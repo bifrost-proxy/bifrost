@@ -389,3 +389,343 @@ pub(super) async fn get_values_from_state(
     }
     HashMap::new()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use bifrost_admin::{AdminState, ScriptManager, SharedScriptManager, SharedValuesStorage};
+    use bifrost_storage::ValuesStorage;
+    use bytes::Bytes;
+    use parking_lot::RwLock as ParkingRwLock;
+    use rand::random;
+    use tokio::sync::RwLock as TokioRwLock;
+
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
+        let mut base = std::env::temp_dir();
+        base.push(format!("bifrost-proxy-tests-{prefix}-{}", random::<u64>()));
+        base
+    }
+
+    fn make_admin_state_with_script_manager() -> Arc<AdminState> {
+        let mut state = AdminState::new(0);
+        let scripts_dir = temp_path("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let manager = ScriptManager::new(scripts_dir);
+        let shared: SharedScriptManager = Arc::new(TokioRwLock::new(manager));
+        state.script_manager = Some(shared);
+        Arc::new(state)
+    }
+
+    fn make_admin_state_with_values(values: &[(&str, &str)]) -> Arc<AdminState> {
+        let mut state = AdminState::new(0);
+        let values_dir = temp_path("values");
+        let mut storage = ValuesStorage::with_dir(values_dir).expect("values storage");
+        for (k, v) in values {
+            storage.set_value(k, v).expect("set value");
+        }
+        let shared: SharedValuesStorage = Arc::new(ParkingRwLock::new(storage));
+        state.values_storage = Some(shared);
+        Arc::new(state)
+    }
+
+    fn make_request_context() -> RequestContext {
+        RequestContext::new()
+    }
+
+    fn make_script_io() -> (RequestData, ResponseData) {
+        (RequestData::default(), ResponseData::default())
+    }
+
+    #[test]
+    fn is_builtin_decoder_recognizes_utf8_and_default() {
+        assert!(is_builtin_decoder("utf8"));
+        assert!(is_builtin_decoder(" default "));
+        assert!(!is_builtin_decoder("UTF8"));
+        assert!(!is_builtin_decoder("other"));
+    }
+
+    #[test]
+    fn builtin_decode_utf8_handles_invalid_utf8() {
+        let input = vec![0xff, b'a'];
+        let decoded = builtin_decode_utf8(&input);
+        let s = String::from_utf8(decoded).unwrap();
+        assert_eq!(s, String::from_utf8_lossy(&input));
+    }
+
+    #[test]
+    fn truncate_string_returns_original_when_short() {
+        let s = "hello".to_string();
+        assert_eq!(truncate_string(s.clone(), 10), s);
+    }
+
+    #[test]
+    fn truncate_string_truncates_with_suffix_and_keeps_utf8_boundary() {
+        let s = "ab前cd".to_string();
+        let truncated = truncate_string(s.clone(), 3);
+        assert!(truncated.starts_with("ab"));
+        assert!(truncated.ends_with("…(truncated)"));
+        assert!(!truncated.contains('前'));
+        assert_eq!(
+            truncate_string("abcdef".to_string(), 3),
+            "abc…(truncated)".to_string()
+        );
+    }
+
+    fn mk_log(message: &str) -> bifrost_script::ScriptLogEntry {
+        bifrost_script::ScriptLogEntry {
+            timestamp: 1,
+            level: bifrost_script::ScriptLogLevel::Info,
+            message: message.to_string(),
+            args: None,
+        }
+    }
+
+    #[test]
+    fn limit_script_logs_keeps_all_when_within_limit() {
+        let logs = vec![mk_log("a"), mk_log("b")];
+        let out = limit_script_logs(logs.clone(), 10);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].message, "a");
+        assert_eq!(out[1].message, "b");
+    }
+
+    #[test]
+    fn limit_script_logs_keeps_tail_when_exceeding_limit() {
+        let logs = vec![mk_log("l1"), mk_log("l2"), mk_log("l3"), mk_log("l4")];
+        let out = limit_script_logs(logs, 2);
+        let messages: Vec<_> = out.iter().map(|l| l.message.as_str()).collect();
+        assert_eq!(messages, vec!["l3", "l4"]);
+    }
+
+    #[tokio::test]
+    async fn apply_decode_scripts_returns_original_when_no_scripts_or_body() {
+        let admin_state: Option<Arc<AdminState>> = None;
+        let ctx = make_request_context();
+        let resolved = ResolvedRules::default();
+        let (req, res) = make_script_io();
+        let values = HashMap::new();
+        let body = Bytes::from_static(b"hello");
+
+        let result = apply_decode_scripts_for_storage(
+            &admin_state,
+            &[],
+            "request",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+
+        assert_eq!(result.output, body);
+        assert!(result.results.is_empty());
+
+        let empty_body = Bytes::new();
+        let result = apply_decode_scripts_for_storage(
+            &admin_state,
+            &["utf8".to_string()],
+            "request",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            empty_body.clone(),
+        )
+        .await;
+        assert_eq!(result.output, empty_body);
+        assert!(result.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_decode_scripts_returns_original_when_admin_state_or_manager_missing() {
+        let ctx = make_request_context();
+        let resolved = ResolvedRules::default();
+        let (req, res) = make_script_io();
+        let values = HashMap::new();
+        let body = Bytes::from_static(b"body");
+        let scripts = ["custom".to_string()];
+
+        // admin_state = None
+        let admin_none: Option<Arc<AdminState>> = None;
+        let result = apply_decode_scripts_for_storage(
+            &admin_none,
+            &scripts,
+            "response",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+        assert_eq!(result.output, body);
+        assert!(result.results.is_empty());
+
+        // admin_state present but script_manager is None
+        let state = Arc::new(AdminState::new(0));
+        let admin_some = Some(state);
+        let result = apply_decode_scripts_for_storage(
+            &admin_some,
+            &scripts,
+            "response",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+        assert_eq!(result.output, body);
+        assert!(result.results.is_empty());
+    }
+
+    #[tokio::test]
+    async fn apply_decode_scripts_skips_large_input_with_marker_result() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_request_context();
+        let resolved = ResolvedRules::default();
+        let (req, res) = make_script_io();
+        let values = HashMap::new();
+        let large = Bytes::from(vec![b'a'; 2 * 1024 * 1024 + 1]);
+
+        let result = apply_decode_scripts_for_storage(
+            &admin_state,
+            &["utf8".to_string()],
+            "request",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            large.clone(),
+        )
+        .await;
+
+        assert_eq!(result.output, large);
+        assert_eq!(result.results.len(), 1);
+        let r = &result.results[0];
+        assert_eq!(r.script_name, "__bifrost_skip__");
+        assert_eq!(r.script_type, ScriptType::Decode);
+        assert!(!r.success);
+        assert!(r
+            .error
+            .as_ref()
+            .expect("error message")
+            .contains("decode 输入过大"));
+    }
+
+    #[tokio::test]
+    async fn apply_decode_scripts_bp_without_parser_scripts_produces_error() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_request_context();
+        let resolved = ResolvedRules {
+            bp_scripts: Vec::new(),
+            ..Default::default()
+        };
+        let (req, res) = make_script_io();
+        let values = HashMap::new();
+        let body = Bytes::from_static(b"body");
+
+        let result = apply_decode_scripts_for_storage(
+            &admin_state,
+            &["bp".to_string()],
+            "request",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+
+        assert_eq!(result.output, body);
+        assert_eq!(result.results.len(), 1);
+        let r = &result.results[0];
+        assert_eq!(r.script_name, "bp");
+        assert_eq!(r.script_type, ScriptType::Parser);
+        assert!(!r.success);
+        assert!(r
+            .error
+            .as_ref()
+            .expect("error message")
+            .contains("decode://bp requires at least one bp:// parser script"));
+        assert!(r.decode_output.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_values_from_state_handles_none_and_some() {
+        let none_state: Option<Arc<AdminState>> = None;
+        let values = get_values_from_state(&none_state).await;
+        assert!(values.is_empty());
+
+        let state = make_admin_state_with_values(&[("k1", "v1"), ("k2", "v2")]);
+        let some_state = Some(state);
+        let values = get_values_from_state(&some_state).await;
+        assert_eq!(values.get("k1"), Some(&"v1".to_string()));
+        assert_eq!(values.get("k2"), Some(&"v2".to_string()));
+    }
+
+    #[tokio::test]
+    async fn apply_decode_scripts_runs_builtin_utf8_and_default() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_request_context();
+        let resolved = ResolvedRules::default();
+        let (req, res) = make_script_io();
+        let values = HashMap::new();
+        let body = Bytes::from_static(b"hello");
+
+        let result_utf8 = apply_decode_scripts_for_storage(
+            &admin_state,
+            &["utf8".to_string()],
+            "response",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+
+        assert_eq!(result_utf8.output, body);
+        assert_eq!(result_utf8.results.len(), 1);
+        let r = &result_utf8.results[0];
+        assert_eq!(r.script_name, "utf8");
+        assert!(r.success);
+        assert_eq!(r.script_type, ScriptType::Decode);
+        assert!(r.decode_output.as_ref().is_some());
+        assert!(r.decode_output.as_ref().unwrap().data.contains("hello"));
+
+        let result_default = apply_decode_scripts_for_storage(
+            &admin_state,
+            &["default".to_string()],
+            "response",
+            &ctx,
+            &resolved,
+            &req,
+            &res,
+            &values,
+            body.clone(),
+        )
+        .await;
+
+        assert_eq!(result_default.output, body);
+        assert_eq!(result_default.results.len(), 1);
+        let r = &result_default.results[0];
+        assert_eq!(r.script_name, "default");
+        assert!(r.success);
+        assert_eq!(r.script_type, ScriptType::Decode);
+    }
+}

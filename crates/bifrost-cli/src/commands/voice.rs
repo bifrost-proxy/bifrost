@@ -1132,4 +1132,127 @@ mod tests {
         );
         assert_eq!(format_shortcut(&key, &modifiers), "cmd+shift+option+a");
     }
+
+    #[test]
+    fn parse_terms_file_rejects_missing_equal_sign() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("terms.txt");
+        fs::write(&path, "invalid-line-without-equals").unwrap();
+        let error = parse_terms_file(&path).unwrap_err().to_string();
+        assert!(error.contains("expected canonical=alias1,alias2"));
+    }
+
+    #[test]
+    fn parse_terms_file_rejects_empty_canonical_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("terms.txt");
+        fs::write(&path, " =alias").unwrap();
+        let error = parse_terms_file(&path).unwrap_err().to_string();
+        assert!(error.contains("canonical term is empty"));
+    }
+
+    #[test]
+    fn listen_streaming_source_rejects_out_of_range_duration() {
+        let args = VoiceListenArgs {
+            source: "mic",
+            app: None,
+            input_file: None,
+            duration: 0,
+            chunk_ms: 1_000,
+            model: "model",
+            provider: "provider",
+            language: "en",
+            format: "jsonl",
+            allow_stateful_large_model: false,
+            dry_run: false,
+            text: "",
+            admin_host: "127.0.0.1",
+            admin_port: 9900,
+        };
+        let error = listen_streaming_source(args).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--duration must be between 1 and 600"));
+
+        let args = VoiceListenArgs {
+            duration: 601,
+            ..args
+        };
+        let error = listen_streaming_source(args).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--duration must be between 1 and 600"));
+    }
+
+    #[test]
+    fn pcm_duration_ms_matches_pcm_layout() {
+        let one_second_bytes =
+            STREAM_SAMPLE_RATE as usize * STREAM_CHANNELS as usize * STREAM_BYTES_PER_SAMPLE;
+        assert_eq!(pcm_duration_ms(one_second_bytes), 1000);
+        assert_eq!(pcm_duration_ms(one_second_bytes * 2), 2000);
+    }
+
+    #[test]
+    fn print_voice_service_event_parses_delta_and_done_flag() {
+        let json = r#"{"type":"partial","delta":" hello world "}"#;
+        let done = print_voice_service_event("text", json).expect("partial event ok");
+        assert!(!done);
+
+        let json = r#"{"type":"done","delta":"","message":"ok"}"#;
+        let done = print_voice_service_event("text", json).expect("done event ok");
+        assert!(done);
+    }
+
+    #[test]
+    fn print_voice_service_event_reports_error_detail() {
+        let json = r#"{"type":"error","message":"failed","detail":"timeout"}"#;
+        let err = print_voice_service_event("text", json).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("failed: timeout"));
+    }
+
+    #[test]
+    fn format_wake_action_formats_key_and_keycode_variants() {
+        let action = serde_json::json!({
+            "type": "key_press",
+            "key": "k",
+            "keycode": null,
+            "modifiers": ["cmd", "shift"],
+            "press_count": 1,
+        });
+        assert_eq!(format_wake_action(&action), "key_press cmd+shift+k");
+
+        let action = serde_json::json!({
+            "type": "key_press",
+            "key": null,
+            "keycode": 36,
+            "modifiers": [],
+            "press_count": 1,
+        });
+        assert_eq!(format_wake_action(&action), "key_press keycode:36");
+
+        let action = serde_json::json!({"type": "shell"});
+        assert_eq!(format_wake_action(&action), "shell");
+    }
+
+    #[test]
+    fn truncate_limits_display_width_and_adds_ellipsis() {
+        assert_eq!(truncate("short", 10), "short");
+        let long = "this is a very long display name for testing";
+        let truncated = truncate(long, 10);
+        assert!(truncated.ends_with("..."));
+        assert!(truncated.len() <= 13); // 10 chars + "..."
+    }
+
+    #[test]
+    fn format_shortcut_without_modifiers_returns_key_only() {
+        let mods: Vec<String> = Vec::new();
+        assert_eq!(format_shortcut("k", &mods), "k");
+    }
+
+    #[test]
+    fn shortcut_from_key_event_returns_none_for_unhandled_keys() {
+        let event = KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE);
+        assert!(shortcut_from_key_event(event).is_none());
+    }
 }

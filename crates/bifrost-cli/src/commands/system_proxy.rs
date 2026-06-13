@@ -1288,4 +1288,49 @@ mod tests {
             None
         ));
     }
+
+    #[test]
+    fn cli_disable_does_not_retry_for_non_owned_by_other_outcomes() {
+        let target = RuntimeSystemProxyTarget {
+            host: "127.0.0.1".to_string(),
+            port: 18889,
+        };
+
+        assert!(!should_retry_disable_with_runtime_target(
+            bifrost_core::SystemProxyDisableOutcome::Disabled,
+            Some(&target)
+        ));
+        assert!(!should_retry_disable_with_runtime_target(
+            bifrost_core::SystemProxyDisableOutcome::NotEnabled,
+            Some(&target)
+        ));
+    }
+
+    #[test]
+    fn pid_reuse_detected_returns_false_when_parent_pid_missing() {
+        assert!(!pid_reuse_detected(None, Some(123)));
+        assert!(!pid_reuse_detected(None, None));
+    }
+
+    #[test]
+    fn runtime_info_system_proxy_target_preserves_specific_host() {
+        let runtime = RuntimeInfo {
+            pid: 123,
+            port: 18889,
+            socks5_port: None,
+            host: Some("example.com".to_string()),
+            started_at_ms: None,
+            start_mode: RuntimeStartMode::Foreground,
+            restartable_runtime: false,
+            binary_path: None,
+        };
+
+        assert_eq!(
+            runtime_info_system_proxy_target(&runtime),
+            RuntimeSystemProxyTarget {
+                host: "example.com".to_string(),
+                port: 18889,
+            }
+        );
+    }
 }

@@ -530,3 +530,187 @@ pub(super) fn parse_permessage_deflate(extensions: &str) -> bool {
         .split(',')
         .any(|ext| ext.trim().starts_with("permessage-deflate"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::Engine;
+    use bytes::Bytes;
+    use flate2::write::DeflateEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    #[test]
+    fn websocket_frame_encode_and_parse_roundtrip_unmasked() {
+        let frame = WebSocketFrame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Text,
+            mask: None,
+            payload: Bytes::from_static(b"hello"),
+        };
+
+        let encoded = frame.encode();
+        let (decoded, consumed) = WebSocketFrame::parse(&encoded).expect("frame should parse");
+
+        assert_eq!(consumed, encoded.len());
+        assert!(decoded.fin);
+        assert_eq!(decoded.opcode, Opcode::Text);
+        assert!(decoded.mask.is_none());
+        assert_eq!(decoded.payload, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn websocket_frame_encode_and_parse_roundtrip_masked() {
+        let frame = WebSocketFrame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Binary,
+            mask: Some([1, 2, 3, 4]),
+            payload: Bytes::from_static(b"abc"),
+        };
+
+        let encoded = frame.encode();
+        let (decoded, consumed) = WebSocketFrame::parse(&encoded).expect("frame should parse");
+
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.opcode, Opcode::Binary);
+        assert_eq!(decoded.payload, Bytes::from_static(b"abc"));
+        assert_eq!(decoded.mask, Some([1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn websocket_frame_close_code_and_reason_helpers() {
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&1000u16.to_be_bytes());
+        payload.extend_from_slice(b"normal");
+
+        let frame = WebSocketFrame {
+            fin: true,
+            rsv1: false,
+            rsv2: false,
+            rsv3: false,
+            opcode: Opcode::Close,
+            mask: None,
+            payload: Bytes::from(payload),
+        };
+
+        assert_eq!(frame.close_code(), Some(1000));
+        assert_eq!(frame.close_reason(), Some("normal"));
+    }
+
+    #[test]
+    fn validate_frame_header_rejects_invalid_control_frame() {
+        // Control frame (opcode=Close) with FIN=0 is invalid
+        let buf = [Opcode::Close as u8, 0];
+        let err = validate_frame_header(&buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn validate_frame_header_rejects_too_large_payload() {
+        // 127 indicates 64-bit extended length. Use a value larger than MAX_FRAME_PAYLOAD_LEN.
+        let mut buf = Vec::new();
+        buf.push(0x81); // FIN + Text opcode
+        buf.push(127); // extended 64-bit length, no mask bit
+        let big_len = (MAX_FRAME_PAYLOAD_LEN as u64) + 1;
+        buf.extend_from_slice(&big_len.to_be_bytes());
+
+        let err = validate_frame_header(&buf).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn decompress_permessage_deflate_roundtrip() {
+        let original = b"hello permessage-deflate";
+        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(original).unwrap();
+        let mut compressed = encoder.finish().unwrap();
+
+        // Some encoders append the RFC 7692 tail; strip it so that the helper must add it back.
+        if compressed.ends_with(&[0x00, 0x00, 0xff, 0xff]) {
+            compressed.truncate(compressed.len() - 4);
+        }
+
+        let payload = Bytes::from(compressed);
+        let decompressed = decompress_permessage_deflate_payload(&payload);
+        assert_eq!(decompressed.as_ref(), original);
+    }
+
+    #[test]
+    fn compute_accept_key_matches_rfc_example() {
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let accept = compute_accept_key(key);
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+
+    #[test]
+    fn generate_sec_websocket_key_produces_base64_16_bytes() {
+        let key = generate_sec_websocket_key();
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(key.as_bytes())
+            .unwrap();
+        assert_eq!(decoded.len(), 16);
+    }
+
+    #[test]
+    fn http_response_parse_and_header_helpers_work() {
+        let raw = b"HTTP/1.1 101 Switching Protocols\r\n\
+                    Sec-WebSocket-Accept: abc\r\n\
+                    X-Test: one\r\n\
+                    x-test: two\r\n\
+                    \r\n";
+        let (resp, consumed) = HttpResponse::parse(raw).expect("parse");
+        assert_eq!(consumed, raw.len());
+        assert_eq!(resp.status_code, 101);
+        assert_eq!(resp.status_text, "Switching Protocols");
+        assert_eq!(resp.header("Sec-WebSocket-Accept"), Some("abc"));
+
+        let values = header_values(&resp, "x-test");
+        assert_eq!(values, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn negotiate_protocol_selects_common_value() {
+        assert_eq!(
+            negotiate_protocol(Some("chat, superproto"), Some("chat")),
+            Some("chat".to_string())
+        );
+        assert_eq!(
+            negotiate_protocol(Some("chat, superproto"), Some("other")),
+            None
+        );
+        assert_eq!(negotiate_protocol(None, Some("chat")), None);
+        assert_eq!(negotiate_protocol(Some("chat"), None), None);
+    }
+
+    #[test]
+    fn negotiate_extensions_filters_by_client_offer_and_upstream() {
+        let client_offer = Some("permessage-deflate; client_max_window_bits, x-custom");
+        let upstream_values = vec![
+            "permessage-deflate; server_max_window_bits=15".to_string(),
+            "x-other".to_string(),
+        ];
+
+        let negotiated = negotiate_extensions(client_offer, &upstream_values);
+        assert_eq!(
+            negotiated.as_deref(),
+            Some("permessage-deflate; server_max_window_bits=15")
+        );
+
+        assert!(negotiate_extensions(Some("x-unknown"), &upstream_values).is_none());
+    }
+
+    #[test]
+    fn parse_permessage_deflate_detects_extension() {
+        assert!(parse_permessage_deflate(
+            "permessage-deflate; client_max_window_bits"
+        ));
+        assert!(parse_permessage_deflate("x-custom, permessage-deflate"));
+        assert!(!parse_permessage_deflate("x-custom, y-other"));
+    }
+}

@@ -1384,3 +1384,247 @@ impl rustls::client::danger::ServerCertVerifier for NoCertificateVerification {
         ]
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bifrost_core::{matcher::WildcardMatcher, Protocol, ResolvedRule, ResolvedRules, Rule};
+    use serde_json::json;
+    use std::sync::Arc;
+
+    fn make_resolved_rule(protocol: Protocol, resolved_value: &str) -> ResolvedRule {
+        let matcher =
+            Arc::new(WildcardMatcher::new("*").expect("failed to create wildcard matcher"));
+        let rule = Rule::new(
+            "*".to_string(),
+            matcher,
+            protocol,
+            resolved_value.to_string(),
+            format!("* {}://{}", protocol.to_str(), resolved_value),
+        );
+        ResolvedRule {
+            rule,
+            captures: None,
+            resolved_value: resolved_value.to_string(),
+        }
+    }
+
+    fn build_resolved_rules(rules: &[(Protocol, &str)]) -> ResolvedRules {
+        let mut resolved = ResolvedRules::new();
+        for (protocol, value) in rules {
+            resolved.add(make_resolved_rule(*protocol, value));
+        }
+        resolved
+    }
+
+    #[test]
+    fn extract_inline_content_strips_wrapping_braces() {
+        assert_eq!(extract_inline_content("{hello}"), "hello");
+        assert_eq!(extract_inline_content("no-braces"), "no-braces");
+        assert_eq!(extract_inline_content("{}"), "");
+    }
+
+    #[test]
+    fn parse_headers_supports_parens_and_colon_and_equals() {
+        let value = "(X-One: a, X-Two: b)";
+        let headers = parse_headers(value).unwrap();
+        assert_eq!(
+            headers,
+            vec![
+                ("X-One".to_string(), "a".to_string()),
+                ("X-Two".to_string(), "b".to_string()),
+            ]
+        );
+
+        let value2 = "X-One=a,X-Two=b";
+        let headers2 = parse_headers(value2).unwrap();
+        assert_eq!(headers2, headers);
+    }
+
+    #[test]
+    fn parse_headers_ignores_empty_and_invalid_parts() {
+        assert!(parse_headers("   ").is_none());
+        assert!(parse_headers(", , ").is_none());
+
+        let headers = parse_headers("X-Ok=1,missing,Y-Ok=2").unwrap();
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("X-Ok".to_string(), "1".to_string()));
+        assert_eq!(headers[1], ("Y-Ok".to_string(), "2".to_string()));
+    }
+
+    #[test]
+    fn replay_error_display_messages_are_human_readable() {
+        assert_eq!(
+            ReplayError::TooManyConcurrent.to_string(),
+            "Too many concurrent replay requests"
+        );
+        assert_eq!(
+            ReplayError::InvalidUrl("bad".into()).to_string(),
+            "Invalid URL: bad"
+        );
+        assert_eq!(
+            ReplayError::ConnectionFailed("oops".into()).to_string(),
+            "Connection failed: oops"
+        );
+        assert_eq!(
+            ReplayError::RequestFailed("timeout".into()).to_string(),
+            "Request failed: timeout"
+        );
+        assert_eq!(
+            ReplayError::Internal("bug".into()).to_string(),
+            "Internal error: bug"
+        );
+    }
+
+    #[test]
+    fn check_mock_response_combines_status_body_and_headers() {
+        let admin = Arc::new(crate::state::AdminState::new(0));
+        let executor = ReplayExecutor::new(admin, false);
+
+        let mut resolved = ResolvedRules::new();
+        resolved.add(make_resolved_rule(Protocol::StatusCode, "201"));
+        resolved.add(make_resolved_rule(Protocol::ResBody, "inline-body"));
+        resolved.add(make_resolved_rule(
+            Protocol::ResHeaders,
+            "(X-Test: one, Content-Type: application/json)",
+        ));
+
+        let mock = executor
+            .check_mock_response(&resolved)
+            .expect("expected mock response");
+        assert_eq!(mock.status, 201);
+        assert_eq!(mock.body.as_deref(), Some("inline-body"));
+        assert!(mock
+            .headers
+            .iter()
+            .any(|(k, v)| k == "X-Test" && v == "one"));
+        assert!(mock
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "application/json"));
+    }
+
+    #[test]
+    fn check_mock_response_infers_default_content_type() {
+        let admin = Arc::new(crate::state::AdminState::new(0));
+        let executor = ReplayExecutor::new(admin, false);
+
+        let resolved = build_resolved_rules(&[(Protocol::ResBody, "hello")]);
+
+        let mock = executor
+            .check_mock_response(&resolved)
+            .expect("expected mock response");
+        assert_eq!(mock.status, 200);
+        assert_eq!(mock.body.as_deref(), Some("hello"));
+        assert!(mock
+            .headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("content-type") && v == "text/plain"));
+    }
+
+    #[test]
+    fn check_mock_response_returns_none_when_no_mock_rules() {
+        let admin = Arc::new(crate::state::AdminState::new(0));
+        let executor = ReplayExecutor::new(admin, false);
+
+        let resolved = build_resolved_rules(&[(Protocol::Host, "example.com")]);
+
+        assert!(executor.check_mock_response(&resolved).is_none());
+    }
+
+    #[test]
+    fn needs_real_request_depends_on_ruleset() {
+        let admin = Arc::new(crate::state::AdminState::new(0));
+        let executor = ReplayExecutor::new(admin, false);
+
+        let only_mock_status = build_resolved_rules(&[(Protocol::StatusCode, "200")]);
+        assert!(!executor.needs_real_request(&only_mock_status));
+
+        let only_host = build_resolved_rules(&[(Protocol::Host, "example.com")]);
+        assert!(executor.needs_real_request(&only_host));
+
+        let res_body_and_headers = build_resolved_rules(&[
+            (Protocol::ResBody, "ok"),
+            (Protocol::ResHeaders, "X-Test: v"),
+        ]);
+        assert!(executor.needs_real_request(&res_body_and_headers));
+
+        let unrelated = build_resolved_rules(&[(Protocol::ReqHeaders, "X-Test=v")]);
+        assert!(executor.needs_real_request(&unrelated));
+    }
+
+    #[test]
+    fn replay_request_dto_serde_roundtrip_and_defaults() {
+        let request_data = ReplayRequestData {
+            method: "POST".into(),
+            url: "http://example.test/".into(),
+            headers: vec![("X-Test".into(), "1".into())],
+            body: None,
+        };
+        let json = serde_json::to_value(&request_data).unwrap();
+        assert!(json.get("body").is_none());
+
+        let req = ReplayExecuteRequest {
+            request: request_data,
+            rule_config: crate::replay_db::RuleConfig {
+                mode: crate::replay_db::RuleMode::Enabled,
+                selected_rules: vec![],
+                custom_rules: None,
+            },
+            request_id: None,
+            timeout_ms: None,
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert!(json.get("request_id").is_none());
+        assert!(json.get("timeout_ms").is_none());
+
+        let back: ReplayExecuteRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(back.request.method, "POST");
+        assert_eq!(back.request.url, "http://example.test/");
+    }
+
+    #[test]
+    fn replay_execute_response_omits_error_when_none() {
+        let res = ReplayExecuteResponse {
+            traffic_id: "t1".into(),
+            status: 200,
+            headers: vec![("Content-Type".into(), "text/plain".into())],
+            body: Some("ok".into()),
+            duration_ms: 42,
+            applied_rules: vec![],
+            error: None,
+        };
+        let json = serde_json::to_value(&res).unwrap();
+        assert!(json.get("error").is_none());
+        assert_eq!(json["traffic_id"], json!("t1"));
+        assert_eq!(json["status"], json!(200));
+    }
+}
+
+#[cfg(test)]
+mod replay_executor_helper_tests {
+    use super::*;
+    use rustls::client::danger::ServerCertVerifier;
+
+    #[test]
+    fn parse_headers_supports_newline_delimited_format() {
+        let headers = parse_headers("X-One: a\nX-Two: b").expect("headers");
+        assert_eq!(headers.len(), 2);
+        assert_eq!(headers[0], ("X-One".to_string(), "a".to_string()));
+        assert_eq!(headers[1], ("X-Two".to_string(), "b".to_string()));
+    }
+
+    #[test]
+    fn get_tls_client_config_builds_for_both_modes() {
+        // Just ensure both branches construct without panicking.
+        let _secure = get_tls_client_config(false);
+        let _insecure = get_tls_client_config(true);
+    }
+
+    #[test]
+    fn no_certificate_verification_reports_supported_schemes() {
+        let verifier = NoCertificateVerification;
+        let schemes = verifier.supported_verify_schemes();
+        assert!(!schemes.is_empty());
+    }
+}

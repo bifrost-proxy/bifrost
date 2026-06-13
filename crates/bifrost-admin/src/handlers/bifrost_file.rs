@@ -1676,4 +1676,260 @@ mod tests {
             })
         }
     }
+
+    #[test]
+    fn count_rules_ignores_blank_and_comment_lines() {
+        let content = "# comment\n\n rule-one  \n   # another comment\nrule-two\n   \n";
+        assert_eq!(count_rules(content), 2);
+    }
+
+    #[test]
+    fn toml_to_json_converts_common_value_types() {
+        use toml::Value;
+
+        let mut table = toml::map::Map::new();
+        table.insert("s".to_string(), Value::String("v".to_string()));
+        table.insert("i".to_string(), Value::Integer(1));
+        table.insert("b".to_string(), Value::Boolean(true));
+        table.insert(
+            "arr".to_string(),
+            Value::Array(vec![Value::Integer(2), Value::Integer(3)]),
+        );
+        let outer = Value::Table(table);
+
+        let json = toml_to_json(outer);
+        assert_eq!(json["s"], "v");
+        assert_eq!(json["i"], 1);
+        assert_eq!(json["b"], true);
+        assert_eq!(json["arr"][0], 2);
+        assert_eq!(json["arr"][1], 3);
+    }
+
+    #[test]
+    fn convert_to_replay_request_maps_request_and_body_types() {
+        use crate::replay_db::{BodyType, RawType, RequestSource, RequestType};
+
+        let headers = vec![KeyValueItemExport {
+            id: "h1".to_string(),
+            key: "X-Test".to_string(),
+            value: "v".to_string(),
+            enabled: true,
+            description: Some("header".to_string()),
+        }];
+
+        let body_export = ReplayBodyExport {
+            body_type: "form-data".to_string(),
+            raw_type: Some("json".to_string()),
+            content: Some("body".to_string()),
+            form_data: vec![KeyValueItemExport {
+                id: "f1".to_string(),
+                key: "k".to_string(),
+                value: "v".to_string(),
+                enabled: true,
+                description: None,
+            }],
+            binary_file: Some("file.bin".to_string()),
+        };
+
+        let export = ReplayRequestExport {
+            id: "rid".to_string(),
+            group_id: Some("gid".to_string()),
+            name: Some("name".to_string()),
+            request_type: "sse".to_string(),
+            method: "GET".to_string(),
+            url: "http://example.test/".to_string(),
+            headers: headers.clone(),
+            body: Some(body_export),
+            is_saved: true,
+            sort_order: 42,
+            created_at: 100,
+            updated_at: 200,
+        };
+
+        let replay = convert_to_replay_request(&export, 7);
+
+        assert_eq!(replay.id, "OUT-007");
+        assert_eq!(replay.group_id.as_deref(), Some("gid"));
+        assert_eq!(replay.name.as_deref(), Some("name"));
+        assert_eq!(replay.request_type, RequestType::Sse);
+        assert_eq!(replay.method, "GET");
+        assert_eq!(replay.url, "http://example.test/");
+        assert!(replay.is_saved);
+        assert_eq!(replay.sort_order, 42);
+        assert_eq!(replay.source, RequestSource::Imported);
+        assert_eq!(replay.created_at, 100);
+        assert_eq!(replay.updated_at, 200);
+        assert_eq!(replay.headers.len(), 1);
+        assert_eq!(replay.headers[0].key, "X-Test");
+        assert_eq!(replay.headers[0].value, "v");
+        assert_eq!(replay.headers[0].description.as_deref(), Some("header"));
+
+        let body = replay.body.expect("body");
+        assert_eq!(body.body_type, BodyType::FormData);
+        assert!(matches!(body.raw_type, Some(RawType::Json)));
+        assert_eq!(body.content.as_deref(), Some("body"));
+        assert_eq!(body.form_data.len(), 1);
+        assert_eq!(body.form_data[0].key, "k");
+        assert_eq!(body.binary_file.as_deref(), Some("file.bin"));
+    }
+
+    #[test]
+    fn convert_from_replay_request_maps_request_and_body_types() {
+        use crate::replay_db::{
+            BodyType, KeyValueItem, RawType, ReplayBody, ReplayRequest, RequestSource, RequestType,
+        };
+
+        let headers = vec![KeyValueItem {
+            id: "h1".to_string(),
+            key: "X-Test".to_string(),
+            value: "v".to_string(),
+            enabled: true,
+            description: Some("header".to_string()),
+        }];
+
+        let body = ReplayBody {
+            body_type: BodyType::Raw,
+            raw_type: Some(RawType::Xml),
+            content: Some("body".to_string()),
+            form_data: vec![KeyValueItem {
+                id: "f1".to_string(),
+                key: "k".to_string(),
+                value: "v".to_string(),
+                enabled: true,
+                description: None,
+            }],
+            binary_file: Some("file.bin".to_string()),
+        };
+
+        let request = ReplayRequest {
+            id: "rid".to_string(),
+            group_id: Some("gid".to_string()),
+            name: Some("name".to_string()),
+            request_type: RequestType::WebSocket,
+            method: "POST".to_string(),
+            url: "ws://example.test/".to_string(),
+            headers,
+            body: Some(body),
+            is_saved: true,
+            sort_order: 11,
+            source: RequestSource::Imported,
+            created_at: 123,
+            updated_at: 456,
+        };
+
+        let export = convert_from_replay_request(&request);
+
+        assert_eq!(export.id, "rid");
+        assert_eq!(export.group_id.as_deref(), Some("gid"));
+        assert_eq!(export.name.as_deref(), Some("name"));
+        assert_eq!(export.request_type, "websocket");
+        assert_eq!(export.method, "POST");
+        assert_eq!(export.url, "ws://example.test/");
+        assert!(export.is_saved);
+        assert_eq!(export.sort_order, 11);
+        assert_eq!(export.created_at, 123);
+        assert_eq!(export.updated_at, 456);
+        assert_eq!(export.headers.len(), 1);
+        assert_eq!(export.headers[0].key, "X-Test");
+        assert_eq!(export.headers[0].value, "v");
+        assert_eq!(export.headers[0].description.as_deref(), Some("header"));
+
+        let body_export = export.body.expect("body");
+        assert_eq!(body_export.body_type, "raw");
+        assert_eq!(body_export.raw_type.as_deref(), Some("xml"));
+        assert_eq!(body_export.content.as_deref(), Some("body"));
+        assert_eq!(body_export.form_data.len(), 1);
+        assert_eq!(body_export.form_data[0].key, "k");
+        assert_eq!(body_export.form_data[0].value, "v");
+        assert_eq!(body_export.binary_file.as_deref(), Some("file.bin"));
+    }
+
+    #[test]
+    fn unavailable_active_rules_export_is_empty_with_reason() {
+        let export = unavailable_active_rules_export(
+            ActiveRuleSource::CustomPort,
+            9900,
+            19090,
+            "missing manager",
+        );
+
+        assert_eq!(export.source, ActiveRuleSource::CustomPort);
+        assert_eq!(export.admin_port, 9900);
+        assert_eq!(export.listener_port, 19090);
+        assert_eq!(export.total, 0);
+        assert!(export.rules.is_empty());
+        assert!(export.merged_content.is_empty());
+        assert_eq!(
+            export.unavailable_reason.as_deref(),
+            Some("missing manager")
+        );
+    }
+
+    #[test]
+    fn network_record_import_falls_back_to_url_when_host_and_path_missing() {
+        let record = NetworkRecord {
+            id: "REQ-fallback".to_string(),
+            method: "POST".to_string(),
+            url: "https://example.test/api?x=1".to_string(),
+            status: 201,
+            host: None,
+            path: None,
+            protocol: None,
+            actual_url: None,
+            actual_host: None,
+            listener_port: None,
+            has_rule_hit: None,
+            error_message: None,
+            client_app: None,
+            client_path: None,
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            duration_ms: 0,
+            timestamp: 0,
+            matched_rules: None,
+            active_rules: None,
+        };
+
+        let traffic = network_record_to_traffic_record(&record);
+
+        assert_eq!(traffic.host, "example.test");
+        assert_eq!(traffic.path, "/api?x=1");
+        assert_eq!(traffic.protocol, "HTTPS");
+    }
+
+    #[test]
+    fn network_record_import_uses_default_protocol_for_invalid_url() {
+        let record = NetworkRecord {
+            id: "REQ-invalid-url".to_string(),
+            method: "GET".to_string(),
+            url: "not a valid url".to_string(),
+            status: 0,
+            host: None,
+            path: None,
+            protocol: None,
+            actual_url: None,
+            actual_host: None,
+            listener_port: None,
+            has_rule_hit: None,
+            error_message: None,
+            client_app: None,
+            client_path: None,
+            request_headers: None,
+            response_headers: None,
+            request_body: None,
+            response_body: None,
+            duration_ms: 0,
+            timestamp: 0,
+            matched_rules: None,
+            active_rules: None,
+        };
+
+        let traffic = network_record_to_traffic_record(&record);
+
+        assert_eq!(traffic.host, "");
+        assert_eq!(traffic.path, "");
+        assert_eq!(traffic.protocol, "HTTP");
+    }
 }

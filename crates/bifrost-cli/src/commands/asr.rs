@@ -3266,4 +3266,193 @@ mod tests {
         assert!(parse_db_value(" garbage").is_none());
         assert!(parse_db_value("").is_none());
     }
+
+    #[test]
+    fn service_state_url_formats_ipv4_and_ipv6_hosts() {
+        let mut state = AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "chinese".to_string(),
+            home: fixed_asr_home(),
+            pid: None,
+            managed_by: "cli".to_string(),
+            owner_module: None,
+            owner_id: None,
+            started_at_ms: 0,
+        };
+        assert_eq!(service_state_url(&state), "http://127.0.0.1:18080");
+        state.host = "::1".to_string();
+        assert_eq!(service_state_url(&state), "http://[::1]:18080");
+    }
+
+    #[test]
+    fn format_timestamp_formats_hh_mm_ss_millis() {
+        assert_eq!(format_timestamp(0.0), "00:00:00.000".to_string());
+        assert_eq!(format_timestamp(1.234), "00:00:01.234".to_string());
+        assert_eq!(format_timestamp(65.001), "00:01:05.001".to_string());
+    }
+
+    #[test]
+    fn format_datetime_epoch_zero_is_unix_epoch_start() {
+        assert_eq!(format_datetime(0), "1970-01-01 00:00:00".to_string());
+    }
+
+    #[test]
+    fn epoch_days_to_ymd_and_ymd_to_epoch_days_roundtrip() {
+        let days = ymd_to_epoch_days(2026, 5, 14);
+        let (y, m, d) = epoch_days_to_ymd(days);
+        assert_eq!((y, m, d), (2026, 5, 14));
+
+        let epoch0 = ymd_to_epoch_days(1970, 1, 1);
+        assert_eq!(epoch0, 0);
+    }
+
+    #[test]
+    fn parse_datetime_to_epoch_parses_fractional_seconds() {
+        let days = ymd_to_epoch_days(2026, 5, 14);
+        let expected = days * 86400 + 17 * 3600 + 2 * 60 + 41;
+        assert_eq!(
+            parse_datetime_to_epoch("2026-05-14", "17:02:41.123"),
+            Some(expected)
+        );
+        assert_eq!(
+            parse_datetime_to_epoch("2026-05-14", "17:02:41"),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn parse_datetime_to_epoch_rejects_invalid_input() {
+        assert!(parse_datetime_to_epoch("not-a-date", "12:00:00").is_none());
+        assert!(parse_datetime_to_epoch("2026-05-14", "not-a-time").is_none());
+    }
+
+    #[test]
+    fn parse_filename_origin_extracts_timestamp_from_name() {
+        let path = std::path::Path::new("TX01_MIC004_20260514_170241_orig.wav");
+        let epoch = parse_filename_origin(path).expect("timestamp");
+        let days = ymd_to_epoch_days(2026, 5, 14);
+        let expected = days * 86400 + 17 * 3600 + 2 * 60 + 41;
+        assert_eq!(epoch, expected);
+    }
+
+    #[test]
+    fn parse_filename_origin_returns_none_for_unparsable_name() {
+        let path = std::path::Path::new("recording.wav");
+        assert!(parse_filename_origin(path).is_none());
+    }
+
+    #[test]
+    fn format_absolute_time_adds_offset_seconds() {
+        let origin_days = ymd_to_epoch_days(2026, 5, 14);
+        let origin_epoch = origin_days * 86400;
+        let formatted = format_absolute_time(origin_epoch, 1.5);
+        assert_eq!(formatted, format_datetime(origin_epoch + 1));
+    }
+
+    #[test]
+    fn format_duration_ms_formats_mm_ss() {
+        assert_eq!(format_duration_ms(0), "00:00".to_string());
+        assert_eq!(format_duration_ms(1_000), "00:01".to_string());
+        assert_eq!(format_duration_ms(61_000), "01:01".to_string());
+    }
+
+    #[test]
+    fn truncate_shorter_or_equal_keeps_original_string() {
+        assert_eq!(truncate("abc", 3), "abc".to_string());
+        assert_eq!(truncate("abc", 10), "abc".to_string());
+    }
+
+    #[test]
+    fn truncate_longer_appends_ellipsis() {
+        assert_eq!(truncate("abcdef", 3), "abc...".to_string());
+    }
+
+    #[test]
+    fn url_encode_escapes_spaces_and_utf8() {
+        let encoded = url_encode("Hello 世界");
+        assert!(!encoded.contains(' '));
+        assert!(encoded.contains("Hello"));
+        assert!(encoded.contains('%'));
+    }
+
+    #[test]
+    fn format_value_handles_string_null_and_object() {
+        assert_eq!(
+            format_value(&Value::String("x".to_string())),
+            "x".to_string()
+        );
+        assert_eq!(format_value(&Value::Null), "-".to_string());
+        let obj = serde_json::json!({"a": 1});
+        assert_eq!(format_value(&obj), "{\"a\":1}".to_string());
+    }
+
+    #[test]
+    fn format_optional_ms_formats_some_and_none() {
+        assert_eq!(format_optional_ms(None), "-".to_string());
+        let s = format_optional_ms(Some(i64::MAX));
+        assert_eq!(s, format_ms(i64::MAX));
+    }
+
+    #[test]
+    fn format_ms_out_of_range_falls_back_to_numeric_string() {
+        let s = format_ms(i64::MAX);
+        assert_eq!(s, i64::MAX.to_string());
+    }
+
+    #[test]
+    fn task_state_prioritizes_running_over_paused_and_enabled() {
+        let mut task = AsrTask::default();
+        assert_eq!(task_state(&task), "disabled");
+        task.enabled = true;
+        assert_eq!(task_state(&task), "enabled");
+        task.paused = true;
+        assert_eq!(task_state(&task), "paused");
+        task.summary.running = true;
+        assert_eq!(task_state(&task), "running");
+    }
+
+    #[test]
+    fn task_choice_state_prioritizes_running_over_paused_and_enabled() {
+        let mut task = AsrTaskWatchChoiceTask::default();
+        assert_eq!(task_choice_state(&task), "disabled");
+        task.enabled = true;
+        assert_eq!(task_choice_state(&task), "enabled");
+        task.paused = true;
+        assert_eq!(task_choice_state(&task), "paused");
+        task.running = true;
+        assert_eq!(task_choice_state(&task), "running");
+    }
+
+    #[test]
+    fn summarize_command_output_handles_empty_and_trims() {
+        assert_eq!(
+            summarize_command_output(b"", b""),
+            "No command output was captured.".to_string()
+        );
+        assert_eq!(
+            summarize_command_output(b" out ", b" err "),
+            "outerr".to_string()
+        );
+    }
+
+    #[test]
+    fn summarize_command_output_truncates_from_tail_when_long() {
+        let long = "a".repeat(1300);
+        let out = summarize_command_output(long.as_bytes(), b"");
+        assert!(out.starts_with("..."));
+        assert_eq!(out.chars().count(), 1203);
+        assert!(out.chars().skip(3).all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn ensure_supported_platform_matches_current_target() {
+        let result = ensure_supported_platform();
+        if std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64" {
+            assert!(result.is_ok());
+        } else {
+            assert!(result.is_err());
+        }
+    }
 }

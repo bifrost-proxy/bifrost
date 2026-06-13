@@ -736,4 +736,61 @@ mod tests {
         rules.redirect = Some("/new/path".to_string());
         assert!(should_intercept_response(&rules));
     }
+
+    #[test]
+    fn test_guess_content_type_from_url_strips_query() {
+        let ct = guess_content_type_from_url("https://example.com/data.json?foo=bar");
+        assert_eq!(ct, "application/json; charset=utf-8");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn test_normalize_file_path_passthrough_on_non_windows() {
+        let path = "/tmp/bifrost/mock-response.txt";
+        assert_eq!(normalize_file_path(path), path.to_string());
+    }
+
+    #[test]
+    fn test_build_status_response_respects_type_charset_and_cache_seconds() {
+        let rules = ResolvedRules {
+            res_type: Some("text/html".to_string()),
+            res_charset: Some("utf-8".to_string()),
+            cache: Some("60".to_string()),
+            ..Default::default()
+        };
+
+        let response = build_status_response(200, &rules);
+        let content_type = response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(content_type, "text/html; charset=utf-8");
+
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cache_control, "max-age=60");
+    }
+
+    #[test]
+    fn test_build_status_response_respects_custom_cache_string() {
+        let rules = ResolvedRules {
+            cache: Some("no-cache, no-store".to_string()),
+            ..Default::default()
+        };
+
+        let response = build_status_response(200, &rules);
+        let cache_control = response
+            .headers()
+            .get(header::CACHE_CONTROL)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert_eq!(cache_control, "no-cache, no-store");
+    }
 }

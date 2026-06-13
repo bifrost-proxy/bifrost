@@ -140,7 +140,12 @@ fn query_wants_base64(query: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{query_wants_base64, query_wants_raw};
+    use super::{
+        decode_query_value, parse_query_params_from_query_string, parse_updates_params,
+        query_wants_base64, query_wants_raw,
+    };
+    use crate::push::{MAX_ID_LEN, MAX_SUBSCRIBED_IDS};
+    use crate::traffic_db::{Direction, TextMatchMode};
 
     #[test]
     fn raw_body_query_flags_are_parsed_independently() {
@@ -153,6 +158,125 @@ mod tests {
         assert!(query_wants_base64(Some("format=base64")));
         assert!(!query_wants_base64(Some("raw=1&encoding=text")));
         assert!(!query_wants_base64(None));
+    }
+
+    #[test]
+    fn decode_query_value_handles_plus_and_percent_encoding() {
+        assert_eq!(decode_query_value("hello+world"), "hello world");
+        assert_eq!(decode_query_value("a%2Bb+test"), "a+b test");
+    }
+
+    #[test]
+    fn parse_updates_params_parses_fields_and_limits_pending_ids() {
+        let long_id = "x".repeat(MAX_ID_LEN + 1);
+        let mut parts = vec!["keep".to_string(), "".to_string(), long_id.clone()];
+        for i in 0..(MAX_SUBSCRIBED_IDS + 2) {
+            parts.push(format!("id-{i}"));
+        }
+        let query = format!(
+            "after_id=req-1&after_seq=42&pending_ids={}&limit=200",
+            parts.join(",")
+        );
+
+        let params = parse_updates_params(&query);
+
+        assert_eq!(params.after_id.as_deref(), Some("req-1"));
+        assert_eq!(params.after_seq, Some(42));
+        assert_eq!(params.limit, Some(200));
+        assert!(params.pending_ids.len() <= MAX_SUBSCRIBED_IDS);
+        assert!(params.pending_ids.contains(&"keep".to_string()));
+        assert!(!params.pending_ids.contains(&"".to_string()));
+        assert!(!params.pending_ids.contains(&long_id));
+    }
+
+    #[test]
+    fn parse_query_params_from_query_string_parses_basic_filters() {
+        let query = "\
+cursor=10\
+&limit=200\
+&direction=forward\
+&method=GET\
+&status=200\
+&status_min=100\
+&status_max=500\
+&protocol=HTTP\
+&has_rule_hit=true\
+&is_websocket=false\
+&is_sse=true\
+&is_h3=false\
+&is_tunnel=true\
+&host=example.com\
+&url_contains=%2Fapi%2Fv1\
+&path_contains=%2Ffoo\
+&client_app=Chrome\
+&client_app_match=equals\
+&client_app_empty=false\
+&client_ip=1.2.3.4\
+&client_ip_match=contains\
+&client_ip_empty=true\
+&listener_port=8080\
+&content_type=text%2Fplain";
+
+        let params = parse_query_params_from_query_string(query);
+
+        assert_eq!(params.cursor, Some(10));
+        assert_eq!(params.limit, Some(200));
+        assert_eq!(params.direction, Direction::Forward);
+        assert_eq!(params.method.as_deref(), Some("GET"));
+        assert_eq!(params.status, Some(200));
+        assert_eq!(params.status_min, Some(100));
+        assert_eq!(params.status_max, Some(500));
+        assert_eq!(params.protocol.as_deref(), Some("HTTP"));
+        assert_eq!(params.has_rule_hit, Some(true));
+        assert_eq!(params.is_websocket, Some(false));
+        assert_eq!(params.is_sse, Some(true));
+        assert_eq!(params.is_h3, Some(false));
+        assert_eq!(params.is_tunnel, Some(true));
+        assert_eq!(params.host_contains.as_deref(), Some("example.com"));
+        assert_eq!(params.url_contains.as_deref(), Some("/api/v1"));
+        assert_eq!(params.path_contains.as_deref(), Some("/foo"));
+        assert_eq!(params.client_app.as_deref(), Some("Chrome"));
+        assert_eq!(params.client_app_match, TextMatchMode::Equals);
+        assert_eq!(params.client_app_empty, Some(false));
+        assert_eq!(params.client_ip.as_deref(), Some("1.2.3.4"));
+        assert_eq!(params.client_ip_match, TextMatchMode::Contains);
+        assert_eq!(params.client_ip_empty, Some(true));
+        assert_eq!(params.listener_port, Some(8080));
+        assert_eq!(params.content_type.as_deref(), Some("text/plain"));
+    }
+
+    #[test]
+    fn parse_query_params_from_query_string_defaults_limit_when_missing() {
+        let params = parse_query_params_from_query_string("method=GET");
+        assert_eq!(params.method.as_deref(), Some("GET"));
+        assert_eq!(params.limit, Some(100));
+    }
+
+    #[test]
+    fn raw_body_query_flags_use_first_raw_value() {
+        // First raw flag wins and short-circuits.
+        assert!(query_wants_raw(Some("raw=1&raw=0")));
+        assert!(!query_wants_raw(Some("raw=0&raw=1")));
+        assert!(!query_wants_raw(Some("raw=false&encoding=base64")));
+    }
+
+    #[test]
+    fn parse_updates_params_uses_cursor_alias_and_ignores_invalid_numbers() {
+        let params = parse_updates_params("after_seq=bogus&cursor=10&limit=abc");
+        assert_eq!(params.after_seq, Some(10));
+        assert!(params.limit.is_none());
+    }
+
+    #[test]
+    fn parse_query_params_from_query_string_supports_host_url_and_path_synonyms() {
+        let params = parse_query_params_from_query_string(
+            "host_contains=example.com&host=final.test&url=/v1&path=/items",
+        );
+
+        // Last occurrence wins and all aliases map to the *_contains fields.
+        assert_eq!(params.host_contains.as_deref(), Some("final.test"));
+        assert_eq!(params.url_contains.as_deref(), Some("/v1"));
+        assert_eq!(params.path_contains.as_deref(), Some("/items"));
     }
 }
 

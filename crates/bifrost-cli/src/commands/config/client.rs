@@ -688,3 +688,129 @@ pub struct UpdateSyncConfigRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_base_url: Option<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn config_api_client_new_builds_expected_base_url() {
+        let client = ConfigApiClient::new("localhost", 8080);
+        assert_eq!(client.base_url, "http://localhost:8080/_bifrost/api");
+    }
+
+    #[test]
+    fn update_server_config_request_serializes_only_present_fields() {
+        let req = UpdateServerConfigRequest {
+            timeout_secs: Some(42),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value, json!({"timeout_secs": 42}));
+    }
+
+    #[test]
+    fn update_tls_config_request_serializes_lists_and_flags() {
+        let req = UpdateTlsConfigRequest {
+            enable_tls_interception: Some(true),
+            intercept_exclude: Some(vec!["example.com".into()]),
+            unsafe_ssl: Some(false),
+            disconnect_on_config_change: Some(true),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["enable_tls_interception"], json!(true));
+        assert_eq!(value["intercept_exclude"], json!(["example.com"]));
+        assert_eq!(value["unsafe_ssl"], json!(false));
+        assert_eq!(value["disconnect_on_config_change"], json!(true));
+        // Fields left as None should be omitted
+        assert!(value.get("intercept_include").is_none());
+    }
+
+    #[test]
+    fn update_performance_config_request_skips_none_fields() {
+        let req = UpdatePerformanceConfigRequest {
+            max_records: Some(1000),
+            max_db_size_bytes: None,
+            max_body_memory_size: Some(512 * 1024),
+            ..Default::default()
+        };
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["max_records"], json!(1000));
+        assert_eq!(value["max_body_memory_size"], json!(512 * 1024));
+        assert!(value.get("max_db_size_bytes").is_none());
+    }
+
+    #[test]
+    fn allow_lan_request_serializes_boolean_flag() {
+        let req = AllowLanRequest { allow_lan: true };
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value, json!({"allow_lan": true}));
+    }
+
+    #[test]
+    fn update_userpass_request_serializes_accounts_and_flags() {
+        let req = UpdateUserPassRequest {
+            enabled: true,
+            accounts: vec![UpdateUserPassAccountRequest {
+                username: "user".into(),
+                password: Some("secret".into()),
+                enabled: false,
+            }],
+            loopback_requires_auth: true,
+        };
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["enabled"], json!(true));
+        assert_eq!(value["loopback_requires_auth"], json!(true));
+        assert_eq!(value["accounts"][0]["username"], json!("user"));
+        assert_eq!(value["accounts"][0]["password"], json!("secret"));
+        assert_eq!(value["accounts"][0]["enabled"], json!(false));
+    }
+
+    #[test]
+    fn update_sync_config_request_serializes_partial_config() {
+        let req = UpdateSyncConfigRequest {
+            enabled: Some(true),
+            auto_sync: None,
+            remote_base_url: Some("https://remote".into()),
+        };
+
+        let value = serde_json::to_value(&req).unwrap();
+        assert_eq!(value["enabled"], json!(true));
+        assert_eq!(value["remote_base_url"], json!("https://remote"));
+        assert!(value.get("auto_sync").is_none());
+    }
+
+    #[test]
+    fn sync_status_response_roundtrips_through_json() {
+        let status = SyncStatusResponse {
+            enabled: true,
+            auto_sync: false,
+            remote_base_url: "https://remote".into(),
+            has_session: true,
+            reachable: true,
+            authorized: true,
+            syncing: false,
+            reason: "ok".into(),
+            last_sync_at: Some("2024-01-01T00:00:00Z".into()),
+            last_sync_action: Some("full".into()),
+            last_error: None,
+            user: Some(SyncUserInfo {
+                user_id: "u1".into(),
+                nickname: "Alice".into(),
+                avatar: "avatar.png".into(),
+                email: "a@example.com".into(),
+            }),
+        };
+
+        let json = serde_json::to_string(&status).unwrap();
+        let decoded: SyncStatusResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.enabled, status.enabled);
+        assert_eq!(decoded.user.unwrap().email, "a@example.com");
+    }
+}

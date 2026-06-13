@@ -447,6 +447,53 @@ mod tests {
         assert!(report.valid);
         assert_eq!(report.rule_count, 2);
     }
+
+    #[test]
+    fn format_active_summary_lines_groups_rules_and_variables() {
+        let resp = ActiveSummaryResponse {
+            total: 3,
+            rules: vec![
+                ActiveRuleItem {
+                    name: "own".to_string(),
+                    rule_count: 1,
+                    group_id: None,
+                    group_name: None,
+                },
+                ActiveRuleItem {
+                    name: "team-a".to_string(),
+                    rule_count: 2,
+                    group_id: Some("g1".to_string()),
+                    group_name: Some("Team A".to_string()),
+                },
+            ],
+            variable_conflicts: vec![VariableConflict {
+                variable_name: "API_HOST".to_string(),
+                definitions: vec![VariableDefinition {
+                    rule_name: "own".to_string(),
+                    value_preview: "localhost".to_string(),
+                }],
+            }],
+            merged_content: "example.com host://127.0.0.1:3000".to_string(),
+        };
+
+        let lines = format_active_summary_lines(&resp);
+        assert!(lines.iter().any(|l| l.contains("My Rules")));
+        assert!(lines.iter().any(|l| l.contains("Group: Team A (g1)")));
+        assert!(lines.iter().any(|l| l.contains("Variable Conflicts (1)")));
+        assert!(lines.iter().any(|l| l.contains("example.com")));
+    }
+
+    #[test]
+    fn format_active_summary_lines_handles_empty_summary() {
+        let resp = ActiveSummaryResponse {
+            total: 0,
+            rules: Vec::new(),
+            variable_conflicts: Vec::new(),
+            merged_content: String::new(),
+        };
+        let lines = format_active_summary_lines(&resp);
+        assert!(lines.iter().any(|l| l.contains("No active rules.")));
+    }
 }
 
 fn load_rule_content(

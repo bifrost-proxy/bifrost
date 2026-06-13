@@ -2381,4 +2381,141 @@ mod tests {
         assert_eq!(hex_encode(&[0xde, 0xad, 0xbe, 0xef]), "deadbeef");
         assert_eq!(hex_encode(&[]), "");
     }
+
+    fn provider_with_base_url(base_url: Option<&str>) -> ImProviderConfig {
+        ImProviderConfig {
+            id: "feishu-main".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu".to_string(),
+            enabled: true,
+            base_url: base_url.map(|s| s.to_string()),
+            app_id: Some("cli_test".to_string()),
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: true,
+            event_types: Vec::new(),
+            agent_config: None,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn test_ws_domain_trims_open_apis_suffix_and_defaults() {
+        let config = provider_with_base_url(Some("https://open.feishu.cn/open-apis"));
+        assert_eq!(ws_domain(&config), "https://open.feishu.cn");
+
+        let config_lark = provider_with_base_url(Some("https://open.larksuite.com"));
+        assert_eq!(ws_domain(&config_lark), "https://open.larksuite.com");
+
+        let config_default = provider_with_base_url(None);
+        assert_eq!(ws_domain(&config_default), "https://open.feishu.cn");
+    }
+
+    #[test]
+    fn test_feishu_file_type_for_name_maps_extensions() {
+        assert_eq!(feishu_file_type_for_name("doc.pdf"), "pdf");
+        assert_eq!(feishu_file_type_for_name("report.DOCX"), "doc");
+        assert_eq!(feishu_file_type_for_name("data.csv"), "xls");
+        assert_eq!(feishu_file_type_for_name("table.XLS"), "xls");
+        assert_eq!(feishu_file_type_for_name("slides.PPT"), "ppt");
+        assert_eq!(feishu_file_type_for_name("unknown.bin"), "stream");
+        assert_eq!(feishu_file_type_for_name("noext"), "stream");
+    }
+
+    #[test]
+    fn test_collect_rich_text_image_keys_recurses_and_deduplicates() {
+        let mut images = Vec::new();
+        let value = serde_json::json!({
+            "tag": "root",
+            "content": [
+                {"tag": "img", "image_key": "img_v3_1"},
+                {
+                    "tag": "paragraph",
+                    "children": [
+                        {"image_key": "img_v3_1"},
+                        {"image_key": "img_v3_2"}
+                    ]
+                }
+            ]
+        });
+
+        collect_rich_text_image_keys(&value, &mut images);
+        let keys: Vec<_> = images.iter().map(|img| img.file_key.as_str()).collect();
+        assert_eq!(keys, vec!["img_v3_1", "img_v3_2"]);
+    }
+
+    #[test]
+    fn test_extract_feishu_message_text_from_rich_nodes() {
+        let rich = serde_json::json!({
+            "content": [[
+                {"tag": "text", "text": "Hello"},
+                {"tag": "a", "text": " world"},
+                {"tag": "br"},
+                {"tag": "at", "user_name": "Alice"}
+            ]]
+        });
+        let text = extract_feishu_message_text(&rich);
+        assert_eq!(text, "Hello world\nAlice");
+
+        let plain = serde_json::json!({"text": "plain text"});
+        assert_eq!(extract_feishu_message_text(&plain), "plain text");
+    }
+
+    #[test]
+    fn test_json_object_keys_extracts_top_level_keys() {
+        let value = serde_json::json!({"a": 1, "b": 2});
+        let mut keys = json_object_keys(&value);
+        keys.sort();
+        assert_eq!(keys, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn test_publish_connection_status_sends_event_when_channel_present() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<FeishuConnectionStatusEvent>();
+        publish_connection_status(
+            Some(&tx),
+            ConnectionState::Connected,
+            Some("ok".to_string()),
+        );
+        let event = rx.try_recv().expect("status event");
+        assert!(matches!(event.state, ConnectionState::Connected));
+        assert_eq!(event.error.as_deref(), Some("ok"));
+
+        // No panic when channel is absent
+        publish_connection_status(None, ConnectionState::Connected, None);
+    }
+
+    #[test]
+    fn test_get_header_value_and_ping_response_frames() {
+        let headers = vec![
+            PbHeader {
+                key: "type".to_string(),
+                value: "ping".to_string(),
+            },
+            PbHeader {
+                key: "x-request-id".to_string(),
+                value: "req-1".to_string(),
+            },
+        ];
+        assert_eq!(get_header_value(&headers, "type"), Some("ping"));
+        assert_eq!(get_header_value(&headers, "missing"), None);
+
+        let ping = build_ping_frame(42);
+        let decoded = PbFrame::decode(&*ping).expect("decode ping frame");
+        assert_eq!(decoded.service, 42);
+        assert_eq!(get_header_value(&decoded.headers, "type"), Some("ping"));
+
+        let ok_bytes = build_response_frame(&decoded, true);
+        let ok_frame = PbFrame::decode(&*ok_bytes).expect("decode ok frame");
+        let ok_body: serde_json::Value =
+            serde_json::from_slice(ok_frame.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(ok_body["code"], 200);
+
+        let err_bytes = build_response_frame(&decoded, false);
+        let err_frame = PbFrame::decode(&*err_bytes).expect("decode err frame");
+        let err_body: serde_json::Value =
+            serde_json::from_slice(err_frame.payload.as_deref().unwrap()).unwrap();
+        assert_eq!(err_body["code"], 500);
+    }
 }

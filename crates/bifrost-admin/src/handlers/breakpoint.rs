@@ -132,3 +132,29 @@ async fn resume(
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AdminState;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn get_settings_reflects_breakpoint_manager_state() {
+        let state = std::sync::Arc::new(AdminState::new(0));
+        state
+            .breakpoint_manager
+            .update_settings(BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 42,
+            });
+
+        let resp = get_settings(&state);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let settings: BreakpointSettings = serde_json::from_slice(&body).unwrap();
+        assert!(settings.enabled);
+        assert_eq!(settings.max_body_bytes, 42);
+    }
+}

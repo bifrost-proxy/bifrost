@@ -853,4 +853,29 @@ mod tests {
         assert!(command_uses_stdout_protocol(cli.command.as_ref()));
         assert_eq!(effective_log_outputs(&cli), vec![LogOutput::File]);
     }
+
+    #[test]
+    fn get_effective_port_prefers_cli_port_when_not_default() {
+        // When CLI port differs from DEFAULT_PORT, runtime detection is skipped.
+        assert_eq!(get_effective_port(DEFAULT_PORT + 1), DEFAULT_PORT + 1);
+    }
+
+    #[test]
+    fn should_run_update_notice_respects_command_filters() {
+        assert!(!should_run_update_notice(
+            true,
+            Some(&Commands::VersionCheck)
+        ));
+        assert!(!should_run_update_notice(
+            true,
+            Some(&Commands::Upgrade {
+                yes: false,
+                restart: false,
+            }),
+        ));
+        assert!(should_run_update_notice(
+            true,
+            Some(&Commands::Status { tui: false })
+        ));
+    }
 }

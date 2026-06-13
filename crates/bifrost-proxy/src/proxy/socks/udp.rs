@@ -626,6 +626,40 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_ipv6_address() {
+        let mut data = vec![0u8; 16];
+        data.extend_from_slice(&[0x1F, 0x90]); // 8080
+        let (addr, port, offset) = UdpRelay::parse_address(0x04, &data).unwrap();
+        assert!(matches!(addr, SocksAddress::IPv6(_)));
+        assert_eq!(port, 8080);
+        assert_eq!(offset, 18);
+    }
+
+    #[test]
+    fn test_parse_address_error_paths() {
+        let err = UdpRelay::parse_address(0x01, &[192, 168, 1])
+            .expect_err("expected IPv4 too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("IPv4 address too short")));
+
+        let err =
+            UdpRelay::parse_address(0x03, &[]).expect_err("expected domain length missing error");
+        assert!(
+            matches!(err, BifrostError::Parse(msg) if msg.contains("Domain name length missing"))
+        );
+
+        let err = UdpRelay::parse_address(0x03, &[5, b'a', b'b'])
+            .expect_err("expected domain too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Domain name too short")));
+
+        let err =
+            UdpRelay::parse_address(0x04, &[0; 10]).expect_err("expected IPv6 too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("IPv6 address too short")));
+
+        let err = UdpRelay::parse_address(0xFF, &[0; 4]).expect_err("expected invalid type error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid address type")));
+    }
+
+    #[test]
     fn test_build_udp_response_ipv4() {
         let addr: SocketAddr = "192.168.1.1:8080".parse().unwrap();
         let payload = b"test";
@@ -638,5 +672,24 @@ mod tests {
         assert_eq!(&response[4..8], &[192, 168, 1, 1]);
         assert_eq!(&response[8..10], &[0x1F, 0x90]);
         assert_eq!(&response[10..], b"test");
+    }
+
+    #[test]
+    fn test_build_udp_response_ipv6() {
+        let addr: SocketAddr = "[2001:db8::1]:8080".parse().unwrap();
+        let payload = b"quic";
+        let response = UdpRelay::build_udp_response(&addr, payload);
+
+        assert_eq!(response[0], 0);
+        assert_eq!(response[1], 0);
+        assert_eq!(response[2], 0);
+        assert_eq!(response[3], AddressType::IPv6 as u8);
+        let expected_ip = match addr.ip() {
+            std::net::IpAddr::V6(ip) => ip.octets(),
+            _ => panic!("expected IPv6 address"),
+        };
+        assert_eq!(&response[4..20], &expected_ip);
+        assert_eq!(&response[20..22], &addr.port().to_be_bytes());
+        assert_eq!(&response[22..], b"quic");
     }
 }

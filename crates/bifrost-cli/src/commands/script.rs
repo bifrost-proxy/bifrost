@@ -442,6 +442,9 @@ pub fn handle_script_command(action: ScriptCommands) -> bifrost_core::Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use tempfile::NamedTempFile;
 
     #[test]
     fn parse_lookup_args_supports_name_only() {
@@ -489,5 +492,146 @@ mod tests {
         assert!(message.contains("demo"));
         assert!(message.contains("request foo/demo"));
         assert!(message.contains("response bar/demo"));
+    }
+
+    #[test]
+    fn parse_script_type_accepts_aliases_and_rejects_invalid() {
+        assert_eq!(parse_script_type("request").unwrap(), ScriptType::Request);
+        assert_eq!(parse_script_type("REQ").unwrap(), ScriptType::Request);
+        assert_eq!(parse_script_type("res").unwrap(), ScriptType::Response);
+        assert_eq!(parse_script_type("dec").unwrap(), ScriptType::Decode);
+        assert_eq!(parse_script_type("parser").unwrap(), ScriptType::Parser);
+        let err = parse_script_type("unknown").unwrap_err();
+        assert!(err.to_string().contains("Invalid script type"));
+    }
+
+    #[test]
+    fn read_script_content_prefers_inline_content() {
+        let result = read_script_content(Some("inline".to_string()), None).unwrap();
+        assert_eq!(result, "inline");
+    }
+
+    #[test]
+    fn read_script_content_reads_from_file_when_no_inline_content() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "from-file").unwrap();
+        let result = read_script_content(None, Some(file.path().to_path_buf())).unwrap();
+        assert_eq!(result, "from-file");
+    }
+
+    #[test]
+    fn read_script_content_errors_when_missing_sources() {
+        let err = read_script_content(None, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Either --content or --file must be provided"));
+    }
+
+    #[test]
+    fn build_mock_request_and_response_have_consistent_fields() {
+        let req = build_mock_request();
+        assert_eq!(req.method, "GET");
+        assert!(req.headers.contains_key("content-type"));
+        let resp = build_mock_response(&req);
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.request.url, req.url);
+    }
+
+    #[test]
+    fn print_logs_handles_empty_and_non_empty_args() {
+        let logs = vec![
+            ScriptLogEntry {
+                timestamp: 0,
+                level: bifrost_script::ScriptLogLevel::Info,
+                message: "plain".to_string(),
+                args: None,
+            },
+            ScriptLogEntry {
+                timestamp: 1,
+                level: bifrost_script::ScriptLogLevel::Error,
+                message: "with args".to_string(),
+                args: Some(vec![json!("one"), json!({"k": "v"})]),
+            },
+        ];
+        print_logs(&logs);
+    }
+
+    #[test]
+    fn print_run_result_handles_error_branch() {
+        let result = ScriptExecutionResult {
+            script_name: "demo".to_string(),
+            script_type: ScriptType::Decode,
+            success: false,
+            error: Some("boom".to_string()),
+            duration_ms: 1,
+            logs: Vec::new(),
+            request_modifications: None,
+            response_modifications: None,
+            decode_output: None,
+        };
+        print_run_result(&result).unwrap();
+    }
+
+    #[test]
+    fn print_run_result_handles_decode_output_branch() {
+        let result = ScriptExecutionResult {
+            script_name: "demo".to_string(),
+            script_type: ScriptType::Decode,
+            success: true,
+            error: None,
+            duration_ms: 1,
+            logs: Vec::new(),
+            request_modifications: None,
+            response_modifications: None,
+            decode_output: Some(bifrost_script::DecodeOutput {
+                data: "decoded".to_string(),
+                code: "0".to_string(),
+                msg: "".to_string(),
+            }),
+        };
+        print_run_result(&result).unwrap();
+    }
+
+    #[test]
+    fn print_run_result_handles_request_modifications_branch() {
+        let mods = bifrost_script::TestRequestModifications {
+            method: Some("POST".to_string()),
+            headers: Some(HashMap::from([(String::from("x"), String::from("y"))])),
+            body: Some("body".to_string()),
+        };
+        let result = ScriptExecutionResult {
+            script_name: "demo".to_string(),
+            script_type: ScriptType::Request,
+            success: true,
+            error: None,
+            duration_ms: 1,
+            logs: Vec::new(),
+            request_modifications: Some(mods),
+            response_modifications: None,
+            decode_output: None,
+        };
+        print_run_result(&result).unwrap();
+    }
+
+    #[test]
+    fn print_run_result_handles_response_modifications_branch() {
+        let mods = bifrost_script::TestResponseModifications {
+            status: Some(201),
+            status_text: Some("Created".to_string()),
+            headers: Some(HashMap::from([(String::from("x"), String::from("y"))])),
+            body: Some("body".to_string()),
+        };
+        let result = ScriptExecutionResult {
+            script_name: "demo".to_string(),
+            script_type: ScriptType::Response,
+            success: true,
+            error: None,
+            duration_ms: 1,
+            logs: Vec::new(),
+            request_modifications: None,
+            response_modifications: Some(mods),
+            decode_output: None,
+        };
+        print_run_result(&result).unwrap();
     }
 }

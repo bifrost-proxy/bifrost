@@ -1469,4 +1469,124 @@ mod tests {
         );
         assert_eq!(message, "ASR task is already running");
     }
+
+    #[test]
+    fn json_message_extracts_non_empty_message_field() {
+        let value = serde_json::json!({"message": "Hello"});
+        assert_eq!(json_message(&value), Some("Hello".to_string()));
+
+        let value = serde_json::json!({"message": "   "});
+        assert_eq!(json_message(&value), None);
+    }
+
+    #[test]
+    fn tui_control_error_message_strips_config_prefix() {
+        let err =
+            BifrostError::Config("Config error: {\"message\":\"Task not found\"}".to_string());
+        let message = tui_control_error_message(&err);
+        assert_eq!(message, "Task not found");
+    }
+
+    #[test]
+    fn format_value_serializes_non_string_values() {
+        assert_eq!(format_value(&Value::String("text".into())), "text");
+        assert_eq!(format_value(&Value::Null), "-".to_string());
+        let object = serde_json::json!({"k":"v"});
+        let formatted = format_value(&object);
+        assert!(formatted.contains("\"k\""));
+    }
+
+    #[test]
+    fn format_optional_ms_formats_and_handles_none() {
+        let now = chrono::Local::now().timestamp_millis();
+        let formatted = format_optional_ms(Some(now));
+        assert!(!formatted.is_empty());
+        assert_ne!(formatted, "-");
+        assert_eq!(format_optional_ms(None), "-".to_string());
+    }
+
+    #[test]
+    fn format_duration_ms_formats_short_and_long_durations() {
+        assert_eq!(format_duration_ms(30_000), "00:30");
+        assert_eq!(format_duration_ms(90_000), "01:30");
+        assert_eq!(format_duration_ms(3_600_000), "01:00:00");
+    }
+
+    #[test]
+    fn format_bytes_uses_iec_units_and_rounds() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1_024), "1.0 KB");
+        assert_eq!(format_bytes(1_048_576), "1.0 MB");
+    }
+
+    #[test]
+    fn empty_dash_replaces_empty_strings() {
+        assert_eq!(empty_dash(""), "-".to_string());
+        assert_eq!(empty_dash("   "), "-".to_string());
+        assert_eq!(empty_dash("value"), "value".to_string());
+    }
+
+    #[test]
+    fn selection_label_summarizes_task_row() {
+        let snapshot = WatchSnapshot {
+            task: WatchTask {
+                id: "abcdef123456".to_string(),
+                name: "Very Long Task Name to be Truncated".to_string(),
+                next_run_at_ms: Some(0),
+                ..WatchTask::default()
+            },
+            progress: WatchProgress {
+                processed: 3,
+                discovered: 10,
+                ..WatchProgress::default()
+            },
+            ..WatchSnapshot::default()
+        };
+        let label = selection_label(&snapshot);
+        assert!(label.contains("3/10"));
+        assert!(label.contains("next"));
+    }
+
+    #[test]
+    fn task_state_reports_enabled_running_and_paused() {
+        let mut task = WatchTask::default();
+        assert_eq!(task_state(&task), "disabled");
+
+        task.enabled = true;
+        assert_eq!(task_state(&task), "enabled");
+
+        task.paused = true;
+        assert_eq!(task_state(&task), "paused");
+
+        task.running = true;
+        task.paused = false;
+        assert_eq!(task_state(&task), "running");
+    }
+
+    #[test]
+    fn open_path_writes_log_when_env_is_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("open.log");
+        std::env::set_var("BIFROST_ASR_TUI_OPEN_LOG", &log_path);
+
+        let file_path = dir.path().join("file.txt");
+        std::fs::write(&file_path, "test").unwrap();
+
+        open_path(file_path.to_str().unwrap(), false).expect("open_path should log");
+
+        let log = std::fs::read_to_string(&log_path).unwrap();
+        assert!(log.contains("open"));
+        assert!(log.contains("file.txt"));
+
+        std::env::remove_var("BIFROST_ASR_TUI_OPEN_LOG");
+    }
+
+    #[test]
+    fn open_path_rejects_missing_or_empty_paths() {
+        let err = open_path("", false).unwrap_err();
+        assert!(err.contains("No file path selected"));
+
+        let err = open_path("/path/does/not/exist", false).unwrap_err();
+        assert!(err.contains("File does not exist"));
+    }
 }

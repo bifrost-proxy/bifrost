@@ -3243,6 +3243,66 @@ mod tests {
         );
         assert_eq!(detail.agent_type.as_deref(), Some("external_cli"));
     }
+
+    #[test]
+    fn is_builtin_runner_value_matches_known_aliases() {
+        for value in ["bifrost_agent", "builtin", "bifrost"] {
+            assert!(is_builtin_runner_value(value));
+        }
+        assert!(!is_builtin_runner_value("external_cli"));
+        assert!(!is_builtin_runner_value(""));
+    }
+
+    #[test]
+    fn is_external_runner_metadata_is_true_when_type_or_id_not_builtin() {
+        assert!(!is_external_runner_metadata(
+            Some("bifrost_agent"),
+            Some("bifrost")
+        ));
+        assert!(is_external_runner_metadata(Some("chatgpt_web"), None));
+        assert!(is_external_runner_metadata(None, Some("web-main")));
+        assert!(is_external_runner_metadata(
+            Some("chatgpt_web"),
+            Some("bifrost")
+        ));
+    }
+
+    #[test]
+    fn merge_history_runner_metadata_prefers_external_history() {
+        let summary = bifrost_agent::persistence::SessionFileSummary {
+            runner_type: Some("chatgpt_web".to_string()),
+            runner_id: Some("web-main".to_string()),
+            ..Default::default()
+        };
+
+        let (r_type, r_id) = merge_history_runner_metadata(
+            Some("bifrost_agent".to_string()),
+            Some("builtin".to_string()),
+            Some(&summary),
+        );
+        assert_eq!(r_type.as_deref(), Some("chatgpt_web"));
+        assert_eq!(r_id.as_deref(), Some("web-main"));
+
+        // Built-in history should not override explicit external config.
+        let builtin_summary = bifrost_agent::persistence::SessionFileSummary {
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: Some("bifrost".to_string()),
+            ..Default::default()
+        };
+        let (r_type2, r_id2) = merge_history_runner_metadata(
+            Some("chatgpt_web".to_string()),
+            Some("web-main".to_string()),
+            Some(&builtin_summary),
+        );
+        assert_eq!(r_type2.as_deref(), Some("chatgpt_web"));
+        assert_eq!(r_id2.as_deref(), Some("web-main"));
+
+        // No history -> original values preserved.
+        let (r_type3, r_id3) =
+            merge_history_runner_metadata(Some("chatgpt_web".into()), None, None);
+        assert_eq!(r_type3.as_deref(), Some("chatgpt_web"));
+        assert!(r_id3.is_none());
+    }
 }
 
 // ---------------------------------------------------------------------------

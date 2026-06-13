@@ -5638,3 +5638,138 @@ mod tests {
         assert_eq!(material.shared_secret.len(), 32);
     }
 }
+
+#[cfg(test)]
+mod helper_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn short_fingerprint_is_deterministic_and_prefixed() {
+        let fp1 = short_fingerprint(b"hello world");
+        let fp2 = short_fingerprint(b"hello world");
+        assert_eq!(fp1, fp2);
+        // 6 bytes of sha256 => 12 hex chars
+        assert_eq!(fp1.len(), 12);
+        assert!(fp1.chars().all(|c| c.is_ascii_hexdigit()));
+
+        let fp_other = short_fingerprint(b"HELLO WORLD");
+        assert_ne!(fp1, fp_other);
+    }
+
+    #[test]
+    fn ssh_key_seed_policy_resolved_roots_prefers_explicit_roots() {
+        let custom_roots = vec![PathBuf::from("/tmp/one"), PathBuf::from("/tmp/two")];
+        let policy = SshKeySeedPolicy {
+            roots: custom_roots.clone(),
+            ops: Vec::new(),
+            allow_overwrite: None,
+            allow_recursive_delete: None,
+        };
+
+        let resolved = policy.resolved_roots();
+        assert_eq!(resolved, custom_roots);
+    }
+
+    #[test]
+    fn max_optional_u64_handles_all_combinations() {
+        assert_eq!(max_optional_u64(Some(1), Some(2)), Some(2));
+        assert_eq!(max_optional_u64(Some(5), None), Some(5));
+        assert_eq!(max_optional_u64(None, Some(7)), Some(7));
+        assert_eq!(max_optional_u64(None, None), None);
+    }
+
+    #[test]
+    fn min_optional_u32_handles_all_combinations() {
+        assert_eq!(min_optional_u32(Some(1), Some(2)), Some(1));
+        assert_eq!(min_optional_u32(Some(5), None), Some(5));
+        assert_eq!(min_optional_u32(None, Some(7)), Some(7));
+        assert_eq!(min_optional_u32(None, None), None);
+    }
+
+    #[test]
+    fn is_relay_unauthorized_matches_network_error_message() {
+        let unauthorized = BifrostError::Network("relay unauthorized".to_string());
+        let other = BifrostError::Network("some other error".to_string());
+
+        assert!(is_relay_unauthorized(&unauthorized));
+        assert!(!is_relay_unauthorized(&other));
+    }
+
+    #[test]
+    fn pairing_not_found_or_expired_error_includes_pairing_id() {
+        let err = pairing_not_found_or_expired_error("pair-123");
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("pair-123"));
+                assert!(msg.contains("not found or expired"));
+            }
+            other => panic!("expected Network error, got {other:?}"),
+        }
+    }
+
+    fn make_test_grant(grant_id: &str, mode: GrantMode) -> GrantInfo {
+        GrantInfo {
+            grant_id: grant_id.to_string(),
+            client_instance_id: "client".to_string(),
+            caller_fingerprint: "fp".to_string(),
+            caller_display_name: None,
+            label: None,
+            grant_mode: mode,
+            grant_scope: GrantScope::RemoteQuery,
+            file_access: FileAccessScope::None,
+            auth_method: AuthMethod::PairCode,
+            status: GrantStatus::Active,
+            first_authorized_at: 1,
+            last_command_at: None,
+            expires_at: None,
+            last_used_at: None,
+            max_calls: None,
+            remaining_calls: None,
+            use_count: 0,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            os_version: None,
+            arch: None,
+        }
+    }
+
+    #[test]
+    fn apply_stored_grant_policy_overrides_scope_file_access_and_flags() {
+        let grant = make_test_grant("g1", GrantMode::Permanent);
+        let stored = StoredGrantPolicy {
+            grant_scope: GrantScope::RemoteShellExec,
+            file_access: FileAccessScope::Read,
+            policy_binding: Some(serde_json::json!({"mode":"all"})),
+            shell_policy_set_version_snapshot: Some(3),
+            interactive_allowed: Some(true),
+            stdin_allowed: Some(false),
+        };
+
+        let updated = apply_stored_grant_policy(grant, Some(&stored));
+        assert_eq!(updated.grant_scope, GrantScope::RemoteShellExec);
+        assert_eq!(updated.file_access, FileAccessScope::Read);
+        assert_eq!(updated.policy_binding, stored.policy_binding);
+        assert_eq!(
+            updated.shell_policy_set_version_snapshot,
+            stored.shell_policy_set_version_snapshot
+        );
+        assert_eq!(updated.interactive_allowed, stored.interactive_allowed);
+        assert_eq!(updated.stdin_allowed, stored.stdin_allowed);
+    }
+
+    #[test]
+    fn apply_stored_grant_policy_leaves_grant_unchanged_when_no_policy() {
+        let grant = make_test_grant("g1", GrantMode::Permanent);
+        let updated = apply_stored_grant_policy(grant.clone(), None);
+        assert_eq!(updated.grant_scope, grant.grant_scope);
+        assert_eq!(updated.file_access, grant.file_access);
+        assert_eq!(updated.policy_binding, grant.policy_binding);
+    }
+}

@@ -1483,3 +1483,97 @@ where
     )
     .await
 }
+
+#[cfg(test)]
+mod voice_helpers_tests {
+    use super::*;
+
+    #[test]
+    fn voice_asr_provider_from_query_defaults_and_rejects_unknown() {
+        let provider = VoiceAsrProvider::from_query("").expect("default provider");
+        assert_eq!(provider.id(), STATEFUL_PROVIDER_ID);
+
+        let err = VoiceAsrProvider::from_query("provider=unknown").unwrap_err();
+        assert!(err.contains("unsupported voice ASR provider"));
+    }
+
+    #[test]
+    fn voice_target_from_query_injects_default_model_when_missing() {
+        let target = voice_target_from_query("").expect("target");
+        assert_eq!(target.model, DEFAULT_VOICE_MODEL);
+
+        let explicit = voice_target_from_query("model=Qwen3-ASR-0.6B").expect("explicit target");
+        assert_eq!(explicit.model, "Qwen3-ASR-0.6B");
+    }
+
+    #[test]
+    fn voice_stateful_chunk_size_sec_uses_query_and_clamps_limits() {
+        let default = voice_stateful_chunk_size_sec("");
+        assert!((default - DEFAULT_VOICE_STREAM_CHUNK_SEC).abs() < 1e-6);
+
+        let from_sec = voice_stateful_chunk_size_sec("stateful_chunk_sec=10");
+        assert!((from_sec - 4.0).abs() < 1e-6);
+
+        let from_ms = voice_stateful_chunk_size_sec("chunk_ms=500");
+        assert!((from_ms - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stateful_17b_enabled_respects_query_flag() {
+        assert!(stateful_17b_enabled("allow_stateful_17b=1"));
+    }
+
+    #[test]
+    fn u128_to_u64_lossy_saturates_at_u64_max() {
+        let within = u128_to_u64_lossy(42u128);
+        assert_eq!(within, 42u64);
+
+        let large = u128_to_u64_lossy(u128::from(u64::MAX) + 1);
+        assert_eq!(large, u64::MAX);
+    }
+
+    #[test]
+    fn parse_query_helpers_extract_typed_values() {
+        let query = "a=1&b=2.5&flag=true&encoded=hello%20world";
+        assert_eq!(
+            parse_query_value(query, "encoded"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(parse_query_u64(query, "a"), Some(1));
+        assert_eq!(parse_query_f32(query, "b"), Some(2.5));
+        assert!(parse_query_bool(query, "flag"));
+        assert!(!parse_query_bool(query, "missing"));
+    }
+
+    #[test]
+    fn parse_voice_ws_client_message_validates_size_and_json() {
+        let msg = serde_json::json!({
+            "type": "start",
+            "source": "mic",
+        })
+        .to_string();
+        let parsed = parse_voice_ws_client_message(&msg).expect("valid message");
+        match parsed {
+            VoiceWsClientMessage::Start { source, .. } => {
+                assert_eq!(source.as_deref(), Some("mic"));
+            }
+            _ => panic!("expected Start variant"),
+        }
+
+        let big = "x".repeat(MAX_VOICE_WS_TEXT_BYTES + 1);
+        let err = parse_voice_ws_client_message(&big).unwrap_err();
+        assert!(err.contains("control frame is too large"));
+    }
+
+    #[test]
+    fn decode_voice_audio_payload_decodes_base64_and_enforces_size_limit() {
+        let data = base64::engine::general_purpose::STANDARD.encode(b"hello");
+        let decoded = decode_voice_audio_payload(&data).expect("decode");
+        assert_eq!(decoded, b"hello");
+
+        let too_big = vec![0u8; MAX_VOICE_WS_AUDIO_CHUNK_BYTES + 1];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&too_big);
+        let err = decode_voice_audio_payload(&encoded).unwrap_err();
+        assert!(err.contains("voice audio chunk is too large"));
+    }
+}

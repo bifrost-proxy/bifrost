@@ -257,3 +257,29 @@ fn notify_values_changed(state: &SharedAdminState, name: &str) {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AdminState;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::{Method, Request};
+
+    #[tokio::test]
+    async fn handle_values_returns_error_when_storage_not_configured() {
+        let state = std::sync::Arc::new(AdminState::new(0));
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/values")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = handle_values(req, state, "").await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let msg = String::from_utf8_lossy(&body);
+        assert!(msg.contains("Values storage not configured"));
+    }
+}

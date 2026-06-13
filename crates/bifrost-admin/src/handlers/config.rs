@@ -1847,6 +1847,8 @@ async fn clear_ip_tls_pending(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::state::AdminState;
+    use http_body_util::BodyExt;
 
     #[test]
     fn tray_launch_is_requested_only_for_enable_on_supported_platforms() {
@@ -1855,5 +1857,229 @@ mod tests {
             !cfg!(target_os = "linux")
         );
         assert!(!should_request_tray_launch_after_config_update(false));
+    }
+
+    #[test]
+    fn tls_config_round_trips_through_json() {
+        let original = TlsConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec!["example.com".to_string()],
+            intercept_include: vec!["*.test".to_string()],
+            app_intercept_exclude: vec!["AppA".to_string()],
+            app_intercept_include: vec!["AppB".to_string()],
+            ip_intercept_exclude: vec!["127.0.0.1".to_string()],
+            ip_intercept_include: vec!["10.0.0.1".to_string()],
+            unsafe_ssl: true,
+            disconnect_on_config_change: false,
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        let decoded: TlsConfig = serde_json::from_str(&json).unwrap();
+
+        assert!(decoded.enable_tls_interception);
+        assert_eq!(decoded.intercept_exclude, vec!["example.com".to_string()]);
+        assert_eq!(decoded.intercept_include, vec!["*.test".to_string()]);
+        assert_eq!(decoded.app_intercept_exclude, vec!["AppA".to_string()]);
+        assert_eq!(decoded.app_intercept_include, vec!["AppB".to_string()]);
+        assert_eq!(decoded.ip_intercept_exclude, vec!["127.0.0.1".to_string()]);
+        assert_eq!(decoded.ip_intercept_include, vec!["10.0.0.1".to_string()]);
+        assert!(decoded.unsafe_ssl);
+        assert!(!decoded.disconnect_on_config_change);
+    }
+
+    #[test]
+    fn ui_pinned_filter_type_uses_snake_case_in_json() {
+        let json = serde_json::to_string(&UiPinnedFilterType::ClientIp).unwrap();
+        assert_eq!(json, r#""client_ip""#);
+
+        let decoded: UiPinnedFilterType = serde_json::from_str(r#""client_app""#).unwrap();
+        assert!(matches!(decoded, UiPinnedFilterType::ClientApp));
+    }
+
+    #[test]
+    fn pinned_filter_type_round_trips_between_ui_and_storage() {
+        for storage_ty in [
+            PinnedFilterType::ClientIp,
+            PinnedFilterType::ClientApp,
+            PinnedFilterType::Domain,
+        ] {
+            match storage_ty {
+                PinnedFilterType::ClientIp => {
+                    let ui: UiPinnedFilterType = storage_ty.into();
+                    assert!(matches!(ui, UiPinnedFilterType::ClientIp));
+                    let back: PinnedFilterType = ui.into();
+                    assert!(matches!(back, PinnedFilterType::ClientIp));
+                }
+                PinnedFilterType::ClientApp => {
+                    let ui: UiPinnedFilterType = storage_ty.into();
+                    assert!(matches!(ui, UiPinnedFilterType::ClientApp));
+                    let back: PinnedFilterType = ui.into();
+                    assert!(matches!(back, PinnedFilterType::ClientApp));
+                }
+                PinnedFilterType::Domain => {
+                    let ui: UiPinnedFilterType = storage_ty.into();
+                    assert!(matches!(ui, UiPinnedFilterType::Domain));
+                    let back: PinnedFilterType = ui.into();
+                    assert!(matches!(back, PinnedFilterType::Domain));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ui_pinned_filter_round_trips_via_storage_type() {
+        let ui = UiPinnedFilter {
+            id: "id-1".to_string(),
+            filter_type: UiPinnedFilterType::Domain,
+            value: "example.com".to_string(),
+            label: "Example".to_string(),
+        };
+
+        let storage: PinnedFilter = ui.clone().into();
+        let back: UiPinnedFilter = storage.into();
+
+        assert_eq!(back.id, "id-1");
+        assert!(matches!(back.filter_type, UiPinnedFilterType::Domain));
+        assert_eq!(back.value, "example.com");
+        assert_eq!(back.label, "Example");
+    }
+
+    #[test]
+    fn ui_collapsed_sections_round_trips_via_storage_type() {
+        let ui = UiCollapsedSections {
+            pinned: true,
+            client_ip: false,
+            client_app: true,
+            domain: false,
+        };
+
+        let storage: CollapsedSections = ui.clone().into();
+        let back: UiCollapsedSections = storage.into();
+
+        assert_eq!(back.pinned, ui.pinned);
+        assert_eq!(back.client_ip, ui.client_ip);
+        assert_eq!(back.client_app, ui.client_app);
+        assert_eq!(back.domain, ui.domain);
+    }
+
+    #[test]
+    fn ui_filter_panel_round_trips_via_storage_type() {
+        let ui = UiFilterPanelConfig {
+            collapsed: true,
+            width: 320,
+            collapsed_sections: UiCollapsedSections {
+                pinned: false,
+                client_ip: true,
+                client_app: false,
+                domain: true,
+            },
+        };
+
+        let storage: FilterPanelConfig = ui.clone().into();
+        let back: UiFilterPanelConfig = storage.into();
+
+        assert_eq!(back.collapsed, ui.collapsed);
+        assert_eq!(back.width, ui.width);
+        assert_eq!(back.collapsed_sections.pinned, ui.collapsed_sections.pinned);
+        assert_eq!(
+            back.collapsed_sections.client_ip,
+            ui.collapsed_sections.client_ip
+        );
+        assert_eq!(
+            back.collapsed_sections.client_app,
+            ui.collapsed_sections.client_app
+        );
+        assert_eq!(back.collapsed_sections.domain, ui.collapsed_sections.domain);
+    }
+
+    #[test]
+    fn ui_config_response_serde_uses_expected_field_names() {
+        let response = UiConfigResponse {
+            pinned_filters: vec![UiPinnedFilter {
+                id: "id-1".to_string(),
+                filter_type: UiPinnedFilterType::ClientIp,
+                value: "1.2.3.4".to_string(),
+                label: "Client IP".to_string(),
+            }],
+            filter_panel: UiFilterPanelConfig {
+                collapsed: false,
+                width: 240,
+                collapsed_sections: UiCollapsedSections {
+                    pinned: true,
+                    client_ip: false,
+                    client_app: false,
+                    domain: true,
+                },
+            },
+            detail_panel_collapsed: true,
+            rules_sort_mode: "byName".to_string(),
+        };
+
+        let json = serde_json::to_value(&response).unwrap();
+        assert!(json.get("pinnedFilters").is_some());
+        assert!(json.get("filterPanel").is_some());
+        assert!(json.get("detailPanelCollapsed").is_some());
+        assert!(json.get("rulesSortMode").is_some());
+
+        let pinned = &json["pinnedFilters"][0];
+        assert_eq!(pinned["id"], "id-1");
+        assert_eq!(pinned["type"], "client_ip");
+        assert_eq!(pinned["value"], "1.2.3.4");
+        assert_eq!(pinned["label"], "Client IP");
+
+        let collapsed_sections = &json["filterPanel"]["collapsedSections"];
+        assert_eq!(collapsed_sections["pinned"], true);
+        assert_eq!(collapsed_sections["clientIp"], false);
+        assert_eq!(collapsed_sections["clientApp"], false);
+        assert_eq!(collapsed_sections["domain"], true);
+    }
+
+    #[test]
+    fn update_ui_config_request_deserializes_partial_payloads() {
+        let json = r#"{ "detailPanelCollapsed": true, "rulesSortMode": "byRule" }"#;
+        let req: UpdateUiConfigRequest = serde_json::from_str(json).unwrap();
+
+        assert!(req.pinned_filters.is_none());
+        assert!(req.filter_panel.is_none());
+        assert_eq!(req.detail_panel_collapsed, Some(true));
+        assert_eq!(req.rules_sort_mode.as_deref(), Some("byRule"));
+    }
+
+    #[tokio::test]
+    async fn performance_config_uses_defaults_without_config_manager() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+
+        let resp = get_performance_config(state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let cfg: PerformanceConfigResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(cfg.traffic.max_records, DEFAULT_TRAFFIC_MAX_RECORDS);
+        assert_eq!(cfg.breakpoint.timeout_ms, DEFAULT_BREAKPOINT_TIMEOUT_MS);
+        assert_eq!(cfg.breakpoint.timeout_min_ms, MIN_BREAKPOINT_TIMEOUT_MS);
+        assert_eq!(cfg.breakpoint.timeout_max_ms, MAX_BREAKPOINT_TIMEOUT_MS);
+    }
+
+    #[test]
+    fn update_sandbox_config_request_deserializes_nested_sections() {
+        let json = r#"{
+            "file": { "sandbox_dir": "/tmp/sandbox" },
+            "net": { "enabled": true, "timeout_ms": 1234 },
+            "limits": { "timeout_ms": 5678, "max_memory_bytes": 1000 }
+        }"#;
+        let req: UpdateSandboxConfigRequest = serde_json::from_str(json).unwrap();
+
+        assert_eq!(
+            req.file.as_ref().and_then(|f| f.sandbox_dir.as_deref()),
+            Some("/tmp/sandbox")
+        );
+        assert_eq!(req.net.as_ref().and_then(|n| n.enabled), Some(true));
+        assert_eq!(req.net.as_ref().and_then(|n| n.timeout_ms), Some(1234));
+        assert_eq!(req.limits.as_ref().and_then(|l| l.timeout_ms), Some(5678));
+        assert_eq!(
+            req.limits.as_ref().and_then(|l| l.max_memory_bytes),
+            Some(1000)
+        );
     }
 }

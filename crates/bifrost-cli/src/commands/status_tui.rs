@@ -1621,4 +1621,150 @@ mod tests {
             _ => panic!("expected performance event"),
         }
     }
+
+    #[test]
+    fn format_bytes_formats_kb_mb_and_gb() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(1_024), "1.00 KB");
+        assert_eq!(format_bytes(1_048_576), "1.00 MB");
+        assert_eq!(format_bytes(1_073_741_824), "1.00 GB");
+    }
+
+    #[test]
+    fn format_rate_formats_small_and_large_values() {
+        assert_eq!(format_rate(128.0), "128 B/s");
+        assert_eq!(format_rate(1_024.0), "1.00 KB/s");
+        assert_eq!(format_rate(1_048_576.0), "1.00 MB/s");
+    }
+
+    #[test]
+    fn format_time_span_formats_seconds_minutes_and_hours() {
+        assert_eq!(format_time_span(30), "30s");
+        assert_eq!(format_time_span(90), "1m30s");
+        assert_eq!(format_time_span(3_600), "1h0m");
+        assert_eq!(format_time_span(3_660), "1h1m");
+    }
+
+    fn dummy_app() -> App {
+        let (_tx, rx) = mpsc::channel();
+        App {
+            port: 9900,
+            push_port: Arc::new(AtomicU16::new(9900)),
+            push_rx: rx,
+            push_connected: false,
+            last_push_event: None,
+            is_running: true,
+            pid: Some(1234),
+            metrics: MetricsSnapshot::default(),
+            qps_history: vec![0.0; QPS_HISTORY_SIZE],
+            cpu_history: vec![0.0; CPU_HISTORY_SIZE],
+            max_cpu: 0.0,
+            memory_used_history: vec![0; CPU_HISTORY_SIZE],
+            max_memory_used: 0,
+            app_metrics: Vec::new(),
+            host_metrics: Vec::new(),
+            rules: Vec::new(),
+            values: Vec::new(),
+            scripts: ScriptsResponse {
+                request: Vec::new(),
+                response: Vec::new(),
+            },
+            config: None,
+            performance_config: None,
+            cli_proxy: None,
+            selected_tab: 0,
+            last_process_check: Instant::now(),
+            last_update: Instant::now(),
+            last_slow_refresh: Instant::now(),
+            refresh_count: 0,
+        }
+    }
+
+    #[test]
+    fn apply_metrics_snapshot_updates_histories_and_maxima() {
+        let mut app = dummy_app();
+        let snapshot = MetricsSnapshot {
+            qps: 42.0,
+            cpu_usage: 77.5,
+            memory_used: 1024 * 1024,
+            memory_total: 2 * 1024 * 1024,
+            ..Default::default()
+        };
+
+        app.apply_metrics_snapshot(snapshot);
+
+        assert_eq!(app.metrics.qps, 42.0);
+        assert_eq!(app.qps_history.last().copied(), Some(42.0));
+        assert_eq!(app.cpu_history.last().copied(), Some(77.5));
+        assert_eq!(app.memory_used_history.last().copied(), Some(1024 * 1024));
+        assert_eq!(app.max_cpu, 77.5);
+        assert_eq!(app.max_memory_used, 1024 * 1024);
+    }
+
+    #[test]
+    fn push_is_healthy_checks_connection_and_staleness() {
+        let mut app = dummy_app();
+        assert!(!app.push_is_healthy());
+
+        app.push_connected = true;
+        app.last_push_event = Some(Instant::now());
+        assert!(app.push_is_healthy());
+
+        app.last_push_event = Some(Instant::now() - PUSH_STALE_TIMEOUT - Duration::from_secs(1));
+        assert!(!app.push_is_healthy());
+    }
+
+    #[test]
+    fn config_lines_include_proxy_cli_and_performance_sections() {
+        let mut app = dummy_app();
+        app.config = Some(ConfigResponse {
+            tls: TlsConfig {
+                enable_tls_interception: true,
+                intercept_include: vec!["example.com".into()],
+                app_intercept_include: vec![],
+                unsafe_ssl: false,
+            },
+            port: 9900,
+            host: "127.0.0.1".into(),
+        });
+        app.cli_proxy = Some(CliProxyStatus {
+            enabled: true,
+            shell: "bash".into(),
+            config_files: vec!["/tmp/proxy.conf".into()],
+            proxy_url: "http://127.0.0.1:9900".into(),
+        });
+        app.performance_config = Some(PerformanceConfigResponse {
+            traffic: TrafficConfig {
+                max_records: 1024,
+                max_db_size_bytes: 1_048_576,
+                max_body_memory_size: 65_536,
+                max_body_buffer_size: 1_048_576,
+                max_body_probe_size: 8_192,
+                binary_traffic_performance_mode: true,
+                file_retention_days: 7,
+                sse_stream_flush_bytes: 4_096,
+                sse_stream_flush_interval_ms: 250,
+                ws_payload_flush_bytes: 4_096,
+                ws_payload_flush_interval_ms: 250,
+                ws_payload_max_open_files: 16,
+            },
+            body_store_stats: Some(BodyStoreStats {
+                file_count: 1,
+                total_size: 2048,
+            }),
+            frame_store_stats: None,
+        });
+
+        let lines = config_lines(&app)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(lines.iter().any(|l| l.contains("Listen: 127.0.0.1:9900")));
+        assert!(lines
+            .iter()
+            .any(|l| l.contains("TLS Interception: Enabled")));
+        assert!(lines.iter().any(|l| l.contains("CLI Proxy (ENV):")));
+        assert!(lines.iter().any(|l| l.contains("Performance:")));
+    }
 }

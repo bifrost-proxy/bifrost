@@ -742,3 +742,42 @@ async fn handle_rename(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    #[test]
+    fn builtin_decode_script_helpers_match_supported_names() {
+        assert!(is_builtin_decode_script("utf8"));
+        assert!(is_builtin_decode_script("default"));
+        assert!(!is_builtin_decode_script("other"));
+
+        let utf8_desc = builtin_decode_script_description("utf8").unwrap();
+        assert!(utf8_desc.to_lowercase().contains("utf-8"));
+
+        assert!(builtin_decode_script_description("other").is_none());
+
+        let utf8_content = builtin_decode_script_content("utf8").unwrap();
+        assert!(utf8_content.contains("decode://utf8"));
+    }
+
+    #[tokio::test]
+    async fn handle_get_exposes_builtin_decode_script_detail() {
+        let dir = tempfile::tempdir().unwrap();
+        let manager = Arc::new(RwLock::new(ScriptManager::new(dir.path().to_path_buf())));
+
+        let resp = super::handle_get("/api/scripts/decode/utf8".to_string(), manager).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let detail: ScriptDetail = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(detail.info.name, "utf8");
+        assert_eq!(detail.info.script_type, ScriptType::Decode);
+        assert!(detail.content.contains("decode://utf8"));
+    }
+}

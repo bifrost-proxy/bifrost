@@ -1277,8 +1277,13 @@ fn print_body(body: &Value, use_color: bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_traffic_list_query, TrafficListOptions};
+    use super::{
+        build_traffic_list_query, format_duration, format_size, parse_traffic_list_rows,
+        print_body, print_headers_section, render_traffic_detail_value, short_start_time,
+        truncate_str, TrafficListOptions, TrafficRow,
+    };
     use crate::commands::OutputFormat;
+    use serde_json::json;
 
     #[test]
     fn build_traffic_list_query_includes_listener_port_filter() {
@@ -1309,5 +1314,204 @@ mod tests {
 
         assert!(query.contains("limit=50"));
         assert!(query.contains("listener_port=50831"));
+    }
+
+    #[test]
+    fn short_start_time_drops_date_prefix_when_present() {
+        assert_eq!(short_start_time("2024-01-01 12:34:56"), "12:34:56");
+        assert_eq!(short_start_time("12:34:56"), "12:34:56");
+    }
+
+    #[test]
+    fn truncate_str_truncates_and_adds_ellipsis() {
+        assert_eq!(truncate_str("short", 10), "short");
+        assert_eq!(truncate_str("abcdefghij", 5), "ab...");
+    }
+
+    #[test]
+    fn format_size_formats_bytes_kb_and_mb() {
+        assert_eq!(format_size(0), "0B");
+        assert_eq!(format_size(999), "999B");
+        assert_eq!(format_size(1024), "1.0KB");
+        assert_eq!(format_size(1024 * 1024), "1.0MB");
+    }
+
+    #[test]
+    fn format_duration_formats_ms_and_seconds_and_zero() {
+        assert_eq!(format_duration(0), "...");
+        assert_eq!(format_duration(50), "50ms");
+        assert_eq!(format_duration(1500), "1.50s");
+    }
+
+    #[test]
+    fn parse_traffic_list_rows_supports_compact_format() {
+        let body = json!({
+            "records": [{
+                "id": "r1",
+                "seq": 42,
+                "m": "GET",
+                "h": "example.com",
+                "p": "/",
+                "s": 200,
+                "res_sz": 1234,
+                "dur": 50,
+                "lp": 8080,
+                "proto": "HTTP/1.1",
+                "st": "2024-01-01 12:00:00",
+            }],
+            "next_cursor": null,
+            "prev_cursor": null,
+            "has_more": false,
+            "total": 1,
+            "server_sequence": 42,
+        })
+        .to_string();
+
+        let (rows, meta) = parse_traffic_list_rows(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row: &TrafficRow = &rows[0];
+        assert_eq!(row.id, "r1");
+        assert_eq!(row.seq, 42);
+        assert_eq!(row.status, 200);
+        assert_eq!(row.method, "GET");
+        assert_eq!(row.host, "example.com");
+        assert_eq!(row.path, "/");
+        assert_eq!(meta.total, Some(1));
+        assert_eq!(meta.server_sequence, Some(42));
+    }
+
+    #[test]
+    fn parse_traffic_list_rows_supports_legacy_format() {
+        let body = json!({
+            "total": 1,
+            "offset": 0,
+            "limit": 10,
+            "records": [{
+                "id": "r1",
+                "sequence": 7,
+                "method": "POST",
+                "host": "example.org",
+                "path": "/api",
+                "status": 201,
+                "response_size": 2048,
+                "duration_ms": 123,
+                "listener_port": 9000,
+                "protocol": "HTTP/2",
+                "start_time": "2024-01-01 13:00:00",
+            }],
+        })
+        .to_string();
+
+        let (rows, meta) = parse_traffic_list_rows(&body).unwrap();
+        assert_eq!(rows.len(), 1);
+        let row: &TrafficRow = &rows[0];
+        assert_eq!(row.id, "r1");
+        assert_eq!(row.seq, 7);
+        assert_eq!(row.method, "POST");
+        assert_eq!(row.listener_port, 9000);
+        assert_eq!(meta.total, Some(1));
+        assert_eq!(meta.offset, Some(0));
+        assert_eq!(meta.limit, Some(10));
+    }
+
+    #[test]
+    fn render_traffic_detail_value_json_and_pretty_do_not_error() {
+        let record = json!({
+            "id": "r1",
+            "method": "GET",
+            "url": "https://example.com/",
+            "status": 200,
+            "protocol": "HTTP/1.1",
+            "duration_ms": 100,
+            "request_size": 512,
+            "response_size": 1024,
+        });
+
+        render_traffic_detail_value(&record, OutputFormat::Json, true).unwrap();
+        render_traffic_detail_value(&record, OutputFormat::JsonPretty, true).unwrap();
+    }
+
+    #[test]
+    fn render_traffic_detail_value_table_renders_headers_and_bodies() {
+        let record = json!({
+            "id": "r1",
+            "method": "GET",
+            "url": "https://example.com/",
+            "status": 200,
+            "protocol": "HTTP/1.1",
+            "duration_ms": 100,
+            "request_size": 256,
+            "response_size": 512,
+            "host": "example.com",
+            "client_ip": "127.0.0.1",
+            "client_app": "cli",
+            "has_rule_hit": true,
+            "matched_rules": [{
+                "protocol": "reqH",
+                "value": "X-Test: 1",
+                "rule_name": "test.rule",
+            }],
+            "request_headers": [["Content-Type", "application/json"]],
+            "original_request_headers": [["Content-Type", "text/plain"]],
+            "response_headers": [["Content-Type", "application/json"]],
+            "original_response_headers": [["Content-Type", "text/plain"]],
+            "request_body": "hello",
+            "response_body": "world",
+            "timing": {
+                "dns_ms": 10,
+                "connect_ms": 20,
+            },
+        });
+
+        render_traffic_detail_value(&record, OutputFormat::Table, true).unwrap();
+        render_traffic_detail_value(&record, OutputFormat::Compact, true).unwrap();
+    }
+
+    #[test]
+    fn print_headers_section_without_original_shows_headers() {
+        let record = json!({
+            "request_headers": [["X-Test", "1"], ["Content-Type", "text/plain"]],
+        });
+
+        print_headers_section(
+            &record,
+            "request_headers",
+            "original_request_headers",
+            "Request Headers",
+            false,
+        );
+    }
+
+    #[test]
+    fn print_headers_section_with_original_shows_add_change_and_remove_markers() {
+        let record = json!({
+            "response_headers": [["X-New", "2"], ["Content-Type", "application/json"]],
+            "original_response_headers": [["X-Old", "1"], ["Content-Type", "text/plain"]],
+        });
+
+        print_headers_section(
+            &record,
+            "response_headers",
+            "original_response_headers",
+            "Response Headers",
+            true,
+        );
+    }
+
+    #[test]
+    fn print_body_handles_long_string_and_truncates() {
+        let long = "a".repeat(2500);
+        let value = json!(long);
+        print_body(&value, false);
+    }
+
+    #[test]
+    fn print_body_handles_large_json_structure() {
+        let mut items = Vec::new();
+        for i in 0..60 {
+            items.push(json!({"idx": i}));
+        }
+        let value = json!(items);
+        print_body(&value, false);
     }
 }

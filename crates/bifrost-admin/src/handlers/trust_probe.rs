@@ -3785,4 +3785,79 @@ mod tests {
             .and_then(|session| session.suggested_wifi_ssid.as_deref())
             .is_none());
     }
+
+    #[test]
+    fn parse_public_probe_path_parses_session_and_optional_action() {
+        let session_id = Uuid::new_v4();
+        let with_action = format!("/public/trust-probe/{}/open", session_id);
+        let without_action = format!("/public/trust-probe/{}", session_id);
+
+        let parsed_with_action = parse_public_probe_path(&with_action).expect("with action");
+        assert_eq!(parsed_with_action.0, session_id);
+        assert_eq!(parsed_with_action.1.as_deref(), Some("open"));
+
+        let parsed_without_action =
+            parse_public_probe_path(&without_action).expect("without action");
+        assert_eq!(parsed_without_action.0, session_id);
+        assert!(parsed_without_action.1.is_none());
+
+        assert!(parse_public_probe_path("/public/trust-probe/not-a-uuid").is_none());
+        assert!(parse_public_probe_path("/public/trust-probe/1234/extra/segment").is_none());
+    }
+
+    #[test]
+    fn normalize_device_id_validates_format_and_length() {
+        assert_eq!(
+            normalize_device_id(Some(" dev-123_Abc ".to_string())).as_deref(),
+            Some("dev-123_Abc")
+        );
+        assert!(normalize_device_id(Some("".to_string())).is_none());
+        assert!(normalize_device_id(Some("   ".to_string())).is_none());
+        let long_id = "x".repeat(97);
+        assert!(normalize_device_id(Some(long_id)).is_none());
+        assert!(normalize_device_id(Some("invalid id!".to_string())).is_none());
+        assert!(normalize_device_id(None).is_none());
+    }
+
+    #[test]
+    fn query_param_decodes_urlencoded_values() {
+        let query = "t=hello%20world&other=x";
+        assert_eq!(
+            query_param(Some(query), "t").as_deref(),
+            Some("hello world")
+        );
+        assert_eq!(query_param(Some(query), "missing"), None);
+        assert_eq!(query_param(None, "t"), None);
+    }
+
+    #[test]
+    fn probe_target_hosts_match_treats_loopback_hosts_as_equivalent() {
+        assert!(probe_target_hosts_match("127.0.0.1", "127.0.0.1"));
+        assert!(probe_target_hosts_match("localhost", "127.0.0.1"));
+        assert!(probe_target_hosts_match("127.0.0.1", "localhost"));
+        assert!(probe_target_hosts_match("::1", "127.0.0.1"));
+        assert!(probe_target_hosts_match("[::1]", "localhost"));
+        assert!(!probe_target_hosts_match("127.0.0.1", "10.0.0.1"));
+    }
+
+    #[test]
+    fn escape_html_escapes_special_characters() {
+        let raw = "<a href=\"x&y\">O'Reilly</a>";
+        let escaped = escape_html(raw);
+        assert!(!escaped.contains('<'));
+        assert!(!escaped.contains('>'));
+        assert!(escaped.contains("&lt;a href=&quot;x&amp;y&quot;"));
+        assert!(escaped.contains("O&#39;Reilly"));
+    }
+
+    #[test]
+    fn validate_probe_host_handles_invalid_and_loopback_hosts() {
+        let err = validate_probe_host("not-an-ip").unwrap_err();
+        assert!(err.contains(
+            "Availability check host must be one of this computer's local IP addresses."
+        ));
+
+        let ok = validate_probe_host("127.0.0.1").unwrap();
+        assert_eq!(ok, "127.0.0.1");
+    }
 }

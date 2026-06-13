@@ -6750,4 +6750,223 @@ mod tests {
             other => panic!("expected OffsetAhead, got {other:?}"),
         }
     }
+
+    #[test]
+    fn sha256_hex_empty_input_matches_known_digest() {
+        let hex = sha256_hex(b"");
+        assert_eq!(
+            hex,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+    }
+
+    #[test]
+    fn sha256_hex_abc_matches_known_digest() {
+        let hex = sha256_hex(b"abc");
+        assert_eq!(
+            hex,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn hex_lower_formats_bytes_as_lowercase_hex() {
+        let bytes = [0x00u8, 0x01, 0xAB, 0xCD, 0xFF];
+        assert_eq!(hex_lower(&bytes), "0001abcdff".to_string());
+    }
+
+    #[test]
+    fn ed25519_public_key_to_spki_der_prefix_and_key() {
+        let public_key = [0x11u8; 32];
+        let der = ed25519_public_key_to_spki_der(&public_key);
+        assert_eq!(der.len(), 12 + public_key.len());
+        assert_eq!(
+            &der[..12],
+            &[0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00]
+        );
+        assert_eq!(&der[12..], &public_key);
+    }
+
+    #[test]
+    fn derive_device_code_is_deterministic_and_prefixed() {
+        let der = vec![0x42u8; 64];
+        let code1 = derive_device_code(&der);
+        let code2 = derive_device_code(&der);
+        assert_eq!(code1, code2);
+        assert!(code1.starts_with("BF-"));
+        assert_eq!(code1.len(), 3 + 16);
+        let suffix = &code1[3..];
+        assert!(suffix.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn derive_device_code_varies_with_input() {
+        let der1 = vec![0x01u8; 64];
+        let der2 = vec![0x02u8; 64];
+        let code1 = derive_device_code(&der1);
+        let code2 = derive_device_code(&der2);
+        assert_ne!(code1, code2);
+    }
+
+    #[test]
+    fn truncate_returns_original_when_shorter_than_max() {
+        let s = "hello";
+        assert_eq!(truncate(s, 10), "hello".to_string());
+    }
+
+    #[test]
+    fn truncate_returns_original_when_equal_to_max() {
+        let s = "hello";
+        assert_eq!(truncate(s, 5), "hello".to_string());
+    }
+
+    #[test]
+    fn truncate_appends_suffix_when_truncated() {
+        let s = "abcdef";
+        let t = truncate(s, 3);
+        assert!(t.starts_with("abc"));
+        assert!(t.ends_with("...(truncated)"));
+    }
+
+    #[test]
+    fn synthesized_cancelled_result_has_expected_shape() {
+        let r = synthesized_cancelled_result();
+        assert_eq!(r.exit_code, 130);
+        assert!(r.cancelled);
+        assert_eq!(r.stderr.as_deref(), Some("remote call cancelled by caller"));
+        assert!(r.stdout.is_none());
+    }
+
+    #[test]
+    fn retryable_cancel_settle_error_matches_cancel_call_429() {
+        let err = BifrostError::Network(
+            "cancel_call failed with status 429 Too Many Requests".to_string(),
+        );
+        assert!(is_retryable_cancel_settle_error(&err));
+    }
+
+    #[test]
+    fn retryable_cancel_settle_error_matches_too_many_requests_message() {
+        let err = BifrostError::Network("too many requests, retry after 10s".to_string());
+        assert!(is_retryable_cancel_settle_error(&err));
+    }
+
+    #[test]
+    fn retryable_cancel_settle_error_rejects_other_network_errors() {
+        let err = BifrostError::Network("some other network error".to_string());
+        assert!(!is_retryable_cancel_settle_error(&err));
+    }
+
+    #[test]
+    fn ambiguous_cancel_settle_result_false_when_cancelled_flag_set() {
+        let result = CallResult {
+            exit_code: 0,
+            stdout: None,
+            stderr: None,
+            duration_ms: None,
+            cancelled: true,
+        };
+        assert!(!is_ambiguous_cancel_settle_result(&result));
+    }
+
+    #[test]
+    fn ambiguous_cancel_settle_result_false_when_non_zero_exit_code() {
+        let result = CallResult {
+            exit_code: 1,
+            stdout: None,
+            stderr: None,
+            duration_ms: None,
+            cancelled: false,
+        };
+        assert!(!is_ambiguous_cancel_settle_result(&result));
+    }
+
+    #[test]
+    fn parse_call_terminal_status_accepts_all_terminal_states() {
+        for status in ["cancelled", "completed", "failed", "timeout"] {
+            let payload = serde_json::json!({
+                "call_id": "c1",
+                "status": status,
+            });
+            assert_eq!(parse_call_terminal_status(&payload), Some(status));
+        }
+    }
+
+    #[test]
+    fn parse_call_terminal_status_missing_or_non_string_yields_none() {
+        let payload = serde_json::json!({ "call_id": "c1" });
+        assert_eq!(parse_call_terminal_status(&payload), None);
+
+        let payload = serde_json::json!({
+            "call_id": "c1",
+            "status": 123,
+        });
+        assert_eq!(parse_call_terminal_status(&payload), None);
+    }
+
+    #[test]
+    fn render_search_size_formats_units() {
+        assert_eq!(render_search_size(0), "0B");
+        assert_eq!(render_search_size(999), "999B");
+        assert_eq!(render_search_size(1024), "1.0KB");
+        assert_eq!(render_search_size(10 * 1024 * 1024), "10.0MB");
+    }
+
+    #[test]
+    fn render_search_duration_formats_ms_and_seconds() {
+        assert_eq!(render_search_duration(0), "...".to_string());
+        assert_eq!(render_search_duration(1), "1ms".to_string());
+        assert_eq!(render_search_duration(1500), "1.50s".to_string());
+    }
+
+    #[test]
+    fn render_search_number_formats_k_and_m_suffixes() {
+        assert_eq!(render_search_number(42), "42".to_string());
+        assert_eq!(render_search_number(1_200), "1.2K".to_string());
+        assert_eq!(render_search_number(2_500_000), "2.5M".to_string());
+    }
+
+    #[test]
+    fn should_stream_remote_render_only_for_raw_mode() {
+        let raw = RemoteRenderMode::Raw;
+        assert!(should_stream_remote_render(&raw));
+
+        let search = RemoteRenderMode::Search {
+            format: OutputFormat::Table,
+            no_color: false,
+            keyword: String::new(),
+            max_scan: None,
+            max_results: None,
+        };
+        assert!(!should_stream_remote_render(&search));
+
+        let traffic = RemoteRenderMode::TrafficList {
+            format: OutputFormat::Compact,
+            no_color: true,
+        };
+        assert!(!should_stream_remote_render(&traffic));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_if_ssh_key_permissions_are_too_open_does_not_panic() {
+        use std::fs::{self, File};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        File::create(&path).expect("create key");
+
+        // Mode 0o600 should not trigger any warning logic that panics.
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o600);
+        fs::set_permissions(&path, perms).unwrap();
+        warn_if_ssh_key_permissions_are_too_open(&path);
+
+        // Mode 0o777 should emit a warning but must not panic.
+        let mut perms = fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o777);
+        fs::set_permissions(&path, perms).unwrap();
+        warn_if_ssh_key_permissions_are_too_open(&path);
+    }
 }

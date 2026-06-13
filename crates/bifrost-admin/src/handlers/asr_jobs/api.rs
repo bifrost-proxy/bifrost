@@ -939,3 +939,86 @@ fn spawn_directory_task_run(task: AsrDirectoryTask) -> Result<(), Box<Response<B
         ))),
     }
 }
+
+#[cfg(test)]
+mod api_tests {
+    use super::*;
+
+    #[test]
+    fn query_param_and_flag_parsing_handle_truthy_and_missing_values() {
+        let query = "force=&other=yes&name=hello+world";
+        assert_eq!(query_param_value(query, "name"), Some("hello world".to_string()));
+        assert!(query_flag_enabled(query, "force"));
+        assert!(query_flag_enabled(query, "other"));
+        assert!(!query_flag_enabled(query, "missing"));
+    }
+
+    #[test]
+    fn pause_mode_from_query_defaults_and_validates_mode() {
+        let default_mode = pause_mode_from_query("").unwrap();
+        assert_eq!(default_mode, AsrTaskPauseMode::LongTerm);
+
+        let temp = pause_mode_from_query("mode=temporary").unwrap();
+        assert_eq!(temp, AsrTaskPauseMode::Temporary);
+
+        let err = pause_mode_from_query("mode=unsupported").unwrap_err();
+        assert!(err.contains("invalid pause mode"));
+    }
+
+    #[test]
+    fn canonical_artifact_format_and_content_type_match_aliases() {
+        assert_eq!(canonical_artifact_format("text"), "txt");
+        assert_eq!(canonical_artifact_format("metadata"), "metadata_json");
+        assert_eq!(canonical_artifact_format("json"), "metadata_json");
+        assert_eq!(canonical_artifact_format("timeline"), "timeline_json");
+        assert_eq!(canonical_artifact_format("vtt"), "vtt");
+
+        assert_eq!(artifact_content_type("vtt"), "text/vtt; charset=utf-8");
+        assert_eq!(artifact_content_type("srt"), "text/plain; charset=utf-8");
+        assert_eq!(artifact_content_type("txt"), "text/plain; charset=utf-8");
+        assert_eq!(
+            artifact_content_type("metadata"),
+            "application/json; charset=utf-8"
+        );
+        assert_eq!(artifact_content_type("unknown"), "application/octet-stream");
+    }
+
+    #[test]
+    fn normalize_task_diarization_config_backfills_max_speakers() {
+        let config = AsrDiarizationConfig {
+            enabled: true,
+            known_speaker_count: None,
+            max_speakers: None,
+            ..Default::default()
+        };
+
+        let normalized = normalize_task_diarization_config(config);
+        assert_eq!(
+            normalized.max_speakers,
+            Some(bifrost_asr::profiles::DEFAULT_AUTO_MAX_SPEAKERS)
+        );
+
+        let with_known = AsrDiarizationConfig {
+            enabled: true,
+            known_speaker_count: Some(3),
+            max_speakers: None,
+            ..Default::default()
+        };
+        let normalized = normalize_task_diarization_config(with_known);
+        // known_speaker_count present should not be overwritten
+        assert_eq!(normalized.known_speaker_count, Some(3));
+    }
+
+    #[test]
+    fn ensure_task_audio_dir_rejects_files_and_creates_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let file_path = temp.path().join("not-a-dir");
+        std::fs::write(&file_path, b"x").unwrap();
+        let err = ensure_task_audio_dir(&file_path).unwrap_err();
+        assert!(err.contains("must be a directory"));
+
+        let dir_path = temp.path().join("audio/dir");
+        ensure_task_audio_dir(&dir_path).unwrap();
+        assert!(dir_path.is_dir());
+    }
+}

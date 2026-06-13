@@ -4206,4 +4206,196 @@ mod tests {
         assert_eq!(snapshot.entries.len(), 1);
         assert!(snapshot.entries.contains_key(Path::new("legacy.json")));
     }
+
+    #[test]
+    fn parse_proxy_users_accepts_single_user() {
+        let users = vec!["alice:secret".to_string()];
+        let accounts = parse_proxy_users(&users).expect("parse proxy users");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[0].password.as_deref(), Some("secret"));
+        assert!(accounts[0].enabled);
+    }
+
+    #[test]
+    fn parse_proxy_users_accepts_multiple_distinct_users() {
+        let users = vec!["alice:one".to_string(), "bob:two".to_string()];
+        let accounts = parse_proxy_users(&users).expect("parse proxy users");
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[1].username, "bob");
+    }
+
+    #[test]
+    fn parse_proxy_users_rejects_missing_separator() {
+        let users = vec!["invalid".to_string()];
+        let err = parse_proxy_users(&users).unwrap_err();
+        assert!(format!("{err}").contains("expected USER:PASS"));
+    }
+
+    #[test]
+    fn parse_proxy_users_rejects_empty_username() {
+        let users = vec![":pass".to_string()];
+        let err = parse_proxy_users(&users).unwrap_err();
+        assert!(
+            format!("{err}").contains("username and password must be non-empty"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_proxy_users_rejects_empty_password() {
+        let users = vec!["user:".to_string()];
+        let err = parse_proxy_users(&users).unwrap_err();
+        assert!(
+            format!("{err}").contains("username and password must be non-empty"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_proxy_users_rejects_duplicate_usernames() {
+        let users = vec!["alice:one".to_string(), "alice:two".to_string()];
+        let err = parse_proxy_users(&users).unwrap_err();
+        assert!(format!("{err}").contains("Duplicate proxy username"));
+    }
+
+    #[test]
+    fn parse_proxy_users_allows_empty_list() {
+        let users: Vec<String> = Vec::new();
+        let accounts = parse_proxy_users(&users).expect("parse proxy users");
+        assert!(accounts.is_empty());
+    }
+
+    #[test]
+    fn build_tray_start_args_omits_host_for_wildcard() {
+        let config = ProxyConfig {
+            host: "0.0.0.0".to_string(),
+            socks5_port: Some(10000),
+            unsafe_ssl: false,
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "info", false, false);
+
+        assert_eq!(args, vec!["--socks5-port", "10000"]);
+    }
+
+    #[test]
+    fn build_tray_start_args_omits_log_level_when_info() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "info", false, false);
+
+        assert_eq!(args, vec!["--host", "127.0.0.1"]);
+    }
+
+    #[test]
+    fn build_tray_start_args_includes_unsafe_ssl_flag() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "debug", false, false);
+
+        assert!(args.contains(&"--unsafe-ssl".to_string()));
+    }
+
+    #[test]
+    fn build_tray_start_args_includes_yes_and_skip_cert_check_flags() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "info", true, true);
+
+        assert!(args.contains(&"--skip-cert-check".to_string()));
+        assert!(args.contains(&"--yes".to_string()));
+    }
+
+    #[test]
+    fn is_port_in_use_treats_wildcard_host_like_loopback() {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        assert!(is_port_in_use("0.0.0.0", port));
+    }
+
+    #[test]
+    fn is_port_in_use_uses_fallback_socketaddr_on_parse_failure() {
+        // Force parse(...) to fail by using an invalid host literal; this should
+        // fall back to 127.0.0.1 without panicking.
+        let port = allocate_loopback_port();
+
+        assert!(!is_port_in_use("256.256.256.256", port));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn raise_fd_limit_runs_without_panic() {
+        // We don't assert on the actual limits; the goal is simply to exercise the
+        // code path on the current platform.
+        raise_fd_limit();
+    }
+
+    #[test]
+    fn should_skip_system_proxy_restore_respects_shutdown_modes() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        use bifrost_core::SystemProxyShutdownMode;
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            SystemProxyShutdownMode::BackgroundCleanup,
+        )
+        .unwrap();
+        assert!(should_skip_system_proxy_restore(dir, "bg"));
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            SystemProxyShutdownMode::ForegroundCleanup,
+        )
+        .unwrap();
+        assert!(should_skip_system_proxy_restore(dir, "fg"));
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .unwrap();
+        assert!(should_skip_system_proxy_restore(dir, "restart"));
+    }
+
+    #[test]
+    fn should_skip_system_proxy_restore_returns_false_when_no_marker() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        assert!(!should_skip_system_proxy_restore(temp_dir.path(), "none"));
+    }
+
+    #[test]
+    fn should_stop_system_proxy_reconcile_for_shutdown_only_on_foreground_cleanup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dir = temp_dir.path();
+        use bifrost_core::SystemProxyShutdownMode;
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            SystemProxyShutdownMode::BackgroundCleanup,
+        )
+        .unwrap();
+        assert!(!should_stop_system_proxy_reconcile_for_shutdown(dir));
+
+        bifrost_core::write_system_proxy_shutdown_mode(
+            dir,
+            SystemProxyShutdownMode::ForegroundCleanup,
+        )
+        .unwrap();
+        assert!(should_stop_system_proxy_reconcile_for_shutdown(dir));
+    }
 }

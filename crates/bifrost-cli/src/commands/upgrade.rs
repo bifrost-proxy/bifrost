@@ -1672,4 +1672,127 @@ mod tests {
         assert_eq!(parse_positive_usize(Some("0"), 2), 2);
         assert_eq!(parse_positive_usize(Some("abc"), 2), 2);
     }
+
+    #[test]
+    fn parse_positive_u64_parses_and_trims() {
+        assert_eq!(parse_positive_u64(Some("42"), 7), 42);
+        assert_eq!(parse_positive_u64(Some(" 5 "), 7), 5);
+    }
+
+    #[test]
+    fn parse_positive_u64_uses_default_for_zero_invalid_and_none() {
+        assert_eq!(parse_positive_u64(Some("0"), 7), 7);
+        assert_eq!(parse_positive_u64(Some("abc"), 7), 7);
+        assert_eq!(parse_positive_u64(None, 7), 7);
+    }
+
+    #[test]
+    fn parse_positive_usize_parses_and_trims() {
+        assert_eq!(parse_positive_usize(Some("3"), 1), 3);
+        assert_eq!(parse_positive_usize(Some(" 8 "), 1), 8);
+    }
+
+    #[test]
+    fn parse_positive_usize_uses_default_for_zero_invalid_and_none() {
+        assert_eq!(parse_positive_usize(Some("0"), 2), 2);
+        assert_eq!(parse_positive_usize(Some("zzz"), 2), 2);
+        assert_eq!(parse_positive_usize(None, 2), 2);
+    }
+
+    #[test]
+    fn musl_fallback_triple_is_defined_for_gnu_targets() {
+        assert_eq!(
+            get_musl_fallback_triple("x86_64-unknown-linux-gnu").as_deref(),
+            Some("x86_64-unknown-linux-musl")
+        );
+        assert_eq!(
+            get_musl_fallback_triple("aarch64-unknown-linux-gnu").as_deref(),
+            Some("aarch64-unknown-linux-musl")
+        );
+    }
+
+    #[test]
+    fn musl_fallback_triple_is_none_for_other_targets() {
+        assert!(get_musl_fallback_triple("x86_64-apple-darwin").is_none());
+    }
+
+    #[test]
+    fn human_bytes_formats_small_values() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(1), "1 B");
+        assert_eq!(human_bytes(1023), "1023 B");
+    }
+
+    #[test]
+    fn human_bytes_formats_larger_units() {
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(5 * 1024 * 1024 * 1024), "5.0 GiB");
+    }
+
+    #[test]
+    fn download_progress_line_without_total_omits_percentage() {
+        let started = Instant::now() - Duration::from_secs(1);
+        let line = download_progress_line(2048, None, started);
+        assert!(line.contains("Downloading…"));
+        assert!(line.contains("2.0 KiB"));
+        assert!(!line.contains("%"));
+    }
+
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_mirror_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "BIFROST_GITHUB_MIRROR";
+        let prev = std::env::var(key).ok();
+        match value {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        let result = f();
+        match prev {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+        result
+    }
+
+    #[test]
+    fn github_mirror_bases_respects_preferred_env() {
+        with_mirror_env(Some("https://example.com/github"), || {
+            let bases = github_mirror_bases();
+            assert!(!bases.is_empty());
+            assert_eq!(bases[0], "https://example.com/github");
+            assert!(bases.iter().any(|b| b.contains("github.com")));
+        });
+    }
+
+    #[test]
+    fn mirror_display_name_strips_scheme_and_path() {
+        assert_eq!(
+            mirror_display_name("https://ghfast.top/https://github.com"),
+            "ghfast.top"
+        );
+        assert_eq!(mirror_display_name("http://foo.bar/"), "foo.bar");
+        assert_eq!(mirror_display_name("plain-host"), "plain-host");
+    }
+
+    #[test]
+    fn github_path_url_normalizes_slashes() {
+        assert_eq!(
+            github_path_url("https://github.com/", "/owner/repo/releases"),
+            "https://github.com/owner/repo/releases"
+        );
+        assert_eq!(
+            github_path_url("https://github.com", "owner/repo"),
+            "https://github.com/owner/repo"
+        );
+    }
+
+    #[test]
+    fn version_comparison_is_newer_version_behaviour() {
+        assert!(is_newer_version("0.0.1", "0.0.2"));
+        assert!(!is_newer_version("0.1.0", "0.1.0"));
+        assert!(!is_newer_version("0.2.0", "0.1.9"));
+    }
 }

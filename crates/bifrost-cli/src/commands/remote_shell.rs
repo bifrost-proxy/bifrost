@@ -412,3 +412,320 @@ fn set_policy_enabled(set: &mut RemoteShellSet, id: &str, enabled: bool) -> Resu
 fn config_error(error: serde_json::Error) -> BifrostError {
     BifrostError::Config(format!("failed to serialize shell config: {error}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn empty_set() -> RemoteShellSet {
+        RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            policies: Vec::new(),
+            profiles: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn prepare_for_save_same_content_uses_max_version() {
+        let mut current = empty_set();
+        current.version = 5;
+        let mut requested = current.clone();
+        requested.version = 3;
+
+        let result = prepare_for_save(current.clone(), requested).unwrap();
+        assert_eq!(result.version, 5);
+
+        let mut requested_forward = current.clone();
+        requested_forward.version = 7;
+        let result2 = prepare_for_save(current, requested_forward).unwrap();
+        assert_eq!(result2.version, 7);
+    }
+
+    #[test]
+    fn prepare_for_save_bumps_version_when_content_diff_and_not_ahead() {
+        let current = empty_set();
+        let requested = RemoteShellSet {
+            schema_version: 0,
+            version: 0,
+            policies: vec![RemoteShellPolicy {
+                id: "p1".to_string(),
+                name: "Policy 1".to_string(),
+                description: None,
+                enabled: true,
+                profile_id: None,
+                metadata: json!({"exec_mode": "argv_exec"}),
+            }],
+            profiles: Vec::new(),
+        };
+
+        let result = prepare_for_save(current, requested).unwrap();
+        assert_eq!(result.version, 1);
+        assert_eq!(result.schema_version, 1);
+    }
+
+    #[test]
+    fn prepare_for_save_preserves_requested_version_when_ahead() {
+        let current = empty_set();
+        let requested = RemoteShellSet {
+            schema_version: 2,
+            version: 10,
+            policies: vec![RemoteShellPolicy {
+                id: "p1".to_string(),
+                name: "Policy 1".to_string(),
+                description: None,
+                enabled: true,
+                profile_id: None,
+                metadata: json!({"exec_mode": "argv_exec"}),
+            }],
+            profiles: Vec::new(),
+        };
+
+        let result = prepare_for_save(current, requested.clone()).unwrap();
+        assert_eq!(result.version, 10);
+        assert_eq!(result.schema_version, 2);
+        assert_eq!(result.policies.len(), requested.policies.len());
+    }
+
+    #[test]
+    fn validate_set_errors_on_missing_profile_reference() {
+        let set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            profiles: Vec::new(),
+            policies: vec![RemoteShellPolicy {
+                id: "p-missing".to_string(),
+                name: "Missing profile".to_string(),
+                description: None,
+                enabled: true,
+                profile_id: Some("missing".to_string()),
+                metadata: json!({}),
+            }],
+        };
+
+        let err = validate_set(&set).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("shell policy 'p-missing' references missing profile 'missing'"));
+    }
+
+    #[test]
+    fn reject_duplicate_profile_detects_conflict() {
+        let set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            policies: Vec::new(),
+            profiles: vec![RemoteShellProfile {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+                description: None,
+                enabled: true,
+                metadata: json!({}),
+            }],
+        };
+
+        let err = reject_duplicate_profile(&set, "default").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("shell profile 'default' already exists"));
+    }
+
+    #[test]
+    fn reject_duplicate_policy_detects_conflict() {
+        let set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            policies: vec![RemoteShellPolicy {
+                id: "p1".to_string(),
+                name: "Policy".to_string(),
+                description: None,
+                enabled: true,
+                profile_id: None,
+                metadata: json!({}),
+            }],
+            profiles: Vec::new(),
+        };
+
+        let err = reject_duplicate_policy(&set, "p1").unwrap_err();
+        assert!(err.to_string().contains("shell policy 'p1' already exists"));
+    }
+
+    #[test]
+    fn ensure_profile_exists_ok_and_error_cases() {
+        let set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            profiles: vec![RemoteShellProfile {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+                description: None,
+                enabled: true,
+                metadata: json!({}),
+            }],
+            policies: Vec::new(),
+        };
+
+        ensure_profile_exists(&set, "default").unwrap();
+        let err = ensure_profile_exists(&set, "missing").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("shell profile 'missing' does not exist"));
+    }
+
+    #[test]
+    fn set_profile_enabled_toggles_flag() {
+        let mut set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            profiles: vec![RemoteShellProfile {
+                id: "p1".to_string(),
+                name: "Profile".to_string(),
+                description: None,
+                enabled: false,
+                metadata: json!({}),
+            }],
+            policies: Vec::new(),
+        };
+
+        set_profile_enabled(&mut set, "p1", true).unwrap();
+        assert!(set.profiles[0].enabled);
+    }
+
+    #[test]
+    fn set_policy_enabled_toggles_flag() {
+        let mut set = RemoteShellSet {
+            schema_version: 1,
+            version: 0,
+            policies: vec![RemoteShellPolicy {
+                id: "p1".to_string(),
+                name: "Policy".to_string(),
+                description: None,
+                enabled: false,
+                profile_id: None,
+                metadata: json!({}),
+            }],
+            profiles: Vec::new(),
+        };
+
+        set_policy_enabled(&mut set, "p1", true).unwrap();
+        assert!(set.policies[0].enabled);
+    }
+
+    #[test]
+    fn config_error_formats_serde_error() {
+        let err = serde_json::from_str::<serde_json::Value>("not-json").unwrap_err();
+        let wrapped = config_error(err);
+        let msg = wrapped.to_string();
+        assert!(msg.contains("failed to serialize shell config"));
+    }
+
+    #[test]
+    fn save_bumped_increments_version_and_schema() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RemoteShellStore::with_file(temp_dir.path().join("remote_shell.json")).unwrap();
+        let set = RemoteShellSet {
+            schema_version: 0,
+            version: 0,
+            policies: Vec::new(),
+            profiles: Vec::new(),
+        };
+
+        save_bumped(&store, set).unwrap();
+        let saved = store.load().unwrap();
+        assert_eq!(saved.version, 1);
+        assert_eq!(saved.schema_version, 1);
+    }
+
+    #[test]
+    fn handle_profile_command_add_and_delete_round_trip() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RemoteShellStore::with_file(temp_dir.path().join("remote_shell.json")).unwrap();
+
+        handle_profile_command(
+            &store,
+            RemoteShellProfileCommands::Add {
+                id: "default".to_string(),
+                name: "Default".to_string(),
+                description: Some("desc".to_string()),
+                cwd: vec!["/tmp".to_string()],
+                env: vec!["PATH".to_string()],
+                default_cwd: Some("/tmp".to_string()),
+                timeout_ms: Some(30_000),
+                stdin: true,
+                interactive: true,
+                inherit_env: true,
+                disabled: false,
+            },
+        )
+        .unwrap();
+
+        let set = store.load().unwrap();
+        assert_eq!(set.profiles.len(), 1);
+        let profile = &set.profiles[0];
+        assert_eq!(profile.id, "default");
+        assert!(profile.enabled);
+        assert_eq!(profile.metadata["cwd_allowlist"], json!(["/tmp"]));
+
+        handle_profile_command(
+            &store,
+            RemoteShellProfileCommands::Delete {
+                id: "default".to_string(),
+            },
+        )
+        .unwrap();
+
+        let set_after = store.load().unwrap();
+        assert!(set_after.profiles.is_empty());
+    }
+
+    #[test]
+    fn handle_policy_command_add_creates_policy() {
+        let temp_dir = TempDir::new().unwrap();
+        let store = RemoteShellStore::with_file(temp_dir.path().join("remote_shell.json")).unwrap();
+
+        let mut set = empty_set();
+        set.profiles.push(RemoteShellProfile {
+            id: "default".to_string(),
+            name: "Default".to_string(),
+            description: None,
+            enabled: true,
+            metadata: json!({}),
+        });
+        store.save(&set).unwrap();
+
+        let args = RemoteShellPolicyAddArgs {
+            id: "allow-bifrost".to_string(),
+            name: "Allow Bifrost".to_string(),
+            description: Some("desc".to_string()),
+            mode: "argv_exec".to_string(),
+            profile: Some("default".to_string()),
+            program: vec!["/usr/bin/bifrost".to_string()],
+            pattern: vec![],
+            cwd: vec!["/tmp".to_string()],
+            env: vec!["PATH".to_string()],
+            default_cwd: Some("/tmp".to_string()),
+            timeout_ms: Some(10_000),
+            shell: Some("/bin/bash".to_string()),
+            stdin: true,
+            interactive: true,
+            inherit_env: true,
+            disabled: false,
+        };
+
+        handle_policy_command(&store, RemoteShellPolicyCommands::Add(Box::new(args))).unwrap();
+
+        let set_after = store.load().unwrap();
+        assert_eq!(set_after.policies.len(), 1);
+        let policy = &set_after.policies[0];
+        assert_eq!(policy.id, "allow-bifrost");
+        assert!(policy.enabled);
+        assert_eq!(policy.profile_id.as_deref(), Some("default"));
+        assert_eq!(policy.metadata["exec_mode"], json!("argv_exec"));
+    }
+
+    #[test]
+    fn print_shell_summary_handles_empty_set() {
+        let set = RemoteShellSet::default();
+        print_shell_summary(&set);
+    }
+}

@@ -3327,3 +3327,173 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn normalize_whitespace_collapses_runs_and_trims() {
+        assert_eq!(normalize_whitespace("  a  b\n\n c\t\td"), "a b c d");
+        assert_eq!(normalize_whitespace("   \n\t  "), "");
+    }
+
+    #[test]
+    fn is_retryable_send_error_matches_known_prefixes() {
+        for msg in [
+            "browser_send_not_submitted: composer not ready",
+            "send_button_not_found on page",
+            "browser_wrong_page: expected_conversation_id=None",
+            "500 Internal Server Error from chatgpt.com",
+            "Cannot find default execution context",
+            "create browser page failed: 500",
+            "connect CDP websocket failed: timeout",
+        ] {
+            assert!(is_retryable_send_error(msg), "{msg} should be retryable");
+        }
+        assert!(!is_retryable_send_error("permanent_failure: auth_required"));
+    }
+
+    #[test]
+    fn is_cdp_transient_error_matches_all_variants() {
+        for msg in [
+            "CDP command timed out: Runtime.evaluate",
+            "CDP connection closed unexpectedly",
+            "Inspected target navigated or closed",
+            "Target closed",
+            "Session closed by browser",
+            "CDP event channel closed",
+        ] {
+            assert!(is_cdp_transient_error(msg), "{msg} should be CDP transient");
+        }
+        assert!(!is_cdp_transient_error("other error"));
+    }
+
+    #[test]
+    fn send_button_ready_max_wait_short_and_long() {
+        let short = "a".repeat(50);
+        assert_eq!(send_button_ready_max_wait(&short), Duration::from_secs(10));
+
+        let long = "a".repeat(121);
+        // chars / 10_000 = 0 here, but mode switches to paste path with min 30s
+        assert_eq!(send_button_ready_max_wait(&long), Duration::from_secs(30),);
+
+        let very_long = "a".repeat(2_000_000);
+        // 30 + 2000000/10000 = 230, clamped to 180
+        assert_eq!(
+            send_button_ready_max_wait(&very_long),
+            Duration::from_secs(180),
+        );
+    }
+
+    #[test]
+    fn send_button_ready_retry_max_wait_depends_on_injection_mode() {
+        let short = "x".repeat(10);
+        let long = "x".repeat(COMPOSER_PASTE_THRESHOLD_CHARS + 1);
+        assert_eq!(
+            composer_text_injection_mode(&short),
+            ComposerTextInjectionMode::InsertText
+        );
+        assert_eq!(
+            composer_text_injection_mode(&long),
+            ComposerTextInjectionMode::NativeClipboardPaste
+        );
+        assert_eq!(
+            send_button_ready_retry_max_wait(&short),
+            Duration::from_secs(15),
+        );
+        assert_eq!(
+            send_button_ready_retry_max_wait(&long),
+            Duration::from_secs(60),
+        );
+    }
+
+    #[test]
+    fn parse_send_sse_collects_messages_and_event_types() {
+        let sse = "data: {\"type\":\"delta\",\"conversation_id\":\"c1\",\"turn_exchange_id\":\"t1\",\"message\":{\"id\":\"m1\",\"text\":\"hello\"}}\n\n"
+            .to_string()
+            + "data: {\"type\":\"stream_handoff\",\"conversation_id\":\"c1\",\"message\":{\"id\":\"m1\",\"text\":\"final\"}}\n\n";
+        let parsed = parse_send_sse(&sse);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("c1"));
+        assert_eq!(parsed.turn_exchange_id.as_deref(), Some("t1"));
+        assert_eq!(parsed.event_types, vec!["delta", "stream_handoff"]);
+        let mapping = parsed
+            .sse_detail
+            .as_ref()
+            .and_then(|v| v.get("mapping"))
+            .and_then(Value::as_object)
+            .expect("mapping");
+        let msg = mapping.get("m1").expect("m1 entry");
+        assert_eq!(
+            msg.get("message")
+                .and_then(|m| m.get("text"))
+                .and_then(Value::as_str),
+            Some("final"),
+        );
+    }
+
+    #[test]
+    fn page_body_has_fatal_error_matches_common_patterns() {
+        for body in [
+            "Too many requests", // 429
+            "HTTP 429: Too Many Requests",
+            "Something went wrong while loading",
+            "Internal Server Error", // 500
+            "Unable to load conversation",
+            "Conversation not found",
+        ] {
+            let state = json!({ "bodyText": body });
+            assert!(page_body_has_fatal_error(&state));
+        }
+
+        let ok_state = json!({ "bodyText": "normal page" });
+        assert!(!page_body_has_fatal_error(&ok_state));
+    }
+
+    #[test]
+    fn target_page_signature_includes_core_fields() {
+        let state = json!({
+            "url": "https://chatgpt.com/c/c1",
+            "pageKind": "conversation",
+            "conversationId": "c1",
+            "visibleComposerCount": 2,
+            "busyCount": 1,
+        });
+        let sig = target_page_signature(&state);
+        assert!(sig.contains("https://chatgpt.com/c/c1"));
+        assert!(sig.contains("conversation"));
+        assert!(sig.contains("c1"));
+        assert!(sig.contains("2"));
+        assert!(sig.ends_with("|1"));
+    }
+
+    #[test]
+    fn paste_modifier_and_key_are_consistent_for_platform() {
+        let modifier = paste_modifier();
+        let (key, code, vk) = paste_modifier_key();
+        if cfg!(target_os = "macos") {
+            assert_eq!(modifier, 4);
+            assert_eq!((key, code, vk), ("Meta", "MetaLeft", 91));
+        } else {
+            assert_eq!(modifier, 2);
+            assert_eq!((key, code, vk), ("Control", "ControlLeft", 17));
+        }
+    }
+
+    #[test]
+    fn extract_conversation_id_from_url_handles_variants() {
+        assert_eq!(
+            extract_conversation_id_from_url("https://chatgpt.com/c/abc-123?model=gpt",).as_deref(),
+            Some("abc-123"),
+        );
+        assert_eq!(
+            extract_conversation_id_from_url("https://chatgpt.com/c/abc-123/extra"),
+            Some("abc-123".to_string()),
+        );
+        assert_eq!(
+            extract_conversation_id_from_url("https://chatgpt.com/"),
+            None,
+        );
+    }
+}

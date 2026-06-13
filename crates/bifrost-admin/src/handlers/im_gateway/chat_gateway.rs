@@ -3545,3 +3545,76 @@ mod tests {
         .is_empty());
     }
 }
+
+#[cfg(test)]
+mod image_message_tests {
+    use super::*;
+    use crate::im_gateway::external_cli::ExternalCliImageInput;
+
+    fn image(mime_type: &str, data: &str) -> ExternalCliImageInput {
+        ExternalCliImageInput {
+            mime_type: mime_type.to_string(),
+            data: data.to_string(),
+            name: None,
+        }
+    }
+
+    #[test]
+    fn message_image_content_parts_returns_none_when_no_images() {
+        let parts = message_image_content_parts("hello", &[]);
+        assert!(parts.is_none());
+
+        let images = vec![image("image/png", "   ")];
+        assert!(message_image_content_parts("hello", &images).is_none());
+    }
+
+    #[test]
+    fn message_image_content_parts_wraps_text_and_images_up_to_limit() {
+        let images = vec![
+            image("image/png", "AAA"),
+            image("image/jpeg", "data:image/jpeg;base64,BBBB"),
+        ];
+        let parts = message_image_content_parts(" hi ", &images).unwrap();
+        let arr = parts.as_array().expect("array of parts");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["type"], "text");
+        assert_eq!(arr[0]["text"], " hi ");
+        assert_eq!(arr[1]["type"], "image_url");
+        assert_eq!(
+            arr[1]["image_url"]["url"].as_str(),
+            Some("data:image/png;base64,AAA")
+        );
+        assert_eq!(
+            arr[2]["image_url"]["url"].as_str(),
+            Some("data:image/jpeg;base64,BBBB")
+        );
+    }
+
+    #[test]
+    fn image_message_preview_uses_message_when_non_empty() {
+        let images = vec![image("image/png", "AAA")];
+        assert_eq!(
+            image_message_preview("  describe image  ", &images),
+            "describe image"
+        );
+    }
+
+    #[test]
+    fn image_message_preview_counts_non_empty_images_when_message_empty() {
+        let images = vec![
+            image("image/png", "AAA"),
+            image("image/png", "BBB"),
+            image("image/png", "   "), // ignored
+        ];
+        assert_eq!(
+            image_message_preview("   ", &images[..1]),
+            "Attached 1 image"
+        );
+        assert_eq!(image_message_preview("", &images), "Attached 2 images");
+        let empty_images = vec![image("image/png", "   ")];
+        assert_eq!(
+            image_message_preview("", &empty_images),
+            "Attached 0 images"
+        );
+    }
+}

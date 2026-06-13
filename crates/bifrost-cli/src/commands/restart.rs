@@ -605,6 +605,8 @@ fn orphan_log(path: &std::path::Path, line: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    use std::os::unix::io::{FromRawFd, OwnedFd};
 
     #[test]
     fn restart_options_default_is_empty() {
@@ -647,5 +649,41 @@ mod tests {
     fn restart_is_unsupported_on_non_unix() {
         let r = run_restart(RestartOptions::default());
         assert!(r.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_byte_with_timeout_succeeds_when_byte_available() {
+        let mut fds = [0i32; 2];
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        }
+        let rd = fds[0];
+        let wr = fds[1];
+        let rd_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(rd) };
+        let buf = [b'K'];
+        unsafe {
+            libc::write(wr, buf.as_ptr() as *const _, 1);
+            libc::close(wr);
+        }
+        let ok = read_byte_with_timeout(&rd_fd, std::time::Duration::from_millis(50));
+        assert!(ok);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_byte_with_timeout_returns_false_on_eof() {
+        let mut fds = [0i32; 2];
+        unsafe {
+            assert_eq!(libc::pipe(fds.as_mut_ptr()), 0);
+        }
+        let rd = fds[0];
+        let wr = fds[1];
+        let rd_fd: OwnedFd = unsafe { OwnedFd::from_raw_fd(rd) };
+        unsafe {
+            libc::close(wr);
+        }
+        let ok = read_byte_with_timeout(&rd_fd, std::time::Duration::from_millis(50));
+        assert!(!ok);
     }
 }

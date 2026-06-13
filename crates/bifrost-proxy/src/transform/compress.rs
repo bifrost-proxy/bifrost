@@ -51,4 +51,45 @@ mod tests {
         let decompressed = try_decompress_body_with_limit(&compressed, "gzip", 1024).unwrap();
         assert_eq!(decompressed, original);
     }
+
+    #[test]
+    fn test_identity_and_empty_encoding_return_input() {
+        let data = b"plain text";
+        assert_eq!(compress_body(data, "").unwrap(), data);
+        assert_eq!(compress_body(data, "identity").unwrap(), data);
+        assert_eq!(compress_body(data, "identity, gzip").unwrap(), data);
+    }
+
+    #[test]
+    fn test_deflate_roundtrip() {
+        let original = b"hello deflate";
+        let compressed = compress_body(original, "deflate").unwrap();
+        let decompressed = try_decompress_body_with_limit(&compressed, "deflate", 1024).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_brotli_roundtrip() {
+        let original = b"hello brotli";
+        let compressed = compress_body(original, "br").unwrap();
+        let decompressed = try_decompress_body_with_limit(&compressed, "br", 1024).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_zstd_roundtrip() {
+        let original = b"hello zstd";
+        let compressed = compress_body(original, "zstd").unwrap();
+        let decompressed = try_decompress_body_with_limit(&compressed, "zstd", 1024).unwrap();
+        assert_eq!(decompressed, original);
+    }
+
+    #[test]
+    fn test_unsupported_encoding_returns_error() {
+        let err = compress_body(b"data", "unknown-encoding").unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(err
+            .to_string()
+            .contains("unsupported content-encoding: unknown-encoding"));
+    }
 }

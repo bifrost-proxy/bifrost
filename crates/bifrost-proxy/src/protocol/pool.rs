@@ -612,6 +612,45 @@ impl<S: AsyncRead + AsyncWrite + Send + Unpin + 'static> ConnectionPool<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+    struct DummyStream;
+
+    impl AsyncRead for DummyStream {
+        fn poll_read(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            _buf: &mut ReadBuf<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    impl AsyncWrite for DummyStream {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<Result<usize, std::io::Error>> {
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), std::io::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[test]
     fn test_connection_key() {
@@ -635,14 +674,118 @@ mod tests {
     }
 
     #[test]
-    fn test_stats_snapshot() {
+    fn test_stats_snapshot_and_reuse_rate_zero() {
         let stats = PoolStats::default();
-        stats.connections_created.store(100, Ordering::Relaxed);
-        stats.connections_reused.store(300, Ordering::Relaxed);
+        stats.connections_created.store(0, Ordering::Relaxed);
+        stats.connections_reused.store(0, Ordering::Relaxed);
 
         let snapshot = stats.snapshot();
-        assert_eq!(snapshot.connections_created, 100);
-        assert_eq!(snapshot.connections_reused, 300);
-        assert!((snapshot.reuse_rate() - 0.75).abs() < 0.001);
+        assert_eq!(snapshot.connections_created, 0);
+        assert_eq!(snapshot.connections_reused, 0);
+        assert_eq!(snapshot.reuse_rate(), 0.0);
+    }
+
+    #[tokio::test]
+    async fn cleanup_expired_removes_stale_idle_connections() {
+        let config = PoolConfig {
+            max_idle_per_host: 10,
+            max_total_connections: 100,
+            idle_timeout: Duration::from_secs(1),
+            max_age: Duration::from_secs(1),
+            connect_timeout: Duration::from_secs(30),
+        };
+        let pool: ConnectionPool<DummyStream> = ConnectionPool::with_stream_type(config);
+        let key = ConnectionKey::http("example.com", 80);
+
+        {
+            let mut pools = pool.inner.pools.write().await;
+            let mutex = pools.entry(key.clone()).or_default();
+            let mut per_host = mutex.lock().await;
+            per_host.connections.push(IdleConnection {
+                stream: DummyStream,
+                created_at: Instant::now() - Duration::from_secs(60),
+                last_used: Instant::now() - Duration::from_secs(60),
+            });
+        }
+        pool.inner
+            .stats
+            .idle_connections
+            .store(1, Ordering::Relaxed);
+        pool.inner
+            .stats
+            .total_connections
+            .store(1, Ordering::Relaxed);
+
+        pool.inner.cleanup_expired().await;
+        let snapshot = pool.inner.stats.snapshot();
+        assert_eq!(snapshot.idle_connections, 0);
+        assert_eq!(snapshot.total_connections, 0);
+        assert_eq!(snapshot.connections_closed, 1);
+    }
+
+    #[tokio::test]
+    async fn close_by_host_and_pattern_remove_expected_hosts() {
+        let config = PoolConfig::default();
+        let pool: ConnectionPool<DummyStream> = ConnectionPool::with_stream_type(config);
+
+        let key_base = ConnectionKey::http("example.com", 80);
+        let key_sub = ConnectionKey::http("api.example.com", 80);
+        let key_other = ConnectionKey::http("other.com", 80);
+
+        {
+            let mut pools = pool.inner.pools.write().await;
+            for key in [&key_base, &key_sub, &key_other] {
+                let mutex = pools.entry(key.clone()).or_default();
+                let mut per_host = mutex.lock().await;
+                per_host.connections.push(IdleConnection {
+                    stream: DummyStream,
+                    created_at: Instant::now(),
+                    last_used: Instant::now(),
+                });
+            }
+        }
+        pool.inner
+            .stats
+            .idle_connections
+            .store(3, Ordering::Relaxed);
+        pool.inner
+            .stats
+            .total_connections
+            .store(3, Ordering::Relaxed);
+
+        let removed_by_host = pool.inner.close_by_host("example.com").await;
+        assert_eq!(removed_by_host, 2);
+        let snapshot = pool.inner.stats.snapshot();
+        assert_eq!(snapshot.idle_connections, 1);
+        assert_eq!(snapshot.total_connections, 1);
+        assert_eq!(snapshot.connections_closed, 2);
+
+        // Add some more connections and test wildcard pattern eviction.
+        {
+            let mut pools = pool.inner.pools.write().await;
+            let wildcard_key = ConnectionKey::http("static.example.com", 80);
+            let mutex = pools.entry(wildcard_key.clone()).or_default();
+            let mut per_host = mutex.lock().await;
+            per_host.connections.push(IdleConnection {
+                stream: DummyStream,
+                created_at: Instant::now(),
+                last_used: Instant::now(),
+            });
+            pool.inner
+                .stats
+                .idle_connections
+                .fetch_add(1, Ordering::Relaxed);
+            pool.inner
+                .stats
+                .total_connections
+                .fetch_add(1, Ordering::Relaxed);
+        }
+
+        let removed_by_pattern = pool.inner.close_by_pattern("*.example.com").await;
+        assert_eq!(removed_by_pattern, 1);
+        let snapshot = pool.inner.stats.snapshot();
+        assert_eq!(snapshot.idle_connections, 1);
+        assert_eq!(snapshot.total_connections, 1);
+        assert_eq!(snapshot.connections_closed, 3);
     }
 }
