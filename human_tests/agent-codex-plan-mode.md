@@ -76,6 +76,7 @@
 - 真实 API E2E 输出 `[agent-goal-prompts] PASS`。
 - mock model 收到的自动 continuation 请求包含 `Work from evidence`、`The audit must prove completion` 和 `strict blocked audit`。
 - mock model 请求中不包含旧内联 prompt 的 `Avoid repeating work that is already done`。
+- 脚本打印 PASS 后必须及时退出，cleanup 使用有界等待停止真实 Bifrost 和 mock model，不得在 CI shell runner 中等待到 900 秒超时。
 
 ### TC-ACPM-05：Web UI 与 IM API 均支持 `/plan` 入口
 
@@ -122,3 +123,9 @@
   pkill -f "test_agent_goal_prompt_templates_human_api" || true
   pkill -f "mock-plan-mode" || true
   ```
+
+## 执行记录
+
+| 日期 | 用例 | 命令 | 实际结果 |
+|------|------|------|----------|
+| 2026-06-13 | TC-ACPM-04 cleanup 回归 | `SKIP_BUILD=true BIFROST_BIN="$(pwd)/target/release/bifrost" e2e-tests/tests/test_agent_goal_prompt_templates_human_api.sh` | PASS：脚本输出 `[agent-goal-prompts] PASS` 后正常退出；cleanup 通过 `bifrost stop` + `safe_cleanup_proxy` 有界清理 Bifrost，并用 `kill_pid` + `wait_pid` 有界清理 mock model，避免 macOS shell runner 在测试已通过后卡到 900 秒超时 |
