@@ -432,6 +432,7 @@
 4. 检查 `test_upgrade_restart_e2e.sh` 输出包含：
    ```text
    PASS upgrade restart has port-release guard, listener diagnostics, and system proxy recovery
+   PASS upgrade restart port-release guard and wait helper cover Windows
    ```
 
 预期结果：
@@ -439,6 +440,7 @@
 - `bifrost upgrade` 检测到运行中的 daemon 并完成二进制替换后，先执行 `stop_for_restart`，再等待 runtime 端口释放，最后才执行 `start -d`。
 - 如果端口在等待窗口内仍被占用，upgrade 返回包含 `Proxy port ... still occupied` 和当前监听进程信息的错误；不得继续启动一个注定因 `Address already in use` 退出的新 daemon。
 - 如果旧 daemon 已停止但替代 daemon 因端口未释放而不会启动，upgrade 必须先执行系统代理 crash recovery，再清理 restart shutdown marker，避免用户系统代理继续指向不可用的 Bifrost 端口。
+- 端口释放等待必须同时覆盖 Unix 和 Windows；Windows 不得回落到 stop 后立即 start 的竞态路径。
 - `restart` 命令与 `upgrade` 命令复用同一个端口释放检测工具，避免两个生命周期入口行为分叉。
 
 ## 清理步骤
@@ -474,4 +476,4 @@
 | 2026-06-11 | TC-IBOC-14 | `grep -q ... Cargo.toml .github/workflows/release.yml install-binary.sh crates/bifrost-cli/src/commands/upgrade.rs scripts/npm-publish.mjs` | PASS：release profile 设置 `strip = "symbols"`；Release workflow 产出并上传 `.tar.xz`；installer、内置 upgrade 和 npm publish 均有候选/兼容机制 |
 | 2026-06-11 | TC-IBOC-15 | `grep -q ... .github/workflows/release.yml` | PASS：release job 在 npm publish 前检查 Unix/macOS `.tar.gz` + `.tar.xz`、Windows `.zip`；Homebrew 仍读取 macOS `.tar.gz` checksum |
 | 2026-06-11 | TC-IBOC-16 | `BIFROST_DISABLE_XZ_ARCHIVE=1 get_archive_ext_candidates darwin`、旧 release 仅 `.tar.gz` 本地 HTTP mock 调用 `install_binary_for_target`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash ./install-binary.sh --version v0.0.96 --no-post-install --no-modify-path` 临时目录安装、`cargo test -p bifrost-cli upgrade_archive --lib -- --nocapture`、本地 Node tar mock | PASS：Bash installer 禁用 xz 后只返回 `.tar.gz`；旧 release 只有 `.tar.gz` 时新脚本先尝试可选 `.tar.xz`，探测不到后不进入全镜像竞速，立即回退 `.tar.gz` 并显示 curl 进度，checksum verified，临时安装的 `bifrost --version` 输出 `bifrost 0.0.96`；内置 upgrade 单测覆盖 `.tar.xz -> .tar.gz`、坏 `.tar.xz` 校验失败、禁用 xz、Windows zip；npm artifact mock 验证 `.tar.gz` 与 `.tar.xz` 都可提取二进制 |
-| 2026-06-13 | TC-IBOC-17 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib wait_for_port_released`、`bash e2e-tests/tests/test_upgrade_restart_e2e.sh` | PASS：upgrade 过滤下 13 个单测通过，覆盖 restart 端口选择；端口释放 helper 2 个单测通过，覆盖空闲快速返回与占用超时；upgrade restart E2E 13/13 PASS，源码门禁确认 stop 后等待端口释放、包含占用进程诊断，并在端口超时放弃重启时执行系统代理恢复 |
+| 2026-06-13 | TC-IBOC-17 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib wait_for_port_released`、`bash e2e-tests/tests/test_upgrade_restart_e2e.sh` | PASS：upgrade 过滤下 13 个单测通过，覆盖 restart 端口选择；端口释放 helper 2 个单测通过，覆盖空闲快速返回与占用超时；upgrade restart E2E 14/14 PASS，源码门禁确认 stop 后等待端口释放、包含占用进程诊断、端口超时放弃重启时执行系统代理恢复，且端口释放 guard 与 wait helper 覆盖 Windows |
