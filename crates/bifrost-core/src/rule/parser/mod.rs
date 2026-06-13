@@ -668,7 +668,46 @@ fn validate_single_protocol_value(
         "reqspeed" | "resspeed" => validate_speed_value(clean_value, line_num, start_col, end_col),
         "method" => validate_http_method(clean_value, line_num, start_col, end_col),
         "dns" => validate_ip_address(clean_value, line_num, start_col, end_col),
-        "host" | "xhost" => validate_host_port(clean_value, line_num, start_col, end_col),
+        "host" | "xhost" | "hosts" | "tunnel" => {
+            validate_host_port(clean_value, line_num, start_col, end_col)
+        }
+        // A-tier (Error): the value has a strong format contract; a malformed
+        // value means the rule almost certainly does nothing at runtime.
+        "redirect" => validate_redirect_url(clean_value, line_num, start_col, end_col),
+        "proxy" | "socks" | "socks5" => {
+            validate_proxy_url(clean_value, line_num, start_col, end_col)
+        }
+        "forwardedfor" | "responsefor" => {
+            validate_ip_address(clean_value, line_num, start_col, end_col)
+        }
+        "auth" => validate_auth_value(clean_value, line_num, start_col, end_col),
+        // B-tier (Warning): the value follows a convention; a deviation is
+        // probably a mistake but is not guaranteed to break the rule.
+        "reqtype" | "restype" => validate_content_type(clean_value, line_num, start_col, end_col),
+        "reqcharset" | "rescharset" => validate_charset(clean_value, line_num, start_col, end_col),
+        "reqreplace" | "resreplace" | "urlreplace" | "pathreplace" | "headerreplace" => {
+            validate_replace_value(protocol_name, clean_value, line_num, start_col, end_col)
+        }
+        "urlparams" | "params" => {
+            validate_kv_pairs(protocol_name, clean_value, line_num, start_col, end_col)
+        }
+        "tlsoptions" => validate_tls_options(clean_value, line_num, start_col, end_col),
+        "upstreamunsafessl" => validate_boolean_value(clean_value, line_num, start_col, end_col),
+        // C-tier (Warning): light structural hint.
+        "attachment" => validate_attachment(clean_value, line_num, start_col, end_col),
+        "breakpoint" => validate_breakpoint(clean_value, line_num, start_col, end_col),
+        // D-tier (no format check): the value is intentionally freeform and has
+        // no machine-checkable contract, so any non-empty value is accepted
+        // here (empty values are already rejected upstream by E014 where the
+        // operator requires one). This explicitly covers the content / body /
+        // header-injection operators (reqBody, resBody, resMerge, req/res
+        // Prepend|Append, reqHeaders, resHeaders, req/resCookies, trailers,
+        // html/js/css Append|Prepend|Body), the path / script / plugin
+        // operators (file, tpl, rawfile, reqScript, resScript, decode, bp,
+        // sniCallback) whose values may be a bare name OR a filesystem path,
+        // and the remaining freeform operators (ua, referer, pac, skip,
+        // urlParams already handled above). They are listed here as a single
+        // documented arm so the classification is exhaustive on purpose.
         _ => None,
     }
 }
@@ -907,6 +946,389 @@ fn validate_host_port(
         Ok(_) => None,
         Err(_) => invalid(format!("Invalid port number: '{}'.", port_str)),
     }
+}
+
+// Shared helper: validate the `host[:port]` part of a value that may carry an
+// optional `scheme://` prefix and an optional `user:pass@` userinfo segment.
+// Returns Some(error_message) when the port is present but malformed, or when
+// the host is empty. Returns None when the shape is acceptable.
+fn check_host_port_remainder(value: &str) -> Option<String> {
+    use std::net::IpAddr;
+
+    // Strip an optional `scheme://` prefix (e.g. `http://`, `socks5://`).
+    let after_scheme = match value.find("://") {
+        Some(pos) => &value[pos + 3..],
+        None => value,
+    };
+    // Strip an optional `user:pass@` userinfo segment.
+    let host_port = match after_scheme.rfind('@') {
+        Some(pos) => &after_scheme[pos + 1..],
+        None => after_scheme,
+    };
+
+    if host_port.is_empty() {
+        return Some("Missing host. Expected host:port.".to_string());
+    }
+
+    // A bare IP (including IPv6) without a port is acceptable.
+    if host_port.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+
+    let port_str = if let Some(rest) = host_port.strip_prefix('[') {
+        match rest.find("]:") {
+            Some(pos) => &rest[pos + 2..],
+            None => return None,
+        }
+    } else if host_port.matches(':').count() > 1 {
+        // Looks like a bare IPv6 host without a port.
+        return None;
+    } else if let Some(colon_pos) = host_port.rfind(':') {
+        &host_port[colon_pos + 1..]
+    } else {
+        // Host only, no port.
+        return None;
+    };
+
+    if port_str.is_empty() {
+        return Some("Missing port number after ':'.".to_string());
+    }
+    match port_str.parse::<u32>() {
+        Ok(0) => Some("Port number out of range: 0. Valid ports are 1-65535.".to_string()),
+        Ok(port) if port > 65535 => Some(format!(
+            "Port number out of range: {}. Maximum is 65535.",
+            port
+        )),
+        Ok(_) => None,
+        Err(_) => Some(format!("Invalid port number: '{}'.", port_str)),
+    }
+}
+
+// A-tier (Error) ------------------------------------------------------------
+
+// `redirect://` sends the client a Location. The value must be a URL: an
+// absolute URL with a scheme (`https://new-site.com/`), a protocol-relative URL
+// (`//host/path`), or an absolute path (`/path`). Anything else (a bare word)
+// would produce a Location header the browser cannot resolve.
+fn validate_redirect_url(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains("://") || value.starts_with("//") || value.starts_with('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid redirect target: '{}'. Expected a URL or absolute path.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E018")
+        .with_suggestion(
+            "Use a full URL (https://example.com/), a protocol-relative URL (//example.com/), or an absolute path (/path). Example: redirect://https://new-site.com/",
+        ),
+    )
+}
+
+// `proxy://`, `socks://`, `socks5://` forward through an upstream proxy. The
+// value is `host:port`, optionally prefixed with a scheme and/or `user:pass@`.
+fn validate_proxy_url(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    check_host_port_remainder(value).map(|message| {
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!("Invalid proxy target: '{}'. {}", value, message),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E019")
+        .with_suggestion(
+            "Expected host:port, optionally with a scheme and credentials. Example: proxy://127.0.0.1:8888 or proxy://user:pass@127.0.0.1:8888",
+        )
+    })
+}
+
+// `auth://` injects an Authorization header from `user:password`. Without a
+// colon there is no password separator and the value is meaningless.
+fn validate_auth_value(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains(':') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!("Invalid auth value: '{}'. Expected 'user:password'.", value),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E020")
+        .with_suggestion("Provide credentials as user:password. Example: auth://admin:secret"),
+    )
+}
+
+// B-tier (Warning) ----------------------------------------------------------
+
+// `reqType://` / `resType://` set a Content-Type. A MIME type is `type/subtype`
+// (optionally with parameters). Missing the slash is almost always a mistake,
+// but the proxy will still set whatever string is given, so this is a warning.
+fn validate_content_type(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    // Allow shorthand keywords that the runtime expands (e.g. `json`, `html`).
+    let known_short = ["json", "html", "xml", "text", "js", "css", "form", "plain"];
+    if known_short.contains(&value.to_lowercase().as_str()) {
+        return None;
+    }
+    let main = value.split(';').next().unwrap_or(value).trim();
+    if main.contains('/') && !main.starts_with('/') && !main.ends_with('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Suspicious Content-Type: '{}'. Expected 'type/subtype'.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W005")
+        .with_suggestion(
+            "A MIME type looks like type/subtype. Example: reqType://application/json",
+        ),
+    )
+}
+
+// `reqCharset://` / `resCharset://` set a charset token, which is a single
+// token of letters, digits and the separators `- _ .` (e.g. `utf-8`, `gbk`,
+// `iso-8859-1`). Stray punctuation is almost certainly a mistake.
+fn validate_charset(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid charset: '{}'. Expected a charset token like utf-8.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W006")
+        .with_suggestion("Example: resCharset://utf-8"),
+    )
+}
+
+// `reqReplace://`, `resReplace://`, `urlReplace://`, `pathReplace://`,
+// `headerReplace://` use a `/old/new/` substitution form. Without a `/`
+// separator the value cannot describe a substitution.
+fn validate_replace_value(
+    protocol_name: &str,
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid {} value: '{}'. Expected an /old/new/ substitution.",
+                protocol_name, value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W007")
+        .with_suggestion("Use /old/new/ to substitute text. Example: resReplace://old/new/"),
+    )
+}
+
+// `urlParams://`, `params://` carry `key=value` pairs joined by `&`. A segment
+// without `=` is most likely a typo.
+fn validate_kv_pairs(
+    protocol_name: &str,
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let has_bad_segment = value
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .any(|seg| !seg.contains('='));
+    if !has_bad_segment {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid {} value: '{}'. Expected key=value pairs joined by '&'.",
+                protocol_name, value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W008")
+        .with_suggestion("Example: urlParams://(key=value&key2=value2)"),
+    )
+}
+
+// `tlsOptions://` carries `key=value` pairs (e.g. `minVersion=TLSv1.2`). A
+// segment without `=` is almost certainly malformed.
+fn validate_tls_options(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let has_bad_segment = value
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .any(|seg| !seg.contains('='));
+    if !has_bad_segment {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid tlsOptions value: '{}'. Expected key=value options.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W009")
+        .with_suggestion(
+            "Use key=value options joined by '&'. Example: tlsOptions://minVersion=TLSv1.2",
+        ),
+    )
+}
+
+// `upstreamUnsafeSSL://` is a boolean toggle.
+fn validate_boolean_value(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let v = value.to_lowercase();
+    if matches!(v.as_str(), "true" | "false" | "1" | "0" | "yes" | "no") {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid boolean value: '{}'. Expected true or false.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W010")
+        .with_suggestion("Use true or false. Example: upstreamUnsafeSSL://true"),
+    )
+}
+
+// C-tier (Warning) ----------------------------------------------------------
+
+// `attachment://` sets a Content-Disposition download filename. A path
+// separator in a filename is suspicious (the browser only uses the basename).
+fn validate_attachment(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if !value.contains('/') && !value.contains('\\') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Suspicious attachment filename: '{}'. A download filename should not contain path separators.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W011")
+        .with_suggestion("Provide a bare filename. Example: attachment://report.pdf"),
+    )
+}
+
+// `breakpoint://` accepts request / response / both (or empty for both).
+fn validate_breakpoint(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let v = value.to_lowercase();
+    if v.is_empty() || matches!(v.as_str(), "request" | "response" | "both" | "req" | "res") {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid breakpoint value: '{}'. Expected request, response, or both.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W012")
+        .with_suggestion("Use request, response, or both. Example: breakpoint://request"),
+    )
 }
 
 fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Result<Vec<Rule>> {
@@ -4178,6 +4600,180 @@ x-custom: value
             literal.is_err(),
             "literal empty resBody:// must still be rejected"
         );
+    }
+
+    fn validate_rules_warnings(text: &str) -> Vec<ParseError> {
+        validate_rules_with_context(text, &HashMap::new()).warnings
+    }
+
+    #[test]
+    fn test_validate_redirect_url() {
+        // Valid: full URL, protocol-relative, absolute path.
+        assert!(validate_rules("r.test redirect://https://new-site.com/").is_empty());
+        assert!(validate_rules("r.test redirect:////cdn.example.com/x").is_empty());
+        assert!(validate_rules("r.test redirect:///local/path").is_empty());
+        // Invalid: a bare word cannot be a Location.
+        let e = validate_rules("r.test redirect://bareword");
+        assert!(
+            first_error_with_code(&e, "E018").is_some(),
+            "bare redirect target must be rejected: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn test_validate_proxy_url() {
+        assert!(validate_rules("p.test proxy://127.0.0.1:8006").is_empty());
+        assert!(validate_rules("p.test proxy://user:pass@127.0.0.1:8888").is_empty());
+        assert!(validate_rules("p.test http-proxy://127.0.0.1:8080").is_empty());
+        // Bad port.
+        let e = validate_rules("p.test proxy://127.0.0.1:99999");
+        assert!(
+            first_error_with_code(&e, "E019").is_some(),
+            "out-of-range proxy port must be rejected: {:?}",
+            e
+        );
+        let e2 = validate_rules("p.test proxy://127.0.0.1:abc");
+        assert!(
+            first_error_with_code(&e2, "E019").is_some(),
+            "non-numeric proxy port must be rejected: {:?}",
+            e2
+        );
+    }
+
+    #[test]
+    fn test_validate_auth_value() {
+        assert!(validate_rules("a.test auth://user:password").is_empty());
+        let e = validate_rules("a.test auth://useronly");
+        assert!(
+            first_error_with_code(&e, "E020").is_some(),
+            "auth without colon must be rejected: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn test_validate_content_type() {
+        assert!(validate_rules_warnings("t.test reqType://application/json").is_empty());
+        assert!(validate_rules_warnings("t.test resType://text/html").is_empty());
+        assert!(validate_rules_warnings("t.test reqType://json").is_empty());
+        let w = validate_rules_warnings("t.test reqType://notamime");
+        assert!(
+            first_error_with_code(&w, "W005").is_some(),
+            "content-type without slash must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_charset() {
+        assert!(validate_rules_warnings("c.test reqCharset://utf-8").is_empty());
+        assert!(validate_rules_warnings("c.test resCharset://gbk").is_empty());
+        let w = validate_rules_warnings("c.test reqCharset://utf@8");
+        assert!(
+            first_error_with_code(&w, "W006").is_some(),
+            "charset with stray punctuation must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_replace_value() {
+        assert!(validate_rules_warnings("x.test reqReplace://old/new/").is_empty());
+        assert!(validate_rules_warnings("x.test resReplace://oldtext/newtext/").is_empty());
+        assert!(validate_rules_warnings("x.test urlReplace://old-path/new-path/").is_empty());
+        assert!(validate_rules_warnings("x.test headerReplace://OldHeader/NewHeader/").is_empty());
+        let w = validate_rules_warnings("x.test reqReplace://noslash");
+        assert!(
+            first_error_with_code(&w, "W007").is_some(),
+            "replace without slash must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_kv_pairs() {
+        assert!(validate_rules_warnings("k.test urlParams://(key=value)").is_empty());
+        assert!(validate_rules_warnings("k.test urlParams://(key=value&key2=value2)").is_empty());
+        assert!(validate_rules_warnings("k.test params://(param1=val1)").is_empty());
+        let w = validate_rules_warnings("k.test urlParams://(keyonly)");
+        assert!(
+            first_error_with_code(&w, "W008").is_some(),
+            "kv pair without '=' must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_tls_options() {
+        assert!(validate_rules_warnings("s.test tlsOptions://minVersion=TLSv1.2").is_empty());
+        let w = validate_rules_warnings("s.test tlsOptions://garbage");
+        assert!(
+            first_error_with_code(&w, "W009").is_some(),
+            "tlsOptions without '=' must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_boolean_value() {
+        assert!(validate_rules_warnings("b.test upstreamUnsafeSSL://true").is_empty());
+        assert!(validate_rules_warnings("b.test upstreamUnsafeSSL://false").is_empty());
+        let w = validate_rules_warnings("b.test upstreamUnsafeSSL://maybe");
+        assert!(
+            first_error_with_code(&w, "W010").is_some(),
+            "non-boolean must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_attachment() {
+        assert!(validate_rules_warnings("d.test attachment://filename.zip").is_empty());
+        let w = validate_rules_warnings("d.test attachment://dir/file.zip");
+        assert!(
+            first_error_with_code(&w, "W011").is_some(),
+            "attachment with path separator must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_breakpoint() {
+        assert!(validate_rules_warnings("bp.test breakpoint://request").is_empty());
+        assert!(validate_rules_warnings("bp.test breakpoint://response").is_empty());
+        assert!(validate_rules_warnings("bp.test breakpoint://both").is_empty());
+        let w = validate_rules_warnings("bp.test breakpoint://sometimes");
+        assert!(
+            first_error_with_code(&w, "W012").is_some(),
+            "unknown breakpoint value must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_new_validators_do_not_fire_on_valid_fixture() {
+        // The canonical valid fixture must remain free of any diagnostics from
+        // the newly added validators.
+        let fixture = include_str!("../valid_rules.bifrost");
+        let result = validate_rules_with_context(fixture, &HashMap::new());
+        let new_codes = [
+            "E018", "E019", "E020", "W005", "W006", "W007", "W008", "W009", "W010", "W011", "W012",
+        ];
+        for code in new_codes {
+            assert!(
+                first_error_with_code(&result.errors, code).is_none(),
+                "new validator {} fired on valid fixture (errors): {:?}",
+                code,
+                result.errors
+            );
+            assert!(
+                first_error_with_code(&result.warnings, code).is_none(),
+                "new validator {} fired on valid fixture (warnings): {:?}",
+                code,
+                result.warnings
+            );
+        }
     }
 
     #[test]
