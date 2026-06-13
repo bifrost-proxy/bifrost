@@ -1030,8 +1030,36 @@
 
 **预期结果**：
 - workflow YAML 解析输出 `shell layout ok`。
-- Linux 单 job 列表数量等于 137 个 CI shell tests。
-- macOS 2 分片数量为 `69/68`，总和等于 137 个 CI shell tests。
+- Linux 单 job 列表数量等于 133 个 CI shell tests。
+- macOS 2 分片数量为 `67/66`，总和等于 133 个 CI shell tests。
+- 上述命令仅静态列出测试，不启动 Bifrost，不使用 9900，不修改系统代理。
+
+### TC-CS-43: CI shell E2E 不收集纯 cargo contract 脚本
+
+**背景**：Mac shell E2E job 中曾出现额外 Rust 编译，根因为部分 `e2e-tests/tests/test_*.sh` 实际只包装 `cargo check` / `cargo test` / `cargo run`，并不验证 shell/CLI/API 端到端链路。这类 contract 已由 Rust unit/integration job 覆盖，不应进入 CI shell E2E。
+
+**操作步骤**：
+1. 静态确认 CI shell 列表不包含纯 cargo contract 脚本：
+   ```bash
+   for script in test_agent_codex_parity_contracts.sh test_im_agent_markdown_image_reply.sh test_im_agent_streaming_progress_card.sh test_utf8_safe_preview_e2e.sh; do
+     if bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q "^${script}$"; then
+       echo "present $script"
+       exit 1
+     else
+       echo "skipped $script"
+     fi
+   done
+   ```
+2. 确认上述脚本仍保留在本地 full-shell 列表中：
+   ```bash
+   for script in test_agent_codex_parity_contracts.sh test_im_agent_markdown_image_reply.sh test_im_agent_streaming_progress_card.sh test_utf8_safe_preview_e2e.sh; do
+     bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q "^${script}$"
+   done
+   ```
+
+**预期结果**：
+- 第 1 步输出 4 行 `skipped ...`，退出码为 0。
+- 第 2 步退出码为 0，说明这些本地回归脚本没有删除，只是不进入 CI shell E2E。
 - 上述命令仅静态列出测试，不启动 Bifrost，不使用 9900，不修改系统代理。
 
 ## 本轮执行记录
@@ -1072,7 +1100,8 @@
 | TC-CS-39 | 通过 | 2026-06-08 本轮执行：`SKIP_BUILD=true e2e-tests/tests/test_temporary_port_bindings.sh` 通过，输出 `Passed: 55`、`Failed: 0`；验证成功 listener 绑定在端口竞态时可重试，且 temporary port 绑定顺序、rule-file、inline rule、update、Traffic API/CLI listener port 等断言保持通过。 |
 | TC-CS-40 | 通过 | 2026-06-08 本轮执行：`bash -n e2e-tests/test_utils/process.sh e2e-tests/tests/test_metrics_hosts_apps_admin_api.sh e2e-tests/tests/test_rule_semantics_regressions.sh e2e-tests/tests/test_proxy_chain_auth_e2e.sh e2e-tests/tests/test_host_rule_path_rewrite.sh e2e-tests/tests/test_multiline_rule_filter_e2e.sh` 通过；随后使用预构建 `target/release/bifrost` 分别执行 `test_metrics_hosts_apps_admin_api.sh`、`test_multiline_rule_filter_e2e.sh`、`test_rule_semantics_regressions.sh`、`test_host_rule_path_rewrite.sh`、`test_proxy_chain_auth_e2e.sh`，五个脚本均退出码 0，输出中不再出现清理阶段 `Killed ...`。 |
 | TC-CS-41 | 通过 | 2026-06-09 本轮执行：`bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 通过；`rg -n 'RESOURCE_HEAVY_TESTS\|test_large_body_protection\\.sh\|is_resource_heavy\|BIFROST_DATA_DIR:-\\$PROJECT_DIR/\\.bifrost-test-large-body' scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 定位到 resource-heavy 串行队列、调度判断和 `BIFROST_DATA_DIR` fallback；使用 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 构建 release binary 后，以临时目录 `/tmp/bifrost-large-body-human.*`、端口 `19214/19215`、`SKIP_BUILD=true BIFROST_BIN=target/release/bifrost` 真实执行 `test_large_body_protection.sh`，输出 5 个 large body HTTP 用例通过、0 失败，且清理阶段停止代理和 mock 服务。 |
-| TC-CS-42 | 通过 | 2026-06-13 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell layout ok`，确认 Linux shell E2E 没有 matrix/shard 环境变量且 job 名称为 `E2E Shell (Linux)`，macOS shell E2E 为 2 分片；静态执行 Linux 单 job `--list-shell-tests` 得到 137 个 CI shell tests；静态执行 `--list-shell-tests --shard N/2` 得到 `1/2 69`、`2/2 68`，总计 137 个 CI shell tests。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
+| TC-CS-42 | 通过 | 2026-06-13 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell layout ok`，确认 Linux shell E2E 没有 matrix/shard 环境变量且 job 名称为 `E2E Shell (Linux)`，macOS shell E2E 为 2 分片；静态执行 Linux 单 job `--list-shell-tests` 得到 133 个 CI shell tests；静态执行 `--list-shell-tests --shard N/2` 得到 `1/2 67`、`2/2 66`，总计 133 个 CI shell tests。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
+| TC-CS-43 | 通过 | 2026-06-13 本轮执行：静态执行 CI shell 列表排除检查，输出 `skipped test_agent_codex_parity_contracts.sh`、`skipped test_im_agent_markdown_image_reply.sh`、`skipped test_im_agent_streaming_progress_card.sh`、`skipped test_utf8_safe_preview_e2e.sh`；确认这些纯 cargo contract 脚本不再进入 CI shell E2E。该回归只列测试，不启动 Bifrost、未使用 9900、未修改系统代理。 |
 
 ## 清理步骤
 

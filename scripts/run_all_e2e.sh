@@ -568,6 +568,13 @@ SKIP_IN_CI_TESTS=(
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"
+  # These shell wrappers are pure Rust compile/test contract checks, not shell
+  # E2E flows. Keep them local-only so CI shell jobs do not compile again after
+  # the dedicated unit/integration jobs already covered the Rust paths.
+  "test_agent_codex_parity_contracts.sh"
+  "test_im_agent_markdown_image_reply.sh"
+  "test_im_agent_streaming_progress_card.sh"
+  "test_utf8_safe_preview_e2e.sh"
   # ASR/voice runtime tests may initialize local models, native audio stacks, or
   # external model downloads. Keep all ASR capability validation local-only so
   # CI never fails because a runtime dependency or model host is unavailable.
