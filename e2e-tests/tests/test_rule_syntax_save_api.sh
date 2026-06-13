@@ -105,6 +105,25 @@ main() {
     assert_json_eq "$invalid_body" ".syntax.errors[0].code" "E020" "invalid create returns E020"
     assert_rule_missing "$invalid_name"
 
+    log_info "Invalid create with a non-reference syntax error is also rejected"
+    local syntax_name syntax_payload syntax_result syntax_code syntax_body
+    syntax_name="${TEST_PREFIX}-syntax"
+    syntax_payload="$(jq -cn --arg name "$syntax_name" \
+        --arg content "example.com another.example.com" \
+        '{name:$name, content:$content, enabled:true}')"
+    syntax_result="$(request_with_status POST "/api/rules" "$syntax_payload")"
+    syntax_code="$(head -n 1 <<<"$syntax_result")"
+    syntax_body="$(tail -n +2 <<<"$syntax_result")"
+    if [[ "$syntax_code" != "422" ]]; then
+        log_fail "Expected non-reference invalid create HTTP 422, got $syntax_code"
+        echo "$syntax_body" | jq .
+        exit 1
+    fi
+    assert_json_eq "$syntax_body" ".saved" "false" "non-reference invalid create is not saved"
+    assert_json_eq "$syntax_body" ".syntax.valid" "false" "non-reference invalid create syntax is invalid"
+    assert_json_eq "$syntax_body" ".syntax.errors[0].code" "E001" "non-reference invalid create returns E001"
+    assert_rule_missing "$syntax_name"
+
     log_info "Invalid update is rejected and original content is preserved"
     local preserve_payload update_payload update_result update_code update_body preserved_content
     preserve_payload="$(jq -cn --arg name "$preserve_name" \

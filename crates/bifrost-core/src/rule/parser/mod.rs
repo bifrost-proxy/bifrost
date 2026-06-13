@@ -3803,4 +3803,168 @@ x-custom: value
             nan
         );
     }
+
+    // ---------------------------------------------------------------------
+    // Coverage for previously untested error/warning codes.
+    //
+    // These lock the *observable* behaviour of `create_detailed_parse_error`
+    // and the value validators so that the syntax contract surfaced to the
+    // editor / API cannot silently regress.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_e001_no_protocol_reports_code_and_range() {
+        // Two bare tokens, neither is a protocol op -> "No protocol found".
+        let errors = validate_rules("example.com another.com");
+        let err = first_error_with_code(&errors, "E001")
+            .unwrap_or_else(|| panic!("expected E001, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert_eq!(err.line, 1);
+        // Range should point at the second token, not column 0.
+        assert!(err.start_column > 1, "E001 should point past the pattern");
+        assert!(err.end_column >= err.start_column);
+        assert!(
+            err.suggestion
+                .as_deref()
+                .map(|s| s.contains("http://") || s.contains("passthrough://"))
+                .unwrap_or(false),
+            "E001 suggestion should propose a protocol prefix: {:?}",
+            err.suggestion
+        );
+    }
+
+    #[test]
+    fn test_e001_single_token_reports_code() {
+        // A lone pattern with no protocol also resolves to E001.
+        let errors = validate_rules("example.com");
+        assert!(
+            first_error_with_code(&errors, "E001").is_some(),
+            "lone pattern must report E001: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unknown_protocol_resolves_to_e001_not_e002() {
+        // Regression guard: an unknown / mistyped protocol is currently treated
+        // as a bare token, so the parser surfaces "No protocol found" (E001),
+        // NOT the (currently unreachable) E002 "Unknown protocol" branch.
+        // This test documents the real behaviour; if E002 is ever wired up,
+        // update this test deliberately rather than by accident.
+        for input in [
+            "error5-unknown.test unknownProtocol://value",
+            "error6-typo.test htpp://localhost:8000/",
+            "error10-similar.test request://body",
+        ] {
+            let errors = validate_rules(input);
+            assert!(
+                first_error_with_code(&errors, "E001").is_some(),
+                "unknown protocol should currently surface E001 for `{}`: {:?}",
+                input,
+                errors
+            );
+            assert!(
+                first_error_with_code(&errors, "E002").is_none(),
+                "E002 is not reachable today; `{}` unexpectedly produced it: {:?}",
+                input,
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_e003_no_pattern_reports_code() {
+        // A line that has only a protocol-op (a filter) and no pattern.
+        let errors = validate_rules("includeFilter://example.com");
+        let err = first_error_with_code(&errors, "E003")
+            .unwrap_or_else(|| panic!("expected E003, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert!(
+            err.message.contains("No pattern found"),
+            "E003 message should mention missing pattern: {}",
+            err.message
+        );
+        assert!(
+            err.suggestion
+                .as_deref()
+                .map(|s| s.contains("pattern"))
+                .unwrap_or(false),
+            "E003 suggestion should mention pattern: {:?}",
+            err.suggestion
+        );
+    }
+
+    #[test]
+    fn test_e004_invalid_regex_reports_code_and_range() {
+        // Unclosed character class is a genuinely invalid regex pattern.
+        let errors = validate_rules("/[invalid[regex/ http://localhost:8000/");
+        let err = first_error_with_code(&errors, "E004")
+            .unwrap_or_else(|| panic!("expected E004, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert!(
+            err.message.contains("Invalid"),
+            "E004 message should mention invalid pattern/regex: {}",
+            err.message
+        );
+        // The range should cover the /.../ regex token.
+        assert!(err.start_column >= 1);
+        assert!(err.end_column > err.start_column);
+    }
+
+    #[test]
+    fn test_w004_invalid_filter_value_is_warning() {
+        // An invalid filter value emits a non-blocking W004 warning while the
+        // rule itself still parses.
+        let result = validate_rules_with_context(
+            "example.com host://127.0.0.1:3000 includeFilter://`(`",
+            &HashMap::new(),
+        );
+        let warn = result
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("W004"))
+            .unwrap_or_else(|| panic!("expected W004 warning, got {:?}", result.warnings));
+        assert_eq!(warn.severity, ParseErrorSeverity::Warning);
+    }
+
+    #[test]
+    fn test_cache_zero_and_method_use_warning_severity() {
+        // Documents an intentional quirk: a handful of value validators carry an
+        // `Exxx` code but `Warning` severity (so they do NOT block a save).
+        // Locking it prevents an accidental severity flip during refactors.
+        let cache_zero = validate_rules_with_context("example.com cache://0", &HashMap::new());
+        let e011 = cache_zero
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("E011"))
+            .unwrap_or_else(|| panic!("cache://0 should warn with E011: {:?}", cache_zero));
+        assert_eq!(e011.severity, ParseErrorSeverity::Warning);
+        assert!(
+            cache_zero.valid,
+            "cache://0 is a warning and must not invalidate the rule set"
+        );
+
+        let bad_method = validate_rules_with_context("example.com method://FOO", &HashMap::new());
+        let e015 = bad_method
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("E015"))
+            .unwrap_or_else(|| panic!("unknown method should warn with E015: {:?}", bad_method));
+        assert_eq!(e015.severity, ParseErrorSeverity::Warning);
+        assert!(bad_method.valid, "unknown method is only a warning");
+    }
+
+    #[test]
+    fn test_blocking_value_error_invalidates_rule_set() {
+        // Contrast with the warning-severity quirk above: a real value error
+        // (non-numeric status code) is an Error and flips `valid` to false.
+        let result = validate_rules_with_context("example.com statusCode://nope", &HashMap::new());
+        let e010 = result
+            .errors
+            .iter()
+            .find(|e| e.code.as_deref() == Some("E010"))
+            .unwrap_or_else(|| panic!("expected E010 error: {:?}", result));
+        assert_eq!(e010.severity, ParseErrorSeverity::Error);
+        assert!(!result.valid, "a blocking value error must invalidate");
+    }
 }

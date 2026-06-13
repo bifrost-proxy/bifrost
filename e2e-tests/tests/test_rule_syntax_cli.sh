@@ -78,6 +78,28 @@ main() {
     fi
     log_info "Rejected invalid rule is absent"
 
+    log_info "Invalid add with a non-reference syntax error is also rejected"
+    local syntax_output syntax_code
+    set +e
+    syntax_output="$(BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" rule add syntax-bad \
+        --json \
+        --content "example.com another.example.com" 2>&1)"
+    syntax_code=$?
+    set -e
+    if [[ "$syntax_code" != "2" ]]; then
+        log_fail "Expected non-reference invalid add exit code 2, got $syntax_code"
+        echo "$syntax_output"
+        exit 1
+    fi
+    assert_json_eq "$syntax_output" ".saved" "false" "non-reference invalid add is not saved"
+    assert_json_eq "$syntax_output" ".syntax.valid" "false" "non-reference invalid add syntax is invalid"
+    assert_json_eq "$syntax_output" ".syntax.errors[0].code" "E001" "non-reference invalid add returns E001"
+    if BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" rule show syntax-bad >/dev/null 2>&1; then
+        log_fail "Rejected non-reference invalid rule was unexpectedly persisted"
+        exit 1
+    fi
+    log_info "Rejected non-reference invalid rule is absent"
+
     log_info "Invalid update is rejected and keeps old content"
     BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" rule add syntax-preserve \
         --content "preserve.example.com host://127.0.0.1:3001" >/dev/null
