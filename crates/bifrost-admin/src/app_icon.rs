@@ -835,9 +835,12 @@ pub fn run_app_icon_worker(path: &Path, output: &Path) -> Result<(), String> {
 fn extract_app_icon_worker_in_process(path: &Path) -> Option<Vec<u8>> {
     #[cfg(target_os = "macos")]
     {
-        extract_icon_via_icns(path).or_else(|| extract_icon_via_nsworkspace(path))
+        // The worker is only spawned after the main process already failed the
+        // pure-file `.icns` path on this same bundle, so retrying it here would
+        // just repeat a guaranteed-failing plist parse + file open. Go straight
+        // to NSWorkspace, which is the whole reason this isolated worker exists.
+        extract_icon_via_nsworkspace(path)
     }
-
     #[cfg(not(target_os = "macos"))]
     {
         extract_app_icon(&path.to_string_lossy())
