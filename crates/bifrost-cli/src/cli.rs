@@ -1492,6 +1492,13 @@ pub enum RuleCommands {
         content: Option<String>,
         #[arg(short, long, value_hint = ValueHint::FilePath, help = "Rule file path")]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Save the rule even when syntax validation returns errors"
+        )]
+        allow_invalid: bool,
+        #[arg(long, help = "Print a machine-readable JSON result")]
+        json: bool,
     },
     #[command(about = "Update an existing rule")]
     Update {
@@ -1501,6 +1508,13 @@ pub enum RuleCommands {
         content: Option<String>,
         #[arg(short, long, value_hint = ValueHint::FilePath, help = "Rule file path")]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Save the rule even when syntax validation returns errors"
+        )]
+        allow_invalid: bool,
+        #[arg(long, help = "Print a machine-readable JSON result")]
+        json: bool,
     },
     #[command(about = "Delete a rule")]
     Delete {
@@ -1602,6 +1616,11 @@ pub enum GroupRuleCommands {
         content: Option<String>,
         #[arg(short, long, value_hint = ValueHint::FilePath, help = "Rule file path")]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Save the rule even when syntax validation returns errors"
+        )]
+        allow_invalid: bool,
     },
     #[command(about = "Update a group rule")]
     Update {
@@ -1613,6 +1632,11 @@ pub enum GroupRuleCommands {
         content: Option<String>,
         #[arg(short, long, value_hint = ValueHint::FilePath, help = "Rule file path")]
         file: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Save the rule even when syntax validation returns errors"
+        )]
+        allow_invalid: bool,
     },
     #[command(about = "Delete a group rule")]
     Delete {

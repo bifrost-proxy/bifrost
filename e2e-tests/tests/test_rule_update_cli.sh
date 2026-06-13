@@ -63,8 +63,7 @@ main() {
 
     RULE_FILE="${TEST_DATA_DIR}/updated-rule.txt"
     cat > "${RULE_FILE}" <<'EOF'
-example.com
-resHeaders://X-Updated=1
+example.com resHeaders://X-Updated=1
 EOF
 
     updated="$("${BIFROST_BIN}" rule update demo --file "${RULE_FILE}" 2>&1)"

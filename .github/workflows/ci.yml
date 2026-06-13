@@ -241,20 +241,14 @@ jobs:
           include-hidden-files: true
 
   e2e-shell:
-    name: E2E Shell (Linux, shard ${{ matrix.shard }}/3)
+    name: E2E Shell (Linux)
     needs: [build-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        shard: [1, 2, 3]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "4"
-      BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
-      BIFROST_E2E_SHARD_TOTAL: "3"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -316,7 +310,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-shell-logs-linux-shard-${{ matrix.shard }}
+          name: e2e-shell-logs-linux
           path: |
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
@@ -705,20 +699,20 @@ jobs:
           include-hidden-files: true
 
   e2e-macos-shell:
-    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/3)
+    name: E2E Shell (aarch64-apple-darwin, shard ${{ matrix.shard }}/2)
     needs: [build-cli-macos-aarch64]
     runs-on: macos-15
     timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3]
+        shard: [1, 2]
     env:
       BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
       BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
       BIFROST_E2E_SHELL_JOBS: "2"
       BIFROST_E2E_SHARD_INDEX: ${{ matrix.shard }}
-      BIFROST_E2E_SHARD_TOTAL: "3"
+      BIFROST_E2E_SHARD_TOTAL: "2"
       BIFROST_E2E_RETRY_FAILED_ONCE: "1"
       BIFROST_E2E_HTTP_RETRIES: "2"
       TIMEOUT: "90"
@@ -792,6 +786,7 @@ jobs:
 
   e2e-macos-runner:
     name: E2E Runner (aarch64-apple-darwin)
+    needs: [build-cli-macos-aarch64]
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -831,8 +826,19 @@ jobs:
         # Keep ASR runtime preparation target-gated to aarch64-apple-darwin.
         shell: bash
         run: bash scripts/ci/prepare-sherpa-onnx-archive.sh aarch64-apple-darwin
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-aarch64-apple-darwin
+          path: target/release
+      - name: Make binary executable
+        run: chmod +x target/release/bifrost
       - name: Tray startup smoke test
+        timeout-minutes: 10
         shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost
+          SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash
@@ -1195,6 +1201,7 @@ jobs:
 
   e2e-windows-runner:
     name: E2E Runner (${{ matrix.target }})
+    needs: [build-cli-windows]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -1232,8 +1239,17 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: e2e-${{ matrix.target }}
+      - name: Download release binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-${{ matrix.target }}
+          path: target/release
       - name: Tray startup smoke test
+        timeout-minutes: 10
         shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
+          SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
         shell: bash

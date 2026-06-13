@@ -221,6 +221,42 @@ error-filter-reqh.test host://127.0.0.1 excludeFilter://reqH:Content-Type
 error-filter-unknown.test host://127.0.0.1 excludeFilter://x:value
 
 # -----------------------------------------------------------------------------
+# 错误类型 15: 未知操作符与有效协议同行 (E002 - Unknown protocol)
+# 即使同一行已有有效协议，未知/拼写错误的 <scheme>:// 操作符也必须报 E002，
+# 而不能被当作 pattern 静默吞掉。
+# -----------------------------------------------------------------------------
+
+# 15.1 有效 host:// 之后跟拼写错误的 htp://
+error-unknown-after-host.test host://127.0.0.1:3000 htp://x
+
+# 15.2 有效 http:// 之后跟完全未知协议
+error-unknown-after-http.test http://localhost:8000/ unknownProtocol://value
+
+# 15.3 有效 reqHeaders:// 之后跟拼写错误的 reqheader://
+error-unknown-after-headers.test reqHeaders://(X-A:1) reqheader://(X-B:2)
+
+# -----------------------------------------------------------------------------
+# 错误类型 16: 必填值操作符为空 (E014 - Empty value for protocol)
+# 需要值的操作符若给空值，运行时相当于不生效（等于规则未起作用），必须报错。
+# -----------------------------------------------------------------------------
+
+# 16.1 reqHeaders 空值
+error-empty-reqheaders.test reqHeaders://
+
+# 16.2 redirect 空值
+error-empty-redirect.test redirect://
+
+# 16.3 file 空值
+error-empty-file.test file://
+
+# 16.4 statusCode 空值
+error-empty-status.test statusCode://
+
+# 16.5 resBody 空值
+error-empty-resbody.test resBody://
+
+
+# -----------------------------------------------------------------------------
 # 验证规则（确保这些有效规则在错误规则之间正常解析）
 # -----------------------------------------------------------------------------
 

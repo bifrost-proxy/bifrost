@@ -559,6 +559,47 @@ export interface ApiResponse<T = unknown> {
   error?: string;
   status?: number;
   data?: T;
+  saved?: boolean;
+  syntax?: RuleSyntaxReport;
+}
+
+export interface RuleSyntaxIssue {
+  line: number;
+  start_column: number;
+  end_column: number;
+  message: string;
+  severity: 'error' | 'warning' | 'info' | 'hint';
+  suggestion?: string;
+  code?: string;
+  fixes?: Array<{
+    title: string;
+    range?: [number, number];
+    new_text: string;
+  }>;
+}
+
+export interface RuleSyntaxGuidance {
+  summary: string;
+  retryable: boolean;
+  next_actions: string[];
+}
+
+export interface RuleSyntaxReport {
+  valid: boolean;
+  rule_count: number;
+  errors: RuleSyntaxIssue[];
+  warnings: RuleSyntaxIssue[];
+  defined_variables: Array<{
+    name: string;
+    source: string;
+    defined_at?: number;
+  }>;
+  script_references: Array<{
+    name: string;
+    script_type: string;
+    line: number;
+  }>;
+  guidance: RuleSyntaxGuidance;
 }
 
 export type AccessMode = 'allow_all' | 'local_only' | 'whitelist' | 'interactive';

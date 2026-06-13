@@ -4,6 +4,7 @@ mod group;
 mod parser;
 mod references;
 mod resolver;
+mod syntax_report;
 mod template;
 mod types;
 pub mod value_source;
@@ -22,6 +23,7 @@ pub use references::{
     rule_reference_name, RuleReferenceError,
 };
 pub use resolver::{ResolvedRule, ResolvedRules, RulesResolver};
+pub use syntax_report::{validate_rule_syntax_report, RuleSyntaxGuidance, RuleSyntaxReport};
 pub use template::TemplateEngine;
 pub use types::Rule;
 pub use value_source::ValueSource;

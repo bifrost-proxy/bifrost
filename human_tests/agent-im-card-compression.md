@@ -1,8 +1,8 @@
-# Agent IM 卡片压缩次数同步
+# Agent IM 卡片进度信息压缩与过滤
 
 ## 功能模块说明
 
-验证内置 Bifrost Agent 在发生 context compaction 后，飞书 IM progress card 的状态区能从 Agent progress events 中同步最新压缩次数。该用例覆盖 payload 渲染层：`Status`、`ContextUpdated`、`CompactionFinished` 事件进入 `ImAgentProgressSnapshot` 后，卡片 JSON 中的状态标题、footer 和 context/token 指标必须与最新事件一致。
+验证内置 Bifrost Agent 飞书 IM progress card 的状态区和执行过程区不会展示过期或无意义的进度噪声。该用例覆盖 payload 渲染层：`Status`、`ContextUpdated`、`CompactionFinished` 事件进入 `ImAgentProgressSnapshot` 后，卡片 JSON 中的状态标题、footer、context/token 指标和过程列表必须与最新事件一致，且不会被 `tool_calls`、`waiting_on_session`、`model_request`、`model_response` 等机器态状态刷屏。
 
 ## 前置条件
 
@@ -52,6 +52,32 @@
 - footer 显示 `Context：~1.2K / 10K (12.0%)` 和 `压缩：3 次`。
 
 **本次执行结果**：通过。2026-05-24 首轮执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::progress_snapshot_uses_context_when_status_is_not_available --lib -- --nocapture` 失败，归因为 footer 在 `status=None` 且 `context=Some(...)` 时未渲染 context fallback 指标；修复后复跑同一命令输出 `1 passed`，footer 断言包含 `Context：~1.2K / 10K (12.0%)` 和 `压缩：3 次`。
+
+### TC-AICC-03：机器态 Status 不进入飞书卡片执行过程
+
+**背景**：Agent 运行过程中会持续产生 `tool_calls`、`waiting_on_session`、`model_request`、`model_response` 等机器态 `Status` 事件。过去这些事件会被渲染成多行 `状态：xxx`，导致飞书 progress card 的执行过程区域被无意义状态刷屏，挤占真正的思考、工具和结果内容。
+
+**操作步骤**：
+
+1. 运行以下命令：
+   ```bash
+   cargo test -p bifrost-admin im_gateway::progress_card::tests::machine_status_events_do_not_flood_process_card --lib -- --nocapture
+   ```
+2. 检查测试输出是否为 `1 passed`。
+3. 检查断言覆盖卡片 JSON：仍包含真实思考内容和正在运行的工具调用，但不包含 `状态：tool_calls`、`状态：waiting_on_session`、`状态：model_request`、`状态：model_response` 或自定义蛇形机器态。
+4. 运行以下命令确认外部 Runner footer 不会从 `当前状态：xxx` 漏出机器态：
+   ```bash
+   cargo test -p bifrost-admin im_gateway::progress_card::tests::external_runner_footer_hides_machine_status_line --lib -- --nocapture
+   ```
+
+**预期结果**：
+
+- `Status` 事件仍更新运行状态上下文，但不会追加到执行过程 timeline。
+- 飞书卡片执行过程只展示真实思考和工具调用等人类可读内容。
+- 卡片 JSON 不包含 `状态：tool_calls`、`状态：waiting_on_session`、`状态：model_request`、`状态：model_response` 或 `custom_machine_state`。
+- 外部 Runner footer 不展示 `当前状态：model_request`。
+
+**本次执行结果**：通过。2026-06-12 执行 `cargo test -p bifrost-admin im_gateway::progress_card::tests::machine_status_events_do_not_flood_process_card --lib -- --nocapture` 和 `cargo test -p bifrost-admin im_gateway::progress_card::tests::external_runner_footer_hides_machine_status_line --lib -- --nocapture`，均输出 `1 passed`；断言确认卡片 JSON 保留 `我会先检查失败用例` 与 `正在运行：exec_command`，并过滤过程区和 footer 中的机器态状态行。
 
 ## 清理步骤
 

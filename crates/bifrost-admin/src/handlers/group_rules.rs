@@ -1,9 +1,13 @@
+use bifrost_core::RuleSyntaxReport;
 use bifrost_storage::RulesStorage;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{error_response, json_response, method_not_allowed, success_response, BoxBody};
+use super::{
+    error_response, json_response, json_response_with_status, method_not_allowed, success_response,
+    BoxBody,
+};
 use crate::state::SharedAdminState;
 use bifrost_storage::ConfigChangeEvent;
 
@@ -94,6 +98,8 @@ struct GroupRuleDetail {
     created_at: String,
     updated_at: String,
     sync: GroupRuleSyncInfo,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    syntax: Option<RuleSyntaxReport>,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,15 +121,57 @@ struct GroupRulesResponse {
 struct CreateGroupRuleRequest {
     name: String,
     content: Option<String>,
+    #[serde(default)]
+    allow_invalid: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateGroupRuleRequest {
     content: String,
+    #[serde(default)]
+    allow_invalid: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct GroupRuleSyntaxRejectionResponse {
+    success: bool,
+    message: String,
+    saved: bool,
+    syntax: RuleSyntaxReport,
 }
 
 fn sanitize_group_dir_name(name: &str) -> String {
     name.replace(['/', '\\', '\0', ':'], "_")
+}
+
+async fn validate_group_rule_for_save(
+    state: &SharedAdminState,
+    group_name: &str,
+    rule_name: &str,
+    content: &str,
+) -> Result<RuleSyntaxReport, Response<BoxBody>> {
+    let source_name = format!("{group_name}/{rule_name}");
+    super::rules::build_rule_syntax_report(
+        state,
+        &source_name,
+        content,
+        &super::rules::global_values_from_state(state),
+    )
+    .await
+    .map_err(|error| error_response(StatusCode::INTERNAL_SERVER_ERROR, &error))
+}
+
+fn group_rule_syntax_rejection_response(
+    rule_name: &str,
+    syntax: RuleSyntaxReport,
+) -> Response<BoxBody> {
+    let response = GroupRuleSyntaxRejectionResponse {
+        success: false,
+        message: format!("Rule '{rule_name}' was not saved because syntax validation failed"),
+        saved: false,
+        syntax,
+    };
+    json_response_with_status(StatusCode::UNPROCESSABLE_ENTITY, &response)
 }
 
 async fn proxy_get_json<T: serde::de::DeserializeOwned>(
@@ -776,6 +824,7 @@ async fn handle_get_rule(
                 remote_id: rule.sync.remote_id,
                 remote_updated_at: rule.sync.remote_updated_at,
             },
+            syntax: None,
         }),
         Err(_) => error_response(StatusCode::NOT_FOUND, "Rule not found"),
     }
@@ -835,11 +884,20 @@ async fn handle_create_rule(
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}")),
     };
+    let content = create_req.content.unwrap_or_default();
+    let syntax =
+        match validate_group_rule_for_save(&state, &group_name, &create_req.name, &content).await {
+            Ok(report) => report,
+            Err(response) => return response,
+        };
+    if !syntax.valid && !create_req.allow_invalid {
+        return group_rule_syntax_rejection_response(&create_req.name, syntax);
+    }
 
     let remote_body = serde_json::json!({
         "user_id": virtual_user_id,
         "name": create_req.name,
-        "rule": create_req.content.unwrap_or_default(),
+        "rule": content,
     });
 
     let env_resp: RemoteResponse<RemoteEnv> =
@@ -878,6 +936,7 @@ async fn handle_create_rule(
             remote_id: Some(env.id),
             remote_updated_at: Some(env.update_time),
         },
+        syntax: Some(syntax),
     })
 }
 
@@ -917,6 +976,16 @@ async fn handle_update_rule(
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {e}")),
     };
+    let syntax =
+        match validate_group_rule_for_save(&state, &group_name, rule_name, &update_req.content)
+            .await
+        {
+            Ok(report) => report,
+            Err(response) => return response,
+        };
+    if !syntax.valid && !update_req.allow_invalid {
+        return group_rule_syntax_rejection_response(rule_name, syntax);
+    }
 
     let remote_body = serde_json::json!({
         "id": remote_id,
@@ -962,6 +1031,7 @@ async fn handle_update_rule(
             remote_id: Some(env.id),
             remote_updated_at: Some(env.update_time),
         },
+        syntax: Some(syntax),
     })
 }
 

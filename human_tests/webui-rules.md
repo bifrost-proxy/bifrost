@@ -842,8 +842,39 @@
 **回归目的**：覆盖规则引用语义、disabled shared 规则复用、`commented-*` 规则名、tab 行内注释、注释内 `@` 不误报、组规则 qualified 引用、候选自动检索、模糊补全、编辑器原位展开详情、亮暗主题可读性、运行时缺失引用跳过和 UI 缺失引用诊断，防止运行时解析和 WebUI 编辑体验不一致。
 
 **执行结果（2026-06-10，本地开发分支）**：
-- ✅ PASS：执行 `bash e2e-tests/tests/test_rule_references.sh`，脚本先编译当前分支 debug 二进制，预置 disabled 组 shared 规则，再通过真实 Admin API 创建 disabled 私有 shared、`commented-*` shared、enabled entry 和包含缺失引用的 enabled 规则；validate API 对 entry 返回 `valid=true` / `rule_count=4`，对缺失引用返回 `E020`，真实代理请求确认 mock 服务收到 `X-At-Rule: ok`、`X-Commented-At-Rule: ok` 与 `X-Group-At-Rule: ok`，并确认 tab 行内注释可解析、注释内 `@` 不作为缺失引用、运行时缺失引用行被跳过后 `at-rule-missing-e2e.test` 仍代理到 mock 服务。
+- ✅ PASS：执行 `bash e2e-tests/tests/test_rule_references.sh`，脚本先编译当前分支 debug 二进制，预置 disabled 组 shared 规则，再通过真实 Admin API 创建 disabled 私有 shared、`commented-*` shared、enabled entry，并用 `allow_invalid=true` 创建包含缺失引用的 enabled 规则；validate API 对 entry 返回 `valid=true` / `rule_count=4`，对缺失引用返回 `E020`，真实代理请求确认 mock 服务收到 `X-At-Rule: ok`、`X-Commented-At-Rule: ok` 与 `X-Group-At-Rule: ok`，并确认 tab 行内注释可解析、注释内 `@` 不作为缺失引用、运行时缺失引用行被跳过后 `at-rule-missing-e2e.test` 仍代理到 mock 服务。
 - ✅ PASS：执行 `npm --prefix web run test:ui -- web/tests/ui/admin-rules-values.spec.ts -g "@规则引用"`，验证缺失引用返回 `E020`，缺失引用 token 标红并 hover 出现错误提示，reference candidates 返回私有短名、`commented-*` 私有短名与组 qualified name，Rules 编辑器在亮色主题下点击 `@规则` 展开/收起详情，在暗色主题下详情内容仍可读，点击 `@组名/规则名` 展开组规则详情，验证 Monaco fuzzy 补全提示完整组规则引用，并确认注释行 `# @...` 不带任何规则引用 decoration 且点击不会展开详情区。
+
+---
+
+### TC-WRU-46：保存缺失引用规则时展示后端语法错误且不清除未保存状态
+
+**前置条件**：
+1. 使用临时数据目录启动 Bifrost，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并携带 `--no-system-proxy`。
+2. 浏览器打开 `http://127.0.0.1:{PORT}/_bifrost/rules`。
+3. 已创建规则 `syntax-webui-invalid`，初始内容为 `example.com host://127.0.0.1:3000`。
+
+**操作步骤**：
+1. 在 Rules 页面选中 `syntax-webui-invalid`。
+2. 将编辑器内容替换为：
+   ```text
+   @missing-webui-reference
+   ```
+3. 点击 Save 按钮，或按 `Cmd+S` / `Ctrl+S`。
+4. 观察 Toast 或页面错误提示。
+5. 刷新页面或重新选中 `syntax-webui-invalid`，检查编辑器内容。
+
+**预期结果**：
+- 保存请求返回失败，页面展示的错误信息包含 `E020` 或缺失引用名称 `missing-webui-reference`。
+- 错误信息包含后端返回的行列位置或 suggestion，能指导 Agent/用户修复。
+- Rules 列表中的未保存标记不会被错误清除，Save 按钮仍可继续用于修复后重试。
+- 刷新或重新选中规则后，持久化内容仍为 `example.com host://127.0.0.1:3000`，无效内容没有落盘。
+- 将内容修复为有效规则后再次保存成功，Toast 显示 `Saved`，未保存标记消失。
+
+**回归目的**：覆盖 WebUI 保存接口不再只吞掉后端异常，而是把保存前语法检查的结构化错误反馈给调用方，并保持不落盘和可重试状态。
+
+**执行结果（2026-06-12，本地开发分支）**：
+- ✅ PASS：使用临时数据目录启动真实 Bifrost：`BIFROST_DATA_DIR=$(mktemp -d) BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost -H 127.0.0.1 -p 61450 start -y --access-mode allow_all --skip-cert-check --no-system-proxy --unsafe-ssl`。随后通过 Playwright 打开 `http://127.0.0.1:61450/_bifrost/rules`，预置 `syntax-webui-invalid` 有效规则，编辑为 `@missing-webui-reference` 后点击 Save；保存请求返回 HTTP 422，响应体 `saved=false`、`syntax.errors[0].code=E020`，页面正文出现 `E020` 或缺失引用名，Save 按钮保持可用；通过 API 确认持久化内容仍为原有效规则；修复为有效规则后再次保存成功并出现 `Saved`。
 
 ---
 

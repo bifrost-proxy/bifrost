@@ -1,10 +1,10 @@
 use bifrost_core::{
-    expand_rule_references_strict, extract_inline_variables,
+    extract_inline_variables,
     rule_share::{
         append_rule_share_query, new_rule_share_payload, share_payload_name_from_rule,
         RuleShareExclusiveScope, RULE_SHARE_PROTOCOL_VERSION, RULE_SHARE_QUERY_PARAM,
     },
-    validate_rules_with_context, ParseError, ParseErrorSeverity, ScriptReference, VariableInfo,
+    validate_rule_syntax_report, ParseError, ParseErrorSeverity, RuleSyntaxReport, ValueStore,
 };
 use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
 use http_body_util::BodyExt;
@@ -13,7 +13,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
-use super::{error_response, json_response, method_not_allowed, success_response, BoxBody};
+use super::{
+    error_response, json_response, json_response_with_status, method_not_allowed, success_response,
+    BoxBody,
+};
 use crate::push::SharedPushManager;
 use crate::state::SharedAdminState;
 
@@ -69,12 +72,16 @@ struct CreateRuleRequest {
     name: String,
     content: String,
     enabled: Option<bool>,
+    #[serde(default)]
+    allow_invalid: bool,
 }
 
 #[derive(Debug, Deserialize)]
 struct UpdateRuleRequest {
     content: Option<String>,
     enabled: Option<bool>,
+    #[serde(default)]
+    allow_invalid: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,14 +151,14 @@ struct ValidateRuleRequest {
     current_group_name: Option<String>,
 }
 
+type ValidateRuleResponse = RuleSyntaxReport;
+
 #[derive(Debug, Serialize)]
-struct ValidateRuleResponse {
-    valid: bool,
-    rule_count: usize,
-    errors: Vec<ParseError>,
-    warnings: Vec<ParseError>,
-    defined_variables: Vec<VariableInfo>,
-    script_references: Vec<ScriptReference>,
+struct RuleMutationResponse {
+    success: bool,
+    message: String,
+    saved: bool,
+    syntax: RuleSyntaxReport,
 }
 
 const BUILTIN_DECODE_SCRIPTS: &[&str] = &["utf8", "default", "bp"];
@@ -555,7 +562,7 @@ fn build_variable_conflicts(
 }
 
 fn append_missing_script_reference_warnings(
-    result: &mut bifrost_core::ValidationResult,
+    result: &mut RuleSyntaxReport,
     req_scripts: &HashSet<String>,
     res_scripts: &HashSet<String>,
     decode_scripts: &HashSet<String>,
@@ -598,6 +605,125 @@ fn append_missing_script_reference_warnings(
         ));
         result.warnings.push(warning);
     }
+    result.refresh_guidance();
+}
+
+pub(crate) async fn build_rule_syntax_report(
+    state: &SharedAdminState,
+    source_name: &str,
+    content: &str,
+    global_values: &HashMap<String, String>,
+) -> Result<RuleSyntaxReport, String> {
+    let rule_files = state
+        .rules_storage
+        .load_all_with_subdirs()
+        .unwrap_or_default();
+    let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&rule_files);
+    reference_catalog.insert(source_name.to_string(), content.to_string());
+
+    let validation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        validate_rule_syntax_report(source_name, content, &reference_catalog, global_values)
+    }));
+
+    let mut result = match validation_result {
+        Ok(r) => r,
+        Err(e) => {
+            let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
+                s.to_string()
+            } else if let Some(s) = e.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "Unknown panic during validation".to_string()
+            };
+
+            tracing::error!(
+                target: "bifrost_admin::rules",
+                error = %panic_msg,
+                "Validation panic caught - returning safe error response"
+            );
+
+            return Err(format!("Validation failed unexpectedly: {}", panic_msg));
+        }
+    };
+
+    if let Some(ref script_manager) = state.script_manager {
+        let manager = script_manager.read().await;
+        let engine = manager.engine();
+
+        let req_scripts: HashSet<String> = engine
+            .list_scripts(bifrost_script::ScriptType::Request)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+
+        let res_scripts: HashSet<String> = engine
+            .list_scripts(bifrost_script::ScriptType::Response)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|s| s.name)
+            .collect();
+
+        let mut decode_scripts: HashSet<String> = BUILTIN_DECODE_SCRIPTS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        decode_scripts.extend(
+            engine
+                .list_scripts(bifrost_script::ScriptType::Decode)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|s| s.name),
+        );
+
+        append_missing_script_reference_warnings(
+            &mut result,
+            &req_scripts,
+            &res_scripts,
+            &decode_scripts,
+        );
+    }
+
+    Ok(result)
+}
+
+pub(crate) fn global_values_from_state(state: &SharedAdminState) -> HashMap<String, String> {
+    state
+        .values_storage
+        .as_ref()
+        .map(|storage| storage.read().as_hashmap())
+        .unwrap_or_default()
+}
+
+fn syntax_rejection_response(rule_name: &str, syntax: RuleSyntaxReport) -> Response<BoxBody> {
+    let message = format!(
+        "Rule '{}' was not saved because syntax validation failed",
+        rule_name
+    );
+    let response = RuleMutationResponse {
+        success: false,
+        message,
+        saved: false,
+        syntax,
+    };
+    json_response_with_status(StatusCode::UNPROCESSABLE_ENTITY, &response)
+}
+
+fn syntax_saved_response(
+    rule_name: &str,
+    action: &str,
+    syntax: RuleSyntaxReport,
+) -> Response<BoxBody> {
+    let response = RuleMutationResponse {
+        success: true,
+        message: format!("Rule '{}' {} successfully", rule_name, action),
+        saved: true,
+        syntax,
+    };
+    json_response(&response)
 }
 
 async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
@@ -628,130 +754,16 @@ async fn validate_rule(req: Request<Incoming>, state: SharedAdminState) -> Respo
     let source_name = current_group_name
         .map(|group| format!("{}/{}", group.trim(), current_rule_name))
         .unwrap_or_else(|| current_rule_name.to_string());
-    let content = request.content.clone();
-    let global_values = request.global_values.clone();
-    let rule_files = state
-        .rules_storage
-        .load_all_with_subdirs()
-        .unwrap_or_default();
-    let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&rule_files);
-    reference_catalog.insert(source_name.clone(), content.clone());
-
-    let content = match expand_rule_references_strict(&source_name, &content, &reference_catalog) {
-        Ok(expanded) => expanded,
-        Err(error) => {
-            // `error.line()` is relative to the rule where the error occurred
-            // (`error.source()`), which may be a nested referenced rule rather
-            // than the rule currently open in the editor. Only map the line/column
-            // back onto the editor content when the error is in the top-level
-            // rule; otherwise anchor it to line 1 to avoid mis-highlighting or
-            // indexing past the editor content. The error message itself already
-            // names the offending source rule and line.
-            let (error_line, error_end_column) = if error.source() == source_name {
-                let end_column = request
-                    .content
-                    .lines()
-                    .nth(error.line().saturating_sub(1))
-                    .map(|line| line.len().max(1))
-                    .unwrap_or(1);
-                (error.line(), end_column)
-            } else {
-                (1, 1)
-            };
-            let reference_error =
-                ParseError::with_range(error_line, 1, error_end_column, error.to_string())
-                    .with_code("E020")
-                    .with_suggestion(
-                        "Create the referenced rule or remove the cycle before enabling this rule.",
-                    );
-            let resp = ValidateRuleResponse {
-                valid: false,
-                rule_count: 0,
-                errors: vec![reference_error],
-                warnings: Vec::new(),
-                defined_variables: Vec::new(),
-                script_references: Vec::new(),
-            };
-            return json_response(&resp);
-        }
-    };
-
-    let validation_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        validate_rules_with_context(&content, &global_values)
-    }));
-
-    let mut result = match validation_result {
-        Ok(r) => r,
-        Err(e) => {
-            let panic_msg = if let Some(s) = e.downcast_ref::<&str>() {
-                s.to_string()
-            } else if let Some(s) = e.downcast_ref::<String>() {
-                s.clone()
-            } else {
-                "Unknown panic during validation".to_string()
-            };
-
-            tracing::error!(
-                target: "bifrost_admin::rules",
-                error = %panic_msg,
-                "Validation panic caught - returning safe error response"
-            );
-
-            return error_response(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                &format!("Validation failed unexpectedly: {}", panic_msg),
-            );
-        }
-    };
-
-    if let Some(ref script_manager) = state.script_manager {
-        let manager = script_manager.read().await;
-        let engine = manager.engine();
-
-        let req_scripts: std::collections::HashSet<String> = engine
-            .list_scripts(bifrost_script::ScriptType::Request)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-
-        let res_scripts: std::collections::HashSet<String> = engine
-            .list_scripts(bifrost_script::ScriptType::Response)
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .map(|s| s.name)
-            .collect();
-
-        let mut decode_scripts: std::collections::HashSet<String> = BUILTIN_DECODE_SCRIPTS
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
-        decode_scripts.extend(
-            engine
-                .list_scripts(bifrost_script::ScriptType::Decode)
-                .await
-                .unwrap_or_default()
-                .into_iter()
-                .map(|s| s.name),
-        );
-
-        append_missing_script_reference_warnings(
-            &mut result,
-            &req_scripts,
-            &res_scripts,
-            &decode_scripts,
-        );
-    }
-
-    let response = ValidateRuleResponse {
-        valid: result.valid,
-        rule_count: result.rule_count,
-        errors: result.errors,
-        warnings: result.warnings,
-        defined_variables: result.defined_variables,
-        script_references: result.script_references,
+    let response: ValidateRuleResponse = match build_rule_syntax_report(
+        &state,
+        &source_name,
+        &request.content,
+        &request.global_values,
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
     };
 
     json_response(&response)
@@ -853,6 +865,21 @@ async fn create_rule(
         return error_response(StatusCode::CONFLICT, "Rule with this name already exists");
     }
 
+    let syntax = match build_rule_syntax_report(
+        &state,
+        &request.name,
+        &request.content,
+        &global_values_from_state(&state),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+    if !syntax.valid && !request.allow_invalid {
+        return syntax_rejection_response(&request.name, syntax);
+    }
+
     let highest_priority_sort_order = state
         .rules_storage
         .list_summaries()
@@ -877,7 +904,7 @@ async fn create_rule(
             }
             notify_rules_changed(&state);
             invalidate_overview_cache(&push_manager);
-            success_response(&format!("Rule '{}' created successfully", request.name))
+            syntax_saved_response(&request.name, "created", syntax)
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -938,10 +965,29 @@ async fn update_rule(
     };
     let content_changed = request.content.is_some();
     let enabled_changed = request.enabled.is_some();
+    let next_content = request
+        .content
+        .clone()
+        .unwrap_or_else(|| existing.content.clone());
+    let should_validate = content_changed || (!existing.enabled && request.enabled == Some(true));
+    let syntax = match build_rule_syntax_report(
+        &state,
+        name,
+        &next_content,
+        &global_values_from_state(&state),
+    )
+    .await
+    {
+        Ok(report) => report,
+        Err(error) => return error_response(StatusCode::INTERNAL_SERVER_ERROR, &error),
+    };
+    if should_validate && !syntax.valid && !request.allow_invalid {
+        return syntax_rejection_response(name, syntax);
+    }
 
     let rule = RuleFile {
         name: existing.name,
-        content: request.content.unwrap_or(existing.content),
+        content: next_content,
         enabled: request.enabled.unwrap_or(existing.enabled),
         sort_order: existing.sort_order,
         description: existing.description,
@@ -960,7 +1006,7 @@ async fn update_rule(
         Ok(_) => {
             notify_rules_changed(&state);
             invalidate_overview_cache(&push_manager);
-            success_response(&format!("Rule '{}' updated successfully", name))
+            syntax_saved_response(name, "updated", syntax)
         }
         Err(e) => error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1322,17 +1368,17 @@ mod tests {
 
     #[test]
     fn test_builtin_decode_script_references_do_not_warn() {
-        let mut result = bifrost_core::ValidationResult {
+        let mut result = RuleSyntaxReport::from_validation_result(bifrost_core::ValidationResult {
             script_references: BUILTIN_DECODE_SCRIPTS
                 .iter()
-                .map(|name| ScriptReference {
+                .map(|name| bifrost_core::ScriptReference {
                     name: (*name).to_string(),
                     script_type: "decode".to_string(),
                     line: 1,
                 })
                 .collect(),
             ..Default::default()
-        };
+        });
         let req_scripts = HashSet::new();
         let res_scripts = HashSet::new();
         let decode_scripts = BUILTIN_DECODE_SCRIPTS
@@ -1355,14 +1401,14 @@ mod tests {
 
     #[test]
     fn test_missing_decode_script_warning_uses_decode_inventory() {
-        let mut result = bifrost_core::ValidationResult {
-            script_references: vec![ScriptReference {
+        let mut result = RuleSyntaxReport::from_validation_result(bifrost_core::ValidationResult {
+            script_references: vec![bifrost_core::ScriptReference {
                 name: "missing".to_string(),
                 script_type: "decode".to_string(),
                 line: 3,
             }],
             ..Default::default()
-        };
+        });
         let req_scripts = HashSet::new();
         let res_scripts = HashSet::from(["response_only".to_string()]);
         let decode_scripts = HashSet::from(["bbb".to_string(), "default".to_string()]);

@@ -668,7 +668,46 @@ fn validate_single_protocol_value(
         "reqspeed" | "resspeed" => validate_speed_value(clean_value, line_num, start_col, end_col),
         "method" => validate_http_method(clean_value, line_num, start_col, end_col),
         "dns" => validate_ip_address(clean_value, line_num, start_col, end_col),
-        "host" | "xhost" => validate_host_port(clean_value, line_num, start_col, end_col),
+        "host" | "xhost" | "hosts" | "tunnel" => {
+            validate_host_port(clean_value, line_num, start_col, end_col)
+        }
+        // A-tier (Error): the value has a strong format contract; a malformed
+        // value means the rule almost certainly does nothing at runtime.
+        "redirect" => validate_redirect_url(clean_value, line_num, start_col, end_col),
+        "proxy" | "socks" | "socks5" => {
+            validate_proxy_url(clean_value, line_num, start_col, end_col)
+        }
+        "forwardedfor" | "responsefor" => {
+            validate_ip_address(clean_value, line_num, start_col, end_col)
+        }
+        "auth" => validate_auth_value(clean_value, line_num, start_col, end_col),
+        // B-tier (Warning): the value follows a convention; a deviation is
+        // probably a mistake but is not guaranteed to break the rule.
+        "reqtype" | "restype" => validate_content_type(clean_value, line_num, start_col, end_col),
+        "reqcharset" | "rescharset" => validate_charset(clean_value, line_num, start_col, end_col),
+        "reqreplace" | "resreplace" | "urlreplace" | "pathreplace" | "headerreplace" => {
+            validate_replace_value(protocol_name, clean_value, line_num, start_col, end_col)
+        }
+        "urlparams" | "params" => {
+            validate_kv_pairs(protocol_name, clean_value, line_num, start_col, end_col)
+        }
+        "tlsoptions" => validate_tls_options(clean_value, line_num, start_col, end_col),
+        "upstreamunsafessl" => validate_boolean_value(clean_value, line_num, start_col, end_col),
+        // C-tier (Warning): light structural hint.
+        "attachment" => validate_attachment(clean_value, line_num, start_col, end_col),
+        "breakpoint" => validate_breakpoint(clean_value, line_num, start_col, end_col),
+        // D-tier (no format check): the value is intentionally freeform and has
+        // no machine-checkable contract, so any non-empty value is accepted
+        // here (empty values are already rejected upstream by E014 where the
+        // operator requires one). This explicitly covers the content / body /
+        // header-injection operators (reqBody, resBody, resMerge, req/res
+        // Prepend|Append, reqHeaders, resHeaders, req/resCookies, trailers,
+        // html/js/css Append|Prepend|Body), the path / script / plugin
+        // operators (file, tpl, rawfile, reqScript, resScript, decode, bp,
+        // sniCallback) whose values may be a bare name OR a filesystem path,
+        // and the remaining freeform operators (ua, referer, pac, skip,
+        // urlParams already handled above). They are listed here as a single
+        // documented arm so the classification is exhaustive on purpose.
         _ => None,
     }
 }
@@ -856,29 +895,440 @@ fn validate_host_port(
     start_col: usize,
     end_col: usize,
 ) -> Option<ParseError> {
-    if let Some(colon_pos) = value.rfind(':') {
-        let port_str = &value[colon_pos + 1..];
-        if !port_str.is_empty() {
-            if let Ok(port) = port_str.parse::<u32>() {
-                if port > 65535 {
-                    return Some(
-                        ParseError::with_range(
-                            line_num,
-                            start_col,
-                            end_col,
-                            format!("Port number out of range: {}. Maximum is 65535.", port),
-                        )
-                        .with_severity(ParseErrorSeverity::Error)
-                        .with_code("E017")
-                        .with_suggestion(
-                            "Port must be between 0 and 65535. Example: host://example.com:8080",
-                        ),
-                    );
-                }
-            }
-        }
+    use std::net::IpAddr;
+
+    // A bare IP address (including IPv6 such as `::1` or `2001:db8::1`) carries
+    // no explicit port and is always valid.
+    if value.parse::<IpAddr>().is_ok() {
+        return None;
     }
-    None
+
+    // Determine the port segment while avoiding false positives on IPv6 hosts.
+    let port_str = if let Some(rest) = value.strip_prefix('[') {
+        // Bracketed IPv6, optionally followed by `:port`, e.g. `[::1]:8080`.
+        match rest.find("]:") {
+            Some(pos) => &rest[pos + 2..],
+            // `[::1]` (no port) or malformed bracket: leave host parsing lenient.
+            None => return None,
+        }
+    } else if value.matches(':').count() > 1 {
+        // Unbracketed value with multiple colons looks like a bare IPv6 host
+        // without a port; stay lenient to avoid misreading a hextet as a port.
+        return None;
+    } else if let Some(colon_pos) = value.rfind(':') {
+        &value[colon_pos + 1..]
+    } else {
+        // No colon at all means host only, which is valid here.
+        return None;
+    };
+
+    let invalid = |message: String| {
+        Some(
+            ParseError::with_range(line_num, start_col, end_col, message)
+                .with_severity(ParseErrorSeverity::Error)
+                .with_code("E017")
+                .with_suggestion(
+                    "Port must be a number between 1 and 65535. Example: host://example.com:8080",
+                ),
+        )
+    };
+
+    if port_str.is_empty() {
+        return invalid("Missing port number after ':'.".to_string());
+    }
+
+    match port_str.parse::<u32>() {
+        Ok(0) => invalid("Port number out of range: 0. Valid ports are 1-65535.".to_string()),
+        Ok(port) if port > 65535 => invalid(format!(
+            "Port number out of range: {}. Maximum is 65535.",
+            port
+        )),
+        Ok(_) => None,
+        Err(_) => invalid(format!("Invalid port number: '{}'.", port_str)),
+    }
+}
+
+// Shared helper: validate the `host[:port]` part of a value that may carry an
+// optional `scheme://` prefix and an optional `user:pass@` userinfo segment.
+// Returns Some(error_message) when the port is present but malformed, or when
+// the host is empty. Returns None when the shape is acceptable.
+fn check_host_port_remainder(value: &str) -> Option<String> {
+    use std::net::IpAddr;
+
+    // Strip an optional `scheme://` prefix (e.g. `http://`, `socks5://`).
+    let after_scheme = match value.find("://") {
+        Some(pos) => &value[pos + 3..],
+        None => value,
+    };
+    // Strip an optional `user:pass@` userinfo segment.
+    let host_port = match after_scheme.rfind('@') {
+        Some(pos) => &after_scheme[pos + 1..],
+        None => after_scheme,
+    };
+
+    if host_port.is_empty() {
+        return Some("Missing host. Expected host:port.".to_string());
+    }
+
+    // A bare IP (including IPv6) without a port is acceptable.
+    if host_port.parse::<IpAddr>().is_ok() {
+        return None;
+    }
+
+    let port_str = if let Some(rest) = host_port.strip_prefix('[') {
+        match rest.find("]:") {
+            Some(pos) => &rest[pos + 2..],
+            None => return None,
+        }
+    } else if host_port.matches(':').count() > 1 {
+        // Looks like a bare IPv6 host without a port.
+        return None;
+    } else if let Some(colon_pos) = host_port.rfind(':') {
+        &host_port[colon_pos + 1..]
+    } else {
+        // Host only, no port.
+        return None;
+    };
+
+    if port_str.is_empty() {
+        return Some("Missing port number after ':'.".to_string());
+    }
+    match port_str.parse::<u32>() {
+        Ok(0) => Some("Port number out of range: 0. Valid ports are 1-65535.".to_string()),
+        Ok(port) if port > 65535 => Some(format!(
+            "Port number out of range: {}. Maximum is 65535.",
+            port
+        )),
+        Ok(_) => None,
+        Err(_) => Some(format!("Invalid port number: '{}'.", port_str)),
+    }
+}
+
+// A-tier (Error) ------------------------------------------------------------
+
+// `redirect://` sends the client a Location. The value must be a URL: an
+// absolute URL with a scheme (`https://new-site.com/`), a protocol-relative URL
+// (`//host/path`), or an absolute path (`/path`). Anything else (a bare word)
+// would produce a Location header the browser cannot resolve.
+fn validate_redirect_url(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains("://") || value.starts_with("//") || value.starts_with('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid redirect target: '{}'. Expected a URL or absolute path.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E018")
+        .with_suggestion(
+            "Use a full URL (https://example.com/), a protocol-relative URL (//example.com/), or an absolute path (/path). Example: redirect://https://new-site.com/",
+        ),
+    )
+}
+
+// `proxy://`, `socks://`, `socks5://` forward through an upstream proxy. The
+// value is `host:port`, optionally prefixed with a scheme and/or `user:pass@`.
+fn validate_proxy_url(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    check_host_port_remainder(value).map(|message| {
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!("Invalid proxy target: '{}'. {}", value, message),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E019")
+        .with_suggestion(
+            "Expected host:port, optionally with a scheme and credentials. Example: proxy://127.0.0.1:8888 or proxy://user:pass@127.0.0.1:8888",
+        )
+    })
+}
+
+// `auth://` injects an Authorization header from `user:password`. Without a
+// colon there is no password separator and the value is meaningless.
+fn validate_auth_value(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains(':') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!("Invalid auth value: '{}'. Expected 'user:password'.", value),
+        )
+        .with_severity(ParseErrorSeverity::Error)
+        .with_code("E020")
+        .with_suggestion("Provide credentials as user:password. Example: auth://admin:secret"),
+    )
+}
+
+// B-tier (Warning) ----------------------------------------------------------
+
+// `reqType://` / `resType://` set a Content-Type. A MIME type is `type/subtype`
+// (optionally with parameters). Missing the slash is almost always a mistake,
+// but the proxy will still set whatever string is given, so this is a warning.
+fn validate_content_type(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    // Allow shorthand keywords that the runtime expands (e.g. `json`, `html`).
+    let known_short = ["json", "html", "xml", "text", "js", "css", "form", "plain"];
+    if known_short.contains(&value.to_lowercase().as_str()) {
+        return None;
+    }
+    let main = value.split(';').next().unwrap_or(value).trim();
+    if main.contains('/') && !main.starts_with('/') && !main.ends_with('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Suspicious Content-Type: '{}'. Expected 'type/subtype'.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W005")
+        .with_suggestion(
+            "A MIME type looks like type/subtype. Example: reqType://application/json",
+        ),
+    )
+}
+
+// `reqCharset://` / `resCharset://` set a charset token, which is a single
+// token of letters, digits and the separators `- _ .` (e.g. `utf-8`, `gbk`,
+// `iso-8859-1`). Stray punctuation is almost certainly a mistake.
+fn validate_charset(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid charset: '{}'. Expected a charset token like utf-8.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W006")
+        .with_suggestion("Example: resCharset://utf-8"),
+    )
+}
+
+// `reqReplace://`, `resReplace://`, `urlReplace://`, `pathReplace://`,
+// `headerReplace://` use a `/old/new/` substitution form. Without a `/`
+// separator the value cannot describe a substitution.
+fn validate_replace_value(
+    protocol_name: &str,
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if value.contains('/') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid {} value: '{}'. Expected an /old/new/ substitution.",
+                protocol_name, value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W007")
+        .with_suggestion("Use /old/new/ to substitute text. Example: resReplace://old/new/"),
+    )
+}
+
+// `urlParams://`, `params://` carry `key=value` pairs joined by `&`. A segment
+// without `=` is most likely a typo.
+fn validate_kv_pairs(
+    protocol_name: &str,
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let has_bad_segment = value
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .any(|seg| !seg.contains('='));
+    if !has_bad_segment {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid {} value: '{}'. Expected key=value pairs joined by '&'.",
+                protocol_name, value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W008")
+        .with_suggestion("Example: urlParams://(key=value&key2=value2)"),
+    )
+}
+
+// `tlsOptions://` carries `key=value` pairs (e.g. `minVersion=TLSv1.2`). A
+// segment without `=` is almost certainly malformed.
+fn validate_tls_options(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let has_bad_segment = value
+        .split('&')
+        .filter(|s| !s.is_empty())
+        .any(|seg| !seg.contains('='));
+    if !has_bad_segment {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid tlsOptions value: '{}'. Expected key=value options.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W009")
+        .with_suggestion(
+            "Use key=value options joined by '&'. Example: tlsOptions://minVersion=TLSv1.2",
+        ),
+    )
+}
+
+// `upstreamUnsafeSSL://` is a boolean toggle.
+fn validate_boolean_value(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let v = value.to_lowercase();
+    if matches!(v.as_str(), "true" | "false" | "1" | "0" | "yes" | "no") {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid boolean value: '{}'. Expected true or false.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W010")
+        .with_suggestion("Use true or false. Example: upstreamUnsafeSSL://true"),
+    )
+}
+
+// C-tier (Warning) ----------------------------------------------------------
+
+// `attachment://` sets a Content-Disposition download filename. A path
+// separator in a filename is suspicious (the browser only uses the basename).
+fn validate_attachment(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if !value.contains('/') && !value.contains('\\') {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Suspicious attachment filename: '{}'. A download filename should not contain path separators.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W011")
+        .with_suggestion("Provide a bare filename. Example: attachment://report.pdf"),
+    )
+}
+
+// `breakpoint://` accepts request / response / both (or empty for both).
+fn validate_breakpoint(
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    let v = value.to_lowercase();
+    if v.is_empty() || matches!(v.as_str(), "request" | "response" | "both" | "req" | "res") {
+        return None;
+    }
+    Some(
+        ParseError::with_range(
+            line_num,
+            start_col,
+            end_col,
+            format!(
+                "Invalid breakpoint value: '{}'. Expected request, response, or both.",
+                value
+            ),
+        )
+        .with_severity(ParseErrorSeverity::Warning)
+        .with_code("W012")
+        .with_suggestion("Use request, response, or both. Example: breakpoint://request"),
+    )
 }
 
 fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Result<Vec<Rule>> {
@@ -887,6 +1337,11 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
     if line.is_empty() || line.starts_with('#') {
         return Ok(vec![]);
     }
+
+    // Keep the author-written form before inline `{value}` references are
+    // expanded. The empty-value (E014) check below must judge what the author
+    // typed, not the runtime expansion result.
+    let authored_line = line;
 
     let line = expand_inline_values(line, values);
 
@@ -897,6 +1352,18 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
 
     let (patterns, mut protocol_values, include_filters, exclude_filters, line_props) =
         extract_pattern_and_protocols(&parts)?;
+
+    // An unknown / mistyped `<scheme>://` op must always be surfaced as E002,
+    // even when the same line still carries another valid protocol. Otherwise a
+    // typo such as `host://127.0.0.1:3000 htp://x` would be silently accepted
+    // with the bad op swallowed as a pattern. Detect it up front, before
+    // deciding how to treat lines that ended up with no recognised protocol.
+    if let Some(scheme) = patterns.iter().find_map(|p| unknown_protocol_scheme(p)) {
+        return Err(BifrostError::Parse(format!(
+            "Unknown protocol '{}'",
+            scheme
+        )));
+    }
 
     if protocol_values.is_empty() {
         let has_url_pattern = patterns.iter().any(|p| {
@@ -909,9 +1376,38 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
         if has_url_pattern {
             protocol_values.push((Protocol::Passthrough, String::new()));
         } else {
+            // No valid protocol on the line and no URL-style pattern to imply a
+            // passthrough. The unknown-scheme case is already handled above, so
+            // this is a genuinely missing protocol, surfaced as E001.
             return Err(BifrostError::Parse(format!(
                 "No protocol found in rule: {}",
                 line
+            )));
+        }
+    }
+
+    // Reject operators that require a value but were authored with an empty one
+    // (e.g. `reqHeaders://`, `redirect://`, `file://`). An empty value means the
+    // op silently does nothing at runtime, which is equivalent to the rule not
+    // taking effect, so it must not be saved. Switch / control ops that are
+    // meaningful on their own (passthrough, delete, tlsIntercept, ...) are
+    // allow-listed via `protocol_requires_value`.
+    //
+    // The check judges the AUTHORED form (before `{value}` expansion): a
+    // data-driven reference such as `resBody://{emptyValue}` is legitimate
+    // Whistle behaviour even when the referenced value resolves to empty at
+    // runtime, so only a literally empty operator must be rejected.
+    let authored_parts = split_rule_parts(authored_line);
+    if let Ok((_, authored_protocol_values, _, _, _)) =
+        extract_pattern_and_protocols(&authored_parts)
+    {
+        if let Some((protocol, _)) = authored_protocol_values
+            .iter()
+            .find(|(protocol, value)| protocol_requires_value(*protocol) && value.trim().is_empty())
+        {
+            return Err(BifrostError::Parse(format!(
+                "Empty value for protocol '{}'",
+                protocol.to_str()
             )));
         }
     }
@@ -1271,9 +1767,23 @@ fn create_detailed_parse_error(
     }
 
     if error_msg.contains("Unknown protocol") {
-        if let Some(proto_match) = PROTOCOL_REGEX.captures(trimmed) {
-            let proto = proto_match.get(1).map(|m| m.as_str()).unwrap_or("");
-            let proto_start = trimmed.find(&format!("{}://", proto)).unwrap_or(0);
+        // The error carries the offending scheme as `Unknown protocol '<name>'`.
+        // Locate that `<name>://` token in the line so the range points at the
+        // protocol op rather than the (whole-line) start.
+        let proto = error_msg
+            .split('\'')
+            .nth(1)
+            .map(|s| s.to_string())
+            .or_else(|| {
+                PROTOCOL_REGEX
+                    .captures(trimmed)
+                    .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+            })
+            .unwrap_or_default();
+
+        if !proto.is_empty() {
+            let needle = format!("{}://", proto);
+            let proto_start = trimmed.find(&needle).unwrap_or(0);
             let start_col = leading_spaces + proto_start + 1;
             let end_col = start_col + proto.len() + 3;
 
@@ -1286,6 +1796,32 @@ fn create_detailed_parse_error(
         }
     }
 
+    if error_msg.contains("Empty value for protocol") {
+        // The error carries the offending protocol as `Empty value for protocol
+        // '<name>'`. Point the range at that `<name>://` op so the editor marks
+        // the empty operator rather than the whole line.
+        let proto = error_msg
+            .split('\'')
+            .nth(1)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        if !proto.is_empty() {
+            let needle = format!("{}://", proto);
+            let proto_start = trimmed.find(&needle).unwrap_or(0);
+            let start_col = leading_spaces + proto_start + 1;
+            let end_col = start_col + proto.len() + 3;
+            return ParseError::with_range(line_num, start_col, end_col, &error_msg)
+                .with_code("E014")
+                .with_suggestion(format!(
+                    "Operator '{proto}://' needs a value; an empty value has no effect. Add a value (e.g. '{proto}://<value>') or remove the operator."
+                ));
+        }
+        return ParseError::new(line_num, trimmed, &error_msg)
+            .with_code("E014")
+            .with_suggestion(
+                "This operator needs a value; an empty value has no effect. Add a value or remove the operator.",
+            );
+    }
     if error_msg.contains("No pattern found") {
         return ParseError::new(line_num, trimmed, &error_msg)
             .with_code("E003")
@@ -1558,6 +2094,49 @@ fn is_bare_host_target_with_path(part: &str) -> bool {
     BARE_HOST_PATH_TARGET_REGEX.is_match(part)
 }
 
+/// If `token` is a `<scheme>://...` op whose scheme is neither a known protocol
+/// nor a recognised alias — and not a real URL scheme that is legitimately used
+/// as a pattern (http/https/ws/wss) — return the offending scheme name. Used to
+/// distinguish a mistyped protocol (E002) from a genuinely missing one (E001).
+fn unknown_protocol_scheme(token: &str) -> Option<String> {
+    let caps = PROTOCOL_REGEX.captures(token)?;
+    let scheme = caps.get(1)?.as_str();
+    // Real URL schemes are valid patterns (e.g. `http://host/path`), never E002.
+    if matches!(scheme, "http" | "https" | "ws" | "wss") {
+        return None;
+    }
+    if Protocol::parse(scheme).is_some() {
+        return None;
+    }
+    if Protocol::parse(Protocol::resolve_alias(scheme)).is_some() {
+        return None;
+    }
+    Some(scheme.to_string())
+}
+
+/// Whether an operator protocol requires a non-empty value. Most ops are
+/// meaningless without one (e.g. `reqHeaders://`, `redirect://`, `file://`):
+/// an empty value means the op silently does nothing, so we reject it instead
+/// of saving an ineffective rule. The allow-empty set mirrors the protocols
+/// whose `value_type` is "empty" in `crate::syntax` (pure switches / control
+/// directives) plus `referer://`, where an empty value intentionally removes
+/// the Referer header (exercised by the e2e referer-remove fixture).
+fn protocol_requires_value(protocol: Protocol) -> bool {
+    !matches!(
+        protocol,
+        Protocol::Delete
+            | Protocol::Skip
+            | Protocol::ReqCors
+            | Protocol::ResCors
+            | Protocol::Http3
+            | Protocol::TlsIntercept
+            | Protocol::TlsPassthrough
+            | Protocol::Passthrough
+            | Protocol::DevTools
+            | Protocol::Referer
+    )
+}
+
 fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult> {
     if parts.is_empty() {
         return Err(BifrostError::Parse("Empty rule".to_string()));
@@ -1644,7 +2223,18 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 let resolved = Protocol::resolve_alias(proto_name);
                 if let Some(protocol) = Protocol::parse(resolved) {
                     protocol_values.push((protocol, value));
+                } else if proto_name == "filter" {
+                    // Legacy Whistle-style `filter://` is a control marker. It
+                    // is not represented as a runtime protocol in bifrost, but
+                    // existing rule fixtures and saved rules may still carry it
+                    // alongside a real operation such as `host://`.
+                    continue;
                 } else {
+                    // Unknown / mistyped scheme. Stay tolerant here: keep it as a
+                    // (URL-like) pattern so multi-op rules that still carry a valid
+                    // protocol elsewhere on the line continue to parse. If the line
+                    // ends up with no valid protocol at all, the caller surfaces it
+                    // as E002 "Unknown protocol" instead of a misleading E001.
                     patterns.push(part.clone());
                 }
             }
@@ -3559,140 +4149,726 @@ x-custom: value
         assert_eq!(parts3[0], "/foo/");
     }
 
-    // ---- Direct unit tests for protocol-value validators ----
+    // ---- value validator coverage (status/cache/delay/speed/method/ip/host_port) ----
 
-    #[test]
-    fn test_validate_status_code_branches() {
-        // valid 100..600 → None
-        assert!(validate_status_code("200", 1, 1, 4).is_none());
-        // out of range high → Error E010
-        let e = validate_status_code("700", 1, 1, 4).unwrap();
-        assert_eq!(e.severity, ParseErrorSeverity::Error);
-        assert_eq!(e.code.as_deref(), Some("E010"));
-        assert!(e.message.contains("Invalid HTTP status code"));
-        assert_eq!(e.fixes.len(), 3);
-        // non-numeric → Error E010, different message
-        let e = validate_status_code("abc", 1, 1, 4).unwrap();
-        assert!(e.message.contains("Expected a number"));
-        assert_eq!(e.fixes.len(), 2);
+    fn first_error_with_code<'a>(errors: &'a [ParseError], code: &str) -> Option<&'a ParseError> {
+        errors.iter().find(|e| e.code.as_deref() == Some(code))
     }
 
     #[test]
-    fn test_validate_cache_value_branches() {
-        // keyword → None
-        assert!(validate_cache_value("no", 1, 1, 3).is_none());
-        assert!(validate_cache_value("NO-CACHE", 1, 1, 8).is_none());
-        // positive number → None
-        assert!(validate_cache_value("3600", 1, 1, 5).is_none());
-        // zero → Warning E011
-        let w = validate_cache_value("0", 1, 1, 2).unwrap();
-        assert_eq!(w.severity, ParseErrorSeverity::Warning);
-        assert_eq!(w.code.as_deref(), Some("E011"));
-        // invalid → Error E011
-        let e = validate_cache_value("soon", 1, 1, 5).unwrap();
-        assert_eq!(e.severity, ParseErrorSeverity::Error);
-        assert!(e.message.contains("Invalid cache value"));
+    fn test_validate_status_code_valid() {
+        let errors = validate_rules("api.test statusCode://200");
+        assert!(errors.is_empty(), "200 should be accepted: {:?}", errors);
+        assert!(validate_rules("api.test statusCode://100").is_empty());
+        assert!(validate_rules("api.test statusCode://599").is_empty());
     }
 
     #[test]
-    fn test_validate_delay_value_branches() {
-        assert!(validate_delay_value("1000", 1, 1, 5).is_none());
-        let e = validate_delay_value("-5", 1, 1, 3).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E012"));
-        assert!(e.message.contains("cannot be negative"));
-        let e = validate_delay_value("fast", 1, 1, 5).unwrap();
-        assert!(e.message.contains("Invalid delay value"));
+    fn test_validate_status_code_out_of_range() {
+        let low = validate_rules("api.test statusCode://99");
+        assert!(
+            first_error_with_code(&low, "E010").is_some(),
+            "99 must be rejected: {:?}",
+            low
+        );
+        let high = validate_rules("api.test statusCode://600");
+        assert!(
+            first_error_with_code(&high, "E010").is_some(),
+            "600 must be rejected: {:?}",
+            high
+        );
+        let nan = validate_rules("api.test statusCode://abc");
+        assert!(
+            first_error_with_code(&nan, "E010").is_some(),
+            "abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_speed_value_branches() {
-        assert!(validate_speed_value("1024", 1, 1, 5).is_none());
-        let e = validate_speed_value("0", 1, 1, 2).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E013"));
-        assert!(e.message.contains("cannot be 0"));
-        let e = validate_speed_value("turbo", 1, 1, 6).unwrap();
-        assert!(e.message.contains("Invalid speed value"));
+    fn test_validate_replace_status_uses_same_validator() {
+        assert!(validate_rules("api.test replaceStatus://301").is_empty());
+        let bad = validate_rules("api.test replaceStatus://700");
+        assert!(
+            first_error_with_code(&bad, "E010").is_some(),
+            "700 must be rejected: {:?}",
+            bad
+        );
     }
 
     #[test]
-    fn test_validate_http_method_branches() {
-        assert!(validate_http_method("get", 1, 1, 4).is_none());
-        assert!(validate_http_method("POST", 1, 1, 5).is_none());
-        let w = validate_http_method("FETCH", 1, 1, 6).unwrap();
-        assert_eq!(w.severity, ParseErrorSeverity::Warning);
-        assert_eq!(w.code.as_deref(), Some("E015"));
-        assert!(w.message.contains("Unknown HTTP method"));
+    fn test_validate_cache_value() {
+        assert!(validate_rules("api.test cache://3600").is_empty());
+        assert!(validate_rules("api.test cache://no").is_empty());
+        assert!(validate_rules("api.test cache://no-cache").is_empty());
+        assert!(validate_rules("api.test cache://no-store").is_empty());
+        // zero is a warning, not a hard error
+        let zero = validate_rules_with_context("api.test cache://0", &HashMap::new());
+        assert!(
+            zero.errors.is_empty(),
+            "cache://0 should not be a hard error"
+        );
+        assert!(
+            zero.warnings
+                .iter()
+                .any(|w| w.code.as_deref() == Some("E011")),
+            "cache://0 should warn: {:?}",
+            zero.warnings
+        );
+        let nan = validate_rules("api.test cache://abc");
+        assert!(
+            first_error_with_code(&nan, "E011").is_some(),
+            "cache://abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_ip_address_branches() {
-        assert!(validate_ip_address("192.168.1.1", 1, 1, 12).is_none());
-        assert!(validate_ip_address("::1", 1, 1, 4).is_none());
-        let e = validate_ip_address("not-an-ip", 1, 1, 10).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E016"));
-        assert!(e.message.contains("Invalid IP address"));
+    fn test_validate_delay_value() {
+        assert!(validate_rules("api.test reqDelay://0").is_empty());
+        assert!(validate_rules("api.test reqDelay://1000").is_empty());
+        assert!(validate_rules("api.test resDelay://250").is_empty());
+        let neg = validate_rules("api.test reqDelay://-1");
+        assert!(
+            first_error_with_code(&neg, "E012").is_some(),
+            "negative delay must be rejected: {:?}",
+            neg
+        );
+        let nan = validate_rules("api.test resDelay://abc");
+        assert!(
+            first_error_with_code(&nan, "E012").is_some(),
+            "delay abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_host_port_branches() {
-        // no colon → None
-        assert!(validate_host_port("example.com", 1, 1, 12).is_none());
-        // valid port → None
-        assert!(validate_host_port("example.com:8080", 1, 1, 17).is_none());
-        // empty port after colon → None (no parse)
-        assert!(validate_host_port("example.com:", 1, 1, 13).is_none());
-        // non-numeric port → None (parse fails, falls through)
-        assert!(validate_host_port("example.com:abc", 1, 1, 16).is_none());
-        // out of range → Error E017
-        let e = validate_host_port("example.com:99999", 1, 1, 18).unwrap();
-        assert_eq!(e.code.as_deref(), Some("E017"));
-        assert!(e.message.contains("out of range"));
+    fn test_validate_speed_value() {
+        assert!(validate_rules("api.test reqSpeed://1024").is_empty());
+        assert!(validate_rules("api.test resSpeed://2048").is_empty());
+        let zero = validate_rules("api.test reqSpeed://0");
+        assert!(
+            first_error_with_code(&zero, "E013").is_some(),
+            "speed 0 must be rejected: {:?}",
+            zero
+        );
+        let nan = validate_rules("api.test resSpeed://abc");
+        assert!(
+            first_error_with_code(&nan, "E013").is_some(),
+            "speed abc must be rejected: {:?}",
+            nan
+        );
     }
 
     #[test]
-    fn test_validate_single_protocol_value_dispatch() {
-        // template placeholder value → None
-        assert!(validate_single_protocol_value("statusCode", "{var}", 1, 0, 5).is_none());
-        // wrapped in parens/backticks then valid → None
-        assert!(validate_single_protocol_value("statusCode", "(200)", 1, 0, 5).is_none());
-        // statusCode dispatch (replaceStatus alias)
-        assert!(validate_single_protocol_value("replaceStatus", "999", 1, 0, 3).is_some());
-        // cache / reqDelay / resSpeed / method / dns / host / xHost dispatch
-        assert!(validate_single_protocol_value("cache", "bad", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("reqDelay", "-1", 1, 0, 2).is_some());
-        assert!(validate_single_protocol_value("resSpeed", "0", 1, 0, 1).is_some());
-        assert!(validate_single_protocol_value("method", "WAT", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("dns", "bad", 1, 0, 3).is_some());
-        assert!(validate_single_protocol_value("xHost", "h:99999", 1, 0, 7).is_some());
-        // unknown protocol → None
-        assert!(validate_single_protocol_value("custom", "anything", 1, 0, 8).is_none());
+    fn test_validate_http_method() {
+        assert!(validate_rules("api.test method://POST").is_empty());
+        // lowercase is normalized and accepted
+        assert!(validate_rules("api.test method://get").is_empty());
+        // unknown method surfaces a warning (not a hard error by design)
+        let bad = validate_rules_with_context("api.test method://FOO", &HashMap::new());
+        assert!(
+            bad.warnings
+                .iter()
+                .any(|w| w.code.as_deref() == Some("E015")),
+            "unknown method should warn: {:?}",
+            bad.warnings
+        );
     }
 
     #[test]
-    fn test_validate_protocol_values_integration_collects_errors() {
-        let content = "example.com statusCode://700 method://FETCH";
-        let result = validate_rules_with_context(content, &HashMap::new());
-        // status code error is an Error; method is a Warning
-        assert!(result
+    fn test_validate_dns_ip() {
+        assert!(validate_rules("api.test dns://192.168.1.1").is_empty());
+        assert!(validate_rules("api.test dns://::1").is_empty());
+        let bad = validate_rules("api.test dns://999.1.1.1");
+        assert!(
+            first_error_with_code(&bad, "E016").is_some(),
+            "invalid ip must be rejected: {:?}",
+            bad
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_valid() {
+        assert!(validate_rules("api.test host://example.com:8080").is_empty());
+        assert!(validate_rules("api.test host://127.0.0.1:3000").is_empty());
+        assert!(validate_rules("api.test host://example.com").is_empty());
+        // bare IPv6 host (no port) must be accepted, not misread as host:port
+        assert!(
+            validate_rules("api.test host://::1").is_empty(),
+            "bare ipv6 should pass"
+        );
+        assert!(
+            validate_rules("api.test host://2001:db8::1").is_empty(),
+            "bare ipv6 with multiple colons should pass"
+        );
+        // bracketed IPv6 with explicit port
+        assert!(
+            validate_rules("api.test host://[::1]:8080").is_empty(),
+            "bracketed ipv6 port should pass"
+        );
+        assert!(validate_rules("api.test xhost://example.com:443").is_empty());
+    }
+
+    #[test]
+    fn test_validate_host_port_out_of_range() {
+        let big = validate_rules("api.test host://example.com:70000");
+        assert!(
+            first_error_with_code(&big, "E017").is_some(),
+            "port 70000 must be rejected: {:?}",
+            big
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_zero_rejected() {
+        let zero = validate_rules("api.test host://example.com:0");
+        assert!(
+            first_error_with_code(&zero, "E017").is_some(),
+            "port 0 must be rejected: {:?}",
+            zero
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_non_numeric_rejected() {
+        let nan = validate_rules("api.test host://example.com:abc");
+        assert!(
+            first_error_with_code(&nan, "E017").is_some(),
+            "non-numeric port must be rejected: {:?}",
+            nan
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_empty_rejected() {
+        let empty = validate_rules("api.test host://example.com:");
+        assert!(
+            first_error_with_code(&empty, "E017").is_some(),
+            "empty port must be rejected: {:?}",
+            empty
+        );
+    }
+
+    #[test]
+    fn test_validate_host_port_bracketed_ipv6_bad_port() {
+        let bad = validate_rules("api.test host://[::1]:0");
+        assert!(
+            first_error_with_code(&bad, "E017").is_some(),
+            "bracketed ipv6 with port 0 must be rejected: {:?}",
+            bad
+        );
+        let nan = validate_rules("api.test host://[::1]:abc");
+        assert!(
+            first_error_with_code(&nan, "E017").is_some(),
+            "bracketed ipv6 with non-numeric port must be rejected: {:?}",
+            nan
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // Coverage for previously untested error/warning codes.
+    //
+    // These lock the *observable* behaviour of `create_detailed_parse_error`
+    // and the value validators so that the syntax contract surfaced to the
+    // editor / API cannot silently regress.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn test_e001_no_protocol_reports_code_and_range() {
+        // Two bare tokens, neither is a protocol op -> "No protocol found".
+        let errors = validate_rules("example.com another.com");
+        let err = first_error_with_code(&errors, "E001")
+            .unwrap_or_else(|| panic!("expected E001, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert_eq!(err.line, 1);
+        // Range should point at the second token, not column 0.
+        assert!(err.start_column > 1, "E001 should point past the pattern");
+        assert!(err.end_column >= err.start_column);
+        assert!(
+            err.suggestion
+                .as_deref()
+                .map(|s| s.contains("http://") || s.contains("passthrough://"))
+                .unwrap_or(false),
+            "E001 suggestion should propose a protocol prefix: {:?}",
+            err.suggestion
+        );
+    }
+
+    #[test]
+    fn test_e001_single_token_reports_code() {
+        // A lone pattern with no protocol also resolves to E001.
+        let errors = validate_rules("example.com");
+        assert!(
+            first_error_with_code(&errors, "E001").is_some(),
+            "lone pattern must report E001: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn test_unknown_protocol_reports_e002() {
+        // An unknown / mistyped protocol op appearing after a pattern is now
+        // surfaced as E002 "Unknown protocol" (previously this fell through to
+        // a misleading E001 "No protocol found"). The suggestion names the
+        // offending scheme.
+        for (input, scheme) in [
+            (
+                "error5-unknown.test unknownProtocol://value",
+                "unknownProtocol",
+            ),
+            ("error6-typo.test htpp://localhost:8000/", "htpp"),
+            ("error10-similar.test request://body", "request"),
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E002")
+                .unwrap_or_else(|| panic!("expected E002 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
+            assert!(
+                err.message.contains("Unknown protocol") && err.message.contains(scheme),
+                "E002 message should name the scheme `{}`: {}",
+                scheme,
+                err.message
+            );
+            assert!(
+                err.suggestion
+                    .as_deref()
+                    .map(|s| s.contains(scheme))
+                    .unwrap_or(false),
+                "E002 suggestion should name the scheme `{}`: {:?}",
+                scheme,
+                err.suggestion
+            );
+            // The offending op is no longer misreported as a missing protocol.
+            assert!(
+                first_error_with_code(&errors, "E001").is_none(),
+                "E001 should not fire once E002 is produced for `{}`: {:?}",
+                input,
+                errors
+            );
+        }
+    }
+
+    #[test]
+    fn test_legacy_filter_marker_does_not_report_unknown_protocol() {
+        let errors = validate_rules("*.local 127.0.0.1:3000 filter://");
+        assert!(
+            first_error_with_code(&errors, "E002").is_none(),
+            "legacy filter:// marker should remain compatible, got: {:?}",
+            errors
+        );
+
+        let rules = parse_line("*.local 127.0.0.1:3000 filter://").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern, "*.local");
+        assert_eq!(rules[0].protocol, Protocol::Host);
+        assert_eq!(rules[0].value, "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn test_unknown_protocol_with_valid_protocol_still_reports_e002() {
+        // P0 regression: an unknown / mistyped `<scheme>://` op must be surfaced
+        // as E002 even when the SAME line already carries another valid
+        // protocol. Previously the bad op was silently swallowed as a pattern
+        // and the rule was accepted as valid (e.g. `host://... htp://x`).
+        for (input, scheme) in [
+            ("example.com host://127.0.0.1:3000 htp://x", "htp"),
+            (
+                "example.com http://localhost:8000/ unknownProtocol://value",
+                "unknownProtocol",
+            ),
+            (
+                "example.com reqHeaders://(X-A: 1) reqheader://(X-B: 2)",
+                "reqheader",
+            ),
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E002")
+                .unwrap_or_else(|| panic!("expected E002 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
+            assert!(
+                err.message.contains("Unknown protocol") && err.message.contains(scheme),
+                "E002 message should name the scheme `{}`: {}",
+                scheme,
+                err.message
+            );
+            // The line must NOT parse into valid rules: the bad op blocks it.
+            assert!(
+                parse_line(input).is_err(),
+                "line with unknown op `{}` must not parse successfully: {}",
+                scheme,
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_value_for_require_value_protocol_reports_e014() {
+        // An operator that needs a value but is given an empty one silently does
+        // nothing at runtime, which is equivalent to the rule not taking effect.
+        // Such lines must be rejected with E014 instead of being saved.
+        for (input, proto) in [
+            ("req-headers.test reqHeaders://", "reqHeaders"),
+            ("redir.test redirect://", "redirect"),
+            ("file-rule.test file://", "file"),
+            ("error15-empty.test host://", "host"),
+            ("status.test statusCode://", "statusCode"),
+            ("body.test resBody://", "resBody"),
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E014")
+                .unwrap_or_else(|| panic!("expected E014 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
+            assert!(
+                err.message.contains("Empty value for protocol") && err.message.contains(proto),
+                "E014 message should name protocol `{}`: {}",
+                proto,
+                err.message
+            );
+            assert!(
+                err.suggestion
+                    .as_deref()
+                    .map(|s| s.contains(proto))
+                    .unwrap_or(false),
+                "E014 suggestion should name protocol `{}`: {:?}",
+                proto,
+                err.suggestion
+            );
+            assert!(
+                parse_line(input).is_err(),
+                "require-value op `{}` with empty value must not parse: {}",
+                proto,
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_value_allowed_for_switch_protocols() {
+        // Pure switch / control ops are meaningful on their own and must keep
+        // accepting an empty value (they mirror the "empty" value_type set in
+        // `crate::syntax`, plus `referer://` whose empty value removes the
+        // header). These must NOT be flagged as E014.
+        for input in [
+            "del.test delete://",
+            "https://passthrough.test/api/ passthrough://",
+            "cors-req.test reqCors://",
+            "cors-res.test resCors://",
+            "tls-i.test tlsIntercept://",
+            "tls-p.test tlsPassthrough://",
+            "referer-remove.local 127.0.0.1:3000 referer://",
+        ] {
+            let errors = validate_rules(input);
+            assert!(
+                first_error_with_code(&errors, "E014").is_none(),
+                "switch op should allow empty value (no E014) for `{}`, got: {:?}",
+                input,
+                errors
+            );
+            assert!(
+                parse_line(input).is_ok(),
+                "switch op with empty value should parse: {}",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn test_empty_value_reference_resolving_to_empty_is_tolerated() {
+        // A data-driven reference (`resBody://{emptyValue}`) is legitimate
+        // Whistle behaviour: the operator is authored with a non-empty value
+        // token, and the referenced value resolving to empty at runtime must
+        // NOT abort the strict config loader (regression: previously the
+        // post-expansion empty value tripped the E014 check and crashed proxy
+        // boot). Literal empty operators stay rejected (covered above).
+        let mut values = HashMap::new();
+        values.insert("emptyValue".to_string(), String::new());
+
+        let parsed = parse_rules_with_values(
+            "test-value-empty.local http://127.0.0.1:3000 resBody://{emptyValue}",
+            &values,
+        );
+        assert!(
+            parsed.is_ok(),
+            "value reference resolving to empty must parse, got: {:?}",
+            parsed.err()
+        );
+
+        // Sanity: a literal empty operator on the same protocol is still an error.
+        let literal = parse_rules_with_values("body.test resBody://", &HashMap::new());
+        assert!(
+            literal.is_err(),
+            "literal empty resBody:// must still be rejected"
+        );
+    }
+
+    fn validate_rules_warnings(text: &str) -> Vec<ParseError> {
+        validate_rules_with_context(text, &HashMap::new()).warnings
+    }
+
+    #[test]
+    fn test_validate_redirect_url() {
+        // Valid: full URL, protocol-relative, absolute path.
+        assert!(validate_rules("r.test redirect://https://new-site.com/").is_empty());
+        assert!(validate_rules("r.test redirect:////cdn.example.com/x").is_empty());
+        assert!(validate_rules("r.test redirect:///local/path").is_empty());
+        // Invalid: a bare word cannot be a Location.
+        let e = validate_rules("r.test redirect://bareword");
+        assert!(
+            first_error_with_code(&e, "E018").is_some(),
+            "bare redirect target must be rejected: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn test_validate_proxy_url() {
+        assert!(validate_rules("p.test proxy://127.0.0.1:8006").is_empty());
+        assert!(validate_rules("p.test proxy://user:pass@127.0.0.1:8888").is_empty());
+        assert!(validate_rules("p.test http-proxy://127.0.0.1:8080").is_empty());
+        // Bad port.
+        let e = validate_rules("p.test proxy://127.0.0.1:99999");
+        assert!(
+            first_error_with_code(&e, "E019").is_some(),
+            "out-of-range proxy port must be rejected: {:?}",
+            e
+        );
+        let e2 = validate_rules("p.test proxy://127.0.0.1:abc");
+        assert!(
+            first_error_with_code(&e2, "E019").is_some(),
+            "non-numeric proxy port must be rejected: {:?}",
+            e2
+        );
+    }
+
+    #[test]
+    fn test_validate_auth_value() {
+        assert!(validate_rules("a.test auth://user:password").is_empty());
+        let e = validate_rules("a.test auth://useronly");
+        assert!(
+            first_error_with_code(&e, "E020").is_some(),
+            "auth without colon must be rejected: {:?}",
+            e
+        );
+    }
+
+    #[test]
+    fn test_validate_content_type() {
+        assert!(validate_rules_warnings("t.test reqType://application/json").is_empty());
+        assert!(validate_rules_warnings("t.test resType://text/html").is_empty());
+        assert!(validate_rules_warnings("t.test reqType://json").is_empty());
+        let w = validate_rules_warnings("t.test reqType://notamime");
+        assert!(
+            first_error_with_code(&w, "W005").is_some(),
+            "content-type without slash must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_charset() {
+        assert!(validate_rules_warnings("c.test reqCharset://utf-8").is_empty());
+        assert!(validate_rules_warnings("c.test resCharset://gbk").is_empty());
+        let w = validate_rules_warnings("c.test reqCharset://utf@8");
+        assert!(
+            first_error_with_code(&w, "W006").is_some(),
+            "charset with stray punctuation must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_replace_value() {
+        assert!(validate_rules_warnings("x.test reqReplace://old/new/").is_empty());
+        assert!(validate_rules_warnings("x.test resReplace://oldtext/newtext/").is_empty());
+        assert!(validate_rules_warnings("x.test urlReplace://old-path/new-path/").is_empty());
+        assert!(validate_rules_warnings("x.test headerReplace://OldHeader/NewHeader/").is_empty());
+        let w = validate_rules_warnings("x.test reqReplace://noslash");
+        assert!(
+            first_error_with_code(&w, "W007").is_some(),
+            "replace without slash must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_kv_pairs() {
+        assert!(validate_rules_warnings("k.test urlParams://(key=value)").is_empty());
+        assert!(validate_rules_warnings("k.test urlParams://(key=value&key2=value2)").is_empty());
+        assert!(validate_rules_warnings("k.test params://(param1=val1)").is_empty());
+        let w = validate_rules_warnings("k.test urlParams://(keyonly)");
+        assert!(
+            first_error_with_code(&w, "W008").is_some(),
+            "kv pair without '=' must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_tls_options() {
+        assert!(validate_rules_warnings("s.test tlsOptions://minVersion=TLSv1.2").is_empty());
+        let w = validate_rules_warnings("s.test tlsOptions://garbage");
+        assert!(
+            first_error_with_code(&w, "W009").is_some(),
+            "tlsOptions without '=' must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_boolean_value() {
+        assert!(validate_rules_warnings("b.test upstreamUnsafeSSL://true").is_empty());
+        assert!(validate_rules_warnings("b.test upstreamUnsafeSSL://false").is_empty());
+        let w = validate_rules_warnings("b.test upstreamUnsafeSSL://maybe");
+        assert!(
+            first_error_with_code(&w, "W010").is_some(),
+            "non-boolean must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_attachment() {
+        assert!(validate_rules_warnings("d.test attachment://filename.zip").is_empty());
+        let w = validate_rules_warnings("d.test attachment://dir/file.zip");
+        assert!(
+            first_error_with_code(&w, "W011").is_some(),
+            "attachment with path separator must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_validate_breakpoint() {
+        assert!(validate_rules_warnings("bp.test breakpoint://request").is_empty());
+        assert!(validate_rules_warnings("bp.test breakpoint://response").is_empty());
+        assert!(validate_rules_warnings("bp.test breakpoint://both").is_empty());
+        let w = validate_rules_warnings("bp.test breakpoint://sometimes");
+        assert!(
+            first_error_with_code(&w, "W012").is_some(),
+            "unknown breakpoint value must warn: {:?}",
+            w
+        );
+    }
+
+    #[test]
+    fn test_new_validators_do_not_fire_on_valid_fixture() {
+        // The canonical valid fixture must remain free of any diagnostics from
+        // the newly added validators.
+        let fixture = include_str!("../valid_rules.bifrost");
+        let result = validate_rules_with_context(fixture, &HashMap::new());
+        let new_codes = [
+            "E018", "E019", "E020", "W005", "W006", "W007", "W008", "W009", "W010", "W011", "W012",
+        ];
+        for code in new_codes {
+            assert!(
+                first_error_with_code(&result.errors, code).is_none(),
+                "new validator {} fired on valid fixture (errors): {:?}",
+                code,
+                result.errors
+            );
+            assert!(
+                first_error_with_code(&result.warnings, code).is_none(),
+                "new validator {} fired on valid fixture (warnings): {:?}",
+                code,
+                result.warnings
+            );
+        }
+    }
+
+    #[test]
+    fn test_e003_no_pattern_reports_code() {
+        // A line that has only a protocol-op (a filter) and no pattern.
+        let errors = validate_rules("includeFilter://example.com");
+        let err = first_error_with_code(&errors, "E003")
+            .unwrap_or_else(|| panic!("expected E003, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert!(
+            err.message.contains("No pattern found"),
+            "E003 message should mention missing pattern: {}",
+            err.message
+        );
+        assert!(
+            err.suggestion
+                .as_deref()
+                .map(|s| s.contains("pattern"))
+                .unwrap_or(false),
+            "E003 suggestion should mention pattern: {:?}",
+            err.suggestion
+        );
+    }
+
+    #[test]
+    fn test_e004_invalid_regex_reports_code_and_range() {
+        // Unclosed character class is a genuinely invalid regex pattern.
+        let errors = validate_rules("/[invalid[regex/ http://localhost:8000/");
+        let err = first_error_with_code(&errors, "E004")
+            .unwrap_or_else(|| panic!("expected E004, got {:?}", errors));
+        assert_eq!(err.severity, ParseErrorSeverity::Error);
+        assert!(
+            err.message.contains("Invalid"),
+            "E004 message should mention invalid pattern/regex: {}",
+            err.message
+        );
+        // The range should cover the /.../ regex token.
+        assert!(err.start_column >= 1);
+        assert!(err.end_column > err.start_column);
+    }
+
+    #[test]
+    fn test_w004_invalid_filter_value_is_warning() {
+        // An invalid filter value emits a non-blocking W004 warning while the
+        // rule itself still parses.
+        let result = validate_rules_with_context(
+            "example.com host://127.0.0.1:3000 includeFilter://`(`",
+            &HashMap::new(),
+        );
+        let warn = result
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("W004"))
+            .unwrap_or_else(|| panic!("expected W004 warning, got {:?}", result.warnings));
+        assert_eq!(warn.severity, ParseErrorSeverity::Warning);
+    }
+
+    #[test]
+    fn test_cache_zero_and_method_use_warning_severity() {
+        // Documents an intentional quirk: a handful of value validators carry an
+        // `Exxx` code but `Warning` severity (so they do NOT block a save).
+        // Locking it prevents an accidental severity flip during refactors.
+        let cache_zero = validate_rules_with_context("example.com cache://0", &HashMap::new());
+        let e011 = cache_zero
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("E011"))
+            .unwrap_or_else(|| panic!("cache://0 should warn with E011: {:?}", cache_zero));
+        assert_eq!(e011.severity, ParseErrorSeverity::Warning);
+        assert!(
+            cache_zero.valid,
+            "cache://0 is a warning and must not invalidate the rule set"
+        );
+
+        let bad_method = validate_rules_with_context("example.com method://FOO", &HashMap::new());
+        let e015 = bad_method
+            .warnings
+            .iter()
+            .find(|w| w.code.as_deref() == Some("E015"))
+            .unwrap_or_else(|| panic!("unknown method should warn with E015: {:?}", bad_method));
+        assert_eq!(e015.severity, ParseErrorSeverity::Warning);
+        assert!(bad_method.valid, "unknown method is only a warning");
+    }
+
+    #[test]
+    fn test_blocking_value_error_invalidates_rule_set() {
+        // Contrast with the warning-severity quirk above: a real value error
+        // (non-numeric status code) is an Error and flips `valid` to false.
+        let result = validate_rules_with_context("example.com statusCode://nope", &HashMap::new());
+        let e010 = result
             .errors
             .iter()
-            .any(|e| e.code.as_deref() == Some("E010")));
-        assert!(result
-            .warnings
-            .iter()
-            .any(|w| w.code.as_deref() == Some("E015")));
-    }
-
-    #[test]
-    fn test_validate_protocol_values_dedupes_same_span() {
-        // Same value at same span should not be pushed twice.
-        let content = "example.com cache://0";
-        let result = validate_rules_with_context(content, &HashMap::new());
-        let e011: Vec<_> = result
-            .warnings
-            .iter()
-            .filter(|w| w.code.as_deref() == Some("E011"))
-            .collect();
-        assert_eq!(e011.len(), 1);
+            .find(|e| e.code.as_deref() == Some("E010"))
+            .unwrap_or_else(|| panic!("expected E010 error: {:?}", result));
+        assert_eq!(e010.severity, ParseErrorSeverity::Error);
+        assert!(!result.valid, "a blocking value error must invalidate");
     }
 }

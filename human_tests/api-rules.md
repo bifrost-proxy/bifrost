@@ -287,6 +287,100 @@
 
 ---
 
+### TC-ARU-14：创建有效规则返回语法检查报告并保存
+
+**操作步骤**：
+1. 执行以下命令：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name": "syntax-valid-api", "content": "example.com host://127.0.0.1:3000", "enabled": true}' | jq .
+   ```
+
+**预期结果**：
+- HTTP 状态码 200
+- 返回 JSON 包含 `"success": true`
+- 返回 JSON 包含 `"saved": true`
+- 返回 JSON 包含 `"syntax.valid": true`
+- 返回 JSON 包含 `"syntax.rule_count": 1`
+
+---
+
+### TC-ARU-15：创建缺失引用规则返回 422 且不保存
+
+**操作步骤**：
+1. 执行以下命令：
+   ```bash
+   curl -s -w "\n%{http_code}" -X POST http://127.0.0.1:8800/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name": "syntax-invalid-api", "content": "@missing-shared-rule", "enabled": true}'
+   ```
+2. 再次获取该规则：
+   ```bash
+   curl -s -w "\n%{http_code}" http://127.0.0.1:8800/_bifrost/api/rules/syntax-invalid-api
+   ```
+
+**预期结果**：
+- 第 1 步 HTTP 状态码为 422
+- 返回 JSON 包含 `"success": false`
+- 返回 JSON 包含 `"saved": false`
+- 返回 JSON 包含 `"syntax.valid": false`
+- 返回 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步 HTTP 状态码为 404，说明无效规则没有落盘
+
+---
+
+### TC-ARU-16：更新为缺失引用规则返回 422 且保留旧内容
+
+**前置条件**：已创建规则 `syntax-preserve-api`，内容为 `preserve.example.com host://127.0.0.1:3001`
+
+**操作步骤**：
+1. 执行以下命令：
+   ```bash
+   curl -s -w "\n%{http_code}" -X PUT http://127.0.0.1:8800/_bifrost/api/rules/syntax-preserve-api \
+     -H "Content-Type: application/json" \
+     -d '{"content": "@missing-update-reference", "enabled": true}'
+   ```
+2. 获取规则详情：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/rules/syntax-preserve-api | jq -r .content
+   ```
+
+**预期结果**：
+- 第 1 步 HTTP 状态码为 422
+- 返回 JSON 包含 `"saved": false`
+- 返回 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步仍输出 `preserve.example.com host://127.0.0.1:3001`
+
+---
+
+### TC-ARU-17：allow_invalid 显式保存无效规则但返回语法错误
+
+**操作步骤**：
+1. 执行以下命令：
+   ```bash
+   curl -s -X POST http://127.0.0.1:8800/_bifrost/api/rules \
+     -H "Content-Type: application/json" \
+     -d '{"name": "syntax-allowed-api", "content": "@missing-allowed-reference", "enabled": true, "allow_invalid": true}' | jq .
+   ```
+2. 获取规则详情：
+   ```bash
+   curl -s http://127.0.0.1:8800/_bifrost/api/rules/syntax-allowed-api | jq -r .content
+   ```
+
+**预期结果**：
+- 第 1 步 HTTP 状态码为 200
+- 返回 JSON 包含 `"success": true`
+- 返回 JSON 包含 `"saved": true`
+- 返回 JSON 包含 `"syntax.valid": false`
+- 返回 JSON 包含 `"syntax.errors[0].code": "E020"`
+- 第 2 步输出 `@missing-allowed-reference`
+
+**执行结果（2026-06-12，本地开发分支）**：
+- ✅ PASS：执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_syntax_save_api.sh`。脚本使用临时数据目录和动态端口启动真实 Bifrost 服务，验证有效创建返回 `saved=true` / `syntax.valid=true`，缺失 `@` 引用创建返回 HTTP 422 且 GET 为 404，缺失引用更新返回 HTTP 422 且旧内容保持不变，`allow_invalid=true` 可保存无效规则但返回 `syntax.valid=false` / `E020`。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

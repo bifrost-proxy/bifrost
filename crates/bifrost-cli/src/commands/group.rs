@@ -28,11 +28,54 @@ fn agent() -> ureq::Agent {
 }
 
 fn api_error(url: &str, err: ureq::Error) -> bifrost_core::BifrostError {
+    if let ureq::Error::Status(code, response) = err {
+        let body = response.into_string().unwrap_or_default();
+        let detail = format_api_error_body(&body).unwrap_or_else(|| body.trim().to_string());
+        return bifrost_core::BifrostError::Config(format!(
+            "Bifrost admin API returned HTTP {code} at {url}: {detail}"
+        ));
+    }
+
     bifrost_core::BifrostError::Config(format!(
         "Failed to connect to Bifrost admin API at {url}\n\
          Is the proxy server running?\n\n\
          Hint: Start the proxy with: bifrost start\n\n\
          Error: {err}"
+    ))
+}
+
+fn format_api_error_body(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let message = value
+        .get("message")
+        .or_else(|| value.get("error"))
+        .and_then(|item| item.as_str())
+        .unwrap_or("request failed");
+    let syntax = value.get("syntax")?;
+    let first_error = syntax.get("errors")?.as_array()?.first()?;
+    let code = first_error
+        .get("code")
+        .and_then(|item| item.as_str())
+        .unwrap_or("syntax");
+    let line = first_error
+        .get("line")
+        .and_then(|item| item.as_u64())
+        .unwrap_or(0);
+    let column = first_error
+        .get("start_column")
+        .and_then(|item| item.as_u64())
+        .unwrap_or(0);
+    let error_message = first_error
+        .get("message")
+        .and_then(|item| item.as_str())
+        .unwrap_or("syntax validation failed");
+    let suggestion = first_error
+        .get("suggestion")
+        .and_then(|item| item.as_str())
+        .map(|item| format!(" Suggestion: {item}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{message}. {code} line {line}:{column}: {error_message}.{suggestion}"
     ))
 }
 
@@ -240,13 +283,15 @@ fn handle_group_rule_command_with_port(
             name,
             content,
             file,
-        } => handle_group_rule_add(port, &group_id, &name, content, file),
+            allow_invalid,
+        } => handle_group_rule_add(port, &group_id, &name, content, file, allow_invalid),
         GroupRuleCommands::Update {
             group_id,
             name,
             content,
             file,
-        } => handle_group_rule_update(port, &group_id, &name, content, file),
+            allow_invalid,
+        } => handle_group_rule_update(port, &group_id, &name, content, file, allow_invalid),
         GroupRuleCommands::Delete { group_id, name } => {
             handle_group_rule_delete(port, &group_id, &name)
         }
@@ -345,6 +390,7 @@ fn handle_group_rule_add(
     name: &str,
     content: Option<String>,
     file: Option<PathBuf>,
+    allow_invalid: bool,
 ) -> bifrost_core::Result<()> {
     let rule_content =
         content.or_else(|| file.as_ref().and_then(|p| std::fs::read_to_string(p).ok()));
@@ -357,6 +403,7 @@ fn handle_group_rule_add(
     let body = serde_json::json!({
         "name": name,
         "content": rule_content.unwrap_or_default(),
+        "allow_invalid": allow_invalid,
     });
 
     let resp = agent()
@@ -377,6 +424,7 @@ fn handle_group_rule_update(
     name: &str,
     content: Option<String>,
     file: Option<PathBuf>,
+    allow_invalid: bool,
 ) -> bifrost_core::Result<()> {
     let rule_content = load_rule_content(content, file)?;
 
@@ -388,6 +436,7 @@ fn handle_group_rule_update(
     );
     let body = serde_json::json!({
         "content": rule_content,
+        "allow_invalid": allow_invalid,
     });
 
     let resp = agent()
@@ -515,11 +564,7 @@ mod tests {
                             let n = stream.read(&mut buf).unwrap_or(0);
                             let request = String::from_utf8_lossy(&buf[..n]).to_string();
 
-                            let first_line = request.lines().next().unwrap_or("").to_string();
-                            if first_line.is_empty() {
-                                continue;
-                            }
-                            request_log.push(first_line);
+                            request_log.push(request);
 
                             let (status_code, body) = if resp_idx < owned_responses.len() {
                                 let r = &owned_responses[resp_idx];
@@ -990,6 +1035,7 @@ mod tests {
                     name: "new-rule".to_string(),
                     content: Some("*.example.com host://localhost:8080".to_string()),
                     file: None,
+                    allow_invalid: false,
                 },
             },
             port,
@@ -999,6 +1045,39 @@ mod tests {
         let logs = server.stop();
         assert!(logs[0].contains("POST"));
         assert!(logs[0].contains("/group-rules/g1"));
+    }
+
+    #[test]
+    fn test_group_rule_add_passes_allow_invalid() {
+        let json = r#"{
+            "name": "draft-rule",
+            "content": "@missing",
+            "enabled": true,
+            "sort_order": 0,
+            "created_at": "2024-06-01T00:00:00Z",
+            "updated_at": "2024-06-01T00:00:00Z",
+            "sync": {"status":"synced","remote_id":"env-456","remote_updated_at":"2024-06-01T00:00:00Z"}
+        }"#;
+
+        let server = MockServer::start(vec![(200, json)]);
+        let port = mock_port_for_admin(server.port);
+
+        let result = handle_group_command_with_port(
+            GroupCommands::Rule {
+                action: GroupRuleCommands::Add {
+                    group_id: "g1".to_string(),
+                    name: "draft-rule".to_string(),
+                    content: Some("@missing".to_string()),
+                    file: None,
+                    allow_invalid: true,
+                },
+            },
+            port,
+        );
+        assert!(result.is_ok());
+
+        let logs = server.stop();
+        assert!(logs[0].contains("\"allow_invalid\":true"));
     }
 
     #[test]
@@ -1026,6 +1105,7 @@ mod tests {
                     name: "file-rule".to_string(),
                     content: None,
                     file: Some(tmp.path().to_path_buf()),
+                    allow_invalid: false,
                 },
             },
             port,
@@ -1058,6 +1138,7 @@ mod tests {
                     name: "empty-rule".to_string(),
                     content: None,
                     file: None,
+                    allow_invalid: false,
                 },
             },
             port,
@@ -1088,6 +1169,7 @@ mod tests {
                     name: "my-rule".to_string(),
                     content: Some("updated content".to_string()),
                     file: None,
+                    allow_invalid: false,
                 },
             },
             port,
@@ -1124,6 +1206,7 @@ mod tests {
                     name: "my-rule".to_string(),
                     content: None,
                     file: Some(tmp.path().to_path_buf()),
+                    allow_invalid: false,
                 },
             },
             port,
@@ -1143,6 +1226,7 @@ mod tests {
                     name: "my-rule".to_string(),
                     content: None,
                     file: None,
+                    allow_invalid: false,
                 },
             },
             12345,
