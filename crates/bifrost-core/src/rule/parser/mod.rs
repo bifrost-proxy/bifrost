@@ -916,6 +916,11 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
         return Ok(vec![]);
     }
 
+    // Keep the author-written form before inline `{value}` references are
+    // expanded. The empty-value (E014) check below must judge what the author
+    // typed, not the runtime expansion result.
+    let authored_line = line;
+
     let line = expand_inline_values(line, values);
 
     let parts = split_rule_parts(&line);
@@ -959,20 +964,30 @@ fn parse_line_with_values(line: &str, values: &HashMap<String, String>) -> Resul
         }
     }
 
-    // Reject operators that require a value but were given an empty one (e.g.
-    // `reqHeaders://`, `redirect://`, `file://`). An empty value means the op
-    // silently does nothing at runtime, which is equivalent to the rule not
+    // Reject operators that require a value but were authored with an empty one
+    // (e.g. `reqHeaders://`, `redirect://`, `file://`). An empty value means the
+    // op silently does nothing at runtime, which is equivalent to the rule not
     // taking effect, so it must not be saved. Switch / control ops that are
     // meaningful on their own (passthrough, delete, tlsIntercept, ...) are
     // allow-listed via `protocol_requires_value`.
-    if let Some((protocol, _)) = protocol_values
-        .iter()
-        .find(|(protocol, value)| protocol_requires_value(*protocol) && value.trim().is_empty())
+    //
+    // The check judges the AUTHORED form (before `{value}` expansion): a
+    // data-driven reference such as `resBody://{emptyValue}` is legitimate
+    // Whistle behaviour even when the referenced value resolves to empty at
+    // runtime, so only a literally empty operator must be rejected.
+    let authored_parts = split_rule_parts(authored_line);
+    if let Ok((_, authored_protocol_values, _, _, _)) =
+        extract_pattern_and_protocols(&authored_parts)
     {
-        return Err(BifrostError::Parse(format!(
-            "Empty value for protocol '{}'",
-            protocol.to_str()
-        )));
+        if let Some((protocol, _)) = authored_protocol_values
+            .iter()
+            .find(|(protocol, value)| protocol_requires_value(*protocol) && value.trim().is_empty())
+        {
+            return Err(BifrostError::Parse(format!(
+                "Empty value for protocol '{}'",
+                protocol.to_str()
+            )));
+        }
     }
 
     let mut rules = Vec::new();
@@ -4134,6 +4149,35 @@ x-custom: value
                 input
             );
         }
+    }
+
+    #[test]
+    fn test_empty_value_reference_resolving_to_empty_is_tolerated() {
+        // A data-driven reference (`resBody://{emptyValue}`) is legitimate
+        // Whistle behaviour: the operator is authored with a non-empty value
+        // token, and the referenced value resolving to empty at runtime must
+        // NOT abort the strict config loader (regression: previously the
+        // post-expansion empty value tripped the E014 check and crashed proxy
+        // boot). Literal empty operators stay rejected (covered above).
+        let mut values = HashMap::new();
+        values.insert("emptyValue".to_string(), String::new());
+
+        let parsed = parse_rules_with_values(
+            "test-value-empty.local http://127.0.0.1:3000 resBody://{emptyValue}",
+            &values,
+        );
+        assert!(
+            parsed.is_ok(),
+            "value reference resolving to empty must parse, got: {:?}",
+            parsed.err()
+        );
+
+        // Sanity: a literal empty operator on the same protocol is still an error.
+        let literal = parse_rules_with_values("body.test resBody://", &HashMap::new());
+        assert!(
+            literal.is_err(),
+            "literal empty resBody:// must still be rejected"
+        );
     }
 
     #[test]
