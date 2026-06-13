@@ -21,12 +21,39 @@ PROXY_PID=""
 
 cleanup() {
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
-        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+        stop_bifrost_best_effort || true
+        if [[ -n "${PROXY_PID}" ]]; then
+            safe_cleanup_proxy "${PROXY_PID}"
+        fi
         kill_bifrost_on_port "${PROXY_PORT}" || true
         rm -rf "${TEST_DATA_DIR}"
     fi
 }
 trap cleanup EXIT
+
+stop_bifrost_best_effort() {
+    if [[ -z "${TEST_DATA_DIR}" || ! -x "${BIFROST_BIN}" ]]; then
+        return 0
+    fi
+
+    BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 &
+    local stop_pid=$!
+    local timeout="${BIFROST_E2E_STOP_TIMEOUT:-10}"
+    local elapsed=0
+
+    while kill -0 "${stop_pid}" 2>/dev/null; do
+        sleep 0.2
+        elapsed=$((elapsed + 1))
+        if [[ "${elapsed}" -ge "$((timeout * 5))" ]]; then
+            kill_pid_force "${stop_pid}"
+            wait "${stop_pid}" 2>/dev/null || true
+            return 1
+        fi
+    done
+
+    wait "${stop_pid}" 2>/dev/null || true
+    return 0
+}
 
 build_bifrost() {
     if [[ -x "${BIFROST_BIN}" && "${SKIP_BUILD:-false}" == "true" ]]; then
@@ -60,9 +87,9 @@ start_proxy() {
 
 stop_proxy() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
-    "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+    stop_bifrost_best_effort || true
     if [[ -n "${PROXY_PID}" ]]; then
-        wait_pid "${PROXY_PID}" || true
+        safe_cleanup_proxy "${PROXY_PID}"
     fi
     kill_bifrost_on_port "${PROXY_PORT}" || true
     PROXY_PID=""

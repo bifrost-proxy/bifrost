@@ -419,6 +419,28 @@ PY
 
 ---
 
+### TC-LOD-12：log-output 默认文件 E2E 停止流程有界退出（CI 回归验证）
+
+**操作步骤**：
+1. 对脚本做 Bash 语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_cli_start_log_output_default_file.sh
+   ```
+2. 使用已构建 release 二进制执行真实 log-output 默认文件 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$(pwd)/target/release/bifrost" \
+     e2e-tests/tests/test_cli_start_log_output_default_file.sh
+   ```
+3. 观察脚本输出，确认 `default-file` 与 `console-file` 两段都完成 Admin API 请求、停止代理、写入文件日志和 Console tracing 断言。
+4. 若 `bifrost stop` 因运行时状态异常卡住，脚本必须通过有界 stop helper 与 `safe_cleanup_proxy` 在超时时清理代理进程，并继续进入测试汇总，不能在已输出单条 PASS 后挂到 CI 900 秒超时。
+
+**预期结果**：
+- 语法检查通过。
+- 真实脚本输出 `Results: ... failed=0`，总耗时为秒级，不出现 900 秒 timeout。
+- 脚本全程使用临时数据目录、`--no-system-proxy` 与隔离端口，不修改用户系统代理。
+
+---
+
 ## 清理步骤
 
 ```bash
@@ -436,3 +458,4 @@ rm -rf /tmp/bifrost-human-launchd-log
 | 2026-06-08 | TC-LOD-11 | 已执行 `SKIP_BUILD=true e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh`、`SKIP_BUILD=true e2e-tests/tests/test_rule_match_logging_noise.sh`、`SKIP_BUILD=true e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`；三者均通过。CI 失败 artifacts 证实旧脚本在 Linux/macOS 中依赖默认 stdout tracing，修复后这些日志断言脚本改为显式 `--log-output console,file`。 | 通过 |
 | 2026-06-12 | TC-LOD-11 | PR #225 CI 中 Linux/macOS `E2E Shell shard 3/3` 均失败于 `test_rule_match_logging_noise.sh`。已将脚本断言从旧 `rule MATCHED` 更新为 `rule matcher candidate matched` 与 `rule selected`，并执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 e2e-tests/tests/test_rule_match_logging_noise.sh`，结果通过。 | 通过 |
 | 2026-06-12 | TC-LOD-11 | PR #227 CI run `27423667730` macOS `E2E Shell (aarch64-apple-darwin, shard 1/3)` failed because `test_rule_match_logging_noise.sh` used fixed debug port `18888`, which was already occupied on the runner. The script now allocates info/debug ports dynamically through `allocate_free_port` while preserving `INFO_PORT` / `DEBUG_PORT` overrides; `bash -n e2e-tests/tests/test_rule_match_logging_noise.sh` passed. | 通过 |
+| 2026-06-13 | TC-LOD-12 | PR #236 CI run `27472448398` 中 macOS shard 1 先显示 `console-file admin request` 通过，随后 `test_cli_start_log_output_default_file.sh` 在停止流程卡到 900 秒 timeout。已将脚本的 `bifrost stop` 改为有界 best-effort helper，并在 stop 超时后使用 `safe_cleanup_proxy` 与端口清理兜底。执行 `bash -n e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过；执行 `BIFROST_E2E_STOP_TIMEOUT=3 SKIP_BUILD=true BIFROST_BIN="$(pwd)/target/release/bifrost" e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过，输出 10/10 passed，总耗时 7.6 秒。 | 通过 |
