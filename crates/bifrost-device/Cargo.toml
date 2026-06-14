@@ -1,6 +1,6 @@
 [package]
 name = "bifrost-device"
-version = "0.0.99"
+version = "0.0.100"
 edition = "2021"
 description = "Mobile device trust helpers for Bifrost"
 
