@@ -206,6 +206,7 @@ impl ImAgentProgressSnapshot {
             AgentTurnProgressEvent::TurnFinished { content } => {
                 self.phase = ImProgressPhase::Finished;
                 if !content.trim().is_empty() {
+                    self.remove_terminal_output_from_timeline(&content);
                     self.output = content;
                 }
             }
@@ -222,6 +223,23 @@ impl ImAgentProgressSnapshot {
 
     fn push_timeline(&mut self, item: ProgressTimelineItem) {
         self.timeline.push(item);
+    }
+
+    fn remove_terminal_output_from_timeline(&mut self, content: &str) {
+        let content = content.trim();
+        if content.is_empty() {
+            return;
+        }
+        if self.timeline.last().is_some_and(|item| {
+            item.kind == ProgressTimelineKind::Thinking && item.detail.trim() == content
+        }) {
+            self.timeline.pop();
+            self.last_thought = self.timeline.iter().rev().find_map(|item| {
+                (item.kind == ProgressTimelineKind::Thinking)
+                    .then(|| item.detail.clone())
+                    .filter(|value| !value.trim().is_empty())
+            });
+        }
     }
 
     fn finish_timeline_tool(&mut self, log: &ToolCallLog, duration_ms: u64) {
