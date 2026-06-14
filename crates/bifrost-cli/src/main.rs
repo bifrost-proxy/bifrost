@@ -140,6 +140,10 @@ fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
 
 #[cfg(windows)]
 fn main() {
+    // The native tray event loop must stay on the Windows process main thread.
+    // Normal CLI commands still run on a larger stack worker thread below.
+    commands::tray::run_if_tray_process();
+
     let handle = std::thread::Builder::new()
         .name("bifrost-cli-main".to_string())
         .stack_size(WINDOWS_CLI_MAIN_STACK_SIZE)

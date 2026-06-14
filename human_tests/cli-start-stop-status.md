@@ -76,7 +76,8 @@
 - 命令执行后终端立即返回（不阻塞）
 - 输出包含类似 "Proxy started in daemon mode" 或显示 PID 的信息
 - 执行 `curl -x http://127.0.0.1:8800 http://httpbin.org/get` 返回正常响应
-- `ps aux | grep bifrost` 可以看到后台进程
+- Unix/macOS 上 `ps aux | grep bifrost` 可以看到后台进程；Windows 上 `Get-Process bifrost` / `wmic process` 可以看到 detached child 仍在运行
+- `runtime.json` 中记录本次运行是 daemon 模式
 
 **清理**：
 ```bash
@@ -899,6 +900,49 @@ PY
 **执行记录**：
 - 2026-06-14 执行真实 macOS daemon 回归通过。先执行 `source ~/.zshrc && cargo build --bin bifrost` 构建当前 debug 二进制，再使用临时 `BIFROST_DATA_DIR=/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T/tmp.wzr0I8raPf` 和动态端口 `56501` 执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 target/debug/bifrost start -p 56501 --host 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --no-intercept -y`。启动输出 `Daemon started with PID: 36648`，Admin API `/_bifrost/api/proxy/address` ready；`runtime.json` 校验 `pid=36648`、`port=56501`、`runtime_start_mode=daemon`、`restartable_runtime=true`；`logs/bifrost.err` 未匹配 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`；随后 `BIFROST_DATA_DIR="$TEST_DATA_DIR" target/debug/bifrost stop` 输出 `Bifrost proxy stopped.`，端口释放，临时目录已清理。全流程使用 `--no-system-proxy` 与 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1`，未修改本机真实系统代理。
 - 2026-06-14 发现并修复 daemon exec child 停止后的 tray helper 残留后，复跑真实 macOS daemon 回归通过。使用临时 `BIFROST_DATA_DIR=/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T/tmp.t5Knv1qqNu` 和动态端口 `58707` 启动当前 debug 二进制，输出 `Daemon started with PID: 56778`；Admin API ready；`runtime.json` 校验 `pid=56778`、`port=58707`、`runtime_start_mode=daemon`、`restartable_runtime=true`；`logs/bifrost.err` 未匹配 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`；`stop` 后端口释放，并通过 `ps -axo command | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR"` 确认 `TRAY_HELPER_LEFT=0`。临时目录已清理，未修改本机真实系统代理。
+
+---
+
+### TC-CSS-34：Windows `start -d` 启动 detached daemon child（回归）
+
+**前置条件**：Windows 11 交互用户 session；服务未运行；使用临时数据目录和非默认端口，避免污染正式数据。
+
+**操作步骤**：
+1. 在 Windows PowerShell / Git Bash 中设置临时数据目录：
+   ```powershell
+   $env:BIFROST_DATA_DIR="$env:TEMP\bifrost-windows-daemon-test"
+   $env:BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1"
+   ```
+2. 执行 Windows daemon 启动：
+   ```powershell
+   bifrost.exe start -p 18894 -d --skip-cert-check --unsafe-ssl --no-system-proxy --no-tray
+   ```
+3. 确认命令返回后终端可继续输入，并访问 Admin API：
+   ```powershell
+   curl.exe -fsS http://127.0.0.1:18894/_bifrost/api/proxy/address
+   ```
+4. 检查 `runtime.json`：
+   ```powershell
+   Get-Content "$env:BIFROST_DATA_DIR\runtime.json"
+   ```
+5. 检查后台进程仍在运行：
+   ```powershell
+   Get-CimInstance Win32_Process -Filter "name='bifrost.exe'" | Select-Object ProcessId,CommandLine
+   ```
+6. 执行清理：
+   ```powershell
+   bifrost.exe -p 18894 stop
+   ```
+
+**预期结果**：
+- `start -d` 在 Windows 上不再返回 "Daemon mode is not supported on this platform"
+- 父进程输出 `Daemon started with PID: <pid>` 后返回，且不保留控制台窗口
+- Admin API ready，`/_bifrost/api/proxy/address` 响应包含端口 `18894`
+- `runtime.json` 的 `runtime_start_mode` 或兼容字段为 `daemon`，`port` 为 `18894`，`pid` 为有效后台进程
+- `stop` 能停止 detached child 并释放端口
+
+**执行记录**：
+- 2026-06-14 执行 Parallels Windows 11 现状排查：已安装 `bifrost 0.0.100`，`crates/bifrost-cli/src/commands/start.rs` 中 Windows `daemon` 分支原实现直接走 `#[cfg(not(unix))] return Err("Daemon mode is not supported on this platform")`，能解释用户反馈的 `bifrost start -d` 实际无法启动。PR #242 已引入跨平台 exec daemon path；本次新增 `test_windows_daemon_start_e2e.sh` 覆盖 Windows detached child 启动、Admin API ready、`runtime_start_mode=daemon` 和 stop 清理。按用户要求，固定后不再使用性能较差的 Parallels Windows VM 编译验证，交由远端 Windows CI 验证。
 
 ---
 

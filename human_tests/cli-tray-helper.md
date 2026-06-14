@@ -529,9 +529,39 @@ bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 - CI 或显式复用场景中，如果传入 `BIFROST_BIN`、`SKIP_BUILD=true` 或 `BIFROST_TRAY_STARTUP_SKIP_BUILD=1`，脚本复用现有 binary，不在 shard 内重新执行 release 构建
 - 主服务 Admin API `/_bifrost/api/proxy/address` 在临时端口 ready，响应包含本次端口
 - `runtime.json` 存在，且其中的 `port` 等于本次临时端口、`pid` 为有效进程 ID
-- 数据目录优先生成 `tray.pid`，且对应 helper 进程存活；Windows runner 若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但 `logs/tray.log*` 已包含启动标记，可按 log-only fallback 通过
+- 数据目录必须生成 `tray.pid`，且对应 helper 进程存活；Windows runner 只有在显式设置 `BIFROST_TRAY_STARTUP_ALLOW_LOG_ONLY=1` 的诊断模式下，才允许把 `logs/tray.log*` 启动标记作为降级信号。常规回归中，只有 `bifrost-tray starting` 但没有活 helper 必须判为失败
 - `logs/tray.log*` 包含 `bifrost-tray starting`
 - 脚本结束时停止主服务、杀掉 helper，并清理临时数据目录
+
+### TC-TH-24: Windows 前台启动托盘 helper 必须在主线程保持存活（回归）
+
+**操作步骤：**
+1. 在 Windows 11 交互用户 session 中准备当前版本 `bifrost.exe`
+2. 使用临时数据目录启动前台服务：
+
+```powershell
+$env:BIFROST_DATA_DIR="$env:TEMP\bifrost-tray-win-main-thread"
+$env:BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1"
+bifrost.exe start -p 18895 --unsafe-ssl --skip-cert-check --no-system-proxy
+```
+
+3. 等待 Admin API ready 后检查：
+
+```powershell
+Test-Path "$env:BIFROST_DATA_DIR\tray.pid"
+Get-Content "$env:BIFROST_DATA_DIR\tray.pid"
+Get-Process bifrost | Select-Object Id,Path,CommandLine
+Get-Content "$env:BIFROST_DATA_DIR\logs\tray.log*" -Tail 80
+```
+
+4. 观察 Windows notification area 是否出现 Bifrost 图标
+
+**预期结果：**
+- 前台 `bifrost start` 进程保持运行，Admin API ready
+- `tray.pid` 存在且 PID 对应 `bifrost.exe __tray` helper 进程仍存活
+- `logs/tray.log*` 包含 `bifrost-tray starting`，并且不只是重复 starting 后退出
+- Windows notification area 显示 Bifrost 图标
+- 如果只有 `tray.lock` 或 `tray.log*`，但没有 `tray.pid` / live helper / notification area 图标，判定为托盘启动回归
 
 ### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
 
@@ -587,6 +617,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-11 | TC-TH-22 | 针对 tray helper RSS 超过 50 MB 的内存口径与运行时瘦身验证：复用 HTTP agent、缩小 tray 日志队列、常驻/动作线程使用小栈，并对远端 group 失败做短退避；同时区分 `ps RSS` 与 macOS `Physical footprint`。 | 本地执行 release 真实 helper 测量：`ps RSS` 启动后约 38 MB，12 秒后约 56 MB；`vmmap -summary` 显示 `Physical footprint: 17.8M`、dirty heap 约 11.9M，满足 30 MB 独占内存目标；`strip` 将二进制从 110M 降至 92M 但 RSS 不变，说明 RSS 主要来自共享 framework 映射而非符号段；远端 group 失败日志退避后 12 秒内 warning 约 3 次，不再每秒刷 |
 | 2026-06-11 | TC-TH-23 | 针对 tray helper 内存优化做代码级归因与收尾：检查 `main.rs` 早返回入口、`Cargo.toml` 主 CLI 依赖、tray 模块 import、`tray_launcher.rs` 配置读取依赖，以及 `arboard`/`open`/`image`/`tao`/`tray-icon`/`muda`/`bifrost-core` 的依赖树；同时清理不采用的独立 helper 与手写平台 open/clipboard 方案。 | 本地执行 `rg -n "run_if_tray|install_panic_hook|init_crypto_provider|Cli::parse|init_logging" crates/bifrost-cli/src/main.rs`，确认 `run_if_tray_process` 在主初始化前；执行 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i arboard` 与 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i open`，确认继续复用跨平台 `arboard`/`open`；执行残留扫描 `rg -n "bifrost-tray-helper|find_sibling_tray_helper|tray_helper_binary|/usr/bin/pbcopy|fn copy_text_to_clipboard|fn open_location"` 无命中；已在 `design/cli-tray-helper.md` 记录独立 helper、替换 `open`/`arboard` 和原生 AppKit/Win32 的实测结论与不采用原因 |
 | 2026-06-12 | TC-TH-21 | 跟进 GitHub Actions run `27407031037` 的 `E2E Runner (aarch64-pc-windows-msvc)`，定位 `test_cli_tray_startup_ci.sh` 在 Windows tray helper 快速创建又清理 `tray.pid` 时，`[[ -s tray.pid ]]` 后的 `cat tray.pid | tr ...` 触发 `set -e -o pipefail` 直接退出。 | 待复验；脚本改为通过 `read_tray_pid_file` 容忍 PID 文件读取竞态，Windows 仍可用 tray log startup marker 做 log-only fallback |
+| 2026-06-14 | TC-TH-21 / TC-TH-24 | Parallels Windows 11 真实现状排查：`bifrost --version` 为 `0.0.100`，`config.toml` 中 `[tray] enabled = true`；前台 `bifrost.exe start` 进程存活且 `runtime_start_mode` 为 `foreground`，但数据目录只有 `tray.lock`、没有 `tray.pid`，系统中没有 `bifrost.exe __tray` helper。日志多次出现主进程 `tray helper launched` 与 helper `bifrost-tray starting data_dir=... parent_pid=...`，随后 helper 退出。代码路径确认 Windows `main()` 原先把 `run_if_tray_process()` 放在 `bifrost-cli-main` worker 线程里，导致原生 tray event loop 没有在进程主线程运行。 | 已修复代码入口：Windows `main()` 最早阶段先执行 `commands::tray::run_if_tray_process()`，普通 CLI 再进入大栈 worker；同时收紧 `test_cli_tray_startup_ci.sh`，默认不再允许 Windows log-only fallback。固定后 Windows VM 本地编译验证暂阻塞：该 VM 缺少 MSVC linker，`cargo build --bin bifrost` 报 `linker lld-link not found` / `link.exe was not found`，需要安装 Visual Studio Build Tools 或由 Windows CI 验证。 |
 
 ## 清理步骤
 

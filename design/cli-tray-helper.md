@@ -38,7 +38,6 @@ Bifrost 目前有两类启动形态：
 - 不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架。允许使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。
 - 不实现 Linux AppIndicator / StatusNotifierItem。
 - 不支持任意 shell 菜单项。
-- 不补齐 Windows `--daemon`。Windows 脚本启动仍可以是前台服务进程 + 独立 tray helper。
 - 不要求 Desktop 复用此 helper。Desktop 托盘体验可以后续单独设计。
 - 不提供公开 `bifrost tray` 子命令；托盘入口是内部 `bifrost __tray`，用户入口仍是 `bifrost start`。
 
@@ -140,6 +139,18 @@ helper 启动后：
    - 重新渲染菜单启用状态。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
+
+Windows 约束：`bifrost.exe __tray ...` 必须在进程主线程进入原生事件循环。Windows CLI 为避免深栈初始化问题会把普通 CLI 命令放到 `bifrost-cli-main` worker 线程执行，但隐藏托盘入口必须在 `main()` 最早阶段先派发，不能等到 worker 线程里再调用 `run_if_tray_process()`。否则 Tao/tray event loop 会在非主线程初始化，helper 可能只写出 `bifrost-tray starting` 后立即退出，表现为没有 `tray.pid`、没有 notification area 图标。
+
+### Windows daemon 侧
+
+Windows 不支持 Unix `fork` daemon。`bifrost start -d` 在 Windows 上使用当前 exe 重新启动一个 detached child：
+
+1. 父进程完成参数解析和启动前门禁。
+2. 父进程移除 child argv 中的 `-d` / `--daemon`，避免递归启动 daemon parent。
+3. 父进程设置 `BIFROST_WINDOWS_DAEMON_CHILD=1`，使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` spawn child，并把 stdout/stderr 写入 `<data_dir>/logs/bifrost.log` / `bifrost.err`。
+4. child 复用前台启动路径，但写入 `runtime.json` 时记录 `runtime_start_mode=daemon`。
+5. 父进程等待 proxy listener ready；child 提前退出或超时则父进程返回非零，不打印成功 PID。
 
 ### 单实例
 
@@ -855,7 +866,7 @@ helper 查找顺序：
   - macOS/Windows。
   - 用临时 `BIFROST_DATA_DIR` 启动 `bifrost start`，显式携带 `--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
   - 自行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost`，避免依赖 CI runner 后续 E2E 的构建顺序，并与现有 shell E2E 的 release binary 约定一致。
-  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows runner 上若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但启动日志已出现，可降级为 log-only 验证，避免平台托盘会话限制或 PID 文件竞态误伤。
+  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows 默认也必须要求 `tray.pid` 存在且 helper 进程存活。仅在明确设置 `BIFROST_TRAY_STARTUP_ALLOW_LOG_ONLY=1` 的已知无交互 runner 上，才允许把 `bifrost-tray starting` 作为诊断性降级信号，不能作为常规 CI 通过条件。
   - 在 `.github/workflows/ci.yml` 的 `e2e-macos-runner` 与 `e2e-windows-runner` 中执行，覆盖 macOS arm64、Windows x64 和 Windows arm64。
 - `e2e-tests/tests/test_cli_tray_launch_macos.sh`
   - macOS only。
@@ -878,7 +889,8 @@ Windows E2E：
 
 - 在 Windows runner 上执行 `test_cli_tray_startup_ci.sh` 的平台 smoke 验证。
 - 验证 Admin API ready、`runtime.json`、`tray.pid` 和 `tray.log`。
-- 验证 `bifrost start` 不依赖 daemon mode。
+- 验证 `bifrost start` 前台模式能创建可见托盘 helper，且不依赖 daemon mode。
+- 执行 `test_windows_daemon_start_e2e.sh`，验证 `bifrost start -d` 会启动 detached child、Admin API ready、`runtime.json` 记录 `runtime_start_mode=daemon`，并且 `stop` 能清理 child。
 - 验证 helper 不弹出 console window。
 
 ### 菜单响应性隔离
@@ -935,6 +947,7 @@ macOS 用例：
 Windows 用例：
 
 - `TC-TRAY-WIN-01`：CLI 启动后 notification area 出现 Bifrost 图标。
+- `TC-TRAY-WIN-01A`：CLI 前台启动后 `<data_dir>/tray.pid` 存在且 helper 进程存活；只有 `logs/tray.log*` 中出现 `bifrost-tray starting` 但无活 helper 时判为回归失败。
 - `TC-TRAY-WIN-02`：点击托盘图标展示菜单。
 - `TC-TRAY-WIN-02B`：主进程 Admin API 繁忙或无响应时，notification area 菜单仍从缓存快速展开。
 - `TC-TRAY-WIN-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个 notification area helper。

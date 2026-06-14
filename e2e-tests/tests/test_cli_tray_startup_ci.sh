@@ -69,6 +69,11 @@ tray_log_has_startup_marker() {
   log="$(first_tray_log 2>/dev/null || true)"
   [[ -n "$log" ]] && grep -q "bifrost-tray starting" "$log"
 }
+
+allow_windows_log_only_fallback() {
+  is_windows && [[ "${BIFROST_TRAY_STARTUP_ALLOW_LOG_ONLY:-0}" == "1" ]]
+}
+
 read_tray_pid_file() {
   local content
   content="$(cat "$DATA_DIR/tray.pid" 2>/dev/null || true)"
@@ -145,7 +150,7 @@ for _ in $(seq 1 160); do
       break
     fi
   fi
-  if is_windows && tray_log_has_startup_marker; then
+  if allow_windows_log_only_fallback && tray_log_has_startup_marker; then
     break
   fi
   if ! pid_is_alive "$START_PID"; then
@@ -164,7 +169,7 @@ if [[ -z "$TRAY_LOG" ]]; then
 fi
 
 if [[ -z "$TRAY_PID" || ! -s "$DATA_DIR/tray.pid" ]]; then
-  if is_windows && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
+  if allow_windows_log_only_fallback && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
     echo "INFO: tray.pid was not created; verified Windows tray helper startup from $TRAY_LOG"
     TRAY_PID="log-only"
   else
@@ -175,7 +180,7 @@ if [[ -z "$TRAY_PID" || ! -s "$DATA_DIR/tray.pid" ]]; then
 fi
 
 if [[ -n "$TRAY_PID" && "$TRAY_PID" != "log-only" ]] && ! pid_is_alive "$TRAY_PID"; then
-  if is_windows && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
+  if allow_windows_log_only_fallback && grep -q "bifrost-tray starting" "$TRAY_LOG"; then
     echo "INFO: tray helper process exited on Windows runner; verified startup from $TRAY_LOG"
     TRAY_PID="log-only"
   else
