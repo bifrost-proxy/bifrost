@@ -5934,3 +5934,1781 @@ mod helper_tests {
         assert_eq!(updated.policy_binding, grant.policy_binding);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use crate::remote_invoke::{Identity, RemoteInvokeConfig};
+    use crate::test_support::TestAdminState;
+
+    use base64::Engine;
+    use bifrost_core::BifrostError;
+    use ring::agreement::{EphemeralPrivateKey, X25519};
+    use ring::rand::SystemRandom;
+    use serde_json::{json, Value};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    /// Helper: build a worker whose storage-backed components (SSH key store,
+    /// grant stores, call history) are wired directly to the harness data dir
+    /// instead of relying on the process-global `bifrost_storage::data_dir()`.
+    /// This avoids cross-test interference for SSH-focused tests.
+    fn make_ssh_test_worker() -> (TestAdminState, Arc<RemoteInvokeWorker>) {
+        let harness = TestAdminState::builder().build();
+        let data_dir = harness.data_dir().to_path_buf();
+
+        let identity = Identity::load_or_create(&data_dir).expect("identity");
+        let config = RemoteInvokeConfig {
+            enabled: true,
+            relay_url: "http://127.0.0.1".to_string(),
+            ..Default::default()
+        };
+
+        let relay_client = Arc::new(RelayClient::new(
+            &config.relay_url,
+            &identity.instance_id,
+            &identity.device_name,
+            &identity.platform,
+        ));
+        let executor = Arc::new(RemoteInvokeExecutor::new_with_state(
+            "127.0.0.1",
+            0,
+            harness.state(),
+        ));
+
+        let call_history_store = Arc::new(CallHistoryStore::new(&data_dir));
+        let grant_crypto_store = Arc::new(GrantCryptoStore::new(&data_dir));
+        let grant_policy_store = Arc::new(GrantPolicyStore::new(&data_dir));
+        let grant_info_store = Arc::new(GrantInfoStore::new(&data_dir));
+        let ssh_key_store = Arc::new(SshKeyStore::new(&data_dir));
+
+        let worker = Arc::new(RemoteInvokeWorker {
+            config,
+            identity,
+            sync_manager: None,
+            relay_client,
+            executor,
+            state: Arc::new(RwLock::new(WorkerState::Disconnected)),
+            pending_pairings: Arc::new(RwLock::new(HashMap::new())),
+            active_calls: Arc::new(RwLock::new(HashMap::new())),
+            call_history_store,
+            local_grants: Arc::new(RwLock::new(HashMap::new())),
+            grant_crypto: Arc::new(RwLock::new(HashMap::new())),
+            grant_crypto_store,
+            grant_policy_store,
+            grant_info_store,
+            grant_policy: Arc::new(RwLock::new(HashMap::new())),
+            discovery_session: Arc::new(RwLock::new(None)),
+            ssh_key_store,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            current_stream_id: Arc::new(RwLock::new(None)),
+            reconnect_notify: Arc::new(Notify::new()),
+        });
+
+        (harness, worker)
+    }
+
+    /// Helper: minimal CallInfo identical to the one used in existing tests.
+    fn make_call_info(call_id: &str) -> CallInfo {
+        CallInfo {
+            call_id: call_id.to_string(),
+            grant_id: "grant-1".to_string(),
+            pairing_id: None,
+            client_instance_id: "test-instance".to_string(),
+            caller_fingerprint: "test-fp".to_string(),
+            auth_method: AuthMethod::PairCode,
+            command_kind: CommandKind::QueryReadonly,
+            status: CallStatus::Streaming,
+            command_summary: CommandSummary {
+                command_preview: "status".to_string(),
+                ..Default::default()
+            },
+            command: RemoteCommand {
+                kind: CommandKind::QueryReadonly,
+                command: "status".to_string(),
+                args_json: None,
+                query: None,
+                policy_id: None,
+                exec_mode: None,
+                argv: None,
+                shell: None,
+                command_text: None,
+                cwd: None,
+                env: None,
+                stdin_mode: None,
+                timeout_ms: None,
+                pty: None,
+                output_mode: None,
+                grant_id: None,
+                caller_fingerprint: None,
+                ssh_fingerprint: None,
+                file_access: Default::default(),
+            },
+            source_ip: None,
+            caller_display_name: Some("TestCaller".to_string()),
+            payload_digest: None,
+            stdout_digest: None,
+            stderr_digest: None,
+            exit_code: None,
+            started_at: 1000,
+            ended_at: None,
+            duration_ms: None,
+            bytes_in: None,
+            bytes_out: None,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
+            policy_id: None,
+            exec_mode: None,
+            output_mode: None,
+            pty_enabled: None,
+        }
+    }
+
+    /// Helper: build a GrantCryptoMaterial and matching session keys.
+    fn build_test_grant_crypto(
+        grant_id: &str,
+        call_id: &str,
+        kind: CommandKind,
+    ) -> (GrantCryptoMaterial, [u8; 32], [u8; 32]) {
+        let rng = SystemRandom::new();
+        let caller_private = EphemeralPrivateKey::generate(&X25519, &rng).expect("caller key");
+        let caller_public = caller_private.compute_public_key().expect("caller public");
+        let engine = base64::engine::general_purpose::STANDARD;
+        let caller_public_b64 = engine.encode(caller_public.as_ref());
+
+        let material = build_grant_crypto_material(&caller_public_b64).expect("grant crypto");
+
+        let open_key = derive_open_call_session_key(
+            &material.shared_secret,
+            grant_id,
+            Some(&material.caller_ephemeral_pub),
+            Some(&material.client_ephemeral_pub),
+            kind,
+        )
+        .expect("open-call key");
+        let stream_key = derive_call_session_key(
+            &material.shared_secret,
+            call_id,
+            Some(&material.caller_ephemeral_pub),
+            Some(&material.client_ephemeral_pub),
+        )
+        .expect("stream key");
+        (material, open_key, stream_key)
+    }
+
+    // ---------------------------------------------------------------------
+    // ActiveCallControl helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn active_call_mark_cancelled_and_flag() {
+        let active = ActiveCallControl::new("g1".to_string(), 42);
+        assert!(!active.is_cancelled());
+        active.mark_cancelled();
+        assert!(active.is_cancelled());
+    }
+
+    #[test]
+    fn active_call_update_call_result_streaming_to_completed() {
+        let active = ActiveCallControl::new("g1".to_string(), 1000);
+        active.set_call_info(make_call_info("c1"));
+
+        let result = CallResult {
+            status: CallStatus::Completed,
+            exit_code: 0,
+            duration_ms: 123,
+            bytes_out: Some(10),
+            stdout_digest: Some("out".to_string()),
+            stderr_digest: Some("err".to_string()),
+        };
+
+        let updated = active
+            .update_call_result(result)
+            .expect("call should update");
+        assert_eq!(updated.status, CallStatus::Completed);
+        assert_eq!(updated.exit_code, Some(0));
+        assert_eq!(updated.duration_ms, Some(123));
+        assert_eq!(updated.bytes_out, Some(10));
+        assert_eq!(updated.stdout_digest.as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn active_call_update_call_result_does_not_override_cancelled() {
+        let active = ActiveCallControl::new("g1".to_string(), 1000);
+        let mut info = make_call_info("c1");
+        info.status = CallStatus::Cancelled;
+        active.set_call_info(info.clone());
+
+        let result = CallResult {
+            status: CallStatus::Completed,
+            exit_code: 0,
+            duration_ms: 1,
+            bytes_out: None,
+            stdout_digest: None,
+            stderr_digest: None,
+        };
+
+        assert!(active.update_call_result(result).is_none());
+        let stored = active.call_info.lock().clone().expect("call info");
+        assert_eq!(stored.status, CallStatus::Cancelled);
+    }
+
+    #[test]
+    fn active_call_mark_call_cancelled_sets_exit_code_and_status() {
+        let active = ActiveCallControl::new("g1".to_string(), 1_000);
+        active.set_call_info(make_call_info("c1"));
+
+        let updated = active
+            .mark_call_cancelled(250)
+            .expect("call info should exist");
+        assert_eq!(updated.status, CallStatus::Cancelled);
+        assert_eq!(updated.exit_code, Some(130));
+        assert_eq!(updated.duration_ms, Some(250));
+        assert!(updated.ended_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn active_call_send_stdin_errors_without_sender() {
+        let active = ActiveCallControl::new("g1".to_string(), 0);
+        let err = active
+            .send_stdin(b"hello".to_vec())
+            .await
+            .expect_err("missing stdin sender should error");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("not accepting stdin"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn active_call_abort_task_clears_joinhandle() {
+        let active = Arc::new(ActiveCallControl::new("g1".to_string(), 0));
+        let cloned = Arc::clone(&active);
+        let handle = tokio::spawn(async move {
+            // Long-ish sleep that should be aborted before completion.
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            cloned.mark_cancelled();
+        });
+        *active.task.lock() = Some(handle);
+
+        active.abort_task();
+        assert!(active.task.lock().is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // Small pure helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn generate_pair_code_returns_fixed_length_digits() {
+        let code = generate_pair_code();
+        assert_eq!(code.len() as u32, PAIR_CODE_DIGITS);
+        assert!(code.chars().all(|c| c.is_ascii_digit()));
+    }
+
+    #[test]
+    fn pairing_request_is_alive_uses_ttl_when_no_expires_at() {
+        let pairing = TimestampedPairing {
+            request: PairingRequest {
+                pairing_id: "p1".to_string(),
+                caller_info: CallerInfo::default(),
+                command_summary: CommandSummary::default(),
+                command: RemoteCommand::default(),
+                caller_pubkey: String::new(),
+                expires_at: None,
+                client_ephemeral_pub: None,
+                caller_ephemeral_pub: None,
+            },
+            received_at: 1_000,
+        };
+        let ttl_ms = 5_000;
+        assert!(pairing_request_is_alive(&pairing, 5_999, ttl_ms));
+        assert!(!pairing_request_is_alive(&pairing, 6_001, ttl_ms));
+    }
+
+    #[test]
+    fn parse_relay_timestamp_millis_accepts_integer_value() {
+        let value = Value::from(1_234_567_u64);
+        assert_eq!(parse_relay_timestamp_millis(&value), Some(1_234_567));
+    }
+
+    #[test]
+    fn should_apply_call_result_rejects_update_after_cancelled() {
+        assert!(!should_apply_call_result(
+            CallStatus::Cancelled,
+            CallStatus::Completed,
+        ));
+    }
+
+    #[test]
+    fn should_apply_call_result_rejects_cancel_after_completed() {
+        assert!(!should_apply_call_result(
+            CallStatus::Completed,
+            CallStatus::Cancelled,
+        ));
+    }
+
+    #[test]
+    fn build_grant_crypto_material_rejects_invalid_b64() {
+        let err = build_grant_crypto_material("not-base64");
+        match err {
+            Ok(_) => panic!("expected error for invalid base64 caller_ephemeral_pub"),
+            Err(BifrostError::Config(msg)) => {
+                assert!(msg.contains("invalid caller_ephemeral_pub encoding"));
+            }
+            Err(other) => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Encryption / decryption helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn decrypt_call_command_errors_when_grant_crypto_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let payload = EncryptedPayload {
+            version: 2,
+            nonce: String::new(),
+            ciphertext: String::new(),
+            tag: String::new(),
+            aad: None,
+        };
+        let err = worker
+            .decrypt_call_command(
+                "missing-grant",
+                "call-1",
+                CommandKind::QueryReadonly,
+                GrantScope::RemoteQuery,
+                &payload,
+            )
+            .expect_err("missing grant should error");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("missing grant shared secret"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decrypt_call_command_round_trips_encrypted_command_payload() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-decrypt";
+        let call_id = "call-decrypt";
+        let kind = CommandKind::QueryReadonly;
+        let scope = GrantScope::RemoteQuery;
+
+        let (material, open_key, _stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        let original = RemoteCommand {
+            kind,
+            command: "status".to_string(),
+            args_json: Some("[\"--json\"]".to_string()),
+            ..Default::default()
+        };
+
+        let payload = encrypt_encrypted_payload_without_aad(&original, &open_key, 2)
+            .expect("encrypt payload");
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        let decrypted = worker
+            .decrypt_call_command(grant_id, call_id, kind, scope, &payload)
+            .expect("decrypt payload");
+
+        assert_eq!(decrypted.kind, original.kind);
+        assert_eq!(decrypted.command, original.command);
+        assert_eq!(decrypted.args_json, original.args_json);
+    }
+
+    #[test]
+    fn encrypt_call_exit_round_trips_exit_payload() {
+        let grant_id = "grant-exit";
+        let call_id = "call-exit";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        let payload = RemoteInvokeWorker::encrypt_call_exit(
+            &material,
+            call_id,
+            7,
+            Some(42),
+            Some("stderr".to_string()),
+            Some("stdout-digest".to_string()),
+            Some("stderr-digest".to_string()),
+        )
+        .expect("encrypt exit");
+
+        let decoded: Value =
+            decrypt_encrypted_payload_without_aad(&payload, &stream_key).expect("decrypt exit");
+
+        assert_eq!(decoded["exit_code"], 7);
+        assert_eq!(decoded["duration_ms"], 42);
+        assert_eq!(decoded["stderr"], "stderr");
+        assert_eq!(decoded["stdout_digest"], "stdout-digest");
+        assert_eq!(decoded["stderr_digest"], "stderr-digest");
+    }
+
+    #[test]
+    fn encrypt_call_frame_round_trips_chunk_payload() {
+        let grant_id = "grant-frame";
+        let call_id = "call-frame";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        let envelope = RemoteInvokeWorker::encrypt_call_frame(
+            &material,
+            call_id,
+            1,
+            "hello-chunk".to_string(),
+            kind,
+            GrantScope::RemoteShellExec,
+        )
+        .expect("encrypt frame");
+
+        assert_eq!(envelope.call_id, call_id);
+        assert_eq!(envelope.seq, 1);
+        assert_eq!(envelope.direction, FrameDirection::ClientToCaller);
+
+        let payload = EncryptedPayload {
+            version: envelope.version,
+            nonce: envelope.nonce.clone(),
+            ciphertext: envelope.ciphertext.clone(),
+            tag: envelope.tag.clone(),
+            aad: envelope.aad.clone(),
+        };
+        let decoded: Value =
+            decrypt_encrypted_payload_without_aad(&payload, &stream_key).expect("decrypt frame");
+        assert_eq!(decoded["chunk"], "hello-chunk");
+    }
+
+    // ---------------------------------------------------------------------
+    // SSH connect result & route refresh
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn build_ssh_connect_result_rejects_when_relay_not_verified() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let event = SshConnectEvent {
+            connect_id: "c1".to_string(),
+            device_code: "dev".to_string(),
+            ssh_key_fingerprint: "fp".to_string(),
+            caller_ephemeral_pub: None,
+            caller_info: None,
+            relay_verified: false,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert_eq!(result.connect_id, event.connect_id);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(result.reason.as_deref(), Some("relay_not_verified"));
+        assert!(result.grant_id.is_none());
+    }
+
+    #[test]
+    fn build_ssh_connect_result_rejects_when_no_active_key() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let event = SshConnectEvent {
+            connect_id: "c2".to_string(),
+            device_code: "dev".to_string(),
+            ssh_key_fingerprint: "fp".to_string(),
+            caller_ephemeral_pub: None,
+            caller_info: None,
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(result.reason.as_deref(), Some("ssh_key_not_found"));
+        assert!(result.grant_id.is_none());
+    }
+
+    #[test]
+    fn build_ssh_connect_result_rejects_on_device_code_mismatch() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+
+        let event = SshConnectEvent {
+            connect_id: "c3".to_string(),
+            device_code: "other-device".to_string(),
+            ssh_key_fingerprint: material.record.ssh_key_fingerprint.clone(),
+            caller_ephemeral_pub: None,
+            caller_info: None,
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(result.reason.as_deref(), Some("ssh_key_not_found"));
+    }
+
+    #[test]
+    fn build_ssh_connect_result_rejects_on_fingerprint_mismatch() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+
+        let event = SshConnectEvent {
+            connect_id: "c4".to_string(),
+            device_code: material.record.device_code.clone(),
+            ssh_key_fingerprint: "wrong-fp".to_string(),
+            caller_ephemeral_pub: None,
+            caller_info: None,
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("ssh_key_fingerprint_mismatch")
+        );
+    }
+
+    #[test]
+    fn build_ssh_connect_result_rejects_when_caller_ephemeral_pub_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+
+        let event = SshConnectEvent {
+            connect_id: "c5".to_string(),
+            device_code: material.record.device_code.clone(),
+            ssh_key_fingerprint: material.record.ssh_key_fingerprint.clone(),
+            caller_ephemeral_pub: None,
+            caller_info: None,
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("caller_ephemeral_pub is required for encrypted ssh remote commands"),
+        );
+    }
+
+    #[test]
+    fn build_ssh_connect_result_rejects_when_caller_ephemeral_pub_invalid() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+
+        let event = SshConnectEvent {
+            connect_id: "c6".to_string(),
+            device_code: material.record.device_code.clone(),
+            ssh_key_fingerprint: material.record.ssh_key_fingerprint.clone(),
+            caller_ephemeral_pub: Some("not-base64".to_string()),
+            caller_info: None,
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Rejected));
+        assert_eq!(
+            result.reason.as_deref(),
+            Some("invalid_caller_ephemeral_pub")
+        );
+    }
+
+    #[test]
+    fn build_ssh_connect_result_approves_with_valid_event() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .ssh_key_store
+            .create_or_replace_key("label".to_string(), GrantMode::Permanent)
+            .expect("create ssh key");
+
+        // Generate a valid caller ephemeral pubkey.
+        let rng = SystemRandom::new();
+        let caller_private = EphemeralPrivateKey::generate(&X25519, &rng).expect("caller key");
+        let caller_public = caller_private.compute_public_key().expect("caller public");
+        let engine = base64::engine::general_purpose::STANDARD;
+        let caller_ephemeral_pub = engine.encode(caller_public.as_ref());
+
+        let caller_info = CallerInfo {
+            fingerprint: "caller-fp".to_string(),
+            display_name: Some("Caller".to_string()),
+            user_agent: None,
+            source_ip: None,
+            platform: None,
+            hostname: None,
+            username: None,
+            label: Some("label".to_string()),
+            os_version: Some("os".to_string()),
+            arch: Some("arch".to_string()),
+        };
+
+        let event = SshConnectEvent {
+            connect_id: "c7".to_string(),
+            device_code: material.record.device_code.clone(),
+            ssh_key_fingerprint: material.record.ssh_key_fingerprint.clone(),
+            caller_ephemeral_pub: Some(caller_ephemeral_pub),
+            caller_info: Some(caller_info.clone()),
+            relay_verified: true,
+        };
+
+        let result = worker.build_ssh_connect_result(&event);
+        assert!(matches!(result.status, SshConnectResultStatus::Approved));
+        assert_eq!(result.connect_id, event.connect_id);
+        assert_eq!(result.caller_fingerprint.as_deref(), Some("caller-fp"));
+        assert_eq!(
+            result.ssh_key_fingerprint.as_deref(),
+            Some(material.record.ssh_key_fingerprint.as_str()),
+        );
+        assert_eq!(result.grant_mode, Some(GrantMode::Permanent));
+        assert!(result.grant_id.is_some());
+    }
+
+    #[test]
+    fn trigger_ssh_route_refresh_sets_state_to_reconnecting() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert_ne!(worker.state(), WorkerState::Reconnecting);
+        worker.trigger_ssh_route_refresh();
+        assert_eq!(worker.state(), WorkerState::Reconnecting);
+    }
+
+    #[test]
+    fn export_active_ssh_key_round_trips_after_create() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        let material = worker
+            .create_ssh_key("export-key".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let exported = worker
+            .export_active_ssh_key()
+            .expect("export active key")
+            .expect("active key should exist");
+        assert_eq!(exported.record.id, material.record.id);
+    }
+
+    #[test]
+    fn create_ssh_key_creates_active_key_and_seeds_policy() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        let material = worker
+            .create_ssh_key("test-key".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let exported = worker
+            .export_active_ssh_key()
+            .expect("export active key")
+            .expect("active key should exist");
+
+        assert_eq!(exported.record.id, material.record.id);
+        assert_eq!(exported.record.label, "test-key");
+    }
+
+    #[test]
+    fn update_ssh_key_updates_label_and_mode() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .create_ssh_key("old-label".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let updated = worker
+            .update_ssh_key(
+                Some("new-label".to_string()),
+                Some(GrantMode::ThirtyMinutes),
+            )
+            .expect("update key")
+            .expect("key should exist");
+
+        assert_eq!(updated.id, material.record.id);
+        assert_eq!(updated.label, "new-label");
+        assert_eq!(updated.grant_mode, GrantMode::Permanent);
+    }
+
+    #[test]
+    fn update_ssh_key_returns_none_when_no_active_key() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let updated = worker
+            .update_ssh_key(None, None)
+            .expect("update without key");
+        assert!(updated.is_none());
+    }
+
+    #[test]
+    fn reset_ssh_key_rotates_active_key() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let original = worker
+            .create_ssh_key("reset-label".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let reset = worker
+            .reset_ssh_key()
+            .expect("reset result")
+            .expect("reset should return material");
+
+        assert_ne!(reset.record.id, original.record.id);
+
+        let active = worker
+            .export_active_ssh_key()
+            .expect("export active")
+            .expect("active key");
+        assert_eq!(active.record.id, reset.record.id);
+    }
+
+    #[test]
+    fn revoke_ssh_key_revokes_and_clears_local_grants() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .create_ssh_key("revoke-label".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let grant = GrantInfo {
+            grant_id: "ssh-grant".to_string(),
+            client_instance_id: "inst".to_string(),
+            caller_fingerprint: "fp".to_string(),
+            caller_display_name: None,
+            label: None,
+            grant_mode: GrantMode::Permanent,
+            grant_scope: GrantScope::RemoteQuery,
+            file_access: FileAccessScope::None,
+            auth_method: AuthMethod::SshPublickey,
+            status: GrantStatus::Active,
+            first_authorized_at: now_millis(),
+            last_command_at: None,
+            expires_at: None,
+            last_used_at: None,
+            max_calls: None,
+            remaining_calls: None,
+            use_count: 0,
+            ssh_key_id: Some(material.record.id.clone()),
+            ssh_key_fingerprint: Some(material.record.ssh_key_fingerprint.clone()),
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            os_version: None,
+            arch: None,
+        };
+        worker
+            .local_grants
+            .write()
+            .insert(grant.grant_id.clone(), grant);
+
+        let revoked = worker.revoke_ssh_key().expect("revoke key");
+        assert!(revoked.is_some());
+        assert!(worker.local_grants.read().get("ssh-grant").is_none());
+    }
+
+    #[test]
+    fn ensure_active_ssh_file_access_policy_returns_none_without_key() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let result = worker
+            .ensure_active_ssh_file_access_policy()
+            .expect("ensure policy");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn ensure_active_ssh_file_access_policy_returns_some_with_key() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker
+            .create_ssh_key("policy-label".to_string(), GrantMode::Permanent, None)
+            .expect("create ssh key");
+
+        let result = worker
+            .ensure_active_ssh_file_access_policy()
+            .expect("ensure policy");
+        assert!(result.is_some());
+    }
+
+    // ---------------------------------------------------------------------
+    // Sleep helper
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn sleep_with_shutdown_check_returns_after_delay() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker.sleep_with_shutdown_check(5).await;
+    }
+
+    #[tokio::test]
+    async fn sleep_with_shutdown_check_returns_on_reconnect_notify() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let notify_worker = Arc::clone(&worker);
+        let handle = tokio::spawn(async move {
+            notify_worker.sleep_with_shutdown_check(5_000).await;
+        });
+        // Give the spawned task a moment to start and then trigger reconnect.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        worker.reconnect_notify.notify_waiters();
+        // The task should finish quickly instead of waiting for the full delay.
+        tokio::time::timeout(Duration::from_millis(100), handle)
+            .await
+            .expect("sleep_with_shutdown_check should wake early")
+            .expect("task join");
+    }
+
+    // ---------------------------------------------------------------------
+    // apply_cancelled_call
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn apply_cancelled_call_updates_active_call_and_persists_history() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-cancel-active";
+
+        let active_call = Arc::new(ActiveCallControl::new("grant-1".to_string(), now_millis()));
+        let mut info = make_call_info(call_id);
+        info.started_at = now_millis();
+        active_call.set_call_info(info.clone());
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        worker.apply_cancelled_call(call_id);
+
+        assert!(!worker.active_calls.read().contains_key(call_id));
+        let stored = worker
+            .get_call(call_id)
+            .expect("cancelled call should be persisted");
+        assert_eq!(stored.status, CallStatus::Cancelled);
+        assert_eq!(stored.exit_code, Some(130));
+        assert!(stored.duration_ms.is_some());
+        assert!(stored.ended_at.is_some());
+    }
+
+    #[test]
+    fn apply_cancelled_call_updates_persisted_call_when_not_active() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-cancel-history";
+        let mut info = make_call_info(call_id);
+        info.started_at = now_millis();
+        worker.persist_call_history_entry(&info);
+
+        worker.apply_cancelled_call(call_id);
+
+        let stored = worker
+            .get_call(call_id)
+            .expect("cancelled call should be persisted");
+        assert_eq!(stored.status, CallStatus::Cancelled);
+        assert_eq!(stored.exit_code, Some(130));
+        assert!(stored.duration_ms.is_some());
+        assert!(stored.ended_at.is_some());
+    }
+
+    #[test]
+    fn apply_cancelled_call_noop_when_unknown_call() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker.apply_cancelled_call("missing-call-id");
+        // Nothing to assert beyond "no panic"; this exercises the debug! branch.
+    }
+
+    // ---------------------------------------------------------------------
+    // list_grants_and_cleanup & revoke_local_ssh_grants
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn list_grants_and_cleanup_returns_live_and_prunes_dead() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let grant_live = GrantInfo {
+            grant_id: "live".to_string(),
+            client_instance_id: "inst".to_string(),
+            caller_fingerprint: "fp-live".to_string(),
+            caller_display_name: None,
+            label: None,
+            grant_mode: GrantMode::Permanent,
+            grant_scope: GrantScope::RemoteQuery,
+            file_access: FileAccessScope::None,
+            auth_method: AuthMethod::PairCode,
+            status: GrantStatus::Active,
+            first_authorized_at: now,
+            last_command_at: None,
+            expires_at: None,
+            last_used_at: None,
+            max_calls: None,
+            remaining_calls: None,
+            use_count: 0,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            os_version: None,
+            arch: None,
+        };
+        let mut grant_dead = grant_live.clone();
+        grant_dead.grant_id = "dead".to_string();
+        grant_dead.status = GrantStatus::Expired;
+
+        worker
+            .local_grants
+            .write()
+            .insert(grant_live.grant_id.clone(), grant_live);
+        worker
+            .local_grants
+            .write()
+            .insert(grant_dead.grant_id.clone(), grant_dead);
+
+        let live_values = worker.list_grants_and_cleanup();
+        assert_eq!(live_values.len(), 1);
+        assert_eq!(live_values[0]["grant_id"], "live");
+        assert!(worker.local_grants.read().get("dead").is_none());
+    }
+
+    #[test]
+    fn revoke_local_ssh_grants_revokes_ssh_grants_without_filter() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        let ssh_grant = GrantInfo {
+            grant_id: "ssh-grant".to_string(),
+            client_instance_id: "inst".to_string(),
+            caller_fingerprint: "fp".to_string(),
+            caller_display_name: None,
+            label: None,
+            grant_mode: GrantMode::Permanent,
+            grant_scope: GrantScope::RemoteQuery,
+            file_access: FileAccessScope::None,
+            auth_method: AuthMethod::SshPublickey,
+            status: GrantStatus::Active,
+            first_authorized_at: now_millis(),
+            last_command_at: None,
+            expires_at: None,
+            last_used_at: None,
+            max_calls: None,
+            remaining_calls: None,
+            use_count: 0,
+            ssh_key_id: Some("ssh-key-1".to_string()),
+            ssh_key_fingerprint: Some("ssh-fp".to_string()),
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            os_version: None,
+            arch: None,
+        };
+        worker
+            .local_grants
+            .write()
+            .insert(ssh_grant.grant_id.clone(), ssh_grant);
+
+        worker.revoke_local_ssh_grants(None);
+        assert!(worker.local_grants.read().get("ssh-grant").is_none());
+    }
+
+    #[test]
+    fn revoke_local_ssh_grants_keeps_other_auth_methods_and_filtered_keys() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        let grant_pair = GrantInfo {
+            grant_id: "pair-grant".to_string(),
+            client_instance_id: "inst".to_string(),
+            caller_fingerprint: "fp".to_string(),
+            caller_display_name: None,
+            label: None,
+            grant_mode: GrantMode::Permanent,
+            grant_scope: GrantScope::RemoteQuery,
+            file_access: FileAccessScope::None,
+            auth_method: AuthMethod::PairCode,
+            status: GrantStatus::Active,
+            first_authorized_at: now_millis(),
+            last_command_at: None,
+            expires_at: None,
+            last_used_at: None,
+            max_calls: None,
+            remaining_calls: None,
+            use_count: 0,
+            ssh_key_id: None,
+            ssh_key_fingerprint: None,
+            caller_ephemeral_pub: None,
+            client_ephemeral_pub: None,
+            policy_binding: None,
+            shell_policy_set_version_snapshot: None,
+            interactive_allowed: None,
+            stdin_allowed: None,
+            os_version: None,
+            arch: None,
+        };
+        let grant_ssh_other = GrantInfo {
+            grant_id: "ssh-other".to_string(),
+            auth_method: AuthMethod::SshPublickey,
+            ssh_key_id: Some("other-key".to_string()),
+            ..grant_pair.clone()
+        };
+        let grant_ssh_target = GrantInfo {
+            grant_id: "ssh-target".to_string(),
+            auth_method: AuthMethod::SshPublickey,
+            ssh_key_id: Some("target-key".to_string()),
+            ..grant_pair.clone()
+        };
+
+        let mut grants = worker.local_grants.write();
+        grants.insert(grant_pair.grant_id.clone(), grant_pair);
+        grants.insert(grant_ssh_other.grant_id.clone(), grant_ssh_other);
+        grants.insert(grant_ssh_target.grant_id.clone(), grant_ssh_target);
+        drop(grants);
+
+        worker.revoke_local_ssh_grants(Some("target-key"));
+
+        let grants = worker.local_grants.read();
+        assert!(grants.get("pair-grant").is_some());
+        assert!(grants.get("ssh-other").is_some());
+        assert!(grants.get("ssh-target").is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // dispatch_sse_event & handle_call_frame
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dispatch_sse_event_parsing_pairing_request_sets_pending() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let payload = json!({
+            "pairing_id": "pair-1",
+            "caller_fingerprint": "fp",
+            "expires_at": 0
+        });
+
+        worker
+            .dispatch_sse_event("pairing_request", &payload.to_string())
+            .await;
+
+        let pending = worker.pending_pairings();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].pairing_id, "pair-1");
+    }
+
+    #[tokio::test]
+    async fn handle_pairing_request_missing_pairing_id_is_ignored() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let payload = json!({
+            "caller_fingerprint": "fp-missing",
+            "command_summary": {},
+            "command": {},
+            "caller_pubkey": "",
+        });
+
+        worker.handle_pairing_request(payload).await;
+
+        assert!(worker.pending_pairings().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_pairing_request_uses_caller_info_when_present() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let payload = json!({
+            "pairing_id": "pair-ci",
+            "caller_info": {
+                "fingerprint": "fp-ci",
+                "display_name": "Display Name",
+                "hostname": "host-ci"
+            },
+            "command_summary": {},
+            "command": {},
+            "caller_pubkey": "pubkey-ci",
+        });
+
+        worker.handle_pairing_request(payload).await;
+
+        let pending = worker.pending_pairings();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].pairing_id, "pair-ci");
+        assert_eq!(pending[0].caller_info.fingerprint, "fp-ci");
+        assert_eq!(
+            pending[0].caller_info.display_name.as_deref(),
+            Some("Display Name")
+        );
+        assert_eq!(pending[0].caller_info.hostname.as_deref(), Some("host-ci"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_sse_event_call_cancel_delegates_to_apply_cancelled_call() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-from-cancel";
+        let mut info = make_call_info(call_id);
+        info.started_at = now_millis();
+        worker.persist_call_history_entry(&info);
+
+        let payload = json!({ "call_id": call_id });
+        worker
+            .dispatch_sse_event("call_cancel", &payload.to_string())
+            .await;
+
+        let stored = worker
+            .get_call(call_id)
+            .expect("cancelled call should exist");
+        assert_eq!(stored.status, CallStatus::Cancelled);
+        assert_eq!(stored.exit_code, Some(130));
+    }
+
+    #[tokio::test]
+    async fn dispatch_sse_event_client_hello_ack_does_not_change_state() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+        worker.dispatch_sse_event("client_hello_ack", "{}").await;
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn dispatch_sse_event_ping_is_noop() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker.dispatch_sse_event("ping", "{}").await;
+        // State should remain unchanged.
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn dispatch_sse_event_replaced_sets_state_disconnected() {
+        let (_harness, worker) = make_ssh_test_worker();
+        // Initial state is Disconnected; calling replaced should keep it Disconnected.
+        worker.dispatch_sse_event("replaced", "{}").await;
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn dispatch_sse_event_unknown_event_is_ignored() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker.dispatch_sse_event("unknown_event", "{}").await;
+        // No panic and no state change.
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_forwards_plain_bytes_via_stdin_channel() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-stdin";
+        let call_id = "call-frame-stdin";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        // Encrypt a JSON payload compatible with CallerInputFramePayload
+        let frame_json = json!({ "data": "hello-stdin" });
+        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
+            .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+
+        let received = rx.recv().await.expect("stdin bytes should arrive");
+        assert_eq!(received, b"hello-stdin".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_when_grant_crypto_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-no-crypto";
+        let envelope = EncryptedEnvelope {
+            version: 2,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: String::new(),
+            ciphertext: String::new(),
+            tag: String::new(),
+            aad: None,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        // No panic, exercises early return branch when grant_crypto is missing.
+        worker.handle_call_frame(data).await;
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_on_missing_call_id_or_envelope() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        let data_missing_call_id = json!({ "envelope_json": "{}" });
+        worker.handle_call_frame(data_missing_call_id).await;
+
+        let data_missing_envelope = json!({ "call_id": "call-missing-envelope" });
+        worker.handle_call_frame(data_missing_envelope).await;
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_rejects_invalid_direction() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-bad-dir";
+        let envelope = EncryptedEnvelope {
+            version: 2,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::ClientToCaller,
+            nonce: String::new(),
+            ciphertext: String::new(),
+            tag: String::new(),
+            aad: None,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_for_inactive_call() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let call_id = "call-inactive";
+        let envelope = EncryptedEnvelope {
+            version: 2,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: String::new(),
+            ciphertext: String::new(),
+            tag: String::new(),
+            aad: None,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_on_decrypt_error() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-decrypt-error";
+        let call_id = "call-decrypt-error";
+        let (material, _open_key, _stream_key) =
+            build_test_grant_crypto(grant_id, call_id, CommandKind::ShellExec);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let envelope = EncryptedEnvelope {
+            version: 2,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: "not-base64".to_string(),
+            ciphertext: "bad".to_string(),
+            tag: "bad".to_string(),
+            aad: None,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_prioritizes_data_b64_over_plain_data() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-b64";
+        let call_id = "call-frame-b64";
+        let (material, _open_key, stream_key) =
+            build_test_grant_crypto(grant_id, call_id, CommandKind::ShellExec);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let encoded = base64::engine::general_purpose::STANDARD.encode(b"from-b64".as_ref());
+        let frame_json = json!({ "data_b64": encoded, "data": "ignored" });
+        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
+            .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+
+        let received = rx.recv().await.expect("stdin bytes should arrive");
+        assert_eq!(received, b"from-b64".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_on_base64_decode_error() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-b64-error";
+        let call_id = "call-frame-b64-error";
+        let (material, _open_key, stream_key) =
+            build_test_grant_crypto(grant_id, call_id, CommandKind::ShellExec);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let frame_json = json!({ "data_b64": "***not-base64***" });
+        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
+            .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+
+        // Decode failure should result in no stdin bytes being forwarded.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_returns_on_empty_payload() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-empty";
+        let call_id = "call-frame-empty";
+        let (material, _open_key, stream_key) =
+            build_test_grant_crypto(grant_id, call_id, CommandKind::ShellExec);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let frame_json = json!({ "data": "" });
+        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
+            .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        worker.handle_call_frame(data).await;
+
+        // Empty payload should be ignored.
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_logs_error_when_stdin_sender_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-no-stdin";
+        let call_id = "call-no-stdin";
+        let (material, _open_key, stream_key) =
+            build_test_grant_crypto(grant_id, call_id, CommandKind::ShellExec);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material);
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let frame_json = json!({ "data": "hello" });
+        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
+            .expect("encrypt frame payload");
+        let envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        let data = json!({
+            "call_id": call_id,
+            "envelope_json": serde_json::to_string(&envelope).unwrap(),
+        });
+
+        // send_stdin will error because no stdin sender was configured.
+        worker.handle_call_frame(data).await;
+    }
+
+    // ---------------------------------------------------------------------
+    // run_loop / registration_session_token / early-return helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn registration_session_token_returns_none_without_sync_manager() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert!(worker.registration_session_token().is_none());
+    }
+
+    #[tokio::test]
+    async fn register_with_relay_requires_session_token() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let err = worker
+            .register_with_relay()
+            .await
+            .expect_err("missing sync session token should be rejected");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("sync session token"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_loop_exits_immediately_when_shutdown_is_set() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker
+            .shutdown
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        worker.run_loop().await;
+        assert_eq!(worker.state(), WorkerState::Disconnected);
+    }
+
+    // ---------------------------------------------------------------------
+    // Small accessors and local-only helpers
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn discovery_session_and_active_call_ids_accessors() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert!(worker.discovery_session().is_none());
+        assert!(worker.active_call_ids().is_empty());
+
+        let c1 = Arc::new(ActiveCallControl::new("g1".to_string(), now_millis()));
+        let c2 = Arc::new(ActiveCallControl::new("g2".to_string(), now_millis()));
+        {
+            let mut active = worker.active_calls.write();
+            active.insert("c1".to_string(), c1);
+            active.insert("c2".to_string(), c2);
+        }
+
+        let mut ids = worker.active_call_ids();
+        ids.sort();
+        assert_eq!(ids, vec!["c1".to_string(), "c2".to_string()]);
+    }
+
+    #[test]
+    fn clear_calls_clears_persisted_history() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let mut call = make_call_info("clear-me");
+        call.started_at = now_millis();
+        worker.persist_call_history_entry(&call);
+        assert_eq!(worker.list_calls().len(), 1);
+
+        worker.clear_calls();
+        assert!(worker.list_calls().is_empty());
+    }
+
+    #[test]
+    fn relay_client_and_executor_accessors_expose_internals() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let relay = worker.relay_client();
+        let executor = worker.executor();
+
+        assert!(!relay.base_url().is_empty());
+        assert!(Arc::ptr_eq(relay, worker.relay_client()));
+        assert!(Arc::ptr_eq(executor, worker.executor()));
+    }
+
+    // ---------------------------------------------------------------------
+    // update_relay_url
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn update_relay_url_is_noop_when_unchanged() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let old_url = worker.relay_client().base_url();
+        worker.update_relay_url(&old_url);
+        assert_eq!(worker.relay_client().base_url(), old_url);
+    }
+
+    #[test]
+    fn update_relay_url_clears_state_when_changed() {
+        let (_harness, worker) = make_ssh_test_worker();
+
+        *worker.discovery_session.write() = Some(DiscoverySession {
+            session_id: "session-1".to_string(),
+            pair_code: "123456".to_string(),
+            expires_at: now_millis() + 10_000,
+            created_at: now_millis(),
+        });
+        worker.pending_pairings.write().insert(
+            "pairing-1".to_string(),
+            TimestampedPairing {
+                request: PairingRequest {
+                    pairing_id: "pairing-1".to_string(),
+                    caller_info: CallerInfo::default(),
+                    command_summary: CommandSummary::default(),
+                    command: RemoteCommand::default(),
+                    caller_pubkey: String::new(),
+                    expires_at: None,
+                    client_ephemeral_pub: None,
+                    caller_ephemeral_pub: None,
+                },
+                received_at: now_millis(),
+            },
+        );
+        worker.local_grants.write().insert(
+            "grant-1".to_string(),
+            GrantInfo {
+                grant_id: "grant-1".to_string(),
+                client_instance_id: worker.identity.instance_id.clone(),
+                caller_fingerprint: "fp".to_string(),
+                caller_display_name: None,
+                label: None,
+                grant_mode: GrantMode::Permanent,
+                grant_scope: GrantScope::RemoteQuery,
+                file_access: FileAccessScope::None,
+                auth_method: AuthMethod::PairCode,
+                status: GrantStatus::Active,
+                first_authorized_at: now_millis(),
+                last_command_at: None,
+                expires_at: None,
+                last_used_at: None,
+                max_calls: None,
+                remaining_calls: None,
+                use_count: 0,
+                ssh_key_id: None,
+                ssh_key_fingerprint: None,
+                caller_ephemeral_pub: None,
+                client_ephemeral_pub: None,
+                policy_binding: None,
+                shell_policy_set_version_snapshot: None,
+                interactive_allowed: None,
+                stdin_allowed: None,
+                os_version: None,
+                arch: None,
+            },
+        );
+        worker.grant_crypto.write().insert(
+            "grant-1".to_string(),
+            GrantCryptoMaterial {
+                shared_secret: vec![1, 2, 3],
+                caller_ephemeral_pub: String::new(),
+                client_ephemeral_pub: String::new(),
+            },
+        );
+
+        let new_url = format!("{}/changed", worker.relay_client().base_url());
+        worker.update_relay_url(&new_url);
+
+        assert_eq!(
+            worker.relay_client().base_url(),
+            new_url.trim_end_matches('/'),
+        );
+        assert!(worker.discovery_session.read().is_none());
+        assert!(worker.pending_pairings.read().is_empty());
+        assert!(worker.local_grants.read().is_empty());
+        assert!(worker.grant_crypto.read().is_empty());
+    }
+
+    // ---------------------------------------------------------------------
+    // approve_pairing / reject_pairing early error paths
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn approve_pairing_returns_error_when_pairing_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let err = worker
+            .approve_pairing(
+                "missing",
+                GrantMode::Permanent,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("missing pairing should be rejected");
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("not found or expired"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn reject_pairing_returns_error_when_pairing_missing() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let err = worker
+            .reject_pairing("missing")
+            .await
+            .expect_err("missing pairing should be rejected");
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("not found or expired"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // poll_pending_pairings_from_relay / reconcile_active_calls_with_relay
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn poll_pending_pairings_from_relay_noop_without_discovery_session() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert!(worker.discovery_session.read().is_none());
+        worker.poll_pending_pairings_from_relay().await;
+        assert!(worker.pending_pairings.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reconcile_active_calls_with_relay_noop_without_active_calls() {
+        let (_harness, worker) = make_ssh_test_worker();
+        assert!(worker.active_calls.read().is_empty());
+        worker.reconcile_active_calls_with_relay().await;
+    }
+
+    #[tokio::test]
+    async fn maybe_refresh_pair_code_does_nothing_without_session() {
+        let (_harness, worker) = make_ssh_test_worker();
+        worker.maybe_refresh_pair_code().await;
+        assert!(worker.discovery_session.read().is_none());
+    }
+
+    // ---------------------------------------------------------------------
+    // handle_grant_created (no network branches)
+    // ---------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_grant_created_missing_grant_id_is_ignored() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let payload = json!({
+            "caller_fingerprint": "fp",
+            "grant_mode": "permanent"
+        });
+        worker.handle_grant_created(payload).await;
+        assert!(worker.local_grants.read().is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_grant_created_inserts_grant_when_crypto_available() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-created";
+        worker.grant_crypto.write().insert(
+            grant_id.to_string(),
+            GrantCryptoMaterial {
+                shared_secret: vec![1],
+                caller_ephemeral_pub: String::new(),
+                client_ephemeral_pub: String::new(),
+            },
+        );
+        let payload = json!({
+            "grant_id": grant_id,
+            "grant_mode": "permanent",
+            "grant_scope": "remote_query",
+            "file_access": "none",
+            "caller_fingerprint": "fp-created"
+        });
+
+        worker.handle_grant_created(payload).await;
+
+        let grants = worker.local_grants.read();
+        let info = grants.get(grant_id).expect("grant should be inserted");
+        assert_eq!(info.grant_id, grant_id);
+        assert_eq!(info.caller_fingerprint, "fp-created");
+    }
+}

@@ -5485,3 +5485,1678 @@ mod tests {
         .expect("write to upstream tunnel");
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use bifrost_admin::{TrafficRecord, TrafficType};
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty};
+    use hyper::body::Incoming;
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::header::HeaderValue;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper::{header, Method, Request, Response, StatusCode, Uri};
+    use hyper_util::rt::TokioIo;
+    use serde_json::json;
+    use std::collections::HashMap;
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use url::Url;
+    use wiremock::matchers::method as wm_method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::server::{HeaderReplaceRule, HeaderReplaceTarget};
+    use bifrost_core::rule_share::{
+        append_rule_share_query, content_sha256, RuleSharePayload,
+        RULE_SHARE_CONTENT_HASH_ALGORITHM, RULE_SHARE_PROTOCOL_VERSION,
+    };
+    use parking_lot::Mutex;
+
+    /// 使用内存 duplex 连接，通过完整 HTTP/1.1 流程驱动 `handle_http_request`，避免直接构造 `Incoming`。
+    async fn run_handle_http_request_with_rules(
+        rules: Arc<dyn RulesResolver>,
+        request: Request<Empty<Bytes>>,
+    ) -> Response<Incoming> {
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let client_io = TokioIo::new(client_io);
+        let server_io = TokioIo::new(server_io);
+
+        // client 连接
+        let (mut sender, client_conn) = client_http1::handshake(client_io)
+            .await
+            .expect("client handshake");
+        tokio::spawn(async move {
+            if let Err(err) = client_conn.await {
+                eprintln!("client conn error: {err}");
+            }
+        });
+
+        // server 连接，内部调用 handle_http_request
+        let rules_clone = rules.clone();
+        let service = service_fn(move |req: Request<Incoming>| {
+            let rules = rules_clone.clone();
+            async move {
+                let ctx = RequestContext::new();
+                let resp = handle_http_request(
+                    req,
+                    rules,
+                    false, // verbose_logging
+                    false, // unsafe_ssl
+                    1024 * 1024,
+                    8 * 1024,
+                    false, // inject_bifrost_badge
+                    &ctx,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("handle_http_request should succeed");
+                Ok::<_, Infallible>(resp)
+            }
+        });
+
+        let server_conn = server_http1::Builder::new().serve_connection(server_io, service);
+        tokio::spawn(async move {
+            if let Err(err) = server_conn.await {
+                eprintln!("server conn error: {err}");
+            }
+        });
+
+        let response = sender
+            .send_request(request)
+            .await
+            .expect("send request through client");
+        response
+    }
+
+    struct DirectStatusResolver;
+
+    impl RulesResolver for DirectStatusResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                status_code: Some(204),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_direct_status_returns_mock_response() {
+        let rules: Arc<dyn RulesResolver> = Arc::new(DirectStatusResolver);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/direct-status")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let (_, body) = resp.into_parts();
+        let bytes = body.collect().await.expect("collect body").to_bytes();
+        // 直接状态响应默认没有 body 文本
+        assert!(bytes.is_empty());
+    }
+
+    #[test]
+    fn apply_websocket_request_header_rules_sets_and_deletes_headers() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-remove-me", HeaderValue::from_static("1"));
+
+        let mut rules = ResolvedRules::default();
+        rules.delete_req_headers.push("x-remove-me".to_string());
+        rules
+            .req_headers
+            .push(("x-add".to_string(), "ok".to_string()));
+        rules.ua = Some("test-agent".to_string());
+        rules.referer = Some("https://ref.example".to_string());
+        rules.auth = Some("user:pass".to_string());
+
+        apply_websocket_request_header_rules(&mut headers, &rules);
+
+        assert!(!headers.contains_key("x-remove-me"));
+        assert_eq!(headers.get("x-add").unwrap(), "ok");
+        assert_eq!(headers.get(USER_AGENT).unwrap(), "test-agent");
+        assert_eq!(headers.get(REFERER).unwrap(), "https://ref.example");
+        let auth = headers.get(AUTHORIZATION).unwrap().to_str().unwrap();
+        assert!(auth.starts_with("Basic "));
+        assert!(auth.len() > "Basic ".len());
+    }
+
+    #[test]
+    fn apply_websocket_response_header_rules_sets_and_deletes_headers() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-remove", HeaderValue::from_static("1"));
+
+        let mut rules = ResolvedRules::default();
+        rules.delete_res_headers.push("x-remove".to_string());
+        rules
+            .res_headers
+            .push(("x-added".to_string(), "value".to_string()));
+
+        apply_websocket_response_header_rules(&mut headers, &rules);
+
+        assert!(!headers.contains_key("x-remove"));
+        assert_eq!(headers.get("x-added").unwrap(), "value");
+    }
+
+    #[test]
+    fn merge_websocket_header_rule_candidates_merges_and_dedups() {
+        struct TestResolver;
+
+        impl RulesResolver for TestResolver {
+            fn resolve_with_context(
+                &self,
+                url: &str,
+                _method: &str,
+                _req_headers: &HashMap<String, String>,
+                _req_cookies: &HashMap<String, String>,
+            ) -> ResolvedRules {
+                let mut rules = ResolvedRules::default();
+                rules.req_headers.push(("x-req".into(), url.into()));
+                rules.res_headers.push(("x-res".into(), url.into()));
+                rules.delete_req_headers.push("x-del-req".into());
+                rules.delete_res_headers.push("x-del-res".into());
+                rules.header_replace.push(HeaderReplaceRule {
+                    target: HeaderReplaceTarget::Request,
+                    header_name: "x-header".into(),
+                    pattern: "from".into(),
+                    replacement: url.into(),
+                });
+                rules.ua = Some(format!("ua-{url}"));
+                rules.referer = Some(format!("ref-{url}"));
+                rules.auth = Some(format!("auth-{url}"));
+                rules
+            }
+        }
+
+        let base = ResolvedRules::default();
+        let resolver: &dyn RulesResolver = &TestResolver;
+        let candidates = vec!["a".to_string(), "b".to_string(), "a".to_string()];
+        let merged = merge_websocket_header_rule_candidates(
+            base,
+            resolver,
+            &candidates,
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        // req/res headers from distinct URLs should all appear once
+        assert_eq!(
+            merged
+                .req_headers
+                .iter()
+                .filter(|(k, _)| k == "x-req")
+                .count(),
+            2
+        );
+        assert_eq!(
+            merged
+                .res_headers
+                .iter()
+                .filter(|(k, _)| k == "x-res")
+                .count(),
+            2
+        );
+        // delete/header_replace entries deduped by value where possible
+        assert_eq!(merged.delete_req_headers.len(), 1);
+        assert_eq!(merged.delete_res_headers.len(), 1);
+        assert_eq!(merged.header_replace.len(), 2);
+        // ua / referer / auth taken from first candidate only
+        assert_eq!(merged.ua.as_deref(), Some("ua-a"));
+        assert_eq!(merged.referer.as_deref(), Some("ref-a"));
+        assert_eq!(merged.auth.as_deref(), Some("auth-a"));
+    }
+
+    #[test]
+    fn append_unique_helpers_deduplicate_entries() {
+        let mut pairs = vec![("a".to_string(), "1".to_string())];
+        append_unique_pairs(
+            &mut pairs,
+            vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string()),
+            ],
+        );
+        assert_eq!(pairs.len(), 2);
+
+        let mut strings = vec!["a".to_string()];
+        append_unique_strings(&mut strings, vec!["a".into(), "b".into()]);
+        assert_eq!(strings, vec!["a".to_string(), "b".to_string()]);
+
+        let mut header_rules = vec![HeaderReplaceRule {
+            target: HeaderReplaceTarget::Request,
+            header_name: "x".into(),
+            pattern: "foo".into(),
+            replacement: "bar".into(),
+        }];
+        append_unique_header_replace(
+            &mut header_rules,
+            vec![
+                HeaderReplaceRule {
+                    target: HeaderReplaceTarget::Request,
+                    header_name: "x".into(),
+                    pattern: "foo".into(),
+                    replacement: "bar".into(),
+                },
+                HeaderReplaceRule {
+                    target: HeaderReplaceTarget::Response,
+                    header_name: "y".into(),
+                    pattern: "a".into(),
+                    replacement: "b".into(),
+                },
+            ],
+        );
+        assert_eq!(header_rules.len(), 2);
+    }
+
+    #[test]
+    fn cloned_headers_hashmap_uses_cache_clone() {
+        let headers = vec![("x-a".to_string(), "1".to_string())];
+        let mut cache: Option<HashMap<String, String>> = None;
+
+        let map1 = cloned_headers_hashmap(&mut cache, &headers);
+        assert_eq!(map1.get("x-a"), Some(&"1".to_string()));
+        assert!(cache.is_some());
+
+        let mut map2 = cloned_headers_hashmap(&mut cache, &headers);
+        map2.insert("x-b".to_string(), "2".to_string());
+        assert_eq!(cache.as_ref().unwrap().get("x-b"), None);
+    }
+
+    #[test]
+    fn get_traffic_type_from_url_classifies_http_and_https() {
+        assert_eq!(
+            get_traffic_type_from_url("http://example.com"),
+            TrafficType::Http
+        );
+        assert_eq!(
+            get_traffic_type_from_url("https://example.com"),
+            TrafficType::Https
+        );
+        // 非 https 前缀都按 Http 处理
+        assert_eq!(
+            get_traffic_type_from_url("ftp://example.com"),
+            TrafficType::Http
+        );
+    }
+
+    #[test]
+    fn annotate_actual_upstream_sets_actual_fields_when_changed() {
+        let mut record = TrafficRecord::new(
+            "id".to_string(),
+            "GET".to_string(),
+            "http://example.com/".to_string(),
+        );
+        let processed_uri: Uri = "http://example.com/original".parse().unwrap();
+
+        annotate_actual_upstream(
+            &mut record,
+            &processed_uri,
+            ("example.com", 80),
+            ("up.example.com", 8080, "/other"),
+            false,
+        );
+
+        assert_eq!(record.actual_host.as_deref(), Some("up.example.com"));
+        assert_eq!(
+            record.actual_url.as_deref(),
+            Some("http://up.example.com:8080/other")
+        );
+    }
+
+    #[test]
+    fn annotate_actual_upstream_no_change_keeps_actual_none() {
+        let mut record = TrafficRecord::new(
+            "id".to_string(),
+            "GET".to_string(),
+            "http://example.com/".to_string(),
+        );
+        let processed_uri: Uri = "http://example.com/path".parse().unwrap();
+
+        annotate_actual_upstream(
+            &mut record,
+            &processed_uri,
+            ("example.com", 80),
+            ("example.com", 80, "/path"),
+            false,
+        );
+
+        assert!(record.actual_host.is_none());
+        assert!(record.actual_url.is_none());
+    }
+
+    #[test]
+    fn build_proxy_rule_url_adds_http_prefix_and_validates() {
+        let url = build_proxy_rule_url("proxy.example:8080").unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("proxy.example"));
+        assert_eq!(url.port(), Some(8080));
+
+        assert!(build_proxy_rule_url("::invalid host::").is_err());
+    }
+
+    #[test]
+    fn proxy_authority_and_connect_authority_format_hosts() {
+        assert_eq!(proxy_authority("example.com", 80), "example.com");
+        assert_eq!(proxy_authority("example.com", 8080), "example.com:8080");
+
+        assert_eq!(proxy_connect_authority("127.0.0.1", 8080), "127.0.0.1:8080");
+        assert_eq!(
+            proxy_connect_authority("[2001:db8::1]", 443),
+            "[2001:db8::1]:443"
+        );
+    }
+
+    #[test]
+    fn build_upstream_proxy_connect_request_includes_optional_auth() {
+        let url = Url::parse("http://proxy.example:8080").unwrap();
+        let req = build_upstream_proxy_connect_request(&url, "example.com", 443);
+        let text = String::from_utf8(req).unwrap();
+        assert!(text.starts_with("CONNECT example.com:443 HTTP/1.1\r\n"));
+        assert!(!text.contains("Proxy-Authorization"));
+
+        let url_auth = Url::parse("http://user:pass@proxy.example:8080").unwrap();
+        let req_auth = build_upstream_proxy_connect_request(&url_auth, "example.com", 443);
+        let text_auth = String::from_utf8(req_auth).unwrap();
+        assert!(text_auth.contains("Proxy-Authorization: Basic"));
+    }
+
+    #[test]
+    fn needs_body_processing_and_related_helpers_behave_as_expected() {
+        let mut rules = ResolvedRules::default();
+        assert!(!needs_body_processing(&rules));
+        assert!(!has_response_body_rules(&rules));
+
+        rules.html_append = Some("<b>".to_string());
+        assert!(needs_body_processing(&rules));
+
+        rules.html_append = None;
+        rules.res_merge = Some(json!({"k": "v"}));
+        assert!(has_response_body_rules(&rules));
+
+        rules.res_merge = None;
+        rules.status_code = Some(500);
+        assert!(needs_response_override(&rules));
+
+        rules = ResolvedRules::default();
+        assert!(!needs_response_phase_resolve(&rules));
+        rules.res_headers.push(("x".into(), "1".into()));
+        assert!(needs_response_phase_resolve(&rules));
+    }
+
+    #[test]
+    fn needs_request_body_processing_and_has_request_body_rules_cover_flags() {
+        let mut rules = ResolvedRules::default();
+        assert!(!needs_request_body_processing(&rules));
+        assert!(!has_request_body_rules(&rules));
+
+        rules.req_body = Some(Bytes::from_static(b"body"));
+        assert!(needs_request_body_processing(&rules));
+        assert!(has_request_body_rules(&rules));
+
+        rules = ResolvedRules::default();
+        rules.req_merge = Some(json!({"a": 1}));
+        assert!(needs_request_body_processing(&rules));
+        assert!(has_request_body_rules(&rules));
+    }
+
+    #[test]
+    fn h2_body_recovery_action_covers_all_branches() {
+        // not retryable or not HTTP/2 -> Stream
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_11,
+                StatusCode::OK,
+                "GET",
+                "text/plain",
+                Some(10),
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::Stream
+        );
+
+        // small known length -> Probe
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "text/plain",
+                Some(10),
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::Probe
+        );
+
+        // large binary body -> RetryHttp1
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "application/octet-stream",
+                Some(2048),
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::RetryHttp1
+        );
+
+        // large text body -> Stream
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "text/plain",
+                Some(2048),
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::Stream
+        );
+
+        // unknown length text -> Probe
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "text/plain",
+                None,
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::Probe
+        );
+
+        // unknown length binary -> RetryHttp1
+        assert_eq!(
+            h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "application/octet-stream",
+                None,
+                1024,
+                true,
+            ),
+            H2BodyRecoveryAction::RetryHttp1
+        );
+    }
+
+    #[test]
+    fn connection_error_suggestion_only_for_tls_failed() {
+        let info = ConnectionErrorInfo {
+            error_type: "OTHER",
+            error_message: "err".to_string(),
+            host: "host".to_string(),
+            request_url: "url".to_string(),
+        };
+        assert!(connection_error_suggestion(&info).is_none());
+    }
+
+    #[test]
+    fn build_connection_error_and_overridden_error_responses() {
+        let info = ConnectionErrorInfo {
+            error_type: "REQUEST_TLS_FAILED",
+            error_message: "fail".to_string(),
+            host: "host".to_string(),
+            request_url: "url".to_string(),
+        };
+
+        let res = build_connection_error_response(502, &info);
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            res.headers().get("X-Bifrost-Error").unwrap(),
+            info.error_type
+        );
+
+        let rules = ResolvedRules {
+            status_code: Some(599),
+            res_headers: vec![("X-Test".into(), "1".into())],
+            ..Default::default()
+        };
+
+        let overridden = build_overridden_error_response(&rules, 502, &info);
+        assert_eq!(overridden.status(), StatusCode::from_u16(599).unwrap());
+        assert_eq!(overridden.headers().get("X-Test").unwrap(), "1");
+        assert_eq!(
+            overridden.headers().get("X-Bifrost-Error").unwrap(),
+            info.error_type
+        );
+
+        // 当自定义 res_body 存在时，不再附带错误头
+        let rules_with_body = ResolvedRules {
+            replace_status: Some(504),
+            res_body: Some(Bytes::from_static(b"custom")),
+            ..Default::default()
+        };
+        let overridden2 = build_overridden_error_response(&rules_with_body, 502, &info);
+        assert_eq!(overridden2.status(), StatusCode::from_u16(504).unwrap());
+        assert!(overridden2.headers().get("X-Bifrost-Error").is_none());
+    }
+
+    #[test]
+    fn metrics_only_forwarding_mode_disabled_for_websocket_and_sse() {
+        // websocket / sse 一律不走 metrics-only 快速路径
+        assert!(!should_use_metrics_only_forwarding_mode(
+            true, false, false, true, false
+        ));
+        assert!(!should_use_metrics_only_forwarding_mode(
+            true, false, false, false, true
+        ));
+    }
+
+    #[test]
+    fn parse_and_record_sse_events_counts_events() {
+        let body = b"data: first\n\n\n\ndata: second\n\n";
+        let count = parse_and_record_sse_events(body);
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn parse_and_record_sse_events_handles_invalid_utf8() {
+        let body = [0xff, 0xfe, 0xfd];
+        let count = parse_and_record_sse_events(&body);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn build_badge_rules_json_without_admin_state_returns_default() {
+        let json = build_badge_rules_json(None, 0).await;
+        assert_eq!(json, r#"{"rules":[],"merged_content":"","admin_port":0}"#);
+    }
+
+    #[test]
+    fn peer_addr_from_client_ip_parses_ipv4_and_ipv6_and_invalid() {
+        let v4 = peer_addr_from_client_ip("127.0.0.1").unwrap();
+        assert_eq!(v4.ip().to_string(), "127.0.0.1");
+        assert_eq!(v4.port(), 0);
+
+        let v6 = peer_addr_from_client_ip("::1").unwrap();
+        assert_eq!(v6.ip().to_string(), "::1");
+
+        assert!(peer_addr_from_client_ip("not-an-ip").is_none());
+    }
+
+    struct ProxyResolver {
+        proxy: String,
+    }
+
+    impl RulesResolver for ProxyResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                proxy: Some(self.proxy.clone()),
+                ignored: crate::server::IgnoredFields {
+                    host: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_via_upstream_http_proxy_uses_proxy_rule() {
+        let mock_server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok via proxy"))
+            .mount(&mock_server)
+            .await;
+
+        let rules: Arc<dyn RulesResolver> = Arc::new(ProxyResolver {
+            proxy: mock_server.uri(),
+        });
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/proxy-test")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (_, body) = resp.into_parts();
+        let bytes = body.collect().await.expect("collect body").to_bytes();
+        assert_eq!(bytes, Bytes::from_static(b"ok via proxy"));
+    }
+
+    struct RecordingResolver {
+        last_url: Arc<Mutex<Option<String>>>,
+    }
+
+    impl RecordingResolver {
+        fn new_arc() -> (Arc<dyn RulesResolver>, Arc<Mutex<Option<String>>>) {
+            let last_url = Arc::new(Mutex::new(None));
+            let resolver = RecordingResolver {
+                last_url: last_url.clone(),
+            };
+            (Arc::new(resolver), last_url)
+        }
+    }
+
+    impl RulesResolver for RecordingResolver {
+        fn resolve_with_context(
+            &self,
+            url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            *self.last_url.lock() = Some(url.to_string());
+            ResolvedRules {
+                status_code: Some(204),
+                ..Default::default()
+            }
+        }
+    }
+
+    struct RedirectResolver;
+
+    impl RulesResolver for RedirectResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                redirect: Some("https://example.net/dest".to_string()),
+                redirect_status: Some(307),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_rule_share_get_redirects_to_clean_url() {
+        let content = "example.test status://200";
+        let content_hash = content_sha256(content);
+        let payload = RuleSharePayload {
+            version: RULE_SHARE_PROTOCOL_VERSION,
+            name: "share-test".to_string(),
+            content: content.to_string(),
+            mode: Default::default(),
+            exclusive_scope: Default::default(),
+            content_hash_algorithm: RULE_SHARE_CONTENT_HASH_ALGORITHM.to_string(),
+            content_hash,
+        };
+
+        let shared_url = append_rule_share_query("http://example.com/rule-share", &payload)
+            .expect("append rule share query");
+        let parts = extract_rule_share_query(&shared_url).expect("extract parts");
+        let clean_url = parts.clean_url;
+
+        assert!(shared_url.contains(RULE_SHARE_QUERY_PARAM));
+        assert!(!clean_url.contains(RULE_SHARE_QUERY_PARAM));
+
+        let uri: Uri = shared_url.parse().expect("valid URI");
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver::default());
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, clean_url);
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_rule_share_post_cleans_url_and_uses_cleaned_url_for_resolve() {
+        let content = "example.test status://201";
+        let content_hash = content_sha256(content);
+        let payload = RuleSharePayload {
+            version: RULE_SHARE_PROTOCOL_VERSION,
+            name: "share-post".to_string(),
+            content: content.to_string(),
+            mode: Default::default(),
+            exclusive_scope: Default::default(),
+            content_hash_algorithm: RULE_SHARE_CONTENT_HASH_ALGORITHM.to_string(),
+            content_hash,
+        };
+
+        let shared_url = append_rule_share_query("http://example.com/post-path?foo=1", &payload)
+            .expect("append rule share query");
+        let parts = extract_rule_share_query(&shared_url).expect("extract parts");
+        let clean_url = parts.clean_url;
+
+        let uri: Uri = shared_url.parse().expect("valid URI");
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let (rules, last_url) = RecordingResolver::new_arc();
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        let recorded = last_url.lock().clone().expect("url recorded");
+        assert_eq!(recorded, clean_url);
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_invalid_rule_share_payload_falls_back_to_normal_handling() {
+        let shared_url = format!(
+            "http://example.com/path?{}=not-valid-base64!",
+            RULE_SHARE_QUERY_PARAM
+        );
+
+        let uri: Uri = shared_url.parse().expect("valid URI");
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let rules: Arc<dyn RulesResolver> = Arc::new(DirectStatusResolver);
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        // Invalid payload should not trigger redirect; we still get a direct 204 status response.
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+    }
+
+    #[tokio::test]
+    async fn connect_via_upstream_http_proxy_tunnel_rejects_non_http_scheme() {
+        let result = connect_via_upstream_http_proxy_tunnel(
+            "https://proxy.example:8080",
+            "example.com",
+            443,
+        )
+        .await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("only supports http proxy rules"));
+            }
+            other => panic!("unexpected error type: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_via_upstream_http_proxy_tunnel_fails_for_non_2xx_status() {
+        let mock_server = MockServer::start().await;
+        Mock::given(wm_method("CONNECT"))
+            .respond_with(ResponseTemplate::new(403))
+            .mount(&mock_server)
+            .await;
+
+        let proxy_rule = mock_server.uri();
+        let result = connect_via_upstream_http_proxy_tunnel(&proxy_rule, "example.com", 443).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("rejected CONNECT"));
+            }
+            other => panic!("unexpected error type: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_request_via_upstream_proxy_sets_host_and_proxy_auth_headers() {
+        let mock_server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wiremock::matchers::path("/proxy-target"))
+            .and(wiremock::matchers::header("host", "target.example:8443"))
+            .and(wiremock::matchers::header(
+                "proxy-authorization",
+                "Basic dXNlcjpwYXNz",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&mock_server)
+            .await;
+
+        let proxy_url = mock_server.uri();
+        let proxy_rule = format!("user:pass@{}", proxy_url.trim_start_matches("http://"));
+
+        let target_uri: Uri = "https://target.example:8443/proxy-target"
+            .parse()
+            .expect("target uri");
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/original")
+            .header(header::HOST, "example.com")
+            .body(full_body(Bytes::from_static(b"body")))
+            .unwrap();
+        let (parts, body) = req.into_parts();
+
+        let resp = send_request_via_upstream_proxy(&proxy_rule, target_uri, parts, body)
+            .await
+            .expect("proxy request should succeed");
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_, body) = resp.into_parts();
+        let bytes = body.collect().await.expect("collect body").to_bytes();
+        assert_eq!(bytes, Bytes::from_static(b"ok"));
+    }
+
+    #[tokio::test]
+    async fn send_request_via_upstream_proxy_rejects_missing_target_authority() {
+        let proxy_rule = "http://127.0.0.1:1";
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/relative-only")
+            .header(header::HOST, "example.com")
+            .body(full_body(Bytes::from_static(b"body")))
+            .unwrap();
+        let (parts, body) = req.into_parts();
+
+        let target_uri: Uri = "/relative-only".parse().unwrap();
+
+        let result = send_request_via_upstream_proxy(proxy_rule, target_uri, parts, body).await;
+        assert!(result.is_err());
+        let err = result.err().unwrap();
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("Missing target authority"));
+            }
+            other => panic!("unexpected error type: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_proxy_forward_uri_passthrough_when_uri_is_absolute() {
+        let uri: Uri = "http://example.com/path".parse().unwrap();
+        let result = build_proxy_forward_uri(&uri, "example.com", 80, false).unwrap();
+        assert_eq!(result, uri);
+    }
+
+    #[test]
+    fn build_proxy_forward_uri_relative_https_non_default_port() {
+        let processed: Uri = "/path?q=1".parse().unwrap();
+        let uri = build_proxy_forward_uri(&processed, "example.com", 8443, true).unwrap();
+        assert_eq!(
+            uri,
+            "https://example.com:8443/path?q=1".parse::<Uri>().unwrap()
+        );
+    }
+
+    #[test]
+    fn build_connection_error_response_uses_bad_gateway_for_invalid_status_code() {
+        let info = ConnectionErrorInfo {
+            error_type: "ERR",
+            error_message: "fail".to_string(),
+            host: "host".to_string(),
+            request_url: "url".to_string(),
+        };
+
+        let res = build_connection_error_response(9999, &info);
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    #[test]
+    fn build_overridden_error_response_falls_back_to_default_status_when_no_override() {
+        let info = ConnectionErrorInfo {
+            error_type: "OTHER",
+            error_message: "err".to_string(),
+            host: "host".to_string(),
+            request_url: "url".to_string(),
+        };
+        let rules = ResolvedRules::default();
+
+        let res = build_overridden_error_response(&rules, 502, &info);
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(
+            res.headers().get("X-Bifrost-Error").unwrap(),
+            info.error_type
+        );
+    }
+
+    #[tokio::test]
+    async fn build_badge_rules_json_with_admin_state_uses_admin_cache() {
+        let state = AdminState::new(18880);
+        let json = build_badge_rules_json(Some(&state), 18880).await;
+        assert_eq!(json, state.badge_rules_json());
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_direct_status_with_admin_state_records_metrics() {
+        let state = Arc::new(AdminState::new(18880));
+        let rules: Arc<dyn RulesResolver> = Arc::new(DirectStatusResolver);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/direct-status-metrics")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let before = state.metrics_collector.get_total_requests();
+        let resp =
+            run_handle_http_request_with_rules_and_admin(rules, Some(state.clone()), req).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let after = state.metrics_collector.get_total_requests();
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_redirect_with_admin_state_records_metrics() {
+        let state = Arc::new(AdminState::new(18880));
+        let rules: Arc<dyn RulesResolver> = Arc::new(RedirectResolver);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/redirect-test")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .expect("build request");
+
+        let before = state.metrics_collector.get_total_requests();
+        let resp =
+            run_handle_http_request_with_rules_and_admin(rules, Some(state.clone()), req).await;
+        assert_eq!(resp.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, "https://example.net/dest");
+        let after = state.metrics_collector.get_total_requests();
+        assert_eq!(after, before + 1);
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_websocket_upgrade_via_upstream_mock_server() {
+        let mock_server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .respond_with(
+                ResponseTemplate::new(101)
+                    .insert_header("Upgrade", "websocket")
+                    .insert_header("Connection", "Upgrade")
+                    .insert_header("Sec-WebSocket-Accept", "dummy"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let address = mock_server.address();
+        let uri: Uri = format!("http://{}{}", address, "/ws-upgrade")
+            .parse()
+            .expect("uri");
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .version(hyper::Version::HTTP_11)
+            .uri(uri)
+            .header(header::HOST, format!("{}", address))
+            .header(header::CONNECTION, "Upgrade")
+            .header(header::UPGRADE, "websocket")
+            .header("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("Sec-WebSocket-Version", "13")
+            .body(Empty::new())
+            .expect("build request");
+
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver::default());
+
+        let resp = run_handle_http_request_with_rules(rules, req).await;
+        assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+        assert_eq!(
+            resp.headers()
+                .get(header::UPGRADE)
+                .and_then(|v| v.to_str().ok()),
+            Some("websocket"),
+        );
+    }
+
+    async fn run_handle_http_request_with_rules_and_admin(
+        rules: Arc<dyn RulesResolver>,
+        admin_state: Option<Arc<AdminState>>,
+        request: Request<Empty<Bytes>>,
+    ) -> Response<Incoming> {
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let client_io = TokioIo::new(client_io);
+        let server_io = TokioIo::new(server_io);
+
+        let (mut sender, client_conn) = client_http1::handshake(client_io)
+            .await
+            .expect("client handshake");
+        tokio::spawn(async move {
+            if let Err(err) = client_conn.await {
+                eprintln!("client conn error: {err}");
+            }
+        });
+
+        let rules_clone = rules.clone();
+        let admin_state_clone = admin_state.clone();
+        let service = service_fn(move |req: Request<Incoming>| {
+            let rules = rules_clone.clone();
+            let admin_state = admin_state_clone.clone();
+            async move {
+                let ctx = RequestContext::new();
+                let resp = handle_http_request(
+                    req,
+                    rules,
+                    false,
+                    false,
+                    1024 * 1024,
+                    8 * 1024,
+                    false,
+                    &ctx,
+                    admin_state,
+                    None,
+                    None,
+                )
+                .await
+                .expect("handle_http_request should succeed");
+                Ok::<_, Infallible>(resp)
+            }
+        });
+
+        let server_conn = server_http1::Builder::new().serve_connection(server_io, service);
+        tokio::spawn(async move {
+            if let Err(err) = server_conn.await {
+                eprintln!("server conn error: {err}");
+            }
+        });
+
+        sender
+            .send_request(request)
+            .await
+            .expect("send request through client")
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::server::{HeaderReplaceRule, HeaderReplaceTarget, ResolvedRules};
+    use crate::transform::{compress_body, decompress_body_with_limit};
+    use bytes::Bytes;
+    use hyper::{header, Method, Request, StatusCode, Uri};
+
+    #[test]
+    fn apply_websocket_header_replace_respects_target_direction() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("x-test", header::HeaderValue::from_static("foo bar foo"));
+        headers.insert("x-other", header::HeaderValue::from_static("keep"));
+
+        let request_rule = HeaderReplaceRule {
+            target: HeaderReplaceTarget::Request,
+            header_name: "x-test".to_string(),
+            pattern: "foo".to_string(),
+            replacement: "baz".to_string(),
+        };
+        let response_rule = HeaderReplaceRule {
+            target: HeaderReplaceTarget::Response,
+            header_name: "x-test".to_string(),
+            pattern: "foo".to_string(),
+            replacement: "should-not-apply".to_string(),
+        };
+
+        let mut rules = ResolvedRules::default();
+        rules.header_replace.push(request_rule);
+        rules.header_replace.push(response_rule);
+
+        apply_websocket_header_replace(&mut headers, &rules, HeaderReplaceTarget::Request);
+
+        assert_eq!(headers.get("x-test").unwrap(), "baz bar baz");
+        assert_eq!(headers.get("x-other").unwrap(), "keep");
+    }
+
+    #[test]
+    fn build_proxy_rule_url_accepts_https_scheme() {
+        let url = build_proxy_rule_url("https://proxy.example:8443").unwrap();
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("proxy.example"));
+        assert_eq!(url.port(), Some(8443));
+    }
+
+    #[test]
+    fn build_upstream_proxy_auth_value_is_none_without_credentials() {
+        let url = build_proxy_rule_url("http://proxy.example:8080").unwrap();
+        assert!(build_upstream_proxy_auth_value(&url).is_none());
+    }
+
+    #[test]
+    fn build_upstream_proxy_connect_request_formats_ipv6_authority_and_auth() {
+        let proxy_url = build_proxy_rule_url("http://user:pass@[2001:db8::1]:8080").unwrap();
+        let req = build_upstream_proxy_connect_request(&proxy_url, "[2001:db8::1]", 443);
+        let text = String::from_utf8(req).unwrap();
+        assert!(text.starts_with("CONNECT [2001:db8::1]:443 HTTP/1.1\r\n"));
+        assert!(text.contains("\r\nHost: [2001:db8::1]:443\r\n"));
+        assert!(text.contains("Proxy-Authorization: Basic"));
+    }
+
+    #[test]
+    fn build_proxy_forward_uri_relative_http_default_port() {
+        let processed: Uri = "/rel-path?q=1".parse().unwrap();
+        let uri = build_proxy_forward_uri(&processed, "example.com", 80, false).unwrap();
+        assert_eq!(
+            uri,
+            "http://example.com/rel-path?q=1".parse::<Uri>().unwrap()
+        );
+    }
+
+    #[test]
+    fn build_proxy_forward_uri_relative_http_non_default_port() {
+        let processed: Uri = "/rel".parse().unwrap();
+        let uri = build_proxy_forward_uri(&processed, "example.com", 8080, false).unwrap();
+        assert_eq!(uri, "http://example.com:8080/rel".parse::<Uri>().unwrap());
+    }
+
+    #[test]
+    fn headers_to_pairs_skips_devtools_client_req_id_header() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(header::HOST, "example.com".parse().unwrap());
+        headers.insert("x-bifrost-client-request-id", "abc123".parse().unwrap());
+
+        let pairs = headers_to_pairs(&headers);
+
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, "host");
+        assert_eq!(pairs[0].1, "example.com");
+    }
+
+    #[test]
+    fn body_to_script_string_returns_none_for_empty_body() {
+        assert!(body_to_script_string(&Bytes::new(), Some("gzip"), 1024).is_none());
+    }
+
+    #[test]
+    fn body_to_script_string_identity_encoding_skips_decompression() {
+        let body = Bytes::from_static(b"plain text");
+        let result = body_to_script_string(&body, Some("identity"), 1024);
+        assert_eq!(result.as_deref(), Some("plain text"));
+    }
+
+    #[test]
+    fn body_to_script_string_without_encoding_uses_plain_utf8() {
+        let body = Bytes::from_static(b"hello world");
+        let result = body_to_script_string(&body, None, 1024);
+        assert_eq!(result.as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn body_to_script_string_returns_none_when_decompressed_body_exceeds_limit() {
+        let large = vec![b'a'; 2048];
+        let compressed = compress_body(&large, "gzip").unwrap();
+        let result = body_to_script_string(&Bytes::from(compressed), Some("gzip"), 16);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn body_to_script_string_returns_none_for_invalid_utf8() {
+        let body = Bytes::from_static(&[0xff, 0xfe, 0xfd]);
+        let result = body_to_script_string(&body, None, 1024);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn script_string_to_body_falls_back_for_unsupported_encoding() {
+        let result = script_string_to_body("hello", Some("unknown-encoding"));
+        assert_eq!(result.content_encoding, None);
+        assert_eq!(result.body, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn decompress_body_with_limit_zero_returns_input() {
+        let data = b"compressed";
+        let result = decompress_body_with_limit(data, Some("gzip"), 0);
+        assert_eq!(result.as_ref(), data);
+    }
+
+    #[test]
+    fn decompress_body_with_limit_unknown_encoding_returns_input() {
+        let data = b"data";
+        let result = decompress_body_with_limit(data, Some("unknown-encoding"), 1024);
+        assert_eq!(result.as_ref(), data);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_streams_for_no_body_status() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::NO_CONTENT,
+            "GET",
+            "application/json",
+            Some(10),
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Stream);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_streams_for_event_stream() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "text/event-stream",
+            Some(10),
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Stream);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_probe_for_small_text_with_known_length() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "text/html; charset=utf-8",
+            Some(512),
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Probe);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_retry_http1_for_large_binary_body() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "application/octet-stream",
+            Some(2048),
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::RetryHttp1);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_stream_for_large_text_body() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "text/html",
+            Some(2048),
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Stream);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_probe_without_length_for_text() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "application/json",
+            None,
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Probe);
+    }
+
+    #[test]
+    fn h2_body_recovery_action_retry_http1_without_length_for_binary() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            StatusCode::OK,
+            "GET",
+            "application/octet-stream",
+            None,
+            1024,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::RetryHttp1);
+    }
+
+    #[test]
+    fn is_websocket_upgrade_accepts_mixed_case_and_multiple_connection_tokens() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/socket")
+            .header(header::CONNECTION, "keep-alive, Upgrade")
+            .header(header::UPGRADE, "WebSocket")
+            .body(())
+            .unwrap();
+
+        assert!(is_websocket_upgrade(&req));
+    }
+
+    async fn run_handle_http_request_with_admin(
+        rules: std::sync::Arc<dyn RulesResolver>,
+        admin_state: Option<std::sync::Arc<bifrost_admin::AdminState>>,
+        request: Request<http_body_util::Empty<Bytes>>,
+        inject_bifrost_badge: bool,
+    ) -> Response<Incoming> {
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let client_io = hyper_util::rt::TokioIo::new(client_io);
+        let server_io = hyper_util::rt::TokioIo::new(server_io);
+
+        let (mut sender, client_conn) = hyper::client::conn::http1::handshake(client_io)
+            .await
+            .expect("client handshake");
+        tokio::spawn(async move {
+            if let Err(err) = client_conn.await {
+                eprintln!("client conn error: {err}");
+            }
+        });
+
+        let rules_clone = rules.clone();
+        let admin_state_clone = admin_state.clone();
+        let service = hyper::service::service_fn(move |req: Request<hyper::body::Incoming>| {
+            let rules = rules_clone.clone();
+            let admin_state = admin_state_clone.clone();
+            async move {
+                let ctx = RequestContext::new();
+                let resp = handle_http_request(
+                    req,
+                    rules,
+                    false,
+                    false,
+                    1024 * 1024,
+                    8 * 1024,
+                    inject_bifrost_badge,
+                    &ctx,
+                    admin_state,
+                    None,
+                    None,
+                )
+                .await
+                .expect("handle_http_request should succeed");
+                Ok::<_, std::convert::Infallible>(resp)
+            }
+        });
+
+        let server_conn =
+            hyper::server::conn::http1::Builder::new().serve_connection(server_io, service);
+        tokio::spawn(async move {
+            if let Err(err) = server_conn.await {
+                eprintln!("server conn error: {err}");
+            }
+        });
+
+        sender
+            .send_request(request)
+            .await
+            .expect("send request through client")
+    }
+
+    struct LocationResolver;
+
+    impl RulesResolver for LocationResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                location_href: Some("https://example.net/location".to_string()),
+                ignored: crate::server::IgnoredFields {
+                    all: true,
+                    ..Default::default()
+                },
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_location_href_returns_301_redirect() {
+        let rules: std::sync::Arc<dyn RulesResolver> = std::sync::Arc::new(LocationResolver);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/location")
+            .header(header::HOST, "example.com")
+            .body(http_body_util::Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_admin(rules, None, req, false).await;
+        assert_eq!(resp.status(), StatusCode::MOVED_PERMANENTLY);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(location, "https://example.net/location");
+    }
+
+    struct ProxyOverrideResolver;
+
+    impl RulesResolver for ProxyOverrideResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                host: Some("127.0.0.1:1".to_string()),
+                res_body: Some(Bytes::from_static(b"custom proxy error")),
+                res_headers: vec![("X-Proxy-Error".into(), "1".into())],
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_proxy_failure_uses_overridden_error_body_without_bifrost_error_header(
+    ) {
+        let rules: std::sync::Arc<dyn RulesResolver> = std::sync::Arc::new(ProxyOverrideResolver);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/proxy-override")
+            .header(header::HOST, "example.com")
+            .body(http_body_util::Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_admin(rules, None, req, false).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(resp.headers().get("X-Proxy-Error").unwrap(), "1");
+        assert!(resp.headers().get("X-Bifrost-Error").is_none());
+
+        let (parts, body) = resp.into_parts();
+        let bytes = http_body_util::BodyExt::collect(body)
+            .await
+            .expect("collect body")
+            .to_bytes();
+        assert_eq!(parts.status, StatusCode::BAD_GATEWAY);
+        assert_eq!(bytes, Bytes::from_static(b"custom proxy error"));
+    }
+
+    struct ProxyErrorResolver;
+
+    impl RulesResolver for ProxyErrorResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                host: Some("127.0.0.1:1".to_string()),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_proxy_failure_with_admin_state_records_metrics() {
+        let rules: std::sync::Arc<dyn RulesResolver> = std::sync::Arc::new(ProxyErrorResolver);
+        let admin = std::sync::Arc::new(bifrost_admin::AdminState::new(18880));
+        let before = admin.metrics_collector.get_total_requests();
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/proxy-fail-admin")
+            .header(header::HOST, "example.com")
+            .body(http_body_util::Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_admin(rules, Some(admin.clone()), req, false).await;
+        assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+        let error_header = resp.headers().get("X-Bifrost-Error").unwrap();
+        assert!(!error_header.to_str().unwrap_or("").is_empty());
+
+        let after = admin.metrics_collector.get_total_requests();
+        assert!(after >= before);
+    }
+
+    struct ReqBodyOverrideResolver;
+
+    impl RulesResolver for ReqBodyOverrideResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                req_body: Some(Bytes::from_static(b"replaced-body")),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_replaces_request_body_before_sending_upstream() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/override"))
+            .and(wiremock::matchers::body_string("replaced-body"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("ok"))
+            .mount(&mock_server)
+            .await;
+
+        let rules: std::sync::Arc<dyn RulesResolver> = std::sync::Arc::new(ReqBodyOverrideResolver);
+
+        let uri: Uri = format!("{}/override", mock_server.uri()).parse().unwrap();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(uri)
+            .header(header::HOST, format!("{}", mock_server.address()))
+            .body(http_body_util::Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_admin(rules, None, req, false).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    struct BadgeNoOpResolver;
+
+    impl RulesResolver for BadgeNoOpResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_injects_bifrost_badge_for_html_response() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/page"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "text/html; charset=utf-8")
+                    .set_body_string("<html><body>Hello</body></html>"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let rules: std::sync::Arc<dyn RulesResolver> = std::sync::Arc::new(BadgeNoOpResolver);
+
+        let uri: Uri = format!("{}/page", mock_server.uri()).parse().unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .header(header::HOST, format!("{}", mock_server.address()))
+            .body(http_body_util::Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_admin(rules, None, req, true).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (_parts, body) = resp.into_parts();
+        let bytes = http_body_util::BodyExt::collect(body)
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("Hello"));
+    }
+
+    #[test]
+    fn build_redirect_response_uses_found_for_invalid_status_code() {
+        let response = build_redirect_response(9999, "https://example.test/dest");
+        assert_eq!(response.status(), StatusCode::FOUND);
+        assert_eq!(
+            response.headers().get(header::LOCATION).unwrap(),
+            "https://example.test/dest"
+        );
+        assert_eq!(
+            response.headers().get(header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+    }
+
+    #[test]
+    fn build_error_body_includes_tls_suggestion() {
+        let info = ConnectionErrorInfo {
+            error_type: "REQUEST_TLS_FAILED",
+            error_message: "upstream failed".to_string(),
+            host: "example.test".to_string(),
+            request_url: "https://example.test".to_string(),
+        };
+
+        let body = build_error_body(502, &info);
+        let text = String::from_utf8(body.to_vec()).unwrap();
+
+        assert!(text.contains("Status: 502"));
+        assert!(text.contains("Error: upstream failed"));
+        assert!(text.contains("URL: https://example.test"));
+        assert!(text.contains("Suggestion:"));
+        assert!(text.contains("upstream HTTPS certificate is self-signed"));
+    }
+}

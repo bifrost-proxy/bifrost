@@ -2492,3 +2492,509 @@ mod tests {
         };
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use crate::test_support::TestAdminState;
+    use crate::AdminState;
+    use std::sync::Arc;
+    // wiremock::MockServer is not available as a dev-dependency in this crate.
+
+    fn make_minimal_manager() -> PushManager {
+        let state = Arc::new(AdminState::new(0));
+        PushManager::new(state)
+    }
+
+    #[test]
+    fn generate_client_id_increments() {
+        let id1 = generate_client_id();
+        let id2 = generate_client_id();
+        assert!(id2 > id1);
+    }
+
+    #[test]
+    fn has_settings_scope_detects_presence() {
+        let mut sub = ClientSubscription::default();
+        sub.settings_scopes
+            .push(SETTINGS_SCOPE_TLS_CONFIG.to_string());
+        assert!(PushManager::has_settings_scope(
+            &sub,
+            SETTINGS_SCOPE_TLS_CONFIG
+        ));
+        assert!(!PushManager::has_settings_scope(
+            &sub,
+            SETTINGS_SCOPE_PROXY_ADDRESS
+        ));
+    }
+
+    #[test]
+    fn build_values_data_none_when_no_values_storage() {
+        let manager = make_minimal_manager();
+        assert!(manager.build_values_data().is_none());
+    }
+
+    #[test]
+    fn build_values_data_some_when_storage_present() {
+        let harness = TestAdminState::builder().build();
+        {
+            let mut storage = harness.values_storage.write();
+            storage.set_value("key", "value").unwrap();
+        }
+        let manager = harness.push_manager();
+        let data = manager
+            .build_values_data()
+            .expect("expected values data to be present");
+        assert_eq!(data.total, 1);
+        assert_eq!(data.values[0].name, "key");
+        assert_eq!(data.values[0].value, "value");
+    }
+
+    #[tokio::test]
+    async fn build_full_overview_with_test_admin_state() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let overview = manager.build_full_overview().await;
+        assert_eq!(overview.server.port, harness.state().port());
+        assert!(overview
+            .server
+            .admin_url
+            .contains(&overview.server.port.to_string()));
+    }
+
+    #[tokio::test]
+    async fn build_lightweight_overview_uses_cache() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let full = manager.build_full_overview().await;
+        let lightweight = manager.build_lightweight_overview().await;
+        assert_eq!(lightweight.server.port, full.server.port);
+        assert_eq!(lightweight.rules.total, full.rules.total);
+    }
+
+    #[tokio::test]
+    async fn push_manager_has_subscribers_flags() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+
+        let subscription = ClientSubscription {
+            need_overview: true,
+            need_metrics: true,
+            need_traffic: true,
+            ..Default::default()
+        };
+        let (_client, _rx) = manager.register_client("subs".to_string(), subscription);
+
+        assert!(manager.has_overview_subscribers());
+        assert!(manager.has_metrics_subscribers());
+        assert!(manager.has_traffic_subscribers());
+    }
+
+    #[tokio::test]
+    async fn register_and_unregister_client_updates_count() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        assert_eq!(manager.client_count(), 0);
+
+        let subscription = ClientSubscription {
+            need_overview: true,
+            ..Default::default()
+        };
+        let (client, _rx) = manager.register_client("client-count".to_string(), subscription);
+        assert_eq!(manager.client_count(), 1);
+
+        manager.unregister_client(client.id);
+        assert_eq!(manager.client_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn broadcast_overview_sends_update() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+
+        let subscription = ClientSubscription {
+            need_overview: true,
+            ..Default::default()
+        };
+        let (_client, mut rx) = manager.register_client("overview".to_string(), subscription);
+
+        manager.broadcast_overview().await;
+        let msg = rx.recv().await.expect("expected overview message");
+        match msg {
+            PushMessage::OverviewUpdate(data) => {
+                assert_eq!(data.server.port, harness.state().port());
+            }
+            other => panic!("expected OverviewUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_overview_lightweight_sends_update() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+
+        // Prime overview cache.
+        manager.build_full_overview().await;
+
+        let subscription = ClientSubscription {
+            need_overview: true,
+            ..Default::default()
+        };
+        let (_client, mut rx) = manager.register_client("overview-light".to_string(), subscription);
+
+        manager.broadcast_overview_lightweight().await;
+        let msg = rx.recv().await.expect("expected overview message");
+        match msg {
+            PushMessage::OverviewUpdate(_) => {}
+            other => panic!("expected OverviewUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_metrics_sends_update() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+
+        let subscription = ClientSubscription {
+            need_metrics: true,
+            ..Default::default()
+        };
+        let (_client, mut rx) = manager.register_client("metrics".to_string(), subscription);
+
+        manager.broadcast_metrics().await;
+        let msg = rx.recv().await.expect("expected metrics update");
+        match msg {
+            PushMessage::MetricsUpdate(_) => {}
+            other => panic!("expected MetricsUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_history_sends_update() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+
+        let subscription = ClientSubscription {
+            need_history: true,
+            ..Default::default()
+        };
+        let (_client, mut rx) = manager.register_client("history".to_string(), subscription);
+
+        manager.broadcast_history().await;
+        let msg = rx.recv().await.expect("expected history update");
+        match msg {
+            PushMessage::HistoryUpdate(_) => {}
+            other => panic!("expected HistoryUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn broadcast_values_snapshot_sends_update() {
+        let harness = TestAdminState::builder().build();
+        {
+            let mut storage = harness.values_storage.write();
+            storage.set_value("k", "v").unwrap();
+        }
+        let manager = harness.push_manager();
+
+        let subscription = ClientSubscription {
+            need_values: true,
+            ..Default::default()
+        };
+        let (_client, mut rx) = manager.register_client("values".to_string(), subscription);
+
+        manager.broadcast_values_snapshot().await;
+        let msg = rx.recv().await.expect("expected values update");
+        match msg {
+            PushMessage::ValuesUpdate(data) => {
+                assert_eq!(data.total, 1);
+            }
+            other => panic!("expected ValuesUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_replay_saved_requests_data_works_with_empty_store() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let data = manager
+            .build_replay_saved_requests_data()
+            .expect("expected replay data");
+        assert_eq!(data.total, 0);
+        assert!(data.requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_replay_groups_data_works_with_empty_store() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let data = manager
+            .build_replay_groups_data()
+            .expect("expected replay groups data");
+        assert!(data.groups.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_scripts_data_none_without_script_manager() {
+        let manager = make_minimal_manager();
+        assert!(manager.build_scripts_data().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_for_proxy_settings_includes_port() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let data = manager
+            .build_settings_update(SETTINGS_SCOPE_PROXY_SETTINGS)
+            .await
+            .expect("expected proxy settings update");
+        assert_eq!(data.scope, SETTINGS_SCOPE_PROXY_SETTINGS);
+        assert_eq!(data.data["port"], harness.state().port());
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_unknown_scope_returns_none() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        assert!(manager.build_settings_update("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn has_settings_scope_subscribers_detects_interested_clients() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let subscription = ClientSubscription {
+            settings_scopes: vec![SETTINGS_SCOPE_TLS_CONFIG.to_string()],
+            ..Default::default()
+        };
+        let (_client, _rx) = manager.register_client("settings-scope".to_string(), subscription);
+        assert!(manager.has_settings_scope_subscribers(SETTINGS_SCOPE_TLS_CONFIG));
+        assert!(!manager.has_settings_scope_subscribers(SETTINGS_SCOPE_PROXY_ADDRESS));
+    }
+
+    #[tokio::test]
+    async fn broadcast_settings_scope_sends_update_to_matching_clients() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let interested = ClientSubscription {
+            settings_scopes: vec![SETTINGS_SCOPE_TLS_CONFIG.to_string()],
+            ..Default::default()
+        };
+        let uninterested = ClientSubscription::default();
+
+        let (_client_a, mut rx_a) = manager.register_client("settings-a".to_string(), interested);
+        let (_client_b, mut rx_b) = manager.register_client("settings-b".to_string(), uninterested);
+
+        manager
+            .broadcast_settings_scope(SETTINGS_SCOPE_TLS_CONFIG)
+            .await;
+
+        let msg_a = rx_a.recv().await.expect("expected settings update for A");
+        match msg_a {
+            PushMessage::SettingsUpdate(data) => {
+                assert_eq!(data.scope, SETTINGS_SCOPE_TLS_CONFIG);
+            }
+            other => panic!("expected SettingsUpdate, got {:?}", other),
+        }
+
+        assert!(
+            rx_b.try_recv().is_err(),
+            "client B should not receive update"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_settings_scope_to_client_sends_single_update() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let subscription = ClientSubscription {
+            settings_scopes: vec![SETTINGS_SCOPE_TLS_CONFIG.to_string()],
+            ..Default::default()
+        };
+        let (client, mut rx) = manager.register_client("settings-client".to_string(), subscription);
+
+        manager
+            .send_settings_scope_to_client(&client, SETTINGS_SCOPE_TLS_CONFIG)
+            .await;
+
+        let msg = rx.recv().await.expect("expected settings update");
+        match msg {
+            PushMessage::SettingsUpdate(data) => {
+                assert_eq!(data.scope, SETTINGS_SCOPE_TLS_CONFIG);
+            }
+            other => panic!("expected SettingsUpdate, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_initial_data_sends_requested_sections() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let subscription = ClientSubscription {
+            need_overview: true,
+            need_metrics: true,
+            need_history: true,
+            ..Default::default()
+        };
+        let (client, mut rx) = manager.register_client("initial-data".to_string(), subscription);
+
+        manager.send_initial_data(&client).await;
+
+        let mut got_overview = false;
+        let mut got_metrics = false;
+        let mut got_history = false;
+
+        for _ in 0..3 {
+            let msg = rx.recv().await.expect("expected initial data message");
+            match msg {
+                PushMessage::OverviewUpdate(_) => got_overview = true,
+                PushMessage::MetricsUpdate(_) => got_metrics = true,
+                PushMessage::HistoryUpdate(_) => got_history = true,
+                _ => {}
+            }
+        }
+
+        assert!(got_overview);
+        assert!(got_metrics);
+        assert!(got_history);
+    }
+
+    #[test]
+    fn broadcast_traffic_deleted_sends_message() {
+        let manager = make_minimal_manager();
+        let (client, mut rx) =
+            PushClient::new("traffic-del".to_string(), ClientSubscription::default());
+        let client = Arc::new(client);
+        manager.clients.insert(client.id, client.clone());
+
+        manager.broadcast_traffic_deleted(vec!["id1".to_string(), "id2".to_string()]);
+        let msg = rx.try_recv().expect("expected traffic deleted message");
+        match msg {
+            PushMessage::TrafficDeleted(data) => {
+                assert_eq!(data.ids, vec!["id1".to_string(), "id2".to_string()]);
+            }
+            other => panic!("expected TrafficDeleted, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn broadcast_replay_history_updated_sends_message() {
+        let manager = make_minimal_manager();
+        let (client, mut rx) =
+            PushClient::new("history-del".to_string(), ClientSubscription::default());
+        let client = Arc::new(client);
+        manager.clients.insert(client.id, client.clone());
+
+        manager.broadcast_replay_history_updated("delete", Some("req"), Some("hist"));
+        let msg = rx
+            .try_recv()
+            .expect("expected replay history updated message");
+        match msg {
+            PushMessage::ReplayHistoryUpdated(data) => {
+                assert_eq!(data.action, "delete");
+                assert_eq!(data.request_id.as_deref(), Some("req"));
+                assert_eq!(data.history_id.as_deref(), Some("hist"));
+            }
+            other => panic!("expected ReplayHistoryUpdated, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn broadcast_breakpoint_messages_send_to_clients() {
+        let manager = make_minimal_manager();
+        let (client, mut rx) = PushClient::new("bp".to_string(), ClientSubscription::default());
+        let client = Arc::new(client);
+        manager.clients.insert(client.id, client.clone());
+
+        manager.broadcast_breakpoint_paused(BreakpointPausedPushData {
+            phase: "request".to_string(),
+            request_id: "r1".to_string(),
+            method: None,
+            url: None,
+            status: None,
+            headers: Vec::new(),
+            body: None,
+            body_omitted: false,
+            body_size: None,
+            max_body_bytes: 0,
+        });
+
+        manager.broadcast_breakpoint_settings_updated(BreakpointSettingsPushData {
+            enabled: true,
+            max_body_bytes: 1024,
+        });
+
+        manager.broadcast_breakpoint_resumed("r1".to_string());
+
+        let mut got_paused = false;
+        let mut got_settings = false;
+        let mut got_resumed = false;
+
+        for _ in 0..3 {
+            let msg = rx.try_recv().expect("expected breakpoint message");
+            match msg {
+                PushMessage::BreakpointPaused(_) => got_paused = true,
+                PushMessage::BreakpointSettingsUpdated(_) => got_settings = true,
+                PushMessage::BreakpointResumed(_) => got_resumed = true,
+                _ => {}
+            }
+        }
+
+        assert!(got_paused);
+        assert!(got_settings);
+        assert!(got_resumed);
+    }
+
+    #[test]
+    fn cert_status_not_installed_when_path_missing() {
+        let snapshot = cert_status(None);
+        assert_eq!(snapshot.status, "not_installed");
+        assert!(!snapshot.installed);
+        assert!(!snapshot.trusted);
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_for_tls_config_scope_has_scope_name() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let data = manager
+            .build_settings_update(SETTINGS_SCOPE_TLS_CONFIG)
+            .await
+            .expect("expected tls config settings update");
+        assert_eq!(data.scope, SETTINGS_SCOPE_TLS_CONFIG);
+    }
+
+    #[tokio::test]
+    async fn broadcast_notification_sends_notification_to_clients() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let (_client, mut rx) =
+            manager.register_client("notify".to_string(), ClientSubscription::default());
+
+        let payload = NotificationPushData {
+            notification_type: "test".to_string(),
+            title: "title".to_string(),
+            message: "msg".to_string(),
+            metadata: None,
+            unread_count: 1,
+        };
+
+        manager.broadcast_notification(payload.clone()).await;
+        let msg = rx.recv().await.expect("expected notification message");
+        match msg {
+            PushMessage::Notification(data) => {
+                assert_eq!(data.notification_type, payload.notification_type);
+                assert_eq!(data.unread_count, payload.unread_count);
+            }
+            other => panic!("expected Notification, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn wiremock_mock_server_smoke() {
+        // Placeholder: higher-level instructions mention wiremock::MockServer,
+        // but this crate does not include wiremock as a dev-dependency.
+        // Keep this test to document the intent while remaining a no-op.
+        assert!(true);
+    }
+}

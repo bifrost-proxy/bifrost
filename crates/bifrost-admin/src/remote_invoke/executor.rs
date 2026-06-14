@@ -5419,3 +5419,481 @@ mod helper_formatting_tests {
         assert_eq!(highlight_keyword(text, "path"), text);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use bifrost_command::{
+        FilterCondition, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
+    };
+
+    fn new_executor() -> RemoteInvokeExecutor {
+        RemoteInvokeExecutor::new("127.0.0.1", 8800)
+    }
+
+    // --- validate_search_args -------------------------------------------------
+
+    #[test]
+    fn validate_search_args_rejects_too_long_keyword() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "a".repeat(MAX_QUERY_LEN + 1);
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("query param too long"), "msg={msg}");
+    }
+
+    #[test]
+    fn validate_search_args_rejects_control_characters() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = format!("ok{}bad", '\u{0007}');
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must not contain ASCII control characters"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_search_args_rejects_invalid_domain() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "ok".to_string();
+        args.filters.domains.push("bad host".to_string());
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("domain param contains invalid characters"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_search_args_rejects_invalid_content_type_filter() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "ok".to_string();
+        args.filters
+            .content_types
+            .push("application/json@".to_string());
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("content_type param contains invalid characters"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_search_args_rejects_unsupported_protocol_filter() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "ok".to_string();
+        args.filters.protocols.push("ftp".to_string());
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported protocol filter 'ftp'"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_search_args_rejects_unsupported_status_filter() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "ok".to_string();
+        args.filters.status_ranges.push("1xx".to_string());
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported status filter '1xx'"), "msg={msg}");
+    }
+
+    #[test]
+    fn validate_search_args_rejects_unsupported_method_condition() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "ok".to_string();
+        args.filters.conditions.push(FilterCondition {
+            field: "method".to_string(),
+            operator: "eq".to_string(),
+            value: "INVALID".to_string(),
+        });
+        let err = executor.validate_search_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("unsupported method filter 'INVALID'"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_search_args_accepts_valid_filters() {
+        let executor = new_executor();
+        let mut args = SearchArgs::default();
+        args.keyword = "nextoncall".to_string();
+        args.filters.protocols = vec!["http".to_string(), "https".to_string()];
+        args.filters.status_ranges = vec!["2xx".to_string(), "error".to_string()];
+        args.filters.content_types = vec!["application/json".to_string()];
+        args.filters.conditions = vec![
+            FilterCondition {
+                field: "method".to_string(),
+                operator: "eq".to_string(),
+                value: "GET".to_string(),
+            },
+            FilterCondition {
+                field: "host".to_string(),
+                operator: "eq".to_string(),
+                value: "example.com".to_string(),
+            },
+            FilterCondition {
+                field: "path".to_string(),
+                operator: "eq".to_string(),
+                value: "/v1".to_string(),
+            },
+        ];
+        executor
+            .validate_search_args(&args)
+            .expect("valid filters should pass");
+    }
+
+    // --- validate_traffic_list_args ------------------------------------------
+
+    #[test]
+    fn validate_traffic_list_args_accepts_valid_params() {
+        let executor = new_executor();
+        let mut args = TrafficListArgs::default();
+        args.method = Some("POST".to_string());
+        args.protocol = Some("https".to_string());
+        args.host = Some("api.example.com".to_string());
+        args.url = Some("/v1/chat".to_string());
+        args.path = Some("/v1".to_string());
+        args.content_type = Some("application/json".to_string());
+        args.client_ip = Some("127.0.0.1".to_string());
+        args.client_app = Some("curl".to_string());
+        executor
+            .validate_traffic_list_args(&args)
+            .expect("valid traffic list args should pass");
+    }
+
+    #[test]
+    fn validate_traffic_list_args_rejects_invalid_method() {
+        let executor = new_executor();
+        let mut args = TrafficListArgs::default();
+        args.method = Some("INVALID".to_string());
+        let err = executor.validate_traffic_list_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported method 'INVALID'"), "msg={msg}");
+    }
+
+    #[test]
+    fn validate_traffic_list_args_rejects_invalid_protocol() {
+        let executor = new_executor();
+        let mut args = TrafficListArgs::default();
+        args.protocol = Some("ftp".to_string());
+        let err = executor.validate_traffic_list_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unsupported protocol 'ftp'"), "msg={msg}");
+    }
+
+    #[test]
+    fn validate_traffic_list_args_rejects_invalid_client_ip_characters() {
+        let executor = new_executor();
+        let mut args = TrafficListArgs::default();
+        args.client_ip = Some("10.0.0.1/24".to_string());
+        let err = executor.validate_traffic_list_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("client_ip param contains invalid characters"),
+            "msg={msg}"
+        );
+    }
+
+    // --- validate_traffic_get_args -------------------------------------------
+
+    #[test]
+    fn validate_traffic_get_args_accepts_valid_id() {
+        let executor = new_executor();
+        let args = TrafficGetArgs {
+            id: "REQ-123abc".to_string(),
+            request_body: false,
+            response_body: false,
+        };
+        executor
+            .validate_traffic_get_args(&args)
+            .expect("valid id should pass");
+    }
+
+    #[test]
+    fn validate_traffic_get_args_rejects_too_long_id() {
+        let executor = new_executor();
+        let args = TrafficGetArgs {
+            id: "x".repeat(MAX_ID_LEN + 1),
+            request_body: false,
+            response_body: false,
+        };
+        let err = executor.validate_traffic_get_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("id param too long"), "msg={msg}");
+    }
+
+    #[test]
+    fn validate_traffic_get_args_rejects_invalid_characters() {
+        let executor = new_executor();
+        let args = TrafficGetArgs {
+            id: "bad id!".to_string(),
+            request_body: false,
+            response_body: false,
+        };
+        let err = executor.validate_traffic_get_args(&args).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("must contain only alphanumeric characters and hyphens"),
+            "msg={msg}"
+        );
+    }
+
+    // --- parse_and_validate_args ---------------------------------------------
+
+    #[test]
+    fn parse_and_validate_args_skips_validation_for_shell_exec_kind() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::ShellExec,
+            args_json: Some("not-json".to_string()),
+            ..Default::default()
+        };
+        let args = executor
+            .parse_and_validate_args(&cmd)
+            .expect("shell exec should bypass arg parsing");
+        assert!(args.id.is_none());
+        assert!(args.query.is_none());
+        assert!(args.method.is_none());
+        assert!(args.limit.is_none());
+    }
+
+    #[test]
+    fn parse_and_validate_args_rejects_invalid_direction() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "traffic.list".to_string(),
+            args_json: Some("{\"direction\":\"sideways\"}".to_string()),
+            ..Default::default()
+        };
+        let err = executor.parse_and_validate_args(&cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("direction must be one of"), "msg={msg}");
+    }
+
+    #[test]
+    fn parse_and_validate_args_rejects_invalid_method() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "traffic.list".to_string(),
+            args_json: Some("{\"method\":\"INVALID\"}".to_string()),
+            ..Default::default()
+        };
+        let err = executor.parse_and_validate_args(&cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("method must be one of"), "msg={msg}");
+    }
+
+    #[test]
+    fn parse_and_validate_args_rejects_invalid_protocol() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "traffic.list".to_string(),
+            args_json: Some("{\"protocol\":\"ftp\"}".to_string()),
+            ..Default::default()
+        };
+        let err = executor.parse_and_validate_args(&cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("protocol must be one of"), "msg={msg}");
+    }
+
+    #[test]
+    fn parse_and_validate_args_rejects_status_out_of_range() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "traffic.list".to_string(),
+            args_json: Some("{\"status\":99}".to_string()),
+            ..Default::default()
+        };
+        let err = executor.parse_and_validate_args(&cmd).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("status must be between 100 and 599"),
+            "msg={msg}"
+        );
+    }
+
+    // --- command_args_from_* helpers -----------------------------------------
+
+    #[test]
+    fn command_args_from_traffic_list_maps_all_relevant_fields() {
+        let executor = new_executor();
+        let args = TrafficListArgs {
+            limit: Some(10),
+            cursor: Some(42),
+            direction: TrafficListDirection::Forward,
+            method: Some("GET".to_string()),
+            status: Some(200),
+            status_min: Some(200),
+            status_max: Some(299),
+            protocol: Some("https".to_string()),
+            host: Some("api.example.com".to_string()),
+            url: Some("/v1/chat".to_string()),
+            path: Some("/v1".to_string()),
+            content_type: Some("application/json".to_string()),
+            client_ip: Some("127.0.0.1".to_string()),
+            client_app: Some("cli".to_string()),
+            has_rule_hit: Some(true),
+            is_websocket: Some(true),
+            is_sse: Some(false),
+            is_tunnel: Some(true),
+            ..TrafficListArgs::default()
+        };
+        let cmd_args = executor.command_args_from_traffic_list(&args);
+        assert_eq!(cmd_args.limit, args.limit);
+        assert_eq!(cmd_args.cursor, args.cursor);
+        assert_eq!(cmd_args.direction.as_deref(), Some("forward"));
+        assert_eq!(cmd_args.method, args.method);
+        assert_eq!(cmd_args.status, args.status);
+        assert_eq!(cmd_args.status_min, args.status_min);
+        assert_eq!(cmd_args.status_max, args.status_max);
+        assert_eq!(cmd_args.protocol, args.protocol);
+        assert_eq!(cmd_args.host, args.host);
+        assert_eq!(cmd_args.url, args.url);
+        assert_eq!(cmd_args.path, args.path);
+        assert_eq!(cmd_args.content_type, args.content_type);
+        assert_eq!(cmd_args.client_ip, args.client_ip);
+        assert_eq!(cmd_args.client_app, args.client_app);
+        assert_eq!(cmd_args.has_rule_hit, args.has_rule_hit);
+        assert_eq!(cmd_args.is_websocket, args.is_websocket);
+        assert_eq!(cmd_args.is_sse, args.is_sse);
+        assert_eq!(cmd_args.is_tunnel, args.is_tunnel);
+    }
+
+    #[test]
+    fn command_args_from_traffic_get_maps_id_and_body_flags() {
+        let executor = new_executor();
+        let args = TrafficGetArgs {
+            id: "REQ-1".to_string(),
+            request_body: true,
+            response_body: false,
+        };
+        let cmd_args = executor.command_args_from_traffic_get(&args);
+        assert_eq!(cmd_args.id.as_deref(), Some("REQ-1"));
+        assert_eq!(cmd_args.request_body, Some(true));
+        assert_eq!(cmd_args.response_body, Some(false));
+    }
+
+    // --- validate_query & transport kind -------------------------------------
+
+    #[test]
+    fn validate_query_covers_all_variants() {
+        let executor = new_executor();
+
+        let search = CanonicalQueryCommand::Search(SearchArgs::default());
+        executor
+            .validate_query(&search)
+            .expect("search args should be valid by default");
+
+        let list = CanonicalQueryCommand::TrafficList(TrafficListArgs::default());
+        executor
+            .validate_query(&list)
+            .expect("traffic list args should be valid by default");
+
+        let get = CanonicalQueryCommand::TrafficGet(TrafficGetArgs {
+            id: "REQ-1".to_string(),
+            request_body: false,
+            response_body: false,
+        });
+        executor
+            .validate_query(&get)
+            .expect("traffic get args should be valid");
+
+        let clear =
+            CanonicalQueryCommand::TrafficClear(bifrost_command::TrafficClearArgs { ids: None });
+        let err = executor.validate_query(&clear).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("traffic.clear is not enabled for remote invoke"),
+            "msg={msg}"
+        );
+    }
+
+    #[test]
+    fn validate_query_transport_kind_enforces_mutating_guard() {
+        let executor = new_executor();
+        let clear =
+            CanonicalQueryCommand::TrafficClear(bifrost_command::TrafficClearArgs { ids: None });
+        let err = executor
+            .validate_query_transport_kind(super::super::types::CommandKind::QueryReadonly, &clear)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("mutating query 'traffic.clear' cannot be sent as query.readonly"),
+            "msg={msg}"
+        );
+
+        let search = CanonicalQueryCommand::Search(SearchArgs::default());
+        executor
+            .validate_query_transport_kind(super::super::types::CommandKind::QueryReadonly, &search)
+            .expect("readonly search should be allowed");
+    }
+
+    // --- execute_power_op & file op wrappers ---------------------------------
+
+    #[tokio::test]
+    async fn execute_power_op_without_manager_returns_config_error() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "status".to_string(),
+            ..Default::default()
+        };
+        let err = executor.execute_power_op(&cmd).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("keepawake manager not initialized"),
+            "msg={msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_power_op_status_returns_json_status() {
+        use std::sync::Arc;
+
+        let mut executor = new_executor();
+        executor.keepawake_manager = Some(bifrost_power::KeepAwakeManager::new(
+            bifrost_power::Mode::Off,
+            Arc::new(bifrost_power::NoopPersister),
+        ));
+
+        let cmd = RemoteCommand {
+            command: "status".to_string(),
+            ..Default::default()
+        };
+        let body = executor.execute_power_op(&cmd).await.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(
+            value.get("mode").and_then(|m| m.as_str()),
+            Some(bifrost_power::Mode::Off.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_file_op_unknown_operation_is_rejected() {
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            command: "file.unknown".to_string(),
+            kind: super::super::types::CommandKind::File,
+            ..Default::default()
+        };
+        let err = executor.execute_file_op(&cmd).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown file operation"), "msg={msg}");
+    }
+}

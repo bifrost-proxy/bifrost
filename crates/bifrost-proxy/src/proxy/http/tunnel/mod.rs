@@ -7486,3 +7486,1228 @@ mod tests {
         assert_eq!(resp.status(), 500);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use bytes::{Bytes, BytesMut};
+    use hyper::Response;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    #[test]
+    fn test_apply_listener_context_sets_all_fields() {
+        let mut record = TrafficRecord::new(
+            "id-1".to_string(),
+            "GET".to_string(),
+            "https://example.com".to_string(),
+        );
+        let client_app = Some("UnitTestApp".to_string());
+        let client_path = Some("/tmp/app".to_string());
+        apply_listener_context(
+            &mut record,
+            8080,
+            "127.0.0.1",
+            &client_app,
+            Some(1234),
+            &client_path,
+        );
+        assert_eq!(record.listener_port, 8080);
+        assert_eq!(record.client_ip, "127.0.0.1");
+        assert_eq!(record.client_app, client_app);
+        assert_eq!(record.client_pid, Some(1234));
+        assert_eq!(record.client_path, client_path);
+    }
+
+    #[test]
+    fn test_is_standard_tls_intercept_port_only_standard_ports() {
+        assert!(is_standard_tls_intercept_port(443));
+        assert!(is_standard_tls_intercept_port(8443));
+        assert!(!is_standard_tls_intercept_port(80));
+        assert!(!is_standard_tls_intercept_port(0));
+    }
+
+    #[test]
+    fn test_is_explicit_tls_intercept_override_checks_domain_and_app() {
+        let mut cfg = TlsInterceptConfig {
+            enable_tls_interception: false,
+            intercept_exclude: vec![],
+            intercept_include: vec!["secure.example.com".to_string()],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec!["MyBrowser".to_string()],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        let mut rules = ResolvedRules::default();
+        // Rule override alone should force interception
+        rules.tls_intercept = Some(true);
+        assert!(is_explicit_tls_intercept_override(
+            "other.example.com",
+            Some("SomeApp"),
+            &cfg,
+            &rules,
+        ));
+
+        // Without rule override, domain or app include should still force interception
+        rules.tls_intercept = None;
+        assert!(is_explicit_tls_intercept_override(
+            "secure.example.com",
+            None,
+            &cfg,
+            &rules,
+        ));
+        assert!(is_explicit_tls_intercept_override(
+            "other.example.com",
+            Some("MyBrowser"),
+            &cfg,
+            &rules,
+        ));
+
+        // No match -> no explicit override
+        cfg.intercept_include.clear();
+        cfg.app_intercept_include.clear();
+        assert!(!is_explicit_tls_intercept_override(
+            "other.example.com",
+            Some("OtherApp"),
+            &cfg,
+            &rules,
+        ));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_host_rewrite_only_plaintext_protocols() {
+        let mut rules = ResolvedRules::default();
+        assert!(!requires_tls_interception_for_host_rewrite(&rules));
+
+        rules.host = Some("example.com".to_string());
+        rules.host_protocol = Some(Protocol::Https);
+        assert!(!requires_tls_interception_for_host_rewrite(&rules));
+
+        rules.host_protocol = Some(Protocol::Http);
+        assert!(requires_tls_interception_for_host_rewrite(&rules));
+        rules.host_protocol = Some(Protocol::Ws);
+        assert!(requires_tls_interception_for_host_rewrite(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_needs_interceptable_fields_and_auto_flag() {
+        let mut rules = ResolvedRules::default();
+        // No interceptable fields => false even with auto_tls_intercept
+        rules.rules.push(crate::server::RuleValue {
+            pattern: "*".to_string(),
+            protocol: Protocol::ResHeaders,
+            value: "X-Test: 1".to_string(),
+            options: std::collections::HashMap::new(),
+            rule_name: None,
+            raw: None,
+            line: None,
+            auto_tls_intercept: true,
+        });
+        assert!(!requires_tls_interception_for_rules(&rules));
+
+        // With matching content mutation + auto flag => true
+        rules
+            .res_headers
+            .push(("X-Test".to_string(), "1".to_string()));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_should_use_connect_upstream_proxy_requires_proxy_and_ignored_or_no_host() {
+        let mut rules = ResolvedRules::default();
+        assert!(!should_use_connect_upstream_proxy(&rules));
+
+        rules.proxy = Some("127.0.0.1:8888".to_string());
+        // proxy but no host override -> uses upstream proxy
+        assert!(should_use_connect_upstream_proxy(&rules));
+
+        rules.host = Some("override.example".to_string());
+        rules.ignored.host = false;
+        assert!(!should_use_connect_upstream_proxy(&rules));
+
+        rules.ignored.host = true;
+        assert!(should_use_connect_upstream_proxy(&rules));
+    }
+
+    #[test]
+    fn test_has_request_and_response_body_rules_detection() {
+        let mut rules = ResolvedRules::default();
+        assert!(!has_request_body_rules(&rules));
+        assert!(!has_response_body_rules(&rules));
+
+        rules.req_body = Some(Bytes::from_static(b"req"));
+        assert!(has_request_body_rules(&rules));
+
+        rules.req_body = None;
+        rules.req_prepend = Some(Bytes::from_static(b"p"));
+        assert!(has_request_body_rules(&rules));
+
+        rules = ResolvedRules::default();
+        rules.res_body = Some(Bytes::from_static(b"res"));
+        assert!(has_response_body_rules(&rules));
+    }
+
+    #[test]
+    fn test_build_upstream_pool_partition_includes_key_fields() {
+        let rules = ResolvedRules {
+            host: Some("override.example".to_string()),
+            proxy: Some("127.0.0.1:8888".to_string()),
+            host_protocol: Some(Protocol::Https),
+            ignored: crate::server::IgnoredFields {
+                host: true,
+                ..Default::default()
+            },
+            upstream_unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let partition =
+            build_upstream_pool_partition("orig.example", "target.example", 443, false, &rules);
+
+        assert!(partition.contains("orig=orig.example"));
+        assert!(partition.contains("target=https://target.example:443"));
+        assert!(partition.contains("host=Some(\"override.example\")"));
+        assert!(partition.contains("proxy=Some(\"127.0.0.1:8888\")"));
+        assert!(partition.contains("ignored_host=true"));
+        assert!(partition.contains("upstream_unsafe_ssl=true"));
+    }
+
+    #[test]
+    fn test_merge_connect_resolved_rules_merges_host_and_tls_fields() {
+        let base = ResolvedRules {
+            host: Some("base.example".to_string()),
+            host_protocol: Some(Protocol::Https),
+            tls_intercept: Some(false),
+            tls_options: None,
+            upstream_unsafe_ssl: false,
+            sni_callback: None,
+            rules: vec![crate::server::RuleValue {
+                pattern: "*".to_string(),
+                protocol: Protocol::ResHeaders,
+                value: "X-Base: 1".to_string(),
+                options: std::collections::HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+                auto_tls_intercept: false,
+            }],
+            ..Default::default()
+        };
+
+        let tunnel_specific = ResolvedRules {
+            host: Some("tunnel.example".to_string()),
+            host_protocol: Some(Protocol::Http),
+            tls_intercept: Some(true),
+            tls_options: Some("opt".to_string()),
+            upstream_unsafe_ssl: true,
+            sni_callback: Some("plugin(arg)".to_string()),
+            rules: vec![crate::server::RuleValue {
+                pattern: "*".to_string(),
+                protocol: Protocol::ReqHeaders,
+                value: "X-Tunnel: 1".to_string(),
+                options: std::collections::HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+                auto_tls_intercept: true,
+            }],
+            ..Default::default()
+        };
+
+        let merged = merge_connect_resolved_rules(base, tunnel_specific);
+        assert_eq!(merged.host.as_deref(), Some("tunnel.example"));
+        assert_eq!(merged.host_protocol, Some(Protocol::Http));
+        assert_eq!(merged.tls_intercept, Some(true));
+        assert_eq!(merged.tls_options.as_deref(), Some("opt"));
+        assert!(merged.upstream_unsafe_ssl);
+        assert_eq!(merged.rules.len(), 2);
+    }
+
+    #[test]
+    fn test_merge_connect_resolved_rules_respects_ignored_host() {
+        let base = ResolvedRules {
+            host: Some("base.example".to_string()),
+            host_protocol: Some(Protocol::Https),
+            ignored: crate::server::IgnoredFields {
+                host: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let tunnel_specific = ResolvedRules {
+            host: Some("tunnel.example".to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+
+        let merged = merge_connect_resolved_rules(base, tunnel_specific);
+        // Host rewrite should be ignored when base.ignored.host is true
+        assert_eq!(merged.host.as_deref(), Some("base.example"));
+        assert_eq!(merged.host_protocol, Some(Protocol::Https));
+    }
+
+    #[test]
+    fn test_parse_sni_callback_spec_variants() {
+        let (plugin, arg) = parse_sni_callback_spec("myPlugin(arg1)");
+        assert_eq!(plugin, "myPlugin");
+        assert_eq!(arg, Some("arg1"));
+
+        let (plugin, arg) = parse_sni_callback_spec("  other_plugin (  spaced arg  ) ");
+        assert_eq!(plugin, "other_plugin");
+        assert_eq!(arg, Some("spaced arg  )"));
+
+        let (plugin, arg) = parse_sni_callback_spec("simple_plugin");
+        assert_eq!(plugin, "simple_plugin");
+        assert_eq!(arg, None);
+
+        let (plugin, arg) = parse_sni_callback_spec("empty() ");
+        assert_eq!(plugin, "empty");
+        assert_eq!(arg, Some(")"));
+    }
+
+    #[test]
+    fn test_format_tls_alpn_some_and_none() {
+        assert_eq!(format_tls_alpn(Some(b"h2")), "h2");
+        assert_eq!(format_tls_alpn(Some(b"http/1.1")), "http/1.1");
+        assert_eq!(format_tls_alpn(None), "none");
+    }
+
+    #[test]
+    fn test_is_likely_text_and_binary_content_type_classification() {
+        assert!(is_likely_text_content_type("text/plain"));
+        assert!(is_likely_text_content_type(
+            "application/json; charset=utf-8"
+        ));
+        assert!(is_likely_text_content_type("application/vnd.api+json"));
+        assert!(is_likely_text_content_type("application/xml"));
+        assert!(is_likely_text_content_type("application/javascript"));
+        assert!(is_likely_text_content_type(
+            "application/x-www-form-urlencoded"
+        ));
+
+        assert!(!is_likely_text_content_type(""));
+        assert!(!is_likely_text_content_type("application/octet-stream"));
+
+        assert!(is_likely_binary_content_type("application/octet-stream"));
+        assert!(is_likely_binary_content_type("application/pdf"));
+        assert!(is_likely_binary_content_type("audio/ogg"));
+        assert!(is_likely_binary_content_type("video/mp4"));
+        assert!(is_likely_binary_content_type("font/woff2"));
+        assert!(is_likely_binary_content_type("application/grpc"));
+
+        // Text types should not be considered binary
+        assert!(!is_likely_binary_content_type("text/html"));
+        assert!(!is_likely_binary_content_type("application/json"));
+    }
+
+    #[test]
+    fn test_should_use_binary_performance_mode_behaviour() {
+        let res = Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/pdf")
+            .body(empty_body())
+            .unwrap();
+        let (mut parts, _body) = res.into_parts();
+
+        // Disabled completely
+        assert!(!should_use_binary_performance_mode(&parts, false));
+
+        // Binary content-type without attachment: should still be eligible
+        assert!(should_use_binary_performance_mode(&parts, true));
+
+        // Image type is explicitly skipped even in binary mode
+        parts.headers.insert(
+            hyper::header::CONTENT_TYPE,
+            HeaderValue::from_static("image/png"),
+        );
+        assert!(!should_use_binary_performance_mode(&parts, true));
+
+        // Attachment header should force binary mode even for non-binary type
+        let res2 = Response::builder()
+            .status(200)
+            .header(
+                hyper::header::CONTENT_DISPOSITION,
+                "attachment; filename=export.bin",
+            )
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(empty_body())
+            .unwrap();
+        let (parts2, _body2) = res2.into_parts();
+        assert!(should_use_binary_performance_mode(&parts2, true));
+    }
+
+    #[test]
+    fn test_process_template_replaces_basic_placeholders() {
+        let vars = TemplateVars {
+            url: "https://example.com/path?query=1".to_string(),
+            method: "POST".to_string(),
+            host: "example.com".to_string(),
+            pathname: "/path".to_string(),
+            search: "?query=1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            req_id: "req-123".to_string(),
+        };
+        let tpl = "${method} ${url} ${host} ${pathname} ${search} ${clientIp} ${reqId}";
+        let out = process_template(tpl, &vars);
+        assert!(out.contains("POST"));
+        assert!(out.contains("https://example.com/path?query=1"));
+        assert!(out.contains("example.com"));
+        assert!(out.contains("/path"));
+        assert!(out.contains("?query=1"));
+        assert!(out.contains("127.0.0.1"));
+        assert!(out.contains("req-123"));
+    }
+
+    #[test]
+    fn test_build_redirect_response_sets_status_and_headers() {
+        let resp = build_redirect_response(301, "https://example.com/target");
+        assert_eq!(resp.status(), 301);
+        assert_eq!(
+            resp.headers()
+                .get(hyper::header::LOCATION)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "https://example.com/target",
+        );
+        assert_eq!(
+            resp.headers()
+                .get(hyper::header::CONTENT_TYPE)
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "text/html; charset=utf-8",
+        );
+    }
+
+    #[test]
+    fn test_requires_client_app_for_tls_decision_detects_app_policy() {
+        let mut cfg = TlsInterceptConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec![],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        assert!(!requires_client_app_for_tls_decision(&cfg));
+
+        cfg.app_intercept_include.push("Chrome".to_string());
+        assert!(requires_client_app_for_tls_decision(&cfg));
+
+        cfg.app_intercept_include.clear();
+        cfg.app_intercept_exclude.push("Postman".to_string());
+        assert!(requires_client_app_for_tls_decision(&cfg));
+    }
+
+    #[test]
+    fn test_is_domain_matched_and_app_matched_helpers() {
+        let patterns = vec!["Example.COM".to_string(), "*.internal.local".to_string()];
+        assert!(is_domain_matched("example.com", &patterns));
+        assert!(is_domain_matched("foo.internal.local", &patterns));
+        assert!(!is_domain_matched("other.com", &patterns));
+
+        let app_patterns = vec![
+            "Chrome".to_string(),
+            "Safari*".to_string(),
+            "*Firefox".to_string(),
+        ];
+        assert!(is_app_matched(Some("Chrome"), &app_patterns));
+        assert!(is_app_matched(
+            Some("Safari Technology Preview"),
+            &app_patterns
+        ));
+        assert!(is_app_matched(Some("Mozilla Firefox"), &app_patterns));
+        assert!(!is_app_matched(Some("Edge"), &app_patterns));
+        assert!(!is_app_matched(None, &app_patterns));
+    }
+
+    #[test]
+    fn test_is_ip_matched_helpers() {
+        let patterns = vec![
+            "192.168.1.0/24".to_string(),
+            "10.0.0.1".to_string(),
+            "fe80::/10".to_string(),
+        ];
+        assert!(is_ip_matched("192.168.1.23", &patterns));
+        assert!(is_ip_matched("10.0.0.1", &patterns));
+        assert!(is_ip_matched("fe80::1", &patterns));
+        assert!(!is_ip_matched("172.16.0.1", &patterns));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_connect_rules_delegates_to_helpers() {
+        let rules = ResolvedRules {
+            res_headers: vec![("X-Test".to_string(), "1".to_string())],
+            rules: vec![crate::server::RuleValue {
+                pattern: "*".to_string(),
+                protocol: Protocol::ResHeaders,
+                value: "X-Test: 1".to_string(),
+                options: std::collections::HashMap::new(),
+                rule_name: None,
+                raw: None,
+                line: None,
+                auto_tls_intercept: true,
+            }],
+            ..Default::default()
+        };
+        assert!(requires_tls_interception_for_connect_rules(&rules));
+
+        let host_rewrite_rules = ResolvedRules {
+            host: Some("127.0.0.1:3000".to_string()),
+            host_protocol: Some(Protocol::Http),
+            ..Default::default()
+        };
+        assert!(requires_tls_interception_for_connect_rules(
+            &host_rewrite_rules
+        ));
+    }
+
+    #[test]
+    fn test_parse_connect_authority_invalid_and_empty_authority() {
+        // Multiple colons should be rejected as invalid authority
+        assert!(parse_connect_authority("too:many:colons").is_err());
+
+        // Empty authority today is treated as an empty host with default HTTPS port
+        let (host, port) =
+            parse_connect_authority("").expect("empty authority should default to :443");
+        assert_eq!(host, "");
+        assert_eq!(port, 443);
+    }
+
+    #[test]
+    fn test_apply_resolved_req_headers_to_outgoing_request_appends_and_overwrites() {
+        let mut req = hyper::Request::builder()
+            .uri("http://example.com")
+            .header("X-Existing", "client")
+            .body(())
+            .unwrap();
+
+        apply_resolved_req_headers_to_outgoing_request(
+            "req-1",
+            &mut req,
+            &[
+                ("X-New".to_string(), "value".to_string()),
+                ("X-Existing".to_string(), "rule".to_string()),
+            ],
+            false,
+        )
+        .expect("headers should be applied");
+
+        let values: Vec<_> = req
+            .headers()
+            .get_all("X-Existing")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["rule".to_string()]);
+        assert_eq!(
+            req.headers().get("X-New").unwrap().to_str().unwrap(),
+            "value",
+        );
+    }
+
+    #[test]
+    fn test_apply_resolved_req_headers_to_outgoing_request_invalid_name_and_value() {
+        let mut req = hyper::Request::builder()
+            .uri("http://example.com")
+            .body(())
+            .unwrap();
+
+        let err = apply_resolved_req_headers_to_outgoing_request(
+            "req-2",
+            &mut req,
+            &[("bad\nname".to_string(), "ok".to_string())],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid request header name"));
+
+        let err = apply_resolved_req_headers_to_outgoing_request(
+            "req-3",
+            &mut req,
+            &[("X-Ok".to_string(), "bad\nvalue".to_string())],
+            false,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid request header value"));
+    }
+
+    #[test]
+    fn test_tls_client_config_wrapper_functions_do_not_panic() {
+        let _cfg1 = get_tls_client_config(false);
+        let _cfg2 = get_tls_client_config_http1_only(true);
+        let _cfg3 = get_tls_client_config_without_alpn(false);
+    }
+
+    struct StubReader {
+        result: Option<std::result::Result<Vec<u8>, std::io::Error>>,
+    }
+
+    impl StubReader {
+        fn with_bytes(bytes: &[u8]) -> Self {
+            Self {
+                result: Some(Ok(bytes.to_vec())),
+            }
+        }
+
+        fn with_zero() -> Self {
+            Self {
+                result: Some(Ok(Vec::new())),
+            }
+        }
+
+        fn with_error(msg: &str) -> Self {
+            Self {
+                result: Some(Err(std::io::Error::new(std::io::ErrorKind::Other, msg))),
+            }
+        }
+    }
+
+    impl AsyncRead for StubReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::result::Result<(), std::io::Error>> {
+            match self.result.take() {
+                Some(Ok(bytes)) => {
+                    let len = bytes.len().min(buf.remaining());
+                    buf.put_slice(&bytes[..len]);
+                    Poll::Ready(Ok(()))
+                }
+                Some(Err(e)) => Poll::Ready(Err(e)),
+                None => {
+                    // Subsequent reads behave like EOF
+                    Poll::Ready(Ok(()))
+                }
+            }
+        }
+    }
+
+    impl Unpin for StubReader {}
+
+    #[tokio::test]
+    async fn test_sniff_tls_client_payload_reads_bytes() {
+        let mut reader = StubReader::with_bytes(b"GET / HTTP/1.1\r\n");
+        let buf = sniff_tls_client_payload(&mut reader, "req-1", false)
+            .await
+            .expect("sniff should succeed");
+        assert_eq!(buf, BytesMut::from(&b"GET / HTTP/1.1\r\n"[..]));
+    }
+
+    #[tokio::test]
+    async fn test_sniff_tls_client_payload_zero_length_returns_empty() {
+        let mut reader = StubReader::with_zero();
+        let buf = sniff_tls_client_payload(&mut reader, "req-2", false)
+            .await
+            .expect("sniff should succeed");
+        assert!(buf.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_sniff_tls_client_payload_error_maps_to_bifrost_error() {
+        let mut reader = StubReader::with_error("boom");
+        let err = sniff_tls_client_payload(&mut reader, "req-3", false)
+            .await
+            .unwrap_err();
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("Failed to sniff intercepted TLS payload"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_h2_body_recovery_action_streams_large_text_bodies() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            hyper::StatusCode::OK,
+            "GET",
+            "text/html",
+            Some(10_000),
+            2048,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Stream);
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::task::{Context, Poll};
+
+    use bifrost_storage::ValuesStorage;
+    use bytes::{Bytes, BytesMut};
+    use hyper::header::{HeaderName, HeaderValue};
+    use hyper::HeaderMap;
+    use parking_lot::RwLock as ParkingRwLock;
+    use serde_json::json;
+    use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+
+    // -------------------------- get_values_from_state --------------------------
+
+    #[tokio::test]
+    async fn test_get_values_from_state_none_returns_empty() {
+        let values = get_values_from_state(&None).await;
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_values_from_state_without_storage_returns_empty() {
+        let state = Arc::new(AdminState::new(0));
+        let values = get_values_from_state(&Some(state)).await;
+        assert!(values.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_get_values_from_state_reads_from_values_storage() {
+        let base_dir = std::env::temp_dir().join("bifrost_values_test_v2");
+        let _ = std::fs::remove_dir_all(&base_dir);
+        let mut storage = ValuesStorage::with_dir(base_dir.clone()).unwrap();
+        storage.set_value("key1", "value1").unwrap();
+        storage.set_value("key2", "value2").unwrap();
+
+        let mut state = AdminState::new(1234);
+        state.values_storage = Some(Arc::new(ParkingRwLock::new(storage)));
+        let state = Arc::new(state);
+
+        let values = get_values_from_state(&Some(state)).await;
+        assert_eq!(values.get("key1"), Some(&"value1".to_string()));
+        assert_eq!(values.get("key2"), Some(&"value2".to_string()));
+
+        let _ = std::fs::remove_dir_all(&base_dir);
+    }
+
+    // ------------------------------ parse_host_rule ------------------------------
+
+    #[test]
+    fn test_parse_host_rule_plain_host_without_port_or_path() {
+        let parsed = parse_host_rule("example.com").expect("host should parse");
+        assert_eq!(parsed.0, "example.com");
+        assert_eq!(parsed.1, None);
+        assert_eq!(parsed.2, None);
+    }
+
+    #[test]
+    fn test_parse_host_rule_with_scheme_port_and_path() {
+        let parsed = parse_host_rule("https://example.com:8443/api/v1?x=1").expect("parse");
+        assert_eq!(parsed.0, "example.com");
+        assert_eq!(parsed.1, Some(8443));
+        assert_eq!(parsed.2.as_deref(), Some("/api/v1?x=1"));
+    }
+
+    #[test]
+    fn test_parse_host_rule_strips_known_prefixes() {
+        for prefix in [
+            "http://", "https://", "ws://", "wss://", "host://", "xhost://", "proxy://", "pac://",
+        ] {
+            let rule = format!("{}example.org:8080/path", prefix);
+            let parsed = parse_host_rule(&rule).expect("parse");
+            assert_eq!(parsed.0, "example.org");
+            assert_eq!(parsed.1, Some(8080));
+            assert_eq!(parsed.2.as_deref(), Some("/path"));
+        }
+    }
+
+    #[test]
+    fn test_parse_host_rule_ignores_empty_or_whitespace() {
+        assert!(parse_host_rule("").is_none());
+        assert!(parse_host_rule("   ").is_none());
+    }
+
+    #[test]
+    fn test_parse_host_rule_filters_root_path() {
+        let parsed = parse_host_rule("https://example.com/").expect("parse");
+        assert_eq!(parsed.0, "example.com");
+        assert_eq!(parsed.1, None);
+        assert_eq!(parsed.2, None, "root path should be treated as none");
+    }
+
+    #[test]
+    fn test_parse_host_rule_invalid_uri_returns_none() {
+        // space in host -> invalid URI
+        assert!(parse_host_rule("bad host").is_none());
+    }
+
+    // ------------------------- sanitize_upstream_headers -------------------------
+
+    #[test]
+    fn test_sanitize_upstream_headers_removes_standard_hop_by_hop_headers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            HeaderValue::from_static("keep-alive"),
+        );
+        headers.insert(
+            HeaderName::from_static("proxy-connection"),
+            HeaderValue::from_static("a"),
+        );
+        headers.insert(
+            HeaderName::from_static("keep-alive"),
+            HeaderValue::from_static("b"),
+        );
+        headers.insert(
+            hyper::header::TRANSFER_ENCODING,
+            HeaderValue::from_static("chunked"),
+        );
+        headers.insert(
+            hyper::header::UPGRADE,
+            HeaderValue::from_static("websocket"),
+        );
+        headers.insert(
+            HeaderName::from_static("trailer"),
+            HeaderValue::from_static("X-Trailer"),
+        );
+
+        sanitize_upstream_headers(&mut headers);
+
+        assert!(!headers.contains_key(hyper::header::CONNECTION));
+        assert!(!headers.contains_key("proxy-connection"));
+        assert!(!headers.contains_key("keep-alive"));
+        assert!(!headers.contains_key(hyper::header::TRANSFER_ENCODING));
+        assert!(!headers.contains_key(hyper::header::UPGRADE));
+        assert!(!headers.contains_key("trailer"));
+    }
+
+    #[test]
+    fn test_sanitize_upstream_headers_removes_headers_listed_in_connection() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::CONNECTION,
+            HeaderValue::from_static("Foo, Bar , baz"),
+        );
+        headers.insert(
+            HeaderName::from_static("foo"),
+            HeaderValue::from_static("1"),
+        );
+        headers.insert(
+            HeaderName::from_static("bar"),
+            HeaderValue::from_static("2"),
+        );
+        headers.insert(
+            HeaderName::from_static("baz"),
+            HeaderValue::from_static("3"),
+        );
+
+        sanitize_upstream_headers(&mut headers);
+
+        assert!(!headers.contains_key(hyper::header::CONNECTION));
+        assert!(!headers.contains_key("foo"));
+        assert!(!headers.contains_key("bar"));
+        assert!(!headers.contains_key("baz"));
+    }
+
+    #[test]
+    fn test_sanitize_upstream_headers_preserves_te_trailers_only() {
+        let mut headers = HeaderMap::new();
+        headers.insert(hyper::header::TE, HeaderValue::from_static("trailers"));
+
+        sanitize_upstream_headers(&mut headers);
+
+        assert!(headers.contains_key(hyper::header::TE));
+    }
+
+    #[test]
+    fn test_sanitize_upstream_headers_drops_te_when_not_trailers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            hyper::header::TE,
+            HeaderValue::from_static("trailers, deflate"),
+        );
+
+        sanitize_upstream_headers(&mut headers);
+
+        assert!(!headers.contains_key(hyper::header::TE));
+    }
+
+    // ------------------------- CombinedAsyncRw & BufferedIo -------------------------
+
+    struct TestReader {
+        data: Bytes,
+        pos: usize,
+    }
+
+    impl AsyncRead for TestReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            if self.pos >= self.data.len() {
+                return Poll::Ready(Ok(()));
+            }
+            let remaining = &self.data[self.pos..];
+            let to_copy = remaining.len().min(buf.remaining());
+            buf.put_slice(&remaining[..to_copy]);
+            self.pos += to_copy;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    struct RecordingWriter {
+        written: Arc<ParkingRwLock<Vec<u8>>>,
+    }
+
+    impl AsyncWrite for RecordingWriter {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.written.write().extend_from_slice(buf);
+            Poll::Ready(Ok(buf.len()))
+        }
+
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_combined_async_rw_delegates_read_and_write() {
+        let reader = TestReader {
+            data: Bytes::from_static(b"hello"),
+            pos: 0,
+        };
+        let written = Arc::new(ParkingRwLock::new(Vec::new()));
+        let writer = RecordingWriter {
+            written: Arc::clone(&written),
+        };
+
+        let mut combined = CombinedAsyncRw::new(reader, writer);
+
+        let mut buf = [0u8; 5];
+        combined.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"hello");
+
+        combined.write_all(b"world").await.unwrap();
+        combined.flush().await.unwrap();
+
+        let recorded = written.read().clone();
+        assert_eq!(recorded, b"world");
+    }
+
+    #[tokio::test]
+    async fn test_buffered_io_reads_from_prefilled_buffer_then_inner() {
+        let inner = TestReader {
+            data: Bytes::from_static(b"DEF"),
+            pos: 0,
+        };
+        let buffer = BytesMut::from(&b"ABC"[..]);
+        let mut io = BufferedIo::new(inner, buffer);
+
+        let mut buf = [0u8; 3];
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"ABC");
+
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"DEF");
+    }
+
+    #[tokio::test]
+    async fn test_buffered_io_partial_reads_across_multiple_calls() {
+        let inner = TestReader {
+            data: Bytes::from_static(b"XYZ"),
+            pos: 0,
+        };
+        let buffer = BytesMut::from(&b"ABCDE"[..]);
+        let mut io = BufferedIo::new(inner, buffer);
+
+        let mut buf = [0u8; 2];
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"AB");
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"CD");
+
+        let mut buf3 = [0u8; 3];
+        io.read_exact(&mut buf3).await.unwrap();
+        assert_eq!(&buf3, b"EXY".as_ref());
+    }
+
+    #[tokio::test]
+    async fn test_buffered_io_without_buffer_reads_from_inner_only() {
+        let inner = TestReader {
+            data: Bytes::from_static(b"payload"),
+            pos: 0,
+        };
+        let buffer = BytesMut::new();
+        let mut io = BufferedIo::new(inner, buffer);
+
+        let mut buf = [0u8; 7];
+        io.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"payload");
+    }
+
+    // ---------------------- build_tls_intercept_server_builder ----------------------
+
+    #[tokio::test]
+    async fn test_build_tls_intercept_server_builder_accepts_small_limits() {
+        // Ensure builder can be constructed with a normal header limit without panicking.
+        let _builder = build_tls_intercept_server_builder(128 * 1024);
+    }
+
+    #[tokio::test]
+    async fn test_build_tls_intercept_server_builder_clamps_large_limits() {
+        // usize::MAX should be clamped to u32::MAX internally without panic.
+        let _builder = build_tls_intercept_server_builder(usize::MAX);
+    }
+
+    // --------------------------- requires_tls_interception_for_rules ---------------------------
+
+    fn auto_tls_rule(protocol: Protocol) -> crate::server::RuleValue {
+        crate::server::RuleValue {
+            pattern: "*".to_string(),
+            protocol,
+            value: "test".to_string(),
+            options: HashMap::new(),
+            rule_name: None,
+            raw: None,
+            line: None,
+            auto_tls_intercept: true,
+        }
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_with_mock_template() {
+        let mut rules = ResolvedRules::default();
+        rules.mock_template = Some("template.json".to_string());
+        rules.rules.push(auto_tls_rule(Protocol::ResHeaders));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_with_html_body_rule() {
+        let mut rules = ResolvedRules::default();
+        rules.html_body = Some("<html></html>".to_string());
+        rules.rules.push(auto_tls_rule(Protocol::HtmlBody));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_with_url_params_rule() {
+        let mut rules = ResolvedRules::default();
+        rules
+            .url_params
+            .push(("foo".to_string(), "bar".to_string()));
+        rules.rules.push(auto_tls_rule(Protocol::UrlParams));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_with_merge_fields() {
+        let mut rules = ResolvedRules::default();
+        rules.req_merge = Some(json!({"k": "v"}));
+        rules.rules.push(auto_tls_rule(Protocol::ResMerge));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    // ------------------------ has_request_body_rules / has_response_body_rules ------------------------
+
+    #[test]
+    fn test_has_request_body_rules_for_append_and_replace_variants() {
+        let mut rules = ResolvedRules::default();
+        assert!(!has_request_body_rules(&rules));
+
+        rules.req_append = Some(Bytes::from_static(b"suffix"));
+        assert!(has_request_body_rules(&rules));
+
+        rules.req_append = None;
+        rules.req_replace.push(("a".to_string(), "b".to_string()));
+        assert!(has_request_body_rules(&rules));
+
+        rules.req_replace.clear();
+        rules.req_replace_regex.push(crate::server::RegexReplace {
+            pattern: regex::Regex::new("a").unwrap(),
+            replacement: "b".to_string(),
+            global: false,
+        });
+        assert!(has_request_body_rules(&rules));
+
+        rules.req_replace_regex.clear();
+        rules.req_merge = Some(json!({"k": "v"}));
+        assert!(has_request_body_rules(&rules));
+    }
+
+    #[test]
+    fn test_has_response_body_rules_for_append_and_merge_variants() {
+        let mut rules = ResolvedRules::default();
+        assert!(!has_response_body_rules(&rules));
+
+        rules.res_append = Some(Bytes::from_static(b"tail"));
+        assert!(has_response_body_rules(&rules));
+
+        rules.res_append = None;
+        rules.res_replace.push(("a".to_string(), "b".to_string()));
+        assert!(has_response_body_rules(&rules));
+
+        rules.res_replace.clear();
+        rules.res_merge = Some(json!({"k": "v"}));
+        assert!(has_response_body_rules(&rules));
+    }
+
+    // ------------------------------ h2_body_recovery_action extra cases ------------------------------
+
+    #[test]
+    fn test_h2_body_recovery_action_streams_for_non_h2_or_head() {
+        let action = h2_body_recovery_action(
+            hyper::Version::HTTP_11,
+            hyper::StatusCode::OK,
+            "GET",
+            "application/json",
+            Some(1024),
+            2048,
+            true,
+        );
+        assert_eq!(action, H2BodyRecoveryAction::Stream);
+
+        let action_head = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            hyper::StatusCode::OK,
+            "HEAD",
+            "application/json",
+            Some(1024),
+            2048,
+            true,
+        );
+        assert_eq!(action_head, H2BodyRecoveryAction::Stream);
+    }
+
+    #[test]
+    fn test_h2_body_recovery_action_streams_for_no_content_or_not_modified() {
+        let action_204 = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            hyper::StatusCode::NO_CONTENT,
+            "GET",
+            "application/json",
+            Some(0),
+            2048,
+            true,
+        );
+        assert_eq!(action_204, H2BodyRecoveryAction::Stream);
+
+        let action_304 = h2_body_recovery_action(
+            hyper::Version::HTTP_2,
+            hyper::StatusCode::NOT_MODIFIED,
+            "GET",
+            "application/json",
+            None,
+            2048,
+            true,
+        );
+        assert_eq!(action_304, H2BodyRecoveryAction::Stream);
+    }
+
+    // ------------------------------ process_template & serve_mock_file ------------------------------
+
+    fn create_temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "{}_{}_{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn test_process_template_replaces_dynamic_placeholders() {
+        let vars = TemplateVars {
+            url: "https://example.com/path?query=1".to_string(),
+            method: "GET".to_string(),
+            host: "example.com".to_string(),
+            pathname: "/path".to_string(),
+            search: "?query=1".to_string(),
+            client_ip: "127.0.0.1".to_string(),
+            req_id: "req-xyz".to_string(),
+        };
+        let tpl = "now=${now}, ts=${timestamp}, rand=${random}";
+        let out = process_template(tpl, &vars);
+        assert!(!out.contains("${now}"));
+        assert!(!out.contains("${timestamp}"));
+        assert!(!out.contains("${random}"));
+    }
+
+    // ---------------- apply_resolved_req_headers_to_outgoing_request (verbose logging) ----------------
+
+    #[test]
+    fn test_apply_resolved_req_headers_with_verbose_logging_inserts_headers() {
+        let mut req = hyper::Request::builder()
+            .uri("https://example.com")
+            .body(())
+            .unwrap();
+
+        apply_resolved_req_headers_to_outgoing_request(
+            "req-verbose-1",
+            &mut req,
+            &[
+                ("X-Verbose-One".to_string(), "1".to_string()),
+                ("X-Verbose-Two".to_string(), "2".to_string()),
+            ],
+            true,
+        )
+        .expect("headers should be applied");
+
+        assert_eq!(
+            req.headers()
+                .get("X-Verbose-One")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "1"
+        );
+        assert_eq!(
+            req.headers()
+                .get("X-Verbose-Two")
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "2"
+        );
+    }
+
+    #[test]
+    fn test_apply_resolved_req_headers_with_verbose_logging_overwrites_existing() {
+        let mut req = hyper::Request::builder()
+            .uri("https://example.com")
+            .header("X-Existing", "client")
+            .body(())
+            .unwrap();
+
+        apply_resolved_req_headers_to_outgoing_request(
+            "req-verbose-2",
+            &mut req,
+            &[("X-Existing".to_string(), "rule".to_string())],
+            true,
+        )
+        .expect("headers should be applied");
+
+        let values: Vec<_> = req
+            .headers()
+            .get_all("X-Existing")
+            .iter()
+            .map(|v| v.to_str().unwrap().to_string())
+            .collect();
+        assert_eq!(values, vec!["rule".to_string()]);
+    }
+}

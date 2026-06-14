@@ -3172,3 +3172,341 @@ def hello():
         conversation_history_store().remove(sk);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use base64::Engine as _;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static GLOBAL_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn global_lock() -> &'static Mutex<()> {
+        GLOBAL_TEST_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    // --- truncate_for_log helpers ---
+
+    #[test]
+    fn truncate_for_log_returns_original_when_short() {
+        let s = "hello";
+        assert_eq!(truncate_for_log(s, 10), "hello");
+    }
+
+    #[test]
+    fn truncate_for_log_truncates_and_appends_ellipsis() {
+        let s = "abcdef";
+        let out = truncate_for_log(s, 3);
+        assert_eq!(out, "abc...");
+    }
+
+    #[test]
+    fn truncate_for_log_handles_unicode_boundaries() {
+        let s = "你好世界"; // 4 chars
+        let out = truncate_for_log(s, 3);
+        // Should still be valid UTF-8 and end with ellipsis
+        assert!(out.ends_with("..."));
+    }
+
+    // --- artifact_kind_label & image count helpers ---
+
+    #[test]
+    fn artifact_kind_label_maps_known_kinds() {
+        assert_eq!(artifact_kind_label("image"), "图片");
+        assert_eq!(artifact_kind_label("archive"), "压缩包");
+        assert_eq!(artifact_kind_label("other"), "附件");
+    }
+
+    #[test]
+    fn requested_image_count_hint_rejects_out_of_range_counts() {
+        assert_eq!(requested_image_count_hint("生成0张图片"), None);
+        assert_eq!(requested_image_count_hint("生成99张图片"), None);
+    }
+
+    #[test]
+    fn chinese_image_count_returns_expected_values() {
+        assert_eq!(chinese_image_count("一"), Some(1));
+        assert_eq!(chinese_image_count("两"), Some(2));
+        assert_eq!(chinese_image_count("十"), Some(10));
+        assert_eq!(chinese_image_count("零"), None);
+    }
+
+    // --- append_status_message & auth identity issue helpers ---
+
+    #[test]
+    fn append_status_message_appends_when_existing_non_empty() {
+        let s = append_status_message(Some("first".to_string()), "second");
+        assert_eq!(s, "first; second");
+    }
+
+    #[test]
+    fn append_status_message_starts_new_when_existing_empty() {
+        let s = append_status_message(Some("".to_string()), "next");
+        assert_eq!(s, "next");
+    }
+
+    #[test]
+    fn authorization_identity_issue_returns_none_when_not_expired() {
+        let identity = AuthorizationIdentity {
+            complete: true,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339()),
+            ..Default::default()
+        };
+        assert!(authorization_identity_issue(&identity).is_none());
+    }
+
+    #[test]
+    fn authorization_identity_issue_reports_parse_error() {
+        let identity = AuthorizationIdentity {
+            complete: true,
+            expires_at: Some("not-a-timestamp".to_string()),
+            ..Default::default()
+        };
+        let msg = authorization_identity_issue(&identity).unwrap();
+        assert!(msg.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_fresh_for_recent_timestamp() {
+        let proof = BrowserAccountCheckProof {
+            captured_at: (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339(),
+            status: 200,
+            logged_in: true,
+        };
+        assert!(browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_stale_for_old_timestamp() {
+        let proof = BrowserAccountCheckProof {
+            captured_at: (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+            status: 200,
+            logged_in: true,
+        };
+        assert!(!browser_account_check_proof_is_fresh(&proof));
+    }
+
+    // --- decode_cdp_response_body & headers extraction ---
+
+    #[test]
+    fn decode_cdp_response_body_reads_plain_text() {
+        let value = json!({"body": "plain-text"});
+        assert_eq!(
+            decode_cdp_response_body(&value).as_deref(),
+            Some("plain-text")
+        );
+    }
+
+    #[test]
+    fn decode_cdp_response_body_decodes_base64_when_flag_set() {
+        let body = base64::engine::general_purpose::STANDARD.encode("hello");
+        let value = json!({"body": body, "base64Encoded": true});
+        assert_eq!(decode_cdp_response_body(&value).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn decode_cdp_response_body_returns_none_when_body_missing() {
+        let value = json!({"base64Encoded": false});
+        assert!(decode_cdp_response_body(&value).is_none());
+    }
+
+    #[test]
+    fn extract_reusable_headers_filters_and_normalizes_keys() {
+        let mut target = BTreeMap::new();
+        let mut headers = serde_json::Map::new();
+        headers.insert(
+            "Authorization".to_string(),
+            Value::String("Bearer token".to_string()),
+        );
+        headers.insert(
+            "OAI-Language".to_string(),
+            Value::String("zh-CN".to_string()),
+        );
+        headers.insert(
+            "Other-Header".to_string(),
+            Value::String("ignored".to_string()),
+        );
+        extract_reusable_headers(&headers, &mut target);
+        assert_eq!(
+            target.get("authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(
+            target.get("oai-language").map(String::as_str),
+            Some("zh-CN")
+        );
+        assert!(!target.contains_key("other-header"));
+    }
+
+    // --- summarize_authorization_identity ---
+
+    #[test]
+    fn summarize_authorization_identity_returns_default_when_no_bearer() {
+        let headers = BTreeMap::from([("authorization".to_string(), "Basic abc".to_string())]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(!id.has_bearer_token);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn summarize_authorization_identity_handles_invalid_jwt_payload() {
+        let headers =
+            BTreeMap::from([("authorization".to_string(), "Bearer not-a-jwt".to_string())]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn summarize_authorization_identity_extracts_core_claims() {
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "https://api.openai.com/profile".to_string(),
+            json!({
+                "email": "user@example.com",
+                "email_verified": true
+            }),
+        );
+        claims.insert(
+            "https://api.openai.com/auth".to_string(),
+            json!({
+                "user_id": "user-123",
+                "chatgpt_account_id": "acc-1"
+            }),
+        );
+        claims.insert(
+            "exp".to_string(),
+            json!(chrono::Utc::now().timestamp() + 3600),
+        );
+        let payload = serde_json::Value::Object(claims);
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes);
+        let token = format!("header.{payload_b64}.sig");
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
+
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(id.has_profile_email);
+        assert_eq!(id.profile_email_verified, Some(true));
+        assert!(id.has_user_identity);
+        assert!(id.has_account_identity);
+        assert!(id.complete);
+        assert!(id.expires_at.is_some());
+    }
+
+    // --- runtime_config & resolve_config_path ---
+
+    #[test]
+    fn runtime_config_uses_timeout_override_from_adapter_config() {
+        let adapter = ExternalCliAdapterConfig {
+            timeout_secs: Some(123),
+            extra: BTreeMap::new(),
+            ..ExternalCliAdapterConfig::default()
+        };
+        let cfg = runtime_config(&adapter).expect("runtime_config ok");
+        assert_eq!(cfg.chatgpt.timeout_secs, 123);
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_absolute_value() {
+        let base = PathBuf::from("/tmp/base-path");
+        let abs = if cfg!(windows) {
+            "C:/chatgpt/state.json"
+        } else {
+            "/var/tmp/state.json"
+        };
+        let out = resolve_config_path(Some(abs), &base, "fallback.json");
+        assert!(out.is_absolute());
+        assert!(out.ends_with("state.json"));
+    }
+
+    #[test]
+    fn resolve_config_path_uses_relative_under_base_when_not_absolute() {
+        let base = PathBuf::from("/tmp/base-path");
+        let out = resolve_config_path(Some("state.json"), &base, "fallback.json");
+        assert!(out.starts_with(&base));
+        assert!(out.ends_with("state.json"));
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_default_when_empty() {
+        let base = PathBuf::from("/tmp/base-path");
+        let out = resolve_config_path(None, &base, "fallback.json");
+        assert_eq!(out, base.join("fallback.json"));
+    }
+
+    #[test]
+    fn iso_now_returns_rfc3339_timestamp() {
+        let ts = iso_now();
+        chrono::DateTime::parse_from_rfc3339(&ts).expect("parse iso_now");
+    }
+
+    // --- startup_auth_dry_run_enabled & browser_fetch_headers ---
+
+    #[test]
+    fn startup_auth_dry_run_enabled_recognizes_truthy_values() {
+        let _guard = global_lock().lock().unwrap();
+        for value in ["1", "true", "yes", "on", "TRUE"] {
+            std::env::set_var(STARTUP_AUTH_DRY_RUN_ENV, value);
+            assert!(startup_auth_dry_run_enabled());
+        }
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+    }
+
+    #[test]
+    fn startup_auth_dry_run_enabled_false_when_unset_or_zero() {
+        let _guard = global_lock().lock().unwrap();
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+        assert!(!startup_auth_dry_run_enabled());
+        std::env::set_var(STARTUP_AUTH_DRY_RUN_ENV, "0");
+        assert!(!startup_auth_dry_run_enabled());
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+    }
+
+    #[test]
+    fn browser_fetch_headers_preserves_non_cookie_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("authorization".to_string(), "Bearer captured".to_string());
+        headers.insert("x-oai-is".to_string(), "prod".to_string());
+        headers.insert("cookie".to_string(), "session=1".to_string());
+        headers.insert("user-agent".to_string(), "UA".to_string());
+        let state = AuthState {
+            captured_at: iso_now(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            user_agent: "UA".to_string(),
+            captured_auth_headers: headers,
+            captured_auth_identity: AuthorizationIdentity::default(),
+            captured_account_check: None,
+            cookies: Vec::new(),
+        };
+        let browser_headers = browser_fetch_headers(&state);
+        assert!(browser_headers.contains_key("authorization"));
+        assert!(browser_headers.contains_key("x-oai-is"));
+        assert!(!browser_headers.contains_key("cookie"));
+        assert!(!browser_headers.contains_key("user-agent"));
+    }
+
+    // --- conversation_has_user_message_after extra coverage ---
+
+    #[test]
+    fn conversation_has_user_message_after_ignores_non_user_roles() {
+        let conversation = json!({
+            "mapping": {
+                "a1": {"message": {"author": {"role": "assistant"}}},
+                "u1": {"message": {
+                    "author": {"role": "user"},
+                    "create_time": 5.0,
+                    "content": {"parts": ["你好"]}
+                }}
+            }
+        });
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "你好",
+            1.0
+        ));
+    }
+}

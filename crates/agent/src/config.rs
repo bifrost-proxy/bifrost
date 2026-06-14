@@ -1209,6 +1209,13 @@ impl AgentConfigStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+    use std::sync::OnceLock;
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn test_default_config() {
@@ -1393,6 +1400,7 @@ enabled = true
 
     #[test]
     fn test_agent_home_dir_default() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // Clear env to test default path
         std::env::remove_var("BIFROST_DATA_DIR");
         let home = agent_home_dir();
@@ -1403,6 +1411,7 @@ enabled = true
 
     #[test]
     fn test_provider_merge_null_fields_fallback_to_builtin() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // Simulates the case where agent_config.json has a user-defined provider
         // with null fields (base_url: null, env_key: null) that should NOT shadow
         // the built-in provider's values.
@@ -1440,6 +1449,7 @@ enabled = true
 
     #[test]
     fn test_provider_merge_user_override_takes_precedence() {
+        let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
         // User-defined fields should override built-in when not null
         //
         // Set MODELHUB_AK so that env_http_headers resolves "api-key" header,

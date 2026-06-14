@@ -3618,3 +3618,950 @@ mod image_message_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use tokio::sync::mpsc;
+
+    use crate::im_gateway::external_cli::ExternalCliRunRequest;
+    use crate::im_gateway::types::{ImProviderAgentConfig, ImProviderConfig, ImProviderType};
+    use crate::test_support::TestAdminState;
+
+    fn sample_run_request() -> ExternalCliRunRequest {
+        ExternalCliRunRequest {
+            message: "hello".to_string(),
+            images: Vec::new(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: None,
+            runner_id: Some("web".to_string()),
+            session_key: Some("session-key".to_string()),
+            runtime: "local".to_string(),
+            adapter: "chatgpt_web".to_string(),
+            work_dir: None,
+            instructions: None,
+            adapter_config: Default::default(),
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn runner_call_stream_request_deserializes_defaults() {
+        let json = r#"{
+            "callerSessionKey": "source",
+            "targetRunnerId": "codex",
+            "message": "hello"
+        }"#;
+        let req: RunnerCallStreamRequest = serde_json::from_str(json).expect("parse request");
+
+        assert_eq!(req.caller_session_key, "source");
+        assert_eq!(req.target_runner_id, "codex");
+        assert_eq!(req.message, "hello");
+        assert!(req.caller_runner_id.is_none());
+        assert!(req.caller_runner_adapter.is_none());
+        assert!(req.work_dir.is_none());
+        assert!(req.history_path.is_none());
+        assert!(req.caller_messages.is_empty());
+    }
+
+    #[test]
+    fn runner_call_stream_request_deserializes_full_fields() {
+        let json = r#"{
+            "callerSessionKey": " source ",
+            "callerRunnerId": " web ",
+            "callerRunnerAdapter": " chatgpt_web ",
+            "targetRunnerId": "codex",
+            "message": " hi ",
+            "workDir": "/tmp/work",
+            "historyPath": " /tmp/history.jsonl ",
+            "callerMessages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "second"}
+            ]
+        }"#;
+        let req: RunnerCallStreamRequest = serde_json::from_str(json).expect("parse request");
+
+        assert_eq!(req.caller_session_key, " source ");
+        assert_eq!(req.caller_runner_id.as_deref(), Some(" web "));
+        assert_eq!(req.caller_runner_adapter.as_deref(), Some(" chatgpt_web "));
+        assert_eq!(req.target_runner_id, "codex");
+        assert_eq!(req.message, " hi ");
+        assert_eq!(
+            req.work_dir
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .as_deref(),
+            Some("/tmp/work")
+        );
+        assert_eq!(req.history_path.as_deref(), Some(" /tmp/history.jsonl "));
+        assert_eq!(req.caller_messages.len(), 2);
+        assert_eq!(req.caller_messages[0].role, "user");
+        assert_eq!(req.caller_messages[1].content, "second");
+    }
+
+    #[test]
+    fn normalize_transcript_role_maps_known_roles_and_defaults() {
+        assert_eq!(normalize_transcript_role("assistant"), "Assistant");
+        assert_eq!(normalize_transcript_role(" Assistant "), "Assistant");
+        assert_eq!(normalize_transcript_role("SYSTEM"), "System");
+        assert_eq!(normalize_transcript_role("developer"), "Developer");
+        assert_eq!(normalize_transcript_role("user"), "User");
+        assert_eq!(normalize_transcript_role("other"), "User");
+    }
+
+    #[test]
+    fn build_runner_call_prompt_includes_no_prior_visible_stub_when_empty() {
+        let prompt = build_runner_call_prompt(
+            "session-1",
+            Some("bifrost_agent"),
+            "codex",
+            "codex",
+            None,
+            &[],
+            "Review this in another runner",
+        );
+
+        assert!(prompt.contains("Source session: session-1"));
+        assert!(prompt.contains("Current runner: bifrost_agent"));
+        assert!(prompt.contains("Target runner: codex (codex)"));
+        assert!(prompt.contains("(No prior visible messages were provided.)"));
+        assert!(prompt.contains("Review this in another runner"));
+    }
+
+    #[test]
+    fn caller_runner_scope_uses_builtin_default_and_custom_adapter() {
+        let (adapter, runner_opt, runner) = caller_runner_scope(None, None);
+        assert_eq!(
+            adapter,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER
+        );
+        assert!(runner_opt.is_none());
+        assert_eq!(
+            runner,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER
+        );
+
+        let (adapter, runner_opt, runner) =
+            caller_runner_scope(Some(" codex "), Some(" chatgpt_web "));
+        assert_eq!(adapter, "chatgpt_web");
+        assert_eq!(runner_opt.as_deref(), Some("codex"));
+        assert_eq!(runner, "codex");
+
+        let (adapter, runner_opt, runner) = caller_runner_scope(Some("codex"), None);
+        assert_eq!(adapter, "codex");
+        assert_eq!(runner_opt.as_deref(), Some("codex"));
+        assert_eq!(runner, "codex");
+    }
+
+    #[test]
+    fn runner_call_visible_running_and_completed_messages_trim_inputs() {
+        let visible = runner_call_visible_user("codex", "  summarize  ");
+        assert_eq!(visible, "Run with codex: summarize");
+
+        let running = runner_call_running_message("codex");
+        assert_eq!(running, "Runner `codex` is running...");
+
+        let completed = runner_call_completed_message("codex", "  done ");
+        assert_eq!(completed, "Runner `codex` completed this call.\n\ndone");
+    }
+
+    #[test]
+    fn update_agent_runner_call_messages_updates_or_appends() {
+        let visible = "Run with codex: summarize";
+        let running = "Runner `codex` is running...";
+        let completed = "Runner `codex` completed this call.\n\ndone";
+
+        let mut messages = vec![
+            bifrost_agent::ChatMessage::user(visible),
+            bifrost_agent::ChatMessage::assistant(running),
+        ];
+        update_agent_runner_call_messages(&mut messages, visible, running, completed);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content.as_deref(), Some(completed));
+
+        let mut messages = Vec::new();
+        update_agent_runner_call_messages(&mut messages, visible, running, completed);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].content.as_deref(), Some(visible));
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].content.as_deref(), Some(completed));
+    }
+
+    #[test]
+    fn update_session_runner_call_messages_updates_or_appends() {
+        let visible = "Run with web: ask";
+        let running = "Runner `web` is running...";
+        let completed = "Runner `web` completed this call.\n\nanswer";
+
+        let mut messages = vec![
+            crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "user".to_string(),
+                content: visible.to_string(),
+                timestamp: Some(1),
+                content_parts: None,
+            },
+            crate::im_gateway::session_state::ImAgentSessionMessage {
+                role: "assistant".to_string(),
+                content: running.to_string(),
+                timestamp: Some(2),
+                content_parts: None,
+            },
+        ];
+        update_session_runner_call_messages(&mut messages, visible, running, completed, 10, 20);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1].content, completed);
+        assert_eq!(messages[1].timestamp, Some(20));
+
+        let mut messages = Vec::new();
+        update_session_runner_call_messages(&mut messages, visible, running, completed, 10, 20);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, "user");
+        assert_eq!(messages[0].timestamp, Some(10));
+        assert_eq!(messages[1].role, "assistant");
+        assert_eq!(messages[1].timestamp, Some(20));
+    }
+
+    #[test]
+    fn resolve_runner_call_target_errors_and_external_ok() {
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+        let err = resolve_runner_call_target(&config, "missing").unwrap_err();
+        assert!(err.contains("runner 'missing' not found"));
+
+        let mut runners = std::collections::BTreeMap::new();
+        runners.insert(
+            "web-disabled".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: false,
+                ..Default::default()
+            },
+        );
+        runners.insert(
+            "web".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "chatgpt_web".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+            version: 1,
+            default_runner_id: "web".to_string(),
+            runners,
+            channels: std::collections::BTreeMap::new(),
+        };
+
+        let err = resolve_runner_call_target(&config, "web-disabled").unwrap_err();
+        assert!(err.contains("runner 'web-disabled' is not enabled"));
+
+        let target = resolve_runner_call_target(&config, "web").expect("external target");
+        match target {
+            RunnerCallTarget::BuiltinAgent => panic!("expected external target"),
+            RunnerCallTarget::External(effective) => {
+                assert_eq!(effective.runner_id, "web");
+                assert_eq!(effective.settings.adapter, "chatgpt_web");
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn runner_call_stream_response_validates_required_fields() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let base = RunnerCallStreamRequest {
+            caller_session_key: "caller".to_string(),
+            caller_runner_id: None,
+            caller_runner_adapter: None,
+            target_runner_id: "codex".to_string(),
+            message: "hello".to_string(),
+            work_dir: None,
+            history_path: None,
+            caller_messages: Vec::new(),
+        };
+
+        let err = runner_call_stream_response(
+            &service,
+            RunnerCallStreamRequest {
+                caller_session_key: "  ".to_string(),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "callerSessionKey is required");
+
+        let err = runner_call_stream_response(
+            &service,
+            RunnerCallStreamRequest {
+                target_runner_id: "".to_string(),
+                ..base.clone()
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "targetRunnerId is required");
+
+        let err = runner_call_stream_response(
+            &service,
+            RunnerCallStreamRequest {
+                message: "   ".to_string(),
+                ..base
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err, "message is required");
+    }
+
+    #[test]
+    fn is_clear_session_command_matches_reset_and_clear() {
+        assert!(is_clear_session_command("/clear"));
+        assert!(is_clear_session_command("  /reset  "));
+        assert!(!is_clear_session_command("/CLEAR"));
+        assert!(!is_clear_session_command("/clear now"));
+    }
+
+    #[test]
+    fn first_message_title_preview_trims_and_truncates() {
+        assert!(first_message_title_preview("   ").is_none());
+
+        let long = "中".repeat(200);
+        let preview = first_message_title_preview(&long).expect("preview");
+        assert_eq!(preview.chars().count(), 81);
+        assert!(preview.ends_with('…'));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_stream_remove_nonexistent_and_parse_error() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let not_found_response = queue_external_cli_stream_response(&service, "session-1", "/rq 5");
+        let not_found_body = not_found_response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect not_found")
+            .to_bytes();
+        let not_found: serde_json::Value =
+            serde_json::from_slice(&not_found_body).expect("json not_found");
+        assert_eq!(not_found["eventType"], "run_finished");
+        assert_eq!(not_found["sessionKey"], "session-1");
+        assert_eq!(not_found["response"].as_str(), Some("❌ 未找到排队消息 #5"));
+
+        let parse_response =
+            queue_external_cli_stream_response(&service, "session-1", "/rq not-a-number");
+        let parse_body = parse_response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect parse_error")
+            .to_bytes();
+        let parse_error: serde_json::Value =
+            serde_json::from_slice(&parse_body).expect("json parse_error");
+        assert_eq!(parse_error["eventType"], "run_finished");
+        assert_eq!(parse_error["sessionKey"], "session-1");
+        assert_eq!(
+            parse_error["response"].as_str(),
+            Some("用法: /rq <序号>（如 /rq 1）")
+        );
+    }
+
+    #[test]
+    fn query_param_extracts_first_match() {
+        let query = Some("runnerId=web&foo=bar&runnerId=extra");
+        assert_eq!(query_param(query, "runnerId"), Some("web".to_string()));
+        assert_eq!(query_param(query, "missing"), None);
+        assert_eq!(query_param(None, "runnerId"), None);
+    }
+
+    #[test]
+    fn request_history_path_prefers_camel_case_and_filters_empty() {
+        let mut req = sample_run_request();
+        req.params = serde_json::json!({ "historyPath": " /tmp/history.log " });
+        assert_eq!(
+            request_history_path(&req),
+            Some("/tmp/history.log".to_string())
+        );
+
+        req.params = serde_json::json!({ "historyPath": "   " });
+        assert!(request_history_path(&req).is_none());
+
+        req.params = serde_json::json!({ "history_path": " /tmp/snake.log " });
+        assert_eq!(
+            request_history_path(&req),
+            Some("/tmp/snake.log".to_string())
+        );
+
+        req.params = serde_json::json!({});
+        assert!(request_history_path(&req).is_none());
+    }
+
+    #[test]
+    fn set_request_history_path_initializes_params_map() {
+        let mut req = sample_run_request();
+        assert!(req.params.is_null());
+        set_request_history_path(&mut req, "/tmp/history.log");
+
+        assert_eq!(
+            request_history_path(&req),
+            Some("/tmp/history.log".to_string())
+        );
+
+        // Second call preserves existing value
+        set_request_history_path(&mut req, "/other/path");
+        assert_eq!(
+            request_history_path(&req),
+            Some("/tmp/history.log".to_string())
+        );
+    }
+
+    #[test]
+    fn persisted_history_path_for_request_returns_none_without_state() {
+        let mut req = sample_run_request();
+        req.session_key = Some("no-state-session".to_string());
+        assert!(persisted_history_path_for_request(&req, "web").is_none());
+    }
+
+    #[test]
+    fn apply_provider_work_dir_to_external_cli_request_uses_provider_override() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let provider = ImProviderConfig {
+            id: "provider-1".to_string(),
+            provider_type: ImProviderType::Feishu,
+            display_name: "Feishu Main".to_string(),
+            enabled: true,
+            base_url: None,
+            app_id: None,
+            secret_ref: None,
+            owner_open_id: None,
+            event_connection_enabled: false,
+            event_types: Vec::new(),
+            agent_config: Some(ImProviderAgentConfig {
+                runner: None,
+                work_dir: Some("/custom/workdir".to_string()),
+                base_instructions: None,
+                developer_instructions: None,
+                user_instructions: None,
+            }),
+            created_at: 0,
+            updated_at: 0,
+        };
+        service
+            .provider_store
+            .add(provider.clone())
+            .expect("add provider");
+
+        let agent_config = service.agent_config_store.load();
+        let stored = service
+            .provider_store
+            .get(&provider.id)
+            .expect("stored provider");
+        let expected_work_dir = effective_agent_work_dir_for_provider(&agent_config, &stored)
+            .expect("resolved work dir");
+
+        let mut req = sample_run_request();
+        req.provider_id = Some(provider.id.clone());
+        req.work_dir = None;
+        req.allow_work_dirs.clear();
+
+        apply_provider_work_dir_to_external_cli_request(&service, &mut req);
+
+        assert_eq!(req.work_dir.as_ref(), Some(&expected_work_dir));
+        assert_eq!(
+            req.allow_work_dirs,
+            vec![expected_work_dir.display().to_string()]
+        );
+    }
+
+    #[test]
+    fn chatgpt_web_settings_uses_default_runner_and_validates_adapter() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        // Unknown runner id -> not found
+        let err = chatgpt_web_settings(&service, Some("missing")).unwrap_err();
+        assert!(err.contains("runner 'missing' not found"));
+
+        // Non-chatgpt_web adapter -> error
+        let mut runners = std::collections::BTreeMap::new();
+        runners.insert(
+            "web".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                adapter: "codex".to_string(),
+                ..Default::default()
+            },
+        );
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+            version: 1,
+            default_runner_id: "web".to_string(),
+            runners,
+            channels: std::collections::BTreeMap::new(),
+        };
+        service
+            .external_cli_config_store
+            .save(config)
+            .expect("save config");
+        let err = chatgpt_web_settings(&service, Some("web")).unwrap_err();
+        assert!(err.contains("uses adapter 'codex', not chatgpt_web"));
+
+        // Valid chatgpt_web runner with default id
+        let mut runners = std::collections::BTreeMap::new();
+        runners.insert(
+            "web".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                enabled: true,
+                adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+                ..Default::default()
+            },
+        );
+        let config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+            version: 1,
+            default_runner_id: "web".to_string(),
+            runners,
+            channels: std::collections::BTreeMap::new(),
+        };
+        service
+            .external_cli_config_store
+            .save(config)
+            .expect("save config");
+
+        let settings = chatgpt_web_settings(&service, None).expect("settings");
+        assert!(settings.enabled);
+        assert_eq!(settings.adapter, crate::im_gateway::chatgpt_web::ADAPTER_ID);
+    }
+
+    #[test]
+    fn external_progress_tool_name_and_arguments_and_call_id() {
+        use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+        let mut event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type: EventType::ToolStarted,
+            content: String::new(),
+            title: Some(" exec_command ".to_string()),
+            raw: serde_json::json!({}),
+        };
+        assert_eq!(
+            external_progress_tool_name(&event, "default"),
+            "exec_command"
+        );
+
+        event.title = None;
+        event.raw = serde_json::json!({ "tool_name": " ls " });
+        assert_eq!(external_progress_tool_name(&event, "default"), "ls");
+
+        event.raw = serde_json::Value::Null;
+        assert_eq!(external_progress_tool_name(&event, "fallback"), "fallback");
+
+        // Arguments prefer structured fields
+        event.content = "ignored".to_string();
+        event.raw = serde_json::json!({ "arguments": {"cmd": "pwd"} });
+        assert_eq!(
+            external_progress_tool_arguments(&event),
+            serde_json::json!({"cmd": "pwd"}).to_string()
+        );
+
+        // Fallback wraps content
+        event.raw = serde_json::Value::Null;
+        event.content = "log".to_string();
+        let args = external_progress_tool_arguments(&event);
+        assert!(args.contains("log"));
+
+        // Call id falls back to adapter + tool name + hash
+        event.title = Some("exec_command".to_string());
+        event.raw = serde_json::json!({ "other": 1 });
+        let call_id = external_progress_call_id("codex", &event);
+        assert!(call_id.starts_with("codex-exec_command-"));
+    }
+
+    #[test]
+    fn builtin_runner_call_progress_event_payload_covers_variants() {
+        use bifrost_agent::AgentTurnProgressEvent as Evt;
+
+        let payload = builtin_runner_call_progress_event_payload(
+            "session-1",
+            Evt::ToolStarted {
+                tool_name: "exec_command".to_string(),
+                arguments: "{\"cmd\":\"pwd\"}".to_string(),
+            },
+        );
+        assert_eq!(payload["eventType"], "tool_started");
+        assert_eq!(payload["sessionKey"], "session-1");
+        assert_eq!(payload["toolName"], "exec_command");
+
+        let log = bifrost_agent::ToolCallLog {
+            tool_name: "exec_command".to_string(),
+            arguments: "{\"cmd\":\"pwd\"}".to_string(),
+            result: "ok".to_string(),
+            success: true,
+        };
+        let payload = builtin_runner_call_progress_event_payload(
+            "session-2",
+            Evt::ToolFinished {
+                log: log.clone(),
+                duration_ms: 123,
+            },
+        );
+        assert_eq!(payload["eventType"], "tool_finished");
+        assert_eq!(payload["sessionKey"], "session-2");
+        assert_eq!(payload["log"]["tool_name"], "exec_command");
+
+        let context = bifrost_agent::session_status::AgentContextSnapshot {
+            estimated_context_tokens: 100,
+            context_window_tokens: Some(200),
+            context_usage_percent: Some(50.0),
+            compaction_count: 1,
+            history_version: 2,
+            message_count: 3,
+            user_turn_count: 1,
+            last_response_tokens: None,
+            total_tokens_used: None,
+        };
+        let progress = bifrost_agent::session_status::AgentCompactionProgress {
+            trigger: "auto".to_string(),
+            reason: "history".to_string(),
+            phase: "before".to_string(),
+            pre_tokens: 100,
+            post_tokens: Some(80),
+            tokens_saved: Some(20),
+            messages_removed: Some(1),
+            duration_ms: Some(10),
+            compaction_count: 1,
+            history_version: 2,
+            context,
+        };
+        let payload = builtin_runner_call_progress_event_payload(
+            "session-3",
+            Evt::CompactionFailed {
+                progress: progress.clone(),
+                error: "boom".to_string(),
+            },
+        );
+        assert_eq!(payload["eventType"], "compaction_failed");
+        assert_eq!(payload["sessionKey"], "session-3");
+        assert_eq!(payload["compaction"]["trigger"], "auto");
+        assert_eq!(payload["error"], "boom");
+
+        let payload = builtin_runner_call_progress_event_payload(
+            "session-4",
+            Evt::LongTaskStatus {
+                session_key: "session-4".to_string(),
+                session_id: "sid".to_string(),
+                profile: "profile".to_string(),
+                state: "running".to_string(),
+                elapsed_ms: 100,
+                last_output_preview: Some("preview".to_string()),
+                next_check_at_ms: Some(200),
+                unchanged_heartbeats: 1,
+            },
+        );
+        assert_eq!(payload["eventType"], "long_task_status");
+        assert_eq!(payload["sessionKey"], "session-4");
+        assert_eq!(payload["sessionId"], "sid");
+        assert_eq!(payload["profile"], "profile");
+        assert_eq!(payload["state"], "running");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn send_ndjson_event_writes_single_json_line() {
+        let (tx, mut rx): (
+            mpsc::Sender<Result<hyper::body::Frame<Bytes>, hyper::Error>>,
+            mpsc::Receiver<Result<hyper::body::Frame<Bytes>, hyper::Error>>,
+        ) = mpsc::channel(1);
+
+        let event = serde_json::json!({"foo": "bar"});
+        send_ndjson_event(&tx, &event)
+            .await
+            .expect("send should succeed");
+
+        let frame = rx.recv().await.expect("frame").expect("ok frame");
+        let data = frame.into_data().expect("data frame");
+        let text = String::from_utf8(data.to_vec()).expect("utf8");
+        assert_eq!(text.trim_end(), "{\"foo\":\"bar\"}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn apply_persisted_state_consumes_imported_contexts_without_session_state() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+
+        crate::im_gateway::session_state::push_imported_context(
+            "external-import-session-2",
+            "codex",
+            Some("codex"),
+            crate::im_gateway::session_state::ImImportedRunnerContext {
+                call_id: "call-import".to_string(),
+                source_session_key: "external-import-session-2".to_string(),
+                target_runner_id: "web".to_string(),
+                target_adapter: "chatgpt_web".to_string(),
+                user_message: "ask web".to_string(),
+                response: "web answer".to_string(),
+                created_at: 1,
+            },
+        )
+        .expect("push imported context");
+
+        let mut req = sample_run_request();
+        req.session_key = Some("external-import-session-2".to_string());
+        req.adapter = "codex".to_string();
+        req.instructions = Some("base instructions".to_string());
+
+        apply_persisted_external_cli_state(&mut req, "codex");
+
+        let instructions = req.instructions.as_deref().expect("instructions");
+        assert!(instructions.contains("base instructions"));
+        assert!(instructions.contains("Imported Runner Results"));
+        assert!(instructions.contains("web answer"));
+
+        let contexts = crate::im_gateway::session_state::take_imported_contexts(
+            "external-import-session-2",
+            "codex",
+            Some("codex"),
+        )
+        .expect("take contexts");
+        assert!(contexts.is_empty());
+    }
+
+    #[test]
+    fn timeline_has_tool_call_detects_existing_call_id() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(dir.path(), "session-tool");
+        recorder
+            .record_session_start("session-tool", serde_json::json!({"source": "admin-api"}))
+            .expect("start session");
+        recorder
+            .record_tool_call_with_id(
+                "session-tool",
+                "exec_command",
+                "{\"cmd\":\"pwd\"}",
+                Some("call-123"),
+            )
+            .expect("tool call");
+        recorder.close();
+
+        assert!(timeline_has_tool_call(
+            &recorder,
+            "session-tool",
+            "call-123"
+        ));
+        assert!(!timeline_has_tool_call(
+            &recorder,
+            "session-tool",
+            "missing"
+        ));
+    }
+
+    #[test]
+    fn message_image_content_parts_respects_max_image_limit() {
+        let mut images = Vec::new();
+        for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+            images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
+                mime_type: "image/png".to_string(),
+                data: format!("A{i}"),
+                name: None,
+            });
+        }
+        let parts = message_image_content_parts("msg", &images).expect("parts");
+        let arr = parts.as_array().expect("array");
+        assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_stream_push_without_prefix_uses_trimmed_message() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let service = ImGatewayService::new(temp_dir.path());
+
+        let response = queue_external_cli_stream_response(
+            &service,
+            "session-queue",
+            "  plain queued message  ",
+        );
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("collect queued")
+            .to_bytes();
+        let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["sessionKey"], "session-queue");
+        assert_eq!(payload["queued"], true);
+        assert_eq!(payload["queueLength"], 1);
+        let items = payload["queueItems"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["message"], "plain queued message");
+    }
+
+    #[test]
+    fn external_progress_tool_name_reads_item_name_field() {
+        use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+        let event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type: EventType::ToolStarted,
+            content: String::new(),
+            title: None,
+            raw: serde_json::json!({
+                "item": { "name": "from_item" }
+            }),
+        };
+        assert_eq!(external_progress_tool_name(&event, "default"), "from_item");
+    }
+
+    #[test]
+    fn external_progress_tool_arguments_uses_item_args_field() {
+        use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+        let event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+            event_type: EventType::ToolStarted,
+            content: String::new(),
+            title: None,
+            raw: serde_json::json!({
+                "item": { "args": {"cmd": "ls"} }
+            }),
+        };
+        assert_eq!(
+            external_progress_tool_arguments(&event),
+            serde_json::json!({"cmd": "ls"}).to_string()
+        );
+    }
+
+    #[test]
+    fn first_message_title_preview_returns_full_when_short() {
+        let msg = "short title";
+        let preview = first_message_title_preview(msg).expect("preview");
+        assert_eq!(preview, msg);
+    }
+
+    #[test]
+    fn runner_call_visible_user_handles_empty_trailing_whitespace() {
+        let visible = runner_call_visible_user("web", " ask  ");
+        assert_eq!(visible, "Run with web: ask");
+    }
+}
+
+#[test]
+fn timeline_has_tool_call_detects_existing_call_id() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let mut recorder =
+        bifrost_agent::persistence::ConversationRecorder::new(dir.path(), "session-tool");
+    recorder
+        .record_session_start("session-tool", serde_json::json!({"source": "admin-api"}))
+        .expect("start session");
+    recorder
+        .record_tool_call_with_id(
+            "session-tool",
+            "exec_command",
+            "{\"cmd\":\"pwd\"}",
+            Some("call-123"),
+        )
+        .expect("tool call");
+    recorder.close();
+
+    assert!(timeline_has_tool_call(
+        &recorder,
+        "session-tool",
+        "call-123"
+    ));
+    assert!(!timeline_has_tool_call(
+        &recorder,
+        "session-tool",
+        "missing"
+    ));
+}
+
+#[test]
+fn message_image_content_parts_respects_max_image_limit() {
+    let mut images = Vec::new();
+    for i in 0..(MAX_AGENT_IMAGES_PER_MESSAGE + 2) {
+        images.push(crate::im_gateway::external_cli::ExternalCliImageInput {
+            mime_type: "image/png".to_string(),
+            data: format!("A{i}"),
+            name: None,
+        });
+    }
+    let parts = message_image_content_parts("msg", &images).expect("parts");
+    let arr = parts.as_array().expect("array");
+    assert_eq!(arr.len(), 1 + MAX_AGENT_IMAGES_PER_MESSAGE);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn queue_stream_push_without_prefix_uses_trimmed_message() {
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let service = ImGatewayService::new(temp_dir.path());
+
+    let response =
+        queue_external_cli_stream_response(&service, "session-queue", "  plain queued message  ");
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("collect queued")
+        .to_bytes();
+    let payload: serde_json::Value = serde_json::from_slice(&body).expect("json payload");
+
+    assert_eq!(payload["eventType"], "run_finished");
+    assert_eq!(payload["sessionKey"], "session-queue");
+    assert_eq!(payload["queued"], true);
+    assert_eq!(payload["queueLength"], 1);
+    let items = payload["queueItems"].as_array().expect("items");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["message"], "plain queued message");
+}
+
+#[test]
+fn external_progress_tool_name_reads_item_name_field() {
+    use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+    let event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+        event_type: EventType::ToolStarted,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "item": { "name": "from_item" }
+        }),
+    };
+    assert_eq!(external_progress_tool_name(&event, "default"), "from_item");
+}
+
+#[test]
+fn external_progress_tool_arguments_uses_item_args_field() {
+    use crate::im_gateway::external_cli::ExternalCliProgressEventType as EventType;
+
+    let event = crate::im_gateway::external_cli::ExternalCliProgressEvent {
+        event_type: EventType::ToolStarted,
+        content: String::new(),
+        title: None,
+        raw: serde_json::json!({
+            "item": { "args": {"cmd": "ls"} }
+        }),
+    };
+    assert_eq!(
+        external_progress_tool_arguments(&event),
+        serde_json::json!({"cmd": "ls"}).to_string()
+    );
+}
+
+#[test]
+fn first_message_title_preview_returns_full_when_short() {
+    let msg = "short title";
+    let preview = first_message_title_preview(msg).expect("preview");
+    assert_eq!(preview, msg);
+}
+
+#[test]
+fn runner_call_visible_user_handles_empty_trailing_whitespace() {
+    let visible = runner_call_visible_user("web", " ask  ");
+    assert_eq!(visible, "Run with web: ask");
+}

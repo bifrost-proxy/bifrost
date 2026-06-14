@@ -2083,3 +2083,256 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
+    use http_body_util::{BodyExt, Full};
+    use hyper::{body::Incoming, Method, Request, StatusCode};
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn get_proxy_settings_uses_defaults_when_config_manager_absent() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+
+        let resp = get_proxy_settings(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: ProxySettingsResponse = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed.server.timeout_secs, 30);
+        assert_eq!(parsed.server.http1_max_header_size, 64 * 1024);
+        assert_eq!(parsed.server.http2_max_header_list_size, 256 * 1024);
+        assert_eq!(parsed.server.websocket_handshake_max_header_size, 64 * 1024);
+        assert_eq!(parsed.tray.supported, tray_supported());
+    }
+
+    #[tokio::test]
+    async fn get_proxy_settings_reads_values_from_config_manager_when_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let resp = get_proxy_settings(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: ProxySettingsResponse = serde_json::from_slice(&body).unwrap();
+
+        let cfg = harness.config_manager.config().await;
+        assert_eq!(parsed.server.timeout_secs, cfg.server.timeout_secs);
+        assert_eq!(
+            parsed.server.http1_max_header_size,
+            cfg.server.http1_max_header_size
+        );
+        assert_eq!(
+            parsed.server.http2_max_header_list_size,
+            cfg.server.http2_max_header_list_size
+        );
+        assert_eq!(
+            parsed.server.websocket_handshake_max_header_size,
+            cfg.server.websocket_handshake_max_header_size
+        );
+    }
+
+    #[tokio::test]
+    async fn get_tray_config_errors_when_config_manager_missing() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+        let resp = get_tray_config(state).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn get_tray_config_reads_from_config_manager() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let resp = get_tray_config(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: TrayConfig = serde_json::from_slice(&body).unwrap();
+
+        let cfg = harness.config_manager.config().await;
+        assert_eq!(parsed.enabled, cfg.tray.enabled);
+        assert_eq!(parsed.supported, tray_supported());
+    }
+
+    #[tokio::test]
+    async fn get_server_config_handles_missing_and_present_config_manager() {
+        let state_without = std::sync::Arc::new(AdminState::new(20000));
+        let resp = get_server_config(state_without).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let resp = get_server_config(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: ServerConfig = serde_json::from_slice(&body).unwrap();
+        let cfg = harness.config_manager.config().await;
+        assert_eq!(parsed.timeout_secs, cfg.server.timeout_secs);
+        assert_eq!(
+            parsed.http1_max_header_size,
+            cfg.server.http1_max_header_size
+        );
+        assert_eq!(
+            parsed.http2_max_header_list_size,
+            cfg.server.http2_max_header_list_size
+        );
+    }
+
+    #[tokio::test]
+    async fn get_tls_config_reflects_runtime_config_fields() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        // Use default runtime config
+        let resp = get_tls_config(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: TlsConfig = serde_json::from_slice(&body).unwrap();
+
+        let runtime = state.runtime_config.read().await.clone();
+        assert_eq!(
+            parsed.enable_tls_interception,
+            runtime.enable_tls_interception
+        );
+        assert_eq!(parsed.intercept_exclude, runtime.intercept_exclude);
+        assert_eq!(parsed.intercept_include, runtime.intercept_include);
+        assert_eq!(parsed.app_intercept_exclude, runtime.app_intercept_exclude);
+        assert_eq!(parsed.app_intercept_include, runtime.app_intercept_include);
+        assert_eq!(parsed.ip_intercept_exclude, runtime.ip_intercept_exclude);
+        assert_eq!(parsed.ip_intercept_include, runtime.ip_intercept_include);
+        assert_eq!(parsed.unsafe_ssl, runtime.unsafe_ssl);
+        assert_eq!(
+            parsed.disconnect_on_config_change,
+            runtime.disconnect_on_config_change
+        );
+    }
+
+    #[tokio::test]
+    async fn list_connections_returns_empty_list_for_fresh_state() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let resp = list_connections(state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["total"].as_u64().unwrap_or_default(), 0);
+        assert!(v["connections"]
+            .as_array()
+            .map(|arr| arr.is_empty())
+            .unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn get_performance_config_uses_config_manager_when_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let resp = get_performance_config(state.clone()).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: PerformanceConfigResponse = serde_json::from_slice(&body).unwrap();
+
+        let cfg = harness.config_manager.config().await;
+        assert_eq!(parsed.traffic.max_records, cfg.traffic.max_records);
+        assert_eq!(
+            parsed.traffic.max_db_size_bytes,
+            cfg.traffic.max_db_size_bytes
+        );
+        assert_eq!(
+            parsed.traffic.file_retention_days,
+            cfg.traffic.file_retention_days
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_body_cache_returns_success_response() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let resp = clear_body_cache(state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Successfully cleared"));
+    }
+
+    #[tokio::test]
+    async fn get_ip_tls_pending_returns_empty_list_when_manager_missing() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+        let resp = get_ip_tls_pending(state).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let pending: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ip_tls_pending_stream_returns_service_unavailable_without_manager() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+        let resp = ip_tls_pending_stream(state).await;
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn clear_ip_tls_pending_reports_when_manager_missing() {
+        let state = std::sync::Arc::new(AdminState::new(19999));
+        let resp = clear_ip_tls_pending(state, None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["message"], "No pending IP TLS decisions");
+    }
+
+    #[tokio::test]
+    async fn clear_ip_tls_pending_clears_manager_list() {
+        let state = std::sync::Arc::new(
+            AdminState::new(19998).with_ip_tls_pending_manager(crate::IpTlsPendingManager::new()),
+        );
+
+        {
+            let manager = state.ip_tls_pending_manager.as_ref().unwrap();
+            let ip: std::net::IpAddr = "10.0.0.1".parse().unwrap();
+            assert!(manager.check_and_add_pending(ip));
+            assert_eq!(manager.pending_count(), 1);
+        }
+
+        let resp = clear_ip_tls_pending(state.clone(), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Cleared all pending IP TLS decisions"));
+
+        let manager = state.ip_tls_pending_manager.as_ref().unwrap();
+        assert_eq!(manager.pending_count(), 0);
+    }
+
+    #[test]
+    fn tray_supported_matches_target_os_linux_flag() {
+        if cfg!(target_os = "linux") {
+            assert!(!tray_supported());
+        } else {
+            assert!(tray_supported());
+        }
+    }
+}

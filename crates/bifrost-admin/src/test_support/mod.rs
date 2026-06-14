@@ -52,7 +52,7 @@ pub struct TestAdminState {
 }
 
 /// Builder for [`TestAdminState`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct TestAdminStateBuilder {
     port: u16,
 }
@@ -89,12 +89,6 @@ impl TestAdminState {
     /// by itself; callers are in control of which methods they exercise.
     pub fn im_gateway_service(&self) -> crate::SharedImGatewayService {
         Arc::new(ImGatewayService::new(self.data_dir()))
-    }
-}
-
-impl Default for TestAdminStateBuilder {
-    fn default() -> Self {
-        Self { port: 0 }
     }
 }
 

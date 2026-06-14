@@ -7512,3 +7512,1405 @@ mod tests {
         warn_if_ssh_key_permissions_are_too_open(&path);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use crate::commands::search::{MatchLocation, SearchResultItem, TrafficSummary};
+    use bifrost_command::{SearchArgs, TrafficClearArgs};
+    use serde_json::{json, Value};
+    use std::sync::{Mutex, OnceLock};
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn with_connections_lock<T>(f: impl FnOnce() -> T) -> T {
+        static LOCK: Mutex<()> = Mutex::new(());
+        let _guard = LOCK.lock().expect("lock connections");
+        f()
+    }
+
+    fn init_test_data_dir() {
+        static TEST_DATA_DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+        let dir = TEST_DATA_DIR.get_or_init(|| tempfile::tempdir().expect("create temp dir"));
+        bifrost_storage::set_data_dir(dir.path().to_path_buf());
+    }
+
+    fn sample_local_connection(client_id: &str, relay_url: &str) -> LocalConnection {
+        LocalConnection {
+            client_instance_id: client_id.to_string(),
+            device_name: "device".to_string(),
+            platform: "macos".to_string(),
+            relay_url: relay_url.to_string(),
+            grant_id: format!("grant-{client_id}"),
+            grant_mode: "permanent".to_string(),
+            caller_fingerprint: "fp-1".to_string(),
+            connected_at: 1,
+            auth_method: Some("pair_code".to_string()),
+            ssh_key_fingerprint: None,
+            ssh_key_source: None,
+            device_code: None,
+            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+            caller_ephemeral_pub: Some("caller-epk".to_string()),
+            client_ephemeral_pub: Some("client-epk".to_string()),
+            shared_secret_encrypted: Some("secret".to_string()),
+        }
+    }
+
+    // --- Base64 helpers and fingerprints ---
+
+    #[test]
+    fn decode_base64_or_raw_empty_returns_empty_vec() {
+        assert!(decode_base64_or_raw("").is_empty());
+    }
+
+    #[test]
+    fn decode_base64_or_raw_valid_base64_decodes() {
+        let bytes = decode_base64_or_raw("aGVsbG8=");
+        assert_eq!(bytes, b"hello");
+    }
+
+    #[test]
+    fn decode_base64_or_raw_invalid_returns_raw_bytes() {
+        let input = "not-base64??";
+        let output = decode_base64_or_raw(input);
+        assert_eq!(output, input.as_bytes());
+    }
+
+    #[test]
+    fn short_fingerprint_uses_first_six_sha256_bytes() {
+        let fp = short_fingerprint(b"abc");
+        assert_eq!(fp, "ba7816bf8f01");
+    }
+
+    // --- Shell exec env and query args JSON ---
+
+    #[test]
+    fn remote_shell_exec_env_empty_returns_none() {
+        assert!(remote_shell_exec_env(&[]).is_none());
+    }
+
+    #[test]
+    fn remote_shell_exec_env_collects_pairs_into_map() {
+        let env = remote_shell_exec_env(&[
+            ("A".to_string(), "1".to_string()),
+            ("B".to_string(), "2".to_string()),
+        ])
+        .expect("env map should be populated");
+        assert_eq!(env.get("A").map(String::as_str), Some("1"));
+        assert_eq!(env.get("B").map(String::as_str), Some("2"));
+    }
+
+    #[test]
+    fn query_args_json_handles_search_variant() {
+        let query = CanonicalQueryCommand::Search(SearchArgs {
+            keyword: "needle".to_string(),
+            limit: Some(10),
+            ..SearchArgs::default()
+        });
+
+        let json_str = query_args_json(&query).expect("search args_json");
+        let v: Value = serde_json::from_str(&json_str).expect("valid json");
+        assert_eq!(v.get("keyword").and_then(|k| k.as_str()), Some("needle"));
+    }
+
+    #[test]
+    fn query_args_json_handles_traffic_list_variant() {
+        let args = TrafficListArgs {
+            limit: Some(5),
+            cursor: Some(42),
+            direction: TrafficListDirection::Backward,
+            host: Some("example.com".to_string()),
+            ..TrafficListArgs::default()
+        };
+        let query = CanonicalQueryCommand::TrafficList(args.clone());
+
+        let json_str = query_args_json(&query).expect("traffic list args_json");
+        let v: Value = serde_json::from_str(&json_str).expect("valid json");
+        assert_eq!(v.get("limit").and_then(|k| k.as_u64()), Some(5));
+        assert_eq!(v.get("cursor").and_then(|k| k.as_u64()), Some(42));
+        assert_eq!(v.get("host").and_then(|k| k.as_str()), Some("example.com"));
+    }
+
+    #[test]
+    fn query_args_json_handles_traffic_get_variant() {
+        let query = CanonicalQueryCommand::TrafficGet(TrafficGetArgs {
+            id: "REQ-1".to_string(),
+            request_body: true,
+            response_body: false,
+        });
+
+        let json_str = query_args_json(&query).expect("traffic get args_json");
+        let v: Value = serde_json::from_str(&json_str).expect("valid json");
+        assert_eq!(v.get("id").and_then(|k| k.as_str()), Some("REQ-1"));
+        assert_eq!(v.get("request_body").and_then(|k| k.as_bool()), Some(true));
+        assert_eq!(
+            v.get("response_body").and_then(|k| k.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn query_args_json_handles_traffic_clear_variant() {
+        let query = CanonicalQueryCommand::TrafficClear(TrafficClearArgs {
+            ids: Some(vec!["REQ-1".to_string(), "REQ-2".to_string()]),
+        });
+
+        let json_str = query_args_json(&query).expect("traffic clear args_json");
+        let v: Value = serde_json::from_str(&json_str).expect("valid json");
+        let ids = v
+            .get("ids")
+            .and_then(|ids| ids.as_array())
+            .expect("ids array");
+        assert_eq!(ids.len(), 2);
+    }
+
+    // --- Remote search string helpers ---
+
+    #[test]
+    fn truncate_search_str_returns_original_for_short_input() {
+        let s = "hello";
+        assert_eq!(truncate_search_str(s, 10), "hello".to_string());
+    }
+
+    #[test]
+    fn truncate_search_str_truncates_and_appends_ellipsis() {
+        let s = "abcdef";
+        let t = truncate_search_str(s, 4);
+        assert!(t.starts_with("a"));
+        assert!(t.ends_with("..."));
+    }
+
+    #[test]
+    fn highlight_remote_search_keyword_no_color_or_empty_keyword_is_passthrough() {
+        let s = "Hello World";
+        assert_eq!(highlight_remote_search_keyword(s, "", true), s);
+        assert_eq!(highlight_remote_search_keyword(s, "world", false), s);
+    }
+
+    #[test]
+    fn highlight_remote_search_keyword_wraps_matches_in_escape_sequences() {
+        let s = "hello hello";
+        let highlighted = highlight_remote_search_keyword(s, "he", true);
+        assert!(highlighted.contains("\x1b[1;33m"));
+        assert!(highlighted.contains("\x1b[0m"));
+        assert!(highlighted.to_lowercase().contains("he"));
+    }
+
+    // --- Remote search SSE decoder & renderer ---
+
+    #[test]
+    fn remote_search_sse_decoder_parses_result_progress_done_error() {
+        let mut decoder = RemoteSearchSseDecoder::default();
+
+        let result_payload = json!({
+            "record": {
+                "id": "REQ-1",
+                "seq": 1u64,
+                "ts": 123u64,
+                "m": "GET",
+                "h": "example.com",
+                "p": "/",
+                "s": 200u16,
+                "ct": null,
+                "req_ct": null,
+                "req_sz": 10usize,
+                "res_sz": 20usize,
+                "dur": 30u64,
+                "proto": "HTTP/1.1",
+                "cip": "127.0.0.1",
+                "capp": "curl",
+                "flags": 0u32,
+                "fc": 0usize,
+                "st": "ok",
+                "et": null,
+            },
+            "matches": [],
+        });
+
+        let progress_payload = json!({
+            "total_searched": 10usize,
+            "total_matched": 2usize,
+            "next_cursor": null,
+            "has_more_hint": false,
+            "iterations": 1usize,
+        });
+
+        let done_payload = json!({
+            "total_searched": 10usize,
+            "total_matched": 2usize,
+            "next_cursor": 5u64,
+            "has_more": true,
+            "search_id": "sid",
+        });
+
+        let error_payload = json!({ "message": "boom" });
+
+        let sse = format!(
+            "event: result\n\
+             data: {}\n\
+             \n\
+             event: progress\n\
+             data: {}\n\
+             \n\
+             event: done\n\
+             data: {}\n\
+             \n\
+             event: error\n\
+             data: {}\n\
+             \n",
+            result_payload.to_string(),
+            progress_payload.to_string(),
+            done_payload.to_string(),
+            error_payload.to_string(),
+        );
+
+        let events = decoder
+            .push_chunk(&sse)
+            .expect("decoder should produce events");
+        assert_eq!(events.len(), 4);
+    }
+
+    #[test]
+    fn remote_search_sse_decoder_handles_partial_chunks() {
+        let mut decoder = RemoteSearchSseDecoder::default();
+        let progress_payload = json!({
+            "total_searched": 1usize,
+            "total_matched": 0usize,
+            "next_cursor": null,
+            "has_more_hint": false,
+            "iterations": 0usize,
+        })
+        .to_string();
+
+        let part1 = format!("event: progress\ndata: {}", progress_payload);
+        let part2 = "\n\n";
+
+        let ev1 = decoder.push_chunk(&part1).expect("no error");
+        assert!(ev1.is_empty());
+        let ev2 = decoder.push_chunk(part2).expect("no error");
+        assert_eq!(ev2.len(), 1);
+    }
+
+    #[test]
+    fn remote_search_renderer_table_accumulates_results_and_done_state() {
+        let render_mode = RemoteRenderMode::Search {
+            format: OutputFormat::Table,
+            no_color: true,
+            keyword: "needle".to_string(),
+            max_scan: Some(50),
+            max_results: Some(3),
+        };
+        let mut renderer = RemoteSearchRenderer::from_render_mode(&render_mode)
+            .expect("renderer should be constructed");
+
+        let item: SearchResultItem = serde_json::from_value(json!({
+            "record": {
+                "id": "REQ-1",
+                "seq": 1u64,
+                "ts": 123u64,
+                "m": "GET",
+                "h": "example.com",
+                "p": "/v1",
+                "s": 200u16,
+                "ct": null,
+                "req_ct": null,
+                "req_sz": 10usize,
+                "res_sz": 20usize,
+                "dur": 30u64,
+                "proto": "HTTP/1.1",
+                "cip": "127.0.0.1",
+                "capp": "curl",
+                "flags": 0u32,
+                "fc": 0usize,
+                "st": "ok",
+                "et": null,
+            },
+            "matches": [{
+                "field": "host",
+                "preview": "example.com",
+                "offset": 0usize,
+            }],
+        }))
+        .expect("decode search result");
+
+        renderer
+            .render_event(RemoteSearchEvent::Result(Box::new(item)))
+            .expect("render result");
+
+        renderer
+            .render_event(RemoteSearchEvent::Progress(RemoteSearchProgressPayload {
+                total_searched: 5,
+                total_matched: 1,
+                next_cursor: None,
+                has_more_hint: false,
+                iterations: 1,
+            }))
+            .expect("render progress");
+
+        renderer
+            .render_event(RemoteSearchEvent::Done(RemoteSearchDonePayload {
+                total_searched: 10,
+                total_matched: 2,
+                next_cursor: Some(5),
+                has_more: true,
+                search_id: "sid".to_string(),
+            }))
+            .expect("render done");
+
+        assert_eq!(renderer.total_searched, 10);
+        assert_eq!(renderer.total_matched, 2);
+        assert!(renderer.has_more);
+    }
+
+    #[test]
+    fn remote_search_renderer_json_collects_results() {
+        let render_mode = RemoteRenderMode::Search {
+            format: OutputFormat::Json,
+            no_color: true,
+            keyword: String::new(),
+            max_scan: None,
+            max_results: None,
+        };
+        let mut renderer = RemoteSearchRenderer::from_render_mode(&render_mode)
+            .expect("renderer should be constructed");
+
+        let item: SearchResultItem = serde_json::from_value(json!({
+            "record": {
+                "id": "REQ-2",
+                "seq": 2u64,
+                "ts": 1u64,
+                "m": "POST",
+                "h": "example.com",
+                "p": "/v2",
+                "s": 201u16,
+                "ct": null,
+                "req_ct": null,
+                "req_sz": 5usize,
+                "res_sz": 15usize,
+                "dur": 5u64,
+                "proto": "HTTP/2",
+                "cip": "127.0.0.1",
+                "capp": null,
+                "flags": 0u32,
+                "fc": 0usize,
+                "st": "ok",
+                "et": null,
+            },
+            "matches": [],
+        }))
+        .expect("decode search result");
+
+        renderer
+            .render_event(RemoteSearchEvent::Result(Box::new(item)))
+            .expect("render result");
+        renderer
+            .render_event(RemoteSearchEvent::Done(RemoteSearchDonePayload {
+                total_searched: 1,
+                total_matched: 1,
+                next_cursor: None,
+                has_more: false,
+                search_id: "s".to_string(),
+            }))
+            .expect("render done");
+
+        assert_eq!(renderer.json_results.len(), 1);
+        assert_eq!(renderer.total_matched, 1);
+        assert_eq!(renderer.total_searched, 1);
+    }
+
+    #[test]
+    fn remote_search_renderer_from_render_mode_non_search_returns_none() {
+        let render_mode = RemoteRenderMode::Raw;
+        assert!(RemoteSearchRenderer::from_render_mode(&render_mode).is_none());
+    }
+
+    // --- Connection file helpers and resolver ---
+
+    #[test]
+    fn load_connections_missing_file_returns_empty_vec() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let path = connections_path();
+            let _ = std::fs::remove_file(&path);
+            let loaded = load_connections().expect("load should succeed");
+            assert!(loaded.is_empty());
+        });
+    }
+
+    #[test]
+    fn save_and_load_connections_roundtrip() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let connections = vec![sample_local_connection("client-1", "https://relay-a")];
+            save_connections(&connections).expect("save");
+            let _loaded = load_connections().expect("load");
+        });
+    }
+
+    #[test]
+    fn remove_stale_local_connection_persists_changes() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let mut connections = vec![
+                sample_local_connection("client-1", "https://relay-a"),
+                sample_local_connection("client-2", "https://relay-a"),
+            ];
+            save_connections(&connections).expect("save initial");
+            let stale = connections[0].clone();
+            let removed =
+                remove_stale_local_connection(&mut connections, &stale).expect("remove stale");
+            assert!(removed);
+            assert_eq!(connections.len(), 1);
+            assert_eq!(connections[0].client_instance_id, "client-2");
+        });
+    }
+
+    #[test]
+    fn resolve_local_connection_errors_when_no_saved_connections() {
+        let err = resolve_local_connection(&[], None).expect_err("should fail");
+        assert!(err
+            .to_string()
+            .contains("no saved connection, please run `bifrost remote conn up"));
+    }
+
+    #[test]
+    fn resolve_local_connection_single_connection_without_client_id() {
+        let conn = sample_local_connection("client-1", "https://relay-a");
+        let resolved = resolve_local_connection(&[conn.clone()], None).expect("resolve");
+        assert_eq!(resolved.client_instance_id, conn.client_instance_id);
+    }
+
+    #[test]
+    fn resolve_local_connection_explicit_full_client_id_matches() {
+        let conn = sample_local_connection("client-full", "https://relay-a");
+        let resolved =
+            resolve_local_connection(&[conn.clone()], Some("client-full")).expect("resolve");
+        assert_eq!(resolved.client_instance_id, "client-full");
+    }
+
+    #[test]
+    fn resolve_local_connection_explicit_prefix_with_no_match_errors() {
+        let conn = sample_local_connection("client-1", "https://relay-a");
+        let err =
+            resolve_local_connection(&[conn], Some("does-not-exist")).expect_err("should fail");
+        assert!(err.to_string().contains("no saved connection matching"));
+    }
+
+    // --- Shell scope upgrade error variants ---
+
+    #[test]
+    fn shell_scope_upgrade_error_for_ssh_key_mentions_ssh_prompt() {
+        let mut conn = sample_local_connection("client-1", "https://relay-a");
+        conn.auth_method = Some("ssh_publickey".to_string());
+        conn.ssh_key_source = Some("env".to_string());
+        conn.device_code = Some("BF-0123".to_string());
+
+        let msg = shell_scope_upgrade_error(&conn).to_string();
+        assert!(msg.contains("fresh SSH authorization prompt"));
+    }
+
+    #[test]
+    fn shell_scope_upgrade_error_readonly_suggests_pair_code() {
+        let conn = sample_local_connection("client-1", "https://relay-a");
+        let msg = shell_scope_upgrade_error(&conn).to_string();
+        assert!(msg.contains("read-only"));
+        assert!(msg.contains("bifrost remote conn up <pair-code>"));
+    }
+
+    // --- Env SSH key normalization and key parsing helpers ---
+
+    #[test]
+    fn normalize_env_ssh_key_value_passthrough_for_real_newlines() {
+        let input = format!("{BIFROST_KEY_BEGIN}\nline1\n{BIFROST_KEY_END}\n");
+        let normalized = normalize_env_ssh_key_value(input.clone());
+        assert_eq!(normalized, input);
+    }
+
+    #[test]
+    fn normalize_env_ssh_key_value_unescapes_backslash_n_sequences() {
+        let encoded = format!("{BIFROST_KEY_BEGIN}\\nline1\\n{BIFROST_KEY_END}\\n");
+        let normalized = normalize_env_ssh_key_value(encoded);
+        assert!(normalized.contains('\n'));
+        assert!(!normalized.contains("\\n"));
+    }
+
+    #[test]
+    fn parse_bifrost_key_file_returns_none_for_non_bifrost_file() {
+        let text = "no magic header here";
+        let parsed = parse_bifrost_key_file(text).expect("parse ok");
+        assert!(parsed.is_none());
+    }
+
+    #[test]
+    fn parse_bifrost_key_file_requires_device_code_header() {
+        let pkcs8_b64 = base64::engine::general_purpose::STANDARD.encode(b"dummy-pkcs8-data");
+        let text = format!("{BIFROST_KEY_BEGIN}\n{}\n{BIFROST_KEY_END}\n", pkcs8_b64);
+        let err = parse_bifrost_key_file(&text).expect_err("missing Device-Code should error");
+        assert!(err
+            .to_string()
+            .contains("Bifrost SSH key file is missing `Device-Code:` header"));
+    }
+
+    #[test]
+    fn parse_pem_block_decodes_base64_body() {
+        let pkcs8_bytes = vec![1u8, 2, 3, 4];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&pkcs8_bytes);
+        let text = format!("{PKCS8_KEY_BEGIN}\n{}\n{PKCS8_KEY_END}\n", encoded);
+        let decoded = parse_pem_block(&text, PKCS8_KEY_BEGIN, PKCS8_KEY_END)
+            .expect("no error")
+            .expect("pem block found");
+        assert_eq!(decoded, pkcs8_bytes);
+    }
+
+    #[test]
+    fn parse_pem_block_missing_markers_returns_none() {
+        let text = "-----BEGIN OTHER-----\nABC\n-----END OTHER-----";
+        let decoded = parse_pem_block(text, PKCS8_KEY_BEGIN, PKCS8_KEY_END).expect("no error");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn parse_ssh_private_key_bytes_binary_passes_through() {
+        let raw = [0u8, 1, 2, 3];
+        let (pkcs8, device_code) = parse_ssh_private_key_bytes(&raw).expect("parse");
+        assert_eq!(pkcs8, raw);
+        assert!(device_code.is_none());
+    }
+
+    #[test]
+    fn parse_ssh_private_key_bytes_prefers_bifrost_format() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+        let rendered = format!(
+            "{BIFROST_KEY_BEGIN}\nDevice-Code: BF-0000000000000000\n{}\n{BIFROST_KEY_END}\n",
+            base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref())
+        );
+        let (parsed_pkcs8, device_code) =
+            parse_ssh_private_key_bytes(rendered.as_bytes()).expect("parse");
+        assert_eq!(parsed_pkcs8, pkcs8.as_ref());
+        assert_eq!(device_code.as_deref(), Some("BF-0000000000000000"));
+    }
+
+    #[test]
+    fn load_ssh_key_respects_device_code_override() {
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("pkcs8");
+        let rendered = format!(
+            "{BIFROST_KEY_BEGIN}\nDevice-Code: BF-AAAAAAAAAAAAAAAA\n{}\n{BIFROST_KEY_END}\n",
+            base64::engine::general_purpose::STANDARD.encode(pkcs8.as_ref())
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("key");
+        std::fs::write(&path, rendered).expect("write key");
+
+        let loaded =
+            load_ssh_key(path.to_str().unwrap(), Some("BF-OVERRIDE-1234")).expect("load ssh key");
+        assert_eq!(loaded.device_code, "BF-OVERRIDE-1234");
+    }
+
+    #[test]
+    fn read_ssh_key_source_reads_from_file_spec() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("k");
+        std::fs::write(&path, "key-content").expect("write key");
+
+        let (raw, label, file_path) = read_ssh_key_source(path.to_str().unwrap()).expect("read");
+        assert_eq!(raw, b"key-content");
+        assert!(label.contains("k"));
+        assert_eq!(file_path.as_deref(), Some(path.as_path()));
+    }
+
+    // --- Encrypted frame and exit payload helpers ---
+
+    #[test]
+    fn encrypt_caller_input_frame_roundtrip_decrypts_payload() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+        let call_id = "call-1";
+        let seq = 5u64;
+        let plaintext = b"hello-input";
+
+        let envelope_json = encrypt_caller_input_frame(&transport, call_id, seq, plaintext)
+            .expect("encrypt input frame");
+        let envelope: Value = serde_json::from_str(&envelope_json).expect("parse envelope");
+
+        let payload = EncryptedPayload {
+            version: envelope
+                .get("version")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(ENCRYPTED_OPEN_CALL_VERSION as u64) as u32,
+            nonce: envelope
+                .get("nonce")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string(),
+            ciphertext: envelope
+                .get("ciphertext")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string(),
+            tag: envelope
+                .get("tag")
+                .and_then(|v| v.as_str())
+                .unwrap()
+                .to_string(),
+            aad: None,
+        };
+
+        let key_bytes = derive_call_event_key(
+            &transport.shared_secret,
+            call_id,
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+        )
+        .expect("derive key");
+        let plaintext_bytes =
+            decrypt_payload_bytes(&payload, &key_bytes, None).expect("decrypt payload");
+        let frame: CallerInputFramePayload =
+            serde_json::from_slice(&plaintext_bytes).expect("decode frame");
+        assert_eq!(
+            frame.data_b64,
+            base64::engine::general_purpose::STANDARD.encode(plaintext)
+        );
+    }
+
+    #[test]
+    fn decrypt_exit_payload_with_aad_roundtrip() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+        let call_id = "call-exit";
+        let exit = EncryptedExitPayload {
+            exit_code: 7,
+            duration_ms: Some(42),
+            stderr: Some("boom".to_string()),
+            stdout_digest: None,
+            stderr_digest: None,
+        };
+
+        let aad = FrameEnvelopeAad {
+            version: ENCRYPTED_OPEN_CALL_VERSION,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: "client_to_caller".to_string(),
+            frame_type: Some("exit".to_string()),
+            command_kind: None,
+        };
+        let aad_bytes = serde_json::to_vec(&aad).expect("encode aad");
+
+        let key_bytes = derive_call_event_key(
+            &transport.shared_secret,
+            call_id,
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+        )
+        .expect("derive key");
+        let unbound =
+            UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).expect("build encryption key");
+        let key = LessSafeKey::new(unbound);
+        let mut nonce = [0u8; NONCE_LEN];
+        SystemRandom::new().fill(&mut nonce).expect("nonce");
+        let mut sealed = serde_json::to_vec(&exit).expect("encode exit");
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::from(&aad_bytes[..]),
+            &mut sealed,
+        )
+        .expect("seal exit");
+        let tag = sealed.split_off(sealed.len().saturating_sub(16));
+        let payload = EncryptedPayload {
+            version: ENCRYPTED_OPEN_CALL_VERSION,
+            nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+            ciphertext: base64::engine::general_purpose::STANDARD.encode(&sealed),
+            tag: base64::engine::general_purpose::STANDARD.encode(tag),
+            aad: Some(aad),
+        };
+
+        let decrypted =
+            decrypt_exit_payload(&transport, call_id, &payload).expect("decrypt exit payload");
+        assert_eq!(decrypted.exit_code, 7);
+        assert_eq!(decrypted.duration_ms, Some(42));
+        assert_eq!(decrypted.stderr.as_deref(), Some("boom"));
+    }
+
+    // --- Hostname / username / os version helpers ---
+
+    #[test]
+    fn get_hostname_returns_non_empty_string() {
+        let hostname = get_hostname();
+        assert!(!hostname.is_empty());
+    }
+
+    #[test]
+    fn get_username_returns_non_empty_string() {
+        let username = get_username();
+        assert!(!username.is_empty());
+    }
+
+    #[test]
+    fn get_os_version_smoke_test() {
+        let version = get_os_version();
+        if let Some(v) = version {
+            assert!(!v.is_empty());
+        }
+    }
+
+    // --- HTTP helpers using wiremock ---
+
+    #[tokio::test]
+    async fn caller_delete_grant_treats_2xx_as_deleted() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v4/remote-invoke/grants/grant-ok"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let outcome = client
+            .delete_grant("grant-ok", "fp-1")
+            .await
+            .expect("delete should succeed");
+        assert_eq!(outcome, DeleteGrantOutcome::Deleted);
+    }
+
+    #[tokio::test]
+    async fn caller_delete_grant_treats_404_grant_not_found_as_already_missing() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/v4/remote-invoke/grants/grant-missing"))
+            .respond_with(ResponseTemplate::new(404).set_body_raw(
+                "{\"code\":404,\"message\":\"grant_not_found\"}",
+                "application/json",
+            ))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let outcome = client
+            .delete_grant("grant-missing", "fp-1")
+            .await
+            .expect("delete should succeed");
+        assert_eq!(outcome, DeleteGrantOutcome::AlreadyMissing);
+    }
+
+    #[tokio::test]
+    async fn find_reusable_grant_returns_none_for_null_data() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/remote-invoke/grants/reusable"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let grant = client
+            .find_reusable_grant("client-1", "fp-1")
+            .await
+            .expect("request should succeed");
+        assert!(grant.is_none());
+    }
+
+    #[tokio::test]
+    async fn find_reusable_grant_returns_some_for_valid_grant() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/remote-invoke/grants/reusable"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": {
+                    "grant_id": "grant-1",
+                    "status": "active",
+                    "caller_ephemeral_pub": "caller-epk",
+                    "client_ephemeral_pub": "client-epk"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let grant = client
+            .find_reusable_grant("client-1", "fp-1")
+            .await
+            .expect("request should succeed")
+            .expect("grant should be present");
+        assert_eq!(grant.grant_id, "grant-1");
+        assert_eq!(grant.status, "active");
+    }
+
+    #[tokio::test]
+    async fn start_pairing_nonzero_code_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/pairings/start"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 123,
+                "message": "bad things",
+                "data": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let req = StartPairingRequest {
+            pair_code: "CODE".to_string(),
+            caller_info: CallerInfo {
+                fingerprint: "fp-1".to_string(),
+                display_name: None,
+                user_agent: None,
+                platform: None,
+                hostname: None,
+                username: None,
+                label: None,
+                os_version: None,
+                arch: None,
+            },
+            caller_ephemeral_pub: "epk".to_string(),
+        };
+
+        let err = client.start_pairing(&req).await.expect_err("should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("start_pairing error code 123"));
+    }
+
+    #[tokio::test]
+    async fn subscribe_call_events_processes_frame_and_exit_plaintext() {
+        let mock_server = MockServer::start().await;
+        let call_id = "call-1";
+        let exit_json = json!({
+            "exit_code": 7,
+            "duration_ms": 42u64,
+            "stderr": "boom",
+        });
+
+        let envelope = json!({
+            "version": ENCRYPTED_OPEN_CALL_VERSION,
+            "nonce": "",
+            "ciphertext": "hello-chunk",
+            "tag": "",
+        });
+        let frame_data = json!({
+            "envelope_json": envelope.to_string(),
+        })
+        .to_string();
+
+        let sse_body = format!(
+            "event: frame\n\
+             data: {}\n\
+             \n\
+             event: exit\n\
+             data: {}\n\
+             \n",
+            frame_data,
+            exit_json.to_string(),
+        );
+
+        Mock::given(method("GET"))
+            .and(path(&format!("/v4/remote-invoke/calls/{call_id}/events")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: Vec::new(),
+        };
+
+        let result = client
+            .subscribe_call_events(
+                call_id,
+                "relay-token",
+                &transport,
+                &RemoteRenderMode::Raw,
+                5,
+            )
+            .await
+            .expect("subscribe should succeed");
+
+        assert_eq!(result.exit_code, 7);
+        assert_eq!(result.duration_ms, Some(42));
+        assert_eq!(result.stderr.as_deref(), Some("boom"));
+        assert!(result.stdout.is_none());
+        assert!(!result.cancelled);
+    }
+
+    #[tokio::test]
+    async fn subscribe_call_events_status_cancelled_sets_cancelled_result() {
+        let mock_server = MockServer::start().await;
+        let call_id = "call-cancel";
+        let status_payload = json!({
+            "call_id": call_id,
+            "status": "cancelled",
+        })
+        .to_string();
+
+        let sse_body = format!(
+            "event: status\n\
+             data: {}\n\
+             \n",
+            status_payload,
+        );
+
+        Mock::given(method("GET"))
+            .and(path(&format!("/v4/remote-invoke/calls/{call_id}/events")))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: Vec::new(),
+        };
+
+        let result = client
+            .subscribe_call_events(
+                call_id,
+                "relay-token",
+                &transport,
+                &RemoteRenderMode::TrafficList {
+                    format: OutputFormat::Compact,
+                    no_color: true,
+                },
+                5,
+            )
+            .await
+            .expect("subscribe should succeed");
+
+        assert_eq!(result.exit_code, 130);
+        assert!(result.cancelled);
+        assert_eq!(
+            result.stderr.as_deref(),
+            Some("remote call cancelled by caller")
+        );
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::cli::RemoteSearchArgs;
+    use crate::commands::search::SearchResultItem;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn base_search_args() -> RemoteSearchArgs {
+        RemoteSearchArgs {
+            keyword: Some("needle".to_string()),
+            limit: 50,
+            format: "table".to_string(),
+            no_color: false,
+            url: false,
+            headers: false,
+            body: false,
+            req_header: false,
+            res_header: false,
+            req_body: false,
+            res_body: false,
+            status: None,
+            method: None,
+            host: None,
+            path: None,
+            listener_port: None,
+            protocol: None,
+            content_type: None,
+            domain: None,
+            max_scan: Some(100),
+            max_results: Some(25),
+        }
+    }
+
+    fn sample_search_result_item() -> SearchResultItem {
+        serde_json::from_value(json!({
+            "record": {
+                "id": "REQ-1",
+                "seq": 1u64,
+                "ts": 123u64,
+                "m": "GET",
+                "h": "example.com",
+                "p": "/v1",
+                "s": 200u16,
+                "ct": null,
+                "req_ct": null,
+                "req_sz": 10usize,
+                "res_sz": 20usize,
+                "dur": 30u64,
+                "proto": "HTTP/1.1",
+                "cip": "127.0.0.1",
+                "capp": "curl",
+                "flags": 0u32,
+                "fc": 0usize,
+                "st": "ok",
+                "et": null,
+            },
+            "matches": [{
+                "field": "host",
+                "preview": "example.com",
+                "offset": 0usize,
+            }],
+        }))
+        .expect("search result item")
+    }
+
+    #[test]
+    fn command_search_args_all_scope_when_no_location_flags() {
+        let args = base_search_args();
+        let search = command_search_args(&args);
+        assert_eq!(search.keyword, "needle");
+        assert!(search.scope.all);
+        assert!(!search.scope.url);
+        assert!(!search.scope.request_body);
+        assert!(!search.scope.response_body);
+        assert!(!search.scope.request_headers);
+        assert!(!search.scope.response_headers);
+    }
+
+    #[test]
+    fn command_search_args_url_scope_disables_all() {
+        let mut args = base_search_args();
+        args.url = true;
+        let search = command_search_args(&args);
+        assert!(!search.scope.all);
+        assert!(search.scope.url);
+    }
+
+    #[test]
+    fn command_search_args_builds_filters_for_all_supported_fields() {
+        let mut args = base_search_args();
+        args.status = Some("4xx".to_string());
+        args.protocol = Some("HTTPS".to_string());
+        args.content_type = Some("json".to_string());
+        args.domain = Some("example.com".to_string());
+        args.method = Some("POST".to_string());
+        args.host = Some("api.example.com".to_string());
+        args.path = Some("/v1".to_string());
+        args.listener_port = Some(18080);
+
+        let search = command_search_args(&args);
+        assert_eq!(search.filters.status_ranges, vec!["4xx"]);
+        assert_eq!(search.filters.protocols, vec!["https"]);
+        assert_eq!(search.filters.content_types, vec!["json"]);
+        assert_eq!(search.filters.domains, vec!["example.com"]);
+        assert!(search
+            .filters
+            .conditions
+            .iter()
+            .any(|c| c.field == "method" && c.operator == "equals" && c.value == "POST"));
+        assert!(search.filters.conditions.iter().any(|c| c.field == "host"
+            && c.operator == "contains"
+            && c.value == "api.example.com"));
+        assert!(search
+            .filters
+            .conditions
+            .iter()
+            .any(|c| c.field == "path" && c.operator == "contains" && c.value == "/v1"));
+        assert!(search
+            .filters
+            .conditions
+            .iter()
+            .any(|c| c.field == "listener_port" && c.operator == "equals" && c.value == "18080"));
+    }
+
+    #[test]
+    fn render_search_size_formats_bytes_kb_and_mb() {
+        assert_eq!(render_search_size(512), "512B");
+        assert_eq!(render_search_size(2048), "2.0KB");
+        assert_eq!(render_search_size(3 * 1024 * 1024), "3.0MB");
+    }
+
+    #[test]
+    fn render_search_duration_formats_zero_and_seconds() {
+        assert_eq!(render_search_duration(0), "...");
+        assert_eq!(render_search_duration(250), "250ms");
+        assert_eq!(render_search_duration(1500), "1.50s");
+    }
+
+    #[test]
+    fn render_search_number_formats_thousands_and_millions() {
+        assert_eq!(render_search_number(999), "999");
+        assert_eq!(render_search_number(2_000), "2.0K");
+        assert_eq!(render_search_number(2_000_000), "2.0M");
+    }
+
+    #[test]
+    fn print_remote_search_table_row_runs_without_color() {
+        let item = sample_search_result_item();
+        print_remote_search_table_row(&item, "example", false);
+    }
+
+    #[test]
+    fn print_remote_search_table_row_runs_with_color() {
+        let item = sample_search_result_item();
+        print_remote_search_table_row(&item, "example", true);
+    }
+
+    #[test]
+    fn print_remote_search_summary_plain_with_matches_and_more_flag() {
+        print_remote_search_summary("needle", Some(200), Some(10), 500, 5, true, false);
+    }
+
+    #[test]
+    fn print_remote_search_summary_color_without_matches() {
+        print_remote_search_summary("needle", Some(50), Some(5), 100, 0, false, true);
+    }
+
+    #[test]
+    fn should_stream_remote_render_only_for_raw_mode() {
+        assert!(should_stream_remote_render(&RemoteRenderMode::Raw));
+        let render = RemoteRenderMode::TrafficGet {
+            format: OutputFormat::JsonPretty,
+            no_color: false,
+        };
+        assert!(!should_stream_remote_render(&render));
+    }
+
+    #[test]
+    fn remote_search_renderer_handles_error_in_json_mode() {
+        let render_mode = RemoteRenderMode::Search {
+            format: OutputFormat::JsonPretty,
+            no_color: true,
+            keyword: String::new(),
+            max_scan: None,
+            max_results: None,
+        };
+        let mut renderer = RemoteSearchRenderer::from_render_mode(&render_mode)
+            .expect("renderer should construct");
+        renderer
+            .render_event(RemoteSearchEvent::Error(RemoteSearchErrorPayload {
+                message: "boom".to_string(),
+            }))
+            .expect("error event should be handled");
+    }
+
+    #[test]
+    fn remote_search_renderer_handles_error_in_table_mode() {
+        let render_mode = RemoteRenderMode::Search {
+            format: OutputFormat::Table,
+            no_color: true,
+            keyword: "k".to_string(),
+            max_scan: Some(10),
+            max_results: Some(5),
+        };
+        let mut renderer = RemoteSearchRenderer::from_render_mode(&render_mode)
+            .expect("renderer should construct");
+        renderer
+            .render_event(RemoteSearchEvent::Error(RemoteSearchErrorPayload {
+                message: "boom".to_string(),
+            }))
+            .expect("error event should be handled");
+    }
+
+    #[tokio::test]
+    async fn watch_pairing_returns_approved_result() {
+        let mock_server = MockServer::start().await;
+        let body = "event: decision\n\
+                    data: {\"status\":\"approved\",\"grant_id\":\"g1\",\"client_instance_id\":\"c1\",\"device_name\":\"Dev\",\"platform\":\"macos\",\"grant_mode\":\"permanent\",\"caller_ephemeral_pub\":\"cpub\",\"client_ephemeral_pub\":\"epub\"}\n\n";
+        Mock::given(method("GET"))
+            .and(path("/v4/remote-invoke/pairings/p1/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let result = client.watch_pairing("p1").await.expect("watch_pairing");
+        assert_eq!(result.status, "approved");
+        assert_eq!(result.grant_id.as_deref(), Some("g1"));
+        assert_eq!(result.client_instance_id.as_deref(), Some("c1"));
+    }
+
+    #[tokio::test]
+    async fn watch_pairing_non_success_status_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/remote-invoke/pairings/p1/watch"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let err = client.watch_pairing("p1").await.expect_err("should fail");
+        assert!(err.to_string().contains("watch pairing returned"));
+    }
+
+    #[tokio::test]
+    async fn request_ssh_challenge_parses_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/ssh/challenge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": {
+                    "challenge_id": "cid",
+                    "challenge": "ch",
+                    "expires_at": 123u64
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let resp = client
+            .request_ssh_challenge("BF-0001")
+            .await
+            .expect("ssh challenge");
+        assert_eq!(resp.challenge_id, "cid");
+        assert_eq!(resp.challenge, "ch");
+        assert_eq!(resp.expires_at, Some(123));
+    }
+
+    #[tokio::test]
+    async fn request_ssh_challenge_non_zero_code_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/ssh/challenge"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 42,
+                "message": "bad",
+                "data": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let err = client
+            .request_ssh_challenge("BF-0001")
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("ssh_challenge error code"));
+    }
+
+    #[tokio::test]
+    async fn ssh_connect_parses_success() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/ssh/connect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": {
+                    "connect_id": "cid",
+                    "relay_token": "tok",
+                    "expires_at": 42u64
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let req = SshConnectRequest {
+            device_code: "BF-1".to_string(),
+            challenge_id: "ch".to_string(),
+            signature: "sig".to_string(),
+            timestamp: 1,
+            caller_info: None,
+            caller_ephemeral_pub: None,
+        };
+        let resp = client.ssh_connect(&req).await.expect("ssh_connect");
+        assert_eq!(resp.connect_id, "cid");
+        assert_eq!(resp.relay_token, "tok");
+        assert_eq!(resp.expires_at, Some(42));
+    }
+
+    #[tokio::test]
+    async fn ssh_connect_non_zero_code_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/ssh/connect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 7,
+                "message": "denied",
+                "data": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let req = SshConnectRequest {
+            device_code: "BF-1".to_string(),
+            challenge_id: "ch".to_string(),
+            signature: "sig".to_string(),
+            timestamp: 1,
+            caller_info: None,
+            caller_ephemeral_pub: None,
+        };
+        let err = client.ssh_connect(&req).await.expect_err("should fail");
+        assert!(err.to_string().contains("ssh_connect error code"));
+    }
+
+    #[tokio::test]
+    async fn cancel_call_non_success_status_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/calls/abc/cancel"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("{\"code\":1,\"message\":\"bad\"}"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let err = client
+            .cancel_call("abc", "tok")
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("cancel_call failed with status"));
+    }
+
+    #[tokio::test]
+    async fn post_call_input_successful_request() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v4/remote-invoke/calls/abc/input"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": null
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        client
+            .post_call_input("abc", "tok", "{}".to_string())
+            .await
+            .expect("post_call_input");
+    }
+
+    #[tokio::test]
+    async fn subscribe_call_events_non_success_status_maps_to_error() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v4/remote-invoke/calls/call-err/events"))
+            .respond_with(ResponseTemplate::new(500).set_body_string("failure"))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller".to_string(),
+            client_ephemeral_pub: "client".to_string(),
+            shared_secret: Vec::new(),
+        };
+        let err = client
+            .subscribe_call_events("call-err", "tok", &transport, &RemoteRenderMode::Raw, 1)
+            .await
+            .expect_err("should fail");
+        assert!(err.to_string().contains("call events returned"));
+    }
+}

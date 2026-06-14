@@ -417,8 +417,13 @@ mod tests {
     use crate::types::ToolDefinition;
     use std::io::{Read, Write};
     use std::net::TcpListener;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, OnceLock};
     use std::thread;
+
+    fn streaming_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     #[test]
     fn responses_url_converts_chat_completions_endpoint() {
@@ -487,6 +492,7 @@ mod tests {
 
     #[tokio::test]
     async fn streaming_client_sends_responses_shape() {
+        let _guard = streaming_lock().lock().unwrap_or_else(|e| e.into_inner());
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");
         let url = format!(
             "http://{}/v1/chat/completions",

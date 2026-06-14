@@ -1800,3 +1800,475 @@ mod tests {
         assert!(toml.contains("mode = \"local_only\""));
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use crate::cli::ConfigCommands;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn start_mock_server() -> (MockServer, String, u16) {
+        let mock_server = MockServer::start().await;
+        let base_uri = mock_server.uri(); // e.g. http://127.0.0.1:12345
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().expect("mock server host").to_string();
+        let port: u16 = parts
+            .next()
+            .expect("mock server port")
+            .parse()
+            .expect("valid port number");
+        (mock_server, host, port)
+    }
+
+    async fn setup_basic_config_mocks(server: &MockServer) {
+        // Server config (GET/PUT)
+        let server_body = json!({
+            "timeout_secs": 30u64,
+            "http1_max_header_size": 64_000usize,
+            "http2_max_header_list_size": 256_000usize,
+            "websocket_handshake_max_header_size": 64_000usize,
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&server_body))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&server_body))
+            .mount(server)
+            .await;
+
+        // TLS config (GET/PUT)
+        let tls_body = json!({
+            "enable_tls_interception": true,
+            "intercept_exclude": ["example.com"],
+            "intercept_include": ["include.com"],
+            "app_intercept_exclude": ["AppA"],
+            "app_intercept_include": ["AppB"],
+            "ip_intercept_exclude": ["127.0.0.1"],
+            "ip_intercept_include": ["10.0.0.1"],
+            "unsafe_ssl": false,
+            "disconnect_on_config_change": true,
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/tls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&tls_body))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/tls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&tls_body))
+            .mount(server)
+            .await;
+
+        // Performance config (GET/PUT)
+        let perf_body = json!({
+            "traffic": {
+                "max_records": DEFAULT_TRAFFIC_MAX_RECORDS,
+                "max_db_size_bytes": 2_000_000_000u64,
+                "max_body_memory_size": 512 * 1024usize,
+                "max_body_buffer_size": 10 * 1024 * 1024usize,
+                "max_body_probe_size": 64 * 1024usize,
+                "binary_traffic_performance_mode": true,
+                "file_retention_days": 7u64,
+                "sse_stream_flush_bytes": 256 * 1024usize,
+                "sse_stream_flush_interval_ms": 1000u64,
+                "ws_payload_flush_bytes": 512 * 1024usize,
+                "ws_payload_flush_interval_ms": 1000u64,
+                "ws_payload_max_open_files": 128usize,
+            },
+            "body_store_stats": null,
+            "frame_store_stats": null,
+            "ws_payload_store_stats": null,
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/performance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&perf_body))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/performance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&perf_body))
+            .mount(server)
+            .await;
+
+        // Clear cache
+        let clear_body = json!({
+            "body_cache_removed": 1usize,
+            "traffic_cache_removed": 2usize,
+            "frame_cache_removed": 3usize,
+            "ws_payload_cache_removed": 4usize,
+            "message": "cleared",
+        });
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/config/performance/clear-cache"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&clear_body))
+            .mount(server)
+            .await;
+
+        // Whitelist (GET)
+        let whitelist_body = json!({
+            "mode": "local_only",
+            "allow_lan": false,
+            "whitelist": ["127.0.0.1"],
+            "temporary_whitelist": [],
+            "userpass": {
+                "enabled": true,
+                "accounts": [
+                    {
+                        "username": "demo",
+                        "enabled": true,
+                        "has_password": true,
+                        "last_connected_at": null,
+                    }
+                ],
+                "loopback_requires_auth": true,
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/whitelist"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&whitelist_body))
+            .mount(server)
+            .await;
+
+        // Whitelist updates
+        let ok_body = json!({"ok": true});
+        for (m, p) in [
+            ("PUT", "/_bifrost/api/whitelist/allow-lan"),
+            ("PUT", "/_bifrost/api/whitelist/userpass"),
+            ("PUT", "/_bifrost/api/whitelist/mode"),
+        ] {
+            Mock::given(method(m))
+                .and(path(p))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
+                .mount(server)
+                .await;
+        }
+
+        // Disconnect by domain
+        let disconnect_body = json!({
+            "success": true,
+            "disconnected_count": 1usize,
+            "message": "disconnected",
+        });
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/config/connections/disconnect"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&disconnect_body))
+            .mount(server)
+            .await;
+
+        // Disconnect by app
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/config/connections/disconnect-by-app"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
+            .mount(server)
+            .await;
+
+        // List connections
+        let connections_body = json!({
+            "total": 1usize,
+            "connections": [
+                {
+                    "req_id": "req-1",
+                    "host": "example.com",
+                    "port": 443u16,
+                    "intercept_mode": true,
+                    "client_app": "UnitTest",
+                }
+            ],
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/connections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&connections_body))
+            .mount(server)
+            .await;
+
+        // System overview
+        let overview_body = json!({
+            "body_store_used": 10u64,
+            "frame_store_used": 20u64,
+            "other": "ignored",
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/system/overview"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&overview_body))
+            .mount(server)
+            .await;
+
+        // Sandbox config
+        let sandbox_body = json!({"net": {"enabled": true}});
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/sandbox"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&sandbox_body))
+            .mount(server)
+            .await;
+
+        // Websocket connections
+        let ws_body = json!([]);
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/websocket/connections"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&ws_body))
+            .mount(server)
+            .await;
+
+        // Memory diagnostics
+        let memory_body = json!({
+            "process": {
+                "pid": 1234u64,
+                "rss_kib": 1024u64,
+                "vms_kib": 2048u64,
+                "cpu_usage_percent": 1.5f64,
+                "system_total_kib": 8 * 1024 * 1024u64,
+            },
+            "connections": {
+                "tunnel_registry_active": 1u64,
+                "sse": {"connections": 2u64, "open": 1u64},
+            },
+            "stores": {
+                "body_store": {"file_count": 4u64, "total_size": 4096u64},
+                "frame_store": {"disk": {"connection_count": 2u64, "total_size": 2048u64}},
+                "ws_payload_store": {"disk": {"file_count": 3u64, "total_size": 1024u64}},
+            },
+            "traffic_db": {
+                "db": {"record_count": 10u64, "db_size_bytes": 10_000u64},
+                "recent_cache": {"entries": 5u64},
+            },
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/system/memory"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&memory_body))
+            .mount(server)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn handle_config_command_covers_happy_paths_with_mock_server() {
+        let (server, host, port) = start_mock_server().await;
+        setup_basic_config_mocks(&server).await;
+
+        // Default (None) -> show_all_config
+        handle_config_command(None, &host, port).unwrap();
+
+        // Show section variants
+        handle_config_command(
+            Some(ConfigCommands::Show {
+                json: false,
+                section: Some("server".to_string()),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Show {
+                json: true,
+                section: Some("tls".to_string()),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Show {
+                json: false,
+                section: Some("traffic".to_string()),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Show {
+                json: true,
+                section: Some("access".to_string()),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        // Get / set / list style commands
+        handle_config_command(
+            Some(ConfigCommands::Get {
+                key: "tls.enabled".to_string(),
+                json: true,
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Set {
+                key: "server.timeout-secs".to_string(),
+                value: "45".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Set {
+                key: "traffic.max-records".to_string(),
+                value: MIN_TRAFFIC_MAX_RECORDS.to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Add {
+                key: "tls.exclude".to_string(),
+                value: "extra.com".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Remove {
+                key: "tls.exclude".to_string(),
+                value: "extra.com".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Reset {
+                key: "server.timeout-secs".to_string(),
+                yes: true,
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(Some(ConfigCommands::ClearCache { yes: true }), &host, port).unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Disconnect {
+                domain: "example.com".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::Export {
+                output: None,
+                format: "toml".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(
+            Some(ConfigCommands::DisconnectByApp {
+                app: "UnitTest".to_string(),
+            }),
+            &host,
+            port,
+        )
+        .unwrap();
+
+        handle_config_command(Some(ConfigCommands::Performance), &host, port).unwrap();
+        handle_config_command(Some(ConfigCommands::Websocket), &host, port).unwrap();
+        handle_config_command(Some(ConfigCommands::Connections), &host, port).unwrap();
+        handle_config_command(Some(ConfigCommands::Memory), &host, port).unwrap();
+    }
+
+    #[tokio::test]
+    async fn export_config_writes_toml_to_file_when_output_provided() {
+        let (server, host, port) = start_mock_server().await;
+        setup_basic_config_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        export_config(&client, Some(tmp.path().to_path_buf()), "toml").unwrap();
+
+        let contents = std::fs::read_to_string(tmp.path()).unwrap();
+        assert!(contents.contains("[server]"));
+        assert!(contents.contains("[tls]"));
+        assert!(contents.contains("[traffic]"));
+        assert!(contents.contains("[access]"));
+    }
+
+    #[test]
+    fn show_section_config_rejects_unknown_section() {
+        let client = ConfigApiClient::new("localhost", 0);
+        let err = show_section_config(&client, "unknown-section", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown section"));
+        assert!(msg.contains("server, tls, traffic, access"));
+    }
+
+    #[test]
+    fn get_config_value_rejects_unknown_key() {
+        let client = ConfigApiClient::new("localhost", 0);
+        let err = get_config_value(&client, "does.not.exist", false).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Unknown config key"));
+        assert!(msg.contains("traffic.max-records"));
+    }
+
+    #[test]
+    fn set_config_value_rejects_invalid_bool_and_ranges_before_network() {
+        let client = ConfigApiClient::new("localhost", 0);
+
+        // Invalid boolean for tls.enabled
+        let err = set_config_value(&client, "tls.enabled", "maybe").unwrap_err();
+        assert!(err.to_string().contains("Invalid boolean value"));
+
+        // traffic.retention-days > 7
+        let err = set_config_value(&client, "traffic.retention-days", "10").unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("retention-days cannot exceed 7 days"));
+
+        // traffic.max-records outside allowed range
+        let below_min = (MIN_TRAFFIC_MAX_RECORDS - 1).max(0);
+        let err =
+            set_config_value(&client, "traffic.max-records", &below_min.to_string()).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("traffic.max-records must be between"));
+    }
+
+    #[test]
+    fn add_and_remove_list_item_report_non_list_keys() {
+        let client = ConfigApiClient::new("localhost", 0);
+
+        let err = add_list_item(&client, "server.timeout-secs", "1").unwrap_err();
+        assert!(err.to_string().contains("is not a list configuration"));
+
+        let err = remove_list_item(&client, "server.timeout-secs", "1").unwrap_err();
+        assert!(err.to_string().contains("is not a list configuration"));
+    }
+
+    #[test]
+    fn reset_config_rejects_unknown_key_without_network() {
+        let client = ConfigApiClient::new("localhost", 0);
+        let err = reset_config(&client, "does.not.exist", true).unwrap_err();
+        assert!(err.to_string().contains("Unknown config key"));
+    }
+
+    #[test]
+    fn export_config_rejects_unsupported_format() {
+        let client = ConfigApiClient::new("localhost", 0);
+        let _ = export_config(&client, None, "yaml").unwrap_err();
+    }
+}

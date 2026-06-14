@@ -3456,3 +3456,1019 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use std::io::Cursor;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // --- Helpers -----------------------------------------------------------------
+
+    fn make_test_client_with_base_url(base_url: String) -> AsrTaskClient {
+        AsrTaskClient {
+            base_url,
+            agent: bifrost_core::direct_ureq_agent_builder()
+                .timeout(Duration::from_secs(5))
+                .build(),
+        }
+    }
+
+    async fn make_test_client_from_mock(mock: &MockServer) -> AsrTaskClient {
+        let base_uri = mock.uri();
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().expect("mock server host");
+        let port: u16 = parts
+            .next()
+            .expect("mock server port")
+            .parse()
+            .expect("valid port number");
+        AsrTaskClient::new(host, port)
+    }
+
+    fn create_temp_audio_file(dir: &TempDir, name: &str) -> PathBuf {
+        let path = dir.path().join(name);
+        std::fs::write(&path, b"test-audio").unwrap();
+        path
+    }
+
+    // --- normalized_subtitle_formats --------------------------------------------
+
+    #[test]
+    fn normalized_subtitle_formats_deduplicates_and_normalizes_aliases() {
+        let formats = vec![
+            "  SRT  ".to_string(),
+            "vtt".to_string(),
+            "json".to_string(),
+            "metadata_json".to_string(),
+            "text".to_string(),
+            "unknown".to_string(),
+            "srt".to_string(),
+        ];
+        let normalized = normalized_subtitle_formats(&formats);
+        assert_eq!(
+            normalized,
+            vec![
+                "srt".to_string(),
+                "vtt".to_string(),
+                "timeline_json".to_string(),
+                "metadata".to_string(),
+                "txt".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_subtitle_formats_defaults_when_input_empty() {
+        let normalized = normalized_subtitle_formats(&[]);
+        assert_eq!(
+            normalized,
+            vec![
+                "srt".to_string(),
+                "vtt".to_string(),
+                "txt".to_string(),
+                "timeline_json".to_string(),
+                "metadata".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn normalized_subtitle_formats_uses_defaults_when_only_invalid() {
+        let normalized = normalized_subtitle_formats(&["??".to_string()]);
+        assert_eq!(
+            normalized,
+            vec![
+                "srt".to_string(),
+                "vtt".to_string(),
+                "txt".to_string(),
+                "timeline_json".to_string(),
+                "metadata".to_string(),
+            ]
+        );
+    }
+
+    // --- SSE helpers -------------------------------------------------------------
+
+    #[test]
+    fn consume_asr_sse_jsonl_ignores_non_data_lines_and_done_marker() {
+        let input = b"event: keep-alive\n\
+                      data:   \n\
+                      data: [DONE]\n\
+                      data: {\"value\": 1}\n";
+        consume_asr_sse_jsonl(Cursor::new(&input[..]))
+            .expect("stream should be consumed successfully");
+    }
+
+    #[test]
+    fn consume_asr_sse_jsonl_reports_invalid_json() {
+        let input = b"data: not-json\n";
+        let err = consume_asr_sse_jsonl(Cursor::new(&input[..]))
+            .expect_err("invalid JSON should be reported as config error");
+        let message = err.to_string();
+        assert!(message.contains("invalid JSON"));
+        assert!(message.contains("data:"));
+    }
+
+    #[test]
+    fn sse_last_json_returns_last_valid_event() {
+        let stream = "data: {\"a\":1}\n\
+                      data: not-json\n\
+                      data: {\"b\":2}\n";
+        let value = sse_last_json(stream).expect("last JSON event");
+        assert_eq!(value["b"], 2);
+    }
+
+    // --- AsrTaskClient + JSON helpers -------------------------------------------
+
+    #[tokio::test]
+    async fn asr_task_client_get_json_parses_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{ "id": "t1" }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = make_test_client_with_base_url(mock_server.uri());
+        let value = client.get_json("/asr/tasks").expect("JSON should parse");
+        assert_eq!(value["tasks"][0]["id"], "t1");
+    }
+
+    #[tokio::test]
+    async fn asr_task_client_get_json_reports_invalid_json() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/asr/bad"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("not-json"))
+            .mount(&mock_server)
+            .await;
+
+        let client = make_test_client_with_base_url(mock_server.uri());
+        let err = client
+            .get_json("/asr/bad")
+            .expect_err("invalid JSON should be reported");
+        let message = err.to_string();
+        assert!(message.contains("returned invalid JSON"));
+        assert!(message.contains("body:"));
+    }
+
+    #[tokio::test]
+    async fn asr_task_client_get_json_reports_http_error_status() {
+        let mock_server = MockServer::start().await;
+
+        let long_body = "x".repeat(600);
+        Mock::given(method("GET"))
+            .and(path("/asr/fail"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(long_body.clone()))
+            .mount(&mock_server)
+            .await;
+
+        let client = make_test_client_with_base_url(mock_server.uri());
+        let err = client
+            .get_json("/asr/fail")
+            .expect_err("HTTP 500 should be reported as config error");
+        let message = err.to_string();
+        assert!(message.contains("failed with HTTP 500"));
+        // Body snippet is included but truncated by helper.
+        assert!(message.contains("x"));
+    }
+
+    #[tokio::test]
+    async fn asr_task_client_post_and_put_json_body_succeed() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "task-1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path("/asr/tasks/task-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = make_test_client_with_base_url(mock_server.uri());
+        let created = client
+            .post_json_body("/asr/tasks", &serde_json::json!({"name": "alpha"}))
+            .expect("create request should succeed");
+        assert_eq!(created["id"], "task-1");
+
+        let updated = client
+            .put_json_body("/asr/tasks/task-1", &serde_json::json!({"enabled": true}))
+            .expect("update request should succeed");
+        assert_eq!(updated["ok"], true);
+    }
+
+    #[tokio::test]
+    async fn asr_task_client_get_text_reads_plain_body() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/asr/plain"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hello text"))
+            .mount(&mock_server)
+            .await;
+
+        let client = make_test_client_with_base_url(mock_server.uri());
+        let body = client.get_text("/asr/plain").expect("plain text response");
+        assert_eq!(body, "hello text");
+    }
+
+    // --- Offline subtitle pipeline ----------------------------------------------
+
+    #[test]
+    fn subtitle_file_with_admin_pipeline_errors_when_audio_missing() {
+        let temp = TempDir::new().unwrap();
+        let audio = temp.path().join("missing.wav");
+        let out = temp.path().join("out");
+        let client = make_test_client_with_base_url("http://127.0.0.1:0".to_string());
+
+        let err = subtitle_file_with_admin_pipeline(
+            &client,
+            &audio,
+            "Qwen3-ASR-0.6B",
+            "chinese",
+            "profile",
+            false,
+            &["srt".to_string()],
+            &out,
+            false,
+        )
+        .expect_err("missing audio should be rejected");
+        assert!(err.to_string().contains("audio file does not exist"));
+    }
+
+    #[tokio::test]
+    async fn subtitle_file_with_admin_pipeline_happy_path_json() {
+        let temp = TempDir::new().unwrap();
+        let audio = create_temp_audio_file(&temp, "audio.wav");
+        let out = temp.path().join("subtitles");
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_with_base_url(mock_server.uri());
+
+        // 1) Create offline job
+        Mock::given(method("POST"))
+            .and(path("/asr/offline-jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-1"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // 2) Poll job status (immediately succeeded)
+        Mock::given(method("GET"))
+            .and(path("/asr/offline-jobs/job-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-1",
+                "status": "succeeded",
+                "pipeline_profile": "offline-speaker-subtitle-local"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // 3) Download artifacts
+        Mock::given(method("GET"))
+            .and(path("/asr/offline-jobs/job-1/artifacts/srt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("SUBTITLE"))
+            .mount(&mock_server)
+            .await;
+
+        subtitle_file_with_admin_pipeline(
+            &client,
+            &audio,
+            "Qwen3-ASR-0.6B",
+            "chinese",
+            "profile",
+            false,
+            &["srt".to_string()],
+            &out,
+            true,
+        )
+        .expect("subtitle pipeline should succeed");
+
+        let srt_path = out.join("audio.srt");
+        assert!(srt_path.is_file());
+        let contents = std::fs::read_to_string(srt_path).unwrap();
+        assert!(contents.contains("SUBTITLE"));
+    }
+
+    #[tokio::test]
+    async fn subtitle_file_with_admin_pipeline_reports_job_failure() {
+        let temp = TempDir::new().unwrap();
+        let audio = create_temp_audio_file(&temp, "audio.wav");
+        let out = temp.path().join("subtitles");
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_with_base_url(mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/asr/offline-jobs"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-err"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/asr/offline-jobs/job-err"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-err",
+                "status": "failed",
+                "error": "boom",
+                "pipeline_profile": "offline-speaker-subtitle-local"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let err = subtitle_file_with_admin_pipeline(
+            &client,
+            &audio,
+            "Qwen3-ASR-0.6B",
+            "chinese",
+            "profile",
+            false,
+            &["srt".to_string()],
+            &out,
+            false,
+        )
+        .expect_err("failed job should be reported as config error");
+        assert!(err
+            .to_string()
+            .contains("offline subtitle job job-err failed"));
+    }
+
+    // --- wait_for_offline_job & download_offline_job_artifacts ------------------
+
+    #[tokio::test]
+    async fn wait_for_offline_job_returns_succeeded_job() {
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_with_base_url(mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/asr/offline-jobs/job-2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "job_id": "job-2",
+                "status": "succeeded"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let job = wait_for_offline_job(&client, "job-2").expect("job should succeed");
+        assert_eq!(job["status"], "succeeded");
+    }
+
+    #[tokio::test]
+    async fn download_offline_job_artifacts_writes_expected_files() {
+        let temp = TempDir::new().unwrap();
+        let audio = create_temp_audio_file(&temp, "clip.wav");
+        let out = temp.path().join("artifacts");
+        std::fs::create_dir_all(&out).unwrap();
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_with_base_url(mock_server.uri());
+
+        Mock::given(method("GET"))
+            .and(path("/asr/offline-jobs/job-3/artifacts/srt"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("SRT"))
+            .mount(&mock_server)
+            .await;
+
+        let outputs =
+            download_offline_job_artifacts(&client, "job-3", &audio, &out, &["srt".to_string()])
+                .expect("artifact download");
+
+        assert_eq!(outputs.len(), 1);
+        let path = PathBuf::from(outputs[0]["path"].as_str().unwrap());
+        assert!(path.is_file());
+        assert!(std::fs::read_to_string(path).unwrap().contains("SRT"));
+    }
+
+    // --- stream_file_with_admin_speakers ----------------------------------------
+
+    #[test]
+    fn stream_file_with_admin_speakers_errors_when_audio_missing() {
+        let temp = TempDir::new().unwrap();
+        let audio = temp.path().join("missing.wav");
+        let client = make_test_client_with_base_url("http://127.0.0.1:0".to_string());
+
+        let err = stream_file_with_admin_speakers(&client, &audio, "model", "lang")
+            .expect_err("missing audio should be rejected");
+        assert!(err.to_string().contains("audio file does not exist"));
+    }
+
+    #[tokio::test]
+    async fn stream_file_with_admin_speakers_consumes_sse_stream() {
+        let temp = TempDir::new().unwrap();
+        let audio = create_temp_audio_file(&temp, "audio.wav");
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_with_base_url(mock_server.uri());
+
+        Mock::given(method("POST"))
+            .and(path("/asr/transcribe-stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "data: {\"text\":\"hello\"}\n\
+                 data: [DONE]\n",
+            ))
+            .mount(&mock_server)
+            .await;
+
+        stream_file_with_admin_speakers(&client, &audio, "model", "lang")
+            .expect("streaming SSE pipeline should succeed");
+    }
+
+    // --- create_task & handle_asr_task_command ----------------------------------
+
+    #[tokio::test]
+    async fn create_task_builds_expected_request_body_and_handles_json_output() {
+        let temp = TempDir::new().unwrap();
+        let dir = temp.path().join("audio");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "task-123",
+                "name": "meetings",
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let input = CreateTaskCliInput {
+            name: Some("meetings".to_string()),
+            dir,
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "chinese".to_string(),
+            runtime_strategy: "reuse_per_file".to_string(),
+            time: "02:00".to_string(),
+            disabled: false,
+            non_recursive: false,
+            no_speaker_diarization: false,
+            diarization_profile: "sherpa-onnx-balanced".to_string(),
+            known_speaker_count: None,
+            no_voiceprint_matching: false,
+            json: true,
+        };
+
+        create_task(&client, input).expect("create_task should succeed");
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_command_list_uses_json_or_pretty_output() {
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        let list_body = serde_json::json!({
+            "tasks": [{
+                "id": "t1",
+                "name": "Alpha",
+                "audio_dir": "/tmp/audio",
+                "enabled": true,
+                "paused": false,
+                "model": "Qwen3-ASR-0.6B",
+                "language": "chinese",
+                "runtime_strategy": {},
+                "diarization": {},
+                "schedule": {},
+                "summary": {"discovered": 1, "processed": 1, "pending": 0},
+                "files": [],
+                "daily_documents": [],
+            }]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&list_body))
+            .mount(&mock_server)
+            .await;
+
+        handle_asr_task_command(&client, AiAsrTaskCommands::List { json: true })
+            .expect("json list should succeed");
+
+        handle_asr_task_command(&client, AiAsrTaskCommands::List { json: false })
+            .expect("pretty list should succeed");
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_command_show_and_files_use_parsed_task() {
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        let detail_body = serde_json::json!({
+            "id": "t1",
+            "name": "Alpha",
+            "audio_dir": "/tmp/audio",
+            "enabled": true,
+            "paused": false,
+            "model": "Qwen3-ASR-0.6B",
+            "language": "chinese",
+            "runtime_strategy": {},
+            "diarization": {},
+            "schedule": {},
+            "summary": {"discovered": 5, "processed": 3, "pending": 2},
+            "files": [
+                {
+                    "key": "k1",
+                    "source_path": "/tmp/audio/a.wav",
+                    "status": "success",
+                    "media_duration_ms": 1_000u64,
+                    "text_chars": 10u64,
+                    "output_text_path": "/tmp/text.txt",
+                    "output_timeline_path": null,
+                    "source_size": 1024u64,
+                    "error": null,
+                    "diarization_status": "ok",
+                    "speaker_count": 1u64,
+                    "finished_at_ms": 1_i64,
+                }
+            ],
+            "daily_documents": [],
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/t1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&detail_body))
+            .mount(&mock_server)
+            .await;
+
+        handle_asr_task_command(
+            &client,
+            AiAsrTaskCommands::Show {
+                task_id: "t1".to_string(),
+                json: false,
+            },
+        )
+        .expect("show should succeed");
+
+        handle_asr_task_command(
+            &client,
+            AiAsrTaskCommands::Files {
+                task_id: "t1".to_string(),
+                status: None,
+                limit: 10,
+                json: false,
+            },
+        )
+        .expect("files should succeed");
+    }
+
+    #[tokio::test]
+    async fn run_task_respects_wait_and_json_flags() {
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        // POST /run
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/asr/tasks/task-9/run"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "message": "started"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // GET /tasks/task-9 used when wait=true
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/task-9"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "task-9",
+                "name": "run-test",
+                "audio_dir": "/tmp/audio",
+                "enabled": true,
+                "paused": false,
+                "model": "Qwen3-ASR-0.6B",
+                "language": "chinese",
+                "runtime_strategy": {},
+                "diarization": {},
+                "schedule": {},
+                "summary": {"discovered": 1, "processed": 1, "pending": 0, "running": false},
+                "files": [],
+                "daily_documents": [],
+            })))
+            .mount(&mock_server)
+            .await;
+
+        run_task(&client, "task-9", false, true).expect("json fire-and-forget should work");
+        run_task(&client, "task-9", true, false).expect("wait=true should poll once");
+    }
+
+    // --- diarization profile APIs -----------------------------------------------
+
+    #[tokio::test]
+    async fn handle_asr_diarization_command_profiles_status_and_init() {
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profiles": [
+                    {"id": "p1", "engine": "e", "quality_tier": "t", "ready": true}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profile": {"id": "p1", "engine": "e", "ready": true, "install_dir": "/asr"},
+                "voiceprint_dir": "/vp",
+                "speaker_profile_count": 1,
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/init-stream"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("data: {\"status\":{\"profile\":{\"id\":\"p1\"}}}\n"),
+            )
+            .mount(&mock_server)
+            .await;
+
+        handle_asr_diarization_command(&client, AiAsrDiarizationCommands::Profiles { json: false })
+            .expect("profiles should succeed");
+
+        handle_asr_diarization_command(
+            &client,
+            AiAsrDiarizationCommands::Status {
+                profile: "p1".to_string(),
+                json: false,
+            },
+        )
+        .expect("status should succeed");
+
+        handle_asr_diarization_command(
+            &client,
+            AiAsrDiarizationCommands::Init {
+                profile: "p1".to_string(),
+                json: true,
+            },
+        )
+        .expect("init should succeed");
+    }
+
+    #[tokio::test]
+    async fn handle_asr_diarization_speaker_enroll_live_uses_test_pcm() {
+        let temp = TempDir::new().unwrap();
+        let audio = create_temp_audio_file(&temp, "prompt.raw");
+
+        let mock_server = MockServer::start().await;
+        let client = make_test_client_from_mock(&mock_server).await;
+
+        // Create session with one prompt
+        Mock::given(method("POST"))
+            .and(path(
+                "/_bifrost/api/asr/speaker-profiles/enrollment-sessions",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "session": {
+                    "id": "session-1",
+                    "prompts": [{"id": "prompt-1", "text": "Say hello"}],
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        // Audio chunks
+        Mock::given(method("POST"))
+            .and(path(
+                "/_bifrost/api/asr/speaker-profiles/enrollment-sessions/session-1/audio",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        // Finish
+        Mock::given(method("POST"))
+            .and(path(
+                "/_bifrost/api/asr/speaker-profiles/enrollment-sessions/session-1/finish",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profile": {"id": "sp-1", "display_name": "Tester"}
+            })))
+            .mount(&mock_server)
+            .await;
+
+        enroll_speaker_live(
+            &client,
+            "Tester",
+            "sherpa-onnx-balanced",
+            1,
+            ":0",
+            Some(&audio),
+            false,
+        )
+        .expect("enrollment should succeed with test PCM16");
+    }
+
+    // --- CLI asset helpers (model files, tokenizer, etc.) -----------------------
+
+    fn create_model_files(home: &Path, model: &str, include_all: bool) {
+        let install = install_dir(home);
+        std::fs::create_dir_all(&install).unwrap();
+        let model_path = model_dir(home, model);
+        std::fs::create_dir_all(&model_path).unwrap();
+
+        std::fs::write(install.join("asr"), b"bin").unwrap();
+        std::fs::write(install.join("asr-server"), b"bin").unwrap();
+
+        for file in required_model_files(model) {
+            if include_all || *file != "model.safetensors" {
+                std::fs::write(model_path.join(file), b"x").unwrap();
+            }
+        }
+
+        std::fs::create_dir_all(install.join("tokenizers")).unwrap();
+        std::fs::write(
+            install.join("tokenizers").join("tokenizer-0.6B.json"),
+            b"{}",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn cli_assets_installed_checks_required_files() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let model = "Qwen3-ASR-0.6B";
+
+        assert!(!cli_assets_installed(home, model));
+
+        create_model_files(home, model, true);
+        // cli_assets_installed also requires tokenizer.json in the model dir
+        std::fs::write(model_dir(home, model).join("tokenizer.json"), b"{}").unwrap();
+        assert!(cli_assets_installed(home, model));
+    }
+
+    #[test]
+    fn prepare_cli_model_copies_tokenizer_into_model_dir() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let model = "Qwen3-ASR-0.6B";
+
+        create_model_files(home, model, true);
+
+        prepare_cli_model(home, model).expect("prepare_cli_model should succeed");
+
+        let tokenizer_path = model_dir(home, model).join("tokenizer.json");
+        assert!(tokenizer_path.is_file());
+    }
+
+    #[test]
+    fn prepare_cli_model_errors_when_model_files_missing() {
+        let temp = TempDir::new().unwrap();
+        let home = temp.path();
+        let model = "Qwen3-ASR-0.6B";
+
+        create_model_files(home, model, false);
+
+        let err = prepare_cli_model(home, model)
+            .expect_err("missing model.safetensors should be reported as config error");
+        assert!(err
+            .to_string()
+            .contains("missing ASR model file after download"));
+    }
+
+    #[test]
+    fn tokenizer_size_supports_known_models_and_rejects_unknown() {
+        assert_eq!(tokenizer_size("Qwen3-ASR-0.6B").unwrap(), "0.6B");
+        assert_eq!(tokenizer_size("Qwen3-ASR-1.7B").unwrap(), "1.7B");
+        let err = tokenizer_size("Other").expect_err("unknown model should error");
+        assert!(err.to_string().contains("unsupported ASR model"));
+    }
+
+    #[test]
+    fn required_model_files_returns_expected_sets() {
+        let small = required_model_files("Qwen3-ASR-0.6B");
+        assert_eq!(small, &["config.json", "model.safetensors"]);
+
+        let big = required_model_files("Qwen3-ASR-1.7B");
+        assert!(big.contains(&"model-00001-of-00002.safetensors"));
+        assert!(big.contains(&"model-00002-of-00002.safetensors"));
+
+        let default = required_model_files("unknown-model");
+        assert_eq!(default, &["config.json"]);
+    }
+
+    #[test]
+    fn detect_asr_release_asset_matches_supported_platform() {
+        let result = detect_asr_release_asset();
+        if std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64" {
+            assert!(result.is_ok());
+            assert_eq!(result.unwrap(), "asr-macos-aarch64");
+        } else {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn command_succeeds_handles_existing_and_missing_commands() {
+        assert!(command_succeeds("true", &[]));
+        assert!(!command_succeeds("definitely-not-a-command", &[]));
+    }
+
+    // --- Zip extraction & directory copy helpers --------------------------------
+
+    fn build_test_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let cursor = Cursor::new(Vec::new());
+        let mut zip = zip::ZipWriter::new(cursor);
+        let opts = SimpleFileOptions::default();
+        for (name, bytes) in entries {
+            zip.start_file(*name, opts).unwrap();
+            zip.write_all(bytes).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn extract_zip_to_dir_unpacks_entries() {
+        let temp = TempDir::new().unwrap();
+        let zip_path = temp.path().join("test.zip");
+        let dest = temp.path().join("out");
+
+        let bytes = build_test_zip(&[("dir/file.txt", b"hello"), ("root.bin", b"x")]);
+        std::fs::write(&zip_path, bytes).unwrap();
+
+        extract_zip_to_dir(&zip_path, &dest).expect("zip extraction should succeed");
+
+        assert!(dest.join("dir/file.txt").is_file());
+        assert!(dest.join("root.bin").is_file());
+    }
+
+    #[test]
+    fn copy_dir_contents_recursively_copies_tree() {
+        let temp = TempDir::new().unwrap();
+        let from = temp.path().join("from");
+        let to = temp.path().join("to");
+        std::fs::create_dir_all(from.join("sub")).unwrap();
+        std::fs::write(from.join("root.txt"), b"root").unwrap();
+        std::fs::write(from.join("sub/nested.txt"), b"nested").unwrap();
+        std::fs::create_dir_all(&to).unwrap();
+
+        copy_dir_contents(&from, &to).expect("copy_dir_contents should succeed");
+
+        assert!(to.join("root.txt").is_file());
+        assert!(to.join("sub/nested.txt").is_file());
+    }
+
+    #[test]
+    fn mark_cli_binaries_executable_sets_execute_bits_on_unix() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let temp = TempDir::new().unwrap();
+            let install = temp.path();
+            std::fs::create_dir_all(install).unwrap();
+            let asr = install.join("asr");
+            let asr_server = install.join("asr-server");
+            std::fs::write(&asr, b"bin").unwrap();
+            std::fs::write(&asr_server, b"bin").unwrap();
+
+            mark_cli_binaries_executable(install).expect("chmod should succeed");
+
+            let mode_asr = std::fs::metadata(&asr).unwrap().permissions().mode();
+            let mode_server = std::fs::metadata(&asr_server).unwrap().permissions().mode();
+            assert!(mode_asr & 0o111 != 0);
+            assert!(mode_server & 0o111 != 0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn mock_host_port(mock: &MockServer) -> (String, u16) {
+        let base_uri = mock.uri();
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().expect("mock server host").to_string();
+        let port: u16 = parts
+            .next()
+            .expect("mock server port")
+            .parse()
+            .expect("valid port number");
+        (host, port)
+    }
+
+    #[tokio::test]
+    async fn handle_asr_command_task_list_json_uses_admin_api_client() {
+        let mock_server = MockServer::start().await;
+        let list_body = serde_json::json!({
+            "tasks": [{
+                "id": "t1",
+                "name": "Alpha",
+                "audio_dir": "/tmp/audio",
+                "enabled": true,
+                "paused": false,
+                "model": "Qwen3-ASR-0.6B",
+                "language": "chinese",
+                "runtime_strategy": {},
+                "diarization": {},
+                "schedule": {},
+                "summary": {"discovered": 1, "processed": 1, "pending": 0},
+                "files": [],
+                "daily_documents": [],
+            }]
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&list_body))
+            .mount(&mock_server)
+            .await;
+
+        let (host, port) = mock_host_port(&mock_server).await;
+
+        handle_asr_command(
+            AiAsrCommands::Task {
+                action: AiAsrTaskCommands::List { json: true },
+            },
+            &host,
+            port,
+        )
+        .expect("task list should succeed via handle_asr_command");
+    }
+
+    #[tokio::test]
+    async fn handle_asr_command_diarization_profiles_json_uses_admin_api_client() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profiles": [
+                    {"id": "p1", "engine": "e", "quality_tier": "t", "ready": true}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let (host, port) = mock_host_port(&mock_server).await;
+
+        handle_asr_command(
+            AiAsrCommands::Diarization {
+                action: AiAsrDiarizationCommands::Profiles { json: true },
+            },
+            &host,
+            port,
+        )
+        .expect("profiles should succeed via handle_asr_command");
+    }
+
+    #[tokio::test]
+    async fn handle_ai_command_routes_asr_task_to_handle_asr_command() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let (host, port) = mock_host_port(&mock_server).await;
+
+        handle_ai_command(
+            AiCommands::Asr {
+                action: AiAsrCommands::Task {
+                    action: AiAsrTaskCommands::List { json: true },
+                },
+            },
+            &host,
+            port,
+        )
+        .expect("handle_ai_command should delegate to handle_asr_command for ASR tasks");
+    }
+}
