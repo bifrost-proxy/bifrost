@@ -69,6 +69,16 @@ bifrost_process_path() {
     fi
 }
 
+pid_is_running() {
+    local pid="$1"
+    if is_windows; then
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            "try { Get-Process -Id ${pid} -ErrorAction Stop | Out-Null; exit 0 } catch { exit 1 }" >/dev/null 2>&1
+    else
+        kill -0 "$pid" 2>/dev/null
+    fi
+}
+
 find_old_bifrost_bin() {
     if [[ -n "$OLD_BIFROST_BIN" && -x "$OLD_BIFROST_BIN" ]]; then
         echo "$OLD_BIFROST_BIN"
@@ -204,7 +214,7 @@ PY
     if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]]; then
         old_pid="$(sed -n 's/.*Daemon started with PID: \([0-9][0-9]*\).*/\1/p' /tmp/bifrost-upgrade-old-start.log | tail -n 1)"
     fi
-    if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$old_pid" 2>/dev/null; then
+    if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]] || ! pid_is_running "$old_pid"; then
         _log_fail "old daemon started" "running pid" "$(cat /tmp/bifrost-upgrade-old-start.log 2>/dev/null)"
         return 1
     fi
@@ -254,7 +264,7 @@ PY
         _log_fail "upgrade replaced daemon pid" "new PID different from $old_pid" "$new_pid"
         return 1
     fi
-    if ! kill -0 "$new_pid" 2>/dev/null; then
+    if ! pid_is_running "$new_pid"; then
         _log_fail "new daemon process alive" "PID $new_pid alive" "not running"
         return 1
     fi
