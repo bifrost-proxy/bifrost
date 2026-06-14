@@ -59,7 +59,7 @@ pub use admin_auth::{
     set_admin_password_hash, set_admin_username, set_remote_access_enabled, validate_admin_jwt,
     validate_password_strength, AdminJwtClaims, MAX_LOGIN_ATTEMPTS, MIN_PASSWORD_LENGTH,
 };
-pub use app_icon::{create_app_icon_cache, AppIconCache, SharedAppIconCache};
+pub use app_icon::{create_app_icon_cache, run_app_icon_worker, AppIconCache, SharedAppIconCache};
 pub use async_traffic::{
     start_async_traffic_processor, AsyncTrafficWriter, SharedAsyncTrafficWriter, TrafficCommand,
 };

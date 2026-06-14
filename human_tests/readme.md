@@ -154,6 +154,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [app-icon-memory-optimization.md](./app-icon-memory-optimization.md) | App Icon 内存优化 | 3 | macOS 多真实系统 App 图标请求后主进程 RSS 增量防护、非 App bundle 路径不触发 AppKit fallback、图标内存缓存按字节驱逐 |
 | [memory-sqlite-cache-optimization.md](./memory-sqlite-cache-optimization.md) | SQLite Cache Size 与内存优化 | 6 | SQLite cache_size 降低、读连接池缩减、metadata_cache LRU 化后的功能回归与内存验证 |
 | [long-term-memory.md](./long-term-memory.md) | Long-term Memory 长期记忆系统 | 11 | 文件记忆目录、`raw_memories.md`/`rollout_summaries` 追溯文件、无数据库 bounded Phase 2 consolidation、文件锁、原子写、按需加载说明注入、关闭召回、`/remember` 文件追加、不创建 SQLite、Admin 文件 API、WebUI 文件视图、导入导出、真实对话接口自动生成并跨独立 Session 消费，以及自动记忆与真实对话 shell E2E mock 均和当前 Phase 1/Phase 2 prompt 对齐回归 |
 

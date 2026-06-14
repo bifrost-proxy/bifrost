@@ -47,14 +47,39 @@ fi
 PROXY_PID=""
 HTML_PID=""
 
+terminate_pid() {
+  local pid="$1"
+  local label="$2"
+
+  if [[ -z "$pid" ]]; then
+    return 0
+  fi
+
+  if ! kill -0 "$pid" >/dev/null 2>&1; then
+    wait "$pid" >/dev/null 2>&1 || true
+    return 0
+  fi
+
+  kill "$pid" >/dev/null 2>&1 || true
+  for _ in $(seq 1 50); do
+    if ! kill -0 "$pid" >/dev/null 2>&1; then
+      wait "$pid" >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "[WARN] ${label} did not stop after SIGTERM; sending SIGKILL" >&2
+  kill -9 "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
 cleanup() {
   if [[ -n "${PROXY_PID}" ]]; then
-    kill "${PROXY_PID}" >/dev/null 2>&1 || true
-    wait "${PROXY_PID}" >/dev/null 2>&1 || true
+    terminate_pid "${PROXY_PID}" "bifrost proxy"
   fi
   if [[ -n "${HTML_PID}" ]]; then
-    kill "${HTML_PID}" >/dev/null 2>&1 || true
-    wait "${HTML_PID}" >/dev/null 2>&1 || true
+    terminate_pid "${HTML_PID}" "html server"
   fi
 }
 trap cleanup EXIT
@@ -160,8 +185,7 @@ start_proxy() {
 
 stop_proxy() {
   if [[ -n "${PROXY_PID}" ]]; then
-    kill "${PROXY_PID}" >/dev/null 2>&1 || true
-    wait "${PROXY_PID}" >/dev/null 2>&1 || true
+    terminate_pid "${PROXY_PID}" "bifrost proxy"
     PROXY_PID=""
   fi
 }

@@ -212,6 +212,9 @@ fn run_cli_main() {
         Some(Commands::AsrDiarizationWorker { request }) => {
             bifrost_admin::run_asr_diarization_worker_stdio(&request).map_err(BifrostError::Config)
         }
+        Some(Commands::AppIconWorker { path, output }) => {
+            bifrost_admin::run_app_icon_worker(&path, &output).map_err(BifrostError::Config)
+        }
         Some(Commands::Start {
             port,
             host,
