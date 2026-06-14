@@ -301,15 +301,22 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
-    #[command(about = "Write a file atomically. Content is read from --content-file or stdin.")]
+    #[command(
+        about = "Write a file atomically. Content comes from --content, --content-file, --content-b64, or stdin."
+    )]
     Write {
         #[arg(help = "Target path (absolute, or relative to --cwd)")]
         path: String,
+        #[arg(
+            long,
+            help = "Inline UTF-8 content to write (simplest option for short text)"
+        )]
+        content: Option<String>,
         #[arg(long, value_hint = ValueHint::FilePath, help = "Read content from a local file (or '-' for stdin)")]
         content_file: Option<String>,
         #[arg(
             long = "content-b64",
-            help = "Provide content as a base64-encoded string (overrides --content-file)"
+            help = "Provide content as a base64-encoded string (overrides --content/--content-file)"
         )]
         content_b64: Option<String>,
         #[arg(long, help = "Expected current sha256 for optimistic locking")]

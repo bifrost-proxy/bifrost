@@ -155,10 +155,31 @@ fn validate_streaming_prefs(prefs: &StreamingPrefs) -> Result<(), String> {
     }
 }
 
+/// Identifies which `file.*` operation produced a result, so the renderer can
+/// turn the server's JSON response into human-friendly output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RemoteFileOp {
+    Read,
+    List,
+    Stat,
+    Glob,
+    Find,
+    Hash,
+    Write,
+    Edit,
+    Mkdir,
+    Move,
+    Delete,
+    Patch,
+}
+
 #[derive(Debug, Clone)]
 enum RemoteRenderMode {
     Raw,
-    File,
+    File {
+        op: RemoteFileOp,
+        json: bool,
+    },
     Search {
         format: OutputFormat,
         no_color: bool,
@@ -2444,7 +2465,7 @@ fn build_remote_file_command(
     action: &RemoteFileCommands,
 ) -> bifrost_core::Result<BuiltRemoteCommand> {
     use serde_json::json;
-    let (file_op, label, args_value, _output) = match action {
+    let (file_op, label, args_value, output) = match action {
         RemoteFileCommands::Read {
             path,
             max_bytes,
@@ -2554,6 +2575,7 @@ fn build_remote_file_command(
         ),
         RemoteFileCommands::Write {
             path,
+            content: cli_content,
             content_file,
             content_b64: cli_content_b64,
             base_sha256,
@@ -2564,6 +2586,8 @@ fn build_remote_file_command(
         } => {
             let content_b64 = if let Some(b64) = cli_content_b64.as_deref() {
                 b64.to_string()
+            } else if let Some(text) = cli_content.as_deref() {
+                base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
             } else {
                 match content_file.as_deref() {
                     Some("-") | None => {
@@ -2606,8 +2630,20 @@ fn build_remote_file_command(
             cwd,
             output,
         } => {
-            let edits_val: serde_json::Value =
-                serde_json::from_str(edits).unwrap_or(serde_json::Value::Null);
+            let edits_val: serde_json::Value = serde_json::from_str(edits).map_err(|e| {
+                BifrostError::Config(format!(
+                    "invalid --edits JSON: {e}. Expected a JSON array like \
+                     '[{{\"start_line\":10,\"end_line\":12,\"replacement\":\"new text\\n\"}}]' \
+                     (1-based inclusive line numbers)."
+                ))
+            })?;
+            if !edits_val.is_array() {
+                return Err(BifrostError::Config(
+                    "invalid --edits: expected a JSON array of \
+                     {start_line,end_line,replacement} objects."
+                        .to_string(),
+                ));
+            }
             (
                 "file.edit",
                 format!("file.edit {}", path),
@@ -2701,6 +2737,22 @@ fn build_remote_file_command(
         }
     };
 
+    let render_op = match action {
+        RemoteFileCommands::Read { .. } => RemoteFileOp::Read,
+        RemoteFileCommands::List { .. } => RemoteFileOp::List,
+        RemoteFileCommands::Stat { .. } => RemoteFileOp::Stat,
+        RemoteFileCommands::Glob { .. } => RemoteFileOp::Glob,
+        RemoteFileCommands::Find { .. } => RemoteFileOp::Find,
+        RemoteFileCommands::Hash { .. } => RemoteFileOp::Hash,
+        RemoteFileCommands::Write { .. } => RemoteFileOp::Write,
+        RemoteFileCommands::Edit { .. } => RemoteFileOp::Edit,
+        RemoteFileCommands::Mkdir { .. } => RemoteFileOp::Mkdir,
+        RemoteFileCommands::Move { .. } => RemoteFileOp::Move,
+        RemoteFileCommands::Delete { .. } => RemoteFileOp::Delete,
+        RemoteFileCommands::Patch { .. } => RemoteFileOp::Patch,
+    };
+    let render_json = output.eq_ignore_ascii_case("json");
+
     Ok(BuiltRemoteCommand {
         kind: CommandKind::File,
         label,
@@ -2708,7 +2760,10 @@ fn build_remote_file_command(
         args_json: Some(args_value.to_string()),
         query: None,
         shell_exec: None,
-        render: RemoteRenderMode::File,
+        render: RemoteRenderMode::File {
+            op: render_op,
+            json: render_json,
+        },
         streaming_prefs: None,
     })
 }
@@ -3439,10 +3494,20 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
     if let Some(ref stdout) = result.stdout {
         if !stdout.is_empty() {
             match &command.render {
-                RemoteRenderMode::Raw | RemoteRenderMode::File => {
+                RemoteRenderMode::Raw => {
                     print!("{stdout}");
                     if !stdout.ends_with('\n') {
                         println!();
+                    }
+                }
+                RemoteRenderMode::File { op, json } => {
+                    if *json {
+                        print!("{stdout}");
+                        if !stdout.ends_with('\n') {
+                            println!();
+                        }
+                    } else {
+                        render_remote_file_human(*op, stdout);
                     }
                 }
                 RemoteRenderMode::Search { .. } => {}
@@ -3474,6 +3539,13 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
             if !stderr.ends_with('\n') {
                 eprintln!();
             }
+            // For file ops, surface an actionable remediation hint based on the
+            // structured `[file.xxx]` error code the server embeds in stderr.
+            if matches!(command.render, RemoteRenderMode::File { .. }) {
+                if let Some(hint) = remote_file_error_hint(stderr) {
+                    eprintln!("  {} {}", "→".bright_yellow(), hint.bright_yellow());
+                }
+            }
         }
     }
 
@@ -3500,6 +3572,314 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
             )
             .bright_red()
         );
+    }
+}
+
+/// Map a structured `[file.xxx]` error code (embedded by the server in stderr)
+/// to a one-line, actionable remediation hint for coding agents.
+fn remote_file_error_hint(stderr: &str) -> Option<&'static str> {
+    let code = stderr
+        .split_once('[')
+        .and_then(|(_, rest)| rest.split_once(']'))
+        .map(|(code, _)| code.trim())?;
+    let hint = match code {
+        "file.out_of_scope" => {
+            "Path is outside the granted roots. Ask the target to add it to FileAccessPolicy \
+             (~/.bifrost/file-access.toml); do not change --cwd to work around it."
+        }
+        "file.permission_denied" => {
+            "Denied by policy. If it hit `denies` (e.g. .ssh, target/), the owner excluded it; \
+             if write scope is missing, ask the target to re-authorize with read-write File Access."
+        }
+        "file.binary_not_allowed" => {
+            "File looks binary. Re-run `read` with --allow-binary, or use `file hash` + chunked reads."
+        }
+        "file.sha_mismatch" => {
+            "Optimistic-lock failed: the file changed since you read it. Re-run `read`, take the \
+             fresh sha256/file_sha256, and retry with --base-sha256."
+        }
+        "file.not_found" => {
+            "Path does not exist. Use `file write --create-parents` or `file mkdir --parents` first."
+        }
+        "file.is_a_directory" => "Target is a directory; switch to `file list`/`file delete --recursive`.",
+        "file.not_a_directory" => "A path component is a file, not a directory; check the path.",
+        "file.invalid_args" => {
+            "Invalid arguments. For `edit`, line numbers are 1-based inclusive and must be within \
+             the file; re-`read` to get current line numbers."
+        }
+        "file.invalid_regex" => "The search regex is invalid; check the pattern syntax.",
+        "file.invalid_glob" => "The glob pattern is invalid; e.g. use '*.rs' or 'src/**/*.ts'.",
+        "file.precondition_failed" => {
+            "Patch context did not match the current file. Re-`read` the target and regenerate \
+             the unified diff against the latest content."
+        }
+        _ => return None,
+    };
+    Some(hint)
+}
+
+/// Render a `file.*` JSON response into compact, human-friendly text for
+/// terminals and coding agents. Falls back to printing the raw JSON if the
+/// payload cannot be parsed, so no information is ever lost.
+fn render_remote_file_human(op: RemoteFileOp, stdout: &str) {
+    let trimmed = stdout.trim();
+    let value: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(_) => {
+            print!("{stdout}");
+            if !stdout.ends_with('\n') {
+                println!();
+            }
+            return;
+        }
+    };
+
+    match op {
+        RemoteFileOp::Read => render_file_read_human(&value),
+        RemoteFileOp::List => render_file_list_human(&value),
+        RemoteFileOp::Stat => render_file_stat_human(&value),
+        RemoteFileOp::Glob => render_file_glob_human(&value),
+        RemoteFileOp::Find => render_file_find_human(&value),
+        RemoteFileOp::Hash => render_file_hash_human(&value),
+        RemoteFileOp::Write | RemoteFileOp::Edit => render_file_write_human(op, &value),
+        RemoteFileOp::Mkdir => render_file_mkdir_human(&value),
+        RemoteFileOp::Move => render_file_move_human(&value),
+        RemoteFileOp::Delete => render_file_delete_human(&value),
+        RemoteFileOp::Patch => render_file_patch_human(&value),
+    }
+}
+
+fn truncation_notice(op: RemoteFileOp) -> &'static str {
+    match op {
+        RemoteFileOp::Read => {
+            "output truncated — fetch more with --offset/--limit or raise --max-bytes"
+        }
+        RemoteFileOp::List => "listing truncated — narrow the path or reduce --depth",
+        RemoteFileOp::Glob => "results truncated — tighten the pattern or raise --max-matches",
+        RemoteFileOp::Find => {
+            "results truncated — tighten the regex/--glob/--path or raise --max-matches"
+        }
+        _ => "result truncated",
+    }
+}
+
+fn print_truncation_hint(op: RemoteFileOp, value: &Value) {
+    if value.get("truncated").and_then(Value::as_bool) == Some(true) {
+        eprintln!(
+            "  {} {}",
+            "⚠".bright_yellow(),
+            truncation_notice(op).bright_yellow()
+        );
+    }
+}
+
+fn render_file_read_human(value: &Value) {
+    let decoded = value
+        .get("content_b64")
+        .and_then(Value::as_str)
+        .and_then(|b64| base64::engine::general_purpose::STANDARD.decode(b64).ok());
+
+    match decoded {
+        Some(bytes) => match String::from_utf8(bytes) {
+            Ok(text) => {
+                // Print content verbatim so it round-trips and pipes cleanly.
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+            }
+            Err(e) => {
+                let len = e.as_bytes().len();
+                eprintln!(
+                    "{}",
+                    format!(
+                        "[binary content, {len} bytes — use --output json + decode content_b64, \
+                         or `file hash`]"
+                    )
+                    .dimmed()
+                );
+            }
+        },
+        None => {
+            print!("{value}");
+            println!();
+            return;
+        }
+    }
+
+    // Footer with sha256 (for optimistic-lock edits) and size, on stderr so it
+    // does not pollute piped file content on stdout.
+    let sha = value
+        .get("file_sha256")
+        .and_then(Value::as_str)
+        .or_else(|| value.get("sha256").and_then(Value::as_str));
+    let total_lines = value.get("total_lines").and_then(Value::as_u64);
+    let total_size = value.get("total_size").and_then(Value::as_u64);
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(n) = total_lines {
+        parts.push(format!("{n} lines"));
+    }
+    if let Some(n) = total_size {
+        parts.push(format!("{n} bytes"));
+    }
+    if let Some(s) = sha {
+        parts.push(format!("sha256={s}"));
+    }
+    if !parts.is_empty() {
+        eprintln!("{}", format!("— {}", parts.join("  ")).dimmed());
+    }
+    print_truncation_hint(RemoteFileOp::Read, value);
+}
+
+fn render_file_list_human(value: &Value) {
+    if let Some(entries) = value.get("entries").and_then(Value::as_array) {
+        for e in entries {
+            let kind = e.get("type").and_then(Value::as_str).unwrap_or("?");
+            let path = e
+                .get("path")
+                .and_then(Value::as_str)
+                .or_else(|| e.get("name").and_then(Value::as_str))
+                .unwrap_or("");
+            let marker = match kind {
+                "dir" => "/",
+                "symlink" => "@",
+                _ => "",
+            };
+            if let Some(tgt) = e.get("symlink_target").and_then(Value::as_str) {
+                println!("{path}{marker} -> {tgt}");
+            } else {
+                println!("{path}{marker}");
+            }
+        }
+        eprintln!("{}", format!("— {} entries", entries.len()).dimmed());
+    } else {
+        print!("{value}");
+        println!();
+    }
+    print_truncation_hint(RemoteFileOp::List, value);
+}
+
+fn render_file_stat_human(value: &Value) {
+    let kind = value.get("kind").and_then(Value::as_str).unwrap_or("?");
+    let size = value.get("size").and_then(Value::as_u64).unwrap_or(0);
+    println!("type: {kind}");
+    println!("size: {size} bytes");
+    if let Some(mode) = value.get("mode").and_then(Value::as_u64) {
+        println!("mode: {:o}", mode);
+    }
+    if let Some(mtime) = value.get("mtime_unix").and_then(Value::as_u64) {
+        println!("mtime_unix: {mtime}");
+    }
+    if let Some(tgt) = value.get("symlink_target").and_then(Value::as_str) {
+        println!("symlink_target: {tgt}");
+    }
+    if let Some(sha) = value.get("sha256").and_then(Value::as_str) {
+        println!("sha256: {sha}");
+    }
+}
+
+fn render_file_glob_human(value: &Value) {
+    if let Some(matches) = value.get("matches").and_then(Value::as_array) {
+        for m in matches {
+            if let Some(p) = m.as_str() {
+                println!("{p}");
+            }
+        }
+        eprintln!("{}", format!("— {} matches", matches.len()).dimmed());
+    } else {
+        print!("{value}");
+        println!();
+    }
+    print_truncation_hint(RemoteFileOp::Glob, value);
+}
+
+fn render_file_find_human(value: &Value) {
+    if let Some(matches) = value.get("matches").and_then(Value::as_array) {
+        for m in matches {
+            let path = m.get("path").and_then(Value::as_str).unwrap_or("");
+            let line = m.get("line").and_then(Value::as_u64).unwrap_or(0);
+            let col = m.get("column").and_then(Value::as_u64).unwrap_or(0);
+            let preview = m.get("preview").and_then(Value::as_str).unwrap_or("");
+            println!("{path}:{line}:{col}: {preview}");
+            if let Some(ctx) = m.get("context").and_then(Value::as_array) {
+                for c in ctx {
+                    let cl = c.get("line").and_then(Value::as_u64).unwrap_or(0);
+                    let content = c.get("content").and_then(Value::as_str).unwrap_or("");
+                    println!("  {cl}| {content}");
+                }
+            }
+        }
+        eprintln!("{}", format!("— {} matches", matches.len()).dimmed());
+    } else {
+        print!("{value}");
+        println!();
+    }
+    print_truncation_hint(RemoteFileOp::Find, value);
+}
+
+fn render_file_hash_human(value: &Value) {
+    let algo = value
+        .get("algo")
+        .and_then(Value::as_str)
+        .unwrap_or("sha256");
+    let hex = value.get("hex").and_then(Value::as_str).unwrap_or("");
+    println!("{algo}: {hex}");
+    if let Some(size) = value.get("size").and_then(Value::as_u64) {
+        eprintln!("{}", format!("— {size} bytes").dimmed());
+    }
+}
+
+fn render_file_write_human(op: RemoteFileOp, value: &Value) {
+    let verb = if op == RemoteFileOp::Edit {
+        "Edited"
+    } else {
+        "Wrote"
+    };
+    let path = value.get("path").and_then(Value::as_str).unwrap_or("");
+    let bytes = value
+        .get("bytes_written")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    println!("{} {} ({} bytes)", verb.green(), path, bytes);
+    if let Some(n) = value.get("applied_edits").and_then(Value::as_u64) {
+        println!("  {n} edit(s) applied");
+    }
+    if let Some(sha) = value.get("sha256").and_then(Value::as_str) {
+        eprintln!("{}", format!("— sha256={sha}").dimmed());
+    }
+}
+
+fn render_file_mkdir_human(value: &Value) {
+    let path = value.get("path").and_then(Value::as_str).unwrap_or("");
+    println!("{} {}", "Created".green(), path);
+}
+
+fn render_file_move_human(value: &Value) {
+    let from = value.get("from").and_then(Value::as_str).unwrap_or("");
+    let to = value.get("to").and_then(Value::as_str).unwrap_or("");
+    println!("{} {} -> {}", "Moved".green(), from, to);
+}
+
+fn render_file_delete_human(value: &Value) {
+    let path = value.get("path").and_then(Value::as_str).unwrap_or("");
+    println!("{} {}", "Deleted".green(), path);
+}
+
+fn render_file_patch_human(value: &Value) {
+    if let Some(files) = value.get("files").and_then(Value::as_array) {
+        for f in files {
+            let path = f.get("path").and_then(Value::as_str).unwrap_or("");
+            if f.get("deleted").and_then(Value::as_bool) == Some(true) {
+                println!("{} {}", "deleted".red(), path);
+            } else {
+                let bytes = f.get("bytes_written").and_then(Value::as_u64).unwrap_or(0);
+                println!("{} {} ({} bytes)", "patched".green(), path, bytes);
+            }
+        }
+        eprintln!("{}", format!("— {} file(s)", files.len()).dimmed());
+    } else {
+        print!("{value}");
+        println!();
     }
 }
 
