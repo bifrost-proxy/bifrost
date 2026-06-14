@@ -1037,6 +1037,7 @@ Linux 用例：
 实现完成必须满足：
 
 - Windows/macOS CLI start 能自动拉起原生托盘 helper。
+- Windows 托盘 helper 在 Stop 主服务后，`Start Bifrost` 必须通过 detached daemon 路径重新启动主服务；不能从 tray helper 直接拉起需要长期依附前台子进程的服务控制路径。
 - Linux 不暴露、不启动、不打包。
 - 没有引入 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时。
 - helper 缺失或失败不影响主服务。

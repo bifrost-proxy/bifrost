@@ -563,6 +563,39 @@ Get-Content "$env:BIFROST_DATA_DIR\logs\tray.log*" -Tail 80
 - Windows notification area 显示 Bifrost 图标
 - 如果只有 `tray.lock` 或 `tray.log*`，但没有 `tray.pid` / live helper / notification area 图标，判定为托盘启动回归
 
+### TC-TH-25: Windows 托盘 Stop 后可从同一托盘重新 Start（回归）
+
+**操作步骤：**
+1. 在 Windows 11 交互用户 session 中准备当前版本 `bifrost.exe`
+2. 使用临时数据目录启动服务并等待 notification area 出现 Bifrost 托盘图标：
+
+```powershell
+$env:BIFROST_DATA_DIR="$env:TEMP\bifrost-tray-win-stop-start"
+$env:BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1"
+bifrost.exe start -p 18896 --unsafe-ssl --skip-cert-check --no-system-proxy
+```
+
+3. 点击托盘菜单中的 `Stop Bifrost`
+4. 等待菜单状态变为 `Bifrost: Stopped` 或 `Bifrost: Disconnected`
+5. 不退出托盘 helper，继续点击同一托盘菜单中的 `Start Bifrost`
+6. 等待最多 10 秒后检查：
+
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18896/_bifrost/api/proxy/address
+Get-Content "$env:BIFROST_DATA_DIR\runtime.json"
+Get-Content "$env:BIFROST_DATA_DIR\tray.pid"
+Get-Process bifrost | Select-Object Id,Path,CommandLine
+Get-Content "$env:BIFROST_DATA_DIR\logs\tray.log*" -Tail 120
+```
+
+**预期结果：**
+- Stop 后主服务进程退出，托盘 helper 在空转超时窗口内保持存在并显示 stopped/disconnected 状态
+- 点击 `Start Bifrost` 后菜单先显示 `Bifrost: Starting...`，且 `Start Bifrost` 暂时置灰
+- 托盘触发的 Start 使用 detached daemon 启动主服务，不依赖 tray helper 的前台子进程生命周期
+- `runtime.json` 重新生成并指向活的主服务 PID，`runtime_start_mode` 为 `daemon`
+- Admin API 重新 ready，托盘菜单恢复 `Bifrost: Running on 127.0.0.1:18896`
+- `tray.pid` 仍指向同一个存活的 `bifrost.exe __tray` helper；不会创建第二个托盘 helper，也不会因为只有 foreground child 退出而显示 `Start failed`
+
 ### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
 
 **操作步骤：**
@@ -618,6 +651,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-11 | TC-TH-23 | 针对 tray helper 内存优化做代码级归因与收尾：检查 `main.rs` 早返回入口、`Cargo.toml` 主 CLI 依赖、tray 模块 import、`tray_launcher.rs` 配置读取依赖，以及 `arboard`/`open`/`image`/`tao`/`tray-icon`/`muda`/`bifrost-core` 的依赖树；同时清理不采用的独立 helper 与手写平台 open/clipboard 方案。 | 本地执行 `rg -n "run_if_tray|install_panic_hook|init_crypto_provider|Cli::parse|init_logging" crates/bifrost-cli/src/main.rs`，确认 `run_if_tray_process` 在主初始化前；执行 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i arboard` 与 `cargo tree -p bifrost-cli --target aarch64-apple-darwin -i open`，确认继续复用跨平台 `arboard`/`open`；执行残留扫描 `rg -n "bifrost-tray-helper|find_sibling_tray_helper|tray_helper_binary|/usr/bin/pbcopy|fn copy_text_to_clipboard|fn open_location"` 无命中；已在 `design/cli-tray-helper.md` 记录独立 helper、替换 `open`/`arboard` 和原生 AppKit/Win32 的实测结论与不采用原因 |
 | 2026-06-12 | TC-TH-21 | 跟进 GitHub Actions run `27407031037` 的 `E2E Runner (aarch64-pc-windows-msvc)`，定位 `test_cli_tray_startup_ci.sh` 在 Windows tray helper 快速创建又清理 `tray.pid` 时，`[[ -s tray.pid ]]` 后的 `cat tray.pid | tr ...` 触发 `set -e -o pipefail` 直接退出。 | 待复验；脚本改为通过 `read_tray_pid_file` 容忍 PID 文件读取竞态，Windows 仍可用 tray log startup marker 做 log-only fallback |
 | 2026-06-14 | TC-TH-21 / TC-TH-24 | Parallels Windows 11 真实现状排查：`bifrost --version` 为 `0.0.100`，`config.toml` 中 `[tray] enabled = true`；前台 `bifrost.exe start` 进程存活且 `runtime_start_mode` 为 `foreground`，但数据目录只有 `tray.lock`、没有 `tray.pid`，系统中没有 `bifrost.exe __tray` helper。日志多次出现主进程 `tray helper launched` 与 helper `bifrost-tray starting data_dir=... parent_pid=...`，随后 helper 退出。代码路径确认 Windows `main()` 原先把 `run_if_tray_process()` 放在 `bifrost-cli-main` worker 线程里，导致原生 tray event loop 没有在进程主线程运行。 | 已修复代码入口：Windows `main()` 最早阶段先执行 `commands::tray::run_if_tray_process()`，普通 CLI 再进入大栈 worker；同时收紧 `test_cli_tray_startup_ci.sh`，默认不再允许 Windows log-only fallback。固定后 Windows VM 本地编译验证暂阻塞：该 VM 缺少 MSVC linker，`cargo build --bin bifrost` 报 `linker lld-link not found` / `link.exe was not found`，需要安装 Visual Studio Build Tools 或由 Windows CI 验证。 |
+| 2026-06-14 | TC-TH-25 | 用户在 Windows 11 上真实复现：托盘图标已经出现，但从托盘菜单 Stop 主服务后，再从同一托盘点击 Start 无法成功启动。代码路径确认托盘 `StartService` 原先执行 `bifrost start --no-tray --no-system-proxy` 前台启动，并由 tray helper 线程等待子进程；在 Windows tray helper 发起的服务控制路径中，前台子进程生命周期和 helper 会话绑定过紧，容易在 Stop 后 Start 被判失败或无法维持服务。 | 已修复为托盘 Start 使用 `bifrost start --daemon --no-tray --no-system-proxy`，并允许 daemon parent 成功退出后继续等待 `runtime.json` 指向活主服务；本地执行 `cargo test -p bifrost-cli commands::tray::tray::tests::test_tray_start_service_uses_detached_daemon -- --nocapture` 通过。 |
 
 ## 清理步骤
 

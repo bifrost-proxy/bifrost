@@ -154,6 +154,30 @@
     }
 
     #[test]
+    fn test_tray_start_service_uses_detached_daemon() {
+        let extra = vec![
+            "--unsafe-ssl".to_string(),
+            "--skip-cert-check".to_string(),
+        ];
+
+        let args = build_service_start_args(Some(18897), &extra);
+
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "--daemon",
+                "--no-tray",
+                "--no-system-proxy",
+                "-p",
+                "18897",
+                "--unsafe-ssl",
+                "--skip-cert-check",
+            ]
+        );
+    }
+
+    #[test]
     fn test_recent_tray_interaction_defers_structural_replacement() {
         assert!(!should_replace_native_menu(false, false, true));
         assert!(should_replace_native_menu(false, false, false));

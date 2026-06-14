@@ -1546,15 +1546,7 @@ fn spawn_start(
     let mut cmd = Command::new(bin);
     cmd.env("BIFROST_DATA_DIR", data_dir)
         .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
-        .arg("start")
-        .arg("--no-tray")
-        .arg("--no-system-proxy");
-    if let Some(p) = port {
-        cmd.arg("-p").arg(p.to_string());
-    }
-    for a in extra_args {
-        cmd.arg(a);
-    }
+        .args(build_service_start_args(port, extra_args));
     configure_service_command(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
@@ -1568,6 +1560,21 @@ fn spawn_start(
     }
 }
 
+fn build_service_start_args(port: Option<u16>, extra_args: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "start".to_string(),
+        "--daemon".to_string(),
+        "--no-tray".to_string(),
+        "--no-system-proxy".to_string(),
+    ];
+    if let Some(p) = port {
+        args.push("-p".to_string());
+        args.push(p.to_string());
+    }
+    args.extend(extra_args.iter().cloned());
+    args
+}
+
 fn monitor_start_child(
     mut child: Child,
     runtime_file: PathBuf,
@@ -1577,25 +1584,35 @@ fn monitor_start_child(
 ) {
     let start = std::time::Instant::now();
     let mut ready = false;
+    let mut child_exited = false;
     while start.elapsed() < START_READY_TIMEOUT {
         if runtime_file_points_to_running_service(&runtime_file) {
             ready = true;
             break;
         }
 
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                tracing::error!(status = %status, "bifrost start exited before service became ready");
-                operation.store(failure_operation, Ordering::Relaxed);
-                reload_flag.store(true, Ordering::Relaxed);
-                return;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(error = %error, "failed to poll bifrost start child");
-                operation.store(failure_operation, Ordering::Relaxed);
-                reload_flag.store(true, Ordering::Relaxed);
-                return;
+        if !child_exited {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    child_exited = true;
+                    tracing::info!(
+                        status = %status,
+                        "bifrost start command exited successfully; waiting for service readiness"
+                    );
+                }
+                Ok(Some(status)) => {
+                    tracing::error!(status = %status, "bifrost start exited before service became ready");
+                    operation.store(failure_operation, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to poll bifrost start child");
+                    operation.store(failure_operation, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                    return;
+                }
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -1610,8 +1627,10 @@ fn monitor_start_child(
         reload_flag.store(true, Ordering::Relaxed);
     }
 
-    if let Err(error) = child.wait() {
-        tracing::warn!(error = %error, "failed to reap bifrost start child");
+    if !child_exited {
+        if let Err(error) = child.wait() {
+            tracing::warn!(error = %error, "failed to reap bifrost start child");
+        }
     }
     reload_flag.store(true, Ordering::Relaxed);
 }
