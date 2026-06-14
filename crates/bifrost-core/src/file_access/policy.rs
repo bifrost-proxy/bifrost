@@ -22,6 +22,7 @@ use crate::file_access::{
 pub enum FileOp {
     // --- Phase 1 (read) ---
     Read,
+    ReadMany,
     List,
     Stat,
     Glob,
@@ -41,6 +42,7 @@ impl FileOp {
     pub fn as_str(self) -> &'static str {
         match self {
             FileOp::Read => "read",
+            FileOp::ReadMany => "read_many",
             FileOp::List => "list",
             FileOp::Stat => "stat",
             FileOp::Glob => "glob",
