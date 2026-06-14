@@ -399,11 +399,21 @@ fn prompt_confirm(message: &str) -> bool {
 }
 
 fn resolve_target_dirs(tool: &AiTool, custom_dir: &Option<PathBuf>, cwd: bool) -> Vec<PathBuf> {
+    let cwd_base = || std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    resolve_target_dirs_with_base(tool, custom_dir, cwd, cwd_base)
+}
+
+fn resolve_target_dirs_with_base(
+    tool: &AiTool,
+    custom_dir: &Option<PathBuf>,
+    cwd: bool,
+    cwd_base: impl FnOnce() -> PathBuf,
+) -> Vec<PathBuf> {
     if let Some(d) = custom_dir {
         return vec![d.clone()];
     }
     if cwd {
-        let base = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let base = cwd_base();
         return tool.project_local_dirs(&base);
     }
     tool.default_global_dirs()
@@ -626,4 +636,107 @@ pub fn handle_install_skill(
     println!();
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use tempfile::TempDir;
+
+    #[test]
+    fn parse_tool_parses_known_values_and_all() {
+        let all = parse_tool("all").unwrap();
+        assert!(all.contains(&AiTool::ClaudeCode));
+        assert!(all.contains(&AiTool::GitHubCopilot));
+
+        assert_eq!(parse_tool("claude-code").unwrap(), vec![AiTool::ClaudeCode]);
+        assert_eq!(parse_tool("Claude Code").unwrap(), vec![AiTool::ClaudeCode]);
+        assert_eq!(parse_tool("copilot").unwrap(), vec![AiTool::GitHubCopilot]);
+        assert!(parse_tool("unknown-tool").is_err());
+    }
+
+    #[test]
+    fn resolve_target_dirs_prefers_custom_dir() {
+        let custom = PathBuf::from("/tmp/custom-dir");
+        let dirs = resolve_target_dirs(&AiTool::ClaudeCode, &Some(custom.clone()), false);
+        assert_eq!(dirs, vec![custom]);
+    }
+
+    #[test]
+    fn resolve_target_dirs_uses_cwd_project_dirs() {
+        let temp_dir = TempDir::new().unwrap();
+        let dirs =
+            resolve_target_dirs_with_base(&AiTool::Codex, &None, true, || temp_dir.path().into());
+        let expected = AiTool::Codex.project_local_dirs(temp_dir.path());
+        assert_eq!(dirs, expected);
+    }
+
+    #[test]
+    fn skill_target_dir_for_primary_and_remote_sources() {
+        let base = PathBuf::from("/home/user/.claude/skills/bifrost");
+        let primary = skill_target_dir(&base, SKILL_SOURCES[0]);
+        assert_eq!(primary, base);
+
+        let expected_remote = base
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(SKILL_SOURCES[1].dir_name);
+        let remote = skill_target_dir(&base, SKILL_SOURCES[1]);
+        assert_eq!(remote, expected_remote);
+    }
+
+    #[test]
+    fn install_to_dir_writes_skill_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let tool = AiTool::ClaudeCode;
+        let asset = SkillAsset {
+            source: SKILL_SOURCES[0],
+            content: "test-skill".to_string(),
+        };
+        let primary_target = temp_dir.path().join("cli").join("skills").join("bifrost");
+
+        install_to_dir(&tool, &asset, &primary_target).unwrap();
+
+        let target_file = primary_target.join(tool.target_filename());
+        let content = std::fs::read_to_string(&target_file).unwrap();
+        assert_eq!(content, tool.wrap_content("test-skill"));
+    }
+
+    #[test]
+    fn download_skill_source_uses_embedded_when_requested() {
+        let old = std::env::var("BIFROST_INSTALL_SKILL_SOURCE").ok();
+        std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", "embedded");
+
+        let content = download_skill_source(SKILL_SOURCES[0]).unwrap();
+        assert!(!content.is_empty());
+
+        if let Some(old) = old {
+            std::env::set_var("BIFROST_INSTALL_SKILL_SOURCE", old);
+        } else {
+            std::env::remove_var("BIFROST_INSTALL_SKILL_SOURCE");
+        }
+    }
+
+    #[test]
+    fn format_io_error_special_cases() {
+        use std::io::{Error, ErrorKind};
+
+        let path = Path::new("/tmp/test");
+        let err = Error::new(ErrorKind::PermissionDenied, "denied");
+        let msg = format_io_error(&err, path, "write file").to_string();
+        assert!(msg.contains("Permission denied"));
+
+        let err = Error::new(ErrorKind::NotFound, "missing");
+        let msg = format_io_error(&err, path, "read file").to_string();
+        assert!(msg.contains("Path not found"));
+
+        let err = Error::new(ErrorKind::AlreadyExists, "exists");
+        let msg = format_io_error(&err, path, "create directory").to_string();
+        assert!(msg.contains("already exists"));
+
+        let err = Error::other("disk full");
+        let msg = format_io_error(&err, path, "write file").to_string();
+        assert!(msg.contains("disk may be full"));
+    }
 }

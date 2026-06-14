@@ -2324,4 +2324,171 @@ mod tests {
         assert_eq!(data.updates[0].res_sz, latest.res_sz);
         assert_eq!(data.updates[0].fc, latest.fc);
     }
+
+    #[test]
+    fn is_pending_traffic_record_treats_zero_status_as_pending() {
+        let mut summary = compact(1, "pending-1");
+        summary.s = 0;
+        assert!(is_pending_traffic_record(&summary));
+
+        summary.s = 200;
+        assert!(!is_pending_traffic_record(&summary));
+    }
+
+    #[test]
+    fn is_pending_traffic_record_detects_open_streaming_sockets() {
+        let mut summary = compact(1, "ws-1");
+        summary.s = 200;
+        summary.flags = crate::traffic_db::TrafficFlags::IS_WEBSOCKET;
+        summary.ss = Some(crate::traffic::SocketStatus {
+            is_open: true,
+            send_count: 1,
+            receive_count: 1,
+            send_bytes: 10,
+            receive_bytes: 10,
+            frame_count: 1,
+            close_code: None,
+            close_reason: None,
+        });
+        assert!(is_pending_traffic_record(&summary));
+
+        if let Some(ref mut status) = summary.ss {
+            status.is_open = false;
+        }
+        assert!(!is_pending_traffic_record(&summary));
+    }
+
+    #[test]
+    fn dedupe_compact_records_keep_latest_keeps_last_occurrence() {
+        let first = compact(1, "same-id");
+        let mut second = compact(2, "same-id");
+        second.res_sz = 123;
+        second.fc = 99;
+
+        let deduped = dedupe_compact_records_keep_latest(vec![first, second.clone()]);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].id, "same-id");
+        assert_eq!(deduped[0].res_sz, second.res_sz);
+        assert_eq!(deduped[0].fc, second.fc);
+    }
+
+    #[test]
+    fn client_subscription_default_has_expected_limits() {
+        let sub = ClientSubscription::default();
+        assert_eq!(sub.history_limit, default_history_limit());
+        assert_eq!(sub.metrics_interval_ms, default_metrics_interval_ms());
+        assert!(!sub.need_traffic);
+        assert!(sub.settings_scopes.is_empty());
+    }
+
+    #[test]
+    fn client_subscription_deserializes_with_defaults() {
+        let json = r#"{"need_traffic": true}"#;
+        let sub: ClientSubscription = serde_json::from_str(json).unwrap();
+        assert!(sub.need_traffic);
+        assert_eq!(sub.history_limit, default_history_limit());
+        assert_eq!(sub.metrics_interval_ms, default_metrics_interval_ms());
+    }
+
+    #[test]
+    fn push_message_serde_uses_type_and_data_fields() {
+        let msg = PushMessage::Connected(ConnectedData {
+            client_id: 123,
+            message: "hi".to_string(),
+        });
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "connected");
+        assert_eq!(v["data"]["client_id"], 123);
+        assert_eq!(v["data"]["message"], "hi");
+    }
+
+    #[test]
+    fn push_message_settings_update_serde_uses_type_and_data_fields() {
+        let msg = PushMessage::SettingsUpdate(SettingsUpdateData {
+            scope: SETTINGS_SCOPE_TLS_CONFIG.to_string(),
+            data: serde_json::json!({"k": "v"}),
+        });
+        let v = serde_json::to_value(&msg).unwrap();
+        assert_eq!(v["type"], "settings_update");
+        assert_eq!(v["data"]["scope"], SETTINGS_SCOPE_TLS_CONFIG);
+        assert_eq!(v["data"]["data"]["k"], "v");
+    }
+
+    #[test]
+    fn update_pending_ids_tracks_pending_status_transitions() {
+        let state = Arc::new(AdminState::new(0));
+        let manager = PushManager::new(state);
+
+        let pending_ids = vec!["req-stable".to_string(), "req-finished".to_string()];
+
+        let mut updated_finished = compact(1, "req-finished");
+        updated_finished.s = 200;
+
+        let mut new_pending = compact(2, "req-new-pending");
+        new_pending.s = 0;
+
+        let mut new_finished = compact(3, "req-new-finished");
+        new_finished.s = 200;
+
+        let next = manager.update_pending_ids(
+            &pending_ids,
+            &[new_pending, new_finished],
+            &[updated_finished],
+        );
+
+        assert!(next.contains(&"req-stable".to_string()));
+        assert!(next.contains(&"req-new-pending".to_string()));
+        assert!(!next.contains(&"req-finished".to_string()));
+        assert!(!next.contains(&"req-new-finished".to_string()));
+    }
+
+    #[test]
+    fn ensure_bucket_capacity_evicts_oldest_bucket_when_capacity_exceeded() {
+        let state = Arc::new(AdminState::new(0));
+        let manager = PushManager::new(state);
+
+        {
+            let mut order = manager.bucket_order.lock();
+            order.push_back("a".to_string());
+            order.push_back("b".to_string());
+            order.push_back("c".to_string());
+        }
+        manager.buckets.insert("a".to_string(), vec![1]);
+        manager.buckets.insert("b".to_string(), vec![2]);
+        manager.buckets.insert("c".to_string(), vec![3]);
+
+        let evicted = manager.ensure_bucket_capacity("d");
+
+        assert_eq!(evicted, vec![1]);
+        assert!(manager.buckets.get("a").is_none());
+
+        let order: Vec<String> = manager.bucket_order.lock().iter().cloned().collect();
+        assert_eq!(
+            order,
+            vec!["b".to_string(), "c".to_string(), "d".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn broadcast_metrics_clamps_client_interval_to_allowed_range() {
+        let state = Arc::new(AdminState::new(0));
+        let manager = Arc::new(PushManager::new(state));
+
+        let subscription = ClientSubscription {
+            need_metrics: true,
+            metrics_interval_ms: METRICS_INTERVAL_MAX_MS * 10,
+            ..Default::default()
+        };
+        let (_client, mut receiver) =
+            manager.register_client("metrics-client".to_string(), subscription);
+
+        manager
+            .broadcast_metrics_with_interval(METRICS_INTERVAL_MAX_MS)
+            .await;
+
+        let message = receiver.try_recv().expect("expected metrics update");
+        let PushMessage::MetricsUpdate(_) = message else {
+            panic!("expected MetricsUpdate message");
+        };
+    }
 }

@@ -406,4 +406,111 @@ mod tests {
         assert!(!breakpoint_request_rule_enabled(&empty));
         assert!(!breakpoint_response_rule_enabled(&empty));
     }
+
+    #[test]
+    fn breakpoint_value_enables_phase_parses_aliases_and_delimiters() {
+        assert!(breakpoint_value_enables_phase(
+            "request",
+            BreakpointPhase::Request
+        ));
+        assert!(breakpoint_value_enables_phase(
+            "req",
+            BreakpointPhase::Request
+        ));
+        assert!(breakpoint_value_enables_phase(
+            "response",
+            BreakpointPhase::Response
+        ));
+        assert!(breakpoint_value_enables_phase(
+            "res",
+            BreakpointPhase::Response
+        ));
+        assert!(breakpoint_value_enables_phase(
+            "both",
+            BreakpointPhase::Request
+        ));
+        assert!(breakpoint_value_enables_phase(
+            "all",
+            BreakpointPhase::Response
+        ));
+
+        // Mixed delimiters and whitespace.
+        let value = " req | res , both & other";
+        assert!(breakpoint_value_enables_phase(
+            value,
+            BreakpointPhase::Request
+        ));
+        assert!(breakpoint_value_enables_phase(
+            value,
+            BreakpointPhase::Response
+        ));
+        assert!(!breakpoint_value_enables_phase(
+            "none",
+            BreakpointPhase::Request
+        ));
+    }
+
+    #[test]
+    fn breakpoint_body_payload_handles_empty_and_forced_omit() {
+        let state = AdminState::new(0);
+        let body = Bytes::new();
+
+        let payload = breakpoint_body_payload(&state, &body, Some(123), false);
+        assert!(payload.body.is_none());
+        assert!(payload.body_editable);
+        assert!(!payload.body_omitted);
+        assert_eq!(payload.body_size, Some(123));
+
+        let payload = breakpoint_body_payload(&state, &body, Some(5), true);
+        assert!(payload.body.is_none());
+        assert!(!payload.body_editable);
+        assert!(payload.body_omitted);
+        assert_eq!(payload.body_size, Some(5));
+    }
+
+    #[test]
+    fn breakpoint_body_payload_respects_capture_limit_and_utf8_validity() {
+        let state = AdminState::new(0);
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 4,
+            });
+
+        // Within limit and valid UTF-8
+        let body = Bytes::from_static(b"abcd");
+        let payload = breakpoint_body_payload(&state, &body, None, false);
+        assert_eq!(payload.body.as_deref(), Some("abcd"));
+        assert!(payload.body_editable);
+        assert!(!payload.body_omitted);
+
+        // Exceeds limit
+        let body = Bytes::from_static(b"abcdef");
+        let payload = breakpoint_body_payload(&state, &body, None, false);
+        assert!(payload.body.is_none());
+        assert!(!payload.body_editable);
+        assert!(payload.body_omitted);
+
+        // Invalid UTF-8 body is omitted even when small
+        let body = Bytes::from_static(&[0xff, 0xfe]);
+        let payload = breakpoint_body_payload(&state, &body, None, false);
+        assert!(payload.body.is_none());
+        assert!(!payload.body_editable);
+        assert!(payload.body_omitted);
+    }
+
+    #[test]
+    fn body_edit_within_limit_uses_breakpoint_capture_limit() {
+        let state = AdminState::new(0);
+        state
+            .breakpoint_manager
+            .update_settings(bifrost_admin::breakpoint::BreakpointSettings {
+                enabled: true,
+                max_body_bytes: 5,
+            });
+
+        assert!(body_edit_within_limit(&state, "12345"));
+        assert!(!body_edit_within_limit(&state, "123456"));
+    }
 }

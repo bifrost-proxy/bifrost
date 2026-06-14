@@ -5140,3 +5140,117 @@ mod audit_helpers_tests {
         assert_eq!(b, Some(7));
     }
 }
+
+#[cfg(test)]
+mod helper_formatting_tests {
+    use super::*;
+
+    #[test]
+    fn shell_exec_mode_label_matches_variants() {
+        assert_eq!(shell_exec_mode_label(&ShellExecMode::ArgvExec), "argv_exec");
+        assert_eq!(
+            shell_exec_mode_label(&ShellExecMode::ShellText),
+            "shell_text"
+        );
+        assert_eq!(shell_exec_mode_label(&ShellExecMode::Template), "template");
+    }
+
+    #[test]
+    fn dedupe_shell_exec_modes_preserves_order_and_removes_duplicates() {
+        let mut modes = vec![
+            ShellExecMode::ArgvExec,
+            ShellExecMode::ShellText,
+            ShellExecMode::ArgvExec,
+            ShellExecMode::Template,
+            ShellExecMode::ShellText,
+        ];
+        dedupe_shell_exec_modes(&mut modes);
+        assert_eq!(
+            modes,
+            vec![
+                ShellExecMode::ArgvExec,
+                ShellExecMode::ShellText,
+                ShellExecMode::Template,
+            ]
+        );
+    }
+
+    #[test]
+    fn validate_string_param_accepts_valid_values_and_rejects_invalid() {
+        let ok = Some("example-host".to_string());
+        validate_string_param(&ok, "host", 100, is_host_char).expect("valid host");
+
+        let too_long = Some("x".repeat(MAX_HOST_LEN + 1));
+        let err = validate_string_param(&too_long, "host", MAX_HOST_LEN, is_host_char)
+            .expect_err("length should be rejected");
+        assert!(format!("{err}").contains("too long"));
+
+        let bad_chars = Some("bad host!".to_string());
+        let err = validate_string_param(&bad_chars, "host", 100, is_host_char)
+            .expect_err("invalid characters should be rejected");
+        assert!(format!("{err}").contains("invalid characters"));
+    }
+
+    #[test]
+    fn append_truncated_bytes_never_exceeds_max_bytes() {
+        let mut buf = Vec::new();
+        append_truncated_bytes(&mut buf, b"hello", 3);
+        assert_eq!(buf, b"hel");
+
+        append_truncated_bytes(&mut buf, b"world", 3);
+        assert_eq!(buf, b"hel");
+
+        let mut buf = b"abc".to_vec();
+        append_truncated_bytes(&mut buf, b"def", 6);
+        assert_eq!(buf, b"abcdef");
+    }
+
+    #[test]
+    fn path_is_within_matches_prefix_and_child_paths() {
+        assert!(path_is_within("/a/b", "/a/b"));
+        assert!(path_is_within("/a/b/c", "/a/b"));
+        assert!(path_is_within("/a/b\\c", "/a/b"));
+        assert!(!path_is_within("/a/bc", "/a/b"));
+    }
+
+    #[test]
+    fn sse_event_formats_event_and_escapes_newlines() {
+        let json = "{\"k\":\"v\"\nline2}";
+        let frame = sse_event("progress", json);
+        assert!(frame.starts_with("event: progress\n"));
+        assert!(frame.contains("data: "));
+        assert!(frame.contains("\\nline2"));
+        assert!(frame.ends_with("\n\n"));
+    }
+
+    #[test]
+    fn format_helpers_cover_status_size_duration_and_number() {
+        assert_eq!(format_status(0), "...");
+        assert_eq!(format_status(404), "404");
+
+        assert_eq!(format_size(10), "10B");
+        assert_eq!(format_size(1024), "1.0KB");
+        assert_eq!(format_size(1536), "1.5KB");
+        assert_eq!(format_size(1024 * 1024), "1.0MB");
+
+        assert_eq!(format_duration(999), "999ms");
+        assert_eq!(format_duration(1500), "1.50s");
+
+        assert_eq!(format_number(0), "0");
+        assert_eq!(format_number(1_000), "1,000");
+        assert_eq!(format_number(1_234_567), "1,234,567");
+    }
+
+    #[test]
+    fn truncate_str_leaves_short_strings_and_truncates_long_ones() {
+        assert_eq!(truncate_str("short", 10), "short");
+        let truncated = truncate_str("abcdefghij", 5);
+        assert_eq!(truncated, "ab...");
+    }
+
+    #[test]
+    fn highlight_keyword_currently_returns_text_unchanged() {
+        let text = "example path";
+        assert_eq!(highlight_keyword(text, "path"), text);
+    }
+}

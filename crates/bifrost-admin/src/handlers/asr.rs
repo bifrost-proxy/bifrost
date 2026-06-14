@@ -2898,3 +2898,188 @@ mod tests {
         assert_eq!(wav_pcm_duration_ms(&[0u8; 44]), None);
     }
 }
+
+#[cfg(test)]
+mod asr_additional_tests {
+    use super::*;
+
+    fn sample_download_progress(
+        total_bytes: Option<u64>,
+        percent: Option<u8>,
+    ) -> crate::resource_download::DownloadProgress {
+        crate::resource_download::DownloadProgress {
+            label: "asr".to_string(),
+            url: "http://example.test/asr".to_string(),
+            dest: "/tmp/asr.zip".to_string(),
+            downloaded_bytes: 42,
+            total_bytes,
+            percent,
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 100,
+            resumed: false,
+            complete: false,
+        }
+    }
+
+    #[test]
+    fn query_param_value_decodes_percent_encoded_pairs() {
+        let query = "flag=1&name=hello%20world&empty=";
+        assert_eq!(
+            super::query_param_value(query, "name"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(
+            super::query_param_value(query, "flag"),
+            Some("1".to_string())
+        );
+        assert_eq!(super::query_param_value(query, "missing"), None);
+    }
+
+    #[test]
+    fn query_flag_enabled_recognizes_truthy_values() {
+        assert!(super::query_flag_enabled("flag=1", "flag"));
+        assert!(super::query_flag_enabled("flag=true", "flag"));
+        assert!(super::query_flag_enabled("flag=TRUE", "flag"));
+        assert!(super::query_flag_enabled("flag=yes", "flag"));
+        assert!(super::query_flag_enabled("flag=on", "flag"));
+        assert!(!super::query_flag_enabled("flag=0", "flag"));
+        assert!(!super::query_flag_enabled("other=1", "flag"));
+    }
+
+    #[test]
+    fn download_detail_formats_bytes_when_total_known() {
+        let progress = sample_download_progress(Some(100), Some(25));
+        let detail = super::download_detail(&progress).unwrap();
+        assert_eq!(detail, "42 / 100 bytes (25%)");
+
+        let progress = sample_download_progress(None, None);
+        assert!(super::download_detail(&progress).is_none());
+    }
+
+    #[test]
+    fn tokenizer_size_rejects_unknown_models() {
+        let err = super::tokenizer_size("Unknown-ASR").unwrap_err();
+        assert!(err.contains("unsupported model: Unknown-ASR"));
+    }
+
+    #[tokio::test]
+    async fn sse_event_helpers_emit_expected_frames() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+
+        super::send_progress(
+            &tx,
+            AsrStreamPayload {
+                phase: "test",
+                status: "running",
+                progress: 10,
+                message: "testing progress",
+                detail: Some("detail"),
+                file: Some("file.wav"),
+                server_url: Some("http://127.0.0.1:18080".to_string()),
+            },
+        )
+        .await;
+        let frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(frame.starts_with("event: progress\n"));
+        assert!(frame.contains("\"phase\":\"test\""));
+
+        super::send_text(&tx, "line1\nline2").await;
+        let text_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(text_frame.starts_with("event: text\n"));
+        assert!(text_frame.contains("line1\\nline2"));
+
+        super::send_asr_segment(
+            &tx,
+            "segment",
+            AsrSegmentPayload {
+                index: 1,
+                start_ms: 0,
+                end_ms: 1000,
+                stable_start_ms: 0,
+                stable_end_ms: 1000,
+                text: "hello",
+                delta: "hello",
+                committed: "hello",
+                speaker: None,
+                speaker_display_name: None,
+                speaker_profile_id: None,
+                speaker_confidence: None,
+            },
+        )
+        .await;
+        let segment_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(segment_frame.starts_with("event: segment\n"));
+        assert!(segment_frame.contains("\"index\":1"));
+
+        super::send_error(&tx, "oops", Some("detail")).await;
+        let error_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(error_frame.starts_with("event: error\n"));
+        assert!(error_frame.contains("\"message\":\"oops\""));
+        assert!(error_frame.contains("\"detail\":\"detail\""));
+
+        super::send_done(&tx).await;
+        let done_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(done_frame.starts_with("event: done\n"));
+        assert!(done_frame.contains("\"ok\":true"));
+    }
+}
+
+#[cfg(test)]
+mod asr_more_tests {
+    use super::*;
+    use bytes::Bytes;
+
+    #[test]
+    fn file_extension_extracts_suffix_or_defaults() {
+        assert_eq!(file_extension("test.wav"), ".wav");
+        assert_eq!(file_extension("no_extension"), ".audio");
+        assert_eq!(file_extension("archive.tar.gz"), ".gz");
+    }
+
+    #[test]
+    fn multipart_boundary_extracts_and_strips_quotes() {
+        let ct = "multipart/form-data; boundary=abc123";
+        assert_eq!(multipart_boundary(ct), Some("abc123".to_string()));
+
+        let ct = "multipart/form-data; charset=utf-8; boundary=\"xyz\"";
+        assert_eq!(multipart_boundary(ct), Some("xyz".to_string()));
+
+        assert!(multipart_boundary("text/plain").is_none());
+    }
+
+    #[test]
+    fn extract_multipart_filename_parses_filename_and_ignores_empty() {
+        let headers = "form-data; name=\"file\"; filename=\"clip.wav\"";
+        assert_eq!(
+            extract_multipart_filename(headers),
+            Some("clip.wav".to_string())
+        );
+        assert!(extract_multipart_filename("form-data; name=\"file\"").is_none());
+    }
+
+    #[test]
+    fn find_bytes_finds_subsequence_or_none() {
+        let haystack = b"abcde";
+        assert_eq!(find_bytes(haystack, b"bc"), Some(1));
+        assert_eq!(find_bytes(haystack, b"de"), Some(3));
+        assert_eq!(find_bytes(haystack, b"xx"), None);
+    }
+
+    #[test]
+    fn extract_multipart_audio_returns_error_when_file_field_missing() {
+        let body = Bytes::from_static(b"--boundary\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nvalue\r\n--boundary--\r\n");
+        let err = extract_multipart_audio(&body, "boundary")
+            .err()
+            .expect("should be error when file field missing");
+        assert!(err.contains("multipart field 'file' missing"));
+    }
+
+    #[test]
+    fn extract_multipart_audio_extracts_file_bytes_and_filename() {
+        let body = Bytes::from_static(b"--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.wav\"\r\n\r\nDATA\r\n--b--\r\n");
+        let uploaded = extract_multipart_audio(&body, "b").expect("multipart file");
+        assert_eq!(uploaded.bytes, b"DATA");
+        assert_eq!(uploaded.filename, "a.wav");
+    }
+}

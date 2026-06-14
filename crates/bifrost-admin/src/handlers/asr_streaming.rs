@@ -376,3 +376,46 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod streaming_extra_tests {
+    use super::*;
+
+    #[test]
+    fn whole_file_text_fallback_builds_single_segment_when_text_present() {
+        let transcription = whole_file_text_fallback("  hello  ", Some(42_000));
+        assert_eq!(transcription.text, "hello");
+        assert_eq!(transcription.segments.len(), 1);
+        assert_eq!(transcription.segments[0], (0, 42_000, "hello".to_string()));
+    }
+
+    #[test]
+    fn whole_file_text_fallback_produces_no_segments_for_empty_text() {
+        let transcription = whole_file_text_fallback("   \n", Some(10_000));
+        assert!(transcription.text.is_empty());
+        assert!(transcription.segments.is_empty());
+    }
+
+    #[test]
+    fn append_transcript_delta_inserts_spaces_between_ascii_words() {
+        let mut committed = "hello".to_string();
+        append_transcript_delta(&mut committed, "world");
+        assert_eq!(committed, "hello world");
+
+        // empty delta is ignored
+        append_transcript_delta(&mut committed, "   ");
+        assert_eq!(committed, "hello world");
+    }
+
+    #[test]
+    fn append_transcript_delta_joins_cjk_text_without_extra_space() {
+        let mut committed = "你好".to_string();
+        append_transcript_delta(&mut committed, "，世界");
+        // CJK punctuation at the start of delta should attach without an extra space
+        assert_eq!(committed, "你好，世界");
+
+        let mut committed = String::new();
+        append_transcript_delta(&mut committed, "测试");
+        assert_eq!(committed, "测试");
+    }
+}

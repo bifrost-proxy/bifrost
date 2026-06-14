@@ -87,3 +87,88 @@ where
     }
     Ok(BoundedBody::Complete(buf.freeze()))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use hyper::body::{Body, Frame, SizeHint};
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    #[derive(Debug)]
+    struct TestBody {
+        frames: VecDeque<Bytes>,
+    }
+
+    impl TestBody {
+        fn from_chunks(chunks: &[&[u8]]) -> Self {
+            let frames = chunks
+                .iter()
+                .map(|c| Bytes::copy_from_slice(c))
+                .collect::<VecDeque<_>>();
+            Self { frames }
+        }
+    }
+
+    impl Body for TestBody {
+        type Data = Bytes;
+        type Error = hyper::Error;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+            if let Some(chunk) = self.frames.pop_front() {
+                return Poll::Ready(Some(Ok(Frame::data(chunk))));
+            }
+            Poll::Ready(None)
+        }
+
+        fn is_end_stream(&self) -> bool {
+            self.frames.is_empty()
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            SizeHint::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn read_body_bounded_collects_complete_body_when_under_limit() {
+        let body = TestBody::from_chunks(&[b"hello", b" ", b"world"]);
+        let result = read_body_bounded(body, 1024).await.unwrap();
+
+        match result {
+            BoundedBody::Complete(bytes) => {
+                assert_eq!(bytes.as_ref(), b"hello world");
+            }
+            BoundedBody::Exceeded(_) => panic!("expected Complete variant"),
+        }
+    }
+
+    #[tokio::test]
+    async fn read_body_bounded_returns_prefix_replay_when_exceeded() {
+        let body = TestBody::from_chunks(&[b"hello", b"world"]);
+        let result = read_body_bounded(body, 5).await.unwrap();
+
+        let prefix_body = match result {
+            BoundedBody::Exceeded(prefix) => prefix,
+            BoundedBody::Complete(_) => panic!("expected Exceeded variant"),
+        };
+
+        // PrefixReplayBody should replay the frames we saw before exceeding the limit.
+        let mut collected = Vec::new();
+        let mut replay = prefix_body;
+        while let Some(frame) = replay.frame().await {
+            let frame = frame.expect("frame ok");
+            if let Some(data) = frame.data_ref() {
+                collected.extend_from_slice(data);
+            }
+        }
+
+        assert_eq!(collected.as_slice(), b"helloworld");
+    }
+}

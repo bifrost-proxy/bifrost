@@ -2834,3 +2834,117 @@ mod websocket_rule_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_method_is_get() {
+        assert_eq!(default_method(), "GET");
+    }
+
+    #[test]
+    fn unified_replay_request_deserializes_with_defaults() {
+        let json = r#"{
+            "url": "http://example.test/path",
+            "headers": [["X-Test", "1"]]
+        }"#;
+        let req: UnifiedReplayRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.url, "http://example.test/path");
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.headers.len(), 1);
+        assert!(req.body.is_none());
+        assert!(req.request_id.is_none());
+        assert!(req.rule_config.is_none());
+        assert!(req.timeout_ms.is_none());
+    }
+
+    #[test]
+    fn unified_replay_request_preserves_optional_fields() {
+        let json = r#"{
+            "url": "http://example.test",
+            "method": "POST",
+            "headers": [],
+            "body": "payload",
+            "request_id": "req-1",
+            "timeout_ms": 1234
+        }"#;
+        let req: UnifiedReplayRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.body.as_deref(), Some("payload"));
+        assert_eq!(req.request_id.as_deref(), Some("req-1"));
+        assert_eq!(req.timeout_ms, Some(1234));
+    }
+
+    #[test]
+    fn stream_event_serde_roundtrip_and_id_is_optional() {
+        let event = StreamEvent {
+            type_: "message".into(),
+            data: "hello".into(),
+            id: None,
+        };
+        let json = serde_json::to_value(&event).unwrap();
+        assert!(json.get("id").is_none());
+
+        let back: StreamEvent = serde_json::from_value(json).unwrap();
+        assert_eq!(back.type_, "message");
+        assert_eq!(back.data, "hello");
+        assert!(back.id.is_none());
+    }
+
+    #[test]
+    fn effective_authority_normalizes_host_and_default_ports() {
+        assert_eq!(
+            effective_authority("https://Example.TEST/path"),
+            Some("example.test:443".to_string())
+        );
+        assert_eq!(
+            effective_authority("http://example.test"),
+            Some("example.test:80".to_string())
+        );
+    }
+
+    #[test]
+    fn replay_target_authority_changed_falls_back_to_raw_urls() {
+        // When parsing fails we should fall back to string comparison
+        assert!(replay_target_authority_changed(
+            "not-a-url",
+            "also-not-a-url"
+        ));
+        assert!(!replay_target_authority_changed("same", "same"));
+    }
+}
+
+#[cfg(test)]
+mod replay_extra_tests {
+    use super::*;
+
+    #[test]
+    fn get_header_value_is_case_insensitive() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("x-test".to_string(), "1".to_string()),
+        ];
+        assert_eq!(
+            get_header_value(&headers, "content-type"),
+            Some("text/plain")
+        );
+        assert_eq!(get_header_value(&headers, "X-TEST"), Some("1"));
+        assert_eq!(get_header_value(&headers, "missing"), None);
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_for_empty_body() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        assert!(decode_replay_body(&headers, b"").is_none());
+    }
+
+    #[test]
+    fn decode_replay_body_passes_through_unknown_encoding() {
+        let body = br#"{"ok":true}"#;
+        let headers = vec![("content-encoding".to_string(), "unknown".to_string())];
+        let decoded = decode_replay_body(&headers, body).expect("decoded");
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+}

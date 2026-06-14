@@ -1632,3 +1632,171 @@ fn export_as_toml(
 
     output
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::config::client::{
+        BodyStoreStats, FrameStoreStats, PerformanceConfigResponse, ServerConfigResponse,
+        TlsConfigResponse, TrafficConfig, UserPassAccountResponse, UserPassResponse,
+        WhitelistResponse, WsPayloadStoreStats,
+    };
+
+    fn sample_server() -> ServerConfigResponse {
+        ServerConfigResponse {
+            timeout_secs: 30,
+            http1_max_header_size: 64 * 1024,
+            http2_max_header_list_size: 256 * 1024,
+            websocket_handshake_max_header_size: 64 * 1024,
+        }
+    }
+
+    fn sample_tls() -> TlsConfigResponse {
+        TlsConfigResponse {
+            enable_tls_interception: true,
+            intercept_exclude: vec!["example.com".into()],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec!["AppA".into()],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+            disconnect_on_config_change: true,
+        }
+    }
+
+    fn sample_perf(with_stats: bool) -> PerformanceConfigResponse {
+        let traffic = TrafficConfig {
+            max_records: 1000,
+            max_db_size_bytes: 1024 * 1024 * 1024,
+            max_body_memory_size: 512 * 1024,
+            max_body_buffer_size: 10 * 1024 * 1024,
+            max_body_probe_size: 64 * 1024,
+            binary_traffic_performance_mode: true,
+            file_retention_days: 7,
+            sse_stream_flush_bytes: 256 * 1024,
+            sse_stream_flush_interval_ms: 1000,
+            ws_payload_flush_bytes: 512 * 1024,
+            ws_payload_flush_interval_ms: 1000,
+            ws_payload_max_open_files: 64,
+        };
+
+        let (body_store_stats, frame_store_stats, ws_payload_store_stats) = if with_stats {
+            (
+                Some(BodyStoreStats {
+                    file_count: 10,
+                    total_size: 12345,
+                    temp_dir: "/tmp/body".into(),
+                    max_memory_size: 512 * 1024,
+                    retention_days: 7,
+                }),
+                Some(FrameStoreStats {
+                    connection_count: 2,
+                    total_size: 6789,
+                    frames_dir: "/tmp/frames".into(),
+                    retention_hours: 24,
+                }),
+                Some(WsPayloadStoreStats {
+                    file_count: 3,
+                    total_size: 1111,
+                    payload_dir: "/tmp/ws".into(),
+                    retention_days: 3,
+                }),
+            )
+        } else {
+            (None, None, None)
+        };
+
+        PerformanceConfigResponse {
+            traffic,
+            body_store_stats,
+            frame_store_stats,
+            ws_payload_store_stats,
+        }
+    }
+
+    fn sample_whitelist() -> WhitelistResponse {
+        WhitelistResponse {
+            mode: "local_only".into(),
+            allow_lan: false,
+            whitelist: vec!["127.0.0.1".into()],
+            temporary_whitelist: vec![],
+            userpass: UserPassResponse {
+                enabled: true,
+                accounts: vec![UserPassAccountResponse {
+                    username: "demo".into(),
+                    enabled: true,
+                    has_password: true,
+                    last_connected_at: None,
+                }],
+                loopback_requires_auth: true,
+            },
+        }
+    }
+
+    #[test]
+    fn parse_userpass_accounts_parses_valid_json_array() {
+        let json = r#"[
+            {"username":"alice","password":"secret","enabled":true},
+            {"username":"bob","password":null,"enabled":false}
+        ]"#;
+
+        let accounts = parse_userpass_accounts(json).expect("valid accounts json");
+        assert_eq!(accounts.len(), 2);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[0].password.as_deref(), Some("secret"));
+        assert!(accounts[0].enabled);
+        assert_eq!(accounts[1].username, "bob");
+        assert!(accounts[1].password.is_none());
+        assert!(!accounts[1].enabled);
+    }
+
+    #[test]
+    fn parse_userpass_accounts_returns_helpful_error_for_invalid_json() {
+        let err = parse_userpass_accounts("not-json").unwrap_err();
+        assert!(err.starts_with("access.userpass.accounts expects a JSON array like",));
+    }
+
+    #[test]
+    fn export_as_json_produces_structured_output() {
+        let server = sample_server();
+        let tls = sample_tls();
+        let perf = sample_perf(false);
+        let whitelist = sample_whitelist();
+
+        let json_str = export_as_json(&server, &tls, &perf, &whitelist).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+
+        assert_eq!(v["server"]["timeout_secs"].as_u64(), Some(30));
+        assert_eq!(
+            v["server"]["http1_max_header_size"].as_u64(),
+            Some(64 * 1024)
+        );
+        assert_eq!(v["tls"]["enabled"].as_bool(), Some(true));
+        assert_eq!(
+            v["traffic"]["max_records"].as_u64(),
+            Some(perf.traffic.max_records as u64)
+        );
+        assert_eq!(v["access"]["mode"].as_str(), Some("local_only"));
+        assert_eq!(v["access"]["allow_lan"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn export_as_toml_contains_expected_sections_and_keys() {
+        let server = sample_server();
+        let tls = sample_tls();
+        let perf = sample_perf(true);
+        let whitelist = sample_whitelist();
+
+        let toml = export_as_toml(&server, &tls, &perf, &whitelist);
+
+        assert!(toml.contains("[server]"));
+        assert!(toml.contains("timeout_secs = 30"));
+        assert!(toml.contains("[tls]"));
+        assert!(toml.contains("enable_interception"));
+        assert!(toml.contains("[traffic]"));
+        assert!(toml.contains("max_records"));
+        assert!(toml.contains("[access]"));
+        assert!(toml.contains("mode = \"local_only\""));
+    }
+}

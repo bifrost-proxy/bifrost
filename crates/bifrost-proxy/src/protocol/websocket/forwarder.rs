@@ -74,3 +74,80 @@ impl WebSocketForwarder {
         Ok((r1, r2))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use tokio::io::{duplex, empty, sink, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn bidirectional_forwards_client_frames_and_counts() {
+        let (forwarder_side, mut client_side) = duplex(1024);
+
+        // Prepare two simple frames from client to server.
+        let frames = vec![
+            WebSocketFrame::text("hello"),
+            WebSocketFrame::binary(b"world"),
+        ];
+        let mut encoded = Vec::new();
+        for frame in &frames {
+            encoded.extend_from_slice(&frame.encode());
+        }
+
+        // Feed encoded frames into the client-side connection.
+        let writer = tokio::spawn(async move {
+            client_side.write_all(&encoded).await.unwrap();
+        });
+
+        let (client_to_server, server_to_client) =
+            WebSocketForwarder::bidirectional(forwarder_side, sink(), empty(), sink(), None, None)
+                .await
+                .unwrap();
+
+        writer.await.unwrap();
+
+        assert_eq!(client_to_server, 2);
+        assert_eq!(server_to_client, 0);
+    }
+
+    #[tokio::test]
+    async fn bidirectional_applies_callbacks_and_can_drop_frames() {
+        let (forwarder_side, mut client_side) = duplex(1024);
+
+        let frames = vec![WebSocketFrame::text("keep"), WebSocketFrame::text("drop")];
+        let mut encoded = Vec::new();
+        for frame in &frames {
+            encoded.extend_from_slice(&frame.encode());
+        }
+
+        let writer = tokio::spawn(async move {
+            client_side.write_all(&encoded).await.unwrap();
+        });
+
+        let on_client_frame: WebSocketFrameCallback = Box::new(|frame: &WebSocketFrame| {
+            if frame.payload == Bytes::from_static(b"drop") {
+                None
+            } else {
+                Some(frame.clone())
+            }
+        });
+
+        let (client_to_server, server_to_client) = WebSocketForwarder::bidirectional(
+            forwarder_side,
+            sink(),
+            empty(),
+            sink(),
+            Some(on_client_frame),
+            None,
+        )
+        .await
+        .unwrap();
+
+        writer.await.unwrap();
+
+        // Only one frame should be forwarded due to the callback dropping the second.
+        assert_eq!(client_to_server, 1);
+        assert_eq!(server_to_client, 0);
+    }
+}

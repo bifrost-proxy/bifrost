@@ -360,3 +360,318 @@ fn choose_provider_from_reader_returns_selected_provider() {
     assert!(prompt.contains("Select IM provider"));
     assert!(prompt.contains("Feishu B"));
 }
+
+#[test]
+fn ensure_provider_value_sets_when_missing() {
+    let mut body = json!({});
+    ensure_provider_value(&mut body, "feishu-main");
+    assert_eq!(body["provider_id"], "feishu-main");
+}
+
+#[test]
+fn parse_provider_add_args_parses_common_flags() {
+    let body = parse_provider_add_args(
+        "feishu-main",
+        &[
+            "--type".into(),
+            "feishu".into(),
+            "--app-id".into(),
+            "cli_xxx".into(),
+            "--secret".into(),
+            "plain-secret".into(),
+            "--base-url".into(),
+            "https://open.feishu.cn".into(),
+            "--display-name".into(),
+            "Main".into(),
+            "--enabled".into(),
+            "false".into(),
+            "--owner-open-id".into(),
+            "ou_xxx".into(),
+            "--enable-long-connection".into(),
+            "true".into(),
+        ],
+    )
+    .expect("parse provider add args");
+
+    assert_eq!(body["id"], "feishu-main");
+    assert_eq!(body["provider_type"], "feishu");
+    assert_eq!(body["app_id"], "cli_xxx");
+    assert_eq!(body["app_secret"], "plain-secret");
+    assert_eq!(body["base_url"], "https://open.feishu.cn");
+    assert_eq!(body["display_name"], "Main");
+    assert_eq!(body["enabled"], false); // parsed from explicit flag
+    assert_eq!(body["owner_open_id"], "ou_xxx");
+    assert_eq!(body["event_connection_enabled"], true);
+}
+
+#[test]
+fn parse_provider_update_args_parses_flags() {
+    let body = parse_provider_update_args(&[
+        "--display-name".into(),
+        "New Name".into(),
+        "--enable-long-connection".into(),
+        "true".into(),
+        "--enabled".into(),
+        "false".into(),
+        "--base-url".into(),
+        "https://example.com".into(),
+    ])
+    .expect("parse provider update args");
+
+    assert_eq!(body["display_name"], "New Name");
+    assert_eq!(body["event_connection_enabled"], true);
+    assert_eq!(body["enabled"], false);
+    assert_eq!(body["base_url"], "https://example.com");
+}
+
+#[test]
+fn parse_target_add_args_parses_flags() {
+    let body = parse_target_add_args(
+        "oncall",
+        &[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--receive-id-type".into(),
+            "chat_id".into(),
+            "--receive-id".into(),
+            "oc_xxx".into(),
+            "--display-name".into(),
+            "Oncall".into(),
+            "--msg-type".into(),
+            "text".into(),
+        ],
+    )
+    .expect("parse target add args");
+
+    assert_eq!(body["id"], "oncall");
+    assert_eq!(body["provider_id"], "feishu-main");
+    assert_eq!(body["receive_id_type"], "chat_id");
+    assert_eq!(body["receive_id"], "oc_xxx");
+    assert_eq!(body["display_name"], "Oncall");
+    assert_eq!(body["default_msg_type"], "text");
+}
+
+#[test]
+fn parse_target_update_args_parses_flags() {
+    let body = parse_target_update_args(&[
+        "--receive-id".into(),
+        "oc_new".into(),
+        "--display-name".into(),
+        "New".into(),
+        "--enabled".into(),
+        "false".into(),
+    ])
+    .expect("parse target update args");
+
+    assert_eq!(body["receive_id"], "oc_new");
+    assert_eq!(body["display_name"], "New");
+    assert_eq!(body["enabled"], false);
+}
+
+#[test]
+fn parse_route_add_args_builds_matcher_and_action() {
+    let body = parse_route_add_args(
+        "deploy",
+        &[
+            "--provider".into(),
+            "feishu-main".into(),
+            "--event".into(),
+            "message.receive".into(),
+            "--chat-id".into(),
+            "oc_xxx".into(),
+            "--user-id".into(),
+            "ou_xxx".into(),
+            "--keyword".into(),
+            "deploy".into(),
+            "--regex".into(),
+            "^/deploy".into(),
+            "--script-file".into(),
+            "./deploy.sh".into(),
+            "--reply".into(),
+            "thread".into(),
+            "--timeout-ms".into(),
+            "5000".into(),
+        ],
+    )
+    .expect("parse route add args");
+
+    assert_eq!(body["name"], "deploy");
+    assert_eq!(body["provider_id"], "feishu-main");
+    assert_eq!(body["event_type"], "message.receive");
+    assert_eq!(body["matcher"]["chat_ids"][0], "oc_xxx");
+    assert_eq!(body["matcher"]["user_ids"][0], "ou_xxx");
+    assert_eq!(body["matcher"]["keyword"], "deploy");
+    assert_eq!(body["matcher"]["regex"], "^/deploy");
+    assert_eq!(body["action"]["script_file"], "./deploy.sh");
+    assert_eq!(body["action"]["type"], "script");
+    assert_eq!(body["action"]["reply_mode"], "thread");
+    assert_eq!(body["timeout_ms"], 5000);
+}
+
+#[test]
+fn summarize_matcher_returns_star_for_empty_and_describes_fields() {
+    let empty = summarize_matcher(&json!({}));
+    assert_eq!(empty, "*");
+
+    let matcher = json!({
+        "regex": "^/deploy",
+        "keyword": "deploy",
+        "chat_ids": ["oc_xxx", "oc_yyy"],
+    });
+    let summary = summarize_matcher(&matcher);
+    assert!(summary.contains("regex:^/deploy"));
+    assert!(summary.contains("kw:deploy"));
+    assert!(summary.contains("chats:2"));
+}
+
+#[test]
+fn api_url_builds_expected_prefix() {
+    let url = api_url("127.0.0.1", 9900, "/providers");
+    assert_eq!(
+        url,
+        "http://127.0.0.1:9900/_bifrost/api/im-gateway/providers"
+    );
+}
+
+#[test]
+fn guess_image_mime_type_recognizes_common_extensions() {
+    assert_eq!(guess_image_mime_type("photo.png"), Some("image/png"));
+    assert_eq!(guess_image_mime_type("photo.jpg"), Some("image/jpeg"));
+    assert_eq!(guess_image_mime_type("photo.jpeg"), Some("image/jpeg"));
+    assert_eq!(guess_image_mime_type("anim.gif"), Some("image/gif"));
+    assert_eq!(guess_image_mime_type("img.webp"), Some("image/webp"));
+    assert_eq!(guess_image_mime_type("file.txt"), None);
+}
+
+#[test]
+fn format_timestamp_handles_seconds_and_milliseconds() {
+    // 2020-01-01 00:00:00 UTC
+    let secs = 1_577_836_800; // seconds
+    let ms = secs * 1000; // milliseconds
+
+    let from_secs = format_timestamp(secs);
+    let from_ms = format_timestamp(ms);
+
+    assert_eq!(from_secs, from_ms);
+    assert!(from_secs.starts_with("2020-01-01"));
+}
+
+#[test]
+fn handle_im_command_help_and_empty_args_do_not_error() {
+    handle_im_command("127.0.0.1", 9900, &[]).expect("empty args should show help");
+    handle_im_command("127.0.0.1", 9900, &["help".into()])
+        .expect("help subcommand should print help");
+}
+
+#[test]
+fn build_image_payload_reads_file_and_sets_mime_and_base64() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("image.png");
+    std::fs::write(&path, [1u8, 2, 3]).unwrap();
+
+    let payload = build_image_payload(Some(path.to_str().unwrap()), None, Some("avatar"))
+        .expect("build image payload");
+
+    assert_eq!(payload["image_type"], "avatar");
+    assert_eq!(payload["file_name"], "image.png");
+    assert_eq!(payload["mime_type"], "image/png");
+    // 0x01 0x02 0x03 -> AQID in base64
+    assert_eq!(payload["data_base64"], "AQID");
+}
+
+#[test]
+fn build_image_payload_requires_file_or_key() {
+    let err = build_image_payload(None, None, None).unwrap_err();
+    match err {
+        bifrost_core::BifrostError::Config(msg) => {
+            assert!(msg.contains("image file or image key is required"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_secret_allows_plain_and_env_and_file_sources() {
+    // plain value
+    assert_eq!(resolve_secret("plain").unwrap(), "plain".to_string());
+
+    // env:KEY
+    std::env::set_var("BIFROST_TEST_SECRET", "from-env");
+    assert_eq!(
+        resolve_secret("env:BIFROST_TEST_SECRET").unwrap(),
+        "from-env".to_string()
+    );
+    std::env::remove_var("BIFROST_TEST_SECRET");
+
+    // file:path
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("secret.txt");
+    std::fs::write(&path, "from-file\n").unwrap();
+    let value = resolve_secret(&format!("file:{}", path.display())).unwrap();
+    assert_eq!(value, "from-file".to_string());
+}
+
+#[test]
+fn print_route_list_and_history_helpers_handle_empty_inputs() {
+    let empty = json!([]);
+    print_route_list(&empty);
+    print_events(&empty);
+    print_task_runs(&empty);
+    print_message_logs(&empty);
+}
+
+#[test]
+fn format_events_and_runs_render_basic_fields() {
+    let events = json!([
+        {
+            "event_id": "abcdef123456",
+            "provider_id": "feishu-main",
+            "event_type": "message.receive",
+            "source": {"chat_id": "oc_xxx"},
+            "received_at": 1_577_836_800_000i64
+        }
+    ]);
+    print_events(&events);
+
+    let runs = json!([
+        {
+            "run_id": "run123",
+            "trigger_source": "manual",
+            "status": "success",
+            "duration_ms": 1500u64,
+            "exit_code": 0,
+            "started_at": 1_577_836_800_000i64
+        }
+    ]);
+    print_task_runs(&runs);
+}
+
+#[test]
+fn print_message_logs_formats_inbound_and_outbound() {
+    let messages = json!([
+        {
+            "id": "1",
+            "direction": "inbound",
+            "status": "success",
+            "sender_open_id": "sender-1234567890",
+            "content_preview": "hello from remote",
+            "timestamp": 1_577_836_800_000i64
+        },
+        {
+            "id": "2",
+            "direction": "outbound",
+            "status": "failed",
+            "target_name": "oncall",
+            "content_preview": "deployment failed",
+            "timestamp": 1_577_836_800_000i64
+        }
+    ]);
+
+    print_message_logs(&messages);
+}
+
+#[test]
+fn handle_im_command_unknown_subcommand_falls_back_to_help() {
+    handle_im_command("127.0.0.1", 9900, &["unknown".into()])
+        .expect("unknown subcommand should not error");
+}

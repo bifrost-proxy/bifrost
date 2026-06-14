@@ -1749,3 +1749,252 @@ async fn read_json<T: for<'de> serde::Deserialize<'de>>(
     serde_json::from_slice(&bytes)
         .map_err(|e| error_response(StatusCode::BAD_REQUEST, &format!("invalid json: {e}")))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    use serde_json::json;
+
+    #[tokio::test]
+    async fn blocking_runs_closure_on_blocking_pool() {
+        let value = blocking(|| 40 + 2).await;
+        assert_eq!(value, 42);
+    }
+
+    #[test]
+    fn parse_query_and_query_token_extracts_token() {
+        let map = parse_query("a=1&token=secret&b=2");
+        assert_eq!(map.get("a").unwrap(), "1");
+        assert_eq!(map.get("token").unwrap(), "secret");
+
+        assert_eq!(
+            query_token(Some("a=1&token=secret")),
+            Some("secret".to_string())
+        );
+        assert!(query_token(Some("a=1&token=   ")).is_none());
+        assert!(query_token(None).is_none());
+    }
+
+    #[test]
+    fn with_cdp_session_id_only_adds_when_object_and_session_present() {
+        let msg = json!({ "id": 1, "method": "Test.method" });
+        let sid = json!("session-1");
+
+        let updated = with_cdp_session_id(msg.clone(), Some(&sid));
+        assert_eq!(updated["sessionId"], sid);
+
+        let unchanged = with_cdp_session_id(msg.clone(), None);
+        assert!(unchanged.get("sessionId").is_none());
+    }
+
+    #[test]
+    fn request_dom_storage_is_local_defaults_to_true() {
+        assert!(
+            request_dom_storage_is_local(&json!({})),
+            "missing flag should be treated as localStorage"
+        );
+        assert!(request_dom_storage_is_local(&json!({
+            "params": { "storageId": { "isLocalStorage": true } }
+        })));
+        assert!(!request_dom_storage_is_local(&json!({
+            "params": { "storageId": { "isLocalStorage": false } }
+        })));
+    }
+
+    #[test]
+    fn is_allowed_cdp_origin_allows_localhost_and_127() {
+        assert!(is_allowed_cdp_origin("http://127.0.0.1:9222"));
+        assert!(is_allowed_cdp_origin("https://localhost"));
+        assert!(!is_allowed_cdp_origin("ftp://localhost"));
+        assert!(!is_allowed_cdp_origin("http://evil.example.com"));
+    }
+
+    #[test]
+    fn is_allowed_cdp_origin_respects_env_whitelist() {
+        let key = "BIFROST_DEVTOOLS_ALLOWED_ORIGINS";
+        let previous = std::env::var(key).ok();
+
+        std::env::set_var(key, "https://devtools.example.test");
+        assert!(is_allowed_cdp_origin("https://devtools.example.test"));
+
+        match previous {
+            Some(value) => std::env::set_var(key, value),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    #[tokio::test]
+    async fn cdp_unauthorized_builds_json_body() {
+        let resp = cdp_unauthorized("missing_token");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let body_bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let v: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(v["code"], json!("missing_token"));
+    }
+
+    #[test]
+    fn generate_accept_key_matches_rfc_example() {
+        // Example from RFC 6455, Section 1.3
+        let key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let accept = generate_accept_key(key);
+        assert_eq!(accept, "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+    }
+}
+
+#[cfg(test)]
+mod devtools_helper_tests {
+    use super::*;
+    use crate::devtools::{
+        CapabilityMatrix, ConsoleMessage, DebugAdapterKind, DebugFidelity, DebugPage,
+        DebugPageState, DevtoolsMode, NetworkEvent, StorageSnapshot,
+    };
+
+    fn sample_page_with_dom(dom: serde_json::Value) -> DebugPage {
+        DebugPage {
+            page_id: "pg1".to_string(),
+            title: Some("Title".to_string()),
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            user_agent: None,
+            adapter: DebugAdapterKind::PageBridge,
+            fidelity: DebugFidelity::Fallback,
+            state: DebugPageState::Discoverable,
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+            traffic_ids: Vec::new(),
+            last_seen_at_ms: 0,
+            capabilities: CapabilityMatrix::default(),
+            status_reason: None,
+            bridge_token: "token".to_string(),
+            bridge_tab_id: None,
+            dom_snapshot: None,
+            dom_tree: Some(dom),
+            dom_updated_at_ms: 0,
+            console_messages: Vec::new(),
+            network_events: Vec::new(),
+            storage_snapshot: None,
+            evaluate_allowlist: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn page_dom_root_uses_existing_dom_tree() {
+        let dom = serde_json::json!({"nodeId": 42, "children": []});
+        let page = sample_page_with_dom(dom.clone());
+        let root = page_dom_root(&page);
+        assert_eq!(root, dom);
+    }
+
+    #[test]
+    fn page_dom_root_builds_default_document_when_missing() {
+        let mut page = sample_page_with_dom(serde_json::json!({"nodeId": 1}));
+        page.dom_tree = None;
+        let root = page_dom_root(&page);
+        assert_eq!(root["nodeName"], "#document");
+        assert_eq!(root["documentURL"], page.url);
+    }
+
+    #[test]
+    fn requested_node_style_finds_inline_style_attribute() {
+        let dom = serde_json::json!({
+            "nodeId": 1,
+            "children": [
+                {
+                    "nodeId": 2,
+                    "attributes": ["class", "x", "style", "color: red;"]
+                }
+            ]
+        });
+        let page = sample_page_with_dom(dom);
+        let request = serde_json::json!({"params": {"nodeId": 2}});
+        let style = requested_node_style(&request, &page).expect("style");
+        assert_eq!(style, "color: red;");
+
+        let missing = serde_json::json!({"params": {"nodeId": 99}});
+        assert!(requested_node_style(&missing, &page).is_none());
+    }
+
+    #[test]
+    fn css_property_values_parses_name_value_pairs() {
+        let props = css_property_values("color: red; padding: 10px; invalid");
+        assert_eq!(props.len(), 2);
+        assert_eq!(props[0], ("color".to_string(), "red".to_string()));
+        assert_eq!(props[1], ("padding".to_string(), "10px".to_string()));
+    }
+
+    #[test]
+    fn cdp_css_style_wraps_properties_and_range() {
+        let style = cdp_css_style("sheet1", "color: red;");
+        assert_eq!(style["styleSheetId"], "sheet1");
+        assert_eq!(style["cssText"], "color: red;");
+        let props = style["cssProperties"].as_array().unwrap();
+        assert_eq!(props.len(), 1);
+        assert_eq!(props[0]["name"], "color");
+        assert_eq!(props[0]["value"], "red");
+    }
+
+    #[test]
+    fn console_event_serializes_console_message() {
+        let msg = ConsoleMessage {
+            level: "error".to_string(),
+            text: "oops".to_string(),
+            at_ms: 123,
+            args: Vec::new(),
+            raw: None,
+        };
+        let event = console_event(&msg);
+        assert_eq!(event["method"], "Runtime.consoleAPICalled");
+        assert_eq!(event["params"]["type"], "error");
+        assert_eq!(event["params"]["args"][0]["value"], "oops");
+    }
+
+    #[test]
+    fn network_event_triplet_emits_request_and_finish_and_optional_response() {
+        let page = DebugPage {
+            page_id: "pg1".to_string(),
+            title: None,
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            user_agent: None,
+            adapter: DebugAdapterKind::PageBridge,
+            fidelity: DebugFidelity::Fallback,
+            state: DebugPageState::Discoverable,
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+            traffic_ids: Vec::new(),
+            last_seen_at_ms: 0,
+            capabilities: CapabilityMatrix::default(),
+            status_reason: None,
+            bridge_token: "token".to_string(),
+            bridge_tab_id: None,
+            dom_snapshot: None,
+            dom_tree: None,
+            dom_updated_at_ms: 0,
+            console_messages: Vec::new(),
+            network_events: Vec::new(),
+            storage_snapshot: Some(StorageSnapshot::default()),
+            evaluate_allowlist: Vec::new(),
+        };
+        let event = NetworkEvent {
+            url: "http://example.test/1".to_string(),
+            method: "GET".to_string(),
+            status: Some(200),
+            resource_type: "document".to_string(),
+            at_ms: 1000,
+            query_params: Vec::new(),
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            from_cache: None,
+            client_req_id: None,
+            traffic_id: None,
+        };
+        let events = network_event_triplet(&page, 0, &event);
+        // requestWillBeSent + responseReceived + loadingFinished
+        assert_eq!(events.len(), 3);
+        assert_eq!(events[0]["method"], "Network.requestWillBeSent");
+        assert_eq!(events[1]["method"], "Network.responseReceived");
+        assert_eq!(events[2]["method"], "Network.loadingFinished");
+    }
+}

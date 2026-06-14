@@ -848,4 +848,122 @@ mod tests {
         assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 4);
         assert_eq!(&bytes[44..], &[0, 1, 2, 3]);
     }
+
+    #[test]
+    fn wake_worker_match_binding_selects_first_matching_enabled_binding() {
+        let profiles = serde_json::json!([
+            {
+                "id": "p1",
+                "voiceprint_profile_id": "vp-1",
+                "speaker_threshold": 0.5
+            }
+        ]);
+        let bindings = serde_json::json!([
+            {
+                "id": "b1",
+                "enabled": true,
+                "phrase": "hey bifrost",
+                "profile_id": "p1",
+                "speaker_threshold": 0.7
+            },
+            {
+                "id": "b2",
+                "enabled": false,
+                "phrase": "hey bifrost",
+                "profile_id": "p1"
+            }
+        ]);
+
+        let candidate = wake_worker_match_binding(
+            profiles.as_array().unwrap(),
+            bindings.as_array().unwrap(),
+            &normalize_wake_phrase("hey bifrost"),
+        )
+        .expect("match ok")
+        .expect("candidate expected");
+
+        assert_eq!(candidate.phrase, "hey bifrost");
+        assert_eq!(candidate.profile_id, "p1");
+        assert_eq!(candidate.binding_id, "b1");
+        // speaker_threshold comes from binding when present
+        assert!((candidate.speaker_threshold - 0.7).abs() < 1e-6);
+    }
+
+    #[test]
+    fn wake_worker_match_binding_returns_none_when_no_binding_matches() {
+        let profiles = serde_json::json!([
+            {"id": "p1", "voiceprint_profile_id": "vp-1"}
+        ]);
+        let bindings = serde_json::json!([
+            {
+                "id": "b1",
+                "enabled": true,
+                "phrase": "different phrase",
+                "profile_id": "p1"
+            }
+        ]);
+
+        let candidate = wake_worker_match_binding(
+            profiles.as_array().unwrap(),
+            bindings.as_array().unwrap(),
+            &normalize_wake_phrase("hey bifrost"),
+        )
+        .expect("match ok");
+
+        assert!(candidate.is_none());
+    }
+
+    #[test]
+    fn wake_worker_candidate_speaker_allowed_applies_profile_and_threshold() {
+        let candidate = WakeWorkerCandidate {
+            phrase: "hey".to_string(),
+            binding_id: "b1".to_string(),
+            profile_id: "p1".to_string(),
+            voiceprint_profile_id: Some("vp-1".to_string()),
+            speaker_threshold: 0.75,
+        };
+
+        // Missing speaker → rejected
+        assert!(!wake_worker_candidate_speaker_allowed(&candidate, None));
+
+        // Mismatched profile id → rejected
+        let speaker = serde_json::json!({
+            "matched": true,
+            "profile_id": "vp-2",
+            "confidence": 0.9
+        });
+        assert!(!wake_worker_candidate_speaker_allowed(
+            &candidate,
+            Some(&speaker)
+        ));
+
+        // Low confidence → rejected
+        let speaker = serde_json::json!({
+            "matched": true,
+            "profile_id": "vp-1",
+            "confidence": 0.5
+        });
+        assert!(!wake_worker_candidate_speaker_allowed(
+            &candidate,
+            Some(&speaker)
+        ));
+
+        // All conditions satisfied → allowed
+        let speaker = serde_json::json!({
+            "matched": true,
+            "profile_id": "vp-1",
+            "confidence": 0.9
+        });
+        assert!(wake_worker_candidate_speaker_allowed(
+            &candidate,
+            Some(&speaker)
+        ));
+
+        // Candidate without voiceprint profile always allowed
+        let candidate = WakeWorkerCandidate {
+            voiceprint_profile_id: None,
+            ..candidate
+        };
+        assert!(wake_worker_candidate_speaker_allowed(&candidate, None));
+    }
 }

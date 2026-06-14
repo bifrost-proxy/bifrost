@@ -86,3 +86,50 @@ fn status_reason(code: u16) -> &'static str {
         _ => "Unknown",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calculate_request_size_matches_serialized_request() {
+        let headers = vec![
+            ("Host".to_string(), "example.com".to_string()),
+            ("X-Test".to_string(), "abc".to_string()),
+        ];
+        let body = "12345";
+
+        let calculated = calculate_request_size("GET", "/path", &headers, body.len());
+
+        let mut serialized = String::new();
+        serialized.push_str("GET /path HTTP/1.1\r\n");
+        serialized.push_str("Host: example.com\r\n");
+        serialized.push_str("X-Test: abc\r\n");
+        serialized.push_str("\r\n");
+        serialized.push_str(body);
+
+        assert_eq!(calculated, serialized.len());
+    }
+
+    #[test]
+    fn calculate_response_size_and_headers_size_are_consistent() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("X-Test".to_string(), "1".to_string()),
+        ];
+        let body = "hello";
+
+        let headers_size = calculate_response_headers_size(200, &headers);
+        let total_size = calculate_response_size(200, &headers, body.len());
+
+        assert_eq!(total_size, headers_size + body.len());
+    }
+
+    #[test]
+    fn status_reason_covers_known_and_unknown_codes() {
+        assert_eq!(status_reason(200), "OK");
+        assert_eq!(status_reason(404), "Not Found");
+        assert_eq!(status_reason(101), "Switching Protocols");
+        assert_eq!(status_reason(999), "Unknown");
+    }
+}

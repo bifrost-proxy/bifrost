@@ -156,3 +156,43 @@ mod tests {
         assert_eq!(&body[..], b"2345");
     }
 }
+
+#[cfg(test)]
+mod source_extra_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn parse_byte_range_supports_suffix_and_open_ended_ranges() {
+        let total = 10u64;
+        // open-ended range
+        let range = parse_byte_range(Some("bytes=2-"), total).unwrap().unwrap();
+        assert_eq!(range, (2, 9));
+
+        // suffix range
+        let range = parse_byte_range(Some("bytes=-4"), total).unwrap().unwrap();
+        assert_eq!(range, (6, 9));
+    }
+
+    #[test]
+    fn parse_byte_range_rejects_invalid_ranges() {
+        // start beyond end of file
+        assert!(parse_byte_range(Some("bytes=20-"), 10).is_err());
+        // start greater than end
+        assert!(parse_byte_range(Some("bytes=8-3"), 10).is_err());
+        // unsupported prefix
+        assert!(parse_byte_range(Some("items=0-1"), 10).is_err());
+        // multiple ranges not supported
+        assert!(parse_byte_range(Some("bytes=0-1,2-3"), 10).is_err());
+    }
+
+    #[test]
+    fn audio_content_type_maps_common_extensions_and_defaults() {
+        assert_eq!(audio_content_type(Path::new("clip.mp3")), "audio/mpeg");
+        assert_eq!(audio_content_type(Path::new("clip.flac")), "audio/flac");
+        assert_eq!(
+            audio_content_type(Path::new("clip.unknown")),
+            "application/octet-stream"
+        );
+    }
+}

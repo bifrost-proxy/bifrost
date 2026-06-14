@@ -1229,3 +1229,185 @@ fn summarize_detail_includes_ordered_messages() {
         Some("assistant")
     );
 }
+
+fn make_run_request_with_params(params: Value, session_key: Option<&str>) -> ExternalCliRunRequest {
+    ExternalCliRunRequest {
+        message: "hello".to_string(),
+        images: Vec::new(),
+        operation: "ask".to_string(),
+        params,
+        provider_id: None,
+        runner_id: None,
+        session_key: session_key.map(ToString::to_string),
+        runtime: "external_cli".to_string(),
+        adapter: ADAPTER_ID.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn requested_or_session_conversation_prefers_param_over_session_map() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig::default(),
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    // Pre-populate session map with a different conversation id
+    tokio::fs::write(
+        &config.sessions_path,
+        json!({ "sk1": "old-conv" }).to_string(),
+    )
+    .await
+    .expect("write sessions");
+
+    let request = make_run_request_with_params(json!({ "conversationId": " c-new " }), Some("sk1"));
+    let result = interaction::requested_or_session_conversation(&request, &config)
+        .await
+        .expect("ok");
+    assert_eq!(result.as_deref(), Some("c-new"));
+}
+
+#[tokio::test]
+async fn requested_or_session_conversation_reads_session_map_when_param_missing() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig::default(),
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    tokio::fs::write(
+        &config.sessions_path,
+        json!({ "sk1": "conv-from-session" }).to_string(),
+    )
+    .await
+    .expect("write sessions");
+
+    let request = make_run_request_with_params(Value::Null, Some("sk1"));
+    let result = interaction::requested_or_session_conversation(&request, &config)
+        .await
+        .expect("ok");
+    assert_eq!(result.as_deref(), Some("conv-from-session"));
+
+    let request2 = make_run_request_with_params(Value::Null, None);
+    let result2 = interaction::requested_or_session_conversation(&request2, &config)
+        .await
+        .expect("ok");
+    assert_eq!(result2, None);
+}
+
+#[tokio::test]
+async fn save_session_conversation_persists_and_updates_mapping() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig::default(),
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+
+    interaction::save_session_conversation(&config, "sk1", "c1")
+        .await
+        .expect("save sk1");
+    interaction::save_session_conversation(&config, "sk2", "c2")
+        .await
+        .expect("save sk2");
+    interaction::save_session_conversation(&config, "sk1", "c1-new")
+        .await
+        .expect("update sk1");
+
+    let content = tokio::fs::read_to_string(&config.sessions_path)
+        .await
+        .expect("read map");
+    let map: serde_json::Value = serde_json::from_str(&content).expect("parse map");
+    assert_eq!(map.get("sk1").and_then(Value::as_str), Some("c1-new"));
+    assert_eq!(map.get("sk2").and_then(Value::as_str), Some("c2"));
+}
+
+#[test]
+fn try_waited_final_from_sse_builds_waited_final_for_finished_assistant() {
+    let sse_detail = json!({
+        "mapping": {
+            "user": {
+                "message": {
+                    "id": "u1",
+                    "author": {"role": "user"},
+                    "create_time": 0.0,
+                    "content": {"parts": ["hi"]}
+                }
+            },
+            "a1": {
+                "message": {
+                    "id": "a1",
+                    "author": {"role": "assistant"},
+                    "create_time": 1.0,
+                    "status": "finished_successfully",
+                    "end_turn": true,
+                    "content": {"parts": ["thinking"]}
+                }
+            },
+            "a2": {
+                "message": {
+                    "id": "a2",
+                    "author": {"role": "assistant"},
+                    "create_time": 2.0,
+                    "status": "finished_successfully",
+                    "end_turn": true,
+                    "content": {"parts": ["final answer"]}
+                }
+            }
+        }
+    });
+
+    let waited = interaction::try_waited_final_from_sse(&sse_detail, Some(0.0))
+        .expect("waited final from sse");
+    assert_eq!(
+        waited.final_message.get("text").and_then(Value::as_str),
+        Some("thinking\n\nfinal answer")
+    );
+    assert_eq!(
+        waited.all_texts,
+        vec!["thinking".to_string(), "final answer".to_string()]
+    );
+    assert!(!waited.had_429_or_fallback);
+}
+
+#[test]
+fn browser_fetch_headers_strips_cookie_and_user_agent() {
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer captured".to_string());
+    headers.insert("cookie".to_string(), "session=1".to_string());
+    headers.insert("user-agent".to_string(), "UA".to_string());
+    let state = AuthState {
+        captured_at: iso_now(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        user_agent: "UA".to_string(),
+        captured_auth_headers: headers,
+        captured_auth_identity: AuthorizationIdentity::default(),
+        captured_account_check: None,
+        cookies: Vec::new(),
+    };
+
+    let browser_headers = browser_fetch_headers(&state);
+    assert_eq!(
+        browser_headers.get("authorization").map(String::as_str),
+        Some("Bearer captured")
+    );
+    assert!(!browser_headers.contains_key("cookie"));
+    assert!(!browser_headers.contains_key("user-agent"));
+}

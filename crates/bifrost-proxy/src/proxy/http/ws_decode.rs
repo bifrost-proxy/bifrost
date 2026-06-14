@@ -273,3 +273,221 @@ pub async fn decode_ws_payload_for_storage(
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use bifrost_admin::{
+        AdminState, FrameDirection, FrameType, ScriptManager, SharedScriptManager,
+        SharedValuesStorage,
+    };
+    use bifrost_core::Protocol;
+    use bifrost_storage::ValuesStorage;
+    use parking_lot::RwLock as ParkingRwLock;
+    use rand::random;
+    use tokio::sync::RwLock as TokioRwLock;
+
+    fn temp_path(prefix: &str) -> std::path::PathBuf {
+        let mut base = std::env::temp_dir();
+        base.push(format!(
+            "bifrost-proxy-tests-ws-{prefix}-{}",
+            random::<u64>()
+        ));
+        base
+    }
+
+    fn make_admin_state_with_script_manager() -> Arc<AdminState> {
+        let mut state = AdminState::new(0);
+        let scripts_dir = temp_path("scripts");
+        std::fs::create_dir_all(&scripts_dir).expect("create scripts dir");
+        let manager = ScriptManager::new(scripts_dir);
+        let shared: SharedScriptManager = Arc::new(TokioRwLock::new(manager));
+        state.script_manager = Some(shared);
+        Arc::new(state)
+    }
+
+    fn make_admin_state_with_values(values: &[(&str, &str)]) -> Arc<AdminState> {
+        let mut state = AdminState::new(0);
+        let values_dir = temp_path("values");
+        let mut storage = ValuesStorage::with_dir(values_dir).expect("values storage");
+        for (k, v) in values {
+            storage.set_value(k, v).expect("set value");
+        }
+        let shared: SharedValuesStorage = Arc::new(ParkingRwLock::new(storage));
+        state.values_storage = Some(shared);
+        Arc::new(state)
+    }
+
+    fn make_ctx() -> RequestContext {
+        RequestContext::new()
+    }
+
+    #[test]
+    fn parse_url_parts_handles_valid_and_invalid_urls() {
+        let (host, path, protocol) = parse_url_parts("ws://example.com/chat?token=1");
+        assert_eq!(host, "example.com");
+        assert_eq!(path, "/chat");
+        assert_eq!(protocol, "ws");
+
+        let (host, path, protocol) = parse_url_parts("not a url");
+        assert_eq!(host, "");
+        assert_eq!(path, "not a url");
+        assert_eq!(protocol, "http");
+    }
+
+    #[test]
+    fn is_builtin_decoder_matches_exact_names_only() {
+        assert!(is_builtin_decoder("utf8"));
+        assert!(is_builtin_decoder("default"));
+        assert!(!is_builtin_decoder(" utf8"));
+        assert!(!is_builtin_decoder("other"));
+    }
+
+    #[test]
+    fn builtin_decode_utf8_roundtrips_and_is_lossy() {
+        let ascii = b"hello";
+        assert_eq!(builtin_decode_utf8(ascii), b"hello".to_vec());
+
+        let invalid = vec![0xff, b'a'];
+        let decoded = String::from_utf8(builtin_decode_utf8(&invalid)).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(&invalid));
+    }
+
+    #[test]
+    fn build_matched_rules_info_copies_fields() {
+        use crate::server::RuleValue;
+
+        let rule = RuleValue {
+            pattern: "example.test".to_string(),
+            protocol: Protocol::Http,
+            value: "foo".to_string(),
+            options: HashMap::new(),
+            rule_name: None,
+            raw: None,
+            line: None,
+            auto_tls_intercept: false,
+        };
+        let resolved = ResolvedRules {
+            rules: vec![rule.clone()],
+            ..Default::default()
+        };
+
+        let infos = build_matched_rules_info(&resolved);
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0].pattern, rule.pattern);
+        assert_eq!(infos[0].value, rule.value);
+        assert_eq!(infos[0].protocol, rule.protocol.to_string());
+    }
+
+    #[tokio::test]
+    async fn get_values_from_state_handles_none_and_some() {
+        let none_state: Option<Arc<AdminState>> = None;
+        let values = get_values_from_state(&none_state).await;
+        assert!(values.is_empty());
+
+        let state = make_admin_state_with_values(&[("vk", "vv")]);
+        let some_state = Some(state);
+        let values = get_values_from_state(&some_state).await;
+        assert_eq!(values.get("vk"), Some(&"vv".to_string()));
+    }
+
+    #[tokio::test]
+    async fn decode_ws_payload_returns_none_for_empty_inputs_and_missing_state() {
+        let ctx = make_ctx();
+        let resolved = ResolvedRules::default();
+        let meta = WsHandshakeMeta::default();
+
+        // No scripts
+        let out = decode_ws_payload_for_storage(
+            &None,
+            &[],
+            &ctx,
+            &resolved,
+            "ws://example.com/ws",
+            "GET",
+            &[],
+            &meta,
+            FrameDirection::Send,
+            FrameType::Text,
+            b"some payload",
+        )
+        .await;
+        assert!(out.is_none());
+
+        // Empty payload
+        let out = decode_ws_payload_for_storage(
+            &None,
+            &["utf8".to_string()],
+            &ctx,
+            &resolved,
+            "ws://example.com/ws",
+            "GET",
+            &[],
+            &meta,
+            FrameDirection::Send,
+            FrameType::Text,
+            &[],
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_ws_payload_skips_large_payload_with_marker() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_ctx();
+        let resolved = ResolvedRules::default();
+        let meta = WsHandshakeMeta::default();
+        let headers = vec![("Host".to_string(), "example.com".to_string())];
+
+        let big = vec![b'x'; 2 * 1024 * 1024 + 1];
+        let out = decode_ws_payload_for_storage(
+            &admin_state,
+            &["utf8".to_string()],
+            &ctx,
+            &resolved,
+            "ws://example.com/ws",
+            "GET",
+            &headers,
+            &meta,
+            FrameDirection::Send,
+            FrameType::Text,
+            &big,
+        )
+        .await;
+        assert!(out.is_none());
+    }
+
+    #[tokio::test]
+    async fn decode_ws_payload_applies_builtin_utf8_decoder() {
+        let admin = make_admin_state_with_script_manager();
+        let admin_state = Some(admin);
+        let ctx = make_ctx();
+        let resolved = ResolvedRules::default();
+        let meta = WsHandshakeMeta::default();
+        let headers = vec![("Host".to_string(), "example.com".to_string())];
+
+        let payload = vec![0xff, b'a'];
+        let out = decode_ws_payload_for_storage(
+            &admin_state,
+            &["utf8".to_string()],
+            &ctx,
+            &resolved,
+            "ws://example.com/ws",
+            "GET",
+            &headers,
+            &meta,
+            FrameDirection::Send,
+            FrameType::Text,
+            &payload,
+        )
+        .await;
+
+        let result = out.expect("expected some output");
+        assert_eq!(result, builtin_decode_utf8(&payload));
+    }
+}

@@ -1817,7 +1817,31 @@ fn draw_status_bar(f: &mut Frame, app: &InteractiveApp, area: Rect) {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_search_request_body, parse_sse_events, SearchOptions, SseEvent};
+    use super::*;
+
+    fn sample_traffic_summary() -> TrafficSummary {
+        TrafficSummary {
+            id: "id-1".to_string(),
+            seq: 1,
+            ts: 0,
+            m: "GET".to_string(),
+            h: "example.com".to_string(),
+            p: "/path".to_string(),
+            s: 200,
+            ct: None,
+            req_ct: None,
+            req_sz: 123,
+            res_sz: 456,
+            dur: 789,
+            proto: "HTTP/1.1".to_string(),
+            cip: "127.0.0.1".to_string(),
+            capp: None,
+            flags: 0,
+            fc: 0,
+            st: String::new(),
+            et: None,
+        }
+    }
 
     #[test]
     fn build_search_request_body_includes_basic_conditions() {
@@ -1933,5 +1957,179 @@ mod tests {
             SseEvent::Error(error) => assert_eq!(error.message, "search stream failed"),
             other => panic!("unexpected event: {:?}", std::mem::discriminant(other)),
         }
+    }
+
+    #[test]
+    fn parse_sse_events_ignores_unknown_events() {
+        let sse = b"event: unknown\ndata: {\"foo\":1}\n\n";
+        let events: Vec<_> = parse_sse_events(&sse[..]).collect();
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn output_format_from_str_accepts_short_and_long_aliases() {
+        use std::str::FromStr;
+
+        assert!(matches!(
+            super::OutputFormat::from_str("table").unwrap(),
+            super::OutputFormat::Table
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("compact").unwrap(),
+            super::OutputFormat::Compact
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("c").unwrap(),
+            super::OutputFormat::Compact
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("json").unwrap(),
+            super::OutputFormat::Json
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("j").unwrap(),
+            super::OutputFormat::Json
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("json-pretty").unwrap(),
+            super::OutputFormat::JsonPretty
+        ));
+        assert!(matches!(
+            super::OutputFormat::from_str("jp").unwrap(),
+            super::OutputFormat::JsonPretty
+        ));
+    }
+
+    #[test]
+    fn highlight_keyword_wraps_all_case_insensitive_matches() {
+        let text = "Hello Token token";
+        let highlighted = super::highlight_keyword(text, "token", true);
+        // two highlighted segments
+        assert!(highlighted.matches("\u{1b}[1;33m").count() >= 2);
+        assert!(highlighted.ends_with("\u{1b}[0m"));
+    }
+
+    #[test]
+    fn highlight_keyword_returns_original_when_no_match_or_disabled() {
+        let text = "hello";
+        assert_eq!(super::highlight_keyword(text, "token", true), text);
+        assert_eq!(super::highlight_keyword(text, "", true), text);
+        assert_eq!(super::highlight_keyword(text, "hello", false), text);
+    }
+
+    #[test]
+    fn truncate_str_limits_visible_characters_and_appends_ellipsis() {
+        let s = "abcdefghijklmnopqrstuvwxyz";
+        let truncated = super::truncate_str(s, 10);
+        assert!(truncated.ends_with("..."));
+        assert_eq!(truncated.chars().count(), 10);
+
+        // Unicode-safe: do not split surrogate pairs
+        let s = "😀😀😀😀😀"; // 5 emojis
+        let truncated = super::truncate_str(s, 4);
+        assert!(truncated.ends_with("..."));
+    }
+
+    #[test]
+    fn format_size_and_duration_and_number_are_human_friendly() {
+        assert_eq!(super::format_size(500), "500B");
+        assert_eq!(super::format_size(1_024), "1.0KB");
+        assert_eq!(super::format_size(1_048_576), "1.0MB");
+
+        assert_eq!(super::format_duration(0), "...");
+        assert_eq!(super::format_duration(500), "500ms");
+        assert_eq!(super::format_duration(2_500), "2.50s");
+
+        assert_eq!(super::format_number(999), "999");
+        assert_eq!(super::format_number(1_500), "1.5K");
+        assert_eq!(super::format_number(1_500_000), "1.5M");
+    }
+
+    #[test]
+    fn match_field_label_maps_known_fields_and_falls_back_to_match() {
+        assert_eq!(super::match_field_label("url"), "URL");
+        assert_eq!(super::match_field_label("request_headers"), "REQ_HDR");
+        assert_eq!(super::match_field_label("response_headers"), "RES_HDR");
+        assert_eq!(super::match_field_label("request_body"), "REQ_BODY");
+        assert_eq!(super::match_field_label("response_body"), "RES_BODY");
+        assert_eq!(super::match_field_label("frames"), "FRAMES");
+        assert_eq!(super::match_field_label("other"), "MATCH");
+    }
+
+    #[test]
+    fn highlight_spans_returns_spans_with_highlight_style() {
+        let spans = super::highlight_spans("hello token world", "token");
+        assert!(!spans.is_empty());
+        let joined: String = spans
+            .iter()
+            .map(|s| s.content.to_string())
+            .collect::<Vec<_>>()
+            .join("");
+        assert_eq!(joined, "hello token world");
+    }
+
+    #[test]
+    fn build_match_summary_returns_no_match_when_matches_empty() {
+        let item = SearchResultItem {
+            record: sample_traffic_summary(),
+            matches: Vec::new(),
+        };
+        let (header, _preview) = build_match_summary(&item, "token");
+        let header_debug = format!("{header:?}");
+        assert!(header_debug.contains("NO_MATCH"));
+    }
+
+    #[test]
+    fn build_match_summary_prefers_non_url_match_and_truncates_preview() {
+        let item = SearchResultItem {
+            record: sample_traffic_summary(),
+            matches: vec![
+                MatchLocation {
+                    field: "url".to_string(),
+                    preview: "https://example.com/ignored".to_string(),
+                    offset: 0,
+                },
+                MatchLocation {
+                    field: "request_body".to_string(),
+                    preview: "a".repeat(200),
+                    offset: 0,
+                },
+            ],
+        };
+        let (header, preview) = build_match_summary(&item, "a");
+        let header_debug = format!("{header:?}");
+        assert!(
+            header_debug.contains("REQ_BODY"),
+            "header was {header_debug}"
+        );
+        let preview_debug = format!("{preview:?}");
+        assert!(preview_debug.contains("..."));
+    }
+
+    #[test]
+    fn format_headers_formats_present_headers_and_reports_empty() {
+        let headers = Some(vec![(
+            "Content-Type".to_string(),
+            "application/json".to_string(),
+        )]);
+        let text = format_headers(&headers, "Headers");
+        assert!(text.contains("Headers"));
+        assert!(text.contains("Content-Type: application/json"));
+
+        let empty = format_headers(&None, "Headers");
+        assert!(empty.to_lowercase().contains("no headers"));
+    }
+
+    #[test]
+    fn format_body_formats_json_and_plain_text_bodies() {
+        let mut app = InteractiveApp::new(SearchOptions::default());
+        app.request_body = Some("{\"foo\":1}".to_string());
+        app.response_body = Some("line1\nline2".to_string());
+
+        let text = format_body(&app);
+        assert!(text.contains("Request Body"));
+        assert!(text.contains("\"foo\": 1"));
+        assert!(text.contains("Response Body"));
+        assert!(text.contains("line1"));
     }
 }

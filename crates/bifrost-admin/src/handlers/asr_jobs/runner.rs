@@ -1768,3 +1768,84 @@ fn persist_partial_transcription_artifacts(
     }
     save_file_store(&context.task_id, &store)
 }
+
+#[cfg(test)]
+mod runner_tests {
+    use super::*;
+    use crate::asr_runtime::AsrServiceState;
+    use std::path::PathBuf;
+
+    fn sample_file_record(created: Option<u64>, modified: Option<u64>) -> FileRecord {
+        FileRecord {
+            task_id: "task".to_string(),
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_size: None,
+            source_modified_ms: modified,
+            source_created_at_ms: created,
+            source_created_at_source: None,
+            content_hash: None,
+            content_hash_algorithm: None,
+            duplicate_of_source_key: None,
+            transcript_alias: None,
+            media_duration_ms: None,
+            status: FileStatus::Pending,
+            output_text_path: None,
+            output_metadata_path: None,
+            output_timeline_path: None,
+            text_chars: 0,
+            error: None,
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            chunk_metrics: Vec::new(),
+            fallback_reason: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            progress_current: None,
+            progress_total: None,
+            failed_chunks: Vec::new(),
+            memory_limit_hints: Vec::new(),
+        }
+    }
+
+    fn sample_state(pid: Option<u32>, port: u16) -> AsrServiceState {
+        AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port,
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "chinese".to_string(),
+            home: crate::handlers::asr::default_home(),
+            pid,
+            managed_by: "test".to_string(),
+            owner_module: Some("test".to_string()),
+            owner_id: None,
+            started_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn pending_source_and_modified_time_ms_use_defaults_when_missing() {
+        let record = sample_file_record(Some(123), Some(456));
+        assert_eq!(pending_source_time_ms(Some(&record)), 123);
+        assert_eq!(pending_modified_time_ms(Some(&record)), 456);
+
+        assert_eq!(pending_source_time_ms(None), u64::MAX);
+        assert_eq!(pending_modified_time_ms(None), u64::MAX);
+
+        let missing_times = sample_file_record(None, None);
+        assert_eq!(pending_source_time_ms(Some(&missing_times)), u64::MAX);
+        assert_eq!(pending_modified_time_ms(Some(&missing_times)), u64::MAX);
+    }
+
+    #[test]
+    fn service_state_same_process_requires_matching_pid_and_port() {
+        let before = sample_state(Some(12345), 60_000);
+        let same = sample_state(Some(12345), 60_000);
+        let different_pid = sample_state(Some(12346), 60_000);
+        let different_port = sample_state(Some(12345), 60_001);
+
+        assert!(service_state_same_process(Some(&before), Some(&same)));
+        assert!(!service_state_same_process(Some(&before), Some(&different_pid)));
+        assert!(!service_state_same_process(Some(&before), Some(&different_port)));
+        assert!(!service_state_same_process(Some(&before), None));
+        assert!(!service_state_same_process(None, Some(&same)));
+    }
+}

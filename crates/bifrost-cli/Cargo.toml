@@ -59,6 +59,9 @@ ring = "0.17"
 uuid.workspace = true
 fs2 = "0.4"
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.28", features = ["signal", "process", "fs"] }
 libc = "0.2"

@@ -827,4 +827,83 @@ mod tests {
 
         assert!(err.to_string().contains("not ready"));
     }
+
+    #[test]
+    fn connected_android_devices_filters_by_connected_status() {
+        let devices = vec![
+            android_device("connected", DeviceStatus::Connected),
+            android_device("disconnected", DeviceStatus::Offline),
+            android_device("unauthorized", DeviceStatus::Unauthorized),
+        ];
+        let connected = connected_android_devices(&devices);
+        assert_eq!(connected.len(), 1);
+        assert_eq!(connected[0].id, "connected");
+    }
+
+    fn ios_device(id: &str, status: DeviceStatus, target: Option<&str>) -> MobileDevice {
+        MobileDevice {
+            id: id.to_string(),
+            name: None,
+            managed_install_target: target.map(|t| t.to_string()),
+            platform: bifrost_device::MobilePlatform::Ios,
+            status,
+            capability: bifrost_device::DeviceTrustCapability::PushAndOpenInstaller,
+            certificate_status: None,
+            status_message: "status".to_string(),
+        }
+    }
+
+    #[test]
+    fn select_single_ios_device_resolves_by_id_or_target() {
+        let devices = vec![
+            ios_device("ios-1", DeviceStatus::Connected, Some("target-1")),
+            ios_device("ios-2", DeviceStatus::Connected, Some("target-2")),
+        ];
+
+        let selected = select_single_ios_device_for_configurator(&devices, Some("ios-2"), true)
+            .expect("select by id");
+        assert_eq!(selected.id, "ios-2");
+
+        let selected = select_single_ios_device_for_configurator(&devices, Some("target-1"), true)
+            .expect("select by managed target");
+        assert_eq!(selected.id, "ios-1");
+    }
+
+    #[test]
+    fn select_single_ios_device_requires_device_when_multiple_non_interactive() {
+        let devices = vec![
+            ios_device("ios-1", DeviceStatus::Connected, None),
+            ios_device("ios-2", DeviceStatus::Connected, None),
+        ];
+        let err = select_single_ios_device_for_configurator(&devices, None, true)
+            .expect_err("multiple devices should require --device");
+        assert!(err.to_string().contains("Pass --device <id>"));
+    }
+
+    #[test]
+    fn device_display_name_uses_friendly_name_when_available() {
+        let named = MobileDevice {
+            id: "abc123".to_string(),
+            name: Some("My Phone".to_string()),
+            managed_install_target: None,
+            platform: bifrost_device::MobilePlatform::Android,
+            status: DeviceStatus::Connected,
+            capability: bifrost_device::DeviceTrustCapability::PushAndOpenInstaller,
+            certificate_status: None,
+            status_message: String::new(),
+        };
+        let unnamed = MobileDevice {
+            id: "xyz456".to_string(),
+            name: None,
+            managed_install_target: None,
+            platform: bifrost_device::MobilePlatform::Android,
+            status: DeviceStatus::Connected,
+            capability: bifrost_device::DeviceTrustCapability::PushAndOpenInstaller,
+            certificate_status: None,
+            status_message: String::new(),
+        };
+
+        assert_eq!(device_display_name(&named), "My Phone (abc123)");
+        assert_eq!(device_display_name(&unnamed), "xyz456");
+    }
 }

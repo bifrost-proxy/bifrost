@@ -779,4 +779,59 @@ mod tests {
         assert!(error.to_string().contains("--rule-file"));
         assert!(error.to_string().contains("--rule-text"));
     }
+
+    #[test]
+    fn inline_rule_label_summarizes_content_preview() {
+        assert_eq!(inline_rule_label("status://200"), "inline:status://200");
+        assert_eq!(
+            inline_rule_label("   status://200   "),
+            "inline:status://200"
+        );
+        let long = "rule one two three four five six seven eight nine ten";
+        let label = inline_rule_label(long);
+        assert!(label.starts_with("inline:"));
+        assert!(label.len() <= "inline:".len() + 48);
+    }
+
+    #[test]
+    fn inline_rule_label_marks_empty_content() {
+        assert_eq!(inline_rule_label(""), "inline:<empty>");
+        assert_eq!(inline_rule_label("   \n  \t"), "inline:<empty>");
+    }
+
+    #[test]
+    fn count_rules_ignores_comments_and_markdown_fences() {
+        let content = r#"
+# comment line
+rule one
+
+```markdown
+ignored
+```
+   rule two   
+# another comment
+"#;
+        assert_eq!(count_rules(content), 3);
+    }
+
+    #[test]
+    fn build_rule_refs_rejects_group_rule_with_empty_parts() {
+        let err = build_rule_refs(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["group-only/".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected <group_id>/<rule_name>"));
+
+        let err = build_rule_refs(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec!["/rule-only".to_string()],
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("expected <group_id>/<rule_name>"));
+    }
 }

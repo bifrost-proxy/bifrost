@@ -922,3 +922,52 @@ mod tests {
         assert_eq!(asr_ws_progress_event_type("preprocess"), "progress");
     }
 }
+
+#[cfg(test)]
+mod ws_extra_tests {
+    use super::*;
+
+    #[test]
+    fn decode_audio_payload_decodes_valid_base64() {
+        use base64::Engine as _;
+        let encoded = base64::engine::general_purpose::STANDARD.encode([1u8, 2, 3]);
+        let decoded = decode_audio_payload(&encoded).unwrap();
+        assert_eq!(decoded, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn parse_ws_client_message_rejects_oversized_payloads() {
+        // MAX_WS_TEXT_BYTES is an upper bound for accepted control frames
+        let oversized = "x".repeat(MAX_WS_TEXT_BYTES + 1);
+        let err = parse_ws_client_message(&oversized).unwrap_err();
+        assert!(err.contains("too large"));
+    }
+
+    #[test]
+    fn ws_options_flush_interval_is_clamped_to_maximum() {
+        let query = format!(
+            "flush_interval_ms=200000&window_ms={}",
+            crate::handlers::asr_streaming::MIN_STREAM_WINDOW_MS
+        );
+        let options = asr_ws_options_from_query(Some(&query)).unwrap();
+        assert_eq!(
+            options.flush_interval,
+            Duration::from_millis(MAX_FLUSH_INTERVAL_MS)
+        );
+    }
+
+    #[test]
+    fn audio_extension_from_mime_inferrs_common_extensions() {
+        assert_eq!(audio_extension_from_mime("audio/webm"), "webm");
+        assert_eq!(audio_extension_from_mime("audio/ogg"), "ogg");
+        assert_eq!(audio_extension_from_mime("audio/mp4"), "m4a");
+        assert_eq!(audio_extension_from_mime("audio/wav"), "wav");
+        assert_eq!(audio_extension_from_mime("application/octet-stream"), "webm");
+    }
+
+    #[test]
+    fn format_seconds_formats_milliseconds_with_three_fractional_digits() {
+        assert_eq!(format_seconds(1_500), "1.500");
+        assert_eq!(format_seconds(0), "0.000");
+    }
+}

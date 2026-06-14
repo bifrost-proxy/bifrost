@@ -854,4 +854,21 @@ mod tests {
     fn launchd_auto_install_skips_current_loaded_daemon() {
         assert!(!system_proxy_launchd_needs_auto_install(true, true, false));
     }
+
+    #[test]
+    fn system_proxy_status_unsupported_uses_config_preferences() {
+        let cfg = SystemProxyConfig {
+            enabled: true,
+            bypass: "example.com".to_string(),
+            auto_enable: true,
+        };
+        let status = SystemProxyStatus::unsupported(&cfg);
+
+        assert!(!status.supported);
+        assert!(!status.enabled);
+        assert_eq!(status.host, "");
+        assert_eq!(status.port, 0);
+        assert!(status.configured_enabled);
+        assert_eq!(status.configured_bypass, "example.com");
+    }
 }

@@ -2174,3 +2174,62 @@ mod tests {
         assert_eq!(store.events[0].speaker_confidence, Some(0.93));
     }
 }
+
+#[cfg(test)]
+mod wake_helper_tests {
+    use super::*;
+    use serde_json::json;
+    use std::fs;
+    use std::io::Read as _;
+    use tempfile::tempdir;
+
+    #[test]
+    fn atomic_json_write_creates_parent_dirs_and_writes_pretty_json() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("nested/config.json");
+        let value = json!({"k": 1, "s": "v"});
+
+        atomic_json_write(&path, &value).expect("atomic write");
+
+        let mut file = fs::File::open(&path).expect("written file exists");
+        let mut contents = String::new();
+        file.read_to_string(&mut contents).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents).unwrap();
+        assert_eq!(parsed, value);
+
+        // Temporary file should not remain.
+        let tmp_path = path.with_extension("tmp");
+        assert!(!tmp_path.exists());
+    }
+
+    #[test]
+    fn validate_id_accepts_safe_ids_and_rejects_invalid() {
+        validate_id("id-1_ok.2", "label").expect("valid id");
+        assert!(validate_id("", "id").is_err());
+        assert!(validate_id(&"x".repeat(97), "id").is_err());
+        assert!(validate_id("bad id", "id").is_err());
+        assert!(validate_id("bad#id", "id").is_err());
+    }
+
+    #[test]
+    fn escape_applescript_escapes_backslashes_and_quotes() {
+        let input = "a\\b\"c";
+        let escaped = escape_applescript(input);
+        // Backslashes doubled, quotes escaped.
+        assert_eq!(escaped, "a\\\\b\\\"c");
+    }
+
+    #[test]
+    fn default_flags_and_values_match_expected_defaults() {
+        assert!(default_enabled());
+        assert!(default_dry_run());
+        assert!(default_execute());
+        assert_eq!(default_listener_source(), "mic".to_string());
+        assert_eq!(
+            default_listener_engine(),
+            "lightweight_kws_listener".to_string()
+        );
+        assert_eq!(default_press_count(), 1);
+        assert_eq!(default_repeat_delay_ms(), 100);
+    }
+}

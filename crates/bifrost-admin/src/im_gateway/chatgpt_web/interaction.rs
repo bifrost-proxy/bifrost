@@ -2205,3 +2205,196 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn has_in_progress_messages_respects_after_time() {
+        let conversation = json!({
+            "mapping": {
+                "early": {"message": {"create_time": 10.0, "status": "in_progress"}},
+                "late": {"message": {"create_time": 20.0, "status": "finished_successfully"}}
+            }
+        });
+
+        assert!(has_in_progress_messages(&conversation, None));
+        assert!(!has_in_progress_messages(&conversation, Some(15.0)));
+        assert!(!has_in_progress_messages(&json!({}), None));
+    }
+
+    #[test]
+    fn find_final_assistant_ignores_non_assistant_and_empty_text() {
+        let conversation = json!({
+            "mapping": {
+                "user": {
+                    "message": {
+                        "id": "u1",
+                        "author": {"role": "user"},
+                        "create_time": 1.0,
+                        "content": {"parts": ["hello"]}
+                    }
+                },
+                "assistant_empty": {
+                    "message": {
+                        "id": "a0",
+                        "author": {"role": "assistant"},
+                        "create_time": 2.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["   "]}
+                    }
+                },
+                "assistant_final": {
+                    "message": {
+                        "id": "a1",
+                        "author": {"role": "assistant"},
+                        "create_time": 3.0,
+                        "status": "finished_successfully",
+                        "end_turn": true,
+                        "metadata": {"default_model_slug": "gpt-4"},
+                        "content": {"parts": ["answer"]}
+                    }
+                }
+            }
+        });
+
+        let final_msg = find_final_assistant(&conversation, None).expect("final message");
+        assert_eq!(final_msg.get("id").and_then(Value::as_str), Some("a1"));
+        assert_eq!(
+            final_msg.get("model").and_then(Value::as_str),
+            Some("gpt-4")
+        );
+        assert_eq!(
+            final_msg.get("text").and_then(Value::as_str),
+            Some("answer")
+        );
+    }
+
+    #[test]
+    fn find_all_assistant_texts_merges_multiple_finished_messages() {
+        let conversation = json!({
+            "mapping": {
+                "a1": {
+                    "message": {
+                        "id": "a1",
+                        "author": {"role": "assistant"},
+                        "create_time": 1.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["step 1"]}
+                    }
+                },
+                "a2": {
+                    "message": {
+                        "id": "a2",
+                        "author": {"role": "assistant"},
+                        "create_time": 2.0,
+                        "status": "finished_successfully",
+                        "content": {"parts": ["step 2"]}
+                    }
+                },
+                "in_progress": {
+                    "message": {
+                        "id": "a3",
+                        "author": {"role": "assistant"},
+                        "create_time": 3.0,
+                        "status": "in_progress",
+                        "content": {"parts": ["ignored"]}
+                    }
+                }
+            }
+        });
+
+        let (merged, texts) = find_all_assistant_texts(&conversation, None).expect("merged texts");
+        assert_eq!(texts, vec!["step 1".to_string(), "step 2".to_string()]);
+        assert_eq!(
+            merged.get("text").and_then(Value::as_str),
+            Some("step 1\n\nstep 2")
+        );
+        assert_eq!(merged.get("id").and_then(Value::as_str), Some("a2"));
+    }
+
+    #[test]
+    fn extract_generated_image_placeholders_parses_paths_and_dimensions() {
+        let text = "Generated images from the last image_gen call were saved at:\n\
+- /mnt/data/cat1.png (wxh = 1024 x 1024)\n\
+- /mnt/data/cat2.png (wxh = 512 x 512)";
+        let images = extract_generated_image_placeholders(text);
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            images[0].get("sourcePath").and_then(Value::as_str),
+            Some("/mnt/data/cat1.png")
+        );
+        assert_eq!(
+            images[0].get("dimensions").and_then(Value::as_str),
+            Some("1024 x 1024)")
+        );
+        assert_eq!(
+            images[1].get("sourcePath").and_then(Value::as_str),
+            Some("/mnt/data/cat2.png")
+        );
+    }
+
+    #[test]
+    fn collect_and_attach_generated_image_assets_deduplicates_and_aligns() {
+        let message = json!({
+            "content": {
+                "parts": [
+                    {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_cat_1", "width": 640_u64, "height": 480_u64, "size_bytes": 11_u64},
+                    {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_cat_2", "width": 800_u64, "height": 600_u64, "size_bytes": 22_u64},
+                    {"content_type": "image_asset_pointer", "asset_pointer": "sediment://file_cat_1", "width": 1_u64, "height": 1_u64, "size_bytes": 1_u64}
+                ]
+            }
+        });
+        let assets = collect_generated_image_assets_from_message(&message, 123.0);
+        assert_eq!(assets.len(), 2);
+        assert_eq!(
+            assets[0].get("assetPointer").and_then(Value::as_str),
+            Some("sediment://file_cat_1")
+        );
+        assert_eq!(
+            assets[1].get("fileId").and_then(Value::as_str),
+            Some("file_cat_2")
+        );
+
+        let mut placeholders = vec![
+            json!({"sourcePath": "/mnt/data/cat1.png"}),
+            json!({"sourcePath": "/mnt/data/cat2.png"}),
+        ];
+        attach_generated_image_assets(&mut placeholders, &assets);
+        assert_eq!(
+            placeholders[0].get("fileId").and_then(Value::as_str),
+            Some("file_cat_1")
+        );
+        assert_eq!(
+            placeholders[1].get("width").and_then(Value::as_u64),
+            Some(800)
+        );
+    }
+
+    #[test]
+    fn dom_content_is_usable_considers_images_and_text() {
+        assert!(dom_content_is_usable("", 1));
+        assert!(!dom_content_is_usable("   ", 0));
+        assert!(dom_content_is_usable("ChatGPT 说：OK", 0));
+    }
+
+    #[test]
+    fn event_helper_builds_progress_event() {
+        let raw = json!({"phase": "test"});
+        let evt = event(
+            ExternalCliProgressEventType::AssistantDelta,
+            "hello",
+            Some("title"),
+            raw.clone(),
+        );
+        assert!(matches!(
+            evt.event_type,
+            ExternalCliProgressEventType::AssistantDelta
+        ));
+        assert_eq!(evt.content, "hello");
+        assert_eq!(evt.title.as_deref(), Some("title"));
+        assert_eq!(evt.raw, raw);
+    }
+}

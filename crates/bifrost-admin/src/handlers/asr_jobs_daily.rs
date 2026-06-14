@@ -179,3 +179,15 @@ mod tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod daily_extra_tests {
+    use super::*;
+
+    #[test]
+    fn parse_daily_document_date_enforces_yyyy_mm_dd_format() {
+        assert!(parse_daily_document_date("2024-01-02").is_ok());
+        assert!(parse_daily_document_date("2024-13-01").is_err());
+        assert!(parse_daily_document_date("2024/01/02").is_err());
+    }
+}

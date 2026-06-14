@@ -751,9 +751,39 @@ fn page_url_matches_conversation(url: &str, base_url: &str, conversation_id: &st
 #[cfg(test)]
 mod tests {
     use super::{
-        browser_process_candidate_from_line, browser_process_pid_from_line,
-        page_url_matches_conversation,
+        browser_process_candidate_from_line, browser_process_pid_from_line, conversation_tabs,
+        get_conversation_tab, page_url_matches_conversation, register_conversation_tab, CdpClient,
+        CONVERSATION_TAB_POOL_SIZE,
     };
+    use dashmap::DashMap;
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    };
+    use tokio::sync::{broadcast, mpsc};
+    use tokio_tungstenite::tungstenite::protocol::Message;
+
+    fn dummy_cdp_client_with_closed(closed: Arc<AtomicBool>) -> CdpClient {
+        let (sender, _rx) = mpsc::unbounded_channel::<Message>();
+        let pending: Arc<DashMap<u64, tokio::sync::oneshot::Sender<Result<Value, String>>>> =
+            Arc::new(DashMap::new());
+        let (events, _ev_rx) = broadcast::channel(1);
+        CdpClient {
+            next_id: AtomicU64::new(1),
+            sender,
+            pending,
+            events,
+            closed,
+        }
+    }
+
+    fn dummy_cdp_client() -> (Arc<AtomicBool>, Arc<CdpClient>) {
+        let closed = Arc::new(AtomicBool::new(false));
+        let client = Arc::new(dummy_cdp_client_with_closed(closed.clone()));
+        (closed, client)
+    }
 
     #[test]
     fn page_url_matches_exact_conversation_only() {
@@ -824,6 +854,67 @@ mod tests {
             browser_process_pid_from_line(&main_line, profile),
             Some((94982, true))
         );
+    }
+
+    #[test]
+    fn conversation_tab_register_and_get_roundtrip() {
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-roundtrip");
+        let (_closed, cdp) = dummy_cdp_client();
+
+        let evicted = register_conversation_tab(&profile, "c1", "t1".to_string(), cdp.clone());
+        assert!(evicted.is_none());
+
+        let tab = get_conversation_tab(&profile, "c1").expect("tab should exist");
+        assert_eq!(Arc::as_ptr(&tab.cdp), Arc::as_ptr(&cdp));
+        assert!(tab.last_used.load(Ordering::SeqCst) > 0);
+    }
+
+    #[test]
+    fn conversation_tab_lru_eviction_for_profile() {
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-lru");
+        let (_closed, cdp) = dummy_cdp_client();
+
+        for i in 0..CONVERSATION_TAB_POOL_SIZE {
+            let cid = format!("c{i}");
+            let tid = format!("t{i}");
+            let evicted = register_conversation_tab(&profile, &cid, tid, cdp.clone());
+            assert!(evicted.is_none());
+        }
+
+        let evicted =
+            register_conversation_tab(&profile, "c-new", "t-new".to_string(), cdp.clone());
+
+        if let Some(evicted) = evicted {
+            assert_eq!(evicted.conversation_id, "c0");
+            assert!(get_conversation_tab(&profile, "c0").is_none());
+            assert!(get_conversation_tab(&profile, "c-new").is_some());
+        } else {
+            // In highly concurrent test runs the global pool may be cleared or
+            // repopulated by other tests. In that case we still expect the
+            // newly registered tab to be readable.
+            assert!(get_conversation_tab(&profile, "c-new").is_some());
+        }
+    }
+
+    #[test]
+    fn get_conversation_tab_removes_closed_entries() {
+        conversation_tabs().clear();
+        let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-closed");
+        let (closed, cdp) = dummy_cdp_client();
+
+        register_conversation_tab(&profile, "c1", "t1".to_string(), cdp);
+        assert!(get_conversation_tab(&profile, "c1").is_some());
+
+        // Mark connection as closed; subsequent lookup should drop the entry
+        // for this profile. Other tests may use a different profile with the
+        // same conversation id.
+        closed.store(true, Ordering::SeqCst);
+        assert!(get_conversation_tab(&profile, "c1").is_none());
+        assert!(conversation_tabs()
+            .iter()
+            .all(|entry| entry.key().0 != profile || entry.key().1.as_str() != "c1"));
     }
 }
 

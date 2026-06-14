@@ -247,3 +247,173 @@ pub fn format_size(bytes: usize) -> String {
         format!("{} B", bytes)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn parse_bool_accepts_true_values_case_insensitively() {
+        for value in ["true", "TRUE", "yes", "YeS", "on", "ON", "1"] {
+            assert!(parse_bool(value).unwrap(), "value={value}");
+        }
+    }
+
+    #[test]
+    fn parse_bool_accepts_false_values_case_insensitively() {
+        for value in ["false", "FALSE", "no", "No", "off", "OFF", "0"] {
+            assert!(!parse_bool(value).unwrap(), "value={value}");
+        }
+    }
+
+    #[test]
+    fn parse_bool_rejects_invalid_values() {
+        let err = parse_bool("maybe").unwrap_err();
+        assert!(err.contains("Invalid boolean value"));
+        assert!(err.contains("true/false/yes/no/on/off/1/0"));
+    }
+
+    #[test]
+    fn parse_list_splits_trims_and_ignores_empty_items() {
+        let items = parse_list(" foo, bar , , baz ,,  ");
+        assert_eq!(items, vec!["foo", "bar", "baz"]);
+
+        let empty: Vec<String> = parse_list("");
+        assert!(empty.is_empty());
+    }
+
+    #[test]
+    fn parse_size_parses_plain_numbers_and_units() {
+        // Plain number
+        assert_eq!(parse_size("42").unwrap(), 42);
+
+        // Bytes
+        assert_eq!(parse_size("123B").unwrap(), 123);
+        assert_eq!(parse_size(" 123B").unwrap(), 123);
+
+        // KB/MB/GB with mixed case and spaces
+        assert_eq!(parse_size("1kb").unwrap(), 1024);
+        assert_eq!(parse_size("2 KB").unwrap(), 2 * 1024);
+        assert_eq!(parse_size("1mb").unwrap(), 1024 * 1024);
+        assert_eq!(parse_size("3 MB").unwrap(), 3 * 1024 * 1024);
+        assert_eq!(parse_size("1gb").unwrap(), 1024 * 1024 * 1024);
+    }
+
+    #[test]
+    fn parse_size_rejects_invalid_values() {
+        let err = parse_size("not-a-number").unwrap_err();
+        assert!(err.starts_with("Invalid size:"));
+
+        let err = parse_size("10XB").unwrap_err();
+        assert!(err.starts_with("Invalid size:"));
+    }
+
+    #[test]
+    fn format_size_uses_expected_units() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(999), "999 B");
+        assert_eq!(format_size(1024), "1 KB");
+        assert_eq!(format_size(1024 * 1024), "1 MB");
+        assert_eq!(format_size(2 * 1024 * 1024 * 1024), "2 GB");
+    }
+
+    #[test]
+    fn config_key_all_keys_roundtrip_display_and_parse() {
+        for key_str in ConfigKey::all_keys() {
+            let parsed: ConfigKey = key_str.parse().unwrap();
+            assert_eq!(parsed.to_string(), *key_str);
+        }
+    }
+
+    #[test]
+    fn config_key_from_str_is_case_and_style_insensitive() {
+        assert_eq!(
+            ConfigKey::from_str("server.timeout-secs").unwrap(),
+            ConfigKey::ServerTimeoutSecs
+        );
+        // Underscores are treated as dashes
+        assert_eq!(
+            ConfigKey::from_str("SERVER.TIMEOUT_SECS").unwrap(),
+            ConfigKey::ServerTimeoutSecs
+        );
+        assert_eq!(
+            ConfigKey::from_str("tls.app_exclude").unwrap(),
+            ConfigKey::TlsAppExclude
+        );
+        assert_eq!(
+            ConfigKey::from_str("traffic.max_db_size").unwrap(),
+            ConfigKey::TrafficMaxDbSize
+        );
+    }
+
+    #[test]
+    fn unknown_config_key_error_lists_available_keys() {
+        let err = ConfigKey::from_str("does.not.exist").unwrap_err();
+        assert!(err.contains("Unknown config key"));
+        // Error message should include at least one known key to help users
+        assert!(err.contains("traffic.max-records"));
+    }
+
+    #[test]
+    fn is_list_matches_expected_variants() {
+        use ConfigKey::*;
+
+        let list_keys = [
+            TlsExclude,
+            TlsInclude,
+            TlsAppExclude,
+            TlsAppInclude,
+            TlsIpExclude,
+            TlsIpInclude,
+            AccessUserPassAccounts,
+        ];
+
+        for key in list_keys {
+            assert!(key.is_list(), "{key:?} should be a list key");
+        }
+
+        let non_list_keys = [
+            ServerTimeoutSecs,
+            TlsEnabled,
+            TrafficMaxRecords,
+            AccessMode,
+            AccessAllowLan,
+        ];
+
+        for key in non_list_keys {
+            assert!(!key.is_list(), "{key:?} should not be a list key");
+        }
+    }
+
+    #[test]
+    fn is_size_matches_expected_variants() {
+        use ConfigKey::*;
+
+        let size_keys = [
+            TrafficMaxBodySize,
+            TrafficMaxBufferSize,
+            TrafficMaxDbSize,
+            ServerHttp1MaxHeaderSize,
+            ServerHttp2MaxHeaderListSize,
+            ServerWebSocketHandshakeMaxHeaderSize,
+            TrafficSseStreamFlushBytes,
+            TrafficWsPayloadFlushBytes,
+        ];
+
+        for key in size_keys {
+            assert!(key.is_size(), "{key:?} should be a size key");
+        }
+
+        let non_size_keys = [
+            ServerTimeoutSecs,
+            TrafficMaxRecords,
+            TrafficRetentionDays,
+            AccessMode,
+        ];
+
+        for key in non_size_keys {
+            assert!(!key.is_size(), "{key:?} should not be a size key");
+        }
+    }
+}

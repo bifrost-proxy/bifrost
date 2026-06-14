@@ -413,3 +413,156 @@ fn download_image(url: &str, dest: &PathBuf) -> Result<()> {
     fs::write(dest, &bytes).map_err(bifrost_core::BifrostError::Io)?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Mutex, OnceLock};
+    use std::thread;
+
+    fn agent_run_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn spawn_simple_http_server(body: String, content_type: &str) -> (u16, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let ct = content_type.to_string();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let mut received = Vec::new();
+            let mut header_end = None;
+            loop {
+                let n = stream.read(&mut buf).unwrap();
+                if n == 0 {
+                    break;
+                }
+                received.extend_from_slice(&buf[..n]);
+                if let Some(pos) = received.windows(4).position(|w| w == b"\r\n\r\n") {
+                    header_end = Some(pos + 4);
+                    break;
+                }
+            }
+            if let Some(header_end) = header_end {
+                let headers = String::from_utf8_lossy(&received[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().ok())
+                            .flatten()
+                    })
+                    .unwrap_or(0);
+                while received.len().saturating_sub(header_end) < content_length {
+                    let n = stream.read(&mut buf).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&buf[..n]);
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nContent-Type: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                ct,
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn handle_agent_run_rejects_empty_message() {
+        let opts = AgentRunOptions {
+            message: "   ",
+            runner: Some("test-runner".to_string()),
+            session: None,
+            new_conversation: false,
+            output_dir: None,
+            raw_json: false,
+        };
+
+        let result = handle_agent_run("127.0.0.1", 0, opts);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("message cannot be empty"));
+    }
+
+    #[test]
+    fn handle_agent_run_stream_success_without_images() {
+        let _guard = agent_run_test_lock();
+        let body_lines = [
+            r#"{"eventType":"run_started"}"#,
+            r#"{"eventType":"status","title":"working","content":"step1"}"#,
+            r#"{"eventType":"assistant_delta"}"#,
+            r#"{"eventType":"run_finished","response":"Hello from agent","status":"succeeded"}"#,
+        ];
+        let body = body_lines.join("\n") + "\n";
+        let (port, handle) = spawn_simple_http_server(body, "application/x-ndjson");
+
+        let opts = AgentRunOptions {
+            message: "Hello",
+            runner: Some("test-runner".to_string()),
+            session: Some("test-session".to_string()),
+            new_conversation: false,
+            output_dir: None,
+            raw_json: false,
+        };
+
+        let result = handle_agent_run("127.0.0.1", port, opts);
+        handle.join().unwrap();
+        assert!(result.is_ok(), "agent run failed: {result:?}");
+    }
+
+    #[test]
+    fn handle_agent_run_stream_failed_propagates_error() {
+        let _guard = agent_run_test_lock();
+        let body_lines = [r#"{"eventType":"run_failed","error":"something went wrong"}"#];
+        let body = body_lines.join("\n") + "\n";
+        let (port, handle) = spawn_simple_http_server(body, "application/x-ndjson");
+
+        let opts = AgentRunOptions {
+            message: "Hello",
+            runner: Some("test-runner".to_string()),
+            session: None,
+            new_conversation: false,
+            output_dir: None,
+            raw_json: false,
+        };
+
+        let result = handle_agent_run("127.0.0.1", port, opts);
+        handle.join().unwrap();
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("agent run failed"));
+    }
+
+    #[test]
+    fn clear_status_line_does_not_panic() {
+        clear_status_line(true);
+        clear_status_line(false);
+    }
+
+    #[test]
+    fn select_runner_interactively_uses_single_enabled_runner_without_tty() {
+        let config_body = r#"{
+            "runners": {
+                "chatgpt-web": {"enabled": true, "adapter": "test-adapter"}
+            }
+        }"#
+        .to_string();
+        let (port, handle) = spawn_simple_http_server(config_body, "application/json");
+
+        let runner_id = select_runner_interactively("127.0.0.1", port).unwrap();
+        handle.join().unwrap();
+        assert_eq!(runner_id, "chatgpt-web");
+    }
+}
