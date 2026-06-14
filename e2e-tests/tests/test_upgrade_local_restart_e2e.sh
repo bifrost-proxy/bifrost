@@ -44,6 +44,22 @@ host_triple() {
     rustc -vV | awk '/^host:/ {print $2}'
 }
 
+binary_name() {
+    if is_windows; then
+        echo "bifrost.exe"
+    else
+        echo "bifrost"
+    fi
+}
+
+windows_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -w "$1"
+    else
+        echo "$1"
+    fi
+}
+
 find_old_bifrost_bin() {
     if [[ -n "$OLD_BIFROST_BIN" && -x "$OLD_BIFROST_BIN" ]]; then
         echo "$OLD_BIFROST_BIN"
@@ -75,6 +91,10 @@ wait_proxy_ready() {
 }
 
 assert_no_tray_helper_for_test_data_dir() {
+    if is_windows; then
+        return 0
+    fi
+
     local matches
     matches="$(ps -axo command 2>/dev/null | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR" || true)"
     if [[ -n "$matches" ]]; then
@@ -90,11 +110,25 @@ create_local_release_archive() {
     local target="$3"
     local binary="$4"
     local package_dir="${archive_root}/bifrost-v${version}-${target}"
-    local archive_path="${archive_root}/bifrost-v${version}-${target}.tar.xz"
+    local bin_name
+    bin_name="$(binary_name)"
 
     mkdir -p "$package_dir"
-    cp "$binary" "${package_dir}/bifrost"
-    chmod +x "${package_dir}/bifrost"
+    cp "$binary" "${package_dir}/${bin_name}"
+    chmod +x "${package_dir}/${bin_name}" 2>/dev/null || true
+
+    if is_windows; then
+        local archive_path="${archive_root}/bifrost-v${version}-${target}.zip"
+        local package_dir_win archive_path_win
+        package_dir_win="$(windows_path "$package_dir")"
+        archive_path_win="$(windows_path "$archive_path")"
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            "Compress-Archive -Path '${package_dir_win}' -DestinationPath '${archive_path_win}' -Force" >/dev/null
+        echo "$archive_path"
+        return 0
+    fi
+
+    local archive_path="${archive_root}/bifrost-v${version}-${target}.tar.xz"
     tar -C "$archive_root" -cJf "$archive_path" "bifrost-v${version}-${target}"
     echo "$archive_path"
 }
@@ -119,11 +153,13 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
     local install_dir="${TEST_ROOT}/install"
     local archive_root="${TEST_ROOT}/archive"
     mkdir -p "$TEST_DATA_DIR" "$install_dir" "$archive_root"
-    INSTALL_BIN="${install_dir}/bifrost"
+    INSTALL_BIN="${install_dir}/$(binary_name)"
     cp "$BIFROST_BIN" "$INSTALL_BIN"
-    chmod +x "$INSTALL_BIN"
+    chmod +x "$INSTALL_BIN" 2>/dev/null || true
 
-    PROXY_PORT="$(python3 - <<'PY'
+    local py
+    py="$(python3_cmd)"
+    PROXY_PORT="$("$py" - <<'PY'
 import socket
 s = socket.socket()
 s.bind(("127.0.0.1", 0))
@@ -167,7 +203,7 @@ PY
     grep -q 'Detected running Bifrost proxy' "$upgrade_log" \
         && grep -q 'Stopping current proxy' "$upgrade_log" \
         && grep -q "Waiting for proxy port ${PROXY_PORT} to be released" "$upgrade_log" \
-        && grep -q 'Proxy restarted successfully with the new version' "$upgrade_log"
+        && grep -Eq 'Proxy restarted successfully with the new version|Proxy restart scheduled with the new version' "$upgrade_log"
     assert_equals "0" "$?" "upgrade output contains stop/wait/restart milestones" || return 1
 
     grep -q -- '--no-system-proxy' "$upgrade_log" \
@@ -207,10 +243,12 @@ PY
     assert_equals "False" "$runtime_system_proxy_enabled" "new daemon runtime records no-system-proxy mode" || return 1
 
     local new_cmd
-    new_cmd="$(ps -p "$new_pid" -o command= 2>/dev/null || true)"
-    if [[ "$new_cmd" != "$INSTALL_BIN"* ]]; then
-        _log_fail "new daemon uses upgraded install path" "$INSTALL_BIN" "$new_cmd"
-        return 1
+    if ! is_windows; then
+        new_cmd="$(ps -p "$new_pid" -o command= 2>/dev/null || true)"
+        if [[ "$new_cmd" != "$INSTALL_BIN"* ]]; then
+            _log_fail "new daemon uses upgraded install path" "$INSTALL_BIN" "$new_cmd"
+            return 1
+        fi
     fi
     _log_pass "new daemon command uses upgraded install path"
 

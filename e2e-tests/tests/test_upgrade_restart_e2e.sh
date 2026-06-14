@@ -378,6 +378,27 @@ test_upgrade_installs_binary_atomically_in_source() {
     fi
 }
 
+test_windows_upgrade_defers_self_replacement_in_source() {
+    _log_info "case: Windows upgrade defers self replacement until current exe exits"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "DeferredWindows" "$source_file" \
+        && grep -q "unique_pending_binary_path" "$source_file" \
+        && grep -q "schedule_windows_deferred_install" "$source_file" \
+        && grep -q "Wait-Process -Timeout 120" "$source_file" \
+        && grep -Fq 'Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force' "$source_file" \
+        && grep -Fq 'Start-Process -FilePath $TargetPath -ArgumentList $restartArgs' "$source_file" \
+        && grep -q "Proxy restart scheduled with the new version" "$source_file"; then
+        _log_pass "Windows upgrade stages self replacement and restarts after the upgrade process exits"
+    else
+        _log_fail "Windows deferred self replacement" \
+            "DeferredWindows + pending exe + PowerShell wait/replace/start helper" \
+            "Windows upgrade can still try to overwrite the running exe directly"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
@@ -386,6 +407,7 @@ main() {
     test_upgrade_restart_port_guard_covers_windows || true
     test_macos_daemon_start_uses_exec_child_guard || true
     test_upgrade_installs_binary_atomically_in_source || true
+    test_windows_upgrade_defers_self_replacement_in_source || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

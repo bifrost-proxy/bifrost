@@ -514,11 +514,41 @@
 - `test_upgrade_restart_e2e.sh` 必须覆盖 macOS 和 Windows daemon exec child 源码门禁：`run_daemon_via_exec` 以 Unix/Windows cfg 编译，macOS 保留 `setsid()`，Windows 使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`，main 入口通过 `BIFROST_DETACHED_DAEMON_CHILD` 避免二次 daemon fork。
 - 本地构造真实 upgrade restart 必须仍能完成旧 daemon 停止、端口释放等待、新 daemon 启动、Admin API ready、无 ObjC fork crash、stop 后无 tray helper 残留。
 
+### TC-IBOC-20 Windows x86 CI 必须真实覆盖 upgrade 后重启
+
+操作步骤：
+
+1. 在 GitHub Actions `E2E Shell (x86_64-pc-windows-msvc)` job 中下载当前 PR 构建出的 `bifrost.exe`：
+   ```text
+   actions/download-artifact: bifrost-release-x86_64-pc-windows-msvc -> target/release/bifrost.exe
+   ```
+2. 在同一个 Windows x86 runner 中下载已发布的 Windows x86 release binary 作为旧 daemon fixture：
+   ```powershell
+   Invoke-WebRequest https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.100/bifrost-v0.0.100-x86_64-pc-windows-msvc.zip
+   Expand-Archive ...
+   ```
+3. 用 bash 执行真实升级重启脚本：
+   ```bash
+   BIFROST_BIN="$GITHUB_WORKSPACE/target/release/bifrost.exe" \
+   OLD_BIFROST_BIN="$GITHUB_WORKSPACE/old-release/bifrost-old.exe" \
+   BIFROST_UPGRADE_E2E_VERSION=0.0.101 \
+   bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   ```
+4. 脚本必须在 Windows 上创建 `.zip` 测试 archive，并通过 debug-only `BIFROST_UPGRADE_TEST_ARCHIVE` 驱动当前 PR 的 `bifrost.exe upgrade -y --restart`。
+
+预期结果：
+
+- Windows x86 CI 必须执行真实进程链路：旧 release `bifrost.exe` 启动 daemon，当前 PR `bifrost.exe` 执行 upgrade，upgrade 停止旧 daemon，等待旧端口释放，替换当前安装路径，最后用替换后的 `bifrost.exe start -d` 启动新 daemon。
+- 由于 Windows 不允许当前进程直接覆盖正在运行的 exe，upgrade 必须先 stage 新 exe，再调度 PowerShell helper 在当前 upgrade 进程退出后替换目标 exe；如果指定 `--restart`，helper 必须替换后执行新 exe 的 restart args。
+- CI 输出必须包含 stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；随后脚本必须通过 Admin API ready、新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
+- 该用例只能在 Windows x86 runner 上执行；macOS/Linux 继续保留本地真实 upgrade restart 脚本和 CI 源码门禁，避免所有平台都依赖同一类静态检查。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
 - `test_upgrade_restart_e2e.sh` 退出时会停止测试 daemon 并删除临时数据目录。
 - `test_upgrade_local_restart_e2e.sh` 退出时会停止测试 daemon、清理同数据目录 tray helper 并删除临时安装目录、临时 archive 和临时数据目录。
+- Windows x86 CI 失败时会上传 `.e2e-reports/`、`.bifrost-e2e-ci/`、`target/` 和 `old-release/`，其中包含 `.bifrost-upgrade-*.log` helper 日志，便于定位替换或重启失败。
 - 退出当前 shell 即可清理函数定义。
 
 ## 执行记录

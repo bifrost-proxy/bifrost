@@ -1090,6 +1090,70 @@ jobs:
       - name: Check desktop client
         run: cargo check --manifest-path desktop/src-tauri/Cargo.toml --target ${{ matrix.target }}
 
+  e2e-windows-shell:
+    name: E2E Shell (x86_64-pc-windows-msvc)
+    needs: [build-cli-windows]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      BIFROST_DATA_DIR: ${{ github.workspace }}/.bifrost-e2e-ci
+      BIFROST_E2E_REPORT_DIR: ${{ github.workspace }}/.e2e-reports
+      BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1"
+      PYTHONIOENCODING: utf-8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Download current PR binary
+        uses: actions/download-artifact@v4
+        with:
+          name: bifrost-release-x86_64-pc-windows-msvc
+          path: target/release
+      - name: Download previous Windows release binary
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "0.0.100"
+          $target = "x86_64-pc-windows-msvc"
+          $archiveName = "bifrost-v$version-$target.zip"
+          $url = "https://github.com/bifrost-proxy/bifrost/releases/download/v$version/$archiveName"
+          New-Item -ItemType Directory -Force old-release | Out-Null
+          Invoke-WebRequest -Uri $url -OutFile "old-release/$archiveName"
+          Expand-Archive -Path "old-release/$archiveName" -DestinationPath "old-release" -Force
+          Copy-Item "old-release/bifrost-v$version-$target/bifrost.exe" "old-release/bifrost-old.exe" -Force
+          ./old-release/bifrost-old.exe --version
+      - name: E2E upgrade restart from previous Windows release
+        shell: bash
+        env:
+          BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
+          OLD_BIFROST_BIN: ${{ github.workspace }}/old-release/bifrost-old.exe
+          BIFROST_UPGRADE_E2E_VERSION: 0.0.101
+        run: bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+      - name: Dump failed suite logs
+        if: failure()
+        shell: bash
+        run: |
+          echo "=== E2E Report Directory ==="
+          find "$BIFROST_E2E_REPORT_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
+          echo ""
+          echo "=== E2E Data Directory ==="
+          find "$BIFROST_DATA_DIR" -type f -name "*.log" 2>/dev/null | head -20 || true
+          echo ""
+          echo "=== Upgrade helper logs ==="
+          find target old-release -type f -name ".bifrost-upgrade-*.log" -print -exec cat {} \; 2>/dev/null || true
+      - name: Upload E2E logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-shell-logs-x86_64-pc-windows-msvc-upgrade-restart
+          path: |
+            ${{ github.workspace }}/.e2e-reports/
+            ${{ github.workspace }}/.bifrost-e2e-ci/
+            ${{ github.workspace }}/target/
+            ${{ github.workspace }}/old-release/
+          retention-days: 7
+          if-no-files-found: ignore
+          include-hidden-files: true
+
   e2e-windows-rules:
     name: E2E Rules (${{ matrix.target }}, shard ${{ matrix.rule_shard }})
     needs: [build-cli-windows]

@@ -51,6 +51,20 @@ enum RestartArgsSource<'a> {
     DefaultConfig,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum UpgradeInstallOutcome {
+    Installed,
+    #[cfg(windows)]
+    DeferredWindows(WindowsDeferredInstall),
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsDeferredInstall {
+    staged_binary: PathBuf,
+    target_path: PathBuf,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DownloadTuning {
     connect_timeout_secs: u64,
@@ -162,20 +176,6 @@ fn restart_executable_for_install_method(method: &InstallMethod) -> Result<PathB
             "Cannot determine restart executable for unknown install method".to_string(),
         )),
     }
-}
-
-#[cfg(windows)]
-fn running_executable_matches_target(target_path: &Path) -> bool {
-    let Ok(current_exe) = env::current_exe() else {
-        return false;
-    };
-    let Ok(current_exe) = fs::canonicalize(current_exe) else {
-        return false;
-    };
-    let Ok(target_path) = fs::canonicalize(target_path) else {
-        return false;
-    };
-    current_exe == target_path
 }
 
 fn get_target_triple() -> Option<&'static str> {
@@ -441,7 +441,23 @@ fn restore_binary_backup_best_effort(target_path: &Path) {
     }
 }
 
-fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<(), BifrostError> {
+fn install_binary_atomically(
+    new_binary: &Path,
+    target_path: &Path,
+) -> Result<UpgradeInstallOutcome, BifrostError> {
+    #[cfg(windows)]
+    if is_current_exe_path(target_path)? {
+        let staged_binary = unique_pending_binary_path(target_path);
+        let _ = fs::remove_file(&staged_binary);
+        fs::copy(new_binary, &staged_binary)?;
+        return Ok(UpgradeInstallOutcome::DeferredWindows(
+            WindowsDeferredInstall {
+                staged_binary,
+                target_path: target_path.to_path_buf(),
+            },
+        ));
+    }
+
     let temp_target = unique_temp_binary_path(target_path);
     let backup_path = binary_backup_path(target_path);
 
@@ -482,7 +498,7 @@ fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<()
     }
 
     match fs::rename(&temp_target, target_path) {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(UpgradeInstallOutcome::Installed),
         Err(error) => {
             let _ = fs::remove_file(&temp_target);
             if backup_path.exists() && !target_path.exists() {
@@ -491,6 +507,23 @@ fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<()
             Err(BifrostError::Io(error))
         }
     }
+}
+
+#[cfg(windows)]
+fn is_current_exe_path(target_path: &Path) -> Result<bool, BifrostError> {
+    let current_exe = env::current_exe().map_err(BifrostError::Io)?;
+    let current_exe = fs::canonicalize(&current_exe).unwrap_or(current_exe);
+    let target_path = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
+    Ok(current_exe == target_path)
+}
+
+#[cfg(windows)]
+fn unique_pending_binary_path(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bifrost.exe");
+    target_path.with_file_name(format!(".{}.pending.{}", file_name, std::process::id()))
 }
 
 fn prompt_confirm(message: &str) -> bool {
@@ -1032,7 +1065,7 @@ fn download_and_install(
     version: &str,
     target_path: &Path,
     temp_dir: &tempfile::TempDir,
-) -> Result<(), BifrostError> {
+) -> Result<UpgradeInstallOutcome, BifrostError> {
     let tuning = DownloadTuning::from_env();
     let release_tag = make_release_tag(version);
     let mut last_error = None;
@@ -1212,14 +1245,10 @@ fn download_and_install(
     install_binary_atomically(&new_binary, target_path)
 }
 
-fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError> {
-    #[cfg(windows)]
-    if running_executable_matches_target(target_path) {
-        return Err(BifrostError::Config(
-            "Windows cannot replace the currently running bifrost.exe directly. Stop Bifrost and run the PowerShell install script from a separate shell, or use an external updater process.".to_string(),
-        ));
-    }
-
+fn upgrade_manual(
+    target_path: &Path,
+    version: &str,
+) -> Result<UpgradeInstallOutcome, BifrostError> {
     let target = get_target_triple().ok_or_else(|| {
         BifrostError::Config("Unsupported platform for automatic upgrade".to_string())
     })?;
@@ -1231,11 +1260,13 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
     let install_result = download_and_install(target, version, target_path, &temp_dir);
 
     let needs_musl_fallback = match &install_result {
-        Ok(()) => !verify_binary(target_path),
+        Ok(UpgradeInstallOutcome::Installed) => !verify_binary(target_path),
+        #[cfg(windows)]
+        Ok(UpgradeInstallOutcome::DeferredWindows(_)) => false,
         Err(_) => true,
     };
 
-    if needs_musl_fallback {
+    let install_outcome = if needs_musl_fallback {
         if let Some(musl_target) = get_musl_fallback_triple(target) {
             let reason = if install_result.is_err() {
                 "download/install failed"
@@ -1251,13 +1282,18 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
                 format!("  Retrying with musl build: {}", musl_target).bright_cyan()
             );
 
-            if let Err(error) = download_and_install(&musl_target, version, target_path, &temp_dir)
-            {
-                restore_binary_backup_best_effort(target_path);
-                return Err(error);
-            }
+            let fallback_result =
+                match download_and_install(&musl_target, version, target_path, &temp_dir) {
+                    Ok(outcome) => outcome,
+                    Err(error) => {
+                        restore_binary_backup_best_effort(target_path);
+                        return Err(error);
+                    }
+                };
 
-            if !verify_binary(target_path) {
+            if matches!(fallback_result, UpgradeInstallOutcome::Installed)
+                && !verify_binary(target_path)
+            {
                 restore_binary_backup_best_effort(target_path);
                 return Err(BifrostError::Config(
                     "Fallback musl binary also failed to run. Try installing manually with:\n  curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash".to_string(),
@@ -1267,6 +1303,7 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
             effective_target = musl_target;
             println!("{}", "✓ musl fallback succeeded".bright_green());
             cleanup_binary_backup(target_path);
+            fallback_result
         } else if let Err(e) = install_result {
             restore_binary_backup_best_effort(target_path);
             return Err(e);
@@ -1278,7 +1315,8 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
         }
     } else {
         cleanup_binary_backup(target_path);
-    }
+        install_result?
+    };
 
     println!(
         "{}",
@@ -1286,7 +1324,7 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
             .bright_green()
             .bold()
     );
-    Ok(())
+    Ok(install_outcome)
 }
 
 pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
@@ -1387,8 +1425,10 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
     let restart_executable = restart_executable_for_install_method(&install_method)?;
 
     let upgrade_result = match install_method {
-        InstallMethod::Homebrew => upgrade_via_homebrew(&cache.latest_version),
-        InstallMethod::Script => upgrade_via_script(),
+        InstallMethod::Homebrew => {
+            upgrade_via_homebrew(&cache.latest_version).map(|()| UpgradeInstallOutcome::Installed)
+        }
+        InstallMethod::Script => upgrade_via_script().map(|()| UpgradeInstallOutcome::Installed),
         InstallMethod::Manual(path) => upgrade_manual(&path, &cache.latest_version),
         InstallMethod::Unknown => {
             println!(
@@ -1409,9 +1449,17 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
         }
     };
 
-    upgrade_result?;
+    let upgrade_outcome = upgrade_result?;
 
-    maybe_restart_running_proxy(restart, &restart_executable)?;
+    match upgrade_outcome {
+        UpgradeInstallOutcome::Installed => {
+            maybe_restart_running_proxy(restart, &restart_executable)?
+        }
+        #[cfg(windows)]
+        UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
+            maybe_restart_running_proxy_after_windows_deferred_install(restart, deferred_install)?
+        }
+    }
 
     Ok(())
 }
@@ -1511,6 +1559,223 @@ fn maybe_restart_running_proxy(
         ));
     }
 
+    Ok(())
+}
+
+#[cfg(windows)]
+fn maybe_restart_running_proxy_after_windows_deferred_install(
+    auto_restart: bool,
+    deferred_install: WindowsDeferredInstall,
+) -> Result<(), BifrostError> {
+    let pid = match read_pid() {
+        Some(pid) if is_process_running(pid) => Some(pid),
+        _ => None,
+    };
+
+    let Some(pid) = pid else {
+        schedule_windows_deferred_install(deferred_install, None)?;
+        println!(
+            "{}",
+            "✓ Upgrade replacement scheduled and will finish after this process exits."
+                .bright_green()
+                .bold()
+        );
+        return Ok(());
+    };
+
+    println!();
+    println!(
+        "{}",
+        format!("  Detected running Bifrost proxy (PID: {})", pid)
+            .bright_yellow()
+            .bold()
+    );
+
+    let should_restart = if auto_restart {
+        println!(
+            "{}",
+            "  Auto-restarting due to --restart flag...".bright_cyan()
+        );
+        true
+    } else {
+        println!(
+            "{}",
+            "  Windows needs the running proxy to stop before replacing bifrost.exe."
+                .bright_yellow()
+        );
+        println!(
+            "{}",
+            "  Tip: use `bifrost upgrade --restart` to replace and restart automatically.".dimmed()
+        );
+        println!();
+        prompt_confirm("  Restart the proxy now?")
+    };
+
+    if !should_restart {
+        let _ = fs::remove_file(&deferred_install.staged_binary);
+        println!(
+            "{}",
+            "  Upgrade replacement was not applied because the running proxy was kept alive."
+                .dimmed()
+        );
+        return Ok(());
+    }
+
+    let runtime_info = read_runtime_info();
+    let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
+    let default_system_proxy = if runtime_info.is_none() {
+        Some(default_restart_system_proxy_config()?)
+    } else {
+        None
+    };
+
+    println!("{}", "  Stopping current proxy...".bright_cyan());
+    super::stop::run_stop_for_restart()
+        .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
+
+    let restart_source = runtime_info
+        .as_ref()
+        .map(RestartArgsSource::Runtime)
+        .unwrap_or(RestartArgsSource::DefaultConfig);
+    let args = build_restart_args(
+        restart_source,
+        system_proxy_snapshot.as_ref(),
+        default_system_proxy.as_ref(),
+    );
+    let restart_ports = restart_ports_from_runtime(runtime_info.as_ref());
+
+    wait_for_restart_ports_release(&restart_ports)?;
+
+    println!(
+        "{} {} {}",
+        "  Scheduling proxy restart with:".bright_cyan(),
+        deferred_install.target_path.display(),
+        args.join(" ")
+    );
+
+    schedule_windows_deferred_install(deferred_install, Some(&args))?;
+    println!(
+        "{}",
+        "✓ Proxy restart scheduled with the new version after this process exits."
+            .bright_green()
+            .bold()
+    );
+
+    Ok(())
+}
+
+#[cfg(windows)]
+fn schedule_windows_deferred_install(
+    deferred_install: WindowsDeferredInstall,
+    restart_args: Option<&[String]>,
+) -> Result<(), BifrostError> {
+    let parent_pid = std::process::id();
+    let target_dir = deferred_install
+        .target_path
+        .parent()
+        .ok_or_else(|| {
+            BifrostError::Config(format!(
+                "Cannot determine install directory for {}",
+                deferred_install.target_path.display()
+            ))
+        })?
+        .to_path_buf();
+    let suffix = parent_pid.to_string();
+    let script_path = target_dir.join(format!(".bifrost-upgrade-{}.ps1", suffix));
+    let args_path = target_dir.join(format!(".bifrost-upgrade-{}.args", suffix));
+    let log_path = target_dir.join(format!(".bifrost-upgrade-{}.log", suffix));
+    let ready_path = target_dir.join(format!(".bifrost-upgrade-{}.ok", suffix));
+
+    if let Some(args) = restart_args {
+        fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
+    } else {
+        let _ = fs::remove_file(&args_path);
+    }
+
+    fs::write(
+        &script_path,
+        r#"
+param(
+  [int]$ParentPid,
+  [string]$PendingPath,
+  [string]$TargetPath,
+  [string]$RestartArgsPath,
+  [string]$ReadyPath,
+  [string]$LogPath
+)
+
+$ErrorActionPreference = "Stop"
+function Write-UpgradeLog([string]$Message) {
+  $timestamp = (Get-Date).ToString("o")
+  Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
+}
+
+try {
+  Write-UpgradeLog "waiting for parent pid $ParentPid"
+  $parent = Get-Process -Id $ParentPid -ErrorAction SilentlyContinue
+  if ($parent) {
+    $parent | Wait-Process -Timeout 120
+  }
+  if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
+    throw "parent process $ParentPid did not exit before timeout"
+  }
+
+  Write-UpgradeLog "replacing $TargetPath"
+  if (Test-Path -LiteralPath $TargetPath) {
+    Remove-Item -LiteralPath $TargetPath -Force
+  }
+  Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force
+
+  if ($RestartArgsPath -and (Test-Path -LiteralPath $RestartArgsPath)) {
+    $restartArgs = [System.IO.File]::ReadAllLines($RestartArgsPath)
+    if ($restartArgs.Count -gt 0) {
+      Write-UpgradeLog "starting $TargetPath $($restartArgs -join ' ')"
+      $child = Start-Process -FilePath $TargetPath -ArgumentList $restartArgs -NoNewWindow -PassThru -Wait
+      if ($child.ExitCode -ne 0) {
+        throw "restart command exited with code $($child.ExitCode)"
+      }
+    }
+  }
+
+  Set-Content -LiteralPath $ReadyPath -Value "ok"
+  Write-UpgradeLog "done"
+  Remove-Item -LiteralPath $RestartArgsPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
+  exit 0
+} catch {
+  Write-UpgradeLog "ERROR: $($_.Exception.Message)"
+  exit 1
+}
+"#,
+    )
+    .map_err(BifrostError::Io)?;
+
+    let mut command = Command::new("powershell");
+    command
+        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+        .arg(&script_path)
+        .arg("-ParentPid")
+        .arg(parent_pid.to_string())
+        .arg("-PendingPath")
+        .arg(&deferred_install.staged_binary)
+        .arg("-TargetPath")
+        .arg(&deferred_install.target_path)
+        .arg("-RestartArgsPath")
+        .arg(&args_path)
+        .arg("-ReadyPath")
+        .arg(&ready_path)
+        .arg("-LogPath")
+        .arg(&log_path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    command.spawn().map_err(BifrostError::Io)?;
+    println!(
+        "{} {}",
+        "  Windows upgrade helper log:".dimmed(),
+        log_path.display().to_string().dimmed()
+    );
     Ok(())
 }
 
