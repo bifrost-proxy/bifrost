@@ -834,6 +834,74 @@ PY
 
 ---
 
+### TC-CSS-33：macOS daemon exec child 避免 fork 后 ObjC 崩溃（回归）
+
+**前置条件**：macOS，本机未运行测试端口上的 Bifrost；测试使用临时 `BIFROST_DATA_DIR` 和动态端口，不修改正式数据目录和系统代理。
+
+**操作步骤**：
+1. 构建当前源码二进制：
+   ```bash
+   cargo build --bin bifrost
+   ```
+2. 准备临时目录和动态端口：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+   ```
+3. 启动真实 daemon，必须使用临时数据目录、禁用 Sync 自动登录弹窗和真实系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 \
+   target/debug/bifrost start -p "$PORT" -H 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --no-intercept -y
+   ```
+4. 轮询 Admin API：
+   ```bash
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/proxy/address"
+   ```
+5. 检查 `runtime.json`：
+   ```bash
+   python3 - "$TEST_DATA_DIR/runtime.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+assert data["port"] == int(__import__("os").environ["PORT"])
+assert data["runtime_start_mode"] == "daemon"
+assert data["restartable_runtime"] is True
+print(data["pid"])
+PY
+   ```
+6. 检查 daemon 错误日志中不包含 macOS Objective-C fork safety 崩溃特征：
+   ```bash
+   ! grep -E 'objc_initializeAfterForkError|\\+\\[NSNumber initialize\\]' "$TEST_DATA_DIR/logs/bifrost.err"
+   ```
+7. 停止 daemon，确认端口释放且没有同一数据目录的 tray helper 残留：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" target/debug/bifrost stop
+   ! curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/proxy/address"
+   ! ps -axo command | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR"
+   rm -rf "$TEST_DATA_DIR"
+   ```
+
+**预期结果**：
+- `start --daemon` 返回成功，并输出 daemon PID、Admin UI、日志文件路径。
+- Admin API 可访问，说明 daemon listener ready 后父进程才返回。
+- `runtime.json` 中 `runtime_start_mode` 为 `daemon`，`restartable_runtime` 为 `true`，PID 对应仍在运行的 daemon 子进程。
+- `logs/bifrost.err` 不包含 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`，避免 v0.0.100 upgrade 重启时 fork 后初始化 ObjC runtime 的崩溃。
+- `bifrost stop` 可停止该 daemon，端口释放，并且不残留同一数据目录的 `bifrost __tray` helper；全程使用 `--no-system-proxy` 和 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1`，不修改本机真实系统代理。
+
+**执行记录**：
+- 2026-06-14 执行真实 macOS daemon 回归通过。先执行 `source ~/.zshrc && cargo build --bin bifrost` 构建当前 debug 二进制，再使用临时 `BIFROST_DATA_DIR=/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T/tmp.wzr0I8raPf` 和动态端口 `56501` 执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1 target/debug/bifrost start -p 56501 --host 127.0.0.1 --daemon --skip-cert-check --no-system-proxy --no-intercept -y`。启动输出 `Daemon started with PID: 36648`，Admin API `/_bifrost/api/proxy/address` ready；`runtime.json` 校验 `pid=36648`、`port=56501`、`runtime_start_mode=daemon`、`restartable_runtime=true`；`logs/bifrost.err` 未匹配 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`；随后 `BIFROST_DATA_DIR="$TEST_DATA_DIR" target/debug/bifrost stop` 输出 `Bifrost proxy stopped.`，端口释放，临时目录已清理。全流程使用 `--no-system-proxy` 与 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1`，未修改本机真实系统代理。
+- 2026-06-14 发现并修复 daemon exec child 停止后的 tray helper 残留后，复跑真实 macOS daemon 回归通过。使用临时 `BIFROST_DATA_DIR=/var/folders/0q/zf2m3_nx6f9gqfd_jx0fcljr0000gn/T/tmp.t5Knv1qqNu` 和动态端口 `58707` 启动当前 debug 二进制，输出 `Daemon started with PID: 56778`；Admin API ready；`runtime.json` 校验 `pid=56778`、`port=58707`、`runtime_start_mode=daemon`、`restartable_runtime=true`；`logs/bifrost.err` 未匹配 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`；`stop` 后端口释放，并通过 `ps -axo command | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR"` 确认 `TRAY_HELPER_LEFT=0`。临时目录已清理，未修改本机真实系统代理。
+
+---
+
 
 ## 清理
 

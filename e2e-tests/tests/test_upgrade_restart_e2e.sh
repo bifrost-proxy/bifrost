@@ -23,7 +23,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18891}"
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -98,13 +98,30 @@ start_daemon() {
     return 1
 }
 
+assert_no_tray_helper_for_test_data_dir() {
+    if is_windows; then
+        return 0
+    fi
+
+    local matches
+    matches="$(ps -axo command 2>/dev/null | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR" || true)"
+    if [[ -n "$matches" ]]; then
+        _log_fail "daemon stop cleaned tray helper" "no __tray helper for $TEST_DATA_DIR" "$matches"
+        return 1
+    fi
+
+    _log_pass "daemon stop leaves no tray helper for test data dir"
+}
+
 stop_daemon() {
     BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
     sleep 1
     safe_cleanup_proxy "$PROXY_PID"
     PROXY_PID=""
     sleep 1
+    assert_no_tray_helper_for_test_data_dir
 }
+
 
 test_upgrade_no_daemon_no_error() {
     _log_info "case: upgrade without running daemon -> no error"
@@ -302,12 +319,35 @@ test_upgrade_restart_port_guard_covers_windows() {
     fi
 }
 
+test_macos_daemon_start_uses_exec_child_guard() {
+    _log_info "case: macOS daemon start avoids post-fork runtime initialization"
+
+    local start_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/start.rs"
+    local main_src="${PROJECT_DIR}/crates/bifrost-cli/src/main.rs"
+
+    if grep -q 'run_daemon_via_exec' "$start_src" \
+        && grep -q 'BIFROST_DETACHED_DAEMON_CHILD' "$start_src" \
+        && grep -q 'foreground_runtime_start_mode()' "$start_src" \
+        && grep -q 'current_dir(&bifrost_dir)' "$start_src" \
+        && grep -q 'libc::setsid()' "$start_src" \
+        && grep -q 'is_detached_daemon_child_process' "$main_src" \
+        && grep -q 'daemon && !is_detached_daemon_child' "$main_src"; then
+        _log_pass "macOS daemon start execs a fresh detached child before runtime init"
+    else
+        _log_fail "macOS daemon exec child guard" \
+            "run_daemon_via_exec + detached child env + main daemon bypass + setsid/current_dir" \
+            "fork-after-runtime guard missing"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
     test_upgrade_restart_flag_in_help || true
     test_upgrade_restart_port_release_guard_in_source || true
     test_upgrade_restart_port_guard_covers_windows || true
+    test_macos_daemon_start_uses_exec_child_guard || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

@@ -702,6 +702,8 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
         let system_proxy = SystemProxyStatus {
             supported: true,
@@ -796,6 +798,8 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
         let addresses = ProxyAddressInfo {
             addresses: vec![

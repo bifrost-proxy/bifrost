@@ -443,10 +443,48 @@
 - 端口释放等待必须同时覆盖 Unix 和 Windows；Windows 不得回落到 stop 后立即 start 的竞态路径。
 - `restart` 命令与 `upgrade` 命令复用同一个端口释放检测工具，避免两个生命周期入口行为分叉。
 
+### TC-IBOC-18 本地构造 upgrade 后必须自动重启新 daemon
+
+操作步骤：
+
+1. 构建当前源码 debug 二进制：
+   ```bash
+   source ~/.zshrc
+   cargo build --bin bifrost
+   ```
+2. 执行本地 upgrade restart E2E：
+   ```bash
+   source ~/.zshrc
+   BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   ```
+3. 脚本使用旧版 `0.0.99` 二进制启动临时数据目录下的 daemon，再把当前 debug 二进制打成本地 release archive，并通过 debug-only `BIFROST_UPGRADE_TEST_LATEST_VERSION` / `BIFROST_UPGRADE_TEST_ARCHIVE` 执行真实 `upgrade -y --restart`。
+4. 检查输出包含：
+   ```text
+   PASS old daemon started on port ... (PID: ...)
+   PASS upgrade output contains stop/wait/restart milestones
+   PASS upgrade restart preserves no-system-proxy mode
+   PASS upgrade restarted daemon with new PID: ...
+   PASS new daemon runtime records no-system-proxy mode
+   PASS new daemon command uses upgraded install path
+   PASS new daemon error log has no ObjC fork crash
+   PASS upgrade restart leaves no tray helper for test data dir
+   PASS upgraded daemon stops and releases port
+   ```
+
+预期结果：
+
+- `upgrade -y --restart` 必须完整执行二进制替换、检测运行中旧 daemon、停止旧 daemon、等待旧端口释放、用升级后的安装路径启动新 daemon。
+- 新 daemon 的 PID 必须不同于旧 PID，Admin API 必须 ready，`ps` 命令行必须指向临时安装目录下被升级后的 `bifrost`。
+- 新 daemon 的错误日志不得包含 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`。
+- upgrade 输出中的 restart 命令必须保留 `--no-system-proxy`，且输出不得出现 `System proxy: enabled`；新 daemon 的 `runtime.json` 必须记录 `system_proxy_enabled=false`，避免旧 daemon 原本未启用系统代理时升级后意外拉起系统代理 helper。
+- 停止升级后的 daemon 后，测试端口释放，且临时数据目录不残留 `bifrost __tray` helper。
+- 全流程使用临时安装目录、临时数据目录、动态端口和 `--no-system-proxy`，不修改用户正式数据和系统代理。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
 - `test_upgrade_restart_e2e.sh` 退出时会停止测试 daemon 并删除临时数据目录。
+- `test_upgrade_local_restart_e2e.sh` 退出时会停止测试 daemon、清理同数据目录 tray helper 并删除临时安装目录、临时 archive 和临时数据目录。
 - 退出当前 shell 即可清理函数定义。
 
 ## 执行记录
@@ -477,3 +515,5 @@
 | 2026-06-11 | TC-IBOC-15 | `grep -q ... .github/workflows/release.yml` | PASS：release job 在 npm publish 前检查 Unix/macOS `.tar.gz` + `.tar.xz`、Windows `.zip`；Homebrew 仍读取 macOS `.tar.gz` checksum |
 | 2026-06-11 | TC-IBOC-16 | `BIFROST_DISABLE_XZ_ARCHIVE=1 get_archive_ext_candidates darwin`、旧 release 仅 `.tar.gz` 本地 HTTP mock 调用 `install_binary_for_target`、`bash e2e-tests/tests/test_install_binary_adaptive_download.sh`、`bash ./install-binary.sh --version v0.0.96 --no-post-install --no-modify-path` 临时目录安装、`cargo test -p bifrost-cli upgrade_archive --lib -- --nocapture`、本地 Node tar mock | PASS：Bash installer 禁用 xz 后只返回 `.tar.gz`；旧 release 只有 `.tar.gz` 时新脚本先尝试可选 `.tar.xz`，探测不到后不进入全镜像竞速，立即回退 `.tar.gz` 并显示 curl 进度，checksum verified，临时安装的 `bifrost --version` 输出 `bifrost 0.0.96`；内置 upgrade 单测覆盖 `.tar.xz -> .tar.gz`、坏 `.tar.xz` 校验失败、禁用 xz、Windows zip；npm artifact mock 验证 `.tar.gz` 与 `.tar.xz` 都可提取二进制 |
 | 2026-06-13 | TC-IBOC-17 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib wait_for_port_released`、`bash e2e-tests/tests/test_upgrade_restart_e2e.sh` | PASS：upgrade 过滤下 13 个单测通过，覆盖 restart 端口选择；端口释放 helper 2 个单测通过，覆盖空闲快速返回与占用超时；upgrade restart E2E 14/14 PASS，源码门禁确认 stop 后等待端口释放、包含占用进程诊断、端口超时放弃重启时执行系统代理恢复，且端口释放 guard 与 wait helper 覆盖 Windows |
+| 2026-06-14 | TC-IBOC-18 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地构造旧版 `0.0.99` daemon 在临时端口 `61941` 运行，执行当前 debug 二进制的 `upgrade -y --restart` 后输出包含检测运行中代理、停止旧代理、等待端口释放和重启成功；旧 PID `90510` 被新 PID `91470` 替换，新 daemon 命令行指向临时安装目录升级后的 `bifrost`，Admin API ready，错误日志无 ObjC fork crash，stop 后无同数据目录 tray helper 残留且端口释放；脚本汇总 8/8 PASS |
+| 2026-06-14 | TC-IBOC-18 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：第二轮复跑本地构造 upgrade restart E2E。旧版 `0.0.99` daemon 在临时端口 `50021`、旧 PID `43350` 运行；upgrade 输出包含检测运行中代理、停止旧代理、等待端口释放、重启成功，并额外断言 restart 命令包含 `--no-system-proxy` 且不出现 `System proxy: enabled`；升级后新 PID `44255` 使用临时安装目录下的新二进制，`runtime.json` 记录 `system_proxy_enabled=false`，Admin API ready，错误日志无 ObjC fork crash，stop 后无同数据目录 tray helper 残留且端口释放；脚本汇总 10/10 PASS |

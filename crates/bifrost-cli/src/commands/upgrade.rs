@@ -592,6 +592,44 @@ fn release_archive_ext_candidates() -> Vec<&'static str> {
     )
 }
 
+fn archive_ext_from_path(path: &Path) -> Option<&'static str> {
+    let file_name = path.file_name()?.to_str()?;
+    if file_name.ends_with(".tar.xz") {
+        Some("tar.xz")
+    } else if file_name.ends_with(".tar.gz") {
+        Some("tar.gz")
+    } else if file_name.ends_with(".zip") {
+        Some("zip")
+    } else {
+        None
+    }
+}
+
+#[cfg(debug_assertions)]
+fn debug_upgrade_archive_override() -> Result<Option<(PathBuf, &'static str)>, BifrostError> {
+    let Some(path) = env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE").map(PathBuf::from) else {
+        return Ok(None);
+    };
+    let archive_ext = archive_ext_from_path(&path).ok_or_else(|| {
+        BifrostError::Config(format!(
+            "BIFROST_UPGRADE_TEST_ARCHIVE must point to .tar.xz, .tar.gz, or .zip: {}",
+            path.display()
+        ))
+    })?;
+    Ok(Some((path, archive_ext)))
+}
+
+#[cfg(debug_assertions)]
+fn debug_upgrade_latest_version_override() -> Option<VersionCache> {
+    env::var("BIFROST_UPGRADE_TEST_LATEST_VERSION")
+        .ok()
+        .map(|latest_version| VersionCache {
+            latest_version,
+            release_highlights: vec!["local upgrade restart e2e".to_string()],
+            checked_at: chrono::Utc::now(),
+        })
+}
+
 fn validate_downloaded_archive(path: &Path, archive_ext: &str) -> Result<(), BifrostError> {
     if archive_ext == "zip" {
         return Ok(());
@@ -797,79 +835,94 @@ fn download_and_install(
     let mut selected_archive_path = None;
     let mut selected_archive_ext = None;
 
-    for archive_ext in release_archive_ext_candidates() {
-        let archive_name = format!("bifrost-v{}-{}.{}", version, target, archive_ext);
-        let archive_github_path = format!(
-            "bifrost-proxy/bifrost/releases/download/{}/{}",
-            release_tag, archive_name
+    #[cfg(debug_assertions)]
+    if let Some((archive_path, archive_ext)) = debug_upgrade_archive_override()? {
+        println!(
+            "{} {}",
+            "Using local test archive:".bright_cyan(),
+            archive_path.display()
         );
-        let archive_path = temp_dir.path().join(&archive_name);
+        validate_downloaded_archive(&archive_path, archive_ext)?;
+        selected_archive_path = Some(archive_path);
+        selected_archive_ext = Some(archive_ext);
+    }
 
-        for (attempt, base) in ordered_download_bases(&archive_github_path, tuning)
-            .into_iter()
-            .enumerate()
-        {
-            let download_url = github_path_url(&base, &archive_github_path);
-            if attempt == 0 {
-                println!(
-                    "{} {}",
-                    "Selected fastest available source:".bright_cyan(),
-                    mirror_display_name(&base).bright_white()
-                );
-            } else {
-                println!(
-                    "{} {}",
-                    "Retrying with source:".bright_yellow(),
-                    mirror_display_name(&base).bright_white()
-                );
-            }
-            println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
+    if selected_archive_path.is_none() {
+        for archive_ext in release_archive_ext_candidates() {
+            let archive_name = format!("bifrost-v{}-{}.{}", version, target, archive_ext);
+            let archive_github_path = format!(
+                "bifrost-proxy/bifrost/releases/download/{}/{}",
+                release_tag, archive_name
+            );
+            let archive_path = temp_dir.path().join(&archive_name);
 
-            match download_file_with_progress(&download_url, &archive_path, tuning) {
-                Ok(()) => {
-                    if let Err(error) = validate_downloaded_archive(&archive_path, archive_ext) {
+            for (attempt, base) in ordered_download_bases(&archive_github_path, tuning)
+                .into_iter()
+                .enumerate()
+            {
+                let download_url = github_path_url(&base, &archive_github_path);
+                if attempt == 0 {
+                    println!(
+                        "{} {}",
+                        "Selected fastest available source:".bright_cyan(),
+                        mirror_display_name(&base).bright_white()
+                    );
+                } else {
+                    println!(
+                        "{} {}",
+                        "Retrying with source:".bright_yellow(),
+                        mirror_display_name(&base).bright_white()
+                    );
+                }
+                println!("{} {}", "Downloading:".bright_cyan(), download_url.dimmed());
+
+                match download_file_with_progress(&download_url, &archive_path, tuning) {
+                    Ok(()) => {
+                        if let Err(error) = validate_downloaded_archive(&archive_path, archive_ext)
+                        {
+                            let _ = fs::remove_file(&archive_path);
+                            println!(
+                                "{} {}",
+                                "Downloaded archive failed validation:".bright_yellow(),
+                                error.to_string().dimmed()
+                            );
+                            last_error = Some(error);
+                            continue;
+                        }
+                        if attempt > 0 {
+                            println!(
+                                "{} {}",
+                                "Downloaded via fallback source:".bright_green(),
+                                mirror_display_name(&base).bright_white()
+                            );
+                        }
+                        selected_archive_path = Some(archive_path);
+                        selected_archive_ext = Some(archive_ext);
+                        last_error = None;
+                        break;
+                    }
+                    Err(error) => {
                         let _ = fs::remove_file(&archive_path);
                         println!(
                             "{} {}",
-                            "Downloaded archive failed validation:".bright_yellow(),
+                            "Download source failed:".bright_yellow(),
                             error.to_string().dimmed()
                         );
                         last_error = Some(error);
-                        continue;
                     }
-                    if attempt > 0 {
-                        println!(
-                            "{} {}",
-                            "Downloaded via fallback source:".bright_green(),
-                            mirror_display_name(&base).bright_white()
-                        );
-                    }
-                    selected_archive_path = Some(archive_path);
-                    selected_archive_ext = Some(archive_ext);
-                    last_error = None;
-                    break;
-                }
-                Err(error) => {
-                    let _ = fs::remove_file(&archive_path);
-                    println!(
-                        "{} {}",
-                        "Download source failed:".bright_yellow(),
-                        error.to_string().dimmed()
-                    );
-                    last_error = Some(error);
                 }
             }
-        }
 
-        if selected_archive_path.is_some() {
-            break;
-        }
-        if archive_ext != "tar.gz" && archive_ext != "zip" {
-            println!(
-                "{} {}",
-                "Archive download failed, falling back to:".bright_yellow(),
-                "tar.gz".bright_white()
-            );
+            if selected_archive_path.is_some() {
+                break;
+            }
+            if archive_ext != "tar.gz" && archive_ext != "zip" {
+                println!(
+                    "{} {}",
+                    "Archive download failed, falling back to:".bright_yellow(),
+                    "tar.gz".bright_white()
+                );
+            }
         }
     }
 
@@ -1085,48 +1138,58 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
         format!("(current: v{})", current_version).dimmed()
     );
 
-    let cache = match get_latest_version_fresh_with_diagnostics() {
-        Ok(c) => c,
-        Err(diagnostic) => {
-            if let Some(cached) = get_latest_version() {
-                println!(
-                    "{}",
-                    format!(
-                        "⚠ Could not fetch latest version ({}), using cached data.",
-                        diagnostic
-                    )
-                    .bright_yellow()
-                );
-                cached
-            } else {
-                println!(
-                    "{}",
-                    format!("⚠ Could not check for updates: {}", diagnostic).bright_yellow()
-                );
-                println!();
-                println!("{}", "  You can upgrade manually by running:".dimmed());
-                println!(
-                    "  {}",
-                    "curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash"
-                        .bright_cyan()
-                );
-                println!();
-                println!("{}", "  Troubleshooting tips:".dimmed());
-                println!("{}", "    • Check your internet connection".dimmed());
-                println!(
-                    "{}",
-                    "    • If behind a proxy/firewall, ensure github.com is accessible".dimmed()
-                );
-                println!(
-                    "{}",
-                    "    • Try: curl -sI -o /dev/null -w '%{url_effective}' -L https://github.com/bifrost-proxy/bifrost/releases/latest"
-                        .dimmed()
-                );
-                println!(
-                    "{}",
-                    "    • Set RUST_LOG=debug for detailed diagnostics".dimmed()
-                );
-                return Ok(());
+    #[cfg(debug_assertions)]
+    let debug_latest = debug_upgrade_latest_version_override();
+    #[cfg(not(debug_assertions))]
+    let debug_latest: Option<VersionCache> = None;
+
+    let cache = if let Some(cache) = debug_latest {
+        cache
+    } else {
+        match get_latest_version_fresh_with_diagnostics() {
+            Ok(c) => c,
+            Err(diagnostic) => {
+                if let Some(cached) = get_latest_version() {
+                    println!(
+                        "{}",
+                        format!(
+                            "⚠ Could not fetch latest version ({}), using cached data.",
+                            diagnostic
+                        )
+                        .bright_yellow()
+                    );
+                    cached
+                } else {
+                    println!(
+                        "{}",
+                        format!("⚠ Could not check for updates: {}", diagnostic).bright_yellow()
+                    );
+                    println!();
+                    println!("{}", "  You can upgrade manually by running:".dimmed());
+                    println!(
+                        "  {}",
+                        "curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash"
+                            .bright_cyan()
+                    );
+                    println!();
+                    println!("{}", "  Troubleshooting tips:".dimmed());
+                    println!("{}", "    • Check your internet connection".dimmed());
+                    println!(
+                        "{}",
+                        "    • If behind a proxy/firewall, ensure github.com is accessible"
+                            .dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "    • Try: curl -sI -o /dev/null -w '%{url_effective}' -L https://github.com/bifrost-proxy/bifrost/releases/latest"
+                            .dimmed()
+                    );
+                    println!(
+                        "{}",
+                        "    • Set RUST_LOG=debug for detailed diagnostics".dimmed()
+                    );
+                    return Ok(());
+                }
             }
         }
     };
@@ -1359,6 +1422,18 @@ fn build_restart_args(
         args.push("--system-proxy".to_string());
         args.push("--proxy-bypass".to_string());
         args.push(snapshot.bypass.clone());
+    } else if let Some(info) = runtime_info {
+        if info.system_proxy_enabled.unwrap_or(false) {
+            args.push("--system-proxy".to_string());
+            if let Some(bypass) = info.system_proxy_bypass.as_ref() {
+                args.push("--proxy-bypass".to_string());
+                args.push(bypass.clone());
+            }
+        } else {
+            args.push("--no-system-proxy".to_string());
+        }
+    } else {
+        args.push("--no-system-proxy".to_string());
     }
 
     args
@@ -1470,6 +1545,8 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: Some(false),
+            system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
         let args = build_restart_args(Some(&info), None);
@@ -1485,7 +1562,8 @@ mod tests {
                 "--host",
                 "0.0.0.0",
                 "--socks5-port",
-                "1080"
+                "1080",
+                "--no-system-proxy"
             ]
         );
     }
@@ -1501,19 +1579,38 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: Some(false),
+            system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
         let args = build_restart_args(Some(&info), None);
         assert_eq!(
             args,
-            vec!["start", "-d", "-y", "--skip-cert-check", "-p", "9900"]
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "-p",
+                "9900",
+                "--no-system-proxy"
+            ]
         );
     }
 
     #[test]
     fn test_build_restart_args_no_runtime_info() {
         let args = build_restart_args(None, None);
-        assert_eq!(args, vec!["start", "-d", "-y", "--skip-cert-check"]);
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "--no-system-proxy"
+            ]
+        );
     }
 
     #[test]
@@ -1532,6 +1629,8 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert_eq!(restart_port_from_runtime(Some(&info)), 18891);
@@ -1548,12 +1647,22 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: Some(false),
+            system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
         let args = build_restart_args(Some(&info), None);
         assert_eq!(
             args,
-            vec!["start", "-d", "-y", "--skip-cert-check", "-p", "8800"]
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "-p",
+                "8800",
+                "--no-system-proxy"
+            ]
         );
     }
 
@@ -1568,6 +1677,8 @@ mod tests {
             start_mode: Default::default(),
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: Some(false),
+            system_proxy_bypass: Some("runtime-bypass-ignored-by-snapshot".to_string()),
         };
         let snapshot = RuntimeSystemProxySnapshot {
             bypass: "localhost,127.0.0.1,*.local".to_string(),
@@ -1587,6 +1698,70 @@ mod tests {
                 "--system-proxy",
                 "--proxy-bypass",
                 "localhost,127.0.0.1,*.local"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_restart_args_preserves_runtime_system_proxy_request() {
+        let info = crate::process::RuntimeInfo {
+            pid: 12345,
+            port: 9900,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
+        };
+
+        let args = build_restart_args(Some(&info), None);
+
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "-p",
+                "9900",
+                "--system-proxy",
+                "--proxy-bypass",
+                "localhost,127.0.0.1,*.local"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_restart_args_defaults_to_no_system_proxy_for_legacy_runtime() {
+        let info = crate::process::RuntimeInfo {
+            pid: 12345,
+            port: 9900,
+            socks5_port: None,
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: None,
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
+        };
+
+        let args = build_restart_args(Some(&info), None);
+
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "-p",
+                "9900",
+                "--no-system-proxy"
             ]
         );
     }
@@ -1634,6 +1809,20 @@ mod tests {
             archive_ext_candidates_for_os("windows", true, false),
             vec!["zip"]
         );
+    }
+
+    #[test]
+    fn archive_ext_from_path_accepts_supported_upgrade_archives() {
+        assert_eq!(
+            archive_ext_from_path(Path::new("bifrost.tar.xz")),
+            Some("tar.xz")
+        );
+        assert_eq!(
+            archive_ext_from_path(Path::new("bifrost.tar.gz")),
+            Some("tar.gz")
+        );
+        assert_eq!(archive_ext_from_path(Path::new("bifrost.zip")), Some("zip"));
+        assert_eq!(archive_ext_from_path(Path::new("bifrost.gz")), None);
     }
 
     #[test]

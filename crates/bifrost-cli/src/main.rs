@@ -167,7 +167,9 @@ fn run_cli_main() {
 
     let cli = Cli::parse();
 
-    let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }));
+    let is_detached_daemon_child = commands::is_detached_daemon_child_process();
+    let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }))
+        && !is_detached_daemon_child;
 
     let _log_guard = if is_daemon_mode {
         None
@@ -253,12 +255,13 @@ fn run_cli_main() {
             let no_tray_flag = no_tray;
             #[cfg(target_os = "linux")]
             let no_tray_flag = true;
+            let daemon_flag = daemon && !is_detached_daemon_child;
             run_start(
                 effective_port,
                 effective_host,
                 effective_socks5_port,
                 &cli.log_level,
-                daemon,
+                daemon_flag,
                 cli.log_dir
                     .clone()
                     .unwrap_or_else(|| data_dir().join("logs")),
