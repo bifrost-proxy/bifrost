@@ -1975,7 +1975,7 @@ pub fn run_foreground(
             );
             let detached_daemon_child = is_detached_daemon_child_process();
             let tray_launch_callback = build_tray_launch_callback(
-                no_tray || detached_daemon_child,
+                should_suppress_startup_tray(no_tray, detached_daemon_child),
                 bifrost_dir.clone(),
                 pid,
                 &config,
@@ -2460,6 +2460,10 @@ fn build_tray_start_args(
     }
 
     args
+}
+
+fn should_suppress_startup_tray(no_tray: bool, _detached_daemon_child: bool) -> bool {
+    no_tray
 }
 
 fn build_tray_launch_callback(
@@ -4268,6 +4272,12 @@ mod tests {
                 "--yes",
             ]
         );
+    }
+
+    #[test]
+    fn daemon_child_does_not_suppress_startup_tray() {
+        assert!(!should_suppress_startup_tray(false, true));
+        assert!(should_suppress_startup_tray(true, true));
     }
 
     #[test]

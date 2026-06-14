@@ -190,6 +190,7 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 - Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Admin UI` / `Open Logs` 时出现短暂终端窗口。
 - Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
 - macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
+- `bifrost start -d` 的 daemon child 是真正的长期服务进程；它完成 listener/runtime 初始化后仍必须按配置拉起 tray helper。只有用户显式传入 `--no-tray` 或配置禁用 tray 时才跳过，不能因为 `BIFROST_DETACHED_DAEMON_CHILD=1` 跳过 tray。
 
 ## CLI 交互面
 
