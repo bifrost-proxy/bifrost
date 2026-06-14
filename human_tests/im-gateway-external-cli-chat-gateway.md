@@ -834,8 +834,37 @@
 3. `Access is denied` 等非 missing-process 错误不会被误判为成功。
 4. 两个原 CI 失败用例最终仍收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`。
 
+### TC-IEC-42: TraeX progress card 保留模型公开输出并隐藏机器状态
+
+操作步骤：
+1. 使用临时数据目录启动当前源码 Bifrost，必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `--no-system-proxy`：
+   ```bash
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DATA_DIR=/tmp/bifrost-traex-visible-<ts> \
+   target/debug/bifrost start --host 127.0.0.1 -p <port> --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 通过 Chat Gateway defaults API 配置 `traex` runner，adapter 为 `traex`，executable 指向本机真实 TraeX CLI，`sandbox=read-only`、`skipGitRepoCheck=true`、`deliveryMode=progress_card`。
+3. 调用 `/chat/stream`，要求 TraeX 先说明要检查什么，再执行版本检查命令，最后给出结论：
+   ```bash
+   curl -sS -N "http://127.0.0.1:<port>/_bifrost/api/im-gateway/chat/stream" \
+     -H 'content-type: application/json' \
+     -d '{"message":"检查一下 Trae X 的版本是否需要更新。请先简短说明你准备检查什么，然后运行必要命令，最后给出结论。","sessionKey":"traex-visible-regression-<ts>","providerId":"feishu-main","runnerId":"traex","workDir":"/Users/eden/work/github/bifrost"}'
+   ```
+4. 读取本次 run 的 `cli.stdout.log`、`normalized_events.jsonl`、run detail 和 session JSONL，检查事件顺序。
+5. 执行 focused card 回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::progress_card --lib -- --nocapture
+   ```
+
+预期结果：
+1. TraeX 原始 stdout 和 `normalized_events.jsonl` 至少包含一条工具前的 `agent_message`/`assistant_final`，例如“检查当前 Trae X 版本并与最新可用版本对比”。
+2. 工具事件仍按 `tool_started`/`tool_finished` 进入 timeline，工具前后的公开模型 content 与工具调用保持交叉顺序。
+3. `tool_calls`、`waiting_on_session`、`model_request`、`model_response`、`turn started`、`model rerouted:*` 等机器状态不进入 progress card 过程区域。
+4. 完成态 progress card 底部展示最终结论；如果最后一条运行中模型 content 与最终输出完全相同，过程区域去重该终态重复项，但保留更早的公开模型 content 和工具过程。
+
 ## 最近执行记录
 
+- 2026-06-14：执行 TC-IEC-42。先在 `main` 启动临时服务，端口 `51754`，数据目录 `/tmp/bifrost-traex-visible-1781401190`，命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `--no-system-proxy`；配置真实 TraeX runner `/Users/eden/.local/bin/traex` 后调用 `/chat/stream`，run `1781401268378-9439e402-6e4c-4b12-85a9-09e6f889b792`。`cli.stdout.log` 与 `normalized_events.jsonl` 显示 TraeX 先输出 `agent_message`“检查当前 Trae X 版本并与最新可用版本对比。”，再交叉输出 `command_execution` 工具事件，最后输出 `agent_message`“**结论：** 当前 Trae X 版本为 `0.200.9`，已是最新版本，无需更新。”；session JSONL 同步记录工具前 `assistant_delta`、工具调用、最终 `assistant_delta` 和 `assistant_message`。补充单测 `traex_model_messages_stay_visible_while_machine_statuses_are_hidden` 后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::progress_card --lib` 通过，29 个 progress card 用例全部通过，确认机器状态隐藏、工具前模型公开 content 保留、终态重复结论不再留在过程区。
 - 2026-06-12：执行 TC-IEC-41 的本地回归步骤，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_marks_stopped_run_before_late_stdout --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_stops_active_run_by_session_key --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin request_run_stop_treats_missing_active_pid_as_stopped --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin taskkill_missing_process_messages_are_idempotent --lib -- --nocapture` 均通过。Windows Unit Tests 的真实 `taskkill` missing pid 路径待 PR GitHub Actions 验证。
 - 2026-06-08：执行 TC-IEC-39/40 的本轮回归验证。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture` 通过，确认 Feishu + Trae/Codex external runner 在没有 channel delivery override 时解析为 `ProgressCard`，且显式 channel/input override 与非 Feishu Provider 行为不变。命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts` 通过，1 个测试文件 10 个用例全部通过，确认 external runner 的 thinking/tool `processSteps` 挂在最终 assistant message 上，不再生成额外 `Agent is running...` 占位消息。
 - 2026-05-13：执行 TC-IEC-01/02/03/04/08/09/10/11/12/13，临时服务端口 `18880`，`BIFROST_DATA_DIR=/tmp/bifrost-im-external-cli-test`，均通过；TC-IEC-12 使用 `sleep 23` 慢进程验证 active run 可停止，run 收敛为 `status:"stopped"`，`response:"External CLI run was stopped by request."`，且未残留 `sleep 23` 测试进程。
