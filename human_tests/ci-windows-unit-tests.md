@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 GitHub Actions `Windows Unit Tests (x86_64)` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、外部 runner 的 stdin/工作目录/停止语义、Agent exec_command 的默认 shell/stdin/TTY 夹具、Agent session 间接调用 exec_command 的长任务/交互夹具、Goal prompt 换行断言、AdminState 托盘 callback 单测隔离、TOML 中 Windows 路径转义、以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
+验证 GitHub Actions `Windows Unit Tests (x86_64)` 与 `Unit & Integration Tests` 中暴露的跨平台单元测试问题不会回归。重点覆盖 Windows 路径分隔符、Windows 缺失可执行文件错误文本、PowerShell/cmd 与 Unix shell 差异、外部 runner 的 stdin/工作目录/停止语义、Agent exec_command 的默认 shell/stdin/TTY 夹具、Agent session 间接调用 exec_command 的长任务/交互夹具、Goal prompt 换行断言、AdminState 托盘 callback 单测隔离、TOML 中 Windows 路径转义、HTTP mock server 请求体读取完整性，以及 ASR native runtime 在 Windows/Linux 不可用时的测试 gating。
 
 ## 前置条件
 
@@ -313,6 +313,19 @@ prlctl exec "Windows 11" cmd /c "cd /d C:\Users\eden\github\bifrost && call \"C:
 - 仅 Unix 测试使用的 `std::fs` import 和 Android CA status 测试模块不会在 Windows `--all-targets -D warnings` 下产生 unused import。
 - `bifrost-device` 单元测试全部通过，非 macOS 平台仍保持 iOS discovery/configurator unsupported 语义。
 
+### TC-CWUT-20 Group rule mock server reads full request body
+
+操作步骤：
+
+```bash
+source ~/.zshrc && SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib commands::group::tests -- --nocapture
+```
+
+预期结果：
+- `commands::group::tests::test_group_rule_add_passes_allow_invalid` 在 GitHub Actions `Unit & Integration Tests` 中不因 TCP 分段只读取到 HTTP header 而假失败。
+- Group CLI 测试 mock server 必须循环读取到 `\r\n\r\n` 后声明的 `content-length` 完整 body，再把请求写入 logs。
+- 新增 helper 单测覆盖 header 已到、body 分段稍后到达时 `http_request_is_complete()` 先返回 false，追加完整 body 后返回 true。
+
 ## 清理步骤
 
 本测试只运行单元测试和静态扫描；cargo 产物由常规构建缓存管理，无额外临时服务需要停止。
@@ -345,3 +358,4 @@ prlctl exec "Windows 11" cmd /c "cd /d C:\Users\eden\github\bifrost && call \"C:
 | 2026-06-12 | TC-CWUT-17 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步最新 `origin/main` 后，执行 `cargo +stable test -p skills --all-features -j1`、`cargo +stable test --workspace --all-features -j1`、`cargo +stable test -p bifrost-core --all-features -j1`、`cargo +stable clippy --workspace --all-targets --all-features -j1 -- -D warnings`。 | 通过，skills 89 passed，完整 workspace all-features、bifrost-core 897 passed，workspace clippy 通过；Windows-only symlink 测试 warning 已通过 `#[cfg(unix)]` 收敛 |
 | 2026-06-12 | TC-CWUT-18 | 跟进 GitHub Actions run `27404962469`，定位 `Windows Unit Tests (x86_64)` 的测试主体后失败点为 `Post Run Swatinem/rust-cache` 保存 cache；更新 workflow 后重新检查 PR checks。 | 待复验，预期 Windows Unit Tests 不再因 cache post-step 保存失败变红 |
 | 2026-06-12 | TC-CWUT-19 | 在 Parallels `Windows 11` VM 的 `C:\Users\eden\github\bifrost` 同步远端分支并 rebase 到最新 `origin/main` 后，执行 `cargo +stable clippy -p bifrost-device --all-targets --all-features -j1 -- -D warnings` 与 `cargo +stable test -p bifrost-device --all-features -j1`。 | 通过，clippy 无 warning；`bifrost-device` 49 个单元测试与 doc-tests 全部通过，覆盖 iOS cfgutil macOS-only helper 和 Android CA status Unix-only module 的 Windows 编译回归 |
+| 2026-06-13 | TC-CWUT-20 | 跟进 GitHub Actions run `27468695678` 的 `Unit & Integration Tests`，定位 `commands::group::tests::test_group_rule_add_passes_allow_invalid` 在 CI 中 mock server 单次 read 只读到 header，导致 logs 中缺少 `"allow_invalid":true`；本地执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib commands::group::tests -- --nocapture`。 | 通过，本地 group tests 35 个用例全部通过；mock server 改为按 `content-length` 等待完整 body 后记录请求，避免 CI TCP 分段假阴性 |

@@ -7,6 +7,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 cd "$REPO_DIR"
 
+source "$REPO_DIR/e2e-tests/test_utils/process.sh"
+
 pick_port() {
   python3 - <<'PY'
 import socket
@@ -26,12 +28,14 @@ RESPONSE_FILE="$TEST_DIR/response.json"
 
 cleanup() {
   if [[ -n "${BIFROST_PID:-}" ]]; then
-    kill "$BIFROST_PID" >/dev/null 2>&1 || true
-    wait "$BIFROST_PID" >/dev/null 2>&1 || true
+    if [[ -n "${BIFROST_BIN:-}" ]]; then
+      BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$BIFROST_PORT" stop >/dev/null 2>&1 || true
+    fi
+    safe_cleanup_proxy "$BIFROST_PID"
   fi
   if [[ -n "${MOCK_PID:-}" ]]; then
-    kill "$MOCK_PID" >/dev/null 2>&1 || true
-    wait "$MOCK_PID" >/dev/null 2>&1 || true
+    kill_pid "$MOCK_PID"
+    wait_pid "$MOCK_PID" >/dev/null 2>&1 || true
   fi
   rm -rf "$TEST_DIR"
 }

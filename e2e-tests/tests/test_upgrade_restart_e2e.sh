@@ -12,6 +12,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # 2. 有 daemon 运行时 upgrade（版本已最新不触发重启）不报错
 # 3. --restart 参数与 daemon 模式启动的组合
 # 4. 验证 runtime.json 中信息正确性，确保重启时能正确读取
+# 5. 源码门禁验证 upgrade 的真实重启路径在 stop 后等待端口释放，避免 EADDRINUSE 崩溃
 
 set -uo pipefail
 
@@ -256,10 +257,57 @@ test_upgrade_restart_flag_in_help() {
     fi
 }
 
+test_upgrade_restart_port_release_guard_in_source() {
+    _log_info "case: upgrade restart path waits for port release before start"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "wait_for_restart_port_release(restart_port)" "$source_file" \
+        && grep -q "Proxy port .*still occupied after" "$source_file" \
+        && grep -q "find_process_on_port(port)" "$source_file" \
+        && grep -q "recover_from_crash(&data_dir)" "$source_file"; then
+        _log_pass "upgrade restart has port-release guard, listener diagnostics, and system proxy recovery"
+    else
+        _log_fail "upgrade restart port guard" \
+            "wait_for_restart_port_release plus occupied-port diagnostics and system proxy recovery" \
+            "guard missing from upgrade.rs"
+        return 1
+    fi
+}
+
+test_upgrade_restart_port_guard_covers_windows() {
+    _log_info "case: upgrade restart port-release guard is not unix-only"
+
+    local upgrade_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+    local process_src="${PROJECT_DIR}/crates/bifrost-cli/src/process.rs"
+
+    # The active guard must compile on both Unix and Windows, and the only
+    # no-op fallback may target neither-unix-nor-windows platforms. The shared
+    # wait helper must likewise be available on Windows, otherwise Windows
+    # upgrades silently fall back to the racy stop-then-start path.
+    # Note: use portable grep only (macOS ships BSD grep without -P/-z).
+    local wait_helper_cfg
+    wait_helper_cfg="$(grep -B1 'pub fn wait_for_port_released' "$process_src" | head -1)"
+
+    if grep -q '#\[cfg(any(unix, windows))\]' "$upgrade_src" \
+        && grep -q '#\[cfg(not(any(unix, windows)))\]' "$upgrade_src" \
+        && ! grep -q '#\[cfg(not(unix))\]' "$upgrade_src" \
+        && printf '%s' "$wait_helper_cfg" | grep -q 'cfg(any(unix, windows))'; then
+        _log_pass "upgrade restart port-release guard and wait helper cover Windows"
+    else
+        _log_fail "upgrade restart windows coverage" \
+            "wait_for_restart_port_release + wait_for_port_released gated for any(unix, windows)" \
+            "guard or wait helper is still unix-only"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
     test_upgrade_restart_flag_in_help || true
+    test_upgrade_restart_port_release_guard_in_source || true
+    test_upgrade_restart_port_guard_covers_windows || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true
