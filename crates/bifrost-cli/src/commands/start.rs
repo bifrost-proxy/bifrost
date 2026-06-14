@@ -370,6 +370,7 @@ struct SystemProxyReconcileConfig {
     enabled_flag: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
     daemon_mode: bool,
+    defer_startup_recovery_for_restart_handoff: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -410,6 +411,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         enabled_flag,
         stop_flag,
         daemon_mode,
+        defer_startup_recovery_for_restart_handoff,
     } = config;
 
     let _ = std::thread::Builder::new()
@@ -417,9 +419,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         .spawn(move || {
             let started_at = Instant::now();
 
-            if !should_run_system_proxy_startup_recovery(
+            if !should_run_system_proxy_reconcile_startup_recovery(
                 &bifrost_dir,
                 desired_enabled.load(Ordering::Acquire),
+                defer_startup_recovery_for_restart_handoff,
             ) {
                 tracing::info!(
                     target: "bifrost_cli::startup",
@@ -1048,6 +1051,15 @@ fn should_run_system_proxy_startup_recovery(
     !should_defer_startup_proxy_recovery_for_restart_handoff(bifrost_dir, enable_system_proxy)
 }
 
+fn should_run_system_proxy_reconcile_startup_recovery(
+    bifrost_dir: &std::path::Path,
+    enable_system_proxy: bool,
+    defer_for_restart_handoff: bool,
+) -> bool {
+    !defer_for_restart_handoff
+        && should_run_system_proxy_startup_recovery(bifrost_dir, enable_system_proxy)
+}
+
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1509,10 +1521,9 @@ pub fn run_start(
         }
     }
 
-    let mut restart_handoff_guard = if should_defer_startup_proxy_recovery_for_restart_handoff(
-        &bifrost_dir,
-        enable_system_proxy,
-    ) {
+    let defer_startup_recovery_for_restart_handoff =
+        should_defer_startup_proxy_recovery_for_restart_handoff(&bifrost_dir, enable_system_proxy);
+    let mut restart_handoff_guard = if defer_startup_recovery_for_restart_handoff {
         Some(RestartHandoffStartupGuard::new(bifrost_dir.clone()))
     } else {
         recover_proxy_state_before_start(&bifrost_dir);
@@ -1533,6 +1544,7 @@ pub fn run_start(
                 all_values.clone(),
                 enable_system_proxy,
                 system_proxy_bypass.clone(),
+                defer_startup_recovery_for_restart_handoff,
                 cli_proxy,
                 cli_proxy_no_proxy.clone(),
                 config_manager,
@@ -1571,6 +1583,7 @@ pub fn run_start(
             all_values,
             enable_system_proxy,
             system_proxy_bypass,
+            defer_startup_recovery_for_restart_handoff,
             cli_proxy,
             cli_proxy_no_proxy,
             disconnect_on_config_change,
@@ -1598,6 +1611,7 @@ pub fn run_foreground(
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
     system_proxy_bypass: String,
+    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     disconnect_on_config_change: bool,
@@ -2203,6 +2217,7 @@ pub fn run_foreground(
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
                 daemon_mode: detached_daemon_child,
+                defer_startup_recovery_for_restart_handoff,
             });
 
             spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -2215,6 +2230,7 @@ pub fn run_foreground(
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
                 daemon_mode: detached_daemon_child,
+                defer_startup_recovery_for_restart_handoff,
             });
 
             let shutdown_signal = wait_for_shutdown_signal();
@@ -2751,6 +2767,7 @@ pub fn run_daemon(
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
     system_proxy_bypass: String,
+    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     config_manager: ConfigManager,
@@ -3306,6 +3323,7 @@ pub fn run_daemon(
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
+                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -3318,6 +3336,7 @@ pub fn run_daemon(
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
+                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     let listener_config = server.config().clone();
@@ -4161,6 +4180,41 @@ mod tests {
         assert!(!should_run_system_proxy_startup_recovery(
             temp_dir.path(),
             true,
+        ));
+    }
+
+    #[test]
+    fn system_proxy_reconcile_uses_captured_restart_handoff_after_marker_consumed() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime info");
+
+        let defer_for_restart_handoff =
+            should_defer_startup_proxy_recovery_for_restart_handoff(temp_dir.path(), true);
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(temp_dir.path());
+
+        assert!(defer_for_restart_handoff);
+        assert!(should_run_system_proxy_startup_recovery(
+            temp_dir.path(),
+            true,
+        ));
+        assert!(!should_run_system_proxy_reconcile_startup_recovery(
+            temp_dir.path(),
+            true,
+            defer_for_restart_handoff,
         ));
     }
 

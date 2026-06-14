@@ -1108,24 +1108,11 @@ jobs:
         with:
           name: bifrost-release-x86_64-pc-windows-msvc
           path: target/release
-      - name: Download previous Windows release binary
-        shell: powershell
-        run: |
-          $ErrorActionPreference = "Stop"
-          $version = "0.0.100"
-          $target = "x86_64-pc-windows-msvc"
-          $archiveName = "bifrost-v$version-$target.zip"
-          $url = "https://github.com/bifrost-proxy/bifrost/releases/download/v$version/$archiveName"
-          New-Item -ItemType Directory -Force old-release | Out-Null
-          Invoke-WebRequest -Uri $url -OutFile "old-release/$archiveName"
-          Expand-Archive -Path "old-release/$archiveName" -DestinationPath "old-release" -Force
-          Copy-Item "old-release/bifrost-v$version-$target/bifrost.exe" "old-release/bifrost-old.exe" -Force
-          ./old-release/bifrost-old.exe --version
-      - name: E2E upgrade restart from previous Windows release
+      - name: E2E upgrade restart with Windows self-update replacement
         shell: bash
         env:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
-          OLD_BIFROST_BIN: ${{ github.workspace }}/old-release/bifrost-old.exe
+          BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN: "1"
           BIFROST_UPGRADE_E2E_VERSION: 0.0.101
         run: bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
       - name: Dump failed suite logs
@@ -1149,7 +1136,6 @@ jobs:
             ${{ github.workspace }}/.e2e-reports/
             ${{ github.workspace }}/.bifrost-e2e-ci/
             ${{ github.workspace }}/target/
-            ${{ github.workspace }}/old-release/
           retention-days: 7
           if-no-files-found: ignore
           include-hidden-files: true

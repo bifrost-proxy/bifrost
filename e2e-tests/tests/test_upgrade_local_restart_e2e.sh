@@ -12,6 +12,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 OLD_BIFROST_BIN="${OLD_BIFROST_BIN:-}"
+BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN="${BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN:-0}"
 TEST_VERSION="${BIFROST_UPGRADE_E2E_VERSION:-0.0.101}"
 TEST_ROOT=""
 TEST_DATA_DIR=""
@@ -141,13 +142,6 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
         return 1
     fi
 
-    local old_bin
-    if ! old_bin="$(find_old_bifrost_bin)"; then
-        _log_fail "old bifrost binary available" "0.0.99 binary via OLD_BIFROST_BIN or ~/.cargo/bin/bifrost" "not found"
-        return 1
-    fi
-    _log_pass "old binary selected: $old_bin"
-
     TEST_ROOT="$(mktemp -d)"
     TEST_DATA_DIR="${TEST_ROOT}/data"
     local install_dir="${TEST_ROOT}/install"
@@ -156,6 +150,18 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
     INSTALL_BIN="${install_dir}/$(binary_name)"
     cp "$BIFROST_BIN" "$INSTALL_BIN"
     chmod +x "$INSTALL_BIN" 2>/dev/null || true
+
+    local start_bin
+    if [[ "$BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN" == "1" ]]; then
+        start_bin="$INSTALL_BIN"
+        _log_pass "start binary selected: installed test binary $start_bin"
+    else
+        if ! start_bin="$(find_old_bifrost_bin)"; then
+            _log_fail "old bifrost binary available" "0.0.99 binary via OLD_BIFROST_BIN or ~/.cargo/bin/bifrost" "not found"
+            return 1
+        fi
+        _log_pass "old binary selected: $start_bin"
+    fi
 
     local py
     py="$(python3_cmd)"
@@ -174,7 +180,7 @@ PY
 
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
-    "$old_bin" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
+    "$start_bin" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --skip-cert-check --no-system-proxy --no-intercept --no-tray -y >/tmp/bifrost-upgrade-old-start.log 2>&1
     local old_pid
     old_pid="$(cat "${TEST_DATA_DIR}/bifrost.pid" 2>/dev/null || true)"
