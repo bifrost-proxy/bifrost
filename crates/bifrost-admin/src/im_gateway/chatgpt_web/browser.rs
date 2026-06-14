@@ -760,7 +760,7 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex, OnceLock,
     };
     use tokio::sync::{broadcast, mpsc};
     use tokio_tungstenite::tungstenite::protocol::Message;
@@ -783,6 +783,13 @@ mod tests {
         let closed = Arc::new(AtomicBool::new(false));
         let client = Arc::new(dummy_cdp_client_with_closed(closed.clone()));
         (closed, client)
+    }
+
+    fn conversation_tabs_test_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("conversation tab test lock poisoned")
     }
 
     #[test]
@@ -858,6 +865,7 @@ mod tests {
 
     #[test]
     fn conversation_tab_register_and_get_roundtrip() {
+        let _guard = conversation_tabs_test_lock();
         conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-roundtrip");
         let (_closed, cdp) = dummy_cdp_client();
@@ -872,6 +880,7 @@ mod tests {
 
     #[test]
     fn conversation_tab_lru_eviction_for_profile() {
+        let _guard = conversation_tabs_test_lock();
         conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-lru");
         let (_closed, cdp) = dummy_cdp_client();
@@ -900,6 +909,7 @@ mod tests {
 
     #[test]
     fn get_conversation_tab_removes_closed_entries() {
+        let _guard = conversation_tabs_test_lock();
         conversation_tabs().clear();
         let profile = PathBuf::from("/tmp/chatgpt-web-tests-profile-closed");
         let (closed, cdp) = dummy_cdp_client();
