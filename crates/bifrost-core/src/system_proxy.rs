@@ -910,67 +910,40 @@ impl SystemProxyManager {
 
     #[cfg(target_os = "windows")]
     fn parse_windows_proxy() -> Option<Sysproxy> {
-        use std::process::Command;
+        use winreg::enums::HKEY_CURRENT_USER;
+        use winreg::RegKey;
 
-        let output = Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyEnable",
-            ])
-            .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let enable = stdout.contains("0x1");
-
-        let output = Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyServer",
-            ])
-            .output()
-            .ok()?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let (host, port) = if let Some(line) = stdout.lines().find(|l| l.contains("ProxyServer")) {
-            if let Some(value) = line.split_whitespace().last() {
-                if let Some((h, p)) = value.split_once(':') {
-                    (h.to_string(), p.parse().unwrap_or(0))
-                } else {
-                    (value.to_string(), 0)
-                }
-            } else {
-                (String::new(), 0)
+        let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+        let settings = match hkcu
+            .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        {
+            Ok(key) => key,
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "[SYSTEM_PROXY] Failed to open Windows Internet Settings registry key"
+                );
+                return Some(Sysproxy {
+                    enable: false,
+                    host: String::new(),
+                    port: 0,
+                    bypass: String::new(),
+                });
             }
-        } else {
-            (String::new(), 0)
         };
 
-        let output = Command::new("reg")
-            .args([
-                "query",
-                r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings",
-                "/v",
-                "ProxyOverride",
-            ])
-            .output()
-            .ok();
-
-        let bypass = output
-            .map(|o| {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout
-                    .lines()
-                    .find(|l| l.contains("ProxyOverride"))
-                    .and_then(|line| line.split_whitespace().last())
-                    .map(|v| v.replace(';', ","))
-                    .unwrap_or_default()
-            })
+        let enable = settings
+            .get_value::<u32, _>("ProxyEnable")
+            .map(|value| value != 0)
+            .unwrap_or(false);
+        let proxy_server = settings
+            .get_value::<String, _>("ProxyServer")
             .unwrap_or_default();
+        let (host, port) = Self::parse_windows_proxy_server(&proxy_server);
+        let bypass = settings
+            .get_value::<String, _>("ProxyOverride")
+            .unwrap_or_default()
+            .replace(';', ",");
 
         Some(Sysproxy {
             enable,
@@ -978,6 +951,40 @@ impl SystemProxyManager {
             port,
             bypass,
         })
+    }
+
+    #[cfg(target_os = "windows")]
+    fn parse_windows_proxy_server(proxy_server: &str) -> (String, u16) {
+        let proxy_server = proxy_server.trim();
+        if proxy_server.is_empty() {
+            return (String::new(), 0);
+        }
+
+        let target = proxy_server
+            .split(';')
+            .filter_map(|entry| entry.split_once('='))
+            .find_map(|(scheme, value)| {
+                let scheme = scheme.trim().to_ascii_lowercase();
+                if matches!(scheme.as_str(), "http" | "https" | "socks" | "socks5") {
+                    Some(value.trim())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(proxy_server);
+
+        Self::parse_windows_proxy_host_port(target)
+    }
+
+    #[cfg(target_os = "windows")]
+    fn parse_windows_proxy_host_port(value: &str) -> (String, u16) {
+        let value = value.trim();
+        if let Some((host, port)) = value.rsplit_once(':') {
+            if let Ok(port) = port.parse::<u16>() {
+                return (host.trim().trim_matches(['[', ']']).to_string(), port);
+            }
+        }
+        (value.trim_matches(['[', ']']).to_string(), 0)
     }
 
     #[cfg(target_os = "linux")]

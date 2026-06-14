@@ -136,7 +136,8 @@ helper 启动后：
    - 读取 runtime；
    - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
-   - 重新渲染菜单启用状态。
+   - 重新渲染菜单启用状态；
+   - 不在后台定时读取系统代理状态。系统代理状态只能使用缓存，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
 
@@ -176,6 +177,17 @@ v1 语义：
   - `Quit Tray` 可用；
   - `Status` 显示最近一次停止或断连原因。
 - `Quit Tray` 只退出 helper，不停止主服务。
+
+### System Proxy 状态缓存
+
+System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台心跳的一部分：
+
+- tray helper 的后台菜单快照线程可以刷新 runtime、rules、active rules 和本地配置，但不得定时请求 `/api/proxy/system`。
+- `System Proxy` 菜单项使用最近一次缓存状态渲染；缓存为空时可以暂时不显示该项，或等待下一次用户交互后补齐。
+- 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
+- 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
+- Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
+- macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
 
 ## CLI 交互面
 

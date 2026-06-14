@@ -596,6 +596,36 @@ Get-Content "$env:BIFROST_DATA_DIR\logs\tray.log*" -Tail 120
 - Admin API 重新 ready，托盘菜单恢复 `Bifrost: Running on 127.0.0.1:18896`
 - `tray.pid` 仍指向同一个存活的 `bifrost.exe __tray` helper；不会创建第二个托盘 helper，也不会因为只有 foreground child 退出而显示 `Start failed`
 
+### TC-TH-26: 托盘后台空闲不高频查询系统代理且 Windows 不弹终端窗口（回归）
+
+**操作步骤：**
+1. 在 Windows 11 交互用户 session 中使用当前版本 `bifrost.exe` 启动服务和托盘：
+
+```powershell
+$env:BIFROST_DATA_DIR="$env:TEMP\bifrost-tray-win-system-proxy-cache"
+$env:BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1"
+bifrost.exe start -p 18897 --unsafe-ssl --skip-cert-check --no-system-proxy
+```
+
+2. 在不展开托盘菜单的情况下等待 30 秒，并用进程采样确认是否有 Bifrost 父进程反复创建系统命令：
+
+```powershell
+Get-CimInstance Win32_Process |
+  Where-Object { $_.Name -in @("reg.exe", "powershell.exe", "cmd.exe", "conhost.exe", "WindowsTerminal.exe", "OpenConsole.exe") } |
+  Select-Object ProcessId,ParentProcessId,Name,CommandLine
+```
+
+3. 展开托盘菜单一次，允许托盘按需刷新 System Proxy 缓存
+4. 再等待 30 秒，重复第 2 步采样
+5. 查看 `logs/tray.log*` 与 `logs/bifrost*.log`
+
+**预期结果：**
+- 托盘后台空闲轮询不会每秒请求 `/api/proxy/system`
+- 后台空闲时，Bifrost 主服务不会反复创建 `reg.exe` / `powershell.exe` / `cmd.exe` / `conhost.exe` / `WindowsTerminal.exe`
+- Windows 上即使用户展开托盘菜单触发一次 System Proxy 按需刷新，也不会弹出可见终端窗口
+- System Proxy 菜单项使用最近一次缓存状态渲染；缓存只在托盘交互、System Proxy 开关操作或显式菜单动作后刷新
+- macOS/Windows 都不允许因为托盘常驻而高频调用系统代理检测命令；相关检测必须是按需或低频缓存路径
+
 ### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
 
 **操作步骤：**
@@ -652,6 +682,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-12 | TC-TH-21 | 跟进 GitHub Actions run `27407031037` 的 `E2E Runner (aarch64-pc-windows-msvc)`，定位 `test_cli_tray_startup_ci.sh` 在 Windows tray helper 快速创建又清理 `tray.pid` 时，`[[ -s tray.pid ]]` 后的 `cat tray.pid | tr ...` 触发 `set -e -o pipefail` 直接退出。 | 待复验；脚本改为通过 `read_tray_pid_file` 容忍 PID 文件读取竞态，Windows 仍可用 tray log startup marker 做 log-only fallback |
 | 2026-06-14 | TC-TH-21 / TC-TH-24 | Parallels Windows 11 真实现状排查：`bifrost --version` 为 `0.0.100`，`config.toml` 中 `[tray] enabled = true`；前台 `bifrost.exe start` 进程存活且 `runtime_start_mode` 为 `foreground`，但数据目录只有 `tray.lock`、没有 `tray.pid`，系统中没有 `bifrost.exe __tray` helper。日志多次出现主进程 `tray helper launched` 与 helper `bifrost-tray starting data_dir=... parent_pid=...`，随后 helper 退出。代码路径确认 Windows `main()` 原先把 `run_if_tray_process()` 放在 `bifrost-cli-main` worker 线程里，导致原生 tray event loop 没有在进程主线程运行。 | 已修复代码入口：Windows `main()` 最早阶段先执行 `commands::tray::run_if_tray_process()`，普通 CLI 再进入大栈 worker；同时收紧 `test_cli_tray_startup_ci.sh`，默认不再允许 Windows log-only fallback。固定后 Windows VM 本地编译验证暂阻塞：该 VM 缺少 MSVC linker，`cargo build --bin bifrost` 报 `linker lld-link not found` / `link.exe was not found`，需要安装 Visual Studio Build Tools 或由 Windows CI 验证。 |
 | 2026-06-14 | TC-TH-25 | 用户在 Windows 11 上真实复现：托盘图标已经出现，但从托盘菜单 Stop 主服务后，再从同一托盘点击 Start 无法成功启动。代码路径确认托盘 `StartService` 原先执行 `bifrost start --no-tray --no-system-proxy` 前台启动，并由 tray helper 线程等待子进程；在 Windows tray helper 发起的服务控制路径中，前台子进程生命周期和 helper 会话绑定过紧，容易在 Stop 后 Start 被判失败或无法维持服务。 | 已修复为托盘 Start 使用 `bifrost start --daemon --no-tray --no-system-proxy`，并允许 daemon parent 成功退出后继续等待 `runtime.json` 指向活主服务；本地执行 `cargo test -p bifrost-cli commands::tray::tray::tests::test_tray_start_service_uses_detached_daemon -- --nocapture` 通过。 |
+| 2026-06-15 | TC-TH-26 | Windows 11 真实复现：运行中的 Bifrost 主服务 PID `4480` 和托盘 helper PID `2500` 存活时，进程采样抓到主服务每秒左右创建 `reg.exe query HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings /v ProxyEnable|ProxyServer|ProxyOverride`，随后 Windows 自动创建 `conhost.exe`、`OpenConsole.exe`、`WindowsTerminal.exe`，表现为终端窗口反复弹出又关闭。代码路径确认托盘后台 `poll_menu_data` 每 1 秒刷新菜单快照并请求 `/api/proxy/system`，Admin handler 经 `SystemProxyManager::get_current()` 读取系统代理。 | 已修复为托盘后台刷新不再请求 System Proxy；仅在托盘交互或 System Proxy 开关后按需刷新并缓存该状态。同时 Windows `parse_windows_proxy()` 改用 HKCU registry API 读取 `ProxyEnable` / `ProxyServer` / `ProxyOverride`，不再 spawn `reg.exe`。本地执行 `cargo test -p bifrost-cli tray -- --nocapture` 通过，包含 `test_background_menu_refresh_preserves_system_proxy_cache`；Windows VM 待替换二进制后执行进程采样复验。 |
 
 ## 清理步骤
 

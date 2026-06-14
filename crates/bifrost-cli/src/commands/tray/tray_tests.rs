@@ -278,7 +278,7 @@
         };
 
         let started = Instant::now();
-        let snapshot = load_menu_data_snapshot(&args, ServiceState::Running, false);
+        let snapshot = load_menu_data_snapshot(&args, ServiceState::Running, false, false);
         let elapsed = started.elapsed();
 
         assert!(
@@ -301,6 +301,48 @@
             menu::MenuEntry::Submenu(_) => panic!("expected status item"),
         };
         assert!(status.starts_with("Bifrost: Running on 127.0.0.1:"));
+    }
+
+    #[test]
+    fn test_background_menu_refresh_preserves_system_proxy_cache() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-system-proxy-cache-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: std::process::id(),
+            admin_url: Some("http://127.0.0.1:65535/_bifrost/".to_string()),
+            port: Some(65535),
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+        let cached = menu::SystemProxyMenuState {
+            supported: true,
+            enabled: true,
+        };
+        let snapshot = MenuDataSnapshot {
+            runtime: runtime_for_menu(&args),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: Some(cached.clone()),
+            bin_available: true,
+        };
+        let menu_data = Arc::new(Mutex::new(snapshot));
+        let generation = AtomicU64::new(0);
+
+        refresh_menu_data_snapshot(
+            &args,
+            ServiceState::Running,
+            &menu_data,
+            &generation,
+            false,
+        );
+
+        let snapshot = clone_menu_data_snapshot(&menu_data);
+        assert_eq!(snapshot.system_proxy, Some(cached));
     }
 
     #[test]

@@ -37,6 +37,7 @@ reqwest = { workspace = true, features = ["blocking", "json"] }
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+winreg = "0.50"
 windows-sys = { version = "0.59", features = [
     "Win32_Foundation",
     "Win32_System_Threading",
