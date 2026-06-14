@@ -29,12 +29,16 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | Agent 的意图 | 选哪个命令 | 不要这么做 |
 |---|---|---|
 | 看一下远端某文件 | `remote file read <path>` | `remote exec --shell-text "cat <path>"` |
+| 一次读多个文件 | `remote file read-many --path a --path b ...` | 循环多次 `read` / `shell-text "cat a b c"` |
 | 列目录树、找文件名 | `remote file list` / `remote file glob` | `shell-text "find ..." / "ls -R"` |
 | 正则搜代码、定位符号 | `remote file find <regex>` | `shell-text "grep -rn ..."` |
+| 多关键词 OR 搜 / 字面量 / 整词 | `remote file find -e p1 -e p2 [--fixed-strings] [--word]` | 多次 grep 后人肉合并 |
+| 搜到点想看上下文 | `remote file find <regex> --around 3` | 再单独 `read` 那几行 |
 | 写一个短文本文件 | `remote file write <path> --content "..." --create-parents` | `shell-text "echo ... > file"` |
 | 从本地文件写过去 | `remote file write <path> --content-file ./local.txt --create-parents` | `scp` / `echo`+重定向 |
-| 改已有文件的几行 | `remote file edit --base-sha256 <sha> --edits '[...]'` | `sed -i` / `echo`+重定向 |
-| 多文件统一 patch | `remote file patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
+| 改已有文件的几行（按行号） | `remote file edit --base-sha256 <sha> --edits '[{"start_line":..}]'` | `sed -i` / `echo`+重定向 |
+| 按内容锚点改（不数行号） | `remote file edit --edits '[{"old_string":"..","new_string":".."}]'` | `sed`/正则替换 |
+| 多文件统一 patch（含改名/复制） | `remote file patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
 | 创建目录 | `remote file mkdir --parents` | `shell-text "mkdir -p ..."` |
 | 移动/删除 | `remote file move` / `remote file delete --recursive` | `shell-text "mv" / "rm -rf"` |
 | 传输大文件 / 二进制 / 特殊字符 | `remote file write --content-b64 "$(base64 < ./blob.bin)"` | echo 管道 base64 |
@@ -255,10 +259,15 @@ bifrost remote exec --resume-call-id <uuid> --resume-relay-token <token> \
 # —— 只读（需 remote_file_read）——
 bifrost remote file read   <path> [--max-bytes N] [--allow-binary] \
                                    [--offset LINE] [--limit N]
+bifrost remote file read-many --path <p1> --path <p2> ... \
+                                   [--max-bytes N] [--allow-binary]
 bifrost remote file list   [path] [--depth N] [--no-ignore] [--exclude NAME]...
 bifrost remote file stat   <path>
 bifrost remote file glob   '<pattern>'  [--max-matches N] [--no-ignore]
-bifrost remote file find   '<regex>'    [--path <sub>] [--max-matches N] \
+bifrost remote file find   ['<regex>']  [-e '<regex>']... \
+                                         [--fixed-strings] [--word] \
+                                         [--around N] \
+                                         [--path <sub>] [--max-matches N] \
                                          [--max-scan N] \
                                          [-B N] [-A N] [-i] [--glob '<pat>'] \
                                          [--no-ignore] [--exclude NAME]...
@@ -277,6 +286,60 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 
 所有子命令共享 `--cwd <path>`、`--output human|json`、`--relay-url`、`--client-id`。
 
+#### `read-many`：一次往返并发读多个文件
+
+需要同时看一组文件（比如某模块的 5 个源文件）时，不要循环调用 `read`，用 `read-many` 一次取回：
+
+```bash
+bifrost remote file read-many \
+  --path src/lib.rs --path src/main.rs --path Cargo.toml
+```
+
+- 重复 `--path` 指定每个文件，**至少传一个**。
+- 服务端**并发**读取，单个文件失败（不存在 / 越权 / 二进制未允许）**不会**中断其余文件——该文件返回单独的错误项，其余正常返回。
+- json 模式返回 `{files:[...], count, ok_count}`：`count` 是请求数，`ok_count` 是成功数；每个 `files[i]` 要么带 `content_b64`/`sha256`/`size` 等正文字段，要么带该文件的 `error` 码。
+- 每个文件仍受 `--max-bytes` / `--allow-binary` 约束（对全体生效）。
+
+#### 按内容锚定编辑（`edit` 的第二种形态）
+
+`edit` 的 `--edits` 现支持两种**互斥**的 item 形态，单次调用只能用其中一种：
+
+1. **行号区间**（原有）：`{"start_line":10,"end_line":12,"replacement":"new\n"}`，1-based 闭区间。
+2. **内容锚定**（新增）：`{"old_string":"foo","new_string":"bar","expected_count":1}`，按**字面子串**定位替换，不必数行号。`expected_count` 省略时默认 1；实际命中数与之不符会报错回滚，避免误改。锚定文本被 EOL 归一化到源文件风格。
+
+```bash
+# 锚定改：把唯一一处 "old_token" 换成 "new_token"
+bifrost remote file edit src/config.rs \
+  --edits '[{"old_string":"old_token","new_string":"new_token"}]'
+
+# 一个文件里预期出现 3 次，全部替换
+bifrost remote file edit src/x.rs \
+  --edits '[{"old_string":"v1","new_string":"v2","expected_count":3}]'
+```
+
+判定规则：只要 item 带 `old_string` 即视为锚定模式；不能在同一次调用里混用行号区间和锚定 item。
+
+#### `find` 增强：多模式 OR / 字面量 / 整词 / 上下文 snippet
+
+```bash
+# 多关键词 OR（命中任一即返回）：位置参数 + 可重复的 -e
+bifrost remote file find 'TODO' -e 'FIXME' -e 'XXX' --glob '*.rs'
+
+# 字面量搜索（pattern 里的正则元字符当普通字符）
+bifrost remote file find -e 'a.b(c)' --fixed-strings
+
+# 整词匹配（加词边界 \b...\b，避免 sub-word 误命中）
+bifrost remote file find -e 'log' --word
+
+# 对称上下文窗口：每个命中额外回带前后 N 行，合成 snippet 字段
+bifrost remote file find 'fn main' --around 3
+```
+
+- 位置参数 `<regex>` 与可重复的 `-e/--regex` 可同时给，全部合并为一条**非捕获交替** `(?:p1|p2|...)`。
+- `--fixed-strings`：对每个模式做 `regex::escape`，按字面量匹配。
+- `--word`：每个模式包成 `\b(?:..)\b`。
+- `--around N`：等价同时设置前后上下文，命中处额外返回 `snippet`（含上下文的连续片段）。`--around` 与 `-B/-A` 同时给时以更大的窗口为准。
+
 #### 输出渲染：默认 `human`，结构化字段才加 `--output json`
 
 `remote file` 所有子命令的输出默认就是 **`human`** 格式，开箱就是人类/agent 可读，不必每次都加 `--output json`。
@@ -293,12 +356,13 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 - **`truncated` 自动提示**：`list` / `glob` / `find` / `read` 超限时，human 输出会在 stderr 直接给出**截断的下一步建议**（如"用 --offset/--limit 取更多""收紧 pattern / 提高 --max-matches"）。Agent 据此分片即可，不必自己猜。json 模式下对应字段为 `"truncated": true`。
 - **整文件 sha256**：`read` 当 `truncated=true` 时额外带整文件 `file_sha256`，可用于 resume 或乐观锁一致性校验。
 - **原子写**：`write` / `edit` / `patch` 采用 tmp+rename，失败自动回滚。`patch` 多文件级原子（任一文件失败全部回滚，已新建的文件也会被 unlink）。
+- **`patch` 支持改名 / 复制**：除新增、修改、删除外，`patch` 现支持 `rename from/to`（改名）与 `copy from/to`（复制）形态的 diff，整批同样原子提交、失败整体回滚。
 - **乐观锁**：`write` / `edit` 传 `--base-sha256` 后，文件已被改动会返回 `file.sha_mismatch`；Agent 应重新 `read` 再重试，不要盲目覆盖。
 - **EOL 保留**：`edit` 自动识别并保留 LF / CRLF 风格；跨风格 replacement 会被归一到目标文件风格。
 - **字符列定位**：`find` 返回的 `column` 是**字符列（char-based）**；`byte_column` 是字节偏移，二者在 CJK / 多字节场景会不同。
 - **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` 从本地文件或 stdin；`--content-b64 <b64>` 由 caller 本地 base64、目标端解码。优先级：`--content-b64` > `--content` > `--content-file`。二进制、含 CRLF、含特殊字符的文本走 `--content-b64` 最安全，远比 echo 管道 base64 + shell 重定向可靠。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
-- **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错并给出示例**（不再静默吞错发 null）。格式是 1-based 闭区间行号的对象数组：`[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`。
+- **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错并给出示例**（不再静默吞错发 null）。两种形态：行号区间 `[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`（1-based 闭区间），或内容锚定 `[{"old_string":"foo","new_string":"bar","expected_count":1}]`（按字面子串定位，`expected_count` 默认 1，命中数不符则报错）；单次调用两种形态不可混用。
 - **错误自带修复建议**：file 操作失败时，CLI 会根据服务端的 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→让目标端加白名单而非改 cwd）。错误码含义见下方"错误码契约"。
 - **Symlink lstat 语义**：`stat` / `list` 不跟随软链；`stat` 额外返回 `symlink_target`。Windows 自动去 `\\?\` / `\\?\UNC\` 前缀。
 - **`read --output json` 的关键字段**：`content_b64`（base64 编码正文）、`sha256`（返回切片的 sha）、`size`（返回切片字节数）、`total_size` / `total_lines`（整文件）、`truncated`（是否截断）、`file_sha256`（仅 truncated=true 时出现，整文件 sha，用于后续 `--base-sha256` 乐观锁）、`start_line` / `end_line`（使用 `--offset`/`--limit` 时的范围）、`mtime_unix`。注意 human 模式下这些都已替你渲染好（正文走 stdout、sha/行数/字节数走 stderr footer），只有要程序化解析时才需要 json。
@@ -331,16 +395,21 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 bifrost remote file list src --depth 2
 bifrost remote file glob 'src/**/*.rs' --max-matches 200
 
-# 2. 定位符号（human：path:line:col: 预览 + 上下文）
-bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' -B 2 -A 2
+# 2. 定位符号（human：path:line:col: 预览 + 上下文；多关键词用可重复 -e）
+bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' --around 2
 
 # 3. 读文件（human：明文走 stdout，sha256/行数/字节数走 stderr footer）
 bifrost remote file read src/lib.rs            # 直接看到明文；footer 里有 sha256
+bifrost remote file read-many --path src/lib.rs --path src/main.rs  # 一次读多个
 
-# 4. 乐观锁 edit（sha 抄第 3 步 footer 里的 sha256）
+# 4a. 乐观锁 edit（按行号；sha 抄第 3 步 footer 里的 sha256）
 bifrost remote file edit src/lib.rs \
   --base-sha256 <sha-from-step-3> \
   --edits '[{"start_line":10,"end_line":12,"replacement":"// new impl\n"}]'
+
+# 4b. 锚定 edit（按内容，不数行号）
+bifrost remote file edit src/lib.rs \
+  --edits '[{"old_string":"old_impl()","new_string":"new_impl()"}]'
 
 # 5a. 新建 / 覆盖写——短文本直接内联
 bifrost remote file write docs/changelog.md \
@@ -429,3 +498,15 @@ A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./loca
 
 **Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
 A: `remote exec`：`--cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`。git / 测试用 shell，代码改动用 file。
+
+**Q: 我要一次看某模块的好几个文件，怎么少跑几趟？**
+A: 用 `remote file read-many --path a --path b --path c`，一次往返并发取回；某个文件读失败不影响其余文件，json 模式里看 `ok_count`。
+
+**Q: 我想替换某个符号但懒得数行号，会不会一定要先 read 算行号？**
+A: 不用。用锚定编辑：`remote file edit <path> --edits '[{"old_string":"旧串","new_string":"新串"}]'`，按字面子串定位。担心多处命中误改就加 `expected_count` 兜底。
+
+**Q: 我要在一批文件里搜 TODO / FIXME / XXX 三个词，还要看命中处上下文？**
+A: `remote file find 'TODO' -e 'FIXME' -e 'XXX' --around 3`——多模式 OR + 每个命中回带前后 3 行 snippet。要按字面量搜带正则元字符的串再加 `--fixed-strings`，要整词匹配加 `--word`。
+
+**Q: 我的 diff 里有文件改名 / 复制，`patch` 能直接吃吗？**
+A: 能。`patch` 现支持 `rename from/to` 与 `copy from/to` 形态，和新增 / 修改 / 删除一起整批原子提交，失败整体回滚。
