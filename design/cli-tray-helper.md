@@ -188,6 +188,7 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 - 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
 - Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
 - Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Admin UI` / `Open Logs` 时出现短暂终端窗口。
+- Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
 - macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
 
 ## CLI 交互面
