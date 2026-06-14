@@ -184,6 +184,21 @@ pub fn save_root_ca(cert_path: &Path, key_path: &Path, ca: &CertificateAuthority
     fs::write(cert_path, cert_pem)?;
     fs::write(key_path, key_pem)?;
 
+    // Restrict the private key to owner read/write only on Unix; the public
+    // certificate may stay world-readable. Failure to tighten permissions is
+    // logged but not fatal.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(key_path, fs::Permissions::from_mode(0o600)) {
+            eprintln!(
+                "⚠ Failed to set 0600 permissions on CA private key {}: {}",
+                key_path.display(),
+                e
+            );
+        }
+    }
+
     Ok(())
 }
 

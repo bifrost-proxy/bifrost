@@ -15,6 +15,18 @@ impl PerMessageDeflateConfig {
     }
 }
 
+/// Upper bound on the decompressed size of a single permessage-deflate
+/// message.
+///
+/// permessage-deflate lets a peer ship a tiny compressed frame that inflates
+/// to gigabytes (a "zip bomb"). Because the proxy decompresses every captured
+/// WS frame for recording, an unbounded inflater is a memory-exhaustion DoS.
+/// We cap the inflated output per message; once the cap is hit we stop
+/// decompressing and return what we have so far (the recorded payload is
+/// truncated, but the proxy stays alive). 64 MiB comfortably covers legitimate
+/// application messages while bounding worst-case allocation.
+pub const MAX_DECOMPRESSED_MESSAGE_BYTES: usize = 64 * 1024 * 1024;
+
 /// 解析 `Sec-WebSocket-Extensions` 中的 `permessage-deflate` 配置。
 ///
 /// 仅关注：
@@ -127,6 +139,18 @@ impl PerMessageDeflateInflater {
             }
             input_pos = input_pos.saturating_add(used_in);
 
+            // Decompression-bomb guard: stop once the inflated output exceeds
+            // the per-message cap. We keep what we have (truncated record)
+            // rather than allocating unboundedly.
+            if out.len() >= MAX_DECOMPRESSED_MESSAGE_BYTES {
+                out.truncate(MAX_DECOMPRESSED_MESSAGE_BYTES);
+                tracing::warn!(
+                    cap = MAX_DECOMPRESSED_MESSAGE_BYTES,
+                    "[WS] permessage-deflate output hit decompression cap; truncating"
+                );
+                break;
+            }
+
             // 在 SYNC_FLUSH 模式下，通常不会 StreamEnd，但这里允许提前退出。
             if matches!(status, Status::StreamEnd) {
                 break;
@@ -143,5 +167,49 @@ impl PerMessageDeflateInflater {
 impl Default for PerMessageDeflateInflater {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::write::DeflateEncoder;
+    use flate2::Compression;
+    use std::io::Write;
+
+    /// Compress `data` as a single permessage-deflate message body (raw
+    /// DEFLATE, SYNC_FLUSH trailer stripped by the inflater).
+    fn deflate_raw(data: &[u8]) -> Vec<u8> {
+        let mut enc = DeflateEncoder::new(Vec::new(), Compression::best());
+        enc.write_all(data).unwrap();
+        enc.finish().unwrap()
+    }
+
+    #[test]
+    fn decompresses_roundtrip() {
+        let original = b"hello permessage-deflate world".repeat(16);
+        let compressed = deflate_raw(&original);
+        let mut inflater = PerMessageDeflateInflater::new();
+        let out = inflater.decompress_message(&compressed).unwrap();
+        assert_eq!(out.as_ref(), original.as_slice());
+    }
+
+    #[test]
+    fn decompression_bomb_is_capped() {
+        // A highly compressible payload that inflates far beyond the cap.
+        let huge = vec![0u8; MAX_DECOMPRESSED_MESSAGE_BYTES * 2];
+        let compressed = deflate_raw(&huge);
+        // The compressed form must be dramatically smaller than the cap,
+        // otherwise this isn't a meaningful bomb test.
+        assert!(compressed.len() < MAX_DECOMPRESSED_MESSAGE_BYTES / 10);
+
+        let mut inflater = PerMessageDeflateInflater::new();
+        let out = inflater.decompress_message(&compressed).unwrap();
+        assert!(
+            out.len() <= MAX_DECOMPRESSED_MESSAGE_BYTES,
+            "output {} exceeded cap {}",
+            out.len(),
+            MAX_DECOMPRESSED_MESSAGE_BYTES
+        );
     }
 }

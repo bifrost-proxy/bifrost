@@ -45,6 +45,49 @@ pub fn allowed_origin_header_value(origin: &str) -> Option<HeaderValue> {
     }
 }
 
+/// Returns `true` if a `Host` header value refers to a recognized local host.
+///
+/// This is the anti-DNS-rebinding check for the loopback auth bypass: a
+/// browser tricked by DNS rebinding connects to `127.0.0.1` (so the peer looks
+/// like loopback) but still sends the attacker's domain in the `Host` header.
+/// By requiring the `Host` to be a known-local name we reject rebinding while
+/// keeping the legitimate desktop UI (which always sends a local host) working.
+pub fn is_allowed_host(host_header: &str) -> bool {
+    let host_lower = host_header.trim().to_ascii_lowercase();
+
+    // Strip an optional `:port` suffix, taking IPv6 brackets into account.
+    let host_without_port = if let Some(bracket_end) = host_lower.find(']') {
+        &host_lower[..bracket_end + 1]
+    } else if host_lower.matches(':').count() == 1 {
+        // Exactly one colon: a `host:port` pair (bracket-less IPv6 such as
+        // `::1` has multiple colons and must NOT be treated as `host:port`,
+        // otherwise the `:1` is wrongly stripped as a port leaving `::`).
+        if let Some(colon_pos) = host_lower.rfind(':') {
+            let after_colon = &host_lower[colon_pos + 1..];
+            if !after_colon.is_empty() && after_colon.chars().all(|c| c.is_ascii_digit()) {
+                &host_lower[..colon_pos]
+            } else {
+                host_lower.as_str()
+            }
+        } else {
+            host_lower.as_str()
+        }
+    } else {
+        host_lower.as_str()
+    };
+
+    matches!(
+        host_without_port,
+        "localhost"
+            | "127.0.0.1"
+            | "[::1]"
+            | "::1"
+            | "0.0.0.0"
+            | "tauri.localhost"
+            | "bifrost.local"
+    )
+}
+
 pub fn apply_cors_headers(
     resp: &mut hyper::Response<super::handlers::BoxBody>,
     origin: Option<&str>,
@@ -91,6 +134,32 @@ mod tests {
         assert!(!is_allowed_origin("http://10.0.0.1:8800"));
         assert!(!is_allowed_origin("http://localhost.evil.com"));
         assert!(!is_allowed_origin("http://my-server.com"));
+    }
+
+    #[test]
+    fn allowed_host_accepts_local_names() {
+        assert!(is_allowed_host("localhost"));
+        assert!(is_allowed_host("localhost:9900"));
+        assert!(is_allowed_host("127.0.0.1"));
+        assert!(is_allowed_host("127.0.0.1:8800"));
+        assert!(is_allowed_host("[::1]"));
+        assert!(is_allowed_host("[::1]:8800"));
+        assert!(is_allowed_host("::1"));
+        assert!(is_allowed_host("0.0.0.0:8800"));
+        assert!(is_allowed_host("tauri.localhost"));
+        assert!(is_allowed_host("bifrost.local"));
+        assert!(is_allowed_host("BIFROST.LOCAL"));
+    }
+
+    #[test]
+    fn allowed_host_rejects_rebinding_domains() {
+        // DNS-rebinding: peer is loopback but Host is attacker-controlled.
+        assert!(!is_allowed_host("evil.com"));
+        assert!(!is_allowed_host("attacker.example.com:9900"));
+        assert!(!is_allowed_host("localhost.evil.com"));
+        assert!(!is_allowed_host("127.0.0.1.evil.com"));
+        assert!(!is_allowed_host("192.168.1.100"));
+        assert!(!is_allowed_host(""));
     }
 
     #[test]

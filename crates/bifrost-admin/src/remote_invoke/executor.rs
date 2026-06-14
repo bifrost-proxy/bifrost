@@ -3221,11 +3221,45 @@ fn append_truncated_bytes(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) 
     target.extend_from_slice(&chunk[..chunk.len().min(remaining)]);
 }
 
+/// Lexically normalize a path string by resolving `.` and `..` components
+/// without touching the filesystem. The cwd of a shell.exec may not exist yet,
+/// so `canonicalize` is unusable here; this pure string normalization prevents
+/// `..` from escaping a cwd allowlist prefix. The leading-`/` (POSIX) or
+/// drive/UNC prefix is preserved; backslashes are treated as separators so
+/// Windows-style paths normalize consistently.
+fn lexical_normalize(path: &str) -> String {
+    let is_absolute = path.starts_with('/') || path.starts_with('\\');
+    let mut stack: Vec<&str> = Vec::new();
+    for component in path.split(['/', '\\']) {
+        match component {
+            "" | "." => {}
+            ".." => {
+                // Pop a real component; never pop above an absolute root, and
+                // for relative paths keep leading `..` so they remain distinct.
+                if matches!(stack.last(), Some(&last) if last != "..") {
+                    stack.pop();
+                } else if !is_absolute {
+                    stack.push("..");
+                }
+            }
+            other => stack.push(other),
+        }
+    }
+    let joined = stack.join("/");
+    if is_absolute {
+        format!("/{joined}")
+    } else {
+        joined
+    }
+}
+
 fn path_is_within(path: &str, allowed_prefix: &str) -> bool {
+    let path = lexical_normalize(path);
+    let allowed_prefix = lexical_normalize(allowed_prefix);
     path == allowed_prefix
         || path
-            .strip_prefix(allowed_prefix)
-            .is_some_and(|rest| rest.starts_with('/') || rest.starts_with('\\'))
+            .strip_prefix(&allowed_prefix)
+            .is_some_and(|rest| rest.starts_with('/'))
 }
 
 fn sse_event(event: &str, json_data: &str) -> String {
@@ -3421,6 +3455,19 @@ mod tests {
     use tempfile::TempDir;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    #[test]
+    fn path_is_within_rejects_dotdot_traversal() {
+        // P1-6: `..` must not let a cwd escape the allowlisted prefix.
+        assert!(!path_is_within("/allowed/../etc", "/allowed"));
+        assert!(!path_is_within("/allowed/sub/../../etc", "/allowed"));
+        // Legitimate subpaths and the prefix itself stay allowed.
+        assert!(path_is_within("/allowed/sub", "/allowed"));
+        assert!(path_is_within("/allowed", "/allowed"));
+        assert!(path_is_within("/allowed/sub/../sub2", "/allowed"));
+        // A sibling that merely shares a string prefix is not within.
+        assert!(!path_is_within("/allowedother", "/allowed"));
+    }
 
     #[test]
     fn shell_policy_metadata_parses_pr7_fields() {

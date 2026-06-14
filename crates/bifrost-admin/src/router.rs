@@ -284,7 +284,22 @@ impl AdminRouter {
             .unwrap_or(false);
 
         if is_loopback {
-            return None;
+            // Anti-DNS-rebinding: a loopback peer is necessary but not
+            // sufficient. A browser tricked by DNS rebinding connects to
+            // 127.0.0.1 (peer looks loopback) yet sends the attacker's domain
+            // in the `Host` header. Only grant the loopback bypass when the
+            // `Host` header is a recognized local name, which the legitimate
+            // desktop UI always sends. Requests without a Host header (or with
+            // a foreign Host) fall through to bearer-token validation.
+            let host_ok = req
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(crate::cors::is_allowed_host)
+                .unwrap_or(false);
+            if host_ok {
+                return None;
+            }
         }
 
         let token = extract_bearer_token(req).or_else(|| {
@@ -359,6 +374,7 @@ mod tests {
         let (state, _tmp) = new_state_remote_enabled();
         let req = Request::builder()
             .uri("/_bifrost/api/system/status")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
             .body(())
             .unwrap();
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", loopback_peer());
@@ -431,6 +447,7 @@ mod tests {
         let (state, _tmp) = new_state_remote_enabled();
         let req = Request::builder()
             .uri("/_bifrost/api/auth/passwd")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
             .body(())
             .unwrap();
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/auth/passwd", loopback_peer());
@@ -442,6 +459,7 @@ mod tests {
         let (state, _tmp) = new_state_remote_enabled();
         let req = Request::builder()
             .uri("/_bifrost/api/auth/remote")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
             .body(())
             .unwrap();
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/auth/remote", loopback_peer());

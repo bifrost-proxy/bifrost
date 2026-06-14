@@ -175,6 +175,18 @@ impl BodyStore {
         if !temp_dir.exists() {
             let _ = fs::create_dir_all(&temp_dir);
         }
+        // Captured response bodies are sensitive; restrict the directory to the
+        // owner on Unix. Done once at construction to avoid per-write cost.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&temp_dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!(
+                    "failed to set 0700 permissions on {}: {e}",
+                    temp_dir.display()
+                );
+            }
+        }
         Self {
             temp_dir,
             max_memory_size,

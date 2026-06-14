@@ -721,6 +721,19 @@ fn load_or_create_connections_key() -> bifrost_core::Result<[u8; 32]> {
                 parent.display()
             )))
         })?;
+        // The data dir holds the transport master key; restrict it to the
+        // owner on Unix. Best-effort: log a warning on failure.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            {
+                tracing::warn!(
+                    "failed to set 0700 permissions on {}: {e}",
+                    parent.display()
+                );
+            }
+        }
     }
 
     let mut key = [0u8; 32];
@@ -734,6 +747,14 @@ fn load_or_create_connections_key() -> bifrost_core::Result<[u8; 32]> {
             path.display()
         )))
     })?;
+    // The transport master key must only be readable by its owner.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("failed to set 0600 permissions on {}: {e}", path.display());
+        }
+    }
     Ok(key)
 }
 

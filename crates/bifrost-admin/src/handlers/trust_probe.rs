@@ -1086,7 +1086,17 @@ fn shutdown_idle_probe_server_if_due(
 
 impl TrustProbeSession {
     fn token_matches(&self, token: &str) -> bool {
-        token.is_empty() || self.token_hash == hash_token(token)
+        // NOTE: an empty token is still accepted on purpose — the public
+        // "fixed landing" flow (`render_fixed_probe_landing`) renders sessions
+        // tokenless via `render_landing_page(session_id, "")`, and session IDs
+        // are unguessable v4 UUIDs (122 bits of entropy). Tightening this into
+        // a hard rejection would break that anonymous flow, so it needs a
+        // product decision (tracked as P0-2). We do, however, compare the
+        // non-empty case in constant time to avoid a token-hash timing oracle.
+        if token.is_empty() {
+            return true;
+        }
+        constant_time_eq(self.token_hash.as_bytes(), hash_token(token).as_bytes())
     }
 
     fn is_expired(&self) -> bool {
@@ -2988,6 +2998,20 @@ fn hash_token(token: &str) -> String {
         .collect::<String>()
 }
 
+/// Constant-time byte comparison to avoid leaking the token hash via timing.
+/// Both inputs are fixed-length SHA-256 hex digests, but we still compare in
+/// constant time to keep the auth path free of early-exit side channels.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
 fn certificate_sha256_fingerprint(cert_path: &Path) -> Option<String> {
     let data = bifrost_device::read_certificate_der_from_file(cert_path).ok()?;
     let digest = Sha256::digest(data);
@@ -3066,6 +3090,25 @@ mod tests {
     fn token_hash_does_not_match_plain_token() {
         let token = "secret";
         assert_ne!(hash_token(token), token);
+    }
+
+    #[test]
+    fn token_match_uses_constant_time_compare() {
+        let session = test_session(Uuid::new_v4(), "real-token", Utc::now());
+        // Wrong token rejected, correct token accepted (constant-time path).
+        assert!(!session.token_matches("wrong"));
+        assert!(session.token_matches("real-token"));
+        // Empty token is intentionally still accepted for the public flow.
+        assert!(session.token_matches(""));
+    }
+
+    #[test]
+    fn constant_time_eq_behaves_like_eq() {
+        assert!(constant_time_eq(b"abc", b"abc"));
+        assert!(!constant_time_eq(b"abc", b"abd"));
+        assert!(!constant_time_eq(b"abc", b"ab"));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 
     #[test]

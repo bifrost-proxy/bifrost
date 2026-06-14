@@ -605,7 +605,10 @@ pub async fn handle_file_list(
                 }
             }
             entries.push(entry_val);
-            if md.is_dir() && cur_depth + 1 < depth {
+            // P1-7: never descend through a directory symlink — following it
+            // could enumerate content outside the authorized root. The link is
+            // still listed above (kind = "symlink"), we just don't recurse.
+            if md.is_dir() && !lmd.file_type().is_symlink() && cur_depth + 1 < depth {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if should_skip_dir(name, exclude_patterns) {
                         continue;
@@ -2125,6 +2128,37 @@ mod tests {
             .unwrap();
         assert_eq!(v["size"].as_u64().unwrap(), 6);
         assert!(!v["truncated"].as_bool().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn list_does_not_recurse_through_directory_symlink() {
+        // P1-7: a symlink to a directory outside the root must be listed as a
+        // single "symlink" entry, but its contents must NOT be enumerated.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"top-secret").unwrap();
+
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.txt"), b"x").unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+
+        let policy = mk_policy(root.path());
+        let dec = policy
+            .check(Path::new("."), root.path(), FileOp::List)
+            .unwrap();
+        // depth 5 would normally descend into the linked dir.
+        let v = handle_file_list(&dec, Some(5), &[], false, &[], None, None)
+            .await
+            .unwrap();
+        let entries = v["entries"].as_array().unwrap();
+        // The symlink itself is listed …
+        assert!(entries
+            .iter()
+            .any(|e| e["name"] == "link" && e["type"] == "symlink"));
+        // … but the out-of-root content behind it is never enumerated.
+        assert!(!entries
+            .iter()
+            .any(|e| e["name"].as_str() == Some("secret.txt")));
     }
 
     #[tokio::test]

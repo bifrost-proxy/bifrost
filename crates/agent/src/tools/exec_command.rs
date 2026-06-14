@@ -630,6 +630,61 @@ fn default_shell() -> String {
     }
 }
 
+/// Returns `true` if an environment variable named `name` is sensitive and must
+/// not be inherited by an agent-spawned subprocess.
+///
+/// The agent runs model-selected shell commands. Inheriting the *entire* host
+/// environment leaks credentials (cloud keys, tokens, DB URLs) into arbitrary
+/// commands, which an indirect prompt injection could exfiltrate. We keep the
+/// generic shell environment (PATH/HOME/locale/TERM, etc.) so ordinary commands
+/// keep working, but strip anything whose name looks credential-bearing.
+fn is_sensitive_env_name(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    // Exact names that are highly sensitive but don't match the substring rules.
+    const EXACT: &[&str] = &[
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "GITLAB_TOKEN",
+        "NPM_TOKEN",
+        "DATABASE_URL",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+    ];
+    if EXACT.contains(&upper.as_str()) {
+        return true;
+    }
+    // Substring heuristics covering the common credential naming conventions.
+    const NEEDLES: &[&str] = &[
+        "SECRET",
+        "TOKEN",
+        "PASSWORD",
+        "PASSWD",
+        "APIKEY",
+        "API_KEY",
+        "ACCESS_KEY",
+        "PRIVATE_KEY",
+        "CREDENTIAL",
+        "SESSION_KEY",
+        "AUTH",
+    ];
+    NEEDLES.iter().any(|needle| upper.contains(needle))
+}
+
+/// Build the filtered environment to hand to an agent subprocess: the host
+/// environment minus any [`is_sensitive_env_name`] entries.
+fn filtered_subprocess_env() -> Vec<(std::ffi::OsString, std::ffi::OsString)> {
+    std::env::vars_os()
+        .filter(|(key, _)| match key.to_str() {
+            Some(name) => !is_sensitive_env_name(name),
+            // Non-UTF-8 names can't match our patterns; pass them through.
+            None => true,
+        })
+        .collect()
+}
+
 enum ExecBackend {
     Pipe {
         child: Box<Mutex<Child>>,
@@ -912,7 +967,8 @@ fn create_pipe_exec_session(
     command_builder
         .args(&command.args)
         .current_dir(work_dir)
-        .envs(std::env::vars_os())
+        .env_clear()
+        .envs(filtered_subprocess_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -1066,6 +1122,14 @@ fn create_pty_exec_session(
     let mut command_builder = CommandBuilder::new(&command.program);
     command_builder.args(command.args.iter().map(String::as_str));
     command_builder.cwd(work_dir.as_os_str());
+    // Drop the inherited host environment (portable_pty seeds it from
+    // `std::env::vars_os()`), then re-add only the non-sensitive entries so
+    // model-run commands cannot read host credentials. See
+    // `is_sensitive_env_name`.
+    command_builder.env_clear();
+    for (key, value) in filtered_subprocess_env() {
+        command_builder.env(key, value);
+    }
     command_builder.env_remove("BASH_ENV");
     command_builder.env_remove("ENV");
     command_builder.env("TERM", "xterm-256color");
@@ -1132,6 +1196,37 @@ fn create_pty_exec_session(
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn sensitive_env_names_are_filtered() {
+        // Credential-bearing names are stripped...
+        assert!(is_sensitive_env_name("AWS_SECRET_ACCESS_KEY"));
+        assert!(is_sensitive_env_name("GITHUB_TOKEN"));
+        assert!(is_sensitive_env_name("MY_API_KEY"));
+        assert!(is_sensitive_env_name("db_password"));
+        assert!(is_sensitive_env_name("SERVICE_AUTH_TOKEN"));
+        assert!(is_sensitive_env_name("SOME_PRIVATE_KEY"));
+        assert!(is_sensitive_env_name("DATABASE_URL"));
+        // ...while generic shell environment passes through.
+        assert!(!is_sensitive_env_name("PATH"));
+        assert!(!is_sensitive_env_name("HOME"));
+        assert!(!is_sensitive_env_name("LANG"));
+        assert!(!is_sensitive_env_name("TERM"));
+        assert!(!is_sensitive_env_name("PWD"));
+        assert!(!is_sensitive_env_name("SHELL"));
+    }
+
+    #[test]
+    fn filtered_env_excludes_injected_secret() {
+        std::env::set_var("BIFROST_TEST_SECRET_TOKEN", "should-not-leak");
+        std::env::set_var("BIFROST_TEST_PLAIN_VAR", "ok");
+        let env = filtered_subprocess_env();
+        let has = |k: &str| env.iter().any(|(key, _)| key.to_str() == Some(k));
+        assert!(!has("BIFROST_TEST_SECRET_TOKEN"));
+        assert!(has("BIFROST_TEST_PLAIN_VAR"));
+        std::env::remove_var("BIFROST_TEST_SECRET_TOKEN");
+        std::env::remove_var("BIFROST_TEST_PLAIN_VAR");
+    }
 
     #[cfg(windows)]
     fn ps_string(value: &str) -> String {
