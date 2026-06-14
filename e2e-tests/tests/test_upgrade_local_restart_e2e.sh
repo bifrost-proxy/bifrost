@@ -224,6 +224,29 @@ PY
     }
     _log_pass "old daemon started on port $PROXY_PORT (PID: $old_pid)"
 
+    local runtime_port=""
+    for _ in $(seq 1 50); do
+        runtime_port="$("$py" - "$TEST_DATA_DIR/runtime.json" <<'PY'
+import json
+import sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as fh:
+        print(json.load(fh).get("port", ""))
+except Exception:
+    print("")
+PY
+)"
+        if [[ "$runtime_port" == "$PROXY_PORT" ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ "$runtime_port" != "$PROXY_PORT" ]]; then
+        _log_fail "old daemon runtime records proxy port" "$PROXY_PORT" "${runtime_port:-missing}"
+        return 1
+    fi
+    _log_pass "old daemon runtime recorded port $PROXY_PORT"
+
     local upgrade_log="${TEST_ROOT}/upgrade.log"
     BIFROST_DATA_DIR="$bifrost_data_dir" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
@@ -236,11 +259,15 @@ PY
         return 1
     fi
 
-    grep -q 'Detected running Bifrost proxy' "$upgrade_log" \
+    if grep -q 'Detected running Bifrost proxy' "$upgrade_log" \
         && grep -q 'Stopping current proxy' "$upgrade_log" \
         && grep -q "Waiting for proxy port ${PROXY_PORT} to be released" "$upgrade_log" \
-        && grep -Eq 'Proxy restarted successfully with the new version|Proxy restart scheduled with the new version' "$upgrade_log"
-    assert_equals "0" "$?" "upgrade output contains stop/wait/restart milestones" || return 1
+        && grep -Eq 'Proxy restarted successfully with the new version|Proxy restart scheduled with the new version' "$upgrade_log"; then
+        _log_pass "upgrade output contains stop/wait/restart milestones"
+    else
+        _log_fail "upgrade output contains stop/wait/restart milestones" "all milestones" "$(cat "$upgrade_log")"
+        return 1
+    fi
 
     grep -q -- '--no-system-proxy' "$upgrade_log" \
         && ! grep -q 'System proxy: enabled' "$upgrade_log"
