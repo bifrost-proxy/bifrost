@@ -72,12 +72,9 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .err()
                     .ok_or_else(|| "expected error, got ok".to_string())?;
 
-                if err.code() != "file.permission_denied" {
+                if err.code() != "file.deny_pattern" {
                     let _ = fs::remove_dir_all(&root);
-                    return Err(format!(
-                        "expected file.permission_denied, got {}",
-                        err.code()
-                    ));
+                    return Err(format!("expected file.deny_pattern, got {}", err.code()));
                 }
 
                 let _ = fs::remove_dir_all(&root);
@@ -285,11 +282,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .ok_or_else(|| "expected deny for .git/config write".to_string())?;
 
                 let _ = fs::remove_dir_all(&root);
-                if err.code() != "file.permission_denied" {
-                    return Err(format!(
-                        "expected file.permission_denied, got {}",
-                        err.code()
-                    ));
+                if err.code() != "file.deny_pattern" {
+                    return Err(format!("expected file.deny_pattern, got {}", err.code()));
                 }
                 Ok(())
             },
