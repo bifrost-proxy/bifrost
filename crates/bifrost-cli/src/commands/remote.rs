@@ -4049,8 +4049,15 @@ fn render_file_patch_human(value: &Value) {
     if let Some(files) = value.get("files").and_then(Value::as_array) {
         for f in files {
             let path = f.get("path").and_then(Value::as_str).unwrap_or("");
+            let from = f.get("from").and_then(Value::as_str).unwrap_or("");
+            let to = f.get("to").and_then(Value::as_str).unwrap_or("");
             if f.get("deleted").and_then(Value::as_bool) == Some(true) {
                 println!("{} {}", "deleted".red(), path);
+            } else if f.get("renamed").and_then(Value::as_bool) == Some(true) {
+                println!("{} {} -> {}", "renamed".green(), from, to);
+            } else if f.get("copied").and_then(Value::as_bool) == Some(true) {
+                let bytes = f.get("bytes_written").and_then(Value::as_u64).unwrap_or(0);
+                println!("{} {} -> {} ({} bytes)", "copied".green(), from, to, bytes);
             } else {
                 let bytes = f.get("bytes_written").and_then(Value::as_u64).unwrap_or(0);
                 println!("{} {} ({} bytes)", "patched".green(), path, bytes);

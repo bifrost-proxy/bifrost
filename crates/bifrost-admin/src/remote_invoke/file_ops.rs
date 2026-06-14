@@ -33,6 +33,8 @@ const DEFAULT_SEARCH_MAX: usize = 500;
 const SEARCH_HARD_CAP: usize = 50_000;
 const DEFAULT_SEARCH_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
+const MAX_READ_MANY_FILES: usize = 100;
+const MAX_READ_MANY_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Directories skipped by default in `file.list`, `file.glob`, and `file.search`.
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -513,6 +515,14 @@ pub async fn handle_file_read_many(
     max_bytes: Option<u64>,
     allow_binary: bool,
 ) -> Result<Value> {
+    if items.len() > MAX_READ_MANY_FILES {
+        return Err(BifrostError::Config(format!(
+            "[file.invalid_args] file.read_many supports at most {} paths per request, got {}",
+            MAX_READ_MANY_FILES,
+            items.len()
+        )));
+    }
+
     let futs = items.into_iter().map(|(path, dec)| async move {
         match dec {
             Err(error) => json!({
@@ -552,16 +562,27 @@ pub async fn handle_file_read_many(
             }
         }
     });
-
     let files: Vec<Value> = futures_util::future::join_all(futs).await;
     let ok_count = files
         .iter()
         .filter(|f| f.get("ok").and_then(Value::as_bool) == Some(true))
         .count();
+    let total_bytes: u64 = files
+        .iter()
+        .filter(|f| f.get("ok").and_then(Value::as_bool) == Some(true))
+        .filter_map(|f| f.get("size").and_then(Value::as_u64))
+        .sum();
+    if total_bytes > MAX_READ_MANY_TOTAL_BYTES {
+        return Err(size_too_large(format!(
+            "file.read_many returned {} bytes, max total is {}",
+            total_bytes, MAX_READ_MANY_TOTAL_BYTES
+        )));
+    }
     Ok(json!({
         "files": files,
         "count": files.len(),
         "ok_count": ok_count,
+        "total_bytes": total_bytes,
     }))
 }
 
@@ -2229,7 +2250,10 @@ pub async fn handle_file_apply_patch(
         /// unlink target (delete path).
         Delete,
         /// rename `from` -> `to` (patch RenameOnly).
-        Rename { from: PathBuf },
+        Rename {
+            from: PathBuf,
+            allow_overwrite: bool,
+        },
         /// copy already written to tmp; rename tmp -> target (patch CopyOnly).
         Copy,
     }
@@ -2315,6 +2339,23 @@ pub async fn handle_file_apply_patch(
                     )));
                 }
                 let prior_mode = capture_mode(&from_path).await;
+                if let Some(expected) = base_shas.get(from) {
+                    let bytes = match fs::read(&from_path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            cleanup_tmps(&staged).await;
+                            return Err(io_err("rename-source-read", e));
+                        }
+                    };
+                    let actual = sha256_hex(&bytes);
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        cleanup_tmps(&staged).await;
+                        return Err(sha_mismatch(format!(
+                            "base_sha256 mismatch for '{}': expected {}, actual {}",
+                            from, expected, actual
+                        )));
+                    }
+                }
                 staged.push(Staged {
                     target: to_path.clone(),
                     tmp: PathBuf::new(),
@@ -2325,7 +2366,10 @@ pub async fn handle_file_apply_patch(
                         "to": to_path.to_string_lossy(),
                         "renamed": true,
                     }),
-                    action: StageAction::Rename { from: from_path },
+                    action: StageAction::Rename {
+                        from: from_path,
+                        allow_overwrite: to_dec.allow_overwrite,
+                    },
                 });
                 continue;
             }
@@ -2366,6 +2410,16 @@ pub async fn handle_file_apply_patch(
                         return Err(io_err("copy-source-read", e));
                     }
                 };
+                if let Some(expected) = base_shas.get(from) {
+                    let actual = sha256_hex(&bytes);
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        cleanup_tmps(&staged).await;
+                        return Err(sha_mismatch(format!(
+                            "base_sha256 mismatch for '{}': expected {}, actual {}",
+                            from, expected, actual
+                        )));
+                    }
+                }
                 let max = if to_dec.max_write_bytes == 0 {
                     DEFAULT_MAX_WRITE_BYTES
                 } else {
@@ -2768,9 +2822,19 @@ pub async fn handle_file_apply_patch(
                     return Err(io_err("remove_file", e));
                 }
             }
-            StageAction::Rename { from } => {
+            StageAction::Rename {
+                from,
+                allow_overwrite,
+            } => {
                 // Respect overwrite at commit time too (race-narrowing).
                 let existed_before = fs::metadata(&s.target).await.is_ok();
+                if existed_before && !allow_overwrite {
+                    rollback(&committed, &renamed, &staged, idx).await;
+                    return Err(precondition_failed(format!(
+                        "rename destination '{}' exists and overwrite is disabled",
+                        s.target.to_string_lossy()
+                    )));
+                }
                 let snapshot = fs::read(&s.target).await.unwrap_or_default();
                 let snapshot_mode = capture_mode(&s.target).await;
                 if let Err(e) = fs::rename(from, &s.target).await {
@@ -4318,6 +4382,48 @@ type Alias = u32;
             .unwrap()
             .contains("file.not_found"));
     }
+    #[tokio::test]
+    async fn read_many_rejects_too_many_paths() {
+        let items = (0..=MAX_READ_MANY_FILES)
+            .map(|i| {
+                (
+                    format!("file-{i}.txt"),
+                    Err("[file.not_found] missing".to_string()),
+                )
+            })
+            .collect();
+
+        let err = handle_file_read_many(items, None, false).await.unwrap_err();
+        assert!(err.to_string().contains("file.invalid_args"));
+        assert!(err.to_string().contains(&MAX_READ_MANY_FILES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_many_rejects_too_many_total_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_a = tmp.path().join("a.bin");
+        let file_b = tmp.path().join("b.bin");
+        std::fs::write(&file_a, vec![b'a'; 8 * 1024 * 1024]).unwrap();
+        std::fs::write(&file_b, vec![b'b'; 8 * 1024 * 1024 + 1]).unwrap();
+        let policy = mk_policy(tmp.path());
+        let mut dec_a = policy
+            .check(Path::new("a.bin"), tmp.path(), FileOp::Read)
+            .unwrap();
+        dec_a.max_read_bytes = MAX_READ_MANY_TOTAL_BYTES + 1;
+        let mut dec_b = policy
+            .check(Path::new("b.bin"), tmp.path(), FileOp::Read)
+            .unwrap();
+        dec_b.max_read_bytes = MAX_READ_MANY_TOTAL_BYTES + 1;
+        let items = vec![
+            ("a.bin".to_string(), Ok(dec_a)),
+            ("b.bin".to_string(), Ok(dec_b)),
+        ];
+
+        let err = handle_file_read_many(items, Some(MAX_READ_MANY_TOTAL_BYTES + 1), true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.size_too_large"));
+    }
 
     // ---------- P1-2 patch rename ----------
     #[tokio::test]
@@ -4354,6 +4460,84 @@ type Alias = u32;
             std::fs::read_to_string(tmp.path().join("to.txt")).unwrap(),
             "content\n"
         );
+    }
+    #[tokio::test]
+    async fn apply_patch_rename_only_rejects_stale_source_base_sha() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "from.txt".to_string(),
+            policy
+                .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        decisions.insert(
+            "to.txt".to_string(),
+            policy
+                .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+        let mut base = HashMap::new();
+        base.insert("from.txt".to_string(), "deadbeef".repeat(8));
+
+        let err = handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rename_only_rechecks_overwrite_at_commit() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "from.txt".to_string(),
+            policy
+                .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        let mut to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        to_dec.allow_overwrite = false;
+        let to_path = to_dec.path.clone();
+        decisions.insert("to.txt".to_string(), to_dec);
+        let mut existing_dec = policy
+            .check(Path::new("existing.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        existing_dec.path = to_path;
+        decisions.insert("existing.txt".to_string(), existing_dec);
+        let patch = concat!(
+            "--- /dev/null\n",
+            "+++ b/existing.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+created first\n",
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+
+        let err = handle_file_apply_patch(&decisions, patch, &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.precondition_failed"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
     }
 
     // ---------- P1-2 patch copy ----------
@@ -4395,6 +4579,41 @@ type Alias = u32;
             std::fs::read_to_string(tmp.path().join("dup.txt")).unwrap(),
             "dup-me\n"
         );
+    }
+    #[tokio::test]
+    async fn apply_patch_copy_only_rejects_stale_source_base_sha() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("orig.txt"), b"dup-me\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "orig.txt".to_string(),
+            policy
+                .check(Path::new("orig.txt"), tmp.path(), FileOp::Read)
+                .unwrap(),
+        );
+        decisions.insert(
+            "dup.txt".to_string(),
+            policy
+                .check(Path::new("dup.txt"), tmp.path(), FileOp::Write)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/orig.txt b/dup.txt\n",
+            "similarity index 100%\n",
+            "copy from orig.txt\n",
+            "copy to dup.txt\n",
+        );
+        let mut base = HashMap::new();
+        base.insert("orig.txt".to_string(), "deadbeef".repeat(8));
+
+        let err = handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("orig.txt").exists());
+        assert!(!tmp.path().join("dup.txt").exists());
     }
 
     #[tokio::test]

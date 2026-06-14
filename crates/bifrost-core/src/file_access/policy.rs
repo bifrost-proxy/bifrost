@@ -278,6 +278,7 @@ impl FileAccessPolicy {
             write_denies: Vec::new(),
             ops: vec![
                 FileOp::Read,
+                FileOp::ReadMany,
                 FileOp::List,
                 FileOp::Stat,
                 FileOp::Glob,
@@ -302,6 +303,7 @@ impl FileAccessPolicy {
             write_denies: vec!["**/Cargo.lock".into(), "**/*.lock".into()],
             ops: vec![
                 FileOp::Read,
+                FileOp::ReadMany,
                 FileOp::List,
                 FileOp::Stat,
                 FileOp::Glob,
@@ -379,6 +381,25 @@ mod tests {
             .check(Path::new("Cargo.toml"), &tmp, FileOp::Write)
             .unwrap_err();
         assert_eq!(err.code(), "file.permission_denied");
+    }
+
+    #[test]
+    fn default_policies_allow_read_many() {
+        let root = std::env::temp_dir().join("bifrost_fa_read_many_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let readonly = FileAccessPolicy::new_readonly("ro", vec![root.clone()]);
+        let readwrite = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+
+        readonly
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+        readwrite
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
