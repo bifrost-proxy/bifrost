@@ -308,22 +308,23 @@ impl FileAccessPolicyStore {
         if let Some(p) = &self.default_policy {
             return p.clone();
         }
-        // 5. Hardcoded read-only rooted at cwd.
         FileAccessPolicy::new_readonly(format!("default:{grant_id}"), vec![cwd.to_path_buf()])
     }
 }
 
-/// Full set of 12 file operations. SSH-key authorization seeds a grant
-/// with this set by default so coding-agent flows can use file.write /
-/// file.edit / file.patch / etc. without extra manual TOML edits.
+/// Full set of file operations. SSH-key authorization seeds a grant
+/// with this set by default so coding-agent flows can use the complete
+/// `file.*` surface without extra manual TOML edits.
 pub fn full_file_ops() -> Vec<FileOp> {
     vec![
         FileOp::Read,
+        FileOp::ReadMany,
         FileOp::List,
         FileOp::Stat,
         FileOp::Glob,
         FileOp::Search,
         FileOp::Hash,
+        FileOp::Outline,
         FileOp::Write,
         FileOp::Edit,
         FileOp::Mkdir,
@@ -988,16 +989,18 @@ ops = ["read"]
     }
 
     #[test]
-    fn full_file_ops_covers_all_twelve_ops() {
+    fn full_file_ops_covers_complete_file_surface() {
         let ops = full_file_ops();
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 14);
         for expected in [
             FileOp::Read,
+            FileOp::ReadMany,
             FileOp::List,
             FileOp::Stat,
             FileOp::Glob,
             FileOp::Search,
             FileOp::Hash,
+            FileOp::Outline,
             FileOp::Write,
             FileOp::Edit,
             FileOp::Mkdir,
@@ -1028,7 +1031,7 @@ ops = ["read"]
             cfg.grants[0].match_.ssh_fingerprint.as_deref(),
             Some("fp-alpha")
         );
-        assert_eq!(cfg.grants[0].ops.len(), 12);
+        assert_eq!(cfg.grants[0].ops, full_file_ops());
         assert_eq!(cfg.grants[0].allow_overwrite, Some(true));
 
         // 2) Same fingerprint, different payload → overwrite, no duplicate.
@@ -1069,10 +1072,12 @@ ops = ["read"]
             Some("fp-beta")
         );
         assert_eq!(
-            cfg.grants[0].ops.len(),
-            12,
+            cfg.grants[0].ops,
+            full_file_ops(),
             "empty ops must default to full_file_ops"
         );
+        assert!(cfg.grants[0].ops.contains(&FileOp::ReadMany));
+        assert!(cfg.grants[0].ops.contains(&FileOp::Outline));
         assert_eq!(
             cfg.grants[1].match_.ssh_fingerprint.as_deref(),
             Some("fp-alpha")
@@ -1082,7 +1087,7 @@ ops = ["read"]
         //    full-ops entry for fp-beta.
         let store = FileAccessPolicyStore::from_raw(cfg);
         let p = store.resolve("unknown-gid", None, Some("fp-beta"), Path::new("/tmp"));
-        assert_eq!(p.ops.len(), 12);
+        assert_eq!(p.ops, full_file_ops());
         assert!(p.ops.contains(&FileOp::Write));
     }
 

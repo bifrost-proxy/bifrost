@@ -2740,12 +2740,20 @@ fn build_remote_file_command(
         RemoteFileCommands::Move {
             from,
             to,
+            base_sha256,
+            allow_overwrite,
             cwd,
             output,
         } => (
             "file.move",
             format!("file.move {} -> {}", from, to),
-            json!({ "path": from, "to_path": to, "cwd": cwd }),
+            json!({
+                "path": from,
+                "to_path": to,
+                "base_sha256": base_sha256,
+                "allow_overwrite": allow_overwrite,
+                "cwd": cwd,
+            }),
             output.clone(),
         ),
         RemoteFileCommands::Delete {

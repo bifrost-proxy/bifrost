@@ -675,8 +675,11 @@ impl RemoteInvokeExecutor {
             cwd,
         );
 
-        // file.read_many resolves and policy-checks each path independently
-        // (the single-decision flow below assumes exactly one requested_path).
+        // file.read_many has two policy layers:
+        //   1. request-level capability: the policy must explicitly allow ReadMany;
+        //   2. per-file content access: each path must still be individually readable.
+        // Per-file denials are returned inline so one denied/missing file does not
+        // abort the whole batch after the request-level capability has passed.
         if file_op_name == "file.read_many" {
             let paths = params.paths.clone().unwrap_or_default();
             if paths.is_empty() {
@@ -685,6 +688,20 @@ impl RemoteInvokeExecutor {
                         .to_string(),
                 ));
             }
+            if !policy.ops.contains(&FileOp::ReadMany) {
+                warn!(
+                    grant_id = %grant_id,
+                    op = %file_op_name,
+                    code = "file.op_not_permitted",
+                    caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                    "file access denied by policy (read_many request)"
+                );
+                return Err(BifrostError::Config(
+                    "[file.op_not_permitted] requested op read_many is not permitted by the active policy"
+                        .to_string(),
+                ));
+            }
+
             let mut decisions: Vec<(
                 String,
                 std::result::Result<bifrost_core::file_access::PolicyDecision, String>,
@@ -912,6 +929,7 @@ impl RemoteInvokeExecutor {
                     &decision,
                     &to_decision,
                     params.base_sha256.as_deref(),
+                    params.allow_overwrite,
                 )
                 .await?
             }

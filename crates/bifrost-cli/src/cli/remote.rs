@@ -444,6 +444,16 @@ pub enum RemoteFileCommands {
         from: String,
         #[arg(help = "Destination path")]
         to: String,
+        #[arg(
+            long,
+            help = "Expected current sha256 for optimistic locking on the source file"
+        )]
+        base_sha256: Option<String>,
+        #[arg(
+            long,
+            help = "Allow destination overwrite even if policy default forbids"
+        )]
+        allow_overwrite: Option<bool>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]

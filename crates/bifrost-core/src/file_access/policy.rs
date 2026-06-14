@@ -403,6 +403,35 @@ mod tests {
     }
 
     #[test]
+    fn read_many_can_be_gated_independently_from_read() {
+        let root = std::env::temp_dir().join("bifrost_fa_read_many_gate_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let mut read_only = FileAccessPolicy::new_readonly("read-only", vec![root.clone()]);
+        read_only.ops = vec![FileOp::Read];
+        let err = read_only
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.op_not_permitted");
+        read_only
+            .check(Path::new("file.txt"), &root, FileOp::Read)
+            .unwrap();
+
+        let mut batch_only = FileAccessPolicy::new_readonly("batch-only", vec![root.clone()]);
+        batch_only.ops = vec![FileOp::ReadMany];
+        batch_only
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+        let err = batch_only
+            .check(Path::new("file.txt"), &root, FileOp::Read)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.op_not_permitted");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
     fn deny_pattern_fires() {
         let tmp = std::env::temp_dir();
         let root = tmp.join("bifrost_fa_deny_test");

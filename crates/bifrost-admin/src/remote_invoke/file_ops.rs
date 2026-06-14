@@ -1908,22 +1908,31 @@ pub async fn handle_file_move(
     decision: &PolicyDecision,
     to_decision: &PolicyDecision,
     base_sha256: Option<&str>,
+    allow_overwrite_override: Option<bool>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Move);
     debug_assert_eq!(to_decision.op, FileOp::Move);
     let from = decision.path.as_path();
     let to = to_decision.path.as_path();
+    let allow_overwrite = allow_overwrite_override.unwrap_or(to_decision.allow_overwrite);
+
+    if from == to {
+        return Err(precondition_failed(
+            "source and destination are the same path",
+        ));
+    }
+
+    let from_meta = fs::symlink_metadata(from)
+        .await
+        .map_err(|e| io_err_structured("move-source-stat", e))?;
 
     // Optimistic lock: if the caller supplied `base_sha256`, verify the
     // source file hashes match before renaming. This prevents a losing
     // writer in a two-agent race from clobbering an already-moved target.
     // Directories do not have a sha and are rejected with sha_mismatch
     // so callers get a stable error code.
-    if let Some(expected) = base_sha256 {
-        let meta = fs::symlink_metadata(from)
-            .await
-            .map_err(|e| io_err("stat", e))?;
-        if !meta.file_type().is_file() {
+    let source_sha256 = if let Some(expected) = base_sha256 {
+        if !from_meta.file_type().is_file() {
             return Err(BifrostError::Config(
                 "[file.sha_mismatch] base_sha256 is only valid for regular files".to_string(),
             ));
@@ -1935,19 +1944,74 @@ pub async fn handle_file_move(
                 expected, actual
             )));
         }
-    }
+        Some(actual)
+    } else if from_meta.file_type().is_file() {
+        Some(sha256_file(from).await?)
+    } else {
+        None
+    };
 
-    if fs::metadata(to).await.is_ok() && !decision.allow_overwrite {
+    let dest_existed_before = fs::symlink_metadata(to).await.is_ok();
+    if dest_existed_before && !allow_overwrite {
         return Err(precondition_failed(
             "destination exists and overwrite is disabled",
         ));
     }
-    fs::rename(from, to)
-        .await
-        .map_err(|e| io_err_structured("rename", e))?;
+
+    if dest_existed_before {
+        fs::rename(from, to)
+            .await
+            .map_err(|e| io_err_structured("rename", e))?;
+    } else {
+        // Avoid the classic check-then-rename overwrite race when the
+        // destination did not exist at validation time. Hard-linking a regular
+        // file to the destination is an atomic create-if-absent primitive on the
+        // supported Unix-like targets; if another writer wins the race, we fail
+        // with a structured precondition error and leave the source untouched.
+        if from_meta.file_type().is_file() {
+            match fs::hard_link(from, to).await {
+                Ok(()) => {
+                    if let Err(e) = fs::remove_file(from).await {
+                        let _ = fs::remove_file(to).await;
+                        return Err(io_err_structured("remove-moved-source", e));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(precondition_failed(
+                        "destination appeared during move and overwrite is disabled",
+                    ));
+                }
+                Err(e) if e.raw_os_error() == Some(18) => {
+                    // Cross-device hard links are impossible. Fall back to
+                    // rename only when overwrite is explicitly allowed; otherwise
+                    // failing closed preserves no-overwrite semantics.
+                    if !allow_overwrite {
+                        return Err(precondition_failed(
+                            "destination create-if-absent is not supported across devices",
+                        ));
+                    }
+                    fs::rename(from, to)
+                        .await
+                        .map_err(|e| io_err_structured("rename", e))?;
+                }
+                Err(e) => return Err(io_err_structured("link-move", e)),
+            }
+        } else {
+            // Directories cannot use hard-link based no-overwrite semantics.
+            // The pre-rename check above still rejects an existing target; if a
+            // concurrent creator wins, platform rename should fail for common
+            // directory cases and we surface that structured error.
+            fs::rename(from, to)
+                .await
+                .map_err(|e| io_err_structured("rename", e))?;
+        }
+    }
+
     Ok(json!({
         "from": from.to_string_lossy(),
         "to": to.to_string_lossy(),
+        "overwritten": dest_existed_before,
+        "source_sha256": source_sha256,
     }))
 }
 
@@ -4617,6 +4681,53 @@ type Alias = u32;
     }
 
     #[tokio::test]
+    async fn move_rejects_stale_source_base_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let from_dec = policy
+            .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+
+        let err = handle_file_move(&from_dec, &to_dec, Some(&"deadbeef".repeat(8)), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_respects_destination_overwrite_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"new\n").unwrap();
+        std::fs::write(tmp.path().join("to.txt"), b"old\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let from_dec = policy
+            .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+
+        let err = handle_file_move(&from_dec, &to_dec, None, Some(false))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.precondition_failed"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("from.txt")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("to.txt")).unwrap(),
+            "old\n"
+        );
+    }
+
+    #[tokio::test]
     async fn search_respects_policy_denies() {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("secrets")).unwrap();
@@ -4941,7 +5052,9 @@ type Alias = u32;
         let d_to = pol
             .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
             .unwrap();
-        let out = handle_file_move(&d_from, &d_to, Some(&sha)).await.unwrap();
+        let out = handle_file_move(&d_from, &d_to, Some(&sha), None)
+            .await
+            .unwrap();
         assert!(out["from"].as_str().unwrap().ends_with("a.txt"));
         assert!(to.exists());
         assert!(!from.exists());
@@ -4964,7 +5077,7 @@ type Alias = u32;
         let d_to = pol
             .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
             .unwrap();
-        let err = handle_file_move(&d_from, &d_to, Some(&bogus))
+        let err = handle_file_move(&d_from, &d_to, Some(&bogus), None)
             .await
             .err()
             .unwrap();
@@ -4994,7 +5107,7 @@ type Alias = u32;
         let d_to = pol
             .check(Path::new("dir_b"), tmp.path(), FileOp::Move)
             .unwrap();
-        let err = handle_file_move(&d_from, &d_to, Some(&"0".repeat(64)))
+        let err = handle_file_move(&d_from, &d_to, Some(&"0".repeat(64)), None)
             .await
             .err()
             .unwrap();
