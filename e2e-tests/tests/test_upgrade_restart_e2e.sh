@@ -279,14 +279,19 @@ test_upgrade_restart_port_release_guard_in_source() {
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
 
-    if grep -q "wait_for_restart_port_release(restart_port)" "$source_file" \
+    if grep -q "wait_for_restart_ports_release(&restart_ports)" "$source_file" \
+        && grep -q "fn restart_ports_from_runtime" "$source_file" \
+        && grep -q "info.socks5_port" "$source_file" \
+        && grep -q "restart_executable_for_install_method(&install_method)" "$source_file" \
+        && grep -q "maybe_restart_running_proxy(restart, &restart_executable)" "$source_file" \
+        && grep -q "Command::new(restart_executable)" "$source_file" \
         && grep -q "Proxy port .*still occupied after" "$source_file" \
         && grep -q "find_process_on_port(port)" "$source_file" \
         && grep -q "recover_from_crash(&data_dir)" "$source_file"; then
-        _log_pass "upgrade restart has port-release guard, listener diagnostics, and system proxy recovery"
+        _log_pass "upgrade restart has multi-port release guard, fixed restart executable, listener diagnostics, and system proxy recovery"
     else
         _log_fail "upgrade restart port guard" \
-            "wait_for_restart_port_release plus occupied-port diagnostics and system proxy recovery" \
+            "wait_for_restart_ports_release plus occupied-port diagnostics, socks5 coverage, fixed restart executable, and system proxy recovery" \
             "guard missing from upgrade.rs"
         return 1
     fi

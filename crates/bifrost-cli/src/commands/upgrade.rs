@@ -153,6 +153,31 @@ fn detect_install_method() -> InstallMethod {
     InstallMethod::Manual(exe_path)
 }
 
+fn restart_executable_for_install_method(method: &InstallMethod) -> Result<PathBuf, BifrostError> {
+    match method {
+        InstallMethod::Homebrew => Ok(PathBuf::from("bifrost")),
+        InstallMethod::Script => env::current_exe().map_err(BifrostError::Io),
+        InstallMethod::Manual(path) => Ok(path.clone()),
+        InstallMethod::Unknown => Err(BifrostError::Config(
+            "Cannot determine restart executable for unknown install method".to_string(),
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn running_executable_matches_target(target_path: &Path) -> bool {
+    let Ok(current_exe) = env::current_exe() else {
+        return false;
+    };
+    let Ok(current_exe) = fs::canonicalize(current_exe) else {
+        return false;
+    };
+    let Ok(target_path) = fs::canonicalize(target_path) else {
+        return false;
+    };
+    current_exe == target_path
+}
+
 fn get_target_triple() -> Option<&'static str> {
     #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
     {
@@ -367,9 +392,58 @@ fn unique_temp_binary_path(target_path: &Path) -> PathBuf {
     target_path.with_file_name(format!(".{}.tmp.{}", file_name, std::process::id()))
 }
 
+fn binary_backup_path(target_path: &Path) -> PathBuf {
+    target_path.with_extension("backup")
+}
+
+fn cleanup_binary_backup(target_path: &Path) {
+    let backup_path = binary_backup_path(target_path);
+    if backup_path.exists() {
+        let _ = fs::remove_file(backup_path);
+    }
+}
+
+fn restore_binary_backup(target_path: &Path) -> Result<bool, BifrostError> {
+    let backup_path = binary_backup_path(target_path);
+    if !backup_path.exists() {
+        return Ok(false);
+    }
+
+    #[cfg(windows)]
+    {
+        if target_path.exists() {
+            fs::remove_file(target_path)?;
+        }
+    }
+
+    #[cfg(unix)]
+    {
+        if target_path.exists() {
+            fs::remove_file(target_path)?;
+        }
+    }
+
+    fs::rename(&backup_path, target_path)?;
+    Ok(true)
+}
+
+fn restore_binary_backup_best_effort(target_path: &Path) {
+    match restore_binary_backup(target_path) {
+        Ok(true) => eprintln!(
+            "Restored previous Bifrost binary from backup: {}",
+            target_path.display()
+        ),
+        Ok(false) => {}
+        Err(error) => eprintln!(
+            "Failed to restore previous Bifrost binary from backup: {}",
+            error
+        ),
+    }
+}
+
 fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<(), BifrostError> {
     let temp_target = unique_temp_binary_path(target_path);
-    let backup_path = target_path.with_extension("backup");
+    let backup_path = binary_backup_path(target_path);
 
     let _ = fs::remove_file(&temp_target);
     fs::copy(new_binary, &temp_target)?;
@@ -387,8 +461,7 @@ fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<()
         clear_quarantine_attr(&temp_target);
     }
 
-    if target_path.exists() {
-        let _ = fs::remove_file(&backup_path);
+    if target_path.exists() && !backup_path.exists() {
         fs::copy(target_path, &backup_path).map_err(|e| {
             BifrostError::Io(std::io::Error::new(
                 e.kind(),
@@ -409,12 +482,7 @@ fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<()
     }
 
     match fs::rename(&temp_target, target_path) {
-        Ok(()) => {
-            if backup_path.exists() {
-                let _ = fs::remove_file(&backup_path);
-            }
-            Ok(())
-        }
+        Ok(()) => Ok(()),
         Err(error) => {
             let _ = fs::remove_file(&temp_target);
             if backup_path.exists() && !target_path.exists() {
@@ -1145,6 +1213,13 @@ fn download_and_install(
 }
 
 fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError> {
+    #[cfg(windows)]
+    if running_executable_matches_target(target_path) {
+        return Err(BifrostError::Config(
+            "Windows cannot replace the currently running bifrost.exe directly. Stop Bifrost and run the PowerShell install script from a separate shell, or use an external updater process.".to_string(),
+        ));
+    }
+
     let target = get_target_triple().ok_or_else(|| {
         BifrostError::Config("Unsupported platform for automatic upgrade".to_string())
     })?;
@@ -1176,9 +1251,14 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
                 format!("  Retrying with musl build: {}", musl_target).bright_cyan()
             );
 
-            download_and_install(&musl_target, version, target_path, &temp_dir)?;
+            if let Err(error) = download_and_install(&musl_target, version, target_path, &temp_dir)
+            {
+                restore_binary_backup_best_effort(target_path);
+                return Err(error);
+            }
 
             if !verify_binary(target_path) {
+                restore_binary_backup_best_effort(target_path);
                 return Err(BifrostError::Config(
                     "Fallback musl binary also failed to run. Try installing manually with:\n  curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash".to_string(),
                 ));
@@ -1186,13 +1266,18 @@ fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError>
 
             effective_target = musl_target;
             println!("{}", "✓ musl fallback succeeded".bright_green());
+            cleanup_binary_backup(target_path);
         } else if let Err(e) = install_result {
+            restore_binary_backup_best_effort(target_path);
             return Err(e);
         } else {
+            restore_binary_backup_best_effort(target_path);
             return Err(BifrostError::Config(
                 "Installed binary failed verification (`bifrost --version` returned non-zero). Try installing manually with:\n  curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash".to_string(),
             ));
         }
+    } else {
+        cleanup_binary_backup(target_path);
     }
 
     println!(
@@ -1299,6 +1384,8 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
 
     println!();
 
+    let restart_executable = restart_executable_for_install_method(&install_method)?;
+
     let upgrade_result = match install_method {
         InstallMethod::Homebrew => upgrade_via_homebrew(&cache.latest_version),
         InstallMethod::Script => upgrade_via_script(),
@@ -1324,12 +1411,15 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
 
     upgrade_result?;
 
-    maybe_restart_running_proxy(restart)?;
+    maybe_restart_running_proxy(restart, &restart_executable)?;
 
     Ok(())
 }
 
-fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
+fn maybe_restart_running_proxy(
+    auto_restart: bool,
+    restart_executable: &Path,
+) -> Result<(), BifrostError> {
     let pid = match read_pid() {
         Some(pid) if is_process_running(pid) => pid,
         _ => return Ok(()),
@@ -1382,7 +1472,6 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
-    let exe_path = env::current_exe().map_err(BifrostError::Io)?;
     let restart_source = runtime_info
         .as_ref()
         .map(RestartArgsSource::Runtime)
@@ -1392,18 +1481,18 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
         system_proxy_snapshot.as_ref(),
         default_system_proxy.as_ref(),
     );
-    let restart_port = restart_port_from_runtime(runtime_info.as_ref());
+    let restart_ports = restart_ports_from_runtime(runtime_info.as_ref());
 
-    wait_for_restart_port_release(restart_port)?;
+    wait_for_restart_ports_release(&restart_ports)?;
 
     println!(
         "{} {} {}",
         "  Starting proxy with:".bright_cyan(),
-        exe_path.display(),
+        restart_executable.display(),
         args.join(" ")
     );
 
-    let status = Command::new(&exe_path)
+    let status = Command::new(restart_executable)
         .args(&args)
         .status()
         .map_err(BifrostError::Io)?;
@@ -1435,8 +1524,25 @@ fn default_restart_system_proxy_config() -> Result<RestartSystemProxyConfig, Bif
     })
 }
 
-fn restart_port_from_runtime(runtime_info: Option<&crate::process::RuntimeInfo>) -> u16 {
-    runtime_info.map(|info| info.port).unwrap_or(9900)
+fn restart_ports_from_runtime(runtime_info: Option<&crate::process::RuntimeInfo>) -> Vec<u16> {
+    let Some(info) = runtime_info else {
+        return vec![9900];
+    };
+
+    let mut ports = vec![info.port];
+    if let Some(socks5_port) = info.socks5_port {
+        if socks5_port != info.port {
+            ports.push(socks5_port);
+        }
+    }
+    ports
+}
+
+fn wait_for_restart_ports_release(ports: &[u16]) -> Result<(), BifrostError> {
+    for port in ports {
+        wait_for_restart_port_release(*port)?;
+    }
+    Ok(())
 }
 
 #[cfg(any(unix, windows))]
@@ -1755,15 +1861,15 @@ mod tests {
 
     #[test]
     fn upgrade_restart_port_from_runtime_defaults_to_9900() {
-        assert_eq!(restart_port_from_runtime(None), 9900);
+        assert_eq!(restart_ports_from_runtime(None), vec![9900]);
     }
 
     #[test]
-    fn upgrade_restart_port_from_runtime_uses_runtime_port() {
+    fn upgrade_restart_ports_from_runtime_uses_runtime_ports() {
         let info = crate::process::RuntimeInfo {
             pid: 12345,
             port: 18891,
-            socks5_port: None,
+            socks5_port: Some(18892),
             host: Some("0.0.0.0".to_string()),
             started_at_ms: None,
             start_mode: Default::default(),
@@ -1773,7 +1879,27 @@ mod tests {
             system_proxy_bypass: None,
         };
 
-        assert_eq!(restart_port_from_runtime(Some(&info)), 18891);
+        assert_eq!(restart_ports_from_runtime(Some(&info)), vec![18891, 18892]);
+    }
+
+    #[test]
+    fn upgrade_restart_executable_uses_install_target_for_manual_install() {
+        let target_path = PathBuf::from("/tmp/bifrost-upgrade-target/bin/bifrost");
+
+        assert_eq!(
+            restart_executable_for_install_method(&InstallMethod::Manual(target_path.clone()))
+                .expect("restart executable"),
+            target_path
+        );
+    }
+
+    #[test]
+    fn upgrade_restart_executable_uses_path_for_homebrew_install() {
+        assert_eq!(
+            restart_executable_for_install_method(&InstallMethod::Homebrew)
+                .expect("restart executable"),
+            PathBuf::from("bifrost")
+        );
     }
 
     #[test]
@@ -1986,7 +2112,29 @@ mod tests {
 
         assert_eq!(std::fs::read(&target).expect("read target"), b"new binary");
         assert!(!unique_temp_binary_path(&target).exists());
-        assert!(!target.with_extension("backup").exists());
+        assert_eq!(
+            std::fs::read(binary_backup_path(&target)).expect("read backup"),
+            b"old binary"
+        );
+
+        cleanup_binary_backup(&target);
+        assert!(!binary_backup_path(&target).exists());
+    }
+
+    #[test]
+    fn upgrade_restore_binary_backup_restores_previous_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("new-bifrost");
+        let target = dir.path().join("bifrost");
+        std::fs::write(&source, b"new binary").expect("write source");
+        std::fs::write(&target, b"old binary").expect("write target");
+
+        install_binary_atomically(&source, &target).expect("install atomically");
+        assert_eq!(std::fs::read(&target).expect("read target"), b"new binary");
+
+        assert!(restore_binary_backup(&target).expect("restore backup"));
+        assert_eq!(std::fs::read(&target).expect("read target"), b"old binary");
+        assert!(!binary_backup_path(&target).exists());
     }
 
     #[test]
