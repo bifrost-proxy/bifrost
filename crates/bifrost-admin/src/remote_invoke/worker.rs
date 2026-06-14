@@ -2631,6 +2631,40 @@ impl RemoteInvokeWorker {
             "executing remote command via call_open"
         );
 
+        // P0-2: enforce `max_active_calls`. Each in-flight call spawns a task
+        // that holds a 64 MiB session ring plus per-stream buffers and a child
+        // process; without a ceiling a misbehaving (or buggy) agent can open an
+        // unbounded number of concurrent calls and exhaust the client host's
+        // memory. Reject over-limit opens up front with a stable, programmatic
+        // signal so callers can back off and retry.
+        let max_active = self.config.max_active_calls as usize;
+        if max_active > 0 {
+            let active_now = self.active_calls.read().len();
+            if active_now >= max_active {
+                warn!(
+                    call_id = %call_id,
+                    grant_id = %grant_id,
+                    active = active_now,
+                    max_active_calls = max_active,
+                    "rejecting call_open: max_active_calls exceeded"
+                );
+                self.send_call_exit(
+                    &call_id,
+                    -2,
+                    Some(format!(
+                        "[remote.max_active_calls_exceeded] client is at its concurrency limit \
+                         ({active_now}/{max_active} active calls); retry after an in-flight call \
+                         finishes"
+                    )),
+                    None,
+                    None,
+                    0,
+                )
+                .await;
+                return;
+            }
+        }
+
         let call_started_at = now_millis();
         let active_call = Arc::new(ActiveCallControl::new(grant_id.clone(), call_started_at));
         let stdin_rx = command_accepts_stdin(&command).then(|| active_call.prepare_stdin_channel());

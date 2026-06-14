@@ -211,6 +211,13 @@ pub enum RemoteFileCommands {
         path: Option<String>,
         #[arg(long, default_value_t = 1, help = "Max recursion depth")]
         depth: u32,
+        #[arg(long, help = "Max entries to return per page")]
+        max_matches: Option<usize>,
+        #[arg(
+            long,
+            help = "Resume token from a previous page's next_cursor (pagination)"
+        )]
+        cursor: Option<u64>,
         #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
         no_ignore: bool,
         #[arg(
@@ -238,6 +245,11 @@ pub enum RemoteFileCommands {
         pattern: String,
         #[arg(long, help = "Max matches to return")]
         max_matches: Option<usize>,
+        #[arg(
+            long,
+            help = "Resume token from a previous page's next_cursor (pagination)"
+        )]
+        cursor: Option<u64>,
         #[arg(long = "no-ignore", help = "Do not respect .gitignore rules")]
         no_ignore: bool,
         #[arg(
@@ -263,6 +275,11 @@ pub enum RemoteFileCommands {
         max_matches: Option<usize>,
         #[arg(long, help = "Per-file scan byte cap")]
         max_scan: Option<u64>,
+        #[arg(
+            long,
+            help = "Resume token from a previous page's next_cursor (pagination)"
+        )]
+        cursor: Option<u64>,
         #[arg(long, short = 'B', help = "Number of context lines before each match")]
         context_before: Option<u32>,
         #[arg(long, short = 'A', help = "Number of context lines after each match")]
@@ -396,6 +413,14 @@ pub enum RemoteFileCommands {
             help = "Provide the unified diff as a base64 string (overrides --patch-file)"
         )]
         patch_b64: Option<String>,
+        #[arg(
+            long = "base-sha",
+            value_name = "PATH=SHA256",
+            help = "Per-file optimistic lock: expected current sha256 for a patch target \
+                    (repeatable). Use an empty sha (PATH=) to assert the file does not exist yet. \
+                    PATH must match the patch's target path."
+        )]
+        base_sha: Vec<String>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]

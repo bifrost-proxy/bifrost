@@ -2490,6 +2490,8 @@ fn build_remote_file_command(
         RemoteFileCommands::List {
             path,
             depth,
+            max_matches,
+            cursor,
             no_ignore,
             exclude_patterns,
             cwd,
@@ -2500,6 +2502,8 @@ fn build_remote_file_command(
             json!({
                 "path": path,
                 "depth": depth,
+                "max_matches": max_matches,
+                "cursor": cursor,
                 "respect_gitignore": !no_ignore,
                 "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "cwd": cwd,
@@ -2515,6 +2519,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Glob {
             pattern,
             max_matches,
+            cursor,
             no_ignore,
             exclude_patterns,
             cwd,
@@ -2525,6 +2530,7 @@ fn build_remote_file_command(
             json!({
                 "pattern": pattern,
                 "max_matches": max_matches,
+                "cursor": cursor,
                 "respect_gitignore": !no_ignore,
                 "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
                 "cwd": cwd,
@@ -2536,6 +2542,7 @@ fn build_remote_file_command(
             path,
             max_matches,
             max_scan,
+            cursor,
             case_insensitive,
             glob,
             no_ignore,
@@ -2552,6 +2559,7 @@ fn build_remote_file_command(
                 "path": path,
                 "max_matches": max_matches,
                 "max_scan_bytes": max_scan,
+                "cursor": cursor,
                 "case_insensitive": case_insensitive,
                 "glob": glob,
                 "respect_gitignore": !no_ignore,
@@ -2692,6 +2700,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Patch {
             patch_file,
             patch_b64,
+            base_sha,
             cwd,
             output,
         } => {
@@ -2728,10 +2737,27 @@ fn build_remote_file_command(
                     "apply-patch requires --patch-file or --patch-b64".to_string(),
                 ));
             };
+            // Parse `--base-sha PATH=SHA` pairs into a map for the server-side
+            // per-file optimistic lock. An empty SHA asserts the target does
+            // not yet exist (creation guard).
+            let mut base_shas = serde_json::Map::new();
+            for pair in base_sha {
+                let (p, sha) = pair.split_once('=').ok_or_else(|| {
+                    BifrostError::Config(format!(
+                        "invalid --base-sha '{pair}': expected PATH=SHA256 (SHA may be empty)"
+                    ))
+                })?;
+                base_shas.insert(p.to_string(), Value::String(sha.to_string()));
+            }
+            let base_shas_val = if base_shas.is_empty() {
+                Value::Null
+            } else {
+                Value::Object(base_shas)
+            };
             (
                 "file.apply_patch",
                 format!("file.apply_patch ({} bytes)", patch_text.len()),
-                json!({ "patch_text": patch_text, "cwd": cwd }),
+                json!({ "patch_text": patch_text, "base_shas": base_shas_val, "cwd": cwd }),
                 output.clone(),
             )
         }
@@ -3587,9 +3613,21 @@ fn remote_file_error_hint(stderr: &str) -> Option<&'static str> {
             "Path is outside the granted roots. Ask the target to add it to FileAccessPolicy \
              (~/.bifrost/file-access.toml); do not change --cwd to work around it."
         }
+        "file.deny_pattern" => {
+            "Path matched a policy `denies` rule (e.g. .ssh, .env, target/, *.pfx). The owner \
+             deliberately excluded it; pick a different path — re-authorizing will NOT unblock it."
+        }
         "file.permission_denied" => {
-            "Denied by policy. If it hit `denies` (e.g. .ssh, target/), the owner excluded it; \
-             if write scope is missing, ask the target to re-authorize with read-write File Access."
+            "Write blocked because the grant is read-only (or recursive delete is disabled). \
+             Ask the target to re-authorize with read-write File Access."
+        }
+        "file.already_exists" => {
+            "Target already exists. For `mkdir`, drop it or add --parents (idempotent on existing \
+             dirs); for `move`, pass --overwrite or choose a new destination."
+        }
+        "file.cross_device" => {
+            "Source and destination are on different filesystems, so an atomic rename is impossible. \
+             Use `file read` + `file write` to copy across the boundary instead of `move`."
         }
         "file.binary_not_allowed" => {
             "File looks binary. Re-run `read` with --allow-binary, or use `file hash` + chunked reads."
@@ -3670,6 +3708,15 @@ fn print_truncation_hint(op: RemoteFileOp, value: &Value) {
             "⚠".bright_yellow(),
             truncation_notice(op).bright_yellow()
         );
+        // P1: when the server returned a resumable cursor, surface the exact
+        // flag to fetch the next page rather than leaving the agent guessing.
+        if let Some(nc) = value.get("next_cursor").and_then(Value::as_u64) {
+            eprintln!(
+                "  {} {}",
+                "→".bright_cyan(),
+                format!("more results available — re-run with --cursor {nc}").bright_cyan()
+            );
+        }
     }
 }
 

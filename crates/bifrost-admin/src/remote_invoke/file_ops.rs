@@ -23,8 +23,13 @@ use tokio::io::AsyncReadExt;
 
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 const DEFAULT_LIST_DEPTH: u32 = 1;
+const DEFAULT_LIST_MAX: usize = 2_000;
 const DEFAULT_GLOB_MAX: usize = 1_000;
 const DEFAULT_SEARCH_MAX: usize = 500;
+/// Safety ceiling on total hits collected before pagination, independent of the
+/// per-page `max`. Prevents an unbounded regex match set from exhausting memory
+/// while still allowing cursor-based paging up to this many results.
+const SEARCH_HARD_CAP: usize = 50_000;
 const DEFAULT_SEARCH_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
 
@@ -54,6 +59,25 @@ fn io_err(ctx: &str, err: std::io::Error) -> BifrostError {
     BifrostError::Config(format!("[file.io_error] {}: {}", ctx, err))
 }
 
+/// Map an io error to a *structural* wire code where the errno carries
+/// actionable meaning, falling back to the generic `[file.io_error]`.
+/// This lets CLIs branch on `file.already_exists` / `file.not_found` /
+/// `file.cross_device` instead of string-matching opaque OS messages.
+fn io_err_structured(ctx: &str, err: std::io::Error) -> BifrostError {
+    use std::io::ErrorKind;
+    // EXDEV (cross-device link) has no stable ErrorKind on all toolchains,
+    // so match the raw errno (18 on Linux/macOS) as well.
+    let is_exdev = err.raw_os_error() == Some(18);
+    let code = match err.kind() {
+        ErrorKind::AlreadyExists => "file.already_exists",
+        ErrorKind::NotFound => "file.not_found",
+        ErrorKind::PermissionDenied => "file.permission_denied",
+        _ if is_exdev => "file.cross_device",
+        _ => "file.io_error",
+    };
+    BifrostError::Config(format!("[{}] {}: {}", code, ctx, err))
+}
+
 fn system_time_to_unix(time: std::time::SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
 }
@@ -71,6 +95,30 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect()
+}
+
+/// P1: deterministic offset pagination over a fully-collected, sorted result
+/// set. Returns the requested page plus the cursor to pass back for the next
+/// page (`None` when the result set is exhausted). A `limit` of 0 is treated
+/// as "no pagination" and returns everything from the offset onward.
+fn paginate<T>(items: Vec<T>, cursor: Option<u64>, limit: usize) -> (Vec<T>, Option<u64>) {
+    let start = cursor.unwrap_or(0) as usize;
+    let total = items.len();
+    if start >= total {
+        return (Vec::new(), None);
+    }
+    let mut iter = items.into_iter().skip(start);
+    if limit == 0 {
+        return (iter.collect(), None);
+    }
+    let page: Vec<T> = iter.by_ref().take(limit).collect();
+    let consumed = start + page.len();
+    let next = if consumed < total {
+        Some(consumed as u64)
+    } else {
+        None
+    };
+    (page, next)
 }
 
 async fn sha256_file(path: &Path) -> Result<String> {
@@ -461,13 +509,24 @@ pub async fn handle_file_list(
     depth: Option<u32>,
     exclude_patterns: &[String],
     respect_gitignore: bool,
+    denies: &[String],
+    max_results: Option<usize>,
+    cursor: Option<u64>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::List);
     let depth = depth.unwrap_or(DEFAULT_LIST_DEPTH).max(1);
+    let max = max_results.unwrap_or(DEFAULT_LIST_MAX);
     let root = decision.path.as_path().to_path_buf();
 
-    let deny = DenyMatcher::new(&[]).map_err(fa_to_bifrost)?;
-    let _ = deny; // matcher is carried via decision-owned policy externally
+    // P1: enforce deny rules per-entry so policy-blacklisted paths (ssh keys,
+    // credentials, env files, ...) never leak through directory listing.
+    let deny_matcher = if denies.is_empty() {
+        None
+    } else {
+        Some(DenyMatcher::new(denies).map_err(|e| {
+            BifrostError::Config(format!("[file.invalid_deny] bad deny pattern: {}", e))
+        })?)
+    };
 
     let gi_opt = if respect_gitignore {
         build_gitignore_for(decision.path.as_path())
@@ -502,6 +561,11 @@ pub async fn handle_file_list(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
+            if let Some(ref dm) = deny_matcher {
+                if dm.match_raw(&rel).is_some() {
+                    continue;
+                }
+            }
             // lstat first so we can accurately tag symlinks; fall back to
             // follow-metadata for size/mtime when the symlink resolves.
             let lmd = match fs::symlink_metadata(&path).await {
@@ -552,7 +616,26 @@ pub async fn handle_file_list(
         }
     }
 
-    Ok(json!({ "entries": entries, "truncated": truncated, "root": root.to_string_lossy() }))
+    // P1: stable ordering (BFS traversal order is filesystem-dependent) so the
+    // offset cursor resumes deterministically across calls. `dir_truncated`
+    // marks per-directory entry caps separately from page truncation.
+    let dir_truncated = truncated;
+    entries.sort_by(|a, b| {
+        a["path"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["path"].as_str().unwrap_or(""))
+    });
+    let (page, next_cursor) = paginate(entries, cursor, max);
+    let mut out = json!({
+        "entries": page,
+        "truncated": dir_truncated || next_cursor.is_some(),
+        "root": root.to_string_lossy(),
+    });
+    if let Some(nc) = next_cursor {
+        out["next_cursor"] = json!(nc);
+    }
+    Ok(out)
 }
 
 /// `file.stat` — return size, mtime, mode, kind, sha256 (files only).
@@ -629,20 +712,29 @@ pub async fn handle_file_glob(
     max_matches: Option<usize>,
     exclude_patterns: &[String],
     respect_gitignore: bool,
+    denies: &[String],
+    cursor: Option<u64>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Glob);
     let max = max_matches.unwrap_or(DEFAULT_GLOB_MAX);
     let root = decision.path.as_path().to_path_buf();
     let matcher = GlobMatcher::new(&[pattern.to_string()]).map_err(fa_to_bifrost)?;
+    // P1: enforce deny rules so policy-blacklisted paths never surface via glob.
+    let deny_matcher = if denies.is_empty() {
+        None
+    } else {
+        Some(DenyMatcher::new(denies).map_err(|e| {
+            BifrostError::Config(format!("[file.invalid_deny] bad deny pattern: {}", e))
+        })?)
+    };
 
-    let mut matches: Vec<String> = Vec::new();
+    let mut all_matches: Vec<String> = Vec::new();
     let gi_opt = if respect_gitignore {
         build_gitignore_for(&root)
     } else {
         None
     };
     let mut stack: Vec<PathBuf> = vec![root.clone()];
-    let mut truncated = false;
     while let Some(dir) = stack.pop() {
         let mut rd = match fs::read_dir(&dir).await {
             Ok(rd) => rd,
@@ -659,6 +751,11 @@ pub async fn handle_file_glob(
                 .unwrap_or(&path)
                 .to_string_lossy()
                 .replace('\\', "/");
+            if let Some(ref dm) = deny_matcher {
+                if dm.match_raw(&rel).is_some() {
+                    continue;
+                }
+            }
             if md.is_dir() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if should_skip_dir(name, exclude_patterns) {
@@ -674,23 +771,24 @@ pub async fn handle_file_glob(
                 continue;
             }
             if matcher.is_match(&rel) {
-                if matches.len() >= max {
-                    truncated = true;
-                    break;
-                }
-                matches.push(rel);
+                all_matches.push(rel);
             }
-        }
-        if truncated {
-            break;
         }
     }
 
-    Ok(json!({
-        "matches": matches,
-        "truncated": truncated,
+    // P1: deterministic ordering enables a stable offset cursor for resumable
+    // pagination across very large trees.
+    all_matches.sort_unstable();
+    let (page, next_cursor) = paginate(all_matches, cursor, max);
+    let mut out = json!({
+        "matches": page,
+        "truncated": next_cursor.is_some(),
         "root": root.to_string_lossy(),
-    }))
+    });
+    if let Some(nc) = next_cursor {
+        out["next_cursor"] = json!(nc);
+    }
+    Ok(out)
 }
 
 /// `file.search` — regex grep across files under the policy root.
@@ -707,6 +805,7 @@ pub async fn handle_file_search(
     file_glob: Option<&str>,
     respect_gitignore: bool,
     denies: &[String],
+    cursor: Option<u64>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Search);
     let root = decision.path.as_path().to_path_buf();
@@ -856,7 +955,7 @@ pub async fn handle_file_search(
                         hit["context"] = json!(ctx);
                     }
                     hits.push(hit);
-                    if hits.len() >= max {
+                    if hits.len() >= SEARCH_HARD_CAP {
                         truncated = true;
                         break 'outer;
                     }
@@ -865,11 +964,27 @@ pub async fn handle_file_search(
         }
     }
 
-    Ok(json!({
-        "matches": hits,
-        "truncated": truncated,
+    // P1: stable ordering so the offset cursor resumes deterministically. The
+    // BFS stack pops directories in filesystem-dependent order, so sort by
+    // (path, line, column) before slicing the page.
+    hits.sort_by(|a, b| {
+        let pa = a["path"].as_str().unwrap_or("");
+        let pb = b["path"].as_str().unwrap_or("");
+        pa.cmp(pb)
+            .then(a["line"].as_u64().cmp(&b["line"].as_u64()))
+            .then(a["column"].as_u64().cmp(&b["column"].as_u64()))
+    });
+    let scan_truncated = truncated;
+    let (page, next_cursor) = paginate(hits, cursor, max);
+    let mut out = json!({
+        "matches": page,
+        "truncated": scan_truncated || next_cursor.is_some(),
         "root": root.to_string_lossy(),
-    }))
+    });
+    if let Some(nc) = next_cursor {
+        out["next_cursor"] = json!(nc);
+    }
+    Ok(out)
 }
 
 /// `file.hash` — content hash. Currently only `sha256` is supported.
@@ -1214,7 +1329,7 @@ pub async fn handle_file_mkdir(decision: &PolicyDecision, parents: bool) -> Resu
     } else {
         fs::create_dir(path).await
     };
-    res.map_err(|e| io_err("mkdir", e))?;
+    res.map_err(|e| io_err_structured("mkdir", e))?;
     Ok(json!({
         "path": path.to_string_lossy(),
         "created": true,
@@ -1262,7 +1377,7 @@ pub async fn handle_file_move(
     }
     fs::rename(from, to)
         .await
-        .map_err(|e| io_err("rename", e))?;
+        .map_err(|e| io_err_structured("rename", e))?;
     Ok(json!({
         "from": from.to_string_lossy(),
         "to": to.to_string_lossy(),
@@ -1359,6 +1474,16 @@ impl PatchEntry {
             self.new_path.clone()
         }
     }
+}
+
+/// Best-effort extraction of the target file paths in a patch body, for audit
+/// logging. Returns the decision-key path of each entry (new_path for
+/// create/modify, old_path for delete). Parse failures yield an empty list so
+/// audit logging never blocks the operation itself.
+pub fn patch_target_paths(text: &str) -> Vec<String> {
+    parse_patch(text)
+        .map(|entries| entries.iter().map(PatchEntry::decision_key).collect())
+        .unwrap_or_default()
 }
 
 fn strip_ab_prefix(s: &str) -> String {
@@ -1535,6 +1660,7 @@ pub fn parse_patch(text: &str) -> Result<Vec<PatchEntry>> {
 pub async fn handle_file_apply_patch(
     decisions: &std::collections::HashMap<String, PolicyDecision>,
     patch_text: &str,
+    base_shas: &std::collections::HashMap<String, String>,
 ) -> Result<Value> {
     // Two-phase commit:
     //   phase 1 — for every file in the patch compute the new bytes and
@@ -1624,6 +1750,34 @@ pub async fn handle_file_apply_patch(
                 return Err(io_err("read", e));
             }
         };
+        // P0-1: per-file optimistic lock. If the caller supplied a
+        // `base_sha256` for this patch target, verify the on-disk content
+        // hashes to the expected value BEFORE staging any change. Unlike the
+        // context-line matching below (which can still match after an unrelated
+        // edit elsewhere in the file), this guarantees the patch was generated
+        // against exactly the bytes currently on disk — closing the silent
+        // multi-agent overwrite gap. An empty expected sha means "expected to
+        // not exist yet" (creation), mirroring file.write semantics.
+        if let Some(expected) = base_shas.get(&key) {
+            let actual = if orig_bytes.is_empty() && fs::metadata(&target).await.is_err() {
+                String::new()
+            } else {
+                sha256_hex(&orig_bytes)
+            };
+            if !actual.eq_ignore_ascii_case(expected) {
+                cleanup_tmps(&staged).await;
+                return Err(sha_mismatch(format!(
+                    "base_sha256 mismatch for '{}': expected {}, actual {}",
+                    key,
+                    expected,
+                    if actual.is_empty() {
+                        "<absent>"
+                    } else {
+                        &actual
+                    }
+                )));
+            }
+        }
         let prior_mode = capture_mode(&target).await;
         let eol = Eol::detect(&orig_bytes);
         let orig_text = match String::from_utf8(orig_bytes.clone()) {
@@ -1996,7 +2150,9 @@ mod tests {
         let dec = policy
             .check(Path::new("."), tmp.path(), FileOp::List)
             .unwrap();
-        let v = handle_file_list(&dec, Some(1), &[], false).await.unwrap();
+        let v = handle_file_list(&dec, Some(1), &[], false, &[], None, None)
+            .await
+            .unwrap();
         let entries = v["entries"].as_array().unwrap();
         assert!(entries.iter().any(|e| e["name"] == "a.txt"));
         assert!(entries.iter().any(|e| e["name"] == "sub"));
@@ -2085,6 +2241,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -2116,7 +2273,7 @@ mod tests {
             .check(Path::new("."), tmp.path(), FileOp::Glob)
             .unwrap();
 
-        let v = handle_file_glob(&dec, "**/*", None, &[], false)
+        let v = handle_file_glob(&dec, "**/*", None, &[], false, &[], None)
             .await
             .unwrap();
         let matches: Vec<&str> = v["matches"]
@@ -2142,7 +2299,9 @@ mod tests {
             .check(Path::new("."), tmp.path(), FileOp::List)
             .unwrap();
 
-        let v = handle_file_list(&dec, Some(2), &[], false).await.unwrap();
+        let v = handle_file_list(&dec, Some(2), &[], false, &[], None, None)
+            .await
+            .unwrap();
         let entries = v["entries"].as_array().unwrap();
         let names: Vec<&str> = entries
             .iter()
@@ -2262,6 +2421,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -2298,6 +2458,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -2335,6 +2496,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -2367,6 +2529,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap_err();
@@ -2579,7 +2742,9 @@ mod tests {
         std::fs::write(root.join("a.txt"), b"x").unwrap();
         let policy = mk_rw_policy(root);
         let dec = policy.check(Path::new("."), root, FileOp::List).unwrap();
-        let v = handle_file_list(&dec, Some(1), &[], false).await.unwrap();
+        let v = handle_file_list(&dec, Some(1), &[], false, &[], None, None)
+            .await
+            .unwrap();
         assert!(
             v.get("truncated").is_some(),
             "list response must expose `truncated` flag"
@@ -2623,7 +2788,9 @@ mod tests {
 
         let policy = mk_rw_policy(root);
         let dec = policy.check(Path::new("."), root, FileOp::List).unwrap();
-        let v = handle_file_list(&dec, Some(1), &[], false).await.unwrap();
+        let v = handle_file_list(&dec, Some(1), &[], false, &[], None, None)
+            .await
+            .unwrap();
         let entries = v["entries"].as_array().unwrap();
         let link_entry = entries
             .iter()
@@ -2677,7 +2844,7 @@ mod tests {
             .check(Path::new("."), tmp.path(), FileOp::Glob)
             .unwrap();
 
-        let v = handle_file_glob(&dec, "**/*", None, &["build".to_string()], false)
+        let v = handle_file_glob(&dec, "**/*", None, &["build".to_string()], false, &[], None)
             .await
             .unwrap();
         let matches: Vec<&str> = v["matches"]
@@ -2717,7 +2884,9 @@ mod tests {
             "+final\n",
             "\\ No newline at end of file\n",
         );
-        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
+            .await
+            .unwrap();
         let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
         assert_eq!(content, "final", "got {:?}", content);
     }
@@ -2749,7 +2918,9 @@ mod tests {
             " beta\n",
             "\\ No newline at end of file\n",
         );
-        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
+            .await
+            .unwrap();
         let content = std::fs::read_to_string(tmp.path().join("f.txt")).unwrap();
         assert_eq!(content, "ALPHA\nbeta", "got {:?}", content);
     }
@@ -2768,7 +2939,9 @@ mod tests {
         decisions.insert("new.txt".to_string(), dec);
 
         let patch = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n";
-        let v = handle_file_apply_patch(&decisions, patch).await.unwrap();
+        let v = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
+            .await
+            .unwrap();
         let files = v["files"].as_array().unwrap();
         assert_eq!(files.len(), 1);
 
@@ -2791,7 +2964,7 @@ mod tests {
         decisions.insert("f.txt".to_string(), dec);
 
         let patch = "--- a/f.txt\n+++ b/f.txt\n@@ -1,1 +1,1 @@\n-wrong_context\n+replacement\n";
-        let err = handle_file_apply_patch(&decisions, patch)
+        let err = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
             .await
             .unwrap_err();
         assert!(err.to_string().contains("mismatch"));
@@ -2857,7 +3030,7 @@ mod tests {
  banana
  cherry
 ";
-        let err = handle_file_apply_patch(&decisions, patch)
+        let err = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
             .await
             .unwrap_err();
         assert!(
@@ -2980,6 +3153,7 @@ mod tests {
             None,
             true,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -3012,6 +3186,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -3053,6 +3228,7 @@ mod tests {
             None,
             false,
             &[],
+            None,
         )
         .await
         .unwrap();
@@ -3078,6 +3254,7 @@ mod tests {
             None,
             false,
             &denies,
+            None,
         )
         .await
         .unwrap();
@@ -3249,7 +3426,7 @@ mod tests {
             "diff --git a/img.png b/img.png\n",
             "Binary files a/img.png and b/img.png differ\n",
         );
-        let err = handle_file_apply_patch(&decisions, patch)
+        let err = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -3265,7 +3442,7 @@ mod tests {
             "rename from from.txt\n",
             "rename to to.txt\n",
         );
-        let err = handle_file_apply_patch(&decisions, patch)
+        let err = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
             .await
             .unwrap_err();
         let msg = err.to_string();
@@ -3291,7 +3468,9 @@ mod tests {
             "-old\n",
             "+new\n",
         );
-        handle_file_apply_patch(&decisions, patch).await.unwrap();
+        handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
+            .await
+            .unwrap();
         assert_eq!(
             std::fs::read_to_string(tmp.path().join("f.txt")).unwrap(),
             "new\n"
@@ -3446,5 +3625,271 @@ mod tests {
             .await
             .unwrap();
         assert!(!p.exists());
+    }
+
+    // ===============================================================
+    //  E2E coverage for the P0/P1 hardening batch
+    // ===============================================================
+
+    // --- P1-17: list/glob enforce deny rules per-entry ---
+    #[tokio::test]
+    async fn list_filters_denied_entries_p1_17() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("ok.txt"), b"x").unwrap();
+        std::fs::create_dir(tmp.path().join(".ssh")).unwrap();
+        std::fs::write(tmp.path().join(".ssh/id_rsa"), b"SECRET").unwrap();
+        std::fs::write(tmp.path().join(".env"), b"TOKEN=1").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::List)
+            .unwrap();
+        let denies = vec!["**/.ssh/**".to_string(), "**/.env".to_string()];
+        let v = handle_file_list(&dec, Some(3), &[], false, &denies, None, None)
+            .await
+            .unwrap();
+        let names: Vec<String> = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| e["path"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(names.iter().any(|p| p.contains("ok.txt")));
+        assert!(
+            !names.iter().any(|p| p.contains("id_rsa")),
+            "denied ssh key must not leak via list: {:?}",
+            names
+        );
+        assert!(
+            !names.iter().any(|p| p.ends_with(".env")),
+            "denied env file must not leak via list: {:?}",
+            names
+        );
+    }
+
+    #[tokio::test]
+    async fn glob_filters_denied_entries_p1_17() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/main.rs"), b"fn main(){}").unwrap();
+        std::fs::create_dir(tmp.path().join("secrets")).unwrap();
+        std::fs::write(tmp.path().join("secrets/key.pem"), b"PRIV").unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Glob)
+            .unwrap();
+        let denies = vec!["**/*.pem".to_string()];
+        let v = handle_file_glob(&dec, "**/*", None, &[], false, &denies, None)
+            .await
+            .unwrap();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(matches.iter().any(|m| m.contains("main.rs")));
+        assert!(
+            !matches.iter().any(|m| m.contains("key.pem")),
+            "denied pem must not leak via glob: {:?}",
+            matches
+        );
+    }
+
+    // --- P1-19: pagination cursor for traversal ops ---
+    #[tokio::test]
+    async fn list_pagination_cursor_walks_all_entries_p1_19() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            std::fs::write(tmp.path().join(format!("f{i}.txt")), b"x").unwrap();
+        }
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::List)
+            .unwrap();
+
+        // page 1: limit 2
+        let p1 = handle_file_list(&dec, Some(1), &[], false, &[], Some(2), None)
+            .await
+            .unwrap();
+        assert_eq!(p1["entries"].as_array().unwrap().len(), 2);
+        assert!(p1["truncated"].as_bool().unwrap());
+        let c1 = p1["next_cursor"].as_u64().expect("page1 next_cursor");
+        assert_eq!(c1, 2);
+
+        // page 2
+        let p2 = handle_file_list(&dec, Some(1), &[], false, &[], Some(2), Some(c1))
+            .await
+            .unwrap();
+        assert_eq!(p2["entries"].as_array().unwrap().len(), 2);
+        let c2 = p2["next_cursor"].as_u64().expect("page2 next_cursor");
+        assert_eq!(c2, 4);
+
+        // page 3: last entry, no more cursor
+        let p3 = handle_file_list(&dec, Some(1), &[], false, &[], Some(2), Some(c2))
+            .await
+            .unwrap();
+        assert_eq!(p3["entries"].as_array().unwrap().len(), 1);
+        assert!(p3.get("next_cursor").map(|c| c.is_null()).unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn glob_pagination_cursor_is_deterministic_p1_19() {
+        let tmp = tempfile::tempdir().unwrap();
+        for i in 0..4 {
+            std::fs::write(tmp.path().join(format!("a{i}.log")), b"x").unwrap();
+        }
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Glob)
+            .unwrap();
+
+        let p1 = handle_file_glob(&dec, "**/*.log", Some(2), &[], false, &[], None)
+            .await
+            .unwrap();
+        let m1: Vec<String> = p1["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(m1.len(), 2);
+        let c1 = p1["next_cursor"].as_u64().expect("glob next_cursor");
+
+        let p2 = handle_file_glob(&dec, "**/*.log", Some(2), &[], false, &[], Some(c1))
+            .await
+            .unwrap();
+        let m2: Vec<String> = p2["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(m2.len(), 2);
+        // pages must not overlap (deterministic sort + offset slicing)
+        for m in &m2 {
+            assert!(!m1.contains(m), "page overlap: {} in both", m);
+        }
+    }
+
+    // --- P0-1: apply_patch per-file base_sha256 optimistic lock ---
+    #[tokio::test]
+    async fn apply_patch_rejects_stale_base_sha_p0_1() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("a.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = HashMap::new();
+        decisions.insert("a.txt".to_string(), dec);
+
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n three\n";
+
+        // Wrong base sha -> must be rejected before any write.
+        let mut base = HashMap::new();
+        base.insert("a.txt".to_string(), "deadbeef".repeat(8));
+        let err = handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("file.sha_mismatch") || err.to_string().contains("mismatch"),
+            "expected sha mismatch, got: {}",
+            err
+        );
+        let still = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
+        assert_eq!(
+            still, "one\ntwo\nthree\n",
+            "file must be untouched on stale base"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_patch_accepts_matching_base_sha_p0_1() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        let good = sha256_file(&tmp.path().join("a.txt")).await.unwrap();
+
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("a.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        let mut decisions = HashMap::new();
+        decisions.insert("a.txt".to_string(), dec);
+
+        let patch = "--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@\n-one\n+ONE\n two\n three\n";
+        let mut base = HashMap::new();
+        base.insert("a.txt".to_string(), good);
+        handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap();
+        let out = std::fs::read_to_string(tmp.path().join("a.txt")).unwrap();
+        assert_eq!(out, "ONE\ntwo\nthree\n");
+    }
+
+    // --- P1-20: patch_target_paths surfaces every touched file for audit ---
+    #[test]
+    fn patch_target_paths_lists_all_targets_p1_20() {
+        let patch = "\
+--- a/src/a.rs
++++ b/src/a.rs
+@@ -1,1 +1,1 @@
+-x
++y
+--- /dev/null
++++ b/src/new.rs
+@@ -0,0 +1,1 @@
++z
+";
+        let mut paths = patch_target_paths(patch);
+        paths.sort();
+        assert_eq!(
+            paths,
+            vec!["src/a.rs".to_string(), "src/new.rs".to_string()]
+        );
+    }
+
+    // --- P1-18: structured io error codes ---
+    #[tokio::test]
+    async fn mkdir_existing_yields_already_exists_code_p1_18() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir(tmp.path().join("d")).unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("d"), tmp.path(), FileOp::Mkdir)
+            .unwrap();
+        let err = handle_file_mkdir(&dec, false).await.unwrap_err();
+        assert!(
+            err.to_string().contains("file.already_exists"),
+            "expected file.already_exists, got: {}",
+            err
+        );
+    }
+
+    // --- paginate() unit semantics ---
+    #[test]
+    fn paginate_helper_offsets_and_terminates() {
+        let items: Vec<u32> = (0..5).collect();
+        let (p1, n1) = paginate(items.clone(), None, 2);
+        assert_eq!(p1, vec![0, 1]);
+        assert_eq!(n1, Some(2));
+        let (p2, n2) = paginate(items.clone(), Some(2), 2);
+        assert_eq!(p2, vec![2, 3]);
+        assert_eq!(n2, Some(4));
+        let (p3, n3) = paginate(items.clone(), Some(4), 2);
+        assert_eq!(p3, vec![4]);
+        assert_eq!(n3, None);
+        // cursor past end -> empty, no next
+        let (p4, n4) = paginate(items.clone(), Some(99), 2);
+        assert!(p4.is_empty());
+        assert_eq!(n4, None);
+        // limit 0 -> all, no next
+        let (p5, n5) = paginate(items, None, 0);
+        assert_eq!(p5.len(), 5);
+        assert_eq!(n5, None);
     }
 }

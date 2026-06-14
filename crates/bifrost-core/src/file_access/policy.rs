@@ -386,7 +386,7 @@ mod tests {
         let err = policy
             .check(Path::new(".git/config"), &root, FileOp::Read)
             .unwrap_err();
-        assert_eq!(err.code(), "file.permission_denied");
+        assert_eq!(err.code(), "file.deny_pattern");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -407,7 +407,7 @@ mod tests {
         let err = policy
             .check(Path::new("Cargo.lock"), &root, FileOp::Write)
             .unwrap_err();
-        assert_eq!(err.code(), "file.permission_denied");
+        assert_eq!(err.code(), "file.deny_pattern");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -459,13 +459,13 @@ mod tests {
         let err = policy
             .check(Path::new(".ssh"), &root, FileOp::List)
             .unwrap_err();
-        assert_eq!(err.code(), "file.permission_denied");
+        assert_eq!(err.code(), "file.deny_pattern");
 
         // Reading a file inside .ssh must also be denied.
         let err = policy
             .check(Path::new(".ssh/id_rsa"), &root, FileOp::Read)
             .unwrap_err();
-        assert_eq!(err.code(), "file.permission_denied");
+        assert_eq!(err.code(), "file.deny_pattern");
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -479,7 +479,7 @@ mod tests {
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for d in ["target", "node_modules"] {
             let err = policy.check(Path::new(d), &root, FileOp::List).unwrap_err();
-            assert_eq!(err.code(), "file.permission_denied", "dir={d}");
+            assert_eq!(err.code(), "file.deny_pattern", "dir={d}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
@@ -494,7 +494,7 @@ mod tests {
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for f in [".env", ".env.local"] {
             let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
-            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+            assert_eq!(err.code(), "file.deny_pattern", "file={f}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
@@ -514,7 +514,7 @@ mod tests {
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for f in [".npmrc", ".netrc"] {
             let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
-            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+            assert_eq!(err.code(), "file.deny_pattern", "file={f}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
@@ -531,7 +531,7 @@ mod tests {
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for f in ["id_rsa", "id_rsa.pub", "id_rsa_backup"] {
             let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
-            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+            assert_eq!(err.code(), "file.deny_pattern", "file={f}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
@@ -547,7 +547,7 @@ mod tests {
         let policy = FileAccessPolicy::new_readonly("t", vec![root.clone()]);
         for f in ["client.pfx", "client.p12"] {
             let err = policy.check(Path::new(f), &root, FileOp::Read).unwrap_err();
-            assert_eq!(err.code(), "file.permission_denied", "file={f}");
+            assert_eq!(err.code(), "file.deny_pattern", "file={f}");
         }
         std::fs::remove_dir_all(&root).ok();
     }
