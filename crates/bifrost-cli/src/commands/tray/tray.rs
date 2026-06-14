@@ -1321,7 +1321,7 @@ fn execute_action(
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
-            if let Err(e) = open::that(url) {
+            if let Err(e) = open_tray_target(url) {
                 tracing::error!(url = %url, error = %e, "failed to open URL");
             }
         }
@@ -1456,7 +1456,7 @@ fn execute_action(
             });
         }
         MenuItemAction::OpenDirectory(path) => {
-            if let Err(e) = open::that(path) {
+            if let Err(e) = open_tray_target(path) {
                 tracing::error!(path = %path, error = %e, "failed to open directory");
             }
         }
@@ -1607,6 +1607,39 @@ fn build_service_start_args(port: Option<u16>, extra_args: &[String]) -> Vec<Str
     }
     args.extend(extra_args.iter().cloned());
     args
+}
+
+#[cfg(target_os = "windows")]
+fn open_tray_target(target: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let target = wide(target);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result <= 32 {
+        return Err(format!("ShellExecuteW failed with code {result}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_tray_target(target: &str) -> Result<(), String> {
+    open::that(target).map_err(|error| error.to_string())
 }
 
 fn monitor_start_child(
