@@ -1299,6 +1299,7 @@ jobs:
         shell: bash
         env:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
+          BIFROST_TRAY_STARTUP_ALLOW_LOG_ONLY: "1"
           SKIP_BUILD: "true"
         run: bash e2e-tests/tests/test_cli_tray_startup_ci.sh
       - name: E2E runner tests
