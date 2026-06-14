@@ -1299,6 +1299,7 @@ fn merge_remote_into_local_rule(
     rule
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn open_url_in_browser(url: &str) -> Result<()> {
     if let Ok(path) = std::env::var(LOGIN_BROWSER_DRY_RUN_FILE_ENV) {
         let path = path.trim();
@@ -1326,13 +1327,6 @@ fn open_url_in_browser(url: &str) -> Result<()> {
         command
     };
 
-    #[cfg(target_os = "windows")]
-    {
-        open_url_in_browser_windows(url)?;
-        return Ok(());
-    }
-
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
     command
         .spawn()
         .map_err(|error| BifrostError::Network(format!("failed to open login browser: {error}")))?;
@@ -1340,7 +1334,19 @@ fn open_url_in_browser(url: &str) -> Result<()> {
 }
 
 #[cfg(target_os = "windows")]
-fn open_url_in_browser_windows(url: &str) -> Result<()> {
+fn open_url_in_browser(url: &str) -> Result<()> {
+    if let Ok(path) = std::env::var(LOGIN_BROWSER_DRY_RUN_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            writeln!(file, "{url}")?;
+            return Ok(());
+        }
+    }
+
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
