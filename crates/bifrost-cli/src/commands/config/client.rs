@@ -693,6 +693,44 @@ pub struct UpdateSyncConfigRequest {
 mod tests {
     use super::*;
     use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn config_api_client_get_server_config_uses_wiremock() {
+        let mock_server = MockServer::start().await;
+
+        let response_body = serde_json::json!({
+            "timeout_secs": 30u64,
+            "http1_max_header_size": 8192usize,
+            "http2_max_header_list_size": 16384usize,
+            "websocket_handshake_max_header_size": 4096usize,
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&response_body))
+            .mount(&mock_server)
+            .await;
+
+        let base_uri = mock_server.uri(); // e.g. http://127.0.0.1:12345
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().expect("mock server host");
+        let port: u16 = parts
+            .next()
+            .expect("mock server port")
+            .parse()
+            .expect("valid port number");
+
+        let client = ConfigApiClient::new(host, port);
+        let resp = client.get_server_config().expect("request should succeed");
+
+        assert_eq!(resp.timeout_secs, 30);
+        assert_eq!(resp.http1_max_header_size, 8192);
+        assert_eq!(resp.http2_max_header_list_size, 16384);
+        assert_eq!(resp.websocket_handshake_max_header_size, 4096);
+    }
 
     #[test]
     fn config_api_client_new_builds_expected_base_url() {

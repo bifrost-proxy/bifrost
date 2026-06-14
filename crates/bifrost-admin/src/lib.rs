@@ -48,8 +48,10 @@ pub mod traffic_db;
 mod version_check;
 mod ws_payload_store;
 
-#[cfg(test)]
-mod test_env;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_env;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support;
 #[cfg(test)]
 mod tests;
 

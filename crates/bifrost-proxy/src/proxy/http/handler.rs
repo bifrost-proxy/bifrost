@@ -4825,6 +4825,10 @@ mod tests {
     use hyper::Method;
     use hyper::Uri;
     use hyper::Version;
+    use mockall::{automock, predicate::eq};
+    use tokio::io::AsyncWriteExt;
+    use wiremock::matchers::method;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn test_extract_host_port_from_uri() {
@@ -5444,5 +5448,40 @@ mod tests {
         assert_eq!(value["listener_port"], 18881);
         assert_eq!(value["rules"][0]["name"], "temp-badge");
         assert_eq!(value["merged_content"], "badge-temp.test status://221");
+    }
+
+    #[automock]
+    trait SumService {
+        fn add(&self, a: i32, b: i32) -> i32;
+    }
+
+    #[test]
+    fn mockall_can_mock_simple_trait() {
+        let mut mock = MockSumService::new();
+        mock.expect_add().with(eq(1), eq(2)).return_const(3);
+        assert_eq!(mock.add(1, 2), 3);
+    }
+
+    #[tokio::test]
+    async fn connect_via_upstream_http_proxy_tunnel_succeeds_with_wiremock_proxy() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("CONNECT"))
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&mock_server)
+            .await;
+
+        let proxy_rule = mock_server.uri();
+        let mut stream = connect_via_upstream_http_proxy_tunnel(&proxy_rule, "example.com", 443)
+            .await
+            .expect("CONNECT tunnel should succeed");
+
+        tokio::time::timeout(
+            Duration::from_millis(50),
+            stream.write_all(b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"),
+        )
+        .await
+        .expect("write should complete in time")
+        .expect("write to upstream tunnel");
     }
 }
