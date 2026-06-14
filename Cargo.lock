@@ -726,6 +726,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "windows-sys 0.59.0",
  "wiremock",
 ]
 
