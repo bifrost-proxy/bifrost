@@ -1309,6 +1309,7 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_action(
     action: &MenuItemAction,
     args: &TrayArgs,

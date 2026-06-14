@@ -828,7 +828,6 @@ fn release_archive_ext_candidates() -> Vec<&'static str> {
     )
 }
 
-#[cfg(any(debug_assertions, test))]
 fn archive_ext_from_path(path: &Path) -> Option<&'static str> {
     let file_name = path.file_name()?.to_str()?;
     if file_name.ends_with(".tar.xz") {
@@ -842,8 +841,19 @@ fn archive_ext_from_path(path: &Path) -> Option<&'static str> {
     }
 }
 
-#[cfg(debug_assertions)]
-fn debug_upgrade_archive_override() -> Result<Option<(PathBuf, &'static str)>, BifrostError> {
+fn upgrade_test_overrides_enabled() -> bool {
+    cfg!(debug_assertions)
+        || env::var("BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES")
+            .ok()
+            .as_deref()
+            == Some("1")
+}
+
+fn test_upgrade_archive_override() -> Result<Option<(PathBuf, &'static str)>, BifrostError> {
+    if !upgrade_test_overrides_enabled() {
+        return Ok(None);
+    }
+
     let Some(path) = env::var_os("BIFROST_UPGRADE_TEST_ARCHIVE").map(PathBuf::from) else {
         return Ok(None);
     };
@@ -856,8 +866,11 @@ fn debug_upgrade_archive_override() -> Result<Option<(PathBuf, &'static str)>, B
     Ok(Some((path, archive_ext)))
 }
 
-#[cfg(debug_assertions)]
-fn debug_upgrade_latest_version_override() -> Option<VersionCache> {
+fn test_upgrade_latest_version_override() -> Option<VersionCache> {
+    if !upgrade_test_overrides_enabled() {
+        return None;
+    }
+
     env::var("BIFROST_UPGRADE_TEST_LATEST_VERSION")
         .ok()
         .map(|latest_version| VersionCache {
@@ -1072,8 +1085,7 @@ fn download_and_install(
     let mut selected_archive_path = None;
     let mut selected_archive_ext = None;
 
-    #[cfg(debug_assertions)]
-    if let Some((archive_path, archive_ext)) = debug_upgrade_archive_override()? {
+    if let Some((archive_path, archive_ext)) = test_upgrade_archive_override()? {
         println!(
             "{} {}",
             "Using local test archive:".bright_cyan(),
@@ -1336,12 +1348,9 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
         format!("(current: v{})", current_version).dimmed()
     );
 
-    #[cfg(debug_assertions)]
-    let debug_latest = debug_upgrade_latest_version_override();
-    #[cfg(not(debug_assertions))]
-    let debug_latest: Option<VersionCache> = None;
+    let test_latest = test_upgrade_latest_version_override();
 
-    let cache = if let Some(cache) = debug_latest {
+    let cache = if let Some(cache) = test_latest {
         cache
     } else {
         match get_latest_version_fresh_with_diagnostics() {

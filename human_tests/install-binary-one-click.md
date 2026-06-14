@@ -526,17 +526,18 @@
    ```bash
    BIFROST_BIN="$GITHUB_WORKSPACE/target/release/bifrost.exe" \
    BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 \
+   BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
    BIFROST_UPGRADE_E2E_VERSION=0.0.101 \
    bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
    ```
-3. 脚本必须在 Windows 上创建 `.zip` 测试 archive，并通过 debug-only `BIFROST_UPGRADE_TEST_ARCHIVE` 驱动临时安装路径中的 `bifrost.exe upgrade -y --restart`。
+3. 脚本必须在 Windows 上创建 `.zip` 测试 archive，并在 CI 显式设置 `BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1` 后，通过 `BIFROST_UPGRADE_TEST_ARCHIVE` 驱动 release `bifrost.exe upgrade -y --restart`。
 
 预期结果：
 
 - Windows x86 CI 必须执行真实进程链路：当前 PR `bifrost.exe` 复制到临时安装路径并启动 daemon，同一路径的 `bifrost.exe` 执行 upgrade，upgrade 停止 daemon，等待旧端口释放，替换当前安装路径，最后用替换后的 `bifrost.exe start -d` 启动新 daemon。
 - 该路径必须覆盖 Windows 用户最关键的 self-update 行为；历史 release 如 v0.0.100 缺少 Windows daemon exec start 能力，不作为本用例的启动 fixture。
 - 由于 Windows 不允许当前进程直接覆盖正在运行的 exe，upgrade 必须先 stage 新 exe，再调度 PowerShell helper 在当前 upgrade 进程退出后替换目标 exe；如果指定 `--restart`，helper 必须替换后执行新 exe 的 restart args。
-- CI 输出必须包含 stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；随后脚本必须通过 Admin API ready、新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
+- CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；随后脚本必须通过 Admin API ready、新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
 - 该用例只能在 Windows x86 runner 上执行；macOS/Linux 继续保留本地真实 upgrade restart 脚本和 CI 源码门禁，避免所有平台都依赖同一类静态检查。
 
 ## 清理步骤
@@ -581,3 +582,5 @@
 | 2026-06-14 | TC-IBOC-19 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib detached_daemon_readiness_host -- --nocapture` | PASS：1 个 readiness host 单测通过，`0.0.0.0`、`::`、`[::]` 均映射到 `127.0.0.1`，普通 LAN host 保持原值 |
 | 2026-06-14 | TC-IBOC-19 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" bash e2e-tests/tests/test_upgrade_restart_e2e.sh` | PASS：18/18 PASS，源码门禁覆盖 upgrade 端口释放、系统代理恢复、macOS/Windows daemon exec child、Windows detached flags、wildcard ready host、main daemon child bypass 和 tray helper 清理 |
 | 2026-06-14 | TC-IBOC-19 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地构造旧版 `0.0.99` daemon 在临时端口 `49872`、旧 PID `80457` 运行；upgrade 输出包含 stop/wait/restart 里程碑，升级后新 PID `81567` 使用临时安装目录新二进制，Admin API ready，`runtime.json` 记录 `system_proxy_enabled=false`，错误日志无 ObjC fork crash，stop 后无 tray helper 残留且端口释放；脚本汇总 10/10 PASS |
+| 2026-06-14 | TC-IBOC-20 | `prlctl exec "Windows 11" --current-user ... bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | FAIL 后已修复：Windows VM 使用 CI 下载的 release `bifrost.exe` 复现出 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 在 release 构建被忽略，upgrade 输出 `You're already on the latest version (v0.0.100)`，未进入重启路径；本次修复改为 CI 显式设置 `BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1` 后才允许 release binary 使用本地测试 archive/latest override |
+| 2026-06-14 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过，包含 detected/stop/wait/start 输出、`--no-system-proxy` 保留、新 PID 存活、Admin API ready、runtime `system_proxy_enabled=false`、stop 后端口释放 |

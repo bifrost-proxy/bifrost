@@ -79,6 +79,43 @@ pid_is_running() {
     fi
 }
 
+allocate_free_port() {
+    local py
+    py="$(python3_cmd 2>/dev/null || true)"
+    if [[ -n "$py" ]]; then
+        "$py" - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+        return 0
+    fi
+
+    if is_windows; then
+        powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            '$listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Parse("127.0.0.1"), 0); $listener.Start(); $port = $listener.LocalEndpoint.Port; $listener.Stop(); Write-Output $port'
+        return 0
+    fi
+
+    return 1
+}
+
+assert_upgrade_log_contains() {
+    local upgrade_log="$1"
+    local pattern="$2"
+    local description="$3"
+
+    if grep -Eq "$pattern" "$upgrade_log"; then
+        _log_pass "$description"
+        return 0
+    fi
+
+    _log_fail "$description" "$pattern" "$(cat "$upgrade_log")"
+    return 1
+}
+
 find_old_bifrost_bin() {
     if [[ -n "$OLD_BIFROST_BIN" && -x "$OLD_BIFROST_BIN" ]]; then
         echo "$OLD_BIFROST_BIN"
@@ -182,15 +219,12 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
     fi
 
     local py
-    py="$(python3_cmd)"
-    PROXY_PORT="$("$py" - <<'PY'
-import socket
-s = socket.socket()
-s.bind(("127.0.0.1", 0))
-print(s.getsockname()[1])
-s.close()
-PY
-)"
+    py="$(python3_cmd 2>/dev/null || true)"
+    PROXY_PORT="$(allocate_free_port)"
+    if [[ -z "$PROXY_PORT" || ! "$PROXY_PORT" =~ ^[0-9]+$ ]]; then
+        _log_fail "free proxy port allocated" "numeric port" "$PROXY_PORT"
+        return 1
+    fi
 
     local target archive_path
     target="$(host_triple)"
@@ -226,7 +260,11 @@ PY
 
     local runtime_port=""
     for _ in $(seq 1 50); do
-        runtime_port="$("$py" - "$TEST_DATA_DIR/runtime.json" <<'PY'
+        if [[ -z "$py" ]]; then
+            runtime_port="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+                "try { (Get-Content -Raw '$(windows_path "$TEST_DATA_DIR/runtime.json")' | ConvertFrom-Json).port } catch { '' }")"
+        else
+            runtime_port="$("$py" - "$TEST_DATA_DIR/runtime.json" <<'PY'
 import json
 import sys
 try:
@@ -236,6 +274,7 @@ except Exception:
     print("")
 PY
 )"
+        fi
         if [[ "$runtime_port" == "$PROXY_PORT" ]]; then
             break
         fi
@@ -259,14 +298,28 @@ PY
         return 1
     fi
 
-    if grep -q 'Detected running Bifrost proxy' "$upgrade_log" \
-        && grep -q 'Stopping current proxy' "$upgrade_log" \
-        && grep -q "Waiting for proxy port ${PROXY_PORT} to be released" "$upgrade_log" \
-        && grep -Eq 'Proxy restarted successfully with the new version|Proxy restart scheduled with the new version' "$upgrade_log"; then
-        _log_pass "upgrade output contains stop/wait/restart milestones"
+    assert_upgrade_log_contains \
+        "$upgrade_log" \
+        'Detected running Bifrost proxy' \
+        "upgrade output detects running proxy" || return 1
+    assert_upgrade_log_contains \
+        "$upgrade_log" \
+        'Stopping current proxy' \
+        "upgrade output stops current proxy" || return 1
+    assert_upgrade_log_contains \
+        "$upgrade_log" \
+        'Waiting for proxy port [0-9]+ to be released before restart' \
+        "upgrade output waits for proxy port release" || return 1
+    if is_windows; then
+        assert_upgrade_log_contains \
+            "$upgrade_log" \
+            'Scheduling proxy restart with:|Proxy restart scheduled with the new version' \
+            "upgrade output schedules Windows restart" || return 1
     else
-        _log_fail "upgrade output contains stop/wait/restart milestones" "all milestones" "$(cat "$upgrade_log")"
-        return 1
+        assert_upgrade_log_contains \
+            "$upgrade_log" \
+            'Starting proxy with:|Proxy restarted successfully with the new version' \
+            "upgrade output starts replacement proxy" || return 1
     fi
 
     grep -q -- '--no-system-proxy' "$upgrade_log" \
@@ -281,12 +334,20 @@ PY
         return 1
     }
 
+    local runtime_json_path
+    runtime_json_path="${TEST_DATA_DIR}/runtime.json"
+
     local new_pid
-    new_pid="$(python3 - "$TEST_DATA_DIR/runtime.json" <<'PY'
+    if [[ -z "$py" ]]; then
+        new_pid="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            "try { (Get-Content -Raw '$(windows_path "$runtime_json_path")' | ConvertFrom-Json).pid } catch { '' }")"
+    else
+        new_pid="$("$py" - "$runtime_json_path" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1]))["pid"])
 PY
 )"
+    fi
     if [[ "$new_pid" == "$old_pid" ]]; then
         _log_fail "upgrade replaced daemon pid" "new PID different from $old_pid" "$new_pid"
         return 1
@@ -298,11 +359,16 @@ PY
     _log_pass "upgrade restarted daemon with new PID: $new_pid"
 
     local runtime_system_proxy_enabled
-    runtime_system_proxy_enabled="$(python3 - "$TEST_DATA_DIR/runtime.json" <<'PY'
+    if [[ -z "$py" ]]; then
+        runtime_system_proxy_enabled="$(powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \
+            "try { (Get-Content -Raw '$(windows_path "$runtime_json_path")' | ConvertFrom-Json).system_proxy_enabled } catch { '' }")"
+    else
+        runtime_system_proxy_enabled="$("$py" - "$runtime_json_path" <<'PY'
 import json, sys
 print(json.load(open(sys.argv[1])).get("system_proxy_enabled"))
 PY
 )"
+    fi
     assert_equals "False" "$runtime_system_proxy_enabled" "new daemon runtime records no-system-proxy mode" || return 1
 
     local new_cmd
