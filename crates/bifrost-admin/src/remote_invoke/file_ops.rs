@@ -1406,18 +1406,29 @@ pub async fn handle_file_outline(
         .map_err(|e| io_err(&format!("read {}", path.display()), e))?;
     let bytes_truncated = (buf.len() as u64) < total_size;
 
-    if is_probably_binary(&buf) {
-        return Err(fa_to_bifrost(FileAccessError::BinaryNotAllowed {
-            path: path.to_path_buf(),
-        }));
-    }
-    let text = String::from_utf8_lossy(&buf);
-
     let lang = outline_language_for(path);
     let max_symbols = max_symbols
         .filter(|n| *n > 0)
         .unwrap_or(DEFAULT_OUTLINE_MAX_SYMBOLS);
-    let (symbols, sym_truncated) = extract_outline(&text, lang, max_symbols);
+    // The binary sniff + utf-8 decode + multi-regex per-line scan are
+    // CPU-bound; run them off the async reactor so a large source file cannot
+    // stall the shared runtime that also serves the proxy. We compute
+    // total_lines here too so `buf`/`text` need not cross the await boundary.
+    let path_for_blocking = path.to_path_buf();
+    let (symbols, sym_truncated, total_lines) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<OutlineSymbol>, bool, u32)> {
+            if is_probably_binary(&buf) {
+                return Err(fa_to_bifrost(FileAccessError::BinaryNotAllowed {
+                    path: path_for_blocking,
+                }));
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let total_lines = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+            let (symbols, sym_truncated) = extract_outline(&text, lang, max_symbols);
+            Ok((symbols, sym_truncated, total_lines))
+        })
+        .await
+        .map_err(|e| BifrostError::Config(format!("outline worker join failed: {e}")))??;
 
     let symbols_json: Vec<Value> = symbols
         .iter()
@@ -1437,7 +1448,7 @@ pub async fn handle_file_outline(
         "count": symbols_json.len(),
         "truncated": sym_truncated || bytes_truncated,
         "total_size": total_size,
-        "total_lines": u32::try_from(text.lines().count()).unwrap_or(u32::MAX),
+        "total_lines": total_lines,
     }))
 }
 
