@@ -4,7 +4,7 @@ use std::env;
 use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -30,6 +30,14 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
 const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
+const BINARY_VERIFY_TIMEOUT_SECS: u64 = 5;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TimedCommandStatus {
+    Success,
+    Failure,
+    TimedOut,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RestartSystemProxyConfig {
@@ -296,12 +304,125 @@ fn get_musl_fallback_triple(target: &str) -> Option<String> {
     }
 }
 
+fn command_status_with_timeout(
+    program: &Path,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<TimedCommandStatus, BifrostError> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(BifrostError::Io)?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                return Ok(if status.success() {
+                    TimedCommandStatus::Success
+                } else {
+                    TimedCommandStatus::Failure
+                });
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let pid = child.id();
+                let _ = child.kill();
+                thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                eprintln!(
+                    "Warning: command timed out after {}s and was asked to terminate: {} (pid {}) {}",
+                    timeout.as_secs(),
+                    program.display(),
+                    pid,
+                    args.join(" ")
+                );
+                return Ok(TimedCommandStatus::TimedOut);
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(25)),
+            Err(error) => return Err(BifrostError::Io(error)),
+        }
+    }
+}
+
 fn verify_binary(path: &Path) -> bool {
-    Command::new(path)
-        .arg("--version")
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+    matches!(
+        command_status_with_timeout(
+            path,
+            &["--version"],
+            Duration::from_secs(BINARY_VERIFY_TIMEOUT_SECS)
+        ),
+        Ok(TimedCommandStatus::Success)
+    )
+}
+
+fn unique_temp_binary_path(target_path: &Path) -> PathBuf {
+    let file_name = target_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("bifrost");
+    target_path.with_file_name(format!(".{}.tmp.{}", file_name, std::process::id()))
+}
+
+fn install_binary_atomically(new_binary: &Path, target_path: &Path) -> Result<(), BifrostError> {
+    let temp_target = unique_temp_binary_path(target_path);
+    let backup_path = target_path.with_extension("backup");
+
+    let _ = fs::remove_file(&temp_target);
+    fs::copy(new_binary, &temp_target)?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&temp_target)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&temp_target, perms)?;
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        clear_quarantine_attr(&temp_target);
+    }
+
+    if target_path.exists() {
+        let _ = fs::remove_file(&backup_path);
+        fs::copy(target_path, &backup_path).map_err(|e| {
+            BifrostError::Io(std::io::Error::new(
+                e.kind(),
+                format!(
+                    "failed to backup current binary {}: {}",
+                    target_path.display(),
+                    e
+                ),
+            ))
+        })?;
+    }
+
+    #[cfg(windows)]
+    {
+        if target_path.exists() {
+            fs::remove_file(target_path)?;
+        }
+    }
+
+    match fs::rename(&temp_target, target_path) {
+        Ok(()) => {
+            if backup_path.exists() {
+                let _ = fs::remove_file(&backup_path);
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_target);
+            if backup_path.exists() && !target_path.exists() {
+                let _ = fs::copy(&backup_path, target_path);
+            }
+            Err(BifrostError::Io(error))
+        }
+    }
 }
 
 fn prompt_confirm(message: &str) -> bool {
@@ -606,6 +727,7 @@ fn release_archive_ext_candidates() -> Vec<&'static str> {
     )
 }
 
+#[cfg(any(debug_assertions, test))]
 fn archive_ext_from_path(path: &Path) -> Option<&'static str> {
     let file_name = path.file_name()?.to_str()?;
     if file_name.ends_with(".tar.xz") {
@@ -840,7 +962,7 @@ fn upgrade_via_script() -> Result<(), BifrostError> {
 fn download_and_install(
     target: &str,
     version: &str,
-    target_path: &PathBuf,
+    target_path: &Path,
     temp_dir: &tempfile::TempDir,
 ) -> Result<(), BifrostError> {
     let tuning = DownloadTuning::from_env();
@@ -1019,71 +1141,10 @@ fn download_and_install(
         target_path.display()
     );
 
-    let backup_path = target_path.with_extension("backup");
-    if target_path.exists() {
-        fs::rename(target_path, &backup_path).map_err(|e| {
-            BifrostError::Io(std::io::Error::new(
-                e.kind(),
-                format!(
-                    "failed to backup current binary {}: {}",
-                    target_path.display(),
-                    e
-                ),
-            ))
-        })?;
-    }
-
-    match fs::copy(&new_binary, target_path) {
-        Ok(_) => {
-            if backup_path.exists() {
-                let _ = fs::remove_file(&backup_path);
-            }
-
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perms = fs::metadata(target_path)
-                    .map_err(|e| {
-                        BifrostError::Io(std::io::Error::new(
-                            e.kind(),
-                            format!(
-                                "failed to read metadata of {}: {}",
-                                target_path.display(),
-                                e
-                            ),
-                        ))
-                    })?
-                    .permissions();
-                perms.set_mode(0o755);
-                fs::set_permissions(target_path, perms).map_err(|e| {
-                    BifrostError::Io(std::io::Error::new(
-                        e.kind(),
-                        format!(
-                            "failed to set executable permissions on {}: {}",
-                            target_path.display(),
-                            e
-                        ),
-                    ))
-                })?;
-            }
-
-            #[cfg(target_os = "macos")]
-            {
-                clear_quarantine_attr(target_path);
-            }
-
-            Ok(())
-        }
-        Err(e) => {
-            if backup_path.exists() {
-                let _ = fs::rename(&backup_path, target_path);
-            }
-            Err(BifrostError::Io(e))
-        }
-    }
+    install_binary_atomically(&new_binary, target_path)
 }
 
-fn upgrade_manual(target_path: &PathBuf, version: &str) -> Result<(), BifrostError> {
+fn upgrade_manual(target_path: &Path, version: &str) -> Result<(), BifrostError> {
     let target = get_target_triple().ok_or_else(|| {
         BifrostError::Config("Unsupported platform for automatic upgrade".to_string())
     })?;
@@ -1911,6 +1972,63 @@ mod tests {
         std::fs::write(&archive, b"not an xz archive").expect("write archive");
 
         assert!(validate_downloaded_archive(&archive, "tar.xz").is_err());
+    }
+
+    #[test]
+    fn upgrade_install_binary_atomically_replaces_existing_target() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let source = dir.path().join("new-bifrost");
+        let target = dir.path().join("bifrost");
+        std::fs::write(&source, b"new binary").expect("write source");
+        std::fs::write(&target, b"old binary").expect("write target");
+
+        install_binary_atomically(&source, &target).expect("install atomically");
+
+        assert_eq!(std::fs::read(&target).expect("read target"), b"new binary");
+        assert!(!unique_temp_binary_path(&target).exists());
+        assert!(!target.with_extension("backup").exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upgrade_command_status_with_timeout_reports_success_and_failure() {
+        assert_eq!(
+            command_status_with_timeout(
+                Path::new("/bin/sh"),
+                &["-c", "exit 0"],
+                Duration::from_secs(1)
+            )
+            .unwrap(),
+            TimedCommandStatus::Success
+        );
+
+        assert_eq!(
+            command_status_with_timeout(
+                Path::new("/bin/sh"),
+                &["-c", "exit 7"],
+                Duration::from_secs(1)
+            )
+            .unwrap(),
+            TimedCommandStatus::Failure
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn upgrade_command_status_with_timeout_does_not_block_on_hung_child() {
+        let started = Instant::now();
+        let status = command_status_with_timeout(
+            Path::new("/bin/sh"),
+            &["-c", "sleep 5"],
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        assert_eq!(status, TimedCommandStatus::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timeout helper should return promptly"
+        );
     }
 
     #[test]

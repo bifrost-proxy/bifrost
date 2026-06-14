@@ -77,6 +77,20 @@ function Write-Error {
     Write-Host $Message
 }
 
+function Install-BinaryAtomically {
+    param(
+        [string]$SourcePath,
+        [string]$DestPath
+    )
+
+    $tempPath = "$DestPath.tmp.$PID"
+    if (Test-Path $tempPath) {
+        Remove-Item -Path $tempPath -Force
+    }
+    Copy-Item -Path $SourcePath -Destination $tempPath -Force
+    Move-Item -Path $tempPath -Destination $DestPath -Force
+}
+
 function Get-Architecture {
     $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
     switch ($arch) {
@@ -539,7 +553,7 @@ function Install-Bifrost {
         }
 
         $destPath = Join-Path $InstallDir $binaryName
-        Copy-Item -Path $sourcePath -Destination $destPath -Force
+        Install-BinaryAtomically -SourcePath $sourcePath -DestPath $destPath
 
         Write-Success "CLI installed: $destPath"
 

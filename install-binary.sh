@@ -253,6 +253,18 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+install_binary_atomically() {
+    local source_path="$1"
+    local dest_path="$2"
+    local tmp_path="${dest_path}.tmp.$$"
+
+    rm -f "$tmp_path"
+    cp "$source_path" "$tmp_path"
+    chmod +x "$tmp_path"
+    clear_xattr "$tmp_path"
+    mv -f "$tmp_path" "$dest_path"
+}
+
 build_mirror_url_list() {
     local preferred="${BIFROST_GITHUB_MIRROR:-}"
     local -a mirrors=()
@@ -1128,6 +1140,7 @@ show_help() {
     echo "  BIFROST_DOWNLOAD_TIMEOUT          Total timeout per download attempt in seconds"
     echo "  BIFROST_DOWNLOAD_TRIES            Retry count per downloader attempt"
     echo "  BIFROST_INSTALL_POST_INSTALL      Set to 0/false to skip post-install setup"
+    echo "  BIFROST_INSTALL_POST_INSTALL_TIMEOUT  Timeout per post-install command in seconds"
     echo "  BIFROST_INSTALL_AUTO_CERT         Set to 0/false to skip CA trust"
     echo "  BIFROST_INSTALL_AUTO_SKILLS       Set to 0/false to skip skill installation"
     echo "  BIFROST_INSTALL_AUTO_START        Set to 0/false to skip service startup"
@@ -1237,6 +1250,40 @@ run_bifrost_post_install_command() {
     if is_enabled "${BIFROST_INSTALL_POST_INSTALL_DRY_RUN:-0}"; then
         echo "  [dry-run] $*"
         return 0
+    fi
+
+    local timeout_seconds="${BIFROST_INSTALL_POST_INSTALL_TIMEOUT:-120}"
+    if [[ "$timeout_seconds" =~ ^[0-9]+$ ]] && [[ "$timeout_seconds" -gt 0 ]]; then
+        if has_command perl; then
+            perl -e '
+                my $timeout = shift @ARGV;
+                my $pid = fork();
+                exit 125 unless defined $pid;
+                if ($pid == 0) {
+                    exec @ARGV;
+                    exit 127;
+                }
+                $SIG{ALRM} = sub {
+                    kill "TERM", $pid;
+                    select undef, undef, undef, 1;
+                    kill "KILL", $pid;
+                    exit 124;
+                };
+                alarm $timeout;
+                waitpid($pid, 0);
+                my $status = $?;
+                alarm 0;
+                exit($status >> 8) if ($status & 127) == 0;
+                exit(128 + ($status & 127));
+            ' "$timeout_seconds" "$@"
+            local rc=$?
+            if [[ "$rc" -eq 124 ]]; then
+                print_warning "Post-install command timed out after ${timeout_seconds}s: $*"
+            fi
+            return "$rc"
+        fi
+
+        print_warning "perl not found; running post-install command without watchdog timeout"
     fi
 
     "$@"
@@ -1360,24 +1407,21 @@ install_binary_for_target() {
     [[ "$os" == "windows" ]] && binary_name="bifrost.exe"
 
     if [[ -f "$extract_subdir/$extracted_dir/$binary_name" ]]; then
-        cp "$extract_subdir/$extracted_dir/$binary_name" "$install_dir/$binary_name"
+        install_binary_atomically "$extract_subdir/$extracted_dir/$binary_name" "$install_dir/$binary_name"
     elif [[ -f "$extract_subdir/$binary_name" ]]; then
-        cp "$extract_subdir/$binary_name" "$install_dir/$binary_name"
+        install_binary_atomically "$extract_subdir/$binary_name" "$install_dir/$binary_name"
     else
         local found_binary
         found_binary=$(find "$extract_subdir" -name "$binary_name" -type f 2>/dev/null | head -1)
         if [[ -n "$found_binary" ]]; then
             print_warning "Binary found at unexpected path: $found_binary"
-            cp "$found_binary" "$install_dir/$binary_name"
+            install_binary_atomically "$found_binary" "$install_dir/$binary_name"
         else
             print_error "Binary not found in archive"
             ls -laR "$extract_subdir" >&2 2>/dev/null || true
             return 1
         fi
     fi
-
-    chmod +x "$install_dir/$binary_name"
-    clear_xattr "$install_dir/$binary_name"
     return 0
 }
 

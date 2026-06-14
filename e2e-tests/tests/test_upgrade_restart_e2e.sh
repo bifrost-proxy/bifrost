@@ -355,6 +355,24 @@ test_macos_daemon_start_uses_exec_child_guard() {
     fi
 }
 
+test_upgrade_installs_binary_atomically_in_source() {
+    _log_info "case: upgrade installs binary through atomic replacement helper"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "fn install_binary_atomically" "$source_file" \
+        && grep -q "install_binary_atomically(&new_binary, target_path)" "$source_file" \
+        && grep -q "fs::rename(&temp_target, target_path)" "$source_file" \
+        && ! grep -q "fs::copy(&new_binary, target_path)" "$source_file"; then
+        _log_pass "upgrade uses temp file plus rename instead of copying directly to final binary path"
+    else
+        _log_fail "upgrade atomic binary replacement" \
+            "install_binary_atomically with temp rename and no fs::copy(&new_binary, target_path)" \
+            "upgrade can still expose a partially copied executable"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
@@ -362,6 +380,7 @@ main() {
     test_upgrade_restart_port_release_guard_in_source || true
     test_upgrade_restart_port_guard_covers_windows || true
     test_macos_daemon_start_uses_exec_child_guard || true
+    test_upgrade_installs_binary_atomically_in_source || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true

@@ -488,6 +488,41 @@
 
 ---
 
+### TC-CIE-28：升级校验子进程超时不阻塞 upgrade
+
+**操作步骤**：
+1. 执行聚焦单元测试，验证 upgrade 用临时文件原子替换最终二进制：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_install_binary_atomically_replaces_existing_target
+   ```
+2. 执行聚焦单元测试，模拟子进程长时间不退出：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_status_with_timeout_does_not_block_on_hung_child
+   ```
+3. 执行聚焦单元测试，确认子进程正常退出和失败退出仍被正确区分：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_status_with_timeout_reports_success_and_failure
+   ```
+4. 验证安装脚本使用临时文件原子替换目标二进制：
+   ```bash
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 bash -c 'source ./install-binary.sh; d="$(mktemp -d)"; printf old > "$d/bifrost"; printf new > "$d/source"; install_binary_atomically "$d/source" "$d/bifrost"; test "$(cat "$d/bifrost")" = new; test ! -e "$d/bifrost.tmp.$$"'
+   ```
+5. 验证安装脚本 post-install 子步骤具备超时 watchdog：
+   ```bash
+   bash -n install-binary.sh
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 bash -c 'source ./install-binary.sh; set +e; BIFROST_INSTALL_POST_INSTALL_TIMEOUT=1 run_bifrost_post_install_command sh -c "sleep 5"; rc="$?"; test "$rc" -eq 124'
+   ```
+
+**预期结果**：
+- 第 1 条命令输出 `test result: ok`，确认 upgrade 不再直接复制到最终可执行路径
+- 第 2 条命令在 1 秒内完成，输出 `test result: ok`，不会等待 `sleep 5` 完整结束
+- 第 3 条命令输出 `test result: ok`，成功退出映射为 success，非 0 退出映射为 failure
+- 第 4 条命令完成后目标文件内容为 `new`，临时文件不存在
+- 第 5 条命令返回 124，并输出 post-install command timed out 相关 warning
+- 任一子步骤卡住时，`bifrost upgrade` 或一键安装脚本都不会无限等待该子进程
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：
