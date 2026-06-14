@@ -21,7 +21,7 @@ PROXY_PORT=""
 
 cleanup() {
     if [[ -n "$TEST_DATA_DIR" && -x "$INSTALL_BIN" ]]; then
-        BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >/dev/null 2>&1 || true
+        BIFROST_DATA_DIR="$(bifrost_process_path "$TEST_DATA_DIR")" "$INSTALL_BIN" stop >/dev/null 2>&1 || true
     fi
     if [[ -n "$PROXY_PORT" ]]; then
         kill_bifrost_on_port "$PROXY_PORT"
@@ -56,6 +56,14 @@ binary_name() {
 windows_path() {
     if command -v cygpath >/dev/null 2>&1; then
         cygpath -w "$1"
+    else
+        echo "$1"
+    fi
+}
+
+bifrost_process_path() {
+    if is_windows; then
+        windows_path "$1"
     else
         echo "$1"
     fi
@@ -178,12 +186,24 @@ PY
     target="$(host_triple)"
     archive_path="$(create_local_release_archive "$archive_root" "$TEST_VERSION" "$target" "$BIFROST_BIN")"
 
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+    local bifrost_data_dir
+    bifrost_data_dir="$(bifrost_process_path "$TEST_DATA_DIR")"
+    BIFROST_DATA_DIR="$bifrost_data_dir" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     "$start_bin" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --skip-cert-check --no-system-proxy --no-intercept --no-tray -y >/tmp/bifrost-upgrade-old-start.log 2>&1
     local old_pid
-    old_pid="$(cat "${TEST_DATA_DIR}/bifrost.pid" 2>/dev/null || true)"
+    old_pid=""
+    for _ in $(seq 1 50); do
+        old_pid="$(cat "${TEST_DATA_DIR}/bifrost.pid" 2>/dev/null || true)"
+        if [[ -n "$old_pid" && "$old_pid" =~ ^[0-9]+$ ]]; then
+            break
+        fi
+        sleep 0.1
+    done
+    if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]]; then
+        old_pid="$(sed -n 's/.*Daemon started with PID: \([0-9][0-9]*\).*/\1/p' /tmp/bifrost-upgrade-old-start.log | tail -n 1)"
+    fi
     if [[ -z "$old_pid" || ! "$old_pid" =~ ^[0-9]+$ ]] || ! kill -0 "$old_pid" 2>/dev/null; then
         _log_fail "old daemon started" "running pid" "$(cat /tmp/bifrost-upgrade-old-start.log 2>/dev/null)"
         return 1
@@ -195,10 +215,10 @@ PY
     _log_pass "old daemon started on port $PROXY_PORT (PID: $old_pid)"
 
     local upgrade_log="${TEST_ROOT}/upgrade.log"
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" \
+    BIFROST_DATA_DIR="$bifrost_data_dir" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
-    BIFROST_UPGRADE_TEST_ARCHIVE="$archive_path" \
+    BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
     "$INSTALL_BIN" upgrade -y --restart >"$upgrade_log" 2>&1
     local upgrade_status=$?
     if [[ $upgrade_status -ne 0 ]]; then
@@ -265,7 +285,7 @@ PY
     fi
     _log_pass "new daemon error log has no ObjC fork crash"
 
-    BIFROST_DATA_DIR="$TEST_DATA_DIR" "$INSTALL_BIN" stop >/tmp/bifrost-upgrade-new-stop.log 2>&1 || {
+    BIFROST_DATA_DIR="$bifrost_data_dir" "$INSTALL_BIN" stop >/tmp/bifrost-upgrade-new-stop.log 2>&1 || {
         _log_fail "new daemon stops cleanly" "stop exits 0" "$(cat /tmp/bifrost-upgrade-new-stop.log)"
         return 1
     }
