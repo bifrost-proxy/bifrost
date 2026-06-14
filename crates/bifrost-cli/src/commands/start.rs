@@ -1547,7 +1547,18 @@ pub fn run_start(
             }
             daemon_result?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let daemon_result =
+                run_daemon_via_exec(&proxy_config, &config_manager, &log_dir, log_retention_days);
+            if daemon_result.is_ok() {
+                if let Some(guard) = restart_handoff_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
+            daemon_result?;
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             return Err(bifrost_core::BifrostError::Config(
                 "Daemon mode is not supported on this platform".to_string(),
@@ -2597,18 +2608,22 @@ fn raise_fd_limit() {
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
 
-#[cfg(unix)]
+fn detached_daemon_readiness_host(host: &str) -> &str {
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1"
+    } else {
+        host
+    }
+}
+
+#[cfg(any(unix, windows))]
 fn wait_for_detached_daemon_ready(
     child: &mut std::process::Child,
     host: &str,
     port: u16,
     timeout: Duration,
 ) -> bifrost_core::Result<()> {
-    let connect_host = if host == "0.0.0.0" || host == "::" {
-        "127.0.0.1"
-    } else {
-        host
-    };
+    let connect_host = detached_daemon_readiness_host(host);
     let addr = format!("{connect_host}:{port}");
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -2632,14 +2647,13 @@ fn wait_for_detached_daemon_ready(
     )))
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn run_daemon_via_exec(
     config: &ProxyConfig,
     config_manager: &ConfigManager,
     log_dir: &Path,
     log_retention_days: u32,
 ) -> bifrost_core::Result<()> {
-    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
 
     use crate::process::get_pid_file;
@@ -2678,11 +2692,7 @@ fn run_daemon_via_exec(
     if let Some(socks5_port) = config.socks5_port {
         println!("SOCKS5 (separate): {}:{}", config.host, socks5_port);
     }
-    let admin_host = if config.host == "0.0.0.0" {
-        "127.0.0.1"
-    } else {
-        &config.host
-    };
+    let admin_host = detached_daemon_readiness_host(&config.host);
     println!("Admin UI: http://{}:{}/", admin_host, config.port);
     println!("PID file: {}", get_pid_file()?.display());
     println!("Log file: {}", log_dir.join("bifrost.log").display());
@@ -2698,15 +2708,30 @@ fn run_daemon_via_exec(
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr));
 
-    // SAFETY: keep the replacement process detached like the legacy fork daemon
-    // path; the pre-exec closure only calls async-signal-safe libc::setsid.
-    unsafe {
-        command.pre_exec(|| {
-            if libc::setsid() < 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(())
-        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: keep the replacement process detached like the legacy fork daemon
+        // path; the pre-exec closure only calls async-signal-safe libc::setsid.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
     }
 
     let mut child = command.spawn().map_err(bifrost_core::BifrostError::Io)?;
@@ -4441,6 +4466,17 @@ mod tests {
         assert!(!env_flag_enabled(None));
         assert!(!env_flag_enabled(Some(std::ffi::OsString::from("0"))));
         assert!(!env_flag_enabled(Some(std::ffi::OsString::from("false"))));
+    }
+
+    #[test]
+    fn detached_daemon_readiness_host_maps_wildcard_listeners_to_loopback() {
+        assert_eq!(detached_daemon_readiness_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(detached_daemon_readiness_host("::"), "127.0.0.1");
+        assert_eq!(detached_daemon_readiness_host("[::]"), "127.0.0.1");
+        assert_eq!(
+            detached_daemon_readiness_host("192.168.1.20"),
+            "192.168.1.20"
+        );
     }
 
     #[test]

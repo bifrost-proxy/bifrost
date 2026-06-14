@@ -10,13 +10,15 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::update_check::{get_latest_version, get_latest_version_fresh_with_diagnostics};
+use crate::config::get_bifrost_dir;
 use crate::process::{
     capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
-    read_runtime_info, RuntimeSystemProxySnapshot,
+    read_runtime_info, RuntimeInfo, RuntimeSystemProxySnapshot,
 };
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
 };
+use bifrost_storage::ConfigManager;
 const GITHUB_BASE_URL: &str = "https://github.com";
 const DEFAULT_GITHUB_MIRROR_URLS: &[&str] = &[
     "https://github.com",
@@ -28,6 +30,18 @@ const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
 const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RestartSystemProxyConfig {
+    enabled: bool,
+    bypass: String,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum RestartArgsSource<'a> {
+    Runtime(&'a RuntimeInfo),
+    DefaultConfig,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct DownloadTuning {
@@ -1297,13 +1311,26 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
 
     let runtime_info = read_runtime_info();
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
+    let default_system_proxy = if runtime_info.is_none() {
+        Some(default_restart_system_proxy_config()?)
+    } else {
+        None
+    };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
     let exe_path = env::current_exe().map_err(BifrostError::Io)?;
-    let args = build_restart_args(runtime_info.as_ref(), system_proxy_snapshot.as_ref());
+    let restart_source = runtime_info
+        .as_ref()
+        .map(RestartArgsSource::Runtime)
+        .unwrap_or(RestartArgsSource::DefaultConfig);
+    let args = build_restart_args(
+        restart_source,
+        system_proxy_snapshot.as_ref(),
+        default_system_proxy.as_ref(),
+    );
     let restart_port = restart_port_from_runtime(runtime_info.as_ref());
 
     wait_for_restart_port_release(restart_port)?;
@@ -1335,6 +1362,16 @@ fn maybe_restart_running_proxy(auto_restart: bool) -> Result<(), BifrostError> {
     }
 
     Ok(())
+}
+
+fn default_restart_system_proxy_config() -> Result<RestartSystemProxyConfig, BifrostError> {
+    let bifrost_dir = get_bifrost_dir()?;
+    let config_manager = ConfigManager::new(bifrost_dir)?;
+    let config = futures::executor::block_on(config_manager.config());
+    Ok(RestartSystemProxyConfig {
+        enabled: config.system_proxy.enabled,
+        bypass: config.system_proxy.bypass,
+    })
 }
 
 fn restart_port_from_runtime(runtime_info: Option<&crate::process::RuntimeInfo>) -> u16 {
@@ -1391,8 +1428,9 @@ fn wait_for_restart_port_release(_port: u16) -> Result<(), BifrostError> {
 }
 
 fn build_restart_args(
-    runtime_info: Option<&crate::process::RuntimeInfo>,
+    source: RestartArgsSource<'_>,
     system_proxy_snapshot: Option<&RuntimeSystemProxySnapshot>,
+    default_system_proxy: Option<&RestartSystemProxyConfig>,
 ) -> Vec<String> {
     let mut args = vec![
         "start".to_string(),
@@ -1401,7 +1439,7 @@ fn build_restart_args(
         "--skip-cert-check".to_string(),
     ];
 
-    if let Some(info) = runtime_info {
+    if let RestartArgsSource::Runtime(info) = source {
         args.push("-p".to_string());
         args.push(info.port.to_string());
 
@@ -1422,13 +1460,21 @@ fn build_restart_args(
         args.push("--system-proxy".to_string());
         args.push("--proxy-bypass".to_string());
         args.push(snapshot.bypass.clone());
-    } else if let Some(info) = runtime_info {
+    } else if let RestartArgsSource::Runtime(info) = source {
         if info.system_proxy_enabled.unwrap_or(false) {
             args.push("--system-proxy".to_string());
             if let Some(bypass) = info.system_proxy_bypass.as_ref() {
                 args.push("--proxy-bypass".to_string());
                 args.push(bypass.clone());
             }
+        } else {
+            args.push("--no-system-proxy".to_string());
+        }
+    } else if let Some(config) = default_system_proxy {
+        if config.enabled {
+            args.push("--system-proxy".to_string());
+            args.push("--proxy-bypass".to_string());
+            args.push(config.bypass.clone());
         } else {
             args.push("--no-system-proxy".to_string());
         }
@@ -1549,7 +1595,7 @@ mod tests {
             system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
-        let args = build_restart_args(Some(&info), None);
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
         assert_eq!(
             args,
             vec![
@@ -1583,7 +1629,7 @@ mod tests {
             system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
-        let args = build_restart_args(Some(&info), None);
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
         assert_eq!(
             args,
             vec![
@@ -1599,8 +1645,41 @@ mod tests {
     }
 
     #[test]
-    fn test_build_restart_args_no_runtime_info() {
-        let args = build_restart_args(None, None);
+    fn test_build_restart_args_no_runtime_info_uses_default_config_system_proxy() {
+        let default_system_proxy = RestartSystemProxyConfig {
+            enabled: true,
+            bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
+        };
+        let args = build_restart_args(
+            RestartArgsSource::DefaultConfig,
+            None,
+            Some(&default_system_proxy),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "start",
+                "-d",
+                "-y",
+                "--skip-cert-check",
+                "--system-proxy",
+                "--proxy-bypass",
+                "localhost,127.0.0.1,::1,*.local"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_build_restart_args_no_runtime_info_preserves_disabled_default_config_system_proxy() {
+        let default_system_proxy = RestartSystemProxyConfig {
+            enabled: false,
+            bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
+        };
+        let args = build_restart_args(
+            RestartArgsSource::DefaultConfig,
+            None,
+            Some(&default_system_proxy),
+        );
         assert_eq!(
             args,
             vec![
@@ -1651,7 +1730,7 @@ mod tests {
             system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
-        let args = build_restart_args(Some(&info), None);
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
         assert_eq!(
             args,
             vec![
@@ -1684,7 +1763,7 @@ mod tests {
             bypass: "localhost,127.0.0.1,*.local".to_string(),
         };
 
-        let args = build_restart_args(Some(&info), Some(&snapshot));
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), Some(&snapshot), None);
 
         assert_eq!(
             args,
@@ -1717,7 +1796,7 @@ mod tests {
             system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
 
-        let args = build_restart_args(Some(&info), None);
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
 
         assert_eq!(
             args,
@@ -1750,7 +1829,7 @@ mod tests {
             system_proxy_bypass: None,
         };
 
-        let args = build_restart_args(Some(&info), None);
+        let args = build_restart_args(RestartArgsSource::Runtime(&info), None, None);
 
         assert_eq!(
             args,

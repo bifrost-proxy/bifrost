@@ -8,7 +8,7 @@
 - 安装所有支持 AI 工具的 Bifrost skills。
 - 启动 Bifrost 服务，用户安装完成后可直接访问默认管理端和代理能力。
 
-目标是把原先“安装二进制后再手动处理证书、skill、启动服务”的多步流程合并为一次安装命令。高级用户和 CI 仍可通过参数或环境变量跳过自动步骤。本轮同时修复二进制下载长时间静默的问题，并让 `bifrost upgrade` 复用安装脚本的最快源选择能力；针对 macOS upgrade 后重启失败，daemon 启动链路必须避免 fork 后继续初始化完整运行时。
+目标是把原先“安装二进制后再手动处理证书、skill、启动服务”的多步流程合并为一次安装命令。高级用户和 CI 仍可通过参数或环境变量跳过自动步骤。本轮同时修复二进制下载长时间静默的问题，并让 `bifrost upgrade` 复用安装脚本的最快源选择能力；针对 upgrade 后重启失败，daemon 启动链路必须避免 macOS fork 后继续初始化完整运行时，同时保证 Windows `start --daemon` 可被 upgrade restart 正常调起。
 
 ## 实现逻辑
 
@@ -18,8 +18,8 @@
 - PowerShell installer 使用同一组镜像候选源和短超时探测，latest、archive、checksums 都通过选出的最快可用源下载；如果选中源完整下载失败，则继续按候选源列表回退。
 - PowerShell installer 在下载开始、结束时使用 `Write-Progress` 明确展示下载状态，避免终端完全无反馈。
 - `bifrost upgrade` 的手动安装路径使用与安装脚本一致的 GitHub / mirror 候选列表，先并发探测 release 资产 URL，选择最快可用源，再执行带进度百分比、已下载大小和速度的 streaming 下载；若选中源完整下载失败，继续回退剩余候选源。
-- `bifrost upgrade` 在替换二进制后若检测到运行中的 daemon，会复用 runtime.json 中记录的端口、host、socks5 端口和系统代理状态重启代理。系统代理参数按“当前系统代理快照优先 -> runtime 明确启用 -> 显式 `--no-system-proxy`”构造，避免旧 daemon 原本未启用系统代理时，upgrade restart 因配置默认值回落而意外启动系统代理 helper。重启路径在 `stop_for_restart` 成功后必须等待旧监听端口完全释放，再执行 `start -d`；如果端口在 10 秒内仍被占用，upgrade 先执行系统代理 crash recovery 并清理 restart shutdown marker，再返回包含占用进程信息的错误，避免新 daemon 因 `EADDRINUSE` 立即退出并被包装成模糊的 readiness/network error，也避免系统代理继续指向不可用的 Bifrost 端口。该端口释放等待在 Unix 与 Windows 上行为一致（共用 `wait_for_port_released` 的 bind 探测，`wait_for_restart_port_release` 以 `cfg(any(unix, windows))` 编译），Windows 下端口仍被占用时给出 `netstat -ano | findstr :<port>` 形式的诊断提示；仅在既非 Unix 也非 Windows 的平台保留 no-op 回退。
-- macOS 上 `start --daemon` 不再让 fork 出来的 child 继续执行完整代理初始化。父进程改为通过 `std::process::Command` 启动当前二进制的 exec 子进程，并设置内部环境变量 `BIFROST_DETACHED_DAEMON_CHILD=1`。exec 子进程绕过二次 daemon fork，按前台启动路径初始化服务，但继续写入 `runtime_start_mode=daemon`，保留 daemon 的系统代理生命周期语义；父进程重定向 stdout/stderr 到 daemon log，切换 child working directory 到 `BIFROST_DATA_DIR`，通过 `setsid()` 脱离当前终端，并等待代理监听端口 ready 或 child 提前退出。该链路避免 macOS Objective-C runtime 在 fork 后首次初始化时触发 `objc_initializeAfterForkError`，同时保留后台进程可 stop/restart/status 管理的用户行为。
+- `bifrost upgrade` 在替换二进制后若检测到运行中的 daemon，会优先复用 runtime.json 中记录的端口、host、socks5 端口和系统代理状态重启代理；如果 runtime.json 不存在，则按默认配置执行 `start -d -y --skip-cert-check`，端口、host 和 socks5 由当前配置默认值决定。系统代理参数按“当前系统代理快照优先 -> runtime 明确启用/关闭 -> 无 runtime 时读取默认配置 -> legacy runtime 缺失字段时显式 `--no-system-proxy`”构造，避免旧 daemon 原本未启用系统代理时，upgrade restart 因配置默认值回落而意外启动系统代理 helper，也避免无 runtime 文件时丢失用户当前默认配置。重启路径在 `stop_for_restart` 成功后必须等待旧监听端口完全释放，再执行 `start -d`；如果端口在 10 秒内仍被占用，upgrade 先执行系统代理 crash recovery 并清理 restart shutdown marker，再返回包含占用进程信息的错误，避免新 daemon 因 `EADDRINUSE` 立即退出并被包装成模糊的 readiness/network error，也避免系统代理继续指向不可用的 Bifrost 端口。该端口释放等待在 Unix 与 Windows 上行为一致（共用 `wait_for_port_released` 的 bind 探测，`wait_for_restart_port_release` 以 `cfg(any(unix, windows))` 编译），Windows 下端口仍被占用时给出 `netstat -ano | findstr :<port>` 形式的诊断提示；仅在既非 Unix 也非 Windows 的平台保留 no-op 回退。
+- macOS 和 Windows 上 `start --daemon` 不再让 fork 出来的 child 继续执行完整代理初始化，Windows 也不再返回 daemon unsupported。父进程改为通过 `std::process::Command` 启动当前二进制的 exec 子进程，并设置内部环境变量 `BIFROST_DETACHED_DAEMON_CHILD=1`。exec 子进程绕过二次 daemon fork，按前台启动路径初始化服务，但继续写入 `runtime_start_mode=daemon`，保留 daemon 的系统代理生命周期语义；父进程重定向 stdout/stderr 到 daemon log，切换 child working directory 到 `BIFROST_DATA_DIR`，macOS/Linux 使用 `setsid()` 脱离当前终端，Windows 使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`，并等待代理监听端口 ready 或 child 提前退出。ready 探测和 Admin UI 提示会把 `0.0.0.0`、`::`、`[::]` 归一到 `127.0.0.1`，避免 wildcard listener 被误当成不可连接地址。该链路避免 macOS Objective-C runtime 在 fork 后首次初始化时触发 `objc_initializeAfterForkError`，同时保留后台进程可 stop/restart/status 管理的用户行为。
 - Debug 构建提供本地 upgrade E2E 专用环境变量 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 和 `BIFROST_UPGRADE_TEST_ARCHIVE`，用于在无网络、无真实 GitHub release 的本机测试中构造“旧 daemon 正在运行 -> `upgrade -y --restart` 下载/解压本地 archive -> 替换安装路径二进制 -> stop 旧 daemon -> 用新二进制 restart”的完整链路。该测试入口只在 `debug_assertions` 下编译，正式 release 不读取这些变量。
 - 最新版本探测不再按 `github.com -> mirror` 串行等待完整超时；Bash 通过并发重定向探测抢最快结果，PowerShell 通过短超时探测先选源再读取 `releases/latest` 重定向，避免默认 GitHub 直连在受限网络中拖到完整下载超时。
 - `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制下载；`BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。Bash installer 与 `bifrost upgrade` 均读取这些环境变量。
@@ -66,6 +66,8 @@
 - `wait_for_port_released_returns_quickly_when_port_is_free` / `wait_for_port_released_times_out_when_port_is_held`：验证 upgrade/restart 共用的端口释放等待工具在空闲端口快速返回、占用端口耗尽预算。
 - `upgrade_restart_port_from_runtime_defaults_to_9900` / `upgrade_restart_port_from_runtime_uses_runtime_port`：验证 upgrade restart 在 legacy pidfile 和 runtime.json 场景选择正确的等待端口。
 - `env_flag_enabled_accepts_true_values` / `env_flag_enabled_rejects_absent_and_false_values`：验证内部 exec 子进程标记只接受明确 true 值，避免普通命令被误判成 detached daemon child。
+- `test_build_restart_args_no_runtime_info_uses_default_config_system_proxy` / `test_build_restart_args_no_runtime_info_preserves_disabled_default_config_system_proxy`：验证 runtime.json 缺失时 upgrade restart 使用默认配置构造系统代理参数。
+- `detached_daemon_readiness_host_maps_wildcard_listeners_to_loopback`：验证 `0.0.0.0`、`::`、`[::]` ready 探测地址归一到 loopback。
 - 使用 `bash -n install-binary.sh` 覆盖 shell 语法。
 
 ### E2E 测试
@@ -96,7 +98,7 @@
   - 保留无 daemon、有 daemon 但已最新、`--restart` 已最新和 runtime.json 参数回归。
   - 增加源码门禁，确认 upgrade 的真实重启路径包含 `wait_for_restart_port_release`、端口占用错误文案、`find_process_on_port` 诊断和系统代理恢复，避免后续改动绕过端口释放保护或失败恢复。
   - 增加 Windows 覆盖门禁，确认 `wait_for_restart_port_release` 与 `wait_for_port_released` 以 `cfg(any(unix, windows))` 编译、不残留 `cfg(not(unix))` 的 unix-only 回退，避免 Windows upgrade 重启再次退回到不等端口释放的竞态路径。
-  - 增加 macOS daemon exec child 源码门禁，确认 `start --daemon` 使用 exec 子进程、`BIFROST_DETACHED_DAEMON_CHILD`、`setsid()`、`current_dir(&bifrost_dir)` 和 main daemon bypass，防止重回 fork 后初始化完整运行时的崩溃路径。
+  - 增加 macOS/Windows daemon exec child 源码门禁，确认 `start --daemon` 使用 exec 子进程、`BIFROST_DETACHED_DAEMON_CHILD`、`setsid()`、Windows detached process flags、`current_dir(&bifrost_dir)`、wildcard host ready 探测归一和 main daemon bypass，防止重回 fork 后初始化完整运行时的崩溃路径，并避免 Windows upgrade restart 无法启动后台服务。
   - 增加 daemon stop 后 helper 清理断言，确认当前测试数据目录下不残留 `bifrost __tray` 进程，避免用户升级/重启后服务已停但 helper 仍残留。
 - 新增 `e2e-tests/tests/test_upgrade_local_restart_e2e.sh`：
   - 选择本机旧版 `0.0.99` 二进制作为运行中的旧 daemon；通过 `BIFROST_BIN` 指向当前源码构建出的新二进制。
@@ -118,6 +120,8 @@
   - 验证 Bash installer 默认下载进度可见，竞速候选进度被抑制。
   - 验证 `bifrost upgrade` 的最快源选择、进度百分比和 env 超时/重试解析。
   - 验证 `bifrost upgrade` 重启路径在 stop 后等待端口释放，端口仍被占用时先恢复系统代理、再输出明确诊断，不再把 `EADDRINUSE` 包装成模糊 readiness/network error。
+  - 验证 runtime.json 缺失时 upgrade restart 等同于使用当前默认配置启动，仍保留默认配置中的 system proxy 开关和 bypass；legacy runtime 缺失 system proxy 字段时继续显式关闭 system proxy。
+  - 验证 macOS/Windows daemon exec child 源码门禁、Windows detached process flags 和 wildcard listener ready 探测归一。
   - 验证本地构造的真实 upgrade restart 链路：旧 daemon 运行中，`upgrade -y --restart` 替换为本地 archive 中的新二进制，新 daemon 自动启动并可停止。
 - 更新 `human_tests/cli-start-stop-status.md`：
   - 新增 macOS daemon exec child 回归用例，使用临时数据目录启动真实 daemon，确认 start/status/stop 均正常、`runtime.json` 仍标记 daemon、日志中不再出现 `+[NSNumber initialize]` 或 `objc_initializeAfterForkError`，stop 后不残留同数据目录的 tray helper。

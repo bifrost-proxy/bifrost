@@ -320,23 +320,37 @@ test_upgrade_restart_port_guard_covers_windows() {
 }
 
 test_macos_daemon_start_uses_exec_child_guard() {
-    _log_info "case: macOS daemon start avoids post-fork runtime initialization"
+    _log_info "case: macOS and Windows daemon start use exec child guards"
 
     local start_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/start.rs"
     local main_src="${PROJECT_DIR}/crates/bifrost-cli/src/main.rs"
+    local daemon_exec_cfg_ok=0
+    if awk '
+        prev == "#[cfg(any(unix, windows))]" && $0 ~ /^fn run_daemon_via_exec/ { found = 1 }
+        { prev = $0 }
+        END { exit found ? 0 : 1 }
+    ' "$start_src"; then
+        daemon_exec_cfg_ok=1
+    fi
 
-    if grep -q 'run_daemon_via_exec' "$start_src" \
-        && grep -q 'BIFROST_DETACHED_DAEMON_CHILD' "$start_src" \
-        && grep -q 'foreground_runtime_start_mode()' "$start_src" \
-        && grep -q 'current_dir(&bifrost_dir)' "$start_src" \
-        && grep -q 'libc::setsid()' "$start_src" \
-        && grep -q 'is_detached_daemon_child_process' "$main_src" \
-        && grep -q 'daemon && !is_detached_daemon_child' "$main_src"; then
-        _log_pass "macOS daemon start execs a fresh detached child before runtime init"
+    if grep -Fq 'run_daemon_via_exec' "$start_src" \
+        && grep -Fq 'BIFROST_DETACHED_DAEMON_CHILD' "$start_src" \
+        && grep -Fq 'foreground_runtime_start_mode()' "$start_src" \
+        && [ "$daemon_exec_cfg_ok" = "1" ] \
+        && grep -Fq 'detached_daemon_readiness_host' "$start_src" \
+        && grep -Fq 'current_dir(&bifrost_dir)' "$start_src" \
+        && grep -Fq 'libc::setsid()' "$start_src" \
+        && grep -Fq 'std::os::windows::process::CommandExt' "$start_src" \
+        && grep -Fq 'DETACHED_PROCESS' "$start_src" \
+        && grep -Fq '#[cfg(windows)]' "$start_src" \
+        && grep -Fq 'run_daemon_via_exec(&proxy_config, &config_manager, &log_dir, log_retention_days)' "$start_src" \
+        && grep -Fq 'is_detached_daemon_child_process' "$main_src" \
+        && grep -Fq 'daemon && !is_detached_daemon_child' "$main_src"; then
+        _log_pass "macOS and Windows daemon start exec a fresh detached child before runtime init"
     else
-        _log_fail "macOS daemon exec child guard" \
-            "run_daemon_via_exec + detached child env + main daemon bypass + setsid/current_dir" \
-            "fork-after-runtime guard missing"
+        _log_fail "daemon exec child guard" \
+            "run_daemon_via_exec + unix/windows cfg + detached child env + main daemon bypass + setsid/current_dir + Windows detached process" \
+            "cross-platform detached daemon guard missing"
         return 1
     fi
 }
