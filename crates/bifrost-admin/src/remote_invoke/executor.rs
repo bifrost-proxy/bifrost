@@ -613,6 +613,8 @@ impl RemoteInvokeExecutor {
             parents: Option<bool>,
             create_parents: Option<bool>,
             patch_text: Option<String>,
+            #[serde(default)]
+            base_shas: Option<std::collections::HashMap<String, String>>,
             exclude_patterns: Option<Vec<String>>,
             context_before: Option<u32>,
             context_after: Option<u32>,
@@ -621,6 +623,8 @@ impl RemoteInvokeExecutor {
             case_insensitive: Option<bool>,
             glob: Option<String>,
             respect_gitignore: Option<bool>,
+            #[serde(default)]
+            cursor: Option<u64>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -666,7 +670,56 @@ impl RemoteInvokeExecutor {
 
         let decision = policy
             .check(Path::new(&requested_path), cwd, op)
-            .map_err(|e| BifrostError::Config(format!("[{}] {}", e.code(), e)))?;
+            .map_err(|e| {
+                // P1 audit: log policy denials (matched deny rule / out-of-scope
+                // / readonly) so blocked access attempts are forensically
+                // traceable. `e` Display carries the matched pattern for
+                // DenyPattern, the offending path for OutOfScope, etc.
+                warn!(
+                    grant_id = %grant_id,
+                    op = %file_op_name,
+                    requested_path = %requested_path,
+                    code = e.code(),
+                    detail = %e,
+                    caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                    "file access denied by policy"
+                );
+                BifrostError::Config(format!("[{}] {}", e.code(), e))
+            })?;
+
+        // P1 audit: record write-class operations with the *canonical* resolved
+        // path (post symlink/`..` resolution) so the audit trail reflects the
+        // real on-disk target, not the caller-supplied alias. apply_patch also
+        // logs the full set of target files parsed from the patch body.
+        if op.is_write() {
+            let canonical = decision.path.as_path().to_string_lossy();
+            if file_op_name == "file.apply_patch" {
+                let files: Vec<String> = params
+                    .patch_text
+                    .as_deref()
+                    .map(super::file_ops::patch_target_paths)
+                    .unwrap_or_default();
+                info!(
+                    grant_id = %grant_id,
+                    op = %file_op_name,
+                    requested_path = %requested_path,
+                    canonical_path = %canonical,
+                    patch_files = ?files,
+                    caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                    "file write audit (apply_patch)"
+                );
+            } else {
+                info!(
+                    grant_id = %grant_id,
+                    op = %file_op_name,
+                    requested_path = %requested_path,
+                    canonical_path = %canonical,
+                    to_path = params.to_path.as_deref().unwrap_or(""),
+                    caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                    "file write audit"
+                );
+            }
+        }
 
         let value = match file_op_name {
             "file.read" => {
@@ -686,6 +739,9 @@ impl RemoteInvokeExecutor {
                     params.depth,
                     &excludes,
                     params.respect_gitignore.unwrap_or(true),
+                    &policy.denies,
+                    params.max_matches,
+                    params.cursor,
                 )
                 .await?
             }
@@ -703,6 +759,8 @@ impl RemoteInvokeExecutor {
                     params.max_matches,
                     &excludes,
                     params.respect_gitignore.unwrap_or(true),
+                    &policy.denies,
+                    params.cursor,
                 )
                 .await?
             }
@@ -725,6 +783,7 @@ impl RemoteInvokeExecutor {
                     params.glob.as_deref(),
                     params.respect_gitignore.unwrap_or(true),
                     &policy.denies,
+                    params.cursor,
                 )
                 .await?
             }
@@ -819,7 +878,12 @@ impl RemoteInvokeExecutor {
                         .map_err(|err| BifrostError::Config(format!("[{}] {}", err.code(), err)))?;
                     decisions.insert(key, d);
                 }
-                super::file_ops::handle_file_apply_patch(&decisions, patch_text).await?
+                super::file_ops::handle_file_apply_patch(
+                    &decisions,
+                    patch_text,
+                    &params.base_shas.clone().unwrap_or_default(),
+                )
+                .await?
             }
             _ => unreachable!(),
         };

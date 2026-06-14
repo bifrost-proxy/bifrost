@@ -31,7 +31,8 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | 看一下远端某文件 | `remote file read <path>` | `remote exec --shell-text "cat <path>"` |
 | 列目录树、找文件名 | `remote file list` / `remote file glob` | `shell-text "find ..." / "ls -R"` |
 | 正则搜代码、定位符号 | `remote file find <regex>` | `shell-text "grep -rn ..."` |
-| 写一个新文件 | `remote file write --content-file ./local.txt --create-parents` | `shell-text "echo ... > file"` |
+| 写一个短文本文件 | `remote file write <path> --content "..." --create-parents` | `shell-text "echo ... > file"` |
+| 从本地文件写过去 | `remote file write <path> --content-file ./local.txt --create-parents` | `scp` / `echo`+重定向 |
 | 改已有文件的几行 | `remote file edit --base-sha256 <sha> --edits '[...]'` | `sed -i` / `echo`+重定向 |
 | 多文件统一 patch | `remote file patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
 | 创建目录 | `remote file mkdir --parents` | `shell-text "mkdir -p ..."` |
@@ -264,7 +265,7 @@ bifrost remote file find   '<regex>'    [--path <sub>] [--max-matches N] \
 bifrost remote file hash   <path> [--algo sha256]
 
 # —— 读写（需 remote_file_write）——
-bifrost remote file write  <path> (--content-file <local|->) | (--content-b64 <b64>) \
+bifrost remote file write  <path> (--content <text>) | (--content-file <local|->) | (--content-b64 <b64>) \
                                    [--base-sha256 SHA] [--allow-overwrite true|false] \
                                    [--create-parents]
 bifrost remote file edit   <path> --edits '<json>' [--base-sha256 SHA]
@@ -276,21 +277,35 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 
 所有子命令共享 `--cwd <path>`、`--output human|json`、`--relay-url`、`--client-id`。
 
+#### 输出渲染：默认 `human`，结构化字段才加 `--output json`
+
+`remote file` 所有子命令的输出默认就是 **`human`** 格式，开箱就是人类/agent 可读，不必每次都加 `--output json`。
+
+- **`read` 默认直接打印明文正文到 stdout**，可以直接 pipe、直接读、直接 diff，不再需要拿 `content_b64` 自己 base64 解码。文件的 **行数 / 字节数 / sha256 footer** 打印在 **stderr**，所以管道里拿到的 stdout 是干净的文件内容。
+- **`list` / `glob` / `find`** 默认逐行打印路径 / `path:line:col: 预览`，末尾在 stderr 给条数统计。
+- **`write` / `edit` / `mkdir` / `move` / `delete` / `patch`** 默认打印一行人类可读的结果（如 `Wrote <path> (123 bytes)`），sha256 走 stderr footer。
+- **乐观锁 sha 哪里拿**：`read` 的 human 输出会在 stderr footer 打印 `sha256=<...>`，直接抄它喂给后续 `edit --base-sha256` / `write --base-sha256` 即可，不必再切 json。
+- **什么时候才需要 `--output json`**：当你要程序化消费结构化字段（如脚本里解析 `total_lines` / `truncated` / `byte_column` / `applied_edits`，或要拿 base64 原文做二进制处理）时，才显式加 `--output json`。json 模式输出原始 JSON，关键字段见下方「行为要点」里 `read --output json` 一条。
+
 #### 行为要点
 
 - **gitignore 默认打开**：`list` / `glob` / `find` 默认跳 `.gitignore` 命中路径。要扫被忽略文件加 `--no-ignore`。
-- **`truncated`**：`list` / `glob` / `find` / `read` 超限时响应带 `"truncated": true`。Agent 应据此分片（`--offset`+`--limit`、收窄 `--path` / `--glob`）。
-- **整文件 sha256**：`read` 当 `truncated=true` 时响应额外带 `file_sha256`（整文件），可用于 resume 或乐观锁一致性校验。
+- **`truncated` 自动提示**：`list` / `glob` / `find` / `read` 超限时，human 输出会在 stderr 直接给出**截断的下一步建议**（如"用 --offset/--limit 取更多""收紧 pattern / 提高 --max-matches"）。Agent 据此分片即可，不必自己猜。json 模式下对应字段为 `"truncated": true`。
+- **整文件 sha256**：`read` 当 `truncated=true` 时额外带整文件 `file_sha256`，可用于 resume 或乐观锁一致性校验。
 - **原子写**：`write` / `edit` / `patch` 采用 tmp+rename，失败自动回滚。`patch` 多文件级原子（任一文件失败全部回滚，已新建的文件也会被 unlink）。
 - **乐观锁**：`write` / `edit` 传 `--base-sha256` 后，文件已被改动会返回 `file.sha_mismatch`；Agent 应重新 `read` 再重试，不要盲目覆盖。
 - **EOL 保留**：`edit` 自动识别并保留 LF / CRLF 风格；跨风格 replacement 会被归一到目标文件风格。
 - **字符列定位**：`find` 返回的 `column` 是**字符列（char-based）**；`byte_column` 是字节偏移，二者在 CJK / 多字节场景会不同。
-- **`--content-b64` / `--patch-b64`**：由 caller 本地 base64、目标端解码；适合二进制、含 CRLF、含特殊字符的文本。远比 echo 管道 base64 + shell 重定向安全。
+- **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` 从本地文件或 stdin；`--content-b64 <b64>` 由 caller 本地 base64、目标端解码。优先级：`--content-b64` > `--content` > `--content-file`。二进制、含 CRLF、含特殊字符的文本走 `--content-b64` 最安全，远比 echo 管道 base64 + shell 重定向可靠。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
+- **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错并给出示例**（不再静默吞错发 null）。格式是 1-based 闭区间行号的对象数组：`[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`。
+- **错误自带修复建议**：file 操作失败时，CLI 会根据服务端的 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→让目标端加白名单而非改 cwd）。错误码含义见下方"错误码契约"。
 - **Symlink lstat 语义**：`stat` / `list` 不跟随软链；`stat` 额外返回 `symlink_target`。Windows 自动去 `\\?\` / `\\?\UNC\` 前缀。
-- **`read --output json` 的关键字段**：`content_b64`（base64 编码正文）、`sha256`（返回切片的 sha）、`size`（返回切片字节数）、`total_size` / `total_lines`（整文件）、`truncated`（是否截断）、`file_sha256`（仅 truncated=true 时出现，整文件 sha，用于后续 `--base-sha256` 乐观锁）、`start_line` / `end_line`（使用 `--offset`/`--limit` 时的范围）、`mtime_unix`。
+- **`read --output json` 的关键字段**：`content_b64`（base64 编码正文）、`sha256`（返回切片的 sha）、`size`（返回切片字节数）、`total_size` / `total_lines`（整文件）、`truncated`（是否截断）、`file_sha256`（仅 truncated=true 时出现，整文件 sha，用于后续 `--base-sha256` 乐观锁）、`start_line` / `end_line`（使用 `--offset`/`--limit` 时的范围）、`mtime_unix`。注意 human 模式下这些都已替你渲染好（正文走 stdout、sha/行数/字节数走 stderr footer），只有要程序化解析时才需要 json。
 
 #### 错误码契约
+
+无论 human 还是 json 模式，服务端都会带结构化错误码；human 模式下 CLI 还会自动补一行 `→` 修复建议。
 
 | 错误码 | 含义 | Agent 应对 |
 |---|---|---|
@@ -300,37 +315,44 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
 | `file.sha_mismatch` | 乐观锁失败 | 重新 `read` + 重算 sha + 重试 |
 | `file.not_found` | 路径不存在 | 视任务决定 `mkdir` / `write --create-parents` |
 | `file.is_a_directory` / `file.not_a_directory` | 类型不匹配 | 切换子命令 |
+| `file.invalid_args` | 参数非法（如 `edit` 行号越界） | 重新 `read` 拿当前行号；`edit` 行号是 1-based 闭区间 |
+| `file.invalid_regex` / `file.invalid_glob` | 搜索 / glob 模式非法 | 检查模式语法 |
+| `file.precondition_failed` | patch 上下文与当前文件不匹配 | 重新 `read` 目标，针对最新内容重新生成 diff |
 
 #### Coding agent 典型 workflow
+
+默认就走 human 模式，又快又干净；只有需要程序化字段时才在那一步加 `--output json`。
 
 ```bash
 # 0. 读取目标工程约束信息：先读工作目录下的 AGENTS.md/agents.md，
 #    再读取 .agents/skills/*/SKILL.md 的元信息；skill 详细内容按需加载。
 
-# 1. 侦察
-bifrost remote file list src --depth 2 --output json
-bifrost remote file glob 'src/**/*.rs' --max-matches 200 --output json
+# 1. 侦察（human：逐行路径 + 末尾条数；要程序化解析才加 --output json）
+bifrost remote file list src --depth 2
+bifrost remote file glob 'src/**/*.rs' --max-matches 200
 
-# 2. 定位符号
-bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' \
-  -B 2 -A 2 --output json
+# 2. 定位符号（human：path:line:col: 预览 + 上下文）
+bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' -B 2 -A 2
 
-# 3. 读 + 拿 sha256
-bifrost remote file read src/lib.rs --output json        # 响应含 sha256
+# 3. 读文件（human：明文走 stdout，sha256/行数/字节数走 stderr footer）
+bifrost remote file read src/lib.rs            # 直接看到明文；footer 里有 sha256
 
-# 4. 乐观锁 edit
+# 4. 乐观锁 edit（sha 抄第 3 步 footer 里的 sha256）
 bifrost remote file edit src/lib.rs \
   --base-sha256 <sha-from-step-3> \
-  --edits '[{"start_line":10,"end_line":12,"replacement":"// new impl\n"}]' \
-  --output json
+  --edits '[{"start_line":10,"end_line":12,"replacement":"// new impl\n"}]'
 
-# 5. 新建 / 覆盖写（二进制、特殊字符统一走 b64）
+# 5a. 新建 / 覆盖写——短文本直接内联
 bifrost remote file write docs/changelog.md \
-  --content-b64 "$(base64 < ./local-notes.md)" \
-  --create-parents --output json
+  --content "## v1.2.3\n- fix something\n" --create-parents
+
+# 5b. 新建 / 覆盖写——二进制 / 特殊字符统一走 b64
+bifrost remote file write assets/logo.png \
+  --content-b64 "$(base64 < ./local-logo.png)" \
+  --allow-overwrite true --create-parents
 
 # 6. 多文件 patch
-bifrost remote file patch --patch-file ./refactor.diff --output json
+bifrost remote file patch --patch-file ./refactor.diff
 
 # 7. 跑测试（这一步才用 exec）
 bifrost remote exec --cwd <USER_HOME>/work/github/repo \
@@ -372,18 +394,19 @@ bifrost remote conn status
 
 1. **先读取目标工程约束信息**：执行任何远端工程任务前，必须先阅读工作目录下的 `AGENTS.md` / `agents.md` 手册；然后读取 `.agents/skills/` 下所有 skill 的元信息（如 frontmatter、名称、描述、触发条件和路径）。skill 详细正文只在任务实际命中或需要其流程时按需加载，避免把无关细节塞进上下文。
 2. **先用 `remote file`，再考虑 `remote exec`**。任何修改远端文件内容的操作，先看是否能用 `remote file write/edit/move/delete/mkdir/patch` 完成。**严禁**用 `exec --shell-text "echo '$B64' | base64 -d > ..."` 这类 shell 拼接写文件。违反此条 = 违反本技能。
-3. **不要重复 `remote conn up`**：先跑 `bifrost remote conn status` 看已有连接是否可用。
-4. **SSH key 优于 pair code**：有 key 先用 key，一次连接永久复用（直到 key 被 reset/revoke）。
-5. **多 client 场景**：显式 `--client-id <prefix>`，不要依赖交互式选择。
-6. **失败分类**：
+3. **默认 human 输出，不要无脑加 `--output json`**：`remote file` 默认就是人类可读，`read` 直接给明文、错误自带修复建议、截断自带下一步。只有要在脚本里解析结构化字段（`total_lines` / `truncated` / `byte_column` / `applied_edits` 等）或处理二进制原文时才加 `--output json`。
+4. **不要重复 `remote conn up`**：先跑 `bifrost remote conn status` 看已有连接是否可用。
+5. **SSH key 优于 pair code**：有 key 先用 key，一次连接永久复用（直到 key 被 reset/revoke）。
+6. **多 client 场景**：显式 `--client-id <prefix>`，不要依赖交互式选择。
+7. **失败分类**（错误信息里 CLI 已自动带 `→` 修复建议，先读它）：
    - `file.out_of_scope` / `file.permission_denied` → 告诉用户需要调 FileAccessPolicy，不自作主张改 `--cwd` 绕过。
    - `file.sha_mismatch` → 重 read 重算 sha 再重试。
    - connect 失败 → 检查 SSH key 有效性、pair code 是否过期、目标是否在线、Web UI 是否授权。grant 失效就重新 `conn up`，**不要**伪造本地连接文件。
-7. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
-8. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
-9. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
-10. **大文件/二进制传输**：`--content-file -` 从 stdin，`--content-b64` / `--patch-b64` 适合非交互；避免 echo 管道 base64。
-11. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
+8. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
+9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
+10. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
+11. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。
+12. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 
 ---
 
@@ -392,8 +415,14 @@ bifrost remote conn status
 **Q: 为什么我 `remote file read` 返回 `file.out_of_scope`？**
 A: 目标端 `~/.bifrost/file-access.toml` 里没有把该路径加入 `roots`。让用户追加一条 `[[grant]]` 或扩大 `[default].roots`。
 
+**Q: 我 `read` 一个文件，怎么直接看内容、又怎么拿乐观锁要用的 sha？**
+A: 直接 `remote file read <path>`——明文打在 stdout，`sha256=<...>` 在 stderr footer，抄过去喂 `edit --base-sha256` 即可。不需要 `--output json` 再解 base64。
+
 **Q: 我想改远端 `Cargo.toml` 的 version，该用哪个命令？**
-A: `remote file read` 拿到 sha → `remote file edit --base-sha256 <sha> --edits '[...]'`。不要用 `shell-text "sed -i ..."`。
+A: `remote file read` 看内容并从 footer 拿 sha → `remote file edit --base-sha256 <sha> --edits '[...]'`。不要用 `shell-text "sed -i ..."`。
+
+**Q: 我要写一个就两三行的小文件，还得先在本地建临时文件吗？**
+A: 不用。直接 `remote file write <path> --content "第一行\n第二行\n" --create-parents`。
 
 **Q: 我要把本地一个 500KB 的二进制部署到远端？**
 A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./local.bin)" --allow-overwrite true --create-parents`。

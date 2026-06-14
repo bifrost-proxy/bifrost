@@ -327,8 +327,11 @@ is_caller_conn_error() {
 }
 
 run_remote_file_cmd() {
+    # NOTE: this suite asserts the machine-readable JSON contract (content_b64,
+    # bytes_written, applied_edits, file_sha256, ...), so it explicitly opts into
+    # --output json. Interactive/agent callers get the human default instead.
     BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote file "$@" \
-        --relay-url "$RELAY_URL" --client-id "$CLIENT_INSTANCE_SHORT" 2>&1
+        --relay-url "$RELAY_URL" --client-id "$CLIENT_INSTANCE_SHORT" --output json 2>&1
 }
 
 # ---------------------------------------------------------------------------

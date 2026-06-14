@@ -56,7 +56,7 @@ impl FileAccessError {
     pub fn code(&self) -> &'static str {
         match self {
             FileAccessError::OutOfScope { .. } => "file.out_of_scope",
-            FileAccessError::DenyPattern { .. } => "file.permission_denied",
+            FileAccessError::DenyPattern { .. } => "file.deny_pattern",
             FileAccessError::PermissionDenied { .. } => "file.permission_denied",
             FileAccessError::SymlinkEscape { .. } => "file.symlink_escape",
             FileAccessError::IgnoredByGitignore { .. } => "file.ignored_by_gitignore",
@@ -86,7 +86,7 @@ mod tests {
                 pattern: "*.env".to_string()
             }
             .code(),
-            "file.permission_denied"
+            "file.deny_pattern"
         );
         assert_eq!(
             FileAccessError::PermissionDenied { reason: "ro" }.code(),
