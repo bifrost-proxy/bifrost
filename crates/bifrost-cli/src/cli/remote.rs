@@ -360,6 +360,27 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(
+        about = "Extract a symbol outline (top-level fn/struct/class/etc.) from a source file"
+    )]
+    Outline {
+        #[arg(help = "Path to the source file")]
+        path: String,
+        #[arg(
+            long = "max-symbols",
+            help = "Maximum number of symbols to return (default 2000)"
+        )]
+        max_symbols: Option<usize>,
+        #[arg(
+            long = "max-bytes",
+            help = "Maximum bytes of the file to scan (capped by policy)"
+        )]
+        max_bytes: Option<u64>,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(
         about = "Write a file atomically. Content comes from --content, --content-file, --content-b64, or stdin."
     )]
     Write {

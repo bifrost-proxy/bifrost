@@ -32,6 +32,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | 一次读多个文件 | `remote file read-many --path a --path b ...` | 循环多次 `read` / `shell-text "cat a b c"` |
 | 列目录树、找文件名 | `remote file list` / `remote file glob` | `shell-text "find ..." / "ls -R"` |
 | 正则搜代码、定位符号 | `remote file find <regex>` | `shell-text "grep -rn ..."` |
+| 看一个源文件有哪些符号（函数/类/结构体） | `remote file outline <path>` | 人肉 `read` 整文件再扫一遍 |
 | 多关键词 OR 搜 / 字面量 / 整词 | `remote file find -e p1 -e p2 [--fixed-strings] [--word]` | 多次 grep 后人肉合并 |
 | 搜到点想看上下文 | `remote file find <regex> --around 3` | 再单独 `read` 那几行 |
 | 写一个短文本文件 | `remote file write <path> --content "..." --create-parents` | `shell-text "echo ... > file"` |
@@ -272,6 +273,7 @@ bifrost remote file find   ['<regex>']  [-e '<regex>']... \
                                          [-B N] [-A N] [-i] [--glob '<pat>'] \
                                          [--no-ignore] [--exclude NAME]...
 bifrost remote file hash   <path> [--algo sha256]
+bifrost remote file outline <path> [--max-symbols N] [--max-bytes N]
 
 # —— 读写（需 remote_file_write）——
 bifrost remote file write  <path> (--content <text>) | (--content-file <local|->) | (--content-b64 <b64>) \
@@ -299,6 +301,21 @@ bifrost remote file read-many \
 - 服务端**并发**读取，单个文件失败（不存在 / 越权 / 二进制未允许）**不会**中断其余文件——该文件返回单独的错误项，其余正常返回。
 - json 模式返回 `{files:[...], count, ok_count}`：`count` 是请求数，`ok_count` 是成功数；每个 `files[i]` 要么带 `content_b64`/`sha256`/`size` 等正文字段，要么带该文件的 `error` 码。
 - 每个文件仍受 `--max-bytes` / `--allow-binary` 约束（对全体生效）。
+
+#### `outline`：快速拿到一个源文件的符号地图
+
+进入一个陌生源文件前，不要先把整文件 `read` 回来再人肉扫一遍函数/类定义。用 `outline` 一次拿到顶层符号清单（函数、结构体、类、方法、枚举、trait/interface、常量等），按行号定位：
+
+```bash
+bifrost remote file outline crates/bifrost-cli/src/cli/remote.rs --max-symbols 50
+```
+
+- 服务端**纯解析、零依赖**（基于多语言正则/启发式抽取，不需要远端装 tree-sitter / LSP），跨平台稳定。
+- 自动按扩展名识别语言：rust / typescript / javascript / python / go / java / kotlin / c / cpp / ruby / swift / csharp / php；无法识别的语言返回空符号集（`language=unknown`），不报错。
+- 默认最多抽取 2000 个符号、扫描前 4 MiB（且不超过授权的 `max_read_bytes`）；超出时 `truncated=true`。`--max-symbols` 收紧上限。
+- 二进制文件按 `file.binary_not_allowed` 拒绝（符号抽取无意义）。
+- human 模式按 `行号 | 类型 | 签名` 逐行输出，footer 给出 `N symbols (lang[, truncated])`；json 模式返回 `{language, symbols:[{kind,name,line,signature}], count, truncated, total_size, total_lines}`。
+- 典型用法：`outline` 拿到符号 + 行号 → 直接 `read --offset <line> --limit N` 精读那一段，或 `edit --base-sha256 ... --edits '[{"start_line":...}]'` 定点改，省掉整文件往返。
 
 #### 按内容锚定编辑（`edit` 的第二种形态）
 
@@ -397,6 +414,9 @@ bifrost remote file glob 'src/**/*.rs' --max-matches 200
 
 # 2. 定位符号（human：path:line:col: 预览 + 上下文；多关键词用可重复 -e）
 bifrost remote file find 'fn handle_file_\w+' --path src --glob '*.rs' --around 2
+
+# 2b. 进陌生文件先看符号地图（函数/类/结构体 + 行号），再按行号精读
+bifrost remote file outline src/lib.rs --max-symbols 50
 
 # 3. 读文件（human：明文走 stdout，sha256/行数/字节数走 stderr footer）
 bifrost remote file read src/lib.rs            # 直接看到明文；footer 里有 sha256
@@ -501,6 +521,9 @@ A: `remote exec`：`--cwd /path/to/repo --shell-text "git pull --ff-only && carg
 
 **Q: 我要一次看某模块的好几个文件，怎么少跑几趟？**
 A: 用 `remote file read-many --path a --path b --path c`，一次往返并发取回；某个文件读失败不影响其余文件，json 模式里看 `ok_count`。
+
+**Q: 我要进一个几千行的陌生源文件改东西，怎么先快速摸清结构？**
+A: 先 `remote file outline <path>` 拿到函数/类/结构体清单 + 行号，再针对目标符号 `read --offset <line> --limit N` 精读那一段，或直接 `edit` 定点改。不用把整文件拉回来人肉扫。
 
 **Q: 我想替换某个符号但懒得数行号，会不会一定要先 read 算行号？**
 A: 不用。用锚定编辑：`remote file edit <path> --edits '[{"old_string":"旧串","new_string":"新串"}]'`，按字面子串定位。担心多处命中误改就加 `expected_count` 兜底。

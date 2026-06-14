@@ -1167,6 +1167,280 @@ pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> 
     Ok(json!({ "algo": "sha256", "hex": hex, "size": md.len() }))
 }
 
+const DEFAULT_OUTLINE_MAX_SYMBOLS: usize = 2_000;
+/// Default byte cap for `file.outline` scanning. Outlines are cheap relative to
+/// full reads but we still bound the work for very large files.
+const DEFAULT_OUTLINE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Map a file extension to a coarse language label used to pick the symbol
+/// patterns. Returns `"unknown"` for anything we don't have rules for; such
+/// files yield an empty outline rather than an error.
+fn outline_language_for(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "rs" => "rust",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
+        "rb" => "ruby",
+        "swift" => "swift",
+        "cs" => "csharp",
+        "php" => "php",
+        _ => "unknown",
+    }
+}
+
+/// A single extracted top-level symbol.
+struct OutlineSymbol {
+    kind: &'static str,
+    name: String,
+    line: u32,
+    signature: String,
+}
+
+/// Compile-once regex registry for the outline extractor. Each language maps to
+/// a list of `(kind, regex)` pairs where the regex captures the symbol name in
+/// group 1. Patterns are intentionally line-oriented and heuristic — this is a
+/// lightweight repo-map primitive, not a full parser.
+fn outline_patterns(lang: &str) -> &'static [(&'static str, regex::Regex)] {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    macro_rules! pats {
+        ($($kind:literal => $re:literal),* $(,)?) => {
+            vec![ $(($kind, Regex::new($re).expect("valid outline regex")),)* ]
+        };
+    }
+
+    static RUST: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "fn"     => r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:extern\s+(?:\x22[^\x22]*\x22\s+)?)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct" => r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"   => r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "trait"  => r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "impl"   => r"^\s*impl(?:\s*<[^>]*>)?\s+([A-Za-z_][A-Za-z0-9_:<>, ]*)",
+            "type"   => r"^\s*(?:pub(?:\([^)]*\))?\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "macro"  => r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static TS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "function" => r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)",
+            "class"    => r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "interface"=> r"^\s*(?:export\s+)?interface\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "type"     => r"^\s*(?:export\s+)?type\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "enum"     => r"^\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "const"    => r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)",
+        ]
+    });
+    static PY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "def"   => r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class" => r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static GO: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "func"   => r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)",
+            "type"   => r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)",
+            "type2"  => r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+",
+        ]
+    });
+    static JVM: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:public\s+|private\s+|protected\s+|final\s+|abstract\s+|static\s+|open\s+|sealed\s+|data\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*(?:public\s+|private\s+|protected\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"      => r"^\s*(?:public\s+|private\s+|protected\s+)*enum(?:\s+class)?\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "fun"       => r"^\s*(?:public\s+|private\s+|protected\s+|override\s+|suspend\s+|inline\s+)*fun\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static C_LIKE: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "struct" => r"^\s*(?:typedef\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"   => r"^\s*(?:typedef\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class"  => r"^\s*(?:template\s*<[^>]*>\s*)?class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "fn"     => r"^\s*(?:[A-Za-z_][A-Za-z0-9_:<>,\*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{?\s*$",
+        ]
+    });
+    static RUBY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"  => r"^\s*class\s+([A-Za-z_][A-Za-z0-9_:]*)",
+            "module" => r"^\s*module\s+([A-Za-z_][A-Za-z0-9_:]*)",
+            "def"    => r"^\s*def\s+([A-Za-z_][A-Za-z0-9_?!.]*)",
+        ]
+    });
+    static SWIFT: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "func"     => r"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+|static\s+|class\s+)*func\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class"    => r"^\s*(?:public\s+|private\s+|internal\s+|final\s+|open\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct"   => r"^\s*(?:public\s+|private\s+|internal\s+)*struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"     => r"^\s*(?:public\s+|private\s+|internal\s+)*enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "protocol" => r"^\s*(?:public\s+|private\s+|internal\s+)*protocol\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static CSHARP: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|sealed\s+|abstract\s+|static\s+|partial\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct"    => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"      => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static PHP: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:abstract\s+|final\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "trait"     => r"^\s*trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "function"  => r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|abstract\s+|final\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static EMPTY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(Vec::new);
+
+    match lang {
+        "rust" => &RUST,
+        "typescript" | "javascript" => &TS,
+        "python" => &PY,
+        "go" => &GO,
+        "java" | "kotlin" => &JVM,
+        "c" | "cpp" => &C_LIKE,
+        "ruby" => &RUBY,
+        "swift" => &SWIFT,
+        "csharp" => &CSHARP,
+        "php" => &PHP,
+        _ => &EMPTY,
+    }
+}
+
+/// Extract a heuristic symbol outline from already-loaded source `text`.
+/// Pure function (no IO) so it can be unit-tested directly.
+fn extract_outline(text: &str, lang: &str, max_symbols: usize) -> (Vec<OutlineSymbol>, bool) {
+    let patterns = outline_patterns(lang);
+    let mut symbols: Vec<OutlineSymbol> = Vec::new();
+    let mut truncated = false;
+    for (idx, raw_line) in text.lines().enumerate() {
+        // Skip obvious comment lines to cut down on false positives.
+        let trimmed = raw_line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#') && lang != "python" && lang != "ruby"
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        for (kind, re) in patterns.iter() {
+            if let Some(caps) = re.captures(raw_line) {
+                if let Some(name) = caps.get(1) {
+                    if symbols.len() >= max_symbols {
+                        truncated = true;
+                        break;
+                    }
+                    let signature = raw_line.trim_end().trim_start().to_string();
+                    // Cap signature length so a giant single-line decl can't
+                    // bloat the response.
+                    let signature = if signature.len() > 240 {
+                        format!("{}…", &signature[..240])
+                    } else {
+                        signature
+                    };
+                    symbols.push(OutlineSymbol {
+                        kind,
+                        name: name.as_str().to_string(),
+                        line: u32::try_from(idx + 1).unwrap_or(u32::MAX),
+                        signature,
+                    });
+                    // First matching pattern wins for this line.
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+    (symbols, truncated)
+}
+
+/// `file.outline` — return a lightweight symbol outline (repo-map primitive)
+/// for a single source file. Uses heuristic, language-aware regex extraction
+/// of top-level declarations (fn/struct/class/interface/def/…) so a coding
+/// agent can grasp a file's shape without reading the whole body. Unknown
+/// languages yield an empty `symbols` array rather than an error.
+pub async fn handle_file_outline(
+    decision: &PolicyDecision,
+    max_symbols: Option<usize>,
+    max_bytes: Option<u64>,
+) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Outline);
+    let path = decision.path.as_path();
+
+    let metadata = fs::metadata(path)
+        .await
+        .map_err(|e| io_err(&format!("stat {}", path.display()), e))?;
+    if !metadata.is_file() {
+        return Err(BifrostError::Config(format!(
+            "[file.not_found] not a regular file: {}",
+            path.display()
+        )));
+    }
+    let total_size = metadata.len();
+
+    let cap = max_bytes
+        .unwrap_or(DEFAULT_OUTLINE_SCAN_BYTES)
+        .min(decision.max_read_bytes);
+    let f = fs::File::open(path)
+        .await
+        .map_err(|e| io_err(&format!("open {}", path.display()), e))?;
+    let mut buf = Vec::new();
+    let mut limited = f.take(cap);
+    limited
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| io_err(&format!("read {}", path.display()), e))?;
+    let bytes_truncated = (buf.len() as u64) < total_size;
+
+    if is_probably_binary(&buf) {
+        return Err(fa_to_bifrost(FileAccessError::BinaryNotAllowed {
+            path: path.to_path_buf(),
+        }));
+    }
+    let text = String::from_utf8_lossy(&buf);
+
+    let lang = outline_language_for(path);
+    let max_symbols = max_symbols
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_OUTLINE_MAX_SYMBOLS);
+    let (symbols, sym_truncated) = extract_outline(&text, lang, max_symbols);
+
+    let symbols_json: Vec<Value> = symbols
+        .iter()
+        .map(|s| {
+            json!({
+                "kind": s.kind,
+                "name": s.name,
+                "line": s.line,
+                "signature": s.signature,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "language": lang,
+        "symbols": symbols_json,
+        "count": symbols_json.len(),
+        "truncated": sym_truncated || bytes_truncated,
+        "total_size": total_size,
+        "total_lines": u32::try_from(text.lines().count()).unwrap_or(u32::MAX),
+    }))
+}
+
 // === Write handlers: file.write / edit / mkdir / move / delete / apply_patch ===
 //
 // All handlers assume the executor has already invoked
@@ -2582,6 +2856,92 @@ mod tests {
             .unwrap();
         let err = handle_file_hash(&dec, Some("md5")).await.unwrap_err();
         assert!(err.to_string().contains("file.unsupported_algo"));
+    }
+
+    // ---------- P1-4 outline ----------
+
+    #[test]
+    fn outline_language_detection_by_ext() {
+        assert_eq!(outline_language_for(Path::new("a.rs")), "rust");
+        assert_eq!(outline_language_for(Path::new("a.tsx")), "typescript");
+        assert_eq!(outline_language_for(Path::new("a.py")), "python");
+        assert_eq!(outline_language_for(Path::new("a.go")), "go");
+        assert_eq!(outline_language_for(Path::new("a.unknownext")), "unknown");
+        assert_eq!(outline_language_for(Path::new("noext")), "unknown");
+    }
+
+    #[test]
+    fn outline_extracts_rust_symbols() {
+        let src = r#"
+// a comment fn not_a_symbol
+pub fn alpha(x: i32) -> i32 { x }
+async fn beta() {}
+pub struct Foo { a: u32 }
+enum Bar { A, B }
+pub trait Baz {}
+impl Foo {}
+type Alias = u32;
+"#;
+        let (syms, truncated) = extract_outline(src, "rust", 2000);
+        assert!(!truncated);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"Foo"));
+        assert!(names.contains(&"Bar"));
+        assert!(names.contains(&"Baz"));
+        assert!(names.contains(&"Alias"));
+        // The commented `fn not_a_symbol` must not be picked up.
+        assert!(!names.contains(&"not_a_symbol"));
+        // Kinds are tagged.
+        let fn_kind = syms.iter().find(|s| s.name == "alpha").unwrap().kind;
+        assert_eq!(fn_kind, "fn");
+    }
+
+    #[test]
+    fn outline_extracts_python_and_respects_hash_comments() {
+        let src =
+            "# top comment\nclass C:\n    def method(self):\n        pass\ndef top():\n    pass\n";
+        let (syms, _) = extract_outline(src, "python", 2000);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"C"));
+        assert!(names.contains(&"method"));
+        assert!(names.contains(&"top"));
+    }
+
+    #[test]
+    fn outline_respects_max_symbols_truncation() {
+        let src = "fn a(){}\nfn b(){}\nfn c(){}\n";
+        let (syms, truncated) = extract_outline(src, "rust", 2);
+        assert_eq!(syms.len(), 2);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn outline_unknown_language_is_empty() {
+        let src = "some random text\nwith no recognizable symbols\n";
+        let (syms, truncated) = extract_outline(src, "unknown", 2000);
+        assert!(syms.is_empty());
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn outline_handler_returns_symbols_for_rust_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(&file, b"pub fn one() {}\nstruct Two;\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("lib.rs"), tmp.path(), FileOp::Outline)
+            .unwrap();
+        let v = handle_file_outline(&dec, None, None).await.unwrap();
+        assert_eq!(v["language"].as_str().unwrap(), "rust");
+        assert_eq!(v["count"].as_u64().unwrap(), 2);
+        assert!(!v["truncated"].as_bool().unwrap());
+        let syms = v["symbols"].as_array().unwrap();
+        assert_eq!(syms[0]["name"].as_str().unwrap(), "one");
+        assert_eq!(syms[0]["kind"].as_str().unwrap(), "fn");
+        assert_eq!(syms[0]["line"].as_u64().unwrap(), 1);
     }
 
     #[tokio::test]

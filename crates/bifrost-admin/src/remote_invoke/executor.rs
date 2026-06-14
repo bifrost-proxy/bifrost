@@ -562,6 +562,7 @@ impl RemoteInvokeExecutor {
             "file.glob" => FileOp::Glob,
             "file.search" => FileOp::Search,
             "file.hash" => FileOp::Hash,
+            "file.outline" => FileOp::Outline,
             "file.write" => FileOp::Write,
             "file.edit" => FileOp::Edit,
             "file.mkdir" => FileOp::Mkdir,
@@ -638,6 +639,9 @@ impl RemoteInvokeExecutor {
             // P1-1: symmetric context window joined into a `snippet`.
             #[serde(default)]
             around: Option<u32>,
+            // P1-4: symbol-outline cap.
+            #[serde(default)]
+            max_symbols: Option<usize>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -858,6 +862,14 @@ impl RemoteInvokeExecutor {
             }
             "file.hash" => {
                 super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
+            }
+            "file.outline" => {
+                super::file_ops::handle_file_outline(
+                    &decision,
+                    params.max_symbols,
+                    params.max_bytes,
+                )
+                .await?
             }
             "file.write" => {
                 let content = params.content_b64.as_deref().ok_or_else(|| {

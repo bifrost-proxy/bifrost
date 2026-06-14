@@ -166,6 +166,7 @@ enum RemoteFileOp {
     Glob,
     Find,
     Hash,
+    Outline,
     Write,
     Edit,
     Mkdir,
@@ -2625,6 +2626,23 @@ fn build_remote_file_command(
             json!({ "path": path, "algo": algo, "cwd": cwd }),
             output.clone(),
         ),
+        RemoteFileCommands::Outline {
+            path,
+            max_symbols,
+            max_bytes,
+            cwd,
+            output,
+        } => (
+            "file.outline",
+            format!("file.outline {}", path),
+            json!({
+                "path": path,
+                "max_symbols": max_symbols,
+                "max_bytes": max_bytes,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
         RemoteFileCommands::Write {
             path,
             content: cli_content,
@@ -2815,6 +2833,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Glob { .. } => RemoteFileOp::Glob,
         RemoteFileCommands::Find { .. } => RemoteFileOp::Find,
         RemoteFileCommands::Hash { .. } => RemoteFileOp::Hash,
+        RemoteFileCommands::Outline { .. } => RemoteFileOp::Outline,
         RemoteFileCommands::Write { .. } => RemoteFileOp::Write,
         RemoteFileCommands::Edit { .. } => RemoteFileOp::Edit,
         RemoteFileCommands::Mkdir { .. } => RemoteFileOp::Mkdir,
@@ -3725,6 +3744,7 @@ fn render_remote_file_human(op: RemoteFileOp, stdout: &str) {
         RemoteFileOp::Glob => render_file_glob_human(&value),
         RemoteFileOp::Find => render_file_find_human(&value),
         RemoteFileOp::Hash => render_file_hash_human(&value),
+        RemoteFileOp::Outline => render_file_outline_human(&value),
         RemoteFileOp::Write | RemoteFileOp::Edit => render_file_write_human(op, &value),
         RemoteFileOp::Mkdir => render_file_mkdir_human(&value),
         RemoteFileOp::Move => render_file_move_human(&value),
@@ -3954,6 +3974,38 @@ fn render_file_hash_human(value: &Value) {
     println!("{algo}: {hex}");
     if let Some(size) = value.get("size").and_then(Value::as_u64) {
         eprintln!("{}", format!("— {size} bytes").dimmed());
+    }
+}
+
+fn render_file_outline_human(value: &Value) {
+    let lang = value
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if let Some(symbols) = value.get("symbols").and_then(Value::as_array) {
+        for s in symbols {
+            let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+            let line = s.get("line").and_then(Value::as_u64).unwrap_or(0);
+            let sig = s
+                .get("signature")
+                .and_then(Value::as_str)
+                .or_else(|| s.get("name").and_then(Value::as_str))
+                .unwrap_or("");
+            println!("{:>5}  {:<10} {}", line, kind, sig);
+        }
+        let truncated = value
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let note = if truncated {
+            format!("— {} symbols ({}, truncated)", symbols.len(), lang)
+        } else {
+            format!("— {} symbols ({})", symbols.len(), lang)
+        };
+        eprintln!("{}", note.dimmed());
+    } else {
+        print!("{value}");
+        println!();
     }
 }
 
