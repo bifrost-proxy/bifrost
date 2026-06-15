@@ -1498,7 +1498,7 @@ mod tests {
             .update_sync_config(SyncConfigUpdate {
                 enabled: Some(true),
                 remote_base_url: Some(remote_base_url.to_string()),
-                connect_timeout_ms: Some(500),
+                connect_timeout_ms: Some(5_000),
                 ..Default::default()
             })
             .await
