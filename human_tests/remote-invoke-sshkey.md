@@ -88,6 +88,29 @@
 - `remote-connections.json` 中 SSH key 连接的 `auth_method=ssh_publickey`；通过 env 模式连接时 `ssh_key_source=env:BIFROST_REMOTE_SSH_KEY`。
 - 不支持任意环境变量名；用户不需要也不能通过 `env:OTHER_NAME` 自定义。
 
+### TC-RISK-03：SSH key 连接默认 Full Trust 且 grant 级别可通过 CLI 切换
+
+**操作步骤**
+
+1. 执行：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d)" bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+2. 观察脚本中 `Wait for ssh_publickey grant created by CLI` 和 `Execute remote shell via SSH-key Full Trust grant` 两段输出。
+3. 通过 target Admin API `/_bifrost/api/remote-invoke/grants` 查询 SSH key grant，确认 `grant_scope`、`file_access`、`interactive_allowed` 和 `stdin_allowed`。
+4. 使用 `bifrost setting grant update --device <caller-fingerprint> --level files` 切换同一 grant 至 Files only。
+5. 再使用 `bifrost setting grant update --device <caller-fingerprint> --level full` 切回 Full Trust。
+6. 对于人工交互验证，可执行 `bifrost setting grant update`，在 TTY 中先选择设备/grant，再选择权限级别。
+
+**预期结果**
+
+- SSH key 首次连接 target 时自动生成的 `ssh_publickey` grant 为 Full Trust：`grant_scope=remote_shell_interactive`、`file_access=read_write`、`interactive_allowed=true`、`stdin_allowed=true`。
+- SSH key grant 绑定内置 `ssh-key-full-access` command group；即使用户未手动创建 shell policy，也能直接运行允许的任意命令。
+- 第 2 步中的 `bifrost remote exec --shell-text "printf ssh-full-trust-ok"` 成功输出 `ssh-full-trust-ok`，不会再因 `grant_scope_mismatch` 退回到只读授权。
+- `bifrost setting grant update --device <caller-fingerprint> --level files` 成功把 grant 切换为 `grant_scope=remote_query` 且 `file_access=read_write`。
+- `bifrost setting grant update --device <caller-fingerprint> --level full` 成功恢复 Full Trust。
+- 仅通过 pair/code 的交互式授权流程允许用户手动选择权限级别；SSH key 自动连接默认必须是 Full Trust。
+
 ## 清理步骤
 
 - 脚本退出时会清理 key 生成、relay、target、caller、mock server 临时目录和进程。
@@ -106,3 +129,9 @@
 | TC-RISK-00 | PASS | 执行 `bash e2e-tests/tests/test_setting_ssh_key_cli.sh` 通过；输出包含 `Generated key is accepted by caller-side --ssh-key parser from fixed env` 和最终 `PASS`，证明生成的 key 可通过固定 `BIFROST_REMOTE_SSH_KEY` + `--ssh-key` 无路径形式进入 caller 侧 parser。 |
 | TC-RISK-01 | PASS | 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过；脚本启动本地 relay、target 与两个 caller，确认两个 caller 使用同一 SSH key 时 caller fingerprint 不同且 target grants 中存在对应 `ssh_publickey` grants。 |
 | TC-RISK-02 | PASS | 同一 `test_remote_invoke_ssh_e2e.sh` 中第二个 caller 将导出的 key 内容写入 `BIFROST_REMOTE_SSH_KEY` 后执行 `bifrost remote conn up --ssh-key --relay-url ...` 成功连接，并断言 `remote-connections.json` 中 `ssh_key_source=env:BIFROST_REMOTE_SSH_KEY`；后续 `remote conn status`、`remote traffic search`、`remote traffic get` 均通过。 |
+
+### 2026-06-15 SSH key 默认 Full Trust 与 grant 级别切换回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-03 | PENDING | 待执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`，脚本需断言 SSH key grant 为 Full Trust，并通过 `remote exec` 验证默认 grant 可以运行命令；随后用 CLI 验证 `setting grant update --device ... --level files/full`。 |

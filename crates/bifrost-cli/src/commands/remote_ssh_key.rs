@@ -8,6 +8,7 @@ use bifrost_admin::remote_invoke::file_policy_store::{
 use bifrost_admin::remote_invoke::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use bifrost_admin::remote_invoke::types::GrantMode;
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::ensure_default_ssh_key_shell_policy;
 use serde_json::{json, Value};
 
 use crate::cli::RemoteSshKeyCommands;
@@ -142,6 +143,7 @@ fn create_local_ssh_key(label: &str, grant_mode: GrantMode) -> Result<SshKeyMate
     let material = SshKeyStore::new(&bifrost_storage::data_dir())
         .create_or_replace_key(label.to_string(), grant_mode)?;
     seed_default_file_access_policy(&material.record)?;
+    ensure_default_ssh_key_shell_policy()?;
     Ok(material)
 }
 

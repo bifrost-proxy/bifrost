@@ -1590,6 +1590,52 @@ fn setting_grant_revoke_parses() {
     }
 }
 
+#[test]
+fn setting_grant_update_level_with_device_parses() {
+    let cli = Cli::try_parse_from([
+        "bifrost", "setting", "grant", "update", "--device", "dp-2b82", "--level", "full",
+    ])
+    .expect("setting grant update --device --level should parse");
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Setting { action } => match action {
+            SettingCommands::Grant { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("dp-2b82"));
+                assert!(rendered.contains("full"));
+            }
+            _ => panic!("unexpected setting action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn setting_grant_update_positional_level_parses() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "setting",
+        "grant",
+        "update",
+        "grant-abc",
+        "--level",
+        "files-only",
+    ])
+    .expect("setting grant update positional --level should parse");
+    let command = cli.command.expect("command should exist");
+    match command {
+        Commands::Setting { action } => match action {
+            SettingCommands::Grant { action } => {
+                let rendered = format!("{action:?}");
+                assert!(rendered.contains("grant-abc"));
+                assert!(rendered.contains("files-only"));
+            }
+            _ => panic!("unexpected setting action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
 // ----- restart subcommand parsing -----
 
 #[test]

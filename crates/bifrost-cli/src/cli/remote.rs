@@ -535,8 +535,21 @@ pub enum RemoteGrantCommands {
     },
     #[command(about = "Update a grant's access scope and policy binding")]
     Update {
-        #[arg(help = "Grant ID to update")]
-        grant_id: String,
+        #[arg(help = "Grant ID to update; omit to choose interactively")]
+        grant_id: Option<String>,
+        #[arg(long = "grant-id", help = "Grant ID to update; useful for scripts")]
+        grant_id_option: Option<String>,
+        #[arg(
+            long,
+            help = "Grant/caller/device selector prefix; matches grant id, caller name, or fingerprint"
+        )]
+        device: Option<String>,
+        #[arg(
+            long,
+            value_parser = ["full", "full-trust", "shell", "commands-files", "commands-and-files", "files", "files-only", "query", "read-only", "read-only-watch"],
+            help = "Permission level: full, shell, files, or query"
+        )]
+        level: Option<String>,
         #[arg(long, value_parser = ["query", "selected", "all"], help = "Shell/query access mode")]
         access: Option<String>,
         #[arg(

@@ -497,10 +497,10 @@ async fn handle_file_access_config(
 
     match *req.method() {
         Method::GET => {
-            if let Err(e) = worker.ensure_active_ssh_file_access_policy() {
+            if let Err(e) = worker.ensure_active_ssh_default_policies() {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to restore ssh file access policy: {e}"),
+                    &format!("Failed to restore ssh default policies: {e}"),
                 );
             }
             let config = load_raw_config();
@@ -531,10 +531,10 @@ async fn handle_file_access_config(
                 return error_response(StatusCode::INTERNAL_SERVER_ERROR, &msg);
             }
 
-            if let Err(e) = worker.ensure_active_ssh_file_access_policy() {
+            if let Err(e) = worker.ensure_active_ssh_default_policies() {
                 return error_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    &format!("Failed to restore ssh file access policy: {e}"),
+                    &format!("Failed to restore ssh default policies: {e}"),
                 );
             }
 

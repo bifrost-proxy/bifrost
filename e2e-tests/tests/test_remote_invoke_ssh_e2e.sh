@@ -301,10 +301,56 @@ for grant in obj.get("grants", []):
         assert grant.get("expires_at") in (None, "")
         assert grant.get("caller_fingerprint") == "'"$CALLER_FINGERPRINT_1"'"
         assert grant.get("ssh_key_fingerprint") == "'"$FINGERPRINT"'"
+        assert grant.get("grant_scope") == "remote_shell_interactive"
+        assert grant.get("file_access") == "read_write"
+        assert grant.get("interactive_allowed") is True
+        assert grant.get("stdin_allowed") is True
         break
 else:
     raise AssertionError("grant not found")
 '
+
+log "Execute remote shell via SSH-key Full Trust grant"
+CLI_EXEC_OUTPUT="$TMPDIR/cli_exec.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote exec --relay-url "$RELAY_URL" --shell-text "printf ssh-full-trust-ok" \
+    >"$CLI_EXEC_OUTPUT" 2>&1
+grep -q "ssh-full-trust-ok" "$CLI_EXEC_OUTPUT"
+
+log "Switch SSH grant to Files only via setting grant --level"
+CLI_GRANT_FILES_OUTPUT="$TMPDIR/cli_grant_files.out"
+"$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting grant update --device "$CALLER_FINGERPRINT_1" --level files \
+    >"$CLI_GRANT_FILES_OUTPUT" 2>&1
+python3 - "$CLI_GRANT_FILES_OUTPUT" "$MATCH_GRANT" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+data = obj.get("data", obj)
+assert data.get("grant_id") == sys.argv[2]
+assert data.get("grant_scope") == "remote_query"
+assert data.get("file_access") == "read_write"
+assert data.get("policy_binding") in (None, {})
+assert data.get("interactive_allowed") is None
+assert data.get("stdin_allowed") is None
+PY
+
+log "Switch SSH grant back to Full Trust via setting grant --level"
+CLI_GRANT_FULL_OUTPUT="$TMPDIR/cli_grant_full.out"
+"$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting grant update --device "$CALLER_FINGERPRINT_1" --level full \
+    >"$CLI_GRANT_FULL_OUTPUT" 2>&1
+python3 - "$CLI_GRANT_FULL_OUTPUT" "$MATCH_GRANT" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+data = obj.get("data", obj)
+assert data.get("grant_id") == sys.argv[2]
+assert data.get("grant_scope") == "remote_shell_interactive"
+assert data.get("file_access") == "read_write"
+assert data.get("interactive_allowed") is True
+assert data.get("stdin_allowed") is True
+binding = data.get("policy_binding") or {}
+assert binding.get("mode") == "selected"
+assert "ssh-key-full-access" in binding.get("policy_ids", [])
+PY
 
 log "Use same SSH key from another caller sandbox and verify caller identity isolation"
 CALLER_DATA_DIR_2="$(mktemp -d)"

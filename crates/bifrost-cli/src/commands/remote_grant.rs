@@ -1,5 +1,9 @@
+use std::io::IsTerminal;
+
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::DEFAULT_SSH_KEY_SHELL_POLICY_ID;
 use chrono::{DateTime, Local};
+use dialoguer::{theme::ColorfulTheme, Select};
 use serde_json::{json, Value};
 
 use crate::cli::RemoteGrantCommands;
@@ -28,6 +32,9 @@ pub fn handle_remote_grant_command(
         }
         RemoteGrantCommands::Update {
             grant_id,
+            grant_id_option,
+            device,
+            level,
             access,
             scope,
             policy,
@@ -35,14 +42,33 @@ pub fn handle_remote_grant_command(
             interactive,
             file_access,
         } => {
-            let body = build_update_payload(
+            let grants_payload = client
+                .list_remote_invoke_grants()
+                .map_err(BifrostError::Config)?;
+            let grant_id = resolve_grant_id(
+                &grants_payload,
+                grant_id_option.as_deref().or(grant_id.as_deref()),
+                device.as_deref(),
+            )?;
+            let level = resolve_level(
+                &grants_payload,
+                level.as_deref(),
                 access.as_deref(),
                 scope.as_deref(),
-                &policy,
-                stdin,
-                interactive,
                 file_access.as_deref(),
             )?;
+            let body = if let Some(level) = level {
+                build_level_payload(level)
+            } else {
+                build_update_payload(
+                    access.as_deref(),
+                    scope.as_deref(),
+                    &policy,
+                    stdin,
+                    interactive,
+                    file_access.as_deref(),
+                )?
+            };
             let payload = client
                 .update_remote_invoke_grant(&grant_id, &body)
                 .map_err(BifrostError::Config)?;
@@ -65,6 +91,229 @@ pub fn handle_remote_grant_command(
     }
 
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionLevel {
+    FullTrust,
+    CommandsAndFiles,
+    FilesOnly,
+    ReadOnlyWatch,
+}
+
+impl PermissionLevel {
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "full" | "full-trust" => Ok(Self::FullTrust),
+            "shell" | "commands-files" | "commands-and-files" => Ok(Self::CommandsAndFiles),
+            "files" | "files-only" => Ok(Self::FilesOnly),
+            "query" | "read-only" | "read-only-watch" => Ok(Self::ReadOnlyWatch),
+            other => Err(BifrostError::Config(format!(
+                "unsupported permission level '{}'",
+                other
+            ))),
+        }
+    }
+}
+
+fn build_level_payload(level: PermissionLevel) -> Value {
+    match level {
+        PermissionLevel::FullTrust => json!({
+            "grant_scope": "remote_shell_interactive",
+            "file_access": "read_write",
+            "policy_binding": {
+                "mode": "selected",
+                "policy_ids": [DEFAULT_SSH_KEY_SHELL_POLICY_ID],
+            },
+            "interactive_allowed": true,
+            "stdin_allowed": true,
+        }),
+        PermissionLevel::CommandsAndFiles => json!({
+            "grant_scope": "remote_shell_exec",
+            "file_access": "read_write",
+            "policy_binding": {
+                "mode": "selected",
+                "policy_ids": [DEFAULT_SSH_KEY_SHELL_POLICY_ID],
+            },
+            "interactive_allowed": false,
+            "stdin_allowed": false,
+        }),
+        PermissionLevel::FilesOnly => json!({
+            "grant_scope": "remote_query",
+            "file_access": "read_write",
+            "policy_binding": Value::Null,
+            "interactive_allowed": Value::Null,
+            "stdin_allowed": Value::Null,
+        }),
+        PermissionLevel::ReadOnlyWatch => json!({
+            "grant_scope": "remote_query",
+            "file_access": "none",
+            "policy_binding": Value::Null,
+            "interactive_allowed": Value::Null,
+            "stdin_allowed": Value::Null,
+        }),
+    }
+}
+
+fn resolve_level(
+    grants_payload: &Value,
+    level: Option<&str>,
+    access: Option<&str>,
+    scope: Option<&str>,
+    file_access: Option<&str>,
+) -> Result<Option<PermissionLevel>> {
+    if let Some(level) = level {
+        if access.is_some() || scope.is_some() || file_access.is_some() {
+            return Err(BifrostError::Config(
+                "use either --level or low-level scope/access flags, not both".to_string(),
+            ));
+        }
+        return PermissionLevel::parse(level).map(Some);
+    }
+
+    if access.is_some() || scope.is_some() || file_access.is_some() {
+        return Ok(None);
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(BifrostError::Config(
+            "permission level is required in non-interactive mode; pass --level full|shell|files|query"
+                .to_string(),
+        ));
+    }
+
+    let choices = [
+        "Full trust - commands, files, stdin, interactive terminals",
+        "Run commands & read/write files - no interactive terminals",
+        "Files only - read/write files and inspect traffic",
+        "Read-only watch - status and traffic only",
+    ];
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!(
+            "Select permission level for {} grant(s)",
+            grants_payload
+                .get("grants")
+                .and_then(Value::as_array)
+                .map(|grants| grants.len())
+                .unwrap_or(0)
+        ))
+        .items(&choices)
+        .default(0)
+        .interact()
+        .map_err(|error| BifrostError::Config(format!("select permission level: {error}")))?;
+    Ok(Some(match selection {
+        0 => PermissionLevel::FullTrust,
+        1 => PermissionLevel::CommandsAndFiles,
+        2 => PermissionLevel::FilesOnly,
+        _ => PermissionLevel::ReadOnlyWatch,
+    }))
+}
+
+fn resolve_grant_id(
+    payload: &Value,
+    explicit: Option<&str>,
+    device: Option<&str>,
+) -> Result<String> {
+    if explicit.is_some() && device.is_some() {
+        return Err(BifrostError::Config(
+            "use either grant id or --device, not both".to_string(),
+        ));
+    }
+    if let Some(grant_id) = explicit {
+        return Ok(grant_id.to_string());
+    }
+
+    let grants = payload
+        .get("grants")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if grants.is_empty() {
+        return Err(BifrostError::Config("no active grants found".to_string()));
+    }
+
+    if let Some(selector) = device {
+        let selector = selector.trim();
+        let matches = grants
+            .iter()
+            .filter(|grant| grant_matches_selector(grant, selector))
+            .collect::<Vec<_>>();
+        return match matches.as_slice() {
+            [grant] => grant_id_from_value(grant),
+            [] => Err(BifrostError::Config(format!(
+                "no grant matched device selector '{}'",
+                selector
+            ))),
+            _ => Err(BifrostError::Config(format!(
+                "device selector '{}' matched multiple grants; use --grant-id",
+                selector
+            ))),
+        };
+    }
+
+    if !std::io::stdin().is_terminal() {
+        return Err(BifrostError::Config(
+            "grant id is required in non-interactive mode; pass <grant-id>, --grant-id, or --device"
+                .to_string(),
+        ));
+    }
+
+    let labels = grants.iter().map(format_grant_choice).collect::<Vec<_>>();
+    let selection = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select grant/device")
+        .items(&labels)
+        .default(0)
+        .interact()
+        .map_err(|error| BifrostError::Config(format!("select grant: {error}")))?;
+    grant_id_from_value(&grants[selection])
+}
+
+fn grant_id_from_value(grant: &Value) -> Result<String> {
+    grant
+        .get("grant_id")
+        .and_then(Value::as_str)
+        .or_else(|| grant.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| BifrostError::Config("grant entry is missing grant_id".to_string()))
+}
+
+fn grant_matches_selector(grant: &Value, selector: &str) -> bool {
+    [
+        "grant_id",
+        "id",
+        "caller_display_name",
+        "caller_fingerprint",
+        "label",
+        "device_name",
+        "ssh_key_fingerprint",
+    ]
+    .iter()
+    .filter_map(|key| grant.get(*key).and_then(Value::as_str))
+    .any(|value| value.starts_with(selector) || value.contains(selector))
+}
+
+fn format_grant_choice(grant: &Value) -> String {
+    let grant_id = grant
+        .get("grant_id")
+        .and_then(Value::as_str)
+        .or_else(|| grant.get("id").and_then(Value::as_str))
+        .unwrap_or("-");
+    let caller = grant
+        .get("caller_display_name")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .or_else(|| grant.get("label").and_then(Value::as_str))
+        .or_else(|| grant.get("caller_fingerprint").and_then(Value::as_str))
+        .unwrap_or("-");
+    let scope = grant
+        .get("grant_scope")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let file_access = grant
+        .get("file_access")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    format!("{grant_id} | {caller} | scope={scope} | file={file_access}")
 }
 
 fn build_update_payload(
@@ -188,6 +437,10 @@ fn print_grant_summary(payload: &Value) {
             .get("grant_scope")
             .and_then(Value::as_str)
             .unwrap_or("-");
+        let file_access = grant
+            .get("file_access")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
         let mode = grant
             .get("grant_mode")
             .and_then(Value::as_str)
@@ -220,7 +473,10 @@ fn print_grant_summary(payload: &Value) {
             .map(format_millis)
             .unwrap_or_else(|| "-".to_string());
         println!("  - {} {}", grant_id, caller);
-        println!("    scope: {} | mode: {}", scope, mode);
+        println!(
+            "    scope: {} | file: {} | mode: {}",
+            scope, file_access, mode
+        );
         println!(
             "    first connected: {} | last command: {}",
             first_connected, last_command
@@ -294,5 +550,45 @@ mod tests {
             .expect_err("no flags should fail");
 
         assert!(err.to_string().contains("--file-access"));
+    }
+
+    #[test]
+    fn build_level_payload_full_trust_uses_interactive_shell_and_default_policy() {
+        let payload = build_level_payload(PermissionLevel::FullTrust);
+
+        assert_eq!(payload["grant_scope"], "remote_shell_interactive");
+        assert_eq!(payload["file_access"], "read_write");
+        assert_eq!(payload["interactive_allowed"], true);
+        assert_eq!(payload["stdin_allowed"], true);
+        assert_eq!(payload["policy_binding"]["mode"], "selected");
+        assert_eq!(
+            payload["policy_binding"]["policy_ids"][0],
+            DEFAULT_SSH_KEY_SHELL_POLICY_ID
+        );
+    }
+
+    #[test]
+    fn build_level_payload_files_only_keeps_shell_query_but_file_write() {
+        let payload = build_level_payload(PermissionLevel::FilesOnly);
+
+        assert_eq!(payload["grant_scope"], "remote_query");
+        assert_eq!(payload["file_access"], "read_write");
+        assert!(payload["policy_binding"].is_null());
+    }
+
+    #[test]
+    fn permission_level_aliases_parse() {
+        assert_eq!(
+            PermissionLevel::parse("full-trust").unwrap(),
+            PermissionLevel::FullTrust
+        );
+        assert_eq!(
+            PermissionLevel::parse("commands-and-files").unwrap(),
+            PermissionLevel::CommandsAndFiles
+        );
+        assert_eq!(
+            PermissionLevel::parse("read-only-watch").unwrap(),
+            PermissionLevel::ReadOnlyWatch
+        );
     }
 }

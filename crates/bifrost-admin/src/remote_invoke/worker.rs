@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use bifrost_core::{BifrostError, Result};
-use bifrost_storage::RemoteShellStore;
+use bifrost_storage::{
+    ensure_default_ssh_key_shell_policy, RemoteShellStore, DEFAULT_SSH_KEY_SHELL_POLICY_ID,
+};
 use bifrost_sync::SyncManagerHandle;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -545,6 +547,14 @@ impl RemoteInvokeWorker {
         Ok(Some(record))
     }
 
+    pub fn ensure_active_ssh_default_policies(&self) -> Result<Option<SshKeyRecord>> {
+        let record = self.ensure_active_ssh_file_access_policy()?;
+        if record.is_some() {
+            ensure_default_ssh_key_shell_policy()?;
+        }
+        Ok(record)
+    }
+
     pub fn export_active_ssh_key(&self) -> Result<Option<SshKeyMaterial>> {
         self.ssh_key_store.export_active_key_material()
     }
@@ -560,6 +570,7 @@ impl RemoteInvokeWorker {
             .ssh_key_store
             .create_or_replace_key(label, grant_mode)?;
         self.seed_ssh_file_access_grant(&result.record, seed_policy);
+        ensure_default_ssh_key_shell_policy()?;
         self.trigger_ssh_route_refresh();
         Ok(result)
     }
@@ -602,6 +613,7 @@ impl RemoteInvokeWorker {
         if !moved {
             self.seed_ssh_file_access_grant(&reset.record, None);
         }
+        ensure_default_ssh_key_shell_policy()?;
         self.trigger_ssh_route_refresh();
         Ok(Some(reset))
     }
@@ -789,6 +801,9 @@ impl RemoteInvokeWorker {
             )
         })?;
         let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
+        if shell_policy_binding_uses_default_ssh_key_policy(requested_policy_binding.as_ref()) {
+            ensure_default_ssh_key_shell_policy()?;
+        }
         let shell_grant = shell_grant_provision(
             requested_grant_scope,
             requested_file_access,
@@ -1657,6 +1672,10 @@ impl RemoteInvokeWorker {
             .cloned()
             .ok_or_else(|| BifrostError::NotFound(format!("grant '{}' not found", grant_id)))?;
 
+        if shell_policy_binding_uses_default_ssh_key_policy(requested_policy_binding.as_ref()) {
+            ensure_default_ssh_key_shell_policy()?;
+        }
+
         let updated_shell_grant = updated_shell_grant_provision(
             &existing,
             requested_grant_scope,
@@ -2152,7 +2171,20 @@ impl RemoteInvokeWorker {
             .filter(|fingerprint| !fingerprint.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| active_key.record.ssh_key_fingerprint.clone());
-        let shell_grant = shell_grant_provision(None, None, None, None, None).unwrap_or_else(|error| {
+        if let Err(error) = ensure_default_ssh_key_shell_policy() {
+            warn!(error = %error, "seed default SSH-key shell policy failed before ssh connect");
+        }
+        let shell_grant = shell_grant_provision(
+            Some(GrantScope::RemoteShellInteractive),
+            Some(FileAccessScope::ReadWrite),
+            Some(json!({
+                "mode": "selected",
+                "policy_ids": [DEFAULT_SSH_KEY_SHELL_POLICY_ID],
+            })),
+            Some(true),
+            Some(true),
+        )
+        .unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed for ssh connect, fallback to remote_query");
             default_query_grant_provision()
         });
@@ -3740,6 +3772,21 @@ fn normalize_shell_policy_binding(
         "mode": "selected",
         "policy_ids": normalized_policy_ids,
     }))
+}
+
+fn shell_policy_binding_uses_default_ssh_key_policy(binding: Option<&Value>) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    binding
+        .get("policy_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|policy_id| policy_id == DEFAULT_SSH_KEY_SHELL_POLICY_ID)
+        })
 }
 
 fn command_accepts_stdin(command: &RemoteCommand) -> bool {
