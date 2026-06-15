@@ -452,6 +452,31 @@
 - Linux Rules E2E 的 `response_modify/trailers.txt` fixture 请求 `https://test-trailers.local/test` 后，响应头包含 `Trailer: X-Trace`，测试总结失败数为 `0`。
 - 测试不使用正式 `9900` 端口，不修改系统代理。
 
+### TC-REF-16：Windows rules result file 后 cleanup 卡住回归
+
+**操作步骤**：
+1. 执行规则并行 runner 语法检查：
+   ```bash
+   bash -n e2e-tests/run_all_tests_parallel.sh
+   ```
+2. 静态检查单 fixture watchdog 不再使用长时间后台 `sleep "$fixture_timeout"`，并确认存在有界等待 helper与 Windows 无界 `wait` 规避：
+   ```bash
+   rg -n 'wait_for_pid_exit_bounded|watchdog_start|sleep_seconds 1|fixture watchdog cleanup exceeded|if ! is_windows; then' e2e-tests/run_all_tests_parallel.sh
+   ! rg -n 'sleep "\$fixture_timeout" &' e2e-tests/run_all_tests_parallel.sh
+   ```
+3. 静态检查主循环在 `result_*.txt` 已写入 `STATUS=` 时不会无界等待仍在 cleanup 的 `run_single_test` 子进程：
+   ```bash
+   rg -n 'if result_has_status "\$rf"; then|清理超过 5s|kill_process_tree "\$\{pids\[\$i\]\}"|kill_pid_force "\$\{pids\[\$i\]\}"' e2e-tests/run_all_tests_parallel.sh
+   ```
+4. 推送后检查 GitHub Actions Windows rules shard 1/4；若日志最后停在 `request_modify/forwarded_for.txt` 附近，后续进度必须继续推进到 `request_modify/req_cors.txt` 及后续 fixture，或在内层 1200 秒预算内输出明确 timeout 失败并上传日志。
+
+**预期结果**：
+- `bash -n` 通过。
+- fixture watchdog 使用短轮询，测试完成后 kill watchdog 不会因为一个长 `sleep` 子进程残留而卡住 suite；Windows 路径不对 cleanup 子进程执行无界 `wait`。
+- 主循环优先按 result file 中的 `STATUS=` 判定 fixture 已完成；如果 cleanup 超过 5 秒，会强制回收该子树并继续后续 fixture。
+- Windows shard 不能再出现 `forwarded_for.txt` 已通过后长期无进度且内层 runner timeout 也不触发的状态。
+- 本静态验证不启动正式 `9900` 服务、不修改系统代理；完整 Windows runtime 由 PR GitHub Actions `CI` run 验证。
+
 ## 清理步骤
 
 1. 删除本测试创建的临时数据目录：
@@ -465,6 +490,8 @@
    ```
 
 ## 执行记录
+
+- 2026-06-15：通过。补充并执行 TC-REF-16；执行 `bash -n e2e-tests/run_all_tests_parallel.sh scripts/run_all_e2e.sh e2e-tests/test_rules.sh` 通过。执行 `rg -n 'wait_for_pid_exit_bounded|watchdog_start|sleep_seconds 1|fixture watchdog cleanup exceeded|if ! is_windows; then' e2e-tests/run_all_tests_parallel.sh` 命中新 helper、短轮询 watchdog、cleanup 超时诊断和 Windows 无界 `wait` 规避；执行 `! rg -n 'sleep "\$fixture_timeout" &' e2e-tests/run_all_tests_parallel.sh` 通过，确认不再创建长时间后台 sleep watchdog；执行 `rg -n 'if result_has_status "\$rf"; then|清理超过 5s|kill_process_tree "\$\{pids\[\$i\]\}"|kill_pid_force "\$\{pids\[\$i\]\}"' e2e-tests/run_all_tests_parallel.sh` 命中 result-file 优先回收与有界 cleanup 强杀逻辑。完整 Windows shard runtime 由推送后的 GitHub Actions `CI` run 验证。
 
 - 2026-06-12：通过。补充并执行 TC-REF-15 的本地 Windows 验证；先执行 `cargo +stable test -p bifrost-proxy test_buffered_res_body_mode_removes_content_length_for_trailers --all-features -j1`，1/1 通过，确认 buffered 响应命中 `trailers://` 时不会保留 `Content-Length` 且 `Trailer: X-Trace` 声明不被 normalize 删除；随后执行 `cargo +stable test -p bifrost-proxy --all-features -j1`，486/486 通过、1 ignored，`protocol_e2e` 18/18 通过，`upstream_http3_e2e` 2/2 通过。Linux `response_modify/trailers.txt` 完整 fixture 由推送后的 GitHub Actions `CI` run 验证。
 

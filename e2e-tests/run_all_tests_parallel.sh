@@ -56,6 +56,21 @@ except Exception:
 PY
 }
 
+wait_for_pid_exit_bounded() {
+    local pid="$1"
+    local timeout_secs="${2:-5}"
+    local start_secs="$SECONDS"
+
+    while kill -0 "$pid" 2>/dev/null; do
+        if [[ $((SECONDS - start_secs)) -ge "$timeout_secs" ]]; then
+            return 1
+        fi
+        sleep_seconds 0.1
+    done
+
+    return 0
+}
+
 usage() {
     echo "用法: $0 [选项]"
     echo ""
@@ -371,23 +386,14 @@ run_single_test() {
 
         local watchdog_pid=""
         (
-            # Avoid leaking orphan `sleep` processes when the watchdog is killed.
-            # If the watchdog is terminated (e.g. because the test finished), ensure
-            # the timer is also terminated so the suite output pipe can close.
             set +e
-            local timer_pid=""
-            cleanup_timer() {
-                if [[ -n "${timer_pid:-}" ]]; then
-                    kill "$timer_pid" 2>/dev/null || true
-                    wait "$timer_pid" 2>/dev/null || true
+            local watchdog_start="$SECONDS"
+            while kill -0 "$test_pid" 2>/dev/null; do
+                if [[ $((SECONDS - watchdog_start)) -ge "$fixture_timeout" ]]; then
+                    break
                 fi
-            }
-            trap cleanup_timer TERM INT EXIT
-
-            sleep "$fixture_timeout" &
-            timer_pid=$!
-            wait "$timer_pid" 2>/dev/null || exit 0
-
+                sleep_seconds 1
+            done
             if kill -0 "$test_pid" 2>/dev/null; then
                 echo "[TIMEOUT] fixture ${rel_path} exceeded ${fixture_timeout}s on port ${proxy_port}" >> "$log_file"
                 # The fixture script spawns background processes (notably `bifrost`).
@@ -411,7 +417,14 @@ run_single_test() {
         fi
 
         kill "$watchdog_pid" 2>/dev/null || true
-        wait "$watchdog_pid" 2>/dev/null || true
+        if ! wait_for_pid_exit_bounded "$watchdog_pid" 3; then
+            echo "[WARN] fixture watchdog cleanup exceeded 3s for ${rel_path}, killing watchdog pid ${watchdog_pid}" >> "$log_file"
+            kill_process_tree "$watchdog_pid"
+            kill_pid_force "$watchdog_pid"
+        fi
+        if ! is_windows; then
+            wait "$watchdog_pid" 2>/dev/null || true
+        fi
 
         local passed=$(grep "^Passed:" "$log_file" 2>/dev/null | tail -1 | perl -pe 's/\e\[[0-9;]*m//g' | sed 's/.*: *//' | tr -d '[:space:]' || echo "0")
         local failed=$(grep "^Failed:" "$log_file" 2>/dev/null | tail -1 | perl -pe 's/\e\[[0-9;]*m//g' | sed 's/.*: *//' | tr -d '[:space:]' || echo "0")
@@ -1149,7 +1162,37 @@ main() {
             fi
 
             local rf="${RESULTS_DIR}/result_${i}.txt"
-            if result_has_status "$rf" || ! kill -0 "${pids[$i]}" 2>/dev/null; then
+            if result_has_status "$rf"; then
+                if kill -0 "${pids[$i]}" 2>/dev/null && ! wait_for_pid_exit_bounded "${pids[$i]}" 5; then
+                    local fixture_rel="${test_files[$i]#$RULES_DIR/}"
+                    warn "测试套件已写入结果但清理超过 5s，强制回收: ${fixture_rel}"
+                    kill_process_tree "${pids[$i]}"
+                    kill_pid_force "${pids[$i]}"
+                fi
+                if ! is_windows; then
+                    wait "${pids[$i]}" 2>/dev/null || true
+                fi
+                unset 'pids[i]'
+                completed=$((completed + 1))
+                running=$((running - 1))
+                local fixture_rel="${test_files[$i]#$RULES_DIR/}"
+                local result_status=""
+                if [[ -f "$rf" ]]; then
+                    while IFS='=' read -r key value; do
+                        if [[ "$key" == "STATUS" ]]; then
+                            result_status="${value%$'\r'}"
+                            break
+                        fi
+                    done < "$rf"
+                fi
+                local label="${fixture_rel}"
+                if [[ "$result_status" == "passed" ]]; then
+                    label="✓ ${fixture_rel}"
+                elif [[ "$result_status" == "failed" ]]; then
+                    label="✗ ${fixture_rel}"
+                fi
+                print_progress "$completed" "$total_suites" "$label"
+            elif ! kill -0 "${pids[$i]}" 2>/dev/null; then
                 wait "${pids[$i]}" 2>/dev/null || true
                 unset 'pids[i]'
                 completed=$((completed + 1))
