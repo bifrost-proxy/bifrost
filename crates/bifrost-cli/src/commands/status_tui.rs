@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bifrost_admin::push::{
     PushMessage as AdminPushMessage, SETTINGS_SCOPE_CLI_PROXY, SETTINGS_SCOPE_PERFORMANCE_CONFIG,
@@ -193,6 +193,80 @@ struct PerformanceConfigResponse {
     frame_store_stats: Option<FrameStoreStats>,
 }
 
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeStatus {
+    state: String,
+    pending_pairings_count: usize,
+    active_call_ids: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeGrant {
+    grant_id: String,
+    caller_fingerprint: String,
+    #[serde(default)]
+    caller_display_name: Option<String>,
+    #[serde(default)]
+    label: Option<String>,
+    #[serde(default)]
+    auth_method: Option<String>,
+    #[serde(default)]
+    grant_scope: Option<String>,
+    status: String,
+    #[serde(default)]
+    first_connected_at: Option<u64>,
+    #[serde(default)]
+    created_at: Option<u64>,
+    #[serde(default)]
+    last_command_at: Option<u64>,
+    #[serde(default)]
+    last_used_at: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeCommandSummary {
+    command_preview: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeCall {
+    call_id: String,
+    grant_id: String,
+    caller_fingerprint: String,
+    #[serde(default)]
+    caller_display_name: Option<String>,
+    #[serde(default)]
+    auth_method: Option<String>,
+    command_summary: RemoteInvokeCommandSummary,
+    status: String,
+    started_at: u64,
+    #[serde(default)]
+    ended_at: Option<u64>,
+    #[serde(default)]
+    exit_code: Option<i32>,
+    #[serde(default)]
+    duration_ms: Option<u64>,
+    #[serde(default)]
+    bytes_out: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeGrantsResponse {
+    grants: Vec<RemoteInvokeGrant>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+struct RemoteInvokeCallsResponse {
+    calls: Vec<RemoteInvokeCall>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct RemoteInvokeSnapshot {
+    status: Option<RemoteInvokeStatus>,
+    grants: Vec<RemoteInvokeGrant>,
+    calls: Vec<RemoteInvokeCall>,
+}
+
 const SLOW_REFRESH_INTERVAL: u64 = 5;
 const PROCESS_CHECK_INTERVAL: Duration = Duration::from_secs(3);
 const CPU_HISTORY_SIZE: usize = 3600;
@@ -212,6 +286,7 @@ struct FetchPlan {
     app_metrics: bool,
     host_metrics: bool,
     cli_proxy: bool,
+    remote_invoke: bool,
 }
 
 #[derive(Debug)]
@@ -248,6 +323,7 @@ struct App {
     config: Option<ConfigResponse>,
     performance_config: Option<PerformanceConfigResponse>,
     cli_proxy: Option<CliProxyStatus>,
+    remote_invoke: RemoteInvokeSnapshot,
     selected_tab: usize,
     last_process_check: Instant,
     last_update: Instant,
@@ -285,6 +361,7 @@ impl App {
             config: None,
             performance_config: None,
             cli_proxy: None,
+            remote_invoke: RemoteInvokeSnapshot::default(),
             selected_tab: 0,
             last_process_check: Instant::now() - PROCESS_CHECK_INTERVAL,
             last_update: Instant::now(),
@@ -396,6 +473,7 @@ impl App {
 
         let port = self.port;
         let fetch_agg_metrics = force_all && self.selected_tab == 2;
+        let needs_remote_invoke = self.selected_tab == 3;
         let plan = FetchPlan {
             metrics: !push_healthy,
             rules: needs_rules_config && (need_slow_refresh || force_full),
@@ -406,6 +484,7 @@ impl App {
             app_metrics: fetch_agg_metrics,
             host_metrics: fetch_agg_metrics,
             cli_proxy: needs_rules_config && (need_slow_refresh || force_full) && !push_healthy,
+            remote_invoke: needs_remote_invoke && (need_slow_refresh || force_full),
         };
         let (
             metrics,
@@ -417,6 +496,7 @@ impl App {
             app_metrics,
             host_metrics,
             cli_proxy,
+            remote_invoke,
         ) = fetch_all_data(port, plan);
 
         if let Some(m) = metrics {
@@ -447,6 +527,9 @@ impl App {
         if let Some(s) = cli_proxy {
             self.cli_proxy = Some(s);
         }
+        if let Some(remote) = remote_invoke {
+            self.remote_invoke = remote;
+        }
 
         if need_slow_refresh {
             self.last_slow_refresh = Instant::now();
@@ -456,7 +539,7 @@ impl App {
     }
 
     fn next_tab(&mut self) {
-        self.selected_tab = (self.selected_tab + 1) % 3;
+        self.selected_tab = (self.selected_tab + 1) % 4;
         // 首次切换到 tab 时立即刷新一次，避免等待下一次 tick/slow refresh。
         // 注意：apps/hosts 属于 DB 聚合，仅在 Traffic Details(tab=2) 时触发。
         self.refresh_with_options(true);
@@ -464,7 +547,7 @@ impl App {
 
     fn prev_tab(&mut self) {
         self.selected_tab = if self.selected_tab == 0 {
-            2
+            3
         } else {
             self.selected_tab - 1
         };
@@ -486,6 +569,7 @@ type FetchAllDataResult = (
     Option<Vec<AppMetrics>>,
     Option<Vec<HostMetrics>>,
     Option<CliProxyStatus>,
+    Option<RemoteInvokeSnapshot>,
 );
 
 fn fetch_all_data(port: u16, plan: FetchPlan) -> FetchAllDataResult {
@@ -555,6 +639,13 @@ fn fetch_all_data(port: u16, plan: FetchPlan) -> FetchAllDataResult {
         });
     }
 
+    if plan.remote_invoke {
+        let tx_remote = tx.clone();
+        thread::spawn(move || {
+            let _ = tx_remote.send(("remote_invoke", fetch_remote_invoke_snapshot(port)));
+        });
+    }
+
     drop(tx);
 
     let mut metrics = None;
@@ -566,6 +657,7 @@ fn fetch_all_data(port: u16, plan: FetchPlan) -> FetchAllDataResult {
     let mut app_metrics = None;
     let mut host_metrics = None;
     let mut cli_proxy = None;
+    let mut remote_invoke = None;
 
     for (key, data) in rx {
         match key {
@@ -578,6 +670,7 @@ fn fetch_all_data(port: u16, plan: FetchPlan) -> FetchAllDataResult {
             "apps" => app_metrics = data.and_then(|d| d.downcast().ok()).map(|b| *b),
             "hosts" => host_metrics = data.and_then(|d| d.downcast().ok()).map(|b| *b),
             "cli_proxy" => cli_proxy = data.and_then(|d| d.downcast().ok()).map(|b| *b),
+            "remote_invoke" => remote_invoke = data.and_then(|d| d.downcast().ok()).map(|b| *b),
             _ => {}
         }
     }
@@ -592,6 +685,7 @@ fn fetch_all_data(port: u16, plan: FetchPlan) -> FetchAllDataResult {
         app_metrics,
         host_metrics,
         cli_proxy,
+        remote_invoke,
     )
 }
 
@@ -648,6 +742,35 @@ fn fetch_cli_proxy(port: u16) -> Option<Box<dyn std::any::Any + Send>> {
     let url = format!("http://127.0.0.1:{}/_bifrost/api/proxy/cli", port);
     let result: Option<CliProxyStatus> = direct_agent().get(&url).call().ok()?.into_json().ok();
     result.map(|r| Box::new(r) as Box<dyn std::any::Any + Send>)
+}
+
+fn fetch_remote_invoke_snapshot(port: u16) -> Option<Box<dyn std::any::Any + Send>> {
+    let base = format!("http://127.0.0.1:{}/_bifrost/api/remote-invoke", port);
+    let status = direct_agent()
+        .get(&format!("{}/status", base))
+        .call()
+        .ok()
+        .and_then(|resp| resp.into_json::<RemoteInvokeStatus>().ok());
+    let grants = direct_agent()
+        .get(&format!("{}/grants", base))
+        .call()
+        .ok()
+        .and_then(|resp| resp.into_json::<RemoteInvokeGrantsResponse>().ok())
+        .map(|resp| resp.grants)
+        .unwrap_or_default();
+    let calls = direct_agent()
+        .get(&format!("{}/calls?limit=20", base))
+        .call()
+        .ok()
+        .and_then(|resp| resp.into_json::<RemoteInvokeCallsResponse>().ok())
+        .map(|resp| resp.calls)
+        .unwrap_or_default();
+
+    Some(Box::new(RemoteInvokeSnapshot {
+        status,
+        grants,
+        calls,
+    }) as Box<dyn std::any::Any + Send>)
 }
 
 fn spawn_push_client(port: Arc<AtomicU16>) -> mpsc::Receiver<TuiPushEvent> {
@@ -814,6 +937,91 @@ fn format_time_span(seconds: usize) -> String {
     }
 }
 
+fn format_timestamp_millis(timestamp: Option<u64>) -> String {
+    let Some(timestamp) = timestamp.filter(|value| *value > 0) else {
+        return "-".to_string();
+    };
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(timestamp);
+    if now >= timestamp {
+        format!(
+            "{} ago",
+            format_time_span(((now - timestamp) / 1000) as usize)
+        )
+    } else {
+        "just now".to_string()
+    }
+}
+
+fn truncate_text(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut output = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    output.push_str("...");
+    output
+}
+
+fn caller_label(
+    display_name: Option<&String>,
+    label: Option<&String>,
+    fingerprint: &str,
+) -> String {
+    display_name
+        .filter(|value| !value.trim().is_empty())
+        .or(label.filter(|value| !value.trim().is_empty()))
+        .cloned()
+        .unwrap_or_else(|| truncate_text(fingerprint, 12))
+}
+
+fn format_remote_auth(auth_method: Option<&String>) -> String {
+    match auth_method.map(|value| value.as_str()) {
+        Some("ssh_publickey") => "SSH key".to_string(),
+        Some("pair_code") => "Pair code".to_string(),
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+fn format_remote_result(call: &RemoteInvokeCall) -> String {
+    let mut parts = Vec::new();
+    if let Some(code) = call.exit_code {
+        parts.push(format!("exit {}", code));
+    }
+    if let Some(duration_ms) = call.duration_ms {
+        parts.push(format_time_span((duration_ms / 1000) as usize));
+    }
+    if let Some(bytes_out) = call.bytes_out {
+        parts.push(format!("out {}", format_bytes(bytes_out)));
+    }
+    if parts.is_empty() {
+        if call.ended_at.is_none() {
+            "running".to_string()
+        } else {
+            "-".to_string()
+        }
+    } else {
+        parts.join(" / ")
+    }
+}
+
+fn latest_call_for_grant<'a>(
+    grant: &RemoteInvokeGrant,
+    calls: &'a [RemoteInvokeCall],
+) -> Option<&'a RemoteInvokeCall> {
+    calls
+        .iter()
+        .filter(|call| {
+            call.grant_id == grant.grant_id || call.caller_fingerprint == grant.caller_fingerprint
+        })
+        .max_by_key(|call| call.started_at)
+}
+
 pub fn run_status_tui() -> bifrost_core::Result<()> {
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
@@ -880,7 +1088,12 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
     let pid_info = app.pid.map(|p| format!("PID: {}", p)).unwrap_or_default();
 
-    let tabs = vec!["Overview", "Rules & Config", "Traffic Details"];
+    let tabs = vec![
+        "Overview",
+        "Rules & Config",
+        "Traffic Details",
+        "Remote Invoke",
+    ];
     let tabs_widget = Tabs::new(tabs)
         .block(Block::default().borders(Borders::ALL).title(vec![
             Span::raw(" Bifrost Status "),
@@ -910,6 +1123,7 @@ fn render_content(frame: &mut Frame, area: Rect, app: &App) {
         0 => render_overview(frame, area, app),
         1 => render_rules_config(frame, area, app),
         2 => render_traffic_details(frame, area, app),
+        3 => render_remote_invoke(frame, area, app),
         _ => {}
     }
 }
@@ -1517,6 +1731,185 @@ fn render_traffic_details(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(hosts_table, detail_layout[1]);
 }
 
+fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Percentage(48),
+            Constraint::Percentage(52),
+        ])
+        .split(area);
+
+    let status = app.remote_invoke.status.as_ref();
+    let state = status
+        .map(|value| value.state.as_str())
+        .unwrap_or("unavailable");
+    let active_calls = status
+        .map(|value| value.active_call_ids.len())
+        .unwrap_or_default();
+    let pending_pairings = status
+        .map(|value| value.pending_pairings_count)
+        .unwrap_or_default();
+    let latest_call = app
+        .remote_invoke
+        .calls
+        .iter()
+        .max_by_key(|call| call.started_at);
+    let latest_summary = latest_call
+        .map(|call| {
+            format!(
+                "{} | {} | {}",
+                truncate_text(&call.command_summary.command_preview, 56),
+                call.status,
+                format_remote_result(call)
+            )
+        })
+        .unwrap_or_else(|| "No remote command history".to_string());
+
+    let summary = Paragraph::new(vec![
+        Line::from(vec![
+            Span::styled("State: ", Style::default().fg(Color::DarkGray)),
+            Span::styled(state.to_string(), Style::default().fg(Color::Cyan).bold()),
+            Span::raw("  "),
+            Span::styled("Clients: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(app.remote_invoke.grants.len().to_string()),
+            Span::raw("  "),
+            Span::styled("Active Calls: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(active_calls.to_string()),
+            Span::raw("  "),
+            Span::styled("Pending Pairings: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(pending_pairings.to_string()),
+        ]),
+        Line::from(vec![
+            Span::styled("Latest: ", Style::default().fg(Color::DarkGray)),
+            Span::raw(latest_summary),
+        ]),
+    ])
+    .block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Remote Invoke Status "),
+    );
+    frame.render_widget(summary, layout[0]);
+
+    let client_rows: Vec<Row> = app
+        .remote_invoke
+        .grants
+        .iter()
+        .take(12)
+        .map(|grant| {
+            let latest = latest_call_for_grant(grant, &app.remote_invoke.calls);
+            let command = latest
+                .map(|call| truncate_text(&call.command_summary.command_preview, 36))
+                .unwrap_or_else(|| "-".to_string());
+            let call_status = latest
+                .map(|call| call.status.clone())
+                .unwrap_or_else(|| "-".to_string());
+            let result = latest
+                .map(format_remote_result)
+                .unwrap_or_else(|| "-".to_string());
+            Row::new(vec![
+                caller_label(
+                    grant.caller_display_name.as_ref(),
+                    grant.label.as_ref(),
+                    &grant.caller_fingerprint,
+                ),
+                format_remote_auth(grant.auth_method.as_ref()),
+                grant.grant_scope.clone().unwrap_or_else(|| "-".to_string()),
+                grant.status.clone(),
+                format_timestamp_millis(grant.first_connected_at.or(grant.created_at)),
+                format_timestamp_millis(grant.last_command_at.or(grant.last_used_at)),
+                command,
+                call_status,
+                result,
+            ])
+        })
+        .collect();
+
+    let clients_table = Table::new(
+        client_rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(10),
+            Constraint::Length(18),
+            Constraint::Length(10),
+            Constraint::Length(11),
+            Constraint::Length(11),
+            Constraint::Min(18),
+            Constraint::Length(12),
+            Constraint::Length(18),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            "Client",
+            "Auth",
+            "Scope",
+            "Grant",
+            "Connected",
+            "Last Cmd",
+            "Latest Command",
+            "Status",
+            "Result",
+        ])
+        .style(Style::default().fg(Color::Yellow).bold())
+        .bottom_margin(1),
+    )
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        " Connected Clients ({}) ",
+        app.remote_invoke.grants.len()
+    )));
+    frame.render_widget(clients_table, layout[1]);
+
+    let call_rows: Vec<Row> = app
+        .remote_invoke
+        .calls
+        .iter()
+        .take(12)
+        .map(|call| {
+            Row::new(vec![
+                caller_label(
+                    call.caller_display_name.as_ref(),
+                    None,
+                    &call.caller_fingerprint,
+                ),
+                format_remote_auth(call.auth_method.as_ref()),
+                truncate_text(&call.command_summary.command_preview, 44),
+                call.status.clone(),
+                format_remote_result(call),
+                format_timestamp_millis(Some(call.started_at)),
+                truncate_text(&call.call_id, 12),
+            ])
+        })
+        .collect();
+
+    let calls_table = Table::new(
+        call_rows,
+        [
+            Constraint::Min(12),
+            Constraint::Length(10),
+            Constraint::Min(24),
+            Constraint::Length(12),
+            Constraint::Length(20),
+            Constraint::Length(11),
+            Constraint::Length(12),
+        ],
+    )
+    .header(
+        Row::new(vec![
+            "Client", "Auth", "Command", "Status", "Result", "Started", "Call ID",
+        ])
+        .style(Style::default().fg(Color::Yellow).bold())
+        .bottom_margin(1),
+    )
+    .block(Block::default().borders(Borders::ALL).title(format!(
+        " Recent Commands ({}) ",
+        app.remote_invoke.calls.len()
+    )));
+    frame.render_widget(calls_table, layout[2]);
+}
+
 fn render_footer(frame: &mut Frame, area: Rect) {
     let help = Line::from(vec![
         Span::styled(" q ", Style::default().fg(Color::Yellow).bold()),
@@ -1645,6 +2038,102 @@ mod tests {
         assert_eq!(format_time_span(3_660), "1h1m");
     }
 
+    #[test]
+    fn remote_invoke_latest_call_matches_grant_and_prefers_newest() {
+        let grant = RemoteInvokeGrant {
+            grant_id: "grant-a".into(),
+            caller_fingerprint: "caller-a".into(),
+            status: "active".into(),
+            ..Default::default()
+        };
+        let calls = vec![
+            RemoteInvokeCall {
+                call_id: "older".into(),
+                grant_id: "grant-a".into(),
+                caller_fingerprint: "caller-a".into(),
+                command_summary: RemoteInvokeCommandSummary {
+                    command_preview: "status".into(),
+                },
+                status: "completed".into(),
+                started_at: 1_000,
+                ..Default::default()
+            },
+            RemoteInvokeCall {
+                call_id: "newer".into(),
+                grant_id: "rotated-grant".into(),
+                caller_fingerprint: "caller-a".into(),
+                command_summary: RemoteInvokeCommandSummary {
+                    command_preview: "shell.exec pwd".into(),
+                },
+                status: "streaming".into(),
+                started_at: 2_000,
+                ..Default::default()
+            },
+            RemoteInvokeCall {
+                call_id: "other".into(),
+                grant_id: "grant-b".into(),
+                caller_fingerprint: "caller-b".into(),
+                command_summary: RemoteInvokeCommandSummary {
+                    command_preview: "traffic list".into(),
+                },
+                status: "completed".into(),
+                started_at: 3_000,
+                ..Default::default()
+            },
+        ];
+
+        let latest = latest_call_for_grant(&grant, &calls).expect("latest call");
+
+        assert_eq!(latest.call_id, "newer");
+        assert_eq!(latest.command_summary.command_preview, "shell.exec pwd");
+    }
+
+    #[test]
+    fn remote_invoke_result_formats_terminal_and_running_calls() {
+        let completed = RemoteInvokeCall {
+            status: "completed".into(),
+            exit_code: Some(0),
+            duration_ms: Some(1_500),
+            bytes_out: Some(2_048),
+            ..Default::default()
+        };
+        assert_eq!(
+            format_remote_result(&completed),
+            "exit 0 / 1s / out 2.00 KB"
+        );
+
+        let running = RemoteInvokeCall {
+            status: "streaming".into(),
+            ended_at: None,
+            ..Default::default()
+        };
+        assert_eq!(format_remote_result(&running), "running");
+    }
+
+    #[test]
+    fn remote_invoke_labels_prefer_human_names_and_normalize_auth() {
+        assert_eq!(
+            caller_label(
+                Some(&"Laptop".to_string()),
+                Some(&"SSH Agent".to_string()),
+                "abcdef0123456789"
+            ),
+            "Laptop"
+        );
+        assert_eq!(
+            caller_label(None, Some(&"SSH Agent".to_string()), "abcdef0123456789"),
+            "SSH Agent"
+        );
+        assert_eq!(
+            format_remote_auth(Some(&"ssh_publickey".to_string())),
+            "SSH key"
+        );
+        assert_eq!(
+            format_remote_auth(Some(&"pair_code".to_string())),
+            "Pair code"
+        );
+    }
+
     fn dummy_app() -> App {
         let (_tx, rx) = mpsc::channel();
         App {
@@ -1672,6 +2161,7 @@ mod tests {
             config: None,
             performance_config: None,
             cli_proxy: None,
+            remote_invoke: RemoteInvokeSnapshot::default(),
             selected_tab: 0,
             last_process_check: Instant::now(),
             last_update: Instant::now(),

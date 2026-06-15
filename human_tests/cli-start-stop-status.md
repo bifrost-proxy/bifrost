@@ -835,6 +835,95 @@ PY
 
 ---
 
+### TC-CSS-35：status TUI 展示 Remote Invoke 远程调用状态面板
+
+**前置条件**：服务未运行，测试使用临时数据目录和动态端口。
+
+**操作步骤**：
+1. 构建当前源码二进制：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+   ```
+2. 准备临时目录和动态端口，启动真实 Bifrost 服务，必须禁用系统代理和 Sync 自动登录弹窗：
+   ```bash
+   TEST_DATA_DIR="$(mktemp -d)"
+   PORT="$(python3 - <<'PY'
+import socket
+s = socket.socket()
+s.bind(("127.0.0.1", 0))
+print(s.getsockname()[1])
+s.close()
+PY
+)"
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost start -p "$PORT" -H 127.0.0.1 --daemon --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept
+   ```
+3. 轮询 Admin API ready，并确认 Remote Invoke 事实源可读取：
+   ```bash
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/remote-invoke/status"
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/remote-invoke/grants"
+   curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/remote-invoke/calls?limit=20"
+   ```
+4. 使用 PTY 启动 TUI，按三次右方向键切到 `Remote Invoke` tab，然后退出：
+   ```bash
+   python3 - <<'PY'
+import fcntl, os, pty, select, struct, subprocess, termios, time
+cmd = ["target/debug/bifrost", "status", "--tui"]
+env = os.environ.copy()
+env["TERM"] = "xterm-256color"
+master, slave = pty.openpty()
+fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 140, 0, 0))
+proc = subprocess.Popen(cmd, stdin=slave, stdout=slave, stderr=slave, env=env, close_fds=True)
+os.close(slave)
+chunks = []
+deadline = time.time() + 2
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        chunks.append(os.read(master, 65536))
+os.write(master, b"\x1b[C\x1b[C\x1b[C")
+deadline = time.time() + 2
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        chunks.append(os.read(master, 65536))
+os.write(master, b"q")
+deadline = time.time() + 5
+while time.time() < deadline:
+    ready, _, _ = select.select([master], [], [], 0.2)
+    if ready:
+        try:
+            chunks.append(os.read(master, 65536))
+        except OSError:
+            break
+    if proc.poll() is not None:
+        break
+proc.wait(timeout=5)
+output = b"".join(chunks).decode("utf-8", "ignore")
+os.close(master)
+for needle in ["Remote Invoke", "Remote Invoke Status", "Connected Clients", "Recent", "Commands", "State:"]:
+    if needle not in output:
+        raise SystemExit(f"missing {needle!r} in TUI output")
+print("Remote Invoke TUI panel verified")
+PY
+   ```
+5. 停止服务并删除临时目录：
+   ```bash
+   BIFROST_DATA_DIR="$TEST_DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost stop
+   rm -rf "$TEST_DATA_DIR"
+   ```
+
+**预期结果**：
+- `status --tui` 顶部 tab 包含 `Remote Invoke`。
+- 切到 Remote Invoke tab 后显示 `Remote Invoke Status`、`Connected Clients`、`Recent Commands`。
+- 面板摘要展示 worker state、客户端数量、active calls 和 pending pairings。
+- 即使当前没有远程客户端或命令历史，面板仍稳定显示空列表和 `No remote command history`，不影响现有 Overview、Rules & Config、Traffic Details tab。
+- 启动命令全程使用临时数据目录、`--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，不修改用户正式数据和系统代理。
+
+**执行记录**：
+- 2026-06-15 执行真实 TUI 验证通过。使用 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 构建当前源码二进制；临时 `BIFROST_DATA_DIR=/var/folders/.../tmp.pl1GGMsGVV`、动态端口 `64717`，以 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 target/debug/bifrost start -p 64717 -H 127.0.0.1 --daemon --skip-cert-check --unsafe-ssl --no-system-proxy --no-intercept` 启动；Admin API ready 后成功读取 `/remote-invoke/status`、`/remote-invoke/grants`、`/remote-invoke/calls?limit=20`。随后用 140x40 PTY 运行 `target/debug/bifrost status --tui`，发送三次右方向键切到 `Remote Invoke` tab，输出包含 `Remote Invoke`、`Remote Invoke Status`、`Connected Clients`、`Recent`、`Commands` 和 `State:`；最后执行 stop 并清理临时数据目录，全程未修改系统代理。
+
+---
+
 ### TC-CSS-33：macOS daemon exec child 避免 fork 后 ObjC 崩溃（回归）
 
 **前置条件**：macOS，本机未运行测试端口上的 Bifrost；测试使用临时 `BIFROST_DATA_DIR` 和动态端口，不修改正式数据目录和系统代理。
