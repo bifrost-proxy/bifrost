@@ -29,6 +29,7 @@ TMPDIR="$(mktemp -d)"
 MOCK_PORT="$(pick_free_port)"
 MOCK_DIR="$(mktemp -d)"
 MOCK_LOG="$(mktemp)"
+TARGET_HOME_FILE="${HOME}/.bifrost-remote-invoke-ssh-e2e-${RANDOM}-${RANDOM}.txt"
 
 ADMIN_PORT="${ADMIN_PORT:-$(pick_free_port)}"
 export ADMIN_PORT
@@ -48,8 +49,9 @@ cleanup() {
         kill "$MOCK_PID" 2>/dev/null || true
         wait "$MOCK_PID" 2>/dev/null || true
     fi
+    pkill -f "bifrost __tray --data-dir ${BIFROST_DATA_DIR}" >/dev/null 2>&1 || true
     rm -rf "$RELAY_DATA_DIR" "$TMPDIR" "$BIFROST_DATA_DIR" "${CALLER_DATA_DIR:-}" "${CALLER_DATA_DIR_2:-}" "$MOCK_DIR" >/dev/null 2>&1 || true
-    rm -f "$RELAY_LOG" "$MOCK_LOG" >/dev/null 2>&1 || true
+    rm -f "$TARGET_HOME_FILE" "$RELAY_LOG" "$MOCK_LOG" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -114,6 +116,148 @@ obj = json.load(open(sys.argv[1]))
 snippet = sys.argv[2]
 namespace = {"obj": obj, "re": re}
 exec(snippet, namespace)
+PY
+}
+
+dump_grant_diagnostics() {
+    echo "[remote-invoke-ssh-e2e] Grant diagnostics:" >&2
+    if [[ -n "${CALLER_CONNECTIONS_JSON:-}" && -f "$CALLER_CONNECTIONS_JSON" ]]; then
+        echo "[remote-invoke-ssh-e2e] caller remote-connections.json:" >&2
+        cat "$CALLER_CONNECTIONS_JSON" >&2
+    fi
+    if [[ -n "${ADMIN_BASE_URL:-}" ]]; then
+        echo "[remote-invoke-ssh-e2e] target grants:" >&2
+        curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >&2 || true
+        echo >&2
+        echo "[remote-invoke-ssh-e2e] target calls:" >&2
+        curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >&2 || true
+        echo >&2
+    fi
+    if [[ -n "${RELAY_URL:-}" && -n "${CLIENT_INSTANCE_ID:-}" && -n "${CALLER_FINGERPRINT_1:-}" ]]; then
+        echo "[remote-invoke-ssh-e2e] relay reusable grant:" >&2
+        curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >&2 || true
+        echo >&2
+    fi
+    if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        echo "[remote-invoke-ssh-e2e] Bifrost log tail:" >&2
+        tail -n 180 "$ADMIN_CLIENT_BIFROST_LOG_FILE" >&2 || true
+    fi
+}
+
+expect_remote_exec_success() {
+    local marker="$1"
+    local output_file="$TMPDIR/remote_exec_${marker}.out"
+    log "  expect remote exec success: ${marker}"
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${marker}" \
+        >"$output_file" 2>&1
+    local status=$?
+    set -e
+    if [[ "$status" -ne 0 ]] || ! grep -q "$marker" "$output_file"; then
+        echo "remote exec success assertion failed for ${marker} (status=${status})" >&2
+        cat "$output_file" >&2
+        dump_grant_diagnostics
+        exit 1
+    fi
+}
+
+expect_remote_exec_denied() {
+    local label="$1"
+    local output_file="$TMPDIR/remote_exec_denied_${label}.out"
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${label}" \
+        >"$output_file" 2>&1
+    local status=$?
+    set -e
+    if [[ "$status" -eq 0 ]]; then
+        echo "remote exec unexpectedly succeeded for ${label}" >&2
+        cat "$output_file" >&2
+        exit 1
+    fi
+    grep -Eiq "grant_scope_mismatch|forbidden|denied|not.*allow|scope" "$output_file"
+}
+
+expect_remote_file_rw_success() {
+    local marker="$1"
+    local write_output="$TMPDIR/file_write_${marker}.out"
+    local read_output="$TMPDIR/file_read_${marker}.out"
+    local marker_b64
+    marker_b64="$(printf '%s' "$marker" | base64)"
+    log "  expect remote file read/write success: ${marker}"
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
+        --content "$marker" --allow-overwrite true --create-parents --output json \
+        >"$write_output" 2>&1
+    local write_status=$?
+    set -e
+    if [[ "$write_status" -ne 0 ]]; then
+        echo "remote file write success assertion failed for ${marker} (status=${write_status})" >&2
+        cat "$write_output" >&2
+        dump_grant_diagnostics
+        exit 1
+    fi
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file read "$TARGET_HOME_FILE" --output json \
+        >"$read_output" 2>&1
+    local read_status=$?
+    set -e
+    if [[ "$read_status" -ne 0 ]] || ! grep -q "\"content_b64\":\"${marker_b64}\"" "$read_output"; then
+        echo "remote file read success assertion failed for ${marker} (status=${read_status})" >&2
+        cat "$read_output" >&2
+        dump_grant_diagnostics
+        exit 1
+    fi
+}
+
+expect_remote_file_write_denied() {
+    local marker="$1"
+    local output_file="$TMPDIR/file_write_denied_${marker}.out"
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
+        --content "$marker" --allow-overwrite true --create-parents --output json \
+        >"$output_file" 2>&1
+    local status=$?
+    set -e
+    if [[ "$status" -eq 0 ]]; then
+        echo "remote file write unexpectedly succeeded for ${marker}" >&2
+        cat "$output_file" >&2
+        exit 1
+    fi
+    grep -Eiq "file_access|forbidden|denied|not.*allow|scope" "$output_file"
+}
+
+update_grant_level_and_assert() {
+    local level="$1"
+    local expected_scope="$2"
+    local expected_file_access="$3"
+    local output_file="$TMPDIR/cli_grant_${level}.out"
+    "$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting grant update --device "$CALLER_FINGERPRINT_1" --level "$level" \
+        >"$output_file" 2>&1
+    python3 - "$output_file" "$MATCH_GRANT" "$expected_scope" "$expected_file_access" "$level" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+grant_id, expected_scope, expected_file_access, level = sys.argv[2:6]
+data = obj.get("data", obj)
+assert data.get("grant_id") == grant_id
+assert data.get("grant_scope") == expected_scope
+assert data.get("file_access") == expected_file_access
+if level in ("full", "full-trust"):
+    assert data.get("interactive_allowed") is True
+    assert data.get("stdin_allowed") is True
+    binding = data.get("policy_binding") or {}
+    assert binding.get("mode") == "selected"
+    assert "ssh-key-full-access" in binding.get("policy_ids", [])
+elif level in ("shell", "commands-files", "commands-and-files"):
+    assert data.get("interactive_allowed") is False
+    assert data.get("stdin_allowed") is False
+    binding = data.get("policy_binding") or {}
+    assert binding.get("mode") == "selected"
+    assert "ssh-key-full-access" in binding.get("policy_ids", [])
+else:
+    assert data.get("interactive_allowed") is None
+    assert data.get("stdin_allowed") is None
+    assert data.get("policy_binding") in (None, {})
 PY
 }
 
@@ -206,41 +350,29 @@ log "Start mock target on port $MOCK_PORT..."
 python3 -m http.server "$MOCK_PORT" --directory "$MOCK_DIR" >"$MOCK_LOG" 2>&1 &
 MOCK_PID=$!
 
-log "Create SSH key"
+log "Create SSH key through CLI against the running Bifrost service"
+CLI_KEY_PATH="$TMPDIR/cli-created.bifrost"
+CLI_CREATE_KEY_OUTPUT="$TMPDIR/cli_create_key.out"
+"$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting ssh-key create \
+    --label "CI Agent" --grant-mode permanent --output "$CLI_KEY_PATH" \
+    >"$CLI_CREATE_KEY_OUTPUT" 2>&1
+grep -q "Remote-invoke SSH key created" "$CLI_CREATE_KEY_OUTPUT"
+grep -q "Use on caller: bifrost remote conn up --ssh-key $CLI_KEY_PATH" "$CLI_CREATE_KEY_OUTPUT"
+test -f "$CLI_KEY_PATH"
+grep -q "BEGIN BIFROST KEY" "$CLI_KEY_PATH"
+grep -q "Device-Code: BF-" "$CLI_KEY_PATH"
+KEY_FILE="$(cat "$CLI_KEY_PATH")"
+
+log "Verify CLI-created SSH key metadata through Admin API"
 CREATE_JSON="$TMPDIR/create.json"
-curl -s -X POST "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" \
-    -H "Content-Type: application/json" \
-    -d '{"label":"CI Agent","grant_mode":"30m"}' >"$CREATE_JSON"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" >"$CREATE_JSON"
 assert_python "$CREATE_JSON" 'assert re.match(r"^BF-[0-9A-F]{16}$", obj["device_code"])'
 assert_python "$CREATE_JSON" 'assert obj["grant_mode"] == "permanent"'
 DEVICE_CODE="$(json_get "$CREATE_JSON" "device_code")"
 FINGERPRINT="$(json_get "$CREATE_JSON" "ssh_key_fingerprint")"
 assert_not_empty "$FINGERPRINT" "ssh key fingerprint 不应为空"
 
-log "Export private key and ensure it matches the active key"
-EXPORT_JSON="$TMPDIR/export.json"
-curl -s "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key/private-key" >"$EXPORT_JSON"
-assert_equals "$DEVICE_CODE" "$(json_get "$EXPORT_JSON" "device_code")" "导出的 device_code 应与 active key 一致"
-assert_equals "$FINGERPRINT" "$(json_get "$EXPORT_JSON" "ssh_key_fingerprint")" "导出的 fingerprint 应与 active key 一致"
-
-log "Reset SSH key"
-RESET_JSON="$TMPDIR/reset.json"
-curl -s -X POST "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key/reset" >"$RESET_JSON"
-NEW_DEVICE_CODE="$(json_get "$RESET_JSON" "device_code")"
-assert_not_empty "$NEW_DEVICE_CODE" "reset 后 device_code 不应为空"
-if [[ "$NEW_DEVICE_CODE" == "$DEVICE_CODE" ]]; then
-    echo "reset did not rotate device_code" >&2
-    exit 1
-fi
-DEVICE_CODE="$NEW_DEVICE_CODE"
-FINGERPRINT="$(json_get "$RESET_JSON" "ssh_key_fingerprint")"
-KEY_FILE="$(json_get "$RESET_JSON" "bifrost_key_file")"
-
-log "Wait for worker reconnect after reset"
-wait_for_worker_connected "$STATUS_JSON" "${BIFROST_E2E_REMOTE_INVOKE_RESET_RECONNECT_TIMEOUT:-180}"
-assert_equals "Connected" "$(json_get "$STATUS_JSON" "state")" "reset 后 worker 应重新连接到 relay"
-
-log "Wait for relay route sync after reset"
+log "Wait for relay route sync after CLI ssh-key create"
 for _ in $(seq 1 30); do
     HTTP_CODE=$(curl -s -o "$TMPDIR/challenge.json" -w '%{http_code}' \
         -X POST "${RELAY_URL}/v4/remote-invoke/ssh/challenge" \
@@ -301,10 +433,76 @@ for grant in obj.get("grants", []):
         assert grant.get("expires_at") in (None, "")
         assert grant.get("caller_fingerprint") == "'"$CALLER_FINGERPRINT_1"'"
         assert grant.get("ssh_key_fingerprint") == "'"$FINGERPRINT"'"
+        assert grant.get("grant_scope") == "remote_shell_interactive"
+        assert grant.get("file_access") == "read_write"
+        assert grant.get("interactive_allowed") is True
+        assert grant.get("stdin_allowed") is True
         break
 else:
     raise AssertionError("grant not found")
 '
+
+log "Wait for relay reusable SSH grant to become queryable"
+for _ in $(seq 1 60); do
+    REUSABLE_AFTER_CONNECT_JSON="$TMPDIR/reusable_after_connect.json"
+    curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >"$REUSABLE_AFTER_CONNECT_JSON"
+    if python3 - "$REUSABLE_AFTER_CONNECT_JSON" "$MATCH_GRANT" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+data = obj.get("data") or {}
+assert data.get("grant_id") == sys.argv[2]
+assert data.get("grant_scope") == "remote_shell_interactive"
+assert data.get("file_access") == "read_write"
+PY
+    then
+        break
+    fi
+    sleep 0.5
+done
+python3 - "$REUSABLE_AFTER_CONNECT_JSON" "$MATCH_GRANT" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+data = obj.get("data") or {}
+assert data.get("grant_id") == sys.argv[2]
+assert data.get("grant_scope") == "remote_shell_interactive"
+assert data.get("file_access") == "read_write"
+PY
+
+log "Verify default SSH-key Full Trust can run commands and read/write files"
+expect_remote_file_rw_success "ssh-full-trust-file-ok"
+expect_remote_exec_success "ssh-full-trust-ok"
+
+log "Switch SSH grant to Run commands & read/write files and verify capabilities"
+update_grant_level_and_assert "shell" "remote_shell_exec" "read_write"
+expect_remote_exec_success "ssh-shell-ok"
+expect_remote_file_rw_success "ssh-shell-file-ok"
+
+log "Switch SSH grant to Files only and verify command denial plus file access"
+update_grant_level_and_assert "files" "remote_query" "read_write"
+expect_remote_exec_denied "ssh-files-deny-exec"
+expect_remote_file_rw_success "ssh-files-file-ok"
+
+log "Switch SSH grant to Read-only watch and verify command/file denial plus status access"
+update_grant_level_and_assert "query" "remote_query" "none"
+CLI_QUERY_STATUS_OUTPUT="$TMPDIR/cli_query_status.out"
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn status --relay-url "$RELAY_URL" \
+    >"$CLI_QUERY_STATUS_OUTPUT" 2>&1
+python3 - "$CLI_QUERY_STATUS_OUTPUT" <<'PY'
+import json
+import sys
+obj = json.load(open(sys.argv[1]))
+assert obj["version"]
+assert obj["device_name"]
+assert obj["os"]
+PY
+expect_remote_exec_denied "ssh-query-deny-exec"
+expect_remote_file_write_denied "ssh-query-deny-file"
+
+log "Switch SSH grant back to Full Trust and verify command access is restored"
+update_grant_level_and_assert "full" "remote_shell_interactive" "read_write"
+expect_remote_exec_success "ssh-full-restored-ok"
 
 log "Use same SSH key from another caller sandbox and verify caller identity isolation"
 CALLER_DATA_DIR_2="$(mktemp -d)"
@@ -328,7 +526,7 @@ fi
 for _ in $(seq 1 60); do
     GRANTS_JSON="$TMPDIR/grants_two_callers.json"
     curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >"$GRANTS_JSON"
-    if python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" <<'PY'
+    if python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" 2>/dev/null <<'PY'
 import json
 import sys
 obj = json.load(open(sys.argv[1]))
@@ -346,7 +544,7 @@ PY
     fi
     sleep 0.5
 done
-python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" <<'PY'
+if ! python3 - "$GRANTS_JSON" "$FINGERPRINT" "$CALLER_FINGERPRINT_1" "$CALLER_FINGERPRINT_2" <<'PY'
 import json
 import sys
 obj = json.load(open(sys.argv[1]))
@@ -359,6 +557,14 @@ matches = [
 ]
 assert {g.get("caller_fingerprint") for g in matches} == {caller_a, caller_b}
 PY
+then
+    echo "expected two ssh_publickey grants for the same SSH key and distinct caller fingerprints" >&2
+    echo "caller_a=${CALLER_FINGERPRINT_1}" >&2
+    echo "caller_b=${CALLER_FINGERPRINT_2}" >&2
+    cat "$GRANTS_JSON" >&2
+    dump_grant_diagnostics
+    exit 1
+fi
 
 KEY_AFTER_USE_JSON="$TMPDIR/key_after_use.json"
 curl -s "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" >"$KEY_AFTER_USE_JSON"

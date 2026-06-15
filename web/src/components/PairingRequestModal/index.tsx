@@ -32,6 +32,7 @@ import {
 } from "../../api/remoteInvoke";
 
 const { Text } = Typography;
+const DEFAULT_SSH_KEY_SHELL_POLICY_ID = "ssh-key-full-access";
 
 interface PairingRequestModalProps {
   visible: boolean;
@@ -85,12 +86,12 @@ export default function PairingRequestModal({
     } else {
       setSelectedPolicies([]);
     }
-    setPreset(hasShellPolicies ? "full" : "query");
+    setPreset("full");
     setShellMode("all");
     setStdinAllowed(false);
     setInteractiveAllowed(false);
     setFileAccess("none");
-  }, [pairing?.pairing_id, enabledPolicies, hasShellPolicies]);
+  }, [pairing?.pairing_id, enabledPolicies]);
 
   if (!pairing) return null;
 
@@ -106,7 +107,7 @@ export default function PairingRequestModal({
         return {
           grant_scope: "remote_shell_interactive" as const,
           file_access: "read_write" as const,
-          policy_binding: { mode: "all" as const },
+          policy_binding: { mode: "selected" as const, policy_ids: [DEFAULT_SSH_KEY_SHELL_POLICY_ID] },
           interactive_allowed: true,
           stdin_allowed: true,
         };
@@ -114,7 +115,7 @@ export default function PairingRequestModal({
         return {
           grant_scope: "remote_shell_exec" as const,
           file_access: "read_write" as const,
-          policy_binding: { mode: "all" as const },
+          policy_binding: { mode: "selected" as const, policy_ids: [DEFAULT_SSH_KEY_SHELL_POLICY_ID] },
           interactive_allowed: false,
           stdin_allowed: false,
         };
@@ -247,7 +248,7 @@ export default function PairingRequestModal({
               type="warning"
               style={{ marginBottom: 12 }}
               message="No command groups enabled on this device"
-              description="This device has no command groups that agents are allowed to run. The shell-related presets below are disabled. You can still grant Files-only or Read-only access, or open Shell access settings to add a group first."
+              description="Full trust will use the built-in Full Access command group. Custom command-group selection still requires adding a group first."
             />
           )}
           <Radio.Group
@@ -256,16 +257,16 @@ export default function PairingRequestModal({
             style={{ width: "100%", marginBottom: 16 }}
           >
             <Space direction="vertical" style={{ width: "100%" }} size={4}>
-              <Radio value="full" disabled={!hasShellPolicies}>
+              <Radio value="full">
                 <Space>
                   <ThunderboltOutlined />
                   <span><b>Full trust</b></span>
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    — Run any allowed command, read &amp; write files, open interactive terminals
+                    — Run any command, read &amp; write files, open interactive terminals
                   </Text>
                 </Space>
               </Radio>
-              <Radio value="shell_only" disabled={!hasShellPolicies}>
+              <Radio value="shell_only">
                 <Space>
                   <CodeOutlined />
                   <span><b>Run commands &amp; read/write files</b></span>
@@ -337,7 +338,9 @@ export default function PairingRequestModal({
                     preset === "full" || (preset === "custom" && stdinAllowed);
 
                   if (shellAllowed) {
-                    if (preset === "custom" && shellMode === "selected") {
+                    if (preset === "full" || preset === "shell_only") {
+                      bullets.push("Run commands from any of: Full Access");
+                    } else if (preset === "custom" && shellMode === "selected") {
                       const names = enabledPolicies
                         .filter((p) => selectedPolicies.includes(p.id))
                         .map((p) => p.name || p.id);

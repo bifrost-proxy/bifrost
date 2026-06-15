@@ -261,6 +261,7 @@ function getNumberField(
 
 type ShellExecMode = "argv_exec" | "shell_text";
 type ShellAccessMode = "sandbox" | "full-access" | "custom";
+const DEFAULT_SSH_KEY_SHELL_POLICY_ID = "ssh-key-full-access";
 
 interface ShellPolicyEditorItem {
   id: string;
@@ -1378,7 +1379,7 @@ export default function RemoteInvokeTab({
           return {
             grant_scope: "remote_shell_interactive",
             file_access: "read_write" as const,
-            policy_binding: { mode: "all" },
+            policy_binding: { mode: "selected", policy_ids: [DEFAULT_SSH_KEY_SHELL_POLICY_ID] },
             interactive_allowed: true,
             stdin_allowed: true,
           };
@@ -1386,7 +1387,7 @@ export default function RemoteInvokeTab({
           return {
             grant_scope: "remote_shell_exec",
             file_access: "read_write" as const,
-            policy_binding: { mode: "all" },
+            policy_binding: { mode: "selected", policy_ids: [DEFAULT_SSH_KEY_SHELL_POLICY_ID] },
             interactive_allowed: false,
             stdin_allowed: false,
           };
@@ -3140,8 +3141,8 @@ export default function RemoteInvokeTab({
           >
             <Space direction="vertical" style={{ width: "100%" }} size={2}>
               {([
-                { value: "full" as const, icon: <ThunderboltOutlined />, name: "Full trust", desc: "Run any allowed command, read & write files, open interactive terminals", disabled: enabledShellPolicies.length === 0 },
-                { value: "shell_only" as const, icon: <CodeOutlined />, name: "Run commands & read/write files", desc: "Can execute allowed commands, edit files, and inspect traffic. No interactive shells.", disabled: enabledShellPolicies.length === 0 },
+                { value: "full" as const, icon: <ThunderboltOutlined />, name: "Full trust", desc: "Run any command, read & write files, open interactive terminals", disabled: false },
+                { value: "shell_only" as const, icon: <CodeOutlined />, name: "Run commands & read/write files", desc: "Can execute commands, edit files, and inspect traffic. No interactive shells.", disabled: false },
                 { value: "file_only" as const, icon: <FileOutlined />, name: "Files only", desc: "Can read & write files and inspect traffic. Cannot run any shell commands.", disabled: false },
                 { value: "query" as const, icon: <SearchOutlined />, name: "Read-only watch", desc: "Can see status and traffic. Cannot run commands and cannot touch files.", disabled: false },
                 { value: "custom" as const, icon: <SettingOutlined />, name: "Custom", desc: "Pick shell + file + terminal access individually", disabled: false },
@@ -3192,7 +3193,9 @@ export default function RemoteInvokeTab({
                     (grantEditorPreset === "custom" && grantEditorStdinAllowed);
 
                   if (shellAllowed) {
-                    if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected") {
+                    if (grantEditorPreset === "full" || grantEditorPreset === "shell_only") {
+                      bullets.push("Run commands from any of: Full Access");
+                    } else if (grantEditorPreset === "custom" && grantEditorAccessMode === "selected") {
                       const names = enabledShellPolicies
                         .filter((p) => grantEditorSelectedPolicies.includes(p.id))
                         .map((p) => p.name || p.id);

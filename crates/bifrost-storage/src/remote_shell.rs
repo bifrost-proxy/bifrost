@@ -159,6 +159,55 @@ impl RemoteShellStore {
     }
 }
 
+pub const DEFAULT_SSH_KEY_SHELL_POLICY_ID: &str = "ssh-key-full-access";
+
+pub fn ensure_default_ssh_key_shell_policy() -> Result<bool> {
+    let store = RemoteShellStore::new()?;
+    ensure_default_ssh_key_shell_policy_in_store(&store)
+}
+
+fn ensure_default_ssh_key_shell_policy_in_store(store: &RemoteShellStore) -> Result<bool> {
+    let mut set = store.load()?;
+
+    let policy = RemoteShellPolicy {
+        id: DEFAULT_SSH_KEY_SHELL_POLICY_ID.to_string(),
+        name: "SSH key full access".to_string(),
+        description: Some(
+            "Default full shell access for reusable SSH-key remote invoke grants.".to_string(),
+        ),
+        enabled: true,
+        profile_id: None,
+        metadata: serde_json::json!({
+            "exec_mode": "shell_text",
+            "allowed_exec_modes": ["argv_exec", "shell_text"],
+            "allow_any_executable": true,
+            "allowed_shell_patterns": ["^(?s:.*)$"],
+            "stdin_allowed": true,
+            "interactive_allowed": true,
+            "inherit_env": true,
+        }),
+    };
+
+    if let Some(existing) = set
+        .policies
+        .iter_mut()
+        .find(|policy| policy.id == DEFAULT_SSH_KEY_SHELL_POLICY_ID)
+    {
+        if *existing == policy {
+            return Ok(false);
+        }
+        *existing = policy;
+    } else {
+        set.policies.push(policy);
+    }
+    set.version = set.version.saturating_add(1);
+    if set.schema_version == 0 {
+        set.schema_version = REMOTE_SHELL_STORE_SCHEMA_VERSION;
+    }
+    store.save(&set)?;
+    Ok(true)
+}
+
 impl Default for RemoteShellStore {
     fn default() -> Self {
         Self::new().expect("Failed to create default RemoteShellStore")
@@ -323,5 +372,47 @@ mod tests {
         store.save(&updated).unwrap();
 
         assert_eq!(store.current_version().unwrap(), 100);
+    }
+
+    #[test]
+    fn test_ensure_default_ssh_key_shell_policy_seeds_full_access_policy() {
+        let (_temp_dir, store) = setup_store();
+
+        let changed = ensure_default_ssh_key_shell_policy_in_store(&store).unwrap();
+        assert!(changed);
+
+        let set = store.load().unwrap();
+        let policy = set.find_policy(DEFAULT_SSH_KEY_SHELL_POLICY_ID).unwrap();
+        assert!(policy.enabled);
+        assert_eq!(
+            policy
+                .metadata
+                .get("allow_any_executable")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            policy
+                .metadata
+                .get("interactive_allowed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+
+        let changed_again = ensure_default_ssh_key_shell_policy_in_store(&store).unwrap();
+        assert!(!changed_again);
+    }
+
+    #[test]
+    fn test_ensure_default_ssh_key_shell_policy_keeps_existing_policy_and_adds_full_access() {
+        let (_temp_dir, store) = setup_store();
+        store.save(&sample_set()).unwrap();
+
+        let changed = ensure_default_ssh_key_shell_policy_in_store(&store).unwrap();
+        assert!(changed);
+
+        let set = store.load().unwrap();
+        assert!(set.find_policy("deploy-api").is_some());
+        assert!(set.find_policy(DEFAULT_SSH_KEY_SHELL_POLICY_ID).is_some());
     }
 }

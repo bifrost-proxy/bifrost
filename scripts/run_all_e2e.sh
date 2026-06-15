@@ -608,6 +608,43 @@ is_skipped_in_ci() {
   return 1
 }
 
+# Approximate per-test wall-clock weight (seconds), derived from observed CI
+# shell E2E run logs. Used by collect_shell_tests to balance shard durations
+# via a longest-processing-time greedy partition. Unlisted tests fall back to
+# a small default; exact values are not critical, only relative ordering is.
+shell_test_weight() {
+  case "$1" in
+    test_agent_send_msg_default_channel.sh) echo 30 ;;
+    test_breakpoint_performance_guard.sh) echo 363 ;;
+    test_tls_intercept_e2e.sh) echo 165 ;;
+    test_chatgpt_web_behavior_artifacts.sh) echo 144 ;;
+    test_long_term_memory_remember_recall.sh) echo 123 ;;
+    test_http3_e2e.sh) echo 119 ;;
+    test_im_gateway_long_reply_delivery_regression.sh) echo 118 ;;
+    test_client_process_transport_attribution.sh) echo 104 ;;
+    test_devtools_page_bridge_api.sh) echo 53 ;;
+    test_remote_invoke_e2e.sh) echo 52 ;;
+    test_group_sync_e2e.sh) echo 43 ;;
+    test_agent_builtin_status_runtime.sh) echo 43 ;;
+    test_replay_websocket_frames.sh) echo 42 ;;
+    test_traffic_persistence_e2e.sh) echo 40 ;;
+    test_sse_frames.sh) echo 39 ;;
+    test_cli_online_commands_e2e.sh) echo 36 ;;
+    test_body_cache_sync_cleanup_admin_api.sh) echo 32 ;;
+    test_traffic_push_e2e.sh) echo 31 ;;
+    test_total_size_cleanup_admin_api.sh) echo 31 ;;
+    test_remote_file_relay_e2e.sh) echo 29 ;;
+    test_traffic_db_e2e.sh) echo 27 ;;
+    test_req_res_script_e2e.sh) echo 27 ;;
+    test_large_body_protection.sh) echo 24 ;;
+    test_socks5_tls_rules.sh) echo 23 ;;
+    test_temporary_port_bindings.sh) echo 22 ;;
+    test_search_traffic_cli_isomorphic_e2e.sh) echo 22 ;;
+    test_replay_rules.sh) echo 20 ;;
+    *) echo 8 ;;
+  esac
+}
+
 collect_shell_tests() {
   local all_tests=()
   if [[ "$SHELL_MODE" == "full" ]]; then
@@ -623,15 +660,40 @@ collect_shell_tests() {
     all_tests=("${STABLE_SHELL_TESTS[@]}")
   fi
 
-  # Apply sharding if configured
+  # Apply sharding if configured (duration-aware greedy partition).
+  # Previously this was a duration-blind round-robin by sorted index, which
+  # clustered the heavy tests into one shard (observed: shard 1 ~1582s of real
+  # work vs shard 2 ~661s). We now assign tests longest-first to whichever
+  # shard currently has the least accumulated weight (LPT scheduling), which
+  # balances wall time while preserving disjoint full coverage across shards.
   if [[ "$SHARD_TOTAL" -gt 0 && "$SHARD_INDEX" -gt 0 ]]; then
-    local i=0
+    local weighted=()
     for name in "${all_tests[@]}"; do
-      if [[ $(( (i % SHARD_TOTAL) + 1 )) -eq "$SHARD_INDEX" ]]; then
+      weighted+=("$(printf '%08d\t%s' "$(shell_test_weight "$name")" "$name")")
+    done
+
+    local shard_load=()
+    local s
+    for ((s = 0; s < SHARD_TOTAL; s++)); do
+      shard_load[s]=0
+    done
+
+    local w
+    while IFS=$'\t' read -r w name; do
+      [[ -z "$name" ]] && continue
+      local min_idx=0
+      local min_load="${shard_load[0]}"
+      for ((s = 1; s < SHARD_TOTAL; s++)); do
+        if [[ "${shard_load[s]}" -lt "$min_load" ]]; then
+          min_load="${shard_load[s]}"
+          min_idx="$s"
+        fi
+      done
+      shard_load[min_idx]=$(( min_load + 10#$w ))
+      if [[ $(( min_idx + 1 )) -eq "$SHARD_INDEX" ]]; then
         printf '%s\n' "$name"
       fi
-      i=$((i + 1))
-    done
+    done < <(printf '%s\n' "${weighted[@]}" | sort -t$'\t' -k1,1nr -k2,2)
   else
     printf '%s\n' "${all_tests[@]}"
   fi
@@ -766,6 +828,7 @@ run_shell_tests_parallel() {
     "test_remote_shell_exec_streaming_e2e.sh"
     "test_traffic_db_e2e.sh"
     "test_openai_like_sse_search_e2e.sh"
+    "test_agent_send_msg_default_channel.sh"
   )
 
   # Some shell tests run cargo check/test/run internally. If they run inside the

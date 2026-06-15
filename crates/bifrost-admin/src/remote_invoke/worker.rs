@@ -7,7 +7,9 @@ use std::time::Duration;
 
 use base64::Engine;
 use bifrost_core::{BifrostError, Result};
-use bifrost_storage::RemoteShellStore;
+use bifrost_storage::{
+    ensure_default_ssh_key_shell_policy, RemoteShellStore, DEFAULT_SSH_KEY_SHELL_POLICY_ID,
+};
 use bifrost_sync::SyncManagerHandle;
 use chrono::{DateTime, Utc};
 use parking_lot::{Mutex, RwLock};
@@ -24,7 +26,8 @@ use super::call_history_store::{
 };
 use super::executor::RemoteInvokeExecutor;
 use super::file_policy_store::{
-    full_file_ops as file_policy_full_ops, has_ssh_fingerprint_grant as file_policy_has_ssh_grant,
+    full_file_ops as file_policy_full_ops, full_trust_file_roots,
+    has_ssh_fingerprint_grant as file_policy_has_ssh_grant,
     rekey_ssh_fingerprint_grant as file_policy_rekey_ssh_grant,
     remove_grant_id_grant as file_policy_remove_grant_id_grant,
     upsert_ssh_fingerprint_grant as file_policy_upsert_ssh_grant,
@@ -192,14 +195,14 @@ struct CallerInputFramePayload {
 }
 
 /// User-supplied override for the file-access grant auto-seeded when an SSH
-/// key is created. `None` + defaults means: `$HOME` as the single root and
-/// all 12 file ops. UI / HTTP API can narrow this.
+/// key is created. `None` + defaults means: full-computer roots and all file
+/// ops. UI / HTTP API can narrow this.
 #[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
 #[serde(default)]
 pub struct SshKeySeedPolicy {
-    /// Absolute paths. Empty → resolver falls back to `$HOME`.
+    /// Absolute paths. Empty -> resolver falls back to full-computer roots.
     pub roots: Vec<std::path::PathBuf>,
-    /// Explicit ops. Empty → resolver falls back to [`file_policy_full_ops`].
+    /// Explicit ops. Empty -> resolver falls back to [`file_policy_full_ops`].
     pub ops: Vec<bifrost_core::file_access::FileOp>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_overwrite: Option<bool>,
@@ -208,15 +211,12 @@ pub struct SshKeySeedPolicy {
 }
 
 impl SshKeySeedPolicy {
-    /// `roots` if non-empty, else `[$HOME]`, else `[]` (fallback tier handles it).
+    /// `roots` if non-empty, else platform full-computer roots.
     pub fn resolved_roots(&self) -> Vec<std::path::PathBuf> {
         if !self.roots.is_empty() {
             return self.roots.clone();
         }
-        match std::env::var_os("HOME") {
-            Some(home) => vec![std::path::PathBuf::from(home)],
-            None => Vec::new(),
-        }
+        full_trust_file_roots()
     }
 }
 
@@ -545,6 +545,14 @@ impl RemoteInvokeWorker {
         Ok(Some(record))
     }
 
+    pub fn ensure_active_ssh_default_policies(&self) -> Result<Option<SshKeyRecord>> {
+        let record = self.ensure_active_ssh_file_access_policy()?;
+        if record.is_some() {
+            ensure_default_ssh_key_shell_policy()?;
+        }
+        Ok(record)
+    }
+
     pub fn export_active_ssh_key(&self) -> Result<Option<SshKeyMaterial>> {
         self.ssh_key_store.export_active_key_material()
     }
@@ -560,6 +568,7 @@ impl RemoteInvokeWorker {
             .ssh_key_store
             .create_or_replace_key(label, grant_mode)?;
         self.seed_ssh_file_access_grant(&result.record, seed_policy);
+        ensure_default_ssh_key_shell_policy()?;
         self.trigger_ssh_route_refresh();
         Ok(result)
     }
@@ -602,6 +611,7 @@ impl RemoteInvokeWorker {
         if !moved {
             self.seed_ssh_file_access_grant(&reset.record, None);
         }
+        ensure_default_ssh_key_shell_policy()?;
         self.trigger_ssh_route_refresh();
         Ok(Some(reset))
     }
@@ -789,6 +799,9 @@ impl RemoteInvokeWorker {
             )
         })?;
         let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
+        if shell_policy_binding_uses_default_ssh_key_policy(requested_policy_binding.as_ref()) {
+            ensure_default_ssh_key_shell_policy()?;
+        }
         let shell_grant = shell_grant_provision(
             requested_grant_scope,
             requested_file_access,
@@ -1182,6 +1195,13 @@ impl RemoteInvokeWorker {
                             preserve_existing_grant_runtime_state(&mut gi, existing);
                         }
                         if !has_usable_grant_crypto(&synced_transport, &gi) {
+                            if gi.auth_method == AuthMethod::SshPublickey {
+                                warn!(
+                                    grant_id = %gid,
+                                    "active SSH relay grant is missing local encrypted transport context during SSE sync; keeping relay grant for ssh_connect reconciliation"
+                                );
+                                continue;
+                            }
                             warn!(
                                 grant_id = %gid,
                                 "active relay grant is missing usable encrypted transport context locally; deleting stale grant"
@@ -1657,6 +1677,10 @@ impl RemoteInvokeWorker {
             .cloned()
             .ok_or_else(|| BifrostError::NotFound(format!("grant '{}' not found", grant_id)))?;
 
+        if shell_policy_binding_uses_default_ssh_key_policy(requested_policy_binding.as_ref()) {
+            ensure_default_ssh_key_shell_policy()?;
+        }
+
         let updated_shell_grant = updated_shell_grant_provision(
             &existing,
             requested_grant_scope,
@@ -1714,6 +1738,7 @@ impl RemoteInvokeWorker {
             updated_shell_grant.shell_policy_set_version_snapshot;
         updated_info.interactive_allowed = updated_shell_grant.interactive_allowed;
         updated_info.stdin_allowed = updated_shell_grant.stdin_allowed;
+        preserve_existing_grant_runtime_state(&mut updated_info, &existing);
 
         self.local_grants
             .write()
@@ -1748,6 +1773,33 @@ impl RemoteInvokeWorker {
         {
             warn!(error = %error, grant_id = %grant_id, "persist grant crypto failed");
         }
+    }
+
+    fn get_grant_crypto(&self, grant_id: &str) -> Option<GrantCryptoMaterial> {
+        if let Some(material) = self.grant_crypto.read().get(grant_id).cloned() {
+            return Some(material);
+        }
+
+        let restored = match self
+            .grant_crypto_store
+            .load_for_relay(&self.relay_client.base_url())
+        {
+            Ok(restored) => restored,
+            Err(error) => {
+                warn!(error = %error, grant_id = %grant_id, "reload grant crypto store failed");
+                return None;
+            }
+        };
+        let stored = restored.get(grant_id)?;
+        let material = GrantCryptoMaterial {
+            shared_secret: stored.shared_secret.clone(),
+            caller_ephemeral_pub: stored.caller_ephemeral_pub.clone(),
+            client_ephemeral_pub: stored.client_ephemeral_pub.clone(),
+        };
+        self.grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+        Some(material)
     }
 
     fn persist_grant_policy(&self, grant_id: &str, policy: &StoredGrantPolicy) {
@@ -1972,6 +2024,13 @@ impl RemoteInvokeWorker {
                     .insert(grant_id.clone(), grant_info);
                 return;
             }
+            if grant_info.auth_method == AuthMethod::SshPublickey {
+                warn!(
+                    grant_id = %grant_id,
+                    "SSH grant_created is missing local encrypted transport context; keeping relay grant for ssh_connect reconciliation"
+                );
+                return;
+            }
             warn!(
                 grant_id = %grant_id,
                 "grant_created is missing usable encrypted transport context locally; deleting stale grant"
@@ -2152,7 +2211,20 @@ impl RemoteInvokeWorker {
             .filter(|fingerprint| !fingerprint.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| active_key.record.ssh_key_fingerprint.clone());
-        let shell_grant = shell_grant_provision(None, None, None, None, None).unwrap_or_else(|error| {
+        if let Err(error) = ensure_default_ssh_key_shell_policy() {
+            warn!(error = %error, "seed default SSH-key shell policy failed before ssh connect");
+        }
+        let shell_grant = shell_grant_provision(
+            Some(GrantScope::RemoteShellInteractive),
+            Some(FileAccessScope::ReadWrite),
+            Some(json!({
+                "mode": "selected",
+                "policy_ids": [DEFAULT_SSH_KEY_SHELL_POLICY_ID],
+            })),
+            Some(true),
+            Some(true),
+        )
+        .unwrap_or_else(|error| {
             warn!(error = %error, "load remote shell grant defaults failed for ssh connect, fallback to remote_query");
             default_query_grant_provision()
         });
@@ -2738,8 +2810,7 @@ impl RemoteInvokeWorker {
         active_call.set_call_info(call_info.clone());
         self.persist_call_history_entry(&call_info);
 
-        let grant_crypto_lookup = { self.grant_crypto.read().get(&grant_id).cloned() };
-        let grant_crypto = match grant_crypto_lookup {
+        let grant_crypto = match self.get_grant_crypto(&grant_id) {
             Some(crypto) => crypto,
             None => {
                 self.send_call_exit(
@@ -3069,8 +3140,7 @@ impl RemoteInvokeWorker {
             warn!(call_id = %call_id, "call_frame received for inactive call");
             return;
         };
-        let grant_crypto_lookup = { self.grant_crypto.read().get(&active_call.grant_id).cloned() };
-        let Some(grant_crypto) = grant_crypto_lookup else {
+        let Some(grant_crypto) = self.get_grant_crypto(&active_call.grant_id) else {
             warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
             return;
         };
@@ -3131,17 +3201,12 @@ impl RemoteInvokeWorker {
         grant_scope: GrantScope,
         payload: &EncryptedPayload,
     ) -> Result<RemoteCommand> {
-        let crypto = self
-            .grant_crypto
-            .read()
-            .get(grant_id)
-            .cloned()
-            .ok_or_else(|| {
-                BifrostError::Config(
-                    "missing grant shared secret for encrypted remote command; reconnect is required"
-                        .to_string(),
-                )
-            })?;
+        let crypto = self.get_grant_crypto(grant_id).ok_or_else(|| {
+            BifrostError::Config(
+                "missing grant shared secret for encrypted remote command; reconnect is required"
+                    .to_string(),
+            )
+        })?;
 
         let session_key = derive_open_call_session_key(
             &crypto.shared_secret,
@@ -3742,6 +3807,21 @@ fn normalize_shell_policy_binding(
     }))
 }
 
+fn shell_policy_binding_uses_default_ssh_key_policy(binding: Option<&Value>) -> bool {
+    let Some(binding) = binding else {
+        return false;
+    };
+    binding
+        .get("policy_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|policy_id| policy_id == DEFAULT_SSH_KEY_SHELL_POLICY_ID)
+        })
+}
+
 fn command_accepts_stdin(command: &RemoteCommand) -> bool {
     command
         .stdin_mode
@@ -4092,12 +4172,25 @@ fn min_optional_u32(left: Option<u32>, right: Option<u32>) -> Option<u32> {
 }
 
 fn preserve_existing_grant_runtime_state(grant: &mut GrantInfo, existing: &GrantInfo) {
+    grant.auth_method = existing.auth_method;
     grant.first_authorized_at = existing.first_authorized_at;
     grant.last_command_at = max_optional_u64(existing.last_command_at, grant.last_command_at);
     grant.last_used_at = max_optional_u64(existing.last_used_at, grant.last_used_at);
     grant.max_calls = existing.max_calls.or(grant.max_calls);
     grant.remaining_calls = min_optional_u32(existing.remaining_calls, grant.remaining_calls);
     grant.use_count = existing.use_count.max(grant.use_count);
+    if grant.caller_ephemeral_pub.is_none() {
+        grant.caller_ephemeral_pub = existing.caller_ephemeral_pub.clone();
+    }
+    if grant.client_ephemeral_pub.is_none() {
+        grant.client_ephemeral_pub = existing.client_ephemeral_pub.clone();
+    }
+    if grant.ssh_key_id.is_none() {
+        grant.ssh_key_id = existing.ssh_key_id.clone();
+    }
+    if grant.ssh_key_fingerprint.is_none() {
+        grant.ssh_key_fingerprint = existing.ssh_key_fingerprint.clone();
+    }
     if existing.status != GrantStatus::Active {
         grant.status = existing.status;
     }
@@ -4700,6 +4793,31 @@ mod tests {
         assert_eq!(rebuilt.max_calls, existing.max_calls);
         assert_eq!(rebuilt.remaining_calls, existing.remaining_calls);
         assert_eq!(rebuilt.use_count, existing.use_count);
+    }
+
+    #[test]
+    fn test_preserve_existing_grant_runtime_state_keeps_transport_identity_when_sync_omits_it() {
+        let mut existing = make_active_grant("grant-crypto", GrantMode::Permanent);
+        existing.auth_method = AuthMethod::SshPublickey;
+        existing.ssh_key_id = Some("ssh-key-current".to_string());
+        existing.ssh_key_fingerprint = Some("ssh-fingerprint-current".to_string());
+        existing.caller_ephemeral_pub = Some("caller-ephemeral-current".to_string());
+        existing.client_ephemeral_pub = Some("client-ephemeral-current".to_string());
+
+        let mut rebuilt = make_active_grant("grant-crypto", GrantMode::Permanent);
+        rebuilt.auth_method = AuthMethod::PairCode;
+        rebuilt.ssh_key_id = None;
+        rebuilt.ssh_key_fingerprint = None;
+        rebuilt.caller_ephemeral_pub = None;
+        rebuilt.client_ephemeral_pub = None;
+
+        preserve_existing_grant_runtime_state(&mut rebuilt, &existing);
+
+        assert_eq!(rebuilt.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(rebuilt.ssh_key_id, existing.ssh_key_id);
+        assert_eq!(rebuilt.ssh_key_fingerprint, existing.ssh_key_fingerprint);
+        assert_eq!(rebuilt.caller_ephemeral_pub, existing.caller_ephemeral_pub);
+        assert_eq!(rebuilt.client_ephemeral_pub, existing.client_ephemeral_pub);
     }
 
     #[test]
@@ -5703,6 +5821,15 @@ mod helper_tests {
 
         let resolved = policy.resolved_roots();
         assert_eq!(resolved, custom_roots);
+    }
+
+    #[test]
+    fn ssh_key_seed_policy_defaults_to_full_trust_roots() {
+        let policy = SshKeySeedPolicy::default();
+        let resolved = policy.resolved_roots();
+
+        assert_eq!(resolved, full_trust_file_roots());
+        assert!(resolved.iter().all(|root| root.is_absolute()));
     }
 
     #[test]

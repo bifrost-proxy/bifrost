@@ -219,6 +219,34 @@ bifrost remote conn up --ssh-key --label ci-agent
 - E2E：`test_setting_ssh_key_cli.sh` 使用固定 env 验证 caller parser；`test_remote_invoke_ssh_e2e.sh` 保留第一 caller 文件模式，并让第二 caller 通过 `BIFROST_REMOTE_SSH_KEY` 完成真实 SSH connect。
 - human_tests：更新 `remote-invoke-sshkey.md`，新增固定 env 用例并记录执行结果。
 
+## 2026-06-15 SSH key 默认 Full Trust
+
+### 问题
+
+`bifrost setting ssh-key create` 只会生成 key 并 seed 文件访问策略；SSH key 连接时 target 端调用 `shell_grant_provision(None, None, None, None, None)`。如果目标设备尚未配置任何 enabled Shell Access policy，`shell_grant_provision` 会降级为 `remote_query`。caller 之后执行 `bifrost remote exec` 会触发 `grant_scope_mismatch`，即使 CLI 自动重新 SSH 授权，也仍然拿到只读 grant。
+
+### 决策
+
+SSH key 是“分发即授权”的长期设备绑定方式，默认必须是 Full Trust：caller 持有 key 后可以运行命令、读写文件、发送 stdin、打开交互式终端并查看状态/流量。只有 pair/code 的交互式授权流程允许用户按需选择 `Read-only watch`、`Files only`、`Run commands & read/write files`、`Full trust` 或 `Custom`。
+
+### 实现
+
+- storage 层新增内置 `ssh-key-full-access` Shell Access policy：允许 `argv_exec` 和 `shell_text`、任意 executable、任意 shell text、stdin、interactive、继承环境。
+- SSH key create/reset/offline create 以及 SSH connect 前都会确保该 policy 存在且启用。
+- SSH key 自动 grant 固定生成为 `remote_shell_interactive + file_access=read_write + stdin_allowed=true + interactive_allowed=true`，并以 `selected[ssh-key-full-access]` 绑定，避免 `mode=all` 与其他 enabled policy 同时匹配时产生 ambiguous。
+- `bifrost setting grant update` 新增权限级别入口：`--level full|shell|files|query`，并支持缺省交互式选择 grant/device 与权限级别。底层 `--access/--scope/--file-access` 参数仍保留给高级用法。
+- WebUI 的 `Full trust` / `Run commands & read/write files` preset 绑定同一内置 full-access policy；`Custom` 仍可选择普通 Shell Access policy。
+
+### 测试方案
+
+- 单元测试：
+  - storage：`ensure_default_ssh_key_shell_policy` 创建、幂等、保留既有 policy。
+  - CLI：`setting grant update --level` 解析和 level payload 映射。
+- E2E：
+  - `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 在 SSH key connect 后执行 `remote exec --shell-text "printf ssh-full-trust-ok"`，验证 saved SSH grant 默认可运行 shell。
+- human_tests：
+  - 更新 `human_tests/remote-invoke-sshkey.md`，新增 SSH key 默认 Full Trust 回归用例并执行。
+
 - 单元测试：
   - `test_random_caller_fingerprint_has_expected_shape` 验证随机 caller ID 格式。
   - `test_load_or_create_caller_fingerprint_persists_per_data_dir` 验证同一数据目录复用。

@@ -10,7 +10,10 @@ mod values;
 pub(crate) use config::BifrostConfig as LegacyBifrostConfig;
 pub use config_manager::{ConfigChangeEvent, ConfigManager, SharedConfigManager};
 pub use data_dir::{data_dir, set_data_dir};
-pub use remote_shell::{RemoteShellPolicy, RemoteShellProfile, RemoteShellSet, RemoteShellStore};
+pub use remote_shell::{
+    ensure_default_ssh_key_shell_policy, RemoteShellPolicy, RemoteShellProfile, RemoteShellSet,
+    RemoteShellStore, DEFAULT_SSH_KEY_SHELL_POLICY_ID,
+};
 pub use rules::{
     build_rule_reference_catalog, content_hash, rule_reference_key, RuleFile, RuleSummary,
     RuleSyncMetadata, RuleSyncStatus, RulesStorage,

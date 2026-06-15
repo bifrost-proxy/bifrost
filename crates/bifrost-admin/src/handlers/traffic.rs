@@ -14,6 +14,14 @@ use crate::query_service::AdminQueryService;
 use crate::state::{AdminState, SharedAdminState};
 use crate::traffic_db::{QueryParams, TrafficSummaryCompact};
 
+async fn join_clear_task<T>(
+    task: tokio::task::JoinHandle<std::result::Result<T, String>>,
+    label: &str,
+) -> std::result::Result<T, String> {
+    task.await
+        .map_err(|e| format!("{label} clear task join failed: {e}"))?
+}
+
 fn enrich_compact_frame_info(summary: &mut TrafficSummaryCompact, state: &AdminState) {
     state.reconcile_socket_summary(summary);
 }
@@ -1217,39 +1225,57 @@ async fn clear_traffic_by_ids(
     if let Some(ref db_store) = state.traffic_db_store {
         let db_store_clone = db_store.clone();
         let ids_for_db = ids_to_delete.clone();
-        let _delete_task = tokio::task::spawn_blocking(move || {
+        let delete_task = tokio::task::spawn_blocking(move || {
             db_store_clone.delete_by_ids(&ids_for_db);
+            Ok(())
         });
+        if let Err(e) = join_clear_task(delete_task, "traffic db delete-by-ids").await {
+            tracing::error!(error = %e, "[CLEAR_TRAFFIC] Failed to delete traffic records by ids");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
     }
 
     if let Some(ref body_store) = state.body_store {
         let body_store_clone = body_store.clone();
         let ids_for_body = ids_to_delete.clone();
-        let _delete_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = body_store_clone.write().delete_by_ids(&ids_for_body) {
-                tracing::warn!("Failed to delete bodies: {}", e);
-            }
+        let delete_task = tokio::task::spawn_blocking(move || {
+            body_store_clone
+                .write()
+                .delete_by_ids(&ids_for_body)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(delete_task, "body store delete-by-ids").await {
+            tracing::warn!(error = %e, "Failed to delete bodies");
+        }
     }
 
     if let Some(ref frame_store) = state.frame_store {
         let frame_store_clone = frame_store.clone();
         let ids_for_frame = ids_to_delete.clone();
-        let _delete_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = frame_store_clone.delete_by_ids(&ids_for_frame) {
-                tracing::warn!("Failed to delete frames: {}", e);
-            }
+        let delete_task = tokio::task::spawn_blocking(move || {
+            frame_store_clone
+                .delete_by_ids(&ids_for_frame)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(delete_task, "frame store delete-by-ids").await {
+            tracing::warn!(error = %e, "Failed to delete frames");
+        }
     }
 
     if let Some(ref ws_payload_store) = state.ws_payload_store {
         let ws_payload_store_clone = ws_payload_store.clone();
         let ids_for_payload = ids_to_delete.clone();
-        let _delete_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = ws_payload_store_clone.delete_by_ids(&ids_for_payload) {
-                tracing::warn!("Failed to delete ws payloads: {}", e);
-            }
+        let delete_task = tokio::task::spawn_blocking(move || {
+            ws_payload_store_clone
+                .delete_by_ids(&ids_for_payload)
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(delete_task, "ws payload store delete-by-ids").await {
+            tracing::warn!(error = %e, "Failed to delete ws payloads");
+        }
     }
 
     if let Some(pm) = push_manager {
@@ -1265,44 +1291,59 @@ async fn clear_all_traffic(
     state: SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
-    let active_connection_ids = state.connection_monitor.active_connection_ids();
+    state.connection_monitor.clear();
 
     if let Some(ref db_store) = state.traffic_db_store {
         let db_store_clone = db_store.clone();
-        let active_ids_for_db = active_connection_ids.clone();
-        let _clear_task = tokio::task::spawn_blocking(move || {
-            db_store_clone.clear_with_active_ids(&active_ids_for_db);
+        let clear_task = tokio::task::spawn_blocking(move || {
+            db_store_clone.clear();
+            Ok(())
         });
+        if let Err(e) = join_clear_task(clear_task, "traffic db clear-all").await {
+            tracing::error!(error = %e, "[CLEAR_TRAFFIC] Failed to clear traffic records");
+            return error_response(StatusCode::INTERNAL_SERVER_ERROR, &e);
+        }
     }
 
     if let Some(ref body_store) = state.body_store {
         let body_store_clone = body_store.clone();
-        let _clear_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = body_store_clone.write().clear() {
-                tracing::warn!("Failed to clear body store: {}", e);
-            }
+        let clear_task = tokio::task::spawn_blocking(move || {
+            body_store_clone
+                .write()
+                .clear()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(clear_task, "body store clear-all").await {
+            tracing::warn!(error = %e, "Failed to clear body store");
+        }
     }
 
     if let Some(ref frame_store) = state.frame_store {
         let frame_store_clone = frame_store.clone();
-        let _clear_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = frame_store_clone.clear() {
-                tracing::warn!("Failed to clear frame store: {}", e);
-            }
+        let clear_task = tokio::task::spawn_blocking(move || {
+            frame_store_clone
+                .clear()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(clear_task, "frame store clear-all").await {
+            tracing::warn!(error = %e, "Failed to clear frame store");
+        }
     }
 
     if let Some(ref ws_payload_store) = state.ws_payload_store {
         let ws_payload_store_clone = ws_payload_store.clone();
-        let _clear_task = tokio::task::spawn_blocking(move || {
-            if let Err(e) = ws_payload_store_clone.clear() {
-                tracing::warn!("Failed to clear ws payload store: {}", e);
-            }
+        let clear_task = tokio::task::spawn_blocking(move || {
+            ws_payload_store_clone
+                .clear()
+                .map(|_| ())
+                .map_err(|e| e.to_string())
         });
+        if let Err(e) = join_clear_task(clear_task, "ws payload store clear-all").await {
+            tracing::warn!(error = %e, "Failed to clear ws payload store");
+        }
     }
-
-    state.connection_monitor.clear();
 
     if let Some(pm) = push_manager {
         pm.invalidate_overview_cache();

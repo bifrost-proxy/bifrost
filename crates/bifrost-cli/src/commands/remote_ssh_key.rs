@@ -3,11 +3,12 @@ use std::io::Write;
 use std::path::Path;
 
 use bifrost_admin::remote_invoke::file_policy_store::{
-    full_file_ops, upsert_ssh_fingerprint_grant,
+    full_file_ops, full_trust_file_roots, upsert_ssh_fingerprint_grant,
 };
 use bifrost_admin::remote_invoke::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use bifrost_admin::remote_invoke::types::GrantMode;
 use bifrost_core::{BifrostError, Result};
+use bifrost_storage::ensure_default_ssh_key_shell_policy;
 use serde_json::{json, Value};
 
 use crate::cli::RemoteSshKeyCommands;
@@ -142,6 +143,7 @@ fn create_local_ssh_key(label: &str, grant_mode: GrantMode) -> Result<SshKeyMate
     let material = SshKeyStore::new(&bifrost_storage::data_dir())
         .create_or_replace_key(label.to_string(), grant_mode)?;
     seed_default_file_access_policy(&material.record)?;
+    ensure_default_ssh_key_shell_policy()?;
     Ok(material)
 }
 
@@ -156,14 +158,10 @@ fn get_local_ssh_key() -> Result<Option<SshKeyRecord>> {
 }
 
 fn seed_default_file_access_policy(record: &SshKeyRecord) -> Result<()> {
-    let roots = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .into_iter()
-        .collect();
     upsert_ssh_fingerprint_grant(
         &record.ssh_key_fingerprint,
         Some(format!("ssh-key:{}", record.label)),
-        roots,
+        full_trust_file_roots(),
         full_file_ops(),
         None,
         None,
