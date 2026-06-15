@@ -279,7 +279,7 @@ fn default_pair_code_ttl_secs() -> u64 {
 }
 
 fn default_max_active_calls() -> u32 {
-    5
+    10
 }
 
 fn default_retention_days() -> u32 {

@@ -584,3 +584,29 @@ bifrost remote file apply-patch --patch-file <local-patch|->
 - GitHub Contents API — `If-Match-SHA` 乐观锁
 - Claude Code / Cursor 的 file_read / file_edit / grep / glob / apply_patch 工具
 - 现有 `crates/bifrost-admin/src/remote_invoke/` 的 executor/worker/types 分层
+
+
+## P0 hardening follow-ups: read_many, move, and CLI contract
+
+### file.read_many authorization model
+
+`file.read_many` now has two explicit authorization layers:
+
+1. **Request-level capability**: the effective `FileAccessPolicy.ops` must include `read_many`. This lets an administrator allow normal single-file reads while disabling high-fanout batch reads.
+2. **Per-file content access**: every requested path is still checked with `read` before content is returned. A denied or missing item is represented as an item-level error in the batch response after the request-level `read_many` gate has passed.
+
+This preserves the coding-agent ergonomics of partial batch success while making `ReadMany` a meaningful policy capability instead of only an enum/documentation alias.
+
+### file.move safety contract
+
+`file.move` exposes the same optimistic-lock and overwrite controls expected from top-level coding-agent file mutations:
+
+- `--base-sha256 <SHA>` verifies the source regular file before moving it. A mismatch returns `file.sha_mismatch` and leaves the source in place.
+- `--allow-overwrite <bool>` overrides the policy default for this call. When false and the destination exists, the operation returns `file.precondition_failed`.
+- For regular files whose destination does not exist at validation time, the implementation uses an atomic create-if-absent link step before removing the source. This avoids the classic destination check-then-rename race for the common no-overwrite path.
+
+Directories still use platform rename semantics because directories cannot be hard-linked. The operation remains policy-confined at both source and destination through `FileOp::Move` decisions.
+
+### CLI contract coverage
+
+The hermetic CLI contract test now treats the remote file surface as fourteen subcommands and verifies `read-many`, `outline`, and the `move` safety flags in addition to the older read/write/search/patch commands.

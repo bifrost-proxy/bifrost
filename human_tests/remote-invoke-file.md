@@ -587,3 +587,54 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd <USER_
 | 2026-04-28 | TC-6.4 旧 SSH grant 使用 caller fingerprint 时 file.write 仍命中 active SSH Key 默认策略 | `cargo test -p bifrost-admin legacy_ssh_grant -- --nocapture` | PASS：旧 SSH grant 的 `ssh_key_fingerprint=caller_fingerprint` 被修正为 active SSH key fingerprint；随后 `FileAccessPolicyStore::resolve()` 命中 `match.ssh_fingerprint` 的 `roots=["/"]` 写策略，`FileOp::Write` 检查通过，不再走 readonly fallback |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
 | 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |
+
+
+### TC-P0-READMANY-01 file.read_many — 请求级 ReadMany capability 与逐文件 Read 双层校验
+**步骤**：
+1. 在 host-B policy 中为测试 grant 配置 `ops = ["read"]`，保留测试根目录内 `ok.txt`。
+2. 执行：
+   ```bash
+   bifrost remote file read-many --path ok.txt --cwd <测试根目录>
+   ```
+3. 将 policy 改为 `ops = ["read_many", "read"]` 后再次执行同一命令。
+4. 再准备一个被 `denies` 命中的文件和一个正常文件，执行同一批量读取。
+
+**期望**：
+- 第 2 步请求整体失败，错误码包含 `file.op_not_permitted`，证明 `read_many` 需要请求级 capability。
+- 第 3 步成功读取 `ok.txt`。
+- 第 4 步正常文件成功，被拒绝文件以 per-item error 返回，批量请求不因单个文件拒绝而整体中断。
+
+### TC-P0-MOVE-01 file.move — source base sha 与 overwrite 安全参数
+**步骤**：
+1. 在测试根目录准备 `from.txt` 和 `to.txt`，记录 `from.txt` 的 sha256。
+2. 使用错误 sha 执行：
+   ```bash
+   bifrost remote file move from.txt moved.txt --base-sha256 deadbeef --cwd <测试根目录>
+   ```
+3. 使用已存在的 `to.txt` 执行：
+   ```bash
+   bifrost remote file move from.txt to.txt --allow-overwrite false --cwd <测试根目录>
+   ```
+4. 使用正确 sha 和显式允许覆盖执行：
+   ```bash
+   bifrost remote file move from.txt to.txt --base-sha256 <正确sha256> --allow-overwrite true --cwd <测试根目录>
+   ```
+
+**期望**：
+- 第 2 步失败，错误码包含 `file.sha_mismatch`，`from.txt` 仍存在。
+- 第 3 步失败，错误码包含 `file.precondition_failed`，`from.txt` 与 `to.txt` 均保持原内容。
+- 第 4 步成功，返回 `from` / `to` / `overwritten` / `source_sha256`，目标内容等于原 source 内容。
+
+### TC-P0-CLI-01 remote file CLI contract — read-many / outline / move safety flags
+**步骤**：
+```bash
+cargo build --release -p bifrost-cli
+bash e2e-tests/tests/test_remote_file_api_e2e.sh
+```
+
+**期望**：
+- root help 列出 fourteen subcommands，包括 `read-many` 和 `outline`。
+- `read-many --help` 包含 `--path` / `--max-bytes` / `--allow-binary`。
+- `outline --help` 包含 `--max-symbols` / `--max-bytes`。
+- `move --help` 包含 `--base-sha256` / `--allow-overwrite`。
+- 缺少 required 参数时 `read-many` 与 `outline` 均被 CLI 拒绝。

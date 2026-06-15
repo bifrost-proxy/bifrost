@@ -556,11 +556,13 @@ impl RemoteInvokeExecutor {
         let file_op_name = command.command.as_str();
         let op = match file_op_name {
             "file.read" => FileOp::Read,
+            "file.read_many" => FileOp::ReadMany,
             "file.list" => FileOp::List,
             "file.stat" => FileOp::Stat,
             "file.glob" => FileOp::Glob,
             "file.search" => FileOp::Search,
             "file.hash" => FileOp::Hash,
+            "file.outline" => FileOp::Outline,
             "file.write" => FileOp::Write,
             "file.edit" => FileOp::Edit,
             "file.mkdir" => FileOp::Mkdir,
@@ -593,6 +595,8 @@ impl RemoteInvokeExecutor {
         #[serde(default)]
         struct FileParams {
             path: Option<String>,
+            #[serde(default)]
+            paths: Option<Vec<String>>,
             max_bytes: Option<u64>,
             allow_binary: Option<bool>,
             depth: Option<u32>,
@@ -625,6 +629,19 @@ impl RemoteInvokeExecutor {
             respect_gitignore: Option<bool>,
             #[serde(default)]
             cursor: Option<u64>,
+            // P1-3: multi-pattern OR + literal + word-boundary search.
+            #[serde(default)]
+            patterns: Option<Vec<String>>,
+            #[serde(default)]
+            fixed_strings: Option<bool>,
+            #[serde(default)]
+            word: Option<bool>,
+            // P1-1: symmetric context window joined into a `snippet`.
+            #[serde(default)]
+            around: Option<u32>,
+            // P1-4: symbol-outline cap.
+            #[serde(default)]
+            max_symbols: Option<usize>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -657,6 +674,65 @@ impl RemoteInvokeExecutor {
             command.ssh_fingerprint.as_deref(),
             cwd,
         );
+
+        // file.read_many has two policy layers:
+        //   1. request-level capability: the policy must explicitly allow ReadMany;
+        //   2. per-file content access: each path must still be individually readable.
+        // Per-file denials are returned inline so one denied/missing file does not
+        // abort the whole batch after the request-level capability has passed.
+        if file_op_name == "file.read_many" {
+            let paths = params.paths.clone().unwrap_or_default();
+            if paths.is_empty() {
+                return Err(BifrostError::Config(
+                    "[file.invalid_args] 'paths' must contain at least one entry for file.read_many"
+                        .to_string(),
+                ));
+            }
+            if !policy.ops.contains(&FileOp::ReadMany) {
+                warn!(
+                    grant_id = %grant_id,
+                    op = %file_op_name,
+                    code = "file.op_not_permitted",
+                    caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                    "file access denied by policy (read_many request)"
+                );
+                return Err(BifrostError::Config(
+                    "[file.op_not_permitted] requested op read_many is not permitted by the active policy"
+                        .to_string(),
+                ));
+            }
+
+            let mut decisions: Vec<(
+                String,
+                std::result::Result<bifrost_core::file_access::PolicyDecision, String>,
+            )> = Vec::with_capacity(paths.len());
+            for p in &paths {
+                match policy.check(Path::new(p), cwd, FileOp::Read) {
+                    Ok(d) => decisions.push((p.clone(), Ok(d))),
+                    Err(e) => {
+                        // Policy denial for one file must not abort the batch.
+                        warn!(
+                            grant_id = %grant_id,
+                            op = %file_op_name,
+                            requested_path = %p,
+                            code = e.code(),
+                            detail = %e,
+                            caller_fp = command.caller_fingerprint.as_deref().unwrap_or(""),
+                            "file access denied by policy (read_many item)"
+                        );
+                        decisions.push((p.clone(), Err(format!("[{}] {}", e.code(), e))));
+                    }
+                }
+            }
+            let value = super::file_ops::handle_file_read_many(
+                decisions,
+                params.max_bytes,
+                params.allow_binary.unwrap_or(false),
+            )
+            .await?;
+            return serde_json::to_string(&value)
+                .map_err(|e| BifrostError::Config(format!("serialize file op result: {}", e)));
+        }
 
         let default_path = ".".to_string();
         let requested_path = match file_op_name {
@@ -765,15 +841,25 @@ impl RemoteInvokeExecutor {
                 .await?
             }
             "file.search" => {
-                let pattern = params.pattern.clone().ok_or_else(|| {
-                    BifrostError::Config(
-                        "[file.invalid_args] 'pattern' is required for file.search".to_string(),
-                    )
-                })?;
+                // P1-3: accept either the scalar `pattern` (back-compat) or the
+                // `patterns` array (OR-combined). At least one must be present.
+                let patterns: Vec<String> = match params.patterns.clone() {
+                    Some(ps) if !ps.is_empty() => ps,
+                    _ => match params.pattern.clone() {
+                        Some(p) => vec![p],
+                        None => {
+                            return Err(BifrostError::Config(
+                                "[file.invalid_args] 'pattern' or non-empty 'patterns' is required for file.search".to_string(),
+                            ))
+                        }
+                    },
+                };
+                // Keep a representative scalar for the legacy parameter.
+                let primary = patterns[0].clone();
                 let excludes = params.exclude_patterns.clone().unwrap_or_default();
                 super::file_ops::handle_file_search(
                     &decision,
-                    &pattern,
+                    &primary,
                     params.max_matches,
                     params.max_scan_bytes,
                     &excludes,
@@ -784,11 +870,23 @@ impl RemoteInvokeExecutor {
                     params.respect_gitignore.unwrap_or(true),
                     &policy.denies,
                     params.cursor,
+                    &patterns,
+                    params.around,
+                    params.fixed_strings.unwrap_or(false),
+                    params.word.unwrap_or(false),
                 )
                 .await?
             }
             "file.hash" => {
                 super::file_ops::handle_file_hash(&decision, params.algo.as_deref()).await?
+            }
+            "file.outline" => {
+                super::file_ops::handle_file_outline(
+                    &decision,
+                    params.max_symbols,
+                    params.max_bytes,
+                )
+                .await?
             }
             "file.write" => {
                 let content = params.content_b64.as_deref().ok_or_else(|| {
@@ -831,6 +929,7 @@ impl RemoteInvokeExecutor {
                     &decision,
                     &to_decision,
                     params.base_sha256.as_deref(),
+                    params.allow_overwrite,
                 )
                 .await?
             }
@@ -855,28 +954,47 @@ impl RemoteInvokeExecutor {
                 // mode changes, binary markers).
                 let entries = super::file_ops::parse_patch(patch_text)?;
                 let mut decisions = std::collections::HashMap::new();
-                for entry in &entries {
-                    // Only content-bearing entries need a decision. The
-                    // handler itself will reject binary/rename/copy/mode
-                    // entries with an explicit error code, but we avoid
-                    // running policy.check on synthetic keys here.
-                    match entry.kind {
-                        super::file_ops::PatchKind::Modify
-                        | super::file_ops::PatchKind::Create
-                        | super::file_ops::PatchKind::Delete => {}
-                        _ => continue,
-                    }
-                    let key = entry.decision_key();
-                    if key.is_empty() || key == "/dev/null" {
-                        continue;
-                    }
-                    if decisions.contains_key(&key) {
-                        continue;
+                // Local helper: insert a policy decision for `rel` under `op`,
+                // keyed by `rel`, deduping repeats.
+                let insert_decision = |decisions: &mut std::collections::HashMap<
+                    String,
+                    bifrost_core::file_access::PolicyDecision,
+                >,
+                                       rel: &str,
+                                       op|
+                 -> Result<()> {
+                    if rel.is_empty() || rel == "/dev/null" || decisions.contains_key(rel) {
+                        return Ok(());
                     }
                     let d = policy
-                        .check(Path::new(&key), cwd, FileOp::ApplyPatch)
+                        .check(Path::new(rel), cwd, op)
                         .map_err(|err| BifrostError::Config(format!("[{}] {}", err.code(), err)))?;
-                    decisions.insert(key, d);
+                    decisions.insert(rel.to_string(), d);
+                    Ok(())
+                };
+
+                for entry in &entries {
+                    match &entry.kind {
+                        super::file_ops::PatchKind::Modify
+                        | super::file_ops::PatchKind::Create
+                        | super::file_ops::PatchKind::Delete => {
+                            let key = entry.decision_key();
+                            insert_decision(&mut decisions, &key, FileOp::ApplyPatch)?;
+                        }
+                        // P1-2: rename/copy need decisions for BOTH endpoints.
+                        // Rename = source delete + dest create -> Move on both.
+                        super::file_ops::PatchKind::RenameOnly { from, to } => {
+                            insert_decision(&mut decisions, from, FileOp::Move)?;
+                            insert_decision(&mut decisions, to, FileOp::Move)?;
+                        }
+                        // Copy = read source + write dest.
+                        super::file_ops::PatchKind::CopyOnly { from, to } => {
+                            insert_decision(&mut decisions, from, FileOp::Read)?;
+                            insert_decision(&mut decisions, to, FileOp::Write)?;
+                        }
+                        // Binary / mode-only stay unsupported (handler rejects).
+                        _ => continue,
+                    }
                 }
                 super::file_ops::handle_file_apply_patch(
                     &decisions,

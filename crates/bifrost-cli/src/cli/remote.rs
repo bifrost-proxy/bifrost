@@ -205,6 +205,23 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human", help = "Output format: human | json")]
         output: String,
     },
+    #[command(about = "Read multiple files in one round-trip. Repeat --path for each file.")]
+    ReadMany {
+        #[arg(
+            long = "path",
+            required = true,
+            help = "A file to read (repeatable, at least one required)"
+        )]
+        paths: Vec<String>,
+        #[arg(long, help = "Maximum bytes to return per file (capped by policy)")]
+        max_bytes: Option<u64>,
+        #[arg(long, help = "Allow binary content in the response")]
+        allow_binary: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human", help = "Output format: human | json")]
+        output: String,
+    },
     #[command(about = "List files under a directory")]
     List {
         #[arg(help = "Directory (default '.' = policy root / cwd)")]
@@ -267,8 +284,14 @@ pub enum RemoteFileCommands {
         about = "Regex-search file contents under the policy root"
     )]
     Find {
-        #[arg(help = "Regex pattern")]
-        pattern: String,
+        #[arg(help = "Regex pattern (positional). Combine with --regex for multiple OR patterns")]
+        pattern: Option<String>,
+        #[arg(
+            long = "regex",
+            short = 'e',
+            help = "Additional regex pattern, OR-combined with others (repeatable)"
+        )]
+        regex: Vec<String>,
         #[arg(long, help = "Subpath to restrict the search (default: policy root)")]
         path: Option<String>,
         #[arg(long, help = "Max matches to return")]
@@ -285,11 +308,29 @@ pub enum RemoteFileCommands {
         #[arg(long, short = 'A', help = "Number of context lines after each match")]
         context_after: Option<u32>,
         #[arg(
+            long = "around",
+            short = 'C',
+            help = "Lines of context before AND after each match, joined into a `snippet` field (takes precedence over -A/-B)"
+        )]
+        around: Option<u32>,
+        #[arg(
             long = "case-insensitive",
             short = 'i',
             help = "Case-insensitive regex search"
         )]
         case_insensitive: bool,
+        #[arg(
+            long = "fixed-strings",
+            short = 'F',
+            help = "Treat patterns as literal strings instead of regex"
+        )]
+        fixed_strings: bool,
+        #[arg(
+            long = "word",
+            short = 'w',
+            help = "Match whole words only (wraps each pattern with word boundaries)"
+        )]
+        word: bool,
         #[arg(
             long = "glob",
             help = "Only search files matching this glob (e.g. '*.rs')"
@@ -313,6 +354,27 @@ pub enum RemoteFileCommands {
         path: String,
         #[arg(long, default_value = "sha256", help = "Digest algorithm")]
         algo: String,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(
+        about = "Extract a symbol outline (top-level fn/struct/class/etc.) from a source file"
+    )]
+    Outline {
+        #[arg(help = "Path to the source file")]
+        path: String,
+        #[arg(
+            long = "max-symbols",
+            help = "Maximum number of symbols to return (default 2000)"
+        )]
+        max_symbols: Option<usize>,
+        #[arg(
+            long = "max-bytes",
+            help = "Maximum bytes of the file to scan (capped by policy)"
+        )]
+        max_bytes: Option<u64>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]
@@ -382,6 +444,16 @@ pub enum RemoteFileCommands {
         from: String,
         #[arg(help = "Destination path")]
         to: String,
+        #[arg(
+            long,
+            help = "Expected current sha256 for optimistic locking on the source file"
+        )]
+        base_sha256: Option<String>,
+        #[arg(
+            long,
+            help = "Allow destination overwrite even if policy default forbids"
+        )]
+        allow_overwrite: Option<bool>,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
         #[arg(long, default_value = "human")]

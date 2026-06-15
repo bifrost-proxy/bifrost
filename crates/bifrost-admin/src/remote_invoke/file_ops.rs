@@ -8,6 +8,7 @@
 //! See `design/remote-invoke-file-api.md` §4 for the response schemas.
 
 use std::collections::VecDeque;
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::time::UNIX_EPOCH;
 
@@ -32,6 +33,8 @@ const DEFAULT_SEARCH_MAX: usize = 500;
 const SEARCH_HARD_CAP: usize = 50_000;
 const DEFAULT_SEARCH_SCAN_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_ENTRIES_PER_DIR: usize = 10_000;
+const MAX_READ_MANY_FILES: usize = 100;
+const MAX_READ_MANY_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Directories skipped by default in `file.list`, `file.glob`, and `file.search`.
 const DEFAULT_EXCLUDE_DIRS: &[&str] = &[
@@ -503,6 +506,86 @@ pub async fn handle_file_read(
     Ok(result)
 }
 
+/// `file.read_many` — read multiple files in one round-trip. Each item is
+/// policy-checked by the caller (executor) and passed in as either a ready
+/// [`PolicyDecision`] or a pre-formatted error string. Per-file failures are
+/// captured into the result and never abort the batch. Reads run concurrently.
+pub async fn handle_file_read_many(
+    items: Vec<(String, std::result::Result<PolicyDecision, String>)>,
+    max_bytes: Option<u64>,
+    allow_binary: bool,
+) -> Result<Value> {
+    if items.len() > MAX_READ_MANY_FILES {
+        return Err(BifrostError::Config(format!(
+            "[file.invalid_args] file.read_many supports at most {} paths per request, got {}",
+            MAX_READ_MANY_FILES,
+            items.len()
+        )));
+    }
+
+    let futs = items.into_iter().map(|(path, dec)| async move {
+        match dec {
+            Err(error) => json!({
+                "path": path,
+                "ok": false,
+                "error_code": error
+                    .split(']')
+                    .next()
+                    .map(|s| s.trim_start_matches('[').to_string())
+                    .unwrap_or_default(),
+                "error": error,
+            }),
+            Ok(decision) => {
+                match handle_file_read(&decision, max_bytes, allow_binary, None, None).await {
+                    Ok(mut v) => {
+                        if let Some(obj) = v.as_object_mut() {
+                            obj.insert("path".to_string(), json!(path));
+                            obj.insert("ok".to_string(), json!(true));
+                        }
+                        v
+                    }
+                    Err(e) => {
+                        let msg = e.to_string();
+                        let code = msg
+                            .split(']')
+                            .next()
+                            .map(|s| s.trim_start_matches('[').to_string())
+                            .unwrap_or_default();
+                        json!({
+                            "path": path,
+                            "ok": false,
+                            "error_code": code,
+                            "error": msg,
+                        })
+                    }
+                }
+            }
+        }
+    });
+    let files: Vec<Value> = futures_util::future::join_all(futs).await;
+    let ok_count = files
+        .iter()
+        .filter(|f| f.get("ok").and_then(Value::as_bool) == Some(true))
+        .count();
+    let total_bytes: u64 = files
+        .iter()
+        .filter(|f| f.get("ok").and_then(Value::as_bool) == Some(true))
+        .filter_map(|f| f.get("size").and_then(Value::as_u64))
+        .sum();
+    if total_bytes > MAX_READ_MANY_TOTAL_BYTES {
+        return Err(size_too_large(format!(
+            "file.read_many returned {} bytes, max total is {}",
+            total_bytes, MAX_READ_MANY_TOTAL_BYTES
+        )));
+    }
+    Ok(json!({
+        "files": files,
+        "count": files.len(),
+        "ok_count": ok_count,
+        "total_bytes": total_bytes,
+    }))
+}
+
 /// `file.list` — breadth-first directory listing up to `depth` levels.
 pub async fn handle_file_list(
     decision: &PolicyDecision,
@@ -792,6 +875,25 @@ pub async fn handle_file_glob(
 }
 
 /// `file.search` — regex grep across files under the policy root.
+///
+/// P0-2: traversal is delegated to [`ignore::WalkBuilder`] so gitignore,
+/// default-excludes and the standard VCS filters are handled by the same
+/// crate the rest of the file already depends on, instead of a hand-rolled
+/// DFS. We use the *single-threaded* walker so the deny-filter, hard-cap and
+/// deterministic sort logic stay simple and order-stable. The per-file cap,
+/// binary sniff, `SEARCH_HARD_CAP`, sort and pagination semantics are all
+/// preserved byte-for-byte from the previous implementation.
+///
+/// P1-1 (`around`): when `around = Some(n)` each hit additionally carries a
+/// `snippet` of the `n` lines before and after the match joined by `\n`.
+/// `around` takes precedence over `context_before`/`context_after` for the
+/// `context` array sizing as well: if `around` is set it overrides both. The
+/// legacy `context` array is still emitted whenever any window is requested.
+///
+/// P1-3 (multi/literal/word): `patterns` is OR-combined. When `fixed_strings`
+/// is set each pattern is `regex::escape`d; when `word` is set each pattern is
+/// wrapped in `\b...\b`. The scalar `pattern` argument is kept for signature
+/// back-compat but is ignored whenever `patterns` is non-empty.
 #[allow(clippy::too_many_arguments)]
 pub async fn handle_file_search(
     decision: &PolicyDecision,
@@ -806,6 +908,10 @@ pub async fn handle_file_search(
     respect_gitignore: bool,
     denies: &[String],
     cursor: Option<u64>,
+    patterns: &[String],
+    around: Option<u32>,
+    fixed_strings: bool,
+    word: bool,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Search);
     let root = decision.path.as_path().to_path_buf();
@@ -821,19 +927,47 @@ pub async fn handle_file_search(
         .unwrap_or(DEFAULT_SEARCH_SCAN_BYTES)
         .min(decision.max_read_bytes);
 
-    let re = {
-        let effective = if case_insensitive && !pattern.starts_with("(?i)") {
-            format!("(?i){}", pattern)
-        } else {
-            pattern.to_string()
-        };
-        regex::Regex::new(&effective).map_err(|e| {
-            BifrostError::Config(format!(
-                "[file.invalid_regex] bad pattern '{}': {}",
-                pattern, e
-            ))
-        })?
+    // P1-3: assemble the effective OR-list. Fall back to the scalar `pattern`
+    // for back-compat when no array was provided.
+    let raw_patterns: Vec<String> = if patterns.is_empty() {
+        vec![pattern.to_string()]
+    } else {
+        patterns.to_vec()
     };
+
+    // Build one combined regex via non-capturing alternation. Applying
+    // escape/word per-pattern (before joining) keeps each alternative
+    // independent.
+    let combined = {
+        let parts: Vec<String> = raw_patterns
+            .iter()
+            .map(|p| {
+                let base = if fixed_strings {
+                    regex::escape(p)
+                } else {
+                    p.clone()
+                };
+                if word {
+                    format!(r"\b(?:{})\b", base)
+                } else {
+                    format!("(?:{})", base)
+                }
+            })
+            .collect();
+        let joined = parts.join("|");
+        if case_insensitive && !joined.starts_with("(?i)") {
+            format!("(?i){}", joined)
+        } else {
+            joined
+        }
+    };
+    let re = regex::Regex::new(&combined).map_err(|e| {
+        BifrostError::Config(format!(
+            "[file.invalid_regex] bad pattern(s) {:?}: {}",
+            raw_patterns, e
+        ))
+    })?;
+
     let file_glob_matcher = match file_glob {
         Some(g) => {
             let pats = vec![g.to_string()];
@@ -844,129 +978,173 @@ pub async fn handle_file_search(
         None => None,
     };
 
-    let gi_opt = if respect_gitignore {
-        build_gitignore_for(&root)
-    } else {
-        None
+    // P1-1: `around` overrides the asymmetric before/after when present.
+    let (before, after) = match around {
+        Some(n) => (n as usize, n as usize),
+        None => (
+            context_before.unwrap_or(0) as usize,
+            context_after.unwrap_or(0) as usize,
+        ),
     };
-    let mut hits: Vec<Value> = Vec::new();
-    let mut stack: Vec<PathBuf> = vec![root.clone()];
-    let mut truncated = false;
-    'outer: while let Some(dir) = stack.pop() {
-        let mut rd = match fs::read_dir(&dir).await {
-            Ok(rd) => rd,
-            Err(_) => continue,
-        };
-        while let Some(entry) = rd.next_entry().await.ok().flatten() {
-            let path = entry.path();
-            let md = match entry.metadata().await {
-                Ok(md) => md,
-                Err(_) => continue,
+    let need_context = before > 0 || after > 0;
+    let want_snippet = around.is_some();
+
+    // P0-2: build the `ignore` walker. `standard_filters(respect_gitignore)`
+    // toggles the whole gitignore/hidden/ignore stack in one shot; we still
+    // layer DEFAULT_EXCLUDE_DIRS + caller excludes as overrides so behaviour
+    // matches the old hand-written `should_skip_dir`.
+    let mut ovr = ignore::overrides::OverrideBuilder::new(&root);
+    for d in DEFAULT_EXCLUDE_DIRS {
+        // `!**/<dir>/**` excludes the directory and everything under it.
+        let _ = ovr.add(&format!("!**/{}/**", d));
+        let _ = ovr.add(&format!("!**/{}", d));
+    }
+    for e in exclude_patterns {
+        let _ = ovr.add(&format!("!**/{}/**", e));
+        let _ = ovr.add(&format!("!**/{}", e));
+    }
+    let overrides = ovr.build().map_err(|e| {
+        BifrostError::Config(format!("[file.invalid_glob] bad exclude pattern: {}", e))
+    })?;
+
+    let mut builder = ignore::WalkBuilder::new(&root);
+    builder
+        .standard_filters(respect_gitignore)
+        .git_ignore(respect_gitignore)
+        .git_global(respect_gitignore)
+        .git_exclude(respect_gitignore)
+        .require_git(false)
+        .hidden(false)
+        .parents(respect_gitignore)
+        .overrides(overrides)
+        .follow_links(false);
+
+    // The walk itself + per-file reads are blocking; run them off the async
+    // reactor. We collect into an owned Vec to avoid borrowing across the
+    // spawn_blocking boundary.
+    let root_for_walk = root.clone();
+    let re_for_walk = re.clone();
+    let denies_owned: Vec<String> = denies.to_vec();
+    let glob_owned = file_glob_matcher;
+    let _ = &deny_matcher;
+
+    let (mut hits, scan_truncated) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<Value>, bool)> {
+            let deny_matcher = if denies_owned.is_empty() {
+                None
+            } else {
+                Some(DenyMatcher::new(&denies_owned).map_err(|e| {
+                    BifrostError::Config(format!("[file.invalid_deny] bad deny pattern: {}", e))
+                })?)
             };
-            if md.is_dir() {
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if should_skip_dir(name, exclude_patterns) {
+            let mut hits: Vec<Value> = Vec::new();
+            let mut truncated = false;
+
+            'walk: for dent in builder.build() {
+                let dent = match dent {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                // Only regular files.
+                match dent.file_type() {
+                    Some(ft) if ft.is_file() => {}
+                    _ => continue,
+                }
+                let path = dent.path().to_path_buf();
+                let rel = path
+                    .strip_prefix(&root_for_walk)
+                    .unwrap_or(&path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                if let Some(ref dm) = deny_matcher {
+                    if dm.match_raw(&rel).is_some() {
                         continue;
                     }
                 }
-                stack.push(path);
-                continue;
-            }
-            if !md.is_file() {
-                continue;
-            }
-            if let Some(ref gi) = gi_opt {
-                if is_gitignored(gi, &path, false) {
-                    continue;
-                }
-            }
-            let rel = path
-                .strip_prefix(&root)
-                .unwrap_or(&path)
-                .to_string_lossy()
-                .replace('\\', "/");
-            if let Some(ref dm) = deny_matcher {
-                if dm.match_raw(&rel).is_some() {
-                    continue;
-                }
-            }
-            if let Some(ref gm) = file_glob_matcher {
-                if !gm.is_match(&rel) {
-                    continue;
-                }
-            }
-            let mut f = match fs::File::open(&path).await {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-            let mut buf = Vec::new();
-            let mut limited = (&mut f).take(per_file_cap);
-            if limited.read_to_end(&mut buf).await.is_err() {
-                continue;
-            }
-            if is_probably_binary(&buf) {
-                continue;
-            }
-            let text = match std::str::from_utf8(&buf) {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            let before = context_before.unwrap_or(0) as usize;
-            let after = context_after.unwrap_or(0) as usize;
-            let need_context = before > 0 || after > 0;
-            let all_lines: Vec<&str> = if need_context {
-                text.lines().collect()
-            } else {
-                Vec::new()
-            };
-            let total_lines = if need_context { all_lines.len() } else { 0 };
-            let lines_iter: Box<dyn Iterator<Item = (usize, &str)>> = if need_context {
-                Box::new(all_lines.iter().copied().enumerate())
-            } else {
-                Box::new(text.lines().enumerate())
-            };
-            for (line_idx, line) in lines_iter {
-                if let Some(m) = re.find(line) {
-                    // P0-1: `column` is a CHAR column (1-based), not a
-                    // byte offset — editors and language servers expect
-                    // grapheme-ish indices. Keep the byte offset as
-                    // `byte_column` so callers that diff raw bytes can
-                    // still recover the original value.
-                    let byte_start = m.start();
-                    let char_col = line[..byte_start].chars().count() as u64 + 1;
-                    let mut hit = json!({
-                        "path": rel,
-                        "line": (line_idx as u64) + 1,
-                        "column": char_col,
-                        "byte_column": (byte_start as u64) + 1,
-                        "preview": line.chars().take(240).collect::<String>(),
-                    });
-                    if need_context {
-                        let ctx_start = line_idx.saturating_sub(before);
-                        let ctx_end = (line_idx + after + 1).min(total_lines);
-                        let ctx: Vec<Value> = (ctx_start..ctx_end)
-                            .map(|i| {
-                                json!({
-                                    "line": (i as u64) + 1,
-                                    "content": all_lines[i].chars().take(240).collect::<String>(),
-                                })
-                            })
-                            .collect();
-                        hit["context"] = json!(ctx);
-                    }
-                    hits.push(hit);
-                    if hits.len() >= SEARCH_HARD_CAP {
-                        truncated = true;
-                        break 'outer;
+                if let Some(ref gm) = glob_owned {
+                    if !gm.is_match(&rel) {
+                        continue;
                     }
                 }
-            }
-        }
-    }
+                // Per-file cap + binary sniff.
+                let mut f = match std::fs::File::open(&path) {
+                    Ok(f) => f,
+                    Err(_) => continue,
+                };
+                let mut buf = Vec::new();
+                if (&mut f).take(per_file_cap).read_to_end(&mut buf).is_err() {
+                    continue;
+                }
+                if is_probably_binary(&buf) {
+                    continue;
+                }
+                let text = match std::str::from_utf8(&buf) {
+                    Ok(t) => t,
+                    Err(_) => continue,
+                };
 
-    // P1: stable ordering so the offset cursor resumes deterministically. The
-    // BFS stack pops directories in filesystem-dependent order, so sort by
-    // (path, line, column) before slicing the page.
+                let all_lines: Vec<&str> = if need_context || want_snippet {
+                    text.lines().collect()
+                } else {
+                    Vec::new()
+                };
+                let total_lines = all_lines.len();
+                let lines_iter: Box<dyn Iterator<Item = (usize, &str)>> =
+                    if need_context || want_snippet {
+                        Box::new(all_lines.iter().copied().enumerate())
+                    } else {
+                        Box::new(text.lines().enumerate())
+                    };
+
+                for (line_idx, line) in lines_iter {
+                    if let Some(m) = re_for_walk.find(line) {
+                        let byte_start = m.start();
+                        let char_col = line[..byte_start].chars().count() as u64 + 1;
+                        let mut hit = json!({
+                            "path": rel,
+                            "line": (line_idx as u64) + 1,
+                            "column": char_col,
+                            "byte_column": (byte_start as u64) + 1,
+                            "preview": line.chars().take(240).collect::<String>(),
+                        });
+                        if need_context {
+                            let ctx_start = line_idx.saturating_sub(before);
+                            let ctx_end = (line_idx + after + 1).min(total_lines);
+                            let ctx: Vec<Value> = (ctx_start..ctx_end)
+                                .map(|i| {
+                                    json!({
+                                        "line": (i as u64) + 1,
+                                        "content": all_lines[i]
+                                            .chars()
+                                            .take(240)
+                                            .collect::<String>(),
+                                    })
+                                })
+                                .collect();
+                            hit["context"] = json!(ctx);
+                        }
+                        if want_snippet {
+                            let s_start = line_idx.saturating_sub(before);
+                            let s_end = (line_idx + after + 1).min(total_lines);
+                            let snippet = all_lines[s_start..s_end].join("\n");
+                            hit["snippet"] = json!(snippet);
+                        }
+                        hits.push(hit);
+                        if hits.len() >= SEARCH_HARD_CAP {
+                            truncated = true;
+                            break 'walk;
+                        }
+                    }
+                }
+            }
+            Ok((hits, truncated))
+        })
+        .await
+        .map_err(|e| {
+            BifrostError::Config(format!("[file.io_error] search task failed: {}", e))
+        })??;
+
+    // P1: stable ordering so the offset cursor resumes deterministically.
     hits.sort_by(|a, b| {
         let pa = a["path"].as_str().unwrap_or("");
         let pb = b["path"].as_str().unwrap_or("");
@@ -974,7 +1152,6 @@ pub async fn handle_file_search(
             .then(a["line"].as_u64().cmp(&b["line"].as_u64()))
             .then(a["column"].as_u64().cmp(&b["column"].as_u64()))
     });
-    let scan_truncated = truncated;
     let (page, next_cursor) = paginate(hits, cursor, max);
     let mut out = json!({
         "matches": page,
@@ -1009,6 +1186,291 @@ pub async fn handle_file_hash(decision: &PolicyDecision, algo: Option<&str>) -> 
     }
     let hex = sha256_file(path).await?;
     Ok(json!({ "algo": "sha256", "hex": hex, "size": md.len() }))
+}
+
+const DEFAULT_OUTLINE_MAX_SYMBOLS: usize = 2_000;
+/// Default byte cap for `file.outline` scanning. Outlines are cheap relative to
+/// full reads but we still bound the work for very large files.
+const DEFAULT_OUTLINE_SCAN_BYTES: u64 = 4 * 1024 * 1024;
+
+/// Map a file extension to a coarse language label used to pick the symbol
+/// patterns. Returns `"unknown"` for anything we don't have rules for; such
+/// files yield an empty outline rather than an error.
+fn outline_language_for(path: &Path) -> &'static str {
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_ascii_lowercase())
+        .unwrap_or_default();
+    match ext.as_str() {
+        "rs" => "rust",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "py" | "pyi" => "python",
+        "go" => "go",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" => "cpp",
+        "rb" => "ruby",
+        "swift" => "swift",
+        "cs" => "csharp",
+        "php" => "php",
+        _ => "unknown",
+    }
+}
+
+/// A single extracted top-level symbol.
+struct OutlineSymbol {
+    kind: &'static str,
+    name: String,
+    line: u32,
+    signature: String,
+}
+
+/// Compile-once regex registry for the outline extractor. Each language maps to
+/// a list of `(kind, regex)` pairs where the regex captures the symbol name in
+/// group 1. Patterns are intentionally line-oriented and heuristic — this is a
+/// lightweight repo-map primitive, not a full parser.
+fn outline_patterns(lang: &str) -> &'static [(&'static str, regex::Regex)] {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+
+    macro_rules! pats {
+        ($($kind:literal => $re:literal),* $(,)?) => {
+            vec![ $(($kind, Regex::new($re).expect("valid outline regex")),)* ]
+        };
+    }
+
+    static RUST: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "fn"     => r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:unsafe\s+)?(?:const\s+)?(?:extern\s+(?:\x22[^\x22]*\x22\s+)?)?fn\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct" => r"^\s*(?:pub(?:\([^)]*\))?\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"   => r"^\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "trait"  => r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:unsafe\s+)?trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "impl"   => r"^\s*impl(?:\s*<[^>]*>)?\s+([A-Za-z_][A-Za-z0-9_:<>, ]*)",
+            "type"   => r"^\s*(?:pub(?:\([^)]*\))?\s+)?type\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "macro"  => r"^\s*macro_rules!\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static TS: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "function" => r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][A-Za-z0-9_$]*)",
+            "class"    => r"^\s*(?:export\s+)?(?:default\s+)?(?:abstract\s+)?class\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "interface"=> r"^\s*(?:export\s+)?interface\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "type"     => r"^\s*(?:export\s+)?type\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "enum"     => r"^\s*(?:export\s+)?(?:const\s+)?enum\s+([A-Za-z_$][A-Za-z0-9_$]*)",
+            "const"    => r"^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*=\s*(?:async\s+)?(?:function|\([^)]*\)\s*=>|[A-Za-z_$][A-Za-z0-9_$]*\s*=>)",
+        ]
+    });
+    static PY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "def"   => r"^\s*(?:async\s+)?def\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class" => r"^\s*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static GO: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "func"   => r"^\s*func\s+(?:\([^)]*\)\s*)?([A-Za-z_][A-Za-z0-9_]*)",
+            "type"   => r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+(?:struct|interface)",
+            "type2"  => r"^\s*type\s+([A-Za-z_][A-Za-z0-9_]*)\s+",
+        ]
+    });
+    static JVM: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:public\s+|private\s+|protected\s+|final\s+|abstract\s+|static\s+|open\s+|sealed\s+|data\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*(?:public\s+|private\s+|protected\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"      => r"^\s*(?:public\s+|private\s+|protected\s+)*enum(?:\s+class)?\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "fun"       => r"^\s*(?:public\s+|private\s+|protected\s+|override\s+|suspend\s+|inline\s+)*fun\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static C_LIKE: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "struct" => r"^\s*(?:typedef\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"   => r"^\s*(?:typedef\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class"  => r"^\s*(?:template\s*<[^>]*>\s*)?class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "fn"     => r"^\s*(?:[A-Za-z_][A-Za-z0-9_:<>,\*&\s]+?)\s+([A-Za-z_][A-Za-z0-9_]*)\s*\([^;]*\)\s*\{?\s*$",
+        ]
+    });
+    static RUBY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"  => r"^\s*class\s+([A-Za-z_][A-Za-z0-9_:]*)",
+            "module" => r"^\s*module\s+([A-Za-z_][A-Za-z0-9_:]*)",
+            "def"    => r"^\s*def\s+([A-Za-z_][A-Za-z0-9_?!.]*)",
+        ]
+    });
+    static SWIFT: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "func"     => r"^\s*(?:public\s+|private\s+|internal\s+|fileprivate\s+|open\s+|static\s+|class\s+)*func\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "class"    => r"^\s*(?:public\s+|private\s+|internal\s+|final\s+|open\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct"   => r"^\s*(?:public\s+|private\s+|internal\s+)*struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"     => r"^\s*(?:public\s+|private\s+|internal\s+)*enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "protocol" => r"^\s*(?:public\s+|private\s+|internal\s+)*protocol\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static CSHARP: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+|sealed\s+|abstract\s+|static\s+|partial\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "struct"    => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*struct\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "enum"      => r"^\s*(?:public\s+|private\s+|protected\s+|internal\s+)*enum\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static PHP: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(|| {
+        pats![
+            "class"     => r"^\s*(?:abstract\s+|final\s+)*class\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "interface" => r"^\s*interface\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "trait"     => r"^\s*trait\s+([A-Za-z_][A-Za-z0-9_]*)",
+            "function"  => r"^\s*(?:public\s+|private\s+|protected\s+|static\s+|abstract\s+|final\s+)*function\s+([A-Za-z_][A-Za-z0-9_]*)",
+        ]
+    });
+    static EMPTY: Lazy<Vec<(&'static str, Regex)>> = Lazy::new(Vec::new);
+
+    match lang {
+        "rust" => &RUST,
+        "typescript" | "javascript" => &TS,
+        "python" => &PY,
+        "go" => &GO,
+        "java" | "kotlin" => &JVM,
+        "c" | "cpp" => &C_LIKE,
+        "ruby" => &RUBY,
+        "swift" => &SWIFT,
+        "csharp" => &CSHARP,
+        "php" => &PHP,
+        _ => &EMPTY,
+    }
+}
+
+/// Extract a heuristic symbol outline from already-loaded source `text`.
+/// Pure function (no IO) so it can be unit-tested directly.
+fn extract_outline(text: &str, lang: &str, max_symbols: usize) -> (Vec<OutlineSymbol>, bool) {
+    let patterns = outline_patterns(lang);
+    let mut symbols: Vec<OutlineSymbol> = Vec::new();
+    let mut truncated = false;
+    for (idx, raw_line) in text.lines().enumerate() {
+        // Skip obvious comment lines to cut down on false positives.
+        let trimmed = raw_line.trim_start();
+        if trimmed.starts_with("//")
+            || trimmed.starts_with('#') && lang != "python" && lang != "ruby"
+            || trimmed.starts_with('*')
+        {
+            continue;
+        }
+        for (kind, re) in patterns.iter() {
+            if let Some(caps) = re.captures(raw_line) {
+                if let Some(name) = caps.get(1) {
+                    if symbols.len() >= max_symbols {
+                        truncated = true;
+                        break;
+                    }
+                    let signature = raw_line.trim_end().trim_start().to_string();
+                    // Cap signature length so a giant single-line decl can't
+                    // bloat the response.
+                    let signature = if signature.len() > 240 {
+                        format!("{}…", &signature[..240])
+                    } else {
+                        signature
+                    };
+                    symbols.push(OutlineSymbol {
+                        kind,
+                        name: name.as_str().to_string(),
+                        line: u32::try_from(idx + 1).unwrap_or(u32::MAX),
+                        signature,
+                    });
+                    // First matching pattern wins for this line.
+                    break;
+                }
+            }
+        }
+        if truncated {
+            break;
+        }
+    }
+    (symbols, truncated)
+}
+
+/// `file.outline` — return a lightweight symbol outline (repo-map primitive)
+/// for a single source file. Uses heuristic, language-aware regex extraction
+/// of top-level declarations (fn/struct/class/interface/def/…) so a coding
+/// agent can grasp a file's shape without reading the whole body. Unknown
+/// languages yield an empty `symbols` array rather than an error.
+pub async fn handle_file_outline(
+    decision: &PolicyDecision,
+    max_symbols: Option<usize>,
+    max_bytes: Option<u64>,
+) -> Result<Value> {
+    debug_assert_eq!(decision.op, FileOp::Outline);
+    let path = decision.path.as_path();
+
+    let metadata = fs::metadata(path)
+        .await
+        .map_err(|e| io_err(&format!("stat {}", path.display()), e))?;
+    if !metadata.is_file() {
+        return Err(BifrostError::Config(format!(
+            "[file.not_found] not a regular file: {}",
+            path.display()
+        )));
+    }
+    let total_size = metadata.len();
+
+    let cap = max_bytes
+        .unwrap_or(DEFAULT_OUTLINE_SCAN_BYTES)
+        .min(decision.max_read_bytes);
+    let f = fs::File::open(path)
+        .await
+        .map_err(|e| io_err(&format!("open {}", path.display()), e))?;
+    let mut buf = Vec::new();
+    let mut limited = f.take(cap);
+    limited
+        .read_to_end(&mut buf)
+        .await
+        .map_err(|e| io_err(&format!("read {}", path.display()), e))?;
+    let bytes_truncated = (buf.len() as u64) < total_size;
+
+    let lang = outline_language_for(path);
+    let max_symbols = max_symbols
+        .filter(|n| *n > 0)
+        .unwrap_or(DEFAULT_OUTLINE_MAX_SYMBOLS);
+    // The binary sniff + utf-8 decode + multi-regex per-line scan are
+    // CPU-bound; run them off the async reactor so a large source file cannot
+    // stall the shared runtime that also serves the proxy. We compute
+    // total_lines here too so `buf`/`text` need not cross the await boundary.
+    let path_for_blocking = path.to_path_buf();
+    let (symbols, sym_truncated, total_lines) =
+        tokio::task::spawn_blocking(move || -> Result<(Vec<OutlineSymbol>, bool, u32)> {
+            if is_probably_binary(&buf) {
+                return Err(fa_to_bifrost(FileAccessError::BinaryNotAllowed {
+                    path: path_for_blocking,
+                }));
+            }
+            let text = String::from_utf8_lossy(&buf);
+            let total_lines = u32::try_from(text.lines().count()).unwrap_or(u32::MAX);
+            let (symbols, sym_truncated) = extract_outline(&text, lang, max_symbols);
+            Ok((symbols, sym_truncated, total_lines))
+        })
+        .await
+        .map_err(|e| BifrostError::Config(format!("outline worker join failed: {e}")))??;
+
+    let symbols_json: Vec<Value> = symbols
+        .iter()
+        .map(|s| {
+            json!({
+                "kind": s.kind,
+                "name": s.name,
+                "line": s.line,
+                "signature": s.signature,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "language": lang,
+        "symbols": symbols_json,
+        "count": symbols_json.len(),
+        "truncated": sym_truncated || bytes_truncated,
+        "total_size": total_size,
+        "total_lines": total_lines,
+    }))
 }
 
 // === Write handlers: file.write / edit / mkdir / move / delete / apply_patch ===
@@ -1169,13 +1631,35 @@ pub async fn handle_file_write(
     }))
 }
 
-/// A single line-range edit. Line numbers are 1-based and inclusive.
-#[derive(Debug, serde::Deserialize)]
+/// A single edit item. Two mutually-exclusive shapes are supported on the
+/// same wire array:
+///   * line-range: `{start_line, end_line, replacement}` (1-based inclusive)
+///   * anchored:   `{old_string, new_string, expected_count?}` (content-based)
+///
+/// An item is treated as anchored iff `old_string` is present.
+#[derive(Debug, Default, serde::Deserialize)]
 pub struct EditRange {
+    #[serde(default)]
     pub start_line: u32,
+    #[serde(default)]
     pub end_line: u32,
     #[serde(default)]
     pub replacement: String,
+    /// Anchored mode: literal substring to locate (no regex).
+    #[serde(default)]
+    pub old_string: Option<String>,
+    /// Anchored mode: replacement text (EOL-normalized to the source file).
+    #[serde(default)]
+    pub new_string: Option<String>,
+    /// Anchored mode: exact number of occurrences expected (default 1).
+    #[serde(default)]
+    pub expected_count: Option<u32>,
+}
+
+impl EditRange {
+    fn is_anchored(&self) -> bool {
+        self.old_string.is_some()
+    }
 }
 
 pub async fn handle_file_edit(
@@ -1192,6 +1676,17 @@ pub async fn handle_file_edit(
         ));
     }
 
+    // v1: anchored and line-range items may not be mixed in one call.
+    let any_anchored = edits.iter().any(EditRange::is_anchored);
+    let all_anchored = edits.iter().all(EditRange::is_anchored);
+    if any_anchored && !all_anchored {
+        return Err(BifrostError::Config(
+            "[file.invalid_args] cannot mix anchored {old_string,...} and \
+             line-range {start_line,...} edits in a single call"
+                .to_string(),
+        ));
+    }
+
     let orig_bytes = fs::read(path).await.map_err(|e| io_err("read", e))?;
     let orig_sha = sha256_hex(&orig_bytes);
     if let Some(expected) = base_sha256 {
@@ -1205,6 +1700,76 @@ pub async fn handle_file_edit(
     let eol = Eol::detect(&orig_bytes);
     let original = String::from_utf8(orig_bytes)
         .map_err(|_| BifrostError::Config("[file.invalid_args] file is not utf-8".to_string()))?;
+
+    // ---- Anchored (content-based) path ------------------------------------
+    if all_anchored {
+        // Each item replaces exactly `expected_count` (default 1) literal
+        // occurrences of `old_string` with `new_string`, EOL-normalized to
+        // the source file. Items are applied in order over a single buffer.
+        let mut content = original;
+        let mut applied_total: u64 = 0;
+        for e in edits {
+            let old = e
+                .old_string
+                .as_deref()
+                .expect("is_anchored guarantees old_string is Some");
+            if old.is_empty() {
+                return Err(BifrostError::Config(
+                    "[file.invalid_args] old_string must not be empty".to_string(),
+                ));
+            }
+            let new_raw = e.new_string.as_deref().unwrap_or("");
+            // Normalize both anchor and replacement to the file's EOL so a
+            // CRLF file matches an LF-typed old_string and vice versa.
+            let old_norm = normalize_to_eol(old, eol);
+            let new_norm = normalize_to_eol(new_raw, eol);
+            let expected = e.expected_count.unwrap_or(1);
+
+            let found = content.matches(old_norm.as_str()).count() as u32;
+            if found == 0 {
+                return Err(BifrostError::Config(format!(
+                    "[file.anchor_not_found] old_string not found in '{}'",
+                    path.to_string_lossy()
+                )));
+            }
+            if found != expected {
+                return Err(BifrostError::Config(format!(
+                    "[file.anchor_not_unique] old_string found {} time(s) in '{}', \
+                     expected {} (set expected_count to override)",
+                    found,
+                    path.to_string_lossy(),
+                    expected
+                )));
+            }
+            content = content.replace(old_norm.as_str(), new_norm.as_str());
+            applied_total += found as u64;
+        }
+
+        let new_bytes = content.into_bytes();
+        let max = if decision.max_write_bytes == 0 {
+            DEFAULT_MAX_WRITE_BYTES
+        } else {
+            decision.max_write_bytes
+        };
+        if (new_bytes.len() as u64) > max {
+            return Err(size_too_large(format!(
+                "result is {} bytes, max_write_bytes is {}",
+                new_bytes.len(),
+                max
+            )));
+        }
+        let new_sha = atomic_rewrite(path, &new_bytes).await?;
+        return Ok(json!({
+            "path": path.to_string_lossy(),
+            "bytes_written": new_bytes.len(),
+            "sha256": new_sha,
+            "previous_sha256": orig_sha,
+            "applied_edits": edits.len(),
+            "applied_occurrences": applied_total,
+        }));
+    }
+
+    // ---- Line-range path (unchanged behavior) -----------------------------
     let lines: Vec<&str> = original.split_inclusive('\n').collect();
 
     // Validate ranges: 1-based, non-overlapping, ascending.
@@ -1282,7 +1847,20 @@ pub async fn handle_file_edit(
         )));
     }
 
-    // Atomic rewrite.
+    // Atomic rewrite (shared with the anchored path above).
+    let new_sha = atomic_rewrite(path, &new_bytes).await?;
+    Ok(json!({
+        "path": path.to_string_lossy(),
+        "bytes_written": new_bytes.len(),
+        "sha256": new_sha,
+        "previous_sha256": orig_sha,
+        "applied_edits": edits.len(),
+    }))
+}
+
+/// Atomically rewrite `path` with `bytes` via tmp+rename, preserving the
+/// file's prior unix mode. Returns the sha256 of the written bytes.
+async fn atomic_rewrite(path: &Path, bytes: &[u8]) -> Result<String> {
     let parent = path.parent().ok_or_else(|| {
         BifrostError::Config("[file.invalid_args] path has no parent".to_string())
     })?;
@@ -1297,28 +1875,17 @@ pub async fn handle_file_edit(
         let mut f = fs::File::create(&tmp)
             .await
             .map_err(|e| io_err("create-tmp", e))?;
-        f.write_all(&new_bytes)
+        f.write_all(bytes)
             .await
             .map_err(|e| io_err("write-tmp", e))?;
         f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
     }
-    // Pre-apply prior mode on tmp so the rename-target inode already
-    // carries the correct perms; the async apply_mode after rename
-    // remains as a defensive fallback.
     let _ = apply_mode_sync(&tmp, prior_mode);
     fs::rename(&tmp, path)
         .await
         .map_err(|e| io_err("rename-tmp", e))?;
     apply_mode(path, prior_mode).await;
-
-    let new_sha = sha256_hex(&new_bytes);
-    Ok(json!({
-        "path": path.to_string_lossy(),
-        "bytes_written": new_bytes.len(),
-        "sha256": new_sha,
-        "previous_sha256": orig_sha,
-        "applied_edits": edits.len(),
-    }))
+    Ok(sha256_hex(bytes))
 }
 
 pub async fn handle_file_mkdir(decision: &PolicyDecision, parents: bool) -> Result<Value> {
@@ -1341,22 +1908,31 @@ pub async fn handle_file_move(
     decision: &PolicyDecision,
     to_decision: &PolicyDecision,
     base_sha256: Option<&str>,
+    allow_overwrite_override: Option<bool>,
 ) -> Result<Value> {
     debug_assert_eq!(decision.op, FileOp::Move);
     debug_assert_eq!(to_decision.op, FileOp::Move);
     let from = decision.path.as_path();
     let to = to_decision.path.as_path();
+    let allow_overwrite = allow_overwrite_override.unwrap_or(to_decision.allow_overwrite);
+
+    if from == to {
+        return Err(precondition_failed(
+            "source and destination are the same path",
+        ));
+    }
+
+    let from_meta = fs::symlink_metadata(from)
+        .await
+        .map_err(|e| io_err_structured("move-source-stat", e))?;
 
     // Optimistic lock: if the caller supplied `base_sha256`, verify the
     // source file hashes match before renaming. This prevents a losing
     // writer in a two-agent race from clobbering an already-moved target.
     // Directories do not have a sha and are rejected with sha_mismatch
     // so callers get a stable error code.
-    if let Some(expected) = base_sha256 {
-        let meta = fs::symlink_metadata(from)
-            .await
-            .map_err(|e| io_err("stat", e))?;
-        if !meta.file_type().is_file() {
+    let source_sha256 = if let Some(expected) = base_sha256 {
+        if !from_meta.file_type().is_file() {
             return Err(BifrostError::Config(
                 "[file.sha_mismatch] base_sha256 is only valid for regular files".to_string(),
             ));
@@ -1368,19 +1944,74 @@ pub async fn handle_file_move(
                 expected, actual
             )));
         }
-    }
+        Some(actual)
+    } else if from_meta.file_type().is_file() {
+        Some(sha256_file(from).await?)
+    } else {
+        None
+    };
 
-    if fs::metadata(to).await.is_ok() && !decision.allow_overwrite {
+    let dest_existed_before = fs::symlink_metadata(to).await.is_ok();
+    if dest_existed_before && !allow_overwrite {
         return Err(precondition_failed(
             "destination exists and overwrite is disabled",
         ));
     }
-    fs::rename(from, to)
-        .await
-        .map_err(|e| io_err_structured("rename", e))?;
+
+    if dest_existed_before {
+        fs::rename(from, to)
+            .await
+            .map_err(|e| io_err_structured("rename", e))?;
+    } else {
+        // Avoid the classic check-then-rename overwrite race when the
+        // destination did not exist at validation time. Hard-linking a regular
+        // file to the destination is an atomic create-if-absent primitive on the
+        // supported Unix-like targets; if another writer wins the race, we fail
+        // with a structured precondition error and leave the source untouched.
+        if from_meta.file_type().is_file() {
+            match fs::hard_link(from, to).await {
+                Ok(()) => {
+                    if let Err(e) = fs::remove_file(from).await {
+                        let _ = fs::remove_file(to).await;
+                        return Err(io_err_structured("remove-moved-source", e));
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    return Err(precondition_failed(
+                        "destination appeared during move and overwrite is disabled",
+                    ));
+                }
+                Err(e) if e.raw_os_error() == Some(18) => {
+                    // Cross-device hard links are impossible. Fall back to
+                    // rename only when overwrite is explicitly allowed; otherwise
+                    // failing closed preserves no-overwrite semantics.
+                    if !allow_overwrite {
+                        return Err(precondition_failed(
+                            "destination create-if-absent is not supported across devices",
+                        ));
+                    }
+                    fs::rename(from, to)
+                        .await
+                        .map_err(|e| io_err_structured("rename", e))?;
+                }
+                Err(e) => return Err(io_err_structured("link-move", e)),
+            }
+        } else {
+            // Directories cannot use hard-link based no-overwrite semantics.
+            // The pre-rename check above still rejects an existing target; if a
+            // concurrent creator wins, platform rename should fail for common
+            // directory cases and we surface that structured error.
+            fs::rename(from, to)
+                .await
+                .map_err(|e| io_err_structured("rename", e))?;
+        }
+    }
+
     Ok(json!({
         "from": from.to_string_lossy(),
         "to": to.to_string_lossy(),
+        "overwritten": dest_existed_before,
+        "source_sha256": source_sha256,
     }))
 }
 
@@ -1676,12 +2307,29 @@ pub async fn handle_file_apply_patch(
 
     let entries = parse_patch(patch_text)?;
 
+    // What phase 2 should do for a staged entry.
+    enum StageAction {
+        /// rename tmp -> target (Modify/Create write path).
+        WriteTmp,
+        /// unlink target (delete path).
+        Delete,
+        /// rename `from` -> `to` (patch RenameOnly).
+        Rename {
+            from: PathBuf,
+            allow_overwrite: bool,
+        },
+        /// copy already written to tmp; rename tmp -> target (patch CopyOnly).
+        Copy,
+    }
+
     struct Staged {
         target: PathBuf,
         tmp: PathBuf,
+        #[allow(dead_code)]
         new_path_is_dev_null: bool,
         prior_mode: Option<u32>,
         applied_entry: Value,
+        action: StageAction,
     }
 
     let mut staged: Vec<Staged> = Vec::new();
@@ -1696,32 +2344,217 @@ pub async fn handle_file_apply_patch(
     for entry in &entries {
         match &entry.kind {
             PatchKind::Binary { path } => {
+                // Binary patches carry no text hunk body we can apply; reject.
                 cleanup_tmps(&staged).await;
                 return Err(BifrostError::Config(format!(
                     "[file.binary_patch_unsupported] binary diff for '{}' is not supported by file.apply_patch",
                     path
                 )));
             }
-            PatchKind::RenameOnly { from, to } => {
-                cleanup_tmps(&staged).await;
-                return Err(BifrostError::Config(format!(
-                    "[file.unsupported_diff] rename from '{}' to '{}' is not supported by file.apply_patch; use file.move",
-                    from, to
-                )));
-            }
-            PatchKind::CopyOnly { from, to } => {
-                cleanup_tmps(&staged).await;
-                return Err(BifrostError::Config(format!(
-                    "[file.unsupported_diff] copy from '{}' to '{}' is not supported by file.apply_patch; use file.read + file.write",
-                    from, to
-                )));
-            }
             PatchKind::ModeOnly { path } => {
+                // Mode-only changes are a niche git extension; out of scope.
                 cleanup_tmps(&staged).await;
                 return Err(BifrostError::Config(format!(
                     "[file.unsupported_diff] mode-only change for '{}' is not supported by file.apply_patch",
                     path
                 )));
+            }
+            PatchKind::RenameOnly { from, to } => {
+                // Stage a rename: both endpoints already have policy decisions
+                // (keyed on `from` and `to`) supplied by the executor.
+                let from_dec = match decisions.get(from) {
+                    Some(d) => d,
+                    None => {
+                        cleanup_tmps(&staged).await;
+                        return Err(BifrostError::Config(format!(
+                            "[file.invalid_args] no policy decision for rename source '{}'",
+                            from
+                        )));
+                    }
+                };
+                let to_dec = match decisions.get(to) {
+                    Some(d) => d,
+                    None => {
+                        cleanup_tmps(&staged).await;
+                        return Err(BifrostError::Config(format!(
+                            "[file.invalid_args] no policy decision for rename dest '{}'",
+                            to
+                        )));
+                    }
+                };
+                let from_path = from_dec.path.as_path().to_path_buf();
+                let to_path = to_dec.path.as_path().to_path_buf();
+                // Source must exist; dest must not (unless overwrite allowed).
+                if fs::symlink_metadata(&from_path).await.is_err() {
+                    cleanup_tmps(&staged).await;
+                    return Err(io_err(
+                        "rename-source",
+                        std::io::Error::new(
+                            std::io::ErrorKind::NotFound,
+                            format!("rename source '{}' does not exist", from),
+                        ),
+                    ));
+                }
+                if fs::metadata(&to_path).await.is_ok() && !to_dec.allow_overwrite {
+                    cleanup_tmps(&staged).await;
+                    return Err(precondition_failed(format!(
+                        "rename destination '{}' exists and overwrite is disabled",
+                        to
+                    )));
+                }
+                let prior_mode = capture_mode(&from_path).await;
+                if let Some(expected) = base_shas.get(from) {
+                    let bytes = match fs::read(&from_path).await {
+                        Ok(b) => b,
+                        Err(e) => {
+                            cleanup_tmps(&staged).await;
+                            return Err(io_err("rename-source-read", e));
+                        }
+                    };
+                    let actual = sha256_hex(&bytes);
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        cleanup_tmps(&staged).await;
+                        return Err(sha_mismatch(format!(
+                            "base_sha256 mismatch for '{}': expected {}, actual {}",
+                            from, expected, actual
+                        )));
+                    }
+                }
+                staged.push(Staged {
+                    target: to_path.clone(),
+                    tmp: PathBuf::new(),
+                    new_path_is_dev_null: false,
+                    prior_mode,
+                    applied_entry: json!({
+                        "from": from_path.to_string_lossy(),
+                        "to": to_path.to_string_lossy(),
+                        "renamed": true,
+                    }),
+                    action: StageAction::Rename {
+                        from: from_path,
+                        allow_overwrite: to_dec.allow_overwrite,
+                    },
+                });
+                continue;
+            }
+            PatchKind::CopyOnly { from, to } => {
+                let from_dec = match decisions.get(from) {
+                    Some(d) => d,
+                    None => {
+                        cleanup_tmps(&staged).await;
+                        return Err(BifrostError::Config(format!(
+                            "[file.invalid_args] no policy decision for copy source '{}'",
+                            from
+                        )));
+                    }
+                };
+                let to_dec = match decisions.get(to) {
+                    Some(d) => d,
+                    None => {
+                        cleanup_tmps(&staged).await;
+                        return Err(BifrostError::Config(format!(
+                            "[file.invalid_args] no policy decision for copy dest '{}'",
+                            to
+                        )));
+                    }
+                };
+                let from_path = from_dec.path.as_path().to_path_buf();
+                let to_path = to_dec.path.as_path().to_path_buf();
+                if fs::metadata(&to_path).await.is_ok() && !to_dec.allow_overwrite {
+                    cleanup_tmps(&staged).await;
+                    return Err(precondition_failed(format!(
+                        "copy destination '{}' exists and overwrite is disabled",
+                        to
+                    )));
+                }
+                let bytes = match fs::read(&from_path).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        cleanup_tmps(&staged).await;
+                        return Err(io_err("copy-source-read", e));
+                    }
+                };
+                if let Some(expected) = base_shas.get(from) {
+                    let actual = sha256_hex(&bytes);
+                    if !actual.eq_ignore_ascii_case(expected) {
+                        cleanup_tmps(&staged).await;
+                        return Err(sha_mismatch(format!(
+                            "base_sha256 mismatch for '{}': expected {}, actual {}",
+                            from, expected, actual
+                        )));
+                    }
+                }
+                let max = if to_dec.max_write_bytes == 0 {
+                    DEFAULT_MAX_WRITE_BYTES
+                } else {
+                    to_dec.max_write_bytes
+                };
+                if (bytes.len() as u64) > max {
+                    cleanup_tmps(&staged).await;
+                    return Err(size_too_large(format!(
+                        "copied file is {} bytes, max_write_bytes is {}",
+                        bytes.len(),
+                        max
+                    )));
+                }
+                let prior_mode = capture_mode(&from_path).await;
+                let parent = match to_path.parent() {
+                    Some(p) => p.to_path_buf(),
+                    None => {
+                        cleanup_tmps(&staged).await;
+                        return Err(BifrostError::Config(
+                            "[file.invalid_args] copy dest has no parent".to_string(),
+                        ));
+                    }
+                };
+                if let Err(e) = fs::create_dir_all(&parent).await {
+                    cleanup_tmps(&staged).await;
+                    return Err(io_err("mkdir-parent", e));
+                }
+                let pid = std::process::id();
+                let nanos = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                let tmp = parent.join(format!(
+                    ".bifrost-patch.{}.{}.{}.tmp",
+                    pid,
+                    nanos,
+                    staged.len()
+                ));
+                {
+                    let write_res = async {
+                        let mut f = fs::File::create(&tmp)
+                            .await
+                            .map_err(|e| io_err("create-tmp", e))?;
+                        f.write_all(&bytes)
+                            .await
+                            .map_err(|e| io_err("write-tmp", e))?;
+                        f.sync_all().await.map_err(|e| io_err("fsync-tmp", e))?;
+                        Ok::<_, BifrostError>(())
+                    }
+                    .await;
+                    if let Err(e) = write_res {
+                        let _ = fs::remove_file(&tmp).await;
+                        cleanup_tmps(&staged).await;
+                        return Err(e);
+                    }
+                }
+                staged.push(Staged {
+                    target: to_path.clone(),
+                    tmp,
+                    new_path_is_dev_null: false,
+                    prior_mode,
+                    applied_entry: json!({
+                        "from": from_path.to_string_lossy(),
+                        "to": to_path.to_string_lossy(),
+                        "bytes_written": bytes.len(),
+                        "sha256": sha256_hex(&bytes),
+                        "copied": true,
+                    }),
+                    action: StageAction::Copy,
+                });
+                continue;
             }
             PatchKind::Modify | PatchKind::Create | PatchKind::Delete => {}
         }
@@ -1944,6 +2777,7 @@ pub async fn handle_file_apply_patch(
                 tmp: PathBuf::new(),
                 new_path_is_dev_null: true,
                 prior_mode,
+                action: StageAction::Delete,
                 applied_entry: json!({
                     "path": target.to_string_lossy(),
                     "deleted": true,
@@ -2006,68 +2840,91 @@ pub async fn handle_file_apply_patch(
             new_path_is_dev_null: false,
             prior_mode,
             applied_entry,
+            action: StageAction::WriteTmp,
         });
     }
 
-    // Phase 2 — commit. Track what we've already renamed so a late failure
-    // can best-effort restore the originals.
-    // P0-4: snapshot tuple carries prior_mode so rollback preserves
-    // unix permissions instead of resetting to umask defaults.
-    // The `existed_before` flag lets rollback unlink files that were
-    // freshly created by the patch rather than leaving empty stubs.
+    // Phase 2 — commit. `committed` snapshots let us best-effort restore
+    // content-bearing targets. `renamed` separately tracks rename moves so
+    // rollback can swing the file back to its original location.
     let mut committed: Vec<(PathBuf, Vec<u8>, Option<u32>, bool)> = Vec::new();
+    // (current_path, original_path) for renames already performed.
+    let mut renamed: Vec<(PathBuf, PathBuf)> = Vec::new();
     let mut applied_out: Vec<Value> = Vec::new();
-    for s in &staged {
-        if s.new_path_is_dev_null {
-            if let Err(e) = fs::remove_file(&s.target).await {
-                // rollback: rewrite every already-committed target from the
-                // snapshot we took before renaming, and restore its prior mode.
-                for (path, bytes, prior, existed) in committed.iter().rev() {
-                    if *existed {
-                        let _ = fs::write(path, bytes).await;
-                        let _ = apply_mode_sync(path, *prior);
-                    } else {
-                        // File was freshly created by this patch —
-                        // unlink instead of leaving an empty stub.
-                        let _ = fs::remove_file(path).await;
-                    }
-                }
-                // also drop any remaining tmp files that haven't been renamed yet
-                for rest in staged.iter().skip(committed.len()) {
-                    if !rest.tmp.as_os_str().is_empty() {
-                        let _ = fs::remove_file(&rest.tmp).await;
-                    }
-                }
-                return Err(io_err("remove_file", e));
-            }
-            applied_out.push(s.applied_entry.clone());
-            continue;
+
+    // Shared rollback: undo renames, then restore/unlink content targets,
+    // then drop any not-yet-renamed tmp files.
+    async fn rollback(
+        committed: &[(PathBuf, Vec<u8>, Option<u32>, bool)],
+        renamed: &[(PathBuf, PathBuf)],
+        staged: &[Staged],
+        done: usize,
+    ) {
+        for (cur, orig) in renamed.iter().rev() {
+            let _ = fs::rename(cur, orig).await;
         }
-        // Snapshot current bytes for rollback (best-effort). `Vec::new()` if
-        // the file didn't exist before. Also capture the prior mode so a
-        // later rollback can restore executable bits etc.
-        // `existed_before` lets rollback distinguish overwrite vs create.
-        let existed_before = fs::metadata(&s.target).await.is_ok();
-        let snapshot = fs::read(&s.target).await.unwrap_or_default();
-        let snapshot_mode = capture_mode(&s.target).await;
-        if let Err(e) = fs::rename(&s.tmp, &s.target).await {
-            for (path, bytes, prior, existed) in committed.iter().rev() {
-                if *existed {
-                    let _ = fs::write(path, bytes).await;
-                    let _ = apply_mode_sync(path, *prior);
-                } else {
-                    let _ = fs::remove_file(path).await;
-                }
+        for (path, bytes, prior, existed) in committed.iter().rev() {
+            if *existed {
+                let _ = fs::write(path, bytes).await;
+                let _ = apply_mode_sync(path, *prior);
+            } else {
+                let _ = fs::remove_file(path).await;
             }
-            for rest in staged.iter().skip(committed.len()) {
-                if !rest.tmp.as_os_str().is_empty() {
-                    let _ = fs::remove_file(&rest.tmp).await;
-                }
-            }
-            return Err(io_err("rename-tmp", e));
         }
-        apply_mode(&s.target, s.prior_mode).await;
-        committed.push((s.target.clone(), snapshot, snapshot_mode, existed_before));
+        for rest in staged.iter().skip(done) {
+            if !rest.tmp.as_os_str().is_empty() {
+                let _ = fs::remove_file(&rest.tmp).await;
+            }
+        }
+    }
+
+    for (idx, s) in staged.iter().enumerate() {
+        match &s.action {
+            StageAction::Delete => {
+                if let Err(e) = fs::remove_file(&s.target).await {
+                    rollback(&committed, &renamed, &staged, idx).await;
+                    return Err(io_err("remove_file", e));
+                }
+            }
+            StageAction::Rename {
+                from,
+                allow_overwrite,
+            } => {
+                // Respect overwrite at commit time too (race-narrowing).
+                let existed_before = fs::metadata(&s.target).await.is_ok();
+                if existed_before && !allow_overwrite {
+                    rollback(&committed, &renamed, &staged, idx).await;
+                    return Err(precondition_failed(format!(
+                        "rename destination '{}' exists and overwrite is disabled",
+                        s.target.to_string_lossy()
+                    )));
+                }
+                let snapshot = fs::read(&s.target).await.unwrap_or_default();
+                let snapshot_mode = capture_mode(&s.target).await;
+                if let Err(e) = fs::rename(from, &s.target).await {
+                    rollback(&committed, &renamed, &staged, idx).await;
+                    return Err(io_err("rename", e));
+                }
+                apply_mode(&s.target, s.prior_mode).await;
+                // If the dest pre-existed, record its snapshot so rollback can
+                // recreate it after swinging the rename back.
+                if existed_before {
+                    committed.push((s.target.clone(), snapshot, snapshot_mode, true));
+                }
+                renamed.push((s.target.clone(), from.clone()));
+            }
+            StageAction::WriteTmp | StageAction::Copy => {
+                let existed_before = fs::metadata(&s.target).await.is_ok();
+                let snapshot = fs::read(&s.target).await.unwrap_or_default();
+                let snapshot_mode = capture_mode(&s.target).await;
+                if let Err(e) = fs::rename(&s.tmp, &s.target).await {
+                    rollback(&committed, &renamed, &staged, idx).await;
+                    return Err(io_err("rename-tmp", e));
+                }
+                apply_mode(&s.target, s.prior_mode).await;
+                committed.push((s.target.clone(), snapshot, snapshot_mode, existed_before));
+            }
+        }
         applied_out.push(s.applied_entry.clone());
     }
 
@@ -2138,6 +2995,92 @@ mod tests {
             .unwrap();
         let err = handle_file_hash(&dec, Some("md5")).await.unwrap_err();
         assert!(err.to_string().contains("file.unsupported_algo"));
+    }
+
+    // ---------- P1-4 outline ----------
+
+    #[test]
+    fn outline_language_detection_by_ext() {
+        assert_eq!(outline_language_for(Path::new("a.rs")), "rust");
+        assert_eq!(outline_language_for(Path::new("a.tsx")), "typescript");
+        assert_eq!(outline_language_for(Path::new("a.py")), "python");
+        assert_eq!(outline_language_for(Path::new("a.go")), "go");
+        assert_eq!(outline_language_for(Path::new("a.unknownext")), "unknown");
+        assert_eq!(outline_language_for(Path::new("noext")), "unknown");
+    }
+
+    #[test]
+    fn outline_extracts_rust_symbols() {
+        let src = r#"
+// a comment fn not_a_symbol
+pub fn alpha(x: i32) -> i32 { x }
+async fn beta() {}
+pub struct Foo { a: u32 }
+enum Bar { A, B }
+pub trait Baz {}
+impl Foo {}
+type Alias = u32;
+"#;
+        let (syms, truncated) = extract_outline(src, "rust", 2000);
+        assert!(!truncated);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(names.contains(&"Foo"));
+        assert!(names.contains(&"Bar"));
+        assert!(names.contains(&"Baz"));
+        assert!(names.contains(&"Alias"));
+        // The commented `fn not_a_symbol` must not be picked up.
+        assert!(!names.contains(&"not_a_symbol"));
+        // Kinds are tagged.
+        let fn_kind = syms.iter().find(|s| s.name == "alpha").unwrap().kind;
+        assert_eq!(fn_kind, "fn");
+    }
+
+    #[test]
+    fn outline_extracts_python_and_respects_hash_comments() {
+        let src =
+            "# top comment\nclass C:\n    def method(self):\n        pass\ndef top():\n    pass\n";
+        let (syms, _) = extract_outline(src, "python", 2000);
+        let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"C"));
+        assert!(names.contains(&"method"));
+        assert!(names.contains(&"top"));
+    }
+
+    #[test]
+    fn outline_respects_max_symbols_truncation() {
+        let src = "fn a(){}\nfn b(){}\nfn c(){}\n";
+        let (syms, truncated) = extract_outline(src, "rust", 2);
+        assert_eq!(syms.len(), 2);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn outline_unknown_language_is_empty() {
+        let src = "some random text\nwith no recognizable symbols\n";
+        let (syms, truncated) = extract_outline(src, "unknown", 2000);
+        assert!(syms.is_empty());
+        assert!(!truncated);
+    }
+
+    #[tokio::test]
+    async fn outline_handler_returns_symbols_for_rust_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("lib.rs");
+        std::fs::write(&file, b"pub fn one() {}\nstruct Two;\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("lib.rs"), tmp.path(), FileOp::Outline)
+            .unwrap();
+        let v = handle_file_outline(&dec, None, None).await.unwrap();
+        assert_eq!(v["language"].as_str().unwrap(), "rust");
+        assert_eq!(v["count"].as_u64().unwrap(), 2);
+        assert!(!v["truncated"].as_bool().unwrap());
+        let syms = v["symbols"].as_array().unwrap();
+        assert_eq!(syms[0]["name"].as_str().unwrap(), "one");
+        assert_eq!(syms[0]["kind"].as_str().unwrap(), "fn");
+        assert_eq!(syms[0]["line"].as_u64().unwrap(), 1);
     }
 
     #[tokio::test]
@@ -2242,6 +3185,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -2422,6 +3369,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -2459,6 +3410,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -2497,6 +3452,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -2530,6 +3489,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap_err();
@@ -2560,6 +3523,7 @@ mod tests {
             start_line: 3,
             end_line: 3,
             replacement: "THIRD".to_string(),
+            ..Default::default()
         }];
         let v = handle_file_edit(&dec, None, &edits).await.unwrap();
         assert_eq!(v["applied_edits"].as_u64().unwrap(), 1);
@@ -2587,6 +3551,7 @@ mod tests {
             start_line: 3,
             end_line: 3,
             replacement: "THIRD".to_string(),
+            ..Default::default()
         }];
         handle_file_edit(&dec, None, &edits).await.unwrap();
         let content = std::fs::read_to_string(&file).unwrap();
@@ -2609,6 +3574,7 @@ mod tests {
             start_line: 2,
             end_line: 2,
             replacement: String::new(),
+            ..Default::default()
         }];
         let v = handle_file_edit(&dec, None, &edits).await.unwrap();
         assert_eq!(v["applied_edits"].as_u64().unwrap(), 1);
@@ -2637,11 +3603,13 @@ mod tests {
                 start_line: 1,
                 end_line: 1,
                 replacement: "AA\n".to_string(),
+                ..Default::default()
             },
             EditRange {
                 start_line: 3,
                 end_line: 4,
                 replacement: "CC_DD\n".to_string(),
+                ..Default::default()
             },
         ];
         let v = handle_file_edit(&dec, None, &edits).await.unwrap();
@@ -2670,11 +3638,13 @@ mod tests {
                 start_line: 1,
                 end_line: 2,
                 replacement: "X\n".to_string(),
+                ..Default::default()
             },
             EditRange {
                 start_line: 2,
                 end_line: 3,
                 replacement: "Y\n".to_string(),
+                ..Default::default()
             },
         ];
         let err = handle_file_edit(&dec, None, &edits).await.unwrap_err();
@@ -2817,6 +3787,7 @@ mod tests {
             start_line: 1,
             end_line: 1,
             replacement: "world\n".to_string(),
+            ..Default::default()
         }];
         let err = handle_file_edit(&dec, Some("deadbeef"), &edits)
             .await
@@ -3061,6 +4032,7 @@ mod tests {
             start_line: 2,
             end_line: 2,
             replacement: "BETA".to_string(),
+            ..Default::default()
         }];
         let _ = handle_file_edit(&dec, None, &edits).await.unwrap();
         let out = std::fs::read(&file).unwrap();
@@ -3154,6 +4126,10 @@ mod tests {
             true,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -3187,6 +4163,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -3200,6 +4180,550 @@ mod tests {
             paths2.iter().any(|p| p.contains("dist/")),
             "disabling gitignore should surface dist/*, got {:?}",
             paths2
+        );
+    }
+
+    // --- P1-3: multi-pattern OR search ---
+    #[tokio::test]
+    async fn search_multi_pattern_or_matches_either_p1_3() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("a.txt"),
+            "alpha line\nbeta line\ngamma line\n",
+        )
+        .unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let patterns = vec!["alpha".to_string(), "gamma".to_string()];
+        let v = handle_file_search(
+            &dec,
+            "alpha",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            true,
+            &[],
+            None,
+            &patterns,
+            None,
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let lines: Vec<u64> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["line"].as_u64().unwrap())
+            .collect();
+        assert!(
+            lines.contains(&1),
+            "should match alpha on line 1: {:?}",
+            lines
+        );
+        assert!(
+            lines.contains(&3),
+            "should match gamma on line 3: {:?}",
+            lines
+        );
+        assert!(!lines.contains(&2), "must NOT match beta line: {:?}", lines);
+    }
+
+    // --- P1-3: fixed_strings treats regex metacharacters literally ---
+    #[tokio::test]
+    async fn search_fixed_strings_literal_match_p1_3() {
+        let tmp = tempfile::tempdir().unwrap();
+        // The literal text contains regex metacharacters; with fixed_strings
+        // it must match the exact bytes, not be interpreted as a pattern.
+        std::fs::write(tmp.path().join("a.txt"), "value = a.b(c)\nother\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let patterns = vec!["a.b(c)".to_string()];
+        let v = handle_file_search(
+            &dec,
+            "a.b(c)",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            true,
+            &[],
+            None,
+            &patterns,
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1, "literal must match exactly once");
+        assert_eq!(matches[0]["line"].as_u64().unwrap(), 1);
+
+        // Sanity: as a regex (fixed_strings=false), `a.b(c)` would also match
+        // because `.` is wildcard — so prove the literal path rejects a near
+        // miss that a regex would accept.
+        std::fs::write(tmp.path().join("b.txt"), "aXb(c)\n").unwrap();
+        let v2 = handle_file_search(
+            &dec,
+            "a.b(c)",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            true,
+            &[],
+            None,
+            &patterns,
+            None,
+            true,
+            false,
+        )
+        .await
+        .unwrap();
+        let paths: Vec<String> = v2["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m["path"].as_str().unwrap().to_string())
+            .collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("b.txt")),
+            "literal search must not match aXb(c): {:?}",
+            paths
+        );
+    }
+
+    // --- P1-1: --around produces a joined snippet window ---
+    #[tokio::test]
+    async fn search_around_emits_snippet_p1_1() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "L1\nL2\nNEEDLE\nL4\nL5\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Search)
+            .unwrap();
+
+        let patterns = vec!["NEEDLE".to_string()];
+        let v = handle_file_search(
+            &dec,
+            "NEEDLE",
+            None,
+            None,
+            &[],
+            None,
+            None,
+            false,
+            None,
+            true,
+            &[],
+            None,
+            &patterns,
+            Some(1),
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+        let matches = v["matches"].as_array().unwrap();
+        assert_eq!(matches.len(), 1);
+        let snippet = matches[0]["snippet"].as_str().expect("snippet present");
+        // around=1 -> one line before + match + one line after.
+        assert_eq!(snippet, "L2\nNEEDLE\nL4");
+    }
+
+    // ---------- P0-1 anchored edit ----------
+    #[tokio::test]
+    async fn edit_anchored_replaces_unique_occurrence() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, b"alpha\nbeta\ngamma\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+        let edits = vec![EditRange {
+            start_line: 0,
+            end_line: 0,
+            replacement: String::new(),
+            old_string: Some("beta".to_string()),
+            new_string: Some("BETA".to_string()),
+            expected_count: None,
+        }];
+        let v = handle_file_edit(&dec, None, &edits).await.unwrap();
+        assert_eq!(v["applied_occurrences"].as_u64().unwrap(), 1);
+        let got = std::fs::read_to_string(&file).unwrap();
+        assert_eq!(got, "alpha\nBETA\ngamma\n");
+    }
+
+    #[tokio::test]
+    async fn edit_anchored_not_unique_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, b"x\nx\nx\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+        let edits = vec![EditRange {
+            start_line: 0,
+            end_line: 0,
+            replacement: String::new(),
+            old_string: Some("x".to_string()),
+            new_string: Some("y".to_string()),
+            expected_count: None, // defaults to 1, but 3 present
+        }];
+        let err = handle_file_edit(&dec, None, &edits).await.unwrap_err();
+        assert!(err.to_string().contains("file.anchor_not_unique"));
+        // File must be untouched.
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "x\nx\nx\n");
+    }
+
+    #[tokio::test]
+    async fn edit_anchored_not_found_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("a.txt");
+        std::fs::write(&file, b"hello\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("a.txt"), tmp.path(), FileOp::Edit)
+            .unwrap();
+        let edits = vec![EditRange {
+            start_line: 0,
+            end_line: 0,
+            replacement: String::new(),
+            old_string: Some("nope".to_string()),
+            new_string: Some("x".to_string()),
+            expected_count: None,
+        }];
+        let err = handle_file_edit(&dec, None, &edits).await.unwrap_err();
+        assert!(err.to_string().contains("file.anchor_not_found"));
+    }
+
+    // ---------- P0-3 read_many partial failure ----------
+    #[tokio::test]
+    async fn read_many_partial_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("ok.txt"), b"hi\n").unwrap();
+        let policy = mk_policy(tmp.path());
+        let ok_dec = policy
+            .check(Path::new("ok.txt"), tmp.path(), FileOp::Read)
+            .unwrap();
+        let items = vec![
+            ("ok.txt".to_string(), Ok(ok_dec)),
+            (
+                "missing.txt".to_string(),
+                Err("[file.not_found] missing.txt".to_string()),
+            ),
+        ];
+        let v = handle_file_read_many(items, None, false).await.unwrap();
+        assert_eq!(v["count"].as_u64().unwrap(), 2);
+        assert_eq!(v["ok_count"].as_u64().unwrap(), 1);
+        let files = v["files"].as_array().unwrap();
+        // ok.txt succeeds, missing.txt carries an error but batch did not abort.
+        let by_path = |p: &str| files.iter().find(|f| f["path"] == p).unwrap();
+        assert_eq!(by_path("ok.txt")["ok"], serde_json::json!(true));
+        assert_eq!(by_path("missing.txt")["ok"], serde_json::json!(false));
+        assert!(by_path("missing.txt")["error"]
+            .as_str()
+            .unwrap()
+            .contains("file.not_found"));
+    }
+    #[tokio::test]
+    async fn read_many_rejects_too_many_paths() {
+        let items = (0..=MAX_READ_MANY_FILES)
+            .map(|i| {
+                (
+                    format!("file-{i}.txt"),
+                    Err("[file.not_found] missing".to_string()),
+                )
+            })
+            .collect();
+
+        let err = handle_file_read_many(items, None, false).await.unwrap_err();
+        assert!(err.to_string().contains("file.invalid_args"));
+        assert!(err.to_string().contains(&MAX_READ_MANY_FILES.to_string()));
+    }
+
+    #[tokio::test]
+    async fn read_many_rejects_too_many_total_bytes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_a = tmp.path().join("a.bin");
+        let file_b = tmp.path().join("b.bin");
+        std::fs::write(&file_a, vec![b'a'; 8 * 1024 * 1024]).unwrap();
+        std::fs::write(&file_b, vec![b'b'; 8 * 1024 * 1024 + 1]).unwrap();
+        let policy = mk_policy(tmp.path());
+        let mut dec_a = policy
+            .check(Path::new("a.bin"), tmp.path(), FileOp::Read)
+            .unwrap();
+        dec_a.max_read_bytes = MAX_READ_MANY_TOTAL_BYTES + 1;
+        let mut dec_b = policy
+            .check(Path::new("b.bin"), tmp.path(), FileOp::Read)
+            .unwrap();
+        dec_b.max_read_bytes = MAX_READ_MANY_TOTAL_BYTES + 1;
+        let items = vec![
+            ("a.bin".to_string(), Ok(dec_a)),
+            ("b.bin".to_string(), Ok(dec_b)),
+        ];
+
+        let err = handle_file_read_many(items, Some(MAX_READ_MANY_TOTAL_BYTES + 1), true)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.size_too_large"));
+    }
+
+    // ---------- P1-2 patch rename ----------
+    #[tokio::test]
+    async fn apply_patch_rename_only() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "from.txt".to_string(),
+            policy
+                .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        decisions.insert(
+            "to.txt".to_string(),
+            policy
+                .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+        let v = handle_file_apply_patch(&decisions, patch, &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(v["files"].as_array().unwrap().len(), 1);
+        assert!(!tmp.path().join("from.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("to.txt")).unwrap(),
+            "content\n"
+        );
+    }
+    #[tokio::test]
+    async fn apply_patch_rename_only_rejects_stale_source_base_sha() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "from.txt".to_string(),
+            policy
+                .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        decisions.insert(
+            "to.txt".to_string(),
+            policy
+                .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+        let mut base = HashMap::new();
+        base.insert("from.txt".to_string(), "deadbeef".repeat(8));
+
+        let err = handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn apply_patch_rename_only_rechecks_overwrite_at_commit() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "from.txt".to_string(),
+            policy
+                .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+                .unwrap(),
+        );
+        let mut to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        to_dec.allow_overwrite = false;
+        let to_path = to_dec.path.clone();
+        decisions.insert("to.txt".to_string(), to_dec);
+        let mut existing_dec = policy
+            .check(Path::new("existing.txt"), tmp.path(), FileOp::ApplyPatch)
+            .unwrap();
+        existing_dec.path = to_path;
+        decisions.insert("existing.txt".to_string(), existing_dec);
+        let patch = concat!(
+            "--- /dev/null\n",
+            "+++ b/existing.txt\n",
+            "@@ -0,0 +1 @@\n",
+            "+created first\n",
+            "diff --git a/from.txt b/to.txt\n",
+            "similarity index 100%\n",
+            "rename from from.txt\n",
+            "rename to to.txt\n",
+        );
+
+        let err = handle_file_apply_patch(&decisions, patch, &HashMap::new())
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.precondition_failed"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
+    }
+
+    // ---------- P1-2 patch copy ----------
+    #[tokio::test]
+    async fn apply_patch_copy_only() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("orig.txt"), b"dup-me\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "orig.txt".to_string(),
+            policy
+                .check(Path::new("orig.txt"), tmp.path(), FileOp::Read)
+                .unwrap(),
+        );
+        decisions.insert(
+            "dup.txt".to_string(),
+            policy
+                .check(Path::new("dup.txt"), tmp.path(), FileOp::Write)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/orig.txt b/dup.txt\n",
+            "similarity index 100%\n",
+            "copy from orig.txt\n",
+            "copy to dup.txt\n",
+        );
+        let v = handle_file_apply_patch(&decisions, patch, &HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(v["files"].as_array().unwrap().len(), 1);
+        // Source remains, dest is an identical copy.
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("orig.txt")).unwrap(),
+            "dup-me\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("dup.txt")).unwrap(),
+            "dup-me\n"
+        );
+    }
+    #[tokio::test]
+    async fn apply_patch_copy_only_rejects_stale_source_base_sha() {
+        use std::collections::HashMap;
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("orig.txt"), b"dup-me\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let mut decisions = HashMap::new();
+        decisions.insert(
+            "orig.txt".to_string(),
+            policy
+                .check(Path::new("orig.txt"), tmp.path(), FileOp::Read)
+                .unwrap(),
+        );
+        decisions.insert(
+            "dup.txt".to_string(),
+            policy
+                .check(Path::new("dup.txt"), tmp.path(), FileOp::Write)
+                .unwrap(),
+        );
+        let patch = concat!(
+            "diff --git a/orig.txt b/dup.txt\n",
+            "similarity index 100%\n",
+            "copy from orig.txt\n",
+            "copy to dup.txt\n",
+        );
+        let mut base = HashMap::new();
+        base.insert("orig.txt".to_string(), "deadbeef".repeat(8));
+
+        let err = handle_file_apply_patch(&decisions, patch, &base)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("orig.txt").exists());
+        assert!(!tmp.path().join("dup.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_rejects_stale_source_base_sha() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"content\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let from_dec = policy
+            .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+
+        let err = handle_file_move(&from_dec, &to_dec, Some(&"deadbeef".repeat(8)), None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.sha_mismatch"));
+        assert!(tmp.path().join("from.txt").exists());
+        assert!(!tmp.path().join("to.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn move_respects_destination_overwrite_override() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"new\n").unwrap();
+        std::fs::write(tmp.path().join("to.txt"), b"old\n").unwrap();
+        let policy = mk_rw_policy(tmp.path());
+        let from_dec = policy
+            .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let to_dec = policy
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+
+        let err = handle_file_move(&from_dec, &to_dec, None, Some(false))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("file.precondition_failed"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("from.txt")).unwrap(),
+            "new\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("to.txt")).unwrap(),
+            "old\n"
         );
     }
 
@@ -3229,6 +4753,10 @@ mod tests {
             false,
             &[],
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -3255,6 +4783,10 @@ mod tests {
             false,
             &denies,
             None,
+            &[],
+            None,
+            false,
+            false,
         )
         .await
         .unwrap();
@@ -3435,18 +4967,41 @@ mod tests {
 
     #[tokio::test]
     async fn apply_patch_rejects_rename_only_with_clear_code() {
-        let decisions = std::collections::HashMap::new();
+        // P1-2: rename-only diffs are now SUPPORTED (previously rejected).
+        // This verifies the rename is applied end-to-end when both endpoints
+        // carry policy decisions keyed on the patch's from/to paths.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("from.txt"), b"payload\n").unwrap();
+        let pol = bifrost_core::file_access::FileAccessPolicy::new_read_write(
+            "t".to_string(),
+            vec![tmp.path().to_path_buf()],
+        );
+        let d_from = pol
+            .check(Path::new("from.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let d_to = pol
+            .check(Path::new("to.txt"), tmp.path(), FileOp::Move)
+            .unwrap();
+        let mut decisions = std::collections::HashMap::new();
+        decisions.insert("from.txt".to_string(), d_from);
+        decisions.insert("to.txt".to_string(), d_to);
         let patch = concat!(
             "diff --git a/from.txt b/to.txt\n",
             "similarity index 100%\n",
             "rename from from.txt\n",
             "rename to to.txt\n",
         );
-        let err = handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
+        handle_file_apply_patch(&decisions, patch, &std::collections::HashMap::new())
             .await
-            .unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("file.unsupported_diff"), "got {}", msg);
+            .unwrap();
+        assert!(
+            !tmp.path().join("from.txt").exists(),
+            "source should be gone"
+        );
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("to.txt")).unwrap(),
+            "payload\n"
+        );
     }
 
     #[tokio::test]
@@ -3497,7 +5052,9 @@ mod tests {
         let d_to = pol
             .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
             .unwrap();
-        let out = handle_file_move(&d_from, &d_to, Some(&sha)).await.unwrap();
+        let out = handle_file_move(&d_from, &d_to, Some(&sha), None)
+            .await
+            .unwrap();
         assert!(out["from"].as_str().unwrap().ends_with("a.txt"));
         assert!(to.exists());
         assert!(!from.exists());
@@ -3520,7 +5077,7 @@ mod tests {
         let d_to = pol
             .check(Path::new("b.txt"), tmp.path(), FileOp::Move)
             .unwrap();
-        let err = handle_file_move(&d_from, &d_to, Some(&bogus))
+        let err = handle_file_move(&d_from, &d_to, Some(&bogus), None)
             .await
             .err()
             .unwrap();
@@ -3550,7 +5107,7 @@ mod tests {
         let d_to = pol
             .check(Path::new("dir_b"), tmp.path(), FileOp::Move)
             .unwrap();
-        let err = handle_file_move(&d_from, &d_to, Some(&"0".repeat(64)))
+        let err = handle_file_move(&d_from, &d_to, Some(&"0".repeat(64)), None)
             .await
             .err()
             .unwrap();

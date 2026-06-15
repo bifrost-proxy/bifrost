@@ -5,7 +5,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # Remote File API — full CLI contract test.
 #
 # This test verifies that ALL `bifrost remote file` subcommands
-# (twelve subcommands) are wired correctly and their --help text
+# (fourteen subcommands) are wired correctly and their --help text
 # mentions the documented flags. It is intentionally hermetic
 # (no relay, no daemon, no network): it only invokes the local
 # binary's help output.
@@ -71,17 +71,17 @@ ensure_binary() {
 # ---------------------------------------------------------------------------
 
 test_remote_file_root_help() {
-    header "bifrost remote file --help lists all twelve subcommands"
+    header "bifrost remote file --help lists all fourteen subcommands"
     local out
     out=$(run_bifrost remote file --help)
     local missing=""
-    for sub in read list stat glob find hash write edit mkdir move delete patch; do
+    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
         if ! output_has "$out" -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
     done
     if [[ -z "$missing" ]]; then
-        pass "all twelve subcommands present"
+        pass "all fourteen subcommands present"
     else
         fail "missing subcommands:$missing"
         echo "$out" | head -50
@@ -171,6 +171,33 @@ test_hash_help() {
     fi
 }
 
+test_read_many_help() {
+    header "remote file read-many --help has repeatable --path / --max-bytes / --allow-binary"
+    local out
+    out=$(run_bifrost remote file read-many --help)
+    if output_has "$out" -q -- "--path" \
+       && output_has "$out" -q -- "--max-bytes" \
+       && output_has "$out" -qi "allow-binary\|binary"; then
+        pass "read-many --help surface ok"
+    else
+        fail "read-many --help missing required flag"
+        echo "$out" | head -30
+    fi
+}
+
+test_outline_help() {
+    header "remote file outline --help has --max-symbols / --max-bytes"
+    local out
+    out=$(run_bifrost remote file outline --help)
+    if output_has "$out" -q -- "--max-symbols" \
+       && output_has "$out" -q -- "--max-bytes"; then
+        pass "outline --help surface ok"
+    else
+        fail "outline --help missing required flag"
+        echo "$out" | head -30
+    fi
+}
+
 # ---------------------------------------------------------------------------
 #  Write subcommands
 # ---------------------------------------------------------------------------
@@ -215,15 +242,17 @@ test_mkdir_help() {
 }
 
 test_move_help() {
-    header "remote file move --help accepts <FROM> <TO>"
+    header "remote file move --help accepts <FROM> <TO> / --base-sha256 / --allow-overwrite"
     local out
     out=$(run_bifrost remote file move --help)
     if output_has "$out" -qi "source\|path" \
-       && output_has "$out" -qi "destination\|to"; then
+       && output_has "$out" -qi "destination\|to" \
+       && output_has "$out" -q -- "--base-sha256" \
+       && output_has "$out" -q -- "--allow-overwrite"; then
         pass "mv --help surface ok"
     else
-        fail "mv --help missing source/destination"
-        echo "$out" | head -20
+        fail "mv --help missing source/destination or safety flags"
+        echo "$out" | head -30
     fi
 }
 
@@ -260,9 +289,9 @@ test_patch_help() {
 # ---------------------------------------------------------------------------
 
 test_output_json_supported() {
-    header "all twelve subcommands accept --output (human | json)"
+    header "all fourteen subcommands accept --output (human | json)"
     local any_fail=0
-    for sub in read list stat glob find hash write edit mkdir move delete patch; do
+    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! output_has "$out" -qi -- "--output\|human\|json"; then
@@ -271,14 +300,14 @@ test_output_json_supported() {
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "twelve subcommands --help all mention --output"
+        pass "fourteen subcommands --help all mention --output"
     fi
 }
 
 test_all_subcommands_have_cwd() {
-    header "all twelve subcommands accept --cwd"
+    header "all fourteen subcommands accept --cwd"
     local any_fail=0
-    for sub in read list stat glob find hash write edit mkdir move delete patch; do
+    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! output_has "$out" -qi -- "--cwd"; then
@@ -287,7 +316,7 @@ test_all_subcommands_have_cwd() {
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "twelve subcommands --help all mention --cwd"
+        pass "fourteen subcommands --help all mention --cwd"
     fi
 }
 
@@ -388,6 +417,30 @@ test_missing_required_hash_path_fails() {
         pass "hash without path correctly rejected (exit=$rc)"
     else
         fail "hash without path not rejected: $out"
+    fi
+}
+
+test_missing_required_read_many_path_fails() {
+    header "missing required --path: read-many should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file read-many 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
+        pass "read-many without --path correctly rejected (exit=$rc)"
+    else
+        fail "read-many without --path not rejected: $out"
+    fi
+}
+
+test_missing_required_outline_path_fails() {
+    header "missing required <PATH>: outline should fail"
+    local out rc
+    out=$("$BIFROST_BIN" remote file outline 2>&1)
+    rc=$?
+    if [[ $rc -ne 0 ]] || output_has "$out" -qi "required\|missing\|usage\|error"; then
+        pass "outline without path correctly rejected (exit=$rc)"
+    else
+        fail "outline without path not rejected: $out"
     fi
 }
 
@@ -521,7 +574,7 @@ test_glob_exclude_flag() {
 test_no_phase_text_in_help() {
     header "no subcommand --help contains 'Phase' text"
     local any_fail=0
-    for sub in read list stat glob find hash write edit mkdir move delete patch; do
+    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if output_has "$out" -qi "phase"; then
@@ -550,14 +603,14 @@ test_subcommand_about_descriptions() {
     local root_out
     root_out=$(run_bifrost remote file --help)
     local any_fail=0
-    for sub in read list stat glob find hash write edit mkdir move delete patch; do
+    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
         if ! output_has "$root_out" -qiE "$sub[[:space:]]"; then
             fail "subcommand $sub not visible in root help"
             any_fail=1
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "all twelve subcommands visible in root help with about text"
+        pass "all fourteen subcommands visible in root help with about text"
     fi
 }
 
@@ -571,11 +624,13 @@ main() {
     # Read-only
     test_remote_file_root_help
     test_read_help
+    test_read_many_help
     test_list_help
     test_stat_help
     test_glob_help
     test_find_help
     test_hash_help
+    test_outline_help
 
     # Write
     test_write_help
@@ -600,6 +655,8 @@ main() {
     test_missing_required_glob_pattern_fails
     test_missing_required_search_pattern_fails
     test_missing_required_hash_path_fails
+    test_missing_required_read_many_path_fails
+    test_missing_required_outline_path_fails
     test_missing_required_stat_path_fails
     test_missing_required_rm_path_fails
     test_missing_required_mkdir_path_fails

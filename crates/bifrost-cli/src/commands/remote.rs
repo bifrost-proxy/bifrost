@@ -160,11 +160,13 @@ fn validate_streaming_prefs(prefs: &StreamingPrefs) -> Result<(), String> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RemoteFileOp {
     Read,
+    ReadMany,
     List,
     Stat,
     Glob,
     Find,
     Hash,
+    Outline,
     Write,
     Edit,
     Mkdir,
@@ -2487,6 +2489,23 @@ fn build_remote_file_command(
             }),
             output.clone(),
         ),
+        RemoteFileCommands::ReadMany {
+            paths,
+            max_bytes,
+            allow_binary,
+            cwd,
+            output,
+        } => (
+            "file.read_many",
+            format!("file.read_many ({} files)", paths.len()),
+            json!({
+                "paths": paths,
+                "max_bytes": max_bytes,
+                "allow_binary": allow_binary,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
         RemoteFileCommands::List {
             path,
             depth,
@@ -2539,37 +2558,63 @@ fn build_remote_file_command(
         ),
         RemoteFileCommands::Find {
             pattern,
+            regex,
             path,
             max_matches,
             max_scan,
             cursor,
+            context_before,
+            context_after,
+            around,
             case_insensitive,
+            fixed_strings,
+            word,
             glob,
             no_ignore,
             exclude_patterns,
-            context_before,
-            context_after,
             cwd,
             output,
-        } => (
-            "file.search",
-            format!("file.search {}", pattern),
-            json!({
-                "pattern": pattern,
-                "path": path,
-                "max_matches": max_matches,
-                "max_scan_bytes": max_scan,
-                "cursor": cursor,
-                "case_insensitive": case_insensitive,
-                "glob": glob,
-                "respect_gitignore": !no_ignore,
-                "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
-                "context_before": context_before,
-                "context_after": context_after,
-                "cwd": cwd,
-            }),
-            output.clone(),
-        ),
+        } => {
+            // P1-3: gather positional `pattern` plus every repeated `--regex`
+            // into one OR-list. `patterns` is the canonical wire field; the
+            // legacy single `pattern` is kept populated for back-compat with
+            // older servers.
+            let mut patterns: Vec<String> = Vec::new();
+            if let Some(p) = pattern.clone() {
+                patterns.push(p);
+            }
+            patterns.extend(regex.clone());
+            if patterns.is_empty() {
+                return Err(BifrostError::Config(
+                    "[file.invalid_args] file find requires a positional <PATTERN> or at least one --regex".to_string(),
+                ));
+            }
+            let label = format!("file.search {}", patterns.join("|"));
+            (
+                "file.search",
+                label,
+                json!({
+                    // Back-compat: first pattern also sent as the scalar field.
+                    "pattern": patterns.first().cloned(),
+                    "patterns": patterns,
+                    "path": path,
+                    "max_matches": max_matches,
+                    "max_scan_bytes": max_scan,
+                    "cursor": cursor,
+                    "case_insensitive": case_insensitive,
+                    "fixed_strings": fixed_strings,
+                    "word": word,
+                    "glob": glob,
+                    "respect_gitignore": !no_ignore,
+                    "exclude_patterns": if exclude_patterns.is_empty() { None } else { Some(exclude_patterns) },
+                    "context_before": context_before,
+                    "context_after": context_after,
+                    "around": around,
+                    "cwd": cwd,
+                }),
+                output.clone(),
+            )
+        }
         RemoteFileCommands::Hash {
             path,
             algo,
@@ -2579,6 +2624,23 @@ fn build_remote_file_command(
             "file.hash",
             format!("file.hash {}", path),
             json!({ "path": path, "algo": algo, "cwd": cwd }),
+            output.clone(),
+        ),
+        RemoteFileCommands::Outline {
+            path,
+            max_symbols,
+            max_bytes,
+            cwd,
+            output,
+        } => (
+            "file.outline",
+            format!("file.outline {}", path),
+            json!({
+                "path": path,
+                "max_symbols": max_symbols,
+                "max_bytes": max_bytes,
+                "cwd": cwd,
+            }),
             output.clone(),
         ),
         RemoteFileCommands::Write {
@@ -2678,12 +2740,20 @@ fn build_remote_file_command(
         RemoteFileCommands::Move {
             from,
             to,
+            base_sha256,
+            allow_overwrite,
             cwd,
             output,
         } => (
             "file.move",
             format!("file.move {} -> {}", from, to),
-            json!({ "path": from, "to_path": to, "cwd": cwd }),
+            json!({
+                "path": from,
+                "to_path": to,
+                "base_sha256": base_sha256,
+                "allow_overwrite": allow_overwrite,
+                "cwd": cwd,
+            }),
             output.clone(),
         ),
         RemoteFileCommands::Delete {
@@ -2765,11 +2835,13 @@ fn build_remote_file_command(
 
     let render_op = match action {
         RemoteFileCommands::Read { .. } => RemoteFileOp::Read,
+        RemoteFileCommands::ReadMany { .. } => RemoteFileOp::ReadMany,
         RemoteFileCommands::List { .. } => RemoteFileOp::List,
         RemoteFileCommands::Stat { .. } => RemoteFileOp::Stat,
         RemoteFileCommands::Glob { .. } => RemoteFileOp::Glob,
         RemoteFileCommands::Find { .. } => RemoteFileOp::Find,
         RemoteFileCommands::Hash { .. } => RemoteFileOp::Hash,
+        RemoteFileCommands::Outline { .. } => RemoteFileOp::Outline,
         RemoteFileCommands::Write { .. } => RemoteFileOp::Write,
         RemoteFileCommands::Edit { .. } => RemoteFileOp::Edit,
         RemoteFileCommands::Mkdir { .. } => RemoteFileOp::Mkdir,
@@ -3674,11 +3746,13 @@ fn render_remote_file_human(op: RemoteFileOp, stdout: &str) {
 
     match op {
         RemoteFileOp::Read => render_file_read_human(&value),
+        RemoteFileOp::ReadMany => render_file_read_many_human(&value),
         RemoteFileOp::List => render_file_list_human(&value),
         RemoteFileOp::Stat => render_file_stat_human(&value),
         RemoteFileOp::Glob => render_file_glob_human(&value),
         RemoteFileOp::Find => render_file_find_human(&value),
         RemoteFileOp::Hash => render_file_hash_human(&value),
+        RemoteFileOp::Outline => render_file_outline_human(&value),
         RemoteFileOp::Write | RemoteFileOp::Edit => render_file_write_human(op, &value),
         RemoteFileOp::Mkdir => render_file_mkdir_human(&value),
         RemoteFileOp::Move => render_file_move_human(&value),
@@ -3776,6 +3850,41 @@ fn render_file_read_human(value: &Value) {
         eprintln!("{}", format!("— {}", parts.join("  ")).dimmed());
     }
     print_truncation_hint(RemoteFileOp::Read, value);
+}
+
+fn render_file_read_many_human(value: &Value) {
+    let files = match value.get("files").and_then(Value::as_array) {
+        Some(f) => f,
+        None => {
+            println!("{value}");
+            return;
+        }
+    };
+    for f in files {
+        let path = f.get("path").and_then(Value::as_str).unwrap_or("?");
+        let ok = f.get("ok").and_then(Value::as_bool).unwrap_or(false);
+        if !ok {
+            let err = f
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("read failed");
+            eprintln!("{}", format!("✗ {path}: {err}").red());
+            continue;
+        }
+        let size = f.get("total_size").and_then(Value::as_u64).unwrap_or(0);
+        let sha = f
+            .get("file_sha256")
+            .and_then(Value::as_str)
+            .or_else(|| f.get("sha256").and_then(Value::as_str))
+            .unwrap_or("");
+        println!(
+            "{}",
+            format!("✓ {path}  ({size} bytes  sha256={sha})").green()
+        );
+    }
+    let ok_count = value.get("ok_count").and_then(Value::as_u64).unwrap_or(0);
+    let count = value.get("count").and_then(Value::as_u64).unwrap_or(0);
+    eprintln!("{}", format!("— {ok_count}/{count} files read").dimmed());
 }
 
 fn render_file_list_human(value: &Value) {
@@ -3876,6 +3985,38 @@ fn render_file_hash_human(value: &Value) {
     }
 }
 
+fn render_file_outline_human(value: &Value) {
+    let lang = value
+        .get("language")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    if let Some(symbols) = value.get("symbols").and_then(Value::as_array) {
+        for s in symbols {
+            let kind = s.get("kind").and_then(Value::as_str).unwrap_or("");
+            let line = s.get("line").and_then(Value::as_u64).unwrap_or(0);
+            let sig = s
+                .get("signature")
+                .and_then(Value::as_str)
+                .or_else(|| s.get("name").and_then(Value::as_str))
+                .unwrap_or("");
+            println!("{:>5}  {:<10} {}", line, kind, sig);
+        }
+        let truncated = value
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let note = if truncated {
+            format!("— {} symbols ({}, truncated)", symbols.len(), lang)
+        } else {
+            format!("— {} symbols ({})", symbols.len(), lang)
+        };
+        eprintln!("{}", note.dimmed());
+    } else {
+        print!("{value}");
+        println!();
+    }
+}
+
 fn render_file_write_human(op: RemoteFileOp, value: &Value) {
     let verb = if op == RemoteFileOp::Edit {
         "Edited"
@@ -3916,8 +4057,15 @@ fn render_file_patch_human(value: &Value) {
     if let Some(files) = value.get("files").and_then(Value::as_array) {
         for f in files {
             let path = f.get("path").and_then(Value::as_str).unwrap_or("");
+            let from = f.get("from").and_then(Value::as_str).unwrap_or("");
+            let to = f.get("to").and_then(Value::as_str).unwrap_or("");
             if f.get("deleted").and_then(Value::as_bool) == Some(true) {
                 println!("{} {}", "deleted".red(), path);
+            } else if f.get("renamed").and_then(Value::as_bool) == Some(true) {
+                println!("{} {} -> {}", "renamed".green(), from, to);
+            } else if f.get("copied").and_then(Value::as_bool) == Some(true) {
+                let bytes = f.get("bytes_written").and_then(Value::as_u64).unwrap_or(0);
+                println!("{} {} -> {} ({} bytes)", "copied".green(), from, to, bytes);
             } else {
                 let bytes = f.get("bytes_written").and_then(Value::as_u64).unwrap_or(0);
                 println!("{} {} ({} bytes)", "patched".green(), path, bytes);

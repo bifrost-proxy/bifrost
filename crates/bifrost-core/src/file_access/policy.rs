@@ -22,11 +22,13 @@ use crate::file_access::{
 pub enum FileOp {
     // --- Phase 1 (read) ---
     Read,
+    ReadMany,
     List,
     Stat,
     Glob,
     Search,
     Hash,
+    Outline,
     // --- Phase 2 (write) ---
     Write,
     Edit,
@@ -41,11 +43,13 @@ impl FileOp {
     pub fn as_str(self) -> &'static str {
         match self {
             FileOp::Read => "read",
+            FileOp::ReadMany => "read_many",
             FileOp::List => "list",
             FileOp::Stat => "stat",
             FileOp::Glob => "glob",
             FileOp::Search => "search",
             FileOp::Hash => "hash",
+            FileOp::Outline => "outline",
             FileOp::Write => "write",
             FileOp::Edit => "edit",
             FileOp::Mkdir => "mkdir",
@@ -274,11 +278,13 @@ impl FileAccessPolicy {
             write_denies: Vec::new(),
             ops: vec![
                 FileOp::Read,
+                FileOp::ReadMany,
                 FileOp::List,
                 FileOp::Stat,
                 FileOp::Glob,
                 FileOp::Search,
                 FileOp::Hash,
+                FileOp::Outline,
             ],
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
@@ -297,11 +303,13 @@ impl FileAccessPolicy {
             write_denies: vec!["**/Cargo.lock".into(), "**/*.lock".into()],
             ops: vec![
                 FileOp::Read,
+                FileOp::ReadMany,
                 FileOp::List,
                 FileOp::Stat,
                 FileOp::Glob,
                 FileOp::Search,
                 FileOp::Hash,
+                FileOp::Outline,
                 FileOp::Write,
                 FileOp::Edit,
                 FileOp::Mkdir,
@@ -373,6 +381,54 @@ mod tests {
             .check(Path::new("Cargo.toml"), &tmp, FileOp::Write)
             .unwrap_err();
         assert_eq!(err.code(), "file.permission_denied");
+    }
+
+    #[test]
+    fn default_policies_allow_read_many() {
+        let root = std::env::temp_dir().join("bifrost_fa_read_many_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let readonly = FileAccessPolicy::new_readonly("ro", vec![root.clone()]);
+        let readwrite = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+
+        readonly
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+        readwrite
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_many_can_be_gated_independently_from_read() {
+        let root = std::env::temp_dir().join("bifrost_fa_read_many_gate_test");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("file.txt"), b"x").unwrap();
+
+        let mut read_only = FileAccessPolicy::new_readonly("read-only", vec![root.clone()]);
+        read_only.ops = vec![FileOp::Read];
+        let err = read_only
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.op_not_permitted");
+        read_only
+            .check(Path::new("file.txt"), &root, FileOp::Read)
+            .unwrap();
+
+        let mut batch_only = FileAccessPolicy::new_readonly("batch-only", vec![root.clone()]);
+        batch_only.ops = vec![FileOp::ReadMany];
+        batch_only
+            .check(Path::new("file.txt"), &root, FileOp::ReadMany)
+            .unwrap();
+        let err = batch_only
+            .check(Path::new("file.txt"), &root, FileOp::Read)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.op_not_permitted");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
