@@ -994,7 +994,7 @@ fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
         && conn.device_code.is_some()
     {
         return BifrostError::Config(
-            "saved remote authorization does not allow shell.exec. Re-run the command to trigger a fresh SSH authorization prompt on the remote device."
+            "saved remote authorization does not allow shell.exec. Ask the target device to raise this grant with `bifrost setting grant update --level shell` or `--level full`."
                 .to_string(),
         );
     }
@@ -1512,8 +1512,8 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         }
     }
 
-    let mut transport = merge_transport_context(&conn, &grant)?;
-    let mut active_grant_id = grant.grant_id.clone();
+    let transport = merge_transport_context(&conn, &grant)?;
+    let active_grant_id = grant.grant_id.clone();
     let command_summary = build_open_call_command_summary(&command);
     let command_encrypted = encrypt_remote_command(
         command.kind,
@@ -1543,74 +1543,6 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
 
     let call_result = match call_result {
         Ok(result) => result,
-        Err(err)
-            if command.kind == CommandKind::ShellExec
-                && is_grant_scope_mismatch_error(&err)
-                && conn.auth_method.as_deref() == Some("ssh_publickey")
-                && conn.ssh_key_source.is_some()
-                && conn.device_code.is_some() =>
-        {
-            println!(
-                "{}",
-                "→ Saved authorization is missing shell.exec scope; requesting fresh SSH approval..."
-                    .bright_yellow()
-            );
-            handle_connect_with_ssh(
-                &caller,
-                conn.ssh_key_source.as_deref().unwrap_or_default(),
-                conn.device_code.as_deref(),
-                &caller_info,
-                &conn.relay_url,
-            )
-            .await?;
-
-            let reloaded_connections = load_connections()?;
-            conn = resolve_local_connection(&reloaded_connections, Some(&conn.client_instance_id))?;
-            let refreshed_fingerprint = if conn.caller_fingerprint.is_empty() {
-                caller_fingerprint.clone()
-            } else {
-                conn.caller_fingerprint.clone()
-            };
-            let refreshed_grant = caller
-                .find_reusable_grant(&conn.client_instance_id, &refreshed_fingerprint)
-                .await?
-                .ok_or_else(|| {
-                    BifrostError::Config(
-                        "fresh SSH authorization was approved but no reusable grant was returned"
-                            .to_string(),
-                    )
-                })?;
-            let refreshed_grant =
-                reconcile_reusable_grant_for_transport(&mut conn, refreshed_grant)?;
-            let refreshed_transport = merge_transport_context(&conn, &refreshed_grant)?;
-            let refreshed_command_encrypted = encrypt_remote_command(
-                command.kind,
-                command.command.as_deref(),
-                command.args_json.as_deref(),
-                command.query.as_ref(),
-                command.shell_exec.as_ref(),
-                &refreshed_grant.grant_id,
-                &refreshed_transport,
-            )?;
-            let retried = caller
-                .open_call(&OpenCallRequest {
-                    grant_id: refreshed_grant.grant_id.clone(),
-                    client_instance_id: conn.client_instance_id.clone(),
-                    caller_fingerprint: refreshed_fingerprint,
-                    command_summary: command_summary.clone(),
-                    command_kind: command.kind,
-                    command_encrypted: refreshed_command_encrypted,
-                    pty_enabled: command
-                        .shell_exec
-                        .as_ref()
-                        .and_then(|payload| payload.pty.as_ref())
-                        .map(|pty| pty.enabled),
-                })
-                .await?;
-            active_grant_id = refreshed_grant.grant_id;
-            transport = refreshed_transport;
-            retried
-        }
         Err(err)
             if command.kind == CommandKind::ShellExec && is_grant_scope_mismatch_error(&err) =>
         {
@@ -7030,6 +6962,20 @@ mod tests {
         );
 
         assert!(!is_stale_remote_grant_error(&err));
+    }
+
+    #[test]
+    fn test_shell_scope_upgrade_error_for_ssh_key_requires_explicit_grant_update() {
+        let mut conn = sample_local_connection("client-ssh", "https://relay.example");
+        conn.auth_method = Some("ssh_publickey".to_string());
+        conn.ssh_key_source = Some("/tmp/test.bifrost".to_string());
+        conn.device_code = Some("BF-TEST".to_string());
+
+        let err = shell_scope_upgrade_error(&conn).to_string();
+
+        assert!(err.contains("does not allow shell.exec"));
+        assert!(err.contains("bifrost setting grant update --level shell"));
+        assert!(!err.contains("fresh SSH authorization"));
     }
 
     #[test]

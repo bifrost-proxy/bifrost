@@ -134,4 +134,4 @@
 
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
-| TC-RISK-03 | PENDING | 待执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`，脚本需断言 SSH key grant 为 Full Trust，并通过 `remote exec` 验证默认 grant 可以运行命令；随后用 CLI 验证 `setting grant update --device ... --level files/full`。 |
+| TC-RISK-03 | PASS | 2026-06-15 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本启动本地 relay、真实 Bifrost target、mock target 和两个 caller；通过 `bifrost setting ssh-key create --label "CI Agent" --grant-mode permanent --output ...` 在运行中的 target 上创建 key，再用该 key 执行 `remote conn up --ssh-key`。验证默认 SSH key grant 可真实 `file.write`/`file.read` 和 `remote exec`，并确认 `setting grant update --device ... --level shell/files/query/full` 后分别满足 commands+files、files-only、read-only watch、恢复 Full Trust 的能力矩阵；files-only/query 下 `remote exec` 被拒绝且不会自动重新 SSH 授权绕过降权。脚本还验证同一 SSH key 的第二 caller 使用不同 `caller_fingerprint`，target 保留两条 `auth_method=ssh_publickey` grant，随后 `remote conn status`、`remote traffic search/get` 和 revoke 全部通过。 |

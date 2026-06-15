@@ -334,6 +334,27 @@ pub fn full_file_ops() -> Vec<FileOp> {
     ]
 }
 
+/// Default file roots for SSH-key Full Trust grants.
+///
+/// Pair-code grants can be narrowed interactively in the UI. SSH-key grants
+/// are non-interactive by default, so their default must mean full-computer
+/// file access rather than `$HOME`-only access.
+pub fn full_trust_file_roots() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let drive = std::env::var_os("SystemDrive")
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| "C:".to_string());
+        return vec![PathBuf::from(format!("{}\\", drive.trim_end_matches('\\')))];
+    }
+
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/")]
+    }
+}
+
 /// Insert or update a `[[grant]]` entry keyed by `match.ssh_fingerprint`.
 ///
 /// Semantics:
@@ -629,6 +650,19 @@ mod tests {
     fn parse(toml_str: &str) -> FileAccessPolicyStore {
         let cfg: RawConfig = toml::from_str(toml_str).expect("toml parses");
         FileAccessPolicyStore::from_raw(cfg)
+    }
+
+    #[test]
+    fn full_trust_file_roots_default_to_platform_root() {
+        let roots = full_trust_file_roots();
+        assert_eq!(roots.len(), 1);
+        assert!(roots[0].is_absolute());
+
+        #[cfg(not(windows))]
+        assert_eq!(roots[0], PathBuf::from("/"));
+
+        #[cfg(windows)]
+        assert!(roots[0].to_string_lossy().ends_with('\\'));
     }
 
     #[test]

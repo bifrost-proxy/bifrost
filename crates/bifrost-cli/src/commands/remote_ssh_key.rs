@@ -3,7 +3,7 @@ use std::io::Write;
 use std::path::Path;
 
 use bifrost_admin::remote_invoke::file_policy_store::{
-    full_file_ops, upsert_ssh_fingerprint_grant,
+    full_file_ops, full_trust_file_roots, upsert_ssh_fingerprint_grant,
 };
 use bifrost_admin::remote_invoke::ssh_keys::{SshKeyMaterial, SshKeyRecord, SshKeyStore};
 use bifrost_admin::remote_invoke::types::GrantMode;
@@ -158,14 +158,10 @@ fn get_local_ssh_key() -> Result<Option<SshKeyRecord>> {
 }
 
 fn seed_default_file_access_policy(record: &SshKeyRecord) -> Result<()> {
-    let roots = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .into_iter()
-        .collect();
     upsert_ssh_fingerprint_grant(
         &record.ssh_key_fingerprint,
         Some(format!("ssh-key:{}", record.label)),
-        roots,
+        full_trust_file_roots(),
         full_file_ops(),
         None,
         None,
