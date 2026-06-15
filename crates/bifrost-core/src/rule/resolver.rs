@@ -252,8 +252,38 @@ impl RulesResolver {
             if !rule.matcher.can_trigger_tls_auto_intercept() {
                 continue;
             }
-            if rule.matcher.matches_host(&url_https, host)
-                || rule.matcher.matches_host(&url_http, host)
+            if rule.matcher.matches_host_scope(&url_https, host)
+                || rule.matcher.matches_host_scope(&url_http, host)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    pub fn has_tls_auto_intercept_route_rules_for_host(&self, host: &str) -> bool {
+        let url_https = format!("https://{}", host);
+        let url_wss = format!("wss://{}", host);
+        for rule in &self.rules {
+            if rule.is_disabled() || rule.is_negated() {
+                continue;
+            }
+            if !matches!(
+                rule.protocol,
+                Protocol::Host
+                    | Protocol::XHost
+                    | Protocol::Http
+                    | Protocol::Https
+                    | Protocol::Ws
+                    | Protocol::Wss
+            ) {
+                continue;
+            }
+            if !rule.matcher.can_trigger_tls_auto_intercept() {
+                continue;
+            }
+            if rule.matcher.matches_host_scope(&url_https, host)
+                || rule.matcher.matches_host_scope(&url_wss, host)
             {
                 return true;
             }

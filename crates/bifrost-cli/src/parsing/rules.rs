@@ -382,6 +382,11 @@ impl ProxyRulesResolverTrait for DynamicRulesResolver {
         let inner = self.inner.read();
         inner.has_response_rules_for_host(host)
     }
+
+    fn has_tls_auto_intercept_route_rules_for_host(&self, host: &str) -> bool {
+        let inner = self.inner.read();
+        inner.has_tls_auto_intercept_route_rules_for_host(host)
+    }
 }
 
 /// Response-phase re-resolution: rebuilds the request context, attaches the upstream
@@ -745,7 +750,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             Protocol::DevTools => {
                 result.devtools = Some(parse_devtools_rule(value));
             }
-            Protocol::Passthrough => {
+            Protocol::Passthrough if !result.ignored.host && result.host.is_none() => {
                 result.ignored.host = true;
             }
             Protocol::Tunnel => {
@@ -1065,6 +1070,30 @@ wss://app.example.test/ ws://localhost:8000/
         );
         assert!(resolved.ignored.host);
         assert_eq!(resolved.host, None);
+    }
+
+    #[test]
+    fn test_merge_passthrough_does_not_override_higher_priority_https_route() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules(
+                "qianchuan.jinritemai.com/app/account-center https://10.37.102.138:8081\n\
+                 qianchuan.jinritemai.com/app https://qianchuan.jinritemai.com/app\n\
+                 qianchuan.jinritemai.com https://10.37.102.138:8080",
+            )
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://qianchuan.jinritemai.com/app/account-center",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(!resolved.ignored.host);
+        assert_eq!(resolved.host.as_deref(), Some("10.37.102.138:8081"));
+        assert_eq!(resolved.host_protocol, Some(Protocol::Https));
     }
 
     #[test]

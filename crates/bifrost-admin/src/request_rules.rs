@@ -105,12 +105,14 @@ pub fn build_applied_rules(core_rules: &CoreResolvedRules) -> AppliedRules {
             {
                 applied.host = Some(rule.resolved_value.clone());
             }
-            Protocol::Passthrough => {
+            Protocol::Passthrough
+                if !applied.forwarding_passthrough
+                    && applied.forward_url.is_none()
+                    && applied.host.is_none() =>
+            {
                 applied.forwarding_passthrough = true;
-                applied.forward_url = None;
                 applied.forward_source_path = None;
                 applied.forward_target_path_exact = false;
-                applied.host = None;
             }
             Protocol::Method if applied.method.is_none() => {
                 applied.method = Some(rule.resolved_value.clone());
@@ -1313,6 +1315,40 @@ b.com status://200 resBody://(value)
         assert_eq!(
             result.url,
             "https://bifrost.local/api/nextagent/v1/sessions"
+        );
+    }
+
+    #[test]
+    fn test_passthrough_does_not_override_higher_priority_forward_rule() {
+        let rules_text = r#"
+qianchuan.jinritemai.com/app/account-center https://10.37.102.138:8081
+qianchuan.jinritemai.com/app https://qianchuan.jinritemai.com/app
+qianchuan.jinritemai.com https://10.37.102.138:8080
+"#;
+        let parser = RuleParser::default();
+        let rules = parser.parse_rules(rules_text).unwrap();
+        let resolver = RulesResolver::new(rules);
+        let ctx = RequestContext::from_url("https://qianchuan.jinritemai.com/app/account-center")
+            .with_method("GET");
+        let resolved_rules = resolver.resolve(&ctx);
+        let resolved_protocols: Vec<_> = resolved_rules
+            .rules
+            .iter()
+            .map(|rule| rule.rule.protocol)
+            .collect();
+        assert!(resolved_protocols.contains(&Protocol::Https));
+        assert!(resolved_protocols.contains(&Protocol::Passthrough));
+
+        let applied_rules = build_applied_rules(&resolved_rules);
+
+        assert!(!applied_rules.forwarding_passthrough);
+        assert_eq!(
+            applied_rules.forward_url.as_deref(),
+            Some("https://10.37.102.138:8081")
+        );
+        assert_eq!(
+            applied_rules.forward_source_path.as_deref(),
+            Some("/app/account-center")
         );
     }
 

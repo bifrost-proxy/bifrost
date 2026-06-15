@@ -45,6 +45,9 @@ pub trait Matcher: Send + Sync {
     fn matches_host(&self, url: &str, host: &str) -> bool {
         self.matches(url, host, "/").matched
     }
+    fn matches_host_scope(&self, url: &str, host: &str) -> bool {
+        self.matches_host(url, host)
+    }
     fn is_negated(&self) -> bool;
     fn priority(&self) -> i32;
     fn can_trigger_tls_auto_intercept(&self) -> bool {
@@ -94,6 +97,145 @@ pub(crate) fn pattern_has_concrete_host_scope(pattern: &str) -> bool {
     };
 
     host_without_port.chars().any(|c| c.is_ascii_alphanumeric())
+}
+
+pub(crate) fn pattern_host_scope_matches(pattern: &str, url: &str, host: &str) -> bool {
+    let mut clean = pattern.strip_prefix('!').unwrap_or(pattern);
+    clean = clean.strip_prefix('^').unwrap_or(clean);
+
+    let (scheme_match, body) = if let Some(rest) = clean.strip_prefix("http://") {
+        (url.starts_with("http://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("https://") {
+        (url.starts_with("https://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("http*://") {
+        (
+            url.starts_with("http://") || url.starts_with("https://"),
+            rest,
+        )
+    } else if let Some(rest) = clean.strip_prefix("ws://") {
+        (url.starts_with("ws://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("wss://") {
+        (url.starts_with("wss://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("ws*://") {
+        (url.starts_with("ws://") || url.starts_with("wss://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("tunnel://") {
+        (url.starts_with("tunnel://"), rest)
+    } else if let Some(rest) = clean.strip_prefix("//") {
+        (url.contains("://"), rest)
+    } else {
+        (true, clean)
+    };
+
+    if !scheme_match || body.starts_with('/') {
+        return false;
+    }
+
+    let host_pattern = body.split('/').next().unwrap_or(body);
+    let host_pattern = host_pattern.strip_prefix('$').unwrap_or(host_pattern);
+    if host_pattern.is_empty() {
+        return false;
+    }
+
+    let (host_pattern, port_pattern) = split_host_port_pattern(host_pattern);
+    if host_pattern.is_empty()
+        || !host_pattern.chars().any(|c| c.is_ascii_alphanumeric())
+        || !port_scope_matches(port_pattern, url, host)
+    {
+        return false;
+    }
+
+    let host = strip_host_port(host);
+    wildcard_host_matches(host_pattern, host)
+}
+
+fn split_host_port_pattern(host: &str) -> (&str, Option<&str>) {
+    if host.starts_with('[') {
+        if let Some(end) = host.find(']') {
+            let rest = &host[end + 1..];
+            if let Some(port) = rest.strip_prefix(':') {
+                return (&host[..=end], Some(port));
+            }
+        }
+        return (host, None);
+    }
+
+    if host.matches(':').count() == 1 {
+        let (candidate_host, candidate_port) = host.split_once(':').unwrap_or((host, ""));
+        if candidate_port
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '*')
+        {
+            return (candidate_host, Some(candidate_port));
+        }
+    }
+
+    (host, None)
+}
+
+fn strip_host_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        return host.find(']').map(|end| &host[..=end]).unwrap_or(host);
+    }
+
+    if host.matches(':').count() == 1 {
+        let (candidate_host, candidate_port) = host.split_once(':').unwrap_or((host, ""));
+        if candidate_port.chars().all(|c| c.is_ascii_digit()) {
+            return candidate_host;
+        }
+    }
+
+    host
+}
+
+fn port_scope_matches(port_pattern: Option<&str>, url: &str, host: &str) -> bool {
+    let Some(port_pattern) = port_pattern else {
+        return true;
+    };
+    let Some(port) = host
+        .rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
+        .or_else(|| default_port_for_url(url))
+    else {
+        return false;
+    };
+
+    wildcard_text_matches(port_pattern, &port.to_string(), true)
+}
+
+fn default_port_for_url(url: &str) -> Option<u16> {
+    if url.starts_with("https://") || url.starts_with("wss://") {
+        Some(443)
+    } else if url.starts_with("http://") || url.starts_with("ws://") {
+        Some(80)
+    } else {
+        None
+    }
+}
+
+fn wildcard_host_matches(pattern: &str, host: &str) -> bool {
+    wildcard_text_matches(pattern, host, false)
+}
+
+fn wildcard_text_matches(pattern: &str, value: &str, ascii_case_sensitive: bool) -> bool {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            c => regex.push_str(&::regex::escape(&c.to_string())),
+        }
+    }
+    regex.push('$');
+
+    let regex = if ascii_case_sensitive {
+        regex
+    } else {
+        format!("(?i:{regex})")
+    };
+
+    ::regex::Regex::new(&regex)
+        .map(|compiled| compiled.is_match(value))
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -214,5 +356,57 @@ mod tests {
     fn matcher_default_can_trigger_tls_auto_intercept_is_false() {
         let m = DummyMatcher { result: true };
         assert!(!m.can_trigger_tls_auto_intercept());
+    }
+
+    #[test]
+    fn pattern_host_scope_matches_plain_domain_with_path() {
+        assert!(pattern_host_scope_matches(
+            "qianchuan.jinritemai.com/app/account-center",
+            "https://qianchuan.jinritemai.com",
+            "qianchuan.jinritemai.com"
+        ));
+        assert!(!pattern_host_scope_matches(
+            "qianchuan.jinritemai.com/app/account-center",
+            "https://other.example.com",
+            "other.example.com"
+        ));
+    }
+
+    #[test]
+    fn pattern_host_scope_matches_respects_explicit_scheme() {
+        assert!(!pattern_host_scope_matches(
+            "http://example.com/api",
+            "https://example.com",
+            "example.com"
+        ));
+        assert!(pattern_host_scope_matches(
+            "http*://example.com/api",
+            "https://example.com",
+            "example.com"
+        ));
+        assert!(pattern_host_scope_matches(
+            "wss://example.com/socket",
+            "wss://example.com",
+            "example.com"
+        ));
+    }
+
+    #[test]
+    fn pattern_host_scope_matches_wildcard_and_ports() {
+        assert!(pattern_host_scope_matches(
+            "*.example.com/api",
+            "https://api.example.com",
+            "api.example.com"
+        ));
+        assert!(pattern_host_scope_matches(
+            "example.com:443/api",
+            "https://example.com",
+            "example.com"
+        ));
+        assert!(!pattern_host_scope_matches(
+            "example.com:8443/api",
+            "https://example.com",
+            "example.com"
+        ));
     }
 }

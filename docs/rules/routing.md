@@ -39,9 +39,9 @@ www.example.com host://api.backend.com:3000
 
 ### HTTPS CONNECT 行为
 
-`host://` 只是改变请求的上游目标地址。对 HTTPS `CONNECT` 或 SOCKS5 建立的 TLS 隧道，如果没有全局 TLS 拦截、TLS include、`tlsIntercept://`，且没有其他需要读取/修改 HTTPS 内层内容的明确 host 作用域规则，命中 `host://` 不会自动开启 TLS 解包。
+`host://` 会改变请求的上游目标地址。对 HTTPS `CONNECT` 或 SOCKS5 建立的 TLS 隧道，命中具备明确域名/IP 作用域的 `host://` 规则时，即使 pattern 没有 `https://` 前缀，Bifrost 也会自动开启 TLS 解包，让内层 HTTPS 请求继续按 path、过滤器和优先级匹配。
 
-如果希望按 HTTPS path、请求/响应头或 body 做处理，需要使用明确域名/IP pattern 的内容类规则，或显式配置 TLS 拦截。
+如果希望按 HTTPS path、请求/响应头或 body 做处理，可以使用明确域名/IP pattern 的路径级路由或内容类规则；这类规则同样可自动触发 TLS 解包，不要求 matcher 前写 `https://`。例如 `www.example.com/api https://127.0.0.1:8443` 会先根据 `www.example.com` 识别需要解包，再在内层请求中按 `/api` 精确匹配。
 
 ### 通配符匹配
 
@@ -111,9 +111,19 @@ api.example.com http://127.0.0.1:3000
 
 # 强制走 HTTPS 上游
 api.example.com https://backend.example.com
+
+# 路径级 HTTPS 转发：HTTPS CONNECT 阶段会因具体域名作用域自动解包，
+# matcher 前不需要额外写 https://
+api.example.com/v1 https://10.0.0.10:8443
 ```
 
 若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket.md) 中的 `ws://` / `wss://`。
+
+### HTTPS CONNECT 行为
+
+带具体域名/IP 作用域的 `http://` / `https://` 路径级路由会自动开启 TLS 解包，即使 pattern 没有协议前缀。Bifrost 在 CONNECT 阶段只能看到 host；当 matcher 的 host 作用域覆盖当前目标时，会先解包，让后续内层 HTTPS 请求按 path、过滤器和优先级正常选择最具体规则。
+
+如果目标地址与 pattern 指向同一站点，例如 `example.com/app https://example.com/app`，parser 会把它规范为 `passthrough://`。`passthrough://` 与其他路由目标遵循 first-win：更高优先级的具体 `https://` / `http://` / `host://` 决策已经选中时，后续更宽泛 passthrough 不会覆盖它。
 
 ---
 
@@ -234,15 +244,17 @@ example.com proxy://user:pass@proxy.com:8080
 
 `proxy://` 只选择下游代理出口。对 HTTPS `CONNECT` 或 SOCKS5 建立的 TLS 隧道，命中纯 `proxy://` 规则时，Bifrost 会向下游 HTTP 代理发送 `CONNECT original_host:original_port` 并透传原始 TLS 字节，不会因为这条规则自动解包。
 
+这是严格边界：即使 proxy 规则 matcher 带具体域名或路径，例如 `example.com/app proxy://127.0.0.1:8080`，只要目标协议只有下游代理转发这一类，就不能因为这条 proxy 规则自动 TLS 解包。
+
 仍会触发解包的情况：
 
 - 全局 TLS 拦截已开启，或目标命中 TLS include / 应用 include。
 - 规则显式配置了 `tlsIntercept://`。
 - 同一目标命中需要读取/修改 HTTPS 内层 HTTP 的规则，并且该规则 pattern 有明确 host 作用域，例如 `api.example.com resHeaders://X-Debug=1`、`*.example.com reqHeaders://X-Env=test`、`192.168.1.10 resBody://...`。
+- 同一目标命中路径级 `http://` / `https://` / `host://` / `xhost://` / `ws://` / `wss://` 路由，并且 matcher 有明确 host 作用域，例如 `api.example.com/v1 https://10.0.0.10:8443`。
 
 不会单独触发自动解包的情况：
 
-- 纯路由：`example.com host://127.0.0.1:3000`。
 - 纯下游代理：`example.com proxy://127.0.0.1:8080`。
 - 纯 wildcard / regex 内容规则：`* resHeaders://X-Debug=1`、`*/api/* resHeaders://X-Debug=1`、`/api\/v\d+/ resHeaders://X-Debug=1`。
 

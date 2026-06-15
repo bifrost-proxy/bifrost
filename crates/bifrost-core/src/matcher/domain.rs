@@ -249,6 +249,10 @@ impl Matcher for DomainMatcher {
         self.matches_protocol(url) && self.matches_domain(url, host)
     }
 
+    fn matches_host_scope(&self, url: &str, host: &str) -> bool {
+        self.matches_host(url, host)
+    }
+
     fn is_negated(&self) -> bool {
         self.negated
     }

@@ -212,19 +212,24 @@ bifrost rule share adhoc-debug https://example.com/app --content "api.example.co
 
 ### HTTPS 自动 TLS 解包边界
 
-当全局 TLS 拦截关闭时，Bifrost 仍会为了执行必须读取或修改 HTTPS 内层 HTTP 内容的规则而自动开启 TLS 解包，例如 `reqHeaders`、`resHeaders`、body 修改、脚本、mock 或状态码类规则。但这个自动解包有明确边界：
+当全局 TLS 拦截关闭时，Bifrost 仍会为了执行必须读取 HTTPS 内层 HTTP 的规则而自动开启 TLS 解包，例如路径级 `http://` / `https://` 转发、`reqHeaders`、`resHeaders`、body 修改、脚本、mock 或状态码类规则。但这个自动解包有明确边界：
 
-- 仅用于 `host://` 改目标地址的规则不会自动开启 TLS 解包。
-- 仅用于 `proxy://` 选择下游代理的规则不会自动开启 TLS 解包；HTTPS `CONNECT` 会保持隧道透传并转发给下游代理。
+- 带具体域名/IP 作用域的路由会自动开启 TLS 解包，即使 matcher 前没有写 `https://`。这是因为 CONNECT 阶段只能看到 host，必须先解包才能让内层 path 和路由优先级继续生效。
+- 仅用于 `proxy://` 选择下游代理的规则严格不会自动开启 TLS 解包；HTTPS `CONNECT` 会保持隧道透传并转发给下游代理。即使 proxy 规则的 matcher 带具体路径，只要目标协议只有下游代理转发，也不能因为这条规则解包。
 - 规则驱动的自动解包必须有明确 host 作用域：Domain、IP/CIDR、带具体域名或 IP 片段的 Wildcard/PathWildcard 可以触发。
 - 纯 regex 或纯 wildcard 范围过大，不能单独触发自动 TLS 解包，例如 `* resHeaders://...`、`*/api/* resHeaders://...`、`/api\/v\d+/ resHeaders://...`。
 - 如果确实需要让宽泛匹配规则处理 HTTPS 明文，请先把 pattern 收窄到明确域名/IP，或显式配置 `tlsIntercept://` / 全局 TLS include。
+- `passthrough://` 与 `http://` / `https://` / `host://` 等路由目标遵循同一套优先级 first-win 语义：如果更高优先级的具体路由已经选中，后续更宽泛的 passthrough 不会覆盖它。
 
 示例：
 
 ```txt
-# 不会自动解包，只改 CONNECT/SOCKS5 上游目标
+# 会自动解包，因为 matcher 有明确域名作用域
 example.com host://127.0.0.1:3000
+
+# 会自动解包，因为具体域名路径路由需要读取 HTTPS 内层 path；
+# matcher 不必写成 https://example.com/api
+example.com/api https://10.0.0.10:8443
 
 # 不会自动解包，只把隧道交给下游代理
 example.com proxy://127.0.0.1:8080

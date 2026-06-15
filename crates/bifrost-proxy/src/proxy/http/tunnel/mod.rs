@@ -743,7 +743,8 @@ pub async fn handle_connect(
         && tls_config.ca_cert.is_some()
         && !matches!(resolved_rules.tls_intercept, Some(false))
         && (requires_tls_interception_for_connect_rules(&resolved_rules)
-            || rules.has_response_rules_for_host(&host))
+            || rules.has_response_rules_for_host(&host)
+            || rules.has_tls_auto_intercept_route_rules_for_host(&host))
     {
         intercept = true;
     }

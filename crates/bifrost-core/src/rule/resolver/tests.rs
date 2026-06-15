@@ -988,6 +988,57 @@ fn test_has_response_rules_for_host_rejects_pure_regex_and_wildcards() {
 }
 
 #[test]
+fn test_has_tls_auto_intercept_route_rules_for_host_allows_plain_domain_routes() {
+    let mut rules = Vec::new();
+    rules.extend(parse_test_rule(
+        "qianchuan.jinritemai.com/app/account-center https://10.37.102.138:8081",
+    ));
+    rules.extend(parse_test_rule(
+        "qianchuan.jinritemai.com/app https://qianchuan.jinritemai.com/app",
+    ));
+    rules.extend(parse_test_rule(
+        "qianchuan.jinritemai.com https://10.37.102.138:8080",
+    ));
+
+    let resolver = RulesResolver::new(rules);
+
+    assert!(resolver.has_tls_auto_intercept_route_rules_for_host("qianchuan.jinritemai.com"));
+    assert!(!resolver.has_tls_auto_intercept_route_rules_for_host("other.jinritemai.com"));
+}
+
+#[test]
+fn test_has_tls_auto_intercept_route_rules_for_host_respects_scheme_scope() {
+    let mut rules = Vec::new();
+    rules.extend(parse_test_rule(
+        "http://scheme-route.local/app http://127.0.0.1:8080",
+    ));
+
+    let resolver = RulesResolver::new(rules);
+
+    assert!(!resolver.has_tls_auto_intercept_route_rules_for_host("scheme-route.local"));
+}
+
+#[test]
+fn test_has_tls_auto_intercept_route_rules_for_host_rejects_proxy_only_and_broad_patterns() {
+    let mut rules = Vec::new();
+    rules.extend(parse_test_rule("proxy-route.local proxy://127.0.0.1:8888"));
+    rules.extend(parse_test_rule(
+        "proxy-route.local/app proxy://127.0.0.1:8889",
+    ));
+    rules.extend(parse_test_rule("* https://127.0.0.1:9443"));
+    rules.extend(parse_test_rule("*/account/* https://127.0.0.1:9444"));
+    rules.extend(parse_test_rule(
+        "/regex-route\\.local/ https://127.0.0.1:9445",
+    ));
+
+    let resolver = RulesResolver::new(rules);
+
+    assert!(!resolver.has_tls_auto_intercept_route_rules_for_host("proxy-route.local"));
+    assert!(!resolver.has_tls_auto_intercept_route_rules_for_host("regex-route.local"));
+    assert!(!resolver.has_tls_auto_intercept_route_rules_for_host("broad-route.local"));
+}
+
+#[test]
 fn test_important_priority_ordering() {
     let matcher1 = Arc::new(WildcardMatcher::new("*.example.com").unwrap());
     let rule1 = Rule::new(
