@@ -203,7 +203,13 @@ impl FileAccessPolicy {
                 };
                 let mut ancestor = abs.as_path();
                 let mut missing_components = Vec::new();
-                while !ancestor.exists() {
+                // Use symlink_metadata (no traversal) so a dangling symlink at
+                // the tail is treated as "exists" and stops the walk here,
+                // rather than being misclassified as a missing component and
+                // raw-reattached below — which would let a write follow the
+                // link outside the root. `exists()` follows links and would
+                // report a dangling link as absent. (P1-8)
+                while ancestor.symlink_metadata().is_err() {
                     let component = ancestor
                         .file_name()
                         .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?
@@ -212,6 +218,26 @@ impl FileAccessPolicy {
                     ancestor = ancestor
                         .parent()
                         .ok_or_else(|| FileAccessError::OutOfScope { path: abs.clone() })?;
+                }
+
+                // P1-8: the deepest existing segment (`ancestor`) may be a
+                // symlink. A symlink that resolves to a location *inside* the
+                // roots is legitimate (e.g. macOS `/home` -> `/System/Volumes/
+                // Data/home`) and must be allowed. But a symlink whose target
+                // escapes the roots, or a dangling symlink whose target is
+                // missing, must be rejected outright rather than having the
+                // missing tail reattached and silently followed out of the
+                // sandbox. Route it through `canonicalize_within_roots`, which
+                // resolves the link and enforces containment.
+                if let Ok(meta) = ancestor.symlink_metadata() {
+                    if meta.file_type().is_symlink()
+                        && canonicalize_within_roots(ancestor, cwd, &self.roots).is_err()
+                    {
+                        return Err(FileAccessError::SymlinkEscape {
+                            path: abs.clone(),
+                            target: std::fs::read_link(ancestor).unwrap_or_else(|_| abs.clone()),
+                        });
+                    }
                 }
 
                 let ancestor_canonical = canonicalize_within_roots(ancestor, cwd, &self.roots)?;
@@ -482,6 +508,28 @@ mod tests {
             .unwrap();
         assert_eq!(decision.op, FileOp::Write);
         assert!(decision.path.as_path().ends_with("new_file.txt"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_through_dangling_symlink_tail_is_rejected() {
+        // P1-8: a write target whose final segment is an existing symlink
+        // (here dangling, pointing outside the root) must not be reattached as
+        // a "missing" component and followed. It must be rejected.
+        let tmp = std::env::temp_dir();
+        let root = tmp.join("bifrost_fa_symlink_tail_test");
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("escape");
+        let _ = std::fs::remove_file(&link);
+        std::os::unix::fs::symlink("/etc/bifrost_does_not_exist", &link).unwrap();
+
+        let policy = FileAccessPolicy::new_read_write("rw", vec![root.clone()]);
+        let err = policy
+            .check(Path::new("escape"), &root, FileOp::Write)
+            .unwrap_err();
+        assert_eq!(err.code(), "file.symlink_escape");
 
         std::fs::remove_dir_all(&root).ok();
     }

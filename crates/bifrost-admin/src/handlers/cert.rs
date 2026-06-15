@@ -278,7 +278,10 @@ fn is_local_peer(peer_addr: Option<SocketAddr>) -> bool {
     match peer_addr.map(|addr| addr.ip()) {
         Some(IpAddr::V4(ip)) => ip.is_loopback(),
         Some(IpAddr::V6(ip)) => ip.is_loopback(),
-        None => true,
+        // Fail closed: an unknown peer address must not be treated as local.
+        // Local CA installation is a privileged operation; if we cannot prove
+        // the request originates from loopback we deny it.
+        None => false,
     }
 }
 
@@ -413,7 +416,16 @@ async fn get_proxy_qrcode(req: Request<Incoming>, state: SharedAdminState) -> Re
 
 #[cfg(test)]
 mod tests {
-    use super::{cert_state_from_status, CertStatus};
+    use super::{cert_state_from_status, is_local_peer, CertStatus};
+
+    #[test]
+    fn local_peer_accepts_loopback_rejects_remote_and_unknown() {
+        assert!(is_local_peer(Some("127.0.0.1:5000".parse().unwrap())));
+        assert!(is_local_peer(Some("[::1]:5000".parse().unwrap())));
+        assert!(!is_local_peer(Some("192.168.1.10:5000".parse().unwrap())));
+        // Fail closed when the peer address is unknown.
+        assert!(!is_local_peer(None));
+    }
 
     #[test]
     fn maps_installed_not_trusted_status_without_false_trust() {

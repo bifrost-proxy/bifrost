@@ -86,10 +86,32 @@ impl FrameStore {
         if !frames_dir.exists() {
             let _ = fs::create_dir_all(&frames_dir);
         }
+        // Captured frames are sensitive; restrict directories to the owner on
+        // Unix. Done once at construction to avoid per-write cost.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&frames_dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!(
+                    "failed to set 0700 permissions on {}: {e}",
+                    frames_dir.display()
+                );
+            }
+        }
 
         let traffic_dir = base_dir.join(TRAFFIC_DB_SUBDIR);
         if !traffic_dir.exists() {
             let _ = fs::create_dir_all(&traffic_dir);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&traffic_dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!(
+                    "failed to set 0700 permissions on {}: {e}",
+                    traffic_dir.display()
+                );
+            }
         }
 
         let db_path = traffic_dir.join("traffic.db");

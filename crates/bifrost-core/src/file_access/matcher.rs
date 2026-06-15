@@ -30,9 +30,11 @@ struct CompiledGlob {
 
 impl GlobMatcher {
     pub fn new(patterns: &[String]) -> Result<Self, FileAccessError> {
+        // Positive allowlist matching stays case-sensitive: an allowlist must
+        // never be widened by case folding.
         let compiled = patterns
             .iter()
-            .map(|p| CompiledGlob::compile(p))
+            .map(|p| CompiledGlob::compile(p, false))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { patterns: compiled })
     }
@@ -51,9 +53,14 @@ impl GlobMatcher {
 
 impl DenyMatcher {
     pub fn new(patterns: &[String]) -> Result<Self, FileAccessError> {
+        // Deny patterns are compiled case-insensitively so that secret/VCS
+        // files (e.g. `.GIT/config`, `ID_RSA`, `config.KEY`, `.ENV`) are still
+        // blocked on case-insensitive filesystems such as macOS (APFS/HFS+)
+        // and Windows (NTFS), where the on-disk name's case can differ from the
+        // pattern. A deny-list must never be *narrowed* by case sensitivity.
         let compiled = patterns
             .iter()
-            .map(|p| CompiledGlob::compile(p))
+            .map(|p| CompiledGlob::compile(p, true))
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { patterns: compiled })
     }
@@ -71,12 +78,15 @@ impl DenyMatcher {
 }
 
 impl CompiledGlob {
-    fn compile(raw: &str) -> Result<Self, FileAccessError> {
+    fn compile(raw: &str, case_insensitive: bool) -> Result<Self, FileAccessError> {
         let regex_src = glob_to_regex(raw);
-        let regex = regex::Regex::new(&regex_src).map_err(|e| FileAccessError::InvalidGlob {
-            pattern: raw.to_string(),
-            reason: e.to_string(),
-        })?;
+        let regex = regex::RegexBuilder::new(&regex_src)
+            .case_insensitive(case_insensitive)
+            .build()
+            .map_err(|e| FileAccessError::InvalidGlob {
+                pattern: raw.to_string(),
+                reason: e.to_string(),
+            })?;
         Ok(Self {
             raw: raw.to_string(),
             regex,
@@ -210,5 +220,34 @@ mod tests {
     #[test]
     fn to_posix_normalizes_backslashes() {
         assert_eq!(to_posix(Path::new("a\\b\\c")), "a/b/c");
+    }
+
+    #[test]
+    fn deny_is_case_insensitive_for_secrets() {
+        // On case-insensitive filesystems (macOS/Windows) the on-disk name's
+        // case may differ from the deny pattern. Deny must still fire.
+        let m = DenyMatcher::new(&[
+            "**/.git/**".into(),
+            "**/id_rsa*".into(),
+            "**/*.key".into(),
+            "**/.env".into(),
+        ])
+        .unwrap();
+        assert!(m.match_raw(".GIT/config").is_some());
+        assert!(m.match_raw("a/.Git/HEAD").is_some());
+        assert!(m.match_raw("ID_RSA").is_some());
+        assert!(m.match_raw("secrets/Config.KEY").is_some());
+        assert!(m.match_raw(".ENV").is_some());
+        // Non-secret paths must still pass.
+        assert!(m.match_raw("src/main.rs").is_none());
+    }
+
+    #[test]
+    fn glob_allowlist_stays_case_sensitive() {
+        // A positive allowlist must NOT be widened by case folding.
+        let m = GlobMatcher::new(&["src/*.rs".into()]).unwrap();
+        assert!(m.is_match("src/main.rs"));
+        assert!(!m.is_match("SRC/main.rs"));
+        assert!(!m.is_match("src/MAIN.RS"));
     }
 }

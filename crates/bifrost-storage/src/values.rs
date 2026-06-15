@@ -41,6 +41,15 @@ impl ValuesStorage {
 
     pub fn with_dir(dir: PathBuf) -> Result<Self> {
         fs::create_dir_all(&dir)?;
+        // Stored values may contain secrets; restrict the directory to the
+        // owner on Unix. Best-effort: log a warning on failure.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!("failed to set 0700 permissions on {}: {e}", dir.display());
+            }
+        }
         let mut storage = Self {
             base_dir: dir,
             cache: HashMap::new(),
@@ -225,7 +234,14 @@ impl ValueStore for ValuesStorage {
 
     fn set(&mut self, key: &str, value: String) {
         let path = self.value_path(key);
-        let _ = fs::write(&path, &value);
+        if let Err(e) = fs::write(&path, &value) {
+            tracing::warn!(
+                "failed to persist value '{}' to {}: {e}",
+                key,
+                path.display()
+            );
+            return;
+        }
         self.cache.insert(key.to_string(), value);
     }
 

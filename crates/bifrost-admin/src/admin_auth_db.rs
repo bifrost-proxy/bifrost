@@ -217,6 +217,30 @@ fn get_schema_version(conn: &Connection) -> u32 {
     .unwrap_or(0)
 }
 
+/// Move a schema-mismatched database file aside to a timestamped backup so it
+/// is preserved (for recovery/forensics) instead of silently deleted. Also
+/// moves the SQLite `-wal` / `-shm` sidecar files if present.
+fn backup_mismatched_db(db_path: &std::path::Path) -> std::io::Result<()> {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let backup = db_path.with_extension(format!("bak.{ts}"));
+    fs::rename(db_path, &backup)?;
+    warn!(backup = %backup.display(), "[DB] mismatched database moved to backup");
+    for sidecar in ["wal", "shm"] {
+        let mut side = db_path.as_os_str().to_os_string();
+        side.push(format!("-{sidecar}"));
+        let side = PathBuf::from(side);
+        if side.exists() {
+            let mut side_bak = backup.as_os_str().to_os_string();
+            side_bak.push(format!("-{sidecar}"));
+            let _ = fs::rename(&side, PathBuf::from(side_bak));
+        }
+    }
+    Ok(())
+}
+
 fn open_conn(db_path: &std::path::Path) -> Result<Connection> {
     let conn = Connection::open(db_path)
         .map_err(|e| BifrostError::Storage(format!("Failed to open auth db: {e}")))?;
@@ -227,17 +251,24 @@ fn open_conn(db_path: &std::path::Path) -> Result<Connection> {
             warn!(
                 current_version = current,
                 expected_version = expected,
-                "[AUTH_DB] Schema version mismatch, resetting database"
+                "[AUTH_DB] Schema version mismatch, backing up and recreating database"
             );
             drop(conn);
-            if let Err(e) = fs::remove_file(db_path) {
-                tracing::error!("[AUTH_DB] Failed to remove old database: {e}");
+            // Preserve the old database rather than deleting it: a silent
+            // delete is irreversible data loss (sessions, credentials) and
+            // destroys forensic evidence after an unexpected downgrade. Move it
+            // aside to a timestamped backup so it can be inspected/recovered.
+            if let Err(e) = backup_mismatched_db(db_path) {
+                tracing::error!("[AUTH_DB] Failed to back up old database: {e}");
+                return Err(BifrostError::Storage(format!(
+                    "auth db schema mismatch and backup failed: {e}"
+                )));
             }
             let new_conn = Connection::open(db_path)
                 .map_err(|e| BifrostError::Storage(format!("Failed to open auth db: {e}")))?;
             init_db(&new_conn)
                 .map_err(|e| BifrostError::Storage(format!("Failed to init auth db: {e}")))?;
-            info!("[AUTH_DB] Database reset successfully");
+            info!("[AUTH_DB] Database recreated after backing up the previous file");
             Ok(new_conn)
         }
         Err(e) => Err(BifrostError::Storage(format!(

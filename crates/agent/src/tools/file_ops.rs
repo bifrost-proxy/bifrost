@@ -59,7 +59,16 @@ impl ToolHandler for WriteFileTool {
             }
         };
 
-        let file_path = resolve_path(&args.path, work_dir);
+        let file_path = match resolve_path_confined(&args.path, work_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolResult {
+                    success: false,
+                    output: format!("path rejected: {e}"),
+                    runtime_events: Vec::new(),
+                }
+            }
+        };
         info!(path = %file_path.display(), bytes = args.content.len(), "writing file");
 
         if let Some(parent) = file_path.parent() {
@@ -149,7 +158,16 @@ impl ToolHandler for ReadFileTool {
             }
         };
 
-        let file_path = resolve_path(&args.path, work_dir);
+        let file_path = match resolve_path_confined(&args.path, work_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                return ToolResult {
+                    success: false,
+                    output: format!("path rejected: {e}"),
+                    runtime_events: Vec::new(),
+                }
+            }
+        };
         info!(path = %file_path.display(), "reading file");
 
         // Check file size before reading (prevent OOM)
@@ -242,11 +260,19 @@ impl ToolHandler for ListDirectoryTool {
     async fn execute(&self, arguments: &str, work_dir: &Path) -> ToolResult {
         let args: ListDirArgs =
             serde_json::from_str(arguments).unwrap_or(ListDirArgs { path: None });
-        let dir = args
-            .path
-            .as_ref()
-            .map(|p| resolve_path(p, work_dir))
-            .unwrap_or_else(|| work_dir.to_path_buf());
+        let dir = match args.path.as_ref() {
+            Some(p) => match resolve_path_confined(p, work_dir) {
+                Ok(d) => d,
+                Err(e) => {
+                    return ToolResult {
+                        success: false,
+                        output: format!("path rejected: {e}"),
+                        runtime_events: Vec::new(),
+                    }
+                }
+            },
+            None => work_dir.to_path_buf(),
+        };
 
         info!(path = %dir.display(), "listing directory");
 
@@ -292,5 +318,185 @@ pub fn resolve_path(path: &str, work_dir: &Path) -> std::path::PathBuf {
         p.to_path_buf()
     } else {
         work_dir.join(p)
+    }
+}
+
+/// Lexically normalize a path by resolving `.` and `..` components purely
+/// textually (no filesystem access, no symlink following).
+///
+/// This must run *before* the symlink-aware canonicalization pass: relying on
+/// `Path::file_name()` to peel components drops `..` segments silently (it
+/// returns `None` when a path ends in `..`), which would let
+/// `sub/../../escape.txt` collapse back *inside* the sandbox instead of
+/// escaping it. Normalizing first guarantees every `..` actually pops a
+/// component (or, when it would climb above the anchor, is preserved so the
+/// final containment check fails closed).
+fn lexical_normalize(path: &Path) -> std::path::PathBuf {
+    use std::path::Component;
+    let mut out = std::path::PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            Component::Prefix(_) | Component::RootDir => out.push(comp.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                // Pop a real component; if there is nothing to pop (the path is
+                // trying to climb above its anchor) keep the `..` so the final
+                // containment check rejects it.
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            Component::Normal(c) => out.push(c),
+        }
+    }
+    out
+}
+
+/// Resolve `path` and confine it to `work_dir`.
+///
+/// The agent's file tools take a model-controlled `path`. Without confinement
+/// an indirect prompt injection could read arbitrary files (`~/.ssh/id_rsa`)
+/// or overwrite host files (`/etc/...`), escalating to RCE. This helper
+/// resolves the candidate (joining relative paths onto `work_dir`, accepting
+/// absolute paths only if they still land inside `work_dir`), normalizes
+/// `..`/`.` components, resolves symlinks on the longest existing prefix, and
+/// rejects anything that escapes the `work_dir` sandbox.
+pub fn resolve_path_confined(path: &str, work_dir: &Path) -> Result<std::path::PathBuf, String> {
+    let candidate = resolve_path(path, work_dir);
+
+    // Canonicalize the sandbox root. If the root itself cannot be resolved we
+    // cannot make a safe decision, so fail closed.
+    let root = work_dir
+        .canonicalize()
+        .map_err(|e| format!("cannot resolve working directory: {e}"))?;
+
+    // Collapse `.`/`..` lexically first (see `lexical_normalize`), then resolve
+    // the longest existing prefix of the normalized candidate (this follows
+    // symlinks for components that exist on disk) and re-attach the
+    // not-yet-existing tail. This lets `write_file` create new files while
+    // still blocking symlink/`..` escapes through existing dirs.
+    let normalized = lexical_normalize(&candidate);
+
+    let mut existing = normalized.as_path();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    let resolved_prefix = loop {
+        match existing.canonicalize() {
+            Ok(p) => break p,
+            Err(_) => match existing.parent() {
+                Some(parent) => {
+                    if let Some(name) = existing.file_name() {
+                        tail.push(name.to_os_string());
+                    }
+                    existing = parent;
+                }
+                None => return Err(format!("invalid path: {}", candidate.display())),
+            },
+        }
+    };
+
+    let mut resolved = resolved_prefix;
+    for name in tail.into_iter().rev() {
+        // Defensive: reject `..` / `.` that survived into the tail.
+        if name == std::ffi::OsStr::new("..") || name == std::ffi::OsStr::new(".") {
+            return Err("path traversal is not allowed".to_string());
+        }
+        resolved.push(name);
+    }
+
+    if !resolved.starts_with(&root) {
+        return Err(format!(
+            "path '{}' escapes the working directory sandbox",
+            path
+        ));
+    }
+    Ok(resolved)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn confined_allows_relative_inside_root() {
+        let tmp = std::env::temp_dir().join(format!(
+            "bifrost-agent-confine-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(tmp.join("sub")).unwrap();
+        std::fs::write(tmp.join("sub/a.txt"), b"x").unwrap();
+
+        let ok = resolve_path_confined("sub/a.txt", &tmp).unwrap();
+        assert!(ok.starts_with(tmp.canonicalize().unwrap()));
+
+        // New (not-yet-existing) file inside root is allowed.
+        let new_ok = resolve_path_confined("sub/new.txt", &tmp).unwrap();
+        assert!(new_ok.starts_with(tmp.canonicalize().unwrap()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn confined_rejects_dotdot_escape() {
+        let tmp = std::env::temp_dir().join(format!(
+            "bifrost-agent-confine-dd-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        assert!(resolve_path_confined("../escape.txt", &tmp).is_err());
+        assert!(resolve_path_confined("sub/../../escape.txt", &tmp).is_err());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn confined_rejects_absolute_outside_root() {
+        let tmp = std::env::temp_dir().join(format!(
+            "bifrost-agent-confine-abs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        if !cfg!(target_os = "windows") {
+            assert!(resolve_path_confined("/etc/passwd", &tmp).is_err());
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn confined_rejects_symlink_escape() {
+        if cfg!(target_os = "windows") {
+            return;
+        }
+        let base = std::env::temp_dir().join(format!(
+            "bifrost-agent-confine-sym-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = base.join("root");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("secret.txt"), b"top secret").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, root.join("link")).unwrap();
+
+        // Reading through a symlink that points outside the root must fail.
+        assert!(resolve_path_confined("link/secret.txt", &root).is_err());
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

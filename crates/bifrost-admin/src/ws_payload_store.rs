@@ -120,6 +120,18 @@ impl WsPayloadStore {
         if !payload_dir.exists() {
             let _ = fs::create_dir_all(&payload_dir);
         }
+        // Captured WebSocket payloads are sensitive; restrict the directory to
+        // the owner on Unix. Done once at construction to avoid per-write cost.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&payload_dir, fs::Permissions::from_mode(0o700)) {
+                tracing::warn!(
+                    "failed to set 0700 permissions on {}: {e}",
+                    payload_dir.display()
+                );
+            }
+        }
         let cache_size = std::num::NonZeroUsize::new(max_open_files.max(1))
             .unwrap_or_else(|| std::num::NonZeroUsize::new(1).expect("non-zero"));
         Self {

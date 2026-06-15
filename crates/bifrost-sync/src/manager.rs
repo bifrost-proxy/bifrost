@@ -1268,6 +1268,19 @@ impl SyncManager {
         let content = serde_json::to_string_pretty(state)
             .map_err(|e| BifrostError::Config(format!("failed to serialize sync state: {e}")))?;
         fs::write(&self.state_file, content)?;
+        // The sync state file embeds SSO tokens; restrict it to the owner on
+        // Unix. Best-effort: log a warning on failure rather than failing sync.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = fs::set_permissions(&self.state_file, fs::Permissions::from_mode(0o600))
+            {
+                tracing::warn!(
+                    "failed to set 0600 permissions on {}: {e}",
+                    self.state_file.display()
+                );
+            }
+        }
         Ok(())
     }
 }
