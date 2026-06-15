@@ -191,7 +191,7 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 - Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Admin UI` / `Open Logs` 时出现短暂终端窗口。
 - Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
 - macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
-- `bifrost start -d` 的 daemon child 是真正的长期服务进程；它完成 listener/runtime 初始化后仍必须按配置拉起 tray helper。只有用户显式传入 `--no-tray` 或配置禁用 tray 时才跳过，不能因为 `BIFROST_DETACHED_DAEMON_CHILD=1` 跳过 tray。
+- `bifrost start -d` 的 daemon child 是真正的长期服务进程；它检测到 `BIFROST_DETACHED_DAEMON_CHILD=1` 后必须直接进入 runtime，不能再次递归 spawn daemon parent。它完成 listener/runtime 初始化后仍必须按配置拉起 tray helper。只有用户显式传入 `--no-tray` 或配置禁用 tray 时才跳过，不能因为 daemon child 身份跳过 tray。
 
 ## CLI 交互面
 
@@ -490,7 +490,7 @@ Quit Tray
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
-- `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
+- `Start Bifrost`：调用可信 `bifrost start --daemon --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；daemon parent 可以成功退出，但 detached daemon child 必须进入长期 runtime。若启动器异常退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
 
