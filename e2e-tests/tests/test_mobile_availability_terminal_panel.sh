@@ -53,6 +53,24 @@ wait_log_contains() {
     return 1
 }
 
+wait_trust_probe_landing() {
+    local url="$1"
+    local body_file="${TEST_DIR}/trust-probe.html"
+    local err_file="${TEST_DIR}/trust-probe.err"
+    for _ in {1..80}; do
+        if curl -fsS --noproxy '*' "$url" >"$body_file" 2>"$err_file" &&
+            grep -q "Bifrost Availability Check" "$body_file"; then
+            return 0
+        fi
+        sleep 0.25
+    done
+    echo "[mobile-availability-terminal] trust probe response body:" >&2
+    cat "$body_file" >&2 2>/dev/null || true
+    echo "[mobile-availability-terminal] trust probe curl stderr:" >&2
+    cat "$err_file" >&2 2>/dev/null || true
+    return 1
+}
+
 if [[ "${SKIP_BUILD:-false}" != "true" || ! -x "$BIFROST_BIN" ]]; then
     cargo build --bin bifrost >/dev/null
     BIFROST_BIN="${PROJECT_DIR}/target/debug/bifrost"
@@ -83,7 +101,7 @@ if ! wait_log_contains "$LOG_FILE" "MOBILE AVAILABILITY CHECK"; then
     exit 1
 fi
 
-if ! curl -fsS --noproxy '*' "http://127.0.0.1:${PORT}/_bifrost/tp" | grep -q "Bifrost Availability Check"; then
+if ! wait_trust_probe_landing "http://127.0.0.1:${PORT}/_bifrost/tp"; then
     cat "$LOG_FILE" >&2 || true
     _log_fail "short trust probe URL opens landing page" "Bifrost Availability Check" "missing"
     exit 1

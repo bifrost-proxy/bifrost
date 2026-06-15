@@ -225,7 +225,7 @@ impl ExecSessionManager {
                 Duration::from_millis(
                     self.write_stdin_yield_time_ms(args.yield_time_ms, input.is_empty()),
                 ),
-                PollMode::OutputOrCompletion,
+                write_stdin_poll_mode(input.is_empty()),
                 PollConsumer::Model {
                     since_chunk_id: args.since_chunk_id,
                 },
@@ -302,6 +302,14 @@ impl ExecSessionManager {
 
 fn clamp_yield_time(yield_time_ms: u64) -> u64 {
     yield_time_ms.clamp(MIN_YIELD_TIME_MS, MAX_YIELD_TIME_MS)
+}
+
+fn write_stdin_poll_mode(empty_input: bool) -> PollMode {
+    if empty_input {
+        PollMode::OutputOrCompletion
+    } else {
+        PollMode::CompletionOrYield
+    }
 }
 
 fn spawn_exit_watcher(session: Arc<ExecSession>) {
@@ -1655,6 +1663,67 @@ mod tests {
         let value: serde_json::Value = serde_json::from_str(&final_poll.output).unwrap();
         assert_eq!(value["exit_code"], 0);
         assert!(value["session_id"].is_null());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn write_stdin_to_tty_waits_for_completion_after_input_echo() {
+        let manager = Arc::new(ExecSessionManager::new());
+        let tool = ExecCommandTool::new(manager.clone());
+        let dir = tempdir().unwrap();
+        let args = serde_json::json!({
+            "cmd": "python3 -u -c 'import sys; print(\"E2E_CONFIRM?\", flush=True); line=sys.stdin.readline(); print(\"E2E_ANSWER=\" + line.strip(), flush=True)'",
+            "tty": true,
+            "yield_time_ms": 50
+        })
+        .to_string();
+        let result = tool.execute(&args, dir.path()).await;
+        assert!(result.success, "{}", result.output);
+        let mut value: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let session_id = value["session_id"]
+            .as_i64()
+            .expect("session id")
+            .to_string();
+        assert_eq!(value["exit_code"], serde_json::Value::Null);
+        let mut combined_output = value["output"].as_str().unwrap_or("").to_string();
+        for _ in 0..20 {
+            if combined_output.contains("E2E_CONFIRM?") {
+                break;
+            }
+            let poll = manager
+                .write_and_poll(ExecWriteArgs {
+                    session_id: session_id.clone(),
+                    chars: None,
+                    since_chunk_id: None,
+                    yield_time_ms: Some(250),
+                    max_output_tokens: None,
+                })
+                .await;
+            assert!(poll.success, "{}", poll.output);
+            value = serde_json::from_str(&poll.output).unwrap();
+            combined_output.push_str(value["output"].as_str().unwrap_or(""));
+        }
+        assert!(
+            combined_output.contains("E2E_CONFIRM?"),
+            "{combined_output}"
+        );
+
+        let poll = manager
+            .write_and_poll(ExecWriteArgs {
+                session_id: session_id.clone(),
+                chars: Some("yes\n".to_string()),
+                since_chunk_id: None,
+                yield_time_ms: Some(1000),
+                max_output_tokens: None,
+            })
+            .await;
+        assert!(poll.success, "{}", poll.output);
+        let value: serde_json::Value = serde_json::from_str(&poll.output).unwrap();
+        let output = value["output"].as_str().unwrap_or("");
+        assert!(output.contains("E2E_ANSWER=yes"), "{output}");
+        assert_eq!(value["exit_code"], 0);
+        assert!(value["session_id"].is_null());
+        assert!(!manager.has_session(&session_id));
     }
 
     #[tokio::test]

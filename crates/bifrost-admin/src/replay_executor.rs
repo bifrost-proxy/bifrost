@@ -1524,7 +1524,10 @@ mod tests {
 
     #[test]
     fn check_mock_response_returns_none_when_no_mock_rules() {
-        let admin = Arc::new(crate::state::AdminState::new(0));
+        let temp_dir = tempfile::tempdir().expect("temp rules dir");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("rules storage");
+        let admin = Arc::new(crate::state::AdminState::new_for_test(0, rules_storage));
         let executor = ReplayExecutor::new(admin, false);
 
         let resolved = build_resolved_rules(&[(Protocol::Host, "example.com")]);
