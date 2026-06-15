@@ -652,14 +652,11 @@ fn validate_single_protocol_value(
         .trim_start_matches('`')
         .trim_end_matches('`');
 
-    if clean_value.starts_with('{') && clean_value.ends_with('}') {
-        return None;
-    }
-
     let start_col = value_start + 1;
     let end_col = value_end;
+    let lower_protocol = protocol_name.to_lowercase();
 
-    match protocol_name.to_lowercase().as_str() {
+    match lower_protocol.as_str() {
         "statuscode" | "replacestatus" => {
             validate_status_code(clean_value, line_num, start_col, end_col)
         }
@@ -691,6 +688,9 @@ fn validate_single_protocol_value(
         "urlparams" | "params" => {
             validate_kv_pairs(protocol_name, clean_value, line_num, start_col, end_col)
         }
+        "reqheaders" | "resheaders" | "reqcookies" | "trailers" => {
+            validate_header_json_value(protocol_name, clean_value, line_num, start_col, end_col)
+        }
         "tlsoptions" => validate_tls_options(clean_value, line_num, start_col, end_col),
         "upstreamunsafessl" => validate_boolean_value(clean_value, line_num, start_col, end_col),
         // C-tier (Warning): light structural hint.
@@ -708,8 +708,114 @@ fn validate_single_protocol_value(
         // and the remaining freeform operators (ua, referer, pac, skip,
         // urlParams already handled above). They are listed here as a single
         // documented arm so the classification is exhaustive on purpose.
-        _ => None,
+        _ => {
+            if clean_value.starts_with('{') && clean_value.ends_with('}') {
+                return None;
+            }
+            None
+        }
     }
+}
+
+fn validate_header_json_value(
+    protocol_name: &str,
+    value: &str,
+    line_num: usize,
+    start_col: usize,
+    end_col: usize,
+) -> Option<ParseError> {
+    if !looks_like_json_object_value(value) {
+        return None;
+    }
+
+    let parsed = match serde_json::from_str::<serde_json::Value>(value) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Some(
+                ParseError::with_range(
+                    line_num,
+                    start_col,
+                    end_col,
+                    format!(
+                        "Invalid JSON object for {}: {}. Use valid JSON or header line format.",
+                        protocol_name, error
+                    ),
+                )
+                .with_severity(ParseErrorSeverity::Error)
+                .with_code("E021")
+                .with_suggestion(
+                    "Use reqHeaders://{\"X-Env\":\"ppe\"} or a block value with lines like `X-Env: ppe`.",
+                ),
+            );
+        }
+    };
+
+    let Some(obj) = parsed.as_object() else {
+        return Some(
+            ParseError::with_range(
+                line_num,
+                start_col,
+                end_col,
+                format!(
+                    "Invalid JSON value for {}. Expected a JSON object.",
+                    protocol_name
+                ),
+            )
+            .with_severity(ParseErrorSeverity::Error)
+            .with_code("E021")
+            .with_suggestion("Use a JSON object such as {\"X-Env\":\"ppe\"}."),
+        );
+    };
+
+    if obj.is_empty() {
+        return Some(
+            ParseError::with_range(
+                line_num,
+                start_col,
+                end_col,
+                format!(
+                    "Invalid JSON object for {}. Expected at least one header or cookie key.",
+                    protocol_name
+                ),
+            )
+            .with_severity(ParseErrorSeverity::Error)
+            .with_code("E021")
+            .with_suggestion("Add at least one key/value pair, for example {\"X-Env\":\"ppe\"}."),
+        );
+    }
+
+    if obj.values().any(|value| {
+        matches!(
+            value,
+            serde_json::Value::Array(_) | serde_json::Value::Object(_)
+        )
+    }) {
+        return Some(
+            ParseError::with_range(
+                line_num,
+                start_col,
+                end_col,
+                format!(
+                    "Invalid JSON object for {}. Header and cookie values must be strings, numbers, booleans, or null.",
+                    protocol_name
+                ),
+            )
+            .with_severity(ParseErrorSeverity::Error)
+            .with_code("E021")
+            .with_suggestion("Use scalar values only, for example {\"X-Env\":\"ppe\",\"X-Flag\":\"1\"}."),
+        );
+    }
+
+    None
+}
+
+fn looks_like_json_object_value(value: &str) -> bool {
+    let value = value.trim();
+    if !(value.starts_with('{') && value.ends_with('}')) {
+        return false;
+    }
+    let inner = value[1..value.len() - 1].trim_start();
+    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
 }
 
 fn validate_status_code(
@@ -4540,6 +4646,44 @@ x-custom: value
                 proto,
                 input
             );
+        }
+    }
+
+    #[test]
+    fn test_header_json_object_values_are_validated() {
+        let valid = r#"example.com reqHeaders://{"x-tt-env":"ppe","x-use-ppe":"1"}"#;
+        assert!(
+            validate_rules(valid).is_empty(),
+            "valid header JSON object should not warn"
+        );
+        let parsed = parse_line(valid).expect("valid header JSON should parse");
+        assert_eq!(parsed[0].protocol, Protocol::ReqHeaders);
+        assert_eq!(parsed[0].value, r#"{"x-tt-env":"ppe","x-use-ppe":"1"}"#);
+
+        let paren_valid = r#"example.com resHeaders://({"Cache-Control":"max-age=3600, public"})"#;
+        assert!(
+            validate_rules(paren_valid).is_empty(),
+            "parenthesized header JSON object should not warn"
+        );
+
+        let value_ref = "example.com reqHeaders://{header_block}";
+        assert!(
+            validate_rules(value_ref).is_empty(),
+            "ordinary value refs should not be treated as JSON"
+        );
+    }
+
+    #[test]
+    fn test_invalid_header_json_object_reports_e021() {
+        for input in [
+            r#"example.com reqHeaders://{"x-tt-env":}"#,
+            r#"example.com resHeaders://{"X-Nested":{"bad":true}}"#,
+            r#"example.com trailers://{}"#,
+        ] {
+            let errors = validate_rules(input);
+            let err = first_error_with_code(&errors, "E021")
+                .unwrap_or_else(|| panic!("expected E021 for `{}`, got {:?}", input, errors));
+            assert_eq!(err.severity, ParseErrorSeverity::Error);
         }
     }
 

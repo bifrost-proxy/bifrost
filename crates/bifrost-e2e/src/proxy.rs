@@ -655,6 +655,10 @@ fn parse_header_value(value: &str) -> Option<Vec<(String, String)>> {
         trimmed
     };
 
+    if looks_like_json_header_object(content) {
+        return Some(parse_json_header_object(content).unwrap_or_default());
+    }
+
     let mut headers = Vec::new();
 
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
@@ -684,6 +688,45 @@ fn parse_header_value(value: &str) -> Option<Vec<(String, String)>> {
         None
     } else {
         Some(headers)
+    }
+}
+
+fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
+    let content = content.trim();
+    if !looks_like_json_header_object(content) {
+        return None;
+    }
+
+    let json_value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let obj = json_value.as_object()?;
+    Some(
+        obj.iter()
+            .filter_map(|(key, value)| {
+                if key.trim().is_empty() {
+                    return None;
+                }
+                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn looks_like_json_header_object(content: &str) -> bool {
+    let content = content.trim();
+    if !(content.starts_with('{') && content.ends_with('}')) {
+        return false;
+    }
+    let inner = content[1..content.len() - 1].trim_start();
+    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
+}
+
+fn json_scalar_to_header_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Null => Some(String::new()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
 }
 

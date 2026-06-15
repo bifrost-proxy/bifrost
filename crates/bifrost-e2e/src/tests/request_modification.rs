@@ -20,6 +20,12 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_req_headers_multiple,
         ),
         TestCase::standalone(
+            "req_headers_json_object",
+            "ReqHeaders protocol: JSON object header map",
+            "request_modification",
+            test_req_headers_json_object,
+        ),
+        TestCase::standalone(
             "req_headers_override",
             "ReqHeaders protocol: later rule overrides earlier",
             "request_modification",
@@ -202,6 +208,33 @@ async fn test_req_headers_multiple() -> Result<(), String> {
     result.assert_success()?;
     mock.assert_header_received("x-header-a", "value-a")?;
     mock.assert_header_received("x-header-b", "value-b")?;
+
+    Ok(())
+}
+
+async fn test_req_headers_json_object() -> Result<(), String> {
+    let mock = EnhancedMockServer::start().await;
+
+    let (port, _proxy) = start_proxy_with_rules(vec![
+        format!("test.local host://127.0.0.1:{}", mock.port),
+        r#"test.local reqHeaders://{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}"#.to_string(),
+    ])
+    .await?;
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let result = CurlCommand::with_proxy(
+        &format!("http://127.0.0.1:{}", port),
+        "http://test.local/api",
+    )
+    .execute()
+    .await
+    .map_err(|e| format!("curl failed: {}", e))?;
+
+    result.assert_success()?;
+    mock.assert_header_received("x-tt-env", "ppe_next_agent_new")?;
+    mock.assert_header_received("x-use-ppe", "1")?;
+    mock.assert_header_received("x-tt-env-fe", "dev")?;
 
     Ok(())
 }

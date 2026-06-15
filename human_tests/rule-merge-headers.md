@@ -152,7 +152,7 @@ PY
 ```
 2. 使用临时数据目录启动 Bifrost（禁止使用 9900，且必须禁用系统代理）：
 ```bash
-BIFROST_DATA_DIR=./.bifrost-test-rmh cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy \
+BIFROST_DATA_DIR=./.bifrost-test-rmh BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy \
   --rules "https://127.0.0.1:9443/ passthrough://" \
   --rules "https://127.0.0.1:9443/ reqHeaders://X-Same-Key=rule-value"
 ```
@@ -181,6 +181,26 @@ cargo run --bin bifrost -- -p 8800 traffic get <sequence>
 - 回显响应中的 `x_same_key_values` 仅包含 `rule-value`
 - `traffic get` 的 `request_headers` 中 `x-same-key` 只出现 1 次
 - 最终发往上游的值等于规则值，不会保留客户端原始重复值
+
+### TC-RMH-07: reqHeaders JSON object 写法兼容 NextOncall PPE 头
+
+**操作步骤**：
+1. 运行语法校验和规则解析相关单元测试：
+```bash
+cargo test -p bifrost-core test_header_json_object_values_are_validated -- --nocapture
+cargo test -p bifrost-core test_invalid_header_json_object_reports_e021 -- --nocapture
+cargo test -p bifrost-cli json_object -- --nocapture
+```
+2. 运行请求修改 E2E 测试：
+```bash
+cargo run -p bifrost-e2e -- --test req_headers_json_object
+```
+
+**预期结果**：
+- 合法规则 `reqHeaders://{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}` 语法校验通过。
+- malformed JSON header object 会返回 E021 语法错误，不会被当作 `{name}` 值引用。
+- E2E mock upstream 收到 `x-tt-env: ppe_next_agent_new`、`x-use-ppe: 1`、`x-tt-env-fe: dev`。
+- malformed JSON object 不会回退到旧冒号拆分路径生成非法 header name。
 
 ## 清理步骤
 

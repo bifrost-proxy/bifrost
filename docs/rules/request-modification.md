@@ -13,12 +13,15 @@
 ```
 pattern reqHeaders://key=value                    # 内联格式（单个头）
 pattern reqHeaders://(key1: value1)               # 小括号格式（可包含空格）
+pattern reqHeaders://{"key1":"value1","key2":"value2"} # JSON 对象格式（多个头，不能包含未包裹空格）
+pattern reqHeaders://({"key1":"value with space"}) # 小括号 JSON 格式（可包含空格）
 pattern reqHeaders://{varName}                    # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
+> 2. JSON 对象只有在内容是合法 JSON object 时才会被当成多个 header；`{my-headers}` 仍然是 value 引用
+> 3. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
 
 ### 基础示例
 
@@ -29,7 +32,10 @@ www.example.com reqHeaders://X-Custom-Header=custom-value
 # 方式2：小括号格式（可包含空格）
 www.example.com reqHeaders://(X-Token: abc123)
 
-# 方式3：引用内嵌值（推荐，支持空格和多个头）
+# 方式3：JSON 对象格式（适合 agent 生成的短 header map）
+www.example.com reqHeaders://{"X-Env":"ppe","X-Flag":"1"}
+
+# 方式4：引用内嵌值（推荐，支持空格和多个头）
 www.example.com reqHeaders://{my-headers}
 ```
 

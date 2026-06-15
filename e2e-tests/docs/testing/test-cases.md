@@ -52,10 +52,10 @@
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| Q001 | 单个请求头 | `test.com reqHeaders://{X-Custom: value}` | 请求包含自定义头 | ✅ |
-| Q002 | 多个请求头 | `test.com reqHeaders://{X-A: 1, X-B: 2}` | 请求包含两个头 | ✅ |
-| Q003 | 覆盖已有头 | `test.com reqHeaders://{Accept: text/plain}` | Accept 被覆盖 | ✅ |
-| Q004 | 模板变量 | `test.com reqHeaders://{X-UUID: ${randomUUID}}` | 头部包含有效 UUID | ✅ |
+| Q001 | 单个请求头 | `test.com reqHeaders://(X-Custom: value)` | 请求包含自定义头 | ✅ |
+| Q002 | 多个请求头 | `test.com reqHeaders://{"X-A":"1","X-B":"2"}` | 请求包含两个头 | ✅ |
+| Q003 | 覆盖已有头 | `test.com reqHeaders://(Accept: text/plain)` | Accept 被覆盖 | ✅ |
+| Q004 | 模板变量 | `test.com reqHeaders://(X-UUID: ${randomUUID})` | 头部包含有效 UUID | ✅ |
 
 ### ua 规则 ✅
 
@@ -81,8 +81,8 @@
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| Q040 | 设置 Cookie | `test.com reqCookies://{session: abc}` | Cookie 包含 session | ✅ |
-| Q041 | 多个 Cookie | `test.com reqCookies://{a: 1, b: 2}` | Cookie 包含多个值 | 🔨 |
+| Q040 | 设置 Cookie | `test.com reqCookies://(session: abc)` | Cookie 包含 session | ✅ |
+| Q041 | 多个 Cookie | `test.com reqCookies://{"a":"1","b":"2"}` | Cookie 包含多个值 | 🔨 |
 
 ### reqType 规则 🔨
 
@@ -104,15 +104,15 @@
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| S001 | 单个响应头 | `test.com resHeaders://{X-Custom: value}` | 响应包含自定义头 | ✅ |
-| S002 | 多个响应头 | `test.com resHeaders://{X-A: 1, X-B: 2}` | 响应包含两个头 | ✅ |
+| S001 | 单个响应头 | `test.com resHeaders://(X-Custom: value)` | 响应包含自定义头 | ✅ |
+| S002 | 多个响应头 | `test.com resHeaders://{"X-A":"1","X-B":"2"}` | 响应包含两个头 | ✅ |
 
 ### resCookies 规则 ✅
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| S010 | 设置响应 Cookie | `test.com resCookies://{session: abc}` | Set-Cookie 被设置 | ✅ |
-| S011 | 带属性 Cookie | `test.com resCookies://{auth: token; httpOnly}` | Cookie 带属性 | 🔨 |
+| S010 | 设置响应 Cookie | `test.com resCookies://session=abc` | Set-Cookie 被设置 | ✅ |
+| S011 | 带属性 Cookie | `test.com resCookies://{"auth":{"value":"token","httpOnly":true}}` | Cookie 带属性 | 🔨 |
 
 ### resCors 规则 ✅
 
@@ -257,8 +257,8 @@
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| F001 | 方法过滤 POST | `test.com resHeaders://{X:1} includeFilter://m:POST` | 仅 POST 生效 | 🔨 |
-| F002 | 方法过滤 GET | `test.com resHeaders://{X:1} includeFilter://m:GET` | 仅 GET 生效 | 🔨 |
+| F001 | 方法过滤 POST | `test.com resHeaders://X=1 includeFilter://m:POST` | 仅 POST 生效 | 🔨 |
+| F002 | 方法过滤 GET | `test.com resHeaders://X=1 includeFilter://m:GET` | 仅 GET 生效 | 🔨 |
 | F003 | 头部过滤 | `test.com host://debug includeFilter://h:X-Debug=true` | 有头部时生效 | 🔨 |
 | F004 | 状态码过滤 | `test.com replaceStatus://200 includeFilter://s:500` | 仅 500 生效 | 🔨 |
 
@@ -266,7 +266,7 @@
 
 | 测试 ID | 测试名称 | 规则 | 预期结果 | 状态 |
 |---------|---------|------|---------|------|
-| F010 | 排除 GET | `test.com resHeaders://{X:1} excludeFilter://m:GET` | GET 不生效 | 🔨 |
+| F010 | 排除 GET | `test.com resHeaders://X=1 excludeFilter://m:GET` | GET 不生效 | 🔨 |
 
 ### delete 规则 🔨
 
