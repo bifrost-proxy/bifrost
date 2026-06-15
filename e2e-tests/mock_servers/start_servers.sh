@@ -223,35 +223,94 @@ start_all() {
     ! should_start_server proxy || start_proxy
 }
 
+# Deadline-based readiness wait.
+#
+# The third argument is a *wall-clock budget in seconds*, NOT an attempt count.
+# A per-attempt approach (sleep 1 + N attempts) is unreliable here: each health
+# probe runs `curl --connect-timeout 2 --max-time 5`, so when a server has bound
+# its port but is slow to answer (e.g. Python cold-start under CPU contention on
+# Windows runners while 6 processes boot at once), a single "attempt" can cost
+# 3-5s instead of ~1s. That silently stretches an intended 30-attempt budget to
+# 90s+ of wall-clock while still logging "30 attempts", yet can also give up far
+# earlier in real time than intended. Measuring against a real deadline makes the
+# budget deterministic regardless of per-probe latency.
 wait_for_server() {
     local check_cmd=$1
     local service_name=$2
-    local max_attempts=${3:-30}
-    local attempt=0
+    local timeout_secs=${3:-60}
+    local start_ts elapsed
+    start_ts=$(date +%s)
 
-    while [ $attempt -lt $max_attempts ]; do
+    while true; do
         if eval "$check_cmd"; then
-            log "$service_name ready (${attempt}s)"
+            elapsed=$(( $(date +%s) - start_ts ))
+            log "$service_name ready (${elapsed}s)"
             return 0
         fi
+        elapsed=$(( $(date +%s) - start_ts ))
+        if [ "$elapsed" -ge "$timeout_secs" ]; then
+            log "$service_name did not become ready after ${timeout_secs}s"
+            return 1
+        fi
         sleep 1
-        attempt=$((attempt + 1))
     done
-    log "$service_name did not become ready after $max_attempts attempts"
-    return 1
 }
 
+# Wait for every enabled server to become ready within a single shared deadline.
+#
+# Previously each server was waited for sequentially with its own budget, so a
+# slow first server (HTTP) had to fully exhaust its budget before HTTPS was even
+# probed -- even though HTTPS had been listening the whole time. Total readiness
+# time degenerated to the *sum* of per-server budgets, and one slow cold-start
+# could tip the suite over the edge. Here we poll all not-yet-ready servers each
+# iteration against one wall-clock deadline, so ready servers are detected as
+# soon as they answer and the overall budget is bounded and deterministic.
 wait_for_all_servers() {
-    local failed=0
+    local timeout_secs=${MOCK_SERVERS_READY_TIMEOUT:-120}
+    local start_ts elapsed
+    start_ts=$(date +%s)
 
-    ! should_start_server http || { wait_for_server "check_http_health $HTTP_PORT" "HTTP Echo Server" 30 || failed=1; }
-    ! should_start_server https || { wait_for_server "check_https_health $HTTPS_PORT" "HTTPS Echo Server" 45 || failed=1; }
-    ! should_start_server ws || { wait_for_server "check_ws_health $WS_PORT" "WebSocket Echo Server" 30 || failed=1; }
-    ! should_start_server wss || { wait_for_server "check_wss_health $WSS_PORT" "WebSocket Secure Echo Server" 45 || failed=1; }
-    ! should_start_server sse || { wait_for_server "check_http_health $SSE_PORT" "SSE Echo Server" 30 || failed=1; }
-    ! should_start_server proxy || { wait_for_server "check_http_health $PROXY_PORT" "HTTP Proxy Echo Server" 30 || failed=1; }
+    # Build the list of (check_cmd, name) pairs for enabled servers only.
+    local -a checks=() names=() pending=()
+    local idx=0
+    add_check() {
+        checks+=("$1")
+        names+=("$2")
+        pending+=("$idx")
+        idx=$((idx + 1))
+    }
+    ! should_start_server http  || add_check "check_http_health $HTTP_PORT"   "HTTP Echo Server"
+    ! should_start_server https || add_check "check_https_health $HTTPS_PORT" "HTTPS Echo Server"
+    ! should_start_server ws    || add_check "check_ws_health $WS_PORT"       "WebSocket Echo Server"
+    ! should_start_server wss   || add_check "check_wss_health $WSS_PORT"     "WebSocket Secure Echo Server"
+    ! should_start_server sse   || add_check "check_http_health $SSE_PORT"    "SSE Echo Server"
+    ! should_start_server proxy || add_check "check_http_health $PROXY_PORT"  "HTTP Proxy Echo Server"
 
-    return $failed
+    while [ ${#pending[@]} -gt 0 ]; do
+        local -a still_pending=()
+        local i
+        for i in "${pending[@]}"; do
+            if eval "${checks[$i]}"; then
+                elapsed=$(( $(date +%s) - start_ts ))
+                log "${names[$i]} ready (${elapsed}s)"
+            else
+                still_pending+=("$i")
+            fi
+        done
+        pending=("${still_pending[@]}")
+        [ ${#pending[@]} -eq 0 ] && break
+
+        elapsed=$(( $(date +%s) - start_ts ))
+        if [ "$elapsed" -ge "$timeout_secs" ]; then
+            for i in "${pending[@]}"; do
+                log "${names[$i]} did not become ready after ${timeout_secs}s"
+            done
+            return 1
+        fi
+        sleep 1
+    done
+
+    return 0
 }
 
 status() {

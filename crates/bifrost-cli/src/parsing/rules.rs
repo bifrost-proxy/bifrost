@@ -1038,6 +1038,35 @@ wss://app.example.test/ ws://localhost:8000/
     }
 
     #[test]
+    fn test_reqheaders_json_object_is_converted_to_proxy_headers() {
+        let rules_text = r#"https://nextoncall.bytedance.net/api/nextagent/ reqHeaders://{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}"#;
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser.parse_rules(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://nextoncall.bytedance.net/api/nextagent/v1/memory/items",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert!(resolved
+            .req_headers
+            .iter()
+            .any(|(key, value)| key == "x-tt-env" && value == "ppe_next_agent_new"));
+        assert!(resolved
+            .req_headers
+            .iter()
+            .any(|(key, value)| key == "x-use-ppe" && value == "1"));
+        assert!(resolved
+            .req_headers
+            .iter()
+            .any(|(key, value)| key == "x-tt-env-fe" && value == "dev"));
+    }
+
+    #[test]
     fn test_merge_host_first_match_wins() {
         let parser = bifrost_core::RuleParser::new();
         let rules = parser

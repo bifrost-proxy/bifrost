@@ -775,6 +775,10 @@ fn parse_header_values(value: &str) -> Vec<(String, String)> {
         trimmed
     };
 
+    if looks_like_json_header_object(content) {
+        return parse_json_header_object(content).unwrap_or_default();
+    }
+
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
     content
         .split(delimiter)
@@ -804,6 +808,45 @@ fn parse_header_value(value: &str) -> Option<(String, String)> {
     }
 
     None
+}
+
+fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
+    let content = content.trim();
+    if !looks_like_json_header_object(content) {
+        return None;
+    }
+
+    let json_value = serde_json::from_str::<Value>(content).ok()?;
+    let obj = json_value.as_object()?;
+    Some(
+        obj.iter()
+            .filter_map(|(key, value)| {
+                if key.trim().is_empty() {
+                    return None;
+                }
+                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn looks_like_json_header_object(content: &str) -> bool {
+    let content = content.trim();
+    if !(content.starts_with('{') && content.ends_with('}')) {
+        return false;
+    }
+    let inner = content[1..content.len() - 1].trim_start();
+    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
+}
+
+fn json_scalar_to_header_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value.clone()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Null => Some(String::new()),
+        Value::Array(_) | Value::Object(_) => None,
+    }
 }
 
 #[derive(Default)]
@@ -1175,6 +1218,13 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_header_values_does_not_fallback_for_malformed_json_object() {
+        let headers = parse_header_values(r#"{"x-tt-env":}"#);
+
+        assert!(headers.is_empty());
+    }
+
+    #[test]
     fn test_apply_forward_rule_preserves_query_after_prefix_rewrite() {
         let rules = AppliedRules {
             forward_url: Some("http://localhost:9000/labor_cost/static".to_string()),
@@ -1391,6 +1441,23 @@ qianchuan.jinritemai.com https://10.37.102.138:8080
                 ("X-Test-Flag".to_string(), "1".to_string())
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_header_values_supports_json_object() {
+        let result = parse_header_values(
+            r#"{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}"#,
+        );
+
+        assert!(result
+            .iter()
+            .any(|(key, value)| key == "x-tt-env" && value == "ppe_next_agent_new"));
+        assert!(result
+            .iter()
+            .any(|(key, value)| key == "x-use-ppe" && value == "1"));
+        assert!(result
+            .iter()
+            .any(|(key, value)| key == "x-tt-env-fe" && value == "dev"));
     }
 
     #[test]

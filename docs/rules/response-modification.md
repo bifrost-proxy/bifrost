@@ -13,14 +13,17 @@
 ```
 pattern resHeaders://key=value              # 内联格式（单个头）
 pattern resHeaders://(key1: value1)         # 小括号格式（可包含空格）
+pattern resHeaders://{"key1":"value1","key2":"value2"} # JSON 对象格式（多个头，不能包含未包裹空格）
+pattern resHeaders://({"key1":"value with space"}) # 小括号 JSON 格式（可包含空格）
 pattern resHeaders://{varName}              # 引用内嵌值/Values（推荐）
 ```
 
 > ⚠️ **重要**：
 >
 > 1. `{name}` 是引用内嵌值的语法，不是直接定义 JSON！
-> 2. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
-> 3. 头部值中的逗号会被截断：当前解析器（内联、小括号、内嵌值三种形式一致）只保留第一个逗号之前的内容，例如 `Cache-Control: max-age=3600, public, must-revalidate` 实际只会设置 `max-age=3600`。需要携带逗号的头部值暂无可用写法。
+> 2. JSON 对象只有在内容是合法 JSON object 时才会被当成多个 header；`{my-res-headers}` 仍然是 value 引用
+> 3. 小括号内容会作为一个整体解析，可以包含空格；多行或多个头部建议使用块变量
+> 4. 非 JSON 行格式中的逗号会被拆分；需要携带逗号的头部值时，请使用小括号 JSON，例如 `resHeaders://({"Cache-Control":"max-age=3600, public"})`。
 
 ### 基础示例
 
@@ -30,6 +33,9 @@ www.example.com resHeaders://X-Custom-Header=custom-value
 
 # 小括号格式
 www.example.com resHeaders://(X-Version: 1.0)
+
+# JSON 对象格式（适合 agent 生成的短 header map）
+www.example.com resHeaders://{"X-Env":"ppe","X-Flag":"1"}
 
 # 引用内嵌值（推荐，支持空格和多个头）
 www.example.com resHeaders://{my-res-headers}

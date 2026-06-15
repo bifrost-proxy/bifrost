@@ -10,6 +10,10 @@ pub fn parse_header_value(value: &str) -> Option<Vec<(String, String)>> {
         (trimmed, trimmed.contains('\n') || trimmed.contains(':'))
     };
 
+    if looks_like_json_header_object(content) {
+        return Some(parse_json_header_object(content).unwrap_or_default());
+    }
+
     let mut headers = Vec::new();
 
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
@@ -32,6 +36,45 @@ pub fn parse_header_value(value: &str) -> Option<Vec<(String, String)>> {
         None
     } else {
         Some(headers)
+    }
+}
+
+fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
+    let content = content.trim();
+    if !looks_like_json_header_object(content) {
+        return None;
+    }
+
+    let json_value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let obj = json_value.as_object()?;
+    Some(
+        obj.iter()
+            .filter_map(|(key, value)| {
+                if key.trim().is_empty() {
+                    return None;
+                }
+                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn looks_like_json_header_object(content: &str) -> bool {
+    let content = content.trim();
+    if !(content.starts_with('{') && content.ends_with('}')) {
+        return false;
+    }
+    let inner = content[1..content.len() - 1].trim_start();
+    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
+}
+
+fn json_scalar_to_header_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Null => Some(String::new()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
 }
 
@@ -166,6 +209,61 @@ mod tests {
                 ("X-Test-Flag".to_string(), "1".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn parse_header_value_supports_json_object() {
+        let value = r#"{"x-tt-env":"ppe_next_agent_new","x-use-ppe":"1","x-tt-env-fe":"dev"}"#;
+
+        let headers = parse_header_value(value).unwrap();
+
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "x-tt-env" && value == "ppe_next_agent_new"));
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "x-use-ppe" && value == "1"));
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "x-tt-env-fe" && value == "dev"));
+    }
+
+    #[test]
+    fn parse_header_value_supports_parenthesized_json_object() {
+        let value = r#"({"X-Number":42,"X-Bool":true,"X-Null":null,"Cache-Control":"max-age=3600, public"})"#;
+
+        let headers = parse_header_value(value).unwrap();
+
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "X-Number" && value == "42"));
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "X-Bool" && value == "true"));
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "X-Null" && value.is_empty()));
+        assert!(headers
+            .iter()
+            .any(|(key, value)| key == "Cache-Control" && value == "max-age=3600, public"));
+    }
+
+    #[test]
+    fn parse_header_value_ignores_nested_json_values() {
+        let value = r#"{"X-Ok":"1","X-Nested":{"bad":true},"X-List":["bad"]}"#;
+
+        let headers = parse_header_value(value).unwrap();
+
+        assert_eq!(headers, vec![("X-Ok".to_string(), "1".to_string())]);
+    }
+
+    #[test]
+    fn parse_header_value_does_not_fallback_for_malformed_json_object() {
+        let value = r#"{"x-tt-env":}"#;
+
+        let headers = parse_header_value(value).unwrap();
+
+        assert!(headers.is_empty());
     }
 
     #[test]

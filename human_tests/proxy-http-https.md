@@ -255,7 +255,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-resheaders", "content": "httpbin.org/get resHeaders://{X-Bifrost-Test: injected-value}", "enabled": true}'
+     -d '{"name": "test-resheaders", "content": "httpbin.org/get resHeaders://(X-Bifrost-Test: injected-value)", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -279,7 +279,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-reqheaders", "content": "httpbin.org/headers reqHeaders://{X-Injected-By: bifrost-proxy}", "enabled": true}'
+     -d '{"name": "test-reqheaders", "content": "httpbin.org/headers reqHeaders://(X-Injected-By: bifrost-proxy)", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -424,7 +424,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-multi-rules", "content": "httpbin.org/get resHeaders://{X-Rule-A: value-a}\nhttpbin.org/get resHeaders://{X-Rule-B: value-b}\nhttpbin.org/get resCors://", "enabled": true}'
+     -d '{"name": "test-multi-rules", "content": "httpbin.org/get resHeaders://(X-Rule-A: value-a)\nhttpbin.org/get resHeaders://(X-Rule-B: value-b)\nhttpbin.org/get resCors://", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -449,7 +449,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-regex", "content": "/httpbin\\.org\\/status\\/\\d+/ resHeaders://{X-Regex-Match: true}", "enabled": true}'
+     -d '{"name": "test-regex", "content": "/httpbin\\.org\\/status\\/\\d+/ resHeaders://(X-Regex-Match: true)", "enabled": true}'
    ```
 2. 执行匹配请求：
    ```bash
@@ -478,7 +478,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-wildcard", "content": "*.httpbin.org resHeaders://{X-Wildcard: matched}", "enabled": true}'
+     -d '{"name": "test-wildcard", "content": "*.httpbin.org resHeaders://(X-Wildcard: matched)", "enabled": true}'
    ```
 2. 执行匹配请求（假设有子域名可用，或使用本地 hosts 映射）：
    ```bash
@@ -502,7 +502,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-domain", "content": "httpbin.org resHeaders://{X-Domain-Match: exact}", "enabled": true}'
+     -d '{"name": "test-domain", "content": "httpbin.org resHeaders://(X-Domain-Match: exact)", "enabled": true}'
    ```
 2. 执行匹配请求：
    ```bash
@@ -530,7 +530,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-ip-cidr", "content": "127.0.0.0/8 resHeaders://{X-IP-Match: cidr}", "enabled": true}'
+     -d '{"name": "test-ip-cidr", "content": "127.0.0.0/8 resHeaders://(X-IP-Match: cidr)", "enabled": true}'
    ```
 2. 执行匹配请求：
    ```bash

@@ -174,7 +174,7 @@ setup_temporary_port_binding() {
         --name "status overview temp port" \
         --rule e2e_rule_1 2>&1)
 
-    if echo "$result" | grep -q "Temporary port: .*:${TEMP_PORT}"; then
+    if grep -q "Temporary port: .*:${TEMP_PORT}" <<< "$result"; then
         pass "已创建 status 用临时端口绑定"
     else
         fail "临时端口绑定创建失败: $result"
@@ -190,85 +190,85 @@ test_status() {
     local result
     result=$(run_bifrost status)
 
-    if echo "$result" | grep -qi "running\|port\|$PROXY_PORT"; then
+    if grep -qi "running\|port\|$PROXY_PORT" <<< "$result"; then
         pass "status 显示服务正在运行且端口正确"
     else
         fail "status 未返回预期内容: $result"
     fi
 
-    if echo "$result" | grep -q "Proxy Local Address: http://127.0.0.1:${PROXY_PORT}"; then
+    if grep -q "Proxy Local Address: http://127.0.0.1:${PROXY_PORT}" <<< "$result"; then
         pass "status 顶部展示 127.0.0.1 本机代理地址"
     else
         fail "status 未展示 127.0.0.1 本机代理地址: $result"
     fi
 
-    if echo "$result" | grep -q "Proxy LAN Addresses:"; then
+    if grep -q "Proxy LAN Addresses:" <<< "$result"; then
         pass "status 顶部展示局域网代理地址状态"
     else
         fail "status 未展示局域网代理地址状态: $result"
     fi
 
-    if echo "$result" | grep -q "System Proxy:"; then
+    if grep -q "System Proxy:" <<< "$result"; then
         pass "status 顶部展示系统代理配置状态"
     else
         fail "status 未展示系统代理配置状态: $result"
     fi
 
-    if echo "$result" | grep -q "TLS Interception:"; then
+    if grep -q "TLS Interception:" <<< "$result"; then
         pass "status 顶部展示 TLS 配置状态"
     else
         fail "status 未展示 TLS 配置状态: $result"
     fi
 
-    if echo "$result" | grep -q "TLS Domain Whitelist:"; then
+    if grep -q "TLS Domain Whitelist:" <<< "$result"; then
         pass "status 顶部展示 TLS 域名白名单状态"
     else
         fail "status 未展示 TLS 域名白名单状态: $result"
     fi
 
-    if echo "$result" | grep -q "TLS App Whitelist:"; then
+    if grep -q "TLS App Whitelist:" <<< "$result"; then
         pass "status 顶部展示 TLS 应用白名单状态"
     else
         fail "status 未展示 TLS 应用白名单状态: $result"
     fi
 
-    if echo "$result" | grep -q "Temporary Port Bindings"; then
+    if grep -q "Temporary Port Bindings" <<< "$result"; then
         pass "status 底部展示临时端口绑定独立区域"
     else
         fail "status 未展示临时端口绑定区域: $result"
     fi
 
-    if echo "$result" | grep -q ":${TEMP_PORT}.*status overview temp port"; then
+    if grep -q ":${TEMP_PORT}.*status overview temp port" <<< "$result"; then
         pass "status 展示临时端口和绑定名称"
     else
         fail "status 未展示预期临时端口绑定: $result"
     fi
 
-    if echo "$result" | grep -q "local:e2e_rule_1"; then
+    if grep -q "local:e2e_rule_1" <<< "$result"; then
         pass "status 展示临时端口绑定的规则引用"
     else
         fail "status 未展示临时端口绑定规则引用: $result"
     fi
 
-    if echo "$result" | grep -q "Default Port Active Rules: ${PROXY_PORT}"; then
+    if grep -q "Default Port Active Rules: ${PROXY_PORT}" <<< "$result"; then
         pass "status 追加展示默认端口活跃规则摘要"
     else
         fail "status 未展示默认端口活跃规则摘要: $result"
     fi
 
-    if echo "$result" | grep -q "Scope: default/main proxy port ${PROXY_PORT}"; then
+    if grep -q "Scope: default/main proxy port ${PROXY_PORT}" <<< "$result"; then
         pass "status 明确默认端口规则与临时端口规则分区"
     else
         fail "status 未说明默认端口规则作用域: $result"
     fi
 
-    if echo "$result" | grep -q "Merged Rules (in parsing order)"; then
+    if grep -q "Merged Rules (in parsing order)" <<< "$result"; then
         pass "status 展示合并规则标题"
     else
         fail "status 未展示合并规则标题: $result"
     fi
 
-    if echo "$result" | grep -q "e2e1.example.com statusCode://200"; then
+    if grep -q "e2e1.example.com statusCode://200" <<< "$result"; then
         pass "status 展示合并后的规则内容"
     else
         fail "status 未展示预期的合并规则内容: $result"
@@ -291,7 +291,7 @@ test_traffic_list_has_records() {
         fail "traffic list 未返回流量记录"
     fi
 
-    if echo "$result" | grep -q "httpbin.org"; then
+    if grep -q "httpbin.org" <<< "$result"; then
         pass "traffic list 包含 httpbin.org 的请求"
     else
         fail "traffic list 未找到 httpbin.org 请求: $(echo "$result" | head -5)"
@@ -304,13 +304,13 @@ test_traffic_list_table_format() {
     local result
     result=$(run_bifrost traffic list -l 5 -f table --no-color)
 
-    if echo "$result" | grep -q "STATUS.*METHOD\|METHOD.*PROTO\|HOST.*PATH"; then
+    if grep -q "STATUS.*METHOD\|METHOD.*PROTO\|HOST.*PATH" <<< "$result"; then
         pass "traffic list -f table 包含表头 (STATUS/METHOD/HOST/PATH)"
     else
         fail "traffic list -f table 缺少表头: $(echo "$result" | head -3)"
     fi
 
-    if echo "$result" | grep -q "httpbin.org"; then
+    if grep -q "httpbin.org" <<< "$result"; then
         pass "traffic list -f table 包含 httpbin.org 数据行"
     else
         fail "traffic list -f table 未包含 httpbin.org: $(echo "$result" | head -10)"
@@ -323,13 +323,13 @@ test_traffic_list_compact_format() {
     local result
     result=$(run_bifrost traffic list -l 5 -f compact --no-color)
 
-    if echo "$result" | grep -q "httpbin.org"; then
+    if grep -q "httpbin.org" <<< "$result"; then
         pass "traffic list -f compact 包含 httpbin.org 记录"
     else
         fail "traffic list -f compact 缺少记录"
     fi
 
-    if echo "$result" | grep -q "GET\|POST"; then
+    if grep -q "GET\|POST" <<< "$result"; then
         pass "traffic list -f compact 包含 HTTP 方法"
     else
         fail "traffic list -f compact 缺少 HTTP 方法"
@@ -342,7 +342,7 @@ test_traffic_list_with_method_filter() {
     local result
     result=$(run_bifrost traffic list -l 20 -f json --method POST)
 
-    if echo "$result" | grep -q "POST\|post"; then
+    if grep -q "POST\|post" <<< "$result"; then
         pass "traffic list --method POST 只返回 POST 请求"
     else
         local total
@@ -392,7 +392,7 @@ test_traffic_get_by_id() {
         fail "traffic get 未返回完整记录: $(echo "$result" | head -5)"
     fi
 
-    if echo "$result" | grep -q "httpbin.org\|host\|url"; then
+    if grep -q "httpbin.org\|host\|url" <<< "$result"; then
         pass "traffic get 记录包含 host 信息"
     else
         fail "traffic get 记录缺少 host 信息"
@@ -411,7 +411,7 @@ test_traffic_search_keyword() {
     if [[ "$total" -gt 0 ]]; then
         pass "traffic search 'httpbin' 搜索到 ${total} 条记录"
     else
-        if echo "$result" | grep -q "httpbin"; then
+        if grep -q "httpbin" <<< "$result"; then
             pass "traffic search 'httpbin' 包含匹配结果"
         else
             fail "traffic search 'httpbin' 未搜索到结果: $(echo "$result" | head -5)"
@@ -452,7 +452,7 @@ test_traffic_clear_by_ids() {
     local result
     result=$(run_bifrost traffic clear --ids "$first_id" -y)
 
-    if echo "$result" | grep -qi "deleted\|Deleted 1"; then
+    if grep -qi "deleted\|Deleted 1" <<< "$result"; then
         pass "traffic clear --ids 返回删除确认消息"
     else
         fail "traffic clear --ids 未返回预期消息: $result"
@@ -474,7 +474,7 @@ test_traffic_clear_all() {
     local result
     result=$(run_bifrost traffic clear -y)
 
-    if echo "$result" | grep -qi "cleared\|All traffic"; then
+    if grep -qi "cleared\|All traffic" <<< "$result"; then
         pass "traffic clear -y 返回清空确认消息"
     else
         fail "traffic clear -y 未返回预期消息: $result"
@@ -530,7 +530,7 @@ test_rule_rename_not_found() {
     local result
     result=$(run_bifrost rule rename nonexistent_xxx_rule new_name)
 
-    if echo "$result" | grep -qi "not found\|error\|Error\|404"; then
+    if grep -qi "not found\|error\|Error\|404" <<< "$result"; then
         pass "rule rename 不存在的规则返回错误信息"
     else
         fail "rule rename 不存在的规则未返回错误: $result"
@@ -600,7 +600,7 @@ test_script_rename_not_found() {
     local result
     result=$(run_bifrost script rename request nonexistent_xxx_script new_name)
 
-    if echo "$result" | grep -qi "not found\|error\|Error\|404"; then
+    if grep -qi "not found\|error\|Error\|404" <<< "$result"; then
         pass "script rename 不存在的脚本返回错误"
     else
         fail "script rename 不存在的脚本未返回错误: $result"
@@ -617,7 +617,7 @@ test_metrics_summary_verify() {
     local result
     result=$(run_bifrost metrics summary)
 
-    if echo "$result" | grep -qi "total\|request\|connection\|traffic\|bytes\|uptime"; then
+    if grep -qi "total\|request\|connection\|traffic\|bytes\|uptime" <<< "$result"; then
         pass "metrics summary 包含关键指标字段"
     else
         fail "metrics summary 缺少关键字段: $result"
@@ -630,7 +630,7 @@ test_metrics_apps_verify() {
     local result
     result=$(run_bifrost metrics apps)
 
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic\|error"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic\|error" <<< "$result"; then
         pass "metrics apps 返回了应用数据"
     else
         fail "metrics apps 失败或为空: $result"
@@ -643,7 +643,7 @@ test_metrics_hosts_verify() {
     local result
     result=$(run_bifrost metrics hosts)
 
-    if echo "$result" | grep -qi "httpbin.org\|host\|count"; then
+    if grep -qi "httpbin.org\|host\|count" <<< "$result"; then
         pass "metrics hosts 包含 httpbin.org 或主机统计信息"
     else
         fail "metrics hosts 未包含预期内容: $(echo "$result" | head -5)"
@@ -656,7 +656,7 @@ test_metrics_history_verify() {
     local result
     result=$(run_bifrost metrics history -l 5)
 
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic\|error"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic\|error" <<< "$result"; then
         pass "metrics history 返回了历史数据"
     else
         fail "metrics history 失败或为空: $result"
@@ -673,7 +673,7 @@ test_sync_status_verify() {
     local result
     result=$(run_bifrost sync status)
 
-    if echo "$result" | grep -qi "sync\|status\|enabled\|disabled\|logged\|not"; then
+    if grep -qi "sync\|status\|enabled\|disabled\|logged\|not" <<< "$result"; then
         pass "sync status 返回了同步状态信息"
     else
         fail "sync status 返回内容不含预期字段: $result"
@@ -686,7 +686,7 @@ test_sync_config_verify() {
     local result
     result=$(run_bifrost sync config)
 
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic\|error"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic\|error" <<< "$result"; then
         pass "sync config 返回了配置信息"
     else
         fail "sync config 失败或为空: $result"
@@ -699,9 +699,9 @@ test_sync_run_verify() {
     local result
     result=$(run_bifrost sync run)
 
-    if echo "$result" | grep -qi "sync\|success\|complet\|not.*login\|no.*token\|skip"; then
+    if grep -qi "sync\|success\|complet\|not.*login\|no.*token\|skip" <<< "$result"; then
         pass "sync run 执行完成并返回同步状态"
-    elif ! echo "$result" | grep -qi "panic"; then
+    elif ! grep -qi "panic" <<< "$result"; then
         pass "sync run 执行完成 (未登录状态预期)"
     else
         fail "sync run 出现 panic: $result"
@@ -718,7 +718,7 @@ test_whitelist_list_verify() {
     local result
     result=$(run_bifrost whitelist list)
 
-    if echo "$result" | grep -qi "127.0.0.1\|whitelist\|ip\|address\|local"; then
+    if grep -qi "127.0.0.1\|whitelist\|ip\|address\|local" <<< "$result"; then
         pass "whitelist list 包含本地 IP 或白名单信息"
     else
         fail "whitelist list 返回内容不含预期字段: $result"
@@ -731,7 +731,7 @@ test_whitelist_status_verify() {
     local result
     result=$(run_bifrost whitelist status)
 
-    if echo "$result" | grep -qi "mode\|access\|whitelist\|allow\|local"; then
+    if grep -qi "mode\|access\|whitelist\|allow\|local" <<< "$result"; then
         pass "whitelist status 包含 mode/access 信息"
     else
         fail "whitelist status 不含预期信息: $result"
@@ -792,14 +792,14 @@ test_whitelist_temporary_roundtrip() {
     local result
     result=$(run_bifrost whitelist add-temporary 10.0.0.99)
 
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "whitelist add-temporary 10.0.0.99 执行成功"
     else
         fail "whitelist add-temporary 失败: $result"
     fi
 
     result=$(run_bifrost whitelist remove-temporary 10.0.0.99)
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "whitelist remove-temporary 10.0.0.99 执行成功"
     else
         fail "whitelist remove-temporary 失败: $result"
@@ -811,14 +811,14 @@ test_whitelist_pending_clear() {
 
     local result
     result=$(run_bifrost whitelist pending)
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic" <<< "$result"; then
         pass "whitelist pending 列出成功"
     else
         fail "whitelist pending 失败或为空: $result"
     fi
 
     result=$(run_bifrost whitelist clear-pending)
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "whitelist clear-pending 执行成功"
     else
         fail "whitelist clear-pending 失败: $result"
@@ -830,7 +830,7 @@ test_whitelist_allow_lan_roundtrip() {
 
     local result
     result=$(run_bifrost whitelist allow-lan true)
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "whitelist allow-lan true 执行成功"
     else
         fail "whitelist allow-lan true 失败: $result"
@@ -845,7 +845,7 @@ test_whitelist_allow_lan_roundtrip() {
     fi
 
     result=$(run_bifrost whitelist allow-lan false)
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "whitelist allow-lan false 恢复成功"
     else
         fail "whitelist allow-lan false 失败: $result"
@@ -862,7 +862,7 @@ test_config_show_verify() {
     local result
     result=$(run_bifrost config show)
 
-    if echo "$result" | grep -qi "tls\|proxy\|port\|intercept\|access"; then
+    if grep -qi "tls\|proxy\|port\|intercept\|access" <<< "$result"; then
         pass "config show 包含 tls/proxy/port 等关键配置"
     else
         fail "config show 缺少关键配置: $(echo "$result" | head -5)"
@@ -887,14 +887,14 @@ test_config_show_section_verify() {
 
     local result
     result=$(run_bifrost config show --section tls)
-    if echo "$result" | grep -qi "tls\|intercept\|ssl\|certificate\|exclude"; then
+    if grep -qi "tls\|intercept\|ssl\|certificate\|exclude" <<< "$result"; then
         pass "config show --section tls 包含 TLS 相关字段"
     else
         fail "config show --section tls 不含 TLS 字段: $result"
     fi
 
     result=$(run_bifrost config show --section traffic)
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic" <<< "$result"; then
         pass "config show --section traffic 返回了数据"
     else
         fail "config show --section traffic 失败"
@@ -944,7 +944,7 @@ test_config_add_remove_verify() {
     local result
     result=$(run_bifrost config add tls.exclude "*.e2etest.local")
 
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "config add tls.exclude *.e2etest.local 执行成功"
     else
         fail "config add 失败: $result"
@@ -959,7 +959,7 @@ test_config_add_remove_verify() {
     fi
 
     result=$(run_bifrost config remove tls.exclude "*.e2etest.local")
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "config remove tls.exclude *.e2etest.local 执行成功"
     else
         fail "config remove 失败: $result"
@@ -987,9 +987,9 @@ test_config_clear_cache_verify() {
     local result
     result=$(run_bifrost config clear-cache -y)
 
-    if echo "$result" | grep -qi "cleared\|cache\|success\|ok\|done"; then
+    if grep -qi "cleared\|cache\|success\|ok\|done" <<< "$result"; then
         pass "config clear-cache 返回了清除确认"
-    elif ! echo "$result" | grep -qi "panic\|error"; then
+    elif ! grep -qi "panic\|error" <<< "$result"; then
         pass "config clear-cache 执行成功"
     else
         fail "config clear-cache 失败: $result"
@@ -1002,7 +1002,7 @@ test_config_performance_verify() {
     local result
     result=$(run_bifrost config performance)
 
-    if echo "$result" | grep -qi "cpu\|memory\|uptime\|thread\|connection\|performance\|system"; then
+    if grep -qi "cpu\|memory\|uptime\|thread\|connection\|performance\|system" <<< "$result"; then
         pass "config performance 包含系统性能指标"
     else
         fail "config performance 缺少性能指标: $(echo "$result" | head -5)"
@@ -1015,7 +1015,7 @@ test_config_websocket_verify() {
     local result
     result=$(run_bifrost config websocket)
 
-    if [[ -n "$result" ]] && ! echo "$result" | grep -qi "panic"; then
+    if [[ -n "$result" ]] && ! grep -qi "panic" <<< "$result"; then
         pass "config websocket 返回了连接信息"
     else
         fail "config websocket 失败或为空: $result"
@@ -1028,7 +1028,7 @@ test_config_disconnect_verify() {
     local result
     result=$(run_bifrost config disconnect "*.nonexist.e2e")
 
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "config disconnect 执行成功 (匹配 0 条预期)"
     else
         fail "config disconnect 失败"
@@ -1041,7 +1041,7 @@ test_config_disconnect_by_app_verify() {
     local result
     result=$(run_bifrost config disconnect-by-app "E2E_FakeApp")
 
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "config disconnect-by-app 执行成功"
     else
         fail "config disconnect-by-app 失败"
@@ -1088,11 +1088,11 @@ test_version_check_verify() {
     local result
     result=$(run_bifrost version-check)
 
-    if echo "$result" | grep -qi "panic"; then
+    if grep -qi "panic" <<< "$result"; then
         fail "version-check panic: $result"
     elif [[ -z "$result" ]]; then
         fail "version-check 不应为空输出"
-    elif echo "$result" | grep -qi "version\|latest\|current\|up.to.date\|upgrade\|available\|error\|timeout\|network\|could not determine"; then
+    elif grep -qi "version\|latest\|current\|up.to.date\|upgrade\|available\|error\|timeout\|network\|could not determine" <<< "$result"; then
         pass "version-check 返回了版本信息或网络状态"
     else
         fail "version-check 返回了异常内容: $result"
@@ -1165,7 +1165,7 @@ EOF
     local result
     result=$(run_bifrost import "$file" --detect-only)
 
-    if echo "$result" | grep -qi "detect\|rules\|type\|1\|found"; then
+    if grep -qi "detect\|rules\|type\|1\|found" <<< "$result"; then
         pass "import --detect-only 返回了检测信息"
     else
         fail "import --detect-only 未返回预期检测结果: $result"
@@ -1201,7 +1201,7 @@ test_search_with_real_data() {
     local result
     result=$(run_bifrost search "httpbin" -l 10 -f json)
 
-    if echo "$result" | grep -q "httpbin"; then
+    if grep -q "httpbin" <<< "$result"; then
         pass "search 'httpbin' 搜索到匹配的流量记录"
     else
         fail "search 'httpbin' 未搜索到匹配结果: $(echo "$result" | head -5)"
@@ -1218,7 +1218,7 @@ test_stop_verify() {
     local result
     result=$(run_bifrost stop)
 
-    if ! echo "$result" | grep -qi "panic"; then
+    if ! grep -qi "panic" <<< "$result"; then
         pass "stop 命令执行完成"
     else
         fail "stop 命令 panic: $result"

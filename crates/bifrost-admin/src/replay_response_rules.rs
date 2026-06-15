@@ -212,6 +212,10 @@ fn parse_header_values(value: &str) -> Vec<(String, String)> {
         trimmed
     };
 
+    if looks_like_json_header_object(content) {
+        return parse_json_header_object(content).unwrap_or_default();
+    }
+
     let delimiter = if content.contains('\n') { '\n' } else { ',' };
     content
         .split(delimiter)
@@ -229,6 +233,45 @@ fn parse_header_value(value: &str) -> Option<(String, String)> {
         None
     } else {
         Some((key.to_string(), val.trim().to_string()))
+    }
+}
+
+fn parse_json_header_object(content: &str) -> Option<Vec<(String, String)>> {
+    let content = content.trim();
+    if !looks_like_json_header_object(content) {
+        return None;
+    }
+
+    let json_value = serde_json::from_str::<serde_json::Value>(content).ok()?;
+    let obj = json_value.as_object()?;
+    Some(
+        obj.iter()
+            .filter_map(|(key, value)| {
+                if key.trim().is_empty() {
+                    return None;
+                }
+                json_scalar_to_header_value(value).map(|value| (key.clone(), value))
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn looks_like_json_header_object(content: &str) -> bool {
+    let content = content.trim();
+    if !(content.starts_with('{') && content.ends_with('}')) {
+        return false;
+    }
+    let inner = content[1..content.len() - 1].trim_start();
+    inner.is_empty() || inner.starts_with('"') || inner.contains(':')
+}
+
+fn json_scalar_to_header_value(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => Some(value.clone()),
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        serde_json::Value::Bool(value) => Some(value.to_string()),
+        serde_json::Value::Null => Some(String::new()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => None,
     }
 }
 
@@ -530,6 +573,27 @@ mod tests {
 
         assert!(header(&headers, "X-Remove").is_none());
         assert_eq!(header(&headers, "X-Keep"), Some("yes"));
+    }
+
+    #[test]
+    fn replay_response_rules_apply_json_object_headers() {
+        let rules =
+            resolve(r#"https://example.test/api resHeaders://{"X-Env":"ppe","X-Flag":"1"}"#);
+
+        let (_, headers, _) = apply_response_rules(&rules, 200, Vec::new(), None);
+
+        assert_eq!(header(&headers, "X-Env"), Some("ppe"));
+        assert_eq!(header(&headers, "X-Flag"), Some("1"));
+    }
+
+    #[test]
+    fn replay_response_rules_ignore_malformed_json_object_headers() {
+        let rules = resolve(r#"https://example.test/api resHeaders://{"X-Env":}"#);
+
+        let (_, headers, _) = apply_response_rules(&rules, 200, Vec::new(), None);
+
+        assert!(header(&headers, "{\"X-Env\"").is_none());
+        assert!(headers.is_empty());
     }
 
     #[test]

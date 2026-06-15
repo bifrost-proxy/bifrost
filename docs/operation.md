@@ -63,7 +63,7 @@ pattern params://foo=1&bar=2
 - 键为空时忽略该对
 - 值可以为空（如 `flag=`）
 
-> ⚠️ **重要**：`&` 拆分仅对 `urlParams`、`params` 这类查询参数协议生效。对 `reqHeaders`、`reqCookies`、`resCookies` 而言，`&` **不是分隔符**：`reqHeaders://X-Custom=test&X-Another=value` 会设置单个请求头 `x-custom: test&X-Another=value`，`reqCookies://session=abc123&user=test` 会设置单个 cookie 值 `session=abc123&user=test`。要设置多个 header/cookie，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或 JSON 对象，它们才会按行拆分：
+> ⚠️ **重要**：`&` 拆分仅对 `urlParams`、`params` 这类查询参数协议生效。对 `reqHeaders`、`reqCookies`、`resCookies` 而言，`&` **不是分隔符**：`reqHeaders://X-Custom=test&X-Another=value` 会设置单个请求头 `x-custom: test&X-Another=value`，`reqCookies://session=abc123&user=test` 会设置单个 cookie 值 `session=abc123&user=test`。要设置多个 header/cookie，请使用行格式（每行一个 `Header: value`，例如通过内嵌值块引用）或合法 JSON 对象：
 
 ````txt
 ``` headers.txt
@@ -72,6 +72,12 @@ X-Another: value
 ```
 pattern reqHeaders://{headers.txt}
 ````
+
+或使用不含未包裹空格的 JSON 对象：
+
+```txt
+pattern reqHeaders://{"X-Custom":"test","X-Another":"value"}
+```
 
 > ⚠️ **值不能包含空格**，空格会被解析器识别为操作符分隔符，导致规则解析错误。
 
@@ -295,7 +301,7 @@ www.test.com resBody://{response.json}
 
 部分协议的 value 需要是键值对数据，Bifrost 支持以下格式：
 
-> ⚠️ **重要**：JSON 对象格式只适用于按原生 JSON 处理的 **body 类协议**（如 `resMerge`），不适用于 header/cookie 类协议。经实测（bifrost 0.0.96）：`resMerge://({"merged":"YES","extra":"field"})` 能把字段合并进 JSON 响应体；但 `resHeaders://({"x-a":"1","x-b":"2"})`、`reqHeaders://({"x-req-a":"1"})` 都设置**零个** header，内嵌 JSON 对象块（`resHeaders://{h.json}`，块内为 `{"x-a":"1","x-b":"2"}`）同样设置零个 header。要设置 header/cookie（`reqHeaders`/`resHeaders`/`reqCookies`/`resCookies`），请用下文的**行格式**（单值时也可用内联值/内联参数）；实测 `resHeaders://{h.txt}`（块内为 `x-a: 1` / `x-b: 2` 两行）能正确设置 `X-A: 1`、`X-B: 2`。
+> ⚠️ **重要**：JSON 对象格式可用于 body 类协议（如 `resMerge`）以及扁平 header/cookie 类协议（如 `reqHeaders`、`resHeaders`、`reqCookies`）。header/cookie JSON 只接受 string/number/bool/null 这类标量值；数组或嵌套对象不会作为 header/cookie 值。`resCookies` 额外支持对象值表示 Cookie 属性。
 
 ### JSON 格式
 
@@ -304,6 +310,13 @@ www.test.com resBody://{response.json}
   "key1": "value1",
   "key2": "value2"
 }
+```
+
+规则内联写法示例：
+
+```txt
+api.example.com reqHeaders://{"X-Env":"ppe","X-Flag":"1"}
+api.example.com resHeaders://({"Cache-Control":"max-age=3600, public"})
 ```
 
 ### 行格式

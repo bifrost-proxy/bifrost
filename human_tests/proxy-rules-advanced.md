@@ -1389,7 +1389,7 @@
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-passthrough", "content": "httpbin.org resHeaders://{X-Modified: true}\nhttpbin.org/ip passthrough://", "enabled": true}'
+     -d '{"name": "test-passthrough", "content": "httpbin.org resHeaders://(X-Modified: true)\nhttpbin.org/ip passthrough://", "enabled": true}'
    ```
 2. 执行被 passthrough 的请求：
    ```bash
@@ -1417,7 +1417,7 @@
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-skip", "content": "httpbin.org/get resHeaders://{X-First: applied}\nhttpbin.org/get skip://\nhttpbin.org/get resHeaders://{X-Second: skipped}", "enabled": true}'
+     -d '{"name": "test-skip", "content": "httpbin.org/get resHeaders://(X-First: applied)\nhttpbin.org/get skip://\nhttpbin.org/get resHeaders://(X-Second: skipped)", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -1443,7 +1443,7 @@
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-tlsintercept", "content": "httpbin.org tlsIntercept://\nhttpbin.org/get resHeaders://{X-TLS-Intercepted: true}", "enabled": true}'
+     -d '{"name": "test-tlsintercept", "content": "httpbin.org tlsIntercept://\nhttpbin.org/get resHeaders://(X-TLS-Intercepted: true)", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -1859,7 +1859,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-priority-normal", "content": "httpbin.org/get resHeaders://{X-Priority: normal}", "enabled": true}'
+     -d '{"name": "test-priority-normal", "content": "httpbin.org/get resHeaders://(X-Priority: normal)", "enabled": true}'
    ```
 2. 创建第二个规则（important 优先级）：
    ```bash
@@ -2010,7 +2010,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-multi-protocol", "content": "httpbin.org/headers ua://MultiProtoTest/1.0 referer://https://test.bifrost.dev/ reqCookies://(multi=true) resHeaders://{X-Multi-Proto: combined} resCookies://(resp_token=abc)", "enabled": true}'
+     -d '{"name": "test-multi-protocol", "content": "httpbin.org/headers ua://MultiProtoTest/1.0 referer://https://test.bifrost.dev/ reqCookies://(multi=true) resHeaders://(X-Multi-Proto: combined) resCookies://(resp_token=abc)", "enabled": true}'
    ```
 2. 执行命令：
    ```bash
@@ -2063,7 +2063,7 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
    ```bash
    curl -X POST http://127.0.0.1:8800/_bifrost/api/rules \
      -H "Content-Type: application/json" \
-     -d '{"name": "test-alias-ignore", "content": "httpbin.org resHeaders://{X-Should-Apply: true}\nignore://httpbin.org/ip", "enabled": true}'
+     -d '{"name": "test-alias-ignore", "content": "httpbin.org resHeaders://(X-Should-Apply: true)\nignore://httpbin.org/ip", "enabled": true}'
    ```
 2. 执行被忽略的请求：
    ```bash

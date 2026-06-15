@@ -2796,17 +2796,40 @@ resolve_value_reference() {
 
 extract_header_from_value() {
     local value="$1"
-    
+
+    extract_headers_from_value "$value" | head -1
+}
+
+extract_headers_from_value() {
+    local value="$1"
+
     value=$(resolve_value_reference "$value")
-    
+
     value="${value#\`}"
     value="${value%\`}"
     value="${value#(}"
     value="${value%)}"
 
+    if [[ "$value" == \{*\} ]] && command -v jq &> /dev/null; then
+        local json_headers
+        json_headers=$(printf '%s' "$value" | jq -r '
+            if type == "object" then
+                to_entries[]
+                | select((.value | type) != "array" and (.value | type) != "object")
+                | "\(.key)|\(.value // "")"
+            else
+                empty
+            end
+        ' 2>/dev/null || true)
+        if [[ -n "$json_headers" ]]; then
+            printf '%s\n' "$json_headers"
+            return 0
+        fi
+    fi
+
     local header_name=""
     local header_value=""
-    
+
     local first_line=$(echo "$value" | head -1)
 
     if [[ "$first_line" == *":"* ]]; then
@@ -3738,16 +3761,19 @@ run_tests() {
             reqHeaders)
                 local req_header_raw=$(extract_value "$protocols" "reqHeaders")
                 req_header_raw=$(resolve_code_block_var "$req_header_raw" "$RULE_FILE")
-                local req_header_first_line=$(echo "$req_header_raw" | head -1)
-                local req_header_info=$(extract_header_from_value "$req_header_first_line")
-                local req_header_name=$(echo "$req_header_info" | cut -d'|' -f1)
-                local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2)
-                if [[ -n "$req_header_name" ]]; then
-                    if [[ "$req_header_value" == *'${'* ]] || [[ "$req_header_raw" == *'`'* ]]; then
-                        test_req_headers_template "$pattern" "$req_header_info"
-                    else
-                        test_req_headers_add "$pattern" "$req_header_name" "$req_header_value"
-                    fi
+                local req_header_infos
+                req_header_infos=$(extract_headers_from_value "$req_header_raw")
+                if [[ -n "$req_header_infos" ]]; then
+                    while IFS= read -r req_header_info; do
+                        local req_header_name=$(echo "$req_header_info" | cut -d'|' -f1)
+                        local req_header_value=$(echo "$req_header_info" | cut -d'|' -f2)
+                        [[ -z "$req_header_name" ]] && continue
+                        if [[ "$req_header_value" == *'${'* ]] || [[ "$req_header_raw" == *'`'* ]]; then
+                            test_req_headers_template "$pattern" "$req_header_info"
+                        else
+                            test_req_headers_add "$pattern" "$req_header_name" "$req_header_value"
+                        fi
+                    done <<< "$req_header_infos"
                 else
                     test_req_headers_add "$pattern" "X-Test-Header" "test-value"
                 fi
@@ -3755,16 +3781,19 @@ run_tests() {
             resHeaders)
                 local res_header_raw=$(extract_value "$protocols" "resHeaders")
                 res_header_raw=$(resolve_code_block_var "$res_header_raw" "$RULE_FILE")
-                local res_header_first_line=$(echo "$res_header_raw" | head -1)
-                local res_header_info=$(extract_header_from_value "$res_header_first_line")
-                local res_header_name=$(echo "$res_header_info" | cut -d'|' -f1)
-                local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2)
-                if [[ -n "$res_header_name" ]]; then
-                    if [[ "$res_header_value" == *'${'* ]] || [[ "$res_header_raw" == *'`'* ]]; then
-                        test_res_headers_template "$pattern" "$res_header_info"
-                    else
-                        test_res_headers_add "$pattern" "$res_header_name" "$res_header_value"
-                    fi
+                local res_header_infos
+                res_header_infos=$(extract_headers_from_value "$res_header_raw")
+                if [[ -n "$res_header_infos" ]]; then
+                    while IFS= read -r res_header_info; do
+                        local res_header_name=$(echo "$res_header_info" | cut -d'|' -f1)
+                        local res_header_value=$(echo "$res_header_info" | cut -d'|' -f2)
+                        [[ -z "$res_header_name" ]] && continue
+                        if [[ "$res_header_value" == *'${'* ]] || [[ "$res_header_raw" == *'`'* ]]; then
+                            test_res_headers_template "$pattern" "$res_header_info"
+                        else
+                            test_res_headers_add "$pattern" "$res_header_name" "$res_header_value"
+                        fi
+                    done <<< "$res_header_infos"
                 else
                     test_res_headers_add "$pattern" "X-Test-Response" "test-value"
                 fi
