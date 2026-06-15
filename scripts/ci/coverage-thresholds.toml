@@ -64,16 +64,20 @@ min = 90.0
 min = 89.0
 
 [crates.bifrost-proxy]
-min = 0.0
+# Current baseline 59.13%; ratchet just below measured coverage.
+min = 59.0
 
 [crates.bifrost-admin]
-min = 0.0
+# Current baseline 49.22%; ratchet just below measured coverage.
+min = 49.0
 
 [crates.agent]
-min = 0.0
+# Current baseline 78.78%; ratchet just below measured coverage.
+min = 78.0
 
 [crates.bifrost-cli]
-min = 0.0
+# Current baseline 45.67%; ratchet just below measured coverage.
+min = 45.0
 
 [crates.bifrost-storage]
 # Reached 94.5% on Linux CI. config_manager/values/rules/config/state/
@@ -102,10 +106,12 @@ min = 84.0
 min = 90.0
 
 [crates.bifrost-asr]
-min = 0.0
+# Current baseline 94.52%; ratchet just below measured coverage.
+min = 94.0
 
 [crates.bifrost-script]
-min = 0.0
+# Current baseline 91.42%; ratchet just below measured coverage.
+min = 91.0
 
 [crates.skills]
 # Reached 95.4% on Linux CI. All modules (executor/validator/store/registry/

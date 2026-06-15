@@ -18,6 +18,15 @@ use crate::state::SharedAdminState;
 use crate::traffic_db::{Direction, QueryParams, QueryResult, TextMatchMode};
 use crate::TrafficRecord;
 
+async fn join_clear_task<T>(
+    task: tokio::task::JoinHandle<std::result::Result<T, String>>,
+    label: &str,
+) -> Result<T> {
+    task.await
+        .map_err(|e| BifrostError::Config(format!("{label} clear task join failed: {e}")))?
+        .map_err(BifrostError::Config)
+}
+
 #[derive(Clone)]
 pub struct AdminQueryService {
     state: SharedAdminState,
@@ -330,33 +339,48 @@ impl AdminQueryService {
         if let Some(ref db_store) = self.state.traffic_db_store {
             let db_store_clone = db_store.clone();
             let ids_for_db = ids_to_delete.clone();
-            let _delete_task = tokio::task::spawn_blocking(move || {
+            let delete_task = tokio::task::spawn_blocking(move || {
                 db_store_clone.delete_by_ids(&ids_for_db);
+                Ok(())
             });
+            join_clear_task(delete_task, "traffic db delete-by-ids").await?;
         }
 
         if let Some(ref body_store) = self.state.body_store {
             let body_store_clone = body_store.clone();
             let ids_for_body = ids_to_delete.clone();
-            let _delete_task = tokio::task::spawn_blocking(move || {
-                let _ = body_store_clone.write().delete_by_ids(&ids_for_body);
+            let delete_task = tokio::task::spawn_blocking(move || {
+                body_store_clone
+                    .write()
+                    .delete_by_ids(&ids_for_body)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(delete_task, "body store delete-by-ids").await;
         }
 
         if let Some(ref frame_store) = self.state.frame_store {
             let frame_store_clone = frame_store.clone();
             let ids_for_frame = ids_to_delete.clone();
-            let _delete_task = tokio::task::spawn_blocking(move || {
-                let _ = frame_store_clone.delete_by_ids(&ids_for_frame);
+            let delete_task = tokio::task::spawn_blocking(move || {
+                frame_store_clone
+                    .delete_by_ids(&ids_for_frame)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(delete_task, "frame store delete-by-ids").await;
         }
 
         if let Some(ref ws_payload_store) = self.state.ws_payload_store {
             let ws_payload_store_clone = ws_payload_store.clone();
             let ids_for_payload = ids_to_delete.clone();
-            let _delete_task = tokio::task::spawn_blocking(move || {
-                let _ = ws_payload_store_clone.delete_by_ids(&ids_for_payload);
+            let delete_task = tokio::task::spawn_blocking(move || {
+                ws_payload_store_clone
+                    .delete_by_ids(&ids_for_payload)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(delete_task, "ws payload store delete-by-ids").await;
         }
 
         if let Some(pm) = &self.push_manager {
@@ -371,38 +395,50 @@ impl AdminQueryService {
     }
 
     async fn clear_all_traffic(&self) -> Result<String> {
-        let active_connection_ids = self.state.connection_monitor.active_connection_ids();
+        self.state.connection_monitor.clear();
 
         if let Some(ref db_store) = self.state.traffic_db_store {
             let db_store_clone = db_store.clone();
-            let active_ids_for_db = active_connection_ids.clone();
-            let _clear_task = tokio::task::spawn_blocking(move || {
-                db_store_clone.clear_with_active_ids(&active_ids_for_db);
+            let clear_task = tokio::task::spawn_blocking(move || {
+                db_store_clone.clear();
+                Ok(())
             });
+            join_clear_task(clear_task, "traffic db clear-all").await?;
         }
 
         if let Some(ref body_store) = self.state.body_store {
             let body_store_clone = body_store.clone();
-            let _clear_task = tokio::task::spawn_blocking(move || {
-                let _ = body_store_clone.write().clear();
+            let clear_task = tokio::task::spawn_blocking(move || {
+                body_store_clone
+                    .write()
+                    .clear()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(clear_task, "body store clear-all").await;
         }
 
         if let Some(ref frame_store) = self.state.frame_store {
             let frame_store_clone = frame_store.clone();
-            let _clear_task = tokio::task::spawn_blocking(move || {
-                let _ = frame_store_clone.clear();
+            let clear_task = tokio::task::spawn_blocking(move || {
+                frame_store_clone
+                    .clear()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(clear_task, "frame store clear-all").await;
         }
 
         if let Some(ref ws_payload_store) = self.state.ws_payload_store {
             let ws_payload_store_clone = ws_payload_store.clone();
-            let _clear_task = tokio::task::spawn_blocking(move || {
-                let _ = ws_payload_store_clone.clear();
+            let clear_task = tokio::task::spawn_blocking(move || {
+                ws_payload_store_clone
+                    .clear()
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
             });
+            let _ = join_clear_task(clear_task, "ws payload store clear-all").await;
         }
-
-        self.state.connection_monitor.clear();
 
         if let Some(pm) = &self.push_manager {
             pm.invalidate_overview_cache();
