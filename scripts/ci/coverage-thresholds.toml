@@ -25,7 +25,7 @@
 # Project-wide goal. The gate also enforces an aggregate workspace floor.
 default = 90.0
 # Aggregate (workspace-wide) line coverage floor.
-workspace_min = 64.0
+workspace_min = 65.0
 # When true, the gate fails if measured coverage exceeds a crate floor by more
 # than `ratchet_slack` without the floor being updated (keeps floors honest).
 # Disabled by default to avoid noisy failures.
