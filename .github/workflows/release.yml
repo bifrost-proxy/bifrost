@@ -215,12 +215,14 @@ jobs:
 
       - name: Install cross
         if: matrix.cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: cli-${{ matrix.target }}
+          shared-key: rust-${{ matrix.target }}
 
       - name: Cache sherpa-onnx archive
         # Local ASR native assets are distributed only for the supported
@@ -396,7 +398,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          key: desktop-${{ matrix.target }}
+          shared-key: rust-${{ matrix.target }}
 
       - name: Build desktop frontend
         run: pnpm --dir web run build:desktop

@@ -1339,6 +1339,52 @@ async fn save_session_conversation_persists_and_updates_mapping() {
     assert_eq!(map.get("sk2").and_then(Value::as_str), Some("c2"));
 }
 
+#[tokio::test]
+#[cfg(unix)]
+async fn write_secret_file_replaces_without_empty_read_window() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let sessions_path = temp.path().join("sessions.json");
+    super::storage::write_secret_file(&sessions_path, br#"{"sk":"old"}"#)
+        .await
+        .expect("seed sessions");
+
+    let writer_path = sessions_path.clone();
+    let writer = tokio::spawn(async move {
+        for index in 0..200 {
+            let content = json!({ "sk": format!("c{index}") }).to_string();
+            super::storage::write_secret_file(&writer_path, content.as_bytes())
+                .await
+                .expect("write sessions");
+            tokio::task::yield_now().await;
+        }
+    });
+
+    let reader_path = sessions_path.clone();
+    let reader = tokio::spawn(async move {
+        for _ in 0..200 {
+            let content = tokio::fs::read_to_string(&reader_path)
+                .await
+                .expect("read sessions");
+            assert!(!content.is_empty(), "session map should never be empty");
+            let _: BTreeMap<String, String> =
+                serde_json::from_str(&content).expect("parse session map");
+            tokio::task::yield_now().await;
+        }
+    });
+
+    writer.await.expect("writer task");
+    reader.await.expect("reader task");
+
+    let content = tokio::fs::read_to_string(&sessions_path)
+        .await
+        .expect("read final sessions");
+    let map: BTreeMap<String, String> = serde_json::from_str(&content).expect("parse final map");
+    assert_eq!(
+        map.get("sk").and_then(|value| value.strip_prefix('c')),
+        Some("199")
+    );
+}
+
 #[test]
 fn try_waited_final_from_sse_builds_waited_final_for_finished_assistant() {
     let sse_detail = json!({

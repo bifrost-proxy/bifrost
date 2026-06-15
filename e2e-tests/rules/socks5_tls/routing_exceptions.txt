@@ -1,15 +1,18 @@
-# Test target: SOCKS5 TLS routing-only rules must not auto-enable TLS interception.
-# host:// only changes the upstream address and must stay raw TLS passthrough.
-socks-host-only.local host://127.0.0.1:__ECHO_HTTPS_PORT__
-wildcard-auto.local host://127.0.0.1:__ECHO_HTTPS_PORT__
-regex-auto.local host://127.0.0.1:__ECHO_HTTPS_PORT__
+# Test target: SOCKS5 TLS proxy-only rules must not auto-enable TLS interception.
 
 # proxy:// only selects a downstream proxy and must not be classified as TLS content handling.
 127.0.0.1 proxy://127.0.0.1:__DOWNSTREAM_PROXY_PORT__
 
 # Pure wildcard and regex response rules are too broad to auto-enable TLS interception.
 * resHeaders://X-Bifrost-Wildcard-Auto-TLS=unexpected
-/regex-auto\.local/ resHeaders://X-Bifrost-Regex-Auto-TLS=unexpected
+/localhost/ resHeaders://X-Bifrost-Regex-Auto-TLS=unexpected
 
 # Content mutation still requires TLS interception even when global interception is disabled.
 socks-mutation.local http://127.0.0.1:__ECHO_HTTP_PORT__ resHeaders://X-Bifrost-Auto-TLS=socks5-content-rule
+
+# A concrete domain route should auto-enable TLS interception even without an
+# explicit scheme prefix, so the inner HTTPS path can select the most specific
+# rule before the root fallback.
+domain-path-auto.local/app/account-center https://127.0.0.1:__SECONDARY_HTTPS_PORT__
+domain-path-auto.local/app https://domain-path-auto.local/app
+domain-path-auto.local https://127.0.0.1:__ECHO_HTTPS_PORT__

@@ -1362,6 +1362,9 @@ impl SocksHandler {
                                     &tls_resolved_rules,
                                 ) || self.rules.as_ref().is_some_and(|r| {
                                     r.has_response_rules_for_host(original_host)
+                                        || r.has_tls_auto_intercept_route_rules_for_host(
+                                            original_host,
+                                        )
                                 })));
                             if do_intercept {
                                 debug!(

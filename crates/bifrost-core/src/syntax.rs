@@ -71,8 +71,12 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
     match protocol {
         Protocol::Host => "Forward request to specified host",
         Protocol::XHost => "Extended host forwarding with path rewrite",
-        Protocol::Http => "HTTP protocol forwarding",
-        Protocol::Https => "HTTPS protocol forwarding",
+        Protocol::Http => {
+            "HTTP forwarding; concrete host/path matches can auto-enable TLS interception for HTTPS CONNECT"
+        }
+        Protocol::Https => {
+            "HTTPS forwarding; concrete host/path matches can auto-enable TLS interception for HTTPS CONNECT"
+        }
         Protocol::Ws => "WebSocket forwarding",
         Protocol::Wss => "Secure WebSocket forwarding",
         Protocol::Proxy => "HTTP proxy forwarding",
@@ -145,7 +149,9 @@ fn get_protocol_description(protocol: Protocol) -> &'static str {
         Protocol::Breakpoint => {
             "Authorize request or response breakpoint phases for matched traffic"
         }
-        Protocol::Passthrough => "Pass through without modification",
+        Protocol::Passthrough => {
+            "Forward matched traffic to its original target, equivalent to an A-to-A forwarding rule"
+        }
         Protocol::Tunnel => "Redirect CONNECT tunnel target",
     }
 }

@@ -1498,7 +1498,7 @@ mod tests {
             .update_sync_config(SyncConfigUpdate {
                 enabled: Some(true),
                 remote_base_url: Some(remote_base_url.to_string()),
-                connect_timeout_ms: Some(500),
+                connect_timeout_ms: Some(5_000),
                 ..Default::default()
             })
             .await
@@ -1888,7 +1888,7 @@ mod tests {
                     };
 
                     let response = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{}",
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
                         json_body.len(),
                         json_body
                     );

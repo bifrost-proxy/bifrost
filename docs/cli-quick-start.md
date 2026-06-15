@@ -118,7 +118,7 @@ api.example.com host://{local-api-target.txt}
 
 ## 场景 4：按需调试 HTTPS 和路径规则
 
-如果你要按 HTTPS URL 的 path 匹配，例如 `https://api.example.com/v1/users`，通常需要对这个域名做 TLS 抓包；否则代理看到的只是 CONNECT 隧道，不一定能看到内部路径。不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围，避免影响带 SSL pinning 的应用。
+如果你要按 HTTPS URL 的 path 匹配，例如 `api.example.com/v1/users https://10.0.0.10:8443`，只要规则 matcher 有明确域名/IP 作用域，Bifrost 会在全局 TLS 抓包关闭时自动对该域名解包，以便读取内部路径；matcher 前不需要强制写 `https://`。不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围。对范围很宽的 wildcard/regex，或没有明确 host 作用域的规则，请显式收窄范围，避免影响带 SSL pinning 的应用。
 
 ```bash
 bifrost rule add https-path -c "api.example.com/v1/users tlsIntercept:// host://127.0.0.1:3000"

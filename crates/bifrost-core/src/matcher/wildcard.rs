@@ -1,6 +1,6 @@
 use regex::Regex;
 
-use super::{pattern_has_concrete_host_scope, MatchResult, Matcher};
+use super::{pattern_has_concrete_host_scope, pattern_host_scope_matches, MatchResult, Matcher};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum WildcardType {
@@ -249,6 +249,10 @@ impl Matcher for WildcardMatcher {
             WildcardType::Prefix => 55,
             WildcardType::Suffix => 55,
         }
+    }
+
+    fn matches_host_scope(&self, url: &str, host: &str) -> bool {
+        !self.negated && pattern_host_scope_matches(&self.raw_pattern, url, host)
     }
 
     fn can_trigger_tls_auto_intercept(&self) -> bool {
