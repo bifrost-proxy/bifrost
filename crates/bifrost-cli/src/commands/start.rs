@@ -1535,7 +1535,9 @@ pub fn run_start(
         stored_config.tls.disconnect_on_change
     };
 
-    if daemon {
+    let should_spawn_daemon_parent =
+        should_spawn_daemon_parent_process(daemon, is_detached_daemon_child_process());
+    if should_spawn_daemon_parent {
         #[cfg(unix)]
         {
             let daemon_result = run_daemon(
@@ -1602,6 +1604,10 @@ pub fn run_start(
     }
 
     Ok(())
+}
+
+fn should_spawn_daemon_parent_process(daemon: bool, detached_daemon_child: bool) -> bool {
+    daemon && !detached_daemon_child
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4278,6 +4284,13 @@ mod tests {
     fn daemon_child_does_not_suppress_startup_tray() {
         assert!(!should_suppress_startup_tray(false, true));
         assert!(should_suppress_startup_tray(true, true));
+    }
+
+    #[test]
+    fn detached_daemon_child_runs_runtime_instead_of_spawning_again() {
+        assert!(should_spawn_daemon_parent_process(true, false));
+        assert!(!should_spawn_daemon_parent_process(true, true));
+        assert!(!should_spawn_daemon_parent_process(false, false));
     }
 
     #[test]
