@@ -1340,6 +1340,7 @@ async fn save_session_conversation_persists_and_updates_mapping() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn write_secret_file_replaces_without_empty_read_window() {
     let temp = tempfile::tempdir().expect("tempdir");
     let sessions_path = temp.path().join("sessions.json");
