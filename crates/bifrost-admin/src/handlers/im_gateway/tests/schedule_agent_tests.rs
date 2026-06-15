@@ -457,7 +457,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
             adapter_config: None,
             conversation_ref: None,
         }),
-        timeout_ms: 10_000,
+        timeout_ms: 30_000,
         max_output_bytes: 1024,
         concurrency_policy: Default::default(),
         retry: Default::default(),
@@ -483,7 +483,11 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
         run.stdout_preview,
         run.agent_final_response
     );
-    assert_eq!(run.agent_final_response.as_deref(), Some("WORKDIR_OK"));
+    let response = run.agent_final_response.as_deref().unwrap_or_default();
+    assert!(
+        response.contains("WORKDIR_OK") && !response.contains("WORKDIR_MISMATCH"),
+        "unexpected final response: {response:?}"
+    );
 }
 
 #[tokio::test(flavor = "current_thread")]

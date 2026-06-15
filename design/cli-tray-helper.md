@@ -38,7 +38,6 @@ Bifrost 目前有两类启动形态：
 - 不引入 Tauri、Wry、WebView 等内嵌浏览器内核的重型桌面框架。允许使用 `tray-icon`、`muda`、`tao` 等体积可控的轻量托盘/菜单库。
 - 不实现 Linux AppIndicator / StatusNotifierItem。
 - 不支持任意 shell 菜单项。
-- 不补齐 Windows `--daemon`。Windows 脚本启动仍可以是前台服务进程 + 独立 tray helper。
 - 不要求 Desktop 复用此 helper。Desktop 托盘体验可以后续单独设计。
 - 不提供公开 `bifrost tray` 子命令；托盘入口是内部 `bifrost __tray`，用户入口仍是 `bifrost start`。
 
@@ -137,9 +136,22 @@ helper 启动后：
    - 读取 runtime；
    - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
-   - 重新渲染菜单启用状态。
+   - 重新渲染菜单启用状态；
+   - 不在后台定时读取系统代理状态。系统代理状态只能使用缓存，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
+
+Windows 约束：`bifrost.exe __tray ...` 必须在进程主线程进入原生事件循环。Windows CLI 为避免深栈初始化问题会把普通 CLI 命令放到 `bifrost-cli-main` worker 线程执行，但隐藏托盘入口必须在 `main()` 最早阶段先派发，不能等到 worker 线程里再调用 `run_if_tray_process()`。否则 Tao/tray event loop 会在非主线程初始化，helper 可能只写出 `bifrost-tray starting` 后立即退出，表现为没有 `tray.pid`、没有 notification area 图标。
+
+### Windows daemon 侧
+
+Windows 不支持 Unix `fork` daemon。`bifrost start -d` 在 Windows 上使用当前 exe 重新启动一个 detached child：
+
+1. 父进程完成参数解析和启动前门禁。
+2. 父进程移除 child argv 中的 `-d` / `--daemon`，避免递归启动 daemon parent。
+3. 父进程设置 `BIFROST_WINDOWS_DAEMON_CHILD=1`，使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` spawn child，并把 stdout/stderr 写入 `<data_dir>/logs/bifrost.log` / `bifrost.err`。
+4. child 复用前台启动路径，但写入 `runtime.json` 时记录 `runtime_start_mode=daemon`。
+5. 父进程等待 proxy listener ready；child 提前退出或超时则父进程返回非零，不打印成功 PID。
 
 ### 单实例
 
@@ -154,6 +166,7 @@ helper 启动后：
 v1 语义：
 
 - `Stop Bifrost` 停止主服务后，helper 会进入空转宽限期；如果 10 分钟内没有新的服务启动并恢复 Running，helper 自动退出并清理 `tray.pid`，避免菜单栏长期残留失效图标。
+- 用户直接执行 `bifrost stop` 或 upgrade restart 内部 stop 时，CLI stop 负责同步停止同一数据目录下由服务自动拉起的 tray helper，避免服务已停但 helper 长期残留；托盘菜单内部触发的 Stop 会带内部环境标记，保留 helper 进入 Stopped 状态，以便用户继续从同一托盘执行 Start。
 - 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。
@@ -165,6 +178,20 @@ v1 语义：
   - `Quit Tray` 可用；
   - `Status` 显示最近一次停止或断连原因。
 - `Quit Tray` 只退出 helper，不停止主服务。
+
+### System Proxy 状态缓存
+
+System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台心跳的一部分：
+
+- tray helper 的后台菜单快照线程可以刷新 runtime、rules、active rules 和本地配置，但不得定时请求 `/api/proxy/system`。
+- `System Proxy` 菜单项使用最近一次缓存状态渲染；缓存为空时可以暂时不显示该项，或等待下一次用户交互后补齐。
+- 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
+- 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
+- Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
+- Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Admin UI` / `Open Logs` 时出现短暂终端窗口。
+- Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
+- macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
+- `bifrost start -d` 的 daemon child 是真正的长期服务进程；它检测到 `BIFROST_DETACHED_DAEMON_CHILD=1` 后必须直接进入 runtime，不能再次递归 spawn daemon parent。它完成 listener/runtime 初始化后仍必须按配置拉起 tray helper。只有用户显式传入 `--no-tray` 或配置禁用 tray 时才跳过，不能因为 daemon child 身份跳过 tray。
 
 ## CLI 交互面
 
@@ -463,7 +490,7 @@ Quit Tray
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
-- `Start Bifrost`：调用可信 `bifrost start --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；若子进程提前退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
+- `Start Bifrost`：调用可信 `bifrost start --daemon --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；daemon parent 可以成功退出，但 detached daemon child 必须进入长期 runtime。若启动器异常退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
 
@@ -855,7 +882,7 @@ helper 查找顺序：
   - macOS/Windows。
   - 用临时 `BIFROST_DATA_DIR` 启动 `bifrost start`，显式携带 `--no-system-proxy` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
   - 自行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost`，避免依赖 CI runner 后续 E2E 的构建顺序，并与现有 shell E2E 的 release binary 约定一致。
-  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows runner 上若 `tray.pid` 缺失或 helper 进程短暂启动后退出，但启动日志已出现，可降级为 log-only 验证，避免平台托盘会话限制或 PID 文件竞态误伤。
+  - 通过 Admin API ready、`runtime.json` 端口/PID、`tray.pid` 进程存活、`logs/tray.log*` 启动标记交叉验证；Windows 默认也必须要求 `tray.pid` 存在且 helper 进程存活。仅在明确设置 `BIFROST_TRAY_STARTUP_ALLOW_LOG_ONLY=1` 的已知无交互 runner 上，才允许把 `bifrost-tray starting` 作为诊断性降级信号，不能作为常规 CI 通过条件。
   - 在 `.github/workflows/ci.yml` 的 `e2e-macos-runner` 与 `e2e-windows-runner` 中执行，覆盖 macOS arm64、Windows x64 和 Windows arm64。
 - `e2e-tests/tests/test_cli_tray_launch_macos.sh`
   - macOS only。
@@ -878,7 +905,8 @@ Windows E2E：
 
 - 在 Windows runner 上执行 `test_cli_tray_startup_ci.sh` 的平台 smoke 验证。
 - 验证 Admin API ready、`runtime.json`、`tray.pid` 和 `tray.log`。
-- 验证 `bifrost start` 不依赖 daemon mode。
+- 验证 `bifrost start` 前台模式能创建可见托盘 helper，且不依赖 daemon mode。
+- 执行 `test_windows_daemon_start_e2e.sh`，验证 `bifrost start -d` 会启动 detached child、Admin API ready、`runtime.json` 记录 `runtime_start_mode=daemon`，并且 `stop` 能清理 child。
 - 验证 helper 不弹出 console window。
 
 ### 菜单响应性隔离
@@ -935,6 +963,7 @@ macOS 用例：
 Windows 用例：
 
 - `TC-TRAY-WIN-01`：CLI 启动后 notification area 出现 Bifrost 图标。
+- `TC-TRAY-WIN-01A`：CLI 前台启动后 `<data_dir>/tray.pid` 存在且 helper 进程存活；只有 `logs/tray.log*` 中出现 `bifrost-tray starting` 但无活 helper 时判为回归失败。
 - `TC-TRAY-WIN-02`：点击托盘图标展示菜单。
 - `TC-TRAY-WIN-02B`：主进程 Admin API 繁忙或无响应时，notification area 菜单仍从缓存快速展开。
 - `TC-TRAY-WIN-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个 notification area helper。
@@ -1024,6 +1053,7 @@ Linux 用例：
 实现完成必须满足：
 
 - Windows/macOS CLI start 能自动拉起原生托盘 helper。
+- Windows 托盘 helper 在 Stop 主服务后，`Start Bifrost` 必须通过 detached daemon 路径重新启动主服务；不能从 tray helper 直接拉起需要长期依附前台子进程的服务控制路径。
 - Linux 不暴露、不启动、不打包。
 - 没有引入 Tauri/Wry/WebView 等浏览器内核或重型 GUI 运行时。
 - helper 缺失或失败不影响主服务。

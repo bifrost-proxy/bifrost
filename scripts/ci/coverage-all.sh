@@ -158,9 +158,6 @@ main() {
 
   # 4. Merge + emit reports.
   step "Generating merged coverage report"
-  local -a fail_args=()
-  [[ -n "$FAIL_UNDER" ]] && fail_args=(--fail-under-lines "$FAIL_UNDER")
-
   if [[ "$WANT_JSON" -eq 1 ]]; then
     cargo llvm-cov report --json --output-path "$OUTPUT_DIR/coverage.json"
     echo -e "${GREEN}JSON : $OUTPUT_DIR/coverage.json${NC}"
@@ -174,8 +171,13 @@ main() {
     echo -e "${GREEN}HTML : $OUTPUT_DIR/html/index.html${NC}"
   fi
   # Text summary + optional hard floor.
-  cargo llvm-cov report "${fail_args[@]}" ${WANT_TEXT:+} || {
-    echo -e "${RED}llvm-cov hard floor (--fail-under) not met${NC}"; exit 1; }
+  if [[ -n "$FAIL_UNDER" ]]; then
+    cargo llvm-cov report --fail-under-lines "$FAIL_UNDER" || {
+      echo -e "${RED}llvm-cov hard floor (--fail-under) not met${NC}"; exit 1; }
+  else
+    cargo llvm-cov report || {
+      echo -e "${RED}llvm-cov report failed${NC}"; exit 1; }
+  fi
 
   # 5. Optional gate (per-crate floors + gap analysis).
   if [[ "$RUN_GATE" -eq 1 ]]; then

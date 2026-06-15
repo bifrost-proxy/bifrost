@@ -18,6 +18,12 @@ tracing.workspace = true
 url.workspace = true
 urlencoding.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
 [dev-dependencies]
 tempfile.workspace = true
 wiremock = "0.6"

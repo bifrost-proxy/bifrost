@@ -66,8 +66,28 @@ const SYSTEM_PROXY_WAKE_GAP_THRESHOLD: Duration = Duration::from_secs(10);
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
     "BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL";
+const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHILD";
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
+
+fn env_flag_enabled(value: Option<std::ffi::OsString>) -> bool {
+    value
+        .and_then(|value| value.into_string().ok())
+        .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+pub fn is_detached_daemon_child_process() -> bool {
+    env_flag_enabled(std::env::var_os(DETACHED_DAEMON_CHILD_ENV))
+}
+
+fn foreground_runtime_start_mode() -> RuntimeStartMode {
+    if is_detached_daemon_child_process() {
+        RuntimeStartMode::Daemon
+    } else {
+        RuntimeStartMode::Foreground
+    }
+}
 
 fn spawn_remote_invoke_worker_startup_task(
     shared_config_manager: Arc<ConfigManager>,
@@ -350,6 +370,7 @@ struct SystemProxyReconcileConfig {
     enabled_flag: Arc<AtomicBool>,
     stop_flag: Arc<AtomicBool>,
     daemon_mode: bool,
+    defer_startup_recovery_for_restart_handoff: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -390,6 +411,7 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         enabled_flag,
         stop_flag,
         daemon_mode,
+        defer_startup_recovery_for_restart_handoff,
     } = config;
 
     let _ = std::thread::Builder::new()
@@ -397,9 +419,10 @@ fn spawn_system_proxy_reconcile_task(config: SystemProxyReconcileConfig) {
         .spawn(move || {
             let started_at = Instant::now();
 
-            if !should_run_system_proxy_startup_recovery(
+            if !should_run_system_proxy_reconcile_startup_recovery(
                 &bifrost_dir,
                 desired_enabled.load(Ordering::Acquire),
+                defer_startup_recovery_for_restart_handoff,
             ) {
                 tracing::info!(
                     target: "bifrost_cli::startup",
@@ -1028,6 +1051,15 @@ fn should_run_system_proxy_startup_recovery(
     !should_defer_startup_proxy_recovery_for_restart_handoff(bifrost_dir, enable_system_proxy)
 }
 
+fn should_run_system_proxy_reconcile_startup_recovery(
+    bifrost_dir: &std::path::Path,
+    enable_system_proxy: bool,
+    defer_for_restart_handoff: bool,
+) -> bool {
+    !defer_for_restart_handoff
+        && should_run_system_proxy_startup_recovery(bifrost_dir, enable_system_proxy)
+}
+
 async fn wait_for_shutdown_signal() {
     #[cfg(unix)]
     {
@@ -1489,10 +1521,9 @@ pub fn run_start(
         }
     }
 
-    let mut restart_handoff_guard = if should_defer_startup_proxy_recovery_for_restart_handoff(
-        &bifrost_dir,
-        enable_system_proxy,
-    ) {
+    let defer_startup_recovery_for_restart_handoff =
+        should_defer_startup_proxy_recovery_for_restart_handoff(&bifrost_dir, enable_system_proxy);
+    let mut restart_handoff_guard = if defer_startup_recovery_for_restart_handoff {
         Some(RestartHandoffStartupGuard::new(bifrost_dir.clone()))
     } else {
         recover_proxy_state_before_start(&bifrost_dir);
@@ -1504,7 +1535,9 @@ pub fn run_start(
         stored_config.tls.disconnect_on_change
     };
 
-    if daemon {
+    let should_spawn_daemon_parent =
+        should_spawn_daemon_parent_process(daemon, is_detached_daemon_child_process());
+    if should_spawn_daemon_parent {
         #[cfg(unix)]
         {
             let daemon_result = run_daemon(
@@ -1513,6 +1546,7 @@ pub fn run_start(
                 all_values.clone(),
                 enable_system_proxy,
                 system_proxy_bypass.clone(),
+                defer_startup_recovery_for_restart_handoff,
                 cli_proxy,
                 cli_proxy_no_proxy.clone(),
                 config_manager,
@@ -1527,7 +1561,18 @@ pub fn run_start(
             }
             daemon_result?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let daemon_result =
+                run_daemon_via_exec(&proxy_config, &config_manager, &log_dir, log_retention_days);
+            if daemon_result.is_ok() {
+                if let Some(guard) = restart_handoff_guard.as_mut() {
+                    guard.disarm();
+                }
+            }
+            daemon_result?;
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             return Err(bifrost_core::BifrostError::Config(
                 "Daemon mode is not supported on this platform".to_string(),
@@ -1540,6 +1585,7 @@ pub fn run_start(
             all_values,
             enable_system_proxy,
             system_proxy_bypass,
+            defer_startup_recovery_for_restart_handoff,
             cli_proxy,
             cli_proxy_no_proxy,
             disconnect_on_config_change,
@@ -1560,6 +1606,10 @@ pub fn run_start(
     Ok(())
 }
 
+fn should_spawn_daemon_parent_process(daemon: bool, detached_daemon_child: bool) -> bool {
+    daemon && !detached_daemon_child
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_foreground(
     config: ProxyConfig,
@@ -1567,6 +1617,7 @@ pub fn run_foreground(
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
     system_proxy_bypass: String,
+    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     disconnect_on_config_change: bool,
@@ -1928,8 +1979,9 @@ pub fn run_foreground(
                     std::process::id(),
                 ),
             );
+            let detached_daemon_child = is_detached_daemon_child_process();
             let tray_launch_callback = build_tray_launch_callback(
-                no_tray,
+                should_suppress_startup_tray(no_tray, detached_daemon_child),
                 bifrost_dir.clone(),
                 pid,
                 &config,
@@ -2125,8 +2177,9 @@ pub fn run_foreground(
                 config.port,
                 config.socks5_port,
                 Some(config.host.clone()),
-                RuntimeStartMode::Foreground,
-            );
+                foreground_runtime_start_mode(),
+            )
+            .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone());
             write_runtime_info(&runtime_info)?;
             let _ = bifrost_core::consume_system_proxy_shutdown_mode(&bifrost_dir);
             #[cfg(target_os = "macos")]
@@ -2141,12 +2194,15 @@ pub fn run_foreground(
             // Launch tray helper if enabled
             tray_launch_callback();
 
-            let mobile_availability_tasks =
+            let mobile_availability_tasks = if detached_daemon_child {
+                Vec::new()
+            } else {
                 bifrost_admin::mobile_availability::spawn_terminal_panel(
                     admin_state_arc.clone(),
                     access_control.clone(),
                     push_manager.clone(),
-                );
+                )
+            };
 
             let system_proxy_host = if base_config.host == "0.0.0.0" {
                 "127.0.0.1".to_string()
@@ -2166,7 +2222,8 @@ pub fn run_foreground(
                 system_proxy_bypass: system_proxy_bypass.clone(),
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
-                daemon_mode: false,
+                daemon_mode: detached_daemon_child,
+                defer_startup_recovery_for_restart_handoff,
             });
 
             spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -2178,11 +2235,22 @@ pub fn run_foreground(
                 system_proxy_bypass: system_proxy_bypass.clone(),
                 enabled_flag: system_proxy_enabled.clone(),
                 stop_flag: system_proxy_reconcile_stop.clone(),
-                daemon_mode: false,
+                daemon_mode: detached_daemon_child,
+                defer_startup_recovery_for_restart_handoff,
             });
 
             let shutdown_signal = wait_for_shutdown_signal();
             tokio::pin!(shutdown_signal);
+            let shutdown_listener_context = if detached_daemon_child {
+                "daemon listener exit"
+            } else {
+                "foreground listener exit"
+            };
+            let shutdown_signal_context = if detached_daemon_child {
+                "daemon signal"
+            } else {
+                "foreground signal"
+            };
             loop {
                 tokio::select! {
                     listener_result = &mut listener_task => {
@@ -2192,7 +2260,7 @@ pub fn run_foreground(
                                 &system_proxy_manager,
                                 &system_proxy_enabled,
                                 &system_proxy_reconcile_stop,
-                                "foreground listener exit",
+                                shutdown_listener_context,
                             )
                             .await;
                         }
@@ -2207,7 +2275,7 @@ pub fn run_foreground(
                                 &system_proxy_manager,
                                 &system_proxy_enabled,
                                 &system_proxy_reconcile_stop,
-                                "foreground signal",
+                                shutdown_signal_context,
                             )
                             .await;
                         }
@@ -2269,8 +2337,9 @@ pub fn run_foreground(
                             actual_port,
                             base_config.socks5_port,
                             Some(base_config.host.clone()),
-                            RuntimeStartMode::Foreground,
-                        );
+                            foreground_runtime_start_mode(),
+                        )
+                        .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone());
                         if let Err(error) = write_runtime_info(&runtime_info) {
                             tracing::warn!("Failed to update runtime info after port rebind: {}", error);
                         }
@@ -2397,6 +2466,10 @@ fn build_tray_start_args(
     }
 
     args
+}
+
+fn should_suppress_startup_tray(no_tray: bool, _detached_daemon_child: bool) -> bool {
+    no_tray
 }
 
 fn build_tray_launch_callback(
@@ -2561,6 +2634,141 @@ fn raise_fd_limit() {
 #[cfg(not(unix))]
 fn raise_fd_limit() {}
 
+fn detached_daemon_readiness_host(host: &str) -> &str {
+    if matches!(host, "0.0.0.0" | "::" | "[::]") {
+        "127.0.0.1"
+    } else {
+        host
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn wait_for_detached_daemon_ready(
+    child: &mut std::process::Child,
+    host: &str,
+    port: u16,
+    timeout: Duration,
+) -> bifrost_core::Result<()> {
+    let connect_host = detached_daemon_readiness_host(host);
+    let addr = format!("{connect_host}:{port}");
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            println!("Daemon started with PID: {}", child.id());
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait().map_err(bifrost_core::BifrostError::Io)? {
+            return Err(bifrost_core::BifrostError::Network(format!(
+                "Daemon exited before the proxy listener became ready (PID: {}, status: {})",
+                child.id(),
+                status
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Err(bifrost_core::BifrostError::Network(format!(
+        "Daemon did not become ready within {}s (PID: {})",
+        timeout.as_secs(),
+        child.id()
+    )))
+}
+
+#[cfg(any(unix, windows))]
+fn run_daemon_via_exec(
+    config: &ProxyConfig,
+    config_manager: &ConfigManager,
+    log_dir: &Path,
+    log_retention_days: u32,
+) -> bifrost_core::Result<()> {
+    use std::process::{Command, Stdio};
+
+    use crate::process::get_pid_file;
+
+    let bifrost_dir = config_manager.data_dir().to_path_buf();
+    std::fs::create_dir_all(&bifrost_dir)?;
+    let err_retention_days = std::cmp::min(log_retention_days, 7);
+    if let Err(e) = bifrost_core::rotate_daemon_err_log(log_dir, err_retention_days) {
+        eprintln!("Warning: Failed to rotate daemon err log: {}", e);
+    }
+    std::fs::create_dir_all(log_dir)?;
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("bifrost.log"))
+        .map_err(|e| {
+            bifrost_core::BifrostError::Config(format!("Failed to open daemon log file: {e}"))
+        })?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("bifrost.err"))
+        .map_err(|e| {
+            bifrost_core::BifrostError::Config(format!("Failed to open daemon error log file: {e}"))
+        })?;
+
+    println!("Starting Bifrost proxy in daemon mode...");
+    if config.enable_socks {
+        println!(
+            "Unified proxy (HTTP/HTTPS/SOCKS5): {}:{}",
+            config.host, config.port
+        );
+    } else {
+        println!("HTTP proxy: {}:{}", config.host, config.port);
+    }
+    if let Some(socks5_port) = config.socks5_port {
+        println!("SOCKS5 (separate): {}:{}", config.host, socks5_port);
+    }
+    let admin_host = detached_daemon_readiness_host(&config.host);
+    println!("Admin UI: http://{}:{}/", admin_host, config.port);
+    println!("PID file: {}", get_pid_file()?.display());
+    println!("Log file: {}", log_dir.join("bifrost.log").display());
+
+    let exe = std::env::current_exe().map_err(bifrost_core::BifrostError::Io)?;
+    let mut command = Command::new(exe);
+    command
+        .args(std::env::args_os().skip(1))
+        .env(DETACHED_DAEMON_CHILD_ENV, "1")
+        .env("BIFROST_DATA_DIR", &bifrost_dir)
+        .current_dir(&bifrost_dir)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr));
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        // SAFETY: keep the replacement process detached like the legacy fork daemon
+        // path; the pre-exec closure only calls async-signal-safe libc::setsid.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS | CREATE_NO_WINDOW);
+    }
+
+    let mut child = command.spawn().map_err(bifrost_core::BifrostError::Io)?;
+    wait_for_detached_daemon_ready(
+        &mut child,
+        &config.host,
+        config.port,
+        Duration::from_secs(30),
+    )
+}
+
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub fn run_daemon(
@@ -2569,6 +2777,7 @@ pub fn run_daemon(
     cli_values: HashMap<String, String>,
     enable_system_proxy: bool,
     system_proxy_bypass: String,
+    defer_startup_recovery_for_restart_handoff: bool,
     enable_cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
     config_manager: ConfigManager,
@@ -2576,6 +2785,10 @@ pub fn run_daemon(
     log_retention_days: u32,
     log_level: &str,
 ) -> bifrost_core::Result<()> {
+    if cfg!(target_os = "macos") {
+        return run_daemon_via_exec(&config, &config_manager, &log_dir, log_retention_days);
+    }
+
     use nix::unistd::{chdir, dup2, fork, setsid, ForkResult};
     use std::os::unix::io::AsRawFd;
     use std::os::unix::net::UnixStream;
@@ -2780,7 +2993,8 @@ pub fn run_daemon(
                     config.socks5_port,
                     Some(config.host.clone()),
                     RuntimeStartMode::Daemon,
-                );
+                )
+                .with_system_proxy(enable_system_proxy, system_proxy_bypass.clone());
                 write_runtime_info(&runtime_info).expect("Failed to write runtime info");
                 #[cfg(target_os = "macos")]
                 spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);
@@ -3119,6 +3333,7 @@ pub fn run_daemon(
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
+                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     spawn_system_proxy_reconcile_task(SystemProxyReconcileConfig {
@@ -3131,6 +3346,7 @@ pub fn run_daemon(
                         enabled_flag: system_proxy_enabled.clone(),
                         stop_flag: system_proxy_reconcile_stop.clone(),
                         daemon_mode: true,
+                        defer_startup_recovery_for_restart_handoff,
                     });
 
                     let listener_config = server.config().clone();
@@ -3978,6 +4194,41 @@ mod tests {
     }
 
     #[test]
+    fn system_proxy_reconcile_uses_captured_restart_handoff_after_marker_consumed() {
+        let _guard = data_dir_test_lock();
+        let temp_dir = tempfile::tempdir().unwrap();
+        set_data_dir(temp_dir.path().to_path_buf());
+        bifrost_core::write_system_proxy_shutdown_mode(
+            temp_dir.path(),
+            bifrost_core::SystemProxyShutdownMode::PreserveForRestart,
+        )
+        .expect("write marker");
+        write_runtime_info(&RuntimeInfo::new(
+            12345,
+            18080,
+            None,
+            Some("127.0.0.1".to_string()),
+            RuntimeStartMode::Daemon,
+        ))
+        .expect("write runtime info");
+
+        let defer_for_restart_handoff =
+            should_defer_startup_proxy_recovery_for_restart_handoff(temp_dir.path(), true);
+        let _ = bifrost_core::consume_system_proxy_shutdown_mode(temp_dir.path());
+
+        assert!(defer_for_restart_handoff);
+        assert!(should_run_system_proxy_startup_recovery(
+            temp_dir.path(),
+            true,
+        ));
+        assert!(!should_run_system_proxy_reconcile_startup_recovery(
+            temp_dir.path(),
+            true,
+            defer_for_restart_handoff,
+        ));
+    }
+
+    #[test]
     fn system_proxy_reconcile_startup_recovery_runs_without_system_proxy_request() {
         let _guard = data_dir_test_lock();
         let temp_dir = tempfile::tempdir().unwrap();
@@ -4027,6 +4278,19 @@ mod tests {
                 "--yes",
             ]
         );
+    }
+
+    #[test]
+    fn daemon_child_does_not_suppress_startup_tray() {
+        assert!(!should_suppress_startup_tray(false, true));
+        assert!(should_suppress_startup_tray(true, true));
+    }
+
+    #[test]
+    fn detached_daemon_child_runs_runtime_instead_of_spawning_again() {
+        assert!(should_spawn_daemon_parent_process(true, false));
+        assert!(!should_spawn_daemon_parent_process(true, true));
+        assert!(!should_spawn_daemon_parent_process(false, false));
     }
 
     #[test]
@@ -4265,6 +4529,31 @@ mod tests {
         let users: Vec<String> = Vec::new();
         let accounts = parse_proxy_users(&users).expect("parse proxy users");
         assert!(accounts.is_empty());
+    }
+
+    #[test]
+    fn env_flag_enabled_accepts_true_values() {
+        assert!(env_flag_enabled(Some(std::ffi::OsString::from("1"))));
+        assert!(env_flag_enabled(Some(std::ffi::OsString::from("true"))));
+        assert!(env_flag_enabled(Some(std::ffi::OsString::from("TRUE"))));
+    }
+
+    #[test]
+    fn env_flag_enabled_rejects_absent_and_false_values() {
+        assert!(!env_flag_enabled(None));
+        assert!(!env_flag_enabled(Some(std::ffi::OsString::from("0"))));
+        assert!(!env_flag_enabled(Some(std::ffi::OsString::from("false"))));
+    }
+
+    #[test]
+    fn detached_daemon_readiness_host_maps_wildcard_listeners_to_loopback() {
+        assert_eq!(detached_daemon_readiness_host("0.0.0.0"), "127.0.0.1");
+        assert_eq!(detached_daemon_readiness_host("::"), "127.0.0.1");
+        assert_eq!(detached_daemon_readiness_host("[::]"), "127.0.0.1");
+        assert_eq!(
+            detached_daemon_readiness_host("192.168.1.20"),
+            "192.168.1.20"
+        );
     }
 
     #[test]

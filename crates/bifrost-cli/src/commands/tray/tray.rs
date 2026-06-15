@@ -85,7 +85,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
-    let initial_menu_data = load_menu_data_snapshot(&args, state, false);
+    let initial_menu_data = load_menu_data_snapshot(&args, state, false, false);
     let menu_items =
         build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str);
 
@@ -119,6 +119,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     }));
     let menu_data = Arc::new(Mutex::new(initial_menu_data));
     let menu_data_generation = Arc::new(AtomicU64::new(0));
+    let system_proxy_refresh_in_flight = Arc::new(AtomicBool::new(false));
 
     let poll_quit = should_quit.clone();
     let poll_state = current_state.clone();
@@ -151,6 +152,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
     let mut last_tray_interaction_at: Option<Instant> = None;
+    let system_proxy_refresh_state = current_state.clone();
+    let system_proxy_refresh_data = menu_data.clone();
+    let system_proxy_refresh_generation = menu_data_generation.clone();
+    let system_proxy_refresh_args = args.clone();
+    let system_proxy_refresh_in_flight_for_event = system_proxy_refresh_in_flight.clone();
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
@@ -166,6 +172,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             while let Ok(event) = tray_receiver.try_recv() {
                 if tray_event_may_open_menu(&event) {
                     last_tray_interaction_at = Some(Instant::now());
+                    request_system_proxy_menu_refresh(
+                        &system_proxy_refresh_args,
+                        &system_proxy_refresh_state,
+                        &system_proxy_refresh_data,
+                        &system_proxy_refresh_generation,
+                        &system_proxy_refresh_in_flight_for_event,
+                    );
                 }
             }
 
@@ -180,6 +193,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                         &current_operation,
                         &menu_data,
                         &menu_data_generation,
+                        &system_proxy_refresh_in_flight,
                     );
                     action_triggered = true;
                 }
@@ -594,6 +608,7 @@ fn load_menu_data_snapshot(
     args: &TrayArgs,
     state: ServiceState,
     include_remote: bool,
+    include_system_proxy: bool,
 ) -> MenuDataSnapshot {
     let runtime = runtime_for_menu(args);
     let custom_config = load_custom_config_safe(&args.data_dir);
@@ -602,7 +617,11 @@ fn load_menu_data_snapshot(
     let (rules, system_proxy) = if include_remote {
         (
             load_rules_for_menu(runtime.as_ref(), state),
-            load_system_proxy_for_menu(runtime.as_ref(), state),
+            if include_system_proxy {
+                load_system_proxy_for_menu(runtime.as_ref(), state)
+            } else {
+                None
+            },
         )
     } else {
         (Vec::new(), None)
@@ -1290,6 +1309,7 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn execute_action(
     action: &MenuItemAction,
     args: &TrayArgs,
@@ -1298,10 +1318,11 @@ fn execute_action(
     operation: &Arc<AtomicU8>,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     menu_data_generation: &Arc<AtomicU64>,
+    system_proxy_refresh_in_flight: &Arc<AtomicBool>,
 ) {
     match action {
         MenuItemAction::OpenUrl(url) => {
-            if let Err(e) = open::that(url) {
+            if let Err(e) = open_tray_target(url) {
                 tracing::error!(url = %url, error = %e, "failed to open URL");
             }
         }
@@ -1338,8 +1359,13 @@ fn execute_action(
         MenuItemAction::SetSystemProxy { url, enabled } => {
             let url = url.clone();
             let enabled = *enabled;
+            let args = args.clone();
             let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
+            let system_proxy_refresh_in_flight = system_proxy_refresh_in_flight.clone();
             spawn_tray_task("bifrost-tray-system-proxy", move || {
+                system_proxy_refresh_in_flight.store(true, Ordering::Relaxed);
                 let agent = http_agent();
                 let body = format!(r#"{{"enabled":{enabled}}}"#);
                 match agent
@@ -1359,6 +1385,14 @@ fn execute_action(
                         tracing::error!(enabled = enabled, url = %url, error = %error, "system proxy toggle failed");
                     }
                 }
+                refresh_menu_data_snapshot(
+                    &args,
+                    ServiceState::Running,
+                    &menu_data,
+                    &menu_data_generation,
+                    true,
+                );
+                system_proxy_refresh_in_flight.store(false, Ordering::Relaxed);
                 reload_flag.store(true, Ordering::Relaxed);
             });
         }
@@ -1423,7 +1457,7 @@ fn execute_action(
             });
         }
         MenuItemAction::OpenDirectory(path) => {
-            if let Err(e) = open::that(path) {
+            if let Err(e) = open_tray_target(path) {
                 tracing::error!(path = %path, error = %e, "failed to open directory");
             }
         }
@@ -1456,6 +1490,7 @@ fn execute_action(
                         ServiceState::Running,
                         &menu_data,
                         &menu_data_generation,
+                        false,
                     );
                     reload_flag.store(true, Ordering::Relaxed);
                 }
@@ -1546,15 +1581,7 @@ fn spawn_start(
     let mut cmd = Command::new(bin);
     cmd.env("BIFROST_DATA_DIR", data_dir)
         .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
-        .arg("start")
-        .arg("--no-tray")
-        .arg("--no-system-proxy");
-    if let Some(p) = port {
-        cmd.arg("-p").arg(p.to_string());
-    }
-    for a in extra_args {
-        cmd.arg(a);
-    }
+        .args(build_service_start_args(port, extra_args));
     configure_service_command(&mut cmd);
     match cmd.spawn() {
         Ok(child) => {
@@ -1568,6 +1595,54 @@ fn spawn_start(
     }
 }
 
+fn build_service_start_args(port: Option<u16>, extra_args: &[String]) -> Vec<String> {
+    let mut args = vec![
+        "start".to_string(),
+        "--daemon".to_string(),
+        "--no-tray".to_string(),
+        "--no-system-proxy".to_string(),
+    ];
+    if let Some(p) = port {
+        args.push("-p".to_string());
+        args.push(p.to_string());
+    }
+    args.extend(extra_args.iter().cloned());
+    args
+}
+
+#[cfg(target_os = "windows")]
+fn open_tray_target(target: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let target = wide(target);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result <= 32 {
+        return Err(format!("ShellExecuteW failed with code {result}"));
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn open_tray_target(target: &str) -> Result<(), String> {
+    open::that(target).map_err(|error| error.to_string())
+}
+
 fn monitor_start_child(
     mut child: Child,
     runtime_file: PathBuf,
@@ -1577,25 +1652,35 @@ fn monitor_start_child(
 ) {
     let start = std::time::Instant::now();
     let mut ready = false;
+    let mut child_exited = false;
     while start.elapsed() < START_READY_TIMEOUT {
         if runtime_file_points_to_running_service(&runtime_file) {
             ready = true;
             break;
         }
 
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                tracing::error!(status = %status, "bifrost start exited before service became ready");
-                operation.store(failure_operation, Ordering::Relaxed);
-                reload_flag.store(true, Ordering::Relaxed);
-                return;
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(error = %error, "failed to poll bifrost start child");
-                operation.store(failure_operation, Ordering::Relaxed);
-                reload_flag.store(true, Ordering::Relaxed);
-                return;
+        if !child_exited {
+            match child.try_wait() {
+                Ok(Some(status)) if status.success() => {
+                    child_exited = true;
+                    tracing::info!(
+                        status = %status,
+                        "bifrost start command exited successfully; waiting for service readiness"
+                    );
+                }
+                Ok(Some(status)) => {
+                    tracing::error!(status = %status, "bifrost start exited before service became ready");
+                    operation.store(failure_operation, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "failed to poll bifrost start child");
+                    operation.store(failure_operation, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                    return;
+                }
             }
         }
         thread::sleep(Duration::from_millis(100));
@@ -1610,8 +1695,10 @@ fn monitor_start_child(
         reload_flag.store(true, Ordering::Relaxed);
     }
 
-    if let Err(error) = child.wait() {
-        tracing::warn!(error = %error, "failed to reap bifrost start child");
+    if !child_exited {
+        if let Err(error) = child.wait() {
+            tracing::warn!(error = %error, "failed to reap bifrost start child");
+        }
     }
     reload_flag.store(true, Ordering::Relaxed);
 }
@@ -1624,7 +1711,9 @@ fn runtime_file_points_to_running_service(runtime_file: &Path) -> bool {
 
 fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
     let mut cmd = Command::new(bin);
-    cmd.env("BIFROST_DATA_DIR", data_dir).arg("stop");
+    cmd.env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_TRAY_INVOKED_STOP", "1")
+        .arg("stop");
     configure_service_command(&mut cmd);
 
     match cmd.spawn() {
@@ -1796,10 +1885,34 @@ fn poll_menu_data(
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
-        refresh_menu_data_snapshot(args, svc_state, menu_data, generation);
+        refresh_menu_data_snapshot(args, svc_state, menu_data, generation, false);
 
         sleep_until_next_menu_data_poll(quit_flag);
     }
+}
+
+fn request_system_proxy_menu_refresh(
+    args: &TrayArgs,
+    state: &AtomicU8,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &Arc<AtomicU64>,
+    refresh_in_flight: &Arc<AtomicBool>,
+) {
+    if state.load(Ordering::Relaxed) != STATE_RUNNING {
+        return;
+    }
+    if refresh_in_flight.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    let args = args.clone();
+    let menu_data = menu_data.clone();
+    let refresh_in_flight = refresh_in_flight.clone();
+    let generation = generation.clone();
+    spawn_tray_task("bifrost-tray-system-proxy-refresh", move || {
+        refresh_menu_data_snapshot(&args, ServiceState::Running, &menu_data, &generation, true);
+        refresh_in_flight.store(false, Ordering::Relaxed);
+    });
 }
 
 fn refresh_menu_data_snapshot(
@@ -1807,10 +1920,14 @@ fn refresh_menu_data_snapshot(
     state: ServiceState,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     generation: &AtomicU64,
+    include_system_proxy: bool,
 ) -> bool {
-    let next = load_menu_data_snapshot(args, state, true);
+    let mut next = load_menu_data_snapshot(args, state, true, include_system_proxy);
     let changed = match menu_data.lock() {
         Ok(mut current) => {
+            if !include_system_proxy {
+                next.system_proxy = current.system_proxy.clone();
+            }
             if *current != next {
                 *current = next;
                 true

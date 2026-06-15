@@ -565,6 +565,10 @@ SKIP_IN_CI_TESTS=(
   # System proxy tests mutate host network settings and are too flaky in
   # ephemeral CI runners. Keep them as local-only full-shell coverage.
   "test_system_proxy_e2e.sh"
+  # This regression constructs a real local upgrade from a historical installed
+  # binary. CI runners do not carry the previous release binary, so keep it as
+  # explicit local coverage.
+  "test_upgrade_local_restart_e2e.sh"
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"

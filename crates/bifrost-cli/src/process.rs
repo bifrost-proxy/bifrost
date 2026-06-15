@@ -36,6 +36,10 @@ pub struct RuntimeInfo {
     pub restartable_runtime: bool,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub binary_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub system_proxy_enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub system_proxy_bypass: Option<String>,
 }
 
 impl RuntimeInfo {
@@ -55,11 +59,19 @@ impl RuntimeInfo {
             start_mode,
             restartable_runtime: start_mode.is_restartable(),
             binary_path: std::env::current_exe().ok(),
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         }
     }
 
     pub fn restartable_daemon(&self) -> bool {
         self.restartable_runtime && self.start_mode.is_restartable()
+    }
+
+    pub fn with_system_proxy(mut self, enabled: bool, bypass: impl Into<String>) -> Self {
+        self.system_proxy_enabled = Some(enabled);
+        self.system_proxy_bypass = Some(bypass.into());
+        self
     }
 }
 

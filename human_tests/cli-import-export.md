@@ -488,6 +488,57 @@
 
 ---
 
+### TC-CIE-28：升级校验子进程超时不阻塞 upgrade
+
+**操作步骤**：
+1. 执行聚焦单元测试，验证 upgrade 用临时文件原子替换最终二进制：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_install_binary_atomically_replaces_existing_target
+   ```
+2. 执行聚焦单元测试，验证 upgrade 校验失败时能从 backup 恢复旧二进制：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_restore_binary_backup_restores_previous_target
+   ```
+3. 执行聚焦单元测试，验证 upgrade restart 会等待 runtime.json 中的 HTTP 端口和 separate SOCKS5 端口：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_restart_ports_from_runtime_uses_runtime_ports
+   ```
+4. 执行聚焦单元测试，模拟子进程长时间不退出：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_status_with_timeout_does_not_block_on_hung_child
+   ```
+5. 执行聚焦单元测试，确认子进程正常退出和失败退出仍被正确区分：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_command_status_with_timeout_reports_success_and_failure
+   ```
+6. 验证升级重启 E2E 的源码门禁包含多端口释放等待、restart executable 固定和系统代理恢复：
+   ```bash
+   bash e2e-tests/tests/test_upgrade_restart_e2e.sh
+   ```
+7. 验证安装脚本使用临时文件原子替换目标二进制：
+   ```bash
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 bash -c 'source ./install-binary.sh; d="$(mktemp -d)"; printf old > "$d/bifrost"; printf new > "$d/source"; install_binary_atomically "$d/source" "$d/bifrost"; test "$(cat "$d/bifrost")" = new; test ! -e "$d/bifrost.tmp.$$"'
+   ```
+8. 验证安装脚本 post-install 子步骤具备超时 watchdog：
+   ```bash
+   bash -n install-binary.sh
+   BIFROST_INSTALL_BINARY_SKIP_MAIN=1 bash -c 'source ./install-binary.sh; set +e; BIFROST_INSTALL_POST_INSTALL_TIMEOUT=1 run_bifrost_post_install_command sh -c "sleep 5"; rc="$?"; test "$rc" -eq 124'
+   ```
+
+**预期结果**：
+- 第 1 条命令输出 `test result: ok`，确认 upgrade 不再直接复制到最终可执行路径，旧二进制 backup 保留到最终校验阶段
+- 第 2 条命令输出 `test result: ok`，确认新二进制校验失败或 fallback 失败时旧二进制可恢复
+- 第 3 条命令输出 `test result: ok`，确认 upgrade restart 不只等待 HTTP 端口，也等待 separate SOCKS5 端口
+- 第 4 条命令在 1 秒内完成，输出 `test result: ok`，不会等待 `sleep 5` 完整结束
+- 第 5 条命令输出 `test result: ok`，成功退出映射为 success，非 0 退出映射为 failure
+- 第 6 条命令通过 19 个断言，确认 upgrade restart 使用多端口释放门禁、端口占用诊断和系统代理恢复；源码门禁覆盖替换后不再用 `current_exe()` 推断新二进制路径
+- 第 7 条命令完成后目标文件内容为 `new`，临时文件不存在
+- 第 8 条命令返回 124，并输出 post-install command timed out 相关 warning
+- 任一子步骤卡住时，`bifrost upgrade` 或一键安装脚本都不会无限等待该子进程
+- Windows 上如果手动安装目标就是当前运行的 `bifrost.exe`，`bifrost upgrade` 应提前给出明确错误，避免在文件锁定的 `remove_file` 阶段失败
+
+---
+
 ## 清理
 
 测试完成后清理临时数据和测试文件：

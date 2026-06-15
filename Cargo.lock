@@ -551,6 +551,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "windows-sys 0.59.0",
+ "winreg 0.50.0",
 ]
 
 [[package]]
@@ -725,6 +726,7 @@ dependencies = [
  "tracing",
  "url",
  "urlencoding",
+ "windows-sys 0.59.0",
  "wiremock",
 ]
 

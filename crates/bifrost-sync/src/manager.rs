@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1311,6 +1312,7 @@ fn merge_remote_into_local_rule(
     rule
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn open_url_in_browser(url: &str) -> Result<()> {
     if let Ok(path) = std::env::var(LOGIN_BROWSER_DRY_RUN_FILE_ENV) {
         let path = path.trim();
@@ -1338,16 +1340,51 @@ fn open_url_in_browser(url: &str) -> Result<()> {
         command
     };
 
-    #[cfg(target_os = "windows")]
-    let mut command = {
-        let mut command = Command::new("cmd");
-        command.args(["/C", "start", "", url]);
-        command
-    };
-
     command
         .spawn()
         .map_err(|error| BifrostError::Network(format!("failed to open login browser: {error}")))?;
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url_in_browser(url: &str) -> Result<()> {
+    if let Ok(path) = std::env::var(LOGIN_BROWSER_DRY_RUN_FILE_ENV) {
+        let path = path.trim();
+        if !path.is_empty() {
+            let mut file = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            writeln!(file, "{url}")?;
+            return Ok(());
+        }
+    }
+
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    fn wide(value: &str) -> Vec<u16> {
+        value.encode_utf16().chain(std::iter::once(0)).collect()
+    }
+
+    let operation = wide("open");
+    let url = wide(url);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            url.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+
+    if result <= 32 {
+        return Err(BifrostError::Network(format!(
+            "failed to open login browser: ShellExecuteW failed with code {result}"
+        )));
+    }
     Ok(())
 }
 

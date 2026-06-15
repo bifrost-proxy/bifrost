@@ -1,6 +1,7 @@
 use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use fs2::FileExt;
 
@@ -218,6 +219,118 @@ fn read_tray_pid(data_dir: &Path) -> Option<u32> {
     std::fs::read_to_string(pid_path)
         .ok()
         .and_then(|pid| pid.trim().parse::<u32>().ok())
+}
+
+pub fn stop_tray_helper(data_dir: &Path) {
+    let Some(mut pid) = existing_tray_helper_pid(data_dir) else {
+        let _ = fs::remove_file(data_dir.join("tray.pid"));
+        return;
+    };
+
+    if pid == 0 {
+        let started = Instant::now();
+        while pid == 0 && started.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(50));
+            pid = read_tray_pid(data_dir).unwrap_or(0);
+        }
+        if pid == 0 {
+            tracing::warn!(
+                data_dir = %data_dir.display(),
+                "tray helper lock is held but tray.pid is missing; cannot stop helper by pid"
+            );
+            return;
+        }
+    }
+
+    terminate_tray_helper_pid(pid);
+    if !wait_for_tray_helper_exit(pid, Duration::from_secs(3)) {
+        force_kill_tray_helper_pid(pid);
+    }
+    if wait_for_tray_helper_exit(pid, Duration::from_secs(2)) {
+        let _ = fs::remove_file(data_dir.join("tray.pid"));
+    }
+}
+
+#[cfg(unix)]
+fn terminate_tray_helper_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGTERM);
+    }
+}
+
+#[cfg(windows)]
+fn terminate_tray_helper_pid(pid: u32) {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, TerminateProcess, PROCESS_TERMINATE};
+
+    let handle = unsafe { OpenProcess(PROCESS_TERMINATE, 0, pid) };
+    if handle.is_null() {
+        return;
+    }
+    unsafe {
+        TerminateProcess(handle, 1);
+        CloseHandle(handle);
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn terminate_tray_helper_pid(_pid: u32) {}
+
+#[cfg(unix)]
+fn force_kill_tray_helper_pid(pid: u32) {
+    unsafe {
+        libc::kill(pid as i32, libc::SIGKILL);
+    }
+}
+
+#[cfg(windows)]
+fn force_kill_tray_helper_pid(pid: u32) {
+    terminate_tray_helper_pid(pid);
+}
+
+#[cfg(not(any(unix, windows)))]
+fn force_kill_tray_helper_pid(_pid: u32) {}
+
+fn wait_for_tray_helper_exit(pid: u32, timeout: Duration) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < timeout {
+        if !is_tray_helper_pid_running(pid) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    false
+}
+
+#[cfg(unix)]
+fn is_tray_helper_pid_running(pid: u32) -> bool {
+    unsafe { libc::kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(windows)]
+fn is_tray_helper_pid_running(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
+    use windows_sys::Win32::System::Threading::{
+        GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    };
+
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    if handle.is_null() {
+        return false;
+    }
+
+    let mut exit_code = 0_u32;
+    let ok = unsafe { GetExitCodeProcess(handle, &mut exit_code) };
+    unsafe {
+        CloseHandle(handle);
+    }
+
+    ok != 0 && exit_code == STILL_ACTIVE as u32
+}
+
+#[cfg(not(any(unix, windows)))]
+fn is_tray_helper_pid_running(_pid: u32) -> bool {
+    false
 }
 
 #[cfg(test)]

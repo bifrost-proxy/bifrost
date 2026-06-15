@@ -587,6 +587,8 @@ bifrost upgrade -y
 bifrost upgrade -y --restart
 ```
 
+`upgrade --restart` 会在升级后停止并重新拉起当前运行中的代理。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身；如果传入 `--restart`，替换完成后会用新的 exe 启动 daemon。
+
 ### 同步（sync）
 
 ```bash

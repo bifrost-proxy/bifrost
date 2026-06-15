@@ -1174,6 +1174,8 @@ mod tests {
             start_mode: RuntimeStartMode::Foreground,
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert!(!runtime_identity_is_current(&runtime));
@@ -1190,6 +1192,8 @@ mod tests {
             start_mode: RuntimeStartMode::Foreground,
             restartable_runtime: false,
             binary_path: Some(PathBuf::from("/tmp/bifrost")),
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert!(!should_try_managed_runtime_restart(&runtime));
@@ -1206,6 +1210,8 @@ mod tests {
             start_mode: RuntimeStartMode::Daemon,
             restartable_runtime: true,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert!(!should_try_managed_runtime_restart(&runtime));
@@ -1222,6 +1228,8 @@ mod tests {
             start_mode: RuntimeStartMode::Daemon,
             restartable_runtime: true,
             binary_path: Some(PathBuf::from("/tmp/bifrost")),
+            system_proxy_enabled: Some(true),
+            system_proxy_bypass: Some("localhost,127.0.0.1,*.local".to_string()),
         };
         let snapshot = RuntimeSystemProxySnapshot {
             bypass: "localhost,127.0.0.1,*.local".to_string(),
@@ -1257,6 +1265,8 @@ mod tests {
             start_mode: RuntimeStartMode::Foreground,
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert_eq!(
@@ -1323,6 +1333,8 @@ mod tests {
             start_mode: RuntimeStartMode::Foreground,
             restartable_runtime: false,
             binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
         };
 
         assert_eq!(

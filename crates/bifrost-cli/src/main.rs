@@ -140,6 +140,10 @@ fn effective_log_outputs(cli: &Cli) -> Vec<LogOutput> {
 
 #[cfg(windows)]
 fn main() {
+    // The native tray event loop must stay on the Windows process main thread.
+    // Normal CLI commands still run on a larger stack worker thread below.
+    commands::tray::run_if_tray_process();
+
     let handle = std::thread::Builder::new()
         .name("bifrost-cli-main".to_string())
         .stack_size(WINDOWS_CLI_MAIN_STACK_SIZE)
@@ -167,7 +171,9 @@ fn run_cli_main() {
 
     let cli = Cli::parse();
 
-    let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }));
+    let is_detached_daemon_child = commands::is_detached_daemon_child_process();
+    let is_daemon_mode = matches!(&cli.command, Some(Commands::Start { daemon: true, .. }))
+        && !is_detached_daemon_child;
 
     let _log_guard = if is_daemon_mode {
         None
@@ -253,12 +259,13 @@ fn run_cli_main() {
             let no_tray_flag = no_tray;
             #[cfg(target_os = "linux")]
             let no_tray_flag = true;
+            let daemon_flag = daemon && !is_detached_daemon_child;
             run_start(
                 effective_port,
                 effective_host,
                 effective_socks5_port,
                 &cli.log_level,
-                daemon,
+                daemon_flag,
                 cli.log_dir
                     .clone()
                     .unwrap_or_else(|| data_dir().join("logs")),

@@ -125,6 +125,29 @@ assert_contains "$help_output" "--no-post-install" \
     "help documents --no-post-install"
 assert_contains "$help_output" "BIFROST_INSTALL_AUTO_START" \
     "help documents post-install environment variables"
+assert_contains "$help_output" "BIFROST_INSTALL_POST_INSTALL_TIMEOUT" \
+    "help documents post-install command timeout"
+
+atomic_dir="$(mktemp -d)"
+printf old >"${atomic_dir}/bifrost"
+printf new >"${atomic_dir}/source"
+install_binary_atomically "${atomic_dir}/source" "${atomic_dir}/bifrost"
+if [[ "$(cat "${atomic_dir}/bifrost")" != "new" ]]; then
+    fail "installer atomically replaces target binary" "target did not contain replacement content"
+fi
+if compgen -G "${atomic_dir}/bifrost.tmp.*" >/dev/null; then
+    fail "installer cleans temporary binary" "temporary bifrost.tmp.* file remained"
+fi
+pass "installer atomically replaces target binary without temp residue"
+
+set +e
+BIFROST_INSTALL_POST_INSTALL_TIMEOUT=1 run_bifrost_post_install_command sh -c "sleep 5"
+timeout_rc=$?
+set -e
+if [[ "$timeout_rc" -ne 124 ]]; then
+    fail "post-install command timeout returns 124" "got exit code ${timeout_rc}"
+fi
+pass "post-install command timeout returns 124"
 
 echo ""
 echo "Passed: $PASSED"

@@ -70,7 +70,13 @@ libc = "0.2"
 bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["full-local-asr"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Foundation", "Win32_System_Threading"] }
+windows-sys = { version = "0.59", features = [
+    "Win32_System_Console",
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 # --- System tray helper (in-process via `bifrost __tray`) ---
 [target.'cfg(not(target_os = "linux"))'.dependencies]

@@ -23,7 +23,7 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/assert.sh"
 source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 
 PROXY_PORT="${PROXY_PORT:-18891}"
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -98,13 +98,30 @@ start_daemon() {
     return 1
 }
 
+assert_no_tray_helper_for_test_data_dir() {
+    if is_windows; then
+        return 0
+    fi
+
+    local matches
+    matches="$(ps -axo command 2>/dev/null | grep -F 'bifrost __tray' | grep -F -- "$TEST_DATA_DIR" || true)"
+    if [[ -n "$matches" ]]; then
+        _log_fail "daemon stop cleaned tray helper" "no __tray helper for $TEST_DATA_DIR" "$matches"
+        return 1
+    fi
+
+    _log_pass "daemon stop leaves no tray helper for test data dir"
+}
+
 stop_daemon() {
     BIFROST_DATA_DIR="${TEST_DATA_DIR}" "$BIFROST_BIN" stop >/dev/null 2>&1 || true
     sleep 1
     safe_cleanup_proxy "$PROXY_PID"
     PROXY_PID=""
     sleep 1
+    assert_no_tray_helper_for_test_data_dir
 }
+
 
 test_upgrade_no_daemon_no_error() {
     _log_info "case: upgrade without running daemon -> no error"
@@ -262,14 +279,19 @@ test_upgrade_restart_port_release_guard_in_source() {
 
     local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
 
-    if grep -q "wait_for_restart_port_release(restart_port)" "$source_file" \
+    if grep -q "wait_for_restart_ports_release(&restart_ports)" "$source_file" \
+        && grep -q "fn restart_ports_from_runtime" "$source_file" \
+        && grep -q "info.socks5_port" "$source_file" \
+        && grep -q "restart_executable_for_install_method(&install_method)" "$source_file" \
+        && grep -q "maybe_restart_running_proxy(restart, &restart_executable)" "$source_file" \
+        && grep -q "Command::new(restart_executable)" "$source_file" \
         && grep -q "Proxy port .*still occupied after" "$source_file" \
         && grep -q "find_process_on_port(port)" "$source_file" \
         && grep -q "recover_from_crash(&data_dir)" "$source_file"; then
-        _log_pass "upgrade restart has port-release guard, listener diagnostics, and system proxy recovery"
+        _log_pass "upgrade restart has multi-port release guard, fixed restart executable, listener diagnostics, and system proxy recovery"
     else
         _log_fail "upgrade restart port guard" \
-            "wait_for_restart_port_release plus occupied-port diagnostics and system proxy recovery" \
+            "wait_for_restart_ports_release plus occupied-port diagnostics, socks5 coverage, fixed restart executable, and system proxy recovery" \
             "guard missing from upgrade.rs"
         return 1
     fi
@@ -302,12 +324,90 @@ test_upgrade_restart_port_guard_covers_windows() {
     fi
 }
 
+test_macos_daemon_start_uses_exec_child_guard() {
+    _log_info "case: macOS and Windows daemon start use exec child guards"
+
+    local start_src="${PROJECT_DIR}/crates/bifrost-cli/src/commands/start.rs"
+    local main_src="${PROJECT_DIR}/crates/bifrost-cli/src/main.rs"
+    local daemon_exec_cfg_ok=0
+    if awk '
+        prev == "#[cfg(any(unix, windows))]" && $0 ~ /^fn run_daemon_via_exec/ { found = 1 }
+        { prev = $0 }
+        END { exit found ? 0 : 1 }
+    ' "$start_src"; then
+        daemon_exec_cfg_ok=1
+    fi
+
+    if grep -Fq 'run_daemon_via_exec' "$start_src" \
+        && grep -Fq 'BIFROST_DETACHED_DAEMON_CHILD' "$start_src" \
+        && grep -Fq 'foreground_runtime_start_mode()' "$start_src" \
+        && [ "$daemon_exec_cfg_ok" = "1" ] \
+        && grep -Fq 'detached_daemon_readiness_host' "$start_src" \
+        && grep -Fq 'current_dir(&bifrost_dir)' "$start_src" \
+        && grep -Fq 'libc::setsid()' "$start_src" \
+        && grep -Fq 'std::os::windows::process::CommandExt' "$start_src" \
+        && grep -Fq 'DETACHED_PROCESS' "$start_src" \
+        && grep -Fq '#[cfg(windows)]' "$start_src" \
+        && grep -Fq 'run_daemon_via_exec(&proxy_config, &config_manager, &log_dir, log_retention_days)' "$start_src" \
+        && grep -Fq 'is_detached_daemon_child_process' "$main_src" \
+        && grep -Fq 'daemon && !is_detached_daemon_child' "$main_src"; then
+        _log_pass "macOS and Windows daemon start exec a fresh detached child before runtime init"
+    else
+        _log_fail "daemon exec child guard" \
+            "run_daemon_via_exec + unix/windows cfg + detached child env + main daemon bypass + setsid/current_dir + Windows detached process" \
+            "cross-platform detached daemon guard missing"
+        return 1
+    fi
+}
+
+test_upgrade_installs_binary_atomically_in_source() {
+    _log_info "case: upgrade installs binary through atomic replacement helper"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "fn install_binary_atomically" "$source_file" \
+        && grep -q "install_binary_atomically(&new_binary, target_path)" "$source_file" \
+        && grep -q "fs::rename(&temp_target, target_path)" "$source_file" \
+        && ! grep -q "fs::copy(&new_binary, target_path)" "$source_file"; then
+        _log_pass "upgrade uses temp file plus rename instead of copying directly to final binary path"
+    else
+        _log_fail "upgrade atomic binary replacement" \
+            "install_binary_atomically with temp rename and no fs::copy(&new_binary, target_path)" \
+            "upgrade can still expose a partially copied executable"
+        return 1
+    fi
+}
+
+test_windows_upgrade_defers_self_replacement_in_source() {
+    _log_info "case: Windows upgrade defers self replacement until current exe exits"
+
+    local source_file="${PROJECT_DIR}/crates/bifrost-cli/src/commands/upgrade.rs"
+
+    if grep -q "DeferredWindows" "$source_file" \
+        && grep -q "unique_pending_binary_path" "$source_file" \
+        && grep -q "schedule_windows_deferred_install" "$source_file" \
+        && grep -q "Wait-Process -Timeout 120" "$source_file" \
+        && grep -Fq 'Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force' "$source_file" \
+        && grep -Fq 'Start-Process -FilePath $TargetPath -ArgumentList $restartArgs' "$source_file" \
+        && grep -q "Proxy restart scheduled with the new version" "$source_file"; then
+        _log_pass "Windows upgrade stages self replacement and restarts after the upgrade process exits"
+    else
+        _log_fail "Windows deferred self replacement" \
+            "DeferredWindows + pending exe + PowerShell wait/replace/start helper" \
+            "Windows upgrade can still try to overwrite the running exe directly"
+        return 1
+    fi
+}
+
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
     test_upgrade_restart_flag_in_help || true
     test_upgrade_restart_port_release_guard_in_source || true
     test_upgrade_restart_port_guard_covers_windows || true
+    test_macos_daemon_start_uses_exec_child_guard || true
+    test_upgrade_installs_binary_atomically_in_source || true
+    test_windows_upgrade_defers_self_replacement_in_source || true
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true
