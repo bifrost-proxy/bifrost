@@ -2336,3 +2336,241 @@ mod coverage_boost {
         }
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::test_support::TestAdminState;
+    use bytes::Bytes;
+    use http_body_util::BodyExt;
+    use hyper::{body::Incoming, Method, Request, StatusCode};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use serde_json::json;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use tokio::net::TcpListener;
+
+    async fn spawn_config_api_server(
+        state: SharedAdminState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind config api listener");
+        let addr: SocketAddr = listener.local_addr().expect("config api local addr");
+        let base = format!("http://{}", addr);
+        let state_clone = state.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else { break };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_config(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    fn put_json(url: &str, body: serde_json::Value) -> ureq::Response {
+        ureq::AgentBuilder::new()
+            .build()
+            .put(url)
+            .set("content-type", "application/json")
+            .send_string(&body.to_string())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn update_performance_config_round_trips_via_http() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state.clone()).await;
+        let url = format!("{}/api/config/performance", base);
+
+        let body = json!({
+            "max_records": MIN_TRAFFIC_MAX_RECORDS + 1,
+            "file_retention_days": 1,
+            "breakpoint_timeout_ms": DEFAULT_BREAKPOINT_TIMEOUT_MS,
+        });
+
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), 200);
+        let resp_body = resp.into_string().unwrap();
+        let cfg: PerformanceConfigResponse = serde_json::from_str(&resp_body).unwrap();
+        assert_eq!(cfg.traffic.max_records, MIN_TRAFFIC_MAX_RECORDS + 1);
+
+        let stored = harness.config_manager.config().await;
+        assert_eq!(stored.traffic.max_records, cfg.traffic.max_records);
+    }
+
+    #[tokio::test]
+    async fn update_performance_config_rejects_retention_days_over_limit() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/performance", base);
+
+        let body = json!({ "file_retention_days": 8 });
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("cannot exceed 7 days"));
+    }
+
+    #[tokio::test]
+    async fn update_performance_config_rejects_max_records_out_of_range() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/performance", base);
+
+        let body = json!({ "max_records": MAX_TRAFFIC_MAX_RECORDS + 1 });
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("max_records must be between"));
+    }
+
+    #[tokio::test]
+    async fn update_tls_config_updates_runtime_and_persists() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state.clone()).await;
+        let url = format!("{}/api/config/tls", base);
+
+        let body = json!({
+            "enable_tls_interception": true,
+            "intercept_exclude": ["example.com"],
+            "intercept_include": [],
+            "app_intercept_exclude": [],
+            "app_intercept_include": [],
+            "ip_intercept_exclude": [],
+            "ip_intercept_include": [],
+            "unsafe_ssl": true,
+            "disconnect_on_config_change": true,
+        });
+
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), 200);
+        let resp_body = resp.into_string().unwrap();
+        let tls: TlsConfig = serde_json::from_str(&resp_body).unwrap();
+        assert!(tls.enable_tls_interception);
+        assert!(tls.unsafe_ssl);
+
+        let runtime = state.runtime_config.read().await.clone();
+        assert!(runtime.enable_tls_interception);
+        assert!(runtime.unsafe_ssl);
+
+        let stored = harness.config_manager.config().await;
+        assert!(stored.tls.enable_interception);
+        assert!(stored.tls.unsafe_ssl);
+    }
+
+    #[tokio::test]
+    async fn update_tls_config_rejects_invalid_json() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/tls", base);
+
+        let resp = ureq::AgentBuilder::new()
+            .build()
+            .put(&url)
+            .set("content-type", "application/json")
+            .send_string("not-json")
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("Invalid JSON"));
+    }
+
+    #[tokio::test]
+    async fn update_server_config_rejects_zero_port() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/server", base);
+
+        let body = json!({ "port": 0 });
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("port must be between"));
+    }
+
+    #[tokio::test]
+    async fn update_server_config_reports_unavailable_when_rebind_manager_missing() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/server", base);
+
+        let body = json!({ "port": 12345 });
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("Port rebind is not available"));
+    }
+
+    #[tokio::test]
+    async fn update_tray_config_requires_enabled_field() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/tray", base);
+
+        let resp = put_json(&url, json!({}));
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("enabled is required"));
+    }
+
+    #[tokio::test]
+    async fn update_sandbox_config_accepts_valid_payload() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/sandbox", base);
+
+        let body = json!({
+            "file": { "sandbox_dir": "/tmp/sandbox", "max_bytes": 1024 },
+            "net": { "enabled": true, "timeout_ms": 1000, "max_request_bytes": 1024, "max_response_bytes": 2048 },
+            "limits": { "timeout_ms": 2000, "max_memory_bytes": 4096 },
+        });
+
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), 200);
+        let bytes = resp.into_string().unwrap();
+        let v: serde_json::Value = serde_json::from_str(&bytes).unwrap();
+        assert!(v.get("file").is_some());
+    }
+
+    #[tokio::test]
+    async fn update_sandbox_config_rejects_non_absolute_allowed_dir() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state).await;
+        let url = format!("{}/api/config/sandbox", base);
+
+        let body = json!({
+            "file": { "allowed_dirs": ["relative/path"] }
+        });
+
+        let resp = put_json(&url, body);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+        let msg = resp.into_string().unwrap();
+        assert!(msg.contains("allowed_dirs must be absolute paths"));
+    }
+}

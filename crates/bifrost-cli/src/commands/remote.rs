@@ -8914,3 +8914,376 @@ mod coverage_boost_v2 {
         assert!(err.to_string().contains("call events returned"));
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+    use serde_json::{json, Value};
+    use tempfile::NamedTempFile;
+    use std::io::Write as _;
+
+    fn build_file_command(action: RemoteFileCommands) -> BuiltRemoteCommand {
+        build_remote_file_command(&action).expect("build file command")
+    }
+
+    fn args_json(built: &BuiltRemoteCommand) -> Value {
+        let args = built
+            .args_json
+            .as_deref()
+            .expect("file command must have args_json");
+        serde_json::from_str(args).expect("args_json must be valid JSON")
+    }
+
+    #[test]
+    fn file_read_command_populates_all_fields() {
+        let cmd = RemoteFileCommands::Read {
+            path: "foo.txt".to_string(),
+            max_bytes: Some(4096),
+            allow_binary: true,
+            offset: Some(10),
+            limit: Some(5),
+            cwd: Some("/tmp".to_string()),
+            output: "human".to_string(),
+        };
+
+        let built = build_file_command(cmd);
+        assert_eq!(built.kind, CommandKind::File);
+        assert_eq!(built.command.as_deref(), Some("file.read"));
+
+        let v = args_json(&built);
+        assert_eq!(v["path"], "foo.txt");
+        assert_eq!(v["max_bytes"].as_u64(), Some(4096));
+        assert_eq!(v["allow_binary"].as_bool(), Some(true));
+        assert_eq!(v["offset"].as_u64(), Some(10));
+        assert_eq!(v["limit"].as_u64(), Some(5));
+        assert_eq!(v["cwd"].as_str(), Some("/tmp"));
+    }
+
+    #[test]
+    fn file_list_respect_gitignore_and_exclude_patterns() {
+        let cmd = RemoteFileCommands::List {
+            path: None,
+            depth: 3,
+            no_ignore: false,
+            exclude_patterns: Vec::new(),
+            cwd: Some("/work".to_string()),
+            output: "human".to_string(),
+        };
+
+        let built = build_file_command(cmd);
+        assert_eq!(built.command.as_deref(), Some("file.list"));
+        let v = args_json(&built);
+        assert_eq!(v["path"], serde_json::Value::Null);
+        assert_eq!(v["depth"].as_u64(), Some(3));
+        assert_eq!(v["respect_gitignore"].as_bool(), Some(true));
+        assert!(v.get("exclude_patterns").unwrap().is_null());
+
+        let cmd2 = RemoteFileCommands::List {
+            path: Some(".".to_string()),
+            depth: 1,
+            no_ignore: true,
+            exclude_patterns: vec!["*.log".to_string()],
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built2 = build_file_command(cmd2);
+        let v2 = args_json(&built2);
+        assert_eq!(v2["respect_gitignore"].as_bool(), Some(false));
+        let ex = v2["exclude_patterns"].as_array().expect("array");
+        assert_eq!(ex.len(), 1);
+        assert_eq!(ex[0], "*.log");
+    }
+
+    #[test]
+    fn file_stat_and_hash_commands_encode_paths() {
+        let stat_cmd = RemoteFileCommands::Stat {
+            path: "foo.txt".to_string(),
+            cwd: Some("/tmp".to_string()),
+            output: "human".to_string(),
+        };
+        let stat_built = build_file_command(stat_cmd);
+        assert_eq!(stat_built.command.as_deref(), Some("file.stat"));
+        let sv = args_json(&stat_built);
+        assert_eq!(sv["path"], "foo.txt");
+        assert_eq!(sv["cwd"].as_str(), Some("/tmp"));
+
+        let hash_cmd = RemoteFileCommands::Hash {
+            path: "foo.txt".to_string(),
+            algo: "sha256".to_string(),
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let hash_built = build_file_command(hash_cmd);
+        assert_eq!(hash_built.command.as_deref(), Some("file.hash"));
+        let hv = args_json(&hash_built);
+        assert_eq!(hv["path"], "foo.txt");
+        assert_eq!(hv["algo"], "sha256");
+    }
+
+    #[test]
+    fn file_glob_and_find_include_search_options() {
+        let glob_cmd = RemoteFileCommands::Glob {
+            pattern: "src/**/*.rs".to_string(),
+            max_matches: Some(50),
+            no_ignore: false,
+            exclude_patterns: vec!["target/**".to_string()],
+            cwd: Some("/repo".to_string()),
+            output: "human".to_string(),
+        };
+        let glob_built = build_file_command(glob_cmd);
+        assert_eq!(glob_built.command.as_deref(), Some("file.glob"));
+        let gv = args_json(&glob_built);
+        assert_eq!(gv["pattern"], "src/**/*.rs");
+        assert_eq!(gv["max_matches"].as_u64(), Some(50));
+        assert_eq!(gv["respect_gitignore"].as_bool(), Some(true));
+
+        let find_cmd = RemoteFileCommands::Find {
+            pattern: "needle".to_string(),
+            path: Some(".".to_string()),
+            max_matches: Some(5),
+            max_scan: Some(1024),
+            case_insensitive: true,
+            glob: Some("*.rs".to_string()),
+            no_ignore: true,
+            exclude_patterns: vec!["target/**".to_string()],
+            context_before: Some(2),
+            context_after: Some(3),
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let find_built = build_file_command(find_cmd);
+        assert_eq!(find_built.command.as_deref(), Some("file.search"));
+        let fv = args_json(&find_built);
+        assert_eq!(fv["pattern"], "needle");
+        assert_eq!(fv["path"], ".");
+        assert_eq!(fv["max_matches"].as_u64(), Some(5));
+        assert_eq!(fv["max_scan_bytes"].as_u64(), Some(1024));
+        assert_eq!(fv["case_insensitive"].as_bool(), Some(true));
+        assert_eq!(fv["glob"], "*.rs");
+        assert_eq!(fv["respect_gitignore"].as_bool(), Some(false));
+        assert_eq!(fv["context_before"].as_u64(), Some(2));
+        assert_eq!(fv["context_after"].as_u64(), Some(3));
+    }
+
+    #[test]
+    fn file_mkdir_move_and_delete_map_simple_fields() {
+        let mkdir_cmd = RemoteFileCommands::Mkdir {
+            path: "dir".to_string(),
+            parents: true,
+            cwd: Some("/root".to_string()),
+            output: "human".to_string(),
+        };
+        let mkdir_built = build_file_command(mkdir_cmd);
+        assert_eq!(mkdir_built.command.as_deref(), Some("file.mkdir"));
+        let mv = args_json(&mkdir_built);
+        assert_eq!(mv["path"], "dir");
+        assert_eq!(mv["parents"].as_bool(), Some(true));
+
+        let move_cmd = RemoteFileCommands::Move {
+            from: "a.txt".to_string(),
+            to: "b.txt".to_string(),
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let move_built = build_file_command(move_cmd);
+        assert_eq!(move_built.command.as_deref(), Some("file.move"));
+        let mv2 = args_json(&move_built);
+        assert_eq!(mv2["path"], "a.txt");
+        assert_eq!(mv2["to_path"], "b.txt");
+
+        let delete_cmd = RemoteFileCommands::Delete {
+            path: "tmp.txt".to_string(),
+            recursive: true,
+            cwd: Some("/tmp".to_string()),
+            output: "human".to_string(),
+        };
+        let delete_built = build_file_command(delete_cmd);
+        assert_eq!(delete_built.command.as_deref(), Some("file.delete"));
+        let dv = args_json(&delete_built);
+        assert_eq!(dv["path"], "tmp.txt");
+        assert_eq!(dv["recursive"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn file_write_prefers_cli_b64_over_file() {
+        let cmd = RemoteFileCommands::Write {
+            path: "out.txt".to_string(),
+            content_file: Some("ignored".to_string()),
+            content_b64: Some("Zm9vYmFy".to_string()),
+            base_sha256: Some("abc".to_string()),
+            allow_overwrite: Some(true),
+            create_parents: false,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        assert_eq!(built.command.as_deref(), Some("file.write"));
+        let v = args_json(&built);
+        assert_eq!(v["path"], "out.txt");
+        assert_eq!(v["content_b64"], "Zm9vYmFy");
+        assert_eq!(v["base_sha256"], "abc");
+        assert_eq!(v["allow_overwrite"].as_bool(), Some(true));
+        assert_eq!(v["create_parents"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn file_write_reads_bytes_from_content_file() {
+        let mut tmp = NamedTempFile::new().expect("temp file");
+        write!(tmp, "hello-file").expect("write temp content");
+        let path = tmp.path().to_path_buf();
+
+        let cmd = RemoteFileCommands::Write {
+            path: "from-file.txt".to_string(),
+            content_file: Some(path.display().to_string()),
+            content_b64: None,
+            base_sha256: None,
+            allow_overwrite: Some(false),
+            create_parents: true,
+            cwd: Some("/cwd".to_string()),
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert_eq!(v["path"], "from-file.txt");
+        assert_eq!(v["cwd"], "/cwd");
+        let b64 = v["content_b64"].as_str().expect("b64 string");
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .expect("decode base64");
+        assert_eq!(decoded, b"hello-file");
+    }
+
+    #[test]
+    fn file_write_reports_io_error_when_file_missing() {
+        let cmd = RemoteFileCommands::Write {
+            path: "missing.txt".to_string(),
+            content_file: Some("/definitely/not/present".to_string()),
+            content_b64: None,
+            base_sha256: None,
+            allow_overwrite: Some(false),
+            create_parents: false,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let err = build_remote_file_command(&cmd).expect_err("expected error");
+        match err {
+            BifrostError::Io(e) => {
+                let msg = e.to_string();
+                assert!(msg.contains("read content file"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_edit_parses_valid_edits_json() {
+        let cmd = RemoteFileCommands::Edit {
+            path: "file.txt".to_string(),
+            edits: "[{\"op\":\"replace\"}]".to_string(),
+            base_sha256: Some("abc".to_string()),
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert!(v["edits"].is_array());
+        assert_eq!(v["base_sha256"], "abc");
+    }
+
+    #[test]
+    fn file_edit_uses_null_for_invalid_edits_json() {
+        let cmd = RemoteFileCommands::Edit {
+            path: "file.txt".to_string(),
+            edits: "not-json".to_string(),
+            base_sha256: None,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert!(v["edits"].is_null());
+    }
+
+    #[test]
+    fn file_patch_from_base64_populates_patch_text() {
+        let patch_text = "diff --git a b";
+        let b64 = base64::engine::general_purpose::STANDARD.encode(patch_text);
+        let cmd = RemoteFileCommands::Patch {
+            patch_file: None,
+            patch_b64: Some(b64),
+            cwd: Some("/repo".to_string()),
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert_eq!(v["patch_text"], patch_text);
+        assert_eq!(v["cwd"], "/repo");
+    }
+
+    #[test]
+    fn file_patch_reports_decode_error_for_invalid_base64() {
+        let cmd = RemoteFileCommands::Patch {
+            patch_file: None,
+            patch_b64: Some("%%%".to_string()),
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let err = build_remote_file_command(&cmd).expect_err("expected error");
+        match err {
+            BifrostError::Io(e) => {
+                assert!(e.to_string().contains("decode --patch-b64"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_patch_requires_source_when_neither_file_nor_b64_provided() {
+        let cmd = RemoteFileCommands::Patch {
+            patch_file: None,
+            patch_b64: None,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let err = build_remote_file_command(&cmd).expect_err("expected config error");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("apply-patch requires"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_patch_reads_patch_file_when_provided() {
+        let mut tmp = NamedTempFile::new().expect("temp patch");
+        write!(tmp, "line1\nline2\n").expect("write patch");
+        let path = tmp.path().to_path_buf();
+
+        let cmd = RemoteFileCommands::Patch {
+            patch_file: Some(path.display().to_string()),
+            patch_b64: None,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert_eq!(v["patch_text"], "line1\nline2\n");
+    }
+
+    #[test]
+    fn build_remote_command_for_file_variant_wraps_file_command() {
+        let action = RemoteCommands::File {
+            action: Box::new(RemoteFileCommands::Stat {
+                path: "foo.txt".to_string(),
+                cwd: None,
+                output: "human".to_string(),
+            }),
+        };
+
+        let built = build_remote_command_checked(&action).expect("build file command");
+        assert_eq!(built.kind, CommandKind::File);
+        assert!(matches!(built.render, RemoteRenderMode::File));
+        assert_eq!(built.command.as_deref(), Some("file.stat"));
+    }
+}

@@ -4472,3 +4472,778 @@ mod coverage_boost_v2 {
         .expect("handle_ai_command should delegate to handle_asr_command for ASR tasks");
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+
+    use std::io::Write as _;
+
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    // --- Formatting helpers: diarization and speaker profiles -----------------
+
+    #[test]
+    fn print_diarization_profiles_handles_empty_list() {
+        let value = serde_json::json!({ "profiles": [] });
+        print_diarization_profiles(&value);
+    }
+
+    #[test]
+    fn print_diarization_profiles_renders_single_profile() {
+        let value = serde_json::json!({
+            "profiles": [{
+                "id": "p1",
+                "engine": "engine-x",
+                "quality_tier": "balanced",
+                "ready": true
+            }]
+        });
+        print_diarization_profiles(&value);
+    }
+
+    #[test]
+    fn print_diarization_status_prints_optional_fields() {
+        let value = serde_json::json!({
+            "profile": {
+                "id": "p1",
+                "engine": "engine-x",
+                "ready": false,
+                "install_dir": "/asr",
+                "message": "warming-up",
+            },
+            "voiceprint_dir": "/voiceprints",
+            "speaker_profile_count": 3,
+        });
+        print_diarization_status(&value);
+    }
+
+    #[test]
+    fn print_speaker_profiles_handles_empty_and_nonempty_lists() {
+        let empty = serde_json::json!({ "profiles": [] });
+        print_speaker_profiles(&empty);
+
+        let value = serde_json::json!({
+            "profiles": [{
+                "id": "sp-1",
+                "display_name": "Alice",
+                "embedding_dim": 256,
+            }]
+        });
+        print_speaker_profiles(&value);
+    }
+
+    #[test]
+    fn print_speaker_profile_formats_all_fields() {
+        let value = serde_json::json!({
+            "display_name": "Bob",
+            "id": "sp-42",
+            "source": "daily-task",
+            "diarization_profile": "sherpa-onnx-balanced",
+            "total_duration_ms": 12_345u64,
+            "embedding_dim": 384u64,
+        });
+        print_speaker_profile(&value);
+    }
+
+    // --- Task list / detail / files / daily documents -------------------------
+
+    fn sample_task_with_file() -> AsrTask {
+        let file = AsrTaskFile {
+            key: "k1".to_string(),
+            source_path: "/audio/a.wav".to_string(),
+            status: "failed".to_string(),
+            source_size: Some(1234),
+            media_duration_ms: Some(90_000),
+            output_text_path: Some("/out/a.txt".to_string()),
+            output_timeline_path: Some("/out/a.timeline.json".to_string()),
+            text_chars: Some(42),
+            error: Some("something went wrong".to_string()),
+            diarization_status: Some("ok".to_string()),
+            speaker_count: Some(2),
+            finished_at_ms: Some(1_700_000_000_000),
+            ..AsrTaskFile::default()
+        };
+        AsrTask {
+            id: "task-1".to_string(),
+            name: "Daily meetings".to_string(),
+            audio_dir: "/audio".to_string(),
+            enabled: true,
+            paused: false,
+            schedule: serde_json::json!({"kind":"daily"}),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            summary: AsrTaskSummary {
+                discovered: 10,
+                processed: 8,
+                pending: 2,
+                failed: 1,
+                partial_success: 1,
+                failed_chunk_count: 0,
+                deleted_after_processing: 0,
+                running: false,
+                diarization_enabled: true,
+                diarization_ready: true,
+                diarization_running: false,
+                diarized_files: 5,
+                speaker_count: 3,
+            },
+            files: vec![file],
+            daily_documents: vec![AsrDailyDocument {
+                date: "2026-05-24".to_string(),
+                path: "/reports/2026-05-24.txt".to_string(),
+                size: 2048,
+                modified_ms: 1_700_000_000_000,
+                text_chars: 1000,
+            }],
+            ..AsrTask::default()
+        }
+    }
+
+    #[test]
+    fn print_task_list_handles_empty_and_nonempty_sets() {
+        print_task_list(&[]);
+
+        let task = sample_task_with_file();
+        print_task_list(&[task]);
+    }
+
+    #[test]
+    fn print_task_detail_includes_daily_documents_section() {
+        let task = sample_task_with_file();
+        print_task_detail(&task);
+    }
+
+    #[test]
+    fn print_task_files_handles_no_matching_files() {
+        let mut task = AsrTask::default();
+        task.files = Vec::new();
+        print_task_files(&task, Some("success"), 10);
+    }
+
+    #[test]
+    fn print_task_files_formats_extended_fields() {
+        let task = sample_task_with_file();
+        // status=None and a generous limit hit all formatting branches.
+        print_task_files(&task, None, 10);
+    }
+
+    #[test]
+    fn print_daily_documents_handles_empty_and_nonempty_lists() {
+        print_daily_documents("task-1", &[]);
+
+        let docs = vec![AsrDailyDocument {
+            date: "2026-05-24".to_string(),
+            path: "/reports/2026-05-24.txt".to_string(),
+            size: 10_240,
+            modified_ms: 1_700_000_000_000,
+            text_chars: 2048,
+        }];
+        print_daily_documents("task-1", &docs);
+    }
+
+    #[test]
+    fn print_daily_agent_sync_result_formats_counts() {
+        let value = serde_json::json!({
+            "sync": {
+                "target_dir": "/reports",
+                "total_files": 10,
+                "copied_files": 7,
+                "skipped_files": 2,
+                "failed_files": 1,
+            }
+        });
+        print_daily_agent_sync_result("task-1", &value);
+    }
+
+    // --- Status printer helpers ------------------------------------------------
+
+    #[test]
+    fn print_status_handles_missing_service_state_for_json_and_text() {
+        let temp = TempDir::new().unwrap();
+        let previous = bifrost_storage::data_dir();
+        bifrost_storage::set_data_dir(temp.path().to_path_buf());
+
+        // With no persisted service state, both JSON and human-readable paths
+        // should complete without errors.
+        print_status(true).unwrap();
+        print_status(false).unwrap();
+
+        bifrost_storage::set_data_dir(previous);
+    }
+
+    #[test]
+    fn sse_last_json_returns_none_when_no_json_payloads() {
+        let stream = "event: keep-alive\n\
+                      data: [DONE]\n";
+        assert!(sse_last_json(stream).is_none());
+    }
+
+    // --- handle_asr_diarization_command pretty-print flows ---------------------
+
+    async fn mock_client_from_server(mock: &MockServer) -> AsrTaskClient {
+        let base_uri = mock.uri();
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().unwrap();
+        let port: u16 = parts.next().unwrap().parse().unwrap();
+        AsrTaskClient::new(host, port)
+    }
+
+    #[tokio::test]
+    async fn handle_asr_diarization_command_profiles_pretty_output() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profiles": [
+                    {"id": "p1", "engine": "e", "quality_tier": "t", "ready": true}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_diarization_command(
+            &client,
+            AiAsrDiarizationCommands::Profiles { json: false },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_diarization_command_status_pretty_output() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/status"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profile": {
+                    "id": "p1",
+                    "engine": "e",
+                    "ready": true,
+                    "install_dir": "/asr",
+                },
+                "voiceprint_dir": "/vp",
+                "speaker_profile_count": 1,
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_diarization_command(
+            &client,
+            AiAsrDiarizationCommands::Status {
+                profile: "p1".to_string(),
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_diarization_command_init_pretty_output_uses_status_snapshot() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/diarization/init-stream"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "data: {\"status\":{\"profile\":{\"id\":\"p1\",\"engine\":\"e\",\"ready\":true}}}\n",
+            ))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_diarization_command(
+            &client,
+            AiAsrDiarizationCommands::Init {
+                profile: "p1".to_string(),
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_diarization_speaker_list_and_show_pretty_output() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/speaker-profiles"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "profiles": [
+                    {"id": "sp-1", "display_name": "Alice", "embedding_dim": 256}
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/speaker-profiles/sp-1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "sp-1",
+                "display_name": "Alice",
+                "source": "daily-task",
+                "diarization_profile": "sherpa-onnx-balanced",
+                "total_duration_ms": 10_000u64,
+                "embedding_dim": 256u64,
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+
+        handle_asr_diarization_speaker_command(
+            &client,
+            AiAsrDiarizationSpeakerCommands::List { json: false },
+        )
+        .unwrap();
+
+        handle_asr_diarization_speaker_command(
+            &client,
+            AiAsrDiarizationSpeakerCommands::Show {
+                profile_id: "sp-1".to_string(),
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    // --- AsrTaskClient extra coverage -----------------------------------------
+
+    #[tokio::test]
+    async fn asr_task_client_post_json_parses_simple_response() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/asr/ping"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let value = client.post_json("/asr/ping").unwrap();
+        assert_eq!(value["ok"], true);
+    }
+
+    // --- parse_task and task selection helpers -------------------------------
+
+    #[test]
+    fn parse_task_defaults_missing_fields() {
+        let value = serde_json::json!({});
+        let task = parse_task(value).expect("empty object should deserialize with defaults");
+        assert_eq!(task.id, "");
+        assert_eq!(task.name, "");
+        assert_eq!(task.summary.discovered, 0);
+        assert!(task.files.is_empty());
+        assert!(task.daily_documents.is_empty());
+    }
+
+    #[test]
+    fn parse_task_reports_error_for_invalid_types() {
+        let value = serde_json::json!({
+            "id": 123,
+            "summary": { "discovered": "not-a-number" }
+        });
+        let err = parse_task(value).expect_err("invalid field types should error");
+        let message = err.to_string();
+        assert!(message.contains("parse ASR task detail"));
+    }
+
+    #[test]
+    fn task_choice_label_formats_basic_fields() {
+        let choice = AsrTaskWatchChoice {
+            task: AsrTaskWatchChoiceTask {
+                id: "task-1".to_string(),
+                name: "Daily meetings".to_string(),
+                enabled: true,
+                ..AsrTaskWatchChoiceTask::default()
+            },
+            progress: AsrTaskWatchChoiceProgress {
+                discovered: 10,
+                processed: 5,
+                pending: 5,
+            },
+        };
+        let label = task_choice_label(&choice);
+        assert!(label.contains("Daily meetings"));
+        assert!(label.contains("5/10"));
+        assert!(label.contains("pending 5"));
+    }
+
+    #[tokio::test]
+    async fn select_asr_task_id_returns_error_when_no_tasks() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let err = select_asr_task_id(&client, None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("No ASR directory tasks."));
+    }
+
+    #[tokio::test]
+    async fn select_asr_task_id_returns_id_for_single_task_without_query() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let id = select_asr_task_id(&client, None).unwrap();
+        assert_eq!(id, "t1");
+    }
+
+    #[tokio::test]
+    async fn select_asr_task_id_uses_query_to_resolve_task_by_name() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [
+                    {
+                        "task": {
+                            "id": "t1",
+                            "name": "Alpha",
+                            "enabled": true,
+                            "paused": false,
+                            "running": false,
+                            "next_run_at_ms": null
+                        },
+                        "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                    },
+                    {
+                        "task": {
+                            "id": "t2",
+                            "name": "Beta",
+                            "enabled": true,
+                            "paused": false,
+                            "running": false,
+                            "next_run_at_ms": null
+                        },
+                        "progress": {"discovered": 0, "processed": 0, "pending": 0}
+                    }
+                ]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let id = select_asr_task_id(&client, Some("Beta")).unwrap();
+        assert_eq!(id, "t2");
+    }
+
+    // --- daily command flows --------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_list_pretty_output_uses_print_daily_documents() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "documents": [{
+                    "date": "2026-05-24",
+                    "path": "/reports/2026-05-24.txt",
+                    "size": 1024u64,
+                    "modified_ms": 1_700_000_000_000i64,
+                    "text_chars": 100u64
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::List {
+                task: None,
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_list_json_output_uses_print_json() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "documents": []
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::List {
+                task: None,
+                json: true,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_show_pretty_output_without_output_file() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily/2026-05-24"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": "hello world"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::Show {
+                first: "2026-05-24".to_string(),
+                second: None,
+                task: None,
+                output: None,
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_show_writes_daily_document_to_output_file() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily/2026-05-24"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "content": "output content"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let temp_dir = TempDir::new().unwrap();
+        let output_path = temp_dir.path().join("daily.txt");
+
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::Show {
+                first: "2026-05-24".to_string(),
+                second: None,
+                task: None,
+                output: Some(output_path.clone()),
+                json: false,
+            },
+        )
+        .unwrap();
+
+        let content = std::fs::read_to_string(output_path).unwrap();
+        assert_eq!(content, "output content");
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_set_sync_dir_configures_directory() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily-agent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "config": { "report_sync_dir": "/tmp/reports" }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let temp_dir = TempDir::new().unwrap();
+
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::SetSyncDir {
+                task: None,
+                dir: Some(temp_dir.path().to_path_buf()),
+                clear: false,
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_asr_task_daily_sync_triggers_agent_sync_and_pretty_prints() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/asr/tasks/-/watch"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tasks": [{
+                    "task": {
+                        "id": "t1",
+                        "name": "Alpha",
+                        "enabled": true,
+                        "paused": false,
+                        "running": false,
+                        "next_run_at_ms": null
+                    },
+                    "progress": {"discovered": 1, "processed": 1, "pending": 0}
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily-agent"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path("/_bifrost/api/asr/tasks/t1/daily-agent/sync"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "sync": {
+                    "target_dir": "/tmp/reports",
+                    "total_files": 3u64,
+                    "copied_files": 2u64,
+                    "skipped_files": 1u64,
+                    "failed_files": 0u64
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = mock_client_from_server(&mock_server).await;
+        let temp_dir = TempDir::new().unwrap();
+
+        handle_asr_task_daily_command(
+            &client,
+            AiAsrTaskDailyCommands::Sync {
+                task: None,
+                dir: Some(temp_dir.path().to_path_buf()),
+                json: false,
+            },
+        )
+        .unwrap();
+    }
+}

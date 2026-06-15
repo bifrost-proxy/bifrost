@@ -4037,3 +4037,395 @@ mod coverage_boost {
         assert_eq!(body["status"], 503);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+
+    use crate::test_support::TestAdminState;
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Full};
+    use hyper::service::service_fn;
+    use hyper::{body::Incoming, client::conn::http1 as client_http1, server::conn::http1 as server_http1};
+    use hyper::{Method, Request, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use serde_json::json;
+
+    /// Send a request to `/agent` handlers over an in-memory HTTP/1.1 connection.
+    async fn agent_request_raw(
+        service: SharedImGatewayService,
+        method: Method,
+        path_and_query: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, String) {
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let service_clone = service.clone();
+        let path = path_and_query.to_string();
+
+        // Server side: route requests under /agent to `handle_agent`.
+        let server = tokio::spawn(async move {
+            let io = TokioIo::new(server_io);
+            let svc = service_fn(move |req: Request<Incoming>| {
+                let service = service_clone.clone();
+                async move {
+                    let path = req.uri().path().to_string();
+                    let rest = path.strip_prefix("/agent").unwrap_or(path.as_str());
+                    let resp = handle_agent(req, &service, rest).await;
+                    Ok::<_, hyper::Error>(resp)
+                }
+            });
+            server_http1::Builder::new().serve_connection(io, svc).await
+        });
+
+        // Client side: single-request HTTP/1.1 connection.
+        let (mut sender, conn) = client_http1::handshake::<_, Full<Bytes>>(TokioIo::new(client_io))
+            .await
+            .expect("handshake");
+        let conn_task = tokio::spawn(async move { conn.await });
+
+        let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
+        let req = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", "localhost")
+            .header("content-type", "application/json")
+            .body(Full::new(Bytes::from(body_bytes)))
+            .unwrap();
+
+        let resp = sender.send_request(req).await.expect("send request");
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8(bytes.to_vec()).unwrap_or_default();
+
+        drop(sender);
+        let _ = conn_task.await;
+        let _ = server.await;
+
+        (status, text)
+    }
+
+    async fn agent_request_json(
+        service: SharedImGatewayService,
+        method: Method,
+        path_and_query: &str,
+        body: Option<serde_json::Value>,
+    ) -> (StatusCode, serde_json::Value) {
+        let body_string = body.map(|v| serde_json::to_string(&v).expect("encode json"));
+        let (status, text) =
+            agent_request_raw(service, method, path_and_query, body_string.as_deref()).await;
+        let json = serde_json::from_str(&text).unwrap_or_else(|_| json!({ "raw": text }));
+        (status, json)
+    }
+
+    // ---------------------------------------------------------------------
+    // /agent/sessions/all
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_all_empty_returns_zero_counts() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/sessions/all", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["total"].as_u64(), Some(0));
+        assert_eq!(body["active_count"].as_u64(), Some(0));
+        assert_eq!(body["history_count"].as_u64(), Some(0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_all_supports_limit_query_param() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/sessions/all?limit=1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["total"].as_u64().unwrap_or(0) <= 1);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_all_method_not_allowed_for_post() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::POST, "/agent/sessions/all", None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["status"], 405);
+    }
+
+    // ---------------------------------------------------------------------
+    // /agent/sessions/history
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_history_empty_returns_zero() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/sessions/history", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["history"].as_array().unwrap().is_empty());
+        assert_eq!(body["total"].as_u64(), Some(0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_history_post_method_not_allowed() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::POST, "/agent/sessions/history", None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["status"], 405);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_history_lists_created_conversation() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let key = "history-v2-list";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        recorder
+            .record_session_start(key, json!({"source": "admin-api"}))
+            .expect("start");
+        recorder
+            .record_user_message(key, "hello")
+            .expect("user message");
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/sessions/history", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let history = body["history"].as_array().expect("array");
+        assert!(history
+            .iter()
+            .any(|item| item["session_key"] == key));
+    }
+
+    // ---------------------------------------------------------------------
+    // /agent/sessions/history/{path}
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_history_events_unpaged_returns_events() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let key = "history-v2-events";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        recorder
+            .record_session_start(key, json!({"source": "admin-api"}))
+            .expect("start");
+        recorder
+            .record_user_message(key, "hello")
+            .expect("user");
+        let file_path = recorder.file_path();
+        let encoded = urlencoding::encode(file_path.to_str().unwrap());
+        let url = format!("/agent/sessions/history/{encoded}");
+
+        let (status, body) = agent_request_json(service, Method::GET, &url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let events = body["events"].as_array().expect("events array");
+        assert!(!events.is_empty());
+        assert_eq!(
+            body["total_count"].as_u64().unwrap_or(0),
+            body["count"].as_u64().unwrap_or(0)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_history_events_tail_query_uses_paging() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let key = "history-v2-tail";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        recorder
+            .record_session_start(key, json!({"source": "admin-api"}))
+            .expect("start");
+        recorder
+            .record_user_message(key, "hello")
+            .expect("user");
+        recorder
+            .record_assistant_message(key, "world")
+            .expect("assistant");
+        let file_path = recorder.file_path();
+        let encoded = urlencoding::encode(file_path.to_str().unwrap());
+        let url = format!("/agent/sessions/history/{encoded}?limit=1&tail=1");
+
+        let (status, body) = agent_request_json(service, Method::GET, &url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let count = body["count"].as_u64().unwrap_or(0);
+        assert!(count <= 1);
+        assert!(body["total_count"].as_u64().unwrap_or(0) >= count);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_history_events_invalid_path_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let encoded = urlencoding::encode("../outside.jsonl");
+        let url = format!("/agent/sessions/history/{encoded}");
+        let (status, body) = agent_request_json(service, Method::GET, &url, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["status"], 400);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_history_delete_removes_file_and_returns_ok() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let key = "history-v2-delete";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        recorder
+            .record_session_start(key, json!({"source": "admin-api"}))
+            .expect("start");
+        let file_path = recorder.file_path();
+        let encoded = urlencoding::encode(file_path.to_str().unwrap());
+        let url = format!("/agent/sessions/history/{encoded}");
+
+        let (status, body) = agent_request_json(service.clone(), Method::DELETE, &url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert!(!file_path.exists());
+    }
+
+    // ---------------------------------------------------------------------
+    // /agent/sessions/:key
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_detail_not_found_returns_404() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::GET, "/agent/sessions/does-not-exist", None).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["status"], 404);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_detail_uses_history_when_runtime_missing() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+        let data_dir = bifrost_agent::config::agent_home_dir();
+
+        let key = "detail-from-history-v2";
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        recorder
+            .record_session_start(key, json!({"source": "admin-api"}))
+            .expect("start");
+        recorder
+            .record_user_message(key, "hello")
+            .expect("user");
+
+        let url = "/agent/sessions/detail-from-history-v2";
+        let (status, body) = agent_request_json(service, Method::GET, url, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["session_key"], key);
+        assert_eq!(body["message_count"].as_u64(), Some(1));
+        assert!(body["history_path"].as_str().is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_session_delete_returns_ok_even_when_missing() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::DELETE, "/agent/sessions/missing", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+    }
+
+    // ---------------------------------------------------------------------
+    // /agent/sessions/events
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_events_post_method_not_allowed() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let (status, body) =
+            agent_request_json(service, Method::POST, "/agent/sessions/events", None).await;
+        assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(body["status"], 405);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn agent_sessions_events_stream_starts_with_connected_event() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let mut resp = agent_session_events_response(&service);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let first_frame = resp
+            .body_mut()
+            .frame()
+            .await
+            .expect("frame")
+            .expect("data frame");
+        let bytes = first_frame.into_data().expect("data");
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(text.contains("event: connected"));
+    }
+
+    // ---------------------------------------------------------------------
+    // Helper functions coverage
+
+    #[test]
+    fn status_from_run_state_maps_variants() {
+        assert_eq!(status_from_run_state("failed"), "failed");
+        assert_eq!(status_from_run_state("stopped"), "stopped");
+        assert_eq!(status_from_run_state("timed_out"), "timed_out");
+        assert_eq!(status_from_run_state("other"), "ended");
+    }
+
+    #[test]
+    fn summary_end_time_prefers_end_when_present() {
+        let mut summary = bifrost_agent::persistence::SessionFileSummary::default();
+        summary.start_time = 10;
+        summary.end_time = 20;
+        assert_eq!(summary_end_time(&summary), 20);
+        summary.end_time = 0;
+        assert_eq!(summary_end_time(&summary), 10);
+    }
+
+    #[test]
+    fn insert_queue_snapshot_is_noop_without_session_key() {
+        let harness = TestAdminState::builder().build();
+        let service = harness.im_gateway_service();
+
+        let mut value = json!({"foo": "bar"});
+        insert_queue_snapshot(&mut value, &service.queue_manager);
+        assert_eq!(value["foo"], "bar");
+    }
+
+    #[test]
+    fn active_session_list_run_state_handles_all_cases() {
+        assert_eq!(active_session_list_run_state(true, "idle"), "running");
+        assert_eq!(active_session_list_run_state(false, "running"), "completed");
+        assert_eq!(active_session_list_run_state(false, "failed"), "failed");
+    }
+
+    #[test]
+    fn history_session_list_run_state_uses_terminal_state_when_available() {
+        let mut summary = bifrost_agent::persistence::SessionFileSummary::default();
+        summary.run_state = Some("failed".to_string());
+        assert_eq!(history_session_list_run_state(&summary), "failed");
+        summary.run_state = Some("non_terminal".to_string());
+        assert_eq!(history_session_list_run_state(&summary), "completed");
+    }
+}

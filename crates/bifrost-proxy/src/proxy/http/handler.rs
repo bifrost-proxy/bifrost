@@ -7160,3 +7160,667 @@ mod coverage_boost_v2 {
         assert!(text.contains("upstream HTTPS certificate is self-signed"));
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+    use bytes::Bytes;
+    use http_body_util::Empty;
+    use hyper::body::Incoming;
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::header::HeaderValue;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper::{header, Method, Request, Response, StatusCode, Uri};
+    use hyper_util::rt::TokioIo;
+    use std::collections::HashMap;
+    use std::convert::Infallible;
+    use std::sync::Arc;
+
+    use crate::server::ResolvedRules;
+
+    /// Helper: run `handle_http_request` over an in-memory HTTP/1.1 connection
+    /// with configurable body buffer limits.
+    async fn run_handle_http_request_with_limits(
+        rules: Arc<dyn RulesResolver>,
+        request: Request<Empty<Bytes>>,
+        max_body_buffer_size: usize,
+        max_body_probe_size: usize,
+    ) -> Response<Incoming> {
+        let (client_io, server_io) = tokio::io::duplex(16 * 1024);
+        let client_io = TokioIo::new(client_io);
+        let server_io = TokioIo::new(server_io);
+
+        let (mut sender, client_conn) = client_http1::handshake(client_io)
+            .await
+            .expect("client handshake");
+        tokio::spawn(async move {
+            if let Err(err) = client_conn.await {
+                eprintln!("client conn error: {err}");
+            }
+        });
+
+        let rules_clone = rules.clone();
+        let service = service_fn(move |req: Request<Incoming>| {
+            let rules = rules_clone.clone();
+            async move {
+                let ctx = RequestContext::new();
+                let resp = handle_http_request(
+                    req,
+                    rules,
+                    false,
+                    false,
+                    max_body_buffer_size,
+                    max_body_probe_size,
+                    false,
+                    &ctx,
+                    None,
+                    None,
+                    None,
+                )
+                .await
+                .expect("handle_http_request should succeed");
+                Ok::<_, Infallible>(resp)
+            }
+        });
+
+        let server_conn = server_http1::Builder::new().serve_connection(server_io, service);
+        tokio::spawn(async move {
+            if let Err(err) = server_conn.await {
+                eprintln!("server conn error: {err}");
+            }
+        });
+
+        sender
+            .send_request(request)
+            .await
+            .expect("send request through client")
+    }
+
+    // ==== Body metadata helpers: request side ====
+
+    #[test]
+    fn normalize_req_headers_known_nonzero_inserts_content_length() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com")
+            .header(hyper::header::CONTENT_LENGTH, "10")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::Known(5), false);
+
+        assert_eq!(
+            parts.headers.get(hyper::header::CONTENT_LENGTH).unwrap(),
+            "5"
+        );
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn normalize_req_headers_known_zero_without_original_drops_content_length() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com")
+            .header(hyper::header::CONTENT_LENGTH, "10")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::Known(0), false);
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+    }
+
+    #[test]
+    fn normalize_req_headers_known_zero_with_original_keeps_zero_length() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::Known(0), true);
+
+        assert_eq!(
+            parts.headers.get(hyper::header::CONTENT_LENGTH).unwrap(),
+            "0"
+        );
+    }
+
+    #[test]
+    fn normalize_req_headers_stream_clears_length_and_transfer_encoding() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com")
+            .header(hyper::header::CONTENT_LENGTH, "10")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::Stream, true);
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn normalize_req_headers_stream_with_trailers_clears_length_and_transfer_encoding() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com")
+            .header(hyper::header::CONTENT_LENGTH, "10")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::StreamWithTrailers, true);
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn normalize_req_headers_stream_with_length_sets_content_length() {
+        let (mut parts, _) = Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com")
+            .header(hyper::header::CONTENT_LENGTH, "10")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(())
+            .unwrap()
+            .into_parts();
+
+        normalize_req_headers(&mut parts, BodyMode::StreamWithLength(42), true);
+
+        assert_eq!(
+            parts.headers.get(hyper::header::CONTENT_LENGTH).unwrap(),
+            "42"
+        );
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    // ==== Body metadata helpers: response side ====
+
+    #[test]
+    fn is_no_body_response_matches_informational_and_no_content_and_head() {
+        assert!(is_no_body_response(StatusCode::CONTINUE, "GET"));
+        assert!(is_no_body_response(StatusCode::NO_CONTENT, "GET"));
+        assert!(is_no_body_response(StatusCode::OK, "HEAD"));
+        assert!(!is_no_body_response(StatusCode::OK, "GET"));
+    }
+
+    #[test]
+    fn normalize_res_headers_removes_body_headers_for_no_content_status() {
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::NO_CONTENT)
+            .header(hyper::header::CONTENT_LENGTH, "123")
+            .header(hyper::header::TRANSFER_ENCODING, "chunked")
+            .body(crate::server::empty_body())
+            .unwrap()
+            .into_parts();
+
+        normalize_res_headers(&mut parts, BodyMode::Known(123), "GET");
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+        assert!(!parts.headers.contains_key(hyper::header::TRANSFER_ENCODING));
+    }
+
+    #[test]
+    fn normalize_res_headers_removes_body_headers_for_head_requests() {
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_LENGTH, "100")
+            .body(crate::server::empty_body())
+            .unwrap()
+            .into_parts();
+
+        normalize_res_headers(&mut parts, BodyMode::Known(100), "HEAD");
+
+        assert!(!parts.headers.contains_key(hyper::header::CONTENT_LENGTH));
+    }
+
+    #[test]
+    fn content_encoding_helpers_read_and_write_headers() {
+        let mut headers = hyper::HeaderMap::new();
+        assert!(header_content_encoding(&headers).is_none());
+
+        headers.insert(
+            hyper::header::CONTENT_ENCODING,
+            HeaderValue::from_static("gzip"),
+        );
+        assert_eq!(
+            header_content_encoding(&headers).as_deref(),
+            Some("gzip")
+        );
+
+        let (mut parts, _) = Response::builder()
+            .status(StatusCode::OK)
+            .header(hyper::header::CONTENT_ENCODING, "br")
+            .body(crate::server::empty_body())
+            .unwrap()
+            .into_parts();
+
+        assert_eq!(response_content_encoding(&parts).as_deref(), Some("br"));
+
+        set_content_encoding_header(&mut parts.headers, Some("zstd"));
+        assert_eq!(response_content_encoding(&parts).as_deref(), Some("zstd"));
+
+        set_content_encoding_header(&mut parts.headers, None);
+        assert!(response_content_encoding(&parts).is_none());
+    }
+
+    // ==== RetryableRequestBlueprint ====
+
+    #[test]
+    fn retryable_request_blueprint_builds_request_with_expected_fields() {
+        let uri: Uri = "https://example.com/api".parse().unwrap();
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert("X-Test", HeaderValue::from_static("1"));
+
+        let blueprint = RetryableRequestBlueprint {
+            method: Method::POST,
+            uri: uri.clone(),
+            headers: headers.clone(),
+            body: Bytes::from_static(b"body-data"),
+        };
+
+        let req = blueprint.build().expect("build request");
+        assert_eq!(req.method(), &Method::POST);
+        assert_eq!(req.uri(), &uri);
+        assert_eq!(req.headers().get("X-Test").unwrap(), "1");
+    }
+
+    // ==== Helper functions: extract_host_port error path ====
+
+    #[test]
+    fn extract_host_port_errors_when_uri_has_no_host_and_no_proxy() {
+        let uri: Uri = "/relative".parse().unwrap();
+        let rules = ResolvedRules::default();
+        let err = extract_host_port(&uri, &rules, false).unwrap_err();
+        match err {
+            BifrostError::Network(msg) => {
+                assert!(msg.contains("Missing host in URI"));
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extract_host_port_uses_fallback_proxy_parsing_when_url_parse_fails() {
+        let uri: Uri = "http://example.com/path".parse().unwrap();
+        let rules = ResolvedRules {
+            proxy: Some("proxy.example:8080".to_string()),
+            ..Default::default()
+        };
+
+        let (host, port) = extract_host_port(&uri, &rules, false).unwrap();
+        assert_eq!(host, "proxy.example");
+        assert_eq!(port, 8080);
+    }
+
+    // ==== Helper functions: traffic type and proxy auth ====
+
+    #[test]
+    fn get_traffic_type_from_url_treats_non_https_as_http() {
+        assert_eq!(
+            get_traffic_type_from_url("ws://example.com"),
+            bifrost_admin::TrafficType::Http
+        );
+        assert_eq!(
+            get_traffic_type_from_url("https://secure.example"),
+            bifrost_admin::TrafficType::Https
+        );
+    }
+
+    #[test]
+    fn proxy_connect_authority_formats_ipv6_without_brackets() {
+        let authority = proxy_connect_authority("2001:db8::1", 443);
+        assert_eq!(authority, "[2001:db8::1]:443");
+    }
+
+    #[test]
+    fn build_upstream_proxy_auth_value_handles_username_without_password() {
+        let url = build_proxy_rule_url("http://user@proxy.example:8080").unwrap();
+        let value = build_upstream_proxy_auth_value(&url).unwrap();
+        assert!(value.starts_with("Basic "));
+        assert!(value.len() > "Basic ".len());
+    }
+
+    // ==== End-to-end: direct status with body override and redirect defaults ====
+
+    struct DirectStatusWithBodyResolver;
+
+    impl RulesResolver for DirectStatusWithBodyResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                status_code: Some(201),
+                res_body: Some(Bytes::from_static(b"direct-body")),
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_direct_status_uses_custom_body() {
+        let rules: Arc<dyn RulesResolver> = Arc::new(DirectStatusWithBodyResolver);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/direct-with-body")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_limits(rules, req, 1024 * 1024, 8 * 1024).await;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let (_, body) = resp.into_parts();
+        let bytes = http_body_util::BodyExt::collect(body)
+            .await
+            .expect("collect body")
+            .to_bytes();
+        assert_eq!(bytes, Bytes::from_static(b"direct-body"));
+    }
+
+    struct SimpleRedirectResolver;
+
+    impl RulesResolver for SimpleRedirectResolver {
+        fn resolve_with_context(
+            &self,
+            _url: &str,
+            _method: &str,
+            _req_headers: &HashMap<String, String>,
+            _req_cookies: &HashMap<String, String>,
+        ) -> ResolvedRules {
+            ResolvedRules {
+                redirect: Some("https://dest.example/path".to_string()),
+                redirect_status: None,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_http_request_redirect_defaults_to_302_found() {
+        let rules: Arc<dyn RulesResolver> = Arc::new(SimpleRedirectResolver);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/source")
+            .header(header::HOST, "example.com")
+            .body(Empty::new())
+            .unwrap();
+
+        let resp = run_handle_http_request_with_limits(rules, req, 1024 * 1024, 8 * 1024).await;
+        assert_eq!(resp.status(), StatusCode::FOUND);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap();
+        assert_eq!(location, "https://dest.example/path");
+    }
+
+    mod extra {
+        use super::*;
+
+        #[test]
+        fn extra_is_no_body_response_for_not_modified() {
+            assert!(is_no_body_response(StatusCode::NOT_MODIFIED, "GET"));
+        }
+
+        #[test]
+        fn extra_is_no_body_response_false_for_post_with_body() {
+            assert!(!is_no_body_response(StatusCode::OK, "POST"));
+        }
+
+        #[test]
+        fn extra_set_content_encoding_header_sets_header_when_some() {
+            let mut headers = hyper::HeaderMap::new();
+            set_content_encoding_header(&mut headers, Some("gzip"));
+            assert_eq!(
+                headers
+                    .get(hyper::header::CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+                Some("gzip")
+            );
+        }
+
+        #[test]
+        fn extra_set_content_encoding_header_removes_existing_header_when_none() {
+            let mut headers = hyper::HeaderMap::new();
+            headers.insert(
+                hyper::header::CONTENT_ENCODING,
+                HeaderValue::from_static("br"),
+            );
+            set_content_encoding_header(&mut headers, None);
+            assert!(headers.get(hyper::header::CONTENT_ENCODING).is_none());
+        }
+
+        #[test]
+        fn extra_headers_pairs_equal_ignore_order_true_for_empty_slices() {
+            let a: Vec<(String, String)> = Vec::new();
+            let b: Vec<(String, String)> = Vec::new();
+            assert!(headers_pairs_equal_ignore_order(&a, &b));
+        }
+
+        #[test]
+        fn extra_headers_pairs_equal_ignore_order_false_when_lengths_differ() {
+            let a = vec![("a".to_string(), "1".to_string())];
+            let b = vec![
+                ("a".to_string(), "1".to_string()),
+                ("b".to_string(), "2".to_string()),
+            ];
+            assert!(!headers_pairs_equal_ignore_order(&a, &b));
+        }
+
+        #[test]
+        fn extra_proxy_authority_uses_plain_host_for_port_80() {
+            assert_eq!(proxy_authority("example.com", 80), "example.com");
+        }
+
+        #[test]
+        fn extra_proxy_authority_includes_port_for_non_default() {
+            assert_eq!(proxy_authority("example.com", 8080), "example.com:8080");
+        }
+
+        #[test]
+        fn extra_get_default_port_uses_https_for_is_https_true() {
+            assert_eq!(get_default_port(&None, true), 443);
+        }
+
+        #[test]
+        fn extra_get_default_port_uses_http_for_is_https_false() {
+            assert_eq!(get_default_port(&None, false), 80);
+        }
+
+        #[test]
+        fn extra_build_error_body_includes_status_and_url() {
+            let info = ConnectionErrorInfo {
+                error_type: "OTHER",
+                error_message: "err".to_string(),
+                host: "host".to_string(),
+                request_url: "http://example.com".to_string(),
+            };
+            let body = build_error_body(599, &info);
+            let text = String::from_utf8(body.to_vec()).unwrap();
+            assert!(text.contains("Status: 599"));
+            assert!(text.contains("URL: http://example.com"));
+        }
+
+        #[test]
+        fn extra_build_connection_error_response_sets_content_type_and_header() {
+            let info = ConnectionErrorInfo {
+                error_type: "REQUEST_TLS_FAILED",
+                error_message: "fail".to_string(),
+                host: "host".to_string(),
+                request_url: "url".to_string(),
+            };
+            let res = build_connection_error_response(502, &info);
+            assert_eq!(
+                res.headers().get(hyper::header::CONTENT_TYPE).unwrap(),
+                "text/plain; charset=utf-8"
+            );
+            assert_eq!(
+                res.headers().get("X-Bifrost-Error").unwrap(),
+                "REQUEST_TLS_FAILED"
+            );
+        }
+
+        #[test]
+        fn extra_build_overridden_error_response_prefers_status_code_over_replace_status() {
+            let rules = ResolvedRules {
+                status_code: Some(201),
+                replace_status: Some(599),
+                ..Default::default()
+            };
+            let info = ConnectionErrorInfo {
+                error_type: "OTHER",
+                error_message: "err".to_string(),
+                host: "host".to_string(),
+                request_url: "url".to_string(),
+            };
+            let res = build_overridden_error_response(&rules, 502, &info);
+            assert_eq!(res.status(), StatusCode::CREATED);
+        }
+
+        #[test]
+        fn extra_build_overridden_error_response_uses_replace_status_when_no_status_code() {
+            let rules = ResolvedRules {
+                status_code: None,
+                replace_status: Some(599),
+                ..Default::default()
+            };
+            let info = ConnectionErrorInfo {
+                error_type: "OTHER",
+                error_message: "err".to_string(),
+                host: "host".to_string(),
+                request_url: "url".to_string(),
+            };
+            let res = build_overridden_error_response(&rules, 502, &info);
+            assert_eq!(res.status(), StatusCode::from_u16(599).unwrap());
+        }
+
+        #[test]
+        fn extra_build_upstream_pool_partition_differs_for_tls_flag() {
+            let rules_tls = ResolvedRules {
+                upstream_unsafe_ssl: false,
+                ..Default::default()
+            };
+            let rules_unsafe = ResolvedRules {
+                upstream_unsafe_ssl: true,
+                ..Default::default()
+            };
+            let a = build_upstream_pool_partition("orig", "target", 443, true, &rules_tls);
+            let b = build_upstream_pool_partition("orig", "target", 443, true, &rules_unsafe);
+            assert_ne!(a, b);
+        }
+
+        #[test]
+        fn extra_should_use_metrics_only_forwarding_mode_false_for_websocket_or_sse() {
+            assert!(!should_use_metrics_only_forwarding_mode(true, false, false, true, false));
+            assert!(!should_use_metrics_only_forwarding_mode( true, false, false, false, true));
+        }
+
+        #[test]
+        fn extra_h2_body_recovery_action_stream_for_non_retryable() {
+            let action = h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "application/octet-stream",
+                Some(10),
+                1024,
+                false,
+            );
+            assert_eq!(action, H2BodyRecoveryAction::Stream);
+        }
+
+        #[test]
+        fn extra_h2_body_recovery_action_retry_http1_for_large_binary_body() {
+            let action = h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "application/octet-stream",
+                Some(2048),
+                1024,
+                true,
+            );
+            assert_eq!(action, H2BodyRecoveryAction::RetryHttp1);
+        }
+
+        #[test]
+        fn extra_h2_body_recovery_action_probe_for_small_text_body() {
+            let action = h2_body_recovery_action(
+                hyper::Version::HTTP_2,
+                StatusCode::OK,
+                "GET",
+                "text/plain",
+                Some(10),
+                1024,
+                true,
+            );
+            assert_eq!(action, H2BodyRecoveryAction::Probe);
+        }
+
+        #[test]
+        fn extra_parse_and_record_sse_events_counts_only_data_lines() {
+            let body = b":comment\ndata: one\nid:1\n\ndata: two\n\n";
+            let count = parse_and_record_sse_events(body);
+            assert_eq!(count, 2);
+        }
+
+        #[test]
+        fn extra_needs_request_body_processing_true_when_req_merge_set() {
+            let mut rules = ResolvedRules::default();
+            rules.req_merge = Some(serde_json::json!({"k": 1}));
+            assert!(needs_request_body_processing(&rules));
+        }
+
+        #[test]
+        fn extra_needs_response_override_true_when_replace_status_set() {
+            let mut rules = ResolvedRules::default();
+            rules.replace_status = Some(599);
+            assert!(needs_response_override(&rules));
+        }
+
+        #[test]
+        fn extra_build_proxy_rule_url_adds_http_prefix_for_plain_host() {
+            let url = build_proxy_rule_url("proxy.local:3128").unwrap();
+            assert_eq!(url.scheme(), "http");
+            assert_eq!(url.host_str(), Some("proxy.local"));
+            assert_eq!(url.port(), Some(3128));
+        }
+
+        #[test]
+        fn extra_build_proxy_forward_uri_relative_http_uses_original_host_and_port() {
+            let processed: Uri = "/path?q=1".parse().unwrap();
+            let uri = build_proxy_forward_uri(&processed, "example.com", 8080, false).unwrap();
+            assert_eq!(
+                uri,
+                "http://example.com:8080/path?q=1".parse::<Uri>().unwrap()
+            );
+        }
+
+        #[test]
+        fn extra_build_proxy_forward_uri_relative_https_uses_default_port() {
+            let processed: Uri = "/secure".parse().unwrap();
+            let uri = build_proxy_forward_uri(&processed, "example.com", 443, true).unwrap();
+            assert_eq!(
+                uri,
+                "https://example.com/secure".parse::<Uri>().unwrap()
+            );
+        }
+    }
+}

@@ -8711,3 +8711,998 @@ mod coverage_boost_v2 {
         assert_eq!(values, vec!["rule".to_string()]);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use bifrost_admin::AdminState;
+    use bifrost_core::Protocol;
+    use bifrost_core::rule_share::{append_rule_share_query, new_rule_share_payload};
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty, Full};
+    use hyper::body::Incoming;
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::header::HeaderValue;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper::{Method, Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use tokio::io::duplex;
+    use tokio::net::TcpListener;
+
+    use wiremock::matchers::{method as wm_method, path as wm_path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    use crate::server::{NoOpRulesResolver, ProxyConfig, ResolvedRules, RuleValue, TlsConfig, TlsInterceptConfig};
+    use crate::utils::logging::RequestContext;
+
+    // ---------------- maybe_backfill_tunnel_client_process ----------------
+
+    #[test]
+    fn test_maybe_backfill_skips_when_metadata_present() {
+        let state = Arc::new(AdminState::new(0));
+        let peer_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 12345));
+        let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
+
+        // Should early-return without spawning background resolver
+        maybe_backfill_tunnel_client_process(
+            &state,
+            "req-meta",
+            Some("Browser"),
+            Some(42),
+            peer_addr,
+            local_addr,
+            false,
+        );
+    }
+
+    #[test]
+    fn test_maybe_backfill_skips_when_unknown_and_flag_set() {
+        let state = Arc::new(AdminState::new(0));
+        let peer_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 12345));
+        let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
+
+        maybe_backfill_tunnel_client_process(
+            &state,
+            "req-skip",
+            None,
+            None,
+            peer_addr,
+            local_addr,
+            true,
+        );
+    }
+
+    #[test]
+    fn test_maybe_backfill_skips_for_non_loopback_peers() {
+        let state = Arc::new(AdminState::new(0));
+        let peer_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::new(1, 2, 3, 4)), 12345));
+        let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
+
+        maybe_backfill_tunnel_client_process(
+            &state,
+            "req-nonloop",
+            None,
+            None,
+            peer_addr,
+            local_addr,
+            false,
+        );
+    }
+
+    // ---------------- domain / app / ip matching helpers ----------------
+
+    #[test]
+    fn test_is_domain_matched_empty_patterns_false() {
+        let patterns: Vec<String> = Vec::new();
+        assert!(!is_domain_matched("example.com", &patterns));
+    }
+
+    #[test]
+    fn test_is_domain_matched_exact_and_wildcard_variants() {
+        let patterns = vec!["example.com".to_string(), "*.internal.local".to_string()];
+        assert!(is_domain_matched("example.com", &patterns));
+        assert!(is_domain_matched("api.internal.local", &patterns));
+        assert!(!is_domain_matched("other.com", &patterns));
+    }
+
+    #[test]
+    fn test_is_app_matched_empty_and_none() {
+        let patterns: Vec<String> = Vec::new();
+        assert!(!is_app_matched(Some("Chrome"), &patterns));
+        assert!(!is_app_matched(None, &patterns));
+    }
+
+    #[test]
+    fn test_is_ip_matched_invalid_and_single_ip() {
+        let patterns = vec!["192.168.1.0/24".to_string(), "10.0.0.1".to_string()];
+        assert!(!is_ip_matched("not-an-ip", &patterns));
+        assert!(is_ip_matched("10.0.0.1", &patterns));
+    }
+
+    #[test]
+    fn test_ip_include_and_exclude_helpers() {
+        let include = vec!["10.0.0.1".to_string()];
+        let exclude = vec!["192.168.0.0/16".to_string()];
+        assert!(is_ip_included("10.0.0.1", &include));
+        assert!(is_ip_excluded("192.168.1.20", &exclude));
+    }
+
+    // ---------------- requires_client_app_for_tls_decision ----------------
+
+    #[test]
+    fn test_requires_client_app_for_tls_decision_when_lists_non_empty() {
+        let mut cfg = TlsInterceptConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec![],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        assert!(!requires_client_app_for_tls_decision(&cfg));
+        cfg.app_intercept_include.push("Chrome".to_string());
+        assert!(requires_client_app_for_tls_decision(&cfg));
+    }
+
+    // ---------------- build_upstream_pool_partition ----------------
+
+    #[test]
+    fn test_build_upstream_pool_partition_http_and_https() {
+        let mut rules = ResolvedRules::default();
+        rules.host = Some("override.example".to_string());
+        rules.proxy = Some("127.0.0.1:8888".to_string());
+        rules.host_protocol = Some(Protocol::Http);
+        rules.upstream_unsafe_ssl = true;
+
+        let http_partition = build_upstream_pool_partition(
+            "orig.example",
+            "target.example",
+            80,
+            true,
+            &rules,
+        );
+        assert!(http_partition.contains("target=http://target.example:80"));
+
+        let https_partition = build_upstream_pool_partition(
+            "orig.example",
+            "target.example",
+            443,
+            false,
+            &rules,
+        );
+        assert!(https_partition.contains("target=https://target.example:443"));
+    }
+
+    // ---------------- send_pooled_request (with real loopback listener) ----------------
+
+    async fn start_simple_http_server(port: u16) {
+        let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), port))
+            .await
+            .expect("bind loopback listener");
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|_req: Request<Incoming>| async move {
+                    let mut resp: Response<BoxBody> = Response::builder()
+                        .status(StatusCode::OK)
+                        .header("x-echo", HeaderValue::from_static("ok"))
+                        .body(full_body(Bytes::from_static(b"hello")))
+                        .unwrap();
+                    resp.headers_mut().insert(
+                        hyper::header::CONTENT_LENGTH,
+                        HeaderValue::from_static("5"),
+                    );
+                    Ok::<_, hyper::Error>(resp)
+                });
+                let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn test_send_pooled_request_basic_get_v3() {
+        // Bind to an ephemeral port on loopback using std listener to satisfy requirements
+        let std_listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind std listener");
+        let port = std_listener.local_addr().unwrap().port();
+        // Hand std listener over to Tokio
+        std_listener.set_nonblocking(true).unwrap();
+        let listener = TcpListener::from_std(std_listener).expect("from_std");
+
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let io = TokioIo::new(stream);
+                let service = service_fn(|_req: Request<Incoming>| async move {
+                    let mut resp: Response<BoxBody> = Response::builder()
+                        .status(StatusCode::OK)
+                        .header("x-echo", HeaderValue::from_static("ok"))
+                        .body(full_body(Bytes::from_static(b"hello")))
+                        .unwrap();
+                    resp.headers_mut().insert(
+                        hyper::header::CONTENT_LENGTH,
+                        HeaderValue::from_static("5"),
+                    );
+                    Ok::<_, hyper::Error>(resp)
+                });
+                let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            }
+        });
+
+        let uri: hyper::Uri = format!("http://127.0.0.1:{port}/test")
+            .parse()
+            .unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(full_body(Bytes::new()))
+            .unwrap();
+
+        let resp = send_pooled_request(req, false, &[], "partition-basic")
+            .await
+            .expect("send_pooled_request should succeed");
+        let (parts, body) = resp.into_parts();
+        assert_eq!(parts.status, StatusCode::OK);
+        assert_eq!(parts.headers.get("x-echo").unwrap(), "ok");
+        let bytes = body.collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"hello");
+    }
+
+    #[tokio::test]
+    async fn test_send_pooled_request_http1_only_v3() {
+        let server = MockServer::start().await;
+        Mock::given(wm_method("GET"))
+            .and(wm_path("/pool"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes("ok-http1"))
+            .mount(&server)
+            .await;
+
+        let uri: hyper::Uri = format!("{}/pool", server.uri()).parse().unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(full_body(Bytes::new()))
+            .unwrap();
+
+        let resp = send_pooled_request_http1_only(req, false, &[], "partition-http1")
+            .await
+            .expect("http1_only request should succeed");
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"ok-http1");
+    }
+
+    // ---------------- rewrite_intercepted_virtual_host_request ----------------
+
+    #[tokio::test]
+    async fn test_rewrite_intercepted_virtual_host_request_prefixes_path() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let rewritten = rewrite_intercepted_virtual_host_request(req);
+                let path = rewritten.uri().path().to_string();
+                let body = Full::new(Bytes::from(path));
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(body)
+                        .unwrap(),
+                )
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/foo")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes, Bytes::from("/_bifrost/foo"));
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    // ---------------- handle_intercepted_rule_share_query ----------------
+
+    #[tokio::test]
+    async fn test_handle_intercepted_rule_share_query_redirects_get() {
+        let payload = new_rule_share_payload("demo", "example.com bp://127.0.0.1:3000").unwrap();
+        let shared = append_rule_share_query("https://example.com/path?a=1", &payload).unwrap();
+        let shared_for_server = shared.clone();
+
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                let shared_cloned = shared_for_server.clone();
+                async move {
+                    let request_url = shared_cloned;
+                    let action = handle_intercepted_rule_share_query(
+                        &mut req,
+                        &request_url,
+                        "req-rule-share",
+                        None,
+                        None,
+                    )
+                    .await;
+
+                    let marker = match action {
+                        InterceptedRuleShareAction::Redirect(clean) => {
+                            let body = Full::new(Bytes::from(clean));
+                            return Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(body)
+                                    .unwrap(),
+                            );
+                        }
+                        _ => "none".to_string(),
+                    };
+
+                    let body = Full::new(Bytes::from(marker));
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(body)
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        // Only path and query matter for the server; host is irrelevant here.
+        let url: hyper::Uri = shared.parse().unwrap();
+        let path_and_query = url
+            .path_and_query()
+            .map(|pq| pq.as_str())
+            .unwrap_or("/");
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(path_and_query)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = std::str::from_utf8(&bytes).unwrap();
+        // Body should be the clean URL without the rule share query param.
+        assert!(body_str.starts_with("https://example.com/path"));
+        assert!(!body_str.contains("__bifrost_rule"));
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v4 {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use bifrost_core::Protocol;
+    use bifrost_core::rule_share::{append_rule_share_query, new_rule_share_payload};
+    use bytes::Bytes;
+    use http_body_util::{BodyExt, Empty, Full};
+    use hyper::body::Incoming;
+    use hyper::client::conn::http1 as client_http1;
+    use hyper::server::conn::http1 as server_http1;
+    use hyper::service::service_fn;
+    use hyper::{Method, Request, Response, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use tokio::io::duplex;
+
+    use crate::server::{ResolvedRules, RuleValue, TlsConfig, TlsInterceptConfig};
+
+    // ---------------- is_websocket_upgrade_request ----------------
+
+    #[tokio::test]
+    async fn test_is_websocket_upgrade_request_true_for_http1_headers_v4() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let is_ws = is_websocket_upgrade_request(&req);
+                let body = Full::new(Bytes::from(if is_ws { "ws" } else { "no" }));
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(body)
+                        .unwrap(),
+                )
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/chat")
+            .header(hyper::header::CONNECTION, "Upgrade")
+            .header(hyper::header::UPGRADE, "websocket")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"ws");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_is_websocket_upgrade_request_false_without_headers_v4() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|req: Request<Incoming>| async move {
+                let is_ws = is_websocket_upgrade_request(&req);
+                let body = Full::new(Bytes::from(if is_ws { "ws" } else { "no" }));
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(body)
+                        .unwrap(),
+                )
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/chat")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"no");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    // ---------------- apply_clean_url_to_intercepted_request ----------------
+
+    #[tokio::test]
+    async fn test_apply_clean_url_to_intercepted_request_sets_path_and_query_v4() {
+        let (client_side, server_side) = duplex(16 * 1024);
+        let clean_url = "https://example.com/clean/path?x=1&y=2".to_string();
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                let clean_url = clean_url.clone();
+                async move {
+                    apply_clean_url_to_intercepted_request(&mut req, &clean_url).unwrap();
+                    let path_and_query = req
+                        .uri()
+                        .path_and_query()
+                        .map(|pq| pq.as_str().to_string())
+                        .unwrap_or_default();
+                    let body = Full::new(Bytes::from(path_and_query));
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(body)
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/original?foo=bar")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"/clean/path?x=1&y=2");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_apply_clean_url_to_intercepted_request_invalid_url_v4() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(|mut req: Request<Incoming>| async move {
+                let result = apply_clean_url_to_intercepted_request(&mut req, "://not-a-valid-url");
+                let body = match result {
+                    Ok(()) => Full::new(Bytes::from_static(b"ok")),
+                    Err(_) => Full::new(Bytes::from_static(b"err")),
+                };
+                Ok::<_, hyper::Error>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(body)
+                        .unwrap(),
+                )
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/original")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"err");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    // ------------- additional handle_intercepted_rule_share_query tests -------------
+
+    #[tokio::test]
+    async fn test_handle_intercepted_rule_share_query_cleans_post_url_v4() {
+        let payload = new_rule_share_payload("demo2", "example.com bp://127.0.0.1:4000").unwrap();
+        let shared = append_rule_share_query("https://example.com/old?flag=1", &payload).unwrap();
+        let shared_for_server = shared.clone();
+
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                let shared_url = shared_for_server.clone();
+                async move {
+                    let action = handle_intercepted_rule_share_query(
+                        &mut req,
+                        &shared_url,
+                        "req-rule-share-post-v4",
+                        None,
+                        None,
+                    )
+                    .await;
+
+                    match action {
+                        InterceptedRuleShareAction::Cleaned(clean) => {
+                            let current = req
+                                .uri()
+                                .path_and_query()
+                                .map(|pq| pq.as_str().to_string())
+                                .unwrap_or_default();
+                            let body = Full::new(Bytes::from(format!("{clean}|{current}")));
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(body)
+                                    .unwrap(),
+                            )
+                        }
+                        _ => {
+                            let body = Full::new(Bytes::from_static(b"unexpected"));
+                            Ok::<_, hyper::Error>(
+                                Response::builder()
+                                    .status(StatusCode::OK)
+                                    .body(body)
+                                    .unwrap(),
+                            )
+                        }
+                    }
+                }
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let uri: hyper::Uri = shared.parse().unwrap();
+        let path_and_query = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri(path_and_query)
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body_str = std::str::from_utf8(&bytes).unwrap();
+        let parts: Vec<&str> = body_str.split('|').collect();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], "https://example.com/old?flag=1");
+        assert_eq!(parts[1], "/old?flag=1");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_handle_intercepted_rule_share_query_invalid_payload_returns_none_v4() {
+        let (client_side, server_side) = duplex(16 * 1024);
+
+        let request_url =
+            "https://example.com/path?__bifrost_rule=not-valid-base64".to_string();
+
+        let server_task = tokio::spawn(async move {
+            let io = TokioIo::new(server_side);
+            let service = service_fn(move |mut req: Request<Incoming>| {
+                let request_url = request_url.clone();
+                async move {
+                    let action = handle_intercepted_rule_share_query(
+                        &mut req,
+                        &request_url,
+                        "req-bad-rule-share-v4",
+                        None,
+                        None,
+                    )
+                    .await;
+                    let marker = match action {
+                        InterceptedRuleShareAction::None => "none",
+                        _ => "other",
+                    };
+                    let body = Full::new(Bytes::from(marker));
+                    Ok::<_, hyper::Error>(
+                        Response::builder()
+                            .status(StatusCode::OK)
+                            .body(body)
+                            .unwrap(),
+                    )
+                }
+            });
+            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+        });
+
+        let io = TokioIo::new(client_side);
+        let (mut sender, conn) = client_http1::handshake(io).await.unwrap();
+        let client_task = tokio::spawn(conn);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/path?__bifrost_rule=not-valid-base64")
+            .body(Empty::<Bytes>::new())
+            .unwrap();
+
+        let resp = sender.send_request(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(bytes.as_ref(), b"none");
+
+        drop(sender);
+        client_task.await.unwrap().unwrap();
+        server_task.await.unwrap();
+    }
+
+    // ------------- content-type helpers --------------
+
+    #[test]
+    fn test_is_likely_text_content_type_empty_and_binary_v4() {
+        assert!(!is_likely_text_content_type(""));
+        assert!(!is_likely_text_content_type("application/octet-stream"));
+        assert!(is_likely_text_content_type("text/plain; charset=utf-8"));
+    }
+
+    #[test]
+    fn test_is_likely_text_content_type_json_and_xml_variants_v4() {
+        assert!(is_likely_text_content_type("application/json"));
+        assert!(is_likely_text_content_type("application/vnd.api+json"));
+        assert!(is_likely_text_content_type("application/atom+xml"));
+    }
+
+    #[test]
+    fn test_is_likely_binary_content_type_for_grpc_and_fonts_v4() {
+        assert!(is_likely_binary_content_type("application/grpc+proto"));
+        assert!(is_likely_binary_content_type("application/font-woff"));
+        assert!(is_likely_binary_content_type("font/woff2"));
+    }
+
+    #[test]
+    fn test_is_likely_binary_content_type_false_for_text_with_charset_v4() {
+        assert!(!is_likely_binary_content_type("text/html; charset=utf-8"));
+        assert!(!is_likely_binary_content_type("application/json; charset=utf-8"));
+    }
+
+    // ------------- should_use_binary_performance_mode extra cases -------------
+
+    #[test]
+    fn test_should_use_binary_performance_mode_disabled_flag_always_false_v4() {
+        let res = Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(empty_body())
+            .unwrap();
+        let (parts, _body) = res.into_parts();
+        assert!(!should_use_binary_performance_mode(&parts, false));
+    }
+
+    #[test]
+    fn test_should_use_binary_performance_mode_inline_binary_still_true_v4() {
+        let res = Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "application/octet-stream")
+            .body(empty_body())
+            .unwrap();
+        let (parts, _body) = res.into_parts();
+        assert!(should_use_binary_performance_mode(&parts, true));
+    }
+
+    #[test]
+    fn test_should_use_binary_performance_mode_skips_images_even_with_flag_v4() {
+        let res = Response::builder()
+            .status(200)
+            .header(hyper::header::CONTENT_TYPE, "image/jpeg")
+            .body(empty_body())
+            .unwrap();
+        let (parts, _body) = res.into_parts();
+        assert!(!should_use_binary_performance_mode(&parts, true));
+    }
+
+    // ------------- h2 alpn formatting helpers -------------
+
+    #[test]
+    fn test_format_tls_alpn_unknown_bytes_v4() {
+        assert_eq!(format_tls_alpn(Some(b"custom/1.0")), "custom/1.0");
+    }
+
+    #[test]
+    fn test_is_http_alpn_recognises_h2_and_http11_v4() {
+        assert!(is_http_alpn(Some(b"h2")));
+        assert!(is_http_alpn(Some(b"http/1.1")));
+        assert!(!is_http_alpn(Some(b"stun")));
+        assert!(!is_http_alpn(None));
+    }
+
+    // ------------- additional TLS interception rules coverage -------------
+
+    fn auto_tls_rule_v4(protocol: Protocol) -> RuleValue {
+        RuleValue {
+            pattern: "*".to_string(),
+            protocol,
+            value: "test".to_string(),
+            options: std::collections::HashMap::new(),
+            rule_name: None,
+            raw: None,
+            line: None,
+            auto_tls_intercept: true,
+        }
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_res_body_rule_v4() {
+        let mut rules = ResolvedRules::default();
+        rules.res_body = Some(Bytes::from_static(b"body"));
+        rules.rules.push(auto_tls_rule_v4(Protocol::ResBody));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_res_replace_regex_rule_v4() {
+        let mut rules = ResolvedRules::default();
+        rules
+            .res_replace_regex
+            .push(crate::server::RegexReplace {
+                pattern: regex::Regex::new("foo").unwrap(),
+                replacement: "bar".to_string(),
+                global: true,
+            });
+        rules.rules.push(auto_tls_rule_v4(Protocol::ResReplace));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_req_scripts_rule_v4() {
+        let mut rules = ResolvedRules::default();
+        rules.req_scripts.push("script1".to_string());
+        rules.rules.push(auto_tls_rule_v4(Protocol::ReqScript));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    #[test]
+    fn test_requires_tls_interception_for_rules_res_scripts_rule_v4() {
+        let mut rules = ResolvedRules::default();
+        rules.res_scripts.push("script-res".to_string());
+        rules.rules.push(auto_tls_rule_v4(Protocol::ResScript));
+        assert!(requires_tls_interception_for_rules(&rules));
+    }
+
+    // ------------- IP helper extra coverage -------------
+
+    #[test]
+    fn test_is_ip_matched_ipv6_and_cidr_v4() {
+        let patterns = vec!["fe80::/10".to_string(), "::1".to_string()];
+        assert!(is_ip_matched("fe80::1", &patterns));
+        assert!(is_ip_matched("::1", &patterns));
+        assert!(!is_ip_matched("::2", &["::3".to_string()]));
+    }
+
+    #[test]
+    fn test_is_ip_included_and_excluded_shortcuts_v4() {
+        let include = vec!["10.1.1.0/24".to_string()];
+        let exclude = vec!["10.1.2.0/24".to_string()];
+        assert!(is_ip_included("10.1.1.10", &include));
+        assert!(is_ip_excluded("10.1.2.10", &exclude));
+    }
+
+    // ------------- domain and TLS decision helpers -------------
+
+    #[test]
+    fn test_is_domain_included_and_excluded_shortcuts_v4() {
+        let include = vec!["*.example.com".to_string()];
+        let exclude = vec!["blocked.com".to_string()];
+        assert!(is_domain_included("api.example.com", &include));
+        assert!(!is_domain_included("foo.com", &include));
+        assert!(is_domain_excluded("blocked.com", &exclude));
+    }
+
+    #[test]
+    fn test_should_intercept_tls_for_client_respects_rule_override_true_v4() {
+        let tls_config = TlsConfig {
+            ca_cert: Some(vec![1]),
+            ca_key: Some(vec![2]),
+            cert_generator: None,
+            sni_resolver: None,
+        };
+        let tls_intercept_config = TlsInterceptConfig {
+            enable_tls_interception: false,
+            intercept_exclude: vec![],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        let mut rules = ResolvedRules::default();
+        rules.tls_intercept = Some(true);
+        assert!(should_intercept_tls_for_client(
+            "example.com",
+            None,
+            true,
+            None,
+            &tls_intercept_config,
+            &tls_config,
+            &rules,
+        ));
+    }
+
+    #[test]
+    fn test_should_intercept_tls_for_client_respects_rule_override_false_v4() {
+        let tls_config = TlsConfig {
+            ca_cert: Some(vec![1]),
+            ca_key: Some(vec![2]),
+            cert_generator: None,
+            sni_resolver: None,
+        };
+        let tls_intercept_config = TlsInterceptConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec![],
+            intercept_include: vec![],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        let mut rules = ResolvedRules::default();
+        rules.tls_intercept = Some(false);
+        assert!(!should_intercept_tls_for_client(
+            "example.com",
+            None,
+            true,
+            None,
+            &tls_intercept_config,
+            &tls_config,
+            &rules,
+        ));
+    }
+
+    #[test]
+    fn test_should_intercept_tls_for_client_domain_include_without_app_policy_v4() {
+        let tls_config = TlsConfig {
+            ca_cert: Some(vec![1]),
+            ca_key: Some(vec![2]),
+            cert_generator: None,
+            sni_resolver: None,
+        };
+        let tls_intercept_config = TlsInterceptConfig {
+            enable_tls_interception: false,
+            intercept_exclude: vec![],
+            intercept_include: vec!["example.com".to_string()],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        let rules = ResolvedRules::default();
+        assert!(should_intercept_tls_for_client(
+            "example.com",
+            None,
+            true,
+            None,
+            &tls_intercept_config,
+            &tls_config,
+            &rules,
+        ));
+    }
+
+    #[test]
+    fn test_should_intercept_tls_for_client_skips_when_no_ca_cert_v4() {
+        let tls_config = TlsConfig {
+            ca_cert: None,
+            ca_key: None,
+            cert_generator: None,
+            sni_resolver: None,
+        };
+        let tls_intercept_config = TlsInterceptConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec![],
+            intercept_include: vec!["example.com".to_string()],
+            app_intercept_exclude: vec![],
+            app_intercept_include: vec![],
+            ip_intercept_exclude: vec![],
+            ip_intercept_include: vec![],
+            unsafe_ssl: false,
+        };
+        let rules = ResolvedRules::default();
+        assert!(!should_intercept_tls_for_client(
+            "example.com",
+            None,
+            true,
+            None,
+            &tls_intercept_config,
+            &tls_config,
+            &rules,
+        ));
+    }
+}

@@ -2782,3 +2782,648 @@ mod coverage_boost {
         assert!(task.import_policy.auto_run_after_import);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::asr_runtime::AsrServiceState;
+    use crate::test_env::BifrostDataDirGuard;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use tempfile::tempdir;
+
+    fn simple_file_record(created: Option<u64>, modified: Option<u64>) -> FileRecord {
+        FileRecord {
+            task_id: "task".to_string(),
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_size: None,
+            source_modified_ms: modified,
+            source_created_at_ms: created,
+            source_created_at_source: None,
+            content_hash: None,
+            content_hash_algorithm: None,
+            duplicate_of_source_key: None,
+            transcript_alias: None,
+            media_duration_ms: None,
+            status: FileStatus::Pending,
+            output_text_path: None,
+            output_metadata_path: None,
+            output_timeline_path: None,
+            text_chars: 0,
+            error: None,
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            chunk_metrics: Vec::new(),
+            fallback_reason: None,
+            started_at_ms: None,
+            finished_at_ms: None,
+            progress_current: None,
+            progress_total: None,
+            failed_chunks: Vec::new(),
+            memory_limit_hints: Vec::new(),
+        }
+    }
+
+    fn simple_state(pid: Option<u32>, port: u16) -> AsrServiceState {
+        AsrServiceState {
+            host: "127.0.0.1".to_string(),
+            port,
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "chinese".to_string(),
+            home: crate::handlers::asr::default_home(),
+            pid,
+            managed_by: "test".to_string(),
+            owner_module: Some("test".to_string()),
+            owner_id: None,
+            started_at_ms: 1,
+        }
+    }
+
+    fn short_audio_source_info(duration_ms: u64) -> SourceAudioInfo {
+        SourceAudioInfo {
+            source_size: None,
+            source_modified_ms: None,
+            source_created_at_ms: None,
+            source_created_at_source: None,
+            media_duration_ms: Some(duration_ms),
+        }
+    }
+
+    fn minimal_task(id: &str) -> AsrDirectoryTask {
+        AsrDirectoryTask {
+            id: id.to_string(),
+            name: id.to_string(),
+            audio_dir: PathBuf::from("/tmp"),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: default_task_schedule(),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
+            created_at_ms: 1,
+            updated_at_ms: 1,
+            last_run_at_ms: None,
+            next_run_at_ms: None,
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
+        }
+    }
+
+    fn make_file_record(created: Option<u64>, modified: Option<u64>) -> FileRecord {
+        simple_file_record(created, modified)
+    }
+
+    fn make_asr_unit(start_ms: u64, end_ms: u64) -> AsrAudioUnit {
+        AsrAudioUnit {
+            unit_id: "unit_00".to_string(),
+            speaker: Some("speaker_00".to_string()),
+            speaker_display_name: Some("用户A".to_string()),
+            mapped_profile_id: None,
+            confidence: Some(0.9),
+            source_start_ms: start_ms,
+            source_end_ms: end_ms,
+            source_segment_ids: vec!["seg0".to_string()],
+            overlap: false,
+            unit_kind: bifrost_asr::planner::AsrUnitKind::Segment,
+        }
+    }
+
+    #[test]
+    fn task_allows_external_device_event_import_requires_enabled_and_devices() {
+        let mut task = AsrDirectoryTask {
+            id: "t".to_string(),
+            name: "t".to_string(),
+            audio_dir: PathBuf::from("/tmp"),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: default_task_schedule(),
+            language: "zh".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            last_run_at_ms: None,
+            next_run_at_ms: None,
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy::default(),
+        };
+        assert!(!task_allows_external_device_event_import(&task));
+        task.import_policy.enabled = true;
+        task.external_devices.push(AsrExternalDeviceBinding::default());
+        assert!(task_allows_external_device_event_import(&task));
+    }
+
+    #[test]
+    fn task_allows_external_device_event_import_false_when_no_devices() {
+        let mut task = AsrDirectoryTask {
+            id: "t2".to_string(),
+            name: "t2".to_string(),
+            audio_dir: PathBuf::from("/tmp"),
+            recursive: true,
+            enabled: true,
+            paused: false,
+            paused_at_ms: None,
+            schedule: default_task_schedule(),
+            language: "zh".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            diarization: AsrDiarizationConfig::default(),
+            created_at_ms: 0,
+            updated_at_ms: 0,
+            last_run_at_ms: None,
+            next_run_at_ms: None,
+            last_error: None,
+            daily_agent: AsrDailyAgentConfig::default(),
+            external_devices: Vec::new(),
+            import_policy: AsrExternalImportPolicy { enabled: true, ..AsrExternalImportPolicy::default() },
+        };
+        assert!(!task_allows_external_device_event_import(&task));
+    }
+
+    #[test]
+    fn pending_time_helpers_handle_zero_and_max_values() {
+        let record = simple_file_record(Some(0), Some(u64::MAX));
+        assert_eq!(pending_source_time_ms(Some(&record)), 0);
+        assert_eq!(pending_modified_time_ms(Some(&record)), u64::MAX);
+
+        assert_eq!(pending_source_time_ms(None), u64::MAX);
+        assert_eq!(pending_modified_time_ms(None), u64::MAX);
+    }
+
+    #[test]
+    fn service_state_same_process_false_for_mismatched_pid_or_port() {
+        let base = simple_state(Some(1000), 60_000);
+        let other_pid = simple_state(Some(1001), 60_000);
+        let other_port = simple_state(Some(1000), 60_001);
+
+        assert!(service_state_same_process(Some(&base), Some(&base)));
+        assert!(!service_state_same_process(Some(&base), Some(&other_pid)));
+        assert!(!service_state_same_process(Some(&base), Some(&other_port)));
+        assert!(!service_state_same_process(Some(&base), None));
+        assert!(!service_state_same_process(None, Some(&base)));
+    }
+
+    #[test]
+    fn sort_pending_paths_uses_source_times_then_path() {
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        let a = PathBuf::from("/audio/a.wav");
+        let b = PathBuf::from("/audio/b.wav");
+        let c = PathBuf::from("/audio/c.wav");
+
+        store
+            .files
+            .insert(source_key(&a), simple_file_record(Some(5), Some(30)));
+        store
+            .files
+            .insert(source_key(&b), simple_file_record(Some(5), Some(20)));
+        store
+            .files
+            .insert(source_key(&c), simple_file_record(Some(1), Some(40)));
+
+        let mut pending = vec![b.clone(), c.clone(), a.clone()];
+        sort_pending_paths_by_source_time(&store, &mut pending);
+        assert_eq!(pending, vec![c, b, a]);
+    }
+
+    #[test]
+    fn timeline_segments_from_plain_chunks_produces_sequential_indices() {
+        let context = PartialArtifactContext {
+            task_id: "t".to_string(),
+            file_key: "k".to_string(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: None,
+                source_modified_ms: None,
+                source_created_at_ms: Some(1_000),
+                source_created_at_source: Some("test".to_string()),
+                media_duration_ms: Some(5_000),
+            },
+            diarization_profile: None,
+            speakers: Vec::new(),
+            text_path: PathBuf::from("/tmp/text.txt"),
+            metadata_path: PathBuf::from("/tmp/meta.json"),
+            timeline_path: PathBuf::from("/tmp/timeline.json"),
+            started_at_ms: 0,
+        };
+
+        let segments = timeline_segments_from_plain_chunks(
+            &[(0, 500, "a".to_string()), (500, 1000, "b".to_string())],
+            &context,
+        );
+        assert_eq!(segments[0].index, 0);
+        assert_eq!(segments[1].index, 1);
+        assert_eq!(segments[0].absolute_start_ms, Some(1_000));
+        assert_eq!(segments[1].absolute_start_ms, Some(1_500));
+    }
+
+    #[test]
+    fn preserve_partial_artifact_fields_leaves_missing_fields_unchanged() {
+        let mut record = simple_file_record(None, None);
+        let existing = simple_file_record(Some(1), Some(2));
+
+        preserve_partial_artifact_fields(&mut record, &existing);
+
+        assert!(record.output_text_path.is_none());
+        assert!(record.output_metadata_path.is_none());
+        assert!(record.output_timeline_path.is_none());
+        assert_eq!(record.text_chars, 0);
+        assert!(record.media_duration_ms.is_none());
+    }
+
+    #[test]
+    fn preserve_partial_artifact_fields_prefers_existing_artifacts() {
+        let mut record = simple_file_record(None, None);
+        let existing = FileRecord {
+            output_text_path: Some(PathBuf::from("/tmp/text.txt")),
+            output_metadata_path: Some(PathBuf::from("/tmp/meta.json")),
+            output_timeline_path: Some(PathBuf::from("/tmp/timeline.json")),
+            text_chars: 10,
+            media_duration_ms: Some(1_000),
+            chunk_metrics: vec![AsrChunkMetric {
+                chunk_index: 0,
+                offset_secs: 0,
+                duration_secs: 1,
+                runner: "r".to_string(),
+                status: "ok".to_string(),
+                elapsed_ms: 10,
+                rtf: 0.1,
+                text_chars: 3,
+                text_sha1: "abc".to_string(),
+                server_url: None,
+                fallback_reason: Some("fallback".to_string()),
+                error: None,
+                recorded_at_ms: 1,
+            }],
+            fallback_reason: Some("fallback".to_string()),
+            ..simple_file_record(Some(1), Some(2))
+        };
+
+        preserve_partial_artifact_fields(&mut record, &existing);
+        assert_eq!(record.output_text_path, existing.output_text_path);
+        assert_eq!(record.text_chars, 10);
+        assert_eq!(record.media_duration_ms, Some(1_000));
+        assert_eq!(record.fallback_reason.as_deref(), Some("fallback"));
+        assert_eq!(record.chunk_metrics.len(), 1);
+    }
+
+    #[test]
+    fn speech_resource_lease_guard_can_wrap_none_and_some() {
+        let guard_none = SpeechResourceLeaseGuard { lease: None };
+        drop(guard_none);
+
+        let lease = bifrost_asr::resources::ResourceLease {
+            lease_id: "id".to_string(),
+            owner_module: "test".to_string(),
+            owner_id: "owner".to_string(),
+            kind: bifrost_asr::resources::SpeechResourceKind::OfflineAsrServer,
+            model_id: Some("model".to_string()),
+            priority: 1,
+            preemptible: true,
+            acquired_at_ms: 0,
+        };
+        let guard_some = SpeechResourceLeaseGuard { lease: Some(lease) };
+        drop(guard_some);
+    }
+
+    #[test]
+    fn minimal_task_helper_sets_basic_defaults() {
+        let task = minimal_task("v2-task");
+        assert_eq!(task.id, "v2-task");
+        assert_eq!(task.name, "v2-task");
+        assert!(task.enabled);
+        assert!(!task.paused);
+        assert_eq!(task.runtime_strategy, AsrRuntimeStrategy::ForkPerChunk);
+    }
+
+    #[test]
+    fn short_audio_source_info_preserves_duration() {
+        let info = short_audio_source_info(1234);
+        assert_eq!(info.media_duration_ms, Some(1234));
+        assert!(info.source_size.is_none());
+    }
+
+    #[test]
+    fn short_audio_source_info_accepts_zero_duration() {
+        let info = short_audio_source_info(0);
+        assert_eq!(info.media_duration_ms, Some(0));
+    }
+
+    #[test]
+    fn make_file_record_uses_created_and_modified_inputs() {
+        let record = make_file_record(Some(10), Some(20));
+        assert_eq!(record.source_created_at_ms, Some(10));
+        assert_eq!(record.source_modified_ms, Some(20));
+        assert!(matches!(record.status, FileStatus::Pending));
+    }
+
+    #[test]
+    fn make_asr_unit_carries_speaker_metadata() {
+        let unit = make_asr_unit(100, 200);
+        assert_eq!(unit.source_start_ms, 100);
+        assert_eq!(unit.source_end_ms, 200);
+        assert_eq!(unit.unit_kind, bifrost_asr::planner::AsrUnitKind::Segment);
+        assert_eq!(unit.speaker.as_deref(), Some("speaker_00"));
+    }
+
+    #[test]
+    fn pending_time_helpers_support_large_values() {
+        let record = simple_file_record(Some(u64::MAX - 1), Some(u64::MAX - 2));
+        assert_eq!(pending_source_time_ms(Some(&record)), u64::MAX - 1);
+        assert_eq!(pending_modified_time_ms(Some(&record)), u64::MAX - 2);
+    }
+
+    #[test]
+    fn service_state_same_process_false_when_either_side_missing() {
+        let state = simple_state(Some(1), 10_000);
+        assert!(!service_state_same_process(Some(&state), None));
+        assert!(!service_state_same_process(None, Some(&state)));
+        assert!(!service_state_same_process(None, None));
+    }
+
+    #[test]
+    fn timeline_segments_from_plain_chunks_empty_input_returns_empty_vec() {
+        let context = PartialArtifactContext {
+            task_id: "t".to_string(),
+            file_key: "k".to_string(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: None,
+                source_modified_ms: None,
+                source_created_at_ms: None,
+                source_created_at_source: None,
+                media_duration_ms: None,
+            },
+            diarization_profile: None,
+            speakers: Vec::new(),
+            text_path: PathBuf::from("/tmp/text.txt"),
+            metadata_path: PathBuf::from("/tmp/meta.json"),
+            timeline_path: PathBuf::from("/tmp/timeline.json"),
+            started_at_ms: 0,
+        };
+        let segments = timeline_segments_from_plain_chunks(&[], &context);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn preserve_partial_artifact_fields_keeps_existing_fallback_reason() {
+        let mut record = simple_file_record(None, None);
+        record.fallback_reason = Some("keep".to_string());
+        let existing = simple_file_record(Some(1), Some(2));
+
+        preserve_partial_artifact_fields(&mut record, &existing);
+        assert_eq!(record.fallback_reason.as_deref(), Some("keep"));
+    }
+
+    #[test]
+    fn speech_resource_lease_guard_is_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<SpeechResourceLeaseGuard>();
+    }
+
+    #[test]
+    fn persist_partial_transcription_artifacts_updates_pending_record_and_artifacts() {
+        let dir = tempdir().expect("tempdir");
+        let _guard = BifrostDataDirGuard::set(dir.path());
+
+        let task_id = "persist_task".to_string();
+        let file_key = "audio.wav".to_string();
+
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        store
+            .files
+            .insert(file_key.clone(), simple_file_record(Some(1_000), Some(2_000)));
+        save_file_store(&task_id, &store).expect("save file store");
+
+        let context = PartialArtifactContext {
+            task_id: task_id.clone(),
+            file_key: file_key.clone(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: dir.path().join("audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: Some(123),
+                source_modified_ms: Some(2_000),
+                source_created_at_ms: Some(1_000),
+                source_created_at_source: Some("test".to_string()),
+                media_duration_ms: Some(5_000),
+            },
+            diarization_profile: Some("default".to_string()),
+            speakers: Vec::new(),
+            text_path: dir.path().join("text.txt"),
+            metadata_path: dir.path().join("meta.json"),
+            timeline_path: dir.path().join("timeline.json"),
+            started_at_ms: 42,
+        };
+
+        let segments = vec![TimelineSegment {
+            index: 0,
+            audio_start_ms: 0,
+            audio_end_ms: 1_000,
+            absolute_start_ms: None,
+            absolute_end_ms: None,
+            speaker: None,
+            speaker_display_name: None,
+            overlap: false,
+            text: "hello".to_string(),
+        }];
+        let metrics = vec![AsrChunkMetric {
+            chunk_index: 0,
+            offset_secs: 0,
+            duration_secs: 1,
+            runner: "test".to_string(),
+            status: "ok".to_string(),
+            elapsed_ms: 10,
+            rtf: 0.1,
+            text_chars: 5,
+            text_sha1: "abc".to_string(),
+            server_url: None,
+            fallback_reason: None,
+            error: None,
+            recorded_at_ms: 1,
+        }];
+        let progress = DiarizedSegmentProgress {
+            text: "hello".to_string(),
+            timeline_segments: segments,
+            chunk_metrics: metrics.clone(),
+            fallback_reason: Some("fallback".to_string()),
+        };
+
+        persist_partial_transcription_artifacts(&context, progress).expect("persist");
+
+        let updated_store = load_file_store(&task_id);
+        let updated = updated_store.files.get(&file_key).expect("record");
+        assert_eq!(updated.status, FileStatus::Processing);
+        assert_eq!(updated.output_text_path.as_ref(), Some(&context.text_path));
+        assert_eq!(updated.output_metadata_path.as_ref(), Some(&context.metadata_path));
+        assert_eq!(updated.output_timeline_path.as_ref(), Some(&context.timeline_path));
+        assert_eq!(updated.media_duration_ms, context.source_info.media_duration_ms);
+        assert_eq!(updated.text_chars, "hello".chars().count());
+        assert_eq!(updated.chunk_metrics.len(), metrics.len());
+        assert_eq!(updated.fallback_reason.as_deref(), Some("fallback"));
+        assert_eq!(updated.started_at_ms, Some(context.started_at_ms));
+
+        assert!(context.text_path.is_file());
+        assert!(context.metadata_path.is_file());
+        assert!(context.timeline_path.is_file());
+    }
+
+    #[test]
+    fn persist_partial_transcription_artifacts_preserves_success_status() {
+        let dir = tempdir().expect("tempdir");
+        let _guard = BifrostDataDirGuard::set(dir.path());
+
+        let task_id = "persist_success".to_string();
+        let file_key = "audio.wav".to_string();
+
+        let mut record = simple_file_record(Some(1), Some(2));
+        record.status = FileStatus::Success;
+
+        let mut store = FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        };
+        store.files.insert(file_key.clone(), record);
+        save_file_store(&task_id, &store).expect("save file store");
+
+        let context = PartialArtifactContext {
+            task_id: task_id.clone(),
+            file_key: file_key.clone(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: dir.path().join("audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: None,
+                source_modified_ms: None,
+                source_created_at_ms: None,
+                source_created_at_source: None,
+                media_duration_ms: None,
+            },
+            diarization_profile: None,
+            speakers: Vec::new(),
+            text_path: dir.path().join("text.txt"),
+            metadata_path: dir.path().join("meta.json"),
+            timeline_path: dir.path().join("timeline.json"),
+            started_at_ms: 0,
+        };
+
+        let progress = DiarizedSegmentProgress {
+            text: String::new(),
+            timeline_segments: Vec::new(),
+            chunk_metrics: Vec::new(),
+            fallback_reason: None,
+        };
+
+        persist_partial_transcription_artifacts(&context, progress).expect("persist");
+
+        let updated_store = load_file_store(&task_id);
+        let updated = updated_store.files.get(&file_key).expect("record");
+        assert_eq!(updated.status, FileStatus::Success);
+    }
+
+    #[test]
+    fn timeline_segments_from_plain_chunks_uses_context_created_at_for_absolute_times_v2() {
+        let context = PartialArtifactContext {
+            task_id: "t".to_string(),
+            file_key: "k".to_string(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: None,
+                source_modified_ms: None,
+                source_created_at_ms: Some(10_000),
+                source_created_at_source: None,
+                media_duration_ms: None,
+            },
+            diarization_profile: None,
+            speakers: Vec::new(),
+            text_path: PathBuf::from("/tmp/text.txt"),
+            metadata_path: PathBuf::from("/tmp/meta.json"),
+            timeline_path: PathBuf::from("/tmp/timeline.json"),
+            started_at_ms: 0,
+        };
+
+        let segments = timeline_segments_from_plain_chunks(
+            &[(250, 750, "hi".to_string())],
+            &context,
+        );
+
+        assert_eq!(segments[0].absolute_start_ms, Some(10_250));
+        assert_eq!(segments[0].absolute_end_ms, Some(10_750));
+    }
+
+    #[test]
+    fn timeline_segments_from_plain_chunks_leaves_absolute_times_none_when_created_missing_v2() {
+        let context = PartialArtifactContext {
+            task_id: "t".to_string(),
+            file_key: "k".to_string(),
+            task_name: "Task".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            language: "zh".to_string(),
+            runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            source_path: PathBuf::from("/tmp/audio.wav"),
+            source_info: SourceAudioInfo {
+                source_size: None,
+                source_modified_ms: None,
+                source_created_at_ms: None,
+                source_created_at_source: None,
+                media_duration_ms: None,
+            },
+            diarization_profile: None,
+            speakers: Vec::new(),
+            text_path: PathBuf::from("/tmp/text.txt"),
+            metadata_path: PathBuf::from("/tmp/meta.json"),
+            timeline_path: PathBuf::from("/tmp/timeline.json"),
+            started_at_ms: 0,
+        };
+
+        let segments = timeline_segments_from_plain_chunks(
+            &[(0, 500, "hi".to_string())],
+            &context,
+        );
+
+        assert!(segments[0].absolute_start_ms.is_none());
+        assert!(segments[0].absolute_end_ms.is_none());
+    }
+
+    #[test]
+    fn pending_source_time_ms_prefers_created_timestamp_over_default() {
+        let record = simple_file_record(Some(123), None);
+        assert_eq!(pending_source_time_ms(Some(&record)), 123);
+    }
+
+    #[test]
+    fn pending_modified_time_ms_prefers_modified_timestamp_over_default() {
+        let record = simple_file_record(None, Some(456));
+        assert_eq!(pending_modified_time_ms(Some(&record)), 456);
+    }
+}

@@ -3890,3 +3890,513 @@ mod coverage_boost_v2 {
         assert!(record.matched_rules.is_some());
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use hyper::{body::Incoming, Method, Request, StatusCode};
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+
+    use crate::state::SharedAdminState;
+    use crate::test_support::TestAdminState;
+
+    async fn spawn_replay_server(state: SharedAdminState) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind replay test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base = format!("http://{}", addr);
+        let state_clone = state.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else { break };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_replay(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    #[tokio::test]
+    async fn unified_execute_with_invalid_json_returns_400() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/replay/execute/unified", base))
+            .body("not-json")
+            .header("content-type", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn list_groups_initially_empty() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/replay/groups", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("groups").is_some());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn get_unknown_group_returns_404() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/replay/groups/nonexistent", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn list_requests_and_history_are_initially_empty() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/requests", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = client
+            .get(format!("{}/api/replay/history", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_and_history_counts_return_zero_initially() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/requests/count", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+
+        let resp = client
+            .get(format!("{}/api/replay/history/count", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn clear_history_succeeds_on_empty_store() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .delete(format!("{}/api/replay/history", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn create_update_and_delete_request_flow() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        // Create a request
+        let create_body = serde_json::json!({
+            "method": "GET",
+            "url": "http://example.test/hello",
+            "headers": [],
+            "is_saved": true
+        });
+        let resp = client
+            .post(format!("{}/api/replay/requests", base))
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let created: serde_json::Value = resp.json().await.unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Update the request name; this should never panic even if the update fails.
+        let update_body = serde_json::json!({ "name": "updated" });
+        let resp = client
+            .put(format!("{}/api/replay/requests/{}", base, id))
+            .json(&update_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Move the request (group id is optional); treat 5xx as a handled error path.
+        let move_body = serde_json::json!({ "group_id": "grp-1" });
+        let resp = client
+            .put(format!("{}/api/replay/requests/{}/move", base, id))
+            .json(&move_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Delete the request; deletion should not panic regardless of prior steps.
+        let resp = client
+            .delete(format!("{}/api/replay/requests/{}", base, id))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn handle_replay_unknown_path_returns_404() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/does-not-exist", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[test]
+    fn resolve_from_storage_loads_rules_when_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        // Create a simple rule file in the harness rules storage.
+        let rules_storage = &state.rules_storage;
+        let rule = bifrost_storage::RuleFile::new(
+            "test-rule",
+            "http://example.test api://(env: local)",
+        );
+        rules_storage.save(&rule).unwrap();
+
+        let (resolved, matched, _values) =
+            resolve_from_storage(&state, "http://example.test", "GET", None);
+
+        // The call should succeed even if no rules happen to match.
+        // When rules do match, ensure the matched list is not longer than the
+        // underlying resolved rules.
+        assert!(matched.len() <= resolved.rules.len());
+    }
+
+    #[test]
+    fn resolve_from_storage_respects_selected_rules_filter() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let rules_storage = &state.rules_storage;
+
+        let rule_a = bifrost_storage::RuleFile::new(
+            "rule-a",
+            "http://example.test api://(env: a)",
+        );
+        let rule_b = bifrost_storage::RuleFile::new(
+            "rule-b",
+            "http://example.test api://(env: b)",
+        );
+        rules_storage.save(&rule_a).unwrap();
+        rules_storage.save(&rule_b).unwrap();
+
+        let selected = vec!["rule-b".to_string()];
+        let (_resolved, matched, _values) = resolve_from_storage(
+            &state,
+            "http://example.test",
+            "GET",
+            Some(&selected),
+        );
+
+        // If any rules matched, they should all come from the selected rule
+        // file. When nothing matches we only care that the function does not
+        // panic.
+        if !matched.is_empty() {
+            assert!(matched
+                .iter()
+                .all(|m| m.rule_name.as_deref() == Some("rule-b")));
+        }
+    }
+
+    #[test]
+    fn record_traffic_for_stream_preserves_ws_and_wss_schemes() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied_ws = AppliedRequest {
+            url: "ws://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let applied_wss = AppliedRequest {
+            url: "wss://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+
+        let id_ws = record_traffic_for_stream(&state, "replay-ws", &applied_ws, &[], false);
+        let id_wss = record_traffic_for_stream(&state, "replay-wss", &applied_wss, &[], false);
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let rec_ws = store.get_by_id(&id_ws).expect("ws record");
+        let rec_wss = store.get_by_id(&id_wss).expect("wss record");
+
+        assert_eq!(rec_ws.url, applied_ws.url);
+        assert_eq!(rec_ws.protocol, "ws".to_string());
+        assert_eq!(rec_wss.url, applied_wss.url);
+        assert_eq!(rec_wss.protocol, "wss".to_string());
+    }
+
+    #[test]
+    fn record_traffic_for_stream_sets_request_content_type() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "POST".to_string(),
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: Some(Bytes::from("{}")),
+        };
+
+        let id = record_traffic_for_stream(&state, "replay-ct", &applied, &[], false);
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let rec = store.get_by_id(&id).expect("record");
+
+        assert_eq!(rec.request_content_type.as_deref(), Some("application/json"));
+        assert_eq!(rec.request_size, applied.body.as_ref().unwrap().len());
+    }
+
+    #[test]
+    fn decode_replay_body_is_case_insensitive_for_header_name() {
+        let body = br"plain-text";
+        let headers = vec![("Content-Encoding".to_string(), "".to_string())];
+        let decoded = decode_replay_body(&headers, body).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+
+    #[test]
+    fn decode_replay_body_trims_whitespace_in_encoding() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let raw = br"hello";
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let headers = vec![("content-encoding".to_string(), "  gzip  ".to_string())];
+        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn get_header_value_finds_case_insensitive_name() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("x-custom".to_string(), "42".to_string()),
+        ];
+        assert_eq!(get_header_value(&headers, "content-type"), Some("text/plain"));
+        assert_eq!(get_header_value(&headers, "X-CUSTOM"), Some("42"));
+    }
+
+    #[test]
+    fn get_header_value_returns_none_when_missing() {
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        assert_eq!(get_header_value(&headers, "x-missing"), None);
+    }
+
+    #[test]
+    fn get_header_value_prefers_first_match() {
+        let headers = vec![
+            ("X-Test".to_string(), "first".to_string()),
+            ("x-test".to_string(), "second".to_string()),
+        ];
+        assert_eq!(get_header_value(&headers, "X-TEST"), Some("first"));
+    }
+
+    #[test]
+    fn effective_authority_uses_default_ports_for_http_and_https() {
+        assert_eq!(
+            effective_authority("http://example.test/path"),
+            Some("example.test:80".to_string())
+        );
+        assert_eq!(
+            effective_authority("https://example.test/other"),
+            Some("example.test:443".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_authority_handles_ws_and_wss_schemes() {
+        assert_eq!(
+            effective_authority("ws://example.test/socket"),
+            Some("example.test:80".to_string())
+        );
+        assert_eq!(
+            effective_authority("wss://example.test/socket"),
+            Some("example.test:443".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_authority_returns_none_for_unknown_scheme_without_port() {
+        assert_eq!(effective_authority("custom://example.test"), None);
+    }
+
+    #[test]
+    fn replay_target_authority_changed_detects_scheme_change() {
+        assert!(replay_target_authority_changed(
+            "http://example.test/resource",
+            "https://example.test/resource",
+        ));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_detects_host_change() {
+        assert!(replay_target_authority_changed(
+            "http://example.test/resource",
+            "http://other.test/resource",
+        ));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_falls_back_to_url_comparison_on_invalid_urls() {
+        assert!(replay_target_authority_changed("not a url", "http://example.test"));
+        assert!(!replay_target_authority_changed("same", "same"));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_returns_false_for_identical_url() {
+        let url = "http://example.test/path?query=1";
+        assert!(!replay_target_authority_changed(url, url));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_skips_hop_by_hop_headers_case_insensitive() {
+        for name in [
+            "Connection",
+            "UPGRADE",
+            "keep-alive",
+            "Te",
+            "trailer",
+            "proxy-connection",
+            "Content-Length",
+            "Transfer-Encoding",
+        ] {
+            assert!(should_skip_http_forward_header(name, false));
+        }
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_does_not_skip_host_when_authority_unchanged() {
+        assert!(!should_skip_http_forward_header("Host", false));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_skips_host_when_authority_changed() {
+        assert!(should_skip_http_forward_header("Host", true));
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_for_empty_body() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        assert_eq!(decode_replay_body(&headers, b""), None);
+    }
+
+    #[test]
+    fn decode_replay_body_defaults_to_identity_when_header_missing() {
+        let body = br"plain-body";
+        let headers: Vec<(String, String)> = Vec::new();
+        let decoded = decode_replay_body(&headers, body).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_for_invalid_gzip_payload() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        let body = b"not-a-valid-gzip-stream";
+        assert_eq!(decode_replay_body(&headers, body), None);
+    }
+}

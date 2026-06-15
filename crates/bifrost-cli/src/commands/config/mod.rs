@@ -2272,3 +2272,259 @@ mod coverage_boost {
         let _ = export_config(&client, None, "yaml").unwrap_err();
     }
 }
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::cli::ConfigCommands;
+    use crate::commands::config::client::ConfigApiClient;
+    use serde_json::json;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn start_mock_server() -> (MockServer, String, u16) {
+        let mock_server = MockServer::start().await;
+        let base_uri = mock_server.uri();
+        let without_scheme = base_uri.trim_start_matches("http://");
+        let mut parts = without_scheme.split(':');
+        let host = parts.next().expect("mock server host").to_string();
+        let port: u16 = parts
+            .next()
+            .expect("mock server port")
+            .parse()
+            .expect("valid port number");
+        (mock_server, host, port)
+    }
+
+    async fn setup_tls_and_whitelist_mocks(server: &MockServer) {
+        let tls_body = json!({
+            "enable_tls_interception": false,
+            "intercept_exclude": [],
+            "intercept_include": [],
+            "app_intercept_exclude": [],
+            "app_intercept_include": [],
+            "ip_intercept_exclude": [],
+            "ip_intercept_include": [],
+            "unsafe_ssl": false,
+            "disconnect_on_config_change": true,
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/tls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&tls_body))
+            .mount(server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/tls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&tls_body))
+            .mount(server)
+            .await;
+
+        let whitelist_body = json!({
+            "mode": "local_only",
+            "allow_lan": false,
+            "whitelist": ["127.0.0.1"],
+            "temporary_whitelist": [],
+            "userpass": {
+                "enabled": false,
+                "accounts": [],
+                "loopback_requires_auth": false,
+            }
+        });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/whitelist"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&whitelist_body))
+            .mount(server)
+            .await;
+
+        let ok_body = json!({"ok": true});
+        for (m, p) in [
+            ("PUT", "_bifrost/api/whitelist/allow-lan"),
+            ("PUT", "_bifrost/api/whitelist/userpass"),
+            ("PUT", "_bifrost/api/whitelist/mode"),
+        ] {
+            Mock::given(method(m))
+                .and(path(&format!("/{p}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
+                .mount(server)
+                .await;
+        }
+    }
+
+    #[tokio::test]
+    async fn set_config_value_updates_tls_unsafe_ssl_via_mock_server() {
+        let (server, host, port) = start_mock_server().await;
+        setup_tls_and_whitelist_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        set_config_value(&client, "tls.unsafe-ssl", "true").unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_config_value_updates_tls_disconnect_on_change_via_mock_server() {
+        let (server, host, port) = start_mock_server().await;
+        setup_tls_and_whitelist_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        set_config_value(&client, "tls.disconnect-on-change", "false").unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_config_value_accepts_valid_access_modes() {
+        let (server, host, port) = start_mock_server().await;
+        setup_tls_and_whitelist_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        for mode in ["allow_all", "local_only", "whitelist", "interactive"] {
+            set_config_value(&client, "access.mode", mode).unwrap();
+        }
+    }
+
+    #[test]
+    fn set_config_value_rejects_invalid_access_mode_before_network() {
+        let client = ConfigApiClient::new("localhost", 0);
+        let err = set_config_value(&client, "access.mode", "invalid-mode").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("Invalid access mode"));
+    }
+
+    #[tokio::test]
+    async fn add_list_item_adds_to_tls_include_list() {
+        let (server, host, port) = start_mock_server().await;
+        setup_tls_and_whitelist_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        add_list_item(&client, "tls.include", "example.com").unwrap();
+    }
+
+    #[tokio::test]
+    async fn remove_list_item_handles_missing_value_gracefully() {
+        let (server, host, port) = start_mock_server().await;
+        setup_tls_and_whitelist_mocks(&server).await;
+
+        let client = ConfigApiClient::new(&host, port);
+        remove_list_item(&client, "tls.include", "missing.com").unwrap();
+    }
+
+    #[tokio::test]
+    async fn reset_config_all_uses_mock_server_without_prompt() {
+        let (server, host, port) = start_mock_server().await;
+
+        // Minimal mocks for TLS / server / performance / whitelist reset sequence.
+        let server_body = json!({
+            "timeout_secs": 30u64,
+            "http1_max_header_size": 64_000usize,
+            "http2_max_header_list_size": 256_000usize,
+            "websocket_handshake_max_header_size": 64_000usize,
+        });
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/server"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&server_body))
+            .mount(&server)
+            .await;
+
+        let tls_body = json!({
+            "enable_tls_interception": false,
+            "intercept_exclude": [],
+            "intercept_include": [],
+            "app_intercept_exclude": [],
+            "app_intercept_include": [],
+            "ip_intercept_exclude": [],
+            "ip_intercept_include": [],
+            "unsafe_ssl": false,
+            "disconnect_on_config_change": true,
+        });
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/tls"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&tls_body))
+            .mount(&server)
+            .await;
+
+        let perf_body = json!({
+            "traffic": {
+                "max_records": DEFAULT_TRAFFIC_MAX_RECORDS,
+                "max_db_size_bytes": 2_000_000_000u64,
+                "max_body_memory_size": 512 * 1024usize,
+                "max_body_buffer_size": 10 * 1024 * 1024usize,
+                "max_body_probe_size": 64 * 1024usize,
+                "binary_traffic_performance_mode": true,
+                "file_retention_days": 7u64,
+                "sse_stream_flush_bytes": 256 * 1024usize,
+                "sse_stream_flush_interval_ms": 1000u64,
+                "ws_payload_flush_bytes": 512 * 1024usize,
+                "ws_payload_flush_interval_ms": 1000u64,
+                "ws_payload_max_open_files": 128usize,
+            },
+            "body_store_stats": null,
+            "frame_store_stats": null,
+            "ws_payload_store_stats": null,
+        });
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/config/performance"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&perf_body))
+            .mount(&server)
+            .await;
+
+        let whitelist_body = json!({
+            "mode": "local_only",
+            "allow_lan": false,
+            "whitelist": [],
+            "temporary_whitelist": [],
+            "userpass": {
+                "enabled": false,
+                "accounts": [],
+                "loopback_requires_auth": false,
+            }
+        });
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/whitelist/mode"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&whitelist_body))
+            .mount(&server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(path("/_bifrost/api/whitelist/allow-lan"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&whitelist_body))
+            .mount(&server)
+            .await;
+
+        let client = ConfigApiClient::new(&host, port);
+        reset_config(&client, "all", true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn clear_cache_uses_wiremock_response() {
+        let (server, host, port) = start_mock_server().await;
+        let clear_body = json!({
+            "body_cache_removed": 1usize,
+            "traffic_cache_removed": 0usize,
+            "frame_cache_removed": 0usize,
+            "ws_payload_cache_removed": 0usize,
+            "message": "cleared",
+        });
+        Mock::given(method("DELETE"))
+            .and(path("/_bifrost/api/config/performance/clear-cache"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&clear_body))
+            .mount(&server)
+            .await;
+
+        let client = ConfigApiClient::new(&host, port);
+        clear_cache(&client, true).unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_config_command_reports_error_on_server_failure() {
+        let (server, host, port) = start_mock_server().await;
+        let error_body = json!({ "error": "boom" });
+        Mock::given(method("GET"))
+            .and(path("/_bifrost/api/config/server"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(&error_body))
+            .mount(&server)
+            .await;
+
+        let result = handle_config_command(
+            Some(ConfigCommands::Show { json: true, section: Some("server".to_string()) }),
+            &host,
+            port,
+        );
+        assert!(result.is_err());
+    }
+}

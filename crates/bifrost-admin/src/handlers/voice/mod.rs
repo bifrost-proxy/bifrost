@@ -2076,3 +2076,334 @@ mod coverage_boost {
         server_task.await.expect("server");
     }
 }
+
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use crate::test_env::BifrostDataDirGuard;
+    use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
+    use std::env;
+    use tempfile::tempdir;
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::{Message, Role};
+    use tokio_tungstenite::WebSocketStream;
+
+    #[tokio::test]
+    async fn start_voice_stateful_session_rejects_17b_when_not_enabled() {
+        let err = start_voice_stateful_session("model=Qwen3-ASR-1.7B", 0.5, "zh")
+            .await
+            .err()
+            .expect("1.7B model should be blocked without flag");
+        assert!(err.contains("blocks 1.7B by default"));
+    }
+
+    #[tokio::test]
+    async fn ensure_voice_target_ready_errors_for_missing_assets_on_non_default_model() {
+        let dir = tempdir().expect("tempdir");
+        let _guard = BifrostDataDirGuard::set(dir.path());
+
+        let target = voice_target_from_query("language=zh&model=CustomVoiceModel").expect("target");
+        let err = ensure_voice_target_ready(&target)
+            .await
+            .expect_err("missing assets should error");
+        assert!(err.contains("assets are missing"));
+    }
+
+    #[tokio::test]
+    async fn emit_stateful_voice_partial_ignores_empty_text() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, _receiver) = ws.split();
+
+        let mut transcript_state = VoiceTranscriptState::new(VoiceRuntimeTuning::from_query(""));
+        let result = StatefulVoiceResult {
+            text: "   ".to_string(),
+            language: "zh".to_string(),
+            inference_ms: 1,
+        };
+        let ctx = StatefulVoiceTranscriptionContext {
+            vocabulary: &VoiceVocabulary::default(),
+            source: "web_mic",
+            session_id: "s1",
+            started_at: Instant::now(),
+        };
+
+        emit_stateful_voice_partial(&mut sender, &mut transcript_state, result, 1000, 0, &ctx)
+            .await
+            .expect("emit");
+
+        // Empty text should not update partial state.
+        assert!(transcript_state.partial.is_empty());
+    }
+
+    #[tokio::test]
+    async fn commit_stateful_voice_utterance_handles_no_active_utterance() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, _receiver) = ws.split();
+
+        let mut transcript_state = VoiceTranscriptState::new(VoiceRuntimeTuning::from_query(""));
+        let mut session = None::<StatefulVoiceSession>;
+        let mut tracker = RealtimeVoiceSpeakerTracker::default();
+        let audio_buffer = VoiceRealtimeAudioBuffer::default();
+        let speaker_ctx = RealtimeVoiceSpeakerContext {
+            tracker: &mut tracker,
+            audio_buffer: &audio_buffer,
+            audio_config: VoiceAudioConfig {
+                sample_rate: VOICE_SAMPLE_RATE,
+                channels: VOICE_CHANNELS,
+            },
+        };
+        let ctx = StatefulVoiceTranscriptionContext {
+            vocabulary: &VoiceVocabulary::default(),
+            source: "web_mic",
+            session_id: "s1",
+            started_at: Instant::now(),
+        };
+        let opts = VoiceCommitOptions {
+            captured_at_ms: 0,
+            window_index: 0,
+            kind: VoiceCommitKind::Stable,
+            reason: "test",
+        };
+
+        commit_stateful_voice_utterance(
+            &mut sender,
+            &mut session,
+            &mut transcript_state,
+            speaker_ctx,
+            &ctx,
+            opts,
+        )
+        .await
+        .expect("commit");
+    }
+
+    #[tokio::test]
+    async fn send_voice_error_sends_error_event() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, mut receiver) = ws.split();
+
+        send_voice_error(&mut sender, "something went wrong", Some("detail")).await.unwrap();
+
+        let msg = receiver.next().await.expect("frame").expect("ok");
+        match msg {
+            Message::Text(text) => {
+                let v: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(v["type"], "error");
+                assert_eq!(v["message"], "something went wrong");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_voice_done_sends_done_event() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, mut receiver) = ws.split();
+
+        send_voice_done(&mut sender).await.unwrap();
+
+        let msg = receiver.next().await.expect("frame").expect("ok");
+        match msg {
+            Message::Text(text) => {
+                let v: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(v["type"], "done");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn voice_stateful_chunk_size_sec_returns_default_for_empty_query_v2() {
+        let value = voice_stateful_chunk_size_sec("");
+        assert!((value - DEFAULT_VOICE_STREAM_CHUNK_SEC).abs() < 1e-6);
+    }
+
+    #[test]
+    fn voice_stateful_chunk_size_sec_clamps_below_min_v2() {
+        let value = voice_stateful_chunk_size_sec("stateful_chunk_sec=0.1");
+        assert!((value - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn voice_stateful_chunk_size_sec_clamps_above_max_v2() {
+        let value = voice_stateful_chunk_size_sec("stateful_chunk_sec=10");
+        assert!((value - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn voice_stateful_chunk_size_sec_prefers_chunk_ms_over_stateful_chunk_v2() {
+        let value = voice_stateful_chunk_size_sec("stateful_chunk_sec=3&chunk_ms=500");
+        assert!((value - 3.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn stateful_17b_enabled_true_for_query_flag_v2() {
+        assert!(stateful_17b_enabled("allow_stateful_17b=1"));
+    }
+
+    #[test]
+    fn stateful_17b_enabled_reads_env_flag_v2() {
+        env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
+        assert!(!stateful_17b_enabled(""));
+        env::set_var("BIFROST_VOICE_ALLOW_STATEFUL_17B", "true");
+        assert!(stateful_17b_enabled(""));
+        env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
+    }
+
+    #[test]
+    fn fake_stateful_worker_enabled_true_for_yes_v2() {
+        env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "yes");
+        assert!(fake_stateful_worker_enabled());
+        env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
+    }
+
+    #[test]
+    fn fake_stateful_worker_enabled_false_when_unset_v2() {
+        env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
+        assert!(!fake_stateful_worker_enabled());
+    }
+
+    #[test]
+    fn voice_target_from_query_appends_default_model_for_non_empty_query_v2() {
+        let target = voice_target_from_query("language=zh").expect("target");
+        assert_eq!(target.model, DEFAULT_VOICE_MODEL);
+    }
+
+    #[test]
+    fn voice_target_from_query_respects_explicit_model_v2() {
+        let target = voice_target_from_query("language=zh&model=Custom").expect("target");
+        assert_eq!(target.model, "Custom");
+    }
+
+    #[test]
+    fn u128_to_u64_lossy_round_trips_small_values_v2() {
+        let value = u128_to_u64_lossy(123u128);
+        assert_eq!(value, 123u64);
+    }
+
+    #[test]
+    fn u128_to_u64_lossy_caps_large_values_v2() {
+        let value = u128_to_u64_lossy(u128::from(u64::MAX) + 10);
+        assert_eq!(value, u64::MAX);
+    }
+
+    #[test]
+    fn parse_voice_ws_client_message_rejects_invalid_json_v2() {
+        let err = parse_voice_ws_client_message("not json").unwrap_err();
+        assert!(err.contains("invalid Voice WebSocket message"));
+    }
+
+    #[test]
+    fn decode_voice_audio_payload_accepts_valid_small_payload_v2() {
+        let data = vec![1u8, 2, 3];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let decoded = decode_voice_audio_payload(&encoded).expect("decode");
+        assert_eq!(decoded, data);
+    }
+
+    #[test]
+    fn decode_voice_audio_payload_rejects_large_payload_v2() {
+        let data = vec![0u8; MAX_VOICE_WS_AUDIO_CHUNK_BYTES + 1];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&data);
+        let err = decode_voice_audio_payload(&encoded).unwrap_err();
+        assert!(err.contains("voice audio chunk is too large"));
+    }
+
+    #[test]
+    fn parse_query_helpers_extract_typed_values_combined_v2() {
+        let query = "a=1&b=2.5&flag=true&encoded=hello%20world";
+        assert_eq!(
+            parse_query_value(query, "encoded"),
+            Some("hello world".to_string())
+        );
+        assert_eq!(parse_query_u64(query, "a"), Some(1));
+        assert_eq!(parse_query_f32(query, "b"), Some(2.5));
+        assert!(parse_query_bool(query, "flag"));
+        assert!(!parse_query_bool(query, "missing"));
+    }
+
+    #[tokio::test]
+    async fn send_voice_event_sends_custom_event_type_v2() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, mut receiver) = ws.split();
+
+        send_voice_event(
+            &mut sender,
+            VoiceWsEvent {
+                event_type: "custom",
+                session_id: None,
+                source: None,
+                text: Some("hi"),
+                raw_text: None,
+                delta: None,
+                committed: None,
+                window_start_ms: None,
+                window_end_ms: None,
+                window_index: None,
+                speaker: None,
+                captured_at_ms: None,
+                emitted_at_ms: None,
+                inference_ms: None,
+                message: None,
+                detail: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let msg = receiver.next().await.expect("frame").expect("ok");
+        match msg {
+            Message::Text(text) => {
+                let v: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(v["type"], "custom");
+                assert_eq!(v["text"], "hi");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn send_voice_error_includes_detail_when_present_v2() {
+        let (_client_raw, server_raw) = duplex(64 * 1024);
+        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let (mut sender, mut receiver) = ws.split();
+
+        send_voice_error(&mut sender, "oops", Some("detail-info")).await.unwrap();
+
+        let msg = receiver.next().await.expect("frame").expect("ok");
+        match msg {
+            Message::Text(text) => {
+                let v: Value = serde_json::from_str(&text).expect("json");
+                assert_eq!(v["type"], "error");
+                assert_eq!(v["message"], "oops");
+                assert_eq!(v["detail"], "detail-info");
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn start_voice_stateful_session_fake_worker_uses_default_text_when_missing_v2() {
+        env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "1");
+        let mut session = start_voice_stateful_session("fake_stateful_worker=1", 0.5, "zh")
+            .await
+            .expect("fake session");
+        env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
+
+        let pcm = vec![1u8; 320];
+        let result = session
+            .feed_pcm16(&pcm)
+            .await
+            .expect("feed")
+            .expect("result");
+        assert_eq!(result.text, "请打开Bifrost");
+        assert_eq!(result.language, "zh");
+    }
+}
