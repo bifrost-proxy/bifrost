@@ -76,12 +76,11 @@ pub(super) fn fake_external_runner_sleep_command() -> (String, Vec<String>) {
 pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
     if cfg!(windows) {
         (
-            "powershell.exe".to_string(),
+            "cmd.exe".to_string(),
             vec![
-                "-NoProfile".to_string(),
-                "-NonInteractive".to_string(),
-                "-Command".to_string(),
-                "if (Test-Path -LiteralPath '.\\expected.marker') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"}') }".to_string(),
+                "/D".to_string(),
+                "/C".to_string(),
+                "if exist expected.marker (echo {\"type\":\"assistant_final\",\"content\":\"WORKDIR_OK\"}) else (echo {\"type\":\"assistant_final\",\"content\":\"WORKDIR_MISMATCH\"})".to_string(),
             ],
         )
     } else {

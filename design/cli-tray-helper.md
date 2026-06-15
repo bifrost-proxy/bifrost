@@ -166,6 +166,7 @@ Windows 不支持 Unix `fork` daemon。`bifrost start -d` 在 Windows 上使用�
 v1 语义：
 
 - `Stop Bifrost` 停止主服务后，helper 会进入空转宽限期；如果 10 分钟内没有新的服务启动并恢复 Running，helper 自动退出并清理 `tray.pid`，避免菜单栏长期残留失效图标。
+- 用户直接执行 `bifrost stop` 或 upgrade restart 内部 stop 时，CLI stop 负责同步停止同一数据目录下由服务自动拉起的 tray helper，避免服务已停但 helper 长期残留；托盘菜单内部触发的 Stop 会带内部环境标记，保留 helper 进入 Stopped 状态，以便用户继续从同一托盘执行 Start。
 - 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。

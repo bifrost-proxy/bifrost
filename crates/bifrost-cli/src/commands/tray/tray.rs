@@ -1711,7 +1711,9 @@ fn runtime_file_points_to_running_service(runtime_file: &Path) -> bool {
 
 fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
     let mut cmd = Command::new(bin);
-    cmd.env("BIFROST_DATA_DIR", data_dir).arg("stop");
+    cmd.env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_TRAY_INVOKED_STOP", "1")
+        .arg("stop");
     configure_service_command(&mut cmd);
 
     match cmd.spawn() {

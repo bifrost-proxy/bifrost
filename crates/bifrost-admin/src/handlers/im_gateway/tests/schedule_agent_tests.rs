@@ -457,7 +457,7 @@ pub(super) async fn schedule_external_runner_executes_from_configured_work_dir()
             adapter_config: None,
             conversation_ref: None,
         }),
-        timeout_ms: 10_000,
+        timeout_ms: 30_000,
         max_output_bytes: 1024,
         concurrency_policy: Default::default(),
         retry: Default::default(),
