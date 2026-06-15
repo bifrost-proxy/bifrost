@@ -13,7 +13,21 @@ source "${PROJECT_DIR}/e2e-tests/test_utils/process.sh"
 BIFROST_BIN="${BIFROST_BIN:-${PROJECT_DIR}/target/debug/bifrost}"
 OLD_BIFROST_BIN="${OLD_BIFROST_BIN:-}"
 BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN="${BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN:-0}"
-TEST_VERSION="${BIFROST_UPGRADE_E2E_VERSION:-0.0.101}"
+# Derive the upgrade target version from the workspace version (patch + 1) so the
+# self-upgrade actually sees a newer release. A hardcoded value silently breaks
+# whenever the workspace version is bumped to match it (see the 0.0.101 collision).
+_default_test_version() {
+    local ws_version major minor patch
+    ws_version="$(grep -m1 '^version' "${PROJECT_DIR}/Cargo.toml" 2>/dev/null \
+        | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
+    if [[ ! "$ws_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo "0.0.101"
+        return
+    fi
+    IFS='.' read -r major minor patch <<<"$ws_version"
+    echo "${major}.${minor}.$((patch + 1))"
+}
+TEST_VERSION="${BIFROST_UPGRADE_E2E_VERSION:-$(_default_test_version)}"
 TEST_ROOT=""
 TEST_DATA_DIR=""
 INSTALL_BIN=""

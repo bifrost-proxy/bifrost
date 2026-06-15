@@ -1114,7 +1114,8 @@ jobs:
           BIFROST_BIN: ${{ github.workspace }}/target/release/bifrost.exe
           BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN: "1"
           BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES: "1"
-          BIFROST_UPGRADE_E2E_VERSION: 0.0.101
+          # No BIFROST_UPGRADE_E2E_VERSION override: the test derives the upgrade
+          # target from the workspace version (patch + 1) to avoid version collisions.
         run: bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh
       - name: Dump failed suite logs
         if: failure()
