@@ -50,6 +50,8 @@ fn voice_provider_selection_defaults_and_validates() {
 
 #[test]
 fn stateful_large_model_can_be_enabled_from_query() {
+    let _env = crate::test_env::voice_env_lock().blocking_lock();
+    std::env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
     assert!(!stateful_17b_enabled("provider=qwen3_stateful_streaming"));
     assert!(stateful_17b_enabled(
         "provider=qwen3_stateful_streaming&allow_stateful_17b=1"
