@@ -256,7 +256,7 @@ pnpm --dir packages/bifrost-sync-server exec tsx src/cli.ts -p "$RELAY_PORT" -d 
 
 预期：
 - macOS 上 `test_build_shell_text_process_default_shell` 验证默认 shell 为 `/bin/sh`
-- macOS 上 `test_build_shell_text_process_explicit_shell` 验证显式 `/bin/bash` 使用 `-lc` 传参
+- macOS 上 `test_build_shell_text_process_explicit_shell` 验证显式 `/bin/bash` 在默认（非 login）路径使用 `-c` 传参（不 source rc，避免 OSC shell-integration 噪声泄漏到捕获的 stdout）
 - E2E `remote_shell_exec_unix_shell_path_fallback` 使用 `/bin/bash` shell 设置的 policy 执行 `echo hello-unix-path` 成功
 - Windows CI 上 fallback 到 `cmd`，不会报 "系统找不到指定的路径"
 
@@ -440,3 +440,4 @@ rm -rf "$TARGET_DATA_DIR" "$CALLER_DATA_DIR" "$CALLER_2_DATA_DIR" "$RELAY_DATA_D
 | TC-RSE-27 | ✅ PASS | 2026-06-16 本地验证。新增 `remote exec --detach` 与 `remote job status/logs/watch` 命令面，`--detach` 在 open_call 成功后返回 `call_id`/`relay_token`，`job watch` 复用 resume stream 并按真实远端 exit code 退出。执行 `cargo test -p bifrost-cli remote::tests::test_build_remote_command_shell_exec_login_flag_reaches_payload --lib` 覆盖 `--login`/timeout payload，执行 `cargo test -p bifrost-cli remote:: --lib --no-run` 确认 CLI remote 测试编译通过。 |
 | TC-RSE-28 | ✅ PASS | 2026-06-16 本地验证。executor timeout 错误文案新增 `requested`、`policy_cap`、`capped_by_policy`，避免用户误以为超大 `--timeout-ms` 已生效。执行 `cargo test -p bifrost-admin remote_invoke::executor::tests::timeout_policy_note_reports_policy_cap --lib` 通过。 |
 | TC-RSE-29 | ✅ PASS | 2026-06-16 本地验证。`remote exec --login --shell-text` 注入 `BIFROST_REMOTE=1`/`TERM=dumb` 并在 shell-text 内部前置 `cd -- <cwd>`，确保目标端 rc 后仍回到 `--cwd`。执行 `cargo test -p bifrost-admin remote_invoke::executor::tests::shell_text_cwd_prefix_quotes_and_forces_cd_inside_shell --lib` 与 `cargo test -p bifrost-admin remote_invoke::executor:: --lib --no-run` 通过。 |
+| TC-RSE-30 | ✅ PASS | 2026-06-16 本地验证。修复 `--login` 此前为 no-op 的缺陷：`build_shell_text_argv` 现按 `login` 选择 `-c`（默认，非 login，不 source rc）/`-lc`（opt-in），默认路径不再泄漏 iTerm2/VS Code 的 `ESC]1337;`/`ESC]133;` OSC 噪声；shell-exec 降噪 env（`TERM=dumb`/`BIFROST_REMOTE=1`/`ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX=NO`）改为无条件注入（defense-in-depth），并以 `or_insert_with` 保留 policy/用户 `--env` 优先级。执行 `cargo test -p bifrost-admin remote_invoke::executor::tests::test_build_shell_text_argv_non_login_uses_dash_c --lib`、`cargo test -p bifrost-admin remote_invoke::executor::tests::test_build_shell_text_argv_login_uses_dash_lc --lib`，以及 `cargo test -p bifrost-admin remote_invoke` 全量 308 passed/0 failed，`cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings` 与 `cargo fmt -p bifrost-admin -- --check` 通过。 |

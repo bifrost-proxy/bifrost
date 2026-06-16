@@ -2438,17 +2438,22 @@ impl RemoteInvokeExecutor {
 
         let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
         let mut merged_env = policy.default_env.clone();
-        if command.login {
-            merged_env
-                .entry("BIFROST_REMOTE".to_string())
-                .or_insert_with(|| "1".to_string());
-            merged_env
-                .entry("TERM".to_string())
-                .or_insert_with(|| "dumb".to_string());
-            merged_env
-                .entry("ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX".to_string())
-                .or_insert_with(|| "NO".to_string());
-        }
+        // Apply shell-exec hygiene env unconditionally (defense-in-depth):
+        // `TERM=dumb` and the integration toggles suppress OSC shell-
+        // integration noise, and `BIFROST_REMOTE=1` lets remote rc files opt
+        // out of interactive decorations. These are most important on the
+        // `--login` path (where rc files run), but are harmless and beneficial
+        // for the non-login default too. `or_insert_with` keeps policy/user
+        // `--env` overrides authoritative.
+        merged_env
+            .entry("BIFROST_REMOTE".to_string())
+            .or_insert_with(|| "1".to_string());
+        merged_env
+            .entry("TERM".to_string())
+            .or_insert_with(|| "dumb".to_string());
+        merged_env
+            .entry("ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX".to_string())
+            .or_insert_with(|| "NO".to_string());
         if let Some(command_env) = &command.env {
             for (key, value) in command_env {
                 merged_env.insert(key.clone(), value.clone());
@@ -3320,9 +3325,15 @@ fn build_shell_text_argv(
         } else {
             shell.unwrap_or("/bin/sh")
         };
+        // Default to a non-login shell (`-c`) so rc/profile files are not
+        // sourced: rc files are the main source of OSC shell-integration
+        // noise (e.g. iTerm2/VS Code `ESC]1337;`/`ESC]133;`) leaking into
+        // captured stdout. `--login` (`-lc`) is opt-in for callers who need
+        // their interactive rc environment.
+        let flag = if login { "-lc" } else { "-c" };
         (
             shell.to_string(),
-            vec!["-lc".to_string(), shell_text.to_string()],
+            vec![flag.to_string(), shell_text.to_string()],
         )
     }
 }
@@ -4739,8 +4750,27 @@ mod tests {
                 .get_args()
                 .map(|a| a.to_string_lossy().to_string())
                 .collect();
-            assert_eq!(args, vec!["-lc", "echo test"]);
+            // build_shell_text_process is the non-login default path, so it
+            // must use `-c` (not `-lc`): rc files are skipped to avoid OSC
+            // shell-integration noise leaking into captured stdout.
+            assert_eq!(args, vec!["-c", "echo test"]);
         }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_build_shell_text_argv_non_login_uses_dash_c() {
+        let (prog, args) = build_shell_text_argv(Some("/bin/bash"), "echo hi", false);
+        assert_eq!(prog, "/bin/bash");
+        assert_eq!(args, vec!["-c".to_string(), "echo hi".to_string()]);
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn test_build_shell_text_argv_login_uses_dash_lc() {
+        let (prog, args) = build_shell_text_argv(Some("/bin/bash"), "echo hi", true);
+        assert_eq!(prog, "/bin/bash");
+        assert_eq!(args, vec!["-lc".to_string(), "echo hi".to_string()]);
     }
 
     #[cfg(windows)]
