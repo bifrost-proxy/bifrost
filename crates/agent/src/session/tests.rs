@@ -2060,7 +2060,10 @@ fn test_request_stop_releases_stale_active_status_without_stop_signal() {
     assert!(manager.request_stop("stale-stop"));
     assert!(!manager.is_session_active("stale-stop"));
     assert!(manager.list_active_turn_statuses().is_empty());
-    assert!(manager.try_take_session("stale-stop").is_some());
+    let recovered = manager
+        .try_take_session("stale-stop")
+        .expect("stale active state should no longer block a new turn");
+    manager.return_session(recovered);
 
     drop(session);
 }

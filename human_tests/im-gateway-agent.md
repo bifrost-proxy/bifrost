@@ -2877,3 +2877,22 @@ rm -rf ./.bifrost-test
   - B 的 queue/guide 输入状态不继承 A 的 submitting 标记。
   - B 消息区不出现 A 的 assistant delta、final response 或错误 toast。
 - **本次执行结果**: 待执行。
+
+### TC-IMA-152: 内置 Agent active-turn 泄漏清理与异常终态唯一真源
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
+  - 准备一个内置 Bifrost Agent Web session，并确保对应 JSONL history 可被 `sessions/` 扫描。
+- **操作步骤**:
+  1. 构造 stop signal 丢失但 `active_turn_statuses` 仍存在的陈旧 active turn，调用 `AgentSessionManager::request_stop(session_key)`。
+  2. 重新尝试 take 同一个 `session_key`，确认不会被陈旧 active 状态阻塞。
+  3. 让 `/_bifrost/api/agent/chat/stream` 的 isolated worker 在没有 `Finished` 事件时结束，或直接调用终态记录 helper 写入 `failed`。
+  4. 扫描同一 session 的 JSONL summary，检查 `run_state`。
+  5. 复查 stream task 的 drop 路径，确认 RAII guard 会归还 checked-out session 并清理 active worker。
+- **预期结果**:
+  - `request_stop` 在 stop signal 缺失但 active status 残留时返回成功，并清理 `active_turn_statuses` / `active_stop_signals` / `active_session_infos` / active lock。
+  - 同一个 session 可以立即发起下一轮，不再出现“没有 agent 在 loop”但 UI 仍显示 Running 的死结。
+  - worker 启动失败、异常退出或事件流提前结束时，JSONL 追加用户可见错误消息和 `run_state_changed: failed`。
+  - active status 只作为当前进程内锁和实时预览，刷新与历史恢复以 JSONL terminal state 为终态事实源。
+  - 正常完成和异常终止都不会让 queue 永久卡在上一轮；显式 Stop 不自动续跑队列。
+- **执行记录（2026-06-16）**: PASS — 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-session-target cargo test -p bifrost-agent test_request_stop_releases_stale_active_status_without_stop_signal --lib -- --nocapture` 通过，验证 stale active stop 兜底清理后同 session 可重新 take；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin agent_stream_session_guard_returns_checked_out_session_on_drop --lib -- --nocapture` 通过，验证 Web stream RAII guard drop 后归还 checked-out session；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin records_builtin_worker_terminal_state_to_requested_history --lib -- --nocapture` 通过，验证内置 worker 异常终态写入指定 JSONL 并被 summary 扫描为 `failed`；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin queue_control_stream_input --lib -- --nocapture` 通过，验证 Web `/q`/`/rq` 队列控制仍不落普通消息且 FIFO 行为保持。
