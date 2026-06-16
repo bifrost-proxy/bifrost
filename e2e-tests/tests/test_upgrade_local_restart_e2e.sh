@@ -189,12 +189,12 @@ assert_post_upgrade_skills_installed() {
         _log_fail "upgrade auto-installs remote Bifrost skill" "$remote_skill exists" "missing"
         return 1
     fi
-    if ! grep -q '^name: bifrost' "$primary_skill"; then
-        _log_fail "primary Bifrost skill has frontmatter" "name: bifrost" "$(head -n 5 "$primary_skill")"
+    if ! grep -Eq '^name: "?bifrost"?$' "$primary_skill"; then
+        _log_fail "primary Bifrost skill has frontmatter" 'name: bifrost or name: "bifrost"' "$(head -n 5 "$primary_skill")"
         return 1
     fi
-    if ! grep -q '^name: bifrost-remote' "$remote_skill"; then
-        _log_fail "remote Bifrost skill has frontmatter" "name: bifrost-remote" "$(head -n 5 "$remote_skill")"
+    if ! grep -Eq '^name: "?bifrost-remote"?$' "$remote_skill"; then
+        _log_fail "remote Bifrost skill has frontmatter" 'name: bifrost-remote or name: "bifrost-remote"' "$(head -n 5 "$remote_skill")"
         return 1
     fi
 
