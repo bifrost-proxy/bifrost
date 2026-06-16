@@ -129,6 +129,46 @@ struct ShellExecProcessSpec {
     env: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EffectiveTimeouts {
+    requested_ms: Option<u64>,
+    policy_cap_ms: Option<u64>,
+    effective_wall_clock_ms: Option<u64>,
+    capped_by_policy: bool,
+}
+
+fn effective_timeouts(
+    command_timeout_ms: Option<u64>,
+    policy_cap_ms: Option<u64>,
+) -> EffectiveTimeouts {
+    let effective_wall_clock_ms = match (command_timeout_ms, policy_cap_ms) {
+        (Some(c), Some(p)) => Some(c.min(p)),
+        (Some(c), None) => Some(c),
+        (None, Some(p)) => Some(p),
+        (None, None) => None,
+    };
+    EffectiveTimeouts {
+        requested_ms: command_timeout_ms,
+        policy_cap_ms,
+        effective_wall_clock_ms,
+        capped_by_policy: matches!((command_timeout_ms, policy_cap_ms), (Some(c), Some(p)) if p < c),
+    }
+}
+
+fn timeout_policy_note(t: EffectiveTimeouts) -> String {
+    match (t.requested_ms, t.policy_cap_ms) {
+        (Some(requested), Some(policy)) if t.capped_by_policy => {
+            format!(" requested={requested}ms, capped_by_policy={policy}ms")
+        }
+        (Some(requested), Some(policy)) => {
+            format!(" requested={requested}ms, policy_cap={policy}ms")
+        }
+        (Some(requested), None) => format!(" requested={requested}ms"),
+        (None, Some(policy)) => format!(" policy_cap={policy}ms"),
+        (None, None) => String::new(),
+    }
+}
+
 #[derive(Debug, serde::Deserialize, Default)]
 struct CommandArgs {
     #[serde(default)]
@@ -1445,12 +1485,8 @@ impl RemoteInvokeExecutor {
         }
 
         // Timeout split identical to PR#3a.
-        let wall_clock_timeout_ms: Option<u64> = match (command.timeout_ms, policy.max_timeout_ms) {
-            (Some(c), Some(p)) => Some(c.min(p)),
-            (Some(c), None) => Some(c),
-            (None, Some(p)) => Some(p),
-            (None, None) => None,
-        };
+        let timeouts = effective_timeouts(command.timeout_ms, policy.max_timeout_ms);
+        let wall_clock_timeout_ms = timeouts.effective_wall_clock_ms;
         let idle_timeout_ms: u64 = policy.max_idle_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
         let timeout_ms = wall_clock_timeout_ms.unwrap_or(u64::MAX);
 
@@ -1561,8 +1597,9 @@ impl RemoteInvokeExecutor {
                         &frame_tx,
                         "wall_clock_timeout",
                         format!(
-                            "shell.exec wall-clock timeout after {timeout_ms} ms (policy '{}')",
-                            policy.policy_id
+                            "shell.exec wall-clock timeout after {timeout_ms} ms (policy '{}'){}",
+                            policy.policy_id,
+                            timeout_policy_note(timeouts)
                         ),
                     ).await;
                     return Ok(());
@@ -1576,8 +1613,9 @@ impl RemoteInvokeExecutor {
                         &frame_tx,
                         "wall_clock_exceeded",
                         format!(
-                            "shell.exec exceeded policy max_wall_clock_ms = {policy_ms} ms (policy '{}')",
-                            policy.policy_id
+                            "shell.exec exceeded policy max_wall_clock_ms = {policy_ms} ms (policy '{}'){}",
+                            policy.policy_id,
+                            timeout_policy_note(timeouts)
                         ),
                     ).await;
                     return Ok(());
@@ -1813,12 +1851,8 @@ impl RemoteInvokeExecutor {
 
         let start = Instant::now();
         // PR#3a: split single wall-clock timeout into (wall_clock, idle).
-        let wall_clock_timeout_ms: Option<u64> = match (command.timeout_ms, policy.max_timeout_ms) {
-            (Some(c), Some(p)) => Some(c.min(p)),
-            (Some(c), None) => Some(c),
-            (None, Some(p)) => Some(p),
-            (None, None) => None,
-        };
+        let timeouts = effective_timeouts(command.timeout_ms, policy.max_timeout_ms);
+        let wall_clock_timeout_ms = timeouts.effective_wall_clock_ms;
         let idle_timeout_ms: u64 = policy.max_idle_ms.unwrap_or(DEFAULT_IDLE_TIMEOUT_MS);
         let timeout_ms = wall_clock_timeout_ms.unwrap_or(u64::MAX);
         if command.pty.as_ref().is_some_and(|pty| pty.enabled) {
@@ -1831,6 +1865,7 @@ impl RemoteInvokeExecutor {
                     wall_clock_timeout_ms,
                     idle_timeout_ms,
                     timeout_ms,
+                    timeouts,
                     start,
                 )
                 .await;
@@ -1915,8 +1950,10 @@ impl RemoteInvokeExecutor {
                     let _ = child.kill().await;
                     let _ = child.wait().await;
                     return Err(BifrostError::Network(format!(
-                        "shell.exec wall-clock timeout after {} ms (policy '{}')",
-                        timeout_ms, policy.policy_id
+                        "shell.exec wall-clock timeout after {} ms (policy '{}'){}",
+                        timeout_ms,
+                        policy.policy_id,
+                        timeout_policy_note(timeouts)
                     )));
                 }
                 // PR#7b Gate 1 (legacy path): policy-level wall-clock ceiling.
@@ -1925,8 +1962,10 @@ impl RemoteInvokeExecutor {
                     let _ = child.wait().await;
                     let policy_ms = policy.max_wall_clock_ms.unwrap_or(0);
                     return Err(BifrostError::Network(format!(
-                        "shell.exec exceeded policy max_wall_clock_ms = {} ms (policy '{}')",
-                        policy_ms, policy.policy_id
+                        "shell.exec exceeded policy max_wall_clock_ms = {} ms (policy '{}'){}",
+                        policy_ms,
+                        policy.policy_id,
+                        timeout_policy_note(timeouts)
                     )));
                 }
                 _ = &mut idle_sleep => {
@@ -2088,6 +2127,7 @@ impl RemoteInvokeExecutor {
         wall_clock_timeout_ms: Option<u64>,
         idle_timeout_ms: u64,
         timeout_ms: u64,
+        timeouts: EffectiveTimeouts,
         start: Instant,
     ) -> Result<RemoteInvokeResponse>
     where
@@ -2214,16 +2254,20 @@ impl RemoteInvokeExecutor {
                 _ = &mut wall_clock => {
                     let _ = killer.kill();
                     return Err(BifrostError::Network(format!(
-                        "shell.exec PTY wall-clock timeout after {} ms (policy '{}')",
-                        timeout_ms, policy.policy_id
+                        "shell.exec PTY wall-clock timeout after {} ms (policy '{}'){}",
+                        timeout_ms,
+                        policy.policy_id,
+                        timeout_policy_note(timeouts)
                     )));
                 }
                 _ = &mut policy_wall_clock => {
                     let _ = killer.kill();
                     let policy_ms = policy.max_wall_clock_ms.unwrap_or(0);
                     return Err(BifrostError::Network(format!(
-                        "shell.exec PTY exceeded policy max_wall_clock_ms = {} ms (policy '{}')",
-                        policy_ms, policy.policy_id
+                        "shell.exec PTY exceeded policy max_wall_clock_ms = {} ms (policy '{}'){}",
+                        policy_ms,
+                        policy.policy_id,
+                        timeout_policy_note(timeouts)
                     )));
                 }
                 _ = &mut idle_sleep => {
@@ -2377,18 +2421,34 @@ impl RemoteInvokeExecutor {
                 (program.clone(), args.to_vec())
             }
             ShellExecMode::ShellText | ShellExecMode::Template => {
-                let shell_text = command.command_text.as_deref().ok_or_else(|| {
+                let mut shell_text = command.command_text.clone().ok_or_else(|| {
                     BifrostError::Config("shell.exec requires command_text".to_string())
                 })?;
+                let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
+                if let Some(cwd) = effective_cwd {
+                    shell_text = prefix_shell_text_with_cwd(cwd, &shell_text);
+                }
                 build_shell_text_argv(
                     command.shell.as_deref().or(policy.shell.as_deref()),
-                    shell_text,
+                    &shell_text,
+                    command.login,
                 )
             }
         };
 
         let effective_cwd = command.cwd.as_ref().or(policy.default_cwd.as_ref());
         let mut merged_env = policy.default_env.clone();
+        if command.login {
+            merged_env
+                .entry("BIFROST_REMOTE".to_string())
+                .or_insert_with(|| "1".to_string());
+            merged_env
+                .entry("TERM".to_string())
+                .or_insert_with(|| "dumb".to_string());
+            merged_env
+                .entry("ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX".to_string())
+                .or_insert_with(|| "NO".to_string());
+        }
         if let Some(command_env) = &command.env {
             for (key, value) in command_env {
                 merged_env.insert(key.clone(), value.clone());
@@ -3201,13 +3261,17 @@ fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
 
 #[cfg(test)]
 fn build_shell_text_process(shell: Option<&str>, shell_text: &str) -> TokioCommand {
-    let (program, args) = build_shell_text_argv(shell, shell_text);
+    let (program, args) = build_shell_text_argv(shell, shell_text, false);
     let mut command = TokioCommand::new(program);
     command.args(args);
     command
 }
 
-fn build_shell_text_argv(shell: Option<&str>, shell_text: &str) -> (String, Vec<String>) {
+fn build_shell_text_argv(
+    shell: Option<&str>,
+    shell_text: &str,
+    login: bool,
+) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
         // Resolve the effective shell: skip Unix-style paths that don't exist on Windows
@@ -3250,12 +3314,32 @@ fn build_shell_text_argv(shell: Option<&str>, shell_text: &str) -> (String, Vec<
 
     #[cfg(not(windows))]
     {
-        let shell = shell.unwrap_or("/bin/sh");
+        let login_shell = std::env::var("SHELL").ok().filter(|s| !s.trim().is_empty());
+        let shell = if login {
+            shell.or(login_shell.as_deref()).unwrap_or("/bin/sh")
+        } else {
+            shell.unwrap_or("/bin/sh")
+        };
         (
             shell.to_string(),
             vec!["-lc".to_string(), shell_text.to_string()],
         )
     }
+}
+
+#[cfg(not(windows))]
+fn shell_single_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(not(windows))]
+fn prefix_shell_text_with_cwd(cwd: &str, shell_text: &str) -> String {
+    format!("cd -- {} && {}", shell_single_quote(cwd), shell_text)
+}
+
+#[cfg(windows)]
+fn prefix_shell_text_with_cwd(_cwd: &str, shell_text: &str) -> String {
+    shell_text.to_string()
 }
 
 /// Returns true if the shell path looks like a Unix-only absolute path

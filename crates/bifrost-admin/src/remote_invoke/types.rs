@@ -10,6 +10,10 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub(crate) fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 // ---------------------------------------------------------------------------
 // Enums
 // ---------------------------------------------------------------------------
@@ -377,6 +381,8 @@ pub struct RemoteCommand {
     pub stdin_mode: Option<StdinMode>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "crate::remote_invoke::types::is_false")]
+    pub login: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pty: Option<RemotePtyRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]

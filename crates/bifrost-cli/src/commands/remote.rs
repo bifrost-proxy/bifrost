@@ -30,7 +30,7 @@ use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
     RemoteCommandExecArgs, RemoteCommands, RemoteConnCommands, RemoteFileCommands,
-    RemoteSearchArgs, RemoteTrafficCommands,
+    RemoteJobCommands, RemoteSearchArgs, RemoteTrafficCommands,
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
@@ -58,6 +58,10 @@ const ENCRYPTED_OPEN_CALL_VERSION: u32 = 2;
 const LOCAL_SECRET_FORMAT_VERSION: u32 = 1;
 const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
 const CALL_EVENT_HKDF_INFO_PREFIX: &[u8] = b"bifrost-e2e-v1";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 fn should_print_remote_progress_banner(stdout_is_terminal: bool) -> bool {
     stdout_is_terminal
@@ -99,6 +103,7 @@ struct ShellExecPayload {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
+    login: bool,
     stdin_mode: Option<String>,
     pty: Option<PtyRequestPayload>,
     output_mode: Option<String>,
@@ -635,6 +640,8 @@ struct CommandEnvelope {
     env: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    login: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stdin_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1116,6 +1123,7 @@ fn encrypt_remote_command(
         cwd: shell_exec.and_then(|payload| payload.cwd.clone()),
         env: shell_exec.and_then(|payload| payload.env.clone()),
         timeout_ms: shell_exec.and_then(|payload| payload.timeout_ms),
+        login: shell_exec.map(|payload| payload.login).unwrap_or(false),
         stdin_mode: shell_exec.and_then(|payload| payload.stdin_mode.clone()),
         pty: shell_exec.and_then(|payload| payload.pty.clone()),
         output_mode: shell_exec.and_then(|payload| payload.output_mode.clone()),
@@ -1393,6 +1401,10 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         .await;
     }
 
+    if let RemoteCommands::Job { action } = &opts.action {
+        return handle_remote_job_command(&caller, action).await;
+    }
+
     let mut conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
     let caller_fingerprint = if conn.caller_fingerprint.is_empty() {
         caller_fingerprint
@@ -1563,6 +1575,18 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
+    if let RemoteCommands::Exec(exec_args) = &opts.action {
+        if exec_args.detach {
+            println!("Detached remote job started");
+            println!("call_id={}", call_result.call_id);
+            println!("relay_token={}", call_result.relay_token);
+            println!(
+                "watch: bifrost remote job watch {} --relay-token <relay_token>",
+                call_result.call_id
+            );
+            return Ok(());
+        }
+    }
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
     }
@@ -2184,6 +2208,9 @@ fn build_remote_command_checked(
             render: RemoteRenderMode::Raw,
             streaming_prefs: None,
         }),
+        RemoteCommands::Job { .. } => Err(BifrostError::Config(
+            "`remote job` is handled locally and should not build an encrypted command".to_string(),
+        )),
         RemoteCommands::Exec(exec_args) => Ok(build_remote_shell_exec_command(exec_args)),
         RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
         RemoteCommands::KeepAwake { action } => {
@@ -2366,6 +2393,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            login: exec_args.login,
             stdin_mode: stdin_mode.clone(),
             pty: pty.clone(),
             output_mode: output_mode.clone(),
@@ -2378,6 +2406,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            login: false,
             stdin_mode,
             pty,
             output_mode,
@@ -2455,6 +2484,16 @@ fn build_remote_file_command(
                 "paths": paths,
                 "max_bytes": max_bytes,
                 "allow_binary": allow_binary,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::ScratchDir { cwd, name, output } => (
+            "file.mkdir",
+            format!("file.scratch_dir {}", name),
+            json!({
+                "path": name,
+                "parents": true,
                 "cwd": cwd,
             }),
             output.clone(),
@@ -2817,6 +2856,66 @@ fn build_remote_file_command(
         },
         streaming_prefs: None,
     })
+}
+
+async fn handle_remote_job_command(
+    caller: &CallerRelayClient,
+    action: &RemoteJobCommands,
+) -> bifrost_core::Result<()> {
+    match action {
+        RemoteJobCommands::Status {
+            call_id,
+            relay_token,
+            wait_ms,
+        } => {
+            match caller
+                .poll_call_terminal_status(call_id, relay_token, Duration::from_millis(*wait_ms))
+                .await?
+            {
+                Some(status) => {
+                    println!("status={}", status.status);
+                    if let Some(exit_code) = status.exit_code {
+                        println!("exit_code={exit_code}");
+                    }
+                    if let Some(duration_ms) = status.duration_ms {
+                        println!("duration_ms={duration_ms}");
+                    }
+                }
+                None => {
+                    println!("status=running");
+                    println!("call_id={call_id}");
+                }
+            }
+            Ok(())
+        }
+        RemoteJobCommands::Logs {
+            call_id,
+            relay_token,
+            output_file,
+            no_verify_digest,
+        }
+        | RemoteJobCommands::Watch {
+            call_id,
+            relay_token,
+            output_file,
+            no_verify_digest,
+        } => {
+            let prefs = StreamingPrefs {
+                stream: true,
+                output_file: output_file.as_ref().map(PathBuf::from),
+                resume_call_id: Some(call_id.clone()),
+                resume_relay_token: Some(relay_token.clone()),
+                no_verify_digest: *no_verify_digest,
+                interactive: false,
+                stdin: false,
+            };
+            let result = run_streaming_dispatch(caller, call_id, relay_token, &prefs).await?;
+            if matches!(action, RemoteJobCommands::Watch { .. }) && result.exit_code != 0 {
+                std::process::exit(result.exit_code);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<String, String>> {
@@ -3635,8 +3734,13 @@ fn remote_file_error_hint(stderr: &str) -> Option<&'static str> {
         .map(|(code, _)| code.trim())?;
     let hint = match code {
         "file.out_of_scope" => {
-            "Path is outside the granted roots. Ask the target to add it to FileAccessPolicy \
-             (~/.bifrost/file-access.toml); do not change --cwd to work around it."
+            "Path is outside the granted roots. If this was /tmp, macOS may resolve it to \
+             /private/tmp outside the policy; use `remote file scratch-dir` under the repo/cwd \
+             or ask the target to add the path to FileAccessPolicy."
+        }
+        "file.op_not_permitted" => {
+            "The active file policy does not allow this operation. For `read-many`, fall back to \
+             repeated `remote file read` calls or ask the target to add the read_many op."
         }
         "file.deny_pattern" => {
             "Path matched a policy `denies` rule (e.g. .ssh, .env, target/, *.pfx). The owner \
@@ -3789,6 +3893,7 @@ fn render_file_read_human(value: &Value) {
         .or_else(|| value.get("sha256").and_then(Value::as_str));
     let total_lines = value.get("total_lines").and_then(Value::as_u64);
     let total_size = value.get("total_size").and_then(Value::as_u64);
+    let mtime = value.get("mtime_unix").and_then(Value::as_u64);
     let mut parts: Vec<String> = Vec::new();
     if let Some(n) = total_lines {
         parts.push(format!("{n} lines"));
@@ -3798,6 +3903,9 @@ fn render_file_read_human(value: &Value) {
     }
     if let Some(s) = sha {
         parts.push(format!("sha256={s}"));
+    }
+    if let Some(ts) = mtime {
+        parts.push(format!("mtime_unix={ts}"));
     }
     if !parts.is_empty() {
         eprintln!("{}", format!("— {}", parts.join("  ")).dimmed());
@@ -4254,6 +4362,13 @@ struct CallResult {
     stderr: Option<String>,
     duration_ms: Option<u64>,
     cancelled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct JobTerminalStatus {
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5073,6 +5188,107 @@ impl CallerRelayClient {
         }
     }
 
+    async fn poll_call_terminal_status(
+        &self,
+        call_id: &str,
+        relay_token: &str,
+        wait: Duration,
+    ) -> bifrost_core::Result<Option<JobTerminalStatus>> {
+        let url = format!(
+            "{}/v4/remote-invoke/calls/{}/events",
+            self.base_url, call_id
+        );
+        let sse_http = direct_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| BifrostError::Network(format!("build job status sse client: {e}")))?;
+        let response = sse_http
+            .get(&url)
+            .header("Authorization", format!("Bearer {relay_token}"))
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("subscribe job status failed: {e}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "job status returned {status}: {}",
+                truncate(&body, 500)
+            )));
+        }
+
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        let mut stream = response.bytes_stream();
+        let mut event_name = String::new();
+        let mut data_buf = String::new();
+        let mut partial_line = String::new();
+
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return Ok(None),
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else {
+                        return Ok(None);
+                    };
+                    let bytes = chunk.map_err(|e| {
+                        BifrostError::Network(format!("job status SSE error: {e}"))
+                    })?;
+                    partial_line.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = partial_line.find('\n') {
+                        let line = partial_line[..pos].trim_end_matches('\r').to_string();
+                        partial_line = partial_line[pos + 1..].to_string();
+                        if line.is_empty() {
+                            if !event_name.is_empty() && !data_buf.is_empty() {
+                                if event_name == "exit" {
+                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                        return Ok(Some(JobTerminalStatus {
+                                            status: "exited".to_string(),
+                                            exit_code: v.get("exit_code").and_then(|x| x.as_i64()).map(|n| n as i32),
+                                            duration_ms: v.get("duration_ms").and_then(Value::as_u64),
+                                        }));
+                                    }
+                                } else if event_name == "status" {
+                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                        if let Some(status) = parse_call_terminal_status(&v) {
+                                            return Ok(Some(JobTerminalStatus {
+                                                status: status.to_string(),
+                                                exit_code: None,
+                                                duration_ms: None,
+                                            }));
+                                        }
+                                    }
+                                } else if event_name == "stream_frame" {
+                                    if let Some(crate::commands::caller_stream_frame::StreamDecision::Done { exit_code, duration_ms, .. }) =
+                                        parse_stream_frame_from_sse_data(&data_buf).and_then(|frame| {
+                                            let mut state = CallerStreamState::new(std::io::sink(), std::io::sink(), false);
+                                            state.feed(&frame).ok()
+                                        })
+                                    {
+                                        return Ok(Some(JobTerminalStatus {
+                                            status: "exited".to_string(),
+                                            exit_code: Some(exit_code),
+                                            duration_ms: Some(duration_ms),
+                                        }));
+                                    }
+                                }
+                            }
+                            event_name.clear();
+                            data_buf.clear();
+                        } else if let Some(ev) = line.strip_prefix("event:") {
+                            event_name = ev.trim().to_string();
+                        } else if let Some(d) = line.strip_prefix("data:") {
+                            if !data_buf.is_empty() {
+                                data_buf.push('\n');
+                            }
+                            data_buf.push_str(d.trim());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn settle_cancelled_call(
         &self,
         call_id: &str,
@@ -5457,7 +5673,9 @@ fn streaming_result_from_outcome(
             digest_ok,
         } => {
             if verify && !digest_ok {
-                StreamingDispatchStep::Error("stream digest mismatch".to_string())
+                StreamingDispatchStep::Error(
+                    "stream digest mismatch; output may be incomplete. Re-run with `remote exec --detach` and follow with `remote job watch`, or retry with --no-verify-digest only after separately validating the remote log/output.".to_string(),
+                )
             } else {
                 StreamingDispatchStep::Complete(CallResult {
                     exit_code,
