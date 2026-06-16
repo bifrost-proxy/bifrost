@@ -74,6 +74,8 @@
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let status = match &menu[0] {
             menu::MenuEntry::Item(item) => item.label.as_str(),
@@ -184,6 +186,32 @@
     }
 
     #[test]
+    fn test_upgrade_operation_status_and_busy() {
+        assert_eq!(
+            operation_status_label(OP_UPGRADING),
+            Some("Bifrost: Updating…")
+        );
+        assert_eq!(
+            operation_status_label(OP_UPGRADE_FAILED),
+            Some("Bifrost: Update failed - open logs")
+        );
+        assert!(operation_busy(OP_UPGRADING));
+        assert!(!operation_busy(OP_UPGRADE_FAILED));
+    }
+
+    #[test]
+    fn test_upgrade_status_label_includes_percent_only_while_downloading() {
+        assert_eq!(
+            upgrade_status_label(OP_UPGRADING, 42),
+            Some("Bifrost: Updating… 42%".to_string())
+        );
+        // No percent available -> fall back to static label.
+        assert_eq!(upgrade_status_label(OP_UPGRADING, UPGRADE_PERCENT_NONE), None);
+        // Not an upgrade -> no dynamic label.
+        assert_eq!(upgrade_status_label(OP_STARTING, 42), None);
+    }
+
+    #[test]
     fn test_explicit_reload_and_user_action_replace_native_menu() {
         assert!(should_replace_native_menu(true, false, true));
         assert!(should_replace_native_menu(false, true, true));
@@ -203,6 +231,8 @@
             &[],
             &[],
             None,
+            None,
+            false,
         );
 
         let busy = menu::build_menu(
@@ -216,6 +246,8 @@
             &[],
             &[],
             None,
+            None,
+            false,
         );
 
         assert_eq!(menu_shape(&initial), menu_shape(&busy));
@@ -235,6 +267,8 @@
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let next = menu::build_menu(
             Some(&rt),
@@ -254,6 +288,8 @@
             }],
             &[],
             None,
+            None,
+            false,
         );
 
         assert_ne!(menu_shape(&initial), menu_shape(&next));
@@ -295,6 +331,7 @@
             None,
             false,
             data_dir.to_string_lossy().as_ref(),
+            false,
         );
         let status = match &menu[0] {
             menu::MenuEntry::Item(item) => item.label.as_str(),
@@ -329,6 +366,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: Some(cached.clone()),
             bin_available: true,
+            update_available: None,
         };
         let menu_data = Arc::new(Mutex::new(snapshot));
         let generation = AtomicU64::new(0);
@@ -480,6 +518,8 @@
             &rules,
             &[],
             None,
+            None,
+            false,
         );
         let rules_menu = menu.iter().find_map(|entry| match entry {
             menu::MenuEntry::Submenu(submenu) if submenu.id == "rules_switcher" => Some(submenu),

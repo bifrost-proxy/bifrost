@@ -18,6 +18,7 @@ pub mod system_proxy;
 pub mod system_proxy_launchd;
 pub mod system_proxy_recovery;
 pub mod text;
+pub mod upgrade_progress;
 pub mod version_check;
 
 pub use access_control::{

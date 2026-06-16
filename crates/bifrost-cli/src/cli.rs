@@ -341,6 +341,20 @@ pub enum Commands {
         #[arg(long, help = "Automatically restart the running proxy after upgrade")]
         restart: bool,
     },
+    #[command(
+        hide = true,
+        about = "Run an unattended background upgrade (used by tray/admin)"
+    )]
+    SelfUpdate {
+        #[arg(long, help = "Target version (informational; engine resolves latest)")]
+        target: Option<String>,
+        #[arg(
+            long,
+            default_value = "cli",
+            help = "Who initiated the upgrade: tray/admin/cli"
+        )]
+        source: String,
+    },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {
         #[command(subcommand)]

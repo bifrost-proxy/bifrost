@@ -1,8 +1,19 @@
+use std::process::{Command, Stdio};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
+use bifrost_core::upgrade_progress::{
+    is_stale, read_progress, write_progress, UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS,
+};
+use bifrost_storage::data_dir;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tracing::warn;
 
-use super::{error_response, json_response, method_not_allowed, BoxBody};
+use super::{error_response, json_response, json_response_with_status, method_not_allowed, BoxBody};
 use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
@@ -30,6 +41,14 @@ pub async fn handle_system(
         },
         "/api/system/version-check" => match method {
             Method::GET => check_version(state, query).await,
+            _ => method_not_allowed(),
+        },
+        "/api/system/upgrade" => match method {
+            Method::POST => start_upgrade(state).await,
+            _ => method_not_allowed(),
+        },
+        "/api/system/upgrade/progress" => match method {
+            Method::GET => get_upgrade_progress().await,
             _ => method_not_allowed(),
         },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
@@ -197,4 +216,166 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 
     let response = state.version_checker.check(force_refresh).await;
     json_response(&response)
+}
+
+/// `POST /api/system/upgrade` — trigger an unattended background upgrade.
+///
+/// Returns `409 Conflict` when there is no newer version available or an
+/// upgrade is already in flight (non-stale active progress). On success it
+/// writes an initial `Checking` progress record, spawns a detached
+/// `bifrost self-update --source admin` subprocess and returns `202 Accepted`
+/// with the current progress snapshot.
+///
+/// The upgrade is never executed inside the admin process: the subprocess stops
+/// the old proxy, swaps the binary and restarts, which would otherwise kill the
+/// admin server mid-request. The progress file survives the restart so the
+/// Web UI can read the terminal state after reconnecting.
+async fn start_upgrade(state: SharedAdminState) -> Response<BoxBody> {
+    let dir = data_dir();
+
+    // Refuse if an upgrade is already running and still alive.
+    let current = read_progress(&dir);
+    if current.is_active() && !is_stale(&current, DEFAULT_STALE_SECS) {
+        return error_response(StatusCode::CONFLICT, "An upgrade is already in progress");
+    }
+
+    // Confirm there is actually a newer version to upgrade to.
+    let version = state.version_checker.check(false).await;
+    if !version.has_update {
+        return error_response(StatusCode::CONFLICT, "No update available");
+    }
+    let target_version = version.latest_version.clone();
+
+    // Seed the channel so the Web UI sees movement immediately, before the
+    // subprocess has had a chance to start writing.
+    let initial = UpgradeProgress::new(UpgradePhase::Checking, "Checking for updates…")
+        .with_target(target_version.clone())
+        .with_source(Some("admin".to_string()));
+    write_progress(&dir, &initial);
+
+    if let Err(error) = spawn_self_update(target_version.as_deref()) {
+        warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
+        let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
+            .with_target(target_version)
+            .with_source(Some("admin".to_string()))
+            .with_error(Some(error.to_string()));
+        write_progress(&dir, &failed);
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to start upgrade process",
+        );
+    }
+
+    json_response_with_status(StatusCode::ACCEPTED, &initial)
+}
+
+/// `GET /api/system/upgrade/progress` — return the current upgrade progress.
+///
+/// A stale active record (no update within [`DEFAULT_STALE_SECS`]) is
+/// normalized to `Failed` so the UI never hangs on a crashed/abandoned upgrade.
+async fn get_upgrade_progress() -> Response<BoxBody> {
+    let dir = data_dir();
+    let progress = normalize_progress(read_progress(&dir));
+    json_response(&progress)
+}
+
+/// Normalize a progress snapshot for readers: a stale active record (no update
+/// within [`DEFAULT_STALE_SECS`]) is mapped to `Failed` so the UI never hangs on
+/// a crashed/abandoned upgrade process. Non-stale and terminal records pass
+/// through unchanged.
+fn normalize_progress(progress: UpgradeProgress) -> UpgradeProgress {
+    if progress.is_active() && is_stale(&progress, DEFAULT_STALE_SECS) {
+        return UpgradeProgress::new(UpgradePhase::Failed, "Upgrade process is not responding")
+            .with_target(progress.target_version.clone())
+            .with_source(progress.source.clone())
+            .with_error(Some("Upgrade process stopped responding".to_string()));
+    }
+    progress
+}
+
+/// Spawn a detached `bifrost self-update` subprocess.
+///
+/// The binary is resolved via `current_exe()` (the admin server runs inside the
+/// bifrost process, so `current_exe` is bifrost itself), falling back to a bare
+/// `bifrost` looked up on `PATH`.
+fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
+    let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
+
+    let mut command = Command::new(&program);
+    command.arg("self-update");
+    if let Some(target) = target_version {
+        command.arg("--target").arg(target);
+    }
+    command
+        .arg("--source")
+        .arg("admin")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    let child = command.spawn()?;
+    tracing::info!(
+        target: "bifrost_admin::system",
+        child_pid = child.id(),
+        program = %program.display(),
+        target_version = target_version.unwrap_or("latest"),
+        "spawned background self-update subprocess"
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_progress;
+    use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
+    use chrono::Utc;
+
+    #[test]
+    fn stale_active_progress_is_normalized_to_failed() {
+        let mut progress = UpgradeProgress::new(UpgradePhase::Downloading, "Downloading…")
+            .with_target(Some("0.0.104".to_string()))
+            .with_source(Some("admin".to_string()));
+        progress.updated_at =
+            (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 30)).to_rfc3339();
+
+        let normalized = normalize_progress(progress);
+        assert_eq!(normalized.phase, UpgradePhase::Failed);
+        assert_eq!(normalized.target_version, Some("0.0.104".to_string()));
+        assert_eq!(normalized.source, Some("admin".to_string()));
+        assert!(normalized.error.is_some());
+    }
+
+    #[test]
+    fn fresh_active_progress_passes_through() {
+        let progress = UpgradeProgress::new(UpgradePhase::Downloading, "Downloading…")
+            .with_percent(Some(42.0));
+        let normalized = normalize_progress(progress.clone());
+        assert_eq!(normalized.phase, UpgradePhase::Downloading);
+        assert_eq!(normalized.percent, Some(42.0));
+    }
+
+    #[test]
+    fn terminal_progress_passes_through_even_when_old() {
+        let mut completed = UpgradeProgress::new(UpgradePhase::Completed, "Done");
+        completed.updated_at =
+            (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 300)).to_rfc3339();
+        assert_eq!(
+            normalize_progress(completed).phase,
+            UpgradePhase::Completed
+        );
+
+        let idle = UpgradeProgress::idle();
+        assert_eq!(normalize_progress(idle).phase, UpgradePhase::Idle);
+    }
 }

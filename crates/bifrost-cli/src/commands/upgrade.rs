@@ -635,7 +635,11 @@ fn select_fastest_github_base(github_path: &str, tuning: DownloadTuning) -> Opti
         .map(|(_, base, _)| base)
 }
 
-fn download_progress_line(downloaded: u64, total: Option<u64>, started: Instant) -> String {
+pub(crate) fn download_progress_line(
+    downloaded: u64,
+    total: Option<u64>,
+    started: Instant,
+) -> String {
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let speed = downloaded as f64 / elapsed;
     match total {
@@ -749,11 +753,13 @@ fn download_file_once_with_progress(
             print!("\r{}", download_progress_line(downloaded, total, started));
             io::stdout().flush().ok();
             last_render = Instant::now();
+            super::upgrade_background::report_download(downloaded, total, started);
         }
     }
 
     file.flush().map_err(BifrostError::Io)?;
     println!("\r{}", download_progress_line(downloaded, total, started));
+    super::upgrade_background::report_download(downloaded, total, started);
 
     if downloaded == 0 {
         return Err(BifrostError::Network(format!(
@@ -1184,6 +1190,7 @@ fn download_and_install(
         .ok_or_else(|| BifrostError::Network("Failed to download release archive".to_string()))?;
 
     println!("{}", "Extracting archive...".bright_cyan());
+    super::upgrade_background::report_installing();
 
     let extract_dir = temp_dir.path().join(format!("extract_{}", target));
     fs::create_dir_all(&extract_dir)?;
@@ -1526,6 +1533,7 @@ fn maybe_restart_running_proxy(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
+    super::upgrade_background::report_restarting();
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -1639,6 +1647,7 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
+    super::upgrade_background::report_restarting();
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
