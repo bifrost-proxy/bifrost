@@ -81,6 +81,12 @@ pub struct AgentWorkerRunResult {
     pub goal_objective: Option<String>,
     #[serde(default)]
     pub history_path: Option<String>,
+    /// Guide messages the worker's turn loop actually consumed (injected into
+    /// history) during this run. The parent uses this to re-queue any guide it
+    /// handed off but the worker never consumed — closing the IPC race where a
+    /// guide arrives after the turn-end checkpoint and would otherwise be lost.
+    #[serde(default)]
+    pub consumed_guide_messages: Vec<String>,
 }
 
 impl From<bifrost_agent::TurnResult> for AgentWorkerRunResult {
@@ -95,6 +101,7 @@ impl From<bifrost_agent::TurnResult> for AgentWorkerRunResult {
             goal_needs_continuation: value.goal_needs_continuation,
             goal_objective: value.goal_objective,
             history_path: None,
+            consumed_guide_messages: Vec::new(),
         }
     }
 }
@@ -908,6 +915,7 @@ async fn run_builtin_agent_turn(
     }
     result.map(|turn_result| AgentWorkerRunResult {
         history_path,
+        consumed_guide_messages: session.consumed_guide_messages.clone(),
         ..AgentWorkerRunResult::from(turn_result)
     })
 }

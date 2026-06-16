@@ -2172,7 +2172,11 @@ pub async fn run_turn_with_mcp_multimodal(
             // checkpoint (after tool execution) never consumed it. Check here
             // before ending the turn so the message is not silently lost.
             let guide_messages = drain_guide_messages(session);
+            let consumed_guides = guide_messages.clone();
             if let Some(guide_msg) = combine_guide_messages(guide_messages) {
+                session
+                    .consumed_guide_messages
+                    .extend(consumed_guides.into_iter().filter(|m| !m.trim().is_empty()));
                 info!(
                     session_key = %session.session_key,
                     guide_msg_len = guide_msg.len(),
@@ -2851,7 +2855,11 @@ pub async fn run_turn_with_mcp_multimodal(
         // this tool call batch was executing. If so, append it to history so the
         // model sees it in the next iteration (before compaction to preserve it).
         let guide_messages = drain_guide_messages(session);
+        let consumed_guides = guide_messages.clone();
         if let Some(guide_msg) = combine_guide_messages(guide_messages) {
+            session
+                .consumed_guide_messages
+                .extend(consumed_guides.into_iter().filter(|m| !m.trim().is_empty()));
             info!(
                 session_key = %session.session_key,
                 guide_msg_len = guide_msg.len(),

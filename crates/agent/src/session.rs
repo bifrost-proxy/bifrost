@@ -229,6 +229,14 @@ pub struct AgentSession {
     /// If a message is present, it is appended to history before the next model call.
     pub guide_channel: Option<GuideChannel>,
 
+    /// Guide messages actually consumed (injected into history) by the turn
+    /// loop during this turn. The IM worker reports these back to the parent so
+    /// it can re-queue any guide that was handed off but never consumed (e.g.
+    /// when the guide arrived over the IPC pipe after the turn-end checkpoint
+    /// already ran). Recording the raw consumed strings — identical to what was
+    /// handed off — lets the parent match exactly and avoid double-processing.
+    pub consumed_guide_messages: Vec<String>,
+
     /// Pending message queue. When the turn loop finishes (model returns stop
     /// with no tool calls and no guide message), it checks this queue. If there
     /// are messages pending, the next one is popped and processed as a new user
@@ -351,6 +359,7 @@ impl AgentSession {
             skill_authoring: SkillAuthoringHub::new(),
             memory_cleared: false,
             guide_channel: None,
+            consumed_guide_messages: Vec::new(),
             pending_messages: std::collections::VecDeque::new(),
             title: None,
             current_plan: None,

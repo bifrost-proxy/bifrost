@@ -113,6 +113,37 @@ impl SessionQueueManager {
         }
     }
 
+    /// Reconcile the guides handed to a worker against the ones it reported as
+    /// actually consumed. Returns the handed-off guides that were NOT consumed
+    /// (the lost-race case: a guide reached the worker over the IPC pipe after
+    /// the turn-end checkpoint already ran, so it was silently dropped). The
+    /// handed-off record for this session is cleared regardless, since the turn
+    /// has ended. Each consumed entry is matched at most once so duplicate guide
+    /// texts are handled correctly.
+    pub fn reconcile_handed_off_guides(
+        &self,
+        session_key: &str,
+        consumed: &[String],
+    ) -> Vec<String> {
+        let Some((_, handed_off)) = self.handed_off_guides.remove(session_key) else {
+            return Vec::new();
+        };
+        let mut remaining_consumed: Vec<&String> =
+            consumed.iter().filter(|m| !m.trim().is_empty()).collect();
+        let mut unconsumed = Vec::new();
+        for guide in handed_off {
+            if guide.trim().is_empty() {
+                continue;
+            }
+            if let Some(pos) = remaining_consumed.iter().position(|c| **c == guide) {
+                remaining_consumed.remove(pos);
+            } else {
+                unconsumed.push(guide);
+            }
+        }
+        unconsumed
+    }
+
     // ── Queue mode ───────────────────────────────────────────────────────
 
     /// Push a message into the queue. Returns the current queue snapshot.
@@ -228,6 +259,35 @@ mod tests {
         );
         mgr.clear_session("s1");
         assert!(mgr.guide_status("s1").is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_handed_off_guides_returns_unconsumed() {
+        let mgr = SessionQueueManager::new();
+        // Two guides handed to the worker.
+        mgr.mark_guides_handed_to_worker("s1", &["consumed".into(), "lost".into()]);
+        // Worker reports it only consumed the first one (the second lost the
+        // IPC race against the turn-end checkpoint).
+        let unconsumed = mgr.reconcile_handed_off_guides("s1", &["consumed".into()]);
+        assert_eq!(unconsumed, vec!["lost".to_string()]);
+        // Handoff record is cleared after reconciliation regardless.
+        assert!(mgr.guide_status("s1").is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_handed_off_guides_all_consumed() {
+        let mgr = SessionQueueManager::new();
+        mgr.mark_guides_handed_to_worker("s1", &["a".into(), "b".into()]);
+        let unconsumed = mgr.reconcile_handed_off_guides("s1", &["a".into(), "b".into()]);
+        assert!(unconsumed.is_empty());
+        assert!(mgr.guide_status("s1").is_empty());
+    }
+
+    #[test]
+    fn test_reconcile_handed_off_guides_none_handed() {
+        let mgr = SessionQueueManager::new();
+        let unconsumed = mgr.reconcile_handed_off_guides("s1", &["x".into()]);
+        assert!(unconsumed.is_empty());
     }
 
     #[test]
