@@ -341,6 +341,7 @@
 - 必须采用立即编译运行的方式，避免使用已编译的二进制文件
 - **⛔ 必须加上 `--no-system-proxy`**：除非测试目标明确涉及系统代理功能（如 `test_system_proxy_e2e.sh`），否则启动 Bifrost 时必须携带 `--no-system-proxy` 参数。原因：Bifrost 默认会修改操作系统的系统代理配置，在开发/测试环境中这会导致网络中断，影响其他进程和开发体验。
 - **⛔ 必须禁用 Sync 自动登录弹窗**：除非测试目标明确涉及 Sync 启动自动登录引导，否则开发、调试、E2E、human_tests 启动 Bifrost 时必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。原因：Sync 默认启用后会在远端可达且本地未登录时自动打开登录页；多数测试不需要这个交互，意外弹窗会干扰自动化、污染用户体验并造成误判。
+- **⛔ 必须禁用托盘（Tray）**：除非测试目标明确涉及托盘行为（如 `test_cli_tray_*`），否则开发、调试、E2E、human_tests、任何复现脚本启动 Bifrost 时必须设置 `BIFROST_DISABLE_TRAY=1`。原因：在 macOS / Windows 上启动完整 `bifrost` 会派生托盘 helper 进程；并发跑测试矩阵时会瞬间拉起几十个托盘并打开上百个登录页，直接打爆机器。这是已经发生过的真实事故。
 - 示例：
 
 ```bash
@@ -349,6 +350,18 @@ BIFROST_DATA_DIR=./.bifrost-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 cargo 
 
 > **唯一豁免场景**：当测试用例的验证目标本身就是系统代理功能时（如需要验证 `--system-proxy` 开启/关闭行为），可以省略 `--no-system-proxy` 或显式使用 `--system-proxy`。此类场景必须在测试用例文档中明确标注。
 > **Sync 弹窗豁免场景**：当测试用例的验证目标本身就是启动登录预检、自动打开登录页或登录弹窗去重时，可以省略 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。此类场景必须在测试用例文档中明确标注，并优先使用 `BIFROST_SYNC_LOGIN_BROWSER_DRY_RUN_FILE` 记录登录 URL，避免真实打开浏览器。
+
+## ⛔ 测试启动红线（禁止裸调 bifrost start）
+
+**任何测试、调试、复现脚本启动完整 `bifrost`（`start` / `run`）之前，必须先具备托盘 + 登录页双重护栏。** 这是事故复盘后的硬约束，违反即视为交付不合格。
+
+1. **禁止裸调**：禁止在没有护栏的情况下直接执行 `bifrost start` / `$BIFROST_BIN start` / `cargo run --bin bifrost -- start`。护栏二选一：
+   - 在脚本顶部 `source e2e-tests/test_utils/process.sh`（共享 helper 已默认 `BIFROST_DISABLE_TRAY=1` 与 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`）；或
+   - 显式 `export BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 后再启动。
+2. **禁止仓库根目录裸脚本**：临时复现脚本不得放在仓库根目录绕过 `scripts/run_all_e2e.sh` 这把"伞"。复现脚本应放进 `e2e-tests/` 并自带护栏；用完即删，禁止提交进仓库。
+3. **禁止并发起多个完整实例**：除非测试目标就是多实例并发，否则不得在同一脚本里并行拉起多个完整 `bifrost` 进程；并发场景必须用独立端口 + 独立数据目录，并设置实例数上限。
+4. **收尾必须清理派生进程**：脚本退出（含失败路径，用 `trap` 兜底）必须杀掉本次派生的 `bifrost`、托盘 helper 与 mock server 进程，并释放占用端口，禁止残留进程污染后续运行。
+5. **提交前自检（不入 CI）**：`scripts/ci/check-e2e-launch-guard.sh` 会扫描所有启动 `bifrost start|run` 的脚本是否携带护栏。为节省 CI 资源，该校验**不作为独立 CI job**，而是要求人/Agent 在新增或修改测试脚本后、提交前本地执行一次（`bash scripts/ci/check-e2e-launch-guard.sh`，退出码非 0 即不合规）。新增不合规脚本必须先修复护栏再提交。
 
 ## 工作区测试要求
 
