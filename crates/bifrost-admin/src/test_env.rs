@@ -11,6 +11,23 @@ pub(crate) struct BifrostDataDirGuard {
     old_static_dir: PathBuf,
 }
 
+/// Lock guarding the process-global bifrost data dir during tests.
+///
+/// `BifrostDataDirGuard` and the remote-invoke shell tests both mutate the same
+/// process-global data dir via `bifrost_storage::set_data_dir`. They must share a
+/// single mutex, otherwise a `BifrostDataDirGuard`-based test can clobber the
+/// global between another test's save/load (observed as a flaky
+/// `remove_grant_policy_*` failure under the parallel `--all-features` CI run).
+/// No test acquires both guard families at once, so sharing the lock is
+/// deadlock-free.
+#[cfg(test)]
+pub(crate) fn bifrost_data_dir_lock() -> MutexGuard<'static, ()> {
+    BIFROST_DATA_DIR_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl BifrostDataDirGuard {
     pub(crate) fn set(data_dir: &Path) -> Self {
         let guard = BIFROST_DATA_DIR_LOCK
@@ -47,4 +64,18 @@ impl Drop for BifrostDataDirGuard {
 #[cfg(test)]
 pub(crate) fn agent_worker_env_lock() -> &'static tokio::sync::Mutex<()> {
     AGENT_WORKER_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+static VOICE_ENV_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+/// Serializes voice tests that read or mutate process-global `BIFROST_VOICE_*`
+/// env vars (e.g. `BIFROST_VOICE_ALLOW_STATEFUL_17B`,
+/// `BIFROST_VOICE_ENABLE_FAKE_STATEFUL`). Without this, a test that only *reads*
+/// a flag can observe a value another test transiently *set*, producing a flaky
+/// failure under the parallel `--all-features` run. A `tokio::sync::Mutex` is
+/// used so async tests can hold it across `.await` without `await_holding_lock`.
+#[cfg(test)]
+pub(crate) fn voice_env_lock() -> &'static tokio::sync::Mutex<()> {
+    VOICE_ENV_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }

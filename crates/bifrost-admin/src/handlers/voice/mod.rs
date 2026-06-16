@@ -1733,6 +1733,7 @@ mod coverage_boost {
 
     #[test]
     fn stateful_17b_enabled_reads_env_flag() {
+        let _env = crate::test_env::voice_env_lock().blocking_lock();
         env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
         assert!(!stateful_17b_enabled(""));
         env::set_var("BIFROST_VOICE_ALLOW_STATEFUL_17B", "true");
@@ -1742,6 +1743,7 @@ mod coverage_boost {
 
     #[test]
     fn fake_stateful_worker_enabled_reads_env_flag() {
+        let _env = crate::test_env::voice_env_lock().blocking_lock();
         env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
         assert!(!fake_stateful_worker_enabled());
         env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "1");
@@ -1757,6 +1759,7 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn start_voice_stateful_session_uses_fake_worker_when_enabled() {
+        let _env = crate::test_env::voice_env_lock().lock().await;
         env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "1");
         let session = start_voice_stateful_session(
             "fake_stateful_worker=1&fake_stateful_text=你好",
@@ -2089,6 +2092,8 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn start_voice_stateful_session_rejects_17b_when_not_enabled() {
+        let _env = crate::test_env::voice_env_lock().lock().await;
+        env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
         let err = start_voice_stateful_session("model=Qwen3-ASR-1.7B", 0.5, "zh")
             .await
             .err()
@@ -2252,6 +2257,7 @@ mod coverage_boost_v2 {
 
     #[test]
     fn stateful_17b_enabled_reads_env_flag_v2() {
+        let _env = crate::test_env::voice_env_lock().blocking_lock();
         env::remove_var("BIFROST_VOICE_ALLOW_STATEFUL_17B");
         assert!(!stateful_17b_enabled(""));
         env::set_var("BIFROST_VOICE_ALLOW_STATEFUL_17B", "true");
@@ -2261,6 +2267,7 @@ mod coverage_boost_v2 {
 
     #[test]
     fn fake_stateful_worker_enabled_true_for_yes_v2() {
+        let _env = crate::test_env::voice_env_lock().blocking_lock();
         env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "yes");
         assert!(fake_stateful_worker_enabled());
         env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
@@ -2268,6 +2275,7 @@ mod coverage_boost_v2 {
 
     #[test]
     fn fake_stateful_worker_enabled_false_when_unset_v2() {
+        let _env = crate::test_env::voice_env_lock().blocking_lock();
         env::remove_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL");
         assert!(!fake_stateful_worker_enabled());
     }
@@ -2400,6 +2408,7 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn start_voice_stateful_session_fake_worker_uses_default_text_when_missing_v2() {
+        let _env = crate::test_env::voice_env_lock().lock().await;
         env::set_var("BIFROST_VOICE_ENABLE_FAKE_STATEFUL", "1");
         let mut session = start_voice_stateful_session("fake_stateful_worker=1", 0.5, "zh")
             .await
