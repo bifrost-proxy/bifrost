@@ -83,15 +83,12 @@ fn build_daily_agent_prompt(
     }
 
     if is_chatgpt_web {
-        if chatgpt_first_turn {
-            prompt.push_str(
-                "\n这是该 ASR 任务固定 ChatGPT Web 对话的第一轮。每条消息都会在开头附带完整的 AGENTS.md 指令，后跟本轮需要处理的内容。\n",
-            );
-        } else {
-            prompt.push_str(
-                "\n这是该 ASR 任务固定 ChatGPT Web 对话的后续轮次。每条消息都会在开头重新附带完整的 AGENTS.md 指令，请以本条消息中的 AGENTS.md 为准，处理其后跟随的新增或变更内容。\n",
-            );
-        }
+        // 每一轮都按「全新的独立任务」来构造 prompt：本条消息自带完成任务所需的全部信息
+        // （AGENTS.md 指令 + 已有日报完整内容 + 变更文件完整内容），不依赖任何历史对话记忆。
+        let _ = chatgpt_first_turn;
+        prompt.push_str(
+            "\n请把本条消息当作一次全新的、独立的任务来处理：不要假设你已经知道之前是怎么做的，也不要依赖任何历史对话记忆。完成本轮所需的全部信息——AGENTS.md 指令、已有日报的完整内容、以及变更文件的完整内容——都已包含在本条消息中。请严格依据本条消息，在已有日报的基础上合并本轮新增或变更的内容，输出完整的最新日报。\n",
+        );
 
         let agents_path = daily_agent_instructions_path(task);
         if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
@@ -100,7 +97,7 @@ fn build_daily_agent_prompt(
             prompt.push_str("\n```\n");
         }
 
-        prompt.push_str("\n---\n## 已有 report 内容（如存在，用于增量合并）：\n");
+        prompt.push_str("\n---\n## 已有日报完整内容（如存在，作为合并基线，请在此基础上更新；不要凭记忆推断历史内容）：\n");
         for entry in &changed_entries {
             if let Ok(report_content) = std::fs::read_to_string(&entry.report_target) {
                 prompt.push_str(&format!(
@@ -110,16 +107,20 @@ fn build_daily_agent_prompt(
             }
         }
 
-        prompt.push_str("\n---\n## 变更文件内容：\n");
+        prompt.push_str("\n---\n## 变更文件完整内容（每次均为全量原文，请勿假设已读过历史版本）：\n");
         for entry in &changed_entries {
             if let Ok(file_content) = std::fs::read_to_string(&entry.source_path) {
+                // 始终发送完整文件内容；对于追加变更，仅额外标注新增部分的起始位置，
+                // 但原有内容也一并附上，确保每一轮都是自包含的、无需依赖历史记忆。
                 let content_to_include = if entry.change_kind == DailyAgentChangeKind::Appended {
                     if let Some(offset) = entry.append_offset {
-                        if (offset as usize) < file_content.len() {
+                        let offset = offset as usize;
+                        if offset < file_content.len() && file_content.is_char_boundary(offset) {
                             format!(
-                                "[新增内容，从字节 {} 开始]\n{}",
+                                "{}\n[以下为本次新增内容，从字节 {} 开始]\n{}",
+                                &file_content[..offset],
                                 offset,
-                                &file_content[offset as usize..]
+                                &file_content[offset..]
                             )
                         } else {
                             file_content
