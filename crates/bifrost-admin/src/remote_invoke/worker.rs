@@ -2773,6 +2773,7 @@ impl RemoteInvokeWorker {
                 env: command.env.clone(),
                 stdin_mode: command.stdin_mode,
                 timeout_ms: command.timeout_ms,
+                login: command.login,
                 pty: command.pty.clone(),
                 output_mode: command.output_mode,
                 grant_id: None,
