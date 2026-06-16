@@ -365,8 +365,7 @@ async fn run_agent_stream(
                     let _ = send_sse_event(&tx, "run_finished", payload).await;
                     return;
                 }
-                next = tx.closed() => {
-                    let _ = next;
+                _ = tx.closed() => {
                     info!(
                         session_key = %session_key,
                         "agent chat stream client disconnected; stopping isolated worker"
