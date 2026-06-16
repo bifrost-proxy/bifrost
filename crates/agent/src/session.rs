@@ -184,6 +184,10 @@ pub struct AgentSession {
     /// Working directory for this session. Overrides config.work_dir when set.
     pub work_dir: Option<String>,
 
+    /// Original working directory saved when entering a git worktree.
+    /// Used by `exit_worktree` to restore the previous directory.
+    pub worktree_original_dir: Option<String>,
+
     /// Source of the session (e.g., "feishu", "api", "unknown").
     pub source: String,
 
@@ -334,6 +338,7 @@ impl AgentSession {
             last_response_history_len: None,
             history_version: 0,
             work_dir: None,
+            worktree_original_dir: None,
             source: "unknown".to_string(),
             agent_type: None,
             runner_type: None,
@@ -388,6 +393,30 @@ impl AgentSession {
         self.slash_router = SlashCommandRouter::with_default_builtins();
         self.skill_registry = None;
         self.attach_default_skill_registry();
+    }
+
+    /// Switch working directory to a git worktree without clearing history.
+    /// Saves the original dir so exit_worktree can restore it.
+    pub fn enter_worktree_dir(&mut self, worktree_dir: String) {
+        let original = self.work_dir.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                .to_string_lossy()
+                .to_string()
+        });
+        self.worktree_original_dir = Some(original);
+        self.work_dir = Some(worktree_dir);
+        // Reload user instructions for the new directory context
+        self.user_instructions = None;
+    }
+
+    /// Exit worktree and restore the original working directory.
+    /// Returns the original dir path, or None if not in a worktree.
+    pub fn exit_worktree_dir(&mut self) -> Option<String> {
+        let original = self.worktree_original_dir.take()?;
+        self.work_dir = Some(original.clone());
+        self.user_instructions = None;
+        Some(original)
     }
 
     /// Load user instructions (AGENTS.md + config user_instructions) once at session

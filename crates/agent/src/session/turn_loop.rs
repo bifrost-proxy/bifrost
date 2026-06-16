@@ -1594,7 +1594,7 @@ pub async fn run_turn_with_mcp_multimodal(
         "assembled agent tool definitions"
     );
 
-    let work_dir = session
+    let mut work_dir = session
         .work_dir
         .as_ref()
         .map(std::path::PathBuf::from)
@@ -2746,6 +2746,43 @@ pub async fn run_turn_with_mcp_multimodal(
                     .with_detail("mode=ordered,count=1"),
             );
             tool_index += 1;
+        }
+
+        // Check if enter_worktree was called — non-destructive CWD switch (preserves history)
+        if let Some(wt_log) = tool_calls_log
+            .iter()
+            .find(|l| l.tool_name == "enter_worktree" && l.success)
+        {
+            if let Some(rest) = wt_log.result.strip_prefix("ENTER_WORKTREE:") {
+                // Format: "ENTER_WORKTREE:<new_dir>:<original_dir>"
+                if let Some((new_dir, _original)) = rest.split_once(':') {
+                    let new_dir = new_dir.to_string();
+                    info!(
+                        session_key = %session.session_key,
+                        new_work_dir = %new_dir,
+                        "entering worktree (non-destructive)"
+                    );
+                    session.enter_worktree_dir(new_dir.clone());
+                    work_dir = std::path::PathBuf::from(&new_dir);
+                }
+            }
+        }
+
+        // Check if exit_worktree was called — restore original CWD
+        if let Some(exit_log) = tool_calls_log
+            .iter()
+            .find(|l| l.tool_name == "exit_worktree" && l.success)
+        {
+            if exit_log.result.starts_with("EXIT_WORKTREE:") {
+                if let Some(original) = session.exit_worktree_dir() {
+                    info!(
+                        session_key = %session.session_key,
+                        restored_dir = %original,
+                        "exiting worktree, restored original directory"
+                    );
+                    work_dir = std::path::PathBuf::from(&original);
+                }
+            }
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
