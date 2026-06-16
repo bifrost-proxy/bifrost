@@ -130,39 +130,65 @@ prepare_bifrost_bin() {
 }
 
 start_local_relay() {
-    RELAY_PORT="$(pick_free_port)"
-    RELAY_LOG="$(mktemp)"
-    local relay_data_dir
-    relay_data_dir="$(mktemp -d)"
-    local relay_exec
-    relay_exec="$(sync_server_exec "$SYNC_SERVER_DIR")"
+    # The relay binds an ephemeral port chosen by pick_free_port. Between
+    # picking the port and the relay actually binding it, another process on a
+    # busy CI host (parallel E2E shards) can steal it, surfacing as the relay
+    # exiting early with EADDRINUSE. Retry with a fresh port a few times before
+    # giving up so the test is not flaky on contended runners.
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        RELAY_PORT="$(pick_free_port)"
+        RELAY_LOG="$(mktemp)"
+        local relay_data_dir
+        relay_data_dir="$(mktemp -d)"
+        local relay_exec
+        relay_exec="$(sync_server_exec "$SYNC_SERVER_DIR")"
 
-    log "Starting relay on port $RELAY_PORT..."
-    (
-        cd "$SYNC_SERVER_DIR" && \
-            eval "$relay_exec" -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke
-    ) >"$RELAY_LOG" 2>&1 &
-    RELAY_PID=$!
-    RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
+        log "Starting relay on port $RELAY_PORT (attempt ${attempt})..."
+        (
+            cd "$SYNC_SERVER_DIR" && \
+                eval "$relay_exec" -p "$RELAY_PORT" -d "$relay_data_dir" --enable-remote-invoke
+        ) >"$RELAY_LOG" 2>&1 &
+        RELAY_PID=$!
+        RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 
-    local waited=0
-    while [[ $waited -lt 30 ]]; do
-        if curl -s -o /dev/null -w '%{http_code}' \
-            "${RELAY_URL}/v4/remote-invoke/client/register" 2>/dev/null | grep -q "4[0-9][0-9]\|200"; then
-            log "Relay ready (pid=$RELAY_PID)"
-            return 0
-        fi
-        if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+        local waited=0
+        local relay_died=0
+        while [[ $waited -lt 30 ]]; do
+            if curl -s -o /dev/null -w '%{http_code}' \
+                "${RELAY_URL}/v4/remote-invoke/client/register" 2>/dev/null | grep -q "4[0-9][0-9]\|200"; then
+                log "Relay ready (pid=$RELAY_PID)"
+                return 0
+            fi
+            if ! kill -0 "$RELAY_PID" 2>/dev/null; then
+                relay_died=1
+                break
+            fi
+            sleep 0.5
+            waited=$((waited + 1))
+        done
+
+        if [[ "$relay_died" -eq 1 ]]; then
+            if grep -q "EADDRINUSE\|address already in use" "$RELAY_LOG" 2>/dev/null; then
+                log "Relay port ${RELAY_PORT} was taken (EADDRINUSE); retrying with a new port"
+                rm -rf "$relay_data_dir" 2>/dev/null || true
+                continue
+            fi
             echo "Relay exited early:" >&2
             cat "$RELAY_LOG" >&2 || true
             exit 1
         fi
-        sleep 0.5
-        waited=$((waited + 1))
+
+        # Relay is alive but never became ready within the window: stop it and
+        # retry with a fresh port/data dir.
+        kill "$RELAY_PID" 2>/dev/null || true
+        wait "$RELAY_PID" 2>/dev/null || true
+        rm -rf "$relay_data_dir" 2>/dev/null || true
+        echo "Relay did not become ready (attempt ${attempt}):" >&2
+        tail -50 "$RELAY_LOG" >&2 || true
     done
 
-    echo "Relay did not become ready:" >&2
-    tail -50 "$RELAY_LOG" >&2 || true
+    echo "Relay did not become ready after multiple attempts" >&2
     exit 1
 }
 
