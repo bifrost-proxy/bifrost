@@ -13,7 +13,7 @@ use crate::state::SharedAdminState;
 
 const MAX_AGENT_IMAGES_PER_MESSAGE: usize = 6;
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AgentChatRequest {
     message: String,
     #[serde(default)]
@@ -30,7 +30,7 @@ struct AgentChatRequest {
     history_path: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct AgentChatImageRequest {
     #[serde(default = "default_chat_image_mime_type")]
     mime_type: String,
@@ -116,6 +116,14 @@ async fn handle_stream(req: Request<Incoming>, state: SharedAdminState) -> Respo
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "admin-chat".to_string());
+
+    if let Some(response) =
+        handle_builtin_queue_control_stream_input(&service, &session_key, body.message.trim())
+    {
+        return sse_response(move |tx| async move {
+            let _ = send_sse_event(&tx, "run_finished", response).await;
+        });
+    }
 
     // Keep session-free commands synchronous enough to avoid taking the session.
     if let Some(response) =
@@ -272,106 +280,132 @@ async fn run_agent_stream(
     mut progress_rx: mpsc::UnboundedReceiver<bifrost_agent::AgentTurnProgressEvent>,
     tx: mpsc::Sender<Result<hyper::body::Frame<Bytes>, hyper::Error>>,
 ) {
-    if !send_sse_event(
-        &tx,
-        "run_started",
-        json!({
-            "eventType": "run_started",
-            "sessionKey": session_key,
-        }),
-    )
-    .await
-    {
-        service.agent_session_manager.return_session(session);
-        return;
-    }
-    let initial_context = bifrost_agent::snapshot_agent_context(&session, &config);
-    if !send_sse_event(
-        &tx,
-        "context_updated",
-        json!({
-            "eventType": "context_updated",
-            "sessionKey": session_key,
-            "context": initial_context,
-        }),
-    )
-    .await
-    {
-        service.agent_session_manager.return_session(session);
-        return;
-    }
-
-    let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
-        session_key.clone(),
-        body.message.clone(),
-        normalize_images(&body.images),
-        &config,
-        session.work_dir.clone(),
-        body.history_path.clone(),
-        Some("web".to_string()),
-    );
-    worker_request.system_prompt = body.system_prompt.clone();
-    worker_request.collaboration_mode = body.collaboration_mode;
-    let mut worker =
-        match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
-            .await
-        {
-            Ok(worker) => worker,
-            Err(error) => {
-                service.agent_session_manager.return_session(session);
-                let payload = json!({
-                    "eventType": "run_finished",
-                    "sessionKey": session_key,
-                    "response": format!("Agent worker 启动失败: {error}"),
-                    "error": error,
-                });
-                let _ = send_sse_event(&tx, "run_finished", payload).await;
-                return;
-            }
-        };
-    let (stop_tx, mut stop_rx) =
-        mpsc::unbounded_channel::<crate::im_gateway::agent_worker::AgentWorkerStopRequest>();
-    let worker_pid = worker.child_id().unwrap_or(0);
-    crate::im_gateway::agent_worker::register_active_worker(&session_key, worker_pid, stop_tx);
-
-    let mut progress_closed = false;
+    let mut current_body = body;
     loop {
-        tokio::select! {
-            maybe_stop = stop_rx.recv() => {
-                let _ = worker.terminate().await;
-                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                service.agent_session_manager.return_session(session);
-                if let Some(stop_request) = maybe_stop {
-                    stop_request.ack();
+        if !send_sse_event(
+            &tx,
+            "run_started",
+            json!({
+                "eventType": "run_started",
+                "sessionKey": session_key,
+            }),
+        )
+        .await
+        {
+            service.agent_session_manager.return_session(session);
+            return;
+        }
+        let initial_context = bifrost_agent::snapshot_agent_context(&session, &config);
+        if !send_sse_event(
+            &tx,
+            "context_updated",
+            json!({
+                "eventType": "context_updated",
+                "sessionKey": session_key,
+                "context": initial_context,
+            }),
+        )
+        .await
+        {
+            service.agent_session_manager.return_session(session);
+            return;
+        }
+
+        let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
+            session_key.clone(),
+            current_body.message.clone(),
+            normalize_images(&current_body.images),
+            &config,
+            session.work_dir.clone(),
+            current_body.history_path.clone(),
+            Some("web".to_string()),
+        );
+        worker_request.system_prompt = current_body.system_prompt.clone();
+        worker_request.collaboration_mode = current_body.collaboration_mode;
+        let mut worker =
+            match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(
+                worker_request,
+            )
+            .await
+            {
+                Ok(worker) => worker,
+                Err(error) => {
+                    service.agent_session_manager.return_session(session);
+                    let payload = json!({
+                        "eventType": "run_finished",
+                        "sessionKey": session_key,
+                        "response": format!("Agent worker 启动失败: {error}"),
+                        "error": error,
+                    });
+                    let _ = send_sse_event(&tx, "run_finished", payload).await;
+                    return;
                 }
-                let payload = json!({
-                    "eventType": "run_finished",
-                    "sessionKey": session_key,
-                    "response": "已收到 /stop，Agent worker 子进程已停止。",
-                    "stopped": true,
-                });
-                let _ = send_sse_event(&tx, "run_finished", payload).await;
-                return;
-            }
-            _ = tx.closed() => {
-                info!(
-                    session_key = %session_key,
-                    "agent chat stream client disconnected; stopping isolated worker"
-                );
-                let _ = worker.terminate().await;
-                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                service.agent_session_manager.return_session(session);
-                return;
-            }
-            maybe_event = progress_rx.recv(), if !progress_closed => {
-                match maybe_event {
-                    Some(event) => {
+            };
+        let (stop_tx, mut stop_rx) =
+            mpsc::unbounded_channel::<crate::im_gateway::agent_worker::AgentWorkerStopRequest>();
+        let worker_pid = worker.child_id().unwrap_or(0);
+        crate::im_gateway::agent_worker::register_active_worker(&session_key, worker_pid, stop_tx);
+
+        let mut progress_closed = false;
+        let next_message = loop {
+            let next_message = tokio::select! {
+                maybe_stop = stop_rx.recv() => {
+                    let _ = worker.terminate().await;
+                    crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                    service.agent_session_manager.return_session(session);
+                    if let Some(stop_request) = maybe_stop {
+                        stop_request.ack();
+                    }
+                    let payload = json!({
+                        "eventType": "run_finished",
+                        "sessionKey": session_key,
+                        "response": "已收到 /stop，Agent worker 子进程已停止。",
+                        "stopped": true,
+                    });
+                    let _ = send_sse_event(&tx, "run_finished", payload).await;
+                    return;
+                }
+                next = tx.closed() => {
+                    let _ = next;
+                    info!(
+                        session_key = %session_key,
+                        "agent chat stream client disconnected; stopping isolated worker"
+                    );
+                    let _ = worker.terminate().await;
+                    crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                    service.agent_session_manager.return_session(session);
+                    return;
+                }
+                maybe_event = progress_rx.recv(), if !progress_closed => {
+                    match maybe_event {
+                        Some(event) => {
+                            apply_worker_progress_event(&service, &session_key, &event).await;
+                            let (event_name, payload) = progress_event_payload(&session_key, event);
+                            if !send_sse_event(&tx, event_name, payload).await {
+                                info!(
+                                    session_key = %session_key,
+                                    "agent chat stream receiver closed while sending progress; stopping isolated worker"
+                                );
+                                let _ = worker.terminate().await;
+                                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                                service.agent_session_manager.return_session(session);
+                                return;
+                            }
+                        }
+                        None => {
+                            progress_closed = true;
+                        }
+                    }
+                    None
+                }
+                event = worker.next_event() => {
+                    while let Ok(event) = progress_rx.try_recv() {
                         apply_worker_progress_event(&service, &session_key, &event).await;
                         let (event_name, payload) = progress_event_payload(&session_key, event);
                         if !send_sse_event(&tx, event_name, payload).await {
                             info!(
                                 session_key = %session_key,
-                                "agent chat stream receiver closed while sending progress; stopping isolated worker"
+                                "agent chat stream receiver closed while flushing progress; stopping isolated worker"
                             );
                             let _ = worker.terminate().await;
                             crate::im_gateway::agent_worker::clear_active_worker(&session_key);
@@ -379,103 +413,119 @@ async fn run_agent_stream(
                             return;
                         }
                     }
-                    None => {
-                        progress_closed = true;
-                    }
-                }
-            }
-            event = worker.next_event() => {
-                while let Ok(event) = progress_rx.try_recv() {
-                    apply_worker_progress_event(&service, &session_key, &event).await;
-                    let (event_name, payload) = progress_event_payload(&session_key, event);
-                    if !send_sse_event(&tx, event_name, payload).await {
-                        info!(
-                            session_key = %session_key,
-                            "agent chat stream receiver closed while flushing progress; stopping isolated worker"
-                        );
-                        let _ = worker.terminate().await;
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
-                }
-                match event {
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {}
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
-                        apply_worker_progress_event(&service, &session_key, &event).await;
-                        let (event_name, payload) = progress_event_payload(&session_key, event);
-                        if !send_sse_event(&tx, event_name, payload).await {
-                            let _ = worker.terminate().await;
+                    match event {
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Started { .. })) => {
+                            None
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Progress { event })) => {
+                            apply_worker_progress_event(&service, &session_key, &event).await;
+                            let (event_name, payload) = progress_event_payload(&session_key, event);
+                            if !send_sse_event(&tx, event_name, payload).await {
+                                let _ = worker.terminate().await;
+                                crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                                service.agent_session_manager.return_session(session);
+                                return;
+                            }
+                            None
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
+                            info!(
+                                session_key = %session_key,
+                                response_len = turn_result.response.len(),
+                                tool_call_count = turn_result.tool_calls_log.len(),
+                                "agent chat stream completed"
+                            );
+                            let latest_history_path = turn_result.history_path.clone();
+                            let payload = json!({
+                                "eventType": "run_finished",
+                                "sessionKey": session_key,
+                                "response": turn_result.response,
+                                "toolCalls": turn_result.tool_calls_log,
+                                "planSteps": turn_result.plan_steps,
+                                "proposedPlan": turn_result.proposed_plan,
+                            });
+                            let _ = send_sse_event(&tx, "run_finished", payload).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            refresh_session_from_worker_history(
+                                &mut session,
+                                &session_key,
+                                &latest_history_path,
+                                &config,
+                            );
+                            match service.queue_manager.pop_queue(&session_key) {
+                                Some(next_message) => {
+                                    let items = service.queue_manager.queue_status(&session_key);
+                                    let payload = json!({
+                                        "eventType": "run_finished",
+                                        "sessionKey": session_key,
+                                        "response": format!("继续处理排队消息（剩余 {} 条）", items.len()),
+                                        "queued": true,
+                                        "queueLength": items.len(),
+                                        "queueItems": items,
+                                    });
+                                    let _ = send_sse_event(&tx, "run_finished", payload).await;
+                                    if let Some(history_path) = latest_history_path {
+                                        current_body.history_path = Some(history_path);
+                                    }
+                                    Some(next_message)
+                                }
+                                None => {
+                                    service.agent_session_manager.return_session(session);
+                                    return;
+                                }
+                            }
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
+                            error!(session_key = %session_key, error = %error, "agent chat stream failed");
+                            let payload = json!({
+                                "eventType": "run_failed",
+                                "sessionKey": session_key,
+                                "error": error,
+                            });
+                            let _ = send_sse_event(&tx, "run_failed", payload).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            service.agent_session_manager.return_session(session);
+                            return;
+                        }
+                        Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
+                            let payload = json!({
+                                "eventType": "run_finished",
+                                "sessionKey": session_key,
+                                "response": "已收到 /stop，Agent worker 子进程已停止。",
+                                "stopped": true,
+                            });
+                            let _ = send_sse_event(&tx, "run_finished", payload).await;
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            service.agent_session_manager.return_session(session);
+                            return;
+                        }
+                        Ok(None) => {
+                            crate::im_gateway::agent_worker::clear_active_worker(&session_key);
+                            service.agent_session_manager.return_session(session);
+                            return;
+                        }
+                        Err(error) => {
+                            error!(session_key = %session_key, error = %error, "agent worker stream failed");
+                            let payload = json!({
+                                "eventType": "run_failed",
+                                "sessionKey": session_key,
+                                "error": format!("agent worker failed: {error}"),
+                            });
+                            let _ = send_sse_event(&tx, "run_failed", payload).await;
                             crate::im_gateway::agent_worker::clear_active_worker(&session_key);
                             service.agent_session_manager.return_session(session);
                             return;
                         }
                     }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
-                        info!(
-                            session_key = %session_key,
-                            response_len = turn_result.response.len(),
-                            tool_call_count = turn_result.tool_calls_log.len(),
-                            "agent chat stream completed"
-                        );
-                        let payload = json!({
-                            "eventType": "run_finished",
-                            "sessionKey": session_key,
-                            "response": turn_result.response,
-                            "toolCalls": turn_result.tool_calls_log,
-                            "planSteps": turn_result.plan_steps,
-                            "proposedPlan": turn_result.proposed_plan,
-                        });
-                        let _ = send_sse_event(&tx, "run_finished", payload).await;
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        refresh_session_from_worker_history(&mut session, &session_key, &turn_result.history_path, &config);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Failed { error })) => {
-                        error!(session_key = %session_key, error = %error, "agent chat stream failed");
-                        let payload = json!({
-                            "eventType": "run_failed",
-                            "sessionKey": session_key,
-                            "error": error,
-                        });
-                        let _ = send_sse_event(&tx, "run_failed", payload).await;
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
-                    Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Stopped)) => {
-                        let payload = json!({
-                            "eventType": "run_finished",
-                            "sessionKey": session_key,
-                            "response": "已收到 /stop，Agent worker 子进程已停止。",
-                            "stopped": true,
-                        });
-                        let _ = send_sse_event(&tx, "run_finished", payload).await;
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
-                    Ok(None) => {
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
-                    Err(error) => {
-                        error!(session_key = %session_key, error = %error, "agent worker stream failed");
-                        let payload = json!({
-                            "eventType": "run_failed",
-                            "sessionKey": session_key,
-                            "error": format!("agent worker failed: {error}"),
-                        });
-                        let _ = send_sse_event(&tx, "run_failed", payload).await;
-                        crate::im_gateway::agent_worker::clear_active_worker(&session_key);
-                        service.agent_session_manager.return_session(session);
-                        return;
-                    }
                 }
+            };
+            if let Some(next_message) = next_message {
+                break next_message;
             }
-        }
+        };
+        current_body.message = next_message;
+        current_body.images.clear();
+        current_body.collaboration_mode = None;
     }
 }
 
@@ -540,63 +590,12 @@ fn handle_builtin_busy_stream_input(
     session_key: &str,
     message: &str,
 ) -> Value {
+    if let Some(response) = handle_builtin_queue_control_stream_input(service, session_key, message)
+    {
+        return response;
+    }
+
     let trimmed = message.trim();
-    if let Some(rest) = trimmed.strip_prefix("/q ") {
-        let queued = rest.trim();
-        if queued.is_empty() {
-            return json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": "用法: /q <排队消息>",
-            });
-        }
-        return match service
-            .queue_manager
-            .push_queue(session_key, queued.to_string())
-        {
-            Ok(items) => json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": format!("✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）", items.len()),
-                "queued": true,
-                "queueLength": items.len(),
-                "queueItems": items,
-            }),
-            Err(error) => json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": format!("排队失败: {error}"),
-            }),
-        };
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("/rq ") {
-        let rest = rest.trim();
-        return match rest.parse::<u64>() {
-            Ok(seq) if service.queue_manager.remove_queue(session_key, seq) => {
-                let items = service.queue_manager.queue_status(session_key);
-                json!({
-                    "eventType": "run_finished",
-                    "sessionKey": session_key,
-                    "response": format!("🗑️ 已删除排队消息 #{seq}"),
-                    "queued": true,
-                    "queueLength": items.len(),
-                    "queueItems": items,
-                })
-            }
-            Ok(seq) => json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": format!("❌ 未找到排队消息 #{seq}"),
-            }),
-            Err(_) => json!({
-                "eventType": "run_finished",
-                "sessionKey": session_key,
-                "response": "用法: /rq <序号>（如 /rq 1）",
-            }),
-        };
-    }
-
     let guide_text = trimmed
         .strip_prefix("/g ")
         .map(str::trim)
@@ -622,6 +621,73 @@ fn handle_builtin_busy_stream_input(
         "guide": true,
         "pendingGuideCount": pending_count,
     })
+}
+
+fn handle_builtin_queue_control_stream_input(
+    service: &crate::handlers::im_gateway::SharedImGatewayService,
+    session_key: &str,
+    message: &str,
+) -> Option<Value> {
+    let trimmed = message.trim();
+    if let Some(rest) = trimmed.strip_prefix("/q ") {
+        let queued = rest.trim();
+        if queued.is_empty() {
+            return Some(json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": "用法: /q <排队消息>",
+            }));
+        }
+        return Some(
+            match service
+                .queue_manager
+                .push_queue(session_key, queued.to_string())
+            {
+                Ok(items) => json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("✅ 消息已收到，将在当前任务完成后处理（排队 {} 条）", items.len()),
+                    "queued": true,
+                    "queueLength": items.len(),
+                    "queueItems": items,
+                }),
+                Err(error) => json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("排队失败: {error}"),
+                }),
+            },
+        );
+    }
+
+    if let Some(rest) = trimmed.strip_prefix("/rq ") {
+        let rest = rest.trim();
+        return Some(match rest.parse::<u64>() {
+            Ok(seq) if service.queue_manager.remove_queue(session_key, seq) => {
+                let items = service.queue_manager.queue_status(session_key);
+                json!({
+                    "eventType": "run_finished",
+                    "sessionKey": session_key,
+                    "response": format!("🗑️ 已删除排队消息 #{seq}"),
+                    "queued": true,
+                    "queueLength": items.len(),
+                    "queueItems": items,
+                })
+            }
+            Ok(seq) => json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": format!("❌ 未找到排队消息 #{seq}"),
+            }),
+            Err(_) => json!({
+                "eventType": "run_finished",
+                "sessionKey": session_key,
+                "response": "用法: /rq <序号>（如 /rq 1）",
+            }),
+        });
+    }
+
+    None
 }
 
 pub(crate) fn queue_snapshot_payload(
@@ -1045,5 +1111,76 @@ mod tests {
         assert_eq!(payload["queueItems"][0]["message"], "first queued");
         assert_eq!(payload["queueItems"][1]["seq"], 2);
         assert_eq!(payload["queueItems"][1]["message"], "second queued");
+    }
+
+    #[test]
+    fn queue_control_stream_input_queues_without_starting_turn() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let service = std::sync::Arc::new(crate::handlers::im_gateway::ImGatewayService::new(
+            temp_dir.path(),
+        ));
+
+        let payload = handle_builtin_queue_control_stream_input(
+            &service,
+            "web-race-session",
+            "/q follow up after stale running state",
+        )
+        .expect("/q should be handled as queue control");
+
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["sessionKey"], "web-race-session");
+        assert_eq!(payload["queued"], true);
+        assert_eq!(payload["queueLength"], 1);
+        assert_eq!(
+            payload["queueItems"][0]["message"],
+            "follow up after stale running state"
+        );
+        assert_eq!(
+            service
+                .queue_manager
+                .pop_queue("web-race-session")
+                .as_deref(),
+            Some("follow up after stale running state")
+        );
+    }
+
+    #[test]
+    fn queue_control_stream_input_removes_queued_item_without_starting_turn() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let service = std::sync::Arc::new(crate::handlers::im_gateway::ImGatewayService::new(
+            temp_dir.path(),
+        ));
+        service
+            .queue_manager
+            .push_queue("web-race-session", "queued item".to_string())
+            .unwrap();
+
+        let payload =
+            handle_builtin_queue_control_stream_input(&service, "web-race-session", "/rq 1")
+                .expect("/rq should be handled as queue control");
+
+        assert_eq!(payload["eventType"], "run_finished");
+        assert_eq!(payload["sessionKey"], "web-race-session");
+        assert_eq!(payload["queued"], true);
+        assert_eq!(payload["queueLength"], 0);
+        assert!(service
+            .queue_manager
+            .queue_status("web-race-session")
+            .is_empty());
+    }
+
+    #[test]
+    fn non_queue_stream_input_is_not_queue_control() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let service = std::sync::Arc::new(crate::handlers::im_gateway::ImGatewayService::new(
+            temp_dir.path(),
+        ));
+
+        assert!(handle_builtin_queue_control_stream_input(
+            &service,
+            "web-race-session",
+            "normal user message",
+        )
+        .is_none());
     }
 }

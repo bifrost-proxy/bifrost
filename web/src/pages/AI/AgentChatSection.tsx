@@ -842,7 +842,15 @@ export default function AgentChatSection() {
                 return;
               }
               timelineEvents = payload.events || [];
-              const timelineThread = matchedThread || fallbackHistoryThread;
+              const timelineThread = {
+                ...(matchedThread || fallbackHistoryThread || {
+                  session_key: nextSessionKey,
+                  status: "active" as const,
+                }),
+                ...(detail.running !== undefined ? { running: detail.running } : {}),
+                ...(detail.state ? { state: detail.state } : {}),
+                ...(detail.run_state ? { run_state: detail.run_state } : {}),
+              };
               historyEventsRef.current = timelineEvents;
               historyEventStartIndexRef.current = payload.start_index ?? 0;
               historyEventEndIndexRef.current =
@@ -929,6 +937,8 @@ export default function AgentChatSection() {
                     status: "active" as const,
                   }),
                   history_path: timelineHistoryPath,
+                  ...(detail.running !== undefined ? { running: detail.running } : {}),
+                  state: detail.state || matchedThread?.state,
                   run_state: detail.run_state || matchedThread?.run_state,
                 },
                 detailTelemetry,
@@ -936,8 +946,10 @@ export default function AgentChatSection() {
             : detailTelemetry;
           setTelemetry(nextTelemetry);
           setRunning(
-            nextTelemetry.phase === "running" ||
-              isRunStateActive(detail.run_state || detail.state),
+            detail.running === false
+              ? false
+              : nextTelemetry.phase === "running" ||
+                  isRunStateActive(detail.run_state || detail.state),
           );
           setWorkDir(detail.work_dir || matchedThread?.work_dir || defaultWorkDir);
           setRunnerId(detail.runner_id || matchedThread?.runner_id || "bifrost_agent");

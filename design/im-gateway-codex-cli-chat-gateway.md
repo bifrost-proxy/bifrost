@@ -1040,6 +1040,8 @@ V0 尚未落地的设计项：
 - Working directory 不属于自定义 runner。runner 运行时优先继承 IM Provider 的 Agent Working Directory，再降级到全局 Agent Working Directory；runner 自身只描述 CLI 可执行文件、参数、指令、skill 和 delivery 默认值。
 - `/` 命令兼容性当前分层处理：内置 Bifrost Agent runner 完整支持忙碌时默认 guide、`/g` 显式 guide、`/q` 排队、`/rq` 移除、`/status` 和 `/stop`；自定义 runner 链路复用同一 busy-session 入口，但普通追加消息默认 queue，`/g` 会明确降级为 queue，`/stop` 会映射到 active runner 进程，并在确认子进程组隔离后终止其进程组。
 - Codex CLI 能力边界：当前使用的 `codex exec --json ... -` 只在启动时读取 prompt/stdin，不支持运行中追加 guide；`codex exec resume <thread_id> ... -` 支持当前 run 完成后的下一轮接续。因此 Codex Runner busy 期间仍按 queue 处理，队列 drain 时继承上一轮 JSONL 解析出的 `threadId`，用 resume 兼容“追加消息”的会话连续性。
+- Web Agent Chat 的运行态唯一真源优先级为：`sessions/all` 或 active detail 的 live summary/active status 高于 JSONL timeline replay。若 detail 明确 `run_state=idle` 或 `running=false`，历史中的旧 `run_state_changed: running` 只能作为过程历史，不得让页面显示 Running、显示 Stop 或追加 `Agent is running...` 占位。active detail 在没有 active loop 时必须显式返回 `running:false`、`state:"idle"` 和 `run_state:"idle"`，避免刷新 active URL 时前端只看到旧 timeline 状态。
+- Web Agent Chat 的 `/q` 和 `/rq` 是队列控制命令，不是普通用户消息。后端必须在尝试 take/start Agent session 之前识别它们；即使前端因 stale running 误发 `/q`，也只能更新 queue snapshot 并返回 `queued` payload，禁止写入 JSONL `user_message` 或在对话记录中展示为普通气泡。真正 busy 的内置 Agent worker 完成后由 stream 继续 pop FIFO queue 并发起下一轮，避免队列只展示不执行。
 
 ## 待讨论问题
 
