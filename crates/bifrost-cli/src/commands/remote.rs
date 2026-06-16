@@ -6339,6 +6339,31 @@ mod tests {
     }
 
     #[test]
+    fn test_build_remote_command_shell_exec_login_flag_reaches_payload() {
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: Some("/srv/api".to_string()),
+            env: vec![],
+            timeout_ms: Some(900_000),
+            detach: true,
+            login: true,
+            shell_text: Some("cargo test".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
+        })));
+
+        let shell_exec = built.shell_exec.expect("shell_exec payload should exist");
+        assert!(shell_exec.login);
+        assert_eq!(shell_exec.timeout_ms, Some(900_000));
+    }
+
+    #[test]
     fn test_build_remote_command_for_shell_exec_argv_uses_program_preview() {
         let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
             cwd: None,
@@ -6560,6 +6585,24 @@ mod tests {
         assert_eq!(prefs.resume_relay_token.as_deref(), Some("relay-tok-42"));
         assert!(prefs.is_streaming());
         assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_build_remote_file_scratch_dir_uses_policy_checked_mkdir() {
+        let built = build_remote_command(&RemoteCommands::File {
+            action: Box::new(RemoteFileCommands::ScratchDir {
+                cwd: Some("/repo".to_string()),
+                name: ".bifrost-tmp".to_string(),
+                output: "json".to_string(),
+            }),
+        });
+
+        assert_eq!(built.kind, CommandKind::File);
+        assert_eq!(built.command.as_deref(), Some("file.mkdir"));
+        let args: Value = serde_json::from_str(built.args_json.as_deref().unwrap()).unwrap();
+        assert_eq!(args.get("path").and_then(Value::as_str), Some(".bifrost-tmp"));
+        assert_eq!(args.get("cwd").and_then(Value::as_str), Some("/repo"));
+        assert_eq!(args.get("parents").and_then(Value::as_bool), Some(true));
     }
 
     #[test]

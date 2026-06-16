@@ -43,3 +43,4 @@ bifrost-server-v4/
 bifrost-remote.zip
 .codex-review/
 *.log
+.agents/skills/e2e-verify/logs/

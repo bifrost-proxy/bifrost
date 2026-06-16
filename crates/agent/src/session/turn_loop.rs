@@ -420,6 +420,47 @@ fn apply_tool_call_completion(
     }
 }
 
+fn apply_worktree_tool_signal(
+    session: &mut AgentSession,
+    work_dir: &mut std::path::PathBuf,
+    tool_name: &str,
+    success: bool,
+    result: &str,
+) {
+    if !success {
+        return;
+    }
+
+    match tool_name {
+        "enter_worktree" => {
+            let first_line = result.lines().next().unwrap_or("");
+            if let Some(new_dir) = first_line.strip_prefix("ENTER_WORKTREE:") {
+                let new_dir = new_dir.to_string();
+                info!(
+                    session_key = %session.session_key,
+                    new_work_dir = %new_dir,
+                    "entering worktree (non-destructive)"
+                );
+                session.enter_worktree_dir(new_dir.clone());
+                *work_dir = std::path::PathBuf::from(new_dir);
+            }
+        }
+        "exit_worktree" => {
+            if result.starts_with("EXIT_WORKTREE:") {
+                if let Some(original) = session.exit_worktree_dir() {
+                    info!(
+                        session_key = %session.session_key,
+                        restored_dir = %original,
+                        "exiting worktree, restored original directory"
+                    );
+                    *work_dir = std::path::PathBuf::from(original);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn apply_tool_runtime_events(
     session: &mut AgentSession,
     recorder: &mut Option<&mut ConversationRecorder>,
@@ -2719,6 +2760,8 @@ pub async fn run_turn_with_mcp_multimodal(
                     return Ok(stopped_turn_result(session, &mut recorder, tool_calls_log));
                 }
             };
+            let tool_success = result.success;
+            let tool_output = result.output.clone();
             apply_tool_call_completion(
                 session,
                 &mut recorder,
@@ -2734,6 +2777,13 @@ pub async fn run_turn_with_mcp_multimodal(
                 local_tool_count,
                 mcp_tool_count,
             );
+            apply_worktree_tool_signal(
+                session,
+                &mut work_dir,
+                tc.name(),
+                tool_success,
+                &tool_output,
+            );
             // Mark session as polluted if this was an MCP tool call (external context).
             if mcp.as_ref().is_some_and(|m| m.is_mcp_tool(tc.name())) {
                 session
@@ -2746,42 +2796,6 @@ pub async fn run_turn_with_mcp_multimodal(
                     .with_detail("mode=ordered,count=1"),
             );
             tool_index += 1;
-        }
-
-        // Check if enter_worktree was called — non-destructive CWD switch (preserves history)
-        if let Some(wt_log) = tool_calls_log
-            .iter()
-            .find(|l| l.tool_name == "enter_worktree" && l.success)
-        {
-            // Signal format: first line is "ENTER_WORKTREE:<path>", rest is informational
-            let first_line = wt_log.result.lines().next().unwrap_or("");
-            if let Some(new_dir) = first_line.strip_prefix("ENTER_WORKTREE:") {
-                let new_dir = new_dir.to_string();
-                info!(
-                    session_key = %session.session_key,
-                    new_work_dir = %new_dir,
-                    "entering worktree (non-destructive)"
-                );
-                session.enter_worktree_dir(new_dir.clone());
-                work_dir = std::path::PathBuf::from(&new_dir);
-            }
-        }
-
-        // Check if exit_worktree was called — restore original CWD
-        if let Some(exit_log) = tool_calls_log
-            .iter()
-            .find(|l| l.tool_name == "exit_worktree" && l.success)
-        {
-            if exit_log.result.starts_with("EXIT_WORKTREE:") {
-                if let Some(original) = session.exit_worktree_dir() {
-                    info!(
-                        session_key = %session.session_key,
-                        restored_dir = %original,
-                        "exiting worktree, restored original directory"
-                    );
-                    work_dir = std::path::PathBuf::from(&original);
-                }
-            }
         }
 
         // Check if switch_workdir was called — if so, apply the switch and exit the turn
@@ -3344,4 +3358,73 @@ fn mark_context_window_full(
         session.restore_token_snapshot(Some(u64::from(context_window)));
     }
     refresh_active_turn_status(session, config, progress);
+}
+
+#[cfg(test)]
+mod worktree_signal_tests {
+    use super::*;
+
+    #[test]
+    fn enter_worktree_signal_updates_session_work_dir_immediately() {
+        let mut session = AgentSession::new_with_work_dir(
+            "worktree-signal",
+            Some("/tmp/main-repo".to_string()),
+        );
+        let mut work_dir = std::path::PathBuf::from("/tmp/main-repo");
+
+        apply_worktree_tool_signal(
+            &mut session,
+            &mut work_dir,
+            "enter_worktree",
+            true,
+            "ENTER_WORKTREE:/tmp/main-repo-feature\nBranch: worktree/feature",
+        );
+
+        assert_eq!(work_dir, std::path::PathBuf::from("/tmp/main-repo-feature"));
+        assert_eq!(session.work_dir.as_deref(), Some("/tmp/main-repo-feature"));
+        assert_eq!(session.worktree_original_dir.as_deref(), Some("/tmp/main-repo"));
+    }
+
+    #[test]
+    fn failed_worktree_signal_keeps_current_work_dir() {
+        let mut session = AgentSession::new_with_work_dir(
+            "worktree-failed-signal",
+            Some("/tmp/main-repo".to_string()),
+        );
+        let mut work_dir = std::path::PathBuf::from("/tmp/main-repo");
+
+        apply_worktree_tool_signal(
+            &mut session,
+            &mut work_dir,
+            "enter_worktree",
+            false,
+            "ENTER_WORKTREE:/tmp/should-not-apply",
+        );
+
+        assert_eq!(work_dir, std::path::PathBuf::from("/tmp/main-repo"));
+        assert_eq!(session.work_dir.as_deref(), Some("/tmp/main-repo"));
+        assert_eq!(session.worktree_original_dir, None);
+    }
+
+    #[test]
+    fn exit_worktree_signal_restores_original_work_dir() {
+        let mut session = AgentSession::new_with_work_dir(
+            "worktree-exit-signal",
+            Some("/tmp/main-repo".to_string()),
+        );
+        session.enter_worktree_dir("/tmp/main-repo-feature".to_string());
+        let mut work_dir = std::path::PathBuf::from("/tmp/main-repo-feature");
+
+        apply_worktree_tool_signal(
+            &mut session,
+            &mut work_dir,
+            "exit_worktree",
+            true,
+            "EXIT_WORKTREE:keep",
+        );
+
+        assert_eq!(work_dir, std::path::PathBuf::from("/tmp/main-repo"));
+        assert_eq!(session.work_dir.as_deref(), Some("/tmp/main-repo"));
+        assert_eq!(session.worktree_original_dir, None);
+    }
 }
