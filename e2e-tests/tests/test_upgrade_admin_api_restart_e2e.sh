@@ -223,6 +223,15 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
         return 1
     }
 
+    # `--no-tray` only exists on builds that ship the tray helper (macOS/Windows);
+    # the Linux `start` command does not define the flag (it is gated behind
+    # `#[cfg(not(target_os = "linux"))]`), so passing it there aborts the daemon
+    # with "unexpected argument '--no-tray'". Add it conditionally.
+    local -a tray_args=()
+    if [[ "$(uname -s)" != "Linux" ]]; then
+        tray_args=(--no-tray)
+    fi
+
     # Start the daemon with the upgrade test-override env vars in its environment.
     # The admin server runs inside this process; the self-update subprocess it
     # spawns inherits these vars, so the upgrade pulls from our real local
@@ -234,7 +243,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     BIFROST_UPGRADE_TEST_ARCHIVE="$archive_path" \
     "$INSTALL_BIN" start -p "$PROXY_PORT" --host 127.0.0.1 --daemon \
         --access-mode allow_all --skip-cert-check --no-system-proxy \
-        --no-intercept --no-tray -y >/tmp/bifrost-admin-upgrade-start.log 2>&1
+        --no-intercept "${tray_args[@]}" -y >/tmp/bifrost-admin-upgrade-start.log 2>&1
 
     local old_pid=""
     for _ in $(seq 1 50); do
