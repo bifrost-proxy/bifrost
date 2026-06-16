@@ -479,8 +479,9 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
     let chatgpt_next = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
     assert!(chatgpt_next.starts_with("## 专有名词配置（每次运行动态注入）"));
     assert!(chatgpt_next.contains("Jennie = 内部项目代号"));
-    assert!(!chatgpt_next.contains("AGENTS.md 内容"));
-    assert!(chatgpt_next.contains("后续轮次"));
+    // 每一轮都完整附带 AGENTS.md、已有日报与变更文件原文
+    assert!(chatgpt_next.contains("AGENTS.md 内容"));
+    assert!(chatgpt_next.contains("本条消息已附带 AGENTS.md 指令"));
     assert!(chatgpt_next.contains("今日新增转写内容"));
 }
 
