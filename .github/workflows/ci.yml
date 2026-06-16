@@ -170,7 +170,28 @@ jobs:
         with:
           save-if: always()
       - name: Build release binary
-        run: cargo build --release --bin bifrost
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+        run: |
+          set -euo pipefail
+
+          heartbeat() {
+            while true; do
+              echo "[build-e2e] cargo release build still running at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              sleep 60
+            done
+          }
+
+          heartbeat &
+          heartbeat_pid=$!
+          cleanup_heartbeat() {
+            kill "$heartbeat_pid" 2>/dev/null || true
+            wait "$heartbeat_pid" 2>/dev/null || true
+          }
+          trap cleanup_heartbeat EXIT
+
+          cargo build --release --bin bifrost --jobs "$CARGO_BUILD_JOBS"
       - name: Upload release binary
         uses: actions/upload-artifact@v4
         with:
