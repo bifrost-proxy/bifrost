@@ -2238,9 +2238,9 @@ mod wake_helper_tests {
 mod coverage_boost {
     use super::*;
     use crate::test_env::BifrostDataDirGuard;
-    use serde_json::json;
+
     use std::fs;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -2316,15 +2316,8 @@ mod coverage_boost {
 
     #[test]
     fn execute_key_press_dry_run_builds_preview() {
-        let result = execute_key_press(
-            Some("space"),
-            None,
-            &vec!["cmd".to_string()],
-            10,
-            10_000,
-            true,
-        )
-        .expect("result");
+        let result = execute_key_press(Some("space"), None, &["cmd".to_string()], 10, 10_000, true)
+            .expect("result");
         assert!(result.dry_run);
         assert!(!result.executed);
         assert_eq!(result.action_type, "key_press");
@@ -2852,14 +2845,13 @@ mod coverage_boost {
     }
 }
 
-
 #[cfg(test)]
 mod coverage_boost_v2 {
     use super::*;
     use crate::test_env::BifrostDataDirGuard;
-    use http_body_util::BodyExt;
+
     use serde_json::Value;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::AtomicBool;
     use std::sync::Arc;
     use tempfile::tempdir;
 
@@ -3329,8 +3321,7 @@ mod coverage_boost_v2 {
             bindings: vec![binding("b1", "p1", now)],
             ..VoiceWakeStore::default()
         };
-        let _ =
-            trigger_binding_by_index(&mut store, 0, now, true, None).expect("trigger");
+        let _ = trigger_binding_by_index(&mut store, 0, now, true, None).expect("trigger");
         assert!(store.events[0].speaker_confidence.is_none());
     }
 }

@@ -5436,8 +5436,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_too_long_keyword() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "a".repeat(MAX_QUERY_LEN + 1);
+        let args = SearchArgs {
+            keyword: "a".repeat(MAX_QUERY_LEN + 1),
+            ..Default::default()
+        };
         let err = executor.validate_search_args(&args).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("query param too long"), "msg={msg}");
@@ -5446,8 +5448,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_control_characters() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = format!("ok{}bad", '\u{0007}');
+        let args = SearchArgs {
+            keyword: format!("ok{}bad", '\u{0007}'),
+            ..Default::default()
+        };
         let err = executor.validate_search_args(&args).unwrap_err();
         let msg = err.to_string();
         assert!(
@@ -5459,8 +5463,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_invalid_domain() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "ok".to_string();
+        let mut args = SearchArgs {
+            keyword: "ok".to_string(),
+            ..Default::default()
+        };
         args.filters.domains.push("bad host".to_string());
         let err = executor.validate_search_args(&args).unwrap_err();
         let msg = err.to_string();
@@ -5473,8 +5479,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_invalid_content_type_filter() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "ok".to_string();
+        let mut args = SearchArgs {
+            keyword: "ok".to_string(),
+            ..Default::default()
+        };
         args.filters
             .content_types
             .push("application/json@".to_string());
@@ -5489,8 +5497,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_unsupported_protocol_filter() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "ok".to_string();
+        let mut args = SearchArgs {
+            keyword: "ok".to_string(),
+            ..Default::default()
+        };
         args.filters.protocols.push("ftp".to_string());
         let err = executor.validate_search_args(&args).unwrap_err();
         let msg = err.to_string();
@@ -5503,8 +5513,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_unsupported_status_filter() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "ok".to_string();
+        let mut args = SearchArgs {
+            keyword: "ok".to_string(),
+            ..Default::default()
+        };
         args.filters.status_ranges.push("1xx".to_string());
         let err = executor.validate_search_args(&args).unwrap_err();
         let msg = err.to_string();
@@ -5514,8 +5526,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_rejects_unsupported_method_condition() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "ok".to_string();
+        let mut args = SearchArgs {
+            keyword: "ok".to_string(),
+            ..Default::default()
+        };
         args.filters.conditions.push(FilterCondition {
             field: "method".to_string(),
             operator: "eq".to_string(),
@@ -5532,8 +5546,10 @@ mod coverage_boost {
     #[test]
     fn validate_search_args_accepts_valid_filters() {
         let executor = new_executor();
-        let mut args = SearchArgs::default();
-        args.keyword = "nextoncall".to_string();
+        let mut args = SearchArgs {
+            keyword: "nextoncall".to_string(),
+            ..Default::default()
+        };
         args.filters.protocols = vec!["http".to_string(), "https".to_string()];
         args.filters.status_ranges = vec!["2xx".to_string(), "error".to_string()];
         args.filters.content_types = vec!["application/json".to_string()];
@@ -5564,15 +5580,17 @@ mod coverage_boost {
     #[test]
     fn validate_traffic_list_args_accepts_valid_params() {
         let executor = new_executor();
-        let mut args = TrafficListArgs::default();
-        args.method = Some("POST".to_string());
-        args.protocol = Some("https".to_string());
-        args.host = Some("api.example.com".to_string());
-        args.url = Some("/v1/chat".to_string());
-        args.path = Some("/v1".to_string());
-        args.content_type = Some("application/json".to_string());
-        args.client_ip = Some("127.0.0.1".to_string());
-        args.client_app = Some("curl".to_string());
+        let args = TrafficListArgs {
+            method: Some("POST".to_string()),
+            protocol: Some("https".to_string()),
+            host: Some("api.example.com".to_string()),
+            url: Some("/v1/chat".to_string()),
+            path: Some("/v1".to_string()),
+            content_type: Some("application/json".to_string()),
+            client_ip: Some("127.0.0.1".to_string()),
+            client_app: Some("curl".to_string()),
+            ..Default::default()
+        };
         executor
             .validate_traffic_list_args(&args)
             .expect("valid traffic list args should pass");
@@ -5581,8 +5599,10 @@ mod coverage_boost {
     #[test]
     fn validate_traffic_list_args_rejects_invalid_method() {
         let executor = new_executor();
-        let mut args = TrafficListArgs::default();
-        args.method = Some("INVALID".to_string());
+        let args = TrafficListArgs {
+            method: Some("INVALID".to_string()),
+            ..Default::default()
+        };
         let err = executor.validate_traffic_list_args(&args).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unsupported method 'INVALID'"), "msg={msg}");
@@ -5591,8 +5611,10 @@ mod coverage_boost {
     #[test]
     fn validate_traffic_list_args_rejects_invalid_protocol() {
         let executor = new_executor();
-        let mut args = TrafficListArgs::default();
-        args.protocol = Some("ftp".to_string());
+        let args = TrafficListArgs {
+            protocol: Some("ftp".to_string()),
+            ..Default::default()
+        };
         let err = executor.validate_traffic_list_args(&args).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unsupported protocol 'ftp'"), "msg={msg}");
@@ -5601,8 +5623,10 @@ mod coverage_boost {
     #[test]
     fn validate_traffic_list_args_rejects_invalid_client_ip_characters() {
         let executor = new_executor();
-        let mut args = TrafficListArgs::default();
-        args.client_ip = Some("10.0.0.1/24".to_string());
+        let args = TrafficListArgs {
+            client_ip: Some("10.0.0.1/24".to_string()),
+            ..Default::default()
+        };
         let err = executor.validate_traffic_list_args(&args).unwrap_err();
         let msg = err.to_string();
         assert!(

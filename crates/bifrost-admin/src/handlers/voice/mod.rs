@@ -1811,6 +1811,7 @@ mod coverage_boost {
 
     // ---- WebSocket helper-based tests ----
 
+    #[allow(dead_code)]
     async fn make_ws_pair() -> (
         futures_util::stream::SplitSink<WebSocketStream<tokio::io::DuplexStream>, Message>,
         futures_util::stream::SplitStream<WebSocketStream<tokio::io::DuplexStream>>,
@@ -1952,19 +1953,16 @@ mod coverage_boost {
         let mut saw_done = false;
         while let Some(msg) = receiver.next().await {
             let msg = msg.expect("ws ok");
-            match msg {
-                Message::Text(text) => {
-                    let v: Value = serde_json::from_str(&text).expect("json");
-                    match v["type"].as_str() {
-                        Some("asr_final_utterance") => saw_final = true,
-                        Some("done") => {
-                            saw_done = true;
-                            break;
-                        }
-                        _ => {}
+            if let Message::Text(text) = msg {
+                let v: Value = serde_json::from_str(&text).expect("json");
+                match v["type"].as_str() {
+                    Some("asr_final_utterance") => saw_final = true,
+                    Some("done") => {
+                        saw_done = true;
+                        break;
                     }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 
@@ -2077,12 +2075,11 @@ mod coverage_boost {
     }
 }
 
-
 #[cfg(test)]
 mod coverage_boost_v2 {
     use super::*;
     use crate::test_env::BifrostDataDirGuard;
-    use futures_util::{SinkExt, StreamExt};
+    use futures_util::StreamExt;
     use serde_json::Value;
     use std::env;
     use tempfile::tempdir;
@@ -2183,11 +2180,15 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn send_voice_error_sends_error_event() {
-        let (_client_raw, server_raw) = duplex(64 * 1024);
-        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
-        let (mut sender, mut receiver) = ws.split();
+        let (client_raw, server_raw) = duplex(64 * 1024);
+        let server_ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let client_ws = WebSocketStream::from_raw_socket(client_raw, Role::Client, None).await;
+        let (mut sender, _server_receiver) = server_ws.split();
+        let (_client_sender, mut receiver) = client_ws.split();
 
-        send_voice_error(&mut sender, "something went wrong", Some("detail")).await.unwrap();
+        send_voice_error(&mut sender, "something went wrong", Some("detail"))
+            .await
+            .unwrap();
 
         let msg = receiver.next().await.expect("frame").expect("ok");
         match msg {
@@ -2202,9 +2203,11 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn send_voice_done_sends_done_event() {
-        let (_client_raw, server_raw) = duplex(64 * 1024);
-        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
-        let (mut sender, mut receiver) = ws.split();
+        let (client_raw, server_raw) = duplex(64 * 1024);
+        let server_ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let client_ws = WebSocketStream::from_raw_socket(client_raw, Role::Client, None).await;
+        let (mut sender, _server_receiver) = server_ws.split();
+        let (_client_sender, mut receiver) = client_ws.split();
 
         send_voice_done(&mut sender).await.unwrap();
 
@@ -2330,9 +2333,11 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn send_voice_event_sends_custom_event_type_v2() {
-        let (_client_raw, server_raw) = duplex(64 * 1024);
-        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
-        let (mut sender, mut receiver) = ws.split();
+        let (client_raw, server_raw) = duplex(64 * 1024);
+        let server_ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let client_ws = WebSocketStream::from_raw_socket(client_raw, Role::Client, None).await;
+        let (mut sender, _server_receiver) = server_ws.split();
+        let (_client_sender, mut receiver) = client_ws.split();
 
         send_voice_event(
             &mut sender,
@@ -2371,11 +2376,15 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn send_voice_error_includes_detail_when_present_v2() {
-        let (_client_raw, server_raw) = duplex(64 * 1024);
-        let ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
-        let (mut sender, mut receiver) = ws.split();
+        let (client_raw, server_raw) = duplex(64 * 1024);
+        let server_ws = WebSocketStream::from_raw_socket(server_raw, Role::Server, None).await;
+        let client_ws = WebSocketStream::from_raw_socket(client_raw, Role::Client, None).await;
+        let (mut sender, _server_receiver) = server_ws.split();
+        let (_client_sender, mut receiver) = client_ws.split();
 
-        send_voice_error(&mut sender, "oops", Some("detail-info")).await.unwrap();
+        send_voice_error(&mut sender, "oops", Some("detail-info"))
+            .await
+            .unwrap();
 
         let msg = receiver.next().await.expect("frame").expect("ok");
         match msg {

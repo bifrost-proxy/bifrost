@@ -2325,7 +2325,7 @@ mod coverage_boost {
         let task = minimal_task("pause-short");
         let source_info = short_audio_source_info(5_000);
         let pause = || true;
-        let mut hooks = TaskTranscribeHooks {
+        let hooks = TaskTranscribeHooks {
             on_chunk_progress: None,
             on_chunk_metric: None,
             pause_check: Some(&pause),
@@ -2924,7 +2924,7 @@ mod coverage_boost_v2 {
 
     #[test]
     fn task_allows_external_device_event_import_false_when_no_devices() {
-        let mut task = AsrDirectoryTask {
+        let task = AsrDirectoryTask {
             id: "t2".to_string(),
             name: "t2".to_string(),
             audio_dir: PathBuf::from("/tmp"),
@@ -3282,7 +3282,12 @@ mod coverage_boost_v2 {
         assert_eq!(updated.output_metadata_path.as_ref(), Some(&context.metadata_path));
         assert_eq!(updated.output_timeline_path.as_ref(), Some(&context.timeline_path));
         assert_eq!(updated.media_duration_ms, context.source_info.media_duration_ms);
-        assert_eq!(updated.text_chars, "hello".chars().count());
+        // `text_chars` is the char count of the *rendered* timeline text
+        // (segments with timestamp/speaker formatting), not the raw segment
+        // text. Tie the assertion to the artifact actually written to disk so
+        // it stays correct regardless of timezone-dependent timestamp width.
+        let rendered_text = std::fs::read_to_string(&context.text_path).expect("read text artifact");
+        assert_eq!(updated.text_chars, rendered_text.chars().count());
         assert_eq!(updated.chunk_metrics.len(), metrics.len());
         assert_eq!(updated.fallback_reason.as_deref(), Some("fallback"));
         assert_eq!(updated.started_at_ms, Some(context.started_at_ms));

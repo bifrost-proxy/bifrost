@@ -2991,6 +2991,7 @@ mod coverage_boost {
     }
 
     #[tokio::test]
+    #[allow(clippy::assertions_on_constants)]
     async fn wiremock_mock_server_smoke() {
         // Placeholder: higher-level instructions mention wiremock::MockServer,
         // but this crate does not include wiremock as a dev-dependency.

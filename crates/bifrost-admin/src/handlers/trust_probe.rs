@@ -3908,7 +3908,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_boost {
     use super::*;
-    use bytes::Bytes;
+
     use chrono::Utc;
     use http_body_util::BodyExt;
     use hyper::StatusCode;
@@ -3916,7 +3916,6 @@ mod coverage_boost {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::AtomicI64;
-    use std::sync::Arc;
 
     fn make_session(now: chrono::DateTime<Utc>) -> TrustProbeSession {
         TrustProbeSession {
@@ -4371,11 +4370,11 @@ mod coverage_boost_v2 {
     use super::*;
 
     use chrono::Utc;
-    use hyper::{body::Incoming, Method, Request, StatusCode};
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
+    use hyper::{body::Incoming, Method, Request, StatusCode};
     use hyper_util::rt::TokioIo;
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::net::{Ipv4Addr, SocketAddr};
     use tokio::net::TcpListener;
 
     use crate::test_support::TestAdminState;
@@ -4392,7 +4391,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let state_inner = state_clone.clone();
                 tokio::spawn(async move {
@@ -4400,8 +4401,7 @@ mod coverage_boost_v2 {
                         let state = state_inner.clone();
                         async move {
                             let path = req.uri().path().to_string();
-                            let resp =
-                                handle_trust_probe_api(req, state, None, &path).await;
+                            let resp = handle_trust_probe_api(req, state, None, &path).await;
                             Ok::<_, hyper::Error>(resp)
                         }
                     });
@@ -4425,7 +4425,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let state_inner = state_clone.clone();
                 tokio::spawn(async move {
@@ -4433,8 +4435,7 @@ mod coverage_boost_v2 {
                         let state = state_inner.clone();
                         async move {
                             let path = req.uri().path().to_string();
-                            let resp =
-                                handle_trust_probe_public(req, state, None, &path).await;
+                            let resp = handle_trust_probe_public(req, state, None, &path).await;
                             Ok::<_, hyper::Error>(resp)
                         }
                     });
@@ -4457,15 +4458,16 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let peer = peer_addr;
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| {
                         let peer = peer;
                         async move {
-                            let resp =
-                                handle_trust_probe_proxy_configured_request(req, peer).await;
+                            let resp = handle_trust_probe_proxy_configured_request(req, peer).await;
                             Ok::<_, hyper::Error>(resp)
                         }
                     });
@@ -4489,7 +4491,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let peer = peer_addr;
                 tokio::spawn(async move {
@@ -4568,10 +4572,7 @@ mod coverage_boost_v2 {
         let session_id = Uuid::new_v4();
         let body = serde_json::json!({ "wifiSsid": "Office Wi-Fi" });
         let resp = client
-            .patch(format!(
-                "{}/api/trust-probe/sessions/{}",
-                base, session_id
-            ))
+            .patch(format!("{}/api/trust-probe/sessions/{}", base, session_id))
             .json(&body)
             .send()
             .await
@@ -4756,7 +4757,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {
@@ -4771,11 +4774,7 @@ mod coverage_boost_v2 {
 
         let client = reqwest::Client::new();
         // IPv4 host without brackets
-        let resp = client
-            .get(format!("{}/ipv4", base))
-            .send()
-            .await
-            .unwrap();
+        let resp = client.get(format!("{}/ipv4", base)).send().await.unwrap();
         let json: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(json["host"].as_str(), Some("127.0.0.1"));
 
@@ -4802,7 +4801,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {
@@ -4839,7 +4840,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {
@@ -4875,7 +4878,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {
@@ -5034,7 +5039,10 @@ mod coverage_boost_v2 {
 
         let client = reqwest::Client::new();
         let resp = client
-            .get(format!("{}/public/trust-probe/{}/session", base, session_id))
+            .get(format!(
+                "{}/public/trust-probe/{}/session",
+                base, session_id
+            ))
             .send()
             .await
             .unwrap();
@@ -5055,9 +5063,7 @@ mod coverage_boost_v2 {
             Some("*"),
         );
         assert_eq!(
-            headers
-                .get("Content-Type")
-                .and_then(|v| v.to_str().ok()),
+            headers.get("Content-Type").and_then(|v| v.to_str().ok()),
             Some("text/plain; charset=utf-8"),
         );
     }
@@ -5073,9 +5079,7 @@ mod coverage_boost_v2 {
             Some("GET, OPTIONS"),
         );
         assert_eq!(
-            headers
-                .get("Content-Type")
-                .and_then(|v| v.to_str().ok()),
+            headers.get("Content-Type").and_then(|v| v.to_str().ok()),
             Some("application/json"),
         );
     }
@@ -5090,7 +5094,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {
@@ -5125,7 +5131,9 @@ mod coverage_boost_v2 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 tokio::spawn(async move {
                     let service = service_fn(move |req: Request<Incoming>| async move {

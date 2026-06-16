@@ -3354,7 +3354,7 @@ mod coverage_boost {
         let (mut sender, conn) = client_http1::handshake::<_, Full<Bytes>>(TokioIo::new(client_io))
             .await
             .expect("handshake");
-        let conn_task = tokio::spawn(async move { conn.await });
+        let conn_task = tokio::spawn(conn);
 
         let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
         let req = Request::builder()
@@ -3406,8 +3406,10 @@ mod coverage_boost {
 
     #[test]
     fn agent_config_response_enriches_with_effective_fields() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig::default();
-        config.work_dir = Some("/tmp/agent-workdir".to_string());
+        let config = crate::im_gateway::agent::ImAgentConfig {
+            work_dir: Some("/tmp/agent-workdir".to_string()),
+            ..Default::default()
+        };
 
         let value = agent_config_response(config.clone());
 
@@ -3509,9 +3511,11 @@ mod coverage_boost {
 
     #[test]
     fn apply_agent_config_patch_clears_auto_compact_and_runner() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig::default();
-        config.model_auto_compact_token_limit = Some(10);
-        config.runner = Some(bifrost_agent::AgentRunnerMode::Custom("old".into()));
+        let mut config = crate::im_gateway::agent::ImAgentConfig {
+            model_auto_compact_token_limit: Some(10),
+            runner: Some(bifrost_agent::AgentRunnerMode::Custom("old".into())),
+            ..Default::default()
+        };
 
         let patch = json!({
             "model_auto_compact_token_limit": null,
@@ -3577,8 +3581,10 @@ mod coverage_boost {
 
     #[test]
     fn apply_agent_config_patch_updates_provider_and_api_key_header() {
-        let mut config = crate::im_gateway::agent::ImAgentConfig::default();
-        config.model_provider = Some("aidp_crawl".to_string());
+        let mut config = crate::im_gateway::agent::ImAgentConfig {
+            model_provider: Some("aidp_crawl".to_string()),
+            ..Default::default()
+        };
 
         let patch = json!({
             "base_url": "https://example.com",
@@ -3711,7 +3717,7 @@ mod coverage_boost {
             .expect("msg");
         let history_path = recorder.file_path().display().to_string();
 
-        let mut manager = bifrost_agent::AgentSessionManager::new(3600);
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
         let mut session =
             manager.take_session_with_work_dir("different-key", Some("/tmp/restore".to_string()));
 
@@ -3735,7 +3741,7 @@ mod coverage_boost {
         .expect("write jsonl");
 
         let history_path = path.display().to_string();
-        let mut manager = bifrost_agent::AgentSessionManager::new(3600);
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
         let mut session = manager
             .take_session_with_work_dir("session-empty", Some("/tmp/restore-empty".to_string()));
 
@@ -3746,6 +3752,7 @@ mod coverage_boost {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::absurd_extreme_comparisons, unused_comparisons)]
     async fn restore_session_from_history_path_restores_fields_from_summary_and_runtime() {
         let _env = new_temp_bifrost_dir();
         let data_dir = bifrost_agent::config::agent_home_dir();
@@ -3769,7 +3776,7 @@ mod coverage_boost {
             .expect("run state");
         let history_path = recorder.file_path().display().to_string();
 
-        let mut manager = bifrost_agent::AgentSessionManager::new(3600);
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
         let mut session = manager.take_session_with_work_dir(session_key, None);
         session.source = "web".to_string();
 
@@ -3787,7 +3794,7 @@ mod coverage_boost {
     #[test]
     fn consume_imported_contexts_for_builtin_agent_appends_developer_message() {
         let _env = new_temp_bifrost_dir();
-        let mut manager = bifrost_agent::AgentSessionManager::new(3600);
+        let manager = bifrost_agent::AgentSessionManager::new(3600);
         let mut session = manager.take_session_with_work_dir(
             "imported-context-session",
             Some("/tmp/import".to_string()),
@@ -4046,7 +4053,9 @@ mod coverage_boost_v2 {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
     use hyper::service::service_fn;
-    use hyper::{body::Incoming, client::conn::http1 as client_http1, server::conn::http1 as server_http1};
+    use hyper::{
+        body::Incoming, client::conn::http1 as client_http1, server::conn::http1 as server_http1,
+    };
     use hyper::{Method, Request, StatusCode};
     use hyper_util::rt::TokioIo;
     use serde_json::json;
@@ -4081,7 +4090,7 @@ mod coverage_boost_v2 {
         let (mut sender, conn) = client_http1::handshake::<_, Full<Bytes>>(TokioIo::new(client_io))
             .await
             .expect("handshake");
-        let conn_task = tokio::spawn(async move { conn.await });
+        let conn_task = tokio::spawn(conn);
 
         let body_bytes = body.map(|s| s.as_bytes().to_vec()).unwrap_or_default();
         let req = Request::builder()
@@ -4188,8 +4197,7 @@ mod coverage_boost_v2 {
         let data_dir = bifrost_agent::config::agent_home_dir();
 
         let key = "history-v2-list";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
         recorder
             .record_session_start(key, json!({"source": "admin-api"}))
             .expect("start");
@@ -4201,9 +4209,7 @@ mod coverage_boost_v2 {
             agent_request_json(service, Method::GET, "/agent/sessions/history", None).await;
         assert_eq!(status, StatusCode::OK);
         let history = body["history"].as_array().expect("array");
-        assert!(history
-            .iter()
-            .any(|item| item["session_key"] == key));
+        assert!(history.iter().any(|item| item["session_key"] == key));
     }
 
     // ---------------------------------------------------------------------
@@ -4216,14 +4222,11 @@ mod coverage_boost_v2 {
         let data_dir = bifrost_agent::config::agent_home_dir();
 
         let key = "history-v2-events";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
         recorder
             .record_session_start(key, json!({"source": "admin-api"}))
             .expect("start");
-        recorder
-            .record_user_message(key, "hello")
-            .expect("user");
+        recorder.record_user_message(key, "hello").expect("user");
         let file_path = recorder.file_path();
         let encoded = urlencoding::encode(file_path.to_str().unwrap());
         let url = format!("/agent/sessions/history/{encoded}");
@@ -4245,14 +4248,11 @@ mod coverage_boost_v2 {
         let data_dir = bifrost_agent::config::agent_home_dir();
 
         let key = "history-v2-tail";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
         recorder
             .record_session_start(key, json!({"source": "admin-api"}))
             .expect("start");
-        recorder
-            .record_user_message(key, "hello")
-            .expect("user");
+        recorder.record_user_message(key, "hello").expect("user");
         recorder
             .record_assistant_message(key, "world")
             .expect("assistant");
@@ -4286,8 +4286,7 @@ mod coverage_boost_v2 {
         let data_dir = bifrost_agent::config::agent_home_dir();
 
         let key = "history-v2-delete";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
         recorder
             .record_session_start(key, json!({"source": "admin-api"}))
             .expect("start");
@@ -4322,14 +4321,11 @@ mod coverage_boost_v2 {
         let data_dir = bifrost_agent::config::agent_home_dir();
 
         let key = "detail-from-history-v2";
-        let mut recorder =
-            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
+        let mut recorder = bifrost_agent::persistence::ConversationRecorder::new(&data_dir, key);
         recorder
             .record_session_start(key, json!({"source": "admin-api"}))
             .expect("start");
-        recorder
-            .record_user_message(key, "hello")
-            .expect("user");
+        recorder.record_user_message(key, "hello").expect("user");
 
         let url = "/agent/sessions/detail-from-history-v2";
         let (status, body) = agent_request_json(service, Method::GET, url, None).await;
@@ -4395,9 +4391,11 @@ mod coverage_boost_v2 {
 
     #[test]
     fn summary_end_time_prefers_end_when_present() {
-        let mut summary = bifrost_agent::persistence::SessionFileSummary::default();
-        summary.start_time = 10;
-        summary.end_time = 20;
+        let mut summary = bifrost_agent::persistence::SessionFileSummary {
+            start_time: 10,
+            end_time: 20,
+            ..Default::default()
+        };
         assert_eq!(summary_end_time(&summary), 20);
         summary.end_time = 0;
         assert_eq!(summary_end_time(&summary), 10);
@@ -4422,8 +4420,10 @@ mod coverage_boost_v2 {
 
     #[test]
     fn history_session_list_run_state_uses_terminal_state_when_available() {
-        let mut summary = bifrost_agent::persistence::SessionFileSummary::default();
-        summary.run_state = Some("failed".to_string());
+        let mut summary = bifrost_agent::persistence::SessionFileSummary {
+            run_state: Some("failed".to_string()),
+            ..Default::default()
+        };
         assert_eq!(history_session_list_run_state(&summary), "failed");
         summary.run_state = Some("non_terminal".to_string());
         assert_eq!(history_session_list_run_state(&summary), "completed");

@@ -7516,7 +7516,7 @@ mod tests {
 #[cfg(test)]
 mod coverage_boost {
     use super::*;
-    use crate::commands::search::{MatchLocation, SearchResultItem, TrafficSummary};
+    use crate::commands::search::SearchResultItem;
     use bifrost_command::{SearchArgs, TrafficClearArgs};
     use serde_json::{json, Value};
     use std::sync::{Mutex, OnceLock};
@@ -7758,10 +7758,7 @@ mod coverage_boost {
              event: error\n\
              data: {}\n\
              \n",
-            result_payload.to_string(),
-            progress_payload.to_string(),
-            done_payload.to_string(),
-            error_payload.to_string(),
+            result_payload, progress_payload, done_payload, error_payload,
         );
 
         let events = decoder
@@ -7976,15 +7973,16 @@ mod coverage_boost {
     #[test]
     fn resolve_local_connection_single_connection_without_client_id() {
         let conn = sample_local_connection("client-1", "https://relay-a");
-        let resolved = resolve_local_connection(&[conn.clone()], None).expect("resolve");
+        let resolved =
+            resolve_local_connection(std::slice::from_ref(&conn), None).expect("resolve");
         assert_eq!(resolved.client_instance_id, conn.client_instance_id);
     }
 
     #[test]
     fn resolve_local_connection_explicit_full_client_id_matches() {
         let conn = sample_local_connection("client-full", "https://relay-a");
-        let resolved =
-            resolve_local_connection(&[conn.clone()], Some("client-full")).expect("resolve");
+        let resolved = resolve_local_connection(std::slice::from_ref(&conn), Some("client-full"))
+            .expect("resolve");
         assert_eq!(resolved.client_instance_id, "client-full");
     }
 
@@ -8006,7 +8004,8 @@ mod coverage_boost {
         conn.device_code = Some("BF-0123".to_string());
 
         let msg = shell_scope_upgrade_error(&conn).to_string();
-        assert!(msg.contains("fresh SSH authorization prompt"));
+        assert!(msg.contains("does not allow shell.exec"));
+        assert!(msg.contains("--level shell"));
     }
 
     #[test]
@@ -8412,12 +8411,11 @@ mod coverage_boost {
              event: exit\n\
              data: {}\n\
              \n",
-            frame_data,
-            exit_json.to_string(),
+            frame_data, exit_json,
         );
 
         Mock::given(method("GET"))
-            .and(path(&format!("/v4/remote-invoke/calls/{call_id}/events")))
+            .and(path(format!("/v4/remote-invoke/calls/{call_id}/events")))
             .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
             .mount(&mock_server)
             .await;
@@ -8465,7 +8463,7 @@ mod coverage_boost {
         );
 
         Mock::given(method("GET"))
-            .and(path(&format!("/v4/remote-invoke/calls/{call_id}/events")))
+            .and(path(format!("/v4/remote-invoke/calls/{call_id}/events")))
             .respond_with(ResponseTemplate::new(200).set_body_raw(sse_body, "text/event-stream"))
             .mount(&mock_server)
             .await;
@@ -8918,9 +8916,8 @@ mod coverage_boost_v2 {
 #[cfg(test)]
 mod coverage_boost_v3 {
     use super::*;
-    use serde_json::{json, Value};
+    use serde_json::Value;
     use tempfile::NamedTempFile;
-    use std::io::Write as _;
 
     fn build_file_command(action: RemoteFileCommands) -> BuiltRemoteCommand {
         build_remote_file_command(&action).expect("build file command")
@@ -8964,6 +8961,8 @@ mod coverage_boost_v3 {
         let cmd = RemoteFileCommands::List {
             path: None,
             depth: 3,
+            max_matches: None,
+            cursor: None,
             no_ignore: false,
             exclude_patterns: Vec::new(),
             cwd: Some("/work".to_string()),
@@ -8981,6 +8980,8 @@ mod coverage_boost_v3 {
         let cmd2 = RemoteFileCommands::List {
             path: Some(".".to_string()),
             depth: 1,
+            max_matches: None,
+            cursor: None,
             no_ignore: true,
             exclude_patterns: vec!["*.log".to_string()],
             cwd: None,
@@ -9025,6 +9026,7 @@ mod coverage_boost_v3 {
         let glob_cmd = RemoteFileCommands::Glob {
             pattern: "src/**/*.rs".to_string(),
             max_matches: Some(50),
+            cursor: None,
             no_ignore: false,
             exclude_patterns: vec!["target/**".to_string()],
             cwd: Some("/repo".to_string()),
@@ -9038,11 +9040,16 @@ mod coverage_boost_v3 {
         assert_eq!(gv["respect_gitignore"].as_bool(), Some(true));
 
         let find_cmd = RemoteFileCommands::Find {
-            pattern: "needle".to_string(),
+            pattern: Some("needle".to_string()),
+            regex: Vec::new(),
             path: Some(".".to_string()),
             max_matches: Some(5),
             max_scan: Some(1024),
+            cursor: None,
             case_insensitive: true,
+            fixed_strings: false,
+            word: false,
+            around: None,
             glob: Some("*.rs".to_string()),
             no_ignore: true,
             exclude_patterns: vec!["target/**".to_string()],
@@ -9082,6 +9089,8 @@ mod coverage_boost_v3 {
         let move_cmd = RemoteFileCommands::Move {
             from: "a.txt".to_string(),
             to: "b.txt".to_string(),
+            base_sha256: None,
+            allow_overwrite: None,
             cwd: None,
             output: "human".to_string(),
         };
@@ -9108,6 +9117,7 @@ mod coverage_boost_v3 {
     fn file_write_prefers_cli_b64_over_file() {
         let cmd = RemoteFileCommands::Write {
             path: "out.txt".to_string(),
+            content: None,
             content_file: Some("ignored".to_string()),
             content_b64: Some("Zm9vYmFy".to_string()),
             base_sha256: Some("abc".to_string()),
@@ -9134,6 +9144,7 @@ mod coverage_boost_v3 {
 
         let cmd = RemoteFileCommands::Write {
             path: "from-file.txt".to_string(),
+            content: None,
             content_file: Some(path.display().to_string()),
             content_b64: None,
             base_sha256: None,
@@ -9157,6 +9168,7 @@ mod coverage_boost_v3 {
     fn file_write_reports_io_error_when_file_missing() {
         let cmd = RemoteFileCommands::Write {
             path: "missing.txt".to_string(),
+            content: None,
             content_file: Some("/definitely/not/present".to_string()),
             content_b64: None,
             base_sha256: None,
@@ -9191,7 +9203,7 @@ mod coverage_boost_v3 {
     }
 
     #[test]
-    fn file_edit_uses_null_for_invalid_edits_json() {
+    fn file_edit_rejects_invalid_edits_json() {
         let cmd = RemoteFileCommands::Edit {
             path: "file.txt".to_string(),
             edits: "not-json".to_string(),
@@ -9199,9 +9211,13 @@ mod coverage_boost_v3 {
             cwd: None,
             output: "human".to_string(),
         };
-        let built = build_file_command(cmd);
-        let v = args_json(&built);
-        assert!(v["edits"].is_null());
+        let err = build_remote_file_command(&cmd).expect_err("expected config error");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("invalid --edits JSON"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
     }
 
     #[test]
@@ -9211,6 +9227,7 @@ mod coverage_boost_v3 {
         let cmd = RemoteFileCommands::Patch {
             patch_file: None,
             patch_b64: Some(b64),
+            base_sha: Vec::new(),
             cwd: Some("/repo".to_string()),
             output: "human".to_string(),
         };
@@ -9225,6 +9242,7 @@ mod coverage_boost_v3 {
         let cmd = RemoteFileCommands::Patch {
             patch_file: None,
             patch_b64: Some("%%%".to_string()),
+            base_sha: Vec::new(),
             cwd: None,
             output: "human".to_string(),
         };
@@ -9242,6 +9260,7 @@ mod coverage_boost_v3 {
         let cmd = RemoteFileCommands::Patch {
             patch_file: None,
             patch_b64: None,
+            base_sha: Vec::new(),
             cwd: None,
             output: "human".to_string(),
         };
@@ -9263,6 +9282,7 @@ mod coverage_boost_v3 {
         let cmd = RemoteFileCommands::Patch {
             patch_file: Some(path.display().to_string()),
             patch_b64: None,
+            base_sha: Vec::new(),
             cwd: None,
             output: "human".to_string(),
         };
@@ -9283,7 +9303,7 @@ mod coverage_boost_v3 {
 
         let built = build_remote_command_checked(&action).expect("build file command");
         assert_eq!(built.kind, CommandKind::File);
-        assert!(matches!(built.render, RemoteRenderMode::File));
+        assert!(matches!(built.render, RemoteRenderMode::File { .. }));
         assert_eq!(built.command.as_deref(), Some("file.stat"));
     }
 }

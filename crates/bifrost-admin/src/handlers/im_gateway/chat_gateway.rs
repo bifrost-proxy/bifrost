@@ -4273,6 +4273,7 @@ mod coverage_boost {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    #[allow(clippy::type_complexity)]
     async fn send_ndjson_event_writes_single_json_line() {
         let (tx, mut rx): (
             mpsc::Sender<Result<hyper::body::Frame<Bytes>, hyper::Error>>,

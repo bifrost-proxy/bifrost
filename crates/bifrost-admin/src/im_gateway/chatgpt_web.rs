@@ -3176,7 +3176,6 @@ def hello():
 #[cfg(test)]
 mod coverage_boost {
     use super::*;
-    use base64::Engine as _;
     use serde_json::{json, Value};
     use std::collections::BTreeMap;
     use std::path::PathBuf;
@@ -3511,7 +3510,6 @@ mod coverage_boost {
     }
 }
 
-
 #[cfg(test)]
 mod coverage_boost_v2 {
     use super::*;
@@ -3557,10 +3555,7 @@ mod coverage_boost_v2 {
     fn collect_account_headers_ignores_unrelated_events() {
         let mut ids = BTreeSet::new();
         let mut headers = BTreeMap::new();
-        let event = make_cdp_event(
-            "Network.responseReceived",
-            json!({"requestId": "r1"}),
-        );
+        let event = make_cdp_event("Network.responseReceived", json!({"requestId": "r1"}));
         collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
         assert!(ids.is_empty());
         assert!(headers.is_empty());
@@ -3603,8 +3598,14 @@ mod coverage_boost_v2 {
         );
         collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
         assert!(ids.contains("r1"));
-        assert_eq!(headers.get("authorization").map(String::as_str), Some("Bearer t"));
-        assert_eq!(headers.get("oai-language").map(String::as_str), Some("zh-CN"));
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer t")
+        );
+        assert_eq!(
+            headers.get("oai-language").map(String::as_str),
+            Some("zh-CN")
+        );
         assert!(!headers.contains_key("x-other"));
     }
 
@@ -3734,13 +3735,9 @@ mod coverage_boost_v2 {
 
     #[test]
     fn summarize_authorization_identity_handles_invalid_json_payload() {
-        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(b"not-json");
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-json");
         let token = format!("header.{payload}.sig");
-        let headers = BTreeMap::from([(
-            "authorization".to_string(),
-            format!("Bearer {token}"),
-        )]);
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
         let id = summarize_authorization_identity(&headers);
         assert!(id.has_bearer_token);
         assert!(!id.complete);
@@ -3760,10 +3757,7 @@ mod coverage_boost_v2 {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).unwrap());
         let token = format!("header.{payload}.sig");
-        let headers = BTreeMap::from([(
-            "authorization".to_string(),
-            format!("Bearer {token}"),
-        )]);
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
         let id = summarize_authorization_identity(&headers);
         assert!(id.has_bearer_token);
         assert!(!id.has_profile_email);
@@ -3789,10 +3783,7 @@ mod coverage_boost_v2 {
         let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(serde_json::to_vec(&claims).unwrap());
         let token = format!("header.{payload}.sig");
-        let headers = BTreeMap::from([(
-            "authorization".to_string(),
-            format!("Bearer {token}"),
-        )]);
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
         let id = summarize_authorization_identity(&headers);
         assert!(id.has_profile_email);
         assert_eq!(id.profile_email_verified, Some(true));
@@ -3858,7 +3849,6 @@ mod coverage_boost_v2 {
         ));
     }
 }
-
 
 #[cfg(test)]
 mod coverage_boost_v3 {
@@ -3933,7 +3923,11 @@ mod coverage_boost_v3 {
     #[test]
     fn conversation_has_user_message_after_false_when_mapping_missing() {
         let conversation = json!({"other": {}});
-        assert!(!conversation_has_user_message_after(&conversation, "hi", 0.0));
+        assert!(!conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            0.0
+        ));
     }
 
     #[test]
@@ -3956,8 +3950,16 @@ mod coverage_boost_v3 {
                 }
             }
         });
-        assert!(conversation_has_user_message_after(&conversation, "hi", 5.0));
-        assert!(conversation_has_user_message_after(&conversation, "hi", 4.0));
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            5.0
+        ));
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            4.0
+        ));
     }
 
     #[test]

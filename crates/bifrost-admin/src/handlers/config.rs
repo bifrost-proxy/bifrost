@@ -2089,9 +2089,8 @@ mod coverage_boost {
     use super::*;
     use crate::state::AdminState;
     use crate::test_support::TestAdminState;
-    use http_body_util::{BodyExt, Full};
-    use hyper::{body::Incoming, Method, Request, StatusCode};
-    use serde_json::json;
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
 
     #[tokio::test]
     async fn get_proxy_settings_uses_defaults_when_config_manager_absent() {
@@ -2341,11 +2340,10 @@ mod coverage_boost {
 mod coverage_boost_v2 {
     use super::*;
     use crate::test_support::TestAdminState;
-    use bytes::Bytes;
-    use http_body_util::BodyExt;
-    use hyper::{body::Incoming, Method, Request, StatusCode};
+
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
+    use hyper::{body::Incoming, Request, StatusCode};
     use hyper_util::rt::TokioIo;
     use serde_json::json;
     use std::net::{Ipv4Addr, SocketAddr};
@@ -2353,43 +2351,62 @@ mod coverage_boost_v2 {
 
     async fn spawn_config_api_server(
         state: SharedAdminState,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .await
-            .expect("bind config api listener");
-        let addr: SocketAddr = listener.local_addr().expect("config api local addr");
-        let base = format!("http://{}", addr);
-        let state_clone = state.clone();
-
-        let handle = tokio::spawn(async move {
-            loop {
-                let Ok((stream, _)) = listener.accept().await else { break };
-                let io = TokioIo::new(stream);
-                let state_inner = state_clone.clone();
-                tokio::spawn(async move {
-                    let service = service_fn(move |req: Request<Incoming>| {
-                        let state = state_inner.clone();
-                        async move {
-                            let path = req.uri().path().to_string();
-                            let resp = handle_config(req, state, None, &path).await;
-                            Ok::<_, hyper::Error>(resp)
-                        }
+    ) -> (String, std::thread::JoinHandle<()>) {
+        // Run the server on a dedicated OS thread with its own runtime so that
+        // the blocking `ureq` client in the test body cannot starve the server
+        // task (the test itself runs on a current-thread runtime).
+        let (tx, rx) = std::sync::mpsc::channel::<SocketAddr>();
+        let handle = std::thread::spawn(move || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("build config api server runtime");
+            rt.block_on(async move {
+                let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+                    .await
+                    .expect("bind config api listener");
+                let addr: SocketAddr = listener.local_addr().expect("config api local addr");
+                tx.send(addr).expect("send config api addr");
+                loop {
+                    let Ok((stream, _)) = listener.accept().await else {
+                        break;
+                    };
+                    let io = TokioIo::new(stream);
+                    let state_inner = state.clone();
+                    tokio::spawn(async move {
+                        let service = service_fn(move |req: Request<Incoming>| {
+                            let state = state_inner.clone();
+                            async move {
+                                let path = req.uri().path().to_string();
+                                let resp = handle_config(req, state, None, &path).await;
+                                Ok::<_, hyper::Error>(resp)
+                            }
+                        });
+                        let _ = http1::Builder::new().serve_connection(io, service).await;
                     });
-                    let _ = http1::Builder::new().serve_connection(io, service).await;
-                });
-            }
+                }
+            });
         });
+
+        let addr = rx.recv().expect("recv config api addr");
+        let base = format!("http://{}", addr);
 
         (base, handle)
     }
 
     fn put_json(url: &str, body: serde_json::Value) -> ureq::Response {
-        ureq::AgentBuilder::new()
+        match ureq::AgentBuilder::new()
             .build()
             .put(url)
             .set("content-type", "application/json")
             .send_string(&body.to_string())
-            .unwrap()
+        {
+            Ok(resp) => resp,
+            // ureq treats any non-2xx status as an error; tests asserting on
+            // 4xx responses still need the underlying Response.
+            Err(ureq::Error::Status(_, resp)) => resp,
+            Err(other) => panic!("config api request failed: {other}"),
+        }
     }
 
     #[tokio::test]
@@ -2485,12 +2502,16 @@ mod coverage_boost_v2 {
         let (base, _handle) = spawn_config_api_server(state).await;
         let url = format!("{}/api/config/tls", base);
 
-        let resp = ureq::AgentBuilder::new()
+        let resp = match ureq::AgentBuilder::new()
             .build()
             .put(&url)
             .set("content-type", "application/json")
             .send_string("not-json")
-            .unwrap();
+        {
+            Ok(resp) => resp,
+            Err(ureq::Error::Status(_, resp)) => resp,
+            Err(other) => panic!("config api request failed: {other}"),
+        };
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
         let msg = resp.into_string().unwrap();
         assert!(msg.contains("Invalid JSON"));

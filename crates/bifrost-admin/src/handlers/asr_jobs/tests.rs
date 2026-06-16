@@ -13,20 +13,14 @@ mod tests {
     }
 
     struct EnvGuard {
-        previous: PathBuf,
+        _guard: crate::test_env::BifrostDataDirGuard,
     }
 
     impl EnvGuard {
         fn set_data_dir(path: &Path) -> Self {
-            let previous = bifrost_storage::data_dir();
-            bifrost_storage::set_data_dir(path.to_path_buf());
-            Self { previous }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            bifrost_storage::set_data_dir(self.previous.clone());
+            Self {
+                _guard: crate::test_env::BifrostDataDirGuard::set(path),
+            }
         }
     }
 

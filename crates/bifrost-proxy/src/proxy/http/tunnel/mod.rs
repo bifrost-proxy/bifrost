@@ -7541,9 +7541,10 @@ mod coverage_boost {
             ip_intercept_include: vec![],
             unsafe_ssl: false,
         };
-        let mut rules = ResolvedRules::default();
-        // Rule override alone should force interception
-        rules.tls_intercept = Some(true);
+        let mut rules = ResolvedRules {
+            tls_intercept: Some(true),
+            ..Default::default()
+        };
         assert!(is_explicit_tls_intercept_override(
             "other.example.com",
             Some("SomeApp"),
@@ -8064,7 +8065,7 @@ mod coverage_boost {
 
         fn with_error(msg: &str) -> Self {
             Self {
-                result: Some(Err(std::io::Error::new(std::io::ErrorKind::Other, msg))),
+                result: Some(Err(std::io::Error::other(msg))),
             }
         }
     }
@@ -8363,7 +8364,7 @@ mod coverage_boost_v2 {
 
     impl AsyncWrite for RecordingWriter {
         fn poll_write(
-            mut self: Pin<&mut Self>,
+            self: Pin<&mut Self>,
             _cx: &mut Context<'_>,
             buf: &[u8],
         ) -> Poll<std::io::Result<usize>> {
@@ -8486,16 +8487,20 @@ mod coverage_boost_v2 {
 
     #[test]
     fn test_requires_tls_interception_for_rules_with_mock_template() {
-        let mut rules = ResolvedRules::default();
-        rules.mock_template = Some("template.json".to_string());
+        let mut rules = ResolvedRules {
+            mock_template: Some("template.json".to_string()),
+            ..Default::default()
+        };
         rules.rules.push(auto_tls_rule(Protocol::ResHeaders));
         assert!(requires_tls_interception_for_rules(&rules));
     }
 
     #[test]
     fn test_requires_tls_interception_for_rules_with_html_body_rule() {
-        let mut rules = ResolvedRules::default();
-        rules.html_body = Some("<html></html>".to_string());
+        let mut rules = ResolvedRules {
+            html_body: Some("<html></html>".to_string()),
+            ..Default::default()
+        };
         rules.rules.push(auto_tls_rule(Protocol::HtmlBody));
         assert!(requires_tls_interception_for_rules(&rules));
     }
@@ -8512,8 +8517,10 @@ mod coverage_boost_v2 {
 
     #[test]
     fn test_requires_tls_interception_for_rules_with_merge_fields() {
-        let mut rules = ResolvedRules::default();
-        rules.req_merge = Some(json!({"k": "v"}));
+        let mut rules = ResolvedRules {
+            req_merge: Some(json!({"k": "v"})),
+            ..Default::default()
+        };
         rules.rules.push(auto_tls_rule(Protocol::ResMerge));
         assert!(requires_tls_interception_for_rules(&rules));
     }
@@ -8616,6 +8623,7 @@ mod coverage_boost_v2 {
 
     // ------------------------------ process_template & serve_mock_file ------------------------------
 
+    #[allow(dead_code)]
     fn create_temp_dir(prefix: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "{}_{}_{}",
@@ -8720,8 +8728,8 @@ mod coverage_boost_v3 {
     use std::sync::Arc;
 
     use bifrost_admin::AdminState;
-    use bifrost_core::Protocol;
     use bifrost_core::rule_share::{append_rule_share_query, new_rule_share_payload};
+    use bifrost_core::Protocol;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::body::Incoming;
@@ -8737,8 +8745,7 @@ mod coverage_boost_v3 {
     use wiremock::matchers::{method as wm_method, path as wm_path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    use crate::server::{NoOpRulesResolver, ProxyConfig, ResolvedRules, RuleValue, TlsConfig, TlsInterceptConfig};
-    use crate::utils::logging::RequestContext;
+    use crate::server::{ResolvedRules, TlsInterceptConfig};
 
     // ---------------- maybe_backfill_tunnel_client_process ----------------
 
@@ -8767,13 +8774,7 @@ mod coverage_boost_v3 {
         let local_addr = SocketAddr::from((IpAddr::V4(Ipv4Addr::LOCALHOST), 443));
 
         maybe_backfill_tunnel_client_process(
-            &state,
-            "req-skip",
-            None,
-            None,
-            peer_addr,
-            local_addr,
-            true,
+            &state, "req-skip", None, None, peer_addr, local_addr, true,
         );
     }
 
@@ -8855,33 +8856,26 @@ mod coverage_boost_v3 {
 
     #[test]
     fn test_build_upstream_pool_partition_http_and_https() {
-        let mut rules = ResolvedRules::default();
-        rules.host = Some("override.example".to_string());
-        rules.proxy = Some("127.0.0.1:8888".to_string());
-        rules.host_protocol = Some(Protocol::Http);
-        rules.upstream_unsafe_ssl = true;
+        let rules = ResolvedRules {
+            host: Some("override.example".to_string()),
+            proxy: Some("127.0.0.1:8888".to_string()),
+            host_protocol: Some(Protocol::Http),
+            upstream_unsafe_ssl: true,
+            ..Default::default()
+        };
 
-        let http_partition = build_upstream_pool_partition(
-            "orig.example",
-            "target.example",
-            80,
-            true,
-            &rules,
-        );
+        let http_partition =
+            build_upstream_pool_partition("orig.example", "target.example", 80, true, &rules);
         assert!(http_partition.contains("target=http://target.example:80"));
 
-        let https_partition = build_upstream_pool_partition(
-            "orig.example",
-            "target.example",
-            443,
-            false,
-            &rules,
-        );
+        let https_partition =
+            build_upstream_pool_partition("orig.example", "target.example", 443, false, &rules);
         assert!(https_partition.contains("target=https://target.example:443"));
     }
 
     // ---------------- send_pooled_request (with real loopback listener) ----------------
 
+    #[allow(dead_code)]
     async fn start_simple_http_server(port: u16) {
         let listener = TcpListener::bind((IpAddr::V4(Ipv4Addr::LOCALHOST), port))
             .await
@@ -8896,13 +8890,13 @@ mod coverage_boost_v3 {
                         .header("x-echo", HeaderValue::from_static("ok"))
                         .body(full_body(Bytes::from_static(b"hello")))
                         .unwrap();
-                    resp.headers_mut().insert(
-                        hyper::header::CONTENT_LENGTH,
-                        HeaderValue::from_static("5"),
-                    );
+                    resp.headers_mut()
+                        .insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("5"));
                     Ok::<_, hyper::Error>(resp)
                 });
-                let _ = server_http1::Builder::new().serve_connection(io, service).await;
+                let _ = server_http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
             }
         });
     }
@@ -8925,19 +8919,17 @@ mod coverage_boost_v3 {
                         .header("x-echo", HeaderValue::from_static("ok"))
                         .body(full_body(Bytes::from_static(b"hello")))
                         .unwrap();
-                    resp.headers_mut().insert(
-                        hyper::header::CONTENT_LENGTH,
-                        HeaderValue::from_static("5"),
-                    );
+                    resp.headers_mut()
+                        .insert(hyper::header::CONTENT_LENGTH, HeaderValue::from_static("5"));
                     Ok::<_, hyper::Error>(resp)
                 });
-                let _ = server_http1::Builder::new().serve_connection(io, service).await;
+                let _ = server_http1::Builder::new()
+                    .serve_connection(io, service)
+                    .await;
             }
         });
 
-        let uri: hyper::Uri = format!("http://127.0.0.1:{port}/test")
-            .parse()
-            .unwrap();
+        let uri: hyper::Uri = format!("http://127.0.0.1:{port}/test").parse().unwrap();
         let req = Request::builder()
             .method(Method::GET)
             .uri(uri)
@@ -8996,7 +8988,9 @@ mod coverage_boost_v3 {
                         .unwrap(),
                 )
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9065,7 +9059,9 @@ mod coverage_boost_v3 {
                     )
                 }
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9074,10 +9070,7 @@ mod coverage_boost_v3 {
 
         // Only path and query matter for the server; host is irrelevant here.
         let url: hyper::Uri = shared.parse().unwrap();
-        let path_and_query = url
-            .path_and_query()
-            .map(|pq| pq.as_str())
-            .unwrap_or("/");
+        let path_and_query = url.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
 
         let req = Request::builder()
             .method(Method::GET)
@@ -9102,10 +9095,8 @@ mod coverage_boost_v3 {
 mod coverage_boost_v4 {
     use super::*;
 
-    use std::sync::Arc;
-
-    use bifrost_core::Protocol;
     use bifrost_core::rule_share::{append_rule_share_query, new_rule_share_payload};
+    use bifrost_core::Protocol;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Empty, Full};
     use hyper::body::Incoming;
@@ -9136,7 +9127,9 @@ mod coverage_boost_v4 {
                         .unwrap(),
                 )
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9176,7 +9169,9 @@ mod coverage_boost_v4 {
                         .unwrap(),
                 )
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9225,7 +9220,9 @@ mod coverage_boost_v4 {
                     )
                 }
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9266,7 +9263,9 @@ mod coverage_boost_v4 {
                         .unwrap(),
                 )
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9339,7 +9338,9 @@ mod coverage_boost_v4 {
                     }
                 }
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9372,8 +9373,7 @@ mod coverage_boost_v4 {
     async fn test_handle_intercepted_rule_share_query_invalid_payload_returns_none_v4() {
         let (client_side, server_side) = duplex(16 * 1024);
 
-        let request_url =
-            "https://example.com/path?__bifrost_rule=not-valid-base64".to_string();
+        let request_url = "https://example.com/path?__bifrost_rule=not-valid-base64".to_string();
 
         let server_task = tokio::spawn(async move {
             let io = TokioIo::new(server_side);
@@ -9401,7 +9401,9 @@ mod coverage_boost_v4 {
                     )
                 }
             });
-            let _ = server_http1::Builder::new().serve_connection(io, service).await;
+            let _ = server_http1::Builder::new()
+                .serve_connection(io, service)
+                .await;
         });
 
         let io = TokioIo::new(client_side);
@@ -9449,7 +9451,9 @@ mod coverage_boost_v4 {
     #[test]
     fn test_is_likely_binary_content_type_false_for_text_with_charset_v4() {
         assert!(!is_likely_binary_content_type("text/html; charset=utf-8"));
-        assert!(!is_likely_binary_content_type("application/json; charset=utf-8"));
+        assert!(!is_likely_binary_content_type(
+            "application/json; charset=utf-8"
+        ));
     }
 
     // ------------- should_use_binary_performance_mode extra cases -------------
@@ -9519,8 +9523,10 @@ mod coverage_boost_v4 {
 
     #[test]
     fn test_requires_tls_interception_for_rules_res_body_rule_v4() {
-        let mut rules = ResolvedRules::default();
-        rules.res_body = Some(Bytes::from_static(b"body"));
+        let mut rules = ResolvedRules {
+            res_body: Some(Bytes::from_static(b"body")),
+            ..Default::default()
+        };
         rules.rules.push(auto_tls_rule_v4(Protocol::ResBody));
         assert!(requires_tls_interception_for_rules(&rules));
     }
@@ -9528,13 +9534,11 @@ mod coverage_boost_v4 {
     #[test]
     fn test_requires_tls_interception_for_rules_res_replace_regex_rule_v4() {
         let mut rules = ResolvedRules::default();
-        rules
-            .res_replace_regex
-            .push(crate::server::RegexReplace {
-                pattern: regex::Regex::new("foo").unwrap(),
-                replacement: "bar".to_string(),
-                global: true,
-            });
+        rules.res_replace_regex.push(crate::server::RegexReplace {
+            pattern: regex::Regex::new("foo").unwrap(),
+            replacement: "bar".to_string(),
+            global: true,
+        });
         rules.rules.push(auto_tls_rule_v4(Protocol::ResReplace));
         assert!(requires_tls_interception_for_rules(&rules));
     }
@@ -9602,8 +9606,10 @@ mod coverage_boost_v4 {
             ip_intercept_include: vec![],
             unsafe_ssl: false,
         };
-        let mut rules = ResolvedRules::default();
-        rules.tls_intercept = Some(true);
+        let rules = ResolvedRules {
+            tls_intercept: Some(true),
+            ..Default::default()
+        };
         assert!(should_intercept_tls_for_client(
             "example.com",
             None,
@@ -9633,8 +9639,10 @@ mod coverage_boost_v4 {
             ip_intercept_include: vec![],
             unsafe_ssl: false,
         };
-        let mut rules = ResolvedRules::default();
-        rules.tls_intercept = Some(false);
+        let rules = ResolvedRules {
+            tls_intercept: Some(false),
+            ..Default::default()
+        };
         assert!(!should_intercept_tls_for_client(
             "example.com",
             None,

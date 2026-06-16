@@ -3811,8 +3811,7 @@ mod coverage_boost_v3 {
     #[test]
     fn asr_download_requests_only_include_sample_files_when_only_samples_missing() {
         let temp = TempDir::new().unwrap();
-        let mut target =
-            target_from_query(Some("model=Qwen3-ASR-0.6B&language=chinese")).unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B&language=chinese")).unwrap();
         target.home = temp.path().to_path_buf();
 
         std::fs::create_dir_all(target.install_dir()).unwrap();

@@ -2008,19 +2008,18 @@ mod coverage_boost {
 
     use futures_util::{SinkExt, StreamExt};
     use hyper::body::Incoming;
-    use hyper::server::conn::http1;
-    use hyper::service::service_fn;
+
     use hyper::{Request, StatusCode};
-    use hyper_util::rt::TokioIo;
+
     use serde_json::json;
-    use tokio::io::{duplex, AsyncReadExt, AsyncWriteExt};
+    use tokio::io::duplex;
     use tokio_tungstenite::tungstenite::protocol::Message;
     use tokio_tungstenite::WebSocketStream;
 
     use crate::devtools::{
-        BridgeEvalPollPayload, BridgeEvalResultPayload, BridgeHelloPayload, BrowserDebugBroker,
-        CapabilityMatrix, ConsoleMessage, DebugAdapterKind, DebugFidelity, DebugPage,
-        DebugPageState, DevtoolsMode, NetworkEvent, SharedBrowserDebugBroker, StorageSnapshot,
+        BridgeEvalResultPayload, BridgeHelloPayload, BrowserDebugBroker, CapabilityMatrix,
+        ConsoleMessage, DebugAdapterKind, DebugFidelity, DebugPage, DebugPageState, DevtoolsMode,
+        NetworkEvent, SharedBrowserDebugBroker, StorageSnapshot,
     };
     use crate::state::{AdminState, SharedAdminState};
     use crate::test_support::TestAdminState;
@@ -2120,6 +2119,7 @@ mod coverage_boost {
         (status, text)
     }
 
+    #[allow(dead_code)]
     fn parse_http_response(buf: &[u8]) -> (StatusCode, String) {
         let text = String::from_utf8_lossy(buf);
         let mut parts = text.split("\r\n\r\n");

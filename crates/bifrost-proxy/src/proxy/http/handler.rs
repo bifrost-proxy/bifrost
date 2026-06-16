@@ -6224,7 +6224,7 @@ mod coverage_boost {
             .body(Empty::new())
             .expect("build request");
 
-        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver::default());
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver);
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
         assert_eq!(resp.status(), StatusCode::FOUND);
@@ -6528,7 +6528,7 @@ mod coverage_boost {
             .body(Empty::new())
             .expect("build request");
 
-        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver::default());
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver);
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
         assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
@@ -7394,10 +7394,7 @@ mod coverage_boost_v3 {
             hyper::header::CONTENT_ENCODING,
             HeaderValue::from_static("gzip"),
         );
-        assert_eq!(
-            header_content_encoding(&headers).as_deref(),
-            Some("gzip")
-        );
+        assert_eq!(header_content_encoding(&headers).as_deref(), Some("gzip"));
 
         let (mut parts, _) = Response::builder()
             .status(StatusCode::OK)
@@ -7728,8 +7725,12 @@ mod coverage_boost_v3 {
 
         #[test]
         fn extra_should_use_metrics_only_forwarding_mode_false_for_websocket_or_sse() {
-            assert!(!should_use_metrics_only_forwarding_mode(true, false, false, true, false));
-            assert!(!should_use_metrics_only_forwarding_mode( true, false, false, false, true));
+            assert!(!should_use_metrics_only_forwarding_mode(
+                true, false, false, true, false
+            ));
+            assert!(!should_use_metrics_only_forwarding_mode(
+                true, false, false, false, true
+            ));
         }
 
         #[test]
@@ -7783,15 +7784,19 @@ mod coverage_boost_v3 {
 
         #[test]
         fn extra_needs_request_body_processing_true_when_req_merge_set() {
-            let mut rules = ResolvedRules::default();
-            rules.req_merge = Some(serde_json::json!({"k": 1}));
+            let rules = ResolvedRules {
+                req_merge: Some(serde_json::json!({"k": 1})),
+                ..Default::default()
+            };
             assert!(needs_request_body_processing(&rules));
         }
 
         #[test]
         fn extra_needs_response_override_true_when_replace_status_set() {
-            let mut rules = ResolvedRules::default();
-            rules.replace_status = Some(599);
+            let rules = ResolvedRules {
+                replace_status: Some(599),
+                ..Default::default()
+            };
             assert!(needs_response_override(&rules));
         }
 
@@ -7817,10 +7822,7 @@ mod coverage_boost_v3 {
         fn extra_build_proxy_forward_uri_relative_https_uses_default_port() {
             let processed: Uri = "/secure".parse().unwrap();
             let uri = build_proxy_forward_uri(&processed, "example.com", 443, true).unwrap();
-            assert_eq!(
-                uri,
-                "https://example.com/secure".parse::<Uri>().unwrap()
-            );
+            assert_eq!(uri, "https://example.com/secure".parse::<Uri>().unwrap());
         }
     }
 }

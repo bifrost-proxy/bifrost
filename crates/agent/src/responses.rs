@@ -491,6 +491,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn streaming_client_sends_responses_shape() {
         let _guard = streaming_lock().lock().unwrap_or_else(|e| e.into_inner());
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock");

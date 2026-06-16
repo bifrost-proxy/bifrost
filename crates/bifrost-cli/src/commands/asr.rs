@@ -4477,8 +4477,6 @@ mod coverage_boost_v2 {
 mod coverage_boost_v3 {
     use super::*;
 
-    use std::io::Write as _;
-
     use tempfile::TempDir;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -4564,7 +4562,6 @@ mod coverage_boost_v3 {
             diarization_status: Some("ok".to_string()),
             speaker_count: Some(2),
             finished_at_ms: Some(1_700_000_000_000),
-            ..AsrTaskFile::default()
         };
         AsrTask {
             id: "task-1".to_string(),
@@ -4618,8 +4615,10 @@ mod coverage_boost_v3 {
 
     #[test]
     fn print_task_files_handles_no_matching_files() {
-        let mut task = AsrTask::default();
-        task.files = Vec::new();
+        let task = AsrTask {
+            files: Vec::new(),
+            ..Default::default()
+        };
         print_task_files(&task, Some("success"), 10);
     }
 
@@ -4707,11 +4706,8 @@ mod coverage_boost_v3 {
             .await;
 
         let client = mock_client_from_server(&mock_server).await;
-        handle_asr_diarization_command(
-            &client,
-            AiAsrDiarizationCommands::Profiles { json: false },
-        )
-        .unwrap();
+        handle_asr_diarization_command(&client, AiAsrDiarizationCommands::Profiles { json: false })
+            .unwrap();
     }
 
     #[tokio::test]
@@ -4890,9 +4886,7 @@ mod coverage_boost_v3 {
 
         let client = mock_client_from_server(&mock_server).await;
         let err = select_asr_task_id(&client, None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("No ASR directory tasks."));
+        assert!(err.to_string().contains("No ASR directory tasks."));
     }
 
     #[tokio::test]

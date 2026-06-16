@@ -2834,7 +2834,7 @@ mod coverage_boost {
     #[cfg(unix)]
     #[test]
     fn is_fd_limit_error_matches_emfile_and_enfile() {
-        use std::io::{Error, ErrorKind};
+        use std::io::Error;
 
         let err = Error::from_raw_os_error(libc::EMFILE);
         assert!(is_fd_limit_error(&err));
@@ -2842,7 +2842,7 @@ mod coverage_boost {
         let err = Error::from_raw_os_error(libc::ENFILE);
         assert!(is_fd_limit_error(&err));
 
-        let err = Error::new(ErrorKind::Other, "other");
+        let err = Error::other("other");
         assert!(!is_fd_limit_error(&err));
     }
 
@@ -3063,7 +3063,7 @@ mod coverage_boost {
         let client_ac = ClientAccessControl::new(ac_config);
         let wrapper = Arc::new(tokio::sync::RwLock::new(client_ac));
 
-        let mut handler = handler.with_access_control(wrapper);
+        let handler = handler.with_access_control(wrapper);
         assert!(handler.requires_userpass_auth().await);
     }
 
@@ -3149,14 +3149,15 @@ mod coverage_boost {
     }
 }
 
-
 #[cfg(test)]
 mod coverage_boost_v2 {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
     use std::sync::Arc;
 
-    use bifrost_core::{AccessControlConfig, ClientAccessControl, UserPassAccountConfig, UserPassAuthConfig, ProxyAuthRateLimiter};
+    use bifrost_core::{
+        AccessControlConfig, ClientAccessControl, ProxyAuthRateLimiter, UserPassAuthConfig,
+    };
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
 
@@ -3190,14 +3191,8 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn handle_auth_success_with_config_credentials() {
-        let (mut handler, mut client) = make_handler_with_opts(
-            true,
-            Some("user"),
-            Some("pass"),
-            30,
-            None,
-        )
-        .await;
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
 
         let client_task = async move {
             let mut buf = Vec::new();
@@ -3240,14 +3235,8 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn handle_auth_invalid_credentials_sends_failure_reply() {
-        let (mut handler, mut client) = make_handler_with_opts(
-            true,
-            Some("user"),
-            Some("pass"),
-            30,
-            None,
-        )
-        .await;
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
 
         let client_task = async move {
             let mut buf = Vec::new();
@@ -3383,7 +3372,10 @@ mod coverage_boost_v2 {
     #[test]
     fn build_handshake_response_for_username_password() {
         let resp = build_handshake_response(AuthMethod::UsernamePassword);
-        assert_eq!(resp, vec![SOCKS5_VERSION, AuthMethod::UsernamePassword as u8]);
+        assert_eq!(
+            resp,
+            vec![SOCKS5_VERSION, AuthMethod::UsernamePassword as u8]
+        );
     }
 
     #[tokio::test]
@@ -3473,20 +3465,14 @@ mod coverage_boost_v2 {
         };
         let ac = ClientAccessControl::new(ac_config);
         let wrapper = Arc::new(tokio::sync::RwLock::new(ac));
-        let mut handler = handler.with_access_control(wrapper);
+        let handler = handler.with_access_control(wrapper);
         assert!(!handler.requires_userpass_auth().await);
     }
 
     #[tokio::test]
     async fn handle_auth_success_clears_rate_limiter_state() {
-        let (mut handler, mut client) = make_handler_with_opts(
-            true,
-            Some("user"),
-            Some("pass"),
-            30,
-            None,
-        )
-        .await;
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
         let ip = handler.peer_addr.ip();
         let limiter = Arc::new(ProxyAuthRateLimiter::new());
         limiter.record_failure(ip);

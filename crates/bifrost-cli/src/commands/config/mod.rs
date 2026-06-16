@@ -2240,7 +2240,7 @@ mod coverage_boost {
             .contains("retention-days cannot exceed 7 days"));
 
         // traffic.max-records outside allowed range
-        let below_min = (MIN_TRAFFIC_MAX_RECORDS - 1).max(0);
+        let below_min = MIN_TRAFFIC_MAX_RECORDS - 1;
         let err =
             set_config_value(&client, "traffic.max-records", &below_min.to_string()).unwrap_err();
         assert!(err
@@ -2343,7 +2343,7 @@ mod coverage_boost_v2 {
             ("PUT", "_bifrost/api/whitelist/mode"),
         ] {
             Mock::given(method(m))
-                .and(path(&format!("/{p}")))
+                .and(path(format!("/{p}")))
                 .respond_with(ResponseTemplate::new(200).set_body_json(&ok_body))
                 .mount(server)
                 .await;
@@ -2521,7 +2521,10 @@ mod coverage_boost_v2 {
             .await;
 
         let result = handle_config_command(
-            Some(ConfigCommands::Show { json: true, section: Some("server".to_string()) }),
+            Some(ConfigCommands::Show {
+                json: true,
+                section: Some("server".to_string()),
+            }),
             &host,
             port,
         );

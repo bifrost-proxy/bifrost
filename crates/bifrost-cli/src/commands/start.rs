@@ -4697,7 +4697,7 @@ mod coverage_boost {
 
     use bifrost_admin::connection_registry::ConnectionRegistry;
     use bifrost_admin::{RuntimeConfig as AdminRuntimeConfig, SharedRuntimeConfig};
-    use bifrost_storage::{ConfigManager, RulesStorage, ValuesStorage};
+    use bifrost_storage::{RulesStorage, ValuesStorage};
     use parking_lot::RwLock as ParkingRwLock;
     use tempfile::tempdir;
 
@@ -5221,8 +5221,14 @@ second content
             .save(&bifrost_storage::RuleFile::new("b", content2))
             .unwrap();
         let (_rules, values) = load_stored_rules(&rules_storage, None);
-        assert_eq!(values.get("body1").map(String::as_str), Some("first content"));
-        assert_eq!(values.get("body2").map(String::as_str), Some("second content"));
+        assert_eq!(
+            values.get("body1").map(String::as_str),
+            Some("first content")
+        );
+        assert_eq!(
+            values.get("body2").map(String::as_str),
+            Some("second content")
+        );
     }
 
     #[test]
@@ -5250,8 +5256,11 @@ second content
             ))
             .unwrap();
 
-        let resolver: SharedDynamicRulesResolver =
-            StdArc::new(DynamicRulesResolver::new(Vec::new(), Vec::new(), HashMap::new()));
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
         let connection_registry = StdArc::new(ConnectionRegistry::new(true));
         let runtime_config: SharedRuntimeConfig =
             StdArc::new(tokio::sync::RwLock::new(AdminRuntimeConfig::default()));
@@ -5308,8 +5317,11 @@ second content
             ValuesStorage::with_dir(data_dir.join("values")).unwrap(),
         ));
 
-        let resolver: SharedDynamicRulesResolver =
-            StdArc::new(DynamicRulesResolver::new(Vec::new(), Vec::new(), HashMap::new()));
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
         let connection_registry = StdArc::new(ConnectionRegistry::new(true));
         let runtime_config: SharedRuntimeConfig =
             StdArc::new(tokio::sync::RwLock::new(AdminRuntimeConfig::default()));
@@ -5343,16 +5355,15 @@ second content
         let data_dir = temp_dir.path().to_path_buf();
         let config_manager = StdArc::new(ConfigManager::new(data_dir).unwrap());
 
-        let admin_state = StdArc::new(AdminState::new(0).with_config_manager_shared(
-            config_manager.clone(),
-        ));
+        let admin_state =
+            StdArc::new(AdminState::new(0).with_config_manager_shared(config_manager.clone()));
         let push_manager = StdArc::new(PushManager::new(admin_state));
 
-        let _handle =
-            spawn_admin_push_watcher_task(Some(config_manager.clone()), push_manager);
+        let _handle = spawn_admin_push_watcher_task(Some(config_manager.clone()), push_manager);
 
-        let _ = config_manager
-            .notify(ConfigChangeEvent::TlsConfigChanged(StoredTlsConfig::default()));
+        let _ = config_manager.notify(ConfigChangeEvent::TlsConfigChanged(
+            StoredTlsConfig::default(),
+        ));
         let _ = config_manager.notify(ConfigChangeEvent::SandboxConfigChanged);
         let _ = config_manager.notify(ConfigChangeEvent::SystemProxyConfigChanged);
         let _ = config_manager.notify(ConfigChangeEvent::TrayConfigChanged);
@@ -5391,11 +5402,10 @@ second content
         let rules_storage =
             bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
         rules_storage
-            .save(&bifrost_storage::RuleFile::new(
-                "disabled",
-                "example.com statusCode://200",
+            .save(
+                &bifrost_storage::RuleFile::new("disabled", "example.com statusCode://200")
+                    .with_enabled(false),
             )
-            .with_enabled(false))
             .unwrap();
         let (rules, _values) = load_stored_rules(&rules_storage, None);
         assert!(rules.is_empty());
@@ -5414,7 +5424,9 @@ second content
     #[test]
     fn rules_filesystem_event_relevant_rejects_access_events() {
         use notify::event::AccessKind;
-        assert!(!is_rules_filesystem_event_relevant(&EventKind::Access(AccessKind::Any)));
+        assert!(!is_rules_filesystem_event_relevant(&EventKind::Access(
+            AccessKind::Any
+        )));
     }
 
     #[test]

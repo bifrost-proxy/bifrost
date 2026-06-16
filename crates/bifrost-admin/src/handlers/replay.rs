@@ -3895,12 +3895,10 @@ mod coverage_boost_v2 {
 mod coverage_boost_v3 {
     use super::*;
 
-    use std::sync::Arc;
-
     use bytes::Bytes;
-    use hyper::{body::Incoming, Method, Request, StatusCode};
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
+    use hyper::{body::Incoming, Request, StatusCode};
     use hyper_util::rt::TokioIo;
     use tokio::net::TcpListener;
 
@@ -3917,7 +3915,9 @@ mod coverage_boost_v3 {
 
         let handle = tokio::spawn(async move {
             loop {
-                let Ok((stream, _peer)) = listener.accept().await else { break };
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
                 let io = TokioIo::new(stream);
                 let state_inner = state_clone.clone();
                 tokio::spawn(async move {
@@ -4140,10 +4140,8 @@ mod coverage_boost_v3 {
 
         // Create a simple rule file in the harness rules storage.
         let rules_storage = &state.rules_storage;
-        let rule = bifrost_storage::RuleFile::new(
-            "test-rule",
-            "http://example.test api://(env: local)",
-        );
+        let rule =
+            bifrost_storage::RuleFile::new("test-rule", "http://example.test api://(env: local)");
         rules_storage.save(&rule).unwrap();
 
         let (resolved, matched, _values) =
@@ -4161,24 +4159,14 @@ mod coverage_boost_v3 {
         let state = harness.state();
         let rules_storage = &state.rules_storage;
 
-        let rule_a = bifrost_storage::RuleFile::new(
-            "rule-a",
-            "http://example.test api://(env: a)",
-        );
-        let rule_b = bifrost_storage::RuleFile::new(
-            "rule-b",
-            "http://example.test api://(env: b)",
-        );
+        let rule_a = bifrost_storage::RuleFile::new("rule-a", "http://example.test api://(env: a)");
+        let rule_b = bifrost_storage::RuleFile::new("rule-b", "http://example.test api://(env: b)");
         rules_storage.save(&rule_a).unwrap();
         rules_storage.save(&rule_b).unwrap();
 
         let selected = vec!["rule-b".to_string()];
-        let (_resolved, matched, _values) = resolve_from_storage(
-            &state,
-            "http://example.test",
-            "GET",
-            Some(&selected),
-        );
+        let (_resolved, matched, _values) =
+            resolve_from_storage(&state, "http://example.test", "GET", Some(&selected));
 
         // If any rules matched, they should all come from the selected rule
         // file. When nothing matches we only care that the function does not
@@ -4243,7 +4231,10 @@ mod coverage_boost_v3 {
             .expect("traffic db store must exist");
         let rec = store.get_by_id(&id).expect("record");
 
-        assert_eq!(rec.request_content_type.as_deref(), Some("application/json"));
+        assert_eq!(
+            rec.request_content_type.as_deref(),
+            Some("application/json")
+        );
         assert_eq!(rec.request_size, applied.body.as_ref().unwrap().len());
     }
 
@@ -4277,7 +4268,10 @@ mod coverage_boost_v3 {
             ("Content-Type".to_string(), "text/plain".to_string()),
             ("x-custom".to_string(), "42".to_string()),
         ];
-        assert_eq!(get_header_value(&headers, "content-type"), Some("text/plain"));
+        assert_eq!(
+            get_header_value(&headers, "content-type"),
+            Some("text/plain")
+        );
         assert_eq!(get_header_value(&headers, "X-CUSTOM"), Some("42"));
     }
 
@@ -4343,7 +4337,10 @@ mod coverage_boost_v3 {
 
     #[test]
     fn replay_target_authority_changed_falls_back_to_url_comparison_on_invalid_urls() {
-        assert!(replay_target_authority_changed("not a url", "http://example.test"));
+        assert!(replay_target_authority_changed(
+            "not a url",
+            "http://example.test"
+        ));
         assert!(!replay_target_authority_changed("same", "same"));
     }
 
