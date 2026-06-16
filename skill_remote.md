@@ -7,7 +7,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 
 # Bifrost Remote
 
-本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成四类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
+本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成五类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端长任务续接**（`job`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
 
 ---
 
@@ -482,7 +482,27 @@ bifrost remote conn down --all               # 所有 client
 bifrost remote conn down --grant-id <gid>    # 指定 grant
 ```
 
-### 4.6 连接漂移 / 流会话错位的恢复
+### 4.6 连接断开、长任务续接与连接漂移恢复
+
+长任务（build/test/CI watch/迁移）必须默认使用 `exec --detach`。这会把远端进程生命周期和 caller 当前这条网络连接解耦：即使本地终端、SSE stream 或 relay 短连接断开，只要远端 call 仍在，caller 都可以凭 `call_id` + `relay_token` 重新接上。
+
+```bash
+# 启动时保存这两个字段
+bifrost remote exec --detach --cwd <repo> \
+  --timeout-ms 1800000 --shell-text "cargo test 2>&1"
+
+# 断开/切线程/重启 CLI 后，优先用 job 命令恢复观察
+bifrost remote job status <call_id> --relay-token <token>
+bifrost remote job logs <call_id> --relay-token <token> --output-file ./test.log
+bifrost remote job watch <call_id> --relay-token <token> --output-file ./test.log
+```
+
+恢复判断：
+
+- `status` 能返回 `running/exited + exit_code` 时，不要重新启动同一长任务；继续 `logs` / `watch`。
+- `watch` 会跟到远端终态，并用真实远端 exit code 作为本地退出码。
+- `logs` / `watch` 遇到 digest mismatch 时，先重新执行同一个 `job logs/watch` 或查看目标端日志；只有你已独立校验输出完整性时，才考虑 `--no-verify-digest`。
+- 只有 `grant revoked`、`authorization expired`、transport identity 变化、relay reusable authorization 变化等连接身份问题，才走下面的 `conn down/up` 重建连接流程。
 
 长会话或服务端重启后，caller 侧有时会看到这类错误：
 
