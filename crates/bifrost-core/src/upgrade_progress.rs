@@ -246,7 +246,10 @@ mod tests {
     #[test]
     fn clear_progress_removes_file() {
         let dir = temp_dir();
-        write_progress(&dir, &UpgradeProgress::new(UpgradePhase::Installing, "Installing"));
+        write_progress(
+            &dir,
+            &UpgradeProgress::new(UpgradePhase::Installing, "Installing"),
+        );
         assert!(progress_file_path(&dir).exists());
         clear_progress(&dir);
         assert!(!progress_file_path(&dir).exists());
@@ -277,14 +280,14 @@ mod tests {
 
         // Old active => stale.
         let mut old = UpgradeProgress::new(UpgradePhase::Downloading, "x");
-        old.updated_at = (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 10))
-            .to_rfc3339();
+        old.updated_at =
+            (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 10)).to_rfc3339();
         assert!(is_stale(&old, DEFAULT_STALE_SECS));
 
         // Old but terminal => never stale.
         let mut done = UpgradeProgress::new(UpgradePhase::Completed, "x");
-        done.updated_at = (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 10))
-            .to_rfc3339();
+        done.updated_at =
+            (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 10)).to_rfc3339();
         assert!(!is_stale(&done, DEFAULT_STALE_SECS));
 
         // Unparseable timestamp on active => stale.

@@ -13,7 +13,9 @@ use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tracing::warn;
 
-use super::{error_response, json_response, json_response_with_status, method_not_allowed, BoxBody};
+use super::{
+    error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
+};
 use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
@@ -370,10 +372,7 @@ mod tests {
         let mut completed = UpgradeProgress::new(UpgradePhase::Completed, "Done");
         completed.updated_at =
             (Utc::now() - chrono::Duration::seconds(DEFAULT_STALE_SECS + 300)).to_rfc3339();
-        assert_eq!(
-            normalize_progress(completed).phase,
-            UpgradePhase::Completed
-        );
+        assert_eq!(normalize_progress(completed).phase, UpgradePhase::Completed);
 
         let idle = UpgradeProgress::idle();
         assert_eq!(normalize_progress(idle).phase, UpgradePhase::Idle);

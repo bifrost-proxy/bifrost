@@ -272,10 +272,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
         if should_refresh_menu {
             let snapshot = clone_menu_data_snapshot(&menu_data);
-            let upgrade_status = upgrade_status_label(
-                new_operation,
-                upgrade_percent.load(Ordering::Relaxed),
-            );
+            let upgrade_status =
+                upgrade_status_label(new_operation, upgrade_percent.load(Ordering::Relaxed));
             let status_label = upgrade_status
                 .as_deref()
                 .or_else(|| operation_status_label(new_operation));
