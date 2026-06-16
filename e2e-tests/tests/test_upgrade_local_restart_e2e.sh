@@ -335,6 +335,7 @@ PY
     HOME="$test_home_for_process" \
     USERPROFILE="$test_home_for_process" \
     BIFROST_INSTALL_SKILL_SOURCE=embedded \
+    BIFROST_INSTALL_SKILL_DIR="$(bifrost_process_path "${test_home}/.codex/skills/bifrost")" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
