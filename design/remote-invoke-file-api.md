@@ -609,7 +609,7 @@ Directories still use platform rename semantics because directories cannot be ha
 
 ### CLI contract coverage
 
-The hermetic CLI contract test now treats the remote file surface as fourteen subcommands and verifies `read-many`, `outline`, and the `move` safety flags in addition to the older read/write/search/patch commands.
+The hermetic CLI contract test now treats the remote file surface as fifteen subcommands and verifies `read-many`, `scratch-dir`, `outline`, and the `move` safety flags in addition to the older read/write/search/patch commands.
 
 ## 2026-06-16 coding-agent UX hardening
 

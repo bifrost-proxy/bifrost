@@ -633,7 +633,7 @@ bash e2e-tests/tests/test_remote_file_api_e2e.sh
 ```
 
 **期望**：
-- root help 列出 fourteen subcommands，包括 `read-many` 和 `outline`。
+- root help 列出 fifteen subcommands，包括 `read-many`、`scratch-dir` 和 `outline`。
 - `read-many --help` 包含 `--path` / `--max-bytes` / `--allow-binary`。
 - `outline --help` 包含 `--max-symbols` / `--max-bytes`。
 - `move --help` 包含 `--base-sha256` / `--allow-overwrite`。

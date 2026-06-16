@@ -5,7 +5,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 # Remote File API — full CLI contract test.
 #
 # This test verifies that ALL `bifrost remote file` subcommands
-# (fourteen subcommands) are wired correctly and their --help text
+# (fifteen subcommands) are wired correctly and their --help text
 # mentions the documented flags. It is intentionally hermetic
 # (no relay, no daemon, no network): it only invokes the local
 # binary's help output.
@@ -34,6 +34,23 @@ fi
 
 PASSED=0
 FAILED=0
+REMOTE_FILE_SUBCOMMANDS=(
+    read
+    read-many
+    scratch-dir
+    list
+    stat
+    glob
+    find
+    hash
+    outline
+    write
+    edit
+    mkdir
+    move
+    delete
+    patch
+)
 
 header() {
     echo ""
@@ -71,17 +88,17 @@ ensure_binary() {
 # ---------------------------------------------------------------------------
 
 test_remote_file_root_help() {
-    header "bifrost remote file --help lists all fourteen subcommands"
+    header "bifrost remote file --help lists all fifteen subcommands"
     local out
     out=$(run_bifrost remote file --help)
     local missing=""
-    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
+    for sub in "${REMOTE_FILE_SUBCOMMANDS[@]}"; do
         if ! output_has "$out" -qiE "(^|[[:space:]])$sub([[:space:]]|$)"; then
             missing+=" $sub"
         fi
     done
     if [[ -z "$missing" ]]; then
-        pass "all fourteen subcommands present"
+        pass "all fifteen subcommands present"
     else
         fail "missing subcommands:$missing"
         echo "$out" | head -50
@@ -181,6 +198,20 @@ test_read_many_help() {
         pass "read-many --help surface ok"
     else
         fail "read-many --help missing required flag"
+        echo "$out" | head -30
+    fi
+}
+
+test_scratch_dir_help() {
+    header "remote file scratch-dir --help has --name / --cwd / --output"
+    local out
+    out=$(run_bifrost remote file scratch-dir --help)
+    if output_has "$out" -q -- "--name" \
+       && output_has "$out" -q -- "--cwd" \
+       && output_has "$out" -q -- "--output"; then
+        pass "scratch-dir --help surface ok"
+    else
+        fail "scratch-dir --help missing required flag"
         echo "$out" | head -30
     fi
 }
@@ -289,9 +320,9 @@ test_patch_help() {
 # ---------------------------------------------------------------------------
 
 test_output_json_supported() {
-    header "all fourteen subcommands accept --output (human | json)"
+    header "all fifteen subcommands accept --output (human | json)"
     local any_fail=0
-    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
+    for sub in "${REMOTE_FILE_SUBCOMMANDS[@]}"; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! output_has "$out" -qi -- "--output\|human\|json"; then
@@ -300,14 +331,14 @@ test_output_json_supported() {
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "fourteen subcommands --help all mention --output"
+        pass "fifteen subcommands --help all mention --output"
     fi
 }
 
 test_all_subcommands_have_cwd() {
-    header "all fourteen subcommands accept --cwd"
+    header "all fifteen subcommands accept --cwd"
     local any_fail=0
-    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
+    for sub in "${REMOTE_FILE_SUBCOMMANDS[@]}"; do
         local out
         out=$(run_bifrost remote file "$sub" --help)
         if ! output_has "$out" -qi -- "--cwd"; then
@@ -316,7 +347,7 @@ test_all_subcommands_have_cwd() {
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "fourteen subcommands --help all mention --cwd"
+        pass "fifteen subcommands --help all mention --cwd"
     fi
 }
 
@@ -603,14 +634,14 @@ test_subcommand_about_descriptions() {
     local root_out
     root_out=$(run_bifrost remote file --help)
     local any_fail=0
-    for sub in read read-many list stat glob find hash outline write edit mkdir move delete patch; do
+    for sub in "${REMOTE_FILE_SUBCOMMANDS[@]}"; do
         if ! output_has "$root_out" -qiE "$sub[[:space:]]"; then
             fail "subcommand $sub not visible in root help"
             any_fail=1
         fi
     done
     if [[ $any_fail -eq 0 ]]; then
-        pass "all fourteen subcommands visible in root help with about text"
+        pass "all fifteen subcommands visible in root help with about text"
     fi
 }
 
@@ -625,6 +656,7 @@ main() {
     test_remote_file_root_help
     test_read_help
     test_read_many_help
+    test_scratch_dir_help
     test_list_help
     test_stat_help
     test_glob_help
