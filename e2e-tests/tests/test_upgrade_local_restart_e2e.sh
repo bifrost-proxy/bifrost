@@ -355,7 +355,9 @@ PY
         "$upgrade_log" \
         'Detected running Bifrost proxy' \
         "upgrade output detects running proxy" || return 1
-    assert_post_upgrade_skills_installed "$test_home" || return 1
+    if ! is_windows; then
+        assert_post_upgrade_skills_installed "$test_home" || return 1
+    fi
     assert_upgrade_log_contains \
         "$upgrade_log" \
         'Stopping current proxy' \
@@ -387,6 +389,12 @@ PY
         _log_fail "new daemon admin ready after upgrade" "reachable" "unreachable"
         return 1
     }
+    if is_windows; then
+        # Windows self-replacement runs in a deferred helper after the upgrade
+        # process exits. The helper installs skills before starting the new
+        # daemon, so Admin readiness is the synchronization point.
+        assert_post_upgrade_skills_installed "$test_home" || return 1
+    fi
 
     local runtime_json_path
     runtime_json_path="${TEST_DATA_DIR}/runtime.json"
