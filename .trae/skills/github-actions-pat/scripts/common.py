@@ -234,6 +234,8 @@ def extract_snippets(text: str) -> List[str]:
 def classify_error(text: str) -> str:
     """Best-effort root-cause bucket."""
     t = text.lower()
+    if "github-actions-log-unavailable" in t or "hosted runner loses communication" in t:
+        return "github actions runner/log unavailable"
     if "panicked at" in t or ("thread '" in t and "panicked" in t):
         return "runtime panic (likely test failure)"
     if re.search(r"error\[e\d+\]", t):

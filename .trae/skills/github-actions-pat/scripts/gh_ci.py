@@ -83,17 +83,37 @@ def _fetch_job_log(token: str, job_id: int) -> str:
     except urllib.error.HTTPError as e:
         if e.code in (301, 302, 303, 307, 308):
             signed_url = e.headers.get("Location")
+        elif e.code == 404:
+            return (
+                "[github-actions-log-unavailable]\n"
+                f"GitHub returned HTTP 404 while fetching logs for job {job_id}.\n"
+                "The job may have ended before its log blob was materialized, "
+                "or the hosted runner may have lost communication with GitHub.\n"
+            )
         else:
             raise
 
     if not signed_url:
-        return ""
+        return (
+            "[github-actions-log-unavailable]\n"
+            f"GitHub did not return a signed log URL for job {job_id}.\n"
+        )
     # Fetch signed URL without auth — Azure Blob refuses Authorization header
     req2 = urllib.request.Request(
         signed_url, headers={"User-Agent": "bifrost-ci-inspector/1.0"}
     )
-    with urllib.request.urlopen(req2) as resp2:
-        return resp2.read().decode("utf-8", errors="replace")
+    try:
+        with urllib.request.urlopen(req2) as resp2:
+            return resp2.read().decode("utf-8", errors="replace")
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            return (
+                "[github-actions-log-unavailable]\n"
+                f"GitHub returned HTTP 404 for the signed log blob of job {job_id}.\n"
+                "This is commonly seen when a hosted runner loses communication "
+                "and GitHub records only a job annotation instead of a normal log.\n"
+            )
+        raise
 
 
 def _failed_steps(job: Dict[str, Any]) -> List[Dict[str, Any]]:

@@ -64,4 +64,6 @@
 
 | 日期 | 用例 | 操作 | 结果 |
 | --- | --- | --- | --- |
-| 2026-06-16 | TC-CFH-01 | 新增 `scripts/ci/ci-flake-hunt-10x.md` 以命中 PR paths 过滤，并准备重新推送 PR #249 | 待执行：推送后通过 GitHub Actions API 验证 CI run 出现 |
+| 2026-06-16 | TC-CFH-01 | 推送 `ff68f905` 后执行 `gh pr checks 249 --watch=false` 与 `gh_ci.py branch codex/ci-flake-hunt-10x --any-status` | 通过：PR #249 出现 CI run `27580795070`，checks 覆盖 Rust Format、Clippy、Dependency Audit、Unit & Integration、Coverage、E2E/Build 矩阵 |
+| 2026-06-16 | TC-CFH-02 | 对 run `27580795070` attempt `2` 执行 `watch_jobs.py` fail-fast 看护 | 发现不稳定因素：Windows `E2E Rules (x86_64-pc-windows-msvc, shard 4/4)` 运行约 47 分钟后 hosted runner lost communication；GitHub job log blob 返回 404，原 PAT 脚本 traceback，需修复后重试 |
+| 2026-06-16 | TC-CFH-02 | 修复 PAT 日志 404 容错后，对同一失败 run 执行 `watch_jobs.py 27580795070` | 通过：命令 exit 2，输出 `github actions runner/log unavailable` 结构化摘要，不再 traceback |

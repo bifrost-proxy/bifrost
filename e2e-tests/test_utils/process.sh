@@ -21,8 +21,43 @@ is_windows() {
 
 _win_stop_process() {
     local pid=$1
+    local win_pid
     # Use canonical taskkill flags; `//F` can be rejected in some environments.
-    taskkill.exe /F /PID "$pid" >/dev/null 2>&1 || true
+    while IFS= read -r win_pid; do
+        [[ -n "$win_pid" ]] || continue
+        taskkill.exe /F /PID "$win_pid" >/dev/null 2>&1 || true
+    done < <(_win_pid_candidates "$pid")
+}
+
+_win_pid_candidates() {
+    local pid="$1"
+    local seen=" "
+    local candidate
+
+    _emit_candidate() {
+        local value="$1"
+        value="$(printf '%s' "$value" | tr -d '\r[:space:]')"
+        [[ "$value" =~ ^[0-9]+$ ]] || return 0
+        if [[ "$seen" != *" $value "* ]]; then
+            seen+="$value "
+            printf '%s\n' "$value"
+        fi
+    }
+
+    # Git Bash/MSYS exposes POSIX-style PIDs to shell `$!`, while taskkill.exe
+    # expects native Windows PIDs. Prefer ps-reported WINPID when available and
+    # keep the original PID as a fallback for environments where both match.
+    if command -v ps >/dev/null 2>&1; then
+        while IFS= read -r candidate; do
+            _emit_candidate "$candidate"
+        done < <(ps -p "$pid" -o winpid= 2>/dev/null || true)
+
+        while IFS= read -r candidate; do
+            _emit_candidate "$candidate"
+        done < <(ps -W 2>/dev/null | awk -v p="$pid" '$1 == p { print $4 }' || true)
+    fi
+
+    _emit_candidate "$pid"
 }
 
 _win_find_pid_on_port() {
@@ -64,7 +99,12 @@ kill_process_tree() {
         return 0
     fi
     if is_windows; then
-        taskkill.exe /F /T /PID "$pid" >/dev/null 2>&1 || true
+        local win_pid
+        kill "$pid" 2>/dev/null || true
+        while IFS= read -r win_pid; do
+            [[ -n "$win_pid" ]] || continue
+            taskkill.exe /F /T /PID "$win_pid" >/dev/null 2>&1 || true
+        done < <(_win_pid_candidates "$pid")
     else
         kill -- -"$pid" 2>/dev/null || kill -9 "$pid" 2>/dev/null || true
     fi
