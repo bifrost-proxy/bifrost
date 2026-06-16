@@ -64,6 +64,10 @@ fail() {
   cat "$LOG_FILE" >&2 2>/dev/null || true
   echo "--- sse ---" >&2
   cat "$SSE_FILE" >&2 2>/dev/null || true
+  echo "--- disconnect sse ---" >&2
+  cat "$DISCONNECT_SSE_FILE" >&2 2>/dev/null || true
+  echo "--- external sse ---" >&2
+  cat "$EXTERNAL_SSE_FILE" >&2 2>/dev/null || true
   exit 1
 }
 
@@ -213,6 +217,13 @@ for _ in {1..40}; do
   fi
   sleep 0.25
 done
+for _ in {1..40}; do
+  if grep -q "run_started" "$DISCONNECT_SSE_FILE"; then
+    break
+  fi
+  sleep 0.25
+done
+grep -q "run_started" "$DISCONNECT_SSE_FILE" || fail "disconnect stream did not emit run_started"
 kill "$DISCONNECT_CURL_PID" >/dev/null 2>&1 || true
 DISCONNECT_CURL_PID=""
 for _ in {1..40}; do
