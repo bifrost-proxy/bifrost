@@ -445,16 +445,14 @@ fn apply_worktree_tool_signal(
                 *work_dir = std::path::PathBuf::from(new_dir);
             }
         }
-        "exit_worktree" => {
-            if result.starts_with("EXIT_WORKTREE:") {
-                if let Some(original) = session.exit_worktree_dir() {
-                    info!(
-                        session_key = %session.session_key,
-                        restored_dir = %original,
-                        "exiting worktree, restored original directory"
-                    );
-                    *work_dir = std::path::PathBuf::from(original);
-                }
+        "exit_worktree" if result.starts_with("EXIT_WORKTREE:") => {
+            if let Some(original) = session.exit_worktree_dir() {
+                info!(
+                    session_key = %session.session_key,
+                    restored_dir = %original,
+                    "exiting worktree, restored original directory"
+                );
+                *work_dir = std::path::PathBuf::from(original);
             }
         }
         _ => {}

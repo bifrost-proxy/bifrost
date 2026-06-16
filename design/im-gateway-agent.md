@@ -1064,6 +1064,8 @@ ChatGPT Web Runner 的 DOM fallback 不能只识别传统 `<img>` 生成图。Ch
 
 刷新页面或关闭浏览器响应流不能代表用户停止 Agent Loop。`/_bifrost/api/agent/chat/stream` 和 `/_bifrost/api/im-gateway/chat/stream` 的 SSE/NDJSON client disconnect 只停止向该 HTTP 响应写入增量，不调用 `request_stop` 或 external CLI stop marker；后台 turn/run 继续执行并在完成后归还 session / 记录 runner state。只有显式点击停止当前轮次或发送 `/stop`，才允许写入 stop signal。
 
+多线程并发运行时，WebView 切换会话必须把“旧流事件”和“旧流收尾”都隔离掉。切换线程时前端用 `AbortController` 中止当前 HTTP stream，并在 `onEvent`、`onFinal`、`catch` 和成功收尾路径中用选中 `sessionKey` 做 guard，丢弃旧会话的延迟事件。即使旧 stream 因 abort 进入 `finally`，也不能无条件 `setRunning(false)` 或清空 collaboration mode；这些状态只能在当前选中会话仍是发起 stream 的会话时更新，避免 A 线程收尾把已经切到的 B 线程按钮、状态 tag 或输入模式打乱。
+
 运行中的输入框不能禁用。无输入时，输入框内右下角主按钮切换为 Stop；有输入时，内置 Bifrost Agent 展示 Guide / Queue 模式切换，默认 Guide 注入当前 loop，也可选择 Queue 等当前轮结束后处理；Codex、ChatGPT Web 和其他外部 Runner 不支持运行中 guide，默认只排队。Queue 状态显示在输入框上方，支持多条追加与删除；当 Runner 支持 guide 时，队列项可一键改为立即 Guide。Queue/Remove 是本地交互状态，不应插入 MessageList，也不应作为 assistant 消息持久化；只有排队项被实际 drain 成下一轮输入后，才进入消息列表和历史。
 
 Composer 与 MessageList 共用同一个滚动容器。输入区使用 sticky/floating 样式贴在对话容器底部，短消息时仍位于容器底部，长历史时随同一滚动容器保持底部悬浮；输入区不再通过顶部硬边框与消息列表切开。

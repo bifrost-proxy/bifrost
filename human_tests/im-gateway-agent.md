@@ -2859,3 +2859,21 @@ rm -rf ./.bifrost-test
 - **清理步骤**:
   - 停止 mock Feishu 服务；删除临时数据目录。
 - **执行记录（2026-06-13）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture`，28 个 progress card 相关测试全部通过。新增覆盖 `progress_event_rolls_over_when_feishu_card_entity_exceeds_limit` 和 `finish_rolls_over_when_final_feishu_card_entity_exceeds_limit`：Feishu mock 第 1 次整卡更新返回 `code=300305 element exceeds the limit` 后，registry 新建并切换到 `card_2/om_2`，旧卡 freeze/settings close 为 best-effort，DELETE 调用次数保持 0，final `message_info` 指向新卡。
+
+### TC-IMA-151: WebView 多线程切换后旧流收尾不污染当前线程状态
+
+- **前置条件**:
+  - 使用当前源码或 Playwright 管理端测试环境。
+  - Agent Chat 中至少有两个 active 线程，A 线程正在通过内置 Bifrost Agent stream 发送请求，B 线程也处于 running 或可恢复状态。
+- **操作步骤**:
+  1. 打开 Agent Chat 并选中 A 线程。
+  2. 发送一条会保持 stream 未完成的消息，确认 A 的 `POST /_bifrost/api/agent/chat/stream` 已开始。
+  3. 在 A stream 完成前切换到 B 线程。
+  4. 让 A stream 被 abort 或延迟返回。
+  5. 观察 B 线程顶部状态、发送按钮、输入模式和消息区。
+- **预期结果**:
+  - A 的延迟 `onEvent`、`onFinal`、错误处理和 `finally` 都不能写入 B 的消息区或状态。
+  - 如果 B 是 running，发送按钮仍保持 Stop 语义，不被 A 的 `finally setRunning(false)` 改成 Send。
+  - B 的 queue/guide 输入状态不继承 A 的 submitting 标记。
+  - B 消息区不出现 A 的 assistant delta、final response 或错误 toast。
+- **本次执行结果**: 待执行。
