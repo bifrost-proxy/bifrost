@@ -638,3 +638,25 @@ bash e2e-tests/tests/test_remote_file_api_e2e.sh
 - `outline --help` 包含 `--max-symbols` / `--max-bytes`。
 - `move --help` 包含 `--base-sha256` / `--allow-overwrite`。
 - 缺少 required 参数时 `read-many` 与 `outline` 均被 CLI 拒绝。
+
+### TC-P1-SCRATCH-01 remote file scratch-dir 与 policy deny 降级提示
+
+**步骤**：
+1. 在授权仓库 cwd 下执行：
+   ```bash
+   bifrost remote file scratch-dir --cwd <测试根目录>
+   ```
+2. 在 policy 未允许 `read_many` 的环境执行：
+   ```bash
+   bifrost remote file read-many --path ok.txt --cwd <测试根目录>
+   ```
+3. 尝试读取或写入 policy roots 外路径（例如未授权的 `/tmp/x`）。
+
+**期望**：
+- 第 1 步返回或创建 `<测试根目录>/.bifrost-tmp`，底层仍受 `file.mkdir` 写权限校验。
+- 第 2 步错误提示包含 `file.op_not_permitted`，并提示可降级为逐个 `remote file read` 或让目标端增加 `read_many` op。
+- 第 3 步错误提示包含 `file.out_of_scope`，并提示 `/tmp` 可能解析到 `/private/tmp`，建议使用 `remote file scratch-dir` 或调整 FileAccessPolicy。
+
+**实际结果（2026-06-16）**：
+- 执行 `cargo test -p bifrost-cli remote::tests::test_build_remote_file_scratch_dir_uses_policy_checked_mkdir --lib` 通过，确认 `scratch-dir` 映射为 policy-gated `file.mkdir`，参数包含 `path=.bifrost-tmp`、`parents=true`、`cwd=<repo>`。
+- 执行 `cargo test -p bifrost-cli remote:: --lib --no-run` 通过，确认新增 CLI surface 测试编译通过。

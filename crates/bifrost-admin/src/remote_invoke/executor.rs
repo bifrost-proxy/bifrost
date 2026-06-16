@@ -5405,6 +5405,28 @@ mod helper_formatting_tests {
     }
 
     #[test]
+    fn timeout_policy_note_reports_policy_cap() {
+        let capped = effective_timeouts(Some(900_000), Some(60_000));
+        assert_eq!(
+            timeout_policy_note(capped),
+            " requested=900000ms, capped_by_policy=60000ms"
+        );
+
+        let uncapped = effective_timeouts(Some(30_000), Some(60_000));
+        assert_eq!(
+            timeout_policy_note(uncapped),
+            " requested=30000ms, policy_cap=60000ms"
+        );
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn shell_text_cwd_prefix_quotes_and_forces_cd_inside_shell() {
+        let text = prefix_shell_text_with_cwd("/Users/me/work repo", "pwd");
+        assert_eq!(text, "cd -- '/Users/me/work repo' && pwd");
+    }
+
+    #[test]
     fn dedupe_shell_exec_modes_preserves_order_and_removes_duplicates() {
         let mut modes = vec![
             ShellExecMode::ArgvExec,

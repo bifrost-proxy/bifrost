@@ -1321,6 +1321,7 @@ export default function AgentChatSection() {
       setSessionKey(thread.session_key);
       setHistoryPath(thread.history_path);
       setDraft("");
+      setSupplementSubmitting(false);
       setTelemetry(telemetryFromThread(thread));
       setComposerMode(undefined);
       setActiveCollaborationMode(undefined);
@@ -1505,7 +1506,9 @@ export default function AgentChatSection() {
           }
         },
       });
-      refreshThreads();
+      if (selectedSessionKeyRef.current === submitSessionKey) {
+        refreshThreads();
+      }
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
       if (selectedSessionKeyRef.current !== submitSessionKey) return;
@@ -1519,7 +1522,9 @@ export default function AgentChatSection() {
       }
       antdMessage.error(text);
     } finally {
-      setSupplementSubmitting(false);
+      if (selectedSessionKeyRef.current === submitSessionKey) {
+        setSupplementSubmitting(false);
+      }
     }
   };
 
@@ -2123,9 +2128,11 @@ export default function AgentChatSection() {
           applyFinalResponse(response);
         },
       });
-      setHistoryPath(undefined);
-      setQueuedInputs([]);
-      setSearchParamsForActiveSession();
+      if (selectedSessionKeyRef.current === sendSessionKey) {
+        setHistoryPath(undefined);
+        setQueuedInputs([]);
+        setSearchParamsForActiveSession();
+      }
       refreshThreads();
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError") return;
@@ -2174,7 +2181,7 @@ export default function AgentChatSection() {
       );
       setThreads((prev) =>
         prev.map((thread) =>
-          thread.session_key === sessionKey
+          thread.session_key === sendSessionKey
             ? {
                 ...thread,
                 status: "ended",
@@ -2188,8 +2195,13 @@ export default function AgentChatSection() {
       );
       antdMessage.error(text);
     } finally {
-      setRunning(false);
-      setActiveCollaborationMode(undefined);
+      if (selectedSessionKeyRef.current === sendSessionKey) {
+        setRunning(false);
+        setActiveCollaborationMode(undefined);
+      }
+      if (streamAbortRef.current === abortController) {
+        streamAbortRef.current = null;
+      }
     }
   };
 

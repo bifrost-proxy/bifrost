@@ -3366,10 +3366,8 @@ mod worktree_signal_tests {
 
     #[test]
     fn enter_worktree_signal_updates_session_work_dir_immediately() {
-        let mut session = AgentSession::new_with_work_dir(
-            "worktree-signal",
-            Some("/tmp/main-repo".to_string()),
-        );
+        let mut session =
+            AgentSession::new_with_work_dir("worktree-signal", Some("/tmp/main-repo".to_string()));
         let mut work_dir = std::path::PathBuf::from("/tmp/main-repo");
 
         apply_worktree_tool_signal(
@@ -3382,7 +3380,10 @@ mod worktree_signal_tests {
 
         assert_eq!(work_dir, std::path::PathBuf::from("/tmp/main-repo-feature"));
         assert_eq!(session.work_dir.as_deref(), Some("/tmp/main-repo-feature"));
-        assert_eq!(session.worktree_original_dir.as_deref(), Some("/tmp/main-repo"));
+        assert_eq!(
+            session.worktree_original_dir.as_deref(),
+            Some("/tmp/main-repo")
+        );
     }
 
     #[test]

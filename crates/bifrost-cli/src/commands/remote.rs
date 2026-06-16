@@ -6600,7 +6600,10 @@ mod tests {
         assert_eq!(built.kind, CommandKind::File);
         assert_eq!(built.command.as_deref(), Some("file.mkdir"));
         let args: Value = serde_json::from_str(built.args_json.as_deref().unwrap()).unwrap();
-        assert_eq!(args.get("path").and_then(Value::as_str), Some(".bifrost-tmp"));
+        assert_eq!(
+            args.get("path").and_then(Value::as_str),
+            Some(".bifrost-tmp")
+        );
         assert_eq!(args.get("cwd").and_then(Value::as_str), Some("/repo"));
         assert_eq!(args.get("parents").and_then(Value::as_bool), Some(true));
     }
