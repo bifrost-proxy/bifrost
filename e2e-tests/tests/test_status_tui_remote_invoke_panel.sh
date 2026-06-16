@@ -58,13 +58,25 @@ wait_for_admin_api() {
     return 1
 }
 
+wait_for_remote_invoke_endpoint() {
+    local path="$1"
+    local waited=0
+    while [[ "$waited" -lt 80 ]]; do
+        if env NO_PROXY="*" no_proxy="*" curl -fsS \
+            "http://127.0.0.1:${ADMIN_PORT}${path}" >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.25
+        waited=$((waited + 1))
+    done
+    echo "remote-invoke endpoint did not become ready: ${path}" >&2
+    return 1
+}
+
 assert_remote_invoke_api_ready() {
-    env NO_PROXY="*" no_proxy="*" curl -fsS \
-        "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/remote-invoke/status" >/dev/null
-    env NO_PROXY="*" no_proxy="*" curl -fsS \
-        "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/remote-invoke/grants" >/dev/null
-    env NO_PROXY="*" no_proxy="*" curl -fsS \
-        "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/remote-invoke/calls?limit=20" >/dev/null
+    wait_for_remote_invoke_endpoint "/_bifrost/api/remote-invoke/status"
+    wait_for_remote_invoke_endpoint "/_bifrost/api/remote-invoke/grants"
+    wait_for_remote_invoke_endpoint "/_bifrost/api/remote-invoke/calls?limit=20"
 }
 
 assert_tui_remote_invoke_panel() {
