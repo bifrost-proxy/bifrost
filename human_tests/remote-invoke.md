@@ -5057,3 +5057,43 @@ rm -rf /tmp/bifrost-remote-overload.*
 - `cargo test -p bifrost-admin test_find_call_started_at_returns_latest_matching_call -- --nocapture`：✅ PASS
 - `bash e2e-tests/tests/test_remote_invoke_e2e.sh`：✅ PASS
 - `PATH=<USER_HOME>/.local/share/mise/installs/node/22.22.0/bin:$PATH bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：✅ PASS
+
+---
+
+## TC-RI-TUI-自适应布局（status TUI Remote Invoke 标签页随窗口自适应）
+
+> 模块：`bifrost status` 终端 TUI 的 `Remote Invoke` 标签页
+> 设计文档：`design/remote-invoke-status-tui-adaptive.md`
+
+### 前置条件
+
+- 已编译 bifrost 二进制（`cargo build --bin bifrost`）。
+- Bifrost 已 `start`，且存在若干 Remote Invoke grants 与历史调用记录（数量建议 > 15 条，
+  以便观察行数自适应）。命令预览中包含较长命令（如带完整路径的 `cd ... && gh run view ...`）。
+- 启动时携带 `--no-system-proxy`，避免修改系统代理。
+
+### 测试用例
+
+| 用例编号 | 用例名称 | 操作步骤 | 预期结果 |
+|---------|---------|---------|---------|
+| TC-RI-TUI-01 | 大窗口行数自适应 | 1. 将终端窗口拉到很大（如高度 ≥ 40 行）2. 运行 `bifrost status` 3. 按 →/← 切到 `Remote Invoke` 标签 | `Connected Clients` 与 `Recent Commands` 表格展示的行数明显多于 12 行（在数据足够时），下方不再出现大片空白 |
+| TC-RI-TUI-02 | 宽窗口内容更完整 | 在很宽的终端（如宽度 ≥ 200 列）查看 Remote Invoke 标签 | `Latest Command` / `Command` / `Latest:` 摘要行展示的命令文本明显比窄窗口更完整，省略号显著减少；命令列充分利用了右侧此前的空白空间 |
+| TC-RI-TUI-03 | 窄/矮窗口稳定可读 | 将终端缩到很窄很矮（如 60 列 × 12 行）再查看 Remote Invoke 标签 | TUI 不崩溃、不 panic；命令列仍保留可读的最小宽度（约 18 字符）并以 `...` 截断；行数随高度收缩 |
+| TC-RI-TUI-04 | 标题计数语义不变 | 对比窗口大小变化前后两张表的标题 | 标题中的 `Connected Clients (N)` / `Recent Commands (N)` 中的 N 始终是全量记录总数，不随可见行数变化 |
+
+### 清理
+
+- 关闭 TUI（`q`），按需 `bifrost stop`。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-TUI-01 | ⏳ 待在 macOS 设备执行 | 沙箱无 Rust 工具链与真实终端，需在 Mac 上编译运行后核对 |
+| TC-RI-TUI-02 | ⏳ 待在 macOS 设备执行 | 同上 |
+| TC-RI-TUI-03 | ⏳ 待在 macOS 设备执行 | 同上 |
+| TC-RI-TUI-04 | ⏳ 待在 macOS 设备执行 | 同上 |
+
+> 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `flex_column_budget`）已抽成纯函数，
+> 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分需在
+> 具备终端与 Rust 工具链的 macOS 设备上按上述用例真实核对。

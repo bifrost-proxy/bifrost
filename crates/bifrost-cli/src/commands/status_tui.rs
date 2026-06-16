@@ -967,6 +967,61 @@ fn truncate_text(value: &str, max_chars: usize) -> String {
     output
 }
 
+/// 计算一张带边框、带表头的表格内部最多能展示多少条数据行。
+///
+/// `area_height` 为表格组件（含边框）的总高度；表格上下边框各占 1 行，
+/// 表头本身占 `header_lines` 行（含 `bottom_margin`）。剩余高度即可用于数据行。
+/// 返回值同时受 `max_rows` 上限约束，避免一次性渲染过多历史记录。
+fn visible_table_rows(area_height: u16, header_lines: u16, max_rows: usize) -> usize {
+    // 上下边框各 1 行。
+    let border_rows = 2u16;
+    let usable = area_height
+        .saturating_sub(border_rows)
+        .saturating_sub(header_lines);
+    (usable as usize).min(max_rows)
+}
+
+/// 根据表格实际可用宽度，计算某个弹性列（`Constraint::Min`）真正能拿到的字符宽度，
+/// 用于在调用 `truncate_text` 前按窗口尺寸自适应截断阈值。
+///
+/// - `area_width`：表格组件总宽度（含边框）。
+/// - `fixed_total`：所有定长列（`Constraint::Length`）的宽度之和。
+/// - `flex_mins`：所有弹性列各自声明的最小宽度。
+/// - `total_columns`：表格总列数（定长 + 弹性），用于估算列间隔。
+/// - `flex_index`：目标弹性列在 `flex_mins` 中的下标。
+///
+/// 弹性列会平分扣除定长列、边框与列间隔后的剩余宽度；当空间不足时回退到各自的
+/// 最小宽度。这样窗口越大，命令/Call ID 等列能展示的内容越完整。
+fn flex_column_budget(
+    area_width: u16,
+    fixed_total: u16,
+    flex_mins: &[u16],
+    total_columns: u16,
+    flex_index: usize,
+) -> usize {
+    let min = flex_mins.get(flex_index).copied().unwrap_or(0);
+    let flex_count = flex_mins.len() as u16;
+    if flex_count == 0 {
+        return min as usize;
+    }
+    // 内容区宽度 = 总宽减去左右边框。
+    let content_width = area_width.saturating_sub(2);
+    // ratatui 默认相邻列间隔为 1 个空格,共 total_columns - 1 个间隔。
+    let gaps = total_columns.saturating_sub(1);
+    let flex_total_min: u16 = flex_mins.iter().copied().sum();
+    let reserved = fixed_total.saturating_add(gaps);
+    let available = content_width.saturating_sub(reserved);
+
+    if available <= flex_total_min {
+        // 空间不够,所有弹性列退回最小宽度。
+        return min as usize;
+    }
+    // 把超出最小值的富余宽度按弹性列数量平均分配。
+    let extra = available - flex_total_min;
+    let share = extra / flex_count;
+    (min + share) as usize
+}
+
 fn caller_label(
     display_name: Option<&String>,
     label: Option<&String>,
@@ -1732,6 +1787,11 @@ fn render_traffic_details(frame: &mut Frame, area: Rect, app: &App) {
 }
 
 fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
+    // 单张表格最多展示的数据行数上限，避免历史记录过多时一次性渲染过载。
+    const MAX_REMOTE_TABLE_ROWS: usize = 200;
+    // 命令列在极窄窗口下的兜底最小可读宽度。
+    const REMOTE_MIN_CMD_BUDGET: usize = 18;
+
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1758,9 +1818,19 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
         .max_by_key(|call| call.started_at);
     let latest_summary = latest_call
         .map(|call| {
+            // 自适应：Latest 行占满状态卡片整行，命令预览按卡片宽度截断，
+            // 预留 "Latest: " 标签、status、result 与分隔符的空间。
+            let reserved = 8 // "Latest: "
+                + call.status.chars().count()
+                + format_remote_result(call).chars().count()
+                + 6 // 两个 " | " 分隔符
+                + 2; // 边框
+            let cmd_budget = (layout[0].width as usize)
+                .saturating_sub(reserved)
+                .max(REMOTE_MIN_CMD_BUDGET);
             format!(
                 "{} | {} | {}",
-                truncate_text(&call.command_summary.command_preview, 56),
+                truncate_text(&call.command_summary.command_preview, cmd_budget),
                 call.status,
                 format_remote_result(call)
             )
@@ -1793,15 +1863,29 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_widget(summary, layout[0]);
 
+    // 自适应：根据 Connected Clients 表格的实际高度/宽度推导可见行数与命令列截断阈值，
+    // 窗口越大展示越完整，避免固定 take(12) 与定长截断造成的大量留白与过度省略。
+    const CLIENTS_FIXED_TOTAL: u16 = 10 + 18 + 10 + 11 + 11 + 12 + 18; // 除两个 Min 列外的定长列之和
+    const CLIENTS_FLEX_MINS: [u16; 2] = [12, 18]; // Client, Latest Command
+    let client_capacity = visible_table_rows(layout[1].height, 2, MAX_REMOTE_TABLE_ROWS);
+    let client_cmd_budget = flex_column_budget(
+        layout[1].width,
+        CLIENTS_FIXED_TOTAL,
+        &CLIENTS_FLEX_MINS,
+        9, // 表格总列数
+        1, // Latest Command 列
+    )
+    .max(REMOTE_MIN_CMD_BUDGET);
+
     let client_rows: Vec<Row> = app
         .remote_invoke
         .grants
         .iter()
-        .take(12)
+        .take(client_capacity)
         .map(|grant| {
             let latest = latest_call_for_grant(grant, &app.remote_invoke.calls);
             let command = latest
-                .map(|call| truncate_text(&call.command_summary.command_preview, 36))
+                .map(|call| truncate_text(&call.command_summary.command_preview, client_cmd_budget))
                 .unwrap_or_else(|| "-".to_string());
             let call_status = latest
                 .map(|call| call.status.clone())
@@ -1862,11 +1946,24 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     )));
     frame.render_widget(clients_table, layout[1]);
 
+    // 自适应：Recent Commands 表格的可见行数与命令列截断阈值同样跟随窗口尺寸。
+    const CALLS_FIXED_TOTAL: u16 = 10 + 12 + 20 + 11 + 12; // Auth+Status+Result+Started+Call ID
+    const CALLS_FLEX_MINS: [u16; 2] = [12, 24]; // Client, Command
+    let call_capacity = visible_table_rows(layout[2].height, 2, MAX_REMOTE_TABLE_ROWS);
+    let call_cmd_budget = flex_column_budget(
+        layout[2].width,
+        CALLS_FIXED_TOTAL,
+        &CALLS_FLEX_MINS,
+        7, // 表格总列数
+        1, // Command 列
+    )
+    .max(REMOTE_MIN_CMD_BUDGET);
+
     let call_rows: Vec<Row> = app
         .remote_invoke
         .calls
         .iter()
-        .take(12)
+        .take(call_capacity)
         .map(|call| {
             Row::new(vec![
                 caller_label(
@@ -1875,7 +1972,7 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
                     &call.caller_fingerprint,
                 ),
                 format_remote_auth(call.auth_method.as_ref()),
-                truncate_text(&call.command_summary.command_preview, 44),
+                truncate_text(&call.command_summary.command_preview, call_cmd_budget),
                 call.status.clone(),
                 format_remote_result(call),
                 format_timestamp_millis(Some(call.started_at)),
@@ -2036,6 +2133,50 @@ mod tests {
         assert_eq!(format_time_span(90), "1m30s");
         assert_eq!(format_time_span(3_600), "1h0m");
         assert_eq!(format_time_span(3_660), "1h1m");
+    }
+
+    #[test]
+    fn visible_table_rows_scales_with_height() {
+        // 高度 = 边框(2) + 表头(2) + 数据行。
+        // 矮窗口：3 行总高，去掉边框与表头后没有可用数据行。
+        assert_eq!(visible_table_rows(3, 2, 200), 0);
+        // 边界：刚好放下表头，无数据行。
+        assert_eq!(visible_table_rows(4, 2, 200), 0);
+        // 普通窗口：高度 20 → 20-2-2=16 行可见。
+        assert_eq!(visible_table_rows(20, 2, 200), 16);
+        // 超大窗口：高度 1000 → 996 行但被 max_rows 上限钳制。
+        assert_eq!(visible_table_rows(1000, 2, 200), 200);
+        // 极端矮：高度 0 不应 panic。
+        assert_eq!(visible_table_rows(0, 2, 200), 0);
+    }
+
+    #[test]
+    fn flex_column_budget_expands_with_width() {
+        let fixed = 90u16;
+        let flex_mins = [12u16, 18u16];
+        // 窄窗口：内容区不足以超过弹性列最小值之和，退回最小宽度。
+        let narrow = flex_column_budget(100, fixed, &flex_mins, 9, 1);
+        assert_eq!(narrow, 18);
+        // 宽窗口：富余宽度按弹性列平分,目标列拿到更多空间。
+        let wide = flex_column_budget(300, fixed, &flex_mins, 9, 1);
+        assert!(
+            wide > 18,
+            "wide window should grant more than the minimum budget, got {wide}"
+        );
+        // 越宽越大：单调不减。
+        let wider = flex_column_budget(500, fixed, &flex_mins, 9, 1);
+        assert!(
+            wider >= wide,
+            "wider window should not shrink budget: {wider} < {wide}"
+        );
+    }
+
+    #[test]
+    fn flex_column_budget_handles_degenerate_inputs() {
+        // 没有弹性列时返回该列最小值(此处取 index 越界 -> 0)。
+        assert_eq!(flex_column_budget(200, 50, &[], 9, 0), 0);
+        // 极窄宽度不应 panic 且不低于最小值。
+        assert_eq!(flex_column_budget(0, 50, &[12, 24], 7, 1), 24);
     }
 
     #[test]
