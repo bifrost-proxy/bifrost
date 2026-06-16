@@ -288,6 +288,7 @@ export default function AgentChatSection() {
   const historyLoadingOlderRef = useRef(false);
   const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
+  const streamAbortRef = useRef<AbortController | null>(null);
 
   const scrollMessagesToBottom = useCallback((force = true) => {
     const element = messagesScrollRef.current;
@@ -1314,6 +1315,9 @@ export default function AgentChatSection() {
       if (isSelectedThread(thread, sessionKey, historyPath, queryView)) {
         return;
       }
+      // Abort any in-flight stream from the previous session to prevent cross-contamination
+      streamAbortRef.current?.abort();
+      streamAbortRef.current = null;
       setSessionKey(thread.session_key);
       setHistoryPath(thread.history_path);
       setDraft("");
@@ -1471,6 +1475,7 @@ export default function AgentChatSection() {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
     }
     setDraft("");
+    const submitSessionKey = sessionKey;
     setSupplementSubmitting(true);
     try {
       await runAgentStream({
@@ -1480,12 +1485,15 @@ export default function AgentChatSection() {
         workDir: workDir || undefined,
         runnerId,
         runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
+        signal: streamAbortRef.current?.signal,
         onEvent: (event) => {
+          if (selectedSessionKeyRef.current !== submitSessionKey) return;
           setTelemetry((prev) => reduceTelemetry(prev, event));
           applyQueueEvent(event);
         },
         onDelta: () => {},
         onFinal: (response) => {
+          if (selectedSessionKeyRef.current !== submitSessionKey) return;
           if (rendersMessage) {
             setMessages((prev) =>
               prev.map((message) =>
@@ -1499,6 +1507,8 @@ export default function AgentChatSection() {
       });
       refreshThreads();
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (selectedSessionKeyRef.current !== submitSessionKey) return;
       const text = error instanceof Error ? error.message : "Agent input failed";
       if (rendersMessage) {
         setMessages((prev) =>
@@ -1704,6 +1714,10 @@ export default function AgentChatSection() {
         ...prev.filter((thread) => thread.session_key !== sessionKey),
       ]);
     });
+    const sendSessionKey = sessionKey;
+    const abortController = new AbortController();
+    streamAbortRef.current?.abort();
+    streamAbortRef.current = abortController;
     let assistantSegmentId = assistantId;
     let assistantSegmentIndex = 0;
     let assistantSegmentHasText = false;
@@ -2024,7 +2038,9 @@ export default function AgentChatSection() {
         runnerId,
         runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
         collaborationMode,
+        signal: abortController.signal,
         onEvent: (event) => {
+          if (selectedSessionKeyRef.current !== sendSessionKey) return;
           setTelemetry((prev) => reduceTelemetry(prev, event));
           if (silentCommand) {
             const step = eventToProcessStep(event);
@@ -2099,6 +2115,7 @@ export default function AgentChatSection() {
           // Deltas are rendered as assistant message segments from onEvent.
         },
         onFinal: (response) => {
+          if (selectedSessionKeyRef.current !== sendSessionKey) return;
           if (silentCommand) {
             finishSilentCommandCompaction("success", "上下文已自动压缩");
             return;
@@ -2111,6 +2128,8 @@ export default function AgentChatSection() {
       setSearchParamsForActiveSession();
       refreshThreads();
     } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+      if (selectedSessionKeyRef.current !== sendSessionKey) return;
       const text = error instanceof Error ? error.message : "Agent run failed";
       setTelemetry((prev) => ({
         ...prev,

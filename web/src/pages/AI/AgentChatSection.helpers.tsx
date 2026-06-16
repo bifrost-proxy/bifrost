@@ -737,6 +737,7 @@ export async function runAgentStream(params: {
   onEvent: (event: Record<string, unknown>) => void;
   onDelta: (content: string) => void;
   onFinal: (content: string) => void;
+  signal?: AbortSignal;
 }) {
   const isExternalRunner =
     params.runnerId && params.runnerId !== "bifrost_agent";
@@ -744,6 +745,7 @@ export async function runAgentStream(params: {
     isExternalRunner ? "/api/im-gateway/chat/stream" : "/api/agent/chat/stream",
     {
       method: "POST",
+      signal: params.signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
         isExternalRunner
