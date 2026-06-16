@@ -3743,6 +3743,14 @@ fn remote_file_error_hint(stderr: &str) -> Option<&'static str> {
             "The active file policy does not allow this operation. For `read-many`, fall back to \
              repeated `remote file read` calls or ask the target to add the read_many op."
         }
+        "file.anchor_not_found" => {
+            "Anchor text not in file — likely changed between your read and write. \
+             Re-`read` the file and re-anchor to the latest content."
+        }
+        "file.anchor_not_unique" => {
+            "Anchor matched multiple times. Pass `expected_count` matching the actual \
+             count, or use a more specific old_string."
+        }
         "file.deny_pattern" => {
             "Path matched a policy `denies` rule (e.g. .ssh, .env, target/, *.pfx). The owner \
              deliberately excluded it; pick a different path — re-authorizing will NOT unblock it."
@@ -3911,7 +3919,22 @@ fn render_file_read_human(value: &Value) {
     if !parts.is_empty() {
         eprintln!("{}", format!("— {}", parts.join("  ")).dimmed());
     }
+    // P1: surface mtime as RFC3339 on a dedicated stderr line so concurrent
+    // editors can spot "this file was modified N seconds ago" without diffing
+    // the structured JSON output.
+    if let Some(mtime) = value.get("mtime_unix").and_then(Value::as_i64) {
+        if let Some(rfc) = format_mtime_rfc3339(mtime) {
+            eprintln!("{}", format!("— mtime={rfc}").dimmed());
+        }
+    }
     print_truncation_hint(RemoteFileOp::Read, value);
+}
+
+/// Format a Unix timestamp (seconds) as an RFC3339 UTC string. Returns `None`
+/// if the timestamp is out of `chrono`'s representable range.
+fn format_mtime_rfc3339(mtime_unix: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(mtime_unix, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 fn render_file_read_many_human(value: &Value) {
@@ -7794,5 +7817,76 @@ mod tests {
         perms.set_mode(0o777);
         fs::set_permissions(&path, perms).unwrap();
         warn_if_ssh_key_permissions_are_too_open(&path);
+    }
+
+    // ---------- remote_file_error_hint coverage for new branches ----------
+
+    #[test]
+    fn test_remote_file_error_hint_op_not_permitted() {
+        let stderr =
+            "[file.op_not_permitted] requested op read_many is not permitted by the active policy";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("`remote file read`"),
+            "hint should point at the per-file read fallback, got: {hint}"
+        );
+        assert!(
+            hint.contains("read_many"),
+            "hint should name the read_many op so callers know what to enable, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_anchor_not_found() {
+        let stderr = "[file.anchor_not_found] old_string not found in 'foo.rs'";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("Re-`read`") && hint.contains("re-anchor"),
+            "hint should tell agent to re-read and re-anchor, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_anchor_not_unique() {
+        let stderr = "[file.anchor_not_unique] old_string found 3 time(s) in 'foo.rs', expected 1";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("expected_count"),
+            "hint should mention expected_count, got: {hint}"
+        );
+        assert!(
+            hint.contains("more specific old_string"),
+            "hint should suggest a more specific old_string, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_out_of_scope_mentions_repo_tmp() {
+        let stderr = "[file.out_of_scope] path /tmp/foo is outside the granted roots";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("scratch-dir"),
+            "hint should point ephemeral writes at `remote file scratch-dir`, got: {hint}"
+        );
+        assert!(
+            hint.contains("FileAccessPolicy"),
+            "hint should keep the FileAccessPolicy guidance, got: {hint}"
+        );
+    }
+
+    // ---------- format_mtime_rfc3339 snapshot ----------
+
+    #[test]
+    fn test_format_mtime_rfc3339_renders_utc_z() {
+        // 2026-06-16T12:34:56Z
+        let ts = 1_781_613_296_i64;
+        let formatted = format_mtime_rfc3339(ts).expect("timestamp should be representable");
+        assert_eq!(formatted, "2026-06-16T12:34:56Z");
+    }
+
+    #[test]
+    fn test_format_mtime_rfc3339_handles_epoch() {
+        let formatted = format_mtime_rfc3339(0).expect("epoch should format");
+        assert_eq!(formatted, "1970-01-01T00:00:00Z");
     }
 }
