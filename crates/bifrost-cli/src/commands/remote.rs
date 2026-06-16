@@ -2836,6 +2836,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Outline { .. } => RemoteFileOp::Outline,
         RemoteFileCommands::Write { .. } => RemoteFileOp::Write,
         RemoteFileCommands::Edit { .. } => RemoteFileOp::Edit,
+        RemoteFileCommands::ScratchDir { .. } => RemoteFileOp::Mkdir,
         RemoteFileCommands::Mkdir { .. } => RemoteFileOp::Mkdir,
         RemoteFileCommands::Move { .. } => RemoteFileOp::Move,
         RemoteFileCommands::Delete { .. } => RemoteFileOp::Delete,
