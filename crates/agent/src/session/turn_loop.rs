@@ -2753,18 +2753,17 @@ pub async fn run_turn_with_mcp_multimodal(
             .iter()
             .find(|l| l.tool_name == "enter_worktree" && l.success)
         {
-            if let Some(rest) = wt_log.result.strip_prefix("ENTER_WORKTREE:") {
-                // Format: "ENTER_WORKTREE:<new_dir>:<original_dir>"
-                if let Some((new_dir, _original)) = rest.split_once(':') {
-                    let new_dir = new_dir.to_string();
-                    info!(
-                        session_key = %session.session_key,
-                        new_work_dir = %new_dir,
-                        "entering worktree (non-destructive)"
-                    );
-                    session.enter_worktree_dir(new_dir.clone());
-                    work_dir = std::path::PathBuf::from(&new_dir);
-                }
+            // Signal format: first line is "ENTER_WORKTREE:<path>", rest is informational
+            let first_line = wt_log.result.lines().next().unwrap_or("");
+            if let Some(new_dir) = first_line.strip_prefix("ENTER_WORKTREE:") {
+                let new_dir = new_dir.to_string();
+                info!(
+                    session_key = %session.session_key,
+                    new_work_dir = %new_dir,
+                    "entering worktree (non-destructive)"
+                );
+                session.enter_worktree_dir(new_dir.clone());
+                work_dir = std::path::PathBuf::from(&new_dir);
             }
         }
 

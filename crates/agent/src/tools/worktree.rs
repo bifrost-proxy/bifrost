@@ -162,9 +162,14 @@ impl ToolHandler for EnterWorktreeTool {
                     branch = %branch_name,
                     "enter_worktree: created worktree"
                 );
+                // Signal format: first line is "ENTER_WORKTREE:<path>", rest is informational
                 ToolResult {
                     success: true,
-                    output: format!("ENTER_WORKTREE:{}:{}", wt_abs.display(), work_dir.display()),
+                    output: format!(
+                        "ENTER_WORKTREE:{}\nBranch: {}\nWorktree created. All file operations now target this directory.",
+                        wt_abs.display(),
+                        branch_name
+                    ),
                     runtime_events: Vec::new(),
                 }
             }
