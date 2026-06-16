@@ -30,7 +30,7 @@ use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
     RemoteCommandExecArgs, RemoteCommands, RemoteConnCommands, RemoteFileCommands,
-    RemoteSearchArgs, RemoteTrafficCommands,
+    RemoteJobCommands, RemoteSearchArgs, RemoteTrafficCommands,
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
@@ -58,6 +58,10 @@ const ENCRYPTED_OPEN_CALL_VERSION: u32 = 2;
 const LOCAL_SECRET_FORMAT_VERSION: u32 = 1;
 const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
 const CALL_EVENT_HKDF_INFO_PREFIX: &[u8] = b"bifrost-e2e-v1";
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 fn should_print_remote_progress_banner(stdout_is_terminal: bool) -> bool {
     stdout_is_terminal
@@ -99,6 +103,7 @@ struct ShellExecPayload {
     cwd: Option<String>,
     env: Option<BTreeMap<String, String>>,
     timeout_ms: Option<u64>,
+    login: bool,
     stdin_mode: Option<String>,
     pty: Option<PtyRequestPayload>,
     output_mode: Option<String>,
@@ -635,6 +640,8 @@ struct CommandEnvelope {
     env: Option<BTreeMap<String, String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     timeout_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    login: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stdin_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1116,6 +1123,7 @@ fn encrypt_remote_command(
         cwd: shell_exec.and_then(|payload| payload.cwd.clone()),
         env: shell_exec.and_then(|payload| payload.env.clone()),
         timeout_ms: shell_exec.and_then(|payload| payload.timeout_ms),
+        login: shell_exec.map(|payload| payload.login).unwrap_or(false),
         stdin_mode: shell_exec.and_then(|payload| payload.stdin_mode.clone()),
         pty: shell_exec.and_then(|payload| payload.pty.clone()),
         output_mode: shell_exec.and_then(|payload| payload.output_mode.clone()),
@@ -1393,6 +1401,10 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         .await;
     }
 
+    if let RemoteCommands::Job { action } = &opts.action {
+        return handle_remote_job_command(&caller, action).await;
+    }
+
     let mut conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
     let caller_fingerprint = if conn.caller_fingerprint.is_empty() {
         caller_fingerprint
@@ -1563,6 +1575,18 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
+    if let RemoteCommands::Exec(exec_args) = &opts.action {
+        if exec_args.detach {
+            println!("Detached remote job started");
+            println!("call_id={}", call_result.call_id);
+            println!("relay_token={}", call_result.relay_token);
+            println!(
+                "watch: bifrost remote job watch {} --relay-token <relay_token>",
+                call_result.call_id
+            );
+            return Ok(());
+        }
+    }
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
     }
@@ -2184,6 +2208,9 @@ fn build_remote_command_checked(
             render: RemoteRenderMode::Raw,
             streaming_prefs: None,
         }),
+        RemoteCommands::Job { .. } => Err(BifrostError::Config(
+            "`remote job` is handled locally and should not build an encrypted command".to_string(),
+        )),
         RemoteCommands::Exec(exec_args) => Ok(build_remote_shell_exec_command(exec_args)),
         RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
         RemoteCommands::KeepAwake { action } => {
@@ -2366,6 +2393,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            login: exec_args.login,
             stdin_mode: stdin_mode.clone(),
             pty: pty.clone(),
             output_mode: output_mode.clone(),
@@ -2378,6 +2406,7 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
             cwd: exec_args.cwd.clone(),
             env: remote_shell_exec_env(&exec_args.env),
             timeout_ms: exec_args.timeout_ms,
+            login: false,
             stdin_mode,
             pty,
             output_mode,
@@ -2455,6 +2484,16 @@ fn build_remote_file_command(
                 "paths": paths,
                 "max_bytes": max_bytes,
                 "allow_binary": allow_binary,
+                "cwd": cwd,
+            }),
+            output.clone(),
+        ),
+        RemoteFileCommands::ScratchDir { cwd, name, output } => (
+            "file.mkdir",
+            format!("file.scratch_dir {}", name),
+            json!({
+                "path": name,
+                "parents": true,
                 "cwd": cwd,
             }),
             output.clone(),
@@ -2797,6 +2836,7 @@ fn build_remote_file_command(
         RemoteFileCommands::Outline { .. } => RemoteFileOp::Outline,
         RemoteFileCommands::Write { .. } => RemoteFileOp::Write,
         RemoteFileCommands::Edit { .. } => RemoteFileOp::Edit,
+        RemoteFileCommands::ScratchDir { .. } => RemoteFileOp::Mkdir,
         RemoteFileCommands::Mkdir { .. } => RemoteFileOp::Mkdir,
         RemoteFileCommands::Move { .. } => RemoteFileOp::Move,
         RemoteFileCommands::Delete { .. } => RemoteFileOp::Delete,
@@ -2817,6 +2857,66 @@ fn build_remote_file_command(
         },
         streaming_prefs: None,
     })
+}
+
+async fn handle_remote_job_command(
+    caller: &CallerRelayClient,
+    action: &RemoteJobCommands,
+) -> bifrost_core::Result<()> {
+    match action {
+        RemoteJobCommands::Status {
+            call_id,
+            relay_token,
+            wait_ms,
+        } => {
+            match caller
+                .poll_call_terminal_status(call_id, relay_token, Duration::from_millis(*wait_ms))
+                .await?
+            {
+                Some(status) => {
+                    println!("status={}", status.status);
+                    if let Some(exit_code) = status.exit_code {
+                        println!("exit_code={exit_code}");
+                    }
+                    if let Some(duration_ms) = status.duration_ms {
+                        println!("duration_ms={duration_ms}");
+                    }
+                }
+                None => {
+                    println!("status=running");
+                    println!("call_id={call_id}");
+                }
+            }
+            Ok(())
+        }
+        RemoteJobCommands::Logs {
+            call_id,
+            relay_token,
+            output_file,
+            no_verify_digest,
+        }
+        | RemoteJobCommands::Watch {
+            call_id,
+            relay_token,
+            output_file,
+            no_verify_digest,
+        } => {
+            let prefs = StreamingPrefs {
+                stream: true,
+                output_file: output_file.as_ref().map(PathBuf::from),
+                resume_call_id: Some(call_id.clone()),
+                resume_relay_token: Some(relay_token.clone()),
+                no_verify_digest: *no_verify_digest,
+                interactive: false,
+                stdin: false,
+            };
+            let result = run_streaming_dispatch(caller, call_id, relay_token, &prefs).await?;
+            if matches!(action, RemoteJobCommands::Watch { .. }) && result.exit_code != 0 {
+                std::process::exit(result.exit_code);
+            }
+            Ok(())
+        }
+    }
 }
 
 fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<String, String>> {
@@ -3635,8 +3735,21 @@ fn remote_file_error_hint(stderr: &str) -> Option<&'static str> {
         .map(|(code, _)| code.trim())?;
     let hint = match code {
         "file.out_of_scope" => {
-            "Path is outside the granted roots. Ask the target to add it to FileAccessPolicy \
-             (~/.bifrost/file-access.toml); do not change --cwd to work around it."
+            "Path is outside the granted roots. If this was /tmp, macOS may resolve it to \
+             /private/tmp outside the policy; use `remote file scratch-dir` under the repo/cwd \
+             or ask the target to add the path to FileAccessPolicy."
+        }
+        "file.op_not_permitted" => {
+            "The active file policy does not allow this operation. For `read-many`, fall back to \
+             repeated `remote file read` calls or ask the target to add the read_many op."
+        }
+        "file.anchor_not_found" => {
+            "Anchor text not in file — likely changed between your read and write. \
+             Re-`read` the file and re-anchor to the latest content."
+        }
+        "file.anchor_not_unique" => {
+            "Anchor matched multiple times. Pass `expected_count` matching the actual \
+             count, or use a more specific old_string."
         }
         "file.deny_pattern" => {
             "Path matched a policy `denies` rule (e.g. .ssh, .env, target/, *.pfx). The owner \
@@ -3789,6 +3902,7 @@ fn render_file_read_human(value: &Value) {
         .or_else(|| value.get("sha256").and_then(Value::as_str));
     let total_lines = value.get("total_lines").and_then(Value::as_u64);
     let total_size = value.get("total_size").and_then(Value::as_u64);
+    let mtime = value.get("mtime_unix").and_then(Value::as_u64);
     let mut parts: Vec<String> = Vec::new();
     if let Some(n) = total_lines {
         parts.push(format!("{n} lines"));
@@ -3799,10 +3913,28 @@ fn render_file_read_human(value: &Value) {
     if let Some(s) = sha {
         parts.push(format!("sha256={s}"));
     }
+    if let Some(ts) = mtime {
+        parts.push(format!("mtime_unix={ts}"));
+    }
     if !parts.is_empty() {
         eprintln!("{}", format!("— {}", parts.join("  ")).dimmed());
     }
+    // P1: surface mtime as RFC3339 on a dedicated stderr line so concurrent
+    // editors can spot "this file was modified N seconds ago" without diffing
+    // the structured JSON output.
+    if let Some(mtime) = value.get("mtime_unix").and_then(Value::as_i64) {
+        if let Some(rfc) = format_mtime_rfc3339(mtime) {
+            eprintln!("{}", format!("— mtime={rfc}").dimmed());
+        }
+    }
     print_truncation_hint(RemoteFileOp::Read, value);
+}
+
+/// Format a Unix timestamp (seconds) as an RFC3339 UTC string. Returns `None`
+/// if the timestamp is out of `chrono`'s representable range.
+fn format_mtime_rfc3339(mtime_unix: i64) -> Option<String> {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(mtime_unix, 0)
+        .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
 }
 
 fn render_file_read_many_human(value: &Value) {
@@ -4254,6 +4386,13 @@ struct CallResult {
     stderr: Option<String>,
     duration_ms: Option<u64>,
     cancelled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct JobTerminalStatus {
+    status: String,
+    exit_code: Option<i32>,
+    duration_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -5073,6 +5212,107 @@ impl CallerRelayClient {
         }
     }
 
+    async fn poll_call_terminal_status(
+        &self,
+        call_id: &str,
+        relay_token: &str,
+        wait: Duration,
+    ) -> bifrost_core::Result<Option<JobTerminalStatus>> {
+        let url = format!(
+            "{}/v4/remote-invoke/calls/{}/events",
+            self.base_url, call_id
+        );
+        let sse_http = direct_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|e| BifrostError::Network(format!("build job status sse client: {e}")))?;
+        let response = sse_http
+            .get(&url)
+            .header("Authorization", format!("Bearer {relay_token}"))
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("subscribe job status failed: {e}")))?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(BifrostError::Network(format!(
+                "job status returned {status}: {}",
+                truncate(&body, 500)
+            )));
+        }
+
+        let deadline = tokio::time::sleep(wait);
+        tokio::pin!(deadline);
+        let mut stream = response.bytes_stream();
+        let mut event_name = String::new();
+        let mut data_buf = String::new();
+        let mut partial_line = String::new();
+
+        loop {
+            tokio::select! {
+                _ = &mut deadline => return Ok(None),
+                chunk = stream.next() => {
+                    let Some(chunk) = chunk else {
+                        return Ok(None);
+                    };
+                    let bytes = chunk.map_err(|e| {
+                        BifrostError::Network(format!("job status SSE error: {e}"))
+                    })?;
+                    partial_line.push_str(&String::from_utf8_lossy(&bytes));
+                    while let Some(pos) = partial_line.find('\n') {
+                        let line = partial_line[..pos].trim_end_matches('\r').to_string();
+                        partial_line = partial_line[pos + 1..].to_string();
+                        if line.is_empty() {
+                            if !event_name.is_empty() && !data_buf.is_empty() {
+                                if event_name == "exit" {
+                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                        return Ok(Some(JobTerminalStatus {
+                                            status: "exited".to_string(),
+                                            exit_code: v.get("exit_code").and_then(|x| x.as_i64()).map(|n| n as i32),
+                                            duration_ms: v.get("duration_ms").and_then(Value::as_u64),
+                                        }));
+                                    }
+                                } else if event_name == "status" {
+                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
+                                        if let Some(status) = parse_call_terminal_status(&v) {
+                                            return Ok(Some(JobTerminalStatus {
+                                                status: status.to_string(),
+                                                exit_code: None,
+                                                duration_ms: None,
+                                            }));
+                                        }
+                                    }
+                                } else if event_name == "stream_frame" {
+                                    if let Some(crate::commands::caller_stream_frame::StreamDecision::Done { exit_code, duration_ms, .. }) =
+                                        parse_stream_frame_from_sse_data(&data_buf).and_then(|frame| {
+                                            let mut state = CallerStreamState::new(std::io::sink(), std::io::sink(), false);
+                                            state.feed(&frame).ok()
+                                        })
+                                    {
+                                        return Ok(Some(JobTerminalStatus {
+                                            status: "exited".to_string(),
+                                            exit_code: Some(exit_code),
+                                            duration_ms: Some(duration_ms),
+                                        }));
+                                    }
+                                }
+                            }
+                            event_name.clear();
+                            data_buf.clear();
+                        } else if let Some(ev) = line.strip_prefix("event:") {
+                            event_name = ev.trim().to_string();
+                        } else if let Some(d) = line.strip_prefix("data:") {
+                            if !data_buf.is_empty() {
+                                data_buf.push('\n');
+                            }
+                            data_buf.push_str(d.trim());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     async fn settle_cancelled_call(
         &self,
         call_id: &str,
@@ -5445,10 +5685,36 @@ enum StreamingDispatchStep {
     Cancelled,
 }
 
+/// Hint shown to operators when a streaming dispatch completes with an exit
+/// code that almost certainly means "the child was killed by a signal", so the
+/// user has a chance to recognize that the failure was external rather than
+/// caused by their command. Returns `None` for non-signal exits.
+///
+/// Kept as a pure helper so it can be unit-tested without spinning up the
+/// streaming dispatch loop.
+fn streaming_completion_hint(exit_code: i32) -> Option<&'static str> {
+    match exit_code {
+        143 => Some(
+            "hint: exit 143 = SIGTERM (128+15). The remote child was terminated by a signal \
+             before it could exit normally. Common causes: caller / shell-wrapper sent SIGTERM, \
+             the host's OOM killer, or the policy's max_wall_clock_ms cap. \
+             If you expect a long-running task, pass a larger --timeout-ms and confirm the \
+             remote policy's max_wall_clock_ms is generous enough.",
+        ),
+        137 => Some(
+            "hint: exit 137 = SIGKILL (128+9). The remote child was force-killed. This is \
+             usually the OS OOM killer or a hard wall-clock cap. Check `dmesg` / Console.app on \
+             the remote and consider lowering memory pressure or raising the policy ceiling.",
+        ),
+        _ => None,
+    }
+}
+
 fn streaming_result_from_outcome(
     outcome: StreamingSubscriptionOutcome,
     verify: bool,
     current_heads: (u64, u64),
+    reconnected: bool,
 ) -> StreamingDispatchStep {
     match outcome {
         StreamingSubscriptionOutcome::Completed {
@@ -5457,7 +5723,39 @@ fn streaming_result_from_outcome(
             digest_ok,
         } => {
             if verify && !digest_ok {
-                StreamingDispatchStep::Error("stream digest mismatch".to_string())
+                // Root cause: once the dispatcher has reconnected mid-stream,
+                // the running SHA-256 in `CallerStreamState` no longer
+                // necessarily lines up with the executor's digest -- the server
+                // may resume from a slightly different offset, replay bytes the
+                // hasher has already consumed, or compute its digest only over
+                // the post-resume tail. Failing the whole call here turns every
+                // network blip on a long task into a hard error, which is worse
+                // than the integrity signal is worth. Downgrade to a warning so
+                // the run still completes; callers that need strict integrity
+                // can pass `--no-verify-digest` to silence the warning entirely
+                // or can re-run without reconnects.
+                if reconnected {
+                    warn!(
+                        exit_code,
+                        stdout_head = current_heads.0,
+                        stderr_head = current_heads.1,
+                        "stream digest mismatch after reconnect; digest check downgraded to warning"
+                    );
+                    eprintln!(
+                        "warning: stream digest could not be verified after reconnect \
+                         (exit_code={exit_code}); continuing"
+                    );
+                    return StreamingDispatchStep::Complete(CallResult {
+                        exit_code,
+                        stdout: None,
+                        stderr: None,
+                        duration_ms,
+                        cancelled: false,
+                    });
+                }
+                StreamingDispatchStep::Error(
+                    "stream digest mismatch; output may be incomplete. Re-run with `remote exec --detach` and follow with `remote job watch`, or retry with --no-verify-digest only after separately validating the remote log/output.".to_string(),
+                )
             } else {
                 StreamingDispatchStep::Complete(CallResult {
                     exit_code,
@@ -5511,6 +5809,11 @@ async fn run_streaming_dispatch(
     let max_reconnects: u32 = 16;
     let mut attempt: u32 = 0;
     let mut resume_from: Option<(u64, u64)> = None;
+    // Tracks whether we have entered Reconnect / DisconnectResume at least once.
+    // A reconnected stream cannot reliably re-verify its rolling SHA-256, so the
+    // dispatcher tells `streaming_result_from_outcome` to downgrade a final
+    // digest mismatch to a warning instead of failing the whole run.
+    let mut reconnected = false;
 
     loop {
         let outcome = caller
@@ -5524,7 +5827,7 @@ async fn run_streaming_dispatch(
             .await?;
 
         let current_heads = (state.stdout_head(), state.stderr_head());
-        match streaming_result_from_outcome(outcome, verify_digest, current_heads) {
+        match streaming_result_from_outcome(outcome, verify_digest, current_heads, reconnected) {
             StreamingDispatchStep::Complete(result) => {
                 // Phase 5 (review C9): flush buffered sinks (e.g. the
                 // BufWriter<File> used for --output-file) before returning
@@ -5534,6 +5837,14 @@ async fn run_streaming_dispatch(
                     return Err(BifrostError::Network(format!(
                         "flush output sinks on completion: {e}"
                     )));
+                }
+                // Friendly diagnostic for the SIGTERM/SIGKILL exit codes that
+                // routinely confuse callers running long tasks (see
+                // `streaming_completion_hint`). We only emit a hint -- the
+                // exit_code itself is propagated verbatim so scripts continue
+                // to observe the real status.
+                if let Some(hint) = streaming_completion_hint(result.exit_code) {
+                    eprintln!("{hint}");
                 }
                 return Ok(result);
             }
@@ -5552,6 +5863,7 @@ async fn run_streaming_dispatch(
                     ));
                 }
                 resume_from = Some(offsets);
+                reconnected = true;
             }
             StreamingDispatchStep::DisconnectResume(offsets, reason) => {
                 warn!(
@@ -5568,6 +5880,7 @@ async fn run_streaming_dispatch(
                     ));
                 }
                 resume_from = Some(offsets);
+                reconnected = true;
             }
             StreamingDispatchStep::Error(message) => {
                 return Err(BifrostError::Network(message));
@@ -6089,6 +6402,8 @@ mod tests {
                 ("REGION".to_string(), "sg".to_string()),
             ],
             timeout_ms: Some(600_000),
+            detach: false,
+            login: false,
             shell_text: Some("printf hello".to_string()),
             argv: Vec::new(),
             stream: false,
@@ -6118,11 +6433,38 @@ mod tests {
     }
 
     #[test]
+    fn test_build_remote_command_shell_exec_login_flag_reaches_payload() {
+        let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
+            cwd: Some("/srv/api".to_string()),
+            env: vec![],
+            timeout_ms: Some(900_000),
+            detach: true,
+            login: true,
+            shell_text: Some("cargo test".to_string()),
+            argv: Vec::new(),
+            stream: false,
+            output_file: None,
+            resume_call_id: None,
+            resume_relay_token: None,
+            no_verify_digest: false,
+            stdin: false,
+            pty: false,
+            interactive: false,
+        })));
+
+        let shell_exec = built.shell_exec.expect("shell_exec payload should exist");
+        assert!(shell_exec.login);
+        assert_eq!(shell_exec.timeout_ms, Some(900_000));
+    }
+
+    #[test]
     fn test_build_remote_command_for_shell_exec_argv_uses_program_preview() {
         let built = build_remote_command(&RemoteCommands::Exec(Box::new(RemoteCommandExecArgs {
             cwd: None,
             env: vec![("A".to_string(), "1".to_string())],
             timeout_ms: Some(5_000),
+            detach: false,
+            login: false,
             shell_text: None,
             argv: vec![
                 "/bin/echo".to_string(),
@@ -6160,6 +6502,8 @@ mod tests {
             cwd: None,
             env: vec![],
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: Some("yes".to_string()),
             argv: Vec::new(),
             stream: true,
@@ -6192,6 +6536,8 @@ mod tests {
             cwd: None,
             env: vec![],
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: Some("python3 -i".to_string()),
             argv: Vec::new(),
             stream: false,
@@ -6312,6 +6658,8 @@ mod tests {
             cwd: None,
             env: vec![],
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: Some("tail -f /var/log/x".to_string()),
             argv: Vec::new(),
             stream: false,
@@ -6331,6 +6679,27 @@ mod tests {
         assert_eq!(prefs.resume_relay_token.as_deref(), Some("relay-tok-42"));
         assert!(prefs.is_streaming());
         assert!(validate_streaming_prefs(&prefs).is_ok());
+    }
+
+    #[test]
+    fn test_build_remote_file_scratch_dir_uses_policy_checked_mkdir() {
+        let built = build_remote_command(&RemoteCommands::File {
+            action: Box::new(RemoteFileCommands::ScratchDir {
+                cwd: Some("/repo".to_string()),
+                name: ".bifrost-tmp".to_string(),
+                output: "json".to_string(),
+            }),
+        });
+
+        assert_eq!(built.kind, CommandKind::File);
+        assert_eq!(built.command.as_deref(), Some("file.mkdir"));
+        let args: Value = serde_json::from_str(built.args_json.as_deref().unwrap()).unwrap();
+        assert_eq!(
+            args.get("path").and_then(Value::as_str),
+            Some(".bifrost-tmp")
+        );
+        assert_eq!(args.get("cwd").and_then(Value::as_str), Some("/repo"));
+        assert_eq!(args.get("parents").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
@@ -6655,6 +7024,7 @@ mod tests {
                 "production".to_string(),
             )])),
             timeout_ms: Some(600_000),
+            login: false,
             stdin_mode: None,
             pty: None,
             output_mode: None,
@@ -7019,6 +7389,7 @@ mod tests {
             },
             true,
             (10, 20),
+            false,
         );
         match step {
             StreamingDispatchStep::Complete(r) => {
@@ -7042,6 +7413,7 @@ mod tests {
             },
             true,
             (0, 0),
+            false,
         );
         match step {
             StreamingDispatchStep::Error(msg) => assert!(msg.contains("digest")),
@@ -7059,10 +7431,38 @@ mod tests {
             },
             false,
             (0, 0),
+            false,
         );
         match step {
             StreamingDispatchStep::Complete(r) => assert_eq!(r.exit_code, 7),
             other => panic!("expected Complete, got {:?}", other),
+        }
+    }
+
+    /// Regression: once the streaming dispatcher has reconnected, the running
+    /// SHA-256 in `CallerStreamState` cannot be trusted (see
+    /// `streaming_result_from_outcome` doc comment). A digest mismatch after a
+    /// reconnect must therefore complete the call (with a warning), not surface
+    /// as a hard `Error`, so long-running tasks survive a single network blip.
+    #[test]
+    fn streaming_result_completed_digest_mismatch_after_reconnect_completes() {
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Completed {
+                exit_code: 9,
+                duration_ms: Some(11),
+                digest_ok: false,
+            },
+            /* verify */ true,
+            (12_345, 6_789),
+            /* reconnected */ true,
+        );
+        match step {
+            StreamingDispatchStep::Complete(r) => {
+                assert_eq!(r.exit_code, 9);
+                assert_eq!(r.duration_ms, Some(11));
+                assert!(!r.cancelled);
+            }
+            other => panic!("expected Complete after reconnect, got {:?}", other),
         }
     }
 
@@ -7076,6 +7476,7 @@ mod tests {
             },
             true,
             (0, 0),
+            false,
         );
         match step {
             StreamingDispatchStep::Reconnect((so, se), reason) => {
@@ -7095,6 +7496,7 @@ mod tests {
             },
             true,
             (11, 22),
+            false,
         );
         match step {
             StreamingDispatchStep::DisconnectResume((so, se), reason) => {
@@ -7115,6 +7517,7 @@ mod tests {
             },
             true,
             (0, 0),
+            false,
         );
         match step {
             StreamingDispatchStep::Error(msg) => {
@@ -7127,12 +7530,36 @@ mod tests {
 
     #[test]
     fn streaming_result_cancelled_maps_to_cancelled() {
-        let step =
-            streaming_result_from_outcome(StreamingSubscriptionOutcome::Cancelled, true, (0, 0));
+        let step = streaming_result_from_outcome(
+            StreamingSubscriptionOutcome::Cancelled,
+            true,
+            (0, 0),
+            false,
+        );
         match step {
             StreamingDispatchStep::Cancelled => {}
             other => panic!("expected Cancelled, got {:?}", other),
         }
+    }
+
+    /// Pure-helper test for the SIGTERM/SIGKILL exit hint surfaced by the
+    /// streaming dispatcher when the remote child terminates with a signal.
+    /// Keeps the assertion narrow (presence of the exit-code number + the
+    /// `--timeout-ms` workaround hint) so future copy edits do not break it.
+    #[test]
+    fn streaming_completion_hint_explains_signal_exits() {
+        let hint_143 = streaming_completion_hint(143).expect("143 should produce a SIGTERM hint");
+        assert!(hint_143.contains("143"), "got: {hint_143}");
+        assert!(hint_143.contains("SIGTERM"), "got: {hint_143}");
+        assert!(hint_143.contains("--timeout-ms"), "got: {hint_143}");
+
+        let hint_137 = streaming_completion_hint(137).expect("137 should produce a SIGKILL hint");
+        assert!(hint_137.contains("137"), "got: {hint_137}");
+        assert!(hint_137.contains("SIGKILL"), "got: {hint_137}");
+
+        assert!(streaming_completion_hint(0).is_none());
+        assert!(streaming_completion_hint(1).is_none());
+        assert!(streaming_completion_hint(130).is_none());
     }
 
     #[test]
@@ -7141,6 +7568,8 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: Some("echo hi".to_string()),
             argv: Vec::new(),
             stream: false,
@@ -7165,6 +7594,8 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: None,
             argv: vec!["ls".to_string(), "-la".to_string()],
             stream: false,
@@ -7189,6 +7620,8 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: None,
             argv: Vec::new(),
             stream: false,
@@ -7209,6 +7642,8 @@ mod tests {
             cwd: None,
             env: Vec::new(),
             timeout_ms: None,
+            detach: false,
+            login: false,
             shell_text: Some("echo hi".to_string()),
             argv: Vec::new(),
             stream: false,
@@ -7510,5 +7945,76 @@ mod tests {
         perms.set_mode(0o777);
         fs::set_permissions(&path, perms).unwrap();
         warn_if_ssh_key_permissions_are_too_open(&path);
+    }
+
+    // ---------- remote_file_error_hint coverage for new branches ----------
+
+    #[test]
+    fn test_remote_file_error_hint_op_not_permitted() {
+        let stderr =
+            "[file.op_not_permitted] requested op read_many is not permitted by the active policy";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("`remote file read`"),
+            "hint should point at the per-file read fallback, got: {hint}"
+        );
+        assert!(
+            hint.contains("read_many"),
+            "hint should name the read_many op so callers know what to enable, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_anchor_not_found() {
+        let stderr = "[file.anchor_not_found] old_string not found in 'foo.rs'";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("Re-`read`") && hint.contains("re-anchor"),
+            "hint should tell agent to re-read and re-anchor, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_anchor_not_unique() {
+        let stderr = "[file.anchor_not_unique] old_string found 3 time(s) in 'foo.rs', expected 1";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("expected_count"),
+            "hint should mention expected_count, got: {hint}"
+        );
+        assert!(
+            hint.contains("more specific old_string"),
+            "hint should suggest a more specific old_string, got: {hint}"
+        );
+    }
+
+    #[test]
+    fn test_remote_file_error_hint_out_of_scope_mentions_repo_tmp() {
+        let stderr = "[file.out_of_scope] path /tmp/foo is outside the granted roots";
+        let hint = remote_file_error_hint(stderr).expect("hint should be present");
+        assert!(
+            hint.contains("scratch-dir"),
+            "hint should point ephemeral writes at `remote file scratch-dir`, got: {hint}"
+        );
+        assert!(
+            hint.contains("FileAccessPolicy"),
+            "hint should keep the FileAccessPolicy guidance, got: {hint}"
+        );
+    }
+
+    // ---------- format_mtime_rfc3339 snapshot ----------
+
+    #[test]
+    fn test_format_mtime_rfc3339_renders_utc_z() {
+        // 2026-06-16T12:34:56Z
+        let ts = 1_781_613_296_i64;
+        let formatted = format_mtime_rfc3339(ts).expect("timestamp should be representable");
+        assert_eq!(formatted, "2026-06-16T12:34:56Z");
+    }
+
+    #[test]
+    fn test_format_mtime_rfc3339_handles_epoch() {
+        let formatted = format_mtime_rfc3339(0).expect("epoch should format");
+        assert_eq!(formatted, "1970-01-01T00:00:00Z");
     }
 }

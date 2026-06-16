@@ -1478,7 +1478,10 @@ mod tests {
 
     #[test]
     fn check_mock_response_combines_status_body_and_headers() {
-        let admin = Arc::new(crate::state::AdminState::new(0));
+        let temp_dir = tempfile::tempdir().expect("temp rules dir");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("rules storage");
+        let admin = Arc::new(crate::state::AdminState::new_for_test(0, rules_storage));
         let executor = ReplayExecutor::new(admin, false);
 
         let mut resolved = ResolvedRules::new();
@@ -1506,7 +1509,10 @@ mod tests {
 
     #[test]
     fn check_mock_response_infers_default_content_type() {
-        let admin = Arc::new(crate::state::AdminState::new(0));
+        let temp_dir = tempfile::tempdir().expect("temp rules dir");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("rules storage");
+        let admin = Arc::new(crate::state::AdminState::new_for_test(0, rules_storage));
         let executor = ReplayExecutor::new(admin, false);
 
         let resolved = build_resolved_rules(&[(Protocol::ResBody, "hello")]);
@@ -1537,7 +1543,10 @@ mod tests {
 
     #[test]
     fn needs_real_request_depends_on_ruleset() {
-        let admin = Arc::new(crate::state::AdminState::new(0));
+        let temp_dir = tempfile::tempdir().expect("temp rules dir");
+        let rules_storage = bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules"))
+            .expect("rules storage");
+        let admin = Arc::new(crate::state::AdminState::new_for_test(0, rules_storage));
         let executor = ReplayExecutor::new(admin, false);
 
         let only_mock_status = build_resolved_rules(&[(Protocol::StatusCode, "200")]);

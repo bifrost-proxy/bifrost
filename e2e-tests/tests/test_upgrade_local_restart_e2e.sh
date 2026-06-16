@@ -1,6 +1,8 @@
 #!/bin/bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_DISABLE_TRAY
 
 set -uo pipefail
 
@@ -174,6 +176,31 @@ assert_no_tray_helper_for_test_data_dir() {
     _log_pass "upgrade restart leaves no tray helper for test data dir"
 }
 
+assert_post_upgrade_skills_installed() {
+    local test_home="$1"
+    local primary_skill="${test_home}/.codex/skills/bifrost/SKILL.md"
+    local remote_skill="${test_home}/.codex/skills/bifrost-remote/SKILL.md"
+
+    if [[ ! -s "$primary_skill" ]]; then
+        _log_fail "upgrade auto-installs primary Bifrost skill" "$primary_skill exists" "missing"
+        return 1
+    fi
+    if [[ ! -s "$remote_skill" ]]; then
+        _log_fail "upgrade auto-installs remote Bifrost skill" "$remote_skill exists" "missing"
+        return 1
+    fi
+    if ! grep -Eq '^name: "?bifrost"?$' "$primary_skill"; then
+        _log_fail "primary Bifrost skill has frontmatter" 'name: bifrost or name: "bifrost"' "$(head -n 5 "$primary_skill")"
+        return 1
+    fi
+    if ! grep -Eq '^name: "?bifrost-remote"?$' "$remote_skill"; then
+        _log_fail "remote Bifrost skill has frontmatter" 'name: bifrost-remote or name: "bifrost-remote"' "$(head -n 5 "$remote_skill")"
+        return 1
+    fi
+
+    _log_pass "upgrade auto-installs Bifrost skills into isolated HOME"
+}
+
 create_local_release_archive() {
     local archive_root="$1"
     local version="$2"
@@ -213,9 +240,12 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
 
     TEST_ROOT="$(mktemp -d)"
     TEST_DATA_DIR="${TEST_ROOT}/data"
+    local test_home="${TEST_ROOT}/home"
+    local test_home_for_process
     local install_dir="${TEST_ROOT}/install"
     local archive_root="${TEST_ROOT}/archive"
-    mkdir -p "$TEST_DATA_DIR" "$install_dir" "$archive_root"
+    mkdir -p "$TEST_DATA_DIR" "$test_home" "$install_dir" "$archive_root"
+    test_home_for_process="$(bifrost_process_path "$test_home")"
     INSTALL_BIN="${install_dir}/$(binary_name)"
     cp "$BIFROST_BIN" "$INSTALL_BIN"
     chmod +x "$INSTALL_BIN" 2>/dev/null || true
@@ -302,6 +332,10 @@ PY
 
     local upgrade_log="${TEST_ROOT}/upgrade.log"
     BIFROST_DATA_DIR="$bifrost_data_dir" \
+    HOME="$test_home_for_process" \
+    USERPROFILE="$test_home_for_process" \
+    BIFROST_INSTALL_SKILL_SOURCE=embedded \
+    BIFROST_INSTALL_SKILL_DIR="$(bifrost_process_path "${test_home}/.codex/skills/bifrost")" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
@@ -312,10 +346,19 @@ PY
         return 1
     fi
 
+    if ! is_windows; then
+        assert_upgrade_log_contains \
+            "$upgrade_log" \
+            'Installing latest Bifrost skills' \
+            "upgrade output installs Bifrost skills" || return 1
+    fi
     assert_upgrade_log_contains \
         "$upgrade_log" \
         'Detected running Bifrost proxy' \
         "upgrade output detects running proxy" || return 1
+    if ! is_windows; then
+        assert_post_upgrade_skills_installed "$test_home" || return 1
+    fi
     assert_upgrade_log_contains \
         "$upgrade_log" \
         'Stopping current proxy' \
@@ -347,6 +390,12 @@ PY
         _log_fail "new daemon admin ready after upgrade" "reachable" "unreachable"
         return 1
     }
+    if is_windows; then
+        # Windows self-replacement runs in a deferred helper after the upgrade
+        # process exits. The helper installs skills before starting the new
+        # daemon, so Admin readiness is the synchronization point.
+        assert_post_upgrade_skills_installed "$test_home" || return 1
+    fi
 
     local runtime_json_path
     runtime_json_path="${TEST_DATA_DIR}/runtime.json"

@@ -4818,3 +4818,23 @@ bifrost-sync-server 优先实现（便于本地调试），验证通过后同步
 - `cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_forwards_stdin_stream -- --nocapture`
 - `cargo test -p bifrost-admin remote_invoke::executor::tests::test_execute_shell_exec_wall_clock_timeout_still_enforced -- --nocapture`
 - `cargo test --workspace --all-features`
+
+### 十五、2026-06-16 长任务与非交互 shell UX 加固
+
+本轮针对真实远端 Mac 使用中暴露的长任务超时、stream digest、非交互 shell PATH 与 `--cwd` 语义问题做增量修复。
+
+实现约束：
+
+1. `bifrost remote exec --detach` 在 open_call 成功后立即返回 `call_id` 与 `relay_token`，长任务不再依赖单条 caller SSE 连接存活。
+2. 新增 `bifrost remote job status|logs|watch`：`status` 用短 SSE 订阅判断 running/exited，`logs/watch` 复用既有 stream resume 通道并由 `watch` 返回真实远端 exit code。
+3. shell executor 的 wall-clock timeout 错误必须显式显示 `requested`、`policy_cap` 与 `capped_by_policy`，避免 `--timeout-ms` 被策略下调时静默误导。
+4. shell exec 默认走非 login 路径（`-c`，不 source rc/profile），从根因消除 rc 注入的 iTerm2/VS Code `ESC]1337;`/`ESC]133;` OSC shell-integration 噪声泄漏到捕获 stdout；`--login`（`-lc`）为 opt-in，给需要交互式 rc 环境的调用方。降噪 env（`BIFROST_REMOTE=1`、`TERM=dumb`、`ITERM_ENABLE_SHELL_INTEGRATION_WITH_TMUX=NO`）无条件注入（defense-in-depth，login 路径下尤为关键），并以 `or_insert_with` 保留 policy/用户 `--env` 优先级；`--login` 时 shell-text 在远端 shell 内部前置 `cd -- <cwd>`，确保 `--cwd` 在 rc 之后生效。
+5. streaming digest mismatch 不再只输出孤立错误，必须给出 `--detach` + `remote job watch` 或显式 `--no-verify-digest` 的恢复建议。
+
+验证计划：
+
+- `cargo test -p bifrost-cli remote::tests::test_build_remote_command_shell_exec_login_flag_reaches_payload --lib`
+- `cargo test -p bifrost-admin remote_invoke::executor::tests::timeout_policy_note_reports_policy_cap --lib`
+- `cargo test -p bifrost-admin remote_invoke::executor::tests::shell_text_cwd_prefix_quotes_and_forces_cd_inside_shell --lib`
+- `cargo test -p bifrost-cli remote:: --lib --no-run`
+- `cargo test -p bifrost-admin remote_invoke::executor:: --lib --no-run`

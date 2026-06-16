@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -200,7 +202,23 @@ curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-
     \"text\": \"DEFAULT_GUIDE_INITIAL\"
   }" >/dev/null
 
-sleep 0.2
+# Barrier (not a fixed sleep): wait until the first inbound turn has actually
+# reached the mock model. That request is what marks the session active and
+# publishes its active-turn status; only then will the second inbound message
+# be routed through guide mode instead of starting a fresh turn. A fixed sleep
+# is racy on loaded CI runners and was the root cause of this test's flakiness.
+DEFAULT_GUIDE_INITIAL_STARTED=""
+for _ in $(seq 1 200); do
+  if [[ -f "$MOCK_LOG" ]] && grep -q "DEFAULT_GUIDE_INITIAL" "$MOCK_LOG"; then
+    DEFAULT_GUIDE_INITIAL_STARTED="true"
+    break
+  fi
+  sleep 0.05
+done
+if [[ -z "$DEFAULT_GUIDE_INITIAL_STARTED" ]]; then
+  echo "[im-guide-queue-human-api] default guide initial turn did not reach mock model" >&2
+  exit 1
+fi
 
 curl -fsS --noproxy '*' -X POST "http://127.0.0.1:$BIFROST_PORT/_bifrost/api/im-gateway/debug/mock-inbound" \
   -H 'Content-Type: application/json' \

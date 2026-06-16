@@ -138,6 +138,7 @@ export type SessionDetailMessage = {
 export type SessionDetail = {
   session_key: string;
   title?: string;
+  running?: boolean;
   source?: string;
   state?: string;
   work_dir?: string;
@@ -622,11 +623,15 @@ export function telemetryFromThread(thread?: AgentThreadSummary): RunTelemetry {
   if (!thread) {
     return EMPTY_TELEMETRY;
   }
+  const state =
+    thread.running === false
+      ? "idle"
+      : thread.state || thread.run_state || thread.status;
   return {
     phase: "idle",
     title: thread.title,
     status: {
-      state: thread.state || thread.status,
+      state,
       source: thread.source,
       work_dir: thread.work_dir,
       message_count: thread.turns,
@@ -650,6 +655,13 @@ export function telemetryFromSessionDetail(
   detail: SessionDetail,
   thread?: AgentThreadSummary,
 ): RunTelemetry {
+  const detailState =
+    detail.running === false
+      ? "idle"
+      : detail.active_status?.state ||
+        detail.run_state ||
+        detail.state ||
+        undefined;
   return {
     ...telemetryFromThread(thread),
     phase: "idle",
@@ -657,9 +669,7 @@ export function telemetryFromSessionDetail(
     status: {
       ...detail.active_status,
       state:
-        detail.active_status?.state ||
-        detail.run_state ||
-        detail.state ||
+        detailState ||
         thread?.run_state ||
         thread?.state ||
         thread?.status ||
@@ -727,6 +737,7 @@ export async function runAgentStream(params: {
   onEvent: (event: Record<string, unknown>) => void;
   onDelta: (content: string) => void;
   onFinal: (content: string) => void;
+  signal?: AbortSignal;
 }) {
   const isExternalRunner =
     params.runnerId && params.runnerId !== "bifrost_agent";
@@ -734,6 +745,7 @@ export async function runAgentStream(params: {
     isExternalRunner ? "/api/im-gateway/chat/stream" : "/api/agent/chat/stream",
     {
       method: "POST",
+      signal: params.signal,
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(
         isExternalRunner

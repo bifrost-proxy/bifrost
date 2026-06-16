@@ -2,7 +2,9 @@
 
 set -euo pipefail
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"

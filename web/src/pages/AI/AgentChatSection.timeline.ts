@@ -636,8 +636,10 @@ export function historyEventsToTelemetry(
       };
     }
   }
+  const threadState = thread?.run_state || thread?.state;
   const explicitIdleThread =
-    thread?.running === false && !isRunStateActive(thread.state);
+    thread?.running === false ||
+    (thread?.running !== true && Boolean(threadState) && !isRunStateActive(threadState));
   const liveStatus = explicitIdleThread
     ? threadTelemetry.status
     : isThreadActiveForTelemetry(thread)
@@ -673,7 +675,7 @@ function mergeDefinedStatus(
 }
 
 function isThreadActiveForTelemetry(thread?: AgentThreadSummary) {
-  if (thread?.running === false && !isRunStateActive(thread.state)) {
+  if (thread?.running === false) {
     return false;
   }
   return thread?.running === true || isRunStateActive(thread?.run_state || thread?.state);

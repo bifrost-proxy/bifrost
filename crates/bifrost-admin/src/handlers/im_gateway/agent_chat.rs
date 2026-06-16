@@ -1554,6 +1554,7 @@ pub(super) async fn process_agent_chat(
     let mut result: Result<bifrost_agent::TurnResult, String> =
         Err("agent worker exited without result".to_string());
     let mut worker_history_path: Option<String> = None;
+    let mut worker_consumed_guides: Vec<String> = Vec::new();
     let mut stop_ack = None;
 
     match crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback(worker_request)
@@ -1619,6 +1620,7 @@ pub(super) async fn process_agent_chat(
                             }
                             Ok(Some(crate::im_gateway::agent_worker::AgentWorkerEvent::Finished { result: turn_result })) => {
                                 worker_history_path = turn_result.history_path.clone();
+                                worker_consumed_guides = turn_result.consumed_guide_messages.clone();
                                 result = Ok(bifrost_agent::TurnResult::from(turn_result));
                                 break;
                             }
@@ -1644,6 +1646,25 @@ pub(super) async fn process_agent_chat(
         Err(error) => {
             result = Err(format!("Agent worker 启动失败: {error}"));
         }
+    }
+
+    // Reconcile guides handed to the worker against the ones it actually
+    // consumed. Any handed-off guide the worker never injected into history was
+    // lost to the IPC race (it reached the worker's command pipe after the
+    // turn-end checkpoint had already drained). Re-queue those so they are
+    // processed in a follow-up turn instead of being silently dropped.
+    let unconsumed_handed_off =
+        queue_manager.reconcile_handed_off_guides(session_key, &worker_consumed_guides);
+    for guide in unconsumed_handed_off {
+        if guide.trim().is_empty() {
+            continue;
+        }
+        info!(
+            session_key = %session_key,
+            guide_msg_len = guide.len(),
+            "re-queuing guide handed to worker but not consumed (IPC race recovery)"
+        );
+        let _ = queue_manager.push_queue(session_key, guide);
     }
 
     if let Some(history_path) = worker_history_path.as_deref() {

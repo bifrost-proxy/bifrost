@@ -2047,6 +2047,28 @@ fn test_running_turns_remain_visible_in_session_list() {
 }
 
 #[test]
+fn test_request_stop_releases_stale_active_status_without_stop_signal() {
+    let manager = AgentSessionManager::new(3600);
+    let session = manager
+        .try_take_session("stale-stop")
+        .expect("session should be checked out");
+    manager.drop_active_stop_signal_for_test("stale-stop");
+
+    assert!(manager.is_session_active("stale-stop"));
+    assert_eq!(manager.list_active_turn_statuses().len(), 1);
+
+    assert!(manager.request_stop("stale-stop"));
+    assert!(!manager.is_session_active("stale-stop"));
+    assert!(manager.list_active_turn_statuses().is_empty());
+    let recovered = manager
+        .try_take_session("stale-stop")
+        .expect("stale active state should no longer block a new turn");
+    manager.return_session(recovered);
+
+    drop(session);
+}
+
+#[test]
 fn test_session_manager_broadcasts_session_list_changes() {
     let manager = AgentSessionManager::new(3600);
     let mut events = manager.subscribe_session_events();

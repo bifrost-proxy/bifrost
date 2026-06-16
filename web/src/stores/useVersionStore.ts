@@ -1,11 +1,18 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
-import { checkVersion as checkVersionApi } from "../api/version";
-import type { VersionCheckResponse } from "../types";
+import {
+  checkVersion as checkVersionApi,
+  getUpgradeProgress as getUpgradeProgressApi,
+  startUpgrade as startUpgradeApi,
+} from "../api/version";
+import type { UpgradePhase, UpgradeProgress, VersionCheckResponse } from "../types";
 import { isConnectionIssueError } from "../api/client";
 
 const SEEN_VERSIONS_STORAGE_KEY = "bifrost-seen-versions";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+const UPGRADE_POLL_INTERVAL_MS = 1000;
+/** sessionStorage flag guarding the single post-upgrade auto-reload. */
+export const UPGRADE_RELOAD_PENDING_KEY = "bifrost-upgrade-reload-pending";
 
 interface CheckVersionOptions {
   forceRefresh?: boolean;
@@ -23,11 +30,48 @@ interface VersionState {
   seenVersions: string[];
   modalVisible: boolean;
 
+  // Upgrade flow state.
+  upgradePhase: UpgradePhase;
+  upgradePercent: number | null;
+  upgradeMessage: string;
+  upgradeError: string | null;
+  upgrading: boolean;
+
   checkVersion: (options?: CheckVersionOptions) => Promise<void>;
   markVersionSeen: (version: string) => void;
   isVersionSeen: (version: string) => boolean;
   setModalVisible: (visible: boolean) => void;
   shouldShowAutoModal: () => boolean;
+  startUpgrade: () => Promise<void>;
+  pollUpgradeProgress: () => void;
+  stopPollUpgradeProgress: () => void;
+}
+
+/** True while an upgrade is mid-flight (non-terminal). */
+function isActivePhase(phase: UpgradePhase): boolean {
+  return (
+    phase === "checking" ||
+    phase === "downloading" ||
+    phase === "installing" ||
+    phase === "restarting"
+  );
+}
+
+let pollTimer: ReturnType<typeof setInterval> | null = null;
+/** Set once we observe the backend drop (proxy restart) during an upgrade. */
+let sawDisconnect = false;
+
+/** Reload the page exactly once after an upgrade, guarded by sessionStorage. */
+function triggerUpgradeReloadOnce() {
+  try {
+    if (sessionStorage.getItem(UPGRADE_RELOAD_PENDING_KEY) === "done") {
+      return;
+    }
+    sessionStorage.setItem(UPGRADE_RELOAD_PENDING_KEY, "done");
+  } catch {
+    // sessionStorage unavailable — fall through and reload anyway.
+  }
+  window.location.reload();
 }
 
 export const useVersionStore = create<VersionState>()(
@@ -42,6 +86,12 @@ export const useVersionStore = create<VersionState>()(
       lastChecked: null,
       seenVersions: [],
       modalVisible: false,
+
+      upgradePhase: "idle",
+      upgradePercent: null,
+      upgradeMessage: "",
+      upgradeError: null,
+      upgrading: false,
 
       checkVersion: async (options: CheckVersionOptions = {}) => {
         const { forceRefresh = false, skipCache = false } = options;
@@ -96,6 +146,88 @@ export const useVersionStore = create<VersionState>()(
           return false;
         }
         return !state.seenVersions.includes(state.latestVersion);
+      },
+
+      startUpgrade: async () => {
+        if (get().upgrading) {
+          return;
+        }
+        sawDisconnect = false;
+        try {
+          sessionStorage.removeItem(UPGRADE_RELOAD_PENDING_KEY);
+        } catch {
+          // ignore — sessionStorage may be unavailable.
+        }
+        set({
+          upgrading: true,
+          upgradePhase: "checking",
+          upgradePercent: null,
+          upgradeMessage: "Checking for updates…",
+          upgradeError: null,
+        });
+        try {
+          const progress = await startUpgradeApi();
+          set({
+            upgradePhase: progress.phase,
+            upgradePercent: progress.percent,
+            upgradeMessage: progress.message,
+            upgradeError: progress.error,
+          });
+          get().pollUpgradeProgress();
+        } catch (error) {
+          set({
+            upgrading: false,
+            upgradePhase: "failed",
+            upgradeError:
+              error instanceof Error ? error.message : "Failed to start upgrade",
+          });
+        }
+      },
+
+      pollUpgradeProgress: () => {
+        if (pollTimer) {
+          return;
+        }
+        pollTimer = setInterval(async () => {
+          try {
+            const progress: UpgradeProgress = await getUpgradeProgressApi();
+            set({
+              upgradePhase: progress.phase,
+              upgradePercent: progress.percent,
+              upgradeMessage: progress.message,
+              upgradeError: progress.error,
+            });
+
+            if (progress.phase === "completed") {
+              get().stopPollUpgradeProgress();
+              set({ upgrading: false });
+              triggerUpgradeReloadOnce();
+            } else if (progress.phase === "failed") {
+              get().stopPollUpgradeProgress();
+              set({ upgrading: false });
+            }
+          } catch (error) {
+            // A connection drop during Restarting is expected (proxy restart).
+            // Remember it: once the backend comes back and we read a terminal
+            // state, we trigger the single auto-reload.
+            if (isConnectionIssueError(error) && isActivePhase(get().upgradePhase)) {
+              sawDisconnect = true;
+            }
+            if (sawDisconnect && !isConnectionIssueError(error)) {
+              // Reconnected after a drop — refresh once to load the new build.
+              get().stopPollUpgradeProgress();
+              set({ upgrading: false });
+              triggerUpgradeReloadOnce();
+            }
+          }
+        }, UPGRADE_POLL_INTERVAL_MS);
+      },
+
+      stopPollUpgradeProgress: () => {
+        if (pollTimer) {
+          clearInterval(pollTimer);
+          pollTimer = null;
+        }
       },
     }),
     {

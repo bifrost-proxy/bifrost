@@ -73,6 +73,19 @@ mkdir -p ./.bifrost-test
 - **预期结果**: 测试通过；`exec_command` 可启动短命令、长任务、等待 stdin 的 pipe 进程和 `tty=true` 真实 PTY，并由 `write_stdin` 轮询到最终 `exit_code`。
 - **本次执行结果**: 通过。2026-05-12 执行后 unified exec 指定单测均 passed。
 
+### TC-APT-07: Worktree 工具成功后同轮立即切换工作目录
+
+- **操作步骤**:
+  ```bash
+  CARGO_TARGET_DIR=./.bifrost-test/agent-p1-target cargo test -p bifrost-agent worktree_signal_tests --lib -- --nocapture
+  ```
+- **预期结果**:
+  - `enter_worktree` 成功信号会立即更新 turn loop 当前 `work_dir` 和 `session.work_dir`。
+  - `exit_worktree` 成功信号会恢复原始工作目录。
+  - 失败的 worktree 信号不修改当前工作目录。
+  - 后续同轮 ordered tool 不再继续落在旧目录。
+- **本次执行结果**: 待执行。
+
 ## 清理步骤
 
 ```bash

@@ -7,7 +7,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 
 # Bifrost Remote
 
-本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成四类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
+本技能指导 Agent 通过 `bifrost remote` 与远端 Bifrost 建立连接，并完成五类操作：**连接管理**（`conn`）、**远端 shell 执行**（`exec`）、**远端长任务续接**（`job`）、**远端文件编程**（`file`，coding-agent 友好）、**远端流量查询**（`traffic`）。
 
 ---
 
@@ -29,7 +29,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | Agent 的意图 | 选哪个命令 | 不要这么做 |
 |---|---|---|
 | 看一下远端某文件 | `remote file read <path>` | `remote exec --shell-text "cat <path>"` |
-| 一次读多个文件 | `remote file read-many --path a --path b ...` | 循环多次 `read` / `shell-text "cat a b c"` |
+| 一次读多个文件 | 先试 `remote file read-many --path a --path b ...`；若 policy deny，回落多次 `read` | `shell-text "cat a b c"` |
 | 列目录树、找文件名 | `remote file list` / `remote file glob` | `shell-text "find ..." / "ls -R"` |
 | 正则搜代码、定位符号 | `remote file find <regex>` | `shell-text "grep -rn ..."` |
 | 看一个源文件有哪些符号（函数/类/结构体） | `remote file outline <path>` | 人肉 `read` 整文件再扫一遍 |
@@ -37,6 +37,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | 搜到点想看上下文 | `remote file find <regex> --around 3` | 再单独 `read` 那几行 |
 | 写一个短文本文件 | `remote file write <path> --content "..." --create-parents` | `shell-text "echo ... > file"` |
 | 从本地文件写过去 | `remote file write <path> --content-file ./local.txt --create-parents` | `scp` / `echo`+重定向 |
+| 放临时脚本 / 日志 | `remote file scratch-dir [--name .bifrost-tmp]` 后写入返回目录 | 写 `/tmp/...` 或 `target/...` 反复撞 FileAccessPolicy |
 | 改已有文件的几行（按行号） | `remote file edit --base-sha256 <sha> --edits '[{"start_line":..}]'` | `sed -i` / `echo`+重定向 |
 | 按内容锚点改（不数行号） | `remote file edit --edits '[{"old_string":"..","new_string":".."}]'` | `sed`/正则替换 |
 | 多文件统一 patch（含改名/复制） | `remote file patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
@@ -48,7 +49,7 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 **只有下列场景才回落到 `remote exec`**：
 - 跑测试 / 构建 / 启动脚本（`cargo test`、`npm run build`、`python app.py`）。
 - `chmod` / `chown` / `ln -s` / `git` 这种文件元信息或 VCS 操作（`remote file` 不覆盖）。
-- 需要 streaming 观察 stdout 的长任务（`--stream` / `--output-file`）。
+- 需要运行远端进程本身。长任务优先用 `exec --detach` + `remote job watch`，不要把构建/测试押在一条长期 streaming 连接上。
 
 ---
 
@@ -239,18 +240,25 @@ bifrost remote exec -- ls -la /tmp
 bifrost remote exec --cwd <USER_HOME>/work/repo --env FOO=bar --shell-text "echo \$FOO"
 bifrost remote exec --timeout-ms 10000 --shell-text "cargo test 2>&1 | tail -30"
 
-# 长任务 / 大输出：流式 + 写文件 + 断点续传
-bifrost remote exec --stream --output-file ./build.log \
+# 长任务 / 大输出：一等公民 job 模型
+bifrost remote exec --detach --cwd <USER_HOME>/work/repo \
   --timeout-ms 1800000 --shell-text "cargo build --release 2>&1"
-bifrost remote exec --resume-call-id <uuid> --resume-relay-token <token> \
-  --output-file ./build.log
+bifrost remote job status <call_id> --relay-token <token>
+bifrost remote job logs <call_id> --relay-token <token> --output-file ./build.log
+bifrost remote job watch <call_id> --relay-token <token> --output-file ./build.log
+
+# 需要用户 PATH / login shell 环境时，显式开启 login shell；CLI 会注入 BIFROST_REMOTE=1、TERM=dumb 抑制常见 shell integration 噪声
+bifrost remote exec --login --cwd <USER_HOME>/work/repo \
+  --shell-text "cargo --version && pwd"
 ```
 
 注意：
 - `$FOO` 是远端 shell 展开，不是 caller 的 env。caller 的 env 要通过 `--env` 显式传入。
-- `--stream` 会一边收 stdout 一边写；不加会缓冲到结束。
-- `--output-file` 隐式开启 `--stream`；默认带 SHA-256 校验（`--no-verify-digest` 关闭）。
-- `--resume-call-id` + `--resume-relay-token` 用于从服务端保留的 session 续传；没开服务端保留时不可用。
+- `--detach` 会立即返回 `call_id` 和 `relay_token`；后续用 `remote job status/logs/watch` 查真实远端进程状态和 exit code。
+- `remote job logs --output-file` / `remote job watch --output-file` 默认做流 digest 校验；遇到 digest mismatch 时先重新 watch/logs 或查看远端日志，不要第一反应加 `--no-verify-digest`。
+- `--stream` 仍可用于短命令或临时观察；构建、测试、CI、迁移等长任务默认走 `--detach`。
+- `--timeout-ms` 会受到目标端 policy 上限约束；若被 cap，错误信息会包含 requested/policy/capped_by_policy，不能把会话超时信号当作远端进程真实 exit code。
+- `--login` 是显式 opt-in。需要 `~/.cargo/bin` / `mise` / `nvm` 等用户 PATH 时使用；`--cwd` 会在 shell rc 之后再次生效，避免 rc 里的 `cd` 覆盖工作目录。
 
 ### 4.4 远端文件编程（`file`，`remote_file_*` scope）
 
@@ -262,6 +270,8 @@ bifrost remote file read   <path> [--max-bytes N] [--allow-binary] \
                                    [--offset LINE] [--limit N]
 bifrost remote file read-many --path <p1> --path <p2> ... \
                                    [--max-bytes N] [--allow-binary]
+bifrost remote file scratch-dir [--cwd <repo>] [--name .bifrost-tmp] \
+                                   [--output human|json]
 bifrost remote file list   [path] [--depth N] [--no-ignore] [--exclude NAME]...
 bifrost remote file stat   <path>
 bifrost remote file glob   '<pattern>'  [--max-matches N] [--no-ignore]
@@ -301,6 +311,20 @@ bifrost remote file read-many \
 - 服务端**并发**读取，单个文件失败（不存在 / 越权 / 二进制未允许）**不会**中断其余文件——该文件返回单独的错误项，其余正常返回。
 - json 模式返回 `{files:[...], count, ok_count}`：`count` 是请求数，`ok_count` 是成功数；每个 `files[i]` 要么带 `content_b64`/`sha256`/`size` 等正文字段，要么带该文件的 `error` 码。
 - 每个文件仍受 `--max-bytes` / `--allow-binary` 约束（对全体生效）。
+- 如果当前授权 policy 阻断 `read-many`（例如返回 `file.op_not_permitted`），不要卡住：直接回落为多次 `remote file read`，并在交付里说明 policy 未开放批量读。
+
+#### `scratch-dir`：拿一个 policy 内的临时落点
+
+需要在远端放 smoke 脚本、临时日志或小型中间文件时，先创建授权根内的暂存目录，不要猜 `/tmp`、`.git`、`target`：
+
+```bash
+bifrost remote file scratch-dir --cwd <USER_HOME>/work/repo
+bifrost remote file write .bifrost-tmp/smoke.js --content-file ./smoke.js --create-parents
+```
+
+- 默认目录名是 `.bifrost-tmp`，也可以用 `--name <dir>` 指定；它走 `remote file mkdir --parents` 同一套 FileAccessPolicy。
+- macOS `/tmp` 常是 `/private/tmp` 的 symlink，容易触发 `file.symlink_escape` 或 `file.out_of_scope`；`target/` 常被 deny pattern 拒绝。
+- 任务结束前按需 `remote file delete .bifrost-tmp --recursive` 清理。
 
 #### `outline`：快速拿到一个源文件的符号地图
 
@@ -380,7 +404,7 @@ bifrost remote file find 'fn main' --around 3
 - **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` 从本地文件或 stdin；`--content-b64 <b64>` 由 caller 本地 base64、目标端解码。优先级：`--content-b64` > `--content` > `--content-file`。二进制、含 CRLF、含特殊字符的文本走 `--content-b64` 最安全，远比 echo 管道 base64 + shell 重定向可靠。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
 - **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错并给出示例**（不再静默吞错发 null）。两种形态：行号区间 `[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`（1-based 闭区间），或内容锚定 `[{"old_string":"foo","new_string":"bar","expected_count":1}]`（按字面子串定位，`expected_count` 默认 1，命中数不符则报错）；单次调用两种形态不可混用。
-- **错误自带修复建议**：file 操作失败时，CLI 会根据服务端的 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→让目标端加白名单而非改 cwd）。错误码含义见下方"错误码契约"。
+- **错误自带修复建议**：file 操作失败时，CLI 会根据服务端的 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→用 `scratch-dir` 或让目标端加白名单而非改 cwd）。错误码含义见下方"错误码契约"。
 - **Symlink lstat 语义**：`stat` / `list` 不跟随软链；`stat` 额外返回 `symlink_target`。Windows 自动去 `\\?\` / `\\?\UNC\` 前缀。
 - **`read --output json` 的关键字段**：`content_b64`（base64 编码正文）、`sha256`（返回切片的 sha）、`size`（返回切片字节数）、`total_size` / `total_lines`（整文件）、`truncated`（是否截断）、`file_sha256`（仅 truncated=true 时出现，整文件 sha，用于后续 `--base-sha256` 乐观锁）、`start_line` / `end_line`（使用 `--offset`/`--limit` 时的范围）、`mtime_unix`。注意 human 模式下这些都已替你渲染好（正文走 stdout、sha/行数/字节数走 stderr footer），只有要程序化解析时才需要 json。
 
@@ -390,8 +414,9 @@ bifrost remote file find 'fn main' --around 3
 
 | 错误码 | 含义 | Agent 应对 |
 |---|---|---|
-| `file.out_of_scope` | 路径在 `roots` 之外 | **不要擅自改 `--cwd`**，请用户在目标端更新 FileAccessPolicy |
+| `file.out_of_scope` | 路径在 `roots` 之外 | 临时文件先试 `remote file scratch-dir`；否则请用户在目标端更新 FileAccessPolicy，**不要擅自改 `--cwd`** |
 | `file.permission_denied` | 命中 denies，或缺 write scope | 如果是 denies（比如 `.ssh`、`target`），说明用户不想给；如果是缺 scope，请用户重新授权 |
+| `file.op_not_permitted` | 当前 grant/policy 未开放该 file op | 按提示降级：如 `read-many` 被 deny，回落多次 `remote file read`；需要长期使用则请用户重授权 |
 | `file.binary_not_allowed` | 是二进制但没加 `--allow-binary` | 显式加 `--allow-binary`，或改用 `hash` + 分片 |
 | `file.sha_mismatch` | 乐观锁失败 | 重新 `read` + 重算 sha + 重试 |
 | `file.not_found` | 路径不存在 | 视任务决定 `mkdir` / `write --create-parents` |
@@ -445,7 +470,8 @@ bifrost remote file patch --patch-file ./refactor.diff
 
 # 7. 跑测试（这一步才用 exec）
 bifrost remote exec --cwd <USER_HOME>/work/github/repo \
-  --timeout-ms 300000 --shell-text "cargo test 2>&1 | tail -30"
+  --detach --timeout-ms 1800000 --shell-text "cargo test 2>&1"
+bifrost remote job watch <call_id> --relay-token <token> --output-file ./test.log
 ```
 
 ### 4.5 断开与回收（`conn down`）
@@ -456,7 +482,27 @@ bifrost remote conn down --all               # 所有 client
 bifrost remote conn down --grant-id <gid>    # 指定 grant
 ```
 
-### 4.6 连接漂移 / 流会话错位的恢复
+### 4.6 连接断开、长任务续接与连接漂移恢复
+
+长任务（build/test/CI watch/迁移）必须默认使用 `exec --detach`。这会把远端进程生命周期和 caller 当前这条网络连接解耦：即使本地终端、SSE stream 或 relay 短连接断开，只要远端 call 仍在，caller 都可以凭 `call_id` + `relay_token` 重新接上。
+
+```bash
+# 启动时保存这两个字段
+bifrost remote exec --detach --cwd <repo> \
+  --timeout-ms 1800000 --shell-text "cargo test 2>&1"
+
+# 断开/切线程/重启 CLI 后，优先用 job 命令恢复观察
+bifrost remote job status <call_id> --relay-token <token>
+bifrost remote job logs <call_id> --relay-token <token> --output-file ./test.log
+bifrost remote job watch <call_id> --relay-token <token> --output-file ./test.log
+```
+
+恢复判断：
+
+- `status` 能返回 `running/exited + exit_code` 时，不要重新启动同一长任务；继续 `logs` / `watch`。
+- `watch` 会跟到远端终态，并用真实远端 exit code 作为本地退出码。
+- `logs` / `watch` 遇到 digest mismatch 时，先重新执行同一个 `job logs/watch` 或查看目标端日志；只有你已独立校验输出完整性时，才考虑 `--no-verify-digest`。
+- 只有 `grant revoked`、`authorization expired`、transport identity 变化、relay reusable authorization 变化等连接身份问题，才走下面的 `conn down/up` 重建连接流程。
 
 长会话或服务端重启后，caller 侧有时会看到这类错误：
 
@@ -493,9 +539,10 @@ bifrost remote conn status
    - connect 失败 → 检查 SSH key 有效性、pair code 是否过期、目标是否在线、Web UI 是否授权。grant 失效就重新 `conn up`，**不要**伪造本地连接文件。
 8. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
 9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
-10. **长任务超时 + 流式**：构建、测试类 `exec` 记得 `--timeout-ms 300000`（默认 30s 不够用），必要时叠 `--stream --output-file ./x.log`。
+10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job watch/logs/status` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
 11. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。
-12. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
+12. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
+13. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 
 ---
 
@@ -517,10 +564,13 @@ A: 不用。直接 `remote file write <path> --content "第一行\n第二行\n" 
 A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./local.bin)" --allow-overwrite true --create-parents`。
 
 **Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
-A: `remote exec`：`--cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`。git / 测试用 shell，代码改动用 file。
+A: `remote exec --detach --cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`，再用 `remote job watch <call_id> --relay-token <token>`。git / 测试用 shell，代码改动用 file。
 
 **Q: 我要一次看某模块的好几个文件，怎么少跑几趟？**
-A: 用 `remote file read-many --path a --path b --path c`，一次往返并发取回；某个文件读失败不影响其余文件，json 模式里看 `ok_count`。
+A: 先用 `remote file read-many --path a --path b --path c`，一次往返并发取回；某个文件读失败不影响其余文件，json 模式里看 `ok_count`。如果 policy 阻断 `read-many`，立即回落为多次 `remote file read`。
+
+**Q: 我要放一个临时 smoke 脚本，能写 `/tmp` 吗？**
+A: 默认不要。先 `remote file scratch-dir --cwd /path/to/repo`，把脚本写到 `.bifrost-tmp/` 下；任务结束后按需 `remote file delete .bifrost-tmp --recursive`。
 
 **Q: 我要进一个几千行的陌生源文件改东西，怎么先快速摸清结构？**
 A: 先 `remote file outline <path>` 拿到函数/类/结构体清单 + 行号，再针对目标符号 `read --offset <line> --limit N` 精读那一段，或直接 `edit` 定点改。不用把整文件拉回来人肉扫。

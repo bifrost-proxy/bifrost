@@ -609,4 +609,27 @@ Directories still use platform rename semantics because directories cannot be ha
 
 ### CLI contract coverage
 
-The hermetic CLI contract test now treats the remote file surface as fourteen subcommands and verifies `read-many`, `outline`, and the `move` safety flags in addition to the older read/write/search/patch commands.
+The hermetic CLI contract test now treats the remote file surface as fifteen subcommands and verifies `read-many`, `scratch-dir`, `outline`, and the `move` safety flags in addition to the older read/write/search/patch commands.
+
+## 2026-06-16 coding-agent UX hardening
+
+### scratch-dir and policy-deny fallbacks
+
+真实远端使用中，临时脚本写入 `/tmp` 会因为 macOS `/tmp -> /private/tmp` symlink 或 policy roots 不包含临时目录而失败。新增 CLI 入口：
+
+```bash
+bifrost remote file scratch-dir --cwd <repo>
+```
+
+该命令在授权 cwd 下创建 `.bifrost-tmp`，底层仍走 `file.mkdir` 与 FileAccessPolicy 写权限校验，不绕过目标端授权边界。后续临时脚本可写入该目录并由调用方清理。
+
+### read/read-many/concurrency visibility
+
+- `file.out_of_scope` hint 明确提示 `/tmp`/`/private/tmp` 与 `scratch-dir` fallback。
+- `file.op_not_permitted` hint 明确提示 `read-many` 可被 policy 独立禁用，并建议降级为逐个 `remote file read`。
+- human `file.read` footer 继续输出 sha256，同时新增 `mtime_unix`，帮助多 agent 在 read/edit 之间发现文件近期变化。
+
+验证计划：
+
+- `cargo test -p bifrost-cli remote::tests::test_build_remote_file_scratch_dir_uses_policy_checked_mkdir --lib`
+- `cargo test -p bifrost-cli remote:: --lib --no-run`

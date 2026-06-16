@@ -409,12 +409,28 @@ fn resolve_target_dirs_with_base(
     cwd: bool,
     cwd_base: impl FnOnce() -> PathBuf,
 ) -> Vec<PathBuf> {
+    let env_dir = std::env::var_os("BIFROST_INSTALL_SKILL_DIR")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from);
+    resolve_target_dirs_with_base_and_env(tool, custom_dir, cwd, cwd_base, env_dir)
+}
+
+fn resolve_target_dirs_with_base_and_env(
+    tool: &AiTool,
+    custom_dir: &Option<PathBuf>,
+    cwd: bool,
+    cwd_base: impl FnOnce() -> PathBuf,
+    env_dir: Option<PathBuf>,
+) -> Vec<PathBuf> {
     if let Some(d) = custom_dir {
         return vec![d.clone()];
     }
     if cwd {
         let base = cwd_base();
         return tool.project_local_dirs(&base);
+    }
+    if let Some(d) = env_dir {
+        return vec![d];
     }
     tool.default_global_dirs()
 }
@@ -670,6 +686,43 @@ mod tests {
             resolve_target_dirs_with_base(&AiTool::Codex, &None, true, || temp_dir.path().into());
         let expected = AiTool::Codex.project_local_dirs(temp_dir.path());
         assert_eq!(dirs, expected);
+    }
+
+    #[test]
+    fn resolve_target_dirs_uses_env_dir_for_global_installs() {
+        let env_dir = PathBuf::from("/tmp/env-skill-dir");
+        let dirs = resolve_target_dirs_with_base_and_env(
+            &AiTool::Codex,
+            &None,
+            false,
+            || PathBuf::from("/tmp/project"),
+            Some(env_dir.clone()),
+        );
+        assert_eq!(dirs, vec![env_dir]);
+    }
+
+    #[test]
+    fn resolve_target_dirs_keeps_explicit_targets_ahead_of_env_dir() {
+        let custom = PathBuf::from("/tmp/custom-dir");
+        let env_dir = Some(PathBuf::from("/tmp/env-skill-dir"));
+        let dirs = resolve_target_dirs_with_base_and_env(
+            &AiTool::Codex,
+            &Some(custom.clone()),
+            false,
+            || PathBuf::from("/tmp/project"),
+            env_dir.clone(),
+        );
+        assert_eq!(dirs, vec![custom]);
+
+        let project = PathBuf::from("/tmp/project");
+        let dirs = resolve_target_dirs_with_base_and_env(
+            &AiTool::Codex,
+            &None,
+            true,
+            || project.clone(),
+            env_dir,
+        );
+        assert_eq!(dirs, AiTool::Codex.project_local_dirs(&project));
     }
 
     #[test]

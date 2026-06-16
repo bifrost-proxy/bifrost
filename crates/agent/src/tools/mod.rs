@@ -24,6 +24,7 @@ pub mod switch_workdir;
 pub mod tool_search;
 pub mod update_plan;
 pub mod view_image;
+pub mod worktree;
 
 use crate::types::{ToolDefinition, ToolResult};
 use async_trait::async_trait;
@@ -85,6 +86,8 @@ impl ToolRegistry {
         registry.register(Arc::new(file_ops::ReadFileTool));
         registry.register(Arc::new(file_ops::ListDirectoryTool));
         registry.register(Arc::new(switch_workdir::SwitchWorkdirTool));
+        registry.register(Arc::new(worktree::EnterWorktreeTool));
+        registry.register(Arc::new(worktree::ExitWorktreeTool));
         registry.register(Arc::new(update_plan::UpdatePlanTool));
         registry.register(Arc::new(set_title::SetTitleTool));
         registry.register(Arc::new(view_image::ViewImageTool));

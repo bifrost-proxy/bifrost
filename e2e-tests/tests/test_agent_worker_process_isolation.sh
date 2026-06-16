@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -62,6 +64,10 @@ fail() {
   cat "$LOG_FILE" >&2 2>/dev/null || true
   echo "--- sse ---" >&2
   cat "$SSE_FILE" >&2 2>/dev/null || true
+  echo "--- disconnect sse ---" >&2
+  cat "$DISCONNECT_SSE_FILE" >&2 2>/dev/null || true
+  echo "--- external sse ---" >&2
+  cat "$EXTERNAL_SSE_FILE" >&2 2>/dev/null || true
   exit 1
 }
 
@@ -211,8 +217,30 @@ for _ in {1..40}; do
   fi
   sleep 0.25
 done
+for _ in {1..40}; do
+  if grep -q "run_started" "$DISCONNECT_SSE_FILE"; then
+    break
+  fi
+  sleep 0.25
+done
+grep -q "run_started" "$DISCONNECT_SSE_FILE" || fail "disconnect stream did not emit run_started"
 kill "$DISCONNECT_CURL_PID" >/dev/null 2>&1 || true
 DISCONNECT_CURL_PID=""
+# Per design/im-gateway-agent.md: an SSE client disconnect (page refresh / closed
+# browser) must NOT stop the Agent loop. The worker keeps running in the
+# background; only an explicit /stop (or stop signal) tears it down. Confirm the
+# worker survives the raw disconnect.
+sleep 2
+if ! worker_running "bifrost agent worker"; then
+  fail "worker process exited after SSE disconnect (should continue in background)"
+fi
+curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api not responding after disconnect"
+
+# Explicit /stop must reap the backgrounded worker spawned by the disconnected stream.
+DISCONNECT_STOP_RESPONSE="$(curl -sS -X POST "http://127.0.0.1:${PORT}/_bifrost/api/agent/chat/stream" \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"/stop","session_key":"e2e-agent-worker-disconnect"}')"
+echo "$DISCONNECT_STOP_RESPONSE" | grep -Eq 'stopped|已请求停止当前 Agent loop|Agent worker 子进程已停止' || fail "disconnect /stop response did not acknowledge stop: $DISCONNECT_STOP_RESPONSE"
 for _ in {1..40}; do
   if ! worker_running "bifrost agent worker"; then
     break
@@ -220,7 +248,7 @@ for _ in {1..40}; do
   sleep 0.25
 done
 if worker_running "bifrost agent worker"; then
-  fail "worker process still running after SSE disconnect"
+  fail "worker process still running after /stop following disconnect"
 fi
 curl -sS "http://127.0.0.1:${PORT}/_bifrost/api/proxy/address" >/dev/null || fail "admin api not responding after disconnect cleanup"
 

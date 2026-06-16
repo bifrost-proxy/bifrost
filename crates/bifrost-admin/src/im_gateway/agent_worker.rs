@@ -81,6 +81,12 @@ pub struct AgentWorkerRunResult {
     pub goal_objective: Option<String>,
     #[serde(default)]
     pub history_path: Option<String>,
+    /// Guide messages the worker's turn loop actually consumed (injected into
+    /// history) during this run. The parent uses this to re-queue any guide it
+    /// handed off but the worker never consumed — closing the IPC race where a
+    /// guide arrives after the turn-end checkpoint and would otherwise be lost.
+    #[serde(default)]
+    pub consumed_guide_messages: Vec<String>,
 }
 
 impl From<bifrost_agent::TurnResult> for AgentWorkerRunResult {
@@ -95,6 +101,7 @@ impl From<bifrost_agent::TurnResult> for AgentWorkerRunResult {
             goal_needs_continuation: value.goal_needs_continuation,
             goal_objective: value.goal_objective,
             history_path: None,
+            consumed_guide_messages: Vec::new(),
         }
     }
 }
@@ -908,6 +915,7 @@ async fn run_builtin_agent_turn(
     }
     result.map(|turn_result| AgentWorkerRunResult {
         history_path,
+        consumed_guide_messages: session.consumed_guide_messages.clone(),
         ..AgentWorkerRunResult::from(turn_result)
     })
 }
@@ -1049,6 +1057,11 @@ mod tests {
     fn admin_port_env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn active_workers_registry_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
     }
 
     fn missing_worker_executable() -> &'static str {
@@ -1209,6 +1222,7 @@ mod tests {
 
     #[tokio::test]
     async fn stop_active_worker_entries_sends_stop_and_clears_registry() {
+        let _lock = active_workers_registry_lock().lock().await;
         let _ = drain_active_workers();
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
         register_active_worker("test-stop-all-workers", 0, stop_tx);
@@ -1227,6 +1241,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::process::{Command as StdProcessCommand, Stdio as StdStdio};
 
+        let _lock = active_workers_registry_lock().lock().await;
         let _ = drain_active_workers();
         let mut child = StdProcessCommand::new("sh")
             .arg("-c")
@@ -1259,6 +1274,7 @@ mod tests {
         use std::os::unix::process::CommandExt;
         use std::process::{Command as StdProcessCommand, Stdio as StdStdio};
 
+        let _lock = active_workers_registry_lock().lock().await;
         let _ = drain_active_workers();
         let mut child = StdProcessCommand::new("sh")
             .arg("-c")

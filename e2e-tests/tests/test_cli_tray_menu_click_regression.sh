@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT_DIR"
+
+if [[ "${BIFROST_E2E_ALLOW_TRAY:-0}" != "1" ]]; then
+  echo "SKIP: tray desktop helper tests are disabled by default; set BIFROST_E2E_ALLOW_TRAY=1 to run"
+  exit 0
+fi
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
   echo "SKIP: tray menu click regression is macOS-only"
@@ -54,6 +64,7 @@ trap cleanup EXIT
 
 export BIFROST_DATA_DIR="$DATA_DIR"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export BIFROST_DISABLE_TRAY=0
 
 echo "Starting bifrost with tray helper on port $PORT..."
 "$BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check \

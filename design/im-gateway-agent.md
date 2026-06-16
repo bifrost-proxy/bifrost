@@ -1064,6 +1064,12 @@ ChatGPT Web Runner 的 DOM fallback 不能只识别传统 `<img>` 生成图。Ch
 
 刷新页面或关闭浏览器响应流不能代表用户停止 Agent Loop。`/_bifrost/api/agent/chat/stream` 和 `/_bifrost/api/im-gateway/chat/stream` 的 SSE/NDJSON client disconnect 只停止向该 HTTP 响应写入增量，不调用 `request_stop` 或 external CLI stop marker；后台 turn/run 继续执行并在完成后归还 session / 记录 runner state。只有显式点击停止当前轮次或发送 `/stop`，才允许写入 stop signal。
 
+内置 Bifrost Agent 的运行状态必须有单一收敛路径：主进程的 `active_turn_statuses` / `active_stop_signals` 只表达当前进程内正在执行的 turn 锁和协作停止句柄；JSONL 的 `run_state_changed` 是刷新、历史恢复和异常诊断的终态事实源。`/_bifrost/api/agent/chat/stream` 的 detached task 必须用 RAII guard 持有 checked-out `AgentSession`，无论 worker 正常完成、panic、stream future 被 drop/abort，还是发送端断开，都要释放 active worker、active status 和 stop signal。worker 子进程启动失败、异常退出、事件流提前结束时，服务端必须向当前或最近的合法 JSONL 写入 `failed` 终态和可见错误消息，再释放 active 状态；显式 `/stop` 或 stop signal 命中时写入 `stopped` 终态。`request_stop` 遇到 stop signal 已丢失但 active status 仍存在的陈旧状态时，必须幂等清理 active 状态并返回成功，避免用户看到 Running 却无法停止。
+
+排队消息的触发点也必须跟随后端 turn 终态收敛，而不是只依赖 UI 展示状态。正常完成后继续 pop FIFO queue；worker 异常失败或流提前结束时，也要先把本轮写成 terminal `failed`，再尝试弹出下一条排队消息，避免上一轮泄漏导致队列永久不出队。用户显式 Stop 表达的是终止当前执行，不自动续跑队列。
+
+多线程并发运行时，WebView 切换会话必须把“旧流事件”和“旧流收尾”都隔离掉。切换线程时前端用 `AbortController` 中止当前 HTTP stream，并在 `onEvent`、`onFinal`、`catch` 和成功收尾路径中用选中 `sessionKey` 做 guard，丢弃旧会话的延迟事件。即使旧 stream 因 abort 进入 `finally`，也不能无条件 `setRunning(false)` 或清空 collaboration mode；这些状态只能在当前选中会话仍是发起 stream 的会话时更新，避免 A 线程收尾把已经切到的 B 线程按钮、状态 tag 或输入模式打乱。
+
 运行中的输入框不能禁用。无输入时，输入框内右下角主按钮切换为 Stop；有输入时，内置 Bifrost Agent 展示 Guide / Queue 模式切换，默认 Guide 注入当前 loop，也可选择 Queue 等当前轮结束后处理；Codex、ChatGPT Web 和其他外部 Runner 不支持运行中 guide，默认只排队。Queue 状态显示在输入框上方，支持多条追加与删除；当 Runner 支持 guide 时，队列项可一键改为立即 Guide。Queue/Remove 是本地交互状态，不应插入 MessageList，也不应作为 assistant 消息持久化；只有排队项被实际 drain 成下一轮输入后，才进入消息列表和历史。
 
 Composer 与 MessageList 共用同一个滚动容器。输入区使用 sticky/floating 样式贴在对话容器底部，短消息时仍位于容器底部，长历史时随同一滚动容器保持底部悬浮；输入区不再通过顶部硬边框与消息列表切开。

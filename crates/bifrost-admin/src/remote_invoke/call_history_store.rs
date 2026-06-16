@@ -787,6 +787,7 @@ mod tests {
                 env: None,
                 stdin_mode: None,
                 timeout_ms: None,
+                login: false,
                 pty: None,
                 output_mode: None,
                 caller_fingerprint: None,

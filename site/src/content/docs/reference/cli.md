@@ -100,6 +100,7 @@ bifrost [OPTIONS] [COMMAND]
 | `BIFROST_REMOTE_SSH_KEY` | `remote conn up --ssh-key` | 固定的 Remote Invoke SSH key 环境变量；当 `--ssh-key` 不带路径时读取该变量内容。 |
 | `BIFROST_FORCE_UPDATE_CHECK` | 版本检查 | 强制执行更新检查；主要用于调试或测试更新提示。 |
 | `BIFROST_INSTALL_SKILL_SOURCE` | `install-skill` | 选择 skill 安装源；正常用户通常无需设置。 |
+| `BIFROST_INSTALL_SKILL_DIR` | `install-skill` | 未显式传 `--dir` / `--cwd` 时覆盖全局 skill 安装目录；主要用于升级/E2E 测试隔离，避免写入真实 AI tool 目录。 |
 | `BIFROST_AGENT_HOME` | Agent 运行时 | Agent 配置和记忆目录的兼容覆盖项；默认优先使用 `$BIFROST_DATA_DIR/agent/`。 |
 | `BIFROST_AGENT_MODEL` / `BIFROST_AGENT_PROVIDER` | Agent 运行时 | 覆盖 Agent 默认模型和 provider。只影响 Agent 能力，不影响代理核心规则。 |
 | `BIFROST_AGENT_WORK_DIR` | Agent 运行时 | 覆盖 Agent 默认工作目录。 |

@@ -32,6 +32,7 @@ pub mod tray;
 pub(crate) mod tray_launcher;
 mod update_check;
 mod upgrade;
+mod upgrade_background;
 mod value;
 mod voice;
 mod voice_wake_worker;
@@ -62,6 +63,7 @@ pub use traffic::{
 };
 pub use update_check::*;
 pub use upgrade::*;
+pub use upgrade_background::handle_upgrade_background;
 pub use value::*;
 pub use whitelist::*;
 

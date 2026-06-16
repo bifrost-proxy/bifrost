@@ -3357,6 +3357,97 @@ test("AI Agent Chat lets idle thread summary override stale running history on i
   await expect(page.getByTestId("agent-chat-thinking-tail")).toHaveCount(0);
 });
 
+test("AI Agent Chat lets active detail idle run_state override stale running history", async ({
+  page,
+}) => {
+  const historyPath = "/tmp/active-detail-idle-stale-running.jsonl";
+  const startedAt = Math.floor(Date.now() / 1000) - 30;
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "bifrost_agent",
+        runners: { bifrost_agent: { enabled: true, adapter: "builtin" } },
+        channels: {},
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ content: "", work_dir: "/tmp/workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route(
+    "**/_bifrost/api/im-gateway/agent/sessions/active-detail-idle-stale-running",
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          session_key: "active-detail-idle-stale-running",
+          status: "active",
+          run_state: "idle",
+          title: "Active detail idle",
+          history_path: historyPath,
+          has_timeline: true,
+          source: "web",
+          messages: [],
+        }),
+      });
+    },
+  );
+  await page.route(
+    `**/_bifrost/api/im-gateway/agent/sessions/history/${encodeURIComponent(historyPath)}**`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          events: [
+            {
+              timestamp: startedAt,
+              event_type: "run_state_changed",
+              session_key: "active-detail-idle-stale-running",
+              content: { state: "running", agent_kind: "builtin", source_channel: "web" },
+            },
+            {
+              timestamp: startedAt + 1,
+              event_type: "user_message",
+              session_key: "active-detail-idle-stale-running",
+              content: { message: "stale active detail question" },
+            },
+          ],
+          start_index: 0,
+          end_index: 2,
+          has_more: false,
+        }),
+      });
+    },
+  );
+
+  await openPage(
+    page,
+    "ai?aiSection=agent-chat&agentSection=chat&session=active-detail-idle-stale-running&view=active",
+  );
+
+  await expect(page.getByTestId("agent-chat-state-tag")).toContainText("Ready");
+  await expect(page.getByTestId("agent-chat-turn-running-group")).toHaveCount(0);
+  await expect(page.getByTestId("agent-chat-messages")).not.toContainText(
+    "Agent is running...",
+  );
+});
+
 test("AI Agent Chat can start a new chat while the selected thread is running", async ({
   page,
 }) => {

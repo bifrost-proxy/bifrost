@@ -13,6 +13,16 @@ use crate::model::{
     InstallMode, InstallSession, InstallStep, MobileDevice, MobilePlatform,
 };
 
+#[cfg(all(test, unix))]
+static ADB_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(all(test, unix))]
+fn adb_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    ADB_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AdbDiscovery {
     pub adb_available: bool,
@@ -625,9 +635,6 @@ List of devices attached
     // behind a single global lock.
 
     #[cfg(unix)]
-    static HARNESS_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    #[cfg(unix)]
     struct FakeAdb {
         dir: PathBuf,
         adb_path: PathBuf,
@@ -681,7 +688,7 @@ List of devices attached
     #[cfg(unix)]
     #[test]
     fn discover_with_ca_lists_devices_and_checks_status() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         // adb devices -l returns one connected device; the CA-status probe then
         // populates certificate_status (exact value is irrelevant here).
         let fake = FakeAdb::new(
@@ -707,7 +714,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn discover_reports_empty_when_no_devices() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *"devices -l"*) printf 'List of devices attached\n'; exit 0 ;;
@@ -726,7 +733,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn discover_reports_failure_on_nonzero_exit() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *"devices -l"*) echo "adb: connection refused" 1>&2; exit 1 ;;
@@ -745,7 +752,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn discover_unavailable_when_adb_missing() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         // Point BIFROST_ADB_PATH at a nonexistent file and clear PATH so no
         // real adb is found.
         let missing = std::env::temp_dir().join(format!("no-adb-{}", Uuid::new_v4()));
@@ -766,7 +773,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn install_android_ca_pushes_and_opens_installer() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *push*) echo "1 file pushed"; exit 0 ;;
@@ -791,7 +798,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn install_android_ca_falls_back_to_settings_when_view_fails() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *push*) echo "1 file pushed"; exit 0 ;;
@@ -815,7 +822,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn install_android_ca_stops_when_push_fails() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *push*) echo "adb: error: failed to push" 1>&2; exit 1 ;;
@@ -848,7 +855,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn check_status_reports_installed_when_store_contains_ca() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         // Build a store whose PEM contains the same cert bytes as the local CA.
         let fake = FakeAdb::new(
             r#"case "$*" in
@@ -869,7 +876,7 @@ esac"#,
     #[cfg(unix)]
     #[test]
     fn check_status_reports_not_installed_when_store_lacks_ca() {
-        let _guard = HARNESS_LOCK.lock().unwrap();
+        let _guard = adb_test_lock();
         let fake = FakeAdb::new(
             r#"case "$*" in
   *cacerts-added*) printf -- '-----BEGIN CERTIFICATE-----\nb3RoZXItY2E=\n-----END CERTIFICATE-----\n'; exit 0 ;;
@@ -1017,6 +1024,7 @@ mod more_tests {
     fn install_android_ca_records_steps_and_fallback_when_view_fails() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = adb_test_lock();
         let test_dir = std::env::temp_dir().join(format!("bifrost-adb-install-{}", Uuid::new_v4()));
         fs::create_dir_all(&test_dir).expect("create temp dir");
         let cert_path = test_dir.join("ca.crt");
@@ -1110,6 +1118,7 @@ esac
     fn find_adb_and_discover_android_devices_use_bifrost_env_and_fake_adb() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = adb_test_lock();
         let test_dir =
             std::env::temp_dir().join(format!("bifrost-adb-discover-{}", Uuid::new_v4()));
         fs::create_dir_all(&test_dir).expect("create temp dir");

@@ -5,7 +5,7 @@ export function isRunStateActive(state?: string) {
 }
 
 export function isThreadActive(thread?: AgentThreadSummary) {
-  if (thread?.running === false && !isRunStateActive(thread.state)) {
+  if (thread?.running === false) {
     return false;
   }
   return thread?.running === true || isRunStateActive(thread?.run_state || thread?.state);

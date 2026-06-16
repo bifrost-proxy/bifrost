@@ -27,8 +27,12 @@ const STATE_DISCONNECTED: u8 = 2;
 const OP_IDLE: u8 = 0;
 const OP_STARTING: u8 = 1;
 const OP_STOPPING: u8 = 2;
+const OP_UPGRADING: u8 = 3;
 const OP_START_FAILED: u8 = 4;
 const OP_STOP_FAILED: u8 = 5;
+const OP_UPGRADE_FAILED: u8 = 6;
+/// Sentinel meaning "no download percent available" for the upgrade percent atomic.
+const UPGRADE_PERCENT_NONE: u8 = u8::MAX;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
@@ -50,6 +54,7 @@ struct MenuDataSnapshot {
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     bin_available: bool,
+    update_available: Option<String>,
 }
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
@@ -87,7 +92,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     let initial_menu_data = load_menu_data_snapshot(&args, state, false, false);
     let menu_items =
-        build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str);
+        build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str, false);
 
     let mut native_menu = NativeMenuState::new(&menu_items);
     let mut action_map = native_menu.action_map.clone();
@@ -112,6 +117,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let should_quit = Arc::new(AtomicBool::new(false));
     let should_reload = Arc::new(AtomicBool::new(false));
     let current_operation = Arc::new(AtomicU8::new(OP_IDLE));
+    let upgrade_percent = Arc::new(AtomicU8::new(UPGRADE_PERCENT_NONE));
     let current_state = Arc::new(AtomicU8::new(match state {
         ServiceState::Running => STATE_RUNNING,
         ServiceState::Stopped => STATE_STOPPED,
@@ -124,9 +130,22 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let poll_quit = should_quit.clone();
     let poll_state = current_state.clone();
     let poll_operation = current_operation.clone();
+    let poll_upgrade_percent = upgrade_percent.clone();
+    let poll_reload = should_reload.clone();
+    let poll_data_snapshot = menu_data.clone();
+    let poll_data_generation = menu_data_generation.clone();
     let poll_args = args.clone();
     spawn_tray_thread("bifrost-tray-state-poll", move || {
-        poll_service_state(&poll_quit, &poll_state, &poll_operation, &poll_args);
+        poll_service_state(
+            &poll_quit,
+            &poll_state,
+            &poll_operation,
+            &poll_upgrade_percent,
+            &poll_reload,
+            &poll_data_snapshot,
+            &poll_data_generation,
+            &poll_args,
+        );
     })
     .map_err(|error| format!("failed to spawn tray state poll thread: {error}"))?;
 
@@ -253,12 +272,18 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
         if should_refresh_menu {
             let snapshot = clone_menu_data_snapshot(&menu_data);
+            let upgrade_status =
+                upgrade_status_label(new_operation, upgrade_percent.load(Ordering::Relaxed));
+            let status_label = upgrade_status
+                .as_deref()
+                .or_else(|| operation_status_label(new_operation));
             let new_menu_items = build_menu_from_snapshot(
                 &snapshot,
                 svc_state,
-                operation_status_label(new_operation),
+                status_label,
                 operation_busy(new_operation),
                 &data_dir_str,
+                new_operation == OP_UPGRADING,
             );
 
             if native_menu.refresh_in_place(&new_menu_items) {
@@ -373,14 +398,29 @@ fn operation_status_label(operation: u8) -> Option<&'static str> {
     match operation {
         OP_STARTING => Some("Bifrost: Starting..."),
         OP_STOPPING => Some("Bifrost: Stopping..."),
+        OP_UPGRADING => Some("Bifrost: Updating…"),
         OP_START_FAILED => Some("Bifrost: Start failed - open logs"),
         OP_STOP_FAILED => Some("Bifrost: Stop failed - open logs"),
+        OP_UPGRADE_FAILED => Some("Bifrost: Update failed - open logs"),
         _ => None,
     }
 }
 
 fn operation_busy(operation: u8) -> bool {
-    matches!(operation, OP_STARTING | OP_STOPPING)
+    matches!(operation, OP_STARTING | OP_STOPPING | OP_UPGRADING)
+}
+
+/// Build a dynamic "Updating… NN%" label while a download is in progress.
+/// Returns `None` when the operation is not an active upgrade or no download
+/// percent is available (the caller then falls back to the static label).
+fn upgrade_status_label(operation: u8, percent: u8) -> Option<String> {
+    if operation != OP_UPGRADING {
+        return None;
+    }
+    if percent == UPGRADE_PERCENT_NONE {
+        return None;
+    }
+    Some(format!("Bifrost: Updating… {percent}%"))
 }
 
 fn clear_completed_operation(operation: &AtomicU8, state: u8) {
@@ -634,6 +674,21 @@ fn load_menu_data_snapshot(
         recent_rule_targets,
         system_proxy,
         bin_available,
+        update_available: detect_update_available(&args.data_dir),
+    }
+}
+
+/// Read the version cache written by the admin `VersionChecker` and return the
+/// latest version string when it is newer than the running tray binary.
+fn detect_update_available(data_dir: &Path) -> Option<String> {
+    let cache_path = data_dir.join("version_cache.json");
+    let content = fs::read_to_string(&cache_path).ok()?;
+    let cache: bifrost_core::version_check::VersionCache = serde_json::from_str(&content).ok()?;
+    let current = env!("CARGO_PKG_VERSION");
+    if bifrost_core::version_check::is_newer_version(current, &cache.latest_version) {
+        Some(cache.latest_version)
+    } else {
+        None
     }
 }
 
@@ -663,6 +718,7 @@ fn build_menu_from_snapshot(
     status_override: Option<&str>,
     service_action_busy: bool,
     data_dir: &str,
+    upgrade_in_progress: bool,
 ) -> Vec<MenuEntry> {
     menu::build_menu(
         snapshot.runtime.as_ref(),
@@ -675,6 +731,8 @@ fn build_menu_from_snapshot(
         &snapshot.rules,
         &snapshot.recent_rule_targets,
         snapshot.system_proxy.as_ref(),
+        snapshot.update_available.as_deref(),
+        upgrade_in_progress,
     )
 }
 
@@ -1456,6 +1514,32 @@ fn execute_action(
                 reload_flag.store(true, Ordering::Relaxed);
             });
         }
+        MenuItemAction::StartUpgrade { target_version } => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("upgrade ignored while another action is running");
+                return;
+            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to start upgrade");
+                operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            };
+            let data_dir = args.data_dir.to_string_lossy().to_string();
+            let target_version = target_version.clone();
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_UPGRADING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
+            spawn_tray_task("bifrost-tray-self-update", move || {
+                if !spawn_self_update(&bin, &data_dir, &target_version) {
+                    operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                    reload_flag.store(true, Ordering::Relaxed);
+                }
+                // On success the upgrade subprocess writes the progress file; the
+                // state-poll thread reconciles it to OP_IDLE / OP_UPGRADE_FAILED.
+            });
+        }
         MenuItemAction::OpenDirectory(path) => {
             if let Err(e) = open_tray_target(path) {
                 tracing::error!(path = %path, error = %e, "failed to open directory");
@@ -1728,6 +1812,34 @@ fn spawn_stop(bin: &Path, data_dir: &str) -> bool {
     }
 }
 
+/// Spawn a detached `bifrost self-update` subprocess that performs the upgrade
+/// and writes progress to `<data_dir>/upgrade-progress.json`. The tray observes
+/// that file rather than waiting on this child (the upgrade restarts the proxy
+/// but never the tray process itself).
+fn spawn_self_update(bin: &Path, data_dir: &str, target_version: &str) -> bool {
+    let mut cmd = Command::new(bin);
+    cmd.env("BIFROST_DATA_DIR", data_dir)
+        .env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1")
+        .args([
+            "self-update",
+            "--target",
+            target_version,
+            "--source",
+            "tray",
+        ]);
+    configure_service_command(&mut cmd);
+    match cmd.spawn() {
+        Ok(child) => {
+            tracing::info!(pid = child.id(), target = %target_version, "bifrost self-update spawned");
+            true
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "failed to spawn bifrost self-update");
+            false
+        }
+    }
+}
+
 fn wait_for_child(mut child: Child, label: &str) -> bool {
     match child.wait() {
         Ok(status) => {
@@ -1797,10 +1909,15 @@ fn bifrost_binary_name() -> &'static str {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn poll_service_state(
     quit_flag: &AtomicBool,
     state: &AtomicU8,
     operation: &AtomicU8,
+    upgrade_percent: &AtomicU8,
+    reload_flag: &AtomicBool,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    menu_data_generation: &AtomicU64,
     args: &TrayArgs,
 ) {
     let mut service_idle_since = match state.load(Ordering::Relaxed) {
@@ -1824,6 +1941,15 @@ fn poll_service_state(
             );
         }
 
+        reconcile_upgrade_progress(
+            args,
+            operation,
+            upgrade_percent,
+            reload_flag,
+            menu_data,
+            menu_data_generation,
+        );
+
         let current_operation = operation.load(Ordering::Relaxed);
         if should_auto_exit_for_service_idle(
             &mut service_idle_since,
@@ -1838,6 +1964,85 @@ fn poll_service_state(
             remove_own_tray_pid(&args.data_dir);
             quit_flag.store(true, Ordering::Relaxed);
             break;
+        }
+    }
+}
+
+/// Reflect the cross-process upgrade-progress file into the tray operation state.
+///
+/// While an upgrade subprocess runs it writes `<data_dir>/upgrade-progress.json`.
+/// We map its phases onto the tray operation indicator and clear the file on a
+/// terminal state so the tray returns to its normal display.
+fn reconcile_upgrade_progress(
+    args: &TrayArgs,
+    operation: &AtomicU8,
+    upgrade_percent: &AtomicU8,
+    reload_flag: &AtomicBool,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    menu_data_generation: &AtomicU64,
+) {
+    use bifrost_core::upgrade_progress::{
+        clear_progress, is_stale, read_progress, UpgradePhase, DEFAULT_STALE_SECS,
+    };
+
+    let current_op = operation.load(Ordering::Relaxed);
+    // Only observe progress while an upgrade is active or its terminal state is
+    // still pending acknowledgement. This avoids reacting to a stale file from a
+    // prior run when the tray is otherwise idle.
+    let progress = read_progress(&args.data_dir);
+
+    match progress.phase {
+        UpgradePhase::Idle => {
+            // Nothing to do; if we were upgrading the terminal handler cleared it.
+        }
+        UpgradePhase::Checking
+        | UpgradePhase::Downloading
+        | UpgradePhase::Installing
+        | UpgradePhase::Restarting => {
+            if is_stale(&progress, DEFAULT_STALE_SECS) {
+                tracing::warn!("upgrade progress is stale; marking update as failed");
+                clear_progress(&args.data_dir);
+                operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                upgrade_percent.store(UPGRADE_PERCENT_NONE, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            }
+            if current_op != OP_UPGRADING {
+                operation.store(OP_UPGRADING, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+            }
+            let pct = match (progress.phase, progress.percent) {
+                (UpgradePhase::Downloading, Some(p)) => p.clamp(0.0, 100.0) as u8,
+                _ => UPGRADE_PERCENT_NONE,
+            };
+            if upgrade_percent.swap(pct, Ordering::Relaxed) != pct {
+                reload_flag.store(true, Ordering::Relaxed);
+            }
+        }
+        UpgradePhase::Completed => {
+            if current_op == OP_UPGRADING {
+                clear_progress(&args.data_dir);
+                operation.store(OP_IDLE, Ordering::Relaxed);
+                upgrade_percent.store(UPGRADE_PERCENT_NONE, Ordering::Relaxed);
+                // Refresh so the "Update to vX" entry disappears once the new
+                // version_cache catches up.
+                refresh_menu_data_snapshot(
+                    args,
+                    ServiceState::Running,
+                    menu_data,
+                    menu_data_generation,
+                    false,
+                );
+                reload_flag.store(true, Ordering::Relaxed);
+            }
+        }
+        UpgradePhase::Failed => {
+            if current_op == OP_UPGRADING {
+                clear_progress(&args.data_dir);
+                operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                upgrade_percent.store(UPGRADE_PERCENT_NONE, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+            }
         }
     }
 }
