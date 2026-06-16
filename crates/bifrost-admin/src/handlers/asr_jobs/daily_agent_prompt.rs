@@ -85,21 +85,19 @@ fn build_daily_agent_prompt(
     if is_chatgpt_web {
         if chatgpt_first_turn {
             prompt.push_str(
-                "\n这是该 ASR 任务固定 ChatGPT Web 对话的第一轮。请先记住 AGENTS.md 指令，后续消息只会发送新增或变更内容。\n",
+                "\n这是该 ASR 任务固定 ChatGPT Web 对话的第一轮。每条消息都会在开头附带完整的 AGENTS.md 指令，后跟本轮需要处理的内容。\n",
             );
         } else {
             prompt.push_str(
-                "\n这是该 ASR 任务固定 ChatGPT Web 对话的后续轮次。沿用之前的 AGENTS.md 指令，只处理本轮新增或变更内容。\n",
+                "\n这是该 ASR 任务固定 ChatGPT Web 对话的后续轮次。每条消息都会在开头重新附带完整的 AGENTS.md 指令，请以本条消息中的 AGENTS.md 为准，处理其后跟随的新增或变更内容。\n",
             );
         }
 
         let agents_path = daily_agent_instructions_path(task);
-        if chatgpt_first_turn {
-            if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
-                prompt.push_str("\n---\n## AGENTS.md 内容：\n\n```markdown\n");
-                prompt.push_str(&agents_content);
-                prompt.push_str("\n```\n");
-            }
+        if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
+            prompt.push_str("\n---\n## AGENTS.md 内容：\n\n```markdown\n");
+            prompt.push_str(&agents_content);
+            prompt.push_str("\n```\n");
         }
 
         prompt.push_str("\n---\n## 已有 report 内容（如存在，用于增量合并）：\n");
