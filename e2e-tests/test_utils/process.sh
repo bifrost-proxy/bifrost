@@ -1,10 +1,12 @@
 #!/bin/bash
 
-# E2E scripts should never open the Sync login browser unless the test is
-# explicitly exercising startup login preflight. Keep this default in the
-# shared process helper so direct Bifrost launches inherit it.
+# E2E scripts should never open desktop UI unless the test explicitly covers it.
+# Keep these defaults in the shared process helper so direct Bifrost launches
+# do not spawn Sync login browser windows or tray helpers.
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 is_windows() {
     local uname_out

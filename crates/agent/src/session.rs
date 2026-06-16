@@ -184,6 +184,10 @@ pub struct AgentSession {
     /// Working directory for this session. Overrides config.work_dir when set.
     pub work_dir: Option<String>,
 
+    /// Original working directory saved when entering a git worktree.
+    /// Used by `exit_worktree` to restore the previous directory.
+    pub worktree_original_dir: Option<String>,
+
     /// Source of the session (e.g., "feishu", "api", "unknown").
     pub source: String,
 
@@ -224,6 +228,14 @@ pub struct AgentSession {
     /// When set, the turn loop checks this after each tool call batch completes.
     /// If a message is present, it is appended to history before the next model call.
     pub guide_channel: Option<GuideChannel>,
+
+    /// Guide messages actually consumed (injected into history) by the turn
+    /// loop during this turn. The IM worker reports these back to the parent so
+    /// it can re-queue any guide that was handed off but never consumed (e.g.
+    /// when the guide arrived over the IPC pipe after the turn-end checkpoint
+    /// already ran). Recording the raw consumed strings — identical to what was
+    /// handed off — lets the parent match exactly and avoid double-processing.
+    pub consumed_guide_messages: Vec<String>,
 
     /// Pending message queue. When the turn loop finishes (model returns stop
     /// with no tool calls and no guide message), it checks this queue. If there
@@ -334,6 +346,7 @@ impl AgentSession {
             last_response_history_len: None,
             history_version: 0,
             work_dir: None,
+            worktree_original_dir: None,
             source: "unknown".to_string(),
             agent_type: None,
             runner_type: None,
@@ -346,6 +359,7 @@ impl AgentSession {
             skill_authoring: SkillAuthoringHub::new(),
             memory_cleared: false,
             guide_channel: None,
+            consumed_guide_messages: Vec::new(),
             pending_messages: std::collections::VecDeque::new(),
             title: None,
             current_plan: None,
@@ -388,6 +402,30 @@ impl AgentSession {
         self.slash_router = SlashCommandRouter::with_default_builtins();
         self.skill_registry = None;
         self.attach_default_skill_registry();
+    }
+
+    /// Switch working directory to a git worktree without clearing history.
+    /// Saves the original dir so exit_worktree can restore it.
+    pub fn enter_worktree_dir(&mut self, worktree_dir: String) {
+        let original = self.work_dir.clone().unwrap_or_else(|| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("/"))
+                .to_string_lossy()
+                .to_string()
+        });
+        self.worktree_original_dir = Some(original);
+        self.work_dir = Some(worktree_dir);
+        // Reload user instructions for the new directory context
+        self.user_instructions = None;
+    }
+
+    /// Exit worktree and restore the original working directory.
+    /// Returns the original dir path, or None if not in a worktree.
+    pub fn exit_worktree_dir(&mut self) -> Option<String> {
+        let original = self.worktree_original_dir.take()?;
+        self.work_dir = Some(original.clone());
+        self.user_instructions = None;
+        Some(original)
     }
 
     /// Load user instructions (AGENTS.md + config user_instructions) once at session

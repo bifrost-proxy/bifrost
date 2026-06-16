@@ -53,6 +53,7 @@
 - Goal：当前只实现目标状态与预算字段，后续可扩展 token/time usage 挂载到 session runtime 并在完成时回报预算消耗。
 - Apply Patch：运行时已兼容 freeform raw patch，后续可考虑独立 freeform grammar tool 注册方式。
 - Unified Exec：当前已覆盖 pipe/PTY、stdin 写入、有序轮询、后台结束监听、Ctrl-C 取消与输出截断；后续增强只在 `exec_command`/`write_stdin` 这一套协议内扩展。
+- Worktree：`enter_worktree` / `exit_worktree` 属于有序状态工具。工具成功后必须立即更新当前 turn loop 的 `work_dir`，不能等到整批 tool calls 结束后再切换；否则同一 assistant tool-call 响应中跟在 `enter_worktree` 后面的 `read_file`、`apply_patch` 或 `exec_command` 仍会落在旧目录，违背“保留上下文但切换工作区”的用户预期。退出 worktree 时同样需要立即恢复原目录，且不能重复消费同一信号，避免把 worktree 自身误记为 original dir。
 
 ## 测试方案
 
@@ -70,6 +71,10 @@
   - `exec_command_write_stdin_drives_pipe_process`
   - `exec_command_yield_defaults_and_clamps_match_codex_unified_exec`
   - `test_exec_command_tty_reports_isatty_true`
+- `worktree`：
+  - `enter_worktree_signal_updates_session_work_dir_immediately`
+  - `exit_worktree_signal_restores_original_work_dir`
+  - `failed_worktree_signal_keeps_current_work_dir`
 - `goal`：create/get/update/duplicate/thread-safety 全覆盖。
 
 ### E2E 测试
@@ -86,6 +91,7 @@
 - 新增 `human_tests/agent-p1-tools.md`
 - 覆盖 `/goal`、IM/会话入口、`apply_patch`、PTY 交互链路
 - 覆盖交互式 shell prompt 前缀不影响 `exit_code` 解析的回归
+- 覆盖 `enter_worktree` 成功后后续工具立即进入新 worktree、`exit_worktree` 恢复原目录、失败结果不污染 session work_dir 的回归
 - 按文档逐条执行并记录结果
 
 ## 校验要求

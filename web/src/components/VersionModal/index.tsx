@@ -1,10 +1,11 @@
-import { Modal, Button, Typography, theme, message, Divider } from "antd";
+import { Modal, Button, Typography, theme, message, Divider, Progress } from "antd";
 import {
   RocketOutlined,
   CopyOutlined,
   ExportOutlined,
   CheckCircleOutlined,
   InfoCircleOutlined,
+  LoadingOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import { useMemo, useCallback } from "react";
@@ -25,9 +26,34 @@ export default function VersionModal() {
   const releaseUrl = useVersionStore((state) => state.releaseUrl);
   const overview = useMetricsStore((state) => state.overview);
 
+  // Upgrade flow state.
+  const upgrading = useVersionStore((state) => state.upgrading);
+  const upgradePhase = useVersionStore((state) => state.upgradePhase);
+  const upgradePercent = useVersionStore((state) => state.upgradePercent);
+  const upgradeMessage = useVersionStore((state) => state.upgradeMessage);
+  const upgradeError = useVersionStore((state) => state.upgradeError);
+  const markVersionSeen = useVersionStore((state) => state.markVersionSeen);
+  const startUpgrade = useVersionStore((state) => state.startUpgrade);
+
+  const isFailed = upgradePhase === "failed";
+  // The modal is locked (no manual close, no "Remind later") while the upgrade
+  // is mid-flight; on failure we re-open the controls so the user can retry.
+  const upgradeInProgress = upgrading && !isFailed;
+
   const handleClose = useCallback(() => {
     setModalVisible(false);
   }, [setModalVisible]);
+
+  const handleRemindLater = useCallback(() => {
+    if (latestVersion) {
+      markVersionSeen(latestVersion);
+    }
+    setModalVisible(false);
+  }, [latestVersion, markVersionSeen, setModalVisible]);
+
+  const handleUpdateNow = useCallback(() => {
+    void startUpgrade();
+  }, [startUpgrade]);
 
   const handleCopyCommand = useCallback(async () => {
     const ok = await copyToClipboard("bifrost upgrade");
@@ -321,20 +347,152 @@ export default function VersionModal() {
     );
   };
 
+  const renderUpgradeProgress = () => {
+    const downloading = upgradePhase === "downloading";
+    const percent =
+      downloading && typeof upgradePercent === "number"
+        ? Math.round(upgradePercent)
+        : undefined;
+    const installing =
+      upgradePhase === "installing" || upgradePhase === "restarting";
+
+    return (
+      <div style={styles.modalContent} data-testid="version-upgrade-progress">
+        <div style={styles.header}>
+          {isFailed ? (
+            <InfoCircleOutlined
+              style={{ ...styles.headerIcon, color: token.colorError }}
+            />
+          ) : (
+            <LoadingOutlined style={styles.headerIcon} />
+          )}
+          <div style={styles.headerText}>
+            <p style={styles.headerTitle}>
+              {isFailed ? "Update Failed" : "Updating Bifrost"}
+            </p>
+            <p style={styles.headerSubtitle}>
+              {isFailed
+                ? "The previous version is still available"
+                : `Installing v${latestVersion}…`}
+            </p>
+          </div>
+        </div>
+
+        {!isFailed && (
+          <div style={styles.section}>
+            <div style={styles.sectionTitle}>
+              <span>⬇️</span>
+              <span>Download</span>
+            </div>
+            <Progress
+              percent={downloading ? (percent ?? 0) : upgradePhase === "checking" ? 0 : 100}
+              status={
+                installing || upgradePhase === "completed" ? "success" : "active"
+              }
+              data-testid="version-download-progress"
+            />
+          </div>
+        )}
+
+        {!isFailed && (
+          <div style={styles.section}>
+            <div style={styles.sectionTitle}>
+              <span>📦</span>
+              <span>Install</span>
+            </div>
+            <Progress
+              percent={
+                upgradePhase === "completed"
+                  ? 100
+                  : installing
+                    ? 99
+                    : 0
+              }
+              status={upgradePhase === "completed" ? "success" : "active"}
+              data-testid="version-install-progress"
+            />
+          </div>
+        )}
+
+        <div
+          style={{
+            ...styles.headerSubtitle,
+            marginTop: 8,
+            color: isFailed ? token.colorError : token.colorTextSecondary,
+          }}
+        >
+          {isFailed
+            ? upgradeError || "Upgrade failed. Please try again."
+            : upgradeMessage || "Working…"}
+        </div>
+      </div>
+    );
+  };
+
+  const renderFooter = () => {
+    if (!hasUpdate) {
+      return (
+        <Button type="primary" onClick={handleClose}>
+          Got it
+        </Button>
+      );
+    }
+    if (upgradeInProgress) {
+      // Locked: no actionable buttons while the upgrade runs.
+      return null;
+    }
+    if (isFailed) {
+      return (
+        <>
+          <Button onClick={handleClose}>Close</Button>
+          <Button
+            type="primary"
+            onClick={handleUpdateNow}
+            data-testid="version-retry-button"
+          >
+            Retry
+          </Button>
+        </>
+      );
+    }
+    return (
+      <>
+        <Button
+          onClick={handleRemindLater}
+          data-testid="version-remind-later-button"
+        >
+          Remind Later
+        </Button>
+        <Button
+          type="primary"
+          onClick={handleUpdateNow}
+          data-testid="version-update-now-button"
+        >
+          Update Now
+        </Button>
+      </>
+    );
+  };
+
+  const showProgressView = hasUpdate && (upgrading || isFailed);
+
   return (
     <Modal
       open={modalVisible}
       onCancel={handleClose}
-      footer={
-        <Button type="primary" onClick={handleClose}>
-          Got it
-        </Button>
-      }
+      closable={!upgradeInProgress}
+      maskClosable={!upgradeInProgress}
+      keyboard={!upgradeInProgress}
+      footer={renderFooter()}
       width={480}
       centered
       destroyOnClose
     >
-      {hasUpdate ? renderUpdateContent() : renderCurrentVersionContent()}
+      {showProgressView
+        ? renderUpgradeProgress()
+        : hasUpdate
+          ? renderUpdateContent()
+          : renderCurrentVersionContent()}
     </Modal>
   );
 }

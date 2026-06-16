@@ -46,6 +46,9 @@
 `skill_remote.md` 描述 relay-backed remote invoke 能力：
 
 - 支持：`remote conn status/down/up`、`remote traffic list/get/search`、`remote exec`、`remote file ...`。
+- 长任务支持：`remote exec --detach` 返回 `call_id` / `relay_token`，`remote job status/logs/watch` 用于断线后恢复观察、读取日志和取得真实远端 exit code；skill 必须把它写成 build/test/CI watch 的默认路径。
+- 连接恢复边界：客户端 stream 断开、digest mismatch 或本地切线程时，优先用 `remote job logs/watch/status` 续接已有 call；只有 grant/authorization/transport identity 失效时，才执行 `remote conn down/up` 重建连接。
+- shell 环境语义：默认 shell-text 使用非 login shell 保持 stdout 干净；需要用户 PATH/rc 时显式 `--login`，并说明 CLI 注入 `BIFROST_REMOTE=1`、`TERM=dumb` 等降噪环境，`--cwd` 在 shell 内部再次生效。
 - 查询类前置条件：目标 Bifrost 已启动、Relay Connection 在线、目标端 Remote Invoke 页面已通过 SSH key 或 pair code 授权 caller，并可用 `bifrost remote conn status` 验证。
 - shell 执行类前置条件：满足查询类前置条件，且目标端已配置 Shell Access profile/policy，授权请求选择 `selected` 或 `all`，必要时开启 stdin/interactive。
 - 文件操作类前置条件：目标端 File Access policy 授权 read 或 read-write，修改远端文件时优先使用 `bifrost remote file`。
@@ -80,6 +83,8 @@
 - 验证 remote skill 不包含 `deprecated` 等历史版本迁移文案。
 - 验证 remote skill 不包含 `traffic.clear` 或 `bifrost remote traffic clear` 命令示例。
 - 验证 remote skill 明确要求执行任何远端工程任务前先阅读 `AGENTS.md` / `agents.md` 和 `.agents/skills/` 下所有 skill 元信息，且 skill 详细内容按需加载。
+- 验证 remote skill 明确把 `exec --detach` + `remote job status/logs/watch` 作为长任务与断线恢复主路径，并说明真实 exit code 来自 job/watch，而不是断开的 stream。
+- 验证 remote skill 对 `remote file scratch-dir`、`read-many` policy deny fallback、`--login`/stdout 降噪、连接漂移重建边界均有说明。
 
 ### E2E 测试
 
@@ -87,6 +92,7 @@
 - 断言 `<tmp>/skills/bifrost/SKILL.md` 和 `<tmp>/skills/bifrost-remote/SKILL.md` 均存在。
 - 断言 remote skill 明确说明当前本机 Shell Access policy / grant 管理使用 `bifrost setting ...`，远端管理使用 `remote exec`，并且不包含历史别名迁移文案。
 - 断言 remote skill 的安装产物包含远端工程约束读取要求：先读 `AGENTS.md` / `agents.md`，再读 `.agents/skills/*/SKILL.md` 元信息，详细 skill 内容按需加载。
+- 断言 remote skill 的安装产物包含 `remote exec --detach`、`remote job status/logs/watch`、`remote file scratch-dir`、`file.op_not_permitted` read-many fallback、`--login` 和连接断开恢复说明。
 
 ### 真实场景测试
 
@@ -98,6 +104,7 @@
 - remote skill 不把 `remote traffic clear` 描述为可直接使用的 remote CLI 子命令，并说明这是写操作。
 - remote skill 使用当前 `bifrost setting ...` 命名空间描述本机管理命令，并使用 `remote exec` 描述目标设备管理路径，不包含 `deprecated` 等历史版本信息。
 - remote skill 强制要求任何远端工程任务开始前先读取目标工程约束信息：`AGENTS.md` / `agents.md` 与 `.agents/skills/` 全量 skill 元信息，详细 skill 内容按需加载。
+- remote skill 指导 coding agent 使用新远程能力：长任务 detach/job 续接、断线后 job watch/logs/status 恢复、scratch-dir 安全临时目录、read-many policy deny 降级、login shell 降噪和连接身份漂移时的重连边界。
 
 ## 校验要求
 

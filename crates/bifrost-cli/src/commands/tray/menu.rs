@@ -42,6 +42,9 @@ pub enum MenuItemAction {
     },
     StartService,
     StopService,
+    StartUpgrade {
+        target_version: String,
+    },
     OpenDirectory(String),
     SelectRule {
         target: RuleTarget,
@@ -84,6 +87,8 @@ pub fn build_menu(
     rules: &[TrayRule],
     recent_rule_targets: &[RuleTarget],
     system_proxy: Option<&SystemProxyMenuState>,
+    update_available: Option<&str>,
+    upgrade_in_progress: bool,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -182,6 +187,23 @@ pub fn build_menu(
     }
 
     items.push(separator("_sep_actions"));
+
+    if let Some(latest) = update_available {
+        let label = if upgrade_in_progress {
+            "Updating…".to_string()
+        } else {
+            format!("Update to v{latest}")
+        };
+        items.push(item(MenuItemDef {
+            id: "update_now".to_string(),
+            label,
+            enabled: bin_available && !upgrade_in_progress,
+            checked: false,
+            action: MenuItemAction::StartUpgrade {
+                target_version: latest.to_string(),
+            },
+        }));
+    }
 
     if is_running {
         items.push(item(MenuItemDef {
@@ -655,6 +677,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Running on 127.0.0.1:8800"));
@@ -682,6 +706,8 @@ mod tests {
             &[],
             &[],
             Some(&system_proxy),
+            None,
+            false,
         );
 
         let labels = menu
@@ -712,6 +738,76 @@ mod tests {
     }
 
     #[test]
+    fn test_menu_update_available_shows_update_item() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            Some("0.0.104"),
+            false,
+        );
+        let update = find_item(&menu, "update_now").expect("update_now present");
+        assert_eq!(update.label, "Update to v0.0.104");
+        assert!(update.enabled);
+        match &update.action {
+            MenuItemAction::StartUpgrade { target_version } => {
+                assert_eq!(target_version, "0.0.104");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_menu_no_update_hides_update_item() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+        );
+        assert!(find_item(&menu, "update_now").is_none());
+    }
+
+    #[test]
+    fn test_menu_update_in_progress_disables_item() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            Some("0.0.104"),
+            true,
+        );
+        let update = find_item(&menu, "update_now").expect("update_now present");
+        assert_eq!(update.label, "Updating…");
+        assert!(!update.enabled);
+    }
+
+    #[test]
     fn test_menu_stopped_state() {
         let rt = sample_runtime();
         let menu = build_menu(
@@ -725,6 +821,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Stopped"));
@@ -748,6 +846,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Starting...");
@@ -770,6 +870,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Start failed - open logs");
@@ -791,6 +893,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let stop = find_item(&menu, "toggle_service").unwrap();
         assert!(!stop.enabled);
@@ -814,6 +918,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
         assert!(socks5.enabled);
@@ -864,6 +970,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let custom = find_item(&menu, "custom1").unwrap();
         assert_eq!(custom.label, "My Item");
@@ -895,6 +1003,8 @@ mod tests {
             &[],
             &[],
             None,
+            None,
+            false,
         );
         let custom = find_item(&menu, "refresh").unwrap();
         match &custom.action {

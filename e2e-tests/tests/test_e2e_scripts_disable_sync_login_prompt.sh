@@ -29,6 +29,7 @@ ALLOWLIST = {
 }
 
 missing = []
+missing_tray = []
 for root in ROOTS:
     for path in sorted(root.rglob("*.sh")):
         rel = path.as_posix()
@@ -45,10 +46,19 @@ for root in ROOTS:
             and "admin_client.sh" not in text
         ):
             missing.append(rel)
+        if (
+            "BIFROST_DISABLE_TRAY" not in text
+            and "--no-tray" not in text
+            and "process.sh" not in text
+            and "admin_client.sh" not in text
+        ):
+            missing_tray.append(rel)
 
 process_helper = Path("e2e-tests/test_utils/process.sh").read_text(errors="ignore")
 if "BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1" not in process_helper:
     missing.append("e2e-tests/test_utils/process.sh")
+if "BIFROST_DISABLE_TRAY:=1" not in process_helper:
+    missing_tray.append("e2e-tests/test_utils/process.sh")
 
 rust_missing = []
 for path in sorted(Path("crates").rglob("*.rs")) + sorted(Path("tests").rglob("*.rs")):
@@ -62,11 +72,16 @@ for path in sorted(Path("crates").rglob("*.rs")) + sorted(Path("tests").rglob("*
 
 missing.extend(rust_missing)
 
-if missing:
-    print("Bifrost startup tests/scripts that may open the Sync login prompt:")
-    for item in missing:
-        print(f"  - {item}")
+if missing or missing_tray:
+    if missing:
+        print("Bifrost startup tests/scripts that may open the Sync login prompt:")
+        for item in missing:
+            print(f"  - {item}")
+    if missing_tray:
+        print("Bifrost startup tests/scripts that may spawn a tray helper:")
+        for item in missing_tray:
+            print(f"  - {item}")
     raise SystemExit(1)
 
-print("All Bifrost startup tests/scripts disable Sync auto-login prompt by default.")
+print("All Bifrost startup tests/scripts disable desktop UI by default.")
 PY

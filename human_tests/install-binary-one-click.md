@@ -9,6 +9,7 @@
 - 当前工作目录为 Bifrost 仓库根目录。
 - 除 TC-IBOC-08 外，不下载 release；所有用例都不启动真实 Bifrost 服务，不修改系统代理。
 - 所有用例都不安装真实 CA 证书，不写入真实 AI tool skills 目录。
+- upgrade restart 相关 E2E 必须默认设置 `BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，禁止测试启动 Tray 或打开 Sync 登录页面。
 - 下载源自适应用例通过 shell stub 模拟网络探测和下载结果，不访问真实 GitHub 或镜像。
 - 下载进度用例通过 shell/Rust 单元测试验证终端输出参数与进度格式，不依赖真实大文件下载。
 - Windows installer 用例需要 `pwsh` 或 Windows PowerShell；如果当前机器不可用，必须记录为环境阻塞，不能宣称已执行通过。
@@ -455,13 +456,16 @@
 2. 执行本地 upgrade restart E2E：
    ```bash
    source ~/.zshrc
-   BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh
    ```
 3. 脚本使用旧版 `0.0.99` 二进制启动临时数据目录下的 daemon，再把当前 debug 二进制打成本地 release archive，并通过 debug-only `BIFROST_UPGRADE_TEST_LATEST_VERSION` / `BIFROST_UPGRADE_TEST_ARCHIVE` 执行真实 `upgrade -y --restart`。
 4. 检查输出包含：
    ```text
    PASS old daemon started on port ... (PID: ...)
    PASS upgrade output contains stop/wait/restart milestones
+   PASS upgrade output installs Bifrost skills
+   PASS upgrade auto-installs Bifrost skills into isolated HOME
    PASS upgrade restart preserves no-system-proxy mode
    PASS upgrade restarted daemon with new PID: ...
    PASS new daemon runtime records no-system-proxy mode
@@ -474,11 +478,50 @@
 预期结果：
 
 - `upgrade -y --restart` 必须完整执行二进制替换、检测运行中旧 daemon、停止旧 daemon、等待旧端口释放、用升级后的安装路径启动新 daemon。
+- `upgrade -y --restart` 必须在新二进制落盘后、停止旧 daemon 前，用升级后的安装路径自动执行 `install-skill --tool all -y`；测试使用临时 HOME/USERPROFILE、`BIFROST_INSTALL_SKILL_SOURCE=embedded` 和 `BIFROST_INSTALL_SKILL_DIR`，不得写入真实 AI tool skills 目录。
+- 临时 HOME 下必须生成 `~/.codex/skills/bifrost/SKILL.md` 和 `~/.codex/skills/bifrost-remote/SKILL.md`，且两个文件包含正确 frontmatter，证明手动 `bifrost upgrade` 会覆盖安装 primary 与 remote skills。
 - 新 daemon 的 PID 必须不同于旧 PID，Admin API 必须 ready，`ps` 命令行必须指向临时安装目录下被升级后的 `bifrost`。
 - 新 daemon 的错误日志不得包含 `objc_initializeAfterForkError` 或 `+[NSNumber initialize]`。
 - upgrade 输出中的 restart 命令必须保留 `--no-system-proxy`，且输出不得出现 `System proxy: enabled`；新 daemon 的 `runtime.json` 必须记录 `system_proxy_enabled=false`，避免旧 daemon 原本未启用系统代理时升级后意外拉起系统代理 helper。
 - 停止升级后的 daemon 后，测试端口释放，且临时数据目录不残留 `bifrost __tray` helper。
 - 全流程使用临时安装目录、临时数据目录、动态端口和 `--no-system-proxy`，不修改用户正式数据和系统代理。
+- 全流程必须禁用 Tray 与 Sync 自动登录弹窗，避免真实测试污染桌面会话或打开登录页面。
+
+### TC-IBOC-21 手动与后台 upgrade 都必须自动覆盖安装 skills
+
+操作步骤：
+
+1. 执行源码门禁，确认手动 `bifrost upgrade` 和后台 `self-update` 共用 `handle_upgrade`：
+   ```bash
+   source ~/.zshrc
+   grep -q 'let result = handle_upgrade(true, true);' crates/bifrost-cli/src/commands/upgrade_background.rs
+   grep -q 'install_skills_after_upgrade_best_effort(&restart_executable)' crates/bifrost-cli/src/commands/upgrade.rs
+   grep -q 'Start-Process -FilePath \\$TargetPath -ArgumentList @("install-skill", "--tool", "all", "-y")' crates/bifrost-cli/src/commands/upgrade.rs
+   ```
+2. 执行 upgrade 后置 skill 安装单元测试：
+   ```bash
+   source ~/.zshrc
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli --lib upgrade_post_install_skill -- --nocapture
+   ```
+3. 执行本地构造真实 upgrade restart：
+   ```bash
+   source ~/.zshrc
+   BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+     BIFROST_BIN="$(pwd)/target/debug/bifrost" e2e-tests/tests/test_upgrade_local_restart_e2e.sh
+   ```
+4. 检查 E2E 输出包含：
+   ```text
+   PASS upgrade output installs Bifrost skills
+   PASS upgrade auto-installs Bifrost skills into isolated HOME
+   ```
+
+预期结果：
+
+- 后台自动升级 `self-update` 仍调用 `handle_upgrade(true, true)`，因此覆盖同一条后置 skills 安装路径。
+- 手动 `bifrost upgrade` 在 `UpgradeInstallOutcome::Installed` 后、restart 前执行 `install-skill --tool all -y`。
+- Windows deferred self-update helper 在目标 exe 替换后、启动新 daemon 前执行同一条 `install-skill --tool all -y`。
+- 单元测试确认后置安装参数固定为 all tools，失败/超时只提示手动重试，不把已成功替换的新二进制回滚。
+- 真实 E2E 在临时 HOME/USERPROFILE 下生成 `bifrost` 与 `bifrost-remote` skills，不污染用户真实目录。
 
 ### TC-IBOC-19 upgrade restart bad case 全面回归
 
@@ -537,7 +580,7 @@
 - Windows x86 CI 必须执行真实进程链路：当前 PR `bifrost.exe` 复制到临时安装路径并启动 daemon，同一路径的 `bifrost.exe` 执行 upgrade，upgrade 停止 daemon，等待旧端口释放，替换当前安装路径，最后用替换后的 `bifrost.exe start -d` 启动新 daemon。
 - 该路径必须覆盖 Windows 用户最关键的 self-update 行为；历史 release 如 v0.0.100 缺少 Windows daemon exec start 能力，不作为本用例的启动 fixture。
 - 由于 Windows 不允许当前进程直接覆盖正在运行的 exe，upgrade 必须先 stage 新 exe，再调度 PowerShell helper 在当前 upgrade 进程退出后替换目标 exe；如果指定 `--restart`，helper 必须替换后执行新 exe 的 restart args。
-- CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；随后脚本必须通过 Admin API ready、新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
+- CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；由于 Windows self-replacement 由 deferred PowerShell helper 在 upgrade 进程退出后执行，脚本必须先等待 Admin API ready 作为 helper 已完成重启的同步点，再验证临时 HOME 下的 `bifrost` / `bifrost-remote` skills 已自动安装，随后继续通过新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
 - 该用例只能在 Windows x86 runner 上执行；macOS/Linux 继续保留本地真实 upgrade restart 脚本和 CI 源码门禁，避免所有平台都依赖同一类静态检查。
 
 ## 清理步骤
@@ -586,3 +629,4 @@
 | 2026-06-14 | TC-IBOC-20 | `prlctl exec "Windows 11" --current-user ... bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | FAIL 后已修复：Windows VM 使用 CI 下载的 release `bifrost.exe` 复现出 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 在 release 构建被忽略，upgrade 输出 `You're already on the latest version (v0.0.100)`，未进入重启路径；本次修复改为 CI 显式设置 `BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1` 后才允许 release binary 使用本地测试 archive/latest override |
 | 2026-06-14 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过，包含 detected/stop/wait/start 输出、`--no-system-proxy` 保留、新 PID 存活、Admin API ready、runtime `system_proxy_enabled=false`、stop 后端口释放 |
 | 2026-06-15 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过。旧 daemon 端口 `49693`、旧 PID `35268`，upgrade 输出包含 detected/stop/wait/start，重启后新 PID `35911`，runtime 保留 `system_proxy_enabled=false`，新 daemon 使用升级后的临时安装路径，错误日志无 ObjC fork crash，stop 后端口释放且无同数据目录 tray helper 残留。 |
+| 2026-06-16 | TC-IBOC-20 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_target_dirs_ --lib` + `bash -n e2e-tests/tests/test_upgrade_local_restart_e2e.sh` + `bash e2e-tests/tests/test_e2e_scripts_disable_sync_login_prompt.sh` + `git diff --check` | PASS：`install-skill` 目录解析新增 `BIFROST_INSTALL_SKILL_DIR` 覆盖并保留 `--dir` / `--cwd` 优先级；静态验证 Windows upgrade restart 脚本通过临时 `BIFROST_INSTALL_SKILL_DIR` 隔离 post-upgrade skill 安装，且在 Admin API ready 后检查 deferred helper 已安装 primary/remote skills；frontmatter name 断言接受 YAML 合法的 quoted/unquoted 形式。本地未执行真实 upgrade restart，避免启动 Tray 或打开 Sync 登录页，完整 Windows 真实链路交由 GitHub Actions `E2E Shell (x86_64-pc-windows-msvc)` 验证。 |

@@ -1730,7 +1730,17 @@ fn session_detail_with_active_status(
     active_status: Option<bifrost_agent::ActiveTurnStatus>,
 ) -> serde_json::Value {
     let Some(status) = active_status else {
-        return serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+        let mut value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
+        if let Some(object) = value.as_object_mut() {
+            object.insert("running".to_string(), serde_json::json!(false));
+            object
+                .entry("state".to_string())
+                .or_insert_with(|| serde_json::json!("idle"));
+            object
+                .entry("run_state".to_string())
+                .or_insert_with(|| serde_json::json!("idle"));
+        }
+        return value;
     };
     let mut value = serde_json::to_value(detail).unwrap_or_else(|_| serde_json::json!({}));
     overlay_active_status_on_session_detail(&mut value, status);
@@ -2475,6 +2485,45 @@ mod tests {
             "idle"
         );
         assert_eq!(active_session_list_run_state(false, "running"), "completed");
+    }
+
+    #[test]
+    fn session_detail_without_active_status_reports_explicit_idle_state() {
+        let detail = bifrost_agent::SessionDetail {
+            session_key: "idle-detail".to_string(),
+            user_id: None,
+            message_count: 1,
+            user_turn_count: 1,
+            created_at: 10,
+            last_active_at: 20,
+            compaction_count: 0,
+            total_tokens_used: None,
+            estimated_tokens: 0,
+            history_version: 1,
+            work_dir: None,
+            source: "web".to_string(),
+            agent_type: Some("Bifrost Agent".to_string()),
+            runner_type: Some("bifrost_agent".to_string()),
+            runner_id: None,
+            model: None,
+            model_provider: None,
+            external_conversation_id: None,
+            external_thread_id: None,
+            title: Some("Idle detail".to_string()),
+            messages: Vec::new(),
+            goal_status: None,
+            goal_objective: None,
+            history_path: Some("/tmp/history.jsonl".to_string()),
+            has_timeline: true,
+            timeline_event_count: 1,
+            run_state: "idle".to_string(),
+        };
+
+        let value = session_detail_with_active_status(detail, None);
+
+        assert_eq!(value["running"], false);
+        assert_eq!(value["state"], "idle");
+        assert_eq!(value["run_state"], "idle");
     }
 
     #[test]

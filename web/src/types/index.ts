@@ -774,3 +774,22 @@ export interface VersionCheckResponse {
   release_url: string | null;
   checked_at: string | null;
 }
+
+export type UpgradePhase =
+  | "idle"
+  | "checking"
+  | "downloading"
+  | "installing"
+  | "restarting"
+  | "completed"
+  | "failed";
+
+export interface UpgradeProgress {
+  phase: UpgradePhase;
+  percent: number | null;
+  message: string;
+  target_version: string | null;
+  source: string | null;
+  error: string | null;
+  updated_at: string;
+}

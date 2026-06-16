@@ -31,6 +31,8 @@ const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
 const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 5;
+const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
+const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimedCommandStatus {
@@ -384,6 +386,47 @@ fn verify_binary(path: &Path) -> bool {
     )
 }
 
+fn post_upgrade_skill_install_message(status: TimedCommandStatus) -> &'static str {
+    match status {
+        TimedCommandStatus::Success => "✓ Bifrost skills installed successfully.",
+        TimedCommandStatus::Failure => {
+            "⚠ Bifrost skill installation failed; retry manually with: bifrost install-skill --tool all -y"
+        }
+        TimedCommandStatus::TimedOut => {
+            "⚠ Bifrost skill installation timed out; retry manually with: bifrost install-skill --tool all -y"
+        }
+    }
+}
+
+fn install_skills_after_upgrade_best_effort(executable: &Path) {
+    println!("{}", "Installing latest Bifrost skills...".bright_cyan());
+    match command_status_with_timeout(
+        executable,
+        POST_UPGRADE_SKILL_INSTALL_ARGS,
+        Duration::from_secs(POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS),
+    ) {
+        Ok(status) => {
+            let message = post_upgrade_skill_install_message(status);
+            if status == TimedCommandStatus::Success {
+                println!("{}", message.bright_green());
+            } else {
+                eprintln!("{}", message.bright_yellow());
+            }
+        }
+        Err(error) => {
+            eprintln!(
+                "{} {}",
+                "⚠ Could not run Bifrost skill installation after upgrade:".bright_yellow(),
+                error.to_string().dimmed()
+            );
+            eprintln!(
+                "{}",
+                "  Retry manually with: bifrost install-skill --tool all -y".dimmed()
+            );
+        }
+    }
+}
+
 fn unique_temp_binary_path(target_path: &Path) -> PathBuf {
     let file_name = target_path
         .file_name()
@@ -635,7 +678,11 @@ fn select_fastest_github_base(github_path: &str, tuning: DownloadTuning) -> Opti
         .map(|(_, base, _)| base)
 }
 
-fn download_progress_line(downloaded: u64, total: Option<u64>, started: Instant) -> String {
+pub(crate) fn download_progress_line(
+    downloaded: u64,
+    total: Option<u64>,
+    started: Instant,
+) -> String {
     let elapsed = started.elapsed().as_secs_f64().max(0.001);
     let speed = downloaded as f64 / elapsed;
     match total {
@@ -749,11 +796,13 @@ fn download_file_once_with_progress(
             print!("\r{}", download_progress_line(downloaded, total, started));
             io::stdout().flush().ok();
             last_render = Instant::now();
+            super::upgrade_background::report_download(downloaded, total, started);
         }
     }
 
     file.flush().map_err(BifrostError::Io)?;
     println!("\r{}", download_progress_line(downloaded, total, started));
+    super::upgrade_background::report_download(downloaded, total, started);
 
     if downloaded == 0 {
         return Err(BifrostError::Network(format!(
@@ -1184,6 +1233,7 @@ fn download_and_install(
         .ok_or_else(|| BifrostError::Network("Failed to download release archive".to_string()))?;
 
     println!("{}", "Extracting archive...".bright_cyan());
+    super::upgrade_background::report_installing();
 
     let extract_dir = temp_dir.path().join(format!("extract_{}", target));
     fs::create_dir_all(&extract_dir)?;
@@ -1462,6 +1512,7 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
 
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
+            install_skills_after_upgrade_best_effort(&restart_executable);
             maybe_restart_running_proxy(restart, &restart_executable)?
         }
         #[cfg(windows)]
@@ -1526,6 +1577,7 @@ fn maybe_restart_running_proxy(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
+    super::upgrade_background::report_restarting();
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -1551,6 +1603,15 @@ fn maybe_restart_running_proxy(
 
     let status = Command::new(restart_executable)
         .args(&args)
+        // The proxy we are restarting from may itself be a detached daemon child,
+        // in which case it carries BIFROST_DETACHED_DAEMON_CHILD=1 in its env. That
+        // var is inherited by this upgrade process (and by an admin-spawned
+        // self-update). If we let the restart command inherit it, `start -d` would
+        // think it is *already* the detached child and run in the FOREGROUND,
+        // blocking this `.status()` call forever (the upgrade hangs at
+        // "restarting"). Strip it so the restart spawns a fresh, properly detached
+        // daemon and returns control here.
+        .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV)
         .status()
         .map_err(BifrostError::Io)?;
 
@@ -1639,6 +1700,7 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
     };
 
     println!("{}", "  Stopping current proxy...".bright_cyan());
+    super::upgrade_background::report_restarting();
     super::stop::run_stop_for_restart()
         .map_err(|e| BifrostError::Config(format!("Failed to stop running proxy: {}", e)))?;
 
@@ -1735,6 +1797,12 @@ try {
   }
   Move-Item -LiteralPath $PendingPath -Destination $TargetPath -Force
 
+  Write-UpgradeLog "installing Bifrost skills"
+  $skillChild = Start-Process -FilePath $TargetPath -ArgumentList @("install-skill", "--tool", "all", "-y") -NoNewWindow -PassThru -Wait
+  if ($skillChild.ExitCode -ne 0) {
+    Write-UpgradeLog "WARNING: skill installation exited with code $($skillChild.ExitCode)"
+  }
+
   if ($RestartArgsPath -and (Test-Path -LiteralPath $RestartArgsPath)) {
     $restartArgs = [System.IO.File]::ReadAllLines($RestartArgsPath)
     if ($restartArgs.Count -gt 0) {
@@ -1777,7 +1845,11 @@ try {
         .arg(&log_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        // The helper relaunches bifrost with `start -d`; strip the detached-daemon
+        // marker so the relaunched proxy detaches properly instead of running in
+        // the foreground (see the unix restart path for the full rationale).
+        .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV);
 
     command.spawn().map_err(BifrostError::Io)?;
     println!(
@@ -2409,6 +2481,29 @@ mod tests {
         assert!(restore_binary_backup(&target).expect("restore backup"));
         assert_eq!(std::fs::read(&target).expect("read target"), b"old binary");
         assert!(!binary_backup_path(&target).exists());
+    }
+
+    #[test]
+    fn upgrade_post_install_skill_messages_cover_all_statuses() {
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::Success)
+                .contains("installed successfully")
+        );
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::Failure)
+                .contains("retry manually")
+        );
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::TimedOut).contains("timed out")
+        );
+    }
+
+    #[test]
+    fn upgrade_post_install_skill_args_cover_all_supported_tools() {
+        assert_eq!(
+            POST_UPGRADE_SKILL_INSTALL_ARGS,
+            &["install-skill", "--tool", "all", "-y"]
+        );
     }
 
     #[test]

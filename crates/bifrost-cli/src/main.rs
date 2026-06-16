@@ -339,6 +339,10 @@ fn run_cli_main() {
         }
         Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes, restart }) => handle_upgrade(yes, restart),
+        Some(Commands::SelfUpdate { target, source }) => {
+            commands::handle_upgrade_background(target, source);
+            Ok(())
+        }
         Some(Commands::InstallSkill {
             tool,
             dir,

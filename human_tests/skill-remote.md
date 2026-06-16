@@ -192,6 +192,38 @@
 - 文档明确必须读取 `.agents/skills/` 下所有 skill 元信息。
 - 文档明确 skill 详细正文只在任务命中或实际需要流程时按需加载。
 
+### TC-SR-09 新远程能力与长任务恢复路径可被 coding agent 理解
+
+操作步骤：
+
+1. 检查 skill 明确把长任务从 stream 主路径切到 detach/job：
+   ```bash
+   rg -n 'exec --detach|remote job status|remote job logs|remote job watch|真实远端 exit code' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+2. 检查断线恢复优先 job 续接，连接身份失效才重建 conn：
+   ```bash
+   rg -n '断开/切线程/重启 CLI|优先用 job|grant revoked|authorization expired|conn down/up' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+3. 检查 shell 环境和 cwd 语义：
+   ```bash
+   rg -n -- '--login|BIFROST_REMOTE=1|TERM=dumb|--cwd.*shell rc' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+4. 检查 file UX 新能力：
+   ```bash
+   rg -n 'remote file scratch-dir|file.op_not_permitted|read-many.*policy|/private/tmp|mtime_unix' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+
+预期结果：
+
+- 文档指导 build/test/CI watch 等长任务使用 `remote exec --detach`，再用 `remote job status/logs/watch` 续接和获取真实 exit code。
+- 文档说明 caller stream 断开、digest mismatch 或本地切线程后不要重启同一长任务，应凭 `call_id`/`relay_token` 续接。
+- 文档说明 `--login` 仅在需要用户 PATH/rc 时启用，默认路径保持 stdout 干净，`--cwd` 在 shell rc 后仍生效。
+- 文档说明临时脚本走 `scratch-dir`，`read-many` 被 policy deny 时降级多次 `read`。
+
+执行记录（2026-06-16）：
+
+- PASS：对仓库源文件 `skill_remote.md` 执行上述关键字检查，命中 `exec --detach`、`remote job status/logs/watch`、`真实远端 exit code`、`断开/切线程/重启 CLI`、`grant revoked`、`authorization expired`、`--login`、`BIFROST_REMOTE=1`、`TERM=dumb`、`remote file scratch-dir`、`file.op_not_permitted`、`/private/tmp` 与 `mtime_unix`。
+
 ## 清理步骤
 
 ```bash

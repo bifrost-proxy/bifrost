@@ -29,6 +29,11 @@ pub enum RemoteCommands {
         long_about = "Execute a shell command on the remote host.\n\n            ⚠  This is the highest-privilege remote command: it can run arbitrary code on the target machine, subject only to the Shell Access policy bound to the active grant. For policy-gated structured writes, prefer `bifrost remote file write/edit/patch`."
     )]
     Exec(Box<RemoteCommandExecArgs>),
+    #[command(about = "Inspect or rejoin a detached remote exec job")]
+    Job {
+        #[command(subcommand)]
+        action: RemoteJobCommands,
+    },
     #[command(about = "Manage remote macOS keep-awake (requires remote_power_mgmt grant)")]
     KeepAwake {
         #[command(subcommand)]
@@ -219,6 +224,19 @@ pub enum RemoteFileCommands {
         allow_binary: bool,
         #[arg(long, help = "Working directory override")]
         cwd: Option<String>,
+        #[arg(long, default_value = "human", help = "Output format: human | json")]
+        output: String,
+    },
+    #[command(about = "Create or print a safe scratch directory under the current remote cwd")]
+    ScratchDir {
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(
+            long,
+            default_value = ".bifrost-tmp",
+            help = "Scratch directory name relative to --cwd"
+        )]
+        name: String,
         #[arg(long, default_value = "human", help = "Output format: human | json")]
         output: String,
     },
@@ -727,6 +745,16 @@ pub struct RemoteCommandExecArgs {
     #[arg(long = "timeout-ms", help = "Remote command timeout in milliseconds")]
     pub timeout_ms: Option<u64>,
     #[arg(
+        long = "detach",
+        help = "Open the remote call and return job identifiers without waiting for completion"
+    )]
+    pub detach: bool,
+    #[arg(
+        long = "login",
+        help = "Run shell-text through the target user's login shell when allowed by policy"
+    )]
+    pub login: bool,
+    #[arg(
         long = "shell-text",
         value_name = "TEXT",
         conflicts_with = "argv",
@@ -782,6 +810,65 @@ pub struct RemoteCommandExecArgs {
         help = "Skip the client-side streaming SHA-256 verification against the Done frame digest"
     )]
     pub no_verify_digest: bool,
+}
+
+#[derive(Subcommand, Clone, Debug)]
+pub enum RemoteJobCommands {
+    #[command(about = "Poll a detached remote exec job until a terminal event or a short timeout")]
+    Status {
+        #[arg(help = "Remote call id returned by `remote exec --detach`")]
+        call_id: String,
+        #[arg(
+            long = "relay-token",
+            value_name = "TOKEN",
+            help = "Relay token returned by `remote exec --detach`"
+        )]
+        relay_token: String,
+        #[arg(
+            long = "wait-ms",
+            default_value_t = 1500,
+            help = "How long to wait for a terminal event"
+        )]
+        wait_ms: u64,
+    },
+    #[command(about = "Stream logs from a detached remote exec job")]
+    Logs {
+        #[arg(help = "Remote call id returned by `remote exec --detach`")]
+        call_id: String,
+        #[arg(
+            long = "relay-token",
+            value_name = "TOKEN",
+            help = "Relay token returned by `remote exec --detach`"
+        )]
+        relay_token: String,
+        #[arg(
+            long = "output-file",
+            value_name = "PATH",
+            help = "Write streamed stdout to a local file"
+        )]
+        output_file: Option<String>,
+        #[arg(long = "no-verify-digest", help = "Skip stream SHA-256 verification")]
+        no_verify_digest: bool,
+    },
+    #[command(about = "Follow a detached job until it exits and return the real remote exit code")]
+    Watch {
+        #[arg(help = "Remote call id returned by `remote exec --detach`")]
+        call_id: String,
+        #[arg(
+            long = "relay-token",
+            value_name = "TOKEN",
+            help = "Relay token returned by `remote exec --detach`"
+        )]
+        relay_token: String,
+        #[arg(
+            long = "output-file",
+            value_name = "PATH",
+            help = "Write streamed stdout to a local file"
+        )]
+        output_file: Option<String>,
+        #[arg(long = "no-verify-digest", help = "Skip stream SHA-256 verification")]
+        no_verify_digest: bool,
+    },
 }
 
 fn parse_env_assignment(value: &str) -> Result<(String, String), String> {

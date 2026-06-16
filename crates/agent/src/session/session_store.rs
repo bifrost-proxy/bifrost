@@ -104,6 +104,11 @@ impl AgentSessionManager {
         session.stop_signal = Some(self.create_stop_signal(session_key));
     }
 
+    #[cfg(test)]
+    pub(crate) fn drop_active_stop_signal_for_test(&self, session_key: &str) {
+        self.active_stop_signals.remove(session_key);
+    }
+
     fn attach_active_turn_handles(&self, session_key: &str, session: &mut AgentSession) {
         self.attach_active_turn_status(session_key, session);
         self.attach_stop_signal(session_key, session);
@@ -344,6 +349,10 @@ impl AgentSessionManager {
     /// Returns true when a running turn was signalled.
     pub fn request_stop(&self, session_key: &str) -> bool {
         let Some(signal) = self.active_stop_signals.get(session_key) else {
+            if self.active_turn_statuses.contains_key(session_key) {
+                self.release_active(session_key);
+                return true;
+            }
             return false;
         };
         let requested = signal.request_stop();

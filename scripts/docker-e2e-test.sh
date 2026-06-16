@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
 
 #
 # 在 Docker ubuntu:24.04 中运行指定的 E2E 测试脚本。

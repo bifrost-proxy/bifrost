@@ -14,21 +14,19 @@ use bifrost_proxy::protocol::{
     WebSocketFrame, WebSocketReader, WebSocketWriter,
 };
 
-async fn find_available_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let port = listener.local_addr().unwrap().port();
-    drop(listener);
-    port
+async fn bind_localhost_listener() -> TcpListener {
+    TcpListener::bind("127.0.0.1:0").await.unwrap()
+}
+
+fn listener_port(listener: &TcpListener) -> u16 {
+    listener.local_addr().unwrap().port()
 }
 
 mod websocket_e2e {
     use super::*;
     use bifrost_proxy::protocol::{compute_accept_key, generate_sec_websocket_key, Opcode};
 
-    async fn start_websocket_echo_server(port: u16, ready_tx: oneshot::Sender<()>) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .await
-            .unwrap();
+    async fn start_websocket_echo_server(listener: TcpListener, ready_tx: oneshot::Sender<()>) {
         ready_tx.send(()).unwrap();
 
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -90,10 +88,11 @@ mod websocket_e2e {
 
     #[tokio::test]
     async fn test_websocket_handshake_and_echo() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_websocket_echo_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_websocket_echo_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -166,10 +165,11 @@ mod websocket_e2e {
 
     #[tokio::test]
     async fn test_websocket_large_message_fragmentation() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_websocket_echo_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_websocket_echo_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -214,10 +214,7 @@ mod websocket_e2e {
 mod sse_e2e {
     use super::*;
 
-    async fn start_sse_server(port: u16, ready_tx: oneshot::Sender<()>) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .await
-            .unwrap();
+    async fn start_sse_server(listener: TcpListener, ready_tx: oneshot::Sender<()>) {
         ready_tx.send(()).unwrap();
 
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -268,10 +265,11 @@ mod sse_e2e {
 
     #[tokio::test]
     async fn test_sse_event_stream() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_sse_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_sse_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -326,10 +324,7 @@ mod sse_e2e {
 mod http1_e2e {
     use super::*;
 
-    async fn start_http_server(port: u16, ready_tx: oneshot::Sender<()>) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .await
-            .unwrap();
+    async fn start_http_server(listener: TcpListener, ready_tx: oneshot::Sender<()>) {
         ready_tx.send(()).unwrap();
 
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -382,10 +377,11 @@ mod http1_e2e {
 
     #[tokio::test]
     async fn test_http_get_request() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_http_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_http_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -419,10 +415,11 @@ mod http1_e2e {
 
     #[tokio::test]
     async fn test_http_post_with_body() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_http_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_http_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -451,10 +448,11 @@ mod http1_e2e {
 
     #[tokio::test]
     async fn test_http_chunked_transfer() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_http_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_http_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -624,10 +622,7 @@ mod protocol_detection_e2e {
 mod connection_pool_e2e {
     use super::*;
 
-    async fn start_pool_test_server(port: u16, ready_tx: oneshot::Sender<()>) {
-        let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
-            .await
-            .unwrap();
+    async fn start_pool_test_server(listener: TcpListener, ready_tx: oneshot::Sender<()>) {
         ready_tx.send(()).unwrap();
 
         let connection_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -668,10 +663,11 @@ mod connection_pool_e2e {
 
     #[tokio::test]
     async fn test_connection_pool_reuse() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_pool_test_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_pool_test_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -722,10 +718,11 @@ mod connection_pool_e2e {
 
     #[tokio::test]
     async fn test_connection_pool_concurrent() {
-        let port = find_available_port().await;
+        let listener = bind_localhost_listener().await;
+        let port = listener_port(&listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
-        let server_handle = tokio::spawn(start_pool_test_server(port, ready_tx));
+        let server_handle = tokio::spawn(start_pool_test_server(listener, ready_tx));
         ready_rx.await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -779,13 +776,12 @@ mod stream_forwarding_e2e {
 
     #[tokio::test]
     async fn test_bidirectional_forwarding() {
-        let server_port = find_available_port().await;
+        let server_listener = bind_localhost_listener().await;
+        let server_port = listener_port(&server_listener);
         let (ready_tx, ready_rx) = oneshot::channel();
 
         let server_handle = tokio::spawn(async move {
-            let listener = TcpListener::bind(format!("127.0.0.1:{}", server_port))
-                .await
-                .unwrap();
+            let listener = server_listener;
             ready_tx.send(()).unwrap();
 
             if let Ok((mut stream, _)) = listener.accept().await {
@@ -800,13 +796,12 @@ mod stream_forwarding_e2e {
 
         ready_rx.await.unwrap();
 
-        let proxy_port = find_available_port().await;
+        let proxy_listener = bind_localhost_listener().await;
+        let proxy_port = listener_port(&proxy_listener);
         let (proxy_ready_tx, proxy_ready_rx) = oneshot::channel();
 
         let proxy_handle = tokio::spawn(async move {
-            let listener = TcpListener::bind(format!("127.0.0.1:{}", proxy_port))
-                .await
-                .unwrap();
+            let listener = proxy_listener;
             proxy_ready_tx.send(()).unwrap();
 
             if let Ok((client_stream, _)) = listener.accept().await {

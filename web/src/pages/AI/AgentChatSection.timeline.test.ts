@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
+import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
   formatContextWindow,
   formatStatusMetricCount,
+  telemetryFromThread,
   type AgentThreadSummary,
   type HistoryEvent,
   type RunTelemetry,
@@ -103,6 +105,63 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetry.status?.state).toBe("idle");
   });
 
+  it("lets explicit idle detail run_state override stale running history state", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "admin-chat",
+      status: "active",
+      run_state: "idle",
+    };
+    const events: HistoryEvent[] = [
+      {
+        timestamp: 1,
+        event_type: "run_state_changed",
+        session_key: "admin-chat",
+        content: { state: "running" },
+      },
+    ];
+
+    const telemetry = historyEventsToTelemetry(events, thread);
+
+    expect(telemetry.phase).toBe("idle");
+    expect(telemetry.status?.state).toBe("idle");
+  });
+
+  it("does not treat running false with idle state as active when run_state is stale", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "admin-chat",
+      status: "active",
+      running: false,
+      run_state: "running",
+      state: "idle",
+    };
+
+    expect(isThreadActive(thread)).toBe(false);
+  });
+
+  it("lets running false override stale active run_state", () => {
+    const thread: AgentThreadSummary = {
+      session_key: "admin-chat",
+      status: "active",
+      running: false,
+      run_state: "running",
+    };
+    const events: HistoryEvent[] = [
+      {
+        timestamp: 1,
+        event_type: "run_state_changed",
+        session_key: "admin-chat",
+        content: { state: "running" },
+      },
+    ];
+
+    const telemetry = historyEventsToTelemetry(events, thread);
+
+    expect(isThreadActive(thread)).toBe(false);
+    expect(telemetry.phase).toBe("idle");
+    expect(telemetry.status?.state).toBe("idle");
+    expect(telemetryFromThread(thread).status?.state).toBe("idle");
+  });
+
   it("keeps active detail status newer than stale history events when thread summary is missing", () => {
     const fallback: RunTelemetry = {
       phase: "running",
@@ -138,6 +197,36 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetry.status?.context_window_tokens).toBe(250_000);
     expect(telemetry.status?.context_usage_percent).toBe(74.7);
     expect(telemetry.status?.last_response_tokens).toBe(181_900);
+  });
+
+  it("does not append a running placeholder when detail run_state is explicit idle", () => {
+    const messages = historyEventsToMessages(
+      [
+        {
+          timestamp: 1,
+          event_type: "run_state_changed",
+          session_key: "admin-chat",
+          content: { state: "running" },
+        },
+        {
+          timestamp: 2,
+          event_type: "user_message",
+          session_key: "admin-chat",
+          content: { message: "queued-looking stale message" },
+        },
+      ],
+      {
+        ensureRunningAssistant: false,
+        runningState: "idle",
+      },
+    );
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      content: "queued-looking stale message",
+    });
+    expect(messages.some((message) => message.content === "Agent is running...")).toBe(false);
   });
 });
 
