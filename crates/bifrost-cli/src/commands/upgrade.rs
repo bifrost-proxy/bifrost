@@ -1559,6 +1559,15 @@ fn maybe_restart_running_proxy(
 
     let status = Command::new(restart_executable)
         .args(&args)
+        // The proxy we are restarting from may itself be a detached daemon child,
+        // in which case it carries BIFROST_DETACHED_DAEMON_CHILD=1 in its env. That
+        // var is inherited by this upgrade process (and by an admin-spawned
+        // self-update). If we let the restart command inherit it, `start -d` would
+        // think it is *already* the detached child and run in the FOREGROUND,
+        // blocking this `.status()` call forever (the upgrade hangs at
+        // "restarting"). Strip it so the restart spawns a fresh, properly detached
+        // daemon and returns control here.
+        .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV)
         .status()
         .map_err(BifrostError::Io)?;
 
@@ -1786,7 +1795,11 @@ try {
         .arg(&log_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stderr(Stdio::null())
+        // The helper relaunches bifrost with `start -d`; strip the detached-daemon
+        // marker so the relaunched proxy detaches properly instead of running in
+        // the foreground (see the unix restart path for the full rationale).
+        .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV);
 
     command.spawn().map_err(BifrostError::Io)?;
     println!(
