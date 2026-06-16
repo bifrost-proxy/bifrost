@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+: "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+export BIFROST_DISABLE_TRAY
+
 if [[ -n "${ZSH_VERSION:-}" ]]; then
   source ~/.zshrc
 fi
@@ -63,7 +68,7 @@ if [[ -n "${DEVICE_RIGHT:-}" ]]; then
   printf 'duplicate audio payload %s\n' "$RUN_ID" > "$RIGHT_DIR/duplicate-copy.wav"
 fi
 
-BIFROST_DATA_DIR="$DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 ./target/debug/bifrost start \
+BIFROST_DATA_DIR="$DATA_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 ./target/debug/bifrost start \
   -p "$PORT" \
   --unsafe-ssl \
   --no-system-proxy \

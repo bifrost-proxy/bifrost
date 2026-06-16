@@ -2485,12 +2485,17 @@ mod tests {
 
     #[test]
     fn upgrade_post_install_skill_messages_cover_all_statuses() {
-        assert!(post_upgrade_skill_install_message(TimedCommandStatus::Success)
-            .contains("installed successfully"));
-        assert!(post_upgrade_skill_install_message(TimedCommandStatus::Failure)
-            .contains("retry manually"));
-        assert!(post_upgrade_skill_install_message(TimedCommandStatus::TimedOut)
-            .contains("timed out"));
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::Success)
+                .contains("installed successfully")
+        );
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::Failure)
+                .contains("retry manually")
+        );
+        assert!(
+            post_upgrade_skill_install_message(TimedCommandStatus::TimedOut).contains("timed out")
+        );
     }
 
     #[test]

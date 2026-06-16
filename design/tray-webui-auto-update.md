@@ -120,6 +120,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
     - `Completed` → 清操作态回 `OP_IDLE`，清进度文件，恢复正常状态展示（升级子进程会重启代理，托盘 state 轮询自然恢复 Running）。
     - `Failed` → `OP_UPGRADE_FAILED`，状态 `Bifrost: Update failed - open logs`，允许重试。
 - 升级子进程会停止旧代理→替换二进制→拉起新代理。托盘自身是独立进程不受影响，仅通过文件观察进度。
+- 升级子进程在新二进制落盘后、重启代理前，必须用新 `bifrost` 可执行文件执行 `install-skill --tool all -y`。这保证托盘/Admin 后台升级和用户手动 `bifrost upgrade` 都会覆盖安装最新 Bifrost skills；若 skill 安装因网络、权限或目录问题失败，upgrade 主流程只输出警告并继续，用户可按提示手动重试。Windows self-update 不能在当前进程中立即执行新 exe，因此 PowerShell deferred helper 在替换目标 exe 后、启动新 daemon 前执行同一条 skill 安装命令，并把失败写入 `.bifrost-upgrade-*.log`。
 
 ### 5. Admin 升级 API（bifrost-admin）
 
@@ -179,6 +180,9 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 - **bifrost-cli / upgrade_background**：
   - `ProgressSink` 在各阶段写出预期 `phase`；下载回调把 `percent` 写入文件。
   - 失败路径写 `Failed` + `error`。
+- **bifrost-cli / upgrade skills**：
+  - `upgrade_post_install_skill_args_cover_all_supported_tools` 断言 upgrade 后置安装命令固定为 `install-skill --tool all -y`。
+  - `upgrade_post_install_skill_messages_cover_all_statuses` 覆盖 success/failure/timeout 文案，确保失败只提示手动重试而不回滚已成功安装的新二进制。
 - **bifrost-admin / system handler**：
   - 无更新时 `POST /api/system/upgrade` → 409。
   - 已有 active 升级 → 409。
@@ -189,7 +193,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 按 `.trae/skills/e2e-test` 流程：
 
 1. 编译最新 Bifrost 二进制。
-2. 临时数据目录启动服务（`--no-system-proxy`、避开 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`）。
+2. 临时数据目录启动服务（`--no-system-proxy`、避开 9900 端口、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`）。
 3. `GET /_bifrost/api/system/version-check`：构造/注入一个“有新版本”的 `version_cache.json`，断言 `has_update = true`。
 4. `POST /_bifrost/api/system/upgrade`（用测试版本覆盖 env 走 `test_upgrade_latest_version_override`，避免真实下载 GitHub），断言 202。
 5. 轮询 `GET /_bifrost/api/system/upgrade/progress`，断言 phase 由 `Checking`→…→ 终态推进，字段结构正确。
@@ -205,6 +209,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 - Web UI 弹出版本管理弹窗，右下角“立即更新 / 稍后提示”两个按钮存在且位置正确。
 - 点“稍后提示”后本会话不再自动弹窗。
 - 点“立即更新”展示下载进度 + 安装进度；安装后代理自动重启；重启后 Web UI 自动刷新一次且只刷新一次。
+- 手动 `bifrost upgrade -y --restart` 与托盘/Admin 后台升级都在新二进制安装成功后自动覆盖安装 `bifrost` 和 `bifrost-remote` skills；测试必须使用临时 HOME/USERPROFILE、`BIFROST_INSTALL_SKILL_SOURCE=embedded`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免污染真实 AI tool skills 目录、启动 Tray 或打开登录页。
 - 升级失败（断网/坏归档）时托盘与 Web UI 都给出失败提示并可重试。
 - 双主题（Light/Dark）下弹窗与进度条样式正确。
 
