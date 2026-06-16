@@ -83,11 +83,10 @@ fn build_daily_agent_prompt(
     }
 
     if is_chatgpt_web {
-        // 每一轮都按「全新的独立任务」来构造 prompt：本条消息自带完成任务所需的全部信息
-        // （AGENTS.md 指令 + 已有日报完整内容 + 变更文件完整内容），不依赖任何历史对话记忆。
+        // 每条消息都自带完成任务所需的全部信息：AGENTS.md 指令 + 已有日报完整内容 + 变更文件完整内容。
         let _ = chatgpt_first_turn;
         prompt.push_str(
-            "\n请把本条消息当作一次全新的、独立的任务来处理：不要假设你已经知道之前是怎么做的，也不要依赖任何历史对话记忆。完成本轮所需的全部信息——AGENTS.md 指令、已有日报的完整内容、以及变更文件的完整内容——都已包含在本条消息中。请严格依据本条消息，在已有日报的基础上合并本轮新增或变更的内容，输出完整的最新日报。\n",
+            "\n本条消息已附带 AGENTS.md 指令、已有日报的完整内容，以及变更文件的完整内容。请在已有日报的基础上合并本轮新增或变更的内容，输出完整的最新日报。\n",
         );
 
         let agents_path = daily_agent_instructions_path(task);
@@ -97,7 +96,7 @@ fn build_daily_agent_prompt(
             prompt.push_str("\n```\n");
         }
 
-        prompt.push_str("\n---\n## 已有日报完整内容（如存在，作为合并基线，请在此基础上更新；不要凭记忆推断历史内容）：\n");
+        prompt.push_str("\n---\n## 已有日报完整内容（如存在，作为合并基线，请在此基础上更新）：\n");
         for entry in &changed_entries {
             if let Ok(report_content) = std::fs::read_to_string(&entry.report_target) {
                 prompt.push_str(&format!(
@@ -107,11 +106,11 @@ fn build_daily_agent_prompt(
             }
         }
 
-        prompt.push_str("\n---\n## 变更文件完整内容（每次均为全量原文，请勿假设已读过历史版本）：\n");
+        prompt.push_str("\n---\n## 变更文件完整内容（每次均为全量原文）：\n");
         for entry in &changed_entries {
             if let Ok(file_content) = std::fs::read_to_string(&entry.source_path) {
-                // 始终发送完整文件内容；对于追加变更，仅额外标注新增部分的起始位置，
-                // 但原有内容也一并附上，确保每一轮都是自包含的、无需依赖历史记忆。
+                // 始终发送完整文件内容；对于追加变更，原有内容与新增内容一并附上，
+                // 仅额外标注新增部分的起始位置。
                 let content_to_include = if entry.change_kind == DailyAgentChangeKind::Appended {
                     if let Some(offset) = entry.append_offset {
                         let offset = offset as usize;
