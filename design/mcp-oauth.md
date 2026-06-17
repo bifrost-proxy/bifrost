@@ -6,18 +6,20 @@ MCP Streamable HTTP transport 支持 OAuth 2.0 认证，token 可按 `OAuthCrede
 
 ## 实现逻辑
 
-- `KeyringTokenStore::is_available()` 不只检查 keyring entry 是否可创建，还执行一次临时 `set/get/delete` roundtrip。
-- 只有 roundtrip 能成功读回同一 probe 值时，`Auto` 模式才选择 keyring。
+- `KeyringTokenStore::is_available()` 不只检查 keyring entry 是否可创建，还执行一次临时 `set/get/delete` roundtrip，只有能读回同一 probe 值才视为可用。
+- `Auto` 模式 save 时再做一次保存校验：写入 keyring 后立即 `load` 比对 `access_token`，不一致或失败时降级到 `OAuthTokenStore` 文件路径。
+- `Auto` 模式 load 时先尝试 keyring，未命中或失败再退回文件路径；delete 同样先 keyring 后文件，任一成功即视为已删除。
 - 在 headless Linux CI、DBus Secret Service 不完整、credential backend 无法持久读写等环境中，`Auto` 模式回退到 `OAuthTokenStore` 文件路径。
+- 未启用 `keyring-store` feature 时，`Keyring` 模式发出 warn 并降级到文件存储，`Auto` 模式直接走文件路径。
 
 ## 依赖项
 
-- Rust `keyring` crate，仅在 `keyring-store` feature 启用时参与。
-- 文件 fallback 使用当前 `data_dir/oauth/<server>.json`。
+- Rust `keyring` crate，仅在 `keyring-store` feature 启用时参与；服务名常量 `KEYRING_SERVICE`，entry username 通过 `compute_key(server_name, url)` 生成（与 Codex 的 `compute_store_key` 对齐：`{server_name}|{sha256_prefix_16}`）。
+- 文件 fallback 使用 `OAuthTokenStore`，token 落盘到 `{data_dir}/oauth/{server_name}.json`。
 
 ## 测试方案
 
-- 单元测试：`mcp::oauth::tests::test_save_load_with_auto_mode_fallback_to_file` 验证 `Auto` 模式可保存并重新加载 token。
+- 单元测试：`bifrost-agent` crate 中 `mcp::oauth::tests::test_save_load_with_auto_mode_fallback_to_file` 验证 `Auto` 模式可保存并重新加载 token（实测文件路径：`crates/agent/src/mcp/oauth.rs`）。
 - E2E 测试：不需要新增独立 E2E，OAuth token store 是本地持久化选择逻辑，单元测试可覆盖 CI 失败路径。
 - 真实场景测试：`human_tests/mcp-oauth.md` 中 `TC-MCP-OAUTH-01` 执行同一 Auto fallback 回归命令。
 
