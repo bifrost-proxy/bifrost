@@ -212,6 +212,8 @@ Output Adapters
 
 ## macOS 系统集成方案（真正输入法一步到位）
 
+（planned, not yet shipped as of 2026-06-16：本节描述的 `Bifrost Voice.inputmethod` bundle、`bifrost-voice-helper` 二进制、LaunchAgent、`bifrost ai voice ime` CLI、`/api/voice/ime/*`、`/api/voice/helper/*`、`/api/voice/microphones`、`/api/voice/feedback*` 端点以及 WebUI Voice Input 安装/权限/麦克风/反馈面板均未在当前仓库实现，仅作为目标设计保留。当前实际已上线的实时语音入口仅为 `/api/voice/listen-ws` + `bifrost ai voice listen` + ASR 工具页 `Start Mic`。）
+
 ### 分发约束与结论
 
 Bifrost 当前主要通过 Homebrew formula 或安装脚本分发，而不是 Mac App Store 或 signed DMG。但用户目标要求“真正的语音输入法”，所以 V1 必须交付 InputMethodKit 输入源，而不是只做全局热键 + paste。
@@ -660,7 +662,12 @@ V1 要求：
 
 ### Admin API
 
-新增 Voice Input API，不替代现有 `/api/asr/*`，而是在其上方提供统一入口：
+新增 Voice Input API，不替代现有 `/api/asr/*`，而是在其上方提供统一入口。
+
+实施状态（as of 2026-06-16）：
+
+- 已上线：`GET /api/voice/sources`、`GET /api/voice/status`、`POST /api/voice/sessions`、`GET /api/voice/listen-ws`、`GET/PUT /api/voice/vocabulary`，另有未在本文档讨论的 `/api/voice/wake/*` 唤醒词链路。
+- 未实现（planned, not yet shipped as of 2026-06-16）：`/api/voice/ime/*`、`/api/voice/helper/*`、`/api/voice/microphones*`、`/api/voice/feedback*`、`/api/voice/sessions/<session_id>/{events,audio,finish,cancel}` 子路由，以及对应的状态响应、IME status JSON 字段、`actions`/`warnings` 数组。
 
 ```text
 GET  /api/voice/sources
@@ -996,6 +1003,8 @@ supports_timestamps: true | false
 
 ### macOS inputmethod / helper
 
+（planned, not yet shipped as of 2026-06-16：仓库中无 `macos/BifrostVoiceInputMethod/` 目录、无 `crates/bifrost-voice-helper`、无 `Bifrost Voice.inputmethod` bundle、无配套 LaunchAgent plist 资源。下列条目为后续工程拆解。）
+
 - 新增 `macos/BifrostVoiceInputMethod/`：
   - `Info.plist`。
   - `main.swift` 创建 `IMKServer`。
@@ -1014,7 +1023,8 @@ supports_timestamps: true | false
 - `voice sources` 做只读能力探测。
 - `voice listen` 启动本地音频监听并输出 text/jsonl/sse，实时 provider 只支持 `qwen3_stateful_streaming`。
 - `voice vocabulary` 管理本地词汇。
-- 新增 `bifrost ai voice ime` 子命令族：
+- 已上线 CLI（as of 2026-06-16）：`bifrost ai voice sources`、`voice listen`、`voice vocabulary`、`voice wake`（唤醒词链路，本文档未展开），以及隐藏 worker 子命令 `voice worker`。
+- 新增 `bifrost ai voice ime` 子命令族（planned, not yet shipped as of 2026-06-16；仓库中没有对应 CLI 实现）：
   - `setup`：幂等安装或修复 inputmethod bundle、helper、LaunchAgent 和默认配置。
   - `status`：查看 inputmethod、helper、权限、热键、麦克风设备和最近 feedback 状态。
   - `repair`：修复 bundle/helper path、LaunchAgent、quarantine 和升级后的权限状态。
@@ -1028,11 +1038,11 @@ supports_timestamps: true | false
 - ASR 工具页内的麦克风输入已改用 Voice Input Runtime：`Start Mic` 通过 `buildVoiceRealtimeUrl()` 连接 `/api/voice/listen-ws`，发送 `pcm_s16le` binary chunk，并消费 `connected/source_ready/asr_partial/asr_stable_delta/asr_final_utterance/done`。
 - ASR 工具页内的文件上传仍走 ASR server 的 `/api/asr/transcribe-stream`，保持离线文件处理与实时语音输入的 provider 边界。
 - Speech 设置中的模型下拉继续支持 `Qwen3-ASR-0.6B` / `Qwen3-ASR-1.7B`；实时语音默认 0.6B，选择 1.7B 时作为显式大模型 opt-in。
-- Settings -> Speech Converter -> Voice Input 提供真正输入法安装、启用状态、helper、权限、热键、麦克风和学习反馈管理。
+- Settings -> Speech Converter -> Voice Input 提供真正输入法安装、启用状态、helper、权限、热键、麦克风和学习反馈管理。（planned, not yet shipped as of 2026-06-16：当前 WebUI 仅保留 ASR 工具页 Start Mic 切到 `/api/voice/listen-ws`，并未实现 IME/helper/permission/microphone/feedback 管理 UI。）
 - 复用现有 Audio Input / Transcript 卡片。
-- 新增 raw/refined 双轨展示。
-- 新增 Vocabulary 管理入口。
-- Agent composer 可复用同一 runtime；macOS 普通输入框必须以 InputMethodKit 为主路径。
+- 新增 raw/refined 双轨展示。（planned, not yet shipped as of 2026-06-16）
+- 新增 Vocabulary 管理入口。（planned, not yet shipped as of 2026-06-16；vocabulary store API 已在后端落地，UI 尚未接入。）
+- Agent composer 可复用同一 runtime；macOS 普通输入框必须以 InputMethodKit 为主路径。（planned, not yet shipped as of 2026-06-16）
 
 ### 文档与测试
 
@@ -1065,14 +1075,16 @@ supports_timestamps: true | false
 
 ### Phase 1：本地 V1
 
-- 实现 `Bifrost Voice.inputmethod` 并作为默认交付入口。
-- 实现 `bifrost ai voice ime setup/status/repair/activate-guide`。
+当前实施状态（as of 2026-06-16）：`qwen3_stateful_streaming` realtime provider、Web PCM/ring-buffer 实时链路、`bifrost ai voice sources` 与 `voice listen --source mic`、vocabulary store 与轻量后处理（含 `GET/PUT /api/voice/vocabulary`）均已上线；`Bifrost Voice.inputmethod`、`bifrost ai voice ime *`、`bifrost-voice-helper`、edit feedback tracker、WebUI Voice Input 安装/修复面板均未实现（planned, not yet shipped as of 2026-06-16）。下列条目仍按目标态保留。
+
+- 实现 `Bifrost Voice.inputmethod` 并作为默认交付入口。（planned）
+- 实现 `bifrost ai voice ime setup/status/repair/activate-guide`。（planned）
 - 实现 `qwen3_stateful_streaming` realtime provider。
 - 实现 Web PCM/ring-buffer 实时链路。
 - 实现 `bifrost ai voice sources` 和 `bifrost ai voice listen --source mic`。
 - 实现 vocabulary store 与轻量后处理。
-- 后置 rewrite 先支持关闭状态和本地 provider interface，不强依赖具体 LLM。
-- 实现 `bifrost-voice-helper`：
+- 后置 rewrite 先支持关闭状态和本地 provider interface，不强依赖具体 LLM。（planned）
+- 实现 `bifrost-voice-helper`（planned, not yet shipped as of 2026-06-16）：
   - `bifrost ai voice ime helper start/stop/start --foreground`。
   - 用户级 LaunchAgent。
   - 全局快捷键。
