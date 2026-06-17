@@ -20,7 +20,8 @@ macOS 进程归属解析需要通过 `proc_listpids`、`proc_pidinfo(PROC_PIDLIS
 - 快照同时写入带 `proxy_addr` 的完整连接 key 和仅 `peer_addr` 的兼容 key，保持 `resolve_for_connection` 与 `resolve` 两类调用语义。
 - 所有异步客户端进程解析统一增加 2 秒硬超时，超时后记录 warn、写入短期 negative cache，并按未知客户端继续处理请求。
 - 异步解析入口读取缓存时保留 negative cache 语义；命中近期 miss/timeout 后直接返回未知客户端，不再继续排队或创建 blocking 任务。
-- 所有异步进程解析的 `spawn_blocking` 统一经过全局并发阀门（默认 4，可通过 `BIFROST_PROCESS_RESOLUTION_CONCURRENCY` 调整）。请求会在 2 秒总预算内等待并发 permit 和实际解析；如果预算耗尽则按未知客户端继续处理，但不会把“并发饱和”写成连接级 negative cache，避免高并发下错误压制后续解析。
+- 所有异步进程解析的 `spawn_blocking` 统一经过全局并发阀门 `PROCESS_RESOLUTION_SEMAPHORE`（默认 4，可通过 `BIFROST_PROCESS_RESOLUTION_CONCURRENCY` 调整）。请求会在 `PROCESS_RESOLUTION_WAIT_TIMEOUT`（硬编码 2 秒）总预算内等待并发 permit 和实际解析；如果预算耗尽则按未知客户端继续处理，但不会把“并发饱和”写成连接级 negative cache，避免高并发下错误压制后续解析。
+- `spawn_async_process_resolver_with_finish` 走的后台 backfill 另带一个独立的 `BACKGROUND_PROCESS_RESOLUTION_SEMAPHORE`（默认 8，可通过 `BIFROST_BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY` 调整），用 `try_acquire` 抢占；抢不到立即按“队列饱和直接跳过”放弃 backfill，不积压请求。
 - 普通 HTTP 请求也在请求开始时执行受限、带超时的同步进程解析，保证 200ms 内结束的短请求仍有机会在 Traffic 记录创建前拿到 `clientApp`。管理端请求仍完全跳过进程解析。
 - `/_bifrost` 管理端请求完全跳过客户端进程解析和后台 backfill，管理端接口不依赖 app 信息，避免管理端自访问被进程识别拖慢。
 - 后台 backfill 仍保留给同步解析失败后的兜底路径；进程解析后台队列饱和时直接跳过，不排队积压，并在完成、miss 或跳过后复位连接级 in-flight 标记，允许同一 keep-alive 连接后续请求再次尝试。
