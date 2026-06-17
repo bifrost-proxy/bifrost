@@ -641,7 +641,7 @@ Shell Access policy 是远程执行的最后一道本机策略，不是普通 CL
 
 ### 远程调用（remote）
 
-`remote` 通过 relay 对另一台已授权的 Bifrost 实例执行操作。全局参数 `--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值；`--client-id` 用于在多个已保存连接中选择目标前缀。
+`remote` 通过 relay 对另一台已授权的 Bifrost 实例执行操作。全局参数 `--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值；`--client-id` 用于在多个已保存连接中选择目标 client id 或 label 前缀，必须放在 `remote` 后、具体子命令前。也可以用 `BIFROST_REMOTE_CLIENT_ID` 固定默认目标。
 
 ```bash
 bifrost setting ssh-key create --label "dev-mac" --output ./bifrost-device.key
@@ -656,6 +656,8 @@ bifrost remote conn down --all
 
 bifrost remote exec --shell-text "pwd && ls"
 bifrost remote exec -- /bin/zsh -lc 'bifrost status'
+bifrost remote run --script-file ./q.py --interpreter python3 --cwd /path/to/repo -- --limit 5
+bifrost remote run --script-file ./check-status.js --interpreter node --detach --cwd /path/to/repo -- --wait
 
 bifrost remote file read README.md --cwd /path/to/repo
 bifrost remote file list src --depth 2 --cwd /path/to/repo
@@ -684,6 +686,19 @@ bifrost remote keep-awake mode get
 
 `--ssh-key` 带路径时读取指定 key 文件；不带值时读取固定环境变量 `BIFROST_REMOTE_SSH_KEY`。环境变量名称固定，不支持自定义名称。
 
+多远端编排时，固定把目标选择放在父命令位置：
+
+```bash
+export BIFROST_REMOTE_CLIENT_ID=devbox
+bifrost remote file read go.mod --cwd /repo
+bifrost remote --client-id macbook exec --detach --shell-text "python3 check.py"
+bifrost remote --client-id macbook job watch <call_id> --output-file ./check.log
+```
+
+`remote run` 是“远端跑本地脚本”的一等公民入口：CLI 会先用 `remote file scratch-dir` 与 `remote file write` 把本地脚本上传到授权目录，再通过 `remote exec` 以 argv 方式执行，避免 heredoc、反引号、管道符和 `/tmp` symlink escape 等问题。前台执行默认在结束后删除上传脚本；`--detach` 会保留脚本以便远端 job 后续读取。
+
+普通 `remote exec` / streaming exec 的调用事件订阅有 300 秒无事件 idle timeout。长时间静默的构建、轮询、迁移或 `--wait` 命令应使用 `remote exec --detach` 或 `remote run --detach`，再通过 `remote job watch <call_id> --output-file <log>` 获取真实远端退出码，不要在 caller 侧用 `sleep` 轮询。
+
 远程文件操作受远端 grant 的 file access policy 约束；`remote exec` 是最高权限路径，能运行任意 shell 命令，实际允许范围由远端 Shell Access policy 决定。
 
 | 子命令 | 做什么 | 何时使用 |
@@ -692,10 +707,11 @@ bifrost remote keep-awake mode get
 | `remote traffic list/get/search` | 查询远端 Bifrost 的流量记录 | 远端机器才有真实流量证据时 |
 | `remote file read/list/stat/glob/find/hash` | 远端只读文件操作 | 读取日志、配置、源码片段，受 file policy 限制 |
 | `remote file write/edit/mkdir/move/delete/patch` | 远端写文件操作 | 需要 policy 允许写入；优先于 `remote exec` 做结构化文件修改 |
+| `remote run` | 上传本地脚本到远端 scratch-dir 并执行 | 需要先传一段本地 py/js/sh 等诊断脚本到远端运行时 |
 | `remote exec` | 在远端执行 shell | 最高权限路径，适合执行已有 CLI、测试、诊断命令 |
 | `remote keep-awake` | 管理远端 macOS 防睡眠 | 需要远端 grant 包含 `remote_power_mgmt` |
 
-`--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值。`--client-id` 用于从多个已保存连接中选择目标设备前缀。
+`--relay-url` 的优先级为：命令行显式值 > 当前运行服务的 sync 配置 > 本地配置文件 > 内置默认值。`--client-id` 用于从多个已保存连接中选择目标设备前缀；显式参数优先于 `BIFROST_REMOTE_CLIENT_ID`。
 
 ### macOS 防睡眠（keep-awake）
 

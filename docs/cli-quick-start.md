@@ -321,9 +321,20 @@ bifrost remote exec -- bifrost status
 bifrost remote traffic list --limit 20
 bifrost remote file read README.md --cwd /path/to/repo
 bifrost remote file find "TODO" --path src --cwd /path/to/repo
+bifrost remote run --script-file ./smoke.py --interpreter python3 --cwd /path/to/repo -- --json
 ```
 
 `remote exec` 是最高权限路径，能在远端运行 shell 命令；实际允许范围由远端 Shell Access policy 和 grant 决定。结构化文件访问优先使用 `bifrost remote file ...`。
+
+多台远端同时可用时，把 `--client-id` 放在 `remote` 后、子命令前；也可以用 `BIFROST_REMOTE_CLIENT_ID` 设置默认目标：
+
+```bash
+export BIFROST_REMOTE_CLIENT_ID=devbox
+bifrost remote file read main.go --cwd /repo
+bifrost remote --client-id macbook run --script-file ./query.py --interpreter python3 --cwd /repo
+```
+
+`remote run` 会把本地脚本上传到远端 FileAccessPolicy 允许的 scratch 目录再执行，适合替代 `exec + heredoc`。长时间静默的 `--wait` / 轮询型命令使用 `--detach` 后接 `remote job watch <call_id> --output-file <log>`，避免 300 秒无事件 idle timeout 或 caller shell 超时。
 
 注意：`bifrost setting ...` 总是管理当前机器。要改远端设置，需要在远端执行：
 

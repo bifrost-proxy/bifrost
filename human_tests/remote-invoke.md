@@ -5098,6 +5098,32 @@ rm -rf /tmp/bifrost-remote-overload.*
 | TC-RI-TUI-05 | ✅ PASS | 宽屏 PTY 捕获确认上下两张表的 `Client` 列都使用动态列宽预算：`caller-c1fe8715267727969cd59e08bada03a6` 和 `caller-800862ed1cc9862b44afebe8242a8561` 完整展示；同步检查输出中不包含 `caller-c1fe...` 或 `caller-8008...`。缩窄到 60 列后输出含省略号，符合“空间不足才省略”的预期。 |
 | TC-RI-TUI-06 | ✅ PASS | 2026-06-17 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli remote_invoke_render_caps_client -- --nocapture` 通过。该用例使用 `ratatui::backend::TestBackend` 渲染 220 列 × 45 行 Remote Invoke 标签页，构造长 caller fingerprint、长命令、非空 result 和长 call id，断言 `SSH key` auth 列出现在第 42 列以内，`file.search json_response`、`64.00 KB` 和 `call-0123456789abcdef` 均可见；同时执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_status_tui_remote_invoke_panel.sh` 通过，确认真实临时 Bifrost + PTY TUI 面板仍可打开。 |
 
+## TC-RI-CLI-工具优化（remote run / 多目标选择 / idle timeout / file write path）
+
+> 模块：`bifrost remote` CLI 工具体验
+> 设计文档：`design/skill-remote.md`
+
+### 前置条件
+
+- 已编译 bifrost CLI，或允许脚本执行 `cargo build --bin bifrost`。
+- 本用例只验证本地 CLI 参数、帮助和离线错误路径，不启动代理，不修改系统代理。
+
+| 用例编号 | 用例名称 | 操作步骤 | 预期结果 |
+|---------|---------|---------|---------|
+| TC-RI-CLI-01 | `remote run` 参数解析 | 执行 `cargo test -p bifrost-cli remote_run_parses_script_upload_options_and_args --test cli_commands` | `remote --client-id devbox run --script-file ./q.py --interpreter python3 --cwd /repo --env TOKEN=redacted --detach -- --limit 5` 可被解析；`--client-id` 保持父命令参数；脚本参数保留在 `args` |
+| TC-RI-CLI-02 | `remote run` 使用 argv_exec | 执行 `cargo test -p bifrost-cli remote_run_builds_argv_exec_payload_for_uploaded_script --lib` | 上传后的脚本以 `argv_exec` 运行，argv 为 `interpreter remote-script-path --limit 5`，不经过 shell 拼接；stream/output-file/digest 参数进入 streaming prefs |
+| TC-RI-CLI-03 | 多目标选择与 idle timeout 提示 | 执行 `cargo test -p bifrost-cli 'resolve_local_connection_explicit_device_label_prefix_matches|resolve_local_connection_multiple_noninteractive_lists_choices|idle_timeout_message_mentions_seconds_and_job_watch' --lib` | selector 支持设备 label/name 前缀；非交互多连接报错列出可复制 `--client-id` 候选和 `BIFROST_REMOTE_CLIENT_ID`；300s idle timeout 文案提示 `remote exec --detach` + `remote job watch --output-file` |
+| TC-RI-CLI-04 | `file write --path` 兼容与黑盒 CLI | 执行 `bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` | `remote run --help` 暴露 `--script-file`/`--interpreter`/`--detach`；`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误；`file write` 缺路径错误给出 `file write <path> --content-file` 引导；`--path` 兼容由单元测试覆盖 |
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-CLI-01 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote_run --test cli_commands`，过滤到 `remote_run_parses_script_upload_options_and_args`，结果 1/1 PASS。 |
+| TC-RI-CLI-02 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote:: --lib` 时 `remote_run_builds_argv_exec_payload_for_uploaded_script` 通过；同集合中并发敏感的既有 `test_encrypt_local_secret_roundtrip` 首次失败，随后单独执行 `cargo test -p bifrost-cli test_encrypt_local_secret_roundtrip --lib -- --test-threads=1` 通过，确认非本次改动引入。 |
+| TC-RI-CLI-03 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote:: --lib` 时三条新增回归均通过：label 前缀选择、多连接非交互候选提示、idle timeout detach/job watch 文案。 |
+| TC-RI-CLI-04 | ✅ PASS | 2026-06-17 执行 `BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过。脚本未启动代理、未修改系统代理，验证 `remote --help` 包含 `BIFROST_REMOTE_CLIENT_ID` 与 `run` 子命令，`remote run --help` 包含 `--script-file` / `--interpreter` / `--detach`，`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误，`remote file write --path flag-path.txt --content-file -` 也进入连接解析，证明 `--path` 兼容入口可用。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。
