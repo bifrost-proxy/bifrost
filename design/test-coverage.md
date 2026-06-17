@@ -65,10 +65,14 @@ E2E 测试覆盖率需要对 **被测二进制**（bifrost server）进行插桩
 
 | 文件 | 用途 |
 |------|------|
-| `scripts/ci/coverage.sh` | 单元测试覆盖率脚本 |
-| `scripts/ci/coverage-e2e.sh` | E2E 测试覆盖率脚本 |
-| `.github/workflows/ci.yml` (coverage job) | CI 自动覆盖率检测（PR 触发） |
-| `scripts/ci/local-ci.sh` (--coverage 选项) | 本地 CI 集成覆盖率 |
+| `scripts/ci/coverage.sh` | 单 crate / 自定义参数的单元测试覆盖率脚本 |
+| `scripts/ci/coverage-all.sh` | 统一脚本：合并单元 + 集成 (+ 可选 E2E) 覆盖率到单一报告 |
+| `scripts/ci/coverage-crate.sh` | 单 crate 覆盖率便捷封装 |
+| `scripts/ci/coverage-e2e.sh` | E2E 测试覆盖率脚本（插桩 `bifrost` / `bifrost-e2e` 二进制） |
+| `scripts/ci/coverage-gate.py` | 读取 `coverage.json` 并按 `coverage-thresholds.toml` 执行门禁 / 输出 gaps / Markdown summary |
+| `scripts/ci/coverage-thresholds.toml` | 全局目标（default = 90.0）、workspace 聚合下限、每个 crate 的 ratchet 下限 |
+| `.github/workflows/ci.yml` (coverage job) | CI 自动覆盖率检测（push / PR 触发，执行 `coverage-all.sh --json --lcov --gate --gaps`） |
+| `scripts/ci/local-ci.sh` (--coverage 选项) | 本地 CI 集成覆盖率（planned, not yet shipped as of 2026-06-17：当前 `local-ci.sh` 未实现 `--coverage` 开关，本地请直接调用 `coverage-all.sh`） |
 
 ## 使用方式
 
@@ -90,7 +94,12 @@ bash scripts/ci/coverage.sh --fail-under 70
 # 生成 LCOV 格式（可导入 IDE）
 bash scripts/ci/coverage.sh --lcov
 
+# 统一脚本：合并单元 + 集成测试覆盖率，输出 JSON / LCOV / HTML 并执行门禁
+bash scripts/ci/coverage-all.sh --json --lcov --gate --gaps
+bash scripts/ci/coverage-all.sh --html --text
+
 # 通过 local-ci 运行（包含 fmt/clippy/test + 覆盖率）
+# planned, not yet shipped as of 2026-06-17：local-ci.sh 暂无 --coverage 开关
 bash scripts/ci/local-ci.sh --skip-e2e --coverage
 bash scripts/ci/local-ci.sh --skip-e2e --coverage-html
 ```
@@ -110,25 +119,43 @@ bash scripts/ci/coverage-e2e.sh --fail-under 50
 
 ### CI 集成
 
-PR 自动触发 `coverage` Job：
-1. 使用 `taiki-e/install-action@cargo-llvm-cov` 安装工具
-2. 生成 LCOV 格式覆盖率数据
-3. 在 Job Summary 中显示覆盖率摘要
-4. 上传 `lcov.info` 作为 artifact（7 天有效期）
+`push` (main) / `pull_request` 自动触发 `coverage` Job（`Coverage (Unit + Integration) & 90% Gate`）：
+1. 使用 `taiki-e/install-action@cargo-llvm-cov` 安装工具，并附加 `llvm-tools-preview` 组件
+2. 运行 `scripts/ci/coverage-all.sh --json --lcov --gate --gaps` 收集合并的单元 + 集成覆盖率，并按 `coverage-thresholds.toml` 中的 ratchet 下限执行门禁
+3. 通过 `scripts/ci/coverage-gate.py … --markdown --no-gate` 写入 `$GITHUB_STEP_SUMMARY` 展示覆盖率摘要
+4. 上传 `coverage.json` + `lcov.info` 作为 `coverage-report-linux` artifact（7 天有效期）
 
-## 当前覆盖率基线
+## 当前覆盖率基线 (ratchet floors, source: `scripts/ci/coverage-thresholds.toml`, as of 2026-06-17)
 
-| Crate | Lines | Regions | Functions |
-|-------|-------|---------|-----------|
-| bifrost-core | 77.5% | 79.7% | 76.8% |
+聚合 workspace 下限：**55.0%**；项目总目标：**90.0%**。下表为每个 crate 的 ratchet floor（实际测量值通常略高）：
+
+| Crate | Floor (line%) | 备注 |
+|-------|--------------:|------|
+| bifrost-command | 90.0 | measured 98.3% |
+| bifrost-tls | 90.0 | reached 91.5% on Linux CI |
+| bifrost-core | 89.0 | reached 89.4% (reachable 95.9%) |
+| bifrost-proxy | 59.0 | baseline 59.13% |
+| bifrost-admin | 49.0 | baseline 49.22% |
+| agent | 78.0 | baseline 78.78% |
+| bifrost-cli | 45.0 | baseline 45.67% |
+| bifrost-storage | 90.0 | reached 94.5% |
+| bifrost-sync | 90.0 | reached 94.0% |
+| bifrost-power | 84.0 | Linux CI baseline 84.5% |
+| bifrost-device | 90.0 | reached 92.4% |
+| bifrost-asr | 94.0 | baseline 94.52% |
+| bifrost-script | 91.0 | baseline 91.42% |
+| skills | 90.0 | reached 95.4% |
+| bifrost-e2e | 50.0 | Linux CI baseline 50.68% |
 
 ## 渐进式门禁策略
 
-建议采用"只升不降"策略：
-1. 首次测量当前覆盖率作为基线
-2. CI 中设置 `--fail-under-lines` 为当前值
-3. 每次覆盖率提升后，上调门禁阈值
-4. 目标：核心库 crate（bifrost-core, bifrost-proxy）达到 80%+
+采用"只升不降"的 ratchet 策略，由 `coverage-thresholds.toml` + `coverage-gate.py` 强制执行：
+1. `[settings].default = 90.0`：项目总体目标。
+2. `[settings].workspace_min = 55.0`：聚合 workspace 必须达到的下限。
+3. `[crates.<name>].min`：每个 crate 的 ratchet floor；任一 crate 跌破即 fail。
+4. 添加测试 → 重新跑 `coverage-all.sh --json` → `coverage-gate.py … --gaps` 找出最缺测试的文件 → 上调 floor。
+5. 目标：所有 crate floors 最终达到 90%。
+6. （planned, not yet shipped as of 2026-06-17）`enforce_ratchet_up`：若实测高出 floor 超过 `ratchet_slack` 但 floor 未更新即失败，默认关闭。
 
 ## 依赖项
 
