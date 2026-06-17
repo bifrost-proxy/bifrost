@@ -116,6 +116,8 @@
 
 ## 测试方案（含 e2e）
 
+以下用例 (planned, not yet shipped as of 2026-06-17) — 当前仓库中 `web/` 下尚未提交 `FilterPanel` / `FilterItem` / `PinnedFilters` 的单元测试或对应 Traffic 计数的 e2e 用例，后续补齐时按以下口径展开：
+
 - 组件级验证：
   - 构造包含多个 client ip / app / domain 的 records
   - 断言左侧每一项展示的数字与 store 中对应 count 一致
