@@ -839,6 +839,7 @@ pub trait ImProvider: Send + Sync {
 ```rust
 pub enum ImProviderType {
     Feishu,
+    Weixin,
     WeChat,
     Webhook,
 }
@@ -998,12 +999,13 @@ pub struct ImProviderConfig {
     pub base_url: Option<String>,
     pub app_id: Option<String>,
     pub secret_ref: Option<String>,
+    pub owner_open_id: Option<String>,
     pub event_connection_enabled: bool,
     pub event_types: Vec<String>,
+    pub agent_config: Option<ImProviderAgentConfig>,
     pub created_at: u64,
     pub updated_at: u64,
 }
-```
 
 ### Target
 
@@ -1164,13 +1166,13 @@ pub struct ImTaskRun {
 
 ```text
 BIFROST_DATA_DIR/admin/im_gateway_providers.json
-BIFROST_DATA_DIR/admin/im_gateway_secrets.json
-BIFROST_DATA_DIR/admin/im_gateway_policies.json
 BIFROST_DATA_DIR/admin/im_gateway_targets.json
 BIFROST_DATA_DIR/admin/im_gateway_routes.json
 BIFROST_DATA_DIR/admin/im_gateway_schedules.json
 BIFROST_DATA_DIR/admin/im_gateway_events.json
 BIFROST_DATA_DIR/admin/im_gateway_runs.json
+BIFROST_DATA_DIR/admin/im_gateway_message_logs.json
+BIFROST_DATA_DIR/admin/im_gateway_external_cli_agent.json
 ```
 
 第一阶段可沿用现有 Remote Invoke store 的版本化 JSON 模式：
@@ -1220,6 +1222,8 @@ bifrost im history runs
 ```
 
 ### 远程命令
+
+> Status (as of 2026-06-16): server-side Remote Invoke protocol (`CommandKind::ImGateway` / `GrantScope::RemoteImGateway` / `RemoteImGatewayAction`) is wired through `crates/bifrost-admin/src/remote_invoke/executor.rs::execute_im_gateway_op`, but the caller-side `bifrost remote im ...` subcommand is **planned, not yet shipped** — `crates/bifrost-cli/src/commands/remote.rs` has no `im` arm. Locally `bifrost im ...` works against `/_bifrost/api/im-gateway` directly. The example session below describes the intended caller surface.
 
 ```bash
 bifrost remote im provider list
@@ -1337,25 +1341,28 @@ pub struct RemoteImGatewayCommand {
 }
 
 pub enum RemoteImGatewayAction {
-    ChannelCheck,
-    ProviderList,
-    ProviderStatus,
-    TargetList,
+    ListProviders,
+    GetProvider,
+    ValidateProvider,
+    GetConnectionStatus,
+    ConnectProvider,
+    DisconnectProvider,
+    ListTargets,
+    GetTarget,
+    AddTarget,
+    UpdateTarget,
+    DeleteTarget,
     SendMessage,
-    RouteList,
-    RouteAdd,
-    RouteUpdate,
-    RoutePause,
-    RouteResume,
-    RouteDelete,
-    ScheduleList,
-    ScheduleAdd,
-    ScheduleUpdate,
-    SchedulePause,
-    ScheduleResume,
-    ScheduleRun,
-    ScheduleDelete,
-    HistoryRuns,
+    ListRoutes,
+    AddRoute,
+    UpdateRoute,
+    DeleteRoute,
+    ListSchedules,
+    AddSchedule,
+    UpdateSchedule,
+    DeleteSchedule,
+    ListRuns,
+    ExecuteScript,
 }
 ```
 
@@ -2209,11 +2216,15 @@ Connections 页面在宽屏下把 Provider 卡片拉满整行，导致卡片数�
   - `event_loop.rs`: IM 长连接事件循环、去重和路由触发。
   - `agent_chat.rs`: IM Agent 对话、忙碌/队列/引导消息和进度事件交错处理。
   - `agent_reply.rs`: Agent 回复卡片、Markdown 图片上传、错误卡片和 Provider policy。
+  - `agent_reply_attachments.rs`: Agent reply 附件（图片/文件）上传与缓存清理。
   - `messages.rs`: Target、Route 和 outbound message/card/image 发送。
   - `schedules.rs`: Schedule CRUD、手动运行、Script/Agent schedule 执行和运行通知。
   - `agent_api.rs`: `/agent` 配置、sessions、memories、MCP status 和 `/agent/chat` HTTP API。
+  - `chat_gateway.rs`: 统一 IM <-> Agent chat gateway 入口、会话路由与事件分发。
+  - `busy_message_mode.rs`: 忙碌期间引导/排队/拒绝消息策略与文案。
+  - `debug_inbound.rs`: Provider inbound 事件调试录制和重放接口。
   - `utils.rs`: 共享响应转换、payload patch、status 文案和通用 helper。
-  - `tests.rs`: 原 handler 模块单元/集成测试。
+  - `tests.rs` 与 `tests/`: 原 handler 模块单元/集成测试，已按子模块进一步拆分。
 - 子模块之间使用真实 Rust `mod` 边界与 `pub(super)` 可见性，不使用 `include!` 机械拼接。
 - 远端 CI 回归中 Windows rules shard 1 在 30 分钟外层 job timeout 下被取消，32 个其它 job 已成功。将 `e2e-windows-rules.timeout-minutes` 放宽到 60，保持内部 suite timeout 不变，避免慢 Windows runner 在无产品失败信号时被外层 envelope 提前取消。
 
