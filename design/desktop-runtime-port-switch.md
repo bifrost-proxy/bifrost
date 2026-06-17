@@ -35,12 +35,14 @@
 
 ### 3. 回退路径仍存在
 
-- 如果后端返回的还是普通 server config，或桌面端无法把响应解析成 rebind 结果，则会进入 `RestartRequired` 分支。
-- 这时桌面壳层会：
-  - 停掉当前 managed child
-  - 调用 `bifrost stop`
-  - 按首选端口重新拉起内嵌 core
-  - 若目标端口不可用，继续沿用桌面端现有的最多 64 个端口顺延策略
+- 如果后端返回的是普通 server config（说明该 core 还不支持运行时 rebind），则会进入 `RestartRequired` 分支。
+- 如果响应既不是端口切换结果也不是普通 server config，桌面端会再用 `wait_for_rebound_backend_port` 在目标端口及其顺延端口上做最多约 2s 的健康探测；探测成功仍按 `Rebound` 处理，失败才返回错误。
+- `RestartRequired` 分支下桌面壳层会：
+  - 调用 `terminate_child` 停掉当前 managed child
+  - 调用 `stop_backend_with_binary`，即 `<embedded core binary> stop`（带 `BIFROST_DATA_DIR`，等价于直接 `bifrost stop`）
+  - 通过 `wait_for_backend_shutdown` 等待旧端口断开（约 3s）
+  - 通过 `launch_backend_on_available_port` 按首选端口重新拉起内嵌 core
+  - 若目标端口不可用，继续沿用桌面端现有的 `MAX_PORT_INCREMENT_ATTEMPTS = 64` 端口顺延策略
 
 因此它不是“纯热切、绝不重启”的实现，而是“热切优先，重启兜底”。
 
