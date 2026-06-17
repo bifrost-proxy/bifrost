@@ -20,10 +20,11 @@
 
 ## 影响范围
 
-- `Settings` 页面内的配置类展示统一变为 pull-on-tab-open。
-- `systemProxy` 不再受 settings push 影响，继续走独立接口。
+- `Settings` 页面内的配置类展示统一变为 pull-on-tab-open（见 `web/src/pages/Settings/index.tsx` 中各 `fetch*` 回调与挂载 `useEffect`，以及 `tabs/ProxyTab.tsx` / `AccessControlTab.tsx` / `CertificateTab.tsx` / `PerformanceTab.tsx` 等）。
+- `systemProxy` 不再受 settings push 影响，继续走独立接口（`fetchSystemProxy` / `fetchSystemProxyLaunchd`）。
 - Access 页顶部 pending 列表改为主动拉取，不再消费 settings push。
-- Sync 登录成功后会强制把 `auto_sync` 恢复为开启，避免历史本地配置把“登录即同步”的默认体验保留下来为关闭状态。
+- Sync 登录成功后会强制把 `auto_sync` 恢复为开启，避免历史本地配置把“登录即同步”的默认体验保留下来为关闭状态（实现位于 `crates/bifrost-sync/src/manager.rs`，回归用例 `save_token_reenables_auto_sync_after_login`）。
+- `CertificateTab` 仍会按需把 `mobile_devices` scope 追加进全局 `pushService` 订阅以驱动手机配对状态，但 Settings 自身的证书/代理配置数据均走 pull，不再依赖 `settings_update` 快照。
 
 ## 测试方案
 
@@ -40,3 +41,8 @@
 ## 文档更新
 
 - 当前为前端内部数据流调整，不涉及对外 API 文档或 README 变更。
+
+## 状态（截至 2026-06-17）
+
+- Settings 各 tab 的 pull-on-open、`systemProxy` 独立通道、Access pending 主动拉取、登录回填 `auto_sync=true` 均已落地。
+- 暂无标注为“(planned, not yet shipped as of 2026-06-17)”的子项。
