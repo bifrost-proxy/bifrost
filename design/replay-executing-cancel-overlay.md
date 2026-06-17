@@ -15,7 +15,7 @@
 1. 保留 Replay 页面在首屏拉取、列表加载等场景下的整体 loading。
 2. 普通 HTTP 执行过程中不再对整个 composer 区域加全屏遮罩。
 3. 在 `ResponsePanel` 内增加局部执行态：
-   - 当 `executing && !hasStreamingContent` 且还没有响应数据时，展示内联 `Executing request...`
+   - 当 `executing && !currentResponse && !currentTrafficRecord && !hasStreamingContent` 时，展示内联 `Spin tip="Executing request..."`（带 `data-testid="replay-response-executing"`）
 4. 这样请求执行时：
    - 用户仍能在 `RequestPanel` 里点击 `Cancel`
    - 响应区仍然给出明确的执行中反馈
