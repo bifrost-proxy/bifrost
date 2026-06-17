@@ -1807,23 +1807,23 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         _ => false,
     };
     if should_detach {
-            let now = now_millis();
-            remember_remote_job(RemoteJobRecord {
-                call_id: call_result.call_id.clone(),
-                relay_token_encrypted: encrypt_local_secret(call_result.relay_token.as_bytes())?,
-                relay_url: opts.relay_url.clone(),
-                client_instance_id: Some(conn.client_instance_id.clone()),
-                device_name: Some(conn.device_name.clone()),
-                command_preview: Some(command_summary.command_preview.clone()),
-                status: "running".to_string(),
-                exit_code: None,
-                created_at: now,
-                updated_at: now,
-            })?;
-            println!("Detached remote job started");
-            println!("call_id={}", call_result.call_id);
-            println!("watch: bifrost remote job watch {}", call_result.call_id);
-            return Ok(());
+        let now = now_millis();
+        remember_remote_job(RemoteJobRecord {
+            call_id: call_result.call_id.clone(),
+            relay_token_encrypted: encrypt_local_secret(call_result.relay_token.as_bytes())?,
+            relay_url: opts.relay_url.clone(),
+            client_instance_id: Some(conn.client_instance_id.clone()),
+            device_name: Some(conn.device_name.clone()),
+            command_preview: Some(command_summary.command_preview.clone()),
+            status: "running".to_string(),
+            exit_code: None,
+            created_at: now,
+            updated_at: now,
+        })?;
+        println!("Detached remote job started");
+        println!("call_id={}", call_result.call_id);
+        println!("watch: bifrost remote job watch {}", call_result.call_id);
+        return Ok(());
     }
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());

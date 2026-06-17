@@ -263,6 +263,11 @@ bifrost remote job watch <call_id> --output-file ./build.log
 # 需要用户 PATH / login shell 环境时，显式开启 login shell；CLI 会注入 BIFROST_REMOTE=1、TERM=dumb 抑制常见 shell integration 噪声
 bifrost remote exec --login --cwd <USER_HOME>/work/repo \
   --shell-text "cargo --version && pwd"
+
+# 远端跑本地脚本：先走 FileAccessPolicy 内 scratch-dir 上传，再 argv_exec 执行
+bifrost remote run --script-file ./q.py --interpreter python3 --cwd <USER_HOME>/work/repo -- --limit 5
+bifrost remote run --script-file ./check-status.js --interpreter node --detach \
+  --cwd <USER_HOME>/work/repo -- --wait
 ```
 
 注意：
@@ -271,8 +276,27 @@ bifrost remote exec --login --cwd <USER_HOME>/work/repo \
 - `remote job list` 列出 caller 本地已知的 detached job、最近状态、exit code、设备与命令摘要；断开、切线程或重启 CLI 后先用它找回 `call_id`。
 - `remote job logs --output-file` / `remote job watch --output-file` 默认做流 digest 校验；遇到 digest mismatch 时先重新 watch/logs 或查看远端日志，不要第一反应加 `--no-verify-digest`。
 - `--stream` 仍可用于短命令或临时观察；构建、测试、CI、迁移等长任务默认走 `--detach`。
+- streaming / buffered call events 的 caller 侧无事件 idle timeout 是 300 秒；长时间静默的 `--wait` / 轮询命令不要押在单条 stream 上，使用 `--detach` + `remote job watch --output-file`。
+- `remote run` 是本地脚本到远端执行的一等公民入口，内部使用 `remote file scratch-dir` + `remote file write` 上传脚本，再用 `remote exec` 的 argv 模式执行。优先使用它替代 `exec + heredoc`，尤其是 Python/Node 查询脚本、包含反引号/`$`/`|` 的脚本和需要复用的 smoke 脚本。
 - `--timeout-ms` 会受到目标端 policy 上限约束；若被 cap，错误信息会包含 requested/policy/capped_by_policy，不能把会话超时信号当作远端进程真实 exit code。
 - `--login` 是显式 opt-in。需要 `~/.cargo/bin` / `mise` / `nvm` 等用户 PATH 时使用；`--cwd` 会在 shell rc 之后再次生效，避免 rc 里的 `cd` 覆盖工作目录。
+
+#### 多远端协作范式
+
+复杂任务常见 caller 同时编排两台或更多远端设备。固定规则：
+
+```bash
+export BIFROST_REMOTE_CLIENT_ID=devbox
+bifrost remote file outline main.go --cwd /repo
+
+bifrost remote --client-id macbook run --script-file ./query.py --interpreter python3 --cwd /repo
+bifrost remote --client-id macbook exec --detach --shell-text "python3 long_poll.py"
+bifrost remote --client-id macbook job watch <call_id> --output-file ./long-poll.log
+```
+
+- `--client-id` 是 `remote` 父命令参数，放在 `remote` 后、子命令前；显式参数优先于 `BIFROST_REMOTE_CLIENT_ID`。
+- selector 可用 client instance id 前缀，也可用设备 label/name 前缀；多连接报错会列出可复制候选。
+- 长任务在哪台设备启动，就用同一台设备的 job cache/watch 跟进；不要在 caller 侧 `sleep` 轮询。
 
 ### 4.4 远端文件编程（`file`，`remote_file_*` scope）
 
@@ -555,9 +579,10 @@ bifrost remote conn status
 8. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
 9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
 10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job list` 找到本地记录的 call，并用 `remote job watch/logs/status <call_id>` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
-11. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。
-12. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
-13. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
+11. **远端跑本地脚本用 `remote run`**：Python/Node/shell smoke 脚本、查询脚本和带复杂字符的脚本都优先用 `remote run --script-file ... --interpreter ... -- <args>`；不要 `cat <<EOF` heredoc 到远端 shell。
+12. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。`file write --path <p>` 仅是兼容误用，推荐仍写成 `file write <p>`。
+13. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
+14. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 
 ---
 
