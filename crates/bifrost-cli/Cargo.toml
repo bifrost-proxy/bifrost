@@ -51,7 +51,7 @@ chrono.workspace = true
 colored = "2"
 tempfile = "3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
-ratatui = "0.29"
+ratatui = { version = "0.30.1", features = ["crossterm_0_28"] }
 crossterm = "0.28"
 tokio-tungstenite = "0.26"
 base64 = "0.22"

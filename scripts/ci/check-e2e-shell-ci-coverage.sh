@@ -24,19 +24,28 @@ if [[ ! -f "$RUNNER" ]]; then
   exit 1
 fi
 
-mapfile -t all_tests < <(
+read_array() {
+  local array_name="$1"
+  local line
+  eval "$array_name=()"
+  while IFS= read -r line; do
+    eval "$array_name+=(\"\$line\")"
+  done
+}
+
+read_array all_tests < <(
   find "$TEST_DIR" -maxdepth 1 -type f -name 'test_*.sh' -print \
     | xargs -n1 basename \
     | sort
 )
 
-mapfile -t selected_tests < <(
+read_array selected_tests < <(
   bash "$RUNNER" --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
     | sed '/^[[:space:]]*$/d' \
     | sort
 )
 
-mapfile -t skipped_tests < <(
+read_array skipped_tests < <(
   awk '
     $0 ~ /^SKIP_IN_CI_TESTS=\(/ { in_list=1; next }
     in_list && $0 ~ /^\)/ { in_list=0; next }

@@ -30,6 +30,14 @@ const CLEANUP_TARGET_PERCENT: usize = 80;
 const METRICS_CACHE_TTL: Duration = Duration::from_secs(5);
 const READ_POOL_SIZE: usize = 2;
 
+fn encode_detail_blob<T: serde::Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
+    serde_json::to_vec(value)
+}
+
+fn decode_detail_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+    serde_json::from_slice(bytes)
+}
+
 struct ReadPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
@@ -342,51 +350,51 @@ impl TrafficDbStore {
         let timing_blob = record
             .timing
             .as_ref()
-            .and_then(|t| bincode::serialize(t).ok());
+            .and_then(|t| encode_detail_blob(t).ok());
         let req_headers_blob = record
             .request_headers
             .as_ref()
-            .and_then(|h| bincode::serialize(h).ok());
+            .and_then(|h| encode_detail_blob(h).ok());
         let res_headers_blob = record
             .original_response_headers
             .as_ref()
-            .and_then(|h| bincode::serialize(h).ok());
+            .and_then(|h| encode_detail_blob(h).ok());
         let rules_blob = record
             .matched_rules
             .as_ref()
-            .and_then(|r| bincode::serialize(r).ok());
+            .and_then(|r| encode_detail_blob(r).ok());
         let socket_status_blob = record
             .socket_status
             .as_ref()
-            .and_then(|s| bincode::serialize(s).ok());
+            .and_then(|s| encode_detail_blob(s).ok());
         let req_body_blob = record
             .request_body_ref
             .as_ref()
-            .and_then(|b| bincode::serialize(b).ok());
+            .and_then(|b| encode_detail_blob(b).ok());
         let res_body_blob = record
             .response_body_ref
             .as_ref()
-            .and_then(|b| bincode::serialize(b).ok());
+            .and_then(|b| encode_detail_blob(b).ok());
         let derived_res_body_blob = record
             .derived_response_body_ref
             .as_ref()
-            .and_then(|b| bincode::serialize(b).ok());
+            .and_then(|b| encode_detail_blob(b).ok());
         let raw_req_body_blob = record
             .raw_request_body_ref
             .as_ref()
-            .and_then(|b| bincode::serialize(b).ok());
+            .and_then(|b| encode_detail_blob(b).ok());
         let raw_res_body_blob = record
             .raw_response_body_ref
             .as_ref()
-            .and_then(|b| bincode::serialize(b).ok());
+            .and_then(|b| encode_detail_blob(b).ok());
         let orig_req_headers_blob = record
             .original_request_headers
             .as_ref()
-            .and_then(|h| bincode::serialize(h).ok());
+            .and_then(|h| encode_detail_blob(h).ok());
         let res_headers_modified_blob = record
             .response_headers
             .as_ref()
-            .and_then(|h| bincode::serialize(h).ok());
+            .and_then(|h| encode_detail_blob(h).ok());
         let req_script_results_blob = record
             .req_script_results
             .as_ref()
@@ -1004,7 +1012,7 @@ impl TrafficDbStore {
             let request_headers: Option<Vec<(String, String)>> = if need_request_headers {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
                 idx += 1;
-                blob.and_then(|b| bincode::deserialize(&b).ok())
+                blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
@@ -1012,7 +1020,7 @@ impl TrafficDbStore {
             let response_headers: Option<Vec<(String, String)>> = if need_response_headers {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
                 idx += 1;
-                blob.and_then(|b| bincode::deserialize(&b).ok())
+                blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
@@ -1020,7 +1028,7 @@ impl TrafficDbStore {
             let request_body_ref: Option<BodyRef> = if need_request_body_ref {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
                 idx += 1;
-                blob.and_then(|b| bincode::deserialize(&b).ok())
+                blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
@@ -1028,14 +1036,14 @@ impl TrafficDbStore {
             let response_body_ref: Option<BodyRef> = if need_response_body_ref {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
                 idx += 1;
-                blob.and_then(|b| bincode::deserialize(&b).ok())
+                blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
 
             let derived_response_body_ref: Option<BodyRef> = if need_response_body_ref {
                 let blob: Option<Vec<u8>> = row.get(idx)?;
-                blob.and_then(|b| bincode::deserialize(&b).ok())
+                blob.and_then(|b| decode_detail_blob(&b).ok())
             } else {
                 None
             };
@@ -1292,30 +1300,30 @@ impl TrafficDbStore {
                     let decode_req_results_blob: Option<Vec<u8>> = row.get(16)?;
                     let decode_res_results_blob: Option<Vec<u8>> = row.get(17)?;
 
-                    record.timing = timing_blob.and_then(|b| bincode::deserialize(&b).ok());
+                    record.timing = timing_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.request_headers =
-                        req_headers_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        req_headers_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.original_response_headers =
-                        res_headers_blob.and_then(|b| bincode::deserialize(&b).ok());
-                    record.matched_rules = rules_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        res_headers_blob.and_then(|b| decode_detail_blob(&b).ok());
+                    record.matched_rules = rules_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.request_body_ref =
-                        req_body_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        req_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.response_body_ref =
-                        res_body_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        res_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.derived_response_body_ref =
-                        derived_res_body_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        derived_res_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.raw_request_body_ref =
-                        raw_req_body_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        raw_req_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.raw_response_body_ref =
-                        raw_res_body_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        raw_res_body_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.actual_url = row.get(9)?;
                     record.actual_host = row.get(10)?;
                     record.original_request_headers =
-                        orig_req_headers_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        orig_req_headers_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.response_headers =
-                        res_headers_modified_blob.and_then(|b| bincode::deserialize(&b).ok());
+                        res_headers_modified_blob.and_then(|b| decode_detail_blob(&b).ok());
                     record.socket_status = socket_status_blob
-                        .and_then(|b| bincode::deserialize(&b).ok())
+                        .and_then(|b| decode_detail_blob(&b).ok())
                         .or_else(|| record.socket_status.clone());
                     record.req_script_results =
                         req_script_results_blob.and_then(|b| serde_json::from_slice(&b).ok());

@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import platform
 import sys
 from collections import defaultdict
 
@@ -149,6 +150,23 @@ def pct(covered: int, count: int) -> float:
     return (covered / count * 100.0) if count else 100.0
 
 
+def platform_floor_key() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macos_min"
+    if system == "windows":
+        return "windows_min"
+    if system == "linux":
+        return "linux_min"
+    return f"{system}_min" if system else "min"
+
+
+def crate_floor(crate_cfg: dict, crate: str, default: float) -> float:
+    cfg = crate_cfg.get(crate, {})
+    key = platform_floor_key()
+    return float(cfg.get(key, cfg.get("min", default)))
+
+
 def run_gate(crate_tot, ws, thresholds, skip_workspace=False) -> tuple[bool, list[str]]:
     settings = thresholds.get("settings", {})
     default = float(settings.get("default", 90.0))
@@ -171,7 +189,7 @@ def run_gate(crate_tot, ws, thresholds, skip_workspace=False) -> tuple[bool, lis
 
     # Per-crate floors.
     for crate, tot in sorted(crate_tot.items()):
-        floor = float(crate_cfg.get(crate, {}).get("min", default))
+        floor = crate_floor(crate_cfg, crate, default)
         p = pct(tot["covered"], tot["count"])
         if p + 1e-9 < floor:
             ok = False
@@ -189,7 +207,7 @@ def print_crate_table(crate_tot, thresholds, markdown=False):
 
     rows = []
     for crate, tot in sorted(crate_tot.items()):
-        floor = float(crate_cfg.get(crate, {}).get("min", default))
+        floor = crate_floor(crate_cfg, crate, default)
         p = pct(tot["covered"], tot["count"])
         status = "PASS" if p + 1e-9 >= floor else "FAIL"
         rows.append((crate, p, floor, tot["covered"], tot["count"], status))

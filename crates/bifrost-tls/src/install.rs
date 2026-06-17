@@ -531,6 +531,8 @@ impl CertInstaller {
 
     #[cfg(target_os = "windows")]
     fn current_cert_thumbprint_windows(&self) -> Result<String> {
+        use rustls::pki_types::{pem::PemObject, CertificateDer};
+
         let cert_bytes = std::fs::read(&self.cert_path).map_err(|e| {
             BifrostError::Tls(format!(
                 "Failed to read certificate file {}: {}",
@@ -538,13 +540,8 @@ impl CertInstaller {
                 e
             ))
         })?;
-        let mut reader = std::io::BufReader::new(cert_bytes.as_slice());
-        let certs = rustls_pemfile::certs(&mut reader)
-            .collect::<std::result::Result<Vec<_>, _>>()
+        let cert = CertificateDer::from_pem_slice(cert_bytes.as_slice())
             .map_err(|e| BifrostError::Tls(format!("Failed to parse PEM certificate: {}", e)))?;
-        let cert = certs
-            .first()
-            .ok_or_else(|| BifrostError::Tls("No certificate found in PEM file".to_string()))?;
 
         Ok(hex_uppercase(&Sha1::digest(cert.as_ref())))
     }

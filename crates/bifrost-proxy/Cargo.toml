@@ -47,7 +47,7 @@ chrono = { version = "0.4", features = ["std"] }
 gethostname = "1"
 webpki-roots.workspace = true
 urlencoding = "2"
-hickory-resolver = "0.24"
+hickory-resolver = "0.26.1"
 lazy_static = "1"
 memchr = "2"
 ipnet.workspace = true

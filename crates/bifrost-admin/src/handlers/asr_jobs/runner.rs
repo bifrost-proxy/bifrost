@@ -2356,7 +2356,7 @@ mod coverage_boost {
     async fn transcribe_file_for_task_with_wav_propagates_diarization_missing_assets() {
         let mut task = minimal_task("diarization-missing");
         task.diarization.enabled = true;
-        // Use default profile; in tests this is considered not ready without real assets.
+        task.diarization.profile = "missing-test-profile".to_string();
 
         let source_info = short_audio_source_info(5_000);
         let hooks = TaskTranscribeHooks {
@@ -2390,6 +2390,7 @@ mod coverage_boost {
     async fn transcribe_diarized_segments_for_task_reports_missing_assets() {
         let mut task = minimal_task("diarized-missing");
         task.diarization.enabled = true;
+        task.diarization.profile = "missing-test-profile".to_string();
 
         let hooks = TaskTranscribeHooks {
             on_chunk_progress: None,

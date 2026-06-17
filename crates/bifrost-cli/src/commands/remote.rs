@@ -604,6 +604,14 @@ fn resolve_local_connection(
     connections: &[LocalConnection],
     explicit_id: Option<&str>,
 ) -> bifrost_core::Result<LocalConnection> {
+    resolve_local_connection_with_terminal(connections, explicit_id, std::io::stdin().is_terminal())
+}
+
+fn resolve_local_connection_with_terminal(
+    connections: &[LocalConnection],
+    explicit_id: Option<&str>,
+    stdin_is_terminal: bool,
+) -> bifrost_core::Result<LocalConnection> {
     if let Some(prefix) = explicit_id {
         let matches: Vec<&LocalConnection> = connections
             .iter()
@@ -632,7 +640,7 @@ fn resolve_local_connection(
                 return Ok(conn.clone());
             }
             n => {
-                if !std::io::stdin().is_terminal() {
+                if !stdin_is_terminal {
                     return Err(BifrostError::Config(format!(
                         "ambiguous remote target selector '{prefix}' matches {n} saved connections, please be more specific:\n{}",
                         saved_connection_choices(&matches.into_iter().cloned().collect::<Vec<_>>())
@@ -682,7 +690,7 @@ fn resolve_local_connection(
             Ok(conn.clone())
         }
         n => {
-            if !std::io::stdin().is_terminal() {
+            if !stdin_is_terminal {
                 return Err(BifrostError::Config(multiple_connections_error(
                     connections,
                 )));
@@ -9169,7 +9177,8 @@ mod coverage_boost {
         let conn_a = sample_local_connection("client-aaaaaaaa", "https://relay-a");
         let mut conn_b = sample_local_connection("client-bbbbbbbb", "https://relay-a");
         conn_b.device_name = "macbook".to_string();
-        let err = resolve_local_connection(&[conn_a, conn_b], None).expect_err("should fail");
+        let err = resolve_local_connection_with_terminal(&[conn_a, conn_b], None, false)
+            .expect_err("should fail");
         let msg = err.to_string();
         assert!(msg.contains("multiple saved connections"));
         assert!(msg.contains("--client-id client-aaaa"));
