@@ -29,7 +29,7 @@
 ## 测试方案
 
 ### 单元测试
-- `test_delete_synced_rule_without_sync_manager`：验证无 sync_manager 时删除有 remote_id 的规则仍然成功
+- `test_delete_synced_rule_without_sync_manager`：验证无 sync_manager 时删除有 remote_id 的规则仍然成功 (planned, not yet shipped as of 2026-06-17)
 
 ### E2E 测试
 - 创建规则 → 启用规则 → 删除规则 → 验证规则列表不再包含该规则
