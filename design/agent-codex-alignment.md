@@ -99,7 +99,7 @@ Bifrost 只保留统一终端协议：`exec_command`、`write_stdin`。`shell` /
 - `mcp::tests::mcp_resource_tools_stay_direct_when_server_tools_are_deferred`：验证 server tools 达到 deferred threshold 时 resource tools 仍直接可见。
 - `tools::tests::unknown_shell_aliases_are_rejected`：验证 `shell_command` / `local_shell` 不可见且旧名称执行失败。
 - `p1_tools_e2e::legacy_shell_tools_are_not_registered_by_default`：验证 `shell` / `shell_pty` 不注册且执行失败。
-- `turn_runtime::tests::stateful_tools_are_ordered`：验证 `tool_search`、Goal、计划、标题、工作目录切换等工具保持 ordered。
+- `turn_runtime::tests::side_effect_tools_are_ordered`：验证 `exec_command`、`write_stdin`、`write_file`、`apply_patch`、`switch_workdir`、`set_title`、`update_plan`、`request_user_input`、`tool_search`、Goal、`send_msg`、schedule_* 等副作用工具保持 ordered。
 - `turn_runtime::tests::ordinary_local_tools_can_run_in_parallel`：验证普通本地工具判定为 parallel。
 - `session::tests::codex_parallel_tool_batch_preserves_history_order`：用两个 barrier 测试工具证明 local tool batch 并发执行，且 tool result 按 `response.tool_calls` 原顺序落回 history。
 
