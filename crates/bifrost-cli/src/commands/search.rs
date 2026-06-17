@@ -1156,8 +1156,8 @@ fn run_tui(app: &mut InteractiveApp) -> std::io::Result<()> {
     result
 }
 
-fn run_tui_loop<B: ratatui::backend::Backend>(
-    terminal: &mut Terminal<B>,
+fn run_tui_loop(
+    terminal: &mut Terminal<CrosstermBackend<std::io::Stdout>>,
     app: &mut InteractiveApp,
 ) -> std::io::Result<()> {
     loop {

@@ -53,6 +53,15 @@ cd "$ROOT_DIR"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; BLUE='\033[0;34m'; NC='\033[0m'
 
+raise_fd_limit() {
+  local target="${BIFROST_COVERAGE_FD_LIMIT:-4096}"
+  local current
+  current="$(ulimit -n 2>/dev/null || echo 0)"
+  if [[ "$current" =~ ^[0-9]+$ && "$current" -lt "$target" ]]; then
+    ulimit -n "$target" 2>/dev/null || true
+  fi
+}
+
 WANT_JSON=1
 WANT_LCOV=0
 WANT_HTML=0
@@ -123,6 +132,7 @@ fi
 
 main() {
   step "Bifrost Unified Coverage"
+  raise_fd_limit
   ensure_tooling
   mkdir -p "$OUTPUT_DIR"
 

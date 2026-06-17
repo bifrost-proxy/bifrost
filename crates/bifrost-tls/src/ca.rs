@@ -5,8 +5,7 @@ use rcgen::{
     BasicConstraints, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa, KeyPair,
     KeyUsagePurpose, PublicKeyData, PKCS_ECDSA_P256_SHA256,
 };
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls_pemfile::private_key;
+use rustls::pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use std::convert::TryFrom;
 use std::fs;
 use std::path::Path;
@@ -402,10 +401,8 @@ fn oid_to_algorithm_name(oid: &x509_parser::oid_registry::Oid) -> String {
 }
 
 fn load_key_pair(key_pem: &str) -> Result<KeyPair> {
-    let mut reader = std::io::BufReader::new(key_pem.as_bytes());
-    let key = private_key(&mut reader)
-        .map_err(|e| BifrostError::Tls(format!("Failed to parse private key PEM: {e}")))?
-        .ok_or_else(|| BifrostError::Tls("No private key found in PEM".to_string()))?;
+    let key = PrivateKeyDer::from_pem_slice(key_pem.as_bytes())
+        .map_err(|e| BifrostError::Tls(format!("Failed to parse private key PEM: {e}")))?;
 
     KeyPair::try_from(&key).map_err(|e| BifrostError::Tls(format!("Failed to parse CA key: {e}")))
 }

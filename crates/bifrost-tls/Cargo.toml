@@ -10,7 +10,6 @@ description = "TLS certificate management for Bifrost proxy"
 bifrost-core = { path = "../bifrost-core" }
 rcgen.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 lru.workspace = true
 parking_lot.workspace = true
 webpki-roots.workspace = true

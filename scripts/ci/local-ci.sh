@@ -21,6 +21,17 @@ COVERAGE_GATE=0
 COVERAGE_FAIL_UNDER=90
 SHARD_SPEC=""
 
+raise_fd_limit() {
+  local target="${BIFROST_LOCAL_CI_FD_LIMIT:-4096}"
+  local current
+  current="$(ulimit -n 2>/dev/null || echo 0)"
+  if [[ "$current" =~ ^[0-9]+$ && "$current" -lt "$target" ]]; then
+    ulimit -n "$target" 2>/dev/null || true
+  fi
+}
+
+raise_fd_limit
+
 usage() {
   cat <<'EOF'
 Usage: scripts/ci/local-ci.sh [options]

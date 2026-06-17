@@ -5,8 +5,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bifrost_core::{BifrostError, Result};
-use hickory_resolver::config::{NameServerConfig, Protocol, ResolverConfig, ResolverOpts};
-use hickory_resolver::TokioAsyncResolver;
+use hickory_resolver::config::{ConnectionConfig, NameServerConfig, ResolverConfig, ResolverOpts};
+use hickory_resolver::net::runtime::TokioRuntimeProvider;
+use hickory_resolver::TokioResolver;
 use tokio::sync::RwLock;
 use tracing::{debug, info, instrument, warn};
 
@@ -230,8 +231,8 @@ impl DnsServerType {
 }
 
 pub struct DnsResolver {
-    system_resolver: TokioAsyncResolver,
-    custom_resolvers: RwLock<HashMap<String, Arc<TokioAsyncResolver>>>,
+    system_resolver: TokioResolver,
+    custom_resolvers: RwLock<HashMap<String, Arc<TokioResolver>>>,
     cache: DnsCache,
     timeout: Duration,
     verbose_logging: bool,
@@ -240,7 +241,8 @@ pub struct DnsResolver {
 impl DnsResolver {
     pub fn new(verbose_logging: bool) -> Self {
         let system_resolver =
-            TokioAsyncResolver::tokio(ResolverConfig::default(), ResolverOpts::default());
+            Self::build_tokio_resolver(ResolverConfig::default(), ResolverOpts::default())
+                .expect("default DNS resolver configuration must be valid");
 
         Self {
             system_resolver,
@@ -418,7 +420,7 @@ impl DnsResolver {
         )))
     }
 
-    async fn get_or_create_resolver(&self, server_key: &str) -> Result<Arc<TokioAsyncResolver>> {
+    async fn get_or_create_resolver(&self, server_key: &str) -> Result<Arc<TokioResolver>> {
         {
             let cache = self.custom_resolvers.read().await;
             if let Some(resolver) = cache.get(server_key) {
@@ -433,15 +435,16 @@ impl DnsResolver {
             ))
         })?;
 
-        let name_server = NameServerConfig::new(addr, Protocol::Udp);
-        let mut config = ResolverConfig::new();
-        config.add_name_server(name_server);
+        let mut connection = ConnectionConfig::udp();
+        connection.port = addr.port();
+        let name_server = NameServerConfig::new(addr.ip(), true, vec![connection]);
+        let config = ResolverConfig::from_parts(None, vec![], vec![name_server]);
 
         let mut opts = ResolverOpts::default();
         opts.timeout = self.timeout;
         opts.attempts = 2;
 
-        let resolver = Arc::new(TokioAsyncResolver::tokio(config, opts));
+        let resolver = Arc::new(Self::build_tokio_resolver(config, opts)?);
 
         {
             let mut cache = self.custom_resolvers.write().await;
@@ -455,6 +458,15 @@ impl DnsResolver {
         );
 
         Ok(resolver)
+    }
+
+    fn build_tokio_resolver(config: ResolverConfig, opts: ResolverOpts) -> Result<TokioResolver> {
+        let mut builder =
+            TokioResolver::builder_with_config(config, TokioRuntimeProvider::default());
+        *builder.options_mut() = opts;
+        builder
+            .build()
+            .map_err(|e| BifrostError::Config(format!("Failed to create DNS resolver: {}", e)))
     }
 
     #[instrument(skip(self), fields(host = %host))]
