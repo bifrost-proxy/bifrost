@@ -45,8 +45,7 @@ PR #174 引入该能力后，性能风险主要集中在三类路径：
 ### Push Messages
 | Type | Data |
 | --- | --- |
-| `breakpoint_request_paused` | `{request_id, method, url, headers, body, body_omitted, body_size, max_body_bytes}` |
-| `breakpoint_response_paused` | `{request_id, status, headers, body, body_omitted, body_size, max_body_bytes}` |
+| `breakpoint_paused` | `{phase, request_id, method, url, status, headers, body, body_omitted, body_size, max_body_bytes}`，`phase` 为 `"request"` 或 `"response"`；`method`/`url` 仅 request 阶段填充，`status` 仅 response 阶段填充 |
 | `breakpoint_resumed` | `{request_id}` |
 | `breakpoint_settings_updated` | `{enabled, max_body_bytes}` |
 | `settings_update(performance_config)` | 包含 `breakpoint.timeout_ms`、`timeout_min_ms`、`timeout_max_ms` |
