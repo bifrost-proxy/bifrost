@@ -47,7 +47,12 @@ bind_port_with_retry() {
         if "$BIFROST_BIN" port bind --port "${port}" "$@" > "${output_file}" 2>&1; then
             return 0
         fi
-        if grep -qi "another process is already listening" "${output_file}"; then
+        # Port contention can surface either from the daemon pre-check
+        # ("another process is already listening") or from the real socket
+        # bind losing the TOCTOU race against a sibling suite, which yields an
+        # OS-level EADDRINUSE message instead. Re-allocate on any of these so
+        # parallel shards do not fail spuriously (Linux 98 / macOS 48 / Win 10048).
+        if grep -qiE "another process is already listening|address already in use|addrinuse|os error 98|os error 48|os error 10048" "${output_file}"; then
             assign_local_test_port "${port_var}"
             continue
         fi
