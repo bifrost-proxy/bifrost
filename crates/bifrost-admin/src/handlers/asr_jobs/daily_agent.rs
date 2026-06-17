@@ -868,7 +868,9 @@ fn persist_daily_agent_conversation_success(
     state.session_key = Some(session_key.to_string());
     state.initialized = true;
     state.updated_at_ms = Some(now_ms());
-    if let Some(metadata) = metadata {
+    if adapter == "chatgpt_web" {
+        state.conversation_id = None;
+    } else if let Some(metadata) = metadata {
         if let Some(conversation_id) =
             metadata_value(metadata, &["conversationId", "conversation_id"])
         {
@@ -983,28 +985,10 @@ async fn run_external_daily_agent_prompt(
         _ => "send".to_string(),
     };
 
-    let mut params = serde_json::Map::new();
-    if effective.settings.adapter == "codex" {
-        if let Some(thread_id) = conversation_state.thread_id.as_deref() {
-            params.insert(
-                "threadId".to_string(),
-                serde_json::Value::String(thread_id.to_string()),
-            );
-        }
-    }
-    if effective.settings.adapter == "chatgpt_web" {
-        if let Some(conversation_id) = conversation_state.conversation_id.as_deref() {
-            params.insert(
-                "conversationId".to_string(),
-                serde_json::Value::String(conversation_id.to_string()),
-            );
-        }
-    }
-    let params = if params.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::Object(params)
-    };
+    let params = daily_agent_external_runner_params(
+        effective.settings.adapter.as_str(),
+        conversation_state,
+    );
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
@@ -1050,6 +1034,26 @@ async fn run_external_daily_agent_prompt(
     }
 
     Ok(run_result)
+}
+
+fn daily_agent_external_runner_params(
+    adapter: &str,
+    conversation_state: &AsrDailyAgentConversationState,
+) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    if adapter == "codex" {
+        if let Some(thread_id) = conversation_state.thread_id.as_deref() {
+            params.insert(
+                "threadId".to_string(),
+                serde_json::Value::String(thread_id.to_string()),
+            );
+        }
+    }
+    if params.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(params)
+    }
 }
 
 fn apply_external_daily_agent_metadata(
@@ -1144,9 +1148,7 @@ async fn run_daily_agent_inner(
                     .collect();
                 for entry in changed_entries {
                     let entry_plan = single_entry_change_plan(&plan, entry.clone());
-                    let chatgpt_first_turn = !conversation_state.initialized;
-                    let prompt =
-                        build_daily_agent_prompt(task, &entry_plan, &adapter, chatgpt_first_turn)?;
+                    let prompt = build_daily_agent_prompt(task, &entry_plan, &adapter, true)?;
                     let run_result = run_external_daily_agent_prompt(
                         task,
                         &runner_id,
@@ -1157,10 +1159,6 @@ async fn run_daily_agent_inner(
                         &effective,
                     )
                     .await?;
-                    apply_external_daily_agent_metadata(
-                        &mut conversation_state,
-                        &run_result.metadata,
-                    );
                     last_metadata = Some(run_result.metadata.clone());
                     if run_result.response.trim().is_empty() {
                         continue;

@@ -211,8 +211,25 @@
 - GPT Web Runner 首轮和后续轮次的 prompt 都以 `## 专有名词配置（每次运行动态注入）` 开头，并包含最新术语正文。
 - 专有名词配置不影响两个 Agent 生成 report、processed records、IM 配置和 report sync 分目录同步。
 
+### TC-ADA-14 回归：ChatGPT Web Daily Agent 每次运行使用新对话
+
+操作步骤：
+1. 打开真实任务 `76612de33e9740bc92440ce64a98a4cb` 的 Daily Agent 页面：`http://127.0.0.1:9900/_bifrost/ai?aiSection=tools-asr&asrTask=76612de33e9740bc92440ce64a98a4cb&asrTaskTab=daily-agent&asrDailyAgentEdit=daily_report`。
+2. 请求 `GET /_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent`，检查 `daily_report` 的 `runner=web`、`timeout_ms=7200000`，以及历史 `last_error`。
+3. 检查失败 run 目录 `/Users/eden/.bifrost/im_gateway/runs/1781646729992-4ed94466-6c30-4c99-a186-f7c4a001b83b/`，确认 `prompt.md` 约 599KB、`runtime_snapshot.json` 中存在旧 `conversationId`，且没有 `result.json`。
+4. 执行 `cargo test -p bifrost-admin daily_agent_`，确认 ChatGPT Web 参数构造不再传旧 `conversationId`，Codex 仍保留 `threadId`。
+5. 执行 `npx tsc --noEmit --project tsconfig.json`，确认 Daily Agent 前端轮询 timeout 改为跟随 agent 配置。
+
+预期结果：
+- ChatGPT Web Daily Agent 不再复用历史 `conversationId`，每个日期运行都以新 ChatGPT 对话发送。
+- 每个新对话 prompt 都包含 AGENTS 指令，避免依赖旧对话上下文。
+- Codex 等非 ChatGPT Web runner 仍可复用 thread，不受本回归影响。
+- 前端不会在 10 分钟固定超时后提前停止轮询；轮询安全时间与后端 `timeout_ms` 对齐。
+- 旧失败的根因被归类为“ChatGPT 页面可能已完成但长对话最终结果获取/扫描未返回”，而不是模型本身未完成。
+
 ## 执行记录
 
+- 2026-06-17：执行 TC-ADA-14 回归验证。`GET /_bifrost/api/asr/tasks/76612de33e9740bc92440ce64a98a4cb/daily-agent` 返回 `daily_report.runner=web`、`timeout_ms=7200000`、`last_error="daily agent run timed out after 7200000ms"`；失败 run 目录 `1781646729992-4ed94466-6c30-4c99-a186-f7c4a001b83b` 中 `prompt.md` 为 599132 bytes，`runtime_snapshot.json` 显示旧 `conversationId=6a22320b-0688-83ec-a25d-4e544fa281c5`，且没有 `result.json` / stdout / stderr，证明 Rust 等外部 ChatGPT Web runner 等满 2 小时未取回最终结果。修复后执行 `cargo fmt --check`、`cargo test -p bifrost-admin daily_agent_`、`npx tsc --noEmit --project tsconfig.json` 均通过；新增单测确认 ChatGPT Web Daily Agent 参数为 `null`，不再传旧 `conversationId`，Codex 仍保留 `threadId`；前端轮询安全时间改为 `timeout_ms + 60s`。
 - 2026-06-05：执行 TC-ADA-13 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_terminology --lib -- --nocapture` 通过，确认全局术语会在 normalize 后保留，并在 `task_for_daily_agent` 派生单 Agent task 时继承；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_prompt_uses_file_list_for_file_capable_runners --lib -- --nocapture` 通过，确认文件型 Runner prompt 只引用相对 `TERMS.md`，ChatGPT Web 首轮和后续轮次都以 `## 专有名词配置（每次运行动态注入）` 开头并包含术语正文；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_workspace_creates_per_agent_instruction_and_output_dirs --lib -- --nocapture` 通过，确认两个默认 Agent 都写入 `TERMS.md` 且 `AGENTS.md` 包含相对引用；`BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 复跑通过，最终临时 task 为 `94b31bc914364597892f5c459e8e4fd3`，验证 API 保存 `terminology`、两个 Agent 工作目录生成 `TERMS.md`、`AGENTS.md` 引用 `TERMS.md`、真实 run 生成 report 并继续按 Agent 分目录自动同步。
 - 2026-06-05：执行 TC-ADA-12 回归验证。首次运行 `BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 时，产品已成功自动同步 `daily_report` 和 `tomorrow_todo`，但脚本用逐字路径比较误判了包含 `T//` 的临时目录；修正为 `os.path.normpath` 后复跑通过，临时 task 为 `f9d476d4aaa8412cbb3f3432712dd079`。验证结果：两个 Agent 跑完后无需点击 `Sync Reports`，同步根目录自动出现 `daily_report/2026-05-22-report.md` 和 `tomorrow_todo/2026-05-22-report.md`，根目录下不存在未分目录的 `2026-05-22-report.md`，两个 Agent 的 `last_report_sync.target_dir` 分别指向各自子目录且 `total_files=1`、`failed_files=0`。
 - 2026-06-04：执行 TC-ADA-06 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_requires_changed_daily_markdown -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_ignores_failed_files_when_daily_markdown_changed -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_after_asr_run_checks_all_agents_for_pending_markdown_changes -- --nocapture` 均通过；`BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，首轮临时 task 为 `f7cb1db771ef436d891a97d6d683f227`，第二轮复跑临时 task 为 `1ff9f0947a3e46bcb6f9bfd7817bf0da`。确认 ASR run 完成后以 daily 合成 Markdown 变更作为 Daily Agent 自动触发门禁；普通 failed 与 `diarization_no_asr_units` failed 不再阻塞已经刷新出的 daily report 后处理；无 daily 变更时仍跳过；非 force 的 appended daily Markdown 会推进两个 Agent 的 processed run_id 更新。

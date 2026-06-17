@@ -486,6 +486,25 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_external_params_start_fresh_conversation() {
+    let state = AsrDailyAgentConversationState {
+        initialized: true,
+        conversation_id: Some("previous-conversation".to_string()),
+        thread_id: Some("previous-thread".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        daily_agent_external_runner_params("chatgpt_web", &state),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        daily_agent_external_runner_params("codex", &state),
+        serde_json::json!({ "threadId": "previous-thread" })
+    );
+}
+
+#[test]
 fn daily_agent_change_plan_filters_to_requested_date() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();

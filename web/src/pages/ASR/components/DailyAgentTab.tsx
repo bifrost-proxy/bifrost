@@ -392,12 +392,14 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
           setRunningAgentId(null);
         }
       }, 3000);
-      // Safety timeout: stop polling after 10 minutes
+      // Safety timeout: use the agent's configured timeout_ms plus a 60s buffer
+      const agent = agents.find((a) => a.id === agentId);
+      const safetyTimeoutMs = (agent?.timeout_ms || 7_200_000) + 60_000;
       setTimeout(() => {
         clearInterval(pollInterval);
         setRunningAgentId(null);
         fetchAll();
-      }, 600_000);
+      }, safetyTimeoutMs);
     } catch (error: unknown) {
       message.error(`Run failed: ${errorMessage(error)}`);
       setRunningAgentId(null);
