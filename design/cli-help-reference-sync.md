@@ -20,7 +20,7 @@
   - 删除 `SUBCOMMAND REFERENCE`、`ENVIRONMENT VARIABLES`、`RULE TEMPLATE VARIABLES`、`RULES QUICK START`
   - 新增 `TIP`，提示使用 `bifrost <command> -h`
   - `More docs` 链接包含 docs 总览、CLI 快速开始、CLI 详细命令、安装启动、规则语法、操作符、匹配器和规则协议手册
-- 将 remote/setting 相关 Clap 类型从 `crates/bifrost-cli/src/cli.rs` 拆到 `crates/bifrost-cli/src/cli/remote.rs` 并 re-export，保持行为不变，同时让本次触碰的 CLI schema 文件回到 1500 行限制以内
+- 将 remote/setting 相关 Clap 类型从 `crates/bifrost-cli/src/cli.rs` 拆到 `crates/bifrost-cli/src/cli/remote.rs` 并 re-export，保持行为不变（当前 `cli.rs` 仍约 2268 行，进一步收敛至 1500 行限制以内为 planned, not yet shipped as of 2026-06-16）
 - 新增 `docs/cli-quick-start.md`：
   - 以“本机排障/联调用主服务+多端口、让流量进入代理、域名转本地、HTTPS 路径规则、改请求/响应、流量定位、同一服务服务多个应用/任务、访问控制、远程操作、备份同步、Agent 协作开发业务 Skill”为一级场景
   - 每个场景解释何时使用、命令含义、常见误区和下一步排查入口
