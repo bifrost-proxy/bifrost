@@ -35,18 +35,24 @@
 
 ### 现状代码路径
 
+- `web/src/components/MonacoDesktopCommands.ts`
+  - 共享 helper，导出 `initDesktopEditEventListener()` 与 `registerDesktopMonacoCommands(editor, isDesktop)`
+  - 监听 Rust 侧通过 `webview.eval()` 派发的 `bifrost-edit-command` DOM CustomEvent，并将其转发给当前/最近聚焦的 Monaco 实例
 - `web/src/components/BifrostEditor/index.ts`
-  - 封装了 Rules 页面使用的 Monaco 初始化
-  - 当前只显式添加了少量自定义行为，没有统一注册桌面端编辑命令兜底
+  - 封装了 Rules 页面使用的 Monaco 初始化；**不**在此处统一接入桌面命令兜底，由各页面自行调用 helper
 - `web/src/pages/Rules/RuleEditor/index.tsx`
-  - 显式注册了 `Cmd/Ctrl+S`
+  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(ed, isDesktopShell())`
 - `web/src/pages/Values/ValueEditor/index.tsx`
-  - 显式注册了 `Cmd/Ctrl+S`
+  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(ed, isDesktopShell())`
 - `web/src/pages/Scripts/index.tsx`
-  - 显式注册了 `Cmd/Ctrl+S`
+  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(editor, isDesktopShell())`
+- `web/src/App.tsx`
+  - 启动时调用一次 `initDesktopEditEventListener()` 安装 CustomEvent 监听
+- `web/src/desktop/tauri.ts`
+  - 提供 `setDesktopDocumentEdited(edited)` / `clearDesktopDocumentEdited()` 桥接，内部 `invoke("set_document_edited", { edited })`
 - `desktop/src-tauri/src/main.rs`
-  - 创建桌面 WebView，但没有为 Monaco 编辑命令提供额外桥接或桌面端兜底
-
+  - 注册原生 `Edit` 菜单项（`edit-undo` / `edit-redo` / `edit-select-all`），`on_menu_event` 内通过 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent
+  - 暴露 `set_document_edited` Tauri 命令，macOS 下调用 `NSWindow::setDocumentEdited`
 ### 根因判断
 
 #### 问题一：编辑命令链路
@@ -76,46 +82,49 @@
 
 ## 实施状态
 
-已完成实施：
-- Root cause: desktop Monaco editors do not receive standard edit commands reliably via native menu chain
-- Scope: all desktop Monaco editors
-- Fix: shared helper registers desktop edit command bindings explicitly
-- Files created: `web/src/components/MonacoDesktopCommands.ts`, `web/src/components/MonacoDesktopCommands.test.ts`
-- Wired into: Rules, Values, Scripts editors
-- Vitest + jsdom configured for web unit tests
-
-待完成实施：
-- Root cause: macOS window `documentEdited` state is not cleared after successful save
-- Scope: desktop Rules / Values / Scripts save flows
-- Fix direction: add a desktop bridge command to clear native `documentEdited` after save succeeds
-
+已完成实施（截至 2026-06-16）：
+- 桌面端 Monaco 编辑命令链路
+  - 共享 helper `web/src/components/MonacoDesktopCommands.ts`（含 `initDesktopEditEventListener` + `registerDesktopMonacoCommands`）
+  - 接入 `Rules / Values / Scripts` 三个编辑器；`App.tsx` 启动时安装事件监听
+  - Rust 侧 `on_menu_event` 经 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent，前端转发到聚焦/最近聚焦的 Monaco 实例
+  - 单测 `web/src/components/MonacoDesktopCommands.test.ts`；Vitest + jsdom 已配置
+- 保存后原生 `documentEdited` 清理
+  - Tauri 命令 `set_document_edited`（macOS 调用 `NSWindow::setDocumentEdited`）
+  - 前端桥接 `clearDesktopDocumentEdited()`；接入点：
+    - `web/src/stores/useRulesStore.ts`（规则保存/批量保存路径）
+    - `web/src/stores/useValuesStore.ts`（值保存路径）
+    - `web/src/pages/Scripts/index.tsx`（脚本保存/新建路径）
+  - 单测 `web/src/stores/useRulesStore.test.ts`
 ## 实现逻辑
 
 ### 统一修复策略
 
-新增一层 Monaco 命令注册 helper，在桌面端编辑器初始化时显式注册下列命令：
+实际实现没有走“在每个 Monaco 编辑器里逐键 `addCommand` 注册 Cmd+A/C/V/X/Z/Shift+Z”这条路径，而是改为 **原生 `Edit` 菜单 → Rust `on_menu_event` → `webview.eval` 派发 DOM CustomEvent → 前端 helper 路由到聚焦的 Monaco 实例** 的桥接方案。这样让 macOS 原生 `Edit` 菜单成为命令源头，避免在每个编辑器实例上重复维护键位绑定。
 
-- `Cmd/Ctrl+A` -> `editor.action.selectAll`
-- `Cmd/Ctrl+C` -> `editor.action.clipboardCopyAction`
-- `Cmd/Ctrl+V` -> `editor.action.clipboardPasteAction`
-- `Cmd/Ctrl+X` -> `editor.action.clipboardCutAction`
-- `Cmd/Ctrl+Z` -> `undo`
-- `Shift+Cmd/Ctrl+Z` -> `redo`
+当前 helper 实际转发的 Monaco action 集合（与 Rust 侧菜单项一一对应）：
+
+- `edit-undo`        → Monaco action `undo`（DOM 兜底：`document.execCommand('undo')`）
+- `edit-redo`        → Monaco action `redo`（DOM 兜底：`document.execCommand('redo')`）
+- `edit-select-all`  → Monaco action `editor.action.selectAll`（DOM 兜底：`document.execCommand('selectAll')`）
+
+说明：Cut / Copy / Paste 由 Tauri 原生 `Edit` 菜单的 `PredefinedMenuItem` 直接承担（系统标准 responder 行为），未走 CustomEvent 通道，因此 helper 内**没有**为它们单独注册转发；这与最初设计中“逐键注册 6 个键位”的描述不同。
 
 ### 接入方式
 
-1. 新增共享 helper，例如 `web/src/components/MonacoDesktopCommands.ts`
-2. 在所有 Monaco 编辑器初始化处统一调用：
-   - `web/src/components/BifrostEditor/index.ts`
+1. 共享 helper：`web/src/components/MonacoDesktopCommands.ts`，导出 `initDesktopEditEventListener()` 与 `registerDesktopMonacoCommands(editor, isDesktop)`
+2. 应用启动一次性安装事件监听：`web/src/App.tsx` 中调用 `initDesktopEditEventListener()`
+3. 各 Monaco 编辑器创建后，调用 `registerDesktopMonacoCommands(editor, isDesktopShell())`：
+   - `web/src/pages/Rules/RuleEditor/index.tsx`
    - `web/src/pages/Values/ValueEditor/index.tsx`
    - `web/src/pages/Scripts/index.tsx`
-3. helper 内部用 `isDesktopShell()` 保护，避免影响 Web 端默认行为
+4. helper 内部用 `isDesktop` 参数（来自 `isDesktopShell()`）做保护，Web 模式直接 no-op；同时记录每个编辑器的 `onDidFocusEditorText` / `onDidDispose` 以维持“最近聚焦编辑器”，避免菜单激活时焦点被原生菜单短暂抢走导致无法路由
+5. 注意：`web/src/components/BifrostEditor/index.ts` **不**在 `editor.create` 重写中调用 helper —— 由各页面自行接入，避免在创建期就强绑桌面态
 
 ### 为什么要抽共享 helper
 
 因为当前问题不是页面业务问题，而是“桌面端 Monaco 共性运行时问题”。如果在 `Rules / Values / Scripts` 各自修，会造成：
 
-- 命令注册重复
+- 焦点追踪逻辑重复
 - 后续遗漏新的编辑器入口
 - 无法保证桌面端行为统一
 
@@ -123,23 +132,24 @@
 
 ### 文档脏状态修复策略
 
-新增一层 desktop runtime helper，在桌面端保存成功后显式调用 Tauri command：
+在桌面端保存成功后，由前端显式调用 Tauri 命令清理原生 `documentEdited`：
 
-- Web -> `invokeDesktop("set_document_edited", { edited: false })`
-- Tauri macOS -> `WindowExtMacOS::set_is_document_edited(false)`
+- Web 侧：`clearDesktopDocumentEdited()` → `invoke("set_document_edited", { edited: false })`
+- Tauri macOS 侧：`set_document_edited` 命令在主线程上调用 `NSWindow::setDocumentEdited(edited)`（通过 `objc2_app_kit::NSWindow`），非 macOS 平台为 no-op
 
-接入点遵循“保存成功后立即清理原生状态”的原则：
+实际接入点（保存成功路径内）：
 
-1. `Rules` 保存成功后清理
-2. `Values` 保存成功后清理
-3. `Scripts` 保存/新建成功后清理
+1. `web/src/stores/useRulesStore.ts`：规则保存、批量保存、规则删除等成功分支后清理
+2. `web/src/stores/useValuesStore.ts`：值保存成功分支后清理
+3. `web/src/pages/Scripts/index.tsx`：脚本保存与新建成功分支后清理
+
+所有调用以 `.catch(() => undefined)` 兜底，保证非桌面环境（`__TAURI__` 不存在）下静默 no-op，不影响 Web 端保存链路。
 
 这样可以保证：
 
 - Web 行为完全不变
 - 桌面端黄点和“保存成功”状态保持一致
 - Undo 后是否仍保留黄点继续交给原生窗口/编辑器行为决定，保存是唯一明确的清理时机
-
 ## 依赖项
 
 - `web/src/components/BifrostEditor/index.ts`

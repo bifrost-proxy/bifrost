@@ -49,41 +49,51 @@ bifrost -p <PORT> start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,::
 
 ### 状态
 
-用途：通过 Web UI 与 `status -t` 展示当前是否启用 CLI 代理与对应配置文件路径。
+通过以下入口展示当前 CLI 代理状态：
+
+- 前台 `bifrost start` 输出的 `🖥️  CLI PROXY (ENV)` 块：实时显示 `Status`（`✓ Enabled` / `⚠ Requested but not enabled` / `Disabled`）、`Proxy` 地址、`No Proxy` 列表（默认 `localhost,127.0.0.1,::1,*.local`）。
+- `bifrost status -t` TUI：通过 Admin push (`SETTINGS_SCOPE_CLI_PROXY`) 拿到 `CliProxyStatus { enabled, shell, config_files, proxy_url }` 并渲染。
+- Web UI / 程序化查询：`GET /api/proxy/cli`，返回 `{ enabled, shell, config_files, proxy_url }`；其中 `enabled` 由 rc 文件中是否包含 `START_MARKER` 决定，`config_files` 为当前 shell 对应的目标 rc 文件路径数组。
 
 ## Shell 自动检测与写入文件选择
 
-检测优先级：
+检测优先级（实现位于 `crates/bifrost-core/src/shell_proxy.rs::ShellProxyManager::detect_shell`）：
 
-1. 环境变量 `SHELL` 的 basename（如 `/bin/zsh` → `zsh`）
-2. 默认 `sh`
+1. 环境变量 `SHELL` 的 basename 包含 `zsh` / `bash` / `fish` → 对应 shell。
+2. 否则若存在 `PSModulePath` 或 `PROFILE` → `PowerShell`。
+3. 否则在 Windows 上若存在 `COMSPEC` → `Cmd`。
+4. 都不匹配 → `Unknown`（不会回退到 `sh`/`~/.profile`，持久化配置直接跳过）。
 
-写入文件策略（为“稳定”兼顾 login/interactive）：
+写入文件策略（仅以下三类 shell 支持持久化；其它 shell 只能用 `enable_temporary` 的临时命令输出）：
 
 - zsh：`~/.zshrc` 与 `~/.zprofile`
 - bash：`~/.bashrc` 与 `~/.bash_profile`
-- sh（含 dash/ksh 等）：`~/.profile`
 - fish：`~/.config/fish/config.fish`
+- PowerShell / Cmd / Unknown：**不写任何 rc 文件**，启动时打印 `CLI proxy persistent config not available for <shell> shell (use temporary commands instead)`。
 
 说明：
 
 - zsh、bash 在不同启动模式会读取不同文件；同时写入两类常见文件可提升“新开终端必生效”的稳定性。
 - fish 的配置文件是固定路径。
+- POSIX `sh` / `dash` / `ksh` 当前**不在支持列表**（planned, not yet shipped as of 2026-06-16）；落到 `Unknown` 分支后不会写 `~/.profile`。
 
 ## 受控块（Managed Block）与幂等
 
-采用固定标记，确保可重复执行且可安全删除：
+采用固定标记，确保可重复执行且可安全删除（常量定义于 `crates/bifrost-core/src/shell_proxy.rs`）：
 
-- 开始标记：`# >>> bifrost cli-proxy >>>`
-- 结束标记：`# <<< bifrost cli-proxy <<<`
+- 开始标记：`# >>> Bifrost proxy start >>>`
+- 结束标记：`# <<< Bifrost proxy end <<<`
 
-实现策略：
+（早期文档曾写作 `# >>> bifrost cli-proxy >>>` / `# <<< bifrost cli-proxy <<<`，实际实现并未使用该名称，以代码中的常量 `START_MARKER` / `END_MARKER` 为准。）
 
-1. 写入前先移除旧块（若存在）。
-2. 启动时：在文件末尾追加新块（确保有换行）。
-3. 退出时：移除块并恢复原始文件内容（基于备份），其余内容不改动。
+实现策略（`ShellProxyManager::enable_persistent` / `disable_persistent` / `restore`）：
 
-写入采用临时文件 + 原子替换，避免写入中断导致 rc 文件损坏。
+1. 写入前先把每个 rc 文件的原始内容快照写入数据目录下的 `shell_proxy_backup.json`（字段为 `{shell_type, files:[{path, original_content}]}`）。
+2. 启动时：若文件中已存在标记块则就地替换，否则追加到文件末尾（前置空行分隔）。
+3. 退出时：调用 `restore`，按 backup 中的 `original_content` 逐文件覆盖；若 `original_content` 为 `None` 表示原本不存在，则删除该文件。restore 完成后删除 backup。
+4. 崩溃恢复：下次 `bifrost start` 启动时调用 `ShellProxyManager::recover_from_crash(data_dir)`，若 backup 仍存在则先执行一次 restore，再继续启动流程。
+
+注：当前实现使用 `std::fs::write` 直接覆盖目标 rc 文件，并未采用 tmp+rename 原子替换；rc 文件损坏风险由 `shell_proxy_backup.json` 兜底恢复（tmp+rename 为 planned, not yet shipped as of 2026-06-16）。
 
 ## 软件代理设置调研（常见场景）
 

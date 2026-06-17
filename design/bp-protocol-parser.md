@@ -49,11 +49,13 @@ Rust 层只负责保留 `bp://` 脚本引用语义：远程 URL 不在规则 res
 
 `build_in_bp` 是推荐的 BP adapter 脚本名。仓库保留 `assets/scripts/parser/build_in_bp.js` 作为内置 parser 资源；Bifrost 启动时会自动释放到当前数据目录的 `scripts/parser/build_in_bp.js`，并在升级/启动后覆盖为随版本发布的最新内容。这样默认规则可以直接写 `bp://build_in_bp?... decode://bp`。如果用户要保留本地修改，应使用其他 parser 脚本名，避免被内置资源覆盖。
 
-规则编辑器的智能提示需要覆盖这条成对语义：
+规则编辑器的智能提示需要覆盖这条成对语义（planned, not yet shipped as of 2026-06-16）：
 
 - `bp://` 协议值提示默认给出 `build_in_bp?psm=<psm>&method=<method> decode://bp`。
 - 已存在的 parser 脚本提示为 `bp://<parser> decode://bp`，确保落库解析协议一并生成。
 - `decode://` 协议值提示包含 `bp`，用于用户分行书写时补齐 `decode://bp`。
+
+当前 `bifrost-core::syntax` 的 `Protocol::Bp` 占位提示仍是通用的 `bp://my-parser-script`，未生成 `build_in_bp?...` 与 `decode://bp` 的成对补全。
 
 ### BAM token 获取
 

@@ -27,6 +27,8 @@ The request had `has_rule_hit=false`, but the stored final response headers drop
 ## Dependencies
 
 - `crates/bifrost-proxy/src/proxy/http/handler.rs`
+- `crates/bifrost-proxy/src/proxy/http/body_metadata.rs` (`BodyMode::StreamWithLength` and `normalize_res_headers`)
+- `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` (same selection helper applied on the HTTPS tunnel path)
 - Existing Traffic recording fields: `original_response_headers`, `response_headers`, `has_rule_hit`
 
 ## Test Plan

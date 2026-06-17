@@ -43,13 +43,13 @@
 
 - 脚本级端到端验证：通过真实 shell 场景分别覆盖默认目录与 `CODEX_HOME` 覆盖目录两条路径，确保 skill 的目录选择逻辑是可执行、可观察的，而不是文档假设。
 
-### 真实场景测试（human_tests）
+### 真实场景测试（human_tests，planned, not yet shipped as of 2026-06-16）
 
-- 更新 `human_tests/codex-task-inspector.md`
+- 新建 `human_tests/codex-task-inspector.md`（仓库当前没有该文件）
   - 新增默认目录探测用例
   - 新增 `CODEX_HOME` 覆盖用例
   - 新增 rollout id 场景下“先探测目录再读 sessions”用例
-- 同步更新 `human_tests/readme.md` 索引说明
+- 同步补充 `human_tests/` 索引说明（仓库当前未提供 `readme.md` / `README.md` 索引文件，需要一并新增）
 - 按用例逐条真实执行并记录结果
 
 ## 校验要求
@@ -63,5 +63,5 @@
 ## 文档更新要求
 
 - 更新 `.agents/skills/codex-task-inspector/SKILL.md`
-- 更新 `human_tests/codex-task-inspector.md`
-- 更新 `human_tests/readme.md`
+- 新建 `human_tests/codex-task-inspector.md`（planned, not yet shipped as of 2026-06-16）
+- 新建或补齐 `human_tests/` 的索引文档（planned, not yet shipped as of 2026-06-16）

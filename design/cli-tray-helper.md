@@ -1,7 +1,7 @@
 # CLI 原生托盘 Helper 方案
 
 > 状态：可实施方案，待 Review
-> 更新时间：2026-06-11
+> 更新时间：2026-06-16
 
 ## 结论
 
@@ -149,7 +149,7 @@ Windows 不支持 Unix `fork` daemon。`bifrost start -d` 在 Windows 上使用�
 
 1. 父进程完成参数解析和启动前门禁。
 2. 父进程移除 child argv 中的 `-d` / `--daemon`，避免递归启动 daemon parent。
-3. 父进程设置 `BIFROST_WINDOWS_DAEMON_CHILD=1`，使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` spawn child，并把 stdout/stderr 写入 `<data_dir>/logs/bifrost.log` / `bifrost.err`。
+3. 父进程设置 `BIFROST_DETACHED_DAEMON_CHILD=1`（历史草案中曾命名为 `BIFROST_WINDOWS_DAEMON_CHILD`，已统一为跨平台的 `BIFROST_DETACHED_DAEMON_CHILD`），使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW` spawn child，并把 stdout/stderr 写入 `<data_dir>/logs/bifrost.log` / `bifrost.err`。
 4. child 复用前台启动路径，但写入 `runtime.json` 时记录 `runtime_start_mode=daemon`。
 5. 父进程等待 proxy listener ready；child 提前退出或超时则父进程返回非零，不打印成功 PID。
 
@@ -220,7 +220,7 @@ CLI 集成：
 crates/bifrost-cli/src/
   commands/start.rs          # start ready 后调用 tray_launcher
   tray_launcher.rs           # 平台 gating、helper 查找、spawn、错误降级
-  commands/tray/             # 内置 __tray helper：cli/runtime/menu/config/lock/tray
+  commands/tray/             # 内置 __tray helper：cli/runtime/menu/config/lock/tray（实际仓库另含 tray_tests.rs 单测桩）
 ```
 
 设计与验证：
@@ -425,6 +425,8 @@ struct TrayState {
 }
 ```
 
+> 实现说明（2026-06-16）：当前 `crates/bifrost-cli/src/commands/tray/runtime.rs` 中的 `enum ServiceState` 只保留 `Running`、`Stopped`、`Disconnected` 三个变体，上方草案中的 `Starting` 与 `Error(String)` 改由 `tray.rs` 中的 `operation: AtomicU8`（`OP_IDLE` / `OP_STARTING` / `OP_STOPPING` / `OP_UPGRADING` / `OP_*_FAILED`）和 `MenuItemAction::StartUpgrade` 等通道承载，`TrayState` 也未作为一个具名结构体落地——上面的字段集合仅作为概念示意。
+
 刷新规则：
 
 - 每 1 秒读取 runtime 并校验 PID，后台轮询是 v1 的状态新鲜度来源。
@@ -462,7 +464,9 @@ System Proxy
 Open Logs
 Quit Tray
 ```
+```
 
+> 实施状态（2026-06-16）：当前 `crates/bifrost-cli/src/commands/tray/menu.rs::build_menu` 在 `_sep_actions` 之后、`Stop Bifrost` 之前会插入一个可选的 `Update to v<version>` 项（`MenuItemAction::StartUpgrade`），并在 `OP_UPGRADING` 期间把状态行渲染为 `Bifrost: Updating…`；上面的菜单清单未列出该项与 upgrade 进度态，仅作为稳态默认布局参考。
 状态规则：
 
 - `Bifrost: ...` 是 disabled title item。
@@ -859,7 +863,7 @@ helper 查找顺序：
 
 ### 平台适配测试钩子
 
-为了让原生 UI 可测，helper 增加内部测试参数：
+为了让原生 UI 可测，helper 计划增加内部测试参数（planned, not yet shipped as of 2026-06-16；当前 `crates/bifrost-cli/src/commands/tray/cli.rs::TrayArgs` 只定义 `--data-dir` / `--runtime-file` / `--parent-pid` / `--admin-url` / `--port` / `--bifrost-bin` / `--start-args`，未实现下列 `--self-test` / `--test-ready-file` / `--test-command-log`，回归依赖 `tray.pid`、`logs/tray.log*` 和 `tray_tests.rs` 单测）：
 
 - `--self-test platform`
   - 初始化平台 tray。
@@ -875,7 +879,7 @@ helper 查找顺序：
 这些参数只用于测试，不在用户文档中主推。
 
 ### E2E 测试
-
+新增脚本建议（实施状态 2026-06-16：仓库中实际已存在 `e2e-tests/tests/test_cli_tray_startup_ci.sh`、`test_cli_tray_config_reenable.sh`、`test_cli_tray_menu_click_regression.sh`；下列 `test_cli_tray_launch_macos.sh` / `test_cli_tray_disable.sh` / `test_cli_tray_missing_helper.sh` / `test_cli_tray_custom_menu.sh` 仍为 planned, not yet shipped as of 2026-06-16，相关覆盖暂由 startup_ci / config_reenable / menu_click_regression 三个脚本承担）：
 新增脚本建议：
 
 - `e2e-tests/tests/test_cli_tray_startup_ci.sh`
@@ -945,7 +949,7 @@ Windows E2E：
 
 ### 真实场景测试
 
-实现阶段必须新增 `human_tests/cli-tray-helper.md` 并执行。
+实现阶段必须新增 `human_tests/cli-tray-helper.md` 并执行（planned, not yet shipped as of 2026-06-16：仓库 `human_tests/` 目录尚无 `cli-tray-helper.md`，下述 `TC-TRAY-*` 用例尚未落到该清单中，但 `human_tests/ci-macos-cli-e2e-split.md` 与 `human_tests/ci-windows-e2e-runner.md` 已覆盖 tray smoke 的 CI 接入侧验证）。
 
 macOS 用例：
 

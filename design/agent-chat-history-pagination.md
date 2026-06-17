@@ -21,13 +21,14 @@ Agent Chat 历史页需要从“打开时全量读取 JSONL 并全量渲染”�
 
 - `crates/agent/src/persistence.rs`：提供分页读取 JSONL event 的基础能力。
 - `crates/bifrost-admin/src/handlers/im_gateway/agent_api.rs`：解析分页查询参数并返回分页元数据。
-- `web/src/pages/AI/AgentChatSection.tsx` 与 `AgentChatSection.timelinePolling.ts`：接入尾页、旧页和增量轮询。
+- `web/src/pages/AI/AgentChatSection.tsx`：接入尾页、旧页和 `since` 增量轮询（分页 fetch helper、`HISTORY_EVENT_PAGE_SIZE = 300` 与轮询调用均在此文件内）。
+- `web/src/pages/AI/AgentChatSection.timelinePolling.ts`：当前仅提供 `isRunStateActive` / `isThreadActive` 辅助；尚未承载分页/轮询逻辑（planned, not yet shipped as of 2026-06-16）。
 
 ## 测试方案
 
 - 单元测试：`test_load_conversation_events_page_supports_tail_cursor_and_since` 验证 tail、cursor、since 三种分页语义；`test_load_conversation_events_page_does_not_parse_unselected_lines` 验证尾页分页不反序列化未选中的旧行。
 - E2E 测试：`e2e-tests/tests/test_agent_history_pagination_api.sh` 用独立 `BIFROST_DATA_DIR` 生成测试 JSONL，验证 summary/list 不返回 events、tail 只返回尾页、cursor 返回旧页、since 返回增量。
-- WebUI 测试：`tests/ui/agent-chat.spec.ts` 的 `AI Agent Chat loads history detail progressively` 验证首屏只请求 tail，并且连续加载旧页后能看到完整线程。
+- WebUI 测试：`tests/ui/agent-chat.spec.ts` 的 `AI Agent Chat loads history detail progressively` 验证首屏只请求 tail，并且连续加载旧页后能看到完整线程（planned, not yet shipped as of 2026-06-16；当前仓库无 `tests/ui/` 目录）。
 - 真实场景测试：`human_tests/agent-chat-history-pagination.md` 覆盖列表摘要、详情尾页、旧页加载、运行中增量轮询、分页不解析未选中旧行、WebUI 多页加载完整历史。
 
 ## Review/Fix/Test 闭环方案
@@ -38,7 +39,7 @@ Agent Chat 历史页需要从“打开时全量读取 JSONL 并全量渲染”�
 ## 校验要求
 
 - `pnpm --dir web exec tsc -b`
-- `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads history detail progressively"`
+- `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "loads history detail progressively"`（planned, not yet shipped as of 2026-06-16）
 - `cargo test -p bifrost-agent test_load_conversation_events_page_supports_tail_cursor_and_since`
 - `cargo test -p bifrost-admin agent_history`
 - `bash e2e-tests/tests/test_agent_history_pagination_api.sh`

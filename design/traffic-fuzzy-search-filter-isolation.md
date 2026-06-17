@@ -2,13 +2,13 @@
 
 ## 功能模块详细描述
 
-Traffic 页的 `Add Filter` 条件只用于当前列表过滤，不应影响 Fuzzy Search 的关键词搜索结果。
+Traffic 页的 `Add Filter` 条件只用于当前列表过滤，不应影响 Fuzzy Search 的关键词搜索结果。（planned, not yet shipped as of 2026-06-17：当前 `web/src/components/SearchMode/index.tsx` 的 `buildFilters` 仍把 `filterConditions` 写入 `filters.conditions`。）
 
 ## 实现逻辑
 
 - 保留 Fuzzy Search 对 toolbar filter 与左侧 panel filter 的支持。
-- 构造搜索请求时，不再把 `FilterBar` 的 `filterConditions` 写入 `filters.conditions`。
-- 这样 Fuzzy Search 只受关键词、scope 和显式筛选面板影响，不会被列表临时过滤条件误伤。
+- 构造搜索请求时，不再把 `FilterBar` 的 `filterConditions` 写入 `filters.conditions`。（planned, not yet shipped as of 2026-06-17）
+- 这样 Fuzzy Search 只受关键词、scope 和显式筛选面板影响，不会被列表临时过滤条件误伤。（planned, not yet shipped as of 2026-06-17）
 
 ## 依赖项
 

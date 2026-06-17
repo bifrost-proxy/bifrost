@@ -15,7 +15,7 @@
   - 其他平台保持现有语义，继续走 `request_desktop_shutdown()`。
 - 保留 `RunEvent::ExitRequested` 对显式退出动作的拦截，继续执行已有的 backend 停止与最终 `app.exit(0)`。
 - 在 macOS 增加 `RunEvent::Reopen` 处理：
-  - 当应用被重新激活且当前没有可见窗口时，重新 `show/unminimize/focus` host 窗口。
+- 将 host 窗口显示逻辑收敛到公共 helper `reveal_host_window`（`show` + `unminimize` + `set_focus`），由 `restore_host_window` 与 `start_main_window_handoff` 共用，避免 handoff 和 reopen 两处行为漂移。
 - 将 host 窗口显示逻辑收敛到公共 helper，避免 handoff 和 reopen 两处行为漂移。
 
 ## 依赖项

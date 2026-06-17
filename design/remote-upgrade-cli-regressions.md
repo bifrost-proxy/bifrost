@@ -99,7 +99,7 @@
 - `test_build_remote_command_for_traffic_list_includes_all_filters`：验证 `traffic.list` 的 `args_json` 含完整过滤参数
 - `test_build_remote_command_for_traffic_get_includes_body_flags`：验证 `traffic.get` 的 `args_json` 含 `id/request_body/response_body`
 - `test_build_open_call_command_summary_uses_label_and_args_json`：验证 caller 发起 `open_call` 时会把参数摘要写入 `command_summary`
-- `test_should_run_update_notice_when_forced_even_without_tty`：验证 `BIFROST_FORCE_UPDATE_CHECK` 可绕过 TTY 限制
+- `should_run_update_notice_when_forced_even_without_tty`（位于 `crates/bifrost-cli/src/main.rs` 的 `tests` 模块）：验证 `BIFROST_FORCE_UPDATE_CHECK` 可绕过 TTY 限制
 
 ### E2E 测试
 

@@ -75,12 +75,16 @@ pub struct TlsConfigUpdate {
 ```json
 {
   "event_type": "new",
-  "ip": "192.168.1.100",
-  "first_seen": 1712345678,
-  "attempt_count": 1,
+  "pending": {
+    "ip": "192.168.1.100",
+    "first_seen": 1712345678,
+    "attempt_count": 1
+  },
   "total_pending": 1
 }
 ```
+
+> 注：实际实现中 `PendingIpTlsEvent` 把 IP 元数据嵌套在 `pending` 字段下（复用 `PendingIpTls` 结构），而不是平铺到事件顶层。
 
 ### API 端点
 
@@ -94,7 +98,9 @@ pub struct TlsConfigUpdate {
 
 ## 前端组件
 
-### PendingTlsIpModal
+### PendingIpTlsModal
+
+> 实际组件名为 `PendingIpTlsModal`（`web/src/components/PendingIpTlsModal/`），与 store `usePendingIpTlsStore` 对齐；下文的 `PendingTlsIpModal` 命名仅出现在早期草案中。
 
 参照现有 `PendingAuthModal` 的交互模式：
 - 当有 pending IP 时自动弹出模态框
@@ -106,7 +112,9 @@ pub struct TlsConfigUpdate {
 
 ### Settings 页面扩展
 
-在 TLS Config 区域新增 "IP TLS Whitelist" section，展示和管理 `ip_intercept_include` / `ip_intercept_exclude` 列表。
+在 `pages/Settings/tabs/ProxyTab.tsx` 的 TLS Config 区域新增两张并排卡片，分别管理 `ip_intercept_include`（标题 **Force Intercept** — Always intercept TLS traffic from these IPs）和 `ip_intercept_exclude`（对应的 Skip 卡片）。每张卡片提供 IP / CIDR 输入框（占位符 `192.168.1.100 or 10.0.0.0/8`）、Add 按钮和已配置 IP 的可关闭 Tag 列表；从一侧添加 IP 时会自动从另一侧移除，保持 include / exclude 互斥。
+
+> 注：实际 UI 标题用 "Force Intercept" / "Skip Intercept" 描述行为，而非早期草案中的 "IP TLS Whitelist" 段名。
 
 ### Traffic 详情空状态入口
 

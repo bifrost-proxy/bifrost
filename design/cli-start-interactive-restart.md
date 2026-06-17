@@ -8,20 +8,23 @@
 
 当 `bifrost start` 检测到已有进程在运行：
 
-- 终端提示：检测到已有进程（PID=xxx），是否重启（y/n）。
+- 终端提示：`Detected an existing Bifrost proxy process (PID: <pid>). Restart? (y/n)`。
 - 读取 stdin：
   - 输入 `y` / `yes`（忽略大小写）：执行重启（停止旧进程后继续启动）。
-  - 输入 `n` / `no` 或空输入：取消本次启动并优雅退出（exit code 0）。
+  - 输入 `n` / `no` 或空输入：取消本次启动，打印 `Start cancelled.` 并以 exit code 0 退出。
   - stdin EOF：视为取消启动。
   - 连续 3 次非法输入：视为取消启动。
+- `--yes` 旁路：当 `bifrost start --yes` 时跳过提示直接执行重启（CI / 自动化场景）。
 
 ## 实现逻辑
 
 - `crates/bifrost-cli/src/commands/start.rs`：在 `run_start` 的最前置阶段读取 `read_pid()` 并判断 `is_process_running(pid)`。
-- 若进程存活，则调用 `prompt_restart_if_running(pid)` 读取 stdin。
+- 若进程存活：当 `--yes` 时直接判定为重启，否则调用 `prompt_restart_if_running(pid)` 读取 stdin。
 - 若用户确认重启，则复用 `stop` 的收尾逻辑：直接调用 `commands::stop::run_stop()`（包含：发送 SIGTERM/TerminateProcess、等待退出、必要时强杀、恢复/关闭 system proxy、清理 CLI proxy、删除 pid/runtime 文件）。
-- stop 成功后继续执行原本的启动流程。
-- PID 检查完成后立即执行目标监听端口冲突检查，再进入配置初始化、启动摘要打印和系统代理收敛规划。端口占用判断优先尝试绑定目标地址，避免仅靠 TCP connect 时被 backlog、未 accept 的测试监听器或防火墙行为影响；这样非交互 CI 或脚本环境中，普通端口占用会稳定返回 `Port <host>:<port> is already in use...`，且不会在实际启动失败前打印 `System proxy: enabled` 这类易误导的摘要。
+- 若 PID 文件存在但进程已不在：当 `system_proxy_shutdown_mode == PreserveForRestart` 时保留 runtime 文件用于 restart handoff，否则调用 `remove_pid()` 清理陈旧 PID。
+- stop 成功后，先（按需）执行 `check_and_install_certificate`，再调用 `check_and_resolve_port_conflict(&host, port, yes)` 做端口冲突检查，然后才进入配置初始化、启动摘要打印和系统代理收敛规划。
+- `check_and_resolve_port_conflict` 行为：端口已占用时尝试通过 `find_process_on_port` 定位占用方；交互终端下提示 `Kill it and continue? (y/n)`，`--yes` 自动确认；非交互且未传 `--yes` 时立即返回错误（消息形如 `Port <host>:<port> is already in use and no interactive terminal is available. Use --yes to auto-resolve.`）。kill 成功后短暂等待并复检端口，仍占用则返回错误。
+- 端口占用判断 (`is_port_in_use`) 优先尝试绑定目标地址（`0.0.0.0` / `::` 归一到 `127.0.0.1`），仅在 `AddrInUse` 之外的错误下回退到 200ms 超时的 TCP connect 探测，避免仅靠 TCP connect 时被 backlog、未 accept 的测试监听器或防火墙行为影响；这样非交互 CI 或脚本环境中，普通端口占用会稳定返回 `Port <host>:<port> is already in use...`，且不会在实际启动失败前打印 `System proxy: enabled` 这类易误导的摘要。
 
 ## 依赖与影响面
 
@@ -37,13 +40,13 @@
 
 ### E2E 测试
 
-新增脚本：`e2e-tests/tests/test_cli_start_interactive_restart_e2e.sh`
+新增脚本：`e2e-tests/tests/test_cli_start_interactive_restart_e2e.sh` (planned, not yet shipped as of 2026-06-16；当前仓库内尚无该脚本)
 
 覆盖点：
 
 - 场景 1：检测冲突 -> stdin 输入 `y` -> 旧进程退出 -> 新进程启动成功
 - 场景 2：检测冲突 -> stdin 输入 `n` -> 不终止旧进程 -> 本次 start 退出
-- 回归脚本：`e2e-tests/tests/test_port_conflict_no_system_proxy_enable.sh`
+- 回归脚本：`e2e-tests/tests/test_port_conflict_no_system_proxy_enable.sh`（已落地）
   - 用 dummy listener 占用测试端口，启动 Bifrost 后必须非 0 退出。
   - 输出必须包含 `already in use`。
   - 输出不得包含 `System proxy: enabled` 或 `System proxy enabled:`，证明端口冲突时不会进入系统代理启用阶段或打印启用摘要。

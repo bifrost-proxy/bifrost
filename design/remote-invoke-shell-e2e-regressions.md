@@ -53,9 +53,10 @@
 更新 `e2e-tests/tests/test_remote_invoke_ssh_e2e.sh`：
 
 - 不再手工构造旧版 `calls/open` 明文 payload
-- 改为复用真实 CLI：
-  - `bifrost remote status`
-  - `bifrost remote search`
+- 改为复用真实 CLI（实际脚本调用，验证于 2026-06-16）：
+  - `bifrost remote conn status`
+  - `bifrost remote exec --shell-text "..."`（成功 / 拒绝路径都覆盖）
+  - `bifrost remote traffic search`
   - `bifrost remote traffic get`
 
 这样测试会自动走当前 caller 侧的：
@@ -76,7 +77,7 @@
 
 本轮将该断言改为带超时的短轮询：
 
-- approve pairing 成功后，最多等待 10 秒
+- approve pairing 成功后，最多等待 20 秒（`wait_for_client_grants_at_least 1 20`）
 - 每秒重新读取一次 `/_bifrost/api/remote-invoke/grants`
 - 只有超时后仍为 `0` 才判定失败
 
@@ -109,9 +110,10 @@
 ## 依赖项
 
 - `target/release/bifrost`
-- `packages/bifrost-sync-server`
+- `packages/bifrost-sync-server`（gitignored 产物，由 `e2e-tests/test_utils/sync_server.sh` 在测试启动时按需构建并通过 `sync_server_exec` 暴露二进制）
 - shell E2E 断言库：`e2e-tests/test_utils/assert.sh`
 - Admin API 工具：`e2e-tests/test_utils/admin_client.sh`
+- 本地 mock：`e2e-tests/mock_servers/http_echo_server.py`（Recent Calls 预览脚本使用 `--port` / `--retries` 启动）
 
 ## 测试方案
 
@@ -135,7 +137,7 @@
 
 - pair-code connect 在当前加密协议下仍能完成 overload retry
 - 显式 `--relay-url` 仍优先于运行中实例 / 本地配置
-- `remote connect --ssh-key` 后，`remote search` 与 `remote traffic get` 能通过真实 CLI 成功执行
+- `remote conn up --ssh-key` 后，`remote traffic search`、`remote traffic get` 与 `remote exec --shell-text` 能通过真实 CLI 成功执行
 - Recent Calls 参数预览回归脚本在离线/受限 CI 网络下仍能通过本地 mock 流量稳定生成调用记录
 
 同时同步更新 `human_tests/readme.md` 索引。

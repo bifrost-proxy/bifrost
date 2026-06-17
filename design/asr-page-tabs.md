@@ -4,24 +4,26 @@
 
 ASR 工具页原来在 `/_bifrost/ai?aiSection=tools-asr` 首页一次性展示模型管理、声纹识别、声纹唤醒、定时任务和转写工作台，用户进入后信息密度过高。本次改造把 ASR 首页拆成顶部三个 Tab：
 
-1. `定时任务`：展示 ASR Directory Task 列表、创建/编辑、运行、暂停、恢复、外接设备导入和删除。
-2. `ASR 管理`：展示 ASR 模型初始化/状态管理，以及文件上传、麦克风实时转写、离线转写工作台。
-3. `声纹识别与唤醒`：展示 Speaker Diarization、声纹录入/识别，以及 Voice Wake Actions 配置。
+1. `Scheduled Tasks`（定时任务）：展示 ASR Directory Task 列表、创建/编辑、运行、暂停、恢复、外接设备导入和删除。
+2. `ASR Management`（ASR 管理）：展示 ASR 模型初始化/状态管理（来自 `Settings/tabs/SpeechTab`），以及文件上传、麦克风实时转写、离线转写工作台。
+3. `Voiceprint & Wake`（声纹识别与唤醒）：展示 Speaker Diarization、声纹录入/识别，以及 Voice Wake Actions 配置。
+
+> Tab 标签当前在 `ASRHomeTabs.tsx` 中为英文常量（`Scheduled Tasks` / `ASR Management` / `Voiceprint & Wake`），与早期文案 `定时任务` / `ASR 管理` / `声纹识别与唤醒` 对应；Playwright 用例仍按中文文案断言，如需统一文案应同步调整组件与用例。
 
 任务详情页继续通过 `asrTask=<task_id>` 深链进入，不嵌在首页 Tab 内，避免破坏现有文件详情、Daily Docs 和 Daily Agent 路由。
 
 ## 实现逻辑
 
 - 新增 `ASRHomeTabs` 组件封装首页三 Tab，只在当前激活 Tab 下挂载对应子模块，降低首页首屏噪声。
-- 新增 URL 参数 `asrTab` 保存首页 Tab：默认缺省为 `scheduled`；`management` 和 `voice` 通过 URL 持久化，刷新后恢复。
-- 保持旧入口 `/_bifrost/ai?aiSection=tools-asr` 默认进入 `定时任务`，符合“第一个 tab 就是定时任务”的预期。
+- 新增 URL 参数 `asrTab` 保存首页 Tab：合法值由 `web/src/pages/ASR/components/asrHomeRoute.ts` 中的 `ASR_HOME_TAB_KEYS = ["scheduled", "management", "voice"]` 定义；缺省值为 `scheduled`，`management` 和 `voice` 通过 URL 持久化，刷新后恢复。
+- 保持旧入口 `/_bifrost/ai?aiSection=tools-asr` 默认进入 `Scheduled Tasks`，符合“第一个 tab 就是定时任务”的预期。
 - 保持任务详情深链 `asrTask`、`asrTaskTab`、`asrFile`、`asrDay`、`asrDailyReport` 行为不变。
 - 所有样式使用 Ant Design/Tabs 默认主题能力和现有 Card 组件，不新增硬编码颜色，继续兼容亮色/暗色主题。
 
 ## 依赖项
 
-- WebUI：`web/src/pages/ASR/index.tsx`、`web/src/pages/ASR/components/ASRHomeTabs.tsx`。
-- 现有 ASR 子组件：`DirectoryTasksPanel`、`SpeechTab`、`SpeechWorkbench`、`DiarizationSetupCard`、`VoiceWakeActionsCard`。
+- WebUI：`web/src/pages/ASR/index.tsx`、`web/src/pages/ASR/components/ASRHomeTabs.tsx`、`web/src/pages/ASR/components/asrHomeRoute.ts`。
+- 现有子组件：`DirectoryTasksPanel`、`SpeechWorkbench`、`DiarizationSetupCard`、`VoiceWakeActionsCard`（位于 `web/src/pages/ASR/components/`），以及从 `web/src/pages/Settings/tabs/SpeechTab.tsx` 引入的模型管理面板。
 - 测试：Playwright UI 测试、TypeScript 构建检查、真实场景 `human_tests/asr-scheduled-task-plan-b.md`。
 
 ## 测试方案

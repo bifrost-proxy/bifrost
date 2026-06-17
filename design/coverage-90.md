@@ -21,19 +21,21 @@
 
 ```
 scripts/ci/
-├── coverage.sh           # 既有：unit + integration（保留）
-├── coverage-e2e.sh       # 既有：E2E instrumented（保留）
-├── coverage-all.sh       # 新增：unit + integration，--with-e2e 时合并 E2E，--gate 走棘轮门禁
-└── coverage-crate.sh     # 新增：按 crate 度量，迭代用
+├── coverage.sh                 # 既有：unit + integration（保留）
+├── coverage-e2e.sh             # 既有：E2E instrumented（保留）
+├── coverage-all.sh             # 新增：unit + integration，--with-e2e 时合并 E2E，--gate 走棘轮门禁
+├── coverage-crate.sh           # 新增：按 crate 度量，迭代用
+├── coverage-gate.py            # 新增：解析 coverage.json，按棘轮下限 + 工作区聚合下限校验，可输出 gap 分析
+└── coverage-thresholds.toml    # 新增：per-crate 棘轮下限 + workspace_min 等门禁配置
 
 Makefile
 ├── coverage              # = coverage-gate
 ├── coverage-unit         # = coverage.sh
 ├── coverage-e2e          # = coverage-e2e.sh
-├── coverage-gate         # = coverage-all.sh --json --gate
-├── coverage-html         # = coverage-all.sh --html
-├── coverage-json         # = coverage-all.sh --json
-└── coverage-crate CRATE= # = coverage-all.sh -p <CRATE> --json --gaps
+├── coverage-gate         # = coverage-all.sh --json --gate --gaps
+├── coverage-html         # = coverage-all.sh --html --fail-under 0
+├── coverage-json         # = coverage-all.sh --json --fail-under 0
+└── coverage-crate CRATE= # = coverage-crate.sh <CRATE> --text --fail-under 90
 
 human_tests/
 └── coverage-mechanism.md # 新增：机制本身的真实场景验证用例
@@ -48,7 +50,8 @@ design/
 
 ```
 ┌──────────────────────────────┐
-│ 1. cargo llvm-cov clean -W   │
+│ 1. cargo llvm-cov clean      │
+│      --workspace             │
 │ 2. cargo llvm-cov            │
 │      --workspace             │
 │      --all-features          │
@@ -63,11 +66,13 @@ design/
            │
            ▼
 ┌──────────────────────────────┐
-│ 4. cp E2E .profraw → llvm-cov │
-│    target dir                 │
+│ 4. 通过 cargo llvm-cov run    │
+│    复用共享 target，使 E2E    │
+│    profraw 直接落在合并目录   │
 │ 5. cargo llvm-cov report      │
-│      --no-run                 │
-│      --fail-under-lines 90    │
+│      （--fail-under PCT 可选；│
+│       90% 棘轮门禁由           │
+│       coverage-gate.py 执行） │
 └──────────────────────────────┘
            │
            ▼
@@ -79,8 +84,8 @@ design/
 - 任何会改动业务代码的开发任务，最终必须运行 `make coverage` 并保证全工作区
   行覆盖率 ≥ 90%，否则任务不能视为完成；
 - 当某个 crate 因为外部依赖（硬件、桌面 API、平台特定能力等）天然无法达到
-  90% 时，必须在 `design/coverage-90.md` 的「不适用清单」里写明原因，并把当
-  次该 crate 的覆盖率冻结值写入 `--fail-under` 例外；
+  90% 时，必须在 `design/coverage-90.md` 的「不适用清单」里写明原因，并在
+  `scripts/ci/coverage-thresholds.toml` 中维护该 crate 的棘轮下限例外；
 - E2E 套件不能跑通的环境（无网络/无 Tauri/无 macOS keychain）下允许使用
   `make coverage-unit` 退化为单元覆盖率 + 90% 门禁，但必须在交付报告里写明
   E2E 已跳过的原因。
@@ -111,9 +116,23 @@ design/
 
 ## 冻结表（最近一次基线）
 
-> 由 `make coverage-json` 输出 `target/coverage/coverage.json` 后，运行
-> `python3 scripts/ci/coverage_freeze.py`（如需）回填。当前手工记录如下：
+> 各 crate 的棘轮下限（floor）记录在 `scripts/ci/coverage-thresholds.toml`，由 `coverage-gate.py` 在每次 `make coverage` 时校验。补测后请同步上调对应 `min`，不要随意下调；下方汇总为最近一次基线（节选，详见 thresholds 文件）：
 
-| 范围 | 行数 | 已覆盖 | 行覆盖率 |
-| ---- | ---: | ---: | ---: |
-| 待补测后由 CI 自动填充 | - | - | - |
+| 范围 | 棘轮下限 (line %) | 备注 |
+| ---- | ----: | ---- |
+| 工作区聚合 (`workspace_min`) | 55.0 | 由 `coverage-gate.py` 聚合校验 |
+| `bifrost-command` | 90.0 | 已达 98.3% |
+| `bifrost-tls` | 90.0 | Linux CI 实测 91.5% |
+| `bifrost-core` | 89.0 | Linux 可达 95.9%；macOS-only / 网络代码降低聚合值 |
+| `bifrost-proxy` | 59.0 | 当前基线 59.13%，待棘轮上调 |
+| `bifrost-admin` | 49.0 | 当前基线 49.22%，待棘轮上调 |
+| `bifrost-storage` | 90.0 | Linux CI 94.5% |
+| `bifrost-sync` | 90.0 | Linux CI 94.0% |
+| `bifrost-power` | 84.0 | Linux 84.5%，残余为 macOS-only IOKit |
+| `bifrost-device` | 90.0 | Linux 92.4%，残余为 macOS-only ioreg |
+| `bifrost-asr` | 94.0 | 当前基线 94.52% |
+| `bifrost-script` | 91.0 | 当前基线 91.42% |
+| `skills` | 90.0 | Linux CI 95.4% |
+| `bifrost-e2e` | 50.0 | 测试运行器自身，随 e2e 用例增长棘轮上调 |
+| `agent` | 78.0 | 当前基线 78.78% |
+| `bifrost-cli` | 45.0 | 当前基线 45.67% |

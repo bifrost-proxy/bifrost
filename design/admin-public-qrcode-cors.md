@@ -14,10 +14,10 @@
 
 ## 实现逻辑
 
-1. 在 `crates/bifrost-admin/src/handlers/mod.rs` 中新增公开资源响应 builder，统一注入：
-   - `Access-Control-Allow-Origin: *`
-   - `Access-Control-Allow-Methods: GET, OPTIONS`
-   - `Access-Control-Allow-Headers: Content-Type, Authorization, X-Client-Id`
+1. 在 `crates/bifrost-admin/src/handlers/mod.rs` 中新增公开资源响应 builder `public_response_builder`，统一注入：
+   - `Access-Control-Allow-Methods: GET, HEAD, OPTIONS`（常量 `PUBLIC_CORS_ALLOW_METHODS`）
+   - `Access-Control-Allow-Headers: Content-Type, Authorization, X-Client-Id`（常量 `ADMIN_CORS_ALLOW_HEADERS`）
+   - `Access-Control-Allow-Origin` 由 builder 留空，统一在 `router::AdminRouter::handle` 出口处通过 `apply_cors_headers` 根据请求 `Origin` 回填（受 `crates/bifrost-admin/src/cors.rs` 的 allowlist 约束），不再硬编码为 `*`。
 2. 将 cert 下载、cert 二维码、proxy 二维码的成功响应切换为统一 builder，避免后续新增公开资源时遗漏 CORS 头。
 3. 在公开 cert/proxy handler 中显式支持 `OPTIONS`，即使未来 router 层调整，也能保持接口级别的跨域能力清晰可见。
 4. 公开证书路径的放行仅基于 `/_bifrost/public/cert` 前缀判断，不再额外拒绝 absolute-form URI；这样通过代理格式或某些客户端构造的请求目标访问时，仍然可以正常下载证书。

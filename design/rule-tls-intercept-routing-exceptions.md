@@ -40,7 +40,7 @@ Bifrost 的规则引擎在全局 TLS 解包关闭时，仍会因为某些规则�
    - `DomainMatcher`、`IpMatcher` 可作为自动解包依据。
    - `WildcardMatcher`、`PathWildcardMatcher` 只有 pattern 的 host 部分包含具体域名/IP 片段时可作为自动解包依据，例如 `*.example.com`、`^api.example.com/v1/*`。
    - `RegexMatcher` 以及纯 `*`、`*/api/*` 等无 host 片段通配规则不能作为自动解包依据。
-6. 保留显式优先级：
+8. 保留显式优先级：
    - `tlsIntercept://` 仍强制解包。
    - `tlsPassthrough://` 仍强制透传。
    - 全局 TLS、域名 include、App include 仍可触发解包。
@@ -49,10 +49,13 @@ Bifrost 的规则引擎在全局 TLS 解包关闭时，仍会因为某些规则�
 
 - `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`
 - `crates/bifrost-proxy/src/proxy/socks/tcp.rs`
+- `crates/bifrost-proxy/src/proxy/http/handler.rs`（`connect_via_upstream_http_proxy_tunnel` 承担 proxy-only 命中后的下游 HTTP CONNECT 转发）
 - `crates/bifrost-core/src/matcher/*`
 - `crates/bifrost-core/src/rule/resolver.rs`
+- `crates/bifrost-cli/src/parsing/rules.rs`（CLI 侧 `RulesResolver` 包装实现，需保持与 core trait 一致）
 - `e2e-tests/tests/test_socks5_tls_routing_exceptions.sh`
 - `e2e-tests/rules/socks5_tls/routing_exceptions.txt`
+- `e2e-tests/run_all_tests_parallel.sh`（`FIXTURE_ONLY_RULES` 必须包含 `socks5_tls/routing_exceptions.txt`）
 
 ## 测试方案
 
@@ -79,11 +82,11 @@ Bifrost 的规则引擎在全局 TLS 解包关闭时，仍会因为某些规则�
 - `TC-S5TRE-04`: 全局 TLS 关闭，纯 regex `resHeaders://...` 命中，但不自动解包，响应头不被应用。
 - `TC-S5TRE-05`: 全局 TLS 关闭，明确域名 `resHeaders://` 命中，HTTPS 通过 SOCKS5 自动解包并应用响应头，证明内容改写类规则没有退化。
 - `TC-S5TRE-06`: 全局 TLS 关闭，`domain-path-auto.local/app/account-center https://...` 这类无协议前缀的具体域名路径路由命中后自动解包，并按内层 path 选择最具体上游。
-- `TC-S5TRE-07`: `routing_exceptions.txt` 是跨规则语义 fixture，必须由专项脚本执行；并行通用 rules runner 应把它列入 `FIXTURE_ONLY_RULES`，避免把 `host://` / `resHeaders://` 混合语义误套普通单规则断言。
+- `TC-S5TRE-07`: `routing_exceptions.txt` 是跨规则语义 fixture，必须由专项脚本执行；并行通用 rules runner 应把它列入 `FIXTURE_ONLY_RULES`，避免把 `host://` / `resHeaders://` 混合语义误套普通单规则断言。当前由 `e2e-tests/run_all_tests_parallel.sh` 的 `FIXTURE_ONLY_RULES` 数组承担（脚本中没有同名 case，仅作隔离约束）；`test_socks5_tls_routing_exceptions.sh` 内只实现 TC-S5TRE-01..06。
 
 ### 真实场景测试
 
-新增 `human_tests/rule-tls-intercept-routing-exceptions.md`，按 E2E 同等场景真实执行 CLI/API 验证，并同步 `human_tests/readme.md` 索引。
+新增 `human_tests/rule-tls-intercept-routing-exceptions.md`，按 E2E 同等场景真实执行 CLI/API 验证，并同步 `human_tests/readme.md` 索引。当前 human_tests 文档覆盖 TC-S5TRE-01..06（与 E2E 脚本对齐），并扩展了两个仅在真实场景执行的用例：TC-S5TRE-07（用户反馈导出的 `qianchuan.jinritemai.com/app/account-center` 路径优先级回归，配套 `cargo test -p bifrost-admin test_passthrough_does_not_override_higher_priority_forward_rule`）和 TC-S5TRE-08（验证 `routing_exceptions.txt` 被 `run_all_tests_parallel.sh` 的 `FIXTURE_ONLY_RULES` 隔离）。
 
 ## Review/Fix/Test 闭环方案
 

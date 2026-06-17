@@ -27,9 +27,12 @@
 
 ## 依赖项
 
+- `crates/bifrost-proxy/src/transform/body.rs`（`apply_body_rules` / `apply_body_rules_preserving_encoding` / `apply_content_injection_preserving_encoding`）
 - `crates/bifrost-proxy/src/transform/compress.rs`
 - `crates/bifrost-proxy/src/transform/decompress.rs`
 - `crates/bifrost-proxy/src/proxy/http/handler.rs`
+- `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`（HTTPS tunnel/MITM 复用相同的保编码 Body 规则与内容注入）
+- `crates/bifrost-admin/src/replay_body_rules.rs` / `replay_response_rules.rs` / `request_rules.rs`（Replay Admin API 专属规则应用链路）
 
 ## 测试方案
 

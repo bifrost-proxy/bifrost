@@ -11,7 +11,7 @@
 - HTTPS interception 的 H2 body reset fallback 到 HTTP/1.1 后，先按 Content-Length 有界读取响应体；需要跳过 body processing 时仍规范化响应头，避免客户端把 fallback body 判定为 decode error。
 - Skills registry watcher 同时保存 raw root 与 canonical root。Windows remove event 中已删除路径无法 canonicalize 时，仍可从 raw root 计算 slug 并删除缓存项。
 - 其他 Windows 编译或 clippy 差异通过 `cfg` 缩小到平台相关分支，不改变非 Windows 行为；平台专用测试 helper 必须随平台 cfg 一起收敛，Unix-only fixture import 不得在 Windows `--all-targets -D warnings` 下产生 unused warning。
-- Windows Unit Tests job 的 `Swatinem/rust-cache` 仅用于 restore，不在该 job 的 post-step 保存 cache，避免测试主体通过后被 Windows tar/zstd cache 打包失败或超时拖红。
+- Windows Unit Tests job（`.github/workflows/ci.yml` 中的 `test-windows-tray`，job name `Windows Unit Tests (x86_64)`，`runs-on: windows-latest`，仅运行 `x86_64-pc-windows-msvc` target）的 `Swatinem/rust-cache` 通过 `save-if: ${{ false }}` 仅用于 restore，不在该 job 的 post-step 保存 cache，避免测试主体通过后被 Windows tar/zstd cache 打包失败或超时拖红。该 job 直接执行 `cargo test --workspace --all-features --target x86_64-pc-windows-msvc`（不带 `-j1`）；`aarch64-pc-windows-msvc` 当前仅在 `build-cli-windows` / `build-desktop-windows` 编译类 job 中覆盖，没有专门的 Windows aarch64 单元测试 job。
 
 ## 依赖项
 

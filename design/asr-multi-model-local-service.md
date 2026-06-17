@@ -1,5 +1,7 @@
 # ASR 双模型本地服务与默认模型配置方案
 
+> 实施状态(截至 2026-06-16):本文档描述的多 provider 注册表、`/api/asr/config`、Cohere provider、CDP 授权下载、`service.json` schema v2、`AsrModelProfile` 等能力**均为 planned, not yet shipped as of 2026-06-16**。当前仓库只实现了 Qwen3-ASR 单 provider 链路(参见下文「当前实现基线」);除非显式标注「已落地」,本文其余章节都属于尚未实现的设计稿。
+
 ## 功能模块说明
 
 本方案在当前 Qwen3-ASR 本地服务实现基础上，扩展为可同时管理多个本地 ASR 模型资产、但同一时刻只运行一个模型服务的统一 ASR 能力。V1 目标模型为：
@@ -21,10 +23,10 @@
 
 当前分支已经具备一套 Qwen3-ASR 专用链路：
 
-- `crates/bifrost-admin/src/asr_runtime.rs`
-  - `DEFAULT_ASR_MODEL = "Qwen3-ASR-1.7B"`。
-  - 固定 ASR home 为 `~/.bifrost/asr`。
-  - `service.json` 记录 `host/port/model/language/home/pid/managed_by/started_at_ms`。
+- `crates/bifrost-admin/src/asr_runtime.rs`(re-exports from `crates/bifrost-asr/src/runtime.rs` since refactor)
+  - `DEFAULT_ASR_MODEL = "Qwen3-ASR-0.6B"`、`DEFAULT_ASR_HOST = "127.0.0.1"`、`DEFAULT_ASR_LANGUAGE = "chinese"`、`ASR_INSTALL_NAME = "qwen3_asr_rs"`。
+  - 固定 ASR home 为 `~/.bifrost/asr`(`fixed_asr_home()`);`service.json` 路径为 `<bifrost_storage::data_dir()>/asr/service.json`,在默认配置下解析为 `~/.bifrost/asr/service.json`。
+  - `AsrServiceState` 记录 `host/port/model/language/home/pid/managed_by/owner_module/owner_id/started_at_ms`(`owner_module`、`owner_id` 为后加的 lease 字段,旧 state 通过 `legacy_owner_module` 回填)。
 - `crates/bifrost-admin/src/handlers/asr.rs`
   - `/api/asr/status`
   - `/api/asr/init-stream`
@@ -32,7 +34,7 @@
   - `/api/asr/service/stop`
   - `/api/asr/transcribe-stream`
   - `/api/asr/transcribe-ws`
-  - 当前 `AsrTarget` 只有 `host/port/language/model/home`，模型目录和必需文件由模型名直接推导。
+  - 当前 `AsrTarget` 包含 `host/port/language/model/home/owner_module/owner_id`,模型目录和必需文件仍由模型名直接推导;`owner_module` 默认 `model_management`,与 `service.json` 的 lease 归属字段联动。
   - 当前初始化固定下载 `second-state/qwen3_asr_rs` release、Qwen Hugging Face 权重和 sample 音频。
   - 当前启动固定执行 `~/.bifrost/asr/qwen3_asr_rs/asr-server --model-dir ... --language ...`。
 - `crates/bifrost-cli/src/commands/asr.rs`
@@ -40,7 +42,7 @@
   - `stream-file` 如果服务未运行会临时启动，用完停止。
   - CLI 当前也固定寻找 `qwen3_asr_rs/asr` 和 `qwen3_asr_rs/asr-server`。
 - `web/src/api/asr.ts`
-  - `defaultAsrParams()` 默认 `Qwen3-ASR-1.7B` 和 `chinese`。
+  - `defaultAsrParams()` 默认 `Qwen3-ASR-0.6B` 和 `chinese`(`DEFAULT_ASR_MODEL` 常量同步为 0.6B)。
   - WebUI 本地存储用户选择，但没有服务端默认模型配置。
 - `web/src/pages/Settings/tabs/SpeechTab.tsx`
   - `Speech Converter` 当前只展示 Qwen 两个模型选项。
@@ -237,7 +239,7 @@ V1 保持 `~/.bifrost/asr` 为唯一 ASR home，但把 runtime 和模型资产�
 
 - `GET /api/asr/config` 返回模型 registry、默认模型、每个模型默认语言、当前运行服务。
 - `PATCH /api/asr/config` 只允许设置已注册模型为默认模型，并校验默认语言属于该模型支持列表。
-- 没有配置文件时默认 `qwen3-asr-1.7b`，保持当前行为。
+- 没有配置文件时默认 `qwen3-asr-0.6b`(对齐当前 `DEFAULT_ASR_MODEL = Qwen3-ASR-0.6B`),保持当前行为。
 - CLI、目录任务创建和 WebUI 都从服务端 config 读默认值，不再各自硬编码。
 
 默认模型使用规则：

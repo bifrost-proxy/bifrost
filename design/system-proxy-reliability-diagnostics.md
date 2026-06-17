@@ -4,6 +4,32 @@
 
 已收敛为可执行技术方案。本文定义下一轮 system proxy 可靠性、wake 后检查、结构化诊断和现场取证能力的落地规格。
 
+### 实施进度（截至 2026-06-17）
+
+已落地：
+
+- `bifrost-power::power_notifications::PowerNotificationWatcher` 已实现 macOS IOKit power notification 监听（`crates/bifrost-power/src/power_notifications.rs`）。
+- `bifrost-cli` 已新增 `system-proxy lifecycle-helper` 子命令（`crates/bifrost-cli/src/commands/system_proxy.rs::run_system_proxy_lifecycle_helper`），覆盖 parent-pid + start-time 监控、SIGTERM/SIGINT/SIGHUP 处理、`PowerEvent::SystemHasPoweredOn` 后调用 `reconcile_system_proxy_after_power_wake` 与 `cleanup_or_restart_managed_runtime`。
+- `bifrost-admin` 在 enable/disable 路径上接入 lifecycle helper（`crates/bifrost-admin/src/state.rs::SystemProxyLifecycleHelperState` 与 `crates/bifrost-admin/src/handlers/proxy.rs` 的 start/stop helper）。
+- `bifrost-core::SystemProxyManager` 已提供 `managed_target_has_live_listener` / `last_runtime_target_has_live_listener` / `recover_from_crash` 等 guarded restore 基础能力。
+- `bifrost-core::system_proxy_recovery` 提供 `is_retryable_recovery_error` / `is_network_services_not_ready_error` / `retry_with_policy`，对应 network services 未 ready 的 retry 安全网。
+- LaunchDaemon one-shot cleanup（`system_proxy_launchd`）保留并继续走 startup recovery。
+
+以下为本文规划但尚未落地（planned, not yet shipped as of 2026-06-17）：
+
+- `bifrost-core::system_proxy_owner_state` 模块与 `system_proxy_owner_state.json` 文件（含 `runtime_start_mode` / `restartable_runtime` / `helper_pid` / `helper_last_heartbeat_at` / `wake_watcher_status` / `last_*` 字段）。
+- `bifrost-core::system_proxy_events` 模块、`logs/system_proxy_events.jsonl` 结构化事件、`.system_proxy_diagnostics.lock` 独立诊断锁、10 MiB rotation。
+- 抽出的共享决策函数 `reconcile_system_proxy_after_wake(trigger, ...)` 与 `WakeReconcileOutcome` 枚举（目前 wake 路径以 `reconcile_system_proxy_after_power_wake` + `cleanup_or_restart_managed_runtime` 内联实现，未提供具名共享 API）。
+- `bifrost-core::managed_runtime_restart::restart_managed_runtime_before_restore` 显式 API 与 `RuntimeRestartOutcome` 枚举。
+- helper 5 秒 heartbeat 写入、`helper_heartbeat_stale` / `helper_heartbeat_recovered` 事件、主进程 watchdog 基于 heartbeat 的检查。
+- `bifrost status` 系统代理诊断摘要新增字段（lifecycle helper、wake watcher、last reconcile/cleanup、ManagedRuntimeDead 等）。
+- WebUI Settings/StatusBar 风险诊断模型。
+- `bifrost doctor system-proxy` 命令、`collection_manifest.json` 与 diagnostic bundle。
+- Request error aggregation 中的 `network_stack_unready_summary` 5 分钟聚合窗口。
+- Windows 平台上的 owner state / event log / parent-death restart-before-restore 端到端验证矩阵。
+
+本节列出的落地清单只代表 wake/lifecycle-helper 链路；以下章节内容仍为目标规格，落地以本节为准。
+
 ## 背景
 
 Bifrost 启用系统代理后，如果主进程异常退出、macOS 合盖/休眠唤醒后网络服务暂不可读，或者 cleanup 路径在网络栈未 ready 时过早退出，系统代理可能继续指向已经不可达的 Bifrost listener。用户侧表现是“整个系统没有网络”。

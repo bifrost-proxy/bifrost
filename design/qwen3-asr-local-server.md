@@ -2,10 +2,10 @@
 
 ## 功能模块说明
 
-本模块把 Qwen3-ASR-1.7B 在 32GB Apple Silicon Mac 上的资源准备、启动与验证固化为 Bifrost 内置 Rust 能力，并在 WebUI 中提供语音转文字入口。目标路线是：
+本模块把 Qwen3-ASR 系列模型（默认 `Qwen3-ASR-0.6B`，可选 `Qwen3-ASR-1.7B`，详见 `crates/bifrost-admin/src/handlers/asr.rs` 的 model 枚举）在 Apple Silicon Mac 上的资源准备、启动与验证固化为 Bifrost 内置 Rust 能力，并在 WebUI 中提供语音转文字入口。1.7B 推荐 32GB 以上内存。目标路线是：
 
 ```text
-Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
+Qwen3-ASR-0.6B/1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 ```
 
 该链路只负责本地语音模型运行验证与本地 WebUI 语音转写，不修改 Bifrost 代理运行时，不启动系统代理，不依赖 CUDA/vLLM。
@@ -22,7 +22,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - `install` 非交互安装：
   - 固定安装到 `~/.bifrost/asr/qwen3_asr_rs`；
   - `--home` 和 `QWEN3_ASR_HOME` 不改变安装目录，避免测试或 WebUI 使用不同目录导致重复下载；
-  - 默认模型为 `Qwen3-ASR-1.7B`；
+  - 当前 CLI 与 API 的默认模型为 `Qwen3-ASR-0.6B`；安装/启动时可通过 `--model Qwen3-ASR-1.7B` 切换到 1.7B（仍由 `crates/bifrost-admin/src/handlers/asr.rs` 中的 model 表枚举）；
   - 通过 Rust 通用下载模块下载 qwen3_asr_rs 最新 release 二进制；
   - 通过 Rust 通用下载模块下载 Hugging Face 权重文件；下载 client 必须使用 `bifrost_core::direct_reqwest_client_builder()` 绕过 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 环境代理，避免用户当前 shell 或正在运行的 Bifrost 代理反向影响 `Qwen3-ASR-0.6B` / `Qwen3-ASR-1.7B` 初始化；
   - 从 release 内置 tokenizer 复制对应 `tokenizer.json`；
@@ -34,7 +34,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - `stream-file` 默认临时启动或复用本地 `asr-server`，按 30 秒窗口、2 秒 overlap 对同一个文件顺序复用模型服务并输出 JSON Lines；命令临时启动的服务会在文件结束后停止，这是 CLI 侧长音频真实验收入口。
 - `chunk`、`batch-transcribe`、目录任务和 WebUI 文件上传链路的模型推理窗口统一为 30 秒；浏览器麦克风 WebSocket 采集是实时交互例外，保留 1 秒 MediaRecorder timeslice 和快速 flush。
 - `verify` 串联 preflight、install、CLI 中文样例、API server、health、models、multipart transcription，用真实模型完成端到端验收。
-- CI 环境默认禁止下载、安装或启动 Qwen3-ASR 模型运行时。`install`、`prepare`、`run-sample`、`start-server`、`verify` 在 `CI=true` / `GITHUB_ACTIONS=true` 等环境下会直接失败并提示原因，除非显式设置 `BIFROST_QWEN3_ASR_ALLOW_CI_MODEL=1`。仓库 E2E 即使误设 `BIFROST_QWEN3_ASR_E2E_ONLINE=1`，在 CI 中也只执行结构/错误路径验证，然后跳过在线模型段。
+- CI 环境默认禁止下载、安装或启动 Qwen3-ASR 模型运行时。当前实现以 `e2e-tests/tests/test_qwen3_asr_local_server.sh` 为入口：脚本检测到 `CI=true` 或未显式设置 `BIFROST_QWEN3_ASR_E2E_ONLINE=1` 时直接跳过在线模型段。`install`、`prepare`、`run-sample`、`start-server`、`verify` 在原始设计中是计划暴露的 CLI 动词，但当前仓库实际把它们实现为 `crates/bifrost-admin/src/handlers/asr.rs` 的内部 Rust 函数（`install_release` / `prepare_model` / `verify_cli_sample` 等），由 `/api/asr/init-stream`、`/api/asr/service/start` 等接口编排；独立 CLI 动词以及 `BIFROST_QWEN3_ASR_ALLOW_CI_MODEL` 环境变量目前未实现（planned, not yet shipped as of 2026-06-16）。仓库 E2E 即使误设 `BIFROST_QWEN3_ASR_E2E_ONLINE=1`，在 CI 中也只执行结构/错误路径验证，然后跳过在线模型段。
 - Bifrost Admin 新增 `/api/asr` 后台 API：
   - `GET /api/asr/status` 只做短超时健康探测和本地安装目录检查，不触发下载，也不阻塞 Bifrost 启动。
   - `GET /api/asr/init-stream` 在用户从 AI -> Tools -> ASR 点击初始化后启动或订阅后台初始化任务，返回 `text/event-stream`。页面刷新或连接中断后再次进入会回放任务历史并继续接收当前进度，不会中断后台下载。
@@ -50,7 +50,8 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
   - `bifrost ai asr stop` 读取同一个 service state，停止对应 pid 并删除状态文件。
   - `bifrost ai asr status --json` 输出 CLI 和 WebUI 共享的模型服务状态；当下游命令（如 `grep -q`）命中后提前关闭 stdout 管道时，CLI 按普通 Unix 管道语义静默结束，不因 `Broken pipe` panic。
   - `bifrost ai asr stream-file <audio>` 确保资产可用后默认启动或复用本地 `asr-server`，按 30 秒窗口顺序发送 chunk 并输出 CLI JSON Lines；如果命令临时启动了模型服务，结束后恢复为停止状态。临时启动前同样执行自检与自动修复。
-  - `bifrost ai asr task list|show|files|run|daily list|daily show` 通过当前 Bifrost Admin API 检查目录定时任务、任务文件和按日聚合 Markdown 文档；未显式传 `-p` 时沿用 CLI 的 runtime port 解析，读不到 runtime 时回退 9900。`daily show` 默认把完整 Markdown 输出到 stdout，`--output` 可写入文件；`run --wait` 用于触发任务并等待后台运行结束，即使没有 pending 文件也会走后端的 daily 文档刷新路径。
+  - `bifrost ai asr task create|list|show|files|run|watch|tui|daily list|daily show` 通过当前 Bifrost Admin API 创建/检查目录定时任务、任务文件、watch TUI 和按日聚合 Markdown 文档；`watch`/`tui` 提供终端中实时刷新的任务面板（`crates/bifrost-cli/src/cli.rs` 中 `AiAsrCommands::Task` -> `AiAsrTaskCommands::Watch|Tui`）；未显式传 `-p` 时沿用 CLI 的 runtime port 解析，读不到 runtime 时回退 9900。`daily show` 默认把完整 Markdown 输出到 stdout，`--output` 可写入文件；`run --wait` 用于触发任务并等待后台运行结束，即使没有 pending 文件也会走后端的 daily 文档刷新路径。
+  - 除上述 task 子树外，`bifrost ai asr` 当前还提供 `subtitle`（离线字幕产物：srt/vtt/txt/timeline_json/metadata）与 `diarization`（说话人分离 profile 初始化/管理）两组子命令；`stream-file` 与 `subtitle` 均支持 `--speaker-aware` 调用 Bifrost Admin 的 speaker diarization 与已登记声纹。
   - CLI 不依赖仓库脚本，不允许用户指定模型目录；除权重/runtime 下载外，启动、停止、状态和流式输出均由 Bifrost 内置命令编排。
 - ASR 目录定时任务：
   - API 新增 `/api/asr/tasks`：创建、列表、详情、删除和手动运行目录任务。任务配置存储在 `BIFROST_DATA_DIR/asr/tasks.json`。
@@ -114,7 +115,8 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - Homebrew 依赖：`ffmpeg`。下载、断点续传和 zip 解压由 Rust 模块完成，不再依赖 `curl` 或 `unzip` 命令。
 - 外部下载源：
   - `https://github.com/second-state/qwen3_asr_rs`
-  - `https://huggingface.co/Qwen/Qwen3-ASR-1.7B`
+  - `https://huggingface.co/Qwen/Qwen3-ASR-0.6B`（默认）
+  - `https://huggingface.co/Qwen/Qwen3-ASR-1.7B`（可选，推荐 32GB 以上）
 - Rust 依赖使用 bifrost-admin 现有 `reqwest`、`tokio-stream`、`http-body-util` 和 `url`。
 - 共享 ASR service state 使用 `bifrost-admin::asr_runtime`，CLI 和 Admin API 共享同一 JSON schema。
 - WebUI 使用现有 React、Ant Design 与 `@ant-design/icons`，不新增 Node package。
@@ -146,7 +148,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - 默认做离线结构验证：脚本语法、帮助输出、缺参失败、CI 模型运行时 guard、preflight 可执行；CI shard 缺少 `ffmpeg` 时验证依赖错误可读后跳过在线段。
 - CI 环境无条件跳过在线模型段，即使误设置 `BIFROST_QWEN3_ASR_E2E_ONLINE=1` 也不会下载权重、安装 runtime、启动 `asr-server` 或部署 Bifrost 托管 ASR 服务。
 - 当 `BIFROST_QWEN3_ASR_E2E_ONLINE=1` 时执行真实部署验证：
-  - 安装 Qwen3-ASR-1.7B；
+  - 安装 Qwen3-ASR 默认模型（当前 `Qwen3-ASR-0.6B`，可显式覆盖为 1.7B）；
   - 运行中文 sample CLI 转写；
   - 通过 Bifrost Admin 启动托管本地 API server；
   - 验证 `/health`、`/v1/models`；
@@ -174,7 +176,7 @@ Qwen3-ASR-1.7B + qwen3_asr_rs + MLX/Metal + 本地 OpenAI-compatible API Server
 - 覆盖：
   - Apple Silicon 与 32GB 内存检查；
   - 依赖安装；
-  - Qwen3-ASR-1.7B 非交互安装；
+  - Qwen3-ASR 非交互安装（默认 0.6B；显式选择时也覆盖 1.7B）；
   - CLI 中文样例转写；
   - API server 健康检查和中文转写；
   - 长音频切片命令的文件产物验证；

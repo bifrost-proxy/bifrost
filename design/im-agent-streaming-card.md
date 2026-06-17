@@ -31,29 +31,38 @@ IM Gateway Agent 在收到来自 IM 的消息后，需要用同一张进度卡�
 ### Provider-neutral progress snapshot
 
 Agent runtime 只产生与 IM 平台无关的事件：
-
 - `Status`
+- `ContextUpdated`
+- `CompactionStarted` / `CompactionFinished` / `CompactionFailed`
 - `ToolStarted`
 - `ToolFinished`
+- `LongTaskStatus`
 - `PlanUpdated`
+- `ProposedPlan`
 - `TitleUpdated`
 - `AssistantDelta`
 - `AssistantFinal`
 - `TurnFinished`
 - `TurnFailed`
+- `TurnFailed`
 
 IM Gateway 把这些事件归并为 `ImAgentProgressSnapshot`。snapshot 是后续所有 IM renderer 的共同输入，包含：
-
 - `session_key`
 - `title`
 - `output`
 - `last_thought`
+- `runner`（adapter / model / token usage / work_dir 等 runner 摘要）
 - `plan_steps`
+- `proposed_plan`
 - `tool_calls`
 - `latest_tool`
+- `timeline`（thinking / tool / status 时间线）
 - `status`
+- `context`（context 用量与压缩计数）
 - `queue_items`
 - `guide_pending`
+- `activity_notice`
+- `phase`
 - `phase`
 
 ### Provider capability
@@ -74,7 +83,7 @@ IM message received
   -> send interactive message with card_id
   -> Agent loop emits progress events
   -> coalesce progress events
-  -> update element content: output / optional plan / optional tool panel / folded status / visible thought
+  -> update element content: output / optional plan / optional tool panel / optional process timeline (`agent_process_panel`) / folded status / visible thought
   -> guide or queue update
        -> create and send a new CardKit card entity below the latest user message
        -> best-effort update previous card entity as a frozen Finished snapshot
@@ -96,8 +105,8 @@ IM message received
 ## 实现逻辑
 
 - `crates/agent` 新增 progress event 通道，挂在 `AgentSession` 上。
-- `refresh_active_turn_status` 自动向 progress 通道发送 status snapshot。
-- 工具调用开始、工具调用结束、计划更新、标题更新、过程文本和最终回复产生对应 progress event。
+- `crates/bifrost-admin/src/im_gateway/progress_card.rs` 维护 IM progress snapshot 和 Feishu streaming card session；除了基础 status/plan/tool/final 事件外，snapshot 还吸收 `ContextUpdated` / `CompactionStarted/Finished/Failed` / `LongTaskStatus` / `ProposedPlan`，用于更新 context 用量、长任务进度和实施方案模块。
+- `crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs::run_agent_chat_with_interleave` / `process_agent_chat` 以及 `handlers/im_gateway/event_loop.rs` 上的等价分支创建 progress session，并把 progress sender 注入 AgentSession。
 - `crates/bifrost-admin/src/im_gateway/progress_card.rs` 维护 IM progress snapshot 和 Feishu streaming card session。
 - `run_agent_chat_with_interleave` / `process_agent_chat` 创建 progress session，并把 progress sender 注入 AgentSession。
 - `run_progress_event_coalescer` 对 status 类事件按 300ms 合并刷新，工具、计划、标题、过程文本、最终输出和结束事件立即刷新；Feishu session 继续按 section fingerprint 过滤未变化模块，避免 status-only 更新打出多次无效 CardKit API。
@@ -121,7 +130,7 @@ IM message received
 - 状态区使用默认折叠的 `agent_status_panel`，折叠标题只展示 token 消耗。
 - guide/queue 注入后，状态区标题追加“已收到引导 / 已加入排队 / 已删除排队”的轻量提示，避免用户误以为输入没有反馈。
 - 计划面板使用 `agent_plan_panel` 组件级更新标题和内容，标题优先展示 in-progress step。
-- 过程文本使用普通 `agent_thinking_panel` markdown 元素，默认直接展示最后一次 `AssistantDelta` 的完整内容，不渲染折叠面板。
+- 过程文本使用普通 `agent_thinking_panel` markdown 元素，默认直接展示最后一次 `AssistantDelta` 的完整内容，不渲染折叠面板；同时 `agent_process_panel` 渲染包含 thinking / tool / status 条目的时间线，工具条目带 `ap_t` / `ap_td` / `ap_tg` 前缀的 element id，便于按 section fingerprint 增量更新。
 - guide/queue 更新会发送新 card entity，并把旧 card entity 更新为冻结快照、关闭 streaming，使消息流同时保留插话时刻的旧快照和最新进度卡片。
 - queue 消息被消费为下一轮时，如果旧 progress session 仍处于 Running，progress registry 应创建新的 card entity / message，并 best-effort 冻结旧 card；冻结失败不得阻断新卡片发送。
 - 已 Finished/Failed 的历史卡片收到新一轮消息时，progress registry 不得调用 freeze/rollover，不得改写旧 snapshot；上层应新建下一张 progress card。

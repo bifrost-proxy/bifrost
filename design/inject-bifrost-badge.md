@@ -55,8 +55,8 @@
 
 ### 4. Web UI / Admin API
 
-- Admin API：复用 `/_bifrost/api/config`，扩展 response 增加 `inject_bifrost_badge` 字段，并新增 `PUT /_bifrost/api/config` 支持更新该字段（内部调用 `update_traffic_config` 持久化）。
-- Web：Settings -> Proxy tab 新增 `Switch`，默认值来自 `GET /config`，切换后调用 `PUT /config`。
+- Admin API：复用 `/_bifrost/api/config/performance`，扩展 `PerformanceConfigResponse.traffic` 增加 `inject_bifrost_badge` 字段，并通过 `PUT /_bifrost/api/config/performance` (`update_performance_config`) 支持更新该字段（内部构造 `TrafficConfigUpdate` 并调用 `update_traffic_config` 持久化）。
+- Web：Settings -> Proxy tab 的 `SystemProxySection` 新增 `Switch`，默认值来自 `GET /api/config/performance`，切换后调用 `PUT /api/config/performance`。
 
 ## 验证计划（强制三层）
 
@@ -65,7 +65,8 @@
 - `bifrost-proxy`：
   - `test_inject_badge_before_body_end`：HTML 含 `</body>` 时插入位置正确。
   - `test_inject_badge_append_when_no_body_end`：无 `</body>` 时回退到末尾追加。
-  - `test_inject_badge_gzip_roundtrip`：gzip body 解压->注入->再压缩后，解压结果包含 badge。
+  - `test_inject_badge_with_doctype` / `test_inject_badge_case_insensitive_body_end`：覆盖 `<!doctype>` 前缀与大小写混合 `</BODY>` 标签的注入。
+  - gzip/br/zstd 解压->注入->再压缩链路由 `transform::compress::test_brotli_roundtrip`、`test_zstd_roundtrip` 等编解码测试，以及 e2e `test_badge_injection_e2e.sh` 端到端验证；当前未在 `badge.rs` 内额外维护专门的 `test_inject_badge_gzip_roundtrip` 单元测试。
   - `test_badge_panel_uses_top_z_index`：Badge 与 hover 弹窗都使用最高 z-index。
   - `test_badge_merged_rules_copy_button_present`：注入片段包含 Merged Rules 复制按钮、剪贴板 API 与 fallback。
   - `test_badge_merged_rules_copy_button_present` 同时断言 fallback 使用 `clipboardData.setData` 且必须有 copy 事件写入标记才成功。
@@ -80,7 +81,7 @@
 
 ### E2E 测试
 
-- 新增 e2e 用例：`badge_injection_html_response`
+- e2e 用例：`e2e-tests/tests/test_badge_injection_e2e.sh`（脚本入口名，不是 Rust 用例名）
   - 启动本地 http server 返回 `Content-Type: text/html` 的页面。
   - 通过 Bifrost 代理请求该页面。
   - 断言响应 body 包含注入标识（例如 `__bifrost_badge__`）。

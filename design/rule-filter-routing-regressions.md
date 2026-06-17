@@ -1,5 +1,38 @@
 # Rule Filter and Routing Regression Fixes
 
+## Status
+
+Verified against current implementation as of 2026-06-17. All items in this
+doc are shipped; no planned-but-unshipped work remains. Key landing points:
+
+- Non-regex path filter prefix matching: `crates/bifrost-core/src/rule/filter.rs`
+  (see `test_parse_plain_path_filter_matches_prefix` and
+  `test_parse_whistle_style_wildcard_path_prefix_filter`).
+- Whistle-style wildcard URL filters: `crates/bifrost-core/src/rule/filter.rs`
+  + resolver tests in `crates/bifrost-core/src/rule/resolver/tests.rs`
+  (`test_exclude_filter_whistle_style_wildcard_path_prefix`).
+- `upstreamUnsafeSsl://true` protocol: parsing in
+  `crates/bifrost-core/src/protocol.rs` and `syntax.rs`, CLI rule parsing in
+  `crates/bifrost-cli/src/parsing/rules.rs`, proxy enforcement and error
+  hint in `crates/bifrost-proxy/src/proxy/http/handler.rs`.
+- `NetworkRecord` diagnostic fields (`actual_url`, `actual_host`,
+  `listener_port`, `has_rule_hit`, `error_message`): defined in
+  `crates/bifrost-core/src/bifrost_file/types.rs` and round-tripped through
+  `crates/bifrost-admin/src/handlers/bifrost_file.rs`.
+- `actual_url` / `actual_host` population for HTTP and tunnel/large-body
+  paths: `crates/bifrost-proxy/src/proxy/http/handler.rs`,
+  `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`,
+  `crates/bifrost-proxy/src/proxy/socks/tcp.rs`.
+- Rule docs updated: `docs/rule.md`, `docs/operation.md`,
+  `docs/rules/routing.md`, `docs/rules/README.md`, `docs-en/rule.md`,
+  `docs-en/operation.md`, top-level `README.md`.
+- Regression fixture excluded from generic runner via `FIXTURE_ONLY_RULES`
+  in `e2e-tests/run_all_tests_parallel.sh`; dedicated script
+  `e2e-tests/tests/test_rule_filter_routing_diagnostics.sh` drives the
+  end-to-end assertions.
+- Human test: `human_tests/rule-filter-routing-diagnostics.md`, indexed in
+  `human_tests/readme.md`.
+
 ## Scope
 
 This change addresses two rule debugging regressions found from real exported

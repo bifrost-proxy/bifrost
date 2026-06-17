@@ -67,13 +67,7 @@ pub struct AgentSession {
 
 ### 1. 工具层（tools/update_plan.rs）
 
-保持现有 `update_plan` 接口和参数不变，继续使用 `UPDATE_PLAN:{json}` 作为最小侵入实现。
-
-原因：
-- 保持模型侧调用方式稳定。
-- 本轮优先修复 runtime 生命周期问题，而不是同时重构所有 tool side effect 通道。
-
-后续可再把字符串信号升级为结构化 side effect。
+`update_plan` 接口和参数（`explanation` + `plan`）保持不变。当前实现已不再使用 `UPDATE_PLAN:{json}` 字符串信号，而是把解析后的 `UpdatePlanArgs` 通过 `ToolResult.runtime_events` 里的 `ToolRuntimeEvent::PlanUpdate(args)` 类型化事件返回给 turn loop；模型侧 tool output 仅返回 `"Plan updated"` 短确认。工具同时校验“最多一个 in_progress 步骤”并允许提交空 plan 作为清空快照。
 
 ### 2. Session 层（session.rs）
 
@@ -93,7 +87,7 @@ pub struct AgentSession {
 - `plan_has_unfinished_steps(plan)`
   - 只要存在 `pending` 或 `in_progress`，就认为还未收口。
 - `extract_plan_update(tool_calls_log)`
-  - 从最新成功的 `update_plan` 中解析 `UpdatePlanArgs.plan`。
+  - 从最新成功的 `update_plan` 中解析 `UpdatePlanArgs.plan`（现以 `ToolRuntimeEvent::PlanUpdate` 形式从 `ToolResult.runtime_events` 直接获取，不再扫描 `UPDATE_PLAN:` 文本）。
   - 解析成功后更新 `session.current_plan`，并重置 `plan_repair_attempts`。
 - `clear_completed_plan_for_new_turn(session)`
   - 只在普通非斜杠用户消息开始前运行。
@@ -181,7 +175,7 @@ pub struct AgentSession {
 新增/补充以下单元测试：
 
 - `plan_has_unfinished_steps`：验证 pending / in_progress / all completed 三种情况
-- `extract_plan_update`：验证可从 `UPDATE_PLAN:{json}` 提取计划
+- `extract_plan_update`：验证可从 `ToolRuntimeEvent::PlanUpdate` 提取计划
 - `plan repair gate`：验证已有 active plan 且未完成时，不会直接结束而会进入 repair 分支
 - `clear_completed_plan_for_new_turn`：验证 completed plan 在下一条普通消息前清空、重置 repair 计数并发送空 plan 进度事件
 - `reconcile_plan_update`：验证同一 turn 内会保留旧 completed 步骤，且不会回退已完成状态

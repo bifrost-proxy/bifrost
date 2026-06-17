@@ -183,7 +183,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 
 在 `crates/bifrost-e2e/src/tests/admin_api.rs` 中新增：
 
-- `admin_api_mobile_devices_lists_android_discovery`：验证设备发现 API 返回 ADB 状态和普通手机确认提示。
+- `admin_api_mobile_devices_lists_android_ios_discovery`：验证设备发现 API 返回 ADB 状态、iOS 发现结果和普通手机确认提示。
 - `admin_public_ios_mobileconfig_uses_current_ca`：验证 iOS mobileconfig 和二维码 public endpoint。
 - `admin_public_ios_wifi_proxy_mobileconfig_contains_proxy_payload`：验证 iOS Wi-Fi Proxy mobileconfig 和二维码 public endpoint 免授权可访问，profile 同时包含 CA payload 和 Wi-Fi manual proxy payload。
 - `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
@@ -191,7 +191,7 @@ Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只
 - `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
 - `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，断言返回的 `probePort` 已是实际绑定端口；打开 public landing/qrcode，访问 public proxy QR、proxy-access；使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，断言 `proxyConfigured=true`；再验证 HTTP netcheck 经代理进入时仍返回 409 防误判，同时用当前 Bifrost CA 作为 root CA 访问直连 HTTPS check 和代理 HTTPS check，最后断言 session 状态为 `tls_trusted`。
 - `admin_trust_probe_public_landing_stable_failed_state`：用 iPhone 窄屏浏览器打开 `/_bifrost/tp`，在未安装/未信任 Bifrost CA 的状态下等待多轮轮询，断言 `Browser HTTPS probe failed`、`Download Bifrost CA`、下一步说明和 iOS Proxy Setup 工具区不会被相同内容反复替换。
-- `proxy_rejects_proxy_routed_active_trust_probe_target`：验证 active trust-probe 的 netcheck/check absolute-form 请求如果经 Bifrost HTTP proxy 进入，会被拒绝且不会把 session 推进为通过态。
+- `proxy_rejects_proxy_routed_active_trust_probe_target`（planned, not yet shipped as of 2026-06-16）：单独的回归 case 尚未落地；当前 HTTP netcheck 经代理被拒的行为仅由 `admin_trust_probe_verifies_https_trust_with_current_ca` 一并覆盖，运行时由 `bifrost_admin::is_active_trust_probe_target` 在 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` 中判定。
 - `trust_probe` 单元测试：验证 User-Agent 平台推断覆盖 Edge、Chrome、iOS Safari、Android WebView/浏览器和常见应用容器，probe listener 健康复用、stale 自愈、60 秒 idle 停止且不会关闭已替换 listener。
 - `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。
 - `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。

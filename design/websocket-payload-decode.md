@@ -65,6 +65,7 @@
 - `raw_payload_preview?: string`
 - `raw_payload_ref?: BodyRef`
 - `raw_payload_size?: usize`
+- `raw_payload_is_text?: bool`：当存在 raw payload 时，标记其是否为文本（用于决定 raw 视图的解码方式）
 
 frames list/detail 会携带这些字段，前端默认展示 decoded payload（payload_preview/full_payload），需要时可展示 raw/base64。
 

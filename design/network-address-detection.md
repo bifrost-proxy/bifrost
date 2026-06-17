@@ -27,14 +27,17 @@
    - 过滤已知虚拟接口前缀：`docker`、`br-`、`veth`、`vnet`、`virbr`、`cni`、`flannel`、`calico`、`weave`、`cilium`、`lxc`、`lxd`、`podman`、`tun`、`tap`、`wg`、`tailscale`、`utun`、`ipsec`、`ppp`、`vmnet`、`vmware`、`vboxnet`、`bridge`、`dummy`
    - 大小写不敏感匹配
 
-3. **IP 地址过滤**
+3. **IP 地址过滤**（`is_effective_client_ip`）
    - 保留 IPv4 私有地址（`10.x`、`172.16-31.x`、`192.168.x`）
    - 保留 CGN 地址（`100.64.0.0/10`，即 `100.64-127.x`，RFC 6598）
-   - 排除回环（`127.x`）、链路本地（`169.254.x`）、IPv6
+   - 保留可路由的公网 IPv4（用于在公网可达接口上对外暴露代理）
+   - 排除回环（`127.x`）、链路本地（`169.254.x`）、未指定（`0.x`）、多播 / 广播、文档段（`192.0.2.0/24`）、benchmark 段（`198.18.0.0/15`）、`>=224.x` 的多播/保留段，以及全部 IPv6
+
+   > 注：早期实现叫 `is_routable_private_ip`，只接受私有/CGN 地址；当前实现已更名为 `is_effective_client_ip`，语义放宽为对客户端有意义的 IPv4 地址，公网 IP 会被一并保留。
 
 ### Preferred IP 检测
 
-通过 UDP socket 连接 `8.8.8.8:80`（不实际发送数据），获取操作系统路由表选择的默认出口 IP，经过 `is_routable_private_ip` 校验后标记为 `is_preferred`。如果检测到的 IP 不属于私有/CGN 地址段（如公网 IP），则丢弃该结果，避免向用户展示无意义的公网地址。
+通过 UDP socket 连接 `8.8.8.8:80`（不实际发送数据），获取操作系统路由表选择的默认出口 IP，经过 `is_effective_client_ip` 校验后标记为 `is_preferred`。回环 / 未指定 / 链路本地 / 多播 / 文档段 / benchmark 段等特殊地址会被丢弃；私有、CGN、公网可路由地址都会被保留。
 
 ### API 变更
 
@@ -82,9 +85,9 @@ preferred IP 的地址卡片上展示绿色 "Recommended" 标签。
    - **优先**：同子网判定 — 检查连接 IP 是否与本机任一网络接口在同一子网（通过 `IpNet::contains()`）
    - **降级**：私有网段判定 — 匹配 RFC 1918 + CGN `100.64.0.0/10` + link-local
    - 启动时通过 `get_local_subnets()` 获取本机所有网络接口的 IP + netmask，计算子网列表
-2. **`network.rs` 的 `is_routable_private_ip()`**：新增 CGN 地址段支持，使 CGN IP 能被正确展示在本机 IP 列表中
-3. **`network.rs` 的 `detect_preferred_ip()`**：增加 `is_routable_private_ip()` 校验，避免回填非私有 IP
-4. **`network.rs` 的 `get_local_subnets()`**：新增函数，通过 `nix::ifaddrs` 获取本机所有网络接口的 IP 和 netmask，计算并返回去重后的子网列表
+2. **`network.rs` 的 `is_effective_client_ip()`**（原 `is_routable_private_ip`，已重命名并放宽语义）：新增 CGN 地址段支持，使 CGN IP 能被正确展示在本机 IP 列表中；同时也保留公网可路由地址
+3. **`network.rs` 的 `detect_preferred_ip()`**：增加 `is_effective_client_ip()` 校验，丢弃回环 / 链路本地 / 多播 / 文档段 / benchmark 段等特殊地址
+4. **`network.rs` 的 `get_local_subnets()`**：新增函数，通过 `nix::ifaddrs` 获取本机所有网络接口的 IP 和 netmask，计算并返回去重后的子网列表（Windows 走 `local_ip_address::list_afinet_netifas`，netmask 不可得时退化为 `/24`）
 
 ### 同子网判定架构
 
@@ -113,14 +116,16 @@ preferred IP 的地址卡片上展示绿色 "Recommended" 标签。
 
 ## 测试方案
 
-### 单元测试
-- `test_is_virtual_interface_name_filters_*` — 验证各类虚拟接口名被正确识别
+### 单元测试（`crates/bifrost-admin/src/network.rs`）
+- `test_is_virtual_interface_name_filters_*` — 验证各类虚拟接口名被正确识别（docker / veth / bridge / vpn / vm / container_orchestration）
 - `test_is_virtual_interface_name_allows_physical` — 验证物理接口不被误过滤
-- `test_is_routable_private_ip_*` — 验证 IP 地址分类正确性（含 CGN 地址段）
-- `test_is_routable_private_ip_accepts_cgn` — 验证 CGN 地址被正确接受
-- `test_is_routable_private_ip_rejects_non_cgn_100` — 验证非 CGN 的 100.x 地址被拒绝
-- `test_get_local_ips_*` — 验证返回值非空、preferred 排序、无重复
-- `test_private_network_detection` — 验证 is_private_network 涵盖 RFC 1918 + CGN
+- `test_is_virtual_interface_name_case_insensitive` — 验证大小写不敏感匹配
+- `test_is_effective_client_ip_accepts_private` / `test_is_effective_client_ip_accepts_cgn` / `test_is_effective_client_ip_accepts_public` — 验证私有 / CGN / 公网 IP 都被保留
+- `test_is_effective_client_ip_rejects_loopback` / `test_is_effective_client_ip_rejects_link_local` / `test_is_effective_client_ip_rejects_ipv6` / `test_is_effective_client_ip_rejects_special_public_ranges` — 验证特殊地址段被排除（文档段、benchmark 段、多播等）
+- `test_get_local_ips_returns_non_empty` / `test_get_local_ips_preferred_is_first` / `test_get_local_ips_no_duplicates` / `test_get_local_ips_all_entries_are_valid_addresses` — 验证返回值非空、preferred 排序、无重复、地址合法
+
+### 单元测试（`crates/bifrost-core/src/access_control.rs`）
+- `test_private_network_detection` — 验证 `is_private_network` 涵盖 RFC 1918 + CGN + link-local
 - `test_cgn_address_allowed_with_allow_lan` — 验证 CGN IP 在 allow_lan=true 时直接 Allow
 - `test_cgn_address_prompts_without_allow_lan` — 验证 CGN IP 在 allow_lan=false 时触发 Prompt
 - `test_local_subnet_detection_allows_same_subnet` — 验证同子网的公网 IP 被视为局域网
@@ -128,7 +133,7 @@ preferred IP 的地址卡片上展示绿色 "Recommended" 标签。
 - `test_subnet_hot_update_changes_access_decision` — 验证运行时更新子网后访问决策实时变化
 
 ### E2E 测试
-- `admin_api_proxy_address_with_preferred_ip` — 验证 API 返回含 `is_preferred` 字段、preferred IP 排在首位
+- `admin_api_proxy_address_with_preferred_ip` — 验证 API 返回含 `is_preferred` 字段、preferred IP 排在首位 (planned, not yet shipped as of 2026-06-16)
 
 ### 真实场景测试
 - 启动服务后调用 `GET /api/proxy/address`，对比 `ifconfig` 输出验证虚拟接口被正确过滤

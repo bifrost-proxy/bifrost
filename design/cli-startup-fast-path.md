@@ -142,8 +142,14 @@ CREATE INDEX idx_frame_metadata_closed_updated
 ## 依赖项
 
 - `crates/bifrost-cli/src/main.rs`
-- `crates/bifrost-cli/src/commands/update_check.rs`
-- `crates/bifrost-cli/src/commands/start.rs`
+- `crates/bifrost-cli/src/commands/update_check.rs`（新增 `spawn_update_check_notice` 后台线程入口）
+- `crates/bifrost-cli/src/commands/start.rs`（阶段日志、`spawn_managed_proxy_task` + readiness pipe、system proxy 后台 reconcile、Remote Invoke worker 后台调度）
+- `crates/bifrost-cli/src/commands/port.rs`（复用 `spawn_managed_proxy_task` 处理端口重绑）
+- `crates/bifrost-core/src/logging.rs`（`reinit_logging_for_daemon` 接受 CLI `--log-level` 并继承到 daemon 子进程）
+- `crates/bifrost-admin/src/state.rs`（`set_remote_invoke_worker` 支持后台异步注入 worker）
+- `crates/bifrost-admin/src/remote_invoke/call_history_store.rs`（JSONL 滚动存储、按 client-key 分片、`max_records=1000` 硬上限、坏行 compaction）
+- `crates/bifrost-admin/src/frame_store.rs`（`frame_connection_metadata` SQLite 表、按需读取 + LRU cache，不再使用 `*.meta.json`）
+- `crates/bifrost-core/src/rules` 与 `crates/bifrost-proxy/src/rules`（规则命中日志降级到 `debug` / `trace`）
 
 ## 测试方案（含 e2e）
 

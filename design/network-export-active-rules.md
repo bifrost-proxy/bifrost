@@ -19,6 +19,7 @@ Network 右键导出 `.bifrost` 文件时，除了请求/响应内容与实际�
   - `source`：`default_port` 或 `custom_port`。
   - `admin_port`：主 Bifrost 端口。
   - `listener_port`：本快照对应的请求入口端口。
+  - `total`：本快照内规则文件总数（聚合计数，便于消费端快速展示）。
   - `rules`：规则文件级明细，包含 `name`、`rule_count`、`group_id`、`group_name`、`content`。
   - `merged_content`：按照运行时加载顺序拼接后的完整规则内容。
   - `unavailable_reason`：快照无法获取时的原因。

@@ -98,7 +98,7 @@ Apple FSEvents 是目录层级变化通知，适合在设备已挂载后观察�
 
 架构保留 `ExternalVolumeProvider` 抽象，避免后续支持 Linux/Windows 时重写 ASR 任务、导入和 UI 主链路。但首版 V1 的交付边界只覆盖 macOS：
 
-- V1 必须实现 macOS Disk Arbitration 事件源。当前实现通过 `diskutil activity` 订阅系统 Disk Arbitration 事件流，覆盖 `DiskAppeared`、`DescriptionChanged` 和 `DiskDisappeared`，事件只做 debounce 后入队，同步仍复用统一导入逻辑。
+- V1 必须实现 macOS Disk Arbitration 事件源。当前实现尚未接入 Disk Arbitration 事件流，仅通过同步扫描 `/Volumes`（配合 `diskutil info` 解析 UUID/external/read-only）枚举已挂载卷，并依赖配置页轮询和手动 `POST /external-import/run` 触发同步（planned, not yet shipped as of 2026-06-16：事件订阅、debounce 入队、`ExternalDeviceImportManager`）。
 - V1 不做 `PollingVolumeProvider` 后台定时扫描，避免设备长期连接时反复遍历和对比；Bifrost 启动前已挂载、事件监听权限/环境不可用等情况通过配置页确认和手动导入入口处理。
 - V1 必须在 macOS 上完整通过真实 disk image 或真实外接设备验证，不能把监听、确认弹窗、导入、去重、异常恢复中的任一关键路径留到后续。
 - Linux/Windows 只保留 provider 接口和设计说明，不作为 V1 可用能力宣传，也不作为 V1 验收门槛。
@@ -208,7 +208,7 @@ pub(crate) struct AsrExternalDeviceBinding {
     pub volume_uuid: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub device_identifier: Option<String>,
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include_globs: Vec<String>,
@@ -219,7 +219,7 @@ pub(crate) struct AsrExternalDeviceBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_import_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_status: Option<AsrExternalImportStatus>,
+    pub last_status: Option<String>,
 }
 ```
 
@@ -281,6 +281,7 @@ pub(crate) struct AsrExternalImportPolicy {
 pub(crate) struct AsrExternalImportStore {
     pub version: u32,
     pub devices: BTreeMap<String, AsrExternalDeviceState>,
+    pub runs: Vec<AsrExternalImportRunSummary>,
 }
 
 pub(crate) struct AsrExternalDeviceState {
@@ -288,9 +289,9 @@ pub(crate) struct AsrExternalDeviceState {
     pub last_seen_mount_path: Option<PathBuf>,
     pub last_scan_at_ms: Option<u64>,
     pub last_import_at_ms: Option<u64>,
+    pub last_status: Option<String>,
     pub last_error: Option<String>,
     pub files: BTreeMap<String, AsrImportedFileRecord>,
-    pub runs: Vec<AsrExternalImportRunSummary>,
 }
 
 pub(crate) struct AsrImportedFileRecord {
@@ -301,8 +302,9 @@ pub(crate) struct AsrImportedFileRecord {
     pub sample_fingerprint: Option<String>,
     pub target_path: PathBuf,
     pub target_size: u64,
+    pub first_seen_at_ms: Option<u64>,
     pub imported_at_ms: u64,
-    pub status: AsrExternalImportedFileStatus,
+    pub status: String,
     pub error: Option<String>,
 }
 
@@ -319,6 +321,9 @@ pub(crate) struct AsrContentHashRecord {
     pub canonical_source_key: String,
     pub canonical_source_path: PathBuf,
     pub transcript_artifacts: AsrTranscriptArtifacts,
+    pub model: String,
+    pub language: String,
+    pub runtime_strategy: AsrRuntimeStrategy,
     pub completed_at_ms: u64,
     pub duplicate_count: u64,
 }
@@ -482,35 +487,39 @@ target_dir/.bifrost-import-<uuid>.part
 ### 新组件
 
 ```text
-ExternalDeviceImportManager
+ExternalDeviceImportManager (planned, not yet shipped as of 2026-06-16)
   - load tasks with external_devices/import_policy
   - start providers
   - maintain per-task queue
   - debounce device events
   - run event/manual reconcile
 
-ExternalVolumeProvider
+ExternalVolumeProvider (planned, not yet shipped as of 2026-06-16)
   - list_mounted_volumes()
   - watch_volume_events()
 
-MacDiskArbitrationProvider
+MacDiskArbitrationProvider (planned, not yet shipped as of 2026-06-16)
 ```
+
+当前实现：`list_external_volumes()` 同步读取 `/Volumes`、对每个卷调用 `diskutil info` 提取 `volume_uuid/device_identifier/external/read_only`，并以 `df -k` 计算 `available_bytes`。导入由 `start_external_import_background()` 在独立线程内调用 `sync_external_devices_for_task()` 执行；尚无事件驱动 manager 或 provider trait。
 
 ### 触发入口
 
-- Bifrost admin/server 启动：启动 ASR scheduler 时同时启动 import manager。
-- Provider 事件：设备 appeared/mounted/description changed/disappeared。
-- 手动入口：`POST /api/asr/tasks/{task_id}/external-import/run`。
+- Bifrost admin/server 启动：启动 ASR scheduler 时同时启动 import manager（planned, not yet shipped as of 2026-06-16）。
+- Provider 事件：设备 appeared/mounted/description changed/disappeared（planned, not yet shipped as of 2026-06-16）。
+- 手动入口：`POST /api/asr/tasks/{task_id}/external-import/run`（已实现，当前忽略 `device_name`，始终对该任务全部 enabled binding 执行 reconcile，并以 `trigger="manual_api"` 记录）。
 - ASR run 不隐式扫描外接设备；已经导入到目标目录的文件按普通目录任务处理。
 
 ### 去抖与排队
 
-设备刚插入时可能连续出现 appeared、description changed、mounted 等多个事件。处理规则：
+设备刚插入时可能连续出现 appeared、description changed、mounted 等多个事件。处理规则（事件驱动部分 planned, not yet shipped as of 2026-06-16）：
 
 - 事件按 `(task_id, binding_name, mount_path)` debounce 2 秒。
 - 同一任务已有 import run 时，新事件只设置 `rerun_requested=true`，当前 run 结束后再跑一次 reconcile。
 - 导入完成且 `auto_run_after_import=true` 且 `imported_count > 0` 时，触发现有 ASR task run。
 - 如果 task 当前 ASR 正在 running，不抢占；只记录 pending import 或等待本轮 ASR 后再触发。
+
+当前实现：`start_external_import_background()` 通过进程内单 task 互斥（“ASR external import is already running”）拒绝并发；尚无事件 debounce、rerun_requested 标记或 ASR running 抢占协调。
 
 ## API 设计
 
@@ -521,14 +530,14 @@ DELETE /api/asr/tasks/{task_id}?confirm_name=<task_name>
 GET  /api/asr/tasks/{task_id}/external-import
 PUT  /api/asr/tasks/{task_id}/external-import
 POST /api/asr/tasks/{task_id}/external-import/run
-GET  /api/asr/tasks/{task_id}/external-import/runs
+GET  /api/asr/tasks/{task_id}/external-import/runs  (planned, not yet shipped as of 2026-06-16; recent runs 当前直接由 GET external-import 的 `runs` 字段返回)
 ```
 
 说明：
 
 - `GET /api/asr/external-volumes` 返回当前 mounted volumes：`name`、`mount_path`、`volume_uuid`、`device_identifier`、`kind`、`read_only`、`available_bytes`。
 - `PUT` 保存 bindings 和 policy。
-- `run` 支持 `device_name` 可选参数；不传则导入所有绑定且当前已连接的设备。
+- `run` 当前实现忽略请求参数，始终对该任务全部 enabled binding 执行一次 reconcile；`device_name` 单设备触发 planned, not yet shipped as of 2026-06-16。
 - `run` 必须后台执行：接口只负责创建导入 run、写入 `current_run` 进度并立即返回 HTTP 202，不能在请求处理链路中等待外接设备扫描和大文件复制完成。
 - 后台导入必须运行在独立阻塞任务/worker 中，文件遍历、读取、内容 hash 计算和复制不得占住 Admin API 主请求路径；完整文件 hash 计算还必须通过全局内容哈希队列串行化。导入期间 `GET /api/asr/tasks`、任务详情和状态接口必须持续响应。
 - `GET /api/asr/tasks/{task_id}/external-import` 返回 `current_run`：`run_id`、`status`、`current_device`、`current_file`、`current_file_size`、`current_file_copied_bytes`、`processed_files`、`total_files_discovered`、`imported/skipped/processed_record_skipped/failed`、`message`。如果服务重启导致 `current_run.status=importing` 但本进程无对应后台任务，状态归一为 `failed` 并提示用户重新导入。
@@ -660,7 +669,7 @@ DELETE /api/asr/tasks/{task_id}?confirm_name=<urlencoded task.name>
 
 ## CLI 设计
 
-后续 CLI 扩展：
+后续 CLI 扩展（planned, not yet shipped as of 2026-06-16，当前 `bifrost-cli` 未提供任何 `external-volumes` / `external-import` 子命令）：
 
 ```text
 bifrost ai asr task external-volumes
@@ -694,17 +703,17 @@ CLI 和 WebUI 都调用同一 Admin API，不直接扫描设备。
 
 ### Phase 1：V1 macOS 完整能力
 
-- 新增数据结构和持久化。
-- 新增导入差异算法、路径安全、原子复制、状态文件和内容 hash index。
-- 设备事件和手动入口同步已连接设备。
+- 新增数据结构和持久化（已实现）。
+- 新增导入差异算法、路径安全、原子复制、状态文件和内容 hash index（已实现）。
+- 手动入口同步已连接设备（已实现）；设备事件驱动同步 planned, not yet shipped as of 2026-06-16。
 - ASR 进入模型前只读取已有 source_key、content hash、canonical audio hash 和产物索引；缺少精确 hash 时不在同步路径补算，命中已完成转写产物时才跳过重复模型推理。
 - 新增手动 API 和单元测试。
-- 新增 Disk Arbitration provider。
-- 事件 debounce 入队。
+- 新增 Disk Arbitration provider（planned, not yet shipped as of 2026-06-16）。
+- 事件 debounce 入队（planned, not yet shipped as of 2026-06-16）。
 - 创建/编辑任务支持绑定设备。
 - 任务详情 External Import tab。
 - WebUI 展示连接状态、任务列表 `Import External` 手动导入按钮、确认弹窗、最近导入结果和错误状态。
-- CLI external-import 子命令。
+- CLI external-import 子命令（planned, not yet shipped as of 2026-06-16）。
 - E2E 覆盖 API、CLI、WebUI。
 - human_tests 用 disk image 或真实 U 盘验证目录结构保持、重复连接去重、内容哈希去重、半写入文件延迟、同名冲突和设备断开恢复。
 

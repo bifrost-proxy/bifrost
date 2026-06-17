@@ -52,14 +52,14 @@ Rules 页面顶部的 Dynamic Island 用于展示当前生效规则数量、规�
   - 展开 Merged Rules，点击右上角复制按钮。
   - 读取浏览器剪贴板，断言内容等于页面展示的 merged rules 文本。
 - `crates/bifrost-e2e/src/tests/group_rules.rs`
-  - `group_rules_active_summary_uses_uncached_local_group_dirs`：未缓存 group id 且没有 sync manager 时，active summary 仍返回本地启用的 Group 规则。
+  - `group_rules_active_summary_uses_local_group_fallback_without_login`：未登录（无 active sync session）且没有缓存 group id 时，active summary 仍通过本地目录名兜底返回本地启用的 Group 规则。
   - `group_rules_active_summary_survives_remote_cache_resolution_failure`：有 sync manager 但登录态/远端 group cache 解析失败或请求卡住时，active summary 立即返回本地 Group 规则、不会删除本地目录，并在失败或短超时后清理 retry 标记，避免临时网络抖动后永久不再重试。
   - CI 的 `E2E Runner` 必须启动仓库内置 `packages/bifrost-sync-server` 测试服务，注册测试用户后通过 `BIFROST_E2E_SYNC_BASE_URL` / `BIFROST_E2E_SYNC_TOKEN` 注入 Rust E2E，禁止让 sync-backed 用例回落到默认生产远端地址。
   - `group_rules_rapid_toggle_keeps_active_summary_and_badge_consistent`：连续启停同一 Group 规则时，active summary 与 Badge cache 必须在限定时间内收敛到相同状态。
   - `group_rules_deeplink_accepts_group_name`：`/api/group-rules/{group_name}` list/detail/enable 均可用，覆盖 Badge/Rules 深链传 group name 的路径。
   - `group_rules_logout_keeps_group_id_navigation_cache`：退出登录后 active summary / Badge / 代理运行时不消费 Group 规则，但 `.group_cache.json` 仍保留历史 name/id 反向映射，重新登录后 active summary 与 Badge 点击恢复使用真实 group id，避免重新登录后点击跳到 `group={group_name}`。
-  - `group_rules_active_summary_skips_group_rules_without_login`：未登录时本地启用的 Group 规则不进入 active summary。
-  - `resolve_valid_group_dirs_skips_local_dirs_without_sync_session` / `resolve_valid_group_dirs_skips_cached_and_uncached_local_dirs_without_sync_session`：代理启动与 hot reload 在未登录时不消费本地 Group 目录。
+  - `resolve_valid_group_dirs_skips_local_dirs_without_sync_session` / `resolve_valid_group_dirs_skips_cached_and_uncached_local_dirs_without_sync_session`：代理启动与 hot reload 在未登录时不消费本地 Group 目录（resolver 层登录态门禁，对应 `crates/bifrost-cli/src/commands/start.rs` 中的 `resolve_valid_group_dirs`）。
+  - 注：原计划新增的 `group_rules_active_summary_skips_group_rules_without_login`（未登录时 active summary 也跳过本地 Group 规则）（planned, not yet shipped as of 2026-06-17）——当前实现中 active summary 仍通过本地目录名兜底返回未登录态下的本地 Group 规则，登录态门禁只作用在代理 resolver 层。
 
 ### 真实场景测试
 

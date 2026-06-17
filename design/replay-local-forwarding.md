@@ -91,7 +91,7 @@ Replay 规则重放还需要和普通代理保持同一套规则语义：
 ### Human Tests
 
 - 更新 `human_tests/webui-replay.md`
-  - 更新 TC-WRP-23：Replay HTTPS API + localhost 转发规则回归
+  - 更新 TC-WRP-24：Replay HTTPS API + localhost 转发规则回归（原 TC-WRP-23 现已为响应体代码高亮用例，本次回归落在 TC-WRP-24）
   - 增加完整 nextoncall PPE 规则：API passthrough 命中后不再被域名级 localhost 规则覆盖，且 PPE headers 已实际注入。
 
 ## 校验要求

@@ -1,6 +1,13 @@
 # Remote Invoke Shell Access 只读 ID 方案
 
-> 状态：已实现 | 更新时间：2026-04-24
+> 状态：已实现 | 更新时间：2026-06-16
+>
+> 当前实现校验（2026-06-16）：
+> - `web/src/pages/Settings/tabs/RemoteInvokeTab.tsx` 中已有 profile 与 policy 的 `id` 输入框均带 `readOnly`（profile 见 L3513、policy 见 L3788）。
+> - 新建条目走顶层 `nextShellItemId(prefix, existingIds)`（L343-L354），按 `profile-N` / `policy-N` 递增并跳过已存在 ID。
+> - 文件中已不存在 `slug` / `slugify` 相关逻辑，确认旧的边输入边规范化已删除。
+> - E2E 回归 `web/tests/ui/admin-settings.spec.ts`（用例名「Settings Remote Invoke 的 Shell Access 仅允许修改名称，Policy/Profile ID 为只读」，L1623 起）验证 `Manage Shell Access` 弹窗里预置的 `readonly-profile` / `readonly-policy` 输入框带 `readonly`，且仅 name 字段可改并保存。
+> - 真实场景用例 `human_tests/remote-invoke.md` 中的 TC-RI-回归-127 已记录 ✅ PASS（详见同文件 TC-RI-回归-127 执行结果章节）。
 
 ## 背景
 

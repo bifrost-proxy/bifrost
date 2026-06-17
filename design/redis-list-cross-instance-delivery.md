@@ -1,8 +1,12 @@
 # 基于 Redis List 的跨实例 SSE 事件投递方案
 
+> **状态（2026-06-16）**：本方案整体 **(planned, not yet shipped as of 2026-06-16)**。原文以 `bifrost-server-v4/` 为目标实现仓位，但该目录已不在仓库中——Remote Invoke Relay 已迁移到 `packages/bifrost-sync-server/`，当前是单实例 in-memory 实现（详见第七节「当前代码现状」）。本节描述的多实例 Relay 部署形态仍是规划目标，并未在生产中落地。
+
 ## 一、问题背景
 
 ### 当前架构
+
+> (planned, not yet shipped as of 2026-06-16) 下述「多实例 Relay + 跨实例投递」是设计前提，而非当前部署形态。
 
 bifrost-server-v4 (Relay) 多实例部署在负载均衡后面。SSE 事件投递依赖三条通道：
 
@@ -227,10 +231,10 @@ export interface Redis {
 
 | 文件 | 改动类型 | 改动说明 |
 |---|---|---|
-| `bifrost-server-v4/app/helper/remoteInvokeSse.ts` | **核心重构** | 替换投递机制，新增队列工具函数，删除 HTTP 投递代码 |
-| `bifrost-server-v4/app/routes/remoteInvoke.ts` | 删除路由 | 移除 `/internal/ri-push` 路由和相关 import |
-| `bifrost-server-v4/app/router.ts` | 删除路由 | 移除 `/internal/ri-push` 路由和相关 import |
-| `bifrost-server-v4/app/service/remoteInvoke.ts` | 无需修改 | Service 层调用的 `pushToClient` 等接口签名不变 |
+| `bifrost-server-v4/app/helper/remoteInvokeSse.ts` | **核心重构** *(planned, not yet shipped as of 2026-06-16；该路径已不存在；当前对应实现位于 `packages/bifrost-sync-server/src/remote-invoke/sse.ts`)* | 替换投递机制，新增队列工具函数，删除 HTTP 投递代码 |
+| `bifrost-server-v4/app/routes/remoteInvoke.ts` | 删除路由 *(planned, not yet shipped as of 2026-06-16；该路径已不存在)* | 移除 `/internal/ri-push` 路由和相关 import |
+| `bifrost-server-v4/app/router.ts` | 删除路由 *(planned, not yet shipped as of 2026-06-16；该路径已不存在)* | 移除 `/internal/ri-push` 路由和相关 import |
+| `bifrost-server-v4/app/service/remoteInvoke.ts` | 无需修改 *(planned, not yet shipped as of 2026-06-16；该路径已不存在)* | Service 层调用的 `pushToClient` 等接口签名不变 |
 
 ### 不影响的部分
 
@@ -270,28 +274,39 @@ export interface Redis {
 
 ## 七、实现状态
 
-✅ **已完成** (2026-04-20)
+**(planned, not yet shipped as of 2026-06-16)**
+
+### 当前代码现状（核对 2026-06-16）
+
+- 原文中引用的 `bifrost-server-v4/` 目录已不存在于本仓库。Remote Invoke 的 Relay 实现已迁移到 `packages/bifrost-sync-server/`，SSE 投递入口位于 `packages/bifrost-sync-server/src/remote-invoke/sse.ts`。
+- 该实现是**单实例内存版本**：所有 `clientStreams` / `callerStreams` / `pairingWatchers` 都是进程内 `Map`，没有引入 Redis（仓库 `packages/**/*.ts` 范围内 `grep -i redis` 0 命中）。
+- 因此本设计文档中所有「跨实例」相关结构都未落地：没有 `Redis` interface、没有 `rpush/expire/eval`、没有 `pushToQueue/drainQueue/startQueuePoller/stopQueuePoller`、没有 `ri:mq:*` Key、没有定时轮询。
+- 同样，文档中列为「需要删除」的旧跨实例代码（`httpPost` / `remoteDeliver` / `handleInternalPush` / `verifyInternalSecret` / `INSTANCE_ADDR` / `INTERNAL_SECRET` / `/internal/ri-push` 路由）在当前 sync-server 版本中**本来就不存在**，无需清理。
+- 与本设计预期相反，`callerEventBuffers`（caller 事件本地缓冲 Map）目前仍然存在并被使用，见 `sse.ts:7,104,111,120,124,129`；只是它现在只是一个进程内 fallback buffer，不再与 Redis String 双写。
+- `pushToCallerStream` / `pushToPairingWatcher` 在「目标 SSE 还没连上」时会把事件追加到本地 buffer Map（`callerEventBuffers` / `pairingEventBuffers`），等对应 `register*` 调用时再 flush 出去；这是单实例下对原方案「Redis List 充当缓冲」的等价简化版本。
 
 ### 实现记录
 
 | Step | 状态 | 说明 |
 |------|------|------|
-| Step 1: 扩展 Redis 接口 | ✅ | 新增 `rpush`, `expire`, `eval` |
-| Step 2: 队列工具函数 | ✅ | `pushToQueue`, `drainQueue`, `startQueuePoller`, `stopQueuePoller` |
-| Step 3: 改造 pushToClient | ✅ | 本地快速路径 + Redis List 队列 |
-| Step 4: 改造 pushToPairingWatcher | ✅ | 本地快速路径 + Redis List 队列 |
-| Step 5: 改造 pushToCallerStream | ✅ | 本地快速路径 + Redis List 队列，删除旧 callerEventBuffers |
-| Step 6: 注册函数启动轮询 | ✅ | 三个 register 函数均启动 queuePoller |
-| Step 7: 注销函数停止轮询 | ✅ | 三个 unregister 函数均停止 queuePoller |
-| Step 8: 删除旧代码 | ✅ | httpPost、remoteDeliver、handleInternalPush 等全部清理 |
-| Step 9: bifrost-sync-server | ✅ | 单实例无需改动 |
+| Step 1: 扩展 Redis 接口 | (planned, not yet shipped as of 2026-06-16) | sync-server 未引入 Redis，无 `Redis` interface |
+| Step 2: 队列工具函数 | (planned, not yet shipped as of 2026-06-16) | 无 `pushToQueue` / `drainQueue` / `startQueuePoller` / `stopQueuePoller` |
+| Step 3: 改造 pushToClient | (planned, not yet shipped as of 2026-06-16) | 当前 `pushToClient` 仅查本实例 `clientStreams` Map，目标不在本实例直接返回 false |
+| Step 4: 改造 pushToPairingWatcher | (planned, not yet shipped as of 2026-06-16) | 未连上时退回本地 `pairingEventBuffers` Map，无 Redis |
+| Step 5: 改造 pushToCallerStream | (planned, not yet shipped as of 2026-06-16) | 未连上时退回本地 `callerEventBuffers` Map，无 Redis；旧 buffer 未删除 |
+| Step 6: 注册函数启动轮询 | (planned, not yet shipped as of 2026-06-16) | `register*` 函数不启动任何 queue poller |
+| Step 7: 注销函数停止轮询 | (planned, not yet shipped as of 2026-06-16) | `unregister*` 函数不涉及 queue poller |
+| Step 8: 删除旧代码 | 不适用 | 列举的旧跨实例符号在迁移后的 sync-server 中本来就不存在 |
+| Step 9: bifrost-sync-server | 部分 | 维持单实例 in-memory 投递，但本方案中的 Redis 改造尚未落地 |
 
 ### 验证结果
 
+本方案尚未实现，下列测试用例均未执行：
+
 | 测试用例 | 结果 | 说明 |
 |----------|------|------|
-| TypeScript 编译 | ✅ | `npx tsc --noEmit` 通过 |
-| cargo test --workspace | ✅ | 1800+ 测试全部通过 |
-| TC-RI-回归-98 | ✅ | 配对审批通知通过 Redis List 成功投递到 Caller |
-| TC-RI-回归-99 | ✅ | call_open 事件通过 Redis List 成功投递到执行端，3 次执行均成功 |
-| TC-RI-回归-100 | ✅ | frame/exit 事件通过 Redis List 成功投递到 Caller，traffic list/search/status 均正常 |
+| TypeScript 编译 | (planned, not yet shipped as of 2026-06-16) | 当前 `sse.ts` 可正常编译，但与本方案无关 |
+| cargo test --workspace | (planned, not yet shipped as of 2026-06-16) | 与本设计无直接关系 |
+| TC-RI-回归-98 | (planned, not yet shipped as of 2026-06-16) | 多实例 Relay 路径未实现，无法回归 |
+| TC-RI-回归-99 | (planned, not yet shipped as of 2026-06-16) | 同上 |
+| TC-RI-回归-100 | (planned, not yet shipped as of 2026-06-16) | 同上 |

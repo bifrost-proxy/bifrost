@@ -63,13 +63,17 @@ bifrost port destroy 18888
 
 ```rust
 pub struct TemporaryPortBinding {
-    pub id: String,
+    // Note (2026-06-17): the shipped struct in `crates/bifrost-admin/src/temp_ports.rs`
+    // omits `id` and `inherit_values`; values are always inherited from shared storage,
+    // and the port number itself is used as the binding key. The fields below are kept
+    // here as the original design surface.
+    pub id: String, // (planned, not yet shipped as of 2026-06-17)
     pub port: u16,
     pub host: String,
     pub name: Option<String>,
     pub status: TemporaryPortStatus,
     pub rule_refs: Vec<RuleSetRef>,
-    pub inherit_values: bool,
+    pub inherit_values: bool, // (planned, not yet shipped as of 2026-06-17)
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -95,7 +99,7 @@ pub enum RuleSetRef {
 
 `RuleFile` 在主进程内按路径读取并解析，错误必须包含文件路径和底层 IO/解析原因；`InlineRule` 直接解析请求体中的规则原文，错误必须包含可定位的行列和 parser message。二者只存在于临时端口 binding 内存对象中，不持久化为本地规则文件。
 
-`inherit_values` 默认 `true`，表示临时端口仍使用共享数据目录中的 values 和规则文件内 inline values。它不表示继承主端口规则集合。
+`inherit_values` 默认 `true`，表示临时端口仍使用共享数据目录中的 values 和规则文件内 inline values。它不表示继承主端口规则集合。当前实现（2026-06-17）尚未暴露这个开关（planned, not yet shipped as of 2026-06-17），临时端口始终继承共享 values。
 
 ### CLI 命令
 
@@ -176,7 +180,7 @@ main ProxyServer :9900
 
 关键点是规则选择隔离、数据共享：临时端口不调用“加载全部已启用规则”的 `load_stored_rules(...)`，也不能在 `EnabledGlobalRules` 结果上追加端口规则；它必须调用新的 `load_bound_rules(rule_refs)`，只从同一份规则存储中取被绑定的规则。
 
-因此实现上推荐把现有“读取全局 enabled 规则”的逻辑也收敛成一个 `RuleSelection`：
+因此实现上推荐把现有“读取全局 enabled 规则”的逻辑也收敛成一个 `RuleSelection`（planned, not yet shipped as of 2026-06-17）：
 
 ```rust
 pub enum RuleSelection {
@@ -185,7 +189,7 @@ pub enum RuleSelection {
 }
 ```
 
-主端口使用 `EnabledGlobalRules`，临时端口使用 `ExplicitRefs(...)`。两者共享同一个 loader、parser、values 合并和 resolver 更新流程，只是选择规则文件的入口不同。
+主端口使用 `EnabledGlobalRules`，临时端口使用 `ExplicitRefs(...)`。两者共享同一个 loader、parser、values 合并和 resolver 更新流程，只是选择规则文件的入口不同。当前实现里主端口走 `load_stored_rules(...)`，临时端口走 `CliTemporaryPortManager::load_bound_rules(...)`，两条路径尚未收敛到统一枚举。
 
 ## 规则引用解析
 
@@ -246,14 +250,14 @@ No running Bifrost proxy found. Start the main proxy first:
 - 减少与 daemon pid/runtime metadata 的兼容面。
 - 注意：不落盘的是“端口绑定关系”，不是规则、values、scripts、证书等共享数据。这些仍然全部来自并保存在当前 `BIFROST_DATA_DIR`。
 
-后续若需要可恢复，再增加：
+后续若需要可恢复，再增加（planned, not yet shipped as of 2026-06-17）：
 
 ```bash
 bifrost port bind --port 18888 --rule local-dev --persist
 bifrost port restore
 ```
 
-持久化文件可放在 `data_dir/runtime/temp_ports.json`，只保存端口到规则引用的映射，与规则文件分离。
+持久化文件可放在 `data_dir/runtime/temp_ports.json`，只保存端口到规则引用的映射，与规则文件分离。当前实现只在主进程内存中维护临时端口绑定，没有 `--persist` 标志，也没有 `port restore` 子命令。
 
 ## Web UI 范围
 

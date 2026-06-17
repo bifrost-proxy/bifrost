@@ -106,12 +106,8 @@ Bifrost 使用 `.memory_state.db` 存储 Phase 2 任务状态：
 
 仍未完全对齐，后续可继续补：
 
-- memory root git baseline：Bifrost 当前没有在 `agent/memory/` 下初始化 git，也没有 `phase2_workspace_diff.md`。
-- per-thread `ThreadMemoryMode`：Bifrost 当前是配置级开关，没有 thread metadata `enabled/disabled/polluted`。
-- `disable_on_external_context` 的污染语义：字段存在，但尚未在 MCP/web/search 等外部上下文进入时自动禁用该 session 的 memory generation。
-- memory citation 解析与隐藏：Bifrost 注入 `<oai-mem-citation>` 要求，但还没有 citation parser/telemetry/UI 消费链路。
-- usage-based retention：Bifrost 当前不维护 `last_usage/use_count`，`max_unused_days` 等字段尚未驱动 pruning；Phase 2 已支持基于最近 N 条 raw/rollout 输入的 bounded selection。
-- rate-limit gating：字段可配置，但自动抽取尚未按 `min_rate_limit_remaining_percent` 跳过低余量窗口。
+- memory root git baseline：Bifrost 当前没有在 `agent/memory/` 下初始化 git，也没有 `phase2_workspace_diff.md`（planned, not yet shipped as of 2026-06-16）。
+- citation 解析的 UI 消费：`memory_citations.rs` + `memory/citation_consumer.rs` 已经把 `<oai-mem-citation>` 解析并喂给 `memory_guard`/`usage_tracking` 驱动 retention；面向终端用户隐藏 citation 标签的前端 UI 链路尚未落地（planned, not yet shipped as of 2026-06-16）。
 
 ## 测试方案
 
@@ -148,7 +144,7 @@ E2E 测试：
 
 ### Phase 2 锁改用 `fs2` 文件锁
 
-- `.phase2.lock` 不再记录 pid/启动时间也不再做 staleness 心跳判断。
+- `.phase2.lock` 内仍 best-effort 写入一行 `pid=<n> acquired_at=<ts>` 文本仅供人肉调试，互斥不再依赖该内容，也不再做 staleness 心跳判断。
 - 运行态使用 `fs2::FileExt::try_lock_exclusive`；进程崩溃后 OS 会自动释放，避免旧版“pid 号复用”误判。
 - 长摘要 append/轮转等共享写路径通过同一把 `agent/memory/.phase2.lock` 的 `lock_exclusive` 串行化，`append_line` 显式 `flush + sync_data + unlock`，保证崩溃后内容落盘且锁被释放。
 
@@ -187,9 +183,9 @@ E2E 测试：
 
 ### Telemetry (`.telemetry.jsonl`)
 
-- 事件以 JSON Lines 形式落盘到 `agent/memory/.telemetry.jsonl`，单行格式 `{ts_unix,event,value,success,detail}`。
-- 关键事件：`memory_extract_started/finished/timeout`、`phase2_started/finished/skipped/locked/circuit_open`、`memory_skill_shadow_refused`、`prune_completed`、`export_archive`、`import_archive`、`replace_memory`、`forget_memory`。
-- 写入前抢 `.phase2.lock`，确保并发 session 的事件不会交叉撕裂。
+- 事件以 JSON Lines 形式落盘到 `agent/memory/.telemetry.jsonl`，单行格式 `{ts,event,value,success,detail}`（`ts` 为 unix 秒）。
+- 关键事件：`memory_extract_started/finished/timeout`、`phase2_started/finished/skipped/locked/circuit_open`、`memory_skill_shadow_refused`、`retention.*`、`forget`、`replace_memory`、`export_archive`、`import_archive` 等。
+- 写入时对 `.telemetry.jsonl` 自身加 `fs2::lock_exclusive` 串行化，确保并发 session 的事件不会交叉撕裂；不依赖 `.phase2.lock`。
 - 纯本地文件，不外发。
 
 ### 全量导出/导入
@@ -221,10 +217,14 @@ const MEMORY_SKILLS_SUBDIR: &str = "_memory";
 
 已补齐的标准行为：
 
-- usage-based / age-based retention 已落地（`max_unused_days`、`max_rollout_age_days`、`max_rollouts_per_startup`）。
+- usage-based / age-based retention 已落地（`max_unused_days`、`max_rollout_age_days`、`max_rollouts_per_startup`），`memory/usage_tracking.rs` + state DB 的 `rollouts.usage_count`/`last_usage` 字段驱动 pruning。
 - memory skills 写路径（与用户 skills 隔离）。
 - 观测维度（通过本地 `.telemetry.jsonl`，不依赖数据库 telemetry）。
 - 稳健 JSON 解析与抽取熔断。
+- per-thread `ThreadMemoryMode`（`Enabled`/`Disabled`/`Polluted { reason }`）由 `memory/pollution.rs::PollutionDetector` 维护，受 `disable_on_external_context` 控制：当 MCP/web/search 等外部上下文进入时自动把该 session 置为 `Polluted`，extract 入口 `auto_extract_after_turn_with_pollution_check` 直接短路。
+- citation 解析与 usage 上报：`memory_citations.rs` 解析 `<oai-mem-citation>` 块，`memory/citation_consumer.rs` 把命中的 rollout/skill 喂给 `MemoryUsageRecord` 与 `state_db::record_usage`。
+- rate-limit gating：`memory_guard::rate_limit_ok` 按 `min_rate_limit_remaining_percent` 判断当前 rate-limit 余量，不足时跳过本轮 Phase 1/Phase 2 任务。
+- state DB 扩展：`.memory_state.db` 除 `phase2_state` 外，已新增 `rollouts`（含 `phase1_status`/`ownership_token`/`usage_count`/`last_usage`）和 `leases`（DB-backed lease/heartbeat）；DB-backed `LeaseManager` 与文件锁 `Phase2LockGuard` 并存。
 
 仍保持不实现（故意选择）：
 

@@ -22,7 +22,7 @@ RemoteFileWrite → 只允许 file (读+写)
 
 | 字段 | 作用 | 可选值 |
 |------|------|--------|
-| `grant_scope` | 控制 shell 访问级别 | `remote_query` / `remote_shell_exec` / `remote_shell_interactive` |
+| `grant_scope` | 控制 shell / 查询 / 电源 / IM 网关访问级别 | `remote_query` / `remote_shell_exec` / `remote_shell_interactive` / `remote_power_mgmt` / `remote_im_gateway` |
 | `file_access` | 控制文件访问级别 | `none`（默认）/ `read` / `read_write` |
 
 两个字段**独立设置、独立检查**，一个 grant 可以同时拥有 `remote_shell_interactive` + `file_access: read_write`。

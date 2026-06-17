@@ -30,3 +30,9 @@ SSE Messages 面板在 request/response 展开与折叠切换时会丢失实时�
 ## 验证方式
 - 展开/折叠 request/response 面板时，Messages 流数据不丢失
 - 切换 Response 的 Tab 后返回 Messages，流数据仍在持续追加
+
+## 现状对照 (2026-06-17)
+方案已落地，主要实现位置：
+- `web/src/components/TrafficDetail/index.tsx`：统一使用垂直 `Splitter` 渲染 Request/Response，折叠态通过 `requestPanelProps`/`responsePanelProps` 设置 `size` 并 `resizable: false`；Response Panel `keepAliveTabs` 包含 `Messages`。
+- `web/src/components/TrafficDetail/Panel/index.tsx`：基于 `keepAliveTabs` 集合保活对应 Tab 内容，未激活时仅隐藏不卸载。
+- `web/src/pages/Replay/components/MessagesPanel.tsx` 与 `ResponsePanel.tsx`：Replay 流程下 `MessagesPanel` 从 `useReplayStore` 读取 `sseEvents`/`wsMessages`，状态由 store 持有，组件复挂载不会清空。
