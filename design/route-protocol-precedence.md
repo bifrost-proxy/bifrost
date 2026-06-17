@@ -15,6 +15,7 @@
 - 除 `xhost` 覆盖 `host` 外，后续命中的路由协议不能覆盖已经选中的 upstream，避免域名级 `https` 兜底覆盖路径级 `host` 排除规则。
 - 后续命中的其他路由协议仍进入 `resolved_rules.rules` 诊断列表，但不再覆盖 `host` / `host_protocol`。
 - 同步更新 bifrost-e2e 中的同构转换逻辑，避免 E2E runner 和生产路径行为不一致。
+- 实现入口：`crates/bifrost-cli/src/parsing/rules.rs` 中的 `should_update_route_target`（rules.rs:793）守门，配合 `Protocol::Host|XHost|Http|Https|Ws|Wss` 分支（rules.rs:490 起）写入 `result.host` / `result.host_protocol`；`crates/bifrost-e2e/src/proxy.rs` 中复刻同名函数（proxy.rs:53）与协议分支（proxy.rs:296/491/495/499/503/507）。`ProxyResolvedRules.host_protocol` 字段定义在 `crates/bifrost-proxy/src/server.rs:434`。
 
 ## 依赖项
 
@@ -24,12 +25,12 @@
 
 ## 测试方案
 
-- 单元测试：覆盖 `Host` 路径规则与 `Https` 域名兜底同时命中时，最终 upstream 保持优先级最高的路径规则。
-- 单元测试：覆盖路径规则未命中时，域名级 `Https` 兜底仍正常生效。
-- 单元测试：覆盖 `xhost` 仍可覆盖同 pattern 的 `host`，避免破坏既有路由语义。
-- E2E 测试：新增 `routing_path_host_vs_domain_https`，使用本地 mock server 验证路径级 `host` 规则不会被域名级 `https` 兜底覆盖。
-- E2E 测试：复跑 `routing_xhost_priority` 与 `test_xhost_over_host`，确认 `xhost` 优先级不回退。
-- human_tests：在 `human_tests/proxy-rules-advanced.md` 增加路由协议跨协议优先级回归用例，并按文档执行。
+- 单元测试：覆盖 `Host` 路径规则与 `Https` 域名兜底同时命中时，最终 upstream 保持优先级最高的路径规则。已落地为 `test_merge_keeps_first_route_target_across_protocols`（`crates/bifrost-cli/src/parsing/rules.rs:1232`）。
+- 单元测试：覆盖路径规则未命中时，域名级 `Https` 兜底仍正常生效（覆盖在同文件的 `test_merge_*` 系列回归中，含纯 `Https` 兜底用例）。
+- 单元测试：覆盖 `xhost` 仍可覆盖同 pattern 的 `host`，避免破坏既有路由语义。已落地为 `test_merge_keeps_xhost_priority_over_host`（`crates/bifrost-cli/src/parsing/rules.rs:1281`）。
+- E2E 测试：新增 `routing_path_host_vs_domain_https`，使用本地 mock server 验证路径级 `host` 规则不会被域名级 `https` 兜底覆盖。已注册于 `crates/bifrost-e2e/src/tests/routing.rs:91`，实现位于同文件 `routing.rs:456`。
+- E2E 测试：复跑 `routing_xhost_priority`（`crates/bifrost-e2e/src/tests/routing.rs:37/251`）与 `test_xhost_over_host`（`crates/bifrost-e2e/src/tests/rule_priority.rs:476`），确认 `xhost` 优先级不回退。
+- human_tests：在 `human_tests/proxy-rules-advanced.md`（约第 2460 行起）增加路由协议跨协议优先级回归用例，并按文档执行；2026-06-09 已记录 PASS 执行结果。
 
 ## Review/Fix/Test 闭环方案
 
