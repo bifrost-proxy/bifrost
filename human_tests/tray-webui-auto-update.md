@@ -111,4 +111,10 @@
 
 ## 执行记录
 
-待本次修复验证后更新。
+2026-06-17 本次修复已执行：
+
+- TC-TWA-01：通过。9900 监听进程为 PID 84203，启动命令仍是 `/Users/eden/.local/bin/bifrost start ... -p 9900 ... --system-proxy`；`/_bifrost/api/system/overview` 返回运行版本 `0.0.104`；`/Users/eden/.local/bin/bifrost --version` 返回 `0.0.105`；`version-check?refresh=true` 返回 `current_version=0.0.104`、`latest_version=0.0.105`、`has_update=true`；`upgrade/progress` 返回 `idle`；日志 `bifrost.2026-06-17.log` 记录 `child_pid=53186` 的 self-update 子进程，`ps` 显示该子进程为 `<defunct>`。结论：现场是磁盘二进制已更新但旧 daemon 未重启，WebView 读到 idle 后未恢复 UI。
+- TC-TWA-02：通过。`BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost bash e2e-tests/tests/test_upgrade_admin_api_restart_e2e.sh` 中 already-latest 子用例验证旧 PID 30641 被重启为新 PID 31380，并写入 `phase=completed`；放宽二进制校验超时后重跑，旧 PID 30641 类似路径稳定通过。
+- TC-TWA-03：通过。完整 Admin POST 升级链路最终 `phase=completed`，source 为 `admin`，后台子进程诊断日志非空，daemon 从 PID 8392 重启为 PID 10397，并继续从测试安装路径运行；新增 already-latest 子用例同次通过，旧 PID 18373 重启为新 PID 19013；测试摘要 `Total: 14, Passed: 14, Failed: 0`。
+- TC-TWA-04：通过。`pnpm --dir web exec vitest run src/stores/useVersionStore.test.ts` 通过，验证 active `installing` 状态读到 `idle` 后 `upgrading=false`、`upgradePhase=idle`，并触发强制 version-check。
+- TC-TWA-05：通过。E2E 已断言测试数据目录下 `logs/upgrade-background.log` 非空；现场旧版本中已确认 child 53186 defunct，修复后 Admin spawn 会等待仍由父进程持有的子进程退出并保留 stdout/stderr 到诊断日志。

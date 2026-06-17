@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiMocks = vi.hoisted(() => ({
@@ -17,11 +18,53 @@ vi.mock("../api/client", () => ({
     error instanceof Error && error.message === "connection",
 }));
 
-import { useVersionStore } from "./useVersionStore";
+type VersionStore = typeof import("./useVersionStore").useVersionStore;
+
+function createMemoryStorage(): Storage {
+  const values = new Map<string, string>();
+  return {
+    get length() {
+      return values.size;
+    },
+    clear: () => values.clear(),
+    getItem: (key: string) => values.get(key) ?? null,
+    key: (index: number) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key: string) => {
+      values.delete(key);
+    },
+    setItem: (key: string, value: string) => {
+      values.set(key, value);
+    },
+  };
+}
 
 describe("useVersionStore upgrade polling", () => {
-  beforeEach(() => {
+  let useVersionStore: VersionStore;
+
+  beforeEach(async () => {
     vi.useFakeTimers();
+    vi.resetModules();
+
+    const localStorage = createMemoryStorage();
+    const sessionStorage = createMemoryStorage();
+
+    Object.defineProperty(globalThis, "localStorage", {
+      value: localStorage,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis, "sessionStorage", {
+      value: sessionStorage,
+      configurable: true,
+    });
+    Object.defineProperty(globalThis, "window", {
+      value: {
+        localStorage,
+        sessionStorage,
+        location: { reload: vi.fn() },
+      },
+      configurable: true,
+    });
+
     apiMocks.checkVersion.mockResolvedValue({
       has_update: true,
       current_version: "0.0.104",
@@ -32,8 +75,8 @@ describe("useVersionStore upgrade polling", () => {
     });
     apiMocks.getUpgradeProgress.mockReset();
     apiMocks.startUpgrade.mockReset();
-    window.localStorage.clear();
-    window.sessionStorage.clear();
+
+    useVersionStore = (await import("./useVersionStore")).useVersionStore;
     useVersionStore.getState().stopPollUpgradeProgress();
     useVersionStore.setState({
       hasUpdate: true,
@@ -54,7 +97,7 @@ describe("useVersionStore upgrade polling", () => {
   });
 
   afterEach(() => {
-    useVersionStore.getState().stopPollUpgradeProgress();
+    useVersionStore?.getState().stopPollUpgradeProgress();
     vi.useRealTimers();
     vi.restoreAllMocks();
   });
@@ -83,9 +126,6 @@ describe("useVersionStore upgrade polling", () => {
 
     expect(useVersionStore.getState().upgrading).toBe(false);
     expect(useVersionStore.getState().upgradePhase).toBe("idle");
-    expect(apiMocks.checkVersion).toHaveBeenCalledWith({
-      forceRefresh: true,
-      skipCache: true,
-    });
+    expect(apiMocks.checkVersion).toHaveBeenCalledWith(true);
   });
 });

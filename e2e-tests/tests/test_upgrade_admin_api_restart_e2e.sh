@@ -238,6 +238,7 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     # archive instead of GitHub — everything else executes for real.
     BIFROST_DATA_DIR="$TEST_DATA_DIR" \
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+    BIFROST_DISABLE_TRAY=1 \
     BIFROST_UPGRADE_TEST_ALLOW_RELEASE_OVERRIDES=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$archive_path" \
@@ -316,6 +317,13 @@ test_admin_api_upgrade_restarts_daemon_with_new_binary() {
     local prog_source
     prog_source="$(json_field "$(cat "${TEST_DATA_DIR}/upgrade-progress.json" 2>/dev/null)" source)"
     assert_equals "admin" "$prog_source" "terminal progress source=admin" || return 1
+
+    local background_log="${TEST_DATA_DIR}/logs/upgrade-background.log"
+    if [[ ! -s "$background_log" ]]; then
+        _log_fail "background upgrade subprocess writes diagnostics log" "non-empty $background_log" "missing or empty"
+        return 1
+    fi
+    _log_pass "background upgrade subprocess wrote diagnostics log"
 
     # Wait for the restarted admin server to come back up.
     wait_admin_ready || {
