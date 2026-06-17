@@ -18,7 +18,7 @@
 
 ## 当前代码基线
 
-本方案基于 2026-05-28 当前仓库状态：
+本方案基于 2026-05-28 当前仓库状态 (2026-06-16 复核：核心 API/`/api/asr/transcribe-ws` 410、`/api/voice/listen-ws`、`/api/asr/offline-jobs`、`/api/speech/{pipelines,decision,resources}`、wake `lightweight_kws_listener`、`crates/bifrost-asr` 拆分、`plan_asr_units` / `write_offline_subtitle_artifacts` / `ResourceLeaseManager` 均已落地;`OfflineSubtitlePipeline` struct、`EngineDecision.vad/speaker_embedding`、独立 E2E 脚本拆分为 planned)：
 
 - 实时语音主能力已经存在于 `crates/bifrost-admin/src/handlers/voice/mod.rs`：
   - `/api/voice/listen-ws` 接收 16kHz mono PCM16。
@@ -88,15 +88,15 @@ Speech Pipeline Orchestrator
 pub struct EngineDecision {
     pub mode: SpeechMode,
     pub pipeline_profile: String,
+    pub profile: SpeechPipelineProfile,
     pub asr: AsrDecision,
-    pub vad: Option<VadDecision>,
     pub wake: Option<WakeDecision>,
     pub diarization: Option<DiarizationDecision>,
-    pub speaker_embedding: Option<SpeakerEmbeddingDecision>,
     pub subtitle: Option<SubtitleDecision>,
     pub runtime: RuntimeDecision,
     pub resource: ResourceDecision,
     pub reasons: Vec<DecisionReason>,
+    // vad / speaker_embedding 决策字段 (planned, not yet shipped as of 2026-06-16)
 }
 ```
 
@@ -359,23 +359,17 @@ crates/bifrost-asr/
     lib.rs
     platform.rs
     runtime.rs
-    pipeline.rs
     decision.rs
     profiles.rs
     resources.rs
-    manifest.rs
     planner.rs
     subtitle.rs
     artifacts.rs
     timeline.rs
-    realtime.rs
+    speaker.rs
+    wake.rs
     offline.rs
-    engines/
-      sherpa_onnx.rs
-      pyannote_sidecar.rs
-      qwen3_offline.rs
-      qwen3_stateful.rs
-      external.rs
+    # pipeline.rs / manifest.rs / realtime.rs / engines/ 子模块 (planned, not yet shipped as of 2026-06-16)
 ```
 
 `bifrost-admin` 只保留适配层：
@@ -549,13 +543,15 @@ single_registered_self_priority_min_duration_ms = 5000
 
 ### OfflineSubtitlePipeline
 
-统一方法：
+统一方法 (planned 形态，目标 API)：
 
 ```rust
 impl OfflineSubtitlePipeline {
     pub async fn run_file(&self, req: OfflineSubtitleRequest) -> Result<OfflineSubtitleArtifacts>;
 }
 ```
+
+当前已落地形态 (as of 2026-06-16)：`bifrost-asr` 暴露自由函数 `write_offline_subtitle_artifacts(OfflineSubtitleArtifactRequest)`，由 `bifrost-admin` 的 `asr/offline_jobs.rs` 与 `asr_jobs/runner.rs` 直接调用，覆盖单文件离线产物与 Directory Task 两条链路；`OfflineSubtitlePipeline` struct 与 `run_file()` 入口尚未抽出，留作后续重构 (planned, not yet shipped as of 2026-06-16)。
 
 内部步骤：
 
@@ -921,10 +917,10 @@ TXT：
 改动：
 
 ```text
-新增 speech/offline.rs
-新增 speech/planner.rs
-新增 speech/subtitle.rs
-Directory Task 接入 OfflineSubtitlePipeline
+新增 crates/bifrost-asr/src/offline.rs (已落地: write_offline_subtitle_artifacts 自由函数)
+新增 crates/bifrost-asr/src/planner.rs (已落地: plan_asr_units + AsrUnitPlannerConfig)
+新增 crates/bifrost-asr/src/subtitle.rs
+Directory Task 接入 write_offline_subtitle_artifacts;OfflineSubtitlePipeline struct/run_file 抽象 (planned, not yet shipped as of 2026-06-16)
 保留 Directory Task 后处理 hook
 ```
 
@@ -1028,6 +1024,9 @@ deprecated_transcribe_ws_returns_migration_error
 E2E 测试：
 
 ```text
+test_asr_speech_pipeline_orchestrator_real_service.sh  # 已落地，覆盖 speech API、旧 WS 410、wake lightweight、offline-jobs、CLI subtitle、Directory Task artifacts 等场景
+
+# 以下细粒度脚本 (planned, not yet shipped as of 2026-06-16)，能力已被合并到上面真实服务脚本中执行：
 test_speech_decision_api.sh
 test_asr_offline_jobs_artifacts.sh
 test_directory_task_offline_pipeline_artifacts.sh
@@ -1035,7 +1034,6 @@ test_voice_listen_ws_realtime_pcm.sh
 test_deprecated_transcribe_ws_migration_error.sh
 test_scheduled_task_yields_to_realtime_voice.sh
 test_directory_task_offline_pipeline_keeps_daily_agent_postprocess.sh
-test_asr_speech_pipeline_orchestrator_real_service.sh
 ```
 
 human_tests：
