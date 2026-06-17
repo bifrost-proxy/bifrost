@@ -5077,10 +5077,11 @@ rm -rf /tmp/bifrost-remote-overload.*
 | 用例编号 | 用例名称 | 操作步骤 | 预期结果 |
 |---------|---------|---------|---------|
 | TC-RI-TUI-01 | 大窗口行数自适应 | 1. 将终端窗口拉到很大（如高度 ≥ 40 行）2. 运行 `bifrost status` 3. 按 →/← 切到 `Remote Invoke` 标签 | `Connected Clients` 与 `Recent Commands` 表格展示的行数明显多于 12 行（在数据足够时），下方不再出现大片空白 |
-| TC-RI-TUI-02 | 宽窗口内容更完整 | 在很宽的终端（如宽度 ≥ 200 列）查看 Remote Invoke 标签 | `Client` / `Latest Command` / `Command` / `Latest:` 摘要行展示的文本明显比窄窗口更完整，省略号显著减少；`Client` 与命令列充分利用了右侧此前的空白空间 |
+| TC-RI-TUI-02 | 宽窗口内容更完整 | 在很宽的终端（如宽度 ≥ 200 列）查看 Remote Invoke 标签 | `Client` / `Latest Command` / `Command` / `Result` / `Call ID` / `Latest:` 摘要行展示的文本明显比窄窗口更完整，省略号显著减少；命令、结果和调用 ID 列充分利用了右侧此前的空白空间 |
 | TC-RI-TUI-03 | 窄/矮窗口稳定可读 | 将终端缩到很窄很矮（如 60 列 × 12 行）再查看 Remote Invoke 标签 | TUI 不崩溃、不 panic；命令列仍保留可读的最小宽度（约 18 字符）并以 `...` 截断；行数随高度收缩 |
 | TC-RI-TUI-04 | 标题计数语义不变 | 对比窗口大小变化前后两张表的标题 | 标题中的 `Connected Clients (N)` / `Recent Commands (N)` 中的 N 始终是全量记录总数，不随可见行数变化 |
 | TC-RI-TUI-05 | Client 列宽屏不提前省略 | 1. 准备至少一条长 caller fingerprint（如 `caller-abcdef0123456789`）的 grant 和 call 记录 2. 在宽度 ≥ 200 列的终端查看 `Remote Invoke` 标签 3. 分别观察 `Connected Clients` 与 `Recent Commands` 左侧 `Client` 列 | 上下两张表的 `Client` 列都按实际列宽展示长 caller ID；当列宽足够容纳完整 ID 时不显示 `caller-...` 形式的提前省略；缩窄窗口后才按可用宽度省略 |
+| TC-RI-TUI-06 | Client 列宽屏不挤压后侧列 | 1. 准备长 caller fingerprint、长命令、非空 result 和长 call id 的 Remote Invoke 记录 2. 在宽度 ≥ 200 列的终端查看 `Remote Invoke` 标签 3. 对比截图中 Client 列占用过宽、后侧列偏窄的旧现象 | `Client` 列在宽屏下有合理上限，不继续吞掉横向空间；`Latest Command` / `Command` 成为主要扩展列，`Result` 与 `Call ID` 比旧固定宽度展示更多内容；后侧列不再被明显压窄 |
 
 ### 清理
 
@@ -5095,7 +5096,8 @@ rm -rf /tmp/bifrost-remote-overload.*
 | TC-RI-TUI-03 | ✅ PASS | 使用 60 列 × 12 行 PTY 打开 `bifrost status --tui` 并切到 `Remote Invoke`，进程正常退出码 0；输出包含 `Remote Invoke`、`Connected Clients`、`Recent Commands` 和 `...`，说明窄/矮窗口不 panic 且仍按可用宽度省略。 |
 | TC-RI-TUI-04 | ✅ PASS | 宽屏 PTY 捕获中标题仍显示全量计数 `Connected Clients (7)` 与 `Recent Commands (20)`；窄屏 PTY 也保留 `Connected Clients` / `Recent Commands` 标题语义，计数不随可见区域截断为可见行数。 |
 | TC-RI-TUI-05 | ✅ PASS | 宽屏 PTY 捕获确认上下两张表的 `Client` 列都使用动态列宽预算：`caller-c1fe8715267727969cd59e08bada03a6` 和 `caller-800862ed1cc9862b44afebe8242a8561` 完整展示；同步检查输出中不包含 `caller-c1fe...` 或 `caller-8008...`。缩窄到 60 列后输出含省略号，符合“空间不足才省略”的预期。 |
+| TC-RI-TUI-06 | ✅ PASS | 2026-06-17 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli remote_invoke_render_caps_client -- --nocapture` 通过。该用例使用 `ratatui::backend::TestBackend` 渲染 220 列 × 45 行 Remote Invoke 标签页，构造长 caller fingerprint、长命令、非空 result 和长 call id，断言 `SSH key` auth 列出现在第 42 列以内，`file.search json_response`、`64.00 KB` 和 `call-0123456789abcdef` 均可见；同时执行 `SKIP_BUILD=true BIFROST_BIN=$PWD/target/debug/bifrost BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_status_tui_remote_invoke_panel.sh` 通过，确认真实临时 Bifrost + PTY TUI 面板仍可打开。 |
 
-> 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `flex_column_budget`）已抽成纯函数，
+> 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。
