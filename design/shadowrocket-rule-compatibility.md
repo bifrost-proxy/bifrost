@@ -1,5 +1,7 @@
 # Shadowrocket 规则兼容与自动转换方案
 
+> 实现状态：本设计文档描述的 Shadowrocket / Surge 规则兼容与自动转换能力 (planned, not yet shipped as of 2026-06-17)。当前仓库中尚未出现 `external_rule` 模块、`parse_shadowrocket` 解析器，也未在 `crates/bifrost-sync/src/normalize.rs` 或前端 Rules 编辑器中接入相关入口；下述章节均为目标设计。
+
 ## 功能模块描述
 
 - 为 Bifrost 增加 Shadowrocket 风格配置的导入、兼容与自动转换能力，优先覆盖常见分流规则、规则集、改写、MITM 与本地 Mock 场景。
