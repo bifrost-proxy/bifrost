@@ -1,5 +1,7 @@
 # Traffic Fixtures 产品方案
 
+> 实现状态（2026-06-16）：本方案为前瞻设计，`Traffic Fixtures` 尚未在仓库中落地。仓库中未发现 `bifrost fixtures` CLI 子命令、`/_bifrost/api/fixtures/...` 管理 API、`FixtureEngine` 运行时模块以及 `fixture_sets / fixtures / fixture_hit_history` 等存储对象。文中提到的 `Traffic` / `Replay` / `Rules` 基础能力已存在（如 `replay_db_store`、Traffic `client_app` 等字段），但 fixture 能力本身全部为 planned, not yet shipped as of 2026-06-16。
+
 ## 1. 背景
 
 Bifrost 当前已经具备较强的流量录制与回放基础能力：
@@ -830,7 +832,7 @@ V1 中，fixtures 不启用基于时间的自动淘汰。
 4. fixture set 删除后，其独占的 fixture 数据被释放。
 5. hit history 清理不影响 fixture 本体数据。
 
-## 15. API 定义
+## 15. API 定义（planned, not yet shipped as of 2026-06-16）
 
 ### 15.1 管理 API
 
@@ -851,7 +853,7 @@ V1 中，fixtures 不启用基于时间的自动淘汰。
 - `FixtureEngine::record_hit(...)`
 - `FixtureEngine::explain_miss(...)`
 
-## 16. CLI 设计目标
+## 16. CLI 设计目标（planned, not yet shipped as of 2026-06-16）
 
 `Traffic Fixtures` 既然是独立能力，就必须提供完整 CLI 控制面，满足以下目标：
 
@@ -1499,7 +1501,7 @@ SSE/WS 并不是简单的“返回一个 body”。
 - WebSocket 继续后置
 - SSE 先聚焦“事件序列回放”，不做复杂事件编辑器
 
-## 19. V1 交付范围
+## 19. V1 交付范围（planned, not yet shipped as of 2026-06-16）
 
 `Traffic Fixtures` V1 的交付范围固定如下：
 
@@ -1537,7 +1539,7 @@ V1 不包含：
 - WebSocket
 - 跨环境导出导入
 
-## 20. 产品定稿
+## 20. 产品定稿（planned, not yet shipped as of 2026-06-16）
 
 `Traffic Fixtures` 的产品定义固定如下：
 
@@ -1554,7 +1556,7 @@ V1 不包含：
 - 默认响应模式：`latest`
 - 默认 SSE 回放：`recorded_timeline + keep_open`
 
-## 21. 验收标准
+## 21. 验收标准（planned, not yet shipped as of 2026-06-16）
 
 产品验收以以下标准为准：
 
