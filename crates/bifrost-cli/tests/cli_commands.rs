@@ -631,6 +631,59 @@ fn remote_command_exec_parses_argv_after_double_dash() {
 }
 
 #[test]
+fn remote_run_parses_script_upload_options_and_args() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "--client-id",
+        "devbox",
+        "run",
+        "--script-file",
+        "./q.py",
+        "--interpreter",
+        "python3",
+        "--cwd",
+        "/repo",
+        "--env",
+        "TOKEN=redacted",
+        "--timeout-ms",
+        "600000",
+        "--scratch-name",
+        ".bifrost-tmp",
+        "--detach",
+        "--",
+        "--limit",
+        "5",
+    ])
+    .expect("remote run should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote {
+            action, client_id, ..
+        } => {
+            assert_eq!(client_id.as_deref(), Some("devbox"));
+            match action {
+                RemoteCommands::Run(run) => {
+                    let run = run.as_ref();
+                    assert_eq!(
+                        run.script_file.as_ref().map(|p| p.to_string_lossy()),
+                        Some("./q.py".into())
+                    );
+                    assert_eq!(run.interpreter, "python3");
+                    assert_eq!(run.cwd.as_deref(), Some("/repo"));
+                    assert_eq!(run.timeout_ms, Some(600000));
+                    assert!(run.detach);
+                    assert_eq!(run.env, vec![("TOKEN".to_string(), "redacted".to_string())]);
+                    assert_eq!(run.args, vec!["--limit".to_string(), "5".to_string()]);
+                }
+                _ => panic!("unexpected remote action"),
+            }
+        }
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
 fn remote_command_exec_rejects_argv_without_double_dash() {
     let err = match Cli::try_parse_from(["bifrost", "remote", "exec", "pwd"]) {
         Ok(_) => panic!("bare argv without `--` should be rejected"),

@@ -29,6 +29,11 @@ pub enum RemoteCommands {
         long_about = "Execute a shell command on the remote host.\n\n            ⚠  This is the highest-privilege remote command: it can run arbitrary code on the target machine, subject only to the Shell Access policy bound to the active grant. For policy-gated structured writes, prefer `bifrost remote file write/edit/patch`."
     )]
     Exec(Box<RemoteCommandExecArgs>),
+    #[command(
+        about = "Upload a local script to a remote scratch dir and run it",
+        long_about = "Upload a local script with `remote file` into a policy-checked scratch directory, then execute it with `remote exec`.\n\n            This is the safe one-command path for coding-agent smoke scripts and diagnostics: it avoids heredocs, shell quoting, /tmp symlink escapes, and repeated script retransmission."
+    )]
+    Run(Box<RemoteRunArgs>),
     #[command(about = "Inspect or rejoin a detached remote exec job")]
     Job {
         #[command(subcommand)]
@@ -403,7 +408,13 @@ pub enum RemoteFileCommands {
     )]
     Write {
         #[arg(help = "Target path (absolute, or relative to --cwd)")]
-        path: String,
+        path: Option<String>,
+        #[arg(
+            long = "path",
+            hide = true,
+            help = "Compatibility alias for the positional target path. Prefer: file write <path>"
+        )]
+        path_flag: Option<String>,
         #[arg(
             long,
             help = "Inline UTF-8 content to write (simplest option for short text)"
@@ -810,6 +821,82 @@ pub struct RemoteCommandExecArgs {
         help = "Skip the client-side streaming SHA-256 verification against the Done frame digest"
     )]
     pub no_verify_digest: bool,
+}
+
+#[derive(Args, Clone, Debug)]
+#[command(group(
+    ArgGroup::new("script_source")
+        .required(true)
+        .args(["script_file"])
+))]
+pub struct RemoteRunArgs {
+    #[arg(
+        long = "script-file",
+        value_name = "PATH",
+        value_hint = ValueHint::FilePath,
+        help = "Local script file to upload with remote file write before execution"
+    )]
+    pub script_file: Option<PathBuf>,
+    #[arg(
+        long = "interpreter",
+        default_value = "python3",
+        help = "Remote interpreter/program used to run the uploaded script"
+    )]
+    pub interpreter: String,
+    #[arg(long, help = "Working directory on the remote host")]
+    pub cwd: Option<String>,
+    #[arg(
+        long = "env",
+        value_name = "KEY=VALUE",
+        value_parser = parse_env_assignment,
+        action = ArgAction::Append,
+        help = "Environment variable assignment for the remote process (repeatable)"
+    )]
+    pub env: Vec<(String, String)>,
+    #[arg(long = "timeout-ms", help = "Remote command timeout in milliseconds")]
+    pub timeout_ms: Option<u64>,
+    #[arg(
+        long = "scratch-name",
+        default_value = ".bifrost-tmp",
+        help = "Remote scratch directory name relative to --cwd"
+    )]
+    pub scratch_name: String,
+    #[arg(
+        long = "remote-name",
+        help = "Remote script filename inside the scratch directory (default: timestamp + local basename)"
+    )]
+    pub remote_name: Option<String>,
+    #[arg(
+        long = "keep",
+        help = "Keep the uploaded remote script instead of deleting it after a foreground run"
+    )]
+    pub keep: bool,
+    #[arg(
+        long = "detach",
+        help = "Start the remote script as a detached job. Detached scripts are kept for post-run inspection."
+    )]
+    pub detach: bool,
+    #[arg(
+        long = "stream",
+        help = "Stream stdout as bytes arrive instead of buffering the whole response"
+    )]
+    pub stream: bool,
+    #[arg(
+        long = "output-file",
+        value_name = "PATH",
+        help = "Write streamed stdout to a local file instead of the terminal (implies --stream)"
+    )]
+    pub output_file: Option<String>,
+    #[arg(long = "no-verify-digest", help = "Skip stream SHA-256 verification")]
+    pub no_verify_digest: bool,
+    #[arg(
+        value_name = "ARGS...",
+        num_args = 0..,
+        last = true,
+        allow_hyphen_values = true,
+        help = "Arguments passed to the uploaded script after `--`"
+    )]
+    pub args: Vec<String>,
 }
 
 #[derive(Subcommand, Clone, Debug)]

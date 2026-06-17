@@ -595,7 +595,7 @@ pub enum Commands {
         #[arg(
             long,
             global = true,
-            help = "Target client instance ID prefix (for selecting among saved connections)"
+            help = "Target client instance ID / label prefix. Put this after `remote`, before the subcommand; env fallback: BIFROST_REMOTE_CLIENT_ID"
         )]
         client_id: Option<String>,
     },
