@@ -1,6 +1,6 @@
 # Skill Creator — Bifrost Agent Loop 技能创建子系统设计
 
-Status: Proposal (approved, pending implementation)
+Status: Implemented (partial; refreshed against code as of 2026-06-17 — see notes below)
 Owners: bifrost-agent, bifrost-admin, webui
 Related: `design/long-term-memory.md`, `crates/agent/src/session.rs`, `crates/agent/src/skills.rs` (`SkillsManager`)
 
@@ -116,9 +116,10 @@ Bifrost Agent Loop 目前对 "skill" 的支持是**被动只读发现**：
 │    - 只渲染 name + description (progressive disclosure)     │
 │  memory_runtime.rs                                           │
 │    - 暴露 memory.read / memory.write 作为 Skill-scoped tool │
-│  tools/skill_creator.rs (NEW)                               │
-│    - meta-tool: skill_creator.{start, interview, draft,     │
-│      test, commit, cancel, list_templates}                  │
+│  skill_authoring.rs (SHIPPED; planned name was            │
+│  tools/skill_creator.rs)                                    │
+│    - SkillAuthoringHub exposes the meta-tool surface       │
+│      (start / interview / draft / test / commit / ...)     │
 └──────────────────────────────────────────────────────────────┘
 ```
 
@@ -461,7 +462,7 @@ pub enum AuthoringState {
 - `commit()` → `Committed`（调 `SkillStore::commit`，归档旧版本）
 - `cancel()` → `Cancelled`（清理 draft 目录）
 
-### 4.7 `skill_creator` Meta-Tool（`crates/agent/src/tools/skill_creator.rs`）
+### 4.7 `skill_creator` Meta-Tool（实现位于 `crates/agent/src/skill_authoring.rs`，导出 `SkillAuthoringHub`；原计划路径 `crates/agent/src/tools/skill_creator.rs` 未采用）
 
 在 ToolRegistry 注册以下 sub-tools（对 LLM 暴露）：
 
@@ -645,8 +646,7 @@ POST /agent/skills/validate
 | `crates/agent/src/session.rs` | 替换 L491 硬编码 match | 改为 `SlashCommandRouter::dispatch` |
 | `crates/agent/src/slash.rs` | **新增** | `SlashCommandRouter` 实现 |
 | `crates/agent/src/prompt.rs` | 修改 "Available skills" 块 | 读 `SkillRegistry::enabled()` |
-| `crates/agent/src/tools/mod.rs` | 追加模块 | 注册 `skill_creator` meta-tool |
-| `crates/agent/src/tools/skill_creator.rs` | **新增** | 见 §4.7 |
+| `crates/agent/src/skill_authoring.rs` | **新增（已实现，文件名与设计稿不同）** | 见 §4.7；导出 `SkillAuthoringHub` 承担 meta-tool 职责 |
 | `crates/agent/src/memory_runtime.rs` | 暴露 memory.read/write | 供 Skill tool_bridge 调用 |
 | `crates/bifrost-admin/Cargo.toml` | 依赖 `skills` | |
 | `crates/bifrost-admin/src/handlers/mod.rs` | 挂 `agent_skills` 模块 | |
@@ -655,13 +655,13 @@ POST /agent/skills/validate
 | `crates/bifrost-admin/src/router.rs` | 追加路由 | `/agent/skills/*` |
 | `web/src/pages/Settings/tabs/AgentTab.tsx` | 追加 `<SkillsSection />` | |
 | `web/src/pages/Settings/tabs/agent/SkillsSection.tsx` | **新增** | |
-| `web/src/pages/Settings/tabs/agent/SkillCreatorWizard.tsx` | **新增** | |
+| `web/src/pages/Settings/tabs/agent/SkillCreatorWizard.tsx` | **新增** | (planned, not yet shipped as of 2026-06-17 — `SkillsSection.tsx` 与 `SkillEditor.tsx` 已落地；Wizard 组件尚未拆出) |
 | `web/src/pages/Settings/tabs/agent/SkillEditor.tsx` | **新增** | |
 | `web/src/pages/Settings/tabs/agent/types.ts` | 追加 SkillRecord/Manifest 类型 | |
 | `web/src/api/agent-skills.ts` | **新增** | 对应 §5 REST |
-| `e2e-tests/tests/test_skill_creator_flow.sh` | **新增** | 跑通 create→test→invoke→delete |
+| `e2e-tests/tests/test_skill_creator_flow.sh` | **新增** | 跑通 create→test→invoke→delete (planned, not yet shipped as of 2026-06-17) |
 | `crates/bifrost-e2e/src/tests/skill_creator.rs` | **新增** | runner 侧 |
-| `human_tests/skill-creator.md` | **新增** | 手测脚本 |
+| `human_tests/skill-creator.md` | **新增** | 手测脚本 (planned, not yet shipped as of 2026-06-17) |
 | `human_tests/readme.md` | 更新索引 | 74+N/1455+M |
 
 ---
