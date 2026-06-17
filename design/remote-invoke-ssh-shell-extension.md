@@ -1,6 +1,8 @@
 # Remote Invoke SSH 公钥鉴权扩展方案
 
-> 状态：决策已确认 | 更新时间：2026-04-22
+> 状态：决策已确认 | 更新时间：2026-06-16
+>
+> 实现现状校准（2026-06-16）：本仓库（`bifrost-remote-fixes-on-tray`）已经落地 SSH key 端到端链路——`crates/bifrost-admin/src/remote_invoke/ssh_keys.rs` 提供 `SshKeyStore` 与 `remote_invoke_ssh_keys` 表，CLI 在 `bifrost remote conn up --ssh-key ...` / `bifrost setting ssh-key ...` 入口可用，`packages/bifrost-sync-server` 包含 `SshAuthService` + `/ssh/challenge` + `/ssh/connect` + `ssh_connect_result` SSE 全链路。`bifrost-server-v4` 与 WebUI 上的 SSH 密钥管理 UI 不在本仓库内，相关章节描述的是生产环境/前端的并行落地工作，仍按 (planned, not yet shipped as of 2026-06-16) 对待。
 
 ## 背景
 
@@ -543,7 +545,7 @@ client（收到 relay 转发的 connect，执行二次确认）
 | Client connect  | `ssh_key_not_found`               | 本地无此 device\_code 的密钥记录                         |
 | Client connect  | `ssh_key_revoked`                 | 密钥已撤销                                           |
 | Client connect  | `ssh_key_fingerprint_mismatch`    | relay 转发的 fingerprint 与本地存储不一致（路由表可能被篡改）    |
-| Client connect  | `ssh_key_limit_exceeded`          | 密钥数量超过上限（100）                                   |
+| Client connect  | `ssh_key_limit_exceeded`          | 密钥数量超过上限（planned, not yet shipped as of 2026-06-16；实际采用单密钥模型，新建即自动 revoke 旧 key，无 100 上限） |
 
 ## API 设计
 
@@ -711,14 +713,16 @@ packages/bifrost-sync-server/src/
 export class SshAuthService {
   constructor(private redis: Redis) {}
 
-  // Client 注册时写入 SSH 路由（须验证 device_code 派生关系）
-  async syncSshRoutes(clientInstanceId: string, routes: SshDeviceRoute[]): Promise<void>
+  // Client 注册/心跳时同步当前 active 路由（须验证 device_code 派生关系）
+  // 注意：实际实现为单数 syncSshRoute（单密钥模型，每个 client_instance_id 至多一条路由）
+  syncSshRoute(clientInstanceId: string, route: SshDeviceRoute | null | undefined): {
+    routeChanged: boolean;
+    previousDeviceCode: string | null;
+    currentDeviceCode: string | null;
+  }
 
-  // Client 心跳时刷新路由 TTL（须验证 device_code 派生关系）
-  async refreshSshRoutes(clientInstanceId: string, routes: SshDeviceRoute[]): Promise<void>
-
-  // Client 撤销密钥时删除路由
-  async removeSshRoute(deviceCode: string): Promise<void>
+  // Client 撤销密钥时删除路由（route 传 null 等价于 removeSshRoute）
+  removeSshRoute(deviceCode: string): void
 
   // Caller 请求 challenge
   async issueChallenge(deviceCode: string): Promise<ChallengeResponse>
@@ -773,7 +777,7 @@ POST /v4/remote-invoke/register
 
 POST /v4/remote-invoke/heartbeat
   body: { ..., ssh_device_route: { device_code, public_key_pem } | null }
-  → 调用 sshAuthService.refreshSshRoute(clientInstanceId, route)
+  → 调用 sshAuthService.syncSshRoute(clientInstanceId, route)  // 实现复用同一方法
 ```
 
 #### 转发机制
@@ -820,17 +824,18 @@ cd packages/bifrost-sync-server && pnpm start --port 3200
 BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 \
   --relay-url http://localhost:3200 --unsafe-ssl --no-system-proxy
 
-# CLI 使用 SSH 密钥连接
-bifrost remote connect --ssh-key ./test-key.bifrost --relay-url http://localhost:3200
+# CLI 使用 SSH 密钥连接（实际命令为 `remote conn up`）
+bifrost remote conn up --ssh-key ./test-key.bifrost --relay-url http://localhost:3200
 ```
 
 ***
 
 ### 版本 B：bifrost-server-v4（生产部署版）
 
-> 路径：`bifrost-server-v4`
+> 路径：`bifrost-server-v4`（**不在本仓库内**；位于字节内部基础设施仓库）
 > 用途：真实环境生产部署
 > 特点：多实例、Redis 集群、`@gulu/application-http` 框架、跨实例事件投递
+> 状态：本仓库范围内为 (planned, not yet shipped as of 2026-06-16) — 本文档以下涉及 `bifrost-server-v4` 的具体路由/方法/Service 代码均为内部仓库的并行实现规约，与 `bifrost-remote-fixes-on-tray` 内的 `packages/bifrost-sync-server` 共享同一 HTTP 契约。
 
 #### 架构定位
 
@@ -1159,7 +1164,7 @@ match event_type {
   - 文件权限必须设为 `0600`（仅所有者可读写）
   - 必须通过加密通道分发（HTTPS、加密聊天、密钥管理服务）
   - 禁止通过明文邮件、公共聊天频道、未加密的文件共享传输
-  - CI/CD 场景建议使用环境变量注入（`--ssh-key env:BIFROST_SSH_KEY`），避免写入磁盘
+  - CI/CD 场景建议使用环境变量注入（`export BIFROST_REMOTE_SSH_KEY=...` + `--ssh-key`，仅支持此固定变量名），避免写入磁盘
 - CLI 从文件读取后应检查文件权限，权限过宽时输出警告
 
 ## CLI 与 UI 改造
@@ -1168,17 +1173,18 @@ match event_type {
 
 保留：
 
-- `bifrost remote connect <pair-code>`
+- `bifrost remote conn up <pair-code>`（命令名为 `conn up`，非 `connect`；2026-04-21 已落地）
 
 新增：
 
-- `bifrost remote connect --ssh-key <path_or_env>`
+- `bifrost remote conn up --ssh-key [<path>]`
+- 本机管理入口：`bifrost setting ssh-key create|export|status|revoke`（2026-05-26 落地）
 
 SSH 连接支持多种密钥来源：
 
 - `--ssh-key ~/.bifrost/remote.key` — 从 Bifrost 密钥文件读取（内含 device\_code + 私钥）
 - `--ssh-key ~/.ssh/bifrost_ed25519` — 从标准 Ed25519 私钥文件读取（自动推导公钥 → 计算 device\_code）
-- `--ssh-key env:BIFROST_SSH_KEY` — 从环境变量读取（适合 CI/CD，内容为 Bifrost 密钥文件格式）
+- `--ssh-key`（无值）— 从固定环境变量 `BIFROST_REMOTE_SSH_KEY` 读取（适合 CI/CD；2026-06-02 起仅支持此固定变量名，不再接受任意 `env:NAME`）
 - `--ssh-key -` — 从 stdin 读取
 
 device\_code 解析策略：
@@ -1195,6 +1201,8 @@ device\_code 解析策略：
 - `device_code`（从密钥文件解析或派生）
 
 ### Admin UI（WebUI Remote 控制部分）
+
+> 实现状态：Admin API（`/api/remote-invoke/ssh-key` 系列）已在本仓库落地（见 `crates/bifrost-cli/src/commands/config/client.rs`），可通过 HTTP 接口直接管理；Tray/WebUI 前端的 SSH 密钥管理界面 (planned, not yet shipped as of 2026-06-16)。
 
 Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无列表视图）：
 
@@ -1312,7 +1320,7 @@ Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无�
 - Client 离线验证 → 路由 TTL 过期后连接 → 应返回 `client_offline`
 - 路由投毒防护 → 恶意 Client 注册篡改的 device\_code → 应返回 `device_code_derivation_mismatch`
 - timestamp 超窗口 → 使用超过 ±30s 的 timestamp → 应返回 `timestamp_out_of_window`
-- 密钥数量上限 → 创建超过 100 个密钥 → 应返回 `ssh_key_limit_exceeded`
+- 密钥数量上限（planned, not yet shipped as of 2026-06-16；实际为单密钥模型，新建会自动撤销旧密钥）
 
 ### bifrost-server-v4 集成测试
 
@@ -1329,9 +1337,9 @@ Remote Invoke 页面新增 **SSH 密钥管理** 区域（单密钥模型，无�
 
 - WebUI 创建密钥、复制 Bifrost 密钥文件
 - 创建时即使传入 `grant_mode=30m`，返回与实际签发结果也必须归一化为 `permanent`
-- CLI 使用 Bifrost 密钥文件连接（device\_code 自动解析）
+- CLI 使用 Bifrost 密钥文件连接（device\_code 自动解析）— 实际命令 `bifrost remote conn up --ssh-key <path>`
 - CLI 使用标准 Ed25519 私钥文件连接（device\_code 自动计算）
-- CLI 使用环境变量传递密钥文件连接（模拟 CI/CD 场景）
+- CLI 使用环境变量传递密钥文件连接（模拟 CI/CD 场景）— `export BIFROST_REMOTE_SSH_KEY=...` + `bifrost remote conn up --ssh-key`
 - 密钥撤销后连接被拒
 - 密钥重置后旧 device\_code 失效、新 device\_code 生效
 - WebUI 展示 caller 连接信息
