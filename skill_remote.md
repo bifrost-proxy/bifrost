@@ -167,6 +167,18 @@ bifrost --version
 
 > **注意**：此自检仅针对 caller（本机），不涉及目标机。目标机的安装由用户自行完成（参见第二节）。
 
+### 4.0.1 调用异常时主动获取远端最新技能
+
+如果执行 `bifrost remote` 相关调用时遇到异常（例如子命令不存在、参数不兼容、协议错误、返回行为与本文不一致、工具调用失败且本地 skill 可能过旧），Agent **必须**主动获取远端最新的 Bifrost Remote skill，再继续排查或重试。
+
+- 权威入口：[skill_remote.md](https://github.com/bifrost-proxy/bifrost/blob/main/skill_remote.md)。
+- 需要直接读取原文时，可使用 raw 地址：
+  ```bash
+  curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/skill_remote.md
+  ```
+- 刷新后先核对最新命令面、参数、错误码和恢复流程；如果远端最新文档与本地 skill 冲突，以远端最新文档为准，并在交付中说明本地 skill 可能滞后。
+- 不要把“本地 skill 没写”当作功能不存在的证据；调用异常应先确认是否已有远端最新技能更新。
+
 ### 4.1 连接（`conn`）
 
 先看本地有没有已保存连接；有就直接查询。没有再走 SSH key / pair code：
@@ -243,9 +255,10 @@ bifrost remote exec --timeout-ms 10000 --shell-text "cargo test 2>&1 | tail -30"
 # 长任务 / 大输出：一等公民 job 模型
 bifrost remote exec --detach --cwd <USER_HOME>/work/repo \
   --timeout-ms 1800000 --shell-text "cargo build --release 2>&1"
-bifrost remote job status <call_id> --relay-token <token>
-bifrost remote job logs <call_id> --relay-token <token> --output-file ./build.log
-bifrost remote job watch <call_id> --relay-token <token> --output-file ./build.log
+bifrost remote job list
+bifrost remote job status <call_id>
+bifrost remote job logs <call_id> --output-file ./build.log
+bifrost remote job watch <call_id> --output-file ./build.log
 
 # 需要用户 PATH / login shell 环境时，显式开启 login shell；CLI 会注入 BIFROST_REMOTE=1、TERM=dumb 抑制常见 shell integration 噪声
 bifrost remote exec --login --cwd <USER_HOME>/work/repo \
@@ -254,7 +267,8 @@ bifrost remote exec --login --cwd <USER_HOME>/work/repo \
 
 注意：
 - `$FOO` 是远端 shell 展开，不是 caller 的 env。caller 的 env 要通过 `--env` 显式传入。
-- `--detach` 会立即返回 `call_id` 和 `relay_token`；后续用 `remote job status/logs/watch` 查真实远端进程状态和 exit code。
+- `--detach` 会立即返回 `call_id`，并把本次 call 的 relay token 加密写入 caller 本地 `remote-jobs.json`；后续只用 `call_id` 执行 `remote job status/logs/watch` 查真实远端进程状态和 exit code，不要手工复制 token。
+- `remote job list` 列出 caller 本地已知的 detached job、最近状态、exit code、设备与命令摘要；断开、切线程或重启 CLI 后先用它找回 `call_id`。
 - `remote job logs --output-file` / `remote job watch --output-file` 默认做流 digest 校验；遇到 digest mismatch 时先重新 watch/logs 或查看远端日志，不要第一反应加 `--no-verify-digest`。
 - `--stream` 仍可用于短命令或临时观察；构建、测试、CI、迁移等长任务默认走 `--detach`。
 - `--timeout-ms` 会受到目标端 policy 上限约束；若被 cap，错误信息会包含 requested/policy/capped_by_policy，不能把会话超时信号当作远端进程真实 exit code。
@@ -471,7 +485,7 @@ bifrost remote file patch --patch-file ./refactor.diff
 # 7. 跑测试（这一步才用 exec）
 bifrost remote exec --cwd <USER_HOME>/work/github/repo \
   --detach --timeout-ms 1800000 --shell-text "cargo test 2>&1"
-bifrost remote job watch <call_id> --relay-token <token> --output-file ./test.log
+bifrost remote job watch <call_id> --output-file ./test.log
 ```
 
 ### 4.5 断开与回收（`conn down`）
@@ -484,21 +498,22 @@ bifrost remote conn down --grant-id <gid>    # 指定 grant
 
 ### 4.6 连接断开、长任务续接与连接漂移恢复
 
-长任务（build/test/CI watch/迁移）必须默认使用 `exec --detach`。这会把远端进程生命周期和 caller 当前这条网络连接解耦：即使本地终端、SSE stream 或 relay 短连接断开，只要远端 call 仍在，caller 都可以凭 `call_id` + `relay_token` 重新接上。
+长任务（build/test/CI watch/迁移）必须默认使用 `exec --detach`。这会把远端进程生命周期和 caller 当前这条网络连接解耦：即使本地终端、SSE stream 或 relay 短连接断开，只要远端 call 仍在，caller 都可以凭本地 job cache 中的 `call_id` 重新接上。
 
 ```bash
-# 启动时保存这两个字段
 bifrost remote exec --detach --cwd <repo> \
   --timeout-ms 1800000 --shell-text "cargo test 2>&1"
 
 # 断开/切线程/重启 CLI 后，优先用 job 命令恢复观察
-bifrost remote job status <call_id> --relay-token <token>
-bifrost remote job logs <call_id> --relay-token <token> --output-file ./test.log
-bifrost remote job watch <call_id> --relay-token <token> --output-file ./test.log
+bifrost remote job list
+bifrost remote job status <call_id>
+bifrost remote job logs <call_id> --output-file ./test.log
+bifrost remote job watch <call_id> --output-file ./test.log
 ```
 
 恢复判断：
 
+- `list` 能看到 caller 本地记住的 detached jobs；如果不知道 `call_id`，先查 `list`。
 - `status` 能返回 `running/exited + exit_code` 时，不要重新启动同一长任务；继续 `logs` / `watch`。
 - `watch` 会跟到远端终态，并用真实远端 exit code 作为本地退出码。
 - `logs` / `watch` 遇到 digest mismatch 时，先重新执行同一个 `job logs/watch` 或查看目标端日志；只有你已独立校验输出完整性时，才考虑 `--no-verify-digest`。
@@ -539,7 +554,7 @@ bifrost remote conn status
    - connect 失败 → 检查 SSH key 有效性、pair code 是否过期、目标是否在线、Web UI 是否授权。grant 失效就重新 `conn up`，**不要**伪造本地连接文件。
 8. **本机 vs 远端不要混**：改本机走 `bifrost setting`；改远端走 `bifrost remote`。
 9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
-10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job watch/logs/status` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
+10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job list` 找到本地记录的 call，并用 `remote job watch/logs/status <call_id>` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
 11. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。
 12. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
 13. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
@@ -564,7 +579,7 @@ A: 不用。直接 `remote file write <path> --content "第一行\n第二行\n" 
 A: `bifrost remote file write <remote-path> --content-b64 "$(base64 -w0 < ./local.bin)" --allow-overwrite true --create-parents`。
 
 **Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
-A: `remote exec --detach --cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`，再用 `remote job watch <call_id> --relay-token <token>`。git / 测试用 shell，代码改动用 file。
+A: `remote exec --detach --cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`，再用 `remote job watch <call_id>`。忘了 call id 时先跑 `remote job list`。git / 测试用 shell，代码改动用 file。
 
 **Q: 我要一次看某模块的好几个文件，怎么少跑几趟？**
 A: 先用 `remote file read-many --path a --path b --path c`，一次往返并发取回；某个文件读失败不影响其余文件，json 模式里看 `ok_count`。如果 policy 阻断 `read-many`，立即回落为多次 `remote file read`。

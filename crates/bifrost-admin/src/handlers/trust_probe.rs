@@ -4379,6 +4379,13 @@ mod coverage_boost_v2 {
 
     use crate::test_support::TestAdminState;
 
+    fn local_reqwest_client() -> reqwest::Client {
+        reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("build local test client")
+    }
+
     async fn spawn_trust_probe_api_server(
         state: SharedAdminState,
     ) -> (String, tokio::task::JoinHandle<()>) {
@@ -4515,7 +4522,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let body = serde_json::json!({ "host": "127.0.0.1", "ttlSeconds": 60 });
         let resp = client
             .post(format!("{}/api/trust-probe/sessions", base))
@@ -4534,7 +4541,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/api/trust-probe/sessions", base))
             .send()
@@ -4551,7 +4558,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/api/trust-probe/sessions/not-a-uuid", base))
             .send()
@@ -4568,7 +4575,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let session_id = Uuid::new_v4();
         let body = serde_json::json!({ "wifiSsid": "Office Wi-Fi" });
         let resp = client
@@ -4588,7 +4595,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_public_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .request(Method::OPTIONS, format!("{}/public/trust-probe", base))
             .send()
@@ -4605,7 +4612,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_public_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/public/trust-probe", base))
             .send()
@@ -4622,7 +4629,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_public_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/public/trust-probe/not-a-uuid", base))
             .send()
@@ -4638,7 +4645,7 @@ mod coverage_boost_v2 {
         let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
         let (base, handle) = spawn_proxy_configured_server(peer).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/_bifrost/trust-probe/proxy-configured", base))
             .send()
@@ -4655,7 +4662,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_proxy_configured_server(peer).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!(
                 "{}/_bifrost/trust-probe/proxy-configured?sid={}&t=tok",
@@ -4675,7 +4682,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_probe_request_server(peer, false).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!(
                 "{}/_bifrost/trust-probe/netcheck?sid={}",
@@ -4695,7 +4702,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_probe_request_server(peer, false).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!(
                 "{}/_bifrost/trust-probe/check?sid={}",
@@ -4715,7 +4722,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_probe_request_server(peer, true).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!(
                 "{}/_bifrost/trust-probe/check?sid={}",
@@ -4736,7 +4743,7 @@ mod coverage_boost_v2 {
         let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 9003));
         let (base, handle) = spawn_probe_request_server(peer, false).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/_bifrost/trust-probe/netcheck", base))
             .send()
@@ -4772,7 +4779,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         // IPv4 host without brackets
         let resp = client.get(format!("{}/ipv4", base)).send().await.unwrap();
         let json: serde_json::Value = resp.json().await.unwrap();
@@ -4816,7 +4823,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/ip", base))
             .header("x-bifrost-peer-ip", "192.168.1.10")
@@ -4855,7 +4862,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/ip", base))
             .header("x-forwarded-for", "10.0.0.1, 10.0.0.2")
@@ -4893,7 +4900,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         // Valid IP
         let resp = client
             .get(format!("{}/ip", base))
@@ -4947,7 +4954,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .post(format!("{}/api/trust-probe/unknown", base))
             .send()
@@ -4964,7 +4971,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_api_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/api/other", base))
             .send()
@@ -4981,7 +4988,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_public_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .request(Method::HEAD, format!("{}/public/trust-probe", base))
             .send()
@@ -4998,7 +5005,7 @@ mod coverage_boost_v2 {
         let state = harness.state();
         let (base, handle) = spawn_trust_probe_public_server(state).await;
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/public/trust-probe/qrcode", base))
             .send()
@@ -5016,7 +5023,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_trust_probe_public_server(state).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .request(
                 Method::HEAD,
@@ -5037,7 +5044,7 @@ mod coverage_boost_v2 {
         let (base, handle) = spawn_trust_probe_public_server(state).await;
         let session_id = Uuid::new_v4();
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!(
                 "{}/public/trust-probe/{}/session",
@@ -5109,7 +5116,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/ip-none", base))
             .send()
@@ -5146,7 +5153,7 @@ mod coverage_boost_v2 {
             }
         });
 
-        let client = reqwest::Client::new();
+        let client = local_reqwest_client();
         let resp = client
             .get(format!("{}/ip-trim", base))
             .header("x-forwarded-for", " 10.0.0.1 , 10.0.0.2 ")

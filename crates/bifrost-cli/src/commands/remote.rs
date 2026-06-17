@@ -44,6 +44,7 @@ const CALLER_USER_AGENT: &str = "bifrost-cli-remote";
 const CONNECTIONS_FILE: &str = "remote-connections.json";
 const CONNECTIONS_KEY_FILE: &str = "remote-connections.key";
 const CALLER_IDENTITY_FILE: &str = "remote-caller-identity.json";
+const REMOTE_JOBS_FILE: &str = "remote-jobs.json";
 const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 const CANCEL_SETTLE_RETRY_DELAYS_MS: [u64; 4] = [200, 500, 1000, 2000];
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 30;
@@ -295,6 +296,27 @@ struct ConnectionsFile {
     connections: Vec<LocalConnection>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteJobRecord {
+    call_id: String,
+    relay_token_encrypted: String,
+    relay_url: String,
+    client_instance_id: Option<String>,
+    device_name: Option<String>,
+    command_preview: Option<String>,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    exit_code: Option<i32>,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteJobsFile {
+    version: u32,
+    jobs: Vec<RemoteJobRecord>,
+}
+
 fn connections_path() -> PathBuf {
     bifrost_storage::data_dir().join(CONNECTIONS_FILE)
 }
@@ -305,6 +327,10 @@ fn connections_key_path() -> PathBuf {
 
 fn caller_identity_path() -> PathBuf {
     bifrost_storage::data_dir().join(CALLER_IDENTITY_FILE)
+}
+
+fn remote_jobs_path() -> PathBuf {
+    bifrost_storage::data_dir().join(REMOTE_JOBS_FILE)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -412,6 +438,119 @@ fn save_connections(connections: &[LocalConnection]) -> bifrost_core::Result<()>
         )))
     })?;
     Ok(())
+}
+
+fn load_remote_jobs() -> bifrost_core::Result<Vec<RemoteJobRecord>> {
+    let path = remote_jobs_path();
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "read {}: {e}",
+            path.display()
+        )))
+    })?;
+    let file: RemoteJobsFile = serde_json::from_str(&content)
+        .map_err(|e| BifrostError::Config(format!("parse {}: {e}", path.display())))?;
+    Ok(file.jobs)
+}
+
+fn save_remote_jobs(jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
+    let path = remote_jobs_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "mkdir {}: {e}",
+                parent.display()
+            )))
+        })?;
+    }
+    let file = RemoteJobsFile {
+        version: 1,
+        jobs: jobs.to_vec(),
+    };
+    let content = serde_json::to_string_pretty(&file)
+        .map_err(|e| BifrostError::Config(format!("serialize remote jobs: {e}")))?;
+    std::fs::write(&path, content).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "write {}: {e}",
+            path.display()
+        )))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("failed to set 0600 permissions on {}: {e}", path.display());
+        }
+    }
+    Ok(())
+}
+
+fn remember_remote_job(record: RemoteJobRecord) -> bifrost_core::Result<()> {
+    let mut jobs = load_remote_jobs()?;
+    jobs.retain(|existing| existing.call_id != record.call_id);
+    jobs.push(record);
+    jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
+    save_remote_jobs(&jobs)
+}
+
+fn resolve_remote_job(call_id: &str) -> bifrost_core::Result<(String, String)> {
+    let jobs = load_remote_jobs()?;
+    let job = jobs
+        .iter()
+        .find(|job| job.call_id == call_id)
+        .ok_or_else(|| {
+            BifrostError::Config(format!(
+                "no local remote job cache for call_id {call_id}; run `bifrost remote job list` to see known jobs, or start the task again with `bifrost remote exec --detach`"
+            ))
+        })?;
+    let token = decrypt_local_secret(&job.relay_token_encrypted).and_then(|bytes| {
+        String::from_utf8(bytes)
+            .map_err(|e| BifrostError::Config(format!("decode cached relay token failed: {e}")))
+    })?;
+    Ok((token, job.relay_url.clone()))
+}
+
+fn update_remote_job_status(
+    call_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+) -> bifrost_core::Result<()> {
+    let mut jobs = load_remote_jobs()?;
+    let Some(job) = jobs.iter_mut().find(|job| job.call_id == call_id) else {
+        return Ok(());
+    };
+    job.status = status.to_string();
+    job.exit_code = exit_code;
+    job.updated_at = now_millis();
+    save_remote_jobs(&jobs)
+}
+
+fn render_remote_job_list(jobs: &[RemoteJobRecord]) {
+    if jobs.is_empty() {
+        println!("No detached remote jobs remembered locally.");
+        return;
+    }
+    println!(
+        "{:<36} {:<10} {:<9} {:<18} COMMAND",
+        "CALL_ID", "STATUS", "EXIT", "DEVICE"
+    );
+    for job in jobs {
+        let exit = job
+            .exit_code
+            .map(|code| code.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "{:<36} {:<10} {:<9} {:<18} {}",
+            truncate(&job.call_id, 36),
+            truncate(&job.status, 10),
+            truncate(&exit, 9),
+            truncate(job.device_name.as_deref().unwrap_or("-"), 18),
+            job.command_preview.as_deref().unwrap_or("-")
+        );
+    }
 }
 
 fn upsert_local_connection(connections: &mut Vec<LocalConnection>, new_conn: LocalConnection) {
@@ -1402,7 +1541,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
 
     if let RemoteCommands::Job { action } = &opts.action {
-        return handle_remote_job_command(&caller, action).await;
+        return handle_remote_job_command(&caller, action, &opts.relay_url).await;
     }
 
     let mut conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
@@ -1577,13 +1716,22 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
     if let RemoteCommands::Exec(exec_args) = &opts.action {
         if exec_args.detach {
+            let now = now_millis();
+            remember_remote_job(RemoteJobRecord {
+                call_id: call_result.call_id.clone(),
+                relay_token_encrypted: encrypt_local_secret(call_result.relay_token.as_bytes())?,
+                relay_url: opts.relay_url.clone(),
+                client_instance_id: Some(conn.client_instance_id.clone()),
+                device_name: Some(conn.device_name.clone()),
+                command_preview: Some(command_summary.command_preview.clone()),
+                status: "running".to_string(),
+                exit_code: None,
+                created_at: now,
+                updated_at: now,
+            })?;
             println!("Detached remote job started");
             println!("call_id={}", call_result.call_id);
-            println!("relay_token={}", call_result.relay_token);
-            println!(
-                "watch: bifrost remote job watch {} --relay-token <relay_token>",
-                call_result.call_id
-            );
+            println!("watch: bifrost remote job watch {}", call_result.call_id);
             return Ok(());
         }
     }
@@ -2862,15 +3010,29 @@ fn build_remote_file_command(
 async fn handle_remote_job_command(
     caller: &CallerRelayClient,
     action: &RemoteJobCommands,
+    default_relay_url: &str,
 ) -> bifrost_core::Result<()> {
     match action {
-        RemoteJobCommands::Status {
-            call_id,
-            relay_token,
-            wait_ms,
-        } => {
+        RemoteJobCommands::List => {
+            let jobs = load_remote_jobs()?;
+            render_remote_job_list(&jobs);
+            Ok(())
+        }
+        RemoteJobCommands::Status { call_id, wait_ms } => {
+            let (resolved_token, relay_url) = resolve_remote_job(call_id)?;
+            let job_caller;
+            let caller = if !relay_url.is_empty() && relay_url != default_relay_url {
+                job_caller = CallerRelayClient::new(&relay_url);
+                &job_caller
+            } else {
+                caller
+            };
             match caller
-                .poll_call_terminal_status(call_id, relay_token, Duration::from_millis(*wait_ms))
+                .poll_call_terminal_status(
+                    call_id,
+                    &resolved_token,
+                    Duration::from_millis(*wait_ms),
+                )
                 .await?
             {
                 Some(status) => {
@@ -2881,38 +3043,49 @@ async fn handle_remote_job_command(
                     if let Some(duration_ms) = status.duration_ms {
                         println!("duration_ms={duration_ms}");
                     }
+                    update_remote_job_status(call_id, &status.status, status.exit_code)?;
                 }
                 None => {
                     println!("status=running");
                     println!("call_id={call_id}");
+                    update_remote_job_status(call_id, "running", None)?;
                 }
             }
             Ok(())
         }
         RemoteJobCommands::Logs {
             call_id,
-            relay_token,
             output_file,
             no_verify_digest,
         }
         | RemoteJobCommands::Watch {
             call_id,
-            relay_token,
             output_file,
             no_verify_digest,
         } => {
+            let (resolved_token, relay_url) = resolve_remote_job(call_id)?;
+            let job_caller;
+            let caller = if !relay_url.is_empty() && relay_url != default_relay_url {
+                job_caller = CallerRelayClient::new(&relay_url);
+                &job_caller
+            } else {
+                caller
+            };
             let prefs = StreamingPrefs {
                 stream: true,
                 output_file: output_file.as_ref().map(PathBuf::from),
                 resume_call_id: Some(call_id.clone()),
-                resume_relay_token: Some(relay_token.clone()),
+                resume_relay_token: Some(resolved_token.clone()),
                 no_verify_digest: *no_verify_digest,
                 interactive: false,
                 stdin: false,
             };
-            let result = run_streaming_dispatch(caller, call_id, relay_token, &prefs).await?;
-            if matches!(action, RemoteJobCommands::Watch { .. }) && result.exit_code != 0 {
-                std::process::exit(result.exit_code);
+            let result = run_streaming_dispatch(caller, call_id, &resolved_token, &prefs).await?;
+            if matches!(action, RemoteJobCommands::Watch { .. }) {
+                update_remote_job_status(call_id, "exited", Some(result.exit_code))?;
+                if result.exit_code != 0 {
+                    std::process::exit(result.exit_code);
+                }
             }
             Ok(())
         }
@@ -8062,6 +8235,21 @@ mod coverage_boost {
         }
     }
 
+    fn sample_remote_job(call_id: &str, relay_url: &str, token: &str) -> RemoteJobRecord {
+        RemoteJobRecord {
+            call_id: call_id.to_string(),
+            relay_token_encrypted: encrypt_local_secret(token.as_bytes()).expect("encrypt token"),
+            relay_url: relay_url.to_string(),
+            client_instance_id: Some("client-1".to_string()),
+            device_name: Some("device".to_string()),
+            command_preview: Some("cargo test".to_string()),
+            status: "running".to_string(),
+            exit_code: None,
+            created_at: 10,
+            updated_at: 10,
+        }
+    }
+
     // --- Base64 helpers and fingerprints ---
 
     #[test]
@@ -8447,6 +8635,63 @@ mod coverage_boost {
             let connections = vec![sample_local_connection("client-1", "https://relay-a")];
             save_connections(&connections).expect("save");
             let _loaded = load_connections().expect("load");
+        });
+    }
+
+    #[test]
+    fn load_remote_jobs_missing_file_returns_empty_vec() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let _ = std::fs::remove_file(remote_jobs_path());
+            let loaded = load_remote_jobs().expect("load remote jobs");
+            assert!(loaded.is_empty());
+        });
+    }
+
+    #[test]
+    fn remember_remote_job_persists_encrypted_token_and_resolves_by_call_id() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let _ = std::fs::remove_file(remote_jobs_path());
+            remember_remote_job(sample_remote_job("call-1", "https://relay-a", "tok-1"))
+                .expect("remember job");
+
+            let jobs = load_remote_jobs().expect("load remote jobs");
+            assert_eq!(jobs.len(), 1);
+            assert_ne!(jobs[0].relay_token_encrypted, "tok-1");
+
+            let (token, relay_url) = resolve_remote_job("call-1").expect("resolve job");
+            assert_eq!(token, "tok-1");
+            assert_eq!(relay_url, "https://relay-a");
+        });
+    }
+
+    #[test]
+    fn resolve_remote_job_without_cache_returns_actionable_error() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let _ = std::fs::remove_file(remote_jobs_path());
+            let err = resolve_remote_job("missing-call").expect_err("resolve should fail");
+            let msg = err.to_string();
+            assert!(msg.contains("no local remote job cache"));
+            assert!(msg.contains("bifrost remote job list"));
+        });
+    }
+
+    #[test]
+    fn update_remote_job_status_persists_exit_code() {
+        with_connections_lock(|| {
+            init_test_data_dir();
+            let _ = std::fs::remove_file(remote_jobs_path());
+            remember_remote_job(sample_remote_job("call-2", "https://relay-a", "tok-2"))
+                .expect("remember job");
+
+            update_remote_job_status("call-2", "exited", Some(7)).expect("update status");
+
+            let jobs = load_remote_jobs().expect("load remote jobs");
+            assert_eq!(jobs[0].status, "exited");
+            assert_eq!(jobs[0].exit_code, Some(7));
+            assert!(jobs[0].updated_at >= jobs[0].created_at);
         });
     }
 

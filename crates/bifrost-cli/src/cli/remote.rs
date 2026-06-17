@@ -814,16 +814,12 @@ pub struct RemoteCommandExecArgs {
 
 #[derive(Subcommand, Clone, Debug)]
 pub enum RemoteJobCommands {
+    #[command(about = "List locally remembered detached remote exec jobs")]
+    List,
     #[command(about = "Poll a detached remote exec job until a terminal event or a short timeout")]
     Status {
         #[arg(help = "Remote call id returned by `remote exec --detach`")]
         call_id: String,
-        #[arg(
-            long = "relay-token",
-            value_name = "TOKEN",
-            help = "Relay token returned by `remote exec --detach`"
-        )]
-        relay_token: String,
         #[arg(
             long = "wait-ms",
             default_value_t = 1500,
@@ -835,12 +831,6 @@ pub enum RemoteJobCommands {
     Logs {
         #[arg(help = "Remote call id returned by `remote exec --detach`")]
         call_id: String,
-        #[arg(
-            long = "relay-token",
-            value_name = "TOKEN",
-            help = "Relay token returned by `remote exec --detach`"
-        )]
-        relay_token: String,
         #[arg(
             long = "output-file",
             value_name = "PATH",
@@ -854,12 +844,6 @@ pub enum RemoteJobCommands {
     Watch {
         #[arg(help = "Remote call id returned by `remote exec --detach`")]
         call_id: String,
-        #[arg(
-            long = "relay-token",
-            value_name = "TOKEN",
-            help = "Relay token returned by `remote exec --detach`"
-        )]
-        relay_token: String,
         #[arg(
             long = "output-file",
             value_name = "PATH",
