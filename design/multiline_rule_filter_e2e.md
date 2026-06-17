@@ -6,11 +6,11 @@
 - 用 mock HTTP echo 服务作为上游，通过回显请求头、路径和响应头，直接验证规则是否真正生效。
 
 ## 实现逻辑
-- 在 `e2e-tests/rules/regression/` 新增专用规则夹具，使用两个 `line\`...\`` 规则块：
-- 一个规则块负责无条件转发到 mock HTTP echo 服务，保证所有测试请求都能稳定到达上游。
-- 一个规则块负责带 `includeFilter` / `excludeFilter` 的请求头与响应头修改，验证过滤条件命中时才生效。
+- 在 `e2e-tests/rules/regression/line_block_filter_effect.txt` 提供专用规则夹具，使用两个 `line\`...\`` 规则块：
+- 一个规则块负责将 `line-block-filter.local` 无条件转发到 mock HTTP echo 服务（端口由 `__ECHO_HTTP_PORT__` 占位符在运行期渲染），保证所有测试请求都能稳定到达上游。
+- 一个规则块负责带 `includeFilter://m:GET`、`includeFilter:///api/`、`excludeFilter:///api/internal/` 的请求头与响应头修改（`reqHeaders://X-Line-Block-Request=matched`、`resHeaders://X-Line-Block-Response=matched`），验证过滤条件命中时才生效。
 - 在 `e2e-tests/tests/` 新增专项 shell E2E 脚本：
-- 启动独立数据目录的 Bifrost 代理。
+- 启动独立数据目录（`$BIFROST_DATA_DIR=.bifrost-e2e-line-block-filter-<port>-<pid>`）的 Bifrost 代理，并以 `--skip-cert-check --unsafe-ssl --no-system-proxy --rules-file <fixture>` 启动；若 `target/release/bifrost` 未构建则脚本会执行 `cargo build --release --bin bifrost`。
 - 启动 mock HTTP echo 服务。
 - 通过代理对同一域名发起多组请求，覆盖：
 - `GET /api/...` 命中 include 条件，验证请求头和响应头都被修改。
@@ -36,7 +36,7 @@
 - `bash e2e-tests/tests/test_multiline_rule_filter_e2e.sh`
 - 新脚本使用 mock 服务黑盒验证多行规则的真实运行效果，而不是只检查解析结果。
 - 断言覆盖请求期与响应期两个阶段，避免只验证单侧行为。
-- 将 `test_multiline_rule_filter_e2e.sh` 纳入 `scripts/run_all_e2e.sh` 的稳定 shell 回归集合，确保日常默认回归入口持续覆盖该场景。
+- 将 `test_multiline_rule_filter_e2e.sh` 纳入 `scripts/run_all_e2e.sh` 中的 `STABLE_SHELL_TESTS` 列表，确保日常默认回归入口持续覆盖该场景。
 - 同步更新 `e2e-tests/rules/COVERAGE.md`，记录多行规则过滤器回归夹具已经补充。
 
 ## 校验要求
