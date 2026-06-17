@@ -135,6 +135,8 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
   - 返回 `read_progress(data_dir)`。stale active（默认 120s 未更新）归一化为 `Failed`（提示“升级进程无响应”）。
 - 复用 `state.rs` 已有 `data_dir`（与 `version_check` 同源 `bifrost_storage::data_dir`）。
 - Admin 不直接执行升级，规避“自杀式重启”问题；进度文件在重启前由子进程持续更新，重启后端口恢复，前端 `GET progress` 读到 `Completed`。
+- 后台 `self-update` 不能复用交互式 `upgrade` 的“当前二进制已是 latest 就直接返回”行为。现场故障中，9900 端口的运行进程仍是 `0.0.104`，但 `/Users/eden/.local/bin/bifrost` 已被替换为 `0.0.105`；Admin 再 spawn `current_exe()` 时，子进程运行的是磁盘上的 `0.0.105`，因此普通 `upgrade` 会判断“already latest”并退出，导致旧 daemon 不重启。后台路径必须在 `restart=true` 且 `latest <= current binary version` 时仍执行 `maybe_restart_running_proxy`，让运行中的旧进程加载磁盘新版本。
+- Admin spawn 后必须保留后台升级子进程诊断：stdout/stderr 追加到 `logs/upgrade-background.log`，并在父进程仍存活时等待子进程退出，避免“下载 100%、安装 0%”时既没有日志也留下 defunct child。
 
 > 安全：升级触发是高权限操作，沿用 admin 现有同源/鉴权中间件（与 `version-check`、`proxy/system` 一致），不新增公网暴露面。
 
@@ -157,6 +159,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
   - 升级进入 `Restarting` 后，后端会断开（代理重启）。前端 `pushService` 现有 `onConnectionChange` 会先 disconnected 再 reconnected。
   - 监听“在升级态下检测到一次 disconnected→reconnected”后，或轮询读到 `Completed` 后，执行**一次** `window.location.reload()`。用 sessionStorage 标志位（`bifrost-upgrade-reload-pending`）防止重复刷新与刷新风暴。
   - 刷新后清理标志位与进度（`Completed` 由后续 `version-check` 自然归零；前端不再展示更新入口）。
+  - 若托盘或其它客户端已经消费并清理了 terminal progress，WebView 可能在 active upgrade 状态下重新读到 `Idle`。此时不应继续展示“Working…”，而应退出升级态：如果过程中观察到连接断开，执行一次 reload；否则强制刷新 version-check，以恢复弹窗和按钮状态。
 - `useGlobalDataSync` 在初始化时检查 `sessionStorage` 升级标志，若存在且后端已恢复，确保只刷新一次。
 
 ### 7. 文件行数与边界
@@ -179,6 +182,10 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 - **bifrost-cli / upgrade_background**：
   - `ProgressSink` 在各阶段写出预期 `phase`；下载回调把 `percent` 写入文件。
   - 失败路径写 `Failed` + `error`。
+  - `self-update` 在磁盘二进制已是 latest 时仍触发 restart，避免旧 daemon 继续以旧内存版本运行。
+- **bifrost-cli / upgrade skills**：
+  - `upgrade_post_install_skill_args_cover_all_supported_tools` 断言 upgrade 后置安装命令固定为 `install-skill --tool all -y`。
+  - `upgrade_post_install_skill_messages_cover_all_statuses` 覆盖 success/failure/timeout 文案，确保失败只提示手动重试而不回滚已成功安装的新二进制。
 - **bifrost-admin / system handler**：
   - 无更新时 `POST /api/system/upgrade` → 409。
   - 已有 active 升级 → 409。
@@ -189,11 +196,12 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 按 `.trae/skills/e2e-test` 流程：
 
 1. 编译最新 Bifrost 二进制。
-2. 临时数据目录启动服务（`--no-system-proxy`、避开 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`）。
+2. 临时数据目录启动服务（`--no-system-proxy`、避开 9900 端口、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`）。
 3. `GET /_bifrost/api/system/version-check`：构造/注入一个“有新版本”的 `version_cache.json`，断言 `has_update = true`。
 4. `POST /_bifrost/api/system/upgrade`（用测试版本覆盖 env 走 `test_upgrade_latest_version_override`，避免真实下载 GitHub），断言 202。
 5. 轮询 `GET /_bifrost/api/system/upgrade/progress`，断言 phase 由 `Checking`→…→ 终态推进，字段结构正确。
 6. 无更新时 `POST upgrade` 断言 409。
+7. 直接执行 `bifrost self-update --source admin`，并将测试 latest 设为当前磁盘二进制版本，断言即使无需下载/安装也会重启当前数据目录下的 daemon，且 `upgrade-progress.json` 写入 `completed`。
 
 > E2E 用测试钩子避免真实联网下载，验证的是 API 协议、进度文件读写、状态机推进，而非真实二进制替换。
 
@@ -205,6 +213,8 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 - Web UI 弹出版本管理弹窗，右下角“立即更新 / 稍后提示”两个按钮存在且位置正确。
 - 点“稍后提示”后本会话不再自动弹窗。
 - 点“立即更新”展示下载进度 + 安装进度；安装后代理自动重启；重启后 Web UI 自动刷新一次且只刷新一次。
+- WebView 升级 active 状态下若 `GET /upgrade/progress` 返回 `idle`，弹窗不能卡在 Working；无连接断开时强制刷新 version-check，有连接断开时只 reload 一次。
+- 手动 `bifrost upgrade -y --restart` 与托盘/Admin 后台升级都在新二进制安装成功后自动覆盖安装 `bifrost` 和 `bifrost-remote` skills；测试必须使用临时 HOME/USERPROFILE、`BIFROST_INSTALL_SKILL_SOURCE=embedded`、`BIFROST_INSTALL_SKILL_DIR`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免污染真实 AI tool skills 目录、启动 Tray 或打开登录页。
 - 升级失败（断网/坏归档）时托盘与 Web UI 都给出失败提示并可重试。
 - 双主题（Light/Dark）下弹窗与进度条样式正确。
 

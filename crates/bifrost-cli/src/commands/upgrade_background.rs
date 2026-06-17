@@ -16,7 +16,7 @@ use std::time::Instant;
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 
-use super::upgrade::{download_progress_line, handle_upgrade};
+use super::upgrade::{download_progress_line, handle_background_upgrade};
 
 struct ProgressSink {
     data_dir: PathBuf,
@@ -99,9 +99,11 @@ pub fn handle_upgrade_background(target: Option<String>, source: String) {
 
     emit(|sink| base(sink, UpgradePhase::Checking, "Checking for updates…"));
 
-    // `handle_upgrade(force = true, restart = true)` is fully unattended: it
-    // skips the confirmation prompt and auto-restarts the running proxy.
-    let result = handle_upgrade(true, true);
+    // This background path is fully unattended: it skips the confirmation
+    // prompt and auto-restarts the running proxy. It also restarts when the
+    // on-disk binary is already current but the running daemon still serves an
+    // older in-memory version.
+    let result = handle_background_upgrade();
 
     match &result {
         Ok(()) => {

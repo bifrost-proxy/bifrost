@@ -190,6 +190,7 @@ export const useVersionStore = create<VersionState>()(
         }
         pollTimer = setInterval(async () => {
           try {
+            const previousPhase = get().upgradePhase;
             const progress: UpgradeProgress = await getUpgradeProgressApi();
             set({
               upgradePhase: progress.phase,
@@ -205,6 +206,20 @@ export const useVersionStore = create<VersionState>()(
             } else if (progress.phase === "failed") {
               get().stopPollUpgradeProgress();
               set({ upgrading: false });
+            }
+            if (progress.phase === "idle" && isActivePhase(previousPhase)) {
+              get().stopPollUpgradeProgress();
+              set({
+                upgrading: false,
+                upgradePercent: null,
+                upgradeMessage: "",
+                upgradeError: null,
+              });
+              if (sawDisconnect) {
+                triggerUpgradeReloadOnce();
+              } else {
+                void get().checkVersion({ forceRefresh: true, skipCache: true });
+              }
             }
           } catch (error) {
             // A connection drop during Restarting is expected (proxy restart).

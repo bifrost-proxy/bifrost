@@ -1389,7 +1389,19 @@ fn upgrade_manual(
     Ok(install_outcome)
 }
 
+pub fn handle_background_upgrade() -> Result<(), BifrostError> {
+    handle_upgrade_inner(true, true, true)
+}
+
 pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
+    handle_upgrade_inner(force, restart, false)
+}
+
+fn handle_upgrade_inner(
+    force: bool,
+    restart: bool,
+    restart_if_already_latest: bool,
+) -> Result<(), BifrostError> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1461,6 +1473,16 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
             .bright_green()
             .bold()
         );
+        if should_restart_when_already_latest(restart, restart_if_already_latest) {
+            let install_method = detect_install_method();
+            let restart_executable = restart_executable_for_install_method(&install_method)?;
+            println!(
+                "{}",
+                "  On-disk binary is current; restarting any running proxy so it adopts this version."
+                    .bright_cyan()
+            );
+            maybe_restart_running_proxy(true, &restart_executable)?;
+        }
         return Ok(());
     }
 
@@ -1522,6 +1544,10 @@ pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
     }
 
     Ok(())
+}
+
+fn should_restart_when_already_latest(restart: bool, restart_if_already_latest: bool) -> bool {
+    restart && restart_if_already_latest
 }
 
 fn maybe_restart_running_proxy(
@@ -2067,6 +2093,14 @@ mod tests {
             }
             _ => panic!("Expected Upgrade command"),
         }
+    }
+
+    #[test]
+    fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
+        assert!(!should_restart_when_already_latest(false, false));
+        assert!(!should_restart_when_already_latest(true, false));
+        assert!(!should_restart_when_already_latest(false, true));
+        assert!(should_restart_when_already_latest(true, true));
     }
 
     #[test]
