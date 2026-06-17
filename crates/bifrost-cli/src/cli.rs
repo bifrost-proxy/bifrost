@@ -2203,6 +2203,9 @@ pub enum SyncCommands {
     Login {
         #[arg(
             long,
+            value_name = "TOKEN",
+            num_args = 0..=1,
+            default_missing_value = "",
             help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
         )]
         token: Option<String>,

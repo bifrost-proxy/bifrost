@@ -354,6 +354,46 @@ fn sync_login_direct_options_parse() {
         _ => panic!("expected sync login token-only command"),
     }
 
+    let cli = Cli::try_parse_from(["bifrost", "sync", "login", "--token"])
+        .expect("sync login missing token value should reach business validation");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: None,
+                },
+        }) => {
+            assert_eq!(token, "");
+        }
+        _ => panic!("expected sync login command with empty token placeholder"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "sync",
+        "login",
+        "--token",
+        "--url",
+        "https://relay.example.test/",
+    ])
+    .expect("sync login missing token value should still parse following url");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: Some(url),
+                },
+        }) => {
+            assert_eq!(token, "");
+            assert_eq!(url, "https://relay.example.test/");
+        }
+        _ => panic!("expected sync login command with empty token and custom url"),
+    }
+
     let cli = Cli::try_parse_from([
         "bifrost",
         "sync",
