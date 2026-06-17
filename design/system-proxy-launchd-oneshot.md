@@ -2,7 +2,7 @@
 
 ## 状态
 
-待 review。本文只定义可执行实施方案，review 通过前不修改运行行为。
+已落地（2026-06-17）。one-shot plist、`SystemProxyLaunchdMode`、`needs_upgrade_reason`、cleanup-daemon 单次退出与 lifecycle helper 兜底均已在 `bifrost-core` / `bifrost-cli` 中实现，并被 E2E 与 human_tests 覆盖。本文档保留为设计纪要；后续行为变更需要新的设计单。
 
 ## 背景
 
@@ -122,7 +122,7 @@ plist 同时设置 `RunAtLoad=true` 和 `KeepAlive=true`。这保证 cleanup dae
 - 移除 `KeepAlive=true`。
 - 不写 `OnDemand`、`LaunchOnlyOnce`、`SuccessfulExit`。
 - 保留 `ProgramArguments`、`StandardOutPath`、`StandardErrorPath` 和 `BIFROST_LAUNCHD_INSTALLED_VERSION`。
-- 可选新增环境变量 `BIFROST_LAUNCHD_MODE=oneshot`，便于日志和未来诊断；如果新增，必须纳入 plist 解析和测试。
+- 可选新增环境变量 `BIFROST_LAUNCHD_MODE=oneshot`，便于日志和未来诊断（planned, not yet shipped as of 2026-06-17；当前实现仅写入 `BIFROST_LAUNCHD_INSTALLED_VERSION`）。
 
 预期片段：
 
@@ -148,20 +148,7 @@ plist 同时设置 `RunAtLoad=true` 和 `KeepAlive=true`。这保证 cleanup dae
 - `set_data_dir(data_dir.clone())` 仍需保留，确保后续读取 runtime/proxy_state 使用同一 data dir。
 - `installed_version` 继续记录到日志，用于定位用户机器上的旧 plist 或旧二进制。
 
-建议将 one-shot 主逻辑抽成可测试函数：
-
-```text
-run_system_proxy_launchd_oneshot(data_dir, installed_version) -> Result<OneShotOutcome>
-```
-
-`OneShotOutcome` 至少包含：
-
-- `Recovered`
-- `SkippedLiveRuntime`
-- `SkippedLiveProxyTarget`
-- `Failed`
-
-如果不想扩大 public API，可以先作为 `system_proxy.rs` 内部 helper，但测试要能覆盖返回路径。
+实际实现把 one-shot 主逻辑保留在 `bifrost-core::system_proxy_launchd::recover_if_no_live_runtime_with_startup_retry(data_dir) -> Result<SystemProxyLaunchdRecoveryOutcome>`，返回 `Recovered` / `Skipped` 两种结果（live runtime 与 live proxy target 命中都合并为 `Skipped`，失败通过 `Err` 上抛并在 CLI 入口 `warn!` 记录）。CLI 侧 `run_system_proxy_cleanup_daemon` 直接消费该函数，无需新增独立函数名（细分为 `SkippedLiveRuntime` / `SkippedLiveProxyTarget` / `Failed` 的变体为 planned, not yet shipped as of 2026-06-17）。
 
 退出码建议：
 
@@ -212,18 +199,20 @@ one-shot 安装时如果 Bifrost 主服务仍在运行，`recover_if_no_live_run
 - 因此 `installed_version` 只作为诊断字段和历史安装版本展示，不应单独触发 `needs_upgrade` 或 GUI 授权重装。
 - 即使版本号相同，也需要考虑 plist 内容模式变化。建议引入 `CURRENT_VERSION` 之外的 plist schema/mode 检测，或让 `needs_upgrade` 在解析到旧 `KeepAlive=true` 时返回 true。
 
-推荐数据模型扩展：
+实际落地的数据模型（`crates/bifrost-core/src/system_proxy_launchd.rs`）：
 
 ```text
 SystemProxyLaunchdStatus {
   installed_mode: Option<SystemProxyLaunchdMode>,
+  needs_upgrade: bool,
   needs_upgrade_reason: Option<String>,
+  ..
 }
 
-SystemProxyLaunchdMode = OneShot | KeepAlive | Unknown
+SystemProxyLaunchdMode = OneShot | KeepAlive | Unknown   // serde rename_all snake_case
 ```
 
-如果希望避免 API schema 变化，也可以只在内部 `parse_installed_plist` 增加 `keep_alive: Option<bool>`，并在 message 中说明 `Installed cleanup LaunchDaemon uses legacy KeepAlive mode`。但推荐显式加 mode，Web UI 更容易展示。
+`parse_installed_plist` 已识别 `keep_alive` / `run_at_load`，`launchd_needs_upgrade_reason` 给出可读升级原因。
 
 升级判定规则：
 
@@ -366,9 +355,9 @@ one-shot 与主进程、lifecycle helper 可能在短时间内同时观察同一
 
 ### 可选增强
 
-- `installed_mode` 字段和 UI 展示。
-- debug-only KeepAlive fallback。
-- one-shot outcome 结构化日志字段。
+- `installed_mode` 字段：已实现（含 serde 与状态返回）。UI 展示沿用 message/needs_upgrade_reason，未单独渲染 mode 徽标（planned, not yet shipped as of 2026-06-17）。
+- debug-only KeepAlive fallback：planned, not yet shipped as of 2026-06-17。
+- one-shot outcome 结构化日志字段：已落地 `elapsed_ms`，`outcome` 字段仍为 planned, not yet shipped as of 2026-06-17。
 
 ## 验证计划
 
