@@ -15,8 +15,10 @@ Remote Invoke 的 `Recent Calls` 是目标客户端本地 Settings 页面展示�
 - 写入路径不先读取全量历史；只 append 当前快照并更新轻量 meta
 - `RemoteInvokeWorker::new()` 不读取 call history；列表/详情 API 请求到来时才按需读取 JSONL
 - worker 内存不保留历史列表；正在执行的 call 仅在 `ActiveCallControl` 中保存临时快照，结束或取消后释放
-- 单个 `relay_url + client_instance_id` 最终落盘最多保留 `remote_invoke.max_records`，默认 1000 条；超出或发现坏 JSONL 行时触发 compaction，按 `call_id` 只保留最新快照，再按 `started_at` 删除最旧记录
-- `/api/remote-invoke/calls` 支持 `limit` 与 `before` 游标分页；前端 Recent Calls 默认只读取一页
+- 单个 `relay_url + client_instance_id` 最终落盘最多保留 `remote_invoke.max_records`，默认 1000 条；硬上限同样为 1000（`effective_max_records` 在源码中将配置值 clamp 到 `[1, 1000]`），超出或发现坏 JSONL 行时触发 compaction，按 `call_id` 只保留最新快照，再按 `started_at` 删除最旧记录
+- 保留窗口由 `remote_invoke.retention_days`（默认 90 天）控制，读取与 upsert 路径均会先按时间裁剪再按上限裁剪
+- 单行 JSONL 大于 2 MiB、整文件超过 256 MiB 时直接丢弃/重建，避免历史日志被超大快照拖坏
+- `/api/remote-invoke/calls` 支持 `limit`（默认 100，硬性 clamp 到 `[1, 200]`）与 `before` 游标分页；前端 Recent Calls 默认只读取一页。同路由的 `DELETE` 清空当前 relay/client 全部本地 Recent Calls，`GET /api/remote-invoke/calls/{call_id}` 拉取单条详情时同样走 on-demand JSONL 读取
 
 ## 依赖项
 
@@ -70,3 +72,11 @@ Remote Invoke 的 `Recent Calls` 是目标客户端本地 Settings 页面展示�
 - 更新 `human_tests/remote-invoke.md`
 - 更新 `human_tests/readme.md`
 - 不涉及外部 README/API 参数变更
+
+## 实现现状校验（2026-06-16）
+
+- `CallHistoryStore` 实现位于 `crates/bifrost-admin/src/remote_invoke/call_history_store.rs`，构造时直接删除遗留 `remote_invoke_call_history.json`，工作目录为 `BIFROST_DATA_DIR/admin/remote_invoke_call_history/<hash>.jsonl`（`hash` 由 `relay_url + client_instance_id` 的 64-bit `DefaultHasher` 生成）。
+- Worker 端调用点在 `crates/bifrost-admin/src/remote_invoke/worker.rs`：`RemoteInvokeWorker::new` 仅 `Arc::new(CallHistoryStore::new(...))`，不读取历史；`list_calls_page` / `get_call` / `clear_calls` 在被 `handlers/remote_invoke.rs` 的 HTTP 处理函数命中时才走 JSONL 读取。
+- HTTP 入口：`/api/remote-invoke/calls`（GET 列表、DELETE 清空）、`/api/remote-invoke/calls/{call_id}`（GET 详情），`limit` 默认 100、clamp 到 `[1, 200]`，`before` 解析为 `u64`。
+- `ActiveCallControl` 仅在内存保存当前调用快照（`call_info`、`stdin_tx`、`task` 等），命令结束/取消后释放；历史链路完全走 `CallHistoryStore::upsert` → JSONL append。
+- 上述实现条目均与文档一致，没有标记 "planned" 的项目。
