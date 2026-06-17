@@ -3497,3 +3497,727 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use serde_json::{json, Value};
+
+    // --- parse_send_sse additional coverage ---
+
+    #[test]
+    fn parse_send_sse_empty_input_returns_defaults() {
+        let parsed = parse_send_sse("");
+        assert!(parsed.conversation_id.is_none());
+        assert!(parsed.turn_exchange_id.is_none());
+        assert!(parsed.event_types.is_empty());
+        assert!(parsed.sse_detail.is_none());
+    }
+
+    #[test]
+    fn parse_send_sse_ignores_non_data_and_invalid_json_lines() {
+        let sse = "event: message\n\n data: not-json\n\n data: {\"incomplete\": true";
+        let parsed = parse_send_sse(sse);
+        assert!(parsed.conversation_id.is_none());
+        assert!(parsed.turn_exchange_id.is_none());
+        assert!(parsed.event_types.is_empty());
+        assert!(parsed.sse_detail.is_none());
+    }
+
+    #[test]
+    fn parse_send_sse_defaults_type_to_patch_when_missing() {
+        let sse = "data: {\"conversation_id\":\"c1\",\"turn_exchange_id\":\"t1\"}\n\n";
+        let parsed = parse_send_sse(sse);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("c1"));
+        assert_eq!(parsed.turn_exchange_id.as_deref(), Some("t1"));
+        assert_eq!(parsed.event_types, vec!["patch".to_string()]);
+    }
+
+    #[test]
+    fn parse_send_sse_keeps_first_ids_even_when_later_events_change() {
+        let sse = "data: {\"type\":\"delta\",\"conversation_id\":\"c1\",\"turn_exchange_id\":\"t1\"}\n\n"
+            .to_string()
+            + "data: {\"type\":\"delta\",\"conversation_id\":\"c2\",\"turn_exchange_id\":\"t2\"}\n\n";
+        let parsed = parse_send_sse(&sse);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("c1"));
+        assert_eq!(parsed.turn_exchange_id.as_deref(), Some("t1"));
+        assert_eq!(
+            parsed.event_types,
+            vec!["delta".to_string(), "delta".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_send_sse_collects_multiple_message_ids() {
+        let sse = "data: {\"type\":\"delta\",\"conversation_id\":\"c1\",\"message\":{\"id\":\"m1\"}}\n\n"
+            .to_string()
+            + "data: {\"type\":\"delta\",\"conversation_id\":\"c1\",\"message\":{\"id\":\"m2\"}}\n\n";
+        let parsed = parse_send_sse(&sse);
+        let mapping = parsed
+            .sse_detail
+            .as_ref()
+            .and_then(|v| v.get("mapping"))
+            .and_then(Value::as_object)
+            .expect("mapping");
+        assert!(mapping.contains_key("m1"));
+        assert!(mapping.contains_key("m2"));
+    }
+
+    // --- format_send_diagnostic coverage ---
+
+    #[test]
+    fn format_send_diagnostic_includes_page_and_defaults() {
+        let diag = json!({
+            "url": "https://chatgpt.com/",
+        });
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("page=https://chatgpt.com/"));
+        assert!(s.contains("composer=NOT_FOUND"));
+        assert!(s.contains("sendButton=NOT_FOUND"));
+    }
+
+    #[test]
+    fn format_send_diagnostic_marks_composer_hidden_disabled_and_empty() {
+        // hidden
+        let hidden = json!({
+            "composerFound": true,
+            "composerVisible": false,
+        });
+        let s = format_send_diagnostic(&hidden);
+        assert!(s.contains("composer=HIDDEN"));
+
+        // disabled
+        let disabled = json!({
+            "composerFound": true,
+            "composerVisible": true,
+            "composerDisabled": true,
+        });
+        let s = format_send_diagnostic(&disabled);
+        assert!(s.contains("composer=DISABLED"));
+
+        // empty
+        let empty = json!({
+            "composerFound": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerHasText": false,
+        });
+        let s = format_send_diagnostic(&empty);
+        assert!(s.contains("composer=EMPTY"));
+    }
+
+    #[test]
+    fn format_send_diagnostic_includes_text_preview_when_composer_ok() {
+        let diag = json!({
+            "composerFound": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerHasText": true,
+            "composerTextPreview": "hello world",
+        });
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("composer=OK"));
+        assert!(s.contains("hello world"));
+    }
+
+    #[test]
+    fn format_send_diagnostic_covers_send_button_states() {
+        let not_found = json!({});
+        let s = format_send_diagnostic(&not_found);
+        assert!(s.contains("sendButton=NOT_FOUND"));
+
+        let hidden = json!({
+            "sendButtonFound": true,
+            "sendButtonVisible": false,
+        });
+        let s = format_send_diagnostic(&hidden);
+        assert!(s.contains("sendButton=HIDDEN"));
+
+        let disabled = json!({
+            "sendButtonFound": true,
+            "sendButtonVisible": true,
+            "sendButtonDisabled": true,
+        });
+        let s = format_send_diagnostic(&disabled);
+        assert!(s.contains("sendButton=DISABLED"));
+
+        let ok = json!({
+            "sendButtonFound": true,
+            "sendButtonVisible": true,
+            "sendButtonDisabled": false,
+        });
+        let s = format_send_diagnostic(&ok);
+        assert!(s.contains("sendButton=OK"));
+    }
+
+    #[test]
+    fn format_send_diagnostic_includes_stop_busy_and_banners() {
+        let diag = json!({
+            "stopButtonVisible": true,
+            "busyCount": 3,
+            "errorBanners": ["Too many requests", ""],
+        });
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("stopButton=VISIBLE"));
+        assert!(s.contains("busyElements=3"));
+        assert!(s.contains("banner=\"Too many requests\""));
+        assert!(!s.contains("banner=\"\""));
+    }
+
+    // --- target_page_matches / terminal_mismatch / error ---
+
+    #[test]
+    fn target_page_matches_false_when_not_ready() {
+        let state = json!({"readyState": "loading"});
+        assert!(!target_page_matches(&state, None, false));
+    }
+
+    #[test]
+    fn target_page_matches_requires_visible_composer_when_requested() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": "c1",
+            "visibleComposerCount": 0,
+        });
+        assert!(target_page_matches(&state, Some("c1"), false));
+        assert!(!target_page_matches(&state, Some("c1"), true));
+    }
+
+    #[test]
+    fn target_page_matches_for_new_conversation_without_id() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": null,
+            "visibleComposerCount": 1,
+        });
+        assert!(target_page_matches(&state, None, true));
+        assert!(!target_page_matches(&state, Some("c1"), true));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_false_when_not_ready() {
+        let state = json!({
+            "readyState": "loading",
+            "conversationId": "c1",
+        });
+        assert!(!target_page_is_terminal_mismatch(&state, Some("c2")));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_true_when_actual_has_id_but_expected_none() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": "c1",
+        });
+        assert!(target_page_is_terminal_mismatch(&state, None));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_false_when_expected_some_actual_none_and_not_new_page() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": null,
+            "pageKind": "conversation",
+        });
+        assert!(!target_page_is_terminal_mismatch(&state, Some("c1")));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_true_when_body_has_fatal_error() {
+        let state = json!({
+            "readyState": "complete",
+            "bodyText": "HTTP 500 Internal Server Error",
+        });
+        assert!(target_page_is_terminal_mismatch(&state, None));
+    }
+
+    #[test]
+    fn target_page_error_includes_body_hint_for_fatal_error() {
+        let state = json!({
+            "url": "https://chatgpt.com/",
+            "readyState": "complete",
+            "pageKind": "conversation",
+            "bodyText": "Too many requests",
+        });
+        let err = target_page_error(&state, Some("c1"));
+        assert!(err.contains("browser_wrong_page"));
+        assert!(err.contains("body_error="));
+    }
+
+    #[test]
+    fn target_page_error_omits_body_hint_when_body_ok() {
+        let state = json!({
+            "url": "https://chatgpt.com/c/c1",
+            "readyState": "complete",
+            "pageKind": "conversation",
+            "bodyText": "normal page",
+        });
+        let err = target_page_error(&state, None);
+        assert!(err.contains("browser_wrong_page"));
+        assert!(!err.contains("body_error="));
+    }
+
+    // --- auth_flow page detection ---
+
+    #[test]
+    fn page_state_is_auth_flow_page_matches_auth0_and_oauth_domains() {
+        let auth0 = json!({"url": "https://auth0.openai.com/auth"});
+        assert!(page_state_is_auth_flow_page(&auth0));
+
+        let ms = json!({"url": "https://login.microsoftonline.com/oauth2"});
+        assert!(page_state_is_auth_flow_page(&ms));
+    }
+
+    #[test]
+    fn page_state_is_auth_flow_page_matches_google_and_apple_domains() {
+        let google = json!({"url": "https://accounts.google.com/o/oauth2/v2/auth"});
+        assert!(page_state_is_auth_flow_page(&google));
+
+        let apple = json!({"url": "https://appleid.apple.com/auth"});
+        assert!(page_state_is_auth_flow_page(&apple));
+    }
+
+    #[test]
+    fn page_state_is_auth_flow_page_matches_login_titles() {
+        let title = json!({
+            "title": "Log in - ChatGPT",
+            "bodyText": "",
+        });
+        assert!(page_state_is_auth_flow_page(&title));
+
+        let chinese = json!({
+            "title": "开始使用 | ChatGPT",
+            "bodyText": "登录即可开始聊天",
+        });
+        assert!(page_state_is_auth_flow_page(&chinese));
+    }
+
+    #[test]
+    fn page_state_is_auth_flow_page_matches_body_keywords() {
+        let body1 = json!({"bodyText": "Log in to ChatGPT"});
+        assert!(page_state_is_auth_flow_page(&body1));
+
+        let body2 = json!({"bodyText": "please sign up to continue"});
+        assert!(page_state_is_auth_flow_page(&body2));
+
+        let body3 = json!({"bodyText": "Continue with Google"});
+        assert!(page_state_is_auth_flow_page(&body3));
+
+        let body4 = json!({"bodyText": "使用 Google 账号继续"});
+        assert!(page_state_is_auth_flow_page(&body4));
+    }
+
+    #[test]
+    fn auth_required_page_error_formats_fields() {
+        let state = json!({
+            "url": "https://chatgpt.com/auth/login",
+            "title": "Log in - ChatGPT",
+            "readyState": "complete",
+        });
+        let err = auth_required_page_error(&state);
+        assert!(err.contains("auth_required:"));
+        assert!(err.contains("url=https://chatgpt.com/auth/login"));
+        assert!(err.contains("title=\"Log in - ChatGPT\""));
+        assert!(err.contains("readyState=complete"));
+    }
+
+    // --- small helpers: page_body_has_fatal_error, should_retry_as_new_conversation ---
+
+    #[test]
+    fn page_body_has_fatal_error_is_false_for_normal_body() {
+        let state = json!({"bodyText": "All good here"});
+        assert!(!page_body_has_fatal_error(&state));
+    }
+
+    #[test]
+    fn should_retry_as_new_conversation_false_for_non_browser_wrong_page() {
+        assert!(!should_retry_as_new_conversation("other_error: something"));
+    }
+
+    #[test]
+    fn should_retry_as_new_conversation_true_for_new_conversation_homepage() {
+        let err = "browser_wrong_page: expected_conversation_id=Some(\"old\") actual_conversation_id=None page_kind=new_conversation url=https://chatgpt.com/";
+        assert!(should_retry_as_new_conversation(err));
+    }
+
+    #[test]
+    fn should_retry_as_new_conversation_true_for_error_with_body_error_hint() {
+        let err = "browser_wrong_page: expected_conversation_id=None actual_conversation_id=None page_kind=unknown url=https://chatgpt.com/ body_error=Too many requests";
+        assert!(should_retry_as_new_conversation(err));
+    }
+
+    // --- heartbeat helpers ---
+
+    #[test]
+    fn handoff_heartbeat_error_none_when_browser_and_cdp_healthy() {
+        assert!(handoff_heartbeat_error(false, false).is_none());
+    }
+
+    #[test]
+    fn handoff_page_heartbeat_error_wraps_original_error() {
+        let err = handoff_page_heartbeat_error("CDP command timed out: Runtime.evaluate");
+        assert!(err.starts_with("browser_unavailable:"));
+        assert!(err.contains("Runtime.evaluate"));
+    }
+
+    // --- URL extraction & whitespace helpers ---
+
+    #[test]
+    fn extract_conversation_id_from_url_trims_and_stops_at_query_or_hash() {
+        let url = "https://chatgpt.com/c/abc-123?model=gpt#section";
+        assert_eq!(
+            extract_conversation_id_from_url(url).as_deref(),
+            Some("abc-123"),
+        );
+    }
+
+    #[test]
+    fn extract_conversation_id_from_url_ignores_trailing_slash_segments() {
+        let url = "https://chatgpt.com/c/abc-123/extra/path";
+        assert_eq!(
+            extract_conversation_id_from_url(url).as_deref(),
+            Some("abc-123"),
+        );
+    }
+
+    #[test]
+    fn normalize_whitespace_handles_mixed_unicode_and_ascii() {
+        let s = "  你 好   world\n\n  test\t";
+        assert_eq!(normalize_whitespace(s), "你 好 world test");
+    }
+
+    #[test]
+    fn normalize_whitespace_leaves_single_spaces_intact() {
+        let s = "a b c";
+        assert_eq!(normalize_whitespace(s), "a b c");
+    }
+
+    #[test]
+    fn now_ms_is_monotonic_non_decreasing() {
+        let a = now_ms();
+        let b = now_ms();
+        assert!(b >= a);
+    }
+
+    // --- send button timing helpers ---
+
+    #[test]
+    fn send_button_ready_max_wait_uses_char_count_for_unicode() {
+        let short = "你".repeat(COMPOSER_PASTE_THRESHOLD_CHARS);
+        let long = "你".repeat(COMPOSER_PASTE_THRESHOLD_CHARS + 1);
+        assert_eq!(
+            composer_text_injection_mode(&short),
+            ComposerTextInjectionMode::InsertText
+        );
+        assert_eq!(
+            composer_text_injection_mode(&long),
+            ComposerTextInjectionMode::NativeClipboardPaste
+        );
+        assert_eq!(send_button_ready_max_wait(&short), Duration::from_secs(10));
+        assert_eq!(
+            send_button_ready_retry_max_wait(&short),
+            Duration::from_secs(15)
+        );
+        assert!(send_button_ready_max_wait(&long) >= Duration::from_secs(30));
+        assert_eq!(
+            send_button_ready_retry_max_wait(&long),
+            Duration::from_secs(60)
+        );
+    }
+
+    // --- paste modifier helpers ---
+
+    #[test]
+    fn paste_modifier_matches_key_mapping() {
+        let modifier = paste_modifier();
+        let (key, _code, vk) = paste_modifier_key();
+        if cfg!(target_os = "macos") {
+            assert_eq!(modifier, 4);
+            assert_eq!((key, vk), ("Meta", 91));
+        } else {
+            assert_eq!(modifier, 2);
+            assert_eq!((key, vk), ("Control", 17));
+        }
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use serde_json::{json, Value};
+
+    // --- parse_send_sse additional edge cases ---
+
+    #[test]
+    fn parse_send_sse_sets_ids_from_later_event_when_initial_missing() {
+        let sse = "data: {\"type\":\"delta\"}\n\n".to_string()
+            + "data: {\"type\":\"final\",\"conversation_id\":\"c-123\",\"turn_exchange_id\":\"t-1\",\"message\":{\"id\":\"m-1\"}}\n\n";
+        let parsed = parse_send_sse(&sse);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("c-123"));
+        assert_eq!(parsed.turn_exchange_id.as_deref(), Some("t-1"));
+        assert_eq!(
+            parsed.event_types,
+            vec!["delta".to_string(), "final".to_string()]
+        );
+        let mapping = parsed
+            .sse_detail
+            .as_ref()
+            .and_then(|v| v.get("mapping"))
+            .and_then(Value::as_object)
+            .expect("mapping");
+        assert!(mapping.contains_key("m-1"));
+    }
+
+    #[test]
+    fn parse_send_sse_ignores_lines_without_data_prefix() {
+        let sse = "event: message\n\ndata: {\"type\":\"delta\",\"conversation_id\":\"c1\"}\n\ncomment: ignore-me";
+        let parsed = parse_send_sse(sse);
+        assert_eq!(parsed.conversation_id.as_deref(), Some("c1"));
+        assert_eq!(parsed.event_types, vec!["delta".to_string()]);
+    }
+
+    // --- format_send_diagnostic edge cases ---
+
+    #[test]
+    fn format_send_diagnostic_defaults_when_only_url_present() {
+        let diag = json!({"url": "https://chatgpt.com/"});
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("page=https://chatgpt.com/"));
+        assert!(s.contains("composer=NOT_FOUND"));
+        assert!(s.contains("sendButton=NOT_FOUND"));
+        assert!(!s.contains("busyElements="));
+    }
+
+    #[test]
+    fn format_send_diagnostic_composer_ok_without_preview_uses_placeholder() {
+        let diag = json!({
+            "composerFound": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerHasText": true
+        });
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("composer=OK"));
+        assert!(s.contains("text=\"?\""));
+    }
+
+    #[test]
+    fn format_send_diagnostic_send_button_disabled_when_visibility_missing() {
+        let diag = json!({
+            "composerFound": true,
+            "composerVisible": true,
+            "composerHasText": true,
+            "sendButtonFound": true
+        });
+        let s = format_send_diagnostic(&diag);
+        // sendButtonVisible defaults to false, so this is treated as HIDDEN even without explicit flag
+        assert!(s.contains("sendButton=HIDDEN"));
+    }
+
+    #[test]
+    fn format_send_diagnostic_skips_non_string_banners() {
+        let diag = json!({
+            "errorBanners": ["Too many requests", 123, null, true]
+        });
+        let s = format_send_diagnostic(&diag);
+        assert!(s.contains("banner=\"Too many requests\""));
+        // numeric / null / bool banners should be ignored
+        assert_eq!(s.matches("banner=\"").count(), 1);
+    }
+
+    // --- target_page_* and auth flow heuristics ---
+
+    #[test]
+    fn target_page_error_uses_auth_required_for_auth_flow_pages() {
+        let state = json!({
+            "url": "https://auth0.openai.com/authorize",
+            "title": "Log in - ChatGPT",
+            "readyState": "complete"
+        });
+        let err = target_page_error(&state, Some("c1"));
+        assert!(err.starts_with("auth_required:"));
+    }
+
+    #[test]
+    fn target_page_error_uses_unknown_page_kind_when_missing() {
+        let state = json!({
+            "url": "https://chatgpt.com/c/c1",
+            "readyState": "complete",
+            "conversationId": "c1"
+        });
+        let err = target_page_error(&state, Some("c2"));
+        assert!(err.contains("page_kind=unknown"));
+    }
+
+    #[test]
+    fn target_page_matches_true_for_new_conversation_without_composer_requirement() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": null,
+            "visibleComposerCount": 0
+        });
+        assert!(target_page_matches(&state, None, false));
+        assert!(!target_page_matches(&state, Some("c1"), false));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_respects_ready_state() {
+        let loading = json!({
+            "readyState": "loading",
+            "conversationId": "c1",
+            "bodyText": "HTTP 500 Internal Server Error"
+        });
+        // Even with fatal error body, non-complete pages are not terminal
+        assert!(!target_page_is_terminal_mismatch(&loading, Some("c2")));
+    }
+
+    #[test]
+    fn page_state_is_auth_flow_page_false_for_regular_page() {
+        let state = json!({
+            "url": "https://chatgpt.com/c/abc",
+            "title": "ChatGPT",
+            "bodyText": "normal page"
+        });
+        assert!(!page_state_is_auth_flow_page(&state));
+    }
+
+    #[test]
+    fn page_body_has_fatal_error_detects_case_insensitive_patterns() {
+        let state = json!({"bodyText": "INTERNAL SERVER ERROR while loading"});
+        assert!(page_body_has_fatal_error(&state));
+    }
+
+    #[test]
+    fn page_body_has_fatal_error_false_when_body_missing() {
+        let state = json!({});
+        assert!(!page_body_has_fatal_error(&state));
+    }
+
+    #[test]
+    fn should_retry_as_new_conversation_requires_browser_wrong_page_prefix() {
+        assert!(!should_retry_as_new_conversation(
+            "some_other_error: page_kind=new_conversation"
+        ));
+    }
+
+    #[test]
+    fn should_retry_as_new_conversation_true_for_homepage_url_suffix() {
+        let err = "browser_wrong_page: expected_conversation_id=None actual_conversation_id=None page_kind=unknown url=https://chatgpt.com/";
+        assert!(should_retry_as_new_conversation(err));
+    }
+
+    #[test]
+    fn handoff_heartbeat_error_prefers_browser_exit_when_both_fail() {
+        let err = handoff_heartbeat_error(true, true).expect("error");
+        assert!(err.contains("browser exited"));
+    }
+
+    #[test]
+    fn auth_required_page_error_handles_missing_optional_fields() {
+        let state = json!({"url": "https://chatgpt.com/auth/login"});
+        let err = auth_required_page_error(&state);
+        assert!(err.contains("url=https://chatgpt.com/auth/login"));
+        // title and readyState should still be present in formatted string
+        assert!(err.contains("title=\"\""));
+        assert!(err.contains("readyState="));
+    }
+
+    // --- URL & text helpers ---
+
+    #[test]
+    fn extract_conversation_id_from_url_returns_none_for_blank_segment() {
+        let url = "https://chatgpt.com/c/   ";
+        assert_eq!(extract_conversation_id_from_url(url), None);
+    }
+
+    #[test]
+    fn extract_conversation_id_from_url_handles_hash_without_query() {
+        let url = "https://chatgpt.com/c/conv-1#section";
+        assert_eq!(
+            extract_conversation_id_from_url(url).as_deref(),
+            Some("conv-1")
+        );
+    }
+
+    #[test]
+    fn normalize_whitespace_handles_only_whitespace_string() {
+        assert_eq!(normalize_whitespace("\n\t  \n"), "");
+    }
+
+    #[test]
+    fn normalize_whitespace_preserves_inner_spaces_between_words() {
+        assert_eq!(normalize_whitespace("foo   bar"), "foo bar");
+    }
+
+    #[test]
+    fn now_ms_is_monotonic_over_multiple_calls() {
+        let a = now_ms();
+        let b = now_ms();
+        let c = now_ms();
+        assert!(b >= a);
+        assert!(c >= b);
+    }
+
+    // --- send button timing helpers additional coverage ---
+
+    #[test]
+    fn send_button_ready_max_wait_short_unicode_is_fixed_10s() {
+        let text = "测".repeat(50);
+        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(10));
+    }
+
+    #[test]
+    fn send_button_ready_max_wait_clamps_very_large_prompts() {
+        let text = "x".repeat(5_000_000);
+        assert_eq!(send_button_ready_max_wait(&text), Duration::from_secs(180));
+    }
+
+    #[test]
+    fn send_button_ready_retry_max_wait_insert_text_and_clipboard_modes() {
+        let short = "abc";
+        let long = &"x".repeat(COMPOSER_PASTE_THRESHOLD_CHARS + 5);
+        assert_eq!(
+            composer_text_injection_mode(short),
+            ComposerTextInjectionMode::InsertText
+        );
+        assert_eq!(
+            composer_text_injection_mode(long),
+            ComposerTextInjectionMode::NativeClipboardPaste
+        );
+        assert_eq!(
+            send_button_ready_retry_max_wait(short),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            send_button_ready_retry_max_wait(long),
+            Duration::from_secs(60)
+        );
+    }
+
+    #[test]
+    fn page_state_is_auth_flow_page_matches_openai_auth_domain() {
+        let state = json!({"url": "https://auth.openai.com/login"});
+        assert!(page_state_is_auth_flow_page(&state));
+    }
+
+    #[test]
+    fn target_page_matches_and_mismatch_for_specific_ids() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": "c-expected",
+            "visibleComposerCount": 1
+        });
+        assert!(target_page_matches(&state, Some("c-expected"), true));
+        assert!(!target_page_matches(&state, Some("other"), true));
+    }
+
+    #[test]
+    fn target_page_is_terminal_mismatch_true_when_expected_some_actual_none_and_new_page() {
+        let state = json!({
+            "readyState": "complete",
+            "conversationId": null,
+            "pageKind": "new_conversation"
+        });
+        assert!(target_page_is_terminal_mismatch(&state, Some("c1")));
+    }
+}

@@ -2670,3 +2670,832 @@ mod tests {
         assert_eq!(SOCKS5_VERSION, 0x05);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use bifrost_core::{AccessControlConfig, UserPassAccountConfig, UserPassAuthConfig};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn make_connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        (server, client, peer_addr)
+    }
+
+    async fn make_handler(
+        auth_required: bool,
+        username: Option<&str>,
+        password: Option<&str>,
+    ) -> (SocksHandler, TcpStream) {
+        let (server, client, peer_addr) = make_connected_pair().await;
+        let handler = SocksHandler::new(
+            server,
+            peer_addr,
+            auth_required,
+            username.map(|s| s.to_string()),
+            password.map(|s| s.to_string()),
+            30,
+            None,
+        );
+        (handler, client)
+    }
+
+    #[test]
+    fn socks_address_parse_ipv4_success() {
+        let addr = Ipv4Addr::new(192, 168, 1, 10);
+        let port = 8080u16;
+        let data = [addr.octets().as_slice(), &port.to_be_bytes()].concat();
+        let (parsed, parsed_port, offset) =
+            SocksAddress::parse_from_bytes(0x01, &data).expect("parse IPv4 address");
+        assert!(matches!(parsed, SocksAddress::IPv4(a) if a == addr));
+        assert_eq!(parsed_port, port);
+        assert_eq!(offset, 6);
+    }
+
+    #[test]
+    fn socks_address_parse_ipv4_too_short() {
+        let err = SocksAddress::parse_from_bytes(0x01, &[192, 168, 1])
+            .expect_err("expected IPv4 too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("IPv4 address too short")));
+    }
+
+    #[test]
+    fn socks_address_parse_domain_success() {
+        let domain = "example.com";
+        let port = 443u16;
+        let mut data = vec![domain.len() as u8];
+        data.extend_from_slice(domain.as_bytes());
+        data.extend_from_slice(&port.to_be_bytes());
+        let (parsed, parsed_port, offset) =
+            SocksAddress::parse_from_bytes(0x03, &data).expect("parse domain");
+        assert!(matches!(parsed, SocksAddress::DomainName(ref d) if d == domain));
+        assert_eq!(parsed_port, port);
+        assert_eq!(offset, 1 + domain.len() + 2);
+    }
+
+    #[test]
+    fn socks_address_parse_domain_missing_len() {
+        let err = SocksAddress::parse_from_bytes(0x03, &[])
+            .expect_err("expected domain length missing error");
+        assert!(
+            matches!(err, BifrostError::Parse(msg) if msg.contains("Domain name length missing"))
+        );
+    }
+
+    #[test]
+    fn socks_address_parse_domain_too_short() {
+        let err = SocksAddress::parse_from_bytes(0x03, &[5, b'a', b'b'])
+            .expect_err("expected domain too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Domain name too short")));
+    }
+
+    #[test]
+    fn socks_address_parse_domain_invalid_encoding() {
+        let data = [1u8, 0xFF, 0x00, 0x50];
+        let err = SocksAddress::parse_from_bytes(0x03, &data)
+            .expect_err("expected invalid domain encoding error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid domain encoding")));
+    }
+
+    #[test]
+    fn socks_address_parse_ipv6_success() {
+        let addr = Ipv6Addr::LOCALHOST;
+        let port = 8080u16;
+        let mut data = addr.octets().to_vec();
+        data.extend_from_slice(&port.to_be_bytes());
+        let (parsed, parsed_port, offset) =
+            SocksAddress::parse_from_bytes(0x04, &data).expect("parse IPv6 address");
+        assert!(matches!(parsed, SocksAddress::IPv6(a) if a == addr));
+        assert_eq!(parsed_port, port);
+        assert_eq!(offset, 18);
+    }
+
+    #[test]
+    fn socks_address_parse_ipv6_too_short() {
+        let err = SocksAddress::parse_from_bytes(0x04, &[0u8; 10])
+            .expect_err("expected IPv6 too short error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("IPv6 address too short")));
+    }
+
+    #[test]
+    fn socks_address_parse_invalid_type() {
+        let err = SocksAddress::parse_from_bytes(0xFF, &[0u8; 4])
+            .expect_err("expected invalid type error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid address type")));
+    }
+
+    #[tokio::test]
+    async fn parse_socks5_handshake_zero_methods() {
+        let data = [SOCKS5_VERSION, 0x00];
+        let (version, methods) = parse_socks5_handshake(&data).await.unwrap();
+        assert_eq!(version, SOCKS5_VERSION);
+        assert!(methods.is_empty());
+    }
+
+    #[tokio::test]
+    async fn parse_socks5_handshake_many_methods() {
+        let data = [SOCKS5_VERSION, 0x04, 0x00, 0x01, 0x02, 0xFF];
+        let (version, methods) = parse_socks5_handshake(&data).await.unwrap();
+        assert_eq!(version, SOCKS5_VERSION);
+        assert_eq!(methods.len(), 4);
+        assert_eq!(methods[0], AuthMethod::NoAuth);
+        assert_eq!(methods[1], AuthMethod::GssApi);
+        assert_eq!(methods[2], AuthMethod::UsernamePassword);
+        assert_eq!(methods[3], AuthMethod::NoAcceptable);
+    }
+
+    #[test]
+    fn build_reply_without_addr_uses_ipv4_zero() {
+        let reply = build_reply(SocksReply::GeneralFailure, None, 0);
+        assert_eq!(reply[0], SOCKS5_VERSION);
+        assert_eq!(reply[1], SocksReply::GeneralFailure as u8);
+        assert_eq!(reply[2], 0x00);
+        assert_eq!(reply[3], AddressType::IPv4 as u8);
+        assert_eq!(&reply[4..8], &[0, 0, 0, 0]);
+        assert_eq!(&reply[8..10], &[0, 0]);
+    }
+
+    #[test]
+    fn generate_socks5_request_id_has_prefix_and_is_unique() {
+        let id1 = generate_socks5_request_id();
+        let id2 = generate_socks5_request_id();
+        assert!(id1.starts_with("SOCKS-"));
+        assert!(id2.starts_with("SOCKS-"));
+        assert_ne!(id1, id2);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn is_fd_limit_error_matches_emfile_and_enfile() {
+        use std::io::Error;
+
+        let err = Error::from_raw_os_error(libc::EMFILE);
+        assert!(is_fd_limit_error(&err));
+
+        let err = Error::from_raw_os_error(libc::ENFILE);
+        assert!(is_fd_limit_error(&err));
+
+        let err = Error::other("other");
+        assert!(!is_fd_limit_error(&err));
+    }
+
+    #[tokio::test]
+    async fn select_auth_method_no_auth_preferred_when_available() {
+        let (handler, _client) = make_handler(false, None, None).await;
+        let methods = vec![AuthMethod::NoAuth as u8, AuthMethod::UsernamePassword as u8];
+        let selected = handler.select_auth_method(&methods, false);
+        assert_eq!(selected, AuthMethod::NoAuth);
+    }
+
+    #[tokio::test]
+    async fn select_auth_method_userpass_required_takes_precedence() {
+        let (handler, _client) = make_handler(false, None, None).await;
+        let methods = vec![AuthMethod::NoAuth as u8, AuthMethod::UsernamePassword as u8];
+        let selected = handler.select_auth_method(&methods, true);
+        assert_eq!(selected, AuthMethod::UsernamePassword);
+    }
+
+    #[tokio::test]
+    async fn select_auth_method_userpass_fallback_when_credentials_configured() {
+        let (handler, _client) = make_handler(false, Some("user"), Some("pass")).await;
+        let methods = vec![AuthMethod::UsernamePassword as u8];
+        let selected = handler.select_auth_method(&methods, false);
+        assert_eq!(selected, AuthMethod::UsernamePassword);
+    }
+
+    #[tokio::test]
+    async fn select_auth_method_no_acceptable_when_required_but_not_offered() {
+        let (handler, _client) = make_handler(true, None, None).await;
+        let methods = vec![AuthMethod::NoAuth as u8];
+        let selected = handler.select_auth_method(&methods, false);
+        assert_eq!(selected, AuthMethod::NoAcceptable);
+    }
+
+    #[tokio::test]
+    async fn handle_request_parses_ipv4_address() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [
+            SOCKS5_VERSION,
+            SocksCommand::Connect as u8,
+            0x00,
+            AddressType::IPv4 as u8,
+        ];
+        let addr = Ipv4Addr::new(10, 0, 0, 1);
+        let port = 8080u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(&addr.octets());
+        buf.extend_from_slice(&port.to_be_bytes());
+        client.write_all(&buf).await.unwrap();
+
+        let (cmd, address, parsed_port) = handler.handle_request().await.unwrap();
+        assert_eq!(cmd, SocksCommand::Connect);
+        assert!(matches!(address, SocksAddress::IPv4(a) if a == addr));
+        assert_eq!(parsed_port, port);
+    }
+
+    #[tokio::test]
+    async fn handle_request_parses_domain_address() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [
+            SOCKS5_VERSION,
+            SocksCommand::Connect as u8,
+            0x00,
+            AddressType::DomainName as u8,
+        ];
+        let domain = "example.test";
+        let port = 1234u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header);
+        buf.push(domain.len() as u8);
+        buf.extend_from_slice(domain.as_bytes());
+        buf.extend_from_slice(&port.to_be_bytes());
+        client.write_all(&buf).await.unwrap();
+
+        let (_cmd, address, parsed_port) = handler.handle_request().await.unwrap();
+        assert!(matches!(address, SocksAddress::DomainName(ref d) if d == domain));
+        assert_eq!(parsed_port, port);
+    }
+
+    #[tokio::test]
+    async fn handle_request_parses_ipv6_address() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [
+            SOCKS5_VERSION,
+            SocksCommand::Connect as u8,
+            0x00,
+            AddressType::IPv6 as u8,
+        ];
+        let addr = Ipv6Addr::LOCALHOST;
+        let port = 5555u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&header);
+        buf.extend_from_slice(&addr.octets());
+        buf.extend_from_slice(&port.to_be_bytes());
+        client.write_all(&buf).await.unwrap();
+
+        let (_cmd, address, parsed_port) = handler.handle_request().await.unwrap();
+        assert!(matches!(address, SocksAddress::IPv6(a) if a == addr));
+        assert_eq!(parsed_port, port);
+    }
+
+    #[tokio::test]
+    async fn handle_request_invalid_version_errors() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [
+            0x04,
+            SocksCommand::Connect as u8,
+            0x00,
+            AddressType::IPv4 as u8,
+        ];
+        client.write_all(&header).await.unwrap();
+        let err = handler
+            .handle_request()
+            .await
+            .expect_err("expected version error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid SOCKS version")));
+    }
+
+    #[tokio::test]
+    async fn handle_request_invalid_command_errors() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [SOCKS5_VERSION, 0xFF, 0x00, AddressType::IPv4 as u8];
+        client.write_all(&header).await.unwrap();
+        let err = handler
+            .handle_request()
+            .await
+            .expect_err("expected command error");
+        assert!(matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid SOCKS5 command")));
+    }
+
+    #[tokio::test]
+    async fn handle_request_invalid_atyp_errors() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let header = [SOCKS5_VERSION, SocksCommand::Connect as u8, 0x00, 0xFF];
+        client.write_all(&header).await.unwrap();
+        let err = handler
+            .handle_request()
+            .await
+            .expect_err("expected atyp error");
+        assert!(
+            matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid SOCKS5 address type"))
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_handshake_no_auth_success() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let client_task = async move {
+            let request = [
+                SOCKS5_VERSION,
+                2,
+                AuthMethod::NoAuth as u8,
+                AuthMethod::UsernamePassword as u8,
+            ];
+            client.write_all(&request).await.unwrap();
+            let mut resp = [0u8; 2];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, [SOCKS5_VERSION, AuthMethod::NoAuth as u8]);
+        };
+
+        let server_task = async move {
+            let method = handler.handle_handshake().await.unwrap();
+            assert_eq!(method, AuthMethod::NoAuth);
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn handle_handshake_invalid_version_errors() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let client_task = async move {
+            let request = [0x04, 1, AuthMethod::NoAuth as u8];
+            client.write_all(&request).await.unwrap();
+        };
+
+        let server_task = async move {
+            let err = handler
+                .handle_handshake()
+                .await
+                .expect_err("expected version error");
+            assert!(
+                matches!(err, BifrostError::Parse(msg) if msg.contains("Invalid SOCKS version"))
+            );
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn requires_userpass_auth_false_without_access_control() {
+        let (handler, _client) = make_handler(false, None, None).await;
+        assert!(!handler.requires_userpass_auth().await);
+    }
+
+    #[tokio::test]
+    async fn requires_userpass_auth_true_with_deferred_userpass() {
+        let (handler, _client) = make_handler(false, None, None).await;
+
+        let userpass_config = UserPassAuthConfig {
+            enabled: true,
+            accounts: vec![UserPassAccountConfig {
+                username: "user".to_string(),
+                password: Some("pass".to_string()),
+                enabled: true,
+            }],
+            loopback_requires_auth: true,
+        };
+
+        let ac_config = AccessControlConfig {
+            mode: AccessMode::LocalOnly,
+            whitelist: Vec::new(),
+            allow_lan: false,
+            userpass: Some(userpass_config),
+        };
+        let client_ac = ClientAccessControl::new(ac_config);
+        let wrapper = Arc::new(tokio::sync::RwLock::new(client_ac));
+
+        let handler = handler.with_access_control(wrapper);
+        assert!(handler.requires_userpass_auth().await);
+    }
+
+    #[tokio::test]
+    async fn rewrite_http_host_replaces_header_value() {
+        let (handler, _client) = make_handler(false, None, None).await;
+        let request = b"GET / HTTP/1.1\r\nHost: old.example\r\n\r\n";
+        let modified = handler
+            .rewrite_http_host(request, "old.example", "new.example")
+            .unwrap();
+        let modified_str = String::from_utf8(modified).unwrap();
+        assert!(modified_str.contains("Host: new.example"));
+        assert!(!modified_str.contains("Host: old.example"));
+    }
+
+    #[tokio::test]
+    async fn send_reply_succeeds_with_ipv4_addr() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+        let server_task = async move {
+            handler
+                .send_reply(SocksReply::Succeeded, Some(addr))
+                .await
+                .unwrap();
+        };
+
+        let client_task = async move {
+            let mut buf = [0u8; 10];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], SOCKS5_VERSION);
+            assert_eq!(buf[1], SocksReply::Succeeded as u8);
+            assert_eq!(buf[3], AddressType::IPv4 as u8);
+        };
+
+        tokio::join!(server_task, client_task);
+    }
+
+    #[tokio::test]
+    async fn send_reply_succeeds_with_ipv6_addr() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+        let addr: SocketAddr = "[::1]:8080".parse().unwrap();
+
+        let server_task = async move {
+            handler
+                .send_reply(SocksReply::Succeeded, Some(addr))
+                .await
+                .unwrap();
+        };
+
+        let client_task = async move {
+            let mut buf = [0u8; 4 + 16 + 2];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], SOCKS5_VERSION);
+            assert_eq!(buf[1], SocksReply::Succeeded as u8);
+            assert_eq!(buf[3], AddressType::IPv6 as u8);
+        };
+
+        tokio::join!(server_task, client_task);
+    }
+
+    #[tokio::test]
+    async fn send_reply_succeeds_with_none_addr_defaults_to_ipv4_zero() {
+        let (mut handler, mut client) = make_handler(false, None, None).await;
+
+        let server_task = async move {
+            handler
+                .send_reply(SocksReply::ConnectionRefused, None)
+                .await
+                .unwrap();
+        };
+
+        let client_task = async move {
+            let mut buf = [0u8; 10];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], SOCKS5_VERSION);
+            assert_eq!(buf[1], SocksReply::ConnectionRefused as u8);
+            assert_eq!(buf[3], AddressType::IPv4 as u8);
+            assert_eq!(&buf[4..8], &[0, 0, 0, 0]);
+        };
+
+        tokio::join!(server_task, client_task);
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::sync::Arc;
+
+    use bifrost_core::{
+        AccessControlConfig, ClientAccessControl, ProxyAuthRateLimiter, UserPassAuthConfig,
+    };
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    async fn make_connected_pair() -> (TcpStream, TcpStream, SocketAddr) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let client = TcpStream::connect(addr).await.unwrap();
+        let (server, peer_addr) = listener.accept().await.unwrap();
+        (server, client, peer_addr)
+    }
+
+    async fn make_handler_with_opts(
+        auth_required: bool,
+        username: Option<&str>,
+        password: Option<&str>,
+        timeout_secs: u64,
+        udp_relay_addr: Option<SocketAddr>,
+    ) -> (SocksHandler, TcpStream) {
+        let (server, client, peer_addr) = make_connected_pair().await;
+        let handler = SocksHandler::new(
+            server,
+            peer_addr,
+            auth_required,
+            username.map(|s| s.to_string()),
+            password.map(|s| s.to_string()),
+            timeout_secs,
+            udp_relay_addr,
+        );
+        (handler, client)
+    }
+
+    #[tokio::test]
+    async fn handle_auth_success_with_config_credentials() {
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
+
+        let client_task = async move {
+            let mut buf = Vec::new();
+            buf.push(0x01); // version
+            buf.push(4); // ulen
+            buf.extend_from_slice(b"user");
+            buf.push(4); // plen
+            buf.extend_from_slice(b"pass");
+            client.write_all(&buf).await.unwrap();
+            let mut resp = [0u8; 2];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, [0x01, 0x00]);
+        };
+
+        let server_task = async move {
+            handler.handle_auth().await.unwrap();
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn handle_auth_invalid_version_errors() {
+        let (mut handler, mut client) = make_handler_with_opts(true, None, None, 30, None).await;
+        let client_task = async move {
+            client.write_all(&[0x02]).await.unwrap();
+        };
+        let server_task = async move {
+            let err = handler
+                .handle_auth()
+                .await
+                .expect_err("invalid version must error");
+            match err {
+                BifrostError::Parse(msg) => assert!(msg.contains("Invalid auth version")),
+                other => panic!("unexpected error: {other:?}"),
+            }
+        };
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn handle_auth_invalid_credentials_sends_failure_reply() {
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
+
+        let client_task = async move {
+            let mut buf = Vec::new();
+            buf.push(0x01);
+            buf.push(4);
+            buf.extend_from_slice(b"user");
+            buf.push(3);
+            buf.extend_from_slice(b"bad");
+            client.write_all(&buf).await.unwrap();
+            let mut resp = [0u8; 2];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, [0x01, 0x01]);
+        };
+
+        let server_task = async move {
+            let err = handler
+                .handle_auth()
+                .await
+                .expect_err("invalid credentials should fail");
+            match err {
+                BifrostError::Network(msg) => {
+                    assert!(msg.contains("Authentication failed"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    fn banned_rate_limiter_for(ip: IpAddr) -> ProxyAuthRateLimiter {
+        let limiter = ProxyAuthRateLimiter::new();
+        for _ in 0..12 {
+            limiter.record_failure(ip);
+        }
+        assert!(limiter.is_banned(&ip));
+        limiter
+    }
+
+    #[tokio::test]
+    async fn handle_auth_rejects_when_ip_banned_by_rate_limiter() {
+        let (mut handler, mut client) = make_handler_with_opts(true, None, None, 30, None).await;
+        let ip = handler.peer_addr.ip();
+        handler.proxy_auth_rate_limiter = Some(Arc::new(banned_rate_limiter_for(ip)));
+
+        let client_task = async move {
+            let mut buf = Vec::new();
+            buf.push(0x01);
+            buf.push(1);
+            buf.extend_from_slice(b"x");
+            buf.push(1);
+            buf.extend_from_slice(b"y");
+            client.write_all(&buf).await.unwrap();
+            let mut resp = [0u8; 2];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, [0x01, 0x01]);
+        };
+
+        let server_task = async move {
+            let err = handler
+                .handle_auth()
+                .await
+                .expect_err("banned IP should be rejected");
+            match err {
+                BifrostError::Network(msg) => {
+                    assert!(msg.contains("Too many failed authentication"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn handle_udp_associate_disabled_returns_error_and_reply() {
+        let (mut handler, mut client) = make_handler_with_opts(false, None, None, 30, None).await;
+
+        let client_task = async move {
+            let mut buf = [0u8; 10];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], SOCKS5_VERSION);
+            assert_eq!(buf[1], SocksReply::CommandNotSupported as u8);
+        };
+
+        let server_task = async move {
+            let err = handler
+                .handle_udp_associate(SocksAddress::IPv4(Ipv4Addr::LOCALHOST), 0)
+                .await
+                .expect_err("UDP disabled should error");
+            match err {
+                BifrostError::Network(msg) => {
+                    assert!(msg.contains("UDP ASSOCIATE not enabled"));
+                }
+                other => panic!("unexpected error: {other:?}"),
+            }
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn handle_udp_associate_succeeds_and_times_out_quickly() {
+        let udp_addr: SocketAddr = "127.0.0.1:43210".parse().unwrap();
+        let (mut handler, mut client) =
+            make_handler_with_opts(false, None, None, 0, Some(udp_addr)).await;
+
+        let client_task = async move {
+            let mut buf = [0u8; 10];
+            client.read_exact(&mut buf).await.unwrap();
+            assert_eq!(buf[0], SOCKS5_VERSION);
+            assert_eq!(buf[1], SocksReply::Succeeded as u8);
+        };
+
+        let server_task = async move {
+            handler
+                .handle_udp_associate(SocksAddress::IPv4(Ipv4Addr::LOCALHOST), 0)
+                .await
+                .unwrap();
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+
+    #[tokio::test]
+    async fn parse_socks5_handshake_accepts_trailing_bytes() {
+        let data = [SOCKS5_VERSION, 0x01, AuthMethod::NoAuth as u8, 0xFF, 0xEE];
+        let (version, methods) = parse_socks5_handshake(&data).await.unwrap();
+        assert_eq!(version, SOCKS5_VERSION);
+        assert_eq!(methods, vec![AuthMethod::NoAuth]);
+    }
+
+    #[test]
+    fn build_handshake_response_for_username_password() {
+        let resp = build_handshake_response(AuthMethod::UsernamePassword);
+        assert_eq!(
+            resp,
+            vec![SOCKS5_VERSION, AuthMethod::UsernamePassword as u8]
+        );
+    }
+
+    #[tokio::test]
+    async fn socks_server_bind_ipv4_localhost_succeeds() {
+        let server = SocksServer::new(SocksConfig::default());
+        let addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = server.bind(addr).await.expect("bind should succeed");
+        let local = listener.local_addr().unwrap();
+        assert!(local.port() > 0);
+    }
+
+    #[tokio::test]
+    async fn socks_handler_builder_flags_are_applied() {
+        let (handler, _client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let handler = handler
+            .with_verbose_logging(true)
+            .with_unsafe_ssl(true)
+            .with_inject_bifrost_badge(false);
+        assert!(handler.verbose_logging);
+        assert!(handler.unsafe_ssl);
+        assert!(!handler.inject_bifrost_badge);
+    }
+
+    #[tokio::test]
+    async fn socks_handler_with_proxy_auth_rate_limiter_sets_field() {
+        let (handler, _client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let limiter = Arc::new(ProxyAuthRateLimiter::new());
+        let handler = handler.with_proxy_auth_rate_limiter(limiter.clone());
+        assert!(handler.proxy_auth_rate_limiter.is_some());
+    }
+
+    #[tokio::test]
+    async fn socks_handler_with_access_control_sets_field() {
+        let (handler, _client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let ac_config = AccessControlConfig {
+            mode: AccessMode::LocalOnly,
+            whitelist: Vec::new(),
+            allow_lan: false,
+            userpass: None,
+        };
+        let ac = ClientAccessControl::new(ac_config);
+        let wrapper = Arc::new(tokio::sync::RwLock::new(ac));
+        let handler = handler.with_access_control(wrapper.clone());
+        assert!(handler.access_control.is_some());
+    }
+
+    #[tokio::test]
+    async fn socks_handler_from_config_copies_auth_fields() {
+        let config = SocksConfig {
+            auth_required: true,
+            username: Some("name".to_string()),
+            password: Some("pw".to_string()),
+            timeout_secs: 5,
+            ..Default::default()
+        };
+        let (server, client, peer) = make_connected_pair().await;
+        let handler = SocksHandler::from_config(server, peer, &config, None);
+        assert!(handler.auth_required);
+        assert_eq!(handler.username.as_deref(), Some("name"));
+        assert_eq!(handler.password.as_deref(), Some("pw"));
+        assert_eq!(handler.timeout_secs, 5);
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn socks_handler_from_config_with_rules_sets_rules() {
+        let config = SocksConfig::default();
+        let (server, client, peer) = make_connected_pair().await;
+        let rules: Arc<dyn RulesResolver> = Arc::new(crate::server::NoOpRulesResolver);
+        let handler = SocksHandler::from_config_with_rules(server, peer, &config, None, rules);
+        assert!(handler.rules.is_some());
+        drop(client);
+    }
+
+    #[tokio::test]
+    async fn requires_userpass_auth_false_when_userpass_disabled() {
+        let (handler, _client) = make_handler_with_opts(false, None, None, 30, None).await;
+        let ac_config = AccessControlConfig {
+            mode: AccessMode::LocalOnly,
+            whitelist: Vec::new(),
+            allow_lan: false,
+            userpass: Some(UserPassAuthConfig {
+                enabled: false,
+                accounts: Vec::new(),
+                loopback_requires_auth: true,
+            }),
+        };
+        let ac = ClientAccessControl::new(ac_config);
+        let wrapper = Arc::new(tokio::sync::RwLock::new(ac));
+        let handler = handler.with_access_control(wrapper);
+        assert!(!handler.requires_userpass_auth().await);
+    }
+
+    #[tokio::test]
+    async fn handle_auth_success_clears_rate_limiter_state() {
+        let (mut handler, mut client) =
+            make_handler_with_opts(true, Some("user"), Some("pass"), 30, None).await;
+        let ip = handler.peer_addr.ip();
+        let limiter = Arc::new(ProxyAuthRateLimiter::new());
+        limiter.record_failure(ip);
+        handler.proxy_auth_rate_limiter = Some(limiter.clone());
+
+        let client_task = async move {
+            let mut buf = Vec::new();
+            buf.push(0x01);
+            buf.push(4);
+            buf.extend_from_slice(b"user");
+            buf.push(4);
+            buf.extend_from_slice(b"pass");
+            client.write_all(&buf).await.unwrap();
+            let mut resp = [0u8; 2];
+            client.read_exact(&mut resp).await.unwrap();
+            assert_eq!(resp, [0x01, 0x00]);
+        };
+
+        let server_task = async move {
+            handler.handle_auth().await.unwrap();
+            assert_eq!(limiter.failure_count(&ip), 0);
+        };
+
+        tokio::join!(client_task, server_task);
+    }
+}

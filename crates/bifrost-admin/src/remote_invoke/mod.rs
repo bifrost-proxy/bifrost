@@ -26,11 +26,9 @@ pub use worker::RemoteInvokeWorker;
 
 #[cfg(test)]
 pub(crate) fn remote_shell_test_guard() -> std::sync::MutexGuard<'static, ()> {
-    use std::sync::{Mutex, OnceLock};
-
-    static GUARD: OnceLock<Mutex<()>> = OnceLock::new();
-    GUARD
-        .get_or_init(|| Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+    // Share the single process-global data-dir lock with `BifrostDataDirGuard`.
+    // These tests mutate `bifrost_storage::set_data_dir` directly, so they must
+    // be mutually exclusive with every other data-dir test guard; otherwise a
+    // parallel guard can clobber the global between this test's save/load.
+    crate::test_env::bifrost_data_dir_lock()
 }

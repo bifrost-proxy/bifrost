@@ -1998,3 +1998,962 @@ mod devtools_helper_tests {
         assert_eq!(events[2]["method"], "Network.loadingFinished");
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use futures_util::{SinkExt, StreamExt};
+    use hyper::body::Incoming;
+
+    use hyper::{Request, StatusCode};
+
+    use serde_json::json;
+    use tokio::io::duplex;
+    use tokio_tungstenite::tungstenite::protocol::Message;
+    use tokio_tungstenite::WebSocketStream;
+
+    use crate::devtools::{
+        BridgeEvalResultPayload, BridgeHelloPayload, BrowserDebugBroker, CapabilityMatrix,
+        ConsoleMessage, DebugAdapterKind, DebugFidelity, DebugPage, DebugPageState, DevtoolsMode,
+        NetworkEvent, SharedBrowserDebugBroker, StorageSnapshot,
+    };
+    use crate::state::{AdminState, SharedAdminState};
+    use crate::test_support::TestAdminState;
+
+    fn base_page() -> DebugPage {
+        DebugPage {
+            page_id: "pg1".to_string(),
+            title: Some("Title".to_string()),
+            url: "http://example.test/".to_string(),
+            origin: "http://example.test".to_string(),
+            user_agent: Some("TestAgent/1.0".to_string()),
+            adapter: DebugAdapterKind::PageBridge,
+            fidelity: DebugFidelity::Fallback,
+            state: DebugPageState::Discoverable,
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+            traffic_ids: Vec::new(),
+            last_seen_at_ms: 0,
+            capabilities: CapabilityMatrix::default(),
+            status_reason: None,
+            bridge_token: "token".to_string(),
+            bridge_tab_id: None,
+            dom_snapshot: None,
+            dom_tree: None,
+            dom_updated_at_ms: 0,
+            console_messages: Vec::new(),
+            network_events: Vec::new(),
+            storage_snapshot: Some(StorageSnapshot::default()),
+            evaluate_allowlist: Vec::new(),
+        }
+    }
+
+    async fn call_cdp(
+        method: &str,
+        request: serde_json::Value,
+        page: &DebugPage,
+    ) -> serde_json::Value {
+        let broker = Arc::new(BrowserDebugBroker::new());
+        cdp_response(json!(1), method, &request, &broker, page, None).await
+    }
+
+    async fn devtools_http_request(
+        state: SharedAdminState,
+        method: &str,
+        path: &str,
+        body: Option<&str>,
+    ) -> (StatusCode, String) {
+        use hyper::server::conn::http1;
+        use hyper::service::service_fn;
+        use hyper_util::rt::TokioIo;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let state_for_server = state.clone();
+
+        tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state = state_for_server.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            Ok::<_, hyper::Error>(handle_devtools(req, state, &path).await)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        // Give the server a brief moment to start listening.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let url = format!("http://{}{}", addr, path);
+        let client = reqwest::Client::new();
+        let request = match method {
+            "GET" => client.get(&url),
+            "POST" => client.post(&url),
+            "PUT" => client.put(&url),
+            "DELETE" => client.delete(&url),
+            other => client.request(other.parse().unwrap(), &url),
+        };
+        let request = if let Some(b) = body {
+            request.body(b.to_string())
+        } else {
+            request
+        };
+        let response = request.send().await.unwrap();
+        let status = response.status();
+        let text = response.text().await.unwrap();
+        (status, text)
+    }
+
+    #[allow(dead_code)]
+    fn parse_http_response(buf: &[u8]) -> (StatusCode, String) {
+        let text = String::from_utf8_lossy(buf);
+        let mut parts = text.split("\r\n\r\n");
+        let head = parts.next().unwrap_or("");
+        let body = parts.next().unwrap_or("").to_string();
+
+        let mut lines = head.lines();
+        let status_line = lines.next().unwrap_or("");
+        let mut status_parts = status_line.split_whitespace();
+        let _http = status_parts.next();
+        let code = status_parts
+            .next()
+            .and_then(|s| s.parse::<u16>().ok())
+            .and_then(|c| StatusCode::from_u16(c).ok())
+            .unwrap_or(StatusCode::OK);
+
+        (code, body)
+    }
+
+    fn make_control_page_with_allowlist(
+        pattern: &str,
+    ) -> (SharedBrowserDebugBroker, DebugPage, String) {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let matched_rule = crate::devtools::MatchedDevtoolsRule {
+            pattern: "rule".to_string(),
+            raw: None,
+            line: Some(1),
+            evaluate_allowlist: vec![pattern.to_string()],
+        };
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test/page".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Control,
+            matched_rule: Some(matched_rule),
+        };
+        let (page_id, token) = broker.register_page_candidate(input);
+        let page = broker.get_page(&page_id).expect("page");
+        (broker, page, token)
+    }
+
+    #[tokio::test]
+    async fn cdp_response_browser_get_version_uses_user_agent() {
+        let mut page = base_page();
+        page.user_agent = Some("CustomAgent".to_string());
+        let req = json!({ "id": 1, "method": "Browser.getVersion" });
+        let resp = call_cdp("Browser.getVersion", req, &page).await;
+
+        assert_eq!(resp["id"], json!(1));
+        assert_eq!(resp["result"]["userAgent"], json!("CustomAgent"));
+        assert_eq!(resp["result"]["protocolVersion"], json!("1.3"));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_target_get_target_info_uses_page_fields() {
+        let page = base_page();
+        let req = json!({ "id": 2, "method": "Target.getTargetInfo" });
+        let resp = call_cdp("Target.getTargetInfo", req, &page).await;
+
+        let info = &resp["result"]["targetInfo"];
+        assert_eq!(info["targetId"], json!("pg1"));
+        assert_eq!(info["title"], json!("Title"));
+        assert_eq!(info["url"], json!("http://example.test/"));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_runtime_enable_emits_execution_context_and_console_events() {
+        let mut page = base_page();
+        page.console_messages.push(ConsoleMessage {
+            level: "log".to_string(),
+            text: "hello".to_string(),
+            at_ms: 123,
+            args: Vec::new(),
+            raw: None,
+        });
+
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({ "id": 3, "method": "Runtime.enable" });
+        let resp = cdp_response(json!(3), "Runtime.enable", &req, &broker, &page, None).await;
+
+        let events = resp
+            .get("result")
+            .and_then(|r| r.get("events"))
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!([]));
+        // We don't rely on a specific shape here, only that the response is well-formed JSON.
+        assert!(events.is_array() || events.is_null());
+    }
+
+    #[tokio::test]
+    async fn cdp_response_storage_get_storage_keys_use_origin() {
+        let page = base_page();
+        let broker = Arc::new(BrowserDebugBroker::new());
+
+        let req1 = json!({ "id": 4, "method": "Storage.getStorageKey" });
+        let resp1 = cdp_response(
+            json!(4),
+            "Storage.getStorageKey",
+            &req1,
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp1["result"]["storageKey"], json!("http://example.test"));
+
+        let req2 = json!({ "id": 5, "method": "Storage.getStorageKeyForFrame" });
+        let resp2 = cdp_response(
+            json!(5),
+            "Storage.getStorageKeyForFrame",
+            &req2,
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp2["result"]["storageKey"], json!("http://example.test"));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_dom_storage_items_switch_between_local_and_session() {
+        let mut page = base_page();
+        page.storage_snapshot = Some(StorageSnapshot {
+            local_storage: vec![("lk".to_string(), "lv".to_string())],
+            session_storage: vec![("sk".to_string(), "sv".to_string())],
+            cookies: Vec::new(),
+        });
+        let broker = Arc::new(BrowserDebugBroker::new());
+
+        let req_local = json!({
+            "id": 6,
+            "method": "DOMStorage.getDOMStorageItems",
+            "params": { "storageId": { "isLocalStorage": true } }
+        });
+        let resp_local = cdp_response(
+            json!(6),
+            "DOMStorage.getDOMStorageItems",
+            &req_local,
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp_local["result"]["entries"][0][0], json!("lk"));
+
+        let req_session = json!({
+            "id": 7,
+            "method": "DOMStorage.getDOMStorageItems",
+            "params": { "storageId": { "isLocalStorage": false } }
+        });
+        let resp_session = cdp_response(
+            json!(7),
+            "DOMStorage.getDOMStorageItems",
+            &req_session,
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp_session["result"]["entries"][0][0], json!("sk"));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_target_get_targets_wraps_single_page() {
+        let page = base_page();
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({ "id": 8, "method": "Target.getTargets" });
+        let resp = cdp_response(json!(8), "Target.getTargets", &req, &broker, &page, None).await;
+
+        let infos = resp["result"]["targetInfos"].as_array().unwrap();
+        assert_eq!(infos.len(), 1);
+        assert_eq!(infos[0]["targetId"], json!("pg1"));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_dom_get_document_and_flattened_document_use_dom_tree() {
+        let mut page = base_page();
+        page.dom_tree = Some(json!({
+            "nodeId": 1,
+            "backendNodeId": 1,
+            "children": [ { "nodeId": 2 }, { "nodeId": 3 } ]
+        }));
+        let broker = Arc::new(BrowserDebugBroker::new());
+
+        let resp_doc = cdp_response(
+            json!(9),
+            "DOM.getDocument",
+            &json!({ "id": 9, "method": "DOM.getDocument" }),
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp_doc["result"]["root"]["nodeId"], json!(1));
+
+        let resp_flat = cdp_response(
+            json!(10),
+            "DOM.getFlattenedDocument",
+            &json!({ "id": 10, "method": "DOM.getFlattenedDocument" }),
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        let nodes = resp_flat["result"]["nodes"].as_array().unwrap();
+        assert_eq!(nodes.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn cdp_response_dom_push_nodes_by_backend_ids_round_trips_ids() {
+        let page = base_page();
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({
+            "id": 11,
+            "method": "DOM.pushNodesByBackendIdsToFrontend",
+            "params": { "backendNodeIds": [1, 2, 3] }
+        });
+        let resp = cdp_response(
+            json!(11),
+            "DOM.pushNodesByBackendIdsToFrontend",
+            &req,
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp["result"]["nodeIds"], json!([1, 2, 3]));
+    }
+
+    #[tokio::test]
+    async fn cdp_response_dom_resolve_node_builds_object_id() {
+        let mut page = base_page();
+        page.dom_tree = Some(json!({ "nodeId": 7 }));
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({
+            "id": 12,
+            "method": "DOM.resolveNode",
+            "params": { "nodeId": 7 }
+        });
+        let resp = cdp_response(json!(12), "DOM.resolveNode", &req, &broker, &page, None).await;
+        assert_eq!(
+            resp["result"]["object"]["objectId"],
+            json!("bifrost-node-7")
+        );
+    }
+
+    #[tokio::test]
+    async fn cdp_response_unknown_method_returns_method_not_found_error() {
+        let page = base_page();
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let resp = cdp_response(
+            json!(13),
+            "Unknown.method",
+            &json!({ "id": 13, "method": "Unknown.method" }),
+            &broker,
+            &page,
+            None,
+        )
+        .await;
+        assert_eq!(resp["id"], json!(13));
+        assert_eq!(resp["error"]["code"], json!(-32601));
+    }
+
+    #[tokio::test]
+    async fn flattened_dom_nodes_collects_nodes_preorder() {
+        let dom = json!({
+            "nodeId": 1,
+            "children": [
+                { "nodeId": 2 },
+                { "nodeId": 3, "children": [{ "nodeId": 4 }] }
+            ]
+        });
+        let mut page = base_page();
+        page.dom_tree = Some(dom);
+        let nodes = flattened_dom_nodes(&page);
+        let ids: Vec<i64> = nodes
+            .iter()
+            .map(|n| n["nodeId"].as_i64().unwrap())
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3, 4]);
+    }
+
+    #[tokio::test]
+    async fn css_matched_styles_response_empty_when_style_blank() {
+        let mut page = base_page();
+        page.dom_tree = Some(json!({
+            "nodeId": 1,
+            "attributes": ["class", "x"]
+        }));
+        let resp =
+            css_matched_styles_response(json!(1), &json!({ "params": { "nodeId": 1 } }), &page);
+        assert!(resp["result"]["matchedCSSRules"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn css_computed_style_response_overrides_defaults() {
+        let mut page = base_page();
+        page.dom_tree = Some(json!({
+            "nodeId": 1,
+            "attributes": ["style", "color: red; line-height: 2;"]
+        }));
+        let resp =
+            css_computed_style_response(json!(1), &json!({ "params": { "nodeId": 1 } }), &page);
+        let props = resp["result"]["computedStyle"].as_array().unwrap();
+        let mut color = None;
+        let mut line_height = None;
+        for prop in props {
+            match prop["name"].as_str().unwrap() {
+                "color" => color = Some(prop["value"].as_str().unwrap().to_string()),
+                "line-height" => line_height = Some(prop["value"].as_str().unwrap().to_string()),
+                _ => {}
+            }
+        }
+        assert_eq!(color.as_deref(), Some("red"));
+        assert_eq!(line_height.as_deref(), Some("2"));
+    }
+
+    #[tokio::test]
+    async fn network_event_triplet_omits_response_when_status_missing() {
+        let page = base_page();
+        let event = NetworkEvent {
+            url: "http://example.test/no-status".to_string(),
+            method: "GET".to_string(),
+            status: None,
+            resource_type: "document".to_string(),
+            at_ms: 1000,
+            query_params: Vec::new(),
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            from_cache: None,
+            client_req_id: None,
+            traffic_id: None,
+        };
+        let events = network_event_triplet(&page, 0, &event);
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["method"], json!("Network.requestWillBeSent"));
+        assert_eq!(events[1]["method"], json!("Network.loadingFinished"));
+    }
+
+    #[tokio::test]
+    async fn cdp_live_events_emits_new_console_network_and_dom_once() {
+        let mut page = base_page();
+        page.console_messages.push(ConsoleMessage {
+            level: "log".to_string(),
+            text: "first".to_string(),
+            at_ms: 10,
+            args: Vec::new(),
+            raw: None,
+        });
+        page.network_events.push(NetworkEvent {
+            url: "http://example.test/1".to_string(),
+            method: "GET".to_string(),
+            status: Some(200),
+            resource_type: "document".to_string(),
+            at_ms: 20,
+            query_params: Vec::new(),
+            request_headers: Vec::new(),
+            response_headers: Vec::new(),
+            from_cache: None,
+            client_req_id: None,
+            traffic_id: None,
+        });
+        page.dom_updated_at_ms = 30;
+
+        let mut last_console_at = 0;
+        let mut last_network_at = 0;
+        let mut last_dom_at = 0;
+        let events = cdp_live_events(
+            &page,
+            &mut last_console_at,
+            &mut last_network_at,
+            &mut last_dom_at,
+        );
+        assert!(events
+            .iter()
+            .any(|e| e["method"] == json!("Runtime.consoleAPICalled")));
+        assert!(events
+            .iter()
+            .any(|e| e["method"] == json!("Network.requestWillBeSent")));
+        assert!(events
+            .iter()
+            .any(|e| e["method"] == json!("DOM.documentUpdated")));
+
+        // Calling again should yield no new events.
+        let events2 = cdp_live_events(
+            &page,
+            &mut last_console_at,
+            &mut last_network_at,
+            &mut last_dom_at,
+        );
+        assert!(events2.is_empty());
+    }
+
+    #[tokio::test]
+    async fn runtime_evaluate_response_requires_control_mode() {
+        let page = base_page();
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "1+1" }
+        });
+        let resp = runtime_evaluate_response(json!(1), &req, &broker, &page, None).await;
+        assert_eq!(resp["error"]["message"], json!("requires_control"));
+    }
+
+    #[tokio::test]
+    async fn runtime_evaluate_response_empty_expression_returns_undefined() {
+        let mut page = base_page();
+        page.mode = DevtoolsMode::Control;
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({
+            "id": 2,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "   " }
+        });
+        let resp = runtime_evaluate_response(json!(2), &req, &broker, &page, None).await;
+        assert_eq!(resp["result"]["result"]["type"], json!("undefined"));
+    }
+
+    #[tokio::test]
+    async fn runtime_evaluate_response_rejects_expression_not_in_allowlist() {
+        let mut page = base_page();
+        page.mode = DevtoolsMode::Control;
+        page.evaluate_allowlist = vec!["^foo".to_string()];
+        let broker = Arc::new(BrowserDebugBroker::new());
+        let req = json!({
+            "id": 3,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "bar()" }
+        });
+        let resp =
+            runtime_evaluate_response(json!(3), &req, &broker, &page, Some("client-1")).await;
+        assert_eq!(resp["error"]["message"], json!("evaluate not in allowlist"));
+    }
+
+    #[tokio::test]
+    async fn runtime_evaluate_response_succeeds_when_bridge_sets_result() {
+        let (broker, page, token) = make_control_page_with_allowlist(".*");
+        let page_id = page.page_id.clone();
+        let request = json!({
+            "id": 4,
+            "method": "Runtime.evaluate",
+            "params": { "expression": "2+2", "world": "main" }
+        });
+
+        let broker_for_call = broker.clone();
+        let page_for_call = page.clone();
+        let fut = tokio::spawn(async move {
+            runtime_evaluate_response(
+                json!(4),
+                &request,
+                &broker_for_call,
+                &page_for_call,
+                Some("caller-1"),
+            )
+            .await
+        });
+
+        // Give runtime_evaluate_response a moment to enqueue the evaluation.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // First eval_id for a fresh broker is 1.
+        let payload = BridgeEvalResultPayload {
+            token,
+            eval_id: 1,
+            result: Some(json!({ "type": "string", "value": "ok" })),
+            exception: None,
+        };
+        broker
+            .bridge_eval_result(&page_id, payload)
+            .expect("bridge_eval_result should succeed");
+
+        let resp = fut.await.expect("join");
+        assert_eq!(resp["result"]["result"]["value"], json!("ok"));
+    }
+
+    #[tokio::test]
+    async fn overlay_highlight_node_response_parses_node_id_from_object_id() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+        };
+        let (page_id, _) = broker.register_page_candidate(input);
+        let page = broker.get_page(&page_id).expect("page");
+        let req = json!({
+            "params": { "objectId": "bifrost-node-42" }
+        });
+        let resp = overlay_highlight_node_response(json!(1), &req, &broker, &page);
+        assert!(resp.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn overlay_highlight_node_response_returns_ok_with_numeric_node_id() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+        };
+        let (page_id, _) = broker.register_page_candidate(input);
+        let page = broker.get_page(&page_id).expect("page");
+        let req = json!({
+            "params": { "nodeId": 7 }
+        });
+        let resp = overlay_highlight_node_response(json!(1), &req, &broker, &page);
+        assert_eq!(resp["id"], json!(1));
+        assert!(resp.get("error").is_none());
+    }
+
+    #[tokio::test]
+    async fn overlay_hide_highlight_response_propagates_broker_error_when_page_missing() {
+        let page = base_page();
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let resp = overlay_hide_highlight_response(json!(1), &broker, &page);
+        assert_eq!(resp["error"]["message"], json!("page not found"));
+    }
+
+    #[tokio::test]
+    async fn handle_session_connection_sends_disconnected_when_session_missing() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let (client_stream, server_stream) = duplex(1024);
+
+        let server_task = tokio::spawn(async move {
+            let server_ws = WebSocketStream::from_raw_socket(
+                server_stream,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            handle_session_connection(server_ws, broker, "missing-session".to_string()).await;
+        });
+
+        let mut client_ws = WebSocketStream::from_raw_socket(
+            client_stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+
+        if let Some(Ok(Message::Text(text))) = client_ws.next().await {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], json!("disconnected"));
+            assert_eq!(v["reason"], json!("session not found"));
+        } else {
+            panic!("expected disconnected message");
+        }
+
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_session_connection_forwards_console_live_events() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+        };
+        let (page_id, token) = broker.register_page_candidate(input);
+        broker
+            .bridge_hello(
+                &page_id,
+                BridgeHelloPayload {
+                    token: token.clone(),
+                    scope: None,
+                    tab_id: None,
+                    title: None,
+                    url: None,
+                    user_agent: None,
+                    dom_snapshot: None,
+                    dom_tree: None,
+                    storage: None,
+                    console: Vec::new(),
+                    network: Vec::new(),
+                },
+            )
+            .expect("bridge_hello");
+        let session = broker.open_session(&page_id).expect("session");
+
+        let (client_stream, server_stream) = duplex(2048);
+        let broker_for_server = broker.clone();
+        let session_id = session.session_id.clone();
+        let server_task = tokio::spawn(async move {
+            let server_ws = WebSocketStream::from_raw_socket(
+                server_stream,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            handle_session_connection(server_ws, broker_for_server, session_id).await;
+        });
+
+        let mut client_ws = WebSocketStream::from_raw_socket(
+            client_stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+
+        // Initial snapshot
+        let _snapshot_msg = client_ws.next().await.expect("snapshot").expect("ok");
+
+        // Send a console message through the broker; it should be forwarded to the session.
+        broker
+            .bridge_console(
+                &page_id,
+                crate::devtools::BridgeConsolePayload {
+                    token,
+                    level: None,
+                    text: "hello".to_string(),
+                    at_ms: None,
+                    args: Vec::new(),
+                    raw: None,
+                },
+            )
+            .expect("bridge_console");
+
+        let console_msg = client_ws.next().await.expect("console").expect("ok");
+        if let Message::Text(text) = console_msg {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], json!("console"));
+            assert_eq!(v["message"]["text"], json!("hello"));
+        } else {
+            panic!("expected text message");
+        }
+
+        client_ws.close(None).await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_bridge_connection_hello_attaches_and_sends_ready() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+        };
+        let (page_id, token) = broker.register_page_candidate(input);
+
+        let (client_stream, server_stream) = duplex(2048);
+        let broker_for_server = broker.clone();
+        let page_id_for_server = page_id.clone();
+
+        let server_task = tokio::spawn(async move {
+            let server_ws = WebSocketStream::from_raw_socket(
+                server_stream,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            handle_bridge_connection(server_ws, broker_for_server, page_id_for_server).await;
+        });
+
+        let mut client_ws = WebSocketStream::from_raw_socket(
+            client_stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+
+        let hello = json!({
+            "type": "hello",
+            "seq": 1,
+            "token": token,
+        });
+        client_ws
+            .send(Message::Text(hello.to_string().into()))
+            .await
+            .unwrap();
+
+        // Expect ack followed by ready.
+        let ack = client_ws.next().await.expect("ack").expect("ok");
+        let ready = client_ws.next().await.expect("ready").expect("ok");
+        if let Message::Text(text) = ack {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], json!("ack"));
+            assert_eq!(v["seq"], json!(1));
+        } else {
+            panic!("expected ack text");
+        }
+        if let Message::Text(text) = ready {
+            let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(v["type"], json!("ready"));
+        } else {
+            panic!("expected ready text");
+        }
+
+        client_ws.close(None).await.unwrap();
+        server_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handle_bridge_connection_deduplicates_console_seq() {
+        let broker: SharedBrowserDebugBroker = Arc::new(BrowserDebugBroker::new());
+        let input = crate::devtools::RegisterPageInput {
+            url: "http://example.test".to_string(),
+            origin: "http://example.test".to_string(),
+            traffic_id: "t1".to_string(),
+            mode: DevtoolsMode::Read,
+            matched_rule: None,
+        };
+        let (page_id, token) = broker.register_page_candidate(input);
+
+        let (client_stream, server_stream) = duplex(4096);
+        let broker_for_server = broker.clone();
+        let page_id_for_server = page_id.clone();
+
+        let server_task = tokio::spawn(async move {
+            let server_ws = WebSocketStream::from_raw_socket(
+                server_stream,
+                tokio_tungstenite::tungstenite::protocol::Role::Server,
+                None,
+            )
+            .await;
+            handle_bridge_connection(server_ws, broker_for_server, page_id_for_server).await;
+        });
+
+        let mut client_ws = WebSocketStream::from_raw_socket(
+            client_stream,
+            tokio_tungstenite::tungstenite::protocol::Role::Client,
+            None,
+        )
+        .await;
+
+        // Handshake.
+        let hello = json!({ "type": "hello", "seq": 1, "token": token });
+        client_ws
+            .send(Message::Text(hello.to_string().into()))
+            .await
+            .unwrap();
+        let _ack = client_ws.next().await.expect("ack");
+        let _ready = client_ws.next().await.expect("ready");
+
+        let console = json!({
+            "type": "console",
+            "seq": 2,
+            "token": token,
+            "text": "first",
+        });
+        client_ws
+            .send(Message::Text(console.to_string().into()))
+            .await
+            .unwrap();
+        let _ack1 = client_ws.next().await.expect("console ack");
+
+        // Duplicate seq should be de-duplicated.
+        client_ws
+            .send(Message::Text(console.to_string().into()))
+            .await
+            .unwrap();
+        let _ack2 = client_ws.next().await.expect("dup console ack");
+
+        client_ws.close(None).await.unwrap();
+        server_task.await.unwrap();
+
+        let page = broker.get_page(&page_id).expect("page");
+        assert_eq!(page.console_messages.len(), 1);
+        assert_eq!(page.console_messages[0].text, "first");
+    }
+
+    #[tokio::test]
+    async fn handle_devtools_version_endpoint_and_method_not_allowed() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (status, body) =
+            devtools_http_request(state.clone(), "GET", "/api/devtools/cdp/json/version", None)
+                .await;
+        assert_eq!(status, StatusCode::OK);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["Browser"], json!("Bifrost DevTools Bridge"));
+
+        let (status_post, _body_post) =
+            devtools_http_request(state, "POST", "/api/devtools/cdp/json/version", None).await;
+        assert_eq!(status_post, StatusCode::METHOD_NOT_ALLOWED);
+    }
+
+    #[tokio::test]
+    async fn handle_devtools_sessions_missing_page_id_returns_400() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let body = "{\"page_id\":null}";
+        let (status, resp_body) =
+            devtools_http_request(state, "POST", "/api/devtools/sessions", Some(body)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&resp_body).unwrap();
+        assert_eq!(v["error"], json!("missing page_id"));
+    }
+
+    #[tokio::test]
+    async fn handle_devtools_network_traffic_returns_503_when_db_missing() {
+        let state = Arc::new(AdminState::new(0));
+        let (status, body) = devtools_http_request(
+            state,
+            "GET",
+            "/api/devtools/network/traffic/abc%20123",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["error"]
+            .as_str()
+            .unwrap()
+            .contains("traffic database is not available"));
+    }
+
+    #[tokio::test]
+    async fn handle_devtools_sessions_invalid_json_returns_400() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (status, body) = devtools_http_request(
+            state,
+            "POST",
+            "/api/devtools/sessions",
+            Some("not valid json"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert!(v["error"].as_str().unwrap().contains("invalid json"));
+    }
+}

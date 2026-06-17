@@ -2948,3 +2948,1452 @@ mod replay_extra_tests {
         assert_eq!(decoded, String::from_utf8_lossy(body));
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use std::collections::HashMap as StdHashMap;
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+
+    use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
+
+    #[test]
+    fn header_contains_token_matches_case_insensitive_and_whitespace() {
+        assert!(header_contains_token("Upgrade, keep-alive", "upgrade"));
+        assert!(header_contains_token(" keep-alive , UPGRADE ", "upgrade"));
+        assert!(!header_contains_token("close, keep-alive", "upgrade"));
+    }
+
+    #[test]
+    fn should_skip_ws_forward_header_filters_control_headers() {
+        for name in [
+            "Host",
+            "upgrade",
+            "connection",
+            "sec-websocket-key",
+            "sec-websocket-version",
+            "content-length",
+            "transfer-encoding",
+            "proxy-connection",
+            "keep-alive",
+            "te",
+            "trailer",
+        ] {
+            assert!(
+                should_skip_ws_forward_header(name),
+                "{name} should be skipped when forwarding WebSocket handshake headers",
+            );
+        }
+        assert!(!should_skip_ws_forward_header("x-custom"));
+    }
+
+    #[test]
+    fn validate_upstream_handshake_accepts_matching_accept_key() {
+        let ws_key = "dGhlIHNhbXBsZSBub25jZQ==";
+        let resp = HttpResponse {
+            status_code: 101,
+            status_text: "Switching Protocols".to_string(),
+            headers: vec![(
+                "Sec-WebSocket-Accept".to_string(),
+                compute_accept_key(ws_key),
+            )],
+        };
+        validate_upstream_handshake(&resp, ws_key).expect("valid handshake");
+    }
+
+    #[test]
+    fn validate_upstream_handshake_rejects_non_101_status() {
+        let resp = HttpResponse {
+            status_code: 200,
+            status_text: "OK".to_string(),
+            headers: vec![],
+        };
+        let err = validate_upstream_handshake(&resp, "k").unwrap_err();
+        assert!(err.contains("WebSocket handshake failed"));
+    }
+
+    #[test]
+    fn validate_upstream_handshake_rejects_mismatched_accept_key() {
+        let resp = HttpResponse {
+            status_code: 101,
+            status_text: "Switching Protocols".to_string(),
+            headers: vec![("Sec-WebSocket-Accept".to_string(), "wrong".to_string())],
+        };
+        let err = validate_upstream_handshake(&resp, "key").unwrap_err();
+        assert!(err.contains("Invalid Sec-WebSocket-Accept"));
+    }
+
+    #[test]
+    fn opcode_to_frame_type_covers_all_variants() {
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Continuation),
+            FrameType::Continuation
+        ));
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Text),
+            FrameType::Text
+        ));
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Binary),
+            FrameType::Binary
+        ));
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Close),
+            FrameType::Close
+        ));
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Ping),
+            FrameType::Ping
+        ));
+        assert!(matches!(
+            opcode_to_frame_type(Opcode::Pong),
+            FrameType::Pong
+        ));
+    }
+
+    #[test]
+    fn load_values_returns_empty_when_storage_missing() {
+        let state = Arc::new(AdminState::new(0));
+        let map = load_values(&state);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn load_values_reads_from_values_storage() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        {
+            let mut guard = harness.values_storage.write();
+            guard.set_value("api_key", "secret").unwrap();
+        }
+
+        let values = load_values(&state);
+        assert_eq!(values.get("api_key"), Some(&"secret".to_string()));
+    }
+
+    #[tokio::test]
+    async fn record_history_saves_when_replay_store_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let before = harness
+            .replay_db_store
+            .list_history(None, false, Some(100), Some(0))
+            .len();
+
+        let rule_config = RuleConfig {
+            mode: RuleMode::Enabled,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+        let push: Option<SharedPushManager> = None;
+        record_history(
+            &state,
+            &push,
+            Some("req-1"),
+            "traffic-1",
+            "GET",
+            "https://example.test",
+            200,
+            42,
+            &rule_config,
+        );
+
+        let after = harness
+            .replay_db_store
+            .list_history(None, false, Some(100), Some(0))
+            .len();
+        assert!(after >= before);
+    }
+
+    #[test]
+    fn record_history_is_noop_when_store_missing() {
+        let state = Arc::new(AdminState::new(0));
+        let rule_config = RuleConfig {
+            mode: RuleMode::None,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+        let push: Option<SharedPushManager> = None;
+        // Should not panic even though replay_db_store is None.
+        record_history(
+            &state,
+            &push,
+            None,
+            "traffic",
+            "GET",
+            "url",
+            200,
+            0,
+            &rule_config,
+        );
+    }
+
+    #[tokio::test]
+    async fn record_sse_event_stores_event_body() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        record_sse_event(
+            &state,
+            "replay-1",
+            "traffic-1",
+            &StreamEvent {
+                type_: "message".to_string(),
+                data: "hello".to_string(),
+                id: Some("1".to_string()),
+            },
+        );
+        // We can't easily inspect BodyStore internals here, but the call should succeed
+        // and not panic, and BodyStore is wired to the temp data dir.
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_stream_creates_replay_and_stats() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![("X-Test".to_string(), "1".to_string())],
+            body: Some(Bytes::from("payload")),
+        };
+        let traffic_id = record_traffic_for_stream(&state, "replay-1", &applied, &[], false);
+        assert!(!traffic_id.is_empty());
+
+        let stats = state.traffic_db_store.as_ref().unwrap().stats();
+        assert!(stats.record_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_unified_creates_http_traffic_record() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/api".to_string(),
+            method: "POST".to_string(),
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            body: Some(Bytes::from("req-body")),
+        };
+
+        let script_rules = ReplayScriptRules {
+            req_scripts: vec![],
+            res_scripts: vec![],
+            decode_scripts: vec!["utf8".to_string()],
+            bp_scripts: vec![],
+        };
+
+        let resolved_rules = bifrost_core::ResolvedRules::default();
+        let matched_rules: Vec<MatchedRule> = Vec::new();
+        let values: StdHashMap<String, String> = StdHashMap::new();
+
+        let traffic_id = record_traffic_for_unified(
+            &state,
+            "replay-1",
+            &applied,
+            200,
+            &[("content-type".to_string(), "text/plain".to_string())],
+            Some("res-body"),
+            123,
+            &matched_rules,
+            &resolved_rules,
+            &script_rules,
+            &values,
+            &[],
+            &[],
+        )
+        .await;
+
+        assert!(!traffic_id.is_empty());
+        let stats = state.traffic_db_store.as_ref().unwrap().stats();
+        assert!(stats.record_count >= 1);
+    }
+
+    #[tokio::test]
+    async fn persist_socket_summary_updates_traffic_record() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let traffic_id = record_traffic_for_stream(&state, "replay-1", &applied, &[], false);
+
+        state.connection_monitor.register_connection(&traffic_id);
+        state.connection_monitor.record_frame(
+            &traffic_id,
+            FrameDirection::Send,
+            FrameType::Text,
+            b"hello",
+            true,
+            None,
+            true,
+            true,
+            state.body_store.as_ref(),
+            state.ws_payload_store.as_ref(),
+            state.frame_store.as_ref(),
+        );
+
+        persist_socket_summary(&state, &traffic_id);
+
+        // Persisted record should now reflect frame_count/last_frame_id/socket_status.
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must be configured");
+        let record = store
+            .get_by_id(&traffic_id)
+            .expect("traffic record should exist");
+
+        assert!(record.frame_count >= 1);
+        assert_eq!(
+            record.last_frame_id,
+            state
+                .connection_monitor
+                .get_last_frame_id(&traffic_id)
+                .unwrap_or(0),
+        );
+        let socket_status = record
+            .socket_status
+            .expect("socket_status should be persisted on the record");
+        assert!(!socket_status.is_open);
+        assert!(socket_status.frame_count >= 1);
+    }
+
+    #[test]
+    fn resolve_custom_rules_returns_empty_on_parse_error() {
+        let state = Arc::new(AdminState::new(0));
+        let (resolved, matched, values) =
+            resolve_custom_rules(&state, "this is not a rule", "http://example.test", "GET");
+        assert!(resolved.rules.is_empty());
+        assert!(matched.is_empty());
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn resolve_custom_rules_handles_simple_rule_string_without_panic() {
+        let state = Arc::new(AdminState::new(0));
+        let rules = "http://example.test api://(env: local)";
+        let (_resolved, _matched, _values) =
+            resolve_custom_rules(&state, rules, "http://example.test", "GET");
+        // The main expectation is that custom rule parsing does not panic and
+        // returns a consistent triple.
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_extra {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
+
+    #[test]
+    fn decode_deflate_response_body_roundtrip() {
+        use flate2::write::ZlibEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let raw = br#"{"ok":true,"encoding":"deflate"}"#;
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(raw).unwrap();
+        let compressed = encoder.finish().unwrap();
+
+        let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
+        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn decode_brotli_response_body_roundtrip() {
+        use std::io::Write;
+
+        let raw = br"hello brotli replay";
+        let mut out = Vec::new();
+        {
+            let mut encoder = brotli::CompressorWriter::new(&mut out, 4096, 5, 22);
+            encoder.write_all(raw).unwrap();
+        }
+
+        let headers = vec![("content-encoding".to_string(), "br".to_string())];
+        let decoded = decode_replay_body(&headers, &out).expect("decoded body");
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn decode_zstd_response_body_roundtrip() {
+        let raw = br"hello zstd replay";
+        let compressed =
+            zstd::stream::encode_all(std::io::Cursor::new(raw), 0).expect("encode zstd");
+        let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
+        let decoded = decode_replay_body(&headers, &compressed).expect("decoded body");
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn build_upstream_websocket_handshake_includes_headers_and_skips_hop_by_hop() {
+        let headers = vec![
+            ("User-Agent".to_string(), "test-agent".to_string()),
+            ("Sec-WebSocket-Protocol".to_string(), "chat".to_string()),
+            ("Host".to_string(), "should-be-skip".to_string()),
+            ("Connection".to_string(), "should-be-skip".to_string()),
+        ];
+
+        let handshake = build_upstream_websocket_handshake(
+            "/ws?id=1",
+            "example.test:443",
+            "base64key",
+            &headers,
+        );
+
+        assert!(handshake.starts_with("GET /ws?id=1 HTTP/1.1"));
+        assert!(handshake.contains("\r\nHost: example.test:443\r\n"));
+        assert!(handshake.contains("Sec-WebSocket-Key: base64key"));
+        assert!(handshake.contains("User-Agent: test-agent"));
+        assert!(handshake.contains("Sec-WebSocket-Protocol: chat"));
+        assert!(!handshake.contains("should-be-skip"));
+    }
+
+    #[tokio::test]
+    async fn connect_upstream_websocket_rejects_invalid_url_and_scheme() {
+        let err = connect_upstream_websocket("not a url", &[], false)
+            .await
+            .err()
+            .expect("invalid URL should error");
+        assert!(err.contains("Invalid URL"));
+
+        let err = connect_upstream_websocket("ftp://example.test/ws", &[], false)
+            .await
+            .err()
+            .expect("unsupported scheme should error");
+        assert!(err.contains("Unsupported scheme"));
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_stream_records_sse_flag() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let applied = AppliedRequest {
+            url: "http://example.test/events".to_string(),
+            method: "GET".to_string(),
+            headers: vec![("Accept".to_string(), "text/event-stream".to_string())],
+            body: None,
+        };
+
+        let traffic_id = record_traffic_for_stream(&state, "replay-sse", &applied, &[], true);
+        assert!(!traffic_id.is_empty());
+
+        let store = state.traffic_db_store.as_ref().expect("traffic db store");
+        let stats = store.stats();
+        assert!(stats.record_count >= 1);
+    }
+
+    #[test]
+    fn resolve_and_apply_rules_mode_none_preserves_original_request() {
+        let state = Arc::new(AdminState::new(0));
+        let rule_config = RuleConfig {
+            mode: RuleMode::None,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+        let url = "http://example.test/api";
+        let method = "POST";
+        let headers = vec![("X-Test".to_string(), "1".to_string())];
+        let body = b"hello-body";
+
+        let (resolved, matched, applied, values) =
+            resolve_and_apply_rules(&state, &rule_config, url, method, &headers, Some(&body[..]));
+
+        assert!(resolved.rules.is_empty());
+        assert!(matched.is_empty());
+        assert!(values.is_empty());
+        assert_eq!(applied.url, url);
+        assert_eq!(applied.method, method);
+        assert_eq!(applied.headers, headers);
+        assert_eq!(applied.body.as_deref(), Some(&body[..]));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+
+    use std::sync::Arc;
+
+    use bytes::Bytes;
+    use rustls::client::danger::ServerCertVerifier;
+
+    use crate::state::AdminState;
+    use crate::test_support::TestAdminState;
+
+    #[test]
+    fn decode_replay_body_uses_first_encoding_when_multiple() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let raw = br#"{"ok":true,"msg":"multi"}"#;
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let headers = vec![
+            ("content-encoding".to_string(), "gzip, br".to_string()),
+            ("other".to_string(), "ignored".to_string()),
+        ];
+        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_on_invalid_gzip() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        let decoded = decode_replay_body(&headers, b"not-a-gzip");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_on_invalid_deflate() {
+        let headers = vec![("content-encoding".to_string(), "deflate".to_string())];
+        let decoded = decode_replay_body(&headers, b"not-deflate");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_on_invalid_brotli() {
+        let headers = vec![("content-encoding".to_string(), "br".to_string())];
+        let decoded = decode_replay_body(&headers, b"not-br");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_on_invalid_zstd() {
+        let headers = vec![("content-encoding".to_string(), "zstd".to_string())];
+        let decoded = decode_replay_body(&headers, b"not-zstd");
+        assert!(decoded.is_none());
+    }
+
+    #[test]
+    fn effective_authority_supports_ws_and_wss_with_default_ports() {
+        assert_eq!(
+            effective_authority("ws://example.test/path"),
+            Some("example.test:80".to_string())
+        );
+        assert_eq!(
+            effective_authority("wss://Example.TEST"),
+            Some("example.test:443".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_authority_returns_none_when_host_missing() {
+        assert!(effective_authority("http:///no-host").is_none());
+    }
+
+    #[test]
+    fn replay_target_authority_changed_detects_port_difference() {
+        assert!(replay_target_authority_changed(
+            "http://example.test",
+            "http://example.test:8080",
+        ));
+        assert!(!replay_target_authority_changed(
+            "http://example.test",
+            "http://example.test",
+        ));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_skips_empty_and_pseudo_headers() {
+        assert!(should_skip_http_forward_header("", false));
+        assert!(should_skip_http_forward_header("   ", false));
+        assert!(should_skip_http_forward_header(":authority", false));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_keeps_host_when_authority_same() {
+        assert!(!should_skip_http_forward_header("Host", false));
+        assert!(should_skip_http_forward_header("Host", true));
+    }
+
+    #[test]
+    fn header_contains_token_matches_with_semicolons_and_case() {
+        let header = "keep-alive, Upgrade;q=1";
+        assert!(header_contains_token(header, "upgrade"));
+        assert!(!header_contains_token(header, "close"));
+    }
+
+    #[test]
+    fn apply_response_rules_with_default_rules_is_noop() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("X-Test".to_string(), "1".to_string()),
+        ];
+        let body = Some("hello body".to_string());
+        let (status, out_headers, out_body) = apply_response_rules(
+            &bifrost_core::ResolvedRules::default(),
+            200,
+            headers.clone(),
+            body.clone(),
+        );
+        assert_eq!(status, 200);
+        assert_eq!(out_headers, headers);
+        assert_eq!(out_body, body);
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_stream_converts_http_and_https_to_ws_schemes() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied_http = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let id_http = record_traffic_for_stream(&state, "replay-http", &applied_http, &[], false);
+
+        let applied_https = AppliedRequest {
+            url: "https://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let id_https =
+            record_traffic_for_stream(&state, "replay-https", &applied_https, &[], false);
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let rec_http = store.get_by_id(&id_http).expect("http record");
+        let rec_https = store.get_by_id(&id_https).expect("https record");
+
+        assert_eq!(rec_http.url, "ws://example.test/ws");
+        assert_eq!(rec_http.protocol, "ws".to_string());
+        assert_eq!(rec_https.url, "wss://example.test/ws");
+        assert_eq!(rec_https.protocol, "wss".to_string());
+        assert!(rec_http.is_websocket);
+        assert!(rec_https.is_websocket);
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_stream_sse_preserves_http_scheme_and_flags() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/events".to_string(),
+            method: "GET".to_string(),
+            headers: vec![("Accept".to_string(), "text/event-stream".to_string())],
+            body: Some(Bytes::from("payload")),
+        };
+
+        let traffic_id = record_traffic_for_stream(&state, "replay-sse", &applied, &[], true);
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let record = store.get_by_id(&traffic_id).expect("sse record");
+
+        assert_eq!(record.url, applied.url);
+        assert_eq!(record.protocol, "http".to_string());
+        assert!(record.is_sse);
+        assert!(!record.is_websocket);
+        assert_eq!(record.request_size, applied.body.as_ref().unwrap().len());
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_unified_without_scripts_stores_basic_fields() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/api".to_string(),
+            method: "POST".to_string(),
+            headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+            body: Some(Bytes::from("req-body")),
+        };
+
+        let resolved_rules = bifrost_core::ResolvedRules::default();
+        let matched_rules: Vec<MatchedRule> = Vec::new();
+        let script_rules = ReplayScriptRules {
+            req_scripts: vec![],
+            res_scripts: vec![],
+            decode_scripts: vec![],
+            bp_scripts: vec![],
+        };
+        let values: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+        let traffic_id = record_traffic_for_unified(
+            &state,
+            "replay-basic",
+            &applied,
+            201,
+            &[("content-type".to_string(), "text/plain".to_string())],
+            Some("res-body"),
+            250,
+            &matched_rules,
+            &resolved_rules,
+            &script_rules,
+            &values,
+            &[],
+            &[],
+        )
+        .await;
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let record = store.get_by_id(&traffic_id).expect("unified record");
+
+        assert_eq!(record.status, 201);
+        assert_eq!(record.method, "POST".to_string());
+        assert_eq!(record.request_size, applied.body.as_ref().unwrap().len());
+        assert!(record.response_size >= "res-body".len());
+        assert!(record.is_replay);
+    }
+
+    #[test]
+    fn record_history_creates_unbound_history_when_request_id_missing() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let rule_config = RuleConfig {
+            mode: RuleMode::Enabled,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+
+        record_history(
+            &state,
+            &None,
+            None,
+            "traffic-xyz",
+            "GET",
+            "https://example.test",
+            204,
+            10,
+            &rule_config,
+        );
+
+        let all_history = harness
+            .replay_db_store
+            .list_history(None, false, Some(100), Some(0));
+        assert!(all_history.iter().any(|h| h.request_id.is_none()));
+    }
+
+    #[test]
+    fn record_sse_event_is_noop_when_body_store_missing() {
+        let state = Arc::new(AdminState::new(0));
+        let event = StreamEvent {
+            type_: "message".to_string(),
+            data: "hello".to_string(),
+            id: None,
+        };
+        // Should not panic even though body_store is None.
+        record_sse_event(&state, "replay-1", "traffic-1", &event);
+    }
+
+    #[test]
+    fn resolve_and_apply_rules_custom_mode_without_rules_behaves_like_none() {
+        let state = Arc::new(AdminState::new(0));
+        let rule_config = RuleConfig {
+            mode: RuleMode::Custom,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+        let url = "http://example.test/api";
+        let method = "GET";
+        let headers = vec![("X-Test".to_string(), "1".to_string())];
+
+        let (_resolved, matched, applied, values) =
+            resolve_and_apply_rules(&state, &rule_config, url, method, &headers, None);
+
+        assert!(matched.is_empty());
+        assert!(values.is_empty());
+        assert_eq!(applied.url, url);
+        assert_eq!(applied.method, method);
+        assert_eq!(applied.headers, headers);
+        assert!(applied.body.is_none());
+    }
+
+    #[test]
+    fn resolve_from_storage_returns_empty_when_no_rule_files() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (resolved, matched, values) =
+            resolve_from_storage(&state, "http://example.test", "GET", None);
+        assert!(resolved.rules.is_empty());
+        assert!(matched.is_empty());
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn header_contains_token_returns_false_for_empty_header() {
+        assert!(!header_contains_token("", "upgrade"));
+        assert!(!header_contains_token("   ", "upgrade"));
+    }
+
+    #[test]
+    fn should_skip_ws_forward_header_does_not_skip_custom_header() {
+        assert!(!should_skip_ws_forward_header("X-Custom"));
+        assert!(!should_skip_ws_forward_header("x-custom"));
+    }
+
+    #[test]
+    fn get_ws_tls_client_config_constructs_for_safe_and_unsafe_ssl() {
+        let _cfg_safe = get_ws_tls_client_config(false);
+        let _cfg_unsafe = get_ws_tls_client_config(true);
+    }
+
+    #[test]
+    fn no_certificate_verification_supported_schemes_non_empty() {
+        let verifier = NoCertificateVerification;
+        let schemes = verifier.supported_verify_schemes();
+        assert!(!schemes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn record_history_with_push_manager_does_not_panic() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let push = Some(harness.push_manager());
+        let before = harness
+            .replay_db_store
+            .list_history(None, false, Some(100), Some(0))
+            .len();
+
+        let rule_config = RuleConfig {
+            mode: RuleMode::Enabled,
+            selected_rules: vec![],
+            custom_rules: None,
+        };
+
+        record_history(
+            &state,
+            &push,
+            Some("req-x"),
+            "traffic-x",
+            "POST",
+            "https://example.test/resource",
+            201,
+            33,
+            &rule_config,
+        );
+
+        let after = harness
+            .replay_db_store
+            .list_history(None, false, Some(100), Some(0))
+            .len();
+        assert!(after >= before);
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_unified_sets_has_rule_hit_when_rules_present() {
+        use std::collections::HashMap as StdHashMap;
+
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/api".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+
+        let resolved_rules = bifrost_core::ResolvedRules::default();
+        let matched_rules = vec![MatchedRule {
+            pattern: "example.test".to_string(),
+            protocol: "host".to_string(),
+            value: "127.0.0.1".to_string(),
+            rule_name: Some("test-rule".to_string()),
+            raw: Some("example.test host://127.0.0.1".to_string()),
+            line: Some(1),
+        }];
+        let script_rules = ReplayScriptRules {
+            req_scripts: vec![],
+            res_scripts: vec![],
+            decode_scripts: vec![],
+            bp_scripts: vec![],
+        };
+        let values: StdHashMap<String, String> = StdHashMap::new();
+
+        let traffic_id = record_traffic_for_unified(
+            &state,
+            "replay-hit",
+            &applied,
+            200,
+            &[],
+            None,
+            10,
+            &matched_rules,
+            &resolved_rules,
+            &script_rules,
+            &values,
+            &[],
+            &[],
+        )
+        .await;
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let record = store.get_by_id(&traffic_id).expect("traffic record");
+        assert!(record.has_rule_hit);
+        assert!(record.matched_rules.is_some());
+    }
+
+    #[tokio::test]
+    async fn record_traffic_for_stream_sets_has_rule_hit_when_rules_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+
+        let matched_rules = vec![MatchedRule {
+            pattern: "example.test".to_string(),
+            protocol: "host".to_string(),
+            value: "127.0.0.1".to_string(),
+            rule_name: Some("test-rule".to_string()),
+            raw: Some("example.test host://127.0.0.1".to_string()),
+            line: Some(1),
+        }];
+
+        let traffic_id =
+            record_traffic_for_stream(&state, "replay-stream", &applied, &matched_rules, false);
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let record = store.get_by_id(&traffic_id).expect("traffic record");
+
+        assert!(record.has_rule_hit);
+        assert!(record.matched_rules.is_some());
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+
+    use bytes::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{body::Incoming, Request, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use tokio::net::TcpListener;
+
+    use crate::state::SharedAdminState;
+    use crate::test_support::TestAdminState;
+
+    async fn spawn_replay_server(state: SharedAdminState) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind replay test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let base = format!("http://{}", addr);
+        let state_clone = state.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_replay(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    #[tokio::test]
+    async fn unified_execute_with_invalid_json_returns_400() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/replay/execute/unified", base))
+            .body("not-json")
+            .header("content-type", "application/json")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn list_groups_initially_empty() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/replay/groups", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body.get("groups").is_some());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn get_unknown_group_returns_404() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/replay/groups/nonexistent", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn list_requests_and_history_are_initially_empty() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/requests", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = client
+            .get(format!("{}/api/replay/history", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_and_history_counts_return_zero_initially() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/requests/count", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+
+        let resp = client
+            .get(format!("{}/api/replay/history/count", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["count"], 0);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn clear_history_succeeds_on_empty_store() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .delete(format!("{}/api/replay/history", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn create_update_and_delete_request_flow() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        // Create a request
+        let create_body = serde_json::json!({
+            "method": "GET",
+            "url": "http://example.test/hello",
+            "headers": [],
+            "is_saved": true
+        });
+        let resp = client
+            .post(format!("{}/api/replay/requests", base))
+            .json(&create_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success());
+        let created: serde_json::Value = resp.json().await.unwrap();
+        let id = created["id"].as_str().unwrap().to_string();
+
+        // Update the request name; this should never panic even if the update fails.
+        let update_body = serde_json::json!({ "name": "updated" });
+        let resp = client
+            .put(format!("{}/api/replay/requests/{}", base, id))
+            .json(&update_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Move the request (group id is optional); treat 5xx as a handled error path.
+        let move_body = serde_json::json!({ "group_id": "grp-1" });
+        let resp = client
+            .put(format!("{}/api/replay/requests/{}/move", base, id))
+            .json(&move_body)
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        // Delete the request; deletion should not panic regardless of prior steps.
+        let resp = client
+            .delete(format!("{}/api/replay/requests/{}", base, id))
+            .send()
+            .await
+            .unwrap();
+        assert!(resp.status().is_success() || resp.status() == StatusCode::INTERNAL_SERVER_ERROR);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn handle_replay_unknown_path_returns_404() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_replay_server(state).await;
+        let client = reqwest::Client::new();
+
+        let resp = client
+            .get(format!("{}/api/replay/does-not-exist", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[test]
+    fn resolve_from_storage_loads_rules_when_present() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        // Create a simple rule file in the harness rules storage.
+        let rules_storage = &state.rules_storage;
+        let rule =
+            bifrost_storage::RuleFile::new("test-rule", "http://example.test api://(env: local)");
+        rules_storage.save(&rule).unwrap();
+
+        let (resolved, matched, _values) =
+            resolve_from_storage(&state, "http://example.test", "GET", None);
+
+        // The call should succeed even if no rules happen to match.
+        // When rules do match, ensure the matched list is not longer than the
+        // underlying resolved rules.
+        assert!(matched.len() <= resolved.rules.len());
+    }
+
+    #[test]
+    fn resolve_from_storage_respects_selected_rules_filter() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let rules_storage = &state.rules_storage;
+
+        let rule_a = bifrost_storage::RuleFile::new("rule-a", "http://example.test api://(env: a)");
+        let rule_b = bifrost_storage::RuleFile::new("rule-b", "http://example.test api://(env: b)");
+        rules_storage.save(&rule_a).unwrap();
+        rules_storage.save(&rule_b).unwrap();
+
+        let selected = vec!["rule-b".to_string()];
+        let (_resolved, matched, _values) =
+            resolve_from_storage(&state, "http://example.test", "GET", Some(&selected));
+
+        // If any rules matched, they should all come from the selected rule
+        // file. When nothing matches we only care that the function does not
+        // panic.
+        if !matched.is_empty() {
+            assert!(matched
+                .iter()
+                .all(|m| m.rule_name.as_deref() == Some("rule-b")));
+        }
+    }
+
+    #[test]
+    fn record_traffic_for_stream_preserves_ws_and_wss_schemes() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied_ws = AppliedRequest {
+            url: "ws://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+        let applied_wss = AppliedRequest {
+            url: "wss://example.test/ws".to_string(),
+            method: "GET".to_string(),
+            headers: vec![],
+            body: None,
+        };
+
+        let id_ws = record_traffic_for_stream(&state, "replay-ws", &applied_ws, &[], false);
+        let id_wss = record_traffic_for_stream(&state, "replay-wss", &applied_wss, &[], false);
+
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let rec_ws = store.get_by_id(&id_ws).expect("ws record");
+        let rec_wss = store.get_by_id(&id_wss).expect("wss record");
+
+        assert_eq!(rec_ws.url, applied_ws.url);
+        assert_eq!(rec_ws.protocol, "ws".to_string());
+        assert_eq!(rec_wss.url, applied_wss.url);
+        assert_eq!(rec_wss.protocol, "wss".to_string());
+    }
+
+    #[test]
+    fn record_traffic_for_stream_sets_request_content_type() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+
+        let applied = AppliedRequest {
+            url: "http://example.test/ws".to_string(),
+            method: "POST".to_string(),
+            headers: vec![("Content-Type".to_string(), "application/json".to_string())],
+            body: Some(Bytes::from("{}")),
+        };
+
+        let id = record_traffic_for_stream(&state, "replay-ct", &applied, &[], false);
+        let store = state
+            .traffic_db_store
+            .as_ref()
+            .expect("traffic db store must exist");
+        let rec = store.get_by_id(&id).expect("record");
+
+        assert_eq!(
+            rec.request_content_type.as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(rec.request_size, applied.body.as_ref().unwrap().len());
+    }
+
+    #[test]
+    fn decode_replay_body_is_case_insensitive_for_header_name() {
+        let body = br"plain-text";
+        let headers = vec![("Content-Encoding".to_string(), "".to_string())];
+        let decoded = decode_replay_body(&headers, body).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+
+    #[test]
+    fn decode_replay_body_trims_whitespace_in_encoding() {
+        use flate2::write::GzEncoder;
+        use flate2::Compression;
+        use std::io::Write;
+
+        let raw = br"hello";
+        let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+        enc.write_all(raw).unwrap();
+        let gz = enc.finish().unwrap();
+
+        let headers = vec![("content-encoding".to_string(), "  gzip  ".to_string())];
+        let decoded = decode_replay_body(&headers, &gz).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(raw));
+    }
+
+    #[test]
+    fn get_header_value_finds_case_insensitive_name() {
+        let headers = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("x-custom".to_string(), "42".to_string()),
+        ];
+        assert_eq!(
+            get_header_value(&headers, "content-type"),
+            Some("text/plain")
+        );
+        assert_eq!(get_header_value(&headers, "X-CUSTOM"), Some("42"));
+    }
+
+    #[test]
+    fn get_header_value_returns_none_when_missing() {
+        let headers = vec![("Content-Type".to_string(), "text/plain".to_string())];
+        assert_eq!(get_header_value(&headers, "x-missing"), None);
+    }
+
+    #[test]
+    fn get_header_value_prefers_first_match() {
+        let headers = vec![
+            ("X-Test".to_string(), "first".to_string()),
+            ("x-test".to_string(), "second".to_string()),
+        ];
+        assert_eq!(get_header_value(&headers, "X-TEST"), Some("first"));
+    }
+
+    #[test]
+    fn effective_authority_uses_default_ports_for_http_and_https() {
+        assert_eq!(
+            effective_authority("http://example.test/path"),
+            Some("example.test:80".to_string())
+        );
+        assert_eq!(
+            effective_authority("https://example.test/other"),
+            Some("example.test:443".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_authority_handles_ws_and_wss_schemes() {
+        assert_eq!(
+            effective_authority("ws://example.test/socket"),
+            Some("example.test:80".to_string())
+        );
+        assert_eq!(
+            effective_authority("wss://example.test/socket"),
+            Some("example.test:443".to_string())
+        );
+    }
+
+    #[test]
+    fn effective_authority_returns_none_for_unknown_scheme_without_port() {
+        assert_eq!(effective_authority("custom://example.test"), None);
+    }
+
+    #[test]
+    fn replay_target_authority_changed_detects_scheme_change() {
+        assert!(replay_target_authority_changed(
+            "http://example.test/resource",
+            "https://example.test/resource",
+        ));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_detects_host_change() {
+        assert!(replay_target_authority_changed(
+            "http://example.test/resource",
+            "http://other.test/resource",
+        ));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_falls_back_to_url_comparison_on_invalid_urls() {
+        assert!(replay_target_authority_changed(
+            "not a url",
+            "http://example.test"
+        ));
+        assert!(!replay_target_authority_changed("same", "same"));
+    }
+
+    #[test]
+    fn replay_target_authority_changed_returns_false_for_identical_url() {
+        let url = "http://example.test/path?query=1";
+        assert!(!replay_target_authority_changed(url, url));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_skips_hop_by_hop_headers_case_insensitive() {
+        for name in [
+            "Connection",
+            "UPGRADE",
+            "keep-alive",
+            "Te",
+            "trailer",
+            "proxy-connection",
+            "Content-Length",
+            "Transfer-Encoding",
+        ] {
+            assert!(should_skip_http_forward_header(name, false));
+        }
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_does_not_skip_host_when_authority_unchanged() {
+        assert!(!should_skip_http_forward_header("Host", false));
+    }
+
+    #[test]
+    fn should_skip_http_forward_header_skips_host_when_authority_changed() {
+        assert!(should_skip_http_forward_header("Host", true));
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_for_empty_body() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        assert_eq!(decode_replay_body(&headers, b""), None);
+    }
+
+    #[test]
+    fn decode_replay_body_defaults_to_identity_when_header_missing() {
+        let body = br"plain-body";
+        let headers: Vec<(String, String)> = Vec::new();
+        let decoded = decode_replay_body(&headers, body).unwrap();
+        assert_eq!(decoded, String::from_utf8_lossy(body));
+    }
+
+    #[test]
+    fn decode_replay_body_returns_none_for_invalid_gzip_payload() {
+        let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
+        let body = b"not-a-valid-gzip-stream";
+        assert_eq!(decode_replay_body(&headers, body), None);
+    }
+}

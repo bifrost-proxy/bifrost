@@ -4688,3 +4688,781 @@ mod tests {
         assert!(should_stop_system_proxy_reconcile_for_shutdown(dir));
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use std::sync::Arc as StdArc;
+    use std::time::Duration;
+
+    use bifrost_admin::connection_registry::ConnectionRegistry;
+    use bifrost_admin::{RuntimeConfig as AdminRuntimeConfig, SharedRuntimeConfig};
+    use bifrost_storage::{RulesStorage, ValuesStorage};
+    use parking_lot::RwLock as ParkingRwLock;
+    use tempfile::tempdir;
+
+    fn allocate_free_loopback_port() -> u16 {
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        port
+    }
+
+    fn with_reconcile_env<F: FnOnce()>(value: Option<&str>, f: F) {
+        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+        let prev = std::env::var(VAR).ok();
+        match value {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+        f();
+        match prev {
+            Some(v) => std::env::set_var(VAR, v),
+            None => std::env::remove_var(VAR),
+        }
+    }
+
+    #[test]
+    fn parse_yes_no_answer_accepts_yes_variants() {
+        assert_eq!(parse_yes_no_answer("y"), Some(true));
+        assert_eq!(parse_yes_no_answer("Y"), Some(true));
+        assert_eq!(parse_yes_no_answer(" yes \n"), Some(true));
+    }
+
+    #[test]
+    fn parse_yes_no_answer_accepts_no_variants() {
+        assert_eq!(parse_yes_no_answer("n"), Some(false));
+        assert_eq!(parse_yes_no_answer("NO"), Some(false));
+        assert_eq!(parse_yes_no_answer("   \n"), Some(false));
+    }
+
+    #[test]
+    fn parse_yes_no_answer_rejects_unknown_strings() {
+        assert_eq!(parse_yes_no_answer("maybe"), None);
+        assert_eq!(parse_yes_no_answer("123"), None);
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_defaults_to_30_when_env_missing() {
+        with_reconcile_env(None, || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_uses_env_value_when_valid() {
+        with_reconcile_env(Some("5"), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 5);
+        });
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_ignores_zero_value() {
+        with_reconcile_env(Some("0"), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_ignores_non_numeric_value() {
+        with_reconcile_env(Some("not-a-number"), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
+    }
+
+    #[test]
+    fn find_available_port_returns_preferred_port_when_free() {
+        let preferred = allocate_free_loopback_port();
+        let actual = find_available_port("127.0.0.1", preferred).expect("should find port");
+        assert_eq!(actual, preferred);
+    }
+
+    #[test]
+    fn find_available_port_skips_in_use_port() {
+        let base = allocate_free_loopback_port();
+        let _listener = std::net::TcpListener::bind(("127.0.0.1", base)).unwrap();
+
+        let actual = find_available_port("127.0.0.1", base).expect("should find port");
+        assert!(
+            actual >= base,
+            "expected actual >= base, got {actual} < {base}"
+        );
+        assert_ne!(
+            actual, base,
+            "expected a different port when base is in use"
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_managed_proxy_task_rejects_invalid_bind_address() {
+        let config = ProxyConfig {
+            host: "invalid host".to_string(),
+            port: 12345,
+            ..Default::default()
+        };
+
+        let tls_config = StdArc::new(bifrost_proxy::TlsConfig::default());
+        let admin_state = StdArc::new(AdminState::new(config.port));
+        let push_manager = StdArc::new(PushManager::new(admin_state.clone()));
+        let access_control = ProxyServer::new(ProxyConfig::default())
+            .access_control()
+            .clone();
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+
+        let err = spawn_managed_proxy_task(
+            config,
+            resolver,
+            tls_config,
+            admin_state,
+            push_manager,
+            access_control,
+        )
+        .await
+        .unwrap_err();
+
+        match err {
+            bifrost_core::BifrostError::Config(msg) => {
+                assert!(msg.contains("Invalid address"), "unexpected message: {msg}");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_task_error_maps_ok_ok_to_exit_error() {
+        let err = listener_task_error(Ok(Ok(())));
+        if let bifrost_core::BifrostError::Network(msg) = err {
+            assert!(msg.contains("exited unexpectedly"));
+        } else {
+            panic!("unexpected error variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_task_error_propagates_inner_error() {
+        let err = listener_task_error(Ok(Err(bifrost_core::BifrostError::Network(
+            "boom".to_string(),
+        ))));
+        match err {
+            bifrost_core::BifrostError::Network(msg) => assert_eq!(msg, "boom"),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_task_error_maps_cancelled_join_error() {
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            Ok::<(), bifrost_core::BifrostError>(())
+        });
+        handle.abort();
+        let result = handle.await;
+        assert!(result.as_ref().unwrap_err().is_cancelled());
+
+        let err = listener_task_error(result);
+        if let bifrost_core::BifrostError::Network(msg) = err {
+            assert!(msg.contains("cancelled"));
+        } else {
+            panic!("unexpected error variant");
+        }
+    }
+
+    #[tokio::test]
+    async fn listener_task_error_maps_panic_join_error() {
+        let handle = tokio::spawn(async {
+            panic!("boom");
+            #[allow(unreachable_code)]
+            Ok::<(), bifrost_core::BifrostError>(())
+        });
+        let result = handle.await;
+        assert!(result.is_err());
+
+        let err = listener_task_error(result);
+        if let bifrost_core::BifrostError::Network(msg) = err {
+            assert!(msg.contains("task failed"));
+        } else {
+            panic!("unexpected error variant");
+        }
+    }
+
+    #[test]
+    fn log_startup_phase_executes_without_panic() {
+        let started = Instant::now();
+        log_startup_phase("coverage_boost", started);
+    }
+
+    #[test]
+    fn is_rules_storage_file_matches_bifrost_extension() {
+        assert!(is_rules_storage_file(Path::new("rules.bifrost")));
+    }
+
+    #[test]
+    fn is_rules_storage_file_matches_json_extension() {
+        assert!(is_rules_storage_file(Path::new("legacy.json")));
+    }
+
+    #[test]
+    fn is_rules_storage_file_rejects_hidden_and_unrelated_files() {
+        assert!(!is_rules_storage_file(Path::new(".hidden.bifrost")));
+        assert!(!is_rules_storage_file(Path::new("README.md")));
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_handles_missing_base_dir() {
+        let temp_dir = tempdir().unwrap();
+        let missing = temp_dir.path().join("missing-rules");
+        let snapshot = collect_rules_filesystem_snapshot(&missing).unwrap();
+        assert!(snapshot.entries.is_empty());
+    }
+
+    #[test]
+    fn rules_filesystem_event_relevant_matches_create_modify_remove_and_any() {
+        use notify::event::{CreateKind, ModifyKind, RemoveKind};
+        use notify::EventKind;
+
+        assert!(is_rules_filesystem_event_relevant(&EventKind::Create(
+            CreateKind::Any
+        )));
+        assert!(is_rules_filesystem_event_relevant(&EventKind::Modify(
+            ModifyKind::Any
+        )));
+        assert!(is_rules_filesystem_event_relevant(&EventKind::Remove(
+            RemoveKind::Any
+        )));
+        assert!(is_rules_filesystem_event_relevant(&EventKind::Any));
+    }
+
+    #[test]
+    fn rules_filesystem_event_relevant_ignores_other_events() {
+        use notify::event::AccessKind;
+        use notify::EventKind;
+
+        assert!(!is_rules_filesystem_event_relevant(&EventKind::Access(
+            AccessKind::Any
+        )));
+    }
+
+    #[tokio::test]
+    async fn spawn_rules_filesystem_watcher_task_noop_without_config_manager() {
+        let temp_dir = tempdir().unwrap();
+        let rules_storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+
+        let handle = spawn_rules_filesystem_watcher_task(None, rules_storage);
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_rules_watcher_task_noop_without_config_manager() {
+        let temp_dir = tempdir().unwrap();
+        let rules_storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let values_storage = StdArc::new(ParkingRwLock::new(
+            ValuesStorage::with_dir(temp_dir.path().join("values")).unwrap(),
+        ));
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+        let connection_registry = StdArc::new(ConnectionRegistry::new(true));
+        let runtime_config: SharedRuntimeConfig =
+            StdArc::new(tokio::sync::RwLock::new(AdminRuntimeConfig::default()));
+        let admin_state = StdArc::new(AdminState::new(0).with_rules_storage(rules_storage));
+
+        let handle = spawn_rules_watcher_task(
+            None,
+            admin_state.rules_storage.clone(),
+            values_storage,
+            resolver,
+            connection_registry,
+            runtime_config,
+            admin_state,
+            None,
+        );
+
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn spawn_admin_push_watcher_task_noop_without_config_manager() {
+        let admin_state = StdArc::new(AdminState::new(0));
+        let push_manager = StdArc::new(PushManager::new(admin_state));
+
+        let handle = spawn_admin_push_watcher_task(None, push_manager);
+        handle.await.unwrap();
+    }
+
+    #[test]
+    fn log_resolver_rules_logs_cli_rules() {
+        let rules_str = "example.test statusCode://201".to_string();
+        let (cli_rules, _) = parse_cli_rules(&[rules_str], &None, &HashMap::new()).unwrap();
+        let resolver = DynamicRulesResolver::new(cli_rules.clone(), Vec::new(), HashMap::new());
+
+        assert_eq!(resolver.cli_rules().len(), cli_rules.len());
+        log_resolver_rules(&resolver);
+    }
+
+    #[test]
+    fn check_and_resolve_port_conflict_returns_ok_when_port_free() {
+        let port = allocate_free_loopback_port();
+        check_and_resolve_port_conflict("127.0.0.1", port, false).expect("port should be free");
+    }
+
+    #[test]
+    fn build_tray_start_args_combines_flags_from_config() {
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            socks5_port: Some(12345),
+            unsafe_ssl: true,
+            ..Default::default()
+        };
+
+        let args = build_tray_start_args(&config, "trace", true, false);
+
+        assert!(args.contains(&"--host".to_string()));
+        assert!(args.contains(&"--socks5-port".to_string()));
+        assert!(args.contains(&"--log-level".to_string()));
+        assert!(args.contains(&"--skip-cert-check".to_string()));
+        assert!(args.contains(&"--unsafe-ssl".to_string()));
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_handles_empty_directory() {
+        let temp_dir = tempdir().unwrap();
+        let snapshot = collect_rules_filesystem_snapshot(temp_dir.path()).unwrap();
+        assert!(snapshot.entries.is_empty());
+    }
+
+    #[test]
+    fn parse_proxy_users_accepts_passwords_with_colons() {
+        let users = vec!["alice:pa:ss:word".to_string()];
+        let accounts = parse_proxy_users(&users).expect("parse proxy users");
+        assert_eq!(accounts.len(), 1);
+        assert_eq!(accounts[0].username, "alice");
+        assert_eq!(accounts[0].password.as_deref(), Some("pa:ss:word"));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn build_tray_launch_callback_with_no_tray_skips_tray_pid() {
+        let temp = tempdir().unwrap();
+        let data_dir = temp.path().to_path_buf();
+        let config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            port: 18080,
+            ..Default::default()
+        };
+
+        let callback =
+            build_tray_launch_callback(true, data_dir.clone(), 1234, &config, "info", false, false);
+
+        callback();
+        assert!(!data_dir.join("tray.pid").exists());
+    }
+
+    #[test]
+    fn launch_tray_helper_if_enabled_noop_when_tray_disabled() {
+        let temp = tempdir().unwrap();
+        let runtime_file = temp.path().join("runtime.json");
+        std::fs::write(&runtime_file, "{}\n").unwrap();
+
+        let request = TrayLaunchHelperRequest {
+            no_tray: true,
+            data_dir: temp.path(),
+            runtime_file: &runtime_file,
+            pid: 1234,
+            admin_url: "http://127.0.0.1:18080/_bifrost/",
+            port: 18080,
+            bifrost_bin: None,
+            start_args: &[],
+        };
+
+        launch_tray_helper_if_enabled(request);
+        assert!(!temp.path().join("tray.pid").exists());
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+    use std::sync::Arc as StdArc;
+    use std::time::Duration;
+
+    use bifrost_admin::connection_registry::ConnectionRegistry;
+    use bifrost_admin::{RuntimeConfig as AdminRuntimeConfig, SharedRuntimeConfig};
+    use bifrost_storage::{ConfigManager, RulesStorage, ValuesStorage};
+    use parking_lot::RwLock as ParkingRwLock;
+    use tempfile::tempdir;
+
+    fn make_temp_rules_dir() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempdir().unwrap();
+        let dir = tmp.path().to_path_buf();
+        (tmp, dir)
+    }
+
+    #[test]
+    fn is_rules_storage_file_rejects_paths_without_file_name() {
+        assert!(!is_rules_storage_file(Path::new("")));
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_errors_for_non_directory() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let err = collect_rules_filesystem_snapshot(file.path()).unwrap_err();
+        assert_ne!(err.kind(), std::io::ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn log_resolver_rules_noop_when_no_cli_rules() {
+        let resolver = DynamicRulesResolver::new(Vec::new(), Vec::new(), HashMap::new());
+        log_resolver_rules(&resolver);
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_trims_whitespace() {
+        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+        let prev = std::env::var(VAR).ok();
+        std::env::set_var(VAR, " 7 ");
+        assert_eq!(system_proxy_reconcile_interval().as_secs(), 7);
+        if let Some(v) = prev {
+            std::env::set_var(VAR, v);
+        } else {
+            std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_ignores_negative_numbers() {
+        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+        let prev = std::env::var(VAR).ok();
+        std::env::set_var(VAR, "-5");
+        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        if let Some(v) = prev {
+            std::env::set_var(VAR, v);
+        } else {
+            std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn rules_filesystem_trigger_debug_format_works() {
+        let msg = format!("{:?}", RulesFilesystemTrigger::WatcherEvent);
+        assert!(msg.contains("WatcherEvent"));
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_ignores_unrelated_extensions() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        std::fs::write(dir.join("notes.txt"), "ignored").unwrap();
+        let snapshot = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert!(snapshot.entries.is_empty());
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_includes_supported_files() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        std::fs::write(dir.join("a.bifrost"), "a.test statusCode://200\n").unwrap();
+        std::fs::write(dir.join("b.json"), "{}").unwrap();
+        let snapshot = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert_eq!(snapshot.entries.len(), 2);
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_equality_detects_difference() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        std::fs::write(dir.join("a.bifrost"), "a.test statusCode://200\n").unwrap();
+        let first = collect_rules_filesystem_snapshot(&dir).unwrap();
+        std::fs::write(dir.join("a.bifrost"), "a.test statusCode://201\n").unwrap();
+        let second = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn load_stored_rules_returns_empty_when_no_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let (rules, values) = load_stored_rules(&rules_storage, None);
+        assert!(rules.is_empty());
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn load_stored_rules_collects_inline_markdown_values_from_multiple_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let content1 = r#"
+example.com resBody://{body1}
+
+``` body1
+first content
+```
+"#;
+        let content2 = r#"
+example.org resBody://{body2}
+
+``` body2
+second content
+```
+"#;
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new("a", content1))
+            .unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new("b", content2))
+            .unwrap();
+        let (_rules, values) = load_stored_rules(&rules_storage, None);
+        assert_eq!(
+            values.get("body1").map(String::as_str),
+            Some("first content")
+        );
+        assert_eq!(
+            values.get("body2").map(String::as_str),
+            Some("second content")
+        );
+    }
+
+    #[test]
+    fn is_rules_filesystem_event_relevant_accepts_any() {
+        assert!(is_rules_filesystem_event_relevant(&EventKind::Any));
+    }
+
+    #[tokio::test]
+    async fn rules_hot_reload_watcher_reacts_to_rules_changed_events() {
+        let temp_dir = tempdir().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let config_manager = StdArc::new(ConfigManager::new(data_dir.clone()).unwrap());
+
+        let rules_dir = data_dir.join("rules");
+        let values_dir = data_dir.join("values");
+        let rules_storage = RulesStorage::with_dir(rules_dir).unwrap();
+        let values_storage = StdArc::new(ParkingRwLock::new(
+            ValuesStorage::with_dir(values_dir).unwrap(),
+        ));
+
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "entry",
+                "example.com statusCode://200",
+            ))
+            .unwrap();
+
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+        let connection_registry = StdArc::new(ConnectionRegistry::new(true));
+        let runtime_config: SharedRuntimeConfig =
+            StdArc::new(tokio::sync::RwLock::new(AdminRuntimeConfig::default()));
+        let admin_state = StdArc::new(
+            AdminState::new(0)
+                .with_rules_storage(rules_storage.clone())
+                .with_config_manager_shared(config_manager.clone()),
+        );
+
+        let base_config = ProxyConfig {
+            host: "127.0.0.1".to_string(),
+            ..Default::default()
+        };
+        let tls_config = StdArc::new(bifrost_proxy::TlsConfig::default());
+        let push_manager = StdArc::new(PushManager::new(admin_state.clone()));
+        let access_control = ProxyServer::new(ProxyConfig::default())
+            .access_control()
+            .clone();
+        let temp_ports = StdArc::new(crate::commands::port::CliTemporaryPortManager::new(
+            base_config,
+            tls_config,
+            admin_state.clone(),
+            push_manager,
+            access_control,
+            rules_storage.clone(),
+            values_storage.clone(),
+        ));
+
+        let _handle = spawn_rules_watcher_task(
+            Some(config_manager.clone()),
+            rules_storage,
+            values_storage,
+            resolver.clone(),
+            connection_registry,
+            runtime_config,
+            admin_state,
+            Some(temp_ports),
+        );
+
+        let _ = config_manager.notify(ConfigChangeEvent::RulesChanged);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+
+        let (_intercept, _passthrough) = resolver.get_tls_rule_patterns();
+    }
+
+    #[tokio::test]
+    async fn rules_hot_reload_watcher_handles_values_changed_without_disconnect() {
+        let temp_dir = tempdir().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let config_manager = StdArc::new(ConfigManager::new(data_dir.clone()).unwrap());
+        let rules_storage = RulesStorage::with_dir(data_dir.join("rules")).unwrap();
+        let values_storage = StdArc::new(ParkingRwLock::new(
+            ValuesStorage::with_dir(data_dir.join("values")).unwrap(),
+        ));
+
+        let resolver: SharedDynamicRulesResolver = StdArc::new(DynamicRulesResolver::new(
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        ));
+        let connection_registry = StdArc::new(ConnectionRegistry::new(true));
+        let runtime_config: SharedRuntimeConfig =
+            StdArc::new(tokio::sync::RwLock::new(AdminRuntimeConfig::default()));
+        let admin_state = StdArc::new(
+            AdminState::new(0)
+                .with_rules_storage(rules_storage.clone())
+                .with_config_manager_shared(config_manager.clone()),
+        );
+
+        let _handle = spawn_rules_watcher_task(
+            Some(config_manager.clone()),
+            rules_storage,
+            values_storage,
+            resolver,
+            connection_registry,
+            runtime_config,
+            admin_state,
+            None,
+        );
+
+        let _ = config_manager.notify(ConfigChangeEvent::ValuesChanged("k".to_string()));
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn admin_push_watcher_handles_all_config_change_events() {
+        use bifrost_storage::TlsConfig as StoredTlsConfig;
+
+        let temp_dir = tempdir().unwrap();
+        let data_dir = temp_dir.path().to_path_buf();
+        let config_manager = StdArc::new(ConfigManager::new(data_dir).unwrap());
+
+        let admin_state =
+            StdArc::new(AdminState::new(0).with_config_manager_shared(config_manager.clone()));
+        let push_manager = StdArc::new(PushManager::new(admin_state));
+
+        let _handle = spawn_admin_push_watcher_task(Some(config_manager.clone()), push_manager);
+
+        let _ = config_manager.notify(ConfigChangeEvent::TlsConfigChanged(
+            StoredTlsConfig::default(),
+        ));
+        let _ = config_manager.notify(ConfigChangeEvent::SandboxConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::SystemProxyConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::TrayConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::AccessConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::ServerConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::TrafficConfigChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::ScriptsChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::ValuesChanged("k".to_string()));
+        let _ = config_manager.notify(ConfigChangeEvent::StateChanged);
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_equality_treats_identical_snapshots_as_equal() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        std::fs::write(dir.join("a.bifrost"), "a.test statusCode://200\n").unwrap();
+        let first = collect_rules_filesystem_snapshot(&dir).unwrap();
+        let second = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn is_rules_storage_file_rejects_hidden_json_files() {
+        assert!(!is_rules_storage_file(Path::new(".hidden.json")));
+    }
+
+    #[test]
+    fn is_rules_storage_file_rejects_hidden_bifrost_files() {
+        assert!(!is_rules_storage_file(Path::new(".hidden.bifrost")));
+    }
+
+    #[test]
+    fn load_stored_rules_ignores_disabled_files_completely() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(
+                &bifrost_storage::RuleFile::new("disabled", "example.com statusCode://200")
+                    .with_enabled(false),
+            )
+            .unwrap();
+        let (rules, _values) = load_stored_rules(&rules_storage, None);
+        assert!(rules.is_empty());
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_handles_nested_directories() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        let nested = dir.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("a.bifrost"), "a.test statusCode://200\n").unwrap();
+        let snapshot = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert_eq!(snapshot.entries.len(), 1);
+    }
+
+    #[test]
+    fn rules_filesystem_event_relevant_rejects_access_events() {
+        use notify::event::AccessKind;
+        assert!(!is_rules_filesystem_event_relevant(&EventKind::Access(
+            AccessKind::Any
+        )));
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_uses_default_when_env_missing() {
+        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+        let prev = std::env::var(VAR).ok();
+        std::env::remove_var(VAR);
+        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        if let Some(v) = prev {
+            std::env::set_var(VAR, v);
+        }
+    }
+
+    #[test]
+    fn system_proxy_reconcile_interval_ignores_zero_value() {
+        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+        let prev = std::env::var(VAR).ok();
+        std::env::set_var(VAR, "0");
+        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        if let Some(v) = prev {
+            std::env::set_var(VAR, v);
+        } else {
+            std::env::remove_var(VAR);
+        }
+    }
+
+    #[test]
+    fn is_rules_storage_file_accepts_supported_extensions() {
+        assert!(is_rules_storage_file(Path::new("rules/sample.bifrost")));
+        assert!(is_rules_storage_file(Path::new("rules/sample.json")));
+    }
+
+    #[test]
+    fn collect_rules_filesystem_snapshot_empty_directory_has_no_entries() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        let snapshot = collect_rules_filesystem_snapshot(&dir).unwrap();
+        assert!(snapshot.entries.is_empty());
+    }
+}

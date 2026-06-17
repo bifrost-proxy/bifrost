@@ -317,7 +317,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-admin"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "aes",
  "async-trait",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-agent"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -438,7 +438,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-asr"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "chrono",
  "pinyin",
@@ -453,7 +453,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-cli"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "arboard",
  "async-trait",
@@ -508,12 +508,13 @@ dependencies = [
  "urlencoding",
  "uuid",
  "windows-sys 0.59.0",
+ "wiremock",
  "zip 2.4.2",
 ]
 
 [[package]]
 name = "bifrost-command"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "serde",
  "serde_json",
@@ -521,7 +522,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -556,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-device"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "base64 0.22.1",
  "serde",
@@ -568,7 +569,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-e2e"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -606,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-power"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "core-foundation 0.10.1",
  "core-foundation-sys",
@@ -619,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-proxy"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "base64 0.22.1",
  "bifrost-admin",
@@ -646,6 +647,7 @@ dependencies = [
  "libc",
  "memchr",
  "mime_guess",
+ "mockall",
  "netstat2",
  "parking_lot",
  "pin-project-lite",
@@ -668,12 +670,13 @@ dependencies = [
  "uuid",
  "webpki-roots 1.0.6",
  "windows 0.58.0",
+ "wiremock",
  "zstd",
 ]
 
 [[package]]
 name = "bifrost-script"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "base64 0.22.1",
  "bifrost-core",
@@ -692,7 +695,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -712,7 +715,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-sync"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -732,7 +735,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tests"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "async-trait",
  "bifrost-admin",
@@ -753,7 +756,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -1967,6 +1970,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "downcast"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1435fa1053d8b2fbbe9be7e97eca7f33d37b28409959813daefc1446a14247f1"
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2233,6 +2242,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
 dependencies = [
  "percent-encoding",
+]
+
+[[package]]
+name = "fragile"
+version = "2.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8878864ba14bb86e818a412bfd6f18f9eabd4ec0f008a28e8f7eb61db532fcf9"
+dependencies = [
+ "futures-core",
 ]
 
 [[package]]
@@ -4103,6 +4121,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "mockall"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "39a6bfcc6c8c7eed5ee98b9c3e33adc726054389233e201c95dab2d41a3839d2"
+dependencies = [
+ "cfg-if",
+ "downcast",
+ "fragile",
+ "mockall_derive",
+ "predicates",
+ "predicates-tree",
+]
+
+[[package]]
+name = "mockall_derive"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "25ca3004c2efe9011bd4e461bd8256445052b9615405b4f7ea43fc8ca5c20898"
+dependencies = [
+ "cfg-if",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "monostate"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5077,6 +5121,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "predicates"
+version = "3.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ada8f2932f28a27ee7b70dd6c1c39ea0675c55a36879ab92f3a715eaa1e63cfe"
+dependencies = [
+ "anstyle",
+ "predicates-core",
+]
+
+[[package]]
+name = "predicates-core"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cad38746f3166b4031b1a0d39ad9f954dd291e7854fcc0eed52ee41a0b50d144"
+
+[[package]]
+name = "predicates-tree"
+version = "1.0.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d0de1b847b39c8131db0467e9df1ff60e6d0562ab8e9a16e568ad0fdb372e2f2"
+dependencies = [
+ "predicates-core",
+ "termtree",
 ]
 
 [[package]]
@@ -6321,7 +6391,7 @@ dependencies = [
 
 [[package]]
 name = "skills"
-version = "0.0.103"
+version = "0.0.104"
 dependencies = [
  "chrono",
  "notify",
@@ -6660,6 +6730,12 @@ checksum = "d5d9cf598a6d7ce700a4e6a9199da127e6819a61e64b68609683cc9a01b5683a"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "termtree"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f50febec83f5ee1df3015341d8bd429f2d1cc62bcba7ea2076759d315084683"
 
 [[package]]
 name = "thiserror"

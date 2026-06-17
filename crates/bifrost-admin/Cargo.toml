@@ -125,3 +125,4 @@ flate2 = "1"
 [features]
 default = ["skills-crud"]
 skills-crud = []
+test-support = []

@@ -3904,3 +3904,1258 @@ mod tests {
         assert_eq!(ok, "127.0.0.1");
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use chrono::Utc;
+    use http_body_util::BodyExt;
+    use hyper::StatusCode;
+    use std::cmp::Ordering;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicI64;
+
+    fn make_session(now: chrono::DateTime<Utc>) -> TrustProbeSession {
+        TrustProbeSession {
+            id: Uuid::new_v4(),
+            token_hash: hash_token("token"),
+            host: "127.0.0.1".to_string(),
+            admin_port: 8800,
+            probe_port: 8802,
+            ca_fingerprint_sha256: None,
+            status: TrustProbeStatus::Created,
+            opened: false,
+            proxy_access_status: None,
+            proxy_access_allowed: None,
+            proxy_access_message: None,
+            proxy_configured: false,
+            proxy_configuration_message: None,
+            suggested_wifi_ssid: None,
+            suggested_wifi_ssid_message: None,
+            network_reachable: false,
+            tls_trusted: false,
+            created_at: now,
+            expires_at: now + chrono::Duration::minutes(10),
+            client_ip: None,
+            user_agent: None,
+            platform_hint: None,
+            last_error: None,
+            devices: HashMap::new(),
+            events: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn normalize_platform_hint_prefers_non_unknown_hint() {
+        let hint = normalize_platform_hint(Some("  android wechat  ".to_string()), None);
+        assert_eq!(hint.as_deref(), Some("android wechat"));
+    }
+
+    #[test]
+    fn normalize_platform_hint_uses_user_agent_when_hint_unknown() {
+        let ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 \
+                  (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1";
+        let hint = normalize_platform_hint(Some(" unknown ".to_string()), Some(ua));
+        assert_eq!(hint.as_deref(), Some("ios safari"));
+    }
+
+    #[test]
+    fn normalize_platform_hint_returns_none_for_empty_hint_and_no_user_agent() {
+        let hint = normalize_platform_hint(Some("   ".to_string()), None);
+        assert!(hint.is_none());
+    }
+
+    #[test]
+    fn is_unknown_platform_hint_recognizes_variants() {
+        assert!(is_unknown_platform_hint("unknown"));
+        assert!(is_unknown_platform_hint("Unknown Browser"));
+        assert!(is_unknown_platform_hint(" unknown device "));
+        assert!(!is_unknown_platform_hint("android"));
+    }
+
+    #[test]
+    fn compare_optional_ip_orders_real_ips() {
+        assert_eq!(
+            compare_optional_ip(Some("10.0.0.1"), Some("127.0.0.1")),
+            Ordering::Less
+        );
+        assert_eq!(
+            compare_optional_ip(Some("127.0.0.1"), Some("10.0.0.1")),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_optional_ip_treats_some_as_less_than_none() {
+        assert_eq!(compare_optional_ip(Some("127.0.0.1"), None), Ordering::Less);
+        assert_eq!(
+            compare_optional_ip(None, Some("127.0.0.1")),
+            Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn compare_optional_ip_uses_string_order_for_invalid_ips() {
+        let left = "zzz";
+        let right = "aaa";
+        assert_eq!(
+            compare_optional_ip(Some(left), Some(right)),
+            left.cmp(right)
+        );
+    }
+
+    #[test]
+    fn device_events_are_bounded_to_32_entries() {
+        let now = Utc::now();
+        let mut device = TrustProbeDeviceState::new("dev".to_string(), now);
+        for i in 0..40 {
+            device.apply_event("page_opened", Some(format!("event-{i}")), None, None, None);
+        }
+        assert_eq!(device.events.len(), 32);
+        assert_eq!(
+            device.events[0].message.as_deref(),
+            Some("event-8"),
+            "oldest events should be evicted when more than 32 are stored",
+        );
+        assert_eq!(
+            device.events.last().unwrap().message.as_deref(),
+            Some("event-39"),
+        );
+    }
+
+    #[test]
+    fn session_events_are_bounded_to_64_entries() {
+        let now = Utc::now();
+        let mut session = make_session(now);
+        for i in 0..80 {
+            session.apply_event(
+                "page_opened",
+                Some(format!("event-{i}")),
+                None,
+                None,
+                None,
+                None,
+            );
+        }
+        assert_eq!(session.events.len(), 64);
+        assert_eq!(session.events[0].message.as_deref(), Some("event-16"),);
+        assert_eq!(
+            session.events.last().unwrap().message.as_deref(),
+            Some("event-79"),
+        );
+    }
+
+    #[test]
+    fn session_apply_event_does_not_override_proxy_configuration_on_failure() {
+        let mut session = make_session(Utc::now());
+        session.apply_event(
+            "proxy_configured_ok",
+            Some("Proxy OK".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+        session.apply_event(
+            "proxy_config_failed",
+            Some("Should be ignored".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert!(session.proxy_configured);
+        assert_eq!(
+            session.proxy_configuration_message.as_deref(),
+            Some("Proxy OK"),
+        );
+    }
+
+    #[test]
+    fn session_apply_event_network_failed_does_not_override_tls_trusted() {
+        let mut session = make_session(Utc::now());
+        session.status = TrustProbeStatus::TlsTrusted;
+        session.tls_trusted = true;
+        session.last_error = Some("existing".to_string());
+
+        session.apply_event(
+            "network_failed",
+            Some("new network error".to_string()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        assert_eq!(session.status, TrustProbeStatus::TlsTrusted);
+        assert_eq!(session.last_error.as_deref(), Some("existing"));
+    }
+
+    #[test]
+    fn manager_get_public_session_rejects_wrong_token_and_expired() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let mut active = make_session(now);
+        active.token_hash = hash_token("good-token");
+        active.expires_at = now + chrono::Duration::minutes(5);
+        let active_id = active.id;
+        manager.sessions.lock().insert(active_id, active);
+
+        assert!(manager
+            .get_public_session(active_id, "good-token")
+            .is_some());
+        assert!(manager.get_public_session(active_id, "bad-token").is_none());
+
+        let mut expired = make_session(now);
+        expired.id = Uuid::new_v4();
+        expired.token_hash = hash_token("other-token");
+        expired.expires_at = now - chrono::Duration::minutes(1);
+        let expired_id = expired.id;
+        manager.sessions.lock().insert(expired_id, expired);
+
+        assert!(manager
+            .get_public_session(expired_id, "other-token")
+            .is_none());
+    }
+
+    #[test]
+    fn manager_list_sessions_sorts_by_expiry_and_omits_expired() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let mut a = make_session(now);
+        a.id = Uuid::new_v4();
+        a.expires_at = now + chrono::Duration::seconds(30);
+        let mut b = make_session(now);
+        b.id = Uuid::new_v4();
+        b.expires_at = now + chrono::Duration::seconds(60);
+        let mut expired = make_session(now);
+        expired.id = Uuid::new_v4();
+        expired.expires_at = now - chrono::Duration::seconds(1);
+
+        manager.sessions.lock().insert(a.id, a);
+        manager.sessions.lock().insert(b.id, b);
+        manager.sessions.lock().insert(expired.id, expired);
+
+        let views = manager.list_sessions();
+        assert_eq!(views.len(), 2);
+        assert!(views[0].expires_at >= views[1].expires_at);
+        assert_ne!(views[0].session_id, views[1].session_id);
+    }
+
+    #[test]
+    fn manager_record_report_populates_default_message_and_wifi_ssid() {
+        let manager = TrustProbeManager::new();
+        let now = Utc::now();
+        let mut session = make_session(now);
+        session.id = Uuid::new_v4();
+        session.token_hash = hash_token("report-token");
+        let session_id = session.id;
+        manager.sessions.lock().insert(session_id, session);
+
+        let ok = manager.record_report(
+            session_id,
+            "report-token",
+            TrustProbeReport {
+                event_type: "network_failed".to_string(),
+                message: None,
+                user_agent: Some("UA-string".to_string()),
+                platform_hint: Some("android".to_string()),
+                status: Some(503),
+                wifi_ssid: Some("Office Wi-Fi".to_string()),
+                device_id: Some("dev-1".to_string()),
+            },
+            Some("192.168.1.10".to_string()),
+            Some("Header-UA".to_string()),
+        );
+        assert!(ok);
+
+        let sessions = manager.sessions.lock();
+        let s = sessions.get(&session_id).unwrap();
+        assert_eq!(s.suggested_wifi_ssid.as_deref(), Some("Office Wi-Fi"));
+        assert!(s
+            .suggested_wifi_ssid_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("provided by the user"));
+        assert_eq!(s.client_ip.as_deref(), Some("192.168.1.10"));
+        assert_eq!(s.user_agent.as_deref(), Some("UA-string"));
+        assert!(s.events.iter().any(|e| e.event_type == "network_failed"
+            && e.message.as_deref() == Some("Probe request returned HTTP 503")));
+    }
+
+    #[test]
+    fn render_landing_page_with_empty_token_does_not_append_query() {
+        let mut session = make_session(Utc::now());
+        session.id = Uuid::new_v4();
+        let html = render_landing_page(&session, "");
+        assert!(!html.contains("?t="));
+        assert!(!html.contains("&t="));
+    }
+
+    #[test]
+    fn render_landing_page_includes_ca_fingerprint_when_present() {
+        let mut session = make_session(Utc::now());
+        session.ca_fingerprint_sha256 = Some("AA:BB:CC".to_string());
+        let html = render_landing_page(&session, "token");
+        assert!(html.contains("AA:BB:CC"));
+    }
+
+    #[tokio::test]
+    async fn render_qrcode_for_url_returns_svg_response() {
+        let resp = render_qrcode_for_url("https://example.invalid/path");
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers()
+                .get("Content-Type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/svg+xml"),
+        );
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let svg = String::from_utf8_lossy(&body);
+        assert!(svg.contains("<svg"));
+    }
+
+    #[test]
+    fn render_probe_qrcode_head_returns_not_found_without_session() {
+        let session_id = Uuid::new_v4();
+        let resp = render_probe_qrcode_head(session_id, "");
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn touch_probe_activity_updates_timestamp() {
+        let last_activity = AtomicI64::new(0);
+        touch_probe_activity(&last_activity);
+        assert!(last_activity.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    }
+
+    #[test]
+    fn ca_key_path_from_cert_path_changes_filename() {
+        let cert = PathBuf::from("/tmp/custom/ca.crt");
+        let key = ca_key_path_from_cert_path(&cert);
+        assert_eq!(key.file_name().unwrap().to_string_lossy(), "ca.key");
+    }
+
+    #[test]
+    fn certificate_sha256_fingerprint_returns_none_for_missing_file() {
+        let path = PathBuf::from("this-file-should-not-exist-for-test.pem");
+        let fingerprint = certificate_sha256_fingerprint(&path);
+        assert!(fingerprint.is_none());
+    }
+
+    #[test]
+    fn current_wifi_ssid_detection_non_macos_uses_fallback_message() {
+        if cfg!(target_os = "macos") {
+            // On macOS we only verify that the detection call does not panic.
+            let _ = current_wifi_ssid_detection();
+            return;
+        }
+        let detection = current_wifi_ssid_detection();
+        assert!(detection.ssid.is_none());
+        assert!(detection
+            .message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("macOS"));
+    }
+
+    #[test]
+    fn trust_probe_status_serde_uses_snake_case() {
+        let json = serde_json::to_string(&TrustProbeStatus::PageOpened).unwrap();
+        assert_eq!(json, "\"page_opened\"");
+    }
+
+    #[test]
+    fn trust_probe_proxy_access_status_serde_uses_snake_case() {
+        let json = serde_json::to_string(&TrustProbeProxyAccessStatus::Allowed).ok();
+        // If the enum layout ever changes this will catch it.
+        assert!(json.as_deref().is_some_and(|s| s == "\"allowed\""));
+    }
+
+    #[test]
+    fn trust_probe_report_deserializes_alias_fields() {
+        let json = r#"{
+            "type": "tls_failed",
+            "message": "failed",
+            "userAgent": "UA",
+            "platformHint": "android",
+            "status": 418,
+            "wifiSsid": "Office Wi-Fi",
+            "deviceId": "dev-123"
+        }"#;
+        let report: TrustProbeReport = serde_json::from_str(json).unwrap();
+        assert_eq!(report.event_type, "tls_failed");
+        assert_eq!(report.message.as_deref(), Some("failed"));
+        assert_eq!(report.user_agent.as_deref(), Some("UA"));
+        assert_eq!(report.platform_hint.as_deref(), Some("android"));
+        assert_eq!(report.status, Some(418));
+        assert_eq!(report.wifi_ssid.as_deref(), Some("Office Wi-Fi"));
+        assert_eq!(report.device_id.as_deref(), Some("dev-123"));
+    }
+
+    #[test]
+    fn create_trust_probe_session_request_deserializes_ttl_seconds() {
+        let json = r#"{ "host": "127.0.0.1", "ttlSeconds": 120 }"#;
+        let req: CreateTrustProbeSessionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.host, "127.0.0.1");
+        assert_eq!(req.ttl_seconds, Some(120));
+    }
+
+    #[test]
+    fn update_trust_probe_session_request_deserializes_wifi_ssid() {
+        let json = r#"{ "wifiSsid": "Office Wi-Fi" }"#;
+        let req: UpdateTrustProbeSessionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.wifi_ssid.as_deref(), Some("Office Wi-Fi"));
+    }
+
+    #[test]
+    fn device_view_accessors_expose_inner_state() {
+        let now = Utc::now();
+        let mut state = TrustProbeDeviceState::new("dev-123".to_string(), now);
+        state.status = TrustProbeStatus::NetworkReachable;
+        state.opened = true;
+        state.proxy_access_status = Some(TrustProbeProxyAccessStatus::Allowed);
+        state.proxy_configured = true;
+        state.network_reachable = true;
+        state.tls_trusted = true;
+        state.client_ip = Some("192.168.1.20".to_string());
+        state.user_agent = Some("UA".to_string());
+        state.platform_hint = Some("android".to_string());
+
+        let view = state.to_view();
+        assert_eq!(view.device_id(), "dev-123");
+        assert_eq!(view.status(), TrustProbeStatus::NetworkReachable);
+        assert!(view.opened());
+        assert_eq!(
+            view.proxy_access_status(),
+            Some(TrustProbeProxyAccessStatus::Allowed)
+        );
+        assert!(view.proxy_configured());
+        assert!(view.network_reachable());
+        assert!(view.tls_trusted());
+        assert_eq!(view.client_ip(), Some("192.168.1.20"));
+        assert_eq!(view.user_agent(), Some("UA"));
+        assert_eq!(view.platform_hint(), Some("android"));
+    }
+
+    #[test]
+    fn session_view_accessors_expose_inner_state() {
+        let now = Utc::now();
+        let mut session = make_session(now);
+        session.host = "10.0.0.8".to_string();
+        session.admin_port = 8801;
+        let view = session.to_view("token");
+
+        assert_eq!(view.host(), "10.0.0.8");
+        assert!(view.landing_url().contains("10.0.0.8"));
+        assert!(view.landing_url().contains(":8801/"));
+    }
+
+    #[test]
+    fn hash_token_is_deterministic_and_case_sensitive() {
+        let a = hash_token("secret");
+        let b = hash_token("secret");
+        let c = hash_token("Secret");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+
+    use chrono::Utc;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{body::Incoming, Method, Request, StatusCode};
+    use hyper_util::rt::TokioIo;
+    use std::net::{Ipv4Addr, SocketAddr};
+    use tokio::net::TcpListener;
+
+    use crate::test_support::TestAdminState;
+
+    async fn spawn_trust_probe_api_server(
+        state: SharedAdminState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind trust-probe api listener");
+        let addr = listener.local_addr().expect("api listener addr");
+        let base = format!("http://{}", addr);
+        let state_clone = state.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_trust_probe_api(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    async fn spawn_trust_probe_public_server(
+        state: SharedAdminState,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind trust-probe public listener");
+        let addr = listener.local_addr().expect("public listener addr");
+        let base = format!("http://{}", addr);
+        let state_clone = state.clone();
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_trust_probe_public(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    async fn spawn_proxy_configured_server(
+        peer_addr: SocketAddr,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind proxy-configured listener");
+        let addr = listener.local_addr().expect("proxy listener addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let peer = peer_addr;
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let peer = peer;
+                        async move {
+                            let resp = handle_trust_probe_proxy_configured_request(req, peer).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    async fn spawn_probe_request_server(
+        peer_addr: SocketAddr,
+        is_tls: bool,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind probe-request listener");
+        let addr = listener.local_addr().expect("probe listener addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let peer = peer_addr;
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let peer = peer;
+                        async move { handle_probe_request(req, peer, is_tls).await }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        (base, handle)
+    }
+
+    #[tokio::test]
+    async fn api_create_session_without_ca_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({ "host": "127.0.0.1", "ttlSeconds": 60 });
+        let resp = client
+            .post(format!("{}/api/trust-probe/sessions", base))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_list_sessions_returns_ok() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/trust-probe/sessions", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_get_session_with_invalid_id_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/trust-probe/sessions/not-a-uuid", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_update_unknown_session_returns_not_found() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let session_id = Uuid::new_v4();
+        let body = serde_json::json!({ "wifiSsid": "Office Wi-Fi" });
+        let resp = client
+            .patch(format!("{}/api/trust-probe/sessions/{}", base, session_id))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_options_returns_cors_preflight() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(Method::OPTIONS, format!("{}/public/trust-probe", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_fixed_landing_without_ca_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/public/trust-probe", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_invalid_session_path_returns_not_found() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/public/trust-probe/not-a-uuid", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_configured_missing_sid_returns_bad_request() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
+        let (base, handle) = spawn_proxy_configured_server(peer).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/_bifrost/trust-probe/proxy-configured", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn proxy_configured_unknown_session_returns_not_found() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 8080));
+        let (base, handle) = spawn_proxy_configured_server(peer).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/_bifrost/trust-probe/proxy-configured?sid={}&t=tok",
+                base, session_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_request_netcheck_over_http_returns_ok() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 9000));
+        let (base, handle) = spawn_probe_request_server(peer, false).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/_bifrost/trust-probe/netcheck?sid={}",
+                base, session_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_request_check_without_tls_returns_bad_request() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 9001));
+        let (base, handle) = spawn_probe_request_server(peer, false).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/_bifrost/trust-probe/check?sid={}",
+                base, session_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_request_check_with_tls_flag_returns_trusted_true() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 9002));
+        let (base, handle) = spawn_probe_request_server(peer, true).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/_bifrost/trust-probe/check?sid={}",
+                base, session_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["trusted"], true);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn probe_request_missing_sid_returns_bad_request() {
+        let peer = SocketAddr::from((Ipv4Addr::LOCALHOST, 9003));
+        let (base, handle) = spawn_probe_request_server(peer, false).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/_bifrost/trust-probe/netcheck", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_probe_host_from_request_parses_ipv6_and_ipv4() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind helper listener");
+        let addr = listener.local_addr().expect("helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let host = public_probe_host_from_request(&req);
+                        let body = serde_json::json!({ "host": host });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        // IPv4 host without brackets
+        let resp = client.get(format!("{}/ipv4", base)).send().await.unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["host"].as_str(), Some("127.0.0.1"));
+
+        // IPv6 literal encoded in the Host header while connecting over IPv4.
+        let resp = client
+            .get(format!("{}/ipv6", base))
+            .header(hyper::header::HOST, "[::1]:8080")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["host"].as_str(), Some("::1"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_client_ip_prefers_bifrost_header() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ip helper listener");
+        let addr = listener.local_addr().expect("ip helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let ip = request_client_ip(&req);
+                        let body = serde_json::json!({ "ip": ip });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/ip", base))
+            .header("x-bifrost-peer-ip", "192.168.1.10")
+            .header("x-forwarded-for", "10.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ip"].as_str(), Some("192.168.1.10"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_client_ip_uses_first_forwarded_entry() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ip helper listener");
+        let addr = listener.local_addr().expect("ip helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let ip = request_client_ip(&req);
+                        let body = serde_json::json!({ "ip": ip });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/ip", base))
+            .header("x-forwarded-for", "10.0.0.1, 10.0.0.2")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ip"].as_str(), Some("10.0.0.1"));
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_client_ip_addr_parses_valid_ip_and_rejects_invalid() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ip-addr helper listener");
+        let addr = listener.local_addr().expect("ip-addr helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let ip = request_client_ip_addr(&req);
+                        let body = serde_json::json!({ "ip": ip.map(|v| v.to_string()) });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        // Valid IP
+        let resp = client
+            .get(format!("{}/ip", base))
+            .header("x-bifrost-peer-ip", "127.0.0.1")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ip"].as_str(), Some("127.0.0.1"));
+
+        // Invalid IP should yield null
+        let resp = client
+            .get(format!("{}/ip-invalid", base))
+            .header("x-bifrost-peer-ip", "not-an-ip")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert!(json["ip"].is_null());
+
+        handle.abort();
+    }
+
+    #[test]
+    fn is_loopback_probe_host_matches_variants() {
+        assert!(is_loopback_probe_host("localhost"));
+        assert!(is_loopback_probe_host("127.0.0.1"));
+        assert!(is_loopback_probe_host("::1"));
+        assert!(is_loopback_probe_host("[::1]"));
+        assert!(!is_loopback_probe_host("10.0.0.1"));
+    }
+
+    #[test]
+    fn probe_target_hosts_match_handles_loopback_equivalence() {
+        assert!(probe_target_hosts_match("127.0.0.1", "localhost"));
+        assert!(probe_target_hosts_match("localhost", "127.0.0.1"));
+        assert!(probe_target_hosts_match("::1", "127.0.0.1"));
+        assert!(!probe_target_hosts_match("127.0.0.1", "10.0.0.1"));
+    }
+
+    #[test]
+    fn now_epoch_millis_is_close_to_utc_now() {
+        let now_fn = now_epoch_millis();
+        let now_real = Utc::now().timestamp_millis();
+        assert!((now_real - now_fn).abs() < 5_000);
+    }
+
+    #[tokio::test]
+    async fn api_unknown_trust_probe_path_returns_method_not_allowed() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{}/api/trust-probe/unknown", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn api_non_trust_probe_path_returns_not_found() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_api_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/api/other", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_fixed_landing_head_without_ca_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(Method::HEAD, format!("{}/public/trust-probe", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_fixed_qrcode_without_ca_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/public/trust-probe/qrcode", base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_qrcode_head_unknown_session_returns_not_found() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .request(
+                Method::HEAD,
+                format!("{}/public/trust-probe/{}/qrcode", base, session_id),
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn public_trust_probe_session_unknown_session_returns_bad_request() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, handle) = spawn_trust_probe_public_server(state).await;
+        let session_id = Uuid::new_v4();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!(
+                "{}/public/trust-probe/{}/session",
+                base, session_id
+            ))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        handle.abort();
+    }
+
+    #[test]
+    fn probe_response_sets_expected_cors_headers() {
+        let resp = probe_response(StatusCode::OK, "body");
+        assert_eq!(resp.status(), StatusCode::OK);
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("Access-Control-Allow-Origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+        );
+        assert_eq!(
+            headers.get("Content-Type").and_then(|v| v.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+    }
+
+    #[test]
+    fn probe_json_response_sets_expected_cors_and_json_headers() {
+        let resp = probe_json_response(StatusCode::OK, serde_json::json!({ "ok": true }));
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("Access-Control-Allow-Methods")
+                .and_then(|v| v.to_str().ok()),
+            Some("GET, OPTIONS"),
+        );
+        assert_eq!(
+            headers.get("Content-Type").and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+        );
+    }
+
+    #[tokio::test]
+    async fn request_client_ip_returns_none_when_headers_missing() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ip-missing helper listener");
+        let addr = listener.local_addr().expect("ip-missing helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let ip = request_client_ip(&req);
+                        let body = serde_json::json!({ "ip": ip });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/ip-none", base))
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert!(json["ip"].is_null());
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn request_client_ip_trims_whitespace_and_uses_first_entry() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind ip-trim helper listener");
+        let addr = listener.local_addr().expect("ip-trim helper addr");
+        let base = format!("http://{}", addr);
+
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| async move {
+                        let ip = request_client_ip(&req);
+                        let body = serde_json::json!({ "ip": ip });
+                        Ok::<_, hyper::Error>(probe_json_response(StatusCode::OK, body))
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}/ip-trim", base))
+            .header("x-forwarded-for", " 10.0.0.1 , 10.0.0.2 ")
+            .send()
+            .await
+            .unwrap();
+        let json: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(json["ip"].as_str(), Some("10.0.0.1"));
+
+        handle.abort();
+    }
+}

@@ -3083,3 +3083,999 @@ mod asr_more_tests {
         assert_eq!(uploaded.filename, "a.wav");
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+
+    use std::fs;
+    use std::io::Write as _;
+
+    use bytes::Bytes;
+    use tempfile::tempdir;
+
+    /// Helper to build an ASR target rooted at a temp home directory.
+    fn make_temp_target(model: &str) -> (AsrTarget, tempfile::TempDir) {
+        let temp = tempdir().expect("tempdir");
+        let target = AsrTarget {
+            host: "127.0.0.1".to_string(),
+            port: Some(18080),
+            language: "chinese".to_string(),
+            model: model.to_string(),
+            home: temp.path().to_path_buf(),
+            owner_module: "test_module".to_string(),
+            owner_id: Some("owner-1".to_string()),
+        };
+        (target, temp)
+    }
+
+    #[test]
+    fn target_from_query_rejects_zero_port() {
+        let err = target_from_query(Some("port=0")).expect_err("port=0 must be rejected");
+        assert!(err.contains("between 1 and 65535"));
+    }
+
+    #[test]
+    fn target_from_query_ignores_whitespace_only_language_model_and_owner() {
+        let default = target_from_query(None).unwrap();
+        let target = target_from_query(Some(
+            "host=localhost&port=18080&language=%20%20%20&model=%20%20%20&owner_module=%20%20%20&owner_id=%20%20%20",
+        ))
+        .unwrap();
+        assert_eq!(target.language, default.language);
+        assert_eq!(target.model, default.model);
+        assert_eq!(target.owner_module, "model_management".to_string());
+        assert!(target.owner_id.is_none());
+    }
+
+    #[test]
+    fn validate_loopback_host_accepts_ipv6_loopback() {
+        validate_loopback_host("::1").expect("::1 should be accepted");
+    }
+
+    #[test]
+    fn asr_target_server_url_formats_ipv6() {
+        let target = AsrTarget {
+            host: "::1".to_string(),
+            port: Some(12345),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            home: default_home(),
+            owner_module: "test".to_string(),
+            owner_id: None,
+        };
+        assert_eq!(target.server_url().as_deref(), Some("http://[::1]:12345"));
+        assert_eq!(
+            target.server_url_display(),
+            "http://[::1]:12345".to_string()
+        );
+    }
+
+    #[test]
+    fn owner_label_includes_owner_id_when_present() {
+        let mut target = AsrTarget {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            home: default_home(),
+            owner_module: "module".to_string(),
+            owner_id: None,
+        };
+        assert_eq!(target.owner_label(), "module");
+        target.owner_id = Some("id-123".to_string());
+        assert_eq!(target.owner_label(), "module:id-123");
+    }
+
+    #[test]
+    fn assets_installed_is_false_when_runtime_missing() {
+        let (target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        assert!(!target.assets_installed());
+    }
+
+    #[test]
+    fn allocate_loopback_port_returns_valid_port() {
+        let port = allocate_loopback_port().expect("allocate port");
+        assert!(port > 0);
+    }
+
+    #[test]
+    fn tokenizer_size_known_models() {
+        assert_eq!(tokenizer_size("Qwen3-ASR-0.6B").unwrap(), "0.6B");
+        assert_eq!(tokenizer_size("Qwen3-ASR-1.7B").unwrap(), "1.7B");
+    }
+
+    #[test]
+    fn detect_asr_release_asset_matches_platform_support() {
+        let supported = asr_platform_supported();
+        let result = detect_asr_release_asset();
+        if supported {
+            assert_eq!(result.unwrap(), "asr-macos-aarch64");
+        } else {
+            let msg = result.unwrap_err();
+            assert!(msg.contains("only supported on Apple Silicon macOS"));
+        }
+    }
+
+    #[tokio::test]
+    async fn download_asr_assets_noop_when_all_assets_present() {
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        // Ensure we operate entirely inside the temp home.
+        target.home = _temp.path().to_path_buf();
+
+        fs::create_dir_all(target.install_dir()).unwrap();
+        fs::write(target.install_dir().join("asr"), b"").unwrap();
+        fs::write(target.install_dir().join("asr-server"), b"").unwrap();
+
+        fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        for sample in [
+            "sample1.wav",
+            "sample1.txt",
+            "sample2.wav",
+            "sample2.txt",
+            "sample3.wav",
+            "sample3.txt",
+        ] {
+            fs::write(target.install_dir().join(sample), b"sample").unwrap();
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+        download_asr_assets(&target, tx)
+            .await
+            .expect("no downloads");
+        // No progress events are required, but channel should be closed.
+        assert!(rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn install_release_noop_when_runtime_already_installed() {
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        target.home = _temp.path().to_path_buf();
+
+        fs::create_dir_all(target.install_dir()).unwrap();
+        fs::write(target.install_dir().join("asr"), b"binary").unwrap();
+        fs::write(target.install_dir().join("asr-server"), b"binary").unwrap();
+
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+        install_release(&target, &tx)
+            .await
+            .expect("should return early when binaries exist");
+    }
+
+    #[tokio::test]
+    async fn prepare_model_fails_when_required_file_missing() {
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        target.home = _temp.path().to_path_buf();
+        fs::create_dir_all(target.model_dir()).unwrap();
+        // Do not create required model files => expect error.
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+        let err = prepare_model(&target, &tx).await.expect_err("missing file");
+        assert!(err.contains("missing ASR model file"));
+    }
+
+    #[tokio::test]
+    async fn prepare_model_succeeds_with_model_and_tokenizer() {
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        target.home = _temp.path().to_path_buf();
+
+        fs::create_dir_all(target.install_dir().join("tokenizers")).unwrap();
+        fs::write(
+            target
+                .install_dir()
+                .join("tokenizers")
+                .join("tokenizer-0.6B.json"),
+            b"{}",
+        )
+        .unwrap();
+
+        fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(8);
+        prepare_model(&target, &tx)
+            .await
+            .expect("prepare_model should succeed");
+        // Drain at least one progress event.
+        let _ = rx.recv().await;
+        assert!(target.model_dir().join("tokenizer.json").is_file());
+    }
+
+    #[tokio::test]
+    async fn verify_cli_sample_reports_missing_sample() {
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        target.home = _temp.path().to_path_buf();
+        fs::create_dir_all(target.install_dir()).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+        let err = verify_cli_sample(&target, &tx)
+            .await
+            .expect_err("sample3.wav missing should be reported");
+        assert!(err.contains("missing ASR sample audio"));
+    }
+
+    #[test]
+    fn extract_zip_to_dir_blocking_extracts_nested_files() {
+        let temp = tempdir().unwrap();
+        let zip_path = temp.path().join("asr.zip");
+        let out_dir = temp.path().join("out");
+        fs::create_dir_all(&out_dir).unwrap();
+
+        {
+            let file = fs::File::create(&zip_path).unwrap();
+            let mut zip = zip::ZipWriter::new(file);
+            let options = zip::write::SimpleFileOptions::default();
+            zip.start_file("bin/asr", options).unwrap();
+            zip.write_all(b"asr-binary").unwrap();
+            zip.start_file("bin/asr-server", options).unwrap();
+            zip.write_all(b"asr-server-binary").unwrap();
+            zip.finish().unwrap();
+        }
+
+        extract_zip_to_dir_blocking(&zip_path, &out_dir).expect("extract zip");
+        assert!(out_dir.join("bin/asr").is_file());
+        assert!(out_dir.join("bin/asr-server").is_file());
+    }
+
+    #[test]
+    fn copy_dir_contents_blocking_copies_all_files() {
+        let temp = tempdir().unwrap();
+        let from = temp.path().join("from");
+        let to = temp.path().join("to");
+        fs::create_dir_all(&to).unwrap();
+        fs::create_dir_all(from.join("sub")).unwrap();
+        fs::write(from.join("root.txt"), b"root").unwrap();
+        fs::write(from.join("sub/sub.txt"), b"sub").unwrap();
+
+        copy_dir_contents_blocking(&from, &to).expect("copy tree");
+        assert_eq!(fs::read_to_string(to.join("root.txt")).unwrap(), "root");
+        assert_eq!(fs::read_to_string(to.join("sub/sub.txt")).unwrap(), "sub");
+    }
+
+    #[tokio::test]
+    async fn mark_asr_binaries_executable_updates_permissions() {
+        let temp = tempdir().unwrap();
+        let install_dir = temp.path();
+        for name in ["asr", "asr-server"] {
+            fs::write(install_dir.join(name), b"#!/bin/sh\nexit 0\n").unwrap();
+        }
+        mark_asr_binaries_executable(install_dir)
+            .await
+            .expect("chmod should succeed");
+    }
+
+    #[test]
+    fn download_detail_handles_missing_total() {
+        let progress = DownloadProgress {
+            label: "test".to_string(),
+            url: "http://example.test".to_string(),
+            dest: "/tmp/test".to_string(),
+            downloaded_bytes: 42,
+            total_bytes: None,
+            percent: None,
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 100,
+            resumed: false,
+            complete: false,
+        };
+        assert!(download_detail(&progress).is_none());
+    }
+
+    #[test]
+    fn summarize_command_output_formats_and_truncates() {
+        let summary = summarize_command_output(b"", b"");
+        assert!(summary.contains("No command output"));
+
+        let long = "x".repeat(1500);
+        let summary = summarize_command_output(long.as_bytes(), b"");
+        assert!(summary.starts_with("..."));
+        assert!(summary.len() >= 10);
+    }
+
+    #[tokio::test]
+    async fn sse_response_wraps_frames_in_http_response() {
+        let response = sse_response(|tx| async move {
+            send_progress(
+                &tx,
+                AsrStreamPayload {
+                    phase: "test",
+                    status: "running",
+                    progress: 1,
+                    message: "hello",
+                    detail: None,
+                    file: None,
+                    server_url: Some("http://127.0.0.1".to_string()),
+                },
+            )
+            .await;
+            send_done(&tx).await;
+        });
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("Content-Type")
+                .and_then(|h| h.to_str().ok()),
+            Some("text/event-stream")
+        );
+
+        let collected = http_body_util::BodyExt::collect(response.into_body())
+            .await
+            .expect("collect body");
+        let text = String::from_utf8(collected.to_bytes().to_vec()).unwrap();
+        assert!(text.contains("event: progress"));
+        assert!(text.contains("event: done"));
+    }
+
+    #[tokio::test]
+    async fn start_managed_service_errors_on_unsupported_platform() {
+        if asr_platform_supported() {
+            // On supported platforms this path would start a real service; skip.
+            return;
+        }
+        let (mut target, _temp) = make_temp_target("Qwen3-ASR-0.6B");
+        target.home = _temp.path().to_path_buf();
+        let err = start_managed_service(target)
+            .await
+            .expect_err("unsupported platform should error");
+        assert!(err.message.contains("not supported"));
+    }
+}
+
+#[cfg(test)]
+mod asr_target_extra_tests {
+    use super::*;
+
+    #[test]
+    fn same_logical_target_ignores_port_difference() {
+        let base = AsrTarget {
+            host: "127.0.0.1".to_string(),
+            port: None,
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            home: default_home(),
+            owner_module: "module".to_string(),
+            owner_id: None,
+        };
+        let mut with_port = base.clone();
+        with_port.port = Some(18080);
+
+        assert!(same_logical_target(&base, &with_port));
+        assert!(!same_target(&base, &with_port));
+    }
+
+    #[test]
+    fn service_busy_response_marks_busy_and_includes_owner_labels() {
+        let requested = AsrTarget {
+            host: "127.0.0.1".to_string(),
+            port: Some(18080),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            home: default_home(),
+            owner_module: "module_a".to_string(),
+            owner_id: Some("a".to_string()),
+        };
+        let existing = AsrTarget {
+            host: "127.0.0.1".to_string(),
+            port: Some(18080),
+            language: "chinese".to_string(),
+            model: "Qwen3-ASR-0.6B".to_string(),
+            home: default_home(),
+            owner_module: "module_b".to_string(),
+            owner_id: Some("b".to_string()),
+        };
+
+        let response = service_busy_response(&requested, &existing);
+        assert!(is_service_busy(&response));
+        let detail = response.detail.expect("detail should be present");
+        assert!(detail.contains("requested owner="));
+        assert!(detail.contains("module_a:a"));
+        assert!(detail.contains("module_b:b"));
+    }
+
+    #[test]
+    fn process_is_alive_reports_current_pid() {
+        let pid = std::process::id();
+        assert!(process_is_alive(pid));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+
+    use bytes::Bytes;
+
+    #[test]
+    fn query_param_value_returns_none_when_key_absent() {
+        let query = "flag=1&name=alice";
+        assert!(query_param_value(query, "missing").is_none());
+    }
+
+    #[test]
+    fn query_param_value_falls_back_to_raw_on_invalid_percent_encoding() {
+        // "%GG" is invalid percent-encoding and should be returned as-is.
+        let query = "name=%GG";
+        assert_eq!(query_param_value(query, "name"), Some("%GG".to_string()));
+    }
+
+    #[test]
+    fn query_flag_enabled_is_false_when_value_unrecognized() {
+        assert!(!query_flag_enabled("flag=yeah", "flag"));
+        assert!(!query_flag_enabled("other=1", "flag"));
+    }
+
+    #[test]
+    fn query_flag_enabled_is_case_sensitive_for_key() {
+        // "Flag" should not match key "flag".
+        assert!(!query_flag_enabled("Flag=1", "flag"));
+    }
+
+    #[test]
+    fn validate_loopback_host_accepts_localhost_and_ipv4() {
+        validate_loopback_host("localhost").unwrap();
+        validate_loopback_host("127.0.0.1").unwrap();
+    }
+
+    #[test]
+    fn validate_loopback_host_rejects_non_loopback_variants() {
+        assert!(validate_loopback_host("192.168.0.1").is_err());
+        assert!(validate_loopback_host("example.com").is_err());
+    }
+
+    #[test]
+    fn asr_target_server_url_is_none_when_port_missing() {
+        let target = target_from_query(None).unwrap();
+        assert!(target.port.is_none());
+        assert!(target.server_url().is_none());
+        assert_eq!(
+            target.server_url_display(),
+            "dynamic port (managed by Bifrost)".to_string()
+        );
+    }
+
+    #[test]
+    fn asr_target_with_port_sets_port_without_changing_host() {
+        let target = target_from_query(Some("host=127.0.0.1")).unwrap();
+        let with_port = target.with_port(18080);
+        assert_eq!(with_port.host, "127.0.0.1");
+        assert_eq!(with_port.port, Some(18080));
+        assert_eq!(
+            with_port.server_url().as_deref(),
+            Some("http://127.0.0.1:18080")
+        );
+    }
+
+    #[test]
+    fn required_model_files_unknown_model_defaults_to_config_only() {
+        let files = required_model_files("Unknown-Model");
+        assert_eq!(files, &["config.json"]);
+    }
+
+    #[test]
+    fn wav_pcm_duration_ms_returns_none_for_header_only_or_short() {
+        assert_eq!(wav_pcm_duration_ms(&[0u8; 10]), None);
+        assert_eq!(wav_pcm_duration_ms(&[0u8; 44]), None);
+    }
+
+    #[test]
+    fn plan_upload_chunk_boundaries_clamps_zero_duration_to_single_second() {
+        let boundaries = plan_upload_chunk_boundaries(0);
+        assert_eq!(boundaries, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn plan_upload_chunk_boundaries_handles_short_clip_less_than_window() {
+        let boundaries = plan_upload_chunk_boundaries(1_500);
+        // 1500ms rounds up to 2 seconds.
+        assert_eq!(boundaries, vec![(0, 2)]);
+    }
+
+    #[test]
+    fn file_extension_handles_hidden_files_and_no_extension() {
+        assert_eq!(file_extension(".hidden"), ".audio");
+        assert_eq!(file_extension("no_extension"), ".audio");
+    }
+
+    #[test]
+    fn multipart_boundary_returns_none_when_missing() {
+        assert!(multipart_boundary("multipart/form-data; charset=utf-8").is_none());
+    }
+
+    #[test]
+    fn extract_multipart_filename_ignores_whitespace_only_value() {
+        let headers = "form-data; name=\"file\"; filename=\"   \"";
+        assert!(extract_multipart_filename(headers).is_none());
+    }
+
+    #[test]
+    fn find_bytes_detects_prefix_match_and_returns_zero_index() {
+        let haystack = b"abcdef";
+        assert_eq!(find_bytes(haystack, b"ab"), Some(0));
+        assert_eq!(find_bytes(haystack, b"cd"), Some(2));
+    }
+
+    #[test]
+    fn detect_asr_release_asset_error_mentions_platform_on_unsupported() {
+        if asr_platform_supported() {
+            // On supported platforms this returns Ok; skip the error-path assertion.
+            assert_eq!(detect_asr_release_asset().unwrap(), "asr-macos-aarch64");
+            return;
+        }
+        let err = detect_asr_release_asset().unwrap_err();
+        assert!(err.contains("Qwen3-ASR local runtime is only supported"));
+    }
+
+    #[test]
+    fn tokenizer_size_known_models_still_supported() {
+        assert_eq!(tokenizer_size("Qwen3-ASR-0.6B").unwrap(), "0.6B");
+        assert_eq!(tokenizer_size("Qwen3-ASR-1.7B").unwrap(), "1.7B");
+    }
+
+    #[test]
+    fn command_succeeds_returns_false_for_missing_binary() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ok = rt.block_on(async { command_succeeds("this-binary-should-not-exist", &[]).await });
+        assert!(!ok);
+    }
+
+    #[tokio::test]
+    async fn summarize_command_output_trims_and_uses_tail_for_long_text() {
+        let long_stdout = "x".repeat(2000);
+        let summary = summarize_command_output(long_stdout.as_bytes(), b"stderr");
+        assert!(summary.len() <= 1203); // 1200 chars plus leading "..." at most.
+        assert!(summary.starts_with("..."));
+        assert!(summary.contains("stderr"));
+    }
+
+    #[test]
+    fn download_detail_handles_zero_total_bytes() {
+        let progress = DownloadProgress {
+            label: "test".to_string(),
+            url: "http://example.test".to_string(),
+            dest: "/tmp/test".to_string(),
+            downloaded_bytes: 0,
+            total_bytes: Some(0),
+            percent: Some(0),
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 0,
+            resumed: false,
+            complete: false,
+        };
+        let detail = download_detail(&progress).unwrap();
+        assert_eq!(detail, "0 / 0 bytes (0%)");
+    }
+
+    #[tokio::test]
+    async fn sse_helpers_handle_empty_text_and_detail_none() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        send_error(&tx, "", None).await;
+        let error_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(error_frame.starts_with("event: error\n"));
+        assert!(error_frame.contains("\"message\":\"\""));
+        assert!(!error_frame.contains("detail"));
+
+        send_done(&tx).await;
+        let done_frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(done_frame.starts_with("event: done\n"));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+
+    use bytes::Bytes;
+    use tempfile::TempDir;
+
+    use crate::resource_download::DownloadProgress;
+    use crate::test_support::TestAdminState;
+
+    #[tokio::test]
+    async fn prepare_audio_for_asr_errors_when_boundary_missing() {
+        let body = Bytes::from_static(b"dummy");
+        let err = prepare_audio_for_asr("multipart/form-data", &body)
+            .await
+            .expect_err("missing boundary must error");
+        assert!(err.contains("multipart boundary missing"));
+    }
+
+    #[tokio::test]
+    async fn prepare_audio_for_asr_errors_when_file_field_missing() {
+        let body = Bytes::from_static(
+            b"--b\r\nContent-Disposition: form-data; name=\"other\"\r\n\r\nDATA\r\n--b--\r\n",
+        );
+        let err = prepare_audio_for_asr("multipart/form-data; boundary=b", &body)
+            .await
+            .expect_err("missing file field must error");
+        assert!(err.contains("multipart field 'file' missing"));
+    }
+
+    #[test]
+    fn append_service_watchdog_log_creates_and_appends_lines() {
+        let temp = TempDir::new().unwrap();
+        let log_path = temp.path().join("watchdog.log");
+
+        append_service_watchdog_log(&log_path, "first\n".to_string());
+        append_service_watchdog_log(&log_path, "second\n".to_string());
+
+        let contents = std::fs::read_to_string(&log_path).unwrap();
+        assert!(contents.contains("first"));
+        assert!(contents.contains("second"));
+    }
+
+    #[test]
+    fn asr_download_requests_returns_empty_when_all_assets_present() {
+        let temp = TempDir::new().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B")).unwrap();
+        target.home = temp.path().to_path_buf();
+
+        std::fs::create_dir_all(target.install_dir()).unwrap();
+        std::fs::write(target.install_dir().join("asr"), b"bin").unwrap();
+        std::fs::write(target.install_dir().join("asr-server"), b"bin").unwrap();
+
+        std::fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            std::fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        for sample in [
+            "sample1.wav",
+            "sample1.txt",
+            "sample2.wav",
+            "sample2.txt",
+            "sample3.wav",
+            "sample3.txt",
+        ] {
+            std::fs::write(target.install_dir().join(sample), b"s").unwrap();
+        }
+
+        let requests = asr_download_requests(&target).unwrap();
+        assert!(requests.is_empty());
+    }
+
+    #[tokio::test]
+    async fn prepare_model_errors_when_tokenizer_source_missing() {
+        let temp = TempDir::new().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B&language=chinese")).unwrap();
+        target.home = temp.path().to_path_buf();
+
+        std::fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            std::fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        std::fs::create_dir_all(target.install_dir().join("tokenizers")).unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+        let err = prepare_model(&target, &tx)
+            .await
+            .expect_err("missing tokenizer source should error");
+        assert!(err.contains("copy tokenizer"));
+    }
+
+    #[tokio::test]
+    async fn test_admin_state_builder_can_be_used_in_asr_tests() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        // Basic sanity: values_storage and traffic_db_store are wired for handlers that
+        // rely on bifrost_storage::data_dir() and related components.
+        assert!(state.values_storage.is_some());
+        assert!(state.traffic_db_store.is_some());
+    }
+
+    // --- Preflight and initializer helpers -----------------------------------
+
+    #[tokio::test]
+    async fn run_preflight_behaves_according_to_platform_support() {
+        let target = target_from_query(None).unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let result = run_preflight(&target, &tx).await;
+        drop(tx);
+
+        if asr_platform_supported() {
+            result.expect("preflight should succeed on supported platforms");
+            let frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+            assert!(frame.contains("event: progress"));
+            assert!(frame.contains("\"phase\":\"preflight\""));
+        } else {
+            let err = result.expect_err("preflight should fail on unsupported platforms");
+            assert!(err.contains("Qwen3-ASR local runtime is only supported"));
+            assert!(rx.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn run_initializer_silent_pub_errors_on_unsupported_platform() {
+        if asr_platform_supported() {
+            // On supported platforms this would try to perform real initialization; skip.
+            return;
+        }
+        let target = target_from_query(None).unwrap();
+        let err = run_initializer_silent_pub(target)
+            .await
+            .expect_err("unsupported platform should error");
+        assert!(err.contains("Qwen3-ASR local runtime is only supported"));
+    }
+
+    // --- Download request planning -------------------------------------------
+
+    #[test]
+    fn asr_download_requests_only_include_sample_files_when_only_samples_missing() {
+        let temp = TempDir::new().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B&language=chinese")).unwrap();
+        target.home = temp.path().to_path_buf();
+
+        std::fs::create_dir_all(target.install_dir()).unwrap();
+        std::fs::write(target.install_dir().join("asr"), b"bin").unwrap();
+        std::fs::write(target.install_dir().join("asr-server"), b"bin").unwrap();
+
+        std::fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            std::fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        let requests = asr_download_requests(&target).unwrap();
+        assert_eq!(requests.len(), 6);
+        assert!(requests
+            .iter()
+            .all(|r| r.label.starts_with("sample") && r.url.contains(ASR_SAMPLE_BASE_URL)));
+    }
+
+    #[test]
+    fn asr_download_requests_skips_samples_that_already_exist() {
+        let temp = TempDir::new().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B")).unwrap();
+        target.home = temp.path().to_path_buf();
+
+        std::fs::create_dir_all(target.install_dir()).unwrap();
+        std::fs::write(target.install_dir().join("asr"), b"bin").unwrap();
+        std::fs::write(target.install_dir().join("asr-server"), b"bin").unwrap();
+
+        std::fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            std::fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        for sample in ["sample1.wav", "sample2.wav", "sample3.wav"] {
+            std::fs::write(target.install_dir().join(sample), b"s").unwrap();
+        }
+
+        let requests = asr_download_requests(&target).unwrap();
+        let labels: Vec<_> = requests.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(labels.len(), 3);
+        assert!(labels.contains(&"sample1.txt"));
+        assert!(labels.contains(&"sample2.txt"));
+        assert!(labels.contains(&"sample3.txt"));
+    }
+
+    #[test]
+    fn asr_download_requests_use_sample_base_url_for_samples() {
+        let temp = TempDir::new().unwrap();
+        let mut target = target_from_query(Some("model=Qwen3-ASR-0.6B")).unwrap();
+        target.home = temp.path().to_path_buf();
+
+        std::fs::create_dir_all(target.install_dir()).unwrap();
+        std::fs::write(target.install_dir().join("asr"), b"bin").unwrap();
+        std::fs::write(target.install_dir().join("asr-server"), b"bin").unwrap();
+
+        std::fs::create_dir_all(target.model_dir()).unwrap();
+        for file in required_model_files(&target.model) {
+            std::fs::write(target.model_dir().join(file), b"model").unwrap();
+        }
+
+        let requests = asr_download_requests(&target).unwrap();
+        assert!(requests
+            .iter()
+            .filter(|r| r.label.starts_with("sample"))
+            .all(|r| r.url.contains(ASR_SAMPLE_BASE_URL)));
+    }
+
+    // --- Download progress SSE helpers ---------------------------------------
+
+    #[test]
+    fn download_detail_formats_without_percent_uses_zero_percent() {
+        let progress = DownloadProgress {
+            label: "test".to_string(),
+            url: "http://example.test".to_string(),
+            dest: "/tmp/test".to_string(),
+            downloaded_bytes: 50,
+            total_bytes: Some(100),
+            percent: None,
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 0,
+            resumed: false,
+            complete: false,
+        };
+        let detail = download_detail(&progress).unwrap();
+        assert_eq!(detail, "50 / 100 bytes (0%)");
+    }
+
+    #[tokio::test]
+    async fn send_download_progress_emits_running_event_for_fresh_download() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let progress = DownloadProgress {
+            label: "model.zip".to_string(),
+            url: "http://example.test/model.zip".to_string(),
+            dest: "/tmp/model.zip".to_string(),
+            downloaded_bytes: 10,
+            total_bytes: Some(100),
+            percent: Some(10),
+            bytes_per_second: Some(5),
+            eta_seconds: Some(18),
+            elapsed_ms: 1000,
+            resumed: false,
+            complete: false,
+        };
+
+        send_download_progress(&tx, "http://127.0.0.1:18080", progress).await;
+        let frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(frame.starts_with("event: progress\n"));
+        assert!(frame.contains("\"status\":\"running\""));
+        assert!(frame.contains("\"file\":\"model.zip\""));
+        assert!(frame.contains("\"downloaded_bytes\":10"));
+    }
+
+    #[tokio::test]
+    async fn send_download_progress_emits_running_event_for_resumed_download() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let progress = DownloadProgress {
+            label: "model.zip".to_string(),
+            url: "http://example.test/model.zip".to_string(),
+            dest: "/tmp/model.zip".to_string(),
+            downloaded_bytes: 60,
+            total_bytes: Some(100),
+            percent: Some(60),
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 2000,
+            resumed: true,
+            complete: false,
+        };
+
+        send_download_progress(&tx, "http://127.0.0.1:18080", progress).await;
+        let frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(frame.contains("Resuming ASR resource download."));
+        assert!(frame.contains("\"resumed\":true"));
+    }
+
+    #[tokio::test]
+    async fn send_download_progress_emits_done_event_for_completed_download() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<Bytes>(4);
+
+        let progress = DownloadProgress {
+            label: "model.zip".to_string(),
+            url: "http://example.test/model.zip".to_string(),
+            dest: "/tmp/model.zip".to_string(),
+            downloaded_bytes: 100,
+            total_bytes: Some(100),
+            percent: Some(100),
+            bytes_per_second: None,
+            eta_seconds: None,
+            elapsed_ms: 3000,
+            resumed: false,
+            complete: true,
+        };
+
+        send_download_progress(&tx, "http://127.0.0.1:18080", progress).await;
+        let frame = String::from_utf8(rx.recv().await.unwrap().to_vec()).unwrap();
+        assert!(frame.contains("\"status\":\"done\""));
+        assert!(frame.contains("Downloaded ASR resource."));
+        assert!(frame.contains("\"complete\":true"));
+    }
+
+    // --- Audio helpers -------------------------------------------------------
+
+    #[test]
+    fn wav_pcm_duration_ms_handles_large_wav_buffer() {
+        let seconds = 120u64;
+        let pcm_bytes = (seconds * 32_000) as usize;
+        let wav = vec![0u8; 44 + pcm_bytes];
+        assert_eq!(wav_pcm_duration_ms(&wav), Some(seconds * 1000));
+    }
+
+    #[test]
+    fn plan_upload_chunk_boundaries_outputs_single_chunk_for_short_audio() {
+        let boundaries = plan_upload_chunk_boundaries(500);
+        assert_eq!(boundaries, vec![(0, 1)]);
+    }
+
+    #[test]
+    fn plan_upload_chunk_boundaries_generates_overlapping_chunks_for_long_audio() {
+        let boundaries = plan_upload_chunk_boundaries(90_000);
+        assert!(boundaries.len() >= 3);
+        for window in boundaries.windows(2) {
+            assert!(window[1].0 > window[0].0);
+        }
+        assert!(boundaries
+            .iter()
+            .all(|(offset, duration)| offset + duration <= 91));
+    }
+
+    // --- Query helpers -------------------------------------------------------
+
+    #[test]
+    fn target_from_query_parses_full_query_into_asr_target() {
+        let target = target_from_query(Some(
+            "host=localhost&port=18080&language=english&model=Qwen3-ASR-1.7B&owner_module=module&owner_id=owner",
+        ))
+        .unwrap();
+        assert_eq!(target.host, "localhost");
+        assert_eq!(target.port, Some(18080));
+        assert_eq!(target.language, "english");
+        assert_eq!(target.model, "Qwen3-ASR-1.7B");
+        assert_eq!(target.owner_module, "module");
+        assert_eq!(target.owner_id.as_deref(), Some("owner"));
+    }
+
+    #[test]
+    fn target_from_query_errors_on_invalid_query_syntax() {
+        let err = target_from_query(Some("host=127.0.0.1&port=not-a-number")).unwrap_err();
+        assert!(err.starts_with("invalid ASR query:"));
+    }
+
+    #[test]
+    fn query_param_value_returns_none_for_empty_query() {
+        assert!(query_param_value("", "key").is_none());
+    }
+
+    #[test]
+    fn query_flag_enabled_is_false_for_empty_value() {
+        assert!(!query_flag_enabled("flag=", "flag"));
+    }
+
+    #[test]
+    fn validate_loopback_host_rejects_empty_hostname() {
+        assert!(validate_loopback_host("").is_err());
+    }
+
+    // --- Misc byte and filename helpers -------------------------------------
+
+    #[test]
+    fn file_extension_preserves_case_for_uppercase_extensions() {
+        assert_eq!(file_extension("TEST.WAV"), ".WAV");
+    }
+
+    #[test]
+    fn find_bytes_returns_none_when_needle_longer_than_haystack() {
+        assert_eq!(find_bytes(b"abc", b"abcd"), None);
+    }
+
+    // --- Tokenizer helpers ---------------------------------------------------
+
+    #[test]
+    fn required_model_files_for_qwen3_0_6b_match_expected_set() {
+        let files = required_model_files("Qwen3-ASR-0.6B");
+        assert_eq!(files, &["config.json", "model.safetensors"]);
+    }
+
+    #[test]
+    fn required_model_files_for_qwen3_1_7b_include_sharded_files() {
+        let files = required_model_files("Qwen3-ASR-1.7B");
+        assert!(files.contains(&"model-00001-of-00002.safetensors"));
+        assert!(files.contains(&"model-00002-of-00002.safetensors"));
+    }
+
+    #[test]
+    fn tokenizer_size_error_message_includes_model_name() {
+        let err = tokenizer_size("Unknown-Model").unwrap_err();
+        assert!(err.contains("unsupported model: Unknown-Model"));
+    }
+
+    #[test]
+    fn tokenizer_size_ok_for_known_models_in_v3() {
+        assert_eq!(tokenizer_size("Qwen3-ASR-0.6B").unwrap(), "0.6B");
+        assert_eq!(tokenizer_size("Qwen3-ASR-1.7B").unwrap(), "1.7B");
+    }
+}

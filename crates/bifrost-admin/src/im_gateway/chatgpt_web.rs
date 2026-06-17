@@ -3172,3 +3172,829 @@ def hello():
         conversation_history_store().remove(sk);
     }
 }
+
+#[cfg(test)]
+mod coverage_boost {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::sync::{Mutex, OnceLock};
+
+    static GLOBAL_TEST_MUTEX: OnceLock<Mutex<()>> = OnceLock::new();
+
+    fn global_lock() -> &'static Mutex<()> {
+        GLOBAL_TEST_MUTEX.get_or_init(|| Mutex::new(()))
+    }
+
+    // --- truncate_for_log helpers ---
+
+    #[test]
+    fn truncate_for_log_returns_original_when_short() {
+        let s = "hello";
+        assert_eq!(truncate_for_log(s, 10), "hello");
+    }
+
+    #[test]
+    fn truncate_for_log_truncates_and_appends_ellipsis() {
+        let s = "abcdef";
+        let out = truncate_for_log(s, 3);
+        assert_eq!(out, "abc...");
+    }
+
+    #[test]
+    fn truncate_for_log_handles_unicode_boundaries() {
+        let s = "你好世界"; // 4 chars
+        let out = truncate_for_log(s, 3);
+        // Should still be valid UTF-8 and end with ellipsis
+        assert!(out.ends_with("..."));
+    }
+
+    // --- artifact_kind_label & image count helpers ---
+
+    #[test]
+    fn artifact_kind_label_maps_known_kinds() {
+        assert_eq!(artifact_kind_label("image"), "图片");
+        assert_eq!(artifact_kind_label("archive"), "压缩包");
+        assert_eq!(artifact_kind_label("other"), "附件");
+    }
+
+    #[test]
+    fn requested_image_count_hint_rejects_out_of_range_counts() {
+        assert_eq!(requested_image_count_hint("生成0张图片"), None);
+        assert_eq!(requested_image_count_hint("生成99张图片"), None);
+    }
+
+    #[test]
+    fn chinese_image_count_returns_expected_values() {
+        assert_eq!(chinese_image_count("一"), Some(1));
+        assert_eq!(chinese_image_count("两"), Some(2));
+        assert_eq!(chinese_image_count("十"), Some(10));
+        assert_eq!(chinese_image_count("零"), None);
+    }
+
+    // --- append_status_message & auth identity issue helpers ---
+
+    #[test]
+    fn append_status_message_appends_when_existing_non_empty() {
+        let s = append_status_message(Some("first".to_string()), "second");
+        assert_eq!(s, "first; second");
+    }
+
+    #[test]
+    fn append_status_message_starts_new_when_existing_empty() {
+        let s = append_status_message(Some("".to_string()), "next");
+        assert_eq!(s, "next");
+    }
+
+    #[test]
+    fn authorization_identity_issue_returns_none_when_not_expired() {
+        let identity = AuthorizationIdentity {
+            complete: true,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339()),
+            ..Default::default()
+        };
+        assert!(authorization_identity_issue(&identity).is_none());
+    }
+
+    #[test]
+    fn authorization_identity_issue_reports_parse_error() {
+        let identity = AuthorizationIdentity {
+            complete: true,
+            expires_at: Some("not-a-timestamp".to_string()),
+            ..Default::default()
+        };
+        let msg = authorization_identity_issue(&identity).unwrap();
+        assert!(msg.contains("could not be parsed"));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_fresh_for_recent_timestamp() {
+        let proof = BrowserAccountCheckProof {
+            captured_at: (chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339(),
+            status: 200,
+            logged_in: true,
+        };
+        assert!(browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_stale_for_old_timestamp() {
+        let proof = BrowserAccountCheckProof {
+            captured_at: (chrono::Utc::now() - chrono::Duration::hours(2)).to_rfc3339(),
+            status: 200,
+            logged_in: true,
+        };
+        assert!(!browser_account_check_proof_is_fresh(&proof));
+    }
+
+    // --- decode_cdp_response_body & headers extraction ---
+
+    #[test]
+    fn decode_cdp_response_body_reads_plain_text() {
+        let value = json!({"body": "plain-text"});
+        assert_eq!(
+            decode_cdp_response_body(&value).as_deref(),
+            Some("plain-text")
+        );
+    }
+
+    #[test]
+    fn decode_cdp_response_body_decodes_base64_when_flag_set() {
+        let body = base64::engine::general_purpose::STANDARD.encode("hello");
+        let value = json!({"body": body, "base64Encoded": true});
+        assert_eq!(decode_cdp_response_body(&value).as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn decode_cdp_response_body_returns_none_when_body_missing() {
+        let value = json!({"base64Encoded": false});
+        assert!(decode_cdp_response_body(&value).is_none());
+    }
+
+    #[test]
+    fn extract_reusable_headers_filters_and_normalizes_keys() {
+        let mut target = BTreeMap::new();
+        let mut headers = serde_json::Map::new();
+        headers.insert(
+            "Authorization".to_string(),
+            Value::String("Bearer token".to_string()),
+        );
+        headers.insert(
+            "OAI-Language".to_string(),
+            Value::String("zh-CN".to_string()),
+        );
+        headers.insert(
+            "Other-Header".to_string(),
+            Value::String("ignored".to_string()),
+        );
+        extract_reusable_headers(&headers, &mut target);
+        assert_eq!(
+            target.get("authorization").map(String::as_str),
+            Some("Bearer token")
+        );
+        assert_eq!(
+            target.get("oai-language").map(String::as_str),
+            Some("zh-CN")
+        );
+        assert!(!target.contains_key("other-header"));
+    }
+
+    // --- summarize_authorization_identity ---
+
+    #[test]
+    fn summarize_authorization_identity_returns_default_when_no_bearer() {
+        let headers = BTreeMap::from([("authorization".to_string(), "Basic abc".to_string())]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(!id.has_bearer_token);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn summarize_authorization_identity_handles_invalid_jwt_payload() {
+        let headers =
+            BTreeMap::from([("authorization".to_string(), "Bearer not-a-jwt".to_string())]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn summarize_authorization_identity_extracts_core_claims() {
+        let mut claims = serde_json::Map::new();
+        claims.insert(
+            "https://api.openai.com/profile".to_string(),
+            json!({
+                "email": "user@example.com",
+                "email_verified": true
+            }),
+        );
+        claims.insert(
+            "https://api.openai.com/auth".to_string(),
+            json!({
+                "user_id": "user-123",
+                "chatgpt_account_id": "acc-1"
+            }),
+        );
+        claims.insert(
+            "exp".to_string(),
+            json!(chrono::Utc::now().timestamp() + 3600),
+        );
+        let payload = serde_json::Value::Object(claims);
+        let payload_bytes = serde_json::to_vec(&payload).unwrap();
+        let payload_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload_bytes);
+        let token = format!("header.{payload_b64}.sig");
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
+
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(id.has_profile_email);
+        assert_eq!(id.profile_email_verified, Some(true));
+        assert!(id.has_user_identity);
+        assert!(id.has_account_identity);
+        assert!(id.complete);
+        assert!(id.expires_at.is_some());
+    }
+
+    // --- runtime_config & resolve_config_path ---
+
+    #[test]
+    fn runtime_config_uses_timeout_override_from_adapter_config() {
+        let adapter = ExternalCliAdapterConfig {
+            timeout_secs: Some(123),
+            extra: BTreeMap::new(),
+            ..ExternalCliAdapterConfig::default()
+        };
+        let cfg = runtime_config(&adapter).expect("runtime_config ok");
+        assert_eq!(cfg.chatgpt.timeout_secs, 123);
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_absolute_value() {
+        let base = PathBuf::from("/tmp/base-path");
+        let abs = if cfg!(windows) {
+            "C:/chatgpt/state.json"
+        } else {
+            "/var/tmp/state.json"
+        };
+        let out = resolve_config_path(Some(abs), &base, "fallback.json");
+        assert!(out.is_absolute());
+        assert!(out.ends_with("state.json"));
+    }
+
+    #[test]
+    fn resolve_config_path_uses_relative_under_base_when_not_absolute() {
+        let base = PathBuf::from("/tmp/base-path");
+        let out = resolve_config_path(Some("state.json"), &base, "fallback.json");
+        assert!(out.starts_with(&base));
+        assert!(out.ends_with("state.json"));
+    }
+
+    #[test]
+    fn resolve_config_path_falls_back_to_default_when_empty() {
+        let base = PathBuf::from("/tmp/base-path");
+        let out = resolve_config_path(None, &base, "fallback.json");
+        assert_eq!(out, base.join("fallback.json"));
+    }
+
+    #[test]
+    fn iso_now_returns_rfc3339_timestamp() {
+        let ts = iso_now();
+        chrono::DateTime::parse_from_rfc3339(&ts).expect("parse iso_now");
+    }
+
+    // --- startup_auth_dry_run_enabled & browser_fetch_headers ---
+
+    #[test]
+    fn startup_auth_dry_run_enabled_recognizes_truthy_values() {
+        let _guard = global_lock().lock().unwrap();
+        for value in ["1", "true", "yes", "on", "TRUE"] {
+            std::env::set_var(STARTUP_AUTH_DRY_RUN_ENV, value);
+            assert!(startup_auth_dry_run_enabled());
+        }
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+    }
+
+    #[test]
+    fn startup_auth_dry_run_enabled_false_when_unset_or_zero() {
+        let _guard = global_lock().lock().unwrap();
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+        assert!(!startup_auth_dry_run_enabled());
+        std::env::set_var(STARTUP_AUTH_DRY_RUN_ENV, "0");
+        assert!(!startup_auth_dry_run_enabled());
+        std::env::remove_var(STARTUP_AUTH_DRY_RUN_ENV);
+    }
+
+    #[test]
+    fn browser_fetch_headers_preserves_non_cookie_headers() {
+        let mut headers = BTreeMap::new();
+        headers.insert("authorization".to_string(), "Bearer captured".to_string());
+        headers.insert("x-oai-is".to_string(), "prod".to_string());
+        headers.insert("cookie".to_string(), "session=1".to_string());
+        headers.insert("user-agent".to_string(), "UA".to_string());
+        let state = AuthState {
+            captured_at: iso_now(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            user_agent: "UA".to_string(),
+            captured_auth_headers: headers,
+            captured_auth_identity: AuthorizationIdentity::default(),
+            captured_account_check: None,
+            cookies: Vec::new(),
+        };
+        let browser_headers = browser_fetch_headers(&state);
+        assert!(browser_headers.contains_key("authorization"));
+        assert!(browser_headers.contains_key("x-oai-is"));
+        assert!(!browser_headers.contains_key("cookie"));
+        assert!(!browser_headers.contains_key("user-agent"));
+    }
+
+    // --- conversation_has_user_message_after extra coverage ---
+
+    #[test]
+    fn conversation_has_user_message_after_ignores_non_user_roles() {
+        let conversation = json!({
+            "mapping": {
+                "a1": {"message": {"author": {"role": "assistant"}}},
+                "u1": {"message": {
+                    "author": {"role": "user"},
+                    "create_time": 5.0,
+                    "content": {"parts": ["你好"]}
+                }}
+            }
+        });
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "你好",
+            1.0
+        ));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v2 {
+    use super::*;
+    use serde_json::{json, Value};
+    use std::collections::{BTreeMap, BTreeSet};
+
+    fn make_cdp_event(method: &str, params: Value) -> CdpEvent {
+        CdpEvent {
+            method: method.to_string(),
+            params,
+        }
+    }
+
+    #[test]
+    fn chatgpt_web_tool_events_skips_empty_and_whitespace_tool_calls() {
+        let raw = json!({
+            "toolCalls": [
+                {"name": "A", "text": "  "},
+                {"name": "B"},
+                {"text": "result"},
+            ]
+        });
+        let events = chatgpt_web_tool_events(&raw);
+        // Only two non-empty contents: name "B" and text "result".
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].content, "B");
+        assert_eq!(events[1].content, "result");
+        assert_eq!(events[0].raw["phase"], "tool");
+        assert_eq!(events[0].raw["batchIndex"], 1);
+    }
+
+    #[test]
+    fn with_phase_clones_and_sets_phase_and_batch_index() {
+        let raw = json!({"foo": 1});
+        let updated = with_phase(&raw, "thinking", 3);
+        assert_eq!(raw["foo"], 1); // original untouched
+        assert_eq!(updated["foo"], 1);
+        assert_eq!(updated["phase"], "thinking");
+        assert_eq!(updated["batchIndex"], 3);
+    }
+
+    #[test]
+    fn collect_account_headers_ignores_unrelated_events() {
+        let mut ids = BTreeSet::new();
+        let mut headers = BTreeMap::new();
+        let event = make_cdp_event("Network.responseReceived", json!({"requestId": "r1"}));
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        assert!(ids.is_empty());
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn collect_account_headers_skips_non_matching_urls() {
+        let mut ids = BTreeSet::new();
+        let mut headers = BTreeMap::new();
+        let event = make_cdp_event(
+            "Network.requestWillBeSent",
+            json!({
+                "request": {"url": "https://chatgpt.com/other"},
+                "requestId": "r1",
+            }),
+        );
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        assert!(ids.is_empty());
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn collect_account_headers_tracks_request_and_extracts_headers() {
+        let mut ids = BTreeSet::new();
+        let mut headers = BTreeMap::new();
+        let url = format!("{}{}?x=1", DEFAULT_BASE_URL, ACCOUNT_CHECK_PATH_PREFIX);
+        let event = make_cdp_event(
+            "Network.requestWillBeSent",
+            json!({
+                "requestId": "r1",
+                "request": {
+                    "url": url,
+                    "headers": {
+                        "Authorization": "Bearer t",
+                        "OAI-Language": "zh-CN",
+                        "X-Other": "ignored",
+                    }
+                }
+            }),
+        );
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        assert!(ids.contains("r1"));
+        assert_eq!(
+            headers.get("authorization").map(String::as_str),
+            Some("Bearer t")
+        );
+        assert_eq!(
+            headers.get("oai-language").map(String::as_str),
+            Some("zh-CN")
+        );
+        assert!(!headers.contains_key("x-other"));
+    }
+
+    #[test]
+    fn collect_account_headers_extra_info_merges_headers_for_tracked_request() {
+        let mut ids = BTreeSet::from(["r1".to_string()]);
+        let mut headers = BTreeMap::new();
+        let event = make_cdp_event(
+            "Network.requestWillBeSentExtraInfo",
+            json!({
+                "requestId": "r1",
+                "headers": {
+                    "User-Agent": "UA",
+                    "Cookie": "ignored",
+                }
+            }),
+        );
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        // User-Agent is in reusable list
+        assert_eq!(headers.get("user-agent").map(String::as_str), Some("UA"));
+        // Cookie should be filtered out by browser_fetch_headers later, not here.
+    }
+
+    #[test]
+    fn collect_account_response_status_only_records_matching_requests() {
+        let mut statuses = BTreeMap::new();
+        let ids = BTreeSet::from(["r1".to_string()]);
+        let event = make_cdp_event(
+            "Network.responseReceived",
+            json!({
+                "requestId": "r1",
+                "response": {"status": 204},
+            }),
+        );
+        collect_account_response_status(&event, &ids, &mut statuses);
+        assert_eq!(statuses.get("r1"), Some(&204));
+
+        // Non-matching id should not be recorded.
+        let event2 = make_cdp_event(
+            "Network.responseReceived",
+            json!({
+                "requestId": "r2",
+                "response": {"status": 200},
+            }),
+        );
+        collect_account_response_status(&event2, &ids, &mut statuses);
+        assert_eq!(statuses.len(), 1);
+    }
+
+    #[test]
+    fn collect_account_response_status_ignores_missing_or_invalid_status() {
+        let mut statuses = BTreeMap::new();
+        let ids = BTreeSet::from(["r1".to_string()]);
+        // Missing response
+        let event = make_cdp_event("Network.responseReceived", json!({"requestId": "r1"}));
+        collect_account_response_status(&event, &ids, &mut statuses);
+        assert!(statuses.is_empty());
+
+        // Non-numeric status
+        let event = make_cdp_event(
+            "Network.responseReceived",
+            json!({"requestId": "r1", "response": {"status": "ok"}}),
+        );
+        collect_account_response_status(&event, &ids, &mut statuses);
+        assert!(statuses.is_empty());
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_fresh_handles_invalid_timestamp() {
+        let proof = BrowserAccountCheckProof {
+            captured_at: "not-a-timestamp".to_string(),
+            status: 200,
+            logged_in: true,
+        };
+        assert!(!browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_fresh_allows_small_future_skew() {
+        let ts = (chrono::Utc::now() + chrono::Duration::seconds(30)).to_rfc3339();
+        let proof = BrowserAccountCheckProof {
+            captured_at: ts,
+            status: 200,
+            logged_in: true,
+        };
+        assert!(browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn browser_account_check_proof_is_stale_when_too_old() {
+        let ts = (chrono::Utc::now()
+            - chrono::Duration::seconds(BROWSER_ACCOUNT_CHECK_PROOF_MAX_AGE_SECS + 300))
+        .to_rfc3339();
+        let proof = BrowserAccountCheckProof {
+            captured_at: ts,
+            status: 200,
+            logged_in: true,
+        };
+        assert!(!browser_account_check_proof_is_fresh(&proof));
+    }
+
+    #[test]
+    fn summarize_authorization_identity_handles_missing_payload_segment() {
+        let headers = BTreeMap::from([(
+            "authorization".to_string(),
+            "Bearer header-only".to_string(),
+        )]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.has_profile_email);
+        assert!(!id.has_user_identity);
+        assert!(!id.has_account_identity);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn summarize_authorization_identity_handles_invalid_base64_payload() {
+        let headers = BTreeMap::from([(
+            "authorization".to_string(),
+            "Bearer header.invalid%%payload.sig".to_string(),
+        )]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.complete);
+        assert!(id.expires_at.is_none());
+    }
+
+    #[test]
+    fn summarize_authorization_identity_handles_invalid_json_payload() {
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-json");
+        let token = format!("header.{payload}.sig");
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.complete);
+        assert!(id.expires_at.is_none());
+    }
+
+    #[test]
+    fn summarize_authorization_identity_uses_alternative_user_id_and_account_fields() {
+        let claims = json!({
+            "https://api.openai.com/profile": {},
+            "https://api.openai.com/auth": {
+                "chatgpt_user_id": "user-999",
+                "chatgpt_account_id": "acc-xyz",
+            },
+            "exp": chrono::Utc::now().timestamp() + 600,
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let token = format!("header.{payload}.sig");
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_bearer_token);
+        assert!(!id.has_profile_email);
+        assert_eq!(id.profile_email_verified, None);
+        assert!(id.has_user_identity);
+        assert!(id.has_account_identity);
+        assert!(!id.complete);
+        assert!(id.expires_at.is_some());
+    }
+
+    #[test]
+    fn summarize_authorization_identity_requires_user_prefix_for_identity() {
+        let claims = json!({
+            "https://api.openai.com/profile": {
+                "email": "user@example.com",
+                "email_verified": true,
+            },
+            "https://api.openai.com/auth": {
+                "user_id": "not-user-prefix",
+                "chatgpt_account_id": "acc-1",
+            },
+        });
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(serde_json::to_vec(&claims).unwrap());
+        let token = format!("header.{payload}.sig");
+        let headers = BTreeMap::from([("authorization".to_string(), format!("Bearer {token}"))]);
+        let id = summarize_authorization_identity(&headers);
+        assert!(id.has_profile_email);
+        assert_eq!(id.profile_email_verified, Some(true));
+        assert!(!id.has_user_identity);
+        assert!(id.has_account_identity);
+        assert!(!id.complete);
+    }
+
+    #[test]
+    fn browser_fetch_headers_drops_cookie_and_user_agent_only() {
+        let mut captured = BTreeMap::new();
+        captured.insert("authorization".to_string(), "Bearer x".to_string());
+        captured.insert("cookie".to_string(), "a=b".to_string());
+        captured.insert("user-agent".to_string(), "UA".to_string());
+        captured.insert("x-extra".to_string(), "1".to_string());
+        let state = AuthState {
+            captured_at: iso_now(),
+            base_url: DEFAULT_BASE_URL.to_string(),
+            user_agent: "UA".to_string(),
+            captured_auth_headers: captured,
+            captured_auth_identity: AuthorizationIdentity::default(),
+            captured_account_check: None,
+            cookies: Vec::new(),
+        };
+        let headers = browser_fetch_headers(&state);
+        assert!(headers.contains_key("authorization"));
+        assert!(headers.contains_key("x-extra"));
+        assert!(!headers.contains_key("cookie"));
+        assert!(!headers.contains_key("user-agent"));
+    }
+
+    #[test]
+    fn chatgpt_web_tool_events_uses_tool_name_when_text_missing() {
+        let raw = json!({
+            "toolCalls": [
+                {"name": "WebSearch"},
+            ]
+        });
+        let events = chatgpt_web_tool_events(&raw);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].content, "WebSearch");
+        assert_eq!(events[0].raw["phase"], "tool");
+    }
+
+    #[test]
+    fn chatgpt_web_response_events_single_part_includes_tool_events() {
+        let raw = json!({
+            "conversationId": "c1",
+            "toolCalls": [
+                {"name": "Search", "text": "Search the web"},
+            ],
+        });
+        let responses = vec!["final answer".to_string()];
+        let events = chatgpt_web_response_events("final answer", &raw, &responses);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0].event_type,
+            ExternalCliProgressEventType::ToolFinished
+        ));
+        assert!(matches!(
+            events[1].event_type,
+            ExternalCliProgressEventType::AssistantFinal
+        ));
+    }
+}
+
+#[cfg(test)]
+mod coverage_boost_v3 {
+    use super::*;
+    use serde_json::json;
+    use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn decode_cdp_response_body_invalid_base64_returns_none() {
+        let value = json!({
+            "body": "%%%not-base64",
+            "base64Encoded": true,
+        });
+        assert!(decode_cdp_response_body(&value).is_none());
+    }
+
+    #[test]
+    fn decode_cdp_response_body_non_utf8_returns_none() {
+        let bytes = vec![0xff, 0xfe, 0xfd];
+        let b64 = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let value = json!({
+            "body": b64,
+            "base64Encoded": true,
+        });
+        assert!(decode_cdp_response_body(&value).is_none());
+    }
+
+    #[test]
+    fn chatgpt_web_tool_events_empty_when_no_tool_calls_present() {
+        let raw = json!({});
+        let events = chatgpt_web_tool_events(&raw);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn chatgpt_web_response_events_trims_and_drops_empty_batches() {
+        let raw = json!({"conversationId": "c1"});
+        let responses = vec![" first ".to_string(), " ".to_string(), "second".to_string()];
+        let events = chatgpt_web_response_events("ignored", &raw, &responses);
+        // two non-empty batches: "first" (thinking) and "second" (final)
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].content, "first");
+        assert!(matches!(
+            events[0].event_type,
+            ExternalCliProgressEventType::AssistantDelta
+        ));
+        assert_eq!(events[1].content, "second");
+        assert!(matches!(
+            events[1].event_type,
+            ExternalCliProgressEventType::AssistantFinal
+        ));
+    }
+
+    #[test]
+    fn has_handoff_submission_evidence_false_for_only_recovery_events() {
+        let events = vec![
+            "handoff_recovered_after_sse_interrupt".to_string(),
+            "browser_ui".to_string(),
+        ];
+        assert!(!has_handoff_submission_evidence(&events));
+    }
+
+    #[test]
+    fn has_handoff_submission_evidence_true_when_other_event_present() {
+        let events = vec![
+            "handoff_recovered_after_sse_interrupt".to_string(),
+            "browser_post_captured".to_string(),
+        ];
+        assert!(has_handoff_submission_evidence(&events));
+    }
+
+    #[test]
+    fn conversation_has_user_message_after_false_when_mapping_missing() {
+        let conversation = json!({"other": {}});
+        assert!(!conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            0.0
+        ));
+    }
+
+    #[test]
+    fn conversation_has_user_message_after_respects_after_time_threshold() {
+        let conversation = json!({
+            "mapping": {
+                "early": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "create_time": 1.0,
+                        "content": {"parts": ["hi"]}
+                    }
+                },
+                "late": {
+                    "message": {
+                        "author": {"role": "user"},
+                        "create_time": 5.0,
+                        "content": {"parts": ["hi"]}
+                    }
+                }
+            }
+        });
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            5.0
+        ));
+        assert!(conversation_has_user_message_after(
+            &conversation,
+            "hi",
+            4.0
+        ));
+    }
+
+    #[test]
+    fn collect_account_headers_extra_info_without_headers_is_noop() {
+        let mut ids = BTreeSet::from(["r1".to_string()]);
+        let mut headers = BTreeMap::new();
+        let event = CdpEvent {
+            method: "Network.requestWillBeSentExtraInfo".to_string(),
+            params: json!({"requestId": "r1"}),
+        };
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn collect_account_headers_request_without_headers_is_noop() {
+        let mut ids = BTreeSet::new();
+        let mut headers = BTreeMap::new();
+        let url = format!("{}{}", DEFAULT_BASE_URL, ACCOUNT_CHECK_PATH_PREFIX);
+        let event = CdpEvent {
+            method: "Network.requestWillBeSent".to_string(),
+            params: json!({
+                "requestId": "r1",
+                "request": {"url": url},
+            }),
+        };
+        collect_account_headers(DEFAULT_BASE_URL, &event, &mut ids, &mut headers);
+        assert!(ids.contains("r1"));
+        assert!(headers.is_empty());
+    }
+
+    #[test]
+    fn with_phase_leaves_non_object_values_unchanged() {
+        let raw = Value::Null;
+        let updated = with_phase(&raw, "final", 0);
+        assert!(updated.is_null());
+    }
+}

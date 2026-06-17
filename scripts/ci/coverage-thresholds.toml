@@ -25,7 +25,7 @@
 # Project-wide goal. The gate also enforces an aggregate workspace floor.
 default = 90.0
 # Aggregate (workspace-wide) line coverage floor.
-workspace_min = 55.0
+workspace_min = 65.0
 # When true, the gate fails if measured coverage exceeds a crate floor by more
 # than `ratchet_slack` without the floor being updated (keeps floors honest).
 # Disabled by default to avoid noisy failures.
@@ -64,20 +64,20 @@ min = 90.0
 min = 89.0
 
 [crates.bifrost-proxy]
-# Current baseline 59.13%; ratchet just below measured coverage.
-min = 59.0
+# Ratcheted to 64% after wave 3-5 proxy tests added.
+min = 64.0
 
 [crates.bifrost-admin]
-# Current baseline 49.22%; ratchet just below measured coverage.
-min = 49.0
+# Ratcheted to 56% after wave 3-5 admin tests added.
+min = 56.0
 
 [crates.agent]
 # Current baseline 78.78%; ratchet just below measured coverage.
 min = 78.0
 
 [crates.bifrost-cli]
-# Current baseline 45.67%; ratchet just below measured coverage.
-min = 45.0
+# Ratcheted to 55% after wave 3-5 cli tests added.
+min = 55.0
 
 [crates.bifrost-storage]
 # Reached 94.5% on Linux CI. config_manager/values/rules/config/state/
