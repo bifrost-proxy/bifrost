@@ -143,6 +143,11 @@ log "Help should explain where to get a headless login token"
 HELP_OUTPUT="$("$BIFROST_BIN" sync login --help 2>&1)"
 assert_body_contains "https://bifrost.bytedance.net/v4/sso/token-login" "$HELP_OUTPUT" "sync login help should include token login URL" || exit 1
 
+log "Top-level login help should match sync login semantics"
+TOP_LEVEL_HELP_OUTPUT="$("$BIFROST_BIN" login --help 2>&1)"
+assert_body_contains "Equivalent to \`bifrost sync login\`" "$TOP_LEVEL_HELP_OUTPUT" "top-level login help should explain sync login equivalence" || exit 1
+assert_body_contains "https://bifrost.bytedance.net/v4/sso/token-login" "$TOP_LEVEL_HELP_OUTPUT" "top-level login help should include token login URL" || exit 1
+
 log "Missing --token value should explain the default token login URL"
 MISSING_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token 2>&1)"
 MISSING_DEFAULT_STATUS=$?
@@ -150,12 +155,26 @@ assert_equals "1" "$MISSING_DEFAULT_STATUS" "missing token value should fail bef
 assert_body_contains "--token must not be empty" "$MISSING_DEFAULT_OUTPUT" "missing token error should stay explicit" || exit 1
 assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login" "$MISSING_DEFAULT_OUTPUT" "missing token error should include default token login URL" || exit 1
 
+log "Top-level login missing --token value should explain the default token login URL"
+TOP_LEVEL_MISSING_DEFAULT_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" login --token 2>&1)"
+TOP_LEVEL_MISSING_DEFAULT_STATUS=$?
+assert_equals "1" "$TOP_LEVEL_MISSING_DEFAULT_STATUS" "top-level missing token value should fail before login" || exit 1
+assert_body_contains "--token must not be empty" "$TOP_LEVEL_MISSING_DEFAULT_OUTPUT" "top-level missing token error should stay explicit" || exit 1
+assert_body_contains "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login" "$TOP_LEVEL_MISSING_DEFAULT_OUTPUT" "top-level missing token error should include default token login URL" || exit 1
+
 log "Missing --token value with explicit url should explain the custom token login URL"
 MISSING_CUSTOM_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync login --token --url "$MOCK_URL" 2>&1)"
 MISSING_CUSTOM_STATUS=$?
 assert_equals "1" "$MISSING_CUSTOM_STATUS" "missing token value with custom url should fail before login" || exit 1
 assert_body_contains "--token must not be empty" "$MISSING_CUSTOM_OUTPUT" "custom missing token error should stay explicit" || exit 1
 assert_body_contains "Sync session token for non-interactive login; get one at ${MOCK_URL}/v4/sso/token-login" "$MISSING_CUSTOM_OUTPUT" "missing token error should include custom token login URL" || exit 1
+
+log "Top-level login missing --token value with explicit url should explain the custom token login URL"
+TOP_LEVEL_MISSING_CUSTOM_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" login --token --url "$MOCK_URL" 2>&1)"
+TOP_LEVEL_MISSING_CUSTOM_STATUS=$?
+assert_equals "1" "$TOP_LEVEL_MISSING_CUSTOM_STATUS" "top-level missing token value with custom url should fail before login" || exit 1
+assert_body_contains "--token must not be empty" "$TOP_LEVEL_MISSING_CUSTOM_OUTPUT" "top-level custom missing token error should stay explicit" || exit 1
+assert_body_contains "Sync session token for non-interactive login; get one at ${MOCK_URL}/v4/sso/token-login" "$TOP_LEVEL_MISSING_CUSTOM_OUTPUT" "top-level missing token error should include custom token login URL" || exit 1
 
 log "Point sync config at mock server for CI-safe authorization"
 CONFIG_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" sync config --remote-url "$MOCK_URL" 2>&1)"
@@ -183,6 +202,17 @@ if ! grep -qE "Login token saved|Login successful" <<<"$LOGIN_EXPLICIT_OUTPUT"; 
 fi
 if grep -q "Login token saved" <<<"$LOGIN_EXPLICIT_OUTPUT"; then
     assert_body_contains "Remote URL: ${MOCK_URL}" "$LOGIN_EXPLICIT_OUTPUT" "CLI explicit direct login should report remote url" || exit 1
+fi
+
+log "Top-level login with explicit token and url should match sync login"
+TOP_LEVEL_LOGIN_OUTPUT="$(CI=1 BIFROST_DATA_DIR="$BIFROST_DATA_DIR" "$BIFROST_BIN" -p "$ADMIN_PORT" login --token ci-token --url "$MOCK_URL" 2>&1)"
+if ! grep -qE "Login token saved|Login successful" <<<"$TOP_LEVEL_LOGIN_OUTPUT"; then
+    echo "top-level direct login should report success" >&2
+    echo "$TOP_LEVEL_LOGIN_OUTPUT" >&2
+    exit 1
+fi
+if grep -q "Login token saved" <<<"$TOP_LEVEL_LOGIN_OUTPUT"; then
+    assert_body_contains "Remote URL: ${MOCK_URL}" "$TOP_LEVEL_LOGIN_OUTPUT" "top-level direct login should report remote url" || exit 1
 fi
 
 log "Token-only direct-login API payload should use configured default URL"

@@ -345,12 +345,12 @@ bifrost import ./rules.bifrost
 
 ```bash
 bifrost sync status
-bifrost sync login --token "$BIFROST_SYNC_TOKEN"
-bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://example.com
+bifrost login --token "$BIFROST_SYNC_TOKEN"
+bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://example.com
 bifrost sync run
 ```
 
-Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
+`bifrost login` 与 `bifrost sync login` 等价。Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
 
 Shell 补全：
 
