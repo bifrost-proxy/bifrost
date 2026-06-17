@@ -8,7 +8,7 @@
 以下约束是 2026-04-23 之后的当前实现真相，优先级高于后文仍保留的历史探索内容：
 
 - `remote caller` 不再决定使用哪条 shell policy
-- caller 侧 `bifrost remote command exec` 只表达“要执行什么命令”
+- caller 侧 `bifrost remote exec` 只表达“要执行什么命令”
 - shell policy 的选择、拒绝、命中日志，全部只发生在执行侧 target
 - 如果命令不满足 target 本地 `Shell Access` 配置，caller 接收到的只能是 target 返回的拒绝结果
 - 如果某个 caller 只能使用特定策略范围，这个约束也只由执行侧保存：
@@ -33,8 +33,8 @@
   - caller 本地 `remote-connections.json` 会按 `client_instance_id + relay_url` 去重覆盖，避免残留旧 transport
 - `bifrost remote disconnect --all` 与按设备 `disconnect` 会循环清理该 caller 在目标设备上的全部 reusable grants，而不是只删除本地文件中最后一条已知 grant
 - target 侧两类配置入口已经分工明确：
-  - `bifrost remote shell ...` 直接编辑目标设备本地数据目录中的 `remote_shell.json`
-  - `bifrost remote grant ...` 与 Settings Grants `Edit Access` 走目标设备本地 admin API，更新本地 grant overlay
+  - `bifrost setting shell ...` 直接编辑目标设备本地数据目录中的 `remote_shell.json`
+  - `bifrost setting grant ...` 与 Settings Grants `Edit Access` 走目标设备本地 admin API，更新本地 grant overlay
 - relay 的 `PATCH /v4/remote-invoke/client/grants/:id` 只接受最小字段：
   - `client_instance_id`
   - `grant_scope`
@@ -44,7 +44,7 @@
 
 本轮已经落地的能力包括：
 
-- caller 侧统一入口：`bifrost remote command exec ...`
+- caller 侧统一入口：`bifrost remote exec ...`
 - target 本地独立 `remote_shell.json` store
 - shell grant 与 query grant 明确隔离
 - 执行前基础限制：
@@ -58,7 +58,7 @@
 - grant 与 `shell_policy_set_version_snapshot` 绑定
 - Recent Calls / call history 记录 target 最终命中的 `policy_id` / `exec_mode`
 - Settings `Remote Invoke` 页提供可视化 Shell Access 管理
-- 本地 CLI 提供 `bifrost remote shell ...` 的脚本化配置能力
+- 本地 CLI 提供 `bifrost setting shell ...` 的脚本化配置能力
 
 ## 策略归属模型
 
@@ -131,18 +131,18 @@ target 基于两类本地信息自动决定有效策略：
 目标设备本地策略管理：
 
 ```bash
-bifrost remote shell list
-bifrost remote shell show --json
-bifrost remote shell apply ./remote_shell.json
-bifrost remote shell profile add --id repo-default --name "Repo Default" --cwd /srv/app --env PATH
-bifrost remote shell policy add --id pwd-argv --name "Pwd argv" --mode argv_exec --profile repo-default --program /bin/pwd
+bifrost setting shell list
+bifrost setting shell show --json
+bifrost setting shell apply ./remote_shell.json
+bifrost setting shell profile add --id repo-default --name "Repo Default" --cwd /srv/app --env PATH
+bifrost setting shell policy add --id pwd-argv --name "Pwd argv" --mode argv_exec --profile repo-default --program /bin/pwd
 ```
 
 caller 侧统一入口：
 
 ```bash
-bifrost remote command exec -- /bin/pwd
-bifrost remote command exec --shell-text "printf hello && /bin/pwd"
+bifrost remote exec -- /bin/pwd
+bifrost remote exec --shell-text "printf hello && /bin/pwd"
 ```
 
 参数约定：
@@ -152,7 +152,7 @@ bifrost remote command exec --shell-text "printf hello && /bin/pwd"
 - `--timeout-ms <n>`：最终会被 target 侧策略上限裁剪
 - `--shell-text <text>`：target 会在允许的 shell_text policy 中自动匹配
 - `-- <program> [args...]`：target 会在允许的 argv_exec policy 中自动匹配
-- 裸参数（例如 `bifrost remote command exec pwd`）在 CLI 层直接拒绝，避免把原本想走 `shell_text` 的输入静默解释成 `argv_exec`
+- 裸参数（例如 `bifrost remote exec pwd`）在 CLI 层直接拒绝，避免把原本想走 `shell_text` 的输入静默解释成 `argv_exec`
 
 ## 最新真实验证结论（2026-04-23）
 
@@ -178,7 +178,7 @@ bifrost remote command exec --shell-text "printf hello && /bin/pwd"
 在 target 侧，`shell.exec` 之前通过 `tokio::process::Command::output()` 一次性等待子进程退出后再返回 `stdout/stderr`。这会导致：
 
 - caller 在命令运行期间收不到任何 `frame`
-- `bifrost remote command exec` 对长时间输出的命令表现为“卡住直到结束”
+- `bifrost remote exec` 对长时间输出的命令表现为“卡住直到结束”
 - 像 `top -l 2 -s 1`、`python3 -u ...` 这类会持续产出 stdout 的命令，即使 relay / caller 已支持 frame 流式打印，也无法真正实时显示
 
 ### 修复方案
@@ -1719,7 +1719,7 @@ client 侧执行前，建议按下面顺序判定：
 ## 执行协议设计
 
 ### 1. Caller CLI 设计
-
+建议新增（planned, not yet shipped as of 2026-06-16；当前已发布的 caller 入口是 `bifrost remote exec`，长任务用 `bifrost remote job status|logs|watch`，尚未提供下列 `bifrost remote shell ...` 子命令）：
 建议新增：
 
 ```text
@@ -2658,7 +2658,7 @@ CLI / WebUI 默认建议：
 
 ### 12.1 caller cancel = client kill 的强一致语义
 
-这里建议作为强约束写死：
+这里建议作为强约束写死（planned, not yet shipped as of 2026-06-16；`bifrost remote shell cancel` 子命令尚未发布，当前 `bifrost remote job` 仅提供 `status|logs|watch`）：
 
 - **当 caller 显式执行** `bifrost remote shell cancel <call_id>` **时，client 必须终止对应命令**
 
@@ -4838,22 +4838,3 @@ bifrost-sync-server 优先实现（便于本地调试），验证通过后同步
 - `cargo test -p bifrost-admin remote_invoke::executor::tests::shell_text_cwd_prefix_quotes_and_forces_cd_inside_shell --lib`
 - `cargo test -p bifrost-cli remote:: --lib --no-run`
 - `cargo test -p bifrost-admin remote_invoke::executor:: --lib --no-run`
-
-### 十六、2026-06-17 detached job 本地恢复缓存
-
-本轮把 `relay_token` 从日常 CLI 交互中收回为 caller 本地实现细节。用户启动长任务后只需要保存或从列表找回 `call_id`，不再手工复制 token。
-
-实现约束：
-
-1. `bifrost remote exec --detach` 在 open_call 成功后，把 `call_id`、加密后的 per-call relay token、relay URL、client/device 摘要、命令摘要与本地状态写入 caller 数据目录的 `remote-jobs.json`。
-2. `bifrost remote job status|logs|watch <call_id>` 默认从本地 job cache 解析 relay URL 和 relay token；如果 cache 里的 relay URL 与当前默认值不同，应按 cache 重建 caller client，避免要求用户传额外 URL 参数。
-3. `bifrost remote job list` 只读取本地 cache，展示 caller 已知 detached jobs 的 call_id、最近状态、exit code、设备和命令摘要。
-4. `remote job status|logs|watch` 不再提供手工 `--relay-token` 参数；缺失本地 cache 时直接报错并提示 `remote job list` / 重新 `exec --detach`，不做历史兼容分支。
-5. `status` 成功观察到 running/exited 后更新本地 cache；`watch` 返回真实远端 exit code，并在终态时写回 `exited + exit_code`。
-
-验证计划：
-
-- `cargo test -p bifrost-cli remote::coverage_boost --lib`
-- `cargo test -p bifrost-cli remote:: --lib --no-run`
-- `bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`
-- `human_tests/remote-shell-exec.md` 新增/执行 call_id-only job 恢复用例
