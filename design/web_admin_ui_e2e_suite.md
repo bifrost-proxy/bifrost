@@ -1,15 +1,16 @@
 # Web Admin 完整 E2E UI 用例设计
 
-## 现状结论
+## 现状结论（2026-06-17 刷新）
 
-当前仓库**没有**一套覆盖你描述范围的完整 Web Admin E2E UI 测试设计。
+本文初稿写于浏览器场景仅有少量 JSON 脚本时。截至 2026-06-17，仓库已基于 Playwright 落地一整套 Web Admin UI E2E：
 
-现有覆盖主要分两类：
+- 测试目录：`web/tests/ui/`，按页面拆分成 `traffic.spec.ts`、`traffic-push.spec.ts`、`admin-rules-values.spec.ts`、`admin-scripts.spec.ts`、`admin-replay.spec.ts`、`admin-settings.spec.ts`、`pending-auth-modal.spec.ts` 等 spec
+- 运行器：`web/playwright.config.ts` 通过 `tests/ui/helpers/test-env.ts` 的 `allocateUiTestEnv()` 自动分配 backend/web 端口、临时 `BIFROST_DATA_DIR`、运行目录与 PID 文件，前端由 Playwright `webServer` 启动 `pnpm exec vite --host 127.0.0.1 --port <WEB_PORT>`
+- 入口脚本：`web/package.json` 暴露 `pnpm test:ui` / `pnpm test:ui:headed`
+- CI：`.github/workflows/ci.yml` 的 `e2e-shell` / `e2e-macos-shell` / `e2e-windows-shell` 等 job 通过 `scripts/ci/run-e2e-shell.sh` 拉起 Playwright，并缓存 `~/.cache/ms-playwright`
+- Admin 写入辅助：`web/tests/ui/helpers/admin-helpers.ts` 与 `traffic-generator.cjs` 取代了原计划的 `seed-traffic.sh` / `seed-admin-data.sh` / `assert-admin-state.js`
 
-- Admin API / Proxy E2E：`e2e-tests/` 下大量 shell 场景，偏接口与代理内核能力验证
-- 管理端浏览器场景：`.trae/skills/e2e-verify/scripts/scenarios/` 下只有少量场景
-
-当前浏览器侧可见场景不止 4 个，已涵盖 stream / traffic / replay 等多类能力，完整清单以 `.trae/skills/e2e-verify/scripts/scenarios/` 目录为准。
+下面保留原始矩阵作为设计目标和补全清单；具体落地以上述 spec 为准。原文中提到的 `.trae/skills/e2e-verify/scripts/scenarios/` 浏览器 JSON 场景路径已经下线（planned, not yet shipped as of 2026-06-17），不要再以该目录作为 ground truth。
 
 这意味着以下关键链路仍缺完整 UI 设计：
 
@@ -594,7 +595,17 @@
 
 ## 推荐场景拆分
 
-建议最终落成以下浏览器场景文件：
+落地状态（2026-06-17）：原计划的 JSON 场景文件已替换为 Playwright spec。下表保留作为设计意图，但 ground truth 是 `web/tests/ui/*.spec.ts`。下面前缀以 `ui-*.json` 命名的均为 planned, not yet shipped as of 2026-06-17，对应 Playwright 实现在右侧 spec 中：
+
+- bootstrap smoke → 由 `playwright.config.ts` 的 `webServer.url` + 各 spec 入口覆盖
+- traffic 全部 → `traffic.spec.ts` / `traffic-push.spec.ts`
+- rules + values → `admin-rules-values.spec.ts`
+- scripts → `admin-scripts.spec.ts`
+- replay → `admin-replay.spec.ts`
+- settings（含 access / performance / TLS / certificate / sync / agent / IM / remote invoke）→ `admin-settings.spec.ts`
+- pending authorizations → `pending-auth-modal.spec.ts`
+
+以下为原始建议的 JSON 场景命名（planned, not yet shipped as of 2026-06-17）：
 
 - `ui-bootstrap-smoke.json`
 - `ui-traffic-http-detail.json`
@@ -618,6 +629,8 @@
 - `ui-settings-system-cli-proxy-host.json`
 
 ## 推荐实现顺序
+
+落地状态（2026-06-17）：P0/P1 中绝大多数项已通过上面列出的 Playwright spec 落地；剩余少量主题（如 system/cli proxy 切换的 host 集成、双标签 push 同步专项）仍按 planned, not yet shipped as of 2026-06-17 看待。
 
 为了控制实现成本，建议按 P0 / P1 / P2 分批落地。
 
@@ -666,7 +679,13 @@
 
 ## 建议补充的辅助脚本
 
-为了支撑这套 UI 用例，建议补 3 类辅助能力：
+落地状态（2026-06-17）：原文这 3 类辅助能力已被 Playwright helper 取代，不再以 shell/JS 单文件形式落地：
+
+- 流量造数：`web/tests/ui/traffic-generator.cjs`（HTTP / SSE / WebSocket / 大 body）
+- Admin 数据写入与断言：`web/tests/ui/helpers/admin-helpers.ts`（rules / values / scripts / replay / settings 通过 `/_bifrost/api` 直接 CRUD）
+- 运行环境与端口分配：`web/tests/ui/helpers/test-env.ts`、`global-setup.ts`、`global-teardown.ts`
+
+下方原计划列表仅作为历史参考（planned, not yet shipped as of 2026-06-17，并且已确定不会以下列文件名实现）：
 
 - `seed-traffic.sh`
   - 生成 HTTP / SSE / WebSocket / 错误请求 / 大 body 请求
@@ -677,8 +696,8 @@
 
 ## 文档结论
 
-结论很明确：
+刷新结论（2026-06-17）：
 
-- 现有浏览器 E2E 场景远不足以覆盖完整 Web Admin
-- 需要补一套按页面和链路拆分的 UI 场景集
-- 上面这份矩阵已经可以直接作为用例文档使用，并据此继续落 JSON 场景或 Playwright 用例
+- 完整 Web Admin UI E2E 已落地为 `web/tests/ui/` 下的 Playwright 套件，并接入 CI 的 `e2e-shell` / `e2e-macos-shell` / `e2e-windows-shell` 等 job
+- 本文上面的矩阵继续作为覆盖目标对照表使用，但具体场景命名、JSON 路径、辅助 shell 脚本均以 Playwright spec 与 `helpers/` 为准
+- 仍按 planned, not yet shipped as of 2026-06-17 看待的剩余项主要集中在：system/cli proxy 等 Host Integration 场景，以及双标签 push 同步专项
