@@ -244,6 +244,8 @@ const startIsolatedBackend = async () => {
       env: {
         ...process.env,
         BIFROST_DATA_DIR: dataDir,
+        BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
+        BIFROST_DISABLE_TRAY: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },

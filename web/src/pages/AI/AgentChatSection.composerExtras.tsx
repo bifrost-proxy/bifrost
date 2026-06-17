@@ -1,10 +1,8 @@
-import type { CSSProperties } from "react";
+import { useState, type CSSProperties } from "react";
 import { Button, Space, Tag, Typography } from "antd";
 import {
   CheckCircleOutlined,
-  DownOutlined,
   LoadingOutlined,
-  RightOutlined,
 } from "@ant-design/icons";
 import type { PlanStep } from "./AgentChatSection.helpers";
 
@@ -12,11 +10,9 @@ const { Text } = Typography;
 
 type AgentChatPlanProps = {
   plan: PlanStep[];
-  collapsed: boolean;
   styles: Record<string, CSSProperties>;
   successColor: string;
   primaryColor: string;
-  onToggle: () => void;
 };
 
 const srOnlyStyle: CSSProperties = {
@@ -41,85 +37,121 @@ function planStatusLabel(status: PlanStep["status"]): string {
   return "Pending";
 }
 
-function collapsedPlanStep(plan: PlanStep[]): { step: PlanStep; extraCount: number } {
+function activePlanStep(plan: PlanStep[]): {
+  step: PlanStep;
+  extraCount: number;
+  index: number;
+  completedCount: number;
+} {
+  const currentIndex = plan.findIndex((step) => step.status === "in_progress");
+  const nextIndex = plan.findIndex((step) => step.status !== "completed");
+  const index =
+    currentIndex >= 0 ? currentIndex : nextIndex >= 0 ? nextIndex : plan.length - 1;
   const current =
-    plan.find((step) => step.status === "in_progress") ??
+    plan[index] ??
     plan.find((step) => step.status !== "completed") ??
     plan[plan.length - 1];
   return {
     step: current,
     extraCount: Math.max(0, plan.length - 1),
+    index,
+    completedCount: plan.filter((step) => step.status === "completed").length,
   };
 }
 
 export function AgentChatPlan({
   plan,
-  collapsed,
   styles,
   successColor,
   primaryColor,
-  onToggle,
 }: AgentChatPlanProps) {
+  const [expanded, setExpanded] = useState(false);
+
   if (plan.length === 0) {
     return null;
   }
 
-  const collapsedStep = collapsed ? collapsedPlanStep(plan) : null;
+  const current = activePlanStep(plan);
+  const progressPercent =
+    plan.length > 0 ? Math.round((current.completedCount / plan.length) * 100) : 0;
+  const progressLabel =
+    current.completedCount === plan.length
+      ? `Done ${plan.length}/${plan.length}`
+      : `Step ${Math.min(current.index + 1, plan.length)}/${plan.length}`;
 
   return (
-    <div data-testid="agent-chat-plan" style={styles.planPanel}>
+    <div
+      data-testid="agent-chat-plan"
+      style={styles.planPanel}
+      onMouseEnter={() => setExpanded(true)}
+      onMouseLeave={() => setExpanded(false)}
+      onFocus={() => setExpanded(true)}
+      onBlur={() => setExpanded(false)}
+    >
       <button
         type="button"
         data-testid="agent-chat-plan-toggle"
-        style={styles.planHeader}
-        onClick={onToggle}
+        style={styles.planCapsule}
+        aria-expanded={expanded}
+        aria-label="Show task progress details"
       >
         <span style={styles.planHeaderLabel}>
-          {collapsedStep?.step.status === "in_progress" ? (
+          {current.step.status === "in_progress" ? (
             <LoadingOutlined
               spin
               aria-label="in progress"
               style={{ ...styles.planStatusIcon, color: primaryColor }}
             />
-          ) : collapsedStep?.step.status === "completed" ? (
+          ) : current.step.status === "completed" ? (
             <CheckCircleOutlined
               aria-label="completed"
               style={{ ...styles.planStatusIcon, color: successColor }}
             />
-          ) : collapsedStep ? (
+          ) : (
             <span aria-label="pending" style={styles.planPendingIcon} />
-          ) : (
-            <CheckCircleOutlined />
           )}
-          <Text strong style={{ fontSize: 13, lineHeight: "18px", flexShrink: 0 }}>
-            Plan
+          <Text strong style={styles.planProgressLabel}>
+            {progressLabel}
           </Text>
-          {collapsedStep ? (
-            <>
-              <Text
-                data-testid="agent-chat-plan-current"
-                title={collapsedStep.step.step}
-                style={styles.planCurrentStep}
-              >
-                {collapsedStep.step.step}
-              </Text>
-              {collapsedStep.extraCount > 0 ? (
-                <Tag
-                  data-testid="agent-chat-plan-more"
-                  style={styles.planCountTag}
-                >
-                  +{collapsedStep.extraCount}
-                </Tag>
-              ) : null}
-            </>
-          ) : (
-            <Tag style={styles.planCountTag}>{plan.length}</Tag>
-          )}
+          <span
+            data-testid="agent-chat-plan-progress"
+            aria-hidden="true"
+            style={styles.planProgressTrack}
+          >
+            <span
+              data-testid="agent-chat-plan-progress-fill"
+              style={{ ...styles.planProgressFill, width: `${progressPercent}%` }}
+            />
+          </span>
+          <Text
+            data-testid="agent-chat-plan-current"
+            title={current.step.step}
+            style={styles.planCurrentStep}
+          >
+            {current.step.step}
+          </Text>
+          {current.extraCount > 0 ? (
+            <Tag data-testid="agent-chat-plan-more" style={styles.planCountTag}>
+              +{current.extraCount}
+            </Tag>
+          ) : null}
         </span>
-        {collapsed ? <RightOutlined /> : <DownOutlined />}
       </button>
-      {!collapsed ? (
-        <div style={styles.planBody}>
+      {expanded ? (
+        <div
+          data-testid="agent-chat-plan-popover"
+          role="dialog"
+          aria-label="Task progress details"
+          style={styles.planPopover}
+        >
+          <div style={styles.planPopoverHeader}>
+            <Text strong style={{ fontSize: 13, lineHeight: "18px" }}>
+              Task progress
+            </Text>
+            <Text type="secondary" style={{ fontSize: 12, lineHeight: "18px" }}>
+              {current.completedCount}/{plan.length} completed
+            </Text>
+          </div>
           <div data-testid="agent-chat-plan-list" style={styles.planList}>
             {plan.map((step, index) => (
               <div
@@ -149,6 +181,9 @@ export function AgentChatPlan({
                 )}
                 <Text title={step.step} style={styles.planStepText}>
                   {step.step}
+                </Text>
+                <Text type="secondary" style={styles.planStatusText}>
+                  {planStatusLabel(step.status)}
                 </Text>
                 <span style={srOnlyStyle}>{planStatusLabel(step.status)}</span>
               </div>

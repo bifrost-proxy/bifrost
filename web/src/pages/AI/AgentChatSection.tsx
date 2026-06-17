@@ -268,7 +268,6 @@ export default function AgentChatSection() {
   const [composerMode, setComposerMode] = useState<AgentCollaborationMode | undefined>();
   const [activeCollaborationMode, setActiveCollaborationMode] = useState<AgentCollaborationMode | undefined>();
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
-  const [planCollapsed, setPlanCollapsed] = useState(true);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -2501,81 +2500,79 @@ export default function AgentChatSection() {
               <div style={styles.composerTrack} data-testid="agent-chat-composer-track">
                 <AgentChatTokenHud telemetry={telemetry} styles={styles} />
                 <Space direction="vertical" size={6} style={{ width: "100%" }}>
-              <AgentChatPlan
-                plan={telemetry.plan}
-                collapsed={planCollapsed}
-                styles={styles}
-                successColor={token.colorSuccess}
-                primaryColor={token.colorPrimary}
-                onToggle={() => setPlanCollapsed((value) => !value)}
-              />
-              <AgentChatPromptChips prompts={PROMPT_CHIPS} onSelect={setDraft} />
-              {queuedInputs.length > 0 ? (
-                <div style={styles.queuePanel} data-testid="agent-chat-queue-panel">
-                  <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      Queued
-                    </Text>
-                    {queuedInputs.map((item) => (
-                      <Row
-                        key={item.seq}
-                        align="middle"
-                        justify="space-between"
-                        gutter={8}
-                      >
-                        <Col flex="auto">
-                          <Text ellipsis>
-                            #{item.seq} {item.message}
-                          </Text>
-                        </Col>
-                        <Col>
-                          <Space size={4}>
-                            {guideSupported ? (
-                              <Button
-                                size="small"
-                                icon={<SendOutlined />}
-                                onClick={() => handleGuideQueued(item)}
-                              >
-                                Guide
-                              </Button>
-                            ) : null}
-                            <Button
-                              size="small"
-                              icon={<DeleteOutlined />}
-                              aria-label={`Remove queued message ${item.seq}`}
-                              onClick={() => handleRemoveQueued(item.seq)}
-                            />
-                          </Space>
-                        </Col>
-                      </Row>
-                    ))}
-                  </Space>
-                </div>
-              ) : null}
-              {running && draft.trim() ? (
-                <div style={styles.runningInputToolbar}>
-                  <Text type="secondary" style={{ fontSize: 12 }}>
-                    {guideSupported
-                      ? "Running input"
-                      : "This runner queues follow-up messages"}
-                  </Text>
-                  {guideSupported ? (
-                    <Segmented
-                      size="small"
-                      value={runningInputMode}
-                      onChange={(value) =>
-                        setRunningInputMode(value as "guide" | "queue")
-                      }
-                      options={[
-                        { label: "Guide", value: "guide" },
-                        { label: "Queue", value: "queue" },
-                      ]}
-                    />
-                  ) : (
-                    <Tag>Queue</Tag>
-                  )}
-                </div>
-              ) : null}
+                  <AgentChatPlan
+                    plan={telemetry.plan}
+                    styles={styles}
+                    successColor={token.colorSuccess}
+                    primaryColor={token.colorPrimary}
+                  />
+                  <AgentChatPromptChips prompts={PROMPT_CHIPS} onSelect={setDraft} />
+                  {queuedInputs.length > 0 ? (
+                    <div style={styles.queuePanel} data-testid="agent-chat-queue-panel">
+                      <Space direction="vertical" size={6} style={{ width: "100%" }}>
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          Queued
+                        </Text>
+                        {queuedInputs.map((item) => (
+                          <Row
+                            key={item.seq}
+                            align="middle"
+                            justify="space-between"
+                            gutter={8}
+                          >
+                            <Col flex="auto">
+                              <Text ellipsis>
+                                #{item.seq} {item.message}
+                              </Text>
+                            </Col>
+                            <Col>
+                              <Space size={4}>
+                                {guideSupported ? (
+                                  <Button
+                                    size="small"
+                                    icon={<SendOutlined />}
+                                    onClick={() => handleGuideQueued(item)}
+                                  >
+                                    Guide
+                                  </Button>
+                                ) : null}
+                                <Button
+                                  size="small"
+                                  icon={<DeleteOutlined />}
+                                  aria-label={`Remove queued message ${item.seq}`}
+                                  onClick={() => handleRemoveQueued(item.seq)}
+                                />
+                              </Space>
+                            </Col>
+                          </Row>
+                        ))}
+                      </Space>
+                    </div>
+                  ) : null}
+                  {running && draft.trim() ? (
+                    <div style={styles.runningInputToolbar}>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {guideSupported
+                          ? "Running input"
+                          : "This runner queues follow-up messages"}
+                      </Text>
+                      {guideSupported ? (
+                        <Segmented
+                          size="small"
+                          value={runningInputMode}
+                          onChange={(value) =>
+                            setRunningInputMode(value as "guide" | "queue")
+                          }
+                          options={[
+                            { label: "Guide", value: "guide" },
+                            { label: "Queue", value: "queue" },
+                          ]}
+                        />
+                      ) : (
+                        <Tag>Queue</Tag>
+                      )}
+                    </div>
+                  ) : null}
               {showSlashRunnerPanel ? (
                 <SlashRunnerPanel
                   commands={slashCommandOptions}
