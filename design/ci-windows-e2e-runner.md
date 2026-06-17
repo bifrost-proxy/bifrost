@@ -4,7 +4,7 @@
 
 Windows `E2E Runner` job 负责在 `x86_64-pc-windows-msvc` 和 `aarch64-pc-windows-msvc` hosted runner 上执行 `scripts/ci/run-e2e-runner.sh`，该入口最终通过 `cargo run -p bifrost-e2e` 编译并运行自定义 E2E runner。
 
-Windows `E2E Rules` job 负责执行 `e2e-tests/run_all_tests_parallel.sh` 的规则 fixture shard。该脚本在 Windows 上使用共享 mock servers，并把并行度强制降为 1，以避免多个 fixture 同时启动/停止 mock servers。
+Windows `E2E Rules` job 通过 `scripts/ci/run-e2e-rules.sh` 调起 `scripts/run_all_e2e.sh --ci --skip-shell --skip-runner --skip-ui --skip-build`，最终执行 `e2e-tests/run_all_tests_parallel.sh` 的规则 fixture shard。该脚本在 Windows 上使用共享 mock servers，并把并行度强制降为 1，以避免多个 fixture 同时启动/停止 mock servers。当前 rules matrix 只覆盖 `x86_64-pc-windows-msvc`（分 4 shard），runner matrix 同时覆盖 `x86_64-pc-windows-msvc` 与 `aarch64-pc-windows-msvc`。
 
 ## 实现逻辑
 
@@ -20,6 +20,7 @@ Windows `E2E Rules` job 负责执行 `e2e-tests/run_all_tests_parallel.sh` 的�
 
 - `.github/workflows/ci.yml`
 - `scripts/ci/run-e2e-runner.sh`
+- `scripts/ci/run-e2e-rules.sh`
 - `scripts/run_all_e2e.sh`
 - `e2e-tests/run_all_tests_parallel.sh`
 - `crates/bifrost-e2e`
