@@ -2,13 +2,13 @@
 
 ## Current Source Snapshot
 
-- Local source mirror: `vendor/qwen3_asr_rs`
+- Local source mirror: `vendor/qwen3_asr_rs` (planned, not yet shipped as of 2026-06-16; the `vendor/` tree is not present in this checkout)
 - Upstream repo: `https://github.com/second-state/qwen3_asr_rs`
-- Checked commit: `3fa673441682350b12da5c21429fea71ce212023`
-- MLX C submodule: `vendor/qwen3_asr_rs/mlx-c`
+- Last reviewed upstream commit: `3fa673441682350b12da5c21429fea71ce212023`
+- MLX C submodule: `vendor/qwen3_asr_rs/mlx-c` (planned, not yet shipped as of 2026-06-16)
 - MLX C commit: `a1290d221f92bd020af805b7d14207eee4ec973b`
 
-This mirror is for source review and patch development only. It should not be added to the Bifrost Cargo workspace until we have a separate decision to vendor and build the runtime from source.
+The mirror is intended for source review and patch development only. It should not be added to the Bifrost Cargo workspace until we have a separate decision to vendor and build the runtime from source. As of 2026-06-16 the Bifrost release wiring still points at the upstream repo: `bifrost-admin/src/handlers/asr.rs` and `bifrost-cli/src/commands/asr.rs` both define `const ASR_RELEASE_REPO: &str = "second-state/qwen3_asr_rs";`, so no fork has been swapped in yet.
 
 ## Findings
 
@@ -57,6 +57,8 @@ Use this model instead:
 This preserves our current operational boundary: Bifrost downloads and supervises a runtime binary; it does not become responsible for compiling MLX in every build.
 
 ## Runtime Patch Shape
+
+(planned, not yet shipped as of 2026-06-16) All runtime-side patches below describe work to be done inside a fork of `qwen3_asr_rs`. No fork checkout exists in this repo today and none of the FFI / CLI / lifecycle changes below have landed in the upstream runtime that Bifrost currently downloads.
 
 Patch the fork in small, upstreamable units.
 
@@ -207,7 +209,7 @@ Test coverage:
 - unit: `server_failure_breaker_switches_remaining_chunks_to_fork` covers the breaker state transition;
 - unit: `service_watchdog_warning_log_is_rate_limited` covers repeated watchdog warning throttling;
 - unit: `reuse_server_failure_threshold_forces_remaining_fork_isolation` exercises `run_chunk_with_strategy` against the simulated `test-error:` managed-server path;
-- E2E: `e2e-tests/tests/test_qwen3_asr_runtime_guards.sh` runs the targeted Rust assertions without downloading or starting Qwen3-ASR.
+- E2E: `e2e-tests/tests/test_qwen3_asr_runtime_guards.sh` (planned, not yet shipped as of 2026-06-16; the script is not present in `e2e-tests/tests/`) is intended to run the targeted Rust assertions without downloading or starting Qwen3-ASR.
 
 When an existing `partial_success` file is repaired through `POST /api/asr/tasks/<task_id>/files/<file_key>/retry-chunks`, recovered chunks must be merged back into every user-visible artifact:
 
@@ -242,26 +244,31 @@ to identify the file and strategy that was active.
 routing, scheduling, retry orchestration, runtime strategy selection, chunk transcription,
 audio normalization, persistence, and unit tests. The refactor keeps `handle_asr_tasks` and
 `ensure_scheduler_started` in the same public module path, but splits the implementation into
-small files under `crates/bifrost-admin/src/handlers/asr_jobs/`:
+small files under `crates/bifrost-admin/src/handlers/asr_jobs/`. As of 2026-06-16 the directory
+holds (verified via `bifrost remote file list`):
 
-- `state.rs`: persisted task/file/chunk structs, runtime strategy enum, schedule validation, and request/response types.
-- `api.rs`: HTTP routing and task-level response handlers.
+- `state.rs`: persisted task/file/chunk structs, `AsrRuntimeStrategy` enum (`ForkPerChunk`, `ReuseServer`, `ReusePerFile` (default), `Auto`, `Compare`), schedule validation, and request/response types.
+- `api.rs`: HTTP routing and task-level response handlers, including `POST /api/asr/tasks/{task_id}/retry-failed-chunks` and `POST /api/asr/tasks/{task_id}/files/{file_key}/retry-chunks`.
 - `retry.rs`: single-file failed chunk retry plus queued task-level bulk retry state.
 - `runner.rs`: scheduler startup, directory task execution, file processing, and per-file runtime lifecycle.
-- `chunk_runtime.rs`: chunk planning, runtime strategy dispatch, chunk metrics, server/fork execution, and timeline normalization.
+- `chunk_runtime.rs`: chunk planning, runtime strategy dispatch, `ServerRunnerState` (`server_failures`, `restart_required`, `force_fork_for_remaining`), chunk metrics, server/fork execution, and timeline normalization.
 - `memory_bisect.rs`: memory-limit hint merging and recursive chunk bisection.
 - `audio_processing.rs`: ffmpeg split/normalize helpers, abortable process execution, and WAV RMS inspection.
 - `store.rs`: task/file store persistence, summaries, discovery, output paths, and task run lock handling.
 - `tests.rs`: existing ASR jobs regression tests.
+- `diarization.rs`, `voiceprint.rs`, `external_import.rs`: companion features that were added after the initial split.
+- `daily_agent.rs`, `daily_agent_api.rs`, `daily_agent_config.rs`, `daily_agent_im.rs`, `daily_agent_prompt.rs`, `daily_agent_records.rs`, `daily_agent_sync.rs`, `daily_agent_workspace.rs`, `daily_agent_tests.rs`, plus the `daily_agent_template.md` / `daily_agent_tomorrow_todo_template.md` prompt templates: the daily-agent feature that now also lives inside the same `asr_jobs/` directory.
 
 This first split intentionally uses `include!` from the original module instead of changing every
 helper into cross-module `pub(super)` APIs. That preserves the pre-refactor visibility model and
-keeps the behavioral diff mechanical. A later cleanup can replace the includes with regular
-submodules once the internal boundaries have settled.
+keeps the behavioral diff mechanical. The current `asr_jobs.rs` still drives the layout via
+`include!("asr_jobs/state.rs");`, `include!("asr_jobs/chunk_runtime.rs");` and friends. A later
+cleanup can replace the includes with regular submodules once the internal boundaries have
+settled (still pending as of 2026-06-16).
 
-After the fork has release artifacts:
+After the fork has release artifacts (planned, not yet shipped as of 2026-06-16):
 
-1. Change the runtime release repo from `second-state/qwen3_asr_rs` to our fork, behind a single constant or config field.
+1. Change the runtime release repo from `second-state/qwen3_asr_rs` to our fork, behind a single constant or config field. Today both `ASR_RELEASE_REPO` constants in `bifrost-admin/src/handlers/asr.rs` and `bifrost-cli/src/commands/asr.rs` still hold `"second-state/qwen3_asr_rs"`.
 2. Start `asr-server` with conservative defaults:
    - 1.7B on 32GB/64GB: memory limit 18 GiB, cache limit 512 MiB, wired limit min(18 GiB, host memory * 0.8)
    - 1.7B on 16GB: host safety cap should reduce wired/memory limit to about 14.4 GiB
