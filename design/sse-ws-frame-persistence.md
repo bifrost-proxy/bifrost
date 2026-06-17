@@ -12,8 +12,8 @@
 
 ## 尚未适合作为“已实现事实”的部分
 
-- 文档里关于 SSE write-behind buffer 的 64KB/200ms 刷盘策略，当前不应直接视为仓库中的稳定实现结论。
-- “SSE 全面不再产生 frames” 也不应写成绝对事实；真实情况是 SSE 详情页主路径已经独立，但底层代码中仍能看到部分 SSE frame 记录逻辑。
+- 文档里关于 SSE write-behind buffer 的 64KB/200ms 刷盘策略 (planned, not yet shipped as of 2026-06-17)：当前实际配置项为 `sse_stream_flush_bytes`（默认 256KB）与 `sse_stream_flush_interval_ms`（默认 1000ms），见 `crates/bifrost-admin/src/handlers/config.rs`。
+- “SSE 全面不再产生 frames” 也不应写成绝对事实；真实情况是 SSE 详情页主路径已经独立（`/api/traffic/{id}/sse/stream`），但底层代码中仍能看到部分 SSE frame 记录逻辑。
 
 ## 当前更准确的描述
 
