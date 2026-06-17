@@ -89,7 +89,7 @@ Weixin 没有 Feishu CardKit 进度卡能力，因此默认 Agent chat 进入真
 - `decrypt_aes_128_ecb_accepts_base64_raw_key`：验证 AES-128-ECB 解密。
 - `send_image_uploads_original_bytes_to_cdn_and_sends_image_item`：验证出站图片原始字节被加密上传到 CDN，并以 `image_item.media` 独立发送。
 - `send_image_returns_config_error_for_unknown_image_key`：验证未知图片 key 不会发送空消息。
-- `send_text_retries_failed_long_message_as_split_messages`：验证长文本首次 `sendmessage` 失败后，Weixin provider 会按顺序补发带 `[i/N]` 前缀的小文本，并且拼回后等于原文。
+- `im_long_reply_delivery_send_text_retries_failed_long_message_as_split_messages`：验证长文本首次 `sendmessage` 失败后，Weixin provider 会按顺序补发带 `[i/N]` 前缀的小文本，并且拼回后等于原文。
 - `split_text_for_retry_preserves_multibyte_content`：验证中文、多字节字符和换行在切分后不丢失、不破坏字符边界。
 - `agent_reply_target_uses_weixin_sender_instead_of_owner`：验证回复目标使用微信发送方。
 - `im_event_loop_forwards_image_attachment_to_agent_chat`：验证 IM 图片传入 Agent 多模态请求。
