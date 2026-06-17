@@ -1,16 +1,17 @@
 # Bifrost Memory 系统现状分析
 
-> 生成时间：2026-05-02 16:40:37 CST
-> 分支 / commit：feat/agent / d234548d
+> 生成时间：2026-05-02 16:40:37 CST（上次全量分析）
+> 刷新时间：2026-06-16（针对当前实现重新对齐）
+> 分支 / commit：codex/design-doc-refresh
 > 分析范围：整仓库
 
 ## 0. TL;DR
 
-- Bifrost 当前没有完整的“长期记忆 / 自动化记忆 / 语义召回”系统；已落地的是 `crates/agent` 中的会话历史、JSONL 持久化和上下文压缩，证据见 `crates/agent/src/lib.rs:L1-L13`、`crates/agent/src/persistence.rs:L1-L4`、`crates/agent/src/compact.rs:L1-L13`。
-- `memories` 配置结构、Admin PATCH 透传和 WebUI 表单已经存在，但没有被 `run_turn`、prompt 构造、持久化扫描或检索链路消费，证据见 `crates/agent/src/config.rs:L262-L295`、`crates/bifrost-admin/src/handlers/im_gateway.rs:L2253-L2305`、`web/src/pages/Settings/tabs/AgentTab.tsx:L829-L1059`。
-- 自动写入当前只覆盖会话事件流：`session_start`、`user_message`、`assistant_message`、`tool_call`、`tool_result` 等写入 JSONL；没有“LLM 自动总结 -> 写入长期记忆”的独立存储链路，证据见 `crates/agent/src/persistence.rs:L18-L38`、`crates/agent/src/session.rs:L657-L665`、`crates/agent/src/session.rs:L879-L992`。
-- 检索/召回当前是会话级历史重放和列表扫描，不存在关键词索引、全文索引、向量库、embedding 或 topK 召回策略；未实现判断基于 `rg -n -i "recall|retrieve|retrieval|top_k|embedding|vector|semantic|episodic|knowledge"` 等搜索只命中压缩阈值、远端密钥和无关文档。
-- 生命周期管理已有 active session 清空、JSONL history 列表/读取/删除、90 天历史清理；但这些都是 session/history 级别，不是可编辑的长期记忆 CRUD，证据见 `crates/bifrost-admin/src/handlers/im_gateway.rs:L1824-L2036`、`crates/agent/src/persistence.rs:L470-L512`。
+- 自上次分析以来，仓库新增了**文件式长期记忆子系统** `crates/agent/src/memory/`（mod / layout / read_path / extract / consolidation / write / search / state_db / mcp_tools / pollution / retention / sub_agent / rollout_tracker / telemetry / usage_tracking / citation_consumer 等）。存储介质是 `$agent_home/memory/` 下的 `MEMORY.md`、`memory_summary.md`、`raw_memories.md`、`rollout_summaries/`、`skills/`、`extensions/`，由 `ensure_memory_layout()` 维护，证据见 `crates/agent/src/memory/layout.rs:L9-L31`、`crates/agent/src/memory/mod.rs:L1-L51`。
+- `MemoriesConfig` 现已被实际消费：`use_memories` / `generate_memories` 由 `crates/agent/src/memory/read_path.rs:L17-L24` 解析，`extract_model` / `consolidation_model` / `max_*` 在 `crates/agent/src/memory/extract.rs:L173-L295`、`crates/agent/src/memory/consolidation.rs:L33-L381`、`crates/agent/src/memory/retention.rs:L25-L200` 被使用，配置定义位于 `crates/agent/src/config.rs:L403-L436`，Admin PATCH 透传见 `crates/bifrost-admin/src/handlers/im_gateway.rs` 的 `memories` 字段路径。
+- 自动写入除原有会话事件流外，新增 `compaction` 事件持久化（`ConversationRecorder::record_compaction()`，证据 `crates/agent/src/persistence.rs:L298-L307`、`crates/agent/src/session/turn_loop.rs:L3284-L3310`）以及 phase-1 抽取 + phase-2 整合两阶段后台流程（`memory::auto_extract_after_turn_with_pollution_check_blocking()`、`memory::consolidation`），由 `crates/agent/src/session/turn_loop.rs:L2394` 在每轮 turn 结束后触发。
+- 召回采用**读路径开发者消息注入**：`memory::recall_system_message()` 在 `crates/agent/src/session/turn_loop.rs:L1725` 被调用，把 `memory_summary.md` 截断后通过 `READ_PATH_TEMPLATE` 拼成 developer message，并通过 MCP 工具 `memory/list` / `memory/read` / `memory/search`（`crates/agent/src/memory/mcp_tools.rs`）让模型按需读取条目；仍未引入 embedding / 向量库 / topK rank 召回，关键词检索见 `crates/agent/src/memory/search.rs`。
+- 用户显式入口已扩展：`/remember <text>` 与 `/forget <id|last>` 注册在 `crates/agent/src/slash.rs:L78-L194`；MCP 工具 `memory/*` 暴露 list / read / search 给模型；`HistoryConfig.max_bytes` 现已通过 `ConversationRecorder::enforce_max_bytes()` 强制裁剪（`crates/agent/src/persistence.rs:L426-L450`）。原有 session/history CRUD（active session 清空、JSONL list/read/delete、90 天清理）仍在 `crates/bifrost-admin/src/handlers/im_gateway.rs` 的 `/agent/sessions*` 路由。
 
 ## 1. 架构总览
 
@@ -22,12 +23,13 @@
 | Agent 会话 | `crates/agent/src/session.rs` | 保存单 session 的 `history`、token、压缩状态、recorder，并执行 turn loop | `crates/agent/src/session.rs:L32-L69`、`crates/agent/src/session.rs:L425-L433` |
 | 压缩 | `crates/agent/src/compact.rs` | 对长上下文做模型总结，替换 session history | `crates/agent/src/compact.rs:L80-L99`、`crates/agent/src/compact.rs:L111-L125` |
 | 持久化 | `crates/agent/src/persistence.rs` | 将会话事件写入 `$agent_home/sessions/YYYY/MM/DD/session-*.jsonl`，并支持加载/扫描/清理 | `crates/agent/src/persistence.rs:L1-L4`、`crates/agent/src/persistence.rs:L44-L84` |
-| 配置 | `crates/agent/src/config.rs` | 定义 `MemoriesConfig`、history 配置和 agent home 目录 | `crates/agent/src/config.rs:L119-L131`、`crates/agent/src/config.rs:L262-L295`、`crates/agent/src/config.rs:L826-L845` |
-| Admin API | `crates/bifrost-admin/src/handlers/im_gateway.rs` | Feishu / API 入口、session history API、agent config PATCH | `crates/bifrost-admin/src/handlers/im_gateway.rs:L517-L533`、`crates/bifrost-admin/src/handlers/im_gateway.rs:L1824-L2036`、`crates/bifrost-admin/src/handlers/im_gateway.rs:L2253-L2305` |
-| WebUI | `web/src/pages/Settings/tabs/AgentTab.tsx`、`web/src/pages/Settings/tabs/agent/types.ts` | Agent 设置页展示 Memory 配置、session/history 视图类型 | `web/src/pages/Settings/tabs/AgentTab.tsx:L829-L1059`、`web/src/pages/Settings/tabs/agent/types.ts:L54-L65` |
-| 测试 | `crates/agent/src/persistence.rs`、`crates/agent/src/compact.rs`、`crates/agent/src/history.rs`、`crates/bifrost-e2e/src/tests/im_gateway_agent.rs` | 单元测试和 E2E 覆盖 history / persistence / compaction 合法性 | `crates/agent/src/persistence.rs:L584-L915`、`crates/agent/src/compact.rs:L385-L492`、`crates/bifrost-e2e/src/tests/im_gateway_agent.rs:L371-L420` |
+| 配置 | `crates/agent/src/config.rs` | 定义 `MemoriesConfig`、history 配置和 agent home 目录 | `crates/agent/src/config.rs:L403-L436`、`crates/agent/src/config.rs:L595`（`get_memories_config`）、`crates/agent/src/config.rs:L1013-L1027` |
+| 长期记忆 | `crates/agent/src/memory/` | 文件式长期记忆：layout / read-path / extract / consolidation / write / search / mcp_tools | `crates/agent/src/memory/mod.rs:L1-L51`、`crates/agent/src/memory/layout.rs:L9-L31`、`crates/agent/src/memory/read_path.rs:L1-L75`、`crates/agent/src/memory/extract.rs:L30-L399`、`crates/agent/src/memory/consolidation.rs:L33-L381`、`crates/agent/src/memory/mcp_tools.rs` |
+| Admin API | `crates/bifrost-admin/src/handlers/im_gateway.rs` | Feishu / API 入口、session history API、agent config PATCH（含 `memories`） | `crates/bifrost-admin/src/handlers/im_gateway.rs`（事件入口、`/agent/sessions*` 与 `memories` PATCH 段，行号随仓库演进） |
+| WebUI | `web/src/pages/Settings/tabs/AgentTab.tsx`、`web/src/pages/Settings/tabs/agent/MemoriesSection.tsx` | Agent 设置页 Memories 子区域（`activeSection === "memories"`），消费 `config.memories` 字段 | `web/src/pages/Settings/tabs/AgentTab.tsx:L55`、`web/src/pages/Settings/tabs/AgentTab.tsx:L1178-L1240` |
+| 测试 | `crates/agent/src/persistence.rs`、`crates/agent/src/compact.rs` / `compact_tests.rs`、`crates/agent/src/history.rs`、`crates/agent/src/memory/tests.rs`、`crates/agent/src/session/tests.rs`、`crates/bifrost-e2e/src/tests/im_gateway_agent.rs` | 单元 + E2E 覆盖 history / persistence / compaction / memory recall / `/remember` `/forget` / compaction 事件回归 | `crates/agent/src/persistence.rs::record_compaction_event_round_trip`、`crates/agent/src/session/tests.rs::test_record_compaction_event_includes_emergency_and_total_tokens`、`crates/agent/src/memory/tests.rs` |
 
-结论：Memory 相关能力不在独立 `memory` crate 中；实际代码集中在 `crates/agent`，由 `bifrost-admin` 的 IM Gateway 入口消费。`bifrost-cli config memory` 是进程内存诊断，不是记忆系统，证据见 `crates/bifrost-cli/src/cli.rs:L1346-L1353`、`crates/bifrost-cli/src/commands/config/mod.rs:L175-L205`。
+结论：Memory 相关能力**已经**集中到 `crates/agent/src/memory/` 子模块（文件式存储 + read-path 注入 + MCP 工具 + phase-1/phase-2 抽取整合），不在独立 crate 中；由 `crates/agent/src/session/turn_loop.rs` 消费，IM Gateway 仅负责入口与 PATCH 透传。`bifrost-cli config memory` 仍是进程内存诊断（`crates/bifrost-cli/src/cli.rs:L2161-L2162`），不是长期记忆 CLI。
 
 ### 1.2 当前数据流
 
@@ -38,34 +40,42 @@ Feishu WebSocket / POST /agent/chat
 crates/bifrost-admin/src/handlers/im_gateway.rs
   - process_agent_chat / /agent/chat
   - 创建或复用 AgentSession
-  - 可选创建 ConversationRecorder
+  - 可选创建 ConversationRecorder（含 max_bytes）
         |
         v
-crates/agent/src/session.rs::run_turn_with_mcp
-  - 内置命令：/clear /undo /compact /status /resume
-  - pre-turn / mid-turn compact_session
-  - build_messages(system prompt + session.history)
-  - model chat completion + tool loop
-  - recorder 写 user/tool/assistant 事件
+crates/agent/src/session/turn_loop.rs::run_turn_with_mcp
+  - 内置命令：/clear /undo /compact /status /resume /remember /forget
+  - pre-turn / mid-turn compact_session（含 record_compaction_event）
+  - recall_system_message() 注入 memory_summary developer message
+  - build_messages(system prompt + memory developer message + session.history)
+  - model chat completion + tool loop（含 memory/list, memory/read, memory/search MCP 工具）
+  - recorder 写 user/tool/assistant/compaction 事件
+  - turn 结尾 auto_extract_after_turn_with_pollution_check_blocking() 异步 phase-1 抽取
         |
+        +--> crates/agent/src/memory/
+        |      extract.rs   -> raw_memories.md（phase-1）
+        |      consolidation.rs -> MEMORY.md / memory_summary.md（phase-2）
+        |      write.rs       -> remember_explicit / replace_memory / forget_memory
+        |      retention.rs   -> max_unused_days / max_rollout_age_days 清理
         v
 crates/agent/src/persistence.rs
   - JSONL: agent_home/sessions/YYYY/MM/DD/session-{session_key}-{timestamp}.jsonl
-  - load_conversation / scan_session_summary / cleanup_expired_sessions
+  - load_conversation / scan_session_summary / cleanup_expired_sessions / enforce_max_bytes
         |
         v
 Admin/WebUI:
-  - /agent/sessions
-  - /agent/sessions/all
-  - /agent/sessions/history
-  - /agent/sessions/history/{path}
+  - /agent/sessions, /agent/sessions/all
+  - /agent/sessions/history, /agent/sessions/history/{path}
 ```
 
-证据：IM 事件入口和默认 Agent chat 路径见 `crates/bifrost-admin/src/handlers/im_gateway.rs:L703-L731`；内部测试 API 路径见 `crates/bifrost-admin/src/handlers/im_gateway.rs:L2062-L2135`；turn loop 步骤注释见 `crates/agent/src/session.rs:L425-L433`。
+证据：IM 事件入口和默认 Agent chat 路径仍在 `crates/bifrost-admin/src/handlers/im_gateway.rs`；turn loop 步骤注释见 `crates/agent/src/session.rs:L1-L12`，`recall_system_message()` 调用点见 `crates/agent/src/session/turn_loop.rs:L1725`，phase-1 抽取触发见 `crates/agent/src/session/turn_loop.rs:L2394`，compaction event 持久化见 `crates/agent/src/session/turn_loop.rs:L3284-L3310`。
 
 ### 1.3 存储介质与 schema 摘要
 
-当前“记忆相邻”的唯一持久存储是 JSONL 会话事件文件，不是 SQLite/Postgres/向量库。路径模板写在代码注释和构造函数中：
+当前持久存储分两层：
+
+1. **会话事件 JSONL**（短期 / 重放）——路径模板写在代码注释和构造函数中：
+2. **长期记忆文件树**（`$agent_home/memory/`，由 `memory::layout::ensure_memory_layout()` 维护）：`MEMORY.md`（已巩固的长期记忆）、`memory_summary.md`（注入到 developer message 的精简摘要）、`raw_memories.md`（phase-1 抽取产出的待巩固原料）、`rollout_summaries/`（按 rollout 切分的对话摘要）、`skills/`（含 `_memory` 子目录）、`extensions/`。仍**没有** SQLite/Postgres/向量库（`state_db.rs` 仅是租约/心跳的进程间协调，不是 memory 内容存储）。
 
 ```rust
 // crates/agent/src/persistence.rs:L1-L4
@@ -99,7 +109,9 @@ pub mod event_types {
 }
 ```
 
-注意：`event_types::COMPACTION` 已声明，`scan_session_summary()` 也会识别 `compaction` 事件（`crates/agent/src/persistence.rs:L445-L451`），但 `compact_session()` 本身没有写 recorder，`run_turn_with_mcp()` 调 compact 后也没有记录 compaction 事件，证据见 `crates/agent/src/compact.rs:L118-L125`、`crates/agent/src/compact.rs:L218-L243`、`crates/agent/src/session.rs:L526-L546`、`crates/agent/src/session.rs:L1023-L1054`。
+事件类型清单较旧版本扩展：除原有 user/assistant/tool_call/tool_result/session_start/session_end/mcp_tools_loaded/skills_loaded/compaction 外，新增 `ASSISTANT_DELTA`、`TITLE_UPDATED`、`GOAL_UPDATED` / `GOAL_CLEARED`、`PLAN_UPDATED` / `PLAN_CLEARED`、`PROPOSED_PLAN`、`RUN_STATE_CHANGED`，证据见 `crates/agent/src/persistence.rs:L29-L48`。
+
+注意（**已修复**）：`compact_session()` 之外，turn loop 现在通过 `record_compaction_event()` 把每次压缩（pre-turn / mid-turn / 手动 `/compact`）都写入 JSONL，证据见 `crates/agent/src/session/turn_loop.rs:L3284-L3310`、`crates/agent/src/session/tests.rs::test_record_compaction_event_includes_emergency_and_total_tokens`、`crates/agent/src/persistence.rs:L298-L307`。`scan_session_summary()` 识别 compaction 事件的逻辑也保留下来。
 
 ## 2. 数据模型
 
@@ -151,10 +163,10 @@ pub struct ChatMessage {
 
 ### 2.3 配置模型：`MemoriesConfig`
 
-`MemoriesConfig` 是 memory 配置，但当前只存配置，不形成数据模型实体：
+`MemoriesConfig` 是 memory 配置；它**已经被实际链路消费**，不再只是占位（参见 §0、§3、§4 的引用点）：
 
 ```rust
-// crates/agent/src/config.rs:L262-L295
+// crates/agent/src/config.rs:L403-L436
 pub struct MemoriesConfig {
     pub disable_on_external_context: Option<bool>,
     pub generate_memories: Option<bool>,
@@ -169,17 +181,19 @@ pub struct MemoriesConfig {
 }
 ```
 
-同名 TS 类型见 `web/src/pages/Settings/tabs/agent/types.ts:L54-L65`。这些字段暗示计划支持 raw memories、rollout 候选、extract/consolidation model、外部上下文污染标记等，但没有发现 `MemoryRecord`、`MemoryStore`、`memory_mode` 运行时结构。对应搜索证据：`rg -n "struct .*Memory|enum .*Memory|trait .*Memory|fn .*memory|memory_mode|MemoryStore|MemoryRecord|MemoryEntry|MemoryManager|MemoryRepository" crates/agent crates/bifrost-admin crates/bifrost-cli web/src design docs human_tests README.md` 只命中资源内存诊断和 `MemoriesConfig` 注释。
+同名 TS 类型见 `web/src/pages/Settings/tabs/agent/types.ts`。这些字段对应的运行时实体已在 `crates/agent/src/memory/types.rs` 落地：`MemoryFileEntry`、`MemoryFileStats`、`Phase1Status`、`RolloutRecord`、`SearchQuery` / `SearchResult` / `SearchResponse`、`SearchMatchMode`、`MemoryTool` / `MemoryToolResult`、`ThreadMemoryMode`（`crates/agent/src/memory/pollution.rs`）等。不再使用关系/向量数据库式 `MemoryRecord`：记忆条目以 Markdown 文本块形式存放在 `MEMORY.md` / `raw_memories.md` / `rollout_summaries/*.md` 中，由 `memory::parse` 与 `memory::write` 模块按段处理。
 
 ### 2.4 分层结构
 
-已实现的分层只有：
+现已落地的分层：
 
-- active session in-memory history：`DashMap<String, AgentSession>`，证据 `crates/agent/src/session.rs:L270-L281`。
-- persisted session JSONL archive：`list_conversations()` 扫描 `data_dir/sessions`，证据 `crates/agent/src/persistence.rs:L470-L493`。
-- compaction summary：在 history 中插入一条用户消息形式的 summary，不是独立 memory 表，证据 `crates/agent/src/compact.rs:L196-L204`。
+- **active session in-memory history**：`DashMap<String, AgentSession>`（`AgentSessionManager`，`crates/agent/src/session/session_store.rs:L17-L27`）。
+- **persisted session JSONL archive**：`list_conversations()` 扫描 `data_dir/sessions`，证据 `crates/agent/src/persistence.rs`。
+- **compaction summary**：作为一条用户消息形式的 summary 写回 `session.history`（`crates/agent/src/compact.rs`），同时落 `compaction` JSONL 事件。
+- **长期记忆（文件式）**：`$agent_home/memory/`，分为 raw（`raw_memories.md`）→ consolidated（`MEMORY.md`）→ summary（`memory_summary.md`），以及按 rollout 切分的对话摘要 `rollout_summaries/*.md`。phase-1 抽取产出 raw，phase-2 整合写入 MEMORY/summary，并由 `retention.rs` 按 `max_unused_days` / `max_rollout_age_days` 等阈值修剪。
+- **污染（pollution）控制**：`ThreadMemoryMode` + `PollutionDetector`（`crates/agent/src/memory/pollution.rs`）决定本轮是否允许写入 long-term memory（`disable_on_external_context` 的实际开关点）。
 
-未实现短期/长期、episodic/semantic、working memory/archive 等专门层。搜索证据：`rg -n -i "episodic|semantic|long[-_ ]?term|short[-_ ]?term|working memory|archive|knowledge"` 仅命中无关 remote long-term key、semantic highlight 和文档文本，没有命中 `crates/agent` 中的专用模型。
+仍未引入 episodic vs semantic / working vs archive 的多层向量记忆模型；当前是 raw → consolidated → summary 的**三档文件层级**。
 
 ## 3. 自动化写入链路
 
@@ -197,7 +211,7 @@ pub struct MemoriesConfig {
 | 自动压缩 | pre-turn / mid-turn token 超阈值 | `compact::compact_session()` | session.history，非 JSONL | `crates/agent/src/session.rs:L620-L650`、`crates/agent/src/session.rs:L1023-L1054` |
 | 手动压缩 | 用户发送 `/compact` | `compact::compact_session()` | session.history，返回中文结果 | `crates/agent/src/session.rs:L512-L561` |
 
-### 3.2 压缩链路：有 LLM 总结，但不是长期记忆
+### 3.2 压缩链路与长期记忆抽取
 
 `compact_session()` 的 prompt 明确是“CONTEXT CHECKPOINT COMPACTION”，用于 handoff summary；它调用同一个 `AgentClient::chat_completion()`，然后重建 session history：
 
@@ -255,7 +269,7 @@ session.compaction_count += 1;
 session.history_version = session.history_version.saturating_add(1);
 ```
 
-结论：这是上下文压缩，不是“自动化记忆”写库。未发现把 summary 写入 `memories`、向量库或独立 facts 表的代码。搜索证据：`rg -n -i "raw_memor|rollout|consolidat|extract_model|use_memories|generate_memories|memory_mode|embedding|vector|semantic|episodic|recall"` 只命中配置/UI 字段与无关内容；没有 `compact_session()` 调用 `ConversationRecorder::record` 或 memory store。
+结论：`compact_session()` 本身仍只做上下文压缩。但**自动化记忆写库已经独立实现**：每轮 turn 结束后 `crates/agent/src/session/turn_loop.rs:L2394` 调用 `memory::auto_extract_after_turn_with_pollution_check_blocking()`，由 `extract.rs` 用 `extract_model` 抽取候选事实写入 `raw_memories.md`；当 raw 条目数达到 `max_raw_memories_for_consolidation` 或满足 phase-2 条件时由 `consolidation.rs` 用 `consolidation_model` 整合到 `MEMORY.md` / `memory_summary.md`，超时分别由 `MEMORY_EXTRACT_TIMEOUT_SECS` / `MEMORY_CONSOLIDATION_TIMEOUT_SECS` 控制（`crates/agent/src/memory/constants.rs`）。`PollutionDetector` 决定当前 thread 是否允许写入。
 
 ### 3.3 去重 / 合并 / 覆盖 / 衰减 / TTL / pin
 
@@ -266,7 +280,7 @@ session.history_version = session.history_version.saturating_add(1);
 - session 文件名 sanitize，避免路径非法字符，证据 `crates/agent/src/persistence.rs:L566-L577`。
 - session listing dedup active/history：`/agent/sessions/all` 用 active keys 跳过重复，证据 `crates/bifrost-admin/src/handlers/im_gateway.rs:L1844-L1905`。
 
-未实现长期 memory 级去重、合并、覆盖、衰减、pin。搜索证据：`rg -n -i "dedup|dedupe|merge|expire|cleanup|retention|pin|ttl"` 在 agent 相关文件只命中 skills 去重、config merge、session TTL、history cleanup；没有 memory record 级策略。
+长期 memory 级策略**部分落地**：`memory::consolidation` 在 phase-2 用模型做合并 / 改写（替代单条 dedupe），`retention.rs::prune_memory_artifacts` 按 `max_unused_days`、`max_rollout_age_days`、`max_rollouts_per_startup`、`min_rollout_idle_hours` 做衰减式清理；`prune_stage1_outputs_for_retention` 控制 phase-1 阶段产物保留。仍未实现显式 pin（保护条目不被覆盖）与 per-record TTL；当前去重靠模型 prompt 与 phase-2 整合提示词约束，证据 `crates/agent/src/memory/consolidation.rs:L33-L381`、`crates/agent/src/memory/retention.rs:L25-L200`。
 
 ### 3.4 敏感信息过滤 / 脱敏
 
@@ -280,29 +294,36 @@ session.history_version = session.history_version.saturating_add(1);
 
 ### 3.5 用户显式“记住这件事”入口
 
-未发现 `bifrost memory ...`、HTTP `/memory`、chat `/remember` 或 slash command。已存在的用户显式入口是 `/compact`（压缩）、`/resume`（恢复 JSONL history）、`/clear`/`/reset`、`/undo`、`/status`，证据 `crates/agent/src/session.rs:L474-L618`。搜索证据：`rg -n -i "bifrost memory|memory (add|set|delete|remove|list|search|recall|remember)|remember this|记住|召回"` 未命中真实 memory CRUD；命中的 `SKILL.md:796` 是“读取 + 记住 sha”的人工操作说明，不是产品入口。
+现已落地以下入口：
+
+- chat slash 命令 `/remember <text>` → `BuiltinCommand::Remember` → `memory::remember_explicit()`，把一条用户口述事实写入长期记忆；
+- chat slash 命令 `/forget <id|last>` → `BuiltinCommand::Forget` → `memory::forget_memory()`，按 id 或 `last` 移除最近一条；
+- 模型自助通过 MCP 工具 `memory/list`、`memory/read`、`memory/search`（`crates/agent/src/memory/mcp_tools.rs`）按需查询。
+
+证据：`crates/agent/src/slash.rs:L78-L194`、`crates/agent/src/memory/write.rs:L133-L381`。仍**没有**面向最终用户的 `bifrost memory` 顶层 CLI 或独立 HTTP `/memory` 路由（planned, not yet shipped as of 2026-06-16）；既有的 `bifrost-cli config memory` 是进程内存诊断，与长期记忆无关。
 
 ## 4. 检索与注入
 
 ### 4.1 检索方式
 
-已实现的“检索”只有：
+已实现的检索分两层：
 
-- active session detail：从 `DashMap` 中取单个 session，证据 `crates/agent/src/session.rs:L348-L378`。
-- JSONL 文件列表：递归扫 `data_dir/sessions/**/*.jsonl`，证据 `crates/agent/src/persistence.rs:L470-L493`、`crates/agent/src/persistence.rs:L514-L529`。
-- JSONL replay：逐行解析事件，恢复成 `ChatMessage`，证据 `crates/agent/src/persistence.rs:L246-L345`。
-- summary quick scan：逐行扫描事件提取 token、turn、source、work_dir，证据 `crates/agent/src/persistence.rs:L371-L468`。
+**会话级（已有）**
 
-没有关键词索引、正则搜索、全文索引、embedding、向量库、混合检索或 topK 召回。搜索证据：
+- active session detail：从 `AgentSessionManager` `DashMap` 取单个 session。
+- JSONL 文件列表 / replay / summary quick scan，见 `crates/agent/src/persistence.rs`。
 
-```text
-命令：rg -n -i "recall|retrieve|retrieval|top_k|topK|threshold|similarity|embedding|vector|semantic|episodic|knowledge|long[-_ ]term|short[-_ ]term|working memory|archive" crates/agent crates/bifrost-admin crates/bifrost-cli web/src design docs human_tests README.md
-关键命中：crates/agent/src/config.rs:L65 auto compact threshold；crates/agent/src/compact.rs:L266-L273 compact threshold；web/src/components/BifrostEditor/index.ts semanticHighlighting；remote_invoke long_term_pubkey。未命中 memory retrieval/embedding/vector store。
-```
+**长期记忆级（新增）**
+
+- 文件式罗列：`memory::list_visible_memories()`（`crates/agent/src/memory/write.rs:L336`）。
+- 关键词搜索：`memory::search_memory_files()` + `crates/agent/src/memory/search.rs`，支持 `SearchMatchMode` / `SearchQuery`（`crates/agent/src/memory/types.rs:L178-L236`）。
+- MCP 工具 `memory/list`、`memory/read`、`memory/search` 让模型按需调用（`crates/agent/src/memory/mcp_tools.rs`）。
+
+仍**未实现** embedding / 向量库 / 语义相似度 topK 召回；planned, not yet shipped as of 2026-06-16。
 
 ### 4.2 召回策略
 
-当前 prompt 注入策略是：每次模型请求调用 `build_messages(system_prompt)`，把 system prompt 和完整 sanitized history 拼成 Chat Completions messages；历史过长时通过 token/context budget 触发 compaction，只有 provider context-window overflow fallback 才会删除最老消息重试。
+当前 prompt 注入策略：每次模型请求调用 `build_messages(system_prompt, memory_message)`：先 prepend system prompt，再注入 `memory::recall_system_message()` 返回的 developer message（含 `memory_summary.md` 摘要和读路径说明），最后接 `session.history`。历史过长时通过 token/context budget 触发 compaction；provider context-window overflow fallback 才会删除最老消息重试。
 
 证据：
 
@@ -326,7 +347,7 @@ fn build_messages(
 }
 ```
 
-没有按用户/仓库/设备 scope 的 memory recall 过滤。已有隔离键是 `session_key` 和 `work_dir/source` 元数据，证据 `crates/agent/src/session.rs:L37-L64`、`crates/agent/src/persistence.rs:L371-L385`。
+长期记忆 scope 当前以 `$agent_home/memory/` 全局共享为主，`AgentSession` 新增 `user_id`（`crates/agent/src/session.rs`）字段以承载 per-user 长期记忆 scope，但 read-path / write-path 当前并未基于 `user_id` 切分文件目录——多用户隔离仍属 planned, not yet shipped as of 2026-06-16。已有隔离键仍是 `session_key`、`work_dir`、`source`。
 
 ### 4.3 注入形式
 
@@ -336,7 +357,7 @@ fn build_messages(
 - history：`session.history` 进入 `build_messages()`，证据 `crates/agent/src/session.rs:L694-L705`。
 - compaction summary：作为 `ChatMessage::user(...)` 放到 history 第一条，证据 `crates/agent/src/compact.rs:L196-L204`。
 
-`MemoriesConfig.use_memories` 的 UI 文案是“Inject memory usage instructions into developer prompts”，证据 `web/src/pages/Settings/tabs/AgentTab.tsx:L867-L884`；但源码中没有 `get_memories_config()` 的调用点。搜索证据：`rg -n "get_memories_config|use_memories|generate_memories|disable_on_external_context" crates/agent crates/bifrost-admin web/src` 仅命中配置定义、Admin PATCH 和 WebUI 表单。
+`MemoriesConfig.use_memories` 的 UI 文案是“Inject memory usage instructions into developer prompts”，对应 `web/src/pages/Settings/tabs/AgentTab.tsx:L1178-L1240`。`get_memories_config()` 现在在多个位置被消费：`crates/agent/src/memory/read_path.rs:L17-L24`（开关）、`crates/agent/src/memory/extract.rs:L194`、`crates/agent/src/memory/consolidation.rs:L351-L381`、`crates/agent/src/memory/retention.rs:L27/L191`。
 
 ## 5. 生命周期与管理
 
@@ -352,15 +373,15 @@ fn build_messages(
 | 查看 JSONL history 内容 | `GET /agent/sessions/history/{encoded_path}` | `crates/bifrost-admin/src/handlers/im_gateway.rs:L1992-L2024` |
 | 删除 JSONL history 文件 | `DELETE /agent/sessions/history/{encoded_path}` | `crates/bifrost-admin/src/handlers/im_gateway.rs:L2025-L2035` |
 | 恢复最近 JSONL 到当前 session | chat 命令 `/resume` | `crates/agent/src/session.rs:L587-L618` |
-| 长期记忆 CRUD | 未实现 | 搜索 `memory add/list/search/delete/export/import` 无真实入口 |
-
-未发现导入/导出 memory 的专用 CLI/API。CLI `config memory` 是系统内存诊断，不是记忆管理，证据 `docs/cli.md:L301`、`crates/bifrost-cli/src/cli.rs:L1352-L1353`。
+| 长期记忆显式 CRUD | chat slash `/remember`、`/forget`；模型侧 MCP `memory/list`、`memory/read`、`memory/search` | `crates/agent/src/slash.rs:L78-L194`、`crates/agent/src/memory/write.rs:L133-L381`、`crates/agent/src/memory/mcp_tools.rs` |
+| 长期记忆导入/导出 / 顶层 CLI | 未实现（planned, not yet shipped as of 2026-06-16） | 仓库内仅 `bifrost-cli config memory` 进程内存诊断（`crates/bifrost-cli/src/cli.rs:L2161-L2162`），与长期记忆无关 |
 
 ### 5.2 清理策略
 
 - active session：`session_ttl_secs` 默认 3600 秒，证据 `crates/agent/src/config.rs:L323-L328`、`crates/agent/src/session.rs:L310-L314`。
 - persisted history：配置可选 `HistoryPersistence::Last90Days`，startup 删除 90 天前 JSONL，证据 `crates/bifrost-admin/src/handlers/im_gateway.rs:L543-L556`、`crates/agent/src/persistence.rs:L495-L512`。
-- `HistoryConfig.max_bytes` 字段存在，但在 `persistence.rs` 未见按文件大小裁剪实现。字段证据 `crates/agent/src/config.rs:L250-L255`；搜索 `rg -n "max_bytes" crates/agent crates/bifrost-admin` 仅命中配置/PATCH，没有命中 cleanup 写法。
+- `HistoryConfig.max_bytes` 现已落地：`ConversationRecorder::enforce_max_bytes()` 在每次写入时检查文件大小，超过即按最早事件切片重写，证据 `crates/agent/src/persistence.rs:L426-L450`、`crates/agent/src/persistence.rs:L120`（写入入口处调用）、`crates/agent/src/persistence.rs:L87-L102`（构造函数 `new_with_max_bytes` / `from_existing_file` 接收 `max_bytes`）。
+- 长期记忆侧由 `memory::retention::prune_memory_artifacts()` 在启动 / 周期触发时按 `max_unused_days` / `max_rollout_age_days` 修剪 raw / rollout 产物。
 
 ### 5.3 多租户 / 多用户 / 多设备隔离
 
@@ -371,7 +392,7 @@ fn build_messages(
 - active session map：`DashMap<String, AgentSession>`，证据 `crates/agent/src/session.rs:L270-L281`。
 - persisted history filename：session key 经过 `sanitize_key()` 写入路径，但 JSONL 内保留原始 session key，证据 `crates/agent/src/persistence.rs:L63-L64`、`crates/agent/src/persistence.rs:L410-L413`。
 
-与 Remote Invoke / FileAccessPolicy / Shell Access 没有直接 memory 耦合；搜索 `rg -n -i "memory|memories|recall|remember" crates/bifrost-admin/src/remote_invoke crates/bifrost-core/src/file_access crates/agent` 中 remote_invoke 命中主要是 `long_term_pubkey`、`remember_bridge_seq` 或注释，不是 Agent memory。
+与 Remote Invoke / FileAccessPolicy / Shell Access 没有直接 memory 耦合；远端通道里出现的 `long_term_pubkey`、`remember_bridge_seq` 等是连接层概念，与 Agent memory 无关。`AgentSession.user_id` 字段为长期记忆 per-user scope 预留，但 `$agent_home/memory/` 当前仍是设备级共享（planned, not yet shipped as of 2026-06-16）。
 
 ## 6. 测试覆盖
 
@@ -393,10 +414,10 @@ fn build_messages(
 
 ### 6.3 空白 / 风险点
 
-- `MemoriesConfig` 没有对应单元测试证明字段对运行时生效；搜索 `rg -n "generate_memories|use_memories|max_raw_memories_for_consolidation|extract_model|consolidation_model" crates/agent/src/*` 只命中 config 定义。
-- `event_types::COMPACTION` 声明和 history scan 已支持，但 turn loop 不写 compaction event；这会让 human_tests 预期“JSONL 包含 compaction”与代码存在 gap，证据 `crates/agent/src/persistence.rs:L33-L38`、`crates/agent/src/persistence.rs:L445-L451`、`crates/agent/src/session.rs:L512-L561`。
-- 没有隐私脱敏测试覆盖 conversation recorder；写入方法直接持久化原文，证据 `crates/agent/src/persistence.rs:L87-L172`。
-- 没有 memory recall/topK/embedding 测试，因为对应实现不存在。搜索证据见附录 A。
+- `MemoriesConfig` 字段现在有 `crates/agent/src/memory/tests.rs`（含 `recall_system_message` 等用例）和 phase-1/phase-2 单元测试覆盖。
+- compaction 事件 gap **已修复**：turn loop 调用 `record_compaction_event()` 写 JSONL，回归测试见 `crates/agent/src/session/tests.rs::test_record_compaction_event_includes_emergency_and_total_tokens`、`crates/agent/src/persistence.rs::record_compaction_event_round_trip`。
+- 仍无通用隐私脱敏测试覆盖 conversation recorder；user/tool/result 原文照旧 JSONL 落盘。`PollutionDetector` 主要解决 cross-thread 上下文污染，并非密钥脱敏。
+- 仍无 memory embedding / topK 测试，因 embedding/向量库未实现；关键词搜索由 `crates/agent/src/memory/search.rs` 的单元用例覆盖。
 
 ## 7. 与其它子系统的耦合
 
@@ -436,12 +457,15 @@ Agent 复用 Bifrost data dir 约定：
 - Session manager、TTL、内置命令、上下文压缩、history sanitize 已落地，证据 `crates/agent/src/session.rs:L270-L346`、`crates/agent/src/session.rs:L474-L618`、`crates/agent/src/compact.rs:L111-L125`、`crates/agent/src/history.rs:L19-L92`。
 - JSONL persistence + restore 修复已落地，设计文档列出的 tool-call 恢复原则与 `load_conversation()` 当前实现一致，证据 `design/im-gateway-agent.md:L42-L48`、`crates/agent/src/persistence.rs:L279-L345`。
 
-### 8.2 设计了但未实现 / 未完全实现
+### 8.2 设计了但未完全实现
 
-- `MemoriesConfig` 字段显示计划支持 memories，但没有实际 memory extraction/consolidation/recall 实现，证据 `crates/agent/src/config.rs:L262-L295` 与搜索命令 `rg -n -i "raw_memor|rollout|consolidat|extract_model|use_memories|generate_memories|memory_mode|embedding|vector|semantic|episodic|recall"` 的结果。
-- `event_types::COMPACTION` 和 `scan_session_summary()` 识别 compaction，但 `compact_session()` 不写 JSONL event；证据 `crates/agent/src/persistence.rs:L33-L38`、`crates/agent/src/persistence.rs:L445-L451`、`crates/agent/src/compact.rs:L218-L243`。
-- `HistoryConfig.max_bytes` 字段存在，但未见文件大小裁剪实现；证据 `crates/agent/src/config.rs:L250-L255`，搜索 `rg -n "max_bytes" crates/agent crates/bifrost-admin` 未发现清理逻辑。
-- `design/im-gateway-agent.md` 较早段落仍有旧结构描述 `ImAgentSessionManager` / `Session { messages: Vec<ChatMessage> }`，与当前 `crates/agent/src/session.rs` 的 `AgentSession` / `ConversationRecorder` 不完全一致，证据 `design/im-gateway-agent.md:L123-L145` 与 `crates/agent/src/session.rs:L32-L69`。
+- 长期记忆 embedding / 向量检索 / 语义相似度 topK 仍未引入；当前长期记忆检索为关键词 + 模型读路径（planned, not yet shipped as of 2026-06-16）。
+- 多用户隔离：`AgentSession.user_id` 已加，但 `$agent_home/memory/` 默认全局共享，未按 `user_id` 切分（planned, not yet shipped as of 2026-06-16）。
+- 顶层 `bifrost memory ...` CLI / `/memory` HTTP 路由：尚未提供（planned）；当前仅 chat slash + MCP 工具。
+- pin / per-record TTL：phase-2 consolidation 与 retention 已覆盖批量衰减，但没有“此条永不被覆盖”的显式 pin 标记（planned）。
+- 通用隐私脱敏（user/tool/result 原文落盘前 redact）仍未实现。
+- 此前文档中提到的 `event_types::COMPACTION` 写入 gap 与 `HistoryConfig.max_bytes` 落地 gap **均已修复**，见 §3.1 / §5.2。
+- `design/im-gateway-agent.md` 早期段落的旧结构描述（`ImAgentSessionManager` / `Session { messages: Vec<ChatMessage> }`）仍可能与当前 `AgentSession` / `ConversationRecorder` 实现不一致，建议同步刷新。
 
 ### 8.3 实现了但未充分文档化
 
@@ -451,16 +475,16 @@ Agent 复用 Bifrost data dir 约定：
 
 ## 9. 风险与建议
 
-1. **P0：明确产品语义，避免把 compaction 误称为长期记忆。** 当前 UI 名称是 `Memories`，但运行时只有 session compaction/history；建议短期改文案或补实现。证据：UI `Memories` 配置见 `web/src/pages/Settings/tabs/AgentTab.tsx:L829-L1059`，运行时压缩见 `crates/agent/src/compact.rs:L111-L125`。
-2. **P0：补齐或移除未接入的 `MemoriesConfig`。** `generate_memories/use_memories/extract_model/consolidation_model` 当前会被保存但不影响任何链路，容易形成“开关已打开但无效”的错觉。证据：配置定义 `crates/agent/src/config.rs:L262-L295`，PATCH `crates/bifrost-admin/src/handlers/im_gateway.rs:L2253-L2305`。
-3. **P0：如果要实现自动化长期记忆，先落数据模型和存储边界。** 至少需要 `MemoryRecord{id, content, source_session, scope, created_at, updated_at, last_used_at, confidence, tags, pinned}`、存储介质、迁移、删除策略和敏感信息策略。当前没有 `MemoryRecord/MemoryStore` 命中，搜索证据见附录 A。
-4. **P1：为 conversation recorder 增加敏感信息过滤。** 现在 user/tool/result 原文直接 JSONL 落盘，工具参数或输出可能包含 token、路径、秘钥。证据 `crates/agent/src/persistence.rs:L87-L172`。
-5. **P1：压缩事件应写入 JSONL 或删除 `COMPACTION` 事件类型预期。** 当前 event type 与 summary scan 支持 compaction，但 turn loop 不写，导致观测数据不完整。证据 `crates/agent/src/persistence.rs:L33-L38`、`crates/agent/src/persistence.rs:L445-L451`。
-6. **P1：修复 `/resume` 的 data_dir 选择。** `run_turn_with_mcp()` 中 `/resume` 用 `config.resolve_work_dir()` 查找 conversations，而正常 recorder 写入 `agent_home_dir()`；这可能导致恢复找不到默认 JSONL。证据 `crates/agent/src/session.rs:L587-L590` 对比 `crates/bifrost-admin/src/handlers/im_gateway.rs:L871-L872`、`crates/bifrost-admin/src/handlers/im_gateway.rs:L2110-L2111`。
-7. **P1：实现 `HistoryConfig.max_bytes` 或从配置中移除。** 字段存在但未见执行逻辑，会误导用户。证据 `crates/agent/src/config.rs:L250-L255`。
-8. **P2：长期记忆检索若落地，应优先从关键词/全文 + scope 过滤开始，再评估 embedding。** 当前没有检索基础设施；直接上向量库会引入隐私、迁移、成本和可解释性问题。搜索证据见附录 A。
-9. **P2：把 session history API 文档化并加路径安全约束说明。** `GET/DELETE /agent/sessions/history/{path}` 接收 encoded path 后直接 `Path::new` + 读/删，建议明确限制在 agent home 或增加 canonicalize 校验。证据 `crates/bifrost-admin/src/handlers/im_gateway.rs:L1992-L2036`。
-10. **P2：同步更新 `design/im-gateway-agent.md` 的旧结构段落。** 文档 L123-L145 仍描述旧的 session manager 类型，当前实现已迁移到 `crates/agent`。证据 `design/im-gateway-agent.md:L123-L145`、`crates/agent/src/session.rs:L32-L69`。
+1. **P0 → 已交付**：长期记忆系统已落地为文件式 `$agent_home/memory/`，含 raw → consolidated → summary 三层，UI `Memories` 文案与运行时一致。
+2. **P0 → 已交付**：`MemoriesConfig` 字段已被 read-path / extract / consolidation / retention 全链路消费（参见 §0、§3、§4）。
+3. **P1（保留）**：为 conversation recorder 增加敏感信息过滤；当前 user/tool/result 原文直接 JSONL 落盘。
+4. **P1 → 已交付**：compaction event 已通过 `record_compaction_event()` 写入 JSONL（§3.1 末尾说明）。
+5. **P1（保留 / 重新核实）**：复核 `/resume` 在 `data_dir` 选择上的一致性——`recall_system_message` 与 phase-1 抽取都基于 `agent_home_dir()`，但 `/resume` 仍使用 `config.resolve_work_dir()`，建议对照当前 `crates/agent/src/session/slash_commands.rs` 重新核实。
+6. **P1 → 已交付**：`HistoryConfig.max_bytes` 已经在 `enforce_max_bytes()` 中实现（§5.2）。
+7. **P2（保留）**：长期记忆检索仍以关键词 + 文件读取为主；如要引入 embedding / 向量索引应先评估隐私与可解释性。
+8. **P2（保留）**：把 `/agent/sessions/history/{path}` 路径安全约束与 `bifrost-cli` 侧的 memory 子命令缺口写入面向用户的文档。
+9. **P2（保留）**：补齐 `bifrost memory ...` 顶层 CLI 与/或 `/memory` HTTP 路由，覆盖 list / read / search / forget / export 等管理动作。
+10. **P2（保留）**：同步刷新 `design/im-gateway-agent.md` 中过期的 session manager 结构描述，与当前 `crates/agent/src/session.rs::AgentSession` 对齐。
 
 ## 附录 A：搜索命令清单
 
