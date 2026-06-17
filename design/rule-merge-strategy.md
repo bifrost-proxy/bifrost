@@ -1,5 +1,7 @@
 # 规则合并策略分析与修复方案
 
+> **状态（截至 2026-06-17）**：本文档针对 `reqHeaders://` / `resHeaders://` 同名覆盖问题给出的修复方案——在 `DomainMatcher::priority()` 中为 `PathPattern::Exact` / `PathPattern::Prefix` 增加基于路径段数的优先级加分——**已落地**到 `crates/bifrost-core/src/matcher/domain.rs`，并伴随 `test_priority_path_depth_exact` / `test_priority_path_depth_prefix` 等单元测试一起合入。下文 §1 描述的「实际」行为为修复前的历史现象，保留以记录问题背景；§4 描述的方案已实施。其余在 §2.2 / §3 中标记为「⚠️ 后续优化」的协议（cookies / urlParams / trailers / params / resMerge）目前仍维持原行为，属 **planned, not yet shipped as of 2026-06-17**。
+
 ## 1. 问题背景
 
 当多条规则匹配同一个请求时，不同类型的协议需要不同的合并策略：
@@ -31,7 +33,7 @@ x-use-ppe: 1
 
 ### 根因定位
 
-`convert_core_result_to_proxy()` 函数（[rules.rs:382-699](../crates/bifrost-cli/src/parsing/rules.rs)）中，`ReqHeaders` 和 `ResHeaders` 使用了"先到先得"的去重逻辑：
+`convert_core_result_to_proxy()` 函数（[rules.rs:471-791](../crates/bifrost-cli/src/parsing/rules.rs)，截至 2026-06-17）中，`ReqHeaders` 和 `ResHeaders` 仍使用「先到先得」的去重逻辑——这一逻辑本身未变，但配合下文 §4 修复后的路径深度优先级，更具体的规则会先被遍历并先写入 header，宽泛规则同名 header 被跳过的语义即等价于「具体覆盖宽泛」：
 
 ```rust
 Protocol::ReqHeaders => {
@@ -88,14 +90,14 @@ Protocol::ReqHeaders => {
 
 | 协议 | 字段类型 | 当前策略 | 是否 multi_match | 预期策略 | 状态 |
 |------|---------|---------|-----------------|---------|------|
-| `reqHeaders://` | `Vec<(String, String)>` | ❌ 先到先得（同名 key 跳过） | ✅ | 同名 key 后覆盖前，不同 key 累积 | 🐛 **BUG** |
-| `resHeaders://` | `Vec<(String, String)>` | ❌ 先到先得（同名 key 跳过） | ✅ | 同名 key 后覆盖前，不同 key 累积 | 🐛 **BUG** |
-| `reqCookies://` | `Vec<(String, String)>` | 全部累积（无去重） | ✅ | 同名 cookie 后覆盖前，不同 cookie 累积 | ⚠️ **需优化** |
-| `resCookies://` | `Vec<(String, ResCookieValue)>` | 全部累积（无去重） | ✅ | 同名 cookie 后覆盖前，不同 cookie 累积 | ⚠️ **需优化** |
-| `urlParams://` | `Vec<(String, String)>` + `delete_url_params` | 全部累积 | ✅ | 同名参数后覆盖前，不同参数累积 | ⚠️ **需优化** |
-| `trailers://` | `Vec<(String, String)>` | 全部累积（无去重） | ✅ | 同名 trailer 后覆盖前，不同 trailer 累积 | ⚠️ **需优化** |
+| `reqHeaders://` | `Vec<(String, String)>` | 先到先得（同名 key 跳过） | ✅ | 同名 key 后覆盖前，不同 key 累积 | ✅ 已修复（通过路径深度优先级，2026-06-17 已合入） |
+| `resHeaders://` | `Vec<(String, String)>` | 先到先得（同名 key 跳过） | ✅ | 同名 key 后覆盖前，不同 key 累积 | ✅ 已修复（同上） |
+| `reqCookies://` | `Vec<(String, String)>` | 全部累积（无去重） | ✅ | 同名 cookie 后覆盖前，不同 cookie 累积 | ⚠️ **需优化** (planned, not yet shipped as of 2026-06-17) |
+| `resCookies://` | `Vec<(String, ResCookieValue)>` | 全部累积（无去重） | ✅ | 同名 cookie 后覆盖前，不同 cookie 累积 | ⚠️ **需优化** (planned, not yet shipped as of 2026-06-17) |
+| `urlParams://` | `Vec<(String, String)>` + `delete_url_params` | 全部累积 | ✅ | 同名参数后覆盖前，不同参数累积 | ⚠️ **需优化** (planned, not yet shipped as of 2026-06-17) |
+| `trailers://` | `Vec<(String, String)>` | 全部累积（无去重） | ✅ | 同名 trailer 后覆盖前，不同 trailer 累积 | ⚠️ **需优化** (planned, not yet shipped as of 2026-06-17) |
 
-> **注意**：`reqCookies://`、`resCookies://`、`urlParams://`、`trailers://` 目前是全部累积，对同名 key 不做覆盖。虽然当前行为在大多数场景下可用（用户很少对同一 cookie/param 设置不同值），但为了一致性，也应该实现"同名后覆盖"。本次修复**优先处理 reqHeaders 和 resHeaders**，其余 KV 集合类协议标记为后续优化项。
+> **注意**：`reqHeaders://` / `resHeaders://` 的同名覆盖问题已通过路径深度优先级修复（更具体的路径排在前面，被先写入；后续宽泛规则的同名 header 在「先到先得」去重逻辑下被跳过，等价于「具体覆盖宽泛」），dedupe 代码本身未动。`reqCookies://`、`resCookies://`、`urlParams://`、`trailers://` 当前仍是全部累积、对同名 key 不做覆盖；虽然在大多数场景下可用（用户很少对同一 cookie/param 设置不同值），但为了一致性应实现「同名后覆盖」——此项 **planned, not yet shipped as of 2026-06-17**。
 
 #### 修改类 - 标量值（Option 类型）— 当前逻辑需确认
 
@@ -147,10 +149,10 @@ Protocol::ReqHeaders => {
 
 | 协议 | 字段类型 | 当前策略 | 是否 multi_match | 状态 |
 |------|---------|---------|-----------------|------|
-| `params://` | `Option<serde_json::Value>` | last-wins（后面的 JSON 覆盖前面） | ✅ | ⚠️ 应该做 JSON deep merge |
-| `resMerge://` | `Option<serde_json::Value>` | last-wins | ✅ | ⚠️ 应该做 JSON deep merge |
+| `params://` | `Option<serde_json::Value>` | last-wins（后面的 JSON 覆盖前面） | ✅ | ⚠️ 应该做 JSON deep merge (planned, not yet shipped as of 2026-06-17) |
+| `resMerge://` | `Option<serde_json::Value>` | last-wins | ✅ | ⚠️ 应该做 JSON deep merge (planned, not yet shipped as of 2026-06-17) |
 
-> `params://` 和 `resMerge://` 的 multi_match 特性暗示它们可以从多条规则合并值，但当前实现是直接 `Option` 赋值（后覆盖前）。理想情况应该做 JSON deep merge（多个 JSON 对象合并），但这个行为变更较大，标记为后续优化项。
+> `params://` 和 `resMerge://` 的 multi_match 特性暗示它们可以从多条规则合并值，但当前实现是直接 `Option` 赋值（后覆盖前）。理想情况应该做 JSON deep merge（多个 JSON 对象合并），但这个行为变更较大，标记为后续优化项——**planned, not yet shipped as of 2026-06-17**。
 
 #### 修改类 - 纯累积型 — 当前逻辑正确 ✅
 
@@ -202,14 +204,14 @@ Protocol::ReqHeaders => {
 
 ## 3. 问题总结
 
-### 🐛 确认的 BUG（本次修复）
+### 🐛 历史 BUG（已修复，2026-06-17 已合入）
 
-| 协议 | 问题 | 影响 |
-|------|------|------|
-| `reqHeaders://` | "先到先得"去重逻辑导致宽泛规则的 header 优先于具体规则 | 用户无法通过更具体的路径规则覆盖宽泛规则设置的 header 值 |
-| `resHeaders://` | 同上 | 同上 |
+| 协议 | 问题 | 影响 | 状态 |
+|------|------|------|------|
+| `reqHeaders://` | 「先到先得」去重逻辑下宽泛规则的 header 先写入，更具体路径无法覆盖 | 用户无法通过更具体的路径规则覆盖宽泛规则设置的 header 值 | ✅ 已通过 `DomainMatcher::priority()` 路径段数加分修复（见 §4） |
+| `resHeaders://` | 同上 | 同上 | ✅ 同上 |
 
-### ⚠️ 后续优化项（本次不修复）
+### ⚠️ 后续优化项（planned, not yet shipped as of 2026-06-17）
 
 | 协议 | 问题 | 说明 |
 |------|------|------|
@@ -220,7 +222,7 @@ Protocol::ReqHeaders => {
 | `params://` | 多条规则的 JSON 不做 deep merge | 语义较复杂，需单独设计 |
 | `resMerge://` | 同上 | 同上 |
 
-## 4. 修复方案
+## 4. 修复方案（✅ 已落地，2026-06-17）
 
 ### 4.1 根因分析
 
@@ -237,19 +239,38 @@ https://example.com/api/v1/    → 100 + 5(protocol) + 15(exact_path) = 120
 
 两条规则优先级相同，stable sort 保持原始声明顺序（宽泛的 `/` 在前，具体的 `/api/v1/` 在后）。在 `reqHeaders://` 的"先到先得"去重逻辑下，宽泛规则的 header 先写入，具体规则的同名 header 被跳过。
 
-### 4.2 修复策略
+### 4.2 修复策略（已实施）
 
-**修复路径优先级**：在 `DomainMatcher::priority()` 的 `PathPattern::Exact` 分支中，增加基于路径段数（path segment count）的额外加分，使更深的精确路径获得更高的优先级。
+**修复路径优先级**：在 `DomainMatcher::priority()` 的 `PathPattern::Exact` / `PathPattern::Prefix` 分支中，增加基于路径段数（path segment count）的额外加分，使更深的路径获得更高的优先级。当前实际代码为：
+
+```rust
+if self.path_pattern.is_some() {
+    priority += match &self.path_pattern {
+        Some(PathPattern::Exact(path)) => {
+            let segments = path.split("/").filter(|s| !s.is_empty()).count() as i32;
+            15 + segments
+        }
+        Some(PathPattern::Prefix(prefix)) => {
+            let segments = prefix.split("/").filter(|s| !s.is_empty()).count() as i32;
+            10 + segments
+        }
+        None => 0,
+    };
+}
+```
+
+效果（以 base = `100`、protocol 命中 `+5` 为参照；下表只展示 path 部分加分）：
 
 ```
 PathPattern::Exact("/")         → 15 + 0 segments = 15
 PathPattern::Exact("/api")      → 15 + 1 segment  = 16
 PathPattern::Exact("/api/v1/")  → 15 + 2 segments = 17
+PathPattern::Prefix("/api/*")   → 10 + 1 segment  = 11
 ```
 
-修复位置：`crates/bifrost-core/src/matcher/domain.rs` → `DomainMatcher::priority()`
+修复位置：`crates/bifrost-core/src/matcher/domain.rs` → `DomainMatcher::priority()`（详见同文件 `test_priority_path_depth_exact` / `test_priority_path_depth_prefix` 等测试）。
 
-**保持"先到先得"逻辑不变**：`convert_core_result_to_proxy` 中 `reqHeaders://` 和 `resHeaders://` 的去重逻辑不需要修改。因为修复优先级后，更具体的路径获得更高优先级，排在前面先写入，宽泛规则后遍历时同名 header 被跳过。
+**保持「先到先得」逻辑不变**：`convert_core_result_to_proxy`（`crates/bifrost-cli/src/parsing/rules.rs:471-791`）中 `Protocol::ReqHeaders` 和 `Protocol::ResHeaders` 的去重逻辑沿用「同名 key 已存在则跳过」未修改。因为修复优先级后，更具体的路径获得更高优先级，排在前面先写入，宽泛规则后遍历时同名 header 被跳过。
 
 ### 4.3 修复影响分析
 
@@ -261,9 +282,9 @@ PathPattern::Exact("/api/v1/")  → 15 + 2 segments = 17
 | 修改类纯累积 | ✅ 无影响，不涉及同名去重 |
 | 已有测试 | 需验证 `test_priority_with_exact_path` 等测试的预期值是否需要更新 |
 
-### 4.4 测试计划
+### 4.4 测试计划（落地状态）
 
-1. **单元测试**：在 `domain.rs` 中新增测试验证路径深度影响优先级
-2. **单元测试**：在 `rules.rs` 中验证 `reqHeaders://` 和 `resHeaders://` 的同名覆盖行为
-3. **E2E 测试**：验证真实规则文件中的 header 覆盖场景
-4. **human_tests**：在 `human_tests/` 中创建 `rule-merge-headers.md` 测试文档
+1. **单元测试**：在 `domain.rs` 中新增测试验证路径深度影响优先级 — ✅ 已落地（`test_priority_path_depth_exact`、`test_priority_path_depth_prefix`、`test_priority_with_exact_path` 等）
+2. **单元测试**：在 `rules.rs` 中验证 `reqHeaders://` 和 `resHeaders://` 的同名覆盖行为 — ✅ 已落地（`rules.rs` 内 `parse_rules` + specific-vs-general 用例，见 953 行附近 `bifrost.local /` vs `/api/v1/` 的对照测试）
+3. **E2E 测试**：验证真实规则文件中的 header 覆盖场景 — ⚠️ planned, not yet shipped as of 2026-06-17（当前覆盖以单元测试 + human_tests 为主）
+4. **human_tests**：在 `human_tests/` 中创建 `rule-merge-headers.md` 测试文档 — ✅ 已落地（同时新增了 `human_tests/rule-merge-strategy.md`）
