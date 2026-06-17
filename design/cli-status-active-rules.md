@@ -53,6 +53,7 @@ GET /_bifrost/api/rules/active-summary
   - `Proxy Local Address`：固定展示当前运行服务的 `http://127.0.0.1:<port>`
   - `Proxy LAN Addresses`：当监听地址是 `0.0.0.0` / `::` 时，读取 `GET /_bifrost/api/proxy/address` 并列出非 loopback 地址；若只监听 localhost，则明确输出不可用
   - `Proxy Listen Address`：展示实际监听 host:port，帮助判断 LAN 地址是否可达
+  - `Proxy Client Fallback Address`：展示客户端可用回退地址（`http://<client_proxy_host>:<port>`），其中监听地址为 `0.0.0.0` / `::` 时回退为 `127.0.0.1`
   - `System Proxy`：只读 `SystemProxyManager::get_current()`，展示 enabled/disabled/unsupported/unknown，并判断 host+port 是否指向当前服务
   - `TLS Interception`：读取 `GET /_bifrost/api/config/tls`，展示全局开关、`unsafe_ssl` 上游证书校验策略和配置变更断连策略
   - `TLS Domain Whitelist`：展示域名 include 列表计数和完整列表，不省略任何条目
