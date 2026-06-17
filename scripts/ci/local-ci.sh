@@ -145,6 +145,7 @@ if [[ "$SKIP_E2E" -eq 0 ]]; then
 fi
 
 if [[ "$SKIP_STATIC" -eq 0 ]]; then
+  run_step "E2E shell CI coverage guard" bash scripts/ci/check-e2e-shell-ci-coverage.sh || HAD_FAILURE=1
   run_step "cargo fmt (workspace)" cargo fmt --all -- --check || HAD_FAILURE=1
   run_step "cargo fmt (desktop)" cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check || HAD_FAILURE=1
   run_step "cargo clippy" cargo clippy --workspace --all-targets --all-features -- -D warnings || HAD_FAILURE=1

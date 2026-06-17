@@ -229,9 +229,21 @@ bash scripts/run_all_e2e.sh --full-shell
 说明：
 
 - `--ci` 会在流水线中执行规则夹具、shell 套件、`bifrost-e2e` runner 和 Playwright；shell 脚本会按平台跳过明确不适用的场景，例如 macOS 专属系统代理脚本
+- 新增 shell E2E 默认必须放在 `e2e-tests/tests/` 并命名为 `test_*.sh`；GitHub Actions 的 `e2e-shell` / `e2e-macos-shell` job 会通过 `scripts/run_all_e2e.sh --ci --full-shell` 自动收集。禁止把关键链路脚本只作为手工脚本保留。
+- 如果某个 `test_*.sh` 因外部模型、硬件、系统代理或平台限制不能在 CI 执行，必须把它加入 `scripts/run_all_e2e.sh` 的 `SKIP_IN_CI_TESTS` 并在相邻注释说明原因。`scripts/ci/check-e2e-shell-ci-coverage.sh` 会在 local-ci 和 GitHub CI 中检查新增脚本是否已被 CI 选中或显式跳过。
 - `--full-shell` 会在本地尝试更广的 shell 套件；默认本地入口仍保留稳定 shell 集合作为更快的日常回归
 - 当前稳定 shell 集合已包含多行规则过滤器专项回归 `test_multiline_rule_filter_e2e.sh`
 - 旧文档中的 `run_all_tests.sh` 已废弃，实际可执行入口为 `run_all_tests_parallel.sh` 和 `scripts/run_all_e2e.sh`
+
+常用 shell E2E CI 自检：
+
+```bash
+# 查看 CI full-shell 会执行哪些脚本
+bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests
+
+# 检查所有 e2e-tests/tests/test_*.sh 都已进入 CI shell job 或显式跳过
+bash scripts/ci/check-e2e-shell-ci-coverage.sh
+```
 
 ### Admin API 客户端工具
 

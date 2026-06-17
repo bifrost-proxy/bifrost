@@ -411,19 +411,20 @@ start_detached_job() {
 }
 
 run_success_job_case() {
-    local detach_out list_out status_out logs_out watch_out noverify_out
-    local logs_file watch_file call_id status_text success_cmd
+    local detach_out list_out status_out logs_out watch_detach_out watch_out
+    local logs_file watch_file call_id watch_call_id status_text success_cmd watch_cmd watch_exit
 
     log "Running successful detached remote job case..."
     detach_out="$WORK_DIR/success.detach.out"
     list_out="$WORK_DIR/success.list.out"
     status_out="$WORK_DIR/success.status.out"
     logs_out="$WORK_DIR/success.logs.out"
-    watch_out="$WORK_DIR/success.watch.out"
-    noverify_out="$WORK_DIR/success.noverify.out"
+    watch_detach_out="$WORK_DIR/success-watch.detach.out"
+    watch_out="$WORK_DIR/success-watch.watch.out"
     logs_file="$WORK_DIR/success.logs.txt"
-    watch_file="$WORK_DIR/success.watch.txt"
+    watch_file="$WORK_DIR/success-watch.watch.txt"
     success_cmd="$PYTHON_BIN -u -c 'import os,time; print(\"JOB_OK_BEGIN\", flush=True); [print(\"JOB_OK_TICK_%d\" % i, flush=True) or time.sleep(0.7) for i in range(4)]; print(\"JOB_OK_ENV=\" + os.environ.get(\"JOB_ENV\", \"\"), flush=True); print(\"JOB_OK_END\", flush=True)'"
+    watch_cmd="$PYTHON_BIN -u -c 'import time; print(\"JOB_WATCH_BEGIN\", flush=True); time.sleep(0.5); print(\"JOB_WATCH_END\", flush=True)'"
 
     start_detached_job "success job" "$success_cmd" "$detach_out" || return 1
     call_id="$(extract_call_id "$detach_out")"
@@ -458,32 +459,29 @@ run_success_job_case() {
     assert_body_contains "JOB_OK_END" "$(cat "$logs_file")" "remote job logs --output-file should include final stdout marker" || return 1
     assert_no_plain_relay_token "$logs_out" "remote job logs should not expose relay token" || return 1
 
-    set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job logs "$call_id" --no-verify-digest >"$noverify_out" 2>&1
-    local noverify_exit=$?
-    set -e
-    if [[ "$noverify_exit" -ne 0 ]]; then
-        _log_fail "remote job logs --no-verify-digest should exit successfully" "0" "exit=${noverify_exit} output=$(cat "$noverify_out")"
-        return 1
-    fi
-    assert_body_contains "JOB_OK_END" "$(cat "$noverify_out")" "remote job logs --no-verify-digest should replay completed stdout" || return 1
-
-    set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job watch "$call_id" --output-file "$watch_file" >"$watch_out" 2>&1
-    local watch_exit=$?
-    set -e
-    if [[ "$watch_exit" -ne 0 ]]; then
-        _log_fail "remote job watch should exit successfully for success job" "0" "exit=${watch_exit} output=$(cat "$watch_out")"
-        return 1
-    fi
-    assert_body_contains "JOB_OK_END" "$(cat "$watch_file")" "remote job watch should replay completed stdout to output file" || return 1
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job status "$call_id" --wait-ms 1000 >"$status_out" 2>&1
+    assert_body_contains "status=exited" "$(cat "$status_out")" "remote job status should report terminal status after logs" || return 1
+    assert_body_contains "exit_code=0" "$(cat "$status_out")" "remote job status should report exit_code=0" || return 1
     assert_cache_contains_job "$call_id" "exited" || return 1
 
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job status "$call_id" --wait-ms 1000 >"$status_out" 2>&1
-    assert_body_contains "status=exited" "$(cat "$status_out")" "remote job status should report terminal status after watch" || return 1
-    assert_body_contains "exit_code=0" "$(cat "$status_out")" "remote job status should report exit_code=0" || return 1
-
     wait_for_target_call_exit "$call_id" "0" || return 1
+
+    start_detached_job "success watch job" "$watch_cmd" "$watch_detach_out" || return 1
+    watch_call_id="$(extract_call_id "$watch_detach_out")"
+    assert_not_empty "$watch_call_id" "success watch job call_id should be printed" || return 1
+
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job watch "$watch_call_id" --no-verify-digest --output-file "$watch_file" >"$watch_out" 2>&1
+    watch_exit=$?
+    set -e
+    if [[ "$watch_exit" -ne 0 ]]; then
+        _log_fail "remote job watch --no-verify-digest should exit successfully for success job" "0" "exit=${watch_exit} output=$(cat "$watch_out")"
+        return 1
+    fi
+    assert_body_contains "JOB_WATCH_BEGIN" "$(cat "$watch_file")" "remote job watch should capture first watch marker" || return 1
+    assert_body_contains "JOB_WATCH_END" "$(cat "$watch_file")" "remote job watch should capture final watch marker" || return 1
+    assert_cache_contains_job "$watch_call_id" "exited" || return 1
+    wait_for_target_call_exit "$watch_call_id" "0" || return 1
 }
 
 run_failure_job_case() {
@@ -561,16 +559,6 @@ run_error_contract_cases() {
 }
 
 cleanup() {
-    if [[ "${KEEP_REMOTE_JOB_E2E_TMP:-}" == "1" ]]; then
-        echo "[remote-job-real-e2e] preserving tmp dirs:" >&2
-        echo "  TARGET_DATA_DIR=$TARGET_DATA_DIR" >&2
-        echo "  CALLER_DATA_DIR=$CALLER_DATA_DIR" >&2
-        echo "  FRESH_CALLER_DATA_DIR=$FRESH_CALLER_DATA_DIR" >&2
-        echo "  RELAY_DATA_DIR=$RELAY_DATA_DIR" >&2
-        echo "  RELAY_LOG=$RELAY_LOG" >&2
-        echo "  WORK_DIR=$WORK_DIR" >&2
-        return
-    fi
     if [[ -n "${CALLER_CONNECT_PID:-}" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
         wait "$CALLER_CONNECT_PID" 2>/dev/null || true

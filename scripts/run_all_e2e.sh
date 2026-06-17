@@ -626,6 +626,7 @@ shell_test_weight() {
     test_client_process_transport_attribution.sh) echo 104 ;;
     test_devtools_page_bridge_api.sh) echo 53 ;;
     test_remote_invoke_e2e.sh) echo 52 ;;
+    test_remote_job_real_e2e.sh) echo 64 ;;
     test_group_sync_e2e.sh) echo 43 ;;
     test_agent_builtin_status_runtime.sh) echo 43 ;;
     test_replay_websocket_frames.sh) echo 42 ;;
@@ -827,6 +828,7 @@ run_shell_tests_parallel() {
   local ISOLATED_AFTER_TESTS=(
     "test_remote_connect_overload_retry_e2e.sh"
     "test_client_process_transport_attribution.sh"
+    "test_remote_job_real_e2e.sh"
     "test_remote_shell_exec_streaming_e2e.sh"
     "test_traffic_db_e2e.sh"
     "test_openai_like_sse_search_e2e.sh"
