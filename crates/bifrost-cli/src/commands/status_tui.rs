@@ -981,45 +981,82 @@ fn visible_table_rows(area_height: u16, header_lines: u16, max_rows: usize) -> u
     (usable as usize).min(max_rows)
 }
 
-/// 根据表格实际可用宽度，计算某个弹性列（`Constraint::Min`）真正能拿到的字符宽度，
-/// 用于在调用 `truncate_text` 前按窗口尺寸自适应截断阈值。
+#[derive(Clone, Copy, Debug)]
+struct AdaptiveColumnSpec {
+    min: u16,
+    max: Option<u16>,
+    weight: u16,
+}
+
+/// 根据表格实际可用宽度计算弹性列的真实宽度。
 ///
-/// - `area_width`：表格组件总宽度（含边框）。
-/// - `fixed_total`：所有定长列（`Constraint::Length`）的宽度之和。
-/// - `flex_mins`：所有弹性列各自声明的最小宽度。
-/// - `total_columns`：表格总列数（定长 + 弹性），用于估算列间隔。
-/// - `flex_index`：目标弹性列在 `flex_mins` 中的下标。
-///
-/// 弹性列会平分扣除定长列、边框与列间隔后的剩余宽度；当空间不足时回退到各自的
-/// 最小宽度。这样窗口越大，命令/Call ID 等列能展示的内容越完整。
-fn flex_column_budget(
+/// 与直接使用多个 `Constraint::Min` 不同，这里允许给低信息密度列设置上限，
+/// 避免 `Client` 这类列在宽屏里持续吞掉空间，把剩余宽度优先让给命令/结果列。
+fn adaptive_column_widths(
     area_width: u16,
     fixed_total: u16,
-    flex_mins: &[u16],
     total_columns: u16,
-    flex_index: usize,
-) -> usize {
-    let min = flex_mins.get(flex_index).copied().unwrap_or(0);
-    let flex_count = flex_mins.len() as u16;
-    if flex_count == 0 {
-        return min as usize;
+    specs: &[AdaptiveColumnSpec],
+) -> Vec<u16> {
+    if specs.is_empty() {
+        return Vec::new();
     }
-    // 内容区宽度 = 总宽减去左右边框。
+
+    let mut widths: Vec<u16> = specs.iter().map(|spec| spec.min).collect();
     let content_width = area_width.saturating_sub(2);
-    // ratatui 默认相邻列间隔为 1 个空格,共 total_columns - 1 个间隔。
     let gaps = total_columns.saturating_sub(1);
-    let flex_total_min: u16 = flex_mins.iter().copied().sum();
+    let min_total: u16 = widths.iter().copied().sum();
     let reserved = fixed_total.saturating_add(gaps);
     let available = content_width.saturating_sub(reserved);
-
-    if available <= flex_total_min {
-        // 空间不够,所有弹性列退回最小宽度。
-        return min as usize;
+    let mut extra = available.saturating_sub(min_total);
+    if extra == 0 {
+        return widths;
     }
-    // 把超出最小值的富余宽度按弹性列数量平均分配。
-    let extra = available - flex_total_min;
-    let share = extra / flex_count;
-    (min + share) as usize
+
+    while extra > 0 {
+        let expandable: Vec<usize> = specs
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, spec)| {
+                if spec.max.is_some_and(|max| widths[idx] >= max) {
+                    None
+                } else {
+                    Some(idx)
+                }
+            })
+            .collect();
+        if expandable.is_empty() {
+            break;
+        }
+
+        let total_weight: u16 = expandable.iter().map(|idx| specs[*idx].weight.max(1)).sum();
+        let before = extra;
+        for idx in expandable {
+            if extra == 0 {
+                break;
+            }
+            let weight = specs[idx].weight.max(1);
+            let weighted_share = ((before as u32 * weight as u32) / total_weight as u32)
+                .max(1)
+                .min(extra as u32) as u16;
+            let room = specs[idx]
+                .max
+                .map(|max| max.saturating_sub(widths[idx]))
+                .unwrap_or(u16::MAX);
+            let delta = weighted_share.min(room).min(extra);
+            if delta == 0 {
+                continue;
+            }
+            widths[idx] = widths[idx].saturating_add(delta);
+            extra -= delta;
+        }
+
+        if extra == before {
+            break;
+        }
+    }
+
+    widths
 }
 
 fn caller_label_with_budget(
@@ -1867,27 +1904,45 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     );
     frame.render_widget(summary, layout[0]);
 
-    // 自适应：根据 Connected Clients 表格的实际高度/宽度推导可见行数与命令列截断阈值，
-    // 窗口越大展示越完整，避免固定 take(12) 与定长截断造成的大量留白与过度省略。
-    const CLIENTS_FIXED_TOTAL: u16 = 10 + 18 + 10 + 11 + 11 + 12 + 18; // 除两个 Min 列外的定长列之和
-    const CLIENTS_FLEX_MINS: [u16; 2] = [12, 18]; // Client, Latest Command
+    // 自适应：根据 Connected Clients 表格的实际高度/宽度推导可见行数与列宽。
+    // Client 列有信息密度上限，命令列不设上限并吸收剩余空间。
+    const CLIENTS_FIXED_TOTAL: u16 = 10 + 18 + 10 + 11 + 11 + 12; // Auth+Scope+Grant+Connected+Last Cmd+Status
+    const CLIENTS_FLEX_SPECS: [AdaptiveColumnSpec; 3] = [
+        AdaptiveColumnSpec {
+            min: 12,
+            max: Some(36),
+            weight: 1,
+        },
+        AdaptiveColumnSpec {
+            min: 24,
+            max: None,
+            weight: 6,
+        },
+        AdaptiveColumnSpec {
+            min: 18,
+            max: Some(30),
+            weight: 2,
+        },
+    ]; // Client, Latest Command, Result
     let client_capacity = visible_table_rows(layout[1].height, 2, MAX_REMOTE_TABLE_ROWS);
-    let client_cmd_budget = flex_column_budget(
+    let client_widths = adaptive_column_widths(
         layout[1].width,
         CLIENTS_FIXED_TOTAL,
-        &CLIENTS_FLEX_MINS,
         9, // 表格总列数
-        1, // Latest Command 列
-    )
-    .max(REMOTE_MIN_CMD_BUDGET);
-    let client_label_budget = flex_column_budget(
-        layout[1].width,
-        CLIENTS_FIXED_TOTAL,
-        &CLIENTS_FLEX_MINS,
-        9, // 表格总列数
-        0, // Client 列
-    )
-    .max(REMOTE_MIN_CLIENT_BUDGET);
+        &CLIENTS_FLEX_SPECS,
+    );
+    let client_label_width = client_widths
+        .first()
+        .copied()
+        .unwrap_or(REMOTE_MIN_CLIENT_BUDGET as u16);
+    let client_cmd_width = client_widths
+        .get(1)
+        .copied()
+        .unwrap_or(REMOTE_MIN_CMD_BUDGET as u16);
+    let client_result_width = client_widths.get(2).copied().unwrap_or(18);
+    let client_label_budget = client_label_width as usize;
+    let client_cmd_budget = client_cmd_width as usize;
+    let client_result_budget = client_result_width as usize;
 
     let client_rows: Vec<Row> = app
         .remote_invoke
@@ -1904,6 +1959,7 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
                 .unwrap_or_else(|| "-".to_string());
             let result = latest
                 .map(format_remote_result)
+                .map(|value| truncate_text(&value, client_result_budget))
                 .unwrap_or_else(|| "-".to_string());
             Row::new(vec![
                 caller_label_with_budget(
@@ -1927,15 +1983,15 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     let clients_table = Table::new(
         client_rows,
         [
-            Constraint::Min(12),
+            Constraint::Length(client_label_width),
             Constraint::Length(10),
             Constraint::Length(18),
             Constraint::Length(10),
             Constraint::Length(11),
             Constraint::Length(11),
-            Constraint::Min(18),
+            Constraint::Length(client_cmd_width),
             Constraint::Length(12),
-            Constraint::Length(18),
+            Constraint::Length(client_result_width),
         ],
     )
     .header(
@@ -1959,26 +2015,51 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     )));
     frame.render_widget(clients_table, layout[1]);
 
-    // 自适应：Recent Commands 表格的可见行数与命令列截断阈值同样跟随窗口尺寸。
-    const CALLS_FIXED_TOTAL: u16 = 10 + 12 + 20 + 11 + 12; // Auth+Status+Result+Started+Call ID
-    const CALLS_FLEX_MINS: [u16; 2] = [12, 24]; // Client, Command
+    // 自适应：Recent Commands 表格同样限制 Client 列，把宽屏富余空间优先给 Command。
+    const CALLS_FIXED_TOTAL: u16 = 10 + 12 + 11; // Auth+Status+Started
+    const CALLS_FLEX_SPECS: [AdaptiveColumnSpec; 4] = [
+        AdaptiveColumnSpec {
+            min: 12,
+            max: Some(36),
+            weight: 1,
+        },
+        AdaptiveColumnSpec {
+            min: 32,
+            max: None,
+            weight: 7,
+        },
+        AdaptiveColumnSpec {
+            min: 20,
+            max: Some(30),
+            weight: 2,
+        },
+        AdaptiveColumnSpec {
+            min: 12,
+            max: Some(24),
+            weight: 1,
+        },
+    ]; // Client, Command, Result, Call ID
     let call_capacity = visible_table_rows(layout[2].height, 2, MAX_REMOTE_TABLE_ROWS);
-    let call_cmd_budget = flex_column_budget(
+    let call_widths = adaptive_column_widths(
         layout[2].width,
         CALLS_FIXED_TOTAL,
-        &CALLS_FLEX_MINS,
         7, // 表格总列数
-        1, // Command 列
-    )
-    .max(REMOTE_MIN_CMD_BUDGET);
-    let call_client_budget = flex_column_budget(
-        layout[2].width,
-        CALLS_FIXED_TOTAL,
-        &CALLS_FLEX_MINS,
-        7, // 表格总列数
-        0, // Client 列
-    )
-    .max(REMOTE_MIN_CLIENT_BUDGET);
+        &CALLS_FLEX_SPECS,
+    );
+    let call_client_width = call_widths
+        .first()
+        .copied()
+        .unwrap_or(REMOTE_MIN_CLIENT_BUDGET as u16);
+    let call_cmd_width = call_widths
+        .get(1)
+        .copied()
+        .unwrap_or(REMOTE_MIN_CMD_BUDGET as u16);
+    let call_result_width = call_widths.get(2).copied().unwrap_or(20);
+    let call_id_width = call_widths.get(3).copied().unwrap_or(12);
+    let call_client_budget = call_client_width as usize;
+    let call_cmd_budget = call_cmd_width as usize;
+    let call_result_budget = call_result_width as usize;
+    let call_id_budget = call_id_width as usize;
 
     let call_rows: Vec<Row> = app
         .remote_invoke
@@ -1996,9 +2077,9 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
                 format_remote_auth(call.auth_method.as_ref()),
                 truncate_text(&call.command_summary.command_preview, call_cmd_budget),
                 call.status.clone(),
-                format_remote_result(call),
+                truncate_text(&format_remote_result(call), call_result_budget),
                 format_timestamp_millis(Some(call.started_at)),
-                truncate_text(&call.call_id, 12),
+                truncate_text(&call.call_id, call_id_budget),
             ])
         })
         .collect();
@@ -2006,13 +2087,13 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     let calls_table = Table::new(
         call_rows,
         [
-            Constraint::Min(12),
+            Constraint::Length(call_client_width),
             Constraint::Length(10),
-            Constraint::Min(24),
+            Constraint::Length(call_cmd_width),
             Constraint::Length(12),
-            Constraint::Length(20),
+            Constraint::Length(call_result_width),
             Constraint::Length(11),
-            Constraint::Length(12),
+            Constraint::Length(call_id_width),
         ],
     )
     .header(
@@ -2047,6 +2128,7 @@ fn render_footer(frame: &mut Frame, area: Rect) {
 mod tests {
     use super::*;
     use bifrost_admin::push::{MetricsData, PushMessage, SettingsUpdateData};
+    use ratatui::backend::TestBackend;
     use serde_json::json;
 
     #[test]
@@ -2173,46 +2255,104 @@ mod tests {
     }
 
     #[test]
-    fn flex_column_budget_expands_with_width() {
-        let fixed = 90u16;
-        let flex_mins = [12u16, 18u16];
-        // 窄窗口：内容区不足以超过弹性列最小值之和，退回最小宽度。
-        let narrow = flex_column_budget(100, fixed, &flex_mins, 9, 1);
-        assert_eq!(narrow, 18);
-        // 宽窗口：富余宽度按弹性列平分,目标列拿到更多空间。
-        let wide = flex_column_budget(300, fixed, &flex_mins, 9, 1);
+    fn adaptive_column_widths_caps_client_and_expands_command() {
+        let fixed = 10 + 18 + 10 + 11 + 11 + 12;
+        let specs = [
+            AdaptiveColumnSpec {
+                min: 12,
+                max: Some(36),
+                weight: 1,
+            },
+            AdaptiveColumnSpec {
+                min: 24,
+                max: None,
+                weight: 6,
+            },
+            AdaptiveColumnSpec {
+                min: 18,
+                max: Some(30),
+                weight: 2,
+            },
+        ];
+
+        let widths = adaptive_column_widths(240, fixed, 9, &specs);
+
         assert!(
-            wide > 18,
-            "wide window should grant more than the minimum budget, got {wide}"
+            widths[0] <= 36,
+            "Client column should stay within its cap: {widths:?}"
         );
-        // 越宽越大：单调不减。
-        let wider = flex_column_budget(500, fixed, &flex_mins, 9, 1);
         assert!(
-            wider >= wide,
-            "wider window should not shrink budget: {wider} < {wide}"
+            widths[1] > widths[0],
+            "Command column should absorb most wide-screen space: {widths:?}"
+        );
+        assert!(
+            widths[2] > 18,
+            "Result column should grow beyond the old fixed width: {widths:?}"
         );
     }
 
     #[test]
-    fn flex_column_budget_expands_client_column_with_width() {
-        let fixed = 90u16;
-        let flex_mins = [12u16, 18u16];
-        let narrow_client = flex_column_budget(100, fixed, &flex_mins, 9, 0);
-        assert_eq!(narrow_client, 12);
+    fn adaptive_column_widths_keep_command_monotonic_after_client_cap() {
+        let fixed = 10 + 12 + 11;
+        let specs = [
+            AdaptiveColumnSpec {
+                min: 12,
+                max: Some(36),
+                weight: 1,
+            },
+            AdaptiveColumnSpec {
+                min: 32,
+                max: None,
+                weight: 7,
+            },
+            AdaptiveColumnSpec {
+                min: 20,
+                max: Some(30),
+                weight: 2,
+            },
+            AdaptiveColumnSpec {
+                min: 12,
+                max: Some(24),
+                weight: 1,
+            },
+        ];
 
-        let wide_client = flex_column_budget(300, fixed, &flex_mins, 9, 0);
+        let wide = adaptive_column_widths(220, fixed, 7, &specs);
+        let wider = adaptive_column_widths(320, fixed, 7, &specs);
+
         assert!(
-            wide_client > 12,
-            "wide window should grant client column more than the minimum budget, got {wide_client}"
+            wide[0] <= 36,
+            "Client column should stay within its cap: {wide:?}"
         );
+        assert!(
+            wider[0] <= 36,
+            "Client cap should hold as width grows: {wider:?}"
+        );
+        assert!(
+            wider[1] > wide[1],
+            "Command column should keep expanding after capped columns stop: {wide:?} -> {wider:?}"
+        );
+        assert!(wider[3] >= wide[3], "Call ID width should not shrink");
     }
 
     #[test]
-    fn flex_column_budget_handles_degenerate_inputs() {
-        // 没有弹性列时返回该列最小值(此处取 index 越界 -> 0)。
-        assert_eq!(flex_column_budget(200, 50, &[], 9, 0), 0);
-        // 极窄宽度不应 panic 且不低于最小值。
-        assert_eq!(flex_column_budget(0, 50, &[12, 24], 7, 1), 24);
+    fn adaptive_column_widths_handles_narrow_and_degenerate_inputs() {
+        let specs = [
+            AdaptiveColumnSpec {
+                min: 12,
+                max: Some(36),
+                weight: 1,
+            },
+            AdaptiveColumnSpec {
+                min: 24,
+                max: None,
+                weight: 6,
+            },
+        ];
+
+        assert_eq!(adaptive_column_widths(0, 90, 9, &specs), vec![12, 24]);
+        assert_eq!(adaptive_column_widths(100, 90, 9, &specs), vec![12, 24]);
+        assert!(adaptive_column_widths(200, 50, 9, &[]).is_empty());
     }
 
     #[test]
@@ -2326,6 +2466,77 @@ mod tests {
         assert_eq!(
             format_remote_auth(Some(&"pair_code".to_string())),
             "Pair code"
+        );
+    }
+
+    fn buffer_lines(terminal: &Terminal<TestBackend>) -> Vec<String> {
+        let buffer = terminal.backend().buffer();
+        buffer
+            .content()
+            .chunks(buffer.area.width as usize)
+            .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+            .collect()
+    }
+
+    #[test]
+    fn remote_invoke_render_caps_client_and_expands_trailing_columns() {
+        let mut app = dummy_app();
+        app.remote_invoke.status = Some(RemoteInvokeStatus {
+            state: "connected".into(),
+            ..Default::default()
+        });
+        app.remote_invoke.grants = vec![RemoteInvokeGrant {
+            grant_id: "grant-wide".into(),
+            caller_fingerprint: "caller-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            auth_method: Some("ssh_publickey".into()),
+            grant_scope: Some("remote_shell_interactive".into()),
+            status: "active".into(),
+            first_connected_at: Some(1_700_000_000_000),
+            last_command_at: Some(1_700_000_100_000),
+            ..Default::default()
+        }];
+        app.remote_invoke.calls = vec![RemoteInvokeCall {
+            call_id: "call-0123456789abcdef0123456789abcdef".into(),
+            grant_id: "grant-wide".into(),
+            caller_fingerprint: "caller-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            caller_display_name: None,
+            auth_method: Some("ssh_publickey".into()),
+            command_summary: RemoteInvokeCommandSummary {
+                command_preview: "file.search json_response\\b /Users/eden/work/github/bifrost/crates/bifrost-cli/src/commands/status_tui.rs".into(),
+            },
+            status: "completed".into(),
+            started_at: 1_700_000_100_000,
+            ended_at: Some(1_700_000_112_000),
+            exit_code: Some(0),
+            duration_ms: Some(12_000),
+            bytes_out: Some(65_536),
+        }];
+
+        let backend = TestBackend::new(220, 45);
+        let mut terminal = Terminal::new(backend).expect("test terminal");
+        terminal
+            .draw(|frame| render_remote_invoke(frame, frame.area(), &app))
+            .expect("draw remote invoke");
+
+        let screen = buffer_lines(&terminal).join("\n");
+        assert!(screen.contains("Latest Command"));
+        assert!(screen.contains("file.search json_response"));
+        assert!(screen.contains("64.00 KB"));
+        assert!(screen.contains("call-0123456789abcdef"));
+
+        let auth_columns = buffer_lines(&terminal)
+            .into_iter()
+            .filter(|line| line.contains("caller-") && line.contains("SSH key"))
+            .map(|line| line.find("SSH key").expect("auth column"))
+            .collect::<Vec<_>>();
+        assert!(
+            !auth_columns.is_empty(),
+            "expected rendered caller rows in screen:\n{screen}"
+        );
+        let max_auth_column = auth_columns.into_iter().max().unwrap();
+        assert!(
+            max_auth_column <= 42,
+            "Client column should be capped before auth column; auth starts at {max_auth_column}\n{screen}"
         );
     }
 
