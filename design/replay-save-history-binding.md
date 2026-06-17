@@ -50,3 +50,10 @@
 ## 文档更新要求
 
 - 本次为管理端交互修复，不涉及 README、API 或配置项变更
+
+## 实现现状（截至 2026-06-17）
+
+- `web/src/stores/useReplayStore.ts` 的 `saveRequest` 已在保存成功后回写 `currentRequest`，将 `historyFilter` 切换为 `{ type: request, requestId: savedRequest.id }`，并同步重置 `selectedRequestId`、`selectedHistoryId`、`historyPage`；随后立即调用 `loadRecentHistory`，且在 `uiState.mode === history` 时再触发 `loadAllHistory`。
+- 持久化层 `partialize` 已包含 `selectedRequestId`，刷新后 `web/src/pages/Replay/index.tsx` 内的 effect 会依据持久化的 `selectedRequestId` 在 `savedRequests` 中找到记录并调用 `selectRequest`，从而恢复模板上下文。
+- e2e 用例 `web/tests/ui/admin-replay.spec.ts` 中的 `从 Traffic 导入后首次保存的模板在执行后可见历史，刷新后仍能恢复` 覆盖了 Traffic 导入 → 首次保存 → 执行 → History 查看 → 刷新后再次查看 的完整链路。
+- 上述能力均已落地；本设计文档无 "(planned, not yet shipped as of 2026-06-17)" 项。
