@@ -186,7 +186,8 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 | NetworkPanel | `web/src/pages/DevTools/components/NetworkPanel.tsx` | 网络事件虚拟列表，复用 VirtualTrafficTable |
 | ConsolePanel | `web/src/pages/DevTools/components/ConsolePanel.tsx` | Console 日志 + 表达式执行（含 Monaco editor） |
 | StoragePanel | `web/src/pages/DevTools/components/StoragePanel.tsx` | Cookies / LocalStorage / SessionStorage 表格编辑 |
-| shared | `web/src/pages/DevTools/components/shared.tsx` | HighlightedText、filterBySearch 等工具函数 |
+| shared | `web/src/pages/DevTools/components/shared.tsx` | HighlightedText、filterBySearch 等共享 React 工具组件 |
+| shared utils | `web/src/pages/DevTools/components/sharedUtils.ts` / `domUtils.ts` / `consoleValueUtils.ts` | DOM 节点格式化、Console 值序列化、过滤等纯函数辅助 |
 
 ### API Client
 
@@ -240,6 +241,8 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 | `crates/bifrost-proxy/src/proxy/http/handler.rs` | HTTP 代理主处理逻辑，调用 devtools 模块完成注入决策 |
 | `crates/bifrost-proxy/src/proxy/http/devtools.rs` | DevTools 规则解析、注入决策、bridge 脚本生成 |
 | `crates/bifrost-admin/src/devtools.rs` | `BrowserDebugBroker` 核心逻辑 |
+| `crates/bifrost-admin/src/devtools_network.rs` | Network 事件缓存、`client_req_id` 主键去重与 PerformanceResourceTiming fallback 合并 |
+| `crates/bifrost-admin/src/devtools_tests.rs` | Broker 单元测试（页面/会话状态、去重、live 队列、runtime.evaluate 默认权限等） |
 | `crates/bifrost-admin/src/handlers/devtools.rs` | HTTP/WebSocket 路由处理 |
 | `crates/bifrost-admin/src/router.rs` | `/api/devtools` 路由入口 |
 | `web/src/pages/DevTools/` | WebUI DevTools 页面及子组件 |
@@ -249,10 +252,12 @@ Network 列表以 page bridge 前端采集事件为可见数据源；Traffic 作
 
 ### 单元测试
 
-- `BrowserDebugBroker::cdp_targets` 不序列化 `systemChromeFrontendUrl`。
-- `BrowserDebugBroker::list_debuggable_pages` 隐藏 `Candidate` / `Stale` 页面。
-- `BrowserDebugBroker::bridge_hello` 使用 `tab_id` 将刷新后的新 page id 迁移到已有 session。
-- `BrowserDebugBroker::command("runtime.evaluate")` 验证裸 `devtools://` 默认可执行，并覆盖兼容模式和 allowlist。
+- `BrowserDebugBroker::list_debuggable_pages` 隐藏 `Candidate` / `Stale` 页面（`test_page_bridge_close_hides_stale_page_from_debuggable_list`）。
+- `BrowserDebugBroker::bridge_hello` 使用 `tab_id` 将刷新后的新 page id 迁移到已有 session，并保证同 `tab_id` 的并发页面相互独立（`test_page_bridge_reload_migrates_open_session_to_new_page_id` / `test_page_bridge_same_tab_id_keeps_concurrent_pages_separate`）。
+- bridge token 校验与 `seq` 去重覆盖重放/伪造场景（`test_page_bridge_rejects_token_replay_or_mismatch` / `test_page_bridge_seq_dedupes_replayed_messages`）。
+- Network cache 按 `client_req_id` 去重，并在 hello/snapshot 重放及 PerformanceResourceTiming fallback 与带 id 事件并存时优先保留带 id 事件（`test_page_bridge_network_cache_dedupes_snapshot_replay_by_client_req_id` / `test_page_bridge_network_cache_prefers_client_req_event_over_performance_fallback`）。
+- `BrowserDebugBroker::command("runtime.evaluate")` 验证裸 `devtools://` 默认可执行（`test_runtime_evaluate_allowed_for_default_session_scope`）。
+- Live channel 有界队列在慢消费者下不阻塞（`test_page_bridge_live_queues_are_bounded`）。
 
 ### E2E 测试
 
