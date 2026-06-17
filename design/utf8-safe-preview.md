@@ -12,9 +12,9 @@ end byte index 500 is not a char boundary
 
 ## 实现逻辑
 
-- 在 `bifrost-core` 新增 `text` 工具模块，提供两类明确语义：
-  - `truncate_chars*`：按 Unicode scalar 字符数量截断，适合 UI/CLI/历史记录 preview。
-  - `truncate_bytes*` / `floor_char_boundary`：保留字节预算语义，但先回退到合法 UTF-8 字符边界，适合日志和请求体预览。
+- 在 `bifrost-core` 新增 `text` 工具模块（`crates/bifrost-core/src/text.rs`），提供两类明确语义：
+  - `truncate_chars*`：按 Unicode scalar 字符数量截断，适合 UI/CLI/历史记录 preview。包含 `truncate_chars`、`truncate_chars_with_suffix`、`truncate_chars_with_ellipsis`。
+  - `truncate_bytes*` / `floor_char_boundary` / `ceil_char_boundary` / `truncate_middle_bytes`：保留字节预算语义，但先回退到合法 UTF-8 字符边界，适合日志和请求体预览；`truncate_middle_bytes` 用于保留头尾、中间替换为省略提示。
 - 禁止新增面向 `&str` 的 `[..N]`、`[..max_len]` 或 `String::truncate(max_len)` preview 截断；必须调用公共 helper。
 - 对确认为二进制 buffer、ASCII 协议分隔符、哈希/nonce 固定字节数组等场景保留原字节切片。
 - Agent compaction 中 `content` 和 tool call arguments 的截断统一改为字符安全 helper，直接覆盖本次 panic。
