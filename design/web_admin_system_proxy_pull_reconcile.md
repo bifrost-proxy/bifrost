@@ -46,3 +46,11 @@
 ## 文档更新
 
 - 当前仅为前端状态同步策略调整，不涉及对外 API/README 变更。
+
+## 实现现状（截至 2026-06-17）
+
+- 后端 `crates/bifrost-admin/src/handlers/proxy.rs` 中 `set_system_proxy` 在 enable/disable 后通过 `wait_for_system_proxy_status` 以 `SYSTEM_PROXY_VERIFY_DELAYS_MS = [200, 400, 800, 1600]` ms 的递增退避读取真实状态，再返回给前端。
+- `read_system_proxy_status` 使用 `target_matches` 与 `SystemProxyManager::any_service_proxy_matches` 判定 `managed_by_bifrost`；`matches_expected_system_proxy` 把 disable 收敛条件放宽为「未启用 或 非 Bifrost 管理」，允许外部代理保留。
+- 持久化时仅写入 `enabled_by_bifrost = status.enabled && status.managed_by_bifrost`，避免用户手动接管外部代理时被错误标记为 Bifrost 拥有。
+- 前端 `web/src/stores/useProxyStore.ts` 的 `toggleSystemProxy` 直接消费 `PUT /api/proxy/system` 返回的真实状态，未匹配时仅在 store 中写入 `error` 文案，不发起额外重拉。
+- `web/src/services/pushService.ts` 的 `SettingsScope` 联合类型仍保留 `'system_proxy'`（兼容服务端 push schema），但 `web/src/pages/Settings/index.tsx` 已不再将其加入 `settings_scopes` 订阅；Settings 页通过 `fetchSystemProxy` 主动拉取，StatusBar / Traffic 页共享同一 `useProxyStore`。
