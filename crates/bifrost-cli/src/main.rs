@@ -452,6 +452,12 @@ fn run_cli_main() {
             client_id,
         }) => {
             let relay_url = resolve_remote_relay_url(relay_url, cli.port);
+            let client_id = client_id.or_else(|| {
+                std::env::var("BIFROST_REMOTE_CLIENT_ID")
+                    .ok()
+                    .map(|value| value.trim().to_string())
+                    .filter(|value| !value.is_empty())
+            });
             remote::handle_remote_command(remote::RemoteOptions {
                 relay_url,
                 client_id,

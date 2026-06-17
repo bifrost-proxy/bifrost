@@ -30,7 +30,7 @@ use super::search::SearchResultItem;
 use super::{render_traffic_detail_body, render_traffic_list_body, OutputFormat};
 use crate::cli::{
     RemoteCommandExecArgs, RemoteCommands, RemoteConnCommands, RemoteFileCommands,
-    RemoteJobCommands, RemoteSearchArgs, RemoteTrafficCommands,
+    RemoteJobCommands, RemoteRunArgs, RemoteSearchArgs, RemoteTrafficCommands,
 };
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
@@ -49,6 +49,7 @@ const START_PAIRING_OVERLOAD_RETRY_DELAYS_MS: [u64; 3] = [300, 700, 1500];
 const CANCEL_SETTLE_RETRY_DELAYS_MS: [u64; 4] = [200, 500, 1000, 2000];
 const SSH_CONNECT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REMOTE_SSH_KEY_ENV_VAR: &str = "BIFROST_REMOTE_SSH_KEY";
+const DEFAULT_REMOTE_CLIENT_ID_ENV_VAR: &str = "BIFROST_REMOTE_CLIENT_ID";
 const DEFAULT_REMOTE_SSH_KEY_ENV_SPEC: &str = "env:BIFROST_REMOTE_SSH_KEY";
 const BIFROST_KEY_BEGIN: &str = "-----BEGIN BIFROST KEY-----";
 const BIFROST_KEY_END: &str = "-----END BIFROST KEY-----";
@@ -66,6 +67,44 @@ fn is_false(value: &bool) -> bool {
 
 fn should_print_remote_progress_banner(stdout_is_terminal: bool) -> bool {
     stdout_is_terminal
+}
+
+fn remote_client_short_id(client_id: &str) -> &str {
+    &client_id[..client_id.len().min(12)]
+}
+
+fn saved_connection_selector_matches(conn: &LocalConnection, selector: &str) -> bool {
+    conn.client_instance_id.starts_with(selector)
+        || (!conn.device_name.is_empty() && conn.device_name.starts_with(selector))
+}
+
+fn saved_connection_choices(connections: &[LocalConnection]) -> String {
+    connections
+        .iter()
+        .map(|conn| {
+            let short_id = remote_client_short_id(&conn.client_instance_id);
+            let label = if conn.device_name.is_empty() {
+                "(unnamed)"
+            } else {
+                conn.device_name.as_str()
+            };
+            format!("  --client-id {short_id}    {label}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn multiple_connections_error(connections: &[LocalConnection]) -> String {
+    format!(
+        "multiple saved connections, please specify a target after `remote`, before the subcommand:\n{}\n→ Example: bifrost remote --client-id <id-or-label-prefix> conn status\n→ Or set {DEFAULT_REMOTE_CLIENT_ID_ENV_VAR}=<id-or-label-prefix>",
+        saved_connection_choices(connections)
+    )
+}
+
+fn remote_call_idle_timeout_message(timeout_secs: u64) -> String {
+    format!(
+        "remote call received no events for {timeout_secs}s (idle timeout, not total process timeout)\n→ Quiet or long-running commands should use `bifrost remote exec --detach ...` and then `bifrost remote job watch <call_id> --output-file <log>`"
+    )
 }
 
 #[derive(Debug)]
@@ -568,14 +607,22 @@ fn resolve_local_connection(
     if let Some(prefix) = explicit_id {
         let matches: Vec<&LocalConnection> = connections
             .iter()
-            .filter(|c| c.client_instance_id.starts_with(prefix))
+            .filter(|c| saved_connection_selector_matches(c, prefix))
             .collect();
 
         match matches.len() {
             0 => {
-                return Err(BifrostError::Config(
-                    "no saved connection matching that prefix, please run `bifrost remote conn up <pair-code>` first".to_string(),
-                ));
+                let detail = if connections.is_empty() {
+                    "no saved connections are available".to_string()
+                } else {
+                    format!(
+                        "available targets:\n{}\n→ Put --client-id after `remote`, before the subcommand.",
+                        saved_connection_choices(connections)
+                    )
+                };
+                return Err(BifrostError::Config(format!(
+                    "no saved connection matching '{prefix}'. {detail}\n→ If this is a new target, run `bifrost remote conn up <pair-code>` first"
+                )));
             }
             1 => {
                 let conn = matches[0];
@@ -587,14 +634,15 @@ fn resolve_local_connection(
             n => {
                 if !std::io::stdin().is_terminal() {
                     return Err(BifrostError::Config(format!(
-                        "ambiguous client id prefix '{prefix}' matches {n} saved connections, please be more specific"
+                        "ambiguous remote target selector '{prefix}' matches {n} saved connections, please be more specific:\n{}",
+                        saved_connection_choices(&matches.into_iter().cloned().collect::<Vec<_>>())
                     )));
                 }
 
                 let items: Vec<String> = matches
                     .iter()
                     .map(|c| {
-                        let short_id = &c.client_instance_id[..c.client_instance_id.len().min(12)];
+                        let short_id = remote_client_short_id(&c.client_instance_id);
                         format!("{} ({short_id})", c.device_name)
                     })
                     .collect();
@@ -635,15 +683,15 @@ fn resolve_local_connection(
         }
         n => {
             if !std::io::stdin().is_terminal() {
-                return Err(BifrostError::Config(
-                    "multiple saved connections, please specify --client-id".to_string(),
-                ));
+                return Err(BifrostError::Config(multiple_connections_error(
+                    connections,
+                )));
             }
 
             let items: Vec<String> = connections
                 .iter()
                 .map(|c| {
-                    let short_id = &c.client_instance_id[..c.client_instance_id.len().min(12)];
+                    let short_id = remote_client_short_id(&c.client_instance_id);
                     format!("{} ({short_id})", c.device_name)
                 })
                 .collect();
@@ -1556,7 +1604,11 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             return Err(BifrostError::Config(msg));
         }
     }
-    let command = build_remote_command_checked(&opts.action)?;
+    let mut command = if matches!(&opts.action, RemoteCommands::Run(_)) {
+        None
+    } else {
+        Some(build_remote_command_checked(&opts.action)?)
+    };
 
     let grant = caller
         .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
@@ -1622,7 +1674,10 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     // `--resume-relay-token`, skip open_call entirely and dive straight into
     // the streaming subscriber, seeded with offsets (0, 0). Validation of the
     // pair is performed via `validate_streaming_prefs`.
-    if let Some(prefs) = command.streaming_prefs.as_ref() {
+    if let Some(prefs) = command
+        .as_ref()
+        .and_then(|command| command.streaming_prefs.as_ref())
+    {
         if let Err(msg) = validate_streaming_prefs(prefs) {
             return Err(BifrostError::Config(msg));
         }
@@ -1664,6 +1719,38 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
 
     let transport = merge_transport_context(&conn, &grant)?;
+    let mut remote_run_cleanup: Option<(String, Option<String>)> = None;
+    if let RemoteCommands::Run(run_args) = &opts.action {
+        let remote_script_path = prepare_remote_run_script(
+            &caller,
+            &conn,
+            &grant,
+            &caller_fingerprint,
+            &transport,
+            run_args,
+        )
+        .await?;
+        if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
+            println!(
+                "{}",
+                format!("→ Uploaded script to {remote_script_path}").dimmed()
+            );
+        }
+        if run_args.detach {
+            eprintln!(
+                "  {} Detached `remote run` keeps the uploaded script for inspection: {}",
+                "→".bright_yellow(),
+                remote_script_path
+            );
+        } else if !run_args.keep {
+            remote_run_cleanup = Some((remote_script_path.clone(), run_args.cwd.clone()));
+        }
+        command = Some(build_remote_run_shell_exec_command(
+            run_args,
+            remote_script_path,
+        ));
+    }
+    let command = command.expect("remote command should be built before open_call");
     let active_grant_id = grant.grant_id.clone();
     let command_summary = build_open_call_command_summary(&command);
     let command_encrypted = encrypt_remote_command(
@@ -1714,8 +1801,12 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
 
     debug!(call_id = %call_result.call_id, grant_id = %active_grant_id, "call opened, subscribing to events");
-    if let RemoteCommands::Exec(exec_args) = &opts.action {
-        if exec_args.detach {
+    let should_detach = match &opts.action {
+        RemoteCommands::Exec(exec_args) => exec_args.detach,
+        RemoteCommands::Run(run_args) => run_args.detach,
+        _ => false,
+    };
+    if should_detach {
             let now = now_millis();
             remember_remote_job(RemoteJobRecord {
                 call_id: call_result.call_id.clone(),
@@ -1733,7 +1824,6 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             println!("call_id={}", call_result.call_id);
             println!("watch: bifrost remote job watch {}", call_result.call_id);
             return Ok(());
-        }
     }
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!("{}", "→ Executing command on remote device...".dimmed());
@@ -1776,6 +1866,18 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         };
         if let Some(handle) = stdin_forwarder {
             handle.abort();
+        }
+        if let Some((remote_path, cwd)) = remote_run_cleanup.as_ref() {
+            cleanup_remote_run_script(
+                &caller,
+                &conn,
+                &grant,
+                &caller_fingerprint,
+                &transport,
+                cwd.clone(),
+                remote_path,
+            )
+            .await;
         }
         if stream_result.exit_code != 0 {
             std::process::exit(stream_result.exit_code);
@@ -1873,6 +1975,19 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             "→".bright_yellow()
         );
         std::process::exit(1);
+    }
+
+    if let Some((remote_path, cwd)) = remote_run_cleanup.as_ref() {
+        cleanup_remote_run_script(
+            &caller,
+            &conn,
+            &grant,
+            &caller_fingerprint,
+            &transport,
+            cwd.clone(),
+            remote_path,
+        )
+        .await;
     }
 
     print_remote_result(&command, &result);
@@ -2360,6 +2475,10 @@ fn build_remote_command_checked(
             "`remote job` is handled locally and should not build an encrypted command".to_string(),
         )),
         RemoteCommands::Exec(exec_args) => Ok(build_remote_shell_exec_command(exec_args)),
+        RemoteCommands::Run(_) => Err(BifrostError::Config(
+            "`remote run` must upload its script before building the final remote exec command"
+                .to_string(),
+        )),
         RemoteCommands::File { action } => build_remote_file_command(action.as_ref()),
         RemoteCommands::KeepAwake { action } => {
             let (op, args) = crate::commands::keepawake::build_remote_args(action);
@@ -2478,6 +2597,179 @@ fn build_open_call_command_summary(command: &BuiltRemoteCommand) -> OpenCallComm
     }
 }
 
+async fn open_and_wait_remote_command(
+    caller: &CallerRelayClient,
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+    caller_fingerprint: &str,
+    transport: &OpenCallTransportContext,
+    command: &BuiltRemoteCommand,
+    timeout_secs: u64,
+) -> bifrost_core::Result<CallResult> {
+    let command_summary = build_open_call_command_summary(command);
+    let command_encrypted = encrypt_remote_command(
+        command.kind,
+        command.command.as_deref(),
+        command.args_json.as_deref(),
+        command.query.as_ref(),
+        command.shell_exec.as_ref(),
+        &grant.grant_id,
+        transport,
+    )?;
+    let call_result = caller
+        .open_call(&OpenCallRequest {
+            grant_id: grant.grant_id.clone(),
+            client_instance_id: conn.client_instance_id.clone(),
+            caller_fingerprint: caller_fingerprint.to_string(),
+            command_summary,
+            command_kind: command.kind,
+            command_encrypted,
+            pty_enabled: command
+                .shell_exec
+                .as_ref()
+                .and_then(|payload| payload.pty.as_ref())
+                .map(|pty| pty.enabled),
+        })
+        .await?;
+    caller
+        .subscribe_call_events(
+            &call_result.call_id,
+            &call_result.relay_token,
+            transport,
+            &command.render,
+            timeout_secs,
+        )
+        .await
+}
+
+async fn run_remote_file_command_or_fail(
+    caller: &CallerRelayClient,
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+    caller_fingerprint: &str,
+    transport: &OpenCallTransportContext,
+    command: &BuiltRemoteCommand,
+    phase: &str,
+) -> bifrost_core::Result<()> {
+    let result = open_and_wait_remote_command(
+        caller,
+        conn,
+        grant,
+        caller_fingerprint,
+        transport,
+        command,
+        CALL_EVENT_TIMEOUT_SECS,
+    )
+    .await?;
+    if result.exit_code == 0 {
+        return Ok(());
+    }
+    print_remote_result(command, &result);
+    Err(BifrostError::Config(format!(
+        "remote run failed while {phase}; see remote file error above"
+    )))
+}
+
+async fn prepare_remote_run_script(
+    caller: &CallerRelayClient,
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+    caller_fingerprint: &str,
+    transport: &OpenCallTransportContext,
+    run_args: &RemoteRunArgs,
+) -> bifrost_core::Result<String> {
+    let script_file = run_args.script_file.as_ref().ok_or_else(|| {
+        BifrostError::Config("`remote run --script-file <path>` is required".to_string())
+    })?;
+    let remote_path = remote_run_script_remote_path(run_args)?;
+    let scratch_command = build_remote_file_command(&RemoteFileCommands::ScratchDir {
+        cwd: run_args.cwd.clone(),
+        name: run_args.scratch_name.clone(),
+        output: "json".to_string(),
+    })?;
+    run_remote_file_command_or_fail(
+        caller,
+        conn,
+        grant,
+        caller_fingerprint,
+        transport,
+        &scratch_command,
+        "creating the remote scratch directory",
+    )
+    .await?;
+    let write_command = build_remote_file_command(&RemoteFileCommands::Write {
+        path: Some(remote_path.clone()),
+        path_flag: None,
+        content: None,
+        content_file: Some(script_file.to_string_lossy().to_string()),
+        content_b64: None,
+        base_sha256: None,
+        allow_overwrite: Some(false),
+        create_parents: true,
+        cwd: run_args.cwd.clone(),
+        output: "json".to_string(),
+    })?;
+    run_remote_file_command_or_fail(
+        caller,
+        conn,
+        grant,
+        caller_fingerprint,
+        transport,
+        &write_command,
+        "uploading the local script",
+    )
+    .await?;
+    Ok(remote_path)
+}
+
+async fn cleanup_remote_run_script(
+    caller: &CallerRelayClient,
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+    caller_fingerprint: &str,
+    transport: &OpenCallTransportContext,
+    cwd: Option<String>,
+    remote_path: &str,
+) {
+    let Ok(delete_command) = build_remote_file_command(&RemoteFileCommands::Delete {
+        path: remote_path.to_string(),
+        recursive: false,
+        cwd,
+        output: "json".to_string(),
+    }) else {
+        return;
+    };
+    match open_and_wait_remote_command(
+        caller,
+        conn,
+        grant,
+        caller_fingerprint,
+        transport,
+        &delete_command,
+        CALL_EVENT_TIMEOUT_SECS,
+    )
+    .await
+    {
+        Ok(result) if result.exit_code == 0 => {}
+        Ok(result) => {
+            eprintln!(
+                "  {} remote run cleanup did not delete {} (exit_code={})",
+                "→".bright_yellow(),
+                remote_path,
+                result.exit_code
+            );
+        }
+        Err(error) => {
+            eprintln!(
+                "  {} remote run cleanup did not delete {}: {}",
+                "→".bright_yellow(),
+                remote_path,
+                error
+            );
+        }
+    }
+}
+
 /// Phase 6 (review fix): pure helper that encodes the post-exit scheduling
 /// contract. Exposed for unit testing so that regression coverage does not
 /// have to spin up a full SSE stream.
@@ -2587,6 +2879,96 @@ fn build_remote_shell_exec_command(exec_args: &RemoteCommandExecArgs) -> BuiltRe
         render: RemoteRenderMode::Raw,
         streaming_prefs: Some(streaming_prefs),
     }
+}
+
+fn build_remote_run_shell_exec_command(
+    run_args: &RemoteRunArgs,
+    remote_script_path: String,
+) -> BuiltRemoteCommand {
+    let mut argv = vec![run_args.interpreter.clone(), remote_script_path.clone()];
+    argv.extend(run_args.args.clone());
+    let shell_exec = ShellExecPayload {
+        exec_mode: "argv_exec".to_string(),
+        argv: Some(argv),
+        command_text: None,
+        cwd: run_args.cwd.clone(),
+        env: remote_shell_exec_env(&run_args.env),
+        timeout_ms: run_args.timeout_ms,
+        login: false,
+        stdin_mode: None,
+        pty: None,
+        output_mode: None,
+    };
+    let streaming_prefs = StreamingPrefs {
+        stream: run_args.stream,
+        output_file: run_args.output_file.as_ref().map(PathBuf::from),
+        resume_call_id: None,
+        resume_relay_token: None,
+        no_verify_digest: run_args.no_verify_digest,
+        interactive: false,
+        stdin: false,
+    };
+
+    BuiltRemoteCommand {
+        kind: CommandKind::ShellExec,
+        label: "remote.run".to_string(),
+        command: Some(format!(
+            "run {} {}",
+            run_args.interpreter, remote_script_path
+        )),
+        args_json: None,
+        query: None,
+        shell_exec: Some(shell_exec),
+        render: RemoteRenderMode::Raw,
+        streaming_prefs: Some(streaming_prefs),
+    }
+}
+
+fn sanitize_remote_run_filename(value: &str) -> String {
+    let sanitized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "script".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn remote_run_script_remote_path(run_args: &RemoteRunArgs) -> bifrost_core::Result<String> {
+    let scratch_name = run_args.scratch_name.trim_matches('/');
+    if scratch_name.is_empty() || scratch_name.contains("..") {
+        return Err(BifrostError::Config(
+            "`remote run --scratch-name` must be a non-empty relative directory name".to_string(),
+        ));
+    }
+    let script_file = run_args.script_file.as_ref().ok_or_else(|| {
+        BifrostError::Config("`remote run --script-file <path>` is required".to_string())
+    })?;
+    let local_name = script_file
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("script");
+    let remote_name = run_args
+        .remote_name
+        .as_deref()
+        .map(sanitize_remote_run_filename)
+        .unwrap_or_else(|| {
+            format!(
+                "run-{}-{}",
+                now_millis(),
+                sanitize_remote_run_filename(local_name)
+            )
+        });
+    Ok(format!("{scratch_name}/{remote_name}"))
 }
 
 fn current_terminal_size() -> (u16, u16) {
@@ -2785,6 +3167,7 @@ fn build_remote_file_command(
         ),
         RemoteFileCommands::Write {
             path,
+            path_flag,
             content: cli_content,
             content_file,
             content_b64: cli_content_b64,
@@ -2794,6 +3177,7 @@ fn build_remote_file_command(
             cwd,
             output,
         } => {
+            let path = resolve_file_write_path(path, path_flag)?;
             let content_b64 = if let Some(b64) = cli_content_b64.as_deref() {
                 b64.to_string()
             } else if let Some(text) = cli_content.as_deref() {
@@ -3098,6 +3482,21 @@ fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<Stri
     }
 
     Some(env_pairs.iter().cloned().collect())
+}
+
+fn resolve_file_write_path(
+    positional: &Option<String>,
+    path_flag: &Option<String>,
+) -> bifrost_core::Result<String> {
+    match (positional.as_ref(), path_flag.as_ref()) {
+        (Some(path), None) | (None, Some(path)) => Ok(path.clone()),
+        (Some(_), Some(_)) => Err(BifrostError::Config(
+            "[file.invalid_args] pass the target path only once: use `bifrost remote file write <path> ...` or the compatibility form `--path <path>`, not both".to_string(),
+        )),
+        (None, None) => Err(BifrostError::Config(
+            "[file.invalid_args] missing target path for file write\n→ Use: bifrost remote file write <path> --content-file <local-file>".to_string(),
+        )),
+    }
 }
 
 fn query_args_json(query: &CanonicalQueryCommand) -> Option<String> {
@@ -5030,8 +5429,13 @@ impl CallerRelayClient {
                     }
                     warn!("call events timed out");
                     if !stream_stdout && stdout_parts.is_empty() {
-                        return Err(BifrostError::Config("remote call timed out waiting for response".to_string()));
+                        return Err(BifrostError::Config(remote_call_idle_timeout_message(timeout_secs)));
                     }
+                    eprintln!(
+                        "  {} {}",
+                        "→".bright_yellow(),
+                        remote_call_idle_timeout_message(timeout_secs).bright_yellow()
+                    );
                     if !stream_stdout {
                         result.stdout = Some(stdout_parts.join(""));
                     }
@@ -5284,6 +5688,11 @@ impl CallerRelayClient {
             tokio::select! {
                 _ = &mut timeout => {
                     warn!("streaming events idle timeout");
+                    eprintln!(
+                        "  {} {}",
+                        "→".bright_yellow(),
+                        remote_call_idle_timeout_message(timeout_secs).bright_yellow()
+                    );
                     return Ok(StreamingSubscriptionOutcome::Disconnected {
                         reason: "idle_timeout".to_string(),
                     });
@@ -8747,11 +9156,43 @@ mod coverage_boost {
     }
 
     #[test]
+    fn resolve_local_connection_explicit_device_label_prefix_matches() {
+        let mut conn = sample_local_connection("client-full", "https://relay-a");
+        conn.device_name = "devbox-mac".to_string();
+        let resolved =
+            resolve_local_connection(std::slice::from_ref(&conn), Some("devbox")).expect("resolve");
+        assert_eq!(resolved.client_instance_id, "client-full");
+    }
+
+    #[test]
+    fn resolve_local_connection_multiple_noninteractive_lists_choices() {
+        let conn_a = sample_local_connection("client-aaaaaaaa", "https://relay-a");
+        let mut conn_b = sample_local_connection("client-bbbbbbbb", "https://relay-a");
+        conn_b.device_name = "macbook".to_string();
+        let err = resolve_local_connection(&[conn_a, conn_b], None).expect_err("should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("multiple saved connections"));
+        assert!(msg.contains("--client-id client-aaaa"));
+        assert!(msg.contains("--client-id client-bbbb"));
+        assert!(msg.contains(DEFAULT_REMOTE_CLIENT_ID_ENV_VAR));
+        assert!(msg.contains("bifrost remote --client-id"));
+    }
+
+    #[test]
     fn resolve_local_connection_explicit_prefix_with_no_match_errors() {
         let conn = sample_local_connection("client-1", "https://relay-a");
         let err =
             resolve_local_connection(&[conn], Some("does-not-exist")).expect_err("should fail");
         assert!(err.to_string().contains("no saved connection matching"));
+    }
+
+    #[test]
+    fn idle_timeout_message_mentions_seconds_and_job_watch() {
+        let msg = remote_call_idle_timeout_message(CALL_EVENT_TIMEOUT_SECS);
+        assert!(msg.contains("300s"));
+        assert!(msg.contains("idle timeout"));
+        assert!(msg.contains("remote exec --detach"));
+        assert!(msg.contains("remote job watch"));
     }
 
     // --- Shell scope upgrade error variants ---
@@ -9876,7 +10317,8 @@ mod coverage_boost_v3 {
     #[test]
     fn file_write_prefers_cli_b64_over_file() {
         let cmd = RemoteFileCommands::Write {
-            path: "out.txt".to_string(),
+            path: Some("out.txt".to_string()),
+            path_flag: None,
             content: None,
             content_file: Some("ignored".to_string()),
             content_b64: Some("Zm9vYmFy".to_string()),
@@ -9903,7 +10345,8 @@ mod coverage_boost_v3 {
         let path = tmp.path().to_path_buf();
 
         let cmd = RemoteFileCommands::Write {
-            path: "from-file.txt".to_string(),
+            path: Some("from-file.txt".to_string()),
+            path_flag: None,
             content: None,
             content_file: Some(path.display().to_string()),
             content_b64: None,
@@ -9925,9 +10368,48 @@ mod coverage_boost_v3 {
     }
 
     #[test]
+    fn file_write_accepts_path_flag_compatibility_alias() {
+        let cmd = RemoteFileCommands::Write {
+            path: None,
+            path_flag: Some("flag-path.txt".to_string()),
+            content: Some("hello".to_string()),
+            content_file: None,
+            content_b64: None,
+            base_sha256: None,
+            allow_overwrite: None,
+            create_parents: true,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert_eq!(v["path"], "flag-path.txt");
+        assert_eq!(v["create_parents"].as_bool(), Some(true));
+    }
+
+    #[test]
+    fn file_write_rejects_duplicate_positional_and_path_flag() {
+        let cmd = RemoteFileCommands::Write {
+            path: Some("pos.txt".to_string()),
+            path_flag: Some("flag.txt".to_string()),
+            content: Some("hello".to_string()),
+            content_file: None,
+            content_b64: None,
+            base_sha256: None,
+            allow_overwrite: None,
+            create_parents: false,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let err = build_remote_file_command(&cmd).expect_err("expected duplicate path error");
+        assert!(err.to_string().contains("target path only once"));
+    }
+
+    #[test]
     fn file_write_reports_io_error_when_file_missing() {
         let cmd = RemoteFileCommands::Write {
-            path: "missing.txt".to_string(),
+            path: Some("missing.txt".to_string()),
+            path_flag: None,
             content: None,
             content_file: Some("/definitely/not/present".to_string()),
             content_b64: None,
@@ -9945,6 +10427,74 @@ mod coverage_boost_v3 {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn remote_run_builds_argv_exec_payload_for_uploaded_script() {
+        let args = RemoteRunArgs {
+            script_file: Some(PathBuf::from("./q.py")),
+            interpreter: "python3".to_string(),
+            cwd: Some("/repo".to_string()),
+            env: vec![("TOKEN".to_string(), "redacted".to_string())],
+            timeout_ms: Some(600000),
+            scratch_name: ".bifrost-tmp".to_string(),
+            remote_name: None,
+            keep: false,
+            detach: false,
+            stream: true,
+            output_file: Some("run.log".to_string()),
+            no_verify_digest: true,
+            args: vec!["--limit".to_string(), "5".to_string()],
+        };
+        let built = build_remote_run_shell_exec_command(&args, ".bifrost-tmp/run-q.py".to_string());
+        assert_eq!(built.kind, CommandKind::ShellExec);
+        assert_eq!(built.label, "remote.run");
+        let payload = built.shell_exec.as_ref().expect("shell payload");
+        assert_eq!(payload.exec_mode, "argv_exec");
+        assert_eq!(
+            payload.argv.as_ref().expect("argv"),
+            &vec![
+                "python3".to_string(),
+                ".bifrost-tmp/run-q.py".to_string(),
+                "--limit".to_string(),
+                "5".to_string(),
+            ]
+        );
+        assert_eq!(payload.cwd.as_deref(), Some("/repo"));
+        assert_eq!(payload.timeout_ms, Some(600000));
+        assert_eq!(
+            payload
+                .env
+                .as_ref()
+                .and_then(|env| env.get("TOKEN"))
+                .map(String::as_str),
+            Some("redacted")
+        );
+        let prefs = built.streaming_prefs.as_ref().expect("streaming prefs");
+        assert!(prefs.is_streaming());
+        assert!(prefs.no_verify_digest);
+        assert_eq!(prefs.output_file.as_deref(), Some(Path::new("run.log")));
+    }
+
+    #[test]
+    fn remote_run_remote_path_uses_scratch_dir_and_sanitized_filename() {
+        let args = RemoteRunArgs {
+            script_file: Some(PathBuf::from("./weird name$.py")),
+            interpreter: "python3".to_string(),
+            cwd: None,
+            env: vec![],
+            timeout_ms: None,
+            scratch_name: ".bifrost-tmp".to_string(),
+            remote_name: Some("custom name$.py".to_string()),
+            keep: false,
+            detach: false,
+            stream: false,
+            output_file: None,
+            no_verify_digest: false,
+            args: vec![],
+        };
+        let remote_path = remote_run_script_remote_path(&args).expect("remote path");
+        assert_eq!(remote_path, ".bifrost-tmp/custom_name_.py");
     }
 
     #[test]
