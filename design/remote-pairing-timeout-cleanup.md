@@ -74,15 +74,15 @@ relay 侧 `packages/bifrost-sync-server` 的配对状态语义不一致：
 
 ### Relay API E2E
 
-- `packages/bifrost-sync-server/src/__tests__/remote-invoke-relay-v2-phase1.test.ts`
+- `packages/bifrost-sync-server/src/__tests__/remote-invoke-pairing-timeout.test.ts`
   - 过期 pending pairing 不应继续占用 `pair_slot_occupied`
   - expired pairing 的 grant decision 应返回 `410`，并将数据库状态更新为 `expired`
 
 ### Human Tests
 
 - `human_tests/remote-invoke.md`
-  - 新增“超时后重新获取 pair code 可再次 connect”
-  - 新增“超时请求在 Pending 列表中不会反复出现，点击审批也不会再报 500”
+  - TC-RI-回归-62：超时配对请求自动从 pending 列表中移除
+  - TC-RI-回归-63：超时后点击 Authorize/Reject 显示友好错误并移除请求
 
 ## 影响范围
 
@@ -90,5 +90,18 @@ relay 侧 `packages/bifrost-sync-server` 的配对状态语义不一致：
 - `packages/bifrost-sync-server/src/routes/remote-invoke.ts`
 - `crates/bifrost-admin/src/remote_invoke/worker.rs`
 - `crates/bifrost-admin/src/handlers/remote_invoke.rs`
-- `packages/bifrost-sync-server/src/__tests__/remote-invoke-relay-v2-phase1.test.ts`
+- `packages/bifrost-sync-server/src/__tests__/remote-invoke-pairing-timeout.test.ts`
 - `human_tests/remote-invoke.md`
+
+## 实现状态（2026-06-17 核对）
+
+本方案各项已经落地，关键代码位置：
+
+- relay 查询面收敛过期 pairing：`packages/bifrost-sync-server/src/remote-invoke/service.ts` 中 `expirePendingPairing()` + `loadActivePendingPairings()`，分别被 `getPendingPairingsForClient()`、`cancelPendingPairings()`、`startPairing()` 复用，`pair_slot_occupied` 判定前会先剔除过期项。
+- relay 审批面：`submitGrantDecision()` 在状态检查前调用 `isPendingPairingExpired()`，命中则 `expirePendingPairing()` 并 `throw pairing_expired`。
+- HTTP 状态码映射：`packages/bifrost-sync-server/src/routes/remote-invoke.ts` 中 `pairing_expired → 410`、`pairing_not_found → 404`、`client_mismatch → 403`，其余 → 400。
+- admin worker 错误收敛：`crates/bifrost-admin/src/remote_invoke/worker.rs` 的 `is_relay_stale_pairing_error()` 同时识别 `pairing_expired` / `pairing_not_pending` / `pairing_not_found`，`approve_pairing()` / `reject_pairing()` 命中后从本地 `pending_pairings` 删除并统一转成 `pairing <id> not found or expired`。
+- handler 状态码映射：`crates/bifrost-admin/src/handlers/remote_invoke.rs` 的 `pairing_action_status_code()` 把 stale pairing 错误映射为 `404`，其余为 `500`。
+- 本地清理优先使用 relay `expires_at`：`pairing_request_is_alive()` 优先用 `request.expires_at`（来自 SSE / `poll_pending_pairings_from_relay()` 持久化的 relay 时间戳），仅在缺失时回退到 `pair_code_ttl_secs * 1000` 兜底。
+
+暂未发现“(planned, not yet shipped as of 2026-06-17)”项。
