@@ -1022,16 +1022,18 @@ fn flex_column_budget(
     (min + share) as usize
 }
 
-fn caller_label(
+fn caller_label_with_budget(
     display_name: Option<&String>,
     label: Option<&String>,
     fingerprint: &str,
+    max_chars: usize,
 ) -> String {
     display_name
         .filter(|value| !value.trim().is_empty())
         .or(label.filter(|value| !value.trim().is_empty()))
         .cloned()
-        .unwrap_or_else(|| truncate_text(fingerprint, 12))
+        .map(|value| truncate_text(&value, max_chars))
+        .unwrap_or_else(|| truncate_text(fingerprint, max_chars))
 }
 
 fn format_remote_auth(auth_method: Option<&String>) -> String {
@@ -1791,6 +1793,8 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
     const MAX_REMOTE_TABLE_ROWS: usize = 200;
     // 命令列在极窄窗口下的兜底最小可读宽度。
     const REMOTE_MIN_CMD_BUDGET: usize = 18;
+    // Client 列在极窄窗口下保持与表格 Min 约束一致的兜底宽度。
+    const REMOTE_MIN_CLIENT_BUDGET: usize = 12;
 
     let layout = Layout::default()
         .direction(Direction::Vertical)
@@ -1876,6 +1880,14 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
         1, // Latest Command 列
     )
     .max(REMOTE_MIN_CMD_BUDGET);
+    let client_label_budget = flex_column_budget(
+        layout[1].width,
+        CLIENTS_FIXED_TOTAL,
+        &CLIENTS_FLEX_MINS,
+        9, // 表格总列数
+        0, // Client 列
+    )
+    .max(REMOTE_MIN_CLIENT_BUDGET);
 
     let client_rows: Vec<Row> = app
         .remote_invoke
@@ -1894,10 +1906,11 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
                 .map(format_remote_result)
                 .unwrap_or_else(|| "-".to_string());
             Row::new(vec![
-                caller_label(
+                caller_label_with_budget(
                     grant.caller_display_name.as_ref(),
                     grant.label.as_ref(),
                     &grant.caller_fingerprint,
+                    client_label_budget,
                 ),
                 format_remote_auth(grant.auth_method.as_ref()),
                 grant.grant_scope.clone().unwrap_or_else(|| "-".to_string()),
@@ -1958,6 +1971,14 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
         1, // Command 列
     )
     .max(REMOTE_MIN_CMD_BUDGET);
+    let call_client_budget = flex_column_budget(
+        layout[2].width,
+        CALLS_FIXED_TOTAL,
+        &CALLS_FLEX_MINS,
+        7, // 表格总列数
+        0, // Client 列
+    )
+    .max(REMOTE_MIN_CLIENT_BUDGET);
 
     let call_rows: Vec<Row> = app
         .remote_invoke
@@ -1966,10 +1987,11 @@ fn render_remote_invoke(frame: &mut Frame, area: Rect, app: &App) {
         .take(call_capacity)
         .map(|call| {
             Row::new(vec![
-                caller_label(
+                caller_label_with_budget(
                     call.caller_display_name.as_ref(),
                     None,
                     &call.caller_fingerprint,
+                    call_client_budget,
                 ),
                 format_remote_auth(call.auth_method.as_ref()),
                 truncate_text(&call.command_summary.command_preview, call_cmd_budget),
@@ -2172,6 +2194,20 @@ mod tests {
     }
 
     #[test]
+    fn flex_column_budget_expands_client_column_with_width() {
+        let fixed = 90u16;
+        let flex_mins = [12u16, 18u16];
+        let narrow_client = flex_column_budget(100, fixed, &flex_mins, 9, 0);
+        assert_eq!(narrow_client, 12);
+
+        let wide_client = flex_column_budget(300, fixed, &flex_mins, 9, 0);
+        assert!(
+            wide_client > 12,
+            "wide window should grant client column more than the minimum budget, got {wide_client}"
+        );
+    }
+
+    #[test]
     fn flex_column_budget_handles_degenerate_inputs() {
         // 没有弹性列时返回该列最小值(此处取 index 越界 -> 0)。
         assert_eq!(flex_column_budget(200, 50, &[], 9, 0), 0);
@@ -2254,16 +2290,34 @@ mod tests {
     #[test]
     fn remote_invoke_labels_prefer_human_names_and_normalize_auth() {
         assert_eq!(
-            caller_label(
+            caller_label_with_budget(
                 Some(&"Laptop".to_string()),
                 Some(&"SSH Agent".to_string()),
-                "abcdef0123456789"
+                "abcdef0123456789",
+                12,
             ),
             "Laptop"
         );
         assert_eq!(
-            caller_label(None, Some(&"SSH Agent".to_string()), "abcdef0123456789"),
+            caller_label_with_budget(None, Some(&"SSH Agent".to_string()), "abcdef0123456789", 12),
             "SSH Agent"
+        );
+        assert_eq!(
+            caller_label_with_budget(None, None, "caller-abcdef0123456789", 12),
+            "caller-abcd..."
+        );
+        assert_eq!(
+            caller_label_with_budget(None, None, "caller-abcdef0123456789", 24),
+            "caller-abcdef0123456789"
+        );
+        assert_eq!(
+            caller_label_with_budget(
+                Some(&"Very Long Client Label".to_string()),
+                None,
+                "ignored",
+                12
+            ),
+            "Very Long C..."
         );
         assert_eq!(
             format_remote_auth(Some(&"ssh_publickey".to_string())),

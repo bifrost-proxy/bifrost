@@ -486,6 +486,56 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_external_params_start_fresh_conversation() {
+    let state = AsrDailyAgentConversationState {
+        initialized: true,
+        conversation_id: Some("previous-conversation".to_string()),
+        thread_id: Some("previous-thread".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        daily_agent_external_runner_params("chatgpt_web", &state),
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        daily_agent_external_runner_params("codex", &state),
+        serde_json::json!({ "threadId": "previous-thread" })
+    );
+}
+
+#[test]
+fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
+    assert!(validate_chatgpt_web_daily_report_response(
+        "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+            .repeat(20)
+            .as_str(),
+        "2026-06-15"
+    )
+    .is_ok());
+    assert!(validate_chatgpt_web_daily_report_response(
+        "ChatGPT 说：# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+            .repeat(20)
+            .as_str(),
+        "2026-06-15"
+    )
+    .is_ok());
+    assert!(validate_chatgpt_web_daily_report_response(
+        "ChatGPT 说：用户的消息为空，但上传的文件包含生成报告的完整说明。",
+        "2026-06-15"
+    )
+    .is_err());
+    assert!(validate_chatgpt_web_daily_report_response("ChatGPT 说：正在思考", "2026-06-15")
+        .is_err());
+    assert!(validate_chatgpt_web_daily_report_response(
+        &"我会直接生成完整日报正文，并包含 # 2026-06-15 日报、## 今日概览 和 ## 证据与不确定性。"
+            .repeat(20),
+        "2026-06-15"
+    )
+    .is_err());
+}
+
+#[test]
 fn daily_agent_change_plan_filters_to_requested_date() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();

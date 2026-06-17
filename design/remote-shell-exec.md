@@ -4838,3 +4838,22 @@ bifrost-sync-server 优先实现（便于本地调试），验证通过后同步
 - `cargo test -p bifrost-admin remote_invoke::executor::tests::shell_text_cwd_prefix_quotes_and_forces_cd_inside_shell --lib`
 - `cargo test -p bifrost-cli remote:: --lib --no-run`
 - `cargo test -p bifrost-admin remote_invoke::executor:: --lib --no-run`
+
+### 十六、2026-06-17 detached job 本地恢复缓存
+
+本轮把 `relay_token` 从日常 CLI 交互中收回为 caller 本地实现细节。用户启动长任务后只需要保存或从列表找回 `call_id`，不再手工复制 token。
+
+实现约束：
+
+1. `bifrost remote exec --detach` 在 open_call 成功后，把 `call_id`、加密后的 per-call relay token、relay URL、client/device 摘要、命令摘要与本地状态写入 caller 数据目录的 `remote-jobs.json`。
+2. `bifrost remote job status|logs|watch <call_id>` 默认从本地 job cache 解析 relay URL 和 relay token；如果 cache 里的 relay URL 与当前默认值不同，应按 cache 重建 caller client，避免要求用户传额外 URL 参数。
+3. `bifrost remote job list` 只读取本地 cache，展示 caller 已知 detached jobs 的 call_id、最近状态、exit code、设备和命令摘要。
+4. `remote job status|logs|watch` 不再提供手工 `--relay-token` 参数；缺失本地 cache 时直接报错并提示 `remote job list` / 重新 `exec --detach`，不做历史兼容分支。
+5. `status` 成功观察到 running/exited 后更新本地 cache；`watch` 返回真实远端 exit code，并在终态时写回 `exited + exit_code`。
+
+验证计划：
+
+- `cargo test -p bifrost-cli remote::coverage_boost --lib`
+- `cargo test -p bifrost-cli remote:: --lib --no-run`
+- `bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh`
+- `human_tests/remote-shell-exec.md` 新增/执行 call_id-only job 恢复用例

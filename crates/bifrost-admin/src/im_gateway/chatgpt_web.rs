@@ -50,10 +50,10 @@ use send::send_with_browser;
 #[cfg(test)]
 use send::{
     composer_text_injection_mode, extract_conversation_id_from_url, handoff_heartbeat_error,
-    handoff_page_heartbeat_error, page_state_is_auth_flow_page, parse_send_sse, paste_modifier,
-    send_button_ready_max_wait, send_button_ready_retry_max_wait, should_retry_as_new_conversation,
-    target_page_error, target_page_is_terminal_mismatch, target_page_matches,
-    ComposerTextInjectionMode,
+    handoff_page_heartbeat_error, native_clipboard_paste_followup_instruction,
+    page_state_is_auth_flow_page, parse_send_sse, paste_modifier, send_button_ready_max_wait,
+    send_button_ready_retry_max_wait, should_retry_as_new_conversation, target_page_error,
+    target_page_is_terminal_mismatch, target_page_matches, ComposerTextInjectionMode,
 };
 use storage::{read_auth_state, write_auth_state, write_redacted_json};
 
@@ -594,6 +594,14 @@ struct RuntimeConfig {
     state_path: PathBuf,
     sessions_path: PathBuf,
     attachments_dir: PathBuf,
+}
+
+impl RuntimeConfig {
+    fn with_profile_dir(&self, profile_dir: PathBuf) -> Self {
+        let mut config = self.clone();
+        config.profile_dir = profile_dir;
+        config
+    }
 }
 
 #[derive(Clone)]
@@ -1538,7 +1546,34 @@ async fn ask_send_and_wait(
 ) -> Result<(std::time::Duration, String, WaitedFinal), String> {
     let phase_start = std::time::Instant::now();
     let after_time = now_secs_f64() - 5.0;
-    let send = send_with_browser(config, auth, conversation_id, message, stop_marker_path).await?;
+    let fresh_profile_dir = if conversation_id.is_none() {
+        Some(run_dir.join("chatgpt_web_fresh_profile"))
+    } else {
+        None
+    };
+    let scoped_config;
+    let send_config = if let Some(profile_dir) = fresh_profile_dir.as_ref() {
+        scoped_config = config.with_profile_dir(profile_dir.clone());
+        &scoped_config
+    } else {
+        config
+    };
+
+    let send = match send_with_browser(
+        send_config,
+        auth,
+        conversation_id,
+        message,
+        stop_marker_path,
+    )
+    .await
+    {
+        Ok(send) => send,
+        Err(error) => {
+            cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
+            return Err(error);
+        }
+    };
     let send_elapsed = phase_start.elapsed();
     info!(
         send_ms = send_elapsed.as_millis() as u64,
@@ -1546,6 +1581,7 @@ async fn ask_send_and_wait(
         "chatgpt_web ask: send phase complete"
     );
     if stop_requested(stop_marker_path).await {
+        cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
         return Err(stopped_error());
     }
     let final_conversation_id = send
@@ -1569,7 +1605,7 @@ async fn ask_send_and_wait(
         && !has_handoff_submission_evidence(&send.event_types)
     {
         if let Err(error) = wait_user_message_visible(
-            config,
+            send_config,
             auth,
             &final_conversation_id,
             message,
@@ -1579,6 +1615,7 @@ async fn ask_send_and_wait(
         )
         .await
         {
+            cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
             let fetch_error = send
                 .event_types
                 .iter()
@@ -1598,6 +1635,7 @@ async fn ask_send_and_wait(
                 conversation_id = %final_conversation_id,
                 "chatgpt_web ask: using SSE stream data directly (no API polling)"
             );
+            cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
             return Ok((send_elapsed, final_conversation_id, waited));
         }
         info!(
@@ -1605,17 +1643,39 @@ async fn ask_send_and_wait(
             "chatgpt_web ask: SSE detail incomplete, falling back to DOM/API wait"
         );
     }
-    let waited = wait_final(
-        config,
+    let waited = match wait_final(
+        send_config,
         auth,
         &final_conversation_id,
         Some(after_time),
         Duration::from_secs(config.chatgpt.timeout_secs),
         stop_marker_path,
-        Some(&config.profile_dir),
+        Some(&send_config.profile_dir),
     )
-    .await?;
+    .await
+    {
+        Ok(waited) => waited,
+        Err(error) => {
+            cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
+            return Err(error);
+        }
+    };
+    cleanup_fresh_run_profile(send_config, fresh_profile_dir.as_deref()).await;
     Ok((send_elapsed, final_conversation_id, waited))
+}
+
+async fn cleanup_fresh_run_profile(config: &RuntimeConfig, profile_dir: Option<&Path>) {
+    let Some(profile_dir) = profile_dir else {
+        return;
+    };
+    BrowserSession::kill_for_profile(config).await;
+    if let Err(error) = tokio::fs::remove_dir_all(profile_dir).await {
+        debug!(
+            profile_dir = %profile_dir.display(),
+            error = %error,
+            "chatgpt_web ask: failed to remove fresh-run browser profile"
+        );
+    }
 }
 
 pub async fn auth_status(

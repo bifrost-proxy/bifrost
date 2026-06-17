@@ -845,6 +845,46 @@ fn single_entry_change_plan(
     }
 }
 
+fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Result<(), String> {
+    let trimmed = response.trim();
+    if trimmed.len() < 512 {
+        return Err(format!(
+            "chatgpt_web daily report response too short for {date}: {} bytes",
+            trimmed.len()
+        ));
+    }
+    if !trimmed.contains(date) {
+        return Err(format!(
+            "chatgpt_web daily report response missing target date {date}"
+        ));
+    }
+    let normalized = trimmed
+        .trim_start_matches("ChatGPT 说")
+        .trim_start_matches([':', '：'])
+        .trim();
+    let expected_heading = format!("# {date} 日报");
+    if !normalized.starts_with(&expected_heading) {
+        return Err(format!(
+            "chatgpt_web daily report response missing leading report heading {expected_heading}"
+        ));
+    }
+    if !normalized.contains("今日概览") || !normalized.contains("证据与不确定性") {
+        return Err(format!(
+            "chatgpt_web daily report response missing required report sections for {date}"
+        ));
+    }
+    if normalized.starts_with("用户的消息为空")
+        || normalized.contains("上传的文件包含")
+        || normalized == "正在思考"
+        || normalized == "正在打草稿"
+    {
+        return Err(format!(
+            "chatgpt_web daily report response is a status/error placeholder for {date}"
+        ));
+    }
+    Ok(())
+}
+
 fn metadata_value(
     metadata: &DailyAgentBTreeMap<String, String>,
     keys: &[&str],
@@ -868,7 +908,9 @@ fn persist_daily_agent_conversation_success(
     state.session_key = Some(session_key.to_string());
     state.initialized = true;
     state.updated_at_ms = Some(now_ms());
-    if let Some(metadata) = metadata {
+    if adapter == "chatgpt_web" {
+        state.conversation_id = None;
+    } else if let Some(metadata) = metadata {
         if let Some(conversation_id) =
             metadata_value(metadata, &["conversationId", "conversation_id"])
         {
@@ -978,32 +1020,40 @@ async fn run_external_daily_agent_prompt(
     conversation_state: &AsrDailyAgentConversationState,
     effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
 ) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
+    let params = daily_agent_external_runner_params(
+        effective.settings.adapter.as_str(),
+        conversation_state,
+    );
+    let request_session_key = if effective.settings.adapter == "chatgpt_web" {
+        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
+        None
+    } else {
+        Some(session_key.to_string())
+    };
+    run_external_daily_agent_prompt_with_params(
+        task,
+        runner_id,
+        prompt,
+        daily_dir,
+        request_session_key,
+        params,
+        effective,
+    )
+    .await
+}
+
+async fn run_external_daily_agent_prompt_with_params(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    prompt: String,
+    daily_dir: &Path,
+    request_session_key: Option<String>,
+    params: serde_json::Value,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
     let operation = match effective.settings.adapter.as_str() {
         "codex" => "run".to_string(),
         _ => "send".to_string(),
-    };
-
-    let mut params = serde_json::Map::new();
-    if effective.settings.adapter == "codex" {
-        if let Some(thread_id) = conversation_state.thread_id.as_deref() {
-            params.insert(
-                "threadId".to_string(),
-                serde_json::Value::String(thread_id.to_string()),
-            );
-        }
-    }
-    if effective.settings.adapter == "chatgpt_web" {
-        if let Some(conversation_id) = conversation_state.conversation_id.as_deref() {
-            params.insert(
-                "conversationId".to_string(),
-                serde_json::Value::String(conversation_id.to_string()),
-            );
-        }
-    }
-    let params = if params.is_empty() {
-        serde_json::Value::Null
-    } else {
-        serde_json::Value::Object(params)
     };
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
@@ -1013,7 +1063,7 @@ async fn run_external_daily_agent_prompt(
         params,
         provider_id: None,
         runner_id: Some(runner_id.to_string()),
-        session_key: Some(session_key.to_string()),
+        session_key: request_session_key,
         runtime: "external_cli".to_string(),
         adapter: effective.settings.adapter.clone(),
         work_dir: Some(daily_dir.to_path_buf()),
@@ -1050,6 +1100,26 @@ async fn run_external_daily_agent_prompt(
     }
 
     Ok(run_result)
+}
+
+fn daily_agent_external_runner_params(
+    adapter: &str,
+    conversation_state: &AsrDailyAgentConversationState,
+) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    if adapter == "codex" {
+        if let Some(thread_id) = conversation_state.thread_id.as_deref() {
+            params.insert(
+                "threadId".to_string(),
+                serde_json::Value::String(thread_id.to_string()),
+            );
+        }
+    }
+    if params.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::Object(params)
+    }
 }
 
 fn apply_external_daily_agent_metadata(
@@ -1144,9 +1214,7 @@ async fn run_daily_agent_inner(
                     .collect();
                 for entry in changed_entries {
                     let entry_plan = single_entry_change_plan(&plan, entry.clone());
-                    let chatgpt_first_turn = !conversation_state.initialized;
-                    let prompt =
-                        build_daily_agent_prompt(task, &entry_plan, &adapter, chatgpt_first_turn)?;
+                    let prompt = build_daily_agent_prompt(task, &entry_plan, &adapter, true)?;
                     let run_result = run_external_daily_agent_prompt(
                         task,
                         &runner_id,
@@ -1157,19 +1225,50 @@ async fn run_daily_agent_inner(
                         &effective,
                     )
                     .await?;
-                    apply_external_daily_agent_metadata(
-                        &mut conversation_state,
-                        &run_result.metadata,
-                    );
                     last_metadata = Some(run_result.metadata.clone());
-                    if run_result.response.trim().is_empty() {
+                    let response = run_result.response.trim();
+                    if response.is_empty() {
                         continue;
                     }
+                    let response = match validate_chatgpt_web_daily_report_response(response, &entry.date) {
+                        Ok(()) => response.to_string(),
+                        Err(first_error) => {
+                            let Some(conversation_id) =
+                                metadata_value(&run_result.metadata, &["conversationId", "conversation_id"])
+                            else {
+                                return Err(first_error);
+                            };
+                            tracing::warn!(
+                                date = %entry.date,
+                                conversation_id = %conversation_id,
+                                error = %first_error,
+                                "chatgpt_web daily report response failed validation; retrying with explicit final-output instruction"
+                            );
+                            let retry_prompt = format!(
+                                "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装。",
+                                date = entry.date
+                            );
+                            let retry_result = run_external_daily_agent_prompt_with_params(
+                                task,
+                                &runner_id,
+                                retry_prompt,
+                                &agent_work_dir,
+                                None,
+                                serde_json::json!({ "conversationId": conversation_id }),
+                                &effective,
+                            )
+                            .await?;
+                            last_metadata = Some(retry_result.metadata.clone());
+                            let retry_response = retry_result.response.trim();
+                            validate_chatgpt_web_daily_report_response(retry_response, &entry.date)?;
+                            retry_response.to_string()
+                        }
+                    };
                     let report_path = PathBuf::from(&entry.report_target);
                     if let Some(parent) = report_path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    if let Err(e) = std::fs::write(&report_path, run_result.response.trim()) {
+                    if let Err(e) = std::fs::write(&report_path, &response) {
                         tracing::warn!(
                             report_path = %report_path.display(),
                             error = %e,
@@ -1178,7 +1277,7 @@ async fn run_daily_agent_inner(
                     } else {
                         tracing::info!(
                             report_path = %report_path.display(),
-                            len = run_result.response.trim().len(),
+                            len = response.len(),
                             "saved chatgpt_web response as report"
                         );
                     }

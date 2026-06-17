@@ -288,12 +288,12 @@ test("AI Agent Chat deep link renders local chat preview and composer flow", asy
   await expect(page.getByTestId("agent-chat-plan-more")).toContainText("+1");
   await expect(page.getByTestId("agent-chat-plan")).not.toContainText("Gather context");
   await expect(page.getByTestId("agent-chat-plan-list")).toHaveCount(0);
-  await page.getByTestId("agent-chat-plan-toggle").click();
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Gather context");
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Implement UI");
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Completed");
-  await page.getByTestId("agent-chat-plan-toggle").click();
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Plan");
+  await page.getByTestId("agent-chat-plan-toggle").hover();
+  await expect(page.getByTestId("agent-chat-plan-popover")).toContainText("Gather context");
+  await expect(page.getByTestId("agent-chat-plan-popover")).toContainText("Implement UI");
+  await expect(page.getByTestId("agent-chat-plan-popover")).toContainText("Completed");
+  await page.mouse.move(0, 0);
+  await expect(page.getByTestId("agent-chat-plan-list")).toHaveCount(0);
   await page.getByTestId("agent-chat-settings-open").click();
   await expect(page.getByText("Agent Chat Status")).toBeVisible();
   await expect(page.getByTestId("agent-chat-status")).toContainText("Finished");
@@ -1067,8 +1067,8 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
       contentType: "text/event-stream",
       body:
         'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
-        'event: plan_updated\ndata: {"eventType":"plan_updated","title":"Density check","steps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve collapse toggle","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n' +
-        'event: run_finished\ndata: {"eventType":"run_finished","response":"Done","planSteps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve collapse toggle","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n',
+        'event: plan_updated\ndata: {"eventType":"plan_updated","title":"Density check","steps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve hover details","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n' +
+        'event: run_finished\ndata: {"eventType":"run_finished","response":"Done","planSteps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve hover details","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n',
     });
   });
 
@@ -1144,11 +1144,12 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
   await expect(page.getByTestId("agent-chat-plan")).not.toContainText(
     "Overflow item seven",
   );
-  await page.getByTestId("agent-chat-plan-toggle").click();
-  await expect(page.getByTestId("agent-chat-plan")).toContainText("Overflow item seven");
+  await page.getByTestId("agent-chat-plan-toggle").hover();
+  await expect(page.getByTestId("agent-chat-plan-popover")).toContainText("Overflow item seven");
   await expect(page.getByTestId("agent-chat-plan-item")).toHaveCount(7);
 
   const assertCompactPlan = async () => {
+    await page.getByTestId("agent-chat-plan-toggle").hover();
     await expect
       .poll(async () =>
         page.getByTestId("agent-chat-plan-list").evaluate((list) => {
@@ -1184,6 +1185,7 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
         visibleRows: 5,
       });
     await expect(page.getByTestId("agent-chat-plan")).not.toContainText("Density check");
+    await expect(page.getByTestId("agent-chat-plan-popover")).toContainText("Task progress");
     await expect(page.getByTestId("agent-chat-plan-status-completed")).toHaveCount(1);
     await expect(page.getByTestId("agent-chat-plan-status-in-progress")).toHaveCount(1);
     await expect(page.getByTestId("agent-chat-plan-status-pending")).toHaveCount(5);
@@ -1191,22 +1193,33 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
       .poll(async () =>
         page.getByTestId("agent-chat-plan").evaluate((panel) => {
           const composer = document.querySelector('[data-testid="agent-chat-composer-track"]');
+          const input = document.querySelector('[data-testid="agent-chat-input"]');
+          const popover = document.querySelector('[data-testid="agent-chat-plan-popover"]');
           const panelBox = panel.getBoundingClientRect();
           const composerBox = composer?.getBoundingClientRect();
+          const inputBox = input?.getBoundingClientRect();
+          const popoverBox = popover?.getBoundingClientRect();
           return {
-            panelIsCompact: panelBox.height <= 176,
+            panelIsCompact: panelBox.height <= 34,
             contained:
               Boolean(composerBox) &&
               panelBox.left >= composerBox!.left &&
               panelBox.right <= composerBox!.right &&
               panelBox.top >= composerBox!.top &&
               panelBox.bottom <= composerBox!.bottom,
+            capsuleAboveInput:
+              Boolean(inputBox) && panelBox.bottom <= inputBox!.top + 1,
+            popoverFloatsAboveCapsule:
+              Boolean(popoverBox) && popoverBox!.bottom <= panelBox.top - 6,
+            popoverWidth: Math.round(popoverBox?.width ?? 999),
           };
         }),
       )
       .toMatchObject({
+        capsuleAboveInput: true,
         contained: true,
         panelIsCompact: true,
+        popoverFloatsAboveCapsule: true,
       });
   };
 
@@ -1214,7 +1227,7 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
   await page.getByTestId("theme-toggle").click();
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await assertCompactPlan();
-  await page.getByTestId("agent-chat-plan-toggle").click();
+  await page.mouse.move(0, 0);
   await expect(page.getByTestId("agent-chat-plan-list")).toHaveCount(0);
 });
 

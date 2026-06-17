@@ -80,6 +80,8 @@ fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
         send_button_ready_retry_max_wait(&large_prompt),
         Duration::from_secs(60)
     );
+    assert!(native_clipboard_paste_followup_instruction().contains("刚刚粘贴或上传"));
+    assert!(native_clipboard_paste_followup_instruction().contains("最终结果正文"));
 }
 
 #[test]
@@ -491,6 +493,12 @@ fn chatgpt_web_behavior_download_filename_is_safe() {
 
 #[test]
 fn dom_output_state_waits_for_generation_controls_to_finish() {
+    assert!(!interaction::dom_content_is_usable(
+        "ChatGPT 说：正在思考",
+        0
+    ));
+    assert!(!interaction::dom_content_is_usable("最后微调一下...", 0));
+    assert!(interaction::dom_content_is_usable("最终答案", 0));
     assert_eq!(
         interaction::dom_output_in_progress_reason(&json!({
             "text": "ChatGPT 说：正在创建图片",
@@ -590,6 +598,19 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "sendButtonVisible": false
         })),
         Some("stop_button_visible")
+    );
+    assert_eq!(
+        interaction::dom_output_in_progress_reason(&json!({
+            "text": "complete answer",
+            "imageCount": 0,
+            "pendingOutputStatusText": false,
+            "composerVisible": false,
+            "composerDisabled": false,
+            "composerTextLength": 0,
+            "sendButtonVisible": true,
+            "sendButtonDisabled": false
+        })),
+        None
     );
 }
 
@@ -1120,6 +1141,7 @@ fn target_page_state_distinguishes_append_and_new_conversation_modes() {
     let existing = json!({
         "readyState": "complete",
         "conversationId": "c1",
+        "urlConversationId": "c1",
         "pageKind": "conversation",
         "visibleComposerCount": 1
     });
@@ -1132,6 +1154,7 @@ fn target_page_state_distinguishes_append_and_new_conversation_modes() {
     let new_page = json!({
         "readyState": "complete",
         "conversationId": null,
+        "urlConversationId": null,
         "pageKind": "new_conversation",
         "visibleComposerCount": 1
     });
@@ -1139,6 +1162,16 @@ fn target_page_state_distinguishes_append_and_new_conversation_modes() {
     assert!(!target_page_matches(&new_page, Some("c1"), true));
     assert!(target_page_is_terminal_mismatch(&new_page, Some("c1")));
     assert!(!target_page_is_terminal_mismatch(&new_page, None));
+
+    let stale_url_new_page = json!({
+        "readyState": "complete",
+        "conversationId": null,
+        "urlConversationId": "stale-c1",
+        "pageKind": "new_conversation",
+        "visibleComposerCount": 1
+    });
+    assert!(!target_page_matches(&stale_url_new_page, None, true));
+    assert!(target_page_is_terminal_mismatch(&stale_url_new_page, None));
 }
 
 #[test]

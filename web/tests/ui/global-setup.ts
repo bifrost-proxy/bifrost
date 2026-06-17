@@ -157,6 +157,8 @@ export default async () => {
         ADMIN_STATUS_URL: BACKEND_URL,
         BIFROST_UI_TEST_PORT: String(backendPort),
         BIFROST_DATA_DIR: dataDir,
+        BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
+        BIFROST_DISABLE_TRAY: "1",
         CARGO_TARGET_DIR: targetDir,
       },
       stdio: ["ignore", "pipe", "pipe"],

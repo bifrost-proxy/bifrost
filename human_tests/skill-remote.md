@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径、远端工程任务开始前必须读取工程约束信息的要求，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
+验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径、远端工程任务开始前必须读取工程约束信息的要求、调用异常时主动获取远端最新技能的要求，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
 
 ## 前置条件
 
@@ -198,31 +198,59 @@
 
 1. 检查 skill 明确把长任务从 stream 主路径切到 detach/job：
    ```bash
-   rg -n 'exec --detach|remote job status|remote job logs|remote job watch|真实远端 exit code' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n 'exec --detach|remote job list|remote job status|remote job logs|remote job watch|真实远端 exit code' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-2. 检查断线恢复优先 job 续接，连接身份失效才重建 conn：
+2. 检查断线恢复优先 job cache 续接，连接身份失效才重建 conn：
    ```bash
-   rg -n '断开/切线程/重启 CLI|优先用 job|grant revoked|authorization expired|conn down/up' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '断开/切线程/重启 CLI|remote job list|job cache|grant revoked|authorization expired|conn down/up' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-3. 检查 shell 环境和 cwd 语义：
+3. 检查文档不要求用户手工复制 relay token：
+   ```bash
+   ! rg -n -- 'remote job .*--relay-token <token>|call_id.*relay_token' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+4. 检查 shell 环境和 cwd 语义：
    ```bash
    rg -n -- '--login|BIFROST_REMOTE=1|TERM=dumb|--cwd.*shell rc' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
-4. 检查 file UX 新能力：
+5. 检查 file UX 新能力：
    ```bash
    rg -n 'remote file scratch-dir|file.op_not_permitted|read-many.*policy|/private/tmp|mtime_unix' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
 
 预期结果：
 
-- 文档指导 build/test/CI watch 等长任务使用 `remote exec --detach`，再用 `remote job status/logs/watch` 续接和获取真实 exit code。
-- 文档说明 caller stream 断开、digest mismatch 或本地切线程后不要重启同一长任务，应凭 `call_id`/`relay_token` 续接。
+- 文档指导 build/test/CI watch 等长任务使用 `remote exec --detach`，再用 `remote job list/status/logs/watch` 续接和获取真实 exit code。
+- 文档说明 caller stream 断开、digest mismatch 或本地切线程后不要重启同一长任务，应先用 `remote job list` 找回 `call_id`，再用 call_id-only job 命令续接；不要求用户手工复制 relay token。
 - 文档说明 `--login` 仅在需要用户 PATH/rc 时启用，默认路径保持 stdout 干净，`--cwd` 在 shell rc 后仍生效。
 - 文档说明临时脚本走 `scratch-dir`，`read-many` 被 policy deny 时降级多次 `read`。
 
 执行记录（2026-06-16）：
 
 - PASS：对仓库源文件 `skill_remote.md` 执行上述关键字检查，命中 `exec --detach`、`remote job status/logs/watch`、`真实远端 exit code`、`断开/切线程/重启 CLI`、`grant revoked`、`authorization expired`、`--login`、`BIFROST_REMOTE=1`、`TERM=dumb`、`remote file scratch-dir`、`file.op_not_permitted`、`/private/tmp` 与 `mtime_unix`。
+
+### TC-SR-10 调用异常时主动获取远端最新技能
+
+操作步骤：
+
+1. 检查 skill 明确要求调用异常时主动获取远端最新技能：
+   ```bash
+   rg -n '调用异常时主动获取远端最新技能|工具调用失败且本地 skill 可能过旧|以远端最新文档为准' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+2. 检查 skill 写入 GitHub 权威入口链接：
+   ```bash
+   rg -n 'https://github.com/bifrost-proxy/bifrost/blob/main/skill_remote\\.md' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+3. 检查 skill 提供可直接读取原文的 raw 地址：
+   ```bash
+   rg -n 'https://raw\\.githubusercontent\\.com/bifrost-proxy/bifrost/main/skill_remote\\.md' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+
+预期结果：
+
+- 文档要求 Agent 在 `bifrost remote` 相关调用异常、本地 skill 可能过旧时，主动获取远端最新 `skill_remote.md`。
+- 文档包含用户提供的 GitHub 权威入口链接。
+- 文档包含可直接读取最新原文的 raw 地址，便于无浏览器环境下刷新技能内容。
+- PASS（2026-06-17）：对仓库源文件 `skill_remote.md` 执行更新后的关键字检查，命中 `remote job list`、`job cache`、call_id-only `status/logs/watch`，且未命中 `remote job ... --relay-token <token>`。
 
 ## 清理步骤
 

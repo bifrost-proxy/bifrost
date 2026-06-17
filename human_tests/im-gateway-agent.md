@@ -2103,8 +2103,8 @@ rm -rf ./.bifrost-test
   5. 在 Settings 弹窗中检查 Workspace 输入框显示默认或当前会话的工作目录，且已初始化会话里为只读/disabled，不能直接切换。
   6. 在 Status 弹窗中检查已存在/已完成会话的 Status、Context 不再全部为空：Status 显示 message/compaction，Context 显示 token/runner；弹窗中不展示 Tools 模块，也不展示本轮已执行工具的 Args/Result 记录。
   7. 检查对话标题栏展示来源、Runner 和状态标签；例如 ChatGPT Web/admin API 显示 Web，runner id 显示在 Runner 标签中，active session 显示 Active。
-  8. 关闭 Settings 弹窗，检查没有 plan 的会话不显示 Plan 模块；触发或 mock 一次包含 `plan_updated` 的 stream/history 后，确认 Plan 显示在输入框上方而不是弹窗中。
-  9. 点击 Plan 折叠按钮，切换会话后确认折叠状态保持；再次展开后切换会话确认展开状态保持。
+  8. 关闭 Settings 弹窗，检查没有 plan 的会话不显示 Plan 模块；触发或 mock 一次包含 `plan_updated` 的 stream/history 后，确认 Plan 以进度胶囊形式显示在输入框上方而不是弹窗中。
+  9. 将鼠标悬浮到 Plan 胶囊上，确认弹出完整任务和进度详情；移开鼠标后详情收起，切换会话不会残留旧会话的详情浮层。
   10. 检查 Threads 列表同一 `session_key` 只出现一条记录；active/history 重复时 active 优先展示且只有一个选中项。
   11. 检查每条线程显示来源标签：Feishu/Weixin/Lark 显示 IM，ChatGPT Web/admin API 显示 Web，Codex/external runner 显示 Runner，ASR runner 显示 ASR；线程列表不显示 `Active` / `Ended` 文案，只有 running 线程显示跳动绿点。
 - **预期结果**:
@@ -2113,13 +2113,14 @@ rm -rf ./.bifrost-test
   - 只有 New Chat 弹窗允许选择待创建会话的 workspace；空白新会话重复 New Chat 不生成新 session id。
   - 已初始化会话的 Workspace 只读展示，不允许切换；已存在 active session 和已完成 history session 都能从 session detail 或 JSONL events 回填 workspace/status/context；Status 弹窗不展示 Tools 卡片。
   - 对话顶部展示来源、Runner 和状态标签。
-  - 没有 plan 时不渲染 Plan；有 plan 时 Plan 位于输入框上方，折叠/展开偏好在页面内持续保持。
+  - 没有 plan 时不渲染 Plan；有 plan 时 Plan 胶囊位于输入框上方，hover/focus 展示完整任务和进度详情，离开后收起。
   - Threads 数据按 `session_key` 唯一展示，不出现重复数据或重复选中。
   - 每条线程都展示可读来源标签，不展示结束状态文案；running 线程通过跳动绿点提示。
 - **清理步骤**:
   - 停止为本用例启动的 Vite dev server。
   - 删除自动化测试创建的临时 mock 数据；不删除用户已有 Bifrost 数据。
-- **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link renders|restores active session|thread list"`，3 条真实 Chromium UI 回归通过：覆盖 New Chat 弹窗选择 workspace、空白未输入新会话确认后 session label 不变、已初始化会话 Settings Workspace disabled、默认 Workspace 随 stream 请求发送、顶部来源/Runner/状态标签、Plan 初始隐藏且有 plan 时在输入框上方可折叠/展开、active session 刷新恢复、线程来源标签 IM/Web、线程列表不再展示 Ended 文案、running 线程展示绿点、同 `session_key` active/history 去重且只选中一条、Threads 独立滚动且窄屏仍保持在对话区右侧，长标题不撑宽页面。随后使用当前源码启动 `WEB_PORT=3001 BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1`，连接用户已启动的 `http://127.0.0.1:9900` 后端并用真实浏览器打开 active session；确认右侧侧栏只剩 Threads，Settings 弹窗 Workspace 为 `/Users/eden/work/github/bifrost`，Status 显示 `Messages 4` / `Compactions 0`，Context 显示 runner `bifrost_agent`，无 plan 时 Plan 模块隐藏，Threads 展示 Web/IM 来源标签且同一 Feishu session 历史被折叠为唯一一条记录。
+- **执行记录（2026-05-25）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link renders|restores active session|thread list"`，3 条真实 Chromium UI 回归通过：覆盖 New Chat 弹窗选择 workspace、空白未输入新会话确认后 session label 不变、已初始化会话 Settings Workspace disabled、默认 Workspace 随 stream 请求发送、顶部来源/Runner/状态标签、Plan 初始隐藏且有 plan 时在输入框上方展示、active session 刷新恢复、线程来源标签 IM/Web、线程列表不再展示 Ended 文案、running 线程展示绿点、同 `session_key` active/history 去重且只选中一条、Threads 独立滚动且窄屏仍保持在对话区右侧，长标题不撑宽页面。随后使用当前源码启动 `WEB_PORT=3001 BACKEND_PORT=9900 pnpm --dir web dev --host 127.0.0.1`，连接用户已启动的 `http://127.0.0.1:9900` 后端并用真实浏览器打开 active session；确认右侧侧栏只剩 Threads，Settings 弹窗 Workspace 为 `/Users/eden/work/github/bifrost`，Status 显示 `Messages 4` / `Compactions 0`，Context 显示 runner `bifrost_agent`，无 plan 时 Plan 模块隐藏，Threads 展示 Web/IM 来源标签且同一 Feishu session 历史被折叠为唯一一条记录。
+- **执行记录（2026-06-17）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts --grep "deep link renders" --reporter=line --timeout=15000 --max-failures=1`，1 条真实 Chromium UI 回归通过：覆盖 Agent Chat deep link、Settings/Status 入口、Plan 初始隐藏、有 plan 时输入框上方展示进度胶囊、hover 胶囊后详情浮层展示完整任务与状态、鼠标移出后详情收起，且 composer 发送流程不回归。测试启动路径已强制设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `BIFROST_DISABLE_TRAY=1`；测试后进程审计无 `.bifrost-ui-test-runs` 测试 tray、测试 Bifrost start、traffic-generator 或 Vite 残留。
 
 ### TC-IMA-125: Agent Chat Status 弹窗不展示 Tools 模块
 

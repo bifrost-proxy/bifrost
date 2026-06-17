@@ -311,6 +311,7 @@ pub(super) async fn wait_final(
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
+    let mut ready_candidate: Option<(usize, tokio::time::Instant)> = None;
 
     while tokio::time::Instant::now() < deadline {
         if stop_requested(stop_marker_path).await {
@@ -338,7 +339,6 @@ pub(super) async fn wait_final(
 
         match dom_outcome {
             DomExtractOutcome::Ready(waited) => {
-                // Stop button gone = generation complete. Extract and return immediately.
                 let dom_text_len = waited
                     .final_message
                     .get("text")
@@ -351,6 +351,31 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
+                let required_stable_for = if dom_text_len < 512 {
+                    std::time::Duration::from_secs(8)
+                } else {
+                    std::time::Duration::from_secs(3)
+                };
+                let now = tokio::time::Instant::now();
+                let stable_since = match ready_candidate {
+                    Some((previous_len, since)) if previous_len == dom_text_len => since,
+                    _ => {
+                        ready_candidate = Some((dom_text_len, now));
+                        now
+                    }
+                };
+                if now.duration_since(stable_since) < required_stable_for {
+                    tracing::info!(
+                        conversation_id,
+                        dom_text_len,
+                        dom_image_count,
+                        stable_for_ms = now.duration_since(stable_since).as_millis(),
+                        required_stable_ms = required_stable_for.as_millis(),
+                        "chatgpt_web wait_final: DOM content candidate waiting for stability"
+                    );
+                    sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
 
                 tracing::info!(
                     conversation_id,
@@ -365,6 +390,7 @@ pub(super) async fn wait_final(
                 image_count,
                 reason,
             } => {
+                ready_candidate = None;
                 // Still generating — just log and wait.
                 // TODO: future enhancement — check if content is long enough for partial/batch output
                 tracing::info!(
@@ -377,6 +403,7 @@ pub(super) async fn wait_final(
                 );
             }
             DomExtractOutcome::NotFound => {
+                ready_candidate = None;
                 tracing::debug!(
                     conversation_id,
                     "chatgpt_web wait_final: no content found yet"
@@ -1629,11 +1656,14 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             sendBtn.dataset.disabled === 'true'
           ) : null;
 
-          const stopBtn = document.querySelector('[data-testid="stop-button"]') ||
-                          document.querySelector('button[aria-label*="Stop"]') ||
-                          document.querySelector('button[aria-label*="停止"]') ||
-                          document.querySelector('button[aria-label*="Cancel"]') ||
-                          document.querySelector('button[aria-label*="取消"]');
+          const stopBtnCandidates = Array.from(document.querySelectorAll(
+            '[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="停止"], button[aria-label*="Cancel"], button[aria-label*="取消"]'
+          ));
+          const stopBtn = stopBtnCandidates.find((button) => {{
+            const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.innerText || '')).trim();
+            if (!label) return false;
+            return /stop\\s*(streaming|generating|responding|response)?|cancel\\s*(generation|response)|停止\\s*(流式传输|生成|回答|回复)|取消\\s*(生成|回答|回复)/i.test(label);
+          }}) || null;
           const stopButtonVisible = isVisible(stopBtn);
 
           // Extract text as Markdown
@@ -2125,14 +2155,43 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     if image_count > 0 {
         return true;
     }
-    let normalized = text
-        .trim()
+    let normalized = normalize_dom_status_text(text);
+    !normalized.is_empty() && !dom_text_is_pending_status(normalized)
+}
+
+fn normalize_dom_status_text(text: &str) -> &str {
+    text.trim()
         .trim_start_matches('\u{feff}')
         .trim_start_matches("ChatGPT 说")
         .trim_start_matches("ChatGPT says")
         .trim_start_matches([':', '：'])
-        .trim();
-    !normalized.is_empty()
+        .trim()
+}
+
+fn dom_text_is_pending_status(normalized: &str) -> bool {
+    let trimmed = normalized.trim().trim_end_matches(['.', '。', '…']).trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    matches!(
+        trimmed,
+        "正在打草稿"
+            | "正在撰写"
+            | "正在思考"
+            | "正在创建图片"
+            | "正在生成图片"
+            | "正在生成图像"
+            | "最后微调一下"
+            | "正在微调"
+            | "Drafting"
+            | "Thinking"
+            | "Creating image"
+            | "Creating images"
+            | "Generating image"
+            | "Generating images"
+            | "Finishing up"
+            | "Making final adjustments"
+    )
 }
 
 pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str> {
@@ -2176,20 +2235,6 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         .unwrap_or(false)
     {
         return Some("output_busy");
-    }
-    if !data
-        .get("composerVisible")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
-        return Some("composer_not_ready");
-    }
-    if data
-        .get("composerDisabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Some("composer_disabled");
     }
     let composer_text_length = data
         .get("composerTextLength")

@@ -1074,9 +1074,9 @@ ChatGPT Web Runner 的 DOM fallback 不能只识别传统 `<img>` 生成图。Ch
 
 Composer 与 MessageList 共用同一个滚动容器。输入区使用 sticky/floating 样式贴在对话容器底部，短消息时仍位于容器底部，长历史时随同一滚动容器保持底部悬浮；输入区不再通过顶部硬边框与消息列表切开。
 
-Plan 不属于 Settings 弹窗。存在 plan 时，Plan 面板展示在输入框上方；没有 plan 时整个模块隐藏。用户手动折叠或展开后，该偏好保存在当前页面状态中，不因切换会话或新建对话而重置。
+Plan 不属于 Settings 弹窗。存在 plan 时，输入框上方只展示一个轻量进度胶囊；没有 plan 时整个模块隐藏。胶囊展示当前进展和最新执行/待执行任务，鼠标悬浮或键盘聚焦胶囊时弹出详情浮层，离开后收起，不再使用点击折叠/展开偏好。
 
-Plan 面板是辅助信息，不能抢占 Agent Chat 的主要阅读空间。展开时只展示真正的 todo step，不展示 `plan_updated` title / explanation 这类二级标题；header 和每个 step 都使用紧凑字体、行高与 padding。每条 step 使用 todo 风格状态图标：completed 显示勾选，in_progress 显示旋转 loading，pending 显示空心待办圆点，不再用文字 tag 占据横向空间。step 列表最多展示 5 条的高度，超过 5 条时只在列表内部滚动，不能继续抬高 composer 或把对话区顶出可视区域。输入框默认只提供 2 行内容高度，随用户输入自动扩高，最高沿用现有 7 行上限；超过上限后由输入框内部滚动承载长文本。输入框 hint 只展示换行方式 `Shift + Enter for a new line`，不展示 session id；hint 与发送按钮的底部留白必须和顶部输入留白保持一致，避免 composer 底部出现大块空白。
+Plan 是辅助信息，不能抢占 Agent Chat 的主要阅读空间。常驻态只保留胶囊，不展示完整 step list；详情浮层只展示真正的 todo step，不展示 `plan_updated` title / explanation 这类二级标题；header 和每个 step 都使用紧凑字体、行高与 padding。每条 step 使用 todo 风格状态图标：completed 显示勾选，in_progress 显示旋转 loading，pending 显示空心待办圆点；状态文字只在详情浮层中作为轻量辅助信息展示。step 列表最多展示 5 条的高度，超过 5 条时只在 step list 内部滚动，不能继续抬高 composer 或把对话区顶出可视区域。输入框默认只提供 2 行内容高度，随用户输入自动扩高，最高沿用现有 7 行上限；超过上限后由输入框内部滚动承载长文本。输入框 hint 只展示换行方式 `Shift + Enter for a new line`，不展示 session id；hint 与发送按钮的底部留白必须和顶部输入留白保持一致，避免 composer 底部出现大块空白。
 
 消息区自身不展示全局 loading spinner。运行状态由顶部 `Running` 标签、Threads 的跳动绿点，以及 assistant 气泡中的 `Generating...` 表达；历史恢复只设置 `aria-busy`，避免左上角出现位置突兀的 loading 图标。
 

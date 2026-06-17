@@ -175,6 +175,11 @@ pub(in crate::im_gateway::chatgpt_web) fn send_button_ready_retry_max_wait(text:
     }
 }
 
+pub(in crate::im_gateway::chatgpt_web) fn native_clipboard_paste_followup_instruction(
+) -> &'static str {
+    "\n\n请阅读刚刚粘贴或上传的完整 Markdown 内容，并严格按其中要求直接输出最终结果正文。不要只说明文件内容，也不要输出代码块包装。"
+}
+
 async fn send_with_browser_once(
     config: &RuntimeConfig,
     auth: &AuthState,
@@ -194,6 +199,9 @@ async fn send_with_browser_once(
     // Reuse existing browser or launch a new one (persistent across calls).
     let mut browser = BrowserSession::get_or_launch(config, headless).await?;
     info!("chatgpt_web send: browser ready");
+    if conversation_id.is_none() {
+        browser.close_chatgpt_pages_for_fresh_run().await;
+    }
 
     // Each concurrent run gets its own isolated tab.  This allows multiple
     // channels (Feishu, WeChat, CLI, …) to operate the same browser in
@@ -202,7 +210,7 @@ async fn send_with_browser_once(
     let navigate_url = if let Some(cid) = conversation_id {
         format!("{}/c/{}", config.chatgpt.base_url, cid)
     } else {
-        config.chatgpt.base_url.clone()
+        new_conversation_url(config)
     };
 
     let mut target_id = None;
@@ -383,7 +391,13 @@ async fn send_with_browser_once(
         if let Err(error) =
             wait_target_page(cdp, expected_conversation_id, Duration::from_secs(30), false).await
         {
-            if expected_conversation_id.is_some() && should_retry_as_new_conversation(&error) {
+            if expected_conversation_id.is_none() {
+                warn!(
+                    %error,
+                    "chatgpt_web send: fresh conversation target was not clean, forcing new chat navigation"
+                );
+                navigate_to_new_conversation(cdp, config, &error).await?;
+            } else if expected_conversation_id.is_some() && should_retry_as_new_conversation(&error) {
                 let is_rate_limited = error.contains("body_error=")
                     && (error.contains("429") || error.contains("rate"));
 
@@ -2560,9 +2574,10 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_matches(
         return false;
     }
     let actual = state.get("conversationId").and_then(Value::as_str);
+    let url_conversation_id = state.get("urlConversationId").and_then(Value::as_str);
     match expected_conversation_id {
         Some(expected) => actual == Some(expected),
-        None => actual.is_none(),
+        None => actual.is_none() && url_conversation_id.is_none(),
     }
 }
 
@@ -2602,6 +2617,7 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_is_terminal_mismatch(
         return true;
     }
     let actual = state.get("conversationId").and_then(Value::as_str);
+    let url_conversation_id = state.get("urlConversationId").and_then(Value::as_str);
     match (expected_conversation_id, actual) {
         (Some(expected), Some(actual)) => actual != expected,
         (Some(_), None) => state
@@ -2609,6 +2625,7 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_is_terminal_mismatch(
             .and_then(Value::as_str)
             .is_some_and(|kind| kind == "new_conversation"),
         (None, Some(_)) => true,
+        (None, None) if url_conversation_id.is_some() => true,
         _ => false,
     }
 }
@@ -2621,6 +2638,7 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_error(
         return auth_required_page_error(state);
     }
     let actual = state.get("conversationId").and_then(Value::as_str);
+    let url_conversation_id = state.get("urlConversationId").and_then(Value::as_str);
     let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
     let page_kind = state
         .get("pageKind")
@@ -2636,8 +2654,8 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_error(
         String::new()
     };
     format!(
-        "browser_wrong_page: expected_conversation_id={:?} actual_conversation_id={:?} page_kind={} url={}{}",
-        expected_conversation_id, actual, page_kind, url, body_hint
+        "browser_wrong_page: expected_conversation_id={:?} actual_conversation_id={:?} url_conversation_id={:?} page_kind={} url={}{}",
+        expected_conversation_id, actual, url_conversation_id, page_kind, url, body_hint
     )
 }
 
@@ -2789,16 +2807,21 @@ async fn navigate_to_new_conversation(
         .get("pageKind")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    let needs_navigate = current_kind != "new_conversation" || page_body_has_fatal_error(&current);
+    let current_url_conversation_id = current.get("urlConversationId").and_then(Value::as_str);
+    let needs_navigate = current_kind != "new_conversation"
+        || current_url_conversation_id.is_some()
+        || page_body_has_fatal_error(&current);
 
     if needs_navigate {
-        let new_url = &config.chatgpt.base_url;
+        let new_url = new_conversation_url(config);
         warn!(
-            %new_url,
+            new_url = %new_url,
             %reason,
+            current_kind,
+            current_url_conversation_id,
             "chatgpt_web send: page not on homepage or has errors, navigating to new conversation"
         );
-        cdp.navigate_and_wait(new_url, Duration::from_secs(15))
+        cdp.navigate_and_wait(&new_url, Duration::from_secs(15))
             .await?;
         wait_target_page(cdp, None, Duration::from_secs(30), false).await
     } else {
@@ -2808,6 +2831,12 @@ async fn navigate_to_new_conversation(
         );
         Ok(())
     }
+}
+
+fn new_conversation_url(config: &RuntimeConfig) -> String {
+    let base = config.chatgpt.base_url.trim_end_matches('/');
+    let nonce = now_ms();
+    format!("{base}/?bifrost_new_chat={nonce}")
 }
 
 async fn set_composer_text(cdp: &CdpClient, text: &str) -> Result<Value, String> {
@@ -2991,10 +3020,51 @@ async fn paste_composer_text(
 async fn paste_composer_text_native(cdp: &CdpClient, text: &str) -> Result<Value, String> {
     write_browser_clipboard(cdp, text).await?;
     dispatch_paste_shortcut(cdp).await?;
+    sleep(Duration::from_millis(500)).await;
+    let state = inspect_composer_after_native_paste(cdp).await?;
+    let text_len = state
+        .get("textLength")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    if text_len < 20 {
+        focus_composer(cdp).await?;
+        cdp.send(
+            "Input.insertText",
+            json!({"text": native_clipboard_paste_followup_instruction()}),
+        )
+        .await?;
+    }
     Ok(json!({
         "ok": true,
-        "mode": "native_clipboard_paste"
+        "mode": "native_clipboard_paste",
+        "composerState": state,
+        "followupInstructionInserted": text_len < 20
     }))
+}
+
+async fn inspect_composer_after_native_paste(cdp: &CdpClient) -> Result<Value, String> {
+    evaluate_value(
+        cdp,
+        r#"(() => {
+          const isVisible = (el) => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+          const candidates = Array.from(document.querySelectorAll(
+            '[data-testid="composer-text-input"], #prompt-textarea, [contenteditable="true"], textarea'
+          )).filter((el) => isVisible(el) && !el.disabled && !el.readOnly);
+          const composer = candidates
+            .sort((a, b) => b.getBoundingClientRect().bottom - a.getBoundingClientRect().bottom)[0];
+          const text = composer ? (composer.value || composer.innerText || composer.textContent || '') : '';
+          const attachmentCount = document.querySelectorAll(
+            '[data-testid*="attachment"], [data-testid*="file"], [aria-label*="file"], [aria-label*="文件"], [aria-label*="附件"]'
+          ).length;
+          return {
+            ok: !!composer,
+            textLength: text.trim().length,
+            attachmentCount,
+            preview: text.trim().slice(0, 120)
+          };
+        })()"#,
+    )
+    .await
 }
 
 async fn write_browser_clipboard(cdp: &CdpClient, text: &str) -> Result<Value, String> {

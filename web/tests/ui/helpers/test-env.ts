@@ -119,6 +119,8 @@ export async function allocateUiTestEnv(): Promise<UiTestEnv> {
   process.env.BIFROST_UI_TEST_PID_FILE = backendPidFile;
   process.env.BIFROST_UI_TEST_TRAFFIC_PID_FILE = trafficPidFile;
   process.env.BIFROST_UI_TEST_LOG_FILE = backendLogPath;
+  process.env.BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT = "1";
+  process.env.BIFROST_DISABLE_TRAY = "1";
 
   return {
     runId,
