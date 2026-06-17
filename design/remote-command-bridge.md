@@ -37,8 +37,8 @@
    - 授权成功后，`grant_id`（UUID 不可猜测）+ `caller_fingerprint`（主机标识 hash）构成操作凭证。
    - 每次创建调用时，Relay 签发 per-call 的 `relay_token`，仅用于该次调用的路由和 SSE 订阅。
    - Caller 不需要任何身份 token（无 `x-bifrost-token`），安全性由可见性管控 + grant 绑定保障。
-4. **加密层**（规划中，首版未实现）
-   - 调用内容不依赖云端 token 明文传输，而是通过调用方与 Bifrost 客户端之间的端到端密钥协商进行双向加密。
+4. **加密层**（已实现）
+   - 调用内容不依赖云端 token 明文传输，而是通过调用方与 Bifrost 客户端之间的 X25519 ECDH 密钥协商 + HKDF-SHA256 派生 + ChaCha20-Poly1305 / AES-256-GCM AEAD 实现双向加密。
 
 这四层同时存在，才能同时满足“pair_code 门控发现”“需要人工授权”“grant 绑定可复用”“云端不知道明文内容”。
 
@@ -90,7 +90,7 @@
 ### 目标
 
 - 支持通过云端中转远程调用 Bifrost 客户端命令。
-- 首版仅支持 **Bifrost 查询类命令**，不支持修改配置、不支持写操作、不支持读取其他敏感配置。
+- **首版（已扩展，2026-06-16）** 命令范围已超出最初的「仅查询」边界：除只读查询命令白名单外，还实现了 `RemoteShellExec`、`RemoteShellInteractive`、`RemotePowerMgmt`、`RemoteImGateway` 等 `GrantScope`，并叠加独立的 `FileAccessScope`（含远端文件 read/list/stat/glob/find/hash/write/edit/patch/mkdir/move/delete）。受 `FileAccessPolicy` 与 GrantScope 双重门控。
 - 支持大流量结果传输与大载荷分片传输，不把协议限制在“小请求/小响应”场景。
 - 支持多个 Bifrost 远端调用客户端同时在线，并在 `Settings -> Remote Invoke` 中统一管理。
 - 支持多个远程调用方（不同 `caller_fingerprint`）对同一 Bifrost 客户端并发发起调用，各调用方授权独立、会话隔离。
@@ -106,7 +106,7 @@
 
 ### 非目标
 
-- 首版不支持任意 shell。
+- ~~首版不支持任意 shell~~ — 已通过 `RemoteShellExec` / `RemoteShellInteractive` GrantScope 开放，但仍要求每次调用都由 Client 端审批人为授权，并保留命令白名单与 FileAccessPolicy 限制。
 - 首版不支持配置修改、状态变更、文件读写、脚本执行、证书/规则/values 等管理写操作。
 - 首版不做任意文件上传/下载隧道。
 - 首版不做多客户端共享一个活跃终端会话。
@@ -284,9 +284,9 @@
   - 如果无效（过期/撤销），报错 "authorization expired, please run `bifrost remote connect <pair-code>` again"
 - **重复配对处理**：同一 Caller 对同一 Client 再次 `connect` 时，新 grant 与旧 grant 并存，本地连接文件更新为最新 grant，旧 grant 在服务端自然过期。
 
-### 4. 真正保密依赖端到端加密（规划中，首版未实现）
+### 4. 真正保密依赖端到端加密（已实现）
 
-> **实现状态**：首版以明文信封格式传输（`EncryptedEnvelope` 中 `nonce`/`tag` 为空，`ciphertext` 实际为明文），端到端加密作为后续安全增强项。
+> **实现状态（2026-06-16）**：X25519 ECDH + HKDF-SHA256 + ChaCha20-Poly1305 / AES-256-GCM 已在 `crates/bifrost-admin/src/remote_invoke/types.rs`（`EncryptedEnvelope` v2、`derive_open_call_session_key`、`derive_call_session_key`）和 `crates/bifrost-cli/src/commands/remote.rs` 实现，`EncryptedEnvelope` 真正承载密文。本地 caller 侧的 shared_secret 经 `remote-connections.key` 派生密钥使用 AES-256-GCM 加密落盘（`shared_secret_encrypted` 字段）。
 
 - 授权通过后，由调用方与客户端交换临时公钥，推荐：
   - `X25519` 做 ECDH
@@ -356,7 +356,7 @@
   - 客户端检测到 token 被拒绝（`401`）后，自动触发完整的重新注册流程（而非续签）。
   - **Token 续签端点**（`POST /client/token/renew`）**尚未实现**，当前通过重新注册替代。
 
-> **设计文档 vs 实现差异**：设计文档要求 Ed25519 签名验证和独立续签端点。当前实现简化为：注册时只验证 pubkey 一致性（不验证签名），过期后重新注册（不使用续签）。后续可平滑升级。
+> **设计文档 vs 实现差异（2026-06-16）**：Ed25519 challenge/response 签名验证已实现（见 `packages/bifrost-sync-server/src/remote-invoke/service.ts` 中 `algorithm: ed25519` 验签逻辑与 `invalid_registration_signature` 错误码）；独立 token 续签端点 `POST /client/token/renew` 仍未实现（planned, not yet shipped as of 2026-06-16），当前依赖客户端在收到 `401` 后通过重新注册（challenge + register）替代续签。
 
 ### 5. 审计摘要与原文分离
 
@@ -962,7 +962,7 @@ struct GrantDecisionReq {
   2: required string client_instance_id,
   3: required string decision,
   4: optional string grant_mode,
-  // client_ephemeral_pub 属于端到端加密（首版未实现），暂不传输
+  // 端到端加密已实现，`client_ephemeral_pub` 在 grant decision 时由 Client 携带，配合 Caller 的 `caller_ephemeral_pub` 派生 per-call 会话密钥
 }
 
 struct ClientCallFrameReq {
@@ -1060,15 +1060,14 @@ struct ReusableGrant {
   - 绑定长期授权（grant）
   - 支撑风控和审计
   - 作为"授权复用命中"的关键维度
-- **当前实现**（`remote.rs`）：
-  - 生成算法：`simple_hash("bifrost-cli:{username}:{hostname}")`
-  - 基于操作系统的 `username` 和 `hostname` 组合
-  - 不再依赖 `device_id`、`app_version`、`platform`、`public_key_hash` 等复杂因素
+- **当前实现（2026-06-16）**（`crates/bifrost-cli/src/commands/remote.rs` 中 `load_or_create_caller_fingerprint` / `generate_random_caller_fingerprint`）：
+  - 生成算法：在 `{BIFROST_DATA_DIR}/remote-caller-identity.json` 中持久化随机 16 字节（128 bit）值，格式 `caller-<32 hex chars>`（来自 `ring::rand::SystemRandom`）
+  - 文件不存在或内容不合法时自动生成并写回，主机迁移可通过拷贝该文件保持身份
+  - **不再**基于 `username` / `hostname` / `device_id` / `app_version` / `platform` / `public_key_hash` 任何机器特征
 - 要求：
-  - 稳定但可轮换（更换用户名或主机名即变化）
-  - 不直接暴露过多宿主机敏感信息
-- 它同时也是"授权复用命中"的关键维度：
-  - 同一 `client_instance_id`、同一 `caller_fingerprint` 才允许直接复用既有授权
+  - 稳定可迁移，按文件持久化
+  - 用户可手动删除文件触发轮换
+  - 不直接暴露宿主机敏感信息
 
 #### `call_id`
 
@@ -1273,7 +1272,7 @@ struct ReusableGrant {
 - 移除授权按钮（Client 侧通过 Relay Client 路由管理）
 - 刷新列表按钮
 
-> **改造说明**：原设计中的"修改有效期按钮"和"修改授权模式按钮"已移除。Grant 属性由 Client 审批时决定，Caller 不应修改（`PATCH /grants/:id` 已删除）。Grant 管理由 Client 侧通过 WebUI + Client 路由完成。
+> **改造说明（2026-06-16）**：Caller 侧 `PATCH /v4/remote-invoke/grants/:id` 仍未提供。Client 侧管理端已新增 `PATCH /v4/remote-invoke/client/grants/:grant_id`（`handleUpdateGrantByClient`），允许 Client 自己调整已批准 grant 的属性；Caller 不可发起此请求。
 
 #### Active Grants 交互要求
 
@@ -1284,7 +1283,7 @@ struct ReusableGrant {
   - 后续 `bifrost remote` 不能再直接复用
   - 必须重新走配对授权流程
 
-> **改造说明**：原设计中"把一次性授权升级为限时授权"、"改短改长有效期"等操作已移除。Grant 的授权模式和有效期在 Client 审批时一次性确定，后续不可由 Caller 或管理端修改（`PATCH /grants/:id` 已删除）。"Relay 用户数据库记录立即更新"的描述不再适用——当前 Relay 是透明中继服务。
+> **改造说明（2026-06-16）**：Caller 仍不能修改 grant。Client 管理端可通过 `PATCH /v4/remote-invoke/client/grants/:grant_id` 调整自己批准过的 grant；Client `DELETE /v4/remote-invoke/client/grants/:grant_id` 也可由 Client 端独立撤销。Caller 端仍只能通过 `DELETE /v4/remote-invoke/grants/:grant_id?caller_fingerprint=...` 在归属校验下撤销自己的 grant。
 
 #### History 区
 
@@ -1718,7 +1717,7 @@ struct ReusableGrant {
   - `(client_instance_id, status)`
   - `(expires_at)`
 
-> **改造说明**：移除了 `user_id`、`caller_pubkey`、`client_ephemeral_pub`、`command_summary_json` 字段。`user_id` 不再需要（Caller 无身份概念）；`caller_pubkey` 和 `client_ephemeral_pub` 属于端到端加密（首版未实现）；`command_summary_json` 在 connect 阶段不再携带（命令在 calls/open 时传入）。
+> **改造说明**：移除了 `user_id`、`caller_pubkey`、`client_ephemeral_pub`、`command_summary_json` 字段。`user_id` 不再需要（Caller 无身份概念）；`command_summary_json` 在 connect 阶段不再携带（命令在 calls/open 时传入）。端到端加密已实现：`caller_ephemeral_pub` / `client_ephemeral_pub` 改为在 grant 创建 / 调用建立时按 per-call 维度传递，配合 `grant_crypto_store` 存储，不再固化到 pairing 表。
 
 #### `bifrost_remote_invoke_grants`
 
@@ -2325,9 +2324,9 @@ struct ReusableGrant {
 
 ## 分阶段实施建议
 
-### Phase 1：最小闭环（明文信封骨架）
+### Phase 1：最小闭环（已发布）
 
-> **实现状态更新**：首版采用明文信封格式传输（`EncryptedEnvelope` 中 `nonce`/`tag` 为空，`ciphertext` 实际为明文）。端到端加密作为后续安全增强项，不在 Phase 1 纳入。
+> **实现状态更新（2026-06-16）**：首版 Phase 1 已实质完成。`EncryptedEnvelope` v2 已落地为真正密文（X25519 + HKDF-SHA256 + ChaCha20-Poly1305 / AES-256-GCM），并已扩展支持 SSH 公钥免配对授权链路；命令白名单已从只读查询扩展到 `RemoteShellExec` / `RemoteShellInteractive` / `RemotePowerMgmt` / `RemoteImGateway`，叠加独立的 `FileAccessScope`。
 
 - 客户端在线 SSE
 - 发现模式与一次性授权码
@@ -2345,13 +2344,16 @@ struct ReusableGrant {
 
 ### Phase 2：完整授权 + 安全增强
 
-- `30m/1h/1d/永久` 授权策略
-- grant 管理与撤销
-- WebUI 历史页
-- 失败重连 / 恢复
-- 设备指纹可信绑定与迁移
-- client_auth_token 注册与续期（当前通过重新注册替代续签）
-- **端到端加密**：X25519 密钥交换 + HKDF 派生 + ChaCha20-Poly1305/AES-256-GCM 加密帧
+### Phase 2：完整授权 + 安全增强（部分已发布）
+
+- ✅ `30m/1h/1d/永久` 授权策略
+- ✅ grant 管理与撤销（Client 侧 PATCH/DELETE 路由 `/v4/remote-invoke/client/grants/:grant_id`）
+- ✅ WebUI 历史页
+- ✅ 失败重连 / 恢复
+- ✅ client_auth_token 注册（Ed25519 challenge/response）
+- ✅ 端到端加密：X25519 + HKDF-SHA256 + ChaCha20-Poly1305 / AES-256-GCM 加密帧
+- ⏳ 设备指纹可信绑定与迁移（planned, not yet shipped as of 2026-06-16）
+- ⏳ `client_auth_token` 续期端点（`POST /client/token/renew` 仍未实现，依赖重新注册替代）
 
 ### Phase 3：高级安全与运维
 
@@ -2607,7 +2609,8 @@ pair_code 可见性门控（6位码，2分钟TTL）
 | 端点 | 处理方式 | 原因 |
 | --- | --- | --- |
 | `GET /clients` | 完全删除 | 防止客户端枚举，以 pair_code 替代 |
-| `PATCH /grants/:id` | 完全删除 | Grant 属性 Client 审批时确定，不可后续修改 |
+| `PATCH /grants/:id` (Caller 侧) | 完全删除 | Caller 不应修改 grant 属性 |
+| `PATCH /client/grants/:grant_id` (Client 侧) | 新增 | Client 管理端可调整自己批准过的 grant 属性 |
 | `GET /grants` | 完全删除 | Caller 无需列出所有 grant |
 | `POST /pairings/start` | 改造 | 移除 `client_instance_id`（从 pair_code 解析）、`caller_pubkey`、`command` |
 | `POST /calls/open` | 新增 | 独立的 call 创建端点，校验 grant 绑定后签发 relay_token |
@@ -2618,16 +2621,21 @@ pair_code 可见性门控（6位码，2分钟TTL）
 - `CallerRelayClient` 结构中不再有 `token` 字段
 - 新增本地连接文件 `{BIFROST_DATA_DIR}/remote-connections.json` 存储已建立的连接
 - `resolve_local_connection()` 替代 `resolve_client_id()`，纯本地文件操作
-- `caller_fingerprint` 生成算法：`simple_hash("bifrost-cli:{username}:{hostname}")`
+- `caller_fingerprint` 生成算法（2026-06-16）：在 `{BIFROST_DATA_DIR}/remote-caller-identity.json` 中持久化 `caller-<32 hex chars>` 形态的随机 128 bit 值（`SystemRandom`），不再基于 username/hostname 派生
+- 新增 SSH 公钥免配对授权链路（`bifrost remote conn up --ssh-key ...` / `/v4/remote-invoke/ssh/challenge` / `/v4/remote-invoke/ssh/connect`），与 6 位 pair_code 互斥可选
+- 远端 caller 侧 `shared_secret` 通过 `{BIFROST_DATA_DIR}/remote-connections.key` 派生密钥使用 AES-256-GCM 加密落盘
 
-### 实现状态标注
+### 实现状态标注（2026-06-16）
 
 - ✅ Caller 路由无鉴权（透明中继模型）
 - ✅ pair_code 发现机制（6位码，自动消费解析 client_instance_id）
+- ✅ SSH 公钥免配对授权链路（pair_code 之外的第二种 AuthMethod）
 - ✅ grant_id + caller_fingerprint 双因子操作凭证
 - ✅ per-call relay_token 路由
-- ✅ 本地连接文件
-- ✅ 命令白名单（status, traffic.list, traffic.get, traffic.search, search.get）
-- ⏳ 端到端加密（EncryptedEnvelope 当前为明文信封，nonce/tag 为空）
-- ⏳ Ed25519 签名验证（当前简化实现）
-- ⏳ 设备指纹可信绑定与迁移
+- ✅ 本地连接文件与本地 caller 身份文件
+- ✅ 命令白名单扩展：除只读查询外，已支持 `RemoteShellExec` / `RemoteShellInteractive` / `RemotePowerMgmt` / `RemoteImGateway` 等 `GrantScope`，并叠加独立的 `FileAccessScope`
+- ✅ 端到端加密：`EncryptedEnvelope` v2 已承载真实密文，使用 X25519 + HKDF-SHA256 + ChaCha20-Poly1305 / AES-256-GCM
+- ✅ Ed25519 challenge/response 注册签名验证（`invalid_registration_signature`）
+- ⏳ `POST /v4/remote-invoke/client/token/renew` 续签端点（planned, not yet shipped as of 2026-06-16）
+- ⏳ 设备指纹可信绑定与迁移流程（planned, not yet shipped as of 2026-06-16）
+- ⏳ 审计 hash chain 与外部时间戳防篡改（planned, not yet shipped as of 2026-06-16）

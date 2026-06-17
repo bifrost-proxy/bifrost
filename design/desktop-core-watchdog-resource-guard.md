@@ -14,26 +14,27 @@
 
 ### 1. 桌面端运行期 watchdog
 
-- 在 `desktop/src-tauri/src/main.rs` 中新增后台 watchdog 线程，与启动期 `bootstrap_desktop_backend()` 并行存在。
+- 在 `desktop/src-tauri/src/main.rs` 中新增后台 watchdog（`monitor_desktop_backend()`，由启动期 `bootstrap_desktop_backend()` spawn 出独立线程），按 `BACKEND_WATCHDOG_POLL_INTERVAL`（默认 2s）周期轮询。
 - watchdog 周期性检查：
-  - 当前 managed child 是否已经退出
-  - 当前 `proxy_port` 的健康探针是否仍然成功
-- 若发现 core 异常退出或健康探针失败，则进入统一恢复流程：
+  - 当前 managed child 是否已经退出（`poll_managed_backend_exit()`）
+  - 当前 `proxy_port` 的健康探针 `probe_backend_health()` 是否仍然成功
+- 若发现 core 异常退出或健康探针失败，则进入 `attempt_backend_recovery()` 统一恢复流程：
   - 标记 `startup_ready=false`
-  - 避免并发重复恢复
-  - 清理当前 child 句柄
+  - 通过 `begin_backend_recovery()` 拿到 `BackendRecoveryGuard`（基于 `BackendState.backend_recovery_in_progress` 原子位），避免并发重复恢复
+  - 清理当前 child 句柄（必要时 `terminate_child()`）
   - 复用现有 `ensure_backend_running()` 逻辑重新拉起或接管 healthy backend
-  - 恢复成功后更新运行端口、清空错误态并记录日志
+  - 恢复成功后更新运行端口、清空错误态，调用 `try_start_native_handoff()` 并记录日志
+  - 恢复失败时按 `BACKEND_WATCHDOG_RECOVERY_RETRY_DELAY`（默认 3s）退避后等待下一轮
 
 ### 2. 恢复流程约束
 
-- watchdog 不在桌面端主动退出阶段工作，避免和 `request_desktop_shutdown()` / `complete_desktop_shutdown()` 互相打架。
+- 端口切换导致的显式 restart 与 watchdog 共用同一恢复互斥标记（`backend_recovery_in_progress`，通过 `begin_backend_recovery()` 进入临界区），防止运行期保活与手动重启并发执行。
 - 端口切换导致的显式 restart 与 watchdog 共用同一恢复互斥标记，防止运行期保活与手动重启并发执行。
 - 恢复失败时只记录错误并等待下一轮重试，不主动把桌面端一起退出。
 
 ### 3. app icon 资源保护
 
-- `crates/bifrost-admin/src/app_icon.rs` 中的磁盘/系统图标提取流程改为串行执行。
+- 在真正进入 `extract_app_icon()` 前增加提取锁（`AppIconCache.extract_lock`），并在获得锁后再次检查内存缓存与磁盘缓存。
 - 在真正进入 `extract_app_icon()` 前增加提取锁，并在获得锁后再次检查内存缓存与磁盘缓存。
 - 这样可以避免高并发 traffic/app icon 请求在缓存尚未命中时，同时触发多路系统图标提取，放大文件句柄占用与系统资源竞争。
 

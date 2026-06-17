@@ -500,8 +500,8 @@ fn evaluate_trust(record: &ClientTrustRecord) -> ClientTrustStatus {
 新增 API 端点：
 
 ```
-GET /api/tls/client-trust          → 列出所有客户端的信任状态
-GET /api/tls/client-trust/stream   → SSE 推送信任状态变更
+GET /notifications/client-trust    → 列出所有客户端的信任状态（已落地，见 crates/bifrost-admin/src/handlers/notification.rs）
+GET /notifications/client-trust/stream → SSE 推送信任状态变更 (planned, not yet shipped as of 2026-06-17 — 当前通过 /notifications SSE 频道 + ClientTrustEvent 推送，见 push.rs)
 ```
 
 响应示例：
@@ -602,11 +602,11 @@ GET /api/tls/client-trust/stream   → SSE 推送信任状态变更
 | `crates/bifrost-proxy/src/proxy/socks/tcp.rs` | SOCKS5 TLS 拦截路径同样添加错误分类和上报 |
 | `crates/bifrost-admin/src/state.rs` | `AdminState` 新增 `client_trust_tracker` 字段 |
 | `crates/bifrost-admin/src/lib.rs` | 导出新模块 |
-| `crates/bifrost-admin/src/handlers/config.rs` | 新增 `/api/tls/client-trust` 端点 |
+| `crates/bifrost-admin/src/handlers/notification.rs` | 新增 `/notifications/client-trust` 端点（实际落地路径与最初设计的 `/api/tls/client-trust` 不同） |
 | `crates/bifrost-admin/src/push.rs` | 集成信任状态变更的 SSE 推送 |
 | `crates/bifrost-cli/src/commands/start.rs` | 初始化 `ClientTlsTrustTracker` |
 | `web/src/api/cert.ts` | 新增客户端信任状态 API 调用 |
-| `web/src/pages/Settings/tabs/CertificateTab.tsx` | 新增客户端信任状态展示区域 |
+| `web/src/pages/Settings/tabs/CertificateTab.tsx` | 新增客户端信任状态展示区域 (planned, not yet shipped as of 2026-06-17 — 信任状态目前通过 Notifications 页面 `client_trust` Tab 展示，见 web/src/pages/Notifications/index.tsx) |
 
 ## 依赖项
 

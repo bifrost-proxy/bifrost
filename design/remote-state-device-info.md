@@ -1,6 +1,6 @@
 # Remote State Device Info
 
-> 状态：已实现 | 更新时间：2026-05-21
+> 状态：已实现 | 更新时间：2026-06-17
 
 ## 背景
 
@@ -43,7 +43,7 @@
 
 ### 真实场景测试
 
-- 更新 `human_tests/remote-invoke.md`，新增 `TC-RI-回归-141`。
+- 更新 `human_tests/remote-invoke.md`，新增 `TC-RI-回归-147`（验证 `remote conn status` 返回可区分设备的状态信息，含执行结果记录）。
 - 使用真实 CLI 执行 `bifrost remote conn status`，验证新增字段可读且 `rust_version` 不再出现。
 
 ## Review/Fix/Test 闭环方案

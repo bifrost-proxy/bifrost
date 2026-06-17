@@ -12,15 +12,17 @@
 
 ### Goal
 
-- 工具层位于 `crates/agent/src/tools/goal.rs`，统一由 `GoalManager` 持有状态。
+- 工具层位于 `crates/agent/src/tools/goal.rs`，三件套工具（`get_goal` / `create_goal` / `update_goal`）通过 `execute_goal_tool` 调度；运行时状态作为 `current_goal: Option<GoalState>` 直接挂在 `AgentSession` 上，由 `goal_runtime_apply` + `GoalRuntimeEvent` 事件流推动，避免 cross-session goal 泄漏（GoalManager 这一中间层在现有实现里并不存在）。
 - Goal 工具对外返回 `ThreadGoal` 快照：使用 `threadId` 作为线程目标标识，不暴露内部 `goalId`；`GoalStatus` 使用 camelCase 序列化，例如 `budgetLimited`。
-- 会话入口位于 `crates/agent/src/slash.rs` 与 `crates/agent/src/session.rs`：
+- 会话入口位于 `crates/agent/src/slash.rs` 与 `crates/agent/src/session/turn_loop.rs`：
   - `/goal`
   - `/goal show`
   - `/goal set <objective>`
   - `/goal set --budget <N> <objective>`
+  - `/goal pause`
+  - `/goal resume`
   - `/goal complete`
-- IM Gateway 继续复用 `run_turn()` 路径，因此 `/goal` 在 Feishu/IM 侧不需要额外协议，只需要把忙碌态命令识别补进 `crates/bifrost-admin/src/handlers/im_gateway.rs`。
+- IM Gateway 继续复用 `run_turn()` 路径，因此 `/goal` 在 Feishu/IM 侧不需要额外协议，只需要把忙碌态命令识别补进 `crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs`（顶层 `handlers/im_gateway.rs` 作为模块入口 re-export `busy_message_mode` 等子模块）。
 
 ### Apply Patch
 

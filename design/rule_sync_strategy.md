@@ -40,10 +40,8 @@
 rule_id = "rl_xxx"
 status = "local_only" # local_only | synced | modified
 last_synced_at = "2026-03-25T10:00:00Z"
-origin_device_id = "dev_macbook_01"
 remote_id = "123456"
 remote_user_id = "u_abc"
-last_synced_remote_updated_at = "2026-03-25T10:00:00Z"
 last_synced_content_hash = "sha256:xxxx"
 remote_created_at = "2026-03-25T09:00:00Z"
 remote_updated_at = "2026-03-25T10:00:00Z"
@@ -59,19 +57,24 @@ remote_updated_at = "2026-03-25T10:00:00Z"
   - `modified`：本地有未同步改动
 - `remote_id`
   - 已绑定的远端对象 ID
-- `last_synced_remote_updated_at`
-  - 上次确认同步时看到的远端更新时间
 - `last_synced_content_hash`
-  - 上次确认同步时远端内容 hash
+  - 上次确认同步时本地写回的内容 hash，用于判断本地是否变化
+- `remote_updated_at`
+  - 远端对象最近一次更新时间（拉取时由服务端给出）
+
+实际字段定义见 `crates/bifrost-storage/src/rules.rs` 的 `RuleSyncMetadata`。
+
+`origin_device_id` 与 `last_synced_remote_updated_at` 字段（planned, not yet shipped as of 2026-06-17）暂未落地，当前依赖 `last_synced_content_hash` + `remote_updated_at` 判断同步快照。
 
 这里不引入 `conflict`，因为策略已经定为“直接覆盖”，不走冲突分支。
 
 ### sync-state.json
 
-`sync-state.json` 只保存：
+`sync-state.json` 保存：
 
-1. session
-2. tombstone
+1. session（token / user / last_sync_at / last_sync_action）
+2. tombstone（`deleted_rules`）
+3. `startup_login_prompt`：首次启动自动唤起登录的去重记录（见 `crates/bifrost-sync/src/manager.rs` 的 `SyncStateFile` 与 `StartupLoginPromptFile`）
 
 ```json
 {
@@ -87,8 +90,7 @@ remote_updated_at = "2026-03-25T10:00:00Z"
       "remote_user_id": "u_abc",
       "base_remote_updated_at": "2026-03-25T10:00:00Z",
       "base_content_hash": "sha256:xxxx",
-      "deleted_at": "2026-03-25T10:01:00Z",
-      "device_id": "dev_macbook_01"
+      "deleted_at": "2026-03-25T10:01:00Z"
     }
   }
 }
@@ -181,17 +183,17 @@ remote_updated_at = "2026-03-25T10:00:00Z"
 
 对每个 tombstone：
 
-1. 如果远端对象（按 `remote_id` 精确匹配）不存在，立即移除 tombstone
-2. 如果远端对象存在，直接请求删除
+1. 如果远端不再存在按 `remote_id` 或 `rule_name` 匹配的对象，且 tombstone 至少存在 `TOMBSTONE_MIN_AGE_SECS`（当前 120 秒），即可清除该 tombstone
+2. 如果远端对象存在（按 `remote_id` 或同 `rule_name` 命中），直接请求删除
 3. 删除失败则保留 tombstone，等待下次重试
-4. 超过 7 天的 tombstone 自动过期清除
+4. 超过 `TOMBSTONE_MAX_AGE_SECS`（当前 7 天）的 tombstone 自动过期清除
 
-注意：tombstone 按 `remote_id` 精确匹配，不再按 `rule_name` 宽泛匹配所有同名远端对象。
+注意：当前实现 tombstone 仍按 `remote_id` 或 `rule_name` 任一命中来匹配远端对象（见 `crates/bifrost-sync/src/manager.rs` 中 `env.id == tombstone.remote_id || env.name == tombstone.rule_name`）。严格收敛为只按 `remote_id` 精确匹配（planned, not yet shipped as of 2026-06-17）。
 
 也就是说：
 
-- 只要 tombstone 在，就持续按 `remote_id` 删除目标远端对象
-- 直到删成功或远端消失或过期
+- 只要 tombstone 在，就持续按 `remote_id` 或同名匹配并删除目标远端对象
+- 直到删成功、远端再也找不到匹配对象（且 tombstone 满 120 秒）、或 7 天过期
 
 ### 第二步：处理活规则
 
@@ -267,21 +269,21 @@ remote_updated_at = "2026-03-25T10:00:00Z"
 - 若本地是 `modified` 状态（有未同步修改），重新 create 到远端
 - 若本地也删了且有 tombstone，继续保持删除语义
 
-### Tombstone 精确匹配
+### Tombstone 匹配
 
-策略：
+当前实现：
 
-- Tombstone 按 `remote_id` 精确匹配远端对象，不再按 `rule_name` 宽泛匹配
-- 避免误删其他端创建的同名但不同 ID 的新规则
-- Tombstone 的 `rule_name` 仅用于阻止从远端拉取同名规则
+- Tombstone 按 `remote_id` 或 `rule_name` 任一命中来匹配远端对象
+- 同名拉取阻断：tombstone 中的 `rule_name` 会阻止从远端拉回同名规则
+- 未来计划（planned, not yet shipped as of 2026-06-17）：进一步收敛为只按 `remote_id` 匹配以减少误删其他端同名新规则的风险
 
 ### Tombstone 生命周期管理
 
 策略：
 
-- 远端对象按 `remote_id` 查找不到时，立即清除 tombstone（目的已达成）
-- Tombstone 超过 7 天自动过期清除，避免永久累积
-- 远端删除成功后立即清除对应 tombstone
+- 远端再也找不到匹配对象，且 tombstone 满 `TOMBSTONE_MIN_AGE_SECS`（120 秒）后清除，避免在同一轮里把刚 commit 的 tombstone 立刻清掉
+- Tombstone 超过 `TOMBSTONE_MAX_AGE_SECS`（7 天）自动过期清除，避免永久累积
+- 远端删除成功后下一轮即可被清理（仍受 min age 约束）
 
 ## 失败处理
 

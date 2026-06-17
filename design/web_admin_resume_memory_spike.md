@@ -29,8 +29,8 @@
 
 ## 仍需谨慎的点
 
-- 前端目前仍以 `pending_ids` 模型为主，没有实现文档里提到的 `visible_ids` 方案。
-- 多 tab 复用单 push 连接也还不是当前实现。
+- 前端目前仍以 `pending_ids` 模型为主，没有实现文档里提到的 `visible_ids` 方案（planned, not yet shipped as of 2026-06-17）。
+- 多 tab 复用单 push 连接也还不是当前实现（planned, not yet shipped as of 2026-06-17）。
 
 ## 结论
 

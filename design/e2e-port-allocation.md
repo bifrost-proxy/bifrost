@@ -12,8 +12,8 @@ Rust E2E 单元测试会在同一进程内并发启动多个 `ProxyInstance`。�
 - `crates/bifrost-e2e/src/tests/rule_merge_strategy.rs` 的 rule merge strategy 用例也必须通过同类 helper 启动 proxy，避免 `cargo test --workspace --all-features` 在主干 CI 中偶发失败。
 - `crates/bifrost-e2e/src/tests/response_modification.rs` 的 response modification 用例通过 helper 启动 proxy，覆盖 workspace 复测暴露的 `test_combined` 端口抢占。
 - `crates/bifrost-e2e/src/tests/rule_priority.rs` 的 rule priority 用例通过 helper 启动 proxy，覆盖 workspace 复测暴露的 `test_xhost_over_host` 端口抢占。
-- helper 每次先选择空闲端口，再实际启动 `ProxyInstance`。
-- 如果启动失败原因是端口 bind 竞态，例如 `Failed to bind` 或 `already listening on this port`，helper 会重新选择端口并重试。
+- helper 每次先调用 `portpicker::pick_unused_port()` 选择空闲端口，再实际启动 `ProxyInstance`；helper 目前未抽到公共模块，而是内联在每个测试文件中（`start_proxy_with_rules` / `start_proxy_with_values` / `start_proxy_with_rules_text` 异步函数，部分文件另定义 `start_proxy_with_rules!` 宏方便变参调用），并共享一个 `is_bind_race` 判定函数。
+- 如果启动失败原因是端口 bind 竞态，例如 `Failed to bind` 或 `already listening on this port`（由各文件的 `is_bind_race` 匹配），helper 会重新选择端口并重试，重试上限由各文件的 `START_PROXY_MAX_ATTEMPTS` 常量控制（`request_modification.rs` 当前仍写死 10 次，属于待统一项）。
 - 非端口竞态错误不吞掉，直接返回原始失败原因，避免隐藏真实业务断言失败。
 
 ## 依赖项
@@ -24,7 +24,7 @@ Rust E2E 单元测试会在同一进程内并发启动多个 `ProxyInstance`。�
 - `crates/bifrost-e2e/src/tests/rule_merge_strategy.rs`
 - `crates/bifrost-e2e/src/tests/response_modification.rs`
 - `crates/bifrost-e2e/src/tests/rule_priority.rs`
-- `crates/bifrost-e2e/src/proxy.rs`
+- `crates/bifrost-e2e/src/proxy.rs`（提供 `ProxyInstance::start` / `start_with_rules_text` / `start_with_values` / `start_with_userpass` 等启动入口；端口探测/重试 helper 仍内联在各测试文件，未抽到此模块）
 
 ## 测试方案
 

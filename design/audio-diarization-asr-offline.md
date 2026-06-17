@@ -16,14 +16,15 @@
 
 ## 当前代码基线
 
-当前 ASR Directory Task 主链路在 `crates/bifrost-admin/src/handlers/asr_jobs.rs` 通过 `include!` 拆分：
+当前 ASR Directory Task 主链路在 `crates/bifrost-admin/src/handlers/asr_jobs.rs` 通过 `include!` 拆分；实际拆分文件位于 `crates/bifrost-admin/src/handlers/asr_jobs/`，已经包含 `state.rs`、`runner.rs`、`audio_processing.rs`、`chunk_runtime.rs`、`diarization.rs`、`voiceprint.rs`、`store.rs`、`retry.rs`、`memory_bisect.rs`、`external_import.rs`、`api.rs`、`daily_agent*.rs`、`tests.rs` 等：
 
-- `state.rs`：`AsrDirectoryTask` 保存 `audio_dir`、`language`、`model`、`runtime_strategy`、`daily_agent`、`external_devices`；`FileRecord` 保存单个音频文件状态、输出文本、metadata、timeline、chunk metrics 和 failed chunks。
+- `state.rs`：`AsrDirectoryTask` 保存 `audio_dir`、`language`、`model`、`runtime_strategy`、`daily_agent`、`external_devices`，并已包含 `pub diarization: AsrDiarizationConfig`；`FileRecord` 保存单个音频文件状态、输出文本、metadata、timeline、chunk metrics、failed chunks、`memory_limit_hints` 等。diarization 状态/manifest 路径/speaker 数不直接写在 `FileRecord` 上，而是由 `diarization_file_state()` 从 manifest 目录推导，序列化到 `FileRecordWithKey` 等包装结构暴露给 API。
 - `runner.rs`：`run_directory_task()` 扫描 pending 文件、准备 ASR target、启动 task/file 级 ASR server，然后调用 `process_pending_files()`。
 - `audio_processing.rs`：`normalize_to_temp()` 把输入转成 16 kHz mono PCM WAV；这里是 diarization 前置处理的最佳复用点。
 - `chunk_runtime.rs`：`run_chunked_transcription()` 当前把 normalized WAV 按 30 秒窗口切分，调用 fork/server ASR，再合并为 `WholeFileTranscription`。
+- `diarization.rs` / `voiceprint.rs`：已落地 diarization profile registry、`/api/asr/diarization/*` 和 `/api/asr/speaker-profiles/*` HTTP 路由、manifest 读写以及 `asr-diarization-worker` 子进程调度。
 - `asr_streaming.rs`：`WholeFileTranscription` 目前是 `text + Vec<(audio_start_ms, audio_end_ms, text)>`，不含 speaker。
-- `asr_jobs_timeline.rs`：`TranscriptTimeline` 和 `TimelineSegment` 是 timeline JSON、文本渲染、Daily Docs 的统一来源；当前 segment 只有时间和文本。
+- `asr_jobs_timeline.rs`：`TranscriptTimeline` 和 `TimelineSegment` 是 timeline JSON、文本渲染、Daily Docs 的统一来源。
 - `store.rs`：`output_paths()` 把输出写到 `<data_dir>/asr/data/text/<task_id>/<relative>.txt|json|timeline.json`，保留输入目录相对结构。
 
 因此 V1 不应重写 ASR 任务系统，而是在 `normalize_to_temp()` 之后、`run_chunked_transcription()` 之前插入一个可暂停、可落盘、可恢复的 diarization stage。
@@ -44,20 +45,24 @@ discover_audio_files
 ### Profile 分层
 
 ```text
-default lightweight:
+default lightweight (shipped):
   id: sherpa-onnx-balanced
-  engine: sherpa-onnx
-  segmentation: pyannote-segmentation-3.0-int8.onnx
-  embedding: 3dspeaker-eres2net-base-zh-cn.onnx
-  fallback_embedding: nemo-titanet-small.onnx
+  engine: sherpa-onnx (in-process inside asr-diarization-worker subprocess)
+  segmentation: segmentation/model.int8.onnx
+    (source: huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0)
+  embedding:    embedding/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+    (source: github.com/k2-fsa/sherpa-onnx releases / speaker-recongition-models)
+  fallback_embedding: nemo-titanet-small.onnx (planned, not yet shipped as of 2026-06-16)
 
-quality sidecar:
+quality sidecar (planned, not yet shipped as of 2026-06-16):
   id: pyannote-community-quality
   engine: pyannote-sidecar
   model: pyannote/speaker-diarization-community-1
   install: explicit user action + Hugging Face token
+  status: registry entry exists in diarization.rs but install/run path returns
+          unsupported / missing assets
 
-lab:
+lab (planned, not yet shipped as of 2026-06-16):
   id: diarizen-lab | sortformer-lab
   engine: external-command | local-http-sidecar
   distribution: user-provided model only
@@ -73,17 +78,27 @@ lab:
 
 V1 在 ASR task 上新增 diarization 配置，默认关闭，避免隐私和资源成本突然改变现有任务行为。用户启用后默认 profile 是 `sherpa-onnx-balanced`。
 
+实际落地结构在 `crates/bifrost-asr/src/profiles.rs`：
+
 ```rust
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub(crate) struct AsrDiarizationConfig {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsrDiarizationConfig {
+    #[serde(default)]
     pub enabled: bool,
-    pub profile: Option<String>,
+    #[serde(default = "default_diarization_profile")] // -> "sherpa-onnx-balanced"
+    pub profile: String,
+    #[serde(default)]
     pub min_speakers: Option<u8>,
+    #[serde(default)]
     pub max_speakers: Option<u8>,
+    #[serde(default)]
     pub known_speaker_count: Option<u8>,
+    #[serde(default)]
     pub voiceprint_matching: bool,
 }
 ```
+
+`AsrDiarizationConfig::speaker_aware_default()` 把 `enabled=true`、`max_speakers=Some(DEFAULT_AUTO_MAX_SPEAKERS=4)`、`voiceprint_matching=true`，被多个 speaker-aware profile 默认引用。
 
 `AsrDirectoryTask` 增加：
 
@@ -92,43 +107,48 @@ pub(crate) struct AsrDiarizationConfig {
 pub diarization: AsrDiarizationConfig,
 ```
 
-`FileRecord` 增加：
+实际实现没有把 diarization 状态写进 `FileRecord` 字段，而是在 `store.rs::diarization_file_state()` 中按 task config + 是否存在 manifest 文件推导，序列化到响应包装 `FileRecordWithKey` 上的 `diarization_status`、`diarization_manifest_path`、`speaker_count`：
 
 ```rust
-pub diarization_status: Option<String>,       // pending | running | success | failed | skipped
-pub diarization_manifest_path: Option<PathBuf>,
-pub diarization_error: Option<String>,
-pub speaker_count: Option<usize>,
-pub speaker_labels: Vec<SpeakerLabelRecord>,
+struct FileRecordWithKey {
+    key: String,
+    #[serde(flatten)] record: FileRecord,
+    #[serde(skip_serializing_if = "Option::is_none")] diarization_status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")] diarization_manifest_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")] speaker_count: Option<usize>,
+}
 ```
+
+`diarization_error`、`speaker_labels` 字段当前未持久化在 `FileRecord` 上；speaker label 直接来自 manifest 与 timeline。后续如需把错误固化到 record，请使用 serde default，避免破坏旧 FileRecord。
 
 ## 新增 crate 与模块边界
 
-新增 workspace crate：
+实际落地复用 `crates/bifrost-asr/`（不是独立的 `bifrost-audio` crate）。当前模块结构：
 
 ```text
-crates/bifrost-audio/
-  src/
-    lib.rs
-    config.rs
-    engine.rs
-    diarization.rs
-    manifest.rs
-    normalize.rs
-    slicer.rs
-    speaker_profile.rs
-    storage.rs
-    engines/
-      sherpa_onnx.rs
-      pyannote_sidecar.rs
-      external_command.rs
+crates/bifrost-asr/src/
+  artifacts.rs
+  decision.rs
+  offline.rs
+  planner.rs
+  platform.rs
+  profiles.rs       # AsrDiarizationConfig + speech-mode profile registry
+  resources.rs
+  runtime.rs
+  speaker.rs        # speaker / diarization 数据结构
+  subtitle.rs
+  timeline.rs       # TranscriptTimeline / TimelineSegment
+  wake.rs
+  native::sherpa_onnx  # cfg(diarization-sherpa) 重导出 sherpa-onnx crate
 ```
+
+Diarization 调度、manifest 落盘、worker 子进程编排在 `crates/bifrost-admin/src/handlers/asr_jobs/{diarization.rs,voiceprint.rs,runner.rs,store.rs}`；pyannote sidecar / DiariZen / Sortformer engine 当前未实现（planned, not yet shipped as of 2026-06-16）。
 
 职责划分：
 
-- `bifrost-audio` 只处理音频 diarization、segment manifest、speaker profile、切片和导出，不依赖 Admin HTTP。
-- `bifrost-admin` 的 `asr_jobs` 负责调度、暂停、FileStore、ASR runtime、API 和 WebUI 所需响应。
-- `bifrost-cli` 后续只调用 Admin API 或复用 `bifrost-audio` 的离线命令，不直接知道 sherpa/pyannote 内部参数。
+- `bifrost-asr` 只提供 ASR/diarization profile、timeline、speaker 数据结构与平台/资源决策，不依赖 Admin HTTP；真实 ONNX 推理通过 `feature = "diarization-sherpa"` 重导出 sherpa-onnx crate，并在 worker 子进程内调用。
+- `bifrost-admin` 的 `asr_jobs` 负责调度、暂停、FileStore、ASR runtime、API、manifest 读写和 `asr-diarization-worker` 子进程编排。
+- `bifrost-cli` 调用 Admin API 或通过隐藏的 `bifrost asr-diarization-worker --request <json>` 入口跑 worker，不直接知道 sherpa-onnx 内部参数。
 
 核心 trait：
 
@@ -176,7 +196,7 @@ Manifest schema：
     {
       "id": "speaker_00",
       "display_name": "用户A",
-      "embedding_model": "3dspeaker-eres2net-base-zh-cn.onnx",
+      "embedding_model": "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx",
       "embedding_path": "speaker-profiles/cache/speaker_00.embedding",
       "mapped_profile_id": null,
       "confidence": null
@@ -345,9 +365,9 @@ Diarization 和声纹模型必须复用 ASR 的“资产初始化”和“业务
     profiles/
       sherpa-onnx-balanced/
         profile.json
-        segmentation/pyannote-segmentation-3.0-int8.onnx
-        embedding/3dspeaker-eres2net-base-zh-cn.onnx
-        fallback/nemo-titanet-small.onnx
+        segmentation/model.int8.onnx
+        embedding/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx
+        fallback/nemo-titanet-small.onnx   # planned, not yet shipped as of 2026-06-16
       pyannote-community-quality/
         profile.json
         sidecar/
@@ -360,8 +380,8 @@ Diarization 和声纹模型必须复用 ASR 的“资产初始化”和“业务
 `sherpa-onnx-balanced` 初始化内容：
 
 - 检查 sherpa-onnx runtime 是否可用；Rust crate 方案走构建依赖，外部 runtime 方案走本地 asset。
-- 下载或导入 `pyannote-segmentation-3.0-int8.onnx`。
-- 下载或导入 speaker embedding model，默认 `3dspeaker-eres2net-base-zh-cn.onnx`，缺失时允许用户选择 `nemo-titanet-small.onnx`。
+- 下载或导入 sherpa-onnx pyannote segmentation int8 模型，落到 `segmentation/model.int8.onnx`。
+- 下载或导入 speaker embedding model，默认 `embedding/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx`；`nemo-titanet-small.onnx` 等可选 fallback 属于后续阶段（planned, not yet shipped as of 2026-06-16）。
 - 运行一段短音频 self-check，确认 segmentation、embedding、clustering 都能返回合法 manifest。
 
 `pyannote-community-quality` 初始化内容：
@@ -390,19 +410,21 @@ PATCH /_bifrost/api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}
 POST /_bifrost/api/asr/speaker-profiles
 ```
 
-后续声纹身份识别阶段再扩展：
+已落地的声纹 profile / 实时朗读录入 HTTP 路由（实现在 `asr_jobs/diarization.rs` + `asr_jobs/voiceprint.rs`）：
 
 ```http
-GET  /_bifrost/api/asr/speaker-profiles
-GET  /_bifrost/api/asr/speaker-profiles/{profile_id}
-PATCH /_bifrost/api/asr/speaker-profiles/{profile_id}
+GET    /_bifrost/api/asr/speaker-profiles
+POST   /_bifrost/api/asr/speaker-profiles
+GET    /_bifrost/api/asr/speaker-profiles/{profile_id}
 DELETE /_bifrost/api/asr/speaker-profiles/{profile_id}
-POST /_bifrost/api/asr/speaker-profiles/enroll-from-task-speaker
-POST /_bifrost/api/asr/speaker-profiles/enroll-from-audio
-POST /_bifrost/api/asr/speaker-profiles/{profile_id}/samples
-POST /_bifrost/api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
-DELETE /_bifrost/api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
+POST   /_bifrost/api/asr/speaker-profiles/identify
+POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions
+POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}/audio
+POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}/finish
+DELETE /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}
 ```
+
+PATCH on a single speaker-profile，以及 `enroll-from-task-speaker` / `enroll-from-audio` / `/{profile_id}/samples` / `tasks/.../speakers/.../match-profile` 跨任务匹配 API 属于后续阶段（planned, not yet shipped as of 2026-06-16）。
 
 `init-stream` 复用现有 `/api/asr/init-stream` 的 SSE 事件形态：`phase`、`message`、`detail`、`download`、`ready`、`error`。区别是 diarization 初始化的 owner 是 `diarization_model_management`，不占用 ASR server 租约。
 
@@ -438,19 +460,18 @@ bifrost ai asr task show <task-id>
 bifrost ai asr task files <task-id>
 ```
 
-后续声纹身份识别阶段再扩展：
+已落地的声纹 profile 管理与实时朗读录入 CLI（实现在 `crates/bifrost-cli/src/cli.rs::AiAsrDiarizationSpeakerCommands`）：
 
 ```bash
-# 后续声纹 profile 管理与实时朗读录入
-bifrost ai asr diarization speakers list
-bifrost ai asr diarization speakers show <profile-id>
-bifrost ai asr diarization speakers enroll-live --name "Eden"
-bifrost ai asr diarization speakers enroll-live --profile <profile-id> --device system_default
-bifrost ai asr diarization speakers match --task <task-id> --file <file-key> --speaker speaker_00 --profile <profile-id>
-bifrost ai asr diarization speakers unmatch --task <task-id> --file <file-key> --speaker speaker_00
+bifrost ai asr diarization speakers list [--json]
+bifrost ai asr diarization speakers show <profile-id> [--json]
+bifrost ai asr diarization speakers enroll-live --name "Eden" \
+    [--profile sherpa-onnx-balanced] [--phrase-seconds 4] [--device :0] [--json]
 ```
 
-V1 不新增单独 `bifrost audio diarize <file>` 作为验收入口；但 CLI 必须支持 diarization profile 的 `profiles/status/init`，并在 task/file 输出中展示 diarization status、speaker count、profile、speaker label。声纹 profile 的 `speakers list/show/enroll-live/match/unmatch` 放到后续身份识别阶段；`import-audio` 只作为调试/迁移高级入口，不是默认录入体验。独立文件级 `bifrost audio diarize <file>` 放到 V1.5。
+`speakers delete <profile-id>` 以及 `speakers match` / `speakers unmatch` 跨任务匹配 CLI 属于后续阶段（planned, not yet shipped as of 2026-06-16）。
+
+V1 不新增单独 `bifrost audio diarize <file>` 作为验收入口；但 CLI 已经支持 diarization profile 的 `profiles/status/init`，并在 task/file 输出中展示 diarization status、speaker count、profile、speaker label。`import-audio` 只作为调试/迁移高级入口，不是默认录入体验；独立文件级 `bifrost audio diarize <file>` 放到 V1.5。
 
 WebUI V1：
 
@@ -726,7 +747,10 @@ failed  missing assets     -         0     call.wav
 - 初始化过程打印下载进度，但不打印 signed URL、token 或 Authorization header。
 - `--json` 模式输出 NDJSON event，字段对齐 SSE：`phase/message/detail/download/ready/error`。
 
-## 声纹实时录入与匹配（后续阶段）
+## 声纹实时录入与匹配（基础已落地，跨任务匹配为后续阶段）
+
+截至 2026-06-16，已实现：默认 `sherpa-onnx-balanced` profile 的下载/自检、`AsrDiarizationConfig.voiceprint_matching` 默认 true、speaker-profile CRUD + identify + enrollment-sessions 系列 HTTP 路由、`speakers list/show/enroll-live` CLI、WebUI `DiarizationSetupCard` 与 directory task `Speaker Diarization` 表单分组、`asr-diarization-worker` 子进程承载 diarization / identify / finish-enrollment 推理。跨任务匹配 API、speaker-profile PATCH、显式 `speakers match/unmatch` CLI、pyannote-community-quality sidecar 实际推理路径属于（planned, not yet shipped as of 2026-06-16）。
+
 
 声纹能力必须让 UI 和 CLI 都能完成基础声纹录入、删除和实时验证。默认录入体验不是上传音频文件，而是 Bifrost 下发指定文本，用户实时朗读，Bifrost 本地采集音频并提取声纹。没有录入 profile 时，Bifrost 只能展示匿名 speaker；录入并匹配后，后续处理才允许把 speaker 映射成用户确认的明确姓名。
 

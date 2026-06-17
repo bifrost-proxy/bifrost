@@ -1,8 +1,9 @@
 # ChatGPT Web Adapter 技术方案
 
 > 状态：实施中
-> 范围：最终态技术方案与当前实现对齐；正式实现位于 `crates/bifrost-admin/src/im_gateway/chatgpt_web.rs`。
+> 范围：最终态技术方案与当前实现对齐；正式实现入口位于 `crates/bifrost-admin/src/im_gateway/chatgpt_web.rs`，配套子模块拆分到 `crates/bifrost-admin/src/im_gateway/chatgpt_web/{artifacts,browser,diagnostics,images,interaction,native,send,storage,tests}.rs`。
 > 核心结论：ChatGPT Web 的最终形态是新增 adapter：`chatgpt_web`。runner 是可命名、可复用、可被 Provider 覆盖选择的配置实例；adapter 是 runner 背后的执行实现。
+> 命名提示：本文使用 `AgentRunner*` 作为最终概念命名；实际代码当前仍沿用 `ExternalCli*` 系列类型（`ExternalCliGatewayConfig` / `ExternalCliAgentSettings` / `ExternalCliChannelSettings` / `ExternalCliRunRequest`），公共 API 路径前缀为 `/_bifrost/api/im-gateway/chat`，并未单独切出 `/_bifrost/api/agent/runners` 命名空间，重命名工作 (planned, not yet shipped as of 2026-06-16)。
 
 ## 背景
 
@@ -122,9 +123,10 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 
 ## 配置模型
 
-最终配置只保留 Agent Runner Registry：
+最终配置只保留 Agent Runner Registry。最终目标命名为 `AgentRunnerRegistry / AgentRunnerSettings / AgentRunnerChannelSettings`，但当前已实现的真实类型仍位于 `crates/bifrost-admin/src/im_gateway/external_cli/mod.rs`，名为 `ExternalCliGatewayConfig / ExternalCliAgentSettings / ExternalCliChannelSettings`，`adapter_config` 字段类型为强类型 `ExternalCliAdapterConfig` 而非 `serde_json::Value`（重命名为 `AgentRunner*` 与 `adapter_config: serde_json::Value` adapter-specific schema 拆分 planned, not yet shipped as of 2026-06-16）：
 
 ```rust
+// 目标命名（planned, not yet shipped as of 2026-06-16）
 pub struct AgentRunnerSettings {
     pub enabled: bool,
     pub adapter: String,
@@ -146,6 +148,14 @@ pub struct AgentRunnerChannelSettings {
     pub enabled: Option<bool>,
     pub runner_id: Option<String>,
     pub delivery_mode: Option<DeliveryMode>,
+}
+
+// 实际已落地类型（shipped）
+pub struct ExternalCliGatewayConfig {
+    pub version: u32,
+    pub default_runner_id: String,
+    pub runners: BTreeMap<String, ExternalCliAgentSettings>,
+    pub channels: BTreeMap<String, ExternalCliChannelSettings>,
 }
 ```
 
@@ -215,9 +225,10 @@ pub struct AgentRunnerChannelSettings {
 
 ## Adapter Registry
 
-最终 adapter trait 是通用 Agent Runner Adapter：
+最终 adapter trait 是通用 Agent Runner Adapter。通用 `AgentRunnerAdapter` trait 与 `AdapterCapabilities` 结构是目标抽象 (planned, not yet shipped as of 2026-06-16)；当前已落地的实现路径是：`chatgpt_web` 模块直接复用 `ExternalCliRunRequest` / `ExternalCliRunStatus` / `ExternalCliProgressEvent*` 完成入参、状态与事件，在 `chatgpt_web.rs` 中以 `ADAPTER_ID = "chatgpt_web"` 常量与显式 dispatch 方式区分；其他 adapter (`codex / custom / mock`) 同样走 `external_cli` 进程托管路径。
 
 ```rust
+// 目标 trait（planned, not yet shipped as of 2026-06-16）
 #[async_trait]
 trait AgentRunnerAdapter {
     fn adapter_id(&self) -> &'static str;
@@ -657,32 +668,43 @@ _umsid
 
 ### Runner Registry API
 
-目标 API 围绕 Agent Runner 和 Adapter：
+目标 API 围绕 Agent Runner 和 Adapter；当前已落地的实际路径仍统一挂在 `/_bifrost/api/im-gateway/chat` 前缀下，未单独切出 `/_bifrost/api/agent/runners` 命名空间 (`/_bifrost/api/agent/runners*` 路由 planned, not yet shipped as of 2026-06-16)：
 
 ```text
+# 目标 API（planned, not yet shipped as of 2026-06-16）
 GET   /_bifrost/api/agent/runners
 PATCH /_bifrost/api/agent/runners
 GET   /_bifrost/api/agent/adapters
 GET   /_bifrost/api/agent/runners/:runner_id
 PATCH /_bifrost/api/agent/runners/:runner_id
 PATCH /_bifrost/api/agent/runners/channels/:provider_id
-POST  /_bifrost/api/im-gateway/chat
-POST  /_bifrost/api/im-gateway/chat/stream
-GET   /_bifrost/api/im-gateway/chat/runs/:run_id
-POST  /_bifrost/api/im-gateway/chat/runs/:run_id/stop
+
+# 已实现的实际路由（shipped）
+GET   /_bifrost/api/im-gateway/chat/config              # 全量 ExternalCliGatewayConfig
+PATCH /_bifrost/api/im-gateway/chat/config              # 全量替换 ExternalCliGatewayConfig
+POST  /_bifrost/api/im-gateway/chat/stream              # 单次 run，SSE 流
+POST  /_bifrost/api/im-gateway/chat/runner-calls/stream # caller -> runner 嵌套调用
+GET   /_bifrost/api/im-gateway/chat/runs/:run_id        # run 详情
+POST  /_bifrost/api/im-gateway/chat/runs/:run_id/stop   # stop run
 ```
 
-Chat Gateway 只负责执行 runner，不负责配置 runner schema。Runner 和 Adapter 配置归属于 Agent 域。
+Chat Gateway 只负责执行 runner，不负责配置 runner schema。Runner 和 Adapter 配置最终归属于 Agent 域，当前仍由同一 chat gateway `/config` 端点承载。
 
 ### Adapter Status API
 
-`chatgpt_web` 需要登录相关动作。建议按 runner 暴露，因为状态来自 runner 的 adapterConfig/profile：
+`chatgpt_web` 需要登录相关动作。建议按 runner 暴露，因为状态来自 runner 的 adapterConfig/profile；当前已落地的真实路径仍按 adapter 而不是 runner 暴露 (`/_bifrost/api/agent/runners/:runner_id/adapter-*` 命名 planned, not yet shipped as of 2026-06-16)：
 
 ```text
+# 目标 API（planned, not yet shipped as of 2026-06-16）
 GET  /_bifrost/api/agent/runners/:runner_id/adapter-status
 POST /_bifrost/api/agent/runners/:runner_id/adapter-actions/check-login
 POST /_bifrost/api/agent/runners/:runner_id/adapter-actions/open-login
 POST /_bifrost/api/agent/runners/:runner_id/adapter-actions/logout
+
+# 已实现的实际路由（shipped），通过 ?runnerId= 或 body 中 runnerId 选择具体 runner
+GET  /_bifrost/api/im-gateway/chat/adapters/chatgpt-web/auth/status
+POST /_bifrost/api/im-gateway/chat/adapters/chatgpt-web/auth/open
+POST /_bifrost/api/im-gateway/chat/adapters/chatgpt-web/auth/stop
 ```
 
 ## WebUI 设计

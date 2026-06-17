@@ -47,8 +47,9 @@ Replay 页面支持在 URL 输入框粘贴 cURL 命令并自动导入 method / u
    - url：`--url` 或 positional 中最后一个 URL candidate
    - headers：`-H/--header`（按首个 `:` 分割）
    - cookie：`-b/--cookie` 转换为 `Cookie` Header（若已有 Cookie Header 则用 `; ` 追加）
-   - basic auth：`-u/--user user:pass` → `Authorization: Basic <base64>`
-   - body：`-d/--data/--data-raw/--data-binary/--data-urlencode/--json` 收集 bodyParts，按 curl 语义用 `&` 拼接
+   - basic auth：`-u/--user user:pass` → `Authorization: Basic <base64>`（仅在尚未存在 `Authorization` Header 时写入）
+   - user-agent：`-A/--user-agent` → `User-Agent` Header
+   - body：`-d/--data/--data-raw/--data-binary/--data-urlencode/--data-ascii/--json` 收集 bodyParts，按 curl 语义用 `&` 拼接（`--json` 在未显式指定时自动补 `Content-Type: application/json`）
    - raw_type：根据 `Content-Type` 推断（json/xml/html/javascript/text），用于 UI 语法高亮
    - `-G/--get`：将 `--data*` 内容追加到 URL query（不作为 body 导入）
 

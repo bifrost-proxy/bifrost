@@ -1,7 +1,7 @@
 # 启动终端移动端可用性检查
 
-> 状态：已进入实现验证
-> 更新时间：2026-06-08
+> 状态：已实现并随 foreground start 默认启用
+> 更新时间：2026-06-16
 
 ## 背景
 
@@ -165,7 +165,7 @@ pub struct MobileAvailabilityPendingAuth {
 数据来源：
 
 - `entries` 来自有效地址枚举 + trust probe public session。
-- `connected_devices` 以 trust probe session devices 为主。
+- `devices` 以 trust probe session devices 为主（实现中字段名即 `devices`）。
 - `pending_authorizations` 来自 access control pending list；审批后应立即从 pending 列表消失，并反映到 trust probe 设备的 `proxyAccessStatus=allowed`。
 - USB 发现设备暂不合并到终端面板；终端面板以浏览器 trust probe 的最近活跃设备为准，避免把已断开的 USB 历史状态持久展示出来。
 
@@ -215,7 +215,7 @@ pub struct MobileAvailabilityPendingAuth {
 
 建议把 `TrustProbeManager` 的部分能力从 private 调整为 crate 内可复用：
 
-- `create_or_reuse_session_for_host(state, host, ttl)`：供终端启动面板使用。
+- `get_or_create_terminal_probe_session(state, host, ttl)`：供终端启动面板复用 trust probe session（实际导出名）。
 - `list_active_sessions()`：已有 public function 可继续使用。
 - `render_terminal_qr(url)`：新增终端二维码渲染 helper，避免 CLI 侧重复依赖和实现。终端二维码编码短公开入口 `http://<host>:<port>/_bifrost/tp`，并关闭 qrcode quiet zone，以减少终端面板占用；`Open` 行仍展示完整 `/_bifrost/public/trust-probe` URL。
 - Router / public trust probe handler 将 `/_bifrost/tp` 映射到同一个 fixed landing page；security public path 检查同步允许该短入口。

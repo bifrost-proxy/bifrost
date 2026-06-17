@@ -37,16 +37,13 @@ helper 命令隐藏在 clap help 之外，不改变用户公开 CLI 面，也不
 
 优化后先把路径归一到最外层 `.app` bundle；没有 `.app` bundle 的路径不走 macOS AppKit 提取。这样避免 UI 中某些短生命周期进程、测试二进制或系统 helper 触发昂贵的图标提取。
 
-### 4. 内存缓存按数量和字节双封顶
+### 4. 主进程不再常驻正向图标，仅缓存负查询
 
-原缓存只按条目数裁剪，且每个条目保存完整 `Vec<u8>` PNG。优化后改为 LRU 风格内存缓存：
+原缓存把每个 app 的完整 `Vec<u8>` PNG 都按条目数裁剪后挂在主进程堆上，是 footprint 增长的另一个来源。优化后主进程内不再常驻任何正向图标字节：
 
-- 最多 256 个 key
-- 正向图标总字节默认不超过 16 MiB
-- 负缓存保留但不计字节
-- 单个图标超过 2 MiB 时仍可落盘，但不放入主进程内存缓存
-
-磁盘缓存继续使用 `<data_dir>/app_info/*.png`，不影响冷启动后复用图标。
+- 正向图标只写入磁盘缓存 `<data_dir>/app_info/*.png`，命中时直接从文件读出返回，热图标常驻成本落在可回收的 OS page cache，不计入进程 footprint。
+- 主进程仅保留一个负缓存 (`AppIconNegativeCache`)，记录已知抓取失败的 app key，避免重复触发昂贵的 fallback。负缓存按 FIFO 驱逐，容量上限 `NEGATIVE_CACHE_MAX_ENTRIES = 1024`。
+- 单个图标字节数有 2 MiB 上限 (`MEMORY_CACHE_MAX_SINGLE_ICON_BYTES`)，超过的 worker 输出会被拒绝、不落盘也不返回。
 
 ### 5. 前端懒加载与并发限流
 
@@ -65,7 +62,7 @@ helper 命令隐藏在 clap help 之外，不改变用户公开 CLI 面，也不
 
 - 路径归一：`.app/Contents/MacOS/bin` 归一到 `.app` bundle。
 - 路径过滤：`target/debug/deps/foo` 和无 `.app` ancestor 的路径不触发 macOS 图标提取。
-- 内存缓存：超过字节上限时驱逐旧正向图标，负缓存不计入字节。
+- 负缓存：达到 `NEGATIVE_CACHE_MAX_ENTRIES` 后按 FIFO 驱逐最旧 key，`remove` 可清除已记录的 miss。
 - handler：已有缓存命中仍返回 `image/png` 与 CORS 头。
 
 ### E2E 测试

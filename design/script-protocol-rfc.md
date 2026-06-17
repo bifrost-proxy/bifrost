@@ -23,10 +23,18 @@
 - 文档假定的“只提供极简安全对象、禁止文件和网络”也不再准确；当前实现支持受控 file/net 能力。
 - 引擎选型、运行时细节若要继续保留，必须以实际 `bifrost_script` 集成为准重新核对，不能继续把旧提案写成事实。
 
-## 建议
+## 建议 (planned, not yet shipped as of 2026-06-17)
 
 - 这份文档应该重写为“已实现能力说明”，而不是继续维护 RFC 形态。
 - 后续如果补文档，建议拆成：
   - 规则协议语义；
   - 脚本运行时与 sandbox；
   - 管理端脚本编辑 / 调试 / 日志体验。
+
+## 参考实现 (verified 2026-06-17)
+
+- 协议常量：`crates/bifrost-core/src/protocol.rs` (`Protocol::ReqScript` / `ResScript` / `Decode`)
+- 规则解析：`crates/bifrost-core/src/rule/parser/mod.rs`
+- 脚本引擎：`crates/bifrost-script/src/engine.rs`、`crates/bifrost-script/src/sandbox.rs` (`SandboxConfig` 暴露 `file_root` / `file_allowed_dirs` / `allow_network` / `network_timeout_ms` / `max_file_bytes` / `max_net_request_bytes` / `max_net_response_bytes`)
+- 内置 parser 脚本：`crates/bifrost-script/src/builtins.rs` (`build_in_bp`)
+- Sandbox 管理 API：`crates/bifrost-admin/src/handlers/config.rs` (`get_sandbox_config` / `update_sandbox_config`)

@@ -17,7 +17,7 @@
   - `DEFAULT_MAX_TURN_ITERATIONS = 20`
   - `DEFAULT_REQUEST_TIMEOUT = 120`
   - `DEFAULT_BACKGROUND_TERMINAL_TIMEOUT_MS = 300_000`
-- `crates/agent/src/mcp.rs`
+- `crates/agent/src/mcp/mod.rs`
   - `DEFAULT_STARTUP_TIMEOUT_SEC = 30`
   - `DEFAULT_TOOL_TIMEOUT_SEC = 60`
 - `crates/agent/src/client.rs`
@@ -47,7 +47,7 @@
 
 ### 2. 统一 MCP 默认超时
 
-修改 `crates/agent/src/mcp.rs`：
+修改 `crates/agent/src/mcp/mod.rs`：
 
 - `DEFAULT_STARTUP_TIMEOUT_SEC = 600`
 - `DEFAULT_TOOL_TIMEOUT_SEC = 600`
@@ -85,7 +85,7 @@
 
 - `crates/agent/src/config.rs`
 - `crates/agent/src/client.rs`
-- `crates/agent/src/mcp.rs`
+- `crates/agent/src/mcp/mod.rs`
 - `crates/bifrost-admin/src/handlers/im_gateway.rs`（复用现有 Agent Admin API 做黑盒验证）
 - `e2e-tests/tests/` 下新增真实接口测试脚本
 - `human_tests/` 下新增真实场景验证文档
@@ -98,7 +98,7 @@
    - 验证默认 `request_timeout_secs = 600`
    - 验证默认 `max_turn_iterations = 1000`
    - 验证默认 `background_terminal_max_timeout = 300000`
-2. `crates/agent/src/mcp.rs` 现有默认配置回退路径相关测试
+2. `crates/agent/src/mcp/mod.rs` 现有默认配置回退路径相关测试
    - 验证 `startup_timeout_sec/tool_timeout_sec` 为 `None` 时仍能走新的默认值常量
 3. 新增/更新 `crates/agent/src/client.rs` 相关测试（如果需要）
    - 验证 `AgentClient::new()` 不再写死 300 秒 builder timeout

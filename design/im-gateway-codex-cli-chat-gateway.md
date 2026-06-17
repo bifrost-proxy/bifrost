@@ -255,7 +255,7 @@ manifest adapter 适合简单 CLI；复杂 CLI 仍通过 Rust 内置 adapter 实
 
 ## API 设计
 
-### `POST /_bifrost/api/im-gateway/chat`
+### `POST /api/im-gateway/chat`
 
 同步执行一个 turn，默认等待最终结果。
 
@@ -304,6 +304,8 @@ manifest adapter 适合简单 CLI；复杂 CLI 仍通过 Rust 内置 adapter 实
 }
 ```
 
+> 当前实现差异（as of 2026-06-16）：`ExternalCliRunRequest`（`crates/bifrost-admin/src/im_gateway/external_cli/mod.rs`）只接受 `message`、`images`、`operation`、`params`、`provider_id`、`runner_id`、`session_key`、`runtime`、`adapter`、`work_dir`、`instructions`（字符串而非对象）、`adapter_config`、`allow_work_dirs`、`inject_bifrost_tools`、`skill_paths`。`provider_type`/`chat_id`/`user_id`/`message_id`/`reply_mode`/`skills.{enabled,disabled}` 字段尚未落地；IM 上下文目前通过 provider/runner 配置和 session_key 表达，回流模式由 channel `deliveryMode`（noIm / finalReply / progressCard）控制，不是 request-level `reply_mode`。
+
 响应：
 
 ```json
@@ -338,7 +340,7 @@ manifest adapter 适合简单 CLI；复杂 CLI 仍通过 Rust 内置 adapter 实
 }
 ```
 
-### `POST /_bifrost/api/im-gateway/chat/stream`
+### `POST /api/im-gateway/chat/stream`
 
 流式执行一个 turn。推荐使用 NDJSON，因为它和 `codex exec --json` 天然匹配，测试脚本也容易消费。
 
@@ -354,15 +356,15 @@ manifest adapter 适合简单 CLI；复杂 CLI 仍通过 Rust 内置 adapter 实
 {"type":"run_finished","status":"completed","response":"已检查..."}
 ```
 
-### `GET /_bifrost/api/im-gateway/chat/runs/:run_id`
+### `GET /api/im-gateway/chat/runs/:run_id`
 
 查询 run 详情，返回最终状态、progress snapshot、stdout/stderr/last_message 路径和安全摘要。
 
-### `GET /_bifrost/api/im-gateway/chat/runs/:run_id/events`
+### `GET /api/im-gateway/chat/runs/:run_id/events` （planned, not yet shipped as of 2026-06-16）
 
-读取规范化后的 progress event log，用于 E2E 失败后回放。
+读取规范化后的 progress event log，用于 E2E 失败后回放。当前实现把 normalized events 写入 `chat_runs/<run_id>/normalized_events.jsonl`，由 `GET .../runs/:run_id` 一并返回；独立 events endpoint 暂未上线。
 
-### `POST /_bifrost/api/im-gateway/chat/runs/:run_id/stop`
+### `POST /api/im-gateway/chat/runs/:run_id/stop`
 
 停止正在运行的外部 CLI Agent 进程，并把 session 状态更新为 stopped。该接口应复用 IM `/stop` 的 session control 语义。
 
@@ -522,17 +524,21 @@ progress_card = true
 
 全局配置接口：
 
-- `GET /_bifrost/api/im-gateway/agent/defaults`
-- `PATCH /_bifrost/api/im-gateway/agent/defaults`
+- `GET /api/im-gateway/agent/defaults` （planned, not yet shipped as of 2026-06-16）
+- `PATCH /api/im-gateway/agent/defaults` （planned, not yet shipped as of 2026-06-16）
+
+当前实现把全局默认配置合并进 `GET/PATCH /api/im-gateway/chat/config` 的 runner registry；独立 `agent/defaults` 入口尚未拆出。
 
 通道配置接口：
 
-- `GET /_bifrost/api/im-gateway/providers/:provider_id/agent`
-- `PATCH /_bifrost/api/im-gateway/providers/:provider_id/agent`
+- `GET /api/im-gateway/agent/providers/:provider_id/agent` （planned, not yet shipped as of 2026-06-16）
+- `PATCH /api/im-gateway/agent/providers/:provider_id/agent` （planned, not yet shipped as of 2026-06-16）
+
+当前实现通过 `GET/PATCH /api/im-gateway/chat/config/channels/:provider_id` 维护 provider 级 `ExternalCliChannelSettings`（runnerId/enabled/deliveryMode）。
 
 预览有效配置接口：
 
-- `POST /_bifrost/api/im-gateway/agent/resolve-config`
+- `POST /api/im-gateway/agent/resolve-config` （planned, not yet shipped as of 2026-06-16）
 
 `resolve-config` 输入 provider、route、work_dir 和 request overrides，返回脱敏后的 `AgentRuntimeSnapshot`，用于 WebUI 预览和 E2E 断言。该接口不返回 secret、token 或完整 provider config。
 

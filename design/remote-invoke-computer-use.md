@@ -1,10 +1,17 @@
 # Computer Use API 设计方案
 
-> 状态：RFC（征求意见稿）
+> 状态：RFC（征求意见稿）（planned, not yet shipped as of 2026-06-16）
 > 作者：Mira Agent
 > 日期：2026-04-25
 > 关联：`design/remote-invoke-file-api.md`、`design/remote-invoke-shell-e2e-regressions.md`
 > 范围：Remote Invoke 第四类能力——GUI 屏幕感知与输入控制
+>
+> **实现状态对照（2026-06-16 review）**：本文档描述的 Computer Use 能力**整体尚未落地**。代码侧核查结果：
+> - `crates/bifrost-admin/src/remote_invoke/types.rs` 中 `GrantScope` 当前枚举值为 `RemoteQuery` / `RemoteShellExec` / `RemoteShellInteractive` / `RemotePowerMgmt` / `RemoteImGateway`，**未包含** `RemoteComputerRead` / `RemoteComputerWrite`。
+> - 同文件中 `CommandKind` 当前枚举值为 `QueryReadonly` / `ShellExec` / `File` / `PowerMgmt` / `ImGateway`，**未包含** `Computer` 变体。
+> - `crates/bifrost-cli` 不存在 `bifrost remote computer ...` 子命令，无 `computer.*` 方法分发。
+> - 不存在 `bifrost-screen-agent` 二进制、`computer_ops` 模块、`ComputerAccessPolicy` 类型或 `computer_access.toml` 配置。
+> 因此下文所有 method、scope、policy、CLI、Phase 路径仍属设计预案，落地时请按本节列出的当前 enum 变体做增量改动，并同步更新 `design/remote-invoke-file-api.md` 中关于 scope 矩阵的描述。
 
 ## 背景与目标
 
@@ -27,7 +34,7 @@ Claude Computer Use 已证明此能力对 Agent 的价值：模型通过「截�
 
 ---
 
-## 能力矩阵
+## 能力矩阵（planned, not yet shipped as of 2026-06-16）
 
 | method | 语义 | 必需 scope |
 |--------|------|------------|
@@ -44,7 +51,7 @@ Claude Computer Use 已证明此能力对 Agent 的价值：模型通过「截�
 
 ---
 
-## 架构设计
+## 架构设计（planned, not yet shipped as of 2026-06-16）
 
 ```
 ┌──────────────┐  computer.screenshot/click/type  ┌────────────┐
@@ -82,7 +89,7 @@ Claude Computer Use 已证明此能力对 Agent 的价值：模型通过「截�
 
 ---
 
-## 授权模型
+## 授权模型（planned, not yet shipped as of 2026-06-16；下文新增 GrantScope/CommandKind 变体均未实现）
 
 ### 新增 GrantScope
 
@@ -175,7 +182,7 @@ require_confirmation = false
 
 ---
 
-## Target 端核心实现
+## Target 端核心实现（planned, not yet shipped as of 2026-06-16）
 
 ### Screenshot Engine
 
@@ -403,7 +410,7 @@ fn traverse_tree(element: &AXUIElement, depth: u32, filter_role: Option<&str>) -
 
 ---
 
-## 协议细节
+## 协议细节（planned, not yet shipped as of 2026-06-16）
 
 Remote invoke 请求复用 `RemoteInvokeRequest` 包络，`CommandKind` 新增 `Computer` 变体。
 
@@ -640,7 +647,7 @@ Remote invoke 请求复用 `RemoteInvokeRequest` 包络，`CommandKind` 新增 `
 
 ---
 
-## 安全设计
+## 安全设计（planned, not yet shipped as of 2026-06-16）
 
 ### 权限分层（三级）
 
@@ -712,7 +719,7 @@ macOS Retina 显示器存在逻辑坐标与物理像素的 2x 差异：
 
 ---
 
-## CLI 映射（caller 侧）
+## CLI 映射（caller 侧）（planned, not yet shipped as of 2026-06-16；`bifrost remote computer` 子命令尚未在 bifrost-cli 中注册）
 
 ```
 bifrost remote computer screenshot    [--display N] [--region x,y,w,h] [--format png|jpeg] [--scale 0.5] [--save path]
@@ -730,9 +737,9 @@ bifrost remote computer wait           [--region x,y,w,h] [--timeout-ms 5000]
 
 ---
 
-## 实现路径
+## 实现路径（planned, not yet shipped as of 2026-06-16；Phase 1/2/3 均未启动）
 
-### Phase 1：只读（截图 + UI 信息）
+### Phase 1：只读（截图 + UI 信息）（planned, not yet shipped as of 2026-06-16）
 
 **目标**：Agent 能「看到」远端屏幕。
 
@@ -749,7 +756,7 @@ bifrost remote computer wait           [--region x,y,w,h] [--timeout-ms 5000]
 - macOS Screen Recording 权限
 - 启动时检测权限，缺权限时明确报错并引导用户开启
 
-### Phase 2：输入操作
+### Phase 2：输入操作（planned, not yet shipped as of 2026-06-16）
 
 **目标**：Agent 能「操作」远端 GUI。
 
@@ -762,7 +769,7 @@ bifrost remote computer wait           [--region x,y,w,h] [--timeout-ms 5000]
 - macOS Accessibility 权限
 - Phase 1 已稳定运行
 
-### Phase 3：高级能力
+### Phase 3：高级能力（planned, not yet shipped as of 2026-06-16）
 
 **目标**：更精准的 GUI 交互。
 

@@ -48,7 +48,7 @@ Sync API 负责把本机 Bifrost 的规则与远端同步服务绑定。原有 `
 ## 测试方案
 
 - 单元测试：
-  - `sync_config_defaults_to_enabled` 验证新安装默认开启 Sync 且默认远端为 `https://bifrost.bytedance.net`。
+  - `bifrost-storage` 的 `test_unified_config_default` 验证新安装默认开启 Sync 且默认远端为 `https://bifrost.bytedance.net`（即 `SyncConfig::default()` 的 `enabled = true`、`remote_base_url = DEFAULT_REMOTE_BASE_URL`）。
   - `save_login_session_updates_remote_url_and_token` 验证 token 与 URL 会落入状态和配置，且启用 auto sync。
   - `save_login_session_rejects_empty_or_invalid_input` 验证空 token 和非法 URL 被拒绝。
   - `startup_login_preflight_*` 系列验证无 token 时最多 3 次探测、可达时只自动打开一次、不可达不弹、已有 token 不探测、已经自动弹过后跨重启不再弹，以及 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 禁用自动弹窗。

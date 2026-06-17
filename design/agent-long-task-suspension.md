@@ -62,7 +62,7 @@ Cooperative Long Task Loop 的核心不是“要不要 watcher”，而是把当
   - `exec_command` 在 `yield_time_ms` 后仍未完成时返回 `session_id`。
   - `write_stdin` 可以写入 stdin、空轮询输出、Ctrl-C 取消。
   - `spawn_exit_watcher()` 每 100ms 刷新退出状态。
-  - `ExecSession::poll()` 会 drain stdout/stderr buffer。
+  - `ExecSession::poll()` 现已通过 `chunk_id` / `model_visible_cursor` / `runtime_cursor` 做非破坏性增量读取（旧 drain 模式已被 Phase 1 append-only transcript 取代）。
   - 输出有 `HeadTailBuffer` 和 `max_output_tokens` 截断。
 - `crates/agent/src/session/turn_loop.rs`
   - turn loop 已有 Codex-style event：`TurnStarted`、`ModelRequestStarted`、`ToolBatchStarted`、`ToolCallStarted`、`ToolCallCompleted`、`TurnCompleted` 等。
@@ -753,7 +753,7 @@ pub struct RuntimeMonitorContext {
 
 - `running=true` 且 `terminal_state=null` 时，不得宣称任务已完成。
 - `resume_reason=output_available` 只能说明“有值得查看的新输出”，不能说明成功或失败。
-- `resume_reason=stall_suspected` 只能说明“长时间无进展证据”，不能说明失败或完成。
+- `resume_reason=stall_suspected` 只能说明“长时间无进展证据”，不能说明失败或完成。（当前实现使用 `resume_reason=stalled`；`stall_suspected` 命名为终极形态目标。）
 - `output_lossy=true` 或 `lost_chunk_count>0` 时，模型必须说明输出不完整，不能编造缺失日志。
 - `external_status` 存在时，CI/delegated agent 结论优先来自外部事实源，而不是 shell 最后一行。
 - `allowed_next_actions` 是模型能请求的动作集合；不在集合里的 action 必须被 runtime 拒绝。
@@ -1724,9 +1724,10 @@ monitor 维护上一条可见摘要 hash：
 - `LongTaskHeartbeat`
 - `LongTaskOutputAvailable`
 - `LongTaskExited`
-- `LongTaskProcessPruned`
+- `LongTaskStalled`
 - `LongTaskResumeFailed`
 - `TurnResumed`
+- `LongTaskProcessPruned`（planned, not yet shipped as of 2026-06-16）
 
 ### 挂起时 history 处理
 
@@ -2068,7 +2069,7 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 
 ### E2E 测试
 
-新增 `e2e-tests/tests/test_agent_long_task_suspension.sh`：
+新增 `e2e-tests/tests/test_agent_long_task_suspension.sh`（planned, not yet shipped as of 2026-06-16；当前仅有 `test_agent_long_task_cooperative_loop.sh`）：
 
 1. 启动 mock model server。
 2. 用临时 `BIFROST_DATA_DIR` 和 `--no-system-proxy` 启动真实 Bifrost。
@@ -2082,7 +2083,7 @@ Cooperative Long Task Loop 的最终交付标准不是“先有一个 in-turn wa
 10. 断言 final monitor summary 包含 exit code 和新增输出，且没有多条 unchanged heartbeat 写入 history。
 11. 断言指标 `model_request_count_while_waiting = 0`，`long_task_heartbeat_omitted_from_history_count > 0`。
 
-新增 `e2e-tests/tests/test_agent_long_task_user_interrupt.sh`：
+新增 `e2e-tests/tests/test_agent_long_task_user_interrupt.sh`（planned, not yet shipped as of 2026-06-16）：
 
 1. 启动 `sleep 60` 长任务并进入 waiting。
 2. 发送 `/stop` 或 API cancel。

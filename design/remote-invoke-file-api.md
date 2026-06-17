@@ -29,11 +29,13 @@
 | method | 语义 | 必需权限 |
 |---|---|---|
 | `file.read` | 读取文件（支持行号 offset/limit、base64 传输） | `file_access ≥ read` |
+| `file.read_many` | 单次往返批量读取多个文件；单文件失败不致命，作为 per-item error 返回 | `file_access ≥ read` + policy.ops 含 `read_many` |
 | `file.list` | 列出目录（支持 recursive、max_depth、gitignore 感知） | `file_access ≥ read` |
 | `file.stat` | 查询元信息（kind/size/mtime/mode/symlink_target） | `file_access ≥ read` |
 | `file.glob` | 路径通配匹配（gitignore 感知、truncated 标志） | `file_access ≥ read` |
 | `file.search` | 内容检索（regex、case_insensitive、gitignore 感知） | `file_access ≥ read` |
 | `file.hash` | 计算文件哈希（sha256） | `file_access ≥ read` |
+| `file.outline` | 解析源文件输出顶层符号大纲（fn/struct/class 等） | `file_access ≥ read` + policy.ops 含 `outline` |
 
 ### 1.2 Phase 2 — 写入
 
@@ -157,9 +159,9 @@ pub struct FileAccessPolicy {
 
 ```rust
 pub enum FileOp {
-    Read, List, Stat, Glob, Search, Hash,       // Phase 1
-    Write, Edit, Mkdir, Move, Delete,            // Phase 2
-    ApplyPatch,                                   // Phase 3
+    Read, ReadMany, List, Stat, Glob, Search, Hash, Outline,  // Phase 1
+    Write, Edit, Mkdir, Move, Delete,                          // Phase 2
+    ApplyPatch,                                                // Phase 3
 }
 ```
 
@@ -365,7 +367,26 @@ pub enum FileOp {
 
 ### 4.9 `file.edit`
 
-请求参数：
+支持两种 edit 模式，每次调用必须**全部 anchored 或全部 line-range**，混用返回 `file.invalid_args`：
+
+**Anchored 模式（推荐，content-based）**
+
+```jsonc
+{
+  "path": "src/main.rs",
+  "base_sha256": "abc…",
+  "edits": [
+    { "old_string": "fn foo()", "new_string": "fn bar()", "expected_count": 1 }
+  ]
+}
+```
+
+- `old_string`：被替换的字面文本（不能为空，否则 `file.invalid_args`）。EOL 自动归一到源文件风格，所以 LF/CRLF 不会引起 anchor miss。
+- `new_string`：替换文本（同样 EOL 归一）。
+- `expected_count`：期望命中次数，默认 1。命中数不等于此值返回 `file.anchor_not_unique`；完全不命中返回 `file.anchor_not_found`。
+- 多个 anchored item 在同一份 buffer 上按顺序串行 apply。
+
+**Line-range 模式**
 
 ```jsonc
 {
@@ -377,7 +398,7 @@ pub enum FileOp {
 }
 ```
 
-`EditRange` 的 `start_line` / `end_line` 为 1-based、inclusive。
+`start_line` / `end_line` 为 1-based、inclusive。
 
 响应同 `file.write`：`{ path, bytes_written, sha256, previous_sha256 }`。
 
@@ -395,11 +416,21 @@ pub enum FileOp {
 ### 4.11 `file.move`
 
 ```jsonc
-{ "from": "src/old.rs", "to": "src/new.rs" }
+{
+  "from": "src/old.rs",
+  "to": "src/new.rs",
+  "base_sha256": "abc…",       // 可选，对源 regular file 做乐观锁校验
+  "allow_overwrite": false       // 可选，覆盖 policy 默认值
+}
 // 响应：{ "from": "…", "to": "…" }
 ```
 
-> **已知缺失**：当前不支持 `base_sha256` 前置校验。多 agent 场景可能丢写。计划下一 PR 补齐。
+实现细节：
+- `base_sha256` 不匹配 → `file.sha_mismatch`，源文件保留不动。
+- `allow_overwrite=false` 且目标已存在 → `file.precondition_failed`。
+- 对 regular file + 目标不存在的常见路径，采用 create-if-absent 链接 + 删源的原子序列，避免 check-then-rename 的 TOCTOU race。
+- 目录仍走平台 rename 语义（目录不可 hard-link）。
+- 源与目标两侧都会走 `FileOp::Move` 的 policy 校验。
 
 ### 4.12 `file.delete`
 
@@ -449,19 +480,26 @@ pub enum FileOp {
 | 错误码 | 来源 | 触发场景 |
 |---|---|---|
 | `file.not_found` | policy / handler | 路径不存在 |
-| `file.permission_denied` | policy / handler | deny 匹配 / 只读 policy 拒绝写 |
-| `file.out_of_scope` | policy | 路径超出 roots |
+| `file.already_exists` | handler | 目标已存在（mkdir 无 parents、move 目标已存在等），由 `io::ErrorKind::AlreadyExists` 映射 |
+| `file.cross_device` | handler | move 时源与目标跨设备，无法 atomic rename，由 EXDEV 映射 |
+| `file.is_a_directory` | handler | 期望文件却拿到目录（如 read/edit 作用于目录） |
+| `file.not_a_directory` | handler | 期望目录的路径分量是文件 |
+| `file.permission_denied` | policy / handler | 只读 policy 拒绝写、recursive delete 被关闭等 |
+| `file.deny_pattern` | policy | 路径命中 `denies` / `write_denies` glob（取代早期文档里使用的「permission_denied for deny」） |
+| `file.out_of_scope` | policy | 路径超出 roots；CLI hint 会提示 `/tmp -> /private/tmp` 与 `remote file scratch-dir` fallback |
 | `file.symlink_escape` | policy | 符号链接解析后超出 roots |
 | `file.ignored_by_gitignore` | policy | respect_gitignore 命中 |
 | `file.binary_not_allowed` | policy | 非 UTF-8 文件 + allow_binary=false |
-| `file.op_not_permitted` | policy | 请求的 op 不在 policy.ops 中 |
-| `file.invalid_args` | handler | 参数缺失/非法 |
+| `file.op_not_permitted` | policy | 请求的 op 不在 policy.ops 中；`read_many` 单独可被关闭，CLI hint 提示降级为逐个 `remote file read` |
+| `file.anchor_not_found` | handler (edit) | anchored edit 的 `old_string` 在目标文件中找不到 |
+| `file.anchor_not_unique` | handler (edit) | anchored edit 的 `old_string` 命中次数 ≠ `expected_count` |
+| `file.invalid_args` | handler | 参数缺失/非法、anchored 与 line-range 混用、`old_string` 为空等 |
 | `file.invalid_glob` | policy / handler | glob 语法错误 |
 | `file.invalid_regex` | handler | 正则语法错误 |
 | `file.invalid_deny` | policy | deny 模式语法错误 |
-| `file.io_error` | handler | 底层 IO 错误 |
-| `file.precondition_failed` | handler | 通用前置条件不满足（目标已存在/不存在等） |
-| `file.sha_mismatch` | handler | `base_sha256` 校验不通过 |
+| `file.io_error` | handler | 底层 IO 错误（未匹配上面任何特化 ErrorKind 时的兜底） |
+| `file.precondition_failed` | handler | 通用前置条件不满足（apply_patch context 不匹配、`allow_overwrite=false` 时目标已存在等） |
+| `file.sha_mismatch` | handler | `base_sha256` 校验不通过（write/edit/move 通用） |
 | `file.size_too_large` | handler | 超过 max_read_bytes / max_write_bytes |
 | `file.unsupported_algo` | handler | hash 算法不支持 |
 | `file.unsupported_diff` | handler | apply_patch 遇到 rename/copy/mode-only diff |
@@ -517,20 +555,34 @@ pub enum FileOp {
 
 ## 7. CLI 映射
 
+CLI 当前导出 15 个子命令（`crates/bifrost-cli/src/cli/remote.rs::RemoteFileCommands`），hermetic CLI contract 测试覆盖全集：
+
 ```
-bifrost remote file read        <path> [--max-bytes N] [--allow-binary]
-bifrost remote file list        [path] [--depth N]
-bifrost remote file stat        <path>
-bifrost remote file glob        <pattern> [--max-matches N]
-bifrost remote file search      <regex> [--path P] [--max-matches N] [--max-scan N]
-bifrost remote file hash        <path> [--algo sha256]
-bifrost remote file write       <path> [--content-file <local-path|->] [--base-sha256 SHA]
-bifrost remote file edit        <path> --edits JSON [--base-sha256 SHA]
-bifrost remote file mkdir       <path> [--parents]
-bifrost remote file mv          <from> <to>
-bifrost remote file rm          <path> [--recursive]
-bifrost remote file apply-patch --patch-file <local-patch|->
+bifrost remote file read        <path> [--offset N] [--limit N] [--max-bytes N] [--allow-binary] [--cwd DIR] [--output human|json]
+bifrost remote file read-many   --path A --path B ... [--max-bytes N] [--allow-binary] [--cwd DIR] [--output human|json]
+bifrost remote file scratch-dir [--cwd DIR] [--name .bifrost-tmp] [--output human|json]
+bifrost remote file list        [path] [--depth N] [--max-matches N] [--cursor TOK] [--no-ignore] [--exclude NAME]... [--cwd DIR]
+bifrost remote file stat        <path> [--cwd DIR]
+bifrost remote file glob        <pattern> [--max-matches N] [--cursor TOK] [--no-ignore] [--exclude NAME]... [--cwd DIR]
+bifrost remote file find        [pattern] [-e REGEX]... [--path P] [-i] [-F] [-w] [--glob G]
+                                 [-A N] [-B N] [-C N] [--max-matches N] [--max-scan N] [--cursor TOK]
+                                 [--no-ignore] [--exclude NAME]... [--cwd DIR]   # alias: search
+bifrost remote file hash        <path> [--algo sha256] [--cwd DIR]
+bifrost remote file outline     <path> [--max-symbols N] [--max-bytes N] [--cwd DIR]
+bifrost remote file write       <path> [--content STR | --content-file <local|-> | --content-b64 B64]
+                                 [--base-sha256 SHA] [--allow-overwrite BOOL] [--create-parents] [--cwd DIR]
+bifrost remote file edit        <path> --edits JSON [--base-sha256 SHA] [--cwd DIR]
+bifrost remote file mkdir       <path> [--parents] [--cwd DIR]
+bifrost remote file move        <from> <to> [--base-sha256 SHA] [--allow-overwrite BOOL] [--cwd DIR]   # alias: mv
+bifrost remote file delete      <path> [--recursive] [--cwd DIR]                                      # alias: rm
+bifrost remote file patch       [--patch-file <local|-> | --patch-b64 B64] [--base-sha PATH=SHA]... [--cwd DIR]   # alias: apply-patch
 ```
+
+注意：
+- 内容检索子命令真名为 `find`（`search` 是 visible alias），同时支持位置正则与可重复 `-e/--regex` 多模式 OR 组合，并提供 `-A/-B/-C` 上下文与 `-F/-w/--glob/--no-ignore/--exclude` 控制；服务端方法名保持 `file.search`。
+- `move` / `delete` / `patch` 是真名，`mv` / `rm` / `apply-patch` 为 visible alias，保持向后兼容。
+- `read` / `list` / `glob` / `find` 等读路径均支持 `--cursor`/`--max-matches` 分页与 `--no-ignore`/`--exclude` 控制；`write` 接受 `--content`/`--content-file`/`--content-b64`/stdin 四种内容输入。
+- `move` 暴露 `--base-sha256` 与 `--allow-overwrite`，覆盖了早期文档中 "file.move 未实现 sha256 前置校验" 的限制。
 
 ---
 
@@ -556,7 +608,7 @@ bifrost remote file apply-patch --patch-file <local-patch|->
 
 | ID | 项 | 优先级 | 说明 |
 |---|---|---|---|
-| R-1 | `file.move` 加 `base_sha256` | P1 | 防多 agent race |
+| R-1 | ~~`file.move` 加 `base_sha256`~~ | done | 已实现：`--base-sha256` + `--allow-overwrite`，详见 §4.11 与底部 hardening |
 | R-2 | `file.delete` 加 `if_match_sha256` | P1 | 防误删 |
 | R-3 | `FileAccessPolicyStore` 缓存 | P1 | `OnceLock<RwLock>` + mtime 失效 |
 | R-4 | handler tracing + audit | P2 | 每个 handler 入口 `tracing::info!(target="audit.file", …)` |

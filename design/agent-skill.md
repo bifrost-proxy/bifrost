@@ -2,7 +2,7 @@
 
 ## 功能模块描述
 
-为 `bifrost-cli` 新增 `install-skill` 子命令，用于从 GitHub 远端主干（main 分支）下载最新的 `SKILL.md` 文件，并安装到各 AI 编程工具的全局配置目录中。
+为 `bifrost-cli` 新增 `install-skill` 子命令，用于从 GitHub 远端主干（main 分支）下载最新的 `SKILL.md` 与 `skill_remote.md` 两个 skill 文件，并安装到各 AI 编程工具的全局配置目录中。两份内容分别落到 `skills/bifrost/SKILL.md`（本地 bifrost 技能）和 `skills/bifrost-remote/SKILL.md`（远程调用技能）两个并列目录。
 
 目标语义：
 
@@ -18,17 +18,18 @@
 
 ### 一、下载源
 
-从 GitHub 远端主干获取最新 SKILL.md：
+从 GitHub 远端主干获取最新 `SKILL.md` 与 `skill_remote.md` 两个文件：
 
 ```
 https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/SKILL.md
+https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/skill_remote.md
 ```
 
-使用 `ureq` 发起 HTTP GET 请求，读取响应体为字符串作为技能文件原始内容。
+使用 `ureq` 发起 HTTP GET 请求，读取响应体为字符串作为技能文件原始内容；网络不可用或下载超过 45s 时回退到编译时通过 `include_str!` 嵌入的副本（同源仓库根目录的 `SKILL.md` / `skill_remote.md`），保证离线环境下也能完成安装。设置 `BIFROST_INSTALL_SKILL_SOURCE=embedded` 可强制只使用嵌入副本，便于 e2e/离线测试。
 
 ### 二、工具与路径映射
 
-所有工具统一使用 `skills/bifrost/SKILL.md` 目录结构，遵循 Standard Agent Skills Format 规范：
+所有工具统一使用 `skills/bifrost/SKILL.md` + `skills/bifrost-remote/SKILL.md` 两套目录结构，遵循 Standard Agent Skills Format 规范。下表展示主目录（bifrost），bifrost-remote 在同一父目录下以并列子目录形式同步写入：
 
 | 工具名 | 标识 | 全局安装路径 | 项目级安装路径（--cwd） |
 | ---------- | ---------- | -------------------------------- | ------------------------------- |
@@ -60,13 +61,14 @@ bifrost install-skill [OPTIONS]
 参数说明：
 
 - `--tool`（`-t`）：指定安装目标工具，可选值为 `claude-code`、`codex`、`trae`、`cursor`、`github-copilot`、`universal`、`all`，默认为 `all`
-- `--dir`（`-d`）：自定义安装目录，覆盖工具的默认安装路径。指定后文件名保持不变，仅替换父目录
-- `-y`：跳过确认提示，直接执行安装
+- `--dir`（`-d`）：自定义安装目录，覆盖工具的默认安装路径。指定后文件名保持不变，仅替换父目录；与 `--cwd` 互斥
+- `--cwd`：安装到当前工作目录下的项目级路径（`./.<tool>/skills/...`）而非全局 `~/...` 路径；与 `--dir` 互斥
+- `-y`（`--yes`）：跳过确认提示，直接执行安装
 
 ### 四、安装流程
 
 1. 解析命令行参数，确定目标工具列表；其中 `all` 会展开为全部专用目标 + 通用目录目标
-2. 从远端下载 SKILL.md 内容
+2. 依次从远端下载 `SKILL.md` 与 `skill_remote.md`（任一文件下载失败/超时则回退到嵌入副本）
 3. 若未指定 `-y`，展示将要安装的工具与目标路径，等待用户确认
 4. 遍历目标工具列表，逐个执行安装：
    - 创建目标路径的父目录（若不存在）

@@ -23,14 +23,15 @@ CLI 模式默认绑定 `0.0.0.0`，桌面端应保持同等能力。
 
 ### 安全性
 
-Admin API 安全机制不受影响：
+Admin API 安全机制不受影响（位于 `crates/bifrost-admin/src/security.rs`）：
 - `is_valid_admin_request()` 校验 `peer_addr.ip().is_loopback()`
-- `allowed_hosts` 仅允许 `127.0.0.1` / `localhost`
+- `AdminSecurityConfig::allowed_hosts` 仅允许 `127.0.0.1` / `localhost`（含带端口形式）
 - 即使代理绑定 `0.0.0.0`，外部请求的 peer_addr 不是 loopback，会被拒绝
 
 ### 变更文件
 
-- `desktop/src-tauri/src/main.rs`
+- `desktop/src-tauri/src/main.rs` — 拆分常量 + 启动参数改用 `BACKEND_BIND_HOST`
+- `crates/bifrost-admin/src/network.rs` — `get_local_ips()` 及其单元测试（既有实现，本次方案直接复用）
 
 ## 测试方案
 

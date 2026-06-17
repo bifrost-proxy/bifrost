@@ -54,7 +54,7 @@
 
 ### IM 内置 Agent 路径
 
-`crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs::process_agent_chat()` 也会创建 `ConversationRecorder`，并调用同一个 `run_turn_with_mcp_multimodal()`。底层 turn loop 会写 JSONL events：
+`crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs::process_agent_chat()` 不再直接调用 `run_turn_with_mcp_multimodal()`，而是通过 `crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback()` 启动隔离的 agent worker 子进程（参见 `agent-loop-process-isolation.md`）。worker 内部仍会创建 `ConversationRecorder` 并调用同一个 `bifrost_agent::session::run_turn_with_mcp_multimodal()`（见 `crates/bifrost-admin/src/im_gateway/agent_worker.rs`）。底层 turn loop 会写 JSONL events：
 
 - `user_message`
 - `tool_call`
@@ -64,7 +64,7 @@
 - `compaction`
 - runtime state events
 
-同时 IM 路径还会把 `progress_sender` 连接到 `ImAgentProgressRegistry`，用于飞书 progress card 实时展示。
+同时 IM 路径还会把 `progress_sender` 连接到 `ImAgentProgressRegistry`（通过 `run_progress_event_coalescer`），用于飞书 progress card 实时展示；worker 子进程产生的 `AgentTurnProgressEvent` 通过 IPC 转发回主进程的 progress channel。
 
 也就是说，底层并不是完全没有过程数据；问题主要出在 Web Chat 读取和会话索引模型。
 
@@ -83,9 +83,11 @@
    - 返回 JSONL `events`
    - 前端 `historyEventsToTelemetry()` 才会解析 `tool_call/tool_result/plan_updated/compaction`
 
-关键问题：`/sessions/all` 构造列表时，如果同一个 `session_key` 已经存在 active/idle in-memory session，就跳过 history row。IM turn 完成后 session 会被 `return_session()` 放回内存，因此 Web 点击该 thread 时进入 active 视图，而不是 history event 视图。
+关键问题：`/sessions/all` 构造列表时，如果同一个 `session_key` 已经存在 active/idle in-memory session，就跳过同 session_key 的纯 history row。IM turn 完成后 session 会被 `return_session()` 放回内存，因此 Web 点击该 thread 时进入 active 视图，而不是 history event 视图。
 
 结果就是：完整 JSONL timeline 存在，但被 active session detail 遮蔽，Web Chat 看不到过程事件。
+
+（现状更新 2026-06-16：`/sessions/all` 现已为 active/running/idle item 合并同 session_key 的 history `history_path` 与 `has_timeline` 字段，前端 `AgentChatSection` 已通过 `historyEventsToMessages` / `historyEventsToTelemetry` 消费历史 timeline，覆盖了下文 Phase 1 中的步骤 1-4。剩余差距集中在跨通道 binding/fan-out 与统一 `AgentRunState` 上。）
 
 ### External Runner 路径的额外问题
 
@@ -207,7 +209,7 @@ Agent Chat 消息中的 Markdown 图片和多模态 `content_parts` 图片统一
 
 ## 方案
 
-### 0. Loop 下沉，Channel View 上提
+### 0. Loop 下沉，Channel View 上提（planned, not yet shipped as of 2026-06-16）
 
 核心模型调整：
 
@@ -249,7 +251,7 @@ ChannelView
 - Agent progress/final reply 由 timeline fan-out 分发到所有 enabled bindings。
 - 每个 binding 自己维护 delivery cursor，避免重复更新飞书卡片或重复推送 Web SSE。
 
-### 0.1 跨通道同对话 fan-out 场景
+### 0.1 跨通道同对话 fan-out 场景（planned, not yet shipped as of 2026-06-16）
 
 目标场景：
 
@@ -276,7 +278,7 @@ ChannelView
 
 但后续 `assistant_final` 不只回到 `source_channel=web`，而是 fan-out 到 conversation A 的所有 active bindings。
 
-### 0.2 ChannelBinding 与 turn 并发边界
+### 0.2 ChannelBinding 与 turn 并发边界（planned, not yet shipped as of 2026-06-16）
 
 同一个 conversation 的 Loop 仍应串行化或显式排队，避免 Web 和 IM 同时发消息时上下文顺序不确定：
 
@@ -286,7 +288,7 @@ ChannelView
 - 被排队的输入也 fan-out：另一个通道应能看到“用户在 Web/IM 追加了消息，等待当前 turn 完成”。
 - 如果当前 runner 支持 interrupt/queue/stop，这些控制命令也应作用于 conversation，而不是只作用于某个 channel 的局部状态。
 
-### 0.3 统一 AgentRunState
+### 0.3 统一 AgentRunState（planned, not yet shipped as of 2026-06-16；canonical timeline 已有 `run_state_changed` 事件，但跨 runner 的 enum 与 channel projection 尚未统一）
 
 运行状态需要和 timeline 一样下沉到底层：
 
@@ -322,7 +324,7 @@ AgentRunState
 - 内置 Agent compaction/tool 状态，不因为入口是 IM 而只在 IM card 可见。
 - stop/cancel/guide/queue 等控制命令作用于 `conversation_id + turn_id`，所有 channel view 同步更新。
 
-### 0.4 IM Card 不再绑定“本次请求”
+### 0.4 IM Card 不再绑定“本次请求”（planned, not yet shipped as of 2026-06-16）
 
 飞书 progress card 的生命周期应从“IM 请求路径创建的临时 card”调整为“conversation 的 IM binding projection”：
 
@@ -418,7 +420,7 @@ TimelineEventPatch -> ConversationEvent
 
 短期不需要一次性重写 IM card，只要保证新的 canonical event type 不让 IM/Web 各自理解一套私有格式。
 
-### 5.1 ChannelFanoutDispatcher
+### 5.1 ChannelFanoutDispatcher（planned, not yet shipped as of 2026-06-16）
 
 建议新增一个轻量 dispatcher，负责把 canonical timeline patch 投递到所有绑定通道：
 
@@ -496,13 +498,13 @@ Runner artifact      -> Timeline attachment/artifact reference
 
 ### Phase 1：让 Web 能看到 IM 内置 Agent 的完整过程
 
-1. `AgentSession` / `SessionInfo` / `SessionDetail` 暴露 recorder `history_path`。
-2. `/sessions/all` 合并 active session 与最新 history file。
-3. `AgentChatSection` 打开带 `history_path` 的 thread 时优先加载 history events。
-4. 保留 active detail 作为运行状态补充。
-5. 引入 conversation-level channel binding 元数据，至少能记录 Web thread 与 IM card 的绑定关系。
-6. 引入统一 `AgentRunState` projection，让 Web session list、Web thread、IM card 都从同一运行状态更新。
-7. 补单元测试和 Web helper 测试。
+1. `AgentSession` / `SessionInfo` / `SessionDetail` 暴露 recorder `history_path`。（shipped）
+2. `/sessions/all` 合并 active session 与最新 history file（active/idle item 已 fallback 到 history `history_path` / `has_timeline`）。（shipped）
+3. `AgentChatSection` 打开带 `history_path` 的 thread 时优先加载 history events（`historyEventsToMessages` / `historyEventsToTelemetry`）。（shipped）
+4. 保留 active detail 作为运行状态补充。（shipped）
+5. 引入 conversation-level channel binding 元数据，至少能记录 Web thread 与 IM card 的绑定关系。（planned, not yet shipped as of 2026-06-16）
+6. 引入统一 `AgentRunState` projection，让 Web session list、Web thread、IM card 都从同一运行状态更新。（planned, not yet shipped as of 2026-06-16）
+7. 补单元测试和 Web helper 测试。（partially shipped：`historyEventsToTelemetry`/`historyEventsToMessages` 与 `/sessions/all` 已有单测；跨通道 binding 测试待补）
 
 验收标准：
 
@@ -513,7 +515,7 @@ Runner artifact      -> Timeline attachment/artifact reference
 - Web 在同一 thread 发送后续消息时，飞书绑定 card 也更新状态和最终回复。
 - Web、IM 对同一 conversation 的 running/completed/failed 状态保持一致。
 
-### Phase 2：External Runner timeline 归一化
+### Phase 2：External Runner timeline 归一化（planned, not yet shipped as of 2026-06-16）
 
 1. 给 `ExternalCliRunEvent` 到 `ConversationEvent` 增加 mapper。
 2. 给 External Runner 私有状态到 `AgentRunState` 增加 mapper。
@@ -527,7 +529,7 @@ Runner artifact      -> Timeline attachment/artifact reference
 - 刷新页面后不退化成“用户消息 + 最终输出”。
 - Codex/ChatGPT Web Runner 的 running/failed/completed 状态在 Web 与 IM 绑定视图中一致。
 
-### Phase 3：统一实时订阅
+### Phase 3：统一实时订阅（planned, not yet shipped as of 2026-06-16）
 
 1. 增加按 `session_key` 订阅 timeline/progress 的 Web endpoint。
 2. IM 发起的 running turn 在 Web 打开时，也能看到实时过程，而不是等待结束后回放。

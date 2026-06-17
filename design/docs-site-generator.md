@@ -58,7 +58,7 @@
 
 ### 真实场景测试
 
-- `human_tests/docs-site-generator.md`
+- `human_tests/docs-site-generator.md`（planned, not yet shipped as of 2026-06-16；当前 `human_tests/` 目录下尚未落地该用例文件）
 - 覆盖中文 README 到英文 README 的切换、中文 docs 到英文 docs 的切换、站点首页英文入口、英文 `/en/...` 构建产物、英文站点内链、未来新增英文文档自动纳入和清理。
 
 ## Review/Fix/Test 闭环方案
@@ -90,5 +90,5 @@
 
 - 同步更新 `README.md`、新增 `README.en.md`。
 - 新增 `docs-en/` 英文文档目录。
-- 同步更新 `human_tests/docs-site-generator.md` 和 `human_tests/readme.md`。
+- 同步更新 `human_tests/docs-site-generator.md` 和 `human_tests/readme.md`（两份 human_tests 文档 planned, not yet shipped as of 2026-06-16）。
 - 若未来调整 docs 路由策略，需要同步更新本文档、E2E 脚本和 human_tests 用例。

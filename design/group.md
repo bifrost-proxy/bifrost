@@ -84,13 +84,13 @@ data_dir/
 ├── rules/
 │   ├── my-rule-1.bifrost           # 用户自己的规则
 │   ├── my-rule-2.bifrost
-│   └── groups/                      # Group 规则子目录
-│       ├── <group-id>/
-│       │   ├── group-rule-1.bifrost
-│       │   └── group-rule-2.bifrost
-│       └── <group-id>/
-│           └── ...
+│   ├── .group_cache.json            # group_id <-> group_name 映射缓存
+│   └── <group-name>/                # Group 规则子目录（按 group name 命名）
+│       ├── group-rule-1.bifrost
+│       └── group-rule-2.bifrost
 ```
+
+实际实现中没有额外的 `groups/` 中间目录：admin handler 直接在 `state.rules_storage.base_dir()` 下用 `sanitize_group_dir_name(<group_name>)` 创建子目录，再通过同目录下的 `.group_cache.json` 维护 group_id 与目录名（group name）的双向映射，孤儿目录在每次列表请求后由 `cleanup_orphaned_group_dirs` 清理。
 
 ### Group 规则本地同步写盘策略
 
@@ -144,24 +144,25 @@ Group 规则列表接口会从远端拉取 env 并同步到本地 `rules/<group-
 
 #### 1.2 API 路由
 
+bifrost-sync-server 上实际暴露的 Group 相关接口（admin 端通过 `sync_manager.proxy_forward` 转发到这些路径）：
+
 | 方法 | 路径 | 说明 | 鉴权 |
 |------|------|------|------|
 | POST | /v4/group | 创建 Group | Token |
 | GET | /v4/group | 搜索/列出 Group | Token |
-| GET | /v4/group/:id | 获取 Group 详情 | Token + 权限检查 |
+| GET | /v4/group/:id | 获取 Group 详情（visibility 由 admin 从 setting 补齐） | Token + 权限检查 |
 | PATCH | /v4/group/:id | 更新 Group | Token + Master/Owner |
 | DELETE | /v4/group/:id | 删除 Group | Token + Owner |
-| GET | /v4/group/:id/members | 获取成员列表 | Token + 成员 |
-| POST | /v4/group/:id/invite | 邀请成员 | Token + Master/Owner |
-| DELETE | /v4/group/:id/member/:user_id | 移除成员 | Token + Master/Owner |
-| PATCH | /v4/group/:id/member/:user_id | 更新成员角色 | Token + Master/Owner |
-| POST | /v4/group/:id/leave | 退出 Group | Token + 成员 |
 | GET | /v4/group/:id/setting | 获取 Group 设置 | Token + Master/Owner |
 | PATCH | /v4/group/:id/setting | 更新 Group 设置 | Token + Master/Owner |
-| GET | /v4/group/:id/envs | 获取 Group 规则列表 | Token + 成员 |
-| POST | /v4/group/:id/envs | 创建 Group 规则 | Token + Master/Owner |
-| PATCH | /v4/group/:id/envs/:env_id | 更新 Group 规则 | Token + Master/Owner |
-| DELETE | /v4/group/:id/envs/:env_id | 删除 Group 规则 | Token + Master/Owner |
+| POST | /v4/group/invite | 邀请成员 | Token + Master/Owner |
+| GET | /v4/room?group_id=... | 获取成员列表（room 表） | Token + 成员 |
+| GET | /v4/env?group_id=... | 列出 Group 规则（env 表） | Token + 成员 |
+| POST | /v4/env | 创建 Group 规则 | Token + Master/Owner |
+| PATCH | /v4/env/:env_id | 更新 Group 规则 | Token + Master/Owner |
+| DELETE | /v4/env/:env_id | 删除 Group 规则 | Token + Master/Owner |
+
+> 注意：成员管理与规则管理在远端复用了既有的 `/v4/room` 和 `/v4/env` 资源，并非 `/v4/group/:id/members` / `/v4/group/:id/envs` 这样的嵌套子资源。`/v4/group/:id/member/:user_id`、`/v4/group/:id/leave` 等嵌套路径（planned, not yet shipped as of 2026-06-16）尚未在当前 bifrost-sync-server 上实现，admin/CLI 暂时通过 room/env 接口组合达成等价效果。
 
 #### 1.3 DAO 接口
 
@@ -200,11 +201,18 @@ interface IGroupSettingDao {
 pub struct RemoteGroup {
     pub id: String,
     pub name: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub avatar: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub description: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub visibility: String,
     pub level: Option<i32>,
+    #[serde(default)]
+    pub created_by: Option<String>,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub create_time: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub update_time: String,
 }
 
@@ -214,13 +222,29 @@ pub struct RemoteGroupMember {
     pub group_id: String,
     pub user_id: String,
     pub level: i32,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub nickname: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub avatar: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub email: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub create_time: String,
+    #[serde(default, deserialize_with = "nullable_string")]
     pub update_time: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteGroupSetting {
+    pub group_id: String,
+    #[serde(default)]
+    pub rules_enabled: bool,
+    #[serde(default)]
+    pub visibility: String,
+}
 ```
+
+同文件还导出 `CreateGroupReq`、`UpdateGroupReq`、`InviteGroupReq`、`UpdateGroupSettingReq`、`GroupListResponse`、`GroupMemberListResponse` 等请求/响应类型。
 
 #### 2.2 新增 Group HTTP 客户端方法
 
@@ -228,38 +252,44 @@ pub struct RemoteGroupMember {
 
 ### 3. bifrost-admin 扩展
 
-#### 3.1 新增 Group handler
+#### 3.1 Group handler
 
 `crates/bifrost-admin/src/handlers/group.rs`
 
-作为代理层，将前端请求转发到 bifrost-sync-server 的 Group API，并附带当前用户的 Token。
+以代理层身份将 `/api/group...` 请求重写为 `/v4/group...` 并经 `SyncManager::proxy_forward` 转发；同时承担以下副作用：
 
-#### 3.2 路由注册
+- 列表请求结果中的 `id <-> name` 写入 `state.group_name_cache()` 并持久化到 `rules/.group_cache.json`。
+- 列表请求触发 `cleanup_orphaned_group_dirs`：本地有目录但远端已不存在的 group 被禁用并删除子目录，必要时通知 rules 重载。
+- 单个 group 详情若缺少 `visibility` 字段，再向 `/v4/group/:id/setting` 拉一次 setting，根据 `level` 字段补齐 visibility（0=private、1=public）后返回。
 
-在 `router.rs` 中添加 `/api/group` 路径的路由分发。
+#### 3.2 Group rules handler
+
+`crates/bifrost-admin/src/handlers/group_rules.rs`
+
+独立于通用 group 代理之外，负责把本地 Bifrost 规则语义映射到远端 env/room 资源，统一暴露 `/api/group-rules/...` 这套与本地规则一致的 API。主要职责：
+
+- `GET /api/group-rules/:group_ref`：先 `resolve_group_ref` 把 id 或 name 归一化，再按需调用 `/v4/group/:id`、`/v4/room`、`/v4/env`、`/v4/user/peer` 拉到该 group 的 env 列表，落盘到本地 `rules/<group-name>/` 子目录，并返回 `{group_id, group_name, writable, rules:[...]}`。
+- `GET /api/group-rules/:group_ref/:name`：从本地 `RulesStorage` 读规则详情。
+- `POST /api/group-rules/:group_ref` / `PUT /api/group-rules/:group_ref/:name`：先在本地 `RulesStorage` 保存或更新规则，再 `POST /v4/env` 或 `PATCH /v4/env/:remote_id` 同步到远端；远端失败时本地仍保留。
+- `DELETE /api/group-rules/:group_ref/:name`：删除本地规则文件并 `DELETE /v4/env/:remote_id`。
+- `PUT /api/group-rules/:group_ref/:name/enable` / `.../disable`：仅切换本地 enabled 状态（通过 `RulesStorage::set_enabled`），不动远端。
+
+#### 3.3 路由注册
+
+在 `router.rs` 中，`/api/group-rules` 前缀必须先匹配并交给 `handle_group_rules`，再让 `/api/group` 前缀走 `handle_group`，避免前缀冲突。
 
 ### 4. bifrost-storage 扩展
 
 #### 4.1 Group 规则存储
 
-扩展 `RulesStorage`，支持 Group 子目录的规则读写：
+实际实现中没有给 `RulesStorage` 增加专门的 `group_storage()` / `list_groups()` 方法（设计上的 `groups/` 中间层目录也未引入）。当前做法是：
 
-```rust
-impl RulesStorage {
-    pub fn group_storage(&self, group_id: &str) -> Result<RulesStorage> {
-        let group_dir = self.base_dir.join("groups").join(group_id);
-        RulesStorage::with_dir(group_dir)
-    }
+- `RulesStorage` 继续暴露 `with_dir(dir)` 和 `base_dir()`，admin handler 直接以 `state.rules_storage.base_dir().join(sanitize_group_dir_name(group_name))` 构造 Group 子目录并通过 `RulesStorage::with_dir` 复用同一套读写逻辑。
+- `RuleFile` 在 `crates/bifrost-storage/src/rules.rs` 中增加 `group: Option<String>` 字段，并配套 `with_group()` 构造与 `rule_reference_key` 拼接 `<group>/<name>` 作为规则引用键。
+- 顶层 `load_all` 在迭代规则目录时识别已知 group 子目录，把其中的规则也带 `group` 元信息一并返回；非 group 的孤立子目录会被跳过（参见 `test_load_enabled_with_subdirs_keeps_group_directories`）。
+- group_id <-> group_name 的映射不在 `RulesStorage` 内部，而是放在 admin state 的 `group_name_cache` 中，持久化到 `rules/.group_cache.json`。
 
-    pub fn list_groups(&self) -> Result<Vec<String>> {
-        let groups_dir = self.base_dir.join("groups");
-        if !groups_dir.exists() {
-            return Ok(Vec::new());
-        }
-        // 列出所有子目录名
-    }
-}
-```
+如果未来要把 group 子目录管理收回 storage 层（独立的 `group_storage()` / `list_groups()` API），相关接口仍属于（planned, not yet shipped as of 2026-06-16）。
 
 ### 5. Web 前端
 
@@ -317,18 +347,15 @@ deleteGroupEnv(id, envId): Promise<void>
 
 #### 5.6 页面组件
 
+实际落地结构与最初设想略有差异：列表页内嵌 `GroupCardGrid` 组件而未拆出 `GroupCard.tsx`；`GroupDetail` 是单文件 `.tsx` 而非子目录。
+
 ```
 pages/Groups/
-├── index.tsx              # 列表页：搜索、我管理的 Group、我加入的 Group
-├── GroupCard.tsx           # Group 卡片
-├── CreateGroupModal.tsx    # 创建/编辑 Group 弹窗
-├── SearchGroup.tsx         # 搜索 Group 组件
-├── GroupDetail/
-│   ├── index.tsx          # 详情页布局
-│   ├── GroupInfo.tsx      # Group 信息展示
-│   └── Members.tsx        # 成员列表
-└── GroupRulesSwitcher.tsx  # 规则页面顶部的 Group 切换组件
+├── index.tsx              # 列表页：搜索、我管理的 Group、我加入的 Group；内含 GroupCardGrid
+└── GroupDetail.tsx         # 详情页（含成员列表与 Group 信息）
 ```
+
+规则页 Group 切换器、创建/编辑弹窗、搜索 Group 子组件的独立拆分（`CreateGroupModal.tsx`、`SearchGroup.tsx`、`GroupRulesSwitcher.tsx` 等）属于（planned, not yet shipped as of 2026-06-16）。
 
 ### 6. CLI 支持（bifrost-cli）
 

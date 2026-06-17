@@ -76,7 +76,13 @@ Bifrost 内置 Agent 不完全复刻 Codex runtime。目标是保留 Bifrost IM 
 - `crates/agent/src/session/progress.rs`
 - `crates/agent/src/session/pending_input.rs`
 - `crates/agent/src/session/turn_loop.rs`
+- `crates/agent/src/session/turn_context.rs`
+- `crates/agent/src/session/turn_timing.rs`
+- `crates/agent/src/session/hooks.rs`
+- `crates/agent/src/session/steer.rs`
+- `crates/agent/src/session/task.rs`
 - `crates/agent/src/session/tests.rs`
+- `crates/agent/src/session/path_switch_tests.rs`
 
 拆分边界：
 
@@ -86,8 +92,9 @@ Bifrost 内置 Agent 不完全复刻 Codex runtime。目标是保留 Bifrost IM 
 - `slash_commands.rs`：session slash dispatch helper。
 - `progress.rs`：assistant delta/final progress event helper。
 - `pending_input.rs`：pending queue drain helper。
-- `turn_loop.rs`：turn loop 小型公共 primitive。
-- `tests.rs`：原 `session.rs` 内联测试外置。
+- `turn_loop.rs`：turn loop 主体（含绝对路径切换快路径 `direct_workdir_switch_path`）。
+- `turn_context.rs` / `turn_timing.rs` / `hooks.rs` / `steer.rs` / `task.rs`：turn-level 上下文/计时/钩子/steer/异步任务驱动 helper（陆续从 `session.rs` 抽出）。
+- `tests.rs` / `path_switch_tests.rs`：原 `session.rs` 内联测试外置，path-switch 行为独立测试文件。
 
 后续收敛要求：
 

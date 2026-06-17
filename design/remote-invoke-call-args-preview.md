@@ -18,7 +18,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 不改变 connect 等无参数命令的展示行为
 - `Recent Calls` 本地落盘，Bifrost 重启后仍能恢复最近记录
 - 支持一键清理当前客户端的全部 Recent Calls
-- 本地记录默认保留 7 天，单个 relay/client 最多保留 100000 条
+- 本地记录默认保留 90 天，单个 relay/client 最多保留 1000 条（`CALL_HISTORY_HARD_MAX_RECORDS` 在 `call_history_store.rs` 中硬上限同样为 1000；用户配置 `max_records` 超过 1000 时也会被截到 1000）
 - 命令相关文本超过 120 字符时直接截断，只保留前 120 字符用于展示和落盘，避免超长命令撑爆本地历史文件
 
 ## 实现方案
@@ -37,9 +37,9 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 
 ### 1.1 Recent Calls 本地落盘与清理
 
-文件：`crates/bifrost-admin/src/remote_invoke/worker.rs`
+文件：`crates/bifrost-admin/src/remote_invoke/worker.rs`、`crates/bifrost-admin/src/remote_invoke/call_history_store.rs`
 
-- 在 worker 内维护 `CallHistoryStore`，落盘目录为 `BIFROST_DATA_DIR/admin/remote_invoke_call_history/`
+- `CallHistoryStore` 已抽到独立模块 `call_history_store.rs`，由 `worker.rs` 通过 `Arc<CallHistoryStore>` 持有；落盘目录为 `BIFROST_DATA_DIR/admin/remote_invoke_call_history/`
 - 存储维度为 `relay_url + client_instance_id + call_id`
 - 收到 `call_open` 并完成本地解密后 append 一行 `streaming` 快照
 - completed / failed / cancelled 终态再 append 一行同 `call_id` 的最新快照
@@ -125,7 +125,7 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
   - 超长搜索参数在 Recent Calls API 中只返回前 120 字符，且 `masked_args_json` 仍是合法 JSON
   - 旧 `remote_invoke_call_history.json` 不存在，JSONL 不包含完整超长参数原文
   - 保留同一 `BIFROST_DATA_DIR` 重启 Bifrost 后，同一 `call_id` 仍可从 Recent Calls API 读取
-  - `GET /remote-invoke/calls?limit=25` 最多返回 25 条，并在有更多记录时返回 `next_cursor`
+  - `GET /_bifrost/api/remote-invoke/calls?limit=25&before=<ts>` 路径下：`limit` 接受 1..=200（默认 100，超出会被 clamp），下一页通过 response 中的 `next_cursor`（上一页最早一条的 `started_at` 毫秒时间戳）配合 `before=<ts>` 查询参数滚动获取；DELETE 同一路径会清空当前 relay/client 的全部本地记录并返回 `{success, removed}`
   - DELETE Recent Calls 后 API 返回空列表
 - Web UI 回归验证：
   - 构造包含超长 `shell.exec` 文本的 Recent Calls 记录
@@ -156,3 +156,15 @@ Remote Invoke 的 `openCall` 已升级到密文链路，relay 不再持久化明
 - 本次改动仅修复 Remote Invoke Recent Calls 展示回退逻辑，不涉及 README / 外部 API 文档变更
 - 必须更新 `human_tests/remote-invoke.md`
 - 必须更新 `human_tests/readme.md`
+
+## 实现状态对齐（2026-06-16 复核）
+
+本节记录 2026-06-16 对照仓库实际代码的复核结论，便于后续阅读时分辨「设计意图」与「现网行为」。
+
+- 已交付：`build_call_command_summary`（`worker.rs:3461`）、`preserve_existing_grant_runtime_state`（`worker.rs:4175`）、`CallHistoryStore`（`call_history_store.rs`）及 `clear_for_client`、120 字符截断、坏 JSONL 行 compaction、旧整 JSON 文件删除（`call_history_store.rs:18` 起常量及对应单测）。
+- 已交付：`RemoteInvokeConfig.retention_days` 默认 90、`max_records` 默认 1000，并在 `effective_max_records()` / `CALL_HISTORY_HARD_MAX_RECORDS` 处硬上限 1000（`types.rs:289-294`、`call_history_store.rs:25`）。
+- 已交付：Web 侧 `getCallArgsPreviewSource` 抽取（`web/src/api/remoteInvoke.ts:210`）与 `RemoteInvokeTab` 标题/Tooltip/详情弹窗共用同一来源（`RemoteInvokeTab.tsx:2848-3088`）。
+- 已交付：`GET /_bifrost/api/remote-invoke/calls` 与 `DELETE /_bifrost/api/remote-invoke/calls` 路由（`handlers/remote_invoke.rs:90`、`handlers/remote_invoke.rs:635` 起的 `handle_calls_list`）。注意：list 接口的下一页游标参数名是 `before`（毫秒 `started_at`），默认 `limit=100`，clamp 到 1..=200；返回体含 `calls`、`next_cursor`、`limit`。`DELETE` 返回 `{success, removed}`。
+- 已交付：本节「测试方案」列举的 5 个 e2e 脚本均已存在（`e2e-tests/tests/test_remote_invoke_e2e.sh`、`..._recent_calls_args_preview_e2e.sh`、`..._recent_calls_persistence_e2e.sh` 等），相关单测函数 `test_call_history_store_*` / `test_build_call_command_summary_*` / `test_preserve_existing_grant_runtime_state_*` 均已落地。
+- 文档遗留偏差（保留原始描述，仅在此标注）：原文档曾写过「默认保留 7 天 / 100000 条」，已按现网实现修正为「90 天 / 1000 条」。
+- (planned, not yet shipped as of 2026-06-16) 暂无本设计内独立未交付项；后续若新增 cross-relay 历史合并视图等扩展能力，应在新章节追加。

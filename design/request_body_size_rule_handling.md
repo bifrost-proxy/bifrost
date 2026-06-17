@@ -25,3 +25,17 @@
 
 - 普通 HTTP 请求处理链路。
 - HTTPS tunnel / H3 相关响应处理链路。
+
+## 实现位置（截至 2026-06-17）
+
+- 请求体 override 判定：
+  - `crates/bifrost-proxy/src/proxy/http/handler.rs:879`（请求路径主入口）
+  - `crates/bifrost-proxy/src/proxy/http/handler.rs:1882`（再处理路径）
+  - `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs:2328`
+- 响应体 override 判定：
+  - `crates/bifrost-proxy/src/proxy/http/handler.rs:3055`
+  - `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs:3621`
+- 大体积 / 探测预读上限：
+  - `crates/bifrost-admin/src/handlers/config.rs`、`crates/bifrost-admin/src/state.rs` 中的 `max_body_buffer_size` / `max_body_probe_size`（admin 可配置，默认 10 MiB / 64 KiB）。
+- 直接替换规则的字段：`crates/bifrost-admin/src/request_rules.rs` 中的 `req_body` / `res_body`（`Option<Bytes>`）。
+- 端到端验证：`e2e-tests/rules/advanced/body_size_strategy.txt` 与 `e2e-tests/tests/test_res_body_override_large.sh` 覆盖 req/res 两侧的大 body override 场景。

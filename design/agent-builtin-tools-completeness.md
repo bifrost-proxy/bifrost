@@ -49,11 +49,14 @@ Bifrost `crates/agent/src/tools/mod.rs` 当前已有：
 - `read_file`
 - `list_directory`
 - `switch_workdir`
+- `enter_worktree` / `exit_worktree`
 - `update_plan`
 - `set_title`
 - `apply_patch`
 - `write_stdin`
-- `get_goal` / `create_goal` / `update_goal`
+- `view_image`
+- `request_user_input`
+- `get_goal` / `create_goal` / `update_goal`（由 session 级 dispatch 暴露，不在 `ToolRegistry::with_defaults` 中注册）
 
 MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛到 Codex canonical 名称 `list_mcp_resources`、`list_mcp_resource_templates`、`read_mcp_resource`，并在存在 MCP server 时作为 direct core tools 暴露，不参与 server tool 的 deferred threshold。
 
@@ -72,7 +75,7 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
    - Bifrost 当前不实现 OS sandbox/approval，因此不把 `sandbox_permissions`、`justification`、`prefix_rule` 暴露为伪协议；后续如引入权限模块再整体接入
 
 2. 扩展 `write_stdin`
-   - 兼容标准 `write_stdin` schema：`session_id`、`chars`、`yield_time_ms`、`max_output_tokens`
+   - 兼容标准 `write_stdin` schema：`session_id`、`chars`、`yield_time_ms`、`max_output_tokens`，并额外暴露 `since_chunk_id` 用于按 chunk 游标拉取新增输出
    - 模型可见协议和运行时解析都只接受数字 `session_id`；旧字符串 session id 和隐藏 `input` 字段必须拒绝，避免形成第二套终端协议
    - 只查找 `exec_command` 真实进程会话；代码中不再保留 `shell_pty` session manager 或 fallback
    - 空输入轮询不得先清空旧 buffer，避免长命令在两次 poll 之间完成时丢失输出；如果本次写入了新 stdin，则等待写入后新增字节或进程结束再返回
@@ -146,9 +149,9 @@ MCP 已有工具调用和 resources 的基础实现；resource 工具已收敛�
 - `view_image_rejects_missing_file`：缺失路径返回明确错误。
 - `view_image_returns_data_url`：PNG/JPEG/GIF/WebP 返回 data URL。
 - `request_user_input_validates_questions`：空 options 或超过 3 个问题返回错误。
-- `tool_search_hidden_without_deferred_tools`：默认本地工具不包含 `tool_search`。
+- `tool_search_is_hidden_without_deferred_tools`（位于 `crates/agent/tests/p1_tools_e2e.rs`）：默认本地工具不包含 `tool_search`。
 - `tool_search_returns_loadable_deferred_tool_definitions`：查询 deferred MCP 工具返回可加载 `ToolDefinition`。
-- `mcp_tool_exposure_defers_at_threshold`：MCP 工具数等于 100 时触发 deferred loading。
+- `mcp_tool_exposure_defers_at_codex_threshold`：MCP 工具数等于 100 时触发 deferred loading。
 
 ### E2E 测试
 

@@ -61,7 +61,7 @@
 - 基础设施 outage 重试预算至少提升到 900 秒，避免大量套件在共享 mock 恢复后因默认预算过短被截断。
 - 失败统计优先读取 runner 实际生成的 `log_<idx>.txt`，同时保留历史 `test_<idx>.log` fallback，避免日志文件名漂移再次让 mock outage 识别失效。
 - `scripts/run_all_e2e.sh::run_and_capture` 在 Windows 下直接后台运行真实命令并把输出写入日志文件，再用独立子 shell 包裹 `tail -f | sed` 流式打印日志。这样 `command_pid` 指向真实 suite runner，watchdog 可使用 `kill_process_tree` 终止整个命令树；命令结束后也会对日志流子 shell 调用 `kill_process_tree`，避免 `tail -f` 残留导致 wrapper 自身挂住。
-- Windows rules job 只运行 `x86_64-pc-windows-msvc` 全量 rules fixture，并把 suite watchdog 收敛到 1200 秒、job timeout 收敛到 30 分钟。Windows ARM runner 当前会把 rules fixture 强制串行执行；CI 实测 shard 1/2/3 在 ARM 上连续触发 90 秒请求超时重试，20 分钟内只能完成少量失败 fixture，无法作为合入门禁。Windows ARM 仍由独立 CLI build、runner E2E 与 desktop sidecar/check 覆盖平台二进制可用性。
+- Windows rules job 只运行 `x86_64-pc-windows-msvc` 全量 rules fixture，并把 suite watchdog 收敛到 1260 秒（`BIFROST_E2E_SUITE_TIMEOUT`）、rules runner 子预算 1200 秒（`BIFROST_E2E_RULE_RUNNER_TIMEOUT`），job `timeout-minutes` 设为 60 分钟以覆盖 Windows runner 固定 setup/cleanup 开销。Windows ARM runner 当前会把 rules fixture 强制串行执行；CI 实测 shard 1/2/3 在 ARM 上连续触发 90 秒请求超时重试，20 分钟内只能完成少量失败 fixture，无法作为合入门禁。Windows ARM 仍由独立 CLI build、runner E2E 与 desktop sidecar/check 覆盖平台二进制可用性。
 - Windows rules job 只依赖 `build-cli-windows` 上传的 `bifrost-release-x86_64-pc-windows-msvc` CLI artifact。Windows desktop bundle/check 继续作为独立验证 job 运行，但不阻塞 rules E2E，因为 rules 只需要 CLI 二进制。
 
 ### 测试方案
@@ -70,7 +70,7 @@
 - E2E 测试：执行缩小分类的 rules runner，验证共享 mock servers 启停、并行参数解析、失败重试入口不回归。
 - 日志路径回归：检查 `result_failure_mentions_mock_outage` 会读取 `log_<idx>.txt`，确保 `count_mock_outage_failures` 能正确识别 suite 日志中的 mock outage。
 - Windows 超时回归：检查 `run_and_capture` 的 Windows 分支后台运行真实命令后再 `tail -f` 日志，watchdog 对真实命令 PID 调用 `kill_process_tree`。
-- Windows 预算回归：检查 `.github/workflows/ci.yml` 中 Windows rules job 只保留 x86_64 矩阵项，timeout 为 30 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 为 1200 秒。
+- Windows 预算回归：检查 `.github/workflows/ci.yml` 中 Windows rules job 只保留 x86_64 矩阵项，job `timeout-minutes` 为 60 分钟，`BIFROST_E2E_SUITE_TIMEOUT` 为 1260 秒，`BIFROST_E2E_RULE_RUNNER_TIMEOUT` 为 1200 秒。
 - Windows CI 依赖回归：静态解析 `.github/workflows/ci.yml`，确认 `e2e-windows-rules.needs == ["build-cli-windows"]`，`build-cli-windows` 上传 CLI artifact，`build-desktop-windows` 下载同一 artifact 但不再被 rules 依赖。
 - 真实场景测试：更新 `human_tests/rules-e2e-fixtures.md`，新增 Windows 共享 mock outage、日志路径回归、suite timeout 诊断、CI 预算、rules job CLI-only 依赖与 Windows ARM rules 收敛用例；本地执行可用的 runner 场景，Windows x86 完整 rules job 与 ARM 平台 build/runner 由 GitHub Actions `CI` run 继续验证。
 
@@ -89,15 +89,15 @@
 ### 实现逻辑
 - 将 Windows x86 rules CI 拆为 4 个矩阵分片：`1/4`、`2/4`、`3/4`、`4/4`，继续通过 `BIFROST_E2E_RULE_SHARD_INDEX` / `BIFROST_E2E_RULE_SHARD_TOTAL` 复用已有 runner 分片逻辑。
 - 每个 shard 仍在 Windows 内部串行执行，避免重新引入共享 mock server 并发掉线风险；跨 shard 由 GitHub Actions 并行调度，把 wall time 降到约四分之一。
-- 单个 shard 的 `BIFROST_E2E_SUITE_TIMEOUT` 保持 1080 秒，job `timeout-minutes` 使用 30 分钟。suite watchdog 仍负责限制真实 rules runner，job 外层预算用于覆盖 Windows 固定启动/清理开销，避免业务套件已通过后在 action post cleanup 阶段被判失败。
+- 单个 shard 的 `BIFROST_E2E_SUITE_TIMEOUT` 保持 1260 秒（当前 CI 已从最初规划的 1080 秒上调以容纳慢 runner），job `timeout-minutes` 使用 60 分钟。suite watchdog 仍负责限制真实 rules runner，job 外层预算用于覆盖 Windows 固定启动/清理开销，避免业务套件已通过后在 action post cleanup 阶段被判失败。
 - 移除 Windows rules job 的 pnpm setup、Node setup 与 `pnpm install` 步骤；rules fixture 不构建或运行 Web UI，减少每个 shard 的固定启动耗时。
 - 失败 artifact 名称加入 shard index，避免多个 shard 同时失败时上传 artifact 名称冲突。
 
 ### 测试方案
-- 静态解析 `.github/workflows/ci.yml`，确认 `e2e-windows-rules` 有 4 个 x86_64 shard、每个 shard total 为 4、job timeout 为 30 分钟、suite timeout 为 1080 秒。
+- 静态解析 `.github/workflows/ci.yml`，确认 `e2e-windows-rules` 有 4 个 x86_64 shard、每个 shard total 为 4、job `timeout-minutes` 为 60 分钟、`BIFROST_E2E_SUITE_TIMEOUT` 为 1260 秒。
 - 语法检查 `e2e-tests/run_all_tests_parallel.sh`、`e2e-tests/test_rules.sh` 与 `scripts/run_all_e2e.sh`，确认现有 rules runner 和 wrapper 入口未被破坏。
 - 分片覆盖检查：按当前 workflow 矩阵参数验证 4 个 shard 索引为 `1 2 3 4` 且没有重复/缺失，artifact 名称包含 shard 维度。
-- 真实场景测试：更新并执行 `human_tests/rules-e2e-fixtures.md` 中 Windows x86 rules 30 分钟 job envelope 分片预算用例；完整 Windows runtime 耗时由推送后的 GitHub Actions `CI` run 继续验证。
+- 真实场景测试：更新并执行 `human_tests/rules-e2e-fixtures.md` 中 Windows x86 rules 60 分钟 job envelope 分片预算用例；完整 Windows runtime 耗时由推送后的 GitHub Actions `CI` run 继续验证。
 
 ### 校验要求
 - rules E2E 需优先于 rust-project-validate 执行。

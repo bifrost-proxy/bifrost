@@ -18,12 +18,16 @@
 
 - `crates/agent/src/compact.rs`
   - `compact_session()` 构造 replacement history。
-  - `collect_recent_user_messages()` 选择压缩后保留的近期用户消息。
+  - `collect_user_messages()` 选择压缩后保留的近期用户消息（旧名 `collect_recent_user_messages` 已重命名）。
   - `insert_initial_context_before_last_user_message()` 控制 mid-turn reinjection 位置。
 - `crates/agent/src/session.rs`
   - `AgentSession::track_token_usage()` / `effective_token_count()` 维护压缩触发口径。
-  - `run_turn_with_mcp_multimodal()` 控制 mid-turn、guide / pending continuation、overflow retry。
+  - `AgentSession::build_messages()` 在请求构造阶段 prepend prompt prefix / memory，并对 history 中已经存在的等价非 system context 做去重。
+- `crates/agent/src/session/turn_loop.rs`
+  - `run_turn_with_mcp_multimodal()` 控制 mid-turn、guide / pending continuation、overflow retry（原 `session.rs` 拆分到 session 子模块的 `turn_loop`）。
+  - `compact_mid_turn_if_needed()` 复用同一套 mid-turn compaction 边界。
   - `record_compaction_event()` 写入持久化统计。
+  - `build_mid_turn_initial_context()` 计算 mid-turn 注入的非 system initial context。
 - `crates/agent/src/session_status.rs`
   - `refresh_active_turn_status()` 将 session state 投影到运行中 `/status`。
 - `crates/bifrost-admin/src/im_gateway/progress_card.rs`
@@ -174,7 +178,7 @@ estimate(history) + estimate(system(base_instructions))
 
 ### 8. 自动压缩触发时机对齐 Codex pre-sampling 与 post-sampling follow-up
 
-Bifrost 在普通 turn 采样前恢复 Codex 当前的 pre-sampling compaction：解析 base instructions 与 prompt prefix 后、把本轮新 user message 写入 history 之前，如果上一轮累计 token usage 已达到 `auto_compact_token_limit`，执行：
+Bifrost 在普通 turn 采样前恢复 Codex 当前的 pre-sampling compaction：解析 base instructions 与 prompt prefix 后、把本轮新 user message 写入 history 之前，如果上一轮累计 token usage 已达到 `model_auto_compact_token_limit`（解析后的有效阈值），执行：
 
 ```text
 CompactionTrigger::Auto
@@ -232,7 +236,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 9. `session_status::tests::test_active_turn_status_text_contains_runtime_metrics`：验证 `/status` 文案字段。
 10. `compact::tests::test_codex_compaction_templates_are_exact`：验证 compaction prompt 与 summary prefix 与 Codex 模板逐字一致。
 11. `compact::tests::test_build_compaction_messages_uses_codex_local_request_shape`：验证 summary 生成请求保留 structured history，把 compaction prompt 作为最后一条 user message，且不再出现 `[role]: ...` 扁平化输入。
-13. `compact::tests::test_compaction_retries_context_window_error_by_dropping_oldest_request_item`：验证 summary 请求超上下文后，移除请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
+13. `compact::tests::test_compaction_retries_context_window_error_by_dropping_history_batch`：验证 summary 请求超上下文后，按预算批量丢弃请求副本中的最老 history item 并重试，且保留 base/system 与 compact prompt。
 14. `compact::tests::test_compaction_retries_transient_error_using_provider_budget`：验证 summary 请求遇到 transient 500 时，按 provider `stream_max_retries` 预算重试且不裁剪 history。
 15. `compact::tests::test_collect_user_messages_caps_preserved_user_budget`：验证 user carry-over 使用 token 预算并产生 `tokens truncated` marker。
 16. `compact::tests::test_build_compacted_history_rebuilds_text_only_user_messages`：验证多模态 user message 压缩后重建为 text-only user message。
@@ -293,7 +297,7 @@ post-sampling 路径仍使用 mid-turn `BeforeLastUserMessage` 注入非 system 
 8. 新增 `TC-BC-29`：mid-turn compact 后 replacement history 不包含 base instructions，build_messages 不重复注入非 system context / memory，token snapshot 只额外计入一次 base instructions。
 9. 新增 `TC-BC-30`：普通 turn pre-sampling auto compaction 对齐 Codex 当前 `DoNotInject + PreTurn` 路径。
 10. 新增 `TC-BC-31`：summary 生成请求使用 Codex local structured history 形态，把 `COMPACTION_PROMPT` 作为最后一条 user message。
-11. 新增 `TC-BC-32`：summary 请求超上下文后移除请求副本中的最老 history item 并重试。
+11. 新增 `TC-BC-32`：summary 请求超上下文后按预算批量丢弃请求副本中的最老 history item 并重试。
 12. 新增 `TC-BC-33`：summary 请求 transient error 按 provider retry budget 退避重试。
 13. 更新 `TC-BC-35`：`/status` 区分显式压缩次数与 token/context budget 驱动的上下文管理，不再报告请求级数量裁剪。
 14. 更新 `TC-BC-36`：构造超过 50 条短历史，验证最终模型请求仍包含最早和最新探针消息，证明常规请求使用完整 history。

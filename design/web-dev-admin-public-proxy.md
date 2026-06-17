@@ -43,5 +43,6 @@
 - `/_bifrost/api/*`：已转发
 - `/_bifrost/ws` 与基于 `/_bifrost/api/*` 的 WebSocket：已转发
 - `/_bifrost/public/*`：本次补齐
+- `/_bifrost/swagger/*`：同样已在 `web/vite.config.ts` 中作为 HTTP 代理透传，便于本地访问 Swagger UI
 
-除以上三类外，当前 `web/src` 中没有发现其他需要在 Vite dev server 中单独透传的服务端直连路径。
+除以上四类外，当前 `web/src` 中没有发现其他需要在 Vite dev server 中单独透传的服务端直连路径。

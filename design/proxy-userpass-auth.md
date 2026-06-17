@@ -1,5 +1,7 @@
 # 代理 `user:password` 鉴权兼容方案
 
+> 实现状态（截至 2026-06-16）：核心配置模型、HTTP 407 鉴权、SOCKS5 IP+userpass 组合、运行时 `last_connected_at`、admin API、Web 设置页、CLI `start --proxy-user` 与 `config access.userpass` 均已落地；剩余 README/docs 更新等少量项标注为 “(planned, not yet shipped as of 2026-06-16)”。
+
 ## 功能模块描述
 
 为 Bifrost 代理增加一套可选的 `user:password` 客户端鉴权能力，并且它不是新的“单选 access mode”，而是对现有 `local_only` / `whitelist` / `interactive` / `allow_all` 的补充。
@@ -80,7 +82,7 @@
 
 ## 实现逻辑
 
-### 一、配置模型
+### 一、配置模型 (shipped)
 
 在 `access` 配置下新增独立的用户名密码配置，而不是新增 mode，并且账号模型直接按多账号设计。
 
@@ -137,7 +139,7 @@ pub struct AccessControlConfig {
 - 对外查询接口不返回明文 password，只返回账号级 `enabled`、`username`、`has_password`
 - 账号允许禁用但保留，方便临时停用而不是删除
 
-### 二、配置入口复用策略
+### 二、配置入口复用策略 (shipped)
 
 现有 Web 设置页和 CLI `config` 都是围绕“whitelist/access”状态工作的，因此首期不建议再单独发明第二套配置入口，而是直接扩展现有 access 返回结构。
 
@@ -182,7 +184,7 @@ pub struct AccessControlConfig {
 - CLI 现有 `config` 与 `whitelist` 相关客户端可以增量扩展，而不是重建访问控制命令体系
 - push scope 继续复用 `whitelist_status`
 
-### 三、授权语义
+### 三、授权语义 (shipped)
 
 统一授权优先级建议如下：
 
@@ -202,7 +204,7 @@ Fallback = existing Interactive / Deny behavior
 
 这正好满足“不是选择题，而是兼容叠加”的诉求。
 
-### 四、连接接入阶段调整
+### 四、连接接入阶段调整 (shipped)
 
 当前主端口在协议分流前就执行 `check_access()` 并直接拒绝，这会导致 HTTP 客户端连发送 `Proxy-Authorization` 的机会都没有。
 
@@ -217,7 +219,7 @@ Fallback = existing Interactive / Deny behavior
 
 这样改动面最小，也不会改变未开启新能力时的行为。
 
-### 五、HTTP 代理鉴权链路
+### 五、HTTP 代理鉴权链路 (shipped; helper enum 命名以实际代码为准，未必叫 `CredentialCheckResult`)
 
 在 HTTP 请求进入 `handle_request()` 之后、真正执行 admin/proxy 路由前，增加 HTTP 客户端鉴权检查：
 
@@ -247,7 +249,7 @@ HTTP 返回策略建议：
 - body 明确提示“可通过管理员审批或提供代理用户名密码访问”
 - 成功时记录命中的 `username`，用于刷新该账号最近连接时间
 
-### 六、HTTP 请求头清洗
+### 六、HTTP 请求头清洗 (shipped — 见 `crates/bifrost-proxy/src/server.rs` 中对 `proxy-authorization` header 的清洗)
 
 当前下游客户端携带的 `proxy-authorization` 不应继续透传给目标站点。
 
@@ -261,7 +263,7 @@ HTTP 返回策略建议：
 
 这样可以避免把下游客户端凭证泄露给真实业务目标。
 
-### 七、SOCKS5 鉴权链路
+### 七、SOCKS5 鉴权链路 (shipped — `crates/bifrost-proxy/src/proxy/socks/tcp.rs` 中根据 `requires_userpass_auth()` 选择 `UsernamePassword` 或 `NoAuth`)
 
 SOCKS5 已有用户名密码握手能力，因此方案重点不是“从零实现”，而是让它和 IP 访问控制组合起来。
 
@@ -280,7 +282,7 @@ SOCKS5 已有用户名密码握手能力，因此方案重点不是“从零实�
 - IP 命中老规则，可以直接过
 - IP 未命中，可以靠用户名密码补充过
 
-### 八、账号最近连接时间与运行时状态
+### 八、账号最近连接时间与运行时状态 (shipped — 落地在 `crates/bifrost-storage/src/state.rs` 的 `userpass_last_connected_at: HashMap<String, u64>`，与设计建议一致)
 
 “最近连接时间”不建议写回主配置文件。
 
@@ -311,7 +313,7 @@ pub struct UserPassRuntimeState {
 
 这样展示的就是“每个账号上一次真正靠用户名密码成功接入的时间”。
 
-### 九、热更新
+### 九、热更新 (shipped — 通过 `ClientAccessControl` 的 generation 机制；`set_userpass_config` 触发后续请求按新配置校验)
 
 当前 `ClientAccessControl` 已经有 generation，用于访问控制变化后让已有连接重新评估。
 
@@ -325,7 +327,7 @@ pub struct UserPassRuntimeState {
 
 这与现有“配置变化影响后续请求”的语义保持一致。
 
-### 十、管理端、Web 与 CLI
+### 十、管理端、Web 与 CLI (shipped — admin `/whitelist/userpass`、Web `AccessControlTab`、CLI `start --proxy-user` 与 `config access.userpass.*` 均已落地)
 
 首期直接交付完整配置面，不拆到第二阶段。
 
@@ -366,18 +368,18 @@ pub struct UserPassRuntimeState {
 
 ### Phase 1：完整首期范围
 
-- 扩展 `access` 配置模型
-- 扩展 access 状态响应结构
-- accept 阶段支持“带 userpass 的 deferred decision”
-- HTTP 代理支持 `Proxy-Authorization: Basic`
-- SOCKS5 复用同一套用户名密码配置
-- 转发前移除下游 `proxy-authorization`
-- 多账号最近连接时间写入运行时状态
-- admin API 返回与更新 `userpass` 状态
-- Web Access Settings 增加配置入口
-- CLI `start` 与 `config` 子命令补齐查看 / 写入
-- 推送通道补充 access 状态变更
-- README / docs 补充 HTTP 代理鉴权说明
+- 扩展 `access` 配置模型 (shipped)
+- 扩展 access 状态响应结构 (shipped)
+- accept 阶段支持“带 userpass 的 deferred decision” (shipped)
+- HTTP 代理支持 `Proxy-Authorization: Basic` (shipped)
+- SOCKS5 复用同一套用户名密码配置 (shipped)
+- 转发前移除下游 `proxy-authorization` (shipped)
+- 多账号最近连接时间写入运行时状态 (shipped — `state.json`)
+- admin API 返回与更新 `userpass` 状态 (shipped — `PUT /api/whitelist/userpass`)
+- Web Access Settings 增加配置入口 (shipped — `web/src/pages/Settings/tabs/AccessControlTab.tsx`)
+- CLI `start` 与 `config` 子命令补齐查看 / 写入 (shipped — `--proxy-user`、`bifrost config access.userpass.*`)
+- 推送通道补充 access 状态变更 (shipped — `bifrost-admin/src/push.rs` 暴露 `userpass` 字段)
+- README / docs 补充 HTTP 代理鉴权说明 (planned, not yet shipped as of 2026-06-16 — CLI docs 已写入 `docs/cli.md`，但 `README.md` / `README.en.md` 尚未提及 `user:password`)
 
 ## 风险与处理
 
@@ -478,10 +480,10 @@ pub struct UserPassRuntimeState {
 
 ## 文档更新要求
 
-- 更新 `README.md`，说明代理支持 `user:password` 客户端鉴权
-- 更新 CLI / 配置文档，补充 access.userpass.accounts 与重复 `--proxy-user` 参数
-- 更新管理端访问控制说明，补充最近连接时间字段语义
-- 若 Web 设置页新增入口，同步更新相关截图或操作说明
+- 更新 `README.md`，说明代理支持 `user:password` 客户端鉴权 (planned, not yet shipped as of 2026-06-16)
+- 更新 CLI / 配置文档，补充 access.userpass.accounts 与重复 `--proxy-user` 参数 (partially shipped — `docs/cli.md` 已含 `--proxy-user`，`access.userpass.*` 详细字段说明仍待补)
+- 更新管理端访问控制说明，补充最近连接时间字段语义 (planned, not yet shipped as of 2026-06-16)
+- 若 Web 设置页新增入口，同步更新相关截图或操作说明 (planned, not yet shipped as of 2026-06-16)
 
 ## 推荐结论
 

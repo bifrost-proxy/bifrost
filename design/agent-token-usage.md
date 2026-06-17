@@ -10,7 +10,7 @@ Agent 需要区分两类 token：
 
 - `total_tokens_used`：历史所有模型调用的累计 API 消耗，用于成本、Goal accounting 和总量展示。
 - `last_response_tokens`：最近一次模型请求返回的当前 context 快照，用于 `effective_token_count()`、自动压缩判断、`/status` 和 IM 卡片 Context 展示。
-- WebUI HUD：从 `RunTelemetry.status` / `RunTelemetry.context` / `RunTelemetry.compaction` 聚合，不发起额外请求；展示累计 token、context percentage/window 和 compaction count/phase。
+- WebUI HUD：从 `RunTelemetry.status` / `RunTelemetry.context` 聚合，不发起额外请求；当前仅展示累计 token 与 context percentage（context window 信息保留在 hover title 中）。compaction count/phase 仍由 Status 弹窗承载，不在 HUD 内独立成项。
 
 ## 用户目标验证清单
 
@@ -51,11 +51,12 @@ Agent 需要区分两类 token：
    - `context_tokens`：当前 context 快照，即响应 `prompt_tokens` / `input_tokens`
 5. `load_session_runtime_state()` 回放 assistant message 时优先使用 `context_tokens` 恢复 `last_response_tokens`，没有该字段时回退旧 `tokens`。
 6. `scan_session_summary()` 继续只累计 `tokens`，不重复累计 `context_tokens`。
-7. `AgentChatSection` 在 composer 输入框上方渲染 `agent-chat-token-hud`：
+7. `AgentChatSection` 通过 `AgentChatSection.tokenHud.tsx` 中的 `AgentChatTokenHud` 组件，在 composer 输入框上方渲染 `agent-chat-token-hud`：
    - `Tokens`：优先展示 `status.total_tokens_used`，回退 `context.totalTokensUsed`。
-   - `Context`：优先展示 `context_usage_percent` / `contextUsagePercent`，并在 title 中保留 `estimated_context_tokens / context_window_tokens`。
-   - `Compression`：优先展示 `status.compaction_count` / `context.compactionCount` / `compaction.compactionCount`，并补充最近 compaction phase。
-   - 缺少单项数据时展示 `-`；尚未收到任何 token/context/compaction telemetry 时不渲染 HUD，避免空胶囊占位误导用户。
+   - `Context`：优先展示 `context_usage_percent` / `contextUsagePercent`，缺失时按 `estimated_context_tokens / context_window_tokens`（默认 250_000）回退计算百分比，hover title 中保留窗口大小文案。
+   - 进度条 `agent-chat-token-hud-progress` 宽度按 context percentage 渲染。
+   - 缺少单项数据时展示 `-`；当 `total_tokens_used` 与 context percentage 都缺失时不渲染 HUD，避免空胶囊占位误导用户。
+   - 当前 HUD 不单独展示 Compression 项；compaction count/phase 仍由 `/status` 弹窗承载（参见 E2E 断言 `not.toContainText("Compression")`）。
 8. HUD 样式放在 `AgentChatSection.styles.ts`，使用 Ant Design token 变量（`colorBgElevated`、`colorBorderSecondary`、`colorTextTertiary` 等），不硬编码主题色。
 
 ## 依赖项
@@ -68,6 +69,7 @@ Agent 需要区分两类 token：
 - `crates/agent/src/persistence.rs`
 - `crates/agent/src/session/tests.rs`
 - `web/src/pages/AI/AgentChatSection.tsx`
+- `web/src/pages/AI/AgentChatSection.tokenHud.tsx`
 - `web/src/pages/AI/AgentChatSection.styles.ts`
 - `web/tests/ui/agent-chat.spec.ts`
 - `human_tests/agent-token-usage.md`
@@ -87,7 +89,7 @@ Agent 需要区分两类 token：
 
 - 更新或复用内置 Agent mock model API 脚本：mock response 返回 `prompt_tokens != total_tokens`，断言 `/status` / `active_status.last_response_tokens` / `estimated_context_tokens` 使用 input tokens，最终 session summary `tokens` 使用 total tokens。
 - Responses API 路径使用 `input_tokens` 字段作为同等验收入口。
-- 更新 `web/tests/ui/agent-chat.spec.ts`：mock AI Chat SSE status/context/compaction 事件，断言 `agent-chat-token-hud` 在输入框上方展示 `Tokens 1,234`、`Context 45%`、`Compression 2`，并验证 HUD 在 composer 内保持悬浮且不遮挡输入框。
+- 更新 `web/tests/ui/agent-chat.spec.ts`：mock AI Chat SSE status/context 事件，断言 `agent-chat-token-hud` 在输入框上方展示 `Tokens 1.2K`、`Context 45%`，并显式断言 `not.toContainText("Compression")`；同时验证 HUD 在 composer 内保持悬浮、进度条宽度按 context percentage 渲染、不遮挡输入框。
 - WebUI E2E：用 Playwright 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，通过 mock route 注入真实 SSE telemetry，截图交付；后端真实服务 token 口径由 `test_agent_builtin_status_runtime.sh` 覆盖。
 
 ### 真实场景测试

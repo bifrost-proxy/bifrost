@@ -3,10 +3,18 @@
 ## 背景
 在高并发与大请求场景下，代理进程内存从 100MB 级别增长到 3000MB，伴随明显性能下降。目标是定位核心增长来源，提供可验证的优化，并用 TLS 解包与不解包场景进行 10000 条请求的压力评估。
 
-## 现状对齐说明
+## 现状对齐说明（截至 2026-06-16）
 - 本文是压测与优化提案，部分条目已落地，阅读时需要标注状态。
-- 已落地：bounded read 与 `max_body_probe_size`、前端 SSE 列表上限、`SseHub` 不再维护历史 ring、帧连接 metadata 入库。
-- 待验证：SSE 解析缓冲统一上限、连接与 BodyStore 周期清理、脚本体积短路与内存副本回收策略。
+- 已落地：
+  - `traffic.max_body_probe_size`（默认 64 KiB）存在于 `bifrost-admin` 配置与 `AdminState`（`crates/bifrost-admin/src/state.rs`、`handlers/config.rs`），超阈值时跳过 body 处理，详见 ADMIN_API.md。
+  - `BodyStore` 周期清理：`start_body_cleanup_task`（`crates/bifrost-admin/src/body_store.rs`）按 `retention_days` 滚动清理过期 body 文件。
+  - 连接帧记录周期清理：`start_frame_cleanup_task`（`crates/bifrost-admin/src/frame_store.rs`），配合 `ConnectionMonitor` 内的 LRU/最大帧数策略限制内存。
+  - SSE / WS 帧 `preview_limit` 与 `max_frames_per_connection` 已配置化（`crates/bifrost-admin/src/connection_monitor.rs`，构造入口 `ConnectionMonitor::with_config`）。
+  - 内存指标采集：`MetricsCollector` + `MetricsSnapshot.memory_used`（`crates/bifrost-admin/src/metrics.rs`），通过 `GET /_bifrost/api/metrics` 暴露。
+- 仍为提案 / 未完全落地（planned, not yet shipped as of 2026-06-16）：
+  - 全局统一的 SSE 事件缓冲上限（目前仅有 per-frame `preview_limit`，未做整连接级缓冲合计上限）。
+  - 严格意义上的“三层存储 + BodyRef”分流（未命中规则即落 DB/文件、内存仅留索引）。当前 BodyStore 已有 inline + file 双形态，但分流策略与 BodyRef 抽象尚未完整落地。
+  - 脚本执行的 body 体积短路阈值与内存副本回收策略仍需补齐。
 
 ## 现象与关键路径
 - 请求侧：历史上存在 body 全量读取与多次拷贝路径，当前需以 bounded read 实际行为为准。
@@ -26,15 +34,17 @@
 - 大体积请求体场景跳过 body 规则与脚本，避免无意义的内存峰值。
 - 请求体体积统计改为优先使用 Content-Length，确保指标完整。
 
-### SSE 缓冲上限
-- 为 SSE 事件缓冲设置最大上限，超过后丢弃缓冲并记录告警，避免无界增长。
-- 上限与当前最大 body 缓冲保持一致，避免额外配置复杂度。
+### SSE 缓冲上限（planned, not yet shipped as of 2026-06-16）
+- 当前实现仅有 per-frame `preview_limit` 与 `max_frames_per_connection`（见 `connection_monitor.rs`），尚未引入整连接级 SSE 事件缓冲合计上限。
+- 计划：为 SSE 事件缓冲设置最大上限，超过后丢弃缓冲并记录告警，避免无界增长；上限与当前最大 body 缓冲保持一致，避免额外配置复杂度。
 
 ### 连接与存储清理
 - 周期性清理已关闭连接的帧记录，避免连接历史积累。
 - 周期性清理 BodyStore 过期文件，防止长期运行后内存与磁盘双增长。
 
-### 三层存储与流式缓存设计
+### 三层存储与流式缓存设计（planned, not yet shipped as of 2026-06-16）
+> 当前 `BodyStore` 已具备 inline + file 双形态与 retention 清理，但严格意义上的“规则命中走内存、未命中走 DB/文件、超阈值走文件 + BodyRef”分流路径尚未完整落地。以下为目标设计。
+
 #### 目标
 - 不降低核心能力（代理、规则处理、搜索全量记录）的前提下显著降低 CPU 与内存消耗。
 - 将请求/响应体存储拆分为「内存缓存层」「数据库层」「文件层」，以规则命中与体积阈值作为分流条件。

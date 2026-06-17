@@ -77,9 +77,9 @@
 
 ## 后续完整方案
 
-### 路由分桶
+### 路由分桶（planned, not yet shipped as of 2026-06-16）
 
-后续应把 remote invoke 限流改为按语义分桶，而不是复用全站限流：
+当前 `packages/bifrost-sync-server/src/routes/remote-invoke.ts` 已经按用途拆出 `registerLimiter` / `clientQueryLimiter` / `clientDataLimiter` / `clientStreamFrameLimiter` / `callerLookupLimiter` / `callerOpenLimiter` / `callerControlLimiter` 等多个 bucket，但这些 limiter 仍然是“以用途命名 + 各自维护键”的零散结构，并未抽成下面这套统一的语义类别。后续应进一步收敛成显式语义分桶：
 
 - `anonymous_entry`
   - `pairings/start`
@@ -90,6 +90,7 @@
   - `calls/:id/events` 建连
 - `data_plane`
   - `client/calls/:id/frame`
+  - `client/calls/:id/stream-frame`
 - `terminal_control`
   - `calls/:id/cancel`
   - `client/calls/:id/exit`
@@ -97,15 +98,15 @@
 
 ### 限流维度
 
-- 匿名入口：按 IP
-- 已授权 transport：按 `call_id` / `client_instance_id` / `grant_id`
-- SSE 建连：按 `call_id` + 活跃连接数
-- 终态控制：高优先级、小流量、保底通道
-- 多用户共享 NAT：不再把“出口 IP 相同”当成已认证 remote invoke 的主要限流依据
+- 匿名入口：按 IP（`pairings/start` 仍走 `pairRateLimiters` 的 per-IP 计数；`ssh/challenge` 由远端 relay 的 Redis 计数兜底）
+- 已授权 transport：按 `call_id` / `client_instance_id` / `grant_id`（已落地，键的拼装见 `applyRateLimit` 的 24 处调用）
+- SSE 建连：按 `call_id` + 活跃连接数（活跃连接数已通过 `handleClientStream` 中的 `max_sse_connections_per_client` / `max_sse_connections_per_ip` 限制；按 `call_id` 的额外建连频率桶尚未落地，planned, not yet shipped as of 2026-06-16）
+- 终态控制：高优先级、小流量、保底通道（已通过 `callerControlLimiter` 分离 `cancel/events/exit/input`）
+- 多用户共享 NAT：不再把“出口 IP 相同”当成已认证 remote invoke 的主要限流依据（已在 `handleClientStream` 中改为 `user:<user_id>` 优先、回退 IP）
 
-### 算法
+### 算法（planned, not yet shipped as of 2026-06-16）
 
-将当前固定窗口 `RateLimiter` 升级为 token bucket / leaky bucket，避免“59 秒打满，接下来整段时间全 429”的悬崖效应。
+`packages/bifrost-sync-server/src/security.ts` 的 `RateLimiter` 当前仍是固定窗口实现（`{count, resetAt}` + `windowMs`），未升级到 token bucket / leaky bucket。后续应在不破坏现有键空间的前提下替换底层算法，避免“59 秒打满，接下来整段时间全 429”的悬崖效应。
 
 ## 测试方案
 
@@ -115,9 +116,9 @@
   - 取消收尾阶段命中 `429` 时识别为可重试错误
   - 取消收尾阶段若只得到空默认结果，会合成 `cancelled`
 - `packages/bifrost-sync-server`
-  - 同一 `x-forwarded-for` 下的 authenticated remote invoke 请求不会被全局 IP limiter 打断
-  - 同一 `x-forwarded-for` 下不同用户的 `client/stream` 不会互相挤掉
-  - 非 remote invoke 路径仍继续走全局限流
+  - 同一 `x-forwarded-for` 下的 authenticated remote invoke 请求不会被全局 IP limiter 打断（planned, not yet shipped as of 2026-06-16；现有 `src/__tests__/rate-limit.test.ts` 只覆盖了非 remote-invoke 路径的全局限流与 `auth_rate_limit_per_ip` 两条用例，仍需补这条 remote-invoke 豁免的回归用例）
+  - 同一 `x-forwarded-for` 下不同用户的 `client/stream` 不会互相挤掉（planned, not yet shipped as of 2026-06-16；该场景目前由 `human_tests/remote-invoke.md` 的 TC-RI-回归-118 人工回归覆盖，尚未在 sync-server 的 vitest 套件中沉淀为自动化用例）
+  - 非 remote invoke 路径仍继续走全局限流（已由 `src/__tests__/rate-limit.test.ts` 的 `uses server.rate_limit_per_ip for non remote-invoke paths` 用例覆盖）
 
 ### E2E
 

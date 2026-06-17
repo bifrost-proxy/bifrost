@@ -17,7 +17,7 @@ Settings -> Agent -> MCP Servers 用于管理 Agent 可使用的 MCP server 配�
 ## 依赖项
 
 - `crates/agent/src/mcp/mod.rs`：复用 MCP 启动、握手、tools/list。
-- `crates/bifrost-admin/src/handlers/im_gateway.rs`：Agent Settings API 路由。
+- `crates/bifrost-admin/src/handlers/im_gateway/agent_api.rs`：`/agent/mcp-status` 路由实现（父分发器位于 `crates/bifrost-admin/src/handlers/im_gateway.rs`）。
 - `web/src/pages/Settings/tabs/agent/McpServersSection.tsx`：MCP Servers 列表展示。
 
 ## 测试方案

@@ -2,7 +2,7 @@
 
 ## 背景
 
-`crates/bifrost-cli/src/cli.rs` 中的 `RemoteTrafficCommands` 直接把 `remote traffic list` 的全部过滤参数内联在 `List` 变体上。
+`crates/bifrost-cli/src/cli/remote.rs` 中的 `RemoteTrafficCommands` 原先直接把 `remote traffic list` 的全部过滤参数内联在 `List` 变体上（该枚举仍由 `crates/bifrost-cli/src/cli.rs` 通过 `pub mod remote; pub use remote::*;` 对外暴露）。
 
 由于该变体包含大量 `Option<String>` 字段，`cargo clippy --workspace --all-targets --all-features -- -D warnings` 在 CI 中触发 `clippy::large-enum-variant`，阻塞 `bifrost-cli` 及其测试目标构建。
 
@@ -16,7 +16,7 @@
 
 ### 1. 拆分 `remote traffic list` 参数结构
 
-在 `crates/bifrost-cli/src/cli.rs` 中新增 `RemoteTrafficListArgs`：
+在 `crates/bifrost-cli/src/cli/remote.rs` 中新增 `RemoteTrafficListArgs`（已落地，定义于 `pub struct RemoteTrafficListArgs` 处）：
 
 - 使用 `#[derive(Args, Clone, Debug)]`
 - 保留 `remote traffic list` 当前的全部参数定义

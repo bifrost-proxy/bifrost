@@ -325,32 +325,57 @@ Agent Chat Composer 支持直接粘贴图片，图片预览展示在输入框上
 
 ### 1. ImAgentConfig - 全局配置
 
+`ImAgentConfig` 是 `bifrost_agent::AgentConfig` 的兼容别名（见 `crates/bifrost-admin/src/im_gateway/agent.rs`）。当前结构按职责分层，模型 base_url / api_key / wire format 已下沉到 `ModelProviderConfig`，而不是直接挂在 `AgentConfig` 上：
+
 ```rust
-pub struct ImAgentConfig {
-    /// LLM API 基础 URL
-    pub base_url: String,
-    /// API 密钥（支持 $ENV_VAR 环境变量引用）
-    pub api_key: String,
-    /// 模型名称
-    pub model: String,
-    /// 最大生成 token 数
-    pub max_completion_tokens: u32,
-    /// 推理强度（low/medium/high）
-    pub reasoning_effort: Option<String>,
-    /// 推理摘要模式（auto/concise/detailed）
-    pub reasoning_summary: Option<String>,
-    /// 会话 TTL（秒）
-    pub session_ttl_secs: u64,
-    /// 是否使用 Azure 认证方式
-    pub by_azure: bool,
-    /// 是否启用 Agent 功能
+pub struct AgentConfig {
     pub enabled: bool,
+    pub runner: Option<AgentRunnerMode>,
+
+    // -- Model selection --
+    pub model: Option<String>,                         // 默认 "gpt-5.4-2026-03-05"
+    pub model_provider: Option<String>,                // 默认 "aidp_crawl"
+    pub model_providers: HashMap<String, ModelProviderConfig>,
+
+    // -- Prompt instructions --
+    pub base_instructions: Option<String>,
+    pub developer_instructions: Option<String>,
+    pub user_instructions: Option<String>,
+
+    // -- Model parameters --
+    pub model_reasoning_effort: Option<String>,        // 默认 "medium"，可设 "none"
+    pub model_reasoning_summary: Option<String>,       // 默认 "auto"，可设 "none"
+    pub model_context_window: Option<i64>,             // 默认 250_000
+    pub model_auto_compact_token_limit: Option<i64>,   // 默认 90% 即 225_000
+    pub max_completion_tokens: Option<u32>,            // 默认 16384
+
+    // -- Runtime --
+    pub max_turn_iterations: Option<u32>,              // 默认 1000
+    pub session_ttl_secs: Option<u64>,                 // 默认 3600
+
+    // -- IM outbound --
     /// Agent 在没有 IM 入站来源时使用的默认消息发送通道
     pub default_message_channel: Option<ImMessageChannelBinding>,
+
+    // -- MCP / Skills / AGENTS.md 等其余字段省略，见 crates/agent/src/config.rs --
+}
+
+pub struct ModelProviderConfig {
+    pub name: Option<String>,
+    pub base_url: Option<String>,                      // 例如 https://search.bytedance.net/...
+    pub wire_api: Option<ModelWireApi>,                // chat / responses，决定认证 header
+    pub env_key: Option<String>,                       // API key 环境变量名，例如 MODELHUB_AK
+    pub api_key: Option<String>,                       // 直接值或 $ENV_VAR
+    pub http_headers: Option<HashMap<String, String>>,
+    pub env_http_headers: Option<HashMap<String, String>>,
+    pub request_max_retries: Option<u64>,
+    pub stream_idle_timeout_ms: Option<u64>,
+    pub stream_max_retries: Option<u64>,
 }
 ```
 
-**配置持久化**：通过 `ImAgentConfigStore` 存储为 JSON 文件（`im_agent_config.json`），支持热更新。
+注意旧文档中提到的 `by_azure: bool` 已被 `ModelProviderConfig.wire_api` + `env_http_headers`（例如 `"api-key" -> "MODELHUB_AK"`）替代；内置 `aidp_crawl` provider 默认即使用 Azure `api-key` header。
+**配置持久化**：通过 `AgentConfigStore` 存储为 JSON 文件（`{data_dir}/agent_config.json`），支持热更新。
 
 ### 1.1 Agent 默认消息通道与 send_msg 工具
 
@@ -528,7 +553,7 @@ WebUI：
 
 ### 2. ImAgentConfigStore - 配置存储
 
-- 文件路径：`{data_dir}/im_agent_config.json`
+- 文件路径：`{data_dir}/agent_config.json`（由 `bifrost-agent::AgentConfigStore` 管理；`ImAgentConfigStore` 仅是 `crates/bifrost-admin/src/im_gateway/agent.rs` 中的兼容别名）
 - 支持环境变量替换（`$MODELHUB_AK` → 实际值）
 - 提供 `load()` / `save()` / `get_resolved_api_key()` 方法
 
@@ -542,35 +567,36 @@ WebUI：
 
 ### 4. ImAgentSessionManager - 会话管理器
 
+`ImAgentSessionManager` 在 `crates/bifrost-admin/src/im_gateway/agent.rs` 中作为 `bifrost_agent::AgentSessionManager` 的兼容别名 re-export。当前真实实现位于 `crates/agent/src/session.rs`：
+
 ```rust
-pub struct ImAgentSessionManager {
-    /// 用户会话映射（open_id → Session）
-    sessions: DashMap<String, Session>,
-    /// 会话 TTL
-    ttl: Duration,
+pub struct AgentSession {
+    /// 会话主键（Web/IM/Runner 通道共用，详见各 adapter）
+    pub session_key: String,
+    // 完整字段见 crates/agent/src/session.rs::AgentSession
 }
 
-struct Session {
-    /// 消息历史
-    messages: Vec<ChatMessage>,
-    /// 最后活跃时间
-    last_active: Instant,
+pub struct AgentSessionManager {
+    /// 按 `session_key` 索引的活跃 session 池
+    sessions: DashMap<String, AgentSession>,
+    // 还包含 active_turn_status、checkout 状态、TTL 等
 }
 ```
 
-- 基于 DashMap 实现线程安全的 per-user 会话隔离
-- 支持 TTL 过期清理（默认 1 小时）
-- 支持内置命令：`/clear`、`/reset`
+- 基于 `DashMap` 实现线程安全的 per-session 隔离。
+- 默认 TTL 由 `AgentConfig::DEFAULT_SESSION_TTL = 3600`（1 小时）控制。
+- 取出 / 归还 session 时维护 `ActiveTurnStatus` 共享快照，配合 `/status` 暴露运行中指标。
+- 支持内置命令：`/clear`、`/reset`、`/stop`、`/status` 等（实现见 `crates/agent/src/slash.rs` 与 `crates/bifrost-admin/src/im_gateway/agent_slash.rs`）。
 
 ### 5. run_turn() / run_turn_with_mcp() - 主入口函数
 
-**处理流程**：
-1. 查找或创建用户会话
-2. 构建消息列表（历史 + 当前消息）
-3. 调用模型 API（run_turn_with_mcp 额外支持 MCP 工具调用）
-4. 记录对话轮次到会话历史
-5. 返回模型响应（TurnResult）
+当前实现位于 `crates/agent/src/session/turn_loop.rs`：`run_turn`、`run_turn_with_mcp` 与多模态变体 `run_turn_with_mcp_multimodal`。**处理流程**：
 
+1. 通过 `AgentSessionManager::take_session*` 查找或创建对应 `session_key` 的 `AgentSession`，并挂载 `ActiveTurnStatus`。
+2. `AgentSession::build_messages()` 构建消息列表，调用 `sanitize_chat_history()` 兜底后送入模型。
+3. 调用模型 API（`run_turn_with_mcp` 在内置工具基础上额外注入 MCP 工具调用，多模态变体支持图片 content parts）。
+4. 把 `tool_call` / `tool_result` / `compaction` / `session_end` 事件落盘到 `~/.bifrost/agent/sessions/.../*.jsonl`。
+5. 返回模型响应（`TurnResult`）。
 ## 默认模型配置
 
 | 配置项 | 默认值 | 说明 |
@@ -582,9 +608,11 @@ struct Session {
 | ReasoningEffort | `medium` | 推理强度；WebUI 的 Agent → Model 配置可设为 `none`，用于 GPT-5.5 等不支持 Chat Completions `reasoning_effort` 的模型，运行时会省略该请求字段 |
 | ReasoningSummary | `auto` | 推理摘要模式；WebUI 的 Agent → Model 配置可设为 `none`，运行时会省略 `reasoning_summary` 字段 |
 | MaxCompletionTokens | `16384` | 最大生成 token |
-| ByAzure | `true` | 使用 `api-key` header 认证 |
-| SessionTTL | `3600` (1小时) | 会话过期时间 |
-| MaxHistory | `20` | 最大历史消息数 |
+| Authentication | `wire_api=chat` + `env_http_headers.api-key=MODELHUB_AK`（替代旧 `by_azure: true`） | 内置 `aidp_crawl` 用 Azure `api-key` header 认证 |
+| SessionTTL | `3600` (1 小时) | 会话过期时间（`AgentConfig::DEFAULT_SESSION_TTL`） |
+| ContextWindow | `250_000` | `model_context_window` 默认；auto-compact 阈值默认 90% 即 225,000 |
+| MaxTurnIterations | `1000` | `max_turn_iterations` 默认 |
+| MaxHistory | 无固定上限 | Agent loop 已移除请求级历史条数限制，由 token/context budget 与 auto-compact 共同收口 |
 
 ## 事件流程
 
@@ -704,15 +732,24 @@ pub enum ImRouteAction {
 ```json
 {
   "enabled": true,
-  "base_url": "https://search.bytedance.net/gpt/openapi/online/multimodal/crawl",
-  "api_key": "$MODELHUB_AK",
   "model": "gpt-5.4-2026-03-05",
+  "model_provider": "aidp_crawl",
+  "model_providers": {
+    "aidp_crawl": {
+      "base_url": "https://search.bytedance.net/gpt/openapi/online/multimodal/crawl",
+      "wire_api": "chat",
+      "env_key": "MODELHUB_AK",
+      "env_http_headers": { "api-key": "MODELHUB_AK" }
+    }
+  },
+  "model_reasoning_effort": "medium",
+  "model_reasoning_summary": "auto",
+  "model_context_window": 250000,
   "max_completion_tokens": 16384,
-  "reasoning_effort": "medium",
-  "reasoning_summary": "auto",
   "session_ttl_secs": 3600,
-  "by_azure": true
+  "max_turn_iterations": 1000
 }
+```
 ```
 
 ### PATCH /api/im-gateway/agent
@@ -731,51 +768,59 @@ pub enum ImRouteAction {
 **行为**：
 - 合并现有配置
 - 支持热更新（无需重启服务）
-- 持久化到 `im_agent_config.json`
+- 持久化到 `{data_dir}/agent_config.json`
 
 ### GET /api/im-gateway/agent/sessions
 
 列出当前活跃的会话列表。
 
-**响应示例**：
 ```json
 {
   "sessions": [
     {
-      "open_id": "ou_xxxxx",
+      "session_key": "feishu:ou_xxxxx",
+      "running": false,
       "message_count": 5,
-      "last_active": "2026-05-01T10:30:00Z",
-      "created_at": "2026-05-01T10:00:00Z"
+      "user_turn_count": 2,
+      "compaction_count": 0,
+      "work_dir": "/path/to/project",
+      "created_at": 1781595586,
+      "last_active_at": 1781598446
     }
   ],
   "total": 1
 }
 ```
 
+实际字段完整列表见 `crates/agent/src/session/session_store.rs::SessionInfo`，包含 `agent_type` / `runner_type` / `runner_id` / `external_thread_id` / `external_conversation_id` / `title` 等扩展字段。
+```
+
 ## 会话管理
 
 ### 设计原则
 
-1. **Per-User 隔离**：每个 `open_id` 独立会话，互不干扰
-2. **内存存储**：不持久化会话，重启后清空（适合对话场景）
-3. **TTL 过期**：默认 1 小时无活动自动清理
-4. **历史限制**：默认保留最近 20 条消息，避免上下文过长
+1. **Per-Session 隔离**：每个 `session_key`（IM 通常衍生自 provider + open_id / chat_id，Web/Runner 自定义命名）独立会话，互不干扰。
+2. **JSONL 持久化**：session 事件按 `~/.bifrost/agent/sessions/YYYY/MM/DD/session-<key>-*.jsonl` 落盘，重启或 `/resume` 后可恢复。
+3. **TTL 过期**：默认 `AgentConfig::DEFAULT_SESSION_TTL = 3600`（1 小时）无活动后回收内存 session（JSONL 仍保留）。
+4. **历史无固定条数限制**：Agent loop 使用完整 sanitized history，由 token/context budget、auto-compact 与 provider context-window 错误共同收口（详见后文 §“为什么不限制历史消息数”）。
 
 ### 会话结构
 
 ```rust
-struct Session {
-    /// 对话历史（包含 user 和 assistant 消息）
-    messages: Vec<ChatMessage>,
-    /// 最后活跃时间（用于 TTL 检查）
-    last_active: Instant,
-    /// 会话创建时间
-    created_at: Instant,
+pub struct AgentSession {
+    pub session_key: String,
+    pub messages: Vec<ChatMessage>,
+    pub last_active: Instant,
+    pub created_at: Instant,
+    pub active_turn_status: Option<Arc<ActiveTurnStatus>>,
+    pub compaction_count: u32,
+    pub work_dir: Option<String>,
+    // 完整字段见 crates/agent/src/session.rs::AgentSession
 }
 
-struct ChatMessage {
-    role: String,  // "user" | "assistant" | "system"
-    content: String,
+pub struct ChatMessage {
+    // 兼容 OpenAI Chat Completions：role + 可选 tool_calls / tool_call_id / content parts
+    // 完整定义见 crates/agent/src/types.rs::ChatMessage
 }
 ```
 
@@ -838,10 +883,10 @@ struct ChatMessage {
 
 **选择 `api-key` header 而非 `Authorization: Bearer` 的原因**：
 
-- **MODELHUB 要求**：字节跳动内部模型服务使用 Azure 认证格式
+- **兼容性**：通过 `ModelProviderConfig.wire_api` + `env_http_headers` 在同一 provider 抽象内表达 Azure `api-key`、标准 OpenAI Bearer 或自定义 header；旧文档中的 `by_azure: bool` 已废弃。
 - **兼容性**：`by_azure: true` 可配置，同时支持标准 OpenAI API
 - **安全性**：避免 Bearer token 被误用
-
+### 4. 为什么会话以 JSONL 持久化
 ### 4. 为什么会话不持久化
 
 **选择内存存储的原因**：
@@ -862,21 +907,38 @@ Agent Loop 已移除请求级历史条数限制，常规请求使用完整 sanit
 ## 文件结构
 
 ```
+crates/agent/                     # bifrost-agent 主体实现
+└── src/
+    ├── config.rs             # AgentConfig / AgentConfigStore（agent_config.json）
+    ├── client.rs             # AgentClient + Chat Completions HTTP 调用
+    ├── session.rs            # AgentSession / AgentSessionManager / ActiveTurnStatus
+    ├── session/turn_loop.rs  # run_turn / run_turn_with_mcp / run_turn_with_mcp_multimodal
+    ├── persistence.rs        # ConversationRecorder + load_conversation(_lossy)
+    ├── history.rs            # sanitize_chat_history + history invariants
+    ├── compact.rs            # 自动/手动压缩、context window budget
+    ├── mcp/                  # MCP tool / server 接入
+    └── tools/                # 内置工具
+
 crates/bifrost-admin/
-├── src/
-│   ├── im_gateway/
-│   │   ├── agent.rs          # Agent 类型 re-exports (from bifrost_agent)
-│   │   │   ├── ImAgentConfig
-│   │   │   ├── ImAgentConfigStore
-│   │   │   ├── ImAgentClient
-│   │   │   ├── ImAgentSessionManager
-│   │   │   ├── run_turn()
-│   │   │   └── run_turn_with_mcp()
-│   │   ├── types.rs          # ImRouteAction::AgentChat 变体
-│   │   └── mod.rs
-│   └── handlers/
-│       └── im_gateway.rs     # HTTP Handler 统一入口
-│           └── handle_im_gateway()
+└── src/
+    ├── im_gateway/
+    │   ├── agent.rs          # Agent 类型 re-exports (from bifrost_agent)：
+    │   │   ├── ImAgentConfig          # = bifrost_agent::AgentConfig
+    │   │   ├── ImAgentConfigStore     # = bifrost_agent::AgentConfigStore
+    │   │   ├── ImAgentClient          # = bifrost_agent::AgentClient
+    │   │   ├── ImAgentSessionManager  # = bifrost_agent::AgentSessionManager
+    │   │   ├── run_turn               # = bifrost_agent::session::run_turn
+    │   │   └── run_turn_with_mcp      # = bifrost_agent::session::run_turn_with_mcp
+    │   ├── agent_slash.rs    # IM 通道 /clear /reset /stop /status 短路处理
+    │   ├── agent_worker.rs   # 独立 `bifrost agent worker` 子进程入口
+    │   ├── send_msg_tool.rs  # 通道无关 send_msg 工具，按 provider capability 动态注入
+    │   ├── session_state.rs  # 外置 Runner / 内置 Agent IM session 持久状态
+    │   ├── types.rs          # ImRouteAction::AgentChat 变体
+    │   └── mod.rs
+    └── handlers/
+        ├── im_gateway.rs    # IM Gateway HTTP Handler 统一入口
+        └── agent_chat.rs    # /_bifrost/api/im-gateway/agent/chat 等 Admin API
+```
 ```
 
 ## 依赖项
@@ -1064,19 +1126,15 @@ ChatGPT Web Runner 的 DOM fallback 不能只识别传统 `<img>` 生成图。Ch
 
 刷新页面或关闭浏览器响应流不能代表用户停止 Agent Loop。`/_bifrost/api/agent/chat/stream` 和 `/_bifrost/api/im-gateway/chat/stream` 的 SSE/NDJSON client disconnect 只停止向该 HTTP 响应写入增量，不调用 `request_stop` 或 external CLI stop marker；后台 turn/run 继续执行并在完成后归还 session / 记录 runner state。只有显式点击停止当前轮次或发送 `/stop`，才允许写入 stop signal。
 
-内置 Bifrost Agent 的运行状态必须有单一收敛路径：主进程的 `active_turn_statuses` / `active_stop_signals` 只表达当前进程内正在执行的 turn 锁和协作停止句柄；JSONL 的 `run_state_changed` 是刷新、历史恢复和异常诊断的终态事实源。`/_bifrost/api/agent/chat/stream` 的 detached task 必须用 RAII guard 持有 checked-out `AgentSession`，无论 worker 正常完成、panic、stream future 被 drop/abort，还是发送端断开，都要释放 active worker、active status 和 stop signal。worker 子进程启动失败、异常退出、事件流提前结束时，服务端必须向当前或最近的合法 JSONL 写入 `failed` 终态和可见错误消息，再释放 active 状态；显式 `/stop` 或 stop signal 命中时写入 `stopped` 终态。`request_stop` 遇到 stop signal 已丢失但 active status 仍存在的陈旧状态时，必须幂等清理 active 状态并返回成功，避免用户看到 Running 却无法停止。
-
-排队消息的触发点也必须跟随后端 turn 终态收敛，而不是只依赖 UI 展示状态。正常完成后继续 pop FIFO queue；worker 异常失败或流提前结束时，也要先把本轮写成 terminal `failed`，再尝试弹出下一条排队消息，避免上一轮泄漏导致队列永久不出队。用户显式 Stop 表达的是终止当前执行，不自动续跑队列。
-
 多线程并发运行时，WebView 切换会话必须把“旧流事件”和“旧流收尾”都隔离掉。切换线程时前端用 `AbortController` 中止当前 HTTP stream，并在 `onEvent`、`onFinal`、`catch` 和成功收尾路径中用选中 `sessionKey` 做 guard，丢弃旧会话的延迟事件。即使旧 stream 因 abort 进入 `finally`，也不能无条件 `setRunning(false)` 或清空 collaboration mode；这些状态只能在当前选中会话仍是发起 stream 的会话时更新，避免 A 线程收尾把已经切到的 B 线程按钮、状态 tag 或输入模式打乱。
 
 运行中的输入框不能禁用。无输入时，输入框内右下角主按钮切换为 Stop；有输入时，内置 Bifrost Agent 展示 Guide / Queue 模式切换，默认 Guide 注入当前 loop，也可选择 Queue 等当前轮结束后处理；Codex、ChatGPT Web 和其他外部 Runner 不支持运行中 guide，默认只排队。Queue 状态显示在输入框上方，支持多条追加与删除；当 Runner 支持 guide 时，队列项可一键改为立即 Guide。Queue/Remove 是本地交互状态，不应插入 MessageList，也不应作为 assistant 消息持久化；只有排队项被实际 drain 成下一轮输入后，才进入消息列表和历史。
 
 Composer 与 MessageList 共用同一个滚动容器。输入区使用 sticky/floating 样式贴在对话容器底部，短消息时仍位于容器底部，长历史时随同一滚动容器保持底部悬浮；输入区不再通过顶部硬边框与消息列表切开。
 
-Plan 不属于 Settings 弹窗。存在 plan 时，输入框上方只展示一个轻量进度胶囊；没有 plan 时整个模块隐藏。胶囊展示当前进展和最新执行/待执行任务，鼠标悬浮或键盘聚焦胶囊时弹出详情浮层，离开后收起，不再使用点击折叠/展开偏好。
+Plan 不属于 Settings 弹窗。存在 plan 时，Plan 面板展示在输入框上方；没有 plan 时整个模块隐藏。用户手动折叠或展开后，该偏好保存在当前页面状态中，不因切换会话或新建对话而重置。
 
-Plan 是辅助信息，不能抢占 Agent Chat 的主要阅读空间。常驻态只保留胶囊，不展示完整 step list；详情浮层只展示真正的 todo step，不展示 `plan_updated` title / explanation 这类二级标题；header 和每个 step 都使用紧凑字体、行高与 padding。每条 step 使用 todo 风格状态图标：completed 显示勾选，in_progress 显示旋转 loading，pending 显示空心待办圆点；状态文字只在详情浮层中作为轻量辅助信息展示。step 列表最多展示 5 条的高度，超过 5 条时只在 step list 内部滚动，不能继续抬高 composer 或把对话区顶出可视区域。输入框默认只提供 2 行内容高度，随用户输入自动扩高，最高沿用现有 7 行上限；超过上限后由输入框内部滚动承载长文本。输入框 hint 只展示换行方式 `Shift + Enter for a new line`，不展示 session id；hint 与发送按钮的底部留白必须和顶部输入留白保持一致，避免 composer 底部出现大块空白。
+Plan 面板是辅助信息，不能抢占 Agent Chat 的主要阅读空间。展开时只展示真正的 todo step，不展示 `plan_updated` title / explanation 这类二级标题；header 和每个 step 都使用紧凑字体、行高与 padding。每条 step 使用 todo 风格状态图标：completed 显示勾选，in_progress 显示旋转 loading，pending 显示空心待办圆点，不再用文字 tag 占据横向空间。step 列表最多展示 5 条的高度，超过 5 条时只在列表内部滚动，不能继续抬高 composer 或把对话区顶出可视区域。输入框默认只提供 2 行内容高度，随用户输入自动扩高，最高沿用现有 7 行上限；超过上限后由输入框内部滚动承载长文本。输入框 hint 只展示换行方式 `Shift + Enter for a new line`，不展示 session id；hint 与发送按钮的底部留白必须和顶部输入留白保持一致，避免 composer 底部出现大块空白。
 
 消息区自身不展示全局 loading spinner。运行状态由顶部 `Running` 标签、Threads 的跳动绿点，以及 assistant 气泡中的 `Generating...` 表达；历史恢复只设置 `aria-busy`，避免左上角出现位置突兀的 loading 图标。
 

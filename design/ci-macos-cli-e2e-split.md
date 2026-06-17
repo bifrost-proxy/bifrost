@@ -6,8 +6,8 @@ macOS CI 的 rules/shell E2E 只依赖 `bifrost` CLI release binary，不依赖 
 
 ## 实现逻辑
 
-- 拆出 `build-cli-macos-aarch64`，只在 `macos-15` 上执行 `cargo build -p bifrost-cli --release --target aarch64-apple-darwin`，上传 `bifrost-release-aarch64-apple-darwin`。
-- 拆出 `build-cli-macos-x86_64`，只在 `macos-15-intel` 上执行 `cargo build -p bifrost-cli --release --target x86_64-apple-darwin`，上传 `bifrost-release-x86_64-apple-darwin`。
+- 拆出 `build-cli-macos-x86_64`，只在 `macos-15` 上执行 `cargo build -p bifrost-cli --release --target x86_64-apple-darwin`，上传 `bifrost-release-x86_64-apple-darwin`；通过 `SKIP_FRONTEND_BUILD=1` 跳过 web 资产，仅产出 CLI binary。
+- `e2e-macos-rules`、`e2e-macos-shell`（2-shard matrix）与 `e2e-macos-runner` 均只依赖 `build-cli-macos-aarch64`，避免等待 x86_64 或 desktop bundle。`e2e-macos-runner` 复用同一 CLI artifact 跑 tray smoke 与 runner E2E。
 - `e2e-macos-rules` 与 `e2e-macos-shell` 只依赖 `build-cli-macos-aarch64`，避免等待 x86_64 或 desktop bundle。
 - `bundle-desktop-macos` 继续依赖两个 CLI artifact，用作 Tauri sidecar，再执行 frontend build 与 desktop bundle 验证。
 - 避免让 E2E 依赖 matrix job，因为 GitHub Actions 的 `needs` 会等待 matrix job 的全部 child 完成。

@@ -6,15 +6,18 @@
 
 ## 实现逻辑
 - 保留规则解析与匹配结果，允许日志继续显示同时命中的协议，便于排查。
-- 在 HTTP 上游发送阶段新增“是否使用上游代理”的统一判定：
-- 当 `resolved_rules.host` 存在且未被忽略时，不使用 `resolved_rules.proxy`。
+- 在 HTTP 上游发送阶段由 `should_use_upstream_proxy(&ResolvedRules)` 统一判定是否使用上游代理：
+- 当 `resolved_rules.host` 存在且未被 `resolved_rules.ignored.host` 忽略时，不使用 `resolved_rules.proxy`。
 - 当 host 被忽略或不存在时，仍允许 `proxy` 生效。
-- 复用同一判定到 HTTP/3 预判逻辑，避免 host 已生效时仍错误禁用直连上游路径。
+- CONNECT/隧道路径由 `should_use_connect_upstream_proxy` 套用同一语义，SOCKS TCP 路径同样复用该判定，避免 host 已生效时仍错误走上游代理。
+- HTTP/3 预判沿用上述统一判定，保证 host 命中时直连上游而非被禁用。
 
 ## 依赖项
-- `crates/bifrost-proxy/src/proxy/http/handler.rs`
-- `crates/bifrost-e2e/src/tests/routing.rs`
-- `crates/bifrost-e2e/src/tests/rule_priority.rs`
+- `crates/bifrost-proxy/src/proxy/http/handler.rs`（`should_use_upstream_proxy`）
+- `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`（`should_use_connect_upstream_proxy`）
+- `crates/bifrost-proxy/src/proxy/socks/tcp.rs`（SOCKS 侧的等价判定）
+- `crates/bifrost-e2e/src/tests/routing.rs`（`test_routing_host_vs_proxy`）
+- `crates/bifrost-e2e/src/tests/rule_priority.rs`（`test_priority_host_vs_proxy`）
 
 ## 测试方案
 - 执行 bifrost-e2e 定向回归：

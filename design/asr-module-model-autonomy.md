@@ -17,9 +17,11 @@ ASR 能力现在同时服务于 Directory Tasks、WebUI 语音工作台（实时
 | 模块 | owner_module | 模型配置来源 | 服务使用策略 |
 | --- | --- | --- | --- |
 | Directory Task | `directory_task` | `AsrDirectoryTask.model` / `language` | 任务运行时按任务 ID 租用服务；任务结束后释放自己启动的服务 |
-| WebUI 语音工作台 | `speech_workbench` | `localStorage:bifrost.asr.workbench.connection.v1` | 上传文件使用工作台租约；实时麦克风共享同一工作台模型参数 |
-| CLI | `cli` | CLI 参数默认值或用户显式 `--model` | `stream-file` 临时租用服务；命令结束后释放自己启动的服务 |
+| WebUI 语音工作台 | `speech_workbench` | `localStorage:bifrost.asr.workbench.connection.v2` | 上传文件使用工作台租约；实时麦克风共享同一工作台模型参数 |
+| CLI | `bifrost_cli` | CLI 参数默认值或用户显式 `--model` | `stream-file` 临时租用服务；命令结束后释放自己启动的服务 |
 | 模型管理 | `model_management` | 模型选择器，仅用于资产状态/初始化 | 不启动长期服务，不占用 ASR Server 租约 |
+| 实时语音 | `realtime_voice` | 由 `crates/bifrost-admin/src/handlers/speech.rs` 注入 | 实时麦克风会话租约；其它离线模块在该 owner 活跃时让步 |
+| 离线任务 | `offline_job` | 由 `offline_jobs.rs` 在派发时强制写入 | 离线转写任务的服务租约，与 directory_task 区分 |
 
 ## 后端实现逻辑
 
@@ -36,10 +38,10 @@ ASR 能力现在同时服务于 Directory Tasks、WebUI 语音工作台（实时
 ### 互斥规则
 
 1. `start_managed_service(target)` 先检查内存中的 `MANAGED_SERVICE` 和持久化 `service.json`。
-2. 如果已有健康服务的 `model/home/owner_module/owner_id` 与请求匹配，允许复用；`language` 是转写请求级参数，不触发服务重启，避免仅切换语言就误杀或重建同一模型服务。
-3. 如果已有健康服务归属其它模块或其它模型，返回冲突信息；HTTP 接口返回 `409 Conflict`，调用者展示当前租用方与模型。
-4. 停止服务时，只有相同目标与相同租约归属可以停止；其它模块不能停止不属于自己的 ASR Server。
-5. Directory Task 和 CLI 只在自己启动了服务时自动停止，避免误停用户已显式启动的工作台服务。
+2. 如果已有健康服务的 `model/home` 与请求匹配，允许跨 owner 复用（见 `target_matches_request` / `qwen3_service_runtime_is_shared_across_modules_for_same_model`）；`language` 是转写请求级参数，不触发服务重启。`same_service_owner` 仅用于判断停止权限，不影响复用决策。
+3. 如果检测到不同模型/不同 home 的健康服务（`find_conflicting_healthy_service`），`start_managed_service` 返回 `service_busy_response`，调用方据此向用户展示当前占用者；HTTP 层不会专门下发 `409`，而是回写 `AsrServiceResponse{ ready:false, managed:false, message, detail }`。
+4. 停止服务时，只有相同 owner（`same_service_owner`）可以停止自己启动的实例；其它模块不能停止不属于自己的 ASR Server。
+5. Directory Task 和 CLI 只在自己启动了服务时自动停止，避免误停用户已显式启动的工作台服务；`realtime_voice` 活跃时，`should_yield_for_realtime` 会让 `offline_job` / `directory_task` / `scheduled_task` 等离线 owner 让步（参考 `crates/bifrost-asr/src/resources.rs` 与 `profiles.rs` 的 `pause_on_realtime_voice`）。
 
 ### 共享模型状态
 
@@ -64,22 +66,23 @@ ASR 页面顺序调整为：
 
 ### 配置隔离
 
-- `loadAsrParams` / `saveAsrParams` 迁移为工作台专用配置，存储在 `bifrost.asr.workbench.connection.v1`。
-- `loadModelManagementParams` / `saveModelManagementParams` 使用独立 storage key，避免初始化模型选择影响工作台。
+- `loadAsrParams` / `saveAsrParams` 迁移为工作台专用配置，存储在 `bifrost.asr.workbench.connection.v2`；旧的 `connection`、`connection.v2`、`connection.v3`、`workbench.connection.v1`、`model-management.connection.v1` 会通过 `clearLegacyAsrParams` 在首次加载时清理。
+- `loadModelManagementParams` / `saveModelManagementParams` 使用独立 storage key `bifrost.asr.model-management.connection.v2`，避免初始化模型选择影响工作台。
 - `loadVoiceRealtimeParams` 从工作台配置派生模型、语言、host、chunkMs，保证实时麦克风与上传文件绑定同一工作台配置。
 - Directory Task 表单保存 `values.model` 和 `values.language`，不再读取工作台当前模型。
 
 ## CLI 实现逻辑
 
-CLI 的 `ai asr start`、`ai asr stream-file`、`ai voice listen` 保留并强调 `--model` 参数。离线 ASR 服务状态写入 `owner_module=cli`，状态输出显示 `owner_module` 和 `owner_id`；实时 voice listen 的 WebSocket URL 也显式携带 `owner_module=cli`，便于用户判断是否与 WebUI 或 Directory Task 冲突。
+CLI 的 `ai asr start`、`ai asr stream-file`、`ai voice listen` 保留并强调 `--model` 参数。离线 ASR 服务状态写入 `owner_module=bifrost_cli`（见 `crates/bifrost-asr/src/runtime.rs` 中默认填充），状态输出显示 `owner_module` 和 `owner_id`；实时 voice listen 的 WebSocket URL 也显式携带 `owner_module=bifrost_cli`，便于用户判断是否与 WebUI 或 Directory Task 冲突。
 
 ## 测试方案
 
 ### 单元测试
 
-- `target_from_query_parses_owner_for_workbench`：验证 owner 参数被正确解析。
-- `same_owner_requires_matching_owner_id`：验证同模型不同模块/任务不会互相复用租约。
-- `status_reads_legacy_service_state_without_owner`：验证旧版 `service.json` 反序列化时 owner 默认兼容。
+- `qwen3_default_owner_is_model_management`（`crates/bifrost-admin/src/handlers/asr.rs`）：验证未携带 owner 参数时默认归属 `model_management`。
+- `qwen3_service_runtime_is_shared_across_modules_for_same_model` / `qwen3_service_runtime_is_shared_across_owner_ids_for_same_model`：验证同模型可被不同 owner 复用，但 `same_service_owner` 仍按 owner 隔离停止权限。
+- `qwen3_resolved_state_preserves_owner_and_port` / `qwen3_owner_agnostic_status_reuses_matching_port`：验证 `with_state` 后 owner、port 与持久化状态保持一致。
+- `lease_owner_module_prefers_owner_module_and_maps_webui`（`crates/bifrost-asr/src/runtime.rs`）：验证旧版 `service.json`（仅有 `managed_by`）反序列化时 owner 映射兼容。
 - CLI 状态测试验证输出包含 `owner_module`。
 
 ### E2E 测试

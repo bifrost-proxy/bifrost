@@ -33,8 +33,8 @@ Audio source
   - 默认 diarization profile 为 `sherpa-onnx-balanced`。
 - `crates/bifrost-admin/src/handlers/asr_jobs/runner.rs`
   - Directory Task 已在 normalize 后进入转写流程。
-  - 开启 diarization 时，已存在 `transcribe_diarized_segments_for_task()` 草稿路径。
-  - 当前实现倾向于直接把 sherpa 输出的 speaker segment 切成短 WAV 后送入 Qwen3-ASR。
+  - 开启 diarization 时，`transcribe_diarized_segments_for_task()` 已是正式路径：先调 `run_sherpa_diarization`，再用 `plan_asr_units(&diarization_segments, &AsrUnitPlannerConfig::default())` 规划 ASR unit，最后逐 unit 切 WAV 送入 Qwen3-ASR `run_chunk_with_strategy`。
+  - `bifrost-asr` 已提供 `plan_asr_units` / `AsrUnitPlannerConfig` / `SpeechPipelineProfile` / `builtin_speech_pipeline_profiles` 等抽象，本方案的多层编排已部分落地。
 - `crates/bifrost-admin/src/handlers/asr_jobs_timeline.rs`
   - `TimelineSegment` 已有 `speaker`、`speaker_display_name`、`overlap`。
   - `TranscriptTimeline` 已有 `diarization_profile` 和 `speakers`。
@@ -477,28 +477,30 @@ diarization segments
 
 ### Admin API
 
-新增或扩展 API：
+新增或扩展 API（标注 shipped vs planned，as of 2026-06-16）：
 
 ```http
-GET    /_bifrost/api/asr/speaker-profiles
-POST   /_bifrost/api/asr/speaker-profiles
-GET    /_bifrost/api/asr/speaker-profiles/{profile_id}
-PATCH  /_bifrost/api/asr/speaker-profiles/{profile_id}
-DELETE /_bifrost/api/asr/speaker-profiles/{profile_id}
-POST   /_bifrost/api/asr/speaker-profiles/identify
+# shipped
+GET    /api/asr/speaker-profiles
+POST   /api/asr/speaker-profiles
+GET    /api/asr/speaker-profiles/{profile_id}
+PATCH  /api/asr/speaker-profiles/{profile_id}
+DELETE /api/asr/speaker-profiles/{profile_id}
+POST   /api/asr/speaker-profiles/identify
+POST   /api/asr/speaker-profiles/enrollment-sessions
+GET    /api/asr/speaker-profiles/enrollment-sessions/{session_id}
+POST   /api/asr/speaker-profiles/enrollment-sessions/{session_id}/audio    # HTTP POST chunk
+POST   /api/asr/speaker-profiles/enrollment-sessions/{session_id}/verify
+POST   /api/asr/speaker-profiles/enrollment-sessions/{session_id}/finish
 
-POST   /_bifrost/api/asr/speaker-profiles/enroll-from-task-speaker
-POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions
-GET    /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}
-WS     /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}/audio-ws
-POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}/verify
-POST   /_bifrost/api/asr/speaker-profiles/enrollment-sessions/{session_id}/finish
-POST   /_bifrost/api/asr/speaker-profiles/import-audio
-POST   /_bifrost/api/asr/speaker-profiles/{profile_id}/samples
-DELETE /_bifrost/api/asr/speaker-profiles/{profile_id}/samples/{sample_id}
-
-POST   /_bifrost/api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
-DELETE /_bifrost/api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
+# planned, not yet shipped as of 2026-06-16
+POST   /api/asr/speaker-profiles/enroll-from-task-speaker
+WS     /api/asr/speaker-profiles/enrollment-sessions/{session_id}/audio-ws
+POST   /api/asr/speaker-profiles/import-audio
+POST   /api/asr/speaker-profiles/{profile_id}/samples
+DELETE /api/asr/speaker-profiles/{profile_id}/samples/{sample_id}
+POST   /api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
+DELETE /api/asr/tasks/{task_id}/files/{file_key}/speakers/{speaker_id}/match-profile
 ```
 
 `enrollment-sessions` 请求：
@@ -763,13 +765,15 @@ SpeechEngineRegistry {
 }
 ```
 
-Admin API：
+Admin API（部分已落地，部分 planned, not yet shipped as of 2026-06-16）：
 
 ```text
-GET /api/asr/speech-pipelines
-GET /api/asr/speech-pipelines/status
-POST /api/asr/speech-pipelines/{id}/init-stream
-PATCH /api/asr/config/default-pipeline
+GET /api/speech/pipelines              # shipped (builtin_speech_pipeline_profiles)
+GET /api/speech/pipelines/status       # shipped (profiles + runtime + resources)
+GET /api/speech/decision                # shipped (resolve_engine_decision)
+GET /api/speech/resources               # shipped
+POST /api/speech/pipelines/{id}/init-stream   # planned
+PATCH /api/speech/config/default-pipeline     # planned
 ```
 
 Directory Task：
@@ -822,22 +826,29 @@ SpeechCapability:
 
 ### CLI
 
-保留已有方向：
+已落地：
 
 ```text
 bifrost ai asr diarization profiles
 bifrost ai asr diarization status
 bifrost ai asr diarization init
+bifrost ai asr diarization speakers list [--json]
+bifrost ai asr diarization speakers show <profile-id> [--json]
+bifrost ai asr diarization speakers enroll-live --name <name> [--profile <id>] [--phrase-seconds N] [--device :0]
 ```
 
-后续声纹身份识别阶段扩展：
+后续声纹身份识别阶段扩展（planned, not yet shipped as of 2026-06-16）：
 
 ```text
-bifrost ai asr diarization speakers list
-bifrost ai asr diarization speakers enroll --task <task> --file <file> --speaker speaker_00 --name "Eden"
+bifrost ai asr diarization speakers rename <profile-id> --name "Eden"
+bifrost ai asr diarization speakers delete <profile-id> --yes
+bifrost ai asr diarization speakers enroll-from-task-speaker --task <task> --file <file> --speaker speaker_00 --name "Eden" --confirm
+bifrost ai asr diarization speakers import-audio ./eden.wav --name "Eden" --confirm
+bifrost ai asr diarization speakers match --task <task> --file <file> --speaker speaker_00 --profile spk_eden
+bifrost ai asr diarization speakers unmatch --task <task> --file <file> --speaker speaker_00
 ```
 
-后续扩展：
+后续 pipeline 入口（planned, not yet shipped as of 2026-06-16）：
 
 ```text
 bifrost ai asr pipelines list
