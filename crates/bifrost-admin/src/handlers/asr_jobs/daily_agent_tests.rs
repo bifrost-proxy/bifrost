@@ -514,12 +514,25 @@ fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
     )
     .is_ok());
     assert!(validate_chatgpt_web_daily_report_response(
+        "ChatGPT 说：# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+            .repeat(20)
+            .as_str(),
+        "2026-06-15"
+    )
+    .is_ok());
+    assert!(validate_chatgpt_web_daily_report_response(
         "ChatGPT 说：用户的消息为空，但上传的文件包含生成报告的完整说明。",
         "2026-06-15"
     )
     .is_err());
     assert!(validate_chatgpt_web_daily_report_response("ChatGPT 说：正在思考", "2026-06-15")
         .is_err());
+    assert!(validate_chatgpt_web_daily_report_response(
+        &"我会直接生成完整日报正文，并包含 # 2026-06-15 日报、## 今日概览 和 ## 证据与不确定性。"
+            .repeat(20),
+        "2026-06-15"
+    )
+    .is_err());
 }
 
 #[test]

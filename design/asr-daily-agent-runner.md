@@ -459,19 +459,17 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 
 #### ChatGPT Web（不可读本地文件）
 
-**首次**（conversation 未初始化）：
-- 消息 1：`AGENTS.md` 全文 + 规则说明
-- 消息 2：change plan 中需处理的内容 + 输出要求
+每个 Daily Agent 文档运行都使用独立新对话，避免长期复用同一个 ChatGPT Web conversation 后，页面扫描最终输出成本随历史消息增长而升高，导致 ChatGPT 已完成但 Bifrost 未取回最终正文。
 
-**后续**（conversation 已初始化）：
-- 只发 change plan 中 `new_file/appended/rewritten/force` 的内容
-- 不重发 `AGENTS.md`
+**每次运行**：
+- 发送 `AGENTS.md` 全文、专有名词、change plan 中需处理的内容和输出要求
+- 清理默认 session key 对应的旧 conversation 映射，本次请求不携带 `session_key`，避免 adapter 从兼容 session map 恢复旧对话
 - `unchanged` 不发送
 
 **Conversation 管理**：
-- 默认 `session_key = asr-daily:<task_id>`（任务级长期会话）
-- 修改 `AGENTS.md` 后不自动重发，UI 提醒用户手动 reset
-- Conversation 重置条件：用户手动 reset / 修改 session_key / 后端检测 404
+- Codex 等可恢复线程的 runner 继续复用 `threadId`
+- ChatGPT Web Daily Agent 成功后只记录 adapter/session 状态，不持久化 `conversation_id`
+- 如果 ChatGPT Web 返回占位文本、计划说明、过短片段或缺少 `# YYYY-MM-DD 日报` / `## 今日概览` / `## 证据与不确定性`，不写 report；若 metadata 含 `conversationId`，在同一个新对话内追加一次明确“立即输出完整日报正文”的纠偏重试
 
 ### 5.6 IM 发送
 
@@ -889,7 +887,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
      │              │                  │                   │               │             │
 ```
 
-### 13.2 ChatGPT Web 首次 + 后续投递
+### 13.2 ChatGPT Web 独立对话投递与结果门禁
 
 ```
 ┌────────────┐  ┌──────────────┐  ┌─────────────────┐  ┌──────────────┐
@@ -898,28 +896,24 @@ build_daily_agent_change_plan(task, trigger, date, force)
 └─────┬──────┘  └──────┬───────┘  └────────┬────────┘  └──────┬───────┘
       │                │                    │                   │
       │─check state───▶│                    │                   │
-      │◀─not_initialized                    │                   │
+      │◀─adapter status  │                   │                   │
       │                │                    │                   │
-      │─[首次: 2 条消息]─────────────────── ▶│                  │
-      │                │                    │─msg1: AGENTS.md──▶│
+      │─clear session conversation─────────▶│                   │
       │                │                    │                   │
-      │                │                    │─msg2: daily text──▶│
+      │─[new chat: full prompt]────────────▶│                   │
+      │                │                    │─msg: AGENTS+daily▶│
       │                │                    │◀─response─────────│
-      │◀─result + conv_ref─────────────────│                   │
+      │◀─result + metadata─────────────────│                   │
       │                │                    │                   │
-      │─persist state─▶│                    │                   │
-      │─write report   │                    │                   │
+      │─validate final report heading/sections                  │
       │                │                    │                   │
-      ╠═══════════════ 次日 ════════════════════════════════════╣
+      ╠════ if response is placeholder / plan / short prefix ═══╣
       │                │                    │                   │
-      │─check state───▶│                    │                   │
-      │◀─initialized   │                    │                   │
-      │                │                    │                   │
-      │─[后续: 1 条消息]─────────────────── ▶│                  │
-      │                │                    │─msg: tail only───▶│
-      │                │                    │  (不重发AGENTS.md) │
+      │─retry with metadata.conversationId─────────────────────▶│
+      │                │                    │─msg: final only──▶│
       │                │                    │◀─response─────────│
       │◀─result────────────────────────────│                   │
+      │─validate + write report + processed state               │
       │                │                    │                   │
 ```
 
@@ -1173,8 +1167,10 @@ build_daily_agent_change_plan(task, trigger, date, force)
 
 3. **ChatGPT Web 大输入投递**：ChatGPT Web composer 超过 120 字符时必须走浏览器原生剪贴板 + 原生粘贴快捷键路径，避免把完整正文嵌入 `Input.insertText` 导致 CDP 卡死；不要再按固定字符数人为分片。该路径通过 CDP 写入当前浏览器上下文的 `navigator.clipboard`，再触发 `Meta+V` / `Ctrl+V`，不依赖系统剪贴板或用户授权弹窗。粘贴大文本后 ChatGPT 可能把内容上传为文件，此时输入框没有可采样正文是正常状态；adapter 不再对 composer 文本做 head/tail/长度采样校验，只轮询发送按钮是否变为可发送状态，按钮可用后立即继续；超时时间只是最大上限，用于覆盖长文档上传/解析耗时。
 
-4. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
+4. **ChatGPT Web 最终输出读取**：DOM fallback 不能把 `正在思考`、`正在打草稿`、`最后微调一下` 等状态文本当最终正文；stop/cancel selector 只匹配真正的生成停止按钮，避免侧边栏“取消置顶”等普通按钮导致等待误判；DOM 候选结果还必须在短文本 8 秒、长文本 3 秒内长度稳定后才返回，减少只读到流式短前缀的概率。
 
-5. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
+5. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
 
-6. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。
+6. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
+
+7. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。

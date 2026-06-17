@@ -858,15 +858,21 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
             "chatgpt_web daily report response missing target date {date}"
         ));
     }
-    if !trimmed.contains("今日概览") || !trimmed.contains("证据与不确定性") {
-        return Err(format!(
-            "chatgpt_web daily report response missing required report sections for {date}"
-        ));
-    }
     let normalized = trimmed
         .trim_start_matches("ChatGPT 说")
         .trim_start_matches([':', '：'])
         .trim();
+    let expected_heading = format!("# {date} 日报");
+    if !normalized.starts_with(&expected_heading) {
+        return Err(format!(
+            "chatgpt_web daily report response missing leading report heading {expected_heading}"
+        ));
+    }
+    if !normalized.contains("今日概览") || !normalized.contains("证据与不确定性") {
+        return Err(format!(
+            "chatgpt_web daily report response missing required report sections for {date}"
+        ));
+    }
     if normalized.starts_with("用户的消息为空")
         || normalized.contains("上传的文件包含")
         || normalized == "正在思考"
@@ -1014,11 +1020,6 @@ async fn run_external_daily_agent_prompt(
     conversation_state: &AsrDailyAgentConversationState,
     effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
 ) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
-    let operation = match effective.settings.adapter.as_str() {
-        "codex" => "run".to_string(),
-        _ => "send".to_string(),
-    };
-
     let params = daily_agent_external_runner_params(
         effective.settings.adapter.as_str(),
         conversation_state,
@@ -1028,6 +1029,31 @@ async fn run_external_daily_agent_prompt(
         None
     } else {
         Some(session_key.to_string())
+    };
+    run_external_daily_agent_prompt_with_params(
+        task,
+        runner_id,
+        prompt,
+        daily_dir,
+        request_session_key,
+        params,
+        effective,
+    )
+    .await
+}
+
+async fn run_external_daily_agent_prompt_with_params(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    prompt: String,
+    daily_dir: &Path,
+    request_session_key: Option<String>,
+    params: serde_json::Value,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
+    let operation = match effective.settings.adapter.as_str() {
+        "codex" => "run".to_string(),
+        _ => "send".to_string(),
     };
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
@@ -1204,12 +1230,45 @@ async fn run_daily_agent_inner(
                     if response.is_empty() {
                         continue;
                     }
-                    validate_chatgpt_web_daily_report_response(response, &entry.date)?;
+                    let response = match validate_chatgpt_web_daily_report_response(response, &entry.date) {
+                        Ok(()) => response.to_string(),
+                        Err(first_error) => {
+                            let Some(conversation_id) =
+                                metadata_value(&run_result.metadata, &["conversationId", "conversation_id"])
+                            else {
+                                return Err(first_error);
+                            };
+                            tracing::warn!(
+                                date = %entry.date,
+                                conversation_id = %conversation_id,
+                                error = %first_error,
+                                "chatgpt_web daily report response failed validation; retrying with explicit final-output instruction"
+                            );
+                            let retry_prompt = format!(
+                                "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装。",
+                                date = entry.date
+                            );
+                            let retry_result = run_external_daily_agent_prompt_with_params(
+                                task,
+                                &runner_id,
+                                retry_prompt,
+                                &agent_work_dir,
+                                None,
+                                serde_json::json!({ "conversationId": conversation_id }),
+                                &effective,
+                            )
+                            .await?;
+                            last_metadata = Some(retry_result.metadata.clone());
+                            let retry_response = retry_result.response.trim();
+                            validate_chatgpt_web_daily_report_response(retry_response, &entry.date)?;
+                            retry_response.to_string()
+                        }
+                    };
                     let report_path = PathBuf::from(&entry.report_target);
                     if let Some(parent) = report_path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    if let Err(e) = std::fs::write(&report_path, response) {
+                    if let Err(e) = std::fs::write(&report_path, &response) {
                         tracing::warn!(
                             report_path = %report_path.display(),
                             error = %e,

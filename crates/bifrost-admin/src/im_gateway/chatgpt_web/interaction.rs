@@ -311,6 +311,7 @@ pub(super) async fn wait_final(
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
+    let mut ready_candidate: Option<(usize, tokio::time::Instant)> = None;
 
     while tokio::time::Instant::now() < deadline {
         if stop_requested(stop_marker_path).await {
@@ -338,7 +339,6 @@ pub(super) async fn wait_final(
 
         match dom_outcome {
             DomExtractOutcome::Ready(waited) => {
-                // Stop button gone = generation complete. Extract and return immediately.
                 let dom_text_len = waited
                     .final_message
                     .get("text")
@@ -351,6 +351,31 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
+                let required_stable_for = if dom_text_len < 512 {
+                    std::time::Duration::from_secs(8)
+                } else {
+                    std::time::Duration::from_secs(3)
+                };
+                let now = tokio::time::Instant::now();
+                let stable_since = match ready_candidate {
+                    Some((previous_len, since)) if previous_len == dom_text_len => since,
+                    _ => {
+                        ready_candidate = Some((dom_text_len, now));
+                        now
+                    }
+                };
+                if now.duration_since(stable_since) < required_stable_for {
+                    tracing::info!(
+                        conversation_id,
+                        dom_text_len,
+                        dom_image_count,
+                        stable_for_ms = now.duration_since(stable_since).as_millis(),
+                        required_stable_ms = required_stable_for.as_millis(),
+                        "chatgpt_web wait_final: DOM content candidate waiting for stability"
+                    );
+                    sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
 
                 tracing::info!(
                     conversation_id,
@@ -365,6 +390,7 @@ pub(super) async fn wait_final(
                 image_count,
                 reason,
             } => {
+                ready_candidate = None;
                 // Still generating — just log and wait.
                 // TODO: future enhancement — check if content is long enough for partial/batch output
                 tracing::info!(
@@ -377,6 +403,7 @@ pub(super) async fn wait_final(
                 );
             }
             DomExtractOutcome::NotFound => {
+                ready_candidate = None;
                 tracing::debug!(
                     conversation_id,
                     "chatgpt_web wait_final: no content found yet"
