@@ -6,8 +6,9 @@ Sync API 负责把本机 Bifrost 的规则与远端同步服务绑定。原有 `
 
 ## Token 直登方案
 
-- CLI 支持 `bifrost sync login --token <token>`，用于 CI、沙箱或无浏览器环境。
-- CLI 继续支持 `bifrost sync login --token <token> --url <remote-url>`，显式覆盖远端同步服务地址。
+- CLI 支持 `bifrost login` 作为一级登录命令，语义等价于 `bifrost sync login`。
+- CLI 支持 `bifrost login --token <token>` / `bifrost sync login --token <token>`，用于 CI、沙箱或无浏览器环境。
+- CLI 继续支持 `bifrost login --token <token> --url <remote-url>` / `bifrost sync login --token <token> --url <remote-url>`，显式覆盖远端同步服务地址。
 - 只提供 `--token` 时，Admin API 使用当前同步配置中的 `remote_base_url`；新安装默认值为内置 Bifrost Provider `https://bifrost.bytedance.net`。
 - 无参数时保持原有打开浏览器登录行为。
 - 只提供 `--url` 仍返回错误，避免误以为完成登录。
@@ -52,14 +53,21 @@ Sync API 负责把本机 Bifrost 的规则与远端同步服务绑定。原有 `
   - `save_login_session_updates_remote_url_and_token` 验证 token 与 URL 会落入状态和配置，且启用 auto sync。
   - `save_login_session_rejects_empty_or_invalid_input` 验证空 token 和非法 URL 被拒绝。
   - `startup_login_preflight_*` 系列验证无 token 时最多 3 次探测、可达时只自动打开一次、不可达不弹、已有 token 不探测、已经自动弹过后跨重启不再弹，以及 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 禁用自动弹窗。
-  - `sync_login_direct_options_parse` 验证 CLI `--token`、`--token/--url` 参数解析与 help 输出中的 token 获取地址。
+  - `sync_login_direct_options_parse` 验证 CLI `--token`、`--token/--url` 参数解析、缺少 token 值时进入业务校验，以及 help 输出中的 token 获取地址。
+  - `top_level_login_options_parse_like_sync_login` 验证一级 `bifrost login` 的 help、`--token`、缺少 token 值、`--token/--url` 参数解析与 `bifrost sync login` 保持一致。
+  - `sync_token_login_url_*` 验证缺少 token 值时默认使用 `https://bifrost.bytedance.net/v4/sso/token-login`，显式自定义 relay URL 时拼接 `<relay>/v4/sso/token-login` 且不会出现双斜杠。
 - E2E 测试：
+  - `e2e-tests/tests/test_sync_login_direct_e2e.sh` 验证 `bifrost sync login --token` 缺少 token 值时返回明确错误，并展示默认 token 获取地址。
+  - 同一脚本验证 `bifrost sync login --token --url <mock-url>` 缺少 token 值时展示自定义 relay 的 token 获取地址。
+  - 同一脚本验证一级 `bifrost login` 的 help、缺少 token 默认/自定义 token 获取地址，以及显式 token+URL 登录成功路径与 `bifrost sync login` 等价。
   - `e2e-tests/tests/test_sync_login_direct_e2e.sh` 启动隔离数据目录、动态端口 Bifrost 与本地 mock sync server，执行 `bifrost sync login --token ci-token-default` 验证省略 `--url` 使用内置默认 Provider。
   - 同一脚本先将 sync config 指向 mock server，再执行 `bifrost sync login --token ci-token`，验证 token-only 走当前配置且最终授权成功。
   - 同一脚本保留 `bifrost sync login --token ci-token --url <mock-url>` 显式 URL 回归，并验证 API token-only payload 成功、URL-only payload 返回 400。
   - `e2e-tests/tests/test_sync_startup_login_preflight_e2e.sh` 使用隔离数据目录和 mock sync server，验证启动无 token 时可达才自动打开登录页一次、重启后不再自动打开，且 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 时不自动打开。
 - 真实场景测试：
   - 更新 `human_tests/api-sync.md`，新增 CI/沙箱 token-only 默认 URL、token+url 直登和 URL-only 错误用例。
+  - 更新 `human_tests/api-sync.md`，新增 `bifrost sync login --token` 缺少 token 值时的默认 token 获取地址与自定义 relay 地址回归用例。
+  - 更新 `human_tests/api-sync.md`，新增一级 `bifrost login` 与 `bifrost sync login` 等价的真实 CLI 用例。
   - 更新 `human_tests/api-sync.md`，新增启动登录预检用例，覆盖无 token、可达自动弹一次、持久化后重启不重复弹、不可达不弹，以及调试环境变量禁用自动弹窗。
   - 更新 `human_tests/readme.md` 索引后，按新增用例真实执行。
 

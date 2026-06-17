@@ -1,4 +1,6 @@
+use std::fs::OpenOptions;
 use std::process::{Command, Stdio};
+use std::thread;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -312,8 +314,8 @@ fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
         .arg("--source")
         .arg("admin")
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(upgrade_log_stdio())
+        .stderr(upgrade_log_stdio());
 
     #[cfg(unix)]
     {
@@ -326,15 +328,41 @@ fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
         command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
     }
 
-    let child = command.spawn()?;
+    let mut child = command.spawn()?;
+    let child_pid = child.id();
     tracing::info!(
         target: "bifrost_admin::system",
-        child_pid = child.id(),
+        child_pid,
         program = %program.display(),
         target_version = target_version.unwrap_or("latest"),
         "spawned background self-update subprocess"
     );
+    thread::spawn(move || match child.wait() {
+        Ok(status) => tracing::info!(
+            target: "bifrost_admin::system",
+            child_pid,
+            status = %status,
+            "background self-update subprocess exited"
+        ),
+        Err(error) => tracing::warn!(
+            target: "bifrost_admin::system",
+            child_pid,
+            error = %error,
+            "failed to reap background self-update subprocess"
+        ),
+    });
     Ok(())
+}
+
+fn upgrade_log_stdio() -> Stdio {
+    let log_dir = data_dir().join("logs");
+    if std::fs::create_dir_all(&log_dir).is_ok() {
+        let log_path = log_dir.join("upgrade-background.log");
+        if let Ok(file) = OpenOptions::new().create(true).append(true).open(log_path) {
+            return Stdio::from(file);
+        }
+    }
+    Stdio::null()
 }
 
 #[cfg(test)]

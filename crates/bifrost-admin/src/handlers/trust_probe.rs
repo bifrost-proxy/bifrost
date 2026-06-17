@@ -2400,13 +2400,33 @@ function randomSuffix() {{
 }}
 function setHtmlIfChanged(id, html) {{
   const element = document.getElementById(id);
-  if (!element || element.innerHTML === html) return;
+  if (!element) return false;
+  if (element.dataset.bifrostHtml === html || element.innerHTML === html) return false;
   element.innerHTML = html;
+  element.dataset.bifrostHtml = html;
+  return true;
 }}
 function show(html) {{ setHtmlIfChanged("result", html); }}
 function showNext(html) {{ setHtmlIfChanged("next", html); }}
 function showProxyAccess(html) {{ setHtmlIfChanged("proxy-access", html); }}
 function showProxyConfiguration(html) {{ setHtmlIfChanged("proxy-configuration", html); }}
+function setTextIfChanged(element, text) {{
+  if (element && element.textContent !== text) element.textContent = text;
+}}
+function setClassPresentIfChanged(element, className, present) {{
+  if (!element) return;
+  const hasClass = element.classList.contains(className);
+  if (present && !hasClass) element.classList.add(className);
+  if (!present && hasClass) element.classList.remove(className);
+}}
+function setHrefIfChanged(link, href) {{
+  if (!link) return;
+  if (href) {{
+    if (link.getAttribute("href") !== href) link.setAttribute("href", href);
+  }} else if (link.hasAttribute("href")) {{
+    link.removeAttribute("href");
+  }}
+}}
 function currentPageHost() {{
   try {{
     return window.location && window.location.hostname ? window.location.hostname : "";
@@ -2439,9 +2459,12 @@ function isIosDevice() {{
 function setIosProxySetupVisible(visible) {{
   const target = document.getElementById("ios-wifi-proxy-tools");
   if (!target) return;
-  target.hidden = !visible;
-  target.classList.toggle("hidden", !visible);
-  if (!visible) target.innerHTML = "";
+  if (target.hidden !== !visible) target.hidden = !visible;
+  setClassPresentIfChanged(target, "hidden", !visible);
+  if (!visible && target.innerHTML) {{
+    target.innerHTML = "";
+    delete target.dataset.bifrostHtml;
+  }}
 }}
 function shouldShowIosProxySetup() {{
   return isIosDevice() && !window.__BIFROST_TRUST_PROBE__.proxyConfigured;
@@ -2655,22 +2678,22 @@ function updateIosWifiProxyProfileLink() {{
   if (!link || !hint) return;
   const url = buildIosWifiProxyProfileUrl();
   if (!url) {{
-    link.removeAttribute("href");
-    link.classList.add("button-disabled");
-    hint.textContent = cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID. Use manual Wi-Fi proxy setup for now.";
+    setHrefIfChanged(link, "");
+    setClassPresentIfChanged(link, "button-disabled", true);
+    setTextIfChanged(hint, cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID. Use manual Wi-Fi proxy setup for now.");
     return;
   }}
   const risk = document.getElementById("ios-wifi-managed-risk");
   if (risk) cfg.managedWifiRiskAccepted = !!risk.checked;
   if (!risk || !risk.checked) {{
-    link.removeAttribute("href");
-    link.classList.add("button-disabled");
-    hint.textContent = "Confirm the managed Wi-Fi removal risk before downloading this experimental profile.";
+    setHrefIfChanged(link, "");
+    setClassPresentIfChanged(link, "button-disabled", true);
+    setTextIfChanged(hint, "Confirm the managed Wi-Fi removal risk before downloading this experimental profile.");
     return;
   }}
-  link.href = url;
-  link.classList.remove("button-disabled");
-  hint.textContent = "This profile configures Wi-Fi proxy " + targetProxyAddress() + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".";
+  setHrefIfChanged(link, url);
+  setClassPresentIfChanged(link, "button-disabled", false);
+  setTextIfChanged(hint, "This profile configures Wi-Fi proxy " + targetProxyAddress() + " for Wi-Fi \"" + window.__BIFROST_TRUST_PROBE__.suggestedWifiSsid + "\".");
 }}
 function renderIosWifiProxyTools() {{
   const cfg = window.__BIFROST_TRUST_PROBE__;
@@ -2686,7 +2709,7 @@ function renderIosWifiProxyTools() {{
   const ssidHtml = ssid ? "<p>Wi-Fi name for this check: <code>" + escapeText(ssid) + "</code></p>" : "<p><span class='warn'>" + escapeText(cfg.suggestedWifiSsidMessage || "Bifrost could not detect this Mac's current Wi-Fi SSID.") + "</span></p>";
   const proxyHost = effectiveProxyHost();
   const proxyAddress = targetProxyAddress();
-  target.innerHTML =
+  const html =
     "<h2>iOS Proxy Setup</h2>" +
     "<p><strong>Recommended:</strong> set the proxy manually in Settings &gt; Wi-Fi &gt; current network &gt; Configure Proxy &gt; Manual. Set Server to <code>" +
     escapeText(proxyHost) +
@@ -2705,6 +2728,7 @@ function renderIosWifiProxyTools() {{
     "<p><a id='ios-wifi-proxy-profile-link' class='button button-disabled'>Download Experimental Wi-Fi Proxy Profile</a></p>" +
     "<small id='ios-wifi-proxy-profile-hint'>Preparing Wi-Fi proxy profile link...</small>" +
     "<p><small>If iOS installs the profile but the proxy does not take effect, disconnect and reconnect Wi-Fi, then run this Availability Check again. If you later remove the profile and Wi-Fi disappears, reconnect to the Wi-Fi network manually.</small></p>";
+  setHtmlIfChanged("ios-wifi-proxy-tools", html);
   updateIosWifiProxyProfileLink();
 }}
 async function submitWifiSsid() {{
@@ -3192,6 +3216,27 @@ mod tests {
         let html = render_landing_page(&session, "token");
 
         assert!(html.contains("\"proxyConfigured\":true"));
+    }
+
+    #[test]
+    fn landing_page_uses_stable_dom_updates_for_polling_sections() {
+        let session = test_session(Uuid::new_v4(), "token", Utc::now());
+        let html = render_landing_page(&session, "token");
+
+        assert!(html.contains("element.dataset.bifrostHtml === html"));
+        assert!(html.contains("element.dataset.bifrostHtml = html;"));
+        assert!(html.contains("return true;"));
+        assert!(html.contains("function setTextIfChanged(element, text)"));
+        assert!(html.contains("function setClassPresentIfChanged(element, className, present)"));
+        assert!(html.contains("function setHrefIfChanged(link, href)"));
+        assert!(html.contains("if (target.hidden !== !visible) target.hidden = !visible;"));
+        assert!(html.contains("delete target.dataset.bifrostHtml;"));
+        assert!(html.contains("setHtmlIfChanged(\"ios-wifi-proxy-tools\", html);"));
+        assert!(html.contains("setTextIfChanged(hint,"));
+        assert!(html.contains("setClassPresentIfChanged(link, \"button-disabled\", true);"));
+        assert!(html.contains("setHrefIfChanged(link, url);"));
+        assert!(!html.contains("target.innerHTML =\n    \"<h2>iOS Proxy Setup</h2>\""));
+        assert!(!html.contains("hint.textContent = \"Confirm the managed Wi-Fi removal risk"));
     }
 
     #[test]

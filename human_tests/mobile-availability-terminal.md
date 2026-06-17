@@ -18,6 +18,7 @@
 - 最近活跃设备的 `network`、`certificate`、`proxy access`、`proxy config` 必须只表示该设备自己的检测结果；不能因为同一个 trust-probe session 内其它浏览器或设备状态已通过，就把当前设备显示为同样通过。
 - 最近活跃设备的设备类型必须优先从 `platformHint` 和 User-Agent 推断，覆盖主流 OS、浏览器和应用容器；不要在能从 UA 识别出信息时显示 `unknown`。
 - WebView `Connected devices` 和终端 `Recent devices` 的设备顺序必须稳定，按设备 IP 排序，不按最近活跃时间排序，避免心跳上报时列表上下抖动。
+- 手机公开 Availability Check 页在未安装或未信任 CA 时可以每秒重试探测，但证书失败提示、下载按钮、下一步说明和 iOS Proxy Setup 工具区必须保持 DOM 稳定，不能在窄屏手机上反复闪烁或错位。
 - 终端在 Access Control pending 时直接提供 `Yes: y | No: n` 审批入口；Web UI 已审批的客户端不再在终端保持 pending。
 - Access Control pending 期间终端面板暂停同一 pending 列表的自动重绘，避免用户输入 `y`/`n` 时被定时刷新擦掉。
 - 同一台移动设备刷新同一个检查页面时，只更新最近活跃时间和状态，不新增 `ios (2)` 这类重复设备。
@@ -266,6 +267,25 @@
 - 退出输出包含 `Bifrost proxy stopped.`。
 - 测试脚本在 CI 中复用外层预构建的 `BIFROST_BIN`，不重新编译 debug binary，也不使用固定端口。
 
+### TC-MAT-17：手机公开页证书未信任状态窄屏不闪烁
+
+**操作步骤**：
+1. 使用临时数据目录启动 Bifrost，禁用系统代理、Sync 自动登录弹窗和托盘：
+   ```bash
+   BIFROST_DATA_DIR=/tmp/bifrost-human-tp-stability/data \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   ./target/debug/bifrost start --host 127.0.0.1 -p 55306 --unsafe-ssl --skip-cert-check --no-system-proxy
+   ```
+2. 使用 iPhone 宽度浏览器打开 `http://127.0.0.1:55306/_bifrost/tp`，但不要把本次临时 CA 安装到浏览器或系统信任链。
+3. 等待至少 5 秒，观察证书状态区域、`Download Bifrost CA` 按钮、下一步说明和 iOS Proxy Setup 区域。
+4. 记录 `#result`、`#next`、`#ios-wifi-proxy-tools` 的 DOM mutation 次数或用肉眼确认页面是否稳定。
+
+**预期结果**：
+- 页面先展示 `Browser HTTPS probe failed` 和 `Download Bifrost CA`。
+- 后续每秒轮询不会把相同证书失败提示、下载按钮、下一步说明或 iOS Proxy Setup 工具区反复替换。
+- 窄屏下按钮和状态信息不闪烁、不错位，页面高度不因相同内容重复写入而跳动。
+
 ## 清理步骤
 
 1. 在启动终端按 `Ctrl+C` 停止服务。
@@ -291,3 +311,4 @@
 | 2026-06-11 | TC-MAT-13 probe listener 端口探测并发稳定性 | 本地 `cargo test --workspace --all-features` 首次并发执行时暴露 `probe_server_port_listening_probe_tracks_local_tcp_listener` 的负路径端口复用竞态；将负路径改为不可监听的 TCP 端口 `0` 后执行 `cargo test -p bifrost-admin handlers::trust_probe::tests::probe_server_port_listening_probe_tracks_local_tcp_listener -- --nocapture`，目标单测通过 | 通过 |
 | 2026-06-11 | TC-MAT-16 Linux CI 分片端口与 PTY EOF 回归 | 针对 PR CI run `27301482558` 的 Linux shard 1 失败补充验证：失败日志显示 `test_cli_foreground_ctrlc_no_enter.sh` 在并发 shell suite 中 1 秒内以 `OSError: [Errno 5] Input/output error` 退出，脚本当时未使用 harness 分配的 `ADMIN_PORT=18063`。修复后执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，脚本复用 harness 端口并将 Linux PTY `EIO` 视为 EOF，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
 | 2026-06-11 | TC-MAT-16 Linux CI release 参数兼容回归 | 针对 PR CI run `27303611971` 的 Linux shard 1 失败补充验证：失败日志显示预构建 release binary 对 `bifrost start --no-tray` 返回 `unexpected argument '--no-tray' found`。修复后移除 CLI flag，改用环境变量 `BIFROST_DISABLE_TRAY=1` 禁用 tray；执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
+| 2026-06-17 | TC-MAT-17 手机公开页证书未信任状态窄屏不闪烁 | 执行 `cargo build --bin bifrost` 后，使用临时数据目录 `/tmp/bifrost-trust-probe-live-55306/data` 启动 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 ./target/debug/bifrost start --host 127.0.0.1 -p 55306 --unsafe-ssl --skip-cert-check --no-system-proxy`。用 Playwright iPhone 12 / 360px 宽度打开 `http://127.0.0.1:55306/_bifrost/tp`，未安装临时 CA，等待 5.2 秒并监听 `#result`、`#next`、`#ios-wifi-proxy-tools`、`#proxy-configuration` mutation。修复前复现到 `#ios-wifi-proxy-tools` 每秒 mutation，`#next` 每秒 mutation；修复后 mutation 只发生在初始状态推进：`#result` 到 `Browser HTTPS probe failed. Download Bifrost CA`，`#next` 到 iOS 证书信任步骤，`#proxy-configuration` 到未配置代理提示；之后 5 秒无周期性 DOM 替换，按钮和状态信息不再闪烁 | 通过 |

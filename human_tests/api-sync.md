@@ -660,6 +660,72 @@ Bifrost Sync API 提供云端同步管理功能，包括同步状态查询、配
 
 ---
 
+### TC-ASN-35：CLI 直登缺少 token 值时提示 token 获取链接
+
+**操作步骤**：
+1. 使用临时数据目录、非 9900 端口和本地 mock sync server 启动 Bifrost，或直接执行隔离 E2E 脚本：
+   ```bash
+   bash e2e-tests/tests/test_sync_login_direct_e2e.sh
+   ```
+2. 脚本会执行默认 Provider 场景：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token
+   ```
+3. 脚本会执行显式自定义 relay URL 场景：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> sync login --token --url "http://127.0.0.1:<mock_sync_port>"
+   ```
+4. 检查两条命令的退出码和 stderr/stdout。
+
+**预期结果**：
+- 两条命令都在真正发起登录前失败，退出码为 1。
+- 默认 Provider 场景输出包含 `--token must not be empty`。
+- 默认 Provider 场景输出包含 `Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login`。
+- 自定义 relay URL 场景输出包含 `--token must not be empty`。
+- 自定义 relay URL 场景输出包含 `Sync session token for non-interactive login; get one at http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`。
+- 命令不会打开浏览器、不会写入新的 sync session token，也不会修改系统代理。
+
+**真实执行记录**：
+- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost sync login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.bytedance.net/v4/sso/token-login`；`bifrost sync login --token --url http://127.0.0.1:<mock_sync_port>` 同样返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`。后续 token-only、token+URL、API token-only、API URL-only 和默认 Provider 回归均通过，未打开浏览器，未修改系统代理。
+
+---
+
+### TC-ASN-36：一级 `bifrost login` 与 `bifrost sync login` 等价
+
+**操作步骤**：
+1. 使用临时数据目录、非 9900 端口和本地 mock sync server 启动 Bifrost，或直接执行隔离 E2E 脚本：
+   ```bash
+   bash e2e-tests/tests/test_sync_login_direct_e2e.sh
+   ```
+2. 查询一级登录命令帮助：
+   ```bash
+   target/release/bifrost login --help
+   ```
+3. 执行一级登录命令缺少 token 值的默认 Provider 场景：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> login --token
+   ```
+4. 执行一级登录命令缺少 token 值的自定义 relay URL 场景：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> login --token --url "http://127.0.0.1:<mock_sync_port>"
+   ```
+5. 执行一级登录命令显式 token+URL 场景：
+   ```bash
+   BIFROST_DATA_DIR="<same_temp_dir>" target/release/bifrost -p <admin_port> login --token ci-token --url "http://127.0.0.1:<mock_sync_port>"
+   ```
+
+**预期结果**：
+- `bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\``、`--token`、`--url` 和默认 token 获取链接 `https://bifrost.bytedance.net/v4/sso/token-login`。
+- `bifrost login --token` 在真正发起登录前失败，退出码为 1，输出包含 `--token must not be empty` 和默认 token 获取链接。
+- `bifrost login --token --url http://127.0.0.1:<mock_sync_port>` 在真正发起登录前失败，退出码为 1，输出包含 `--token must not be empty` 和 mock relay token 获取链接。
+- `bifrost login --token ci-token --url http://127.0.0.1:<mock_sync_port>` 与 `bifrost sync login --token ci-token --url ...` 一样完成直登，输出 `Login token saved` 或 `Login successful`。
+- 所有场景均不打开浏览器、不会修改系统代理。
+
+**真实执行记录**：
+- 2026-06-17：执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh` 通过。脚本先从当前 checkout 重新构建 `target/release/bifrost`，再使用临时 `BIFROST_DATA_DIR`、随机 Admin 端口、本地 mock sync server 和 `--no-system-proxy` 启动隔离服务；`bifrost login --help` 输出包含 `Equivalent to \`bifrost sync login\`` 和默认 token 获取链接；`bifrost login --token` 返回退出码 1，输出包含 `--token must not be empty` 和默认链接 `https://bifrost.bytedance.net/v4/sso/token-login`；`bifrost login --token --url http://127.0.0.1:<mock_sync_port>` 返回退出码 1，并输出 mock relay 链接 `http://127.0.0.1:<mock_sync_port>/v4/sso/token-login`；`bifrost login --token ci-token --url http://127.0.0.1:<mock_sync_port>` 输出 `Login token saved` 或 `Login successful`，与 `bifrost sync login` 等价。全流程未打开浏览器，未修改系统代理。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

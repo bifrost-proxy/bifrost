@@ -594,6 +594,9 @@ bifrost upgrade -y --restart
 
 ```bash
 bifrost sync status
+bifrost login
+bifrost login --token "$BIFROST_SYNC_TOKEN"
+bifrost login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
 bifrost sync login
 bifrost sync login --token "$BIFROST_SYNC_TOKEN"
 bifrost sync login --token "$BIFROST_SYNC_TOKEN" --url https://bifrost.bytedance.net
@@ -602,7 +605,7 @@ bifrost sync run
 bifrost sync config --enabled true --auto-sync true --remote-url https://example.com
 ```
 
-Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
+`bifrost login` 与 `bifrost sync login` 等价，用于更直接地表达登录动作。Headless/CI 登录 token 可从 `https://bifrost.bytedance.net/v4/sso/token-login` 获取；省略 `--url` 时使用当前同步配置的远端 URL，默认是内置 Bifrost Provider。
 
 ### 本机 remote-invoke 设置（setting）
 

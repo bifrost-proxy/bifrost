@@ -354,6 +354,46 @@ fn sync_login_direct_options_parse() {
         _ => panic!("expected sync login token-only command"),
     }
 
+    let cli = Cli::try_parse_from(["bifrost", "sync", "login", "--token"])
+        .expect("sync login missing token value should reach business validation");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: None,
+                },
+        }) => {
+            assert_eq!(token, "");
+        }
+        _ => panic!("expected sync login command with empty token placeholder"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "sync",
+        "login",
+        "--token",
+        "--url",
+        "https://relay.example.test/",
+    ])
+    .expect("sync login missing token value should still parse following url");
+
+    match cli.command {
+        Some(Commands::Sync {
+            action:
+                SyncCommands::Login {
+                    token: Some(token),
+                    url: Some(url),
+                },
+        }) => {
+            assert_eq!(token, "");
+            assert_eq!(url, "https://relay.example.test/");
+        }
+        _ => panic!("expected sync login command with empty token and custom url"),
+    }
+
     let cli = Cli::try_parse_from([
         "bifrost",
         "sync",
@@ -377,6 +417,88 @@ fn sync_login_direct_options_parse() {
             assert_eq!(url, "https://bifrost.bytedance.net");
         }
         _ => panic!("expected sync login command"),
+    }
+}
+
+#[test]
+fn top_level_login_options_parse_like_sync_login() {
+    let help = run_help(&["login"]);
+    assert!(help.contains("--token"), "login should have --token");
+    assert!(help.contains("--url"), "login should have --url");
+    assert!(
+        help.contains("Equivalent to `bifrost sync login`"),
+        "login help should explain sync login equivalence"
+    );
+    assert!(
+        help.contains("https://bifrost.bytedance.net/v4/sso/token-login"),
+        "login help should explain where to get a token"
+    );
+
+    let cli = Cli::try_parse_from(["bifrost", "login", "--token", "ci-token"])
+        .expect("top-level login token-only options should parse");
+
+    match cli.command {
+        Some(Commands::Login {
+            token: Some(token),
+            url: None,
+        }) => {
+            assert_eq!(token, "ci-token");
+        }
+        _ => panic!("expected top-level login token-only command"),
+    }
+
+    let cli = Cli::try_parse_from(["bifrost", "login", "--token"])
+        .expect("top-level login missing token value should reach business validation");
+
+    match cli.command {
+        Some(Commands::Login {
+            token: Some(token),
+            url: None,
+        }) => {
+            assert_eq!(token, "");
+        }
+        _ => panic!("expected top-level login command with empty token placeholder"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "login",
+        "--token",
+        "--url",
+        "https://relay.example.test/",
+    ])
+    .expect("top-level login missing token value should still parse following url");
+
+    match cli.command {
+        Some(Commands::Login {
+            token: Some(token),
+            url: Some(url),
+        }) => {
+            assert_eq!(token, "");
+            assert_eq!(url, "https://relay.example.test/");
+        }
+        _ => panic!("expected top-level login command with empty token and custom url"),
+    }
+
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "login",
+        "--token",
+        "ci-token",
+        "--url",
+        "https://bifrost.bytedance.net",
+    ])
+    .expect("top-level login direct options should parse");
+
+    match cli.command {
+        Some(Commands::Login {
+            token: Some(token),
+            url: Some(url),
+        }) => {
+            assert_eq!(token, "ci-token");
+            assert_eq!(url, "https://bifrost.bytedance.net");
+        }
+        _ => panic!("expected top-level login command"),
     }
 }
 

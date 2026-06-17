@@ -49,6 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: E2E shell CI coverage guard
+        shell: bash
+        run: bash scripts/ci/check-e2e-shell-ci-coverage.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

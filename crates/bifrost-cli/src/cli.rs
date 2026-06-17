@@ -487,6 +487,41 @@ pub enum Commands {
         #[command(subcommand)]
         action: MetricsCommands,
     },
+    #[command(
+        about = "Login to sync service",
+        long_about = concat!(
+            "Login to the sync service.\n",
+            "\n",
+            "Equivalent to `bifrost sync login`. Without options, opens the\n",
+            "browser login flow. For CI or headless environments, pass a token\n",
+            "directly. If --url is omitted, Bifrost uses the configured sync\n",
+            "remote URL, which defaults to the built-in Bifrost provider.\n",
+            "\n",
+            "Get a token from:\n",
+            "  https://bifrost.bytedance.net/v4/sso/token-login\n",
+            "\n",
+            "EXAMPLES:\n",
+            "  bifrost login\n",
+            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\"\n",
+            "  bifrost login --token \"$BIFROST_SYNC_TOKEN\" --url https://bifrost.bytedance.net",
+        )
+    )]
+    Login {
+        #[arg(
+            long,
+            value_name = "TOKEN",
+            num_args = 0..=1,
+            default_missing_value = "",
+            help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
+        )]
+        token: Option<String>,
+        #[arg(
+            long,
+            value_hint = ValueHint::Url,
+            help = "Remote sync URL for non-interactive login (default: configured sync remote URL, built-in provider if unchanged)"
+        )]
+        url: Option<String>,
+    },
     #[command(about = "Manage remote sync")]
     Sync {
         #[command(subcommand)]
@@ -2203,6 +2238,9 @@ pub enum SyncCommands {
     Login {
         #[arg(
             long,
+            value_name = "TOKEN",
+            num_args = 0..=1,
+            default_missing_value = "",
             help = "Sync session token for non-interactive login; get one at https://bifrost.bytedance.net/v4/sso/token-login"
         )]
         token: Option<String>,

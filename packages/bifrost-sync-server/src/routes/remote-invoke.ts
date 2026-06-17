@@ -297,6 +297,10 @@ export async function handleRemoteInvoke(
       return await handleCallInput(ctx, service);
     }
 
+    if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/status$/) && method === 'GET') {
+      return await handleCallStatus(ctx, service);
+    }
+
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/events$/) && method === 'GET') {
       return handleCallEvents(ctx, service);
     }
@@ -969,6 +973,39 @@ function handleCallEvents(ctx: RequestContext, service: RemoteInvokeService): bo
     unregisterCallerEventStream(callId);
   });
 
+  return true;
+}
+
+async function handleCallStatus(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/calls\/([^/]+)\/status/);
+  const callId = parts?.[1] ?? '';
+  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:call_status:${callId}`)) {
+    return true;
+  }
+
+  const token = extractBearerToken(ctx);
+  if (!token || !service.verifyCallToken(callId, token)) {
+    sendError(ctx.res, 401, 'invalid or missing relay_token');
+    return true;
+  }
+
+  const call = await service.getCall('', callId);
+  if (!call) {
+    sendError(ctx.res, 404, 'call not found');
+    return true;
+  }
+
+  sendJson(ctx.res, 200, {
+    code: 0,
+    message: 'ok',
+    data: {
+      call_id: call.id,
+      status: call.status,
+      exit_code: call.exit_code,
+      duration_ms: call.duration_ms || null,
+      ended_at: call.ended_at || null,
+    },
+  });
   return true;
 }
 

@@ -15,7 +15,7 @@ mod help;
 mod parsing;
 mod process;
 
-use cli::{AiCommands, AiVoiceCommands, Cli, Commands, ImportArgs, TrafficCommands};
+use cli::{AiCommands, AiVoiceCommands, Cli, Commands, ImportArgs, SyncCommands, TrafficCommands};
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
     handle_config_command, handle_export_command, handle_group_command, handle_import_command,
@@ -413,6 +413,11 @@ fn run_cli_main() {
         Some(Commands::Metrics { action }) => {
             handle_metrics_command(action, "127.0.0.1", get_effective_port(cli.port))
         }
+        Some(Commands::Login { token, url }) => handle_sync_command(
+            SyncCommands::Login { token, url },
+            "127.0.0.1",
+            get_effective_port(cli.port),
+        ),
         Some(Commands::Sync { action }) => {
             handle_sync_command(action, "127.0.0.1", get_effective_port(cli.port))
         }

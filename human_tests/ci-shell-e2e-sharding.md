@@ -1062,6 +1062,35 @@
 - 第 2 步退出码为 0，说明这些本地回归脚本没有删除，只是不进入 CI shell E2E。
 - 上述命令仅静态列出测试，不启动 Bifrost，不使用 9900，不修改系统代理。
 
+### TC-CS-44: Proxy chain shell E2E 本地下游动态端口回归
+
+**背景**：GitHub Actions macOS shell shard 曾在 `test_proxy_chain_auth_e2e.sh` 中出现 `双代理链路请求成功` 断言失败，期望 2xx 但实际返回 502。该用例不应访问公网或依赖 CI runner 的外部网络；入口 Bifrost、上游 Bifrost、HTTP echo 和 proxy echo 都必须是本机临时服务。CI 和本机差异主要来自本机端口/进程并发，而不是公网可达性。
+
+**操作步骤**：
+1. 语法检查 proxy chain shell E2E：
+   ```bash
+   bash -n e2e-tests/tests/test_proxy_chain_auth_e2e.sh
+   ```
+2. 静态确认脚本不包含公网测试地址，且使用动态端口 helper：
+   ```bash
+   rg -n 'httpbin|example\\.com|echo\\.websocket|pick_available_base_port|127\\.0\\.0\\.1' \
+     e2e-tests/tests/test_proxy_chain_auth_e2e.sh \
+     e2e-tests/rules/forwarding/proxy_chain_entry_auth.txt \
+     e2e-tests/rules/forwarding/proxy_chain_upstream_host.txt
+   ```
+3. 使用已构建的 release binary 真实执行 proxy chain 回归：
+   ```bash
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh
+   ```
+
+**预期结果**：
+- 第 1 步语法检查通过。
+- 第 2 步只显示本地 mock 地址、规则占位符和 `pick_available_base_port`；不出现公网依赖。
+- 第 3 步输出 HTTP echo、proxy echo、上游 Bifrost、入口 Bifrost ready；双 Bifrost 代理链路返回 2xx；下游代理鉴权返回 2xx，并断言 absolute-form URL 与 `Proxy-Authorization: Basic dXNlcjpwYXNz`；汇总 `Total: 11 / Passed: 11 / Failed: 0`。
+- 如果链路返回非 2xx，脚本输出状态码、响应头、响应体，以及 entry/upstream/mock 日志尾部，方便一次性定位本地下游不可用、端口碰撞或产品回归。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1102,6 +1131,7 @@
 | TC-CS-41 | 通过 | 2026-06-09 本轮执行：`bash -n scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 通过；`rg -n 'RESOURCE_HEAVY_TESTS\|test_large_body_protection\\.sh\|is_resource_heavy\|BIFROST_DATA_DIR:-\\$PROJECT_DIR/\\.bifrost-test-large-body' scripts/run_all_e2e.sh e2e-tests/tests/test_large_body_protection.sh` 定位到 resource-heavy 串行队列、调度判断和 `BIFROST_DATA_DIR` fallback；使用 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 构建 release binary 后，以临时目录 `/tmp/bifrost-large-body-human.*`、端口 `19214/19215`、`SKIP_BUILD=true BIFROST_BIN=target/release/bifrost` 真实执行 `test_large_body_protection.sh`，输出 5 个 large body HTTP 用例通过、0 失败，且清理阶段停止代理和 mock 服务。 |
 | TC-CS-42 | 通过 | 2026-06-13 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell layout ok`，确认 Linux shell E2E 没有 matrix/shard 环境变量且 job 名称为 `E2E Shell (Linux)`，macOS shell E2E 为 2 分片；静态执行 Linux 单 job `--list-shell-tests` 得到 133 个 CI shell tests；静态执行 `--list-shell-tests --shard N/2` 得到 `1/2 67`、`2/2 66`，总计 133 个 CI shell tests。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
 | TC-CS-43 | 通过 | 2026-06-13 本轮执行：静态执行 CI shell 列表排除检查，输出 `skipped test_agent_codex_parity_contracts.sh`、`skipped test_im_agent_markdown_image_reply.sh`、`skipped test_im_agent_streaming_progress_card.sh`、`skipped test_utf8_safe_preview_e2e.sh`；确认这些纯 cargo contract 脚本不再进入 CI shell E2E。该回归只列测试，不启动 Bifrost、未使用 9900、未修改系统代理。 |
+| TC-CS-44 | 通过 | 2026-06-17 本轮执行：GitHub Actions `CI` run `27676908356` 仅失败 `E2E Shell (aarch64-apple-darwin, shard 1/2)`，失败套件为 `shell:test_proxy_chain_auth_e2e.sh`，断言 `双代理链路请求成功` 期望 2xx 实际 502；同 run 中 `test_sync_login_direct_e2e.sh`、coverage 90% gate、Unit & Integration、Linux E2E、Windows/macOS/Linux build 与其它 E2E rules/runner 均通过。确认该 proxy chain 用例使用本机 `127.0.0.1` mock，不访问公网；随后把端口从 `$$ % 200` 固定小窗口改为 `pick_available_base_port` 动态连续端口段，并在非 2xx 时输出响应与 entry/upstream/mock 日志。执行 `bash -n e2e-tests/tests/test_proxy_chain_auth_e2e.sh` 通过；执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，输出 HTTP echo、proxy echo、Bifrost ready，双代理链路与下游代理鉴权全部通过，汇总 `Total: 11 / Passed: 11 / Failed: 0`，实际端口为动态非 9900 端口。 |
 
 ## 清理步骤
 
