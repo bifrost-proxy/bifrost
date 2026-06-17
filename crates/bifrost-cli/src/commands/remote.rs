@@ -5392,97 +5392,48 @@ impl CallerRelayClient {
         wait: Duration,
     ) -> bifrost_core::Result<Option<JobTerminalStatus>> {
         let url = format!(
-            "{}/v4/remote-invoke/calls/{}/events",
+            "{}/v4/remote-invoke/calls/{}/status",
             self.base_url, call_id
         );
-        let sse_http = direct_reqwest_client_builder()
+        let http = direct_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
-            .map_err(|e| BifrostError::Network(format!("build job status sse client: {e}")))?;
-        let response = sse_http
-            .get(&url)
-            .header("Authorization", format!("Bearer {relay_token}"))
-            .send()
-            .await
-            .map_err(|e| BifrostError::Network(format!("subscribe job status failed: {e}")))?;
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            return Err(BifrostError::Network(format!(
-                "job status returned {status}: {}",
-                truncate(&body, 500)
-            )));
-        }
-
-        let deadline = tokio::time::sleep(wait);
-        tokio::pin!(deadline);
-        let mut stream = response.bytes_stream();
-        let mut event_name = String::new();
-        let mut data_buf = String::new();
-        let mut partial_line = String::new();
+            .map_err(|e| BifrostError::Network(format!("build job status client: {e}")))?;
+        let deadline = tokio::time::Instant::now() + wait;
 
         loop {
-            tokio::select! {
-                _ = &mut deadline => return Ok(None),
-                chunk = stream.next() => {
-                    let Some(chunk) = chunk else {
-                        return Ok(None);
-                    };
-                    let bytes = chunk.map_err(|e| {
-                        BifrostError::Network(format!("job status SSE error: {e}"))
-                    })?;
-                    partial_line.push_str(&String::from_utf8_lossy(&bytes));
-                    while let Some(pos) = partial_line.find('\n') {
-                        let line = partial_line[..pos].trim_end_matches('\r').to_string();
-                        partial_line = partial_line[pos + 1..].to_string();
-                        if line.is_empty() {
-                            if !event_name.is_empty() && !data_buf.is_empty() {
-                                if event_name == "exit" {
-                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
-                                        return Ok(Some(JobTerminalStatus {
-                                            status: "exited".to_string(),
-                                            exit_code: v.get("exit_code").and_then(|x| x.as_i64()).map(|n| n as i32),
-                                            duration_ms: v.get("duration_ms").and_then(Value::as_u64),
-                                        }));
-                                    }
-                                } else if event_name == "status" {
-                                    if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
-                                        if let Some(status) = parse_call_terminal_status(&v) {
-                                            return Ok(Some(JobTerminalStatus {
-                                                status: status.to_string(),
-                                                exit_code: None,
-                                                duration_ms: None,
-                                            }));
-                                        }
-                                    }
-                                } else if event_name == "stream_frame" {
-                                    if let Some(crate::commands::caller_stream_frame::StreamDecision::Done { exit_code, duration_ms, .. }) =
-                                        parse_stream_frame_from_sse_data(&data_buf).and_then(|frame| {
-                                            let mut state = CallerStreamState::new(std::io::sink(), std::io::sink(), false);
-                                            state.feed(&frame).ok()
-                                        })
-                                    {
-                                        return Ok(Some(JobTerminalStatus {
-                                            status: "exited".to_string(),
-                                            exit_code: Some(exit_code),
-                                            duration_ms: Some(duration_ms),
-                                        }));
-                                    }
-                                }
-                            }
-                            event_name.clear();
-                            data_buf.clear();
-                        } else if let Some(ev) = line.strip_prefix("event:") {
-                            event_name = ev.trim().to_string();
-                        } else if let Some(d) = line.strip_prefix("data:") {
-                            if !data_buf.is_empty() {
-                                data_buf.push('\n');
-                            }
-                            data_buf.push_str(d.trim());
-                        }
-                    }
-                }
+            let response = http
+                .get(&url)
+                .header("Authorization", format!("Bearer {relay_token}"))
+                .send()
+                .await
+                .map_err(|e| BifrostError::Network(format!("poll job status failed: {e}")))?;
+            if !response.status().is_success() {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(BifrostError::Network(format!(
+                    "job status returned {status}: {}",
+                    truncate(&body, 500)
+                )));
             }
+
+            let body: Value = response
+                .json()
+                .await
+                .map_err(|e| BifrostError::Network(format!("decode job status response: {e}")))?;
+            if let Some(status) = job_terminal_status_from_call_payload(&body) {
+                return Ok(Some(status));
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            tokio::time::sleep(std::cmp::min(
+                Duration::from_millis(200),
+                deadline.saturating_duration_since(now),
+            ))
+            .await;
         }
     }
 
@@ -5845,6 +5796,32 @@ fn parse_call_terminal_status(payload: &Value) -> Option<&str> {
         .get("status")
         .and_then(|status| status.as_str())
         .filter(|status| matches!(*status, "cancelled" | "completed" | "failed" | "timeout"))
+}
+
+fn job_terminal_status_from_call_payload(payload: &Value) -> Option<JobTerminalStatus> {
+    let call = payload.get("data").unwrap_or(payload);
+    let status = call.get("status").and_then(Value::as_str)?;
+    match status {
+        "completed" => Some(JobTerminalStatus {
+            status: "exited".to_string(),
+            exit_code: call
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .filter(|code| *code >= 0)
+                .map(|code| code as i32),
+            duration_ms: call.get("duration_ms").and_then(Value::as_u64),
+        }),
+        "cancelled" | "failed" | "timeout" => Some(JobTerminalStatus {
+            status: status.to_string(),
+            exit_code: call
+                .get("exit_code")
+                .and_then(Value::as_i64)
+                .filter(|code| *code >= 0)
+                .map(|code| code as i32),
+            duration_ms: call.get("duration_ms").and_then(Value::as_u64),
+        }),
+        _ => None,
+    }
 }
 
 /// PR #5e-2: pure helper that converts a [`StreamingSubscriptionOutcome`]
@@ -7016,6 +6993,38 @@ mod tests {
         });
 
         assert_eq!(parse_call_terminal_status(&payload), None);
+    }
+
+    #[test]
+    fn job_terminal_status_from_call_payload_maps_completed_to_exited() {
+        let payload = serde_json::json!({
+            "code": 0,
+            "data": {
+                "call_id": "call-1",
+                "status": "completed",
+                "exit_code": 7,
+                "duration_ms": 1234
+            }
+        });
+
+        let status = job_terminal_status_from_call_payload(&payload).expect("terminal status");
+        assert_eq!(status.status, "exited");
+        assert_eq!(status.exit_code, Some(7));
+        assert_eq!(status.duration_ms, Some(1234));
+    }
+
+    #[test]
+    fn job_terminal_status_from_call_payload_rejects_streaming() {
+        let payload = serde_json::json!({
+            "code": 0,
+            "data": {
+                "call_id": "call-1",
+                "status": "streaming",
+                "exit_code": -1
+            }
+        });
+
+        assert!(job_terminal_status_from_call_payload(&payload).is_none());
     }
 
     #[test]

@@ -169,6 +169,14 @@ fn short_fingerprint(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn sha256_hex(bytes: &[u8]) -> String {
+    digest(&SHA256, bytes)
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 #[derive(Clone)]
 struct GrantCryptoMaterial {
     shared_secret: Vec<u8>,
@@ -2983,7 +2991,7 @@ impl RemoteInvokeWorker {
                     };
                     let exit_req = ClientCallExitRequest {
                         call_id: cid.clone(),
-                        client_instance_id: instance_id,
+                        client_instance_id: instance_id.clone(),
                         exit_code: response.exit_code,
                         duration_ms: Some(duration_ms),
                         stderr: None,
@@ -2993,6 +3001,39 @@ impl RemoteInvokeWorker {
                         bytes_out: response.stdout.as_ref().map(|s| s.len() as u64),
                         exit_encrypted,
                     };
+
+                    let done_frame = stream_emit::build_done_frame(
+                        response.exit_code,
+                        response.stdout_total_bytes.unwrap_or(0),
+                        response.stderr_total_bytes.unwrap_or(0),
+                        response
+                            .stdout_sha256_full
+                            .clone()
+                            .unwrap_or_else(|| sha256_hex(b"")),
+                        response
+                            .stderr_sha256_full
+                            .clone()
+                            .unwrap_or_else(|| sha256_hex(b"")),
+                        duration_ms,
+                        None,
+                        None,
+                    );
+                    if let Some(frame_json) = stream_emit::frame_to_json(&done_frame) {
+                        let stream_req = ClientCallStreamFrameRequest {
+                            call_id: cid.clone(),
+                            client_instance_id: instance_id.clone(),
+                            frame_json,
+                        };
+                        if let Err(error) =
+                            relay_client.post_call_stream_frame(&cid, &stream_req).await
+                        {
+                            debug!(
+                                call_id = %cid,
+                                ?error,
+                                "failed to post terminal stream_frame"
+                            );
+                        }
+                    }
 
                     if let Err(e) = relay_client.post_call_exit(&cid, &exit_req).await {
                         error!(error = %e, call_id = %cid, "failed to post call exit");
