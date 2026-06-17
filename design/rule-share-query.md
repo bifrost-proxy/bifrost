@@ -108,17 +108,17 @@ __bifrost_rule
 
 ### 3.2 Payload JSON
 
-第一版 payload：
+第一版 payload（与 `crates/bifrost-core/src/rule_share.rs` 实际实现一致）：
 
 ```json
 {
-  "v": 1,
-  "type": "bifrost.rule.share",
+  "version": 1,
   "name": "local-api",
   "content": "api.example.com host://127.0.0.1:3000",
-  "mode": "exclusive",
+  "mode": "enable_exclusive",
   "exclusive_scope": "my_rules",
-  "content_sha256": "sha256:..."
+  "content_hash_algorithm": "sha256",
+  "content_hash": "<lower-hex sha256 of content>"
 }
 ```
 
@@ -126,15 +126,15 @@ __bifrost_rule
 
 | 字段 | 必填 | Rust 类型 | 约束 |
 | --- | --- | --- | --- |
-| `v` | 是 | `u32` | 第一版只接受 `1` |
-| `type` | 是 | `String` | 必须等于 `bifrost.rule.share` |
-| `name` | 是 | `String` | trim 后不能为空，不能包含路径穿越语义 |
-| `content` | 是 | `String` | trim 后不能为空，必须通过规则 parser 校验 |
-| `mode` | 否 | enum | 第一版只接受缺省或 `exclusive` |
-| `exclusive_scope` | 否 | enum | 缺省为 `my_rules`；第一版只接受 `my_rules` |
-| `content_sha256` | 否 | `String` | 存在时必须等于原始 content 的 `sha256:<hex>` |
+| `version` | 是 | `u8` | 第一版只接受 `1`（常量 `RULE_SHARE_PROTOCOL_VERSION`） |
+| `name` | 是 | `String` | trim 后不能为空，不能包含 `/` 或 `\` 路径分隔符 |
+| `content` | 是 | `String` | trim 后不能为空；长度不超过 `MAX_RULE_FILE_BYTES`；导入侧再用 `validate_rules` 做语义校验 |
+| `mode` | 否 | enum | 默认 `enable_exclusive`；第一版只接受该值 |
+| `exclusive_scope` | 否 | enum | 默认 `my_rules`；第一版只接受该值 |
+| `content_hash_algorithm` | 是 | `String` | 必须等于 `"sha256"`（常量 `RULE_SHARE_CONTENT_HASH_ALGORITHM`） |
+| `content_hash` | 是 | `String` | 必须等于 `sha256(content)` 的 lower-hex；不再使用 `sha256:` 前缀 |
 
-CLI 参数使用 `--exclusive-scope my-rules`，wire JSON 使用 `my_rules`。CLI 层负责映射，避免 URL payload 混用两种拼写。
+CLI `--exclusive-scope` 当前直接接受 `my_rules`（下划线），与 wire JSON 一致；没有引入 `my-rules` 别名。第一版没有顶层 `type: "bifrost.rule.share"` 字段——payload 通过 `__bifrost_rule` query 参数携带，已经天然在 Bifrost 协议下，本字段视为未来扩展位（planned, not yet shipped as of 2026-06-17）。
 
 ### 3.3 URL 构造与清理
 
@@ -157,44 +157,48 @@ CLI 参数使用 `--exclusive-scope my-rules`，wire JSON 使用 `my_rules`。CL
 
 ### 4.1 `bifrost-core::rule_share`
 
-新增文件：`crates/bifrost-core/src/rule_share.rs`。
+实际文件：`crates/bifrost-core/src/rule_share.rs`。
 
-对外常量：
+对外常量（全部带 `RULE_SHARE_` 前缀，便于按命名空间检索）：
 
 ```rust
-pub const SHARE_QUERY_PARAM: &str = "__bifrost_rule";
-pub const SHARE_PAYLOAD_TYPE: &str = "bifrost.rule.share";
-pub const SHARE_PAYLOAD_VERSION: u32 = 1;
+pub const RULE_SHARE_QUERY_PARAM: &str = "__bifrost_rule";
+pub const RULE_SHARE_PROTOCOL_VERSION: u8 = 1;
+pub const RULE_SHARE_CONTENT_HASH_ALGORITHM: &str = "sha256";
+pub const RULE_SHARE_IMPORTED_RULE_PREFIX: &str = "share/";
+pub const RULE_SHARE_IMPORTED_DESCRIPTION_TITLE: &str = "Imported from a Bifrost rule share link";
+pub const RULE_SHARE_IMPORTED_NAME_MARKER: &str = "bifrost-rule-share-name=";
+pub const RULE_SHARE_IMPORTED_HASH_MARKER: &str = "bifrost-rule-share-sha256=";
 ```
 
 对外类型：
 
 ```rust
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RuleSharePayload {
-    pub v: u32,
-    #[serde(rename = "type")]
-    pub payload_type: String,
-    pub name: String,
-    pub content: String,
-    #[serde(default = "default_share_mode")]
-    pub mode: RuleShareMode,
-    #[serde(default = "default_exclusive_scope")]
-    pub exclusive_scope: RuleShareExclusiveScope,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub content_sha256: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleShareMode {
-    Exclusive,
+    #[default]
+    EnableExclusive,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleShareExclusiveScope {
+    #[default]
     MyRules,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleSharePayload {
+    pub version: u8,
+    pub name: String,
+    pub content: String,
+    #[serde(default)]
+    pub mode: RuleShareMode,
+    #[serde(default)]
+    pub exclusive_scope: RuleShareExclusiveScope,
+    pub content_hash_algorithm: String,
+    pub content_hash: String,
 }
 
 pub struct RuleShareUrlParts {
@@ -203,7 +207,7 @@ pub struct RuleShareUrlParts {
 }
 ```
 
-对外函数：
+对外函数（实际签名）：
 
 ```rust
 pub fn new_rule_share_payload(
@@ -212,63 +216,66 @@ pub fn new_rule_share_payload(
 ) -> Result<RuleSharePayload>;
 
 pub fn encode_rule_share_payload(payload: &RuleSharePayload) -> Result<String>;
-
 pub fn decode_rule_share_payload(encoded: &str) -> Result<RuleSharePayload>;
-
 pub fn append_rule_share_query(target_url: &str, payload: &RuleSharePayload) -> Result<String>;
-
-pub fn extract_rule_share_query(request_url: &str) -> Result<RuleShareUrlParts>;
+pub fn extract_rule_share_query(input_url: &str) -> Result<RuleShareUrlParts>;
 
 pub fn content_sha256(content: &str) -> String;
+pub fn imported_rule_name(source_name: &str) -> String;
+pub fn imported_rule_description(source_name: &str, content_hash: &str) -> String;
+pub fn imported_rule_source_name(description: Option<&str>) -> Option<String>;
+pub fn imported_rule_content_hash(description: Option<&str>) -> Option<String>;
+pub fn share_payload_name_from_rule(name: &str, description: Option<&str>) -> String;
+pub fn validate_payload(payload: &RuleSharePayload) -> Result<()>;
 ```
 
-该模块只负责协议、hash、URL，不读写规则存储。
+该模块只负责协议、hash、URL 以及 `share/` 命名空间的元数据辅助函数，不读写规则存储。
 
-错误必须能区分：
+错误必须能区分（当前实现统一通过 `BifrostError::Config(msg)` 返回，message 中包含下列语义；细粒度错误码尚未拆分，planned, not yet shipped as of 2026-06-17）：
 
 - `invalid_target_url`
 - `unsupported_url_scheme`
-- `payload_too_large`
+- `payload_too_large`（编码后或解码后超出 `MAX_RULE_FILE_BYTES`）
 - `invalid_base64`
 - `invalid_json`
 - `unsupported_version`
-- `invalid_payload_type`
-- `invalid_mode`
-- `invalid_scope`
+- `unsupported_content_hash_algorithm`
+- `invalid_mode` / `invalid_scope`（由 serde rename_all 自动拒绝未知 variant）
 - `hash_mismatch`
-- `empty_name`
+- `empty_name` / 名称含 `/` 或 `\`
 - `empty_content`
 
 ### 4.2 `bifrost-admin::rule_share_import`
 
-新增文件：`crates/bifrost-admin/src/rule_share_import.rs`。
+实际文件：`crates/bifrost-admin/src/rule_share_import.rs`。
 
-对外类型：
+对外类型（实际形态）：
 
 ```rust
-pub struct RuleShareImportRequest {
-    pub payload: RuleSharePayload,
-}
-
-pub struct RuleShareImportOutcome {
-    pub final_name: String,
-    pub action: RuleShareImportAction,
-    pub disabled_rule_names: Vec<String>,
-}
-
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuleShareImportAction {
     Created,
     Reused,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RuleShareImportOutcome {
+    pub action: RuleShareImportAction,
+    pub rule_name: String,
+    pub requested_name: String,
+    pub content_hash: String,
+    pub disabled_rules: Vec<String>,
+}
 ```
 
-对外函数：
+对外函数（实际签名，直接吃 `RuleSharePayload`，不再包一层 wrapper struct）：
 
 ```rust
-pub async fn import_rule_share(
-    state: &SharedAdminState,
+pub async fn import_rule_share_payload(
+    state: SharedAdminState,
     push_manager: Option<&SharedPushManager>,
-    request: RuleShareImportRequest,
+    payload: RuleSharePayload,
 ) -> Result<RuleShareImportOutcome>;
 ```
 
@@ -286,20 +293,28 @@ pub async fn import_rule_share(
 
 ### 4.3 `RuleShareImportOutcome` 通知
 
-第一版通知使用现有 Admin push 或 notification 能力，要求前端可见。
+第一版通知复用 `create_notification` + `push_manager.broadcast_notification(NotificationPushData{...})`，前端通过通用 notification 通道收到。
 
-事件内容必须至少包含：
+实际事件载荷（来自 `notify_after_import`）：
 
 ```json
 {
-  "type": "rule_share_imported",
-  "rule_name": "local-api",
-  "action": "created",
-  "disabled_count": 3
+  "notification_type": "rule_share_imported",
+  "title": "Rule imported | Shared rule reused",
+  "message": "Imported and enabled rule '<rule_name>'. Other My Rules were disabled.",
+  "metadata": {
+    "rule_name": "share/local-api",
+    "created": true
+  },
+  "unread_count": 0
 }
 ```
 
-如果当前 push/notification 结构无法直接承载该事件，新增最小 notification 类型，不要把提示耦合到 traffic 记录或 badge JSON。
+注意与早期设计的差异：
+
+- 当前 metadata 只携带 `rule_name` 和 `created`（布尔），没有 `action`/`disabled_count` 字段。如果未来要让前端展示禁用了几条规则，需要扩展 metadata（planned, not yet shipped as of 2026-06-17）。
+- `rule_name` 字段对应最终落盘的 `share/...` 名（可能带递增后缀），不是 payload 里的原始 `name`。
+- 同时还会触发 `broadcast_settings_scope(SETTINGS_SCOPE_NOTIFICATIONS)`，让通知中心 badge 即时刷新。
 
 ## 5. 导入算法
 
@@ -412,30 +427,38 @@ fn apply_exclusive_my_rules(storage: &RulesStorage, final_name: &str) -> Result<
 
 ## 6. 代理接入设计
 
-在 `handle_http_request(...)` 中，resolver 匹配前加入：
+实际入口分为两处（具体见 `crates/bifrost-proxy/src/proxy/http/handler.rs` 与 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`）：
+
+- 普通 HTTP absolute-form：`handle_http_request` 在 resolver 匹配前调用 `handle_rule_share_query(req, ctx, admin_state, push_manager)` 返回 `RuleShareProxyAction::{None, Cleaned(url), Redirect(url)}`。
+- HTTPS TLS 解包后的 intercepted request：tunnel 模块调用 `handle_intercepted_rule_share_query(...)`，返回相同语义的 `InterceptedRuleShareAction`。
+
+伪代码（与实现一致）：
 
 ```text
-raw_url = ctx.url or req.uri().to_string()
-parts = extract_rule_share_query(raw_url)
-if parts.payload exists:
-    outcome = import_rule_share(...)
-    emit notification(outcome)
-    if method is GET or HEAD:
-        return redirect(parts.clean_url)
-    else:
-        rewrite req.uri to clean URL path/query
-        use parts.clean_url for resolver match URL
+raw_url = ctx.url or get_request_url(req)
+if !raw_url.contains("__bifrost_rule"):
+    return None
+parts = extract_rule_share_query(raw_url)        # 失败 -> warn + None
+if parts.payload is None:
+    return None
+if admin_state is Some:
+    import_rule_share_payload(admin_state, push_manager, parts.payload).await
+    # 成功 / 失败均只写日志，不再向上传播
+if method is GET or HEAD:
+    return Redirect(parts.clean_url)            # 上层映射到 302
+else:
+    apply_clean_url_to_request(req, parts.clean_url)
+    return Cleaned(parts.clean_url)             # resolver / 记录 URL 都改用 clean_url
 ```
 
 实现要求：
 
 - 处理发生在 `rules.resolve_with_context(...)` 前。
-- 需要同时覆盖普通 HTTP absolute-form 请求路径和 HTTPS TLS 解包后的 intercepted request 路径；HTTPS 场景中必须先基于 `https://<original_host><path_and_query>` 还原完整 URL，再提取 `__bifrost_rule`，避免分享 query 被后续普通规则命中并消费。
+- 需要同时覆盖普通 HTTP absolute-form 请求路径和 HTTPS TLS 解包后的 intercepted request 路径；HTTPS 场景中先基于 `https://<original_host><path_and_query>` 还原完整 URL，再提取 `__bifrost_rule`，避免分享 query 被后续普通规则命中并消费。
 - 成功导入后的 `GET` / `HEAD` 不继续转发原请求，固定返回 302 到 clean URL，保持浏览器普通导航行为。
-- 非 `GET` / `HEAD` 不重定向，避免改变请求方法和 body 语义。
-- 非 `GET` / `HEAD` 必须剥离上游请求中的 `__bifrost_rule`。
-- 导入失败时不修改规则；`GET` / `HEAD` 仍可重定向到 clean URL，并通过 notification/log 说明失败。
-- proxy 层不直接拼写规则存储逻辑，只调用 admin import service。
+- 非 `GET` / `HEAD` 不重定向，避免改变请求方法和 body 语义；通过 `apply_clean_url_to_request` 重写 URI 后再继续转发，确保上游不会收到 `__bifrost_rule`。
+- 当前实现：即便 `import_rule_share_payload` 返回错误，proxy 层也只 warn 日志、不阻断请求；`GET` / `HEAD` 依然会被 302 到 clean URL。导入失败时尚未生成专门的 notification（planned, not yet shipped as of 2026-06-17 —— 失败目前只在 `bifrost_proxy::rule_share` 日志 target 里出现）。
+- proxy 层不直接拼写规则存储逻辑，只调用 admin import service `import_rule_share_payload`。
 
 ## 7. Admin API 设计
 
@@ -457,15 +480,19 @@ POST /api/rules/share-link
 }
 ```
 
-响应：
+响应（实际实现包含两项额外字段）：
 
 ```json
 {
   "url": "https://example.com/path?a=1&__bifrost_rule=...",
   "payload_version": 1,
-  "query_param": "__bifrost_rule"
+  "query_param": "__bifrost_rule",
+  "rule_name": "local-api",
+  "content_hash": "<lower-hex sha256>"
 }
 ```
+
+请求体支持可选 `exclusive_scope`（缺省 `my_rules`），即使传入也只参与校验，不影响生成的 payload；当前 handler 读完后会丢弃（实际上只生成 `my_rules` 一种 scope）。
 
 错误：
 
@@ -479,40 +506,40 @@ POST /api/rules/share-link
 
 ### 7.2 OpenAPI
 
-`crates/bifrost-admin/src/openapi.rs` 必须补充 `/api/rules/share-link`，字段与错误码保持一致。
+`crates/bifrost-admin/src/openapi.rs` 必须补充 `/api/rules/share-link`，字段与错误码保持一致（planned, not yet shipped as of 2026-06-17 —— 当前 OpenAPI spec 中没有该路径定义，前端 / 第三方调用方需要直接参考本文档的请求与响应结构）。
 
 ## 8. CLI 设计
 
-在 `RuleCommands` 下新增 `Share`：
+在 `RuleCommands` 下新增 `Share`（实际定义见 `crates/bifrost-cli/src/cli.rs`）：
 
 ```rust
 Share {
     name: String,
-    #[arg(long)]
-    url: String,
+    target_url: String,                       // 位置参数，不是 --url
     #[arg(short, long)]
     content: Option<String>,
     #[arg(short, long, value_hint = ValueHint::FilePath)]
     file: Option<PathBuf>,
-    #[arg(long, value_parser = ["my-rules"], default_value = "my-rules")]
-    exclusive_scope: String,
+    #[arg(long, default_value = "my_rules", value_parser = ["my_rules"])]
+    exclusive_scope: String,                  // wire 与 CLI 都用 my_rules（下划线）
 }
 ```
 
 行为：
 
-- `--content` 和 `--file` 互斥。
+- `--content` 和 `--file` 互斥；`--content` 优先于 `--file`。
 - 都不传时，从 `RulesStorage::load(name)` 读取已有 My Rule 内容。
+- 已存在 `share/<name>` 等导入规则时，CLI 通过 `share_payload_name_from_rule` 自动剥掉 `share/` 前缀，再从 description 里恢复原始分享名作为 payload 的 `name`。
 - `--file` 第一版只读取纯规则内容文件，不接受 `.bifrost` 元数据文件作为输入。
 - stdout 只输出最终 URL，方便 Agent 捕获。
-- warning 输出到 stderr，例如 URL 过长。
+- `--exclusive-scope` 当前只接受 `my_rules`；未引入 `my-rules` 别名（planned, not yet shipped as of 2026-06-17）。
 
-示例：
+示例（注意 target URL 是位置参数）：
 
 ```bash
-bifrost rule share local-api --url https://example.com/path
-bifrost rule share local-api -c "api.example.com host://127.0.0.1:3000" --url https://example.com/path
-bifrost rule share local-api -f ./rules/local-api.txt --url https://example.com/path
+bifrost rule share local-api https://example.com/path
+bifrost rule share local-api https://example.com/path --content "api.example.com bp://127.0.0.1:3000"
+bifrost rule share local-api https://example.com/path --file ./rules/local-api.txt
 ```
 
 ## 9. Web UI 设计
@@ -548,70 +575,67 @@ Modal 状态：
 
 ### 9.3 导入成功提示
 
-前端收到 `rule_share_imported` 事件后展示：
+前端收到 `notification_type == "rule_share_imported"` 的通知后，可以直接展示后端 `message` 字段；实际文案与早期设计不同：
+
+创建路径（metadata.created == true，title = "Rule imported"）：
 
 ```text
-Imported and enabled rule "local-api". Disabled 3 other My Rules.
+Imported and enabled rule '<final-name>'. Other My Rules were disabled.
 ```
 
-如果 action 是 `reused`：
+复用路径（metadata.created == false，title = "Shared rule reused"）：
 
 ```text
-Reused and enabled rule "local-api". Disabled 3 other My Rules.
+Enabled existing rule '<final-name>'. Other My Rules were disabled.
 ```
 
-如果最终规则名是递增名，提示必须使用最终规则名。
+当前 message 不包含被禁用规则的数量（与 §4.3 一致）。若未来要在前端展示 "Disabled N other My Rules"，需要在 admin import 侧扩展 metadata 把 disabled_rules 长度透出（planned, not yet shipped as of 2026-06-17）。
+
+如果最终规则名是递增名（如 `share/local-api 2`），后端给出的 `metadata.rule_name` 就是该最终名；前端必须直接使用它，不要再剥掉 `share/` 前缀。
 
 ## 10. 文档更新
 
-必须更新：
+实际更新状态：
 
-- `docs/rule.md`：增加分享 Query 协议说明和安全提示。
-- `docs/cli.md`：增加 `bifrost rule share` 用法。
-- CLI help：`bifrost rule share -h` 能看到目标 URL、content/file、scope 说明。
-- `human_tests/readme.md`：新增 rule share query 用例索引。
+- `docs/rule.md`：已增加分享 Query 协议说明和示例。
+- `docs/cli.md`：已增加 `bifrost rule share` 用法（目标 URL 是位置参数，不是 `--url`）。
+- CLI help：`bifrost rule share -h` 能看到 target URL、content/file、scope 说明。
+- `human_tests/readme.md`：已在表格中新增 `rule-share-query.md` 行（8 个用例）。
 
-第一版不要求更新：
+第一版不要求更新（仍未更新，符合预期）：
 
-- `docs/cli-quick-start.md`：加入 Agent 生成分享链接的短例子。
+- `docs/cli-quick-start.md`：未加入 Agent 生成分享链接的短例子。
 
 ## 11. 测试方案
 
 ### 11.1 单元测试
 
-`crates/bifrost-core/src/rule_share.rs`：
+`crates/bifrost-core/src/rule_share.rs`（实际命名）：
 
-- `encode_decode_round_trip_preserves_payload`
-- `decode_rejects_invalid_base64`
-- `decode_rejects_invalid_json`
-- `decode_rejects_wrong_type`
-- `decode_rejects_unsupported_version`
-- `decode_rejects_hash_mismatch`
-- `append_share_query_preserves_existing_query_and_fragment`
-- `append_share_query_replaces_existing_share_query`
-- `append_share_query_accepts_schemeless_domain`
-- `append_share_query_accepts_schemeless_host_port`
-- `append_share_query_rejects_explicit_non_http_scheme`
-- `extract_share_query_returns_payload_and_clean_url`
-- `extract_share_query_preserves_business_query`
+- `encode_decode_round_trip`
+- `append_and_extract_preserves_site_query_and_fragment`
+- `extract_removes_only_share_query_without_empty_query_suffix`
+- `append_replaces_existing_share_query`
+- `append_accepts_schemeless_domain_targets`
+- `append_accepts_schemeless_localhost_port_targets`
+- `append_rejects_explicit_non_http_scheme`
+- `imported_rule_description_round_trips_source_name`
 - `share_payload_name_strips_import_namespace_and_prefers_source_metadata`
+- `decode_rejects_hash_mismatch`
 
-`crates/bifrost-admin/src/rule_share_import.rs`：
+下列原计划的细分用例仍未补齐（planned, not yet shipped as of 2026-06-17）：`decode_rejects_invalid_base64` / `decode_rejects_invalid_json` / `decode_rejects_wrong_type` / `decode_rejects_unsupported_version`。
 
-- `import_creates_rule_when_name_unused`
-- `import_reuses_same_name_when_content_matches`
-- `import_creates_numbered_name_when_same_name_differs`
-- `import_reuses_numbered_name_when_content_matches`
+`crates/bifrost-admin/src/rule_share_import.rs`（实际命名）：
+
+- `import_reuses_same_name_same_content`
+- `import_suffixes_same_name_different_content_and_disables_others`
 - `import_does_not_overwrite_user_rule_with_original_name`
+- `import_accepts_rule_reference_lines`
 - `import_reopens_same_link_over_existing_share_rule`
-- `import_exclusive_disables_other_my_rules_only`
-- `import_rejects_invalid_rule_content`
 
-`crates/bifrost-cli/src/commands/rule.rs`：
+下列原计划用例尚未拆出独立测试（部分语义由上述测试覆盖）：`import_creates_rule_when_name_unused` / `import_creates_numbered_name_when_same_name_differs` / `import_reuses_numbered_name_when_content_matches` / `import_exclusive_disables_other_my_rules_only` / `import_rejects_invalid_rule_content`（planned, not yet shipped as of 2026-06-17）。
 
-- `rule_share_from_inline_content_outputs_url`
-- `rule_share_from_existing_rule_outputs_url`
-- `rule_share_rejects_non_http_url`
+`crates/bifrost-cli/src/commands/rule.rs`：当前没有针对 `rule share` 子命令的 Rust 单元测试（planned, not yet shipped as of 2026-06-17）；行为由 `e2e-tests/tests/test_rule_share_query.sh` 覆盖。
 
 ### 11.2 Web 测试
 
@@ -626,11 +650,13 @@ Vitest 或 Playwright：
 
 ### 11.3 E2E 测试
 
-新增 Bifrost E2E 用例：
+实际 E2E 用例落在仓库根 shell 测试目录，而不是 Rust `bifrost-e2e`：
 
 ```text
-crates/bifrost-e2e/src/tests/rule_share_query.rs
+e2e-tests/tests/test_rule_share_query.sh
 ```
+
+Rust `crates/bifrost-e2e/src/tests/rule_share_query.rs` 仍未创建（planned, not yet shipped as of 2026-06-17）。当前 shell 脚本已经覆盖：裸域名经 HTTP 代理导入、HTTPS TLS 解包路径导入、带 `@规则引用` 的内容、重复访问不创建副本、同名不同内容创建递增 `share/<name> 2`、对其它 My Rules 独占启用等关键路径。
 
 真实流程：
 
