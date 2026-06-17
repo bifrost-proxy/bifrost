@@ -1629,11 +1629,14 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             sendBtn.dataset.disabled === 'true'
           ) : null;
 
-          const stopBtn = document.querySelector('[data-testid="stop-button"]') ||
-                          document.querySelector('button[aria-label*="Stop"]') ||
-                          document.querySelector('button[aria-label*="停止"]') ||
-                          document.querySelector('button[aria-label*="Cancel"]') ||
-                          document.querySelector('button[aria-label*="取消"]');
+          const stopBtnCandidates = Array.from(document.querySelectorAll(
+            '[data-testid="stop-button"], button[aria-label*="Stop"], button[aria-label*="停止"], button[aria-label*="Cancel"], button[aria-label*="取消"]'
+          ));
+          const stopBtn = stopBtnCandidates.find((button) => {{
+            const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.innerText || '')).trim();
+            if (!label) return false;
+            return /stop\\s*(streaming|generating|responding|response)?|cancel\\s*(generation|response)|停止\\s*(流式传输|生成|回答|回复)|取消\\s*(生成|回答|回复)/i.test(label);
+          }}) || null;
           const stopButtonVisible = isVisible(stopBtn);
 
           // Extract text as Markdown
@@ -2125,14 +2128,43 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     if image_count > 0 {
         return true;
     }
-    let normalized = text
-        .trim()
+    let normalized = normalize_dom_status_text(text);
+    !normalized.is_empty() && !dom_text_is_pending_status(normalized)
+}
+
+fn normalize_dom_status_text(text: &str) -> &str {
+    text.trim()
         .trim_start_matches('\u{feff}')
         .trim_start_matches("ChatGPT 说")
         .trim_start_matches("ChatGPT says")
         .trim_start_matches([':', '：'])
-        .trim();
-    !normalized.is_empty()
+        .trim()
+}
+
+fn dom_text_is_pending_status(normalized: &str) -> bool {
+    let trimmed = normalized.trim().trim_end_matches(['.', '。', '…']).trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    matches!(
+        trimmed,
+        "正在打草稿"
+            | "正在撰写"
+            | "正在思考"
+            | "正在创建图片"
+            | "正在生成图片"
+            | "正在生成图像"
+            | "最后微调一下"
+            | "正在微调"
+            | "Drafting"
+            | "Thinking"
+            | "Creating image"
+            | "Creating images"
+            | "Generating image"
+            | "Generating images"
+            | "Finishing up"
+            | "Making final adjustments"
+    )
 }
 
 pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str> {
@@ -2176,20 +2208,6 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         .unwrap_or(false)
     {
         return Some("output_busy");
-    }
-    if !data
-        .get("composerVisible")
-        .and_then(Value::as_bool)
-        .unwrap_or(true)
-    {
-        return Some("composer_not_ready");
-    }
-    if data
-        .get("composerDisabled")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Some("composer_disabled");
     }
     let composer_text_length = data
         .get("composerTextLength")

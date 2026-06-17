@@ -632,6 +632,50 @@ impl BrowserSession {
         self.close_stale_pages(&list, None).await;
     }
 
+    pub(super) async fn close_chatgpt_pages_for_fresh_run(&self) {
+        let list: Vec<CdpPage> = match wait_for_json(
+            &format!("http://127.0.0.1:{}/json/list", self.port),
+            Duration::from_secs(5),
+        )
+        .await
+        {
+            Ok(list) => list,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    "chatgpt_web browser: failed to list pages before fresh run"
+                );
+                return;
+            }
+        };
+        let to_close: Vec<CdpPage> = list
+            .into_iter()
+            .filter(|page| page.url.starts_with(DEFAULT_BASE_URL))
+            .collect();
+        if to_close.is_empty() {
+            return;
+        }
+        info!(
+            close_count = to_close.len(),
+            "chatgpt_web browser: closing existing ChatGPT pages before fresh run"
+        );
+        for page in to_close {
+            debug!(
+                page_id = %page.id,
+                page_url = %page.url,
+                "chatgpt_web browser: closing ChatGPT page before fresh run"
+            );
+            if let Err(error) = self.close_target(&page.id).await {
+                warn!(
+                    page_id = %page.id,
+                    error = %error,
+                    "chatgpt_web browser: failed to close ChatGPT page before fresh run"
+                );
+            }
+        }
+        clear_conversation_tabs_for_profile(&self.profile_dir);
+    }
+
     #[allow(dead_code)]
     async fn close_stale_pages(&self, pages: &[CdpPage], keep_id: Option<&str>) {
         let chatgpt_pages: Vec<&CdpPage> = pages

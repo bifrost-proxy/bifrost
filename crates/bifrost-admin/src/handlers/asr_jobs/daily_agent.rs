@@ -845,6 +845,40 @@ fn single_entry_change_plan(
     }
 }
 
+fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Result<(), String> {
+    let trimmed = response.trim();
+    if trimmed.len() < 512 {
+        return Err(format!(
+            "chatgpt_web daily report response too short for {date}: {} bytes",
+            trimmed.len()
+        ));
+    }
+    if !trimmed.contains(date) {
+        return Err(format!(
+            "chatgpt_web daily report response missing target date {date}"
+        ));
+    }
+    if !trimmed.contains("今日概览") || !trimmed.contains("证据与不确定性") {
+        return Err(format!(
+            "chatgpt_web daily report response missing required report sections for {date}"
+        ));
+    }
+    let normalized = trimmed
+        .trim_start_matches("ChatGPT 说")
+        .trim_start_matches([':', '：'])
+        .trim();
+    if normalized.starts_with("用户的消息为空")
+        || normalized.contains("上传的文件包含")
+        || normalized == "正在思考"
+        || normalized == "正在打草稿"
+    {
+        return Err(format!(
+            "chatgpt_web daily report response is a status/error placeholder for {date}"
+        ));
+    }
+    Ok(())
+}
+
 fn metadata_value(
     metadata: &DailyAgentBTreeMap<String, String>,
     keys: &[&str],
@@ -989,6 +1023,12 @@ async fn run_external_daily_agent_prompt(
         effective.settings.adapter.as_str(),
         conversation_state,
     );
+    let request_session_key = if effective.settings.adapter == "chatgpt_web" {
+        crate::im_gateway::chatgpt_web::clear_session_conversation(session_key).await;
+        None
+    } else {
+        Some(session_key.to_string())
+    };
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
@@ -997,7 +1037,7 @@ async fn run_external_daily_agent_prompt(
         params,
         provider_id: None,
         runner_id: Some(runner_id.to_string()),
-        session_key: Some(session_key.to_string()),
+        session_key: request_session_key,
         runtime: "external_cli".to_string(),
         adapter: effective.settings.adapter.clone(),
         work_dir: Some(daily_dir.to_path_buf()),
@@ -1160,14 +1200,16 @@ async fn run_daily_agent_inner(
                     )
                     .await?;
                     last_metadata = Some(run_result.metadata.clone());
-                    if run_result.response.trim().is_empty() {
+                    let response = run_result.response.trim();
+                    if response.is_empty() {
                         continue;
                     }
+                    validate_chatgpt_web_daily_report_response(response, &entry.date)?;
                     let report_path = PathBuf::from(&entry.report_target);
                     if let Some(parent) = report_path.parent() {
                         std::fs::create_dir_all(parent).ok();
                     }
-                    if let Err(e) = std::fs::write(&report_path, run_result.response.trim()) {
+                    if let Err(e) = std::fs::write(&report_path, response) {
                         tracing::warn!(
                             report_path = %report_path.display(),
                             error = %e,
@@ -1176,7 +1218,7 @@ async fn run_daily_agent_inner(
                     } else {
                         tracing::info!(
                             report_path = %report_path.display(),
-                            len = run_result.response.trim().len(),
+                            len = response.len(),
                             "saved chatgpt_web response as report"
                         );
                     }
