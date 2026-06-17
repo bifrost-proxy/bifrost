@@ -69,13 +69,13 @@
 ## 测试方案
 
 ### 单元测试
-- `test_grant_info_store_round_trip`: 验证写入/读取/按 relay 过滤
-- `test_grant_info_store_remove`: 验证移除后不再出现
-- `test_sse_reconcile_purges_stale_grants`: 验证对账逻辑
-- `test_validate_grant_accepts_active_permanent`: 验证有效 grant 执行命令时同步写入 `last_command_at`
-- `test_validate_grant_accepts_once_and_consumes`: 验证 once grant 消耗时也写入 `last_command_at`
-- `test_normalize_registration_session_token_rejects_missing_or_empty`: 验证缺失或纯空白 token 不会进入 relay 注册。
-- `test_normalize_registration_session_token_trims_valid_token`: 验证有效 token 会被 trim 后继续注册。
+- `test_grant_info_store_round_trip` (planned, not yet shipped as of 2026-06-16): 验证写入/读取/按 relay 过滤。当前 `grant_info_store.rs` 已实现 `load_for_relay` / `upsert` / `remove` / `retain_only`，但尚未补单元测试。
+- `test_grant_info_store_remove` (planned, not yet shipped as of 2026-06-16): 验证移除后不再出现。
+- `test_sse_reconcile_purges_stale_grants` (planned, not yet shipped as of 2026-06-16): 验证对账逻辑。对应的 production 代码已经落地：`worker.rs::run_sse_session` 在 `fetch_active_grants` 成功后会调用 `GrantInfoStore::retain_only` 以 relay 返回的活动集合清理本地多余 grant，仍需补一个直接覆盖该路径的单元测试。
+- `test_validate_grant_accepts_active_permanent`: 验证有效 grant 执行命令时同步写入 `last_command_at`（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
+- `test_validate_grant_accepts_once_and_consumes`: 验证 once grant 消耗时也写入 `last_command_at`（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
+- `test_normalize_registration_session_token_rejects_missing_or_empty`: 验证缺失或纯空白 token 不会进入 relay 注册（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
+- `test_normalize_registration_session_token_trims_valid_token`: 验证有效 token 会被 trim 后继续注册（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
 
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账
