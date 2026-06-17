@@ -139,10 +139,10 @@ V1 使用 UI 当前展示的 `callerMessages` 作为 transcript 来源；这能�
 
 更新 `human_tests/im-gateway-agent.md`：
 
-- TC-IMA-126：Slash Runner Call 正常路径。
+- TC-IMA-126：Slash Runner Call 正常路径（含刷新页面后从源会话持久化恢复 `Run with <runner>` 用户消息与目标 Runner running/完成状态、`runner-call:*` 子会话不展示为新线程的回归记录）。
 - TC-IMA-127：调用结果被下一轮当前 Runner 消费。
 - TC-IMA-128：选择 Runner 不改变当前会话默认 Runner。
-- TC-IMA-129：刷新页面后 Runner Call running 状态从后端持久化恢复，且不展示 `runner-call:*` 子线程。
+- TC-IMA-145：Slash Runner Call 失败状态不误报成功。
 
 ## Review/Fix/Test 闭环方案
 
