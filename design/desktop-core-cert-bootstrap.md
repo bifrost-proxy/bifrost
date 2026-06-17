@@ -16,9 +16,10 @@
 ### 1. 桌面壳层负责延迟证书预检
 
 - `desktop/src-tauri/src/main.rs` 在 backend bootstrap 成功后，会启动独立线程延迟约 2 秒执行证书预检。
-- 数据目录解析优先级当前为：
+- 数据目录由 `bifrost_storage::data_dir()` 解析，优先级当前为：
+  - 进程内 `set_data_dir()` 覆盖值（CLI / 测试启动时注入）
   - 进程环境变量 `BIFROST_DATA_DIR`
-  - 默认 `~/.bifrost`
+  - `~/.bifrost`（无 home 时回退到 `./.bifrost`）
 - 证书预检流程：
   - 确保 `certs/` 目录存在
   - 若 `ca.crt` / `ca.key` 缺失或无效，则生成新的根证书
@@ -60,9 +61,10 @@
 
 ## 依赖项
 
-- `desktop/src-tauri/src/main.rs`
+- `desktop/src-tauri/src/main.rs`（`ensure_desktop_cert_ready` / `prepare_desktop_certificates` / `schedule_desktop_cert_ready`）
 - `desktop/src-tauri/Cargo.toml`
-- `crates/bifrost-tls/src/install.rs`
+- `crates/bifrost-tls/src/install.rs`（`CertInstaller` / `CertStatus` / `install_and_trust_gui`）
+- `crates/bifrost-storage/src/data_dir.rs`（`data_dir()` 解析逻辑）
 - `README.md`
 
 ## 测试方案（含 e2e）
