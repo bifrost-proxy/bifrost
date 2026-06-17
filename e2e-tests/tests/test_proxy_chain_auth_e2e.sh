@@ -12,10 +12,17 @@ source "$ROOT_DIR/e2e-tests/test_utils/process.sh"
 source "$ROOT_DIR/e2e-tests/test_utils/rule_fixture.sh"
 
 PROXY_HOST="${PROXY_HOST:-127.0.0.1}"
-ENTRY_PORT="${ENTRY_PORT:-$((18920 + ($$ % 200)))}"
-UPSTREAM_PORT="${UPSTREAM_PORT:-$((19120 + ($$ % 200)))}"
-ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-$((13120 + ($$ % 200)))}"
-PROXY_ECHO_PORT="${PROXY_ECHO_PORT:-$((13320 + ($$ % 200)))}"
+if [[ -z "${ENTRY_PORT:-}" || -z "${UPSTREAM_PORT:-}" || -z "${ECHO_HTTP_PORT:-}" || -z "${PROXY_ECHO_PORT:-}" ]]; then
+    PORT_BASE="$(pick_available_base_port "${BIFROST_E2E_PROXY_CHAIN_BASE_PORT:-0}" 4)"
+    if [[ -z "$PORT_BASE" || "$PORT_BASE" == "0" ]]; then
+        echo "failed to allocate proxy chain e2e ports" >&2
+        exit 1
+    fi
+    ENTRY_PORT="${ENTRY_PORT:-$PORT_BASE}"
+    UPSTREAM_PORT="${UPSTREAM_PORT:-$((PORT_BASE + 1))}"
+    ECHO_HTTP_PORT="${ECHO_HTTP_PORT:-$((PORT_BASE + 2))}"
+    PROXY_ECHO_PORT="${PROXY_ECHO_PORT:-$((PORT_BASE + 3))}"
+fi
 
 BIFROST_BIN="$ROOT_DIR/target/release/bifrost"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
@@ -153,6 +160,32 @@ perform_request() {
     rm -f "$headers_file" "$body_file"
 }
 
+dump_diagnostics() {
+    echo "" >&2
+    echo "---- proxy chain diagnostics ----" >&2
+    echo "entry_port=${ENTRY_PORT} upstream_port=${UPSTREAM_PORT} echo_http_port=${ECHO_HTTP_PORT} proxy_echo_port=${PROXY_ECHO_PORT}" >&2
+    echo "HTTP status: ${HTTP_STATUS:-<empty>}" >&2
+    if [[ -n "${HTTP_HEADERS:-}" ]]; then
+        echo "HTTP headers:" >&2
+        printf '%s\n' "$HTTP_HEADERS" >&2
+    fi
+    if [[ -n "${HTTP_BODY:-}" ]]; then
+        echo "HTTP body:" >&2
+        printf '%s\n' "$HTTP_BODY" >&2
+    fi
+    for log_file in \
+        "${TEST_ROOT_DIR}/entry-bifrost.log" \
+        "${TEST_ROOT_DIR}/upstream-bifrost.log" \
+        "${TEST_ROOT_DIR}/http_echo.log" \
+        "${TEST_ROOT_DIR}/proxy_echo.log"; do
+        if [[ -f "$log_file" ]]; then
+            echo "" >&2
+            echo "---- tail ${log_file} ----" >&2
+            tail -n 120 "$log_file" >&2 || true
+        fi
+    done
+}
+
 prepare_workspace() {
     TEST_ROOT_DIR="$(mktemp -d "${ROOT_DIR}/.bifrost-e2e-proxy-chain.XXXXXX")"
     ENTRY_DATA_DIR="${TEST_ROOT_DIR}/entry-data"
@@ -211,7 +244,10 @@ start_entry_bifrost() {
 test_bifrost_proxy_chain() {
     log_section "双 Bifrost 代理链路"
     perform_request "http://chain.test/chain?via=entry"
-    assert_status_2xx "$HTTP_STATUS" "双代理链路请求成功" || return 1
+    assert_status_2xx "$HTTP_STATUS" "双代理链路请求成功" || {
+        dump_diagnostics
+        return 1
+    }
     assert_body_contains '"parsed_path": "/chain"' "$HTTP_BODY" "上游 Bifrost 继续转发到最终 echo 服务" || return 1
     assert_body_contains '"query_string": "via=entry"' "$HTTP_BODY" "双代理链路保留查询参数" || return 1
 }

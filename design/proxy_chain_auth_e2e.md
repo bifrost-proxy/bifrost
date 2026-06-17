@@ -25,9 +25,12 @@
   - 断言最终响应成功、body 包含 `proxy_chain_ok`、`proxy-authorization` 头为 `Basic dXNlcjpwYXNz`，且 query 透传 `via=entry`
 - 在 `e2e-tests/tests/test_proxy_chain_auth_e2e.sh` 新增 shell E2E：
   - 直接启动 release 版 `bifrost` 二进制（`target/release/bifrost`，或 `.exe`），分别使用独立 `BIFROST_DATA_DIR`
+  - 所有下游服务都使用本机 mock：入口 Bifrost、上游 Bifrost、HTTP echo 与 proxy echo 都绑定在 `127.0.0.1`，不得依赖公网或 CI runner 的外部网络可达性。
+  - 端口通过 `pick_available_base_port` 选择连续动态端口段，避免 macOS/Linux shell shard 并发时使用 `$$ % 200` 这类窄窗口导致本地下游 mock 或上游 Bifrost 被端口碰撞污染。
   - 使用规则夹具 `e2e-tests/rules/forwarding/proxy_chain_entry_auth.txt` 与 `proxy_chain_upstream_host.txt`，通过 `render_rule_fixture_to_file` 渲染端口占位符
   - 启动 Python mock：`e2e-tests/mock_servers/http_echo_server.py`（最终 echo）与 `e2e-tests/mock_servers/proxy_echo_server.py`（专门校验 `Proxy-Authorization`）
   - 一个脚本同时覆盖 `test_bifrost_proxy_chain`（双 Bifrost 代理链路）与 `test_downstream_proxy_auth`（下游代理鉴权 absolute-form + `Proxy-Authorization: Basic dXNlcjpwYXNz`）
+  - 如果双代理链路返回非 2xx，脚本必须输出状态码、响应头、响应体，以及 entry/upstream/mock 日志尾部，方便一次性判断是端口冲突、上游进程异常、规则加载问题还是产品回归。
 
 ## 依赖项
 
