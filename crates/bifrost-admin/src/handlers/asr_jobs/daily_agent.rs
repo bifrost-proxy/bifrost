@@ -1055,6 +1055,11 @@ async fn run_external_daily_agent_prompt_with_params(
         "codex" => "run".to_string(),
         _ => "send".to_string(),
     };
+    let adapter_config = daily_agent_external_runner_adapter_config(
+        effective.settings.adapter.as_str(),
+        &effective.settings.adapter_config,
+        task.daily_agent.timeout_ms,
+    );
 
     let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),
@@ -1068,7 +1073,7 @@ async fn run_external_daily_agent_prompt_with_params(
         adapter: effective.settings.adapter.clone(),
         work_dir: Some(daily_dir.to_path_buf()),
         instructions: None,
-        adapter_config: effective.settings.adapter_config.clone(),
+        adapter_config,
         allow_work_dirs: vec![
             daily_dir.to_string_lossy().to_string(),
             daily_dir_for_task(&task.id).to_string_lossy().to_string(),
@@ -1100,6 +1105,32 @@ async fn run_external_daily_agent_prompt_with_params(
     }
 
     Ok(run_result)
+}
+
+fn daily_agent_external_runner_adapter_config(
+    adapter: &str,
+    config: &crate::im_gateway::external_cli::ExternalCliAdapterConfig,
+    daily_timeout_ms: u64,
+) -> crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+    let mut config = config.clone();
+    if adapter != "chatgpt_web" {
+        return config;
+    }
+    let inner_timeout_secs = daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms);
+    config.timeout_secs = Some(match config.timeout_secs {
+        Some(existing) => existing.min(inner_timeout_secs),
+        None => inner_timeout_secs,
+    });
+    config
+}
+
+fn daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms: u64) -> u64 {
+    const MIN_TIMEOUT_SECS: u64 = 1;
+    const OUTER_TIMEOUT_HEADROOM_SECS: u64 = 30;
+    let daily_timeout_secs = daily_timeout_ms / 1000;
+    daily_timeout_secs
+        .saturating_sub(OUTER_TIMEOUT_HEADROOM_SECS)
+        .max(MIN_TIMEOUT_SECS)
 }
 
 fn daily_agent_external_runner_params(

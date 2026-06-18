@@ -962,7 +962,39 @@ impl ExternalCliRuntime {
                         metadata: BTreeMap::new(),
                     }
                 }
-                Err(error) => return Err(error),
+                Err(error) => {
+                    let response = format!("ChatGPT Web run failed: {error}");
+                    let mut metadata = BTreeMap::new();
+                    let diagnostics_path = run_dir.join("failure_diagnostics.json");
+                    if tokio::fs::try_exists(&diagnostics_path)
+                        .await
+                        .unwrap_or(false)
+                    {
+                        metadata.insert(
+                            "failureDiagnostics".to_string(),
+                            diagnostics_path.display().to_string(),
+                        );
+                    }
+                    crate::im_gateway::chatgpt_web::ChatGptWebRunOutput {
+                        status: ExternalCliRunStatus::Failed,
+                        exit_code: None,
+                        stdout: Vec::new(),
+                        stderr: error.as_bytes().to_vec(),
+                        response: response.clone(),
+                        responses: vec![response.clone()],
+                        events: vec![ExternalCliProgressEvent {
+                            event_type: ExternalCliProgressEventType::RunFailed,
+                            content: response,
+                            title: Some("Failed".to_string()),
+                            raw: serde_json::json!({
+                                "type": "run_failed",
+                                "adapter": crate::im_gateway::chatgpt_web::ADAPTER_ID,
+                                "error": error,
+                            }),
+                        }],
+                        metadata,
+                    }
+                }
             };
             tokio::fs::write(&last_message_path, output.response.as_bytes())
                 .await
