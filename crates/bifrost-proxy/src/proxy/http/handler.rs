@@ -1229,13 +1229,17 @@ fn h2_body_recovery_action(
 }
 
 fn should_use_metrics_only_forwarding_mode(
-    skip_binary_recording: bool,
+    _skip_binary_recording: bool,
     _has_rules: bool,
-    needs_processing: bool,
-    is_websocket: bool,
-    is_sse: bool,
+    _needs_processing: bool,
+    _is_websocket: bool,
+    _is_sse: bool,
 ) -> bool {
-    skip_binary_recording && !needs_processing && !is_websocket && !is_sse
+    // Binary performance mode must only skip response body persistence. The
+    // traffic list/export/replay/debugging workflows still rely on a metadata
+    // record being created for the request, so never downgrade to pure
+    // metrics-only forwarding.
+    false
 }
 
 pub struct ConnectionErrorInfo {
@@ -5169,10 +5173,10 @@ mod tests {
         assert!(!should_use_metrics_only_forwarding_mode(
             false, false, false, false, false
         ));
-        assert!(should_use_metrics_only_forwarding_mode(
+        assert!(!should_use_metrics_only_forwarding_mode(
             true, false, false, false, false
         ));
-        assert!(should_use_metrics_only_forwarding_mode(
+        assert!(!should_use_metrics_only_forwarding_mode(
             true, true, false, false, false
         ));
         assert!(!should_use_metrics_only_forwarding_mode(

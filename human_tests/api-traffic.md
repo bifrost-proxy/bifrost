@@ -461,3 +461,56 @@
 ```bash
 rm -rf .bifrost-test
 ```
+---
+
+### TC-ATR-PR260-01：回归 — malformed clear 请求不会清空全部流量
+
+**关联修复**：PR #260 阻塞问题，`DELETE /_bifrost/api/traffic` 收到非空但非法 JSON body 时必须返回 400，不能退化为 clear-all。
+
+**操作步骤**：
+1. 按前置条件启动临时 Bifrost，并产生至少 2 条 traffic record。
+2. 记录当前流量数量：
+   ```bash
+   before=$(curl -s http://127.0.0.1:8800/_bifrost/api/traffic | jq '.records | length')
+   ```
+3. 发送 malformed clear 请求：
+   ```bash
+   status=$(curl -s -o /tmp/bifrost-clear-malformed.json -w '%{http_code}' \
+  -X DELETE http://127.0.0.1:8800/_bifrost/api/traffic \
+  -H 'Content-Type: application/json' \
+  -d '{"ids":["broken"')
+   ```
+4. 再次查询流量数量：
+   ```bash
+   after=$(curl -s http://127.0.0.1:8800/_bifrost/api/traffic | jq '.records | length')
+   ```
+
+**预期结果**：
+- `status` 为 `400`。
+- `/tmp/bifrost-clear-malformed.json` 中包含非法 JSON 错误信息。
+- `after` 与 `before` 一致，已有流量记录没有被清空。
+
+**本次执行记录（2026-06-18）**：
+- 已补充单元测试覆盖 `parse_clear_traffic_request_body`：malformed JSON 返回错误、空 body 保持 clear-all 语义、合法 ids 正常解析。
+- 受限于本轮修复优先在远端仓库提交，完整临时代理手工链路待 CI/人工环境继续执行。
+
+---
+
+### TC-ATR-PR260-02：回归 — 二进制性能模式仍保留 traffic metadata record
+
+**关联修复**：PR #260 阻塞问题，默认开启 binary traffic performance mode 时，二进制响应可以跳过 body 持久化，但必须保留 traffic metadata record。
+
+**操作步骤**：
+1. 按前置条件启动临时 Bifrost，确认 `binary_traffic_performance_mode=true`。
+2. 通过代理请求一个返回 `Content-Type: application/octet-stream` 的测试端点。
+3. 查询 traffic list，并按 URL 或 content type 定位该请求。
+4. 对定位到的记录执行 `traffic get` / export 验证 metadata 可用。
+
+**预期结果**：
+- traffic list 中可以看到该二进制请求。
+- 记录至少包含 method、url、status、request headers、response headers、timing、content type 等 metadata。
+- response body 可以不持久化，但不能整条记录消失。
+
+**本次执行记录（2026-06-18）**：
+- 已补充/调整单元测试，确认 metrics-only forwarding 对 binary fast path 返回 false，避免跳过 metadata record 创建。
+- 完整代理链路待 CI/人工环境继续执行。
