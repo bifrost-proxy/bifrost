@@ -465,12 +465,14 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 - Daily Agent 会清理该 Agent session 关联的历史 Web conversation，并以新 ChatGPT 对话发送完整 `AGENTS.md`、术语和当日 Markdown 内容。
 - `session_key` 不传给 ChatGPT Web adapter，避免不同日期或不同 Agent 复用长对话状态。
 - 如果首次响应未通过日报标题、日期、关键章节和长度门禁，且 adapter 返回了新的 `conversationId`，后端会在同一新对话内追加一次明确“直接输出完整日报正文”的纠偏重试。
+- 如果纠偏重试仍返回被截断的长报告，后端会继续在同一新对话内最多追加 3 次续写请求，并把续写内容合并后重新执行日报标题、日期、关键章节和长度门禁；只有合并后的正文通过门禁才写入 report 与 processed state。
 
 **超时与失败诊断**：
 - Daily Agent 外层仍使用 `timeout_ms` 作为最终运行上限。
 - ChatGPT Web adapter 的内部 `timeout_secs` 会被下压到 `timeout_ms - 30s`（至少 1 秒），且不会放大用户在 runner 上配置的更短 timeout；这样浏览器 handoff、最终回复等待或页面扫描应先由 Web adapter 失败，外层 Daily timeout 只作为兜底。
 - `ExternalCliRuntime` 必须把 ChatGPT Web 普通失败持久化为 failed run，而不是直接返回错误；run 目录必须包含 `result.json`、`cli.stderr.log`、`normalized_events.jsonl`、`last_message.md` 和必要的 `failure_diagnostics.json` 路径元数据。
 - 失败状态会返回到 Daily Agent 并记录到当前 Agent 的 `last_status`、`last_error` 和 `last_run_id`；不更新 processed state，也不写入缺失或未通过门禁的 report。
+- ChatGPT Web 登录浏览器关闭或 CDP 断开时，如果本轮已经捕获并写入有效 `auth_state.json`，后端会重新读取该 auth state 并恢复为登录成功，避免“登录已捕获但窗口关闭被误判失败”的竞态。
 
 **Conversation 管理**：
 - 默认本地状态 key 为 `asr-daily:<task_id>:<agent_id>`，用于隔离不同 Agent 的状态文件和可观测信息。
@@ -894,7 +896,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
      │              │                  │                   │               │             │
 ```
 
-### 13.2 ChatGPT Web 首次 + 后续投递
+### 13.2 ChatGPT Web 每日期新对话 + 纠偏续写
 
 ```
 ┌────────────┐  ┌──────────────┐  ┌─────────────────┐  ┌──────────────┐
@@ -905,24 +907,34 @@ build_daily_agent_change_plan(task, trigger, date, force)
       │─check state───▶│                    │                   │
       │◀─not_initialized                    │                   │
       │                │                    │                   │
-      │─[首次: 2 条消息]─────────────────── ▶│                  │
+      │─[每日期: 新对话 2 条消息]───────────▶│                  │
       │                │                    │─msg1: AGENTS.md──▶│
       │                │                    │                   │
       │                │                    │─msg2: daily text──▶│
       │                │                    │◀─response─────────│
       │◀─result + conv_ref─────────────────│                   │
       │                │                    │                   │
-      │─persist state─▶│                    │                   │
-      │─write report   │                    │                   │
+      │─validate report title/date/sections/length              │
+      │                │                    │                   │
+      │─[invalid + conv_ref] retry same conversation───────────▶│
+      │                │                    │─msg: output final │
+      │                │                    │◀─response─────────│
+      │◀─retry result──────────────────────│                   │
+      │                │                    │                   │
+      │─[still truncated] continue same conversation───────────▶│
+      │                │                    │─msg: continue tail│
+      │                │                    │◀─response─────────│
+      │◀─continuation result───────────────│                   │
+      │                │                    │                   │
+      │─merge + validate                    │                   │
+      │─persist state / write report        │                   │
       │                │                    │                   │
       ╠═══════════════ 次日 ════════════════════════════════════╣
       │                │                    │                   │
       │─check state───▶│                    │                   │
-      │◀─initialized   │                    │                   │
+      │◀─clear old conversation             │                   │
       │                │                    │                   │
-      │─[后续: 1 条消息]─────────────────── ▶│                  │
-      │                │                    │─msg: tail only───▶│
-      │                │                    │  (不重发AGENTS.md) │
+      │─[新日期: 重新发送完整 AGENTS + 当日内容]───────────────▶│
       │                │                    │◀─response─────────│
       │◀─result────────────────────────────│                   │
       │                │                    │                   │

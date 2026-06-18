@@ -1814,6 +1814,18 @@ async fn ensure_authenticated(
     open_login_and_capture(config).await
 }
 
+async fn read_logged_in_auth_state(config: &RuntimeConfig) -> Result<Option<AuthState>, String> {
+    let Ok(state) = read_auth_state(&config.state_path).await else {
+        return Ok(None);
+    };
+    let status = auth_status_from_state(config, &state).await?;
+    if status.logged_in {
+        Ok(Some(state))
+    } else {
+        Ok(None)
+    }
+}
+
 async fn auth_status_from_state(
     config: &RuntimeConfig,
     state: &AuthState,
@@ -1984,12 +1996,26 @@ async fn open_login_and_capture(config: &RuntimeConfig) -> Result<AuthState, Str
                 break;
             }
             if browser.has_exited()? {
+                if let Some(state) = read_logged_in_auth_state(config).await? {
+                    info!(
+                        state_path = %config.state_path.display(),
+                        "chatgpt_web login: browser closed after a valid auth state was captured"
+                    );
+                    return Ok(state);
+                }
                 return Err(
                     "auth_required: ChatGPT browser login window was closed before login completed"
                         .to_string(),
                 );
             }
             if cdp.is_closed() {
+                if let Some(state) = read_logged_in_auth_state(config).await? {
+                    info!(
+                        state_path = %config.state_path.display(),
+                        "chatgpt_web login: CDP closed after a valid auth state was captured"
+                    );
+                    return Ok(state);
+                }
                 return Err(
                     "auth_required: ChatGPT browser login window was closed before login completed"
                         .to_string(),
