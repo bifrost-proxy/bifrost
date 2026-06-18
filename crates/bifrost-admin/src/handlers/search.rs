@@ -9,7 +9,7 @@ use tracing::warn;
 
 use super::{error_response, json_response, method_not_allowed, BoxBody};
 use crate::query_service::AdminQueryService;
-use crate::search::{SearchProgress, SearchRequest};
+use crate::search::{SearchProgress, SearchRequest, SearchedRange};
 use crate::state::SharedAdminState;
 
 const SEARCH_HANDLER_TIMEOUT: Duration = Duration::from_secs(310);
@@ -104,6 +104,7 @@ struct SearchStreamDonePayload {
     next_cursor: Option<u64>,
     has_more: bool,
     search_id: String,
+    searched_range: SearchedRange,
 }
 
 #[derive(Debug, serde::Serialize)]
@@ -207,6 +208,7 @@ async fn execute_search_stream(
                     next_cursor: response.next_cursor,
                     has_more: response.has_more,
                     search_id: response.search_id,
+                    searched_range: response.searched_range,
                 };
                 if let Ok(json) = serde_json::to_string(&done) {
                     if tx

@@ -26,6 +26,8 @@
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
 | [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 37 | traffic list/get/search/clear 命令，含多维度过滤器、代理入口端口筛选、搜索范围控制、交互式搜索 |
 | [search-jsonpath.md](./search-jsonpath.md) | Search JSONPath/Header/时间窗/NDJSON | 6 | `bifrost search` 新增 `--req-json/--res-json` JSONPath body 字段过滤、`--req-header-eq/--res-header-eq` 大小写无关 header 等值过滤、`--since/--until/--latest` 时间窗剪枝、`--format ndjson` 行式 JSON 输出与 `time_range` 透传到 admin |
+| [search-include-body.md](./search-include-body.md) | Search Include Body/Headers 与 Traffic Batch Get | 6 | `bifrost search --include` 在 JSON/NDJSON 输出中保留 body/header payload，`traffic get --ids` 批量获取 body/header 并处理缺失 id 与上限错误 |
+| [traffic-replay.md](./traffic-replay.md) | Traffic Export 与 Replay | 6 | `traffic export` 导出 curl/HAR，`traffic replay` 支持 JSON Patch、refresh-auth、旧字段兼容，并验证 admin `success:false` 时 CLI 非 0 退出 |
 | [cli-ca-cert.md](./cli-ca-cert.md) | CLI CA 证书管理 | 12 | ca generate/export/info/install 命令，含强制重新生成、指定路径导出、证书格式验证 |
 | [cli-values-scripts.md](./cli-values-scripts.md) | CLI Values 与 Scripts | 30 | value list/add/show/set/update/delete/import 和 script list/add/show/get/update/run/rename/delete |
 | [cli-whitelist.md](./cli-whitelist.md) | CLI 白名单管理 | 31 | whitelist 全子命令：list/add/remove/allow-lan/status/mode/pending/approve/reject/clear-pending/add-temporary/remove-temporary |

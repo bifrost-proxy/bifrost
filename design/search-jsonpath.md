@@ -57,8 +57,8 @@ enum BodyCacheEntry { Json(Value), NonJson, Missing }
 
 ## time_range
 
-- `SearchRequest.time_range.since_ms` / `until_ms` 在 `matches_filter_compact` 中实现：`ts < since` 或 `ts > until` 直接 false。
-- 不下推到 SQL（避免改 QueryParams schema），但可避免对剩余 record 的 body/header 解析。
+- `SearchRequest.time_range.since_ms` / `until_ms` 下推到 `QueryParams.since_ms` / `until_ms`，在 SQL `WHERE timestamp >= ?` / `timestamp <= ?` 层先剪掉超窗记录。
+- SQL 下推后，超窗记录不进入 `SearchEngine` 的逐条 matcher，也不会消耗 `max_scan` 或触发 body/header 解析；空窗口会返回 0 命中且 `searched_range.scanned_count == 0`。
 
 ## SearchResponse.searched_range
 
@@ -81,7 +81,7 @@ enum BodyCacheEntry { Json(Value), NonJson, Missing }
 - 在 `OutputFormat` 中加 `Ndjson`（保留 `Json/JsonPretty`）。
 
 `run_simple_search`：
-- 对 `json/json-pretty/ndjson` 走专门 collector：收集 `results`、`searched_range`、`time_range` 并整体输出/逐条输出。
+- 对 `json/json-pretty/ndjson` 走专门 collector：收集 `results`、`searched_range`、`time_range` 并整体输出/逐条输出；SSE `done` 事件必须携带 `searched_range`，让 CLI 结构化输出能验证 SQL 预剪枝没有消耗 `max_scan`。
 
 ## 远端 `bifrost remote traffic search`
 
@@ -97,5 +97,6 @@ enum BodyCacheEntry { Json(Value), NonJson, Missing }
 ## 测试
 
 - 单测：`json_path.rs` 8 个、`engine.rs` 4 个（req body 命中 / res body 命中 / ts 区间 / 非 JSON body 不匹配）、CLI duration 解析 4 个、`command_search_args` 映射 1 个。
+- E2E：`e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh` 验证 `--until` 旧时间窗在 SQL 层剪枝，CLI JSON 输出 `searched_range.scanned_count == 0`。
 - human_tests/search-jsonpath.md：6 个用例（since/until/latest/req-json/res-header/混合）。
 - 全量：`cargo test -p bifrost-admin -p bifrost-cli -p bifrost-command`。

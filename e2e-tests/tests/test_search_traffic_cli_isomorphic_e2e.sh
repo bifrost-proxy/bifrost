@@ -1,6 +1,8 @@
 #!/bin/bash
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
+: "${BIFROST_DISABLE_TRAY:=1}"
+export BIFROST_DISABLE_TRAY
 
 
 set -euo pipefail
@@ -28,6 +30,7 @@ BODY_MARKER=""
 HEADER_MARKER=""
 POST_ID=""
 POST_SEQ=""
+PUT_ID=""
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -227,6 +230,18 @@ seed_traffic() {
         echo "failed to locate POST traffic seq" >&2
         exit 1
     }
+
+    PUT_ID="$(admin_get "/traffic?limit=50" | jq -r '
+        (.records // [])
+        | map(select(((.method // .m // "") | ascii_downcase) == "put" and ((.path // .p // "") | contains("/put"))))
+        | sort_by(.seq // .sequence // 0)
+        | last
+        | .id // empty
+    ')"
+    [[ -n "$PUT_ID" ]] || {
+        echo "failed to locate PUT traffic record" >&2
+        exit 1
+    }
 }
 
 capture_tty_output() {
@@ -355,6 +370,26 @@ test_search_formats_and_limits() {
     assert_json_expr "$limited_output" '(.results | length) <= 2' "--max-results limits result count"
 }
 
+test_search_include_and_time_window_regressions() {
+    header "Local search include/time-window regression coverage"
+    local include_ndjson stale_window_json
+
+    include_ndjson="$(run_cli search "$BODY_MARKER" --body --include bodies,headers --format ndjson)"
+    if printf '%s\n' "$include_ndjson" | jq -e '
+        select(.type == "result")
+        | (.bodies.request.bytes_b64? | type == "string")
+          and (.headers.request? | type == "array")
+    ' >/dev/null 2>&1; then
+        pass "search --include bodies,headers --format ndjson preserves payloads"
+    else
+        fail "search --include bodies,headers --format ndjson preserves payloads"
+        echo "    output: $(printf '%s' "$include_ndjson" | head -n 5)" >&2
+    fi
+
+    stale_window_json="$(run_cli search "$BODY_MARKER" --until 1970-01-01T00:00:00Z --max-scan 1 --format json)"
+    assert_json_expr "$stale_window_json" '.total_matched == 0 and .searched_range.scanned_count == 0' "stale --until window is filtered before max-scan"
+}
+
 test_search_interactive_modes() {
     header "Local interactive search coverage"
     local interactive_out plain_out
@@ -467,6 +502,26 @@ test_traffic_get_and_tty() {
     rm -f "$tty_output"
 }
 
+test_traffic_replay_failure_exit_code() {
+    header "Local traffic replay failure exit-code regression"
+    local replay_output replay_status replay_json
+
+    set +e
+    replay_output="$(run_cli traffic replay "$PUT_ID" --patch '/limit=5' --format json)"
+    replay_status=$?
+    set -e
+    replay_json="$(printf '%s\n' "$replay_output" | sed -n '/^{/p' | head -n 1)"
+
+    if [[ "$replay_status" -ne 0 ]]; then
+        pass "traffic replay success=false exits non-zero"
+    else
+        fail "traffic replay success=false exits non-zero"
+        echo "    output: $(printf '%s' "$replay_output" | head -n 5)" >&2
+    fi
+    assert_json_expr "$replay_json" '.success == false and (.error | type == "string")' "traffic replay prints server failure JSON"
+    assert_text_contains "$replay_output" "Replay failed:" "traffic replay error summary includes Replay failed"
+}
+
 test_traffic_clear_commands() {
     header "Local traffic clear coverage"
     local before after delete_output clear_output
@@ -507,9 +562,11 @@ main() {
     test_search_scope_filters
     test_search_filter_flags
     test_search_formats_and_limits
+    test_search_include_and_time_window_regressions
     test_search_interactive_modes
     test_traffic_list_matrix
     test_traffic_get_and_tty
+    test_traffic_replay_failure_exit_code
     test_traffic_clear_commands
 
     print_summary

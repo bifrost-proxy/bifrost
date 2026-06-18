@@ -168,6 +168,15 @@ struct SseDonePayload {
     has_more: bool,
     #[allow(dead_code)]
     search_id: String,
+    #[serde(default)]
+    searched_range: SseSearchedRange,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct SseSearchedRange {
+    oldest_ts_ms: Option<i64>,
+    newest_ts_ms: Option<i64>,
+    scanned_count: usize,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,22 +425,7 @@ fn stream_ndjson_output(reader: Box<dyn std::io::Read + Send>) -> i32 {
     for event in parse_sse_events(reader) {
         match event {
             SseEvent::Result(item) => {
-                let line = serde_json::json!({
-                    "type": "result",
-                    "id": item.record.id,
-                    "seq": item.record.seq,
-                    "method": item.record.m,
-                    "host": item.record.h,
-                    "path": item.record.p,
-                    "status": item.record.s,
-                    "protocol": item.record.proto,
-                    "timestamp": item.record.ts,
-                    "duration_ms": item.record.dur,
-                    "matches": item.matches.iter().map(|m| serde_json::json!({
-                        "field": m.field,
-                        "preview": m.preview,
-                    })).collect::<Vec<_>>(),
-                });
+                let line = search_result_to_json(&item, true);
                 let _ = writeln!(out, "{}", line);
             }
             SseEvent::Done(d) => {
@@ -440,6 +434,7 @@ fn stream_ndjson_output(reader: Box<dyn std::io::Read + Send>) -> i32 {
                     "total_matched": d.total_matched,
                     "total_searched": d.total_searched,
                     "has_more": d.has_more,
+                    "searched_range": searched_range_to_json(&d.searched_range),
                 });
                 let _ = writeln!(out, "{}", line);
             }
@@ -463,6 +458,50 @@ fn stream_ndjson_output(reader: Box<dyn std::io::Read + Send>) -> i32 {
         return 1;
     }
     0
+}
+
+fn search_result_to_json(item: &SearchResultItem, include_type: bool) -> serde_json::Value {
+    let (bodies_json, headers_json) = search_payloads_to_json(item);
+    let mut obj = serde_json::json!({
+        "id": &item.record.id,
+        "seq": item.record.seq,
+        "method": &item.record.m,
+        "host": &item.record.h,
+        "path": &item.record.p,
+        "status": item.record.s,
+        "protocol": &item.record.proto,
+        "request_size": item.record.req_sz,
+        "response_size": item.record.res_sz,
+        "timestamp": item.record.ts,
+        "duration_ms": item.record.dur,
+        "matches": item.matches.iter().map(|m| serde_json::json!({
+            "field": m.field,
+            "preview": m.preview,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(map) = obj.as_object_mut() {
+        if include_type {
+            map.insert(
+                "type".to_string(),
+                serde_json::Value::String("result".to_string()),
+            );
+        }
+        if let Some(v) = bodies_json {
+            map.insert("bodies".to_string(), v);
+        }
+        if let Some(v) = headers_json {
+            map.insert("headers".to_string(), v);
+        }
+    }
+    obj
+}
+
+fn searched_range_to_json(range: &SseSearchedRange) -> serde_json::Value {
+    serde_json::json!({
+        "oldest_ts_ms": range.oldest_ts_ms,
+        "newest_ts_ms": range.newest_ts_ms,
+        "scanned_count": range.scanned_count,
+    })
 }
 
 fn start_search_stream(
@@ -810,44 +849,19 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
     let mut total_searched = 0;
     let mut has_more = false;
     let mut error_message: Option<String> = None;
+    let mut searched_range = SseSearchedRange::default();
 
     for event in parse_sse_events(reader) {
         match event {
             SseEvent::Result(item) => {
-                let (bodies_json, headers_json) = search_payloads_to_json(&item);
-                let mut obj = serde_json::json!({
-                    "id": item.record.id,
-                    "seq": item.record.seq,
-                    "method": item.record.m,
-                    "host": item.record.h,
-                    "path": item.record.p,
-                    "status": item.record.s,
-                    "protocol": item.record.proto,
-                    "request_size": item.record.req_sz,
-                    "response_size": item.record.res_sz,
-                    "duration_ms": item.record.dur,
-                    "timestamp": item.record.ts,
-                    "matches": item.matches.iter().map(|m| {
-                        serde_json::json!({
-                            "field": m.field,
-                            "preview": m.preview,
-                        })
-                    }).collect::<Vec<_>>(),
-                });
-                if let Some(map) = obj.as_object_mut() {
-                    if let Some(v) = bodies_json {
-                        map.insert("bodies".to_string(), v);
-                    }
-                    if let Some(v) = headers_json {
-                        map.insert("headers".to_string(), v);
-                    }
-                }
+                let obj = search_result_to_json(&item, false);
                 results.push(obj);
             }
             SseEvent::Done(d) => {
                 total_matched = d.total_matched;
                 total_searched = d.total_searched;
                 has_more = d.has_more;
+                searched_range = d.searched_range;
             }
             SseEvent::Progress(progress) => {
                 total_matched = progress.total_matched;
@@ -867,6 +881,7 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
             "total_matched": total_matched,
             "total_searched": total_searched,
             "has_more": has_more,
+            "searched_range": searched_range_to_json(&searched_range),
         });
         if pretty {
             println!("{}", serde_json::to_string_pretty(&output).unwrap());
@@ -881,6 +896,7 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
         "total_matched": total_matched,
         "total_searched": total_searched,
         "has_more": has_more,
+        "searched_range": searched_range_to_json(&searched_range),
     });
 
     if pretty {
@@ -2316,10 +2332,62 @@ mod tests {
     }
 
     #[test]
+    fn parse_sse_events_supports_done_searched_range() {
+        let sse = b"event: done\ndata: {\"total_searched\":0,\"total_matched\":0,\"next_cursor\":null,\"has_more\":false,\"search_id\":\"s1\",\"searched_range\":{\"oldest_ts_ms\":null,\"newest_ts_ms\":null,\"scanned_count\":0}}\n\n";
+        let events: Vec<_> = parse_sse_events(&sse[..]).collect();
+
+        assert_eq!(events.len(), 1);
+        match &events[0] {
+            SseEvent::Done(done) => {
+                assert_eq!(done.total_searched, 0);
+                assert_eq!(done.searched_range.scanned_count, 0);
+                assert!(done.searched_range.oldest_ts_ms.is_none());
+            }
+            other => panic!("unexpected event: {:?}", std::mem::discriminant(other)),
+        }
+    }
+
+    #[test]
     fn parse_sse_events_ignores_unknown_events() {
         let sse = b"event: unknown\ndata: {\"foo\":1}\n\n";
         let events: Vec<_> = parse_sse_events(&sse[..]).collect();
         assert!(events.is_empty());
+    }
+
+    #[test]
+    fn search_result_to_json_preserves_include_payloads_for_ndjson() {
+        let item = SearchResultItem {
+            record: sample_traffic_summary(),
+            matches: vec![MatchLocation {
+                field: "request_body".to_string(),
+                preview: "token".to_string(),
+                offset: 5,
+            }],
+            bodies: Some(BodiesPayloadIn {
+                request: Some(BodyChunkIn {
+                    bytes_b64: "eyJ0b2tlbiI6dHJ1ZX0=".to_string(),
+                    size: 14,
+                    truncated: false,
+                    content_type: Some("application/json".to_string()),
+                }),
+                response: None,
+            }),
+            headers: Some(HeadersPayloadIn {
+                request: vec![("X-Trace-Id".to_string(), "abc123".to_string())],
+                response: vec![("Content-Type".to_string(), "application/json".to_string())],
+            }),
+        };
+
+        let value = search_result_to_json(&item, true);
+
+        assert_eq!(value["type"], "result");
+        assert_eq!(
+            value["bodies"]["request"]["bytes_b64"],
+            "eyJ0b2tlbiI6dHJ1ZX0="
+        );
+        assert_eq!(value["bodies"]["request"]["truncated"], false);
+        assert_eq!(value["headers"]["request"][0][0], "X-Trace-Id");
+        assert_eq!(value["headers"]["response"][0][1], "application/json");
     }
 
     #[test]
