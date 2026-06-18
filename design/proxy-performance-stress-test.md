@@ -586,6 +586,94 @@ scripts/perf/
 - 峰值 RSS 从 `161.2 MiB` 降到 `110.08 MiB`。该数值会受 allocator 和运行时状态影响，基线提升以 connection monitor 残留清零为主证据，RSS 下降作为辅助证据。
 - 功能等价门禁：HTTP/HTTPS/SSE 子场景无错误、无非 2xx；未关闭转发、录制、规则匹配、TLS 决策或 macOS 应用识别能力。
 
+### 2026-06-19：10 万条写入时 async traffic channel 丢记录
+
+现象：
+
+- `scripts/loadtest-traffic-storage-100k.mjs` 首轮 10 万条真实代理写入后，压测客户端完成 100000 个 2xx 请求，但 Traffic API 在 120 秒内只看到 `13623` 条记录。
+- SQLite 复核 `traffic_records` 和 `traffic_record_details` 均只有 `13623` 条；最新记录 URL 已到 `/record/99981`，说明请求覆盖到末尾但大量中间记录没有落库。
+- 同一临时数据目录的 `body_cache` 有 `100000` 个响应 body 文件、约 `391 MiB`，说明 body 已落盘但 Traffic DB record 被丢弃，形成数据完整性和 orphan body 风险。
+- 日志包含大量 `Traffic channel full, dropping record/update`，首轮计数约 `259695` 条匹配。
+
+根因：
+
+- `AsyncTrafficWriter` 使用固定 `10000` 容量 channel，热路径 `try_send` 在满队列时直接丢弃 record/update。
+- 高并发小响应在数秒内完成 10 万请求，body cache 写入速度明显快于 Traffic DB 异步落库，channel 被打满后产生静默流量记录缺失。
+- 异步 processor 每批只处理 `64` 条 record 和 `32` 条 update，放大了 channel backlog 和 SQLite commit/spawn_blocking 调度开销。
+
+优化：
+
+- 满队列时不再丢弃 TrafficCommand，而是派生等待队列容量的发送任务，保证 record/update 在进程存活期间最终进入 processor。
+- record 批量从 `64` 提升到 `512`，update 批量从 `32` 提升到 `256`，降低事务和调度开销。
+- 启动时 async traffic channel 容量提升到 `MAX_TRAFFIC_MAX_RECORDS * 3`，覆盖 10 万记录上限下 record、completion update 和 app/backfill update 的短时峰值。
+- 新增单测 `test_full_channel_defers_without_dropping_records_or_updates`：buffer=1 且 processor 尚未启动时连续提交 64 条 record/update，最终必须全部落库并应用更新。
+
+复测：
+
+- 修复后 10 万条报告 `traffic-storage-100k-2026-06-18T18-48-34.439Z.json`：`recordCompleteness=1`、`retainedRecords=100000`、`configuredMaxRecords=100000`、`writeRps=20973.15`、`writeP95Ms=19.2`、`errors=0`、`non2xx=0`。
+- 读写查询指标：`latestListP95Ms=0.76`、`hostFilterP95Ms=17.21`、`statusFilterP95Ms=2.68`、`batchDetailP95Ms=16.42`、`urlSearchP95Ms=118.72`、`responseBodySearchP95Ms=417.09`。
+- 10 万 + 5000 overflow 报告 `traffic-storage-100k-2026-06-18T18-51-02.051Z.json`：最终 `retainedRecords=82977`，符合当前触发清理后回落到约 80% 水位再继续写入的策略；读列表、批量详情、URL 搜索和 response body 搜索均无错误。
+- 修复后日志未再出现 `Traffic channel full`、`dropping record` 或 `dropping update`。
+
+剩余观察：
+
+- overflow 场景最终保留约 8.3 万条而不是接近 10 万条，是当前 `trigger=max+min(max*15%,2000)`、`target=max*80%` 策略的结果。该行为有助于降低高频 cleanup，但用户感知上“max_records=100000”并不表示长期接近保留 100000 条，需要在产品/配置文档中明确。
+- response body 搜索在 10 万记录下 p95 约 `370-420ms`，是当前搜索侧主要成本；它主要来自逐批扫描和 body ref 读取，没有 body 全文索引。后续若继续优化，需要在不改变 Search API 语义的前提下单独设计索引或缓存策略。
+
+## 10 万条流量存储专项
+
+本专项用于回答“traffic 记录拉到当前硬上限 100000 后，写入、列表、详情和搜索还能不能稳定工作”。它不是替代代理吞吐压测，而是专门拆出 Traffic DB、body 存储、Admin API 查询和 Search Engine 在高记录数下的退化曲线。
+
+执行入口：
+
+```bash
+cargo build --release --bin bifrost
+BIFROST_BIN=./target/release/bifrost \
+BIFROST_PROXY_PORT=19904 \
+BIFROST_UPSTREAM_PORT=28084 \
+LOADTEST_STORAGE_MAX_RECORDS=100000 \
+LOADTEST_STORAGE_RECORDS=100000 \
+LOADTEST_STORAGE_WRITE_CONCURRENCY=256 \
+BIFROST_DISABLE_TRAY=1 \
+BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+node scripts/loadtest-traffic-storage-100k.mjs
+```
+
+默认行为：
+
+- 启动独立 Bifrost 实例和本地 upstream，使用临时 `BIFROST_DATA_DIR=.bifrost-storage-100k/<run-id>`，并强制 `--no-system-proxy`。
+- 通过 `PUT /_bifrost/api/config/performance` 将 `traffic.max_records` 设置为硬上限 `100000`。
+- 真实代理写入 `100000` 条小 JSON 响应记录，记录写入 RPS、p50/p95/p99、错误数和非 2xx。
+- 等待 Traffic API 可见记录达到目标后，执行最近列表、host 过滤、status 过滤、`/api/traffic/batch` 详情批取、URL 搜索和 response body 搜索。
+- 输出 `.artifacts/loadtest/traffic-storage-100k-<run-id>.json`，包含 `write`、`readSearch`、`before/after traffic_db`、进程资源和 `analysis` 汇总。
+
+可选极限行为：
+
+- `LOADTEST_STORAGE_OVERFLOW_RECORDS=N` 可以在 `100000` 基线之外继续写入 N 条，用于验证 cleanup 触发后的保留水位、删除成本和查询退化。
+- 当启用 overflow 时，预期最终保留量可能回落到清理目标水位附近；这属于当前 retention 策略需要被显式评估的行为，不可误判为写入丢失。
+
+必须采集和评估：
+
+| 指标 | 采集字段 | 评估方式 |
+| --- | --- | --- |
+| max records 配置 | `before/after.performanceConfig.traffic.max_records` | 必须为 `100000`，否则该轮无效 |
+| 写入成功率 | `write.ok / write.started` | 默认必须 100%，否则先归因代理、上游或 DB 写入错误 |
+| 写入吞吐与延迟 | `write.rps`、`write.p95Ms`、`write.p99Ms` | 与同机历史 run 对比，定位 DB 或代理热路径退化 |
+| 记录可见性 | `afterWrite.total`、`analysis.recordCompleteness` | 无 overflow 时应接近 1；有 overflow 时按 retention 水位解释 |
+| 列表性能 | `latestListP95Ms`、`hostFilterP95Ms`、`statusFilterP95Ms` | 区分无过滤、host 索引、status 索引成本 |
+| 批量详情性能 | `batchDetailP95Ms` | 验证 `/api/traffic/batch` 在 200 ids 上限下的真实用户读取成本 |
+| 搜索性能 | `urlSearchP95Ms`、`responseBodySearchP95Ms`、`searchSamples.totalSearched` | 区分 URL 轻字段搜索与 response body 搜索成本 |
+| 资源曲线 | `after.memory.process`、`after.memory.traffic_db` | 观察 RSS、recent cache、DB stats 是否随记录数异常膨胀 |
+
+分析路径：
+
+1. 如果写入 RPS 低但 upstream 和代理成功率正常，优先看 Traffic DB 单写事务、SQLite WAL、cleanup、body serialize 和 `recent_cache`。
+2. 如果 `latest list` 快但 `host/status filter` 慢，检查 SQL 计划和索引是否被 `LIKE` 或排序组合破坏。
+3. 如果 URL 搜索慢，检查 Search Engine 批次大小、cursor 翻页和 `get_search_fields_by_ids` 批量取字段成本。
+4. 如果 response body 搜索慢，先区分 body ref 读取、解码、大小限制和 `max_scan=100000` 全量扫描成本。
+5. 如果启用 overflow 后查询突然变慢，单独分析 cleanup 删除批量、checkpoint/compact 和写锁阻塞。
+6. 任何优化必须保留 Traffic API、Search API、body/header 详情、retention 和导出/replay 可用性，不允许通过跳过记录或删字段换性能。
+
 ## 执行命令
 
 ### 快速 smoke

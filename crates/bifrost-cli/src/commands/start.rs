@@ -25,6 +25,7 @@ use bifrost_core::{expand_rule_references, Rule, UserPassAccountConfig, UserPass
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
     set_data_dir, ConfigChangeEvent, ConfigManager, TrafficConfigUpdate, DEFAULT_REMOTE_BASE_URL,
+    MAX_TRAFFIC_MAX_RECORDS,
 };
 use bifrost_sync::SyncManager;
 use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
@@ -43,7 +44,7 @@ use crate::process::{
     remove_pid, write_runtime_info, RuntimeInfo, RuntimeStartMode,
 };
 
-const ASYNC_TRAFFIC_BUFFER_SIZE: usize = 10000;
+const ASYNC_TRAFFIC_BUFFER_SIZE: usize = MAX_TRAFFIC_MAX_RECORDS * 3;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const PORT_REBIND_OLD_LISTENER_GRACE_PERIOD: Duration = Duration::from_millis(250);
 // Reconcile interval for the system-proxy watcher. Defaults to 30s in production;
