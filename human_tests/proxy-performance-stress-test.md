@@ -296,6 +296,47 @@
 - 脚本报告结构稳定，后续可以按 `schema=bifrost-traffic-storage-loadtest/v1` 横向比较不同 run。
 - 报告字段足够支撑“如何测试、如何评估、如何采集、如何分析”的复盘要求。
 
+### TC-PPS-15：10 万条 response body 搜索热路径优化回归
+
+**操作步骤**：
+
+1. 执行 Search Engine 单元回归，验证文件 body 的大小写不敏感搜索和原始 preview：
+   ```bash
+   cargo test -p bifrost-admin search::engine -- --nocapture
+   ```
+2. 检查 10 万条存储压测脚本语法：
+   ```bash
+   node --check scripts/loadtest-traffic-storage-100k.mjs
+   ```
+3. 构建 release 二进制：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost
+   ```
+4. 真实执行 10 万条压测：
+   ```bash
+   BIFROST_BIN=./target/release/bifrost \
+   BIFROST_PROXY_PORT=19904 \
+   BIFROST_UPSTREAM_PORT=28084 \
+   LOADTEST_STORAGE_MAX_RECORDS=100000 \
+   LOADTEST_STORAGE_RECORDS=100000 \
+   LOADTEST_STORAGE_WRITE_CONCURRENCY=256 \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   node scripts/loadtest-traffic-storage-100k.mjs
+   ```
+5. 读取脚本输出的 `report:` JSON 文件，检查：
+   ```bash
+   node -e 'const fs=require("fs"); const r=JSON.parse(fs.readFileSync(process.argv[1],"utf8")); console.log(JSON.stringify(r.analysis,null,2));' <report-json>
+   ```
+
+**预期结果**：
+
+- Search Engine 单元测试通过，文件 body 搜索保持大小写不敏感且 preview 保留原始大小写。
+- `analysis.configuredMaxRecords=100000`、`analysis.retainedRecords=100000`、`analysis.recordCompleteness=1`。
+- `write.errors=0`、`write.non2xx=0`。
+- `responseBodySearchP95Ms` 低于优化前基线 `417.09ms`；URL 搜索、最近列表、批量详情不出现明显回归。
+- 如尝试修改 Search Engine 批大小或索引策略，必须保留同一脚本报告并与基线横向比较；性能变差的尝试必须回滚并记录原因。
+
 ## 清理步骤
 
 1. 本用例默认只执行静态检查和 `node --check`，不会启动服务。
@@ -339,3 +380,12 @@
   - TC-PPS-13 修复后 10 万条复测：`traffic-storage-100k-2026-06-18T18-48-34.439Z.json`，`recordCompleteness=1`、`retainedRecords=100000`、`configuredMaxRecords=100000`、`writeRps=20973.15`、`writeP95Ms=19.2`、`latestListP95Ms=0.76`、`hostFilterP95Ms=17.21`、`statusFilterP95Ms=2.68`、`batchDetailP95Ms=16.42`、`urlSearchP95Ms=118.72`、`responseBodySearchP95Ms=417.09`。
   - TC-PPS-13 overflow 复测：修正脚本等待 `server_sequence>=105001` 后执行 `LOADTEST_STORAGE_OVERFLOW_RECORDS=5000`，报告 `traffic-storage-100k-2026-06-18T18-51-02.051Z.json`，`retainedRecords=82977`、`writeRps=20908`、`writeP95Ms=19.35`、`latestListP95Ms=0.59`、`hostFilterP95Ms=8.89`、`statusFilterP95Ms=1.6`、`batchDetailP95Ms=13.7`、`urlSearchP95Ms=116.57`、`responseBodySearchP95Ms=372.77`；最终保留量符合当前 cleanup 目标水位策略。
   - TC-PPS-14：`human_tests/readme.md` 已更新本模块为 14 个用例；`scripts/loadtest-traffic-storage-100k.mjs` 包含 `bifrost-traffic-storage-loadtest/v1`、`readSearch`、`recordCompleteness`、`retainedRecords`、`urlSearchP95Ms` 和 `responseBodySearchP95Ms`；脚本显式设置搜索 `scope.all=false`，避免把 URL 搜索误测为全字段搜索。
+- 2026-06-19：通过。执行 TC-PPS-15，继续针对 10 万条 response body 搜索热点做优化与反向尝试：
+  - 单元回归：`cargo test -p bifrost-admin search::engine -- --nocapture` 通过，新增文件 body ASCII 搜索用例覆盖大小写不敏感 keyword 与原始 preview。
+  - 脚本语法：`node --check scripts/loadtest-traffic-storage-100k.mjs` 通过。
+  - release 构建：`SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 通过。
+  - ASCII fast path 首轮：`traffic-storage-100k-2026-06-18T20-14-01.523Z.json`，`recordCompleteness=1`、`retainedRecords=100000`、`writeRps=20044.1`、`writeP95Ms=23.43`、`latestListP95Ms=0.68`、`hostFilterP95Ms=16.98`、`statusFilterP95Ms=2.69`、`batchDetailP95Ms=14.66`、`urlSearchP95Ms=116.71`、`responseBodySearchP95Ms=370.97`。
+  - BodyStore 预分配与缩短锁持有后复测：`traffic-storage-100k-2026-06-18T20-17-32.963Z.json`，`recordCompleteness=1`、`retainedRecords=100000`、`writeRps=18436.58`、`writeP95Ms=22.36`、`latestListP95Ms=0.63`、`hostFilterP95Ms=10.39`、`statusFilterP95Ms=1.95`、`batchDetailP95Ms=14.92`、`urlSearchP95Ms=116.62`、`responseBodySearchP95Ms=364.14`。
+  - 反向尝试：将 `SEARCH_BATCH_SIZE` 从 `1000` 提升到 `5000` 后，`traffic-storage-100k-2026-06-18T20-20-53.118Z.json` 显示 `urlSearchP95Ms=124.09`、`responseBodySearchP95Ms=371.93`，搜索退化，已回滚。
+  - 最终复测：`traffic-storage-100k-2026-06-18T20-24-18.611Z.json`，`recordCompleteness=1`、`retainedRecords=100000`、`configuredMaxRecords=100000`、`writeRps=19550.34`、`writeP95Ms=20.13`、`latestListP95Ms=0.52`、`hostFilterP95Ms=9.41`、`statusFilterP95Ms=1.64`、`batchDetailP95Ms=14.28`、`urlSearchP95Ms=115.32`、`responseBodySearchP95Ms=349.88`。
+  - 结论：对比优化前 10 万条完整写入基线 `responseBodySearchP95Ms=417.09`，最终下降到 `349.88`，约下降 `16.1%`；搜索语义、写入完整性和 URL/list/batch 读路径无功能回归。

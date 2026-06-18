@@ -365,13 +365,13 @@ impl BodyStore {
     pub fn load(&self, body_ref: &BodyRef) -> Option<String> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.clone()),
-            BodyRef::File { path, .. } => {
+            BodyRef::File { path, size } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
                 }
                 let mut file = fs::File::open(&path).ok()?;
-                let mut contents = Vec::new();
+                let mut contents = Vec::with_capacity(*size);
                 file.read_to_end(&mut contents).ok()?;
                 Some(String::from_utf8_lossy(&contents).to_string())
             }
@@ -400,13 +400,13 @@ impl BodyStore {
     pub fn load_bytes(&self, body_ref: &BodyRef) -> Option<Vec<u8>> {
         match body_ref {
             BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
-            BodyRef::File { path, .. } => {
+            BodyRef::File { path, size } => {
                 let path = PathBuf::from(path);
                 if !path.exists() {
                     return None;
                 }
                 let mut file = fs::File::open(&path).ok()?;
-                let mut contents = Vec::new();
+                let mut contents = Vec::with_capacity(*size);
                 file.read_to_end(&mut contents).ok()?;
                 Some(contents)
             }
