@@ -885,6 +885,25 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
     Ok(())
 }
 
+fn merge_chatgpt_web_daily_report_continuation(
+    base: &str,
+    continuation: &str,
+    date: &str,
+) -> String {
+    let continuation = continuation.trim();
+    if validate_chatgpt_web_daily_report_response(continuation, date).is_ok() {
+        continuation.to_string()
+    } else {
+        format!("{}\n{}", base.trim_end(), continuation.trim_start())
+    }
+}
+
+fn chatgpt_web_daily_report_tail(response: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = response.chars().collect();
+    let start = chars.len().saturating_sub(max_chars);
+    chars[start..].iter().collect()
+}
+
 fn metadata_value(
     metadata: &DailyAgentBTreeMap<String, String>,
     keys: &[&str],
@@ -1290,9 +1309,57 @@ async fn run_daily_agent_inner(
                             )
                             .await?;
                             last_metadata = Some(retry_result.metadata.clone());
-                            let retry_response = retry_result.response.trim();
-                            validate_chatgpt_web_daily_report_response(retry_response, &entry.date)?;
-                            retry_response.to_string()
+                            let mut retry_response = retry_result.response.trim().to_string();
+                            if validate_chatgpt_web_daily_report_response(&retry_response, &entry.date).is_err() {
+                                let retry_conversation_id = metadata_value(
+                                    &retry_result.metadata,
+                                    &["conversationId", "conversation_id"],
+                                )
+                                .unwrap_or_else(|| conversation_id.clone());
+                                for attempt in 1..=3 {
+                                    let tail = chatgpt_web_daily_report_tail(&retry_response, 1200);
+                                    tracing::warn!(
+                                        date = %entry.date,
+                                        conversation_id = %retry_conversation_id,
+                                        attempt,
+                                        "chatgpt_web daily report response appears truncated; requesting continuation"
+                                    );
+                                    let continuation_prompt = format!(
+                                        "上一条 {date} 日报正文在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 证据与不确定性`。\n\n上一条末尾：\n{tail}",
+                                        date = entry.date,
+                                        tail = tail
+                                    );
+                                    let continuation_result =
+                                        run_external_daily_agent_prompt_with_params(
+                                            task,
+                                            &runner_id,
+                                            continuation_prompt,
+                                            &agent_work_dir,
+                                            None,
+                                            serde_json::json!({
+                                                "conversationId": retry_conversation_id
+                                            }),
+                                            &effective,
+                                        )
+                                        .await?;
+                                    last_metadata = Some(continuation_result.metadata.clone());
+                                    retry_response = merge_chatgpt_web_daily_report_continuation(
+                                        &retry_response,
+                                        &continuation_result.response,
+                                        &entry.date,
+                                    );
+                                    if validate_chatgpt_web_daily_report_response(
+                                        &retry_response,
+                                        &entry.date,
+                                    )
+                                    .is_ok()
+                                    {
+                                        break;
+                                    }
+                                }
+                            }
+                            validate_chatgpt_web_daily_report_response(&retry_response, &entry.date)?;
+                            retry_response
                         }
                     };
                     let report_path = PathBuf::from(&entry.report_target);

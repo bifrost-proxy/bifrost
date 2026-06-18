@@ -564,6 +564,31 @@ fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_report_continuation_can_complete_truncated_response() {
+    let base = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 主要做了什么\n\n"
+        .repeat(20);
+    assert!(validate_chatgpt_web_daily_report_response(&base, "2026-06-15").is_err());
+
+    let continuation = "## 证据与不确定性\n\n已处理转写文件：`2026-06-15.md`。\n";
+    let merged =
+        merge_chatgpt_web_daily_report_continuation(&base, continuation, "2026-06-15");
+
+    assert!(validate_chatgpt_web_daily_report_response(&merged, "2026-06-15").is_ok());
+}
+
+#[test]
+fn daily_agent_chatgpt_web_report_continuation_prefers_complete_rewrite() {
+    let base = "# 2026-06-15 日报\n\n## 今日概览\n\n截断正文。\n";
+    let complete = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+        .repeat(20);
+
+    let merged = merge_chatgpt_web_daily_report_continuation(base, &complete, "2026-06-15");
+
+    assert_eq!(merged, complete.trim());
+    assert!(validate_chatgpt_web_daily_report_response(&merged, "2026-06-15").is_ok());
+}
+
+#[test]
 fn daily_agent_change_plan_filters_to_requested_date() {
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp = TempDir::new().unwrap();

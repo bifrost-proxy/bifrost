@@ -893,6 +893,122 @@ async fn auth_status_accepts_recent_browser_account_check_when_native_probe_fail
 }
 
 #[tokio::test]
+async fn read_logged_in_auth_state_recovers_valid_captured_login() {
+    let mut headers = BTreeMap::new();
+    headers.insert(
+        "authorization".to_string(),
+        "Bearer not-a-jwt-but-present-for-this-status-test".to_string(),
+    );
+    let state = AuthState {
+        captured_at: iso_now(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        user_agent: "Mozilla/5.0".to_string(),
+        captured_auth_headers: headers,
+        captured_auth_identity: AuthorizationIdentity {
+            has_bearer_token: true,
+            has_profile_email: true,
+            profile_email_verified: Some(true),
+            has_user_identity: true,
+            has_account_identity: true,
+            complete: true,
+            expires_at: None,
+        },
+        captured_account_check: Some(BrowserAccountCheckProof {
+            captured_at: iso_now(),
+            status: 200,
+            logged_in: true,
+        }),
+        cookies: vec![BrowserCookie {
+            name: "__Secure-next-auth.session-token".to_string(),
+            value: "token".to_string(),
+            domain: ".chatgpt.com".to_string(),
+            path: Some("/".to_string()),
+            secure: Some(true),
+            http_only: Some(true),
+            same_site: None,
+            expires: None,
+        }],
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig {
+            base_url: "http://[::1".to_string(),
+            poll_interval_ms: 1,
+            timeout_secs: 1,
+            session_consistency: "strong".to_string(),
+            rate_limit_retry_secs: 180,
+            rate_limit_max_retries: 5,
+        },
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+    write_auth_state(&config.state_path, &state)
+        .await
+        .expect("write auth state");
+
+    let recovered = read_logged_in_auth_state(&config)
+        .await
+        .expect("recover auth state");
+
+    assert!(recovered.is_some());
+}
+
+#[tokio::test]
+async fn read_logged_in_auth_state_rejects_expired_captured_login() {
+    let mut headers = BTreeMap::new();
+    headers.insert("authorization".to_string(), "Bearer captured".to_string());
+    let state = AuthState {
+        captured_at: iso_now(),
+        base_url: DEFAULT_BASE_URL.to_string(),
+        user_agent: "Mozilla/5.0".to_string(),
+        captured_auth_headers: headers,
+        captured_auth_identity: AuthorizationIdentity {
+            has_bearer_token: true,
+            has_profile_email: true,
+            profile_email_verified: Some(true),
+            has_user_identity: true,
+            has_account_identity: true,
+            complete: true,
+            expires_at: Some((chrono::Utc::now() - chrono::Duration::minutes(5)).to_rfc3339()),
+        },
+        captured_account_check: Some(BrowserAccountCheckProof {
+            captured_at: iso_now(),
+            status: 200,
+            logged_in: true,
+        }),
+        cookies: Vec::new(),
+    };
+    let temp = tempfile::tempdir().expect("tempdir");
+    let config = RuntimeConfig {
+        browser: BrowserConfig::default(),
+        chatgpt: ChatGptConfig {
+            base_url: "http://[::1".to_string(),
+            poll_interval_ms: 1,
+            timeout_secs: 1,
+            session_consistency: "strong".to_string(),
+            rate_limit_retry_secs: 180,
+            rate_limit_max_retries: 5,
+        },
+        profile_dir: temp.path().join("profile"),
+        state_path: temp.path().join("auth_state.json"),
+        sessions_path: temp.path().join("sessions.json"),
+        attachments_dir: temp.path().join("attachments"),
+    };
+    write_auth_state(&config.state_path, &state)
+        .await
+        .expect("write auth state");
+
+    let recovered = read_logged_in_auth_state(&config)
+        .await
+        .expect("recover auth state");
+
+    assert!(recovered.is_none());
+}
+
+#[tokio::test]
 async fn auth_status_accepts_browser_account_check_when_native_probe_is_forbidden() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
