@@ -165,10 +165,10 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_request_body_post,
         ),
         TestCase::standalone(
-            "binary_performance_mode_skips_binary_recording",
-            "二进制性能模式 - 下载/直播/测速不落盘但图片保留",
+            "binary_performance_mode_skips_binary_body_persistence",
+            "二进制性能模式 - 下载/直播/测速保留 metadata 但不落 body",
             "body_cache",
-            test_binary_performance_mode_skips_binary_recording,
+            test_binary_performance_mode_skips_binary_body_persistence,
         ),
         TestCase::standalone(
             "binary_capture_mode_records_binary_traffic",
@@ -359,7 +359,7 @@ async fn test_request_body_post() -> Result<(), String> {
     Ok(())
 }
 
-async fn test_binary_performance_mode_skips_binary_recording() -> Result<(), String> {
+async fn test_binary_performance_mode_skips_binary_body_persistence() -> Result<(), String> {
     let mock = BinaryTrafficMockServer::start().await?;
     let port = portpicker::pick_unused_port().unwrap();
     let (_proxy, admin_state) = ProxyInstance::start_with_admin(
@@ -388,23 +388,43 @@ async fn test_binary_performance_mode_skips_binary_recording() -> Result<(), Str
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let records = get_all_records(&admin_state).await?;
-    if records.len() != 1 {
+    let mut records = get_all_records(&admin_state).await?;
+    records.sort_by(|left, right| left.url.cmp(&right.url));
+    let urls = records
+        .iter()
+        .map(|record| record.url.as_str())
+        .collect::<Vec<_>>();
+    let expected = vec![
+        "http://media.local/download.bin",
+        "http://media.local/image.png",
+        "http://media.local/live.ts",
+        "http://media.local/speedtest.bin",
+    ];
+    if urls != expected {
         return Err(format!(
-            "Expected only 1 image record in performance mode, got {} records",
-            records.len()
+            "Expected all binary metadata records in performance mode, got {:?}",
+            urls
         ));
     }
 
-    let record = &records[0];
-    if record.url != "http://media.local/image.png" {
-        return Err(format!(
-            "Expected image request to be recorded, got {}",
-            record.url
-        ));
-    }
-    if record.response_body_ref.is_none() {
+    let image_record = records
+        .iter()
+        .find(|record| record.url == "http://media.local/image.png")
+        .ok_or_else(|| "Expected image metadata record to be present".to_string())?;
+    if image_record.response_body_ref.is_none() {
         return Err("Expected image response_body_ref to be present".to_string());
+    }
+
+    for record in records
+        .iter()
+        .filter(|record| record.url != "http://media.local/image.png")
+    {
+        if record.response_body_ref.is_some() {
+            return Err(format!(
+                "Expected performance-mode binary body to be skipped for {}",
+                record.url
+            ));
+        }
     }
 
     let Some(body_store) = admin_state.body_store.as_ref() else {
