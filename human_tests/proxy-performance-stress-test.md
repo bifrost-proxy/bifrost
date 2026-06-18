@@ -220,12 +220,88 @@
 - cooldown 结束时 `cooldownWsConnectionCount=0`、`cooldownWsOpenConnectionCount=0`、`cooldownWsClosedConnectionCount=0`。
 - 所有 HTTP/HTTPS/SSE 子场景 `errors=0`、`non2xx=0`，说明优化没有削弱转发与采集功能。
 
+### TC-PPS-12：10 万条流量存储压测脚本语法与启动保护
+
+**操作步骤**：
+
+1. 执行 Node.js 语法检查：
+   ```bash
+   node --check scripts/loadtest-traffic-storage-100k.mjs
+   ```
+2. 检查脚本启动保护：
+   ```bash
+   rg -n -- "LOADTEST_STORAGE_MAX_RECORDS|100000|--no-system-proxy|BIFROST_DISABLE_TRAY|BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT|assertTcpPortFree|assertProxyOwnedByChild|childExited" scripts/loadtest-traffic-storage-100k.mjs
+   ```
+3. 检查方案文档记录专项方法：
+   ```bash
+   rg -n "10 万条流量存储专项|LOADTEST_STORAGE_RECORDS=100000|traffic.max_records|urlSearchP95Ms|responseBodySearchP95Ms|LOADTEST_STORAGE_OVERFLOW_RECORDS" design/proxy-performance-stress-test.md
+   ```
+
+**预期结果**：
+
+- 脚本通过 `node --check`。
+- 脚本默认使用独立端口和临时数据目录，启动 Bifrost 时包含 `--no-system-proxy`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+- 脚本启动前检查代理端口和 upstream 端口占用，ready 后校验监听 PID 属于本次启动的 Bifrost 子进程；清理时按子进程退出状态判断，必要时升级 SIGKILL。
+- 方案文档明确 `traffic.max_records=100000`、写入、读列表、批量详情、URL 搜索、response body 搜索和 overflow 极限行为。
+
+### TC-PPS-13：真实执行 10 万条写入、读取和搜索压测
+
+**操作步骤**：
+
+1. 构建 release 二进制：
+   ```bash
+   cargo build --release --bin bifrost
+   ```
+2. 真实执行 10 万条压测：
+   ```bash
+   BIFROST_BIN=./target/release/bifrost \
+   BIFROST_PROXY_PORT=19904 \
+   BIFROST_UPSTREAM_PORT=28084 \
+   LOADTEST_STORAGE_MAX_RECORDS=100000 \
+   LOADTEST_STORAGE_RECORDS=100000 \
+   LOADTEST_STORAGE_WRITE_CONCURRENCY=256 \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   node scripts/loadtest-traffic-storage-100k.mjs
+   ```
+3. 读取脚本输出的 `report:` JSON 文件，检查：
+   ```bash
+   node -e 'const fs=require("fs"); const p=process.argv[1]; const r=JSON.parse(fs.readFileSync(p,"utf8")); console.log(JSON.stringify(r.analysis,null,2));' <report-json>
+   ```
+
+**预期结果**：
+
+- `analysis.configuredMaxRecords=100000`。
+- `write.errors=0`、`write.non2xx=0`。
+- 无 overflow 时 `analysis.retainedRecords` 接近 `100000`，`analysis.recordCompleteness` 接近 `1`。
+- 报告包含 `latestListP95Ms`、`hostFilterP95Ms`、`statusFilterP95Ms`、`batchDetailP95Ms`、`urlSearchP95Ms`、`responseBodySearchP95Ms`。
+- 如果任何读写或搜索 p95 明显异常，必须继续查看报告中的 `searchSamples.totalSearched`、Bifrost 日志、Traffic DB stats 和进程资源，不能只给“压测完成”。
+
+### TC-PPS-14：10 万条存储专项索引与报告结构
+
+**操作步骤**：
+
+1. 检查 human_tests 索引：
+   ```bash
+   rg -n "loadtest-traffic-storage-100k|10 万条|读写、列表、批量详情、URL 搜索、response body 搜索" human_tests/readme.md human_tests/proxy-performance-stress-test.md
+   ```
+2. 检查脚本报告 schema 和关键字段：
+   ```bash
+   rg -n "bifrost-traffic-storage-loadtest/v1|readSearch|recordCompleteness|retainedRecords|urlSearchP95Ms|responseBodySearchP95Ms" scripts/loadtest-traffic-storage-100k.mjs
+   ```
+
+**预期结果**：
+
+- `human_tests/readme.md` 已同步更新本模块用例数量和说明。
+- 脚本报告结构稳定，后续可以按 `schema=bifrost-traffic-storage-loadtest/v1` 横向比较不同 run。
+- 报告字段足够支撑“如何测试、如何评估、如何采集、如何分析”的复盘要求。
+
 ## 清理步骤
 
 1. 本用例默认只执行静态检查和 `node --check`，不会启动服务。
 2. 如手工执行了 smoke 压测，可清理：
    ```bash
-   rm -rf .artifacts/loadtest .bifrost-stability .bifrost-loadtest-502
+   rm -rf .artifacts/loadtest .bifrost-stability .bifrost-loadtest-502 .bifrost-storage-100k
    ```
 
 ## 执行记录
@@ -257,3 +333,9 @@
   - TC-PPS-11 优化前基线：`proxy-stability-2026-06-18T16-30-18.900Z.json`，`ok=27854`、`errors=0`、`non2xx=0`、HTTP large `ok=762`、`cooldownWsConnectionCount=762`、`cooldownWsOpenConnectionCount=762`、`peakRssMiB=161.2`。
   - TC-PPS-11 优化后复测：`proxy-stability-2026-06-18T16-36-28.116Z.json`，`ok=27854`、`errors=0`、`non2xx=0`、HTTP large `ok=762`、`cooldownWsConnectionCount=0`、`cooldownWsOpenConnectionCount=0`、`peakRssMiB=110.08`。
   - 结论：binary fast path 不再留下无帧 open monitor；在请求规模完全一致且无转发错误的前提下，cooldown monitor 残留从 762 降为 0，峰值 RSS 下降约 51 MiB。
+- 2026-06-19：通过。执行 TC-PPS-12 至 TC-PPS-14，并真实跑 10 万条存储读写和搜索压测：
+  - TC-PPS-12：`node --check scripts/loadtest-traffic-storage-100k.mjs` 通过；`rg -n -- "LOADTEST_STORAGE_MAX_RECORDS|100000|--no-system-proxy|BIFROST_DISABLE_TRAY|BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT|assertTcpPortFree|assertProxyOwnedByChild|childExited" scripts/loadtest-traffic-storage-100k.mjs` 成功；方案文档中的 `10 万条流量存储专项`、`LOADTEST_STORAGE_RECORDS=100000`、`traffic.max_records`、`urlSearchP95Ms`、`responseBodySearchP95Ms` 和 `LOADTEST_STORAGE_OVERFLOW_RECORDS` 均可检索。
+  - TC-PPS-13 首轮失败复现：报告未生成，临时数据目录 `.bifrost-storage-100k/2026-06-18T18-38-15.200Z` 显示压测客户端完成 100000 个 2xx 请求后，Traffic API 和 SQLite 仅有 `13623` 条记录；`body_cache` 有 `100000` 个文件、约 `391 MiB`；日志存在大量 `Traffic channel full, dropping record/update`。该轮用于确认真实性能问题，不能作为通过基线。
+  - TC-PPS-13 修复后 10 万条复测：`traffic-storage-100k-2026-06-18T18-48-34.439Z.json`，`recordCompleteness=1`、`retainedRecords=100000`、`configuredMaxRecords=100000`、`writeRps=20973.15`、`writeP95Ms=19.2`、`latestListP95Ms=0.76`、`hostFilterP95Ms=17.21`、`statusFilterP95Ms=2.68`、`batchDetailP95Ms=16.42`、`urlSearchP95Ms=118.72`、`responseBodySearchP95Ms=417.09`。
+  - TC-PPS-13 overflow 复测：修正脚本等待 `server_sequence>=105001` 后执行 `LOADTEST_STORAGE_OVERFLOW_RECORDS=5000`，报告 `traffic-storage-100k-2026-06-18T18-51-02.051Z.json`，`retainedRecords=82977`、`writeRps=20908`、`writeP95Ms=19.35`、`latestListP95Ms=0.59`、`hostFilterP95Ms=8.89`、`statusFilterP95Ms=1.6`、`batchDetailP95Ms=13.7`、`urlSearchP95Ms=116.57`、`responseBodySearchP95Ms=372.77`；最终保留量符合当前 cleanup 目标水位策略。
+  - TC-PPS-14：`human_tests/readme.md` 已更新本模块为 14 个用例；`scripts/loadtest-traffic-storage-100k.mjs` 包含 `bifrost-traffic-storage-loadtest/v1`、`readSearch`、`recordCompleteness`、`retainedRecords`、`urlSearchP95Ms` 和 `responseBodySearchP95Ms`；脚本显式设置搜索 `scope.all=false`，避免把 URL 搜索误测为全字段搜索。

@@ -38,18 +38,36 @@ impl AsyncTrafficWriter {
         (Self { tx }, rx)
     }
 
-    #[inline]
-    pub fn record(&self, record: TrafficRecord) {
-        if let Err(e) = self.tx.try_send(TrafficCommand::Record(Box::new(record))) {
+    fn send_lossless(&self, cmd: TrafficCommand, kind: &'static str) {
+        if let Err(e) = self.tx.try_send(cmd) {
             match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    warn!("Traffic channel full, dropping record");
+                mpsc::error::TrySendError::Full(cmd) => {
+                    match tokio::runtime::Handle::try_current() {
+                        Ok(handle) => {
+                            let tx = self.tx.clone();
+                            handle.spawn(async move {
+                                if let Err(e) = tx.send(cmd).await {
+                                    error!(command = kind, error = %e, "Traffic channel closed while waiting for capacity");
+                                }
+                            });
+                        }
+                        Err(_) => {
+                            if let Err(e) = self.tx.blocking_send(cmd) {
+                                error!(command = kind, error = %e, "Traffic channel closed while blocking for capacity");
+                            }
+                        }
+                    }
                 }
                 mpsc::error::TrySendError::Closed(_) => {
-                    error!("Traffic channel closed");
+                    error!(command = kind, "Traffic channel closed");
                 }
             }
         }
+    }
+
+    #[inline]
+    pub fn record(&self, record: TrafficRecord) {
+        self.send_lossless(TrafficCommand::Record(Box::new(record)), "record");
     }
 
     #[inline]
@@ -61,16 +79,7 @@ impl AsyncTrafficWriter {
             id: id.to_string(),
             updater: Arc::new(updater),
         };
-        if let Err(e) = self.tx.try_send(cmd) {
-            match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    warn!("Traffic channel full, dropping update for {}", id);
-                }
-                mpsc::error::TrySendError::Closed(_) => {
-                    error!("Traffic channel closed");
-                }
-            }
-        }
+        self.send_lossless(cmd, "update");
     }
 }
 
@@ -91,11 +100,14 @@ pub fn start_async_traffic_processor(
     tokio::spawn(async move {
         info!("Async traffic processor started");
 
-        let mut batch: Vec<Box<TrafficRecord>> = Vec::with_capacity(64);
-        let mut updates: Vec<(String, TrafficUpdater)> = Vec::with_capacity(32);
+        const RECORD_BATCH_SIZE: usize = 512;
+        const UPDATE_BATCH_SIZE: usize = 256;
+
+        let mut batch: Vec<Box<TrafficRecord>> = Vec::with_capacity(RECORD_BATCH_SIZE);
+        let mut updates: Vec<(String, TrafficUpdater)> = Vec::with_capacity(UPDATE_BATCH_SIZE);
         let mut pending_updates: HashMap<String, Vec<TrafficUpdater>> = HashMap::new();
-        // Cap pending_updates to prevent unbounded memory growth when records are
-        // dropped (channel full) but their updates still arrive.
+        // Cap pending_updates to prevent unbounded memory growth when updates
+        // arrive before their matching record is persisted.
         const MAX_PENDING_UPDATES: usize = 256;
         let mut pending_update_cycle: u64 = 0;
 
@@ -129,7 +141,7 @@ pub fn start_async_traffic_processor(
                         TrafficCommand::Update { id, updater } => updates.push((id, updater)),
                     }
 
-                    while batch.len() < 64 && updates.len() < 32 {
+                    while batch.len() < RECORD_BATCH_SIZE && updates.len() < UPDATE_BATCH_SIZE {
                         match rx.try_recv() {
                             Ok(TrafficCommand::Record(record)) => batch.push(record),
                             Ok(TrafficCommand::Update { id, updater }) => {
@@ -419,6 +431,53 @@ mod tests {
 
         assert!(wait_until(Duration::from_secs(2), || db_store.count() == 100).await);
         assert_eq!(db_store.count(), 100);
+
+        drop(writer);
+        let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
+    }
+
+    #[tokio::test]
+    async fn test_full_channel_defers_without_dropping_records_or_updates() {
+        let (writer, rx) = AsyncTrafficWriter::new(1);
+        let dir = make_temp_dir("async-traffic-full-channel");
+        let traffic_dir = dir.join("traffic");
+        let _ = std::fs::create_dir_all(&traffic_dir);
+        let db_store = Arc::new(
+            TrafficDbStore::new(traffic_dir, 10000, 0, None)
+                .expect("failed to create traffic db store"),
+        );
+
+        for i in 0..64 {
+            let id = format!("full-channel-{}", i);
+            writer.record(TrafficRecord::new(
+                id.clone(),
+                "GET".to_string(),
+                format!("https://example.com/{}", i),
+            ));
+            writer.update_by_id(&id, |record| {
+                record.status = 200;
+                record.response_size = 128;
+            });
+        }
+
+        let handle = start_async_traffic_processor(rx, db_store.clone());
+
+        assert!(
+            wait_until(Duration::from_secs(5), || db_store.count() == 64).await,
+            "all records should be persisted even when the writer channel starts full"
+        );
+        assert!(
+            wait_until(Duration::from_secs(5), || {
+                (0..64).all(|i| {
+                    db_store
+                        .get_by_id(&format!("full-channel-{}", i))
+                        .map(|record| record.status == 200 && record.response_size == 128)
+                        .unwrap_or(false)
+                })
+            })
+            .await,
+            "updates queued while the channel was full should eventually apply"
+        );
 
         drop(writer);
         let _ = tokio::time::timeout(Duration::from_secs(1), handle).await;
