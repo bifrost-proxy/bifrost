@@ -461,19 +461,21 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 
 #### ChatGPT Web（不可读本地文件）
 
-**首次**（conversation 未初始化）：
-- 消息 1：`AGENTS.md` 全文 + 规则说明
-- 消息 2：change plan 中需处理的内容 + 输出要求
+**每次日期运行**：
+- Daily Agent 会清理该 Agent session 关联的历史 Web conversation，并以新 ChatGPT 对话发送完整 `AGENTS.md`、术语和当日 Markdown 内容。
+- `session_key` 不传给 ChatGPT Web adapter，避免不同日期或不同 Agent 复用长对话状态。
+- 如果首次响应未通过日报标题、日期、关键章节和长度门禁，且 adapter 返回了新的 `conversationId`，后端会在同一新对话内追加一次明确“直接输出完整日报正文”的纠偏重试。
 
-**后续**（conversation 已初始化）：
-- 只发 change plan 中 `new_file/appended/rewritten/force` 的内容
-- 不重发 `AGENTS.md`
-- `unchanged` 不发送
+**超时与失败诊断**：
+- Daily Agent 外层仍使用 `timeout_ms` 作为最终运行上限。
+- ChatGPT Web adapter 的内部 `timeout_secs` 会被下压到 `timeout_ms - 30s`（至少 1 秒），且不会放大用户在 runner 上配置的更短 timeout；这样浏览器 handoff、最终回复等待或页面扫描应先由 Web adapter 失败，外层 Daily timeout 只作为兜底。
+- `ExternalCliRuntime` 必须把 ChatGPT Web 普通失败持久化为 failed run，而不是直接返回错误；run 目录必须包含 `result.json`、`cli.stderr.log`、`normalized_events.jsonl`、`last_message.md` 和必要的 `failure_diagnostics.json` 路径元数据。
+- 失败状态会返回到 Daily Agent 并记录到当前 Agent 的 `last_status`、`last_error` 和 `last_run_id`；不更新 processed state，也不写入缺失或未通过门禁的 report。
 
 **Conversation 管理**：
-- 默认 `session_key = asr-daily:<task_id>`（任务级长期会话）
-- 修改 `AGENTS.md` 后不自动重发，UI 提醒用户手动 reset
-- Conversation 重置条件：用户手动 reset / 修改 session_key / 后端检测 404
+- 默认本地状态 key 为 `asr-daily:<task_id>:<agent_id>`，用于隔离不同 Agent 的状态文件和可观测信息。
+- ChatGPT Web 不复用该 key 对应的旧 conversation；非 Web runner（Codex/Trae 等）仍可按 runner metadata 复用 thread/conversation。
+- 修改 `AGENTS.md` 后，下一次 ChatGPT Web 运行会重新发送完整指令和当日内容。
 
 ### 5.6 IM 发送
 
@@ -1141,6 +1143,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | TC-ADA-09 | Daily Docs 行级 Run Daily Agent 可选择全部或单个 Agent |
 | TC-ADA-10 | 多 Agent 共用 ChatGPT Web Runner 的串行运行与失败隔离 |
 | TC-ADA-11 | 每个 Agent 工作目录包含 input 副本并按 Runner 独立落档 |
+| TC-ADA-15 | ChatGPT Web Daily Agent 失败先由 adapter 收敛并持久化诊断产物 |
 | TC-DAR-01 | Daily Agent Records 从已有 Report 目录兜底发现历史报告 |
 | TC-DAR-09 | Daily Agent Records 支持按 Agent、Date、Runner 筛选 |
 | TC-DAR-10 | Daily Agent Records 窄窗口表格横向滚动不撑宽 tab |

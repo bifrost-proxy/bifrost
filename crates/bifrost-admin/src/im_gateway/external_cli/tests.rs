@@ -1023,6 +1023,62 @@ async fn external_cli_runtime_runs_mock_command_and_writes_artifacts() {
 }
 
 #[tokio::test]
+async fn external_cli_runtime_persists_chatgpt_web_adapter_errors() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let runtime = ExternalCliRuntime::new(temp_dir.path());
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello from daily agent".to_string(),
+        operation: "unsupported-test-operation".to_string(),
+        params: serde_json::Value::Null,
+        provider_id: None,
+        runner_id: Some("web".to_string()),
+        session_key: None,
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: crate::im_gateway::chatgpt_web::ADAPTER_ID.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            timeout_secs: Some(1),
+            extra: BTreeMap::from([("browser".to_string(), serde_json::json!("invalid"))]),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let result = runtime.run(request).await.unwrap();
+
+    assert_eq!(result.status, ExternalCliRunStatus::Failed);
+    assert!(result.response.contains("ChatGPT Web run failed"));
+    assert!(result
+        .response
+        .contains("parse chatgpt_web adapter config failed"));
+    assert!(Path::new(&result.artifacts.command_snapshot).exists());
+    assert!(Path::new(&result.artifacts.stdout).exists());
+    assert!(Path::new(&result.artifacts.stderr).exists());
+    assert!(Path::new(&result.artifacts.normalized_events).exists());
+    assert!(Path::new(&result.artifacts.last_message).exists());
+    let stderr = tokio::fs::read_to_string(&result.artifacts.stderr)
+        .await
+        .unwrap();
+    assert!(stderr.contains("parse chatgpt_web adapter config failed"));
+    let last_message = tokio::fs::read_to_string(&result.artifacts.last_message)
+        .await
+        .unwrap();
+    assert_eq!(last_message, result.response);
+    assert!(Path::new(&result.artifacts.run_dir)
+        .join("result.json")
+        .exists());
+    assert!(result.metadata.contains_key("failureDiagnostics"));
+    assert_eq!(
+        result.events[0].event_type,
+        ExternalCliProgressEventType::RunFailed
+    );
+}
+
+#[tokio::test]
 async fn external_cli_runtime_streams_stdout_before_process_exit() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime = ExternalCliRuntime::new(temp_dir.path());
