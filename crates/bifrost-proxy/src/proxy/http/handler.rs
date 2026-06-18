@@ -1242,6 +1242,13 @@ fn should_use_metrics_only_forwarding_mode(
     false
 }
 
+fn should_track_streaming_connection(
+    skip_binary_recording: bool,
+    metrics_only_forwarding: bool,
+) -> bool {
+    !skip_binary_recording && !metrics_only_forwarding
+}
+
 pub struct ConnectionErrorInfo {
     pub error_type: &'static str,
     pub error_message: String,
@@ -3282,7 +3289,12 @@ pub async fn handle_http_request(
                     state.sse_hub.register(record_id);
                 } else if is_streaming {
                     record.set_streaming();
-                    state.connection_monitor.register_connection(record_id);
+                    if should_track_streaming_connection(
+                        skip_binary_recording,
+                        metrics_only_forwarding,
+                    ) {
+                        state.connection_monitor.register_connection(record_id);
+                    }
                 }
 
                 record.request_body_ref = if !body_bytes.is_empty() {
@@ -5182,6 +5194,14 @@ mod tests {
         assert!(!should_use_metrics_only_forwarding_mode(
             true, false, true, false, false
         ));
+    }
+
+    #[test]
+    fn test_binary_fast_path_skips_streaming_connection_monitor() {
+        assert!(should_track_streaming_connection(false, false));
+        assert!(!should_track_streaming_connection(true, false));
+        assert!(!should_track_streaming_connection(false, true));
+        assert!(!should_track_streaming_connection(true, true));
     }
 
     #[test]

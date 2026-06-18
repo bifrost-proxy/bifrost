@@ -1,5 +1,5 @@
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import fs from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -14,6 +14,7 @@ const concurrency = Number(process.env.LOADTEST_CONCURRENCY || "16");
 const durationMs = Number(process.env.LOADTEST_DURATION_MS || "15000");
 const detailSampleLimit = Number(process.env.LOADTEST_DETAIL_SAMPLE_LIMIT || "20");
 const shouldStartProxy = process.env.LOADTEST_START_PROXY === "1";
+const bifrostBin = process.env.BIFROST_BIN || "./target/debug/bifrost";
 const apiBase = `http://127.0.0.1:${proxyPort}/_bifrost/api`;
 const reportDir = path.join(repoRoot, ".artifacts", "loadtest");
 const runId = new Date().toISOString().replaceAll(":", "-");
@@ -31,6 +32,51 @@ function sleep(ms) {
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
+}
+
+function assertTcpPortFree(port, host = "127.0.0.1") {
+  return new Promise((resolve, reject) => {
+    const lsof = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+    if (lsof.status === 0 && lsof.stdout.trim()) {
+      reject(new Error(`TCP port ${host}:${port} is not available:\n${lsof.stdout.trim()}`));
+      return;
+    }
+    const server = http.createServer();
+    server.once("error", (error) => {
+      reject(new Error(`TCP port ${host}:${port} is not available: ${error.message}`));
+    });
+    server.listen(port, host, () => {
+      server.close(resolve);
+    });
+  });
+}
+
+function listeningPids(port) {
+  const result = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("p"))
+    .map((line) => Number(line.slice(1)))
+    .filter(Number.isFinite);
+}
+
+function assertProxyOwnedByChild(port, bifrost) {
+  if (!bifrost) {
+    return;
+  }
+  const pids = listeningPids(port);
+  if (!pids.includes(bifrost.pid)) {
+    throw new Error(
+      `Proxy readiness check reached port ${port}, but listener pids ${JSON.stringify(
+        pids,
+      )} do not include started Bifrost pid ${bifrost.pid}`,
+    );
+  }
 }
 
 async function fetchJson(url, options = {}) {
@@ -90,24 +136,38 @@ function percentile(values, p) {
 
 function startBifrost() {
   return spawn(
-    "./target/debug/bifrost",
-    ["start", "--host", "127.0.0.1", "--port", String(proxyPort), "--skip-cert-check"],
+    bifrostBin,
+    [
+      "start",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(proxyPort),
+      "--skip-cert-check",
+      "--no-system-proxy",
+    ],
     {
       cwd: repoRoot,
       env: {
         ...process.env,
         BIFROST_DATA_DIR: dataDir,
+        BIFROST_DISABLE_TRAY: "1",
+        BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
 }
 
-async function waitForProxyReady(timeoutMs = 30000) {
+async function waitForProxyReady(bifrost, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (bifrost && bifrost.exitCode !== null) {
+      throw new Error(`Bifrost exited before readiness check passed (exit=${bifrost.exitCode})`);
+    }
     try {
       await fetchJson(`${apiBase}/proxy/address`);
+      assertProxyOwnedByChild(proxyPort, bifrost);
       return;
     } catch {
       await sleep(500);
@@ -190,6 +250,7 @@ async function main() {
   await ensureDir(reportDir);
   if (shouldStartProxy) {
     await ensureDir(dataDir);
+    await assertTcpPortFree(proxyPort);
   }
 
   let bifrost;
@@ -201,7 +262,7 @@ async function main() {
   }
 
   try {
-    await waitForProxyReady();
+    await waitForProxyReady(bifrost);
     const startTs = Date.now();
     const load = await runLoad();
     await sleep(1500);

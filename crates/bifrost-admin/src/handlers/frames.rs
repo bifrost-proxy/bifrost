@@ -159,7 +159,22 @@ pub async fn get_frames(
         || monitor.has_persisted_frames(&conn_id, state.frame_store.as_ref());
 
     if has_data {
-        let socket_status = monitor.get_status(&conn_id);
+        let socket_status = if let Some(status) = monitor.get_status(&conn_id) {
+            Some(status)
+        } else {
+            get_traffic_record(state.clone(), connection_id)
+                .await
+                .and_then(|record| {
+                    if record.is_sse {
+                        state
+                            .sse_hub
+                            .get_socket_status(&conn_id)
+                            .or(record.socket_status)
+                    } else {
+                        record.socket_status
+                    }
+                })
+        };
         let last_frame_id = frames
             .last()
             .map(|f| f.frame_id)
@@ -184,11 +199,15 @@ pub async fn get_frames(
         json_response(&response)
     } else {
         if let Some(record) = get_traffic_record(state.clone(), connection_id).await {
-            if record.is_sse {
-                let socket_status = state
+            let socket_status = if record.is_sse {
+                state
                     .sse_hub
                     .get_socket_status(&conn_id)
-                    .or(record.socket_status);
+                    .or(record.socket_status)
+            } else {
+                record.socket_status
+            };
+            if socket_status.is_some() {
                 let response = FramesResponse {
                     frames: Vec::new(),
                     socket_status,
@@ -512,11 +531,13 @@ mod tests {
     use crate::connection_monitor::WebSocketFrameRecord;
     use crate::frame_store::FrameStore;
     use crate::state::AdminState;
-    use crate::traffic::{FrameDirection, FrameType};
+    use crate::traffic::{FrameDirection, FrameType, SocketStatus, TrafficRecord};
+    use crate::traffic_db::TrafficDbStore;
 
     #[derive(Debug, Deserialize)]
     struct FramesResponseForTest {
         frames: Vec<WebSocketFrameRecord>,
+        socket_status: Option<SocketStatus>,
         last_frame_id: u64,
         has_more: bool,
     }
@@ -557,6 +578,40 @@ mod tests {
         assert_eq!(parsed.frames.len(), 100);
         assert_eq!(parsed.last_frame_id, 100);
         assert!(parsed.has_more);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn frames_falls_back_to_persisted_socket_status_after_monitor_cleanup() {
+        let dir = std::env::temp_dir().join(format!("bifrost-admin-test-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+
+        let store = Arc::new(TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(0).with_traffic_db_store_shared(store));
+        let connection_id = "streaming-cleaned";
+        let mut record = TrafficRecord::new(
+            connection_id.to_string(),
+            "GET".to_string(),
+            "http://example.test/stream".to_string(),
+        );
+        record.socket_status = Some(SocketStatus {
+            is_open: false,
+            receive_bytes: 4096,
+            ..Default::default()
+        });
+        state.record_traffic(record);
+
+        let resp = get_frames(state, connection_id, None).await;
+        assert!(resp.status().is_success());
+
+        let body = resp.into_body().collect().await.unwrap().to_bytes();
+        let parsed: FramesResponseForTest = serde_json::from_slice(&body).unwrap();
+        let socket_status = parsed
+            .socket_status
+            .expect("persisted socket status should be returned");
+        assert!(!socket_status.is_open);
+        assert_eq!(socket_status.receive_bytes, 4096);
 
         let _ = fs::remove_dir_all(&dir);
     }
