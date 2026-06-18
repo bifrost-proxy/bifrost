@@ -26,7 +26,6 @@ pub mod openapi;
 mod port_rebind;
 pub mod push;
 mod query_service;
-pub mod redact;
 pub mod remote_invoke;
 pub mod replay;
 pub(crate) mod replay_body_rules;
@@ -119,10 +118,6 @@ pub use port_rebind::{
 pub use push::{start_push_tasks, PushManager, SharedPushManager};
 pub use query_service::{
     search_request_from_command, traffic_list_params_from_command, AdminQueryService,
-};
-pub use redact::{
-    auth_summary_from_headers, default_options as default_redact_options, redact_body_bytes,
-    redact_body_text, redact_headers, AuthSummary, RedactOptions,
 };
 pub use router::AdminRouter;
 pub use security::{is_cert_public_request, is_valid_admin_request, AdminSecurityConfig};

@@ -136,15 +136,15 @@
 
 操作步骤：
 
-1. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include|--show-secrets|bifrost-remote|github-copilot|universal|remote run|remote job watch|read-many|scratch-dir|outline" docs/cli.md docs/cli-quick-start.md docs/agent-skill.md docs-en/cli.md docs-en/cli-quick-start.md docs-en/agent-skill.md SKILL.md`。
-2. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include|--show-secrets" site/src/content/docs/reference/cli.md site/src/content/docs/getting-started/cli-quick-start.md site/src/content/docs/en/reference/cli.md site/src/content/docs/en/getting-started/cli-quick-start.md`。
+1. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include|bifrost-remote|github-copilot|universal|remote run|remote job watch|read-many|scratch-dir|outline" docs/cli.md docs/cli-quick-start.md docs/agent-skill.md docs-en/cli.md docs-en/cli-quick-start.md docs-en/agent-skill.md SKILL.md`。
+2. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include" site/src/content/docs/reference/cli.md site/src/content/docs/getting-started/cli-quick-start.md site/src/content/docs/en/reference/cli.md site/src/content/docs/en/getting-started/cli-quick-start.md`。
 3. 执行 `source ~/.zshrc && rg -n "bifrost-remote|github-copilot|universal|BIFROST_INSTALL_SKILL_SOURCE|BIFROST_INSTALL_SKILL_DIR" docs/agent-skill.md docs-en/agent-skill.md site/src/content/docs/reference/agent-skill.md site/src/content/docs/en/reference/agent-skill.md`。
-4. 打开 `docs/cli.md` 与 `docs/cli-quick-start.md`，确认流量相关说明明确默认脱敏、`--show-secrets` 是显式危险开关，并覆盖等待捕获、批量读取、授权状态、导出、重放、JSONPath / 时间窗口搜索。
+4. 打开 `docs/cli.md` 与 `docs/cli-quick-start.md`，确认流量相关说明明确本期不做脱敏、输出按捕获原文处理，并覆盖等待捕获、批量读取、授权状态、导出、重放、JSONPath / 时间窗口搜索。
 5. 打开 `docs/agent-skill.md` 与 `docs-en/agent-skill.md`，确认安装文档说明会同时安装通用 `bifrost` skill 与专用 `bifrost-remote` skill，且说明 `install-skill` 不启动代理、不创建远端授权、不授予 shell 权限。
 
 预期结果：
 
-- 使用手册覆盖 PR 260 新增的 capture、traffic/search、export/replay/auth-status 与默认脱敏行为。
+- 使用手册覆盖 PR 260 新增的 capture、traffic/search、export/replay/auth-status，并明确本期不做脱敏。
 - Skill 安装文档覆盖 `github-copilot`、`universal`、`all` 目标，说明双 skill 安装和安全边界。
 - 站点文档由同步脚本生成后与 `docs/`、`docs-en/` 源文档保持一致。
 

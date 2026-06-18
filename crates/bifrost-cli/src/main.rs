@@ -389,8 +389,6 @@ fn run_cli_main() {
             latest,
             include,
             max_body,
-            show_secrets,
-            extract_auth_summary,
         }) => {
             let is_interactive = interactive || keyword.is_none();
             let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
@@ -431,8 +429,6 @@ fn run_cli_main() {
                 include_request_headers: inc_req_hdr,
                 include_response_headers: inc_res_hdr,
                 max_body,
-                show_secrets,
-                extract_auth_summary,
             };
             let exit_code = run_search(options);
             std::process::exit(exit_code);
@@ -591,8 +587,6 @@ fn run_cli_main() {
                 response_body,
                 max_body,
                 format,
-                show_secrets,
-                extract_auth_summary,
             } => {
                 // Default format: json-pretty for single id, ndjson for batch
                 // (per the CLI help; users can still pass an explicit --format).
@@ -610,8 +604,6 @@ fn run_cli_main() {
                     response_body,
                     max_body,
                     format: effective_format.parse().unwrap_or(OutputFormat::JsonPretty),
-                    show_secrets,
-                    extract_auth_summary,
                 };
                 run_traffic_get(options)
             }
@@ -647,8 +639,6 @@ fn run_cli_main() {
                 latest,
                 include,
                 max_body,
-                show_secrets,
-                extract_auth_summary,
             } => {
                 let is_interactive = interactive || keyword.is_none();
                 let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
@@ -689,8 +679,6 @@ fn run_cli_main() {
                     include_request_headers: inc_req_hdr,
                     include_response_headers: inc_res_hdr,
                     max_body,
-                    show_secrets,
-                    extract_auth_summary,
                 };
                 let exit_code = run_search(options);
                 std::process::exit(exit_code);
@@ -710,16 +698,12 @@ fn run_cli_main() {
                 port,
                 id,
                 as_format,
-                redact,
-                show_secrets,
                 output,
             } => {
-                let _ = redact;
                 let options = TrafficExportOptions {
                     port: port.unwrap_or_else(|| get_effective_port(cli.port)),
                     id,
                     as_format,
-                    redact: !show_secrets,
                     output,
                 };
                 run_traffic_export(options)

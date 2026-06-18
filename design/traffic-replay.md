@@ -6,15 +6,13 @@
 ## API 契约
 
 ### Export
-`GET /_bifrost/api/traffic/{id}/export?format=curl|fetch|har&redact=true|false`
+`GET /_bifrost/api/traffic/{id}/export?format=curl|fetch|har`
 
 - 返回 `text/plain`，body 为对应格式的字符串。
-- `format` 缺省 `curl`。`redact` 缺省 `true`。
-- `redact=true` 时：
-  - Header：`authorization` / `cookie` / `set-cookie` / `proxy-authorization` / `x-csrf-token` 以及 `x-*-token` 通配 → 值替换为 `<REDACTED>`。
-  - Body：JSON 解析成功时，key 名命中 `(?i)password|token|secret|jwt|sk-` 的值替换为字符串 `<REDACTED>`。
+- `format` 缺省 `curl`。
+- 本期不做导出脱敏；导出的 curl / fetch / HAR 使用已捕获请求的原始 header 与 body。完整脱敏方案另开需求设计与实现。
 - HAR：HAR 1.2 最小子集（`log.version=1.2`、`log.creator`、`log.entries[0]` 含 `request` + 占位 `response`）；二进制 body 以 base64 编码 + `encoding=base64` 注出。
-- CLI：`bifrost traffic export <id> --as curl|fetch|har [--show-secrets] [-o <path>]`。`--show-secrets` 等价 `redact=false`。
+- CLI：`bifrost traffic export <id> --as curl|fetch|har [-o <path>]`。
 
 ### Replay
 `POST /_bifrost/api/traffic/{id}/replay`
@@ -70,9 +68,9 @@ bifrost traffic replay <id> [--patch '/a/b=val' ...]
 
 ## 实现备忘
 
-### redact 子集（与 P2-8 整合 TODO）
-- 当前 `crates/bifrost-admin/src/replay.rs` 自带 `redact_headers` / `redact_json_body_bytes`，常量 `SENSITIVE_HEADER_NAMES` / `SENSITIVE_BODY_KEY_REGEX`。
-- P2-8 落地后：把 replay 的 redact 切换到统一层（同名常量保留为别名 1 wave）；与 export/replay 共享配置。
+### 脱敏边界
+- 本期 export/replay 不做脱敏，避免引入不完整的授权 header、Cookie、JWT、业务 token 处理方案。
+- 后续完整脱敏需求需要统一覆盖 CLI、Admin API、远端调用、文档与 human_tests；在该需求落地前，调用方必须把 export 输出视为敏感数据。
 
 ### JSON Patch
 - 自实现 50 行级别的子集，不引入 `json-patch` crate（依赖少）。

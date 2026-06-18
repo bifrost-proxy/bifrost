@@ -197,7 +197,7 @@ example.com host://127.0.0.1:3000 lineProps://disabled
 
 ## 场景 6：从流量记录定位问题
 
-先看最近流量，再看单条或批量详情。默认会对敏感 header、cookie、token 做脱敏，只有本机诊断且确认安全时才使用 `--show-secrets`：
+先看最近流量，再看单条或批量详情。本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏，以下输出按捕获原文返回：
 
 ```bash
 bifrost traffic list
@@ -225,7 +225,7 @@ bifrost search "" --host api.example.com --req-json '$.user.id=42' --include req
 bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
 ```
 
-需要把捕获请求交给同事、脚本或 Agent 复现时，优先导出脱敏模板或基于原请求重放；只在确认安全时才加 `--show-secrets`：
+需要把捕获请求交给同事、脚本或 Agent 复现时，可以导出模板或基于原请求重放；导出内容包含捕获原文，传播前必须手动移除敏感信息：
 
 ```bash
 bifrost traffic export <id> --as curl
@@ -449,7 +449,7 @@ bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjso
 bifrost traffic auth-status <id>
 ```
 
-这里的“完整”不是把所有隐私数据复制给 Agent，而是让 Agent 能看到完成任务所需的请求链路：URL、method、关键 headers/cookies、请求体、响应体、状态码、错误体和先后顺序。`traffic get`、`search --include`、`traffic export` 等输出默认会脱敏；敏感 token、cookie、手机号、邮箱、身份证号等不应写入最终 skill，skill 里用环境变量、上下文或用户登录态描述来源。
+这里的“完整”不是把所有隐私数据复制给 Agent，而是让 Agent 能看到完成任务所需的请求链路：URL、method、关键 headers/cookies、请求体、响应体、状态码、错误体和先后顺序。`traffic get`、`search --include`、`traffic export` 等输出当前按捕获原文返回；敏感 token、cookie、手机号、邮箱、身份证号等不应写入最终 skill，skill 里用环境变量、上下文或用户登录态描述来源。
 
 第五步，给 Agent 下达任务指令。可以直接使用下面的模板：
 
@@ -458,8 +458,8 @@ bifrost traffic auth-status <id>
 先按 host/client_app/listener_port 过滤，挑出登录、列表、详情、创建、更新、失败响应各 1-2 条。
 对每条请求总结 URL、method、headers/cookies/token 来源、请求体、响应体字段、分页/错误格式。
 不要 mock，不要猜；证据不足时继续用 traffic get <id> --request-body --response-body 或 traffic get --ids ... --format ndjson 查看完整 body。
-保持默认脱敏；除非用户明确要求且确认安全，不要使用 --show-secrets。
-最后把协议理解整理成一个专属 skill：触发场景、所需参数、认证来源、API 调用步骤、错误处理、验证命令和隐私脱敏规则。
+流量输出是捕获原文；发布或沉淀 skill 前必须手动移除 Authorization、Cookie、JWT token 等敏感值。
+最后把协议理解整理成一个专属 skill：触发场景、所需参数、认证来源、API 调用步骤、错误处理、验证命令和隐私处理规则。
 ```
 
 Agent 产出的 skill 至少应包含：

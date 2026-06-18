@@ -22,7 +22,7 @@
 
 ## 非目标
 
-- 不在本任务做敏感字段脱敏（Authorization / Cookie / API key），统一留到 P2-8 redact layer；本设计文档将该依赖单列为风险并在 batch handler 入口预留 hook 位置。
+- 不在本任务做敏感字段脱敏（Authorization / Cookie / API key）。本期 search include 与 batch get 返回已捕获的原始 header/body；完整脱敏方案另开需求设计与实现。
 - 不引入 streaming pagination/cursor（200 id 上限够 wave-2 用，更大批量等 P3）。
 - 不改 body 落盘格式、不改 SearchEngine 已有 `body_cache`、不改 SSE search 协议。
 - 不破坏既有 `bifrost traffic get <ID>` 单 id 行为与 `--request-body/--response-body` flag。
@@ -85,7 +85,7 @@ bifrost traffic get 42 --request-body --response-body  # 原行为不变
 
 ## 风险与后续
 
-1. **敏感数据泄漏（P2-8 redact 依赖）**：当前 batch + include 直接把 Authorization / Cookie / 业务 token 明文回传给已授权 caller。需要 P2-8 的 header/body redact layer 落地后，在 `IncludeOptions::body_limit()` 之后、序列化 `data_b64` 之前 hook 一道 scrub。本设计已在 `handlers/traffic.rs::batch_traffic_handler` 入口 TODO 注释了 hook 位置。
+1. **敏感数据泄漏**：当前 batch + include 直接把 Authorization / Cookie / 业务 token 明文回传给已授权 caller。完整脱敏方案另开需求处理；落地前不要把 batch/search include 输出转发给低信任 caller 或写入可复用文档。
 2. **payload 放大**：base64 比原文膨胀 ~33%。对超过 1 MiB 的响应体应在调用侧自觉收紧 `--max-body`，必要时退回 `traffic get <ID>` 单条流式拉取。
 3. **ndjson 客户端兼容**：浏览器 fetch / 旧版 curl 不直接支持 line-delimited；为此 CLI 提供 `--format json|json-pretty` 信封降级，但 ai-report 等脚本工具应优先消费 ndjson 避免内存峰值。
 4. **200 id 上限**：足以覆盖一次报告窗口的命中量；若未来 LLM 报告窗口扩到 >200 命中，应在 P3 引入 cursor + chunk。

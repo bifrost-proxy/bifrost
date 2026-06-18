@@ -1,16 +1,14 @@
 //! Traffic export (curl / fetch / HAR) and JSON Patch based replay.
 //!
-//! 该模块自包含：不依赖 redact 层（P2-8 wave），自带一套保守的 secret 脱敏规则；
-//! 不依赖 json-patch crate，按 RFC 6902 实现 `replace` / `add` / `remove` 子集。
+//! 该模块不依赖 json-patch crate，按 RFC 6902 实现 `replace` / `add` / `remove` 子集。
 //!
 //! 公共 API:
 //! - [`ExportFormat`], [`ExportOptions`], [`export_request`]
 //! - [`JsonPatchOp`], [`ReplayOptions`], [`ReplayResult`], [`HttpClient`], [`ReqwestClient`],
 //!   [`replay_request`]
-//! - [`redact_headers`], [`redact_json_body_bytes`]
 //!
 //! 设计原则:
-//! 1. 默认 `redact=true`：导出/重放时擦除敏感 header / body 字段，避免泄露。
+//! 1. 导出使用原始捕获数据；本期不做脱敏，后续单独设计完整方案。
 //! 2. 重放使用注入式 `HttpClient` trait，便于单元测试不需要 wiremock。
 //! 3. JSON Patch 仅实现 `replace` / `add` / `remove` 三种，path 走 JSON Pointer (RFC 6901)。
 
@@ -19,84 +17,6 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
-
-// ---------------------------------------------------------------------------
-// Redact 规则（自包含，不依赖 P2-8 redact wave）
-// ---------------------------------------------------------------------------
-
-/// 默认敏感 header 名（小写匹配）。
-pub const SENSITIVE_HEADER_NAMES: &[&str] = &[
-    "authorization",
-    "cookie",
-    "set-cookie",
-    "proxy-authorization",
-    "x-csrf-token",
-];
-
-/// 默认 body JSON key 正则（不区分大小写）：命中即整值替换为 `<REDACTED>`。
-pub const SENSITIVE_BODY_KEY_REGEX: &str = r"(?i)password|token|secret|jwt|sk-";
-
-/// 判断单个 header 名是否敏感（含 `X-*-Token` 通配）。
-pub fn is_sensitive_header(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if SENSITIVE_HEADER_NAMES.iter().any(|h| *h == lower) {
-        return true;
-    }
-    // X-*-Token / X-*-token 通配
-    if let Some(rest) = lower.strip_prefix("x-") {
-        if rest.ends_with("-token") || rest == "token" {
-            return true;
-        }
-    }
-    false
-}
-
-/// 对一组 `(name, value)` 做 redact，命中敏感 header 的 value 改写为 `<REDACTED>`。
-pub fn redact_headers(headers: &mut [(String, String)]) {
-    for (name, value) in headers.iter_mut() {
-        if is_sensitive_header(name) {
-            *value = "<REDACTED>".to_string();
-        }
-    }
-}
-
-/// 对一段 JSON 字节做 redact：仅当能解析为 JSON 时才处理；否则原样返回。
-/// 匹配 key 名（不区分大小写）正则 `password|token|secret|jwt|sk-`，值整体替换为字符串 `"<REDACTED>"`。
-pub fn redact_json_body_bytes(bytes: &[u8]) -> Vec<u8> {
-    let Ok(text) = std::str::from_utf8(bytes) else {
-        return bytes.to_vec();
-    };
-    let mut value: serde_json::Value = match serde_json::from_str(text) {
-        Ok(v) => v,
-        Err(_) => return bytes.to_vec(),
-    };
-    let re = match regex::Regex::new(SENSITIVE_BODY_KEY_REGEX) {
-        Ok(r) => r,
-        Err(_) => return bytes.to_vec(),
-    };
-    redact_json_value(&mut value, &re);
-    serde_json::to_vec(&value).unwrap_or_else(|_| bytes.to_vec())
-}
-
-fn redact_json_value(value: &mut serde_json::Value, re: &regex::Regex) {
-    match value {
-        serde_json::Value::Object(map) => {
-            for (k, v) in map.iter_mut() {
-                if re.is_match(k) {
-                    *v = serde_json::Value::String("<REDACTED>".to_string());
-                } else {
-                    redact_json_value(v, re);
-                }
-            }
-        }
-        serde_json::Value::Array(arr) => {
-            for v in arr.iter_mut() {
-                redact_json_value(v, re);
-            }
-        }
-        _ => {}
-    }
-}
 
 // ---------------------------------------------------------------------------
 // Export
@@ -123,15 +43,12 @@ impl ExportFormat {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportOptions {
-    /// 是否对敏感 header / body 字段执行 redact。默认 true。
-    pub redact: bool,
     pub format: ExportFormat,
 }
 
 impl Default for ExportOptions {
     fn default() -> Self {
         Self {
-            redact: true,
             format: ExportFormat::Curl,
         }
     }
@@ -148,20 +65,9 @@ pub fn export_request(
     body: Option<&[u8]>,
     opts: &ExportOptions,
 ) -> String {
-    // 复制一份 headers 以便 redact
-    let mut headers_owned: Vec<(String, String)> = headers.to_vec();
-    if opts.redact {
-        redact_headers(&mut headers_owned);
-    }
+    let headers_owned: Vec<(String, String)> = headers.to_vec();
 
-    // body redact：尝试当 JSON 处理
-    let body_owned: Option<Vec<u8>> = body.map(|b| {
-        if opts.redact {
-            redact_json_body_bytes(b)
-        } else {
-            b.to_vec()
-        }
-    });
+    let body_owned: Option<Vec<u8>> = body.map(|b| b.to_vec());
 
     match opts.format {
         ExportFormat::Curl => export_curl(method, url, &headers_owned, body_owned.as_deref()),
@@ -828,51 +734,9 @@ mod tests {
     }
 
     #[test]
-    fn is_sensitive_header_recognises_default_and_xtoken_patterns() {
-        assert!(is_sensitive_header("Authorization"));
-        assert!(is_sensitive_header("authorization"));
-        assert!(is_sensitive_header("Cookie"));
-        assert!(is_sensitive_header("Set-Cookie"));
-        assert!(is_sensitive_header("X-Csrf-Token"));
-        assert!(is_sensitive_header("X-Service-Token"));
-        assert!(is_sensitive_header("x-trace-token"));
-        assert!(!is_sensitive_header("Content-Type"));
-        assert!(!is_sensitive_header("X-Request-Id"));
-    }
-
-    #[test]
-    fn redact_headers_redacts_sensitive_values() {
-        let mut h = sample_headers();
-        redact_headers(&mut h);
-        let map: std::collections::HashMap<String, String> = h.into_iter().collect();
-        assert_eq!(map.get("Authorization").unwrap(), "<REDACTED>");
-        assert_eq!(map.get("X-Trace-Token").unwrap(), "<REDACTED>");
-        assert_eq!(map.get("Content-Type").unwrap(), "application/json");
-        assert_eq!(map.get("X-Request-Id").unwrap(), "req-123");
-    }
-
-    #[test]
-    fn redact_json_body_redacts_password_token_jwt() {
-        let out = redact_json_body_bytes(&sample_body());
-        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-        assert_eq!(v["password"], "<REDACTED>");
-        assert_eq!(v["payload"]["jwt"], "<REDACTED>");
-        assert_eq!(v["user"], "alice");
-        assert_eq!(v["payload"]["other"], 1);
-    }
-
-    #[test]
-    fn redact_json_body_preserves_non_json_bytes() {
-        let raw = b"hello world not json";
-        let out = redact_json_body_bytes(raw);
-        assert_eq!(out, raw);
-    }
-
-    #[test]
     fn export_curl_contains_method_url_headers_and_body() {
         let body = sample_body();
         let opts = ExportOptions {
-            redact: true,
             format: ExportFormat::Curl,
         };
         let s = export_request(
@@ -884,27 +748,9 @@ mod tests {
         );
         assert!(s.starts_with("curl -X POST"));
         assert!(s.contains("'https://example.com/api/v1/x'"));
-        assert!(s.contains("'Authorization: <REDACTED>'"));
-        assert!(s.contains("'X-Trace-Token: <REDACTED>'"));
+        assert!(s.contains("'Authorization: Bearer abc.def.ghi'"));
+        assert!(s.contains("'X-Trace-Token: secret-trace'"));
         assert!(s.contains("--data-binary"));
-        assert!(s.contains("\"password\":\"<REDACTED>\""));
-    }
-
-    #[test]
-    fn export_curl_without_redact_keeps_secrets() {
-        let body = sample_body();
-        let opts = ExportOptions {
-            redact: false,
-            format: ExportFormat::Curl,
-        };
-        let s = export_request(
-            "POST",
-            "https://example.com/api/v1/x",
-            &sample_headers(),
-            Some(&body),
-            &opts,
-        );
-        assert!(s.contains("Bearer abc.def.ghi"));
         assert!(s.contains("\"password\":\"p@ss\""));
     }
 
@@ -912,7 +758,6 @@ mod tests {
     fn export_fetch_emits_js_snippet() {
         let body = sample_body();
         let opts = ExportOptions {
-            redact: true,
             format: ExportFormat::Fetch,
         };
         let s = export_request(
@@ -924,7 +769,7 @@ mod tests {
         );
         assert!(s.starts_with("fetch("));
         assert!(s.contains("\"method\": \"POST\""));
-        assert!(s.contains("\"Authorization\": \"<REDACTED>\""));
+        assert!(s.contains("\"Authorization\": \"Bearer abc.def.ghi\""));
         assert!(s.contains("\"body\":"));
     }
 
@@ -932,7 +777,6 @@ mod tests {
     fn export_har_parses_as_json_with_entry() {
         let body = sample_body();
         let opts = ExportOptions {
-            redact: true,
             format: ExportFormat::Har,
         };
         let s = export_request(
@@ -952,11 +796,11 @@ mod tests {
             .iter()
             .find(|h| h["name"] == "Authorization")
             .unwrap();
-        assert_eq!(auth["value"], "<REDACTED>");
+        assert_eq!(auth["value"], "Bearer abc.def.ghi");
         assert!(entry["request"]["postData"]["text"]
             .as_str()
             .unwrap()
-            .contains("<REDACTED>"));
+            .contains("\"password\":\"p@ss\""));
     }
 
     #[test]

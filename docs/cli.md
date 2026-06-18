@@ -288,11 +288,11 @@ bifrost capture wait --host api.example.com --method POST --path /v1/login --tim
 bifrost capture wait --host api.example.com --timeout 10s --format json
 bifrost traffic get <id> --request-body --response-body
 bifrost traffic get --ids 1,2,3 --request-body --response-body --format ndjson
-bifrost traffic get --ids 1,2,3 --request-body --response-body --max-body 32768 --extract-auth-summary
+bifrost traffic get --ids 1,2,3 --request-body --response-body --max-body 32768
 bifrost traffic auth-status <id>
 bifrost traffic auth-status <id> --format json
 bifrost traffic export <id> --as curl
-bifrost traffic export <id> --as fetch --show-secrets
+bifrost traffic export <id> --as fetch
 bifrost traffic export <id> --as har -o ./request.har
 bifrost traffic replay <id>
 bifrost traffic replay <id> --patch '/json/user/name="debug"'
@@ -310,6 +310,8 @@ bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-0
 ```
 
 `bifrost search` 与 `bifrost traffic search` 等价，支持关键词搜索、基础过滤器、结构化 JSONPath / Header 精确匹配、时间范围、返回内容 include 与搜索范围控制。`traffic get` 默认查询单条详情；需要一次交给 Agent 或脚本分析多条记录时，用 `--ids` 批量读取，批量输出推荐 `--format ndjson`，避免把多条大响应合成一个巨大 JSON。
+
+本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏。`traffic get`、`traffic export`、`search --include` 输出均按捕获原文返回；完整脱敏方案会另开需求处理，当前不要把这些输出粘贴到低信任渠道或可复用文档。
 
 基础过滤器：
 
@@ -351,8 +353,6 @@ bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-0
 | `--body` | 同时搜索请求体与响应体 |
 | `--include <FIELDS>` | 在搜索结果里附加指定内容，支持 `request-body`、`response-body`、`request-headers`、`response-headers`，也可用 `req-body`、`res-body`、`req-headers`、`res-headers`、`bodies`、`headers` 等别名 |
 | `--max-body <BYTES>` | 限制返回 body 的最大字节数，避免一次输出过大 |
-| `--extract-auth-summary` | 附加 JWT / Cookie 授权摘要，便于判断登录态来源和过期情况 |
-| `--show-secrets` | 显式显示敏感 header、cookie、token 等原文；默认输出会脱敏，只有本机诊断且确认安全时才使用 |
 
 常见组合示例：
 
@@ -372,7 +372,7 @@ bifrost search "invalid_request_error" --res-body
 # 等待浏览器或桌面应用产生下一条目标请求；超时退出码为 124
 bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
 
-# 一次读取多条详情给 Agent 分析；默认保持敏感信息脱敏
+# 一次读取多条详情给 Agent 分析；输出为捕获原文，注意不要扩散敏感信息
 bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
 
 # 按 JSON 字段和最近时间窗口定位失败响应，并附带响应体
@@ -381,7 +381,7 @@ bifrost search "" --host api.example.com --res-json '$.error.code=invalid_reques
 # 诊断一条请求里的 JWT / Cookie 登录态是否过期
 bifrost traffic auth-status 12
 
-# 导出一条请求为可复现模板，或在脱敏基础上重放并局部改 body
+# 导出一条请求为可复现模板，或基于原始请求重放并局部改 body
 bifrost traffic export 12 --as curl
 bifrost traffic replay 12 --patch '/json/debug=true'
 ```
@@ -884,4 +884,4 @@ bifrost install-skill --cwd -y
 
 安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户只是在本机启动代理、写规则、查本机流量时使用通用 skill；如果要连接另一台机器、使用 pair code / SSH key、远程查询流量、上传脚本执行或通过授权 shell 操作目标设备，应切换到 `bifrost-remote` skill 的完整流程。
 
-和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t codex -y` 或面向当前工具的目标安装，再用 `capture wait`、`traffic list/get/search` 给 Agent 提供真实流量证据；输出可复用 skill 前保持默认脱敏，不要把 token、cookie、手机号、邮箱等敏感信息写入文档。
+和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t codex -y` 或面向当前工具的目标安装，再用 `capture wait`、`traffic list/get/search` 给 Agent 提供真实流量证据；流量详情当前按捕获原文输出，沉淀可复用 skill 前必须手动移除 token、cookie、手机号、邮箱等敏感信息。

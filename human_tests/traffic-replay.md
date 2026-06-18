@@ -6,15 +6,15 @@
 ```
 bifrost traffic export 42 --as curl
 ```
-期望：标准输出一段 `curl -X ...` 命令；`Authorization` / `Cookie` / `X-*-Token` 行的值为 `<REDACTED>`；body 中 JSON 字段 `password` / `token` / `secret` / `jwt` / `sk-` 值为 `<REDACTED>`。
+期望：标准输出一段 `curl -X ...` 命令；`Authorization` / `Cookie` / `X-*-Token` 行和 JSON body 字段保持捕获时原值。本期不做脱敏，输出必须按敏感数据处理。
 
-变体：`--show-secrets`：值不脱敏。`-o /tmp/req.sh`：写到文件，stderr 输出 `wrote /tmp/req.sh`。
+变体：`-o /tmp/req.sh`：写到文件，stderr 输出 `wrote /tmp/req.sh`。
 
 ## 用例 2：export HAR
 ```
 bifrost traffic export 42 --as har | jq '.log.entries[0].request.method'
 ```
-期望：输出 `"POST"`（或对应 method）；`jq '.log.version'` == `"1.2"`；`jq '.log.entries[0].request.headers[] | select(.name|ascii_downcase=="authorization").value'` == `"<REDACTED>"`。
+期望：输出 `"POST"`（或对应 method）；`jq '.log.version'` == `"1.2"`；`jq '.log.entries[0].request.headers[] | select(.name|ascii_downcase=="authorization").value'` 等于捕获到的原始 Authorization 值。
 
 ## 用例 3：replay 改 body
 对一个 JSON body 的请求：

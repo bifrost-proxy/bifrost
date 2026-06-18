@@ -2022,21 +2022,18 @@ async fn get_traffic_record_async(
     }
 }
 
-fn parse_export_query(query: Option<&str>) -> (crate::replay::ExportFormat, bool) {
+fn parse_export_query(query: Option<&str>) -> crate::replay::ExportFormat {
     let mut format = crate::replay::ExportFormat::Curl;
-    let mut redact = true;
     if let Some(q) = query {
         for part in q.split('&') {
             if let Some(v) = part.strip_prefix("format=") {
                 if let Some(f) = crate::replay::ExportFormat::parse(v) {
                     format = f;
                 }
-            } else if let Some(v) = part.strip_prefix("redact=") {
-                redact = !matches!(v, "0" | "false" | "False" | "FALSE" | "no");
             }
         }
     }
-    (format, redact)
+    format
 }
 
 async fn get_traffic_export(
@@ -2044,7 +2041,7 @@ async fn get_traffic_export(
     id: &str,
     query: Option<&str>,
 ) -> Response<BoxBody> {
-    let (format, redact) = parse_export_query(query);
+    let format = parse_export_query(query);
     let record = match get_traffic_record_async(&state, id).await {
         Some(r) => r,
         None => {
@@ -2064,7 +2061,7 @@ async fn get_traffic_export(
         None
     };
     let headers = record.request_headers.clone().unwrap_or_default();
-    let opts = crate::replay::ExportOptions { redact, format };
+    let opts = crate::replay::ExportOptions { format };
     let text = crate::replay::export_request(
         &record.method,
         &record.url,
