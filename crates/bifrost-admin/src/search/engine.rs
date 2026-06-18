@@ -681,31 +681,15 @@ impl SearchEngine {
     }
 
     fn search_text(&self, text: &str, keyword: &str, field: &str) -> Option<MatchLocation> {
-        let text_lower = text.to_lowercase();
-        if let Some(pos) = text_lower.find(keyword) {
-            let start = find_char_boundary(text, pos.saturating_sub(MAX_PREVIEW_CONTEXT), false);
-            let end = find_char_boundary(
-                text,
-                (pos + keyword.len() + MAX_PREVIEW_CONTEXT).min(text.len()),
-                true,
-            );
-
-            let preview = if start > 0 || end < text.len() {
-                let prefix = if start > 0 { "..." } else { "" };
-                let suffix = if end < text.len() { "..." } else { "" };
-                format!("{}{}{}", prefix, &text[start..end], suffix)
-            } else {
-                text[start..end].to_string()
-            };
-
-            Some(MatchLocation {
-                field: field.to_string(),
-                preview,
-                offset: pos,
-            })
-        } else {
-            None
+        if text.is_ascii() && keyword.is_ascii() {
+            return find_ascii_case_insensitive(text.as_bytes(), keyword.as_bytes())
+                .map(|pos| build_text_match(text, pos, keyword.len(), field));
         }
+
+        let text_lower = text.to_lowercase();
+        text_lower
+            .find(keyword)
+            .map(|pos| build_text_match(text, pos, keyword.len(), field))
     }
 
     fn search_body(&self, body_ref: &BodyRef, keyword: &str, field: &str) -> Option<MatchLocation> {
@@ -713,14 +697,24 @@ impl SearchEngine {
             BodyRef::Inline { data } => self.search_text(data, keyword, field),
             BodyRef::File { .. } | BodyRef::FileRange { .. } => {
                 if let Some(ref body_store) = self.body_store {
-                    let store = body_store.read();
-                    if let Some(content) = store.load(body_ref) {
-                        return self.search_text(&content, keyword, field);
+                    let bytes = body_store.read().load_bytes(body_ref);
+                    if let Some(bytes) = bytes {
+                        return self.search_body_bytes(&bytes, keyword, field);
                     }
                 }
                 None
             }
         }
+    }
+
+    fn search_body_bytes(&self, bytes: &[u8], keyword: &str, field: &str) -> Option<MatchLocation> {
+        if bytes.is_ascii() && keyword.is_ascii() {
+            return find_ascii_case_insensitive(bytes, keyword.as_bytes())
+                .map(|pos| build_bytes_match(bytes, pos, keyword.len(), field));
+        }
+
+        let content = String::from_utf8_lossy(bytes);
+        self.search_text(&content, keyword, field)
     }
 
     fn search_frames(
@@ -1151,6 +1145,81 @@ fn find_char_boundary(s: &str, byte_index: usize, search_forward: bool) -> usize
     }
 }
 
+fn find_ascii_case_insensitive(haystack: &[u8], needle_lower: &[u8]) -> Option<usize> {
+    if needle_lower.is_empty() {
+        return Some(0);
+    }
+    if haystack.len() < needle_lower.len() {
+        return None;
+    }
+
+    let first = needle_lower[0];
+    let last_start = haystack.len() - needle_lower.len();
+    let mut start = 0usize;
+    while start <= last_start {
+        if haystack[start].to_ascii_lowercase() != first {
+            start += 1;
+            continue;
+        }
+
+        let mut matched = true;
+        for offset in 1..needle_lower.len() {
+            if haystack[start + offset].to_ascii_lowercase() != needle_lower[offset] {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            return Some(start);
+        }
+        start += 1;
+    }
+
+    None
+}
+
+fn build_text_match(text: &str, pos: usize, keyword_len: usize, field: &str) -> MatchLocation {
+    let start = find_char_boundary(text, pos.saturating_sub(MAX_PREVIEW_CONTEXT), false);
+    let end = find_char_boundary(
+        text,
+        (pos + keyword_len + MAX_PREVIEW_CONTEXT).min(text.len()),
+        true,
+    );
+
+    let preview = if start > 0 || end < text.len() {
+        let prefix = if start > 0 { "..." } else { "" };
+        let suffix = if end < text.len() { "..." } else { "" };
+        format!("{}{}{}", prefix, &text[start..end], suffix)
+    } else {
+        text[start..end].to_string()
+    };
+
+    MatchLocation {
+        field: field.to_string(),
+        preview,
+        offset: pos,
+    }
+}
+
+fn build_bytes_match(bytes: &[u8], pos: usize, keyword_len: usize, field: &str) -> MatchLocation {
+    let start = pos.saturating_sub(MAX_PREVIEW_CONTEXT);
+    let end = (pos + keyword_len + MAX_PREVIEW_CONTEXT).min(bytes.len());
+    let preview_body = String::from_utf8_lossy(&bytes[start..end]);
+    let preview = if start > 0 || end < bytes.len() {
+        let prefix = if start > 0 { "..." } else { "" };
+        let suffix = if end < bytes.len() { "..." } else { "" };
+        format!("{}{}{}", prefix, preview_body, suffix)
+    } else {
+        preview_body.to_string()
+    };
+
+    MatchLocation {
+        field: field.to_string(),
+        preview,
+        offset: pos,
+    }
+}
+
 fn parse_ts_value(raw: &str) -> Option<i64> {
     let trimmed = raw.trim();
     if let Ok(n) = trimmed.parse::<i64>() {
@@ -1262,11 +1331,13 @@ fn eval_value_condition(value: &JsonValue, condition: &FilterCondition) -> bool 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
+    use parking_lot::RwLock;
     use tempfile::TempDir;
 
     use super::SearchEngine;
-    use crate::body_store::BodyRef;
+    use crate::body_store::{BodyRef, BodyStore};
     use crate::search::types::FilterCondition;
     use crate::search::{SearchFilters, SearchRequest, SearchScope, TimeRange};
     use crate::traffic::TrafficRecord;
@@ -1379,6 +1450,62 @@ mod tests {
         assert_eq!(response.total_matched, 1);
         assert_eq!(response.results[0].record.id, "REQ-search-bp");
         assert_eq!(response.results[0].matches[0].field, "response_body");
+    }
+
+    #[test]
+    fn response_body_search_matches_ascii_file_body_without_lowercase_allocation() {
+        let dir = TempDir::new().expect("temp dir");
+        let db = Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        );
+        let body_store = Arc::new(RwLock::new(BodyStore::new(
+            dir.path().join("body_cache"),
+            0,
+            7,
+            64 * 1024,
+            Duration::from_millis(100),
+        )));
+        let body_ref = body_store
+            .read()
+            .store(
+                "REQ-search-ascii-file",
+                "res",
+                br#"{"ok":true,"marker":"STORAGE-BODY-Needle-42","padding":"xxxxxxxx"}"#,
+            )
+            .expect("store body");
+
+        let mut record = TrafficRecord::new(
+            "REQ-search-ascii-file".to_string(),
+            "GET".to_string(),
+            "https://example.com/ascii-file".to_string(),
+        );
+        record.response_body_ref = Some(body_ref);
+        db.record(record);
+
+        let engine = SearchEngine::new(db, Some(body_store));
+        let response = engine.search(&SearchRequest {
+            keyword: "STORAGE-BODY-NEEDLE-42".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            filters: SearchFilters::default(),
+            cursor: None,
+            limit: Some(20),
+            max_scan: None,
+            max_results: None,
+            include: Default::default(),
+            time_range: None,
+        });
+
+        assert_eq!(response.total_matched, 1);
+        assert_eq!(response.results[0].record.id, "REQ-search-ascii-file");
+        assert_eq!(response.results[0].matches[0].field, "response_body");
+        assert!(response.results[0].matches[0]
+            .preview
+            .contains("STORAGE-BODY-Needle-42"));
     }
 
     fn make_db() -> Arc<TrafficDbStore> {

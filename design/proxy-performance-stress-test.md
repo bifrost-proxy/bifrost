@@ -620,6 +620,42 @@ scripts/perf/
 - overflow 场景最终保留约 8.3 万条而不是接近 10 万条，是当前 `trigger=max+min(max*15%,2000)`、`target=max*80%` 策略的结果。该行为有助于降低高频 cleanup，但用户感知上“max_records=100000”并不表示长期接近保留 100000 条，需要在产品/配置文档中明确。
 - response body 搜索在 10 万记录下 p95 约 `370-420ms`，是当前搜索侧主要成本；它主要来自逐批扫描和 body ref 读取，没有 body 全文索引。后续若继续优化，需要在不改变 Search API 语义的前提下单独设计索引或缓存策略。
 
+### 2026-06-19：10 万条 response body 搜索热路径优化
+
+现象：
+
+- 上一轮 10 万条完整写入报告 `traffic-storage-100k-2026-06-18T18-48-34.439Z.json` 中，`responseBodySearchP95Ms=417.09`，明显高于列表、status 过滤、host 过滤和 URL 搜索，是 10 万记录存储专项里最突出的查询热点。
+- 该路径会读取 body ref、把文件内容转成字符串、对整段内容做 `to_lowercase()` 后再搜索；对压测里的常见 ASCII JSON/text 响应体，这会制造额外分配和解码成本。
+
+优化：
+
+- Search Engine 对 ASCII text/body 走 byte-level case-insensitive fast path，避免常见 ASCII JSON/text body 的整段 lowercase 分配。
+- 文件 body 搜索改为 `BodyStore::load_bytes` 后按字节搜索，只有非 ASCII 或需要 fallback 时再走 `String::from_utf8_lossy` 与原有 Unicode 路径。
+- `BodyStore::load` 与 `load_bytes` 按 `BodyRef::File.size` 预分配 buffer，降低大批量文件 body 读取时的 Vec 扩容。
+- 文件 body 的读取结果先离开 `body_store` 读锁再执行搜索，减少全量扫描期间锁持有时间。
+- 功能语义保持不变：搜索仍是大小写不敏感，preview 保留原始大小写；非 ASCII/非 UTF-8 内容继续走原有 fallback。
+
+验证与尝试：
+
+| run | 关键变化 | response body p95 | URL p95 | latest list p95 | host/status p95 | batch p95 | 结论 |
+| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
+| `traffic-storage-100k-2026-06-18T18-48-34.439Z.json` | 优化前基线 | `417.09ms` | `118.72ms` | `0.76ms` | `17.21ms` / `2.68ms` | `16.42ms` | response body 是主要热点 |
+| `traffic-storage-100k-2026-06-18T20-14-01.523Z.json` | ASCII fast path | `370.97ms` | `116.71ms` | `0.68ms` | `16.98ms` / `2.69ms` | `14.66ms` | 搜索热路径明显下降 |
+| `traffic-storage-100k-2026-06-18T20-17-32.963Z.json` | BodyStore 预分配 + 缩短锁持有 | `364.14ms` | `116.62ms` | `0.63ms` | `10.39ms` / `1.95ms` | `14.92ms` | 查询侧继续改善 |
+| `traffic-storage-100k-2026-06-18T20-20-53.118Z.json` | 尝试 `SEARCH_BATCH_SIZE=5000` | `371.93ms` | `124.09ms` | `0.70ms` | `10.72ms` / `1.90ms` | `13.83ms` | URL/body 搜索变差，已回滚到 `1000` |
+| `traffic-storage-100k-2026-06-18T20-24-18.611Z.json` | 手写 ASCII loop + batch 回滚 | `349.88ms` | `115.32ms` | `0.52ms` | `9.41ms` / `1.64ms` | `14.28ms` | 当前最佳，记录完整性仍为 `1` |
+
+最终收益：
+
+- 在 10 万条记录、`recordCompleteness=1`、`retainedRecords=100000` 的同等压力下，response body 搜索 p95 从 `417.09ms` 降到 `349.88ms`，下降约 `16.1%`。
+- URL 搜索 p95 从 `118.72ms` 降到 `115.32ms`，没有因 body 搜索优化产生回归。
+- 写入仍保持 `write.errors=0`、`write.non2xx=0`；最终 run 的 `writeRps=19550.34`、`writeP95Ms=20.13`。
+
+剩余观察：
+
+- 该优化只消除了 common-case 扫描中的不必要分配和锁持有时间；response body 搜索本质仍是按 body ref 全量扫描，没有全文索引。
+- 下一轮如果继续追求数量级提升，应单独设计 body search index/cache，并用 Search API 等价测试、导出/replay 回归和存储增长门禁验证，不能通过跳过 body 或降低 `max_scan` 换性能。
+
 ## 10 万条流量存储专项
 
 本专项用于回答“traffic 记录拉到当前硬上限 100000 后，写入、列表、详情和搜索还能不能稳定工作”。它不是替代代理吞吐压测，而是专门拆出 Traffic DB、body 存储、Admin API 查询和 Search Engine 在高记录数下的退化曲线。
