@@ -3193,7 +3193,7 @@ fn build_remote_file_command(
                 base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
             } else {
                 match content_file.as_deref() {
-                    Some("-") | None => {
+                    Some("-") => {
                         use std::io::Read;
                         let mut buf = Vec::new();
                         std::io::stdin().read_to_end(&mut buf).map_err(|e| {
@@ -3202,6 +3202,11 @@ fn build_remote_file_command(
                             )))
                         })?;
                         base64::engine::general_purpose::STANDARD.encode(&buf)
+                    }
+                    None => {
+                        return Err(BifrostError::Config(
+                            "missing content source for file.write: use --content, --content-file, --content-b64, or --content-file - to read stdin".to_string(),
+                        ));
                     }
                     Some(p) => std::fs::read(p)
                         .map(|b| base64::engine::general_purpose::STANDARD.encode(&b))
@@ -10605,6 +10610,30 @@ mod coverage_boost_v3 {
             BifrostError::Io(e) => {
                 let msg = e.to_string();
                 assert!(msg.contains("read content file"));
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn file_write_rejects_missing_content_source() {
+        let cmd = RemoteFileCommands::Write {
+            path: Some("missing-content.txt".to_string()),
+            path_flag: None,
+            content: None,
+            content_file: None,
+            content_b64: None,
+            base_sha256: None,
+            allow_overwrite: Some(false),
+            create_parents: false,
+            cwd: None,
+            output: "human".to_string(),
+        };
+        let err = build_remote_file_command(&cmd).expect_err("expected missing content source");
+        match err {
+            BifrostError::Config(msg) => {
+                assert!(msg.contains("missing content source for file.write"));
+                assert!(msg.contains("--content-file -"));
             }
             other => panic!("unexpected error: {other:?}"),
         }

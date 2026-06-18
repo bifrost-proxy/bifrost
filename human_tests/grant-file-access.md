@@ -247,3 +247,21 @@ cargo run --bin bifrost -- remote grant update <grant_id> --scope remote_file_re
 ```bash
 rm -rf ./.bifrost-test
 ```
+
+### TC-GFA-PR260-01: 回归 — remote file write 缺少内容源时立即报错
+
+**关联修复**：PR #260 阻塞问题，`bifrost remote file write <path>` 未提供 `--content` / `--content-file` / `--content-b64` 时不能隐式读取 stdin，避免交互式卡住或自动化写入空文件。
+
+**操作步骤**：
+```bash
+bifrost remote file write /tmp/bifrost-missing-content.txt
+```
+
+**预期结果**：
+- 命令立即失败，不等待 stdin。
+- 错误信息提示需要显式提供 `--content`、`--content-file`、`--content-b64`，或使用 `--content-file -` 显式读取 stdin。
+- 远端目标文件不会被创建或覆盖为空文件。
+
+**本次执行记录（2026-06-18）**：
+- 已补充 CLI 单元测试覆盖 `file_write_rejects_missing_content_source`。
+- 完整远端交互链路待 CI/人工授权环境继续执行。

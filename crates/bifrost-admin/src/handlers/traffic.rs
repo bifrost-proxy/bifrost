@@ -1407,6 +1407,15 @@ struct ClearTrafficRequest {
     ids: Option<Vec<String>>,
 }
 
+fn parse_clear_traffic_request_body(
+    body: &[u8],
+) -> std::result::Result<ClearTrafficRequest, String> {
+    if body.is_empty() {
+        return Ok(ClearTrafficRequest { ids: None });
+    }
+    serde_json::from_slice(body).map_err(|e| format!("Invalid JSON clear traffic request: {e}"))
+}
+
 async fn clear_traffic(
     req: Request<Incoming>,
     state: SharedAdminState,
@@ -1417,15 +1426,11 @@ async fn clear_traffic(
         Err(_) => bytes::Bytes::new(),
     };
 
-    let request: ClearTrafficRequest = if body.is_empty() {
-        ClearTrafficRequest { ids: None }
-    } else {
-        match serde_json::from_slice(&body) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("[CLEAR_TRAFFIC] Failed to parse request body: {}", e);
-                ClearTrafficRequest { ids: None }
-            }
+    let request = match parse_clear_traffic_request_body(&body) {
+        Ok(request) => request,
+        Err(e) => {
+            tracing::warn!("[CLEAR_TRAFFIC] Failed to parse request body: {}", e);
+            return error_response(StatusCode::BAD_REQUEST, &e);
         }
     };
 
@@ -1520,6 +1525,34 @@ async fn clear_traffic_by_ids(
 
     tracing::info!("[CLEAR_TRAFFIC] Deleted {} traffic records", count);
     success_response(&format!("{} traffic records cleared successfully", count))
+}
+
+#[cfg(test)]
+mod clear_traffic_request_tests {
+    use super::parse_clear_traffic_request_body;
+
+    #[test]
+    fn malformed_clear_request_is_rejected() {
+        let err = parse_clear_traffic_request_body(br#"{"ids":["one""#)
+            .expect_err("malformed JSON must not fall back to clear-all");
+        assert!(err.contains("Invalid JSON clear traffic request"));
+    }
+
+    #[test]
+    fn empty_clear_request_keeps_clear_all_semantics() {
+        let request = parse_clear_traffic_request_body(b"").expect("empty body is clear-all");
+        assert!(request.ids.is_none());
+    }
+
+    #[test]
+    fn ids_clear_request_parses_ids() {
+        let request =
+            parse_clear_traffic_request_body(br#"{"ids":["a","b"]}"#).expect("valid ids body");
+        assert_eq!(
+            request.ids.as_deref(),
+            Some(&["a".to_string(), "b".to_string()][..])
+        );
+    }
 }
 
 async fn clear_all_traffic(
