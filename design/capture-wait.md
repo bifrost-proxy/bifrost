@@ -12,7 +12,7 @@
 
 - 不替代 `/api/push` 长连接订阅；本能力专门为"等待某一条请求"的一次性命中场景设计。
 - 当前 P0 实现 **不** 接入 SearchEngine 的 JSONPath 过滤（`req_json` 留接口但实现里恒返回 true，等 P0-2 合入后整合）。
-- 不做 body redact / 大 body 转储；返回的 `record` 字段直接取 `TrafficRecord`。
+- 不做 body 脱敏 / 大 body 转储；返回的 `record` 字段直接取 `TrafficRecord`，调用方需把输出视为敏感数据。
 
 ## 数据流
 

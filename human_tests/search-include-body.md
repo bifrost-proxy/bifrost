@@ -30,4 +30,4 @@
 - `--include` 与 `--max-body` 是搜索独立配置；`--max-body` 单独给但未启用任何 body include 时，include 块仅含 `max_body_bytes`，admin 视为无 body 输出（仅作为后续 include 启用时的默认上限）。
 - `bifrost traffic get --ids` 与位置参数 `<ID>` 严格互斥，clap usage 阶段即报错。
 - body 一律 base64 STANDARD 编码；CLI 输出 ndjson / json 信封时保留 `data_b64` 字段，由调用方自行解码。
-- 当前实现**不脱敏** Authorization / Cookie / 业务密钥；遵循 P2-8 redact layer 落地前严禁把 batch 结果转发给低信任 caller。
+- 当前实现**不脱敏** Authorization / Cookie / 业务密钥；完整脱敏方案另开需求落地前，严禁把 batch/search include 结果转发给低信任 caller。

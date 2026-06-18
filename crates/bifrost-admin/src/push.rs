@@ -2356,7 +2356,11 @@ mod tests {
 
     #[test]
     fn send_traffic_delta_dedupes_updates_by_id_keep_latest() {
-        let state = Arc::new(AdminState::new(9916));
+        let test_dir = create_test_dir();
+        let state = Arc::new(AdminState::new_for_test(
+            9916,
+            bifrost_storage::RulesStorage::with_dir(test_dir.join("rules")).unwrap(),
+        ));
         let manager = PushManager::new(state);
         let (client, mut receiver) = PushClient::new(
             "push-client-dedupe".to_string(),

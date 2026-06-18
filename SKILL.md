@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询（含 JSONPath/header 等值/时间窗高级过滤、search --include 直接挂 body/headers、traffic 批量 get、auth-status JWT/Cookie 诊断、export curl/fetch/HAR、replay + JSON Patch、capture wait 等下一条请求、默认 redact 脱敏 + show-secrets/extract-auth-summary、status --format json），以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）；8) 诊断 JWT/Cookie 过期/重放请求/导出 curl/fetch/HAR/等待下一条匹配请求/批量取多条 traffic。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''导出 xxxxx 为 curl''重放 xxxxx 这条请求''看下 xxxxx 的 JWT 还有效吗''等下一条 POST xxxxx 的请求''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash）。"
+description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询（含 JSONPath/header 等值/时间窗高级过滤、search --include 直接挂 body/headers、traffic 批量 get、auth-status JWT/Cookie 诊断、export curl/fetch/HAR、replay + JSON Patch、capture wait 等下一条请求、status --format json），以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）；8) 诊断 JWT/Cookie 过期/重放请求/导出 curl/fetch/HAR/等待下一条匹配请求/批量取多条 traffic。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''导出 xxxxx 为 curl''重放 xxxxx 这条请求''看下 xxxxx 的 JWT 还有效吗''等下一条 POST xxxxx 的请求''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash）。"
 ---
 
 # Bifrost
@@ -469,7 +469,7 @@ bifrost traffic get --ids 57544,57545,57546 --max-body 32768 --format ndjson   #
 bifrost traffic search openai --domain api.openai.com --method POST
 bifrost traffic search openai --proxy-port 18888
 bifrost traffic auth-status 57544                                              # JWT/Cookie 诊断（valid/expired/sub/exp/cookie 名）
-bifrost traffic export 57544 --as curl                                         # 导出 curl 模板（默认 redact）
+bifrost traffic export 57544 --as curl                                         # 导出 curl 模板（原始捕获值）
 bifrost traffic export 57544 --as fetch -o ./repro.js                          # 导出 fetch / HAR
 bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          # 重放并应用 JSON Patch
 ```
@@ -478,9 +478,7 @@ bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          #
 >
 > **批量场景**：要在一次往返里取多条用 `--ids id1,id2,id3`（最多 200，默认 ndjson 输出，省 N-1 次 round-trip）。
 >
-> **脱敏默认开**：`traffic get` / `traffic export` / `search --include` 输出会自动遮蔽 `Authorization`、`Cookie`、`Set-Cookie`、`X-Tt-*`、`api_key`、JWT、邮箱、手机号等敏感字段；调试时加 `--show-secrets` 关闭；想要快速看 JWT sub/exp/cookie 名而不打印明文，加 `--extract-auth-summary`。
->
-> **环境开关**：`BIFROST_REDACT=off` 全局关闭脱敏；`BIFROST_REDACT_BODY_MAX_BYTES=N` 调整脱敏 body 大小上限（默认 65536）。
+> **敏感输出**：本期不做 Authorization、Cookie、JWT token 等敏感信息脱敏。`traffic get` / `traffic export` / `search --include` 按捕获原文输出；完整脱敏方案另开需求处理，当前不要把这些输出写入低信任日志、聊天或可复用 skill。
 
 `traffic list` 完整过滤参数：
 
@@ -508,7 +506,7 @@ bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          #
     --no-color                禁用彩色输出
 ```
 
-`traffic get` 批量与脱敏参数（新）：
+`traffic get` 批量参数：
 
 ```
 [ID]                          单条 ID（与 --ids 互斥；省略时进入交互式选择）
@@ -516,8 +514,6 @@ bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          #
     --request-body            包含请求 body（best effort）
     --response-body           包含响应 body（best effort）
     --max-body <BYTES>        批量模式每条 body 上限（默认 65536）
-    --show-secrets            关闭脱敏（默认开；会打印明文 Authorization/Cookie/JWT/API key）
-    --extract-auth-summary    追加脱敏的 auth 摘要（JWT sub/exp、cookie 名、host）
 -f, --format <FMT>            输出格式：table|compact|json|json-pretty|ndjson（--ids 默认 ndjson）
 ```
 
@@ -528,7 +524,7 @@ bifrost traffic replay 57544 --patch /body/messages/0/content="hello"          #
 bifrost traffic auth-status <ID> [--format human|json]
 
 # export：导出 curl / fetch / HAR 模板，便于在外部 shell / 浏览器 / Postman 复现
-bifrost traffic export <ID> --as curl|fetch|har [--show-secrets] [-o <file>]
+bifrost traffic export <ID> --as curl|fetch|har [-o <file>]
 
 # replay：从 admin 端直接重放请求；可叠加 RFC6902 JSON Patch
 bifrost traffic replay <ID> [--patch /a/b=value]... [--patch-json <RAW_OPS>] \
@@ -538,7 +534,7 @@ bifrost traffic replay <ID> [--patch /a/b=value]... [--patch-json <RAW_OPS>] \
 - `--patch` 是 shorthand：`/headers/Authorization=Bearer xxx` 或 `/body/messages/0/content="hi"`；value 自动识别数字/字符串。
 - `--patch-json` 是 RFC6902 原生数组：`'[{"op":"replace","path":"/headers/X-A","value":"v"}]'`。
 - `--refresh-auth` 会从最近一次同 host 的成功请求里拉 `Authorization` / `Cookie` / `X-Tt-*` 注入，适合 token 过期场景。
-- 所有 export / replay 输出**默认 redact**；想看明文加 `--show-secrets`。
+- export / replay 使用捕获原文或重放结果原文；复制到外部前必须手动移除 Authorization、Cookie、JWT token 等敏感值。
 
 ### 13. 全文搜索
 
@@ -552,7 +548,6 @@ bifrost search foo --since 30m --until now                                      
 bifrost search foo --latest 10m                                                     # --latest 10m == --since now-10m
 bifrost search foo --include bodies,headers --max-body 32768                        # 在结果里直接带上 body/headers
 bifrost search foo --include req-body,res-headers                                   # 也可单独挑：req-body|res-body|req-headers|res-headers
-bifrost search foo --extract-auth-summary                                            # 给每条匹配挂脱敏 auth 摘要
 ```
 
 `search` 完整参数：
@@ -588,8 +583,6 @@ bifrost search foo --extract-auth-summary                                       
     --latest DURATION         快捷写法，等价于 --since now-DURATION
     --include PARTS           随结果返回 request-body|response-body|request-headers|response-headers；别名 req-body/res-body/req-headers/res-headers；快捷 bodies / headers（逗号分隔）
     --max-body BYTES          配合 --include 限制每条 body 上限（默认 65536）
-    --show-secrets            关闭脱敏（默认开，会打印明文 Authorization/Cookie/JWT/API key）
-    --extract-auth-summary    给每条匹配追加脱敏的 auth 摘要（JWT sub/exp、cookie 名、host）
     --no-color                禁用彩色输出
 ```
 
@@ -895,7 +888,7 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 - **TLS 拦截默认关闭**，不要主动全局开启 `--intercept`（详见 §3 TLS/CA）
 - 如果用户只想验证规则，不必启用 TLS 拦截
 - 当用户提供一个少于 6 位的纯数字（如 57544、12345），且上下文含有「详情」「内容」「请求」「查看」等关键词时，应识别为 `bifrost traffic get <ID> --request-body --response-body` 操作；如果用户给了 ≥2 个 ID 应直接走 `bifrost traffic get --ids ID1,ID2,...` 批量
-- **脱敏默认开**：所有 `traffic get` / `traffic export` / `search --include` 路径都会自动遮蔽 Authorization/Cookie/JWT/邮箱/手机号，**不要随意加 `--show-secrets`**；用户明示要看明文时才加，且不要把结果写到日志/文件里
+- **敏感输出**：`traffic get` / `traffic export` / `search --include` 当前按捕获原文输出，不要把 Authorization/Cookie/JWT/邮箱/手机号写到日志、聊天或可复用 skill 里
 - 想知道 token/JWT 是否过期、属于谁，优先用 `bifrost traffic auth-status <ID>`，不要让 user 自己 decode JWT
 - 想在外部 shell / 浏览器复现请求，用 `bifrost traffic export <ID> --as curl|fetch|har`；想直接重放并修改 body/headers 用 `bifrost traffic replay <ID> --patch ...`，不要自己手动拼 curl
 - 需要捕获一次后续请求（比如「等我点击那个按钮」），用 `bifrost capture wait` 而不是 `traffic list` 轮询

@@ -86,8 +86,8 @@ bifrost traffic export <id> --as curl
 bifrost traffic replay <id> --patch '/json/debug=true'
 ```
 
-When using a temporary port, include `--listener-port` or `--proxy-port` filters. Traffic and export outputs are redacted by default; keep that default when handing evidence to an agent, and use `--show-secrets` only for safe local diagnostics.
+When using a temporary port, include `--listener-port` or `--proxy-port` filters. Traffic and export outputs currently contain captured values as-is, including Authorization, Cookie, JWT token, and other sensitive fields; a complete redaction design will be handled separately.
 
 ## Agent Collaboration
 
-Install Bifrost skills, capture the real traffic chain, then let an agent summarize URLs, methods, headers, cookies, bodies, status codes, and ordering. Always redact sensitive tokens and personal data before publishing reusable skills.
+Install Bifrost skills, capture the real traffic chain, then let an agent summarize URLs, methods, headers, cookies, bodies, status codes, and ordering. Manually remove sensitive tokens and personal data before publishing reusable skills.

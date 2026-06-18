@@ -86,8 +86,6 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 format: OutputFormat::Json,
                 ids: Vec::new(),
                 max_body: None,
-                show_secrets: false,
-                extract_auth_summary: false,
             };
             run_traffic_get(get_opts).map_err(|e| e.to_string())?;
 

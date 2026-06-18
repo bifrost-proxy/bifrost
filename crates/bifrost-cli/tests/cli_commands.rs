@@ -749,6 +749,43 @@ fn traffic_clear_command_parse() {
 }
 
 #[test]
+fn traffic_secret_redaction_flags_are_not_accepted() {
+    for args in [
+        vec!["bifrost", "traffic", "get", "42", "--show-secrets"],
+        vec!["bifrost", "traffic", "get", "42", "--extract-auth-summary"],
+        vec!["bifrost", "traffic", "export", "42", "--show-secrets"],
+        vec!["bifrost", "traffic", "export", "42", "--redact"],
+        vec!["bifrost", "search", "token", "--show-secrets"],
+        vec!["bifrost", "search", "token", "--extract-auth-summary"],
+    ] {
+        let err = match Cli::try_parse_from(args.clone()) {
+            Ok(_) => panic!("old redaction flag must fail for {args:?}"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("unexpected argument"),
+            "unexpected error for {args:?}: {err}"
+        );
+    }
+}
+
+#[test]
+fn traffic_get_export_without_redaction_flags_parse() {
+    Cli::try_parse_from([
+        "bifrost",
+        "traffic",
+        "get",
+        "42",
+        "--request-body",
+        "--response-body",
+    ])
+    .expect("traffic get should parse without redaction flags");
+
+    Cli::try_parse_from(["bifrost", "traffic", "export", "42", "--as", "curl"])
+        .expect("traffic export should parse without redaction flags");
+}
+
+#[test]
 fn remote_traffic_clear_is_not_exposed() {
     let help = run_help(&["remote", "traffic"]);
     assert!(help.contains("list"), "remote traffic should list records");

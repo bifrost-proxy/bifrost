@@ -1,10 +1,6 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
-use bifrost_admin::redact::{
-    auth_summary_from_headers, default_options as default_redact_options, redact_body_text,
-    redact_headers, AuthSummary, RedactOptions,
-};
 use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use serde::Deserialize;
@@ -70,8 +66,6 @@ pub struct TrafficGetOptions {
     pub ids: Vec<String>,
     /// Batch mode: optional per-body cap forwarded as `max_body=...`.
     pub max_body: Option<usize>,
-    pub show_secrets: bool,
-    pub extract_auth_summary: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -289,9 +283,6 @@ pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
             output["response_body"] = v;
         }
     }
-
-    let redact_opts = resolve_redact_options(options.show_secrets, options.extract_auth_summary);
-    apply_redact_to_detail(&mut output, &redact_opts);
 
     render_traffic_detail_value(&output, options.format, false)?;
 
@@ -1634,7 +1625,6 @@ pub struct TrafficExportOptions {
     pub port: u16,
     pub id: String,
     pub as_format: String,
-    pub redact: bool,
     pub output: Option<PathBuf>,
 }
 
@@ -1661,8 +1651,8 @@ fn resolve_traffic_id(port: u16, id: &str) -> Result<String> {
 pub fn run_traffic_export(opts: TrafficExportOptions) -> Result<()> {
     let id = resolve_traffic_id(opts.port, &opts.id)?;
     let url = format!(
-        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/export?format={}&redact={}",
-        opts.port, id, opts.as_format, opts.redact
+        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/export?format={}",
+        opts.port, id, opts.as_format
     );
     let agent = direct_agent(Duration::from_secs(15));
     let resp = agent
@@ -1938,148 +1928,6 @@ mod tests_export_replay {
         assert_eq!(parse_timeout("500").unwrap(), 500);
         assert_eq!(parse_timeout("1.5s").unwrap(), 1500);
         assert!(parse_timeout("abc").is_err());
-    }
-}
-
-fn redact_env_disabled() -> bool {
-    match std::env::var("BIFROST_REDACT") {
-        Ok(v) => {
-            let lower = v.trim().to_ascii_lowercase();
-            matches!(lower.as_str(), "off" | "0" | "false" | "no")
-        }
-        Err(_) => false,
-    }
-}
-
-pub(crate) fn resolve_redact_options(
-    show_secrets: bool,
-    extract_auth_summary: bool,
-) -> RedactOptions {
-    let mut opts = default_redact_options();
-    if show_secrets || redact_env_disabled() {
-        opts.show_secrets = true;
-    }
-    opts.extract_auth_summary = extract_auth_summary;
-    opts
-}
-
-fn redact_headers_array(value: &mut Value, opts: &RedactOptions) {
-    if let Some(arr) = value.as_array_mut() {
-        let mut pairs: Vec<(String, String)> = arr
-            .iter()
-            .filter_map(|entry| {
-                let parts = entry.as_array()?;
-                let k = parts.first()?.as_str()?.to_string();
-                let v = parts.get(1)?.as_str()?.to_string();
-                Some((k, v))
-            })
-            .collect();
-        redact_headers(&mut pairs, opts);
-        for (idx, (k, v)) in pairs.into_iter().enumerate() {
-            if let Some(entry) = arr.get_mut(idx) {
-                *entry = Value::Array(vec![Value::String(k), Value::String(v)]);
-            }
-        }
-    }
-}
-
-fn headers_pairs(value: &Value) -> Vec<(String, String)> {
-    value
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|entry| {
-                    let parts = entry.as_array()?;
-                    let k = parts.first()?.as_str()?.to_string();
-                    let v = parts.get(1)?.as_str()?.to_string();
-                    Some((k, v))
-                })
-                .collect()
-        })
-        .unwrap_or_default()
-}
-
-fn content_type_from_headers(value: Option<&Value>) -> Option<String> {
-    let arr = value?.as_array()?;
-    for entry in arr {
-        if let Some(parts) = entry.as_array() {
-            if let (Some(k), Some(v)) = (
-                parts.first().and_then(|v| v.as_str()),
-                parts.get(1).and_then(|v| v.as_str()),
-            ) {
-                if k.eq_ignore_ascii_case("content-type") {
-                    return Some(v.to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn redact_body_value(value: &mut Value, content_type: Option<&str>, opts: &RedactOptions) {
-    if opts.show_secrets {
-        return;
-    }
-    // If the body has been parsed into a JSON object/array we can redact in
-    // place regardless of declared content type — the body is structurally JSON
-    // by construction.
-    if value.is_object() || value.is_array() {
-        let text = serde_json::to_string(value).unwrap_or_default();
-        let redacted = redact_body_text(Some("application/json"), &text, opts);
-        if let Ok(parsed) = serde_json::from_str::<Value>(&redacted) {
-            *value = parsed;
-        }
-        return;
-    }
-    if let Some(s) = value.as_str() {
-        let redacted = redact_body_text(content_type, s, opts);
-        *value = Value::String(redacted);
-    }
-}
-
-fn auth_summary_to_json(summary: &AuthSummary) -> Value {
-    serde_json::json!({
-        "has_jwt": summary.has_jwt,
-        "has_cookie": summary.has_cookie,
-        "jwt_user_id": summary.jwt_user_id,
-        "jwt_exp_unix": summary.jwt_exp_unix,
-        "cookie_names": summary.cookie_names,
-        "host": summary.host,
-    })
-}
-
-/// Apply header/body redaction to a fetched traffic detail JSON in place. Also
-/// appends an `auth_summary` block when requested.
-pub(crate) fn apply_redact_to_detail(record: &mut Value, opts: &RedactOptions) {
-    let req_ct = content_type_from_headers(record.get("request_headers"));
-    let res_ct = content_type_from_headers(record.get("response_headers"));
-
-    if let Some(headers) = record.get("request_headers") {
-        let req_pairs_for_summary = headers_pairs(headers);
-        if opts.extract_auth_summary {
-            let summary = auth_summary_from_headers(&req_pairs_for_summary);
-            if let Some(obj) = record.as_object_mut() {
-                obj.insert("auth_summary".to_string(), auth_summary_to_json(&summary));
-            }
-        }
-    }
-
-    for key in [
-        "request_headers",
-        "response_headers",
-        "original_request_headers",
-        "original_response_headers",
-    ] {
-        if let Some(v) = record.get_mut(key) {
-            redact_headers_array(v, opts);
-        }
-    }
-
-    if let Some(v) = record.get_mut("request_body") {
-        redact_body_value(v, req_ct.as_deref(), opts);
-    }
-    if let Some(v) = record.get_mut("response_body") {
-        redact_body_value(v, res_ct.as_deref(), opts);
     }
 }
 

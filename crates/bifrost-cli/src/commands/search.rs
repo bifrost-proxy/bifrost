@@ -20,11 +20,6 @@ use ratatui::{
 };
 use serde::Deserialize;
 
-use base64::Engine as _;
-use bifrost_admin::redact::{
-    auth_summary_from_headers, default_options, redact_body_bytes, redact_headers, RedactOptions,
-};
-
 fn direct_agent(timeout: Duration) -> ureq::Agent {
     bifrost_core::direct_ureq_agent_builder()
         .timeout(timeout)
@@ -285,10 +280,6 @@ pub struct SearchOptions {
     pub include_request_headers: bool,
     pub include_response_headers: bool,
     pub max_body: Option<usize>,
-    /// When true, disable redaction in CLI output. Equivalent to `--show-secrets`.
-    pub show_secrets: bool,
-    /// When true, append a redacted `auth_summary` block to each result.
-    pub extract_auth_summary: bool,
 }
 
 impl Default for SearchOptions {
@@ -329,8 +320,6 @@ impl Default for SearchOptions {
             include_request_headers: false,
             include_response_headers: false,
             max_body: None,
-            show_secrets: false,
-            extract_auth_summary: false,
         }
     }
 }
@@ -775,40 +764,13 @@ fn stream_compact_output(
     0
 }
 
-/// Build redact options for the search JSON output path.
-///
-/// Mirrors the policy used by `traffic get`: when `--show-secrets` is on we
-/// disable redaction wholesale, otherwise we use the conservative defaults from
-/// `bifrost_admin::redact::default_options()`. `--extract-auth-summary` adds a
-/// structured `auth_summary` field alongside the redacted payload.
-fn search_redact_options(options: &SearchOptions) -> RedactOptions {
-    let mut opts = default_options();
-    opts.show_secrets = options.show_secrets;
-    opts.extract_auth_summary = options.extract_auth_summary;
-    opts
-}
-
-/// Produce the bodies/headers/auth_summary JSON fragments for one
-/// `SearchResultItem`, applying P2-8 redact on the way out. Returns
-/// `(bodies, headers, auth_summary)` -- each `None` when the corresponding
-/// payload was not present in the server response.
-fn redact_search_payloads(
+/// Produce the optional bodies/headers JSON fragments for one `SearchResultItem`.
+fn search_payloads_to_json(
     item: &SearchResultItem,
-    redact_opts: &RedactOptions,
-) -> (
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
-    Option<serde_json::Value>,
-) {
+) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     let bodies_json = item.bodies.as_ref().map(|b| {
-        let req = b
-            .request
-            .as_ref()
-            .map(|chunk| body_chunk_to_json(chunk, redact_opts));
-        let res = b
-            .response
-            .as_ref()
-            .map(|chunk| body_chunk_to_json(chunk, redact_opts));
+        let req = b.request.as_ref().map(body_chunk_to_json);
+        let res = b.response.as_ref().map(body_chunk_to_json);
         let mut obj = serde_json::Map::new();
         if let Some(v) = req {
             obj.insert("request".to_string(), v);
@@ -819,59 +781,30 @@ fn redact_search_payloads(
         serde_json::Value::Object(obj)
     });
 
-    let (headers_json, auth_summary_json) = if let Some(h) = item.headers.as_ref() {
-        let mut req = h.request.clone();
-        let mut res = h.response.clone();
-        // Auth summary uses the *original* header values (still bearing the
-        // secrets) so the inspector can read JWT claims etc.; this is always
-        // safe because the summary itself never reveals the raw token.
-        let summary = if redact_opts.extract_auth_summary {
-            let mut all: Vec<(String, String)> = Vec::with_capacity(req.len() + res.len());
-            all.extend(req.iter().cloned());
-            all.extend(res.iter().cloned());
-            let s = auth_summary_from_headers(&all);
-            Some(serde_json::json!({
-                "has_jwt": s.has_jwt,
-                "has_cookie": s.has_cookie,
-                "jwt_user_id": s.jwt_user_id,
-                "jwt_exp_unix": s.jwt_exp_unix,
-                "cookie_names": s.cookie_names,
-                "host": s.host,
-            }))
-        } else {
-            None
-        };
-        redact_headers(&mut req, redact_opts);
-        redact_headers(&mut res, redact_opts);
+    let headers_json = if let Some(h) = item.headers.as_ref() {
         let hj = serde_json::json!({
-            "request": req.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
-            "response": res.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
+            "request": h.request.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
+            "response": h.response.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
         });
-        (Some(hj), summary)
+        Some(hj)
     } else {
-        (None, None)
+        None
     };
 
-    (bodies_json, headers_json, auth_summary_json)
+    (bodies_json, headers_json)
 }
 
-fn body_chunk_to_json(chunk: &BodyChunkIn, opts: &RedactOptions) -> serde_json::Value {
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(chunk.bytes_b64.as_bytes())
-        .unwrap_or_default();
-    let redacted = redact_body_bytes(chunk.content_type.as_deref(), &raw, opts);
-    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&redacted);
+fn body_chunk_to_json(chunk: &BodyChunkIn) -> serde_json::Value {
     serde_json::json!({
-        "bytes_b64": bytes_b64,
+        "bytes_b64": chunk.bytes_b64.clone(),
         "size": chunk.size,
         "truncated": chunk.truncated,
-        "content_type": chunk.content_type,
+        "content_type": chunk.content_type.clone(),
     })
 }
 
 fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOptions) -> i32 {
     let pretty = options.format == OutputFormat::JsonPretty;
-    let redact_opts = search_redact_options(options);
     let mut results = Vec::new();
     let mut total_matched = 0;
     let mut total_searched = 0;
@@ -881,8 +814,7 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
     for event in parse_sse_events(reader) {
         match event {
             SseEvent::Result(item) => {
-                let (bodies_json, headers_json, auth_summary_json) =
-                    redact_search_payloads(&item, &redact_opts);
+                let (bodies_json, headers_json) = search_payloads_to_json(&item);
                 let mut obj = serde_json::json!({
                     "id": item.record.id,
                     "seq": item.record.seq,
@@ -908,9 +840,6 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
                     }
                     if let Some(v) = headers_json {
                         map.insert("headers".to_string(), v);
-                    }
-                    if let Some(v) = auth_summary_json {
-                        map.insert("auth_summary".to_string(), v);
                     }
                 }
                 results.push(obj);

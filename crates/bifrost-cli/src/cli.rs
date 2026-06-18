@@ -551,16 +551,6 @@ pub enum Commands {
             help = "Max bytes per body when --include includes a body (default: 65536)"
         )]
         max_body: Option<usize>,
-        #[arg(
-            long,
-            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
-        )]
-        show_secrets: bool,
-        #[arg(
-            long,
-            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host) to each match"
-        )]
-        extract_auth_summary: bool,
     },
     #[command(visible_alias = "comp", about = "Generate shell completion scripts")]
     Completions {
@@ -1592,16 +1582,6 @@ pub enum TrafficCommands {
             help = "Output format: table, compact, json, json-pretty, ndjson (ndjson auto-selected for --ids unless overridden)"
         )]
         format: String,
-        #[arg(
-            long,
-            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
-        )]
-        show_secrets: bool,
-        #[arg(
-            long,
-            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host)"
-        )]
-        extract_auth_summary: bool,
     },
     #[command(about = "Search traffic records (same as `bifrost search`)")]
     Search {
@@ -1722,16 +1702,6 @@ pub enum TrafficCommands {
             help = "Max bytes per body when --include includes a body (default: 65536)"
         )]
         max_body: Option<usize>,
-        #[arg(
-            long,
-            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
-        )]
-        show_secrets: bool,
-        #[arg(
-            long,
-            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host) to each match"
-        )]
-        extract_auth_summary: bool,
     },
     #[command(about = "Clear traffic records")]
     Clear {
@@ -1763,10 +1733,6 @@ pub enum TrafficCommands {
         id: String,
         #[arg(long = "as", default_value = "curl", value_parser = ["curl", "fetch", "har"], help = "Export format")]
         as_format: String,
-        #[arg(long, help = "Redact sensitive headers/body fields (default: on)")]
-        redact: bool,
-        #[arg(long, help = "Disable redact, show secrets as-is")]
-        show_secrets: bool,
         #[arg(short = 'o', long, value_hint = ValueHint::FilePath, help = "Write output to file")]
         output: Option<PathBuf>,
     },

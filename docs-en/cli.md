@@ -63,4 +63,4 @@ bifrost port bind --port 18888 --rule-text "debug.test statusCode://218 resBody:
 bifrost port destroy 18888
 ```
 
-Use the command-specific `--help` output as the source of truth for every flag. Traffic outputs are redacted by default; use `--show-secrets` only for local diagnostics when it is safe to expose tokens, cookies, or credentials. For agent workflows, prefer `capture wait`, `traffic get --ids ... --format ndjson`, `search --include ...`, and `traffic auth-status` to collect enough evidence without copying secrets into reusable skills.
+Use the command-specific `--help` output as the source of truth for every flag. This release does not redact Authorization, Cookie, JWT token, or other sensitive values from traffic detail, export, or `search --include` output; a complete redaction design will be handled separately. Treat those outputs as sensitive and manually remove secrets before publishing reusable skills or sharing evidence with lower-trust channels.
