@@ -42,3 +42,16 @@ curl -s -XPOST http://127.0.0.1:9000/_bifrost/api/traffic/<id>/replay \
   -d '{"refresh_auth_from":"latest"}'
 ```
 期望：行为等价 `refresh_auth=true`。
+
+## 用例 6（回归）：server success=false 时 CLI 非 0 退出
+
+对一条非 JSON body 请求执行 JSON Patch，或构造会让 replay admin 返回 `{"success":false,"error":"..."}` 的输入：
+```
+bifrost traffic replay 42 --patch '/limit=5' --format json
+```
+期望：标准输出仍保留 admin 返回的 JSON；CLI exit code 非 0；stderr/错误摘要包含 `Replay failed:` 与服务端 `error` 文本，调用方脚本不会把失败重放误判为成功。
+
+## 本次回归执行（2026-06-18）
+
+- TC-TR-06 执行 `cargo test -p bifrost-cli replay_failure_message -- --nocapture` 通过，验证 `success:false` 会被 CLI helper 判定为失败，`success:true` 不报错。
+- 执行 `SKIP_BUILD=true BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh` 通过，其中 `traffic replay success=false exits non-zero`、`traffic replay prints server failure JSON`、`traffic replay error summary includes Replay failed` 断言真实 CLI replay 失败路径。

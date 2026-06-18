@@ -1807,15 +1807,27 @@ pub fn run_traffic_replay(opts: TrafficReplayOptions) -> Result<()> {
             render_replay_human(&parsed);
         }
     }
+    if let Some(err) = replay_failure_message(&parsed) {
+        return Err(BifrostError::Network(format!("Replay failed: {err}")));
+    }
     Ok(())
 }
 
-fn render_replay_human(parsed: &serde_json::Value) {
-    if parsed.get("success").and_then(|v| v.as_bool()) != Some(true) {
-        let err = parsed
+fn replay_failure_message(parsed: &serde_json::Value) -> Option<String> {
+    if parsed.get("success").and_then(|v| v.as_bool()) == Some(true) {
+        return None;
+    }
+    Some(
+        parsed
             .get("error")
             .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
+            .unwrap_or("unknown error")
+            .to_string(),
+    )
+}
+
+fn render_replay_human(parsed: &serde_json::Value) {
+    if let Some(err) = replay_failure_message(parsed) {
         println!("replay failed: {err}");
         return;
     }
@@ -1928,6 +1940,31 @@ mod tests_export_replay {
         assert_eq!(parse_timeout("500").unwrap(), 500);
         assert_eq!(parse_timeout("1.5s").unwrap(), 1500);
         assert!(parse_timeout("abc").is_err());
+    }
+
+    #[test]
+    fn replay_failure_message_detects_business_failure() {
+        let parsed = serde_json::json!({
+            "success": false,
+            "error": "request body is not valid JSON"
+        });
+
+        assert_eq!(
+            replay_failure_message(&parsed).as_deref(),
+            Some("request body is not valid JSON")
+        );
+    }
+
+    #[test]
+    fn replay_failure_message_ignores_success_response() {
+        let parsed = serde_json::json!({
+            "success": true,
+            "data": {
+                "status": 200
+            }
+        });
+
+        assert!(replay_failure_message(&parsed).is_none());
     }
 }
 

@@ -50,6 +50,9 @@ pub struct QueryParams {
     pub listener_port: Option<u16>,
     pub content_type: Option<String>,
 
+    pub since_ms: Option<i64>,
+    pub until_ms: Option<i64>,
+
     pub pending_ids: Option<Vec<String>>,
 }
 
@@ -74,6 +77,8 @@ impl QueryParams {
             || self.client_ip_empty.is_some()
             || self.listener_port.is_some()
             || self.content_type.is_some()
+            || self.since_ms.is_some()
+            || self.until_ms.is_some()
     }
 
     pub fn build_where_clause(&self) -> (String, Vec<QueryValue>) {
@@ -204,6 +209,16 @@ impl QueryParams {
             params.push(QueryValue::Text(format!("%{}%", ct)));
         }
 
+        if let Some(since_ms) = self.since_ms {
+            conditions.push("timestamp >= ?".to_string());
+            params.push(QueryValue::Int(since_ms));
+        }
+
+        if let Some(until_ms) = self.until_ms {
+            conditions.push("timestamp <= ?".to_string());
+            params.push(QueryValue::Int(until_ms));
+        }
+
         let where_clause = if conditions.is_empty() {
             String::new()
         } else {
@@ -308,5 +323,21 @@ mod tests {
         let (where_clause, values) = params.build_where_clause();
         assert!(where_clause.contains("listener_port = ?"));
         assert!(matches!(values.first(), Some(QueryValue::Int(v)) if *v == 50831));
+    }
+
+    #[test]
+    fn build_where_clause_supports_timestamp_window_filter() {
+        let params = QueryParams {
+            since_ms: Some(1_700_000_000_000),
+            until_ms: Some(1_700_000_060_000),
+            ..Default::default()
+        };
+
+        let (where_clause, values) = params.build_where_clause();
+
+        assert!(where_clause.contains("timestamp >= ?"));
+        assert!(where_clause.contains("timestamp <= ?"));
+        assert!(matches!(values.first(), Some(QueryValue::Int(v)) if *v == 1_700_000_000_000));
+        assert!(matches!(values.get(1), Some(QueryValue::Int(v)) if *v == 1_700_000_060_000));
     }
 }

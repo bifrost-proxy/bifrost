@@ -173,10 +173,6 @@ impl SearchEngine {
         let mut oldest_ts_ms: Option<i64> = None;
         let mut newest_ts_ms: Option<i64> = None;
         let mut scanned_count: usize = 0;
-        let (since_ms, until_ms) = match request.time_range.as_ref() {
-            Some(tr) => (tr.since_ms, tr.until_ms),
-            None => (None, None),
-        };
 
         while results.len() < max_results && total_searched < max_total_searched && db_has_more {
             if started_at.elapsed() >= SEARCH_TIMEOUT {
@@ -235,22 +231,6 @@ impl SearchEngine {
                 current_cursor = Some(compact.seq);
 
                 let ts_signed = compact.ts as i64;
-                if let Some(s) = since_ms {
-                    if ts_signed < s {
-                        if total_searched >= max_total_searched {
-                            break;
-                        }
-                        continue;
-                    }
-                }
-                if let Some(u) = until_ms {
-                    if ts_signed > u {
-                        if total_searched >= max_total_searched {
-                            break;
-                        }
-                        continue;
-                    }
-                }
                 oldest_ts_ms = Some(match oldest_ts_ms {
                     Some(prev) => prev.min(ts_signed),
                     None => ts_signed,
@@ -454,6 +434,11 @@ impl SearchEngine {
 
         if let Some(rule_hit) = filters.has_rule_hit {
             params.has_rule_hit = Some(rule_hit);
+        }
+
+        if let Some(time_range) = request.time_range.as_ref() {
+            params.since_ms = time_range.since_ms;
+            params.until_ms = time_range.until_ms;
         }
 
         for protocol in &filters.protocols {
@@ -1571,7 +1556,7 @@ mod tests {
             }),
         );
         assert_eq!(resp.total_matched, 0);
-        assert_eq!(resp.searched_range.scanned_count, 3);
+        assert_eq!(resp.searched_range.scanned_count, 0);
         assert!(resp.searched_range.oldest_ts_ms.is_none());
     }
 

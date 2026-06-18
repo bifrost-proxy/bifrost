@@ -14,11 +14,12 @@
 
 | 序号 | 场景 | 预期 |
 |------|------|------|
-| 1 | `bifrost search --include req-body,res-body --max-body 65536 errno` | 每条命中带 `bodies.request` / `bodies.response`；`data_b64` 解码即原文（含 JSON / 二进制）；超 64 KiB 的 body `truncated=true` 且解码长度 = 65536；exit code 0 |
+| 1 | `bifrost search --include req-body,res-body --max-body 65536 errno` | 每条命中带 `bodies.request` / `bodies.response`；`bytes_b64` 解码即原文（含 JSON / 二进制）；超 64 KiB 的 body `truncated=true` 且解码长度 = 65536；exit code 0 |
 | 2 | `bifrost search --include headers --format json-pretty token` | 每条命中带 `headers.request` 与 `headers.response`，每项是 `[name, value]` 二元数组；缺失 header 字段则该侧为空数组而非 null；body 字段缺省不返回 |
-| 3 | `bifrost traffic get --ids 1,2,3 --max-body 32768` | 默认 ndjson 输出：3 行，每行独立 `{"id":..,"summary":..,"bodies":..,"headers":..?}`；存在 / 不存在的 id 混排时缺失 id 行变 `{"id":"X","error":"not_found"}`；exit code 0 |
-| 4 | `bifrost traffic get --ids 1,2,3 --format json-pretty` | 客户端聚合成 `{"results":[...]}` 信封并 pretty-print；与单条 `traffic get <ID> --request-body --response-body` 字段对齐 |
-| 5 | `bifrost traffic get --ids $(seq -s, 1 201)` 与 `bifrost traffic get --ids` 留空 | 超 200 上限：admin 返回 HTTP 400 + `[traffic.batch.too_many_ids]`，CLI 非 0 退出；空 ids：CLI clap 直接 usage error |
+| 3 | `bifrost search --include bodies,headers --format ndjson token` | `result` 行保留 `bodies.request.bytes_b64` / `bodies.response.bytes_b64` 与 `headers.request` / `headers.response`，不会因 NDJSON 流式输出丢失 include payload |
+| 4 | `bifrost traffic get --ids 1,2,3 --max-body 32768` | 默认 ndjson 输出：3 行，每行独立 `{"id":..,"summary":..,"bodies":..,"headers":..?}`；存在 / 不存在的 id 混排时缺失 id 行变 `{"id":"X","error":"not_found"}`；exit code 0 |
+| 5 | `bifrost traffic get --ids 1,2,3 --format json-pretty` | 客户端聚合成 `{"results":[...]}` 信封并 pretty-print；与单条 `traffic get <ID> --request-body --response-body` 字段对齐 |
+| 6 | `bifrost traffic get --ids $(seq -s, 1 201)` 与 `bifrost traffic get --ids` 留空 | 超 200 上限：admin 返回 HTTP 400 + `[traffic.batch.too_many_ids]`，CLI 非 0 退出；空 ids：CLI clap 直接 usage error |
 
 ## 联调说明
 - 旧客户端（不传 `--include`）调用新 admin：`SearchRequest.include` 走 `Default`，整段 wire JSON 中省略；服务端落到原路径不读取 body store，零增量开销。
@@ -29,5 +30,10 @@
 ## 边界
 - `--include` 与 `--max-body` 是搜索独立配置；`--max-body` 单独给但未启用任何 body include 时，include 块仅含 `max_body_bytes`，admin 视为无 body 输出（仅作为后续 include 启用时的默认上限）。
 - `bifrost traffic get --ids` 与位置参数 `<ID>` 严格互斥，clap usage 阶段即报错。
-- body 一律 base64 STANDARD 编码；CLI 输出 ndjson / json 信封时保留 `data_b64` 字段，由调用方自行解码。
+- body 一律 base64 STANDARD 编码；CLI 输出 ndjson / json 信封时保留 `bytes_b64` 字段，由调用方自行解码。
 - 当前实现**不脱敏** Authorization / Cookie / 业务密钥；完整脱敏方案另开需求落地前，严禁把 batch/search include 结果转发给低信任 caller。
+
+## 本次回归执行（2026-06-18）
+
+- TC-SIB-03 执行 `cargo test -p bifrost-cli search_result_to_json_preserves_include_payloads_for_ndjson -- --nocapture` 通过，验证 `--format ndjson` 的 `result` 对象仍包含 `bodies.*.bytes_b64` 与 `headers.*`。
+- 执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_search_traffic_cli_isomorphic_e2e.sh` 通过，其中 `search --include bodies,headers --format ndjson preserves payloads` 断言真实 CLI NDJSON `result` 行包含 `bodies.request.bytes_b64` 与 `headers.request`。
