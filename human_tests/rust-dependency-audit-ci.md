@@ -139,7 +139,7 @@ PY`。
 2. 测试覆盖 CA 证书、私钥与安装相关 PEM 解析路径。
 3. `Cargo.toml` 中不再通过 workspace 直接依赖 `rustls-pemfile`。
 
-### TC-RDA-10 Traffic DB detail blob 改用 JSON 后读写正常
+### TC-RDA-10 Traffic DB detail blob 改用 postcard 后读写正常
 
 操作步骤：
 
@@ -148,8 +148,8 @@ PY`。
 预期结果：
 
 1. 命令退出码为 0。
-2. Traffic DB 详情写入、读取、搜索和清理相关测试通过。
-3. `bifrost-admin` 不再直接依赖 `bincode`。
+2. Traffic DB 详情写入、读取、搜索和清理相关测试通过，其中 `test_get_by_id_loads_detail_fields_from_split_table` 覆盖 headers/body_ref/socket_status 经 postcard 编解码后的往返一致性。
+3. `bifrost-admin` 不再直接依赖 `bincode`，detail blob 编解码统一走 `encode_detail_blob`/`decode_detail_blob`（postcard）。
 
 ### TC-RDA-11 Admin 与 Agent 依赖升级后仍可编译
 
@@ -162,6 +162,27 @@ PY`。
 1. 命令退出码为 0。
 2. `portable-pty 0.9` 与 Windows target `local-ip-address 0.6.13` 相关编译图可正常解析。
 3. 输出中没有 `serial 0.4.0` 相关依赖链。
+
+### TC-RDA-12 postcard 迁移不引入新安全告警
+
+操作步骤：
+
+1. 执行 `cargo audit --no-fetch --json > /tmp/bifrost-root-audit.json`。
+2. 执行 `python3 - <<'PY'
+import json
+d = json.load(open('/tmp/bifrost-root-audit.json'))
+print('vulns', d['vulnerabilities']['count'])
+kinds = {k: len(v or []) for k, v in d.get('warnings', {}).items()}
+print('warnings', kinds)
+PY`。
+3. 执行 `cargo tree -i atomic-polyfill`。
+4. 执行 `cargo tree -i heapless`。
+
+预期结果：
+
+1. `vulns` 输出为 `0`。
+2. `warnings` 与未引入 postcard 前的基线一致（`unmaintained=13`、`unsound=1`），即 postcard 链没有新增 advisory warning。
+3. `cargo tree -i atomic-polyfill` 与 `cargo tree -i heapless` 均报告没有匹配 package，证明 `postcard` 以 `default-features = false` + `alloc` 引入，未带入 `heapless`/`atomic-polyfill`（RUSTSEC-2023-0089）。
 
 ## 清理步骤
 

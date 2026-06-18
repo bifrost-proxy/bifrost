@@ -30,12 +30,12 @@ const CLEANUP_TARGET_PERCENT: usize = 80;
 const METRICS_CACHE_TTL: Duration = Duration::from_secs(5);
 const READ_POOL_SIZE: usize = 2;
 
-fn encode_detail_blob<T: serde::Serialize>(value: &T) -> serde_json::Result<Vec<u8>> {
-    serde_json::to_vec(value)
+fn encode_detail_blob<T: serde::Serialize>(value: &T) -> postcard::Result<Vec<u8>> {
+    postcard::to_allocvec(value)
 }
 
-fn decode_detail_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
-    serde_json::from_slice(bytes)
+fn decode_detail_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> postcard::Result<T> {
+    postcard::from_bytes(bytes)
 }
 
 struct ReadPool {
