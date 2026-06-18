@@ -162,7 +162,7 @@
 | TC-DIS-06 | 通过。源码对照确认 `Filter::Body(_regex) => false`；文档不再推荐 `p:`、大写 `H:` 响应头过滤或 `s:4` 这类错误写法，并明确 body filter 当前边界。 |
 | TC-DIS-07 | 通过。`traffic list --help`、`search --help`、`remote file --help` 与文档中的参数/子命令一致；失效示例扫描无命中。 |
 | TC-DIS-08 | 通过。源码、README、规则语法、operation 总表、规则协议手册、routing 专页、E2E 规则和 human_tests 均包含 `upstreamUnsafeSsl`；文档明确它是按规则跳过上游 HTTPS 证书校验，并记录失败响应中的修复建议。 |
-| TC-DIS-09 | 通过。`docs/cli.md`、`docs/cli-quick-start.md`、中英文 Agent Skill 安装文档、`SKILL.md` 和站点同步产物均已覆盖 `capture wait`、`traffic get --ids`、`auth-status`、`traffic export/replay`、JSONPath / include / 脱敏开关、`bifrost-remote` 双 skill 安装说明，以及 `remote run/job/file` 新能力；当前沙箱无 `~/.zshrc`，实际执行时跳过 source 前置并直接运行等价 `rg` 扫描。 |
+| TC-DIS-09 | 通过。`docs/cli.md`、`docs/cli-quick-start.md`、中英文 Agent Skill 安装文档、`SKILL.md` 和站点同步产物均已覆盖 `capture wait`、`traffic get --ids`、`auth-status`、`traffic export/replay`、JSONPath / include、本期不做脱敏且输出按捕获原文处理、`bifrost-remote` 双 skill 安装说明，以及 `remote run/job/file` 新能力；当前沙箱无 `~/.zshrc`，实际执行时跳过 source 前置并直接运行等价 `rg` 扫描。 |
 
 ## 清理步骤
 
