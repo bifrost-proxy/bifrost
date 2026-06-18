@@ -65,8 +65,8 @@ brew install bifrost
 如果用户不希望安装系统级二进制，才退回源码构建；注意这里应从官方仓库拉取源码，而不是假设当前工作区就是 Bifrost 仓库：
 
 ```bash
-git clone https://github.com/bifrost-proxy/bifrost.git /tmp/bifrost
-cd /tmp/bifrost
+git clone https://github.com/bifrost-proxy/bifrost.git bifrost
+cd bifrost
 cd web && pnpm install && pnpm build && cd ..
 cargo build --release -p bifrost
 ./target/release/bifrost --version
@@ -638,8 +638,13 @@ bifrost remote conn down [--all|--grant-id <g>] # 回收 grant
 bifrost remote traffic search <query> --listener-port 18888  # 按远端入口代理端口搜索流量
 bifrost remote traffic list --proxy-port 18888               # 按远端入口代理端口列流量
 bifrost remote traffic get    <id> [OPTIONS]    # 远程获取流量详情
+bifrost remote file read-many --path a --path b --cwd <repo>  # 一次读多个文件
+bifrost remote file scratch-dir --cwd <repo>      # 获取 policy 允许的临时目录
+bifrost remote file outline src/lib.rs --cwd <repo>  # 获取符号地图
+bifrost remote run --script-file ./smoke.py --interpreter python3 --cwd <repo> -- --json  # 上传本地脚本到远端执行
 bifrost remote exec --shell-text "pwd"          # 受 Shell Access policy 限制的 shell.exec
-bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo test
+bifrost remote exec --detach -- cargo test       # 长时间静默任务先 detach
+bifrost remote job watch <call_id> --output-file ./x.log  # 续接 detached job
 ```
 
 > **4-tier 命名（2026 Q2）**：旧的 `remote connect / disconnect / status（顶层）/ search（顶层）` 仍有过渡别名但运行时会打印 deprecation warning，下个 minor release 会移除；`remote command exec` 已硬切为 `remote exec`，没有别名。`remote file {mv, rm, search, apply-patch}` 也已硬切为 `{move, delete, find, patch}`。CI 有 `scripts/ci/check-remote-cli-legacy.sh` 守卫，引用旧名会让流水线红。
@@ -652,6 +657,8 @@ bifrost remote exec --stream --output-file ./x.log --timeout-ms 300000 -- cargo 
 - `remote shell ...` 与 `remote grant ...` 是当前机器本地管理命令（已 deprecated，请改用 `bifrost setting shell` / `bifrost setting grant`）；caller 要管理目标设备时，应通过 `remote exec` 执行目标机命令。
 - `shell.exec` 受目标终端 Shell Access policy 约束；当前不能承诺 OS 级 sandbox 隔离。
 - rule/config/script/value/CA/系统代理等没有专门的 `bifrost remote <module>` 子命令时，不代表不能远程操作；应走已授权的 `remote exec`。
+- 修改远端文件优先使用 `remote file read/edit/patch/write/move/delete`；临时脚本优先使用 `remote run`，不要用 `remote exec + heredoc/base64/echo` 拼接文件内容。
+- 长时间静默的构建、测试、轮询命令优先 `remote exec --detach` 或 `remote run --detach`，再用 `remote job list/status/logs/watch` 续接，避免 300 秒无事件 idle timeout。
 
 ## 推荐工作流
 

@@ -132,6 +132,22 @@
 - E2E 规则文件和脚本覆盖自签名上游成功、未配置时失败、错误响应建议 `upstreamUnsafeSsl://true` 三个场景。
 - 文档明确该协议只影响 Bifrost 到上游 HTTPS 的证书校验，不改变客户端到 Bifrost 的 TLS 信任关系。
 
+### TC-DIS-09 PR 260 新增 CLI 指令已同步到使用手册与 Skill 安装文档
+
+操作步骤：
+
+1. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include|--show-secrets|bifrost-remote|github-copilot|universal|remote run|remote job watch|read-many|scratch-dir|outline" docs/cli.md docs/cli-quick-start.md docs/agent-skill.md docs-en/cli.md docs-en/cli-quick-start.md docs-en/agent-skill.md SKILL.md`。
+2. 执行 `source ~/.zshrc && rg -n "capture wait|traffic get --ids|auth-status|traffic export|traffic replay|--req-json|--res-json|--include|--show-secrets" site/src/content/docs/reference/cli.md site/src/content/docs/getting-started/cli-quick-start.md site/src/content/docs/en/reference/cli.md site/src/content/docs/en/getting-started/cli-quick-start.md`。
+3. 执行 `source ~/.zshrc && rg -n "bifrost-remote|github-copilot|universal|BIFROST_INSTALL_SKILL_SOURCE|BIFROST_INSTALL_SKILL_DIR" docs/agent-skill.md docs-en/agent-skill.md site/src/content/docs/reference/agent-skill.md site/src/content/docs/en/reference/agent-skill.md`。
+4. 打开 `docs/cli.md` 与 `docs/cli-quick-start.md`，确认流量相关说明明确默认脱敏、`--show-secrets` 是显式危险开关，并覆盖等待捕获、批量读取、授权状态、导出、重放、JSONPath / 时间窗口搜索。
+5. 打开 `docs/agent-skill.md` 与 `docs-en/agent-skill.md`，确认安装文档说明会同时安装通用 `bifrost` skill 与专用 `bifrost-remote` skill，且说明 `install-skill` 不启动代理、不创建远端授权、不授予 shell 权限。
+
+预期结果：
+
+- 使用手册覆盖 PR 260 新增的 capture、traffic/search、export/replay/auth-status 与默认脱敏行为。
+- Skill 安装文档覆盖 `github-copilot`、`universal`、`all` 目标，说明双 skill 安装和安全边界。
+- 站点文档由同步脚本生成后与 `docs/`、`docs-en/` 源文档保持一致。
+
 ## 本次执行记录
 
 执行日期：2026-05-09。
@@ -146,6 +162,7 @@
 | TC-DIS-06 | 通过。源码对照确认 `Filter::Body(_regex) => false`；文档不再推荐 `p:`、大写 `H:` 响应头过滤或 `s:4` 这类错误写法，并明确 body filter 当前边界。 |
 | TC-DIS-07 | 通过。`traffic list --help`、`search --help`、`remote file --help` 与文档中的参数/子命令一致；失效示例扫描无命中。 |
 | TC-DIS-08 | 通过。源码、README、规则语法、operation 总表、规则协议手册、routing 专页、E2E 规则和 human_tests 均包含 `upstreamUnsafeSsl`；文档明确它是按规则跳过上游 HTTPS 证书校验，并记录失败响应中的修复建议。 |
+| TC-DIS-09 | 通过。`docs/cli.md`、`docs/cli-quick-start.md`、中英文 Agent Skill 安装文档、`SKILL.md` 和站点同步产物均已覆盖 `capture wait`、`traffic get --ids`、`auth-status`、`traffic export/replay`、JSONPath / include / 脱敏开关、`bifrost-remote` 双 skill 安装说明，以及 `remote run/job/file` 新能力；当前沙箱无 `~/.zshrc`，实际执行时跳过 source 前置并直接运行等价 `rg` 扫描。 |
 
 ## 清理步骤
 

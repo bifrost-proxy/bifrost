@@ -75,12 +75,18 @@ TLS interception priority: rule-level `tlsIntercept://` or `tlsPassthrough://`, 
 
 ```bash
 bifrost traffic list
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
 bifrost traffic get <id> --request-body --response-body
+bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
+bifrost traffic auth-status <id>
 bifrost search "Bearer " --req-header
 bifrost search "invalid_request_error" --res-body
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+bifrost traffic export <id> --as curl
+bifrost traffic replay <id> --patch '/json/debug=true'
 ```
 
-When using a temporary port, include `--listener-port` or `--proxy-port` filters.
+When using a temporary port, include `--listener-port` or `--proxy-port` filters. Traffic and export outputs are redacted by default; keep that default when handing evidence to an agent, and use `--show-secrets` only for safe local diagnostics.
 
 ## Agent Collaboration
 

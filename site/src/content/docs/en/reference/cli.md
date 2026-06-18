@@ -41,7 +41,8 @@ The top-level help intentionally stays short. Exact flag parsing is defined by e
 | `upgrade`, `version-check` | Check for new versions and upgrade the binary. |
 | `config` | Inspect and modify runtime config, connections, cache, and performance status. |
 | `admin` | Manage Admin remote access, passwords, sessions, and audit logs. |
-| `traffic`, `search` | List, get, search, and clear traffic records. |
+| `capture` | Wait for the next matching traffic record, useful for browser/app debugging and agent evidence collection. |
+| `traffic`, `search` | List, get, search, export, replay, diagnose, and clear traffic records. |
 | `install-skill` | Install the Bifrost Agent Skill into AI coding tools. |
 | `remote` | Connect to and operate authorized remote Bifrost instances. |
 | `ai` | Manage AI workflows, ASR tasks, and voice capabilities where supported. |
@@ -60,10 +61,16 @@ bifrost start
 bifrost status
 bifrost rule add local-dev -c "example.com host://127.0.0.1:3000"
 bifrost traffic list --limit 20
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
 bifrost traffic get <id> --request-body --response-body
+bifrost traffic get --ids 1,2,3 --request-body --response-body --format ndjson
+bifrost traffic auth-status <id>
+bifrost traffic export <id> --as curl
+bifrost traffic replay <id> --patch '/json/debug=true'
 bifrost search "keyword" --req-header
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
 bifrost port bind --port 18888 --rule-text "debug.test statusCode://218 resBody://debug"
 bifrost port destroy 18888
 ```
 
-Use the command-specific `--help` output as the source of truth for every flag.
+Use the command-specific `--help` output as the source of truth for every flag. Traffic outputs are redacted by default; use `--show-secrets` only for local diagnostics when it is safe to expose tokens, cookies, or credentials. For agent workflows, prefer `capture wait`, `traffic get --ids ... --format ndjson`, `search --include ...`, and `traffic auth-status` to collect enough evidence without copying secrets into reusable skills.
