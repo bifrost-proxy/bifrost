@@ -292,5 +292,19 @@ fn command_search_args_from_request(request: &SearchRequest) -> SearchArgs {
         limit: request.limit,
         max_scan: request.max_scan,
         max_results: request.max_results,
+        time_range: request
+            .time_range
+            .as_ref()
+            .map(|tr| bifrost_command::TimeRange {
+                since_ms: tr.since_ms,
+                until_ms: tr.until_ms,
+            }),
+        include: bifrost_command::SearchInclude {
+            request_body: request.include.request_body,
+            response_body: request.include.response_body,
+            request_headers: request.include.request_headers,
+            response_headers: request.include.response_headers,
+            max_body_bytes: request.include.max_body_bytes,
+        },
     }
 }

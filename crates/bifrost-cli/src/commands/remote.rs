@@ -2577,6 +2577,7 @@ fn build_remote_command_checked(
                     id: id.clone(),
                     request_body: *request_body,
                     response_body: *response_body,
+                    ..Default::default()
                 });
                 let command_id = query.command_id().to_string();
                 Ok(BuiltRemoteCommand {
@@ -3567,6 +3568,106 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
         });
     }
 
+    for entry in &args.req_json {
+        if let Some((path, value)) = entry.split_once('=') {
+            let p = path.trim();
+            if p.is_empty() {
+                continue;
+            }
+            let field = if p.starts_with('$') {
+                format!(
+                    "req.body.{}",
+                    p.trim_start_matches('$').trim_start_matches('.')
+                )
+            } else {
+                format!("req.body.{}", p)
+            };
+            filters.conditions.push(FilterCondition {
+                field,
+                operator: "equals".to_string(),
+                value: value.trim().to_string(),
+            });
+        }
+    }
+    for entry in &args.res_json {
+        if let Some((path, value)) = entry.split_once('=') {
+            let p = path.trim();
+            if p.is_empty() {
+                continue;
+            }
+            let field = if p.starts_with('$') {
+                format!(
+                    "res.body.{}",
+                    p.trim_start_matches('$').trim_start_matches('.')
+                )
+            } else {
+                format!("res.body.{}", p)
+            };
+            filters.conditions.push(FilterCondition {
+                field,
+                operator: "equals".to_string(),
+                value: value.trim().to_string(),
+            });
+        }
+    }
+    for entry in &args.req_header_eq {
+        if let Some((name, value)) = entry.split_once('=') {
+            let n = name.trim();
+            if n.is_empty() {
+                continue;
+            }
+            filters.conditions.push(FilterCondition {
+                field: format!("req.header.{}", n),
+                operator: "equals".to_string(),
+                value: value.trim().to_string(),
+            });
+        }
+    }
+    for entry in &args.res_header_eq {
+        if let Some((name, value)) = entry.split_once('=') {
+            let n = name.trim();
+            if n.is_empty() {
+                continue;
+            }
+            filters.conditions.push(FilterCondition {
+                field: format!("res.header.{}", n),
+                operator: "equals".to_string(),
+                value: value.trim().to_string(),
+            });
+        }
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut time_range: Option<bifrost_command::TimeRange> = None;
+    let parse_arg = |s: &str| -> Option<i64> {
+        let t = s.trim();
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(t) {
+            return Some(dt.timestamp_millis());
+        }
+        if let Ok(n) = t.parse::<i64>() {
+            return Some(n);
+        }
+        crate::commands::search::parse_duration_ms(t).map(|ms| now_ms - ms)
+    };
+    if let Some(s) = args.latest.as_deref() {
+        if let Some(ms) = crate::commands::search::parse_duration_ms(s) {
+            let tr = time_range.get_or_insert_with(bifrost_command::TimeRange::default);
+            tr.since_ms = Some(now_ms - ms);
+        }
+    }
+    if let Some(s) = args.since.as_deref() {
+        if let Some(v) = parse_arg(s) {
+            let tr = time_range.get_or_insert_with(bifrost_command::TimeRange::default);
+            tr.since_ms = Some(v);
+        }
+    }
+    if let Some(s) = args.until.as_deref() {
+        if let Some(v) = parse_arg(s) {
+            let tr = time_range.get_or_insert_with(bifrost_command::TimeRange::default);
+            tr.until_ms = Some(v);
+        }
+    }
+
     SearchArgs {
         keyword: args.keyword.clone().unwrap_or_default(),
         scope: SearchScope {
@@ -3583,6 +3684,7 @@ fn command_search_args(args: &RemoteSearchArgs) -> SearchArgs {
         limit: Some(args.limit),
         max_scan: args.max_scan,
         max_results: args.max_results,
+        time_range,
         ..SearchArgs::default()
     }
 }
@@ -3715,6 +3817,30 @@ impl RemoteSearchRenderer {
                     }));
                     Ok(())
                 }
+                OutputFormat::Ndjson => {
+                    let line = serde_json::json!({
+                        "type": "result",
+                        "id": item.record.id,
+                        "seq": item.record.seq,
+                        "method": item.record.m,
+                        "host": item.record.h,
+                        "path": item.record.p,
+                        "status": item.record.s,
+                        "protocol": item.record.proto,
+                        "request_size": item.record.req_sz,
+                        "response_size": item.record.res_sz,
+                        "duration_ms": item.record.dur,
+                        "timestamp": item.record.ts,
+                        "matches": item.matches.iter().map(|m| {
+                            serde_json::json!({
+                                "field": m.field,
+                                "preview": m.preview,
+                            })
+                        }).collect::<Vec<_>>(),
+                    });
+                    println!("{}", line);
+                    Ok(())
+                }
             },
             RemoteSearchEvent::Progress(progress) => {
                 self.total_searched = progress.total_searched;
@@ -3757,6 +3883,13 @@ impl RemoteSearchRenderer {
                     }
                     OutputFormat::Table | OutputFormat::Compact => {
                         eprintln!("\x1b[31m✗\x1b[0m Search failed: {}", error.message);
+                    }
+                    OutputFormat::Ndjson => {
+                        let line = serde_json::json!({
+                            "type": "error",
+                            "error": error.message,
+                        });
+                        println!("{}", line);
                     }
                 }
                 Ok(())
@@ -3857,6 +3990,15 @@ impl RemoteSearchRenderer {
                 } else {
                     println!("{}", output);
                 }
+            }
+            OutputFormat::Ndjson => {
+                let line = serde_json::json!({
+                    "type": "done",
+                    "total_matched": self.total_matched,
+                    "total_searched": self.total_searched,
+                    "has_more": self.has_more,
+                });
+                println!("{}", line);
             }
         }
     }
@@ -6655,6 +6797,13 @@ mod tests {
                 domain: Some("example.com".to_string()),
                 max_scan: Some(12),
                 max_results: Some(7),
+                req_json: Vec::new(),
+                res_json: Vec::new(),
+                req_header_eq: Vec::new(),
+                res_header_eq: Vec::new(),
+                since: None,
+                until: None,
+                latest: None,
             })),
         });
 
@@ -6741,6 +6890,13 @@ mod tests {
                 domain: None,
                 max_scan: Some(9),
                 max_results: Some(3),
+                req_json: Vec::new(),
+                res_json: Vec::new(),
+                req_header_eq: Vec::new(),
+                res_header_eq: Vec::new(),
+                since: None,
+                until: None,
+                latest: None,
             })),
         });
 
@@ -6806,6 +6962,13 @@ mod tests {
                 domain: None,
                 max_scan: Some(20),
                 max_results: Some(9),
+                req_json: Vec::new(),
+                res_json: Vec::new(),
+                req_header_eq: Vec::new(),
+                res_header_eq: Vec::new(),
+                since: None,
+                until: None,
+                latest: None,
             })),
         });
 
@@ -7324,6 +7487,7 @@ mod tests {
                 id: "REQ-1".to_string(),
                 request_body: false,
                 response_body: false,
+                ..Default::default()
             })),
             shell_exec: None,
             render: RemoteRenderMode::TrafficGet {
@@ -8757,6 +8921,7 @@ mod coverage_boost {
             id: "REQ-1".to_string(),
             request_body: true,
             response_body: false,
+            ..Default::default()
         });
 
         let json_str = query_args_json(&query).expect("traffic get args_json");
@@ -9740,6 +9905,13 @@ mod coverage_boost_v2 {
             domain: None,
             max_scan: Some(100),
             max_results: Some(25),
+            req_json: Vec::new(),
+            res_json: Vec::new(),
+            req_header_eq: Vec::new(),
+            res_header_eq: Vec::new(),
+            since: None,
+            until: None,
+            latest: None,
         }
     }
 

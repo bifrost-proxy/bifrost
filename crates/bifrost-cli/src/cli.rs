@@ -1,7 +1,18 @@
 use std::path::PathBuf;
 
-use clap::{ArgAction, Parser, Subcommand, ValueHint};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum, ValueHint};
 use clap_complete::Shell;
+
+#[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
+pub enum StatusFormat {
+    /// Human-readable text output (default).
+    Text,
+    /// Machine-readable JSON on a single line.
+    Json,
+    /// Machine-readable JSON with 2-space indentation.
+    #[value(name = "json-pretty")]
+    JsonPretty,
+}
 
 #[derive(Parser)]
 #[command(name = "bifrost")]
@@ -261,6 +272,13 @@ pub enum Commands {
     Status {
         #[arg(short, long, help = "Show interactive TUI dashboard")]
         tui: bool,
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = StatusFormat::Text,
+            help = "Output format: text (default), json (single-line), or json-pretty (indented)"
+        )]
+        format: StatusFormat,
     },
     #[command(about = "Manage rules")]
     Rule {
@@ -375,6 +393,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: TrafficCommands,
     },
+    #[command(about = "Wait for the next traffic record matching a filter")]
+    Capture {
+        #[command(subcommand)]
+        action: CaptureCommands,
+    },
     #[command(
         about = "Install bifrost SKILL.md to AI coding tools (Claude Code, Codex, Trae, Cursor, GitHub Copilot, and standard Agent Skills runtimes)"
     )]
@@ -421,10 +444,52 @@ pub enum Commands {
             short,
             long,
             default_value = "table",
-            value_parser = ["table", "compact", "json", "json-pretty"],
-            help = "Output format: table, compact, json, json-pretty"
+            value_parser = ["table", "compact", "json", "json-pretty", "ndjson"],
+            help = "Output format: table, compact, json, json-pretty, ndjson"
         )]
         format: String,
+        #[arg(
+            long = "req-json",
+            value_name = "PATH=VALUE",
+            help = "JSONPath filter on request body, e.g. $.user.name=alice (repeatable)"
+        )]
+        req_json: Vec<String>,
+        #[arg(
+            long = "res-json",
+            value_name = "PATH=VALUE",
+            help = "JSONPath filter on response body, e.g. $.data.errno=0 (repeatable)"
+        )]
+        res_json: Vec<String>,
+        #[arg(
+            long = "req-header-eq",
+            value_name = "NAME=VALUE",
+            help = "Request header equals filter (repeatable, case-insensitive)"
+        )]
+        req_header_eq: Vec<String>,
+        #[arg(
+            long = "res-header-eq",
+            value_name = "NAME=VALUE",
+            help = "Response header equals filter (repeatable, case-insensitive)"
+        )]
+        res_header_eq: Vec<String>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            help = "Restrict to records since this time (RFC3339 or relative: 30s/5m/2h/1d)"
+        )]
+        since: Option<String>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            help = "Restrict to records until this time (RFC3339 or relative)"
+        )]
+        until: Option<String>,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Shortcut for --since now-DURATION (e.g. 5m, 2h)"
+        )]
+        latest: Option<String>,
         #[arg(long, help = "Search only in URL/path")]
         url: bool,
         #[arg(long, help = "Search only in headers")]
@@ -473,6 +538,29 @@ pub enum Commands {
             help = "Maximum matching results to return (default: 100)"
         )]
         max_results: Option<usize>,
+        #[arg(
+            long = "include",
+            value_name = "PARTS",
+            value_delimiter = ',',
+            help = "Attach extras to each result: request-body, response-body, request-headers, response-headers (aliases: req-body, res-body, req-headers, res-headers; shortcuts: bodies, headers)"
+        )]
+        include: Vec<String>,
+        #[arg(
+            long = "max-body",
+            value_name = "BYTES",
+            help = "Max bytes per body when --include includes a body (default: 65536)"
+        )]
+        max_body: Option<usize>,
+        #[arg(
+            long,
+            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
+        )]
+        show_secrets: bool,
+        #[arg(
+            long,
+            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host) to each match"
+        )]
+        extract_auth_summary: bool,
     },
     #[command(visible_alias = "comp", about = "Generate shell completion scripts")]
     Completions {
@@ -1375,6 +1463,34 @@ pub enum AdminRemoteCommands {
 }
 
 #[derive(Subcommand, Clone)]
+pub enum CaptureCommands {
+    #[command(about = "Wait for the next traffic record matching a filter and print it")]
+    Wait {
+        #[arg(long, help = "Filter: host contains (case-insensitive substring)")]
+        host: Option<String>,
+        #[arg(long, help = "Filter: HTTP method (e.g. GET, POST)")]
+        method: Option<String>,
+        #[arg(long, help = "Filter: path contains (substring)")]
+        path: Option<String>,
+        #[arg(
+            long,
+            default_value = "60s",
+            help = "Timeout duration (e.g. 30s, 2m, 1h, 500ms; max 600s)"
+        )]
+        timeout: String,
+        #[arg(long, help = "URL to open via the OS opener before waiting")]
+        open: Option<String>,
+        #[arg(
+            long,
+            default_value = "human",
+            value_parser = ["human", "json"],
+            help = "Output format: human or json"
+        )]
+        format: String,
+    },
+}
+
+#[derive(Subcommand, Clone)]
 pub enum TrafficCommands {
     #[command(about = "List traffic records")]
     List {
@@ -1441,24 +1557,51 @@ pub enum TrafficCommands {
         #[arg(long, help = "Disable colored output")]
         no_color: bool,
     },
-    #[command(about = "Get traffic record details by id")]
+    #[command(about = "Get traffic record details by id (single or --ids batch)")]
     Get {
         #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
         port: Option<u16>,
-        #[arg(help = "Traffic record id or sequence (optional; prompts if omitted)")]
+        #[arg(
+            help = "Traffic record id or sequence (optional; prompts if omitted; mutually exclusive with --ids)",
+            conflicts_with = "ids"
+        )]
         id: Option<String>,
+        #[arg(
+            long = "ids",
+            value_name = "ID,ID,...",
+            value_delimiter = ',',
+            conflicts_with = "id",
+            help = "Batch mode: fetch multiple records in one round-trip (max 200)"
+        )]
+        ids: Vec<String>,
         #[arg(long, help = "Include request body (best effort)")]
         request_body: bool,
         #[arg(long, help = "Include response body (best effort)")]
         response_body: bool,
         #[arg(
+            long = "max-body",
+            value_name = "BYTES",
+            help = "Batch mode: max bytes per body (default: 65536)"
+        )]
+        max_body: Option<usize>,
+        #[arg(
             short,
             long,
             default_value = "json-pretty",
-            value_parser = ["table", "compact", "json", "json-pretty"],
-            help = "Output format: table, compact, json, json-pretty"
+            value_parser = ["table", "compact", "json", "json-pretty", "ndjson"],
+            help = "Output format: table, compact, json, json-pretty, ndjson (ndjson auto-selected for --ids unless overridden)"
         )]
         format: String,
+        #[arg(
+            long,
+            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
+        )]
+        show_secrets: bool,
+        #[arg(
+            long,
+            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host)"
+        )]
+        extract_auth_summary: bool,
     },
     #[command(about = "Search traffic records (same as `bifrost search`)")]
     Search {
@@ -1472,10 +1615,52 @@ pub enum TrafficCommands {
             short,
             long,
             default_value = "table",
-            value_parser = ["table", "compact", "json", "json-pretty"],
-            help = "Output format: table, compact, json, json-pretty"
+            value_parser = ["table", "compact", "json", "json-pretty", "ndjson"],
+            help = "Output format: table, compact, json, json-pretty, ndjson"
         )]
         format: String,
+        #[arg(
+            long = "req-json",
+            value_name = "PATH=VALUE",
+            help = "JSONPath filter on request body (repeatable)"
+        )]
+        req_json: Vec<String>,
+        #[arg(
+            long = "res-json",
+            value_name = "PATH=VALUE",
+            help = "JSONPath filter on response body (repeatable)"
+        )]
+        res_json: Vec<String>,
+        #[arg(
+            long = "req-header-eq",
+            value_name = "NAME=VALUE",
+            help = "Request header equals filter (repeatable)"
+        )]
+        req_header_eq: Vec<String>,
+        #[arg(
+            long = "res-header-eq",
+            value_name = "NAME=VALUE",
+            help = "Response header equals filter (repeatable)"
+        )]
+        res_header_eq: Vec<String>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            help = "Restrict to records since this time (RFC3339 or 30s/5m/2h/1d)"
+        )]
+        since: Option<String>,
+        #[arg(
+            long,
+            value_name = "TIME",
+            help = "Restrict to records until this time (RFC3339 or relative)"
+        )]
+        until: Option<String>,
+        #[arg(
+            long,
+            value_name = "DURATION",
+            help = "Shortcut for --since now-DURATION"
+        )]
+        latest: Option<String>,
         #[arg(long, help = "Search only in URL/path")]
         url: bool,
         #[arg(long, help = "Search only in headers")]
@@ -1524,6 +1709,29 @@ pub enum TrafficCommands {
             help = "Maximum matching results to return (default: 100)"
         )]
         max_results: Option<usize>,
+        #[arg(
+            long = "include",
+            value_name = "PARTS",
+            value_delimiter = ',',
+            help = "Attach extras to each result: request-body, response-body, request-headers, response-headers (aliases: req-body, res-body, req-headers, res-headers; shortcuts: bodies, headers)"
+        )]
+        include: Vec<String>,
+        #[arg(
+            long = "max-body",
+            value_name = "BYTES",
+            help = "Max bytes per body when --include includes a body (default: 65536)"
+        )]
+        max_body: Option<usize>,
+        #[arg(
+            long,
+            help = "Disable redaction (WARNING: will print raw Authorization/Cookie/JWT/API keys)"
+        )]
+        show_secrets: bool,
+        #[arg(
+            long,
+            help = "Append a redacted auth summary (JWT sub/exp, cookie names, host) to each match"
+        )]
+        extract_auth_summary: bool,
     },
     #[command(about = "Clear traffic records")]
     Clear {
@@ -1531,6 +1739,63 @@ pub enum TrafficCommands {
         ids: Option<String>,
         #[arg(short = 'y', long, help = "Skip confirmation prompt")]
         yes: bool,
+    },
+    #[command(about = "Diagnose JWT / Cookie auth status for a captured request")]
+    AuthStatus {
+        #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
+        port: Option<u16>,
+        #[arg(help = "Traffic record id or sequence")]
+        id: String,
+        #[arg(
+            short,
+            long,
+            default_value = "human",
+            value_parser = ["human", "json"],
+            help = "Output format: human or json"
+        )]
+        format: String,
+    },
+    #[command(about = "Export a captured request as curl/fetch/HAR template")]
+    Export {
+        #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
+        port: Option<u16>,
+        #[arg(help = "Traffic record id or sequence suffix")]
+        id: String,
+        #[arg(long = "as", default_value = "curl", value_parser = ["curl", "fetch", "har"], help = "Export format")]
+        as_format: String,
+        #[arg(long, help = "Redact sensitive headers/body fields (default: on)")]
+        redact: bool,
+        #[arg(long, help = "Disable redact, show secrets as-is")]
+        show_secrets: bool,
+        #[arg(short = 'o', long, value_hint = ValueHint::FilePath, help = "Write output to file")]
+        output: Option<PathBuf>,
+    },
+    #[command(about = "Replay a captured request, optionally with JSON Patch tweaks")]
+    Replay {
+        #[arg(long, help = "Admin API port (default: global -p or runtime port)")]
+        port: Option<u16>,
+        #[arg(help = "Traffic record id or sequence suffix")]
+        id: String,
+        #[arg(
+            long,
+            help = "JSON Patch shorthand, repeatable: '/path=value' (value auto-detected as number or string)"
+        )]
+        patch: Vec<String>,
+        #[arg(long = "patch-json", help = "Raw RFC6902 JSON array of patch ops")]
+        patch_json: Option<String>,
+        #[arg(
+            long = "refresh-auth",
+            help = "Reserved: refresh auth from latest record"
+        )]
+        refresh_auth: bool,
+        #[arg(
+            long,
+            default_value = "30s",
+            help = "Request timeout, e.g. 30s / 1500ms"
+        )]
+        timeout: String,
+        #[arg(short, long, default_value = "human", value_parser = ["human", "json", "json-pretty"], help = "Output format")]
+        format: String,
     },
 }
 

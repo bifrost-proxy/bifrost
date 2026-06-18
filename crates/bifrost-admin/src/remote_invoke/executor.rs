@@ -5780,6 +5780,7 @@ mod coverage_boost {
             id: "REQ-123abc".to_string(),
             request_body: false,
             response_body: false,
+            ..Default::default()
         };
         executor
             .validate_traffic_get_args(&args)
@@ -5793,6 +5794,7 @@ mod coverage_boost {
             id: "x".repeat(MAX_ID_LEN + 1),
             request_body: false,
             response_body: false,
+            ..Default::default()
         };
         let err = executor.validate_traffic_get_args(&args).unwrap_err();
         let msg = err.to_string();
@@ -5806,6 +5808,7 @@ mod coverage_boost {
             id: "bad id!".to_string(),
             request_body: false,
             response_body: false,
+            ..Default::default()
         };
         let err = executor.validate_traffic_get_args(&args).unwrap_err();
         let msg = err.to_string();
@@ -5943,6 +5946,7 @@ mod coverage_boost {
             id: "REQ-1".to_string(),
             request_body: true,
             response_body: false,
+            ..Default::default()
         };
         let cmd_args = executor.command_args_from_traffic_get(&args);
         assert_eq!(cmd_args.id.as_deref(), Some("REQ-1"));
@@ -5970,6 +5974,7 @@ mod coverage_boost {
             id: "REQ-1".to_string(),
             request_body: false,
             response_body: false,
+            ..Default::default()
         });
         executor
             .validate_query(&get)

@@ -13,6 +13,7 @@ pub mod audit;
 pub mod auth;
 pub mod bifrost_file;
 pub mod breakpoint;
+pub mod capture;
 pub mod cert;
 pub mod config;
 pub mod devtools;

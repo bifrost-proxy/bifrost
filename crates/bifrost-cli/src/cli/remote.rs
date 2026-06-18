@@ -1027,10 +1027,52 @@ pub struct RemoteSearchArgs {
         short,
         long,
         default_value = "table",
-        value_parser = ["table", "compact", "json", "json-pretty"],
-        help = "Output format: table, compact, json, json-pretty"
+        value_parser = ["table", "compact", "json", "json-pretty", "ndjson"],
+        help = "Output format: table, compact, json, json-pretty, ndjson"
     )]
     pub format: String,
+    #[arg(
+        long = "req-json",
+        value_name = "PATH=VALUE",
+        help = "JSONPath filter on request body (repeatable)"
+    )]
+    pub req_json: Vec<String>,
+    #[arg(
+        long = "res-json",
+        value_name = "PATH=VALUE",
+        help = "JSONPath filter on response body (repeatable)"
+    )]
+    pub res_json: Vec<String>,
+    #[arg(
+        long = "req-header-eq",
+        value_name = "NAME=VALUE",
+        help = "Request header equals filter (repeatable)"
+    )]
+    pub req_header_eq: Vec<String>,
+    #[arg(
+        long = "res-header-eq",
+        value_name = "NAME=VALUE",
+        help = "Response header equals filter (repeatable)"
+    )]
+    pub res_header_eq: Vec<String>,
+    #[arg(
+        long,
+        value_name = "TIME",
+        help = "Restrict to records since this time (RFC3339 or 30s/5m/2h/1d)"
+    )]
+    pub since: Option<String>,
+    #[arg(
+        long,
+        value_name = "TIME",
+        help = "Restrict to records until this time (RFC3339 or relative)"
+    )]
+    pub until: Option<String>,
+    #[arg(
+        long,
+        value_name = "DURATION",
+        help = "Shortcut for --since now-DURATION"
+    )]
+    pub latest: Option<String>,
     #[arg(long, help = "Disable colored output")]
     pub no_color: bool,
     #[arg(long, help = "Search only in URL/path")]

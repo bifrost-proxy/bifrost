@@ -13,6 +13,7 @@ use crate::handlers::{
     auth::{extract_bearer_token, handle_auth},
     bifrost_file::handle_bifrost_file,
     breakpoint::handle_breakpoint,
+    capture::handle_capture,
     cert::{handle_cert, handle_cert_public, handle_proxy_public},
     config::handle_config,
     cors_preflight,
@@ -155,6 +156,8 @@ impl AdminRouter {
             handle_voice(req, state, path).await
         } else if path.starts_with("/api/breakpoint") {
             handle_breakpoint(req, state, push_manager.clone(), path).await
+        } else if path.starts_with("/api/capture") {
+            handle_capture(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/rules") {
             handle_rules(req, state, push_manager.clone(), path).await
         } else if path.starts_with("/api/devtools") {

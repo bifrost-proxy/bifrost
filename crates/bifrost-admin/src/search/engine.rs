@@ -1,11 +1,15 @@
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use regex::Regex;
+use serde_json::Value as JsonValue;
 use tracing::{debug, warn};
 
+use super::json_path;
 use super::types::{
-    FilterCondition, MatchLocation, SearchFilters, SearchRequest, SearchResponse, SearchResultItem,
-    SearchScope,
+    BodiesPayload, BodyChunk, FilterCondition, HeadersPayload, MatchLocation, SearchFilters,
+    SearchInclude, SearchRequest, SearchResponse, SearchResultItem, SearchScope, SearchedRange,
 };
 use crate::body_store::{BodyRef, SharedBodyStore};
 use crate::connection_monitor::SharedConnectionMonitor;
@@ -13,6 +17,19 @@ use crate::frame_store::SharedFrameStore;
 use crate::traffic_db::{
     QueryParams, SharedTrafficDbStore, TextMatchMode, TrafficSearchFields, TrafficSummaryCompact,
 };
+
+#[derive(Debug, Clone)]
+enum BodyCacheEntry {
+    Json(JsonValue),
+    NonJson,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodySide {
+    Request,
+    Response,
+}
 
 const MAX_PREVIEW_CONTEXT: usize = 50;
 const DEFAULT_BATCH_SIZE: usize = 50;
@@ -102,16 +119,21 @@ impl SearchEngine {
         let max_total_searched = request.max_scan.unwrap_or(DEFAULT_MAX_SCAN);
 
         let scope = &request.scope;
+        let conds = &request.filters.conditions;
+        let cond_needs_req_header = conds.iter().any(|c| c.field.starts_with("req.header."));
+        let cond_needs_res_header = conds.iter().any(|c| c.field.starts_with("res.header."));
+        let cond_needs_req_body = conds.iter().any(|c| c.field.starts_with("req.body."));
+        let cond_needs_res_body = conds.iter().any(|c| c.field.starts_with("res.body."));
         let need_url = (has_keyword && scope.should_search_url())
-            || request
-                .filters
-                .conditions
-                .iter()
-                .any(|c| c.field.as_str() == "url");
-        let need_request_headers = has_keyword && scope.should_search_request_headers();
-        let need_response_headers = has_keyword && scope.should_search_response_headers();
-        let need_request_body_ref = has_keyword && scope.should_search_request_body();
-        let need_response_body_ref = has_keyword && scope.should_search_response_body();
+            || conds.iter().any(|c| c.field.as_str() == "url");
+        let need_request_headers =
+            (has_keyword && scope.should_search_request_headers()) || cond_needs_req_header;
+        let need_response_headers =
+            (has_keyword && scope.should_search_response_headers()) || cond_needs_res_header;
+        let need_request_body_ref =
+            (has_keyword && scope.should_search_request_body()) || cond_needs_req_body;
+        let need_response_body_ref =
+            (has_keyword && scope.should_search_response_body()) || cond_needs_res_body;
 
         debug!(
             keyword = %request.keyword,
@@ -130,6 +152,31 @@ impl SearchEngine {
         let mut iterations = 0;
         let mut db_has_more = true;
         let mut timed_out = false;
+
+        let mut body_cache: HashMap<String, BodyCacheEntry> = HashMap::new();
+        // Raw body bytes cache (per-record, per-side), populated only when
+        // `request.include` requires hydration. Kept distinct from `body_cache`
+        // (which is JSON-shaped) so JSONPath conditions never re-read from disk
+        // when include is also asking for the same body.
+        let mut body_bytes_cache: HashMap<String, Option<Vec<u8>>> = HashMap::new();
+        let include = &request.include;
+        let need_hydrate = include.any();
+        let need_include_req_body = include.request_body;
+        let need_include_res_body = include.response_body;
+        let need_include_req_headers = include.request_headers;
+        let need_include_res_headers = include.response_headers;
+        // Promote fields fetches when hydration needs them but search/filter does not.
+        let need_request_headers = need_request_headers || need_include_req_headers;
+        let need_response_headers = need_response_headers || need_include_res_headers;
+        let need_request_body_ref = need_request_body_ref || need_include_req_body;
+        let need_response_body_ref = need_response_body_ref || need_include_res_body;
+        let mut oldest_ts_ms: Option<i64> = None;
+        let mut newest_ts_ms: Option<i64> = None;
+        let mut scanned_count: usize = 0;
+        let (since_ms, until_ms) = match request.time_range.as_ref() {
+            Some(tr) => (tr.since_ms, tr.until_ms),
+            None => (None, None),
+        };
 
         while results.len() < max_results && total_searched < max_total_searched && db_has_more {
             if started_at.elapsed() >= SEARCH_TIMEOUT {
@@ -184,7 +231,34 @@ impl SearchEngine {
 
             for compact in &query_result.records {
                 total_searched += 1;
+                scanned_count += 1;
                 current_cursor = Some(compact.seq);
+
+                let ts_signed = compact.ts as i64;
+                if let Some(s) = since_ms {
+                    if ts_signed < s {
+                        if total_searched >= max_total_searched {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                if let Some(u) = until_ms {
+                    if ts_signed > u {
+                        if total_searched >= max_total_searched {
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                oldest_ts_ms = Some(match oldest_ts_ms {
+                    Some(prev) => prev.min(ts_signed),
+                    None => ts_signed,
+                });
+                newest_ts_ms = Some(match newest_ts_ms {
+                    Some(prev) => prev.max(ts_signed),
+                    None => ts_signed,
+                });
 
                 if !self.matches_filter_compact(compact, &request.filters) {
                     if total_searched >= max_total_searched {
@@ -196,10 +270,11 @@ impl SearchEngine {
                 let fields = fields_map.get(&compact.id);
 
                 if !request.filters.conditions.is_empty()
-                    && !self.matches_conditions_compact(
+                    && !self.matches_conditions_compact_with_cache(
                         compact,
                         fields,
                         &request.filters.conditions,
+                        &mut body_cache,
                     )
                 {
                     if total_searched >= max_total_searched {
@@ -208,7 +283,18 @@ impl SearchEngine {
                     continue;
                 }
 
-                if let Some(result) = self.search_compact(scope, &keyword_lower, compact, fields) {
+                if let Some(mut result) =
+                    self.search_compact(scope, &keyword_lower, compact, fields)
+                {
+                    if need_hydrate {
+                        self.hydrate_result_item(
+                            &mut result,
+                            compact,
+                            fields,
+                            include,
+                            &mut body_bytes_cache,
+                        );
+                    }
                     results.push(result);
                     if let Some(last) = results.last() {
                         on_result(last);
@@ -253,6 +339,11 @@ impl SearchEngine {
             next_cursor: current_cursor,
             has_more,
             search_id,
+            searched_range: SearchedRange {
+                oldest_ts_ms,
+                newest_ts_ms,
+                scanned_count,
+            },
         }
     }
 
@@ -264,10 +355,7 @@ impl SearchEngine {
         fields: Option<&TrafficSearchFields>,
     ) -> Option<SearchResultItem> {
         if keyword.trim().is_empty() {
-            return Some(SearchResultItem {
-                record: compact.clone(),
-                matches: Vec::new(),
-            });
+            return Some(result_item(compact.clone(), Vec::new()));
         }
 
         // 搜索目标是尽快返回结果：一条 record 只要命中一次就足够展示。
@@ -279,10 +367,7 @@ impl SearchEngine {
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| build_compact_url(compact));
             if let Some(m) = self.search_text(&url_text, keyword, "url") {
-                return Some(SearchResultItem {
-                    record: compact.clone(),
-                    matches: vec![m],
-                });
+                return Some(result_item(compact.clone(), vec![m]));
             }
         }
 
@@ -291,10 +376,7 @@ impl SearchEngine {
                 for (k, v) in headers {
                     let header_text = format!("{}: {}", k, v);
                     if let Some(m) = self.search_text(&header_text, keyword, "request_header") {
-                        return Some(SearchResultItem {
-                            record: compact.clone(),
-                            matches: vec![m],
-                        });
+                        return Some(result_item(compact.clone(), vec![m]));
                     }
                 }
             }
@@ -305,10 +387,7 @@ impl SearchEngine {
                 for (k, v) in headers {
                     let header_text = format!("{}: {}", k, v);
                     if let Some(m) = self.search_text(&header_text, keyword, "response_header") {
-                        return Some(SearchResultItem {
-                            record: compact.clone(),
-                            matches: vec![m],
-                        });
+                        return Some(result_item(compact.clone(), vec![m]));
                     }
                 }
             }
@@ -317,10 +396,7 @@ impl SearchEngine {
         if scope.should_search_request_body() {
             if let Some(body_ref) = fields.and_then(|f| f.request_body_ref.as_ref()) {
                 if let Some(m) = self.search_body(body_ref, keyword, "request_body") {
-                    return Some(SearchResultItem {
-                        record: compact.clone(),
-                        matches: vec![m],
-                    });
+                    return Some(result_item(compact.clone(), vec![m]));
                 }
             }
         }
@@ -332,10 +408,7 @@ impl SearchEngine {
                     .or(f.response_body_ref.as_ref())
             }) {
                 if let Some(m) = self.search_body(body_ref, keyword, "response_body") {
-                    return Some(SearchResultItem {
-                        record: compact.clone(),
-                        matches: vec![m],
-                    });
+                    return Some(result_item(compact.clone(), vec![m]));
                 }
             }
         }
@@ -349,10 +422,7 @@ impl SearchEngine {
                 self.search_frames(&compact.id, keyword, "websocket_message")
             {
                 if let Some(first) = frame_matches.into_iter().next() {
-                    return Some(SearchResultItem {
-                        record: compact.clone(),
-                        matches: vec![first],
-                    });
+                    return Some(result_item(compact.clone(), vec![first]));
                 }
             }
         }
@@ -360,10 +430,7 @@ impl SearchEngine {
         if is_sse && scope.should_search_sse_events() {
             if let Some(frame_matches) = self.search_frames(&compact.id, keyword, "sse_event") {
                 if let Some(first) = frame_matches.into_iter().next() {
-                    return Some(SearchResultItem {
-                        record: compact.clone(),
-                        matches: vec![first],
-                    });
+                    return Some(result_item(compact.clone(), vec![first]));
                 }
             }
         }
@@ -448,6 +515,7 @@ impl SearchEngine {
         params
     }
 
+    #[allow(dead_code)]
     fn matches_conditions_compact(
         &self,
         compact: &TrafficSummaryCompact,
@@ -460,6 +528,126 @@ impl SearchEngine {
             }
         }
         true
+    }
+
+    fn matches_conditions_compact_with_cache(
+        &self,
+        compact: &TrafficSummaryCompact,
+        fields: Option<&TrafficSearchFields>,
+        conditions: &[FilterCondition],
+        body_cache: &mut HashMap<String, BodyCacheEntry>,
+    ) -> bool {
+        for condition in conditions {
+            let field = condition.field.as_str();
+            let matched = if field == "ts" {
+                eval_ts_condition(compact.ts as i64, condition)
+            } else if let Some(rest) = field.strip_prefix("req.header.") {
+                eval_header_condition(
+                    fields.and_then(|f| f.request_headers.as_ref()),
+                    rest,
+                    condition,
+                )
+            } else if let Some(rest) = field.strip_prefix("res.header.") {
+                eval_header_condition(
+                    fields.and_then(|f| f.response_headers.as_ref()),
+                    rest,
+                    condition,
+                )
+            } else if let Some(path) = field.strip_prefix("req.body.") {
+                let body_ref = fields.and_then(|f| f.request_body_ref.as_ref());
+                self.eval_body_json_condition(
+                    body_ref,
+                    &compact.id,
+                    BodySide::Request,
+                    path,
+                    condition,
+                    body_cache,
+                )
+            } else if let Some(path) = field.strip_prefix("res.body.") {
+                let body_ref = fields.and_then(|f| {
+                    f.derived_response_body_ref
+                        .as_ref()
+                        .or(f.response_body_ref.as_ref())
+                });
+                self.eval_body_json_condition(
+                    body_ref,
+                    &compact.id,
+                    BodySide::Response,
+                    path,
+                    condition,
+                    body_cache,
+                )
+            } else {
+                self.matches_condition_compact(compact, fields, condition)
+            };
+            if !matched {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn eval_body_json_condition(
+        &self,
+        body_ref: Option<&BodyRef>,
+        record_id: &str,
+        side: BodySide,
+        path: &str,
+        condition: &FilterCondition,
+        body_cache: &mut HashMap<String, BodyCacheEntry>,
+    ) -> bool {
+        let cache_key = format!(
+            "{}:{}",
+            match side {
+                BodySide::Request => "req",
+                BodySide::Response => "res",
+            },
+            record_id
+        );
+        if !body_cache.contains_key(&cache_key) {
+            let entry = match body_ref {
+                Some(BodyRef::Inline { data }) => match serde_json::from_str::<JsonValue>(data) {
+                    Ok(v) => BodyCacheEntry::Json(v),
+                    Err(_) => BodyCacheEntry::NonJson,
+                },
+                Some(other) => {
+                    if let Some(ref store) = self.body_store {
+                        let guard = store.read();
+                        match guard.load(other) {
+                            Some(content) => match serde_json::from_str::<JsonValue>(&content) {
+                                Ok(v) => BodyCacheEntry::Json(v),
+                                Err(_) => BodyCacheEntry::NonJson,
+                            },
+                            None => BodyCacheEntry::Missing,
+                        }
+                    } else {
+                        BodyCacheEntry::Missing
+                    }
+                }
+                None => BodyCacheEntry::Missing,
+            };
+            body_cache.insert(cache_key.clone(), entry);
+        }
+        let entry = body_cache.get(&cache_key).expect("just inserted");
+        let json = match entry {
+            BodyCacheEntry::Json(v) => v,
+            BodyCacheEntry::NonJson | BodyCacheEntry::Missing => return false,
+        };
+        let normalized = if path.starts_with('$') {
+            path.to_string()
+        } else {
+            format!("$.{}", path)
+        };
+        let nodes = json_path::eval(json, &normalized);
+        if nodes.is_empty() {
+            return condition.operator == "is_empty" || condition.operator == "not_contains";
+        }
+        for node in nodes {
+            if eval_value_condition(node, condition) {
+                return true;
+            }
+        }
+        false
     }
 
     fn matches_condition_compact(
@@ -799,6 +987,139 @@ impl SearchEngine {
     }
 }
 
+/// Construct a `SearchResultItem` with `bodies`/`headers` defaulted to None.
+/// Hydration (when requested) is layered on top by `SearchEngine::hydrate_result_item`.
+fn result_item(record: TrafficSummaryCompact, matches: Vec<MatchLocation>) -> SearchResultItem {
+    SearchResultItem {
+        record,
+        matches,
+        bodies: None,
+        headers: None,
+    }
+}
+
+impl SearchEngine {
+    /// Attach bodies/headers to a `SearchResultItem` when `SearchInclude` flags request it.
+    ///
+    /// Body bytes are deduplicated per-record-per-side via `body_bytes_cache` so a record
+    /// that matched on both bodies (or had a JSONPath condition pre-load it) will not hit the
+    /// body store more than once. Truncation honours `include.body_limit()` and sets
+    /// `BodyChunk.truncated = true` while still reporting the original `size`.
+    fn hydrate_result_item(
+        &self,
+        item: &mut SearchResultItem,
+        compact: &TrafficSummaryCompact,
+        fields: Option<&TrafficSearchFields>,
+        include: &SearchInclude,
+        body_bytes_cache: &mut HashMap<String, Option<Vec<u8>>>,
+    ) {
+        if include.request_headers || include.response_headers {
+            let request = if include.request_headers {
+                fields
+                    .and_then(|f| f.request_headers.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            let response = if include.response_headers {
+                fields
+                    .and_then(|f| f.response_headers.clone())
+                    .unwrap_or_default()
+            } else {
+                Vec::new()
+            };
+            item.headers = Some(HeadersPayload { request, response });
+        }
+
+        if include.request_body || include.response_body {
+            let limit = include.body_limit();
+            let request_chunk = if include.request_body {
+                let body_ref = fields.and_then(|f| f.request_body_ref.as_ref());
+                self.load_body_chunk(
+                    &compact.id,
+                    BodySide::Request,
+                    body_ref,
+                    compact.req_ct.clone(),
+                    limit,
+                    body_bytes_cache,
+                )
+            } else {
+                None
+            };
+            let response_chunk = if include.response_body {
+                let body_ref = fields.and_then(|f| {
+                    f.derived_response_body_ref
+                        .as_ref()
+                        .or(f.response_body_ref.as_ref())
+                });
+                self.load_body_chunk(
+                    &compact.id,
+                    BodySide::Response,
+                    body_ref,
+                    compact.ct.clone(),
+                    limit,
+                    body_bytes_cache,
+                )
+            } else {
+                None
+            };
+            if request_chunk.is_some() || response_chunk.is_some() {
+                item.bodies = Some(BodiesPayload {
+                    request: request_chunk,
+                    response: response_chunk,
+                });
+            }
+        }
+    }
+
+    fn load_body_chunk(
+        &self,
+        record_id: &str,
+        side: BodySide,
+        body_ref: Option<&BodyRef>,
+        content_type: Option<String>,
+        limit: usize,
+        body_bytes_cache: &mut HashMap<String, Option<Vec<u8>>>,
+    ) -> Option<BodyChunk> {
+        let body_ref = body_ref?;
+        let cache_key = format!(
+            "{}:{}",
+            match side {
+                BodySide::Request => "req",
+                BodySide::Response => "res",
+            },
+            record_id
+        );
+        if !body_bytes_cache.contains_key(&cache_key) {
+            let bytes = match body_ref {
+                BodyRef::Inline { data } => Some(data.as_bytes().to_vec()),
+                other => {
+                    if let Some(ref store) = self.body_store {
+                        let guard = store.read();
+                        guard.load_bytes(other)
+                    } else {
+                        None
+                    }
+                }
+            };
+            body_bytes_cache.insert(cache_key.clone(), bytes);
+        }
+        let bytes = body_bytes_cache.get(&cache_key)?.as_ref()?;
+        let original_size = bytes.len();
+        let (slice, truncated) = if original_size > limit {
+            (&bytes[..limit], true)
+        } else {
+            (&bytes[..], false)
+        };
+        Some(BodyChunk {
+            bytes_b64: BASE64.encode(slice),
+            size: original_size,
+            truncated,
+            content_type,
+        })
+    }
+}
+
 fn build_compact_url(compact: &TrafficSummaryCompact) -> String {
     // compact 中 proto/h/p 是 UI 展示和过滤的核心字段。
     // 这里仅用于搜索预览/匹配，避免为了 URL 再回表查整条 record。
@@ -845,6 +1166,114 @@ fn find_char_boundary(s: &str, byte_index: usize, search_forward: bool) -> usize
     }
 }
 
+fn parse_ts_value(raw: &str) -> Option<i64> {
+    let trimmed = raw.trim();
+    if let Ok(n) = trimmed.parse::<i64>() {
+        return Some(n);
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.timestamp_millis());
+    }
+    None
+}
+
+fn eval_ts_condition(ts_ms: i64, condition: &FilterCondition) -> bool {
+    let target = match parse_ts_value(&condition.value) {
+        Some(v) => v,
+        None => return false,
+    };
+    match condition.operator.as_str() {
+        "equals" => ts_ms == target,
+        "lt" => ts_ms < target,
+        "gt" => ts_ms > target,
+        "lte" => ts_ms <= target,
+        "gte" => ts_ms >= target,
+        _ => false,
+    }
+}
+
+fn eval_header_condition(
+    headers: Option<&Vec<(String, String)>>,
+    name: &str,
+    condition: &FilterCondition,
+) -> bool {
+    let name_lower = name.to_lowercase();
+    let values: Vec<&str> = match headers {
+        Some(h) => h
+            .iter()
+            .filter(|(k, _)| k.to_lowercase() == name_lower)
+            .map(|(_, v)| v.as_str())
+            .collect(),
+        None => Vec::new(),
+    };
+    match condition.operator.as_str() {
+        "is_empty" => values.is_empty() || values.iter().all(|v| v.trim().is_empty()),
+        "is_not_empty" => values.iter().any(|v| !v.trim().is_empty()),
+        _ => {
+            if values.is_empty() {
+                return matches!(condition.operator.as_str(), "not_contains");
+            }
+            let target_lower = condition.value.to_lowercase();
+            for v in &values {
+                let v_lower = v.to_lowercase();
+                let ok = match condition.operator.as_str() {
+                    "contains" => v_lower.contains(&target_lower),
+                    "equals" => v_lower == target_lower,
+                    "not_contains" => !v_lower.contains(&target_lower),
+                    "regex" => Regex::new(&condition.value)
+                        .map(|re| re.is_match(v))
+                        .unwrap_or(false),
+                    _ => v_lower.contains(&target_lower),
+                };
+                if ok {
+                    return true;
+                }
+            }
+            false
+        }
+    }
+}
+
+fn eval_value_condition(value: &JsonValue, condition: &FilterCondition) -> bool {
+    let as_text = match value {
+        JsonValue::String(s) => s.clone(),
+        JsonValue::Number(n) => n.to_string(),
+        JsonValue::Bool(b) => b.to_string(),
+        JsonValue::Null => String::new(),
+        _ => value.to_string(),
+    };
+    let op = condition.operator.as_str();
+    if matches!(op, "lt" | "gt" | "lte" | "gte") {
+        let lhs = value
+            .as_f64()
+            .or_else(|| as_text.trim().parse::<f64>().ok());
+        let rhs = condition.value.trim().parse::<f64>().ok();
+        if let (Some(l), Some(r)) = (lhs, rhs) {
+            return match op {
+                "lt" => l < r,
+                "gt" => l > r,
+                "lte" => l <= r,
+                "gte" => l >= r,
+                _ => false,
+            };
+        }
+        return false;
+    }
+    let lhs = as_text.to_lowercase();
+    let rhs = condition.value.to_lowercase();
+    match op {
+        "contains" => lhs.contains(&rhs),
+        "equals" => lhs == rhs,
+        "not_contains" => !lhs.contains(&rhs),
+        "is_empty" => as_text.trim().is_empty() || value.is_null(),
+        "is_not_empty" => !as_text.trim().is_empty() && !value.is_null(),
+        "regex" => Regex::new(&condition.value)
+            .map(|re| re.is_match(&as_text))
+            .unwrap_or(false),
+        _ => lhs.contains(&rhs),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -853,7 +1282,8 @@ mod tests {
 
     use super::SearchEngine;
     use crate::body_store::BodyRef;
-    use crate::search::{SearchFilters, SearchRequest, SearchScope};
+    use crate::search::types::FilterCondition;
+    use crate::search::{SearchFilters, SearchRequest, SearchScope, TimeRange};
     use crate::traffic::TrafficRecord;
     use crate::traffic_db::TrafficDbStore;
 
@@ -908,6 +1338,8 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            time_range: None,
+            ..Default::default()
         });
 
         assert_eq!(response.total_matched, 1);
@@ -955,10 +1387,321 @@ mod tests {
             limit: Some(20),
             max_scan: None,
             max_results: None,
+            include: Default::default(),
+            time_range: None,
         });
 
         assert_eq!(response.total_matched, 1);
         assert_eq!(response.results[0].record.id, "REQ-search-bp");
         assert_eq!(response.results[0].matches[0].field, "response_body");
+    }
+
+    fn make_db() -> Arc<TrafficDbStore> {
+        let dir = TempDir::new().expect("temp dir");
+        Arc::new(
+            TrafficDbStore::new(dir.path().join("traffic"), 1024, 64 * 1024 * 1024, Some(24))
+                .expect("traffic db"),
+        )
+        // NOTE: dir is dropped at end of test; data is in-memory or short-lived.
+    }
+
+    fn record_with_json_body(
+        db: &Arc<TrafficDbStore>,
+        id: &str,
+        url: &str,
+        req_body: Option<serde_json::Value>,
+        res_body: Option<serde_json::Value>,
+    ) {
+        let mut rec = TrafficRecord::new(id.to_string(), "POST".to_string(), url.to_string());
+        if let Some(b) = req_body {
+            rec.request_body_ref = Some(BodyRef::Inline {
+                data: b.to_string(),
+            });
+        }
+        if let Some(b) = res_body {
+            rec.response_body_ref = Some(BodyRef::Inline {
+                data: b.to_string(),
+            });
+        }
+        db.record(rec);
+    }
+
+    fn search_with(
+        db: Arc<TrafficDbStore>,
+        keyword: &str,
+        scope: SearchScope,
+        conditions: Vec<FilterCondition>,
+        time_range: Option<TimeRange>,
+    ) -> crate::search::SearchResponse {
+        let engine = SearchEngine::new(db, None);
+        let filters = SearchFilters {
+            conditions,
+            ..SearchFilters::default()
+        };
+        engine.search(&SearchRequest {
+            keyword: keyword.to_string(),
+            scope,
+            filters,
+            cursor: None,
+            limit: Some(20),
+            max_scan: None,
+            max_results: None,
+            time_range,
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn json_path_req_body_filter_matches() {
+        let db = make_db();
+        record_with_json_body(
+            &db,
+            "REQ-jp-1",
+            "https://api.example.com/v1/users",
+            Some(serde_json::json!({"user":{"id":42,"name":"alice"}})),
+            None,
+        );
+        record_with_json_body(
+            &db,
+            "REQ-jp-2",
+            "https://api.example.com/v1/users",
+            Some(serde_json::json!({"user":{"id":7,"name":"bob"}})),
+            None,
+        );
+        let resp = search_with(
+            db,
+            "",
+            SearchScope::default(),
+            vec![FilterCondition {
+                field: "req.body.$.user.name".to_string(),
+                operator: "equals".to_string(),
+                value: "alice".to_string(),
+            }],
+            None,
+        );
+        assert_eq!(resp.total_matched, 1);
+        assert_eq!(resp.results[0].record.id, "REQ-jp-1");
+    }
+
+    #[test]
+    fn json_path_res_body_numeric_gt_filter() {
+        let db = make_db();
+        record_with_json_body(
+            &db,
+            "REQ-jp-3",
+            "https://api.example.com/v1/foo",
+            None,
+            Some(serde_json::json!({"errno": 0, "data": {"score": 95}})),
+        );
+        record_with_json_body(
+            &db,
+            "REQ-jp-4",
+            "https://api.example.com/v1/foo",
+            None,
+            Some(serde_json::json!({"errno": 0, "data": {"score": 50}})),
+        );
+        let resp = search_with(
+            db,
+            "",
+            SearchScope::default(),
+            vec![FilterCondition {
+                field: "res.body.$.data.score".to_string(),
+                operator: "gt".to_string(),
+                value: "80".to_string(),
+            }],
+            None,
+        );
+        assert_eq!(resp.total_matched, 1);
+        assert_eq!(resp.results[0].record.id, "REQ-jp-3");
+    }
+
+    #[test]
+    fn time_range_pre_filter_and_searched_range_population() {
+        let db = make_db();
+        for i in 0..5 {
+            record_with_json_body(
+                &db,
+                &format!("REQ-ts-{}", i),
+                "https://api.example.com/v1/x",
+                None,
+                Some(serde_json::json!({"i": i})),
+            );
+        }
+        // Time range with a huge until value matches all (since=0).
+        let resp = search_with(
+            db,
+            "",
+            SearchScope::default(),
+            vec![],
+            Some(TimeRange {
+                since_ms: Some(0),
+                until_ms: Some(i64::MAX),
+            }),
+        );
+        assert_eq!(resp.total_matched, 5);
+        assert_eq!(resp.searched_range.scanned_count, 5);
+        assert!(resp.searched_range.oldest_ts_ms.is_some());
+        assert!(resp.searched_range.newest_ts_ms.is_some());
+        assert!(
+            resp.searched_range.oldest_ts_ms.unwrap() <= resp.searched_range.newest_ts_ms.unwrap()
+        );
+    }
+
+    #[test]
+    fn time_range_excludes_records_outside_window() {
+        let db = make_db();
+        for i in 0..3 {
+            record_with_json_body(
+                &db,
+                &format!("REQ-ts2-{}", i),
+                "https://api.example.com/v1/x",
+                None,
+                None,
+            );
+        }
+        // until_ms = 1 forces all current records (with real ts in ms) to be excluded.
+        let resp = search_with(
+            db,
+            "",
+            SearchScope::default(),
+            vec![],
+            Some(TimeRange {
+                since_ms: None,
+                until_ms: Some(1),
+            }),
+        );
+        assert_eq!(resp.total_matched, 0);
+        assert_eq!(resp.searched_range.scanned_count, 3);
+        assert!(resp.searched_range.oldest_ts_ms.is_none());
+    }
+
+    #[test]
+    fn header_condition_case_insensitive_contains() {
+        let db = make_db();
+        let mut rec = TrafficRecord::new(
+            "REQ-hdr-1".to_string(),
+            "GET".to_string(),
+            "https://api.example.com/v1/x".to_string(),
+        );
+        rec.request_headers = Some(vec![("X-Trace-Id".to_string(), "abc-123".to_string())]);
+        db.record(rec);
+        let resp = search_with(
+            db,
+            "",
+            SearchScope::default(),
+            vec![FilterCondition {
+                field: "req.header.x-trace-id".to_string(),
+                operator: "contains".to_string(),
+                value: "abc".to_string(),
+            }],
+            None,
+        );
+        assert_eq!(resp.total_matched, 1);
+        assert_eq!(resp.results[0].record.id, "REQ-hdr-1");
+    }
+
+    #[test]
+    fn include_hydrates_response_body_and_headers() {
+        use crate::search::SearchInclude;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let db = make_db();
+        let mut rec = TrafficRecord::new(
+            "REQ-inc-1".to_string(),
+            "GET".to_string(),
+            "https://api.example.com/v1/items".to_string(),
+        );
+        rec.original_response_headers = Some(vec![(
+            "Content-Type".to_string(),
+            "application/json".to_string(),
+        )]);
+        rec.response_body_ref = Some(BodyRef::Inline {
+            data: r#"{"name":"alpha","id":42}"#.to_string(),
+        });
+        db.record(rec);
+
+        let engine = SearchEngine::new(db, None);
+        let response = engine.search(&SearchRequest {
+            keyword: "alpha".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            filters: SearchFilters::default(),
+            cursor: None,
+            limit: Some(20),
+            max_scan: None,
+            max_results: None,
+            time_range: None,
+            include: SearchInclude {
+                response_body: true,
+                response_headers: true,
+                ..Default::default()
+            },
+        });
+
+        assert_eq!(response.total_matched, 1);
+        let item = &response.results[0];
+        let bodies = item.bodies.as_ref().expect("bodies attached");
+        let res_chunk = bodies.response.as_ref().expect("response chunk");
+        let raw = BASE64.decode(&res_chunk.bytes_b64).expect("valid base64");
+        assert!(String::from_utf8_lossy(&raw).contains("alpha"));
+        assert!(!res_chunk.truncated);
+        let headers = item.headers.as_ref().expect("headers attached");
+        assert!(headers
+            .response
+            .iter()
+            .any(|(k, v)| k == "Content-Type" && v.contains("application/json")));
+        assert!(headers.request.is_empty());
+    }
+
+    #[test]
+    fn include_truncates_body_at_max_body_bytes() {
+        use crate::search::SearchInclude;
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+
+        let db = make_db();
+        let mut rec = TrafficRecord::new(
+            "REQ-inc-trunc".to_string(),
+            "GET".to_string(),
+            "https://api.example.com/v1/big".to_string(),
+        );
+        // 10 KiB payload, keyword embedded near the start so search hits regardless.
+        let mut payload = String::from("hit-needle-zzz ");
+        payload.push_str(&"x".repeat(10 * 1024));
+        rec.response_body_ref = Some(BodyRef::Inline { data: payload });
+        db.record(rec);
+
+        let engine = SearchEngine::new(db, None);
+        let response = engine.search(&SearchRequest {
+            keyword: "hit-needle-zzz".to_string(),
+            scope: SearchScope {
+                all: false,
+                response_body: true,
+                ..Default::default()
+            },
+            filters: SearchFilters::default(),
+            cursor: None,
+            limit: Some(20),
+            max_scan: None,
+            max_results: None,
+            time_range: None,
+            include: SearchInclude {
+                response_body: true,
+                max_body_bytes: Some(256),
+                ..Default::default()
+            },
+        });
+
+        assert_eq!(response.total_matched, 1);
+        let bodies = response.results[0].bodies.as_ref().expect("bodies");
+        let chunk = bodies.response.as_ref().expect("response chunk");
+        assert!(chunk.truncated, "chunk should be truncated");
+        let raw = BASE64.decode(&chunk.bytes_b64).expect("valid base64");
+        assert_eq!(raw.len(), 256);
+        assert!(chunk.size > 256);
     }
 }

@@ -32,6 +32,42 @@ pub struct SearchArgs {
     pub max_scan: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_results: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_range: Option<TimeRange>,
+    #[serde(default, skip_serializing_if = "SearchInclude::is_default")]
+    pub include: SearchInclude,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SearchInclude {
+    #[serde(default)]
+    pub request_body: bool,
+    #[serde(default)]
+    pub response_body: bool,
+    #[serde(default)]
+    pub request_headers: bool,
+    #[serde(default)]
+    pub response_headers: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<usize>,
+}
+
+impl SearchInclude {
+    pub fn is_default(&self) -> bool {
+        !self.request_body
+            && !self.response_body
+            && !self.request_headers
+            && !self.response_headers
+            && self.max_body_bytes.is_none()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TimeRange {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub since_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub until_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,11 +219,24 @@ impl Default for TrafficListArgs {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TrafficGetArgs {
+    /// Single record id; empty when `ids` is provided (batch mode).
+    #[serde(default)]
     pub id: String,
     #[serde(default)]
     pub request_body: bool,
     #[serde(default)]
     pub response_body: bool,
+    /// Batch mode: when non-empty the call returns one detail per id.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ids: Vec<String>,
+    /// Optional per-body truncation in bytes (applied to batch responses).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<usize>,
+    /// Batch mode: include request/response headers in each entry.
+    #[serde(default)]
+    pub request_headers: bool,
+    #[serde(default)]
+    pub response_headers: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -247,6 +296,7 @@ mod tests {
             id: "REQ-1".to_string(),
             request_body: true,
             response_body: false,
+            ..Default::default()
         });
         assert_eq!(command.capability(), CommandCapability::SensitiveBody);
     }
@@ -382,6 +432,7 @@ mod tests {
                 id: "REQ-2".to_string(),
                 request_body: false,
                 response_body: true,
+                ..Default::default()
             })
             .capability(),
             CommandCapability::SensitiveBody

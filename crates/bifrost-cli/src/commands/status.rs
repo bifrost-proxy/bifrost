@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use bifrost_admin::{RuleSetRef, TemporaryPortBinding, TemporaryPortStatus};
 
@@ -513,12 +513,31 @@ fn format_active_summary_status_block(
     lines
 }
 
-pub fn run_status() -> bifrost_core::Result<()> {
-    println!("Bifrost Proxy Status");
-    println!("====================");
+pub fn run_status(format: crate::cli::StatusFormat) -> bifrost_core::Result<()> {
+    let gathered = gather_status();
+    match format {
+        crate::cli::StatusFormat::Text => render_status_text(&gathered),
+        crate::cli::StatusFormat::Json => render_status_json(&gathered, false),
+        crate::cli::StatusFormat::JsonPretty => render_status_json(&gathered, true),
+    }
+    Ok(())
+}
 
+struct GatheredStatus {
+    runtime_info: Option<RuntimeInfo>,
+    is_running: bool,
+    runtime_port: u16,
+    system_proxy: SystemProxyStatus,
+    tls_config: Result<TlsConfig, String>,
+    proxy_address_info: Option<ProxyAddressInfo>,
+    temporary_port_bindings: Result<Vec<TemporaryPortBinding>, String>,
+    rule_groups: Result<Vec<RuleGroup>, String>,
+    active_summary: Option<Result<ActiveSummaryResponse, String>>,
+    data_dir: Option<std::path::PathBuf>,
+}
+
+fn gather_status() -> GatheredStatus {
     let runtime_info = read_runtime_info();
-
     let is_running = runtime_info
         .as_ref()
         .is_some_and(|info| is_process_running(info.pid));
@@ -539,14 +558,46 @@ pub fn run_status() -> bifrost_core::Result<()> {
     } else {
         Err("server not running".to_string())
     };
+    let rule_groups = if is_running {
+        match fetch_rules_from_api(runtime_port) {
+            Some(groups) => Ok(groups),
+            None => Err("Unable to fetch rule information from running server".to_string()),
+        }
+    } else {
+        Err("server not running".to_string())
+    };
+    let active_summary = if is_running {
+        Some(fetch_active_summary_from_api(runtime_port).map_err(|e| e.to_string()))
+    } else {
+        None
+    };
+    let data_dir = crate::config::get_bifrost_dir().ok();
+
+    GatheredStatus {
+        runtime_info,
+        is_running,
+        runtime_port,
+        system_proxy,
+        tls_config,
+        proxy_address_info,
+        temporary_port_bindings,
+        rule_groups,
+        active_summary,
+        data_dir,
+    }
+}
+
+fn render_status_text(g: &GatheredStatus) {
+    println!("Bifrost Proxy Status");
+    println!("====================");
 
     println!();
     for line in format_service_overview_lines(
-        is_running,
-        runtime_info.as_ref(),
-        &system_proxy,
-        tls_config.as_ref().map_err(String::as_str),
-        proxy_address_info.as_ref(),
+        g.is_running,
+        g.runtime_info.as_ref(),
+        &g.system_proxy,
+        g.tls_config.as_ref().map_err(String::as_str),
+        g.proxy_address_info.as_ref(),
     ) {
         println!("{}", line);
     }
@@ -555,7 +606,7 @@ pub fn run_status() -> bifrost_core::Result<()> {
     println!("Runtime");
     println!("-------");
 
-    let is_running = match &runtime_info {
+    let is_running = match &g.runtime_info {
         Some(info) => {
             if is_process_running(info.pid) {
                 println!("Status: Running");
@@ -582,6 +633,7 @@ pub fn run_status() -> bifrost_core::Result<()> {
 
     println!();
 
+    let runtime_port = g.runtime_port;
     println!("Default Port Rule Groups: {runtime_port}");
     println!("-------------------------");
     println!(
@@ -589,8 +641,8 @@ pub fn run_status() -> bifrost_core::Result<()> {
     );
 
     if is_running {
-        match fetch_rules_from_api(runtime_port) {
-            Some(groups) => {
+        match &g.rule_groups {
+            Ok(groups) => {
                 let enabled_groups: Vec<_> = groups.iter().filter(|g| g.enabled).collect();
                 let disabled_groups: Vec<_> = groups.iter().filter(|g| !g.enabled).collect();
 
@@ -606,7 +658,7 @@ pub fn run_status() -> bifrost_core::Result<()> {
                     }
                 }
             }
-            None => {
+            Err(_) => {
                 println!("(Unable to fetch rule information from running server)");
             }
         }
@@ -615,12 +667,12 @@ pub fn run_status() -> bifrost_core::Result<()> {
     }
 
     if is_running {
-        let active_summary_lines = match fetch_active_summary_from_api(runtime_port) {
-            Ok(summary) => format_active_summary_status_block(true, runtime_port, Ok(&summary)),
-            Err(err) => {
-                let err_message = err.to_string();
-                format_active_summary_status_block(true, runtime_port, Err(&err_message))
+        let active_summary_lines = match &g.active_summary {
+            Some(Ok(summary)) => {
+                format_active_summary_status_block(true, runtime_port, Ok(summary))
             }
+            Some(Err(err)) => format_active_summary_status_block(true, runtime_port, Err(err)),
+            None => Vec::new(),
         };
 
         for line in active_summary_lines {
@@ -630,20 +682,245 @@ pub fn run_status() -> bifrost_core::Result<()> {
 
     for line in format_temporary_port_bindings_block(
         is_running,
-        temporary_port_bindings.as_deref().map_err(String::as_str),
+        g.temporary_port_bindings.as_deref().map_err(String::as_str),
     ) {
         println!("{}", line);
     }
-
-    Ok(())
 }
 
+fn render_status_json(g: &GatheredStatus, pretty: bool) {
+    let value = build_status_json(g);
+    let serialized = if pretty {
+        serde_json::to_string_pretty(&value)
+    } else {
+        serde_json::to_string(&value)
+    }
+    .unwrap_or_else(|e| {
+        format!(
+            "{{\"schema_version\":1,\"error\":\"serialize_failed:{}\"}}",
+            e
+        )
+    });
+    println!("{}", serialized);
+}
+
+#[derive(Debug, Serialize)]
+struct StatusJson {
+    schema_version: u32,
+    version: &'static str,
+    running: bool,
+    pid: Option<u32>,
+    uptime_sec: Option<u64>,
+    listener: Option<ListenerJson>,
+    system_proxy: SystemProxyJson,
+    tls: Option<TlsJson>,
+    active_rules: Option<Vec<ActiveRuleGroupJson>>,
+    data_dir: Option<String>,
+    ports: Option<Vec<PortJson>>,
+    errors: Vec<ErrorJson>,
+}
+
+#[derive(Debug, Serialize)]
+struct ListenerJson {
+    host: String,
+    port: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    socks5_port: Option<u16>,
+}
+
+#[derive(Debug, Serialize)]
+struct SystemProxyJson {
+    supported: bool,
+    enabled: bool,
+    host: Option<String>,
+    port: Option<u16>,
+    bypass: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct TlsJson {
+    enabled: bool,
+    include_domains: Vec<String>,
+    exclude_domains: Vec<String>,
+    include_apps: Vec<String>,
+    exclude_apps: Vec<String>,
+    include_ips: Vec<String>,
+    exclude_ips: Vec<String>,
+    unsafe_ssl: bool,
+    disconnect_on_config_change: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct ActiveRuleGroupJson {
+    group: String,
+    rule_count: usize,
+    enabled: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PortJson {
+    port: u16,
+    host: String,
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    binding: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ErrorJson {
+    source: String,
+    message: String,
+}
+
+fn current_epoch_ms() -> Option<u64> {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_millis() as u64)
+}
+
+fn build_status_json(g: &GatheredStatus) -> StatusJson {
+    let mut errors: Vec<ErrorJson> = Vec::new();
+
+    let (pid, uptime_sec, listener) = if g.is_running {
+        let info = g.runtime_info.as_ref();
+        let pid = info.map(|i| i.pid);
+        let listener = info.map(|i| ListenerJson {
+            host: i.host.clone().unwrap_or_else(|| "127.0.0.1".to_string()),
+            port: i.port,
+            socks5_port: i.socks5_port,
+        });
+        let uptime_sec = info
+            .and_then(|i| i.started_at_ms)
+            .and_then(|started| current_epoch_ms().map(|now| now.saturating_sub(started) / 1000));
+        (pid, uptime_sec, listener)
+    } else {
+        (None, None, None)
+    };
+
+    let system_proxy = SystemProxyJson {
+        supported: g.system_proxy.supported,
+        enabled: g.system_proxy.enabled,
+        host: if g.system_proxy.supported && g.system_proxy.host.is_empty() {
+            None
+        } else if g.system_proxy.supported {
+            Some(g.system_proxy.host.clone())
+        } else {
+            None
+        },
+        port: if g.system_proxy.supported && g.system_proxy.port != 0 {
+            Some(g.system_proxy.port)
+        } else {
+            None
+        },
+        bypass: if g.system_proxy.supported {
+            Some(g.system_proxy.bypass.clone())
+        } else {
+            None
+        },
+        error: g.system_proxy.error.clone(),
+    };
+
+    let tls = match &g.tls_config {
+        Ok(cfg) => Some(TlsJson {
+            enabled: cfg.enable_tls_interception,
+            include_domains: cfg.intercept_include.clone(),
+            exclude_domains: cfg.intercept_exclude.clone(),
+            include_apps: cfg.app_intercept_include.clone(),
+            exclude_apps: cfg.app_intercept_exclude.clone(),
+            include_ips: cfg.ip_intercept_include.clone(),
+            exclude_ips: cfg.ip_intercept_exclude.clone(),
+            unsafe_ssl: cfg.unsafe_ssl,
+            disconnect_on_config_change: cfg.disconnect_on_config_change,
+        }),
+        Err(message) => {
+            if g.is_running {
+                errors.push(ErrorJson {
+                    source: "tls_config".to_string(),
+                    message: message.clone(),
+                });
+            }
+            None
+        }
+    };
+
+    let active_rules = match &g.rule_groups {
+        Ok(groups) => Some(
+            groups
+                .iter()
+                .map(|gr| ActiveRuleGroupJson {
+                    group: gr.name.clone(),
+                    rule_count: gr.rule_count,
+                    enabled: gr.enabled,
+                })
+                .collect(),
+        ),
+        Err(message) => {
+            if g.is_running {
+                errors.push(ErrorJson {
+                    source: "rules".to_string(),
+                    message: message.clone(),
+                });
+            }
+            None
+        }
+    };
+
+    let ports = match &g.temporary_port_bindings {
+        Ok(bindings) => Some(
+            bindings
+                .iter()
+                .map(|b| PortJson {
+                    port: b.port,
+                    host: b.host.clone(),
+                    status: format_temp_port_status(&b.status).to_string(),
+                    name: b.name.clone(),
+                    binding: format!("{}:{}", b.host, b.port),
+                })
+                .collect(),
+        ),
+        Err(message) => {
+            if g.is_running {
+                errors.push(ErrorJson {
+                    source: "ports".to_string(),
+                    message: message.clone(),
+                });
+            }
+            None
+        }
+    };
+
+    if let Some(Err(message)) = &g.active_summary {
+        errors.push(ErrorJson {
+            source: "active_summary".to_string(),
+            message: message.clone(),
+        });
+    }
+
+    StatusJson {
+        schema_version: 1,
+        version: env!("CARGO_PKG_VERSION"),
+        running: g.is_running,
+        pid,
+        uptime_sec,
+        listener,
+        system_proxy,
+        tls,
+        active_rules,
+        data_dir: g.data_dir.as_ref().map(|p| p.display().to_string()),
+        ports,
+        errors,
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::{
-        format_active_summary_status_block, format_service_overview_lines,
-        format_temporary_port_bindings_block, ProxyAddress, ProxyAddressInfo, SystemProxyStatus,
-        TlsConfig,
+        build_status_json, format_active_summary_status_block, format_service_overview_lines,
+        format_temporary_port_bindings_block, GatheredStatus, ProxyAddress, ProxyAddressInfo,
+        RuleGroup, SystemProxyStatus, TlsConfig,
     };
     use crate::commands::rule::{ActiveRuleItem, ActiveSummaryResponse};
     use crate::process::RuntimeInfo;
@@ -885,5 +1162,205 @@ mod tests {
         let stopped =
             format_temporary_port_bindings_block(false, Err("server not running")).join("\n");
         assert!(stopped.contains("temporary port bindings unavailable"));
+    }
+
+    fn sample_runtime() -> RuntimeInfo {
+        RuntimeInfo {
+            pid: 4242,
+            port: 9900,
+            socks5_port: Some(9901),
+            host: Some("127.0.0.1".to_string()),
+            started_at_ms: Some(1_700_000_000_000),
+            start_mode: Default::default(),
+            restartable_runtime: false,
+            binary_path: None,
+            system_proxy_enabled: None,
+            system_proxy_bypass: None,
+        }
+    }
+
+    fn sample_tls() -> TlsConfig {
+        TlsConfig {
+            enable_tls_interception: true,
+            intercept_exclude: vec!["corp.test".to_string()],
+            intercept_include: vec!["api.example.test".to_string()],
+            app_intercept_exclude: Vec::new(),
+            app_intercept_include: vec!["Chrome".to_string()],
+            ip_intercept_exclude: Vec::new(),
+            ip_intercept_include: Vec::new(),
+            unsafe_ssl: false,
+            disconnect_on_config_change: false,
+        }
+    }
+
+    fn sample_system_proxy() -> SystemProxyStatus {
+        SystemProxyStatus {
+            supported: true,
+            enabled: true,
+            host: "127.0.0.1".to_string(),
+            port: 9900,
+            bypass: "localhost".to_string(),
+            error: None,
+        }
+    }
+
+    #[test]
+    fn build_status_json_running_serializes_schema_v1() {
+        let runtime = sample_runtime();
+        let tls = sample_tls();
+        let system_proxy = sample_system_proxy();
+        let proxy_address_info = ProxyAddressInfo {
+            addresses: vec![ProxyAddress {
+                address: "127.0.0.1:9900".to_string(),
+            }],
+        };
+        let rule_groups = vec![
+            RuleGroup {
+                name: "default".to_string(),
+                enabled: true,
+                rule_count: 7,
+            },
+            RuleGroup {
+                name: "disabled-grp".to_string(),
+                enabled: false,
+                rule_count: 0,
+            },
+        ];
+        let binding = TemporaryPortBinding {
+            port: 18890,
+            host: "127.0.0.1".to_string(),
+            name: Some("mobile".to_string()),
+            status: TemporaryPortStatus::Running,
+            rule_refs: vec![RuleSetRef::LocalRule {
+                name: "local-rule".to_string(),
+            }],
+            missing_refs: Vec::new(),
+            created_at: 1,
+            updated_at: 2,
+        };
+        let gathered = GatheredStatus {
+            runtime_info: Some(runtime),
+            is_running: true,
+            runtime_port: 9900,
+            system_proxy,
+            tls_config: Ok(tls),
+            proxy_address_info: Some(proxy_address_info),
+            temporary_port_bindings: Ok(vec![binding]),
+            rule_groups: Ok(rule_groups),
+            active_summary: Some(Ok(ActiveSummaryResponse {
+                total: 0,
+                rules: Vec::new(),
+                variable_conflicts: Vec::new(),
+                merged_content: String::new(),
+            })),
+            data_dir: Some(std::path::PathBuf::from("/tmp/bifrost")),
+        };
+
+        let json = build_status_json(&gathered);
+        let v = serde_json::to_value(&json).expect("serialize");
+
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["running"], true);
+        assert_eq!(v["pid"], 4242);
+        assert_eq!(v["listener"]["host"], "127.0.0.1");
+        assert_eq!(v["listener"]["port"], 9900);
+        assert_eq!(v["listener"]["socks5_port"], 9901);
+        assert_eq!(v["system_proxy"]["supported"], true);
+        assert_eq!(v["system_proxy"]["enabled"], true);
+        assert_eq!(v["system_proxy"]["host"], "127.0.0.1");
+        assert_eq!(v["system_proxy"]["port"], 9900);
+        assert_eq!(v["system_proxy"]["bypass"], "localhost");
+        assert!(v["system_proxy"]["error"].is_null());
+        assert_eq!(v["tls"]["enabled"], true);
+        assert_eq!(v["tls"]["include_domains"][0], "api.example.test");
+        assert_eq!(v["tls"]["exclude_domains"][0], "corp.test");
+        assert_eq!(v["tls"]["include_apps"][0], "Chrome");
+        assert_eq!(v["tls"]["unsafe_ssl"], false);
+        assert_eq!(v["active_rules"][0]["group"], "default");
+        assert_eq!(v["active_rules"][0]["rule_count"], 7);
+        assert_eq!(v["active_rules"][0]["enabled"], true);
+        assert_eq!(v["active_rules"][1]["enabled"], false);
+        assert_eq!(v["data_dir"], "/tmp/bifrost");
+        assert_eq!(v["ports"][0]["port"], 18890);
+        assert_eq!(v["ports"][0]["host"], "127.0.0.1");
+        assert_eq!(v["ports"][0]["binding"], "127.0.0.1:18890");
+        assert_eq!(v["ports"][0]["status"], "running");
+        assert!(v["errors"].as_array().unwrap().is_empty());
+        assert!(v.get("version").is_some());
+        assert!(v.get("uptime_sec").is_some());
+    }
+
+    #[test]
+    fn build_status_json_stopped_omits_runtime_and_keeps_keys() {
+        let system_proxy = SystemProxyStatus {
+            supported: true,
+            enabled: false,
+            host: String::new(),
+            port: 0,
+            bypass: String::new(),
+            error: None,
+        };
+        let gathered = GatheredStatus {
+            runtime_info: None,
+            is_running: false,
+            runtime_port: 9900,
+            system_proxy,
+            tls_config: Err("server not running".to_string()),
+            proxy_address_info: None,
+            temporary_port_bindings: Err("server not running".to_string()),
+            rule_groups: Err("server not running".to_string()),
+            active_summary: None,
+            data_dir: None,
+        };
+
+        let json = build_status_json(&gathered);
+        let v = serde_json::to_value(&json).expect("serialize");
+
+        assert_eq!(v["schema_version"], 1);
+        assert_eq!(v["running"], false);
+        assert!(v["pid"].is_null());
+        assert!(v["listener"].is_null());
+        assert!(v["tls"].is_null());
+        assert!(v["active_rules"].is_null());
+        assert!(v["ports"].is_null());
+        assert_eq!(v["system_proxy"]["supported"], true);
+        assert_eq!(v["system_proxy"]["enabled"], false);
+        // No admin API calls were attempted while stopped → no errors recorded.
+        assert!(v["errors"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn build_status_json_partial_failures_recorded_in_errors() {
+        let runtime = sample_runtime();
+        let system_proxy = sample_system_proxy();
+        let gathered = GatheredStatus {
+            runtime_info: Some(runtime),
+            is_running: true,
+            runtime_port: 9900,
+            system_proxy,
+            tls_config: Err("tls api timeout".to_string()),
+            proxy_address_info: None,
+            temporary_port_bindings: Err("ports api 500".to_string()),
+            rule_groups: Err("rules api closed".to_string()),
+            active_summary: Some(Err("active summary 500".to_string())),
+            data_dir: None,
+        };
+
+        let json = build_status_json(&gathered);
+        let v = serde_json::to_value(&json).expect("serialize");
+
+        assert_eq!(v["running"], true);
+        assert!(v["tls"].is_null());
+        assert!(v["active_rules"].is_null());
+        assert!(v["ports"].is_null());
+        let errors = v["errors"].as_array().expect("errors");
+        let sources: Vec<&str> = errors
+            .iter()
+            .map(|e| e["source"].as_str().unwrap_or_default())
+            .collect();
+        assert!(sources.contains(&"tls_config"));
+        assert!(sources.contains(&"rules"));
+        assert!(sources.contains(&"ports"));
+        assert!(sources.contains(&"active_summary"));
     }
 }

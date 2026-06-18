@@ -15,16 +15,21 @@ mod help;
 mod parsing;
 mod process;
 
-use cli::{AiCommands, AiVoiceCommands, Cli, Commands, ImportArgs, SyncCommands, TrafficCommands};
+use cli::{
+    AiCommands, AiVoiceCommands, CaptureCommands, Cli, Commands, ImportArgs, SyncCommands,
+    TrafficCommands,
+};
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
     handle_config_command, handle_export_command, handle_group_command, handle_import_command,
     handle_install_skill, handle_metrics_command, handle_port_command, handle_rule_command,
     handle_script_command, handle_sync_command, handle_system_proxy_command, handle_upgrade,
     handle_value_command, handle_whitelist_command, remote, run_restart, run_search, run_start,
-    run_status, run_status_tui, run_stop, run_traffic_clear, run_traffic_get, run_traffic_list,
-    spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions, TrafficGetOptions,
-    TrafficListOptions,
+    run_status, run_status_tui, run_stop, run_traffic_auth_status, run_traffic_clear,
+    run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
+    spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions,
+    TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
+    TrafficReplayOptions,
 };
 use process::read_runtime_port;
 
@@ -308,11 +313,11 @@ fn run_cli_main() {
             log_level,
             force,
         }),
-        Some(Commands::Status { tui }) => {
+        Some(Commands::Status { tui, format }) => {
             if tui {
                 run_status_tui()
             } else {
-                run_status()
+                run_status(format)
             }
         }
         Some(Commands::Rule { action }) => handle_rule_command(action),
@@ -375,8 +380,21 @@ fn run_cli_main() {
             no_color,
             max_scan,
             max_results,
+            req_json,
+            res_json,
+            req_header_eq,
+            res_header_eq,
+            since,
+            until,
+            latest,
+            include,
+            max_body,
+            show_secrets,
+            extract_auth_summary,
         }) => {
             let is_interactive = interactive || keyword.is_none();
+            let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
+                commands::parse_include_tokens(&include);
             let options = SearchOptions {
                 keyword: keyword.unwrap_or_default(),
                 port: get_effective_port(cli.port),
@@ -401,6 +419,20 @@ fn run_cli_main() {
                 no_color,
                 max_scan,
                 max_results,
+                req_json,
+                res_json,
+                req_header_eq,
+                res_header_eq,
+                since,
+                until,
+                latest,
+                include_request_body: inc_req_body,
+                include_response_body: inc_res_body,
+                include_request_headers: inc_req_hdr,
+                include_response_headers: inc_res_hdr,
+                max_body,
+                show_secrets,
+                extract_auth_summary,
             };
             let exit_code = run_search(options);
             std::process::exit(exit_code);
@@ -464,6 +496,42 @@ fn run_cli_main() {
                 action,
             })
         }
+        Some(Commands::Capture { action }) => match action {
+            CaptureCommands::Wait {
+                host,
+                method,
+                path,
+                timeout,
+                open,
+                format,
+            } => {
+                let timeout_dur = match commands::parse_duration(&timeout) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                let fmt = match commands::CaptureOutputFormat::parse(&format) {
+                    Ok(f) => f,
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        std::process::exit(2);
+                    }
+                };
+                let options = commands::CaptureWaitOptions {
+                    host,
+                    method,
+                    path,
+                    timeout: timeout_dur,
+                    open,
+                    format: fmt,
+                    port: get_effective_port(cli.port),
+                };
+                let exit_code = commands::run_capture_wait(options);
+                std::process::exit(exit_code);
+            }
+        },
         Some(Commands::Traffic { action }) => match action {
             TrafficCommands::List {
                 port,
@@ -518,16 +586,32 @@ fn run_cli_main() {
             TrafficCommands::Get {
                 port,
                 id,
+                ids,
                 request_body,
                 response_body,
+                max_body,
                 format,
+                show_secrets,
+                extract_auth_summary,
             } => {
+                // Default format: json-pretty for single id, ndjson for batch
+                // (per the CLI help; users can still pass an explicit --format).
+                let user_specified_format = format != "json-pretty";
+                let effective_format = if !ids.is_empty() && !user_specified_format {
+                    "ndjson".to_string()
+                } else {
+                    format
+                };
                 let options = TrafficGetOptions {
                     port: port.unwrap_or_else(|| get_effective_port(cli.port)),
                     id,
+                    ids,
                     request_body,
                     response_body,
-                    format: format.parse().unwrap_or(OutputFormat::JsonPretty),
+                    max_body,
+                    format: effective_format.parse().unwrap_or(OutputFormat::JsonPretty),
+                    show_secrets,
+                    extract_auth_summary,
                 };
                 run_traffic_get(options)
             }
@@ -554,8 +638,21 @@ fn run_cli_main() {
                 no_color,
                 max_scan,
                 max_results,
+                req_json,
+                res_json,
+                req_header_eq,
+                res_header_eq,
+                since,
+                until,
+                latest,
+                include,
+                max_body,
+                show_secrets,
+                extract_auth_summary,
             } => {
                 let is_interactive = interactive || keyword.is_none();
+                let (inc_req_body, inc_res_body, inc_req_hdr, inc_res_hdr) =
+                    commands::parse_include_tokens(&include);
                 let options = SearchOptions {
                     keyword: keyword.unwrap_or_default(),
                     port: get_effective_port(cli.port),
@@ -580,12 +677,72 @@ fn run_cli_main() {
                     no_color,
                     max_scan,
                     max_results,
+                    req_json,
+                    res_json,
+                    req_header_eq,
+                    res_header_eq,
+                    since,
+                    until,
+                    latest,
+                    include_request_body: inc_req_body,
+                    include_response_body: inc_res_body,
+                    include_request_headers: inc_req_hdr,
+                    include_response_headers: inc_res_hdr,
+                    max_body,
+                    show_secrets,
+                    extract_auth_summary,
                 };
                 let exit_code = run_search(options);
                 std::process::exit(exit_code);
             }
             TrafficCommands::Clear { ids, yes } => {
                 run_traffic_clear(get_effective_port(cli.port), ids, yes)
+            }
+            TrafficCommands::AuthStatus { port, id, format } => {
+                let options = TrafficAuthStatusOptions {
+                    port: port.unwrap_or_else(|| get_effective_port(cli.port)),
+                    id,
+                    format: format.parse().unwrap_or(OutputFormat::Compact),
+                };
+                run_traffic_auth_status(options)
+            }
+            TrafficCommands::Export {
+                port,
+                id,
+                as_format,
+                redact,
+                show_secrets,
+                output,
+            } => {
+                let _ = redact;
+                let options = TrafficExportOptions {
+                    port: port.unwrap_or_else(|| get_effective_port(cli.port)),
+                    id,
+                    as_format,
+                    redact: !show_secrets,
+                    output,
+                };
+                run_traffic_export(options)
+            }
+            TrafficCommands::Replay {
+                port,
+                id,
+                patch,
+                patch_json,
+                refresh_auth,
+                timeout,
+                format,
+            } => {
+                let options = TrafficReplayOptions {
+                    port: port.unwrap_or_else(|| get_effective_port(cli.port)),
+                    id,
+                    patch,
+                    patch_json,
+                    refresh_auth,
+                    timeout,
+                    format: format.parse().unwrap_or(OutputFormat::Table),
+                };
+                run_traffic_replay(options)
             }
         },
         None => run_start(
@@ -645,7 +802,13 @@ mod tests {
             std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", "1");
         }
 
-        let should_run = should_run_update_notice(false, Some(&Commands::Status { tui: false }));
+        let should_run = should_run_update_notice(
+            false,
+            Some(&Commands::Status {
+                tui: false,
+                format: cli::StatusFormat::Text,
+            }),
+        );
 
         match previous {
             Some(value) => unsafe {
@@ -754,7 +917,10 @@ mod tests {
     fn should_run_update_notice_skips_non_tty_output() {
         assert!(!should_run_update_notice(
             false,
-            Some(&Commands::Status { tui: false })
+            Some(&Commands::Status {
+                tui: false,
+                format: cli::StatusFormat::Text
+            })
         ));
     }
 
@@ -773,7 +939,10 @@ mod tests {
         ));
         assert!(should_run_update_notice(
             true,
-            Some(&Commands::Status { tui: false })
+            Some(&Commands::Status {
+                tui: false,
+                format: cli::StatusFormat::Text
+            })
         ));
     }
 
@@ -897,7 +1066,10 @@ mod tests {
         ));
         assert!(should_run_update_notice(
             true,
-            Some(&Commands::Status { tui: false })
+            Some(&Commands::Status {
+                tui: false,
+                format: cli::StatusFormat::Text
+            })
         ));
     }
 }
