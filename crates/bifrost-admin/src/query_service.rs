@@ -11,8 +11,8 @@ use serde_json::{json, Value};
 use crate::body_store::BodyRef;
 use crate::push::SharedPushManager;
 use crate::search::{
-    FilterCondition, SearchEngine, SearchFilters, SearchProgress, SearchRequest, SearchResponse,
-    SearchScope,
+    FilterCondition, SearchEngine, SearchFilters, SearchInclude, SearchProgress, SearchRequest,
+    SearchResponse, SearchScope,
 };
 use crate::state::SharedAdminState;
 use crate::traffic_db::{Direction, QueryParams, QueryResult, TextMatchMode};
@@ -480,6 +480,17 @@ pub fn search_request_from_command(args: &CommandSearchArgs) -> SearchRequest {
         limit: args.limit,
         max_scan: args.max_scan,
         max_results: args.max_results,
+        time_range: args.time_range.as_ref().map(|tr| crate::search::TimeRange {
+            since_ms: tr.since_ms,
+            until_ms: tr.until_ms,
+        }),
+        include: SearchInclude {
+            request_body: args.include.request_body,
+            response_body: args.include.response_body,
+            request_headers: args.include.request_headers,
+            response_headers: args.include.response_headers,
+            max_body_bytes: args.include.max_body_bytes,
+        },
     }
 }
 
@@ -550,6 +561,8 @@ mod tests {
             max_scan: Some(1000),
             max_results: Some(50),
             cursor: Some(42),
+            time_range: None,
+            ..Default::default()
         };
 
         let request = search_request_from_command(&args);

@@ -51,6 +51,11 @@ pub async fn handle_traffic(
             Method::GET => get_traffic_updates(req, state).await,
             _ => method_not_allowed(),
         }
+    } else if path == "/api/traffic/batch" {
+        match method {
+            Method::GET => batch_traffic(req, state).await,
+            _ => method_not_allowed(),
+        }
     } else if let Some(rest) = path.strip_prefix("/api/traffic/") {
         let rest = rest.trim_end_matches('/');
         if let Some(id) = rest.strip_suffix("/request-body") {
@@ -103,6 +108,21 @@ pub async fn handle_traffic(
         } else if let Some(id) = rest.strip_suffix("/frames") {
             match method {
                 Method::GET => get_frames(state, id, req.uri().query()).await,
+                _ => method_not_allowed(),
+            }
+        } else if let Some(id) = rest.strip_suffix("/auth-status") {
+            match method {
+                Method::GET => get_traffic_auth_status(state, id).await,
+                _ => method_not_allowed(),
+            }
+        } else if let Some(id) = rest.strip_suffix("/export") {
+            match method {
+                Method::GET => get_traffic_export(state, id, req.uri().query()).await,
+                _ => method_not_allowed(),
+            }
+        } else if let Some(id) = rest.strip_suffix("/replay") {
+            match method {
+                Method::POST => post_traffic_replay(req, state, id).await,
                 _ => method_not_allowed(),
             }
         } else {
@@ -1135,6 +1155,221 @@ fn parse_query_params_from_query_string(query: &str) -> QueryParams {
     params
 }
 
+/// Hard upper bound on `?ids=` count for `/api/traffic/batch`. Going higher
+/// would let a single relay round-trip stream very large body payloads back to
+/// the caller (each line can include base64-encoded request+response bodies).
+const BATCH_GET_MAX_IDS: usize = 200;
+const BATCH_GET_DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
+
+#[derive(Default, Debug)]
+struct BatchTrafficParams {
+    ids: Vec<String>,
+    include_request_body: bool,
+    include_response_body: bool,
+    include_request_headers: bool,
+    include_response_headers: bool,
+    max_body_bytes: usize,
+}
+
+fn parse_batch_traffic_query(query: Option<&str>) -> Result<BatchTrafficParams, String> {
+    let mut params = BatchTrafficParams {
+        max_body_bytes: BATCH_GET_DEFAULT_MAX_BODY_BYTES,
+        ..Default::default()
+    };
+    let Some(q) = query else {
+        return Err("missing required `ids` query parameter".to_string());
+    };
+    let mut ids_seen = false;
+    for part in q.split('&') {
+        if part.is_empty() {
+            continue;
+        }
+        if let Some(v) = part.strip_prefix("ids=") {
+            ids_seen = true;
+            let decoded =
+                urlencoding::decode(v).map_err(|e| format!("invalid url-encoded `ids`: {e}"))?;
+            for raw in decoded.split(',') {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                params.ids.push(trimmed.to_string());
+            }
+        } else if let Some(v) = part.strip_prefix("include=") {
+            let decoded = urlencoding::decode(v)
+                .map_err(|e| format!("invalid url-encoded `include`: {e}"))?;
+            for tok in decoded.split(',') {
+                match tok.trim() {
+                    "" => {}
+                    "request-body" | "req-body" => params.include_request_body = true,
+                    "response-body" | "res-body" => params.include_response_body = true,
+                    "request-headers" | "req-headers" => params.include_request_headers = true,
+                    "response-headers" | "res-headers" => params.include_response_headers = true,
+                    "headers" => {
+                        params.include_request_headers = true;
+                        params.include_response_headers = true;
+                    }
+                    "bodies" => {
+                        params.include_request_body = true;
+                        params.include_response_body = true;
+                    }
+                    other => return Err(format!("unknown include token: {other}")),
+                }
+            }
+        } else if let Some(v) = part.strip_prefix("max_body=") {
+            params.max_body_bytes = v
+                .parse::<usize>()
+                .map_err(|e| format!("invalid max_body: {e}"))?;
+        }
+    }
+    if !ids_seen || params.ids.is_empty() {
+        return Err("missing required `ids` query parameter".to_string());
+    }
+    if params.ids.len() > BATCH_GET_MAX_IDS {
+        return Err(format!(
+            "`ids` length {} exceeds maximum of {}",
+            params.ids.len(),
+            BATCH_GET_MAX_IDS
+        ));
+    }
+    Ok(params)
+}
+
+/// `GET /api/traffic/batch?ids=A,B,C&include=request-body,response-body,headers&max_body=N`
+///
+/// Streams `application/x-ndjson`. Each line is either:
+///   `{"id":"A","ok":true,"record":{...},"bodies":{...},"headers":{...}}`
+/// or, when an id cannot be resolved:
+///   `{"id":"A","ok":false,"error":"not_found"}`
+async fn batch_traffic(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    let params = match parse_batch_traffic_query(req.uri().query()) {
+        Ok(p) => p,
+        Err(msg) => return error_response(StatusCode::BAD_REQUEST, &msg),
+    };
+
+    let service = AdminQueryService::new(state.clone());
+    let mut out = Vec::<u8>::new();
+    for id in &params.ids {
+        let line = match service.get_traffic_record(id).await {
+            Ok(record) => {
+                let mut entry = serde_json::json!({
+                    "id": id,
+                    "ok": true,
+                    "record": &record,
+                });
+
+                if params.include_request_body || params.include_response_body {
+                    let mut bodies = serde_json::Map::new();
+                    if params.include_request_body {
+                        let body_ref = record
+                            .request_body_ref
+                            .as_ref()
+                            .or(record.raw_request_body_ref.as_ref());
+                        if let Some(chunk) = build_batch_body_chunk(
+                            &state,
+                            body_ref,
+                            record.request_content_type.as_deref(),
+                            params.max_body_bytes,
+                        )
+                        .await
+                        {
+                            bodies.insert("request".to_string(), chunk);
+                        }
+                    }
+                    if params.include_response_body {
+                        let body_ref = record
+                            .response_body_ref
+                            .as_ref()
+                            .or(record.raw_response_body_ref.as_ref());
+                        if let Some(chunk) = build_batch_body_chunk(
+                            &state,
+                            body_ref,
+                            record.content_type.as_deref(),
+                            params.max_body_bytes,
+                        )
+                        .await
+                        {
+                            bodies.insert("response".to_string(), chunk);
+                        }
+                    }
+                    if !bodies.is_empty() {
+                        entry["bodies"] = serde_json::Value::Object(bodies);
+                    }
+                }
+
+                if params.include_request_headers || params.include_response_headers {
+                    let mut headers = serde_json::Map::new();
+                    if params.include_request_headers {
+                        headers.insert(
+                            "request".to_string(),
+                            serde_json::to_value(&record.request_headers)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    if params.include_response_headers {
+                        headers.insert(
+                            "response".to_string(),
+                            serde_json::to_value(&record.response_headers)
+                                .unwrap_or(serde_json::Value::Null),
+                        );
+                    }
+                    if !headers.is_empty() {
+                        entry["headers"] = serde_json::Value::Object(headers);
+                    }
+                }
+
+                entry
+            }
+            Err(_) => serde_json::json!({
+                "id": id,
+                "ok": false,
+                "error": "not_found",
+            }),
+        };
+        let mut serialized = serde_json::to_vec(&line).unwrap_or_else(|_| b"{}".to_vec());
+        serialized.push(b'\n');
+        out.extend_from_slice(&serialized);
+    }
+
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .header("Cache-Control", "no-store")
+        .body(full_body(out))
+        .unwrap()
+}
+
+async fn build_batch_body_chunk(
+    state: &SharedAdminState,
+    body_ref: Option<&BodyRef>,
+    content_type: Option<&str>,
+    max_body_bytes: usize,
+) -> Option<serde_json::Value> {
+    let body_ref = body_ref?;
+    let bytes = load_body_bytes_async(state, body_ref).await?;
+    let original_size = bytes.len();
+    let (slice, truncated) = if original_size > max_body_bytes {
+        (&bytes[..max_body_bytes], true)
+    } else {
+        (&bytes[..], false)
+    };
+    let encoded = base64::engine::general_purpose::STANDARD.encode(slice);
+    let mut obj = serde_json::Map::new();
+    obj.insert("bytes_b64".to_string(), serde_json::Value::String(encoded));
+    obj.insert(
+        "size".to_string(),
+        serde_json::Value::Number(serde_json::Number::from(original_size)),
+    );
+    obj.insert("truncated".to_string(), serde_json::Value::Bool(truncated));
+    if let Some(ct) = content_type {
+        obj.insert(
+            "content_type".to_string(),
+            serde_json::Value::String(ct.to_string()),
+        );
+    }
+    Some(serde_json::Value::Object(obj))
+}
+
 async fn get_traffic_detail(state: SharedAdminState, id: &str) -> Response<BoxBody> {
     let service = AdminQueryService::new(state.clone());
     match service.get_traffic_record(id).await {
@@ -1587,4 +1822,371 @@ async fn get_body_bytes_async(
             .unwrap(),
         None => error_response(StatusCode::NOT_FOUND, "Body content not found"),
     }
+}
+
+#[cfg(test)]
+mod batch_query_tests {
+    use super::{parse_batch_traffic_query, BATCH_GET_DEFAULT_MAX_BODY_BYTES, BATCH_GET_MAX_IDS};
+
+    #[test]
+    fn parse_basic_ids() {
+        let p = parse_batch_traffic_query(Some("ids=a,b,c")).expect("ok");
+        assert_eq!(p.ids, vec!["a", "b", "c"]);
+        assert_eq!(p.max_body_bytes, BATCH_GET_DEFAULT_MAX_BODY_BYTES);
+        assert!(!p.include_request_body);
+        assert!(!p.include_response_body);
+        assert!(!p.include_request_headers);
+        assert!(!p.include_response_headers);
+    }
+
+    #[test]
+    fn parse_include_aliases_and_shortcuts() {
+        let p =
+            parse_batch_traffic_query(Some("ids=x&include=req-body,res-body,headers")).expect("ok");
+        assert!(p.include_request_body);
+        assert!(p.include_response_body);
+        assert!(p.include_request_headers);
+        assert!(p.include_response_headers);
+
+        let p2 = parse_batch_traffic_query(Some("ids=x&include=bodies")).expect("ok");
+        assert!(p2.include_request_body);
+        assert!(p2.include_response_body);
+        assert!(!p2.include_request_headers);
+    }
+
+    #[test]
+    fn parse_max_body() {
+        let p = parse_batch_traffic_query(Some("ids=a&max_body=2048")).expect("ok");
+        assert_eq!(p.max_body_bytes, 2048);
+    }
+
+    #[test]
+    fn parse_missing_ids_is_error() {
+        assert!(parse_batch_traffic_query(None).is_err());
+        assert!(parse_batch_traffic_query(Some("foo=bar")).is_err());
+        assert!(parse_batch_traffic_query(Some("ids=")).is_err());
+    }
+
+    #[test]
+    fn parse_unknown_include_token_errors() {
+        let err = parse_batch_traffic_query(Some("ids=a&include=mystery-token"))
+            .expect_err("should reject unknown token");
+        assert!(err.contains("unknown include token"));
+    }
+
+    #[test]
+    fn parse_over_limit_ids_rejected() {
+        // Build ids=1,2,...,N where N = BATCH_GET_MAX_IDS + 1.
+        let n = BATCH_GET_MAX_IDS + 1;
+        let ids: String = (0..n).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+        let q = format!("ids={}", ids);
+        let err = parse_batch_traffic_query(Some(&q)).expect_err("should reject");
+        assert!(err.contains("exceeds maximum"));
+    }
+
+    #[test]
+    fn parse_trims_empty_segments() {
+        let p = parse_batch_traffic_query(Some("ids=a,,b,,c,")).expect("ok");
+        assert_eq!(p.ids, vec!["a", "b", "c"]);
+    }
+}
+
+/// GET /api/traffic/{id}/auth-status — JWT/Cookie 登录态诊断。
+async fn get_traffic_auth_status(state: SharedAdminState, id: &str) -> Response<BoxBody> {
+    use crate::auth_inspect::build_auth_summary;
+    let service = AdminQueryService::new(state.clone());
+    let record = match service.get_traffic_record(id).await {
+        Ok(r) => r,
+        Err(_) => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Traffic record '{}' not found", id),
+            )
+        }
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let mut merged: Vec<(String, String)> = Vec::new();
+    if let Some(h) = record.request_headers.as_ref() {
+        merged.extend(h.iter().cloned());
+    }
+    if let Some(h) = record.original_request_headers.as_ref() {
+        merged.extend(h.iter().cloned());
+    }
+    if let Some(h) = record.response_headers.as_ref() {
+        merged.extend(h.iter().cloned());
+    }
+    if let Some(h) = record.original_response_headers.as_ref() {
+        merged.extend(h.iter().cloned());
+    }
+
+    let host = if record.host.is_empty() {
+        record.actual_host.clone().unwrap_or_default()
+    } else {
+        record.host.clone()
+    };
+
+    let summary = build_auth_summary(&merged, &host, now_ms);
+    json_response(&summary)
+}
+
+#[cfg(test)]
+mod auth_status_tests {
+    use super::*;
+    use crate::auth_inspect::AuthSummary;
+
+    fn make_jwt(exp: i64, sub: &str) -> String {
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = URL_SAFE_NO_PAD.encode(b"{\"alg\":\"none\"}");
+        let payload = serde_json::json!({"exp": exp, "sub": sub});
+        let payload_b64 = URL_SAFE_NO_PAD.encode(serde_json::to_vec(&payload).unwrap());
+        format!("{header}.{payload_b64}.sig")
+    }
+
+    #[test]
+    fn auth_summary_serializes_with_expected_fields() {
+        // 验证 AuthSummary 的字段命名（防止意外重命名破坏 API 契约）。
+        let jwt = make_jwt(9_999_999_999, "u-1");
+        let headers = vec![("Authorization".to_string(), format!("Bearer {jwt}"))];
+        let s = crate::auth_inspect::build_auth_summary(&headers, "example.com", 1_700_000_000_000);
+        let v = serde_json::to_value(&s).unwrap();
+        assert!(v.get("host").is_some());
+        assert!(v.get("has_jwt").is_some());
+        assert!(v.get("has_cookie").is_some());
+        assert!(v.get("jwt_exp_ms").is_some());
+        assert!(v.get("jwt_user_id").is_some());
+        assert!(v.get("cookie_exp_ms").is_some());
+        assert!(v.get("valid_at_ms").is_some());
+        assert!(v.get("valid").is_some());
+
+        // 反序列化往返。
+        let parsed: AuthSummary = serde_json::from_value(v).unwrap();
+        assert_eq!(parsed, s);
+    }
+}
+
+// =============================================================================
+// P2-6: traffic export / replay handlers
+// =============================================================================
+
+async fn get_traffic_record_async(
+    state: &SharedAdminState,
+    id: &str,
+) -> Option<crate::traffic::TrafficRecord> {
+    if let Some(ref db_store) = state.traffic_db_store {
+        let db_clone = db_store.clone();
+        let id_owned = id.to_string();
+        tokio::task::spawn_blocking(move || db_clone.get_by_id(&id_owned))
+            .await
+            .ok()
+            .flatten()
+    } else {
+        None
+    }
+}
+
+fn parse_export_query(query: Option<&str>) -> (crate::replay::ExportFormat, bool) {
+    let mut format = crate::replay::ExportFormat::Curl;
+    let mut redact = true;
+    if let Some(q) = query {
+        for part in q.split('&') {
+            if let Some(v) = part.strip_prefix("format=") {
+                if let Some(f) = crate::replay::ExportFormat::parse(v) {
+                    format = f;
+                }
+            } else if let Some(v) = part.strip_prefix("redact=") {
+                redact = !matches!(v, "0" | "false" | "False" | "FALSE" | "no");
+            }
+        }
+    }
+    (format, redact)
+}
+
+async fn get_traffic_export(
+    state: SharedAdminState,
+    id: &str,
+    query: Option<&str>,
+) -> Response<BoxBody> {
+    let (format, redact) = parse_export_query(query);
+    let record = match get_traffic_record_async(&state, id).await {
+        Some(r) => r,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Traffic record '{}' not found", id),
+            )
+        }
+    };
+    let body = if let Some(body_ref) = record
+        .raw_request_body_ref
+        .as_ref()
+        .or(record.request_body_ref.as_ref())
+    {
+        load_body_bytes_async(&state, body_ref).await
+    } else {
+        None
+    };
+    let headers = record.request_headers.clone().unwrap_or_default();
+    let opts = crate::replay::ExportOptions { redact, format };
+    let text = crate::replay::export_request(
+        &record.method,
+        &record.url,
+        &headers,
+        body.as_deref(),
+        &opts,
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/plain; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .body(full_body(text.into_bytes()))
+        .unwrap()
+}
+
+async fn post_traffic_replay(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    id: &str,
+) -> Response<BoxBody> {
+    let body_bytes = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(_) => {
+            return error_response(StatusCode::BAD_REQUEST, "Failed to read request body");
+        }
+    };
+    let opts: crate::replay::ReplayOptions = if body_bytes.is_empty() {
+        crate::replay::ReplayOptions::default()
+    } else {
+        match serde_json::from_slice(&body_bytes) {
+            Ok(v) => v,
+            Err(e) => {
+                return error_response(
+                    StatusCode::BAD_REQUEST,
+                    &format!("Invalid JSON replay options: {e}"),
+                );
+            }
+        }
+    };
+    let record = match get_traffic_record_async(&state, id).await {
+        Some(r) => r,
+        None => {
+            return error_response(
+                StatusCode::NOT_FOUND,
+                &format!("Traffic record '{}' not found", id),
+            );
+        }
+    };
+    let body = if let Some(body_ref) = record
+        .raw_request_body_ref
+        .as_ref()
+        .or(record.request_body_ref.as_ref())
+    {
+        load_body_bytes_async(&state, body_ref)
+            .await
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let headers = record.request_headers.clone().unwrap_or_default();
+
+    // refresh-auth：扫最近 N=200 个 traffic 记录，找同 host 的最新认证 header。
+    let auth_candidates = if opts.refresh_auth_enabled() {
+        let target_host = opts
+            .auth_source_host
+            .clone()
+            .unwrap_or_else(|| record.host.clone())
+            .to_ascii_lowercase();
+        collect_auth_candidates(&state, &target_host, &record.id, 200).await
+    } else {
+        Vec::new()
+    };
+
+    let client = crate::replay::ReqwestClient;
+    match crate::replay::replay_request(
+        &client,
+        &record.method,
+        &record.url,
+        &headers,
+        &body,
+        &opts,
+        &auth_candidates,
+    )
+    .await
+    {
+        Ok(result) => json_response(&serde_json::json!({
+            "success": true,
+            "data": {
+                "status": result.status,
+                "duration_ms": result.duration_ms,
+                "request": {
+                    "method": record.method,
+                    "url": record.url,
+                },
+                "response": {
+                    "status": result.status,
+                    "headers": result.headers,
+                    "body_b64": result.body_b64,
+                },
+                "auth_refresh": result.auth_refresh,
+                // 兼容旧响应字段：CLI human render 直接取这几个 key。
+                "headers": result.headers,
+                "body_b64": result.body_b64,
+            },
+        })),
+        Err(e) => json_response(&serde_json::json!({
+            "success": false,
+            "error": e,
+        })),
+    }
+}
+
+async fn collect_auth_candidates(
+    state: &SharedAdminState,
+    target_host_lc: &str,
+    exclude_id: &str,
+    n: usize,
+) -> Vec<crate::replay::AuthCandidate> {
+    let Some(ref db_store) = state.traffic_db_store else {
+        return Vec::new();
+    };
+    // 1. 取最近 N 条 compact 列表，按 host 粗筛。
+    let db_clone = db_store.clone();
+    let summaries = match tokio::task::spawn_blocking(move || db_clone.query_latest_window(n)).await
+    {
+        Ok(r) => r.records,
+        Err(_) => return Vec::new(),
+    };
+    let target = target_host_lc.to_string();
+    let exclude = exclude_id.to_string();
+    let host_matches: Vec<(String, u64)> = summaries
+        .into_iter()
+        .filter(|s| s.id != exclude && s.h.to_ascii_lowercase() == target)
+        .map(|s| (s.id, s.seq))
+        .collect();
+
+    // 2. 对每个粗筛命中拉完整记录，提取请求 header。
+    let mut out: Vec<crate::replay::AuthCandidate> = Vec::new();
+    for (id, seq) in host_matches {
+        let db_clone = db_store.clone();
+        let id_owned = id.clone();
+        let full = match tokio::task::spawn_blocking(move || db_clone.get_by_id(&id_owned)).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let Some(rec) = full else { continue };
+        let Some(headers) = rec.request_headers.clone() else {
+            continue;
+        };
+        out.push(crate::replay::AuthCandidate {
+            id,
+            host: rec.host.clone(),
+            headers,
+            recency: seq,
+        });
+    }
+    out
 }

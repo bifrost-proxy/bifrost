@@ -20,6 +20,11 @@ use ratatui::{
 };
 use serde::Deserialize;
 
+use base64::Engine as _;
+use bifrost_admin::redact::{
+    auth_summary_from_headers, default_options, redact_body_bytes, redact_headers, RedactOptions,
+};
+
 fn direct_agent(timeout: Duration) -> ureq::Agent {
     bifrost_core::direct_ureq_agent_builder()
         .timeout(timeout)
@@ -46,6 +51,39 @@ fn network_request_error(url: &str, e: &ureq::Error) -> String {
 pub struct SearchResultItem {
     pub record: TrafficSummary,
     pub matches: Vec<MatchLocation>,
+    /// Optional bodies payload returned when `--include request_body|response_body|bodies`
+    /// is passed and the server's `include` block is honored.
+    #[serde(default)]
+    pub bodies: Option<BodiesPayloadIn>,
+    /// Optional headers payload returned when `--include request_headers|response_headers|headers`
+    /// is passed and the server's `include` block is honored.
+    #[serde(default)]
+    pub headers: Option<HeadersPayloadIn>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BodiesPayloadIn {
+    #[serde(default)]
+    pub request: Option<BodyChunkIn>,
+    #[serde(default)]
+    pub response: Option<BodyChunkIn>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BodyChunkIn {
+    pub bytes_b64: String,
+    pub size: usize,
+    pub truncated: bool,
+    #[serde(default)]
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct HeadersPayloadIn {
+    #[serde(default)]
+    pub request: Vec<(String, String)>,
+    #[serde(default)]
+    pub response: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -112,6 +150,7 @@ pub enum OutputFormat {
     Compact,
     Json,
     JsonPretty,
+    Ndjson,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -203,6 +242,7 @@ impl std::str::FromStr for OutputFormat {
             "compact" | "c" => Self::Compact,
             "json" | "j" => Self::Json,
             "json-pretty" | "jp" => Self::JsonPretty,
+            "ndjson" => Self::Ndjson,
             _ => Self::Table,
         })
     }
@@ -233,6 +273,22 @@ pub struct SearchOptions {
     pub no_color: bool,
     pub max_scan: Option<usize>,
     pub max_results: Option<usize>,
+    pub req_json: Vec<String>,
+    pub res_json: Vec<String>,
+    pub req_header_eq: Vec<String>,
+    pub res_header_eq: Vec<String>,
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub latest: Option<String>,
+    pub include_request_body: bool,
+    pub include_response_body: bool,
+    pub include_request_headers: bool,
+    pub include_response_headers: bool,
+    pub max_body: Option<usize>,
+    /// When true, disable redaction in CLI output. Equivalent to `--show-secrets`.
+    pub show_secrets: bool,
+    /// When true, append a redacted `auth_summary` block to each result.
+    pub extract_auth_summary: bool,
 }
 
 impl Default for SearchOptions {
@@ -261,8 +317,59 @@ impl Default for SearchOptions {
             no_color: false,
             max_scan: None,
             max_results: None,
+            req_json: Vec::new(),
+            res_json: Vec::new(),
+            req_header_eq: Vec::new(),
+            res_header_eq: Vec::new(),
+            since: None,
+            until: None,
+            latest: None,
+            include_request_body: false,
+            include_response_body: false,
+            include_request_headers: false,
+            include_response_headers: false,
+            max_body: None,
+            show_secrets: false,
+            extract_auth_summary: false,
         }
     }
+}
+
+/// Parse `--include` tokens (with aliases / shortcuts) into 4 booleans.
+///
+/// Accepted tokens (case-insensitive, comma-separated upstream):
+///   request-body  | req-body
+///   response-body | res-body
+///   request-headers  | req-headers
+///   response-headers | res-headers
+///   bodies  -> both bodies
+///   headers -> both headers
+///
+/// Unknown tokens are silently ignored (CLI is forgiving; admin API validates strictly).
+pub fn parse_include_tokens(tokens: &[String]) -> (bool, bool, bool, bool) {
+    let mut req_body = false;
+    let mut res_body = false;
+    let mut req_headers = false;
+    let mut res_headers = false;
+    for tok in tokens {
+        match tok.trim().to_ascii_lowercase().as_str() {
+            "" => {}
+            "request-body" | "req-body" => req_body = true,
+            "response-body" | "res-body" => res_body = true,
+            "request-headers" | "req-headers" => req_headers = true,
+            "response-headers" | "res-headers" => res_headers = true,
+            "bodies" => {
+                req_body = true;
+                res_body = true;
+            }
+            "headers" => {
+                req_headers = true;
+                res_headers = true;
+            }
+            _ => {}
+        }
+    }
+    (req_body, res_body, req_headers, res_headers)
 }
 
 fn check_proxy_running(port: u16) -> bool {
@@ -306,9 +413,67 @@ fn run_simple_search(options: SearchOptions) -> i32 {
 
     match options.format {
         OutputFormat::Json | OutputFormat::JsonPretty => stream_json_output(reader, &options),
+        OutputFormat::Ndjson => stream_ndjson_output(reader),
         OutputFormat::Table => stream_table_output(reader, &options, use_color),
         OutputFormat::Compact => stream_compact_output(reader, &options, use_color),
     }
+}
+
+fn stream_ndjson_output(reader: Box<dyn std::io::Read + Send>) -> i32 {
+    use std::io::Write;
+    let stdout = std::io::stdout();
+    let mut out = stdout.lock();
+    let mut error_message: Option<String> = None;
+    for event in parse_sse_events(reader) {
+        match event {
+            SseEvent::Result(item) => {
+                let line = serde_json::json!({
+                    "type": "result",
+                    "id": item.record.id,
+                    "seq": item.record.seq,
+                    "method": item.record.m,
+                    "host": item.record.h,
+                    "path": item.record.p,
+                    "status": item.record.s,
+                    "protocol": item.record.proto,
+                    "timestamp": item.record.ts,
+                    "duration_ms": item.record.dur,
+                    "matches": item.matches.iter().map(|m| serde_json::json!({
+                        "field": m.field,
+                        "preview": m.preview,
+                    })).collect::<Vec<_>>(),
+                });
+                let _ = writeln!(out, "{}", line);
+            }
+            SseEvent::Done(d) => {
+                let line = serde_json::json!({
+                    "type": "done",
+                    "total_matched": d.total_matched,
+                    "total_searched": d.total_searched,
+                    "has_more": d.has_more,
+                });
+                let _ = writeln!(out, "{}", line);
+            }
+            SseEvent::Progress(p) => {
+                let line = serde_json::json!({
+                    "type": "progress",
+                    "total_matched": p.total_matched,
+                    "total_searched": p.total_searched,
+                });
+                let _ = writeln!(out, "{}", line);
+            }
+            SseEvent::Error(err) => {
+                error_message = Some(err.message);
+                break;
+            }
+        }
+    }
+    if let Some(msg) = error_message {
+        let line = serde_json::json!({"type": "error", "message": msg});
+        let _ = writeln!(out, "{}", line);
+        return 1;
+    }
+    0
 }
 
 fn start_search_stream(
@@ -610,8 +775,103 @@ fn stream_compact_output(
     0
 }
 
+/// Build redact options for the search JSON output path.
+///
+/// Mirrors the policy used by `traffic get`: when `--show-secrets` is on we
+/// disable redaction wholesale, otherwise we use the conservative defaults from
+/// `bifrost_admin::redact::default_options()`. `--extract-auth-summary` adds a
+/// structured `auth_summary` field alongside the redacted payload.
+fn search_redact_options(options: &SearchOptions) -> RedactOptions {
+    let mut opts = default_options();
+    opts.show_secrets = options.show_secrets;
+    opts.extract_auth_summary = options.extract_auth_summary;
+    opts
+}
+
+/// Produce the bodies/headers/auth_summary JSON fragments for one
+/// `SearchResultItem`, applying P2-8 redact on the way out. Returns
+/// `(bodies, headers, auth_summary)` -- each `None` when the corresponding
+/// payload was not present in the server response.
+fn redact_search_payloads(
+    item: &SearchResultItem,
+    redact_opts: &RedactOptions,
+) -> (
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+    Option<serde_json::Value>,
+) {
+    let bodies_json = item.bodies.as_ref().map(|b| {
+        let req = b
+            .request
+            .as_ref()
+            .map(|chunk| body_chunk_to_json(chunk, redact_opts));
+        let res = b
+            .response
+            .as_ref()
+            .map(|chunk| body_chunk_to_json(chunk, redact_opts));
+        let mut obj = serde_json::Map::new();
+        if let Some(v) = req {
+            obj.insert("request".to_string(), v);
+        }
+        if let Some(v) = res {
+            obj.insert("response".to_string(), v);
+        }
+        serde_json::Value::Object(obj)
+    });
+
+    let (headers_json, auth_summary_json) = if let Some(h) = item.headers.as_ref() {
+        let mut req = h.request.clone();
+        let mut res = h.response.clone();
+        // Auth summary uses the *original* header values (still bearing the
+        // secrets) so the inspector can read JWT claims etc.; this is always
+        // safe because the summary itself never reveals the raw token.
+        let summary = if redact_opts.extract_auth_summary {
+            let mut all: Vec<(String, String)> = Vec::with_capacity(req.len() + res.len());
+            all.extend(req.iter().cloned());
+            all.extend(res.iter().cloned());
+            let s = auth_summary_from_headers(&all);
+            Some(serde_json::json!({
+                "has_jwt": s.has_jwt,
+                "has_cookie": s.has_cookie,
+                "jwt_user_id": s.jwt_user_id,
+                "jwt_exp_unix": s.jwt_exp_unix,
+                "cookie_names": s.cookie_names,
+                "host": s.host,
+            }))
+        } else {
+            None
+        };
+        redact_headers(&mut req, redact_opts);
+        redact_headers(&mut res, redact_opts);
+        let hj = serde_json::json!({
+            "request": req.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
+            "response": res.iter().map(|(k, v)| serde_json::json!([k, v])).collect::<Vec<_>>(),
+        });
+        (Some(hj), summary)
+    } else {
+        (None, None)
+    };
+
+    (bodies_json, headers_json, auth_summary_json)
+}
+
+fn body_chunk_to_json(chunk: &BodyChunkIn, opts: &RedactOptions) -> serde_json::Value {
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(chunk.bytes_b64.as_bytes())
+        .unwrap_or_default();
+    let redacted = redact_body_bytes(chunk.content_type.as_deref(), &raw, opts);
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&redacted);
+    serde_json::json!({
+        "bytes_b64": bytes_b64,
+        "size": chunk.size,
+        "truncated": chunk.truncated,
+        "content_type": chunk.content_type,
+    })
+}
+
 fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOptions) -> i32 {
     let pretty = options.format == OutputFormat::JsonPretty;
+    let redact_opts = search_redact_options(options);
     let mut results = Vec::new();
     let mut total_matched = 0;
     let mut total_searched = 0;
@@ -621,7 +881,9 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
     for event in parse_sse_events(reader) {
         match event {
             SseEvent::Result(item) => {
-                results.push(serde_json::json!({
+                let (bodies_json, headers_json, auth_summary_json) =
+                    redact_search_payloads(&item, &redact_opts);
+                let mut obj = serde_json::json!({
                     "id": item.record.id,
                     "seq": item.record.seq,
                     "method": item.record.m,
@@ -639,7 +901,19 @@ fn stream_json_output(reader: Box<dyn std::io::Read + Send>, options: &SearchOpt
                             "preview": m.preview,
                         })
                     }).collect::<Vec<_>>(),
-                }));
+                });
+                if let Some(map) = obj.as_object_mut() {
+                    if let Some(v) = bodies_json {
+                        map.insert("bodies".to_string(), v);
+                    }
+                    if let Some(v) = headers_json {
+                        map.insert("headers".to_string(), v);
+                    }
+                    if let Some(v) = auth_summary_json {
+                        map.insert("auth_summary".to_string(), v);
+                    }
+                }
+                results.push(obj);
             }
             SseEvent::Done(d) => {
                 total_matched = d.total_matched;
@@ -748,6 +1022,58 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
             "value": port.to_string(),
         }));
     }
+    for entry in &options.req_json {
+        if let Some((path, value)) = split_eq(entry) {
+            let field = if path.starts_with('$') {
+                format!(
+                    "req.body.{}",
+                    path.trim_start_matches('$').trim_start_matches('.')
+                )
+            } else {
+                format!("req.body.{}", path)
+            };
+            conditions.push(serde_json::json!({
+                "field": field,
+                "operator": "equals",
+                "value": value,
+            }));
+        }
+    }
+    for entry in &options.res_json {
+        if let Some((path, value)) = split_eq(entry) {
+            let field = if path.starts_with('$') {
+                format!(
+                    "res.body.{}",
+                    path.trim_start_matches('$').trim_start_matches('.')
+                )
+            } else {
+                format!("res.body.{}", path)
+            };
+            conditions.push(serde_json::json!({
+                "field": field,
+                "operator": "equals",
+                "value": value,
+            }));
+        }
+    }
+    for entry in &options.req_header_eq {
+        if let Some((name, value)) = split_eq(entry) {
+            conditions.push(serde_json::json!({
+                "field": format!("req.header.{}", name),
+                "operator": "equals",
+                "value": value,
+            }));
+        }
+    }
+    for entry in &options.res_header_eq {
+        if let Some((name, value)) = split_eq(entry) {
+            conditions.push(serde_json::json!({
+                "field": format!("res.header.{}", name),
+                "operator": "equals",
+                "value": value,
+            }));
+        }
+    }
     if !conditions.is_empty() {
         filters["conditions"] = serde_json::Value::Array(conditions);
     }
@@ -771,7 +1097,108 @@ fn build_search_request_body(options: &SearchOptions, cursor: Option<u64>) -> se
         body["max_results"] = serde_json::json!(mr);
     }
 
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut since_ms: Option<i64> = None;
+    let mut until_ms: Option<i64> = None;
+    if let Some(ref s) = options.latest {
+        if let Some(dur_ms) = parse_duration_ms(s) {
+            since_ms = Some(now_ms - dur_ms);
+        }
+    }
+    if let Some(ref s) = options.since {
+        if let Some(ts) = parse_time_arg(s, now_ms) {
+            since_ms = Some(ts);
+        }
+    }
+    if let Some(ref s) = options.until {
+        if let Some(ts) = parse_time_arg(s, now_ms) {
+            until_ms = Some(ts);
+        }
+    }
+    if since_ms.is_some() || until_ms.is_some() {
+        let mut tr = serde_json::json!({});
+        if let Some(v) = since_ms {
+            tr["since_ms"] = serde_json::json!(v);
+        }
+        if let Some(v) = until_ms {
+            tr["until_ms"] = serde_json::json!(v);
+        }
+        body["time_range"] = tr;
+    }
+
+    // Emit `include` block when any attach flag is set (or max_body is given).
+    // The admin API treats absent include as the default (no extras), so we only
+    // add the block when needed to keep the request body small for the common path.
+    if options.include_request_body
+        || options.include_response_body
+        || options.include_request_headers
+        || options.include_response_headers
+        || options.max_body.is_some()
+    {
+        let mut include = serde_json::json!({
+            "request_body": options.include_request_body,
+            "response_body": options.include_response_body,
+            "request_headers": options.include_request_headers,
+            "response_headers": options.include_response_headers,
+        });
+        if let Some(mb) = options.max_body {
+            include["max_body_bytes"] = serde_json::json!(mb);
+        }
+        body["include"] = include;
+    }
+
     body
+}
+
+fn split_eq(input: &str) -> Option<(&str, &str)> {
+    let (lhs, rhs) = input.split_once('=')?;
+    let lhs = lhs.trim();
+    let rhs = rhs.trim();
+    if lhs.is_empty() {
+        None
+    } else {
+        Some((lhs, rhs))
+    }
+}
+
+/// Parse a relative duration like "30s", "5m", "2h", "1d" into milliseconds.
+pub fn parse_duration_ms(input: &str) -> Option<i64> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let (num_part, unit_part) = s.split_at(
+        s.find(|c: char| !c.is_ascii_digit() && c != '-' && c != '+' && c != '.')
+            .unwrap_or(s.len()),
+    );
+    let n: f64 = num_part.parse().ok()?;
+    let mult: f64 = match unit_part.trim() {
+        "ms" => 1.0,
+        "s" | "" => 1000.0,
+        "m" => 60.0 * 1000.0,
+        "h" => 60.0 * 60.0 * 1000.0,
+        "d" => 24.0 * 60.0 * 60.0 * 1000.0,
+        "w" => 7.0 * 24.0 * 60.0 * 60.0 * 1000.0,
+        _ => return None,
+    };
+    Some((n * mult) as i64)
+}
+
+fn parse_time_arg(input: &str, now_ms: i64) -> Option<i64> {
+    let s = input.trim();
+    if s.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.timestamp_millis());
+    }
+    if let Ok(n) = s.parse::<i64>() {
+        return Some(n);
+    }
+    if let Some(dur_ms) = parse_duration_ms(s) {
+        return Some(now_ms - dur_ms);
+    }
+    None
 }
 
 fn highlight_keyword(text: &str, keyword: &str, use_color: bool) -> String {
@@ -2073,6 +2500,8 @@ mod tests {
         let item = SearchResultItem {
             record: sample_traffic_summary(),
             matches: Vec::new(),
+            bodies: None,
+            headers: None,
         };
         let (header, _preview) = build_match_summary(&item, "token");
         let header_debug = format!("{header:?}");
@@ -2095,6 +2524,8 @@ mod tests {
                     offset: 0,
                 },
             ],
+            bodies: None,
+            headers: None,
         };
         let (header, preview) = build_match_summary(&item, "a");
         let header_debug = format!("{header:?}");
@@ -2131,5 +2562,148 @@ mod tests {
         assert!(text.contains("\"foo\": 1"));
         assert!(text.contains("Response Body"));
         assert!(text.contains("line1"));
+    }
+
+    #[test]
+    fn parse_duration_ms_handles_units() {
+        assert_eq!(parse_duration_ms("30s"), Some(30_000));
+        assert_eq!(parse_duration_ms("5m"), Some(300_000));
+        assert_eq!(parse_duration_ms("2h"), Some(2 * 60 * 60 * 1000));
+        assert_eq!(parse_duration_ms("1d"), Some(24 * 60 * 60 * 1000));
+    }
+
+    #[test]
+    fn parse_duration_ms_default_unit_seconds() {
+        assert_eq!(parse_duration_ms("45"), Some(45_000));
+    }
+
+    #[test]
+    fn parse_duration_ms_rejects_unknown_unit() {
+        assert!(parse_duration_ms("5y").is_none());
+        assert!(parse_duration_ms("").is_none());
+        assert!(parse_duration_ms("abc").is_none());
+    }
+
+    #[test]
+    fn split_eq_basic() {
+        assert_eq!(split_eq("name=value"), Some(("name", "value")));
+        assert_eq!(split_eq("$.a.b=42"), Some(("$.a.b", "42")));
+        assert_eq!(split_eq("=missing"), None);
+        assert_eq!(split_eq("missing"), None);
+    }
+
+    #[test]
+    fn build_search_request_body_adds_jsonpath_and_header_conditions() {
+        let options = SearchOptions {
+            keyword: String::new(),
+            req_json: vec!["$.user.name=alice".to_string()],
+            res_json: vec!["$.data.errno=0".to_string()],
+            req_header_eq: vec!["X-Trace-Id=abc".to_string()],
+            res_header_eq: vec!["Set-Cookie=foo".to_string()],
+            ..SearchOptions::default()
+        };
+        let body = build_search_request_body(&options, None);
+        let conds = body["filters"]["conditions"]
+            .as_array()
+            .expect("conditions array");
+        let fields: Vec<&str> = conds
+            .iter()
+            .map(|c| c["field"].as_str().unwrap_or(""))
+            .collect();
+        assert!(fields.contains(&"req.body.user.name"));
+        assert!(fields.contains(&"res.body.data.errno"));
+        assert!(fields.contains(&"req.header.X-Trace-Id"));
+        assert!(fields.contains(&"res.header.Set-Cookie"));
+    }
+
+    #[test]
+    fn build_search_request_body_sets_time_range_from_latest() {
+        let options = SearchOptions {
+            keyword: String::new(),
+            latest: Some("5m".to_string()),
+            ..SearchOptions::default()
+        };
+        let body = build_search_request_body(&options, None);
+        let tr = &body["time_range"];
+        assert!(tr.is_object(), "expected time_range to be set, got {tr}");
+        assert!(tr["since_ms"].is_i64() || tr["since_ms"].is_u64());
+    }
+
+    #[test]
+    fn parse_include_tokens_basic_aliases() {
+        let (rb, sb, rh, sh) = parse_include_tokens(&[
+            "request-body".to_string(),
+            "response-body".to_string(),
+            "request-headers".to_string(),
+            "response-headers".to_string(),
+        ]);
+        assert!(rb && sb && rh && sh);
+    }
+
+    #[test]
+    fn parse_include_tokens_short_aliases() {
+        let (rb, sb, rh, sh) = parse_include_tokens(&[
+            "req-body".to_string(),
+            "res-body".to_string(),
+            "req-headers".to_string(),
+            "res-headers".to_string(),
+        ]);
+        assert!(rb && sb && rh && sh);
+    }
+
+    #[test]
+    fn parse_include_tokens_shortcuts() {
+        let (rb, sb, rh, sh) = parse_include_tokens(&["bodies".to_string()]);
+        assert!(rb && sb && !rh && !sh);
+        let (rb, sb, rh, sh) = parse_include_tokens(&["headers".to_string()]);
+        assert!(!rb && !sb && rh && sh);
+    }
+
+    #[test]
+    fn parse_include_tokens_ignores_unknown_and_empty() {
+        let (rb, sb, rh, sh) =
+            parse_include_tokens(&["mystery".to_string(), "".to_string(), "  ".to_string()]);
+        assert!(!rb && !sb && !rh && !sh);
+    }
+
+    #[test]
+    fn build_search_request_body_omits_include_when_all_default() {
+        let options = SearchOptions {
+            keyword: "x".to_string(),
+            ..SearchOptions::default()
+        };
+        let body = build_search_request_body(&options, None);
+        assert!(
+            body.get("include").is_none(),
+            "include block should be omitted when no flags set"
+        );
+    }
+
+    #[test]
+    fn build_search_request_body_emits_include_block_when_any_flag_set() {
+        let options = SearchOptions {
+            keyword: "x".to_string(),
+            include_response_body: true,
+            ..SearchOptions::default()
+        };
+        let body = build_search_request_body(&options, None);
+        let include = &body["include"];
+        assert!(include.is_object());
+        assert_eq!(include["response_body"], serde_json::json!(true));
+        assert_eq!(include["request_body"], serde_json::json!(false));
+        assert!(include.get("max_body_bytes").is_none());
+    }
+
+    #[test]
+    fn build_search_request_body_emits_include_block_for_max_body_only() {
+        let options = SearchOptions {
+            keyword: "x".to_string(),
+            max_body: Some(2048),
+            ..SearchOptions::default()
+        };
+        let body = build_search_request_body(&options, None);
+        let include = &body["include"];
+        assert!(include.is_object());
+        assert_eq!(include["max_body_bytes"], serde_json::json!(2048));
     }
 }

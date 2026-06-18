@@ -1,6 +1,10 @@
 use std::io::IsTerminal;
 use std::time::Duration;
 
+use bifrost_admin::redact::{
+    auth_summary_from_headers, default_options as default_redact_options, redact_body_text,
+    redact_headers, AuthSummary, RedactOptions,
+};
 use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 use serde::Deserialize;
@@ -61,6 +65,13 @@ pub struct TrafficGetOptions {
     pub request_body: bool,
     pub response_body: bool,
     pub format: OutputFormat,
+    /// Batch mode: when non-empty the CLI calls `/api/traffic/batch` once.
+    /// Mutually exclusive with `id` (clap enforces it).
+    pub ids: Vec<String>,
+    /// Batch mode: optional per-body cap forwarded as `max_body=...`.
+    pub max_body: Option<usize>,
+    pub show_secrets: bool,
+    pub extract_auth_summary: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -216,6 +227,12 @@ pub fn run_traffic_clear(port: u16, ids: Option<String>, yes: bool) -> Result<()
 }
 
 pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
+    // Batch mode: when `--ids a,b,c` is provided we hit /api/traffic/batch once
+    // and stream the ndjson response (or aggregate to JSON when --format json*).
+    if !options.ids.is_empty() {
+        return run_traffic_batch_get(&options);
+    }
+
     let mut id = options.id.clone();
     if id.is_none() {
         if !std::io::stdin().is_terminal() {
@@ -273,6 +290,9 @@ pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
         }
     }
 
+    let redact_opts = resolve_redact_options(options.show_secrets, options.extract_auth_summary);
+    apply_redact_to_detail(&mut output, &redact_opts);
+
     render_traffic_detail_value(&output, options.format, false)?;
 
     if !other_matches.is_empty() {
@@ -299,6 +319,113 @@ pub fn run_traffic_get(options: TrafficGetOptions) -> Result<()> {
     Ok(())
 }
 
+/// CLI batch handler: fetch many traffic records in a single HTTP round-trip via
+/// `GET /_bifrost/api/traffic/batch?ids=a,b,c[&include=...][&max_body=N]`.
+///
+/// Output format selection:
+///   - `ndjson`           -> stream server lines unchanged (one JSON object per line).
+///   - `json` / `json-pretty` -> aggregate into `{"results":[...]}` and pretty-print.
+///   - `table` / `compact` -> not meaningful for batch detail; falls back to `ndjson`.
+fn run_traffic_batch_get(options: &TrafficGetOptions) -> Result<()> {
+    // Build the query string. Reuse `urlencoding` to escape ids that may contain
+    // `/`, `+`, `%`, etc. (record ids in the wild may be UUID-like or seq-based).
+    let mut query = String::new();
+    let joined_ids = options
+        .ids
+        .iter()
+        .map(|s| urlencoding::encode(s).into_owned())
+        .collect::<Vec<_>>()
+        .join(",");
+    query.push_str("ids=");
+    query.push_str(&joined_ids);
+
+    let mut include_tokens: Vec<&str> = Vec::new();
+    if options.request_body {
+        include_tokens.push("request-body");
+    }
+    if options.response_body {
+        include_tokens.push("response-body");
+    }
+    // Headers are not exposed as separate CLI flags in this iteration; bodies
+    // are the primary use case. Users wanting headers can call the single-id
+    // endpoint (which always returns headers).
+    if !include_tokens.is_empty() {
+        query.push_str("&include=");
+        query.push_str(&urlencoding::encode(&include_tokens.join(",")));
+    }
+    if let Some(mb) = options.max_body {
+        query.push_str("&max_body=");
+        query.push_str(&mb.to_string());
+    }
+
+    let url = format!(
+        "http://127.0.0.1:{}/_bifrost/api/traffic/batch?{}",
+        options.port, query
+    );
+
+    // Bodies can be large; pick a generous timeout proportional to id count.
+    let timeout = Duration::from_secs(10 + (options.ids.len() as u64).min(120));
+    let resp = direct_agent(timeout)
+        .get(&url)
+        .call()
+        .map_err(|e| network_request_error(&url, &e))?;
+
+    if resp.status() != 200 {
+        let status = resp.status();
+        let body = resp.into_string().unwrap_or_default();
+        return Err(BifrostError::Network(format!(
+            "/api/traffic/batch returned status {}: {}",
+            status, body
+        )));
+    }
+
+    let body = resp
+        .into_string()
+        .map_err(|e| BifrostError::Network(format!("read batch response: {}", e)))?;
+
+    match options.format {
+        OutputFormat::JsonPretty => {
+            // Aggregate ndjson lines into a single JSON object for easy scripting.
+            let mut results = Vec::new();
+            for line in body.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let v: Value = serde_json::from_str(line)
+                    .map_err(|e| BifrostError::Parse(format!("batch line parse: {}", e)))?;
+                results.push(v);
+            }
+            let envelope = serde_json::json!({ "results": results });
+            println!("{}", serde_json::to_string_pretty(&envelope).unwrap());
+        }
+        OutputFormat::Json => {
+            let mut results = Vec::new();
+            for line in body.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let v: Value = serde_json::from_str(line)
+                    .map_err(|e| BifrostError::Parse(format!("batch line parse: {}", e)))?;
+                results.push(v);
+            }
+            let envelope = serde_json::json!({ "results": results });
+            println!("{}", envelope);
+        }
+        _ => {
+            // ndjson / table / compact -> emit server payload as-is (already ndjson).
+            // Trailing newline is preserved by the server; ensure exactly one.
+            print!("{}", body);
+            if !body.ends_with("\n") {
+                println!();
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub fn render_traffic_list_body(body: &str, format: OutputFormat, no_color: bool) -> Result<()> {
     match format {
         OutputFormat::Json => {
@@ -314,6 +441,10 @@ pub fn render_traffic_list_body(body: &str, format: OutputFormat, no_color: bool
         OutputFormat::Table | OutputFormat::Compact => {
             let (rows, meta) = parse_traffic_list_rows(body)?;
             print_traffic_rows(&rows, meta, format, no_color);
+            Ok(())
+        }
+        OutputFormat::Ndjson => {
+            println!("{}", body.trim());
             Ok(())
         }
     }
@@ -961,6 +1092,14 @@ pub fn render_traffic_detail_value(
             return Ok(());
         }
         OutputFormat::Table | OutputFormat::Compact => {}
+        OutputFormat::Ndjson => {
+            println!(
+                "{}",
+                serde_json::to_string(record)
+                    .map_err(|e| BifrostError::Parse(format!("serialize traffic json: {}", e)))?
+            );
+            return Ok(());
+        }
     }
 
     let use_color = !no_color && std::io::stdout().is_terminal();
@@ -1272,6 +1411,675 @@ fn print_body(body: &Value, use_color: bool) {
         }
     } else {
         println!("    {}", body);
+    }
+}
+
+pub struct TrafficAuthStatusOptions {
+    pub port: u16,
+    pub id: String,
+    pub format: OutputFormat,
+}
+
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+pub struct AuthSummaryView {
+    pub host: String,
+    pub has_jwt: bool,
+    pub has_cookie: bool,
+    pub jwt_exp_ms: Option<i64>,
+    pub jwt_user_id: Option<String>,
+    pub cookie_exp_ms: Option<i64>,
+    pub valid_at_ms: Option<i64>,
+    pub valid: Option<bool>,
+}
+
+pub fn run_traffic_auth_status(options: TrafficAuthStatusOptions) -> Result<()> {
+    let url = format!(
+        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/auth-status",
+        options.port,
+        urlencoding::encode(&options.id)
+    );
+
+    let resp = match direct_agent(Duration::from_secs(10)).get(&url).call() {
+        Ok(r) => r,
+        Err(ureq::Error::Status(404, _)) => {
+            return Err(BifrostError::NotFound(format!(
+                "Traffic record '{}' not found",
+                options.id
+            )));
+        }
+        Err(e) => return Err(network_request_error(&url, &e)),
+    };
+
+    let body = resp
+        .into_string()
+        .map_err(|e| BifrostError::Network(format!("Failed to read response: {}", e)))?;
+
+    let summary: AuthSummaryView =
+        serde_json::from_str(&body).map_err(|e| BifrostError::Parse(e.to_string()))?;
+
+    match options.format {
+        OutputFormat::Json | OutputFormat::JsonPretty => {
+            let s = if matches!(options.format, OutputFormat::JsonPretty) {
+                serde_json::to_string_pretty(&summary).unwrap()
+            } else {
+                serde_json::to_string(&summary).unwrap()
+            };
+            println!("{s}");
+        }
+        OutputFormat::Table | OutputFormat::Compact => {
+            print_auth_summary_human(&summary);
+        }
+        OutputFormat::Ndjson => {
+            let s = serde_json::to_string(&summary).unwrap();
+            println!("{s}");
+        }
+    }
+    Ok(())
+}
+
+fn print_auth_summary_human(s: &AuthSummaryView) {
+    println!(
+        "host: {}",
+        if s.host.is_empty() {
+            "(unknown)"
+        } else {
+            &s.host
+        }
+    );
+    let now = s.valid_at_ms.unwrap_or(0);
+
+    if s.has_jwt {
+        let user = s
+            .jwt_user_id
+            .as_deref()
+            .map(|u| format!("user_id={u}, "))
+            .unwrap_or_default();
+        let (exp_str, jwt_valid) = match s.jwt_exp_ms {
+            Some(exp) => (format_ts_iso(exp), Some(exp > now)),
+            None => ("unknown".to_string(), None),
+        };
+        let status = match jwt_valid {
+            Some(true) => "valid",
+            Some(false) => "EXPIRED",
+            None => "no-exp",
+        };
+        println!("jwt: present ({user}exp={exp_str}, {status})");
+    } else {
+        println!("jwt: absent");
+    }
+
+    if s.has_cookie {
+        let (exp_str, ck_valid) = match s.cookie_exp_ms {
+            Some(exp) => (format_ts_iso(exp), Some(exp > now)),
+            None => ("session-only".to_string(), None),
+        };
+        let status = match ck_valid {
+            Some(true) => "valid",
+            Some(false) => "EXPIRED",
+            None => "session",
+        };
+        println!("cookie: present (exp={exp_str}, {status})");
+    } else {
+        println!("cookie: absent");
+    }
+
+    let overall = match s.valid {
+        Some(true) => {
+            let earliest = [s.jwt_exp_ms, s.cookie_exp_ms].into_iter().flatten().min();
+            match earliest {
+                Some(exp) if exp > now => format!("valid for {}", format_duration_short(exp - now)),
+                _ => "valid".to_string(),
+            }
+        }
+        Some(false) => "EXPIRED".to_string(),
+        None => "unknown (no expiry info captured)".to_string(),
+    };
+    println!("overall: {overall}");
+}
+
+fn format_ts_iso(ms: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    match Utc.timestamp_millis_opt(ms).single() {
+        Some(dt) => dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        None => format!("{ms}ms"),
+    }
+}
+
+fn format_duration_short(ms: i64) -> String {
+    if ms <= 0 {
+        return "0s".to_string();
+    }
+    let mut secs = ms / 1000;
+    let days = secs / 86_400;
+    secs %= 86_400;
+    let hours = secs / 3_600;
+    secs %= 3_600;
+    let mins = secs / 60;
+    secs %= 60;
+    let mut out = String::new();
+    if days > 0 {
+        out.push_str(&format!("{days}d"));
+    }
+    if hours > 0 {
+        out.push_str(&format!("{hours}h"));
+    }
+    if mins > 0 {
+        out.push_str(&format!("{mins}m"));
+    }
+    if out.is_empty() || (secs > 0 && days == 0) {
+        out.push_str(&format!("{secs}s"));
+    }
+    out
+}
+
+#[cfg(test)]
+mod auth_status_tests {
+    use super::*;
+
+    #[test]
+    fn format_duration_short_handles_hours_and_minutes() {
+        assert_eq!(format_duration_short(0), "0s");
+        assert_eq!(format_duration_short(45_000), "45s");
+        assert_eq!(format_duration_short(3_600_000 + 60_000 * 23), "1h23m");
+        assert_eq!(format_duration_short(86_400_000 * 2), "2d");
+    }
+
+    #[test]
+    fn print_auth_summary_handles_all_states() {
+        // Just ensure no panic on representative inputs.
+        let s1 = AuthSummaryView {
+            host: "h".into(),
+            has_jwt: true,
+            has_cookie: true,
+            jwt_exp_ms: Some(9_999_999_999_000),
+            jwt_user_id: Some("u1".into()),
+            cookie_exp_ms: Some(9_999_999_999_000),
+            valid_at_ms: Some(1_700_000_000_000),
+            valid: Some(true),
+        };
+        print_auth_summary_human(&s1);
+        let s2 = AuthSummaryView {
+            host: "h".into(),
+            has_jwt: true,
+            has_cookie: false,
+            jwt_exp_ms: Some(1),
+            jwt_user_id: None,
+            cookie_exp_ms: None,
+            valid_at_ms: Some(1_700_000_000_000),
+            valid: Some(false),
+        };
+        print_auth_summary_human(&s2);
+        let s3 = AuthSummaryView {
+            host: "h".into(),
+            has_jwt: false,
+            has_cookie: false,
+            jwt_exp_ms: None,
+            jwt_user_id: None,
+            cookie_exp_ms: None,
+            valid_at_ms: Some(1_700_000_000_000),
+            valid: None,
+        };
+        print_auth_summary_human(&s3);
+    }
+}
+
+// =============================================================================
+// P2-6: traffic export / replay CLI commands
+// =============================================================================
+
+use std::fs;
+use std::path::PathBuf;
+
+pub struct TrafficExportOptions {
+    pub port: u16,
+    pub id: String,
+    pub as_format: String,
+    pub redact: bool,
+    pub output: Option<PathBuf>,
+}
+
+pub struct TrafficReplayOptions {
+    pub port: u16,
+    pub id: String,
+    pub patch: Vec<String>,
+    pub patch_json: Option<String>,
+    pub refresh_auth: bool,
+    pub timeout: String,
+    pub format: OutputFormat,
+}
+
+fn resolve_traffic_id(port: u16, id: &str) -> Result<String> {
+    // 数字后缀模式：纯数字按 sequence suffix 查；否则按 ID 原样
+    if id.chars().all(|c| c.is_ascii_digit()) && !id.is_empty() {
+        let r = find_id_by_sequence_suffix(port, id)?;
+        Ok(r.matched_id)
+    } else {
+        Ok(id.to_string())
+    }
+}
+
+pub fn run_traffic_export(opts: TrafficExportOptions) -> Result<()> {
+    let id = resolve_traffic_id(opts.port, &opts.id)?;
+    let url = format!(
+        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/export?format={}&redact={}",
+        opts.port, id, opts.as_format, opts.redact
+    );
+    let agent = direct_agent(Duration::from_secs(15));
+    let resp = agent
+        .get(&url)
+        .call()
+        .map_err(|e| network_request_error(&url, &e))?;
+    let body = resp
+        .into_string()
+        .map_err(|e| BifrostError::Network(format!("Failed to read export body: {e}")))?;
+    if let Some(path) = opts.output {
+        fs::write(&path, &body).map_err(BifrostError::Io)?;
+        eprintln!("wrote {}", path.display());
+    } else {
+        print!("{}", body);
+        if !body.ends_with('\n') {
+            println!();
+        }
+    }
+    Ok(())
+}
+
+/// 解析 "/a/b=value" 简写为 RFC 6902 replace op；如以 `+` 开头 (`/a/b+=v`) 解释为 add，
+/// 以 `-` 开头 (`-/a/b`) 解释为 remove。
+pub(crate) fn parse_patch_shorthand(input: &str) -> Result<serde_json::Value> {
+    let trimmed = input.trim();
+    if let Some(rest) = trimmed.strip_prefix('-') {
+        let path = rest.trim();
+        if !path.starts_with('/') {
+            return Err(BifrostError::Parse(format!(
+                "patch remove path must start with '/': {input}"
+            )));
+        }
+        return Ok(serde_json::json!({"op": "remove", "path": path}));
+    }
+    let (lhs, rhs) = trimmed.split_once('=').ok_or_else(|| {
+        BifrostError::Parse(format!(
+            "patch shorthand must be '/path=value' or '-/path': {input}"
+        ))
+    })?;
+    let (op, path) = if let Some(p) = lhs.strip_suffix('+') {
+        ("add", p)
+    } else {
+        ("replace", lhs)
+    };
+    if !path.starts_with('/') {
+        return Err(BifrostError::Parse(format!(
+            "patch path must start with '/': {input}"
+        )));
+    }
+    let value = parse_patch_rhs(rhs);
+    Ok(serde_json::json!({"op": op, "path": path, "value": value}))
+}
+
+fn parse_patch_rhs(rhs: &str) -> serde_json::Value {
+    let t = rhs.trim();
+    if t == "null" {
+        return serde_json::Value::Null;
+    }
+    if t == "true" {
+        return serde_json::Value::Bool(true);
+    }
+    if t == "false" {
+        return serde_json::Value::Bool(false);
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        return serde_json::Value::Number(n.into());
+    }
+    if let Ok(f) = t.parse::<f64>() {
+        if let Some(n) = serde_json::Number::from_f64(f) {
+            return serde_json::Value::Number(n);
+        }
+    }
+    // JSON 字面量：{...}、[...]、"..."
+    if (t.starts_with('{') && t.ends_with('}'))
+        || (t.starts_with('[') && t.ends_with(']'))
+        || (t.starts_with('"') && t.ends_with('"'))
+    {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(t) {
+            return v;
+        }
+    }
+    serde_json::Value::String(t.to_string())
+}
+
+fn parse_timeout(spec: &str) -> Result<u64> {
+    let s = spec.trim();
+    if let Some(rest) = s.strip_suffix("ms") {
+        rest.trim()
+            .parse::<u64>()
+            .map_err(|_| BifrostError::Parse(format!("invalid timeout: {spec}")))
+    } else if let Some(rest) = s.strip_suffix('s') {
+        let v: f64 = rest
+            .trim()
+            .parse()
+            .map_err(|_| BifrostError::Parse(format!("invalid timeout: {spec}")))?;
+        Ok((v * 1000.0) as u64)
+    } else {
+        s.parse::<u64>()
+            .map_err(|_| BifrostError::Parse(format!("invalid timeout: {spec}")))
+    }
+}
+
+pub fn run_traffic_replay(opts: TrafficReplayOptions) -> Result<()> {
+    let id = resolve_traffic_id(opts.port, &opts.id)?;
+
+    // 拼接 patch_json
+    let mut patch_ops: Vec<serde_json::Value> = Vec::new();
+    if let Some(raw) = opts.patch_json.as_ref() {
+        let v: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|e| BifrostError::Parse(format!("--patch-json invalid: {e}")))?;
+        match v {
+            serde_json::Value::Array(arr) => patch_ops.extend(arr),
+            other => patch_ops.push(other),
+        }
+    }
+    for p in &opts.patch {
+        patch_ops.push(parse_patch_shorthand(p)?);
+    }
+
+    let timeout_ms = parse_timeout(&opts.timeout)?;
+    let body_json = serde_json::json!({
+        "patch_json": patch_ops,
+        "refresh_auth_from": if opts.refresh_auth { Some("latest") } else { None },
+        "timeout_ms": timeout_ms,
+    });
+
+    let url = format!(
+        "http://127.0.0.1:{}/_bifrost/api/traffic/{}/replay",
+        opts.port, id
+    );
+    let agent = direct_agent(Duration::from_millis(timeout_ms.saturating_add(15_000)));
+    let resp = agent
+        .post(&url)
+        .set("Content-Type", "application/json")
+        .send_string(&serde_json::to_string(&body_json).unwrap())
+        .map_err(|e| network_request_error(&url, &e))?;
+    let body = resp
+        .into_string()
+        .map_err(|e| BifrostError::Network(format!("Failed to read replay body: {e}")))?;
+    let parsed: serde_json::Value = serde_json::from_str(&body)
+        .map_err(|e| BifrostError::Parse(format!("Invalid JSON response: {e}")))?;
+
+    match opts.format {
+        OutputFormat::Json => {
+            println!("{}", parsed);
+        }
+        OutputFormat::JsonPretty => {
+            println!("{}", serde_json::to_string_pretty(&parsed).unwrap());
+        }
+        _ => {
+            // human / table / compact: human-readable summary
+            render_replay_human(&parsed);
+        }
+    }
+    Ok(())
+}
+
+fn render_replay_human(parsed: &serde_json::Value) {
+    if parsed.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        let err = parsed
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        println!("replay failed: {err}");
+        return;
+    }
+    let data = match parsed.get("data") {
+        Some(d) => d,
+        None => {
+            println!("(no data)");
+            return;
+        }
+    };
+    let status = data.get("status").and_then(|v| v.as_u64()).unwrap_or(0);
+    let duration_ms = data
+        .get("duration_ms")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    println!("HTTP {status}  ({duration_ms} ms)");
+    if let Some(headers) = data.get("headers").and_then(|v| v.as_array()) {
+        for entry in headers {
+            if let Some(arr) = entry.as_array() {
+                if arr.len() == 2 {
+                    let k = arr[0].as_str().unwrap_or("");
+                    let v = arr[1].as_str().unwrap_or("");
+                    println!("{k}: {v}");
+                }
+            }
+        }
+    }
+    if let Some(body_b64) = data.get("body_b64").and_then(|v| v.as_str()) {
+        use base64::Engine as _;
+        match base64::engine::general_purpose::STANDARD.decode(body_b64) {
+            Ok(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(text) => {
+                    println!();
+                    println!("{}", text);
+                }
+                Err(_) => println!("\n<binary {} bytes>", bytes.len()),
+            },
+            Err(e) => println!("\n<base64 decode error: {e}>"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests_export_replay {
+    use super::*;
+
+    #[test]
+    fn parse_patch_shorthand_replace_string() {
+        let v = parse_patch_shorthand("/a/b=hello").unwrap();
+        assert_eq!(v["op"], "replace");
+        assert_eq!(v["path"], "/a/b");
+        assert_eq!(v["value"], "hello");
+    }
+
+    #[test]
+    fn parse_patch_shorthand_replace_number() {
+        let v = parse_patch_shorthand("/x=42").unwrap();
+        assert_eq!(v["op"], "replace");
+        assert_eq!(v["value"], 42);
+    }
+
+    #[test]
+    fn parse_patch_shorthand_replace_bool_null_float() {
+        assert_eq!(parse_patch_shorthand("/a=true").unwrap()["value"], true);
+        assert_eq!(parse_patch_shorthand("/a=false").unwrap()["value"], false);
+        assert!(parse_patch_shorthand("/a=null").unwrap()["value"].is_null());
+        let v = parse_patch_shorthand("/a=2.5").unwrap();
+        assert!((v["value"].as_f64().unwrap() - 2.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn parse_patch_shorthand_add_with_plus_suffix() {
+        let v = parse_patch_shorthand("/list/-+=1").unwrap();
+        assert_eq!(v["op"], "add");
+        assert_eq!(v["path"], "/list/-");
+        assert_eq!(v["value"], 1);
+    }
+
+    #[test]
+    fn parse_patch_shorthand_remove_with_minus_prefix() {
+        let v = parse_patch_shorthand("-/a/b").unwrap();
+        assert_eq!(v["op"], "remove");
+        assert_eq!(v["path"], "/a/b");
+        assert!(v.get("value").is_none());
+    }
+
+    #[test]
+    fn parse_patch_shorthand_json_literal() {
+        let v = parse_patch_shorthand(r#"/x={"k":1}"#).unwrap();
+        assert_eq!(v["op"], "replace");
+        assert_eq!(v["value"], serde_json::json!({"k":1}));
+    }
+
+    #[test]
+    fn parse_patch_shorthand_invalid_no_slash() {
+        let err = parse_patch_shorthand("nope=1").unwrap_err();
+        assert!(err.to_string().contains("path must start with '/'"));
+    }
+
+    #[test]
+    fn parse_patch_shorthand_invalid_no_equals() {
+        let err = parse_patch_shorthand("/just-a-path").unwrap_err();
+        assert!(err.to_string().contains("must be"));
+    }
+
+    #[test]
+    fn parse_timeout_seconds_and_ms() {
+        assert_eq!(parse_timeout("30s").unwrap(), 30_000);
+        assert_eq!(parse_timeout("1500ms").unwrap(), 1500);
+        assert_eq!(parse_timeout("500").unwrap(), 500);
+        assert_eq!(parse_timeout("1.5s").unwrap(), 1500);
+        assert!(parse_timeout("abc").is_err());
+    }
+}
+
+fn redact_env_disabled() -> bool {
+    match std::env::var("BIFROST_REDACT") {
+        Ok(v) => {
+            let lower = v.trim().to_ascii_lowercase();
+            matches!(lower.as_str(), "off" | "0" | "false" | "no")
+        }
+        Err(_) => false,
+    }
+}
+
+pub(crate) fn resolve_redact_options(
+    show_secrets: bool,
+    extract_auth_summary: bool,
+) -> RedactOptions {
+    let mut opts = default_redact_options();
+    if show_secrets || redact_env_disabled() {
+        opts.show_secrets = true;
+    }
+    opts.extract_auth_summary = extract_auth_summary;
+    opts
+}
+
+fn redact_headers_array(value: &mut Value, opts: &RedactOptions) {
+    if let Some(arr) = value.as_array_mut() {
+        let mut pairs: Vec<(String, String)> = arr
+            .iter()
+            .filter_map(|entry| {
+                let parts = entry.as_array()?;
+                let k = parts.first()?.as_str()?.to_string();
+                let v = parts.get(1)?.as_str()?.to_string();
+                Some((k, v))
+            })
+            .collect();
+        redact_headers(&mut pairs, opts);
+        for (idx, (k, v)) in pairs.into_iter().enumerate() {
+            if let Some(entry) = arr.get_mut(idx) {
+                *entry = Value::Array(vec![Value::String(k), Value::String(v)]);
+            }
+        }
+    }
+}
+
+fn headers_pairs(value: &Value) -> Vec<(String, String)> {
+    value
+        .as_array()
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|entry| {
+                    let parts = entry.as_array()?;
+                    let k = parts.first()?.as_str()?.to_string();
+                    let v = parts.get(1)?.as_str()?.to_string();
+                    Some((k, v))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn content_type_from_headers(value: Option<&Value>) -> Option<String> {
+    let arr = value?.as_array()?;
+    for entry in arr {
+        if let Some(parts) = entry.as_array() {
+            if let (Some(k), Some(v)) = (
+                parts.first().and_then(|v| v.as_str()),
+                parts.get(1).and_then(|v| v.as_str()),
+            ) {
+                if k.eq_ignore_ascii_case("content-type") {
+                    return Some(v.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn redact_body_value(value: &mut Value, content_type: Option<&str>, opts: &RedactOptions) {
+    if opts.show_secrets {
+        return;
+    }
+    // If the body has been parsed into a JSON object/array we can redact in
+    // place regardless of declared content type — the body is structurally JSON
+    // by construction.
+    if value.is_object() || value.is_array() {
+        let text = serde_json::to_string(value).unwrap_or_default();
+        let redacted = redact_body_text(Some("application/json"), &text, opts);
+        if let Ok(parsed) = serde_json::from_str::<Value>(&redacted) {
+            *value = parsed;
+        }
+        return;
+    }
+    if let Some(s) = value.as_str() {
+        let redacted = redact_body_text(content_type, s, opts);
+        *value = Value::String(redacted);
+    }
+}
+
+fn auth_summary_to_json(summary: &AuthSummary) -> Value {
+    serde_json::json!({
+        "has_jwt": summary.has_jwt,
+        "has_cookie": summary.has_cookie,
+        "jwt_user_id": summary.jwt_user_id,
+        "jwt_exp_unix": summary.jwt_exp_unix,
+        "cookie_names": summary.cookie_names,
+        "host": summary.host,
+    })
+}
+
+/// Apply header/body redaction to a fetched traffic detail JSON in place. Also
+/// appends an `auth_summary` block when requested.
+pub(crate) fn apply_redact_to_detail(record: &mut Value, opts: &RedactOptions) {
+    let req_ct = content_type_from_headers(record.get("request_headers"));
+    let res_ct = content_type_from_headers(record.get("response_headers"));
+
+    if let Some(headers) = record.get("request_headers") {
+        let req_pairs_for_summary = headers_pairs(headers);
+        if opts.extract_auth_summary {
+            let summary = auth_summary_from_headers(&req_pairs_for_summary);
+            if let Some(obj) = record.as_object_mut() {
+                obj.insert("auth_summary".to_string(), auth_summary_to_json(&summary));
+            }
+        }
+    }
+
+    for key in [
+        "request_headers",
+        "response_headers",
+        "original_request_headers",
+        "original_response_headers",
+    ] {
+        if let Some(v) = record.get_mut(key) {
+            redact_headers_array(v, opts);
+        }
+    }
+
+    if let Some(v) = record.get_mut("request_body") {
+        redact_body_value(v, req_ct.as_deref(), opts);
+    }
+    if let Some(v) = record.get_mut("response_body") {
+        redact_body_value(v, res_ct.as_deref(), opts);
     }
 }
 

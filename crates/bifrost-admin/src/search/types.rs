@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::traffic_db::TrafficSummaryCompact;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 pub struct SearchRequest {
     pub keyword: String,
 
@@ -16,6 +16,55 @@ pub struct SearchRequest {
     pub limit: Option<usize>,
     pub max_scan: Option<usize>,
     pub max_results: Option<usize>,
+
+    #[serde(default)]
+    pub time_range: Option<TimeRange>,
+
+    /// Optional per-result attachments (body/headers) requested by the client.
+    /// Kept off by default so existing callers continue to receive lean responses.
+    #[serde(default)]
+    pub include: SearchInclude,
+}
+
+/// Toggles for attaching bodies / headers to each `SearchResultItem`.
+///
+/// Backward compatible: when no toggles are set the engine skips body/header
+/// hydration entirely. `max_body_bytes` defaults to 65536 (64 KiB) per body and
+/// applies independently to request and response bodies.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct SearchInclude {
+    #[serde(default)]
+    pub request_body: bool,
+    #[serde(default)]
+    pub response_body: bool,
+    #[serde(default)]
+    pub request_headers: bool,
+    #[serde(default)]
+    pub response_headers: bool,
+    /// Maximum bytes returned per body; missing means use the engine default.
+    #[serde(default)]
+    pub max_body_bytes: Option<usize>,
+}
+
+impl SearchInclude {
+    pub const DEFAULT_MAX_BODY_BYTES: usize = 64 * 1024;
+
+    /// True when at least one body/header attachment is requested.
+    pub fn any(&self) -> bool {
+        self.request_body || self.response_body || self.request_headers || self.response_headers
+    }
+
+    pub fn body_limit(&self) -> usize {
+        self.max_body_bytes.unwrap_or(Self::DEFAULT_MAX_BODY_BYTES)
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct TimeRange {
+    #[serde(default)]
+    pub since_ms: Option<i64>,
+    #[serde(default)]
+    pub until_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -136,12 +185,55 @@ pub struct SearchResponse {
     pub next_cursor: Option<u64>,
     pub has_more: bool,
     pub search_id: String,
+    #[serde(default)]
+    pub searched_range: SearchedRange,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct SearchedRange {
+    pub oldest_ts_ms: Option<i64>,
+    pub newest_ts_ms: Option<i64>,
+    pub scanned_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SearchResultItem {
     pub record: TrafficSummaryCompact,
     pub matches: Vec<MatchLocation>,
+    /// Bodies attached when `SearchInclude::{request_body,response_body}` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bodies: Option<BodiesPayload>,
+    /// Headers attached when `SearchInclude::{request_headers,response_headers}` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HeadersPayload>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BodiesPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request: Option<BodyChunk>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response: Option<BodyChunk>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BodyChunk {
+    /// Base64 (STANDARD) encoded bytes — binary-safe transport.
+    pub bytes_b64: String,
+    /// Original (pre-truncation) size in bytes, or post-truncation if unknown.
+    pub size: usize,
+    /// True when bytes were truncated to `max_body_bytes`.
+    pub truncated: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct HeadersPayload {
+    #[serde(default)]
+    pub request: Vec<(String, String)>,
+    #[serde(default)]
+    pub response: Vec<(String, String)>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -149,4 +241,40 @@ pub struct MatchLocation {
     pub field: String,
     pub preview: String,
     pub offset: usize,
+}
+
+#[cfg(test)]
+mod include_serde_tests {
+    use super::*;
+
+    #[test]
+    fn search_request_deserializes_without_include_field() {
+        // Legacy callers that predate the include block must still work.
+        let json = serde_json::json!({
+            "keyword": "foo",
+            "scope": {"all": true},
+            "filters": {},
+            "cursor": null,
+            "limit": 10,
+            "max_scan": null,
+            "max_results": null,
+            "time_range": null
+        });
+        let req: SearchRequest = serde_json::from_value(json).expect("deserialize");
+        assert!(!req.include.any());
+        assert_eq!(
+            req.include.body_limit(),
+            SearchInclude::DEFAULT_MAX_BODY_BYTES
+        );
+    }
+
+    #[test]
+    fn search_include_deserializes_partial_fields() {
+        let json = serde_json::json!({"response_body": true, "max_body_bytes": 1024});
+        let inc: SearchInclude = serde_json::from_value(json).expect("deserialize");
+        assert!(inc.response_body);
+        assert!(!inc.request_body);
+        assert_eq!(inc.body_limit(), 1024);
+        assert!(inc.any());
+    }
 }

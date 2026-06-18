@@ -1582,6 +1582,76 @@ impl PushManager {
             self.unregister_client(client_id);
         }
     }
+    /// Wait for a single new traffic record matching `matcher` (capture-wait).
+    ///
+    /// Subscribes to the traffic store event broadcast and resolves on the
+    /// first incoming `TrafficStoreEvent::Inserted` whose compact summary
+    /// passes `matcher`. Returns `CaptureWaitOutcome::matched = None` if no
+    /// matching record arrives within `timeout`.
+    ///
+    /// This is an additive API and does not interact with the existing
+    /// push-broadcast loop. Multiple concurrent `subscribe_once` calls are
+    /// supported because `traffic_db_store.subscribe()` is a multi-consumer
+    /// broadcast channel.
+    pub async fn subscribe_once<F>(&self, matcher: F, timeout: Duration) -> CaptureWaitOutcome
+    where
+        F: Fn(&TrafficSummaryCompact) -> bool + Send + Sync + 'static,
+    {
+        let Some(db_store) = self.state.traffic_db_store.clone() else {
+            return CaptureWaitOutcome {
+                matched: None,
+                scanned: 0,
+            };
+        };
+
+        let scanned = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let scanned_for_task = scanned.clone();
+        let (tx, rx) = tokio::sync::oneshot::channel::<TrafficSummaryCompact>();
+
+        let task = tokio::spawn(async move {
+            let mut receiver = db_store.subscribe();
+            let mut tx = Some(tx);
+            loop {
+                match receiver.recv().await {
+                    Ok(TrafficStoreEvent::Inserted(record)) => {
+                        let compact = TrafficSummaryCompact::from_record(&record);
+                        scanned_for_task.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if matcher(&compact) {
+                            if let Some(sender) = tx.take() {
+                                let _ = sender.send(compact);
+                            }
+                            return;
+                        }
+                    }
+                    Ok(TrafficStoreEvent::Updated(_)) => {
+                        // capture-wait only fires on freshly inserted records
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                }
+            }
+        });
+
+        let outcome = match tokio::time::timeout(timeout, rx).await {
+            Ok(Ok(record)) => CaptureWaitOutcome {
+                matched: Some(record),
+                scanned: scanned.load(std::sync::atomic::Ordering::Relaxed),
+            },
+            Ok(Err(_)) | Err(_) => CaptureWaitOutcome {
+                matched: None,
+                scanned: scanned.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        };
+
+        task.abort();
+        outcome
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct CaptureWaitOutcome {
+    pub matched: Option<TrafficSummaryCompact>,
+    pub scanned: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2497,8 +2567,10 @@ mod tests {
 mod coverage_boost {
     use super::*;
     use crate::test_support::TestAdminState;
-    use crate::AdminState;
+    use crate::{AdminState, TrafficDbStore, TrafficRecord};
     use std::sync::Arc;
+    use tempfile::TempDir;
+    use tokio::time::{sleep, timeout, Duration};
     // wiremock::MockServer is not available as a dev-dependency in this crate.
 
     fn make_minimal_manager() -> PushManager {
@@ -2997,5 +3069,109 @@ mod coverage_boost {
         // but this crate does not include wiremock as a dev-dependency.
         // Keep this test to document the intent while remaining a no-op.
         assert!(true);
+    }
+
+    #[tokio::test]
+    async fn subscribe_once_returns_matching_record() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(19920).with_traffic_db_store_shared(store.clone()));
+        let manager = Arc::new(PushManager::new(state));
+
+        let manager_clone = manager.clone();
+        let waiter = tokio::spawn(async move {
+            manager_clone
+                .subscribe_once(
+                    |c| c.h.contains("bits.bytedance.net") && c.m == "POST",
+                    Duration::from_secs(5),
+                )
+                .await
+        });
+
+        // Let the subscriber subscribe before publishing.
+        sleep(Duration::from_millis(50)).await;
+
+        let mut not_matching = TrafficRecord::new(
+            "cap-1".to_string(),
+            "GET".to_string(),
+            "http://example.test/foo".to_string(),
+        );
+        not_matching.status = 200;
+        store.record(not_matching);
+
+        sleep(Duration::from_millis(50)).await;
+
+        let mut matching = TrafficRecord::new(
+            "cap-2".to_string(),
+            "POST".to_string(),
+            "http://bits.bytedance.net/api/widget".to_string(),
+        );
+        matching.status = 200;
+        store.record(matching);
+
+        let outcome = timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter did not complete")
+            .expect("waiter task panicked");
+
+        let matched = outcome.matched.expect("expected a match");
+        assert_eq!(matched.id, "cap-2");
+        assert!(outcome.scanned >= 2);
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn subscribe_once_times_out_when_no_match() {
+        let dir = TempDir::new().unwrap();
+        let store = Arc::new(TrafficDbStore::new(dir.path().to_path_buf(), 100, 0, None).unwrap());
+        let state = Arc::new(AdminState::new(19921).with_traffic_db_store_shared(store.clone()));
+        let manager = Arc::new(PushManager::new(state));
+
+        let manager_clone = manager.clone();
+        let waiter = tokio::spawn(async move {
+            manager_clone
+                .subscribe_once(|_| false, Duration::from_millis(200))
+                .await
+        });
+
+        sleep(Duration::from_millis(50)).await;
+
+        let mut record = TrafficRecord::new(
+            "cap-timeout-1".to_string(),
+            "GET".to_string(),
+            "http://example.test/whatever".to_string(),
+        );
+        record.status = 200;
+        store.record(record);
+
+        let outcome = timeout(Duration::from_secs(2), waiter)
+            .await
+            .expect("waiter did not complete")
+            .expect("waiter task panicked");
+
+        assert!(
+            outcome.matched.is_none(),
+            "should not match when matcher returns false"
+        );
+        assert!(
+            outcome.scanned >= 1,
+            "scanned counter should reflect evaluated record"
+        );
+        drop(dir);
+    }
+
+    #[tokio::test]
+    async fn subscribe_once_without_traffic_store_returns_none_immediately() {
+        // Build an AdminState that has no traffic store, then ensure the call
+        // does not block.
+        let manager = make_minimal_manager();
+        let outcome = timeout(
+            Duration::from_secs(1),
+            manager.subscribe_once(|_| true, Duration::from_secs(60)),
+        )
+        .await
+        .expect("subscribe_once should return immediately when no traffic store");
+        assert!(outcome.matched.is_none());
+        assert_eq!(outcome.scanned, 0);
     }
 }

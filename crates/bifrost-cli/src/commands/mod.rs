@@ -5,6 +5,7 @@ mod asr_tui;
 mod bifrost_file;
 mod ca;
 mod caller_stream_frame;
+mod capture;
 mod completions;
 pub(crate) mod config;
 mod group;
@@ -45,21 +46,24 @@ use tracing::debug;
 pub use admin::*;
 pub use asr::handle_ai_command;
 pub use ca::*;
+pub use capture::{parse_duration, run_capture_wait, CaptureOutputFormat, CaptureWaitOptions};
 pub use config::handle_config_command;
 pub use group::handle_group_command;
 pub use install_skill::handle_install_skill;
 pub use restart::{run_restart, RestartOptions};
 pub use rule::*;
 pub use script::*;
-pub use search::{run_search, OutputFormat, SearchOptions};
+pub use search::{parse_include_tokens, run_search, OutputFormat, SearchOptions};
 pub use start::*;
 pub use status::*;
 pub use status_tui::*;
 pub use stop::*;
 pub use system_proxy::*;
 pub use traffic::{
-    render_traffic_detail_body, render_traffic_list_body, run_traffic_clear, run_traffic_get,
-    run_traffic_list, TrafficGetOptions, TrafficListOptions,
+    render_traffic_detail_body, render_traffic_list_body, run_traffic_auth_status,
+    run_traffic_clear, run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
+    TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
+    TrafficReplayOptions,
 };
 pub use update_check::*;
 pub use upgrade::*;
