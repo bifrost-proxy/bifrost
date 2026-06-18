@@ -271,15 +271,23 @@ impl TeeBodyDropGuard {
             });
 
             if self.monitor_connection {
-                state.connection_monitor.set_connection_closed(
+                let socket_status = state.connection_monitor.close_connection(
                     &self.record_id,
                     None,
                     None,
                     state.frame_store.as_ref(),
                     state.ws_payload_store.as_ref(),
                 );
+
+                if let Some(socket_status) = socket_status {
+                    let record_id = self.record_id.clone();
+                    state.update_traffic_by_id(&record_id, move |record| {
+                        record.socket_status = Some(socket_status.clone());
+                    });
+                }
             }
         }
+        self.finished = true;
     }
 }
 

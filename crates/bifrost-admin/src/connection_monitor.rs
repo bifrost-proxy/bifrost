@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bifrost_core::text::floor_char_boundary;
 use parking_lot::RwLock;
@@ -139,6 +139,8 @@ impl WebSocketFrameRecord {
 }
 const DEFAULT_MAX_FRAMES_PER_CONNECTION: usize = 1000;
 const BROADCAST_CHANNEL_SIZE: usize = 256;
+const CLOSED_CONNECTION_RETENTION: Duration = Duration::from_secs(30);
+const CONNECTION_CLEANUP_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone)]
 pub struct FrameEvent {
@@ -157,6 +159,7 @@ pub struct ConnectionFrameStore {
     max_frames: usize,
     frame_id_counter: AtomicU64,
     status: SocketStatus,
+    closed_at: Option<Instant>,
     is_monitored: bool,
     is_tunnel: bool, // 标记是否为隧道连接
     tx: broadcast::Sender<FrameEvent>,
@@ -171,6 +174,7 @@ impl ConnectionFrameStore {
             max_frames,
             frame_id_counter: AtomicU64::new(0),
             status: SocketStatus::default(),
+            closed_at: None,
             is_monitored: false,
             is_tunnel: false,
             tx,
@@ -220,6 +224,7 @@ impl ConnectionFrameStore {
         self.status.is_open = false;
         self.status.close_code = code;
         self.status.close_reason = reason;
+        self.closed_at = Some(Instant::now());
     }
 }
 
@@ -233,6 +238,8 @@ pub struct ConnectionMonitor {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ConnectionMonitorMemoryStats {
     pub connection_count: usize,
+    pub open_connection_count: usize,
+    pub closed_connection_count: usize,
     pub tunnel_connection_count: usize,
     pub total_frames_in_memory: usize,
     pub total_preview_bytes: usize,
@@ -765,8 +772,21 @@ impl ConnectionMonitor {
     }
 
     pub fn cleanup_closed_connections(&self) {
+        self.cleanup_closed_connections_older_than(CLOSED_CONNECTION_RETENTION);
+    }
+
+    fn cleanup_closed_connections_older_than(&self, retention: Duration) {
+        let now = Instant::now();
         let mut connections = self.connections.write();
-        connections.retain(|_, store| store.status.is_open);
+        connections.retain(|_, store| {
+            if store.status.is_open || store.is_monitored {
+                return true;
+            }
+
+            store
+                .closed_at
+                .is_none_or(|closed_at| now.duration_since(closed_at) < retention)
+        });
     }
 
     pub fn clear(&self) {
@@ -787,6 +807,11 @@ impl ConnectionMonitor {
         };
 
         for (_id, store) in connections.iter() {
+            if store.status.is_open {
+                stats.open_connection_count += 1;
+            } else {
+                stats.closed_connection_count += 1;
+            }
             if store.is_tunnel {
                 stats.tunnel_connection_count += 1;
             }
@@ -841,7 +866,7 @@ pub fn start_connection_cleanup_task(
     monitor: SharedConnectionMonitor,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let mut interval = tokio::time::interval(CONNECTION_CLEANUP_INTERVAL);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
@@ -987,5 +1012,37 @@ mod tests {
         assert!(!status.is_open);
         assert_eq!(status.close_code, Some(1000));
         assert_eq!(status.close_reason, Some("Normal closure".to_string()));
+    }
+
+    #[test]
+    fn cleanup_closed_connections_respects_retention_and_monitoring() {
+        let monitor = ConnectionMonitor::new();
+        monitor.register_connection("closed");
+        monitor.register_connection("monitored");
+        monitor.start_monitoring("monitored");
+
+        monitor.set_connection_closed("closed", None, None, None, None);
+        monitor.set_connection_closed("monitored", None, None, None, None);
+
+        monitor.cleanup_closed_connections_older_than(Duration::from_secs(30));
+        assert!(monitor.get_status("closed").is_some());
+        assert!(monitor.get_status("monitored").is_some());
+
+        monitor.cleanup_closed_connections_older_than(Duration::ZERO);
+        assert!(monitor.get_status("closed").is_none());
+        assert!(monitor.get_status("monitored").is_some());
+    }
+
+    #[test]
+    fn memory_stats_counts_open_and_closed_connections() {
+        let monitor = ConnectionMonitor::new();
+        monitor.register_connection("open");
+        monitor.register_connection("closed");
+        monitor.set_connection_closed("closed", None, None, None, None);
+
+        let stats = monitor.memory_stats();
+        assert_eq!(stats.connection_count, 2);
+        assert_eq!(stats.open_connection_count, 1);
+        assert_eq!(stats.closed_connection_count, 1);
     }
 }

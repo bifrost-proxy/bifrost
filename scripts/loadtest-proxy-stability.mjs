@@ -14,6 +14,7 @@ const repoRoot = path.resolve(__dirname, "..");
 const proxyPort = Number(process.env.BIFROST_PROXY_PORT || "9900");
 const upstreamPort = Number(process.env.BIFROST_UPSTREAM_PORT || "18080");
 const upstreamHttpsPort = Number(process.env.BIFROST_UPSTREAM_HTTPS_PORT || "18443");
+const bifrostBin = process.env.BIFROST_BIN || "./target/debug/bifrost";
 const useExistingProxy = process.env.LOADTEST_USE_EXISTING_PROXY === "1";
 const proxyUrl = `http://127.0.0.1:${proxyPort}`;
 const apiBase = `${proxyUrl}/_bifrost/api`;
@@ -99,6 +100,51 @@ function sleep(ms) {
 
 async function ensureDir(dir) {
   await fs.mkdir(dir, { recursive: true });
+}
+
+function assertTcpPortFree(port, host = "127.0.0.1") {
+  return new Promise((resolve, reject) => {
+    const lsof = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" });
+    if (lsof.status === 0 && lsof.stdout.trim()) {
+      reject(new Error(`TCP port ${host}:${port} is not available:\n${lsof.stdout.trim()}`));
+      return;
+    }
+    const server = net.createServer();
+    server.once("error", (error) => {
+      reject(new Error(`TCP port ${host}:${port} is not available: ${error.message}`));
+    });
+    server.listen(port, host, () => {
+      server.close(resolve);
+    });
+  });
+}
+
+function listeningPids(port) {
+  const result = spawnSync("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) {
+    return [];
+  }
+  return result.stdout
+    .split("\n")
+    .filter((line) => line.startsWith("p"))
+    .map((line) => Number(line.slice(1)))
+    .filter(Number.isFinite);
+}
+
+function assertProxyOwnedByChild(port, bifrost) {
+  if (!bifrost) {
+    return;
+  }
+  const pids = listeningPids(port);
+  if (!pids.includes(bifrost.pid)) {
+    throw new Error(
+      `Proxy readiness check reached port ${port}, but listener pids ${JSON.stringify(
+        pids,
+      )} do not include started Bifrost pid ${bifrost.pid}`,
+    );
+  }
 }
 
 function onceCallback(callback) {
@@ -362,24 +408,38 @@ async function startHttpsUpstreamServer() {
 
 function startBifrost(logPath) {
   return spawn(
-    "./target/debug/bifrost",
-    ["start", "--host", "127.0.0.1", "--port", String(proxyPort), "--skip-cert-check"],
+    bifrostBin,
+    [
+      "start",
+      "--host",
+      "127.0.0.1",
+      "--port",
+      String(proxyPort),
+      "--skip-cert-check",
+      "--no-system-proxy",
+    ],
     {
       cwd: repoRoot,
       env: {
         ...process.env,
         BIFROST_DATA_DIR: dataDir,
+        BIFROST_DISABLE_TRAY: "1",
+        BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],
     },
   );
 }
 
-async function waitForProxyReady(timeoutMs = 30000) {
+async function waitForProxyReady(bifrost, timeoutMs = 30000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (bifrost && bifrost.exitCode !== null) {
+      throw new Error(`Bifrost exited before readiness check passed (exit=${bifrost.exitCode})`);
+    }
     try {
       await fetchJson(`${apiBase}/system/overview`);
+      assertProxyOwnedByChild(proxyPort, bifrost);
       return;
     } catch {
       await sleep(500);
@@ -573,6 +633,15 @@ function summarizeWindow(samples, name, startTs, endTs) {
   const frameSeries = windowSamples.map(
     (sample) => sample.memory.connections.ws_monitor.total_frames_in_memory,
   );
+  const wsConnectionSeries = windowSamples.map(
+    (sample) => sample.memory.connections.ws_monitor.connection_count || 0,
+  );
+  const wsOpenConnectionSeries = windowSamples.map(
+    (sample) => sample.memory.connections.ws_monitor.open_connection_count || 0,
+  );
+  const wsClosedConnectionSeries = windowSamples.map(
+    (sample) => sample.memory.connections.ws_monitor.closed_connection_count || 0,
+  );
   const recentCacheSeries = windowSamples.map(
     (sample) => sample.memory.traffic_db?.recent_cache?.len || 0,
   );
@@ -599,6 +668,18 @@ function summarizeWindow(samples, name, startTs, endTs) {
       max: Math.max(...frameSeries, 0),
       end: frameSeries.at(-1) || 0,
     },
+    wsConnections: {
+      max: Math.max(...wsConnectionSeries, 0),
+      end: wsConnectionSeries.at(-1) || 0,
+    },
+    wsOpenConnections: {
+      max: Math.max(...wsOpenConnectionSeries, 0),
+      end: wsOpenConnectionSeries.at(-1) || 0,
+    },
+    wsClosedConnections: {
+      max: Math.max(...wsClosedConnectionSeries, 0),
+      end: wsClosedConnectionSeries.at(-1) || 0,
+    },
     recentCacheLen: {
       max: Math.max(...recentCacheSeries, 0),
       end: recentCacheSeries.at(-1) || 0,
@@ -611,6 +692,9 @@ async function main() {
   await ensureDir(dataDir);
 
   const logPath = path.join(reportDir, `proxy-stability-${runId}.log`);
+  if (!useExistingProxy) {
+    await assertTcpPortFree(proxyPort);
+  }
   const upstreamServer = await startUpstreamServer();
   const httpsUpstreamServer = await startHttpsUpstreamServer();
   const bifrost = useExistingProxy ? null : startBifrost(logPath);
@@ -620,7 +704,7 @@ async function main() {
   bifrost?.stderr?.on("data", (chunk) => logChunks.push(chunk));
 
   try {
-    await waitForProxyReady();
+    await waitForProxyReady(bifrost);
 
     const samples = [];
     let samplerStopped = false;
@@ -817,6 +901,9 @@ async function main() {
         cooldownRssMiB: cooldownSummary?.rssMiB.end || 0,
         peakCpuPercent,
         cooldownRecentCacheLen: cooldownSummary?.recentCacheLen.end || 0,
+        cooldownWsConnectionCount: cooldownSummary?.wsConnections.end || 0,
+        cooldownWsOpenConnectionCount: cooldownSummary?.wsOpenConnections.end || 0,
+        cooldownWsClosedConnectionCount: cooldownSummary?.wsClosedConnections.end || 0,
         cooldownWsFramesInMemory: cooldownSummary?.wsFramesInMemory.end || 0,
       },
     };
