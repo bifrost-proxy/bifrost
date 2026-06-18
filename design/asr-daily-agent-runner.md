@@ -470,6 +470,7 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 **超时与失败诊断**：
 - Daily Agent 外层仍使用 `timeout_ms` 作为最终运行上限。
 - ChatGPT Web adapter 的内部 `timeout_secs` 会被下压到 `timeout_ms - 30s`（至少 1 秒），且不会放大用户在 runner 上配置的更短 timeout；这样浏览器 handoff、最终回复等待或页面扫描应先由 Web adapter 失败，外层 Daily timeout 只作为兜底。
+- 如果 `stream_handoff` 后无法及时取得后端 conversation detail，DOM fallback 只能作为保守兜底：长日报正文超过 12KB 时必须等待至少 30 秒文本长度稳定后才可返回，避免模型在长输出中短暂停顿时被误判为完成；页面出现 `连接已中断` / `正在等待完整回复` 等状态时必须视为仍在生成，不能把该状态或当时的半截正文保存为最终 report。
 - `ExternalCliRuntime` 必须把 ChatGPT Web 普通失败持久化为 failed run，而不是直接返回错误；run 目录必须包含 `result.json`、`cli.stderr.log`、`normalized_events.jsonl`、`last_message.md` 和必要的 `failure_diagnostics.json` 路径元数据。
 - 失败状态会返回到 Daily Agent 并记录到当前 Agent 的 `last_status`、`last_error` 和 `last_run_id`；不更新 processed state，也不写入缺失或未通过门禁的 report。
 - ChatGPT Web 登录浏览器关闭或 CDP 断开时，如果本轮已经捕获并写入有效 `auth_state.json`，后端会重新读取该 auth state 并恢复为登录成功，避免“登录已捕获但窗口关闭被误判失败”的竞态。
@@ -1191,10 +1192,12 @@ build_daily_agent_change_plan(task, trigger, date, force)
 
 3. **ChatGPT Web 大输入投递**：ChatGPT Web composer 超过 120 字符时必须走浏览器原生剪贴板 + 原生粘贴快捷键路径，避免把完整正文嵌入 `Input.insertText` 导致 CDP 卡死；不要再按固定字符数人为分片。该路径通过 CDP 写入当前浏览器上下文的 `navigator.clipboard`，再触发 `Meta+V` / `Ctrl+V`，不依赖系统剪贴板或用户授权弹窗。粘贴大文本后 ChatGPT 可能把内容上传为文件，此时输入框没有可采样正文是正常状态；adapter 不再对 composer 文本做 head/tail/长度采样校验，只轮询发送按钮是否变为可发送状态，按钮可用后立即继续；超时时间只是最大上限，用于覆盖长文档上传/解析耗时。
 
-4. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
+4. **ChatGPT Web 长输出完成判定**：ChatGPT Web DOM fallback 不得只凭“stop button 消失 + 3 秒文本长度不变”结束长日报；超过 12KB 的输出至少等待 30 秒稳定，且 `连接已中断` / `正在等待完整回复` 这类页面状态必须进入 in-progress 分支继续等待。
 
-5. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
+5. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
 
-6. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。
+6. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
 
-7. **Terminology / TERMS.md**（2026-06 新增）：`AsrDailyAgentConfig.terminology` 保存用户配置的专有名词列表；`ensure_asr_daily_workspace` 通过 `sync_daily_agent_terms_file` 写入 `.daily/agents/<agent_id>/TERMS.md`，并由 `ensure_daily_agent_terms_reference` 在 `AGENTS.md` 中维护一个 managed reference block。Daily Agent prompt（`daily_agent_prompt.rs`）会在 TERMS 存在时把内容嵌入提示词，让 Runner 在写 report 前应用术语纠错。
+7. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。
+
+8. **Terminology / TERMS.md**（2026-06 新增）：`AsrDailyAgentConfig.terminology` 保存用户配置的专有名词列表；`ensure_asr_daily_workspace` 通过 `sync_daily_agent_terms_file` 写入 `.daily/agents/<agent_id>/TERMS.md`，并由 `ensure_daily_agent_terms_reference` 在 `AGENTS.md` 中维护一个 managed reference block。Daily Agent prompt（`daily_agent_prompt.rs`）会在 TERMS 存在时把内容嵌入提示词，让 Runner 在写 report 前应用术语纠错。

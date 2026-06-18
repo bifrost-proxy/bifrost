@@ -351,11 +351,7 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                let required_stable_for = if dom_text_len < 512 {
-                    std::time::Duration::from_secs(8)
-                } else {
-                    std::time::Duration::from_secs(3)
-                };
+                let required_stable_for = required_dom_stable_for(dom_text_len);
                 let now = tokio::time::Instant::now();
                 let stable_since = match ready_candidate {
                     Some((previous_len, since)) if previous_len == dom_text_len => since,
@@ -1732,6 +1728,16 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             normalizedStatusText.length === 0 ||
             /^(最后微调一下|正在微调|Finishing up|Making final adjustments)\\.?$/i
               .test(normalizedStatusText);
+          const bodyText = (document.body && document.body.innerText) || '';
+          const lowerBodyText = bodyText.toLowerCase();
+          const waitingForCompleteReply =
+            (bodyText.includes('连接已中断') && bodyText.includes('等待完整回复')) ||
+            (
+              lowerBodyText.includes('connection') &&
+              lowerBodyText.includes('interrupted') &&
+              lowerBodyText.includes('waiting') &&
+              (lowerBodyText.includes('complete reply') || lowerBodyText.includes('complete response'))
+            );
 
           // Extract images (deduplicate by src)
           const images = [];
@@ -1758,10 +1764,11 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             found: true,
             turnId: turnId,
             turnCount: allTurns.length,
-            isStreaming: isStreaming || imageGenBusy || stopButtonVisible || (pendingOutputStatusText && images.length === 0),
+            isStreaming: isStreaming || imageGenBusy || stopButtonVisible || waitingForCompleteReply || (pendingOutputStatusText && images.length === 0),
             streamingSignal: isStreaming,
             imageGenBusy,
             stopButtonVisible,
+            waitingForCompleteReply,
             composerVisible,
             composerDisabled,
             composerTextLength,
@@ -2159,6 +2166,17 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     !normalized.is_empty() && !dom_text_is_pending_status(normalized)
 }
 
+fn required_dom_stable_for(text_len: usize) -> std::time::Duration {
+    let secs = if text_len < 512 {
+        8
+    } else if text_len < 12_000 {
+        15
+    } else {
+        30
+    };
+    std::time::Duration::from_secs(secs)
+}
+
 fn normalize_dom_status_text(text: &str) -> &str {
     text.trim()
         .trim_start_matches('\u{feff}')
@@ -2171,6 +2189,9 @@ fn normalize_dom_status_text(text: &str) -> &str {
 fn dom_text_is_pending_status(normalized: &str) -> bool {
     let trimmed = normalized.trim().trim_end_matches(['.', '。', '…']).trim();
     if trimmed.is_empty() {
+        return true;
+    }
+    if dom_text_is_waiting_for_complete_reply(trimmed) {
         return true;
     }
     matches!(
@@ -2192,6 +2213,15 @@ fn dom_text_is_pending_status(normalized: &str) -> bool {
             | "Finishing up"
             | "Making final adjustments"
     )
+}
+
+fn dom_text_is_waiting_for_complete_reply(trimmed: &str) -> bool {
+    let lower = trimmed.to_ascii_lowercase();
+    (trimmed.contains("连接已中断") && trimmed.contains("等待完整回复"))
+        || (lower.contains("connection")
+            && lower.contains("interrupted")
+            && lower.contains("waiting")
+            && (lower.contains("complete reply") || lower.contains("complete response")))
 }
 
 pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str> {
@@ -2230,6 +2260,13 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         return Some("pending_output_status_text");
     }
     if data
+        .get("waitingForCompleteReply")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("waiting_for_complete_reply");
+    }
+    if data
         .get("isStreaming")
         .and_then(Value::as_bool)
         .unwrap_or(false)
@@ -2255,6 +2292,38 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+
+    #[test]
+    fn required_dom_stable_for_is_conservative_for_long_outputs() {
+        assert_eq!(required_dom_stable_for(100).as_secs(), 8);
+        assert_eq!(required_dom_stable_for(8_000).as_secs(), 15);
+        assert_eq!(required_dom_stable_for(12_000).as_secs(), 30);
+        assert_eq!(required_dom_stable_for(40_000).as_secs(), 30);
+    }
+
+    #[test]
+    fn dom_pending_status_detects_waiting_for_complete_reply() {
+        assert!(!dom_content_is_usable("连接已中断。正在等待完整回复", 0));
+        assert!(!dom_content_is_usable(
+            "Connection interrupted. Waiting for complete response",
+            0
+        ));
+        assert!(dom_content_is_usable("## 今日日报\n\n工作项完整输出。", 0));
+    }
+
+    #[test]
+    fn dom_output_in_progress_reason_detects_waiting_for_complete_reply() {
+        let data = json!({
+            "waitingForCompleteReply": true,
+            "imageCount": 0,
+            "isStreaming": false,
+        });
+
+        assert_eq!(
+            dom_output_in_progress_reason(&data),
+            Some("waiting_for_complete_reply")
+        );
+    }
 
     #[test]
     fn has_in_progress_messages_respects_after_time() {
