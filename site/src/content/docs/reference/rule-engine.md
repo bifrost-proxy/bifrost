@@ -170,13 +170,32 @@ example.com host://127.0.0.1:3000
 
 个人私有规则不需要带组名称。组规则必须使用 `组名称/规则名称`，避免和同名私有规则冲突。规则引用只在独立 `@` 行生效；普通 `#` 注释里的 `@规则名称` 不会被当作引用。`@comment` 保持为注释指令，`commented-*` 这类真实规则名仍可正常引用。规则引用支持嵌套；运行时解析遇到缺失引用会跳过该引用行并继续解析后续规则，避免因为删除或尚未同步的引用规则导致整条入口规则失效。循环引用仍会让入口规则解析失败。Rules 编辑器的语法校验会对缺失引用返回 `E020`，并把对应 `@规则` 标红显示悬浮错误提示，便于用户及时修正。
 
-### 9. 规则分享链接
+### 9. 保存时语法检查
+
+通过 Admin API、Group Rule API 或 CLI 新增/更新规则时，Bifrost 会在落盘前运行同一套语法检查服务：
+
+- 规则有效时正常保存，并在响应中返回 `syntax.valid=true`、`rule_count`、`warnings` 和 `guidance`。
+- 规则无效时默认拒绝保存；Admin API 返回 HTTP 422 且 `saved=false`，CLI 返回退出码 2。
+- 响应中的 `syntax.errors[]` 会包含 `line`、`start_column`、`end_column`、`code`、`message` 和 `suggestion`，Agent 调用方应优先按第一条 error 修复后重试。
+- 如果确实需要保存临时无效规则，可以显式传 `allow_invalid=true` 或 CLI `--allow-invalid`；此时会保存，但 `syntax.valid` 仍为 `false`，调用方不能把它当作已通过校验。
+
+CLI 示例：
+
+```bash
+bifrost rule add bad --json --content "@missing-shared"
+# exit code: 2，JSON 中 saved=false、syntax.errors[0].code=E020
+
+bifrost rule add draft --json --allow-invalid --content "@missing-shared"
+# exit code: 0，JSON 中 saved=true、syntax.valid=false
+```
+
+### 10. 规则分享链接
 
 Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
 
 第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
 
-生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `https://...`。显式非 HTTP(S) scheme 会被拒绝。
+生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到并导入分享 query。显式输入 `https://...` 时会保持 HTTPS；显式非 HTTP(S) scheme 会被拒绝。
 
 导入规则统一落在 `share/` 命名空间，避免覆盖用户已有的普通个人规则。例如 payload 名称为 `local-dev` 时，本地规则名为 `share/local-dev`。Bifrost 会在导入规则的描述中记录原始分享名和内容 hash：重复打开同一个分享链接会复用并覆盖同一条 `share/...` 规则，不会持续创建新规则；同名但内容不同的分享链接会创建 `share/规则名 2`、`share/规则名 3` 这类递增后缀的新规则。对已导入的 `share/...` 规则再次分享时，协议 payload 会自动剥掉 `share/` 前缀并优先使用描述中的原始分享名，避免把本地命名空间传播出去。
 
@@ -203,19 +222,24 @@ bifrost rule share adhoc-debug https://example.com/app --content "api.example.co
 
 ### HTTPS 自动 TLS 解包边界
 
-当全局 TLS 拦截关闭时，Bifrost 仍会为了执行必须读取或修改 HTTPS 内层 HTTP 内容的规则而自动开启 TLS 解包，例如 `reqHeaders`、`resHeaders`、body 修改、脚本、mock 或状态码类规则。但这个自动解包有明确边界：
+当全局 TLS 拦截关闭时，Bifrost 仍会为了执行必须读取 HTTPS 内层 HTTP 的规则而自动开启 TLS 解包，例如路径级 `http://` / `https://` 转发、`reqHeaders`、`resHeaders`、body 修改、脚本、mock 或状态码类规则。但这个自动解包有明确边界：
 
-- 仅用于 `host://` 改目标地址的规则不会自动开启 TLS 解包。
-- 仅用于 `proxy://` 选择下游代理的规则不会自动开启 TLS 解包；HTTPS `CONNECT` 会保持隧道透传并转发给下游代理。
+- 带具体域名/IP 作用域的路由会自动开启 TLS 解包，即使 matcher 前没有写 `https://`。这是因为 CONNECT 阶段只能看到 host，必须先解包才能让内层 path 和路由优先级继续生效。
+- 仅用于 `proxy://` 选择下游代理的规则严格不会自动开启 TLS 解包；HTTPS `CONNECT` 会保持隧道透传并转发给下游代理。即使 proxy 规则的 matcher 带具体路径，只要目标协议只有下游代理转发，也不能因为这条规则解包。
 - 规则驱动的自动解包必须有明确 host 作用域：Domain、IP/CIDR、带具体域名或 IP 片段的 Wildcard/PathWildcard 可以触发。
 - 纯 regex 或纯 wildcard 范围过大，不能单独触发自动 TLS 解包，例如 `* resHeaders://...`、`*/api/* resHeaders://...`、`/api\/v\d+/ resHeaders://...`。
 - 如果确实需要让宽泛匹配规则处理 HTTPS 明文，请先把 pattern 收窄到明确域名/IP，或显式配置 `tlsIntercept://` / 全局 TLS include。
+- `passthrough://` 与 `http://` / `https://` / `host://` 等路由目标遵循同一套优先级 first-win 语义：如果更高优先级的具体路由已经选中，后续更宽泛的 passthrough 不会覆盖它。
 
 示例：
 
 ```txt
-# 不会自动解包，只改 CONNECT/SOCKS5 上游目标
+# 会自动解包，因为 matcher 有明确域名作用域
 example.com host://127.0.0.1:3000
+
+# 会自动解包，因为具体域名路径路由需要读取 HTTPS 内层 path；
+# matcher 不必写成 https://example.com/api
+example.com/api https://10.0.0.10:8443
 
 # 不会自动解包，只把隧道交给下游代理
 example.com proxy://127.0.0.1:8080

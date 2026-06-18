@@ -45,7 +45,8 @@ bifrost <command> <subcommand> --help
 | `upgrade` / `version-check` | 检查新版本、升级二进制 | [升级与版本检查](#升级与版本检查upgrade--version-check) |
 | `config` | 查看和修改运行时配置、连接、缓存、性能状态 | [配置项管理](#配置项管理) |
 | `admin` | 管理 Admin 远程访问、密码、会话、审计日志 | [管理端远程访问与鉴权](#管理端远程访问与鉴权admin) |
-| `traffic` / `search` | 查看、获取、搜索、清除流量记录 | [流量查看与搜索](#流量查看与搜索) |
+| `capture` | 等待下一条匹配条件的流量记录，适合浏览器/桌面应用联调和 Agent 采证 | [等待捕获](#等待捕获capture-wait) |
+| `traffic` / `search` | 查看、获取、搜索、导出、重放、诊断和清除流量记录 | [流量查看与搜索](#流量查看与搜索) |
 | `install-skill` | 安装 Bifrost Agent Skill 文档到 AI coding tools | [安装 Skill](#安装-skillinstall-skill) |
 | `ai voice` | 本地语音输入 runtime：来源探测、监听、词汇管理 | [本地语音输入](#本地语音输入ai-voice) |
 | `completions` | 生成 shell 补全脚本 | [Shell 补全](#shell-补全completions) |
@@ -283,7 +284,19 @@ bifrost traffic list --method GET --status-min 400 --limit 100
 bifrost traffic list --listener-port 50831 --format json
 bifrost traffic list --proxy-port 50831 --format json
 bifrost traffic list --client-app Chrome --limit 50
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
+bifrost capture wait --host api.example.com --timeout 10s --format json
 bifrost traffic get <id> --request-body --response-body
+bifrost traffic get --ids 1,2,3 --request-body --response-body --format ndjson
+bifrost traffic get --ids 1,2,3 --request-body --response-body --max-body 32768 --extract-auth-summary
+bifrost traffic auth-status <id>
+bifrost traffic auth-status <id> --format json
+bifrost traffic export <id> --as curl
+bifrost traffic export <id> --as fetch --show-secrets
+bifrost traffic export <id> --as har -o ./request.har
+bifrost traffic replay <id>
+bifrost traffic replay <id> --patch '/json/user/name="debug"'
+bifrost traffic replay <id> --patch-json '[{"op":"replace","path":"/json/user/name","value":"debug"}]'
 bifrost traffic search "keyword"
 bifrost traffic search "keyword" --listener-port 50831
 bifrost traffic search "keyword" --proxy-port 50831
@@ -291,9 +304,12 @@ bifrost search "keyword"
 bifrost search "keyword" --method POST --host api.openai.com --path /v1/responses
 bifrost search "keyword" --req-header
 bifrost search "keyword" --res-body
+bifrost search "" --host api.example.com --req-json '$.user.id=42' --include request-body,response-body
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m
+bifrost search "token" --req-header-eq authorization="Bearer ..." --since 2026-01-01T00:00:00Z --until 2026-01-01T01:00:00Z
 ```
 
-`bifrost search` 与 `bifrost traffic search` 等价，支持关键词搜索、基础过滤器与搜索范围控制。
+`bifrost search` 与 `bifrost traffic search` 等价，支持关键词搜索、基础过滤器、结构化 JSONPath / Header 精确匹配、时间范围、返回内容 include 与搜索范围控制。`traffic get` 默认查询单条详情；需要一次交给 Agent 或脚本分析多条记录时，用 `--ids` 批量读取，批量输出推荐 `--format ndjson`，避免把多条大响应合成一个巨大 JSON。
 
 基础过滤器：
 
@@ -311,6 +327,10 @@ bifrost search "keyword" --res-body
 | `--client-ip <IP>` | 按客户端 IP 过滤，仅 `traffic list` 支持 |
 | `--client-app <APP>` | 按客户端应用或进程名过滤，适合只分析某个浏览器、桌面应用或 CLI 工具产生的流量 |
 | `--listener-port <PORT>` / `--proxy-port <PORT>` | 按流量入口代理端口过滤；`traffic list` 中的 `--port` 仍表示 Admin API 端口 |
+| `--req-json <PATH=VALUE>` / `--res-json <PATH=VALUE>` | 按请求体或响应体 JSONPath 值过滤；适合不用关键词、只按结构字段定位请求 |
+| `--req-header-eq <NAME=VALUE>` / `--res-header-eq <NAME=VALUE>` | 按请求头或响应头精确值过滤 |
+| `--since <TIME>` / `--until <TIME>` | 限定搜索时间窗口，支持 RFC3339 时间或实现支持的相对时间格式 |
+| `--latest <DURATION>` | 只搜索最近一段时间，例如 `15m`、`1h` |
 | `--has-rule-hit <true|false>` | 按是否命中规则过滤，仅 `traffic list` 支持 |
 | `--is-websocket <true|false>` / `--is-sse <true|false>` / `--is-tunnel <true|false>` | 按 WebSocket、SSE 或 CONNECT 隧道流量过滤，仅 `traffic list` 支持 |
 
@@ -318,7 +338,7 @@ bifrost search "keyword" --res-body
 
 按应用过滤依赖 Bifrost 记录到的客户端进程信息。和 `start --app-intercept-include` 配合使用时，可以把某个浏览器或桌面应用的 HTTPS 明文请求收窄成可交给 Agent 分析的证据集；若记录里没有应用名，请改用 `--host`、`--path`、`--listener-port` 等过滤器。
 
-搜索范围：
+搜索范围与返回内容：
 
 | 参数 | 说明 |
 | --- | --- |
@@ -329,6 +349,10 @@ bifrost search "keyword" --res-body
 | `--res-body` | 仅搜索响应体 |
 | `--headers` | 同时搜索请求头与响应头 |
 | `--body` | 同时搜索请求体与响应体 |
+| `--include <FIELDS>` | 在搜索结果里附加指定内容，支持 `request-body`、`response-body`、`request-headers`、`response-headers`，也可用 `req-body`、`res-body`、`req-headers`、`res-headers`、`bodies`、`headers` 等别名 |
+| `--max-body <BYTES>` | 限制返回 body 的最大字节数，避免一次输出过大 |
+| `--extract-auth-summary` | 附加 JWT / Cookie 授权摘要，便于判断登录态来源和过期情况 |
+| `--show-secrets` | 显式显示敏感 header、cookie、token 等原文；默认输出会脱敏，只有本机诊断且确认安全时才使用 |
 
 常见组合示例：
 
@@ -344,7 +368,33 @@ bifrost search "cache-control" --res-header
 
 # 搜索响应体中的错误信息
 bifrost search "invalid_request_error" --res-body
+
+# 等待浏览器或桌面应用产生下一条目标请求；超时退出码为 124
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
+
+# 一次读取多条详情给 Agent 分析；默认保持敏感信息脱敏
+bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
+
+# 按 JSON 字段和最近时间窗口定位失败响应，并附带响应体
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+
+# 诊断一条请求里的 JWT / Cookie 登录态是否过期
+bifrost traffic auth-status 12
+
+# 导出一条请求为可复现模板，或在脱敏基础上重放并局部改 body
+bifrost traffic export 12 --as curl
+bifrost traffic replay 12 --patch '/json/debug=true'
 ```
+
+### 等待捕获（capture wait）
+
+```bash
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
+bifrost capture wait --host api.example.com --timeout 10s --format json
+bifrost capture wait --path /healthz --timeout 5s --open "https://api.example.com/healthz"
+```
+
+`capture wait` 用于“先启动等待，再让浏览器、桌面应用或脚本发起请求”的场景。它会长轮询 Admin API，直到出现符合 `--host`、`--method`、`--path` 的下一条 traffic 记录，或等待超时。`--timeout` 默认 `60s`，最大 `600s`；超时时命令退出码为 `124`，适合脚本判断“没有抓到目标请求”。`--format json` 会输出服务端返回的结构化结果；`--open` 会在等待前尝试打开 URL，打开失败只打印 warning，不影响继续等待。
 
 ### CA 证书管理
 
@@ -824,7 +874,14 @@ bifrost completions powershell
 bifrost install-skill -y
 bifrost install-skill -t codex -y
 bifrost install-skill -t trae -y
+bifrost install-skill -t github-copilot -y
+bifrost install-skill -t universal -y
+bifrost install-skill -t all -y
 bifrost install-skill --cwd -y
 ```
 
-`install-skill` 只安装 Bifrost Agent Skill 文档，让 Agent 知道如何调用本机或远端 Bifrost CLI。它不会启动代理、不会开启系统代理、不会导入规则，也不会授予远端 shell 权限。和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t codex -y`，再用 `traffic list/get/search` 给 Agent 提供真实流量证据。
+`install-skill` 只安装 Bifrost Agent Skill 文档，让 Agent 知道如何调用本机或远端 Bifrost CLI。它不会启动代理、不会开启系统代理、不会导入规则，也不会授予远端 shell 权限。默认目标为 `all`，会覆盖安装到所有支持的 AI 编程工具；`--cwd` 安装到当前项目目录，`--dir` 可指定自定义目录，二者互斥。`BIFROST_INSTALL_SKILL_SOURCE` 可覆盖安装源，`BIFROST_INSTALL_SKILL_DIR` 可在测试中覆盖默认安装目录，普通用户通常不需要设置。
+
+安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill。用户只是在本机启动代理、写规则、查本机流量时使用通用 skill；如果要连接另一台机器、使用 pair code / SSH key、远程查询流量、上传脚本执行或通过授权 shell 操作目标设备，应切换到 `bifrost-remote` skill 的完整流程。
+
+和 Agent 协作沉淀业务 skill 时，推荐先执行 `bifrost install-skill -t codex -y` 或面向当前工具的目标安装，再用 `capture wait`、`traffic list/get/search` 给 Agent 提供真实流量证据；输出可复用 skill 前保持默认脱敏，不要把 token、cookie、手机号、邮箱等敏感信息写入文档。

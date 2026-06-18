@@ -20,17 +20,18 @@ Bifrost 提供 `SKILL.md` 技能文件，可以让 AI 编程助手（Claude Code
 bifrost install-skill -y
 ```
 
-每次执行都会从 GitHub 主干（main 分支）下载最新的 SKILL.md，覆盖式安装到目标目录。
+每次执行都会从 GitHub 主干（main 分支）下载最新的 skill 文档，覆盖式安装到目标目录。安装内容包含通用 `bifrost` skill 和专用 `bifrost-remote` skill：本机代理、规则、流量分析使用通用 skill；连接另一台机器、使用 pair code / SSH key、远程查流量、上传脚本执行或授权 shell 操作目标设备时使用 `bifrost-remote`。
 
 ### 安装到指定工具
 
 ```bash
-bifrost install-skill -t claude-code -y   # 仅 Claude Code
-bifrost install-skill -t codex -y         # Codex + 通用 .agents/skills 目录
-bifrost install-skill -t trae -y          # 仅 Trae
-bifrost install-skill -t cursor -y        # 仅 Cursor
+bifrost install-skill -t claude-code -y    # 仅 Claude Code
+bifrost install-skill -t codex -y          # Codex + 通用 .agents/skills 目录
+bifrost install-skill -t trae -y           # 仅 Trae
+bifrost install-skill -t cursor -y         # 仅 Cursor
 bifrost install-skill -t github-copilot -y # 仅 GitHub Copilot
-bifrost install-skill -t universal -y     # 仅通用 Agent Skills 目录
+bifrost install-skill -t universal -y      # 仅通用 Agent Skills 目录
+bifrost install-skill -t all -y            # 自动安装到所有支持的工具（默认）
 ```
 
 ### 安装到当前项目目录
@@ -46,9 +47,9 @@ bifrost install-skill --cwd -t trae -y    # 安装到当前目录（仅 Trae）
 bifrost install-skill -d /custom/path -y
 ```
 
-### 支持的工具与默认路径
+### 支持的工具、默认路径与安装内容
 
-所有工具统一使用 `skills/bifrost/SKILL.md` 目录结构：
+所有工具统一使用 `skills/bifrost/SKILL.md` 目录结构；同时会安装 `skills/bifrost-remote/SKILL.md`，供远程连接和远端设备操作使用。
 
 | 工具 | 别名 | 全局安装路径 | 项目级安装路径（--cwd） |
 | --- | --- | --- | --- |
@@ -64,7 +65,9 @@ bifrost install-skill -d /custom/path -y
 > - `codex` 目标会保留历史 `.codex/skills` 路径，同时补充标准 `.agents/skills` 目录，方便兼容更多 agent
 > - `universal` 目标仅安装到 `.agents/skills`，适合遵循通用 Agent Skills 规范的运行时
 
-安装的文件始终是从远端下载的原始 SKILL.md 内容（含标准 YAML frontmatter），不做任何额外包装或修改。SKILL.md 源文件自带 `name` 和 `description` frontmatter 字段，兼容所有工具的 skill 自动发现机制。
+安装的文件始终是从远端下载的原始 skill 内容（含标准 YAML frontmatter），不做任何额外包装或修改。源文件自带 `name` 和 `description` frontmatter 字段，兼容所有工具的 skill 自动发现机制。通用 skill 覆盖本机代理、规则、流量和 Agent 采证工作流；remote skill 覆盖授权连接、remote traffic、remote file、remote run/job 和 shell access 边界。
+
+> **安全提示**：`install-skill` 只写入说明文档，不启动代理、不修改系统代理、不导入规则、不会创建远端授权，也不会授予 shell 权限。远端连接必须由用户通过 pair code 或 SSH key 显式授权。
 
 ### 参数说明
 
@@ -74,6 +77,13 @@ bifrost install-skill -d /custom/path -y
 | `-d, --dir <PATH>` | 自定义安装目录（覆盖默认路径，与 `--cwd` 互斥） |
 | `--cwd` | 安装到当前目录（项目级别，与 `--dir` 互斥） |
 | `-y, --yes` | 跳过确认提示 |
+
+相关环境变量：
+
+| 变量 | 说明 |
+| --- | --- |
+| `BIFROST_INSTALL_SKILL_SOURCE` | 覆盖 skill 下载源；正常用户通常无需设置，主要用于开发或验证不同来源。 |
+| `BIFROST_INSTALL_SKILL_DIR` | 未显式传 `--dir` / `--cwd` 时覆盖全局 skill 安装目录；适合测试隔离，避免写入真实 AI 工具目录。 |
 
 ### 错误处理
 
@@ -111,7 +121,9 @@ mkdir -p ~/.copilot/skills/bifrost && cp ./SKILL.md ~/.copilot/skills/bifrost/SK
 
 ## 安装后验证
 
-安装完成后，在对应工具中启动新对话，输入与 bifrost 相关的指令（如"启动代理"、"查看流量"），如果 AI 能正确识别并调用 `bifrost` CLI，说明安装成功。
+安装完成后，在对应工具中启动新对话，输入与 bifrost 相关的指令（如“启动代理”“查看流量”），如果 AI 能正确识别并调用 `bifrost` CLI，说明通用 skill 安装成功。
+
+可以继续验证远程 skill 是否可被发现：向工具说明“我要连接另一台机器的 Bifrost，并通过 pair code 或 SSH key 授权”，期望 Agent 选择 `bifrost-remote` 流程，先检查 `bifrost remote conn status`，再按授权方式连接；它不应要求你把密钥或 token 粘贴到最终文档里。
 
 ## 更新技能文件
 

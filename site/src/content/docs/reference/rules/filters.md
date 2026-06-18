@@ -188,7 +188,9 @@ www.example.com host://default.local excludeFilter://h:X-Special
 
 ## passthrough
 
-`passthrough://` 用于忽略后续规则并直接透传请求。旧的 `ignore://` 写法会在导入、同步或保存时自动转换为 `passthrough://`。
+`passthrough://` 用于在当前优先级位置选择直接透传请求。旧的 `ignore://` 写法会在导入、同步或保存时自动转换为 `passthrough://`。
+
+`passthrough://` 与 `http://`、`https://`、`host://` 等路由目标遵循同一套 first-win 语义：如果更高优先级的具体路由已经选中，后续更宽泛的 passthrough 不会覆盖它；如果 passthrough 优先级更高，则它会阻止后续较低优先级的路由目标生效。
 
 ### 语法
 

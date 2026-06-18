@@ -128,7 +128,7 @@ api.example.com host://{local-api-target.txt}
 
 ## 场景 4：按需调试 HTTPS 和路径规则
 
-如果你要按 HTTPS URL 的 path 匹配，例如 `https://api.example.com/v1/users`，通常需要对这个域名做 TLS 抓包；否则代理看到的只是 CONNECT 隧道，不一定能看到内部路径。不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围，避免影响带 SSL pinning 的应用。
+如果你要按 HTTPS URL 的 path 匹配，例如 `api.example.com/v1/users https://10.0.0.10:8443`，只要规则 matcher 有明确域名/IP 作用域，Bifrost 会在全局 TLS 抓包关闭时自动对该域名解包，以便读取内部路径；matcher 前不需要强制写 `https://`。不要默认开启全局 TLS 抓包，优先用域名白名单、应用白名单或规则级 `tlsIntercept://` 精确控制范围。对范围很宽的 wildcard/regex，或没有明确 host 作用域的规则，请显式收窄范围，避免影响带 SSL pinning 的应用。
 
 ```bash
 bifrost rule add https-path -c "api.example.com/v1/users tlsIntercept:// host://127.0.0.1:3000"
@@ -207,21 +207,41 @@ example.com host://127.0.0.1:3000 lineProps://disabled
 
 ## 场景 6：从流量记录定位问题
 
-先看最近流量，再看单条详情：
+先看最近流量，再看单条或批量详情。默认会对敏感 header、cookie、token 做脱敏，只有本机诊断且确认安全时才使用 `--show-secrets`：
 
 ```bash
 bifrost traffic list
 bifrost traffic list --method GET --status-min 400 --limit 100
 bifrost traffic get <id> --request-body --response-body
+bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
+bifrost traffic auth-status <id>
 ```
 
-按关键词和范围搜索：
+如果你要先启动等待，再在浏览器或桌面应用里触发一次操作，用 `capture wait` 等下一条匹配记录。超时退出码为 `124`，适合脚本判断没有抓到目标请求：
+
+```bash
+bifrost capture wait --host api.example.com --method POST --path /v1/login --timeout 30s
+bifrost capture wait --host api.example.com --timeout 10s --format json
+```
+
+按关键词、结构字段和范围搜索：
 
 ```bash
 bifrost search "Bearer " --req-header
 bifrost search "cache-control" --res-header
 bifrost search "invalid_request_error" --res-body
 bifrost search "keyword" --host api.example.com --path /v1/users
+bifrost search "" --host api.example.com --req-json '$.user.id=42' --include request-body,response-body
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
+```
+
+需要把捕获请求交给同事、脚本或 Agent 复现时，优先导出脱敏模板或基于原请求重放；只在确认安全时才加 `--show-secrets`：
+
+```bash
+bifrost traffic export <id> --as curl
+bifrost traffic export <id> --as har -o ./request.har
+bifrost traffic replay <id>
+bifrost traffic replay <id> --patch '/json/debug=true'
 ```
 
 如果你在调试临时端口，记得带入口端口过滤：
@@ -331,9 +351,20 @@ bifrost remote exec -- bifrost status
 bifrost remote traffic list --limit 20
 bifrost remote file read README.md --cwd /path/to/repo
 bifrost remote file find "TODO" --path src --cwd /path/to/repo
+bifrost remote run --script-file ./smoke.py --interpreter python3 --cwd /path/to/repo -- --json
 ```
 
 `remote exec` 是最高权限路径，能在远端运行 shell 命令；实际允许范围由远端 Shell Access policy 和 grant 决定。结构化文件访问优先使用 `bifrost remote file ...`。
+
+多台远端同时可用时，把 `--client-id` 放在 `remote` 后、子命令前；也可以用 `BIFROST_REMOTE_CLIENT_ID` 设置默认目标：
+
+```bash
+export BIFROST_REMOTE_CLIENT_ID=devbox
+bifrost remote file read main.go --cwd /repo
+bifrost remote --client-id macbook run --script-file ./query.py --interpreter python3 --cwd /repo
+```
+
+`remote run` 会把本地脚本上传到远端 FileAccessPolicy 允许的 scratch 目录再执行，适合替代 `exec + heredoc`。长时间静默的 `--wait` / 轮询型命令使用 `--detach` 后接 `remote job watch <call_id> --output-file <log>`，避免 300 秒无事件 idle timeout 或 caller shell 超时。
 
 注意：`bifrost setting ...` 总是管理当前机器。要改远端设置，需要在远端执行：
 
@@ -420,19 +451,24 @@ curl -x http://127.0.0.1:18882 https://api.example.com/v1/me
 bifrost traffic list --host api.example.com --limit 50
 bifrost traffic list --listener-port 18882 --limit 50
 bifrost traffic list --client-app Chrome --limit 50
+bifrost capture wait --host api.example.com --method POST --path /login --timeout 30s
 bifrost search "keyword" --host api.example.com --req-body
+bifrost search "" --host api.example.com --res-json '$.error.code=invalid_request' --latest 15m --include response-body
 bifrost traffic get <id> --request-body --response-body
+bifrost traffic get --ids 12,13,14 --request-body --response-body --format ndjson
+bifrost traffic auth-status <id>
 ```
 
-这里的“完整”不是把所有隐私数据复制给 Agent，而是让 Agent 能看到完成任务所需的请求链路：URL、method、关键 headers/cookies、请求体、响应体、状态码、错误体和先后顺序。敏感 token、cookie、手机号、邮箱、身份证号等应在输出 skill 时脱敏，skill 里用环境变量、上下文或用户登录态描述来源。
+这里的“完整”不是把所有隐私数据复制给 Agent，而是让 Agent 能看到完成任务所需的请求链路：URL、method、关键 headers/cookies、请求体、响应体、状态码、错误体和先后顺序。`traffic get`、`search --include`、`traffic export` 等输出默认会脱敏；敏感 token、cookie、手机号、邮箱、身份证号等不应写入最终 skill，skill 里用环境变量、上下文或用户登录态描述来源。
 
 第五步，给 Agent 下达任务指令。可以直接使用下面的模板：
 
 ```txt
-请使用 bifrost traffic list/search/get 读取 api.example.com 的真实流量。
-先按 host/client_app 过滤，挑出登录、列表、详情、创建、更新、失败响应各 1-2 条。
+请使用 bifrost capture wait 和 bifrost traffic list/search/get 读取 api.example.com 的真实流量。
+先按 host/client_app/listener_port 过滤，挑出登录、列表、详情、创建、更新、失败响应各 1-2 条。
 对每条请求总结 URL、method、headers/cookies/token 来源、请求体、响应体字段、分页/错误格式。
-不要 mock，不要猜；证据不足时继续用 traffic get <id> --request-body --response-body 查看完整 body。
+不要 mock，不要猜；证据不足时继续用 traffic get <id> --request-body --response-body 或 traffic get --ids ... --format ndjson 查看完整 body。
+保持默认脱敏；除非用户明确要求且确认安全，不要使用 --show-secrets。
 最后把协议理解整理成一个专属 skill：触发场景、所需参数、认证来源、API 调用步骤、错误处理、验证命令和隐私脱敏规则。
 ```
 
