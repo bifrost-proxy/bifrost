@@ -106,7 +106,7 @@
 - `RUSTSEC-2026-0002` / `GHSA-rhfx-m35p-ff5j`：`lru 0.12.5` unsound。修复方式：`ratatui` 从 `0.29` 升级到 `0.30.1`，带入 `lru 0.18.0`。
 - `RUSTSEC-2017-0008`：`serial 0.4.0` unmaintained。修复方式：`portable-pty` 从 `0.8` 升到 `0.9`，移除 `serial` 链。
 - `RUSTSEC-2025-0134`：`rustls-pemfile` unmaintained。修复方式：`bifrost-tls` 改用 `rustls::pki_types::pem::PemObject` 解析 PEM，移除直接依赖。
-- `RUSTSEC-2025-0141`：`bincode` unmaintained。修复方式：Traffic DB detail blob 新写入改用既有 `serde_json`，移除 `bincode` 依赖。
+- `RUSTSEC-2025-0141`：`bincode` unmaintained。修复方式：Traffic DB detail blob 改用 `postcard`（紧凑二进制）写入与读取，移除 `bincode` 依赖。`postcard` 以 `default-features = false` + `alloc` 引入，避免默认 `heapless-cas` feature 带入 `heapless -> atomic-polyfill`（RUSTSEC-2023-0089），保证不新增 advisory warning。
 
 ### 剩余 informational quality 告警
 
@@ -121,11 +121,11 @@
 
 ### 运行时行为变更
 
-Traffic DB 新写入的 detail blobs 从 bincode 二进制编码改为 JSON bytes。数据库 schema 不变，旧 bincode blob 在读取时会按既有容错路径解析失败并返回空 detail 字段；新写入记录由 `cargo test -p bifrost-admin traffic_db --lib` 覆盖读写路径。该兼容性取舍用于彻底移除 unmaintained `bincode` 依赖。
+Traffic DB 新写入的 detail blobs 从 bincode 二进制编码改为 postcard 紧凑二进制编码。数据库 schema 不变，旧 bincode blob 在读取时会按既有容错路径解析失败并返回空 detail 字段；新写入记录由 `cargo test -p bifrost-admin traffic_db --lib` 覆盖读写路径。选型理由：postcard 序列化/反序列化性能接近 bincode 2.x（实测单条 detail 字段 ser+de 约 2.4 µs，约为 JSON 的一半，体积约为 JSON 的 65%），且 postcard 活跃维护、无安全告警；bincode 2.x 因 RUSTSEC-2025-0141 覆盖全版本（no patched versions）不可用。需要说明的是，detail 序列化只占一次 SQLite 单事务 commit（约 20 µs）的个位数百分比，因此该改动对端到端写入吞吐影响很小，主要收益是统一二进制编码与体积下降。该兼容性取舍用于彻底移除 unmaintained `bincode` 依赖。
 
 ### 验证方案补充
 
 - Security 审计：根 `cargo audit --json --no-fetch` 与桌面 `cargo audit --file desktop/src-tauri/Cargo.lock --json --no-fetch` 必须均为 `vulnerabilities=0`。
-- Targeted 单测：`cargo test -p bifrost-tls` 覆盖 PEM 解析迁移；`cargo test -p bifrost-admin traffic_db --lib` 覆盖 Traffic DB JSON detail blob 读写；`cargo check -p bifrost-agent -p bifrost-admin` 覆盖 `portable-pty 0.9` 和 admin 网络接口依赖升级。
+- Targeted 单测：`cargo test -p bifrost-tls` 覆盖 PEM 解析迁移；`cargo test -p bifrost-admin traffic_db --lib` 覆盖 Traffic DB postcard detail blob 读写；`cargo check -p bifrost-agent -p bifrost-admin` 覆盖 `portable-pty 0.9` 和 admin 网络接口依赖升级。
 - E2E smoke：使用临时 `BIFROST_DATA_DIR`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy` 启动最新编译的 `bifrost`，验证 Admin API ready。
 - Coverage 90% 门禁：收尾执行 `make coverage`；若 E2E coverage 环境不可用，按项目规则退化为 `make coverage-unit` 并记录原因。

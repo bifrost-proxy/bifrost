@@ -55,6 +55,7 @@ sha1 = "0.10"
 sha2 = "0.10"
 blake3 = "1"
 rusqlite = { version = "0.33", features = ["bundled", "backup"] }
+postcard = { version = "1", default-features = false, features = ["alloc"] }
 lru.workspace = true
 flate2 = "1"
 tar = "0.4"
