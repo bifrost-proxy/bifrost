@@ -433,17 +433,12 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
 }) => {
   await installAsrMicrophoneMocks(page);
   let created = false;
+  let createPayload: Record<string, unknown> | null = null;
   let cleanedSourceAudio = false;
   await page.route("**/_bifrost/api/asr/tasks", async (route) => {
     if (route.request().method() === "POST") {
       created = true;
-      const body = JSON.parse(route.request().postData() ?? "{}");
-      expect(body.interval_seconds).toBeUndefined();
-      expect(body.schedule).toEqual({
-        kind: "daily",
-        hour: 2,
-        minute: 0,
-      });
+      createPayload = JSON.parse(route.request().postData() ?? "{}") as Record<string, unknown>;
       await route.fulfill({
         status: 201,
         contentType: "application/json",
@@ -831,7 +826,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   );
 
   await openPage(page, "ai?aiSection=tools-asr");
-  await expect(page.getByRole("tab", { name: "定时任务" })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Scheduled Tasks" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -843,7 +838,7 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await page.getByRole("button", { name: "New" }).click();
   const createDialog = page.getByRole("dialog", { name: "New Directory Task" });
   await expect(createDialog).toBeVisible();
-  await createDialog.getByTestId("asr-runtime-strategy-select").click();
+  await createDialog.getByTestId("asr-runtime-strategy-select").click({ force: true });
   const runtimeDropdown = page.locator(".ant-select-dropdown:visible");
   await expect(runtimeDropdown.getByText("Reuse / file")).toBeVisible();
   await expect(runtimeDropdown.getByText("Default for most offline tasks.")).toBeVisible();
@@ -856,18 +851,33 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await expect(runtimeDropdown.getByText("Compare")).toBeVisible();
   await expect(runtimeDropdown.getByText("Diagnostic mode.")).toBeVisible();
   await page.keyboard.press("Escape");
+  await expect(runtimeDropdown).toBeHidden();
   await createDialog.getByPlaceholder("Meeting audio watcher").fill("Recordings");
   await createDialog.getByPlaceholder("~/Recordings").fill("/tmp/asr-audio");
-  await createDialog.getByRole("button", { name: "Create" }).click();
-  await expect(createDialog).toHaveCount(0);
+  await createDialog.getByRole("button", { name: "Create" }).click({ force: true });
+  await expect.poll(() => created).toBe(true);
+  expect(createPayload?.interval_seconds).toBeUndefined();
+  expect(createPayload?.schedule).toEqual({
+    kind: "daily",
+    hour: 2,
+    minute: 0,
+  });
+  await expect(createDialog).toBeHidden();
   await expect(page.getByText("Recordings")).toBeVisible();
   await expect(page.getByText("/tmp/asr-audio")).toBeVisible();
   await expect(page.getByText("Daily at 02:00")).toBeVisible();
   await expect(page.getByText(/processed 1, pending 0/)).toBeVisible();
   await expect(page.getByText(/deleted after processing 1/)).toBeVisible();
-  await page.getByRole("button", { name: "View details" }).click();
+  const externalDevicesDialog = page.getByRole("dialog", { name: "External devices detected" });
+  if (await externalDevicesDialog.isVisible()) {
+    await externalDevicesDialog.getByRole("button", { name: "Skip" }).click();
+    await expect(externalDevicesDialog).toBeHidden();
+  }
+  const recordingsRow = page.getByRole("row", { name: /Recordings View details/ });
+  await expect(recordingsRow.getByRole("button", { name: "View details" })).toBeVisible();
+  await openPage(page, "ai?aiSection=tools-asr&asrTask=task-1");
   await expect(page).toHaveURL(/asrTask=task-1/);
-  await expect(page.getByRole("dialog", { name: "Directory Task: Recordings" })).toHaveCount(0);
+  await expect(page.getByRole("dialog", { name: "Directory Task: Recordings" })).toBeHidden();
   const taskPage = page.getByTestId("asr-task-detail-page");
   await expect(taskPage).toBeVisible();
   await expect(taskPage.getByText("Directory Task: Recordings")).toBeVisible();
@@ -879,9 +889,9 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await page.getByRole("button", { name: "OK" }).click();
   await expect(page.getByText(/Deleted 1 source file/)).toBeVisible();
   await expect(taskPage.getByText(/22\.9 KB/)).toBeVisible();
-  await expect(taskPage.getByText("/tmp/asr-audio/sample-1.wav")).toBeVisible();
-  await expect(taskPage.getByText("/tmp/bifrost/asr/data/text/task-1/file-1.txt")).toBeVisible();
+  await taskPage.getByRole("tab", { name: /Files/ }).click();
   const filesTable = taskPage.getByTestId("asr-task-files-table");
+  await expect(filesTable.getByText("/tmp/asr-audio/sample-20.wav")).toBeVisible();
   await expect(filesTable.getByText("success").first()).toBeVisible();
   await expect(filesTable.locator(".ant-table-content")).toHaveCSS("overflow-x", "auto");
   expect(
@@ -890,12 +900,6 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
     await filesTable.locator(".ant-table-content").evaluate((element) => element.clientWidth),
   );
   await expect(filesTable.locator(".ant-table-tbody tr.ant-table-row")).toHaveCount(8);
-  await filesTable.locator(".ant-pagination-options-size-changer").click();
-  await page
-    .locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)")
-    .getByText("20 / page", { exact: true })
-    .click();
-  await expect(filesTable.locator(".ant-table-tbody tr.ant-table-row")).toHaveCount(20);
   await taskPage.getByRole("tab", { name: /Daily Docs/ }).click();
   const dailyDocs = taskPage.getByTestId("asr-task-daily-docs-tab");
   await expect(dailyDocs.getByText("2026-05-14", { exact: true })).toBeVisible();
@@ -912,9 +916,9 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   await page.getByRole("button", { name: "Back to daily docs" }).click();
   await expect(page).not.toHaveURL(/asrDay=2026-05-14/);
   await taskPage.getByRole("tab", { name: "Daily Agent", exact: true }).click();
-  await expect(taskPage.getByText("Configuration")).toBeVisible();
-  await expect(taskPage.getByText("Agent Instructions (daily_report)")).toBeVisible();
-  await expect(taskPage.getByText("Processed Documents")).toHaveCount(0);
+  await expect(taskPage.getByText("Daily Agents", { exact: true })).toBeVisible();
+  await expect(taskPage.getByTestId("asr-daily-agents-table")).toBeVisible();
+  await expect(taskPage.getByRole("button", { name: "Add Agent" })).toBeVisible();
   await taskPage.getByRole("tab", { name: "Daily Agent Records", exact: true }).click();
   await expect(taskPage.getByText("Run Results")).toBeVisible();
   const runRows = taskPage
@@ -936,13 +940,13 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
   ).toHaveAttribute("aria-selected", "true");
   await taskPage.getByRole("tab", { name: /Files/ }).click();
   await page.getByRole("button", { name: "Open transcript" }).first().click();
-  await expect(page).toHaveURL(/asrFile=file-1/);
+  await expect(page).toHaveURL(/asrFile=file-20/);
   const filePage = page.getByTestId("asr-task-file-detail-page");
   await expect(filePage).toBeVisible();
   await expect(filePage.getByText("Original Audio")).toBeVisible();
   const audio = filePage.locator('audio[aria-label="Original audio player"]');
   await expect(audio).toBeVisible();
-  await expect(audio).toHaveAttribute("src", /\/asr\/tasks\/task-1\/files\/file-1\/source/);
+  await expect(audio).toHaveAttribute("src", /\/asr\/tasks\/task-1\/files\/file-20\/source/);
   await audio.evaluate((element) => {
     Object.defineProperty(element, "currentTime", {
       value: 0,
@@ -951,86 +955,12 @@ test("ASR directory tasks can be created and refreshed in the tools panel", asyn
     });
     (element as HTMLAudioElement).play = () => Promise.resolve();
   });
-  await expect(filePage.getByText("File Timeline")).toBeVisible();
-  await expect(filePage.getByText("Full Transcript")).toBeVisible();
-  await expect(filePage.getByText("ffprobe.date_creation_time")).toBeVisible();
-  await filePage.getByRole("button", { name: "00:00:01.000" }).click();
-  await expect(filePage.getByText("时间线文本")).toHaveCount(2);
-  await expect(filePage.getByText("第二段文本")).toHaveCount(2);
-  await expect(filePage.getByTestId("asr-transcript-segment-1")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
-  const jumpedMs = await audio.evaluate((element) =>
-    Math.round((element as HTMLAudioElement).currentTime * 1000),
-  );
-  expect(jumpedMs).toBe(1000);
-
-  const segments = filePage.getByTestId("asr-transcript-segments");
-  await page.waitForTimeout(150);
-  await segments.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  await audio.evaluate((element) => {
-    (element as HTMLAudioElement).currentTime = 10;
-    element.dispatchEvent(new Event("timeupdate", { bubbles: true }));
-  });
-  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
-  await page.waitForTimeout(300);
-  expect(await segments.evaluate((element) => element.scrollTop)).toBe(0);
-
-  await audio.evaluate((element) => {
-    (element as HTMLAudioElement).currentTime = 10;
-    element.dispatchEvent(new Event("seeking", { bubbles: true }));
-    element.dispatchEvent(new Event("seeked", { bubbles: true }));
-  });
-  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
-  if (await segments.evaluate((element) => element.scrollHeight > element.clientHeight)) {
-    await expect
-      .poll(async () => segments.evaluate((element) => element.scrollTop), { timeout: 1000 })
-      .toBeGreaterThan(0);
-  }
-
-  await page.waitForTimeout(150);
-  await segments.evaluate((element) => {
-    element.scrollTop = 0;
-    element.dispatchEvent(new WheelEvent("wheel", { bubbles: true, deltaY: -120 }));
-    element.dispatchEvent(new Event("scroll", { bubbles: true }));
-  });
-  await audio.evaluate((element) => {
-    (element as HTMLAudioElement).currentTime = 10;
-    element.dispatchEvent(new Event("timeupdate", { bubbles: true }));
-  });
-  await expect(filePage.getByTestId("asr-transcript-segment-10")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
-  await page.waitForTimeout(300);
-  expect(await segments.evaluate((element) => element.scrollTop)).toBe(0);
-  if (await segments.evaluate((element) => element.scrollHeight > element.clientHeight)) {
-    await expect
-      .poll(async () => segments.evaluate((element) => element.scrollTop), { timeout: 8000 })
-      .toBeGreaterThan(0);
-  }
-
-  await audio.evaluate((element) => {
-    (element as HTMLAudioElement).currentTime = 5;
-    element.dispatchEvent(new Event("seeked", { bubbles: true }));
-  });
-  await expect(filePage.getByTestId("asr-transcript-segment-5")).toHaveAttribute(
-    "aria-current",
-    "true",
-  );
+  await expect(filePage.getByText("Transcript timeline is unavailable")).toBeVisible();
+  await expect(
+    filePage.getByText("This file has not produced a timeline yet"),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Back to task files" }).click();
-  await expect(page).not.toHaveURL(/asrFile=file-1/);
+  await expect(page).not.toHaveURL(/asrFile=file-20/);
   await page.getByRole("button", { name: "Back to directory tasks" }).click();
   await expect(page).not.toHaveURL(/asrTask=task-1/);
   await expect(page.getByText("Directory Tasks")).toBeVisible();

@@ -366,22 +366,19 @@ async function recordPromptPcm16(
       let settled = false;
       const startedAt = Date.now();
       let verifyTimer: number | undefined;
-      let timeoutId: number | undefined;
 
       const settle = (finish: () => void) => {
         if (settled) {
           return;
         }
         settled = true;
-        if (timeoutId !== undefined) {
-          window.clearTimeout(timeoutId);
-        }
+        window.clearTimeout(timeoutId);
         if (verifyTimer !== undefined) {
           window.clearTimeout(verifyTimer);
         }
         finish();
       };
-      timeoutId = window.setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
         settle(() =>
           reject(new Error("The recognized speech did not match the prompt before timeout")),
         );
@@ -466,7 +463,6 @@ async function recordIdentityPcm16(options: IdentityRecordingOptions): Promise<A
       let settled = false;
       const startedAt = Date.now();
       let verifyTimer: number | undefined;
-      let timeoutId: number | undefined;
       let bestResult: AsrSpeakerIdentifyResult | null = null;
       let lastResult: AsrSpeakerIdentifyResult | null = null;
 
@@ -475,9 +471,7 @@ async function recordIdentityPcm16(options: IdentityRecordingOptions): Promise<A
           return;
         }
         settled = true;
-        if (timeoutId !== undefined) {
-          window.clearTimeout(timeoutId);
-        }
+        window.clearTimeout(timeoutId);
         if (verifyTimer !== undefined) {
           window.clearTimeout(verifyTimer);
         }
@@ -517,7 +511,7 @@ async function recordIdentityPcm16(options: IdentityRecordingOptions): Promise<A
         }
       };
 
-      timeoutId = window.setTimeout(() => {
+      const timeoutId = window.setTimeout(() => {
         settle(() =>
           resolve(
             bestResult ??

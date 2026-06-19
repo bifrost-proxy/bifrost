@@ -60,6 +60,7 @@
 
 | 文件 | 功能模块 | 测试用例数 | 说明 |
 |------|---------|-----------|------|
+| [node-security-frontend.md](./node-security-frontend.md) | Node.js 安全依赖修复 | 5 | Dependabot npm 告警和本地 audit 清零，Web 前端 lint/build/unit/UI E2E、UI 修改点逐项覆盖、Docs site 构建、Sync Server 构建测试、Puppeteer 脚本 audit 回归 |
 | [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 15 | Toolbar 单一全局开关、`breakpoint://request` / `breakpoint://response` 规则应用、pause/resume、暂停期间关闭 breakpoint、breakpoint OFF 回归、large body 默认关闭性能回归、oversized body header-only pause、response timeout 自动放行、request/response 小 body 与 headers 编辑、规则编辑器智能提示、OpenAPI 与 UI 分工、侧边栏 OpenAPI 入口、协议 registry 同步 |
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |

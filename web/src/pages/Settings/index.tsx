@@ -271,6 +271,7 @@ export default function Settings() {
       const status = await getSyncStatus();
       setSyncStatus(status);
       setSyncRemoteBaseUrlDraft(status.remote_base_url);
+      useSyncStore.getState().setSyncStatus(status);
     } catch (error) {
       if (!suppressRestartErrors && !isConnectionIssueError(error)) {
         console.error("Failed to fetch sync status");
@@ -796,6 +797,35 @@ export default function Settings() {
     fetchTlsConfigData,
     fetchWhitelistStatus,
   ]);
+
+  useEffect(() => {
+    if (activeTab !== "sync" && activeTab !== "remote-invoke") {
+      return;
+    }
+
+    let stopped = false;
+    const refresh = async () => {
+      try {
+        const status = await getSyncStatus();
+        if (stopped) return;
+        setSyncStatus(status);
+        setSyncRemoteBaseUrlDraft(status.remote_base_url);
+        useSyncStore.getState().setSyncStatus(status);
+      } catch (error) {
+        if (!suppressRestartErrors && !isConnectionIssueError(error)) {
+          console.error("Failed to refresh sync status");
+        }
+      }
+    };
+
+    const timer = window.setInterval(() => {
+      void refresh();
+    }, 2_000);
+    return () => {
+      stopped = true;
+      window.clearInterval(timer);
+    };
+  }, [activeTab, suppressRestartErrors]);
 
   useEffect(() => {
     const timers = perfUpdateTimers.current;

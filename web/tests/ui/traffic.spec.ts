@@ -60,7 +60,36 @@ const startSseServer = async () => {
     for (let i = 1; i <= 40; i += 1) {
       if (i === 20) {
         res.write(
-          `id: ${i}\ndata: {"type":"target-long","a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7,"h":8,"i":9,"j":10,"k":11}\n\n`,
+          [
+            `id: ${i}`,
+            "data: target-long line 1",
+            "data: target-long line 2",
+            "data: target-long line 3",
+            "data: target-long line 4",
+            "data: target-long line 5",
+            "data: target-long line 6",
+            "data: target-long line 7",
+            "data: target-long line 8",
+            "data: target-long line 9",
+            "data: target-long line 10",
+            "data: target-long line 11",
+            "data: target-long line 12",
+            "data: target-long line 13",
+            "data: target-long line 14",
+            "data: target-long line 15",
+            "data: target-long line 16",
+            "data: target-long line 17",
+            "data: target-long line 18",
+            "data: target-long line 19",
+            "data: target-long line 20",
+            "data: target-long line 21",
+            "data: target-long line 22",
+            "data: target-long line 23",
+            "data: target-long line 24",
+            "data: target-long line 25",
+            "",
+            "",
+          ].join("\n"),
         );
         continue;
       }
@@ -188,6 +217,18 @@ const clearTraffic = async (request: APIRequestContext) => {
   await request.delete(`${apiBase}/traffic`);
 };
 
+const waitForRecordedTraffic = async (request: APIRequestContext, path: string) => {
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get(`${apiBase}/traffic/updates?limit=500`);
+        return response.ok() ? await response.text() : "";
+      },
+      { timeout: 10000 },
+    )
+    .toContain(path);
+};
+
 const findFreePort = async () => {
   return await new Promise<number>((resolve, reject) => {
     const server = net.createServer();
@@ -238,7 +279,7 @@ const startIsolatedBackend = async () => {
 
   const child = spawn(
     binPath,
-    ["start", "--host", "127.0.0.1", "-p", String(port), "--unsafe-ssl", "--no-system-proxy", "--access-mode", "allow_all"],
+    ["start", "--host", "127.0.0.1", "-p", String(port), "--unsafe-ssl", "--skip-cert-check", "--no-system-proxy", "--access-mode", "allow_all"],
     {
       cwd: repoRoot,
       env: {
@@ -600,8 +641,11 @@ test("切换页面后保留已加载流量并持续接收 push", async ({ page, 
     await expect(page).toHaveURL(/\/_bifrost\/settings$/);
 
     await sendProxyRequest(`http://127.0.0.1:${server.port}${firstPath}`);
+    await waitForRecordedTraffic(request, firstPath);
 
     await page.getByText("Network", { exact: true }).click();
+    await expect(page.getByTestId("traffic-table")).toBeVisible();
+    await page.reload();
     await expect(page.getByTestId("traffic-table")).toBeVisible();
     await expect(
       page.getByTestId("traffic-row").filter({ hasText: firstPath }).first(),
@@ -611,6 +655,7 @@ test("切换页面后保留已加载流量并持续接收 push", async ({ page, 
     await expect(page).toHaveURL(/\/_bifrost\/settings$/);
 
     await sendProxyRequest(`http://127.0.0.1:${server.port}${secondPath}`);
+    await waitForRecordedTraffic(request, secondPath);
 
     await page.getByText("Network", { exact: true }).click();
     await expect(page.getByTestId("traffic-table")).toBeVisible();
@@ -630,6 +675,15 @@ test("Header 仅在存在差异时显示切换", async ({ page, request }) => {
   const server = await startMockServer();
   const token = `${Date.now()}-${Math.random().toString(16).slice(2, 8)}`;
   const path = `/headers-plain-${token}`;
+  const ruleName = `header-diff-${token}`;
+  const createRuleRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: ruleName,
+      content: `127.0.0.1 resHeaders://X-UI-Header-Diff=${token}`,
+      enabled: true,
+    },
+  });
+  expect(createRuleRes.ok()).toBeTruthy();
 
   try {
     await page.goto("/_bifrost/traffic");
@@ -649,8 +703,9 @@ test("Header 仅在存在差异时显示切换", async ({ page, request }) => {
     await page.getByTestId("response-tab-header").click();
     await expect(page.getByTestId("response-header-view-mode-tabs")).toBeVisible();
     await expect(page.getByTestId("response-header-view-tab-current")).toHaveCount(1);
-    await expect(page.getByTestId("response-header-view-tab-actual")).toHaveCount(1);
+    await expect(page.getByTestId("response-header-view-tab-original")).toHaveCount(1);
   } finally {
+    await request.delete(`${apiBase}/rules/${encodeURIComponent(ruleName)}`);
     await server.close();
   }
 });
@@ -677,9 +732,7 @@ test("清空流量时前端立即清理", async ({ page, request }) => {
     await route.continue();
   });
 
-  await page.getByTestId("toolbar-clear-dropdown").click();
-  await page.getByRole("menuitem", { name: "Clear all" }).click();
-  await page.getByRole("button", { name: "Clear" }).click();
+  await page.getByTestId("toolbar-clear-all").click();
 
   await expect(row).toHaveCount(0, { timeout: 500 });
   expect(deleteSeen).toBeTruthy();
@@ -1026,9 +1079,9 @@ test("订阅更新提示与滚动状态一致", async ({ page, request }) => {
   });
 
   await sendProxyRequest(`http://127.0.0.1:${server.port}/latest-${token}`);
-  const scrollBottomButton = page.getByTestId("traffic-scroll-bottom");
-  await expect(scrollBottomButton).toBeVisible();
-  await scrollBottomButton.click({ force: true });
+  const newTrafficIndicator = page.getByTestId("traffic-new-indicator");
+  await expect(newTrafficIndicator).toBeVisible();
+  await newTrafficIndicator.click({ force: true });
   await expect(
     page.getByTestId("traffic-row").filter({ hasText: `/latest-${token}` }).first(),
   ).toBeVisible();
@@ -1317,8 +1370,13 @@ test("SSE 详情通过弹窗展开且不改变列表项高度", async ({ page, r
     .toBeLessThan(2);
   await expect(page.getByTestId("sse-event-detail-content")).toBeVisible();
   await expect(page.getByTestId("sse-event-detail-content")).toContainText("target-long");
-  await page.getByRole("button", { name: "Close" }).click();
-  await expect(page.getByTestId("sse-event-detail-content")).toHaveCount(0);
+  await page
+    .locator(".ant-modal")
+    .filter({ has: page.getByTestId("sse-event-detail-content") })
+    .locator(".ant-modal-footer")
+    .getByRole("button", { name: "Close" })
+    .click();
+  await expect(page.getByTestId("sse-event-detail-content")).not.toBeVisible();
 
   await server.close();
 });
@@ -1692,8 +1750,9 @@ test("OpenAI 风格 SSE 会自动打开聚合后的 Response tab", async ({ page
   await sseRow.click();
 
   await expect(page.getByTestId("response-tab-openai")).toBeVisible();
-  await expect(page.getByTestId("traffic-detail")).toContainText('"object": "chat.completion"');
-  await expect(page.getByTestId("traffic-detail")).toContainText('"content": "token-1token-2token-3"');
+  await expect(page.getByTestId("traffic-detail")).toContainText("Model Info");
+  await expect(page.getByTestId("traffic-detail")).toContainText("gpt-4o-mini");
+  await expect(page.getByTestId("traffic-detail")).toContainText("token-1token-2token-3");
 
   await server.close();
 });

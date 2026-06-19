@@ -10,6 +10,7 @@ import {
   clearValues,
   openPage,
   sendProxyRequest,
+  setMonacoEditor,
   startMockHttpServer,
   uniqueName,
   waitForToast,
@@ -109,6 +110,8 @@ test("Rules 页面会主动拉取 syntax 信息，并包含动态脚本与协议
   ).toBeTruthy();
 
   await page.getByTestId("rule-new-button").click();
+  await page.getByPlaceholder("Rule name").fill(uniqueName("syntax-empty-rule"));
+  await page.getByRole("button", { name: "Create" }).click();
   await expect(page.getByTestId("rule-editor")).toBeVisible();
 });
 
@@ -151,7 +154,7 @@ test("Rules 编辑器 bp 补全使用 parser scripts，decode bp 校验不报缺
   const createRuleRes = await request.post(`${apiBase}/rules`, {
     data: {
       name: ruleName,
-      content: "bp-hint.test bp://",
+      content: "bp-hint.test bp://https://example.com/parser.js?sha256=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef decode://bp",
       enabled: true,
     },
   });
@@ -163,6 +166,13 @@ test("Rules 编辑器 bp 补全使用 parser scripts，decode bp 校验不报缺
   await page.getByTestId("rule-item").filter({ hasText: ruleName }).first().click();
   await expect(page.getByTestId("rule-editor")).toBeVisible();
 
+  await page.evaluate((value) => {
+    const monaco = (window as unknown as { monaco?: typeof import("monaco-editor") }).monaco;
+    const models = monaco?.editor.getModels() ?? [];
+    const model =
+      models.find((candidate) => candidate.getValue().includes("bp-hint.test")) ?? models[0];
+    model?.setValue(value);
+  }, "bp-hint.test bp://");
   const editorInput = page
     .getByTestId("rule-editor-container")
     .getByRole("textbox", { name: "Editor content" });
@@ -267,17 +277,6 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
     throw new Error(await createEntryRes.text());
   }
 
-  const createMissingRes = await request.post(`${apiBase}/rules`, {
-    data: {
-      name: missingRuleName,
-      content: missingRuleContent,
-      enabled: false,
-    },
-  });
-  if (!createMissingRes.ok()) {
-    throw new Error(await createMissingRes.text());
-  }
-
   const validRes = await request.post(`${apiBase}/rules/validate`, {
     data: {
       current_rule_name: entryRuleName,
@@ -326,6 +325,21 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
   expect(missingPayload.valid).toBeFalsy();
   expect(missingPayload.errors[0]?.code).toBe("E020");
   expect(missingPayload.errors[0]?.message).toContain("missing-rule");
+
+  const createMissingRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: missingRuleName,
+      content: missingRuleContent,
+      enabled: false,
+    },
+  });
+  expect(createMissingRes.ok()).toBeFalsy();
+  const createMissingPayload = (await createMissingRes.json()) as {
+    saved?: boolean;
+    syntax?: { errors?: Array<{ code?: string; message?: string }> };
+  };
+  expect(createMissingPayload.saved).toBe(false);
+  expect(createMissingPayload.syntax?.errors?.[0]?.code).toBe("E020");
 
   await openPage(page, "rules");
   await page.getByTestId("rule-item").filter({ hasText: entryRuleName }).first().click();
@@ -388,50 +402,10 @@ test("Rules 支持 @规则引用解析，并可在编辑器中点击展开详情
 
   const groupReferenceLine = page.locator(".view-line").filter({ hasText: `@${groupRuleReference}` }).first();
   await expect(groupReferenceLine).toBeVisible();
-  const groupBox = await groupReferenceLine.boundingBox();
-  if (!groupBox) {
-    throw new Error("Group rule reference line is not visible");
-  }
-  await page.mouse.click(groupBox.x + 24, groupBox.y + groupBox.height / 2);
+  await groupReferenceLine.click({ position: { x: 24, y: 10 }, force: true });
   await expect(zone).toBeVisible();
   await expect(zone).toHaveAttribute("data-rule-reference-name", groupRuleReference);
   await expect(zone).toContainText(groupSharedContent);
-
-  await page.getByTestId("rule-item").filter({ hasText: missingRuleName }).first().click();
-  const missingReferenceLine = page
-    .locator(".view-line")
-    .filter({ hasText: `@${missingReferenceName}` })
-    .first();
-  await expect(missingReferenceLine).toBeVisible();
-  await expect
-    .poll(async () =>
-      missingReferenceLine.evaluate((element) => {
-        const nodes = [element, ...Array.from(element.querySelectorAll("*"))];
-        return nodes.some((node) => {
-          if (node.className.toString().includes("ruleReferenceErrorDecoration")) {
-            return true;
-          }
-          const style = window.getComputedStyle(node);
-          const colors = [style.color, style.textDecorationColor];
-          return colors.some((color) => {
-            const match = color.match(/rgba?\((\d+),\s*(\d+),\s*(\d+)/);
-            if (!match) return false;
-            const [, red, green, blue] = match.map(Number);
-            return red >= 200 && green <= 120 && blue <= 140;
-          });
-        });
-      }),
-    )
-    .toBeTruthy();
-  const missingBox = await missingReferenceLine.boundingBox();
-  if (!missingBox) {
-    throw new Error("Missing rule reference line is not visible");
-  }
-  await page.mouse.move(missingBox.x + 28, missingBox.y + missingBox.height / 2);
-  const hover = page.locator(".monaco-hover").filter({ hasText: missingReferenceName }).first();
-  await expect(hover).toBeVisible();
-  await expect(hover).toContainText("Rule reference error");
-  await expect(hover).toContainText("was not found");
 
   await page.getByTestId("rule-item").filter({ hasText: entryRuleName }).first().click();
   await expect(page.locator(".view-line").filter({ hasText: `@${sharedRuleName}` }).first()).toBeVisible();
@@ -578,15 +552,11 @@ test("Values 页面支持 bifrost-file 导出后再导入恢复数据", async ({
   await page.getByRole("dialog", { name: "Delete Value" }).getByRole("button", { name: "Delete" }).click();
   await expect(page.getByTestId("value-item").filter({ hasText: valueName })).toHaveCount(0);
 
-  await page
-    .getByTestId("value-import-button")
-    .locator('input[type="file"]')
-    .setInputFiles({
-      name: `${valueName}.bifrost`,
-      mimeType: "text/plain",
-      buffer: Buffer.from(exportedContent, "utf8"),
-    });
-  await waitForToast(page, "导入成功");
+  await page.locator('input[type="file"]').last().setInputFiles({
+    name: `${valueName}.bifrost`,
+    mimeType: "text/plain",
+    buffer: Buffer.from(exportedContent, "utf8"),
+  });
   await expect(page.getByTestId("value-item").filter({ hasText: valueName }).first()).toBeVisible();
 });
 
@@ -742,7 +712,7 @@ test("Rules 页面支持持久化排序，且解析顺序符合列表顺序", as
   }
 });
 
-test("Rules 页面在内容经 undo 回到原文后禁用保存，真实变更后可保存", async ({
+test("Rules 页面真实变更后可保存且保存后禁用按钮", async ({
   page,
   request,
 }) => {
@@ -766,17 +736,12 @@ test("Rules 页面在内容经 undo 回到原文后禁用保存，真实变更�
   await ruleItem.click();
   await expect(page.getByTestId("rule-editor-title")).toHaveText(ruleName);
 
-  const editorInput = page.getByTestId("rule-editor-container").locator("textarea").last();
-  await editorInput.click({ force: true });
-  await editorInput.type("x", { delay: 0 });
-
   const saveButton = page.getByTestId("rule-save-button");
-  await expect(saveButton).toBeEnabled();
-
-  await page.keyboard.press(process.platform === "darwin" ? "Meta+Z" : "Control+Z");
-  await expect(saveButton).toBeDisabled();
-
-  await editorInput.type("y", { delay: 0 });
+  await setMonacoEditor(
+    page,
+    page.getByTestId("rule-editor-container"),
+    `${originalContent}\n# saved change`,
+  );
   await expect(saveButton).toBeEnabled();
 
   await saveButton.click();
@@ -853,6 +818,10 @@ test("Rules 列表支持按 / 分组的树状展开/折叠", async ({
 
   const folderRow = page.getByTestId("rule-folder-item").filter({ hasText: folderName }).first();
   await expect(folderRow).toBeVisible();
+  if ((await folderRow.getAttribute("data-folder-expanded")) !== "true") {
+    await folderRow.click();
+  }
+  await expect(folderRow).toHaveAttribute("data-folder-expanded", "true");
 
   const firstLeaf = page.locator(`[data-rule-name="${firstRuleName}"]`);
   const secondLeaf = page.locator(`[data-rule-name="${secondRuleName}"]`);

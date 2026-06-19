@@ -129,7 +129,7 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await openPage(page, "ai?aiSection=tools-asr");
 
   await expect(page.getByTestId("asr-home-tabs")).toBeVisible();
-  await expect(page.getByRole("tab", { name: "定时任务" })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Scheduled Tasks" })).toHaveAttribute(
     "aria-selected",
     "true",
   );
@@ -139,14 +139,14 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByTestId("asr-diarization-setup-card")).toHaveCount(0);
   await expect(page.getByTestId("voice-wake-actions-card")).toHaveCount(0);
 
-  await page.getByRole("tab", { name: "ASR 管理" }).click();
+  await page.getByRole("tab", { name: "ASR Management" }).click();
   await expect(page).toHaveURL(/asrTab=management/);
   await expect(page.getByTestId("asr-home-tab-management")).toBeVisible();
   await expect(page.getByText("Model Management", { exact: true })).toBeVisible();
   await expect(page.getByTestId("asr-workbench-card")).toBeVisible();
   await expect(page.getByTestId("asr-home-tab-scheduled")).toHaveCount(0);
 
-  await page.getByRole("tab", { name: "声纹识别与唤醒" }).click();
+  await page.getByRole("tab", { name: "Voiceprint & Wake" }).click();
   await expect(page).toHaveURL(/asrTab=voice/);
   await expect(page.getByTestId("asr-home-tab-voice")).toBeVisible();
   await expect(page.getByTestId("asr-diarization-setup-card")).toBeVisible();
@@ -154,7 +154,7 @@ test("ASR 首页按定时任务、ASR 管理、声纹识别与唤醒三 Tab 分�
   await expect(page.getByTestId("asr-workbench-card")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.getByRole("tab", { name: "声纹识别与唤醒" })).toHaveAttribute(
+  await expect(page.getByRole("tab", { name: "Voiceprint & Wake" })).toHaveAttribute(
     "aria-selected",
     "true",
   );

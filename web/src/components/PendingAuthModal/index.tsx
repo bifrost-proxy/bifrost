@@ -1,4 +1,5 @@
 import { useCallback } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Badge,
   Button,
@@ -14,6 +15,7 @@ import {
   CheckOutlined,
   CloseOutlined,
   ClearOutlined,
+  SettingOutlined,
   WarningOutlined,
 } from "@ant-design/icons";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
@@ -30,6 +32,7 @@ function formatTimeAgo(timestamp: number) {
 }
 
 export default function PendingAuthModal() {
+  const navigate = useNavigate();
   const { token } = theme.useToken();
   const pendingList = usePendingAuthStore((s) => s.pendingList);
   const pendingCount = usePendingAuthStore((s) => s.pendingCount);
@@ -70,6 +73,10 @@ export default function PendingAuthModal() {
     }
   }, [clearPending]);
 
+  const handleOpenAccessControl = useCallback(() => {
+    navigate("/settings?tab=access");
+  }, [navigate]);
+
   return (
     <Modal
       open={pendingCount > 0}
@@ -85,6 +92,13 @@ export default function PendingAuthModal() {
       }
       footer={
         <Space>
+          <Button
+            icon={<SettingOutlined />}
+            onClick={handleOpenAccessControl}
+            data-testid="pending-auth-modal-settings"
+          >
+            Settings
+          </Button>
           {pendingList.length > 0 && (
             <Popconfirm
               title="Clear all pending authorizations?"

@@ -2386,6 +2386,7 @@ export default function RemoteInvokeTab({
                   icon={<EditOutlined />}
                   onClick={openShellEditor}
                   disabled={shellLoading}
+                  data-testid="settings-remote-invoke-manage-shell-access"
                 >
                   Manage Access
                 </Button>

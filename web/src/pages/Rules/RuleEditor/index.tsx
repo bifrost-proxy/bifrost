@@ -51,6 +51,10 @@ function formatSyncStatus(sync?: RuleSyncInfo | null): string {
   }
 }
 
+function normalizeRuleEditorContent(content: string | undefined | null): string {
+  return (content ?? "").replace(/\r\n/g, "\n").replace(/\n+$/g, "");
+}
+
 interface RuleReferenceMatch {
   name: string;
   range: IRange;
@@ -114,6 +118,7 @@ export default function RuleEditor() {
     currentRule,
     selectedRuleName,
     editingContent,
+    savedContent,
     loading,
     saving,
     isGroupMode,
@@ -122,6 +127,7 @@ export default function RuleEditor() {
     groupWritable,
     rules,
     setEditingContent,
+    clearEditingContent,
     saveCurrentRule,
     deleteRule,
   } = useRulesStore();
@@ -150,6 +156,7 @@ export default function RuleEditor() {
     currentRule: typeof currentRule;
     selectedRuleName: typeof selectedRuleName;
     editingContent: typeof editingContent;
+    savedContent: typeof savedContent;
     activeGroupId: typeof activeGroupId;
     activeGroupName: typeof activeGroupName;
     isGroupMode: typeof isGroupMode;
@@ -200,6 +207,7 @@ export default function RuleEditor() {
       currentRule,
       selectedRuleName,
       editingContent,
+      savedContent,
       activeGroupId,
       activeGroupName,
       isGroupMode,
@@ -208,6 +216,7 @@ export default function RuleEditor() {
     currentRule,
     selectedRuleName,
     editingContent,
+    savedContent,
     activeGroupId,
     activeGroupName,
     isGroupMode,
@@ -444,7 +453,19 @@ export default function RuleEditor() {
     collapseRuleReference();
     const content = modelRef.current.getValue();
     ruleDetailCacheRef.current.set(selectedName, content);
-    setEditingContent(selectedName, content);
+    const savedContent =
+      currentRuleRef.current?.currentRule?.name === selectedName
+        ? currentRuleRef.current.savedContent[selectedName] ??
+          currentRuleRef.current.currentRule.content
+        : undefined;
+    if (
+      savedContent !== undefined &&
+      normalizeRuleEditorContent(content) === normalizeRuleEditorContent(savedContent)
+    ) {
+      clearEditingContent(selectedName);
+    } else {
+      setEditingContent(selectedName, content);
+    }
     refreshRuleReferenceDecorations();
 
     if (validatorRef.current && modelRef.current) {
@@ -452,6 +473,7 @@ export default function RuleEditor() {
     }
   }, [
     collapseRuleReference,
+    clearEditingContent,
     refreshRuleReferenceDecorations,
     setEditingContent,
     handleValidationComplete,
@@ -684,7 +706,8 @@ export default function RuleEditor() {
   const hasChanges =
     selectedRuleName &&
     editingContent[selectedRuleName] !== undefined &&
-    editingContent[selectedRuleName] !== currentRule?.content;
+    normalizeRuleEditorContent(editingContent[selectedRuleName]) !==
+      normalizeRuleEditorContent(savedContent[selectedRuleName] ?? currentRule?.content);
   const metaItems = currentRule
     ? isGroupMode
       ? [
