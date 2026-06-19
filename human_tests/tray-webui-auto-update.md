@@ -121,6 +121,7 @@
 - tray 菜单状态行下方展示当前版本号，例如 `Version v0.0.110`，且该信息行不可点击。
 - tray 更新提示不再依赖 Web UI 先写缓存。
 - tray 对新鲜缓存不发起高频 GitHub 请求；过期或缺失缓存才会进入后台检查路径。
+- Windows CI 显式 log-only 降级模式只要求 `bifrost-tray starting` 启动标记，不要求后台线程日志，因为该模式表示无交互 runner 上 helper 可能无法长驻。
 
 ## 清理步骤
 
@@ -143,4 +144,4 @@
 
 2026-06-19 本次优化已执行：
 
-- TC-TWA-06：通过。执行 `cargo test -p bifrost-cli test_menu_running_state`、`cargo test -p bifrost-cli test_tray_update_cache_missing_or_stale_requires_fetch` 与 `cargo test -p bifrost-cli test_detect_update_available_uses_tray_cache_without_network`，过滤用例均在 `src/lib.rs` 和 `src/main.rs` 单测目标中通过；验证菜单包含不可点击的当前版本号、缓存缺失/过期会进入后台检查路径、新鲜缓存跳过联网、缓存中存在更高版本时 tray 识别 `Update to v999.0.0` 的前置状态。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 生成当前 debug 二进制，再执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，真实拉起 Darwin tray helper（port 16172，tray_pid 34284），脚本通过并断言 tray 日志包含 `tray update check skipped; cached version is still fresh`。
+- TC-TWA-06：通过。执行 `cargo test -p bifrost-cli test_menu_running_state`、`cargo test -p bifrost-cli test_tray_update_cache_missing_or_stale_requires_fetch` 与 `cargo test -p bifrost-cli test_detect_update_available_uses_tray_cache_without_network`，过滤用例均在 `src/lib.rs` 和 `src/main.rs` 单测目标中通过；验证菜单包含不可点击的当前版本号、缓存缺失/过期会进入后台检查路径、新鲜缓存跳过联网、缓存中存在更高版本时 tray 识别 `Update to v999.0.0` 的前置状态。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 生成当前 debug 二进制，再执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，真实拉起 Darwin tray helper（port 16172，tray_pid 34284），脚本通过并断言 tray 日志包含 `tray update check skipped; cached version is still fresh`。GitHub Actions run `27835478800` 暴露 Windows ARM log-only 模式下 helper 可重复启动但不长驻，已将脚本调整为该显式降级模式只验证启动标记，后台更新日志断言保留给有存活 helper 的平台。

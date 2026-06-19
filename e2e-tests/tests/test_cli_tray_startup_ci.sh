@@ -212,16 +212,20 @@ if ! grep -q "bifrost-tray starting" "$TRAY_LOG"; then
   exit 1
 fi
 
-for _ in $(seq 1 40); do
-  if grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
-    break
+if [[ "$TRAY_PID" == "log-only" ]]; then
+  echo "INFO: skipping background update-check log assertion in Windows log-only tray mode"
+else
+  for _ in $(seq 1 40); do
+    if grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
+      break
+    fi
+    sleep 0.25
+  done
+  if ! grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
+    echo "ERROR: tray helper did not honor fresh version cache for background update check" >&2
+    dump_diagnostics
+    exit 1
   fi
-  sleep 0.25
-done
-if ! grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
-  echo "ERROR: tray helper did not honor fresh version cache for background update check" >&2
-  dump_diagnostics
-  exit 1
 fi
 
 curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/proxy/address" >"$DATA_DIR/proxy-address.json"
