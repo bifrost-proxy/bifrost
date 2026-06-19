@@ -37,6 +37,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -68,6 +69,76 @@ mod tests {
         }"#;
         let task: AsrDirectoryTask = serde_json::from_str(json).unwrap();
         assert_eq!(task.runtime_strategy, AsrRuntimeStrategy::ReusePerFile);
+        assert_eq!(task.max_concurrent_files, 1);
+    }
+
+    #[test]
+    fn max_concurrent_files_is_clamped_and_effective_for_fork_per_chunk() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut task = test_directory_task("concurrency-task", temp.path().join("audio"));
+        task.max_concurrent_files = 99;
+        task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
+        assert_eq!(normalize_max_concurrent_files(task.max_concurrent_files), 16);
+        assert_eq!(effective_max_concurrent_files(&task), 16);
+
+        task.runtime_strategy = AsrRuntimeStrategy::ReusePerFile;
+        assert_eq!(effective_max_concurrent_files(&task), 1);
+
+        task.runtime_strategy = AsrRuntimeStrategy::ForkPerChunk;
+        task.diarization.enabled = true;
+        assert_eq!(effective_max_concurrent_files(&task), 16);
+    }
+
+    #[test]
+    fn running_task_allows_concurrency_update_but_rejects_runtime_risk() {
+        let _lock = test_data_dir_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let task = test_directory_task("running-concurrency-task", audio_dir);
+        add_task(task.clone()).unwrap();
+        RUNNING_TASKS.lock().unwrap().insert(task.id.clone());
+
+        let update = UpdateTaskRequest {
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: None,
+            runtime_strategy: None,
+            max_concurrent_files: Some(4),
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        let updated = update_task_config(&task.id, update).unwrap();
+        assert_eq!(updated.max_concurrent_files, 4);
+
+        let risky_update = UpdateTaskRequest {
+            name: None,
+            audio_dir: None,
+            recursive: None,
+            enabled: None,
+            paused: None,
+            schedule: None,
+            language: None,
+            model: Some("Qwen3-ASR-0.6B".to_string()),
+            runtime_strategy: None,
+            max_concurrent_files: None,
+            diarization: None,
+            daily_agent: None,
+            external_devices: None,
+            import_policy: None,
+        };
+        let error = update_task_config(&task.id, risky_update).unwrap_err();
+        assert_eq!(error.0, StatusCode::CONFLICT);
+
+        RUNNING_TASKS.lock().unwrap().remove(&task.id);
     }
 
     #[test]
@@ -816,6 +887,9 @@ mod tests {
                 current_chunk_total: 9,
                 processed_now: 2,
                 failed_now: 0,
+                max_concurrent_files: default_max_concurrent_files(),
+                effective_max_concurrent_files: default_max_concurrent_files(),
+                active_file_count: 0,
                 stage: "asr".to_string(),
                 stage_message: Some("processing chunks".to_string()),
                 message: Some("processing".to_string()),
@@ -1081,6 +1155,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1330,6 +1405,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1359,6 +1435,19 @@ mod tests {
             .lock()
             .unwrap()
             .remove("force-pause-task");
+    }
+
+    #[test]
+    fn diarization_worker_abort_error_is_retryable_on_recovery() {
+        assert!(is_retryable_asr_server_acquire_error(
+            "ASR diarization worker failed:"
+        ));
+        assert!(is_retryable_asr_server_acquire_error(
+            "managed ASR server start failed: Qwen3-ASR service is busy"
+        ));
+        assert!(!is_retryable_asr_server_acquire_error(
+            "ASR diarization worker failed: missing model assets"
+        ));
     }
 
     #[test]
@@ -1425,6 +1514,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1534,6 +1624,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1597,6 +1688,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1662,6 +1754,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1710,6 +1803,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1759,6 +1853,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1812,6 +1907,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -1944,6 +2040,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: start,
             updated_at_ms: start,
@@ -2511,6 +2608,7 @@ mod tests {
 
     #[test]
     fn running_task_guard_releases_marker_on_drop() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();
         {
             let _guard = RunningTaskGuard::acquire("guard-task").unwrap();
@@ -3159,6 +3257,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -3359,6 +3458,7 @@ mod tests {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-1.7B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,

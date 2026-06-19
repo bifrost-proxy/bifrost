@@ -380,6 +380,8 @@ export interface AsrTaskSummary {
   cleanable_source_bytes: number;
   cleanable_source_file_count: number;
   running: boolean;
+  max_concurrent_files?: number;
+  effective_max_concurrent_files?: number;
   diarization_enabled?: boolean;
   diarization_ready?: boolean;
   diarization_running?: boolean;
@@ -521,6 +523,7 @@ export interface AsrDirectoryTask {
   language: string;
   model: string;
   runtime_strategy: AsrRuntimeStrategy;
+  max_concurrent_files: number;
   diarization?: {
     enabled: boolean;
     profile: string;
@@ -587,6 +590,7 @@ export interface CreateAsrTaskRequest {
   language?: string;
   model?: string;
   runtime_strategy?: AsrRuntimeStrategy;
+  max_concurrent_files?: number;
   diarization?: AsrDirectoryTask["diarization"];
   external_devices?: AsrExternalDeviceBinding[];
   import_policy?: AsrExternalImportPolicy;

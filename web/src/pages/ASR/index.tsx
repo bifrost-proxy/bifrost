@@ -852,6 +852,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
         language: values.language,
         model: values.model,
         runtime_strategy: values.runtime_strategy,
+        max_concurrent_files: values.max_concurrent_files,
         diarization: {
           enabled: Boolean(values.diarization_enabled),
           profile: values.diarization_profile || "sherpa-onnx-balanced",
@@ -899,6 +900,7 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           language: values.language,
           model: values.model,
           runtime_strategy: values.runtime_strategy,
+          max_concurrent_files: values.max_concurrent_files,
           diarization: {
             enabled: Boolean(values.diarization_enabled),
             profile: values.diarization_profile || "sherpa-onnx-balanced",

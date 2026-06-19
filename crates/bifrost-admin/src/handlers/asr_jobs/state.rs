@@ -11,9 +11,11 @@ static EXTERNAL_IMPORT_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(())
 static RUNNING_EXTERNAL_IMPORT_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
 static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static FILE_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";
+const ASR_TASK_MAX_CONCURRENT_FILES_LIMIT: u8 = 16;
 const ASR_AUTO_FALLBACK_RTF_MULTIPLIER: f64 = 1.5;
 const MIN_BISECT_SECS: u64 = 2;
 const FFMPEG_NORMALIZE_MIN_TIMEOUT_SECS: u64 = 120;
@@ -104,6 +106,8 @@ pub(crate) struct AsrDirectoryTask {
     pub model: String,
     #[serde(default)]
     pub runtime_strategy: AsrRuntimeStrategy,
+    #[serde(default = "default_max_concurrent_files")]
+    pub max_concurrent_files: u8,
     #[serde(default)]
     pub diarization: AsrDiarizationConfig,
     pub created_at_ms: u64,
@@ -218,6 +222,22 @@ fn default_external_max_file_bytes() -> u64 {
 
 fn default_content_hash_algorithm() -> String {
     "blake3".to_string()
+}
+
+fn default_max_concurrent_files() -> u8 {
+    1
+}
+
+fn normalize_max_concurrent_files(value: u8) -> u8 {
+    value.clamp(1, ASR_TASK_MAX_CONCURRENT_FILES_LIMIT)
+}
+
+fn effective_max_concurrent_files(task: &AsrDirectoryTask) -> u8 {
+    if task.runtime_strategy != AsrRuntimeStrategy::ForkPerChunk {
+        1
+    } else {
+        normalize_max_concurrent_files(task.max_concurrent_files)
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -673,6 +693,8 @@ struct TaskSummary {
     cleanable_source_bytes: u64,
     cleanable_source_file_count: usize,
     running: bool,
+    max_concurrent_files: u8,
+    effective_max_concurrent_files: u8,
     diarization_enabled: bool,
     diarization_ready: bool,
     diarization_running: bool,
@@ -765,6 +787,12 @@ struct AsrRunProgress {
     processed_now: usize,
     #[serde(default)]
     failed_now: usize,
+    #[serde(default = "default_max_concurrent_files")]
+    max_concurrent_files: u8,
+    #[serde(default = "default_max_concurrent_files")]
+    effective_max_concurrent_files: u8,
+    #[serde(default)]
+    active_file_count: usize,
     #[serde(default = "default_asr_progress_stage")]
     stage: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -789,6 +817,8 @@ struct TaskWatchTask {
     language: String,
     model: String,
     runtime_strategy: AsrRuntimeStrategy,
+    max_concurrent_files: u8,
+    effective_max_concurrent_files: u8,
     diarization: AsrDiarizationConfig,
     last_run_at_ms: Option<u64>,
     next_run_at_ms: Option<u64>,
@@ -813,6 +843,9 @@ struct TaskWatchProgress {
     current_file_total: usize,
     current_chunk_done: usize,
     current_chunk_total: usize,
+    max_concurrent_files: u8,
+    effective_max_concurrent_files: u8,
+    active_file_count: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
     eta_ms: Option<u64>,
     eta_confidence: &'static str,
@@ -1097,6 +1130,7 @@ struct CreateTaskRequest {
     language: Option<String>,
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
+    max_concurrent_files: Option<u8>,
     diarization: Option<AsrDiarizationConfig>,
     daily_agent: Option<AsrDailyAgentConfig>,
     external_devices: Option<Vec<AsrExternalDeviceBinding>>,
@@ -1114,6 +1148,7 @@ struct UpdateTaskRequest {
     language: Option<String>,
     model: Option<String>,
     runtime_strategy: Option<AsrRuntimeStrategy>,
+    max_concurrent_files: Option<u8>,
     diarization: Option<AsrDiarizationConfig>,
     daily_agent: Option<AsrDailyAgentConfig>,
     external_devices: Option<Vec<AsrExternalDeviceBinding>>,
