@@ -212,6 +212,53 @@
     }
 
     #[test]
+    fn test_tray_update_cache_missing_or_stale_requires_fetch() {
+        let dir = tempfile::tempdir().unwrap();
+
+        assert!(should_fetch_update_cache(dir.path()));
+
+        let fresh_cache = bifrost_core::version_check::VersionCache {
+            latest_version: "999.0.0".to_string(),
+            release_highlights: vec!["fresh".to_string()],
+            checked_at: chrono::Utc::now(),
+        };
+        assert!(write_version_cache(dir.path(), &fresh_cache));
+        assert!(!should_fetch_update_cache(dir.path()));
+
+        let stale_cache = bifrost_core::version_check::VersionCache {
+            checked_at: chrono::Utc::now()
+                - chrono::Duration::seconds(TRAY_UPDATE_CACHE_MAX_AGE_SECS + 1),
+            ..fresh_cache
+        };
+        assert!(write_version_cache(dir.path(), &stale_cache));
+        assert!(should_fetch_update_cache(dir.path()));
+    }
+
+    #[test]
+    fn test_detect_update_available_uses_tray_cache_without_network() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = bifrost_core::version_check::VersionCache {
+            latest_version: "999.0.0".to_string(),
+            release_highlights: vec!["background check".to_string()],
+            checked_at: chrono::Utc::now(),
+        };
+        assert!(write_version_cache(dir.path(), &cache));
+
+        assert_eq!(
+            detect_update_available(dir.path()),
+            Some("999.0.0".to_string())
+        );
+
+        let old_cache = bifrost_core::version_check::VersionCache {
+            latest_version: "0.0.0".to_string(),
+            release_highlights: Vec::new(),
+            checked_at: chrono::Utc::now(),
+        };
+        assert!(write_version_cache(dir.path(), &old_cache));
+        assert_eq!(detect_update_available(dir.path()), None);
+    }
+
+    #[test]
     fn test_explicit_reload_and_user_action_replace_native_menu() {
         assert!(should_replace_native_menu(true, false, true));
         assert!(should_replace_native_menu(false, true, true));

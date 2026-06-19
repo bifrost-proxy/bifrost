@@ -42,9 +42,13 @@ const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 const SERVICE_IDLE_EXIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
+const VERSION_CACHE_FILE: &str = "version_cache.json";
 const RECENT_RULE_LIMIT: usize = 5;
 const TRAY_THREAD_STACK_SIZE: usize = 512 * 1024;
 const TRAY_LOG_BUFFERED_LINES_LIMIT: usize = 1024;
+const TRAY_UPDATE_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
+const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
+const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -164,6 +168,22 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         );
     })
     .map_err(|error| format!("failed to spawn tray menu poll thread: {error}"))?;
+
+    let update_quit = should_quit.clone();
+    let update_state = current_state.clone();
+    let update_args = args.clone();
+    let update_snapshot = menu_data.clone();
+    let update_generation = menu_data_generation.clone();
+    spawn_tray_thread("bifrost-tray-update-check", move || {
+        poll_update_check(
+            &update_quit,
+            &update_state,
+            &update_args,
+            &update_snapshot,
+            &update_generation,
+        );
+    })
+    .map_err(|error| format!("failed to spawn tray update check thread: {error}"))?;
 
     let menu_receiver = MenuEvent::receiver().clone();
     let tray_receiver = TrayIconEvent::receiver().clone();
@@ -681,15 +701,107 @@ fn load_menu_data_snapshot(
 /// Read the version cache written by the admin `VersionChecker` and return the
 /// latest version string when it is newer than the running tray binary.
 fn detect_update_available(data_dir: &Path) -> Option<String> {
-    let cache_path = data_dir.join("version_cache.json");
-    let content = fs::read_to_string(&cache_path).ok()?;
-    let cache: bifrost_core::version_check::VersionCache = serde_json::from_str(&content).ok()?;
+    let cache = read_version_cache(data_dir)?;
     let current = env!("CARGO_PKG_VERSION");
     if bifrost_core::version_check::is_newer_version(current, &cache.latest_version) {
         Some(cache.latest_version)
     } else {
         None
     }
+}
+
+fn version_cache_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(VERSION_CACHE_FILE)
+}
+
+fn read_version_cache(data_dir: &Path) -> Option<bifrost_core::version_check::VersionCache> {
+    let content = fs::read_to_string(version_cache_path(data_dir)).ok()?;
+    serde_json::from_str(&content).ok()
+}
+
+fn write_version_cache(data_dir: &Path, cache: &bifrost_core::version_check::VersionCache) -> bool {
+    let path = version_cache_path(data_dir);
+    if let Some(parent) = path.parent() {
+        if let Err(error) = fs::create_dir_all(parent) {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %error,
+                "failed to create data dir before writing version cache"
+            );
+            return false;
+        }
+    }
+    match serde_json::to_string_pretty(cache) {
+        Ok(content) => {
+            let tmp = path.with_extension("json.tmp");
+            match fs::write(&tmp, content).and_then(|_| fs::rename(&tmp, &path)) {
+                Ok(()) => true,
+                Err(error) => {
+                    let _ = fs::remove_file(&tmp);
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %error,
+                        "failed to write version cache"
+                    );
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to encode version cache");
+            false
+        }
+    }
+}
+
+fn version_cache_is_fresh(cache: &bifrost_core::version_check::VersionCache) -> bool {
+    chrono::Utc::now().signed_duration_since(cache.checked_at)
+        < chrono::Duration::seconds(TRAY_UPDATE_CACHE_MAX_AGE_SECS)
+}
+
+fn should_fetch_update_cache(data_dir: &Path) -> bool {
+    read_version_cache(data_dir)
+        .as_ref()
+        .is_none_or(|cache| !version_cache_is_fresh(cache))
+}
+
+fn refresh_update_cache_from_github(data_dir: &Path) -> bool {
+    if !should_fetch_update_cache(data_dir) {
+        tracing::info!("tray update check skipped; cached version is still fresh");
+        return false;
+    }
+
+    match bifrost_core::version_check::fetch_latest_release_sync() {
+        Ok((latest, highlights)) => {
+            let cache = bifrost_core::version_check::VersionCache {
+                latest_version: latest,
+                release_highlights: highlights,
+                checked_at: chrono::Utc::now(),
+            };
+            let changed = read_version_cache(data_dir)
+                .as_ref()
+                .is_none_or(|current| current.latest_version != cache.latest_version);
+            if write_version_cache(data_dir, &cache) {
+                tracing::info!(
+                    latest_version = %cache.latest_version,
+                    has_update = bifrost_core::version_check::is_newer_version(
+                        env!("CARGO_PKG_VERSION"),
+                        &cache.latest_version
+                    ),
+                    "tray background update check completed"
+                );
+                return changed;
+            }
+        }
+        Err(error) => {
+            tracing::debug!(
+                error = %error,
+                "tray background update check failed; keeping existing cache"
+            );
+        }
+    }
+
+    false
 }
 
 fn load_system_proxy_for_menu(
@@ -2096,6 +2208,42 @@ fn poll_menu_data(
     }
 }
 
+fn poll_update_check(
+    quit_flag: &AtomicBool,
+    state: &AtomicU8,
+    args: &TrayArgs,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &AtomicU64,
+) {
+    sleep_interruptibly(quit_flag, tray_update_check_initial_delay());
+
+    loop {
+        if quit_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let cache_changed = refresh_update_cache_from_github(&args.data_dir);
+        if cache_changed {
+            let svc_state = match state.load(Ordering::Relaxed) {
+                STATE_RUNNING => ServiceState::Running,
+                STATE_STOPPED => ServiceState::Stopped,
+                _ => ServiceState::Disconnected,
+            };
+            refresh_menu_data_snapshot(args, svc_state, menu_data, generation, false);
+        }
+
+        sleep_interruptibly(quit_flag, TRAY_UPDATE_CHECK_INTERVAL);
+    }
+}
+
+fn tray_update_check_initial_delay() -> Duration {
+    std::env::var("BIFROST_TRAY_UPDATE_CHECK_INITIAL_DELAY_MS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(TRAY_UPDATE_CHECK_INITIAL_DELAY)
+}
+
 fn request_system_proxy_menu_refresh(
     args: &TrayArgs,
     state: &AtomicU8,
@@ -2166,12 +2314,16 @@ fn remove_own_tray_pid(data_dir: &Path) {
 }
 
 fn sleep_until_next_menu_data_poll(quit_flag: &AtomicBool) {
+    sleep_interruptibly(quit_flag, POLL_INTERVAL);
+}
+
+fn sleep_interruptibly(quit_flag: &AtomicBool, duration: Duration) {
     let mut slept = Duration::ZERO;
-    while slept < POLL_INTERVAL {
+    while slept < duration {
         if quit_flag.load(Ordering::Relaxed) {
             break;
         }
-        let remaining = POLL_INTERVAL.saturating_sub(slept);
+        let remaining = duration.saturating_sub(slept);
         let chunk = remaining.min(Duration::from_millis(100));
         thread::sleep(chunk);
         slept += chunk;
