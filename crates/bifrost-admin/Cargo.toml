@@ -73,7 +73,7 @@ tokio-rustls = { version = "0.26", default-features = false, features = ["ring"]
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-native-certs = "0.8"
 once_cell.workspace = true
-jsonwebtoken = "9"
+jsonwebtoken = { version = "10.3", features = ["aws_lc_rs"] }
 bcrypt = "0.17"
 rand.workspace = true
 gethostname = "1"
