@@ -208,6 +208,9 @@ fn update_run_progress<F>(task_id: &str, update: F)
 where
     F: FnOnce(&mut AsrRunProgress),
 {
+    let _guard = RUN_PROGRESS_UPDATE_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (progress, _) = load_run_progress(task_id);
     let mut progress = progress.unwrap_or_else(|| start_run_progress(task_id, "background"));
     update(&mut progress);
@@ -292,6 +295,7 @@ fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
     for (key, record) in store.files.iter() {
         merged.files.insert(key.clone(), record.clone());
     }
+    normalize_completed_processing_records(task_id, &mut merged);
     atomic_json_write(&path, &merged)
 }
 
@@ -311,7 +315,16 @@ fn atomic_text_write(path: &Path, content: &str) -> Result<(), String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("create dir for {}: {e}", path.display()))?;
     }
-    let tmp = path.with_extension("tmp");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("atomic");
+    let tmp = path.with_file_name(format!(
+        ".{file_name}.{}.{}.{}.tmp",
+        std::process::id(),
+        now_ms(),
+        ATOMIC_WRITE_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
     std::fs::write(&tmp, content.as_bytes())
         .map_err(|e| format!("write temp file {}: {e}", tmp.display()))?;
     std::fs::rename(&tmp, path)
@@ -351,16 +364,16 @@ fn find_task(id: &str) -> Option<AsrDirectoryTask> {
 }
 
 fn task_detail(task: AsrDirectoryTask) -> TaskDetail {
-    let summary = if RUNNING_TASKS.lock().unwrap().contains(&task.id) {
-        summarize_task_from_store(&task)
-    } else {
-        summarize_task(&task)
-    };
+    let discovered = discover_audio_files(&task.audio_dir, task.recursive).unwrap_or_default();
+    let mut file_store = load_file_store(&task.id);
+    normalize_completed_processing_records(&task.id, &mut file_store);
+    let visible = visible_file_entries(&task, &file_store, Some(&discovered));
+    let visible_store = file_store_from_entries(visible.iter().cloned());
+    let summary = summarize_task_records(&task, &visible_store, Some(&discovered));
     let daily_documents =
         list_daily_documents_for_task(&bifrost_storage::data_dir(), &task.id, &task.name)
             .unwrap_or_default();
-    let mut files = load_file_store(&task.id)
-        .files
+    let mut files = visible
         .into_iter()
         .map(|(key, record)| file_record_with_key(&task, key, record))
         .collect::<Vec<_>>();
@@ -398,7 +411,8 @@ fn file_record_with_key(
 }
 
 fn task_watch_snapshot(task: AsrDirectoryTask, include_recent: bool) -> TaskWatchSnapshot {
-    let file_store = load_file_store(&task.id);
+    let mut file_store = load_file_store(&task.id);
+    normalize_completed_processing_records(&task.id, &mut file_store);
     task_watch_snapshot_from_store(task, &file_store, include_recent)
 }
 
@@ -409,7 +423,9 @@ fn task_watch_snapshot_from_store(
 ) -> TaskWatchSnapshot {
     let (run_progress, run_progress_warning) = load_run_progress(&task.id);
     let running = RUNNING_TASKS.lock().unwrap().contains(&task.id);
-    let summary = summarize_task_records(&task, file_store, None);
+    let visible = visible_file_entries(&task, file_store, None);
+    let visible_store = file_store_from_entries(visible.iter().cloned());
+    let summary = summarize_task_records(&task, &visible_store, None);
     let service = read_service_state(&bifrost_storage::data_dir()).map(|state| TaskWatchService {
         managed: true,
         server_url: format!("http://{}:{}", state.host, state.port),
@@ -418,7 +434,7 @@ fn task_watch_snapshot_from_store(
         owner_id: state.owner_id,
     });
 
-    let current = current_watch_file(file_store, run_progress.as_ref());
+    let current = current_watch_file(&visible_store, run_progress.as_ref());
     let current_key = current.as_ref().map(|(key, _)| key.clone());
     let current_record = current.as_ref().map(|(_, record)| *record);
     let current_path = run_progress
@@ -453,7 +469,12 @@ fn task_watch_snapshot_from_store(
             .min(100.0)
     };
 
-    let consumption = task_watch_consumption(file_store, current_record, current_chunk_done, current_chunk_total);
+    let consumption = task_watch_consumption(
+        &visible_store,
+        current_record,
+        current_chunk_done,
+        current_chunk_total,
+    );
     let (eta_ms, eta_confidence) = estimate_watch_eta(
         &consumption,
         running,
@@ -481,7 +502,7 @@ fn task_watch_snapshot_from_store(
     }
 
     let recent_files = if include_recent {
-        recent_watch_files(&task, file_store, 8)
+        recent_watch_files(&task, &visible_store, 8)
     } else {
         Vec::new()
     };
@@ -808,13 +829,15 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
             }
         }
         let mut files = load_file_store(&task.id);
+        let completed_count = normalize_completed_processing_records(&task.id, &mut files);
         let reset_count = reset_interrupted_processing_records(&task.id, &mut files);
         let retryable_failed_count = reset_retryable_failed_records(&task.id, &mut files);
-        if reset_count > 0 || retryable_failed_count > 0 {
+        if completed_count > 0 || reset_count > 0 || retryable_failed_count > 0 {
             match save_file_store(&task.id, &files) {
                 Ok(()) => {
                     tracing::warn!(
                         task_id = %task.id,
+                        completed_count,
                         reset_count,
                         retryable_failed_count,
                         "reset recoverable ASR records on scheduler startup"
@@ -823,6 +846,7 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
                 Err(error) => {
                     tracing::warn!(
                         task_id = %task.id,
+                        completed_count,
                         reset_count,
                         retryable_failed_count,
                         error = %error,
@@ -832,7 +856,9 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
                 }
             }
         }
-        if (reset_count > 0 || retryable_failed_count > 0) && task.last_error.is_some() {
+        if (completed_count > 0 || reset_count > 0 || retryable_failed_count > 0)
+            && task.last_error.is_some()
+        {
             task.last_error = None;
             task.updated_at_ms = now_ms();
             task_store_changed = true;
@@ -880,6 +906,9 @@ fn reset_interrupted_processing_records(task_id: &str, files: &mut FileStore) ->
         if record.status != FileStatus::Processing {
             continue;
         }
+        if completed_processing_record_is_recoverable(record) {
+            continue;
+        }
         record.status = FileStatus::Pending;
         record.started_at_ms = None;
         record.finished_at_ms = None;
@@ -896,6 +925,82 @@ fn reset_interrupted_processing_records(task_id: &str, files: &mut FileStore) ->
         );
     }
     reset_count
+}
+
+fn normalize_completed_processing_records(_task_id: &str, files: &mut FileStore) -> usize {
+    let mut completed_count = 0usize;
+    for record in files.files.values_mut() {
+        if !completed_processing_record_is_recoverable(record) {
+            continue;
+        }
+        record.status = FileStatus::Success;
+        record.error = None;
+        if record.progress_total.is_none() {
+            record.progress_total = Some(record.chunk_metrics.len());
+        }
+        if let Some(total) = record.progress_total {
+            record.progress_current = Some(total);
+        }
+        if record.text_chars == 0 {
+            if let Some(path) = record.output_text_path.as_ref() {
+                if let Ok(text) = std::fs::read_to_string(path) {
+                    record.text_chars = text.chars().count();
+                }
+            }
+        }
+        record.finished_at_ms = Some(
+            record
+                .chunk_metrics
+                .iter()
+                .map(|metric| metric.recorded_at_ms)
+                .max()
+                .unwrap_or_else(now_ms),
+        );
+        completed_count += 1;
+    }
+    completed_count
+}
+
+fn completed_processing_record_is_recoverable(record: &FileRecord) -> bool {
+    if record.status != FileStatus::Processing
+        || record.error.is_some()
+        || !record.failed_chunks.is_empty()
+        || record.chunk_metrics.is_empty()
+    {
+        return false;
+    }
+    if !record.chunk_metrics.iter().all(|metric| metric.status == "ok") {
+        return false;
+    }
+    let Some(total) = record.progress_total else {
+        return false;
+    };
+    let chunk_indexes = record
+        .chunk_metrics
+        .iter()
+        .map(|metric| metric.chunk_index)
+        .collect::<HashSet<_>>();
+    if total == 0 || chunk_indexes.len() < total {
+        return false;
+    }
+    if !record
+        .output_text_path
+        .as_ref()
+        .is_some_and(|path| path.is_file())
+    {
+        return false;
+    }
+    if let Some(path) = record.output_metadata_path.as_ref() {
+        if !path.is_file() {
+            return false;
+        }
+    }
+    if let Some(path) = record.output_timeline_path.as_ref() {
+        if !path.is_file() {
+            return false;
+        }
+    }
+    true
 }
 
 fn reset_retryable_failed_records(task_id: &str, files: &mut FileStore) -> usize {
@@ -1017,7 +1122,10 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         .iter()
         .map(|path| source_key(path))
         .collect::<HashSet<_>>();
-    let file_store = load_file_store(&task.id);
+    let mut file_store = load_file_store(&task.id);
+    normalize_completed_processing_records(&task.id, &mut file_store);
+    let visible = visible_file_entries(task, &file_store, Some(&discovered));
+    let file_store = file_store_from_entries(visible);
     let audio_source_file_count = discovered.len();
     let audio_source_bytes = discovered
         .iter()
@@ -1088,8 +1196,74 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
 }
 
 fn summarize_task_from_store(task: &AsrDirectoryTask) -> TaskSummary {
-    let file_store = load_file_store(&task.id);
+    let mut file_store = load_file_store(&task.id);
+    normalize_completed_processing_records(&task.id, &mut file_store);
+    let visible = visible_file_entries(task, &file_store, None);
+    let file_store = file_store_from_entries(visible);
     summarize_task_records(task, &file_store, None)
+}
+
+fn file_store_from_entries<I>(entries: I) -> FileStore
+where
+    I: IntoIterator<Item = (String, FileRecord)>,
+{
+    FileStore {
+        version: TASK_STORE_VERSION,
+        files: entries.into_iter().collect(),
+    }
+}
+
+fn visible_file_entries(
+    _task: &AsrDirectoryTask,
+    file_store: &FileStore,
+    discovered: Option<&[PathBuf]>,
+) -> Vec<(String, FileRecord)> {
+    let discovered_keys = discovered.map(|paths| {
+        paths
+            .iter()
+            .map(|path| source_key(path))
+            .collect::<HashSet<_>>()
+    });
+    let mut best_by_source = BTreeMap::<PathBuf, (String, FileRecord)>::new();
+    for (key, record) in &file_store.files {
+        match best_by_source.get(&record.source_path) {
+            Some((best_key, best_record))
+                if visible_record_rank(key, record, discovered_keys.as_ref())
+                    <= visible_record_rank(best_key, best_record, discovered_keys.as_ref()) => {}
+            _ => {
+                best_by_source.insert(record.source_path.clone(), (key.clone(), record.clone()));
+            }
+        }
+    }
+    best_by_source.into_values().collect()
+}
+
+fn visible_record_rank(
+    key: &str,
+    record: &FileRecord,
+    discovered_keys: Option<&HashSet<String>>,
+) -> (u8, u64, usize, u64) {
+    let is_current = discovered_keys.is_some_and(|keys| keys.contains(key));
+    let status_rank = if is_current {
+        5
+    } else {
+        match record.status {
+            FileStatus::Success | FileStatus::PartialSuccess => 4,
+            FileStatus::Processing => 3,
+            FileStatus::Failed => 2,
+            FileStatus::Pending => 1,
+        }
+    };
+    (
+        status_rank,
+        record
+            .finished_at_ms
+            .or(record.started_at_ms)
+            .or(record.source_modified_ms)
+            .unwrap_or(0),
+        record.chunk_metrics.len(),
+        record.text_chars as u64,
+    )
 }
 
 fn summarize_task_records(
