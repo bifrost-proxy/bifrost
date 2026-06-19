@@ -129,7 +129,23 @@ fi
 
 export BIFROST_DATA_DIR="$DATA_DIR"
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
+export BIFROST_TRAY_UPDATE_CHECK_INITIAL_DELAY_MS="${BIFROST_TRAY_UPDATE_CHECK_INITIAL_DELAY_MS:-0}"
 unset BIFROST_DISABLE_TRAY
+
+"$(python3_cmd)" - "$DATA_DIR/version_cache.json" <<'PY'
+import datetime
+import json
+import sys
+
+path = sys.argv[1]
+payload = {
+    "latest_version": "999.0.0",
+    "release_highlights": ["tray startup e2e fresh cache"],
+    "checked_at": datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z"),
+}
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(payload, fh)
+PY
 
 echo "Starting bifrost with tray helper on 127.0.0.1:$PORT..."
 "$BIN" start -p "$PORT" --unsafe-ssl --no-system-proxy --skip-cert-check \
@@ -192,6 +208,18 @@ fi
 
 if ! grep -q "bifrost-tray starting" "$TRAY_LOG"; then
   echo "ERROR: tray log does not contain startup marker" >&2
+  dump_diagnostics
+  exit 1
+fi
+
+for _ in $(seq 1 40); do
+  if grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
+    break
+  fi
+  sleep 0.25
+done
+if ! grep -q "tray update check skipped; cached version is still fresh" "$TRAY_LOG"; then
+  echo "ERROR: tray helper did not honor fresh version cache for background update check" >&2
   dump_diagnostics
   exit 1
 fi

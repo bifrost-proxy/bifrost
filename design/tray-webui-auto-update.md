@@ -107,6 +107,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 
 - **菜单项**：`build_menu` 新增条件项 `update_now`，仅当存在新版本时显示，label = `Update to v{latest}`。
   - 新版本判定：托盘读取 `data_dir/version_cache.json`（已有，admin `VersionChecker` 与 update_check 共用该缓存）与当前版本比对 `is_newer_version`。
+  - 托盘 helper 现在也会自主维护该缓存：启动后延迟 30 秒执行一次后台检查，之后每 6 小时最多检查一次；若 `version_cache.json` 仍新鲜则不联网。检查在线程中执行，不阻塞菜单打开、图标状态更新或服务启停操作。网络失败时保留旧缓存，不隐藏已有的更新入口。
   - 升级进行中（`read_progress().is_active()`）时该项禁用并显示进行态。
 - **新动作** `MenuItemAction::StartUpgrade { target_version }`：
   - `execute_action` 中新增分支：检查 `operation` 未忙 → 置新操作态 `OP_UPGRADING` → `spawn_tray_task` 中 `spawn` 出 `bifrost self-update --target <v> --source tray`（detached，复用 `resolve_bifrost_binary` + `configure_service_command`）。
@@ -202,6 +203,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 5. 轮询 `GET /_bifrost/api/system/upgrade/progress`，断言 phase 由 `Checking`→…→ 终态推进，字段结构正确。
 6. 无更新时 `POST upgrade` 断言 409。
 7. 直接执行 `bifrost self-update --source admin`，并将测试 latest 设为当前磁盘二进制版本，断言即使无需下载/安装也会重启当前数据目录下的 daemon，且 `upgrade-progress.json` 写入 `completed`。
+8. `test_cli_tray_startup_ci.sh` 在临时数据目录预置新鲜 `version_cache.json`，把 tray 首次后台检查延迟压到 0，真实拉起 tray helper 后从 `tray.log` 断言缓存新鲜时跳过联网检查，避免启动后高频请求 GitHub。
 
 > E2E 用测试钩子避免真实联网下载，验证的是 API 协议、进度文件读写、状态机推进，而非真实二进制替换。
 
