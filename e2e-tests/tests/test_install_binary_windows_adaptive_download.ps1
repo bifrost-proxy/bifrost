@@ -58,6 +58,7 @@ Run-Case "preferred mirror ordering" {
 }
 
 Run-Case "fastest mirror probe selection" {
+    $env:BIFROST_INSTALLER_TEST_DISABLE_JOBS = "1"
     function Test-GithubUrl {
         param([string]$Url)
         return $Url.StartsWith("https://ghfast.top/")
@@ -65,6 +66,7 @@ Run-Case "fastest mirror probe selection" {
 
     $selected = Select-FastestGithubBase -GithubPath "$REPO/releases/latest"
     Assert-Eq $selected "https://ghfast.top/https://github.com" "fast mirror wins when github.com probe fails"
+    Remove-Item Env:BIFROST_INSTALLER_TEST_DISABLE_JOBS -ErrorAction SilentlyContinue
 }
 
 Run-Case "latest version redirect selection" {
@@ -154,6 +156,21 @@ Run-Case "download timeout env" {
     Assert-Eq ([string](Get-IntEnv -Name "BIFROST_DOWNLOAD_TRIES" -Default 2)) "1" "BIFROST_DOWNLOAD_TRIES is parsed"
     Remove-Item Env:BIFROST_DOWNLOAD_TIMEOUT -ErrorAction SilentlyContinue
     Remove-Item Env:BIFROST_DOWNLOAD_TRIES -ErrorAction SilentlyContinue
+}
+
+Run-Case "Windows User PATH helper is case-insensitive and slash-tolerant" {
+    $pathList = "C:\Tools;C:\Users\eden_studio\.local\bin\;C:\Other"
+    $contains = Test-PathListContains -PathList $pathList -Directory "c:\users\EDEN_STUDIO\.local\bin"
+    Assert-Eq ([string]$contains) "True" "PATH helper detects existing entry regardless of case and trailing slash"
+}
+
+Run-Case "Windows User PATH helper appends once" {
+    $pathList = "C:\Tools;C:\Other"
+    $updated = Add-PathListEntry -PathList $pathList -Directory "C:\Users\eden_studio\.local\bin"
+    Assert-Eq $updated "C:\Tools;C:\Other;C:\Users\eden_studio\.local\bin" "PATH helper appends missing install dir"
+
+    $again = Add-PathListEntry -PathList $updated -Directory "c:\users\EDEN_STUDIO\.local\bin\"
+    Assert-Eq $again $updated "PATH helper does not duplicate existing install dir"
 }
 
 Remove-Item Env:BIFROST_INSTALL_BINARY_SKIP_MAIN -ErrorAction SilentlyContinue
