@@ -112,7 +112,7 @@
 
 以下项仍由上游或平台栈传递引入，本轮不通过 ignore 绕过，也不做大范围替换：
 
-- GTK3 / `glib 0.18.5` / `proc-macro-error 1.0.4`：来源为 Linux tray stack `tray-icon 0.19.3`、`muda 0.15.3`、`tao 0.31.1` 及桌面 Tauri Linux stack。升级这些 crate 会改变托盘与窗口行为，需要单独托盘/桌面专项验证。
+- GTK3 / `glib 0.18.5` / `proc-macro-error 1.0.4`：来源为 Linux tray/window stack。根工作区当前路径为 `tray-icon 0.19.3`、`muda 0.15.3`、`tao 0.31.1 -> gtk 0.18.2 -> glib 0.18.5`；桌面路径为 Tauri/Wry Linux WebKitGTK 与 GTK3 stack。升级 CLI tray/window stack 无法安全关闭 `glib`，且会改变 Windows 托盘/启动行为，需要等待上游迁移或单独托盘/桌面专项改造。
 - `fxhash 0.2.1`：来源为 `bm25 2.3.2`，用于 Agent tool search。当前 `bm25` 无更高兼容版本可直接升级。
 - `paste 1.0.15`：来源包括 ASR `qwen3-asr/candle`、`tokenizers` 与 Linux `netstat2` 链，属于上游传递依赖。
 - `proc-macro-error2 2.0.1`：来源为 `local-ip-address 0.6.13 -> neli -> getset`，已升级到当前 latest 但上游仍带入该 proc-macro。
@@ -129,3 +129,39 @@ Traffic DB 新写入的 detail blobs 从 bincode 二进制编码改为 postcard 
 - Targeted 单测：`cargo test -p bifrost-tls` 覆盖 PEM 解析迁移；`cargo test -p bifrost-admin traffic_db --lib` 覆盖 Traffic DB postcard detail blob 读写；`cargo check -p bifrost-agent -p bifrost-admin` 覆盖 `portable-pty 0.9` 和 admin 网络接口依赖升级。
 - E2E smoke：使用临时 `BIFROST_DATA_DIR`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy` 启动最新编译的 `bifrost`，验证 Admin API ready。
 - Coverage 90% 门禁：收尾执行 `make coverage`；若 E2E coverage 环境不可用，按项目规则退化为 `make coverage-unit` 并记录原因。
+
+## 2026-06-19 Dependabot Rust open alerts 复核
+
+### 告警来源
+
+本轮通过 GitHub Dependabot alerts API 分页读取 `bifrost-proxy/bifrost` 的 open alerts，并在本地筛选 `dependency.package.ecosystem == "rust"`。API 返回 15 条 Rust open alerts，集中在 7 个依赖包：
+
+- 根 `Cargo.lock`：`glib`、`jsonwebtoken`、`tar`。
+- `crates/bifrost-admin/Cargo.toml`：`jsonwebtoken`。
+- `desktop/src-tauri/Cargo.lock`：`glib`、`openssl`、`rand`、`tauri`。
+
+### 已修复项
+
+- `jsonwebtoken` / `GHSA-h395-gr6q-cpjc` / `CVE-2026-25537`：`bifrost-admin` 从 `jsonwebtoken 9.3.1` 升级到 `10.4.0`。`jsonwebtoken` 10 需要显式 crypto provider，本项目只使用 HS256，选择 `aws_lc_rs` provider，避免 `rust_crypto` provider 额外引入 `rsa 0.9.10` 的 `RUSTSEC-2023-0071` timing side-channel 漏洞。
+- `tar` / `GHSA-3pv8-6f4r-ffg2`：根锁文件从 `tar 0.4.45` 升级到 `0.4.46`。
+- `openssl` / `GHSA-ghm9-cr32-g9qj`、`GHSA-hppc-g8h3-xhp3`、`GHSA-8c75-8mhr-p7r9`、`GHSA-xmgf-hq76-4vx2`、`GHSA-pqf5-4pqq-29f5`、`GHSA-xp3w-r5p5-63rr`、`GHSA-xv59-967r-8726`、`GHSA-phqj-4mhp-q6mq`：desktop 锁文件从 `openssl 0.10.75` 升级到 `0.10.80`。
+- `tauri` / `GHSA-7gmj-67g7-phm9` / `CVE-2026-42184`：desktop `tauri` 约束提升到 patched floor `2.11.1`，锁文件解析到 `2.11.3`。
+- `rand` / `GHSA-cq8v-f236-94qc`：desktop Tauri 升级移除了 `tauri-utils -> kuchikiki -> selectors -> phf_codegen 0.8 -> rand 0.7.3` 链；desktop 锁文件仅剩 `rand 0.8.6` 与 `0.9.4`。
+
+### 未能在本轮安全关闭的项
+
+- `glib` / `GHSA-wrw7-89jp-8q8g`：根与 desktop 锁文件仍包含 `glib 0.18.5`。根路径来自 `bifrost-cli` 的 `tray-icon 0.19.3`、`muda 0.15.3`、`tao 0.31.1 -> gtk 0.18.2 -> glib 0.18.5`；desktop 路径来自 Tauri/Wry Linux WebKitGTK 与 GTK3 stack。强行 patch 到 `glib 0.20` 会跨 gtk-rs major version，无法作为安全的锁文件修复；移除或大幅升级 `tao` / tray stack / Tauri Linux WebView 依赖会改变托盘、窗口或桌面功能边界，需单独功能迁移设计。
+
+### Review/Fix/Test 闭环方案补充
+
+第 1 轮复核范围：
+
+- 用户目标：Rust Dependabot open alerts 逐项分析，能修复项全部修复，无法修复项给出上游路径和风险。
+- 变更范围：根/desktop 锁文件、`bifrost-admin` JWT provider、CLI 托盘依赖 features、desktop Tauri patched floor、design/human_tests。
+- 验证命令：`cargo audit` 根和 desktop、`cargo test -p bifrost-admin admin_auth --lib`、`cargo check -p bifrost-admin --all-features`、新增 human_tests 用例。
+
+第 2 轮复核范围：
+
+- 确认修复没有引入新的 `cargo audit vulnerabilities`，尤其验证 `jsonwebtoken` provider 不再引入 `rsa` advisory。
+- 复核 `glib` 剩余路径是否确实来自上游 GTK/Tauri stack，且没有通过新增 ignore 隐藏。
+- 复跑受影响测试与审计命令，并进入 `rust-project-validate`、coverage 90% 门禁与远端 CI 看护。

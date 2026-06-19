@@ -1092,14 +1092,11 @@ mod tests {
 
     #[test]
     fn stop_restore_suppression_marker_is_consumed_once() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("time")
-            .as_nanos();
-        let data_dir = std::env::temp_dir().join(format!("bifrost-launchd-test-{unique}"));
-        let plist_path = std::env::temp_dir().join(format!("com.bifrost.test.{unique}.plist"));
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let data_dir = temp_dir.path().join("data");
+        let plist_path = temp_dir.path().join("com.bifrost.test.plist");
         let config = SystemProxyLaunchdConfig::new(
-            Some(format!("com.bifrost.test.{unique}")),
+            Some("com.bifrost.test".to_string()),
             Some(PathBuf::from("/tmp/bifrost")),
             data_dir.clone(),
             Some(plist_path.clone()),
@@ -1111,9 +1108,6 @@ mod tests {
         assert!(marker.exists());
         assert!(consume_stop_restore_suppression(&data_dir));
         assert!(!consume_stop_restore_suppression(&data_dir));
-
-        let _ = std::fs::remove_file(plist_path);
-        let _ = std::fs::remove_dir_all(data_dir);
     }
 
     #[test]
