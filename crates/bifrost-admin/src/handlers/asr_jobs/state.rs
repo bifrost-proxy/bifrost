@@ -12,6 +12,8 @@ static RUNNING_EXTERNAL_IMPORT_TASKS: Lazy<StdMutex<HashSet<String>>> =
     Lazy::new(|| StdMutex::new(HashSet::new()));
 static CONTENT_HASH_QUEUE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
 static FILE_STORE_WRITE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static RUN_PROGRESS_UPDATE_LOCK: Lazy<StdMutex<()>> = Lazy::new(|| StdMutex::new(()));
+static ATOMIC_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const TASK_STORE_VERSION: u32 = 1;
 const ASR_TASK_PAUSED_MESSAGE: &str = "ASR task paused by request";

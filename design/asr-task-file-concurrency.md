@@ -56,12 +56,27 @@ max_concurrent_files: u8
 - `save_file_store()` 在写入前读取最新 store，再按 key 覆盖本 worker 的记录。
 - chunk progress/metric 回调也只保存当前文件 key，避免旧快照覆盖其他 worker 最新状态。
 
+### 状态恢复与历史记录折叠
+
+高并发真实任务中还存在两个状态一致性风险：
+
+- `run_progress.json` 和部分 artifact 使用固定 `<path>.tmp` 临时文件名，并发写入时会互相抢 rename，产生 `No such file or directory` 的持久化警告。
+- `source_key()` 包含路径、size 和 mtime。同一路径在外接导入或手动拷贝过程中 mtime 变化时会产生多条历史 key，旧的 `pending/processing` 记录会继续出现在 Files tab，让用户误以为“最后一片不结束”。
+
+修复策略：
+
+1. `atomic_text_write()` 使用同目录唯一临时文件名，避免并发写同一目标时共享 `.tmp`。
+2. 读取、保存和启动恢复时识别完整的 `processing` 记录：没有 error、没有 failed chunks、chunk metrics 全为 `ok`、text artifact 存在、timeline/metadata 如有记录也存在。满足条件时自动收敛为 `success`，补齐 `finished_at_ms` 和完成进度。
+3. Task detail、watch 和 summary 展示前按 `source_path` 折叠同路径历史记录：优先展示当前发现的 source key；否则展示已完成记录；再退回 processing/failed/pending。这样保留持久化恢复能力，同时避免旧 key 污染用户感知进度。
+
 ## 测试方案
 
 - 单元测试：验证旧 JSON 默认 `max_concurrent_files=1`；验证 `normalize_max_concurrent_files()` 裁剪到 `16`；验证 `effective_max_concurrent_files()` 在 `fork_per_chunk` 返回用户期望值，且共享 runtime 降级为 `1`。
+- 单元测试：验证并发 atomic 写不会出现固定 tmp rename 竞争；验证完整 `processing` 记录可从 artifact 自动恢复为 `success`；验证同一路径旧 `pending/processing` 记录不会污染 task detail 和 summary。
 - 前端测试：`npm --prefix web run typecheck` 或构建路径验证 TS 类型与 UI 编译。
 - E2E 测试：通过 ASR task API 创建 `runtime_strategy=fork_per_chunk,max_concurrent_files=3` 的任务，确认详情返回期望值；运行中 PATCH 为 `2` 后 watch/detail 返回更新值。
-- human_tests：`human_tests/asr-task-concurrency.md` 覆盖 API 创建、运行中调节、共享 runtime effective 降级和 WebUI 字段展示。
+- E2E 测试：预置 stale `processing` + 同路径旧记录的 task store，启动临时 Bifrost 后通过真实 Admin API 验证 Files tab 数据收敛为单条 `success`。
+- human_tests：`human_tests/asr-task-concurrency.md` 覆盖 API 创建、运行中调节、共享 runtime effective 降级、WebUI 字段展示、状态恢复和历史记录折叠。
 - coverage 90% 门禁：收尾运行 `make coverage`；若本地 ASR/E2E 环境不可用，退化为 `make coverage-unit` 并记录原因。
 
 ## Review/Fix/Test 闭环

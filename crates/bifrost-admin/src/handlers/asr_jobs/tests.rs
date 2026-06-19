@@ -909,6 +909,142 @@ mod tests {
     }
 
     #[test]
+    fn atomic_json_write_uses_unique_temp_files_under_concurrency() {
+        let _guard = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let path = temp.path().join("run_progress.json");
+        let mut handles = Vec::new();
+        for index in 0..16usize {
+            let path = path.clone();
+            handles.push(std::thread::spawn(move || {
+                atomic_json_write(&path, &serde_json::json!({ "index": index })).unwrap();
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let persisted: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(persisted.get("index").is_some(), "{persisted}");
+        let leftovers = std::fs::read_dir(temp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|entry| entry.file_name().to_string_lossy().to_string())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn completed_processing_record_recovers_from_partial_artifacts() {
+        let _guard = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("meeting.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let text_path = temp.path().join("meeting.txt");
+        let timeline_path = temp.path().join("meeting.timeline.json");
+        std::fs::write(&text_path, "hello world").unwrap();
+        std::fs::write(&timeline_path, "{}").unwrap();
+
+        let mut store = FileStore::default();
+        let key = source_key(&audio);
+        let mut record = pending_record("recover-complete", &audio);
+        record.status = FileStatus::Processing;
+        record.started_at_ms = Some(10);
+        record.progress_current = Some(1);
+        record.progress_total = Some(2);
+        record.output_text_path = Some(text_path);
+        record.output_timeline_path = Some(timeline_path);
+        record.chunk_metrics = vec![
+            AsrChunkMetric {
+                chunk_index: 0,
+                offset_secs: 0,
+                duration_secs: 3,
+                runner: "fork_per_chunk".to_string(),
+                status: "ok".to_string(),
+                elapsed_ms: 100,
+                rtf: 0.1,
+                text_chars: 5,
+                text_sha1: "a".to_string(),
+                server_url: None,
+                fallback_reason: None,
+                error: None,
+                recorded_at_ms: 20,
+            },
+            AsrChunkMetric {
+                chunk_index: 1,
+                offset_secs: 3,
+                duration_secs: 3,
+                runner: "fork_per_chunk".to_string(),
+                status: "ok".to_string(),
+                elapsed_ms: 100,
+                rtf: 0.1,
+                text_chars: 6,
+                text_sha1: "b".to_string(),
+                server_url: None,
+                fallback_reason: None,
+                error: None,
+                recorded_at_ms: 30,
+            },
+        ];
+        store.files.insert(key.clone(), record);
+
+        assert_eq!(
+            normalize_completed_processing_records("recover-complete", &mut store),
+            1
+        );
+        let recovered = store.files.get(&key).unwrap();
+        assert_eq!(recovered.status, FileStatus::Success);
+        assert_eq!(recovered.progress_current, Some(2));
+        assert_eq!(recovered.progress_total, Some(2));
+        assert_eq!(recovered.finished_at_ms, Some(30));
+        assert_eq!(recovered.text_chars, 11);
+    }
+
+    #[test]
+    fn task_detail_collapses_superseded_same_source_records() {
+        let _guard = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _env = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let audio = audio_dir.join("meeting.wav");
+        std::fs::write(&audio, b"audio").unwrap();
+        let task = test_directory_task("collapse-same-source", audio_dir.clone());
+        add_task(task.clone()).unwrap();
+
+        let mut store = FileStore::default();
+        let mut current = pending_record(&task.id, &audio);
+        current.status = FileStatus::Success;
+        current.finished_at_ms = Some(200);
+        current.text_chars = 42;
+        store.files.insert(source_key(&audio), current);
+
+        let mut stale_pending = pending_record(&task.id, &audio);
+        stale_pending.status = FileStatus::Pending;
+        store.files.insert("old-pending-key".to_string(), stale_pending);
+
+        let mut stale_processing = pending_record(&task.id, &audio);
+        stale_processing.status = FileStatus::Processing;
+        stale_processing.progress_current = Some(9);
+        stale_processing.progress_total = Some(9);
+        store
+            .files
+            .insert("old-processing-key".to_string(), stale_processing);
+        save_file_store(&task.id, &store).unwrap();
+
+        let detail = task_detail(task);
+        assert_eq!(detail.files.len(), 1);
+        assert_eq!(detail.files[0].record.status, FileStatus::Success);
+        assert_eq!(detail.summary.processed, 1);
+        assert_eq!(detail.summary.pending, 0);
+    }
+
+    #[test]
     fn task_watch_snapshot_marks_eta_confidence_without_duration() {
         let _guard = test_data_dir_lock();
         let temp = TempDir::new().unwrap();
