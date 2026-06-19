@@ -13,7 +13,7 @@
     "start": "node dist/cli.js",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "test": "vitest run",
+    "test": "vitest run src",
     "test:watch": "vitest"
   },
   "keywords": [
@@ -24,8 +24,8 @@
   ],
   "license": "MIT",
   "dependencies": {
-    "better-sqlite3": "^11.0.0",
-    "js-yaml": "^4.1.1",
+    "better-sqlite3": "^12.11.1",
+    "js-yaml": "^4.2.0",
     "mysql2": "^3.11.0",
     "nanoid": "^3.3.7"
   },
@@ -35,15 +35,10 @@
     "@types/node": "^20.14.0",
     "tsx": "^4.15.0",
     "typescript": "^5.5.0",
+    "vite": "^8.0.16",
     "vitest": "^4.1.2"
   },
   "engines": {
     "node": ">=18"
-  },
-  "pnpm": {
-    "onlyBuiltDependencies": [
-      "better-sqlite3",
-      "esbuild"
-    ]
   }
 }

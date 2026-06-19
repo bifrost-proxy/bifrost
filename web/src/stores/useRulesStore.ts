@@ -86,6 +86,7 @@ interface RulesState {
   renameRule: (oldName: string, newName: string) => Promise<boolean>;
   reorderRules: (order: string[]) => Promise<boolean>;
   setEditingContent: (name: string, content: string) => void;
+  clearEditingContent: (name: string) => void;
   setSearchKeyword: (keyword: string) => void;
   hasUnsavedChanges: (name: string) => boolean;
   clearError: () => void;
@@ -395,6 +396,9 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         await get().fetchRules();
         const rule = await api.getRule(selectedRuleName);
         set((state) => ({
+          editingContent: Object.fromEntries(
+            Object.entries(state.editingContent).filter(([name]) => name !== selectedRuleName),
+          ),
           currentRule: rule,
           saving: false,
           savedContent: { ...state.savedContent, [selectedRuleName]: rule.content },
@@ -588,6 +592,17 @@ export const useRulesStore = create<RulesState>((set, get) => ({
         [name]: content,
       },
     }));
+  },
+
+  clearEditingContent: (name: string) => {
+    set((state) => {
+      if (state.editingContent[name] === undefined) {
+        return state;
+      }
+      const editingContent = { ...state.editingContent };
+      delete editingContent[name];
+      return { editingContent };
+    });
   },
 
   setSearchKeyword: (keyword: string) => {

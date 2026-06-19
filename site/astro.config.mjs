@@ -48,11 +48,11 @@ export default defineConfig({
       sidebar: [
         {
           label: "开始使用 / Getting Started",
-          autogenerate: { directory: "getting-started" },
+          items: [{ autogenerate: { directory: "getting-started" } }],
         },
         {
           label: "参考文档 / Reference",
-          autogenerate: { directory: "reference" },
+          items: [{ autogenerate: { directory: "reference" } }],
         },
       ],
       head: [

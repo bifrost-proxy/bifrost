@@ -856,6 +856,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
                   disabled={saving}
                 />
                 <Button
+                  data-testid="asr-daily-agent-report-sync-dir-save"
                   size="small"
                   icon={<SaveOutlined />}
                   onClick={handleSaveReportSyncDir}

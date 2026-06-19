@@ -23,6 +23,6 @@
     "push:debug:help": "node push-debug.js --help"
   },
   "dependencies": {
-    "puppeteer": "^24.4.0"
+    "puppeteer": "^25.1.0"
   }
 }

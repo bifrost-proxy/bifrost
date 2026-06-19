@@ -271,11 +271,10 @@ export function historyEventsToMessages(
     appendProcessStep(step);
   });
 
+  const effectiveRunState = options.runningState ?? latestRunState;
   const shouldEnsureRunningAssistant =
-    !isTerminalRunState(latestRunState) &&
-    (isActiveRunState(latestRunState) ||
-      isActiveRunState(options.runningState) ||
-      options.ensureRunningAssistant === true);
+    !isTerminalRunState(effectiveRunState) &&
+    (isActiveRunState(effectiveRunState) || options.ensureRunningAssistant === true);
   flushPendingSteps();
   if (shouldEnsureRunningAssistant && messages[messages.length - 1]?.role === "user") {
     messages.push({

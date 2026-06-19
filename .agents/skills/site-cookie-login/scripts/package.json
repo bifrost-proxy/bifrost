@@ -7,6 +7,6 @@
     "login": "node site-login.js"
   },
   "dependencies": {
-    "puppeteer": "^23.0.0"
+    "puppeteer": "^25.1.0"
   }
 }

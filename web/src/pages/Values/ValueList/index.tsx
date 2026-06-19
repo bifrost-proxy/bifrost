@@ -441,6 +441,7 @@ export default function ValueList() {
                           icon={<MoreOutlined />}
                           onClick={(e) => e.stopPropagation()}
                           className={styles.moreBtn}
+                          data-testid="value-item-menu"
                         />
                       </Dropdown>
                     </div>

@@ -101,7 +101,7 @@ test("Rules editor opens Breakpoint value suggestions", async ({
   const createRuleRes = await request.post(`${apiBase}/rules`, {
     data: {
       name: ruleName,
-      content: "ui-breakpoint.test breakpoint://",
+      content: "ui-breakpoint.test breakpoint://request",
       enabled: true,
     },
   });
@@ -114,6 +114,7 @@ test("Rules editor opens Breakpoint value suggestions", async ({
   await expect(page.getByTestId("rule-editor")).toBeVisible();
 
   const editorContainer = page.getByTestId("rule-editor-container");
+  await setMonacoEditor(page, editorContainer, "ui-breakpoint.test breakpoint://");
   const editorInput = editorContainer.getByRole("textbox", { name: "Editor content" });
   await editorInput.click({ force: true });
   await page.keyboard.press(process.platform === "darwin" ? "Meta+ArrowRight" : "End");
