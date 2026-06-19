@@ -39,17 +39,17 @@ if (-not $InstallDir) {
 
 function Write-Banner {
     Write-Host ""
-    Write-Host "╔═══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "║                                                           ║" -ForegroundColor Cyan
-    Write-Host "║   ____  _  __                _                            ║" -ForegroundColor Cyan
-    Write-Host "║  |  _ \(_)/ _|_ __ ___  ___| |_                           ║" -ForegroundColor Cyan
-    Write-Host "║  | |_) | | |_| '__/ _ \/ __| __|                          ║" -ForegroundColor Cyan
-    Write-Host "║  |  _ <| |  _| | | (_) \__ \ |_                           ║" -ForegroundColor Cyan
-    Write-Host "║  |_| \_\_|_| |_|  \___/|___/\__|                          ║" -ForegroundColor Cyan
-    Write-Host "║                                                           ║" -ForegroundColor Cyan
-    Write-Host "║   High-performance HTTP/HTTPS/SOCKS5 Proxy Server         ║" -ForegroundColor Cyan
-    Write-Host "║                                                           ║" -ForegroundColor Cyan
-    Write-Host "╚═══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Cyan
+    Write-Host "|                                                         |" -ForegroundColor Cyan
+    Write-Host "|   ____  _  __                _                          |" -ForegroundColor Cyan
+    Write-Host "|  |  _ \(_)/ _|_ __ ___  ___| |_                         |" -ForegroundColor Cyan
+    Write-Host "|  | |_) | | |_| '__/ _ \/ __| __|                        |" -ForegroundColor Cyan
+    Write-Host "|  |  _ <| |  _| | | (_) \__ \ |_                         |" -ForegroundColor Cyan
+    Write-Host "|  |_| \_\_|_| |_|  \___/|___/\__|                        |" -ForegroundColor Cyan
+    Write-Host "|                                                         |" -ForegroundColor Cyan
+    Write-Host "|   High-performance HTTP/HTTPS/SOCKS5 Proxy Server       |" -ForegroundColor Cyan
+    Write-Host "|                                                         |" -ForegroundColor Cyan
+    Write-Host "+---------------------------------------------------------+" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -89,6 +89,81 @@ function Install-BinaryAtomically {
     }
     Copy-Item -Path $SourcePath -Destination $tempPath -Force
     Move-Item -Path $tempPath -Destination $DestPath -Force
+}
+
+function Split-PathList {
+    param([string]$PathList)
+
+    if ([string]::IsNullOrWhiteSpace($PathList)) {
+        return @()
+    }
+
+    return @($PathList -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+}
+
+function Normalize-PathEntry {
+    param([string]$PathEntry)
+
+    if ($null -eq $PathEntry) {
+        return ""
+    }
+
+    return $PathEntry.Trim().TrimEnd('\')
+}
+
+function Test-PathListContains {
+    param(
+        [string]$PathList,
+        [string]$Directory
+    )
+
+    $normalizedDirectory = Normalize-PathEntry -PathEntry $Directory
+    foreach ($entry in @(Split-PathList -PathList $PathList)) {
+        if ((Normalize-PathEntry -PathEntry $entry) -ieq $normalizedDirectory) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Add-PathListEntry {
+    param(
+        [string]$PathList,
+        [string]$Directory
+    )
+
+    if (Test-PathListContains -PathList $PathList -Directory $Directory) {
+        return $PathList
+    }
+
+    if ([string]::IsNullOrWhiteSpace($PathList)) {
+        return $Directory
+    }
+
+    return "$($PathList.TrimEnd(';'));$Directory"
+}
+
+function Add-BifrostToUserPath {
+    param([string]$Directory)
+
+    $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+    $alreadyInUserPath = Test-PathListContains -PathList $currentUserPath -Directory $Directory
+
+    if (-not $alreadyInUserPath) {
+        $newUserPath = Add-PathListEntry -PathList $currentUserPath -Directory $Directory
+        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
+    }
+
+    if (-not (Test-PathListContains -PathList $env:Path -Directory $Directory)) {
+        $env:Path = Add-PathListEntry -PathList $env:Path -Directory $Directory
+    }
+
+    if ($alreadyInUserPath) {
+        return "already"
+    }
+
+    return "added"
 }
 
 function Get-Architecture {
@@ -201,6 +276,16 @@ function Select-FastestGithubBase {
 
     if ($mirrors.Count -eq 1) {
         return $mirrors[0]
+    }
+
+    if ($env:BIFROST_INSTALLER_TEST_DISABLE_JOBS -eq "1") {
+        foreach ($mirror in $mirrors) {
+            $url = Join-GithubUrl -BaseUrl $mirror -GithubPath $GithubPath
+            if (Test-GithubUrl -Url $url) {
+                return $mirror
+            }
+        }
+        return $null
     }
 
     $jobs = @()
@@ -558,23 +643,24 @@ function Install-Bifrost {
         Write-Success "CLI installed: $destPath"
 
         Write-Host ""
-        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        Write-Host "------------------------------------------------------------"
         Write-Success "Installation completed!"
-        Write-Host "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        Write-Host "------------------------------------------------------------"
         Write-Host ""
 
-        $currentPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        if ($currentPath -notlike "*$InstallDir*") {
-            Write-Warning "$InstallDir is not in your PATH"
-            Write-Host ""
-            Write-Host "To add it permanently, run:"
-            Write-Host ""
-            Write-Host "  `$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')" -ForegroundColor Gray
-            Write-Host "  [Environment]::SetEnvironmentVariable('Path', `"`$currentPath;$InstallDir`", 'User')" -ForegroundColor Gray
-            Write-Host ""
-            Write-Host "Or add it temporarily for this session:"
-            Write-Host ""
-            Write-Host "  `$env:Path += `";$InstallDir`"" -ForegroundColor Gray
+        $pathResult = Add-BifrostToUserPath -Directory $InstallDir
+        if ($pathResult -eq "added") {
+            Write-Success "Added to Windows User PATH: $InstallDir"
+            Write-Success "Updated current PowerShell PATH for this session"
+        }
+        else {
+            Write-Success "Windows User PATH already contains: $InstallDir"
+            if (Test-PathListContains -PathList $env:Path -Directory $InstallDir) {
+                Write-Success "Current PowerShell PATH contains: $InstallDir"
+            }
+            else {
+                Write-Warning "Restart PowerShell/CMD to use bifrost from PATH"
+            }
         }
 
         Write-Host ""

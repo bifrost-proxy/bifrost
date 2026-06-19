@@ -13,6 +13,7 @@
 - 下载源自适应用例通过 shell stub 模拟网络探测和下载结果，不访问真实 GitHub 或镜像。
 - 下载进度用例通过 shell/Rust 单元测试验证终端输出参数与进度格式，不依赖真实大文件下载。
 - Windows installer 用例需要 `pwsh` 或 Windows PowerShell；如果当前机器不可用，必须记录为环境阻塞，不能宣称已执行通过。
+- Windows PATH 用例会修改 Windows User `Path`，执行前应记录原始值，执行后可按需恢复；验收重点是新开的 PowerShell/CMD/Git Bash 能直接执行 `bifrost`。
 - CI Cargo 网络稳定性用例通过读取 GitHub Actions workflow，验证 CI/Release 统一关闭 Cargo HTTP/2 multiplexing、开启网络重试并提高 HTTP timeout。
 - 所有命令执行前使用：
   ```bash
@@ -583,12 +584,49 @@
 - CI 输出必须包含 detected/stop/wait/restart 里程碑，且允许 Windows 输出 `Proxy restart scheduled with the new version`；由于 Windows self-replacement 由 deferred PowerShell helper 在 upgrade 进程退出后执行，脚本必须先等待 Admin API ready 作为 helper 已完成重启的同步点，再验证临时 HOME 下的 `bifrost` / `bifrost-remote` skills 已自动安装，随后继续通过新 PID 存活、`runtime.json` 记录 `system_proxy_enabled=false`、stop 后端口释放来确认重启真实完成。
 - 该用例只能在 Windows x86 runner 上执行；macOS/Linux 继续保留本地真实 upgrade restart 脚本和 CI 源码门禁，避免所有平台都依赖同一类静态检查。
 
+### TC-IBOC-21 Windows 安装脚本自动配置 PowerShell/CMD PATH
+
+操作步骤：
+
+1. 在 Windows VM 中记录当前用户 PATH：
+   ```powershell
+   [Environment]::GetEnvironmentVariable('Path', 'User')
+   ```
+2. 执行离线 PATH helper 回归：
+   ```bash
+   bash e2e-tests/tests/test_install_binary_windows_path.sh
+   ```
+3. 执行 PowerShell helper 回归：
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1
+   ```
+4. 使用 Bash installer 的 `--no-post-install` 安装到默认 Windows Git Bash 路径，避免证书、skills、服务启动和系统代理副作用：
+   ```bash
+   bash install-binary.sh --no-post-install
+   ```
+5. 打开新的 PowerShell，执行：
+   ```powershell
+   bifrost --version
+   ```
+6. 打开新的 CMD，执行：
+   ```cmd
+   bifrost --version
+   ```
+
+预期结果：
+
+- Bash installer 输出 `Added to Windows User PATH` 或 `Windows User PATH already contains`。
+- Windows User `Path` 包含安装目录 `C:\Users\<user>\.local\bin`。
+- 新开的 PowerShell 和 CMD 都能直接找到 `bifrost` 并输出版本。
+- `--no-modify-path` 场景不会写入 Git Bash rc，也不会写入 Windows User `Path`。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
 - `test_upgrade_restart_e2e.sh` 退出时会停止测试 daemon 并删除临时数据目录。
 - `test_upgrade_local_restart_e2e.sh` 退出时会停止测试 daemon、清理同数据目录 tray helper 并删除临时安装目录、临时 archive 和临时数据目录。
 - Windows x86 CI 失败时会上传 `.e2e-reports/`、`.bifrost-e2e-ci/` 和 `target/`，其中包含 `.bifrost-upgrade-*.log` helper 日志，便于定位替换或重启失败。
+- Windows PATH 用例如修改了真实用户 PATH，可用执行前记录值恢复；若保留安装目录在 PATH 中，也必须确认不重复追加。
 - 退出当前 shell 即可清理函数定义。
 
 ## 执行记录
@@ -630,3 +668,4 @@
 | 2026-06-14 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过，包含 detected/stop/wait/start 输出、`--no-system-proxy` 保留、新 PID 存活、Admin API ready、runtime `system_proxy_enabled=false`、stop 后端口释放 |
 | 2026-06-15 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过。旧 daemon 端口 `49693`、旧 PID `35268`，upgrade 输出包含 detected/stop/wait/start，重启后新 PID `35911`，runtime 保留 `system_proxy_enabled=false`，新 daemon 使用升级后的临时安装路径，错误日志无 ObjC fork crash，stop 后端口释放且无同数据目录 tray helper 残留。 |
 | 2026-06-16 | TC-IBOC-20 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_target_dirs_ --lib` + `bash -n e2e-tests/tests/test_upgrade_local_restart_e2e.sh` + `bash e2e-tests/tests/test_e2e_scripts_disable_sync_login_prompt.sh` + `git diff --check` | PASS：`install-skill` 目录解析新增 `BIFROST_INSTALL_SKILL_DIR` 覆盖并保留 `--dir` / `--cwd` 优先级；静态验证 Windows upgrade restart 脚本通过临时 `BIFROST_INSTALL_SKILL_DIR` 隔离 post-upgrade skill 安装，且在 Admin API ready 后检查 deferred helper 已安装 primary/remote skills；frontmatter name 断言接受 YAML 合法的 quoted/unquoted 形式。本地未执行真实 upgrade restart，避免启动 Tray 或打开 Sync 登录页，完整 Windows 真实链路交由 GitHub Actions `E2E Shell (x86_64-pc-windows-msvc)` 验证。 |
+| 2026-06-20 | TC-IBOC-21 | Parallels `Windows 11` VM：`bash e2e-tests/tests/test_install_binary_windows_path.sh`、`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`、`bash install-binary.sh --version v0.0.110 --no-post-install`、新 PowerShell/CMD/Git Bash 分别执行 `bifrost --version` | PASS：离线 Bash PATH 回归 7/7 通过；Windows PowerShell 5.1 回归 20/20 通过；真实 Bash 安装输出 `Added to Windows User PATH: C:\Users\eden_studio\.local\bin` 且跳过 post-install；新 PowerShell 的 User `Path` 包含 `C:\Users\eden_studio\.local\bin`，`Get-Command bifrost` 指向该目录并输出 `bifrost 0.0.110`；CMD `where bifrost` 指向同一路径并输出 `bifrost 0.0.110`；Git Bash `command -v bifrost` 输出 `/c/Users/eden_studio/.local/bin/bifrost` 并输出 `bifrost 0.0.110`。 |

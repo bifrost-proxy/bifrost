@@ -1114,6 +1114,162 @@ add_to_path() {
     return 0
 }
 
+path_in_current_process() {
+    local dir="$1"
+    [[ ":$PATH:" == *":$dir:"* ]]
+}
+
+prepend_current_process_path() {
+    local dir="$1"
+    if ! path_in_current_process "$dir"; then
+        export PATH="$dir:$PATH"
+    fi
+}
+
+windows_path_powershell_command() {
+    cat <<'PS'
+$dir = $env:BIFROST_WINDOWS_PATH_DIR
+if ([string]::IsNullOrWhiteSpace($dir)) {
+    Write-Output "missing-dir"
+    exit 2
+}
+
+$current = [Environment]::GetEnvironmentVariable('Path', 'User')
+if ($null -eq $current) {
+    $current = ''
+}
+
+$normalizedDir = $dir.Trim().TrimEnd('\')
+$exists = $false
+foreach ($entry in ($current -split ';')) {
+    if ($entry.Trim().TrimEnd('\') -ieq $normalizedDir) {
+        $exists = $true
+        break
+    }
+}
+
+if ($exists) {
+    Write-Output "already"
+    exit 0
+}
+
+if ([string]::IsNullOrWhiteSpace($current)) {
+    $newPath = $dir
+} else {
+    $newPath = $current.TrimEnd(';') + ';' + $dir
+}
+
+[Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+Write-Output "added"
+PS
+}
+
+add_to_windows_user_path() {
+    local win_dir="$1"
+    local ps_bin=""
+    local result=""
+
+    if has_command powershell.exe; then
+        ps_bin="powershell.exe"
+    elif has_command pwsh.exe; then
+        ps_bin="pwsh.exe"
+    elif has_command pwsh; then
+        ps_bin="pwsh"
+    else
+        print_warning "PowerShell not found; cannot update Windows User PATH automatically"
+        return 1
+    fi
+
+    result=$(BIFROST_WINDOWS_PATH_DIR="$win_dir" "$ps_bin" -NoProfile -ExecutionPolicy Bypass -Command "$(windows_path_powershell_command)" 2>/dev/null | tr -d '\r' | tail -n 1) || {
+        print_warning "Failed to update Windows User PATH automatically"
+        return 1
+    }
+
+    case "$result" in
+        added)
+            print_success "Added to Windows User PATH: $win_dir"
+            ;;
+        already)
+            print_success "Windows User PATH already contains: $win_dir"
+            ;;
+        *)
+            print_warning "Unexpected Windows User PATH update result: ${result:-empty}"
+            return 1
+            ;;
+    esac
+}
+
+configure_install_path() {
+    local os="$1"
+    local install_dir="$2"
+    local current_path_missing=0
+    local need_path_hint=0
+
+    if ! path_in_current_process "$install_dir"; then
+        current_path_missing=1
+    fi
+
+    if [[ "$NO_MODIFY_PATH" == "1" ]]; then
+        if [[ "$current_path_missing" == "1" ]]; then
+            print_warning "$install_dir is not in your PATH (auto-configuration skipped by --no-modify-path)"
+            need_path_hint=1
+        fi
+    elif [[ "$os" == "windows" ]]; then
+        local win_install_dir="$install_dir"
+        if command -v cygpath >/dev/null 2>&1; then
+            win_install_dir=$(cygpath -w "$install_dir")
+        fi
+
+        if [[ "$current_path_missing" == "1" ]]; then
+            print_warning "$install_dir is not in your PATH"
+            echo ""
+
+            local user_shell
+            user_shell=$(detect_user_shell)
+            local config_file
+            config_file=$(get_shell_config_file "$user_shell" "$os")
+
+            print_step "Detected shell: $user_shell (config: $config_file)"
+            add_to_path "$user_shell" "$config_file" "$install_dir"
+            prepend_current_process_path "$install_dir"
+            need_path_hint=1
+        fi
+
+        add_to_windows_user_path "$win_install_dir" || {
+            echo ""
+            echo "You can add it to Windows PATH manually (PowerShell):"
+            echo ""
+            echo "  \$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')"
+            echo "  [Environment]::SetEnvironmentVariable('Path', \"\$currentPath;$win_install_dir\", 'User')"
+        }
+    elif [[ "$current_path_missing" == "1" ]]; then
+        print_warning "$install_dir is not in your PATH"
+        echo ""
+
+        local user_shell
+        user_shell=$(detect_user_shell)
+        local config_file
+        config_file=$(get_shell_config_file "$user_shell" "$os")
+
+        print_step "Detected shell: $user_shell (config: $config_file)"
+        add_to_path "$user_shell" "$config_file" "$install_dir"
+        prepend_current_process_path "$install_dir"
+        need_path_hint=1
+    fi
+
+    if [[ "$need_path_hint" == "1" ]]; then
+        echo ""
+        print_warning "Restart your terminal or run the following to use bifrost from this shell now:"
+        echo ""
+        echo "  export PATH=\"$install_dir:\$PATH\""
+        if [[ "$os" == "windows" ]]; then
+            echo ""
+            echo "New PowerShell/CMD/Git Bash windows will inherit the updated Windows User PATH."
+            echo "Already-open PowerShell/CMD windows must be restarted to see the new PATH."
+        fi
+    fi
+}
+
 show_help() {
     echo "Bifrost Installation Script"
     echo ""
@@ -1540,50 +1696,7 @@ main() {
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
     echo ""
 
-    local need_path_hint=0
-    if [[ ":$PATH:" != *":$INSTALL_DIR:"* ]]; then
-        if [[ "$NO_MODIFY_PATH" == "1" ]]; then
-            print_warning "$INSTALL_DIR is not in your PATH (auto-configuration skipped by --no-modify-path)"
-            need_path_hint=1
-        elif [[ "$os" == "windows" ]]; then
-            print_warning "$INSTALL_DIR is not in your PATH"
-            echo ""
-            local win_install_dir="$INSTALL_DIR"
-            if command -v cygpath >/dev/null 2>&1; then
-                win_install_dir=$(cygpath -w "$INSTALL_DIR")
-            fi
-            local user_shell
-            user_shell=$(detect_user_shell)
-            local config_file
-            config_file=$(get_shell_config_file "$user_shell" "$os")
-
-            print_step "Detected shell: $user_shell (config: $config_file)"
-            add_to_path "$user_shell" "$config_file" "$INSTALL_DIR"
-
-            echo ""
-            echo "You may also want to add it to Windows PATH (PowerShell):"
-            echo ""
-            echo "  \$currentPath = [Environment]::GetEnvironmentVariable('Path', 'User')"
-            echo "  [Environment]::SetEnvironmentVariable('Path', \"\$currentPath;$win_install_dir\", 'User')"
-            need_path_hint=1
-        else
-            local user_shell
-            user_shell=$(detect_user_shell)
-            local config_file
-            config_file=$(get_shell_config_file "$user_shell" "$os")
-
-            print_step "Detected shell: $user_shell (config: $config_file)"
-            add_to_path "$user_shell" "$config_file" "$INSTALL_DIR"
-            need_path_hint=1
-        fi
-    fi
-
-    if [[ "$need_path_hint" == "1" ]]; then
-        echo ""
-        print_warning "Restart your terminal or run the following to use bifrost now:"
-        echo ""
-        echo "  export PATH=\"$INSTALL_DIR:\$PATH\""
-    fi
+    configure_install_path "$os" "$INSTALL_DIR"
 
     run_post_install "$INSTALL_DIR/$binary_name"
 
