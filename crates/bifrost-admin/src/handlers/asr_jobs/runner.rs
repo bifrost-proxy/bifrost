@@ -255,6 +255,11 @@ async fn run_directory_task(
     let _guard = ASR_JOB_RUN_LOCK.lock().await;
     let _task_lock = TaskRunFileLock::acquire(&task.id)?;
     start_run_progress(&task.id, "background");
+    update_run_progress(&task.id, |progress| {
+        progress.max_concurrent_files = normalize_max_concurrent_files(task.max_concurrent_files);
+        progress.effective_max_concurrent_files = effective_max_concurrent_files(&task);
+        progress.active_file_count = 0;
+    });
     if task_pause_requested(&task.id) {
         return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
     }
@@ -644,6 +649,246 @@ async fn process_pending_files(
     task_server_state: &mut Option<ServerRunnerState>,
     stop_task_server_after_use: &mut bool,
 ) -> Result<(usize, usize), String> {
+    let effective_concurrency = current_effective_max_concurrent_files(task);
+    if effective_concurrency <= 1 {
+        return process_pending_files_sequential(
+            task,
+            target,
+            asr_bin,
+            model_path,
+            server_url,
+            startup_fallback_reason,
+            pending,
+            processed_now_base,
+            failed_now_base,
+            files,
+            pause_check,
+            task_server_state,
+            stop_task_server_after_use,
+        )
+        .await;
+    }
+
+    process_pending_files_parallel_fork(
+        task,
+        target,
+        asr_bin,
+        model_path,
+        startup_fallback_reason,
+        pending,
+        processed_now_base,
+        failed_now_base,
+        pause_check,
+    )
+    .await
+}
+
+fn current_effective_max_concurrent_files(task: &AsrDirectoryTask) -> usize {
+    find_task(&task.id)
+        .as_ref()
+        .map(effective_max_concurrent_files)
+        .unwrap_or_else(|| effective_max_concurrent_files(task)) as usize
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_pending_files_parallel_fork(
+    task: &AsrDirectoryTask,
+    target: &AsrTarget,
+    asr_bin: &Path,
+    model_path: &Path,
+    startup_fallback_reason: Option<&str>,
+    pending: &[PathBuf],
+    processed_now_base: usize,
+    failed_now_base: usize,
+    pause_check: &(dyn Fn() -> bool + Send + Sync),
+) -> Result<(usize, usize), String> {
+    let mut queue = pending.iter().cloned().collect::<VecDeque<_>>();
+    let total_pending = pending.len();
+    let mut processed_now = processed_now_base;
+    let mut failed_now = failed_now_base;
+    let mut completed_now = 0usize;
+    let mut join_set = tokio::task::JoinSet::new();
+
+    update_run_progress(&task.id, |progress| {
+        progress.current_file_index = 0;
+        progress.current_file_total = total_pending;
+        progress.processed_now = processed_now;
+        progress.failed_now = failed_now;
+        progress.max_concurrent_files = normalize_max_concurrent_files(task.max_concurrent_files);
+        progress.effective_max_concurrent_files = current_effective_max_concurrent_files(task) as u8;
+        progress.active_file_count = 0;
+        progress.stage = "asr".to_string();
+        progress.stage_message = Some("parallel file transcription".to_string());
+        progress.message = Some(format!(
+            "processing {total_pending} pending file(s) with up to {} concurrent worker(s)",
+            progress.effective_max_concurrent_files
+        ));
+    });
+
+    while !queue.is_empty() || !join_set.is_empty() {
+        if pause_check() {
+            join_set.abort_all();
+            update_run_progress(&task.id, |progress| {
+                progress.active_file_count = 0;
+                progress.message = Some("ASR directory task paused; aborting active workers".to_string());
+            });
+            return Err(ASR_TASK_PAUSED_MESSAGE.to_string());
+        }
+
+        let effective = current_effective_max_concurrent_files(task).max(1);
+        while join_set.len() < effective {
+            let Some(path) = queue.pop_front() else {
+                break;
+            };
+            let task = find_task(&task.id).unwrap_or_else(|| task.clone());
+            let target = target.clone();
+            let asr_bin = asr_bin.to_path_buf();
+            let model_path = model_path.to_path_buf();
+            let startup_fallback_reason = startup_fallback_reason.map(str::to_string);
+            join_set.spawn(async move {
+                tokio::task::spawn_blocking(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(|error| {
+                            format!("failed to create ASR file worker runtime: {error}")
+                        })?;
+                    runtime.block_on(async move {
+                let key = source_key(&path);
+                let mut latest_store = load_file_store(&task.id);
+                let existing = latest_store.files.remove(&key);
+                let mut file_store = FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::new(),
+                };
+                if let Some(record) = existing {
+                    file_store.files.insert(key, record);
+                }
+                let mut file_server_state = None::<ServerRunnerState>;
+                let mut stop_after_use = false;
+                let worker_pause_check = || {
+                    task_pause_requested(&task.id)
+                        || crate::handlers::speech::directory_task_should_yield_for_realtime(
+                            &task.id,
+                        )
+                };
+                process_pending_files_sequential(
+                    &task,
+                    &target,
+                    &asr_bin,
+                    &model_path,
+                    None,
+                    startup_fallback_reason.as_deref(),
+                    std::slice::from_ref(&path),
+                    0,
+                    0,
+                    &mut file_store,
+                    &worker_pause_check,
+                    &mut file_server_state,
+                    &mut stop_after_use,
+                )
+                .await
+                    })
+                })
+                .await
+                .map_err(|error| format!("ASR file worker blocking task failed: {error}"))?
+            });
+        }
+
+        update_run_progress(&task.id, |progress| {
+            progress.current_file_index = completed_now;
+            progress.current_file_total = total_pending;
+            progress.processed_now = processed_now;
+            progress.failed_now = failed_now;
+            progress.max_concurrent_files = find_task(&task.id)
+                .map(|task| normalize_max_concurrent_files(task.max_concurrent_files))
+                .unwrap_or_else(|| normalize_max_concurrent_files(task.max_concurrent_files));
+            progress.effective_max_concurrent_files =
+                current_effective_max_concurrent_files(task) as u8;
+            progress.active_file_count = join_set.len();
+            progress.message = Some(format!(
+                "processed {completed_now}/{total_pending}; {} active, {} queued",
+                join_set.len(),
+                queue.len()
+            ));
+        });
+
+        let result = tokio::select! {
+            result = join_set.join_next() => result,
+            _ = tokio::time::sleep(Duration::from_secs(2)), if !join_set.is_empty() => {
+                continue;
+            }
+        };
+        let Some(result) = result else {
+            continue;
+        };
+        completed_now += 1;
+        match result {
+            Ok(Ok((processed, failed))) => {
+                processed_now += processed;
+                failed_now += failed;
+            }
+            Ok(Err(error)) if error == ASR_TASK_PAUSED_MESSAGE => {
+                join_set.abort_all();
+                update_run_progress(&task.id, |progress| {
+                    progress.active_file_count = 0;
+                    progress.message =
+                        Some("ASR directory task paused; aborting active workers".to_string());
+                });
+                return Err(error);
+            }
+            Ok(Err(error)) => {
+                failed_now += 1;
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %error,
+                    "parallel ASR file worker failed"
+                );
+            }
+            Err(error) => {
+                failed_now += 1;
+                tracing::warn!(
+                    task_id = %task.id,
+                    error = %error,
+                    "parallel ASR file worker panicked or was cancelled"
+                );
+            }
+        }
+    }
+
+    update_run_progress(&task.id, |progress| {
+        progress.current_file_index = completed_now;
+        progress.current_file_total = total_pending;
+        progress.processed_now = processed_now;
+        progress.failed_now = failed_now;
+        progress.active_file_count = 0;
+        progress.message = Some(format!(
+            "processed {processed_now} file(s), failed {failed_now}"
+        ));
+    });
+
+    Ok((
+        processed_now.saturating_sub(processed_now_base),
+        failed_now.saturating_sub(failed_now_base),
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn process_pending_files_sequential(
+    task: &AsrDirectoryTask,
+    target: &AsrTarget,
+    asr_bin: &Path,
+    model_path: &Path,
+    server_url: Option<&str>,
+    startup_fallback_reason: Option<&str>,
+    pending: &[PathBuf],
+    processed_now_base: usize,
+    failed_now_base: usize,
+    files: &mut FileStore,
+    pause_check: &(dyn Fn() -> bool + Send + Sync),
+    task_server_state: &mut Option<ServerRunnerState>,
+    stop_task_server_after_use: &mut bool,
+) -> Result<(usize, usize), String> {
     let mut processed_now = processed_now_base;
     let mut failed_now = failed_now_base;
 
@@ -843,14 +1088,14 @@ async fn process_pending_files(
                     progress.current_chunk_total = chunk_total;
                     progress.message = Some(format!("processing chunk {chunk_done}/{chunk_total}"));
                 });
-                let mut progress_store = load_file_store(&task_id);
-                if let Some(rec) = progress_store.files.get_mut(&key) {
-                    rec.progress_current = Some(chunk_done);
-                    rec.progress_total = Some(chunk_total);
-                } else {
-                    // Construct a minimal record without calling pending_record(),
-                    // which would run ffprobe on every chunk completion (expensive).
-                    let rec = FileRecord {
+                let mut progress_store = FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::new(),
+                };
+                let mut rec = load_file_store(&task_id)
+                    .files
+                    .remove(&key)
+                    .unwrap_or_else(|| FileRecord {
                         task_id: task_id.clone(),
                         source_path: path.clone(),
                         source_size: None,
@@ -877,9 +1122,10 @@ async fn process_pending_files(
                         progress_total: Some(chunk_total),
                         failed_chunks: Vec::new(),
                         memory_limit_hints: Vec::new(),
-                    };
-                    progress_store.files.insert(key.clone(), rec);
-                }
+                    });
+                rec.progress_current = Some(chunk_done);
+                rec.progress_total = Some(chunk_total);
+                progress_store.files.insert(key.clone(), rec);
                 let _ = save_file_store(&task_id, &progress_store);
                 tracing::debug!(
                     task_id = %task_id,
@@ -909,8 +1155,11 @@ async fn process_pending_files(
                     error = ?metric.error,
                     "ASR chunk metric"
                 );
-                let mut metric_store = load_file_store(&task_id);
-                if let Some(rec) = metric_store.files.get_mut(&key) {
+                let mut metric_store = FileStore {
+                    version: TASK_STORE_VERSION,
+                    files: BTreeMap::new(),
+                };
+                if let Some(mut rec) = load_file_store(&task_id).files.remove(&key) {
                     rec.chunk_metrics.push(metric);
                     if rec.fallback_reason.is_none() {
                         rec.fallback_reason = rec
@@ -918,8 +1167,9 @@ async fn process_pending_files(
                             .iter()
                             .find_map(|item| item.fallback_reason.clone());
                     }
+                    metric_store.files.insert(key.clone(), rec);
+                    let _ = save_file_store(&task_id, &metric_store);
                 }
-                let _ = save_file_store(&task_id, &metric_store);
             }
         };
 
@@ -2308,6 +2558,7 @@ mod coverage_boost {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-0.6B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -2862,6 +3113,7 @@ mod coverage_boost_v2 {
             language: "chinese".to_string(),
             model: "Qwen3-ASR-0.6B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 1,
             updated_at_ms: 1,
@@ -2907,6 +3159,7 @@ mod coverage_boost_v2 {
             language: "zh".to_string(),
             model: "Qwen3-ASR-0.6B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 0,
             updated_at_ms: 0,
@@ -2937,6 +3190,7 @@ mod coverage_boost_v2 {
             language: "zh".to_string(),
             model: "Qwen3-ASR-0.6B".to_string(),
             runtime_strategy: AsrRuntimeStrategy::ForkPerChunk,
+            max_concurrent_files: default_max_concurrent_files(),
             diarization: AsrDiarizationConfig::default(),
             created_at_ms: 0,
             updated_at_ms: 0,

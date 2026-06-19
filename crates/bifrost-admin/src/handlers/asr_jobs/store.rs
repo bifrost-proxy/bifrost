@@ -191,6 +191,9 @@ fn start_run_progress(task_id: &str, trigger: &str) -> AsrRunProgress {
         current_chunk_total: 0,
         processed_now: 0,
         failed_now: 0,
+        max_concurrent_files: default_max_concurrent_files(),
+        effective_max_concurrent_files: default_max_concurrent_files(),
+        active_file_count: 0,
         stage: "queued".to_string(),
         stage_message: Some("waiting for ASR worker".to_string()),
         message: Some("ASR directory task queued.".to_string()),
@@ -267,8 +270,29 @@ fn load_file_store(task_id: &str) -> FileStore {
 }
 
 fn save_file_store(task_id: &str, store: &FileStore) -> Result<(), String> {
+    let _guard = FILE_STORE_WRITE_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = file_store_path(task_id);
-    atomic_json_write(&path, store)
+    let mut merged = match std::fs::read_to_string(&path) {
+        Ok(content) => serde_json::from_str::<FileStore>(&content).unwrap_or_else(|_| FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => FileStore {
+            version: TASK_STORE_VERSION,
+            files: BTreeMap::new(),
+        },
+        Err(error) => {
+            return Err(format!("read existing file store {}: {error}", path.display()));
+        }
+    };
+    if merged.version != TASK_STORE_VERSION {
+        merged.version = TASK_STORE_VERSION;
+        merged.files.clear();
+    }
+    for (key, record) in store.files.iter() {
+        merged.files.insert(key.clone(), record.clone());
+    }
+    atomic_json_write(&path, &merged)
 }
 
 /// Write a JSON file atomically: serialize → write to `<path>.tmp` → rename
@@ -474,6 +498,8 @@ fn task_watch_snapshot_from_store(
             language: task.language.clone(),
             model: task.model.clone(),
             runtime_strategy: task.runtime_strategy,
+            max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
+            effective_max_concurrent_files: effective_max_concurrent_files(&task),
             diarization: task.diarization.clone(),
             last_run_at_ms: task.last_run_at_ms,
             next_run_at_ms: task.next_run_at_ms,
@@ -494,6 +520,18 @@ fn task_watch_snapshot_from_store(
             current_file_total,
             current_chunk_done,
             current_chunk_total,
+            max_concurrent_files: run_progress
+                .as_ref()
+                .map(|progress| progress.max_concurrent_files)
+                .unwrap_or_else(|| normalize_max_concurrent_files(task.max_concurrent_files)),
+            effective_max_concurrent_files: run_progress
+                .as_ref()
+                .map(|progress| progress.effective_max_concurrent_files)
+                .unwrap_or_else(|| effective_max_concurrent_files(&task)),
+            active_file_count: run_progress
+                .as_ref()
+                .map(|progress| progress.active_file_count)
+                .unwrap_or(0),
             eta_ms,
             eta_confidence,
             stage: run_progress
@@ -891,7 +929,8 @@ fn reset_retryable_failed_records(task_id: &str, files: &mut FileStore) -> usize
 }
 
 fn is_retryable_asr_server_acquire_error(error: &str) -> bool {
-    error.contains("managed ASR server start failed")
+    error.trim() == "ASR diarization worker failed:"
+        || error.contains("managed ASR server start failed")
         && (error.contains("Qwen3-ASR service is busy")
             || error.contains("local server is reachable, but it is not managed by this Bifrost process")
             || error.contains("Failed to allocate a dynamic ASR service port")
@@ -1038,6 +1077,8 @@ fn summarize_task(task: &AsrDirectoryTask) -> TaskSummary {
         cleanable_source_bytes,
         cleanable_source_file_count,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
+        effective_max_concurrent_files: effective_max_concurrent_files(task),
         diarization_enabled: task.diarization.enabled,
         diarization_ready,
         diarization_running,
@@ -1131,6 +1172,8 @@ fn summarize_task_records(
         cleanable_source_bytes: 0,
         cleanable_source_file_count: 0,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
+        max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
+        effective_max_concurrent_files: effective_max_concurrent_files(task),
         diarization_enabled: task.diarization.enabled,
         diarization_ready,
         diarization_running,

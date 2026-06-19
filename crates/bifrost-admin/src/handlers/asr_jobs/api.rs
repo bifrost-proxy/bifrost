@@ -334,6 +334,11 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
             .model
             .unwrap_or_else(|| bifrost_asr::runtime::DEFAULT_ASR_MODEL.to_string()),
         runtime_strategy: create.runtime_strategy.unwrap_or_default(),
+        max_concurrent_files: normalize_max_concurrent_files(
+            create
+                .max_concurrent_files
+                .unwrap_or_else(default_max_concurrent_files),
+        ),
         diarization: normalize_task_diarization_config(create.diarization.unwrap_or_else(
             bifrost_asr::profiles::AsrDiarizationConfig::speaker_aware_default,
         )),
@@ -443,6 +448,9 @@ fn update_task_config(
     }
     if let Some(runtime_strategy) = update.runtime_strategy {
         task.runtime_strategy = runtime_strategy;
+    }
+    if let Some(max_concurrent_files) = update.max_concurrent_files {
+        task.max_concurrent_files = normalize_max_concurrent_files(max_concurrent_files);
     }
     if let Some(diarization) = update.diarization {
         task.diarization = normalize_task_diarization_config(diarization);
@@ -582,6 +590,7 @@ async fn put_external_import_response(id: &str, req: Request<Incoming>) -> Respo
         language: None,
         model: None,
         runtime_strategy: None,
+        max_concurrent_files: None,
         diarization: None,
         daily_agent: None,
         external_devices: update.external_devices,

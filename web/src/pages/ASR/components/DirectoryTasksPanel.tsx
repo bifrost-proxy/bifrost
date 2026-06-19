@@ -376,6 +376,7 @@ export default function DirectoryTasksPanel({
             schedule_day: 1,
             schedule_minute: 0,
             runtime_strategy: "reuse_per_file",
+            max_concurrent_files: 1,
             diarization_enabled: true,
             diarization_profile: "sherpa-onnx-balanced",
             voiceprint_matching: true,
@@ -487,6 +488,11 @@ export default function DirectoryTasksPanel({
                 </Select>
               </Form.Item>
             </Col>
+            <Col xs={24} md={8}>
+              <Form.Item name="max_concurrent_files" label="File Concurrency">
+                <InputNumber min={1} max={16} style={{ width: "100%" }} />
+              </Form.Item>
+            </Col>
             <Col xs={12} md={8}>
               <Form.Item
                 name="diarization_enabled"
@@ -593,6 +599,12 @@ export default function DirectoryTasksPanel({
                 <Space size={4} wrap>
                   <Tag>{record.model}</Tag>
                   <Tag>{record.language}</Tag>
+                  <Tag>
+                    {record.summary.effective_max_concurrent_files ??
+                      record.max_concurrent_files ??
+                      1}
+                    /{record.max_concurrent_files ?? 1} files
+                  </Tag>
                 </Space>
               </Space>
             ),
@@ -626,6 +638,9 @@ export default function DirectoryTasksPanel({
                   next {formatTime(record.next_run_at_ms)}
                 </Text>
                 <Tag>{record.runtime_strategy}</Tag>
+                {record.summary.effective_max_concurrent_files !== record.max_concurrent_files ? (
+                  <Tag color="warning">effective 1</Tag>
+                ) : null}
                 {record.diarization?.enabled ? (
                   <Tag color={record.summary.diarization_ready ? "purple" : "warning"}>
                     {record.summary.diarization_ready ? "speakers ready" : "speakers setup"}
@@ -878,6 +893,7 @@ function defaultTaskFormValues() {
     schedule_day: 1,
     schedule_minute: 0,
     runtime_strategy: "reuse_per_file",
+    max_concurrent_files: 1,
     diarization_enabled: true,
     diarization_profile: "sherpa-onnx-balanced",
     diarization_known_speaker_count: undefined,
@@ -927,6 +943,7 @@ function taskToFormValues(task: AsrDirectoryTask) {
     model: task.model,
     language: task.language,
     runtime_strategy: task.runtime_strategy,
+    max_concurrent_files: task.max_concurrent_files ?? 1,
     diarization_enabled: task.diarization?.enabled ?? true,
     diarization_profile: task.diarization?.profile ?? "sherpa-onnx-balanced",
     diarization_known_speaker_count: task.diarization?.known_speaker_count,

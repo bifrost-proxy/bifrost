@@ -474,6 +474,7 @@ fn build_daily_agent_records(
         language: "chinese".to_string(),
         model: "Qwen3-ASR-1.7B".to_string(),
         runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        max_concurrent_files: default_max_concurrent_files(),
         diarization: AsrDiarizationConfig::default(),
         created_at_ms: 1,
         updated_at_ms: 1,
