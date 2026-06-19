@@ -113,6 +113,14 @@ pub fn build_menu(
         action: MenuItemAction::None,
     }));
 
+    items.push(item(MenuItemDef {
+        id: "_version".to_string(),
+        label: format!("Version v{}", env!("CARGO_PKG_VERSION")),
+        enabled: false,
+        checked: false,
+        action: MenuItemAction::None,
+    }));
+
     if let Some(rt) = runtime {
         let admin_url = rt.admin_url();
 
@@ -682,6 +690,12 @@ mod tests {
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Running on 127.0.0.1:8800"));
+        let version = find_item(&menu, "_version").unwrap();
+        assert_eq!(
+            version.label,
+            format!("Version v{}", env!("CARGO_PKG_VERSION"))
+        );
+        assert!(!version.enabled);
         let open_admin = find_item(&menu, "open_admin_ui").unwrap();
         assert!(open_admin.enabled);
         assert!(find_item(&menu, "restart_service").is_none());
