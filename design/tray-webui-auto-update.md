@@ -205,7 +205,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 6. 无更新时 `POST upgrade` 断言 409。
 7. 直接执行 `bifrost self-update --source admin`，并将测试 latest 设为当前磁盘二进制版本，断言即使无需下载/安装也会重启当前数据目录下的 daemon，且 `upgrade-progress.json` 写入 `completed`。
 8. `build_menu` 单元测试断言菜单包含不可点击的当前版本信息行，并与可点击的 `Update to v{latest}` 区分。
-9. `test_cli_tray_startup_ci.sh` 在临时数据目录预置新鲜 `version_cache.json`，把 tray 首次后台检查延迟压到 0，真实拉起 tray helper 后从 `tray.log` 断言缓存新鲜时跳过联网检查，避免启动后高频请求 GitHub。
+9. `test_cli_tray_startup_ci.sh` 在临时数据目录预置新鲜 `version_cache.json`，把 tray 首次后台检查延迟压到 0，真实拉起 tray helper 后从 `tray.log` 断言缓存新鲜时跳过联网检查，避免启动后高频请求 GitHub；Windows 无交互 runner 的显式 log-only 降级模式只断言 helper 启动标记，避免把原生 tray 无法长驻误判为后台更新失败。
 
 > E2E 用测试钩子避免真实联网下载，验证的是 API 协议、进度文件读写、状态机推进，而非真实二进制替换。
 
