@@ -100,12 +100,13 @@
 - 能在 `upgrade-background.log` 中看到后台升级输出或错误。
 - 父进程存活且子进程退出时，不留下长期 defunct child。
 
-### TC-TWA-06：Tray helper 自主低频后台检查更新
+### TC-TWA-06：Tray helper 自主低频后台检查更新与当前版本展示
 
 **操作步骤**：
 1. 使用临时数据目录，不启动 Web UI version-check，直接写入/读取 tray 共享的 `version_cache.json`。
 2. 执行 tray 单元回归：
    ```bash
+   cargo test -p bifrost-cli test_menu_running_state
    cargo test -p bifrost-cli test_tray_update_cache_missing_or_stale_requires_fetch
    cargo test -p bifrost-cli test_detect_update_available_uses_tray_cache_without_network
    ```
@@ -113,10 +114,11 @@
    ```bash
    BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh
    ```
-4. 检查测试断言是否覆盖：缓存缺失需要后台检查、新鲜缓存不联网、过期缓存需要后台检查、缓存中存在更高版本时 tray 能识别为可更新。
+4. 检查测试断言是否覆盖：菜单展示不可点击的当前版本号、缓存缺失需要后台检查、新鲜缓存不联网、过期缓存需要后台检查、缓存中存在更高版本时 tray 能识别为可更新。
 
 **预期结果**：
 - 测试命令退出码为 0。
+- tray 菜单状态行下方展示当前版本号，例如 `Version v0.0.110`，且该信息行不可点击。
 - tray 更新提示不再依赖 Web UI 先写缓存。
 - tray 对新鲜缓存不发起高频 GitHub 请求；过期或缺失缓存才会进入后台检查路径。
 
@@ -141,4 +143,4 @@
 
 2026-06-19 本次优化已执行：
 
-- TC-TWA-06：通过。执行 `cargo test -p bifrost-cli test_tray_update_cache_missing_or_stale_requires_fetch` 与 `cargo test -p bifrost-cli test_detect_update_available_uses_tray_cache_without_network`，两个过滤用例均在 `src/lib.rs` 和 `src/main.rs` 单测目标中通过；验证缓存缺失/过期会进入后台检查路径、新鲜缓存跳过联网、缓存中存在更高版本时 tray 识别 `Update to v999.0.0` 的前置状态。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 生成当前 debug 二进制，再执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，真实拉起 Darwin tray helper（port 15364，tray_pid 98554），脚本通过并断言 tray 日志包含 `tray update check skipped; cached version is still fresh`。
+- TC-TWA-06：通过。执行 `cargo test -p bifrost-cli test_menu_running_state`、`cargo test -p bifrost-cli test_tray_update_cache_missing_or_stale_requires_fetch` 与 `cargo test -p bifrost-cli test_detect_update_available_uses_tray_cache_without_network`，过滤用例均在 `src/lib.rs` 和 `src/main.rs` 单测目标中通过；验证菜单包含不可点击的当前版本号、缓存缺失/过期会进入后台检查路径、新鲜缓存跳过联网、缓存中存在更高版本时 tray 识别 `Update to v999.0.0` 的前置状态。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 生成当前 debug 二进制，再执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh`，真实拉起 Darwin tray helper（port 16172，tray_pid 34284），脚本通过并断言 tray 日志包含 `tray update check skipped; cached version is still fresh`。
