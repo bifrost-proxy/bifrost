@@ -44,6 +44,7 @@ pub mod traffic;
 pub mod trust_probe;
 pub mod user;
 pub mod values;
+pub mod videos;
 pub mod voice;
 pub mod voice_stateful;
 pub mod websocket;
