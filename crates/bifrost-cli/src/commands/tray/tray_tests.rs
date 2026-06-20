@@ -64,13 +64,13 @@
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
-                menu_bar: "C20% M55% D55% ↑001M ↓512K".to_string(),
+                menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
         };
 
         assert_eq!(
             menu_bar_stats_title(&snapshot, ServiceState::Running),
-            Some("C20% M55% D55% ↑001M ↓512K".to_string())
+            Some("C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string())
         );
         assert_eq!(menu_bar_stats_title(&snapshot, ServiceState::Stopped), None);
     }
@@ -78,10 +78,11 @@
     #[cfg(target_os = "macos")]
     #[test]
     fn test_menu_bar_stats_bitmap_is_compact_and_non_empty() {
-        let bitmap = render_menu_bar_stats_bitmap("C20% M55% D55% ↑001M ↓512K")
-            .expect("bitmap");
+        let bitmap =
+            render_menu_bar_stats_bitmap("C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s")
+                .expect("bitmap");
 
-        assert_eq!(bitmap.height, 78);
+        assert_eq!(bitmap.height, 36);
         assert!(bitmap.width <= 1400);
         assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
 
@@ -92,7 +93,7 @@
             .filter_map(|(idx, pixel)| {
                 let x = idx as u32 % bitmap.width;
                 let y = idx as u32 / bitmap.width;
-                (x < 78 && y < bitmap.height).then_some(pixel[3])
+                (x < 32 && y < bitmap.height).then_some(pixel[3])
             })
             .max()
             .unwrap_or(0);
@@ -101,14 +102,26 @@
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn test_menu_bar_stats_font_uses_tabular_digit_widths() {
+    fn test_menu_bar_stats_columns_align_value_and_label_rows() {
         let font = menu_bar_stats_font().expect("font");
-        let zero = measure_text_width(font, "000", 50.0);
-        let ones = measure_text_width(font, "111", 50.0);
-        let eights = measure_text_width(font, "888", 50.0);
+        let rows = menu_bar_stats_rows("C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s");
+        let columns = menu_bar_stats_columns(font, &rows, 28.0, 9.5);
 
-        assert_eq!(zero, ones);
-        assert_eq!(zero, eights);
+        assert_eq!(
+            rows.values,
+            vec!["C20%", "M55%", "D55%", "↑1.5 M/s ↓512 K/s"]
+        );
+        assert!(rows.labels.is_empty());
+        assert_eq!(columns.len(), 4);
+        assert!(columns.windows(2).all(|pair| pair[0].x < pair[1].x));
+        assert_eq!(columns[0].value_font_px, 28.0);
+        assert_eq!(columns[0].label_font_px, 9.5);
+        assert_eq!(columns[3].value_font_px, 28.0);
+        assert_eq!(columns[3].label_font_px, 9.5);
+        assert!(columns.windows(2).all(|pair| {
+            pair[1].x - (pair[0].x + pair[0].width)
+                == MENU_BAR_STATS_SEPARATOR_GAP * 2 + MENU_BAR_STATS_SEPARATOR_WIDTH
+        }));
     }
 
     #[cfg(target_os = "macos")]
@@ -125,7 +138,7 @@
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
-                menu_bar: "C20% M55% D55% ↑001M ↓512K".to_string(),
+                menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
         };
 
@@ -520,6 +533,7 @@
             system_proxy: Some(cached.clone()),
             bin_available: true,
             update_available: None,
+            #[cfg(target_os = "macos")]
             system_stats: None,
         };
         let menu_data = Arc::new(Mutex::new(snapshot));

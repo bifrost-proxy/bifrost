@@ -1,6 +1,5 @@
 use super::config::{self, CustomMenuItem, MenuAction, TrayConfig};
 use super::runtime::{RuntimeInfo, ServiceState};
-use super::system_stats::SystemStatsMenuLines;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -74,6 +73,13 @@ pub struct TrayRule {
 pub struct SystemProxyMenuState {
     pub supported: bool,
     pub enabled: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SystemStatsMenuLines {
+    pub system: String,
+    pub network: String,
+    pub menu_bar: String,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -728,7 +734,7 @@ mod tests {
         let stats = SystemStatsMenuLines {
             system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
             network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
-            menu_bar: "C23% | M56% | D59% | ↑002M/s↓512K/s".to_string(),
+            menu_bar: "C23% | M56% | D59% | ↑1.5 M/s ↓512 K/s".to_string(),
         };
         let menu = build_menu(
             Some(&rt),

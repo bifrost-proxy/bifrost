@@ -15,8 +15,8 @@ use std::{
 
 use bifrost_storage::TraySystemStatsItems;
 use sysinfo::Disks;
-#[cfg(not(target_os = "macos"))]
-use sysinfo::{Networks, System};
+
+use super::menu::SystemStatsMenuLines;
 
 const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
@@ -33,13 +33,6 @@ pub struct SystemStatsSnapshot {
     pub network_up_bytes_per_sec: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SystemStatsMenuLines {
-    pub system: String,
-    pub network: String,
-    pub menu_bar: String,
-}
-
 impl SystemStatsMenuLines {
     pub fn collecting(items: &TraySystemStatsItems) -> Self {
         Self {
@@ -51,12 +44,7 @@ impl SystemStatsMenuLines {
 }
 
 pub struct SystemStatsSampler {
-    #[cfg(not(target_os = "macos"))]
-    system: System,
-    #[cfg(target_os = "macos")]
     last_cpu_ticks: Option<MacCpuTicks>,
-    #[cfg(not(target_os = "macos"))]
-    networks: Networks,
     disk_mount_point: Option<PathBuf>,
     cpu_percent: f32,
     memory_used_bytes: u64,
@@ -100,50 +88,19 @@ struct MacCpuTicks {
 
 impl SystemStatsSampler {
     pub fn new(data_dir: &Path) -> Self {
-        #[cfg(target_os = "macos")]
         let last_cpu_ticks = mac_cpu_ticks();
-        #[cfg(target_os = "macos")]
         let memory_total_bytes = mac_memory_total_bytes().unwrap_or(0);
-        #[cfg(target_os = "macos")]
         let memory_used_bytes = mac_memory_used_bytes(memory_total_bytes).unwrap_or(0);
-
-        #[cfg(not(target_os = "macos"))]
-        let mut system = System::new();
-        #[cfg(not(target_os = "macos"))]
-        system.refresh_memory();
-        #[cfg(not(target_os = "macos"))]
-        system.refresh_cpu_all();
-
-        #[cfg(not(target_os = "macos"))]
-        let mut networks = {
-            let mut networks = Networks::new_with_refreshed_list();
-            networks.refresh();
-            networks
-        };
 
         let disks = Disks::new_with_refreshed_list();
         let disk_mount_point = select_disk_mount_point(disks.list(), Some(data_dir));
         let disk_used_percent = disk_mount_point.as_deref().and_then(disk_usage_percent);
 
         Self {
-            #[cfg(target_os = "macos")]
             cpu_percent: 0.0,
-            #[cfg(not(target_os = "macos"))]
-            cpu_percent: system.global_cpu_usage().clamp(0.0, 100.0),
-            #[cfg(target_os = "macos")]
             memory_used_bytes,
-            #[cfg(not(target_os = "macos"))]
-            memory_used_bytes: system.used_memory(),
-            #[cfg(target_os = "macos")]
             memory_total_bytes,
-            #[cfg(not(target_os = "macos"))]
-            memory_total_bytes: system.total_memory(),
-            #[cfg(not(target_os = "macos"))]
-            system,
-            #[cfg(target_os = "macos")]
             last_cpu_ticks,
-            #[cfg(not(target_os = "macos"))]
-            networks,
             disk_mount_point,
             disk_used_percent,
             last_cpu_memory_at: None,
@@ -164,32 +121,19 @@ impl SystemStatsSampler {
                 .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
                 .unwrap_or(true)
         {
-            #[cfg(target_os = "macos")]
-            {
-                if items.cpu {
-                    if let Some(current_ticks) = mac_cpu_ticks() {
-                        if let Some(cpu_percent) =
-                            mac_cpu_percent(self.last_cpu_ticks, current_ticks)
-                        {
-                            self.cpu_percent = cpu_percent;
-                        }
-                        self.last_cpu_ticks = Some(current_ticks);
+            if items.cpu {
+                if let Some(current_ticks) = mac_cpu_ticks() {
+                    if let Some(cpu_percent) = mac_cpu_percent(self.last_cpu_ticks, current_ticks) {
+                        self.cpu_percent = cpu_percent;
                     }
-                }
-                if items.memory {
-                    self.memory_total_bytes =
-                        mac_memory_total_bytes().unwrap_or(self.memory_total_bytes);
-                    self.memory_used_bytes = mac_memory_used_bytes(self.memory_total_bytes)
-                        .unwrap_or(self.memory_used_bytes);
+                    self.last_cpu_ticks = Some(current_ticks);
                 }
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                self.system.refresh_memory();
-                self.system.refresh_cpu_usage();
-                self.cpu_percent = self.system.global_cpu_usage().clamp(0.0, 100.0);
-                self.memory_used_bytes = self.system.used_memory();
-                self.memory_total_bytes = self.system.total_memory();
+            if items.memory {
+                self.memory_total_bytes =
+                    mac_memory_total_bytes().unwrap_or(self.memory_total_bytes);
+                self.memory_used_bytes = mac_memory_used_bytes(self.memory_total_bytes)
+                    .unwrap_or(self.memory_used_bytes);
             }
             self.last_cpu_memory_at = Some(now);
         }
@@ -213,13 +157,9 @@ impl SystemStatsSampler {
                 .map(|last| now.saturating_duration_since(last) >= NETWORK_LIST_REFRESH_INTERVAL)
                 .unwrap_or(true)
             {
-                #[cfg(not(target_os = "macos"))]
-                self.networks.refresh_list();
                 self.last_network_list_refresh_at = Some(now);
                 self.update_preferred_network_interface();
             }
-            #[cfg(not(target_os = "macos"))]
-            self.networks.refresh();
             self.sample_network_rates(now)
         } else {
             self.reset_network_baseline();
@@ -254,10 +194,7 @@ impl SystemStatsSampler {
     }
 
     fn sample_network_rates(&mut self, now: Instant) -> Option<NetworkRates> {
-        #[cfg(target_os = "macos")]
         let current_interfaces = collect_network_interfaces();
-        #[cfg(not(target_os = "macos"))]
-        let current_interfaces = collect_network_interfaces(&self.networks);
         let mut candidates = Vec::new();
 
         for (name, current_totals) in &current_interfaces {
@@ -336,20 +273,11 @@ fn select_network_rates(
 }
 
 fn detect_default_network_interface() -> Option<String> {
-    #[cfg(target_os = "macos")]
-    {
-        detect_default_network_interface_from_route(&["-n", "get", "default"]).or_else(|| {
-            detect_default_network_interface_from_route(&["-n", "get", "-inet6", "default"])
-        })
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    {
-        None
-    }
+    detect_default_network_interface_from_route(&["-n", "get", "default"]).or_else(|| {
+        detect_default_network_interface_from_route(&["-n", "get", "-inet6", "default"])
+    })
 }
 
-#[cfg(target_os = "macos")]
 fn detect_default_network_interface_from_route(args: &[&str]) -> Option<String> {
     let output = Command::new("route").args(args).output().ok()?;
     if !output.status.success() {
@@ -358,7 +286,6 @@ fn detect_default_network_interface_from_route(args: &[&str]) -> Option<String> 
     parse_default_network_interface(&String::from_utf8_lossy(&output.stdout))
 }
 
-#[cfg(any(test, target_os = "macos"))]
 fn parse_default_network_interface(output: &str) -> Option<String> {
     for line in output.lines() {
         let line = line.trim();
@@ -411,7 +338,6 @@ fn weighted_average(previous: u64, current: u64, previous_weight: u64, current_w
         / total_weight
 }
 
-#[cfg(target_os = "macos")]
 #[allow(deprecated)]
 fn mac_cpu_ticks() -> Option<MacCpuTicks> {
     let mut info = std::mem::MaybeUninit::<libc::host_cpu_load_info_data_t>::uninit();
@@ -437,7 +363,6 @@ fn mac_cpu_ticks() -> Option<MacCpuTicks> {
     })
 }
 
-#[cfg(target_os = "macos")]
 fn mac_cpu_percent(previous: Option<MacCpuTicks>, current: MacCpuTicks) -> Option<f32> {
     let previous = previous?;
     let user = current.user.checked_sub(previous.user)?;
@@ -456,7 +381,6 @@ fn mac_cpu_percent(previous: Option<MacCpuTicks>, current: MacCpuTicks) -> Optio
     Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
 }
 
-#[cfg(target_os = "macos")]
 fn mac_memory_total_bytes() -> Option<u64> {
     let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
     let mut value = 0_u64;
@@ -478,7 +402,6 @@ fn mac_memory_total_bytes() -> Option<u64> {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[allow(deprecated)]
 fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
     if total_bytes == 0 {
@@ -510,7 +433,6 @@ fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
     Some(total_bytes.saturating_sub(free_bytes))
 }
 
-#[cfg(target_os = "macos")]
 fn collect_network_interfaces() -> BTreeMap<String, NetworkTotals> {
     let mut interfaces = BTreeMap::new();
     let mut addrs: *mut libc::ifaddrs = std::ptr::null_mut();
@@ -545,24 +467,6 @@ fn collect_network_interfaces() -> BTreeMap<String, NetworkTotals> {
     interfaces
 }
 
-#[cfg(not(target_os = "macos"))]
-fn collect_network_interfaces(networks: &Networks) -> BTreeMap<String, NetworkTotals> {
-    let mut interfaces = BTreeMap::new();
-    for (name, network) in networks {
-        if is_ignored_network_interface(name) {
-            continue;
-        }
-        interfaces.insert(
-            name.to_string(),
-            NetworkTotals {
-                received: network.total_received(),
-                transmitted: network.total_transmitted(),
-            },
-        );
-    }
-    interfaces
-}
-
 fn select_disk_mount_point(disks: &[sysinfo::Disk], current_dir: Option<&Path>) -> Option<PathBuf> {
     if let Some(path) = current_dir {
         if let Some(disk) = disks
@@ -581,7 +485,6 @@ fn select_disk_mount_point(disks: &[sysinfo::Disk], current_dir: Option<&Path>) 
         .map(|disk| disk.mount_point().to_path_buf())
 }
 
-#[cfg(unix)]
 fn disk_usage_percent(mount_point: &Path) -> Option<f32> {
     let c_path = CString::new(mount_point.as_os_str().as_bytes()).ok()?;
     let mut stat = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -603,11 +506,6 @@ fn disk_usage_percent(mount_point: &Path) -> Option<f32> {
     let available = (stat.f_bavail as u128).saturating_mul(block_size as u128);
     let used = total.saturating_sub(available);
     Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
-}
-
-#[cfg(not(unix))]
-fn disk_usage_percent(_mount_point: &Path) -> Option<f32> {
-    None
 }
 
 fn network_rate_from_totals(
@@ -688,7 +586,7 @@ pub fn menu_lines(
     if items.memory {
         menu_bar_parts.push(format!(
             "M{}",
-            format_menu_bar_memory_percent(snapshot.memory_used_bytes, snapshot.memory_total_bytes)
+            format_menu_bar_memory_percent(snapshot.memory_used_bytes, snapshot.memory_total_bytes,)
         ));
     }
     if items.disk {
@@ -700,29 +598,18 @@ pub fn menu_lines(
                 .unwrap_or_else(|| "--%".to_string())
         ));
     }
-    if items.upload {
-        menu_bar_parts.push(format!(
-            "↑{}",
-            snapshot
-                .network_up_bytes_per_sec
-                .map(format_menu_bar_bytes_rate)
-                .unwrap_or_else(|| "---".to_string())
-        ));
-    }
-    if items.download {
-        menu_bar_parts.push(format!(
-            "↓{}",
-            snapshot
-                .network_down_bytes_per_sec
-                .map(format_menu_bar_bytes_rate)
-                .unwrap_or_else(|| "---".to_string())
-        ));
+    if let Some(network) = menu_bar_network_part(
+        items,
+        snapshot.network_up_bytes_per_sec,
+        snapshot.network_down_bytes_per_sec,
+    ) {
+        menu_bar_parts.push(network);
     }
 
     SystemStatsMenuLines {
         system: line_with_prefix("System", &system_parts),
         network: line_with_prefix("Network", &network_parts),
-        menu_bar: menu_bar_parts.join(" "),
+        menu_bar: menu_bar_parts.join(" | "),
     }
 }
 
@@ -762,13 +649,44 @@ fn collecting_menu_bar_line(items: &TraySystemStatsItems) -> String {
     if items.disk {
         parts.push("D--%");
     }
+    if let Some(network) = collecting_menu_bar_network_part(items) {
+        parts.push(network);
+    }
+    parts.join(" | ")
+}
+
+fn menu_bar_network_part(
+    items: &TraySystemStatsItems,
+    upload_bytes_per_sec: Option<u64>,
+    download_bytes_per_sec: Option<u64>,
+) -> Option<String> {
+    let mut parts = Vec::with_capacity(2);
     if items.upload {
-        parts.push("↑---");
+        parts.push(format!(
+            "↑{}",
+            upload_bytes_per_sec
+                .map(format_menu_bar_bytes_rate)
+                .unwrap_or_else(|| "---".to_string())
+        ));
     }
     if items.download {
-        parts.push("↓---");
+        parts.push(format!(
+            "↓{}",
+            download_bytes_per_sec
+                .map(format_menu_bar_bytes_rate)
+                .unwrap_or_else(|| "---".to_string())
+        ));
     }
-    parts.join(" ")
+    (!parts.is_empty()).then(|| parts.join(" "))
+}
+
+fn collecting_menu_bar_network_part(items: &TraySystemStatsItems) -> Option<&'static str> {
+    match (items.upload, items.download) {
+        (true, true) => Some("↑--- ↓---"),
+        (true, false) => Some("↑---"),
+        (false, true) => Some("↓---"),
+        (false, false) => None,
+    }
 }
 
 fn line_with_prefix<T: AsRef<str>>(prefix: &str, parts: &[T]) -> String {
@@ -790,7 +708,7 @@ pub fn format_bytes_rate(bytes_per_sec: u64) -> String {
 }
 
 fn format_menu_bar_bytes_rate(bytes_per_sec: u64) -> String {
-    format_menu_bar_bytes_compact(quantize_menu_bar_bytes_rate(bytes_per_sec))
+    format!("{}/s", format_menu_bar_bytes_compact(bytes_per_sec))
 }
 
 pub fn format_bytes(bytes: u64) -> String {
@@ -814,12 +732,17 @@ fn format_menu_bar_bytes_compact(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
     let mut value = bytes as f64;
     let mut unit = 0_usize;
-    while value >= 999.5 && unit < UNITS.len() - 1 {
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
         value /= 1024.0;
         unit += 1;
     }
-    let rounded = value.round().clamp(0.0, 999.0) as u64;
-    format!("{rounded:03}{}", UNITS[unit])
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else if value >= 100.0 {
+        format!("{value:.0} {}", UNITS[unit])
+    } else {
+        format!("{value:.1} {}", UNITS[unit])
+    }
 }
 
 fn format_percent(value: f32) -> String {
@@ -837,7 +760,7 @@ fn format_menu_bar_percent(value: f32) -> String {
     if rounded >= 100 {
         "100%".to_string()
     } else {
-        format!("{rounded:02}%")
+        format!("{rounded}%")
     }
 }
 
@@ -862,15 +785,6 @@ fn quantize_menu_bar_percent(value: f32) -> u8 {
     } else {
         rounded / 5 * 5
     }
-}
-
-fn quantize_menu_bar_bytes_rate(bytes_per_sec: u64) -> u64 {
-    let step = if bytes_per_sec < 1024 * 1024 {
-        128 * 1024
-    } else {
-        1024 * 1024
-    };
-    bytes_per_sec / step * step
 }
 
 fn is_ignored_network_interface(name: &str) -> bool {
@@ -932,7 +846,7 @@ mod tests {
             "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%"
         );
         assert_eq!(lines.network, "Network: Up 1.5 MB/s | Down 512 KB/s");
-        assert_eq!(lines.menu_bar, "C20% M55% D55% ↑001M ↓512K");
+        assert_eq!(lines.menu_bar, "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s");
     }
 
     #[test]
@@ -953,7 +867,7 @@ mod tests {
             lines.network,
             "Network: Up collecting... | Down collecting..."
         );
-        assert_eq!(lines.menu_bar, "C20% M55% D55% ↑--- ↓---");
+        assert_eq!(lines.menu_bar, "C20% | M55% | D55% | ↑--- ↓---");
     }
 
     #[test]
@@ -970,7 +884,7 @@ mod tests {
             &TraySystemStatsItems::default(),
         );
 
-        assert_eq!(lines.menu_bar, "C05% M05% D05% ↑000B ↓000B");
+        assert_eq!(lines.menu_bar, "C5% | M5% | D5% | ↑8.0 K/s ↓26.0 K/s");
     }
 
     #[test]
@@ -987,7 +901,7 @@ mod tests {
             &TraySystemStatsItems::default(),
         );
 
-        assert_eq!(lines.menu_bar, "C05% M--% D--% ↑001M ↓512K");
+        assert_eq!(lines.menu_bar, "C5% | M--% | D--% | ↑1.5 M/s ↓512 K/s");
     }
 
     #[test]
@@ -1013,7 +927,7 @@ mod tests {
 
         assert_eq!(lines.system, "System: CPU 5.4%");
         assert_eq!(lines.network, "Network: Down 26.0 KB/s");
-        assert_eq!(lines.menu_bar, "C05% ↓000B");
+        assert_eq!(lines.menu_bar, "C5% | ↓26.0 K/s");
     }
 
     #[test]
@@ -1030,7 +944,7 @@ mod tests {
 
         assert_eq!(lines.system, "System: Memory collecting...");
         assert_eq!(lines.network, "Network: Up collecting...");
-        assert_eq!(lines.menu_bar, "M--% ↑---");
+        assert_eq!(lines.menu_bar, "M--% | ↑---");
     }
 
     #[test]

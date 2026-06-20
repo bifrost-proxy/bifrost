@@ -481,10 +481,14 @@ fn save_connections(connections: &[LocalConnection]) -> bifrost_core::Result<()>
 
 fn load_remote_jobs() -> bifrost_core::Result<Vec<RemoteJobRecord>> {
     let path = remote_jobs_path();
+    load_remote_jobs_from_path(&path)
+}
+
+fn load_remote_jobs_from_path(path: &Path) -> bifrost_core::Result<Vec<RemoteJobRecord>> {
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| {
+    let content = std::fs::read_to_string(path).map_err(|e| {
         BifrostError::Io(std::io::Error::other(format!(
             "read {}: {e}",
             path.display()
@@ -495,8 +499,7 @@ fn load_remote_jobs() -> bifrost_core::Result<Vec<RemoteJobRecord>> {
     Ok(file.jobs)
 }
 
-fn save_remote_jobs(jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
-    let path = remote_jobs_path();
+fn save_remote_jobs_to_path(path: &Path, jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             BifrostError::Io(std::io::Error::other(format!(
@@ -511,7 +514,7 @@ fn save_remote_jobs(jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
     };
     let content = serde_json::to_string_pretty(&file)
         .map_err(|e| BifrostError::Config(format!("serialize remote jobs: {e}")))?;
-    std::fs::write(&path, content).map_err(|e| {
+    std::fs::write(path, content).map_err(|e| {
         BifrostError::Io(std::io::Error::other(format!(
             "write {}: {e}",
             path.display()
@@ -520,7 +523,7 @@ fn save_remote_jobs(jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)) {
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
             tracing::warn!("failed to set 0600 permissions on {}: {e}", path.display());
         }
     }
@@ -528,11 +531,16 @@ fn save_remote_jobs(jobs: &[RemoteJobRecord]) -> bifrost_core::Result<()> {
 }
 
 fn remember_remote_job(record: RemoteJobRecord) -> bifrost_core::Result<()> {
-    let mut jobs = load_remote_jobs()?;
+    let path = remote_jobs_path();
+    remember_remote_job_at(&path, record)
+}
+
+fn remember_remote_job_at(path: &Path, record: RemoteJobRecord) -> bifrost_core::Result<()> {
+    let mut jobs = load_remote_jobs_from_path(path)?;
     jobs.retain(|existing| existing.call_id != record.call_id);
     jobs.push(record);
     jobs.sort_by_key(|job| std::cmp::Reverse(job.updated_at));
-    save_remote_jobs(&jobs)
+    save_remote_jobs_to_path(path, &jobs)
 }
 
 fn resolve_remote_job(call_id: &str) -> bifrost_core::Result<(String, String)> {
@@ -557,14 +565,24 @@ fn update_remote_job_status(
     status: &str,
     exit_code: Option<i32>,
 ) -> bifrost_core::Result<()> {
-    let mut jobs = load_remote_jobs()?;
+    let path = remote_jobs_path();
+    update_remote_job_status_at(&path, call_id, status, exit_code)
+}
+
+fn update_remote_job_status_at(
+    path: &Path,
+    call_id: &str,
+    status: &str,
+    exit_code: Option<i32>,
+) -> bifrost_core::Result<()> {
+    let mut jobs = load_remote_jobs_from_path(path)?;
     let Some(job) = jobs.iter_mut().find(|job| job.call_id == call_id) else {
         return Ok(());
     };
     job.status = status.to_string();
     job.exit_code = exit_code;
     job.updated_at = now_millis();
-    save_remote_jobs(&jobs)
+    save_remote_jobs_to_path(path, &jobs)
 }
 
 fn render_remote_job_list(jobs: &[RemoteJobRecord]) {
@@ -9278,16 +9296,24 @@ mod coverage_boost {
     fn update_remote_job_status_persists_exit_code() {
         with_connections_lock(|| {
             init_test_data_dir();
-            let _ = std::fs::remove_file(remote_jobs_path());
-            remember_remote_job(sample_remote_job("call-2", "https://relay-a", "tok-2"))
-                .expect("remember job");
+            let path = remote_jobs_path();
+            let _ = std::fs::remove_file(&path);
+            remember_remote_job_at(
+                &path,
+                sample_remote_job("call-2", "https://relay-a", "tok-2"),
+            )
+            .expect("remember job");
 
-            update_remote_job_status("call-2", "exited", Some(7)).expect("update status");
+            update_remote_job_status_at(&path, "call-2", "exited", Some(7)).expect("update status");
 
-            let jobs = load_remote_jobs().expect("load remote jobs");
-            assert_eq!(jobs[0].status, "exited");
-            assert_eq!(jobs[0].exit_code, Some(7));
-            assert!(jobs[0].updated_at >= jobs[0].created_at);
+            let jobs = load_remote_jobs_from_path(&path).expect("load remote jobs");
+            let job = jobs
+                .iter()
+                .find(|job| job.call_id == "call-2")
+                .expect("updated job");
+            assert_eq!(job.status, "exited");
+            assert_eq!(job.exit_code, Some(7));
+            assert!(job.updated_at >= job.created_at);
         });
     }
 

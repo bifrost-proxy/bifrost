@@ -20,7 +20,7 @@ mod lock;
 mod menu;
 #[cfg(not(target_os = "linux"))]
 mod runtime;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
 mod system_stats;
 #[cfg(not(target_os = "linux"))]
 #[allow(clippy::module_inception)]
