@@ -711,6 +711,32 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 - 文档明确区分已落地的小优化、无收益且不采用的独立 helper / `open` / `arboard` 替换试验、以及暂不采用的原生 AppKit/Win32 helper 风险
 - 后续若目标是 `Physical footprint < 30 MB`，当前方案可沿用；若目标是用户可见 `ps RSS < 30 MB`，文档必须明确 macOS AppKit 基线已超过 30 MB，不能继续承诺通过小优化达成
 
+### TC-TH-29: Tray 菜单展示系统 CPU/内存/上下行网速并可在 Settings 关闭
+
+**操作步骤：**
+1. 执行菜单结构与系统状态格式化单元回归：
+```bash
+cargo test -p bifrost-cli system_stats --lib
+```
+2. 使用当前 debug 二进制执行配置 E2E，验证默认开启、独立关闭/开启与配置持久化：
+```bash
+BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh
+```
+3. 使用临时数据目录真实启动 macOS 或 Windows tray helper：
+```bash
+BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh
+```
+4. 在 macOS 上通过 System Events 点击当前 `bifrost` 菜单栏图标，读取原生菜单文本；在 Windows VM 上通过真实交互 session 启动同一测试脚本并打开 notification area 菜单。
+5. 打开 `http://127.0.0.1:<port>/_bifrost/settings?tab=tray`，确认 Settings 中存在独立 Tray tab，`Tray Icon` 和 `Show System Stats` 默认打开；关闭 `Show System Stats` 后再次展开托盘菜单。
+6. 再次打开 `GET /_bifrost/api/config/tray`，确认 `show_system_stats` 与 Settings 开关一致。
+
+**预期结果：**
+- 默认 `GET /api/config/tray` 返回 `enabled: true` 且 `show_system_stats: true`。
+- 托盘菜单在版本行下方展示两排不可点击系统状态：第一排为 whole-system CPU/Memory，第二排为 Up/Down 网络速率；数据来源是整机状态，不是 Bifrost 进程自身指标。
+- Settings 中有独立 `Tray` tab，`Show System Stats` 可独立于 `Tray Icon` 开关关闭/开启。
+- 关闭 `Show System Stats` 后，托盘菜单不再展示系统状态两排；重新开启后恢复展示。
+- macOS 与 Windows VM 的真实 tray helper 均能启动，日志包含 `bifrost-tray starting`，且不修改系统代理。
+
 ## 本次执行记录
 
 | 日期 | 用例 | 执行方式 | 结果 |
@@ -732,6 +758,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-15 | TC-TH-27 | Windows 11 真实复现：最新二进制执行 `target\debug\bifrost.exe start -d -p 9900 --unsafe-ssl --skip-cert-check --no-system-proxy` 后，后台主服务 PID `5148` 存活，但没有自动出现 `bifrost.exe __tray` helper；必须手动 `Start-Process ... __tray ...` 才能看到托盘。代码路径确认 foreground 初始化完成后会调用 `tray_launch_callback()`，但该 callback 在 daemon child 中由 `no_tray || detached_daemon_child` 构造，导致 `BIFROST_DETACHED_DAEMON_CHILD=1` 的长期主服务进程永远跳过 tray。 | 已修复为 daemon child 不再抑制启动 tray；只有显式 `--no-tray` 或配置禁用 tray 才跳过。新增单元测试 `daemon_child_does_not_suppress_startup_tray` 覆盖该行为；Windows VM 待替换二进制后执行 `start -d` 自动托盘复验。 |
 | 2026-06-15 | TC-TH-25 | Windows 11 真实复现：用户从托盘 Stop 主服务后，同一托盘点击 `Start Bifrost` 多次只短暂创建 `bifrost.exe` 子进程，随后 exit code 1；`tray.log.2026-06-15` 记录 `bifrost service started pid=...` 后 `bifrost start exited before service became ready status=exit code: 1`。用同参直接执行 `target\debug\bifrost.exe start --daemon --no-tray --no-system-proxy -p 9900 --skip-cert-check --unsafe-ssl` 复现 `Daemon exited before the proxy listener became ready`。代码路径确认 Windows/macOS exec daemon child 继承原始 `--daemon` 参数后没有识别 `BIFROST_DETACHED_DAEMON_CHILD=1`，会再次进入 daemon parent 启动器，而不是进入长期 runtime。 | 已修复为 detached daemon child 不再 spawn 新 daemon parent，而是直接执行 runtime；新增单元测试 `detached_daemon_child_runs_runtime_instead_of_spawning_again` 覆盖该分支。Windows VM 待替换二进制后复验托盘 Stop -> Start。 |
 | 2026-06-20 | TC-TH-28 | Parallels Windows 11 真实复现：`tray.log.2026-06-20` 显示 05:42 与 05:43 两次从托盘触发 `bifrost self-update spawned target=0.0.111`，当时 `tray helper launched tray_bin=C:\Users\eden_studio\.local\bin\bifrost.exe`；`.local\bin\.bifrost-upgrade-3244.log` 和 `.bifrost-upgrade-8220.log` 均记录 `replacing C:\Users\eden_studio\.local\bin\bifrost.exe` 后 `Access is denied`，且 `.bifrost.exe.pending.*` 残留。与此同时 `upgrade-progress.json` 错误显示 `phase: completed`，而 `.local\bin\bifrost.exe --version` 仍为 `0.0.110`。 | 已定位根因：Windows 延迟替换 helper 只等待 self-update 父进程退出，没有停止/等待同一 exe 上运行的 tray helper，导致目标 exe 被锁；同时 Rust 父进程在 helper 实际替换前写入 completed，造成假成功。已更新实现：调度 helper 前停止 tray helper，helper 等目标 exe 可写，成功/失败由 helper 写入 terminal progress。已执行日志/版本/残留文件只读验证；修复后二进制待 Windows VM 重建后按本用例复验。 |
+| 2026-06-20 | TC-TH-29 | Tray 系统状态两排展示与 Settings 开关新增验证。macOS 本地执行 `cargo test -p bifrost-cli system_stats --lib` 通过 5/5，覆盖 system/network 两个 disabled menu rows、关闭后隐藏、CPU/Memory/Up/Down 文案格式和 Windows/macOS loopback 过滤；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 11/11，验证 `enabled=true`、`show_system_stats=true` 默认值、独立关闭/开启与 `config.toml` 持久化；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 真实拉起 Darwin tray helper（port 12644，tray_pid 36151）。性能基线：`sysinfo 0.31.4` release microbench 连续 500 次采样平均 1.1796ms、最大 1.8934ms，估算 1s/2s/3s 刷新 CPU 分别约 0.1180%/0.0590%/0.0393%；Mac debug tray helper 20 秒进程采样，3 秒刷新开启系统状态平均 CPU 0.4650%、RSS 64,332KB，关闭系统状态平均 CPU 0.1300%、RSS 63,514KB。随后用 Parallels Windows 11 原 repo 派生 worktree `C:\Users\eden_studio\work\github\bifrost-tray-system-stats-win` 验证：从 Mac 当前 main bundle 建 worktree 并应用完整 patch，不污染 VM 原脏目录；执行 `cargo test -p bifrost-cli system_stats --lib` 通过 5/5；重新编译 `target\debug\bifrost.exe` 后执行 PowerShell 真实链路，临时端口 64995，tray helper PID 6012，`GET /api/config/tray` 默认 `show_system_stats=true`，`PUT {"show_system_stats":false}` 后 `config.toml` 持久化为 false，再开启成功，`tray.log.2026-06-20` 包含 `bifrost-tray starting`。 | 通过。默认刷新间隔定为 3 秒，在实时性和性能之间取低开销方案；macOS 与 Windows VM 均完成真实 helper 启动和配置链路验证；系统状态两排的原生菜单结构由跨平台 tray menu 单测验证。macOS System Events 可读取现有 9900 tray 菜单，但同名 status item 在多个 `bifrost` tray 进程间映射不稳定，因此未把临时 helper 的辅助功能菜单文本作为验收依据。 |
 
 ## 清理步骤
 

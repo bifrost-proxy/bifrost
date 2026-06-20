@@ -16,6 +16,7 @@ import {
   ThunderboltOutlined,
   SafetyOutlined,
   ApiOutlined,
+  AppstoreOutlined,
 } from "@ant-design/icons";
 import { useMetricsStore } from "../../stores/useMetricsStore";
 import { useProxyStore } from "../../stores/useProxyStore";
@@ -64,6 +65,7 @@ import MetricsTab from "./tabs/MetricsTab";
 import AccessControlTab from "./tabs/AccessControlTab";
 import PerformanceTab from "./tabs/PerformanceTab";
 import SyncTab from "./tabs/SyncTab";
+import TrayTab from "./tabs/TrayTab";
 import RemoteAccessTab from "./tabs/RemoteAccessTab";
 import RemoteInvokeTab from "./tabs/RemoteInvokeTab";
 import { updateDesktopProxyPort } from "../../desktop/tauri";
@@ -86,6 +88,7 @@ const VALID_TABS = [
   "metrics",
   "access",
   "performance",
+  "tray",
   "sync",
   "remote",
   "remote-invoke",
@@ -365,6 +368,22 @@ export default function Settings() {
       message.success(enabled ? "Tray icon enabled" : "Tray icon disabled");
     } catch {
       message.error("Failed to update tray setting");
+      void fetchProxySettings();
+    } finally {
+      setTrayLoading(false);
+    }
+  };
+
+  const handleTraySystemStatsToggle = async (enabled: boolean) => {
+    setTrayLoading(true);
+    try {
+      const tray = await updateTrayConfig({ show_system_stats: enabled });
+      setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
+      message.success(
+        enabled ? "Tray system stats enabled" : "Tray system stats disabled",
+      );
+    } catch {
+      message.error("Failed to update tray system stats setting");
       void fetchProxySettings();
     } finally {
       setTrayLoading(false);
@@ -773,6 +792,9 @@ export default function Settings() {
       case "performance":
         void fetchPerformanceConfig();
         break;
+      case "tray":
+        void fetchProxySettings();
+        break;
       case "sync":
       case "remote-invoke":
         void fetchSyncStatusData();
@@ -1144,9 +1166,6 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
                 cliProxy={cliProxy}
                 systemProxyLoading={systemProxyLoading}
                 systemProxyLaunchdLoading={systemProxyLaunchdLoading}
-                trayConfig={proxySettings?.tray ?? null}
-                trayLoading={trayLoading}
-                onToggleTray={handleTrayToggle}
                 onToggleSystemProxy={handleSystemProxyToggle}
                 onToggleSystemProxyLaunchd={handleSystemProxyLaunchdToggle}
                 copyProxyConfig={copyProxyConfig}
@@ -1261,6 +1280,22 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
               handleBreakpointTimeoutChange={handleBreakpointTimeoutChange}
               handleClearBodyCache={handleClearBodyCache}
               formatBytes={formatBytes}
+        />
+      ),
+    },
+    {
+      key: "tray",
+      label: (
+        <span>
+          <AppstoreOutlined /> Tray
+        </span>
+      ),
+      children: (
+        <TrayTab
+          trayConfig={proxySettings?.tray ?? null}
+          trayLoading={trayLoading}
+          onToggleTray={handleTrayToggle}
+          onToggleSystemStats={handleTraySystemStatsToggle}
         />
       ),
     },

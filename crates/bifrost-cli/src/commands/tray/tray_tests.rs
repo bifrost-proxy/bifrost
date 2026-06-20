@@ -76,6 +76,7 @@
             None,
             None,
             false,
+            None,
         );
         let status = match &menu[0] {
             menu::MenuEntry::Item(item) => item.label.as_str(),
@@ -280,6 +281,7 @@
             None,
             None,
             false,
+            None,
         );
 
         let busy = menu::build_menu(
@@ -295,6 +297,7 @@
             None,
             None,
             false,
+            None,
         );
 
         assert_eq!(menu_shape(&initial), menu_shape(&busy));
@@ -316,6 +319,7 @@
             None,
             None,
             false,
+            None,
         );
         let next = menu::build_menu(
             Some(&rt),
@@ -337,6 +341,7 @@
             None,
             None,
             false,
+            None,
         );
 
         assert_ne!(menu_shape(&initial), menu_shape(&next));
@@ -414,6 +419,7 @@
             system_proxy: Some(cached.clone()),
             bin_available: true,
             update_available: None,
+            system_stats: None,
         };
         let menu_data = Arc::new(Mutex::new(snapshot));
         let generation = AtomicU64::new(0);
@@ -567,6 +573,7 @@
             None,
             None,
             false,
+            None,
         );
         let rules_menu = menu.iter().find_map(|entry| match entry {
             menu::MenuEntry::Submenu(submenu) if submenu.id == "rules_switcher" => Some(submenu),

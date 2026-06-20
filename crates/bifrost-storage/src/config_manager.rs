@@ -203,6 +203,9 @@ impl ConfigManager {
         if let Some(enabled) = update.enabled {
             config.tray.enabled = enabled;
         }
+        if let Some(show_system_stats) = update.show_system_stats {
+            config.tray.show_system_stats = show_system_stats;
+        }
 
         self.save_config(&config)?;
         let tray_config = config.tray.clone();
