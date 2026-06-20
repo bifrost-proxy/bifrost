@@ -352,6 +352,25 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
     "true",
   );
 
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/_bifrost/settings?tab=tray", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("settings-tray-tab")).toBeVisible();
+  const mobileLayout = await page.evaluate(() => ({
+    viewportWidth: window.innerWidth,
+    documentScrollWidth: document.documentElement.scrollWidth,
+    traySwitchLeft: document
+      .querySelector('[data-testid="settings-tray-switch"]')
+      ?.getBoundingClientRect().left,
+    statsSwitchLeft: document
+      .querySelector('[data-testid="settings-tray-system-stats-switch"]')
+      ?.getBoundingClientRect().left,
+  }));
+  expect(mobileLayout.documentScrollWidth).toBeLessThanOrEqual(
+    mobileLayout.viewportWidth,
+  );
+  expect(mobileLayout.traySwitchLeft).toBeGreaterThan(250);
+  expect(mobileLayout.statsSwitchLeft).toBeGreaterThan(250);
+
   await page.getByTestId("settings-tray-system-stats-switch").click();
   await waitForToast(page, "Tray system stats disabled");
   expect(updatePayloads).toContainEqual({ show_system_stats: false });

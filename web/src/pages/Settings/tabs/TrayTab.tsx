@@ -1,8 +1,25 @@
 import { Card, Col, Row, Space, Switch, Tooltip, Typography } from "antd";
 import { AppstoreOutlined, DashboardOutlined } from "@ant-design/icons";
+import type { CSSProperties } from "react";
 import type { TrayConfig } from "../../../api/config";
 
 const { Text } = Typography;
+
+const settingRowStyle: CSSProperties = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "space-between",
+  gap: 12,
+  width: "100%",
+};
+
+const settingTextStyle: CSSProperties = {
+  minWidth: 0,
+};
+
+const settingControlStyle: CSSProperties = {
+  flexShrink: 0,
+};
 
 interface TrayTabProps {
   trayConfig: TrayConfig | null;
@@ -30,15 +47,15 @@ export default function TrayTab({
           size="small"
         >
           <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <Row justify="space-between" align="middle">
-              <Col>
+            <div style={settingRowStyle}>
+              <div style={settingTextStyle}>
                 <Text>Tray Icon</Text>
                 <br />
                 <Text type="secondary" style={{ fontSize: 12 }}>
                   Native quick controller
                 </Text>
-              </Col>
-              <Col>
+              </div>
+              <div style={settingControlStyle}>
                 {trayConfig ? (
                   trayConfig.supported ? (
                     <Switch
@@ -55,8 +72,8 @@ export default function TrayTab({
                 ) : (
                   <Text type="secondary">Loading...</Text>
                 )}
-              </Col>
-            </Row>
+              </div>
+            </div>
           </Space>
         </Card>
       </Col>
@@ -71,15 +88,15 @@ export default function TrayTab({
           }
           size="small"
         >
-          <Row justify="space-between" align="middle">
-            <Col>
+          <div style={settingRowStyle}>
+            <div style={settingTextStyle}>
               <Text>Show System Stats</Text>
               <br />
               <Text type="secondary" style={{ fontSize: 12 }}>
                 CPU, memory, upload, and download speed
               </Text>
-            </Col>
-            <Col>
+            </div>
+            <div style={settingControlStyle}>
               {trayConfig ? (
                 trayConfig.supported ? (
                   <Switch
@@ -94,8 +111,8 @@ export default function TrayTab({
               ) : (
                 <Text type="secondary">Loading...</Text>
               )}
-            </Col>
-          </Row>
+            </div>
+          </div>
         </Card>
       </Col>
     </Row>
