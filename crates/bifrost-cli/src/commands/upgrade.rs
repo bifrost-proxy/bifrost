@@ -5,7 +5,10 @@ use std::fs;
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::mpsc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -33,6 +36,7 @@ const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
+static DEFERRED_INSTALL_SCHEDULED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TimedCommandStatus {
@@ -73,6 +77,15 @@ struct DownloadTuning {
     download_timeout_secs: u64,
     mirror_probe_timeout_secs: u64,
     download_tries: usize,
+}
+
+pub(crate) fn take_deferred_install_scheduled() -> bool {
+    DEFERRED_INSTALL_SCHEDULED.swap(false, Ordering::SeqCst)
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn mark_deferred_install_scheduled() {
+    DEFERRED_INSTALL_SCHEDULED.store(true, Ordering::SeqCst);
 }
 
 impl Default for DownloadTuning {
@@ -1663,12 +1676,14 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
     auto_restart: bool,
     deferred_install: WindowsDeferredInstall,
 ) -> Result<(), BifrostError> {
+    let data_dir = get_bifrost_dir()?;
     let pid = match read_pid() {
         Some(pid) if is_process_running(pid) => Some(pid),
         _ => None,
     };
 
     let Some(pid) = pid else {
+        stop_tray_helper_before_windows_deferred_install(&data_dir);
         schedule_windows_deferred_install(deferred_install, None)?;
         println!(
             "{}",
@@ -1742,6 +1757,7 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
     let restart_ports = restart_ports_from_runtime(runtime_info.as_ref());
 
     wait_for_restart_ports_release(&restart_ports)?;
+    stop_tray_helper_before_windows_deferred_install(&data_dir);
 
     println!(
         "{} {} {}",
@@ -1759,6 +1775,15 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
     );
 
     Ok(())
+}
+
+#[cfg(windows)]
+fn stop_tray_helper_before_windows_deferred_install(data_dir: &Path) {
+    println!(
+        "{}",
+        "  Stopping tray helper so Windows can replace bifrost.exe...".bright_cyan()
+    );
+    super::tray_launcher::stop_tray_helper(data_dir);
 }
 
 #[cfg(windows)]
@@ -1782,6 +1807,7 @@ fn schedule_windows_deferred_install(
     let args_path = target_dir.join(format!(".bifrost-upgrade-{}.args", suffix));
     let log_path = target_dir.join(format!(".bifrost-upgrade-{}.log", suffix));
     let ready_path = target_dir.join(format!(".bifrost-upgrade-{}.ok", suffix));
+    let progress_path = get_bifrost_dir()?.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
 
     if let Some(args) = restart_args {
         fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
@@ -1798,13 +1824,55 @@ param(
   [string]$TargetPath,
   [string]$RestartArgsPath,
   [string]$ReadyPath,
-  [string]$LogPath
+  [string]$LogPath,
+  [string]$ProgressPath
 )
 
 $ErrorActionPreference = "Stop"
 function Write-UpgradeLog([string]$Message) {
   $timestamp = (Get-Date).ToString("o")
   Add-Content -LiteralPath $LogPath -Value "$timestamp $Message"
+}
+
+function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorMessage) {
+  try {
+    $previous = $null
+    if ($ProgressPath -and (Test-Path -LiteralPath $ProgressPath)) {
+      $previous = Get-Content -LiteralPath $ProgressPath -Raw | ConvertFrom-Json
+    }
+    $progress = [ordered]@{
+      phase = $Phase
+      percent = $null
+      message = $Message
+      target_version = if ($previous -and $previous.target_version) { $previous.target_version } else { $null }
+      source = if ($previous -and $previous.source) { $previous.source } else { $null }
+      error = if ($ErrorMessage) { $ErrorMessage } else { $null }
+      updated_at = (Get-Date).ToUniversalTime().ToString("o")
+    }
+    $tmpPath = "$ProgressPath.tmp"
+    $json = $progress | ConvertTo-Json -Depth 4
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    [System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)
+    Move-Item -LiteralPath $tmpPath -Destination $ProgressPath -Force
+  } catch {
+    Write-UpgradeLog "WARNING: failed to write progress: $($_.Exception.Message)"
+  }
+}
+
+function Wait-TargetPathWritable([string]$Path, [int]$TimeoutSeconds) {
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      if (Test-Path -LiteralPath $Path) {
+        $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::ReadWrite, [System.IO.FileShare]::None)
+        $stream.Close()
+      }
+      return
+    } catch {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+  throw "target binary is still locked: $Path"
 }
 
 try {
@@ -1816,6 +1884,10 @@ try {
   if (Get-Process -Id $ParentPid -ErrorAction SilentlyContinue) {
     throw "parent process $ParentPid did not exit before timeout"
   }
+
+  Write-UpgradeProgress "restarting" "Finalizing upgrade..." $null
+  Write-UpgradeLog "waiting for target binary to become writable"
+  Wait-TargetPathWritable $TargetPath 120
 
   Write-UpgradeLog "replacing $TargetPath"
   if (Test-Path -LiteralPath $TargetPath) {
@@ -1841,12 +1913,15 @@ try {
   }
 
   Set-Content -LiteralPath $ReadyPath -Value "ok"
+  Write-UpgradeProgress "completed" "Upgrade complete" $null
   Write-UpgradeLog "done"
   Remove-Item -LiteralPath $RestartArgsPath -Force -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
   exit 0
 } catch {
-  Write-UpgradeLog "ERROR: $($_.Exception.Message)"
+  $errorMessage = $_.Exception.Message
+  Write-UpgradeProgress "failed" "Upgrade failed" $errorMessage
+  Write-UpgradeLog "ERROR: $errorMessage"
   exit 1
 }
 "#,
@@ -1869,6 +1944,8 @@ try {
         .arg(&ready_path)
         .arg("-LogPath")
         .arg(&log_path)
+        .arg("-ProgressPath")
+        .arg(&progress_path)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -1878,6 +1955,7 @@ try {
         .env_remove(super::start::DETACHED_DAEMON_CHILD_ENV);
 
     command.spawn().map_err(BifrostError::Io)?;
+    mark_deferred_install_scheduled();
     println!(
         "{} {}",
         "  Windows upgrade helper log:".dimmed(),
@@ -2101,6 +2179,19 @@ mod tests {
         assert!(!should_restart_when_already_latest(true, false));
         assert!(!should_restart_when_already_latest(false, true));
         assert!(should_restart_when_already_latest(true, true));
+    }
+
+    #[test]
+    fn windows_deferred_install_waits_for_tray_unlock_and_reports_terminal_progress() {
+        let source = include_str!("upgrade.rs");
+        assert!(source.contains("stop_tray_helper_before_windows_deferred_install(&data_dir);"));
+        assert!(source.contains("Wait-TargetPathWritable $TargetPath 120"));
+        assert!(source.contains("[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)"));
+        assert!(source.contains("mark_deferred_install_scheduled();"));
+        assert!(source.contains("Write-UpgradeProgress \"completed\" \"Upgrade complete\" $null"));
+        assert!(
+            source.contains("Write-UpgradeProgress \"failed\" \"Upgrade failed\" $errorMessage")
+        );
     }
 
     #[test]

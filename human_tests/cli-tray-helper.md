@@ -630,6 +630,48 @@ Get-CimInstance Win32_Process |
 - System Proxy 菜单项使用最近一次缓存状态渲染；缓存只在托盘交互、System Proxy 开关操作或显式菜单动作后刷新
 - macOS/Windows 都不允许因为托盘常驻而高频调用系统代理检测命令；相关检测必须是按需或低频缓存路径
 
+### TC-TH-28: Windows Tray self-update 释放托盘锁并准确上报失败（回归）
+
+**操作步骤：**
+1. 在 Parallels Windows 11 交互用户 session 中确认当前用户 PATH 优先命中待升级的 CLI 安装位，例如：
+
+```powershell
+$env:BIFROST_DATA_DIR="$env:USERPROFILE\.bifrost"
+Get-Command bifrost -All
+& "$env:USERPROFILE\.local\bin\bifrost.exe" --version
+```
+
+2. 通过该二进制启动服务和托盘，确保 `tray.log*` 记录 `tray helper launched tray_bin=...\.local\bin\bifrost.exe`：
+
+```powershell
+$env:BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT="1"
+& "$env:USERPROFILE\.local\bin\bifrost.exe" start -d -p 9900 --unsafe-ssl --skip-cert-check --no-system-proxy
+Get-Content "$env:BIFROST_DATA_DIR\logs\bifrost*.log" -Tail 200
+Get-Content "$env:BIFROST_DATA_DIR\logs\tray.log*" -Tail 120
+```
+
+3. 从托盘菜单点击 `Update to v<latest>`，等待最多 3 分钟。
+4. 检查升级结果、helper 日志和目标二进制版本：
+
+```powershell
+Get-Content "$env:BIFROST_DATA_DIR\upgrade-progress.json"
+Get-ChildItem "$env:USERPROFILE\.local\bin" -Force -Filter ".bifrost-upgrade-*" |
+  Sort-Object LastWriteTime |
+  Select-Object Name,Length,LastWriteTime
+Get-ChildItem "$env:USERPROFILE\.local\bin" -Force -Filter ".bifrost-upgrade-*.log" |
+  ForEach-Object { $_.FullName; Get-Content $_.FullName }
+& "$env:USERPROFILE\.local\bin\bifrost.exe" --version
+Get-Process bifrost -ErrorAction SilentlyContinue |
+  Select-Object Id,Path,StartTime
+```
+
+**预期结果：**
+- Tray 触发更新后，Rust `self-update` 调度 Windows helper 前会停止同一 `data_dir` 的 tray helper，避免 `bifrost.exe __tray` 持有目标 exe 锁。
+- Windows helper 日志包含 `waiting for target binary to become writable`，随后替换目标 exe；不应出现 `Access is denied` / `访问被拒绝`。
+- 如果目标 exe 因其他进程长期锁定导致替换失败，`upgrade-progress.json` 必须为 `phase: "failed"` 且 `error` 包含失败原因；禁止显示 `phase: "completed"`。
+- 替换成功后，`upgrade-progress.json` 为 `phase: "completed"`，`.local\bin\bifrost.exe --version` 返回目标版本，pending 文件不再残留。
+- 如果重启参数存在，helper 使用替换后的目标 exe 执行 `start -d`，新 `Get-Process bifrost` 输出的 `Path` 指向已更新的目标 exe。
+
 ### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
 
 **操作步骤：**
@@ -689,6 +731,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 | 2026-06-15 | TC-TH-26 | Windows 11 真实复现：运行中的 Bifrost 主服务 PID `4480` 和托盘 helper PID `2500` 存活时，进程采样抓到主服务每秒左右创建 `reg.exe query HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings /v ProxyEnable|ProxyServer|ProxyOverride`，随后 Windows 自动创建 `conhost.exe`、`OpenConsole.exe`、`WindowsTerminal.exe`，表现为终端窗口反复弹出又关闭。代码路径确认托盘后台 `poll_menu_data` 每 1 秒刷新菜单快照并请求 `/api/proxy/system`，Admin handler 经 `SystemProxyManager::get_current()` 读取系统代理。修复后补充采样发现用户点击 `Open Logs` / `Open Admin UI` 时 `open::that()` 仍会通过 `cmd /c start` 拉起 console 子进程；代码复核发现 Sync 启动自动登录提示也存在同类 `cmd /C start` 偶发路径。 | 已修复为托盘后台刷新不再请求 System Proxy；仅在托盘交互或 System Proxy 开关后按需刷新并缓存该状态。Windows `parse_windows_proxy()` 改用 HKCU registry API 读取 `ProxyEnable` / `ProxyServer` / `ProxyOverride`，不再 spawn `reg.exe`。Windows 托盘打开 URL/目录和 Sync 自动登录打开浏览器均改为 Win32 `ShellExecuteW`，不再通过 `cmd /c start`。本地执行 `cargo test -p bifrost-cli tray -- --nocapture` 通过，包含 `test_background_menu_refresh_preserves_system_proxy_cache`；Windows VM 待替换二进制后执行进程采样复验。 |
 | 2026-06-15 | TC-TH-27 | Windows 11 真实复现：最新二进制执行 `target\debug\bifrost.exe start -d -p 9900 --unsafe-ssl --skip-cert-check --no-system-proxy` 后，后台主服务 PID `5148` 存活，但没有自动出现 `bifrost.exe __tray` helper；必须手动 `Start-Process ... __tray ...` 才能看到托盘。代码路径确认 foreground 初始化完成后会调用 `tray_launch_callback()`，但该 callback 在 daemon child 中由 `no_tray || detached_daemon_child` 构造，导致 `BIFROST_DETACHED_DAEMON_CHILD=1` 的长期主服务进程永远跳过 tray。 | 已修复为 daemon child 不再抑制启动 tray；只有显式 `--no-tray` 或配置禁用 tray 才跳过。新增单元测试 `daemon_child_does_not_suppress_startup_tray` 覆盖该行为；Windows VM 待替换二进制后执行 `start -d` 自动托盘复验。 |
 | 2026-06-15 | TC-TH-25 | Windows 11 真实复现：用户从托盘 Stop 主服务后，同一托盘点击 `Start Bifrost` 多次只短暂创建 `bifrost.exe` 子进程，随后 exit code 1；`tray.log.2026-06-15` 记录 `bifrost service started pid=...` 后 `bifrost start exited before service became ready status=exit code: 1`。用同参直接执行 `target\debug\bifrost.exe start --daemon --no-tray --no-system-proxy -p 9900 --skip-cert-check --unsafe-ssl` 复现 `Daemon exited before the proxy listener became ready`。代码路径确认 Windows/macOS exec daemon child 继承原始 `--daemon` 参数后没有识别 `BIFROST_DETACHED_DAEMON_CHILD=1`，会再次进入 daemon parent 启动器，而不是进入长期 runtime。 | 已修复为 detached daemon child 不再 spawn 新 daemon parent，而是直接执行 runtime；新增单元测试 `detached_daemon_child_runs_runtime_instead_of_spawning_again` 覆盖该分支。Windows VM 待替换二进制后复验托盘 Stop -> Start。 |
+| 2026-06-20 | TC-TH-28 | Parallels Windows 11 真实复现：`tray.log.2026-06-20` 显示 05:42 与 05:43 两次从托盘触发 `bifrost self-update spawned target=0.0.111`，当时 `tray helper launched tray_bin=C:\Users\eden_studio\.local\bin\bifrost.exe`；`.local\bin\.bifrost-upgrade-3244.log` 和 `.bifrost-upgrade-8220.log` 均记录 `replacing C:\Users\eden_studio\.local\bin\bifrost.exe` 后 `Access is denied`，且 `.bifrost.exe.pending.*` 残留。与此同时 `upgrade-progress.json` 错误显示 `phase: completed`，而 `.local\bin\bifrost.exe --version` 仍为 `0.0.110`。 | 已定位根因：Windows 延迟替换 helper 只等待 self-update 父进程退出，没有停止/等待同一 exe 上运行的 tray helper，导致目标 exe 被锁；同时 Rust 父进程在 helper 实际替换前写入 completed，造成假成功。已更新实现：调度 helper 前停止 tray helper，helper 等目标 exe 可写，成功/失败由 helper 写入 terminal progress。已执行日志/版本/残留文件只读验证；修复后二进制待 Windows VM 重建后按本用例复验。 |
 
 ## 清理步骤
 
