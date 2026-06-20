@@ -1,14 +1,19 @@
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    time::{Duration, Instant},
+};
 
 use sysinfo::{Networks, System};
+
+const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemStatsSnapshot {
     pub cpu_percent: f32,
     pub memory_used_bytes: u64,
     pub memory_total_bytes: u64,
-    pub network_down_bytes_per_sec: u64,
-    pub network_up_bytes_per_sec: u64,
+    pub network_down_bytes_per_sec: Option<u64>,
+    pub network_up_bytes_per_sec: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -29,7 +34,29 @@ impl SystemStatsMenuLines {
 pub struct SystemStatsSampler {
     system: System,
     networks: Networks,
-    last_sample_at: Option<Instant>,
+    cpu_percent: f32,
+    memory_used_bytes: u64,
+    memory_total_bytes: u64,
+    last_cpu_memory_at: Option<Instant>,
+    last_network_interfaces: BTreeMap<String, NetworkInterfaceSample>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetworkTotals {
+    received: u64,
+    transmitted: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetworkRates {
+    down_bytes_per_sec: u64,
+    up_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NetworkInterfaceSample {
+    at: Instant,
+    totals: NetworkTotals,
 }
 
 impl SystemStatsSampler {
@@ -42,44 +69,113 @@ impl SystemStatsSampler {
         networks.refresh();
 
         Self {
+            cpu_percent: system.global_cpu_usage().clamp(0.0, 100.0),
+            memory_used_bytes: system.used_memory(),
+            memory_total_bytes: system.total_memory(),
             system,
             networks,
-            last_sample_at: None,
+            last_cpu_memory_at: None,
+            last_network_interfaces: BTreeMap::new(),
         }
     }
 
     pub fn sample(&mut self, now: Instant) -> SystemStatsSnapshot {
-        self.system.refresh_memory();
-        self.system.refresh_cpu_usage();
+        if self
+            .last_cpu_memory_at
+            .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
+            .unwrap_or(true)
+        {
+            self.system.refresh_memory();
+            self.system.refresh_cpu_usage();
+            self.cpu_percent = self.system.global_cpu_usage().clamp(0.0, 100.0);
+            self.memory_used_bytes = self.system.used_memory();
+            self.memory_total_bytes = self.system.total_memory();
+            self.last_cpu_memory_at = Some(now);
+        }
+
         self.networks.refresh_list();
         self.networks.refresh();
+        let rates = self.sample_network_rates(now);
 
-        let elapsed = self
-            .last_sample_at
-            .map(|last| now.saturating_duration_since(last))
-            .filter(|elapsed| elapsed.as_secs_f64() > 0.0)
-            .unwrap_or(Duration::from_secs(1));
-        self.last_sample_at = Some(now);
-
-        let mut received = 0_u64;
-        let mut transmitted = 0_u64;
-        for (name, network) in &self.networks {
-            if is_loopback_interface(name) {
-                continue;
-            }
-            received = received.saturating_add(network.received());
-            transmitted = transmitted.saturating_add(network.transmitted());
-        }
-
-        let seconds = elapsed.as_secs_f64();
         SystemStatsSnapshot {
-            cpu_percent: self.system.global_cpu_usage().clamp(0.0, 100.0),
-            memory_used_bytes: self.system.used_memory(),
-            memory_total_bytes: self.system.total_memory(),
-            network_down_bytes_per_sec: bytes_per_sec(received, seconds),
-            network_up_bytes_per_sec: bytes_per_sec(transmitted, seconds),
+            cpu_percent: self.cpu_percent,
+            memory_used_bytes: self.memory_used_bytes,
+            memory_total_bytes: self.memory_total_bytes,
+            network_down_bytes_per_sec: rates.map(|rates| rates.down_bytes_per_sec),
+            network_up_bytes_per_sec: rates.map(|rates| rates.up_bytes_per_sec),
         }
     }
+
+    pub fn reset_network_baseline(&mut self) {
+        self.last_network_interfaces.clear();
+    }
+
+    fn sample_network_rates(&mut self, now: Instant) -> Option<NetworkRates> {
+        let current_interfaces = collect_network_interfaces(&self.networks);
+        let mut down_bytes_per_sec = 0_u64;
+        let mut up_bytes_per_sec = 0_u64;
+        let mut saw_rate = false;
+
+        for (name, current_totals) in &current_interfaces {
+            let Some(last) = self.last_network_interfaces.get(name) else {
+                continue;
+            };
+            let Some(rates) = network_rate_from_totals(*current_totals, last.totals, now, last.at)
+            else {
+                continue;
+            };
+            saw_rate = true;
+            down_bytes_per_sec = down_bytes_per_sec.saturating_add(rates.down_bytes_per_sec);
+            up_bytes_per_sec = up_bytes_per_sec.saturating_add(rates.up_bytes_per_sec);
+        }
+
+        self.last_network_interfaces = current_interfaces
+            .into_iter()
+            .map(|(name, totals)| (name, NetworkInterfaceSample { at: now, totals }))
+            .collect();
+
+        saw_rate.then_some(NetworkRates {
+            down_bytes_per_sec,
+            up_bytes_per_sec,
+        })
+    }
+}
+
+fn collect_network_interfaces(networks: &Networks) -> BTreeMap<String, NetworkTotals> {
+    let mut interfaces = BTreeMap::new();
+    for (name, network) in networks {
+        if is_loopback_interface(name) {
+            continue;
+        }
+        interfaces.insert(
+            name.to_string(),
+            NetworkTotals {
+                received: network.total_received(),
+                transmitted: network.total_transmitted(),
+            },
+        );
+    }
+    interfaces
+}
+
+fn network_rate_from_totals(
+    current: NetworkTotals,
+    last: NetworkTotals,
+    now: Instant,
+    last_at: Instant,
+) -> Option<NetworkRates> {
+    let elapsed = now.saturating_duration_since(last_at);
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.0 {
+        return None;
+    }
+    Some(NetworkRates {
+        down_bytes_per_sec: bytes_per_sec(current.received.checked_sub(last.received)?, seconds),
+        up_bytes_per_sec: bytes_per_sec(
+            current.transmitted.checked_sub(last.transmitted)?,
+            seconds,
+        ),
+    })
 }
 
 pub fn menu_lines(snapshot: &SystemStatsSnapshot) -> SystemStatsMenuLines {
@@ -92,8 +188,14 @@ pub fn menu_lines(snapshot: &SystemStatsSnapshot) -> SystemStatsMenuLines {
         ),
         network: format!(
             "Network: Up {} | Down {}",
-            format_bytes_rate(snapshot.network_up_bytes_per_sec),
-            format_bytes_rate(snapshot.network_down_bytes_per_sec)
+            snapshot
+                .network_up_bytes_per_sec
+                .map(format_bytes_rate)
+                .unwrap_or_else(|| "collecting...".to_string()),
+            snapshot
+                .network_down_bytes_per_sec
+                .map(format_bytes_rate)
+                .unwrap_or_else(|| "collecting...".to_string())
         ),
     }
 }
@@ -162,12 +264,73 @@ mod tests {
             cpu_percent: 23.4,
             memory_used_bytes: 18 * 1024 * 1024 * 1024,
             memory_total_bytes: 32 * 1024 * 1024 * 1024,
-            network_down_bytes_per_sec: 512 * 1024,
-            network_up_bytes_per_sec: 1536 * 1024,
+            network_down_bytes_per_sec: Some(512 * 1024),
+            network_up_bytes_per_sec: Some(1536 * 1024),
         });
 
         assert_eq!(lines.system, "System: CPU 23% | Memory 18.0 GB / 32.0 GB");
         assert_eq!(lines.network, "Network: Up 1.5 MB/s | Down 512 KB/s");
+    }
+
+    #[test]
+    fn menu_lines_keep_network_collecting_until_two_counter_samples_exist() {
+        let lines = menu_lines(&SystemStatsSnapshot {
+            cpu_percent: 23.4,
+            memory_used_bytes: 18 * 1024 * 1024 * 1024,
+            memory_total_bytes: 32 * 1024 * 1024 * 1024,
+            network_down_bytes_per_sec: None,
+            network_up_bytes_per_sec: None,
+        });
+
+        assert_eq!(
+            lines.network,
+            "Network: Up collecting... | Down collecting..."
+        );
+    }
+
+    #[test]
+    fn network_rate_uses_cumulative_counters_and_actual_elapsed_time() {
+        let last_at = Instant::now();
+        let now = last_at + Duration::from_millis(500);
+
+        let rates = network_rate_from_totals(
+            NetworkTotals {
+                received: 4096,
+                transmitted: 2048,
+            },
+            NetworkTotals {
+                received: 1024,
+                transmitted: 1024,
+            },
+            now,
+            last_at,
+        )
+        .expect("valid rate");
+
+        assert_eq!(rates.down_bytes_per_sec, 6144);
+        assert_eq!(rates.up_bytes_per_sec, 2048);
+    }
+
+    #[test]
+    fn network_rate_skips_counter_reset_or_interface_recreation() {
+        let last_at = Instant::now();
+        let now = last_at + Duration::from_secs(1);
+
+        assert_eq!(
+            network_rate_from_totals(
+                NetworkTotals {
+                    received: 10,
+                    transmitted: 20,
+                },
+                NetworkTotals {
+                    received: 100,
+                    transmitted: 20,
+                },
+                now,
+                last_at,
+            ),
+            None
+        );
     }
 
     #[test]

@@ -50,7 +50,7 @@ const TRAY_LOG_BUFFERED_LINES_LIMIT: usize = 1024;
 const TRAY_UPDATE_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
-const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -2268,6 +2268,7 @@ fn poll_system_stats(
             let lines = system_stats::menu_lines(&snapshot);
             update_system_stats_snapshot(Some(lines), menu_data, generation);
         } else {
+            sampler.reset_network_baseline();
             update_system_stats_snapshot(None, menu_data, generation);
         }
 
