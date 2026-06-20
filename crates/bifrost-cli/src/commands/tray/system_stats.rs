@@ -18,7 +18,7 @@ use sysinfo::Disks;
 #[cfg(not(target_os = "macos"))]
 use sysinfo::{Networks, System};
 
-const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NETWORK_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(900);
 const NETWORK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
