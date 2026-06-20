@@ -37,6 +37,42 @@ put_tray_config() {
 
 default_config="$(get_tray_config)"
 assert_json_field ".enabled" "true" "$default_config" "tray icon should default to enabled"
+system_stats_supported="$(printf '%s' "$default_config" | jq -r '.system_stats_supported')"
+
+if [[ "$system_stats_supported" != "true" ]]; then
+    assert_json_field ".system_stats_supported" "false" "$default_config" "tray system stats should report unsupported on this platform"
+    assert_json_field ".show_system_stats" "false" "$default_config" "unsupported tray system stats should be disabled"
+    assert_json_field ".system_stats_items.cpu" "false" "$default_config" "unsupported CPU stats should be masked off"
+    assert_json_field ".system_stats_items.memory" "false" "$default_config" "unsupported memory stats should be masked off"
+    assert_json_field ".system_stats_items.disk" "false" "$default_config" "unsupported disk stats should be masked off"
+    assert_json_field ".system_stats_items.upload" "false" "$default_config" "unsupported upload stats should be masked off"
+    assert_json_field ".system_stats_items.download" "false" "$default_config" "unsupported download stats should be masked off"
+
+    unsupported_response="$(env NO_PROXY="*" no_proxy="*" curl -sS -X PUT "$tray_url" \
+        -H 'Content-Type: application/json' \
+        -d '{"show_system_stats":true}')"
+    assert_json_field ".error" "tray system stats are not supported on this platform" "$unsupported_response" \
+        "unsupported platform should reject tray system stats updates"
+
+    updated_tray_off="$(put_tray_config '{"enabled":false}')"
+    assert_json_field ".enabled" "false" "$updated_tray_off" "tray icon can still be disabled without system stats support"
+    assert_json_field ".show_system_stats" "false" "$updated_tray_off" "tray enabled update keeps unsupported system stats disabled"
+
+    invalid_response="$(env NO_PROXY="*" no_proxy="*" curl -sS -X PUT "$tray_url" \
+        -H 'Content-Type: application/json' \
+        -d '{}')"
+    assert_json_field ".error" "enabled, show_system_stats, or system_stats_items is required" "$invalid_response" \
+        "empty tray config update should be rejected"
+
+    echo ""
+    echo "Results: $PASSED_ASSERTIONS passed, $FAILED_ASSERTIONS failed"
+    if [ "$FAILED_ASSERTIONS" -gt 0 ]; then
+        exit 1
+    fi
+    exit 0
+fi
+
+assert_json_field ".system_stats_supported" "true" "$default_config" "tray system stats should be supported on macOS"
 assert_json_field ".show_system_stats" "true" "$default_config" "tray system stats should default to enabled"
 assert_json_field ".system_stats_items.cpu" "true" "$default_config" "CPU stats should default to enabled"
 assert_json_field ".system_stats_items.memory" "true" "$default_config" "memory stats should default to enabled"

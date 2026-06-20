@@ -49,6 +49,7 @@ pub struct ProxySettingsResponse {
 pub struct TrayConfig {
     pub enabled: bool,
     pub supported: bool,
+    pub system_stats_supported: bool,
     pub show_system_stats: bool,
     pub system_stats_items: TraySystemStatsItemsResponse,
 }
@@ -485,12 +486,7 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
                     .server
                     .websocket_handshake_max_header_size,
             },
-            TrayConfig {
-                enabled: config.tray.enabled,
-                supported: tray_supported(),
-                show_system_stats: config.tray.show_system_stats,
-                system_stats_items: (&config.tray.system_stats_items).into(),
-            },
+            tray_response_from_config(config.tray.enabled, &config.tray),
         )
     } else {
         (
@@ -503,8 +499,11 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
             TrayConfig {
                 enabled: tray_supported(),
                 supported: tray_supported(),
-                show_system_stats: true,
-                system_stats_items: (&TraySystemStatsItems::default()).into(),
+                system_stats_supported: tray_system_stats_supported(),
+                show_system_stats: tray_system_stats_supported(),
+                system_stats_items: tray_system_stats_items_response(
+                    &TraySystemStatsItems::default(),
+                ),
             },
         )
     };
@@ -539,12 +538,10 @@ async fn get_tray_config(state: SharedAdminState) -> Response<BoxBody> {
     };
 
     let config = config_manager.config().await;
-    json_response(&TrayConfig {
-        enabled: config.tray.enabled,
-        supported: tray_supported(),
-        show_system_stats: config.tray.show_system_stats,
-        system_stats_items: (&config.tray.system_stats_items).into(),
-    })
+    json_response(&tray_response_from_config(
+        config.tray.enabled,
+        &config.tray,
+    ))
 }
 
 async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
@@ -582,6 +579,15 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
         );
     };
 
+    let system_stats_update_allowed = tray_system_stats_supported()
+        || (request.show_system_stats.is_none() && request.system_stats_items.is_none());
+    if !system_stats_update_allowed {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "tray system stats are not supported on this platform",
+        );
+    }
+
     match config_manager
         .update_tray_config(TrayConfigUpdate {
             enabled: request.enabled,
@@ -608,12 +614,7 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
                     tracing::debug!("Tray config enabled but no launch callback is registered");
                 }
             }
-            json_response(&TrayConfig {
-                enabled: config.enabled,
-                supported: tray_supported(),
-                show_system_stats: config.show_system_stats,
-                system_stats_items: (&config.system_stats_items).into(),
-            })
+            json_response(&tray_response_from_config(config.enabled, &config))
         }
         Err(e) => {
             tracing::error!("Failed to persist tray config: {}", e);
@@ -631,6 +632,34 @@ fn should_request_tray_launch_after_config_update(enabled: bool) -> bool {
 
 fn tray_supported() -> bool {
     !cfg!(target_os = "linux")
+}
+
+fn tray_system_stats_supported() -> bool {
+    cfg!(target_os = "macos")
+}
+
+fn tray_system_stats_items_response(items: &TraySystemStatsItems) -> TraySystemStatsItemsResponse {
+    if tray_system_stats_supported() {
+        items.into()
+    } else {
+        TraySystemStatsItemsResponse {
+            cpu: false,
+            memory: false,
+            disk: false,
+            upload: false,
+            download: false,
+        }
+    }
+}
+
+fn tray_response_from_config(enabled: bool, config: &bifrost_storage::TrayConfig) -> TrayConfig {
+    TrayConfig {
+        enabled,
+        supported: tray_supported(),
+        system_stats_supported: tray_system_stats_supported(),
+        show_system_stats: tray_system_stats_supported() && config.show_system_stats,
+        system_stats_items: tray_system_stats_items_response(&config.system_stats_items),
+    }
 }
 
 async fn get_server_config(state: SharedAdminState) -> Response<BoxBody> {
@@ -2176,7 +2205,11 @@ mod coverage_boost {
         assert_eq!(parsed.server.http2_max_header_list_size, 256 * 1024);
         assert_eq!(parsed.server.websocket_handshake_max_header_size, 64 * 1024);
         assert_eq!(parsed.tray.supported, tray_supported());
-        assert!(parsed.tray.show_system_stats);
+        assert_eq!(
+            parsed.tray.system_stats_supported,
+            tray_system_stats_supported()
+        );
+        assert_eq!(parsed.tray.show_system_stats, tray_system_stats_supported());
     }
 
     #[tokio::test]
@@ -2227,10 +2260,14 @@ mod coverage_boost {
         let cfg = harness.config_manager.config().await;
         assert_eq!(parsed.enabled, cfg.tray.enabled);
         assert_eq!(parsed.supported, tray_supported());
-        assert_eq!(parsed.show_system_stats, cfg.tray.show_system_stats);
+        assert_eq!(parsed.system_stats_supported, tray_system_stats_supported());
+        assert_eq!(
+            parsed.show_system_stats,
+            tray_system_stats_supported() && cfg.tray.show_system_stats
+        );
         assert_eq!(
             parsed.system_stats_items.download,
-            cfg.tray.system_stats_items.download
+            tray_system_stats_supported() && cfg.tray.system_stats_items.download
         );
     }
 
@@ -2641,14 +2678,20 @@ mod coverage_boost_v2 {
         let url = format!("{}/api/config/tray", base);
 
         let resp = put_json(&url, json!({"show_system_stats": false}));
-        assert_eq!(resp.status(), StatusCode::OK.as_u16());
-        let body = resp.into_string().unwrap();
-        let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
-        assert!(!parsed.show_system_stats);
+        if tray_system_stats_supported() {
+            assert_eq!(resp.status(), StatusCode::OK.as_u16());
+            let body = resp.into_string().unwrap();
+            let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
+            assert!(!parsed.show_system_stats);
 
-        let cfg = harness.config_manager.config().await;
-        assert!(!cfg.tray.show_system_stats);
-        assert!(cfg.tray.enabled);
+            let cfg = harness.config_manager.config().await;
+            assert!(!cfg.tray.show_system_stats);
+            assert!(cfg.tray.enabled);
+        } else {
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+            let msg = resp.into_string().unwrap();
+            assert!(msg.contains("tray system stats are not supported on this platform"));
+        }
     }
 
     #[tokio::test]
@@ -2659,17 +2702,23 @@ mod coverage_boost_v2 {
         let url = format!("{}/api/config/tray", base);
 
         let resp = put_json(&url, json!({"system_stats_items": {"download": false}}));
-        assert_eq!(resp.status(), StatusCode::OK.as_u16());
-        let body = resp.into_string().unwrap();
-        let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
-        assert!(!parsed.system_stats_items.download);
-        assert!(parsed.system_stats_items.upload);
-        assert!(parsed.show_system_stats);
+        if tray_system_stats_supported() {
+            assert_eq!(resp.status(), StatusCode::OK.as_u16());
+            let body = resp.into_string().unwrap();
+            let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
+            assert!(!parsed.system_stats_items.download);
+            assert!(parsed.system_stats_items.upload);
+            assert!(parsed.show_system_stats);
 
-        let cfg = harness.config_manager.config().await;
-        assert!(!cfg.tray.system_stats_items.download);
-        assert!(cfg.tray.system_stats_items.upload);
-        assert!(cfg.tray.show_system_stats);
+            let cfg = harness.config_manager.config().await;
+            assert!(!cfg.tray.system_stats_items.download);
+            assert!(cfg.tray.system_stats_items.upload);
+            assert!(cfg.tray.show_system_stats);
+        } else {
+            assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
+            let msg = resp.into_string().unwrap();
+            assert!(msg.contains("tray system stats are not supported on this platform"));
+        }
     }
 
     #[tokio::test]

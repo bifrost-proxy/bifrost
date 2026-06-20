@@ -22,6 +22,7 @@ export interface ProxySettings {
 export interface TrayConfig {
   enabled: boolean;
   supported: boolean;
+  system_stats_supported: boolean;
   show_system_stats: boolean;
   system_stats_items: TraySystemStatsItems;
 }

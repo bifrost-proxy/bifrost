@@ -148,7 +148,7 @@ impl SystemStatsSampler {
             {
                 self.networks.refresh_list();
                 self.last_network_list_refresh_at = Some(now);
-                self.preferred_network_interface = detect_default_network_interface();
+                self.update_preferred_network_interface();
             }
             self.networks.refresh();
             self.sample_network_rates(now)
@@ -171,6 +171,17 @@ impl SystemStatsSampler {
         self.last_network_interfaces.clear();
         self.active_network_interface = None;
         self.smoothed_network_rates = None;
+    }
+
+    fn update_preferred_network_interface(&mut self) {
+        self.set_preferred_network_interface(detect_default_network_interface());
+    }
+
+    fn set_preferred_network_interface(&mut self, preferred: Option<String>) {
+        if preferred != self.preferred_network_interface {
+            self.preferred_network_interface = preferred;
+            self.reset_network_baseline();
+        }
     }
 
     fn sample_network_rates(&mut self, now: Instant) -> Option<NetworkRates> {
@@ -255,30 +266,38 @@ fn select_network_rates(
 fn detect_default_network_interface() -> Option<String> {
     #[cfg(target_os = "macos")]
     {
-        let output = Command::new("route")
-            .args(["-n", "get", "default"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let line = line.trim();
-            if let Some(interface) = line.strip_prefix("interface:") {
-                let interface = interface.trim();
-                if !interface.is_empty() && !is_ignored_network_interface(interface) {
-                    return Some(interface.to_string());
-                }
-            }
-        }
-        None
+        detect_default_network_interface_from_route(&["-n", "get", "default"]).or_else(|| {
+            detect_default_network_interface_from_route(&["-n", "get", "-inet6", "default"])
+        })
     }
 
     #[cfg(not(target_os = "macos"))]
     {
         None
     }
+}
+
+#[cfg(target_os = "macos")]
+fn detect_default_network_interface_from_route(args: &[&str]) -> Option<String> {
+    let output = Command::new("route").args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_default_network_interface(&String::from_utf8_lossy(&output.stdout))
+}
+
+#[cfg(any(test, target_os = "macos"))]
+fn parse_default_network_interface(output: &str) -> Option<String> {
+    for line in output.lines() {
+        let line = line.trim();
+        if let Some(interface) = line.strip_prefix("interface:") {
+            let interface = interface.trim();
+            if !interface.is_empty() && !is_ignored_network_interface(interface) {
+                return Some(interface.to_string());
+            }
+        }
+    }
+    None
 }
 
 fn network_rate_weight(rates: &NetworkRates) -> u64 {
@@ -996,6 +1015,49 @@ mod tests {
 
         assert_eq!(active, Some("en1".to_string()));
         assert_eq!(rates.down_bytes_per_sec, 100 * 1024);
+    }
+
+    #[test]
+    fn default_route_parser_ignores_virtual_interfaces() {
+        assert_eq!(
+            parse_default_network_interface(
+                "route to: default\n  interface: bridge100\n  gateway: 10.211.55.1\n"
+            ),
+            None
+        );
+        assert_eq!(
+            parse_default_network_interface(
+                "route to: default\n  gateway: 192.168.8.1\n  interface: en1\n"
+            ),
+            Some("en1".to_string())
+        );
+    }
+
+    #[test]
+    fn preferred_interface_change_resets_network_baseline() {
+        let mut sampler = SystemStatsSampler::new(Path::new("/tmp"));
+        sampler.preferred_network_interface = Some("en0".to_string());
+        sampler.last_network_interfaces.insert(
+            "en0".to_string(),
+            NetworkInterfaceSample {
+                at: Instant::now(),
+                totals: NetworkTotals {
+                    received: 1,
+                    transmitted: 2,
+                },
+            },
+        );
+        sampler.active_network_interface = Some("en0".to_string());
+        sampler.smoothed_network_rates = Some(NetworkRates {
+            down_bytes_per_sec: 100,
+            up_bytes_per_sec: 50,
+        });
+
+        sampler.set_preferred_network_interface(Some("en1".to_string()));
+
+        assert!(sampler.last_network_interfaces.is_empty());
+        assert!(sampler.active_network_interface.is_none());
+        assert!(sampler.smoothed_network_rates.is_none());
     }
 
     #[test]

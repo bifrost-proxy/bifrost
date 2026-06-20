@@ -211,14 +211,17 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     })
     .map_err(|error| format!("failed to spawn tray update check thread: {error}"))?;
 
-    let stats_quit = should_quit.clone();
-    let stats_args = args.clone();
-    let stats_snapshot = menu_data.clone();
-    let stats_generation = menu_data_generation.clone();
-    spawn_tray_thread("bifrost-tray-system-stats", move || {
-        poll_system_stats(&stats_quit, &stats_args, &stats_snapshot, &stats_generation);
-    })
-    .map_err(|error| format!("failed to spawn tray system stats thread: {error}"))?;
+    #[cfg(target_os = "macos")]
+    {
+        let stats_quit = should_quit.clone();
+        let stats_args = args.clone();
+        let stats_snapshot = menu_data.clone();
+        let stats_generation = menu_data_generation.clone();
+        spawn_tray_thread("bifrost-tray-system-stats", move || {
+            poll_system_stats(&stats_quit, &stats_args, &stats_snapshot, &stats_generation);
+        })
+        .map_err(|error| format!("failed to spawn tray system stats thread: {error}"))?;
+    }
 
     let menu_receiver = MenuEvent::receiver().clone();
     let tray_receiver = TrayIconEvent::receiver().clone();
@@ -624,17 +627,25 @@ fn draw_font_text(
 ) {
     let mut cursor_x = x;
     for ch in text.chars() {
-        let (metrics, bitmap) = font.rasterize(ch, font_px);
+        let glyph = cached_menu_bar_glyph(font, ch, font_px);
+        let metrics = &glyph.metrics;
         let glyph_x = cursor_x.round() as i32 + metrics.xmin;
         let glyph_y = baseline_y - metrics.ymin - metrics.height as i32;
-        draw_rasterized_glyph(rgba, canvas_width, glyph_x, glyph_y, metrics.width, &bitmap);
+        draw_rasterized_glyph(
+            rgba,
+            canvas_width,
+            glyph_x,
+            glyph_y,
+            metrics.width,
+            &glyph.bitmap,
+        );
         draw_rasterized_glyph(
             rgba,
             canvas_width,
             glyph_x + 1,
             glyph_y,
             metrics.width,
-            &bitmap,
+            &glyph.bitmap,
         );
         draw_rasterized_glyph(
             rgba,
@@ -642,9 +653,35 @@ fn draw_font_text(
             glyph_x + 2,
             glyph_y,
             metrics.width,
-            &bitmap,
+            &glyph.bitmap,
         );
         cursor_x += metrics.advance_width;
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MenuBarGlyph {
+    metrics: fontdue::Metrics,
+    bitmap: Vec<u8>,
+}
+
+#[cfg(target_os = "macos")]
+fn cached_menu_bar_glyph(font: &fontdue::Font, ch: char, font_px: f32) -> Arc<MenuBarGlyph> {
+    static GLYPHS: OnceLock<Mutex<HashMap<(char, u32), Arc<MenuBarGlyph>>>> = OnceLock::new();
+    let key = (ch, font_px.to_bits());
+    let cache = GLYPHS.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(mut glyphs) = cache.lock() {
+        if let Some(glyph) = glyphs.get(&key) {
+            return glyph.clone();
+        }
+        let (metrics, bitmap) = font.rasterize(ch, font_px);
+        let glyph = Arc::new(MenuBarGlyph { metrics, bitmap });
+        glyphs.insert(key, glyph.clone());
+        glyph
+    } else {
+        let (metrics, bitmap) = font.rasterize(ch, font_px);
+        Arc::new(MenuBarGlyph { metrics, bitmap })
     }
 }
 
