@@ -509,7 +509,7 @@ fn render_menu_bar_stats_bitmap(title: &str) -> Option<MenuBarStatsBitmap> {
     }
 
     let font = menu_bar_stats_font()?;
-    let text_width = measure_text_width(font, &text, FONT_PX) + 1;
+    let text_width = measure_text_width(font, &text, FONT_PX) + 3;
     let text_x = PADDING_X + ICON_SIZE + ICON_GAP;
     let width = (text_x + text_width + PADDING_X).clamp(96, 1400);
     let mut rgba = vec![0_u8; (width * HEIGHT * 4) as usize];
@@ -632,6 +632,14 @@ fn draw_font_text(
             rgba,
             canvas_width,
             glyph_x + 1,
+            glyph_y,
+            metrics.width,
+            &bitmap,
+        );
+        draw_rasterized_glyph(
+            rgba,
+            canvas_width,
+            glyph_x + 2,
             glyph_y,
             metrics.width,
             &bitmap,

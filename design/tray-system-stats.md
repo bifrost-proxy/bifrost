@@ -43,11 +43,12 @@ Admin API `/api/config/tray` 返回并更新 `show_system_stats` 与 `system_sta
 
 ### 性能与实时性权衡
 
-刷新频率不做成用户可见配置，默认系统状态线程 3 秒、CPU/内存/磁盘 3 秒、网卡列表 30 秒。理由：
+刷新频率不做成用户可见配置，默认系统状态线程 3 秒、CPU/内存 3 秒、磁盘 30 秒、网卡列表 60 秒。理由：
 
-- 3 秒刷新能明显降低 tray helper 空闲 CPU，同时仍足够观察菜单栏趋势；CPU/内存/磁盘变化相对慢，3 秒刷新足够判断当前系统是否繁忙。
+- 3 秒刷新能明显降低 tray helper 空闲 CPU，同时仍足够观察菜单栏趋势；CPU/内存按 3 秒刷新，网速每 3 秒按累计字节差分刷新。磁盘容量变化和默认路由/网卡列表变化相对慢，分别按 30 秒和 60 秒刷新，避免频繁 I/O 和系统路由查询。
 - 采样只在 tray helper 本地执行，不访问 Admin API，不阻塞主代理进程。
 - 当 `show_system_stats=false` 或所有 `system_stats_items` 子项均关闭时，线程只读取配置并清空菜单状态，不执行 `sysinfo` CPU/内存/网络采样；当 Upload/Download 均关闭但 CPU/Memory/Disk 仍开启时，只刷新非网络指标并重置网络累计基线，避免把关闭期间的字节变化折算成当前速率。
+- 子项关闭时跳过对应重采样：CPU/Memory 均关闭时不刷新 `sysinfo::System`，Disk 关闭或未到 30 秒窗口时不刷新磁盘列表，Upload/Download 均关闭时不刷新网络计数。
 - Mac 本地 release microbench 使用 `sysinfo 0.31.4` 连续执行 500 次采样，单次平均 1.1796ms、最大 1.8934ms；按采样耗时估算，1s/2s/3s 刷新分别约为 0.1180% / 0.0590% / 0.0393% 单核 CPU。
 - Mac debug tray helper 真实进程 warm-up 5 秒后采样 20 秒：网络 1 秒、CPU/内存 3 秒刷新开启系统状态时平均 CPU 0.4700%、RSS 67,989KB；关闭系统状态时平均 CPU 0.0600%、RSS 67,076KB。增量约 0.4100% CPU 与 913KB RSS，处在可接受范围。
 
