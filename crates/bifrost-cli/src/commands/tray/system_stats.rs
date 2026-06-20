@@ -9,8 +9,9 @@ use bifrost_storage::TraySystemStatsItems;
 use sysinfo::{Disks, Networks, System};
 
 const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(3);
+const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NETWORK_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(900);
-const NETWORK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
+const NETWORK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemStatsSnapshot {
@@ -49,6 +50,7 @@ pub struct SystemStatsSampler {
     memory_total_bytes: u64,
     disk_used_percent: Option<f32>,
     last_cpu_memory_at: Option<Instant>,
+    last_disk_at: Option<Instant>,
     last_network_list_refresh_at: Option<Instant>,
     last_network_interfaces: BTreeMap<String, NetworkInterfaceSample>,
     active_network_interface: Option<String>,
@@ -99,6 +101,7 @@ impl SystemStatsSampler {
             disk_mount_point,
             disk_used_percent,
             last_cpu_memory_at: None,
+            last_disk_at: None,
             last_network_list_refresh_at: None,
             last_network_interfaces: BTreeMap::new(),
             active_network_interface: None,
@@ -108,22 +111,33 @@ impl SystemStatsSampler {
     }
 
     pub fn sample(&mut self, now: Instant, items: &TraySystemStatsItems) -> SystemStatsSnapshot {
-        if self
-            .last_cpu_memory_at
-            .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
-            .unwrap_or(true)
+        let needs_cpu_or_memory = items.cpu || items.memory;
+        if needs_cpu_or_memory
+            && self
+                .last_cpu_memory_at
+                .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
+                .unwrap_or(true)
         {
             self.system.refresh_memory();
             self.system.refresh_cpu_usage();
             self.cpu_percent = self.system.global_cpu_usage().clamp(0.0, 100.0);
             self.memory_used_bytes = self.system.used_memory();
             self.memory_total_bytes = self.system.total_memory();
+            self.last_cpu_memory_at = Some(now);
+        }
+
+        if items.disk
+            && self
+                .last_disk_at
+                .map(|last| now.saturating_duration_since(last) >= DISK_REFRESH_INTERVAL)
+                .unwrap_or(true)
+        {
             self.disks.refresh();
             self.disk_used_percent = self
                 .disk_mount_point
                 .as_deref()
                 .and_then(|mount_point| disk_usage_percent(self.disks.list(), mount_point));
-            self.last_cpu_memory_at = Some(now);
+            self.last_disk_at = Some(now);
         }
 
         let rates = if items.upload || items.download {
@@ -792,6 +806,41 @@ mod tests {
         assert!(sampler.last_network_interfaces.is_empty());
         assert!(sampler.active_network_interface.is_none());
         assert!(sampler.smoothed_network_rates.is_none());
+    }
+
+    #[test]
+    fn sample_skips_disabled_metric_refreshes_and_throttles_disk_refresh() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut sampler = SystemStatsSampler::new(temp.path());
+        let now = Instant::now();
+        sampler.last_cpu_memory_at = Some(now);
+        sampler.last_disk_at = Some(now);
+
+        let network_only = TraySystemStatsItems {
+            cpu: false,
+            memory: false,
+            disk: false,
+            upload: true,
+            download: true,
+        };
+        let _ = sampler.sample(now + CPU_MEMORY_REFRESH_INTERVAL * 2, &network_only);
+
+        assert_eq!(sampler.last_cpu_memory_at, Some(now));
+        assert_eq!(sampler.last_disk_at, Some(now));
+
+        let disk_enabled = TraySystemStatsItems {
+            cpu: false,
+            memory: false,
+            disk: true,
+            upload: false,
+            download: false,
+        };
+        let _ = sampler.sample(now + CPU_MEMORY_REFRESH_INTERVAL * 2, &disk_enabled);
+        assert_eq!(sampler.last_disk_at, Some(now));
+
+        let after_disk_window = now + DISK_REFRESH_INTERVAL + Duration::from_secs(1);
+        let _ = sampler.sample(after_disk_window, &disk_enabled);
+        assert_eq!(sampler.last_disk_at, Some(after_disk_window));
     }
 
     #[test]
