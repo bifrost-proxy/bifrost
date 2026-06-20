@@ -47,6 +47,7 @@ const OP_UPGRADE_FAILED: u8 = 6;
 /// Sentinel meaning "no download percent available" for the upgrade percent atomic.
 const UPGRADE_PERCENT_NONE: u8 = u8::MAX;
 const POLL_INTERVAL: Duration = Duration::from_secs(1);
+const MENU_DATA_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
@@ -155,6 +156,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     }));
     let menu_data = Arc::new(Mutex::new(initial_menu_data));
     let menu_data_generation = Arc::new(AtomicU64::new(0));
+    #[cfg(target_os = "macos")]
+    let system_stats_generation = Arc::new(AtomicU64::new(0));
     let system_proxy_refresh_in_flight = Arc::new(AtomicBool::new(false));
 
     let poll_quit = should_quit.clone();
@@ -216,7 +219,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let stats_quit = should_quit.clone();
         let stats_args = args.clone();
         let stats_snapshot = menu_data.clone();
-        let stats_generation = menu_data_generation.clone();
+        let stats_generation = system_stats_generation.clone();
         spawn_tray_thread("bifrost-tray-system-stats", move || {
             poll_system_stats(&stats_quit, &stats_args, &stats_snapshot, &stats_generation);
         })
@@ -230,6 +233,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
     #[cfg(target_os = "macos")]
     let mut last_rendered_menu_bar_title = initial_menu_bar_title;
+    #[cfg(target_os = "macos")]
+    let mut last_rendered_system_stats_generation = system_stats_generation.load(Ordering::Relaxed);
     let mut last_tray_interaction_at: Option<Instant> = None;
     let system_proxy_refresh_state = current_state.clone();
     let system_proxy_refresh_data = menu_data.clone();
@@ -288,6 +293,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let reload_requested = should_reload.swap(false, Ordering::Relaxed);
         let data_generation = menu_data_generation.load(Ordering::Relaxed);
         let data_changed = data_generation != last_rendered_data_generation;
+        #[cfg(target_os = "macos")]
+        let system_stats_data_generation = system_stats_generation.load(Ordering::Relaxed);
+        #[cfg(target_os = "macos")]
+        let system_stats_changed =
+            system_stats_data_generation != last_rendered_system_stats_generation;
         let menu_recently_interacted = last_tray_interaction_at
             .is_some_and(|instant| instant.elapsed() < MENU_REBUILD_SUPPRESSION_AFTER_CLICK);
         let svc_state = match new_state {
@@ -331,21 +341,26 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         );
 
         #[cfg(target_os = "macos")]
-        if state_changed || data_changed {
+        if state_changed || data_changed || system_stats_changed {
             let snapshot = clone_menu_data_snapshot(&menu_data);
             let new_title = menu_bar_stats_title(&snapshot, svc_state);
             if new_title != last_rendered_menu_bar_title {
-                set_menu_bar_stats_indicator(
-                    &tray_icon,
-                    new_title.as_deref(),
-                    match svc_state {
-                        ServiceState::Running => &icon_running,
-                        _ => &icon_stopped,
-                    },
-                );
-                last_rendered_menu_bar_title = new_title;
-                tracing::debug!("tray menu bar title updated");
+                let can_update_now =
+                    state_changed || last_rendered_menu_bar_title.is_none() || new_title.is_none();
+                if can_update_now {
+                    set_menu_bar_stats_indicator(
+                        &tray_icon,
+                        new_title.as_deref(),
+                        match svc_state {
+                            ServiceState::Running => &icon_running,
+                            _ => &icon_stopped,
+                        },
+                    );
+                    last_rendered_menu_bar_title = new_title;
+                    tracing::debug!("tray menu bar title updated");
+                }
             }
+            last_rendered_system_stats_generation = system_stats_data_generation;
         }
 
         if should_refresh_menu {
@@ -666,8 +681,11 @@ struct MenuBarGlyph {
 }
 
 #[cfg(target_os = "macos")]
+type MenuBarGlyphCache = Mutex<HashMap<(char, u32), Arc<MenuBarGlyph>>>;
+
+#[cfg(target_os = "macos")]
 fn cached_menu_bar_glyph(font: &fontdue::Font, ch: char, font_px: f32) -> Arc<MenuBarGlyph> {
-    static GLYPHS: OnceLock<Mutex<HashMap<(char, u32), Arc<MenuBarGlyph>>>> = OnceLock::new();
+    static GLYPHS: OnceLock<MenuBarGlyphCache> = OnceLock::new();
     let key = (ch, font_px.to_bits());
     let cache = GLYPHS.get_or_init(|| Mutex::new(HashMap::new()));
 
@@ -2743,7 +2761,7 @@ fn remove_own_tray_pid(data_dir: &Path) {
 }
 
 fn sleep_until_next_menu_data_poll(quit_flag: &AtomicBool) {
-    sleep_interruptibly(quit_flag, POLL_INTERVAL);
+    sleep_interruptibly(quit_flag, MENU_DATA_POLL_INTERVAL);
 }
 
 fn sleep_interruptibly(quit_flag: &AtomicBool, duration: Duration) {
