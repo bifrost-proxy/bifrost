@@ -133,15 +133,23 @@ function Add-PathListEntry {
         [string]$Directory
     )
 
-    if (Test-PathListContains -PathList $PathList -Directory $Directory) {
-        return $PathList
-    }
-
     if ([string]::IsNullOrWhiteSpace($PathList)) {
         return $Directory
     }
 
-    return "$($PathList.TrimEnd(';'));$Directory"
+    $normalizedDirectory = Normalize-PathEntry -PathEntry $Directory
+    $entries = @()
+    foreach ($entry in @(Split-PathList -PathList $PathList)) {
+        if ((Normalize-PathEntry -PathEntry $entry) -ine $normalizedDirectory) {
+            $entries += $entry
+        }
+    }
+
+    if ($entries.Count -eq 0) {
+        return $Directory
+    }
+
+    return "$Directory;$($entries -join ';')"
 }
 
 function Add-BifrostToUserPath {
@@ -150,14 +158,12 @@ function Add-BifrostToUserPath {
     $currentUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
     $alreadyInUserPath = Test-PathListContains -PathList $currentUserPath -Directory $Directory
 
-    if (-not $alreadyInUserPath) {
-        $newUserPath = Add-PathListEntry -PathList $currentUserPath -Directory $Directory
+    $newUserPath = Add-PathListEntry -PathList $currentUserPath -Directory $Directory
+    if ($newUserPath -ne $currentUserPath) {
         [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
     }
 
-    if (-not (Test-PathListContains -PathList $env:Path -Directory $Directory)) {
-        $env:Path = Add-PathListEntry -PathList $env:Path -Directory $Directory
-    }
+    $env:Path = Add-PathListEntry -PathList $env:Path -Directory $Directory
 
     if ($alreadyInUserPath) {
         return "already"
@@ -166,13 +172,67 @@ function Add-BifrostToUserPath {
     return "added"
 }
 
-function Get-Architecture {
-    $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+function Convert-ToBifrostArchitecture {
+    param([object]$Architecture)
+
+    if ($null -eq $Architecture) {
+        return $null
+    }
+
+    $arch = ([string]$Architecture).Trim().ToUpperInvariant()
     switch ($arch) {
         "X64" { return "x86_64" }
-        "Arm64" { return "aarch64" }
-        default { return "unknown" }
+        "AMD64" { return "x86_64" }
+        "ARM64" { return "aarch64" }
+        "AARCH64" { return "aarch64" }
+        default { return $null }
     }
+}
+
+function Resolve-BifrostArchitecture {
+    param(
+        [object]$RuntimeArchitecture,
+        [string]$NativeArchitecture,
+        [string]$ProcessArchitecture,
+        [bool]$Is64BitOperatingSystem
+    )
+
+    $runtimeArch = Convert-ToBifrostArchitecture $RuntimeArchitecture
+    if ($runtimeArch) {
+        return $runtimeArch
+    }
+
+    $nativeArch = Convert-ToBifrostArchitecture $NativeArchitecture
+    if ($nativeArch) {
+        return $nativeArch
+    }
+
+    $processArch = Convert-ToBifrostArchitecture $ProcessArchitecture
+    if ($processArch) {
+        return $processArch
+    }
+
+    if ($Is64BitOperatingSystem) {
+        return "x86_64"
+    }
+
+    return "unknown"
+}
+
+function Get-Architecture {
+    $runtimeArchitecture = $null
+    try {
+        $runtimeArchitecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+    }
+    catch {
+        # Windows PowerShell 5.1 can run on hosts where RuntimeInformation is unavailable.
+    }
+
+    return Resolve-BifrostArchitecture `
+        -RuntimeArchitecture $runtimeArchitecture `
+        -NativeArchitecture $env:PROCESSOR_ARCHITEW6432 `
+        -ProcessArchitecture $env:PROCESSOR_ARCHITECTURE `
+        -Is64BitOperatingSystem ([Environment]::Is64BitOperatingSystem)
 }
 
 function Get-Target {
@@ -426,11 +486,35 @@ function Get-FileHash256 {
     return $hash.Hash.ToLower()
 }
 
+function Join-Path3 {
+    param(
+        [string]$Path,
+        [string]$ChildPath,
+        [string]$GrandchildPath
+    )
+
+    return (Join-Path (Join-Path $Path $ChildPath) $GrandchildPath)
+}
+
+function Ensure-SystemNetHttp {
+    if ("System.Net.Http.HttpClient" -as [type]) {
+        return
+    }
+
+    Add-Type -AssemblyName System.Net.Http -ErrorAction Stop
+
+    if (-not ("System.Net.Http.HttpClient" -as [type])) {
+        throw "System.Net.Http.HttpClient is unavailable"
+    }
+}
+
 function Invoke-BifrostDownload {
     param(
         [string]$Uri,
         [string]$OutFile
     )
+
+    Ensure-SystemNetHttp
 
     $timeout = Get-IntEnv -Name "BIFROST_DOWNLOAD_TIMEOUT" -Default 120
     $tries = Get-IntEnv -Name "BIFROST_DOWNLOAD_TRIES" -Default 2
@@ -620,7 +704,7 @@ function Install-Bifrost {
 
         $binaryName = "$BINARY_NAME.exe"
         $extractedDir = "bifrost-$Version-$target"
-        $sourcePath = Join-Path $extractDir $extractedDir $binaryName
+        $sourcePath = Join-Path3 -Path $extractDir -ChildPath $extractedDir -GrandchildPath $binaryName
 
         if (-not (Test-Path $sourcePath)) {
             $sourcePath = Join-Path $extractDir $binaryName

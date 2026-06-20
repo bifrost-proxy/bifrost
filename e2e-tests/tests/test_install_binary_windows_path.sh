@@ -137,8 +137,24 @@ run_no_modify_path_case() {
     rm -rf "$tmpdir"
 }
 
+run_current_process_path_prepend_case() {
+    local old_path
+
+    old_path="$PATH"
+    PATH="/usr/bin:/c/Users/test-user/.local/bin:/bin"
+    prepend_current_process_path "/c/Users/test-user/.local/bin"
+
+    if [[ "$PATH" != "/c/Users/test-user/.local/bin:/usr/bin:/bin" ]]; then
+        fail "current process PATH is prepended and deduplicated" "got PATH=$PATH"
+    fi
+
+    pass "current process PATH is prepended and deduplicated"
+    PATH="$old_path"
+}
+
 run_windows_path_case
 run_no_modify_path_case
+run_current_process_path_prepend_case
 
 echo ""
 echo "Passed: $PASSED"

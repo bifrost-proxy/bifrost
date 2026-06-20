@@ -644,6 +644,38 @@
 - 指定版本安装同时覆盖 Bash `--version` 和 PowerShell `-Version`。
 - Windows PATH 行为说明明确：PowerShell installer 更新当前会话和 Windows User `Path`，Git Bash installer 更新 Windows User `Path`，新 PowerShell/CMD 可直接执行 `bifrost`。
 
+### TC-IBOC-23 Windows PowerShell 真实安装链路可用
+
+操作步骤：
+
+1. 在 Windows VM 的 Windows PowerShell 5.1 中执行 PowerShell installer 回归：
+   ```powershell
+   powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1
+   ```
+2. 在 Windows VM 的 Windows PowerShell 5.1 中执行真实安装，版本固定为当前已发布版本，避免 latest 变化影响结果：
+   ```powershell
+   .\install-binary.ps1 -Version v0.0.110
+   ```
+3. 验证安装目录中的二进制可运行：
+   ```powershell
+   $exe = Join-Path (Join-Path $env:LOCALAPPDATA 'bifrost\bin') 'bifrost.exe'
+   & $exe --version
+   ```
+4. 验证当前 PowerShell 会话的 PATH 优先命中新安装目录，而不是已有 cargo/npm 等旧路径：
+   ```powershell
+   (Get-Command bifrost).Source
+   bifrost --version
+   ```
+
+预期结果：
+
+- installer 输出 `Architecture: aarch64` 或 `Architecture: x86_64`，不得输出 `Architecture: unknown`。
+- 下载阶段不得报 `System.Net.Http.HttpClientHandler` 类型缺失。
+- 解压阶段不得因三参数 `Join-Path` 在 Windows PowerShell 5.1 下失败。
+- 安装完成后输出 `Installation completed!`。
+- 安装目录 `bifrost.exe` 输出 `bifrost 0.0.110`。
+- 当前 PowerShell 会话 `Get-Command bifrost` 指向 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe`，`bifrost --version` 输出 `bifrost 0.0.110`。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
@@ -651,6 +683,7 @@
 - `test_upgrade_local_restart_e2e.sh` 退出时会停止测试 daemon、清理同数据目录 tray helper 并删除临时安装目录、临时 archive 和临时数据目录。
 - Windows x86 CI 失败时会上传 `.e2e-reports/`、`.bifrost-e2e-ci/` 和 `target/`，其中包含 `.bifrost-upgrade-*.log` helper 日志，便于定位替换或重启失败。
 - Windows PATH 用例如修改了真实用户 PATH，可用执行前记录值恢复；若保留安装目录在 PATH 中，也必须确认不重复追加。
+- Windows PowerShell 真实安装用例会保留 `%LOCALAPPDATA%\bifrost\bin` 和 Windows User `Path` 中的安装目录；如需恢复，可删除该目录并按执行前记录恢复 User `Path`。
 - 退出当前 shell 即可清理函数定义。
 
 ## 执行记录
@@ -694,3 +727,4 @@
 | 2026-06-16 | TC-IBOC-20 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_target_dirs_ --lib` + `bash -n e2e-tests/tests/test_upgrade_local_restart_e2e.sh` + `bash e2e-tests/tests/test_e2e_scripts_disable_sync_login_prompt.sh` + `git diff --check` | PASS：`install-skill` 目录解析新增 `BIFROST_INSTALL_SKILL_DIR` 覆盖并保留 `--dir` / `--cwd` 优先级；静态验证 Windows upgrade restart 脚本通过临时 `BIFROST_INSTALL_SKILL_DIR` 隔离 post-upgrade skill 安装，且在 Admin API ready 后检查 deferred helper 已安装 primary/remote skills；frontmatter name 断言接受 YAML 合法的 quoted/unquoted 形式。本地未执行真实 upgrade restart，避免启动 Tray 或打开 Sync 登录页，完整 Windows 真实链路交由 GitHub Actions `E2E Shell (x86_64-pc-windows-msvc)` 验证。 |
 | 2026-06-20 | TC-IBOC-21 | Parallels `Windows 11` VM：`bash e2e-tests/tests/test_install_binary_windows_path.sh`、`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`、`bash install-binary.sh --version v0.0.110 --no-post-install`、新 PowerShell/CMD/Git Bash 分别执行 `bifrost --version` | PASS：离线 Bash PATH 回归 7/7 通过；Windows PowerShell 5.1 回归 20/20 通过；真实 Bash 安装输出 `Added to Windows User PATH: C:\Users\eden_studio\.local\bin` 且跳过 post-install；新 PowerShell 的 User `Path` 包含 `C:\Users\eden_studio\.local\bin`，`Get-Command bifrost` 指向该目录并输出 `bifrost 0.0.110`；CMD `where bifrost` 指向同一路径并输出 `bifrost 0.0.110`；Git Bash `command -v bifrost` 输出 `/c/Users/eden_studio/.local/bin/bifrost` 并输出 `bifrost 0.0.110`。 |
 | 2026-06-20 | TC-IBOC-22 | 按 TC-IBOC-22 的三条 `rg` 文档断言执行 | PASS：中文/英文 README 的脚本安装段落均包含 Bash 与 Windows PowerShell 入口，指定版本示例覆盖 PowerShell `-Version`，并说明 Windows installer 会写入 Windows User `Path` 以支持新 PowerShell/CMD 直接执行 `bifrost`。 |
+| 2026-06-20 | TC-IBOC-23 | Parallels `Windows 11` VM：`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`；`install-binary.ps1 -Version v0.0.110`；raw branch `Invoke-RestMethod https://raw.githubusercontent.com/bifrost-proxy/bifrost/codex/windows-installer-path/install-binary.ps1` 后以 `eden_studio` 当前用户执行 `-Version v0.0.110`；验证 `%LOCALAPPDATA%\bifrost\bin\bifrost.exe --version`、`(Get-Command bifrost).Source`、`bifrost --version` | PASS：Windows PowerShell 5.1 回归 31/31 通过；真实安装输出 `Architecture: aarch64`、`Target: aarch64-pc-windows-msvc`，成功下载 release zip 与 checksums、完成 checksum verified、extracting、installation completed；raw branch 当前用户验证输出 `edenstudio175f\eden_studio`，安装目录 `C:\Users\eden_studio\AppData\Local\bifrost\bin\bifrost.exe` 输出 `bifrost 0.0.110`；当前 PowerShell 会话 `Get-Command bifrost` 指向同一安装目录并输出 `bifrost 0.0.110`。 |
