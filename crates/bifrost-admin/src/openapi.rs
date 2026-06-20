@@ -128,17 +128,18 @@ fn generate_components() -> serde_json::Value {
             },
             "TrayConfig": {
                 "type": "object",
-                "description": "System tray helper setting shown in Settings > Proxy.",
+                "description": "System tray helper settings shown in Settings > Tray.",
                 "properties": {
                     "enabled": {"type": "boolean", "description": "Whether Bifrost should launch and keep the tray helper running"},
-                    "supported": {"type": "boolean", "description": "Whether the current platform supports the native tray helper"}
+                    "supported": {"type": "boolean", "description": "Whether the current platform supports the native tray helper"},
+                    "show_system_stats": {"type": "boolean", "description": "Whether the tray menu should show whole-system CPU, memory, and network throughput"}
                 }
             },
             "UpdateTrayConfigRequest": {
                 "type": "object",
-                "required": ["enabled"],
                 "properties": {
-                    "enabled": {"type": "boolean"}
+                    "enabled": {"type": "boolean"},
+                    "show_system_stats": {"type": "boolean"}
                 }
             },
             "BreakpointEdit": {
@@ -1409,6 +1410,7 @@ mod tests {
         let tray = &schema(&spec, "TrayConfig")["properties"];
         assert!(tray.get("enabled").is_some());
         assert!(tray.get("supported").is_some());
+        assert!(tray.get("show_system_stats").is_some());
     }
 
     #[test]

@@ -44,7 +44,7 @@ import {
   type TemporaryPortBinding,
   type TemporaryPortRuleSetRef,
 } from "../../../api/ports";
-import type { ProxySettings, TlsConfig, TrayConfig } from "../../../api/config";
+import type { ProxySettings, TlsConfig } from "../../../api/config";
 import { updateTlsConfig } from "../../../api/config";
 import { useTlsConfigStore } from "../../../stores/useTlsConfigStore";
 import SystemProxySection from "./SystemProxySection";
@@ -914,9 +914,6 @@ export interface ProxyTabProps {
   cliProxy: CliProxyStatus | null;
   systemProxyLoading: boolean;
   systemProxyLaunchdLoading: boolean;
-  trayConfig: TrayConfig | null;
-  trayLoading: boolean;
-  onToggleTray: (enabled: boolean) => void;
   onToggleSystemProxy: (enabled: boolean) => void;
   onToggleSystemProxyLaunchd: (enabled: boolean) => void;
   copyProxyConfig: () => void;
@@ -964,9 +961,6 @@ export default function ProxyTab({
   cliProxy,
   systemProxyLoading,
   systemProxyLaunchdLoading,
-  trayConfig,
-  trayLoading,
-  onToggleTray,
   onToggleSystemProxy,
   onToggleSystemProxyLaunchd,
   copyProxyConfig,
@@ -1098,9 +1092,6 @@ export default function ProxyTab({
           cliProxy={cliProxy}
           systemProxyLoading={systemProxyLoading}
           systemProxyLaunchdLoading={systemProxyLaunchdLoading}
-          trayConfig={trayConfig}
-          trayLoading={trayLoading}
-          onToggleTray={onToggleTray}
           injectBifrostBadge={injectBifrostBadge}
           injectBifrostBadgeLoading={injectBifrostBadgeLoading}
           onToggleSystemProxy={onToggleSystemProxy}

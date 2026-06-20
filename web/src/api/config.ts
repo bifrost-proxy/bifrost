@@ -22,6 +22,7 @@ export interface ProxySettings {
 export interface TrayConfig {
   enabled: boolean;
   supported: boolean;
+  show_system_stats: boolean;
 }
 
 export interface UpdateTlsConfigRequest {
@@ -48,7 +49,12 @@ export async function updateTlsConfig(config: UpdateTlsConfigRequest): Promise<T
   return put<TlsConfig>('/config/tls', config);
 }
 
-export async function updateTrayConfig(config: { enabled: boolean }): Promise<TrayConfig> {
+export interface UpdateTrayConfigRequest {
+  enabled?: boolean;
+  show_system_stats?: boolean;
+}
+
+export async function updateTrayConfig(config: UpdateTrayConfigRequest): Promise<TrayConfig> {
   return put<TrayConfig>('/config/tray', config);
 }
 

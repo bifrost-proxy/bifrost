@@ -20,6 +20,7 @@ use super::config::{self, TrayConfig};
 use super::lock::TrayLock;
 use super::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, SubmenuDef};
 use super::runtime::{self, RuntimeInfo, ServiceState};
+use super::system_stats::{self, SystemStatsMenuLines, SystemStatsSampler};
 
 const STATE_RUNNING: u8 = 0;
 const STATE_STOPPED: u8 = 1;
@@ -49,6 +50,7 @@ const TRAY_LOG_BUFFERED_LINES_LIMIT: usize = 1024;
 const TRAY_UPDATE_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
+const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -59,6 +61,7 @@ struct MenuDataSnapshot {
     system_proxy: Option<menu::SystemProxyMenuState>,
     bin_available: bool,
     update_available: Option<String>,
+    system_stats: Option<SystemStatsMenuLines>,
 }
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
@@ -184,6 +187,15 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         );
     })
     .map_err(|error| format!("failed to spawn tray update check thread: {error}"))?;
+
+    let stats_quit = should_quit.clone();
+    let stats_args = args.clone();
+    let stats_snapshot = menu_data.clone();
+    let stats_generation = menu_data_generation.clone();
+    spawn_tray_thread("bifrost-tray-system-stats", move || {
+        poll_system_stats(&stats_quit, &stats_args, &stats_snapshot, &stats_generation);
+    })
+    .map_err(|error| format!("failed to spawn tray system stats thread: {error}"))?;
 
     let menu_receiver = MenuEvent::receiver().clone();
     let tray_receiver = TrayIconEvent::receiver().clone();
@@ -594,6 +606,34 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     }
 }
 
+fn load_tray_system_stats_enabled(data_dir: &Path) -> bool {
+    let path = data_dir.join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to read tray system stats config; keeping system stats enabled"
+            );
+            return true;
+        }
+    };
+
+    match toml::from_str::<bifrost_storage::UnifiedConfig>(&content) {
+        Ok(config) => config.tray.show_system_stats,
+        Err(error) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "failed to parse tray system stats config; keeping system stats enabled"
+            );
+            true
+        }
+    }
+}
+
 fn load_recent_rule_targets(data_dir: &Path) -> Vec<RuleTarget> {
     let path = data_dir.join(RECENT_RULES_FILE);
     let content = match fs::read_to_string(&path) {
@@ -695,6 +735,8 @@ fn load_menu_data_snapshot(
         system_proxy,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
+        system_stats: load_tray_system_stats_enabled(&args.data_dir)
+            .then(SystemStatsMenuLines::collecting),
     }
 }
 
@@ -845,6 +887,7 @@ fn build_menu_from_snapshot(
         snapshot.system_proxy.as_ref(),
         snapshot.update_available.as_deref(),
         upgrade_in_progress,
+        snapshot.system_stats.as_ref(),
     )
 }
 
@@ -2208,6 +2251,61 @@ fn poll_menu_data(
     }
 }
 
+fn poll_system_stats(
+    quit_flag: &AtomicBool,
+    args: &TrayArgs,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &AtomicU64,
+) {
+    let mut sampler = SystemStatsSampler::new();
+    loop {
+        if quit_flag.load(Ordering::Relaxed) {
+            break;
+        }
+
+        if load_tray_system_stats_enabled(&args.data_dir) {
+            let snapshot = sampler.sample(Instant::now());
+            let lines = system_stats::menu_lines(&snapshot);
+            update_system_stats_snapshot(Some(lines), menu_data, generation);
+        } else {
+            update_system_stats_snapshot(None, menu_data, generation);
+        }
+
+        sleep_interruptibly(quit_flag, SYSTEM_STATS_POLL_INTERVAL);
+    }
+}
+
+fn update_system_stats_snapshot(
+    lines: Option<SystemStatsMenuLines>,
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &AtomicU64,
+) -> bool {
+    let changed = match menu_data.lock() {
+        Ok(mut current) => {
+            if current.system_stats == lines {
+                false
+            } else {
+                current.system_stats = lines;
+                true
+            }
+        }
+        Err(poisoned) => {
+            tracing::warn!("tray menu data snapshot lock was poisoned; updating system stats");
+            let mut current = poisoned.into_inner();
+            if current.system_stats == lines {
+                false
+            } else {
+                current.system_stats = lines;
+                true
+            }
+        }
+    };
+    if changed {
+        generation.fetch_add(1, Ordering::Relaxed);
+    }
+    changed
+}
+
 fn poll_update_check(
     quit_flag: &AtomicBool,
     state: &AtomicU8,
@@ -2280,6 +2378,9 @@ fn refresh_menu_data_snapshot(
         Ok(mut current) => {
             if !include_system_proxy {
                 next.system_proxy = current.system_proxy.clone();
+            }
+            if next.system_stats.is_some() {
+                next.system_stats = current.system_stats.clone().or(next.system_stats);
             }
             if *current != next {
                 *current = next;

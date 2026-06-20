@@ -267,17 +267,22 @@ pub struct ProxySettings {
 #[serde(default)]
 pub struct TrayConfig {
     pub enabled: bool,
+    pub show_system_stats: bool,
 }
 
 impl Default for TrayConfig {
     fn default() -> Self {
-        Self { enabled: true }
+        Self {
+            enabled: true,
+            show_system_stats: true,
+        }
     }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TrayConfigUpdate {
     pub enabled: Option<bool>,
+    pub show_system_stats: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -531,6 +536,8 @@ mod tests {
         assert!(config.tls.intercept_exclude.is_empty());
         assert_eq!(config.access.mode, AccessMode::Interactive);
         assert!(config.system_proxy.enabled);
+        assert!(config.tray.enabled);
+        assert!(config.tray.show_system_stats);
         assert!(config.sync.enabled);
         assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
@@ -590,6 +597,7 @@ mod tests {
             parsed.tls.enable_interception
         );
         assert_eq!(config.ui.rules_sort_mode, parsed.ui.rules_sort_mode);
+        assert_eq!(config.tray.show_system_stats, parsed.tray.show_system_stats);
     }
 }
 

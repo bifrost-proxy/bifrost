@@ -1,5 +1,6 @@
 use super::config::{self, CustomMenuItem, MenuAction, TrayConfig};
 use super::runtime::{RuntimeInfo, ServiceState};
+use super::system_stats::SystemStatsMenuLines;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone)]
@@ -89,6 +90,7 @@ pub fn build_menu(
     system_proxy: Option<&SystemProxyMenuState>,
     update_available: Option<&str>,
     upgrade_in_progress: bool,
+    system_stats: Option<&SystemStatsMenuLines>,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -120,6 +122,23 @@ pub fn build_menu(
         checked: false,
         action: MenuItemAction::None,
     }));
+
+    if let Some(stats) = system_stats {
+        items.push(item(MenuItemDef {
+            id: "_system_stats".to_string(),
+            label: stats.system.clone(),
+            enabled: false,
+            checked: false,
+            action: MenuItemAction::None,
+        }));
+        items.push(item(MenuItemDef {
+            id: "_network_stats".to_string(),
+            label: stats.network.clone(),
+            enabled: false,
+            checked: false,
+            action: MenuItemAction::None,
+        }));
+    }
 
     if let Some(rt) = runtime {
         let admin_url = rt.admin_url();
@@ -687,6 +706,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Running on 127.0.0.1:8800"));
@@ -700,6 +720,60 @@ mod tests {
         assert!(open_admin.enabled);
         assert!(find_item(&menu, "restart_service").is_none());
         assert!(find_item(&menu, "open_data_dir").is_none());
+    }
+
+    #[test]
+    fn test_menu_system_stats_uses_two_disabled_rows_when_enabled() {
+        let rt = sample_runtime();
+        let stats = SystemStatsMenuLines {
+            system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB".to_string(),
+            network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+        };
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            Some(&stats),
+        );
+
+        let system = find_item(&menu, "_system_stats").unwrap();
+        assert_eq!(system.label, stats.system);
+        assert!(!system.enabled);
+        let network = find_item(&menu, "_network_stats").unwrap();
+        assert_eq!(network.label, stats.network);
+        assert!(!network.enabled);
+    }
+
+    #[test]
+    fn test_menu_system_stats_hidden_when_disabled() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            None,
+        );
+
+        assert!(find_item(&menu, "_system_stats").is_none());
+        assert!(find_item(&menu, "_network_stats").is_none());
     }
 
     #[test]
@@ -722,6 +796,7 @@ mod tests {
             Some(&system_proxy),
             None,
             false,
+            None,
         );
 
         let labels = menu
@@ -767,6 +842,7 @@ mod tests {
             None,
             Some("0.0.104"),
             false,
+            None,
         );
         let update = find_item(&menu, "update_now").expect("update_now present");
         assert_eq!(update.label, "Update to v0.0.104");
@@ -795,6 +871,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         assert!(find_item(&menu, "update_now").is_none());
     }
@@ -815,6 +892,7 @@ mod tests {
             None,
             Some("0.0.104"),
             true,
+            None,
         );
         let update = find_item(&menu, "update_now").expect("update_now present");
         assert_eq!(update.label, "Updating…");
@@ -837,6 +915,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Stopped"));
@@ -862,6 +941,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Starting...");
@@ -886,6 +966,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Start failed - open logs");
@@ -909,6 +990,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let stop = find_item(&menu, "toggle_service").unwrap();
         assert!(!stop.enabled);
@@ -934,6 +1016,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
         assert!(socks5.enabled);
@@ -986,6 +1069,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let custom = find_item(&menu, "custom1").unwrap();
         assert_eq!(custom.label, "My Item");
@@ -1019,6 +1103,7 @@ mod tests {
             None,
             None,
             false,
+            None,
         );
         let custom = find_item(&menu, "refresh").unwrap();
         match &custom.action {

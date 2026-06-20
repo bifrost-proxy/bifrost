@@ -83,6 +83,7 @@ windows-sys = { version = "0.59", features = [
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 open = "5"
 arboard = "3"
+sysinfo = "0.31"
 tracing-subscriber = { workspace = true, features = ["env-filter"] }
 tracing-appender.workspace = true
 

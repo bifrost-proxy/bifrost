@@ -48,6 +48,7 @@ pub struct ProxySettingsResponse {
 pub struct TrayConfig {
     pub enabled: bool,
     pub supported: bool,
+    pub show_system_stats: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ pub struct UpdateTlsConfigRequest {
 #[derive(Deserialize)]
 pub struct UpdateTrayConfigRequest {
     pub enabled: Option<bool>,
+    pub show_system_stats: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +443,7 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
             TrayConfig {
                 enabled: config.tray.enabled,
                 supported: tray_supported(),
+                show_system_stats: config.tray.show_system_stats,
             },
         )
     } else {
@@ -454,6 +457,7 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
             TrayConfig {
                 enabled: tray_supported(),
                 supported: tray_supported(),
+                show_system_stats: true,
             },
         )
     };
@@ -491,6 +495,7 @@ async fn get_tray_config(state: SharedAdminState) -> Response<BoxBody> {
     json_response(&TrayConfig {
         enabled: config.tray.enabled,
         supported: tray_supported(),
+        show_system_stats: config.tray.show_system_stats,
     })
 }
 
@@ -512,8 +517,11 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
-    if request.enabled.is_none() {
-        return error_response(StatusCode::BAD_REQUEST, "enabled is required");
+    if request.enabled.is_none() && request.show_system_stats.is_none() {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "enabled or show_system_stats is required",
+        );
     }
 
     let Some(ref config_manager) = state.config_manager else {
@@ -526,12 +534,14 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
     match config_manager
         .update_tray_config(TrayConfigUpdate {
             enabled: request.enabled,
+            show_system_stats: request.show_system_stats,
         })
         .await
     {
         Ok(config) => {
             tracing::info!(
                 enabled = config.enabled,
+                show_system_stats = config.show_system_stats,
                 "Tray config updated and persisted"
             );
             if should_request_tray_launch_after_config_update(config.enabled) {
@@ -544,6 +554,7 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
             json_response(&TrayConfig {
                 enabled: config.enabled,
                 supported: tray_supported(),
+                show_system_stats: config.show_system_stats,
             })
         }
         Err(e) => {
@@ -2107,6 +2118,7 @@ mod coverage_boost {
         assert_eq!(parsed.server.http2_max_header_list_size, 256 * 1024);
         assert_eq!(parsed.server.websocket_handshake_max_header_size, 64 * 1024);
         assert_eq!(parsed.tray.supported, tray_supported());
+        assert!(parsed.tray.show_system_stats);
     }
 
     #[tokio::test]
@@ -2157,6 +2169,7 @@ mod coverage_boost {
         let cfg = harness.config_manager.config().await;
         assert_eq!(parsed.enabled, cfg.tray.enabled);
         assert_eq!(parsed.supported, tray_supported());
+        assert_eq!(parsed.show_system_stats, cfg.tray.show_system_stats);
     }
 
     #[tokio::test]
@@ -2546,7 +2559,7 @@ mod coverage_boost_v2 {
     }
 
     #[tokio::test]
-    async fn update_tray_config_requires_enabled_field() {
+    async fn update_tray_config_requires_at_least_one_field() {
         let harness = TestAdminState::builder().build();
         let state = harness.state();
         let (base, _handle) = spawn_config_api_server(state).await;
@@ -2555,7 +2568,25 @@ mod coverage_boost_v2 {
         let resp = put_json(&url, json!({}));
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
         let msg = resp.into_string().unwrap();
-        assert!(msg.contains("enabled is required"));
+        assert!(msg.contains("enabled or show_system_stats is required"));
+    }
+
+    #[tokio::test]
+    async fn update_tray_config_accepts_system_stats_only() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state.clone()).await;
+        let url = format!("{}/api/config/tray", base);
+
+        let resp = put_json(&url, json!({"show_system_stats": false}));
+        assert_eq!(resp.status(), StatusCode::OK.as_u16());
+        let body = resp.into_string().unwrap();
+        let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
+        assert!(!parsed.show_system_stats);
+
+        let cfg = harness.config_manager.config().await;
+        assert!(!cfg.tray.show_system_stats);
+        assert!(cfg.tray.enabled);
     }
 
     #[tokio::test]
