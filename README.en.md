@@ -21,16 +21,33 @@ Bifrost is a high-performance, AI-friendly proxy server written in Rust and insp
 
 Install the CLI with the script:
 
+macOS / Linux / Git Bash:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
-The installer can also install and trust the CA certificate, install Bifrost AI skills, and start Bifrost as a background service. Bash and PowerShell installers probe GitHub and built-in mirrors, then use the fastest available release source. Use `BIFROST_GITHUB_MIRROR` when your network needs a preferred mirror.
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1 | iex
+```
+
+The installer can also install and trust the CA certificate, install Bifrost AI skills, and start Bifrost as a background service. Bash and PowerShell installers probe GitHub and built-in mirrors, then use the fastest available release source. Use `BIFROST_GITHUB_MIRROR` when your network needs a preferred mirror. On Windows, the PowerShell installer adds the install directory to both the current session and the Windows User `Path`; the Git Bash installer also updates the Windows User `Path`, so newly opened PowerShell/CMD windows can run `bifrost` directly.
 
 Install a specific version:
 
+macOS / Linux / Git Bash:
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.96
+```
+
+Windows PowerShell:
+
+```powershell
+$installer = irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1
+& ([scriptblock]::Create($installer)) -Version v0.0.96
 ```
 
 Install with npm:

@@ -620,6 +620,30 @@
 - 新开的 PowerShell 和 CMD 都能直接找到 `bifrost` 并输出版本。
 - `--no-modify-path` 场景不会写入 Git Bash rc，也不会写入 Windows User `Path`。
 
+### TC-IBOC-22 README 脚本安装说明包含 Windows PowerShell 入口
+
+操作步骤：
+
+1. 检查中文 README 的脚本安装段落包含 macOS / Linux / Git Bash 与 Windows PowerShell 两个入口：
+   ```bash
+   rg -n 'macOS / Linux / Git Bash|Windows PowerShell|install-binary\.ps1|Windows 用户 `Path`|新打开的 PowerShell/CMD' README.md
+   ```
+2. 检查英文 README 的脚本安装段落包含相同的 Windows PowerShell 入口和 PATH 行为说明：
+   ```bash
+   rg -n 'macOS / Linux / Git Bash|Windows PowerShell|install-binary\.ps1|Windows User `Path`|newly opened PowerShell/CMD' README.en.md
+   ```
+3. 检查两个 README 都给出指定版本的 PowerShell 调用方式：
+   ```bash
+   rg -n '\$installer = irm|\[scriptblock\]::Create\(\$installer\)|-Version v0\.0\.96' README.md README.en.md
+   ```
+
+预期结果：
+
+- 中文 README 不再只展示 `.sh | bash`，同时展示 Windows PowerShell 的 `install-binary.ps1` 安装命令。
+- 英文 README 与中文 README 保持一致。
+- 指定版本安装同时覆盖 Bash `--version` 和 PowerShell `-Version`。
+- Windows PATH 行为说明明确：PowerShell installer 更新当前会话和 Windows User `Path`，Git Bash installer 更新 Windows User `Path`，新 PowerShell/CMD 可直接执行 `bifrost`。
+
 ## 清理步骤
 
 - 本用例只 source shell 函数、执行 dry-run 或使用 `mktemp -d` 临时数据目录，不产生持久化测试数据。
@@ -669,3 +693,4 @@
 | 2026-06-15 | TC-IBOC-20 | `BIFROST_BIN="$(pwd)/target/debug/bifrost" BIFROST_UPGRADE_E2E_START_WITH_INSTALL_BIN=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` | PASS：本地 Mac 构造临时安装路径 upgrade restart E2E 14/14 通过。旧 daemon 端口 `49693`、旧 PID `35268`，upgrade 输出包含 detected/stop/wait/start，重启后新 PID `35911`，runtime 保留 `system_proxy_enabled=false`，新 daemon 使用升级后的临时安装路径，错误日志无 ObjC fork crash，stop 后端口释放且无同数据目录 tray helper 残留。 |
 | 2026-06-16 | TC-IBOC-20 | `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli resolve_target_dirs_ --lib` + `bash -n e2e-tests/tests/test_upgrade_local_restart_e2e.sh` + `bash e2e-tests/tests/test_e2e_scripts_disable_sync_login_prompt.sh` + `git diff --check` | PASS：`install-skill` 目录解析新增 `BIFROST_INSTALL_SKILL_DIR` 覆盖并保留 `--dir` / `--cwd` 优先级；静态验证 Windows upgrade restart 脚本通过临时 `BIFROST_INSTALL_SKILL_DIR` 隔离 post-upgrade skill 安装，且在 Admin API ready 后检查 deferred helper 已安装 primary/remote skills；frontmatter name 断言接受 YAML 合法的 quoted/unquoted 形式。本地未执行真实 upgrade restart，避免启动 Tray 或打开 Sync 登录页，完整 Windows 真实链路交由 GitHub Actions `E2E Shell (x86_64-pc-windows-msvc)` 验证。 |
 | 2026-06-20 | TC-IBOC-21 | Parallels `Windows 11` VM：`bash e2e-tests/tests/test_install_binary_windows_path.sh`、`powershell.exe -NoProfile -ExecutionPolicy Bypass -File e2e-tests\tests\test_install_binary_windows_adaptive_download.ps1`、`bash install-binary.sh --version v0.0.110 --no-post-install`、新 PowerShell/CMD/Git Bash 分别执行 `bifrost --version` | PASS：离线 Bash PATH 回归 7/7 通过；Windows PowerShell 5.1 回归 20/20 通过；真实 Bash 安装输出 `Added to Windows User PATH: C:\Users\eden_studio\.local\bin` 且跳过 post-install；新 PowerShell 的 User `Path` 包含 `C:\Users\eden_studio\.local\bin`，`Get-Command bifrost` 指向该目录并输出 `bifrost 0.0.110`；CMD `where bifrost` 指向同一路径并输出 `bifrost 0.0.110`；Git Bash `command -v bifrost` 输出 `/c/Users/eden_studio/.local/bin/bifrost` 并输出 `bifrost 0.0.110`。 |
+| 2026-06-20 | TC-IBOC-22 | 按 TC-IBOC-22 的三条 `rg` 文档断言执行 | PASS：中文/英文 README 的脚本安装段落均包含 Bash 与 Windows PowerShell 入口，指定版本示例覆盖 PowerShell `-Version`，并说明 Windows installer 会写入 Windows User `Path` 以支持新 PowerShell/CMD 直接执行 `bifrost`。 |
