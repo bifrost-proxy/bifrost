@@ -92,6 +92,7 @@ tray-icon = "0.19"
 muda = "0.15"
 tao = { version = "0.31", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
+fontdue = "0.9"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 tray-icon = "0.19"

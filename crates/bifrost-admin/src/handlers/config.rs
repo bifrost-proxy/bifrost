@@ -1,9 +1,10 @@
 use bifrost_storage::{
     CollapsedSections, FilterPanelConfig, PinnedFilter, PinnedFilterType, SandboxConfigUpdate,
     SandboxFileConfigUpdate, SandboxLimitsConfigUpdate, SandboxNetConfigUpdate, ServerConfigUpdate,
-    TlsConfigUpdate, TrafficConfigUpdate, TrayConfigUpdate, UiConfigUpdate,
-    DEFAULT_BREAKPOINT_TIMEOUT_MS, DEFAULT_TRAFFIC_MAX_RECORDS, MAX_BREAKPOINT_TIMEOUT_MS,
-    MAX_TRAFFIC_MAX_RECORDS, MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_RECORDS,
+    TlsConfigUpdate, TrafficConfigUpdate, TrayConfigUpdate, TraySystemStatsItems,
+    TraySystemStatsItemsUpdate, UiConfigUpdate, DEFAULT_BREAKPOINT_TIMEOUT_MS,
+    DEFAULT_TRAFFIC_MAX_RECORDS, MAX_BREAKPOINT_TIMEOUT_MS, MAX_TRAFFIC_MAX_RECORDS,
+    MIN_BREAKPOINT_TIMEOUT_MS, MIN_TRAFFIC_MAX_RECORDS,
 };
 use bytes::Bytes;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -49,6 +50,16 @@ pub struct TrayConfig {
     pub enabled: bool,
     pub supported: bool,
     pub show_system_stats: bool,
+    pub system_stats_items: TraySystemStatsItemsResponse,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraySystemStatsItemsResponse {
+    pub cpu: bool,
+    pub memory: bool,
+    pub disk: bool,
+    pub upload: bool,
+    pub download: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,6 +102,40 @@ pub struct UpdateTlsConfigRequest {
 pub struct UpdateTrayConfigRequest {
     pub enabled: Option<bool>,
     pub show_system_stats: Option<bool>,
+    pub system_stats_items: Option<UpdateTraySystemStatsItemsRequest>,
+}
+
+#[derive(Deserialize)]
+pub struct UpdateTraySystemStatsItemsRequest {
+    pub cpu: Option<bool>,
+    pub memory: Option<bool>,
+    pub disk: Option<bool>,
+    pub upload: Option<bool>,
+    pub download: Option<bool>,
+}
+
+impl From<&TraySystemStatsItems> for TraySystemStatsItemsResponse {
+    fn from(items: &TraySystemStatsItems) -> Self {
+        Self {
+            cpu: items.cpu,
+            memory: items.memory,
+            disk: items.disk,
+            upload: items.upload,
+            download: items.download,
+        }
+    }
+}
+
+impl From<UpdateTraySystemStatsItemsRequest> for TraySystemStatsItemsUpdate {
+    fn from(request: UpdateTraySystemStatsItemsRequest) -> Self {
+        Self {
+            cpu: request.cpu,
+            memory: request.memory,
+            disk: request.disk,
+            upload: request.upload,
+            download: request.download,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,6 +489,7 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
                 enabled: config.tray.enabled,
                 supported: tray_supported(),
                 show_system_stats: config.tray.show_system_stats,
+                system_stats_items: (&config.tray.system_stats_items).into(),
             },
         )
     } else {
@@ -458,6 +504,7 @@ async fn get_proxy_settings(state: SharedAdminState) -> Response<BoxBody> {
                 enabled: tray_supported(),
                 supported: tray_supported(),
                 show_system_stats: true,
+                system_stats_items: (&TraySystemStatsItems::default()).into(),
             },
         )
     };
@@ -496,6 +543,7 @@ async fn get_tray_config(state: SharedAdminState) -> Response<BoxBody> {
         enabled: config.tray.enabled,
         supported: tray_supported(),
         show_system_stats: config.tray.show_system_stats,
+        system_stats_items: (&config.tray.system_stats_items).into(),
     })
 }
 
@@ -517,10 +565,13 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
 
-    if request.enabled.is_none() && request.show_system_stats.is_none() {
+    if request.enabled.is_none()
+        && request.show_system_stats.is_none()
+        && request.system_stats_items.is_none()
+    {
         return error_response(
             StatusCode::BAD_REQUEST,
-            "enabled or show_system_stats is required",
+            "enabled, show_system_stats, or system_stats_items is required",
         );
     }
 
@@ -535,6 +586,7 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
         .update_tray_config(TrayConfigUpdate {
             enabled: request.enabled,
             show_system_stats: request.show_system_stats,
+            system_stats_items: request.system_stats_items.map(Into::into),
         })
         .await
     {
@@ -542,6 +594,11 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
             tracing::info!(
                 enabled = config.enabled,
                 show_system_stats = config.show_system_stats,
+                system_stats_cpu = config.system_stats_items.cpu,
+                system_stats_memory = config.system_stats_items.memory,
+                system_stats_disk = config.system_stats_items.disk,
+                system_stats_upload = config.system_stats_items.upload,
+                system_stats_download = config.system_stats_items.download,
                 "Tray config updated and persisted"
             );
             if should_request_tray_launch_after_config_update(config.enabled) {
@@ -555,6 +612,7 @@ async fn update_tray_config(req: Request<Incoming>, state: SharedAdminState) -> 
                 enabled: config.enabled,
                 supported: tray_supported(),
                 show_system_stats: config.show_system_stats,
+                system_stats_items: (&config.system_stats_items).into(),
             })
         }
         Err(e) => {
@@ -2170,6 +2228,10 @@ mod coverage_boost {
         assert_eq!(parsed.enabled, cfg.tray.enabled);
         assert_eq!(parsed.supported, tray_supported());
         assert_eq!(parsed.show_system_stats, cfg.tray.show_system_stats);
+        assert_eq!(
+            parsed.system_stats_items.download,
+            cfg.tray.system_stats_items.download
+        );
     }
 
     #[tokio::test]
@@ -2568,7 +2630,7 @@ mod coverage_boost_v2 {
         let resp = put_json(&url, json!({}));
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST.as_u16());
         let msg = resp.into_string().unwrap();
-        assert!(msg.contains("enabled or show_system_stats is required"));
+        assert!(msg.contains("enabled, show_system_stats, or system_stats_items is required"));
     }
 
     #[tokio::test]
@@ -2587,6 +2649,27 @@ mod coverage_boost_v2 {
         let cfg = harness.config_manager.config().await;
         assert!(!cfg.tray.show_system_stats);
         assert!(cfg.tray.enabled);
+    }
+
+    #[tokio::test]
+    async fn update_tray_config_accepts_individual_system_stats_items() {
+        let harness = TestAdminState::builder().build();
+        let state = harness.state();
+        let (base, _handle) = spawn_config_api_server(state.clone()).await;
+        let url = format!("{}/api/config/tray", base);
+
+        let resp = put_json(&url, json!({"system_stats_items": {"download": false}}));
+        assert_eq!(resp.status(), StatusCode::OK.as_u16());
+        let body = resp.into_string().unwrap();
+        let parsed: TrayConfig = serde_json::from_str(&body).unwrap();
+        assert!(!parsed.system_stats_items.download);
+        assert!(parsed.system_stats_items.upload);
+        assert!(parsed.show_system_stats);
+
+        let cfg = harness.config_manager.config().await;
+        assert!(!cfg.tray.system_stats_items.download);
+        assert!(cfg.tray.system_stats_items.upload);
+        assert!(cfg.tray.show_system_stats);
     }
 
     #[tokio::test]

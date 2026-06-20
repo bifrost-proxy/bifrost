@@ -660,6 +660,16 @@ export interface ProxySettings {
 export interface TrayConfig {
   enabled: boolean;
   supported: boolean;
+  show_system_stats: boolean;
+  system_stats_items: TraySystemStatsItems;
+}
+
+export interface TraySystemStatsItems {
+  cpu: boolean;
+  memory: boolean;
+  disk: boolean;
+  upload: boolean;
+  download: boolean;
 }
 
 export interface CertInfo {

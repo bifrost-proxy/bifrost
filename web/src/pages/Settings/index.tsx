@@ -37,6 +37,7 @@ import {
   type ProxySettings,
   type BreakpointPerformanceConfig,
   type PerformanceConfig,
+  type TraySystemStatsItems,
   type TrafficConfig,
   type UpdateTrafficConfigRequest,
 } from "../../api/config";
@@ -384,6 +385,25 @@ export default function Settings() {
       );
     } catch {
       message.error("Failed to update tray system stats setting");
+      void fetchProxySettings();
+    } finally {
+      setTrayLoading(false);
+    }
+  };
+
+  const handleTraySystemStatsItemToggle = async (
+    item: keyof TraySystemStatsItems,
+    enabled: boolean,
+  ) => {
+    setTrayLoading(true);
+    try {
+      const tray = await updateTrayConfig({
+        system_stats_items: { [item]: enabled },
+      });
+      setProxySettings((prev) => (prev ? { ...prev, tray } : prev));
+      message.success("Tray system status item updated");
+    } catch {
+      message.error("Failed to update tray system status item");
       void fetchProxySettings();
     } finally {
       setTrayLoading(false);
@@ -1296,6 +1316,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           trayLoading={trayLoading}
           onToggleTray={handleTrayToggle}
           onToggleSystemStats={handleTraySystemStatsToggle}
+          onToggleSystemStatsItem={handleTraySystemStatsItemToggle}
         />
       ),
     },

@@ -23,6 +23,15 @@ export interface TrayConfig {
   enabled: boolean;
   supported: boolean;
   show_system_stats: boolean;
+  system_stats_items: TraySystemStatsItems;
+}
+
+export interface TraySystemStatsItems {
+  cpu: boolean;
+  memory: boolean;
+  disk: boolean;
+  upload: boolean;
+  download: boolean;
 }
 
 export interface UpdateTlsConfigRequest {
@@ -52,6 +61,7 @@ export async function updateTlsConfig(config: UpdateTlsConfigRequest): Promise<T
 export interface UpdateTrayConfigRequest {
   enabled?: boolean;
   show_system_stats?: boolean;
+  system_stats_items?: Partial<TraySystemStatsItems>;
 }
 
 export async function updateTrayConfig(config: UpdateTrayConfigRequest): Promise<TrayConfig> {

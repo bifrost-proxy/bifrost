@@ -268,6 +268,7 @@ pub struct ProxySettings {
 pub struct TrayConfig {
     pub enabled: bool,
     pub show_system_stats: bool,
+    pub system_stats_items: TraySystemStatsItems,
 }
 
 impl Default for TrayConfig {
@@ -275,14 +276,62 @@ impl Default for TrayConfig {
         Self {
             enabled: true,
             show_system_stats: true,
+            system_stats_items: TraySystemStatsItems::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TraySystemStatsItems {
+    #[serde(default = "default_true")]
+    pub cpu: bool,
+    #[serde(default = "default_true")]
+    pub memory: bool,
+    #[serde(default = "default_true")]
+    pub disk: bool,
+    #[serde(default = "default_true")]
+    pub upload: bool,
+    #[serde(default = "default_true")]
+    pub download: bool,
+}
+
+impl TraySystemStatsItems {
+    pub fn any_enabled(&self) -> bool {
+        self.cpu || self.memory || self.disk || self.upload || self.download
+    }
+}
+
+impl Default for TraySystemStatsItems {
+    fn default() -> Self {
+        Self {
+            cpu: true,
+            memory: true,
+            disk: true,
+            upload: true,
+            download: true,
+        }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct TrayConfigUpdate {
     pub enabled: Option<bool>,
     pub show_system_stats: Option<bool>,
+    pub system_stats_items: Option<TraySystemStatsItemsUpdate>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TraySystemStatsItemsUpdate {
+    pub cpu: Option<bool>,
+    pub memory: Option<bool>,
+    pub disk: Option<bool>,
+    pub upload: Option<bool>,
+    pub download: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +587,11 @@ mod tests {
         assert!(config.system_proxy.enabled);
         assert!(config.tray.enabled);
         assert!(config.tray.show_system_stats);
+        assert!(config.tray.system_stats_items.cpu);
+        assert!(config.tray.system_stats_items.memory);
+        assert!(config.tray.system_stats_items.disk);
+        assert!(config.tray.system_stats_items.upload);
+        assert!(config.tray.system_stats_items.download);
         assert!(config.sync.enabled);
         assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
@@ -598,6 +652,35 @@ mod tests {
         );
         assert_eq!(config.ui.rules_sort_mode, parsed.ui.rules_sort_mode);
         assert_eq!(config.tray.show_system_stats, parsed.tray.show_system_stats);
+        assert_eq!(
+            config.tray.system_stats_items.cpu,
+            parsed.tray.system_stats_items.cpu
+        );
+        assert_eq!(
+            config.tray.system_stats_items.download,
+            parsed.tray.system_stats_items.download
+        );
+    }
+
+    #[test]
+    fn test_partial_tray_system_stats_items_default_to_enabled() {
+        let parsed: UnifiedConfig = toml::from_str(
+            r#"
+            [tray]
+            enabled = true
+            show_system_stats = true
+
+            [tray.system_stats_items]
+            download = false
+            "#,
+        )
+        .unwrap();
+
+        assert!(parsed.tray.system_stats_items.cpu);
+        assert!(parsed.tray.system_stats_items.memory);
+        assert!(parsed.tray.system_stats_items.disk);
+        assert!(parsed.tray.system_stats_items.upload);
+        assert!(!parsed.tray.system_stats_items.download);
     }
 }
 

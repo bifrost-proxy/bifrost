@@ -206,6 +206,23 @@ impl ConfigManager {
         if let Some(show_system_stats) = update.show_system_stats {
             config.tray.show_system_stats = show_system_stats;
         }
+        if let Some(items) = update.system_stats_items {
+            if let Some(cpu) = items.cpu {
+                config.tray.system_stats_items.cpu = cpu;
+            }
+            if let Some(memory) = items.memory {
+                config.tray.system_stats_items.memory = memory;
+            }
+            if let Some(disk) = items.disk {
+                config.tray.system_stats_items.disk = disk;
+            }
+            if let Some(upload) = items.upload {
+                config.tray.system_stats_items.upload = upload;
+            }
+            if let Some(download) = items.download {
+                config.tray.system_stats_items.download = download;
+            }
+        }
 
         self.save_config(&config)?;
         let tray_config = config.tray.clone();
