@@ -1104,12 +1104,21 @@ mod tests {
         assert_eq!(sampler.last_disk_at, Some(after_disk_window));
     }
 
+    #[cfg(not(target_os = "windows"))]
     #[test]
     fn disk_usage_percent_reports_valid_percent_for_existing_path() {
         let temp = tempfile::tempdir().unwrap();
         let percent = disk_usage_percent(temp.path()).expect("disk usage for temp dir");
 
         assert!((0.0..=100.0).contains(&percent));
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn disk_usage_percent_is_unsupported_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+
+        assert!(disk_usage_percent(temp.path()).is_none());
     }
 
     #[test]
