@@ -719,7 +719,7 @@ BIFROST_DATA_DIR="$TMP_DIR" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 cargo test -p bifrost-cli system_stats --lib
 cargo test -p bifrost-cli menu_bar_stats_bitmap --lib
 ```
-2. 使用当前 debug 二进制执行配置 E2E，验证默认开启、系统状态总开关独立关闭/开启、CPU/Memory/Disk/Upload/Download 子开关默认全开、单项关闭/开启与配置持久化：
+2. 使用当前 debug 二进制执行配置 E2E。macOS 验证默认开启、系统状态总开关独立关闭/开启、CPU/Memory/Disk/Upload/Download 子开关默认全开、单项关闭/开启与配置持久化；Windows/Linux 验证 `system_stats_supported=false`、系统状态全部 mask off，且系统状态更新被拒绝：
 ```bash
 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh
 ```
@@ -727,34 +727,36 @@ BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_st
 ```bash
 BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh
 ```
-4. 打开 `http://127.0.0.1:<port>/_bifrost/settings?tab=tray`，确认 Settings 中存在独立 Tray tab，`Tray Icon` 和 `Show System Stats` 默认打开，CPU、Memory、Disk、Upload、Download 五个子开关默认打开；分别在桌面和移动端 viewport 截图确认图标、文案、开关位置没有遮挡、错位或横向溢出。
-5. 在 macOS 上直接观察当前 `bifrost` 菜单栏 status item；在 Windows VM 上通过真实交互 session 启动同一测试脚本并打开 notification area 菜单。
+4. 打开 `http://127.0.0.1:<port>/_bifrost/settings?tab=tray`。macOS 确认 Settings 中存在独立 Tray tab，`Tray Icon` 和 `Show System Stats` 默认打开，CPU、Memory、Disk、Upload、Download 五个子开关默认打开；分别在桌面和移动端 viewport 截图确认图标、文案、开关位置没有遮挡、错位或横向溢出。Windows 确认 Settings Tray tab 只展示 `Tray Icon` 一个配置项，不展示 `System Status`、`Show System Stats` 或任意 CPU/Memory/Disk/Upload/Download 子开关。
+5. 在 macOS 上直接观察当前 `bifrost` 菜单栏 status item；在 Windows VM 上通过真实交互 session 启动同一测试脚本并打开 notification area 菜单，确认菜单不包含系统状态详情行。
 6. macOS 连续截取至少 3 张菜单栏截图，每张间隔 2 秒，确认无需点击下拉菜单即可看到常驻状态：左侧 Bifrost 图标视觉大小与未开启系统状态时一致，右侧文本为 `Cxx% | Mxx% | Dxx% | ↑nnnU/s | ↓nnnU/s` 形态且下行文本完整可见。
 7. 对比连续截图，确认状态文本使用等宽数字，CPU/内存/磁盘百分比不足两位时补 `0`，网速数字始终三位；状态区域不会因为 `5%`/`10%`、`111K/s`/`888K/s` 或 `8K/s`/`100K/s` 这类变化而明显左右抖动。
 8. 在 macOS 上执行 `route -n get default`，确认默认出站接口（如 `en0`）；观察 tray 展示值应来自默认出站接口或最可信的活跃物理接口，不应把 Parallels/bridge/VPN/tunnel/Docker 等虚拟接口简单累加导致几十 MB/s 的离谱尖峰。
-9. 展开 macOS 原生 tray 菜单，确认菜单中不再重复展示 `System:` 与 `Network:` 两排资源信息；在 Windows notification area 菜单中确认这两排仍作为降级详情存在，且 `System:` 行包含 Disk 百分比。
+9. 展开 macOS 原生 tray 菜单，确认菜单中不再重复展示 `System:` 与 `Network:` 两排资源信息；在 Windows notification area 菜单中确认也不存在 CPU/Memory/Disk/Up/Down 系统状态详情行。
 10. 在 Settings 中关闭 `Download` 子开关，确认 `GET /_bifrost/api/config/tray` 返回 `system_stats_items.download=false`，macOS 菜单栏不再展示 `↓...`，其它已启用项仍展示；重新打开 `Download` 后下行字段恢复。
-11. 关闭 `Show System Stats` 后再次观察 macOS 菜单栏与托盘菜单，并截图确认常驻状态恢复普通 Bifrost 图标、菜单仍不展示系统状态两排；Windows 菜单两排系统状态消失。
-12. 再次打开 `GET /_bifrost/api/config/tray`，确认 `show_system_stats` 与 Settings 开关一致，且各 `system_stats_items` 子开关与 Settings 一致。
-13. 在 macOS 上对 `bifrost __tray` helper 做至少 20 秒 CPU 采样，确认空闲状态稳定低于 1%；若本机同时有截图、编译或其它重负载，必须记录为环境干扰并重新采样。
+11. 关闭 `Show System Stats` 后再次观察 macOS 菜单栏与托盘菜单，并截图确认常驻状态恢复普通 Bifrost 图标、菜单仍不展示系统状态两排。
+12. 再次打开 `GET /_bifrost/api/config/tray`。macOS 确认 `show_system_stats` 与 Settings 开关一致，且各 `system_stats_items` 子开关与 Settings 一致；Windows 确认 `system_stats_supported=false`、`show_system_stats=false`，且所有 `system_stats_items` 为 `false`。
+13. 在 Windows 上执行 `PUT /_bifrost/api/config/tray {"show_system_stats":true}` 和 `PUT /_bifrost/api/config/tray {"system_stats_items":{"cpu":true}}`，确认均返回 400 且错误为 `tray system stats are not supported on this platform`；同时查看 `tray.log*`，确认没有系统状态采样线程启动日志。
+14. 在 macOS 上对 `bifrost __tray` helper 做至少 20 秒 CPU 采样，确认空闲状态稳定低于 1%；若本机同时有截图、编译或其它重负载，必须记录为环境干扰并重新采样。
 
 **预期结果：**
-- 默认 `GET /api/config/tray` 返回 `enabled: true`、`show_system_stats: true`，且 `system_stats_items.cpu/memory/disk/upload/download` 全为 `true`。
+- macOS 默认 `GET /api/config/tray` 返回 `enabled: true`、`system_stats_supported: true`、`show_system_stats: true`，且 `system_stats_items.cpu/memory/disk/upload/download` 全为 `true`。
 - macOS 菜单栏无需点击即可常驻展示系统状态；左侧 Bifrost 图标大小不因启用系统状态而缩小或变形，右侧状态文本使用等宽字体和固定宽度字段，数据来源是整机状态，不是 Bifrost 进程自身指标。
 - 网速优先按默认出站接口的累计字节差值计算；找不到默认接口时才回退到活跃物理接口，并通过 hysteresis、虚拟接口过滤和指数平滑避免双算、跳接口和单样本尖峰。
-- macOS 下拉菜单不重复展示系统状态详情；Windows 托盘菜单在版本行下方保留两排不可点击详情：第一排为 whole-system CPU/Memory/Disk，第二排为 Up/Down 网络速率。
-- Windows notification area 原生不支持 macOS 这种横向常驻文本，Windows 验收以图标启动、菜单详情、配置接口和 tray helper 存活为准。
-- Settings 中有独立 `Tray` tab，`Show System Stats` 可独立于 `Tray Icon` 开关关闭/开启；CPU、Memory、Disk、Upload、Download 每一项都可单独启用/禁用，默认全部启用。
+- macOS 下拉菜单不重复展示系统状态详情；Windows 托盘菜单也不展示 CPU/Memory/Disk/Up/Down 系统状态详情。
+- Windows notification area 原生不支持 macOS 这种横向常驻文本；Windows 产品行为是不支持 Tray 系统信息，不采样、不展示、不暴露配置项。
+- Settings 中有独立 `Tray` tab；macOS `Show System Stats` 可独立于 `Tray Icon` 开关关闭/开启，CPU、Memory、Disk、Upload、Download 每一项都可单独启用/禁用且默认全部启用；Windows 只展示 `Tray Icon` 一个配置项。
 - Web UI 截图中 Tray tab 的两个卡片、图标、说明文案和开关在桌面与移动端均完整可见；移动端没有横向溢出，开关仍保持右侧对齐。
 - macOS 桌面截图中必须看到菜单栏常驻状态；连续 2 秒间隔截图中的网络速率应随系统流量变化刷新，菜单不应闪退或被刷新关闭。
-- 关闭单个子项后，只移除该子项展示，不影响其它系统状态项；关闭 `Show System Stats` 后，macOS 菜单栏恢复普通 Bifrost 图标，Windows 托盘菜单不再展示系统状态两排；重新开启后恢复展示。
-- macOS 与 Windows VM 的真实 tray helper 均能启动，日志包含 `bifrost-tray starting`，且不修改系统代理。
+- 关闭单个子项后，只移除该子项展示，不影响其它系统状态项；关闭 `Show System Stats` 后，macOS 菜单栏恢复普通 Bifrost 图标。
+- Windows `GET /api/config/tray` 返回 `system_stats_supported=false`、`show_system_stats=false`、所有 `system_stats_items=false`；任何系统状态字段更新都返回 400；真实 tray helper 可启动但不启动系统状态采样线程，且不修改系统代理。
 - macOS tray helper 空闲 CPU 目标为 <1%，系统状态线程不得因高频网卡列表刷新或重复位图重绘造成 2-3% 常驻占用。
 
 ## 本次执行记录
 
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
+| 2026-06-21 | TC-TH-29 | 针对网速计算方式重新评估并补充回归。读取当前实现确认网速来源为 `sysinfo::Networks` 的接口累计 `total_received()` / `total_transmitted()`，按 `Instant` 单调时间做差分；执行 `route -n get default` 得到默认路由接口 `en1`；执行 `netstat -ibn` 与 `ifconfig` 发现本机同时存在 `utun5`、`bridge100/101`、`vmenet0/1`、`awdl0`、`llw0` 等 VPN/虚拟机/本地链路接口，验证“所有接口累加”会混入非用户直觉的流量。执行 `nettop -m route -t external -d -x -L 3 -s 1` 与 `netstat -ibn -I en1; sleep 3; netstat -ibn -I en1` 对照，确认系统工具也以累计字节计数和 delta 口径展示单位时间吞吐。代码补充 IPv6 默认路由 fallback，并在默认路由接口变化时重置网络累计基线和平滑值。执行 `cargo fmt --all` 通过；执行 `cargo test -p bifrost-cli system_stats --lib` 通过 23/23，新增覆盖默认路由解析过滤虚拟接口、首选接口变化重置网络基线。 | 通过。最终网速算法选择“默认路由接口优先的内核累计字节差分 / 单调时间”，找不到默认路由时才回退到最活跃非虚拟物理接口；不用 Bifrost 代理流量、不用 per-process 统计、不累加所有接口。3 秒采样窗口配合 60/40 EMA 平滑，更符合菜单栏人眼观察稳定性；接口变化时丢弃旧平滑值，避免 Wi-Fi/有线/VPN 切换后的残留速度。 |
 | 2026-06-21 | TC-TH-29 | 针对性能极致化和字体加粗补充验证。实现上将 CPU/Memory 采样限定为对应子项启用时才刷新，Disk 采样从 3 秒降频到 30 秒，默认路由/网卡列表刷新从 30 秒降频到 60 秒，Upload/Download 均关闭时继续跳过网络采样并重置基线；macOS 菜单栏文字从 2-pass faux-bold 增加到 3-pass faux-bold。执行 `cargo fmt --all -- --check` 通过；执行 `cargo test -p bifrost-cli system_stats --lib` 通过 21/21，新增覆盖只启用网络时不刷新 CPU/Memory/Disk、Disk 未到 30 秒窗口不刷新且到期后刷新；执行 `cargo test -p bifrost-cli menu_bar_stats --lib` 通过 3/3；执行 `cargo build --release --bin bifrost` 通过。真实 release 性能采样使用临时目录 `/tmp/bifrost-tray-perf.JzmLJs`、端口 `59659`、主进程 `81783`、tray PID `81816`；warm-up 10 秒后采样 60 秒，记录 `/tmp/bifrost-tray-perf-cpu-1781978487.txt`，结果 `samples=60 avg=0.5167 max=3.0000 min=0.0000`，采样结束时 `ps` 当前 CPU `0.7%`、RSS `68064KB`。 | 通过。release 真实 tray helper 平均 CPU 明确低于 1%，符合系统状态常驻展示的性能目标；短瞬时峰值仍可能出现，但平均占用稳定在 0.5% 左右。字体已进一步加粗，实时性保持为菜单栏系统状态每 3 秒更新，网速仍每 3 秒按默认路由接口累计字节差分刷新；低频的磁盘和网卡列表刷新被降频以减少 I/O 和路由查询开销。 |
 | 2026-06-21 | TC-TH-29 | 针对菜单栏高度、下行宽度、稳定网速算法和系统状态逐项开关重新执行。执行 `cargo fmt --all -- --check` 通过；执行 `cargo test -p bifrost-storage unified_config --lib` 通过 7/7，覆盖 `system_stats_items` 默认全开和部分 TOML 配置未声明字段仍默认开启；执行 `cargo test -p bifrost-admin tray_config --lib` 通过 5/5，覆盖 `GET /api/config/tray`、空 payload 拒绝、`show_system_stats` 单独更新和 `system_stats_items.download` 单独更新；执行 `cargo test -p bifrost-cli system_stats --lib` 通过 20/20，覆盖默认路由优先、活跃接口 hysteresis、虚拟/VPN/bridge 接口过滤、短采样窗口抑制、EMA 平滑、逐项菜单栏过滤、等宽字段和 Upload/Download 均关闭时重置网络累计基线；执行 `cargo test -p bifrost-cli menu_bar_stats --lib` 通过 3/3，覆盖 78px bitmap、50px 等宽字体和 Running-only 标题；执行 `cargo test -p bifrost-admin openapi --lib` 通过 2/2；执行 `pnpm --dir web exec tsc -b` 通过；首次执行 `pnpm --dir web exec playwright test tests/ui/admin-settings.spec.ts -g "Settings Tray tab" --reporter=line` 因本机缺少 Playwright Chromium 失败，执行 `pnpm --dir web exec playwright install chromium` 后重跑通过 1/1，覆盖 Tray tab 总开关、Download 子开关和移动端无横向溢出；执行 `cargo build --bin bifrost` 通过；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 22/22；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 通过，输出 `PASS: tray helper started on Darwin; port=18703 tray_pid=47093`。真实 macOS 可视验证使用临时目录 `/tmp/bifrost-menubar-final3.cvZBVm`、端口 `62105`、tray PID `49170`，默认 API 返回 `{"enabled":true,"supported":true,"show_system_stats":true,"system_stats_items":{"cpu":true,"memory":true,"disk":true,"upload":true,"download":true}}`，默认路由接口 `en1`；截图 `/tmp/bifrost-menubar-final3-1.png` 显示 78px/50px 菜单栏状态图标和文字高度，下行字段完整可见；`PUT {"system_stats_items":{"download":false}}` 返回 `download=false` 后截图 `/tmp/bifrost-menubar-final3-download-off.png` 确认菜单栏移除 `↓...`；恢复 `download=true` 后截图 `/tmp/bifrost-menubar-final3-download-on.png` 确认下行字段恢复且完整；空闲 CPU 30 秒采样记录 `/tmp/bifrost-menubar-final3-cpu-idle.txt`，汇总 `samples=30 avg=0.4533 max=3.5000`。 | 通过。当前实现菜单栏 bitmap 高度和字体高度已明显增加，图标不因启用系统状态而缩小，`↓nnnU/s` 下行字段完整显示；系统状态总开关与 CPU/Memory/Disk/Upload/Download 子开关均可独立配置且默认全开；网速使用默认路由接口 `en1` 的累计字节差分，结合虚拟接口过滤、最小采样间隔、接口 hysteresis 和 60/40 EMA 平滑，避免汇总所有网卡造成 VPN/bridge/虚拟网卡双算和尖峰；关闭单个子项只移除对应字段，不影响其它指标。临时前台实例和 orphan tray helper 已清理。Windows VM 真实图形验收本轮未执行，仍需后续接 Windows 环境验证 notification area 降级详情。 |
 | 2026-06-21 | TC-TH-29 | 接手挂起的 TRAY 任务后补齐固定宽度、等宽字体、磁盘百分比、图标大小和 CPU <1% 验证。执行 `cargo fmt --all -- --check` 通过；执行 `cargo test -p bifrost-cli system_stats --lib` 通过 13/13，覆盖固定宽度 `C05% | M09% | D09% | ↑008K/s↓026K/s`、磁盘百分比、虚拟/VPN/bridge 接口过滤、短采样窗口抑制和未知值兜底；执行 `cargo test -p bifrost-cli menu_bar_stats --lib` 通过 3/3，覆盖 macOS Running-only 标题、菜单栏 bitmap 非空和 `000/111/888` 等宽数字宽度；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 11/11；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_cli_tray_startup_ci.sh` 通过，输出 `PASS: tray helper started on Darwin`。重建等宽字体验收实例：数据目录 `/tmp/bifrost-menubar-mono.42um5h`，端口 `50839`，daemon PID `7930`，tray PID `7967`，`GET /_bifrost/api/config/tray` 返回 `{"enabled":true,"supported":true,"show_system_stats":true}`；连续截图保存到 `/tmp/bifrost-menubar-mono-1.png`、`/tmp/bifrost-menubar-mono-2.png`、`/tmp/bifrost-menubar-mono-3.png`。纯空闲 CPU 采样 40 秒记录在 `/tmp/bifrost-menubar-mono-cpu-idle2.txt`。 | 通过。当前实现使用等宽字体渲染右侧状态文本，数字宽度稳定；百分比固定两/三位空间，网速固定三位数字加单位；macOS bitmap 左侧 Bifrost 图标占满模板高度，避免启用系统状态后图标显著变小。纯空闲 CPU 40 个 1 秒采样平均 `0.8100%`、最大 `4.2000%`，满足 <1% 平均目标；截图并发采样平均 `1.7167%` 被记录为 `screencapture`/WindowServer 干扰，不作为空闲指标。Windows VM 真实图形验收尚未在本轮执行，需后续接 Windows 环境验证 notification area 菜单详情。 |

@@ -299,6 +299,7 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
   let trayConfig = {
     enabled: true,
     supported: true,
+    system_stats_supported: true,
     show_system_stats: true,
     system_stats_items: {
       cpu: true,
@@ -420,6 +421,79 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
   await page.getByTestId("settings-tray-switch").click();
   await waitForToast(page, "Tray icon disabled");
   expect(updatePayloads).toContainEqual({ enabled: false });
+  await expect(page.getByTestId("settings-tray-switch")).toHaveAttribute(
+    "aria-checked",
+    "false",
+  );
+});
+
+test("Settings Tray tab 在系统状态不支持的平台只展示托盘开关", async ({ page }) => {
+  let trayConfig = {
+    enabled: true,
+    supported: true,
+    system_stats_supported: false,
+    show_system_stats: false,
+    system_stats_items: {
+      cpu: false,
+      memory: false,
+      disk: false,
+      upload: false,
+      download: false,
+    },
+  };
+  const updatePayloads: unknown[] = [];
+
+  await page.route("**/_bifrost/api/config", async (route) => {
+    await route.fulfill({
+      json: {
+        host: "127.0.0.1",
+        port: backendPort,
+        tls: {
+          enable_tls_interception: false,
+          intercept_exclude: [],
+          intercept_include: [],
+          app_intercept_exclude: [],
+          app_intercept_include: [],
+          ip_intercept_exclude: [],
+          ip_intercept_include: [],
+          unsafe_ssl: true,
+          disconnect_on_config_change: false,
+        },
+        tray: trayConfig,
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/config/tray", async (route) => {
+    if (route.request().method() === "PUT") {
+      const payload = route.request().postDataJSON() as { enabled?: boolean };
+      updatePayloads.push(payload);
+      trayConfig = {
+        ...trayConfig,
+        ...payload,
+      };
+    }
+    await route.fulfill({ json: trayConfig });
+  });
+
+  await openPage(page, "settings?tab=tray");
+  await expect(page.getByRole("tab", { name: /Tray/ })).toHaveAttribute(
+    "aria-selected",
+    "true",
+  );
+  await expect(page.getByTestId("settings-tray-tab")).toBeVisible();
+  await expect(page.getByTestId("settings-tray-tab")).not.toContainText(
+    "System Status",
+  );
+  await expect(
+    page.getByTestId("settings-tray-system-stats-switch"),
+  ).toHaveCount(0);
+  await expect(
+    page.getByTestId("settings-tray-system-stats-download-switch"),
+  ).toHaveCount(0);
+
+  await page.getByTestId("settings-tray-switch").click();
+  await waitForToast(page, "Tray icon disabled");
+  expect(updatePayloads).toEqual([{ enabled: false }]);
   await expect(page.getByTestId("settings-tray-switch")).toHaveAttribute(
     "aria-checked",
     "false",

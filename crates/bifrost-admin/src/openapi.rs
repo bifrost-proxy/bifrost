@@ -132,7 +132,8 @@ fn generate_components() -> serde_json::Value {
                 "properties": {
                     "enabled": {"type": "boolean", "description": "Whether Bifrost should launch and keep the tray helper running"},
                     "supported": {"type": "boolean", "description": "Whether the current platform supports the native tray helper"},
-                    "show_system_stats": {"type": "boolean", "description": "Whether the tray menu should show whole-system CPU, memory, disk, and network throughput"},
+                    "system_stats_supported": {"type": "boolean", "description": "Whether the current platform supports tray system status metrics. macOS supports this; Windows and Linux return false."},
+                    "show_system_stats": {"type": "boolean", "description": "Whether the tray should show whole-system CPU, memory, disk, and network throughput when system_stats_supported is true"},
                     "system_stats_items": {"$ref": "#/components/schemas/TraySystemStatsItems"}
                 }
             },
@@ -151,8 +152,8 @@ fn generate_components() -> serde_json::Value {
                 "type": "object",
                 "properties": {
                     "enabled": {"type": "boolean"},
-                    "show_system_stats": {"type": "boolean"},
-                    "system_stats_items": {"$ref": "#/components/schemas/TraySystemStatsItems"}
+                    "show_system_stats": {"type": "boolean", "description": "Only accepted on platforms where TrayConfig.system_stats_supported is true"},
+                    "system_stats_items": {"allOf": [{"$ref": "#/components/schemas/TraySystemStatsItems"}], "description": "Only accepted on platforms where TrayConfig.system_stats_supported is true"}
                 }
             },
             "BreakpointEdit": {
@@ -1423,6 +1424,7 @@ mod tests {
         let tray = &schema(&spec, "TrayConfig")["properties"];
         assert!(tray.get("enabled").is_some());
         assert!(tray.get("supported").is_some());
+        assert!(tray.get("system_stats_supported").is_some());
         assert!(tray.get("show_system_stats").is_some());
         assert!(tray.get("system_stats_items").is_some());
 

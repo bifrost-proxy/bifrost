@@ -40,7 +40,10 @@ export default function TrayTab({
   onToggleSystemStatsItem,
 }: TrayTabProps) {
   const systemStatsDisabled =
-    !trayConfig || !trayConfig.supported || !trayConfig.show_system_stats;
+    !trayConfig ||
+    !trayConfig.supported ||
+    !trayConfig.system_stats_supported ||
+    !trayConfig.show_system_stats;
   const statsItems: Array<{
     key: keyof TrayConfig["system_stats_items"];
     label: string;
@@ -117,72 +120,74 @@ export default function TrayTab({
         </Card>
       </Col>
 
-      <Col xs={24}>
-        <Card
-          title={
-            <Space>
-              <DashboardOutlined />
-              <span>System Status</span>
-            </Space>
-          }
-          size="small"
-        >
-          <Space direction="vertical" style={{ width: "100%" }} size="middle">
-            <div style={settingRowStyle}>
-              <div style={settingTextStyle}>
-                <Text>Show System Stats</Text>
-                <br />
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  CPU, memory, disk, upload, and download speed
-                </Text>
-              </div>
-              <div style={settingControlStyle}>
-                {trayConfig ? (
-                  trayConfig.supported ? (
-                    <Switch
-                      checked={trayConfig.show_system_stats}
-                      loading={trayLoading}
-                      onChange={onToggleSystemStats}
-                      data-testid="settings-tray-system-stats-switch"
-                    />
-                  ) : (
-                    <Text type="secondary">Not Supported</Text>
-                  )
-                ) : (
-                  <Text type="secondary">Loading...</Text>
-                )}
-              </div>
-            </div>
-
-            {statsItems.map((item) => (
-              <div key={item.key} style={settingRowStyle}>
-                <div style={{ ...settingTextStyle, paddingLeft: 12 }}>
-                  <Text>{item.label}</Text>
+      {(!trayConfig || trayConfig.system_stats_supported) && (
+        <Col xs={24}>
+          <Card
+            title={
+              <Space>
+                <DashboardOutlined />
+                <span>System Status</span>
+              </Space>
+            }
+            size="small"
+          >
+            <Space direction="vertical" style={{ width: "100%" }} size="middle">
+              <div style={settingRowStyle}>
+                <div style={settingTextStyle}>
+                  <Text>Show System Stats</Text>
                   <br />
                   <Text type="secondary" style={{ fontSize: 12 }}>
-                    {item.description}
+                    CPU, memory, disk, upload, and download speed
                   </Text>
                 </div>
                 <div style={settingControlStyle}>
                   {trayConfig ? (
-                    <Switch
-                      checked={trayConfig.system_stats_items[item.key]}
-                      disabled={systemStatsDisabled}
-                      loading={trayLoading}
-                      onChange={(enabled) =>
-                        onToggleSystemStatsItem(item.key, enabled)
-                      }
-                      data-testid={`settings-tray-system-stats-${item.key}-switch`}
-                    />
+                    trayConfig.supported ? (
+                      <Switch
+                        checked={trayConfig.show_system_stats}
+                        loading={trayLoading}
+                        onChange={onToggleSystemStats}
+                        data-testid="settings-tray-system-stats-switch"
+                      />
+                    ) : (
+                      <Text type="secondary">Not Supported</Text>
+                    )
                   ) : (
                     <Text type="secondary">Loading...</Text>
                   )}
                 </div>
               </div>
-            ))}
-          </Space>
-        </Card>
-      </Col>
+
+              {statsItems.map((item) => (
+                <div key={item.key} style={settingRowStyle}>
+                  <div style={{ ...settingTextStyle, paddingLeft: 12 }}>
+                    <Text>{item.label}</Text>
+                    <br />
+                    <Text type="secondary" style={{ fontSize: 12 }}>
+                      {item.description}
+                    </Text>
+                  </div>
+                  <div style={settingControlStyle}>
+                    {trayConfig ? (
+                      <Switch
+                        checked={trayConfig.system_stats_items[item.key]}
+                        disabled={systemStatsDisabled}
+                        loading={trayLoading}
+                        onChange={(enabled) =>
+                          onToggleSystemStatsItem(item.key, enabled)
+                        }
+                        data-testid={`settings-tray-system-stats-${item.key}-switch`}
+                      />
+                    ) : (
+                      <Text type="secondary">Loading...</Text>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </Space>
+          </Card>
+        </Col>
+      )}
     </Row>
   );
 }
