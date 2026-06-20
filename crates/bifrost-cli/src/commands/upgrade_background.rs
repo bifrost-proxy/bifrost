@@ -16,7 +16,9 @@ use std::time::Instant;
 
 use bifrost_core::upgrade_progress::{write_progress, UpgradePhase, UpgradeProgress};
 
-use super::upgrade::{download_progress_line, handle_background_upgrade};
+use super::upgrade::{
+    download_progress_line, handle_background_upgrade, take_deferred_install_scheduled,
+};
 
 struct ProgressSink {
     data_dir: PathBuf,
@@ -104,8 +106,14 @@ pub fn handle_upgrade_background(target: Option<String>, source: String) {
     // on-disk binary is already current but the running daemon still serves an
     // older in-memory version.
     let result = handle_background_upgrade();
+    let deferred_terminal_pending = take_deferred_install_scheduled();
 
     match &result {
+        Ok(()) if deferred_terminal_pending => {
+            tracing::info!(
+                "background upgrade: terminal progress delegated to Windows deferred installer"
+            );
+        }
         Ok(()) => {
             let target_version = target.clone();
             let source_label = source.clone();
@@ -207,5 +215,13 @@ mod tests {
         report_installing();
         report_download(1, Some(2), Instant::now());
         report_restarting();
+    }
+
+    #[test]
+    fn background_upgrade_source_delegates_windows_deferred_terminal_progress() {
+        let source = include_str!("upgrade_background.rs");
+        assert!(source.contains("take_deferred_install_scheduled"));
+        assert!(source.contains("deferred_terminal_pending"));
+        assert!(source.contains("terminal progress delegated to Windows deferred installer"));
     }
 }

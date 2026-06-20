@@ -167,6 +167,8 @@ v1 语义：
 
 - `Stop Bifrost` 停止主服务后，helper 会进入空转宽限期；如果 10 分钟内没有新的服务启动并恢复 Running，helper 自动退出并清理 `tray.pid`，避免菜单栏长期残留失效图标。
 - 用户直接执行 `bifrost stop` 或 upgrade restart 内部 stop 时，CLI stop 负责同步停止同一数据目录下由服务自动拉起的 tray helper，避免服务已停但 helper 长期残留；托盘菜单内部触发的 Stop 会带内部环境标记，保留 helper 进入 Stopped 状态，以便用户继续从同一托盘执行 Start。
+- Windows 上从托盘触发 `self-update` 时，升级目标二进制可能正被同一个 `bifrost.exe __tray` helper 锁住；Windows 延迟替换 helper 必须在调度替换前停止同一 `data_dir` 的 tray helper，并在 PowerShell helper 内等待目标 exe 可写后再 `Remove-Item` / `Move-Item`。如果目标 exe 仍被锁住或替换失败，helper 必须把 `<data_dir>/upgrade-progress.json` 写成 `failed`，不能让托盘或 Admin UI 显示假成功。
+- Windows 延迟替换 helper 的成功状态以 PowerShell helper 完成替换并按需执行 `start -d` 后写入的 `completed` 为准；Rust `self-update` 父进程只负责下载、暂存、停止旧进程和调度 helper，不能把“helper 已调度”视为“二进制已替换”。
 - 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。
