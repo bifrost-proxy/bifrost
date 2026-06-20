@@ -18,16 +18,21 @@ use tray_icon::{TrayIconBuilder, TrayIconEvent};
 use super::cli::TrayArgs;
 use super::config::{self, TrayConfig};
 use super::lock::TrayLock;
+#[cfg(target_os = "macos")]
+use super::menu::SystemStatsMenuLines;
 use super::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, SubmenuDef};
 use super::runtime::{self, RuntimeInfo, ServiceState};
-use super::system_stats::{self, SystemStatsMenuLines, SystemStatsSampler};
+#[cfg(target_os = "macos")]
+use super::system_stats::{self, SystemStatsSampler};
 
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TraySystemStatsConfig {
     enabled: bool,
     items: bifrost_storage::TraySystemStatsItems,
 }
 
+#[cfg(target_os = "macos")]
 impl TraySystemStatsConfig {
     fn visible(&self) -> bool {
         self.enabled && self.items.any_enabled()
@@ -64,7 +69,7 @@ const TRAY_UPDATE_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
 const EVENT_LOOP_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(1);
-const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -75,6 +80,7 @@ struct MenuDataSnapshot {
     system_proxy: Option<menu::SystemProxyMenuState>,
     bin_available: bool,
     update_available: Option<String>,
+    #[cfg(target_os = "macos")]
     system_stats: Option<SystemStatsMenuLines>,
 }
 
@@ -345,20 +351,16 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             let snapshot = clone_menu_data_snapshot(&menu_data);
             let new_title = menu_bar_stats_title(&snapshot, svc_state);
             if new_title != last_rendered_menu_bar_title {
-                let can_update_now =
-                    state_changed || last_rendered_menu_bar_title.is_none() || new_title.is_none();
-                if can_update_now {
-                    set_menu_bar_stats_indicator(
-                        &tray_icon,
-                        new_title.as_deref(),
-                        match svc_state {
-                            ServiceState::Running => &icon_running,
-                            _ => &icon_stopped,
-                        },
-                    );
-                    last_rendered_menu_bar_title = new_title;
-                    tracing::debug!("tray menu bar title updated");
-                }
+                set_menu_bar_stats_indicator(
+                    &tray_icon,
+                    new_title.as_deref(),
+                    match svc_state {
+                        ServiceState::Running => &icon_running,
+                        _ => &icon_stopped,
+                    },
+                );
+                last_rendered_menu_bar_title = new_title;
+                tracing::debug!("tray menu bar title updated");
             }
             last_rendered_system_stats_generation = system_stats_data_generation;
         }
@@ -488,9 +490,8 @@ fn set_menu_bar_stats_indicator(
     title: Option<&str>,
     fallback_icon: &tray_icon::Icon,
 ) {
-    // The native NSStatusItem title uses the system menu bar font, which is too
-    // large for a two-line monitor. Keep the title empty and render a compact
-    // template image instead.
+    // Render a single template image so the Bifrost icon, separators, and
+    // fixed-width metric columns stay aligned as one status item.
     tray_icon.set_title(Some(""));
     let icon = title
         .and_then(menu_bar_stats_icon)
@@ -507,6 +508,11 @@ struct MenuBarStatsBitmap {
 }
 
 #[cfg(target_os = "macos")]
+const MENU_BAR_STATS_SEPARATOR_GAP: u32 = 6;
+#[cfg(target_os = "macos")]
+const MENU_BAR_STATS_SEPARATOR_WIDTH: u32 = 2;
+
+#[cfg(target_os = "macos")]
 fn menu_bar_stats_icon(title: &str) -> Option<tray_icon::Icon> {
     let bitmap = render_menu_bar_stats_bitmap(title)?;
     tray_icon::Icon::from_rgba(bitmap.rgba, bitmap.width, bitmap.height).ok()
@@ -514,39 +520,273 @@ fn menu_bar_stats_icon(title: &str) -> Option<tray_icon::Icon> {
 
 #[cfg(target_os = "macos")]
 fn render_menu_bar_stats_bitmap(title: &str) -> Option<MenuBarStatsBitmap> {
-    const PADDING_X: u32 = 6;
-    const ICON_SIZE: u32 = 78;
-    const ICON_GAP: u32 = 8;
-    const HEIGHT: u32 = 78;
-    const TEXT_BASELINE: i32 = 60;
-    const FONT_PX: f32 = 50.0;
-
-    let text = title.split_whitespace().collect::<Vec<_>>().join(" ");
-    if text.is_empty() {
+    const PADDING_X: u32 = 2;
+    const ICON_SIZE: u32 = 32;
+    const ICON_GAP: u32 = 5;
+    const HEIGHT: u32 = 36;
+    const VALUE_BASELINE: i32 = 18;
+    const LABEL_BASELINE: i32 = 32;
+    const VALUE_FONT_PX: f32 = 18.0;
+    const LABEL_FONT_PX: f32 = 9.5;
+    const SINGLE_ROW_BASELINE: i32 = 31;
+    const SINGLE_ROW_FONT_PX: f32 = 28.0;
+    let rows = menu_bar_stats_rows(title);
+    if rows.values.is_empty() && rows.labels.is_empty() {
         return None;
     }
 
     let font = menu_bar_stats_font()?;
-    let text_width = measure_text_width(font, &text, FONT_PX) + 3;
+    let single_row = rows.labels.is_empty();
+    let columns = if single_row {
+        menu_bar_stats_columns(font, &rows, SINGLE_ROW_FONT_PX, LABEL_FONT_PX)
+    } else {
+        menu_bar_stats_columns(font, &rows, VALUE_FONT_PX, LABEL_FONT_PX)
+    };
+    let text_width = columns
+        .last()
+        .map(|column| column.x + column.width)
+        .unwrap_or(0);
     let text_x = PADDING_X + ICON_SIZE + ICON_GAP;
     let width = (text_x + text_width + PADDING_X).clamp(96, 1400);
     let mut rgba = vec![0_u8; (width * HEIGHT * 4) as usize];
     draw_menu_bar_bifrost_icon(&mut rgba, width, PADDING_X, (HEIGHT - ICON_SIZE) / 2);
-    draw_font_text(
+    draw_menu_bar_stats_separators(
         &mut rgba,
         width,
-        text_x as f32,
-        TEXT_BASELINE,
-        FONT_PX,
-        &text,
+        text_x,
+        if single_row { 3 } else { 4 },
+        33,
+        rows.values.len().max(rows.labels.len()),
+        &columns,
+    );
+    draw_menu_bar_stats_row(
+        &mut rgba,
+        width,
+        text_x,
+        if single_row {
+            SINGLE_ROW_BASELINE
+        } else {
+            VALUE_BASELINE
+        },
+        true,
+        &rows.values,
+        &columns,
         font,
     );
+    if !single_row {
+        draw_menu_bar_stats_row(
+            &mut rgba,
+            width,
+            text_x,
+            LABEL_BASELINE,
+            false,
+            &rows.labels,
+            &columns,
+            font,
+        );
+    }
 
     Some(MenuBarStatsBitmap {
         rgba,
         width,
         height: HEIGHT,
     })
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MenuBarStatsRows {
+    values: Vec<String>,
+    labels: Vec<String>,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MenuBarStatsColumn {
+    x: u32,
+    width: u32,
+    value_font_px: f32,
+    label_font_px: f32,
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_rows(title: &str) -> MenuBarStatsRows {
+    let mut lines = title.lines();
+    let values = split_menu_bar_stats_row(lines.next().unwrap_or_default());
+    let labels = split_menu_bar_stats_row(lines.next().unwrap_or_default());
+    MenuBarStatsRows { values, labels }
+}
+
+#[cfg(target_os = "macos")]
+fn split_menu_bar_stats_row(row: &str) -> Vec<String> {
+    row.split('|')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_columns(
+    font: &fontdue::Font,
+    rows: &MenuBarStatsRows,
+    value_font_px: f32,
+    label_font_px: f32,
+) -> Vec<MenuBarStatsColumn> {
+    let count = rows.values.len().max(rows.labels.len());
+    let mut columns = Vec::with_capacity(count);
+    let mut x = 0_u32;
+    for idx in 0..count {
+        let value = rows.values.get(idx);
+        let label = rows.labels.get(idx);
+        let value_font = value_font_px;
+        let label_font = if is_menu_bar_network_column(value, label) {
+            value_font_px
+        } else {
+            label_font_px
+        };
+        let value_width = rows
+            .values
+            .get(idx)
+            .map(|text| measure_text_width(font, text, value_font))
+            .unwrap_or(0);
+        let label_width = rows
+            .labels
+            .get(idx)
+            .map(|text| measure_text_width(font, text, label_font))
+            .unwrap_or(0);
+        let min_width = menu_bar_stats_min_column_width(font, value, label, value_font, label_font);
+        let width = value_width.max(label_width).max(min_width);
+        columns.push(MenuBarStatsColumn {
+            x,
+            width,
+            value_font_px: value_font,
+            label_font_px: label_font,
+        });
+        x = x
+            .saturating_add(width)
+            .saturating_add(MENU_BAR_STATS_SEPARATOR_GAP * 2 + MENU_BAR_STATS_SEPARATOR_WIDTH);
+    }
+    columns
+}
+
+#[cfg(target_os = "macos")]
+fn is_menu_bar_network_column(value: Option<&String>, label: Option<&String>) -> bool {
+    value.is_some_and(|text| text.starts_with('↑'))
+        && label.is_some_and(|text| text.starts_with('↓'))
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_min_column_width(
+    font: &fontdue::Font,
+    value: Option<&String>,
+    label: Option<&String>,
+    value_font_px: f32,
+    label_font_px: f32,
+) -> u32 {
+    if value
+        .map(|text| text.starts_with('↑') && text.contains('↓'))
+        .unwrap_or(false)
+    {
+        return measure_text_width(font, "↑999.9 M/s ↓999.9 M/s", value_font_px);
+    }
+    if is_menu_bar_network_column(value, label)
+        || value
+            .map(|text| text.starts_with('↑') || text.starts_with('↓'))
+            .unwrap_or(false)
+    {
+        return measure_text_width(font, "↓999.9 M/s", value_font_px);
+    }
+    if value
+        .map(|text| text == "--%" || text.ends_with('%'))
+        .unwrap_or(false)
+    {
+        return measure_text_width(font, "100%", value_font_px).max(
+            label
+                .map(|text| measure_text_width(font, text, label_font_px))
+                .unwrap_or(0),
+        );
+    }
+    0
+}
+
+#[cfg(target_os = "macos")]
+fn draw_menu_bar_stats_separators(
+    rgba: &mut [u8],
+    canvas_width: u32,
+    text_x: u32,
+    top_y: u32,
+    bottom_y: u32,
+    column_count: usize,
+    columns: &[MenuBarStatsColumn],
+) {
+    for idx in 0..column_count.saturating_sub(1) {
+        let Some(column) = columns.get(idx) else {
+            break;
+        };
+        let x = text_x + column.x + column.width + MENU_BAR_STATS_SEPARATOR_GAP;
+        draw_menu_bar_stats_separator(rgba, canvas_width, x, top_y, bottom_y);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn draw_menu_bar_stats_separator(
+    rgba: &mut [u8],
+    canvas_width: u32,
+    x: u32,
+    top_y: u32,
+    bottom_y: u32,
+) {
+    for y in top_y..=bottom_y {
+        for dx in 0..MENU_BAR_STATS_SEPARATOR_WIDTH {
+            let px = x + dx;
+            if px >= canvas_width {
+                continue;
+            }
+            let idx = ((y * canvas_width + px) * 4) as usize;
+            if idx + 3 < rgba.len() {
+                rgba[idx] = 0;
+                rgba[idx + 1] = 0;
+                rgba[idx + 2] = 0;
+                rgba[idx + 3] = rgba[idx + 3].max(210);
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[allow(clippy::too_many_arguments)]
+fn draw_menu_bar_stats_row(
+    rgba: &mut [u8],
+    canvas_width: u32,
+    text_x: u32,
+    baseline_y: i32,
+    is_value_row: bool,
+    parts: &[String],
+    columns: &[MenuBarStatsColumn],
+    font: &fontdue::Font,
+) {
+    for (idx, part) in parts.iter().enumerate() {
+        let Some(column) = columns.get(idx) else {
+            break;
+        };
+        let font_px = if is_value_row {
+            column.value_font_px
+        } else {
+            column.label_font_px
+        };
+        let part_width = measure_text_width(font, part, font_px);
+        let centered_x = column.x + column.width.saturating_sub(part_width) / 2;
+        draw_font_text(
+            rgba,
+            canvas_width,
+            (text_x + centered_x) as f32,
+            baseline_y,
+            font_px,
+            part,
+            font,
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -582,7 +822,7 @@ struct MenuBarIconAlpha {
 fn menu_bar_bifrost_icon_alpha() -> Option<&'static MenuBarIconAlpha> {
     static ICON: OnceLock<Option<MenuBarIconAlpha>> = OnceLock::new();
     ICON.get_or_init(|| {
-        const ICON_SIZE: u32 = 78;
+        const ICON_SIZE: u32 = 32;
         let img =
             image::load_from_memory(include_bytes!("../../../../../assets/trayTemplate@2x.png"))
                 .ok()?
@@ -608,10 +848,14 @@ fn menu_bar_stats_font() -> Option<&'static fontdue::Font> {
     static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
     FONT.get_or_init(|| {
         [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
             "/System/Library/Fonts/SFNSMono.ttf",
-            "/System/Library/Fonts/Menlo.ttc",
-            "/System/Library/Fonts/Courier.ttc",
             "/System/Library/Fonts/SFNS.ttf",
+            "/System/Library/Fonts/SFCompact.ttf",
+            "/System/Library/Fonts/HelveticaNeue.ttc",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/DIN Alternate Bold.ttf",
         ]
         .iter()
         .find_map(|path| {
@@ -658,14 +902,6 @@ fn draw_font_text(
             rgba,
             canvas_width,
             glyph_x + 1,
-            glyph_y,
-            metrics.width,
-            &glyph.bitmap,
-        );
-        draw_rasterized_glyph(
-            rgba,
-            canvas_width,
-            glyph_x + 2,
             glyph_y,
             metrics.width,
             &glyph.bitmap,
@@ -927,6 +1163,7 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn load_tray_system_stats_config(data_dir: &Path) -> TraySystemStatsConfig {
     let path = data_dir.join("config.toml");
     let content = match std::fs::read_to_string(&path) {
@@ -1070,6 +1307,7 @@ fn load_menu_data_snapshot(
         system_proxy,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
+        #[cfg(target_os = "macos")]
         system_stats: {
             let stats_config = load_tray_system_stats_config(&args.data_dir);
             stats_config
@@ -1213,10 +1451,7 @@ fn build_menu_from_snapshot(
     data_dir: &str,
     upgrade_in_progress: bool,
 ) -> Vec<MenuEntry> {
-    #[cfg(target_os = "macos")]
     let menu_system_stats = None;
-    #[cfg(not(target_os = "macos"))]
-    let menu_system_stats = snapshot.system_stats.as_ref();
 
     menu::build_menu(
         snapshot.runtime.as_ref(),
@@ -2595,6 +2830,7 @@ fn poll_menu_data(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn poll_system_stats(
     quit_flag: &AtomicBool,
     args: &TrayArgs,
@@ -2621,6 +2857,7 @@ fn poll_system_stats(
     }
 }
 
+#[cfg(target_os = "macos")]
 fn update_system_stats_snapshot(
     lines: Option<SystemStatsMenuLines>,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
@@ -2725,6 +2962,7 @@ fn refresh_menu_data_snapshot(
             if !include_system_proxy {
                 next.system_proxy = current.system_proxy.clone();
             }
+            #[cfg(target_os = "macos")]
             if next.system_stats.is_some() {
                 next.system_stats = current.system_stats.clone().or(next.system_stats);
             }

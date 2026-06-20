@@ -5,8 +5,8 @@
 Tray 新增 macOS 全系统状态展示能力，默认开启。macOS 上优先在菜单栏 status item 中以模板图像常驻展示紧凑状态，避免用户每次点开菜单才能看到：
 
 - Bifrost 原图标保持与未启用系统状态时一致的视觉大小。
-- 图标右侧使用等宽字体展示紧凑文本，例如 `C20% M55% D55% ↑001M ↓512K`，其中 `C/M/D` 分别表示 CPU、Memory、Disk。
-- 百分比保持固定宽度，网速数字始终三位；等宽数字避免 `1/8/0` 字宽不同造成菜单栏左右抖动。
+- 图标右侧使用接近系统监控菜单的常规系统字体绘制单行状态，例如 `C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s`。CPU/Memory/Disk 分别缩写为 `C/M/D` 并放在数值前；上传/下载网速作为一个整体字段展示，中间仅用小空格分隔，不再用竖线拆开。
+- 单行布局在 36px 透明模板图内使用 28px 字体，尽量吃满 macOS status item 可用高度，避免两行文字被系统缩放后过小；列宽由渲染器预留稳定空间，不依赖左侧补零。
 
 这些指标表示整台机器的状态，不表示 Bifrost 进程自身资源消耗，也不表示 Bifrost 代理流量聚合。Windows 明确不支持 Tray 系统信息：不采样 CPU、内存、磁盘或网速，不展示菜单详情，不暴露 Settings 系统信息配置项。原因是 Windows notification area 对图标信息承载有限，把系统信息放进点击菜单会造成体验和性能折扣。
 
@@ -33,7 +33,7 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 系统状态仅在 macOS 由 `bifrost __tray` helper 本地采样，不经过 Admin API：
 
 - Tray helper 在独立进程运行，即使 Bifrost 主服务繁忙、停止或 Admin API 无响应，也可以继续更新机器状态。
-- 采样线程每 3 秒刷新系统状态快照；CPU、内存最多每 2 秒刷新一次并复用最近值，磁盘按 30 秒窗口刷新。
+- 采样线程每 1 秒刷新系统状态快照；CPU、内存最多每 2 秒刷新一次并复用最近值，磁盘按 30 秒窗口刷新。
 - macOS CPU 使用 Mach `host_statistics(HOST_CPU_LOAD_INFO)` 的 tick delta 计算，内存使用 `host_statistics64(HOST_VM_INFO64)` 与 `sysctl HW_MEMSIZE`，避免为菜单栏状态走较重的通用系统刷新路径。
 - macOS 网络接口计数使用 `getifaddrs` 读取 `AF_LINK` 的 `if_data.ifi_ibytes/ifi_obytes`，避免 `sysinfo::Networks::refresh()` 的额外列表刷新成本。
 - 磁盘百分比按当前 `data_dir` 所在挂载点计算，避免随便取第一个磁盘导致显示与用户实际数据目录无关。
@@ -53,17 +53,17 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 - Apple Activity Monitor 的 `Data received/sec` / `Data sent/sec` 也是单位时间内传输数据量；macOS `nettop` 支持 1 秒 delta mode；`netstat -ibn -I <iface>` 暴露接口累计 `Ibytes` / `Obytes`。这些工具都围绕系统维护的累计计数做差分。
 - 本机实测默认路由为 `en1`，同时存在 `utun5`、`bridge100/101`、`vmenet*`、`awdl0`、`llw0` 等接口。全接口累加会把 VPN、虚拟机桥接、AWDL/本地链路流量混入用户直觉中的“当前上网速度”，容易双算或出现离谱尖峰。
 - 只看 Bifrost 代理流量或 per-process 统计不符合用户目标，因为 Tray 系统状态表示整机当前网络负载，不是 Bifrost 进程自身吞吐。
-- 3 秒采样窗口比 1 秒更稳，仍能反映菜单栏趋势；配合 60/40 EMA 平滑可减少瞬时 TCP burst 抖动。若未来需要更接近 Activity Monitor 的实时曲线，可把窗口降到 1 秒，但 CPU 与重绘开销会增加，且菜单栏文本更抖。
+- 1 秒采样窗口用于优先满足网速实时性；配合默认路由接口选择、短窗口保护和 60/40 EMA 平滑减少瞬时 TCP burst 抖动。
 
 ### 性能与实时性权衡
 
-刷新频率不做成用户可见配置，默认系统状态线程 3 秒、CPU/内存 2 秒、磁盘 30 秒、网卡列表 60 秒。理由：
+刷新频率不做成用户可见配置，默认系统状态线程 1 秒、CPU/内存 2 秒、磁盘 30 秒、网卡列表 60 秒。理由：
 
-- 3 秒菜单状态刷新能明显降低 tray helper 空闲 CPU，同时仍足够观察菜单栏趋势；CPU/内存内部缓存按 2 秒刷新，提供更好的实时性且不会重新引入 AppKit 图标重绘开销；网速每 3 秒按累计字节差分刷新。磁盘容量变化和默认路由/网卡列表变化相对慢，分别按 30 秒和 60 秒刷新，避免频繁 I/O 和系统路由查询。
+- 1 秒菜单状态刷新让上下行网速更接近系统监控工具；CPU/内存内部缓存按 2 秒刷新，磁盘容量变化和默认路由/网卡列表变化相对慢，分别按 30 秒和 60 秒刷新，避免频繁 I/O 和系统路由查询。
 - 采样只在 tray helper 本地执行，不访问 Admin API，不阻塞主代理进程。
 - 当 `show_system_stats=false` 或所有 `system_stats_items` 子项均关闭时，线程只读取配置并清空菜单状态，不执行 CPU/内存/网络采样；当 Upload/Download 均关闭但 CPU/Memory/Disk 仍开启时，只刷新非网络指标并重置网络累计基线，避免把关闭期间的字节变化折算成当前速率。
 - 子项关闭时跳过对应重采样：CPU 关闭时不读取 CPU tick，Memory 关闭时不读取 VM 统计，Disk 关闭或未到 30 秒窗口时不执行 `statvfs`，Upload/Download 均关闭时不读取网络计数。
-- 真实性能优化结论是 macOS `set_icon` 才是主要尖峰来源。系统状态快照仍每 3 秒采样并更新菜单数据，但周期性系统状态文本变化不再调用 `set_icon`；菜单栏图像只在启动、服务 Running/Stopped/Disconnected 状态变化、进入系统状态显示或退出系统状态显示时更新，避免 AppKit status item 位图重设造成 2-3% CPU 峰值。
+- 性能风险主要来自 macOS `set_icon` 位图重设，而不是 Mach/getifaddrs/statvfs 采样本身。实现只在菜单栏文本发生变化时更新 status item 图像；CPU/内存/磁盘缓存、接口过滤、固定列宽和平滑共同降低无意义重绘。
 - 最终 release 真实采样在所有系统信息展示均启用时执行：`show_system_stats=true` 且 `cpu/memory/disk/upload/download=true`，warm-up 15 秒后采集 120 个 1 秒样本，tray helper 平均 CPU `0.0467%`，最大 CPU `0.7000%`，`over_1=0`、`over_1_5=0`，满足平均低于 1% 且不超过 1.5% 的目标。
 
 若后续真实用户机器上看到明显 CPU 增高，优先排查是否又引入了周期性 AppKit `set_icon` / 原生菜单对象重建；其次再考虑把 CPU/内存/磁盘刷新间隔调高到 5 秒。只有存在明确用户需求时再增加 Settings 中的刷新频率选项。
@@ -76,13 +76,13 @@ macOS 系统状态进入菜单栏 status item 常驻图像，展开菜单不重�
 
 ### macOS 菜单栏常驻标题
 
-`tray-icon 0.19` 在 macOS 上会把 icon 按系统菜单栏高度缩放，因此系统状态开启且服务 Running 时，helper 生成一张透明模板图像作为 status item icon。模板图左侧绘制占满图像高度的 Bifrost template icon，确保开启系统状态后图标视觉大小不小于原版；右侧用 SF Mono/Menlo 等宽字体绘制固定宽度状态文本，例如 `C20% M55% D55% ↑001M ↓512K`。关闭 `show_system_stats`、关闭全部子项或服务不在 Running 状态时恢复普通 Bifrost 图标。为控制 CPU，系统状态文本内容的周期变化不再触发 status item icon 重绘。
+`tray-icon 0.19` 在 macOS 上会把 icon 按系统菜单栏高度缩放，因此系统状态开启且服务 Running 时，helper 生成一张透明模板图像作为 status item icon。模板图左侧绘制占满图像高度的 Bifrost template icon，确保开启系统状态后图标视觉大小不小于原版；右侧优先用 Arial/SF/Helvetica 常规系统字体绘制 28px 单行状态，例如 `C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s`，并仅做轻量横向叠画以保持清晰度，避免过粗。渲染器按 `100%` 和 `↑999.9 M/s ↓999.9 M/s` 预留稳定列宽，文本不再通过 `05%` 或 `001M/s` 这类补零方式稳定宽度。关闭 `show_system_stats`、关闭全部子项或服务不在 Running 状态时恢复普通 Bifrost 图标。
 
 macOS 展开菜单不再重复展示 `System:` / `Network:` 两排资源信息，避免同一信息同时出现在菜单栏和下拉菜单。Windows notification area 的 `set_title` 在当前 `tray-icon` 实现中是 no-op，系统托盘也没有 macOS 这种可横向常驻文本区域，因此 Windows 不支持 Tray 系统信息，而不是用菜单详情降级。
 
 ## 依赖项
 
-- `bifrost-cli` 在 macOS tray 构建下使用 libc Mach、`getifaddrs` 和 `statvfs` 采样系统状态；非 macOS 保留 `sysinfo = "0.31"` 类型边界但产品层面不启用系统信息展示。
+- `bifrost-cli` 仅在 macOS tray 构建下使用 libc Mach、`getifaddrs`、`statvfs` 与 `sysinfo::Disks` 初始化挂载点；Windows 不引入系统状态采样模块。
 - 不新增 Tauri tray 依赖；仍复用现有 `tao` + `tray-icon` helper。
 
 ## Windows / macOS 兼容调研
@@ -100,7 +100,7 @@ macOS 展开菜单不再重复展示 `System:` / `Network:` 两排资源信息�
 - `bifrost-admin`：`GET /api/config/tray` 与 `GET /api/config` 返回 `system_stats_supported`、`show_system_stats` 和 `system_stats_items`；macOS `PUT /api/config/tray` 支持仅更新系统状态总开关或单个子项，非 macOS 携带系统状态字段时返回 400。
 - `bifrost-cli`：
   - 系统状态格式化输出稳定单位。
-  - macOS 菜单栏 status item icon 使用原尺寸 Bifrost 图标 + 等宽固定宽度 C/M/D/Up/Down 文案，且按子项开关过滤展示。
+  - macOS 菜单栏 status item icon 使用原尺寸 Bifrost 图标 + 常规字重单行 `C/M/D/↑/↓` 文案，且按子项开关过滤展示。
   - macOS Tray 菜单不重复展示系统状态两排。
   - Windows 不启动系统状态采样线程。
   - 同结构状态文本更新不改变 native menu shape。
@@ -116,8 +116,8 @@ macOS 展开菜单不再重复展示 `System:` / `Network:` 两排资源信息�
 
 更新 `human_tests/cli-tray-helper.md`：
 
-- macOS：真实启动 tray helper，验证默认开启、Settings Tray tab 开关、Admin API 持久化和性能基线；通过截图或辅助功能确认菜单栏常驻状态、原图标视觉大小、等宽数字和下行完整展示。
-- Windows VM：验证 `GET /api/config/tray` 返回 `system_stats_supported=false`、系统状态全部 mask off；Settings Tray tab 只展示 `Tray Icon`；携带 `show_system_stats` 或 `system_stats_items` 的 `PUT` 返回 400；tray helper 日志中不应出现系统状态采样线程。
+- macOS：真实启动 tray helper，验证默认开启、Settings Tray tab 开关、Admin API 持久化和性能基线；通过截图或辅助功能确认菜单栏常驻状态、原图标视觉大小、单行常规字重文本、列宽稳定和上下行网速作为一组完整展示。
+- Windows：仅验证 `GET /api/config/tray` 返回 `system_stats_supported=false`、系统状态全部 mask off；Settings Tray tab 只展示 `Tray Icon`；携带 `show_system_stats` 或 `system_stats_items` 的 `PUT` 返回 400；tray helper 日志中不应出现系统状态采样线程。不做 Windows 资源状态展示、菜单详情或截图验收。
 
 ## Review/Fix/Test 闭环方案
 
