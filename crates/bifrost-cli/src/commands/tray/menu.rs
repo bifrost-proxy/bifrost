@@ -726,8 +726,9 @@ mod tests {
     fn test_menu_system_stats_uses_two_disabled_rows_when_enabled() {
         let rt = sample_runtime();
         let stats = SystemStatsMenuLines {
-            system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB".to_string(),
+            system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
             network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+            menu_bar: "C23% | M56% | D59% | ↑002M/s↓512K/s".to_string(),
         };
         let menu = build_menu(
             Some(&rt),

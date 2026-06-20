@@ -300,6 +300,13 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
     enabled: true,
     supported: true,
     show_system_stats: true,
+    system_stats_items: {
+      cpu: true,
+      memory: true,
+      disk: true,
+      upload: true,
+      download: true,
+    },
   };
   const updatePayloads: unknown[] = [];
 
@@ -328,9 +335,17 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
       const payload = route.request().postDataJSON() as {
         enabled?: boolean;
         show_system_stats?: boolean;
+        system_stats_items?: Partial<typeof trayConfig.system_stats_items>;
       };
       updatePayloads.push(payload);
-      trayConfig = { ...trayConfig, ...payload };
+      trayConfig = {
+        ...trayConfig,
+        ...payload,
+        system_stats_items: {
+          ...trayConfig.system_stats_items,
+          ...payload.system_stats_items,
+        },
+      };
     }
     await route.fulfill({ json: trayConfig });
   });
@@ -341,7 +356,9 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
     "true",
   );
   await expect(page.getByTestId("settings-tray-tab")).toContainText("System Status");
-  await expect(page.getByTestId("settings-tray-tab")).toContainText("CPU, memory");
+  await expect(page.getByTestId("settings-tray-tab")).toContainText(
+    "CPU, memory, disk, upload, and download speed",
+  );
 
   await expect(page.getByTestId("settings-tray-switch")).toHaveAttribute(
     "aria-checked",
@@ -351,6 +368,13 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
     "aria-checked",
     "true",
   );
+  await expect(page.getByTestId("settings-tray-system-stats-cpu-switch")).toHaveAttribute(
+    "aria-checked",
+    "true",
+  );
+  await expect(
+    page.getByTestId("settings-tray-system-stats-download-switch"),
+  ).toHaveAttribute("aria-checked", "true");
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/_bifrost/settings?tab=tray", { waitUntil: "domcontentloaded" });
@@ -378,6 +402,20 @@ test("Settings Tray tab 支持独立开关系统状态两排展示", async ({ pa
     "aria-checked",
     "false",
   );
+  await expect(
+    page.getByTestId("settings-tray-system-stats-download-switch"),
+  ).toBeDisabled();
+
+  await page.getByTestId("settings-tray-system-stats-switch").click();
+  await waitForToast(page, "Tray system stats enabled");
+  await page.getByTestId("settings-tray-system-stats-download-switch").click();
+  await waitForToast(page, "Tray system status item updated");
+  expect(updatePayloads).toContainEqual({
+    system_stats_items: { download: false },
+  });
+  await expect(
+    page.getByTestId("settings-tray-system-stats-download-switch"),
+  ).toHaveAttribute("aria-checked", "false");
 
   await page.getByTestId("settings-tray-switch").click();
   await waitForToast(page, "Tray icon disabled");

@@ -132,14 +132,27 @@ fn generate_components() -> serde_json::Value {
                 "properties": {
                     "enabled": {"type": "boolean", "description": "Whether Bifrost should launch and keep the tray helper running"},
                     "supported": {"type": "boolean", "description": "Whether the current platform supports the native tray helper"},
-                    "show_system_stats": {"type": "boolean", "description": "Whether the tray menu should show whole-system CPU, memory, and network throughput"}
+                    "show_system_stats": {"type": "boolean", "description": "Whether the tray menu should show whole-system CPU, memory, disk, and network throughput"},
+                    "system_stats_items": {"$ref": "#/components/schemas/TraySystemStatsItems"}
+                }
+            },
+            "TraySystemStatsItems": {
+                "type": "object",
+                "description": "Per-metric tray system status visibility flags. Missing fields default to true.",
+                "properties": {
+                    "cpu": {"type": "boolean"},
+                    "memory": {"type": "boolean"},
+                    "disk": {"type": "boolean"},
+                    "upload": {"type": "boolean"},
+                    "download": {"type": "boolean"}
                 }
             },
             "UpdateTrayConfigRequest": {
                 "type": "object",
                 "properties": {
                     "enabled": {"type": "boolean"},
-                    "show_system_stats": {"type": "boolean"}
+                    "show_system_stats": {"type": "boolean"},
+                    "system_stats_items": {"$ref": "#/components/schemas/TraySystemStatsItems"}
                 }
             },
             "BreakpointEdit": {
@@ -1411,6 +1424,14 @@ mod tests {
         assert!(tray.get("enabled").is_some());
         assert!(tray.get("supported").is_some());
         assert!(tray.get("show_system_stats").is_some());
+        assert!(tray.get("system_stats_items").is_some());
+
+        let tray_items = &schema(&spec, "TraySystemStatsItems")["properties"];
+        assert!(tray_items.get("cpu").is_some());
+        assert!(tray_items.get("memory").is_some());
+        assert!(tray_items.get("disk").is_some());
+        assert!(tray_items.get("upload").is_some());
+        assert!(tray_items.get("download").is_some());
     }
 
     #[test]

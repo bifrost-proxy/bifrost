@@ -41,6 +41,107 @@
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn find_menu_item<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a MenuItemDef> {
+        entries.iter().find_map(|entry| match entry {
+            MenuEntry::Item(item) if item.id == id => Some(item),
+            MenuEntry::Submenu(submenu) => find_menu_item(&submenu.children, id),
+            _ => None,
+        })
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_menu_bar_stats_title_uses_running_system_stats_only() {
+        let snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            bin_available: true,
+            update_available: None,
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
+                network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+                menu_bar: "C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string(),
+            }),
+        };
+
+        assert_eq!(
+            menu_bar_stats_title(&snapshot, ServiceState::Running),
+            Some("C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string())
+        );
+        assert_eq!(menu_bar_stats_title(&snapshot, ServiceState::Stopped), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_menu_bar_stats_bitmap_is_compact_and_non_empty() {
+        let bitmap = render_menu_bar_stats_bitmap("C23% | M56% | D59% | ↑002M/s | ↓512K/s")
+            .expect("bitmap");
+
+        assert_eq!(bitmap.height, 78);
+        assert!(bitmap.width <= 1400);
+        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+
+        let icon_region_max_alpha = bitmap
+            .rgba
+            .chunks_exact(4)
+            .enumerate()
+            .filter_map(|(idx, pixel)| {
+                let x = idx as u32 % bitmap.width;
+                let y = idx as u32 / bitmap.width;
+                (x < 78 && y < bitmap.height).then_some(pixel[3])
+            })
+            .max()
+            .unwrap_or(0);
+        assert_eq!(icon_region_max_alpha, 255);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_menu_bar_stats_font_uses_tabular_digit_widths() {
+        let font = menu_bar_stats_font().expect("font");
+        let zero = measure_text_width(font, "000", 50.0);
+        let ones = measure_text_width(font, "111", 50.0);
+        let eights = measure_text_width(font, "888", 50.0);
+
+        assert_eq!(zero, ones);
+        assert_eq!(zero, eights);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_macos_menu_hides_system_stats_rows() {
+        let snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            bin_available: true,
+            update_available: None,
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
+                network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+                menu_bar: "C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string(),
+            }),
+        };
+
+        let menu = build_menu_from_snapshot(
+            &snapshot,
+            ServiceState::Running,
+            None,
+            false,
+            "/tmp/.bifrost",
+            false,
+        );
+
+        assert!(find_menu_item(&menu, "_system_stats").is_none());
+        assert!(find_menu_item(&menu, "_network_stats").is_none());
+    }
+
     #[test]
     fn test_missing_runtime_file_uses_parent_process_fallback_for_menu() {
         let data_dir = std::env::temp_dir().join(format!(

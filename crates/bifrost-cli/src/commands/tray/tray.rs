@@ -22,6 +22,18 @@ use super::menu::{self, MenuEntry, MenuItemAction, MenuItemDef, RuleTarget, Subm
 use super::runtime::{self, RuntimeInfo, ServiceState};
 use super::system_stats::{self, SystemStatsMenuLines, SystemStatsSampler};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraySystemStatsConfig {
+    enabled: bool,
+    items: bifrost_storage::TraySystemStatsItems,
+}
+
+impl TraySystemStatsConfig {
+    fn visible(&self) -> bool {
+        self.enabled && self.items.any_enabled()
+    }
+}
+
 const STATE_RUNNING: u8 = 0;
 const STATE_STOPPED: u8 = 1;
 const STATE_DISCONNECTED: u8 = 2;
@@ -50,7 +62,8 @@ const TRAY_LOG_BUFFERED_LINES_LIMIT: usize = 1024;
 const TRAY_UPDATE_CHECK_INITIAL_DELAY: Duration = Duration::from_secs(30);
 const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
-const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const EVENT_LOOP_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(1);
+const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MenuDataSnapshot {
@@ -98,6 +111,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
     let initial_menu_data = load_menu_data_snapshot(&args, state, false, false);
+    #[cfg(target_os = "macos")]
+    let initial_menu_bar_title = menu_bar_stats_title(&initial_menu_data, state);
     let menu_items =
         build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str, false);
 
@@ -109,10 +124,18 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         _ => &icon_stopped,
     };
 
+    #[cfg(target_os = "macos")]
+    let initial_icon_for_builder = initial_menu_bar_title
+        .as_deref()
+        .and_then(menu_bar_stats_icon)
+        .unwrap_or_else(|| initial_icon.clone());
+    #[cfg(not(target_os = "macos"))]
+    let initial_icon_for_builder = initial_icon.clone();
+
     let builder = TrayIconBuilder::new()
         .with_menu(Box::new(native_menu.menu.clone()))
         .with_tooltip(state_tooltip(state))
-        .with_icon(initial_icon.clone());
+        .with_icon(initial_icon_for_builder);
 
     #[cfg(target_os = "macos")]
     let builder = builder.with_icon_as_template(true);
@@ -202,6 +225,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    let mut last_rendered_menu_bar_title = initial_menu_bar_title;
     let mut last_tray_interaction_at: Option<Instant> = None;
     let system_proxy_refresh_state = current_state.clone();
     let system_proxy_refresh_data = menu_data.clone();
@@ -211,7 +236,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 
     event_loop.run(move |event, _, control_flow| {
         *control_flow =
-            ControlFlow::WaitUntil(std::time::Instant::now() + Duration::from_millis(200));
+            ControlFlow::WaitUntil(std::time::Instant::now() + EVENT_LOOP_BACKGROUND_POLL_INTERVAL);
 
         if should_quit.load(Ordering::Relaxed) {
             *control_flow = ControlFlow::Exit;
@@ -301,6 +326,24 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             action_triggered,
             data_changed,
         );
+
+        #[cfg(target_os = "macos")]
+        if state_changed || data_changed {
+            let snapshot = clone_menu_data_snapshot(&menu_data);
+            let new_title = menu_bar_stats_title(&snapshot, svc_state);
+            if new_title != last_rendered_menu_bar_title {
+                set_menu_bar_stats_indicator(
+                    &tray_icon,
+                    new_title.as_deref(),
+                    match svc_state {
+                        ServiceState::Running => &icon_running,
+                        _ => &icon_stopped,
+                    },
+                );
+                last_rendered_menu_bar_title = new_title;
+                tracing::debug!("tray menu bar title updated");
+            }
+        }
 
         if should_refresh_menu {
             let snapshot = clone_menu_data_snapshot(&menu_data);
@@ -406,6 +449,221 @@ fn cleanup_old_logs(log_dir: &Path) {
             if let Err(error) = fs::remove_file(&path) {
                 tracing::warn!(path = %path.display(), error = %error, "failed to remove old tray log");
             }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_title(snapshot: &MenuDataSnapshot, state: ServiceState) -> Option<String> {
+    if state != ServiceState::Running {
+        return None;
+    }
+    snapshot
+        .system_stats
+        .as_ref()
+        .map(|stats| stats.menu_bar.clone())
+}
+
+#[cfg(target_os = "macos")]
+fn set_menu_bar_stats_indicator(
+    tray_icon: &tray_icon::TrayIcon,
+    title: Option<&str>,
+    fallback_icon: &tray_icon::Icon,
+) {
+    // The native NSStatusItem title uses the system menu bar font, which is too
+    // large for a two-line monitor. Keep the title empty and render a compact
+    // template image instead.
+    tray_icon.set_title(Some(""));
+    let icon = title
+        .and_then(menu_bar_stats_icon)
+        .unwrap_or_else(|| fallback_icon.clone());
+    let _ = tray_icon.set_icon_with_as_template(Some(icon), true);
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct MenuBarStatsBitmap {
+    rgba: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_icon(title: &str) -> Option<tray_icon::Icon> {
+    let bitmap = render_menu_bar_stats_bitmap(title)?;
+    tray_icon::Icon::from_rgba(bitmap.rgba, bitmap.width, bitmap.height).ok()
+}
+
+#[cfg(target_os = "macos")]
+fn render_menu_bar_stats_bitmap(title: &str) -> Option<MenuBarStatsBitmap> {
+    const PADDING_X: u32 = 6;
+    const ICON_SIZE: u32 = 78;
+    const ICON_GAP: u32 = 8;
+    const HEIGHT: u32 = 78;
+    const TEXT_BASELINE: i32 = 60;
+    const FONT_PX: f32 = 50.0;
+
+    let text = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        return None;
+    }
+
+    let font = menu_bar_stats_font()?;
+    let text_width = measure_text_width(font, &text, FONT_PX) + 1;
+    let text_x = PADDING_X + ICON_SIZE + ICON_GAP;
+    let width = (text_x + text_width + PADDING_X).clamp(96, 1400);
+    let mut rgba = vec![0_u8; (width * HEIGHT * 4) as usize];
+    draw_menu_bar_bifrost_icon(&mut rgba, width, PADDING_X, (HEIGHT - ICON_SIZE) / 2);
+    draw_font_text(
+        &mut rgba,
+        width,
+        text_x as f32,
+        TEXT_BASELINE,
+        FONT_PX,
+        &text,
+        font,
+    );
+
+    Some(MenuBarStatsBitmap {
+        rgba,
+        width,
+        height: HEIGHT,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn draw_menu_bar_bifrost_icon(rgba: &mut [u8], canvas_width: u32, x: u32, y: u32) {
+    let Some(icon) = menu_bar_bifrost_icon_alpha() else {
+        return;
+    };
+    for row in 0..icon.height {
+        for col in 0..icon.width {
+            let alpha = icon.alpha[(row * icon.width + col) as usize];
+            if alpha == 0 {
+                continue;
+            }
+            let idx = (((y + row) * canvas_width + x + col) * 4) as usize;
+            if idx + 3 < rgba.len() {
+                rgba[idx] = 0;
+                rgba[idx + 1] = 0;
+                rgba[idx + 2] = 0;
+                rgba[idx + 3] = alpha;
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct MenuBarIconAlpha {
+    alpha: Vec<u8>,
+    width: u32,
+    height: u32,
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_bifrost_icon_alpha() -> Option<&'static MenuBarIconAlpha> {
+    static ICON: OnceLock<Option<MenuBarIconAlpha>> = OnceLock::new();
+    ICON.get_or_init(|| {
+        const ICON_SIZE: u32 = 78;
+        let img =
+            image::load_from_memory(include_bytes!("../../../../../assets/trayTemplate@2x.png"))
+                .ok()?
+                .to_rgba8();
+        let resized = image::imageops::resize(
+            &img,
+            ICON_SIZE,
+            ICON_SIZE,
+            image::imageops::FilterType::Lanczos3,
+        );
+        let alpha = resized.pixels().map(|pixel| pixel[3]).collect();
+        Some(MenuBarIconAlpha {
+            alpha,
+            width: ICON_SIZE,
+            height: ICON_SIZE,
+        })
+    })
+    .as_ref()
+}
+
+#[cfg(target_os = "macos")]
+fn menu_bar_stats_font() -> Option<&'static fontdue::Font> {
+    static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
+    FONT.get_or_init(|| {
+        [
+            "/System/Library/Fonts/SFNSMono.ttf",
+            "/System/Library/Fonts/Menlo.ttc",
+            "/System/Library/Fonts/Courier.ttc",
+            "/System/Library/Fonts/SFNS.ttf",
+        ]
+        .iter()
+        .find_map(|path| {
+            let bytes = fs::read(path).ok()?;
+            fontdue::Font::from_bytes(bytes, fontdue::FontSettings::default()).ok()
+        })
+    })
+    .as_ref()
+}
+
+#[cfg(target_os = "macos")]
+fn measure_text_width(font: &fontdue::Font, text: &str, font_px: f32) -> u32 {
+    text.chars()
+        .map(|ch| font.metrics(ch, font_px).advance_width)
+        .sum::<f32>()
+        .ceil() as u32
+}
+
+#[cfg(target_os = "macos")]
+fn draw_font_text(
+    rgba: &mut [u8],
+    canvas_width: u32,
+    x: f32,
+    baseline_y: i32,
+    font_px: f32,
+    text: &str,
+    font: &fontdue::Font,
+) {
+    let mut cursor_x = x;
+    for ch in text.chars() {
+        let (metrics, bitmap) = font.rasterize(ch, font_px);
+        let glyph_x = cursor_x.round() as i32 + metrics.xmin;
+        let glyph_y = baseline_y - metrics.ymin - metrics.height as i32;
+        draw_rasterized_glyph(rgba, canvas_width, glyph_x, glyph_y, metrics.width, &bitmap);
+        draw_rasterized_glyph(
+            rgba,
+            canvas_width,
+            glyph_x + 1,
+            glyph_y,
+            metrics.width,
+            &bitmap,
+        );
+        cursor_x += metrics.advance_width;
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn draw_rasterized_glyph(
+    rgba: &mut [u8],
+    canvas_width: u32,
+    x: i32,
+    y: i32,
+    glyph_width: usize,
+    bitmap: &[u8],
+) {
+    for (idx, alpha) in bitmap.iter().enumerate() {
+        if *alpha == 0 {
+            continue;
+        }
+        let px = x + (idx % glyph_width) as i32;
+        let py = y + (idx / glyph_width) as i32;
+        if px < 0 || py < 0 || px as u32 >= canvas_width {
+            continue;
+        }
+        let out_idx = ((py as u32 * canvas_width + px as u32) * 4) as usize;
+        if out_idx + 3 < rgba.len() {
+            rgba[out_idx] = 0;
+            rgba[out_idx + 1] = 0;
+            rgba[out_idx + 2] = 0;
+            rgba[out_idx + 3] = rgba[out_idx + 3].max(*alpha);
         }
     }
 }
@@ -606,30 +864,44 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
     }
 }
 
-fn load_tray_system_stats_enabled(data_dir: &Path) -> bool {
+fn load_tray_system_stats_config(data_dir: &Path) -> TraySystemStatsConfig {
     let path = data_dir.join("config.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return TraySystemStatsConfig {
+                enabled: true,
+                items: bifrost_storage::TraySystemStatsItems::default(),
+            };
+        }
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
                 "failed to read tray system stats config; keeping system stats enabled"
             );
-            return true;
+            return TraySystemStatsConfig {
+                enabled: true,
+                items: bifrost_storage::TraySystemStatsItems::default(),
+            };
         }
     };
 
     match toml::from_str::<bifrost_storage::UnifiedConfig>(&content) {
-        Ok(config) => config.tray.show_system_stats,
+        Ok(config) => TraySystemStatsConfig {
+            enabled: config.tray.show_system_stats,
+            items: config.tray.system_stats_items,
+        },
         Err(error) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %error,
                 "failed to parse tray system stats config; keeping system stats enabled"
             );
-            true
+            TraySystemStatsConfig {
+                enabled: true,
+                items: bifrost_storage::TraySystemStatsItems::default(),
+            }
         }
     }
 }
@@ -735,8 +1007,12 @@ fn load_menu_data_snapshot(
         system_proxy,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
-        system_stats: load_tray_system_stats_enabled(&args.data_dir)
-            .then(SystemStatsMenuLines::collecting),
+        system_stats: {
+            let stats_config = load_tray_system_stats_config(&args.data_dir);
+            stats_config
+                .visible()
+                .then(|| SystemStatsMenuLines::collecting(&stats_config.items))
+        },
     }
 }
 
@@ -874,6 +1150,11 @@ fn build_menu_from_snapshot(
     data_dir: &str,
     upgrade_in_progress: bool,
 ) -> Vec<MenuEntry> {
+    #[cfg(target_os = "macos")]
+    let menu_system_stats = None;
+    #[cfg(not(target_os = "macos"))]
+    let menu_system_stats = snapshot.system_stats.as_ref();
+
     menu::build_menu(
         snapshot.runtime.as_ref(),
         state,
@@ -887,7 +1168,7 @@ fn build_menu_from_snapshot(
         snapshot.system_proxy.as_ref(),
         snapshot.update_available.as_deref(),
         upgrade_in_progress,
-        snapshot.system_stats.as_ref(),
+        menu_system_stats,
     )
 }
 
@@ -2257,15 +2538,16 @@ fn poll_system_stats(
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     generation: &AtomicU64,
 ) {
-    let mut sampler = SystemStatsSampler::new();
+    let mut sampler = SystemStatsSampler::new(&args.data_dir);
     loop {
         if quit_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        if load_tray_system_stats_enabled(&args.data_dir) {
-            let snapshot = sampler.sample(Instant::now());
-            let lines = system_stats::menu_lines(&snapshot);
+        let stats_config = load_tray_system_stats_config(&args.data_dir);
+        if stats_config.visible() {
+            let snapshot = sampler.sample(Instant::now(), &stats_config.items);
+            let lines = system_stats::menu_lines(&snapshot, &stats_config.items);
             update_system_stats_snapshot(Some(lines), menu_data, generation);
         } else {
             sampler.reset_network_baseline();
