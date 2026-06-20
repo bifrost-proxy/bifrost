@@ -44,6 +44,7 @@ use crate::handlers::{
     trust_probe::{handle_trust_probe_api, handle_trust_probe_public},
     user::handle_user,
     values::handle_values,
+    videos::handle_videos,
     voice::handle_voice,
     websocket::handle_websocket_upgrade,
     whitelist::handle_whitelist_request,
@@ -179,6 +180,8 @@ impl AdminRouter {
         } else if path.starts_with("/api/values") {
             let path_suffix = path.strip_prefix("/api/values").unwrap_or("");
             handle_values(req, state, path_suffix).await
+        } else if path.starts_with("/api/videos") {
+            handle_videos(req, path).await
         } else if path.starts_with("/api/whitelist") {
             if let Some(access_control) = &state.access_control {
                 handle_whitelist_request(

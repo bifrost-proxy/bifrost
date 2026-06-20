@@ -5,6 +5,7 @@ import { CloudOutlined, RobotOutlined, ToolOutlined } from "@ant-design/icons";
 import AgentTab from "../Settings/tabs/AgentTab";
 import ImGatewayTab from "../Settings/tabs/ImGatewayTab";
 import ASR from "../ASR";
+import VideosTool from "./VideosTool";
 import { getAsrCapabilities } from "../../api/asr";
 import AgentChatSection from "./AgentChatSection";
 import {
@@ -22,6 +23,12 @@ type AiSection =
       id: "tools-asr";
       group: "tools";
       section: "asr";
+      label: string;
+    }
+  | {
+      id: "tools-videos";
+      group: "tools";
+      section: "videos";
       label: string;
     }
   | {
@@ -79,6 +86,12 @@ export default function AI() {
             },
           ]
         : []),
+      {
+        id: "tools-videos" as const,
+        group: "tools" as const,
+        section: "videos" as const,
+        label: "Videos",
+      },
       ...AGENT_SECTION_NAV.map((section) => ({
         id: `agent-${section.id}` as const,
         group: "agent" as const,
@@ -363,6 +376,9 @@ export default function AI() {
             <AgentTab hideSectionNav />
           ) : activeSection.group === "im-gateway" ? (
             <ImGatewayTab hideSectionNav />
+          ) : activeSection.group === "tools" &&
+            activeSection.section === "videos" ? (
+            <VideosTool />
           ) : (
             <ASR />
           )}

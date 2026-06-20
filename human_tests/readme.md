@@ -64,6 +64,7 @@
 | [breakpoint-hook.md](./breakpoint-hook.md) | Breakpoint Rule Gating | 15 | Toolbar 单一全局开关、`breakpoint://request` / `breakpoint://response` 规则应用、pause/resume、暂停期间关闭 breakpoint、breakpoint OFF 回归、large body 默认关闭性能回归、oversized body header-only pause、response timeout 自动放行、request/response 小 body 与 headers 编辑、规则编辑器智能提示、OpenAPI 与 UI 分工、侧边栏 OpenAPI 入口、协议 registry 同步 |
 | [remote-access-web-ui.md](./remote-access-web-ui.md) | 远程访问管理 Web UI | 17 | 远程访问配置、登录、会话管理、登录记录展示 |
 | [remote-access-brute-force-protection.md](./remote-access-brute-force-protection.md) | 远程访问暴力破解防护 | 13 | 登录失败计数、自动锁定、密码强度校验、本机恢复、前端锁定提示 |
+| [videos-tool.md](./videos-tool.md) | Videos Tool | 4 | AI/TOOLS 下 YouTube 下载入口、默认 Downloads/YouTube、自定义目录、下载进度展示、非 YouTube URL 拒绝 |
 | [webui-traffic.md](./webui-traffic.md) | Web UI Traffic 页面 | 51 | 流量表格、详情面板、Tab 切换、Body 视图、筛选过滤（含主筛选器按代理端口过滤与临时停用单条条件）、右键菜单、CONNECT Response 空状态按 Client IP 开启 TLS 解包和访问白名单、Network .bifrost 导入导出空包防误报、WebSocket/SSE、搜索、高并发 CONNECT 压力 |
 | [network-export.md](./network-export.md) | Network 导出生效规则快照 | 4 | 默认端口与自定义端口 Network `.bifrost` 导出携带对应端口生效规则快照，保持空选择防护和旧文件导入兼容 |
 | [webui-rules.md](./webui-rules.md) | Web UI Rules 页面 | 46 | 规则列表、创建/编辑/删除、排序方式 UI 配置持久化、语法高亮、自动补全、树形视图、`@规则名称` 与 `@组名称/规则名称` 引用解析、候选检索、模糊补全、编辑器原位展开、缺失引用标红和 hover 错误提示、保存时后端语法错误反馈且不落盘、`commented-*` 规则名与注释内 `@` 边界、Dynamic Island、Merged Rules 一键复制、Group active summary 与代理运行时本地 fallback、远端失败和快速本地变更稳定性、Group name 深链不返回 502、退出/重新登录后 Group ID 跳转保持、导入导出、桌面端编辑器快捷键回归、Undo 后保存清理黄点、编辑器内容恢复原文后 Save 按钮禁用回归 |
