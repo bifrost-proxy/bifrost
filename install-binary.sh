@@ -1121,9 +1121,22 @@ path_in_current_process() {
 
 prepend_current_process_path() {
     local dir="$1"
-    if ! path_in_current_process "$dir"; then
-        export PATH="$dir:$PATH"
-    fi
+    local new_path="$dir"
+    local entry
+    local normalized_dir="${dir%/}"
+
+    IFS=':' read -r -a path_entries <<<"$PATH"
+    for entry in "${path_entries[@]}"; do
+        if [ -z "$entry" ]; then
+            continue
+        fi
+        if [ "${entry%/}" = "$normalized_dir" ]; then
+            continue
+        fi
+        new_path="$new_path:$entry"
+    done
+
+    export PATH="$new_path"
 }
 
 windows_path_powershell_command() {
@@ -1141,26 +1154,32 @@ if ($null -eq $current) {
 
 $normalizedDir = $dir.Trim().TrimEnd('\')
 $exists = $false
+$entries = @()
 foreach ($entry in ($current -split ';')) {
     if ($entry.Trim().TrimEnd('\') -ieq $normalizedDir) {
         $exists = $true
-        break
+        continue
     }
+    if (-not [string]::IsNullOrWhiteSpace($entry)) {
+        $entries += $entry
+    }
+}
+
+if ($entries.Count -eq 0) {
+    $newPath = $dir
+} else {
+    $newPath = $dir + ';' + ($entries -join ';')
+}
+
+if ($newPath -ne $current) {
+    [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
 }
 
 if ($exists) {
     Write-Output "already"
-    exit 0
-}
-
-if ([string]::IsNullOrWhiteSpace($current)) {
-    $newPath = $dir
 } else {
-    $newPath = $current.TrimEnd(';') + ';' + $dir
+    Write-Output "added"
 }
-
-[Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
-Write-Output "added"
 PS
 }
 

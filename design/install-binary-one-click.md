@@ -33,6 +33,7 @@
 - 使用安装目录中的绝对二进制路径执行命令，避免当前 shell 的 `PATH` 尚未刷新时找不到 `bifrost`。
 - Windows 下 Bash installer 不再只写 Git Bash 的 `~/.bashrc` 并提示用户手动改系统 PATH，而是同时通过 PowerShell 自动把安装目录写入 Windows User `Path`。这样新开的 PowerShell、CMD 和 Git Bash 都能直接执行 `bifrost`；已经打开的 PowerShell/CMD 仍需要重启，这是 Windows 进程环境继承机制决定的。
 - PowerShell installer 安装完成后自动把安装目录写入 Windows User `Path`，并同步更新当前 `$env:Path`。通过 `irm ... | iex` 在当前 PowerShell 会话安装时，安装结束后同一窗口即可直接执行 `bifrost`。
+- PowerShell installer 必须兼容 Windows PowerShell 5.1：架构检测不能只依赖 `RuntimeInformation.OSArchitecture` 的单一字符串形态，还要兼容 `PROCESSOR_ARCHITEW6432` / `PROCESSOR_ARCHITECTURE` 的 `ARM64`、`AMD64` 等 Windows 环境变量；下载前必须显式加载 `System.Net.Http`；解压路径拼接不能使用 PowerShell 7 才支持的多参数 `Join-Path`。安装目录写入 `Path` 时采用“去重后前置”，确保机器上已有 cargo/npm 等旧 `bifrost.exe` 时，新安装的二进制在当前 PowerShell 和新窗口中优先生效。
 - `start --daemon --yes` 保持 `bifrost start` 的默认正式实例语义，同时自动确认启动过程中的证书检查和已有进程重启提示，并让安装脚本能够正常返回。
 - post-install 单步失败只记录 warning 和可重试命令，不回滚已经安装好的 CLI 二进制。原因是证书信任可能受系统权限、管理员授权或平台安全策略影响，失败时用户仍应保留可用 CLI。
 - post-install 每个子命令默认有 `BIFROST_INSTALL_POST_INSTALL_TIMEOUT=120` 秒 watchdog。证书安装、skills 安装或服务启动任一步骤卡住时，安装脚本返回该步骤失败并继续收敛后续提示，不能永久占住用户终端。
@@ -100,11 +101,13 @@
   - 验证最快源完整下载失败后继续回退到 `github.com`。
   - 验证 `BIFROST_DOWNLOAD_TIMEOUT` 和 `BIFROST_DOWNLOAD_TRIES` 在 PowerShell installer 中可解析。
   - 验证 Windows User `Path` helper 对大小写和尾斜杠不敏感，并且追加安装目录时保持幂等。
+  - 验证 Windows PowerShell 5.1 兼容性：`System.Net.Http` 可显式加载、archive 内二进制路径拼接不使用多参数 `Join-Path`、`Arm64` / `ARM64` / `AMD64` 架构输入可映射到 release target，Windows User `Path` 会去重并前置安装目录。
 - 新增 `e2e-tests/tests/test_install_binary_windows_path.sh`：
   - source `install-binary.sh` 并设置 `BIFROST_INSTALL_BINARY_SKIP_MAIN=1`，避免真实下载 release。
   - stub `cygpath` 和 `powershell.exe`，验证 Windows Git Bash 安装路径会转换为 Windows 路径并写入 Windows User `Path`。
   - 验证 Git Bash `~/.bashrc` 仍会写入安装目录，重复执行不会追加重复 PATH 行。
   - 验证 `--no-modify-path` 会同时跳过 Git Bash rc 和 Windows User `Path` 写入。
+  - 验证当前 Git Bash 进程 PATH 会去重并前置安装目录，避免已有旧 `bifrost` 抢先命中。
 - 新增 `e2e-tests/tests/test_install_binary_post_install.sh`：
   - source `install-binary.sh` 并设置 `BIFROST_INSTALL_BINARY_SKIP_MAIN=1`，避免真实下载 release。
   - 设置 `BIFROST_INSTALL_POST_INSTALL_DRY_RUN=1`，验证默认命令顺序为 `ca install` -> `install-skill --tool all -y` -> `start --daemon --yes`。

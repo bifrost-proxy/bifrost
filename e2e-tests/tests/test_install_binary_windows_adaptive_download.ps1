@@ -158,19 +158,40 @@ Run-Case "download timeout env" {
     Remove-Item Env:BIFROST_DOWNLOAD_TRIES -ErrorAction SilentlyContinue
 }
 
+Run-Case "System.Net.Http is loaded for Windows PowerShell downloads" {
+    Ensure-SystemNetHttp
+    Assert-Eq ([string](("System.Net.Http.HttpClient" -as [type]) -ne $null)) "True" "HttpClient type is available after Ensure-SystemNetHttp"
+}
+
+Run-Case "archive binary path helper is compatible with Windows PowerShell 5.1" {
+    $joined = Join-Path3 -Path "C:\Temp\extract" -ChildPath "bifrost-v1-target" -GrandchildPath "bifrost.exe"
+    Assert-Eq $joined "C:\Temp\extract\bifrost-v1-target\bifrost.exe" "Join-Path3 builds nested archive binary path"
+}
+
 Run-Case "Windows User PATH helper is case-insensitive and slash-tolerant" {
     $pathList = "C:\Tools;C:\Users\eden_studio\.local\bin\;C:\Other"
     $contains = Test-PathListContains -PathList $pathList -Directory "c:\users\EDEN_STUDIO\.local\bin"
     Assert-Eq ([string]$contains) "True" "PATH helper detects existing entry regardless of case and trailing slash"
 }
 
-Run-Case "Windows User PATH helper appends once" {
+Run-Case "Windows User PATH helper prepends and deduplicates" {
     $pathList = "C:\Tools;C:\Other"
     $updated = Add-PathListEntry -PathList $pathList -Directory "C:\Users\eden_studio\.local\bin"
-    Assert-Eq $updated "C:\Tools;C:\Other;C:\Users\eden_studio\.local\bin" "PATH helper appends missing install dir"
+    Assert-Eq $updated "C:\Users\eden_studio\.local\bin;C:\Tools;C:\Other" "PATH helper prepends missing install dir"
 
-    $again = Add-PathListEntry -PathList $updated -Directory "c:\users\EDEN_STUDIO\.local\bin\"
+    $again = Add-PathListEntry -PathList "C:\Tools;c:\users\EDEN_STUDIO\.local\bin\;C:\Other" -Directory "C:\Users\eden_studio\.local\bin"
     Assert-Eq $again $updated "PATH helper does not duplicate existing install dir"
+}
+
+Run-Case "architecture helper maps RuntimeInformation values" {
+    Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture "X64" -NativeArchitecture "" -ProcessArchitecture "" -Is64BitOperatingSystem $true) "x86_64" "RuntimeInformation X64 maps to x86_64"
+    Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture "Arm64" -NativeArchitecture "" -ProcessArchitecture "" -Is64BitOperatingSystem $true) "aarch64" "RuntimeInformation Arm64 maps to aarch64"
+}
+
+Run-Case "architecture helper falls back to Windows environment variables" {
+    Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture "unknown" -NativeArchitecture "ARM64" -ProcessArchitecture "x86" -Is64BitOperatingSystem $true) "aarch64" "PROCESSOR_ARCHITEW6432 ARM64 wins for 32-bit PowerShell on ARM64 Windows"
+    Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture $null -NativeArchitecture "" -ProcessArchitecture "AMD64" -Is64BitOperatingSystem $true) "x86_64" "PROCESSOR_ARCHITECTURE AMD64 maps to x86_64"
+    Assert-Eq (Resolve-BifrostArchitecture -RuntimeArchitecture $null -NativeArchitecture "" -ProcessArchitecture "" -Is64BitOperatingSystem $true) "x86_64" "64-bit OS fallback maps to x86_64"
 }
 
 Remove-Item Env:BIFROST_INSTALL_BINARY_SKIP_MAIN -ErrorAction SilentlyContinue
