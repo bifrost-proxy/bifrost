@@ -5,8 +5,8 @@
 Tray 新增 macOS 全系统状态展示能力，默认开启。macOS 上优先在菜单栏 status item 中以模板图像常驻展示紧凑状态，避免用户每次点开菜单才能看到：
 
 - Bifrost 原图标保持与未启用系统状态时一致的视觉大小。
-- 图标右侧使用等宽字体展示 `Cxx% | Mxx% | Dxx% | ↑nnnU/s | ↓nnnU/s`，其中 `C/M/D` 分别表示 CPU、Memory、Disk。
-- 百分比不足两位时补 `0`，网速数字始终三位；等宽数字避免 `1/8/0` 字宽不同造成菜单栏左右抖动。
+- 图标右侧使用等宽字体展示紧凑文本，例如 `C20% M55% D55% ↑001M ↓512K`，其中 `C/M/D` 分别表示 CPU、Memory、Disk。
+- 百分比保持固定宽度，网速数字始终三位；等宽数字避免 `1/8/0` 字宽不同造成菜单栏左右抖动。
 
 这些指标表示整台机器的状态，不表示 Bifrost 进程自身资源消耗，也不表示 Bifrost 代理流量聚合。Windows 明确不支持 Tray 系统信息：不采样 CPU、内存、磁盘或网速，不展示菜单详情，不暴露 Settings 系统信息配置项。原因是 Windows notification area 对图标信息承载有限，把系统信息放进点击菜单会造成体验和性能折扣。
 
@@ -33,9 +33,11 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 系统状态仅在 macOS 由 `bifrost __tray` helper 本地采样，不经过 Admin API：
 
 - Tray helper 在独立进程运行，即使 Bifrost 主服务繁忙、停止或 Admin API 无响应，也可以继续更新机器状态。
-- 采样线程每 3 秒刷新菜单栏系统状态；CPU、内存和磁盘每 3 秒刷新一次并复用最近值。
-- 使用同一个 `sysinfo::System`、`sysinfo::Networks` 与 `sysinfo::Disks` 实例循环刷新，避免 CPU 与网络差值类指标在重建实例时失真。
+- 采样线程每 3 秒刷新系统状态快照；CPU、内存每 3 秒刷新一次并复用最近值，磁盘按 30 秒窗口刷新。
+- macOS CPU 使用 Mach `host_statistics(HOST_CPU_LOAD_INFO)` 的 tick delta 计算，内存使用 `host_statistics64(HOST_VM_INFO64)` 与 `sysctl HW_MEMSIZE`，避免为菜单栏状态走较重的通用系统刷新路径。
+- macOS 网络接口计数使用 `getifaddrs` 读取 `AF_LINK` 的 `if_data.ifi_ibytes/ifi_obytes`，避免 `sysinfo::Networks::refresh()` 的额外列表刷新成本。
 - 磁盘百分比按当前 `data_dir` 所在挂载点计算，避免随便取第一个磁盘导致显示与用户实际数据目录无关。
+- 磁盘使用 `statvfs(mount_point)` 读取当前挂载点容量，不在周期路径刷新完整磁盘列表。
 - 网络速率优先使用系统默认出站接口。macOS 通过 `route -n get default` 获取 IPv4 默认路由 interface，并在缺失时回退到 `route -n get -inet6 default`；随后按该接口的内核累计字节计数计算吞吐。获取不到默认接口时，才回退到最活跃的非虚拟物理接口。
 - 每个接口保存平台累计字节计数，下一次采样用同一接口的累计差值除以 `Instant` 单调时钟间隔，转换为 bytes/sec 后格式化。
 - 首次采样、网卡新增/移除、计数回退或采样间隔小于 900ms 时，该接口当前拍不参与速率计算，避免显示虚高尖峰。
@@ -59,12 +61,12 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 
 - 3 秒刷新能明显降低 tray helper 空闲 CPU，同时仍足够观察菜单栏趋势；CPU/内存按 3 秒刷新，网速每 3 秒按累计字节差分刷新。磁盘容量变化和默认路由/网卡列表变化相对慢，分别按 30 秒和 60 秒刷新，避免频繁 I/O 和系统路由查询。
 - 采样只在 tray helper 本地执行，不访问 Admin API，不阻塞主代理进程。
-- 当 `show_system_stats=false` 或所有 `system_stats_items` 子项均关闭时，线程只读取配置并清空菜单状态，不执行 `sysinfo` CPU/内存/网络采样；当 Upload/Download 均关闭但 CPU/Memory/Disk 仍开启时，只刷新非网络指标并重置网络累计基线，避免把关闭期间的字节变化折算成当前速率。
-- 子项关闭时跳过对应重采样：CPU/Memory 均关闭时不刷新 `sysinfo::System`，Disk 关闭或未到 30 秒窗口时不刷新磁盘列表，Upload/Download 均关闭时不刷新网络计数。
-- Mac 本地 release microbench 使用 `sysinfo 0.31.4` 连续执行 500 次采样，单次平均 1.1796ms、最大 1.8934ms；按采样耗时估算，1s/2s/3s 刷新分别约为 0.1180% / 0.0590% / 0.0393% 单核 CPU。
-- Mac debug tray helper 真实进程 warm-up 5 秒后采样 20 秒：网络 1 秒、CPU/内存 3 秒刷新开启系统状态时平均 CPU 0.4700%、RSS 67,989KB；关闭系统状态时平均 CPU 0.0600%、RSS 67,076KB。增量约 0.4100% CPU 与 913KB RSS，处在可接受范围。
+- 当 `show_system_stats=false` 或所有 `system_stats_items` 子项均关闭时，线程只读取配置并清空菜单状态，不执行 CPU/内存/网络采样；当 Upload/Download 均关闭但 CPU/Memory/Disk 仍开启时，只刷新非网络指标并重置网络累计基线，避免把关闭期间的字节变化折算成当前速率。
+- 子项关闭时跳过对应重采样：CPU 关闭时不读取 CPU tick，Memory 关闭时不读取 VM 统计，Disk 关闭或未到 30 秒窗口时不执行 `statvfs`，Upload/Download 均关闭时不读取网络计数。
+- 真实性能优化结论是 macOS `set_icon` 才是主要尖峰来源。系统状态快照仍每 3 秒采样并更新菜单数据，但周期性系统状态文本变化不再调用 `set_icon`；菜单栏图像只在启动、服务 Running/Stopped/Disconnected 状态变化、进入系统状态显示或退出系统状态显示时更新，避免 AppKit status item 位图重设造成 2-3% CPU 峰值。
+- 最终 release 真实采样在所有系统信息展示均启用时执行：`show_system_stats=true` 且 `cpu/memory/disk/upload/download=true`，warm-up 15 秒后采集 120 个 1 秒样本，tray helper 平均 CPU `0.0467%`，最大 CPU `0.7000%`，`over_1=0`、`over_1_5=0`，满足平均低于 1% 且不超过 1.5% 的目标。
 
-若后续真实用户机器上看到明显 CPU 增高，优先进一步减少未变化文本的图像重绘，或把 CPU/内存/磁盘刷新间隔调高到 5 秒；只有存在明确用户需求时再增加 Settings 中的刷新频率选项。
+若后续真实用户机器上看到明显 CPU 增高，优先排查是否又引入了周期性 AppKit `set_icon` / 原生菜单对象重建；其次再考虑把 CPU/内存/磁盘刷新间隔调高到 5 秒。只有存在明确用户需求时再增加 Settings 中的刷新频率选项。
 
 ### 菜单更新
 
@@ -74,22 +76,20 @@ macOS 系统状态进入菜单栏 status item 常驻图像，展开菜单不重�
 
 ### macOS 菜单栏常驻标题
 
-`tray-icon 0.19` 在 macOS 上会把 icon 按系统菜单栏高度缩放，因此系统状态开启且服务 Running 时，helper 生成一张透明模板图像作为 status item icon。模板图左侧绘制占满图像高度的 Bifrost template icon，确保开启系统状态后图标视觉大小不小于原版；右侧用 SF Mono/Menlo 等宽字体绘制固定宽度状态文本 `Cxx% | Mxx% | Dxx% | ↑nnnU/s | ↓nnnU/s`。关闭 `show_system_stats`、关闭全部子项或服务不在 Running 状态时恢复普通 Bifrost 图标。
+`tray-icon 0.19` 在 macOS 上会把 icon 按系统菜单栏高度缩放，因此系统状态开启且服务 Running 时，helper 生成一张透明模板图像作为 status item icon。模板图左侧绘制占满图像高度的 Bifrost template icon，确保开启系统状态后图标视觉大小不小于原版；右侧用 SF Mono/Menlo 等宽字体绘制固定宽度状态文本，例如 `C20% M55% D55% ↑001M ↓512K`。关闭 `show_system_stats`、关闭全部子项或服务不在 Running 状态时恢复普通 Bifrost 图标。为控制 CPU，系统状态文本内容的周期变化不再触发 status item icon 重绘。
 
 macOS 展开菜单不再重复展示 `System:` / `Network:` 两排资源信息，避免同一信息同时出现在菜单栏和下拉菜单。Windows notification area 的 `set_title` 在当前 `tray-icon` 实现中是 no-op，系统托盘也没有 macOS 这种可横向常驻文本区域，因此 Windows 不支持 Tray 系统信息，而不是用菜单详情降级。
 
 ## 依赖项
 
-- `bifrost-cli` 在 macOS tray 构建下使用 `sysinfo = "0.31"` 采样系统状态。
+- `bifrost-cli` 在 macOS tray 构建下使用 libc Mach、`getifaddrs` 和 `statvfs` 采样系统状态；非 macOS 保留 `sysinfo = "0.31"` 类型边界但产品层面不启用系统信息展示。
 - 不新增 Tauri tray 依赖；仍复用现有 `tao` + `tray-icon` helper。
 
 ## Windows / macOS 兼容调研
 
-- `tray-icon` 的 `MenuItem`/`CheckMenuItem` 支持 `set_text`，满足高频文本原地更新需求。
-- `sysinfo 0.31.4` 支持 macOS 的 CPU、内存和网络接口统计；CPU 使用率依赖同一实例连续刷新，网络速率使用 `total_received()` / `total_transmitted()` 平台累计计数自行计算。
-- macOS 侧 `sysinfo` 读取 `if_msghdr2.ifm_data.ifi_ibytes/ifi_obytes`，属于系统原生累计计数来源。
+- `tray-icon` 的 `MenuItem`/`CheckMenuItem` 支持 `set_text`，满足普通菜单项原地更新需求；菜单栏 status item 位图不应随系统状态文本高频重设。
+- macOS CPU/内存用 Mach host statistics；网络用 `getifaddrs` 暴露的 `if_data.ifi_ibytes/ifi_obytes` 原生累计计数；磁盘用 `statvfs`。
 - Windows 虽然可以通过 `GetIfTable2` / `GetIfEntry2` 读取 `InOctets` / `OutOctets`，但产品层面不支持 Tray 系统信息，避免 notification area 菜单展示和后台采样带来的体验/性能折扣。
-- 如果后续 macOS 发现内存或 CPU 数值与系统 Activity Monitor 口径偏差不可接受，fallback 方案是 macOS `host_statistics64` / `sysctl` 平台封装。
 
 ## 测试方案
 

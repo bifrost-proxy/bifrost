@@ -64,13 +64,13 @@
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
-                menu_bar: "C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string(),
+                menu_bar: "C20% M55% D55% ↑001M ↓512K".to_string(),
             }),
         };
 
         assert_eq!(
             menu_bar_stats_title(&snapshot, ServiceState::Running),
-            Some("C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string())
+            Some("C20% M55% D55% ↑001M ↓512K".to_string())
         );
         assert_eq!(menu_bar_stats_title(&snapshot, ServiceState::Stopped), None);
     }
@@ -78,7 +78,7 @@
     #[cfg(target_os = "macos")]
     #[test]
     fn test_menu_bar_stats_bitmap_is_compact_and_non_empty() {
-        let bitmap = render_menu_bar_stats_bitmap("C23% | M56% | D59% | ↑002M/s | ↓512K/s")
+        let bitmap = render_menu_bar_stats_bitmap("C20% M55% D55% ↑001M ↓512K")
             .expect("bitmap");
 
         assert_eq!(bitmap.height, 78);
@@ -125,7 +125,7 @@
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
-                menu_bar: "C23% | M56% | D59% | ↑002M/s | ↓512K/s".to_string(),
+                menu_bar: "C20% M55% D55% ↑001M ↓512K".to_string(),
             }),
         };
 
