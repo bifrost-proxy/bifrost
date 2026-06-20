@@ -23,17 +23,34 @@ Bifrost 是一个用 Rust 编写的高性能，AI 友好的代理服务器，灵
 
 方法一：使用脚本安装
 
+macOS / Linux / Git Bash：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash
 ```
 
+Windows PowerShell：
+
+```powershell
+irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1 | iex
+```
+
 该脚本默认会继续安装并信任 CA 证书、安装所有 Bifrost AI skills，并以后台服务启动 Bifrost；安装完成后可直接访问管理端。
-Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中也可通过 `BIFROST_GITHUB_MIRROR` 指定优先镜像。
+Bash 与 PowerShell 安装脚本都会自动探测 GitHub 直连和内置镜像源，优先使用最快可用的 release 下载地址；受限网络中也可通过 `BIFROST_GITHUB_MIRROR` 指定优先镜像。Windows PowerShell 脚本会把安装目录加入当前会话和 Windows 用户 `Path`；Git Bash 脚本在 Windows 下也会同步写入 Windows 用户 `Path`，新打开的 PowerShell/CMD 可直接执行 `bifrost`。
 
 安装指定版本
 
+macOS / Linux / Git Bash：
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.sh | bash -s -- --version v0.0.96
+```
+
+Windows PowerShell：
+
+```powershell
+$installer = irm https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/install-binary.ps1
+& ([scriptblock]::Create($installer)) -Version v0.0.96
 ```
 
 方法二：使用 npm 安装
