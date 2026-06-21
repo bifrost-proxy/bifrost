@@ -734,6 +734,8 @@ struct NativeStatsStatusItem {
     item: Retained<NSStatusItem>,
     menu_delegate: Retained<NativeStatsMenuDelegate>,
     rendered_image: Option<NativeStatsImage>,
+    rendered_title: Option<String>,
+    render_scratch: Option<MenuBarStatsBitmap>,
     mtm: MainThreadMarker,
     _main_thread_only: PhantomData<std::rc::Rc<()>>,
 }
@@ -761,6 +763,8 @@ impl NativeStatsStatusItem {
             item,
             menu_delegate,
             rendered_image: None,
+            rendered_title: None,
+            render_scratch: None,
             mtm,
             _main_thread_only: PhantomData,
         };
@@ -789,13 +793,19 @@ impl NativeStatsStatusItem {
     }
 
     fn set_title(&mut self, title: Option<&str>) {
-        let Some(bitmap) = render_native_menu_bar_status_bitmap(title) else {
+        if self.rendered_title.as_deref() == title {
+            return;
+        }
+        let Some(bitmap) =
+            render_native_menu_bar_status_bitmap_reusing(title, self.render_scratch.take())
+        else {
             return;
         };
         let Some(button) = self.item.button(self.mtm) else {
+            self.render_scratch = Some(bitmap);
             return;
         };
-        let image = match self.rendered_image.as_mut() {
+        let (image, image_changed) = match self.rendered_image.as_mut() {
             Some(rendered)
                 if rendered.width == bitmap.width
                     && rendered.height == bitmap.height
@@ -805,7 +815,7 @@ impl NativeStatsStatusItem {
                     &bitmap,
                     rendered.image_rep.as_deref().expect("checked image rep"),
                 ) {
-                    rendered.image.clone()
+                    (rendered.image.clone(), false)
                 } else {
                     self.rendered_image = None;
                     let Some(rendered) = native_stats_image_from_bitmap(&bitmap)
@@ -815,7 +825,7 @@ impl NativeStatsStatusItem {
                     };
                     let image = rendered.image.clone();
                     self.rendered_image = Some(rendered);
-                    image
+                    (image, true)
                 }
             }
             _ => {
@@ -826,18 +836,26 @@ impl NativeStatsStatusItem {
                 };
                 let image = rendered.image.clone();
                 self.rendered_image = Some(rendered);
-                image
+                (image, true)
             }
         };
         let width_points = f64::from(bitmap.width) / 2.0;
         let height_points = f64::from(bitmap.height) / 2.0;
-        image.setSize(NSSize::new(width_points, height_points));
-        image.setTemplate(true);
-        self.item.setLength(width_points);
-        button.setImage(Some(&image));
-        button.setImagePosition(NSCellImagePosition::ImageOnly);
+        if image_changed {
+            image.setSize(NSSize::new(width_points, height_points));
+            image.setTemplate(true);
+            self.item.setLength(width_points);
+            button.setImage(Some(&image));
+            button.setImagePosition(NSCellImagePosition::ImageOnly);
+        } else {
+            unsafe {
+                let _: () = msg_send![&button, setNeedsDisplay: true];
+            }
+        }
         let label = NSString::from_str(&native_stats_accessibility_label(title));
         button.setAccessibilityLabel(Some(&label));
+        self.rendered_title = title.map(ToString::to_string);
+        self.render_scratch = Some(bitmap);
     }
 }
 
@@ -956,11 +974,14 @@ fn render_menu_bar_stats_bitmap(title: &str) -> Option<MenuBarStatsBitmap> {
 
 #[cfg(all(target_os = "macos", test))]
 fn render_native_menu_bar_stats_bitmap(title: &str) -> Option<MenuBarStatsBitmap> {
-    render_native_menu_bar_status_bitmap(Some(title))
+    render_native_menu_bar_status_bitmap_reusing(Some(title), None)
 }
 
 #[cfg(target_os = "macos")]
-fn render_native_menu_bar_status_bitmap(title: Option<&str>) -> Option<MenuBarStatsBitmap> {
+fn render_native_menu_bar_status_bitmap_reusing(
+    title: Option<&str>,
+    reusable: Option<MenuBarStatsBitmap>,
+) -> Option<MenuBarStatsBitmap> {
     const PADDING_X: u32 = 2;
     const ICON_SIZE: u32 = 36;
     const ICON_GAP: u32 = 5;
@@ -990,7 +1011,13 @@ fn render_native_menu_bar_status_bitmap(title: Option<&str>) -> Option<MenuBarSt
     };
     let text_x = PADDING_X + ICON_SIZE + ICON_GAP;
     let width = (text_x + text_width + PADDING_X).clamp(24, 1400);
-    let mut rgba = vec![0_u8; (width * HEIGHT * 4) as usize];
+    let mut rgba = reusable
+        .filter(|bitmap| bitmap.width == width && bitmap.height == HEIGHT)
+        .map(|mut bitmap| {
+            bitmap.rgba.fill(0);
+            bitmap.rgba
+        })
+        .unwrap_or_else(|| vec![0_u8; (width * HEIGHT * 4) as usize]);
     draw_menu_bar_bifrost_icon(
         &mut rgba,
         width,

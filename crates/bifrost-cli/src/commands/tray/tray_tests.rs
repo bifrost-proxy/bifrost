@@ -318,6 +318,30 @@
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_native_menu_bar_stats_bitmap_reuses_same_size_buffer() {
+        let bitmap = render_native_menu_bar_stats_bitmap(
+            "C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s",
+        )
+        .expect("native bitmap");
+        let width = bitmap.width;
+        let height = bitmap.height;
+        let ptr = bitmap.rgba.as_ptr();
+        let capacity = bitmap.rgba.capacity();
+
+        let reused = render_native_menu_bar_status_bitmap_reusing(
+            Some("C15% | M75% | D65% | ↑12.7 K/s ↓26.2 K/s"),
+            Some(bitmap),
+        )
+        .expect("reused native bitmap");
+
+        assert_eq!(reused.width, width);
+        assert_eq!(reused.height, height);
+        assert_eq!(reused.rgba.as_ptr(), ptr);
+        assert_eq!(reused.rgba.capacity(), capacity);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_macos_menu_hides_system_stats_rows() {
         let snapshot = MenuDataSnapshot {
             runtime: Some(sample_runtime()),

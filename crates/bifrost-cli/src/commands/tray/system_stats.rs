@@ -54,7 +54,8 @@ pub struct SystemStatsSampler {
     memory_used_bytes: u64,
     memory_total_bytes: u64,
     disk_used_percent: Option<f32>,
-    last_cpu_memory_at: Option<Instant>,
+    last_cpu_at: Option<Instant>,
+    last_memory_at: Option<Instant>,
     last_disk_at: Option<Instant>,
     last_network_list_refresh_at: Option<Instant>,
     last_network_interfaces: BTreeMap<String, NetworkInterfaceSample>,
@@ -167,7 +168,8 @@ impl SystemStatsSampler {
             last_cpu_ticks,
             disk_mount_point,
             disk_used_percent,
-            last_cpu_memory_at: None,
+            last_cpu_at: None,
+            last_memory_at: None,
             last_disk_at: None,
             last_network_list_refresh_at: None,
             last_network_interfaces: BTreeMap::new(),
@@ -179,28 +181,31 @@ impl SystemStatsSampler {
     }
 
     pub fn sample(&mut self, now: Instant, items: &TraySystemStatsItems) -> SystemStatsSnapshot {
-        let needs_cpu_or_memory = items.cpu || items.memory;
-        if needs_cpu_or_memory
+        if items.cpu
             && self
-                .last_cpu_memory_at
+                .last_cpu_at
                 .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
                 .unwrap_or(true)
         {
-            if items.cpu {
-                if let Some(current_ticks) = mac_cpu_ticks() {
-                    if let Some(cpu_percent) = mac_cpu_percent(self.last_cpu_ticks, current_ticks) {
-                        self.cpu_percent = cpu_percent;
-                    }
-                    self.last_cpu_ticks = Some(current_ticks);
+            if let Some(current_ticks) = mac_cpu_ticks() {
+                if let Some(cpu_percent) = mac_cpu_percent(self.last_cpu_ticks, current_ticks) {
+                    self.cpu_percent = cpu_percent;
                 }
+                self.last_cpu_ticks = Some(current_ticks);
             }
-            if items.memory {
-                self.memory_total_bytes =
-                    mac_memory_total_bytes().unwrap_or(self.memory_total_bytes);
-                self.memory_used_bytes = mac_memory_used_bytes(self.memory_total_bytes)
-                    .unwrap_or(self.memory_used_bytes);
-            }
-            self.last_cpu_memory_at = Some(now);
+            self.last_cpu_at = Some(now);
+        }
+
+        if items.memory
+            && self
+                .last_memory_at
+                .map(|last| now.saturating_duration_since(last) >= CPU_MEMORY_REFRESH_INTERVAL)
+                .unwrap_or(true)
+        {
+            self.memory_total_bytes = mac_memory_total_bytes().unwrap_or(self.memory_total_bytes);
+            self.memory_used_bytes =
+                mac_memory_used_bytes(self.memory_total_bytes).unwrap_or(self.memory_used_bytes);
+            self.last_memory_at = Some(now);
         }
 
         if items.disk
@@ -1101,7 +1106,8 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let mut sampler = SystemStatsSampler::new(temp.path());
         let now = Instant::now();
-        sampler.last_cpu_memory_at = Some(now);
+        sampler.last_cpu_at = Some(now);
+        sampler.last_memory_at = Some(now);
         sampler.last_disk_at = Some(now);
 
         let network_only = TraySystemStatsItems {
@@ -1113,8 +1119,34 @@ mod tests {
         };
         let _ = sampler.sample(now + CPU_MEMORY_REFRESH_INTERVAL * 2, &network_only);
 
-        assert_eq!(sampler.last_cpu_memory_at, Some(now));
+        assert_eq!(sampler.last_cpu_at, Some(now));
+        assert_eq!(sampler.last_memory_at, Some(now));
         assert_eq!(sampler.last_disk_at, Some(now));
+
+        let cpu_only = TraySystemStatsItems {
+            cpu: true,
+            memory: false,
+            disk: false,
+            upload: false,
+            download: false,
+        };
+        let after_cpu_window = now + CPU_MEMORY_REFRESH_INTERVAL + Duration::from_millis(1);
+        let _ = sampler.sample(after_cpu_window, &cpu_only);
+        assert_eq!(sampler.last_cpu_at, Some(after_cpu_window));
+        assert_eq!(sampler.last_memory_at, Some(now));
+
+        let memory_only = TraySystemStatsItems {
+            cpu: false,
+            memory: true,
+            disk: false,
+            upload: false,
+            download: false,
+        };
+        let after_memory_window =
+            after_cpu_window + CPU_MEMORY_REFRESH_INTERVAL + Duration::from_millis(1);
+        let _ = sampler.sample(after_memory_window, &memory_only);
+        assert_eq!(sampler.last_cpu_at, Some(after_cpu_window));
+        assert_eq!(sampler.last_memory_at, Some(after_memory_window));
 
         let disk_enabled = TraySystemStatsItems {
             cpu: false,
