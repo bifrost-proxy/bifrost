@@ -151,6 +151,16 @@ struct MacCpuTicks {
     nice: u64,
 }
 
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MacMemoryPageCounts {
+    free: u64,
+    speculative: u64,
+    wired: u64,
+    purgeable: u64,
+    internal: u64,
+}
+
 impl SystemStatsSampler {
     pub fn new(data_dir: &Path) -> Self {
         let last_cpu_ticks = mac_cpu_ticks();
@@ -546,9 +556,33 @@ fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
         return None;
     }
 
-    let free_pages = (info.free_count as u64).saturating_add(info.speculative_count as u64);
-    let free_bytes = free_pages.saturating_mul(page_size);
-    Some(total_bytes.saturating_sub(free_bytes))
+    let total_pages = total_bytes / page_size;
+    if total_pages == 0 {
+        return None;
+    }
+
+    let page_counts = MacMemoryPageCounts {
+        free: info.free_count as u64,
+        speculative: info.speculative_count as u64,
+        wired: info.wire_count as u64,
+        purgeable: info.purgeable_count as u64,
+        internal: info.internal_page_count as u64,
+    };
+    let used_pages = mac_memory_used_pages(page_counts, total_pages);
+    Some(used_pages.saturating_mul(page_size).min(total_bytes))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_memory_used_pages(counts: MacMemoryPageCounts, total_pages: u64) -> u64 {
+    let pressure_pages = counts
+        .internal
+        .saturating_sub(counts.purgeable)
+        .saturating_add(counts.wired);
+    if pressure_pages > 0 {
+        return pressure_pages.min(total_pages);
+    }
+
+    total_pages.saturating_sub(counts.free.saturating_add(counts.speculative))
 }
 
 fn collect_network_interfaces() -> BTreeMap<String, NetworkTotals> {
@@ -1003,6 +1037,34 @@ mod tests {
         );
 
         assert_eq!(lines.menu_bar, "C5% | M5% | D5% | ↑8.0 K/s ↓26.0 K/s");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_memory_used_pages_excludes_file_cache_and_purgeable_memory() {
+        let counts = MacMemoryPageCounts {
+            free: 600,
+            speculative: 100,
+            wired: 300,
+            purgeable: 200,
+            internal: 1_500,
+        };
+
+        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_600);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_memory_used_pages_falls_back_to_non_free_pages_when_pressure_counts_are_empty() {
+        let counts = MacMemoryPageCounts {
+            free: 600,
+            speculative: 100,
+            wired: 0,
+            purgeable: 0,
+            internal: 0,
+        };
+
+        assert_eq!(mac_memory_used_pages(counts, 4_000), 3_300);
     }
 
     #[test]
