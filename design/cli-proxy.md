@@ -88,12 +88,12 @@ bifrost -p <PORT> start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,::
 
 实现策略（`ShellProxyManager::enable_persistent` / `disable_persistent` / `restore`）：
 
-1. 写入前先把每个 rc 文件的原始内容快照写入数据目录下的 `shell_proxy_backup.json`（字段为 `{shell_type, files:[{path, original_content}]}`）。
-2. 启动时：若文件中已存在标记块则就地替换，否则追加到文件末尾（前置空行分隔）。
-3. 退出时：调用 `restore`，按 backup 中的 `original_content` 逐文件覆盖；若 `original_content` 为 `None` 表示原本不存在，则删除该文件。restore 完成后删除 backup。
-4. 崩溃恢复：下次 `bifrost start` 启动时调用 `ShellProxyManager::recover_from_crash(data_dir)`，若 backup 仍存在则先执行一次 restore，再继续启动流程。
+1. 启用时：逐个读取当前 rc 文件；若文件中已存在标记块则只替换标记块内容，否则追加一个新的 Bifrost 管理块到文件末尾。
+2. 禁用时：逐个读取当前 rc 文件，只删除开始/结束标记之间的 Bifrost 管理块；没有 marker 的文件保持原样。
+3. 恢复时：仍然只删除当前文件里的 Bifrost 管理块，保留用户在代理启用期间追加或修改的其它内容；如果删除管理块后文件为空，则移除该空文件。
+4. 崩溃恢复：下次 `bifrost start` 启动时调用 `ShellProxyManager::recover_from_crash(data_dir)`；若发现旧版本残留的 `shell_proxy_backup.json`，只使用其中的路径定位待清理 rc 文件，不把 `original_content` 覆盖写回。
 
-注：当前实现使用 `std::fs::write` 直接覆盖目标 rc 文件，并未采用 tmp+rename 原子替换；rc 文件损坏风险由 `shell_proxy_backup.json` 兜底恢复（tmp+rename 为 planned, not yet shipped as of 2026-06-16）。
+设计约束：禁止依赖整文件备份恢复 rc 文件。整文件备份会在代理启用到恢复之间形成空窗期，用户或其它工具在这段时间写入 `.zshrc` / `.bashrc` 后，再用旧快照覆盖会造成配置丢失甚至清空。当前实现的安全边界是 marker-block-only：Bifrost 只拥有两个 marker 中间的内容。
 
 ## 软件代理设置调研（常见场景）
 

@@ -190,7 +190,7 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 - 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
 - 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
 - Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
-- Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Admin UI` / `Open Logs` 时出现短暂终端窗口。
+- Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Traffic` / `Open Settings` / `Open Logs` 时出现短暂终端窗口。
 - Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
 - macOS 同样不能因为托盘常驻而高频执行 `scutil --proxy`；如后续发现 macOS 查询仍有明显开销，应继续将平台查询收敛到按需/缓存路径或原生 API。
 - `bifrost start -d` 的 daemon child 是真正的长期服务进程；它检测到 `BIFROST_DETACHED_DAEMON_CHILD=1` 后必须直接进入 runtime，不能再次递归 spawn daemon parent。它完成 listener/runtime 初始化后仍必须按配置拉起 tray helper。只有用户显式传入 `--no-tray` 或配置禁用 tray 时才跳过，不能因为 daemon child 身份跳过 tray。
@@ -454,7 +454,6 @@ URL 拼接：
 
 ```text
 Bifrost: Running on 127.0.0.1:8800
-Open Admin UI
 Open Traffic
 Open Rules
 Open Settings
@@ -474,7 +473,6 @@ Quit Tray
 - `Bifrost: ...` 是 disabled title item。
 - Running 时启用依赖服务的菜单项。
 - Stopped/Disconnected 时置灰：
-- `Open Admin UI`
 - `Open Traffic`
 - `Open Rules`
 - `Rules: ...`
@@ -487,7 +485,6 @@ Quit Tray
 
 动作规则：
 
-- `Open Admin UI`：打开 `admin_url`。
 - `Open Traffic`：打开 `admin_url + traffic`。
 - `Open Rules`：打开 `admin_url + rules`。
 - `Open Settings`：打开 `admin_url + settings`。
@@ -742,7 +739,7 @@ Windows：
 
 - 该路线证明了像素级还原可行；关键收益是绕过 `tray-icon` 18pt 图片高度限制。
 - 当前实现是 macOS 默认路径；形态是单个 native `NSStatusItem`，点击状态块本身会打开 Bifrost 菜单。
-- 真实回归中对同一个 menu bar item 执行 AXPress，可以读到 `Open Admin UI`、`Open Traffic`、`Stop Bifrost`、`Quit Tray` 等菜单项，证明图标、状态和菜单已合并到同一个状态项。
+- 真实回归中对同一个 menu bar item 执行 AXPress，可以读到 `Open Traffic`、`Open Rules`、`Open Settings`、`Stop Bifrost`、`Quit Tray` 等菜单项，证明图标、状态和菜单已合并到同一个状态项。
 - 后续如果产品确认采用该路线，可把实验开关迁移成正式 macOS 默认路径；Windows 不启用系统资源状态，也不新增相关代码。
 
 当前建议：
@@ -996,7 +993,7 @@ Windows E2E：
 macOS 用例：
 
 - `TC-TRAY-MAC-01`：CLI 启动后 menu bar 出现 Bifrost 图标。
-- `TC-TRAY-MAC-02`：点击 `Open Admin UI` 打开管理端。
+- `TC-TRAY-MAC-02`：点击 `Open Traffic` 打开管理端流量页。
 - `TC-TRAY-MAC-02A`：点击 menu bar 图标后默认菜单保持展开，不闪烁消失。
 - `TC-TRAY-MAC-02B`：主进程 Admin API 繁忙或无响应时，托盘菜单仍从缓存快速展开。
 - `TC-TRAY-MAC-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个托盘进程。
@@ -1014,7 +1011,7 @@ Windows 用例：
 - `TC-TRAY-WIN-02B`：主进程 Admin API 繁忙或无响应时，notification area 菜单仍从缓存快速展开。
 - `TC-TRAY-WIN-02C`：CLI 重启时，同一数据目录已有 tray helper 则不再创建第二个 notification area helper。
 - `TC-TRAY-WIN-02D`：Settings > Proxy 关闭 Tray Icon 后，配置持久化且已有 notification area helper 退出；重新打开开关后不重启服务也能重新创建托盘；再次关闭后重新 `bifrost start` 不再创建托盘。
-- `TC-TRAY-WIN-03`：`Open Admin UI` 打开管理端。
+- `TC-TRAY-WIN-03`：`Open Traffic` 打开管理端流量页。
 - `TC-TRAY-WIN-04`：`--no-tray` 不出现托盘图标。
 - `TC-TRAY-WIN-05`：Explorer 重启后图标恢复。
 - `TC-TRAY-WIN-06`：helper 不弹出 console window。

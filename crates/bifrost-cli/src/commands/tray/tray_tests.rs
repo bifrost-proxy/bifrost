@@ -721,6 +721,26 @@
         assert_eq!(snapshot.system_proxy, Some(cached));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_menu_will_open_hook_requests_system_proxy_refresh() {
+        struct CountingWillOpen {
+            count: std::sync::atomic::AtomicUsize,
+        }
+
+        impl NativeStatsMenuWillOpen for CountingWillOpen {
+            fn menu_will_open(&self) {
+                self.count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let hook = CountingWillOpen {
+            count: std::sync::atomic::AtomicUsize::new(0),
+        };
+        hook.menu_will_open();
+        assert_eq!(hook.count.load(Ordering::Relaxed), 1);
+    }
+
     #[test]
     fn test_rule_toggle_url_for_personal_rule() {
         let target = RuleTarget::Personal {
