@@ -705,6 +705,46 @@ Windows：
 5. **暂不采用：原生平台 API helper**：macOS 直接使用 AppKit `NSStatusItem`/`NSMenu`，Windows 直接使用 Win32 `Shell_NotifyIconW`/popup menu，移除 `tao`/`tray-icon`/`muda` 通用事件循环。Objective-C 最小原型显示 macOS 原生 AppKit status item 本身 `ps RSS` 约 40 MB，因此该路线可能再降低约 10 MB，但不能承诺达到 30 MB；会显著增加 unsafe/platform glue、菜单刷新一致性和 Windows Explorer 重启恢复的维护成本。当前继续使用跨平台 tray 基础库。
 6. **度量口径方案**：如果产品目标是“真实独占内存小于 30 MB”，当前 release helper 已满足 `Physical footprint < 30 MB`；如果产品目标是“活动监视器/ps RSS 显示小于 30 MB”，macOS AppKit 基线显示 30 MB 目标不具备现实可达性，应改为 `Physical footprint` 或 platform private bytes 作为验收口径。
 
+### macOS 菜单栏系统状态像素级还原实现
+
+背景：`tray-icon 0.19.3` 的 macOS backend 在 `set_icon_for_ns_status_item_button` 中把 status item 图片高度固定为 `18.0` points。即使 Bifrost 自己生成更高的透明模板图，最终也会被该库缩放到 18pt 左右，导致两行 CPU/MEM/SSD/网速布局无法充分利用菜单栏高度，字体偏小、上下空白和竖线视觉都无法做到 1:1 贴近参考产品。
+
+本轮将 macOS 系统状态展示默认切到原生 AppKit 路线：Bifrost 使用一个 AppKit `NSStatusItem` 作为主菜单栏状态项，状态项内部同时承载 Bifrost 图标、两行系统状态图和原托盘菜单；不再额外创建一个分离的系统状态项。状态图使用 2x PNG 模板图渲染 24pt 高的两行信息：
+
+- 旧单行 title `C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s` 会转换为参考布局：
+  - 第一行：`10% | 75% | 65% | ↑11.7 K/s`
+  - 第二行：`CPU | MEM | SSD | ↓25.2 K/s`
+- CPU/Memory/Disk 的数值行使用更大字体，标签行使用较小字体。
+- Upload/Download 属于同一个网络列，上下两行使用同样字号；网络列内部不再额外用竖线隔开。网络箭头由位图渲染器绘制，不使用文本箭头字符；网络列使用固定槽位，箭头左对齐，数值文本右对齐。
+- 列间分隔线由位图渲染器画成贯穿上下两行的连续竖线。
+- Bifrost 图标使用 native 状态图内的模板图渲染，目标视觉高度为 18pt，避免启用系统状态后图标显著变小。
+- 如果原生 `NSStatusItem` 创建失败，立即回退到既有 `tray-icon` 位图路径，避免实验开关导致菜单栏空白。
+- 可通过 `BIFROST_TRAY_NATIVE_STATS_VIEW=0` 显式回退既有 `tray-icon` 位图路径，作为紧急兼容开关；未设置该环境变量时 macOS 默认启用 native 状态项。
+- native 状态项会设置 accessibility description，例如 `Bifrost: C5% | M80% | D65% | ↑6.3 K/s ↓12.0 K/s`；关闭系统状态后 description 退回 `Bifrost`。该字段用于辅助功能和真实状态栏自动回归，不影响视觉。
+
+真实 macOS release 验证（2026-06-21）：
+
+- 启动命令使用临时数据目录 `/tmp/bifrost-native-stats.dOukVt`、端口 `62144`，显式设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，并携带 `--no-system-proxy --skip-cert-check`；macOS native 状态项为默认路径，无需额外设置 `BIFROST_TRAY_NATIVE_STATS_VIEW=1`。
+- `GET /_bifrost/api/config/tray` 返回 `enabled=true`、`system_stats_supported=true`、`show_system_stats=true`，且 CPU/Memory/Disk/Upload/Download 全部启用。
+- `tray.log.2026-06-21` 记录 `native macOS tray stats view enabled`。
+- 连续 3 张 1 秒间隔完整菜单栏截图：
+  - `/tmp/bifrost-native-stats-shots/topbar-1.png`
+  - `/tmp/bifrost-native-stats-shots/topbar-2.png`
+  - `/tmp/bifrost-native-stats-shots/topbar-3.png`
+- 局部 2x 对照图：
+  - `/tmp/bifrost-native-stats-shots/status-compare-1-2x.png`
+  - `/tmp/bifrost-native-stats-shots/status-compare-2-2x.png`
+  - `/tmp/bifrost-native-stats-shots/status-compare-3-2x.png`
+- 截图显示 native 两行状态项在完整菜单栏中可见，CPU 与网速在 1 秒间隔图中刷新，列间竖线连续贯穿两行，字体高度明显接近右侧参考产品。
+- 60 秒空闲性能采样：`samples=60 avg_cpu=0.3200 max_cpu=1.4000 avg_rss_kb=71766 min_rss_kb=71536 max_rss_kb=71792 rss_delta_kb=256`。平均 CPU 低于 1%，RSS 无显著增长。
+
+当前结论：
+
+- 该路线证明了像素级还原可行；关键收益是绕过 `tray-icon` 18pt 图片高度限制。
+- 当前实现是 macOS 默认路径；形态是单个 native `NSStatusItem`，点击状态块本身会打开 Bifrost 菜单。
+- 真实回归中对同一个 menu bar item 执行 AXPress，可以读到 `Open Admin UI`、`Open Traffic`、`Stop Bifrost`、`Quit Tray` 等菜单项，证明图标、状态和菜单已合并到同一个状态项。
+- 后续如果产品确认采用该路线，可把实验开关迁移成正式 macOS 默认路径；Windows 不启用系统资源状态，也不新增相关代码。
+
 当前建议：
 
 - v1 保持单二进制 `bifrost __tray`，继续使用跨平台 tray 基础库（`tray-icon` / `muda` / `tao`）以及 `open` / `arboard`。
