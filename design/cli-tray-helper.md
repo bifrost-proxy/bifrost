@@ -457,7 +457,7 @@ Bifrost: Running on 127.0.0.1:8800
 Open Admin UI
 Open Traffic
 Open Rules
-Copy Admin URL
+Open Settings
 Copy HTTP Proxy
 Copy SOCKS5 Proxy
 Rules: <当前启用规则>
@@ -478,7 +478,7 @@ Quit Tray
 - `Open Traffic`
 - `Open Rules`
 - `Rules: ...`
-- `Copy Admin URL`
+- `Open Settings`
 - `Copy HTTP Proxy`
 - `Copy SOCKS5 Proxy`
 - `System Proxy`
@@ -490,7 +490,7 @@ Quit Tray
 - `Open Admin UI`：打开 `admin_url`。
 - `Open Traffic`：打开 `admin_url + traffic`。
 - `Open Rules`：打开 `admin_url + rules`。
-- `Copy Admin URL`：复制 `admin_url`。
+- `Open Settings`：打开 `admin_url + settings`。
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
 - `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`；统一代理模式下没有独立 `socks5_port` 时 fallback 到主代理端口，只在服务未运行或 SOCKS 未启用时置灰。
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。

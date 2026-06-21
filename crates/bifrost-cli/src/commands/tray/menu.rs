@@ -174,11 +174,11 @@ pub fn build_menu(
         }));
 
         items.push(item(MenuItemDef {
-            id: "copy_admin_url".to_string(),
-            label: "Copy Admin URL".to_string(),
+            id: "open_settings".to_string(),
+            label: "Open Settings".to_string(),
             enabled: is_running,
             checked: false,
-            action: MenuItemAction::CopyText(admin_url.clone()),
+            action: MenuItemAction::OpenUrl(format!("{}settings", admin_url)),
         }));
 
         items.push(item(MenuItemDef {
@@ -724,6 +724,15 @@ mod tests {
         assert!(!version.enabled);
         let open_admin = find_item(&menu, "open_admin_ui").unwrap();
         assert!(open_admin.enabled);
+        let open_settings = find_item(&menu, "open_settings").unwrap();
+        assert_eq!(open_settings.label, "Open Settings");
+        assert!(open_settings.enabled);
+        match &open_settings.action {
+            MenuItemAction::OpenUrl(url) => {
+                assert_eq!(url, "http://127.0.0.1:8800/_bifrost/settings");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
         assert!(find_item(&menu, "restart_service").is_none());
         assert!(find_item(&menu, "open_data_dir").is_none());
     }
