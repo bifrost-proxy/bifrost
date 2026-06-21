@@ -718,6 +718,7 @@ Windows：
 - 如果原生 `NSStatusItem` 创建失败，立即回退到既有 `tray-icon` 位图路径，避免实验开关导致菜单栏空白。
 - 可通过 `BIFROST_TRAY_NATIVE_STATS_VIEW=0` 显式回退既有 `tray-icon` 位图路径，作为紧急兼容开关；未设置该环境变量时 macOS 默认启用 native 状态项。
 - native 状态项会设置 accessibility description，例如 `Bifrost: C5% | M80% | D65% | ↑6.3 K/s ↓12.0 K/s`；关闭系统状态后 description 退回 `Bifrost`。该字段用于辅助功能和真实状态栏自动回归，不影响视觉。
+- 性能热路径不能每秒 PNG encode/decode。性能回归中 `sample` 明确显示旧路径主要耗时在 `encode_menu_bar_stats_png` / `png::Writer::write_image_data` / `NSImage initWithData`，系统指标采样本身占比很低。当前 native AppKit 路径使用 `NSBitmapImageRep` 直接承接渲染器生成的 RGBA buffer，并在宽高不变时复用同一个 `NSImage` / bitmap representation，只更新像素内容；只有宽高变化或 raw bitmap 构造失败时才走重新创建或 PNG fallback。
 
 真实 macOS release 验证（2026-06-21）：
 
@@ -734,6 +735,7 @@ Windows：
   - `/tmp/bifrost-native-stats-shots/status-compare-3-2x.png`
 - 截图显示 native 两行状态项在完整菜单栏中可见，CPU 与网速在 1 秒间隔图中刷新，列间竖线连续贯穿两行，字体高度明显接近右侧参考产品。
 - 60 秒空闲性能采样：`samples=60 avg_cpu=0.3200 max_cpu=1.4000 avg_rss_kb=71766 min_rss_kb=71536 max_rss_kb=71792 rss_delta_kb=256`。平均 CPU 低于 1%，RSS 无显著增长。
+- 2026-06-21 追加性能回归：优化前 debug 真实 tray helper 60 秒采样为 `avg_cpu=1.978 p95=6.000 max_cpu=6.500 avg_rss_mb=84.10`，`sample` 定位热点为 PNG encode/decode。切换 raw bitmap 后 debug 采样降到 `avg_cpu=0.698 p95=1.800 max_cpu=5.600`；release 最终实现（raw bitmap + 同尺寸 image buffer 复用）60 秒采样为 `avg_cpu=0.437 p50=0.300 p90=1.000 p95=1.200 max_cpu=2.300 avg_rss_mb=66.43 max_rss_mb=67.16`。关闭系统状态的 release 基线为 `avg_cpu=0.077 p95=0.600 max_cpu=0.600 avg_rss_mb=69.63`。结论：1 秒展示刷新保持不变，平均 CPU 明确低于 1%，RSS 无显著增长；个别 1 秒 `ps` 样本仍可能出现 1.x% 瞬时峰值，继续压低峰值需要把可见刷新频率降到 1.5-2 秒，会牺牲网速实时性。
 
 当前结论：
 

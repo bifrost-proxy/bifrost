@@ -38,8 +38,8 @@ use objc2::{
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSAccessibility, NSCellImagePosition, NSImage, NSMenu, NSMenuDelegate, NSStatusBar,
-    NSStatusItem,
+    NSAccessibility, NSBitmapFormat, NSBitmapImageRep, NSCellImagePosition, NSDeviceRGBColorSpace,
+    NSImage, NSMenu, NSMenuDelegate, NSStatusBar, NSStatusItem,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSSize, NSString};
@@ -723,7 +723,16 @@ impl NativeMenuActionTarget {
 struct NativeStatsStatusItem {
     item: Retained<NSStatusItem>,
     menu_delegate: Retained<NativeStatsMenuDelegate>,
+    rendered_image: Option<NativeStatsImage>,
     mtm: MainThreadMarker,
+}
+
+#[cfg(target_os = "macos")]
+struct NativeStatsImage {
+    image: Retained<NSImage>,
+    image_rep: Option<Retained<NSBitmapImageRep>>,
+    width: u32,
+    height: u32,
 }
 
 #[cfg(target_os = "macos")]
@@ -740,6 +749,7 @@ impl NativeStatsStatusItem {
         let mut native = Self {
             item,
             menu_delegate,
+            rendered_image: None,
             mtm,
         };
         native.set_menu(menu);
@@ -770,15 +780,42 @@ impl NativeStatsStatusItem {
         let Some(bitmap) = render_native_menu_bar_status_bitmap(title) else {
             return;
         };
-        let Some(png) = encode_menu_bar_stats_png(&bitmap) else {
-            return;
-        };
         let Some(button) = self.item.button(self.mtm) else {
             return;
         };
-        let data = NSData::from_vec(png);
-        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
-            return;
+        let image = match self.rendered_image.as_mut() {
+            Some(rendered)
+                if rendered.width == bitmap.width
+                    && rendered.height == bitmap.height
+                    && rendered.image_rep.is_some() =>
+            {
+                if copy_menu_bar_stats_bitmap_to_image_rep(
+                    &bitmap,
+                    rendered.image_rep.as_deref().expect("checked image rep"),
+                ) {
+                    rendered.image.clone()
+                } else {
+                    self.rendered_image = None;
+                    let Some(rendered) = native_stats_image_from_bitmap(&bitmap)
+                        .or_else(|| native_stats_image_from_png(&bitmap))
+                    else {
+                        return;
+                    };
+                    let image = rendered.image.clone();
+                    self.rendered_image = Some(rendered);
+                    image
+                }
+            }
+            _ => {
+                let Some(rendered) = native_stats_image_from_bitmap(&bitmap)
+                    .or_else(|| native_stats_image_from_png(&bitmap))
+                else {
+                    return;
+                };
+                let image = rendered.image.clone();
+                self.rendered_image = Some(rendered);
+                image
+            }
         };
         let width_points = f64::from(bitmap.width) / 2.0;
         let height_points = f64::from(bitmap.height) / 2.0;
@@ -1003,6 +1040,77 @@ fn encode_menu_bar_stats_png(bitmap: &MenuBarStatsBitmap) -> Option<Vec<u8>> {
         )
         .ok()?;
     Some(png)
+}
+
+#[cfg(target_os = "macos")]
+fn native_stats_image_from_bitmap(bitmap: &MenuBarStatsBitmap) -> Option<NativeStatsImage> {
+    let width = bitmap.width as isize;
+    let height = bitmap.height as isize;
+    let bytes_per_row = (bitmap.width * 4) as isize;
+    let bits_per_pixel = 32;
+    let bitmap_format =
+        NSBitmapFormat::AlphaNonpremultiplied | NSBitmapFormat::ThirtyTwoBitBigEndian;
+    let image_rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            bitmap_format,
+            bytes_per_row,
+            bits_per_pixel,
+        )?
+    };
+    if !copy_menu_bar_stats_bitmap_to_image_rep(bitmap, &image_rep) {
+        return None;
+    }
+    let image = NSImage::initWithSize(
+        NSImage::alloc(),
+        NSSize::new(
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
+        ),
+    );
+    image.addRepresentation(&image_rep);
+    Some(NativeStatsImage {
+        image,
+        image_rep: Some(image_rep),
+        width: bitmap.width,
+        height: bitmap.height,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn native_stats_image_from_png(bitmap: &MenuBarStatsBitmap) -> Option<NativeStatsImage> {
+    let png = encode_menu_bar_stats_png(bitmap)?;
+    let data = NSData::from_vec(png);
+    let image = NSImage::initWithData(NSImage::alloc(), &data)?;
+    Some(NativeStatsImage {
+        image,
+        image_rep: None,
+        width: bitmap.width,
+        height: bitmap.height,
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_menu_bar_stats_bitmap_to_image_rep(
+    bitmap: &MenuBarStatsBitmap,
+    image_rep: &NSBitmapImageRep,
+) -> bool {
+    let bitmap_data = image_rep.bitmapData();
+    if bitmap_data.is_null() {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bitmap.rgba.as_ptr(), bitmap_data, bitmap.rgba.len());
+    }
+    true
 }
 
 #[cfg(target_os = "macos")]
