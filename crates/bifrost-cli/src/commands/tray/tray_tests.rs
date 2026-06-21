@@ -140,6 +140,28 @@
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_system_stats_config_watcher_keeps_previous_config_on_parse_error() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("config.toml"),
+            "[tray]\nshow_system_stats = false\n",
+        )
+        .unwrap();
+        let start = Instant::now();
+        let mut watcher = TraySystemStatsConfigWatcher::new(temp.path(), start);
+
+        let initial = watcher.current(start);
+        assert!(!initial.enabled);
+
+        std::fs::write(temp.path().join("config.toml"), "[tray\npartial").unwrap();
+        let after_fallback = start + SYSTEM_STATS_CONFIG_FALLBACK_RELOAD_INTERVAL;
+        let after_parse_error = watcher.current(after_fallback);
+
+        assert!(!after_parse_error.enabled);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_native_menu_bar_stats_rows_convert_single_row_to_reference_layout() {
         let rows = native_menu_bar_stats_rows("C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s");
 

@@ -1,12 +1,18 @@
 use std::collections::HashMap;
 use std::fs;
+#[cfg(target_os = "macos")]
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+#[cfg(target_os = "macos")]
+use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
+#[cfg(target_os = "macos")]
+use notify::{EventKind, RecursiveMode, Watcher};
 use serde::Deserialize;
 use tao::event::Event;
 use tao::event_loop::{ControlFlow, EventLoopBuilder};
@@ -89,6 +95,8 @@ const TRAY_UPDATE_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 const TRAY_UPDATE_CACHE_MAX_AGE_SECS: i64 = 6 * 60 * 60;
 const EVENT_LOOP_BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "macos")]
+const SYSTEM_STATS_CONFIG_FALLBACK_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const NATIVE_STATS_VIEW_ENV: &str = "BIFROST_TRAY_NATIVE_STATS_VIEW";
 
@@ -720,11 +728,14 @@ impl NativeMenuActionTarget {
 }
 
 #[cfg(target_os = "macos")]
+/// Native AppKit status item. This object owns AppKit handles and must be
+/// created, used, and dropped on the macOS main thread.
 struct NativeStatsStatusItem {
     item: Retained<NSStatusItem>,
     menu_delegate: Retained<NativeStatsMenuDelegate>,
     rendered_image: Option<NativeStatsImage>,
     mtm: MainThreadMarker,
+    _main_thread_only: PhantomData<std::rc::Rc<()>>,
 }
 
 #[cfg(target_os = "macos")]
@@ -751,6 +762,7 @@ impl NativeStatsStatusItem {
             menu_delegate,
             rendered_image: None,
             mtm,
+            _main_thread_only: PhantomData,
         };
         native.set_menu(menu);
         native.set_tooltip(tooltip);
@@ -832,6 +844,12 @@ impl NativeStatsStatusItem {
 #[cfg(target_os = "macos")]
 impl Drop for NativeStatsStatusItem {
     fn drop(&mut self) {
+        if MainThreadMarker::new().is_none() {
+            tracing::warn!(
+                "native macOS stats status item dropped off main thread; leaving AppKit cleanup to process exit"
+            );
+            return;
+        }
         NSStatusBar::systemStatusBar().removeStatusItem(&self.item);
     }
 }
@@ -1920,45 +1938,180 @@ fn load_custom_config_safe(data_dir: &Path) -> Option<TrayConfig> {
 
 #[cfg(target_os = "macos")]
 fn load_tray_system_stats_config(data_dir: &Path) -> TraySystemStatsConfig {
+    match try_load_tray_system_stats_config(data_dir) {
+        Ok(config) => config,
+        Err(error) => {
+            tracing::warn!(
+                data_dir = %data_dir.display(),
+                error = %error,
+                "failed to load tray system stats config; keeping system stats enabled"
+            );
+            default_tray_system_stats_config()
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn try_load_tray_system_stats_config(data_dir: &Path) -> Result<TraySystemStatsConfig, String> {
     let path = data_dir.join("config.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(content) => content,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return TraySystemStatsConfig {
-                enabled: true,
-                items: bifrost_storage::TraySystemStatsItems::default(),
-            };
+            return Ok(default_tray_system_stats_config());
         }
         Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to read tray system stats config; keeping system stats enabled"
-            );
-            return TraySystemStatsConfig {
-                enabled: true,
-                items: bifrost_storage::TraySystemStatsItems::default(),
-            };
+            return Err(format!("read {}: {error}", path.display()));
         }
     };
 
     match toml::from_str::<bifrost_storage::UnifiedConfig>(&content) {
-        Ok(config) => TraySystemStatsConfig {
+        Ok(config) => Ok(TraySystemStatsConfig {
             enabled: config.tray.show_system_stats,
             items: config.tray.system_stats_items,
-        },
-        Err(error) => {
-            tracing::warn!(
-                path = %path.display(),
-                error = %error,
-                "failed to parse tray system stats config; keeping system stats enabled"
-            );
-            TraySystemStatsConfig {
-                enabled: true,
-                items: bifrost_storage::TraySystemStatsItems::default(),
-            }
+        }),
+        Err(error) => Err(format!("parse {}: {error}", path.display())),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn default_tray_system_stats_config() -> TraySystemStatsConfig {
+    TraySystemStatsConfig {
+        enabled: true,
+        items: bifrost_storage::TraySystemStatsItems::default(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct TraySystemStatsConfigWatcher {
+    data_dir: PathBuf,
+    config_path: PathBuf,
+    config: TraySystemStatsConfig,
+    last_reload_at: Instant,
+    event_rx: Option<mpsc::Receiver<notify::Result<notify::Event>>>,
+    _watcher: Option<notify::RecommendedWatcher>,
+}
+
+#[cfg(target_os = "macos")]
+impl TraySystemStatsConfigWatcher {
+    fn new(data_dir: &Path, now: Instant) -> Self {
+        let config = load_tray_system_stats_config(data_dir);
+        let config_path = data_dir.join("config.toml");
+        let (event_rx, watcher) = create_tray_system_stats_config_watcher(data_dir);
+        Self {
+            data_dir: data_dir.to_path_buf(),
+            config_path,
+            config,
+            last_reload_at: now,
+            event_rx,
+            _watcher: watcher,
         }
     }
+
+    fn current(&mut self, now: Instant) -> TraySystemStatsConfig {
+        let mut should_reload = false;
+        let mut disconnected = false;
+
+        if let Some(rx) = &self.event_rx {
+            loop {
+                match rx.try_recv() {
+                    Ok(Ok(event)) => {
+                        if tray_system_stats_config_event_is_relevant(&event, &self.config_path) {
+                            should_reload = true;
+                        }
+                    }
+                    Ok(Err(error)) => {
+                        tracing::debug!(
+                            error = %error,
+                            "tray system stats config watcher event failed"
+                        );
+                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        disconnected = true;
+                        break;
+                    }
+                }
+            }
+        }
+
+        if disconnected {
+            self.event_rx = None;
+            self._watcher = None;
+            tracing::debug!("tray system stats config watcher disconnected; using periodic reload");
+        }
+
+        if now.saturating_duration_since(self.last_reload_at)
+            >= SYSTEM_STATS_CONFIG_FALLBACK_RELOAD_INTERVAL
+        {
+            should_reload = true;
+        }
+
+        if should_reload {
+            self.last_reload_at = now;
+            match try_load_tray_system_stats_config(&self.data_dir) {
+                Ok(config) => {
+                    self.config = config;
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        error = %error,
+                        "failed to refresh tray system stats config; keeping previous config"
+                    );
+                }
+            }
+        }
+
+        self.config.clone()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn create_tray_system_stats_config_watcher(
+    data_dir: &Path,
+) -> (
+    Option<mpsc::Receiver<notify::Result<notify::Event>>>,
+    Option<notify::RecommendedWatcher>,
+) {
+    let (tx, rx) = mpsc::channel();
+    let mut watcher = match notify::recommended_watcher(move |event| {
+        let _ = tx.send(event);
+    }) {
+        Ok(watcher) => watcher,
+        Err(error) => {
+            tracing::debug!(
+                data_dir = %data_dir.display(),
+                error = %error,
+                "failed to create tray system stats config watcher; using periodic reload"
+            );
+            return (None, None);
+        }
+    };
+
+    if let Err(error) = watcher.watch(data_dir, RecursiveMode::NonRecursive) {
+        tracing::debug!(
+            data_dir = %data_dir.display(),
+            error = %error,
+            "failed to watch tray system stats config directory; using periodic reload"
+        );
+        return (None, None);
+    }
+
+    (Some(rx), Some(watcher))
+}
+
+#[cfg(target_os = "macos")]
+fn tray_system_stats_config_event_is_relevant(event: &notify::Event, config_path: &Path) -> bool {
+    if !matches!(
+        event.kind,
+        EventKind::Any | EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    ) {
+        return false;
+    }
+
+    event.paths.is_empty()
+        || event.paths.iter().any(|path| {
+            path == config_path || path.file_name().is_some_and(|name| name == "config.toml")
+        })
 }
 
 fn load_recent_rule_targets(data_dir: &Path) -> Vec<RuleTarget> {
@@ -3681,12 +3834,14 @@ fn poll_system_stats(
     generation: &AtomicU64,
 ) {
     let mut sampler = SystemStatsSampler::new(&args.data_dir);
+    let mut stats_config_watcher =
+        TraySystemStatsConfigWatcher::new(&args.data_dir, Instant::now());
     loop {
         if quit_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        let stats_config = load_tray_system_stats_config(&args.data_dir);
+        let stats_config = stats_config_watcher.current(Instant::now());
         if stats_config.visible() {
             let snapshot = sampler.sample(Instant::now(), &stats_config.items);
             let lines = system_stats::menu_lines(&snapshot, &stats_config.items);
