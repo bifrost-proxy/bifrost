@@ -150,14 +150,6 @@ pub fn build_menu(
         let admin_url = rt.admin_url();
 
         items.push(item(MenuItemDef {
-            id: "open_admin_ui".to_string(),
-            label: "Open Admin UI".to_string(),
-            enabled: is_running,
-            checked: false,
-            action: MenuItemAction::OpenUrl(admin_url.clone()),
-        }));
-
-        items.push(item(MenuItemDef {
             id: "open_traffic".to_string(),
             label: "Open Traffic".to_string(),
             enabled: is_running,
@@ -722,8 +714,9 @@ mod tests {
             format!("Version v{}", env!("CARGO_PKG_VERSION"))
         );
         assert!(!version.enabled);
-        let open_admin = find_item(&menu, "open_admin_ui").unwrap();
-        assert!(open_admin.enabled);
+        assert!(find_item(&menu, "open_admin_ui").is_none());
+        let open_traffic = find_item(&menu, "open_traffic").unwrap();
+        assert!(open_traffic.enabled);
         let open_settings = find_item(&menu, "open_settings").unwrap();
         assert_eq!(open_settings.label, "Open Settings");
         assert!(open_settings.enabled);
@@ -935,8 +928,9 @@ mod tests {
         );
         let status = find_item(&menu, "_status").unwrap();
         assert!(status.label.contains("Stopped"));
-        let open_admin = find_item(&menu, "open_admin_ui").unwrap();
-        assert!(!open_admin.enabled);
+        assert!(find_item(&menu, "open_admin_ui").is_none());
+        let open_traffic = find_item(&menu, "open_traffic").unwrap();
+        assert!(!open_traffic.enabled);
         let quit = find_item(&menu, "quit_tray").unwrap();
         assert!(quit.enabled);
     }

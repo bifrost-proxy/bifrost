@@ -234,21 +234,6 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"#.to_string(),
         let proxy_url = format!("http://{}:{}", host, port);
         let config_block = self.generate_config_block(&proxy_url, bypass);
 
-        let mut backups = Vec::new();
-        for config_path in &self.config_paths {
-            let original_content = if config_path.exists() {
-                Some(std::fs::read_to_string(config_path)?)
-            } else {
-                None
-            };
-            backups.push(ShellProxyBackupFile {
-                path: config_path.to_string_lossy().to_string(),
-                original_content,
-            });
-        }
-
-        self.save_backup(backups)?;
-
         for config_path in &self.config_paths {
             let content = if config_path.exists() {
                 std::fs::read_to_string(config_path)?
@@ -270,47 +255,35 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"#.to_string(),
             return Ok(());
         }
 
-        let mut backups = Vec::new();
-        for config_path in &self.config_paths {
-            let original_content = if config_path.exists() {
-                Some(std::fs::read_to_string(config_path)?)
-            } else {
-                None
-            };
-            backups.push(ShellProxyBackupFile {
-                path: config_path.to_string_lossy().to_string(),
-                original_content,
-            });
-        }
-
-        let _ = self.save_backup(backups);
-
         for config_path in &self.config_paths {
             if !config_path.exists() {
                 continue;
             }
             let content = std::fs::read_to_string(config_path)?;
             let new_content = self.remove_config_block(&content);
-            std::fs::write(config_path, new_content)?;
+            if new_content != content {
+                self.write_or_remove_empty_config(config_path, new_content)?;
+            }
         }
 
         Ok(())
     }
 
     pub fn restore(&mut self) -> Result<()> {
-        let backup = self.normalize_backup(self.load_backup()?);
-
-        for file in backup.files {
-            let config_path = PathBuf::from(file.path);
-            if let Some(original_content) = file.original_content {
-                if let Some(parent) = config_path.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::write(config_path, original_content)?;
-            } else {
-                let _ = std::fs::remove_file(config_path);
+        let backup = self
+            .load_backup()
+            .ok()
+            .map(|backup| self.normalize_backup(backup));
+        let mut paths = self.config_paths.clone();
+        if let Some(backup) = backup {
+            for file in backup.files {
+                paths.push(PathBuf::from(file.path));
             }
         }
+        paths.sort();
+        paths.dedup();
+
+        self.remove_bifrost_blocks_from_paths(paths)?;
 
         self.remove_backup();
 
@@ -378,6 +351,7 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"#.to_string(),
         self.data_dir.join(BACKUP_FILE_NAME)
     }
 
+    #[cfg(test)]
     fn save_backup(&self, files: Vec<ShellProxyBackupFile>) -> Result<()> {
         let backup = ShellProxyBackup {
             shell_type: self.shell_type.as_str().to_string(),
@@ -417,6 +391,29 @@ unset HTTP_PROXY HTTPS_PROXY ALL_PROXY NO_PROXY"#.to_string(),
 
     fn remove_backup(&self) {
         let _ = std::fs::remove_file(self.backup_file_path());
+    }
+
+    fn remove_bifrost_blocks_from_paths(&self, paths: Vec<PathBuf>) -> Result<()> {
+        for config_path in paths {
+            if !config_path.exists() {
+                continue;
+            }
+            let content = std::fs::read_to_string(&config_path)?;
+            let new_content = self.remove_config_block(&content);
+            if new_content != content {
+                self.write_or_remove_empty_config(&config_path, new_content)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn write_or_remove_empty_config(&self, config_path: &Path, content: String) -> Result<()> {
+        if content.trim().is_empty() {
+            let _ = std::fs::remove_file(config_path);
+            return Ok(());
+        }
+        std::fs::write(config_path, content)?;
+        Ok(())
     }
 }
 
@@ -533,8 +530,9 @@ mod tests {
         assert!(after_enable.contains("HTTP_PROXY=http://127.0.0.1:7890"));
         // Existing user content is preserved.
         assert!(after_enable.contains("alias ll='ls -la'"));
-        // Backup file was written.
-        assert!(tmp.path().join(BACKUP_FILE_NAME).exists());
+        // Persistent proxy management is marker-block based and does not rely
+        // on whole-file backups that could overwrite concurrent user edits.
+        assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
 
         mgr.disable_persistent().unwrap();
         let after_disable = std::fs::read_to_string(&rc).unwrap();
@@ -567,6 +565,52 @@ mod tests {
     }
 
     #[test]
+    fn disable_persistent_without_marker_does_not_write_backup() {
+        let tmp = TempDir::new().unwrap();
+        let rc = tmp.path().join(".zshrc");
+        std::fs::write(&rc, "# user config\nalias gl='git pull'\n").unwrap();
+        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
+
+        mgr.disable_persistent().unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(&rc).unwrap(),
+            "# user config\nalias gl='git pull'\n"
+        );
+        assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
+    }
+
+    #[test]
+    fn disable_persistent_only_removes_bifrost_blocks() {
+        let tmp = TempDir::new().unwrap();
+        let zshrc = tmp.path().join(".zshrc");
+        let zprofile = tmp.path().join(".zprofile");
+        std::fs::write(&zshrc, "# user config\n").unwrap();
+        std::fs::write(
+            &zprofile,
+            format!(
+                "before\n{}\nproxy block\n{}\nafter\n",
+                START_MARKER, END_MARKER
+            ),
+        )
+        .unwrap();
+        let mut mgr = manager_with(
+            tmp.path().to_path_buf(),
+            ShellType::Zsh,
+            vec![zshrc.clone(), zprofile.clone()],
+        );
+
+        mgr.disable_persistent().unwrap();
+
+        assert_eq!(std::fs::read_to_string(&zshrc).unwrap(), "# user config\n");
+        assert_eq!(
+            std::fs::read_to_string(&zprofile).unwrap(),
+            "before\nafter\n"
+        );
+        assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
+    }
+
+    #[test]
     fn status_detects_persistent_config_and_env() {
         let tmp = TempDir::new().unwrap();
         let rc = tmp.path().join(".bashrc");
@@ -584,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_writes_back_original_content() {
+    fn restore_removes_bifrost_block_without_overwriting_user_changes() {
         let tmp = TempDir::new().unwrap();
         let rc = tmp.path().join(".zshrc");
         std::fs::write(&rc, "ORIGINAL\n").unwrap();
@@ -593,10 +637,15 @@ mod tests {
         mgr.enable_persistent("127.0.0.1", 7890, "localhost")
             .unwrap();
         assert_ne!(std::fs::read_to_string(&rc).unwrap(), "ORIGINAL\n");
+        let edited = std::fs::read_to_string(&rc).unwrap() + "\n# user edited while proxy active\n";
+        std::fs::write(&rc, edited).unwrap();
 
         mgr.restore().unwrap();
-        assert_eq!(std::fs::read_to_string(&rc).unwrap(), "ORIGINAL\n");
-        // Backup file removed after restore.
+        let restored = std::fs::read_to_string(&rc).unwrap();
+        assert!(!restored.contains(START_MARKER));
+        assert!(!restored.contains(END_MARKER));
+        assert!(restored.contains("ORIGINAL"));
+        assert!(restored.contains("# user edited while proxy active"));
         assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
     }
 
@@ -606,29 +655,40 @@ mod tests {
         let rc = tmp.path().join(".bashrc"); // does not exist yet
         let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Bash, vec![rc.clone()]);
 
-        // Enable creates the file (original_content = None recorded in backup).
+        // Enable creates the file with only the managed Bifrost block.
         mgr.enable_persistent("127.0.0.1", 7890, "localhost")
             .unwrap();
         assert!(rc.exists());
 
         mgr.restore().unwrap();
-        // Since there was no original content, the file is removed.
+        // Removing the managed block leaves the file empty, so it is removed.
         assert!(!rc.exists());
     }
 
     #[test]
-    fn recover_from_crash_restores_when_backup_present() {
+    fn recover_from_crash_uses_legacy_backup_paths_without_overwriting_content() {
         let tmp = TempDir::new().unwrap();
         let rc = tmp.path().join(".zshrc");
-        std::fs::write(&rc, "BEFORE\n").unwrap();
-        let mut mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
-        mgr.enable_persistent("127.0.0.1", 7890, "localhost")
-            .unwrap();
+        let mgr = manager_with(tmp.path().to_path_buf(), ShellType::Zsh, vec![rc.clone()]);
+        mgr.save_backup(vec![ShellProxyBackupFile {
+            path: rc.to_string_lossy().to_string(),
+            original_content: Some("STALE BACKUP\n".to_string()),
+        }])
+        .unwrap();
+        std::fs::write(
+            &rc,
+            format!(
+                "USER BEFORE\n{}\nproxy block\n{}\nUSER AFTER\n",
+                START_MARKER, END_MARKER
+            ),
+        )
+        .unwrap();
 
-        // recover_from_crash builds its own manager via env detection, so the
-        // restored config_paths may differ; what we assert is that it does not
-        // error and clears the backup file in the data dir.
         ShellProxyManager::recover_from_crash(tmp.path()).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&rc).unwrap(),
+            "USER BEFORE\nUSER AFTER\n"
+        );
         assert!(!tmp.path().join(BACKUP_FILE_NAME).exists());
     }
 

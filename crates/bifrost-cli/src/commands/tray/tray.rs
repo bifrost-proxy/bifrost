@@ -31,13 +31,18 @@ use image::ImageEncoder;
 #[cfg(target_os = "macos")]
 use objc2::rc::Retained;
 #[cfg(target_os = "macos")]
-use objc2::{AnyThread, MainThreadMarker};
+use objc2::runtime::{AnyObject, ProtocolObject};
 #[cfg(target_os = "macos")]
-use objc2_app_kit::{
-    NSAccessibility, NSCellImagePosition, NSImage, NSMenu, NSStatusBar, NSStatusItem,
+use objc2::{
+    define_class, msg_send, sel, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly,
 };
 #[cfg(target_os = "macos")]
-use objc2_foundation::{NSData, NSSize, NSString};
+use objc2_app_kit::{
+    NSAccessibility, NSCellImagePosition, NSImage, NSMenu, NSMenuDelegate, NSStatusBar,
+    NSStatusItem,
+};
+#[cfg(target_os = "macos")]
+use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSSize, NSString};
 
 #[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -139,7 +144,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let menu_items =
         build_menu_from_snapshot(&initial_menu_data, state, None, false, &data_dir_str, false);
 
-    let mut native_menu = NativeMenuState::new(&menu_items);
+    #[cfg(target_os = "macos")]
+    let (native_action_sender, native_action_receiver) = std::sync::mpsc::channel::<MenuId>();
+    let mut native_menu = NativeMenuState::new(
+        &menu_items,
+        #[cfg(target_os = "macos")]
+        Some(native_action_sender.clone()),
+    );
     let mut action_map = native_menu.action_map.clone();
 
     let initial_icon = match state {
@@ -157,6 +168,21 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let initial_icon_for_builder = initial_icon.clone();
 
+    let should_quit = Arc::new(AtomicBool::new(false));
+    let should_reload = Arc::new(AtomicBool::new(false));
+    let current_operation = Arc::new(AtomicU8::new(OP_IDLE));
+    let upgrade_percent = Arc::new(AtomicU8::new(UPGRADE_PERCENT_NONE));
+    let current_state = Arc::new(AtomicU8::new(match state {
+        ServiceState::Running => STATE_RUNNING,
+        ServiceState::Stopped => STATE_STOPPED,
+        ServiceState::Disconnected => STATE_DISCONNECTED,
+    }));
+    let menu_data = Arc::new(Mutex::new(initial_menu_data));
+    let menu_data_generation = Arc::new(AtomicU64::new(0));
+    #[cfg(target_os = "macos")]
+    let system_stats_generation = Arc::new(AtomicU64::new(0));
+    let system_proxy_refresh_in_flight = Arc::new(AtomicBool::new(false));
+
     let builder = TrayIconBuilder::new()
         .with_menu(Box::new(native_menu.menu.clone()))
         .with_tooltip(state_tooltip(state))
@@ -171,6 +197,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             initial_menu_bar_title.as_deref(),
             &native_menu.menu,
             state_tooltip(state),
+            Arc::new(SystemProxyMenuWillOpen {
+                args: args.clone(),
+                state: current_state.clone(),
+                menu_data: menu_data.clone(),
+                generation: menu_data_generation.clone(),
+                refresh_in_flight: system_proxy_refresh_in_flight.clone(),
+            }),
         ) {
             Some(item) => {
                 tracing::info!("native macOS tray stats view enabled as primary status item");
@@ -203,36 +236,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             .build()
             .map_err(|e| format!("failed to create tray icon: {e}"))?,
     );
-
-    let should_quit = Arc::new(AtomicBool::new(false));
-    let should_reload = Arc::new(AtomicBool::new(false));
-    let current_operation = Arc::new(AtomicU8::new(OP_IDLE));
-    let upgrade_percent = Arc::new(AtomicU8::new(UPGRADE_PERCENT_NONE));
-    let current_state = Arc::new(AtomicU8::new(match state {
-        ServiceState::Running => STATE_RUNNING,
-        ServiceState::Stopped => STATE_STOPPED,
-        ServiceState::Disconnected => STATE_DISCONNECTED,
-    }));
-    let menu_data = Arc::new(Mutex::new(initial_menu_data));
-    let menu_data_generation = Arc::new(AtomicU64::new(0));
-    #[cfg(target_os = "macos")]
-    let system_stats_generation = Arc::new(AtomicU64::new(0));
-    let system_proxy_refresh_in_flight = Arc::new(AtomicBool::new(false));
-
-    #[cfg(target_os = "macos")]
-    if native_stats_item.is_some() {
-        // The native primary NSStatusItem opens its NSMenu directly, so the
-        // tray-icon click event used by the fallback path is not emitted.
-        // Prime the on-demand System Proxy row once so the merged native menu
-        // does not lose that existing affordance.
-        request_system_proxy_menu_refresh(
-            &args,
-            &current_state,
-            &menu_data,
-            &menu_data_generation,
-            &system_proxy_refresh_in_flight,
-        );
-    }
 
     let poll_quit = should_quit.clone();
     let poll_state = current_state.clone();
@@ -343,6 +346,24 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             while let Ok(event) = menu_receiver.try_recv() {
                 if let Some(action) = action_map.get(&event.id) {
                     tracing::info!("menu action triggered");
+                    execute_action(
+                        action,
+                        &args,
+                        &should_quit,
+                        &should_reload,
+                        &current_operation,
+                        &menu_data,
+                        &menu_data_generation,
+                        &system_proxy_refresh_in_flight,
+                    );
+                    action_triggered = true;
+                }
+            }
+
+            #[cfg(target_os = "macos")]
+            while let Ok(id) = native_action_receiver.try_recv() {
+                if let Some(action) = action_map.get(&id) {
+                    tracing::info!("native menu action triggered");
                     execute_action(
                         action,
                         &args,
@@ -483,7 +504,11 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 last_rendered_state = new_state;
                 last_rendered_operation = new_operation;
                 last_rendered_data_generation = data_generation;
-                native_menu = NativeMenuState::new(&new_menu_items);
+                native_menu = NativeMenuState::new(
+                    &new_menu_items,
+                    #[cfg(target_os = "macos")]
+                    Some(native_action_sender.clone()),
+                );
                 if let Some(tray_icon) = tray_icon.as_ref() {
                     tray_icon.set_menu(Some(Box::new(native_menu.menu.clone())));
                 }
@@ -601,17 +626,122 @@ fn native_stats_view_enabled_from_env(value: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "macos")]
+trait NativeStatsMenuWillOpen: Send + Sync {
+    fn menu_will_open(&self);
+}
+
+#[cfg(target_os = "macos")]
+struct SystemProxyMenuWillOpen {
+    args: TrayArgs,
+    state: Arc<AtomicU8>,
+    menu_data: Arc<Mutex<MenuDataSnapshot>>,
+    generation: Arc<AtomicU64>,
+    refresh_in_flight: Arc<AtomicBool>,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeStatsMenuWillOpen for SystemProxyMenuWillOpen {
+    fn menu_will_open(&self) {
+        request_system_proxy_menu_refresh(
+            &self.args,
+            &self.state,
+            &self.menu_data,
+            &self.generation,
+            &self.refresh_in_flight,
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NativeStatsMenuDelegateIvars {
+    will_open: Arc<dyn NativeStatsMenuWillOpen>,
+}
+
+#[cfg(target_os = "macos")]
+struct NativeMenuActionTargetIvars {
+    id: MenuId,
+    sender: std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+}
+
+#[cfg(target_os = "macos")]
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "BifrostNativeStatsMenuDelegate"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = NativeStatsMenuDelegateIvars]
+    struct NativeStatsMenuDelegate;
+
+    unsafe impl NSObjectProtocol for NativeStatsMenuDelegate {}
+
+    unsafe impl NSMenuDelegate for NativeStatsMenuDelegate {
+        #[unsafe(method(menuWillOpen:))]
+        fn menu_will_open(&self, _menu: &NSMenu) {
+            self.ivars().will_open.menu_will_open();
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+define_class!(
+    #[unsafe(super(NSObject))]
+    #[name = "BifrostNativeMenuActionTarget"]
+    #[thread_kind = MainThreadOnly]
+    #[ivars = NativeMenuActionTargetIvars]
+    struct NativeMenuActionTarget;
+
+    unsafe impl NSObjectProtocol for NativeMenuActionTarget {}
+
+    impl NativeMenuActionTarget {
+        #[unsafe(method(fireBifrostNativeMenuAction:))]
+        fn fire_bifrost_native_menu_action(&self, _sender: Option<&AnyObject>) {
+            let _ = self.ivars().sender.send(self.ivars().id.clone());
+        }
+    }
+);
+
+#[cfg(target_os = "macos")]
+impl NativeStatsMenuDelegate {
+    fn new(will_open: Arc<dyn NativeStatsMenuWillOpen>, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(NativeStatsMenuDelegateIvars { will_open });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl NativeMenuActionTarget {
+    fn new(
+        id: MenuId,
+        sender: std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+        mtm: MainThreadMarker,
+    ) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(NativeMenuActionTargetIvars { id, sender });
+        unsafe { msg_send![super(this), init] }
+    }
+}
+
+#[cfg(target_os = "macos")]
 struct NativeStatsStatusItem {
     item: Retained<NSStatusItem>,
+    menu_delegate: Retained<NativeStatsMenuDelegate>,
     mtm: MainThreadMarker,
 }
 
 #[cfg(target_os = "macos")]
 impl NativeStatsStatusItem {
-    fn new(title: Option<&str>, menu: &Menu, tooltip: &str) -> Option<Self> {
+    fn new(
+        title: Option<&str>,
+        menu: &Menu,
+        tooltip: &str,
+        menu_will_open: Arc<dyn NativeStatsMenuWillOpen>,
+    ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(1.0);
-        let mut native = Self { item, mtm };
+        let menu_delegate = NativeStatsMenuDelegate::new(menu_will_open, mtm);
+        let mut native = Self {
+            item,
+            menu_delegate,
+            mtm,
+        };
         native.set_menu(menu);
         native.set_tooltip(tooltip);
         native.set_title(title);
@@ -621,6 +751,10 @@ impl NativeStatsStatusItem {
     fn set_menu(&mut self, menu: &Menu) {
         unsafe {
             let ns_menu = menu.ns_menu().cast::<NSMenu>().as_ref();
+            if let Some(ns_menu) = ns_menu {
+                let delegate = ProtocolObject::from_ref(&*self.menu_delegate);
+                ns_menu.setDelegate(Some(delegate));
+            }
             self.item.setMenu(ns_menu);
         }
     }
@@ -2363,10 +2497,17 @@ struct NativeMenuState {
     action_map: HashMap<MenuId, MenuItemAction>,
     handles: Vec<NativeMenuHandle>,
     shape: Vec<NativeMenuShape>,
+    #[cfg(target_os = "macos")]
+    action_sender: Option<std::rc::Rc<std::sync::mpsc::Sender<MenuId>>>,
+    #[cfg(target_os = "macos")]
+    action_targets: Vec<Retained<NativeMenuActionTarget>>,
 }
 
 impl NativeMenuState {
-    fn new(items: &[MenuEntry]) -> Self {
+    fn new(
+        items: &[MenuEntry],
+        #[cfg(target_os = "macos")] action_sender: Option<std::sync::mpsc::Sender<MenuId>>,
+    ) -> Self {
         let menu = Menu::new();
         let mut action_map = HashMap::new();
         let mut handles = Vec::new();
@@ -2376,12 +2517,22 @@ impl NativeMenuState {
             append_menu_entry(&menu, entry, &mut action_map, &mut handles, &mut shape);
         }
 
-        Self {
+        #[cfg(target_os = "macos")]
+        let action_sender = action_sender.map(std::rc::Rc::new);
+
+        let mut state = Self {
             menu,
             action_map,
             handles,
             shape,
-        }
+            #[cfg(target_os = "macos")]
+            action_sender,
+            #[cfg(target_os = "macos")]
+            action_targets: Vec::new(),
+        };
+        #[cfg(target_os = "macos")]
+        state.install_action_targets(items);
+        state
     }
 
     fn refresh_in_place(&mut self, items: &[MenuEntry]) -> bool {
@@ -2401,7 +2552,72 @@ impl NativeMenuState {
             }
         }
         self.action_map = next_action_map;
+        #[cfg(target_os = "macos")]
+        self.install_action_targets(items);
         true
+    }
+
+    #[cfg(target_os = "macos")]
+    fn install_action_targets(&mut self, items: &[MenuEntry]) {
+        self.action_targets.clear();
+        let Some(sender) = &self.action_sender else {
+            return;
+        };
+        self.action_targets = install_native_menu_action_targets(&self.menu, items, sender);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_menu_action_targets(
+    menu: &Menu,
+    items: &[MenuEntry],
+    sender: &std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+) -> Vec<Retained<NativeMenuActionTarget>> {
+    let mut targets = Vec::new();
+    unsafe {
+        let Some(ns_menu) = menu.ns_menu().cast::<NSMenu>().as_ref() else {
+            return targets;
+        };
+        install_native_menu_action_targets_for_ns_menu(ns_menu, items, sender, &mut targets);
+    }
+    targets
+}
+
+#[cfg(target_os = "macos")]
+fn install_native_menu_action_targets_for_ns_menu(
+    ns_menu: &NSMenu,
+    items: &[MenuEntry],
+    sender: &std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+    targets: &mut Vec<Retained<NativeMenuActionTarget>>,
+) {
+    let mtm = MainThreadMarker::from(ns_menu);
+    for (index, entry) in items.iter().enumerate() {
+        let Some(ns_item) = ns_menu.itemAtIndex(index as objc2_foundation::NSInteger) else {
+            break;
+        };
+        match entry {
+            MenuEntry::Item(item) => {
+                if !matches!(item.action, MenuItemAction::None) {
+                    let target =
+                        NativeMenuActionTarget::new(MenuId::new(&item.id), sender.clone(), mtm);
+                    unsafe {
+                        ns_item.setTarget(Some(&target));
+                        ns_item.setAction(Some(sel!(fireBifrostNativeMenuAction:)));
+                    }
+                    targets.push(target);
+                }
+            }
+            MenuEntry::Submenu(submenu) => {
+                if let Some(child_menu) = ns_item.submenu() {
+                    install_native_menu_action_targets_for_ns_menu(
+                        &child_menu,
+                        &submenu.children,
+                        sender,
+                        targets,
+                    );
+                }
+            }
+        }
     }
 }
 
@@ -2454,12 +2670,18 @@ fn append_menu_item(
             MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
         )
     {
-        let menu_item = CheckMenuItem::new(&item.label, item.enabled, item.checked, None);
+        let menu_item = CheckMenuItem::with_id(
+            MenuId::new(&item.id),
+            &item.label,
+            item.enabled,
+            item.checked,
+            None,
+        );
         map.insert(menu_item.id().clone(), item.action.clone());
         menu.append_item(&menu_item);
         handles.push(NativeMenuHandle::Check(menu_item));
     } else {
-        let menu_item = MenuItem::new(&item.label, item.enabled, None);
+        let menu_item = MenuItem::with_id(MenuId::new(&item.id), &item.label, item.enabled, None);
         map.insert(menu_item.id().clone(), item.action.clone());
         menu.append_item(&menu_item);
         handles.push(NativeMenuHandle::Item(menu_item));

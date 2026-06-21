@@ -43,7 +43,7 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 
 **预期结果：**
 - 顶部显示 "Bifrost: Running on 127.0.0.1:8801"（灰色不可点击）
-- 包含以下菜单项：Open Admin UI、Open Traffic、Open Rules、Open Settings、Copy HTTP Proxy、Copy SOCKS5 Proxy
+- 包含以下菜单项：Open Traffic、Open Rules、Open Settings、Copy HTTP Proxy、Copy SOCKS5 Proxy
 - 点击 Open Settings 打开 `http://127.0.0.1:8801/_bifrost/settings`
 - 统一代理模式下 Copy SOCKS5 Proxy 可点击，复制值为 `socks5://127.0.0.1:8801`；如果启动时显式传入 `--socks5-port <port>`，则复制独立 SOCKS5 端口
 - 没有规则时仍显示 `Rules: None` 子菜单，子菜单中显示置灰的 `No rules available`
@@ -58,12 +58,12 @@ cargo run --bin bifrost -- start -p 8801 --unsafe-ssl --no-system-proxy --skip-c
 **操作步骤：**
 1. 在 TC-TH-01 基础上，连续点击托盘图标 3 次
 2. 每次点击后观察菜单是否保持展开至少 2 秒
-3. 每次菜单展开后移动鼠标到 "Open Admin UI" 菜单项但不点击
+3. 每次菜单展开后移动鼠标到 "Open Traffic" 菜单项但不点击
 4. 查看 `.bifrost-tray-test/logs/tray.log*`
 
 **预期结果：**
 - 每次点击后菜单都保持展开，不出现闪烁一下立即消失
-- 鼠标移动到 "Open Admin UI" 时该菜单项保持可见且可高亮
+- 鼠标移动到 "Open Traffic" 时该菜单项保持可见且可高亮
 - 点击图标本身不会立即产生 `tray menu rebuilt` 日志
 - 菜单打开后的短保护窗口内，后台状态轮询、规则轮询或系统代理状态刷新不应替换 native menu
 - 保护窗口外的后台状态变化仍可重建菜单，用于保持服务停止/启动状态刷新
@@ -99,7 +99,7 @@ cargo test -p bifrost-cli native_menu -- --nocapture
 **预期结果：**
 - 主服务 PID 仍存活时，菜单顶部显示 `Bifrost: Running on 127.0.0.1:8801`
 - 菜单不显示 `Bifrost: Unknown`
-- Open Admin UI、Copy HTTP Proxy、Rules、System Proxy 等依赖 Admin URL 的菜单项仍使用启动参数中的 `127.0.0.1:8801`
+- Open Traffic、Copy HTTP Proxy、Rules、System Proxy 等依赖 Admin URL 的菜单项仍使用启动参数中的 `127.0.0.1:8801`
 - 恢复 runtime 文件后菜单状态保持 Running，不出现 Stop/Start 与状态标题不一致
 
 ### TC-TH-02-REG-03: 主进程 Admin API 繁忙时菜单仍快速响应
@@ -141,14 +141,14 @@ cat ./.bifrost-tray-test/tray.pid
 - 日志记录已有 helper 被复用或跳过启动，而不是短暂创建第二个 helper 后由内部 lock 退出
 - 同一 `BIFROST_DATA_DIR` 下始终只有一个活动 tray helper
 
-### TC-TH-03: Open Admin UI 打开浏览器管理端
+### TC-TH-03: Open Traffic 打开浏览器管理端 Traffic 页面
 
 **操作步骤：**
-1. 点击 "Open Admin UI" 菜单项
+1. 点击 "Open Traffic" 菜单项
 
 **预期结果：**
-- 默认浏览器打开 `http://127.0.0.1:8801/_bifrost/`
-- 管理端页面正常加载
+- 默认浏览器打开 `http://127.0.0.1:8801/_bifrost/traffic`
+- 管理端 Traffic 页面正常加载
 
 ### TC-TH-04: Copy HTTP Proxy 复制到剪贴板
 
@@ -179,7 +179,7 @@ cat ./.bifrost-tray-test/tray.pid
 **预期结果：**
 - Bifrost 主服务停止（端口 8801 不再监听）
 - 托盘图标仍存在但菜单进入 stopped 状态（状态行显示 "Bifrost: Stopped" 或 "Bifrost: Disconnected"）
-- 依赖服务的菜单项（Open Admin UI 等）置灰
+- 依赖服务的菜单项（Open Traffic 等）置灰
 
 ### TC-TH-07: --no-tray 禁用托盘
 
@@ -421,7 +421,7 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 
 **预期结果：**
 - 菜单状态行显示 "Bifrost: Stopped" 或 "Bifrost: Disconnected"
-- Open Admin UI、Open Traffic、Open Rules、Open Settings、Copy HTTP Proxy 等依赖服务的菜单项置灰
+- Open Traffic、Open Rules、Open Settings、Copy HTTP Proxy 等依赖服务的菜单项置灰
 - 没有依赖再次点击图标预热下一次菜单才能看到新状态
 
 ### TC-TH-15B: 主服务退出后托盘空转 10 分钟自动退出
@@ -483,7 +483,7 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 **预期结果：**
 - Open Settings 打开 `http://[::1]:8801/_bifrost/settings`
 - HTTP Proxy 为 `http://[::1]:8801`
-- Open Admin UI 使用同样带方括号的 URL
+- Open Settings 和 Open Traffic 使用同样带方括号的 URL
 
 ### TC-TH-19: 超大 tray.json fail closed 且日志保留不无限增长
 
@@ -625,7 +625,7 @@ Get-CimInstance Win32_Process |
 - 托盘后台空闲轮询不会每秒请求 `/api/proxy/system`
 - 后台空闲时，Bifrost 主服务不会反复创建 `reg.exe` / `powershell.exe` / `cmd.exe` / `conhost.exe` / `WindowsTerminal.exe`
 - Windows 上即使用户展开托盘菜单触发一次 System Proxy 按需刷新，也不会弹出可见终端窗口
-- Windows 上点击 `Open Admin UI` / `Open Logs` 这类打开 URL 或目录的菜单项时，托盘 helper 也不应通过 `cmd /c start` 创建可见 console 子进程；应使用无控制台的系统打开 API
+- Windows 上点击 `Open Traffic` / `Open Settings` / `Open Logs` 这类打开 URL 或目录的菜单项时，托盘 helper 也不应通过 `cmd /c start` 创建可见 console 子进程；应使用无控制台的系统打开 API
 - Windows 上 Sync 启动自动登录提示打开浏览器时，也不应通过 `cmd /c start` 创建可见 console 子进程；应使用无控制台的系统打开 API
 - Windows 上 `bifrost start -d` 后，daemon child 必须自动拉起 tray helper；不能只启动后台主服务而没有托盘图标
 - System Proxy 菜单项使用最近一次缓存状态渲染；缓存只在托盘交互、System Proxy 开关操作或显式菜单动作后刷新
@@ -776,7 +776,7 @@ target/release/bifrost start -d -y --skip-cert-check -p 62144 --host 127.0.0.1 -
 6. 连续截取 3 张完整顶部菜单栏截图，每张间隔 1 秒；同时生成局部 2x 对照图，要求截图中包含 Bifrost native 单一状态项和右侧参考状态项。
 7. 对 3 张截图逐张目视检查：CPU 与上下行网速是否刷新、两行布局是否稳定、列间竖线是否贯穿上下两行、网络上下两行字号是否一致、图形箭头是否与参考方案接近、状态项是否明显比旧 18pt 位图方案更接近参考产品。
 8. 使用 `PUT /_bifrost/api/config/tray` 分别关闭 CPU、Memory、Disk、Upload、Download 和 `show_system_stats`，每次等待至少 1 秒后读取 `System Events` 中 `bifrost` 进程 menu bar item 的 `description`，确认对应字段从状态栏 description 中消失，其它字段保持存在。
-9. 对同一个 menu bar item 执行 `AXPress`，读取展开菜单中的 `Open Admin UI`、`Open Traffic`、`Stop Bifrost`、`Quit Tray` 等菜单项，确认图标、状态和菜单合并在同一个可点击状态项里。
+9. 对同一个 menu bar item 执行 `AXPress`，读取展开菜单中的 `Open Traffic`、`Open Rules`、`Open Settings`、`Stop Bifrost`、`Quit Tray` 等菜单项，确认图标、状态和菜单合并在同一个可点击状态项里。
 10. 对 tray helper 做 60 秒空闲 CPU/RSS 采样，确认平均 CPU <1%，RSS 无显著增长。
 
 **预期结果：**
@@ -794,6 +794,7 @@ target/release/bifrost start -d -y --skip-cert-check -p 62144 --host 127.0.0.1 -
 
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
+| 2026-06-21 | TC-TH-02 / TC-TH-03 / TC-TH-14-REG-02 / TC-TH-30 | 针对 native macOS 菜单点击不触发 action、默认菜单重复入口和 System Proxy 菜单打开前刷新回归重新执行。执行 `cargo test -p bifrost-core shell_proxy --lib -- --nocapture` 通过 24/24；执行 `cargo test -p bifrost-cli commands::tray::menu::tests --lib --all-features -- --nocapture` 通过 20/20，断言 `open_admin_ui` 不存在且 `Open Settings` 指向 `/_bifrost/settings`；执行 `cargo test -p bifrost-cli native_ --lib --all-features -- --nocapture` 通过 13/13，覆盖 native `menuWillOpen` 刷新 System Proxy 缓存。执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 后使用临时目录 `/tmp/bifrost-open-settings-fixed.g1hwHz/data`、端口 `61804` 启动真实 macOS daemon，tray PID `26957`，启动参数包含 `--no-system-proxy --skip-cert-check`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。通过 `System Events` 读取同一个 menu bar item 的 description 为 `Bifrost: C15% | M55% | D65% | ↑9.3 K/s ↓17.7 K/s`；执行 AXPress 后菜单项为 `Bifrost: Running on 127.0.0.1:61804`、`Version v0.0.112`、`Open Traffic`、`Open Rules`、`Open Settings`、`Copy HTTP Proxy`、`Copy SOCKS5 Proxy`、`Rules: None`、`Stop Bifrost`、`System Proxy`、`Open Logs`、`Quit Tray`，不包含 `Open Admin UI`。把 Microsoft Edge 当前 tab 先设为 `about:blank`，再通过 tray 菜单点击 `Open Settings`；`tray.log` 中 `native menu action triggered` 计数从 1 增加到 2，Edge active tab URL 变为 `http://127.0.0.1:61804/_bifrost/settings`。截图保存为 `/tmp/bifrost-open-settings-fixed-menu.png`，可见完整菜单、Settings 页面和同一个 native 状态项。 | 通过。native `NSStatusItem.setMenu(...)` 路径已补显式 target/action 派发，不再依赖不会触发的 `muda::MenuEvent`；`Open Settings` 会真实打开管理端 Settings 页面；默认菜单删除重复的 `Open Admin UI`，保留 `Open Traffic` 作为 Traffic 页入口；System Proxy 勾选状态在 native 菜单 `menuWillOpen` 时触发按需刷新，避免只在旧 TrayIconEvent 点击路径更新造成 stale 状态。 |
 | 2026-06-21 | TC-TH-02 | 根据最新反馈将默认菜单中的 `Copy Admin URL` 替换为 `Open Settings`。执行 `cargo test -p bifrost-cli test_menu_running_state --lib --all-features -- --nocapture` 通过 1/1，断言 `open_settings` 菜单项 label 为 `Open Settings` 且 action 为 `OpenUrl("http://127.0.0.1:8800/_bifrost/settings")`；执行 `cargo fmt --all -- --check` 通过；执行 `cargo test -p bifrost-cli commands::tray::menu::tests --lib --all-features -- --nocapture` 通过 20/20；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 63/63。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 重建真实 CLI 二进制，清理旧临时实例后使用临时目录 `/tmp/bifrost-open-settings.IaCn4B/data`、端口 `56622` 启动真实 macOS daemon，tray PID `34043`，启动参数包含 `--no-system-proxy --skip-cert-check`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。`tray.log.2026-06-21` 记录 `native macOS tray stats view enabled as primary status item`；通过 `System Events` 针对 PID `34043` 执行 AXPress，展开同一个 native status item 的菜单，菜单项依次包含 `Open Admin UI`、`Open Traffic`、`Open Rules`、`Open Settings`、`Copy HTTP Proxy`、`Copy SOCKS5 Proxy`、`Rules: None`、`Stop Bifrost`、`System Proxy`、`Open Logs`、`Quit Tray`。验证后执行 `BIFROST_DATA_DIR=/tmp/bifrost-open-settings.IaCn4B/data target/debug/bifrost stop` 停止临时实例。 | 通过。默认菜单红框位置现在是 `Open Settings`，不再显示 `Copy Admin URL`；行为不是只改文案，菜单 action 指向 Settings 路由。验证中发现如果只跑 lib 单测而不重建 `target/debug/bifrost`，真实托盘会继续使用旧二进制；本轮已重建 binary 后再做 AX 菜单回归，避免旧实例和旧二进制串台。 |
 | 2026-06-21 | TC-TH-30 | 修正 macOS native 路线默认行为后补充回归。执行 `cargo fmt --all -- --check` 通过；执行 `cargo test -p bifrost-cli native_stats_view --lib --all-features -- --nocapture` 通过 1/1，确认不设置 `BIFROST_TRAY_NATIVE_STATS_VIEW` 时默认启用 native，显式设置 `0/false/no/off` 时才回退旧路径；执行 `cargo test -p bifrost-cli native_ --lib --all-features -- --nocapture` 通过 12/12。执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 通过；复制 release 二进制到 `/tmp/bifrost-native-default.8UAgca/bifrost-native-default`，不设置 `BIFROST_TRAY_NATIVE_STATS_VIEW`，仅设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，使用临时数据目录 `/tmp/bifrost-native-default.8UAgca/data`、端口 `50021`、主进程 PID `73098`、tray PID `73116` 启动真实 macOS daemon，启动参数包含 `--no-system-proxy --skip-cert-check`。`GET /_bifrost/api/config/tray` 返回系统状态支持且全项开启；`tray.log.2026-06-21` 记录 `native macOS tray stats view enabled as primary status item`；`System Events` 读取 menu bar item description 为 `Bifrost: C5% | M80% | D65% | ↑5.1 K/s ↓4.6 K/s`。测试后停止临时实例并确认主进程、tray 进程退出。 | 通过。macOS native 两行状态项现在是默认路径，不需要额外环境变量；环境变量只保留为显式回退开关。该修复避免用户安装正常版本后仍落到旧 `tray-icon` 位图路径。 |
 | 2026-06-21 | TC-TH-30 | 按用户要求重新执行所有 Tray 系统状态开关回归。执行 `cargo test -p bifrost-cli native_ --lib --all-features -- --nocapture` 通过 11/11，覆盖 native 单状态项、两行布局、网络图形箭头、固定槽位、可访问性标签和子项过滤；执行 `cargo test -p bifrost-cli menu_bar_stats --lib --all-features -- --nocapture` 通过 6/6；执行 `cargo test -p bifrost-cli system_stats --lib --all-features -- --nocapture` 通过 24/24；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 63/63，覆盖 CPU/Memory/Disk/Upload/Download 与 `show_system_stats` 的逐项关闭、持久化和恢复。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 通过，复制 release 二进制到 `/tmp/bifrost-native-regression3.sm0Nsa/bifrost-native-regression3` 并以 daemon 方式启动真实 macOS 实例，数据目录 `/tmp/bifrost-native-regression3.sm0Nsa/data`，端口 `49518`，主进程 PID `64402`，tray PID `64421`，环境包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `BIFROST_TRAY_NATIVE_STATS_VIEW=1`，启动参数包含 `--no-system-proxy --skip-cert-check`。`tray.log.2026-06-21` 记录 `native macOS tray stats view enabled as primary status item`。通过 `PUT /_bifrost/api/config/tray` 逐项切换后用 `System Events` 读取同一个 menu bar item description：全开为 `Bifrost: C5% | M80% | D65% | ↑3.4 K/s ↓8.1 K/s`；`cpu=false` 为 `Bifrost: M80% | D65% | ↑4.0 K/s ↓3.2 K/s`；`memory=false` 为 `Bifrost: C0% | D65% | ↑1.6 K/s ↓1.7 K/s`；`disk=false` 为 `Bifrost: C5% | M80% | ↑5.0 K/s ↓6.3 K/s`；`upload=false` 为 `Bifrost: C0% | M80% | D65% | ↓25.1 K/s`；`download=false` 为 `Bifrost: C5% | M80% | D65% | ↑4.2 K/s`；`show_system_stats=false` 为 `Bifrost`；恢复全开为 `Bifrost: C5% | M80% | D65% | ↑12.6 K/s ↓12.4 K/s`，原始记录保存于 `/tmp/bifrost-native-regression3.sm0Nsa/tray-switch-ax.txt`。对同一状态项执行 AXPress 后菜单项包含 `Open Admin UI`、`Open Traffic`、`Open Rules`、`Stop Bifrost`、`System Proxy`、`Open Logs`、`Quit Tray`。对 tray PID `64421` 采集 60 个 1 秒 CPU/RSS 样本，记录 `/tmp/bifrost-native-regression3.sm0Nsa/tray-perf-60s.txt`。尝试 `screencapture -x -R0,0,1800,140` 返回 `could not create image from rect`；整屏 `screencapture -x` 可生成 5120x2880 PNG，但顶部裁剪为黑帧；Computer Use 读取 Finder 桌面截图成功但只暴露左侧系统菜单，未显示右侧 menu extras。 | 通过，截图通道受限。配置 E2E、真实 macOS daemon 实例、状态栏 AX description 和 AXPress 菜单验证共同证明 Settings/Tray 每个开关都会反映到同一个可点击 Bifrost native status item：关闭单项只隐藏对应 CPU/MEM/SSD/上行/下行字段，关闭总开关恢复纯 `Bifrost`，恢复全开后全部字段回到状态栏；点击状态块本身打开 Bifrost 原菜单，不再是分离的不可点击状态块。性能汇总为 `samples=60 avg_cpu=0.6583 max_cpu=2.0000 avg_rss_kb=79212 min_rss_kb=79136 max_rss_kb=79216 rss_delta_kb=80`，平均 CPU <1%，RSS 无显著增长。当前自动截图链路仍无法稳定捕获右侧菜单栏状态项，因此没有把黑帧当作视觉通过证据；视觉部分仍保留为 AX 可验证和后续人工目视复核。 |
