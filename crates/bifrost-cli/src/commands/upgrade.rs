@@ -32,7 +32,7 @@ const DOWNLOAD_CONNECT_TIMEOUT_SECS: u64 = 10;
 const DOWNLOAD_TIMEOUT_SECS: u64 = 120;
 const MIRROR_PROBE_TIMEOUT_SECS: u64 = 5;
 const DOWNLOAD_TRIES: usize = 2;
-const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 10;
+const UPGRADE_RESTART_PORT_RELEASE_TIMEOUT_SECS: u64 = 30;
 const BINARY_VERIFY_TIMEOUT_SECS: u64 = 15;
 const POST_UPGRADE_SKILL_INSTALL_TIMEOUT_SECS: u64 = 120;
 const POST_UPGRADE_SKILL_INSTALL_ARGS: &[&str] = &["install-skill", "--tool", "all", "-y"];
@@ -1807,7 +1807,11 @@ fn schedule_windows_deferred_install(
     let args_path = target_dir.join(format!(".bifrost-upgrade-{}.args", suffix));
     let log_path = target_dir.join(format!(".bifrost-upgrade-{}.log", suffix));
     let ready_path = target_dir.join(format!(".bifrost-upgrade-{}.ok", suffix));
-    let progress_path = get_bifrost_dir()?.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
+    let progress_dir = get_bifrost_dir()?;
+    let progress_path = progress_dir.join(bifrost_core::upgrade_progress::PROGRESS_FILE_NAME);
+    let progress_snapshot = bifrost_core::upgrade_progress::read_progress(&progress_dir);
+    let progress_target_version = progress_snapshot.target_version.unwrap_or_default();
+    let progress_source = progress_snapshot.source.unwrap_or_default();
 
     if let Some(args) = restart_args {
         fs::write(&args_path, args.join("\n")).map_err(BifrostError::Io)?;
@@ -1825,7 +1829,9 @@ param(
   [string]$RestartArgsPath,
   [string]$ReadyPath,
   [string]$LogPath,
-  [string]$ProgressPath
+  [string]$ProgressPath,
+  [string]$TargetVersion,
+  [string]$Source
 )
 
 $ErrorActionPreference = "Stop"
@@ -1838,14 +1844,18 @@ function Write-UpgradeProgress([string]$Phase, [string]$Message, [string]$ErrorM
   try {
     $previous = $null
     if ($ProgressPath -and (Test-Path -LiteralPath $ProgressPath)) {
-      $previous = Get-Content -LiteralPath $ProgressPath -Raw | ConvertFrom-Json
+      try {
+        $previous = Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      } catch {
+        Write-UpgradeLog "WARNING: ignoring unreadable previous progress: $($_.Exception.Message)"
+      }
     }
     $progress = [ordered]@{
       phase = $Phase
       percent = $null
       message = $Message
-      target_version = if ($previous -and $previous.target_version) { $previous.target_version } else { $null }
-      source = if ($previous -and $previous.source) { $previous.source } else { $null }
+      target_version = if ($TargetVersion) { $TargetVersion } elseif ($previous -and $previous.target_version) { $previous.target_version } else { $null }
+      source = if ($Source) { $Source } elseif ($previous -and $previous.source) { $previous.source } else { $null }
       error = if ($ErrorMessage) { $ErrorMessage } else { $null }
       updated_at = (Get-Date).ToUniversalTime().ToString("o")
     }
@@ -1946,6 +1956,10 @@ try {
         .arg(&log_path)
         .arg("-ProgressPath")
         .arg(&progress_path)
+        .arg("-TargetVersion")
+        .arg(progress_target_version)
+        .arg("-Source")
+        .arg(progress_source)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -2187,6 +2201,10 @@ mod tests {
         assert!(source.contains("stop_tray_helper_before_windows_deferred_install(&data_dir);"));
         assert!(source.contains("Wait-TargetPathWritable $TargetPath 120"));
         assert!(source.contains("[System.IO.File]::WriteAllText($tmpPath, $json, $utf8NoBom)"));
+        assert!(source.contains("Get-Content -LiteralPath $ProgressPath -Raw -Encoding UTF8"));
+        assert!(source.contains("target_version = if ($TargetVersion)"));
+        assert!(source.contains(".arg(\"-TargetVersion\")"));
+        assert!(source.contains(".arg(\"-Source\")"));
         assert!(source.contains("mark_deferred_install_scheduled();"));
         assert!(source.contains("Write-UpgradeProgress \"completed\" \"Upgrade complete\" $null"));
         assert!(

@@ -271,8 +271,8 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
     None
 }
 
-/// Block until `port` is bindable on both `0.0.0.0` and `127.0.0.1`, or
-/// `budget` elapses. Returns `true` if released within budget.
+/// Block until `port` is bindable on both `0.0.0.0` and `127.0.0.1` for TCP and
+/// UDP, or `budget` elapses. Returns `true` if released within budget.
 ///
 /// Used on both Unix and Windows: after a daemon is stopped, the OS does not
 /// release the listening socket instantaneously, so a fresh daemon that binds
@@ -281,7 +281,7 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
 /// both targets.
 #[cfg(any(unix, windows))]
 pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
-    use std::net::{SocketAddr, TcpListener};
+    use std::net::{SocketAddr, TcpListener, UdpSocket};
     use std::time::{Duration, Instant};
 
     let deadline = Instant::now() + budget;
@@ -289,9 +289,11 @@ pub fn wait_for_port_released(port: u16, budget: std::time::Duration) -> bool {
     let lo: SocketAddr = ([127, 0, 0, 1], port).into();
 
     while Instant::now() < deadline {
-        let any_ok = TcpListener::bind(any).is_ok();
-        let lo_ok = TcpListener::bind(lo).is_ok();
-        if any_ok && lo_ok {
+        let tcp_any_ok = TcpListener::bind(any).is_ok();
+        let tcp_lo_ok = TcpListener::bind(lo).is_ok();
+        let udp_any_ok = UdpSocket::bind(any).is_ok();
+        let udp_lo_ok = UdpSocket::bind(lo).is_ok();
+        if tcp_any_ok && tcp_lo_ok && udp_any_ok && udp_lo_ok {
             return true;
         }
         std::thread::sleep(Duration::from_millis(100));
@@ -312,14 +314,24 @@ pub fn find_process_on_port(port: u16) -> Option<PortProcessInfo> {
     let port_str = format!(":{}", port);
     for line in stdout.lines() {
         let trimmed = line.trim();
-        if !trimmed.contains("LISTENING") {
+        let is_tcp_listener = trimmed.starts_with("TCP") && trimmed.contains("LISTENING");
+        let is_udp_socket = trimmed.starts_with("UDP");
+        if !is_tcp_listener && !is_udp_socket {
             continue;
         }
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
-        if parts.len() >= 5 {
+        if is_tcp_listener && parts.len() >= 5 {
             let local_addr = parts[1];
             if local_addr.ends_with(&port_str) {
                 if let Ok(pid) = parts[4].parse::<u32>() {
+                    let name = get_process_name_windows(pid).unwrap_or_default();
+                    return Some(PortProcessInfo { pid, name });
+                }
+            }
+        } else if is_udp_socket && parts.len() >= 4 {
+            let local_addr = parts[1];
+            if local_addr.ends_with(&port_str) {
+                if let Ok(pid) = parts[3].parse::<u32>() {
                     let name = get_process_name_windows(pid).unwrap_or_default();
                     return Some(PortProcessInfo { pid, name });
                 }
@@ -490,6 +502,25 @@ mod tests {
         drop(listener);
 
         assert!(!freed, "held port {} should NOT be reported free", port);
+        assert!(
+            elapsed >= std::time::Duration::from_millis(350),
+            "probe should use most of the budget; took {:?}",
+            elapsed
+        );
+    }
+
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn wait_for_port_released_times_out_when_udp_port_is_held() {
+        let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = socket.local_addr().unwrap().port();
+
+        let start = std::time::Instant::now();
+        let freed = wait_for_port_released(port, std::time::Duration::from_millis(400));
+        let elapsed = start.elapsed();
+        drop(socket);
+
+        assert!(!freed, "held UDP port {} should NOT be reported free", port);
         assert!(
             elapsed >= std::time::Duration::from_millis(350),
             "probe should use most of the budget; took {:?}",
