@@ -117,11 +117,181 @@
         assert_eq!(columns[0].value_font_px, 28.0);
         assert_eq!(columns[0].label_font_px, 9.5);
         assert_eq!(columns[3].value_font_px, 28.0);
-        assert_eq!(columns[3].label_font_px, 9.5);
+        assert_eq!(columns[3].label_font_px, 28.0);
         assert!(columns.windows(2).all(|pair| {
             pair[1].x - (pair[0].x + pair[0].width)
                 == MENU_BAR_STATS_SEPARATOR_GAP * 2 + MENU_BAR_STATS_SEPARATOR_WIDTH
         }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_stats_view_is_default_on_with_explicit_opt_out() {
+        assert!(native_stats_view_enabled_from_env(None));
+        assert!(native_stats_view_enabled_from_env(Some("1")));
+        assert!(native_stats_view_enabled_from_env(Some("true")));
+        assert!(native_stats_view_enabled_from_env(Some("yes")));
+
+        assert!(!native_stats_view_enabled_from_env(Some("0")));
+        assert!(!native_stats_view_enabled_from_env(Some("false")));
+        assert!(!native_stats_view_enabled_from_env(Some("no")));
+        assert!(!native_stats_view_enabled_from_env(Some("off")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_menu_bar_stats_rows_convert_single_row_to_reference_layout() {
+        let rows = native_menu_bar_stats_rows("C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s");
+
+        assert_eq!(
+            rows.values,
+            vec!["10%", "75%", "65%", "↑11.7 K/s"]
+        );
+        assert_eq!(
+            rows.labels,
+            vec!["CPU", "MEM", "SSD", "↓25.2 K/s"]
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_menu_bar_stats_rows_follow_each_tray_switch() {
+        let snapshot = system_stats::SystemStatsSnapshot {
+            cpu_percent: 10.0,
+            memory_used_bytes: 16 * 1024 * 1024 * 1024,
+            memory_total_bytes: 32 * 1024 * 1024 * 1024,
+            disk_used_percent: Some(65.0),
+            network_down_bytes_per_sec: Some(2048),
+            network_up_bytes_per_sec: Some(1024),
+        };
+
+        let cases = [
+            (
+                bifrost_storage::TraySystemStatsItems {
+                    cpu: false,
+                    memory: true,
+                    disk: true,
+                    upload: true,
+                    download: true,
+                },
+                vec!["50%", "65%", "↑1.0 K/s"],
+                vec!["MEM", "SSD", "↓2.0 K/s"],
+            ),
+            (
+                bifrost_storage::TraySystemStatsItems {
+                    cpu: true,
+                    memory: false,
+                    disk: true,
+                    upload: true,
+                    download: true,
+                },
+                vec!["10%", "65%", "↑1.0 K/s"],
+                vec!["CPU", "SSD", "↓2.0 K/s"],
+            ),
+            (
+                bifrost_storage::TraySystemStatsItems {
+                    cpu: true,
+                    memory: true,
+                    disk: false,
+                    upload: true,
+                    download: true,
+                },
+                vec!["10%", "50%", "↑1.0 K/s"],
+                vec!["CPU", "MEM", "↓2.0 K/s"],
+            ),
+            (
+                bifrost_storage::TraySystemStatsItems {
+                    cpu: true,
+                    memory: true,
+                    disk: true,
+                    upload: false,
+                    download: true,
+                },
+                vec!["10%", "50%", "65%", ""],
+                vec!["CPU", "MEM", "SSD", "↓2.0 K/s"],
+            ),
+            (
+                bifrost_storage::TraySystemStatsItems {
+                    cpu: true,
+                    memory: true,
+                    disk: true,
+                    upload: true,
+                    download: false,
+                },
+                vec!["10%", "50%", "65%", "↑1.0 K/s"],
+                vec!["CPU", "MEM", "SSD", ""],
+            ),
+        ];
+
+        for (items, expected_values, expected_labels) in cases {
+            let lines = system_stats::menu_lines(&snapshot, &items);
+            let rows = native_menu_bar_stats_rows(&lines.menu_bar);
+
+            assert_eq!(rows.values, expected_values);
+            assert_eq!(rows.labels, expected_labels);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_network_column_uses_same_font_for_up_and_down_rows() {
+        let font = menu_bar_stats_font().expect("font");
+        let rows = native_menu_bar_stats_rows("C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s");
+        let columns = menu_bar_stats_columns(font, &rows, 24.0, 14.0);
+
+        let network = columns.last().expect("network column");
+        assert_eq!(network.value_font_px, 24.0);
+        assert_eq!(network.label_font_px, 24.0);
+        assert!(network.width >= measure_text_width(font, "↓999.9 M/s", 24.0));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_network_column_uses_fixed_slot_with_graphic_arrow() {
+        let font = menu_bar_stats_font().expect("font");
+        let actual_width = measure_menu_bar_stats_part_width(font, "↑11.7 K/s", 24.0);
+        let text_width = measure_text_width(font, "11.7 K/s", 24.0);
+        let stable_width = menu_bar_network_stable_width(font, 24.0);
+
+        assert_eq!(
+            actual_width,
+            MENU_BAR_NETWORK_ARROW_WIDTH + MENU_BAR_NETWORK_ARROW_GAP + text_width
+        );
+        assert!(stable_width > actual_width);
+        assert_eq!(menu_bar_network_text_without_arrow("↓25.2 K/s"), "25.2 K/s");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_stats_accessibility_label_reflects_status_item_content() {
+        assert_eq!(
+            native_stats_accessibility_label(Some("C10% | M50% | ↑1.0 K/s ↓2.0 K/s")),
+            "Bifrost: C10% | M50% | ↑1.0 K/s ↓2.0 K/s"
+        );
+        assert_eq!(native_stats_accessibility_label(None), "Bifrost");
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_menu_bar_stats_bitmap_uses_full_height_and_continuous_separators() {
+        let bitmap = render_native_menu_bar_stats_bitmap(
+            "C10% | M75% | D65% | ↑11.7 K/s ↓25.2 K/s",
+        )
+        .expect("native bitmap");
+
+        assert_eq!(bitmap.height, 48);
+        assert!(bitmap.width > 200);
+        assert!(bitmap.rgba.chunks_exact(4).any(|pixel| pixel[3] == 255));
+
+        let separator_x = (0..bitmap.width)
+            .find(|x| {
+                (5..=42).all(|y| {
+                    let idx = ((y * bitmap.width + *x) * 4) as usize;
+                    bitmap.rgba.get(idx + 3).copied().unwrap_or_default() >= 200
+                })
+            })
+            .expect("continuous separator");
+        assert!(separator_x > 0);
     }
 
     #[cfg(target_os = "macos")]

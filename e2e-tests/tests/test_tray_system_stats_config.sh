@@ -122,6 +122,24 @@ assert_json_field ".enabled" "true" "$updated_both_on" "tray icon can be re-enab
 assert_json_field ".show_system_stats" "true" "$updated_both_on" "system stats can be re-enabled"
 assert_json_field ".system_stats_items.download" "true" "$updated_both_on" "download stats can be re-enabled"
 
+for item in cpu memory disk upload download; do
+    updated_item_off="$(put_tray_config "{\"system_stats_items\":{\"$item\":false}}")"
+    assert_json_field ".system_stats_items.$item" "false" "$updated_item_off" "$item stats can be disabled independently"
+    assert_json_field ".show_system_stats" "true" "$updated_item_off" "$item update should preserve group visibility"
+
+    for other in cpu memory disk upload download; do
+        if [[ "$other" != "$item" ]]; then
+            assert_json_field ".system_stats_items.$other" "true" "$updated_item_off" "$item update should preserve $other stats"
+        fi
+    done
+
+    persisted_item_off="$(get_tray_config)"
+    assert_json_field ".system_stats_items.$item" "false" "$persisted_item_off" "$item disabled state should persist through GET"
+
+    updated_item_on="$(put_tray_config "{\"system_stats_items\":{\"$item\":true}}")"
+    assert_json_field ".system_stats_items.$item" "true" "$updated_item_on" "$item stats can be re-enabled independently"
+done
+
 invalid_response="$(env NO_PROXY="*" no_proxy="*" curl -sS -X PUT "$tray_url" \
     -H 'Content-Type: application/json' \
     -d '{}')"
