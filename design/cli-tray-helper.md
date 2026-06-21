@@ -169,6 +169,8 @@ v1 语义：
 - 用户直接执行 `bifrost stop` 或 upgrade restart 内部 stop 时，CLI stop 负责同步停止同一数据目录下由服务自动拉起的 tray helper，避免服务已停但 helper 长期残留；托盘菜单内部触发的 Stop 会带内部环境标记，保留 helper 进入 Stopped 状态，以便用户继续从同一托盘执行 Start。
 - Windows 上从托盘触发 `self-update` 时，升级目标二进制可能正被同一个 `bifrost.exe __tray` helper 锁住；Windows 延迟替换 helper 必须在调度替换前停止同一 `data_dir` 的 tray helper，并在 PowerShell helper 内等待目标 exe 可写后再 `Remove-Item` / `Move-Item`。如果目标 exe 仍被锁住或替换失败，helper 必须把 `<data_dir>/upgrade-progress.json` 写成 `failed`，不能让托盘或 Admin UI 显示假成功。
 - Windows 延迟替换 helper 的成功状态以 PowerShell helper 完成替换并按需执行 `start -d` 后写入的 `completed` 为准；Rust `self-update` 父进程只负责下载、暂存、停止旧进程和调度 helper，不能把“helper 已调度”视为“二进制已替换”。
+- Windows 延迟替换 helper 在重启前必须确认统一代理端口的 TCP 与 UDP 监听都已释放，并给 Windows socket 释放窗口保留足够预算（当前为 30 秒）。统一代理会同时绑定 TCP/UDP；如果只探测 TCP，旧进程退出窗口中残留的 UDP socket 会让新 `start -d` 以 `WSAEADDRINUSE` 失败，表现为二进制已替换但代理没有自动重启。
+- Windows 延迟替换 helper 写 `<data_dir>/upgrade-progress.json` 时必须生成可解析 UTF-8 JSON。helper 应从 Rust 调度侧接收 `target_version` / `source` 兜底值，并在读取旧 progress 时显式按 UTF-8 解析；旧 progress 损坏不能阻断 helper 写入最终 `failed` / `completed` 状态。
 - 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。

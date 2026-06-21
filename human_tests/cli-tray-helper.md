@@ -674,6 +674,37 @@ Get-Process bifrost -ErrorAction SilentlyContinue |
 - 替换成功后，`upgrade-progress.json` 为 `phase: "completed"`，`.local\bin\bifrost.exe --version` 返回目标版本，pending 文件不再残留。
 - 如果重启参数存在，helper 使用替换后的目标 exe 执行 `start -d`，新 `Get-Process bifrost` 输出的 `Path` 指向已更新的目标 exe。
 
+### TC-TH-28-REG-01: Windows Web UI 更新替换成功后等待 TCP/UDP 释放再重启（回归）
+
+**操作步骤：**
+1. 在 Parallels Windows 11 交互用户 session 中通过 Web UI 或托盘入口触发从旧版本升级到新版本。
+2. 等待升级后台进程结束后，读取用户数据目录与 helper 日志：
+
+```powershell
+$data = "$env:USERPROFILE\.bifrost"
+$bin = "$env:USERPROFILE\.local\bin\bifrost.exe"
+& $bin --version
+Get-Content "$data\logs\upgrade-background.log" -Tail 80
+Get-ChildItem "$env:USERPROFILE\.local\bin" -Force -Filter ".bifrost-upgrade-*.log" |
+  Sort-Object LastWriteTime -Descending |
+  Select-Object -First 1 |
+  ForEach-Object { $_.FullName; Get-Content $_.FullName }
+Get-Content "$data\upgrade-progress.json" -ErrorAction SilentlyContinue
+Get-Content "$data\runtime.json"
+netstat -ano | Select-String ":9900"
+Get-Process bifrost -ErrorAction SilentlyContinue |
+  Select-Object Id,Path,StartTime
+```
+
+3. 如果没有新版本可升级，可使用同一版本的调试包或临时发布包复现 helper 路径，但不得手动启动服务后把结果算作自动重启通过。
+
+**预期结果：**
+- `.local\bin\bifrost.exe --version` 返回目标版本，说明替换成功。
+- helper 日志不出现 `restart command exited with code 1`，也不出现 UDP `0.0.0.0:9900` / `os error 10048` / `WSAEADDRINUSE` 端口占用失败。
+- Web UI/托盘触发的自动重启后，`runtime.json` 中主进程为自动 `start -d` 重启出的 daemon；不能只靠用户手动执行 `bifrost.exe` 前台启动恢复。
+- `upgrade-progress.json` 如存在，必须是可解析 JSON，且 terminal 状态为 `completed`；不能因为旧 progress 的 UTF-8 字符或半写入内容导致 helper 无法写入最终状态。
+- `netstat -ano` 中 TCP 与 UDP `:9900` 都归属于新的 Bifrost 主进程 PID。
+
 ### TC-TH-22: macOS Tray Helper 内存口径与空闲占用
 
 **操作步骤：**
