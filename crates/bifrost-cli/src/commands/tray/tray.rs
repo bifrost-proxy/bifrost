@@ -83,6 +83,8 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
+#[cfg(target_os = "macos")]
+const MENU_STRUCTURAL_STATUS_UPDATE_SUPPRESSION: Duration = Duration::from_secs(2);
 const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
 const SERVICE_IDLE_EXIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
@@ -189,6 +191,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let menu_data_generation = Arc::new(AtomicU64::new(0));
     #[cfg(target_os = "macos")]
     let system_stats_generation = Arc::new(AtomicU64::new(0));
+    #[cfg(target_os = "macos")]
+    let native_menu_open_state = Arc::new(NativeMenuOpenState::default());
     let system_proxy_refresh_in_flight = Arc::new(AtomicBool::new(false));
 
     let builder = TrayIconBuilder::new()
@@ -205,12 +209,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             initial_menu_bar_title.as_deref(),
             &native_menu.menu,
             state_tooltip(state),
-            Arc::new(SystemProxyMenuWillOpen {
+            Arc::new(SystemProxyMenuLifecycle {
                 args: args.clone(),
                 state: current_state.clone(),
                 menu_data: menu_data.clone(),
                 generation: menu_data_generation.clone(),
                 refresh_in_flight: system_proxy_refresh_in_flight.clone(),
+                menu_open_state: native_menu_open_state.clone(),
             }),
         ) {
             Some(item) => {
@@ -320,6 +325,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_menu_bar_title = initial_menu_bar_title;
     #[cfg(target_os = "macos")]
     let mut last_rendered_system_stats_generation = system_stats_generation.load(Ordering::Relaxed);
+    #[cfg(target_os = "macos")]
+    let mut last_native_menu_lifecycle_generation =
+        native_menu_open_state.generation.load(Ordering::Relaxed);
     let mut last_tray_interaction_at: Option<Instant> = None;
     let system_proxy_refresh_state = current_state.clone();
     let system_proxy_refresh_data = menu_data.clone();
@@ -401,8 +409,21 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         #[cfg(target_os = "macos")]
         let system_stats_changed =
             system_stats_data_generation != last_rendered_system_stats_generation;
+        #[cfg(target_os = "macos")]
+        {
+            let lifecycle_generation = native_menu_open_state.generation.load(Ordering::Relaxed);
+            if lifecycle_generation != last_native_menu_lifecycle_generation {
+                last_native_menu_lifecycle_generation = lifecycle_generation;
+                last_tray_interaction_at = Some(Instant::now());
+            }
+        }
+        #[cfg(target_os = "macos")]
+        let menu_currently_open = native_menu_open_state.open.load(Ordering::Relaxed);
+        #[cfg(not(target_os = "macos"))]
+        let menu_currently_open = false;
         let menu_recently_interacted = last_tray_interaction_at
-            .is_some_and(|instant| instant.elapsed() < MENU_REBUILD_SUPPRESSION_AFTER_CLICK);
+            .is_some_and(|instant| instant.elapsed() < MENU_REBUILD_SUPPRESSION_AFTER_CLICK)
+            || menu_currently_open;
         let svc_state = match new_state {
             STATE_RUNNING => ServiceState::Running,
             STATE_STOPPED => ServiceState::Stopped,
@@ -457,7 +478,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             let new_title = menu_bar_stats_title(&snapshot, svc_state);
             if new_title != last_rendered_menu_bar_title {
                 if let Some(native_stats_item) = native_stats_item.as_mut() {
-                    native_stats_item.set_title(new_title.as_deref());
+                    let allow_structural_update = !menu_currently_open
+                        && !last_tray_interaction_at.is_some_and(|instant| {
+                            instant.elapsed() < MENU_STRUCTURAL_STATUS_UPDATE_SUPPRESSION
+                        });
+                    if native_stats_item.set_title(new_title.as_deref(), allow_structural_update) {
+                        last_rendered_menu_bar_title = new_title;
+                    }
                 } else {
                     if let Some(tray_icon) = tray_icon.as_ref() {
                         set_menu_bar_stats_indicator(
@@ -469,77 +496,86 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                             },
                         );
                     }
+                    last_rendered_menu_bar_title = new_title;
                 }
-                last_rendered_menu_bar_title = new_title;
                 tracing::debug!("tray menu bar title updated");
             }
             last_rendered_system_stats_generation = system_stats_data_generation;
         }
 
         if should_refresh_menu {
-            let snapshot = clone_menu_data_snapshot(&menu_data);
-            let upgrade_status =
-                upgrade_status_label(new_operation, upgrade_percent.load(Ordering::Relaxed));
-            let status_label = upgrade_status
-                .as_deref()
-                .or_else(|| operation_status_label(new_operation));
-            let new_menu_items = build_menu_from_snapshot(
-                &snapshot,
-                svc_state,
-                status_label,
-                operation_busy(new_operation),
-                &data_dir_str,
-                new_operation == OP_UPGRADING,
-            );
-
-            if native_menu.refresh_in_place(&new_menu_items) {
-                last_rendered_state = new_state;
-                last_rendered_operation = new_operation;
-                last_rendered_data_generation = data_generation;
-                action_map = native_menu.action_map.clone();
-                tracing::info!(
-                    state = new_state,
-                    operation = new_operation,
-                    data_changed = data_changed,
-                    reloaded = reload_requested,
-                    "tray menu refreshed in place"
-                );
-            } else if should_replace_native_menu(
-                reload_requested,
-                action_triggered,
-                menu_recently_interacted,
-            ) {
-                last_rendered_state = new_state;
-                last_rendered_operation = new_operation;
-                last_rendered_data_generation = data_generation;
-                native_menu = NativeMenuState::new(
-                    &new_menu_items,
-                    #[cfg(target_os = "macos")]
-                    Some(native_action_sender.clone()),
-                );
-                if let Some(tray_icon) = tray_icon.as_ref() {
-                    tray_icon.set_menu(Some(Box::new(native_menu.menu.clone())));
-                }
-                #[cfg(target_os = "macos")]
-                if let Some(native_stats_item) = native_stats_item.as_mut() {
-                    native_stats_item.set_menu(&native_menu.menu);
-                }
-                action_map = native_menu.action_map.clone();
-
-                tracing::info!(
-                    state = new_state,
-                    operation = new_operation,
-                    data_changed = data_changed,
-                    reloaded = reload_requested,
-                    "tray menu rebuilt"
-                );
-            } else {
+            if menu_currently_open {
                 tracing::debug!(
                     state = new_state,
                     operation = new_operation,
                     data_changed = data_changed,
-                    "tray menu structure changed while recently interacted; delaying rebuild"
+                    "tray menu data changed while native menu is open; delaying refresh"
                 );
+            } else {
+                let snapshot = clone_menu_data_snapshot(&menu_data);
+                let upgrade_status =
+                    upgrade_status_label(new_operation, upgrade_percent.load(Ordering::Relaxed));
+                let status_label = upgrade_status
+                    .as_deref()
+                    .or_else(|| operation_status_label(new_operation));
+                let new_menu_items = build_menu_from_snapshot(
+                    &snapshot,
+                    svc_state,
+                    status_label,
+                    operation_busy(new_operation),
+                    &data_dir_str,
+                    new_operation == OP_UPGRADING,
+                );
+
+                if native_menu.refresh_in_place(&new_menu_items) {
+                    last_rendered_state = new_state;
+                    last_rendered_operation = new_operation;
+                    last_rendered_data_generation = data_generation;
+                    action_map = native_menu.action_map.clone();
+                    tracing::info!(
+                        state = new_state,
+                        operation = new_operation,
+                        data_changed = data_changed,
+                        reloaded = reload_requested,
+                        "tray menu refreshed in place"
+                    );
+                } else if should_replace_native_menu(
+                    reload_requested,
+                    action_triggered,
+                    menu_recently_interacted,
+                ) {
+                    last_rendered_state = new_state;
+                    last_rendered_operation = new_operation;
+                    last_rendered_data_generation = data_generation;
+                    native_menu = NativeMenuState::new(
+                        &new_menu_items,
+                        #[cfg(target_os = "macos")]
+                        Some(native_action_sender.clone()),
+                    );
+                    if let Some(tray_icon) = tray_icon.as_ref() {
+                        tray_icon.set_menu(Some(Box::new(native_menu.menu.clone())));
+                    }
+                    #[cfg(target_os = "macos")]
+                    if let Some(native_stats_item) = native_stats_item.as_mut() {
+                        native_stats_item.set_menu(&native_menu.menu);
+                    }
+                    action_map = native_menu.action_map.clone();
+
+                    tracing::info!(
+                        state = new_state,
+                        operation = new_operation,
+                        data_changed = data_changed,
+                        reloaded = reload_requested,
+                        "tray menu rebuilt"
+                    );
+                } else {
+                    tracing::debug!(
+                        state = new_state,
+                        operation = new_operation,
+                        data_changed = data_changed,
+                        "tray menu structure changed while recently interacted; delaying rebuild"
+                    );
+                }
             }
         }
     });
@@ -634,22 +670,45 @@ fn native_stats_view_enabled_from_env(value: Option<&str>) -> bool {
 }
 
 #[cfg(target_os = "macos")]
-trait NativeStatsMenuWillOpen: Send + Sync {
-    fn menu_will_open(&self);
+#[derive(Default)]
+struct NativeMenuOpenState {
+    open: AtomicBool,
+    generation: AtomicU64,
 }
 
 #[cfg(target_os = "macos")]
-struct SystemProxyMenuWillOpen {
+impl NativeMenuOpenState {
+    fn mark_open(&self) {
+        self.open.store(true, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn mark_closed(&self) {
+        self.open.store(false, Ordering::Relaxed);
+        self.generation.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(target_os = "macos")]
+trait NativeStatsMenuLifecycle: Send + Sync {
+    fn menu_will_open(&self);
+    fn menu_did_close(&self);
+}
+
+#[cfg(target_os = "macos")]
+struct SystemProxyMenuLifecycle {
     args: TrayArgs,
     state: Arc<AtomicU8>,
     menu_data: Arc<Mutex<MenuDataSnapshot>>,
     generation: Arc<AtomicU64>,
     refresh_in_flight: Arc<AtomicBool>,
+    menu_open_state: Arc<NativeMenuOpenState>,
 }
 
 #[cfg(target_os = "macos")]
-impl NativeStatsMenuWillOpen for SystemProxyMenuWillOpen {
+impl NativeStatsMenuLifecycle for SystemProxyMenuLifecycle {
     fn menu_will_open(&self) {
+        self.menu_open_state.mark_open();
         request_system_proxy_menu_refresh(
             &self.args,
             &self.state,
@@ -658,11 +717,15 @@ impl NativeStatsMenuWillOpen for SystemProxyMenuWillOpen {
             &self.refresh_in_flight,
         );
     }
+
+    fn menu_did_close(&self) {
+        self.menu_open_state.mark_closed();
+    }
 }
 
 #[cfg(target_os = "macos")]
 struct NativeStatsMenuDelegateIvars {
-    will_open: Arc<dyn NativeStatsMenuWillOpen>,
+    lifecycle: Arc<dyn NativeStatsMenuLifecycle>,
 }
 
 #[cfg(target_os = "macos")]
@@ -684,7 +747,12 @@ define_class!(
     unsafe impl NSMenuDelegate for NativeStatsMenuDelegate {
         #[unsafe(method(menuWillOpen:))]
         fn menu_will_open(&self, _menu: &NSMenu) {
-            self.ivars().will_open.menu_will_open();
+            self.ivars().lifecycle.menu_will_open();
+        }
+
+        #[unsafe(method(menuDidClose:))]
+        fn menu_did_close(&self, _menu: &NSMenu) {
+            self.ivars().lifecycle.menu_did_close();
         }
     }
 );
@@ -709,8 +777,8 @@ define_class!(
 
 #[cfg(target_os = "macos")]
 impl NativeStatsMenuDelegate {
-    fn new(will_open: Arc<dyn NativeStatsMenuWillOpen>, mtm: MainThreadMarker) -> Retained<Self> {
-        let this = Self::alloc(mtm).set_ivars(NativeStatsMenuDelegateIvars { will_open });
+    fn new(lifecycle: Arc<dyn NativeStatsMenuLifecycle>, mtm: MainThreadMarker) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(NativeStatsMenuDelegateIvars { lifecycle });
         unsafe { msg_send![super(this), init] }
     }
 }
@@ -754,11 +822,11 @@ impl NativeStatsStatusItem {
         title: Option<&str>,
         menu: &Menu,
         tooltip: &str,
-        menu_will_open: Arc<dyn NativeStatsMenuWillOpen>,
+        menu_lifecycle: Arc<dyn NativeStatsMenuLifecycle>,
     ) -> Option<Self> {
         let mtm = MainThreadMarker::new()?;
         let item = NSStatusBar::systemStatusBar().statusItemWithLength(1.0);
-        let menu_delegate = NativeStatsMenuDelegate::new(menu_will_open, mtm);
+        let menu_delegate = NativeStatsMenuDelegate::new(menu_lifecycle, mtm);
         let mut native = Self {
             item,
             menu_delegate,
@@ -770,7 +838,7 @@ impl NativeStatsStatusItem {
         };
         native.set_menu(menu);
         native.set_tooltip(tooltip);
-        native.set_title(title);
+        native.set_title(title, true);
         Some(native)
     }
 
@@ -792,19 +860,31 @@ impl NativeStatsStatusItem {
         }
     }
 
-    fn set_title(&mut self, title: Option<&str>) {
+    fn set_title(&mut self, title: Option<&str>, allow_structural_update: bool) -> bool {
         if self.rendered_title.as_deref() == title {
-            return;
+            return true;
         }
         let Some(bitmap) =
             render_native_menu_bar_status_bitmap_reusing(title, self.render_scratch.take())
         else {
-            return;
+            return false;
         };
         let Some(button) = self.item.button(self.mtm) else {
             self.render_scratch = Some(bitmap);
-            return;
+            return false;
         };
+        let structural_update_needed = !matches!(
+            self.rendered_image.as_ref(),
+            Some(rendered)
+                if rendered.width == bitmap.width
+                    && rendered.height == bitmap.height
+                    && rendered.image_rep.is_some()
+        );
+        if structural_update_needed && !allow_structural_update {
+            self.render_scratch = Some(bitmap);
+            return false;
+        }
+
         let (image, image_changed) = match self.rendered_image.as_mut() {
             Some(rendered)
                 if rendered.width == bitmap.width
@@ -821,7 +901,7 @@ impl NativeStatsStatusItem {
                     let Some(rendered) = native_stats_image_from_bitmap(&bitmap)
                         .or_else(|| native_stats_image_from_png(&bitmap))
                     else {
-                        return;
+                        return false;
                     };
                     let image = rendered.image.clone();
                     self.rendered_image = Some(rendered);
@@ -832,7 +912,7 @@ impl NativeStatsStatusItem {
                 let Some(rendered) = native_stats_image_from_bitmap(&bitmap)
                     .or_else(|| native_stats_image_from_png(&bitmap))
                 else {
-                    return;
+                    return false;
                 };
                 let image = rendered.image.clone();
                 self.rendered_image = Some(rendered);
@@ -856,6 +936,7 @@ impl NativeStatsStatusItem {
         button.setAccessibilityLabel(Some(&label));
         self.rendered_title = title.map(ToString::to_string);
         self.render_scratch = Some(bitmap);
+        true
     }
 }
 

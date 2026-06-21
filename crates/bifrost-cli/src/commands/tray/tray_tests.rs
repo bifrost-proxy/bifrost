@@ -595,6 +595,22 @@
         assert!(should_replace_native_menu(false, true, true));
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_native_menu_open_state_tracks_open_close_generation() {
+        let state = NativeMenuOpenState::default();
+        assert!(!state.open.load(Ordering::Relaxed));
+        assert_eq!(state.generation.load(Ordering::Relaxed), 0);
+
+        state.mark_open();
+        assert!(state.open.load(Ordering::Relaxed));
+        assert_eq!(state.generation.load(Ordering::Relaxed), 1);
+
+        state.mark_closed();
+        assert!(!state.open.load(Ordering::Relaxed));
+        assert_eq!(state.generation.load(Ordering::Relaxed), 2);
+    }
+
     #[test]
     fn test_same_shape_native_menu_can_refresh_items_in_place() {
         let rt = sample_runtime();
@@ -769,22 +785,30 @@
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn test_native_menu_will_open_hook_requests_system_proxy_refresh() {
-        struct CountingWillOpen {
-            count: std::sync::atomic::AtomicUsize,
+    fn test_native_menu_lifecycle_hook_tracks_open_close() {
+        struct CountingLifecycle {
+            open_count: std::sync::atomic::AtomicUsize,
+            close_count: std::sync::atomic::AtomicUsize,
         }
 
-        impl NativeStatsMenuWillOpen for CountingWillOpen {
+        impl NativeStatsMenuLifecycle for CountingLifecycle {
             fn menu_will_open(&self) {
-                self.count.fetch_add(1, Ordering::Relaxed);
+                self.open_count.fetch_add(1, Ordering::Relaxed);
+            }
+
+            fn menu_did_close(&self) {
+                self.close_count.fetch_add(1, Ordering::Relaxed);
             }
         }
 
-        let hook = CountingWillOpen {
-            count: std::sync::atomic::AtomicUsize::new(0),
+        let hook = CountingLifecycle {
+            open_count: std::sync::atomic::AtomicUsize::new(0),
+            close_count: std::sync::atomic::AtomicUsize::new(0),
         };
         hook.menu_will_open();
-        assert_eq!(hook.count.load(Ordering::Relaxed), 1);
+        hook.menu_did_close();
+        assert_eq!(hook.open_count.load(Ordering::Relaxed), 1);
+        assert_eq!(hook.close_count.load(Ordering::Relaxed), 1);
     }
 
     #[test]
