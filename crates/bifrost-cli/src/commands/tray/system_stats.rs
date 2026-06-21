@@ -1,7 +1,9 @@
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    sync::mpsc,
+    thread,
     time::{Duration, Instant},
 };
 
@@ -22,6 +24,8 @@ const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NETWORK_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(900);
 const NETWORK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const DEFAULT_ROUTE_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
+const DEFAULT_ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemStatsSnapshot {
@@ -56,6 +60,7 @@ pub struct SystemStatsSampler {
     last_network_interfaces: BTreeMap<String, NetworkInterfaceSample>,
     active_network_interface: Option<String>,
     preferred_network_interface: Option<String>,
+    default_network_interface_resolver: DefaultNetworkInterfaceResolver,
     smoothed_network_rates: Option<NetworkRates>,
 }
 
@@ -75,6 +80,65 @@ struct NetworkRates {
 struct NetworkInterfaceSample {
     at: Instant,
     totals: NetworkTotals,
+}
+
+struct DefaultNetworkInterfaceResolver {
+    tx: mpsc::Sender<Option<String>>,
+    rx: mpsc::Receiver<Option<String>>,
+    pending: bool,
+}
+
+impl DefaultNetworkInterfaceResolver {
+    fn new() -> Self {
+        let (tx, rx) = mpsc::channel();
+        Self {
+            tx,
+            rx,
+            pending: false,
+        }
+    }
+
+    fn request_refresh(&mut self) {
+        if self.pending {
+            return;
+        }
+
+        let tx = self.tx.clone();
+        match thread::Builder::new()
+            .name("bifrost-tray-route-detect".to_string())
+            .stack_size(128 * 1024)
+            .spawn(move || {
+                let _ = tx.send(detect_default_network_interface());
+            }) {
+            Ok(_) => {
+                self.pending = true;
+            }
+            Err(error) => {
+                tracing::debug!(
+                    error = %error,
+                    "failed to spawn default route detection worker"
+                );
+            }
+        }
+    }
+
+    fn drain_latest(&mut self) -> Option<Option<String>> {
+        let mut latest = None;
+        loop {
+            match self.rx.try_recv() {
+                Ok(value) => {
+                    self.pending = false;
+                    latest = Some(value);
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending = false;
+                    break;
+                }
+            }
+        }
+        latest
+    }
 }
 
 #[cfg(target_os = "macos")]
@@ -108,7 +172,8 @@ impl SystemStatsSampler {
             last_network_list_refresh_at: None,
             last_network_interfaces: BTreeMap::new(),
             active_network_interface: None,
-            preferred_network_interface: detect_default_network_interface(),
+            preferred_network_interface: None,
+            default_network_interface_resolver: DefaultNetworkInterfaceResolver::new(),
             smoothed_network_rates: None,
         }
     }
@@ -152,13 +217,14 @@ impl SystemStatsSampler {
         }
 
         let rates = if items.upload || items.download {
+            self.apply_resolved_default_network_interface();
             if self
                 .last_network_list_refresh_at
                 .map(|last| now.saturating_duration_since(last) >= NETWORK_LIST_REFRESH_INTERVAL)
                 .unwrap_or(true)
             {
                 self.last_network_list_refresh_at = Some(now);
-                self.update_preferred_network_interface();
+                self.default_network_interface_resolver.request_refresh();
             }
             self.sample_network_rates(now)
         } else {
@@ -182,8 +248,10 @@ impl SystemStatsSampler {
         self.smoothed_network_rates = None;
     }
 
-    fn update_preferred_network_interface(&mut self) {
-        self.set_preferred_network_interface(detect_default_network_interface());
+    fn apply_resolved_default_network_interface(&mut self) {
+        if let Some(preferred) = self.default_network_interface_resolver.drain_latest() {
+            self.set_preferred_network_interface(preferred);
+        }
     }
 
     fn set_preferred_network_interface(&mut self, preferred: Option<String>) {
@@ -279,11 +347,56 @@ fn detect_default_network_interface() -> Option<String> {
 }
 
 fn detect_default_network_interface_from_route(args: &[&str]) -> Option<String> {
-    let output = Command::new("route").args(args).output().ok()?;
+    let output = command_output_with_timeout("route", args, DEFAULT_ROUTE_QUERY_TIMEOUT)?;
     if !output.status.success() {
         return None;
     }
     parse_default_network_interface(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn command_output_with_timeout(
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Option<std::process::Output> {
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return child.wait_with_output().ok(),
+            Ok(None) => {
+                if started.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    tracing::debug!(
+                        program,
+                        args = ?args,
+                        timeout_ms = timeout.as_millis(),
+                        "default route command timed out"
+                    );
+                    return None;
+                }
+                thread::sleep(DEFAULT_ROUTE_POLL_INTERVAL);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    program,
+                    args = ?args,
+                    error = %error,
+                    "failed to poll default route command"
+                );
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+    }
 }
 
 fn parse_default_network_interface(output: &str) -> Option<String> {
@@ -1231,6 +1344,34 @@ mod tests {
         assert!(sampler.last_network_interfaces.is_empty());
         assert!(sampler.active_network_interface.is_none());
         assert!(sampler.smoothed_network_rates.is_none());
+    }
+
+    #[test]
+    fn preferred_interface_resolver_result_is_applied_without_waiting_for_next_refresh() {
+        let mut sampler = SystemStatsSampler::new(Path::new("/tmp"));
+        sampler
+            .default_network_interface_resolver
+            .tx
+            .send(Some("en9".to_string()))
+            .unwrap();
+
+        sampler.apply_resolved_default_network_interface();
+
+        assert_eq!(sampler.preferred_network_interface, Some("en9".to_string()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_with_timeout_returns_when_child_hangs() {
+        let started = Instant::now();
+        let output = command_output_with_timeout(
+            "sh",
+            &["-c", "sleep 2; echo late"],
+            Duration::from_millis(50),
+        );
+
+        assert!(output.is_none());
+        assert!(started.elapsed() < Duration::from_secs(1));
     }
 
     #[test]
