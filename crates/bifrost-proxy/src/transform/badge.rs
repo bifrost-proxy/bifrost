@@ -30,6 +30,14 @@ const BADGE_STYLE: &str = concat!(
     "transition:opacity .25s .1s;",
     "}",
     "#__bifrost_badge__:hover .__bb_txt{opacity:1}",
+    "#__bifrost_badge__ .__bb_share_badge{",
+    "display:none;position:absolute;right:-2px;bottom:-3px;",
+    "height:13px;min-width:34px;padding:0 4px;border-radius:9999px;",
+    "background:#faad14;color:#1f1f1f;border:1px solid rgba(255,255,255,.95);",
+    "font-size:8px;font-weight:800;line-height:12px;text-align:center;",
+    "box-shadow:0 1px 5px rgba(0,0,0,.22);letter-spacing:0;text-transform:uppercase;",
+    "}",
+    "#__bifrost_badge__.--share .__bb_share_badge{display:block}",
     "#__bb_panel__{",
     "position:fixed;left:15px;bottom:52px;z-index:2147483647!important;",
     "min-width:280px;max-width:400px;max-height:420px;",
@@ -74,6 +82,20 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_empty{",
     "padding:24px 16px;text-align:center;font-size:13px;color:#999;",
     "}",
+    "#__bb_panel__ .__bb_share_env{",
+    "padding:10px 16px;border-bottom:1px solid #f0f0f0;",
+    "display:flex;align-items:center;gap:8px;font-size:13px;color:#333;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_name{",
+    "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit{",
+    "border:1px solid rgba(250,173,20,.55);border-radius:4px;",
+    "background:#fff7e6;color:#ad6800;font-size:11px;font-weight:700;",
+    "height:22px;padding:0 8px;line-height:20px;cursor:pointer;",
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:#fff1b8;border-color:#faad14}",
     "#__bb_panel__ .__bb_grp{",
     "padding:8px 16px 4px;font-size:10px;font-weight:600;color:#999;",
     "display:flex;align-items:center;gap:4px;",
@@ -114,6 +136,9 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_sec{color:#666}",
     "#__bb_panel__ .__bb_ri .__bb_rc{color:#666}",
     "#__bb_panel__ .__bb_empty{color:#666}",
+    "#__bb_panel__ .__bb_share_env{border-bottom-color:#333;color:#e0e0e0}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit{background:#2a2418;color:#ffd666;border-color:rgba(250,173,20,.45)}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:#332b18;border-color:#faad14}",
     "#__bb_panel__ .__bb_grp{color:#666}",
     "#__bb_panel__ .__bb_grp svg{fill:#666}",
     "#__bb_panel__ .__bb_mg{border-top-color:#333}",
@@ -128,6 +153,7 @@ const BADGE_HTML: &str = concat!(
     r#"<div id="__bifrost_badge__" aria-hidden="true">"#,
     r#"<span class="__bb_ico">B</span>"#,
     r#"<span class="__bb_txt">Bifrost proxy is working</span>"#,
+    r#"<span class="__bb_share_badge">Share</span>"#,
     "</div>",
     r#"<div id="__bb_panel__"></div>"#,
 );
@@ -144,6 +170,7 @@ fn badge_script(rules_json: &str) -> String {
             "var D={rules_json};",
             "var hideTimer=null;",
             "var base=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/rules':'';",
+            "var apiBase=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/api':'';",
             "var BOLT='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M560 192L256 576h208l-48 256 320-384H528l32-256z\" fill=\"currentColor\"/></svg>';",
             "var TEAM='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M824 512a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm-312-88a120 120 0 1 0 0-240 120 120 0 0 0 0 240zm-312 88a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm624 56c-46 0-86 26-106 64h-4c-24-48-62-86-108-110a184 184 0 0 0-104-32h-8a184 184 0 0 0-104 32c-46 24-84 62-108 110h-4a120 120 0 0 0-106-64c-66 0-120 54-120 120v64h248a248 248 0 0 0 8 24h-8v200h416V792h-8a248 248 0 0 0 8-24h248v-64c0-66-54-120-120-120z\" fill=\"currentColor\"/></svg>';",
             "function show(){{clearTimeout(hideTimer);render();P.classList.add('--visible')}}",
@@ -153,6 +180,7 @@ fn badge_script(rules_json: &str) -> String {
             "function fallbackCopy(text){{return new Promise(function(resolve,reject){{var t=document.createElement('textarea');var prev=document.activeElement;var ok=false;var copied=false;function onCopy(e){{if(e.clipboardData){{e.clipboardData.setData('text/plain',text);e.preventDefault();copied=true}}}}t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.top='0';t.style.left='0';t.style.width='1px';t.style.height='1px';t.style.opacity='0';document.body.appendChild(t);document.addEventListener('copy',onCopy,true);try{{t.focus();t.select();t.setSelectionRange(0,text.length);ok=document.execCommand('copy')}}catch(e){{ok=false}}document.removeEventListener('copy',onCopy,true);document.body.removeChild(t);try{{if(prev&&prev.focus)prev.focus()}}catch(e){{}}ok&&copied?resolve():reject(new Error('copy failed'))}})}}",
             "function copyText(text){{if(navigator.clipboard&&window.isSecureContext&&navigator.clipboard.writeText){{return navigator.clipboard.writeText(text).catch(function(){{return fallbackCopy(text)}})}}return fallbackCopy(text)}}",
             "function copyMerged(btn){{copyText(String(D.merged_content||'').trim()).then(function(){{setCopyState(btn,'Copied');setTimeout(function(){{setCopyState(btn,'Copy')}},1200)}}).catch(function(){{setCopyState(btn,'Failed');setTimeout(function(){{setCopyState(btn,'Copy')}},1600)}})}}",
+            "function exitShare(btn){{if(!apiBase)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Exiting';fetch(apiBase+'/rules/share-env/exit',{{method:'POST',mode:'cors',credentials:'omit'}}).then(function(r){{if(!r.ok)throw new Error('exit failed');return r.text()}}).then(function(){{btn.textContent='Exited';setTimeout(function(){{location.reload()}},250)}}).catch(function(){{btn.disabled=false;btn.textContent='Failed';setTimeout(function(){{btn.textContent=old}},1400)}})}}",
             "function ruleRow(r){{",
             "var href='';",
             "if(base){{",
@@ -165,7 +193,10 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "function render(){{",
             "var rules=D.rules||[];",
+            "var share=D.share_env||{{active:false}};",
+            "if(share.active)B.classList.add('--share');else B.classList.remove('--share');",
             "var html='<div class=\"__bb_ph\">'+BOLT+' Active Rules<span style=\"margin-left:auto;font-size:12px;font-weight:500;color:#52c41a\">'+rules.length+' active</span></div>';",
+            "if(share.active){{var sn=share.requested_name||share.imported_rule_name||'Bifrost';html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_name\">'+esc(sn)+' share env active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
             "html+='<div class=\"__bb_pl\">';",
             "if(rules.length===0){{html+='<div class=\"__bb_empty\">No active rules</div>'}}",
             "else{{",
@@ -191,6 +222,7 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "P.innerHTML=html;",
             "Array.prototype.forEach.call(P.querySelectorAll('.__bb_copy'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();copyMerged(btn)}}}});",
+            "Array.prototype.forEach.call(P.querySelectorAll('.__bb_exit'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();exitShare(btn)}}}});",
             "}}",
             "B.onmouseenter=show;",
             "B.onmouseleave=hide;",
@@ -339,6 +371,7 @@ mod tests {
 
     const EMPTY_RULES: &str = r#"{"rules":[],"merged_content":"","admin_port":8800}"#;
     const SAMPLE_RULES: &str = r#"{"rules":[{"name":"my-rule","rule_count":3,"group_id":null,"group_name":null}],"merged_content":"example.com mock 200","admin_port":8800}"#;
+    const SHARE_RULES: &str = r#"{"rules":[{"name":"share/demo","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"demo.example.com statusCode://204","admin_port":8800,"share_env":{"active":true,"imported_rule_name":"share/demo","requested_name":"demo","content_hash":"abc","enabled_rule_names":["before"],"entered_at":"2026-06-22T00:00:00Z"}}"#;
 
     #[test]
     fn test_inject_badge_before_body_end() {
@@ -431,7 +464,7 @@ mod tests {
         assert!(snippet.contains("rule_count"));
         assert!(snippet.contains("merged_content"));
         assert!(snippet.contains("admin_port"));
-        assert!(!snippet.contains("fetch("));
+        assert!(snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
     }
 
     #[test]
@@ -500,6 +533,20 @@ mod tests {
         assert!(snippet.contains("clipboardData.setData('text/plain',text)"));
         assert!(snippet.contains("ok&&copied?resolve()"));
         assert!(snippet.contains("copyMerged(btn)"));
+    }
+
+    #[test]
+    fn test_badge_share_env_badge_and_exit_button_present() {
+        let snippet = build_badge_snippet(SHARE_RULES);
+
+        assert!(snippet.contains("__bb_share_badge"));
+        assert!(snippet.contains(">Share</span>"));
+        assert!(snippet.contains("--share"));
+        assert!(snippet.contains("share env active"));
+        assert!(snippet.contains("__bb_exit"));
+        assert!(snippet.contains("/rules/share-env/exit"));
+        assert!(snippet.contains("exitShare(btn)"));
+        assert!(snippet.contains("location.reload()"));
     }
 
     #[test]

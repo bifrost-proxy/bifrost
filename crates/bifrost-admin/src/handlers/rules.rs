@@ -18,6 +18,7 @@ use super::{
     BoxBody,
 };
 use crate::push::SharedPushManager;
+use crate::rule_share_import::exit_rule_share_env;
 use crate::state::SharedAdminState;
 
 #[derive(Debug, Serialize)]
@@ -111,6 +112,16 @@ struct CreateRuleShareLinkResponse {
     content_hash: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ShareEnvStatusResponse {
+    active: bool,
+    imported_rule_name: Option<String>,
+    requested_name: Option<String>,
+    content_hash: Option<String>,
+    enabled_rule_names: Vec<String>,
+    entered_at: Option<String>,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ActiveRuleItem {
     name: String,
@@ -186,6 +197,16 @@ pub async fn handle_rules(
             Method::POST => create_rule_share_link(req, state).await,
             _ => method_not_allowed(),
         }
+    } else if path == "/api/rules/share-env/status" {
+        match method {
+            Method::GET => share_env_status(state).await,
+            _ => method_not_allowed(),
+        }
+    } else if path == "/api/rules/share-env/exit" {
+        match method {
+            Method::POST => exit_share_env(state, push_manager).await,
+            _ => method_not_allowed(),
+        }
     } else if path == "/api/rules/active-summary" {
         match method {
             Method::GET => active_summary(state).await,
@@ -230,6 +251,44 @@ pub async fn handle_rules(
         }
     } else {
         error_response(StatusCode::NOT_FOUND, "Not Found")
+    }
+}
+
+async fn share_env_status(state: SharedAdminState) -> Response<BoxBody> {
+    match state.rules_storage.load_share_env_state() {
+        Ok(Some(share_state)) if share_state.active => json_response(&ShareEnvStatusResponse {
+            active: true,
+            imported_rule_name: Some(share_state.imported_rule_name),
+            requested_name: Some(share_state.requested_name),
+            content_hash: Some(share_state.content_hash),
+            enabled_rule_names: share_state.enabled_rule_names,
+            entered_at: Some(share_state.entered_at),
+        }),
+        Ok(_) => json_response(&ShareEnvStatusResponse {
+            active: false,
+            imported_rule_name: None,
+            requested_name: None,
+            content_hash: None,
+            enabled_rule_names: Vec::new(),
+            entered_at: None,
+        }),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to load share env state: {}", error),
+        ),
+    }
+}
+
+async fn exit_share_env(
+    state: SharedAdminState,
+    push_manager: Option<SharedPushManager>,
+) -> Response<BoxBody> {
+    match exit_rule_share_env(state, push_manager.as_ref()).await {
+        Ok(outcome) => json_response(&outcome),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to exit share env: {}", error),
+        ),
     }
 }
 
