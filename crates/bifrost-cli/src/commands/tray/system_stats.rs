@@ -30,7 +30,10 @@ const DEFAULT_ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 #[derive(Debug, Clone, PartialEq)]
 pub struct SystemStatsSnapshot {
     pub cpu_percent: f32,
+    pub memory_pressure_percent: Option<f32>,
     pub memory_used_bytes: u64,
+    pub memory_compressed_bytes: u64,
+    pub memory_cached_bytes: u64,
     pub memory_total_bytes: u64,
     pub disk_used_percent: Option<f32>,
     pub network_down_bytes_per_sec: Option<u64>,
@@ -51,7 +54,10 @@ pub struct SystemStatsSampler {
     last_cpu_ticks: Option<MacCpuTicks>,
     disk_mount_point: Option<PathBuf>,
     cpu_percent: f32,
+    memory_pressure_percent: Option<f32>,
     memory_used_bytes: u64,
+    memory_compressed_bytes: u64,
+    memory_cached_bytes: u64,
     memory_total_bytes: u64,
     disk_used_percent: Option<f32>,
     last_cpu_at: Option<Instant>,
@@ -156,17 +162,31 @@ struct MacCpuTicks {
 struct MacMemoryPageCounts {
     free: u64,
     speculative: u64,
-    active: u64,
     wired: u64,
     purgeable: u64,
     internal: u64,
+    compressor: u64,
+    file_backed: u64,
+}
+
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MacMemorySample {
+    used_bytes: u64,
+    compressed_bytes: u64,
+    cached_bytes: u64,
 }
 
 impl SystemStatsSampler {
     pub fn new(data_dir: &Path) -> Self {
         let last_cpu_ticks = mac_cpu_ticks();
         let memory_total_bytes = mac_memory_total_bytes().unwrap_or(0);
-        let memory_used_bytes = mac_memory_used_bytes(memory_total_bytes).unwrap_or(0);
+        let memory_pressure_percent = mac_memory_pressure_percent();
+        let memory_sample = mac_memory_sample(memory_total_bytes).unwrap_or(MacMemorySample {
+            used_bytes: 0,
+            compressed_bytes: 0,
+            cached_bytes: 0,
+        });
 
         let disks = Disks::new_with_refreshed_list();
         let disk_mount_point = select_disk_mount_point(disks.list(), Some(data_dir));
@@ -174,7 +194,10 @@ impl SystemStatsSampler {
 
         Self {
             cpu_percent: 0.0,
-            memory_used_bytes,
+            memory_pressure_percent,
+            memory_used_bytes: memory_sample.used_bytes,
+            memory_compressed_bytes: memory_sample.compressed_bytes,
+            memory_cached_bytes: memory_sample.cached_bytes,
             memory_total_bytes,
             last_cpu_ticks,
             disk_mount_point,
@@ -214,8 +237,12 @@ impl SystemStatsSampler {
                 .unwrap_or(true)
         {
             self.memory_total_bytes = mac_memory_total_bytes().unwrap_or(self.memory_total_bytes);
-            self.memory_used_bytes =
-                mac_memory_used_bytes(self.memory_total_bytes).unwrap_or(self.memory_used_bytes);
+            self.memory_pressure_percent = mac_memory_pressure_percent();
+            if let Some(memory_sample) = mac_memory_sample(self.memory_total_bytes) {
+                self.memory_used_bytes = memory_sample.used_bytes;
+                self.memory_compressed_bytes = memory_sample.compressed_bytes;
+                self.memory_cached_bytes = memory_sample.cached_bytes;
+            }
             self.last_memory_at = Some(now);
         }
 
@@ -250,7 +277,10 @@ impl SystemStatsSampler {
 
         SystemStatsSnapshot {
             cpu_percent: self.cpu_percent,
+            memory_pressure_percent: self.memory_pressure_percent,
             memory_used_bytes: self.memory_used_bytes,
+            memory_compressed_bytes: self.memory_compressed_bytes,
+            memory_cached_bytes: self.memory_cached_bytes,
             memory_total_bytes: self.memory_total_bytes,
             disk_used_percent: self.disk_used_percent,
             network_down_bytes_per_sec: rates.map(|rates| rates.down_bytes_per_sec),
@@ -531,8 +561,34 @@ fn mac_memory_total_bytes() -> Option<u64> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn mac_memory_pressure_percent() -> Option<f32> {
+    let name = CString::new("kern.memorystatus_level").ok()?;
+    let mut free_level: libc::c_int = 0;
+    let mut len = std::mem::size_of::<libc::c_int>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut free_level as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0 || len != std::mem::size_of::<libc::c_int>() {
+        return None;
+    }
+
+    Some(mac_memory_pressure_percent_from_free_level(free_level))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_memory_pressure_percent_from_free_level(free_level: libc::c_int) -> f32 {
+    100.0 - (free_level.clamp(0, 100) as f32)
+}
+
 #[allow(deprecated)]
-fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
+fn mac_memory_sample(total_bytes: u64) -> Option<MacMemorySample> {
     if total_bytes == 0 {
         return None;
     }
@@ -565,36 +621,49 @@ fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
     let page_counts = MacMemoryPageCounts {
         free: info.free_count as u64,
         speculative: info.speculative_count as u64,
-        active: info.active_count as u64,
         wired: info.wire_count as u64,
         purgeable: info.purgeable_count as u64,
         internal: info.internal_page_count as u64,
+        compressor: info.compressor_page_count as u64,
+        file_backed: info.external_page_count as u64,
     };
     let used_pages = mac_memory_used_pages(page_counts, total_pages);
-    Some(used_pages.saturating_mul(page_size).min(total_bytes))
+    Some(MacMemorySample {
+        used_bytes: pages_to_bytes(used_pages, page_size, total_bytes),
+        compressed_bytes: pages_to_bytes(page_counts.compressor, page_size, total_bytes),
+        cached_bytes: pages_to_bytes(
+            mac_memory_cached_pages(page_counts, total_pages),
+            page_size,
+            total_bytes,
+        ),
+    })
 }
 
 #[cfg(target_os = "macos")]
 fn mac_memory_used_pages(counts: MacMemoryPageCounts, total_pages: u64) -> u64 {
-    if counts.active > 0 {
-        let pressure_pages = counts
-            .active
-            .saturating_add(counts.wired)
-            .saturating_sub(counts.purgeable);
-        if pressure_pages > 0 {
-            return pressure_pages.min(total_pages);
-        }
-    }
-
-    let internal_pages = counts
+    let activity_monitor_style_pages = counts
         .internal
         .saturating_sub(counts.purgeable)
-        .saturating_add(counts.wired);
-    if internal_pages > 0 {
-        return internal_pages.min(total_pages);
+        .saturating_add(counts.wired)
+        .saturating_add(counts.compressor);
+    if activity_monitor_style_pages > 0 {
+        return activity_monitor_style_pages.min(total_pages);
     }
 
     total_pages.saturating_sub(counts.free.saturating_add(counts.speculative))
+}
+
+#[cfg(target_os = "macos")]
+fn mac_memory_cached_pages(counts: MacMemoryPageCounts, total_pages: u64) -> u64 {
+    counts
+        .file_backed
+        .saturating_add(counts.speculative)
+        .saturating_add(counts.purgeable)
+        .min(total_pages)
+}
+
+fn pages_to_bytes(pages: u64, page_size: u64, total_bytes: u64) -> u64 {
+    pages.saturating_mul(page_size).min(total_bytes)
 }
 
 fn collect_network_interfaces() -> BTreeMap<String, NetworkTotals> {
@@ -704,11 +773,27 @@ pub fn menu_lines(
         system_parts.push(format!("CPU {}", format_percent(snapshot.cpu_percent)));
     }
     if items.memory {
-        system_parts.push(format!(
+        let mut memory_details = vec![format!(
             "Memory {} / {}",
             format_bytes(snapshot.memory_used_bytes),
             format_bytes(snapshot.memory_total_bytes)
-        ));
+        )];
+        if let Some(pressure_percent) = snapshot.memory_pressure_percent {
+            memory_details.push(format!("Pressure {}", format_percent(pressure_percent)));
+        }
+        if snapshot.memory_compressed_bytes > 0 {
+            memory_details.push(format!(
+                "Compressed {}",
+                format_bytes(snapshot.memory_compressed_bytes)
+            ));
+        }
+        if snapshot.memory_cached_bytes > 0 {
+            memory_details.push(format!(
+                "Cached {}",
+                format_bytes(snapshot.memory_cached_bytes)
+            ));
+        }
+        system_parts.push(memory_details.join(" | "));
     }
     if items.disk {
         system_parts.push(format!(
@@ -932,7 +1017,14 @@ fn format_menu_bar_memory_percent(used_bytes: u64, total_bytes: u64) -> String {
     if total_bytes == 0 {
         return "--%".to_string();
     }
-    format_menu_bar_percent((used_bytes as f32 / total_bytes as f32 * 100.0).clamp(0.0, 100.0))
+    let rounded = (used_bytes as f32 / total_bytes as f32 * 100.0)
+        .round()
+        .clamp(0.0, 100.0) as u8;
+    if rounded >= 100 {
+        "100%".to_string()
+    } else {
+        format!("{rounded}%")
+    }
 }
 
 fn bytes_per_sec(bytes: u64, seconds: f64) -> u64 {
@@ -996,7 +1088,10 @@ mod tests {
         let lines = menu_lines(
             &SystemStatsSnapshot {
                 cpu_percent: 23.4,
+                memory_pressure_percent: None,
                 memory_used_bytes: 18 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 0,
+                memory_cached_bytes: 0,
                 memory_total_bytes: 32 * 1024 * 1024 * 1024,
                 disk_used_percent: Some(58.7),
                 network_down_bytes_per_sec: Some(512 * 1024),
@@ -1010,7 +1105,7 @@ mod tests {
             "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%"
         );
         assert_eq!(lines.network, "Network: Up 1.5 MB/s | Down 512 KB/s");
-        assert_eq!(lines.menu_bar, "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s");
+        assert_eq!(lines.menu_bar, "C20% | M56% | D55% | ↑1.5 M/s ↓512 K/s");
     }
 
     #[test]
@@ -1018,7 +1113,10 @@ mod tests {
         let lines = menu_lines(
             &SystemStatsSnapshot {
                 cpu_percent: 23.4,
+                memory_pressure_percent: None,
                 memory_used_bytes: 18 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 0,
+                memory_cached_bytes: 0,
                 memory_total_bytes: 32 * 1024 * 1024 * 1024,
                 disk_used_percent: Some(58.7),
                 network_down_bytes_per_sec: None,
@@ -1031,7 +1129,7 @@ mod tests {
             lines.network,
             "Network: Up collecting... | Down collecting..."
         );
-        assert_eq!(lines.menu_bar, "C20% | M55% | D55% | ↑--- ↓---");
+        assert_eq!(lines.menu_bar, "C20% | M56% | D55% | ↑--- ↓---");
     }
 
     #[test]
@@ -1039,7 +1137,10 @@ mod tests {
         let lines = menu_lines(
             &SystemStatsSnapshot {
                 cpu_percent: 5.4,
+                memory_pressure_percent: None,
                 memory_used_bytes: 3 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 0,
+                memory_cached_bytes: 0,
                 memory_total_bytes: 32 * 1024 * 1024 * 1024,
                 disk_used_percent: Some(8.6),
                 network_down_bytes_per_sec: Some(26 * 1024),
@@ -1048,37 +1149,87 @@ mod tests {
             &TraySystemStatsItems::default(),
         );
 
-        assert_eq!(lines.menu_bar, "C5% | M5% | D5% | ↑8.0 K/s ↓26.0 K/s");
+        assert_eq!(lines.menu_bar, "C5% | M9% | D5% | ↑8.0 K/s ↓26.0 K/s");
+    }
+
+    #[test]
+    fn menu_lines_shows_memory_load_and_pressure_on_macos() {
+        let lines = menu_lines(
+            &SystemStatsSnapshot {
+                cpu_percent: 5.4,
+                memory_pressure_percent: Some(22.1),
+                memory_used_bytes: 28 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 6 * 1024 * 1024 * 1024,
+                memory_cached_bytes: 14 * 1024 * 1024 * 1024,
+                memory_total_bytes: 64 * 1024 * 1024 * 1024,
+                disk_used_percent: Some(30.0),
+                network_down_bytes_per_sec: Some(26 * 1024),
+                network_up_bytes_per_sec: Some(8 * 1024),
+            },
+            &TraySystemStatsItems::default(),
+        );
+
+        assert_eq!(
+            lines.system,
+            "System: CPU 5.4% | Memory 28.0 GB / 64.0 GB | Pressure 22% | Compressed 6.0 GB | Cached 14.0 GB | Disk 30%"
+        );
+        assert_eq!(lines.menu_bar, "C5% | M44% | D30% | ↑8.0 K/s ↓26.0 K/s");
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn mac_memory_used_pages_excludes_file_cache_and_purgeable_memory() {
-        let counts = MacMemoryPageCounts {
-            free: 600,
-            speculative: 100,
-            active: 1_100,
-            wired: 300,
-            purgeable: 200,
-            internal: 1_500,
-        };
-
-        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_200);
+    fn mac_memory_pressure_percent_from_free_level_clamps_to_pressure() {
+        assert_eq!(mac_memory_pressure_percent_from_free_level(78), 22.0);
+        assert_eq!(mac_memory_pressure_percent_from_free_level(120), 0.0);
+        assert_eq!(mac_memory_pressure_percent_from_free_level(-10), 100.0);
     }
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn mac_memory_used_pages_falls_back_to_internal_when_active_counts_are_empty() {
+    fn mac_memory_used_pages_includes_compressor_and_excludes_cache() {
         let counts = MacMemoryPageCounts {
             free: 600,
             speculative: 100,
-            active: 0,
             wired: 300,
             purgeable: 200,
             internal: 1_500,
+            compressor: 250,
+            file_backed: 1_000,
         };
 
-        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_600);
+        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_850);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_memory_used_pages_subtracts_purgeable_memory() {
+        let counts = MacMemoryPageCounts {
+            free: 600,
+            speculative: 100,
+            wired: 300,
+            purgeable: 700,
+            internal: 1_500,
+            compressor: 250,
+            file_backed: 1_000,
+        };
+
+        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_350);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_memory_cached_pages_includes_file_backed_speculative_and_purgeable() {
+        let counts = MacMemoryPageCounts {
+            free: 600,
+            speculative: 100,
+            wired: 300,
+            purgeable: 700,
+            internal: 1_500,
+            compressor: 250,
+            file_backed: 1_000,
+        };
+
+        assert_eq!(mac_memory_cached_pages(counts, 4_000), 1_800);
     }
 
     #[cfg(target_os = "macos")]
@@ -1087,10 +1238,11 @@ mod tests {
         let counts = MacMemoryPageCounts {
             free: 600,
             speculative: 100,
-            active: 0,
             wired: 0,
             purgeable: 0,
             internal: 0,
+            compressor: 0,
+            file_backed: 0,
         };
 
         assert_eq!(mac_memory_used_pages(counts, 4_000), 3_300);
@@ -1101,7 +1253,10 @@ mod tests {
         let lines = menu_lines(
             &SystemStatsSnapshot {
                 cpu_percent: 5.4,
+                memory_pressure_percent: None,
                 memory_used_bytes: 18 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 0,
+                memory_cached_bytes: 0,
                 memory_total_bytes: 0,
                 disk_used_percent: None,
                 network_down_bytes_per_sec: Some(512 * 1024),
@@ -1125,7 +1280,10 @@ mod tests {
         let lines = menu_lines(
             &SystemStatsSnapshot {
                 cpu_percent: 5.4,
+                memory_pressure_percent: None,
                 memory_used_bytes: 3 * 1024 * 1024 * 1024,
+                memory_compressed_bytes: 0,
+                memory_cached_bytes: 0,
                 memory_total_bytes: 32 * 1024 * 1024 * 1024,
                 disk_used_percent: Some(8.6),
                 network_down_bytes_per_sec: Some(26 * 1024),

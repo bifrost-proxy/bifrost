@@ -180,7 +180,10 @@
     fn test_native_menu_bar_stats_rows_follow_each_tray_switch() {
         let snapshot = system_stats::SystemStatsSnapshot {
             cpu_percent: 10.0,
+            memory_pressure_percent: None,
             memory_used_bytes: 16 * 1024 * 1024 * 1024,
+            memory_compressed_bytes: 0,
+            memory_cached_bytes: 0,
             memory_total_bytes: 32 * 1024 * 1024 * 1024,
             disk_used_percent: Some(65.0),
             network_down_bytes_per_sec: Some(2048),
