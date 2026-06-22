@@ -3,7 +3,7 @@ use super::system_stats::SystemStatsSnapshot;
 use super::tray::{cached_menu_bar_glyph, menu_bar_stats_font};
 
 pub const DASHBOARD_WIDTH: u32 = 680;
-pub const DASHBOARD_HEIGHT: u32 = 328;
+pub const DASHBOARD_HEIGHT: u32 = 352;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrayDashboardSnapshot {
@@ -12,6 +12,8 @@ pub struct TrayDashboardSnapshot {
     pub system_proxy_label: String,
     pub cpu_percent: f32,
     pub cpu_logical_cores: Option<usize>,
+    pub cpu_performance_cores: Option<usize>,
+    pub cpu_efficiency_cores: Option<usize>,
     pub load_one: f32,
     pub load_five: f32,
     pub load_fifteen: f32,
@@ -64,6 +66,8 @@ impl TrayDashboardHistory {
             system_proxy_label,
             cpu_percent: stats.cpu_percent,
             cpu_logical_cores: stats.cpu_logical_cores,
+            cpu_performance_cores: stats.cpu_performance_cores,
+            cpu_efficiency_cores: stats.cpu_efficiency_cores,
             load_one: stats.load_one,
             load_five: stats.load_five,
             load_fifteen: stats.load_fifteen,
@@ -143,6 +147,14 @@ pub fn render_dashboard_with_theme(
         palette.separator,
     );
     draw_network_row(snapshot, &mut bitmap, &palette, font);
+    draw_line(
+        &mut bitmap,
+        24,
+        328,
+        DASHBOARD_WIDTH - 24,
+        328,
+        palette.separator,
+    );
 
     Some(bitmap)
 }
@@ -167,28 +179,14 @@ fn draw_cpu_row(
     draw_text(
         bitmap,
         250.0,
-        36,
-        26.0,
-        &format!(
-            "load {:.1} / {:.1} / {:.1}",
-            snapshot.load_one, snapshot.load_five, snapshot.load_fifteen
+        54,
+        24.0,
+        &format_cpu_topology(
+            snapshot.cpu_logical_cores,
+            snapshot.cpu_performance_cores,
+            snapshot.cpu_efficiency_cores,
         ),
         palette.secondary_text,
-        font,
-    );
-    draw_text(
-        bitmap,
-        250.0,
-        66,
-        24.0,
-        &format!(
-            "logical cores {}",
-            snapshot
-                .cpu_logical_cores
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "--".to_string())
-        ),
-        palette.tertiary_text,
         font,
     );
 }
@@ -207,24 +205,32 @@ fn draw_memory_row(
     .unwrap_or(0.0);
     let color = palette.status_color(memory_status(percent));
     draw_metric_label(bitmap, 112, "Memory", palette, font);
+    let pressure_percent = snapshot.memory_pressure_percent.unwrap_or(percent);
+    let pressure_label = format_percent(pressure_percent);
+    draw_text(bitmap, 36.0, 148, 32.0, &pressure_label, color, font);
     draw_text(
         bitmap,
-        36.0,
+        36.0 + measure_text(&pressure_label, 32.0, font) + 8.0,
         148,
-        32.0,
-        &format!(
-            "{} / {}",
-            format_bytes_compact(snapshot.memory_used_bytes),
-            format_bytes_compact(snapshot.memory_total_bytes)
-        ),
-        palette.primary_text,
+        24.0,
+        &format!("({})", format_memory_health(memory_status(percent))),
+        color,
         font,
     );
-    let pressure_label = snapshot
-        .memory_pressure_percent
-        .map(|value| format!("pressure {}", format_percent(value)))
-        .unwrap_or_else(|| format!("used {}", format_percent(percent)));
-    draw_text(bitmap, 250.0, 118, 26.0, &pressure_label, color, font);
+    let usage_label = format!(
+        "{} / {}",
+        format_bytes_compact(snapshot.memory_used_bytes),
+        format_bytes_compact(snapshot.memory_total_bytes)
+    );
+    draw_text(
+        bitmap,
+        250.0,
+        118,
+        26.0,
+        &format!("used {usage_label}"),
+        palette.secondary_text,
+        font,
+    );
     draw_text(
         bitmap,
         250.0,
@@ -282,8 +288,8 @@ fn draw_disk_row(
         24.0,
         &format!(
             "read {}   write {}",
-            format_optional_rate(snapshot.disk_read_bytes_per_sec),
-            format_optional_rate(snapshot.disk_write_bytes_per_sec)
+            format_optional_disk_rate(snapshot.disk_read_bytes_per_sec),
+            format_optional_disk_rate(snapshot.disk_write_bytes_per_sec)
         ),
         palette.tertiary_text,
         font,
@@ -368,6 +374,16 @@ fn draw_text(
         );
         cursor_x += metrics.advance_width;
     }
+}
+
+fn measure_text(text: &str, font_px: f32, font: &fontdue::Font) -> f32 {
+    text.chars()
+        .map(|ch| {
+            cached_menu_bar_glyph(font, ch, font_px)
+                .metrics
+                .advance_width
+        })
+        .sum()
 }
 
 fn draw_glyph(
@@ -477,7 +493,6 @@ impl Color {
 #[derive(Debug, Clone, Copy)]
 struct DashboardPalette {
     background: Color,
-    primary_text: Color,
     secondary_text: Color,
     tertiary_text: Color,
     label_text: Color,
@@ -494,7 +509,6 @@ impl DashboardPalette {
         match theme {
             DashboardTheme::Light => Self {
                 background: Color::rgba(247, 250, 253, 16),
-                primary_text: Color::rgba(38, 45, 56, 255),
                 secondary_text: Color::rgba(85, 96, 113, 255),
                 tertiary_text: Color::rgba(118, 128, 144, 255),
                 label_text: Color::rgba(58, 68, 82, 255),
@@ -507,7 +521,6 @@ impl DashboardPalette {
             },
             DashboardTheme::Dark => Self {
                 background: Color::rgba(32, 34, 38, 24),
-                primary_text: Color::rgba(242, 244, 248, 255),
                 secondary_text: Color::rgba(178, 184, 194, 255),
                 tertiary_text: Color::rgba(162, 169, 181, 255),
                 label_text: Color::rgba(211, 216, 225, 255),
@@ -557,6 +570,14 @@ fn memory_status(percent: f32) -> StatusLevel {
     }
 }
 
+fn format_memory_health(status: StatusLevel) -> &'static str {
+    match status {
+        StatusLevel::Good => "Healthy",
+        StatusLevel::Warning => "Pressure",
+        StatusLevel::Critical => "Critical",
+    }
+}
+
 fn disk_status(percent: f32) -> StatusLevel {
     if percent >= 90.0 {
         StatusLevel::Critical
@@ -595,6 +616,28 @@ fn format_optional_rate(value: Option<u64>) -> String {
     value
         .map(|value| format!("{}/s", format_bytes_compact(value)))
         .unwrap_or_else(|| "--".to_string())
+}
+
+fn format_optional_disk_rate(value: Option<u64>) -> String {
+    value
+        .map(|value| format!("{}/s", format_bytes_compact(value)))
+        .unwrap_or_else(|| "collecting".to_string())
+}
+
+fn format_cpu_topology(
+    logical: Option<usize>,
+    performance: Option<usize>,
+    efficiency: Option<usize>,
+) -> String {
+    let logical = logical
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "--".to_string());
+    match (performance, efficiency) {
+        (Some(performance), Some(efficiency)) => {
+            format!("cores {logical} (P{performance} / E{efficiency})")
+        }
+        _ => format!("logical cores {logical}"),
+    }
 }
 
 fn format_swap(used: Option<u64>, total: Option<u64>) -> String {
@@ -650,14 +693,36 @@ mod tests {
     }
 
     #[test]
+    fn memory_health_label_names_pressure_status() {
+        assert_eq!(format_memory_health(StatusLevel::Good), "Healthy");
+        assert_eq!(format_memory_health(StatusLevel::Warning), "Pressure");
+        assert_eq!(format_memory_health(StatusLevel::Critical), "Critical");
+    }
+
+    #[test]
     fn formatting_handles_rates_and_swap() {
         assert_eq!(format_optional_rate(Some(1536)), "1.5K/s");
         assert_eq!(format_optional_rate(None), "--");
+        assert_eq!(format_optional_disk_rate(Some(0)), "0B/s");
+        assert_eq!(format_optional_disk_rate(None), "collecting");
         assert_eq!(
             format_swap(Some(512 * 1024 * 1024), Some(2 * 1024 * 1024 * 1024)),
             "512.0M / 2.0G"
         );
         assert_eq!(format_swap(None, None), "--");
+    }
+
+    #[test]
+    fn cpu_topology_uses_perf_efficiency_cores_when_available() {
+        assert_eq!(
+            format_cpu_topology(Some(16), Some(12), Some(4)),
+            "cores 16 (P12 / E4)"
+        );
+        assert_eq!(
+            format_cpu_topology(Some(10), None, None),
+            "logical cores 10"
+        );
+        assert_eq!(format_cpu_topology(None, None, None), "logical cores --");
     }
 
     #[test]
@@ -672,6 +737,8 @@ mod tests {
             system_proxy_label: "System proxy Off".to_string(),
             cpu_percent: 23.0,
             cpu_logical_cores: Some(10),
+            cpu_performance_cores: Some(6),
+            cpu_efficiency_cores: Some(4),
             load_one: 1.2,
             load_five: 1.5,
             load_fifteen: 1.8,

@@ -37,6 +37,8 @@
 - 下拉菜单顶部展示一块固定高度 dashboard header。
 - Header 包含 CPU、Memory、Disk、Network 四个区域，不再重复展示 `Bifrost` 标题和 Running 状态。
 - Header 使用不同颜色区分状态和网络方向。
+- CPU 区域不展示 Bifrost 自身进程负载或 load average；右侧只展示逻辑核心数，支持时显示 P/E 核心分布，例如 `cores 16 (P12 / E4)`。
+- Network 区域下方有一条分隔线，把 header 和 Open Traffic 等普通菜单项隔开。
 - Header 下方仍显示 Open Traffic、Open Rules、Open Settings、Copy Proxy 等原有菜单项。
 - 菜单底部展示 `Bifrost: Running on ...` 和 `Version ...` 两行信息。
 
@@ -49,10 +51,10 @@
 
 **预期结果**：
 
-- Memory 区域展示 used/total、pressure 或 used 百分比。
-- Memory 区域展示 compressed、cached、swap 信息；不可用时显示 `--` 而不是空白或崩溃。
+- Memory 区域左侧主值展示 memory pressure 百分比，后面用较小字号括号展示健康状态，例如 `14% (Healthy)`、`64% (Pressure)` 或 `86% (Critical)`；无 pressure 时用 used 百分比兜底。
+- Memory 区域右侧第一行展示 used/total，第二行展示 compressed、cached、swap 信息；不可用时显示 `--` 而不是空白或崩溃。
 - Disk 区域第一行展示 free/total。
-- Disk 区域第二行展示 read/write 瞬时吞吐；采样未完成时显示 `--`，采样完成后显示类似 `read 12.3M/s   write 4.8M/s`。
+- Disk 区域第二行展示 read/write 瞬时吞吐；首次打开菜单时允许短暂显示 `collecting`，约 1 秒采样窗口后显示类似 `read 12.3M/s   write 4.8M/s`，无 I/O 时显示 `0B/s` 而不是空白。
 
 ### TC-TDH-03 菜单打开期间刷新不关闭菜单
 
@@ -80,7 +82,7 @@
 **预期结果**：
 
 - `tray.log` 只出现一次 `native tray dashboard header installed ...`。
-- 菜单关闭期间不因为 dashboard stats 更新持续重建原生菜单或刷新 dashboard bitmap。
+- 菜单关闭期间不因为 dashboard stats 更新持续重建原生菜单、刷新 dashboard bitmap 或推进隐藏详细行 generation。
 - 30 秒 idle 平均 CPU 低于 1%；RSS 不出现持续单调增长。
 
 ## 清理步骤
@@ -103,6 +105,6 @@
 | 日期 | 用例 | 结果 | 说明 |
 | --- | --- | --- | --- |
 | 2026-06-22 | TC-TDH-01 | 部分通过，需人工视觉确认 | 已使用 `/tmp/bifrost-tray-dashboard.A4Uf6G` 启动本次 `target/debug/bifrost`，API ready，daemon PID 24085，tray PID 24163，`tray.log.2026-06-22` 记录 `native tray dashboard header installed items=14 width=340 height=164`；自动截图发现当前 macOS 处于锁屏界面，无法点开托盘菜单做视觉确认，需解锁后补截图 |
-| 2026-06-22 | TC-TDH-02 | 部分通过，需人工视觉确认 | `cargo test -p bifrost-cli commands::tray -- --nocapture` 已验证 Memory/Disk 文案、颜色阈值、fallback、非空渲染和 I/O Registry read/write parser；原生下拉视觉细节需解锁后打开菜单确认 |
+| 2026-06-22 | TC-TDH-02 | 部分通过，需人工视觉确认 | `cargo test -p bifrost-cli commands::tray -- --nocapture` 已验证 Memory/Disk 文案、颜色阈值、fallback、非空渲染和 Disk I/O counter delta；生产采集改为菜单打开期间通过 IOKit 读取 read/write counter，原生下拉视觉细节需解锁后打开菜单确认 |
 | 2026-06-22 | TC-TDH-03 | 部分通过，需人工视觉确认 | 已修复普通菜单轮询把 dashboard snapshot 置空导致 header 闪烁的问题；新日志中 header 只安装一次，后续 group 502 未再触发 `tray menu refreshed in place`；菜单打开 5 秒不关闭需解锁后手动点开状态项确认 |
-| 2026-06-22 | TC-TDH-04 | 通过 | 优化前 debug tray helper idle 约 `3.3% CPU / 109456 KB RSS`；优化后关闭菜单 idle 30 秒采样为 `samples=30 avg_cpu=0.3067 min_cpu=0.0 max_cpu=1.5 avg_rss_kb=95015 min_rss_kb=92544 max_rss_kb=95664 rss_delta_kb=3120`。日志确认 header 安装一次，未出现 dashboard 持续刷新导致的菜单重建；仍有 group list 502 周期 warning，后续可单独加失败退避 |
+| 2026-06-22 | TC-TDH-04 | 通过 | 优化前 debug tray helper idle 约 `3.3% CPU / 109456 KB RSS`；IOKit 采样阶段关闭菜单 idle 30 秒为 `samples=30 avg_cpu=1.0033 min_cpu=0.0 max_cpu=4.9 avg_rss_kb=103095 min_rss_kb=103008 max_rss_kb=103296 rss_delta_kb=288`；最终优化后关闭菜单 idle 30 秒为 `samples=30 avg_cpu=0.5733 min_cpu=0.0 max_cpu=7.3 avg_rss_kb=87370 min_rss_kb=85744 max_rss_kb=89392 rss_delta_kb=3648`。日志确认 header 安装一次，菜单关闭时不更新 dashboard snapshot，group list 502 warning 退避到约 60 秒 |

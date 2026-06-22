@@ -92,7 +92,7 @@ const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 #[cfg(target_os = "macos")]
 const MENU_STRUCTURAL_STATUS_UPDATE_SUPPRESSION: Duration = Duration::from_secs(2);
-const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const SERVICE_IDLE_EXIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
 const VERSION_CACHE_FILE: &str = "version_cache.json";
@@ -124,6 +124,12 @@ struct MenuDataSnapshot {
     system_stats: Option<SystemStatsMenuLines>,
     #[cfg(target_os = "macos")]
     dashboard: Option<TrayDashboardSnapshot>,
+}
+
+#[cfg(target_os = "macos")]
+enum DashboardSnapshotUpdate {
+    Preserve,
+    Set(Option<Box<TrayDashboardSnapshot>>),
 }
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
@@ -4224,7 +4230,7 @@ fn poll_system_stats(
     menu_open_state: &Arc<NativeMenuOpenState>,
 ) {
     let mut sampler = SystemStatsSampler::new(&args.data_dir);
-    let mut dashboard_history = TrayDashboardHistory::default();
+    let mut dashboard_history = TrayDashboardHistory;
     let mut stats_config_watcher =
         TraySystemStatsConfigWatcher::new(&args.data_dir, Instant::now());
     loop {
@@ -4234,24 +4240,32 @@ fn poll_system_stats(
 
         let stats_config = stats_config_watcher.current(Instant::now());
         if stats_config.visible() {
-            let snapshot = sampler.sample_with_disk_io(
-                Instant::now(),
-                &stats_config.items,
-                menu_open_state.open.load(Ordering::Relaxed),
-            );
+            let menu_is_open = menu_open_state.open.load(Ordering::Relaxed);
+            let snapshot =
+                sampler.sample_with_disk_io(Instant::now(), &stats_config.items, menu_is_open);
             let lines = system_stats::menu_lines(&snapshot, &stats_config.items);
             let menu_snapshot = clone_menu_data_snapshot(menu_data);
-            let service_state = determine_state(menu_snapshot.runtime.as_ref(), args.parent_pid);
-            let dashboard = dashboard_history.snapshot(
-                service_state,
-                dashboard_runtime_label(menu_snapshot.runtime.as_ref(), service_state),
-                dashboard_system_proxy_label(menu_snapshot.system_proxy.as_ref()),
-                &snapshot,
-            );
-            update_system_stats_snapshot(Some(lines), Some(dashboard), menu_data, generation);
+            let dashboard_update = if menu_is_open || menu_snapshot.dashboard.is_none() {
+                let service_state =
+                    determine_state(menu_snapshot.runtime.as_ref(), args.parent_pid);
+                DashboardSnapshotUpdate::Set(Some(Box::new(dashboard_history.snapshot(
+                    service_state,
+                    dashboard_runtime_label(menu_snapshot.runtime.as_ref(), service_state),
+                    dashboard_system_proxy_label(menu_snapshot.system_proxy.as_ref()),
+                    &snapshot,
+                ))))
+            } else {
+                DashboardSnapshotUpdate::Preserve
+            };
+            update_system_stats_snapshot(Some(lines), dashboard_update, menu_data, generation);
         } else {
             sampler.reset_network_baseline();
-            update_system_stats_snapshot(None, None, menu_data, generation);
+            update_system_stats_snapshot(
+                None,
+                DashboardSnapshotUpdate::Set(None),
+                menu_data,
+                generation,
+            );
         }
 
         sleep_interruptibly(quit_flag, SYSTEM_STATS_POLL_INTERVAL);
@@ -4261,36 +4275,55 @@ fn poll_system_stats(
 #[cfg(target_os = "macos")]
 fn update_system_stats_snapshot(
     lines: Option<SystemStatsMenuLines>,
-    dashboard: Option<TrayDashboardSnapshot>,
+    dashboard: DashboardSnapshotUpdate,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     generation: &AtomicU64,
 ) -> bool {
     let changed = match menu_data.lock() {
-        Ok(mut current) => {
-            if current.system_stats == lines && current.dashboard == dashboard {
-                false
-            } else {
-                current.system_stats = lines;
-                current.dashboard = dashboard;
-                true
-            }
-        }
+        Ok(mut current) => apply_system_stats_snapshot_update(&mut current, lines, dashboard),
         Err(poisoned) => {
             tracing::warn!("tray menu data snapshot lock was poisoned; updating system stats");
             let mut current = poisoned.into_inner();
-            if current.system_stats == lines && current.dashboard == dashboard {
-                false
-            } else {
-                current.system_stats = lines;
-                current.dashboard = dashboard;
-                true
-            }
+            apply_system_stats_snapshot_update(&mut current, lines, dashboard)
         }
     };
     if changed {
         generation.fetch_add(1, Ordering::Relaxed);
     }
     changed
+}
+
+#[cfg(target_os = "macos")]
+fn apply_system_stats_snapshot_update(
+    current: &mut MenuDataSnapshot,
+    lines: Option<SystemStatsMenuLines>,
+    dashboard: DashboardSnapshotUpdate,
+) -> bool {
+    let preserving_dashboard = matches!(dashboard, DashboardSnapshotUpdate::Preserve);
+    let lines_changed = if preserving_dashboard
+        && current
+            .system_stats
+            .as_ref()
+            .map(|lines| lines.menu_bar.as_str())
+            == lines.as_ref().map(|lines| lines.menu_bar.as_str())
+    {
+        false
+    } else {
+        current.system_stats != lines
+    };
+    let dashboard_changed = match &dashboard {
+        DashboardSnapshotUpdate::Preserve => false,
+        DashboardSnapshotUpdate::Set(next) => current.dashboard.as_ref() != next.as_deref(),
+    };
+    if !lines_changed && !dashboard_changed {
+        return false;
+    }
+
+    current.system_stats = lines;
+    if let DashboardSnapshotUpdate::Set(next) = dashboard {
+        current.dashboard = next.map(|snapshot| *snapshot);
+    }
+    true
 }
 
 #[cfg(target_os = "macos")]

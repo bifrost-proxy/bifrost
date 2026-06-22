@@ -36,30 +36,30 @@ Bifrost 的 macOS tray 当前已经能在菜单栏标题中展示 CPU、内存�
 
 ## 信息架构
 
-Dashboard header 建议尺寸为 2x bitmap：`680 x 328 px`，对应 macOS points `340 x 164`。
+Dashboard header 建议尺寸为 2x bitmap：`680 x 352 px`，对应 macOS points `340 x 176`。
 
 布局：
 
 ```text
-CPU       23%          load 1.8 / 2.1 / 2.4
-                       logical cores 12
+CPU       23%          cores 16 (P12 / E4)
 
-Memory    18.2 / 32G   pressure 42%
+Memory    42% (Healthy)  used 18.2 / 32G
                        comp 1.2G  cache 4.8G  swap 512M / 2G
 
 Disk      59%          free 410G of 460G
-                       read 12.3M/s   write 4.8M/s
+                       read collecting   write collecting
 
 Network                up 1.2M/s
                        down 512K/s
+-------------------------------------------------
 ```
 
 V1 主要字段：
 
 | 区域 | 字段 | 来源 |
 | --- | --- | --- |
-| CPU | percent、load averages、logical cores | `SystemStatsSampler` |
-| Memory | used/total、pressure、compressed、cached、swap | `SystemStatsSampler` + macOS swap helper |
+| CPU | percent、logical cores、P/E cores（可用时） | `SystemStatsSampler` + macOS sysctl |
+| Memory | pressure 或 used percent、used/total、compressed、cached、swap | `SystemStatsSampler` + macOS swap helper |
 | Disk | used percent、free bytes、read/write instant I/O | `sysinfo::Disks` + macOS I/O Registry statistics |
 | Network | up/down rate | `SystemStatsSampler` |
 
@@ -110,6 +110,8 @@ struct TrayDashboardSnapshot {
     system_proxy_label: String,
     cpu_percent: f32,
     cpu_logical_cores: Option<usize>,
+    cpu_performance_cores: Option<usize>,
+    cpu_efficiency_cores: Option<usize>,
     load_one: f32,
     load_five: f32,
     load_fifteen: f32,
@@ -131,16 +133,19 @@ struct TrayDashboardSnapshot {
 }
 ```
 
-Disk read/write 通过 `ioreg -rc IOBlockStorageDriver -k Statistics -l` 读取 `Bytes (Read)` 和 `Bytes (Write)`，后台间隔采样后计算每秒速率。失败时显示 `--`，不阻塞菜单打开。
+CPU P/E core 分布通过 `hw.perflevel0.logicalcpu` 与 `hw.perflevel1.logicalcpu` 读取；不可用时降级为 `logical cores N`。CPU 区域不展示 load average，避免把 Unix 队列指标暴露给普通 Tray 视觉。CPU 温度没有稳定免权限系统 API，V1 不在默认刷新路径里采集，避免引入 sudo、SMC 私有接口或高成本 `powermetrics`。
+
+Disk read/write 生产路径直接通过 macOS IOKit 枚举 `IOBlockStorageDriver`，读取每个服务的 `Statistics` 属性中的累计 `Bytes (Read)` 和 `Bytes (Write)` counter，再用相邻 counter 的差值和真实 elapsed time 计算瞬时速率。`ioreg` 和 `iostat` 只作为人工验证参考，不进入 Tray 热路径。2026-06-22 在本机用连续 6 秒 `ioreg` 抽样和 `iostat -d -w 1 -c 5` 交叉验证：底层 counter 持续增长，`iostat` 同时能看到 `disk0` 等设备存在 MB/s 级吞吐，因此 UI 不能长期停留在空值。采样未完成时显示 `collecting`，采样完成且无 I/O 时显示 `0B/s`，不阻塞菜单打开。
 
 ## 采样策略
 
 - CPU/memory/network：沿用 `SYSTEM_STATS_POLL_INTERVAL = 1s`。
 - Disk usage：沿用现有较低频刷新。
-- Disk I/O：后台采样，不能在菜单点击路径同步执行；菜单关闭时不触发 `ioreg` read/write 采样，避免 idle 状态额外拉起查询进程。
-- 菜单打开时：直接使用最近 snapshot 渲染；采样为空时显示 `Collecting...`。
-- Dashboard header 首次 stats 到达时安装一次；安装后只有菜单处于打开状态才刷新 bitmap image。菜单关闭期间的 1s stats 更新只更新数据 snapshot，不做 680x328 bitmap 渲染和 `NSImage` 替换。
+- Disk I/O：不在后台持续高频采样，也不在 sampler 初始化时建立 baseline。只有原生菜单处于打开状态时才读取 IOKit counter；首次打开先建立 baseline，约 1 秒后的第二个样本产出 read/write 速率。菜单关闭后清空 Disk I/O baseline 和速率，避免旧值伪装成实时状态。
+- 菜单打开时：Disk I/O 首个样本前显示 `collecting`；第二个样本后显示 read/write 瞬时速率。
+- Dashboard header 首次 stats 到达时安装一次；安装后只有菜单处于打开状态才刷新 bitmap image。菜单关闭期间的 1s stats 更新只刷新菜单栏可见短标题；dashboard snapshot 保持不变，不做 680x352 bitmap 渲染、`NSImage` 替换或隐藏详细行 generation 更新。
 - Dashboard 复用菜单栏统计项已有 fontdue font 与 glyph cache，不再维护第二套字体和 glyph cache。
+- Remote group 接口失败后使用 60 秒退避，避免 group 服务暂时 502 时每个菜单数据轮询周期反复请求和刷 warning。
 
 ## 渲染策略
 
@@ -157,11 +162,11 @@ Disk read/write 通过 `ioreg -rc IOBlockStorageDriver -k Statistics -l` 读取 
 渲染元素：
 
 - 四个 metric row
-- 轻量分隔线
+- 轻量分隔线；Network 区域底部也保留一条分隔线，用于和普通菜单项区分。
 - 左侧统一展示指标名称和主数值。
 - 右侧用上下两行展示细节。
-- CPU 右侧展示 load averages 和 logical cores。
-- Memory 右侧展示 pressure、compressed、cached、swap。
+- CPU 右侧只展示 logical/P-E cores；不展示 load average 或 Bifrost 自身进程负载。
+- Memory 左侧主值展示 memory pressure 百分比，后面用小字号括号展示健康状态（如 `14% (Healthy)`、`64% (Pressure)`、`86% (Critical)`），无 pressure 时用 used percent 兜底；右侧第一行展示 used/total，第二行展示 compressed、cached、swap。
 - Disk 右侧展示 free/total、read/write。
 - Network 左侧只展示 `Network`，右侧第一行 upload、第二行 download。
 
@@ -186,13 +191,13 @@ macOS 下扩展 `NativeMenuState`：
 
 ## 性能验证
 
-本功能的 idle 性能目标是：不因为 dashboard header 引入每秒 bitmap 重绘、`NSImage` 替换或磁盘 I/O 子进程采样。2026-06-22 使用 debug build、临时 `BIFROST_DATA_DIR=/tmp/bifrost-tray-dashboard.A4Uf6G`、端口 `18890` 验证：
+本功能的 idle 性能目标是：不因为 dashboard header 引入每秒 bitmap 重绘或 `NSImage` 替换；Disk read/write 作为实时指标只在菜单打开期间做 1 秒级 IOKit counter 差分，菜单关闭后不持续高频采样。2026-06-22 使用 debug build、临时端口 `18890` 验证：
 
 - 优化前：tray helper idle 约 `3.3% CPU / 109456 KB RSS`。
-- 优化后：30 秒 idle 采样 `samples=30 avg_cpu=0.3067 min_cpu=0.0 max_cpu=1.5 avg_rss_kb=95015 min_rss_kb=92544 max_rss_kb=95664 rss_delta_kb=3120`。
-- 日志确认 `native tray dashboard header installed items=14 width=340 height=164` 只安装一次；未看到 stats 更新触发 `tray menu refreshed` 循环。
-
-剩余可优化项：group list 502 仍会按菜单数据轮询周期写 warning，这不是 dashboard bitmap 的成本，但后续可以增加失败退避，减少 idle 请求和日志噪声。
+- IOKit + 菜单打开期间采样后：30 秒 idle 采样 `samples=30 avg_cpu=1.0033 min_cpu=0.0 max_cpu=4.9 avg_rss_kb=103095 min_rss_kb=103008 max_rss_kb=103296 rss_delta_kb=288`。
+- 关闭菜单保留 dashboard snapshot + remote group 60 秒失败退避后：30 秒 idle 采样 `samples=30 avg_cpu=0.5733 min_cpu=0.0 max_cpu=7.3 avg_rss_kb=87370 min_rss_kb=85744 max_rss_kb=89392 rss_delta_kb=3648`。
+- 当前线上 release helper 对照：`target/release/bifrost __tray` RSS 约 `64208 KB`；debug build 有额外符号和调试开销，不直接作为发布包峰值。
+- 日志确认 `native tray dashboard header installed ...` 只安装一次；新增底部分隔线后 header 高度为 `176` points。group list 502 warning 从约每 6 秒一次降为约每 60 秒一次。
 
 ## 测试方案
 
@@ -200,8 +205,9 @@ macOS 下扩展 `NativeMenuState`：
 
 - 颜色阈值：CPU/memory/disk 三档状态。
 - pressure fallback：无 memory pressure 时使用 used/total。
-- 格式化：bytes、bytes/sec、swap unavailable、disk read/write fallback。
-- I/O Registry parser：累加非空块设备 read/write counter。
+- 格式化：CPU P/E core fallback、bytes、bytes/sec、swap unavailable、disk read/write collecting fallback。
+- Disk I/O counter delta：相邻累计 counter 按真实 elapsed time 计算 read/write bytes/sec，counter reset 时不产出负速率。
+- Disk I/O 采样生命周期：菜单关闭时不采集 read/write，菜单打开后按 1 秒 IOKit counter delta 产出速率。
 - bitmap：样例 snapshot 渲染后尺寸固定、非空 alpha、包含不同颜色像素。
 
 E2E：
@@ -222,20 +228,22 @@ human_tests：
   - 菜单能打开
   - 顶部 header 出现 CPU/Memory/Disk/Network 区域
   - Bifrost 运行状态和版本号出现在菜单底部
-  - 内存展示 pressure/compressed/cached/swap
-  - 磁盘展示 used/free/read/write
+  - CPU 不展示 Bifrost 自身进程负载或 load，只展示逻辑/P-E 核心信息
+  - 内存左侧展示 pressure 健康状态，右侧展示 used/total、compressed/cached/swap
+  - 磁盘展示 used/free/read/write，未完成采样时显示 collecting
+  - Network 下方有分隔线，把 header 和普通菜单项隔开
   - 菜单打开期间 stats 刷新不导致菜单自动关闭
 
 ## 风险与降级
 
 - AppKit custom view API 只在 macOS 启用，其他平台不受影响。
 - 若 `NSImageView` 或 bitmap image 创建失败，菜单退回原状。
-- 若 disk I/O helper 不可用，显示 `read -- / write --`。
+- 若 disk I/O IOKit counter 尚未形成两个样本，显示 `read collecting / write collecting`；若 IOKit 不可用，会保持 collecting 而不阻塞菜单。
 - 若 swap 信息不可用，显示 `swap --`。
 - 若 dashboard 造成菜单尺寸过大，可通过 `BIFROST_TRAY_DASHBOARD=0` 临时关闭。
 
 ## 后续扩展
 
-- 加 SMC 温度、风扇、电池。
+- 加 SMC 温度、GPU cores、风扇、电池；这些需要额外权限、私有接口或较高采样成本，后续单独评估。
 - 加 Bifrost QPS/active connections/history。
 - 升级为 `NSPopover`/`NSPanel`，支持 tab、hover、点击跳转。

@@ -507,6 +507,8 @@ dependencies = [
  "clap",
  "clap_complete",
  "colored",
+ "core-foundation 0.10.1",
+ "core-foundation-sys",
  "crossterm 0.28.1",
  "dialoguer",
  "dirs 5.0.1",

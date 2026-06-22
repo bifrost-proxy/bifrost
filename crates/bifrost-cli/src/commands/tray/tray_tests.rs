@@ -41,6 +41,39 @@
         }
     }
 
+    #[cfg(target_os = "macos")]
+    fn sample_dashboard_snapshot(runtime_label: &str) -> TrayDashboardSnapshot {
+        TrayDashboardSnapshot {
+            service_state: ServiceState::Running,
+            runtime_label: runtime_label.to_string(),
+            system_proxy_label: "System proxy Off".to_string(),
+            cpu_percent: 23.0,
+            cpu_logical_cores: Some(16),
+            cpu_performance_cores: Some(12),
+            cpu_efficiency_cores: Some(4),
+            load_one: 0.0,
+            load_five: 0.0,
+            load_fifteen: 0.0,
+            memory_used_bytes: 18 * 1024 * 1024 * 1024,
+            memory_total_bytes: 32 * 1024 * 1024 * 1024,
+            memory_pressure_percent: Some(14.0),
+            memory_compressed_bytes: 1024 * 1024 * 1024,
+            memory_cached_bytes: 4 * 1024 * 1024 * 1024,
+            swap_used_bytes: Some(0),
+            swap_total_bytes: Some(0),
+            disk_used_percent: Some(40.0),
+            disk_free_bytes: Some(500 * 1024 * 1024 * 1024),
+            disk_total_bytes: Some(1_000 * 1024 * 1024 * 1024),
+            disk_mount_label: Some("/".to_string()),
+            disk_total_bytes_per_sec: Some(0),
+            disk_read_bytes_per_sec: Some(0),
+            disk_write_bytes_per_sec: Some(0),
+            network_up_bytes_per_sec: Some(0),
+            network_down_bytes_per_sec: Some(0),
+            network_interface_label: Some("en0".to_string()),
+        }
+    }
+
     fn find_menu_item<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a MenuItemDef> {
         entries.iter().find_map(|entry| match entry {
             MenuEntry::Item(item) if item.id == id => Some(item),
@@ -623,6 +656,65 @@
         assert!(should_refresh_dashboard(true, true, false, true));
         assert!(should_refresh_dashboard(true, false, true, true));
         assert!(!should_refresh_dashboard(true, false, false, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_system_stats_update_can_preserve_dashboard_snapshot() {
+        let original_dashboard = sample_dashboard_snapshot("127.0.0.1:8800");
+        let replacement_dashboard = sample_dashboard_snapshot("127.0.0.1:18890");
+        let mut snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            bin_available: true,
+            update_available: None,
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 20%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C20%".to_string(),
+            }),
+            dashboard: Some(original_dashboard.clone()),
+        };
+
+        let current_lines = snapshot.system_stats.clone();
+        assert!(!apply_system_stats_snapshot_update(
+            &mut snapshot,
+            current_lines,
+            DashboardSnapshotUpdate::Preserve,
+        ));
+        assert_eq!(snapshot.dashboard, Some(original_dashboard.clone()));
+
+        assert!(!apply_system_stats_snapshot_update(
+            &mut snapshot,
+            Some(SystemStatsMenuLines {
+                system: "System: CPU 21%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C20%".to_string(),
+            }),
+            DashboardSnapshotUpdate::Preserve,
+        ));
+        assert_eq!(snapshot.dashboard, Some(original_dashboard));
+
+        assert!(apply_system_stats_snapshot_update(
+            &mut snapshot,
+            Some(SystemStatsMenuLines {
+                system: "System: CPU 25%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C25%".to_string(),
+            }),
+            DashboardSnapshotUpdate::Preserve,
+        ));
+
+        let current_lines = snapshot.system_stats.clone();
+        assert!(apply_system_stats_snapshot_update(
+            &mut snapshot,
+            current_lines,
+            DashboardSnapshotUpdate::Set(Some(Box::new(replacement_dashboard.clone()))),
+        ));
+        assert_eq!(snapshot.dashboard, Some(replacement_dashboard));
     }
 
     #[test]
