@@ -34,7 +34,7 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 
 - Tray helper 在独立进程运行，即使 Bifrost 主服务繁忙、停止或 Admin API 无响应，也可以继续更新机器状态。
 - 采样线程每 1 秒刷新系统状态快照；CPU、内存最多每 2 秒刷新一次并复用最近值，磁盘按 30 秒窗口刷新。
-- macOS CPU 使用 Mach `host_statistics(HOST_CPU_LOAD_INFO)` 的 tick delta 计算，内存使用 `host_statistics64(HOST_VM_INFO64)` 与 `sysctl HW_MEMSIZE`，避免为菜单栏状态走较重的通用系统刷新路径。
+- macOS CPU 使用 Mach `host_statistics(HOST_CPU_LOAD_INFO)` 的 tick delta 计算；菜单栏 `MEM` 使用 `host_statistics64(HOST_VM_INFO64)` + `sysctl HW_MEMSIZE` 得到 `Memory Used` 风格内存负载：计入 anonymous/internal、wired 和 compressed memory，排除 file-backed/speculative/purgeable cache；菜单下拉补充 `kern.memorystatus_level` 换算的 pressure 诊断值，避免为菜单栏状态走较重的通用系统刷新路径。
 - macOS 网络接口计数使用 `getifaddrs` 读取 `AF_LINK` 的 `if_data.ifi_ibytes/ifi_obytes`，避免 `sysinfo::Networks::refresh()` 的额外列表刷新成本。
 - 磁盘百分比按当前 `data_dir` 所在挂载点计算，避免随便取第一个磁盘导致显示与用户实际数据目录无关。
 - 磁盘使用 `statvfs(mount_point)` 读取当前挂载点容量，不在周期路径刷新完整磁盘列表。
@@ -60,6 +60,7 @@ Admin API `/api/config/tray` 额外返回 `system_stats_supported`：
 刷新频率不做成用户可见配置，默认系统状态线程 1 秒、CPU/内存 2 秒、磁盘 30 秒、网卡列表 60 秒。理由：
 
 - 1 秒菜单状态刷新让上下行网速更接近系统监控工具；CPU/内存内部缓存按 2 秒刷新，磁盘容量变化和默认路由/网卡列表变化相对慢，分别按 30 秒和 60 秒刷新，避免频繁 I/O 和系统路由查询。
+- macOS 菜单栏 `MEM` 使用 Activity Monitor / iStat Menus 风格的 `Memory Used` 近似值：`internal - purgeable + wired + compressor`，即把 compressed memory 计入已用内存，同时排除 file-backed cache / speculative / purgeable 可回收缓存。下拉系统详情保留 `Pressure`、`Compressed`、`Cached` 明细；`Pressure` 只作为健康度诊断，不作为菜单栏主百分比。
 - 采样只在 tray helper 本地执行，不访问 Admin API，不阻塞主代理进程。
 - 当 `show_system_stats=false` 或所有 `system_stats_items` 子项均关闭时，线程只读取配置并清空菜单状态，不执行 CPU/内存/网络采样；当 Upload/Download 均关闭但 CPU/Memory/Disk 仍开启时，只刷新非网络指标并重置网络累计基线，避免把关闭期间的字节变化折算成当前速率。
 - 子项关闭时跳过对应重采样：CPU 关闭时不读取 CPU tick，Memory 关闭时不读取 VM 统计，Disk 关闭或未到 30 秒窗口时不执行 `statvfs`，Upload/Download 均关闭时不读取网络计数。
