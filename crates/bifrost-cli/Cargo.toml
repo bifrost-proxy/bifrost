@@ -102,17 +102,22 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "objc2-core-foundation",
     "NSAccessibilityProtocols",
+    "NSAppearance",
     "NSBitmapImageRep",
     "NSButton",
     "NSCell",
+    "NSControl",
     "NSGraphics",
     "NSImage",
+    "NSImageView",
     "NSImageRep",
     "NSMenu",
     "NSMenuItem",
+    "NSResponder",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSView",
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

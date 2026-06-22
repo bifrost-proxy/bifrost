@@ -113,22 +113,6 @@ pub fn build_menu(
                 _ => "Bifrost: Unknown".to_string(),
             });
 
-    items.push(item(MenuItemDef {
-        id: "_status".to_string(),
-        label: status_label,
-        enabled: false,
-        checked: false,
-        action: MenuItemAction::None,
-    }));
-
-    items.push(item(MenuItemDef {
-        id: "_version".to_string(),
-        label: format!("Version v{}", env!("CARGO_PKG_VERSION")),
-        enabled: false,
-        checked: false,
-        action: MenuItemAction::None,
-    }));
-
     if let Some(stats) = system_stats {
         items.push(item(MenuItemDef {
             id: "_system_stats".to_string(),
@@ -179,14 +163,6 @@ pub fn build_menu(
             enabled: is_running,
             checked: false,
             action: MenuItemAction::CopyText(rt.http_proxy_url()),
-        }));
-
-        items.push(item(MenuItemDef {
-            id: "copy_socks5_proxy".to_string(),
-            label: "Copy SOCKS5 Proxy".to_string(),
-            enabled: is_running,
-            checked: false,
-            action: MenuItemAction::CopyText(rt.socks5_proxy_url().unwrap_or_default()),
         }));
     }
 
@@ -278,6 +254,24 @@ pub fn build_menu(
         enabled: true,
         checked: false,
         action: MenuItemAction::QuitTray,
+    }));
+
+    items.push(separator("_sep_info"));
+
+    items.push(item(MenuItemDef {
+        id: "_status".to_string(),
+        label: status_label,
+        enabled: false,
+        checked: false,
+        action: MenuItemAction::None,
+    }));
+
+    items.push(item(MenuItemDef {
+        id: "_version".to_string(),
+        label: format!("Version v{}", env!("CARGO_PKG_VERSION")),
+        enabled: false,
+        checked: false,
+        action: MenuItemAction::None,
     }));
 
     items
@@ -1008,7 +1002,7 @@ mod tests {
     }
 
     #[test]
-    fn test_menu_unified_proxy_socks5_uses_main_port() {
+    fn test_menu_omits_low_frequency_copy_socks5_proxy_item() {
         let rt = RuntimeInfo {
             socks5_port: None,
             ..sample_runtime()
@@ -1028,14 +1022,7 @@ mod tests {
             false,
             None,
         );
-        let socks5 = find_item(&menu, "copy_socks5_proxy").unwrap();
-        assert!(socks5.enabled);
-        match &socks5.action {
-            MenuItemAction::CopyText(text) => {
-                assert_eq!(text, "socks5://127.0.0.1:8800");
-            }
-            other => panic!("unexpected action: {other:?}"),
-        }
+        assert!(find_item(&menu, "copy_socks5_proxy").is_none());
     }
 
     #[test]

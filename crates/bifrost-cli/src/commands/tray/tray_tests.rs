@@ -41,7 +41,6 @@
         }
     }
 
-    #[cfg(target_os = "macos")]
     fn find_menu_item<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a MenuItemDef> {
         entries.iter().find_map(|entry| match entry {
             MenuEntry::Item(item) if item.id == id => Some(item),
@@ -66,6 +65,7 @@
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
                 menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
+            dashboard: None,
         };
 
         assert_eq!(
@@ -188,6 +188,7 @@
             disk_used_percent: Some(65.0),
             network_down_bytes_per_sec: Some(2048),
             network_up_bytes_per_sec: Some(1024),
+            ..system_stats::SystemStatsSnapshot::default()
         };
 
         let cases = [
@@ -359,6 +360,7 @@
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
                 menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
+            dashboard: None,
         };
 
         let menu = build_menu_from_snapshot(
@@ -411,11 +413,8 @@
             false,
             None,
         );
-        let status = match &menu[0] {
-            menu::MenuEntry::Item(item) => item.label.as_str(),
-            menu::MenuEntry::Submenu(_) => panic!("expected status item"),
-        };
-        assert_eq!(status, "Bifrost: Running on 127.0.0.1:9900");
+        let status = find_menu_item(&menu, "_status").expect("status item");
+        assert_eq!(status.label, "Bifrost: Running on 127.0.0.1:9900");
     }
 
     #[test]
@@ -515,8 +514,9 @@
 
     #[test]
     fn test_recent_tray_interaction_defers_structural_replacement() {
-        assert!(!should_replace_native_menu(false, false, true));
-        assert!(should_replace_native_menu(false, false, false));
+        assert!(!should_replace_native_menu(false, false, true, false, true));
+        assert!(should_replace_native_menu(false, false, true, false, false));
+        assert!(!should_replace_native_menu(false, false, false, false, false));
     }
 
     #[test]
@@ -594,8 +594,8 @@
 
     #[test]
     fn test_explicit_reload_and_user_action_replace_native_menu() {
-        assert!(should_replace_native_menu(true, false, true));
-        assert!(should_replace_native_menu(false, true, true));
+        assert!(should_replace_native_menu(false, false, true, false, false));
+        assert!(should_replace_native_menu(false, false, false, true, false));
     }
 
     #[cfg(target_os = "macos")]
@@ -612,6 +612,17 @@
         state.mark_closed();
         assert!(!state.open.load(Ordering::Relaxed));
         assert_eq!(state.generation.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_dashboard_refresh_only_while_menu_is_open() {
+        assert!(should_refresh_dashboard(false, true, false, false));
+        assert!(!should_refresh_dashboard(false, true, false, true));
+        assert!(!should_refresh_dashboard(false, false, true, true));
+        assert!(should_refresh_dashboard(true, true, false, true));
+        assert!(should_refresh_dashboard(true, false, true, true));
+        assert!(!should_refresh_dashboard(true, false, false, true));
     }
 
     #[test]
@@ -734,11 +745,8 @@
             data_dir.to_string_lossy().as_ref(),
             false,
         );
-        let status = match &menu[0] {
-            menu::MenuEntry::Item(item) => item.label.as_str(),
-            menu::MenuEntry::Submenu(_) => panic!("expected status item"),
-        };
-        assert!(status.starts_with("Bifrost: Running on 127.0.0.1:"));
+        let status = find_menu_item(&menu, "_status").expect("status item");
+        assert!(status.label.starts_with("Bifrost: Running on 127.0.0.1:"));
     }
 
     #[test]
@@ -770,6 +778,8 @@
             update_available: None,
             #[cfg(target_os = "macos")]
             system_stats: None,
+            #[cfg(target_os = "macos")]
+            dashboard: None,
         };
         let menu_data = Arc::new(Mutex::new(snapshot));
         let generation = AtomicU64::new(0);

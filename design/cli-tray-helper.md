@@ -460,7 +460,6 @@ Open Traffic
 Open Rules
 Open Settings
 Copy HTTP Proxy
-Copy SOCKS5 Proxy
 Rules: <当前启用规则>
 Stop Bifrost
 System Proxy
@@ -480,7 +479,6 @@ Quit Tray
 - `Rules: ...`
 - `Open Settings`
 - `Copy HTTP Proxy`
-- `Copy SOCKS5 Proxy`
 - `System Proxy`
 - `Stop Bifrost`
 - `Open Logs`、`Quit Tray` 始终可用。
@@ -491,7 +489,7 @@ Quit Tray
 - `Open Rules`：打开 `admin_url + rules`。
 - `Open Settings`：打开 `admin_url + settings`。
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
-- `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`；统一代理模式下没有独立 `socks5_port` 时 fallback 到主代理端口，只在服务未运行或 SOCKS 未启用时置灰。
+- 默认菜单不展示 `Copy SOCKS5 Proxy`；如确实需要，可通过自定义菜单模板变量 `{socks5_proxy}` 生成自定义复制项。
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
