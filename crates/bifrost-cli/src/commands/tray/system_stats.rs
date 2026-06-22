@@ -156,6 +156,7 @@ struct MacCpuTicks {
 struct MacMemoryPageCounts {
     free: u64,
     speculative: u64,
+    active: u64,
     wired: u64,
     purgeable: u64,
     internal: u64,
@@ -564,6 +565,7 @@ fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
     let page_counts = MacMemoryPageCounts {
         free: info.free_count as u64,
         speculative: info.speculative_count as u64,
+        active: info.active_count as u64,
         wired: info.wire_count as u64,
         purgeable: info.purgeable_count as u64,
         internal: info.internal_page_count as u64,
@@ -574,12 +576,22 @@ fn mac_memory_used_bytes(total_bytes: u64) -> Option<u64> {
 
 #[cfg(target_os = "macos")]
 fn mac_memory_used_pages(counts: MacMemoryPageCounts, total_pages: u64) -> u64 {
-    let pressure_pages = counts
+    if counts.active > 0 {
+        let pressure_pages = counts
+            .active
+            .saturating_add(counts.wired)
+            .saturating_sub(counts.purgeable);
+        if pressure_pages > 0 {
+            return pressure_pages.min(total_pages);
+        }
+    }
+
+    let internal_pages = counts
         .internal
         .saturating_sub(counts.purgeable)
         .saturating_add(counts.wired);
-    if pressure_pages > 0 {
-        return pressure_pages.min(total_pages);
+    if internal_pages > 0 {
+        return internal_pages.min(total_pages);
     }
 
     total_pages.saturating_sub(counts.free.saturating_add(counts.speculative))
@@ -1045,6 +1057,22 @@ mod tests {
         let counts = MacMemoryPageCounts {
             free: 600,
             speculative: 100,
+            active: 1_100,
+            wired: 300,
+            purgeable: 200,
+            internal: 1_500,
+        };
+
+        assert_eq!(mac_memory_used_pages(counts, 4_000), 1_200);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_memory_used_pages_falls_back_to_internal_when_active_counts_are_empty() {
+        let counts = MacMemoryPageCounts {
+            free: 600,
+            speculative: 100,
+            active: 0,
             wired: 300,
             purgeable: 200,
             internal: 1_500,
@@ -1059,6 +1087,7 @@ mod tests {
         let counts = MacMemoryPageCounts {
             free: 600,
             speculative: 100,
+            active: 0,
             wired: 0,
             purgeable: 0,
             internal: 0,
