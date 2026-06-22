@@ -1091,6 +1091,40 @@
 - 第 3 步输出 HTTP echo、proxy echo、上游 Bifrost、入口 Bifrost ready；双 Bifrost 代理链路返回 2xx；下游代理鉴权返回 2xx，并断言 absolute-form URL 与 `Proxy-Authorization: Basic dXNlcjpwYXNz`；汇总 `Total: 11 / Passed: 11 / Failed: 0`。
 - 如果链路返回非 2xx，脚本输出状态码、响应头、响应体，以及 entry/upstream/mock 日志尾部，方便一次性定位本地下游不可用、端口碰撞或产品回归。
 
+### TC-CS-45: SOCKS5 TLS routing exceptions 下游代理端口不撞 SOCKS5 端口
+
+**背景**：GitHub Actions Linux shell E2E run `27924364360` 中 `test_socks5_tls_routing_exceptions.sh` 失败，runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本内旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下同样算成 `19379`，导致下游代理与独立 SOCKS5 listener 端口碰撞并报 `Address already in use`。脚本必须优先消费外层 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，而不是用 PID 派生端口。
+
+**操作步骤**：
+1. 语法检查脚本：
+   ```bash
+   bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh
+   ```
+2. 静态确认 `DOWNSTREAM_PROXY_PORT` 默认值优先使用 runner 注入端口：
+   ```bash
+   rg -n 'DOWNSTREAM_PROXY_PORT=.*ECHO_PROXY_PORT.*MOCK_ECHO_PROXY_PORT.*PROXY_PORT \\+ 7' \
+     e2e-tests/tests/test_socks5_tls_routing_exceptions.sh
+   ```
+3. 使用 CI 失败时的相邻端口形态真实执行脚本：
+   ```bash
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   SKIP_BUILD=true \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   PROXY_PORT=19373 \
+   SOCKS5_PORT=19379 \
+   ECHO_PROXY_PORT=19380 \
+   MOCK_ECHO_PROXY_PORT=19380 \
+   ECHO_HTTP_PORT=19374 \
+   ECHO_HTTPS_PORT=19375 \
+   bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh
+   ```
+
+**预期结果**：
+- 第 1 步语法检查通过。
+- 第 2 步能定位到 `DOWNSTREAM_PROXY_PORT` 的默认值链路。
+- 第 3 步上游 Bifrost 使用 `PROXY_PORT=19373` 和 `SOCKS5_PORT=19379`；下游 Bifrost 使用 `ECHO_PROXY_PORT=19380`，不再尝试绑定 `19379`；脚本所有断言通过并清理临时进程。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1132,6 +1166,7 @@
 | TC-CS-42 | 通过 | 2026-06-13 本轮执行：Ruby YAML 解析 `.github/workflows/ci.yml` 输出 `shell layout ok`，确认 Linux shell E2E 没有 matrix/shard 环境变量且 job 名称为 `E2E Shell (Linux)`，macOS shell E2E 为 2 分片；静态执行 Linux 单 job `--list-shell-tests` 得到 133 个 CI shell tests；静态执行 `--list-shell-tests --shard N/2` 得到 `1/2 67`、`2/2 66`，总计 133 个 CI shell tests。全部命令只列测试或解析 YAML，未启动 Bifrost、未使用 9900、未修改系统代理。 |
 | TC-CS-43 | 通过 | 2026-06-13 本轮执行：静态执行 CI shell 列表排除检查，输出 `skipped test_agent_codex_parity_contracts.sh`、`skipped test_im_agent_markdown_image_reply.sh`、`skipped test_im_agent_streaming_progress_card.sh`、`skipped test_utf8_safe_preview_e2e.sh`；确认这些纯 cargo contract 脚本不再进入 CI shell E2E。该回归只列测试，不启动 Bifrost、未使用 9900、未修改系统代理。 |
 | TC-CS-44 | 通过 | 2026-06-17 本轮执行：GitHub Actions `CI` run `27676908356` 仅失败 `E2E Shell (aarch64-apple-darwin, shard 1/2)`，失败套件为 `shell:test_proxy_chain_auth_e2e.sh`，断言 `双代理链路请求成功` 期望 2xx 实际 502；同 run 中 `test_sync_login_direct_e2e.sh`、coverage 90% gate、Unit & Integration、Linux E2E、Windows/macOS/Linux build 与其它 E2E rules/runner 均通过。确认该 proxy chain 用例使用本机 `127.0.0.1` mock，不访问公网；随后把端口从 `$$ % 200` 固定小窗口改为 `pick_available_base_port` 动态连续端口段，并在非 2xx 时输出响应与 entry/upstream/mock 日志。执行 `bash -n e2e-tests/tests/test_proxy_chain_auth_e2e.sh` 通过；执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，输出 HTTP echo、proxy echo、Bifrost ready，双代理链路与下游代理鉴权全部通过，汇总 `Total: 11 / Passed: 11 / Failed: 0`，实际端口为动态非 9900 端口。 |
+| TC-CS-45 | 通过 | 2026-06-22 本轮执行：GitHub Actions `CI` run `27924364360` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_socks5_tls_routing_exceptions.sh`，失败原因为 `Network error: Failed to bind to 0.0.0.0:19379: Address already in use`。完整 job log 显示 runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下也算成 `19379`，下游代理和独立 SOCKS5 listener 端口碰撞。修复为 `DOWNSTREAM_PROXY_PORT` 优先使用 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，再 fallback 到 `PROXY_PORT+7`。执行 `bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 通过；执行静态 `rg` 确认默认值链路存在；随后使用 `PROXY_PORT=19373 SOCKS5_PORT=19379 ECHO_PROXY_PORT=19380 MOCK_ECHO_PROXY_PORT=19380 ECHO_HTTP_PORT=19374 ECHO_HTTPS_PORT=19375 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 真实复现 CI 端口形态，脚本完成所有 routing exception 断言并退出 0，全程未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 
