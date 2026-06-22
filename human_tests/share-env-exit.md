@@ -44,7 +44,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 **预期结果**：
 - 第一次访问 share URL 返回 clean URL redirect，业务 URL 不再包含 `__bifrost_rule`。
 - 页面胶囊不显示被裁剪的 `Share` 文字角标，B 胶囊边框有呼吸光晕，右上角显示红色圆点。
-- hover panel 中显示短文案 `Share mode active`。
+- hover panel 中显示短文案 `Share preview active`。
 - 同一行存在 `Exit` 按钮。
 - `GET /_bifrost/api/rules/share-env/status` 返回 `active=true` 和 `requested_name=share-source`。
 
@@ -99,4 +99,4 @@ rm -rf ./.bifrost-human-share-env
 ## 执行记录
 
 - 2026-06-22：已通过 `e2e-tests/tests/test_badge_injection_e2e.sh` 的 Share 环境 case 自动执行 TC-SEE-01 和 TC-SEE-02 的 API、代理、badge 注入内容与规则恢复断言。
-- 2026-06-22：已使用 Playwright 真实浏览器通过 Bifrost 代理打开 share URL，确认 `#__bifrost_badge__` 立即带 `--share` 状态、右上角红点和呼吸光晕，hover panel 显示 `Share mode active` 和 `Exit`；点击 Exit 后验证 `share-env/status.active=false`、`before-enabled.enabled=true`、`share/share-source.enabled=false`。
+- 2026-06-22：已使用 Playwright 真实浏览器通过 Bifrost 代理打开 share URL，确认 `#__bifrost_badge__` 立即带 `--share` 状态、右上角红点和呼吸光晕，hover panel 显示 `Share preview active` 和 `Exit`；点击 Exit 后验证 `share-env/status.active=false`、`before-enabled.enabled=true`、`share/share-source.enabled=false`。

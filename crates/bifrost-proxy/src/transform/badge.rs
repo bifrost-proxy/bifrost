@@ -88,19 +88,25 @@ const BADGE_STYLE: &str = concat!(
     "padding:24px 16px;text-align:center;font-size:13px;color:#999;",
     "}",
     "#__bb_panel__ .__bb_share_env{",
-    "padding:10px 16px;border-bottom:1px solid #f0f0f0;",
-    "display:flex;align-items:center;gap:8px;font-size:13px;color:#333;",
+    "margin:10px 12px;padding:8px 10px 8px 12px;border-left:3px solid #6CBFCF;",
+    "border-radius:6px;background:rgba(108,191,207,.10);",
+    "display:flex;align-items:center;gap:8px;font-size:13px;color:#238C9C;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_status_dot{",
+    "width:7px;height:7px;border-radius:9999px;background:#ff4d4f;",
+    "box-shadow:0 0 0 2px rgba(255,77,79,.12);flex-shrink:0;",
     "}",
     "#__bb_panel__ .__bb_share_env .__bb_share_name{",
     "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+    "font-size:13px;font-weight:600;color:#238C9C;",
     "}",
     "#__bb_panel__ .__bb_share_env .__bb_exit{",
-    "border:1px solid rgba(250,173,20,.55);border-radius:4px;",
-    "background:#fff7e6;color:#ad6800;font-size:11px;font-weight:700;",
+    "border:1px solid rgba(47,154,174,.35);border-radius:4px;",
+    "background:rgba(255,255,255,.72);color:#238C9C;font-size:11px;font-weight:700;",
     "height:22px;padding:0 8px;line-height:20px;cursor:pointer;",
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
     "}",
-    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:#fff1b8;border-color:#faad14}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:rgba(108,191,207,.16);border-color:rgba(47,154,174,.55)}",
     "#__bb_panel__ .__bb_grp{",
     "padding:8px 16px 4px;font-size:10px;font-weight:600;color:#999;",
     "display:flex;align-items:center;gap:4px;",
@@ -141,9 +147,10 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_sec{color:#666}",
     "#__bb_panel__ .__bb_ri .__bb_rc{color:#666}",
     "#__bb_panel__ .__bb_empty{color:#666}",
-    "#__bb_panel__ .__bb_share_env{border-bottom-color:#333;color:#e0e0e0}",
-    "#__bb_panel__ .__bb_share_env .__bb_exit{background:#2a2418;color:#ffd666;border-color:rgba(250,173,20,.45)}",
-    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:#332b18;border-color:#faad14}",
+    "#__bb_panel__ .__bb_share_env{background:rgba(108,191,207,.14);color:#7BEBC0}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_name{color:#7BEBC0}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit{background:rgba(31,31,31,.58);color:#7BEBC0;border-color:rgba(123,235,192,.35)}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:rgba(123,235,192,.12);border-color:rgba(123,235,192,.58)}",
     "#__bb_panel__ .__bb_grp{color:#666}",
     "#__bb_panel__ .__bb_grp svg{fill:#666}",
     "#__bb_panel__ .__bb_mg{border-top-color:#333}",
@@ -203,7 +210,7 @@ fn badge_script(rules_json: &str) -> String {
             "var active=shareActive();",
             "syncShareState();",
             "var html='<div class=\"__bb_ph\">'+BOLT+' Active Rules<span style=\"margin-left:auto;font-size:12px;font-weight:500;color:#52c41a\">'+rules.length+' active</span></div>';",
-            "if(active){{html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_name\">Share mode active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
+            "if(active){{html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_status_dot\"></span><span class=\"__bb_share_name\">Share preview active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
             "html+='<div class=\"__bb_pl\">';",
             "if(rules.length===0){{html+='<div class=\"__bb_empty\">No active rules</div>'}}",
             "else{{",
@@ -552,7 +559,8 @@ mod tests {
         assert!(snippet.contains("--share"));
         assert!(snippet.contains("syncShareState();"));
         assert!(snippet.contains("function shareActive()"));
-        assert!(snippet.contains("Share mode active"));
+        assert!(snippet.contains("__bb_share_status_dot"));
+        assert!(snippet.contains("Share preview active"));
         assert!(snippet.contains("__bb_exit"));
         assert!(snippet.contains("/rules/share-env/exit"));
         assert!(snippet.contains("mode:'no-cors'"));
