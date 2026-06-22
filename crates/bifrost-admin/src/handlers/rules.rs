@@ -204,7 +204,7 @@ pub async fn handle_rules(
         }
     } else if path == "/api/rules/share-env/exit" {
         match method {
-            Method::POST => exit_share_env(state, push_manager).await,
+            Method::POST => exit_share_env(req, state, push_manager).await,
             _ => method_not_allowed(),
         }
     } else if path == "/api/rules/active-summary" {
@@ -280,9 +280,32 @@ async fn share_env_status(state: SharedAdminState) -> Response<BoxBody> {
 }
 
 async fn exit_share_env(
+    req: Request<Incoming>,
     state: SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    let provided_token = req
+        .uri()
+        .query()
+        .and_then(|query| serde_urlencoded::from_str::<HashMap<String, String>>(query).ok())
+        .and_then(|mut query| query.remove("token"))
+        .unwrap_or_default();
+    match state.rules_storage.load_share_env_state() {
+        Ok(Some(share_state))
+            if share_state.active
+                && (provided_token.is_empty() || provided_token != share_state.exit_token) =>
+        {
+            return error_response(StatusCode::FORBIDDEN, "Invalid share env exit token");
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load share env state: {}", error),
+            );
+        }
+    }
+
     match exit_rule_share_env(state, push_manager.as_ref()).await {
         Ok(outcome) => json_response(&outcome),
         Err(error) => error_response(

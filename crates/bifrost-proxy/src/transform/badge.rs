@@ -179,6 +179,7 @@ fn badge_script(rules_json: &str) -> String {
             "var B=document.getElementById('__bifrost_badge__');",
             "var P=document.getElementById('__bb_panel__');",
             "if(!B||!P)return;",
+            "var S=document.currentScript;",
             "var D={rules_json};",
             "var hideTimer=null;",
             "var base=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/rules':'';",
@@ -194,7 +195,7 @@ fn badge_script(rules_json: &str) -> String {
             "function fallbackCopy(text){{return new Promise(function(resolve,reject){{var t=document.createElement('textarea');var prev=document.activeElement;var ok=false;var copied=false;function onCopy(e){{if(e.clipboardData){{e.clipboardData.setData('text/plain',text);e.preventDefault();copied=true}}}}t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.top='0';t.style.left='0';t.style.width='1px';t.style.height='1px';t.style.opacity='0';document.body.appendChild(t);document.addEventListener('copy',onCopy,true);try{{t.focus();t.select();t.setSelectionRange(0,text.length);ok=document.execCommand('copy')}}catch(e){{ok=false}}document.removeEventListener('copy',onCopy,true);document.body.removeChild(t);try{{if(prev&&prev.focus)prev.focus()}}catch(e){{}}ok&&copied?resolve():reject(new Error('copy failed'))}})}}",
             "function copyText(text){{if(navigator.clipboard&&window.isSecureContext&&navigator.clipboard.writeText){{return navigator.clipboard.writeText(text).catch(function(){{return fallbackCopy(text)}})}}return fallbackCopy(text)}}",
             "function copyMerged(btn){{copyText(String(D.merged_content||'').trim()).then(function(){{setCopyState(btn,'Copied');setTimeout(function(){{setCopyState(btn,'Copy')}},1200)}}).catch(function(){{setCopyState(btn,'Failed');setTimeout(function(){{setCopyState(btn,'Copy')}},1600)}})}}",
-            "function exitShare(btn){{if(!apiBase)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Exiting';function done(){{btn.textContent='Exited';setTimeout(function(){{location.reload()}},250)}}function fail(){{btn.disabled=false;btn.textContent='Failed';setTimeout(function(){{btn.textContent=old}},1400)}}fetch(apiBase+'/rules/share-env/exit',{{method:'POST',mode:'cors',credentials:'omit'}}).then(function(r){{if(!r.ok)throw new Error('exit failed');return r.text()}}).then(done).catch(function(){{fetch(apiBase+'/rules/share-env/exit',{{method:'POST',mode:'no-cors',credentials:'omit'}}).then(done).catch(fail)}})}}",
+            "function exitShare(btn,ev){{if(!apiBase||!ev||ev.isTrusted===false)return;var token=(D.share_env&&D.share_env.exit_token)||'';if(!token)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Exiting';function done(){{btn.textContent='Exited';setTimeout(function(){{location.reload()}},250)}}function fail(){{btn.disabled=false;btn.textContent='Failed';setTimeout(function(){{btn.textContent=old}},1400)}}fetch(apiBase+'/rules/share-env/exit?token='+encodeURIComponent(token),{{method:'POST',mode:'cors',credentials:'omit'}}).then(function(r){{if(!r.ok)throw new Error('exit failed');return r.json()}}).then(function(data){{if(!data||data.was_active!==true)throw new Error('exit not active');done()}}).catch(fail)}}",
             "function ruleRow(r){{",
             "var href='';",
             "if(base){{",
@@ -236,7 +237,7 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "P.innerHTML=html;",
             "Array.prototype.forEach.call(P.querySelectorAll('.__bb_copy'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();copyMerged(btn)}}}});",
-            "Array.prototype.forEach.call(P.querySelectorAll('.__bb_exit'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();exitShare(btn)}}}});",
+            "Array.prototype.forEach.call(P.querySelectorAll('.__bb_exit'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();exitShare(btn,ev)}}}});",
             "}}",
             "B.onmouseenter=show;",
             "B.onmouseleave=hide;",
@@ -244,6 +245,7 @@ fn badge_script(rules_json: &str) -> String {
             "P.onmouseleave=hide;",
             "B.onclick=function(){{B.style.display='none';P.classList.remove('--visible')}};",
             "syncShareState();",
+            "if(S&&S.parentNode)S.parentNode.removeChild(S);",
             "}})();",
             "</script>",
         ),
@@ -386,7 +388,7 @@ mod tests {
 
     const EMPTY_RULES: &str = r#"{"rules":[],"merged_content":"","admin_port":8800}"#;
     const SAMPLE_RULES: &str = r#"{"rules":[{"name":"my-rule","rule_count":3,"group_id":null,"group_name":null}],"merged_content":"example.com mock 200","admin_port":8800}"#;
-    const SHARE_RULES: &str = r#"{"rules":[{"name":"share/demo","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"demo.example.com statusCode://204","admin_port":8800,"share_env":{"active":true,"imported_rule_name":"share/demo","requested_name":"demo","content_hash":"abc","enabled_rule_names":["before"],"entered_at":"2026-06-22T00:00:00Z"}}"#;
+    const SHARE_RULES: &str = r#"{"rules":[{"name":"share/demo","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"demo.example.com statusCode://204","admin_port":8800,"share_env":{"active":true,"imported_rule_name":"share/demo","requested_name":"demo","content_hash":"abc","enabled_rule_names":["before"],"entered_at":"2026-06-22T00:00:00Z","exit_token":"exit-token"}}"#;
 
     #[test]
     fn test_inject_badge_before_body_end() {
@@ -561,10 +563,15 @@ mod tests {
         assert!(snippet.contains("function shareActive()"));
         assert!(snippet.contains("__bb_share_status_dot"));
         assert!(snippet.contains("Share preview active"));
+        assert!(snippet.contains("exit_token"));
+        assert!(snippet.contains("ev.isTrusted"));
+        assert!(snippet.contains("document.currentScript"));
+        assert!(snippet.contains("removeChild(S)"));
         assert!(snippet.contains("__bb_exit"));
         assert!(snippet.contains("/rules/share-env/exit"));
-        assert!(snippet.contains("mode:'no-cors'"));
-        assert!(snippet.contains("exitShare(btn)"));
+        assert!(snippet.contains("encodeURIComponent(token)"));
+        assert!(!snippet.contains("mode:'no-cors'"));
+        assert!(snippet.contains("exitShare(btn,ev)"));
         assert!(snippet.contains("location.reload()"));
     }
 

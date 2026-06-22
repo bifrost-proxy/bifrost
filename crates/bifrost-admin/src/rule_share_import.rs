@@ -198,6 +198,7 @@ fn ensure_share_env_state(
         content_hash: content_hash.to_string(),
         enabled_rule_names: pre_share_enabled_rules.to_vec(),
         entered_at: chrono::Utc::now().to_rfc3339(),
+        exit_token: uuid::Uuid::new_v4().to_string(),
     };
     state.rules_storage.save_share_env_state(&share_state)
 }

@@ -6,13 +6,15 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 
 ## 实现逻辑
 
-- `RulesStorage` 在 rules 目录下维护 `.share_env_state.json`，记录 `active`、导入的规则名、原始分享名、内容 hash、进入前启用的 My Rules 列表和进入时间。
+- `RulesStorage` 在 rules 目录下维护 `.share_env_state.json`，记录 `active`、导入的规则名、原始分享名、内容 hash、进入前启用的 My Rules 列表、进入时间和 share exit token。
 - `import_rule_share_payload` 在第一次进入 Share 环境时保存当前 enabled My Rules 快照；如果已经处于 active Share 环境，继续导入其它 share 链接时不覆盖原始快照。
 - Share 导入仍保持原有行为：目标分享规则启用，其它 My Rules 禁用，Group 规则不参与第一版。
 - `POST /_bifrost/api/rules/share-env/exit` 按快照恢复 My Rules enabled 状态，清除 `.share_env_state.json`，并复用 rules changed 通知链路刷新 resolver 和 badge cache。
 - `GET /_bifrost/api/rules/share-env/status` 返回当前 Share 环境状态，便于 UI、E2E 和真实场景验证。
-- 注入页面的 Bifrost badge JSON 增加 `share_env` 字段；当 `share_env.active=true` 时，B 胶囊立即进入 Share 视觉状态：边框呼吸光晕、右上角红点，hover panel 中展示短文案 `Share preview active` 和 `Exit` 按钮。
-- Exit 按钮优先以 CORS POST 调用本地 admin API；业务页面跨域限制导致 CORS 请求失败时，降级为 `no-cors` POST 触发退出，成功后刷新当前页面，让后续请求使用恢复后的规则状态。
+- 注入页面的 Bifrost badge JSON 增加 `share_env` 字段；当 `share_env.active=true` 时，B 胶囊立即进入 Share 视觉状态：边框呼吸光晕、右上角红点，hover panel 中展示短文案 `Share preview active` 和 `Exit` 按钮，并携带本次 Share 环境专属 `exit_token`。
+- Exit 按钮仅在真实用户点击事件中触发，以 CORS POST 调用本地 admin API 并携带 `exit_token`；后端校验 token 后才恢复规则。请求成功且响应 `was_active=true` 后刷新当前页面，失败时保留按钮并显示失败状态，避免把发出请求误判为成功。
+- `/api/rules/share-env/exit` 为注入页面提供跨域 CORS 特例，但状态变更必须通过 token 校验；无 token 或 token 不匹配返回 403。
+- 注入脚本执行后移除自身 `<script>` 节点，避免 `exit_token` 长期保留在页面 DOM 文本中；token 后续只存在于 badge 闭包里。
 
 ## 依赖项
 
@@ -28,15 +30,16 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 - `bifrost-storage`：`test_share_env_state_roundtrip_and_clear` 验证 Share 状态文件保存、读取和清理。
 - `bifrost-admin`：`import_stashes_pre_share_enabled_rules_once_and_exit_restores` 验证第一次 Share 导入保存快照、第二次 Share 不覆盖快照、退出恢复原 enabled 集合。
 - `bifrost-admin`：`exit_share_env_without_state_is_noop` 验证无 Share 状态时退出是幂等 no-op。
-- `bifrost-proxy`：`test_badge_share_env_badge_and_exit_button_present` 验证注入片段包含 Share 红点、呼吸光晕、初始化 Share 状态、`Share preview active` 行、Exit 按钮和退出 API 的 `no-cors` 兜底。
+- `bifrost-proxy`：`test_badge_share_env_badge_and_exit_button_present` 验证注入片段包含 Share 红点、呼吸光晕、初始化 Share 状态、`Share preview active` 行、Exit 按钮、真实点击限制、exit token 和无 `no-cors` 盲成功兜底。
 
 ### E2E 测试
 
 - `e2e-tests/tests/test_badge_injection_e2e.sh`
   - 创建 `before-enabled`、`before-disabled`、`share-source` 三条 My Rules。
   - 通过真实代理访问包含 `__bifrost_rule` 的分享 URL，断言 GET 重定向到 clean URL。
-  - 断言 Share 状态 API active，注入页面包含 Share 红点、呼吸光晕、`Share preview active` 和退出 API。
-  - 调用退出 API 后断言 `before-enabled` 恢复 enabled，`before-disabled` 保持 disabled，导入的 `share/share-source` 被 disabled。
+  - 断言 Share 状态 API active，注入页面包含 Share 红点、呼吸光晕、`Share preview active`、exit token 和退出 API。
+  - 断言无效 token 调用退出 API 返回 403 且 Share 环境仍 active。
+  - 携带正确 token 调用退出 API 后断言 `before-enabled` 恢复 enabled，`before-disabled` 保持 disabled，导入的 `share/share-source` 被 disabled。
 
 ### 真实场景测试
 

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{body::Incoming, header::HeaderValue, Method, Request, Response, StatusCode};
 use tracing::debug;
 
 use crate::cors::apply_cors_headers;
@@ -65,6 +65,25 @@ fn query_token(query: Option<&str>) -> Option<String> {
         .filter(|token| !token.trim().is_empty())
 }
 
+fn apply_share_env_exit_cors(resp: &mut Response<BoxBody>, origin: Option<&str>) {
+    let headers = resp.headers_mut();
+    headers.insert(
+        "Access-Control-Allow-Origin",
+        origin
+            .and_then(|origin| HeaderValue::from_str(origin).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("*")),
+    );
+    headers.insert("Vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "Access-Control-Allow-Headers",
+        HeaderValue::from_static("Content-Type"),
+    );
+}
+
 pub struct AdminRouter;
 
 impl AdminRouter {
@@ -89,7 +108,11 @@ impl AdminRouter {
 
         if req.method() == Method::OPTIONS {
             let mut resp = cors_preflight();
-            apply_cors_headers(&mut resp, origin.as_deref());
+            if admin_path == "/api/rules/share-env/exit" {
+                apply_share_env_exit_cors(&mut resp, origin.as_deref());
+            } else {
+                apply_cors_headers(&mut resp, origin.as_deref());
+            }
             return resp;
         }
 
@@ -114,7 +137,11 @@ impl AdminRouter {
             serve_static_file(&admin_path, req.headers())
         };
 
-        apply_cors_headers(&mut resp, origin.as_deref());
+        if admin_path == "/api/rules/share-env/exit" {
+            apply_share_env_exit_cors(&mut resp, origin.as_deref());
+        } else {
+            apply_cors_headers(&mut resp, origin.as_deref());
+        }
         resp
     }
 

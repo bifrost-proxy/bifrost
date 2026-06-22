@@ -46,6 +46,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 - 页面胶囊不显示被裁剪的 `Share` 文字角标，B 胶囊边框有呼吸光晕，右上角显示红色圆点。
 - hover panel 中显示短文案 `Share preview active`。
 - 同一行存在 `Exit` 按钮。
+- 注入数据中包含 `exit_token`，且退出脚本不包含 `mode:'no-cors'`。
 - `GET /_bifrost/api/rules/share-env/status` 返回 `active=true` 和 `requested_name=share-source`。
 
 ### TC-SEE-02：退出 Share 环境后恢复进入前启用规则
@@ -53,7 +54,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 **操作步骤**：
 1. 在 TC-SEE-01 的 Share 环境中点击 hover panel 的 `Exit` 按钮，或调用：
    ```bash
-   curl -X POST http://127.0.0.1:18880/_bifrost/api/rules/share-env/exit
+   curl -X POST "http://127.0.0.1:18880/_bifrost/api/rules/share-env/exit?token=<exit_token>"
    ```
 2. 查询三条规则状态：
    ```bash
@@ -68,6 +69,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 
 **预期结果**：
 - Exit API 返回 `was_active=true`。
+- 无效或缺失 `exit_token` 的 Exit API 返回 `403`，Share 环境保持 active。
 - `before-enabled.enabled=true`。
 - `before-disabled.enabled=false`。
 - `share/share-source.enabled=false`。

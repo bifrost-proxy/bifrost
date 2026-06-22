@@ -279,6 +279,8 @@ pub struct ShareEnvState {
     pub content_hash: String,
     pub enabled_rule_names: Vec<String>,
     pub entered_at: String,
+    #[serde(default)]
+    pub exit_token: String,
 }
 
 impl From<&RuleFile> for RuleSummary {
@@ -940,6 +942,7 @@ mod tests {
             content_hash: "hash".to_string(),
             enabled_rule_names: vec!["a".to_string(), "b".to_string()],
             entered_at: "2026-06-22T00:00:00Z".to_string(),
+            exit_token: "exit-token".to_string(),
         };
 
         storage.save_share_env_state(&state).unwrap();
