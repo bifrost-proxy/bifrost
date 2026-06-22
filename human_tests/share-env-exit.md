@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证通过 Rule Share Query 进入预览环境后，Bifrost 注入到业务页面的页面胶囊能明确提示当前处于 Share 环境，并提供退出入口。退出后必须恢复进入 Share 前启用的 My Rules 状态。
+验证通过 Rule Share Query 进入预览环境后，Bifrost 注入到业务页面的页面胶囊能用轻量视觉状态提示当前处于 Share 环境，并提供退出入口。退出后必须恢复进入 Share 前启用的 My Rules 状态。
 
 ## 前置条件
 
@@ -25,7 +25,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 
 ## 测试用例列表
 
-### TC-SEE-01：进入 Share 环境后页面胶囊展示 Share badge 和 Exit
+### TC-SEE-01：进入 Share 环境后页面胶囊展示 Share 视觉状态和 Exit
 
 **操作步骤**：
 1. 启动本地 HTML 服务：
@@ -43,8 +43,8 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 
 **预期结果**：
 - 第一次访问 share URL 返回 clean URL redirect，业务 URL 不再包含 `__bifrost_rule`。
-- 页面胶囊右下角显示 `Share` badge。
-- hover panel 中显示 `share-source share env active`。
+- 页面胶囊不显示被裁剪的 `Share` 文字角标，B 胶囊边框有呼吸光晕，右上角显示红色圆点。
+- hover panel 中显示短文案 `Share mode active`。
 - 同一行存在 `Exit` 按钮。
 - `GET /_bifrost/api/rules/share-env/status` 返回 `active=true` 和 `requested_name=share-source`。
 
@@ -72,7 +72,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 - `before-disabled.enabled=false`。
 - `share/share-source.enabled=false`。
 - Share 环境状态返回 `active=false`。
-- 后续通过代理刷新 clean URL 时，页面仍可显示普通 Bifrost badge，但不再处于 active Share 状态。
+- 后续通过代理刷新 clean URL 时，页面仍可显示普通 Bifrost badge，但不再处于 active Share 状态，不再显示红点和呼吸光晕。
 
 ### TC-SEE-03：连续打开多个 Share 链接不覆盖原始恢复快照
 
@@ -99,4 +99,4 @@ rm -rf ./.bifrost-human-share-env
 ## 执行记录
 
 - 2026-06-22：已通过 `e2e-tests/tests/test_badge_injection_e2e.sh` 的 Share 环境 case 自动执行 TC-SEE-01 和 TC-SEE-02 的 API、代理、badge 注入内容与规则恢复断言。
-- 2026-06-22：已使用 Playwright 真实浏览器通过 Bifrost 代理打开 share URL，hover `#__bifrost_badge__`，确认 panel 显示 `share-source share env active` 和 `Exit`，点击 Exit 后验证 `share-env/status.active=false`、`before-enabled.enabled=true`、`share/share-source.enabled=false`。
+- 2026-06-22：已使用 Playwright 真实浏览器通过 Bifrost 代理打开 share URL，确认 `#__bifrost_badge__` 立即带 `--share` 状态、右上角红点和呼吸光晕，hover panel 显示 `Share mode active` 和 `Exit`；点击 Exit 后验证 `share-env/status.active=false`、`before-enabled.enabled=true`、`share/share-source.enabled=false`。

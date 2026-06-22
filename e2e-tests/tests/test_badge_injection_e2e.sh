@@ -382,9 +382,13 @@ assert_share_env_exit_restores_rules() {
 
   fetch_via_proxy "$clean_url"
   assert_status "200" "$HTTP_STATUS" "Clean page request should succeed after share import" || return 1
-  assert_body_contains "__bb_share_badge" "$HTTP_BODY" "Injected badge should include Share environment badge" || return 1
+  assert_body_contains "__bb_share_dot" "$HTTP_BODY" "Injected badge should include Share environment red dot" || return 1
+  assert_body_contains "__bb_share_pulse" "$HTTP_BODY" "Injected badge should include Share environment pulse glow" || return 1
+  assert_body_contains "syncShareState();" "$HTTP_BODY" "Injected badge should apply Share state before hover" || return 1
+  assert_body_contains "Share mode active" "$HTTP_BODY" "Injected badge panel should show concise Share mode text" || return 1
   assert_body_contains '"requested_name":"share-source"' "$HTTP_BODY" "Badge inline data should identify active share env" || return 1
   assert_body_contains "/rules/share-env/exit" "$HTTP_BODY" "Badge panel should include share exit API" || return 1
+  assert_body_contains "mode:'no-cors'" "$HTTP_BODY" "Badge exit should include no-cors fallback for cross-origin pages" || return 1
 
   local before_enabled
   before_enabled="$(rule_enabled_state "before-enabled")"

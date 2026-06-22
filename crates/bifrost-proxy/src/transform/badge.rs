@@ -178,6 +178,8 @@ fn badge_script(rules_json: &str) -> String {
             "var apiBase=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/api':'';",
             "var BOLT='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M560 192L256 576h208l-48 256 320-384H528l32-256z\" fill=\"currentColor\"/></svg>';",
             "var TEAM='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M824 512a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm-312-88a120 120 0 1 0 0-240 120 120 0 0 0 0 240zm-312 88a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm624 56c-46 0-86 26-106 64h-4c-24-48-62-86-108-110a184 184 0 0 0-104-32h-8a184 184 0 0 0-104 32c-46 24-84 62-108 110h-4a120 120 0 0 0-106-64c-66 0-120 54-120 120v64h248a248 248 0 0 0 8 24h-8v200h416V792h-8a248 248 0 0 0 8-24h248v-64c0-66-54-120-120-120z\" fill=\"currentColor\"/></svg>';",
+            "function shareActive(){{return!!(D.share_env&&D.share_env.active)}}",
+            "function syncShareState(){{if(shareActive())B.classList.add('--share');else B.classList.remove('--share')}}",
             "function show(){{clearTimeout(hideTimer);render();P.classList.add('--visible')}}",
             "function hide(){{hideTimer=setTimeout(function(){{P.classList.remove('--visible')}},150)}}",
             "function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML}}",
@@ -198,10 +200,10 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "function render(){{",
             "var rules=D.rules||[];",
-            "var share=D.share_env||{{active:false}};",
-            "if(share.active)B.classList.add('--share');else B.classList.remove('--share');",
+            "var active=shareActive();",
+            "syncShareState();",
             "var html='<div class=\"__bb_ph\">'+BOLT+' Active Rules<span style=\"margin-left:auto;font-size:12px;font-weight:500;color:#52c41a\">'+rules.length+' active</span></div>';",
-            "if(share.active){{html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_name\">Share mode active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
+            "if(active){{html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_name\">Share mode active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
             "html+='<div class=\"__bb_pl\">';",
             "if(rules.length===0){{html+='<div class=\"__bb_empty\">No active rules</div>'}}",
             "else{{",
@@ -234,6 +236,7 @@ fn badge_script(rules_json: &str) -> String {
             "P.onmouseenter=function(){{clearTimeout(hideTimer)}};",
             "P.onmouseleave=hide;",
             "B.onclick=function(){{B.style.display='none';P.classList.remove('--visible')}};",
+            "syncShareState();",
             "}})();",
             "</script>",
         ),
@@ -547,6 +550,8 @@ mod tests {
         assert!(snippet.contains("__bb_share_dot"));
         assert!(snippet.contains("__bb_share_pulse"));
         assert!(snippet.contains("--share"));
+        assert!(snippet.contains("syncShareState();"));
+        assert!(snippet.contains("function shareActive()"));
         assert!(snippet.contains("Share mode active"));
         assert!(snippet.contains("__bb_exit"));
         assert!(snippet.contains("/rules/share-env/exit"));
