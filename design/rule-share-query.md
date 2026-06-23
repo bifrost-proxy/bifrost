@@ -2,20 +2,21 @@
 
 ## 0. 已确认产品决策
 
-本功能第一版只做本地 My Rules 范围内的无损切换，不静默修改 Group 规则或远端同步规则状态。
+本功能第一版只做本地 My Rules 范围内的无损切换，不静默修改 Group 规则或远端同步规则状态。2026-06-23 安全修订后，代理入口只负责跳转到本机确认页；写规则必须由用户在确认页点击 Apply Rule 后触发。
 
 已确认决策：
 
 1. 分享 Query 参数名固定为 `__bifrost_rule`。
 2. 分享 payload 必须同时携带规则名称和规则内容。
-3. 导入成功后必须启用目标规则，并禁用其它 My Rules。
-4. `exclusive_scope` 第一版固定为 `my_rules`；`all` 不进入第一版实现。
-5. 同名同内容必须复用，避免每次刷新产生重复规则。
-6. 同名不同内容必须创建递增名称，例如 `name 2`、`name 3`。
-7. `GET` / `HEAD` 访问分享链接后必须重定向到 clean URL。
-8. clean URL 必须移除 `__bifrost_rule`，并保留其它业务 query 和 fragment。
-9. 导入成功后必须给用户可见提示，不能只写日志或只刷新规则列表。
-10. Web UI 右键 Share 和 CLI 生成链接必须使用同一套协议编码。
+3. 访问分享链接后必须先展示本机确认页，确认页必须展示规则名称、内容 hash、独占范围、返回目标和完整规则内容。
+4. 用户确认导入成功后必须启用目标规则，并禁用其它 My Rules。
+5. `exclusive_scope` 第一版固定为 `my_rules`；`all` 不进入第一版实现。
+6. 同名同内容必须复用，避免每次刷新产生重复规则。
+7. 同名不同内容必须创建递增名称，例如 `name 2`、`name 3`。
+8. 确认完成后必须重定向到 clean URL。
+9. clean URL 必须移除 `__bifrost_rule`，并保留其它业务 query 和 fragment。
+10. 导入成功后必须给用户可见提示，不能只写日志或只刷新规则列表。
+11. Web UI 右键 Share 和 CLI 生成链接必须使用同一套协议编码。
 
 第一版非目标：
 
@@ -23,7 +24,7 @@
 - 不修改 Group 规则 enabled 状态。
 - 不把分享规则导入到 Group。
 - 不支持 `exclusive_scope = all` 的行为，只保留 wire schema 扩展位。
-- 不支持 POST/PUT 等非幂等方法的重定向；这些方法只剥离私有 Query 后继续转发。
+- 不保留 POST/PUT 等非幂等原始方法；访问分享链接统一跳转确认页，确认后以普通页面跳转回 clean URL。
 
 ## 1. 用户目标验证清单
 
@@ -31,9 +32,10 @@
 
 - 代理能识别目标 URL 上的 `__bifrost_rule` Query。
 - payload 能还原出规则名称、规则内容、协议版本和内容 hash。
-- 首次访问分享链接后自动创建或复用 My Rule。
-- 导入成功后立即启用目标规则。
-- 导入成功后禁用其它 My Rules。
+- 首次访问分享链接后只展示确认页，不创建或启用规则。
+- 用户确认后创建或复用 My Rule。
+- 确认导入成功后立即启用目标规则。
+- 确认导入成功后禁用其它 My Rules。
 - 同名同内容不创建新规则。
 - 同名不同内容创建递增名称。
 - Web UI 规则列表右键支持 Share。
@@ -53,7 +55,7 @@
 - 使用真实 Bifrost 代理和临时数据目录访问分享链接。
 - 使用 CLI 生成链接，再由代理导入。
 - 使用 Web UI 右键 Share 生成并复制链接。
-- `GET` / `HEAD` 分享链接返回 clean URL 重定向。
+- 分享链接返回本机确认页重定向，确认成功后返回 clean URL。
 - 导入提示包含最终规则名和导入动作。
 - 重复访问同一分享链接不会增加规则数量。
 - 同名不同内容分享链接会创建递增规则名。
@@ -429,7 +431,7 @@ fn apply_exclusive_my_rules(storage: &RulesStorage, final_name: &str) -> Result<
 
 实际入口分为两处（具体见 `crates/bifrost-proxy/src/proxy/http/handler.rs` 与 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`）：
 
-- 普通 HTTP absolute-form：`handle_http_request` 在 resolver 匹配前调用 `handle_rule_share_query(req, ctx, admin_state, push_manager)` 返回 `RuleShareProxyAction::{None, Cleaned(url), Redirect(url)}`。
+- 普通 HTTP absolute-form：`handle_http_request` 在 resolver 匹配前调用 `handle_rule_share_query(req, ctx, admin_state, push_manager)` 返回 `RuleShareProxyAction::{None, Redirect(url)}`。
 - HTTPS TLS 解包后的 intercepted request：tunnel 模块调用 `handle_intercepted_rule_share_query(...)`，返回相同语义的 `InterceptedRuleShareAction`。
 
 伪代码（与实现一致）：
@@ -442,23 +444,19 @@ parts = extract_rule_share_query(raw_url)        # 失败 -> warn + None
 if parts.payload is None:
     return None
 if admin_state is Some:
-    import_rule_share_payload(admin_state, push_manager, parts.payload).await
-    # 成功 / 失败均只写日志，不再向上传播
-if method is GET or HEAD:
-    return Redirect(parts.clean_url)            # 上层映射到 302
-else:
-    apply_clean_url_to_request(req, parts.clean_url)
-    return Cleaned(parts.clean_url)             # resolver / 记录 URL 都改用 clean_url
+    confirm_url = "http://127.0.0.1:<admin_port>/_bifrost/share/rule?payload=...&target=<clean_url>"
+    return Redirect(confirm_url)                # 上层映射到 302
+return Redirect(parts.clean_url)                # admin 不可用时不写规则，只移除私有 query
 ```
 
 实现要求：
 
 - 处理发生在 `rules.resolve_with_context(...)` 前。
 - 需要同时覆盖普通 HTTP absolute-form 请求路径和 HTTPS TLS 解包后的 intercepted request 路径；HTTPS 场景中先基于 `https://<original_host><path_and_query>` 还原完整 URL，再提取 `__bifrost_rule`，避免分享 query 被后续普通规则命中并消费。
-- 成功导入后的 `GET` / `HEAD` 不继续转发原请求，固定返回 302 到 clean URL，保持浏览器普通导航行为。
-- 非 `GET` / `HEAD` 不重定向，避免改变请求方法和 body 语义；通过 `apply_clean_url_to_request` 重写 URI 后再继续转发，确保上游不会收到 `__bifrost_rule`。
-- 当前实现：即便 `import_rule_share_payload` 返回错误，proxy 层也只 warn 日志、不阻断请求；`GET` / `HEAD` 依然会被 302 到 clean URL。导入失败时尚未生成专门的 notification（planned, not yet shipped as of 2026-06-17 —— 失败目前只在 `bifrost_proxy::rule_share` 日志 target 里出现）。
-- proxy 层不直接拼写规则存储逻辑，只调用 admin import service `import_rule_share_payload`。
+- 代理层不直接调用 `import_rule_share_payload`，避免任意网页通过代理流量静默写入规则。
+- 确认页 GET 只解码并展示 payload；真正写入发生在 `POST /api/rules/share-confirm`。
+- `POST /api/rules/share-confirm` 复用 Admin API 浏览器写请求防护，浏览器上下文必须携带同源 CSRF token。
+- admin 不可用时，代理只重定向到 clean URL，不创建规则。
 
 ## 7. Admin API 设计
 

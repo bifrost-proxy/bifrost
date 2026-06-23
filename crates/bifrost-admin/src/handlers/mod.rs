@@ -32,6 +32,7 @@ pub mod remote_invoke;
 pub mod replay;
 mod replay_ws;
 pub mod room;
+pub mod rule_share_confirm;
 pub mod rules;
 pub mod scripts;
 pub mod search;
@@ -56,7 +57,8 @@ use hyper::{Response, StatusCode};
 use serde::Serialize;
 
 pub type BoxBody = http_body_util::combinators::BoxBody<Bytes, hyper::Error>;
-pub const ADMIN_CORS_ALLOW_HEADERS: &str = "Content-Type, Authorization, X-Client-Id";
+pub const ADMIN_CORS_ALLOW_HEADERS: &str =
+    "Content-Type, Authorization, X-Client-Id, X-Bifrost-CSRF";
 pub const PUBLIC_CORS_ALLOW_METHODS: &str = "GET, HEAD, OPTIONS";
 
 pub fn full_body(body: impl Into<Bytes>) -> BoxBody {

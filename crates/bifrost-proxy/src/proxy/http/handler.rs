@@ -5,12 +5,12 @@ use std::time::{Duration, Instant};
 
 use base64::Engine;
 use bifrost_admin::{
-    rule_share_import::import_rule_share_payload, AdminRouter, AdminState, RequestTiming,
-    SharedPushManager, TrafficRecord, TrafficType, ADMIN_PATH_PREFIX,
+    AdminRouter, AdminState, RequestTiming, SharedPushManager, TrafficRecord, TrafficType,
+    ADMIN_PATH_PREFIX,
 };
 use bifrost_core::{
     protocol::Protocol,
-    rule_share::{extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
+    rule_share::{encode_rule_share_payload, extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
     BifrostError, Result,
 };
 use bifrost_script::{RequestData, ResponseData};
@@ -20,7 +20,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1;
 use hyper::header::{HeaderName, HeaderValue, AUTHORIZATION, REFERER, USER_AGENT};
 use hyper::HeaderMap;
-use hyper::{Method, Request, Response, StatusCode, Uri};
+use hyper::{Request, Response, StatusCode, Uri};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -1378,16 +1378,14 @@ pub async fn handle_http_request(
         return handle_http_websocket(req, rules, ctx, admin_state, push_manager, unsafe_ssl).await;
     }
 
-    let rule_share_clean_url =
-        match handle_rule_share_query(&mut req, ctx, admin_state.as_ref(), push_manager.as_ref())
-            .await?
-        {
-            RuleShareProxyAction::None => None,
-            RuleShareProxyAction::Cleaned(clean_url) => Some(clean_url),
-            RuleShareProxyAction::Redirect(clean_url) => {
-                return Ok(build_redirect_response(302, &clean_url));
-            }
-        };
+    match handle_rule_share_query(&mut req, ctx, admin_state.as_ref(), push_manager.as_ref())
+        .await?
+    {
+        RuleShareProxyAction::None => {}
+        RuleShareProxyAction::Redirect(clean_url) => {
+            return Ok(build_redirect_response(302, &clean_url));
+        }
+    };
 
     let devtools_client_req_id_from_uri = take_devtools_client_req_id_from_uri(req.uri_mut());
     let devtools_client_req_id =
@@ -1395,9 +1393,7 @@ pub async fn handle_http_request(
     let uri = req.uri().clone();
     let method = req.method().to_string();
     let url = uri.to_string();
-    let record_url = if let Some(clean_url) = &rule_share_clean_url {
-        clean_url.clone()
-    } else if ctx.url.is_empty() {
+    let record_url = if ctx.url.is_empty() {
         url.clone()
     } else {
         ctx.url.clone()
@@ -1416,13 +1412,7 @@ pub async fn handle_http_request(
         .collect();
     let incoming_cookies: HashMap<String, String> = collect_all_cookies_from_headers(req.headers());
 
-    let rule_match_url = if let Some(clean_url) = &rule_share_clean_url {
-        clean_url.as_str()
-    } else if ctx.url.is_empty() {
-        &url
-    } else {
-        &ctx.url
-    };
+    let rule_match_url = if ctx.url.is_empty() { &url } else { &ctx.url };
     let resolved_rules = rules.resolve_with_context(
         rule_match_url,
         &method,
@@ -4017,7 +4007,6 @@ pub async fn handle_http_request(
 
 enum RuleShareProxyAction {
     None,
-    Cleaned(String),
     Redirect(String),
 }
 
@@ -4025,7 +4014,7 @@ async fn handle_rule_share_query(
     req: &mut Request<Incoming>,
     ctx: &RequestContext,
     admin_state: Option<&Arc<AdminState>>,
-    push_manager: Option<&SharedPushManager>,
+    _push_manager: Option<&SharedPushManager>,
 ) -> Result<RuleShareProxyAction> {
     let request_url = if ctx.url.is_empty() {
         get_request_url(req)
@@ -4054,61 +4043,38 @@ async fn handle_rule_share_query(
     };
 
     if let Some(state) = admin_state {
-        match import_rule_share_payload((*state).clone(), push_manager, payload).await {
-            Ok(outcome) => {
-                info!(
-                    target: "bifrost_proxy::rule_share",
-                    action = ?outcome.action,
-                    rule_name = %outcome.rule_name,
-                    "imported rule share query"
-                );
-            }
-            Err(error) => {
-                warn!(
-                    target: "bifrost_proxy::rule_share",
-                    error = %error,
-                    "failed to import rule share query"
-                );
-            }
-        }
-    } else {
-        warn!(
+        let confirm_url = build_rule_share_confirm_url(state.port(), &payload, &parts.clean_url)?;
+        info!(
             target: "bifrost_proxy::rule_share",
-            "rule share query was present but admin state is unavailable"
+            target_url = %parts.clean_url,
+            confirm_url = %confirm_url,
+            "redirecting rule share query to confirmation page"
         );
+        return Ok(RuleShareProxyAction::Redirect(confirm_url));
     }
 
-    if *req.method() == Method::GET || *req.method() == Method::HEAD {
-        return Ok(RuleShareProxyAction::Redirect(parts.clean_url));
-    }
-
-    apply_clean_url_to_request(req, &parts.clean_url)?;
-    Ok(RuleShareProxyAction::Cleaned(parts.clean_url))
+    warn!(
+        target: "bifrost_proxy::rule_share",
+        "rule share query was present but admin state is unavailable"
+    );
+    Ok(RuleShareProxyAction::Redirect(parts.clean_url))
 }
 
-fn apply_clean_url_to_request(req: &mut Request<Incoming>, clean_url: &str) -> Result<()> {
-    let uri = if req.uri().scheme().is_some() {
-        clean_url.parse::<Uri>().map_err(|error| {
-            BifrostError::Proxy(format!("invalid clean rule share URI: {error}"))
-        })?
-    } else {
-        let clean = Url::parse(clean_url).map_err(|error| {
-            BifrostError::Proxy(format!("invalid clean rule share URL: {error}"))
-        })?;
-        let mut path_and_query = clean.path().to_string();
-        if path_and_query.is_empty() {
-            path_and_query.push('/');
-        }
-        if let Some(query) = clean.query() {
-            path_and_query.push('?');
-            path_and_query.push_str(query);
-        }
-        path_and_query.parse::<Uri>().map_err(|error| {
-            BifrostError::Proxy(format!("invalid clean rule share path: {error}"))
-        })?
-    };
-    *req.uri_mut() = uri;
-    Ok(())
+fn build_rule_share_confirm_url(
+    admin_port: u16,
+    payload: &bifrost_core::rule_share::RuleSharePayload,
+    clean_url: &str,
+) -> Result<String> {
+    let encoded = encode_rule_share_payload(payload)?;
+    let mut confirm = Url::parse(&format!(
+        "http://127.0.0.1:{admin_port}{ADMIN_PATH_PREFIX}/share/rule"
+    ))
+    .map_err(|error| BifrostError::Proxy(format!("invalid rule share confirm URL: {error}")))?;
+    confirm
+        .query_pairs_mut()
+        .append_pair("payload", &encoded)
+        .append_pair("target", clean_url);
+    Ok(confirm.to_string())
 }
 
 fn build_redirect_response(status_code: u16, location: &str) -> Response<BoxBody> {
@@ -6266,7 +6232,7 @@ mod coverage_boost {
     }
 
     #[tokio::test]
-    async fn handle_http_request_rule_share_post_cleans_url_and_uses_cleaned_url_for_resolve() {
+    async fn handle_http_request_rule_share_post_redirects_without_resolving() {
         let content = "example.test status://201";
         let content_hash = content_sha256(content);
         let payload = RuleSharePayload {
@@ -6295,10 +6261,18 @@ mod coverage_boost {
         let (rules, last_url) = RecordingResolver::new_arc();
 
         let resp = run_handle_http_request_with_rules(rules, req).await;
-        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        assert_eq!(resp.status(), StatusCode::FOUND);
 
-        let recorded = last_url.lock().clone().expect("url recorded");
-        assert_eq!(recorded, clean_url);
+        let location = resp
+            .headers()
+            .get(header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .expect("location header");
+        assert_eq!(location, clean_url);
+        assert!(
+            last_url.lock().is_none(),
+            "share links must redirect before normal rule resolution"
+        );
     }
 
     #[tokio::test]

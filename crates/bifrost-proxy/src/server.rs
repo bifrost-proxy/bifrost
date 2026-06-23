@@ -1514,6 +1514,15 @@ async fn handle_request(
 
     if path.starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/")) {
         if let Some(state) = admin_state {
+            let allow_remote_admin = bifrost_admin::is_remote_access_enabled(&state);
+            if !is_valid_admin_request(&req, peer_addr, &admin_security_config, allow_remote_admin)
+            {
+                warn!(
+                    "Rejected invalid devtools bridge admin request from {}: {} {} (possible forgery attempt)",
+                    peer_addr, method, uri
+                );
+                return Ok(error_response(403, "Forbidden"));
+            }
             if let Ok(value) = hyper::header::HeaderValue::from_str(&peer_addr.ip().to_string()) {
                 req.headers_mut().insert(
                     hyper::header::HeaderName::from_static("x-bifrost-peer-ip"),
@@ -1540,15 +1549,7 @@ async fn handle_request(
                 );
             }
             let allow_remote_admin = bifrost_admin::is_remote_access_enabled(&state);
-            if is_loopback && !req.uri().path().is_empty() {
-                debug!(
-                    "Loopback admin request from {}: {} {}",
-                    peer_addr, method, path
-                );
-                return Ok(convert_admin_response(
-                    AdminRouter::handle(req, state, push_manager, Some(peer_addr)).await,
-                ));
-            } else if is_cert_public_request(&req) {
+            if is_cert_public_request(&req) {
                 debug!(
                     "Public cert request from {}: {} {}",
                     peer_addr, method, path

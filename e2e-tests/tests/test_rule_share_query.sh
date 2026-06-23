@@ -67,7 +67,6 @@ BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
   --skip-cert-check \
   --no-system-proxy \
   --no-intercept \
-  --intercept-include a.com \
   -y >/tmp/bifrost-rule-share-proxy.log 2>&1 &
 PROXY_PID=$!
 
@@ -77,8 +76,64 @@ for _ in {1..80}; do
   fi
   sleep 0.25
 done
-
 curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules" >/dev/null
+
+header_location() {
+  python3 - "$1" <<'PY'
+import sys
+for line in open(sys.argv[1], "rb"):
+    text = line.decode("latin1").strip()
+    if text.lower().startswith("location:"):
+        print(text.split(":", 1)[1].strip())
+        break
+PY
+}
+
+assert_confirm_location() {
+  local location="$1"
+  [[ "$location" == "http://127.0.0.1:${PROXY_PORT}/_bifrost/share/rule?"* ]]
+  [[ "$location" == *"payload="* ]]
+  [[ "$location" == *"target="* ]]
+  [[ "$location" != *"__bifrost_rule"* ]]
+}
+
+confirm_location() {
+  local location="$1"
+  python3 - "$location" "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" <<'PY'
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+location = sys.argv[1]
+endpoint = sys.argv[2]
+query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+body = json.dumps({
+    "payload": query["payload"][0],
+    "target_url": query["target"][0],
+}).encode()
+req = urllib.request.Request(
+    endpoint,
+    data=body,
+    method="POST",
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=10) as resp:
+    data = json.loads(resp.read().decode())
+assert data["success"] is True
+assert data["redirect_url"] == query["target"][0]
+print(data["rule_name"])
+PY
+}
+
+assert_rule_count() {
+  local pattern="$1"
+  local expected="$2"
+  local file="$3"
+  local count
+  count="$(grep -Ec "$pattern" "$file" || true)"
+  [[ "$count" == "$expected" ]]
+}
 
 TARGET_URL="http://127.0.0.1:${TARGET_PORT}/hello?site=1"
 SHARE_URL="$(
@@ -87,196 +142,45 @@ SHARE_URL="$(
 )"
 [[ "$SHARE_URL" == *"__bifrost_rule="* ]]
 
-BARE_DOMAIN_SHARE_URL="$(
-  BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule share rsq-e2e-bare a.com \
-    --content "bare.test bp://127.0.0.1:3000"
-)"
-[[ "$BARE_DOMAIN_SHARE_URL" == http://a.com/* ]]
-[[ "$BARE_DOMAIN_SHARE_URL" == *"__bifrost_rule="* ]]
-curl -sS -o /tmp/bifrost-rule-share-bare.out \
-  -D /tmp/bifrost-rule-share-bare.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$BARE_DOMAIN_SHARE_URL" >/dev/null
-grep -Eiq '^HTTP/.* 302' /tmp/bifrost-rule-share-bare.headers
-grep -Eiq $'^location: http://a\\.com/\r?$' /tmp/bifrost-rule-share-bare.headers
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-bare-list.txt
-grep -F 'share/rsq-e2e-bare [enabled]' /tmp/bifrost-rule-share-bare-list.txt
+curl -sS -o /tmp/bifrost-rule-share-body.out \
+  -D /tmp/bifrost-rule-share.headers \
+  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
+grep -Eiq '^HTTP/.* 302' /tmp/bifrost-rule-share.headers
+CONFIRM_URL="$(header_location /tmp/bifrost-rule-share.headers)"
+assert_confirm_location "$CONFIRM_URL"
 
-PLAYWRIGHT_ENTRY="$ROOT_DIR/web/node_modules/playwright"
-if [[ ! -d "$PLAYWRIGHT_ENTRY" ]]; then
-  echo "Playwright dependency is missing: $PLAYWRIGHT_ENTRY" >&2
-  echo "Install web dependencies before running this E2E." >&2
-  exit 1
-fi
+BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-before-confirm.txt
+! grep -F 'share/rsq-e2e [enabled]' /tmp/bifrost-rule-share-list-before-confirm.txt
 
-BROWSER_SHARE_URL="$(
-  BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule share rsq-e2e-browser a.com \
-    --content "browser.test bp://127.0.0.1:3000"
-)"
-[[ "$BROWSER_SHARE_URL" == http://a.com/* ]]
-BROWSER_SHARE_URL="$BROWSER_SHARE_URL" \
-PROXY_PORT="$PROXY_PORT" \
-PLAYWRIGHT_ENTRY="$PLAYWRIGHT_ENTRY" \
-node <<'NODE'
-const { chromium } = require(process.env.PLAYWRIGHT_ENTRY);
+CONFIRM_PAGE="$(curl -fsS "$CONFIRM_URL")"
+[[ "$CONFIRM_PAGE" == *"Apply Shared Bifrost Rule"* ]]
+[[ "$CONFIRM_PAGE" == *"rsq-e2e"* ]]
+[[ "$CONFIRM_PAGE" == *"share.test bp://127.0.0.1:3000"* ]]
 
-(async () => {
-  const browser = await chromium.launch({
-    headless: true,
-    proxy: { server: `http://127.0.0.1:${process.env.PROXY_PORT}` },
-  });
-  const page = await browser.newPage();
-  const responses = [];
-  page.on('response', async (response) => {
-    responses.push({
-      url: response.url(),
-      status: response.status(),
-      location: response.headers().location || '',
-    });
-  });
-
-  try {
-    await page.goto(process.env.BROWSER_SHARE_URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: 10000,
-    }).catch((error) => {
-      const message = String(error && error.message ? error.message : error);
-      if (!message.includes('ERR_HTTP_RESPONSE_CODE_FAILURE')) {
-        throw error;
-      }
-    });
-  } finally {
-    await browser.close();
-  }
-
-  const shareResponse = responses.find((response) =>
-    response.url.startsWith('http://a.com/?__bifrost_rule=')
-  );
-  if (!shareResponse) {
-    throw new Error(`missing browser response for share URL: ${JSON.stringify(responses)}`);
-  }
-  if (shareResponse.status !== 302) {
-    throw new Error(`expected browser share response 302, got ${JSON.stringify(shareResponse)}`);
-  }
-  if (shareResponse.location !== 'http://a.com/') {
-    throw new Error(`expected clean browser redirect to http://a.com/, got ${JSON.stringify(shareResponse)}`);
-  }
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
-NODE
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-browser-list.txt
-grep -F 'share/rsq-e2e-browser [enabled]' /tmp/bifrost-rule-share-browser-list.txt
-
-SHADOW_RULE_PAYLOAD="$(
-  python3 - <<'PY'
-import json
-
-print(json.dumps({
-    "name": "rsq-e2e-shadow",
-    "content": "a.com status://200 resBody://(shadowed)",
-    "enabled": True,
-}))
-PY
-)"
-curl -fsS -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules" \
-  -H 'Content-Type: application/json' \
-  --data "$SHADOW_RULE_PAYLOAD" >/tmp/bifrost-rule-share-shadow-create.json
-
-HTTPS_BROWSER_SHARE_URL="$(
-  BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule share rsq-e2e-browser-https https://a.com/ \
-    --content $'@rsq-e2e-shadow\nbrowser-https.test bp://127.0.0.1:3000'
-)"
-[[ "$HTTPS_BROWSER_SHARE_URL" == https://a.com/* ]]
-HTTPS_BROWSER_SHARE_URL="$HTTPS_BROWSER_SHARE_URL" \
-PROXY_PORT="$PROXY_PORT" \
-PLAYWRIGHT_ENTRY="$PLAYWRIGHT_ENTRY" \
-node <<'NODE'
-const { chromium } = require(process.env.PLAYWRIGHT_ENTRY);
-
-(async () => {
-  const browser = await chromium.launch({
-    headless: true,
-    proxy: { server: `http://127.0.0.1:${process.env.PROXY_PORT}` },
-  });
-  const context = await browser.newContext({ ignoreHTTPSErrors: true });
-  const page = await context.newPage();
-  const responses = [];
-  page.on('response', async (response) => {
-    responses.push({
-      url: response.url(),
-      status: response.status(),
-      location: response.headers().location || '',
-    });
-  });
-
-  try {
-    await page.goto(process.env.HTTPS_BROWSER_SHARE_URL, {
-      waitUntil: 'domcontentloaded',
-      timeout: 10000,
-    }).catch((error) => {
-      const message = String(error && error.message ? error.message : error);
-      if (!message.includes('ERR_HTTP_RESPONSE_CODE_FAILURE')) {
-        throw error;
-      }
-    });
-  } finally {
-    await browser.close();
-  }
-
-  const shareResponse = responses.find((response) =>
-    response.url.startsWith('https://a.com/?__bifrost_rule=')
-  );
-  if (!shareResponse) {
-    throw new Error(`missing HTTPS browser response for share URL: ${JSON.stringify(responses)}`);
-  }
-  if (shareResponse.status !== 302) {
-    throw new Error(`expected HTTPS browser share response 302, got ${JSON.stringify(shareResponse)}`);
-  }
-  if (shareResponse.location !== 'https://a.com/') {
-    throw new Error(`expected clean HTTPS browser redirect to https://a.com/, got ${JSON.stringify(shareResponse)}`);
-  }
-})().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
-NODE
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-browser-https-list.txt
-grep -F 'share/rsq-e2e-browser-https [enabled]' /tmp/bifrost-rule-share-browser-https-list.txt
-grep -F 'rsq-e2e-shadow [disabled]' /tmp/bifrost-rule-share-browser-https-list.txt
-
-HEADERS="$(
-  curl -sS -o /tmp/bifrost-rule-share-body.out -D - -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL"
-)"
-echo "$HEADERS" | grep -Eiq '^HTTP/.* 302'
-echo "$HEADERS" | grep -Eiq "^location: http://127\\.0\\.0\\.1:${TARGET_PORT}/hello\\?site=1"
-
+CONFIRMED_RULE="$(confirm_location "$CONFIRM_URL")"
+[[ "$CONFIRMED_RULE" == "share/rsq-e2e" ]]
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-1.txt
 grep -F 'share/rsq-e2e [enabled]' /tmp/bifrost-rule-share-list-1.txt
 
-curl -sS -o /tmp/bifrost-rule-share-repeat.out -D /tmp/bifrost-rule-share-repeat.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
+CONFIRMED_RULE_REPEAT="$(confirm_location "$CONFIRM_URL")"
+[[ "$CONFIRMED_RULE_REPEAT" == "share/rsq-e2e" ]]
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-2.txt
-COUNT="$(grep -Ec '^  share/rsq-e2e( [0-9]+)? \[' /tmp/bifrost-rule-share-list-2.txt || true)"
-[[ "$COUNT" == "1" ]]
+assert_rule_count '^  share/rsq-e2e( [0-9]+)? \[' 1 /tmp/bifrost-rule-share-list-2.txt
 
 SHARE_URL_2="$(
   BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule share rsq-e2e "$TARGET_URL" \
     --content "other.test host://127.0.0.1:3000"
 )"
-curl -sS -o /tmp/bifrost-rule-share-second.out -D /tmp/bifrost-rule-share-second.headers \
+curl -sS -o /tmp/bifrost-rule-share-second.out \
+  -D /tmp/bifrost-rule-share-second.headers \
   -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL_2" >/dev/null
+CONFIRM_URL_2="$(header_location /tmp/bifrost-rule-share-second.headers)"
+assert_confirm_location "$CONFIRM_URL_2"
+CONFIRMED_RULE_2="$(confirm_location "$CONFIRM_URL_2")"
+[[ "$CONFIRMED_RULE_2" == "share/rsq-e2e 2" ]]
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-3.txt
 grep -F 'share/rsq-e2e [disabled]' /tmp/bifrost-rule-share-list-3.txt
 grep -F 'share/rsq-e2e 2 [enabled]' /tmp/bifrost-rule-share-list-3.txt
-
-curl -sS -o /tmp/bifrost-rule-share-second-repeat.out \
-  -D /tmp/bifrost-rule-share-second-repeat.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL_2" >/dev/null
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-4.txt
-COUNT_AFTER_SUFFIX="$(grep -Ec '^  share/rsq-e2e( [0-9]+)? \[' /tmp/bifrost-rule-share-list-4.txt || true)"
-[[ "$COUNT_AFTER_SUFFIX" == "2" ]]
-grep -F 'share/rsq-e2e 2 [enabled]' /tmp/bifrost-rule-share-list-4.txt
 
 RESHARE_URL="$(
   BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule share "share/rsq-e2e 2" "$TARGET_URL"
@@ -285,10 +189,13 @@ RESHARE_URL="$(
 curl -sS -o /tmp/bifrost-rule-share-reshare.out \
   -D /tmp/bifrost-rule-share-reshare.headers \
   -x "http://127.0.0.1:${PROXY_PORT}" "$RESHARE_URL" >/dev/null
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-5.txt
-COUNT_AFTER_RESHARE="$(grep -Ec '^  share/rsq-e2e( [0-9]+)? \[' /tmp/bifrost-rule-share-list-5.txt || true)"
-[[ "$COUNT_AFTER_RESHARE" == "2" ]]
-grep -F 'share/rsq-e2e 2 [enabled]' /tmp/bifrost-rule-share-list-5.txt
+CONFIRM_URL_RESHARE="$(header_location /tmp/bifrost-rule-share-reshare.headers)"
+assert_confirm_location "$CONFIRM_URL_RESHARE"
+CONFIRMED_RESHARE="$(confirm_location "$CONFIRM_URL_RESHARE")"
+[[ "$CONFIRMED_RESHARE" == "share/rsq-e2e 2" ]]
+BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-4.txt
+assert_rule_count '^  share/rsq-e2e( [0-9]+)? \[' 2 /tmp/bifrost-rule-share-list-4.txt
+grep -F 'share/rsq-e2e 2 [enabled]' /tmp/bifrost-rule-share-list-4.txt
 
 API_BARE_RESP="$(
   curl -fsS -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-link" \
@@ -319,18 +226,4 @@ assert resp["rule_name"] == "rsq-e2e"
 assert "__bifrost_rule=" in resp["url"]
 PY
 
-API_URL="$(python3 - "$API_RESP" <<'PY'
-import json
-import sys
-print(json.loads(sys.argv[1])["url"])
-PY
-)"
-curl -sS -o /tmp/bifrost-rule-share-api-import.out \
-  -D /tmp/bifrost-rule-share-api-import.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$API_URL" >/dev/null
-BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-6.txt
-COUNT_AFTER_API_RESHARE="$(grep -Ec '^  share/rsq-e2e( [0-9]+)? \[' /tmp/bifrost-rule-share-list-6.txt || true)"
-[[ "$COUNT_AFTER_API_RESHARE" == "2" ]]
-grep -F 'share/rsq-e2e 2 [enabled]' /tmp/bifrost-rule-share-list-6.txt
-
-echo "rule share query e2e passed"
+echo "rule share confirmation E2E passed"
