@@ -487,7 +487,8 @@ mod tests {
         assert!(snippet.contains("rule_count"));
         assert!(snippet.contains("merged_content"));
         assert!(snippet.contains("admin_port"));
-        assert!(snippet.contains("_bifrost/share-env/exit"));
+        assert!(snippet.contains("_bifrost/api"));
+        assert!(snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
     }
 
     #[test]
