@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 Bifrost Admin API 和 Rule Share 在真实代理服务下不会被未知网页或代理流量伪造写操作。覆盖规则创建、启用/停用、修改、Rule Share 确认应用，以及 Bifrost 作为代理时收到 absolute-form Admin API 请求的拒绝行为。
+验证 Bifrost Admin API 和 Rule Share 在真实代理服务下不会被未知网页或代理流量伪造写操作。覆盖规则创建、启用/停用、修改、Rule Share 确认应用，以及 Bifrost 作为代理时收到 absolute-form Admin API 请求或 Admin Push WebSocket 伪造请求的拒绝行为；同时验证注入到被代理页面内的 token 化 bridge 入口仍可正常工作。
 
 ## 前置条件
 
@@ -126,6 +126,33 @@
 - 响应里的 `redirect_url` 等于 clean target URL。
 - 规则列表出现 `share/shared-security [enabled]`。
 
+### TC-ACS-09 通过 Bifrost 代理伪造 Admin Push WebSocket 被拒绝
+
+操作步骤：
+1. 启动 Bifrost 后，使用 `e2e-tests/test_utils/ws_via_http_proxy.js` 通过同一个 Bifrost HTTP proxy 连接：
+   `ws://127.0.0.1:<port>/_bifrost/api/push?x_client_id=<id>&need_overview=true`。
+2. 观察 WebSocket 握手结果。
+3. 继续通过本地直连方式连接 `/_bifrost/api/push`，验证正常本地 WebUI push 仍可用。
+
+预期结果：
+- 经 HTTP proxy 伪造的 Admin Push WebSocket 返回 HTTP 403。
+- 本地直连 WebSocket 仍可建立连接并接收 `connected` / push 消息。
+- 代理伪造请求不会绕过 Admin Host / CSRF / 浏览器写入防护边界。
+
+### TC-ACS-10 被代理页面内的 DevTools page bridge 可连接
+
+操作步骤：
+1. 启动 Bifrost 后，通过 Admin API 创建启用的 `devtools://` 规则，匹配测试页面域名。
+2. 使用浏览器通过 Bifrost 代理打开该测试页面。
+3. 等待页面内注入的 `window.__BIFROST_DEVTOOLS_BRIDGE__` 状态变成 `connected`。
+4. 通过 WebUI/DevTools API 执行页面 bridge 会话命令，验证 DOM、Network、Storage、Console 等能力可用。
+5. 同时保留 TC-ACS-09，确认通用 `/_bifrost/api/push` 不能通过 HTTP proxy 伪造连接。
+
+预期结果：
+- DevTools page bridge 的专属 `/_bifrost/api/devtools/bridge/<page_id>/ws` 入口允许被代理页面连接。
+- bridge 连接仍依赖页面专属 token，不能扩展为普通 Admin API 或 Admin Push 的跨站访问。
+- `/_bifrost/api/push` 经 HTTP proxy 伪造访问仍返回 HTTP 403。
+
 ## 清理步骤
 
 1. 终止测试启动的 Bifrost 进程。
@@ -134,3 +161,5 @@
 ## 执行记录
 
 - 2026-06-23：已执行 `e2e-tests/tests/test_admin_cross_site_security.sh`，TC-ACS-01 到 TC-ACS-08 全部通过。
+- 2026-06-23：已执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_traffic_push_e2e.sh`，其中 `WebSocket Admin Push Via HTTP Proxy Rejected` 断言经代理连接 `/_bifrost/api/push` 返回 `Unexpected server response: 403`，本地直连 WebSocket、traffic delta、overview、metrics、channel limit、polling fallback、pending ids 和 incremental sequence 均通过。
+- 2026-06-23：已执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`，验证 DevTools page bridge 可在被代理页面内通过专属 bridge WebSocket 连接并完成页面调试能力回归。

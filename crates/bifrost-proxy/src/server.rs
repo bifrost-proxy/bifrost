@@ -1512,17 +1512,8 @@ async fn handle_request(
     let is_proxy_request_to_other_server =
         is_proxy_request_targeting_other(&req, proxy_config.port, &proxy_config.host);
 
-    if path.starts_with(&format!("{ADMIN_PATH_PREFIX}/api/devtools/bridge/")) {
+    if is_devtools_bridge_admin_path(path) {
         if let Some(state) = admin_state {
-            let allow_remote_admin = bifrost_admin::is_remote_access_enabled(&state);
-            if !is_valid_admin_request(&req, peer_addr, &admin_security_config, allow_remote_admin)
-            {
-                warn!(
-                    "Rejected invalid devtools bridge admin request from {}: {} {} (possible forgery attempt)",
-                    peer_addr, method, uri
-                );
-                return Ok(error_response(403, "Forbidden"));
-            }
             if let Ok(value) = hyper::header::HeaderValue::from_str(&peer_addr.ip().to_string()) {
                 req.headers_mut().insert(
                     hyper::header::HeaderName::from_static("x-bifrost-peer-ip"),
@@ -2028,6 +2019,11 @@ fn is_proxy_request_targeting_other(
     true
 }
 
+fn is_devtools_bridge_admin_path(path: &str) -> bool {
+    path.strip_prefix(ADMIN_PATH_PREFIX)
+        .is_some_and(|rest| rest.starts_with("/api/devtools/bridge/"))
+}
+
 fn is_trust_probe_proxy_configured_request(req: &Request<Incoming>) -> bool {
     let uri = req.uri();
     uri.scheme_str() == Some("http")
@@ -2355,6 +2351,21 @@ mod tests {
             .unwrap();
 
         assert!(is_proxy_request_to_trust_probe_direct_target(&req));
+    }
+
+    #[test]
+    fn test_devtools_bridge_admin_path_is_narrow_exception() {
+        assert!(is_devtools_bridge_admin_path(
+            "/_bifrost/api/devtools/bridge/pg_123/ws"
+        ));
+        assert!(is_devtools_bridge_admin_path(
+            "/_bifrost/api/devtools/bridge/pg_123/hello"
+        ));
+        assert!(!is_devtools_bridge_admin_path("/_bifrost/api/push"));
+        assert!(!is_devtools_bridge_admin_path("/_bifrost/api/rules"));
+        assert!(!is_devtools_bridge_admin_path(
+            "/api/devtools/bridge/pg_123/ws"
+        ));
     }
 
     #[test]

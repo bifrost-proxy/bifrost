@@ -2,12 +2,12 @@
 
 ## 功能模块说明
 
-Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启用该规则、禁用其它 My Rules。该能力适合快速进入预览环境，但用户需要一个明确的 Share 环境提示和快速退出入口，退出后恢复进入 Share 前的启用规则集合。
+Rule Share 确认页应用分享规则后，会把分享规则导入 My Rules，并以 exclusive 方式启用该规则、禁用其它 My Rules。该能力适合快速进入预览环境，但用户需要一个明确的 Share 环境提示和快速退出入口，退出后恢复进入 Share 前的启用规则集合。
 
 ## 实现逻辑
 
 - `RulesStorage` 在 rules 目录下维护 `.share_env_state.json`，记录 `active`、导入的规则名、原始分享名、内容 hash、进入前启用的 My Rules 列表、进入时间和 share exit token。
-- `import_rule_share_payload` 在第一次进入 Share 环境时保存当前 enabled My Rules 快照；如果已经处于 active Share 环境，继续导入其它 share 链接时不覆盖原始快照。
+- `share-confirm` 在用户确认应用分享规则后调用 `import_rule_share_payload`。第一次进入 Share 环境时保存当前 enabled My Rules 快照；如果已经处于 active Share 环境，继续确认其它 share 链接时不覆盖原始快照。
 - Share 导入仍保持原有行为：目标分享规则启用，其它 My Rules 禁用，Group 规则不参与第一版。
 - `POST /_bifrost/api/rules/share-env/exit` 按快照恢复 My Rules enabled 状态，清除 `.share_env_state.json`，并复用 rules changed 通知链路刷新 resolver 和 badge cache。
 - `GET /_bifrost/api/rules/share-env/status` 返回当前 Share 环境状态，便于 UI、E2E 和真实场景验证。
@@ -42,9 +42,10 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 
 - `e2e-tests/tests/test_badge_injection_e2e.sh`
   - 创建 `before-enabled`、`before-disabled`、`share-source` 三条 My Rules。
-  - 通过真实代理访问包含 `__bifrost_rule` 的分享 URL，断言 GET 重定向到 clean URL。
+  - 通过真实代理访问包含 `__bifrost_rule` 的分享 URL，断言 GET 重定向到本机规则确认页，且确认页 URL 不再包含原始 `__bifrost_rule`。
+  - 调用 `POST /_bifrost/api/rules/share-confirm` 确认应用后，断言返回 clean URL 并进入 Share 环境。
   - 断言 Share 状态 API active，注入页面包含 Share 红点、呼吸光晕、`Share preview active`、原地退出 API、JSON body token 和成功后刷新逻辑，且不包含 `enabled_rule_names`。
-  - 连续打开两条 share 链接，断言第二次导入不会覆盖第一次进入 Share 前的恢复快照。
+  - 连续确认两条 share 链接，断言第二次导入不会覆盖第一次进入 Share 前的恢复快照。
   - 断言无效 token 调用退出 API 返回 403 且 Share 环境仍 active。
   - 从 badge 注入数据读取 token，携带正确 JSON body token 调用退出 API 后断言 `before-enabled` 恢复 enabled，`before-disabled` 保持 disabled，两条导入的 `share/...` 规则均被 disabled。
   - 断言本地确认页对 `Origin: http://localhost:3000` 不返回 `Access-Control-Allow-Origin`，防止被允许的本地业务 origin 读取 token。
@@ -53,7 +54,7 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 
 - 新增 `human_tests/share-env-exit.md`。
 - 使用临时数据目录启动 Bifrost：`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_DATA_DIR=... bifrost start -p <port> --unsafe-ssl --skip-cert-check --no-system-proxy --enable-badge-injection`。
-- 通过真实代理访问分享链接，确认页面胶囊出现呼吸光晕和右上角红点，hover panel 显示 `Share preview active` 和 `Exit`。
+- 通过真实代理访问分享链接，确认跳转到本机规则确认页；用户确认应用后进入 Share 环境，再访问 clean URL，确认页面胶囊出现呼吸光晕和右上角红点，hover panel 显示 `Share preview active` 和 `Exit`。
 - 点击或调用 Exit，确认规则状态恢复。
 
 ## Review/Fix/Test 闭环方案
