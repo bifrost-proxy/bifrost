@@ -395,6 +395,7 @@ assert_share_env_exit_restores_rules() {
   assert_body_contains "_bifrost/share-env/exit" "$HTTP_BODY" "Badge panel should open local share exit confirmation page" || return 1
   assert_body_not_contains "mode:'no-cors'" "$HTTP_BODY" "Badge exit should not use no-cors blind success fallback" || return 1
   assert_body_not_contains "exit_token" "$HTTP_BODY" "Badge inline data must not expose share exit token to proxied pages" || return 1
+  assert_body_not_contains "enabled_rule_names" "$HTTP_BODY" "Badge inline data must not expose pre-share enabled rule names to proxied pages" || return 1
 
   local before_enabled
   before_enabled="$(rule_enabled_state "before-enabled")"

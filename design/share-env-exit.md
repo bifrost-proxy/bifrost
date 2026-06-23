@@ -11,7 +11,7 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 - Share 导入仍保持原有行为：目标分享规则启用，其它 My Rules 禁用，Group 规则不参与第一版。
 - `POST /_bifrost/api/rules/share-env/exit` 按快照恢复 My Rules enabled 状态，清除 `.share_env_state.json`，并复用 rules changed 通知链路刷新 resolver 和 badge cache。
 - `GET /_bifrost/api/rules/share-env/status` 返回当前 Share 环境状态，便于 UI、E2E 和真实场景验证。
-- 注入页面的 Bifrost badge JSON 增加 `share_env` 字段；当 `share_env.active=true` 时，B 胶囊立即进入 Share 视觉状态：边框呼吸光晕、右上角红点，hover panel 中展示短文案 `Share preview active` 和 `Exit` 按钮。注入数据不包含 `exit_token`。
+- 注入页面的 Bifrost badge JSON 增加 `share_env` 字段；当 `share_env.active=true` 时，B 胶囊立即进入 Share 视觉状态：边框呼吸光晕、右上角红点，hover panel 中展示短文案 `Share preview active` 和 `Exit` 按钮。注入数据不包含 `exit_token` 或恢复快照 `enabled_rule_names`。
 - Exit 按钮仅在真实用户点击事件中触发，并打开同源本地确认页 `/_bifrost/share-env/exit`。确认页由 Admin origin 渲染并携带本次 Share 环境专属 token，业务页面脚本无法读取该 token。
 - 确认页以 JSON body 或 form body POST 到 `/_bifrost/api/rules/share-env/exit`；后端校验 token 后才恢复规则。token 不通过 URL query 传递，确认页响应设置 `Cache-Control: no-store`、`Referrer-Policy: no-referrer` 和 `X-Frame-Options: DENY`。
 - `/_bifrost/share-env/exit` 确认页不应用全局 CORS，即使请求来自全局允许的本地 origin（如 `http://localhost:3000`），也不能通过浏览器读取 token-bearing HTML。
@@ -41,7 +41,7 @@ Share rule query 会把分享规则导入 My Rules，并以 exclusive 方式启�
 - `e2e-tests/tests/test_badge_injection_e2e.sh`
   - 创建 `before-enabled`、`before-disabled`、`share-source` 三条 My Rules。
   - 通过真实代理访问包含 `__bifrost_rule` 的分享 URL，断言 GET 重定向到 clean URL。
-  - 断言 Share 状态 API active，注入页面包含 Share 红点、呼吸光晕、`Share preview active` 和本地确认页链接，且不包含 `exit_token`。
+  - 断言 Share 状态 API active，注入页面包含 Share 红点、呼吸光晕、`Share preview active` 和本地确认页链接，且不包含 `exit_token` 或 `enabled_rule_names`。
   - 连续打开两条 share 链接，断言第二次导入不会覆盖第一次进入 Share 前的恢复快照。
   - 断言无效 token 调用退出 API 返回 403 且 Share 环境仍 active。
   - 从本地确认页读取 token，携带正确 JSON body token 调用退出 API 后断言 `before-enabled` 恢复 enabled，`before-disabled` 保持 disabled，两条导入的 `share/...` 规则均被 disabled。

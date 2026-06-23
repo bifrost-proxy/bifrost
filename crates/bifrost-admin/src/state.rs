@@ -1471,7 +1471,6 @@ impl AdminState {
                     "imported_rule_name": state.imported_rule_name,
                     "requested_name": state.requested_name,
                     "content_hash": state.content_hash,
-                    "enabled_rule_names": state.enabled_rule_names,
                     "entered_at": state.entered_at,
                 })
             })
@@ -2074,6 +2073,7 @@ mod tests {
         assert_eq!(json["share_env"]["requested_name"], "demo");
         assert_eq!(json["share_env"]["imported_rule_name"], "share/demo");
         assert!(json["share_env"].get("exit_token").is_none());
+        assert!(json["share_env"].get("enabled_rule_names").is_none());
 
         cleanup_test_dir(&dir);
     }

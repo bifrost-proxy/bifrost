@@ -266,6 +266,7 @@ fn inline_script_safe_json(rules_json: &str) -> String {
         .and_then(|value| value.as_object_mut())
     {
         share_env.remove("exit_token");
+        share_env.remove("enabled_rule_names");
     }
     let json = serde_json::to_string(&value)
         .unwrap_or_else(|_| r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string());
@@ -570,6 +571,7 @@ mod tests {
         assert!(snippet.contains("__bb_share_status_dot"));
         assert!(snippet.contains("Share preview active"));
         assert!(!snippet.contains("exit_token"));
+        assert!(!snippet.contains("enabled_rule_names"));
         assert!(snippet.contains("ev.isTrusted"));
         assert!(snippet.contains("document.currentScript"));
         assert!(snippet.contains("removeChild(S)"));
