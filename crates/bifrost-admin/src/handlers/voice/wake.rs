@@ -38,6 +38,9 @@ const MAX_LISTENER_CHUNK_MS: u64 = 4_000;
 static VOICE_WAKE_LISTENER: Lazy<Mutex<VoiceWakeListenerRuntime>> =
     Lazy::new(|| Mutex::new(VoiceWakeListenerRuntime::default()));
 
+#[cfg(test)]
+static VOICE_WAKE_LISTENER_TEST_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct VoiceWakeStore {
     version: u32,
@@ -2657,8 +2660,10 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn download_voice_wake_kws_archive_async_marks_downloaded_status() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
+        reset_listener_runtime().await;
         let dest = dir.path().join("kws_async.tar.bz2");
         let data = vec![0u8; 1_500_000];
         fs::write(&dest, &data).expect("write");
@@ -2676,6 +2681,8 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn listener_state_snapshot_clears_finished_task() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
+        reset_listener_runtime().await;
         // Ensure a finished task is cleared from the runtime.
         {
             let mut runtime = VOICE_WAKE_LISTENER.lock().await;
@@ -2688,6 +2695,8 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn run_lightweight_mic_wake_listener_respects_cancel_flag() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
+        reset_listener_runtime().await;
         let cancel = Arc::new(AtomicBool::new(true));
         let request = VoiceWakeListenerStartRequest {
             source: "mic".to_string(),
@@ -2707,6 +2716,8 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn record_listener_error_updates_state() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
+        reset_listener_runtime().await;
         record_listener_error("something went wrong").await;
         let state = listener_state_snapshot().await;
         assert_eq!(state.last_error.as_deref(), Some("something went wrong"));
@@ -2773,6 +2784,7 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn process_listener_transcript_no_match_sets_last_match_status() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_listener_runtime().await;
@@ -2807,6 +2819,7 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn process_listener_transcript_dry_run_success_updates_trigger_count() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_listener_runtime().await;
@@ -3053,6 +3066,7 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn run_mock_voice_wake_listener_processes_all_transcripts() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_runtime().await;
@@ -3084,6 +3098,7 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn run_voice_wake_listener_mock_source_updates_state_to_stopped() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_runtime().await;
@@ -3109,6 +3124,7 @@ mod coverage_boost_v2 {
 
     #[tokio::test]
     async fn process_listener_transcript_records_error_for_mic_without_chunk() {
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_runtime().await;
@@ -3151,6 +3167,7 @@ mod coverage_boost_v2 {
             return;
         }
 
+        let _listener_guard = VOICE_WAKE_LISTENER_TEST_LOCK.lock().await;
         let dir = tempdir().expect("tempdir");
         let _guard = BifrostDataDirGuard::set(dir.path());
         reset_runtime().await;

@@ -16,28 +16,59 @@ use std::{
 };
 
 use bifrost_storage::TraySystemStatsItems;
-use sysinfo::Disks;
+use sysinfo::{Disks, MemoryRefreshKind, RefreshKind, System};
 
 use super::menu::SystemStatsMenuLines;
+
+#[cfg(target_os = "macos")]
+use core_foundation::base::TCFType;
+#[cfg(target_os = "macos")]
+use core_foundation::string::CFString;
+#[cfg(target_os = "macos")]
+use core_foundation_sys::{
+    base::{kCFAllocatorDefault, CFGetTypeID, CFRelease, CFTypeRef},
+    dictionary::{
+        CFDictionaryGetTypeID, CFDictionaryGetValueIfPresent, CFDictionaryRef,
+        CFMutableDictionaryRef,
+    },
+    number::{kCFNumberSInt64Type, CFNumberGetTypeID, CFNumberGetValue, CFNumberRef},
+    string::CFStringRef,
+};
 
 const CPU_MEMORY_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
 const DISK_REFRESH_INTERVAL: Duration = Duration::from_secs(30);
 const NETWORK_MIN_SAMPLE_INTERVAL: Duration = Duration::from_millis(900);
 const NETWORK_LIST_REFRESH_INTERVAL: Duration = Duration::from_secs(60);
+const DISK_IO_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
 const DEFAULT_ROUTE_QUERY_TIMEOUT: Duration = Duration::from_millis(750);
 const DEFAULT_ROUTE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SystemStatsSnapshot {
     pub cpu_percent: f32,
+    pub cpu_logical_cores: Option<usize>,
+    pub cpu_performance_cores: Option<usize>,
+    pub cpu_efficiency_cores: Option<usize>,
+    pub load_one: f32,
+    pub load_five: f32,
+    pub load_fifteen: f32,
     pub memory_pressure_percent: Option<f32>,
     pub memory_used_bytes: u64,
     pub memory_compressed_bytes: u64,
     pub memory_cached_bytes: u64,
     pub memory_total_bytes: u64,
+    pub swap_used_bytes: Option<u64>,
+    pub swap_total_bytes: Option<u64>,
     pub disk_used_percent: Option<f32>,
+    pub disk_free_bytes: Option<u64>,
+    pub disk_total_bytes: Option<u64>,
+    pub disk_mount_point: Option<String>,
+    pub disk_total_bytes_per_sec: Option<u64>,
+    pub disk_read_bytes_per_sec: Option<u64>,
+    pub disk_write_bytes_per_sec: Option<u64>,
     pub network_down_bytes_per_sec: Option<u64>,
     pub network_up_bytes_per_sec: Option<u64>,
+    pub network_interface: Option<String>,
 }
 
 impl SystemStatsMenuLines {
@@ -53,16 +84,32 @@ impl SystemStatsMenuLines {
 pub struct SystemStatsSampler {
     last_cpu_ticks: Option<MacCpuTicks>,
     disk_mount_point: Option<PathBuf>,
+    system: System,
     cpu_percent: f32,
+    cpu_logical_cores: Option<usize>,
+    cpu_performance_cores: Option<usize>,
+    cpu_efficiency_cores: Option<usize>,
+    load_one: f32,
+    load_five: f32,
+    load_fifteen: f32,
     memory_pressure_percent: Option<f32>,
     memory_used_bytes: u64,
     memory_compressed_bytes: u64,
     memory_cached_bytes: u64,
     memory_total_bytes: u64,
+    swap_used_bytes: Option<u64>,
+    swap_total_bytes: Option<u64>,
     disk_used_percent: Option<f32>,
+    disk_free_bytes: Option<u64>,
+    disk_total_bytes: Option<u64>,
+    disk_total_bytes_per_sec: Option<u64>,
+    disk_read_bytes_per_sec: Option<u64>,
+    disk_write_bytes_per_sec: Option<u64>,
+    last_disk_io_sample: Option<DiskIoSample>,
     last_cpu_at: Option<Instant>,
     last_memory_at: Option<Instant>,
     last_disk_at: Option<Instant>,
+    last_disk_io_at: Option<Instant>,
     last_network_list_refresh_at: Option<Instant>,
     last_network_interfaces: BTreeMap<String, NetworkInterfaceSample>,
     active_network_interface: Option<String>,
@@ -81,6 +128,81 @@ struct NetworkTotals {
 struct NetworkRates {
     down_bytes_per_sec: u64,
     up_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskIoRates {
+    read_bytes_per_sec: u64,
+    write_bytes_per_sec: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskIoCounters {
+    read_bytes: u64,
+    write_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DiskIoSample {
+    at: Instant,
+    counters: DiskIoCounters,
+}
+
+#[cfg(target_os = "macos")]
+type IoObject = libc::c_uint;
+#[cfg(target_os = "macos")]
+type IoIterator = IoObject;
+#[cfg(target_os = "macos")]
+type IoRegistryEntry = IoObject;
+#[cfg(target_os = "macos")]
+type IoOptionBits = libc::c_uint;
+#[cfg(target_os = "macos")]
+type IoReturn = libc::c_int;
+
+#[cfg(target_os = "macos")]
+const K_IO_RETURN_SUCCESS: IoReturn = 0;
+#[cfg(target_os = "macos")]
+const K_IO_MAIN_PORT_DEFAULT: libc::mach_port_t = 0;
+#[cfg(target_os = "macos")]
+const IO_BLOCK_STORAGE_DRIVER_CLASS: &str = "IOBlockStorageDriver";
+#[cfg(target_os = "macos")]
+const IO_BLOCK_STORAGE_STATISTICS_KEY: &str = "Statistics";
+#[cfg(target_os = "macos")]
+const IO_BLOCK_STORAGE_BYTES_READ_KEY: &str = "Bytes (Read)";
+#[cfg(target_os = "macos")]
+const IO_BLOCK_STORAGE_BYTES_WRITTEN_KEY: &str = "Bytes (Write)";
+
+#[cfg(target_os = "macos")]
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOServiceMatching(name: *const libc::c_char) -> CFMutableDictionaryRef;
+    fn IOServiceGetMatchingServices(
+        main_port: libc::mach_port_t,
+        matching: CFDictionaryRef,
+        existing: *mut IoIterator,
+    ) -> IoReturn;
+    fn IOIteratorNext(iterator: IoIterator) -> IoObject;
+    fn IOObjectRelease(object: IoObject) -> IoReturn;
+    fn IORegistryEntryCreateCFProperty(
+        entry: IoRegistryEntry,
+        key: CFStringRef,
+        allocator: core_foundation_sys::base::CFAllocatorRef,
+        options: IoOptionBits,
+    ) -> CFTypeRef;
+}
+
+#[cfg(target_os = "macos")]
+struct IoObjectGuard(IoObject);
+
+#[cfg(target_os = "macos")]
+impl Drop for IoObjectGuard {
+    fn drop(&mut self) {
+        if self.0 != 0 {
+            // SAFETY: IOKit objects returned by IOIteratorNext and iterator APIs
+            // are released with IOObjectRelease.
+            let _ = unsafe { IOObjectRelease(self.0) };
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -180,6 +302,11 @@ struct MacMemorySample {
 impl SystemStatsSampler {
     pub fn new(data_dir: &Path) -> Self {
         let last_cpu_ticks = mac_cpu_ticks();
+        let mut system = System::new_with_specifics(
+            RefreshKind::new().with_memory(MemoryRefreshKind::new().with_swap()),
+        );
+        system.refresh_memory_specifics(MemoryRefreshKind::new().with_swap());
+        let load = System::load_average();
         let memory_total_bytes = mac_memory_total_bytes().unwrap_or(0);
         let memory_pressure_percent = mac_memory_pressure_percent();
         let memory_sample = mac_memory_sample(memory_total_bytes).unwrap_or(MacMemorySample {
@@ -187,24 +314,45 @@ impl SystemStatsSampler {
             compressed_bytes: 0,
             cached_bytes: 0,
         });
+        let swap_total_bytes = Some(system.total_swap());
+        let swap_used_bytes = Some(system.used_swap());
 
         let disks = Disks::new_with_refreshed_list();
         let disk_mount_point = select_disk_mount_point(disks.list(), Some(data_dir));
         let disk_used_percent = disk_mount_point.as_deref().and_then(disk_usage_percent);
-
+        let (disk_total_bytes, disk_free_bytes) = disk_mount_point
+            .as_deref()
+            .map(|mount| disk_space(disks.list(), mount))
+            .unwrap_or((None, None));
         Self {
             cpu_percent: 0.0,
+            cpu_logical_cores: cpu_logical_cores(),
+            cpu_performance_cores: cpu_perflevel_cores(0),
+            cpu_efficiency_cores: cpu_perflevel_cores(1),
+            load_one: load.one as f32,
+            load_five: load.five as f32,
+            load_fifteen: load.fifteen as f32,
             memory_pressure_percent,
             memory_used_bytes: memory_sample.used_bytes,
             memory_compressed_bytes: memory_sample.compressed_bytes,
             memory_cached_bytes: memory_sample.cached_bytes,
             memory_total_bytes,
+            swap_used_bytes,
+            swap_total_bytes,
             last_cpu_ticks,
             disk_mount_point,
+            system,
             disk_used_percent,
+            disk_free_bytes,
+            disk_total_bytes,
+            disk_total_bytes_per_sec: None,
+            disk_read_bytes_per_sec: None,
+            disk_write_bytes_per_sec: None,
+            last_disk_io_sample: None,
             last_cpu_at: None,
             last_memory_at: None,
             last_disk_at: None,
+            last_disk_io_at: None,
             last_network_list_refresh_at: None,
             last_network_interfaces: BTreeMap::new(),
             active_network_interface: None,
@@ -214,7 +362,17 @@ impl SystemStatsSampler {
         }
     }
 
+    #[cfg(test)]
     pub fn sample(&mut self, now: Instant, items: &TraySystemStatsItems) -> SystemStatsSnapshot {
+        self.sample_with_disk_io(now, items, true)
+    }
+
+    pub fn sample_with_disk_io(
+        &mut self,
+        now: Instant,
+        items: &TraySystemStatsItems,
+        sample_disk_io_active: bool,
+    ) -> SystemStatsSnapshot {
         if items.cpu
             && self
                 .last_cpu_at
@@ -227,6 +385,10 @@ impl SystemStatsSampler {
                 }
                 self.last_cpu_ticks = Some(current_ticks);
             }
+            let load = System::load_average();
+            self.load_one = load.one as f32;
+            self.load_five = load.five as f32;
+            self.load_fifteen = load.fifteen as f32;
             self.last_cpu_at = Some(now);
         }
 
@@ -243,6 +405,10 @@ impl SystemStatsSampler {
                 self.memory_compressed_bytes = memory_sample.compressed_bytes;
                 self.memory_cached_bytes = memory_sample.cached_bytes;
             }
+            self.system
+                .refresh_memory_specifics(MemoryRefreshKind::new().with_swap());
+            self.swap_total_bytes = Some(self.system.total_swap());
+            self.swap_used_bytes = Some(self.system.used_swap());
             self.last_memory_at = Some(now);
         }
 
@@ -252,11 +418,32 @@ impl SystemStatsSampler {
                 .map(|last| now.saturating_duration_since(last) >= DISK_REFRESH_INTERVAL)
                 .unwrap_or(true)
         {
+            let disks = Disks::new_with_refreshed_list();
             self.disk_used_percent = self
                 .disk_mount_point
                 .as_deref()
                 .and_then(disk_usage_percent);
+            if let Some(mount) = self.disk_mount_point.as_deref() {
+                let (total, free) = disk_space(disks.list(), mount);
+                self.disk_total_bytes = total;
+                self.disk_free_bytes = free;
+            }
             self.last_disk_at = Some(now);
+        }
+
+        if items.disk && sample_disk_io_active {
+            if self
+                .last_disk_io_at
+                .map(|last| now.saturating_duration_since(last) >= DISK_IO_REFRESH_INTERVAL)
+                .unwrap_or(true)
+            {
+                self.last_disk_io_at = Some(now);
+                self.apply_disk_io_sample(sample_disk_io());
+            }
+        } else {
+            self.clear_disk_io_rates();
+            self.last_disk_io_sample = None;
+            self.last_disk_io_at = None;
         }
 
         let rates = if items.upload || items.download {
@@ -277,15 +464,65 @@ impl SystemStatsSampler {
 
         SystemStatsSnapshot {
             cpu_percent: self.cpu_percent,
+            cpu_logical_cores: self.cpu_logical_cores,
+            cpu_performance_cores: self.cpu_performance_cores,
+            cpu_efficiency_cores: self.cpu_efficiency_cores,
             memory_pressure_percent: self.memory_pressure_percent,
             memory_used_bytes: self.memory_used_bytes,
             memory_compressed_bytes: self.memory_compressed_bytes,
             memory_cached_bytes: self.memory_cached_bytes,
             memory_total_bytes: self.memory_total_bytes,
             disk_used_percent: self.disk_used_percent,
+            disk_free_bytes: self.disk_free_bytes,
+            disk_total_bytes: self.disk_total_bytes,
+            disk_mount_point: self
+                .disk_mount_point
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            disk_total_bytes_per_sec: self.disk_total_bytes_per_sec,
+            disk_read_bytes_per_sec: self.disk_read_bytes_per_sec,
+            disk_write_bytes_per_sec: self.disk_write_bytes_per_sec,
             network_down_bytes_per_sec: rates.map(|rates| rates.down_bytes_per_sec),
             network_up_bytes_per_sec: rates.map(|rates| rates.up_bytes_per_sec),
+            network_interface: self.active_network_interface.clone(),
+            load_one: self.load_one,
+            load_five: self.load_five,
+            load_fifteen: self.load_fifteen,
+            swap_used_bytes: self.swap_used_bytes,
+            swap_total_bytes: self.swap_total_bytes,
         }
+    }
+
+    fn apply_disk_io_sample(&mut self, sample: Option<DiskIoSample>) {
+        let Some(sample) = sample else {
+            self.clear_disk_io_rates();
+            self.last_disk_io_sample = None;
+            return;
+        };
+
+        if let Some(previous) = self.last_disk_io_sample {
+            if let Some(rates) = disk_io_rates_from_samples(previous, sample) {
+                self.disk_read_bytes_per_sec = Some(rates.read_bytes_per_sec);
+                self.disk_write_bytes_per_sec = Some(rates.write_bytes_per_sec);
+                self.disk_total_bytes_per_sec = Some(
+                    rates
+                        .read_bytes_per_sec
+                        .saturating_add(rates.write_bytes_per_sec),
+                );
+            } else {
+                self.clear_disk_io_rates();
+            }
+        } else {
+            self.clear_disk_io_rates();
+        }
+
+        self.last_disk_io_sample = Some(sample);
+    }
+
+    fn clear_disk_io_rates(&mut self) {
+        self.disk_total_bytes_per_sec = None;
+        self.disk_read_bytes_per_sec = None;
+        self.disk_write_bytes_per_sec = None;
     }
 
     pub fn reset_network_baseline(&mut self) {
@@ -540,6 +777,42 @@ fn mac_cpu_percent(previous: Option<MacCpuTicks>, current: MacCpuTicks) -> Optio
     Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
 }
 
+fn cpu_logical_cores() -> Option<usize> {
+    sysctl_usize("hw.logicalcpu")
+        .or_else(|| std::thread::available_parallelism().ok().map(usize::from))
+}
+
+#[cfg(target_os = "macos")]
+fn cpu_perflevel_cores(level: u8) -> Option<usize> {
+    sysctl_usize(&format!("hw.perflevel{level}.logicalcpu"))
+        .or_else(|| sysctl_usize(&format!("hw.perflevel{level}.physicalcpu")))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cpu_perflevel_cores(_level: u8) -> Option<usize> {
+    None
+}
+
+fn sysctl_usize(name: &str) -> Option<usize> {
+    let name = CString::new(name).ok()?;
+    let mut value: libc::c_uint = 0;
+    let mut len = std::mem::size_of::<libc::c_uint>();
+    let result = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut value as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result == 0 && len == std::mem::size_of::<libc::c_uint>() && value > 0 {
+        usize::try_from(value).ok()
+    } else {
+        None
+    }
+}
+
 fn mac_memory_total_bytes() -> Option<u64> {
     let mut mib = [libc::CTL_HW, libc::HW_MEMSIZE];
     let mut value = 0_u64;
@@ -739,6 +1012,181 @@ fn disk_usage_percent(mount_point: &Path) -> Option<f32> {
     let available = (stat.f_bavail as u128).saturating_mul(block_size as u128);
     let used = total.saturating_sub(available);
     Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
+}
+
+fn disk_space(disks: &[sysinfo::Disk], mount_point: &Path) -> (Option<u64>, Option<u64>) {
+    disks
+        .iter()
+        .find(|disk| disk.mount_point() == mount_point)
+        .map(|disk| (Some(disk.total_space()), Some(disk.available_space())))
+        .unwrap_or((None, None))
+}
+
+fn sample_disk_io() -> Option<DiskIoSample> {
+    let counters = disk_io_counters()?;
+    Some(DiskIoSample {
+        at: Instant::now(),
+        counters,
+    })
+}
+
+fn disk_io_rates_from_samples(
+    previous: DiskIoSample,
+    current: DiskIoSample,
+) -> Option<DiskIoRates> {
+    let elapsed = current.at.checked_duration_since(previous.at)?;
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.0 {
+        return None;
+    }
+    Some(DiskIoRates {
+        read_bytes_per_sec: bytes_per_sec(
+            current
+                .counters
+                .read_bytes
+                .checked_sub(previous.counters.read_bytes)?,
+            seconds,
+        ),
+        write_bytes_per_sec: bytes_per_sec(
+            current
+                .counters
+                .write_bytes
+                .checked_sub(previous.counters.write_bytes)?,
+            seconds,
+        ),
+    })
+}
+
+fn disk_io_counters() -> Option<DiskIoCounters> {
+    let class_name = CString::new(IO_BLOCK_STORAGE_DRIVER_CLASS).ok()?;
+    // SAFETY: IOServiceMatching reads a valid NUL-terminated class name and
+    // returns a retained matching dictionary consumed by IOServiceGetMatchingServices.
+    let matching = unsafe { IOServiceMatching(class_name.as_ptr()) };
+    if matching.is_null() {
+        return None;
+    }
+
+    let mut iterator: IoIterator = 0;
+    // SAFETY: `matching` is a valid dictionary from IOServiceMatching and the
+    // iterator out-param is valid for the duration of the call.
+    let result = unsafe {
+        IOServiceGetMatchingServices(
+            K_IO_MAIN_PORT_DEFAULT,
+            matching as CFDictionaryRef,
+            &mut iterator,
+        )
+    };
+    if result != K_IO_RETURN_SUCCESS || iterator == 0 {
+        return None;
+    }
+
+    let _iterator_guard = IoObjectGuard(iterator);
+    let mut read_bytes = 0_u64;
+    let mut write_bytes = 0_u64;
+    let mut found = false;
+
+    loop {
+        // SAFETY: `iterator` is a valid IOKit iterator until released by guard.
+        let service = unsafe { IOIteratorNext(iterator) };
+        if service == 0 {
+            break;
+        }
+        let _service_guard = IoObjectGuard(service);
+        let Some(counters) = disk_io_counters_from_service(service) else {
+            continue;
+        };
+        let read = counters.read_bytes;
+        let write = counters.write_bytes;
+        if read == 0 && write == 0 {
+            continue;
+        }
+        read_bytes = read_bytes.saturating_add(read);
+        write_bytes = write_bytes.saturating_add(write);
+        found = true;
+    }
+
+    found.then_some(DiskIoCounters {
+        read_bytes,
+        write_bytes,
+    })
+}
+
+fn disk_io_counters_from_service(service: IoRegistryEntry) -> Option<DiskIoCounters> {
+    let statistics_key = CFString::new(IO_BLOCK_STORAGE_STATISTICS_KEY);
+    // SAFETY: `service` is an IORegistry entry returned by IOKit; key and
+    // allocator are valid for the call. The returned property follows the
+    // create rule and is released below.
+    let property = unsafe {
+        IORegistryEntryCreateCFProperty(
+            service,
+            statistics_key.as_concrete_TypeRef(),
+            kCFAllocatorDefault,
+            0,
+        )
+    };
+    if property.is_null() {
+        return None;
+    }
+
+    let counters = disk_io_counters_from_statistics(property);
+    // SAFETY: `property` is a +1 CoreFoundation object from the create-rule API.
+    unsafe { CFRelease(property) };
+    counters
+}
+
+fn disk_io_counters_from_statistics(property: CFTypeRef) -> Option<DiskIoCounters> {
+    // SAFETY: `property` is checked for null before callers pass it here and
+    // remains valid for this stack frame.
+    if unsafe { CFGetTypeID(property) } != unsafe { CFDictionaryGetTypeID() } {
+        return None;
+    }
+    let statistics = property as CFDictionaryRef;
+    let read_bytes = cf_dictionary_u64(statistics, IO_BLOCK_STORAGE_BYTES_READ_KEY).unwrap_or(0);
+    let write_bytes =
+        cf_dictionary_u64(statistics, IO_BLOCK_STORAGE_BYTES_WRITTEN_KEY).unwrap_or(0);
+    if read_bytes == 0 && write_bytes == 0 {
+        return None;
+    }
+    Some(DiskIoCounters {
+        read_bytes,
+        write_bytes,
+    })
+}
+
+fn cf_dictionary_u64(dictionary: CFDictionaryRef, key: &str) -> Option<u64> {
+    let key = CFString::new(key);
+    let mut value = std::ptr::null();
+    // SAFETY: `dictionary` is a valid CFDictionaryRef and `value` is a valid
+    // out-param. CoreFoundation retains ownership of the returned value.
+    let found = unsafe {
+        CFDictionaryGetValueIfPresent(
+            dictionary,
+            key.as_concrete_TypeRef() as *const libc::c_void,
+            &mut value,
+        )
+    };
+    if found == 0 || value.is_null() {
+        return None;
+    }
+    let number = value as CFTypeRef;
+    // SAFETY: `number` points to a CoreFoundation object owned by the dictionary.
+    if unsafe { CFGetTypeID(number) } != unsafe { CFNumberGetTypeID() } {
+        return None;
+    }
+    let mut signed_value = 0_i64;
+    // SAFETY: type was checked as CFNumber and `signed_value` is a valid out-param.
+    let ok = unsafe {
+        CFNumberGetValue(
+            number as CFNumberRef,
+            kCFNumberSInt64Type,
+            &mut signed_value as *mut i64 as *mut libc::c_void,
+        )
+    };
+    if ok && signed_value >= 0 {
+        Some(signed_value as u64)
+    } else {
+        None
+    }
 }
 
 fn network_rate_from_totals(
@@ -1096,6 +1544,7 @@ mod tests {
                 disk_used_percent: Some(58.7),
                 network_down_bytes_per_sec: Some(512 * 1024),
                 network_up_bytes_per_sec: Some(1536 * 1024),
+                ..SystemStatsSnapshot::default()
             },
             &TraySystemStatsItems::default(),
         );
@@ -1121,6 +1570,7 @@ mod tests {
                 disk_used_percent: Some(58.7),
                 network_down_bytes_per_sec: None,
                 network_up_bytes_per_sec: None,
+                ..SystemStatsSnapshot::default()
             },
             &TraySystemStatsItems::default(),
         );
@@ -1145,6 +1595,7 @@ mod tests {
                 disk_used_percent: Some(8.6),
                 network_down_bytes_per_sec: Some(26 * 1024),
                 network_up_bytes_per_sec: Some(8 * 1024),
+                ..SystemStatsSnapshot::default()
             },
             &TraySystemStatsItems::default(),
         );
@@ -1165,6 +1616,7 @@ mod tests {
                 disk_used_percent: Some(30.0),
                 network_down_bytes_per_sec: Some(26 * 1024),
                 network_up_bytes_per_sec: Some(8 * 1024),
+                ..SystemStatsSnapshot::default()
             },
             &TraySystemStatsItems::default(),
         );
@@ -1261,6 +1713,7 @@ mod tests {
                 disk_used_percent: None,
                 network_down_bytes_per_sec: Some(512 * 1024),
                 network_up_bytes_per_sec: Some(1536 * 1024),
+                ..SystemStatsSnapshot::default()
             },
             &TraySystemStatsItems::default(),
         );
@@ -1288,6 +1741,7 @@ mod tests {
                 disk_used_percent: Some(8.6),
                 network_down_bytes_per_sec: Some(26 * 1024),
                 network_up_bytes_per_sec: Some(8 * 1024),
+                ..SystemStatsSnapshot::default()
             },
             &items,
         );
@@ -1410,6 +1864,136 @@ mod tests {
         let after_disk_window = now + DISK_REFRESH_INTERVAL + Duration::from_secs(1);
         let _ = sampler.sample(after_disk_window, &disk_enabled);
         assert_eq!(sampler.last_disk_at, Some(after_disk_window));
+    }
+
+    #[test]
+    fn sample_disk_io_counter_only_while_menu_is_open() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut sampler = SystemStatsSampler::new(temp.path());
+        let items = TraySystemStatsItems {
+            cpu: false,
+            memory: false,
+            disk: true,
+            upload: false,
+            download: false,
+        };
+        let now = Instant::now();
+
+        let _ = sampler.sample_with_disk_io(now, &items, false);
+        assert_eq!(sampler.last_disk_io_at, None);
+
+        let before_interval = now + DISK_IO_REFRESH_INTERVAL - Duration::from_millis(1);
+        let _ = sampler.sample_with_disk_io(before_interval, &items, true);
+        assert_eq!(sampler.last_disk_io_at, Some(before_interval));
+
+        let still_before_interval = before_interval + Duration::from_millis(1);
+        let _ = sampler.sample_with_disk_io(still_before_interval, &items, true);
+        assert_eq!(sampler.last_disk_io_at, Some(before_interval));
+
+        sampler.disk_read_bytes_per_sec = Some(1);
+        sampler.disk_write_bytes_per_sec = Some(2);
+        sampler.disk_total_bytes_per_sec = Some(3);
+        sampler.last_disk_io_sample = Some(DiskIoSample {
+            at: before_interval,
+            counters: DiskIoCounters {
+                read_bytes: 1,
+                write_bytes: 2,
+            },
+        });
+        let _ = sampler.sample_with_disk_io(still_before_interval, &items, false);
+        assert_eq!(sampler.last_disk_io_at, None);
+        assert_eq!(sampler.last_disk_io_sample, None);
+        assert_eq!(sampler.disk_read_bytes_per_sec, None);
+        assert_eq!(sampler.disk_write_bytes_per_sec, None);
+        assert_eq!(sampler.disk_total_bytes_per_sec, None);
+
+        let _ = sampler.sample_with_disk_io(before_interval, &items, true);
+        assert_eq!(sampler.last_disk_io_at, Some(before_interval));
+
+        let after_interval = before_interval + DISK_IO_REFRESH_INTERVAL + Duration::from_millis(1);
+        let _ = sampler.sample_with_disk_io(after_interval, &items, true);
+        assert_eq!(sampler.last_disk_io_at, Some(after_interval));
+    }
+
+    #[test]
+    fn disk_io_rates_use_counter_delta_and_elapsed_time() {
+        let started = Instant::now();
+        let rates = disk_io_rates_from_samples(
+            DiskIoSample {
+                at: started,
+                counters: DiskIoCounters {
+                    read_bytes: 1_000,
+                    write_bytes: 2_000,
+                },
+            },
+            DiskIoSample {
+                at: started + Duration::from_secs(2),
+                counters: DiskIoCounters {
+                    read_bytes: 5_096,
+                    write_bytes: 10_192,
+                },
+            },
+        )
+        .expect("valid disk io rates");
+
+        assert_eq!(rates.read_bytes_per_sec, 2048);
+        assert_eq!(rates.write_bytes_per_sec, 4096);
+    }
+
+    #[test]
+    fn disk_io_sample_clears_stale_rates_on_failure_or_counter_reset() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut sampler = SystemStatsSampler::new(temp.path());
+        let started = Instant::now();
+
+        sampler.apply_disk_io_sample(Some(DiskIoSample {
+            at: started,
+            counters: DiskIoCounters {
+                read_bytes: 1_000,
+                write_bytes: 2_000,
+            },
+        }));
+        assert_eq!(sampler.disk_read_bytes_per_sec, None);
+        assert_eq!(sampler.disk_write_bytes_per_sec, None);
+        assert_eq!(sampler.disk_total_bytes_per_sec, None);
+
+        sampler.apply_disk_io_sample(Some(DiskIoSample {
+            at: started + Duration::from_secs(1),
+            counters: DiskIoCounters {
+                read_bytes: 2_024,
+                write_bytes: 4_048,
+            },
+        }));
+        assert_eq!(sampler.disk_read_bytes_per_sec, Some(1024));
+        assert_eq!(sampler.disk_write_bytes_per_sec, Some(2048));
+        assert_eq!(sampler.disk_total_bytes_per_sec, Some(3072));
+
+        sampler.apply_disk_io_sample(Some(DiskIoSample {
+            at: started + Duration::from_secs(2),
+            counters: DiskIoCounters {
+                read_bytes: 512,
+                write_bytes: 1024,
+            },
+        }));
+        assert_eq!(sampler.disk_read_bytes_per_sec, None);
+        assert_eq!(sampler.disk_write_bytes_per_sec, None);
+        assert_eq!(sampler.disk_total_bytes_per_sec, None);
+        assert_eq!(
+            sampler.last_disk_io_sample.map(|sample| sample.counters),
+            Some(DiskIoCounters {
+                read_bytes: 512,
+                write_bytes: 1024,
+            })
+        );
+
+        sampler.disk_read_bytes_per_sec = Some(1);
+        sampler.disk_write_bytes_per_sec = Some(2);
+        sampler.disk_total_bytes_per_sec = Some(3);
+        sampler.apply_disk_io_sample(None);
+        assert_eq!(sampler.disk_read_bytes_per_sec, None);
+        assert_eq!(sampler.disk_write_bytes_per_sec, None);
+        assert_eq!(sampler.disk_total_bytes_per_sec, None);
+        assert_eq!(sampler.last_disk_io_sample, None);
     }
 
     #[cfg(not(target_os = "windows"))]

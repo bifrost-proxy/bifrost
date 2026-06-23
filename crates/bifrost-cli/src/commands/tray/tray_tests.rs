@@ -42,6 +42,38 @@
     }
 
     #[cfg(target_os = "macos")]
+    fn sample_dashboard_snapshot(runtime_label: &str) -> TrayDashboardSnapshot {
+        TrayDashboardSnapshot {
+            service_state: ServiceState::Running,
+            runtime_label: runtime_label.to_string(),
+            system_proxy_label: "System proxy Off".to_string(),
+            cpu_percent: 23.0,
+            cpu_logical_cores: Some(16),
+            cpu_performance_cores: Some(12),
+            cpu_efficiency_cores: Some(4),
+            load_one: 0.0,
+            load_five: 0.0,
+            load_fifteen: 0.0,
+            memory_used_bytes: 18 * 1024 * 1024 * 1024,
+            memory_total_bytes: 32 * 1024 * 1024 * 1024,
+            memory_pressure_percent: Some(14.0),
+            memory_compressed_bytes: 1024 * 1024 * 1024,
+            memory_cached_bytes: 4 * 1024 * 1024 * 1024,
+            swap_used_bytes: Some(0),
+            swap_total_bytes: Some(0),
+            disk_used_percent: Some(40.0),
+            disk_free_bytes: Some(500 * 1024 * 1024 * 1024),
+            disk_total_bytes: Some(1_000 * 1024 * 1024 * 1024),
+            disk_mount_label: Some("/".to_string()),
+            disk_total_bytes_per_sec: Some(0),
+            disk_read_bytes_per_sec: Some(0),
+            disk_write_bytes_per_sec: Some(0),
+            network_up_bytes_per_sec: Some(0),
+            network_down_bytes_per_sec: Some(0),
+            network_interface_label: Some("en0".to_string()),
+        }
+    }
+
     fn find_menu_item<'a>(entries: &'a [MenuEntry], id: &str) -> Option<&'a MenuItemDef> {
         entries.iter().find_map(|entry| match entry {
             MenuEntry::Item(item) if item.id == id => Some(item),
@@ -66,6 +98,7 @@
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
                 menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
+            dashboard: None,
         };
 
         assert_eq!(
@@ -188,6 +221,7 @@
             disk_used_percent: Some(65.0),
             network_down_bytes_per_sec: Some(2048),
             network_up_bytes_per_sec: Some(1024),
+            ..system_stats::SystemStatsSnapshot::default()
         };
 
         let cases = [
@@ -359,6 +393,7 @@
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
                 menu_bar: "C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string(),
             }),
+            dashboard: None,
         };
 
         let menu = build_menu_from_snapshot(
@@ -411,11 +446,8 @@
             false,
             None,
         );
-        let status = match &menu[0] {
-            menu::MenuEntry::Item(item) => item.label.as_str(),
-            menu::MenuEntry::Submenu(_) => panic!("expected status item"),
-        };
-        assert_eq!(status, "Bifrost: Running on 127.0.0.1:9900");
+        let status = find_menu_item(&menu, "_status").expect("status item");
+        assert_eq!(status.label, "Bifrost: Running on 127.0.0.1:9900");
     }
 
     #[test]
@@ -515,8 +547,9 @@
 
     #[test]
     fn test_recent_tray_interaction_defers_structural_replacement() {
-        assert!(!should_replace_native_menu(false, false, true));
-        assert!(should_replace_native_menu(false, false, false));
+        assert!(!should_replace_native_menu(false, false, true, false, true));
+        assert!(should_replace_native_menu(false, false, true, false, false));
+        assert!(!should_replace_native_menu(false, false, false, false, false));
     }
 
     #[test]
@@ -594,8 +627,8 @@
 
     #[test]
     fn test_explicit_reload_and_user_action_replace_native_menu() {
-        assert!(should_replace_native_menu(true, false, true));
-        assert!(should_replace_native_menu(false, true, true));
+        assert!(should_replace_native_menu(false, false, true, false, false));
+        assert!(should_replace_native_menu(false, false, false, true, false));
     }
 
     #[cfg(target_os = "macos")]
@@ -612,6 +645,76 @@
         state.mark_closed();
         assert!(!state.open.load(Ordering::Relaxed));
         assert_eq!(state.generation.load(Ordering::Relaxed), 2);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_dashboard_refresh_only_while_menu_is_open() {
+        assert!(should_refresh_dashboard(false, true, false, false));
+        assert!(!should_refresh_dashboard(false, true, false, true));
+        assert!(!should_refresh_dashboard(false, false, true, true));
+        assert!(should_refresh_dashboard(true, true, false, true));
+        assert!(should_refresh_dashboard(true, false, true, true));
+        assert!(!should_refresh_dashboard(true, false, false, true));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_system_stats_update_can_preserve_dashboard_snapshot() {
+        let original_dashboard = sample_dashboard_snapshot("127.0.0.1:8800");
+        let replacement_dashboard = sample_dashboard_snapshot("127.0.0.1:18890");
+        let mut snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            bin_available: true,
+            update_available: None,
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 20%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C20%".to_string(),
+            }),
+            dashboard: Some(original_dashboard.clone()),
+        };
+
+        let current_lines = snapshot.system_stats.clone();
+        assert!(!apply_system_stats_snapshot_update(
+            &mut snapshot,
+            current_lines,
+            DashboardSnapshotUpdate::Preserve,
+        ));
+        assert_eq!(snapshot.dashboard, Some(original_dashboard.clone()));
+
+        assert!(!apply_system_stats_snapshot_update(
+            &mut snapshot,
+            Some(SystemStatsMenuLines {
+                system: "System: CPU 21%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C20%".to_string(),
+            }),
+            DashboardSnapshotUpdate::Preserve,
+        ));
+        assert_eq!(snapshot.dashboard, Some(original_dashboard));
+
+        assert!(apply_system_stats_snapshot_update(
+            &mut snapshot,
+            Some(SystemStatsMenuLines {
+                system: "System: CPU 25%".to_string(),
+                network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
+                menu_bar: "C25%".to_string(),
+            }),
+            DashboardSnapshotUpdate::Preserve,
+        ));
+
+        let current_lines = snapshot.system_stats.clone();
+        assert!(apply_system_stats_snapshot_update(
+            &mut snapshot,
+            current_lines,
+            DashboardSnapshotUpdate::Set(Some(Box::new(replacement_dashboard.clone()))),
+        ));
+        assert_eq!(snapshot.dashboard, Some(replacement_dashboard));
     }
 
     #[test]
@@ -734,11 +837,8 @@
             data_dir.to_string_lossy().as_ref(),
             false,
         );
-        let status = match &menu[0] {
-            menu::MenuEntry::Item(item) => item.label.as_str(),
-            menu::MenuEntry::Submenu(_) => panic!("expected status item"),
-        };
-        assert!(status.starts_with("Bifrost: Running on 127.0.0.1:"));
+        let status = find_menu_item(&menu, "_status").expect("status item");
+        assert!(status.label.starts_with("Bifrost: Running on 127.0.0.1:"));
     }
 
     #[test]
@@ -770,6 +870,8 @@
             update_available: None,
             #[cfg(target_os = "macos")]
             system_stats: None,
+            #[cfg(target_os = "macos")]
+            dashboard: None,
         };
         let menu_data = Arc::new(Mutex::new(snapshot));
         let generation = AtomicU64::new(0);
