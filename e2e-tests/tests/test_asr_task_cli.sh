@@ -251,6 +251,7 @@ grep -q "Skipped:  *0" "$ADMIN_DATA_DIR/daily-sync.out"
 test -f "$SYNC_DIR/daily_report/2026-05-17-report.md"
 grep -q "报告同步目录验证内容" "$SYNC_DIR/daily_report/2026-05-17-report.md"
 test ! -f "$SYNC_DIR/2026-05-17-report.md"
+printf 'stale-short\n' > "$SYNC_DIR/daily_report/2026-05-17-report.md"
 BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" --json >"$ADMIN_DATA_DIR/daily-sync-second.json"
 python3 - "$ADMIN_DATA_DIR/daily-sync-second.json" "$SYNC_DIR" <<'PY'
 import json
@@ -262,6 +263,20 @@ assert sync["target_dir"] == sys.argv[2], sync
 assert sync["total_files"] == 1, sync
 assert sync["copied_files"] == 1, sync
 assert sync["skipped_files"] == 0, sync
+assert sync["failed_files"] == 0, sync
+PY
+grep -q "报告同步目录验证内容" "$SYNC_DIR/daily_report/2026-05-17-report.md"
+BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" ai asr task daily sync "$TASK_ID" --json >"$ADMIN_DATA_DIR/daily-sync-third.json"
+python3 - "$ADMIN_DATA_DIR/daily-sync-third.json" "$SYNC_DIR" <<'PY'
+import json
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    result = json.load(f)
+sync = result["sync"]
+assert sync["target_dir"] == sys.argv[2], sync
+assert sync["total_files"] == 1, sync
+assert sync["copied_files"] == 0, sync
+assert sync["skipped_files"] == 1, sync
 assert sync["failed_files"] == 0, sync
 PY
 

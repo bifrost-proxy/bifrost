@@ -1130,8 +1130,8 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     .unwrap();
 
     assert_eq!(daily_result.total_files, 1);
-    assert_eq!(daily_result.copied_files, 1);
-    assert_eq!(daily_result.skipped_files, 0);
+    assert_eq!(daily_result.copied_files, 0);
+    assert_eq!(daily_result.skipped_files, 1);
     assert_eq!(daily_result.failed_files, 0);
     assert_eq!(
         daily_result.target_dir,
@@ -1156,9 +1156,53 @@ fn daily_agent_report_sync_copies_reports_into_agent_subdirectories() {
     assert!(!sync_dir.join("2026-05-14-report.md").exists());
 }
 
+#[test]
+fn daily_agent_report_sync_overwrites_target_when_hash_differs() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let sync_dir = temp.path().join("icloud-sync");
+    std::fs::create_dir_all(&sync_dir).unwrap();
+
+    let mut task = test_directory_task(
+        "daily-agent-report-sync-hash-mismatch-task",
+        temp.path().join("audio"),
+    );
+    set_primary_daily_agent_report_sync_dir(
+        &mut task.daily_agent,
+        Some(sync_dir.to_string_lossy().to_string()),
+    );
+    ensure_asr_daily_workspace(&task).unwrap();
+
+    let daily_report_agent = normalized_daily_agents(&task.daily_agent)
+        .into_iter()
+        .find(|agent| agent.id == "daily_report")
+        .unwrap();
+    let daily_report_task = task_for_daily_agent(&task, &daily_report_agent);
+    let daily_report_path = daily_agent_output_dir(&daily_report_task).join("2026-05-14-report.md");
+    std::fs::write(&daily_report_path, "fresh report").unwrap();
+
+    let target_dir = sync_dir.join("daily_report");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target_path = target_dir.join("2026-05-14-report.md");
+    std::fs::write(&target_path, "stale short").unwrap();
+
+    let result = sync_daily_agent_report_files(
+        &daily_report_task,
+        &[daily_report_path.to_string_lossy().to_string()],
+    )
+    .unwrap();
+
+    assert_eq!(result.total_files, 1);
+    assert_eq!(result.copied_files, 1);
+    assert_eq!(result.skipped_files, 0);
+    assert_eq!(result.failed_files, 0);
+    assert_eq!(std::fs::read_to_string(&target_path).unwrap(), "fresh report");
+}
+
 #[cfg(unix)]
 #[test]
-fn daily_agent_report_sync_overwrites_unreadable_target_without_reading_target_hash() {
+fn daily_agent_report_sync_overwrites_unreadable_target_when_hash_cannot_be_read() {
     use std::os::unix::fs::PermissionsExt;
 
     let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());

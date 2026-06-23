@@ -114,6 +114,17 @@ fn sync_daily_agent_report_files(
             continue;
         }
 
+        if target.is_file() {
+            if let (Ok(source_sha256), Ok(target_sha256)) =
+                (compute_sha256(&source), compute_sha256(&target))
+            {
+                if source_sha256 == target_sha256 {
+                    result.skipped_files += 1;
+                    continue;
+                }
+            }
+        }
+
         let temp_target = target_dir.join(format!(
             ".{}.{}.{}.tmp",
             file_name.to_string_lossy(),

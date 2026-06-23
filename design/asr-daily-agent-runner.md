@@ -1103,7 +1103,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
 | Daily Docs 行级 Run All Agents | 点击某日文档行主按钮后，请求只携带该行 `date`，不携带 `force`/`agent_id`，后端 change plan 只包含该日期并按顺序运行全部 enabled Agent |
 | Daily Docs 行级 Run 单 Agent | 点击某日文档行 Agent 下拉项后，请求携带该行 `date` 和对应 `agent_id`，只运行指定 Agent |
 | Report sync dir 自动同步 | 配置 `report_sync_dir` 后 Runner 成功生成 report，会把本轮 report 复制到目标目录，并在 `last_report_sync` 记录 copied/skipped/failed；外部目录超时只记录同步错误，不影响 report 生成成功状态 |
-| 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report，目标目录已有文件时不读取目标 hash，使用临时文件覆盖；iCloud/外部目录卡住时 API 超时返回失败结果但代理进程继续响应其他请求 |
+| 手动同步 report | 调用 `/daily-agent/sync` 后同步全部现有 report；目标目录已有文件且可读时对比源/目标 sha256，hash 一致跳过，hash 不一致使用临时文件覆盖；目标 hash 读取失败时继续覆盖，避免 iCloud/外部目录权限或占位文件卡住同步；外部目录 I/O 超时时 API 返回失败结果但代理进程继续响应其他请求 |
 | CLI 同步控制 | `daily set-sync-dir` 能设置/清除目录，`daily sync` 能手动同步并输出 target/total/copied/skipped/failed |
 | 打开 report 详情 | `/daily-agent/reports/{date}` 返回 report Markdown 全文，非法日期拒绝，缺失 report 返回 404 |
 | 历史 report 发现 | `/daily-agent/runs` 合并 `daily_agent_processed.json` 与磁盘 `.daily/agents/<agent_id>/output/<output_dir>/`，并兼容旧版 `daily/<output_dir>/`、`.daily/agents/<agent_id>/<output_dir>/` 和 `daily/Report/` 下的 `YYYY-MM-DD-report.md`；即使 processed state 缺失，Daily Agent Records 也必须展示已有报告，并按日期倒序返回 |

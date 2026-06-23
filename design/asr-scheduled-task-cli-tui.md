@@ -527,14 +527,15 @@ Daily Agent 页面提供任务级 `report_sync_dir` 和 `Sync Reports` 操作，
 - 任务级 `report_sync_dir` 是所有 Daily Agents 共用的同步根目录；保存该目录时同步写入每个 Agent item，历史配置中 Agent item 为空时也从任务级字段继承。
 - 每个 Agent 成功生成 report 后立即同步本轮生成的 report，不等待用户手动点击 `Sync Reports`。
 - 同步目标按 Agent 分目录：`<report_sync_dir>/<agent_id>/YYYY-MM-DD-report.md`，避免不同 Agent 同一天报告覆盖或误判为相同内容跳过。
+- 同步前对可读的源文件和目标文件计算 sha256；hash 一致时跳过复制，hash 不一致时使用临时文件 + rename 强制覆盖目标副本。目标文件不存在或目标 hash 读取失败时仍继续覆盖，避免外部同步目录的权限/占位文件让同步卡死。
 - 手动 `Sync Reports` 遍历全部已配置 Agent，返回任务级汇总结果，同时分别更新各 Agent 的 `last_report_sync`。
 - 既有 processed state、IM delivery、Git commit 和 change plan 语义不变。
 
 ### 测试补充
 
-- 单元测试：覆盖任务级同步目录同步到所有 Agent、同一天两个 Agent 报告复制到不同 agent 子目录且不会落到同步根目录。
+- 单元测试：覆盖任务级同步目录同步到所有 Agent、同一天两个 Agent 报告复制到不同 agent 子目录且不会落到同步根目录、目标 hash 一致时跳过、目标 hash 不一致时覆盖、目标不可读时仍覆盖。
 - E2E：扩展 `e2e-tests/tests/test_asr_daily_agents_api.sh`，配置同步根目录后触发两个 Agent 真实运行，断言 `daily_report` 与 `tomorrow_todo` 的报告自动出现在各自子目录，并检查 `last_report_sync.target_dir`。
-- CLI E2E：更新 `e2e-tests/tests/test_asr_task_cli.sh`，手动 `daily sync` 断言报告复制到 `daily_report/` 子目录。
+- CLI E2E：更新 `e2e-tests/tests/test_asr_task_cli.sh`，手动 `daily sync` 断言报告复制到 `daily_report/` 子目录，篡改目标短文件后再次同步会按 hash 不一致覆盖，第三次 hash 一致返回 skipped。
 - human_tests：更新 `human_tests/asr-daily-agents.md` 的自动同步回归用例。
 
 ## 2026-06-05 增量：Daily Agent 全局专有名词配置
