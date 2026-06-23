@@ -38,6 +38,11 @@ export https_proxy=""
 # binary's default log level.
 export RUST_LOG="${RUST_LOG:-bifrost_cli::rules=info,bifrost_admin=info,info}"
 
+# The default foreground log-output is file-only; route tracing to the captured
+# stdout (ADMIN_CLIENT_BIFROST_LOG_FILE) as well so reload_log_count can observe
+# the "config change event received, reloading rules" line deterministically.
+export ADMIN_CLIENT_LOG_OUTPUT="console,file"
+
 if [[ -n "${ADMIN_PORT:-}" ]]; then
     BIFROST_PORT="$ADMIN_PORT"
     SYNC_PORT=${SYNC_PORT:-$((BIFROST_PORT + 8))}
@@ -105,13 +110,39 @@ done
 echo "Using ports: sync=$SYNC_PORT bifrost=$BIFROST_PORT"
 
 # Helper: count reload log lines emitted by the rules hot-reload watcher.
+#
+# IMPORTANT: in daemon mode bifrost calls reinit_logging_for_daemon(), which
+# routes ALL tracing output to a rolling daily file
+#   <data_dir>/logs/bifrost.YYYY-MM-DD.log
+# (and dup2's the process stdout to <data_dir>/logs/bifrost.log). The
+# "config change event received, reloading rules" line is a tracing::info!,
+# so it lands in the rolling file -- NOT in the admin-client captured stdout
+# ($ADMIN_CLIENT_BIFROST_LOG_FILE). We therefore aggregate matches across every
+# bifrost*.log under the data-dir logs directory, with the admin-client capture
+# as an extra (foreground / non-daemon) fallback.
 reload_log_count() {
-    if [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
-        grep -c "config change event received, reloading rules" \
-            "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || echo 0
-    else
-        echo 0
+    local needle="config change event received, reloading rules"
+    local total=0
+    local f c
+    local log_glob="${BIFROST_DATA_DIR_E2E}/logs"
+    # NOTE: grep -c prints "0" *and* exits 1 when there are no matches; a
+    # trailing `|| echo 0` would then emit a second line and corrupt the
+    # arithmetic. Capture the count plainly and sanitize to the leading
+    # integer instead.
+    if [[ -d "$log_glob" ]]; then
+        for f in "$log_glob"/bifrost*.log; do
+            [[ -f "$f" ]] || continue
+            c=$(grep -c "$needle" "$f" 2>/dev/null)
+            c=${c%%[!0-9]*}
+            total=$((total + ${c:-0}))
+        done
     fi
+    if [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        c=$(grep -c "$needle" "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null)
+        c=${c%%[!0-9]*}
+        total=$((total + ${c:-0}))
+    fi
+    echo "$total"
 }
 
 # Helper: resolve the on-disk path of a synced group rule file.
@@ -357,10 +388,13 @@ UPDATE_ENV=$(api -X PATCH -H "Content-Type: application/json" \
     "${SYNC_URL}/v4/env/${ENV_ID}")
 assert_body_contains '"code":0' "$UPDATE_ENV" "Remote env updated"
 
-# Trigger the sync that should now detect a real change.
-CHANGED_LIST=$(admin_get "/api/group-rules/${GROUP_ID}")
-assert_body_contains '10.9.8.7' "$CHANGED_LIST" "Changed content visible via admin list"
+# Trigger the sync that should now detect a real change. The list endpoint
+# returns rule metadata only (no rule body), so the authoritative observable
+# for propagated content is the on-disk synced .bifrost file.
+admin_get "/api/group-rules/${GROUP_ID}" > /dev/null
 sleep 3
+CHANGED_FILE_CONTENT="$(cat "$RULE_FILE" 2>/dev/null)"
+assert_body_contains '10.9.8.7' "$CHANGED_FILE_CONTENT" "Changed content visible in synced rule file"
 
 POST_CHANGE_RELOADS="$(reload_log_count)"
 POST_CHANGE_FP="$(file_fingerprint "$RULE_FILE")"

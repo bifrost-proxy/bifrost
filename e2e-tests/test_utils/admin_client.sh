@@ -216,7 +216,15 @@ admin_start_bifrost() {
     elif [[ -f "$windows_bin" ]]; then
         bifrost_bin="$windows_bin"
     fi
-    local start_args=(
+    local start_args=()
+    # Opt-in: callers needing the tracing log lines on the captured stdout
+    # (ADMIN_CLIENT_BIFROST_LOG_FILE) set ADMIN_CLIENT_LOG_OUTPUT, e.g.
+    # "console,file". This is a global flag and must precede the start
+    # subcommand. Default (unset) preserves the file-only behavior.
+    if [[ -n "${ADMIN_CLIENT_LOG_OUTPUT:-}" ]]; then
+        start_args+=(--log-output "$ADMIN_CLIENT_LOG_OUTPUT")
+    fi
+    start_args+=(
         -H "$host"
         -p "$port"
         start
