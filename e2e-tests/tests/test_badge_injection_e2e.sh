@@ -424,6 +424,25 @@ assert_share_env_exit_restores_rules() {
   exit_page="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit")"
   assert_body_contains "Share preview active" "$exit_page" "Local exit confirmation page should show active Share state" || return 1
   assert_body_contains "Exit share preview" "$exit_page" "Local exit confirmation page should render exit action" || return 1
+  local exit_page_headers
+  exit_page_headers="$(mktemp)"
+  env NO_PROXY="*" no_proxy="*" curl -sS -D "$exit_page_headers" -o /dev/null \
+    -H "Origin: http://localhost:3000" \
+    "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit" >/dev/null
+  assert_header_not_exists "Access-Control-Allow-Origin" "$(cat "$exit_page_headers")" "Local exit confirmation page must not be CORS-readable by allowed local origins" || {
+    rm -f "$exit_page_headers"
+    return 1
+  }
+  env NO_PROXY="*" no_proxy="*" curl -sS -D "$exit_page_headers" -o /dev/null \
+    -X OPTIONS \
+    -H "Origin: http://localhost:3000" \
+    -H "Access-Control-Request-Method: GET" \
+    "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit" >/dev/null
+  assert_header_not_exists "Access-Control-Allow-Origin" "$(cat "$exit_page_headers")" "Local exit confirmation page preflight must not allow CORS" || {
+    rm -f "$exit_page_headers"
+    return 1
+  }
+  rm -f "$exit_page_headers"
   local exit_token
   exit_token="$(python3 -c 'import re,sys; m=re.search(r"var token=\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")' <<<"$exit_page")"
   assert_not_empty "$exit_token" "Share exit token should be available only on local confirmation page" || return 1

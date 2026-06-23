@@ -66,6 +66,10 @@ fn query_token(query: Option<&str>) -> Option<String> {
         .filter(|token| !token.trim().is_empty())
 }
 
+fn should_apply_cors(admin_path: &str) -> bool {
+    admin_path != "/share-env/exit"
+}
+
 pub struct AdminRouter;
 
 impl AdminRouter {
@@ -90,7 +94,9 @@ impl AdminRouter {
 
         if req.method() == Method::OPTIONS {
             let mut resp = cors_preflight();
-            apply_cors_headers(&mut resp, origin.as_deref());
+            if should_apply_cors(&admin_path) {
+                apply_cors_headers(&mut resp, origin.as_deref());
+            }
             return resp;
         }
 
@@ -127,7 +133,9 @@ impl AdminRouter {
             serve_static_file(&admin_path, req.headers())
         };
 
-        apply_cors_headers(&mut resp, origin.as_deref());
+        if should_apply_cors(&admin_path) {
+            apply_cors_headers(&mut resp, origin.as_deref());
+        }
         resp
     }
 
@@ -374,6 +382,14 @@ mod tests {
 
     fn loopback_peer() -> Option<SocketAddr> {
         Some("127.0.0.1:12345".parse().unwrap())
+    }
+
+    #[test]
+    fn test_share_env_exit_page_suppresses_cors() {
+        assert!(!should_apply_cors("/share-env/exit"));
+        assert!(should_apply_cors("/api/rules/share-env/exit"));
+        assert!(should_apply_cors("/api/rules/share-env/status"));
+        assert!(should_apply_cors("/"));
     }
 
     #[test]

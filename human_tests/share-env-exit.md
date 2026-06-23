@@ -47,6 +47,7 @@ target/release/bifrost start -p 18880 --unsafe-ssl --skip-cert-check --no-system
 - hover panel 中显示短文案 `Share preview active`。
 - 同一行存在 `Exit` 按钮。
 - 注入数据不包含 `exit_token`，Exit 动作只打开本地确认页 `/_bifrost/share-env/exit`，且退出脚本不包含 `mode:'no-cors'`。
+- 对 `/_bifrost/share-env/exit` 发起带 `Origin: http://localhost:3000` 的请求时，响应不包含 `Access-Control-Allow-Origin`，确认页不能被本地业务 origin 通过 CORS 读取。
 - `GET /_bifrost/api/rules/share-env/status` 返回 `active=true` 和 `requested_name=share-source`。
 
 ### TC-SEE-02：退出 Share 环境后恢复进入前启用规则
@@ -108,3 +109,4 @@ rm -rf ./.bifrost-human-share-env
 - 2026-06-22：已使用 Playwright 真实浏览器通过 Bifrost 代理打开 share URL，确认 `#__bifrost_badge__` 立即带 `--share` 状态、右上角红点和呼吸光晕，hover panel 显示 `Share preview active` 和 `Exit`；点击 Exit 后验证 `share-env/status.active=false`、`before-enabled.enabled=true`、`share/share-source.enabled=false`。
 - 2026-06-23：根据 PR review 更新预期：被代理页面注入数据不得包含 `exit_token`，Exit 打开本地确认页，token 通过 JSON/form body 提交；连续打开多个 share 链接后退出必须恢复第一次 Share 前的 My Rules enabled 状态。
 - 2026-06-23：已使用临时数据目录 `.bifrost-human-share-env` 启动本地 Bifrost 和 HTML 服务，用 Google Chrome/Playwright 通过真实代理打开 clean URL，确认 Share badge 红点、呼吸光晕、hover panel `Share preview active` 和 `Exit`；确认被代理页面 visible DOM 不包含 `exit_token`；再打开本地确认页点击 `Exit share preview`，验证连续两个 Share 链接后退出恢复到第一次 Share 前状态，`before-enabled.enabled=true`、`before-disabled.enabled=false`、两条 `share/...` 规则均为 disabled。测试结束已清理临时进程和数据目录。
+- 2026-06-23：根据 Codex review 更新安全预期：本地确认页不应用全局 CORS。已通过 E2E 对 `Origin: http://localhost:3000` 的确认页响应断言无 `Access-Control-Allow-Origin`，避免 allowed local origin 读取退出 token。
