@@ -8,6 +8,7 @@ import {
   isDesktopCoreTransitionActive,
   useDesktopCoreStore,
 } from '../stores/useDesktopCoreStore';
+import { ADMIN_CSRF_HEADER, getAdminCsrfToken, isUnsafeHttpMethod } from './csrf';
 
 const client = axios.create({
   timeout: 30000,
@@ -107,7 +108,7 @@ export function notifyApiBusinessError(
   });
 }
 
-client.interceptors.request.use((config) => {
+client.interceptors.request.use(async (config) => {
   config.baseURL = buildApiUrl();
   config.headers = config.headers ?? {};
   config.headers['X-Client-Id'] = getClientId();
@@ -115,6 +116,9 @@ client.interceptors.request.use((config) => {
   const token = getAdminToken();
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+  }
+  if (isUnsafeHttpMethod(config.method) && !config.headers[ADMIN_CSRF_HEADER]) {
+    config.headers[ADMIN_CSRF_HEADER] = await getAdminCsrfToken();
   }
   return config;
 });

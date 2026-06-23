@@ -48,7 +48,8 @@ pub fn is_valid_admin_request<T>(
     config: &AdminSecurityConfig,
     allow_remote: bool,
 ) -> bool {
-    if !allow_remote && !peer_addr.ip().is_loopback() {
+    let is_loopback = peer_addr.ip().is_loopback();
+    if !allow_remote && !is_loopback {
         tracing::debug!(
             "Admin request rejected: peer address {} is not loopback",
             peer_addr
@@ -76,6 +77,13 @@ pub fn is_valid_admin_request<T>(
 
     if let Some(host) = req.headers().get(hyper::header::HOST) {
         if let Ok(host_str) = host.to_str() {
+            if is_loopback && !crate::cors::is_allowed_host(host_str) {
+                tracing::debug!(
+                    "Admin request rejected: loopback peer used non-local host {}",
+                    host_str
+                );
+                return false;
+            }
             if !allow_remote && !config.allowed_hosts.iter().any(|h| host_str == h) {
                 tracing::debug!(
                     "Admin request rejected: host {} not in allowed list {:?}",
@@ -196,6 +204,15 @@ mod tests {
         let req = create_request("/_bifrost/api/rules", Some("evil.com:9900"));
 
         assert!(!is_valid_admin_request(&req, peer_addr, &config, false));
+        assert!(!is_valid_admin_request(&req, peer_addr, &config, true));
+    }
+
+    #[test]
+    fn test_accept_remote_enabled_non_loopback_custom_host() {
+        let config = AdminSecurityConfig::new(9900);
+        let peer_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 25)), 12345);
+        let req = create_request("/_bifrost/api/rules", Some("admin.internal:9900"));
+
         assert!(is_valid_admin_request(&req, peer_addr, &config, true));
     }
 

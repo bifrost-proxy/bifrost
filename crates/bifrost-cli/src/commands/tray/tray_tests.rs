@@ -41,6 +41,106 @@
         }
     }
 
+    #[test]
+    fn test_load_system_proxy_state_treats_other_owner_as_unchecked() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![(
+            "HTTP/1.1 200 OK",
+            r#"{"supported":true,"enabled":true,"managed_by_bifrost":false}"#,
+        )]);
+
+        let status = load_system_proxy_state(&admin_url).expect("system proxy state");
+        handle.join().unwrap();
+
+        assert_eq!(
+            status.state,
+            menu::SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            }
+        );
+        assert!(!status.needs_recheck);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["GET /_bifrost/api/proxy/system HTTP/1.1"]
+        );
+    }
+
+    #[test]
+    fn test_load_system_proxy_state_rechecks_configured_but_inactive() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![(
+            "HTTP/1.1 200 OK",
+            r#"{"supported":true,"enabled":false,"managed_by_bifrost":false,"configured_enabled":true}"#,
+        )]);
+
+        let status = load_system_proxy_state(&admin_url).expect("system proxy state");
+        handle.join().unwrap();
+
+        assert_eq!(
+            status.state,
+            menu::SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            }
+        );
+        assert!(status.needs_recheck);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec!["GET /_bifrost/api/proxy/system HTTP/1.1"]
+        );
+    }
+
+    #[test]
+    fn test_system_proxy_snapshot_matches_desired_state_only_after_recheck_clears() {
+        let rechecking = SystemProxyMenuSnapshot {
+            state: menu::SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            },
+            needs_recheck: true,
+        };
+        assert!(!system_proxy_snapshot_matches_desired(&rechecking, false));
+
+        let disabled = SystemProxyMenuSnapshot {
+            state: menu::SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            },
+            needs_recheck: false,
+        };
+        assert!(system_proxy_snapshot_matches_desired(&disabled, false));
+        assert!(!system_proxy_snapshot_matches_desired(&disabled, true));
+
+        let enabled = SystemProxyMenuSnapshot {
+            state: menu::SystemProxyMenuState {
+                supported: true,
+                enabled: true,
+            },
+            needs_recheck: false,
+        };
+        assert!(system_proxy_snapshot_matches_desired(&enabled, true));
+    }
+
+    #[test]
+    fn test_active_rule_targets_match_desired_state() {
+        let target = RuleTarget::Personal {
+            name: "alpha".to_string(),
+        };
+        let group_target = RuleTarget::Group {
+            group_name: "team".to_string(),
+            name: "beta".to_string(),
+        };
+        let active = vec![target.clone()];
+
+        assert!(active_rule_targets_match_desired(&active, &target, true));
+        assert!(!active_rule_targets_match_desired(&active, &target, false));
+        assert!(active_rule_targets_match_desired(&active, &group_target, false));
+        assert!(!active_rule_targets_match_desired(
+            &active,
+            &group_target,
+            true
+        ));
+    }
+
     #[cfg(target_os = "macos")]
     fn sample_dashboard_snapshot(runtime_label: &str) -> TrayDashboardSnapshot {
         TrayDashboardSnapshot {
@@ -91,6 +191,8 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: None,
+            system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -386,6 +488,8 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: None,
+            system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -451,17 +555,53 @@
     }
 
     #[test]
+    fn test_running_menu_snapshot_uses_admin_url_fallback_when_runtime_is_missing() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-running-fallback-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: 999_999,
+            admin_url: Some("http://127.0.0.1:18898/_bifrost/".to_string()),
+            port: Some(18898),
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+
+        let running = load_menu_data_snapshot(&args, ServiceState::Running, false, false);
+        assert_eq!(
+            running.runtime.as_ref().map(|runtime| runtime.port),
+            Some(18898)
+        );
+
+        let disconnected =
+            load_menu_data_snapshot(&args, ServiceState::Disconnected, false, false);
+        assert!(disconnected.runtime.is_none());
+    }
+
+    #[test]
     fn test_pure_tray_icon_event_does_not_refresh_native_menu() {
         assert!(!should_refresh_native_menu(
-            false, false, false, false, false
+            false, false, false, false, false, false
         ));
     }
 
     #[test]
     fn test_background_changes_request_native_menu_refresh() {
-        assert!(should_refresh_native_menu(true, false, false, false, false));
-        assert!(should_refresh_native_menu(false, true, false, false, false));
-        assert!(should_refresh_native_menu(false, false, false, false, true));
+        assert!(should_refresh_native_menu(
+            true, false, false, false, false, false
+        ));
+        assert!(should_refresh_native_menu(
+            false, true, false, false, false, false
+        ));
+        assert!(should_refresh_native_menu(
+            false, false, false, false, true, false
+        ));
+        assert!(should_refresh_native_menu(
+            false, false, false, false, false, true
+        ));
     }
 
     #[test]
@@ -550,6 +690,64 @@
         assert!(!should_replace_native_menu(false, false, true, false, true));
         assert!(should_replace_native_menu(false, false, true, false, false));
         assert!(!should_replace_native_menu(false, false, false, false, false));
+    }
+
+    #[test]
+    fn test_open_menu_forces_replacement_for_explicit_action_state_changes() {
+        assert!(!should_force_replace_open_native_menu(
+            true, false, false, false, false
+        ));
+        assert!(!should_force_replace_open_native_menu(
+            false, true, false, false, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, true, false, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, false, true, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, false, false, true
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, true, false, false, false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_monitor_start_child_returns_after_runtime_ready_without_waiting_for_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_file = temp.path().join("runtime.json");
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .spawn()
+            .expect("spawn sleeping child");
+        fs::write(
+            &runtime_file,
+            format!(r#"{{"pid":{},"port":9900}}"#, child.id()),
+        )
+        .unwrap();
+
+        let operation = Arc::new(AtomicU8::new(OP_STARTING));
+        let reload_flag = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+
+        assert!(monitor_start_child(
+            child,
+            runtime_file,
+            operation.clone(),
+            reload_flag.clone(),
+            OP_START_FAILED,
+        ));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "ready daemon child must not block the start action thread"
+        );
+        assert_eq!(operation.load(Ordering::Relaxed), OP_IDLE);
+        assert!(reload_flag.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -683,6 +881,8 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: None,
+            system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -853,6 +1053,70 @@
         );
         let status = find_menu_item(&menu, "_status").expect("status item");
         assert!(status.label.starts_with("Bifrost: Running on 127.0.0.1:"));
+        let toggle = find_menu_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
+        assert!(!toggle.enabled);
+        assert!(!toggle.checked);
+    }
+
+    #[test]
+    fn test_initial_menu_snapshot_loads_rules_and_system_proxy_from_admin_api() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![
+            (
+                "HTTP/1.1 200 OK",
+                r#"[{"name":"alpha","rule_name":"alpha","group_name":null,"group_id":null}]"#,
+            ),
+            ("HTTP/1.1 200 OK", r#"{"code":0,"data":{"list":[]}}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"total":1,"rules":[{"name":"alpha","rule_count":1,"group_id":null,"group_name":null}],"variable_conflicts":[],"merged_content":""}"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"supported":true,"enabled":true,"managed_by_bifrost":true}"#,
+            ),
+        ]);
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-initial-full-admin-snapshot-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: std::process::id(),
+            admin_url: Some(admin_url),
+            port: None,
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+
+        let snapshot = load_menu_data_snapshot(&args, ServiceState::Running, true, true);
+        handle.join().unwrap();
+
+        assert_eq!(snapshot.rules.len(), 1);
+        assert_eq!(
+            snapshot.rules[0].target,
+            RuleTarget::Personal {
+                name: "alpha".to_string(),
+            }
+        );
+        assert!(snapshot.rules[0].enabled);
+        assert_eq!(
+            snapshot.system_proxy,
+            Some(menu::SystemProxyMenuState {
+                supported: true,
+                enabled: true,
+            })
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
+                "GET /_bifrost/api/group HTTP/1.1",
+                "GET /_bifrost/api/rules/active-summary HTTP/1.1",
+                "GET /_bifrost/api/proxy/system HTTP/1.1",
+            ]
+        );
     }
 
     #[test]
@@ -880,6 +1144,8 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: Some(cached.clone()),
+            system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             #[cfg(target_os = "macos")]
@@ -935,6 +1201,8 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: None,
+            system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             #[cfg(target_os = "macos")]
@@ -984,6 +1252,83 @@
         assert_eq!(toggle.label, "System Proxy");
         assert!(toggle.enabled);
         assert!(toggle.checked);
+    }
+
+    #[test]
+    fn test_background_menu_refresh_rechecks_configured_inactive_system_proxy_cache() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![
+            ("HTTP/1.1 200 OK", r#"[]"#),
+            ("HTTP/1.1 200 OK", r#"{"code":0,"data":{"list":[]}}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"total":0,"rules":[],"variable_conflicts":[],"merged_content":""}"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"supported":true,"enabled":true,"managed_by_bifrost":true,"configured_enabled":true}"#,
+            ),
+        ]);
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-system-proxy-recheck-cache-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: std::process::id(),
+            admin_url: Some(admin_url),
+            port: None,
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+        let snapshot = MenuDataSnapshot {
+            runtime: runtime_for_menu(&args),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: Some(menu::SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            }),
+            system_proxy_needs_recheck: true,
+            pending_action: None,
+            bin_available: true,
+            update_available: None,
+            #[cfg(target_os = "macos")]
+            system_stats: None,
+            #[cfg(target_os = "macos")]
+            dashboard: None,
+        };
+        let menu_data = Arc::new(Mutex::new(snapshot));
+        let generation = AtomicU64::new(0);
+
+        assert!(refresh_menu_data_snapshot(
+            &args,
+            ServiceState::Running,
+            &menu_data,
+            &generation,
+            false,
+        ));
+        handle.join().unwrap();
+
+        let snapshot = clone_menu_data_snapshot(&menu_data);
+        assert_eq!(
+            snapshot.system_proxy,
+            Some(menu::SystemProxyMenuState {
+                supported: true,
+                enabled: true,
+            })
+        );
+        assert!(!snapshot.system_proxy_needs_recheck);
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
+                "GET /_bifrost/api/group HTTP/1.1",
+                "GET /_bifrost/api/rules/active-summary HTTP/1.1",
+                "GET /_bifrost/api/proxy/system HTTP/1.1",
+            ]
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1055,7 +1400,7 @@
             ),
             (
                 "HTTP/1.1 200 OK",
-                r#"{"total":1,"rules":[{"name":"shared","rule_count":1,"group_id":"grp-a","group_name":"Team A"}],"variable_conflicts":[],"merged_content":""}"#,
+                r#"{"total":2,"rules":[{"name":"shared","rule_count":1,"group_id":"grp-a","group_name":"Team A"},{"name":"NextOncall双前端本地开发","rule_count":1,"group_id":"grp-master","group_name":"next-agent"}],"variable_conflicts":[],"merged_content":""}"#,
             ),
             (
                 "HTTP/1.1 200 OK",
@@ -1114,7 +1459,7 @@
                     }
             })
             .unwrap();
-        assert!(!master_group.enabled);
+        assert!(master_group.enabled);
         assert!(master_group.managed_group);
 
         let hidden_local_group = rules

@@ -300,6 +300,76 @@ fetch_via_proxy_follow_headers() {
   rm -f "$headers_file" "$body_file"
 }
 
+header_location() {
+  python3 - "$1" <<'PY'
+import pathlib
+import sys
+
+headers = pathlib.Path(sys.argv[1]).read_text(encoding="utf-8", errors="replace")
+location = ""
+for line in headers.splitlines():
+    if line.lower().startswith("location:"):
+        location = line.split(":", 1)[1].strip()
+print(location)
+PY
+}
+
+confirm_rule_share_location() {
+  local location="$1"
+  python3 - "$location" "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-confirm" <<'PY'
+import json
+import sys
+import urllib.parse
+import urllib.request
+
+location = sys.argv[1]
+endpoint = sys.argv[2]
+query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+body = json.dumps({
+    "payload": query["payload"][0],
+    "target_url": query["target"][0],
+}).encode()
+req = urllib.request.Request(
+    endpoint,
+    data=body,
+    method="POST",
+    headers={"Content-Type": "application/json"},
+)
+with urllib.request.urlopen(req, timeout=10) as resp:
+    data = json.loads(resp.read().decode())
+assert data["success"] is True
+assert data["redirect_url"] == query["target"][0]
+print(data["rule_name"])
+PY
+}
+
+open_and_confirm_share_link() {
+  local share_url="$1"
+  local expected_rule="$2"
+  local headers_file
+  headers_file="$(mktemp)"
+  local body_file
+  body_file="$(mktemp)"
+
+  HTTP_STATUS="$(NO_PROXY="" no_proxy="" curl -sS --max-time "$(http_timeout)" --proxy "http://${PROXY_HOST}:${PROXY_PORT}" -D "$headers_file" -o "$body_file" -w '%{http_code}' "$share_url" 2>/dev/null || echo 000)"
+  HTTP_HEADERS="$(cat "$headers_file" | tr -d '\r')"
+  HTTP_BODY="$(cat "$body_file")"
+
+  local location
+  location="$(header_location "$headers_file")"
+  rm -f "$headers_file" "$body_file"
+
+  assert_status "302" "$HTTP_STATUS" "Share link GET should redirect to rule confirmation page" || return 1
+  assert_body_contains "/_bifrost/share/rule?" "$location" "Share link redirect should target local confirmation page" || return 1
+  assert_body_contains "payload=" "$location" "Confirmation redirect should carry share payload" || return 1
+  assert_body_contains "target=" "$location" "Confirmation redirect should carry clean target" || return 1
+  assert_body_not_contains "__bifrost_rule" "$location" "Confirmation redirect should remove original share query" || return 1
+
+  local confirmed_rule
+  confirmed_rule="$(confirm_rule_share_location "$location")"
+  assert_body_equals "$expected_rule" "$confirmed_rule" "Rule share confirmation should apply expected rule" || return 1
+}
+
 fetch_via_proxy() {
   local url="$1"
   local headers_file
@@ -375,13 +445,11 @@ assert_share_env_exit_restores_rules() {
   second_share_url="$(create_share_link_for_rule "share-source-2" "$clean_url")"
   assert_body_contains "__bifrost_rule" "$second_share_url" "Second share link should include rule share query" || return 1
 
-  fetch_via_proxy_follow_headers "$share_url"
-  assert_status "302" "$HTTP_STATUS" "Share link GET should redirect to clean URL" || return 1
-  assert_body_not_contains "__bifrost_rule" "$HTTP_HEADERS" "Redirect location should remove share query" || return 1
+  open_and_confirm_share_link "$share_url" "share/share-source" || return 1
 
   local status_json
   status_json="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/status")"
-  assert_body_contains '"active":true' "$status_json" "Share env status should be active after import" || return 1
+  assert_body_contains '"active":true' "$status_json" "Share env status should be active after confirmation" || return 1
   assert_body_contains '"requested_name":"share-source"' "$status_json" "Share env should record requested rule name" || return 1
 
   fetch_via_proxy "$clean_url"
@@ -408,10 +476,9 @@ assert_share_env_exit_restores_rules() {
   imported_enabled="$(rule_enabled_state "share/share-source")"
   assert_body_equals "true" "$imported_enabled" "Imported share rule should be enabled inside share env" || return 1
 
-  fetch_via_proxy_follow_headers "$second_share_url"
-  assert_status "302" "$HTTP_STATUS" "Second share link GET should redirect to clean URL" || return 1
+  open_and_confirm_share_link "$second_share_url" "share/share-source-2" || return 1
   imported_enabled="$(rule_enabled_state "share/share-source")"
-  assert_body_equals "false" "$imported_enabled" "First imported share rule should be disabled after second share import" || return 1
+  assert_body_equals "false" "$imported_enabled" "First imported share rule should be disabled after second share confirmation" || return 1
   local second_imported_enabled
   second_imported_enabled="$(rule_enabled_state "share/share-source-2")"
   assert_body_equals "true" "$second_imported_enabled" "Second imported share rule should be enabled inside share env" || return 1

@@ -13,6 +13,7 @@ use std::sync::Arc;
 use bifrost_core::{ClientAccessControl, SystemProxyManager};
 use bifrost_storage::{ConfigManager, RulesStorage, SharedConfigManager, ValuesStorage};
 use bifrost_sync::SharedSyncManager;
+use rand::{distributions::Alphanumeric, Rng};
 
 use crate::admin_auth_db::{AuthDb, SharedAuthDb};
 use parking_lot::RwLock as ParkingRwLock;
@@ -426,6 +427,7 @@ pub struct AdminState {
     group_name_cache: parking_lot::Mutex<HashMap<String, String>>,
     group_cache_resolved: AtomicBool,
     badge_rules_cache: parking_lot::RwLock<String>,
+    csrf_token: String,
 }
 
 const DEFAULT_MAX_BODY_BUFFER_SIZE: usize = 10 * 1024 * 1024;
@@ -489,6 +491,11 @@ impl AdminState {
             badge_rules_cache: parking_lot::RwLock::new(
                 r#"{"rules":[],"merged_content":"","share_env":{"active":false}}"#.to_string(),
             ),
+            csrf_token: rand::thread_rng()
+                .sample_iter(&Alphanumeric)
+                .take(48)
+                .map(char::from)
+                .collect(),
         }
     }
 
@@ -501,6 +508,10 @@ impl AdminState {
         if old != port {
             tracing::info!("AdminState port updated: {} -> {}", old, port);
         }
+    }
+
+    pub fn csrf_token(&self) -> &str {
+        &self.csrf_token
     }
 
     pub fn get_max_body_buffer_size(&self) -> usize {
