@@ -183,7 +183,7 @@ fn badge_script(rules_json: &str) -> String {
             "var D={rules_json};",
             "var hideTimer=null;",
             "var base=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/rules':'';",
-            "var apiBase=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/api':'';",
+            "var exitPage=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/share-env/exit':'';",
             "var BOLT='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M560 192L256 576h208l-48 256 320-384H528l32-256z\" fill=\"currentColor\"/></svg>';",
             "var TEAM='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M824 512a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm-312-88a120 120 0 1 0 0-240 120 120 0 0 0 0 240zm-312 88a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm624 56c-46 0-86 26-106 64h-4c-24-48-62-86-108-110a184 184 0 0 0-104-32h-8a184 184 0 0 0-104 32c-46 24-84 62-108 110h-4a120 120 0 0 0-106-64c-66 0-120 54-120 120v64h248a248 248 0 0 0 8 24h-8v200h416V792h-8a248 248 0 0 0 8-24h248v-64c0-66-54-120-120-120z\" fill=\"currentColor\"/></svg>';",
             "function shareActive(){{return!!(D.share_env&&D.share_env.active)}}",
@@ -195,7 +195,7 @@ fn badge_script(rules_json: &str) -> String {
             "function fallbackCopy(text){{return new Promise(function(resolve,reject){{var t=document.createElement('textarea');var prev=document.activeElement;var ok=false;var copied=false;function onCopy(e){{if(e.clipboardData){{e.clipboardData.setData('text/plain',text);e.preventDefault();copied=true}}}}t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.top='0';t.style.left='0';t.style.width='1px';t.style.height='1px';t.style.opacity='0';document.body.appendChild(t);document.addEventListener('copy',onCopy,true);try{{t.focus();t.select();t.setSelectionRange(0,text.length);ok=document.execCommand('copy')}}catch(e){{ok=false}}document.removeEventListener('copy',onCopy,true);document.body.removeChild(t);try{{if(prev&&prev.focus)prev.focus()}}catch(e){{}}ok&&copied?resolve():reject(new Error('copy failed'))}})}}",
             "function copyText(text){{if(navigator.clipboard&&window.isSecureContext&&navigator.clipboard.writeText){{return navigator.clipboard.writeText(text).catch(function(){{return fallbackCopy(text)}})}}return fallbackCopy(text)}}",
             "function copyMerged(btn){{copyText(String(D.merged_content||'').trim()).then(function(){{setCopyState(btn,'Copied');setTimeout(function(){{setCopyState(btn,'Copy')}},1200)}}).catch(function(){{setCopyState(btn,'Failed');setTimeout(function(){{setCopyState(btn,'Copy')}},1600)}})}}",
-            "function exitShare(btn,ev){{if(!apiBase||!ev||ev.isTrusted===false)return;var token=(D.share_env&&D.share_env.exit_token)||'';if(!token)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Exiting';function done(){{btn.textContent='Exited';setTimeout(function(){{location.reload()}},250)}}function fail(){{btn.disabled=false;btn.textContent='Failed';setTimeout(function(){{btn.textContent=old}},1400)}}fetch(apiBase+'/rules/share-env/exit?token='+encodeURIComponent(token),{{method:'POST',mode:'cors',credentials:'omit'}}).then(function(r){{if(!r.ok)throw new Error('exit failed');return r.json()}}).then(function(data){{if(!data||data.was_active!==true)throw new Error('exit not active');done()}}).catch(fail)}}",
+            "function exitShare(btn,ev){{if(!exitPage||!ev||ev.isTrusted===false)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Opening';var w=null;try{{w=window.open(exitPage,'_blank','popup,width=420,height=460')}}catch(e){{w=null}}if(w){{btn.textContent='Confirm';setTimeout(function(){{btn.disabled=false;btn.textContent=old}},1600)}}else{{location.href=exitPage}}}}",
             "function ruleRow(r){{",
             "var href='';",
             "if(base){{",
@@ -254,13 +254,19 @@ fn badge_script(rules_json: &str) -> String {
 }
 
 fn inline_script_safe_json(rules_json: &str) -> String {
-    let value = serde_json::from_str::<serde_json::Value>(rules_json).unwrap_or_else(|_| {
+    let mut value = serde_json::from_str::<serde_json::Value>(rules_json).unwrap_or_else(|_| {
         serde_json::json!({
             "rules": [],
             "merged_content": "",
             "admin_port": 0,
         })
     });
+    if let Some(share_env) = value
+        .get_mut("share_env")
+        .and_then(|value| value.as_object_mut())
+    {
+        share_env.remove("exit_token");
+    }
     let json = serde_json::to_string(&value)
         .unwrap_or_else(|_| r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string());
 
@@ -481,7 +487,7 @@ mod tests {
         assert!(snippet.contains("rule_count"));
         assert!(snippet.contains("merged_content"));
         assert!(snippet.contains("admin_port"));
-        assert!(snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
+        assert!(snippet.contains("_bifrost/share-env/exit"));
     }
 
     #[test]
@@ -563,16 +569,18 @@ mod tests {
         assert!(snippet.contains("function shareActive()"));
         assert!(snippet.contains("__bb_share_status_dot"));
         assert!(snippet.contains("Share preview active"));
-        assert!(snippet.contains("exit_token"));
+        assert!(!snippet.contains("exit_token"));
         assert!(snippet.contains("ev.isTrusted"));
         assert!(snippet.contains("document.currentScript"));
         assert!(snippet.contains("removeChild(S)"));
         assert!(snippet.contains("__bb_exit"));
-        assert!(snippet.contains("/rules/share-env/exit"));
-        assert!(snippet.contains("encodeURIComponent(token)"));
+        assert!(snippet.contains("_bifrost/share-env/exit"));
+        assert!(snippet.contains("window.open(exitPage"));
+        assert!(!snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
+        assert!(!snippet.contains("encodeURIComponent(token)"));
         assert!(!snippet.contains("mode:'no-cors'"));
         assert!(snippet.contains("exitShare(btn,ev)"));
-        assert!(snippet.contains("location.reload()"));
+        assert!(snippet.contains("location.href=exitPage"));
     }
 
     #[test]

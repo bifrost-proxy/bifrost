@@ -1465,11 +1465,7 @@ impl AdminState {
             .ok()
             .flatten()
             .filter(|state| state.active)
-            .map(|mut state| {
-                if state.exit_token.is_empty() {
-                    state.exit_token = uuid::Uuid::new_v4().to_string();
-                    let _ = self.rules_storage.save_share_env_state(&state);
-                }
+            .map(|state| {
                 serde_json::json!({
                     "active": true,
                     "imported_rule_name": state.imported_rule_name,
@@ -1477,7 +1473,6 @@ impl AdminState {
                     "content_hash": state.content_hash,
                     "enabled_rule_names": state.enabled_rule_names,
                     "entered_at": state.entered_at,
-                    "exit_token": state.exit_token,
                 })
             })
             .unwrap_or_else(|| serde_json::json!({"active": false}));
@@ -2078,7 +2073,7 @@ mod tests {
         assert_eq!(json["share_env"]["active"], true);
         assert_eq!(json["share_env"]["requested_name"], "demo");
         assert_eq!(json["share_env"]["imported_rule_name"], "share/demo");
-        assert_eq!(json["share_env"]["exit_token"], "exit-token");
+        assert!(json["share_env"].get("exit_token").is_none());
 
         cleanup_test_dir(&dir);
     }
