@@ -22,7 +22,7 @@
 | [cli-start-advanced.md](./cli-start-advanced.md) | CLI Start 高级参数 | 33 | 顶层 help 短链化、按场景组织的 CLI 快速开始、同一 Bifrost 服务服务多个应用/开发任务、Agent 协作开发业务 Skill 场景、完整 CLI 详细文档入口、全局 Values 推荐边界、TLS 拦截域名/应用排除与白名单、系统代理（默认启用、--no-system-proxy 禁用、异步收敛轮询、互斥校验）、CLI 代理环境变量、访问控制模式、Badge 注入、证书检查跳过、日志配置 |
 | [cli-rule-management.md](./cli-rule-management.md) | CLI 规则管理 | 50 | rule 子命令全覆盖：list/add/show/get/update/enable/disable/delete/rename/reorder/active/sync，含过滤器、lineProps、legacy filter 控制标记兼容，以及保存前语法检查 JSON 报告、失败不落盘和 allow-invalid 草稿保存 |
 | [rule-share-query.md](./rule-share-query.md) | Rule Share Query | 8 | CLI/Web UI/Admin API 生成分享链接、裸域名目标 URL 默认补 HTTP 并经代理真实导入、HTTPS TLS 解包路径导入含 `@规则引用` 的分享链接、代理 GET 导入后重定向 clean URL、`share/` 命名空间复用、同名不同内容后缀创建并独占启用个人规则 |
-| [share-env-exit.md](./share-env-exit.md) | Share 环境快速退出 | 3 | Share 环境页面胶囊红点与呼吸光晕、hover panel Exit 入口、本地确认页退出、确认页禁用 CORS、防止本地业务 origin 读取 token、注入页不暴露进入 Share 前的规则名、退出后恢复进入 Share 前启用的 My Rules 快照，以及连续 Share 链接不覆盖原始恢复快照 |
+| [share-env-exit.md](./share-env-exit.md) | Share 环境快速退出 | 5 | Share 环境页面胶囊红点与呼吸光晕、hover panel Exit 入口、原地 JSON body 退出、成功后刷新当前页面、注入页不暴露进入 Share 前的规则名、退出后恢复进入 Share 前启用的 My Rules 快照、连续 Share 链接不覆盖原始恢复快照，以及进入前空 enabled / 多 enabled 的恢复边界 |
 | [rules-filesystem-hot-reload.md](./rules-filesystem-hot-reload.md) | 规则文件系统热更新 | 5 | CLI 本地规则新增/更新/删除、直接 `.bifrost` 文件编辑和直接删除后，运行中代理与 Rules active summary 自动刷新，Group 规则无变化同步不重复写盘 |
 | [cli-rule-list-legacy-skip.md](./cli-rule-list-legacy-skip.md) | CLI `rule list` `.bifrost` 文件过滤 | 2 | 非 `.bifrost` 文件自动忽略，且 group 子目录规则仍可正常读取 |
 | [cli-traffic-search.md](./cli-traffic-search.md) | CLI 流量与搜索 | 37 | traffic list/get/search/clear 命令，含多维度过滤器、代理入口端口筛选、搜索范围控制、交互式搜索 |

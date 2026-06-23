@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{body::Incoming, header::HeaderValue, Method, Request, Response, StatusCode};
 use tracing::debug;
 
 use crate::cors::apply_cors_headers;
@@ -70,6 +70,25 @@ fn should_apply_cors(admin_path: &str) -> bool {
     admin_path != "/share-env/exit"
 }
 
+fn apply_share_env_exit_cors(resp: &mut Response<BoxBody>, origin: Option<&str>) {
+    let headers = resp.headers_mut();
+    headers.insert(
+        "Access-Control-Allow-Origin",
+        origin
+            .and_then(|origin| HeaderValue::from_str(origin).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("*")),
+    );
+    headers.insert("Vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "Access-Control-Allow-Headers",
+        HeaderValue::from_static("Content-Type"),
+    );
+}
+
 pub struct AdminRouter;
 
 impl AdminRouter {
@@ -94,7 +113,9 @@ impl AdminRouter {
 
         if req.method() == Method::OPTIONS {
             let mut resp = cors_preflight();
-            if should_apply_cors(&admin_path) {
+            if admin_path == "/api/rules/share-env/exit" {
+                apply_share_env_exit_cors(&mut resp, origin.as_deref());
+            } else if should_apply_cors(&admin_path) {
                 apply_cors_headers(&mut resp, origin.as_deref());
             }
             return resp;
@@ -133,7 +154,9 @@ impl AdminRouter {
             serve_static_file(&admin_path, req.headers())
         };
 
-        if should_apply_cors(&admin_path) {
+        if admin_path == "/api/rules/share-env/exit" {
+            apply_share_env_exit_cors(&mut resp, origin.as_deref());
+        } else if should_apply_cors(&admin_path) {
             apply_cors_headers(&mut resp, origin.as_deref());
         }
         resp
@@ -390,6 +413,34 @@ mod tests {
         assert!(should_apply_cors("/api/rules/share-env/exit"));
         assert!(should_apply_cors("/api/rules/share-env/status"));
         assert!(should_apply_cors("/"));
+    }
+
+    #[test]
+    fn test_share_env_exit_api_allows_business_origin_cors() {
+        let mut resp = Response::builder()
+            .status(200)
+            .body(crate::handlers::empty_body())
+            .unwrap();
+        apply_share_env_exit_cors(&mut resp, Some("https://www.coze.cn"));
+
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("https://www.coze.cn")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Methods")
+                .and_then(|value| value.to_str().ok()),
+            Some("POST, OPTIONS")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Headers")
+                .and_then(|value| value.to_str().ok()),
+            Some("Content-Type")
+        );
     }
 
     #[test]

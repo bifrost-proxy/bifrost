@@ -571,6 +571,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exit_share_env_restores_empty_pre_share_enabled_set() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-disabled", "disabled.example.com statusCode://202")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        let share_state = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert!(share_state.enabled_rule_names.is_empty());
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+
+        let exit = exit_rule_share_env(state.clone(), None).await.unwrap();
+        assert!(exit.was_active);
+        assert!(exit.restored_rules.is_empty());
+        assert_eq!(exit.disabled_rules, vec!["share/shared".to_string()]);
+        assert!(!state.rules_storage.load("before-disabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_share_env_restores_multiple_pre_share_enabled_rules() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(&RuleFile::new("before-a", "a.example.com statusCode://201").with_enabled(true))
+            .unwrap();
+        state
+            .rules_storage
+            .save(&RuleFile::new("before-b", "b.example.com statusCode://202").with_enabled(true))
+            .unwrap();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-disabled", "disabled.example.com statusCode://203")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        let share_state = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert_eq!(
+            share_state.enabled_rule_names,
+            vec!["before-a".to_string(), "before-b".to_string()]
+        );
+        assert!(!state.rules_storage.load("before-a").unwrap().enabled);
+        assert!(!state.rules_storage.load("before-b").unwrap().enabled);
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+
+        let exit = exit_rule_share_env(state.clone(), None).await.unwrap();
+        assert!(exit.was_active);
+        assert_eq!(
+            exit.restored_rules,
+            vec!["before-a".to_string(), "before-b".to_string()]
+        );
+        assert_eq!(exit.disabled_rules, vec!["share/shared".to_string()]);
+        assert!(state.rules_storage.load("before-a").unwrap().enabled);
+        assert!(state.rules_storage.load("before-b").unwrap().enabled);
+        assert!(!state.rules_storage.load("before-disabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
     async fn exit_share_env_without_state_is_noop() {
         let state = temp_rules_state();
         let outcome = exit_rule_share_env(state, None).await.unwrap();

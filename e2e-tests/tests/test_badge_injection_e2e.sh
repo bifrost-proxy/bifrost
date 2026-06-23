@@ -392,9 +392,13 @@ assert_share_env_exit_restores_rules() {
   assert_body_contains "__bb_share_status_dot" "$HTTP_BODY" "Injected badge panel should include Share status dot" || return 1
   assert_body_contains "Share preview active" "$HTTP_BODY" "Injected badge panel should show concise Share preview text" || return 1
   assert_body_contains '"requested_name":"share-source"' "$HTTP_BODY" "Badge inline data should identify active share env" || return 1
-  assert_body_contains "_bifrost/share-env/exit" "$HTTP_BODY" "Badge panel should open local share exit confirmation page" || return 1
+  assert_body_contains "_bifrost/api/rules/share-env/exit" "$HTTP_BODY" "Badge panel should call local share exit API in place" || return 1
+  assert_body_contains "body:JSON.stringify({token:token})" "$HTTP_BODY" "Badge exit should send token in JSON body" || return 1
+  assert_body_contains "location.reload()" "$HTTP_BODY" "Badge exit should reload current page after successful exit" || return 1
+  assert_body_not_contains "window.open(exitPage" "$HTTP_BODY" "Badge exit should not open a secondary confirmation page" || return 1
+  assert_body_not_contains "location.href=exitPage" "$HTTP_BODY" "Badge exit should not navigate to a secondary confirmation page" || return 1
   assert_body_not_contains "mode:'no-cors'" "$HTTP_BODY" "Badge exit should not use no-cors blind success fallback" || return 1
-  assert_body_not_contains "exit_token" "$HTTP_BODY" "Badge inline data must not expose share exit token to proxied pages" || return 1
+  assert_body_contains "exit_token" "$HTTP_BODY" "Badge inline data should carry share exit token for in-place JSON body exit" || return 1
   assert_body_not_contains "enabled_rule_names" "$HTTP_BODY" "Badge inline data must not expose pre-share enabled rule names to proxied pages" || return 1
 
   local before_enabled
@@ -421,32 +425,9 @@ assert_share_env_exit_restores_rules() {
   status_json="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/status")"
   assert_body_contains '"active":true' "$status_json" "Share env should remain active after invalid exit token" || return 1
 
-  local exit_page
-  exit_page="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit")"
-  assert_body_contains "Share preview active" "$exit_page" "Local exit confirmation page should show active Share state" || return 1
-  assert_body_contains "Exit share preview" "$exit_page" "Local exit confirmation page should render exit action" || return 1
-  local exit_page_headers
-  exit_page_headers="$(mktemp)"
-  env NO_PROXY="*" no_proxy="*" curl -sS -D "$exit_page_headers" -o /dev/null \
-    -H "Origin: http://localhost:3000" \
-    "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit" >/dev/null
-  assert_header_not_exists "Access-Control-Allow-Origin" "$(cat "$exit_page_headers")" "Local exit confirmation page must not be CORS-readable by allowed local origins" || {
-    rm -f "$exit_page_headers"
-    return 1
-  }
-  env NO_PROXY="*" no_proxy="*" curl -sS -D "$exit_page_headers" -o /dev/null \
-    -X OPTIONS \
-    -H "Origin: http://localhost:3000" \
-    -H "Access-Control-Request-Method: GET" \
-    "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/share-env/exit" >/dev/null
-  assert_header_not_exists "Access-Control-Allow-Origin" "$(cat "$exit_page_headers")" "Local exit confirmation page preflight must not allow CORS" || {
-    rm -f "$exit_page_headers"
-    return 1
-  }
-  rm -f "$exit_page_headers"
   local exit_token
-  exit_token="$(python3 -c 'import re,sys; m=re.search(r"var token=\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")' <<<"$exit_page")"
-  assert_not_empty "$exit_token" "Share exit token should be available only on local confirmation page" || return 1
+  exit_token="$(python3 -c 'import re,sys; m=re.search(r"\"exit_token\":\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")' <<<"$HTTP_BODY")"
+  assert_not_empty "$exit_token" "Share exit token should be available to the injected badge for in-place exit" || return 1
 
   local exit_response
   exit_response="$(env NO_PROXY="*" no_proxy="*" curl -sS \
