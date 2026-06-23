@@ -224,18 +224,32 @@ pub fn build_menu(
         }));
     }
 
-    if let (Some(rt), Some(system_proxy)) = (runtime, system_proxy) {
+    if let Some(rt) = runtime {
         let admin_url = rt.admin_url();
-        items.push(item(MenuItemDef {
-            id: "toggle_system_proxy".to_string(),
-            label: "System Proxy".to_string(),
-            enabled: is_running && system_proxy.supported && !service_action_busy,
-            checked: system_proxy.enabled,
-            action: MenuItemAction::SetSystemProxy {
-                url: format!("{}api/proxy/system", admin_url),
-                enabled: !system_proxy.enabled,
-            },
-        }));
+        let fallback_system_proxy;
+        let system_proxy = if let Some(system_proxy) = system_proxy {
+            Some(system_proxy)
+        } else if is_running {
+            fallback_system_proxy = SystemProxyMenuState {
+                supported: true,
+                enabled: false,
+            };
+            Some(&fallback_system_proxy)
+        } else {
+            None
+        };
+        if let Some(system_proxy) = system_proxy {
+            items.push(item(MenuItemDef {
+                id: "toggle_system_proxy".to_string(),
+                label: "System Proxy".to_string(),
+                enabled: is_running && system_proxy.supported && !service_action_busy,
+                checked: system_proxy.enabled,
+                action: MenuItemAction::SetSystemProxy {
+                    url: format!("{}api/proxy/system", admin_url),
+                    enabled: !system_proxy.enabled,
+                },
+            }));
+        }
     }
 
     items.push(item(MenuItemDef {
@@ -824,6 +838,38 @@ mod tests {
             MenuItemAction::SetSystemProxy { url, enabled } => {
                 assert_eq!(url, "http://127.0.0.1:8800/_bifrost/api/proxy/system");
                 assert!(!enabled);
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_system_proxy_toggle_is_visible_while_running_without_cached_state() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            None,
+        );
+
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
+        assert!(toggle.enabled);
+        assert!(!toggle.checked);
+        match &toggle.action {
+            MenuItemAction::SetSystemProxy { url, enabled } => {
+                assert_eq!(url, "http://127.0.0.1:8800/_bifrost/api/proxy/system");
+                assert!(*enabled);
             }
             other => panic!("unexpected action: {other:?}"),
         }

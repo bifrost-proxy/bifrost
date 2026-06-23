@@ -59,7 +59,7 @@ V1 主要字段：
 | 区域 | 字段 | 来源 |
 | --- | --- | --- |
 | CPU | percent、logical cores、P/E cores（可用时） | `SystemStatsSampler` + macOS sysctl |
-| Memory | pressure 或 used percent、used/total、compressed、cached、swap | `SystemStatsSampler` + macOS swap helper |
+| Memory | used percent、used/total、compressed、cached、swap、pressure health | `SystemStatsSampler` + macOS swap helper |
 | Disk | used percent、free bytes、read/write instant I/O | `sysinfo::Disks` + macOS I/O Registry statistics |
 | Network | up/down rate | `SystemStatsSampler` |
 
@@ -79,8 +79,8 @@ CPU：
 
 Memory：
 
-- 优先用 pressure percent。
-- 无 pressure 时用 used/total percent。
+- 主数值使用 used/total percent，与顶部 status item 的 MEM 口径一致。
+- pressure 只用于健康状态与颜色参考；无 pressure 时用 used/total percent 作为健康状态 fallback。
 - `< 60%`: green
 - `60%..80%`: amber
 - `>= 80%`: red
@@ -166,7 +166,7 @@ Disk read/write 生产路径直接通过 macOS IOKit 枚举 `IOBlockStorageDrive
 - 左侧统一展示指标名称和主数值。
 - 右侧用上下两行展示细节。
 - CPU 右侧只展示 logical/P-E cores；不展示 load average 或 Bifrost 自身进程负载。
-- Memory 左侧主值展示 memory pressure 百分比，后面用小字号括号展示健康状态（如 `14% (Healthy)`、`64% (Pressure)`、`86% (Critical)`），无 pressure 时用 used percent 兜底；右侧第一行展示 used/total，第二行展示 compressed、cached、swap。
+- Memory 左侧主值展示与菜单栏 `MEM` 一致的 memory used 百分比，后面用小字号括号展示基于 pressure 的健康状态（如 `70% (Healthy)`、`70% (Pressure)`、`86% (Critical)`），无 pressure 时健康状态用 used percent 兜底；右侧第一行展示 used/total，第二行展示 compressed、cached、swap。
 - Disk 右侧展示 free/total、read/write。
 - Network 左侧只展示 `Network`，右侧第一行 upload、第二行 download。
 
@@ -229,7 +229,7 @@ human_tests：
   - 顶部 header 出现 CPU/Memory/Disk/Network 区域
   - Bifrost 运行状态和版本号出现在菜单底部
   - CPU 不展示 Bifrost 自身进程负载或 load，只展示逻辑/P-E 核心信息
-  - 内存左侧展示 pressure 健康状态，右侧展示 used/total、compressed/cached/swap
+  - 内存左侧主值展示 used percent 并与顶部 MEM 一致，pressure 仅作为健康状态；右侧展示 used/total、compressed/cached/swap
   - 磁盘展示 used/free/read/write，未完成采样时显示 collecting
   - Network 下方有分隔线，把 header 和普通菜单项隔开
   - 菜单打开期间 stats 刷新不导致菜单自动关闭
