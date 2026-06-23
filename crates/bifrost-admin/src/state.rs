@@ -1472,6 +1472,7 @@ impl AdminState {
                     "requested_name": state.requested_name,
                     "content_hash": state.content_hash,
                     "entered_at": state.entered_at,
+                    "exit_token": state.exit_token,
                 })
             })
             .unwrap_or_else(|| serde_json::json!({"active": false}));
@@ -2072,7 +2073,7 @@ mod tests {
         assert_eq!(json["share_env"]["active"], true);
         assert_eq!(json["share_env"]["requested_name"], "demo");
         assert_eq!(json["share_env"]["imported_rule_name"], "share/demo");
-        assert!(json["share_env"].get("exit_token").is_none());
+        assert_eq!(json["share_env"]["exit_token"], "exit-token");
         assert!(json["share_env"].get("enabled_rule_names").is_none());
 
         cleanup_test_dir(&dir);
