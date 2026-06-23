@@ -389,9 +389,11 @@ UPDATE_ENV=$(api -X PATCH -H "Content-Type: application/json" \
 assert_body_contains '"code":0' "$UPDATE_ENV" "Remote env updated"
 
 # Trigger the sync that should now detect a real change. The list endpoint
-# returns rule metadata only (no rule body), so the authoritative observable
-# for propagated content is the on-disk synced .bifrost file.
+# returns rule metadata only (no rule body); the detail endpoint exposes the
+# rule body, and the authoritative on-disk observable is the synced .bifrost file.
 admin_get "/api/group-rules/${GROUP_ID}" > /dev/null
+CHANGED_DETAIL=$(admin_get "/api/group-rules/${GROUP_ID}/storm-rule")
+assert_body_contains '10.9.8.7' "$CHANGED_DETAIL" "Changed content visible via admin detail"
 sleep 3
 CHANGED_FILE_CONTENT="$(cat "$RULE_FILE" 2>/dev/null)"
 assert_body_contains '10.9.8.7' "$CHANGED_FILE_CONTENT" "Changed content visible in synced rule file"
@@ -403,7 +405,11 @@ echo "Pre-change fp=$PRE_CHANGE_FP post-change fp=$POST_CHANGE_FP"
 
 assert_not_equals "$PRE_CHANGE_FP" "$POST_CHANGE_FP" \
     "Real change: local rule file was rewritten with new content"
-# A real change must trigger at least one new reload line.
+assert_body_contains '10.9.8.7' "$(cat "$RULE_FILE")" \
+    "Real change: local rule file contains new content"
+# A real change must trigger at least one new reload line. reload_log_count
+# aggregates the tracing line from the daemon rolling log, so this is the
+# authoritative observable that the hot-reload watcher actually fired.
 REAL_CHANGE_TRIGGERED=$([[ "$POST_CHANGE_RELOADS" -gt "$PRE_CHANGE_RELOADS" ]] && echo yes || echo no)
 assert_equals "yes" "$REAL_CHANGE_TRIGGERED" \
     "Real change: reload was triggered ($PRE_CHANGE_RELOADS -> $POST_CHANGE_RELOADS)"
