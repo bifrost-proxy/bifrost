@@ -44,4 +44,5 @@ windows-sys = { version = "0.59", features = [
 ] }
 
 [dev-dependencies]
+filetime = "0.2"
 tempfile.workspace = true

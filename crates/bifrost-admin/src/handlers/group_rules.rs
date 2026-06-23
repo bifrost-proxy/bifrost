@@ -1,4 +1,7 @@
-use bifrost_core::RuleSyntaxReport;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, LazyLock, Mutex};
+
+use bifrost_core::{normalize_rule_content, RuleSyntaxReport};
 use bifrost_storage::RulesStorage;
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
@@ -9,7 +12,20 @@ use super::{
     BoxBody,
 };
 use crate::state::SharedAdminState;
-use bifrost_storage::ConfigChangeEvent;
+use bifrost_storage::{ConfigChangeEvent, RulesChangeOrigin};
+
+static GROUP_SYNC_LOCKS: LazyLock<Mutex<HashMap<String, Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+fn group_sync_lock(group_name: &str) -> Arc<Mutex<()>> {
+    let mut locks = GROUP_SYNC_LOCKS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    locks
+        .entry(group_name.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 fn nullable_string<'de, D>(deserializer: D) -> std::result::Result<String, D::Error>
 where
@@ -289,30 +305,31 @@ fn sync_envs_to_local(
     envs: &[RemoteEnv],
     group_name: &str,
 ) -> Result<bool, String> {
-    let existing_names: std::collections::HashSet<String> = rules_storage
+    let existing_names: HashSet<String> = rules_storage
         .list()
         .unwrap_or_default()
         .into_iter()
         .collect();
 
     let mut active_rules_changed = false;
-    let mut remote_names = std::collections::HashSet::new();
+    let mut remote_names = HashSet::new();
     for env in envs {
         let rule_name = env.name.clone();
         remote_names.insert(rule_name.clone());
+        let normalized_content = canonical_group_rule_content(&env.rule);
 
         let existing = rules_storage.load(&rule_name).ok();
         let existing_enabled = existing.as_ref().map(|r| r.enabled).unwrap_or(false);
         if existing_enabled
             && existing
                 .as_ref()
-                .map(|r| r.content.as_str() != env.rule.as_str())
+                .map(|r| r.content.as_str() != normalized_content.as_str())
                 .unwrap_or(false)
         {
             active_rules_changed = true;
         }
 
-        let mut rule_file = bifrost_storage::RuleFile::new(&rule_name, &env.rule);
+        let mut rule_file = bifrost_storage::RuleFile::new(&rule_name, normalized_content);
         rule_file.enabled = existing_enabled;
         rule_file.group = Some(group_name.to_string());
         rule_file.created_at = env.create_time.clone();
@@ -322,11 +339,11 @@ fn sync_envs_to_local(
         }
         rule_file.mark_synced(&env.id, &env.user_id, &env.create_time, &env.update_time);
 
-        if existing
+        let matches_existing = existing
             .as_ref()
             .map(|existing_rule| synced_group_rule_matches(existing_rule, &rule_file))
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if matches_existing {
             continue;
         }
 
@@ -352,6 +369,12 @@ fn sync_envs_to_local(
     Ok(active_rules_changed)
 }
 
+fn canonical_group_rule_content(content: &str) -> String {
+    normalize_rule_content(content)
+        .trim_end_matches('\n')
+        .to_string()
+}
+
 fn synced_group_rule_matches(
     existing: &bifrost_storage::RuleFile,
     desired: &bifrost_storage::RuleFile,
@@ -360,18 +383,8 @@ fn synced_group_rule_matches(
         && existing.content == desired.content
         && existing.enabled == desired.enabled
         && existing.sort_order == desired.sort_order
-        && existing.description == desired.description
         && existing.group == desired.group
-        && existing.version == desired.version
-        && existing.created_at == desired.created_at
-        && existing.updated_at == desired.updated_at
-        && existing.sync.rule_id == desired.sync.rule_id
-        && existing.sync.status == desired.sync.status
-        && existing.sync.last_synced_content_hash == desired.sync.last_synced_content_hash
         && existing.sync.remote_id == desired.sync.remote_id
-        && existing.sync.remote_user_id == desired.sync.remote_user_id
-        && existing.sync.remote_created_at == desired.sync.remote_created_at
-        && existing.sync.remote_updated_at == desired.sync.remote_updated_at
 }
 
 fn build_rule_info_from_storage(rules_storage: &RulesStorage) -> Vec<GroupRuleInfo> {
@@ -766,16 +779,22 @@ async fn handle_list_and_sync(
     );
 
     match fetch_user_envs(&sync_manager, &virtual_user_id).await {
-        Ok(envs) => match sync_envs_to_local(&group_storage, &envs, &group_name) {
-            Ok(active_rules_changed) => {
-                if active_rules_changed {
-                    notify_rules_changed(&state);
+        Ok(envs) => {
+            let sync_lock = group_sync_lock(&group_name);
+            let _sync_guard = sync_lock
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            match sync_envs_to_local(&group_storage, &envs, &group_name) {
+                Ok(active_rules_changed) => {
+                    if active_rules_changed {
+                        notify_rules_changed(&state, RulesChangeOrigin::RemoteSync);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed to sync envs to local storage");
                 }
             }
-            Err(e) => {
-                tracing::warn!(error = %e, "Failed to sync envs to local storage");
-            }
-        },
+        }
         Err(e) => {
             tracing::warn!(
                 error = %e,
@@ -913,7 +932,8 @@ async fn handle_create_rule(
     };
 
     let rule_name = env.name.clone();
-    let mut rule_file = bifrost_storage::RuleFile::new(&rule_name, &env.rule);
+    let mut rule_file =
+        bifrost_storage::RuleFile::new(&rule_name, canonical_group_rule_content(&env.rule));
     rule_file.enabled = false;
     rule_file.group = Some(group_name.clone());
     rule_file.created_at = env.create_time.clone();
@@ -1004,7 +1024,8 @@ async fn handle_update_rule(
     };
     let env = env_resp.data;
 
-    let mut rule_file = bifrost_storage::RuleFile::new(rule_name, &env.rule);
+    let mut rule_file =
+        bifrost_storage::RuleFile::new(rule_name, canonical_group_rule_content(&env.rule));
     rule_file.enabled = existing.enabled;
     rule_file.group = Some(group_name.clone());
     rule_file.created_at = env.create_time.clone();
@@ -1016,7 +1037,7 @@ async fn handle_update_rule(
     }
 
     if existing.enabled {
-        notify_rules_changed(&state);
+        notify_rules_changed(&state, RulesChangeOrigin::RemoteSync);
     }
 
     json_response(&GroupRuleDetail {
@@ -1073,7 +1094,7 @@ async fn handle_delete_rule(
     }
 
     if existing.enabled {
-        notify_rules_changed(&state);
+        notify_rules_changed(&state, RulesChangeOrigin::RemoteSync);
     }
 
     success_response("Rule deleted")
@@ -1098,7 +1119,7 @@ async fn handle_enable_rule(
 
     match group_storage.set_enabled(rule_name, enabled) {
         Ok(_) => {
-            notify_rules_changed(&state);
+            notify_rules_changed(&state, RulesChangeOrigin::LocalApi);
             let action = if enabled { "enabled" } else { "disabled" };
             tracing::info!(
                 target: "bifrost_admin::group_rules",
@@ -1117,10 +1138,10 @@ async fn handle_enable_rule(
     }
 }
 
-fn notify_rules_changed(state: &SharedAdminState) {
+fn notify_rules_changed(state: &SharedAdminState, origin: RulesChangeOrigin) {
     state.refresh_badge_rules_cache();
     if let Some(ref config_manager) = state.config_manager {
-        match config_manager.notify(ConfigChangeEvent::RulesChanged) {
+        match config_manager.notify(ConfigChangeEvent::rules_changed(origin)) {
             Ok(count) => {
                 tracing::info!(
                     target: "bifrost_admin::group_rules",
@@ -1158,6 +1179,14 @@ mod tests {
     fn storage() -> RulesStorage {
         let dir = tempfile::tempdir().expect("temp dir");
         RulesStorage::with_dir(dir.keep()).expect("rules storage")
+    }
+
+    #[test]
+    fn group_sync_lock_reuses_lock_for_same_group() {
+        let first = group_sync_lock("cache-group-lock-test");
+        let second = group_sync_lock("cache-group-lock-test");
+
+        assert!(Arc::ptr_eq(&first, &second));
     }
 
     #[test]
@@ -1261,6 +1290,37 @@ mod tests {
 
         assert_eq!(second_content, first_content);
         assert_eq!(second_modified, first_modified);
+        assert_eq!(second_rule.sync.last_synced_at, first_synced_at);
+    }
+
+    #[test]
+    fn sync_envs_to_local_skips_unchanged_normalized_remote_rule_write() {
+        let storage = storage();
+        let env = remote_env("normalized-rule", "example.com ignore://host|rule\n");
+        let normalized_content = canonical_group_rule_content(&env.rule);
+        assert_ne!(normalized_content, env.rule);
+
+        sync_envs_to_local(&storage, std::slice::from_ref(&env), "cache-group")
+            .expect("initial sync");
+        let path = storage.base_dir().join("normalized-rule.bifrost");
+        let first_content = std::fs::read_to_string(&path).expect("read initial rule");
+        let first_rule = storage
+            .load("normalized-rule")
+            .expect("load initially synced rule");
+        let first_synced_at = first_rule.sync.last_synced_at.clone();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        let changed = sync_envs_to_local(&storage, &[env], "cache-group").expect("repeat sync");
+        assert!(!changed);
+
+        let second_content = std::fs::read_to_string(&path).expect("read repeated rule");
+        let second_rule = storage
+            .load("normalized-rule")
+            .expect("load repeatedly synced rule");
+
+        assert_eq!(second_content, first_content);
+        assert_eq!(second_rule.content, normalized_content);
         assert_eq!(second_rule.sync.last_synced_at, first_synced_at);
     }
 }

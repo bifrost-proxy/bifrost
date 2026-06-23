@@ -6,7 +6,7 @@ use bifrost_core::{
     },
     validate_rule_syntax_report, ParseError, ParseErrorSeverity, RuleSyntaxReport, ValueStore,
 };
-use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesStorage};
+use bifrost_storage::{ConfigChangeEvent, RuleFile, RuleSummary, RulesChangeOrigin, RulesStorage};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -1483,7 +1483,9 @@ pub(crate) fn notify_rules_changed_pub(state: &SharedAdminState) {
 fn notify_rules_changed(state: &SharedAdminState) {
     state.refresh_badge_rules_cache();
     if let Some(ref config_manager) = state.config_manager {
-        match config_manager.notify(ConfigChangeEvent::RulesChanged) {
+        match config_manager.notify(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        )) {
             Ok(count) => {
                 tracing::info!(
                     target: "bifrost_admin::rules",

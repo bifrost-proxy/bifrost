@@ -15,12 +15,17 @@
 - macOS 系统级 LaunchDaemon 隐藏命令 `system-proxy cleanup-daemon` 例外：plist 已把 `StandardOutPath` / `StandardErrorPath` 指向 `/var/log/bifrost-system-proxy-cleanup.*`，因此该命令默认保留 `console,file`，避免系统级守护进程日志丢失。
 - stdout 协议型隐藏 worker 继续强制使用文件日志，避免 JSONL/stdio IPC 被日志污染。
 - daemon 模式保持既有 `reinit_logging_for_daemon` 文件日志路径。
+- 日志目录保留策略统一为默认 7 天；CLI 主进程、daemon、Tray 和 Desktop sidecar/bootstrap 都调用共享清理逻辑。
+- 日志目录默认容量上限为 1GiB；即使 7 天内日志暴涨，清理逻辑也会按修改时间从旧到新删除已知 Bifrost 日志产物，直到目录总量回到上限内。
+- 清理范围覆盖当前 `bifrost.YYYY-MM-DD.log`、daemon err 轮转、Tray 日志、历史 `log-YYYY-MM-DD.log`、desktop sidecar/bootstrap、guardian/restart/upgrade 日志和 `*-audit.json`；未知普通文件不纳入删除。
 
 ## 依赖项
 
 - `crates/bifrost-cli/src/cli.rs`：全局 CLI 参数默认值和 help。
 - `crates/bifrost-cli/src/main.rs`：根据 CLI 参数计算 `LogOutput`。
 - `crates/bifrost-core/src/logging.rs`：`LogConfig` 默认输出。
+- `crates/bifrost-cli/src/commands/tray/tray.rs`：Tray 启动时复用共享日志目录清理。
+- `desktop/src-tauri/src/main.rs`：Desktop bootstrap/sidecar 打开日志前复用共享日志目录清理。
 
 ## 测试方案
 
@@ -30,12 +35,15 @@
   - `explicit_console_log_output_keeps_file_logging` 验证 `--log-output console` 作为 stdout opt-in 简写时仍保留文件日志。
   - `launchd_cleanup_daemon_keeps_console_logs_for_standard_paths` 验证 macOS LaunchDaemon cleanup 隐藏命令默认保留 console 输出。
   - `voice_worker_forces_logs_away_from_stdout_protocol` 验证 stdout 协议型 worker 不被显式 console 参数污染。
+  - `cleanup_bifrost_log_dir_removes_legacy_and_shared_dated_logs` 验证 7 天保留清理覆盖历史 `log-YYYY-MM-DD.log`、Tray 和 daemon err 轮转日志。
+  - `cleanup_bifrost_log_dir_removes_old_fixed_log_artifacts_by_mtime` 验证 desktop sidecar/bootstrap、audit 等固定文件按 mtime 清理。
+  - `cleanup_bifrost_log_dir_enforces_total_size_by_removing_oldest_logs` 验证 1GiB 容量上限路径按旧到新删除日志。
 - E2E 测试：
   - `e2e-tests/tests/test_cli_start_log_output_default_file.sh` 启动真实前台服务，断言默认无 console tracing 日志且文件日志非空。
   - 同一脚本使用 `--log-output console` 断言显式开启后 console tracing 日志可见，且文件日志仍非空。
   - macOS 上同一脚本运行 `system-proxy cleanup-daemon`，断言 launchd stdio 路径需要的 console tracing 日志仍可见。
 - 真实场景测试：
-  - 更新并执行 `human_tests/cli-log-output-default.md` 中默认文件日志、显式 console opt-in、daemon 文件日志和默认 info 噪声回归用例。
+  - 更新并执行 `human_tests/cli-log-output-default.md` 中默认文件日志、显式 console opt-in、daemon 文件日志、默认 info 噪声，以及日志目录 7 天保留 + 1GiB 上限回归用例。
 
 ## Review/Fix/Test 闭环方案
 

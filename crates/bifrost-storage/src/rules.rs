@@ -586,7 +586,7 @@ impl RulesStorage {
                                     }
                                 }
                                 if !sub_rules.is_empty() {
-                                    tracing::info!(
+                                    tracing::debug!(
                                         target: "bifrost_storage::rules",
                                         subdir = %dir_name,
                                         count = sub_rules.len(),

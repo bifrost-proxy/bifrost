@@ -9,8 +9,8 @@ use std::time::Duration;
 
 use bifrost_core::{BifrostError, Result};
 use bifrost_storage::{
-    content_hash, ConfigChangeEvent, ConfigManager, RuleFile, RuleSyncStatus, RulesStorage,
-    SyncConfig, SyncConfigUpdate,
+    content_hash, ConfigChangeEvent, ConfigManager, RuleFile, RuleSyncStatus, RulesChangeOrigin,
+    RulesStorage, SyncConfig, SyncConfigUpdate,
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -559,7 +559,9 @@ impl SyncManager {
                 _ = self.wake.notified() => {}
                 event = receiver.recv() => {
                     match event {
-                        Ok(ConfigChangeEvent::RulesChanged | ConfigChangeEvent::SyncConfigChanged) => {}
+                        Ok(ConfigChangeEvent::RulesChanged(origin))
+                            if origin.should_wake_sync() => {}
+                        Ok(ConfigChangeEvent::SyncConfigChanged) => {}
                         Ok(_) => continue,
                         Err(broadcast::error::RecvError::Lagged(_)) => {}
                         Err(broadcast::error::RecvError::Closed) => break,
@@ -644,7 +646,9 @@ impl SyncManager {
                     target: "bifrost_sync::manager",
                     "session expired, triggering rules reload to disable group rules"
                 );
-                let _ = self.config_manager.notify(ConfigChangeEvent::RulesChanged);
+                let _ = self.config_manager.notify(ConfigChangeEvent::rules_changed(
+                    RulesChangeOrigin::RemoteSync,
+                ));
             }
             return Ok(());
         };
@@ -1248,7 +1252,9 @@ impl SyncManager {
         drop(current_state);
 
         if local_storage_changed {
-            let _ = self.config_manager.notify(ConfigChangeEvent::RulesChanged);
+            let _ = self.config_manager.notify(ConfigChangeEvent::rules_changed(
+                RulesChangeOrigin::RemoteSync,
+            ));
         }
 
         Ok(())
