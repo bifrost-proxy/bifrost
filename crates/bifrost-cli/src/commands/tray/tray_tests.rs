@@ -192,6 +192,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -488,6 +489,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -550,6 +552,33 @@
         );
         let status = find_menu_item(&menu, "_status").expect("status item");
         assert_eq!(status.label, "Bifrost: Running on 127.0.0.1:9900");
+    }
+
+    #[test]
+    fn test_running_menu_snapshot_uses_admin_url_fallback_when_runtime_is_missing() {
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-running-fallback-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: 999_999,
+            admin_url: Some("http://127.0.0.1:18898/_bifrost/".to_string()),
+            port: Some(18898),
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+
+        let running = load_menu_data_snapshot(&args, ServiceState::Running, false, false);
+        assert_eq!(
+            running.runtime.as_ref().map(|runtime| runtime.port),
+            Some(18898)
+        );
+
+        let disconnected =
+            load_menu_data_snapshot(&args, ServiceState::Disconnected, false, false);
+        assert!(disconnected.runtime.is_none());
     }
 
     #[test]
@@ -661,6 +690,64 @@
         assert!(!should_replace_native_menu(false, false, true, false, true));
         assert!(should_replace_native_menu(false, false, true, false, false));
         assert!(!should_replace_native_menu(false, false, false, false, false));
+    }
+
+    #[test]
+    fn test_open_menu_forces_replacement_for_explicit_action_state_changes() {
+        assert!(!should_force_replace_open_native_menu(
+            true, false, false, false, false
+        ));
+        assert!(!should_force_replace_open_native_menu(
+            false, true, false, false, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, true, false, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, false, true, false
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, false, false, false, true
+        ));
+        assert!(should_force_replace_open_native_menu(
+            true, true, false, false, false
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_monitor_start_child_returns_after_runtime_ready_without_waiting_for_daemon() {
+        let temp = tempfile::tempdir().unwrap();
+        let runtime_file = temp.path().join("runtime.json");
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 2")
+            .spawn()
+            .expect("spawn sleeping child");
+        fs::write(
+            &runtime_file,
+            format!(r#"{{"pid":{},"port":9900}}"#, child.id()),
+        )
+        .unwrap();
+
+        let operation = Arc::new(AtomicU8::new(OP_STARTING));
+        let reload_flag = Arc::new(AtomicBool::new(false));
+        let started = Instant::now();
+
+        assert!(monitor_start_child(
+            child,
+            runtime_file,
+            operation.clone(),
+            reload_flag.clone(),
+            OP_START_FAILED,
+        ));
+
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "ready daemon child must not block the start action thread"
+        );
+        assert_eq!(operation.load(Ordering::Relaxed), OP_IDLE);
+        assert!(reload_flag.load(Ordering::Relaxed));
     }
 
     #[test]
@@ -795,6 +882,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             system_stats: Some(SystemStatsMenuLines {
@@ -1057,6 +1145,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: Some(cached.clone()),
             system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             #[cfg(target_os = "macos")]
@@ -1113,6 +1202,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             #[cfg(target_os = "macos")]
@@ -1201,6 +1291,7 @@
                 enabled: false,
             }),
             system_proxy_needs_recheck: true,
+            pending_action: None,
             bin_available: true,
             update_available: None,
             #[cfg(target_os = "macos")]

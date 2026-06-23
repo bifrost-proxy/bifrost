@@ -121,6 +121,7 @@ struct MenuDataSnapshot {
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     system_proxy_needs_recheck: bool,
+    pending_action: Option<menu::PendingMenuAction>,
     bin_available: bool,
     update_available: Option<String>,
     #[cfg(target_os = "macos")]
@@ -397,6 +398,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                         &should_quit,
                         &should_reload,
                         &current_operation,
+                        &current_state,
                         &menu_data,
                         &menu_data_generation,
                         &system_proxy_refresh_in_flight,
@@ -415,6 +417,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                         &should_quit,
                         &should_reload,
                         &current_operation,
+                        &current_state,
                         &menu_data,
                         &menu_data_generation,
                         &system_proxy_refresh_in_flight,
@@ -549,7 +552,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         }
 
         if should_refresh_menu {
-            if menu_currently_open {
+            let can_refresh_open_menu =
+                !menu_currently_open || operation_changed || reload_requested || action_triggered;
+            if !can_refresh_open_menu {
                 tracing::debug!(
                     state = new_state,
                     operation = new_operation,
@@ -592,6 +597,12 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                     reload_requested,
                     action_triggered,
                     menu_recently_interacted,
+                ) || should_force_replace_open_native_menu(
+                    menu_currently_open,
+                    state_changed,
+                    operation_changed,
+                    reload_requested,
+                    action_triggered,
                 ) {
                     last_rendered_state = new_state;
                     last_rendered_operation = new_operation;
@@ -2043,6 +2054,17 @@ fn should_replace_native_menu(
         && !menu_recently_interacted
 }
 
+fn should_force_replace_open_native_menu(
+    menu_currently_open: bool,
+    state_changed: bool,
+    operation_changed: bool,
+    reload_requested: bool,
+    action_triggered: bool,
+) -> bool {
+    menu_currently_open
+        && (state_changed || operation_changed || reload_requested || action_triggered)
+}
+
 #[cfg(target_os = "macos")]
 fn should_refresh_dashboard(
     menu_currently_open: bool,
@@ -2431,7 +2453,13 @@ fn load_menu_data_snapshot(
     include_remote: bool,
     include_system_proxy: bool,
 ) -> MenuDataSnapshot {
-    let runtime = runtime_for_menu(args);
+    let runtime = runtime_for_menu(args).or_else(|| {
+        if state == ServiceState::Running {
+            fallback_runtime_from_args(args)
+        } else {
+            None
+        }
+    });
     let custom_config = load_custom_config_safe(&args.data_dir);
     let bin_available = trusted_bifrost_binary_available(args);
     let recent_rule_targets = load_recent_rule_targets(&args.data_dir);
@@ -2466,6 +2494,7 @@ fn load_menu_data_snapshot(
         recent_rule_targets,
         system_proxy,
         system_proxy_needs_recheck,
+        pending_action: None,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
         #[cfg(target_os = "macos")]
@@ -2622,7 +2651,7 @@ fn build_menu_from_snapshot(
 ) -> Vec<MenuEntry> {
     let menu_system_stats = None;
 
-    menu::build_menu(
+    menu::build_menu_with_pending(
         snapshot.runtime.as_ref(),
         state,
         status_override,
@@ -2636,6 +2665,7 @@ fn build_menu_from_snapshot(
         snapshot.update_available.as_deref(),
         upgrade_in_progress,
         menu_system_stats,
+        snapshot.pending_action.as_ref(),
     )
 }
 
@@ -3575,6 +3605,7 @@ fn execute_action(
     quit_flag: &AtomicBool,
     reload_flag: &Arc<AtomicBool>,
     operation: &Arc<AtomicU8>,
+    state: &Arc<AtomicU8>,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     menu_data_generation: &Arc<AtomicU64>,
     system_proxy_refresh_in_flight: &Arc<AtomicBool>,
@@ -3618,6 +3649,15 @@ fn execute_action(
         MenuItemAction::SetSystemProxy { url, enabled } => {
             let url = url.clone();
             let enabled = *enabled;
+            if !set_pending_menu_action(
+                menu_data,
+                menu_data_generation,
+                menu::PendingMenuAction::SystemProxy { enabled },
+            ) {
+                tracing::warn!("ignoring system proxy toggle while another tray action is pending");
+                return;
+            }
+            reload_flag.store(true, Ordering::Relaxed);
             let admin_url = runtime_for_menu(args)
                 .map(|rt| rt.admin_url())
                 .unwrap_or_else(|| admin_url_from_system_proxy_endpoint(&url));
@@ -3652,6 +3692,7 @@ fn execute_action(
                 if request_succeeded {
                     wait_for_system_proxy_menu_state(&admin_url, enabled);
                 }
+                clear_pending_menu_action(&menu_data, &menu_data_generation);
                 refresh_menu_data_snapshot(
                     &args,
                     ServiceState::Running,
@@ -3678,19 +3719,35 @@ fn execute_action(
             let runtime_file = args.runtime_file.clone();
             let port = args.port;
             let extra_args = args.start_args.clone();
+            let args_for_refresh = args.clone();
             let operation = operation.clone();
+            let state = state.clone();
             let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
             operation.store(OP_STARTING, Ordering::Relaxed);
             reload_flag.store(true, Ordering::Relaxed);
             spawn_tray_task("bifrost-tray-start-service", move || {
                 match spawn_start(&bin, &data_dir, port, &extra_args) {
-                    Some(child) => monitor_start_child(
-                        child,
-                        runtime_file,
-                        operation,
-                        reload_flag,
-                        OP_START_FAILED,
-                    ),
+                    Some(child) => {
+                        if monitor_start_child(
+                            child,
+                            runtime_file,
+                            operation.clone(),
+                            reload_flag.clone(),
+                            OP_START_FAILED,
+                        ) {
+                            state.store(STATE_RUNNING, Ordering::Relaxed);
+                            refresh_menu_data_snapshot(
+                                &args_for_refresh,
+                                ServiceState::Running,
+                                &menu_data,
+                                &menu_data_generation,
+                                true,
+                            );
+                            reload_flag.store(true, Ordering::Relaxed);
+                        }
+                    }
                     None => {
                         operation.store(OP_START_FAILED, Ordering::Relaxed);
                         reload_flag.store(true, Ordering::Relaxed);
@@ -3710,13 +3767,27 @@ fn execute_action(
                 return;
             };
             let data_dir = args.data_dir.to_string_lossy().to_string();
+            let args_for_refresh = args.clone();
             let operation = operation.clone();
+            let state = state.clone();
             let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
             operation.store(OP_STOPPING, Ordering::Relaxed);
             reload_flag.store(true, Ordering::Relaxed);
             spawn_tray_task("bifrost-tray-stop-service", move || {
                 if spawn_stop(&bin, &data_dir) {
+                    let next_state = compute_service_state(&args_for_refresh);
+                    let service_state = service_state_from_code(next_state);
+                    state.store(next_state, Ordering::Relaxed);
                     operation.store(OP_IDLE, Ordering::Relaxed);
+                    refresh_menu_data_snapshot(
+                        &args_for_refresh,
+                        service_state,
+                        &menu_data,
+                        &menu_data_generation,
+                        false,
+                    );
                 } else {
                     operation.store(OP_STOP_FAILED, Ordering::Relaxed);
                 }
@@ -3768,6 +3839,19 @@ fn execute_action(
             let target = target.clone();
             let enabled_targets = enabled_targets.clone();
             let currently_enabled = *currently_enabled;
+            let next_enabled = !currently_enabled;
+            if !set_pending_menu_action(
+                menu_data,
+                menu_data_generation,
+                menu::PendingMenuAction::Rule {
+                    target: target.clone(),
+                    enabled: next_enabled,
+                },
+            ) {
+                tracing::warn!(target = ?target, "ignoring rule toggle while another tray action is pending");
+                return;
+            }
+            reload_flag.store(true, Ordering::Relaxed);
             let data_dir = args.data_dir.clone();
             let args = args.clone();
             let reload_flag = reload_flag.clone();
@@ -3775,7 +3859,6 @@ fn execute_action(
             let menu_data_generation = menu_data_generation.clone();
             spawn_tray_task("bifrost-tray-select-rule", move || {
                 if toggle_single_rule(&admin_url, &target, &enabled_targets, currently_enabled) {
-                    let next_enabled = !currently_enabled;
                     thread::sleep(ACTION_STATE_SETTLE_INTERVAL);
                     let settled =
                         load_active_rule_targets(&admin_url)
@@ -3792,20 +3875,21 @@ fn execute_action(
                     if !currently_enabled {
                         record_recent_rule_target(&data_dir, &target);
                     }
-                    let changed = refresh_menu_data_snapshot(
-                        &args,
-                        ServiceState::Running,
-                        &menu_data,
-                        &menu_data_generation,
-                        false,
-                    );
-                    tracing::info!(
-                        target = ?target,
-                        changed = changed,
-                        "rule tray menu snapshot refreshed after action"
-                    );
-                    reload_flag.store(true, Ordering::Relaxed);
                 }
+                clear_pending_menu_action(&menu_data, &menu_data_generation);
+                let changed = refresh_menu_data_snapshot(
+                    &args,
+                    ServiceState::Running,
+                    &menu_data,
+                    &menu_data_generation,
+                    false,
+                );
+                tracing::info!(
+                    target = ?target,
+                    changed = changed,
+                    "rule tray menu snapshot refreshed after action"
+                );
+                reload_flag.store(true, Ordering::Relaxed);
             });
         }
         MenuItemAction::QuitTray => {
@@ -4036,7 +4120,7 @@ fn monitor_start_child(
     operation: Arc<AtomicU8>,
     reload_flag: Arc<AtomicBool>,
     failure_operation: u8,
-) {
+) -> bool {
     let start = std::time::Instant::now();
     let mut ready = false;
     let mut child_exited = false;
@@ -4059,14 +4143,14 @@ fn monitor_start_child(
                     tracing::error!(status = %status, "bifrost start exited before service became ready");
                     operation.store(failure_operation, Ordering::Relaxed);
                     reload_flag.store(true, Ordering::Relaxed);
-                    return;
+                    return false;
                 }
                 Ok(None) => {}
                 Err(error) => {
                     tracing::error!(error = %error, "failed to poll bifrost start child");
                     operation.store(failure_operation, Ordering::Relaxed);
                     reload_flag.store(true, Ordering::Relaxed);
-                    return;
+                    return false;
                 }
             }
         }
@@ -4083,11 +4167,18 @@ fn monitor_start_child(
     }
 
     if !child_exited {
-        if let Err(error) = child.wait() {
+        if ready {
+            spawn_tray_task("bifrost-tray-start-child-reaper", move || {
+                if let Err(error) = child.wait() {
+                    tracing::warn!(error = %error, "failed to reap bifrost start child");
+                }
+            });
+        } else if let Err(error) = child.wait() {
             tracing::warn!(error = %error, "failed to reap bifrost start child");
         }
     }
     reload_flag.store(true, Ordering::Relaxed);
+    ready
 }
 
 fn runtime_file_points_to_running_service(runtime_file: &Path) -> bool {
@@ -4242,6 +4333,15 @@ fn poll_service_state(
                 new_state = new_state,
                 "service state transition detected"
             );
+            let service_state = service_state_from_code(new_state);
+            refresh_menu_data_snapshot(
+                args,
+                service_state,
+                menu_data,
+                menu_data_generation,
+                service_state == ServiceState::Running,
+            );
+            reload_flag.store(true, Ordering::Relaxed);
         }
 
         reconcile_upgrade_progress(
@@ -4623,6 +4723,7 @@ fn refresh_menu_data_snapshot(
             if next.system_proxy.is_none() {
                 next.system_proxy_needs_recheck = false;
             }
+            next.pending_action = current.pending_action.clone();
             #[cfg(target_os = "macos")]
             if next.system_stats.is_some() {
                 next.system_stats = current.system_stats.clone().or(next.system_stats);
@@ -4647,7 +4748,59 @@ fn refresh_menu_data_snapshot(
     if changed {
         generation.fetch_add(1, Ordering::Relaxed);
     }
+    if state == ServiceState::Running {
+        let snapshot = clone_menu_data_snapshot(menu_data);
+        tracing::debug!(
+            changed = changed,
+            runtime_port = snapshot.runtime.as_ref().map(|runtime| runtime.port),
+            has_system_proxy = snapshot.system_proxy.is_some(),
+            rules = snapshot.rules.len(),
+            "tray running menu snapshot refreshed"
+        );
+    }
     changed
+}
+
+fn set_pending_menu_action(
+    menu_data: &Arc<Mutex<MenuDataSnapshot>>,
+    generation: &AtomicU64,
+    pending_action: menu::PendingMenuAction,
+) -> bool {
+    match menu_data.lock() {
+        Ok(mut current) => {
+            if current.pending_action.is_some() {
+                return false;
+            }
+            current.pending_action = Some(pending_action);
+            generation.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+        Err(poisoned) => {
+            let mut current = poisoned.into_inner();
+            if current.pending_action.is_some() {
+                return false;
+            }
+            current.pending_action = Some(pending_action);
+            generation.fetch_add(1, Ordering::Relaxed);
+            true
+        }
+    }
+}
+
+fn clear_pending_menu_action(menu_data: &Arc<Mutex<MenuDataSnapshot>>, generation: &AtomicU64) {
+    match menu_data.lock() {
+        Ok(mut current) => {
+            if current.pending_action.take().is_some() {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Err(poisoned) => {
+            let mut current = poisoned.into_inner();
+            if current.pending_action.take().is_some() {
+                generation.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
 }
 
 fn remove_own_tray_pid(data_dir: &Path) {
@@ -4696,6 +4849,14 @@ fn compute_service_state(args: &TrayArgs) -> u8 {
         STATE_STOPPED
     } else {
         STATE_DISCONNECTED
+    }
+}
+
+fn service_state_from_code(state: u8) -> ServiceState {
+    match state {
+        STATE_RUNNING => ServiceState::Running,
+        STATE_STOPPED => ServiceState::Stopped,
+        _ => ServiceState::Disconnected,
     }
 }
 

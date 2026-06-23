@@ -183,7 +183,7 @@ impl AdminRouter {
             return resp;
         }
 
-        if let Some(resp) = Self::check_browser_write_guard(&req, &state) {
+        if let Some(resp) = Self::check_browser_write_guard(&req, &state, path) {
             return resp;
         }
 
@@ -410,8 +410,13 @@ impl AdminRouter {
     fn check_browser_write_guard<T>(
         req: &Request<T>,
         state: &SharedAdminState,
+        path: &str,
     ) -> Option<Response<BoxBody>> {
         if is_safe_method(req.method()) {
+            return None;
+        }
+
+        if path == "/api/rules/share-env/exit" {
             return None;
         }
 
@@ -745,9 +750,30 @@ mod tests {
             .body(())
             .unwrap();
 
-        let resp = AdminRouter::check_browser_write_guard(&req, &state)
+        let resp = AdminRouter::check_browser_write_guard(&req, &state, "/api/rules")
             .expect("cross-site browser write should be rejected");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_browser_write_guard_allows_share_env_exit_cross_site_bridge() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_bifrost/api/rules/share-env/exit")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "https://www.coze.cn")
+            .header("Sec-Fetch-Site", "cross-site")
+            .body(())
+            .unwrap();
+
+        assert!(
+            AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/share-env/exit")
+                .is_none()
+        );
     }
 
     #[test]
@@ -765,7 +791,7 @@ mod tests {
             .body(())
             .unwrap();
 
-        let resp = AdminRouter::check_browser_write_guard(&req, &state)
+        let resp = AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo/enable")
             .expect("local browser write without CSRF should be rejected");
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
     }
@@ -786,7 +812,10 @@ mod tests {
             .body(())
             .unwrap();
 
-        assert!(AdminRouter::check_browser_write_guard(&req, &state).is_none());
+        assert!(
+            AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo/enable")
+                .is_none()
+        );
     }
 
     #[test]
@@ -802,7 +831,7 @@ mod tests {
             .body(())
             .unwrap();
 
-        assert!(AdminRouter::check_browser_write_guard(&req, &state).is_none());
+        assert!(AdminRouter::check_browser_write_guard(&req, &state, "/api/rules").is_none());
     }
 
     #[test]

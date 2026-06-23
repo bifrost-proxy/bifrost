@@ -82,7 +82,13 @@ pub struct SystemStatsMenuLines {
     pub menu_bar: String,
 }
 
-#[allow(clippy::too_many_arguments)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingMenuAction {
+    SystemProxy { enabled: bool },
+    Rule { target: RuleTarget, enabled: bool },
+}
+
+#[allow(clippy::too_many_arguments, dead_code)]
 pub fn build_menu(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
@@ -97,6 +103,41 @@ pub fn build_menu(
     update_available: Option<&str>,
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
+) -> Vec<MenuEntry> {
+    build_menu_with_pending(
+        runtime,
+        state,
+        status_override,
+        service_action_busy,
+        custom_config,
+        data_dir,
+        bin_available,
+        rules,
+        recent_rule_targets,
+        system_proxy,
+        update_available,
+        upgrade_in_progress,
+        system_stats,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn build_menu_with_pending(
+    runtime: Option<&RuntimeInfo>,
+    state: ServiceState,
+    status_override: Option<&str>,
+    service_action_busy: bool,
+    custom_config: Option<&TrayConfig>,
+    data_dir: &str,
+    bin_available: bool,
+    rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
+    system_proxy: Option<&SystemProxyMenuState>,
+    update_available: Option<&str>,
+    upgrade_in_progress: bool,
+    system_stats: Option<&SystemStatsMenuLines>,
+    pending_action: Option<&PendingMenuAction>,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -172,6 +213,7 @@ pub fn build_menu(
         recent_rule_targets,
         is_running,
         admin_rules_url.as_deref(),
+        pending_action,
     ) {
         items.push(MenuEntry::Submenu(rules_menu));
     }
@@ -207,17 +249,27 @@ pub fn build_menu(
     }
 
     if is_running {
+        let label = if service_action_busy && status_label == "Bifrost: Stopping..." {
+            "Stopping Bifrost..."
+        } else {
+            "Stop Bifrost"
+        };
         items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
-            label: "Stop Bifrost".to_string(),
+            label: label.to_string(),
             enabled: bin_available && !service_action_busy,
             checked: false,
             action: MenuItemAction::StopService,
         }));
     } else {
+        let label = if service_action_busy && status_label == "Bifrost: Starting..." {
+            "Starting Bifrost..."
+        } else {
+            "Start Bifrost"
+        };
         items.push(item(MenuItemDef {
             id: "toggle_service".to_string(),
-            label: "Start Bifrost".to_string(),
+            label: label.to_string(),
             enabled: bin_available && !service_action_busy,
             checked: false,
             action: MenuItemAction::StartService,
@@ -241,10 +293,22 @@ pub fn build_menu(
             None
         };
         if let Some(system_proxy) = system_proxy {
+            let pending_system_proxy = pending_action.and_then(|pending| match pending {
+                PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
+                PendingMenuAction::Rule { .. } => None,
+            });
+            let label = match pending_system_proxy {
+                Some(true) => "Enabling System Proxy...",
+                Some(false) => "Disabling System Proxy...",
+                None => "System Proxy",
+            };
             items.push(item(MenuItemDef {
                 id: "toggle_system_proxy".to_string(),
-                label: "System Proxy".to_string(),
-                enabled: is_running && system_proxy.supported && !service_action_busy,
+                label: label.to_string(),
+                enabled: is_running
+                    && system_proxy.supported
+                    && !service_action_busy
+                    && pending_action.is_none(),
                 checked: system_proxy.enabled,
                 action: MenuItemAction::SetSystemProxy {
                     url: format!("{}api/proxy/system", admin_url),
@@ -312,6 +376,7 @@ fn build_rules_menu(
     recent_rule_targets: &[RuleTarget],
     is_running: bool,
     admin_rules_url: Option<&str>,
+    pending_action: Option<&PendingMenuAction>,
 ) -> Option<SubmenuDef> {
     if rules.is_empty() {
         if !is_running {
@@ -340,20 +405,52 @@ fn build_rules_menu(
     let has_group_rules = rules
         .iter()
         .any(|rule| matches!(rule.target, RuleTarget::Group { .. }));
-    let label = match active_label {
-        Some(name) => format!("Rules: {name}"),
-        None => "Rules: None".to_string(),
+    let pending_rule = pending_action.and_then(|pending| match pending {
+        PendingMenuAction::Rule { target, enabled } => Some((target, *enabled)),
+        PendingMenuAction::SystemProxy { .. } => None,
+    });
+    let rule_items_enabled = is_running && pending_action.is_none();
+    let label = if let Some((target, enabled)) = pending_rule {
+        if enabled {
+            format!("Rules: Applying {}", rule_label(target))
+        } else {
+            format!("Rules: Disabling {}", rule_label(target))
+        }
+    } else {
+        match active_label {
+            Some(name) => format!("Rules: {name}"),
+            None => "Rules: None".to_string(),
+        }
     };
 
-    let mut children =
-        build_recent_rule_entries(rules, recent_rule_targets, &enabled_targets, is_running);
+    let mut children = build_recent_rule_entries(
+        rules,
+        recent_rule_targets,
+        &enabled_targets,
+        rule_items_enabled,
+        pending_rule,
+    );
     let grouped_children = if has_group_rules {
-        build_grouped_rule_entries(rules, &enabled_targets, is_running, admin_rules_url)
+        build_grouped_rule_entries(
+            rules,
+            &enabled_targets,
+            rule_items_enabled,
+            admin_rules_url,
+            pending_rule,
+        )
     } else {
         rules
             .iter()
             .enumerate()
-            .map(|(index, rule)| rule_entry(rule, index, &enabled_targets, is_running))
+            .map(|(index, rule)| {
+                rule_entry(
+                    rule,
+                    index,
+                    &enabled_targets,
+                    rule_items_enabled,
+                    pending_rule,
+                )
+            })
             .collect()
     };
     if !children.is_empty() && !grouped_children.is_empty() {
@@ -374,6 +471,7 @@ fn build_recent_rule_entries(
     recent_rule_targets: &[RuleTarget],
     enabled_targets: &[RuleTarget],
     is_running: bool,
+    pending_rule: Option<(&RuleTarget, bool)>,
 ) -> Vec<MenuEntry> {
     let mut children = Vec::new();
     let mut seen = Vec::<RuleTarget>::new();
@@ -385,10 +483,11 @@ fn build_recent_rule_entries(
             continue;
         };
         seen.push(target.clone());
+        let (label, enabled) = rule_action_label_and_enabled(rule, is_running, pending_rule, true);
         children.push(item(MenuItemDef {
             id: format!("recent_rule_{}", children.len()),
-            label: rule_label(&rule.target),
-            enabled: is_running,
+            label,
+            enabled,
             checked: rule.enabled,
             action: MenuItemAction::SelectRule {
                 target: rule.target.clone(),
@@ -418,6 +517,7 @@ fn build_grouped_rule_entries(
     enabled_targets: &[RuleTarget],
     is_running: bool,
     admin_rules_url: Option<&str>,
+    pending_rule: Option<(&RuleTarget, bool)>,
 ) -> Vec<MenuEntry> {
     let mut children = Vec::new();
     let personal_rules = rules
@@ -428,7 +528,7 @@ fn build_grouped_rule_entries(
     if !personal_rules.is_empty() {
         let personal_children = personal_rules
             .into_iter()
-            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running))
+            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running, pending_rule))
             .collect();
         children.push(MenuEntry::Submenu(SubmenuDef {
             id: "rules_my_rules".to_string(),
@@ -459,7 +559,7 @@ fn build_grouped_rule_entries(
                 } => name == &group_name && rule.managed_group,
                 RuleTarget::Personal { .. } => false,
             })
-            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running))
+            .map(|(index, rule)| rule_entry(rule, index, enabled_targets, is_running, pending_rule))
             .collect();
         children.push(MenuEntry::Submenu(SubmenuDef {
             id: format!("rules_group_{}", sanitize_menu_id(&group_name)),
@@ -495,11 +595,13 @@ fn rule_entry(
     index: usize,
     enabled_targets: &[RuleTarget],
     is_running: bool,
+    pending_rule: Option<(&RuleTarget, bool)>,
 ) -> MenuEntry {
+    let (label, enabled) = rule_action_label_and_enabled(rule, is_running, pending_rule, false);
     item(MenuItemDef {
         id: format!("select_rule_{index}"),
-        label: short_rule_label(&rule.target),
-        enabled: is_running,
+        label,
+        enabled,
         checked: rule.enabled,
         action: MenuItemAction::SelectRule {
             target: rule.target.clone(),
@@ -507,6 +609,28 @@ fn rule_entry(
             currently_enabled: rule.enabled,
         },
     })
+}
+
+fn rule_action_label_and_enabled(
+    rule: &TrayRule,
+    is_running: bool,
+    pending_rule: Option<(&RuleTarget, bool)>,
+    full_label: bool,
+) -> (String, bool) {
+    let base_label = if full_label {
+        rule_label(&rule.target)
+    } else {
+        short_rule_label(&rule.target)
+    };
+    let Some((target, enabled)) = pending_rule else {
+        return (base_label, is_running);
+    };
+    if target == &rule.target {
+        let prefix = if enabled { "Applying" } else { "Disabling" };
+        (format!("{prefix} {base_label}..."), false)
+    } else {
+        (base_label, false)
+    }
 }
 
 fn other_enabled_targets(enabled_targets: &[RuleTarget], target: &RuleTarget) -> Vec<RuleTarget> {
@@ -565,6 +689,7 @@ pub fn build_rules_menu_for_test(rules: &[TrayRule], is_running: bool) -> Option
         &[],
         is_running,
         Some("http://127.0.0.1:8800/_bifrost/rules"),
+        None,
     )
 }
 
@@ -579,6 +704,7 @@ pub fn build_rules_menu_for_test_with_recent(
         recent_rule_targets,
         is_running,
         Some("http://127.0.0.1:8800/_bifrost/rules"),
+        None,
     )
 }
 
@@ -878,6 +1004,43 @@ mod tests {
     }
 
     #[test]
+    fn test_system_proxy_pending_shows_busy_label_and_disables_async_toggles() {
+        let rt = sample_runtime();
+        let system_proxy = SystemProxyMenuState {
+            supported: true,
+            enabled: false,
+        };
+        let rules = vec![personal_rule("alpha", false)];
+        let menu = build_menu_with_pending(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &rules,
+            &[],
+            Some(&system_proxy),
+            None,
+            false,
+            None,
+            Some(&PendingMenuAction::SystemProxy { enabled: true }),
+        );
+
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "Enabling System Proxy...");
+        assert!(!toggle.enabled);
+        assert!(!toggle.checked);
+
+        let rules_menu = find_submenu(&menu, "rules_switcher").unwrap();
+        assert_eq!(rules_menu.label, "Rules: None");
+        let alpha = find_item(&rules_menu.children, "select_rule_0").unwrap();
+        assert_eq!(alpha.label, "alpha");
+        assert!(!alpha.enabled);
+    }
+
+    #[test]
     fn test_menu_update_available_shows_update_item() {
         let rt = sample_runtime();
         let menu = build_menu(
@@ -1003,8 +1166,33 @@ mod tests {
         let status = find_item(&menu, "_status").unwrap();
         assert_eq!(status.label, "Bifrost: Starting...");
         let start = find_item(&menu, "toggle_service").unwrap();
-        assert_eq!(start.label, "Start Bifrost");
+        assert_eq!(start.label, "Starting Bifrost...");
         assert!(!start.enabled);
+    }
+
+    #[test]
+    fn test_service_action_busy_shows_stopping_label() {
+        let rt = sample_runtime();
+        let menu = build_menu(
+            Some(&rt),
+            ServiceState::Running,
+            Some("Bifrost: Stopping..."),
+            true,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            None,
+            false,
+            None,
+        );
+        let status = find_item(&menu, "_status").unwrap();
+        assert_eq!(status.label, "Bifrost: Stopping...");
+        let stop = find_item(&menu, "toggle_service").unwrap();
+        assert_eq!(stop.label, "Stopping Bifrost...");
+        assert!(!stop.enabled);
     }
 
     #[test]
@@ -1209,6 +1397,52 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_rules_pending_shows_busy_label_and_disables_async_toggles() {
+        let rt = sample_runtime();
+        let system_proxy = SystemProxyMenuState {
+            supported: true,
+            enabled: true,
+        };
+        let target = RuleTarget::Personal {
+            name: "beta".to_string(),
+        };
+        let rules = vec![personal_rule("alpha", true), personal_rule("beta", false)];
+        let menu = build_menu_with_pending(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &rules,
+            &[],
+            Some(&system_proxy),
+            None,
+            false,
+            None,
+            Some(&PendingMenuAction::Rule {
+                target: target.clone(),
+                enabled: true,
+            }),
+        );
+
+        let rules_menu = find_submenu(&menu, "rules_switcher").unwrap();
+        assert_eq!(rules_menu.label, "Rules: Applying beta");
+        let alpha = find_item(&rules_menu.children, "select_rule_0").unwrap();
+        let beta = find_item(&rules_menu.children, "select_rule_1").unwrap();
+        assert_eq!(alpha.label, "alpha");
+        assert!(!alpha.enabled);
+        assert_eq!(beta.label, "Applying beta...");
+        assert!(!beta.enabled);
+
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
+        assert!(!toggle.enabled);
+        assert!(toggle.checked);
     }
 
     #[test]
