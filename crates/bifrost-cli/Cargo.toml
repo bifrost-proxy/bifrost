@@ -93,6 +93,8 @@ tao = { version = "0.31", default-features = false }
 sysinfo = "0.31"
 image = { version = "0.25", default-features = false, features = ["png"] }
 fontdue = "0.9"
+core-foundation = "0.10"
+core-foundation-sys = "0.8"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSData",
@@ -102,17 +104,22 @@ objc2-app-kit = { version = "0.3", default-features = false, features = [
     "std",
     "objc2-core-foundation",
     "NSAccessibilityProtocols",
+    "NSAppearance",
     "NSBitmapImageRep",
     "NSButton",
     "NSCell",
+    "NSControl",
     "NSGraphics",
     "NSImage",
+    "NSImageView",
     "NSImageRep",
     "NSMenu",
     "NSMenuItem",
+    "NSResponder",
     "NSStatusBar",
     "NSStatusBarButton",
     "NSStatusItem",
+    "NSView",
 ] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

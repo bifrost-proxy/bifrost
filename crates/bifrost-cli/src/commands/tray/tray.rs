@@ -24,6 +24,11 @@ use tray_icon::{TrayIconBuilder, TrayIconEvent};
 
 use super::cli::TrayArgs;
 use super::config::{self, TrayConfig};
+#[cfg(target_os = "macos")]
+use super::dashboard::{
+    self, DashboardTheme, TrayDashboardBitmap, TrayDashboardHistory, TrayDashboardSnapshot,
+    DASHBOARD_HEIGHT, DASHBOARD_WIDTH,
+};
 use super::lock::TrayLock;
 #[cfg(target_os = "macos")]
 use super::menu::SystemStatsMenuLines;
@@ -40,12 +45,14 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, ProtocolObject};
 #[cfg(target_os = "macos")]
 use objc2::{
-    define_class, msg_send, sel, AnyThread, DeclaredClass, MainThreadMarker, MainThreadOnly,
+    define_class, msg_send, sel, AnyThread, ClassType, DeclaredClass, MainThreadMarker,
+    MainThreadOnly,
 };
 #[cfg(target_os = "macos")]
 use objc2_app_kit::{
-    NSAccessibility, NSBitmapFormat, NSBitmapImageRep, NSCellImagePosition, NSDeviceRGBColorSpace,
-    NSImage, NSMenu, NSMenuDelegate, NSStatusBar, NSStatusItem,
+    NSAccessibility, NSAppearance, NSBitmapFormat, NSBitmapImageRep, NSCellImagePosition,
+    NSDeviceRGBColorSpace, NSImage, NSImageScaling, NSImageView, NSMenu, NSMenuDelegate,
+    NSMenuItem, NSStatusBar, NSStatusItem, NSView,
 };
 #[cfg(target_os = "macos")]
 use objc2_foundation::{NSData, NSObject, NSObjectProtocol, NSSize, NSString};
@@ -85,7 +92,7 @@ const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 #[cfg(target_os = "macos")]
 const MENU_STRUCTURAL_STATUS_UPDATE_SUPPRESSION: Duration = Duration::from_secs(2);
-const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(5);
+const REMOTE_GROUP_FAILURE_BACKOFF: Duration = Duration::from_secs(60);
 const SERVICE_IDLE_EXIT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const RECENT_RULES_FILE: &str = "tray_recent_rules.json";
 const VERSION_CACHE_FILE: &str = "version_cache.json";
@@ -101,8 +108,10 @@ const SYSTEM_STATS_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const SYSTEM_STATS_CONFIG_FALLBACK_RELOAD_INTERVAL: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const NATIVE_STATS_VIEW_ENV: &str = "BIFROST_TRAY_NATIVE_STATS_VIEW";
+#[cfg(target_os = "macos")]
+const TRAY_DASHBOARD_ENV: &str = "BIFROST_TRAY_DASHBOARD";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct MenuDataSnapshot {
     runtime: Option<RuntimeInfo>,
     custom_config: Option<TrayConfig>,
@@ -113,6 +122,14 @@ struct MenuDataSnapshot {
     update_available: Option<String>,
     #[cfg(target_os = "macos")]
     system_stats: Option<SystemStatsMenuLines>,
+    #[cfg(target_os = "macos")]
+    dashboard: Option<TrayDashboardSnapshot>,
+}
+
+#[cfg(target_os = "macos")]
+enum DashboardSnapshotUpdate {
+    Preserve,
+    Set(Option<Box<TrayDashboardSnapshot>>),
 }
 
 pub fn run(args: TrayArgs) -> Result<(), String> {
@@ -158,6 +175,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let (native_action_sender, native_action_receiver) = std::sync::mpsc::channel::<MenuId>();
     let mut native_menu = NativeMenuState::new(
         &menu_items,
+        #[cfg(target_os = "macos")]
+        initial_menu_data.dashboard.as_ref(),
         #[cfg(target_os = "macos")]
         Some(native_action_sender.clone()),
     );
@@ -310,8 +329,15 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let stats_args = args.clone();
         let stats_snapshot = menu_data.clone();
         let stats_generation = system_stats_generation.clone();
+        let stats_menu_open_state = native_menu_open_state.clone();
         spawn_tray_thread("bifrost-tray-system-stats", move || {
-            poll_system_stats(&stats_quit, &stats_args, &stats_snapshot, &stats_generation);
+            poll_system_stats(
+                &stats_quit,
+                &stats_args,
+                &stats_snapshot,
+                &stats_generation,
+                &stats_menu_open_state,
+            );
         })
         .map_err(|error| format!("failed to spawn tray system stats thread: {error}"))?;
     }
@@ -410,10 +436,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         let system_stats_changed =
             system_stats_data_generation != last_rendered_system_stats_generation;
         #[cfg(target_os = "macos")]
+        let mut native_menu_lifecycle_changed = false;
+        #[cfg(target_os = "macos")]
         {
             let lifecycle_generation = native_menu_open_state.generation.load(Ordering::Relaxed);
             if lifecycle_generation != last_native_menu_lifecycle_generation {
                 last_native_menu_lifecycle_generation = lifecycle_generation;
+                native_menu_lifecycle_changed = true;
                 last_tray_interaction_at = Some(Instant::now());
             }
         }
@@ -473,7 +502,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         );
 
         #[cfg(target_os = "macos")]
-        if state_changed || data_changed || system_stats_changed {
+        if state_changed || data_changed || system_stats_changed || native_menu_lifecycle_changed {
             let snapshot = clone_menu_data_snapshot(&menu_data);
             let new_title = menu_bar_stats_title(&snapshot, svc_state);
             if new_title != last_rendered_menu_bar_title {
@@ -501,6 +530,15 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 tracing::debug!("tray menu bar title updated");
             }
             last_rendered_system_stats_generation = system_stats_data_generation;
+            #[cfg(target_os = "macos")]
+            if should_refresh_dashboard(
+                menu_currently_open,
+                system_stats_changed,
+                native_menu_lifecycle_changed,
+                native_menu.dashboard_header.is_some(),
+            ) {
+                native_menu.refresh_dashboard(snapshot.dashboard.as_ref());
+            }
         }
 
         if should_refresh_menu {
@@ -528,6 +566,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                 );
 
                 if native_menu.refresh_in_place(&new_menu_items) {
+                    #[cfg(target_os = "macos")]
+                    native_menu.refresh_dashboard(snapshot.dashboard.as_ref());
                     last_rendered_state = new_state;
                     last_rendered_operation = new_operation;
                     last_rendered_data_generation = data_generation;
@@ -540,6 +580,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                         "tray menu refreshed in place"
                     );
                 } else if should_replace_native_menu(
+                    state_changed,
+                    operation_changed,
                     reload_requested,
                     action_triggered,
                     menu_recently_interacted,
@@ -549,6 +591,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                     last_rendered_data_generation = data_generation;
                     native_menu = NativeMenuState::new(
                         &new_menu_items,
+                        #[cfg(target_os = "macos")]
+                        snapshot.dashboard.as_ref(),
                         #[cfg(target_os = "macos")]
                         Some(native_action_sender.clone()),
                     );
@@ -1212,6 +1256,49 @@ fn native_stats_image_from_bitmap(bitmap: &MenuBarStatsBitmap) -> Option<NativeS
 }
 
 #[cfg(target_os = "macos")]
+fn native_dashboard_image_from_bitmap(bitmap: &TrayDashboardBitmap) -> Option<NativeStatsImage> {
+    let width = bitmap.width as isize;
+    let height = bitmap.height as isize;
+    let bytes_per_row = (bitmap.width * 4) as isize;
+    let bits_per_pixel = 32;
+    let bitmap_format =
+        NSBitmapFormat::AlphaNonpremultiplied | NSBitmapFormat::ThirtyTwoBitBigEndian;
+    let image_rep = unsafe {
+        NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bitmapFormat_bytesPerRow_bitsPerPixel(
+            NSBitmapImageRep::alloc(),
+            std::ptr::null_mut(),
+            width,
+            height,
+            8,
+            4,
+            true,
+            false,
+            NSDeviceRGBColorSpace,
+            bitmap_format,
+            bytes_per_row,
+            bits_per_pixel,
+        )?
+    };
+    if !copy_dashboard_bitmap_to_image_rep(bitmap, &image_rep) {
+        return None;
+    }
+    let image = NSImage::initWithSize(
+        NSImage::alloc(),
+        NSSize::new(
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
+        ),
+    );
+    image.addRepresentation(&image_rep);
+    Some(NativeStatsImage {
+        image,
+        image_rep: Some(image_rep),
+        width: bitmap.width,
+        height: bitmap.height,
+    })
+}
+
+#[cfg(target_os = "macos")]
 fn native_stats_image_from_png(bitmap: &MenuBarStatsBitmap) -> Option<NativeStatsImage> {
     let png = encode_menu_bar_stats_png(bitmap)?;
     let data = NSData::from_vec(png);
@@ -1222,6 +1309,21 @@ fn native_stats_image_from_png(bitmap: &MenuBarStatsBitmap) -> Option<NativeStat
         width: bitmap.width,
         height: bitmap.height,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn copy_dashboard_bitmap_to_image_rep(
+    bitmap: &TrayDashboardBitmap,
+    image_rep: &NSBitmapImageRep,
+) -> bool {
+    let bitmap_data = image_rep.bitmapData();
+    if bitmap_data.is_null() {
+        return false;
+    }
+    unsafe {
+        std::ptr::copy_nonoverlapping(bitmap.rgba.as_ptr(), bitmap_data, bitmap.rgba.len());
+    }
+    true
 }
 
 #[cfg(target_os = "macos")]
@@ -1599,7 +1701,7 @@ fn menu_bar_bifrost_icon_alpha(icon_size: u32) -> Option<Arc<MenuBarIconAlpha>> 
 }
 
 #[cfg(target_os = "macos")]
-fn menu_bar_stats_font() -> Option<&'static fontdue::Font> {
+pub(super) fn menu_bar_stats_font() -> Option<&'static fontdue::Font> {
     static FONT: OnceLock<Option<fontdue::Font>> = OnceLock::new();
     FONT.get_or_init(|| {
         [
@@ -1792,16 +1894,20 @@ fn draw_font_text(
 }
 
 #[cfg(target_os = "macos")]
-struct MenuBarGlyph {
-    metrics: fontdue::Metrics,
-    bitmap: Vec<u8>,
+pub(super) struct MenuBarGlyph {
+    pub(super) metrics: fontdue::Metrics,
+    pub(super) bitmap: Vec<u8>,
 }
 
 #[cfg(target_os = "macos")]
 type MenuBarGlyphCache = Mutex<HashMap<(char, u32), Arc<MenuBarGlyph>>>;
 
 #[cfg(target_os = "macos")]
-fn cached_menu_bar_glyph(font: &fontdue::Font, ch: char, font_px: f32) -> Arc<MenuBarGlyph> {
+pub(super) fn cached_menu_bar_glyph(
+    font: &fontdue::Font,
+    ch: char,
+    font_px: f32,
+) -> Arc<MenuBarGlyph> {
     static GLYPHS: OnceLock<MenuBarGlyphCache> = OnceLock::new();
     let key = (ch, font_px.to_bits());
     let cache = GLYPHS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -1914,11 +2020,25 @@ fn should_refresh_native_menu(
 }
 
 fn should_replace_native_menu(
+    state_changed: bool,
+    operation_changed: bool,
     reload_requested: bool,
     action_triggered: bool,
     menu_recently_interacted: bool,
 ) -> bool {
-    reload_requested || action_triggered || !menu_recently_interacted
+    (state_changed || operation_changed || reload_requested || action_triggered)
+        && !menu_recently_interacted
+}
+
+#[cfg(target_os = "macos")]
+fn should_refresh_dashboard(
+    menu_currently_open: bool,
+    system_stats_changed: bool,
+    native_menu_lifecycle_changed: bool,
+    dashboard_installed: bool,
+) -> bool {
+    (!dashboard_installed && system_stats_changed)
+        || (menu_currently_open && (system_stats_changed || native_menu_lifecycle_changed))
 }
 
 fn tray_event_may_open_menu(event: &TrayIconEvent) -> bool {
@@ -2330,6 +2450,8 @@ fn load_menu_data_snapshot(
                 .visible()
                 .then(|| SystemStatsMenuLines::collecting(&stats_config.items))
         },
+        #[cfg(target_os = "macos")]
+        dashboard: None,
     }
 }
 
@@ -2745,15 +2867,21 @@ fn load_managed_groups_from_admin(
         Ok(resp) => match resp.into_json::<serde_json::Value>() {
             Ok(value) => value,
             Err(error) => {
-                record_remote_group_failure();
-                tracing::warn!(error = %error, "failed to decode group list for tray menu");
-                return None;
+                if record_remote_group_failure() {
+                    tracing::warn!(error = %error, "failed to decode group list for tray menu");
+                } else {
+                    tracing::debug!(error = %error, "failed to decode group list for tray menu");
+                }
+                return Some(Vec::new());
             }
         },
         Err(error) => {
-            record_remote_group_failure();
-            tracing::warn!(error = %error, "failed to load group list for tray menu");
-            return None;
+            if record_remote_group_failure() {
+                tracing::warn!(error = %error, "failed to load group list for tray menu");
+            } else {
+                tracing::debug!(error = %error, "failed to load group list for tray menu");
+            }
+            return Some(Vec::new());
         }
     };
 
@@ -2796,33 +2924,51 @@ fn load_managed_groups_from_admin(
     Some(managed_groups)
 }
 
-fn remote_group_failure_backoff() -> &'static Mutex<Option<Instant>> {
-    static BACKOFF: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    BACKOFF.get_or_init(|| Mutex::new(None))
+#[derive(Debug, Default)]
+struct RemoteGroupFailureState {
+    failed_at: Option<Instant>,
+    warned: bool,
+}
+
+fn remote_group_failure_backoff() -> &'static Mutex<RemoteGroupFailureState> {
+    static BACKOFF: OnceLock<Mutex<RemoteGroupFailureState>> = OnceLock::new();
+    BACKOFF.get_or_init(|| Mutex::new(RemoteGroupFailureState::default()))
 }
 
 fn remote_group_failure_backoff_active() -> bool {
     match remote_group_failure_backoff().lock() {
-        Ok(guard) => {
-            guard.is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF)
-        }
+        Ok(guard) => guard
+            .failed_at
+            .is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF),
         Err(poisoned) => poisoned
             .into_inner()
+            .failed_at
             .is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF),
     }
 }
 
-fn record_remote_group_failure() {
+fn record_remote_group_failure() -> bool {
     match remote_group_failure_backoff().lock() {
-        Ok(mut guard) => *guard = Some(Instant::now()),
-        Err(poisoned) => *poisoned.into_inner() = Some(Instant::now()),
+        Ok(mut guard) => {
+            let should_warn = !guard.warned;
+            guard.failed_at = Some(Instant::now());
+            guard.warned = true;
+            should_warn
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            let should_warn = !guard.warned;
+            guard.failed_at = Some(Instant::now());
+            guard.warned = true;
+            should_warn
+        }
     }
 }
 
 fn clear_remote_group_failure() {
     match remote_group_failure_backoff().lock() {
-        Ok(mut guard) => *guard = None,
-        Err(poisoned) => *poisoned.into_inner() = None,
+        Ok(mut guard) => *guard = RemoteGroupFailureState::default(),
+        Err(poisoned) => *poisoned.into_inner() = RemoteGroupFailureState::default(),
     }
 }
 
@@ -2867,6 +3013,8 @@ struct NativeMenuState {
     handles: Vec<NativeMenuHandle>,
     shape: Vec<NativeMenuShape>,
     #[cfg(target_os = "macos")]
+    dashboard_header: Option<NativeDashboardHeader>,
+    #[cfg(target_os = "macos")]
     action_sender: Option<std::rc::Rc<std::sync::mpsc::Sender<MenuId>>>,
     #[cfg(target_os = "macos")]
     action_targets: Vec<Retained<NativeMenuActionTarget>>,
@@ -2875,6 +3023,7 @@ struct NativeMenuState {
 impl NativeMenuState {
     fn new(
         items: &[MenuEntry],
+        #[cfg(target_os = "macos")] dashboard: Option<&TrayDashboardSnapshot>,
         #[cfg(target_os = "macos")] action_sender: Option<std::sync::mpsc::Sender<MenuId>>,
     ) -> Self {
         let menu = Menu::new();
@@ -2895,12 +3044,17 @@ impl NativeMenuState {
             handles,
             shape,
             #[cfg(target_os = "macos")]
+            dashboard_header: None,
+            #[cfg(target_os = "macos")]
             action_sender,
             #[cfg(target_os = "macos")]
             action_targets: Vec::new(),
         };
         #[cfg(target_os = "macos")]
-        state.install_action_targets(items);
+        {
+            state.install_action_targets(items);
+            state.dashboard_header = install_dashboard_header(&state.menu, dashboard);
+        }
         state
     }
 
@@ -2927,12 +3081,163 @@ impl NativeMenuState {
     }
 
     #[cfg(target_os = "macos")]
+    fn refresh_dashboard(&mut self, dashboard: Option<&TrayDashboardSnapshot>) {
+        let theme = current_dashboard_theme();
+        match (&mut self.dashboard_header, dashboard) {
+            (Some(header), Some(snapshot)) => {
+                header.set_snapshot(snapshot, theme);
+            }
+            (None, Some(snapshot)) => {
+                self.dashboard_header = install_dashboard_header(&self.menu, Some(snapshot));
+            }
+            (Some(_), None) => {}
+            (None, None) => {}
+        }
+    }
+
+    #[cfg(target_os = "macos")]
     fn install_action_targets(&mut self, items: &[MenuEntry]) {
         self.action_targets.clear();
         let Some(sender) = &self.action_sender else {
             return;
         };
-        self.action_targets = install_native_menu_action_targets(&self.menu, items, sender);
+        self.action_targets = install_native_menu_action_targets(
+            &self.menu,
+            items,
+            sender,
+            usize::from(self.dashboard_header.is_some()),
+        );
+    }
+}
+
+#[cfg(target_os = "macos")]
+struct NativeDashboardHeader {
+    item: Retained<NSMenuItem>,
+    image_view: Retained<NSImageView>,
+    rendered_image: Option<NativeStatsImage>,
+}
+
+#[cfg(target_os = "macos")]
+impl NativeDashboardHeader {
+    fn new(
+        snapshot: &TrayDashboardSnapshot,
+        theme: DashboardTheme,
+        mtm: MainThreadMarker,
+    ) -> Option<Self> {
+        let bitmap = dashboard::render_dashboard_with_theme(snapshot, theme)?;
+        let rendered = native_dashboard_image_from_bitmap(&bitmap)?;
+        let view_size = NSSize::new(
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
+        );
+        rendered.image.setSize(view_size);
+        rendered.image.setTemplate(false);
+        let image_view = NSImageView::imageViewWithImage(&rendered.image, mtm);
+        image_view.setEditable(false);
+        image_view.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        let image_view_ref: &NSImageView = &image_view;
+        let image_view_view: &NSView = image_view_ref.as_super().as_super();
+        image_view_view.setFrameSize(view_size);
+        let title = NSString::from_str("");
+        let key = NSString::from_str("");
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(
+                NSMenuItem::alloc(mtm),
+                &title,
+                None,
+                &key,
+            )
+        };
+        item.setView(Some(image_view_view));
+        item.setEnabled(false);
+        Some(Self {
+            item,
+            image_view,
+            rendered_image: Some(rendered),
+        })
+    }
+
+    fn set_snapshot(&mut self, snapshot: &TrayDashboardSnapshot, theme: DashboardTheme) -> bool {
+        let Some(bitmap) = dashboard::render_dashboard_with_theme(snapshot, theme) else {
+            return false;
+        };
+        if let Some(rendered) = self.rendered_image.as_mut() {
+            let reusable = rendered.width == bitmap.width && rendered.height == bitmap.height;
+            if reusable {
+                if let Some(image_rep) = rendered.image_rep.as_deref() {
+                    if copy_dashboard_bitmap_to_image_rep(&bitmap, image_rep) {
+                        unsafe {
+                            let _: () = msg_send![&self.image_view, setNeedsDisplay: true];
+                        }
+                        return true;
+                    }
+                }
+            }
+        }
+
+        let Some(rendered) = native_dashboard_image_from_bitmap(&bitmap) else {
+            return false;
+        };
+        let view_size = NSSize::new(
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
+        );
+        rendered.image.setSize(view_size);
+        rendered.image.setTemplate(false);
+        self.image_view.setImage(Some(&rendered.image));
+        let image_view_ref: &NSImageView = &self.image_view;
+        let image_view_view: &NSView = image_view_ref.as_super().as_super();
+        image_view_view.setFrameSize(view_size);
+        self.rendered_image = Some(rendered);
+        true
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_dashboard_header(
+    menu: &Menu,
+    snapshot: Option<&TrayDashboardSnapshot>,
+) -> Option<NativeDashboardHeader> {
+    if !tray_dashboard_enabled() {
+        tracing::debug!("tray dashboard header disabled by environment");
+        return None;
+    }
+    unsafe {
+        let ns_menu = menu.ns_menu().cast::<NSMenu>().as_ref()?;
+        let mtm = MainThreadMarker::from(ns_menu);
+        let snapshot = snapshot?;
+        let theme = current_dashboard_theme();
+        let Some(header) = NativeDashboardHeader::new(snapshot, theme, mtm) else {
+            tracing::warn!("failed to render native tray dashboard header");
+            return None;
+        };
+        ns_menu.insertItem_atIndex(&header.item, 0);
+        tracing::info!(
+            items = ns_menu.numberOfItems(),
+            width = header
+                .rendered_image
+                .as_ref()
+                .map(|image| image.width / 2)
+                .unwrap_or(DASHBOARD_WIDTH / 2),
+            height = DASHBOARD_HEIGHT / 2,
+            "native tray dashboard header installed"
+        );
+        Some(header)
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn tray_dashboard_enabled() -> bool {
+    dashboard::dashboard_enabled_from_env(std::env::var(TRAY_DASHBOARD_ENV).ok().as_deref())
+}
+
+#[cfg(target_os = "macos")]
+fn current_dashboard_theme() -> DashboardTheme {
+    let name = NSAppearance::currentDrawingAppearance().name().to_string();
+    if name.to_ascii_lowercase().contains("dark") {
+        DashboardTheme::Dark
+    } else {
+        DashboardTheme::Light
     }
 }
 
@@ -2941,13 +3246,20 @@ fn install_native_menu_action_targets(
     menu: &Menu,
     items: &[MenuEntry],
     sender: &std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+    index_offset: usize,
 ) -> Vec<Retained<NativeMenuActionTarget>> {
     let mut targets = Vec::new();
     unsafe {
         let Some(ns_menu) = menu.ns_menu().cast::<NSMenu>().as_ref() else {
             return targets;
         };
-        install_native_menu_action_targets_for_ns_menu(ns_menu, items, sender, &mut targets);
+        install_native_menu_action_targets_for_ns_menu(
+            ns_menu,
+            items,
+            sender,
+            index_offset,
+            &mut targets,
+        );
     }
     targets
 }
@@ -2957,11 +3269,13 @@ fn install_native_menu_action_targets_for_ns_menu(
     ns_menu: &NSMenu,
     items: &[MenuEntry],
     sender: &std::rc::Rc<std::sync::mpsc::Sender<MenuId>>,
+    index_offset: usize,
     targets: &mut Vec<Retained<NativeMenuActionTarget>>,
 ) {
     let mtm = MainThreadMarker::from(ns_menu);
     for (index, entry) in items.iter().enumerate() {
-        let Some(ns_item) = ns_menu.itemAtIndex(index as objc2_foundation::NSInteger) else {
+        let native_index = index.saturating_add(index_offset);
+        let Some(ns_item) = ns_menu.itemAtIndex(native_index as objc2_foundation::NSInteger) else {
             break;
         };
         match entry {
@@ -2982,6 +3296,7 @@ fn install_native_menu_action_targets_for_ns_menu(
                         &child_menu,
                         &submenu.children,
                         sender,
+                        0,
                         targets,
                     );
                 }
@@ -3940,8 +4255,10 @@ fn poll_system_stats(
     args: &TrayArgs,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     generation: &AtomicU64,
+    menu_open_state: &Arc<NativeMenuOpenState>,
 ) {
     let mut sampler = SystemStatsSampler::new(&args.data_dir);
+    let mut dashboard_history = TrayDashboardHistory;
     let mut stats_config_watcher =
         TraySystemStatsConfigWatcher::new(&args.data_dir, Instant::now());
     loop {
@@ -3950,13 +4267,37 @@ fn poll_system_stats(
         }
 
         let stats_config = stats_config_watcher.current(Instant::now());
+        let menu_is_open = menu_open_state.open.load(Ordering::Relaxed);
         if stats_config.visible() {
-            let snapshot = sampler.sample(Instant::now(), &stats_config.items);
-            let lines = system_stats::menu_lines(&snapshot, &stats_config.items);
-            update_system_stats_snapshot(Some(lines), menu_data, generation);
+            let snapshot =
+                sampler.sample_for_menu_state(Instant::now(), &stats_config.items, menu_is_open);
+            let lines = system_stats::menu_lines_for_menu_state(
+                &snapshot,
+                &stats_config.items,
+                menu_is_open,
+            );
+            let menu_snapshot = clone_menu_data_snapshot(menu_data);
+            let dashboard_update = if menu_is_open || menu_snapshot.dashboard.is_none() {
+                let service_state =
+                    determine_state(menu_snapshot.runtime.as_ref(), args.parent_pid);
+                DashboardSnapshotUpdate::Set(Some(Box::new(dashboard_history.snapshot(
+                    service_state,
+                    dashboard_runtime_label(menu_snapshot.runtime.as_ref(), service_state),
+                    dashboard_system_proxy_label(menu_snapshot.system_proxy.as_ref()),
+                    &snapshot,
+                ))))
+            } else {
+                DashboardSnapshotUpdate::Preserve
+            };
+            update_system_stats_snapshot(Some(lines), dashboard_update, menu_data, generation);
         } else {
             sampler.reset_network_baseline();
-            update_system_stats_snapshot(None, menu_data, generation);
+            update_system_stats_snapshot(
+                None,
+                DashboardSnapshotUpdate::Set(None),
+                menu_data,
+                generation,
+            );
         }
 
         sleep_interruptibly(quit_flag, SYSTEM_STATS_POLL_INTERVAL);
@@ -3966,33 +4307,77 @@ fn poll_system_stats(
 #[cfg(target_os = "macos")]
 fn update_system_stats_snapshot(
     lines: Option<SystemStatsMenuLines>,
+    dashboard: DashboardSnapshotUpdate,
     menu_data: &Arc<Mutex<MenuDataSnapshot>>,
     generation: &AtomicU64,
 ) -> bool {
     let changed = match menu_data.lock() {
-        Ok(mut current) => {
-            if current.system_stats == lines {
-                false
-            } else {
-                current.system_stats = lines;
-                true
-            }
-        }
+        Ok(mut current) => apply_system_stats_snapshot_update(&mut current, lines, dashboard),
         Err(poisoned) => {
             tracing::warn!("tray menu data snapshot lock was poisoned; updating system stats");
             let mut current = poisoned.into_inner();
-            if current.system_stats == lines {
-                false
-            } else {
-                current.system_stats = lines;
-                true
-            }
+            apply_system_stats_snapshot_update(&mut current, lines, dashboard)
         }
     };
     if changed {
         generation.fetch_add(1, Ordering::Relaxed);
     }
     changed
+}
+
+#[cfg(target_os = "macos")]
+fn apply_system_stats_snapshot_update(
+    current: &mut MenuDataSnapshot,
+    lines: Option<SystemStatsMenuLines>,
+    dashboard: DashboardSnapshotUpdate,
+) -> bool {
+    let preserving_dashboard = matches!(dashboard, DashboardSnapshotUpdate::Preserve);
+    let lines_changed = if preserving_dashboard
+        && current
+            .system_stats
+            .as_ref()
+            .map(|lines| lines.menu_bar.as_str())
+            == lines.as_ref().map(|lines| lines.menu_bar.as_str())
+    {
+        false
+    } else {
+        current.system_stats != lines
+    };
+    let dashboard_changed = match &dashboard {
+        DashboardSnapshotUpdate::Preserve => false,
+        DashboardSnapshotUpdate::Set(next) => current.dashboard.as_ref() != next.as_deref(),
+    };
+    if !lines_changed && !dashboard_changed {
+        return false;
+    }
+
+    current.system_stats = lines;
+    if let DashboardSnapshotUpdate::Set(next) = dashboard {
+        current.dashboard = next.map(|snapshot| *snapshot);
+    }
+    true
+}
+
+#[cfg(target_os = "macos")]
+fn dashboard_runtime_label(runtime: Option<&RuntimeInfo>, state: ServiceState) -> String {
+    match (state, runtime) {
+        (ServiceState::Running, Some(runtime)) => {
+            format!("{}:{}", runtime.effective_host(), runtime.port)
+        }
+        (ServiceState::Stopped, _) => "Service stopped".to_string(),
+        (ServiceState::Disconnected, _) => "Service disconnected".to_string(),
+        _ => "Service unknown".to_string(),
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dashboard_system_proxy_label(system_proxy: Option<&menu::SystemProxyMenuState>) -> String {
+    match system_proxy {
+        Some(state) if !state.supported => "System proxy unsupported".to_string(),
+        Some(state) if state.enabled => "System proxy On".to_string(),
+        Some(_) => "System proxy Off".to_string(),
+        None => "System proxy --".to_string(),
+    }
 }
 
 fn poll_update_check(
@@ -4062,15 +4447,27 @@ fn refresh_menu_data_snapshot(
     generation: &AtomicU64,
     include_system_proxy: bool,
 ) -> bool {
-    let mut next = load_menu_data_snapshot(args, state, true, include_system_proxy);
+    let should_load_system_proxy = include_system_proxy
+        || match menu_data.lock() {
+            Ok(current) => state == ServiceState::Running && current.system_proxy.is_none(),
+            Err(poisoned) => {
+                let current = poisoned.into_inner();
+                state == ServiceState::Running && current.system_proxy.is_none()
+            }
+        };
+    let mut next = load_menu_data_snapshot(args, state, true, should_load_system_proxy);
     let changed = match menu_data.lock() {
         Ok(mut current) => {
-            if !include_system_proxy {
+            if !include_system_proxy && current.system_proxy.is_some() {
                 next.system_proxy = current.system_proxy.clone();
             }
             #[cfg(target_os = "macos")]
             if next.system_stats.is_some() {
                 next.system_stats = current.system_stats.clone().or(next.system_stats);
+            }
+            #[cfg(target_os = "macos")]
+            {
+                next.dashboard = current.dashboard.clone();
             }
             if *current != next {
                 *current = next;

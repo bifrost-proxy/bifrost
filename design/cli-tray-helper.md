@@ -137,7 +137,7 @@ helper 启动后：
    - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
    - 重新渲染菜单启用状态；
-   - 不在后台定时读取系统代理状态。系统代理状态只能使用缓存，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
+   - 不把系统代理状态放入高频心跳；当 Running 状态下缓存缺失时，后台菜单快照允许补齐一次 `/api/proxy/system`，缓存已有后仅保留旧值，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
 
@@ -188,7 +188,8 @@ v1 语义：
 System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台心跳的一部分：
 
 - tray helper 的后台菜单快照线程可以刷新 runtime、rules、active rules 和本地配置，但不得定时请求 `/api/proxy/system`。
-- `System Proxy` 菜单项使用最近一次缓存状态渲染；缓存为空时可以暂时不显示该项，或等待下一次用户交互后补齐。
+- `System Proxy` 菜单项在服务 Running 且 runtime 可用时必须稳定显示；缓存为空时先按未选中、可点击状态渲染，不能因为状态尚未返回而从菜单中消失。
+- 第一次后台远端快照如果发现 Running 状态下系统代理缓存为空，可以请求一次 `/api/proxy/system` 补齐缓存；缓存已有后普通后台刷新必须复用旧值，避免把系统代理查询放进高频轮询。
 - 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
 - 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
 - Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
@@ -460,7 +461,6 @@ Open Traffic
 Open Rules
 Open Settings
 Copy HTTP Proxy
-Copy SOCKS5 Proxy
 Rules: <当前启用规则>
 Stop Bifrost
 System Proxy
@@ -480,7 +480,6 @@ Quit Tray
 - `Rules: ...`
 - `Open Settings`
 - `Copy HTTP Proxy`
-- `Copy SOCKS5 Proxy`
 - `System Proxy`
 - `Stop Bifrost`
 - `Open Logs`、`Quit Tray` 始终可用。
@@ -491,7 +490,7 @@ Quit Tray
 - `Open Rules`：打开 `admin_url + rules`。
 - `Open Settings`：打开 `admin_url + settings`。
 - `Copy HTTP Proxy`：复制 `http://<host>:<port>`。
-- `Copy SOCKS5 Proxy`：复制 `socks5://<host>:<socks5_port>`；统一代理模式下没有独立 `socks5_port` 时 fallback 到主代理端口，只在服务未运行或 SOCKS 未启用时置灰。
+- 默认菜单不展示 `Copy SOCKS5 Proxy`；如确实需要，可通过自定义菜单模板变量 `{socks5_proxy}` 生成自定义复制项。
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
@@ -722,7 +721,7 @@ Windows：
 - native 状态项会设置 accessibility description，例如 `Bifrost: C5% | M80% | D65% | ↑6.3 K/s ↓12.0 K/s`；关闭系统状态后 description 退回 `Bifrost`。该字段用于辅助功能和真实状态栏自动回归，不影响视觉。
 - macOS 菜单栏 `MEM` 展示对齐 Activity Monitor / iStat Menus 这类系统监控工具的 `Memory Used` 风格，而不是 Activity Monitor 的 Memory Pressure 健康度，也不是 `total - free` 的物理非空闲口径：采样基于 `vm_statistics64` 的 `internal - purgeable + wired + compressor`，把 compressed memory 计入已用内存，同时排除 file-backed cache / speculative / purgeable 这类可回收缓存，避免把系统缓存误报成 75%-80%。下拉系统行会附带 `kern.memorystatus_level` 换算出的 Pressure 诊断值，以及 `Compressed` / `Cached` 明细，便于和 Activity Monitor 的 Memory Used、Compressed、Cached Files、Memory Pressure 分层对照。选择该口径是因为内核 pressure 在绿色状态下会被系统缓存、压缩和余量策略稳定住，打开/关闭普通 App 不一定明显变化，不适合做状态栏主读数。
 - 性能热路径不能每秒 PNG encode/decode。性能回归中 `sample` 明确显示旧路径主要耗时在 `encode_menu_bar_stats_png` / `png::Writer::write_image_data` / `NSImage initWithData`，系统指标采样本身占比很低。当前 native AppKit 路径使用 `NSBitmapImageRep` 直接承接渲染器生成的 RGBA buffer，并在宽高不变时复用同一个 `NSImage` / bitmap representation，只更新像素内容；只有宽高变化或 raw bitmap 构造失败时才走重新创建或 PNG fallback。
-- native 渲染更新应避免把 1 秒网络刷新放大成 AppKit 重安装成本：`NativeStatsStatusItem` 会记录上一份 title，相同展示文本直接跳过渲染；同尺寸刷新复用 scratch RGBA buffer，避免每秒重新分配；同一个 `NSImage` / `NSBitmapImageRep` 只更新像素后标记 button 重绘，不重复执行 `setLength` / `setImage` / `setImagePosition`。CPU 与 Memory 采样计时分离，关闭某一项后不会因为另一项启用而刷新对应指标。
+- native 渲染更新应避免把 1 秒网络刷新放大成 AppKit 重安装成本：`NativeStatsStatusItem` 会记录上一份 title，相同展示文本直接跳过渲染；同尺寸刷新复用 scratch RGBA buffer，避免每秒重新分配；同一个 `NSImage` / `NSBitmapImageRep` 只更新像素内容，并重新把同一个 image 交给 button 触发 AppKit 立即重绘，但不重复执行 `setLength` 或重建 status item。CPU 与 Memory 采样计时分离，关闭某一项后不会因为另一项启用而刷新对应指标。
 - native 菜单展开期间不能替换 `NSMenu` 或对 `NSStatusItem` 做结构性重装。AppKit 在菜单打开时执行 `setMenu`、`setLength` 或 `setImage` 可能直接关闭当前弹窗，因此 native 路径通过 `menuWillOpen` / `menuDidClose` 记录菜单生命周期：菜单打开期间延迟菜单结构刷新和宽高变化的状态项重装；同尺寸 bitmap 像素更新仍允许继续执行，避免网速/采样信息因菜单展开而停止刷新。被延迟的菜单快照在菜单关闭后继续按 generation 补刷新。
 - 系统状态采样线程不能把同步 I/O 或可能卡顿的子进程调用放在 1 秒热路径上。当前实现使用 `notify` watcher 监听 `config.toml` 变化，文件事件触发时更新内存中的 `TraySystemStatsConfig`，watcher 断开或事件丢失时最多每 30 秒兜底重读一次；读取或解析失败时保留上一份配置，避免配置写入瞬间 partial-read 导致状态反复跳变或日志风暴。默认路由接口刷新放入后台 worker，`route -n get default` / IPv6 fallback 受 750ms timeout 保护，采样线程只非阻塞消费 channel 中的最新结果，route 卡顿时继续使用上一轮接口或活跃物理接口 fallback。
 - `NativeStatsStatusItem` 是 AppKit main-thread only 对象，持有 `Retained<NSStatusItem>` 和 `MainThreadMarker`，并通过 `PhantomData<Rc<()>>` 显式标记为 `!Send + !Sync`；Drop 中也会检查当前线程，避免未来误把 native status item 移到采样线程后在非主线程调用 AppKit cleanup。

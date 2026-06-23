@@ -23,6 +23,7 @@
 - Access Control pending 期间终端面板暂停同一 pending 列表的自动重绘，避免用户输入 `y`/`n` 时被定时刷新擦掉。
 - 同一台移动设备刷新同一个检查页面时，只更新最近活跃时间和状态，不新增 `ios (2)` 这类重复设备。
 - 启动期间控制台不应输出与移动面板无关的 Demo/进程检查噪声。
+- 前台启动在打印 `MOBILE AVAILABILITY CHECK` ready 面板前必须已安装 shutdown 信号监听，避免用户或 E2E 在 ready 后立刻按 `Ctrl-C` 时落入监听空窗。
 
 ## 前置条件
 
@@ -312,3 +313,4 @@
 | 2026-06-11 | TC-MAT-16 Linux CI 分片端口与 PTY EOF 回归 | 针对 PR CI run `27301482558` 的 Linux shard 1 失败补充验证：失败日志显示 `test_cli_foreground_ctrlc_no_enter.sh` 在并发 shell suite 中 1 秒内以 `OSError: [Errno 5] Input/output error` 退出，脚本当时未使用 harness 分配的 `ADMIN_PORT=18063`。修复后执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，脚本复用 harness 端口并将 Linux PTY `EIO` 视为 EOF，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
 | 2026-06-11 | TC-MAT-16 Linux CI release 参数兼容回归 | 针对 PR CI run `27303611971` 的 Linux shard 1 失败补充验证：失败日志显示预构建 release binary 对 `bifrost start --no-tray` 返回 `unexpected argument '--no-tray' found`。修复后移除 CLI flag，改用环境变量 `BIFROST_DISABLE_TRAY=1` 禁用 tray；执行 `ADMIN_PORT=18063 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |
 | 2026-06-17 | TC-MAT-17 手机公开页证书未信任状态窄屏不闪烁 | 执行 `cargo build --bin bifrost` 后，使用临时数据目录 `/tmp/bifrost-trust-probe-live-55306/data` 启动 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 ./target/debug/bifrost start --host 127.0.0.1 -p 55306 --unsafe-ssl --skip-cert-check --no-system-proxy`。用 Playwright iPhone 12 / 360px 宽度打开 `http://127.0.0.1:55306/_bifrost/tp`，未安装临时 CA，等待 5.2 秒并监听 `#result`、`#next`、`#ios-wifi-proxy-tools`、`#proxy-configuration` mutation。修复前复现到 `#ios-wifi-proxy-tools` 每秒 mutation，`#next` 每秒 mutation；修复后 mutation 只发生在初始状态推进：`#result` 到 `Browser HTTPS probe failed. Download Bifrost CA`，`#next` 到 iOS 证书信任步骤，`#proxy-configuration` 到未配置代理提示；之后 5 秒无周期性 DOM 替换，按钮和状态信息不再闪烁 | 通过 |
+| 2026-06-23 | TC-MAT-16 前台 Ctrl-C ready 后信号监听空窗回归 | 针对 PR CI run `27971792953` 的 Linux `E2E Shell` 失败补充验证：失败日志显示 `test_cli_foreground_ctrlc_no_enter.sh` 在读到 `MOBILE AVAILABILITY CHECK` 后立即写入 Ctrl-C，但 8 秒内进程未优雅停止。修复为在移动端可用性面板打印 ready 前显式安装 `SIGINT`/`SIGTERM`/`SIGHUP` listener 后，执行 `BIFROST_BIN=target/release/bifrost bash e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh`，输出 `PASS: foreground Ctrl-C stops without an extra Enter` | 通过 |

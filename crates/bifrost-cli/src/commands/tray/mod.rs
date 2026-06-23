@@ -14,6 +14,8 @@ mod cli;
 
 #[cfg(not(target_os = "linux"))]
 mod config;
+#[cfg(target_os = "macos")]
+mod dashboard;
 #[cfg(not(target_os = "linux"))]
 mod lock;
 #[cfg(not(target_os = "linux"))]

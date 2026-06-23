@@ -1061,26 +1061,44 @@ fn should_run_system_proxy_reconcile_startup_recovery(
         && should_run_system_proxy_startup_recovery(bifrost_dir, enable_system_proxy)
 }
 
-async fn wait_for_shutdown_signal() {
-    #[cfg(unix)]
-    {
+#[cfg(unix)]
+struct ShutdownSignalListener {
+    sigterm: tokio::signal::unix::Signal,
+    sigint: tokio::signal::unix::Signal,
+    sighup: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ShutdownSignalListener {
+    fn install() -> Self {
         use tokio::signal::unix::{signal, SignalKind};
 
-        let mut sigterm =
-            signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
-        let mut sigint = signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
-        let mut sighup = signal(SignalKind::hangup()).expect("failed to install SIGHUP handler");
-
-        tokio::select! {
-            _ = sigterm.recv() => {},
-            _ = sigint.recv() => {},
-            _ = sighup.recv() => {},
-            _ = tokio::signal::ctrl_c() => {},
+        Self {
+            sigterm: signal(SignalKind::terminate()).expect("failed to install SIGTERM handler"),
+            sigint: signal(SignalKind::interrupt()).expect("failed to install SIGINT handler"),
+            sighup: signal(SignalKind::hangup()).expect("failed to install SIGHUP handler"),
         }
     }
 
-    #[cfg(not(unix))]
-    {
+    async fn wait(&mut self) {
+        tokio::select! {
+            _ = self.sigterm.recv() => {},
+            _ = self.sigint.recv() => {},
+            _ = self.sighup.recv() => {},
+        }
+    }
+}
+
+#[cfg(not(unix))]
+struct ShutdownSignalListener;
+
+#[cfg(not(unix))]
+impl ShutdownSignalListener {
+    fn install() -> Self {
+        Self
+    }
+
+    async fn wait(&mut self) {
         let _ = tokio::signal::ctrl_c().await;
     }
 }
@@ -2195,6 +2213,7 @@ pub fn run_foreground(
             // Launch tray helper if enabled
             tray_launch_callback();
 
+            let mut shutdown_signal = ShutdownSignalListener::install();
             let mobile_availability_tasks = if detached_daemon_child {
                 Vec::new()
             } else {
@@ -2240,8 +2259,6 @@ pub fn run_foreground(
                 defer_startup_recovery_for_restart_handoff,
             });
 
-            let shutdown_signal = wait_for_shutdown_signal();
-            tokio::pin!(shutdown_signal);
             let shutdown_listener_context = if detached_daemon_child {
                 "daemon listener exit"
             } else {
@@ -2267,7 +2284,7 @@ pub fn run_foreground(
                         }
                         return Err(listener_task_error(listener_result));
                     },
-                    _ = &mut shutdown_signal => {
+                    _ = shutdown_signal.wait() => {
                         info!("Received shutdown signal");
                         println!("\nShutting down...");
                         if enable_system_proxy || system_proxy_enabled.load(Ordering::Acquire) {
@@ -3001,8 +3018,9 @@ pub fn run_daemon(
                 spawn_system_proxy_launchd_install_task(bifrost_dir.clone(), enable_system_proxy);
                 // 先安装 shutdown 信号监听，避免初始化阶段收到 SIGTERM 导致直接退出、但无法记录优雅退出日志。
                 // 这也能让 `bifrost stop` 在 daemon 启动早期更可靠。
+                let mut shutdown_signal = ShutdownSignalListener::install();
                 let result: bifrost_core::Result<()> = tokio::select! {
-                    _ = wait_for_shutdown_signal() => {
+                    _ = shutdown_signal.wait() => {
                         // 注意：daemon 场景下 tracing 日志可能写入 rolling file（例如 bifrost.YYYY-MM-DD.log），
                         // 这里同时写到 stdout，确保 stop/测试能在 bifrost.log 中观察到“优雅退出”。
                         info!("Received shutdown signal");
