@@ -392,7 +392,7 @@ assert_share_env_exit_restores_rules() {
   assert_body_contains "__bb_share_status_dot" "$HTTP_BODY" "Injected badge panel should include Share status dot" || return 1
   assert_body_contains "Share preview active" "$HTTP_BODY" "Injected badge panel should show concise Share preview text" || return 1
   assert_body_contains '"requested_name":"share-source"' "$HTTP_BODY" "Badge inline data should identify active share env" || return 1
-  assert_body_contains "_bifrost/api/rules/share-env/exit" "$HTTP_BODY" "Badge panel should call local share exit API in place" || return 1
+  assert_body_contains "fetch(apiBase+'/rules/share-env/exit'" "$HTTP_BODY" "Badge panel should call local share exit API in place" || return 1
   assert_body_contains "body:JSON.stringify({token:token})" "$HTTP_BODY" "Badge exit should send token in JSON body" || return 1
   assert_body_contains "location.reload()" "$HTTP_BODY" "Badge exit should reload current page after successful exit" || return 1
   assert_body_not_contains "window.open(exitPage" "$HTTP_BODY" "Badge exit should not open a secondary confirmation page" || return 1
@@ -415,6 +415,9 @@ assert_share_env_exit_restores_rules() {
   local second_imported_enabled
   second_imported_enabled="$(rule_enabled_state "share/share-source-2")"
   assert_body_equals "true" "$second_imported_enabled" "Second imported share rule should be enabled inside share env" || return 1
+
+  fetch_via_proxy "$clean_url"
+  assert_status "200" "$HTTP_STATUS" "Clean page request should succeed after second share import" || return 1
 
   local invalid_exit_status
   invalid_exit_status="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
