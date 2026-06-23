@@ -5124,6 +5124,31 @@ rm -rf /tmp/bifrost-remote-overload.*
 | TC-RI-CLI-03 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote:: --lib` 时三条新增回归均通过：label 前缀选择、多连接非交互候选提示、idle timeout detach/job watch 文案。 |
 | TC-RI-CLI-04 | ✅ PASS | 2026-06-17 执行 `BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过。脚本未启动代理、未修改系统代理，验证 `remote --help` 包含 `BIFROST_REMOTE_CLIENT_ID` 与 `run` 子命令，`remote run --help` 包含 `--script-file` / `--interpreter` / `--detach`，`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误，`remote file write --path flag-path.txt --content-file -` 也进入连接解析，证明 `--path` 兼容入口可用。 |
 
+## TC-RI-回归-149：E2E admin helper 绑定 0.0.0.0 时客户端探测必须走 loopback
+
+**背景**：GitHub Actions PR #284 的 macOS shell shard 曾在 `test_remote_invoke_recent_calls_args_preview_e2e.sh` 停在 `Starting bifrost admin`。复现确认服务实际已监听并可通过 `127.0.0.1` 访问，但 E2E helper 把监听地址 `0.0.0.0` 当作客户端访问 host，`/_bifrost/api/auth/status` 被安全层以 403 拒绝。修复要求测试工具区分 bind host 与 client host，不放宽产品侧 Host/跨站安全边界。
+
+### 操作步骤
+
+1. 执行语法检查：`bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+2. 执行 helper 归一化检查：
+   `ADMIN_HOST=0.0.0.0 ADMIN_PORT=12345 bash -lc 'source e2e-tests/test_utils/admin_client.sh >/dev/null; admin_base_url; admin_client_host'`。
+3. 使用 release 二进制复跑 Recent Calls 参数预览 E2E：
+   `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+
+### 预期结果
+
+- helper 语法检查通过。
+- `ADMIN_HOST=0.0.0.0` 只作为启动监听地址；`admin_base_url` 输出 `http://127.0.0.1:12345/_bifrost`，`admin_client_host` 输出 `127.0.0.1`。
+- Recent Calls E2E 能在 `-H 0.0.0.0` 启动 target admin 后通过 readiness、sync session、pairing、grants、remote traffic search、Recent Calls 参数预览、长参数截断、重启恢复和清理全部记录。
+- 全流程使用随机端口和隔离数据目录，启动参数包含 `--no-system-proxy`，不使用 9900，不修改系统代理。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-149 | ✅ PASS | 2026-06-23 执行 `bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；执行 `ADMIN_HOST=0.0.0.0 ADMIN_PORT=12345 bash -lc 'source e2e-tests/test_utils/admin_client.sh >/dev/null; admin_base_url; admin_client_host'` 输出 `http://127.0.0.1:12345/_bifrost` 与 `127.0.0.1`。随后执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过。脚本启动本地 relay `62895`、target admin `-H 0.0.0.0 -p 62896`、本地 echo fixture `62897`，并完整通过 relay 注册、sync session、pair-code 授权、Grants 首次连接/最近命令时间、Recent Calls 参数预览、120 字符长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。

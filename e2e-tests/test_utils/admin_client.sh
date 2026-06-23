@@ -46,6 +46,19 @@ admin_host() {
     echo "${ADMIN_HOST:-127.0.0.1}"
 }
 
+admin_client_host() {
+    local host
+    host="$(admin_host)"
+    case "$host" in
+        0.0.0.0 | "::" | "[::]")
+            echo "127.0.0.1"
+            ;;
+        *)
+            echo "$host"
+            ;;
+    esac
+}
+
 admin_port() {
     if [[ -n "${ADMIN_PORT:-}" ]]; then
         echo "${ADMIN_PORT}"
@@ -70,7 +83,7 @@ admin_base_url() {
     if [[ -n "${ADMIN_BASE_URL_OVERRIDE:-}" ]]; then
         echo "${ADMIN_BASE_URL_OVERRIDE}"
     else
-        echo "http://$(admin_host):$(admin_port)$(admin_path_prefix)"
+        echo "http://$(admin_client_host):$(admin_port)$(admin_path_prefix)"
     fi
 }
 
@@ -147,11 +160,11 @@ admin_wait_for_proxy_ready() {
     local waited=0
     local proxy_ready_url="${ADMIN_PROXY_READY_URL:-}"
     local proxy_url
-    proxy_url="http://$(admin_host):$(admin_port)"
 
     if [[ -z "$proxy_ready_url" ]]; then
         return 0
     fi
+    proxy_url="http://$(admin_client_host):$(admin_port)"
 
     while [[ $waited -lt $timeout ]]; do
         if curl -fsS --max-time 5 --proxy "$proxy_url" "$proxy_ready_url" >/dev/null 2>&1; then
