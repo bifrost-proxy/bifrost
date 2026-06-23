@@ -487,7 +487,7 @@ impl AdminState {
             group_name_cache: parking_lot::Mutex::new(HashMap::new()),
             group_cache_resolved: AtomicBool::new(false),
             badge_rules_cache: parking_lot::RwLock::new(
-                r#"{"rules":[],"merged_content":""}"#.to_string(),
+                r#"{"rules":[],"merged_content":"","share_env":{"active":false}}"#.to_string(),
             ),
         }
     }
@@ -1400,11 +1400,12 @@ impl AdminState {
                     })
                     .count();
                 content_parts.push(rule.content.clone());
-                items.push(format!(
-                    r#"{{"name":{},"rule_count":{},"group_id":null,"group_name":null}}"#,
-                    serde_json::to_string(&rule.name).unwrap_or_else(|_| "\"\"".to_string()),
-                    rule_count,
-                ));
+                items.push(serde_json::json!({
+                    "name": rule.name,
+                    "rule_count": rule_count,
+                    "group_id": null,
+                    "group_name": null,
+                }));
             }
         }
 
@@ -1444,16 +1445,12 @@ impl AdminState {
                                     })
                                     .count();
                                 content_parts.push(rule.content.clone());
-                                items.push(format!(
-                                r#"{{"name":{},"rule_count":{},"group_id":{},"group_name":{}}}"#,
-                                serde_json::to_string(&rule.name)
-                                    .unwrap_or_else(|_| "\"\"".to_string()),
-                                rule_count,
-                                serde_json::to_string(&dir_name)
-                                    .unwrap_or_else(|_| "\"\"".to_string()),
-                                serde_json::to_string(&group_name)
-                                    .unwrap_or_else(|_| "\"\"".to_string()),
-                            ));
+                                items.push(serde_json::json!({
+                                    "name": rule.name,
+                                    "rule_count": rule_count,
+                                    "group_id": dir_name,
+                                    "group_name": group_name,
+                                }));
                             }
                         }
                     }
@@ -1462,13 +1459,33 @@ impl AdminState {
         }
 
         let merged = content_parts.join("\n");
-        let json = format!(
-            r#"{{"rules":[{}],"merged_content":{},"admin_port":{}}}"#,
-            items.join(","),
-            serde_json::to_string(&merged).unwrap_or_else(|_| "\"\"".to_string()),
-            self.port(),
-        );
-        *self.badge_rules_cache.write() = json;
+        let share_env = self
+            .rules_storage
+            .load_share_env_state()
+            .ok()
+            .flatten()
+            .filter(|state| state.active)
+            .map(|state| {
+                serde_json::json!({
+                    "active": true,
+                    "imported_rule_name": state.imported_rule_name,
+                    "requested_name": state.requested_name,
+                    "content_hash": state.content_hash,
+                    "entered_at": state.entered_at,
+                    "exit_token": state.exit_token,
+                })
+            })
+            .unwrap_or_else(|| serde_json::json!({"active": false}));
+        let json = serde_json::json!({
+            "rules": items,
+            "merged_content": merged,
+            "admin_port": self.port(),
+            "share_env": share_env,
+        });
+        *self.badge_rules_cache.write() = serde_json::to_string(&json).unwrap_or_else(|_| {
+            r#"{"rules":[],"merged_content":"","admin_port":0,"share_env":{"active":false}}"#
+                .to_string()
+        });
     }
     pub fn with_keepawake_manager(mut self, mgr: bifrost_power::SharedKeepAwakeManager) -> Self {
         self.keepawake_manager = Some(mgr);
@@ -2021,6 +2038,43 @@ mod tests {
 
         assert_eq!(rule["group_id"], "TeamAlpha");
         assert_eq!(rule["group_name"], "gid-alpha");
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn badge_rules_cache_includes_share_env_state() {
+        let dir = create_test_dir();
+        let rules_dir = dir.join("rules");
+        let _ = fs::create_dir_all(&rules_dir);
+        let storage = RulesStorage::with_dir(rules_dir).unwrap();
+        storage
+            .save(&bifrost_storage::RuleFile::new(
+                "share/demo",
+                "demo.example.com statusCode://204",
+            ))
+            .unwrap();
+        storage
+            .save_share_env_state(&bifrost_storage::ShareEnvState {
+                active: true,
+                imported_rule_name: "share/demo".to_string(),
+                requested_name: "demo".to_string(),
+                content_hash: "hash".to_string(),
+                enabled_rule_names: vec!["before".to_string()],
+                entered_at: "2026-06-22T00:00:00Z".to_string(),
+                exit_token: "exit-token".to_string(),
+            })
+            .unwrap();
+
+        let state = AdminState::new_for_test(19905, storage);
+        state.refresh_badge_rules_cache();
+        let json: serde_json::Value = serde_json::from_str(&state.badge_rules_json()).unwrap();
+
+        assert_eq!(json["share_env"]["active"], true);
+        assert_eq!(json["share_env"]["requested_name"], "demo");
+        assert_eq!(json["share_env"]["imported_rule_name"], "share/demo");
+        assert_eq!(json["share_env"]["exit_token"], "exit-token");
+        assert!(json["share_env"].get("enabled_rule_names").is_none());
 
         cleanup_test_dir(&dir);
     }

@@ -52,4 +52,16 @@ mod tests {
             PathBuf::from("/tmp/meeting.vtt")
         );
     }
+
+    #[test]
+    fn subtitle_path_falls_back_to_regular_extension_rules() {
+        let root = PathBuf::from("/");
+        assert_eq!(subtitle_path_from_timeline(&root, ".srt"), root);
+
+        let path = PathBuf::from("/tmp/meeting.json");
+        assert_eq!(
+            subtitle_path_from_timeline(&path, "vtt"),
+            PathBuf::from("/tmp/meeting.vtt")
+        );
+    }
 }

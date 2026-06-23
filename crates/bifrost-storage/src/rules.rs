@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+const SHARE_ENV_STATE_FILE: &str = ".share_env_state.json";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RuleSyncStatus {
@@ -269,6 +271,18 @@ pub struct RuleSummary {
     pub updated_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShareEnvState {
+    pub active: bool,
+    pub imported_rule_name: String,
+    pub requested_name: String,
+    pub content_hash: String,
+    pub enabled_rule_names: Vec<String>,
+    pub entered_at: String,
+    #[serde(default)]
+    pub exit_token: String,
+}
+
 impl From<&RuleFile> for RuleSummary {
     fn from(rule: &RuleFile) -> Self {
         let rule_count = rule
@@ -339,6 +353,10 @@ impl RulesStorage {
 
     fn raw_legacy_rule_path(&self, name: &str) -> PathBuf {
         self.base_dir.join(format!("{}.json", name))
+    }
+
+    fn share_env_state_path(&self) -> PathBuf {
+        self.base_dir.join(SHARE_ENV_STATE_FILE)
     }
 
     pub fn load(&self, name: &str) -> Result<RuleFile> {
@@ -656,6 +674,35 @@ impl RulesStorage {
         }
         Ok(())
     }
+
+    pub fn load_share_env_state(&self) -> Result<Option<ShareEnvState>> {
+        let path = self.share_env_state_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        ensure_file_size_within_limit(&path, MAX_RULE_FILE_BYTES)?;
+        let content = fs::read_to_string(&path)?;
+        let state: ShareEnvState = serde_json::from_str(&content)
+            .map_err(|e| BifrostError::Parse(format!("Failed to parse share env state: {}", e)))?;
+        Ok(Some(state))
+    }
+
+    pub fn save_share_env_state(&self, state: &ShareEnvState) -> Result<()> {
+        let path = self.share_env_state_path();
+        let content = serde_json::to_string_pretty(state).map_err(|e| {
+            BifrostError::Config(format!("Failed to serialize share env state: {}", e))
+        })?;
+        fs::write(path, content)?;
+        Ok(())
+    }
+
+    pub fn clear_share_env_state(&self) -> Result<()> {
+        let path = self.share_env_state_path();
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+        Ok(())
+    }
 }
 
 fn ensure_sync_metadata(rule: &mut RuleFile) -> bool {
@@ -796,6 +843,11 @@ mod tests {
         storage.save(&RuleFile::new("valid", "content")).unwrap();
         fs::write(temp_dir.path().join(".group_cache"), "{\"cached\":true}").unwrap();
         fs::write(
+            temp_dir.path().join(SHARE_ENV_STATE_FILE),
+            r#"{"active":true,"imported_rule_name":"share/demo","requested_name":"demo","content_hash":"abc","enabled_rule_names":[],"entered_at":"2026-06-22T00:00:00Z"}"#,
+        )
+        .unwrap();
+        fs::write(
             temp_dir.path().join("legacy.json"),
             r#"{"name":"legacy","content":"legacy.example.com host://127.0.0.1:4000","enabled":true}"#,
         )
@@ -878,6 +930,26 @@ mod tests {
         storage.set_enabled("test", true).unwrap();
         let rule = storage.load("test").unwrap();
         assert!(rule.enabled);
+    }
+
+    #[test]
+    fn test_share_env_state_roundtrip_and_clear() {
+        let (_temp_dir, storage) = setup();
+        let state = ShareEnvState {
+            active: true,
+            imported_rule_name: "share/demo".to_string(),
+            requested_name: "demo".to_string(),
+            content_hash: "hash".to_string(),
+            enabled_rule_names: vec!["a".to_string(), "b".to_string()],
+            entered_at: "2026-06-22T00:00:00Z".to_string(),
+            exit_token: "exit-token".to_string(),
+        };
+
+        storage.save_share_env_state(&state).unwrap();
+        assert_eq!(storage.load_share_env_state().unwrap(), Some(state));
+
+        storage.clear_share_env_state().unwrap();
+        assert_eq!(storage.load_share_env_state().unwrap(), None);
     }
 
     #[test]

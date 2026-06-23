@@ -14,10 +14,11 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::{
-    error_response, json_response, json_response_with_status, method_not_allowed, success_response,
-    BoxBody,
+    error_response, full_body, json_response, json_response_with_status, method_not_allowed,
+    success_response, BoxBody,
 };
 use crate::push::SharedPushManager;
+use crate::rule_share_import::exit_rule_share_env;
 use crate::state::SharedAdminState;
 
 #[derive(Debug, Serialize)]
@@ -111,6 +112,221 @@ struct CreateRuleShareLinkResponse {
     content_hash: String,
 }
 
+#[derive(Debug, Serialize)]
+struct ShareEnvStatusResponse {
+    active: bool,
+    imported_rule_name: Option<String>,
+    requested_name: Option<String>,
+    content_hash: Option<String>,
+    enabled_rule_names: Vec<String>,
+    entered_at: Option<String>,
+}
+
+fn html_escape(value: &str) -> String {
+    let mut escaped = String::with_capacity(value.len());
+    for ch in value.chars() {
+        match ch {
+            '&' => escaped.push_str("&amp;"),
+            '<' => escaped.push_str("&lt;"),
+            '>' => escaped.push_str("&gt;"),
+            '"' => escaped.push_str("&quot;"),
+            '\'' => escaped.push_str("&#39;"),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+fn html_response(body: String) -> Response<BoxBody> {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "text/html; charset=utf-8")
+        .header("Cache-Control", "no-store")
+        .header("Referrer-Policy", "no-referrer")
+        .header("X-Frame-Options", "DENY")
+        .body(full_body(body))
+        .unwrap()
+}
+
+pub fn share_env_exit_page(state: SharedAdminState) -> Response<BoxBody> {
+    let share_state = match state.rules_storage.load_share_env_state() {
+        Ok(Some(mut share_state)) if share_state.active => {
+            if share_state.exit_token.trim().is_empty() {
+                share_state.exit_token = uuid::Uuid::new_v4().to_string();
+                if let Err(error) = state.rules_storage.save_share_env_state(&share_state) {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to save share env exit token: {}", error),
+                    );
+                }
+            }
+            Some(share_state)
+        }
+        Ok(_) => None,
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load share env state: {}", error),
+            );
+        }
+    };
+
+    let (status_class, title, description, button, script) = if let Some(share_state) = share_state
+    {
+        let token_json =
+            serde_json::to_string(&share_state.exit_token).unwrap_or_else(|_| "\"\"".to_string());
+        let requested_name = html_escape(&share_state.requested_name);
+        let imported_rule_name = html_escape(&share_state.imported_rule_name);
+        let token_attr = html_escape(&share_state.exit_token);
+        (
+            "active",
+            "Share preview active".to_string(),
+            format!(
+                "Exit <strong>{}</strong> and restore the rules that were enabled before <strong>{}</strong> was imported.",
+                imported_rule_name, requested_name
+            ),
+            format!(
+                r#"<form id="exit-form" method="post" action="/_bifrost/api/rules/share-env/exit"><input type="hidden" name="token" value="{token_attr}"><button id="confirm-exit" type="submit">Exit share preview</button></form>"#
+            ),
+            format!(
+                r#"<script>
+(function(){{
+  var token={token_json};
+  var button=document.getElementById('confirm-exit');
+  var status=document.getElementById('status');
+  var form=document.getElementById('exit-form');
+  function setStatus(text, className){{status.textContent=text;status.className=className||'';}}
+  form.addEventListener('submit', function(ev){{
+    ev.preventDefault();
+    if(ev.isTrusted===false)return;
+    button.disabled=true;
+    button.textContent='Exiting';
+    setStatus('Restoring rules...', '');
+    if(typeof fetch!=='function'){{form.submit();return;}}
+    fetch('/_bifrost/api/rules/share-env/exit', {{
+      method:'POST',
+      credentials:'same-origin',
+      headers:{{'Content-Type':'application/json'}},
+      body:JSON.stringify({{token:token}})
+    }}).then(function(resp){{
+      if(!resp.ok)throw new Error('Exit failed');
+      return resp.json();
+    }}).then(function(data){{
+      if(!data||data.was_active!==true)throw new Error('Share preview is not active');
+      setStatus('Share preview exited. Returning to your page...', 'ok');
+      try{{if(window.opener&&!window.opener.closed)window.opener.location.reload();}}catch(e){{}}
+      setTimeout(function(){{window.close();}},700);
+    }}).catch(function(){{
+      button.disabled=false;
+      button.textContent='Exit share preview';
+      setStatus('Exit failed. Refresh and try again.', 'err');
+    }});
+  }});
+}})();
+</script>"#
+            ),
+        )
+    } else {
+        (
+            "inactive",
+            "No active Share preview".to_string(),
+            "There is no active Share preview to exit.".to_string(),
+            r#"<button type="button" disabled>Exit share preview</button>"#.to_string(),
+            String::new(),
+        )
+    };
+
+    html_response(format!(
+        r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{title}</title>
+  <style>
+    :root{{color-scheme:light dark;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}}
+    body{{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f9fa;color:#1f2a2e}}
+    main{{width:min(360px,calc(100vw - 32px));border:1px solid rgba(35,140,156,.18);border-radius:12px;background:#fff;box-shadow:0 18px 48px rgba(31,42,46,.14);padding:24px}}
+    .mark{{width:10px;height:10px;border-radius:999px;background:#ff4d4f;box-shadow:0 0 0 5px rgba(255,77,79,.12);margin-bottom:14px}}
+    .mark.inactive{{background:#9aa3a7;box-shadow:0 0 0 5px rgba(154,163,167,.12)}}
+    h1{{font-size:20px;line-height:1.2;margin:0 0 10px;font-weight:700}}
+    p{{font-size:14px;line-height:1.55;margin:0 0 18px;color:#506167}}
+    button{{height:34px;border:1px solid rgba(35,140,156,.36);border-radius:6px;background:#238c9c;color:#fff;font-size:14px;font-weight:700;padding:0 14px;cursor:pointer}}
+    button:disabled{{cursor:not-allowed;opacity:.55}}
+    #status{{min-height:20px;margin-top:12px;font-size:13px}}
+    #status.ok{{color:#168a42}}
+    #status.err{{color:#c93535}}
+    @media(prefers-color-scheme:dark){{
+      body{{background:#15191b;color:#e9f1f2}}
+      main{{background:#202628;border-color:rgba(123,235,192,.22);box-shadow:0 18px 48px rgba(0,0,0,.36)}}
+      p{{color:#b9c7ca}}
+      button{{background:#2f9aae;border-color:rgba(123,235,192,.36)}}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <div class="mark {status_class}"></div>
+    <h1>{title}</h1>
+    <p>{description}</p>
+    {button}
+    <p id="status" aria-live="polite"></p>
+  </main>
+  {script}
+</body>
+</html>"#
+    ))
+}
+
+async fn share_exit_token_from_request(
+    req: Request<Incoming>,
+) -> Result<String, Response<BoxBody>> {
+    let (parts, body) = req.into_parts();
+
+    let bytes = body.collect().await.map_err(|error| {
+        error_response(
+            StatusCode::BAD_REQUEST,
+            &format!("Failed to read share env exit request: {}", error),
+        )
+    })?;
+    let bytes = bytes.to_bytes();
+    Ok(share_exit_token_from_headers_and_body(
+        &parts.headers,
+        bytes.as_ref(),
+    ))
+}
+
+fn share_exit_token_from_headers_and_body(headers: &hyper::HeaderMap, bytes: &[u8]) -> String {
+    if let Some(token) = headers
+        .get("X-Bifrost-Share-Exit-Token")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return token.to_string();
+    }
+
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    if let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) {
+        return value
+            .get("token")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .unwrap_or_default()
+            .to_string();
+    }
+
+    let body = String::from_utf8_lossy(bytes);
+    serde_urlencoded::from_str::<HashMap<String, String>>(&body)
+        .ok()
+        .and_then(|mut form| form.remove("token"))
+        .map(|token| token.trim().to_string())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct ActiveRuleItem {
     name: String,
@@ -186,6 +402,16 @@ pub async fn handle_rules(
             Method::POST => create_rule_share_link(req, state).await,
             _ => method_not_allowed(),
         }
+    } else if path == "/api/rules/share-env/status" {
+        match method {
+            Method::GET => share_env_status(state).await,
+            _ => method_not_allowed(),
+        }
+    } else if path == "/api/rules/share-env/exit" {
+        match method {
+            Method::POST => exit_share_env(req, state, push_manager).await,
+            _ => method_not_allowed(),
+        }
     } else if path == "/api/rules/active-summary" {
         match method {
             Method::GET => active_summary(state).await,
@@ -230,6 +456,77 @@ pub async fn handle_rules(
         }
     } else {
         error_response(StatusCode::NOT_FOUND, "Not Found")
+    }
+}
+
+async fn share_env_status(state: SharedAdminState) -> Response<BoxBody> {
+    match state.rules_storage.load_share_env_state() {
+        Ok(Some(share_state)) if share_state.active => json_response(&ShareEnvStatusResponse {
+            active: true,
+            imported_rule_name: Some(share_state.imported_rule_name),
+            requested_name: Some(share_state.requested_name),
+            content_hash: Some(share_state.content_hash),
+            enabled_rule_names: share_state.enabled_rule_names,
+            entered_at: Some(share_state.entered_at),
+        }),
+        Ok(_) => json_response(&ShareEnvStatusResponse {
+            active: false,
+            imported_rule_name: None,
+            requested_name: None,
+            content_hash: None,
+            enabled_rule_names: Vec::new(),
+            entered_at: None,
+        }),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to load share env state: {}", error),
+        ),
+    }
+}
+
+async fn exit_share_env(
+    req: Request<Incoming>,
+    state: SharedAdminState,
+    push_manager: Option<SharedPushManager>,
+) -> Response<BoxBody> {
+    let provided_token = match share_exit_token_from_request(req).await {
+        Ok(token) => token,
+        Err(response) => return response,
+    };
+    match state.rules_storage.load_share_env_state() {
+        Ok(Some(mut share_state)) if share_state.active => {
+            if share_state.exit_token.trim().is_empty() {
+                share_state.exit_token = uuid::Uuid::new_v4().to_string();
+                if let Err(error) = state.rules_storage.save_share_env_state(&share_state) {
+                    return error_response(
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        &format!("Failed to refresh share env exit token: {}", error),
+                    );
+                }
+                return error_response(
+                    StatusCode::CONFLICT,
+                    "Share env exit token was refreshed; open the exit confirmation page again",
+                );
+            }
+            if provided_token.is_empty() || provided_token != share_state.exit_token {
+                return error_response(StatusCode::FORBIDDEN, "Invalid share env exit token");
+            }
+        }
+        Ok(_) => {}
+        Err(error) => {
+            return error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                &format!("Failed to load share env state: {}", error),
+            );
+        }
+    }
+
+    match exit_rule_share_env(state, push_manager.as_ref()).await {
+        Ok(outcome) => json_response(&outcome),
+        Err(error) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to exit share env: {}", error),
+        ),
     }
 }
 
@@ -1213,6 +1510,7 @@ fn notify_rules_changed(state: &SharedAdminState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::header::HeaderValue;
 
     #[test]
     fn test_detect_variable_conflicts_same_name_different_values() {
@@ -1316,6 +1614,83 @@ mod tests {
         assert_eq!(summary.rules[0].group_id.as_deref(), Some("Tray Team"));
         assert_eq!(summary.rules[0].group_name.as_deref(), Some("Tray Team"));
         assert_eq!(summary.merged_content, "group.example.com statusCode://203");
+    }
+
+    #[test]
+    fn share_exit_token_prefers_header_over_body() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            "X-Bifrost-Share-Exit-Token",
+            HeaderValue::from_static(" header-token "),
+        );
+
+        assert_eq!(
+            share_exit_token_from_headers_and_body(&headers, br#"{"token":"body-token"}"#),
+            "header-token"
+        );
+    }
+
+    #[test]
+    fn share_exit_token_reads_json_body() {
+        let headers = hyper::HeaderMap::new();
+
+        assert_eq!(
+            share_exit_token_from_headers_and_body(&headers, br#"{"token":" json-token "}"#),
+            "json-token"
+        );
+    }
+
+    #[test]
+    fn share_exit_token_reads_form_body() {
+        let headers = hyper::HeaderMap::new();
+
+        assert_eq!(
+            share_exit_token_from_headers_and_body(&headers, b"token=form-token"),
+            "form-token"
+        );
+    }
+
+    #[tokio::test]
+    async fn share_env_exit_page_regenerates_empty_token_and_sets_security_headers() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        storage
+            .save_share_env_state(&bifrost_storage::ShareEnvState {
+                active: true,
+                imported_rule_name: "share/demo".to_string(),
+                requested_name: "demo".to_string(),
+                content_hash: "hash".to_string(),
+                enabled_rule_names: vec!["before".to_string()],
+                entered_at: "2026-06-22T00:00:00Z".to_string(),
+                exit_token: String::new(),
+            })
+            .unwrap();
+        let state =
+            std::sync::Arc::new(crate::state::AdminState::new(0).with_rules_storage(storage));
+
+        let response = share_env_exit_page(state.clone());
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response.headers().get("Referrer-Policy"),
+            Some(&HeaderValue::from_static("no-referrer"))
+        );
+        assert_eq!(
+            response.headers().get("X-Frame-Options"),
+            Some(&HeaderValue::from_static("DENY"))
+        );
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Share preview active"));
+        assert!(body.contains("method=\"post\" action=\"/_bifrost/api/rules/share-env/exit\""));
+        assert!(!body.contains("share-env/exit?token="));
+
+        let refreshed = state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .expect("share env state");
+        assert!(!refreshed.exit_token.is_empty());
     }
 
     #[test]

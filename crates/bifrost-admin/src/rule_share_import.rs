@@ -5,7 +5,7 @@ use bifrost_core::rule_share::{
 use bifrost_core::{
     normalize_rule_content, rule_reference_name, validate_rules, BifrostError, Result,
 };
-use bifrost_storage::RuleFile;
+use bifrost_storage::{RuleFile, ShareEnvState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
@@ -32,6 +32,13 @@ pub struct RuleShareImportOutcome {
     pub disabled_rules: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuleShareExitOutcome {
+    pub restored_rules: Vec<String>,
+    pub disabled_rules: Vec<String>,
+    pub was_active: bool,
+}
+
 pub async fn import_rule_share_payload(
     state: SharedAdminState,
     push_manager: Option<&SharedPushManager>,
@@ -44,6 +51,7 @@ pub async fn import_rule_share_payload(
     let rule_name_base = imported_rule_name(&requested_name);
     let description = imported_rule_description(&requested_name, &content_hash);
     let existing_rules = state.rules_storage.load_all()?;
+    let pre_share_enabled_rules = enabled_rule_names(&existing_rules);
 
     if let Some(existing) = find_reusable_rule(
         &requested_name,
@@ -59,6 +67,13 @@ pub async fn import_rule_share_payload(
         state.rules_storage.save(&rule)?;
         clear_deleted_rule_intent(&state, &rule.name).await;
 
+        ensure_share_env_state(
+            &state,
+            &existing.name,
+            &requested_name,
+            &content_hash,
+            &pre_share_enabled_rules,
+        )?;
         let disabled_rules = apply_exclusive_enable(&state, &existing.name).await?;
         notify_after_import(&state, push_manager, &existing.name, false).await;
         return Ok(RuleShareImportOutcome {
@@ -86,6 +101,13 @@ pub async fn import_rule_share_payload(
 
     clear_deleted_rule_intent(&state, &rule_name).await;
 
+    ensure_share_env_state(
+        &state,
+        &rule_name,
+        &requested_name,
+        &content_hash,
+        &pre_share_enabled_rules,
+    )?;
     let disabled_rules = apply_exclusive_enable(&state, &rule_name).await?;
     notify_after_import(&state, push_manager, &rule_name, true).await;
     Ok(RuleShareImportOutcome {
@@ -95,6 +117,90 @@ pub async fn import_rule_share_payload(
         content_hash,
         disabled_rules,
     })
+}
+
+pub async fn exit_rule_share_env(
+    state: SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
+) -> Result<RuleShareExitOutcome> {
+    let Some(share_state) = state.rules_storage.load_share_env_state()? else {
+        return Ok(RuleShareExitOutcome {
+            restored_rules: Vec::new(),
+            disabled_rules: Vec::new(),
+            was_active: false,
+        });
+    };
+
+    let enabled_set = share_state
+        .enabled_rule_names
+        .iter()
+        .cloned()
+        .collect::<std::collections::HashSet<_>>();
+    let mut restored_rules = Vec::new();
+    let mut disabled_rules = Vec::new();
+
+    for mut rule in state.rules_storage.load_all()? {
+        let should_enable = enabled_set.contains(&rule.name);
+        if rule.enabled == should_enable {
+            continue;
+        }
+        rule.enabled = should_enable;
+        rule.touch_local_change();
+        state.rules_storage.save(&rule)?;
+        if should_enable {
+            restored_rules.push(rule.name);
+        } else {
+            disabled_rules.push(rule.name);
+        }
+    }
+
+    restored_rules.sort();
+    disabled_rules.sort();
+    state.rules_storage.clear_share_env_state()?;
+    notify_after_share_exit(&state, push_manager, &restored_rules, &disabled_rules).await;
+
+    Ok(RuleShareExitOutcome {
+        restored_rules,
+        disabled_rules,
+        was_active: share_state.active,
+    })
+}
+
+fn enabled_rule_names(rules: &[RuleFile]) -> Vec<String> {
+    let mut names = rules
+        .iter()
+        .filter(|rule| rule.enabled)
+        .map(|rule| rule.name.clone())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
+}
+
+fn ensure_share_env_state(
+    state: &SharedAdminState,
+    imported_rule_name: &str,
+    requested_name: &str,
+    content_hash: &str,
+    pre_share_enabled_rules: &[String],
+) -> Result<()> {
+    if state
+        .rules_storage
+        .load_share_env_state()?
+        .is_some_and(|state| state.active)
+    {
+        return Ok(());
+    }
+
+    let share_state = ShareEnvState {
+        active: true,
+        imported_rule_name: imported_rule_name.to_string(),
+        requested_name: requested_name.to_string(),
+        content_hash: content_hash.to_string(),
+        enabled_rule_names: pre_share_enabled_rules.to_vec(),
+        entered_at: chrono::Utc::now().to_rfc3339(),
+        exit_token: uuid::Uuid::new_v4().to_string(),
+    };
+    state.rules_storage.save_share_env_state(&share_state)
 }
 
 fn validate_import_payload(payload: &RuleSharePayload) -> Result<()> {
@@ -273,6 +379,60 @@ async fn notify_after_import(
     );
 }
 
+async fn notify_after_share_exit(
+    state: &SharedAdminState,
+    push_manager: Option<&SharedPushManager>,
+    restored_rules: &[String],
+    disabled_rules: &[String],
+) {
+    notify_rules_changed_pub(state);
+    let metadata = json!({
+        "restored_rules": restored_rules,
+        "disabled_rules": disabled_rules,
+    });
+    let message = format!(
+        "Exited share environment. Restored {} previously enabled My Rules.",
+        restored_rules.len()
+    );
+
+    if let Err(error) = create_notification(&CreateNotification {
+        notification_type: "rule_share_exited".to_string(),
+        title: "Share environment exited".to_string(),
+        message: message.clone(),
+        metadata: Some(metadata.to_string()),
+    }) {
+        warn!(
+            target: "bifrost_admin::rule_share",
+            error = %error,
+            "failed to record rule share exit notification"
+        );
+    }
+
+    if let Some(push_manager) = push_manager {
+        push_manager.invalidate_overview_cache();
+        let unread_count = count_unread().unwrap_or(0);
+        push_manager
+            .broadcast_notification(NotificationPushData {
+                notification_type: "rule_share_exited".to_string(),
+                title: "Share environment exited".to_string(),
+                message,
+                metadata: Some(metadata),
+                unread_count,
+            })
+            .await;
+        push_manager
+            .broadcast_settings_scope(SETTINGS_SCOPE_NOTIFICATIONS)
+            .await;
+    }
+
+    info!(
+        target: "bifrost_admin::rule_share",
+        restored = restored_rules.len(),
+        disabled = disabled_rules.len(),
+        "rule share environment exited"
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,6 +504,171 @@ mod tests {
         assert_eq!(third.action, RuleShareImportAction::Reused);
         assert_eq!(third.rule_name, "share/shared 2");
         assert_eq!(state.rules_storage.list().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn import_stashes_pre_share_enabled_rules_once_and_exit_restores() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-enabled", "before.example.com statusCode://201")
+                    .with_enabled(true),
+            )
+            .unwrap();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-disabled", "disabled.example.com statusCode://202")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let first_payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        let first = import_rule_share_payload(state.clone(), None, first_payload)
+            .await
+            .unwrap();
+        assert_eq!(first.rule_name, "share/shared");
+        assert!(!state.rules_storage.load("before-enabled").unwrap().enabled);
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+
+        let share_state = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert_eq!(
+            share_state.enabled_rule_names,
+            vec!["before-enabled".to_string()]
+        );
+
+        let second_payload = bifrost_core::rule_share::new_rule_share_payload(
+            "other",
+            "other.example.com statusCode://204",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, second_payload)
+            .await
+            .unwrap();
+        let share_state_after_second = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert_eq!(
+            share_state_after_second.enabled_rule_names,
+            vec!["before-enabled".to_string()]
+        );
+
+        let exit = exit_rule_share_env(state.clone(), None).await.unwrap();
+        assert!(exit.was_active);
+        assert_eq!(exit.restored_rules, vec!["before-enabled".to_string()]);
+        assert!(state.rules_storage.load("before-enabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("before-disabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/other").unwrap().enabled);
+        assert!(state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_share_env_restores_empty_pre_share_enabled_set() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-disabled", "disabled.example.com statusCode://202")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        let share_state = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert!(share_state.enabled_rule_names.is_empty());
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+
+        let exit = exit_rule_share_env(state.clone(), None).await.unwrap();
+        assert!(exit.was_active);
+        assert!(exit.restored_rules.is_empty());
+        assert_eq!(exit.disabled_rules, vec!["share/shared".to_string()]);
+        assert!(!state.rules_storage.load("before-disabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_share_env_restores_multiple_pre_share_enabled_rules() {
+        let state = temp_rules_state();
+        state
+            .rules_storage
+            .save(&RuleFile::new("before-a", "a.example.com statusCode://201").with_enabled(true))
+            .unwrap();
+        state
+            .rules_storage
+            .save(&RuleFile::new("before-b", "b.example.com statusCode://202").with_enabled(true))
+            .unwrap();
+        state
+            .rules_storage
+            .save(
+                &RuleFile::new("before-disabled", "disabled.example.com statusCode://203")
+                    .with_enabled(false),
+            )
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "example.com bp://127.0.0.1:3000",
+        )
+        .unwrap();
+        import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        let share_state = state.rules_storage.load_share_env_state().unwrap().unwrap();
+        assert_eq!(
+            share_state.enabled_rule_names,
+            vec!["before-a".to_string(), "before-b".to_string()]
+        );
+        assert!(!state.rules_storage.load("before-a").unwrap().enabled);
+        assert!(!state.rules_storage.load("before-b").unwrap().enabled);
+        assert!(state.rules_storage.load("share/shared").unwrap().enabled);
+
+        let exit = exit_rule_share_env(state.clone(), None).await.unwrap();
+        assert!(exit.was_active);
+        assert_eq!(
+            exit.restored_rules,
+            vec!["before-a".to_string(), "before-b".to_string()]
+        );
+        assert_eq!(exit.disabled_rules, vec!["share/shared".to_string()]);
+        assert!(state.rules_storage.load("before-a").unwrap().enabled);
+        assert!(state.rules_storage.load("before-b").unwrap().enabled);
+        assert!(!state.rules_storage.load("before-disabled").unwrap().enabled);
+        assert!(!state.rules_storage.load("share/shared").unwrap().enabled);
+        assert!(state
+            .rules_storage
+            .load_share_env_state()
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn exit_share_env_without_state_is_noop() {
+        let state = temp_rules_state();
+        let outcome = exit_rule_share_env(state, None).await.unwrap();
+        assert!(!outcome.was_active);
+        assert!(outcome.restored_rules.is_empty());
+        assert!(outcome.disabled_rules.is_empty());
     }
 
     #[tokio::test]

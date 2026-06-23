@@ -4817,7 +4817,8 @@ pub(crate) async fn build_badge_rules_json(
             }
             state.badge_rules_json()
         }
-        None => r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string(),
+        None => r#"{"rules":[],"merged_content":"","admin_port":0,"share_env":{"active":false}}"#
+            .to_string(),
     }
 }
 
@@ -4829,7 +4830,7 @@ fn temporary_port_badge_rules_json(
     let merged_content =
         serde_json::to_string(&summary.merged_content).unwrap_or_else(|_| "\"\"".to_string());
     format!(
-        r#"{{"rules":{},"merged_content":{},"admin_port":{},"listener_port":{}}}"#,
+        r#"{{"rules":{},"merged_content":{},"admin_port":{},"listener_port":{},"share_env":{{"active":false}}}}"#,
         rules, merged_content, admin_port, summary.port
     )
 }
@@ -6104,7 +6105,10 @@ mod coverage_boost {
     #[tokio::test]
     async fn build_badge_rules_json_without_admin_state_returns_default() {
         let json = build_badge_rules_json(None, 0).await;
-        assert_eq!(json, r#"{"rules":[],"merged_content":"","admin_port":0}"#);
+        assert_eq!(
+            json,
+            r#"{"rules":[],"merged_content":"","admin_port":0,"share_env":{"active":false}}"#
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use hyper::{body::Incoming, header::HeaderValue, Method, Request, Response, StatusCode};
 use tracing::debug;
 
 use crate::cors::apply_cors_headers;
@@ -23,6 +23,7 @@ use crate::handlers::{
     group::handle_group,
     group_rules::handle_group_rules,
     im_gateway::handle_im_gateway,
+    method_not_allowed,
     metrics::handle_metrics,
     mobile_devices::{handle_mobile_devices, handle_mobile_public},
     notification::handle_notification,
@@ -32,7 +33,7 @@ use crate::handlers::{
     remote_invoke::handle_remote_invoke,
     replay::handle_replay,
     room::handle_room,
-    rules::handle_rules,
+    rules::{handle_rules, share_env_exit_page},
     scripts::handle_scripts_request,
     search::handle_search,
     speech::handle_speech,
@@ -65,6 +66,29 @@ fn query_token(query: Option<&str>) -> Option<String> {
         .filter(|token| !token.trim().is_empty())
 }
 
+fn should_apply_cors(admin_path: &str) -> bool {
+    admin_path != "/share-env/exit"
+}
+
+fn apply_share_env_exit_cors(resp: &mut Response<BoxBody>, origin: Option<&str>) {
+    let headers = resp.headers_mut();
+    headers.insert(
+        "Access-Control-Allow-Origin",
+        origin
+            .and_then(|origin| HeaderValue::from_str(origin).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("*")),
+    );
+    headers.insert("Vary", HeaderValue::from_static("Origin"));
+    headers.insert(
+        "Access-Control-Allow-Methods",
+        HeaderValue::from_static("POST, OPTIONS"),
+    );
+    headers.insert(
+        "Access-Control-Allow-Headers",
+        HeaderValue::from_static("Content-Type"),
+    );
+}
+
 pub struct AdminRouter;
 
 impl AdminRouter {
@@ -89,7 +113,11 @@ impl AdminRouter {
 
         if req.method() == Method::OPTIONS {
             let mut resp = cors_preflight();
-            apply_cors_headers(&mut resp, origin.as_deref());
+            if admin_path == "/api/rules/share-env/exit" {
+                apply_share_env_exit_cors(&mut resp, origin.as_deref());
+            } else if should_apply_cors(&admin_path) {
+                apply_cors_headers(&mut resp, origin.as_deref());
+            }
             return resp;
         }
 
@@ -105,6 +133,18 @@ impl AdminRouter {
             handle_trust_probe_public(req, state, push_manager.clone(), &admin_path).await
         } else if admin_path.starts_with("/public/sync-login") {
             handle_sync_public(req, state, &admin_path).await
+        } else if admin_path == "/share-env/exit" {
+            if req.method() == Method::GET {
+                if let Some(resp) =
+                    Self::check_api_auth(&req, &state, "/api/rules/share-env/exit", peer_addr)
+                {
+                    resp
+                } else {
+                    share_env_exit_page(state)
+                }
+            } else {
+                method_not_allowed()
+            }
         } else if admin_path.starts_with("/api/") {
             // Ensure the ASR scheduled-task scheduler is running on first API
             // request so tasks execute even if the ASR page is never visited.
@@ -114,7 +154,11 @@ impl AdminRouter {
             serve_static_file(&admin_path, req.headers())
         };
 
-        apply_cors_headers(&mut resp, origin.as_deref());
+        if admin_path == "/api/rules/share-env/exit" {
+            apply_share_env_exit_cors(&mut resp, origin.as_deref());
+        } else if should_apply_cors(&admin_path) {
+            apply_cors_headers(&mut resp, origin.as_deref());
+        }
         resp
     }
 
@@ -364,6 +408,42 @@ mod tests {
     }
 
     #[test]
+    fn test_share_env_exit_page_suppresses_cors() {
+        assert!(!should_apply_cors("/share-env/exit"));
+        assert!(should_apply_cors("/api/rules/share-env/exit"));
+        assert!(should_apply_cors("/api/rules/share-env/status"));
+        assert!(should_apply_cors("/"));
+    }
+
+    #[test]
+    fn test_share_env_exit_api_allows_business_origin_cors() {
+        let mut resp = Response::builder()
+            .status(200)
+            .body(crate::handlers::empty_body())
+            .unwrap();
+        apply_share_env_exit_cors(&mut resp, Some("https://www.coze.cn"));
+
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Origin")
+                .and_then(|value| value.to_str().ok()),
+            Some("https://www.coze.cn")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Methods")
+                .and_then(|value| value.to_str().ok()),
+            Some("POST, OPTIONS")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Access-Control-Allow-Headers")
+                .and_then(|value| value.to_str().ok()),
+            Some("Content-Type")
+        );
+    }
+
+    #[test]
     fn test_check_api_auth_requires_token_when_remote_enabled_for_remote_peer() {
         let (state, _tmp) = new_state_remote_enabled();
         let req = Request::builder()
@@ -433,6 +513,19 @@ mod tests {
             .unwrap();
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/auth/remote", remote_peer())
             .expect("should reject remote toggle without token");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_rejects_remote_share_env_exit_without_token() {
+        let (state, _tmp) = new_state_remote_enabled();
+        let req = Request::builder()
+            .uri("/_bifrost/share-env/exit")
+            .body(())
+            .unwrap();
+        let resp =
+            AdminRouter::check_api_auth(&req, &state, "/api/rules/share-env/exit", remote_peer())
+                .expect("remote share env exit confirmation should require token");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 

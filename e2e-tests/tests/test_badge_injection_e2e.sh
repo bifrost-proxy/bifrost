@@ -225,6 +225,81 @@ PY
   assert_status "200" "$status" "vConsole regression rule should be created"
 }
 
+create_rule_api() {
+  local name="$1"
+  local content="$2"
+  local enabled="$3"
+  local payload_file
+  payload_file="$(mktemp)"
+  python3 - "$payload_file" "$name" "$content" "$enabled" <<'PY'
+import json
+import sys
+
+_, path, name, content, enabled = sys.argv
+payload = {
+    "name": name,
+    "content": content,
+    "enabled": enabled.lower() == "true",
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(payload, f)
+PY
+
+  local status
+  status="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${payload_file}")"
+  rm -f "$payload_file"
+
+  assert_status "200" "$status" "Rule '${name}' should be created"
+}
+
+rule_enabled_state() {
+  local name="$1"
+  env NO_PROXY="*" no_proxy="*" curl -sS \
+    "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/${name}" \
+    | python3 -c 'import json,sys; print(str(json.load(sys.stdin)["enabled"]).lower())'
+}
+
+create_share_link_for_rule() {
+  local name="$1"
+  local target_url="$2"
+  local payload_file
+  payload_file="$(mktemp)"
+  python3 - "$payload_file" "$name" "$target_url" <<'PY'
+import json
+import sys
+
+_, path, name, target_url = sys.argv
+with open(path, "w", encoding="utf-8") as f:
+    json.dump({"name": name, "target_url": target_url}, f)
+PY
+
+  local response
+  response="$(env NO_PROXY="*" no_proxy="*" curl -sS \
+    -X POST "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-link" \
+    -H "Content-Type: application/json" \
+    --data-binary "@${payload_file}")"
+  rm -f "$payload_file"
+
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["url"])' <<<"$response"
+}
+
+fetch_via_proxy_follow_headers() {
+  local url="$1"
+  local headers_file
+  headers_file="$(mktemp)"
+  local body_file
+  body_file="$(mktemp)"
+
+  HTTP_STATUS="$(NO_PROXY="" no_proxy="" curl -sS --max-time "$(http_timeout)" --proxy "http://${PROXY_HOST}:${PROXY_PORT}" -D "$headers_file" -o "$body_file" -w '%{http_code}' "$url" 2>/dev/null || echo 000)"
+  HTTP_HEADERS="$(cat "$headers_file" | tr -d '\r')"
+  HTTP_BODY="$(cat "$body_file")"
+
+  rm -f "$headers_file" "$body_file"
+}
+
 fetch_via_proxy() {
   local url="$1"
   local headers_file
@@ -285,6 +360,100 @@ assert_vconsole_rule_is_not_promoted_to_page_script() {
   assert_body_not_contains "</script>\n<script>new VConsole();</script>" "$HTTP_BODY" "vConsole script should not escape from badge inline data"
 }
 
+assert_share_env_exit_restores_rules() {
+  local clean_url="http://127.0.0.1:${HTML_PORT}/index.html"
+
+  create_rule_api "before-enabled" "before-enabled.test statusCode://201" "true" || return 1
+  create_rule_api "before-disabled" "before-disabled.test statusCode://202" "false" || return 1
+  create_rule_api "share-source" "share-source.test statusCode://204" "false" || return 1
+  create_rule_api "share-source-2" "share-source-2.test statusCode://205" "false" || return 1
+
+  local share_url
+  share_url="$(create_share_link_for_rule "share-source" "$clean_url")"
+  assert_body_contains "__bifrost_rule" "$share_url" "Share link should include rule share query" || return 1
+  local second_share_url
+  second_share_url="$(create_share_link_for_rule "share-source-2" "$clean_url")"
+  assert_body_contains "__bifrost_rule" "$second_share_url" "Second share link should include rule share query" || return 1
+
+  fetch_via_proxy_follow_headers "$share_url"
+  assert_status "302" "$HTTP_STATUS" "Share link GET should redirect to clean URL" || return 1
+  assert_body_not_contains "__bifrost_rule" "$HTTP_HEADERS" "Redirect location should remove share query" || return 1
+
+  local status_json
+  status_json="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/status")"
+  assert_body_contains '"active":true' "$status_json" "Share env status should be active after import" || return 1
+  assert_body_contains '"requested_name":"share-source"' "$status_json" "Share env should record requested rule name" || return 1
+
+  fetch_via_proxy "$clean_url"
+  assert_status "200" "$HTTP_STATUS" "Clean page request should succeed after share import" || return 1
+  assert_body_contains "__bb_share_dot" "$HTTP_BODY" "Injected badge should include Share environment red dot" || return 1
+  assert_body_contains "__bb_share_pulse" "$HTTP_BODY" "Injected badge should include Share environment pulse glow" || return 1
+  assert_body_contains "syncShareState();" "$HTTP_BODY" "Injected badge should apply Share state before hover" || return 1
+  assert_body_contains "__bb_share_status_dot" "$HTTP_BODY" "Injected badge panel should include Share status dot" || return 1
+  assert_body_contains "Share preview active" "$HTTP_BODY" "Injected badge panel should show concise Share preview text" || return 1
+  assert_body_contains '"requested_name":"share-source"' "$HTTP_BODY" "Badge inline data should identify active share env" || return 1
+  assert_body_contains "fetch(apiBase+'/rules/share-env/exit'" "$HTTP_BODY" "Badge panel should call local share exit API in place" || return 1
+  assert_body_contains "body:JSON.stringify({token:token})" "$HTTP_BODY" "Badge exit should send token in JSON body" || return 1
+  assert_body_contains "location.reload()" "$HTTP_BODY" "Badge exit should reload current page after successful exit" || return 1
+  assert_body_not_contains "window.open(exitPage" "$HTTP_BODY" "Badge exit should not open a secondary confirmation page" || return 1
+  assert_body_not_contains "location.href=exitPage" "$HTTP_BODY" "Badge exit should not navigate to a secondary confirmation page" || return 1
+  assert_body_not_contains "mode:'no-cors'" "$HTTP_BODY" "Badge exit should not use no-cors blind success fallback" || return 1
+  assert_body_contains "exit_token" "$HTTP_BODY" "Badge inline data should carry share exit token for in-place JSON body exit" || return 1
+  assert_body_not_contains "enabled_rule_names" "$HTTP_BODY" "Badge inline data must not expose pre-share enabled rule names to proxied pages" || return 1
+
+  local before_enabled
+  before_enabled="$(rule_enabled_state "before-enabled")"
+  assert_body_equals "false" "$before_enabled" "Before-enabled rule should be disabled inside share env" || return 1
+  local imported_enabled
+  imported_enabled="$(rule_enabled_state "share/share-source")"
+  assert_body_equals "true" "$imported_enabled" "Imported share rule should be enabled inside share env" || return 1
+
+  fetch_via_proxy_follow_headers "$second_share_url"
+  assert_status "302" "$HTTP_STATUS" "Second share link GET should redirect to clean URL" || return 1
+  imported_enabled="$(rule_enabled_state "share/share-source")"
+  assert_body_equals "false" "$imported_enabled" "First imported share rule should be disabled after second share import" || return 1
+  local second_imported_enabled
+  second_imported_enabled="$(rule_enabled_state "share/share-source-2")"
+  assert_body_equals "true" "$second_imported_enabled" "Second imported share rule should be enabled inside share env" || return 1
+
+  fetch_via_proxy "$clean_url"
+  assert_status "200" "$HTTP_STATUS" "Clean page request should succeed after second share import" || return 1
+
+  local invalid_exit_status
+  invalid_exit_status="$(env NO_PROXY="*" no_proxy="*" curl -sS -o /dev/null -w '%{http_code}' \
+    -X POST "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/exit" \
+    -H "Content-Type: application/json" \
+    --data '{"token":"invalid"}')"
+  assert_status "403" "$invalid_exit_status" "Exit API should reject invalid share exit token" || return 1
+  status_json="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/status")"
+  assert_body_contains '"active":true' "$status_json" "Share env should remain active after invalid exit token" || return 1
+
+  local exit_token
+  exit_token="$(python3 -c 'import re,sys; m=re.search(r"\"exit_token\":\"([^\"]+)\"", sys.stdin.read()); print(m.group(1) if m else "")' <<<"$HTTP_BODY")"
+  assert_not_empty "$exit_token" "Share exit token should be available to the injected badge for in-place exit" || return 1
+
+  local exit_response
+  exit_response="$(env NO_PROXY="*" no_proxy="*" curl -sS \
+    -X POST "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/exit" \
+    -H "Content-Type: application/json" \
+    --data "{\"token\":\"${exit_token}\"}")"
+  assert_body_contains '"was_active":true' "$exit_response" "Exit API should report active share env" || return 1
+  assert_body_contains '"before-enabled"' "$exit_response" "Exit API should report restored rule" || return 1
+
+  before_enabled="$(rule_enabled_state "before-enabled")"
+  assert_body_equals "true" "$before_enabled" "Before-enabled rule should be restored after exit" || return 1
+  imported_enabled="$(rule_enabled_state "share/share-source")"
+  assert_body_equals "false" "$imported_enabled" "Imported share rule should be disabled after exit" || return 1
+  second_imported_enabled="$(rule_enabled_state "share/share-source-2")"
+  assert_body_equals "false" "$second_imported_enabled" "Second imported share rule should be disabled after exit" || return 1
+  local before_disabled
+  before_disabled="$(rule_enabled_state "before-disabled")"
+  assert_body_equals "false" "$before_disabled" "Previously disabled rule should remain disabled after exit" || return 1
+
+  status_json="$(env NO_PROXY="*" no_proxy="*" curl -sS "http://${PROXY_HOST}:${PROXY_PORT}/_bifrost/api/rules/share-env/status")"
+  assert_body_contains '"active":false' "$status_json" "Share env status should be inactive after exit" || return 1
+}
+
 BIFROST_BIN="$(build_bifrost)"
 start_html_server
 
@@ -306,6 +475,11 @@ stop_proxy
 echo "[INFO] Case 4: badge merged rules escape </script> in vConsole htmlAppend values"
 start_proxy "${BIFROST_DATA_DIR_BASE}-escape" --enable-badge-injection
 assert_vconsole_rule_is_not_promoted_to_page_script || { print_test_summary || true; exit 1; }
+stop_proxy
+
+echo "[INFO] Case 5: share env badge exit restores previous enabled rules"
+start_proxy "${BIFROST_DATA_DIR_BASE}-share-env" --enable-badge-injection
+assert_share_env_exit_restores_rules || { print_test_summary || true; exit 1; }
 stop_proxy
 
 print_test_summary || exit 1

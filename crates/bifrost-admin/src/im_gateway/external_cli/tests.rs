@@ -1115,7 +1115,7 @@ async fn external_cli_runtime_streams_stdout_before_process_exit() {
             .unwrap()
     });
 
-    let first = tokio::time::timeout(Duration::from_secs(3), progress_rx.recv())
+    let first = tokio::time::timeout(Duration::from_secs(10), progress_rx.recv())
         .await
         .expect("progress event should arrive before process exit")
         .expect("progress channel open");

@@ -10,7 +10,7 @@ const BADGE_STYLE: &str = concat!(
     "height:30px;width:30px;border-radius:9999px;",
     "background:linear-gradient(135deg,#7BEBC0,#6CBFCF);",
     "box-shadow:0 0 10px 2px rgba(123,235,192,0.35),0 0 0 2px rgba(255,255,255,0.9);",
-    "cursor:pointer;overflow:hidden;white-space:nowrap;",
+    "cursor:pointer;overflow:visible;white-space:nowrap;",
     "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
     "user-select:none;-webkit-user-select:none;",
     "transition:width .4s cubic-bezier(.4,0,.2,1),border-radius .4s cubic-bezier(.4,0,.2,1),box-shadow .3s;",
@@ -30,6 +30,19 @@ const BADGE_STYLE: &str = concat!(
     "transition:opacity .25s .1s;",
     "}",
     "#__bifrost_badge__:hover .__bb_txt{opacity:1}",
+    "#__bifrost_badge__.--share{",
+    "animation:__bb_share_pulse 1.8s ease-in-out infinite;",
+    "}",
+    "#__bifrost_badge__ .__bb_share_dot{",
+    "display:none;position:absolute;right:-2px;top:-2px;",
+    "width:8px;height:8px;border-radius:9999px;background:#ff4d4f;",
+    "border:2px solid #fff;box-shadow:0 2px 7px rgba(255,77,79,.45);",
+    "}",
+    "#__bifrost_badge__.--share .__bb_share_dot{display:block}",
+    "@keyframes __bb_share_pulse{",
+    "0%,100%{box-shadow:0 0 14px 4px rgba(123,235,192,.52),0 0 0 2px rgba(255,255,255,.96)}",
+    "50%{box-shadow:0 0 28px 9px rgba(123,235,192,.76),0 0 0 2px rgba(255,255,255,1)}",
+    "}",
     "#__bb_panel__{",
     "position:fixed;left:15px;bottom:52px;z-index:2147483647!important;",
     "min-width:280px;max-width:400px;max-height:420px;",
@@ -74,6 +87,26 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_empty{",
     "padding:24px 16px;text-align:center;font-size:13px;color:#999;",
     "}",
+    "#__bb_panel__ .__bb_share_env{",
+    "margin:10px 12px;padding:8px 10px 8px 12px;border-left:3px solid #6CBFCF;",
+    "border-radius:6px;background:rgba(108,191,207,.10);",
+    "display:flex;align-items:center;gap:8px;font-size:13px;color:#238C9C;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_status_dot{",
+    "width:7px;height:7px;border-radius:9999px;background:#ff4d4f;",
+    "box-shadow:0 0 0 2px rgba(255,77,79,.12);flex-shrink:0;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_name{",
+    "flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;",
+    "font-size:13px;font-weight:600;color:#238C9C;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit{",
+    "border:1px solid rgba(47,154,174,.35);border-radius:4px;",
+    "background:rgba(255,255,255,.72);color:#238C9C;font-size:11px;font-weight:700;",
+    "height:22px;padding:0 8px;line-height:20px;cursor:pointer;",
+    "font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;",
+    "}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:rgba(108,191,207,.16);border-color:rgba(47,154,174,.55)}",
     "#__bb_panel__ .__bb_grp{",
     "padding:8px 16px 4px;font-size:10px;font-weight:600;color:#999;",
     "display:flex;align-items:center;gap:4px;",
@@ -114,6 +147,10 @@ const BADGE_STYLE: &str = concat!(
     "#__bb_panel__ .__bb_sec{color:#666}",
     "#__bb_panel__ .__bb_ri .__bb_rc{color:#666}",
     "#__bb_panel__ .__bb_empty{color:#666}",
+    "#__bb_panel__ .__bb_share_env{background:rgba(108,191,207,.14);color:#7BEBC0}",
+    "#__bb_panel__ .__bb_share_env .__bb_share_name{color:#7BEBC0}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit{background:rgba(31,31,31,.58);color:#7BEBC0;border-color:rgba(123,235,192,.35)}",
+    "#__bb_panel__ .__bb_share_env .__bb_exit:hover{background:rgba(123,235,192,.12);border-color:rgba(123,235,192,.58)}",
     "#__bb_panel__ .__bb_grp{color:#666}",
     "#__bb_panel__ .__bb_grp svg{fill:#666}",
     "#__bb_panel__ .__bb_mg{border-top-color:#333}",
@@ -128,6 +165,7 @@ const BADGE_HTML: &str = concat!(
     r#"<div id="__bifrost_badge__" aria-hidden="true">"#,
     r#"<span class="__bb_ico">B</span>"#,
     r#"<span class="__bb_txt">Bifrost proxy is working</span>"#,
+    r#"<span class="__bb_share_dot"></span>"#,
     "</div>",
     r#"<div id="__bb_panel__"></div>"#,
 );
@@ -141,11 +179,15 @@ fn badge_script(rules_json: &str) -> String {
             "var B=document.getElementById('__bifrost_badge__');",
             "var P=document.getElementById('__bb_panel__');",
             "if(!B||!P)return;",
+            "var S=document.currentScript;",
             "var D={rules_json};",
             "var hideTimer=null;",
             "var base=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/rules':'';",
+            "var apiBase=D.admin_port?'http://127.0.0.1:'+D.admin_port+'/_bifrost/api':'';",
             "var BOLT='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M560 192L256 576h208l-48 256 320-384H528l32-256z\" fill=\"currentColor\"/></svg>';",
             "var TEAM='<svg viewBox=\"0 0 1024 1024\" xmlns=\"http://www.w3.org/2000/svg\"><path d=\"M824 512a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm-312-88a120 120 0 1 0 0-240 120 120 0 0 0 0 240zm-312 88a56 56 0 1 0 0-112 56 56 0 0 0 0 112zm624 56c-46 0-86 26-106 64h-4c-24-48-62-86-108-110a184 184 0 0 0-104-32h-8a184 184 0 0 0-104 32c-46 24-84 62-108 110h-4a120 120 0 0 0-106-64c-66 0-120 54-120 120v64h248a248 248 0 0 0 8 24h-8v200h416V792h-8a248 248 0 0 0 8-24h248v-64c0-66-54-120-120-120z\" fill=\"currentColor\"/></svg>';",
+            "function shareActive(){{return!!(D.share_env&&D.share_env.active)}}",
+            "function syncShareState(){{if(shareActive())B.classList.add('--share');else B.classList.remove('--share')}}",
             "function show(){{clearTimeout(hideTimer);render();P.classList.add('--visible')}}",
             "function hide(){{hideTimer=setTimeout(function(){{P.classList.remove('--visible')}},150)}}",
             "function esc(s){{var d=document.createElement('div');d.textContent=s;return d.innerHTML}}",
@@ -153,6 +195,7 @@ fn badge_script(rules_json: &str) -> String {
             "function fallbackCopy(text){{return new Promise(function(resolve,reject){{var t=document.createElement('textarea');var prev=document.activeElement;var ok=false;var copied=false;function onCopy(e){{if(e.clipboardData){{e.clipboardData.setData('text/plain',text);e.preventDefault();copied=true}}}}t.value=text;t.setAttribute('readonly','');t.style.position='fixed';t.style.top='0';t.style.left='0';t.style.width='1px';t.style.height='1px';t.style.opacity='0';document.body.appendChild(t);document.addEventListener('copy',onCopy,true);try{{t.focus();t.select();t.setSelectionRange(0,text.length);ok=document.execCommand('copy')}}catch(e){{ok=false}}document.removeEventListener('copy',onCopy,true);document.body.removeChild(t);try{{if(prev&&prev.focus)prev.focus()}}catch(e){{}}ok&&copied?resolve():reject(new Error('copy failed'))}})}}",
             "function copyText(text){{if(navigator.clipboard&&window.isSecureContext&&navigator.clipboard.writeText){{return navigator.clipboard.writeText(text).catch(function(){{return fallbackCopy(text)}})}}return fallbackCopy(text)}}",
             "function copyMerged(btn){{copyText(String(D.merged_content||'').trim()).then(function(){{setCopyState(btn,'Copied');setTimeout(function(){{setCopyState(btn,'Copy')}},1200)}}).catch(function(){{setCopyState(btn,'Failed');setTimeout(function(){{setCopyState(btn,'Copy')}},1600)}})}}",
+            "function exitShare(btn,ev){{if(!apiBase||!ev||ev.isTrusted===false)return;var token=(D.share_env&&D.share_env.exit_token)||'';if(!token)return;var old=btn.textContent;btn.disabled=true;btn.textContent='Exiting';function done(){{btn.textContent='Exited';setTimeout(function(){{location.reload()}},250)}}function fail(){{btn.disabled=false;btn.textContent='Failed';setTimeout(function(){{btn.textContent=old}},1400)}}fetch(apiBase+'/rules/share-env/exit',{{method:'POST',mode:'cors',credentials:'omit',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{token:token}})}}).then(function(r){{if(!r.ok)throw new Error('exit failed');return r.json()}}).then(function(data){{if(!data||data.was_active!==true)throw new Error('exit not active');done()}}).catch(fail)}}",
             "function ruleRow(r){{",
             "var href='';",
             "if(base){{",
@@ -165,7 +208,10 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "function render(){{",
             "var rules=D.rules||[];",
+            "var active=shareActive();",
+            "syncShareState();",
             "var html='<div class=\"__bb_ph\">'+BOLT+' Active Rules<span style=\"margin-left:auto;font-size:12px;font-weight:500;color:#52c41a\">'+rules.length+' active</span></div>';",
+            "if(active){{html+='<div class=\"__bb_share_env\"><span class=\"__bb_share_status_dot\"></span><span class=\"__bb_share_name\">Share preview active</span><button type=\"button\" class=\"__bb_exit\" title=\"Exit share environment\">Exit</button></div>'}}",
             "html+='<div class=\"__bb_pl\">';",
             "if(rules.length===0){{html+='<div class=\"__bb_empty\">No active rules</div>'}}",
             "else{{",
@@ -191,12 +237,15 @@ fn badge_script(rules_json: &str) -> String {
             "}}",
             "P.innerHTML=html;",
             "Array.prototype.forEach.call(P.querySelectorAll('.__bb_copy'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();copyMerged(btn)}}}});",
+            "Array.prototype.forEach.call(P.querySelectorAll('.__bb_exit'),function(btn){{btn.onclick=function(ev){{ev.stopPropagation();exitShare(btn,ev)}}}});",
             "}}",
             "B.onmouseenter=show;",
             "B.onmouseleave=hide;",
             "P.onmouseenter=function(){{clearTimeout(hideTimer)}};",
             "P.onmouseleave=hide;",
             "B.onclick=function(){{B.style.display='none';P.classList.remove('--visible')}};",
+            "syncShareState();",
+            "if(S&&S.parentNode)S.parentNode.removeChild(S);",
             "}})();",
             "</script>",
         ),
@@ -205,13 +254,19 @@ fn badge_script(rules_json: &str) -> String {
 }
 
 fn inline_script_safe_json(rules_json: &str) -> String {
-    let value = serde_json::from_str::<serde_json::Value>(rules_json).unwrap_or_else(|_| {
+    let mut value = serde_json::from_str::<serde_json::Value>(rules_json).unwrap_or_else(|_| {
         serde_json::json!({
             "rules": [],
             "merged_content": "",
             "admin_port": 0,
         })
     });
+    if let Some(share_env) = value
+        .get_mut("share_env")
+        .and_then(|value| value.as_object_mut())
+    {
+        share_env.remove("enabled_rule_names");
+    }
     let json = serde_json::to_string(&value)
         .unwrap_or_else(|_| r#"{"rules":[],"merged_content":"","admin_port":0}"#.to_string());
 
@@ -339,6 +394,7 @@ mod tests {
 
     const EMPTY_RULES: &str = r#"{"rules":[],"merged_content":"","admin_port":8800}"#;
     const SAMPLE_RULES: &str = r#"{"rules":[{"name":"my-rule","rule_count":3,"group_id":null,"group_name":null}],"merged_content":"example.com mock 200","admin_port":8800}"#;
+    const SHARE_RULES: &str = r#"{"rules":[{"name":"share/demo","rule_count":1,"group_id":null,"group_name":null}],"merged_content":"demo.example.com statusCode://204","admin_port":8800,"share_env":{"active":true,"imported_rule_name":"share/demo","requested_name":"demo","content_hash":"abc","enabled_rule_names":["before"],"entered_at":"2026-06-22T00:00:00Z","exit_token":"exit-token"}}"#;
 
     #[test]
     fn test_inject_badge_before_body_end() {
@@ -431,7 +487,8 @@ mod tests {
         assert!(snippet.contains("rule_count"));
         assert!(snippet.contains("merged_content"));
         assert!(snippet.contains("admin_port"));
-        assert!(!snippet.contains("fetch("));
+        assert!(snippet.contains("_bifrost/api"));
+        assert!(snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
     }
 
     #[test]
@@ -500,6 +557,34 @@ mod tests {
         assert!(snippet.contains("clipboardData.setData('text/plain',text)"));
         assert!(snippet.contains("ok&&copied?resolve()"));
         assert!(snippet.contains("copyMerged(btn)"));
+    }
+
+    #[test]
+    fn test_badge_share_env_badge_and_exit_button_present() {
+        let snippet = build_badge_snippet(SHARE_RULES);
+
+        assert!(snippet.contains("__bb_share_dot"));
+        assert!(snippet.contains("__bb_share_pulse"));
+        assert!(snippet.contains("--share"));
+        assert!(snippet.contains("syncShareState();"));
+        assert!(snippet.contains("function shareActive()"));
+        assert!(snippet.contains("__bb_share_status_dot"));
+        assert!(snippet.contains("Share preview active"));
+        assert!(snippet.contains("exit_token"));
+        assert!(!snippet.contains("enabled_rule_names"));
+        assert!(snippet.contains("ev.isTrusted"));
+        assert!(snippet.contains("document.currentScript"));
+        assert!(snippet.contains("removeChild(S)"));
+        assert!(snippet.contains("__bb_exit"));
+        assert!(snippet.contains("fetch(apiBase+'/rules/share-env/exit'"));
+        assert!(snippet.contains("body:JSON.stringify({token:token})"));
+        assert!(snippet.contains("location.reload()"));
+        assert!(!snippet.contains("_bifrost/share-env/exit"));
+        assert!(!snippet.contains("window.open(exitPage"));
+        assert!(!snippet.contains("location.href=exitPage"));
+        assert!(!snippet.contains("encodeURIComponent(token)"));
+        assert!(!snippet.contains("mode:'no-cors'"));
+        assert!(snippet.contains("exitShare(btn,ev)"));
     }
 
     #[test]
