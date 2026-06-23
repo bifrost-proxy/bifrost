@@ -660,6 +660,20 @@
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_native_menu_bar_stats_keeps_same_size_for_live_value_refresh() {
+        let before =
+            render_native_menu_bar_stats_bitmap("C75% | M71% | D90% | ↑44.3 K/s ↓188 K/s")
+                .expect("before bitmap");
+        let after =
+            render_native_menu_bar_stats_bitmap("C79% | M32% | D92% | ↑44.3 K/s ↓187.8 K/s")
+                .expect("after bitmap");
+
+        assert_eq!(before.width, after.width);
+        assert_eq!(before.height, after.height);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_system_stats_update_can_preserve_dashboard_snapshot() {
         let original_dashboard = sample_dashboard_snapshot("127.0.0.1:8800");
         let replacement_dashboard = sample_dashboard_snapshot("127.0.0.1:18890");
@@ -886,6 +900,90 @@
 
         let snapshot = clone_menu_data_snapshot(&menu_data);
         assert_eq!(snapshot.system_proxy, Some(cached));
+    }
+
+    #[test]
+    fn test_background_menu_refresh_loads_missing_system_proxy_cache_once() {
+        let (admin_url, seen, handle) = spawn_test_http_server(vec![
+            ("HTTP/1.1 200 OK", r#"[]"#),
+            ("HTTP/1.1 200 OK", r#"{"code":0,"data":{"list":[]}}"#),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"total":0,"rules":[],"variable_conflicts":[],"merged_content":""}"#,
+            ),
+            (
+                "HTTP/1.1 200 OK",
+                r#"{"supported":true,"enabled":true,"managed_by_bifrost":true}"#,
+            ),
+        ]);
+        let data_dir = std::env::temp_dir().join(format!(
+            "bifrost-tray-system-proxy-fill-cache-{}",
+            std::process::id()
+        ));
+        let args = TrayArgs {
+            data_dir: data_dir.clone(),
+            runtime_file: data_dir.join("missing-runtime.json"),
+            parent_pid: std::process::id(),
+            admin_url: Some(admin_url),
+            port: None,
+            bifrost_bin: Some(PathBuf::from("/tmp/bifrost")),
+            start_args: Vec::new(),
+        };
+        let snapshot = MenuDataSnapshot {
+            runtime: runtime_for_menu(&args),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            bin_available: true,
+            update_available: None,
+            #[cfg(target_os = "macos")]
+            system_stats: None,
+            #[cfg(target_os = "macos")]
+            dashboard: None,
+        };
+        let menu_data = Arc::new(Mutex::new(snapshot));
+        let generation = AtomicU64::new(0);
+
+        assert!(refresh_menu_data_snapshot(
+            &args,
+            ServiceState::Running,
+            &menu_data,
+            &generation,
+            false,
+        ));
+        handle.join().unwrap();
+
+        let snapshot = clone_menu_data_snapshot(&menu_data);
+        assert_eq!(
+            snapshot.system_proxy,
+            Some(menu::SystemProxyMenuState {
+                supported: true,
+                enabled: true,
+            })
+        );
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![
+                "GET /_bifrost/api/rules/reference-candidates HTTP/1.1",
+                "GET /_bifrost/api/group HTTP/1.1",
+                "GET /_bifrost/api/rules/active-summary HTTP/1.1",
+                "GET /_bifrost/api/proxy/system HTTP/1.1",
+            ]
+        );
+
+        let menu = build_menu_from_snapshot(
+            &snapshot,
+            ServiceState::Running,
+            None,
+            false,
+            data_dir.to_string_lossy().as_ref(),
+            false,
+        );
+        let toggle = find_menu_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
+        assert!(toggle.enabled);
+        assert!(toggle.checked);
     }
 
     #[cfg(target_os = "macos")]
@@ -1185,9 +1283,13 @@
         clear_remote_group_failure();
         assert!(!remote_group_failure_backoff_active());
 
-        record_remote_group_failure();
+        assert!(record_remote_group_failure());
+        assert!(remote_group_failure_backoff_active());
+        assert!(!record_remote_group_failure());
         assert!(remote_group_failure_backoff_active());
 
         clear_remote_group_failure();
         assert!(!remote_group_failure_backoff_active());
+        assert!(record_remote_group_failure());
+        clear_remote_group_failure();
     }

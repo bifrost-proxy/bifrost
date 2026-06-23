@@ -2867,15 +2867,21 @@ fn load_managed_groups_from_admin(
         Ok(resp) => match resp.into_json::<serde_json::Value>() {
             Ok(value) => value,
             Err(error) => {
-                record_remote_group_failure();
-                tracing::warn!(error = %error, "failed to decode group list for tray menu");
-                return None;
+                if record_remote_group_failure() {
+                    tracing::warn!(error = %error, "failed to decode group list for tray menu");
+                } else {
+                    tracing::debug!(error = %error, "failed to decode group list for tray menu");
+                }
+                return Some(Vec::new());
             }
         },
         Err(error) => {
-            record_remote_group_failure();
-            tracing::warn!(error = %error, "failed to load group list for tray menu");
-            return None;
+            if record_remote_group_failure() {
+                tracing::warn!(error = %error, "failed to load group list for tray menu");
+            } else {
+                tracing::debug!(error = %error, "failed to load group list for tray menu");
+            }
+            return Some(Vec::new());
         }
     };
 
@@ -2918,33 +2924,51 @@ fn load_managed_groups_from_admin(
     Some(managed_groups)
 }
 
-fn remote_group_failure_backoff() -> &'static Mutex<Option<Instant>> {
-    static BACKOFF: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
-    BACKOFF.get_or_init(|| Mutex::new(None))
+#[derive(Debug, Default)]
+struct RemoteGroupFailureState {
+    failed_at: Option<Instant>,
+    warned: bool,
+}
+
+fn remote_group_failure_backoff() -> &'static Mutex<RemoteGroupFailureState> {
+    static BACKOFF: OnceLock<Mutex<RemoteGroupFailureState>> = OnceLock::new();
+    BACKOFF.get_or_init(|| Mutex::new(RemoteGroupFailureState::default()))
 }
 
 fn remote_group_failure_backoff_active() -> bool {
     match remote_group_failure_backoff().lock() {
-        Ok(guard) => {
-            guard.is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF)
-        }
+        Ok(guard) => guard
+            .failed_at
+            .is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF),
         Err(poisoned) => poisoned
             .into_inner()
+            .failed_at
             .is_some_and(|failed_at| failed_at.elapsed() < REMOTE_GROUP_FAILURE_BACKOFF),
     }
 }
 
-fn record_remote_group_failure() {
+fn record_remote_group_failure() -> bool {
     match remote_group_failure_backoff().lock() {
-        Ok(mut guard) => *guard = Some(Instant::now()),
-        Err(poisoned) => *poisoned.into_inner() = Some(Instant::now()),
+        Ok(mut guard) => {
+            let should_warn = !guard.warned;
+            guard.failed_at = Some(Instant::now());
+            guard.warned = true;
+            should_warn
+        }
+        Err(poisoned) => {
+            let mut guard = poisoned.into_inner();
+            let should_warn = !guard.warned;
+            guard.failed_at = Some(Instant::now());
+            guard.warned = true;
+            should_warn
+        }
     }
 }
 
 fn clear_remote_group_failure() {
     match remote_group_failure_backoff().lock() {
-        Ok(mut guard) => *guard = None,
-        Err(poisoned) => *poisoned.into_inner() = None,
+        Ok(mut guard) => *guard = RemoteGroupFailureState::default(),
+        Err(poisoned) => *poisoned.into_inner() = RemoteGroupFailureState::default(),
     }
 }
 
@@ -3103,8 +3127,8 @@ impl NativeDashboardHeader {
         let bitmap = dashboard::render_dashboard_with_theme(snapshot, theme)?;
         let rendered = native_dashboard_image_from_bitmap(&bitmap)?;
         let view_size = NSSize::new(
-            f64::from(DASHBOARD_WIDTH) / 2.0,
-            f64::from(DASHBOARD_HEIGHT) / 2.0,
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
         );
         rendered.image.setSize(view_size);
         rendered.image.setTemplate(false);
@@ -3155,8 +3179,8 @@ impl NativeDashboardHeader {
             return false;
         };
         let view_size = NSSize::new(
-            f64::from(DASHBOARD_WIDTH) / 2.0,
-            f64::from(DASHBOARD_HEIGHT) / 2.0,
+            f64::from(bitmap.width) / 2.0,
+            f64::from(bitmap.height) / 2.0,
         );
         rendered.image.setSize(view_size);
         rendered.image.setTemplate(false);
@@ -3190,7 +3214,11 @@ fn install_dashboard_header(
         ns_menu.insertItem_atIndex(&header.item, 0);
         tracing::info!(
             items = ns_menu.numberOfItems(),
-            width = DASHBOARD_WIDTH / 2,
+            width = header
+                .rendered_image
+                .as_ref()
+                .map(|image| image.width / 2)
+                .unwrap_or(DASHBOARD_WIDTH / 2),
             height = DASHBOARD_HEIGHT / 2,
             "native tray dashboard header installed"
         );
@@ -4239,11 +4267,15 @@ fn poll_system_stats(
         }
 
         let stats_config = stats_config_watcher.current(Instant::now());
+        let menu_is_open = menu_open_state.open.load(Ordering::Relaxed);
         if stats_config.visible() {
-            let menu_is_open = menu_open_state.open.load(Ordering::Relaxed);
             let snapshot =
-                sampler.sample_with_disk_io(Instant::now(), &stats_config.items, menu_is_open);
-            let lines = system_stats::menu_lines(&snapshot, &stats_config.items);
+                sampler.sample_for_menu_state(Instant::now(), &stats_config.items, menu_is_open);
+            let lines = system_stats::menu_lines_for_menu_state(
+                &snapshot,
+                &stats_config.items,
+                menu_is_open,
+            );
             let menu_snapshot = clone_menu_data_snapshot(menu_data);
             let dashboard_update = if menu_is_open || menu_snapshot.dashboard.is_none() {
                 let service_state =
@@ -4415,10 +4447,18 @@ fn refresh_menu_data_snapshot(
     generation: &AtomicU64,
     include_system_proxy: bool,
 ) -> bool {
-    let mut next = load_menu_data_snapshot(args, state, true, include_system_proxy);
+    let should_load_system_proxy = include_system_proxy
+        || match menu_data.lock() {
+            Ok(current) => state == ServiceState::Running && current.system_proxy.is_none(),
+            Err(poisoned) => {
+                let current = poisoned.into_inner();
+                state == ServiceState::Running && current.system_proxy.is_none()
+            }
+        };
+    let mut next = load_menu_data_snapshot(args, state, true, should_load_system_proxy);
     let changed = match menu_data.lock() {
         Ok(mut current) => {
-            if !include_system_proxy {
+            if !include_system_proxy && current.system_proxy.is_some() {
                 next.system_proxy = current.system_proxy.clone();
             }
             #[cfg(target_os = "macos")]

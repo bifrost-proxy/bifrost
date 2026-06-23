@@ -411,7 +411,23 @@ curl -sS -X POST http://127.0.0.1:8801/_bifrost/api/rules \
 - 菜单中不存在 `Open Data Directory`
 - `System Proxy` 是原生勾选菜单项，勾选状态与 `managed_by_bifrost=true` 的系统代理状态一致
 - 点击后通过 Admin API 切换系统代理到当前 Bifrost 端口；再次点击可关闭，关闭后不残留 Bifrost 管理的系统代理
-- 切换动作使用 Admin API 的个人规则 enable/disable 与组规则 enable/disable 接口
+- 切换动作使用 Admin API `PUT /_bifrost/api/proxy/system`，状态读取使用同一个 `GET /_bifrost/api/proxy/system`
+
+### TC-TH-14-REG-03: Running 状态下系统代理开关缓存缺失时不消失
+
+**操作步骤：**
+1. 使用启动命令模板启动 Bifrost 服务
+2. 在系统代理状态缓存尚未返回或被清空的场景下构建托盘菜单快照
+3. 展开托盘菜单并观察 `Stop Bifrost` 下方动作区
+4. 等待后台远端快照刷新一次，再次展开托盘菜单
+5. 对比 Web UI System Proxy 开关使用的状态接口
+
+**预期结果：**
+- 服务为 Running 且 runtime 可用时，`System Proxy` 菜单项必须稳定存在，不能因为缓存为 `None` 直接消失
+- 缓存为空时菜单先按未选中、可点击开关渲染；后台第一次远端快照会请求一次 `/api/proxy/system` 补齐状态
+- 缓存补齐后，勾选态与 `GET /_bifrost/api/proxy/system` 中 `enabled && managed_by_bifrost != false` 一致
+- 普通后台刷新在缓存已有时复用旧值，不把系统代理状态查询放入高频轮询
+- Web UI 与托盘菜单读取同一个 `GET /api/proxy/system`，切换同一个 `PUT /api/proxy/system`
 
 ### TC-TH-15: 服务停止后 1 秒轮询刷新菜单状态
 
@@ -775,7 +791,7 @@ BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/tes
 **预期结果：**
 - macOS 默认 `GET /api/config/tray` 返回 `enabled: true`、`system_stats_supported: true`、`show_system_stats: true`，且 `system_stats_items.cpu/memory/disk/upload/download` 全为 `true`。
 - macOS 菜单栏无需点击即可常驻展示系统状态；左侧 Bifrost 图标大小不因启用系统状态而缩小或变形，右侧状态文本使用常规字重系统字体、单行 `C/M/D/↑/↓` 布局和稳定列宽，上传/下载作为一个网络字段展示，数据来源是整机状态，不是 Bifrost 进程自身指标。
-- 网速优先按默认出站接口的累计字节差值计算；找不到默认接口时才回退到活跃物理接口，并通过 hysteresis、虚拟接口过滤和指数平滑避免双算、跳接口和单样本尖峰。
+- 网速默认按默认出站接口的累计字节差值计算；找不到默认接口时才回退到活跃物理接口，并通过 hysteresis、虚拟接口过滤和指数平滑避免双算、跳接口和单样本尖峰。本机代理链路导致默认接口下行接近 0 时，允许严格条件下用 `lo0` 补下行，但上传仍以物理/默认路由接口为准。
 - macOS 下拉菜单不重复展示系统状态详情；Windows 托盘菜单也不展示 CPU/Memory/Disk/Up/Down 系统状态详情。
 - Windows notification area 原生不支持 macOS 这种横向常驻文本；Windows 产品行为是不支持 Tray 系统信息，不采样、不展示、不暴露配置项。
 - Settings 中有独立 `Tray` tab；macOS `Show System Stats` 可独立于 `Tray Icon` 开关关闭/开启，CPU、Memory、Disk、Upload、Download 每一项都可单独启用/禁用且默认全部启用；Windows 只展示 `Tray Icon` 一个配置项。
@@ -784,6 +800,34 @@ BIFROST_BIN="$PWD/target/debug/bifrost" SKIP_BUILD=true bash e2e-tests/tests/tes
 - 关闭单个子项后，只移除该子项展示，不影响其它系统状态项；关闭 `Show System Stats` 后，macOS 菜单栏恢复普通 Bifrost 图标。
 - Windows `GET /api/config/tray` 返回 `system_stats_supported=false`、`show_system_stats=false`、所有 `system_stats_items=false`；任何系统状态字段更新都返回 400；真实 tray helper 可启动但不启动系统状态采样线程，且不修改系统代理。
 - macOS tray helper 空闲平均 CPU 目标为 <1%，内存不能显著增长；系统状态线程不得因高频网卡列表刷新或重复位图重绘造成 2-3% 常驻占用。
+- `nettop` socket/route 采样只允许作为显式诊断或临时实验，不能作为默认常驻路径；若采样 CPU 明显高于 1% 目标，应回退低成本接口计数与 loopback 兜底方案。
+
+### TC-TH-29-REG-01: macOS 本机代理链路下行不应长期显示 0B/s
+
+**操作步骤：**
+1. 执行定向单元回归，覆盖 `nettop` CSV 首帧跳过、坏行忽略、loopback 下行兜底和“不把上传误报为下载”：
+```bash
+cargo test -p bifrost-cli tray::system_stats::tests:: -- --nocapture
+```
+2. 确认默认路由接口：
+```bash
+route -n get default
+```
+3. 在不启用 `BIFROST_TRAY_NETTOP_STATS` 的情况下，记录默认路由接口与 `lo0` 的下载前累计字节；随后显式通过当前 Bifrost HTTP 代理端口执行真实下载，确保覆盖“应用 -> 本机 Bifrost 代理 -> 外网”的 loopback 链路：
+```bash
+curl -x http://127.0.0.1:<bifrost-port> -L --max-time 20 -o /dev/null -sS \
+  -w 'http_code=%{http_code} size_download=%{size_download} speed_download=%{speed_download}\n' \
+  'https://speed.cloudflare.com/__down?bytes=10485760'
+```
+4. 再次记录默认路由接口与 `lo0` 累计字节，计算 delta，并套用 tray 规则：默认接口下行 <= 4 KiB/s、默认接口上行 > 0、`lo0` 较大方向 >= 16 KiB/s 且大于默认接口上行 2 倍时，展示下行取 `lo0` 较大方向，展示上行仍取默认接口上行。
+5. 可选诊断：临时执行 `nettop -t external -d -x -P -L 0 -s 1 -c` 或 `nettop -m route -t external -d -x -L 0 -s 1 -c -J bytes_in,bytes_out` 验证 socket/route 层能看到下行，同时记录 `ps -p <pid> -o %cpu,rss` 资源占用。
+
+**预期结果：**
+- 第 1 步单元回归通过。
+- 真实下载 `http_code=200` 且 `size_download` 接近请求字节数。
+- 若默认路由接口下行 delta 为 0 或接近 0，但 `lo0` 有显著 delta，fallback 条件成立后 tray 展示下行应为非 0；该值不要求等于 `curl speed_download`，但不能长期保持 `0B/s`。
+- 上传值仍来自默认路由/物理接口，不因 loopback 的双向镜像被放大。
+- 默认路径不启动 `nettop`；如执行可选诊断且 CPU 显著高于 1% 目标，只能作为“不适合默认常驻”的证据。
 
 ### TC-TH-30: macOS Native 两行菜单栏系统状态像素级还原回归
 
@@ -826,6 +870,8 @@ target/release/bifrost start -d -y --skip-cert-check -p 62144 --host 127.0.0.1 -
 
 | 日期 | 用例 | 执行方式 | 结果 |
 | --- | --- | --- | --- |
+| 2026-06-23 | TC-TH-14-REG-02 / TC-TH-14-REG-03 | 针对用户反馈发布版托盘菜单丢失 `System Proxy` 状态和开关执行回归。审查确认 Web UI 与托盘菜单均读取 `GET /api/proxy/system`、切换 `PUT /api/proxy/system`，Web UI checked 口径为 `enabled && managed_by_bifrost != false`。根因为 tray 初始快速快照不查系统代理，后台刷新又把 `system_proxy=None` 原样保留，导致菜单项可永久缺失。修复后 Running 状态且 runtime 可用时菜单稳定展示 `System Proxy`；缓存为空时先按未选中可点击项渲染，第一次后台远端快照补一次 `/api/proxy/system`，缓存已有后普通后台刷新复用旧值。执行 `cargo test -p bifrost-cli system_proxy_toggle_is_visible_while_running_without_cached_state -- --nocapture` 通过 lib/main 各 1/1；执行 `cargo test -p bifrost-cli background_menu_refresh -- --nocapture` 通过 lib/main 各 2/2；执行 `cargo test -p bifrost-cli commands::tray -- --nocapture` 通过 lib/main 各 135/135；执行 `cargo fmt --all -- --check` 与 `cargo build --bin bifrost` 通过。随后用当前 `target/debug/bifrost` 重启临时真实实例 `/tmp/bifrost-tray-net-live.ZItL1s`，端口 `59933`，主进程 PID `77179`、tray PID `77269`，启动参数包含 `--no-system-proxy --skip-cert-check --unsafe-ssl` 且设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。`GET http://127.0.0.1:59933/_bifrost/api/proxy/system` 返回 `supported=true enabled=true host=127.0.0.1 port=9900 managed_by_bifrost=false`。通过 System Events 对 PID `77269` 执行 AXPress 后读取菜单项，动作区包含 `Stop Bifrost`、`System Proxy`、`Open Logs`，footer 为 `Bifrost: Running on 127.0.0.1:59933`。 | 通过。服务 Running 时 `System Proxy` 不再因缓存缺失从菜单消失；当前系统代理由正式 9900 管理，因此 59933 托盘显示未勾选，和 Web UI 口径一致。后台不会把 `/api/proxy/system` 放进每秒或每分钟高频心跳，只在缓存缺失时补一次、用户展开/切换时按需刷新。 |
+| 2026-06-23 | TC-TH-29-REG-01 | 针对用户反馈 macOS tray 下行长期显示 `0B/s` 执行本机代理链路回归。执行 `cargo test -p bifrost-cli tray::system_stats::tests:: -- --nocapture`，lib/main 各 35/35 通过，覆盖 `nettop` socket CSV 首帧跳过/坏行忽略、默认路由选择、虚拟接口过滤、network rate 平滑、loopback 下行兜底以及“不把代理上传误报为下载”。真实下载验证先用裸 `curl` 发现环境未设置 `HTTP_PROXY/HTTPS_PROXY`，该路径不稳定覆盖本机代理；随后改为显式 `curl -x http://127.0.0.1:9900 https://speed.cloudflare.com/__down?bytes=10485760`，返回 `http_code=200 size_download=10485760 speed_download=2815007`。下载前后 `if_data64` delta 为 `default_if=en0 primary_down=0 primary_up=220160 lo0_down=10884096 lo0_up=10884096 fallback=yes display_down=10884096 display_up=220160`。同时诊断 `nettop` socket/route 能采到下行，但 8 个 1 秒 `ps` 样本 CPU 约 `33.9%` 到 `128.5%`，因此不作为默认常驻方案。 | 通过。显式本机 Bifrost 代理链路下，物理默认接口下行仍为 0，但 loopback 下行证据充足，新增 fallback 会把展示下行从 `0B/s` 改为非 0，同时上传仍取默认接口上行；默认路径不启动 `nettop`，避免高 CPU 常驻。 |
 | 2026-06-22 | TC-TH-02 | 根据用户反馈移除默认菜单中的 `Copy SOCKS5 Proxy`。执行 `cargo fmt --all` 通过；执行 `cargo test -p bifrost-cli commands::tray::menu::tests -- --nocapture` 通过，lib/main 各 20/20，新增断言 `copy_socks5_proxy` 不再出现在默认菜单；执行 `cargo build --bin bifrost` 通过。随后使用临时数据目录 `/tmp/bifrost-tray-dashboard.A4Uf6G`、端口 `18890` 重启真实 macOS daemon，启动参数包含 `--no-system-proxy --skip-cert-check --unsafe-ssl` 且设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_E2E_ALLOW_TRAY=1`；`GET /_bifrost/api/proxy/address` 返回 ready；`tray.log.2026-06-22` 记录 `native tray dashboard header installed items=14 width=340 height=164`。 | 通过。默认菜单入口数量较上一轮 `items=15` 少 1，和移除 `Copy SOCKS5 Proxy` 一致；`{socks5_proxy}` 自定义菜单模板变量保留，低频 SOCKS5 复制能力不再占默认菜单位置。当前 macOS 仍处于锁屏截图环境，未将桌面截图作为视觉证据。 |
 | 2026-06-22 | TC-TH-30-REG-MEM-02 | 针对用户要求对齐 Activity Monitor / iStat Menus 等行业系统监控设计，重新审查 macOS `MEM` 口径。确认 Activity Monitor / iStat Menus 均区分 `Memory Used` 与 `Memory Pressure`：菜单栏主读数应表达用户直觉上的已用内存，而不是绿色状态下较稳定的压力健康度。实现改为基于 `vm_statistics64` 的 `internal - purgeable + wired + compressor`，将 compressed memory 计入 Memory Used，同时继续排除 file-backed / speculative / purgeable 可回收缓存；下拉系统详情保留 `Pressure`、`Compressed`、`Cached` 明细用于诊断对照。执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli mac_memory --lib --all-features -- --nocapture` 通过 5/5；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli system_stats --lib --all-features -- --nocapture` 通过 33/33；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli native_ --lib --all-features -- --nocapture` 通过 15/15；执行 `BIFROST_BIN="$PWD/target/debug/bifrost" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_tray_system_stats_config.sh` 通过 63/63。随后执行 `SKIP_FRONTEND_BUILD=1 cargo build --release --bin bifrost` 通过，并只使用工作目录 `/Users/eden_studio/work/github/bifrost/target/release/bifrost` 重启真实 9900 服务，不复制到系统安装路径；重启后主进程 PID `12953`，tray PID `13012`。用脚本读取 `vm_stat`、`memory_pressure`、`top` 与 System Events AX description：底层公式得到 `bifrost_mem_used_style=56.0% 35.85 GB`，`cached_detail=29.1% 18.60 GB`，`pressure_diagnostic=30%`，`top` 显示 `PhysMem: 53G used (3204M wired, 15G compressor), 11G unused`；连续 8 次 AX description 均显示 `M56%`，例如 `09:28:08 Bifrost: C10% \| M56% \| D40% \| ↑69.2 K/s ↓6.9 M/s` 到 `09:28:16 Bifrost: C5% \| M56% \| D40% \| ↑19.0 K/s ↓98.2 K/s`。对 tray PID `13012` 采集 60 个 1 秒 `ps` 样本，记录 `/tmp/bifrost-tray-mem-used-perf-1782091710.txt`。 | 通过。菜单栏 `MEM` 已从旧的 cache-excluded load 升级为更接近 Activity Monitor / iStat Menus `Memory Used` 的口径：compressed memory 会计入主百分比，file-backed/speculative/purgeable 缓存不计入主百分比但进入 `Cached` 诊断明细；Pressure 继续作为健康度诊断，不再作为菜单栏主读数。真实运行态中 AX `M56%` 与脚本公式 `56.0%` 一致，证明当前工作目录 release 版本已经生效；网络值在 1 秒读数中持续变化。性能采样结果为 `samples=60 avg_cpu=0.4833 min_cpu=0.0000 max_cpu=1.8000 avg_rss_kb=67866 min_rss_kb=67856 max_rss_kb=67872 rss_delta_kb=16`，平均 CPU 低于 1%，RSS 无显著增长。 |
 | 2026-06-21 | TC-TH-02-REG-01 / TC-TH-02-REG-01B / TC-TH-30 | 针对用户反馈“点击 native Bifrost 状态项时菜单弹一下又消失”执行根因审查。真实 `tray.log.2026-06-21` 显示后台每约 3 秒因 group API 502 推动 `tray menu rebuilt`；native `NSStatusItem` 直接挂 `NSMenu`，不会走旧 `TrayIconEvent::Click` 路径，因此 `last_tray_interaction_at` 没有被更新。AppKit 在菜单展开期间收到 `setMenu` 或状态项 `setLength` / `setImage` 这类结构性更新时会关闭当前弹窗。修复为给 native menu delegate 增加 `menuWillOpen` / `menuDidClose` 生命周期：菜单打开期间持续延迟菜单结构刷新和宽高变化的状态项重装；同尺寸 bitmap 像素刷新仍允许继续执行，保证网速/采样显示不被菜单展开阻断；菜单关闭后再按 generation 补刷新。执行 `cargo fmt --all`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli native_menu_open_state --lib --all-features -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli native_menu_lifecycle --lib --all-features -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli native_ --lib --all-features -- --nocapture` 通过；安装到 `/Users/eden_studio/.cargo/bin/bifrost` 并重启真实本机实例，主进程 PID `87942`、tray PID `87960`，AX description 为 `Bifrost: C20% | M75% | D65% | ↑145 K/s ↓10.9 M/s`。执行 AXPress 后分别等待 1/2/4/6 秒读取菜单，结果均为 14 个菜单项且包含 `Open Traffic`、`Open Rules`、`Open Settings`、`System Proxy`、`Quit Tray`；4 秒后截图 `/tmp/bifrost-native-menu-stable-215946.png` 显示菜单仍展开。 | 通过。native 菜单打开状态现在由 AppKit lifecycle 而不是旧 tray click event 驱动；后台菜单数据变化不会在菜单展开期间替换 NSMenu；系统状态同尺寸像素刷新仍可继续，结构性宽度变化延后到菜单关闭后，避免菜单“弹一下又消失”。 |

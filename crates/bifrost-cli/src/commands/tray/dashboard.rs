@@ -4,6 +4,9 @@ use super::tray::{cached_menu_bar_glyph, menu_bar_stats_font};
 
 pub const DASHBOARD_WIDTH: u32 = 680;
 pub const DASHBOARD_HEIGHT: u32 = 352;
+const DASHBOARD_MAX_WIDTH: u32 = 900;
+const DASHBOARD_RIGHT_COLUMN_X: f32 = 250.0;
+const DASHBOARD_RIGHT_PADDING: u32 = 32;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrayDashboardSnapshot {
@@ -105,9 +108,10 @@ pub fn render_dashboard_with_theme(
 ) -> Option<TrayDashboardBitmap> {
     let font = menu_bar_stats_font()?;
     let palette = DashboardPalette::for_theme(theme);
+    let width = dashboard_width(snapshot, font);
     let mut bitmap = TrayDashboardBitmap {
-        rgba: vec![0; (DASHBOARD_WIDTH * DASHBOARD_HEIGHT * 4) as usize],
-        width: DASHBOARD_WIDTH,
+        rgba: vec![0; (width * DASHBOARD_HEIGHT * 4) as usize],
+        width,
         height: DASHBOARD_HEIGHT,
     };
 
@@ -115,48 +119,70 @@ pub fn render_dashboard_with_theme(
         &mut bitmap,
         0,
         0,
-        DASHBOARD_WIDTH,
+        width,
         DASHBOARD_HEIGHT,
         palette.background,
     );
     draw_cpu_row(snapshot, &mut bitmap, &palette, font);
-    draw_line(
-        &mut bitmap,
-        24,
-        82,
-        DASHBOARD_WIDTH - 24,
-        82,
-        palette.separator,
-    );
+    draw_line(&mut bitmap, 24, 82, width - 24, 82, palette.separator);
     draw_memory_row(snapshot, &mut bitmap, &palette, font);
-    draw_line(
-        &mut bitmap,
-        24,
-        164,
-        DASHBOARD_WIDTH - 24,
-        164,
-        palette.separator,
-    );
+    draw_line(&mut bitmap, 24, 164, width - 24, 164, palette.separator);
     draw_disk_row(snapshot, &mut bitmap, &palette, font);
-    draw_line(
-        &mut bitmap,
-        24,
-        246,
-        DASHBOARD_WIDTH - 24,
-        246,
-        palette.separator,
-    );
+    draw_line(&mut bitmap, 24, 246, width - 24, 246, palette.separator);
     draw_network_row(snapshot, &mut bitmap, &palette, font);
-    draw_line(
-        &mut bitmap,
-        24,
-        328,
-        DASHBOARD_WIDTH - 24,
-        328,
-        palette.separator,
-    );
+    draw_line(&mut bitmap, 24, 328, width - 24, 328, palette.separator);
 
     Some(bitmap)
+}
+
+fn dashboard_width(snapshot: &TrayDashboardSnapshot, font: &fontdue::Font) -> u32 {
+    let right_column_width = dashboard_right_column_labels(snapshot)
+        .into_iter()
+        .map(|(text, font_px)| measure_text(&text, font_px, font).ceil() as u32)
+        .max()
+        .unwrap_or(0);
+    let required =
+        DASHBOARD_RIGHT_COLUMN_X.ceil() as u32 + right_column_width + DASHBOARD_RIGHT_PADDING;
+    let width = required.clamp(DASHBOARD_WIDTH, DASHBOARD_MAX_WIDTH);
+    width + (width % 2)
+}
+
+fn dashboard_right_column_labels(snapshot: &TrayDashboardSnapshot) -> Vec<(String, f32)> {
+    vec![
+        (
+            format_cpu_topology(
+                snapshot.cpu_logical_cores,
+                snapshot.cpu_performance_cores,
+                snapshot.cpu_efficiency_cores,
+            ),
+            24.0,
+        ),
+        (format!("used {}", memory_usage_label(snapshot)), 26.0),
+        (memory_detail_label(snapshot), 24.0),
+        (
+            format!(
+                "free {} of {}",
+                format_optional_bytes(snapshot.disk_free_bytes),
+                format_optional_bytes(snapshot.disk_total_bytes)
+            ),
+            26.0,
+        ),
+        (disk_rate_label(snapshot), 24.0),
+        (
+            format!(
+                "up {}",
+                format_optional_rate(snapshot.network_up_bytes_per_sec)
+            ),
+            26.0,
+        ),
+        (
+            format!(
+                "down {}",
+                format_optional_rate(snapshot.network_down_bytes_per_sec)
+            ),
+            26.0,
+        ),
+    ]
 }
 
 fn draw_cpu_row(
@@ -178,7 +204,7 @@ fn draw_cpu_row(
     );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         54,
         24.0,
         &format_cpu_topology(
@@ -197,51 +223,42 @@ fn draw_memory_row(
     palette: &DashboardPalette,
     font: &fontdue::Font,
 ) {
-    let percent = memory_status_percent(
+    let used_percent =
+        memory_used_percent(snapshot.memory_used_bytes, snapshot.memory_total_bytes).unwrap_or(0.0);
+    let health_percent = memory_health_percent(
         snapshot.memory_pressure_percent,
         snapshot.memory_used_bytes,
         snapshot.memory_total_bytes,
     )
-    .unwrap_or(0.0);
-    let color = palette.status_color(memory_status(percent));
+    .unwrap_or(used_percent);
+    let color = palette.status_color(memory_status(health_percent));
     draw_metric_label(bitmap, 112, "Memory", palette, font);
-    let pressure_percent = snapshot.memory_pressure_percent.unwrap_or(percent);
-    let pressure_label = format_percent(pressure_percent);
-    draw_text(bitmap, 36.0, 148, 32.0, &pressure_label, color, font);
+    let used_label = format_percent(used_percent);
+    draw_text(bitmap, 36.0, 148, 32.0, &used_label, color, font);
     draw_text(
         bitmap,
-        36.0 + measure_text(&pressure_label, 32.0, font) + 8.0,
+        36.0 + measure_text(&used_label, 32.0, font) + 8.0,
         148,
         24.0,
-        &format!("({})", format_memory_health(memory_status(percent))),
+        &format!("({})", format_memory_health(memory_status(health_percent))),
         color,
         font,
     );
-    let usage_label = format!(
-        "{} / {}",
-        format_bytes_compact(snapshot.memory_used_bytes),
-        format_bytes_compact(snapshot.memory_total_bytes)
-    );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         118,
         26.0,
-        &format!("used {usage_label}"),
+        &format!("used {}", memory_usage_label(snapshot)),
         palette.secondary_text,
         font,
     );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         148,
         24.0,
-        &format!(
-            "comp {}  cache {}  swap {}",
-            format_bytes_compact(snapshot.memory_compressed_bytes),
-            format_bytes_compact(snapshot.memory_cached_bytes),
-            format_swap(snapshot.swap_used_bytes, snapshot.swap_total_bytes)
-        ),
+        &memory_detail_label(snapshot),
         palette.tertiary_text,
         font,
     );
@@ -270,7 +287,7 @@ fn draw_disk_row(
     );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         200,
         26.0,
         &format!(
@@ -283,14 +300,10 @@ fn draw_disk_row(
     );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         230,
         24.0,
-        &format!(
-            "read {}   write {}",
-            format_optional_disk_rate(snapshot.disk_read_bytes_per_sec),
-            format_optional_disk_rate(snapshot.disk_write_bytes_per_sec)
-        ),
+        &disk_rate_label(snapshot),
         palette.tertiary_text,
         font,
     );
@@ -307,7 +320,7 @@ fn draw_network_row(
     let up_color = palette.network_up;
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         282,
         26.0,
         &format!(
@@ -319,7 +332,7 @@ fn draw_network_row(
     );
     draw_text(
         bitmap,
-        250.0,
+        DASHBOARD_RIGHT_COLUMN_X,
         312,
         26.0,
         &format!(
@@ -588,14 +601,41 @@ fn disk_status(percent: f32) -> StatusLevel {
     }
 }
 
-fn memory_status_percent(pressure: Option<f32>, used: u64, total: u64) -> Option<f32> {
-    pressure.or_else(|| {
-        if total == 0 {
-            None
-        } else {
-            Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
-        }
-    })
+fn memory_used_percent(used: u64, total: u64) -> Option<f32> {
+    if total == 0 {
+        None
+    } else {
+        Some((used as f32 / total as f32 * 100.0).clamp(0.0, 100.0))
+    }
+}
+
+fn memory_health_percent(pressure: Option<f32>, used: u64, total: u64) -> Option<f32> {
+    pressure.or_else(|| memory_used_percent(used, total))
+}
+
+fn memory_usage_label(snapshot: &TrayDashboardSnapshot) -> String {
+    format!(
+        "{} / {}",
+        format_bytes_compact(snapshot.memory_used_bytes),
+        format_bytes_compact(snapshot.memory_total_bytes)
+    )
+}
+
+fn memory_detail_label(snapshot: &TrayDashboardSnapshot) -> String {
+    format!(
+        "comp {}  cache {}  swap {}",
+        format_bytes_compact(snapshot.memory_compressed_bytes),
+        format_bytes_compact(snapshot.memory_cached_bytes),
+        format_swap(snapshot.swap_used_bytes, snapshot.swap_total_bytes)
+    )
+}
+
+fn disk_rate_label(snapshot: &TrayDashboardSnapshot) -> String {
+    format!(
+        "read {}   write {}",
+        format_optional_disk_rate(snapshot.disk_read_bytes_per_sec),
+        format_optional_disk_rate(snapshot.disk_write_bytes_per_sec)
+    )
 }
 
 fn format_percent(value: f32) -> String {
@@ -686,10 +726,11 @@ mod tests {
     }
 
     #[test]
-    fn memory_status_falls_back_to_used_percent() {
-        assert_eq!(memory_status_percent(Some(42.0), 9, 10), Some(42.0));
-        assert_eq!(memory_status_percent(None, 5, 10), Some(50.0));
-        assert_eq!(memory_status_percent(None, 5, 0), None);
+    fn memory_main_percent_uses_used_bytes_while_health_prefers_pressure() {
+        assert_eq!(memory_used_percent(7, 10), Some(70.0));
+        assert_eq!(memory_used_percent(5, 0), None);
+        assert_eq!(memory_health_percent(Some(29.0), 7, 10), Some(29.0));
+        assert_eq!(memory_health_percent(None, 7, 10), Some(70.0));
     }
 
     #[test]
@@ -763,8 +804,56 @@ mod tests {
 
         let bitmap =
             render_dashboard_with_theme(&snapshot, DashboardTheme::Dark).expect("dashboard bitmap");
-        assert_eq!(bitmap.width, DASHBOARD_WIDTH);
+        assert!(bitmap.width >= DASHBOARD_WIDTH);
+        assert!(bitmap.width <= DASHBOARD_MAX_WIDTH);
+        assert_eq!(bitmap.width % 2, 0);
         assert_eq!(bitmap.height, DASHBOARD_HEIGHT);
         assert!(bitmap.rgba.iter().any(|value| *value != 0));
+    }
+
+    #[test]
+    fn render_dashboard_expands_width_for_long_memory_detail_line() {
+        let Some(font) = menu_bar_stats_font() else {
+            return;
+        };
+        let snapshot = TrayDashboardSnapshot {
+            service_state: ServiceState::Running,
+            runtime_label: "127.0.0.1:9900".to_string(),
+            system_proxy_label: "System proxy Off".to_string(),
+            cpu_percent: 22.0,
+            cpu_logical_cores: Some(10),
+            cpu_performance_cores: Some(8),
+            cpu_efficiency_cores: Some(2),
+            load_one: 1.2,
+            load_five: 1.5,
+            load_fifteen: 1.8,
+            memory_used_bytes: 20_700_000_000,
+            memory_total_bytes: 32_000_000_000,
+            memory_pressure_percent: Some(23.0),
+            memory_compressed_bytes: 2_500_000_000,
+            memory_cached_bytes: 9_800_000_000,
+            swap_used_bytes: Some(10_600_000_000),
+            swap_total_bytes: Some(13_400_000_000),
+            disk_used_percent: Some(85.0),
+            disk_free_bytes: Some(71_400_000_000),
+            disk_total_bytes: Some(460_400_000_000),
+            disk_mount_label: Some("/".to_string()),
+            disk_total_bytes_per_sec: Some(24 * 1024 * 1024),
+            disk_read_bytes_per_sec: Some(2_900_000),
+            disk_write_bytes_per_sec: Some(21_400_000),
+            network_up_bytes_per_sec: Some(1_100_000),
+            network_down_bytes_per_sec: Some(0),
+            network_interface_label: Some("en0".to_string()),
+        };
+
+        let detail_right_edge = DASHBOARD_RIGHT_COLUMN_X.ceil() as u32
+            + measure_text(&memory_detail_label(&snapshot), 24.0, font).ceil() as u32
+            + DASHBOARD_RIGHT_PADDING;
+        let bitmap = render_dashboard_with_theme(&snapshot, DashboardTheme::Light)
+            .expect("dashboard bitmap");
+
+        assert!(detail_right_edge > DASHBOARD_WIDTH);
+        assert!(bitmap.width >= detail_right_edge);
+        assert_eq!(bitmap.height, DASHBOARD_HEIGHT);
     }
 }
