@@ -103,7 +103,9 @@ mod tests {
             "socks5_port": 1080,
             "host": "127.0.0.1",
             "started_at_ms": 1700000000000,
-            "binary_path": "/usr/local/bin/bifrost"
+            "binary_path": "/usr/local/bin/bifrost",
+            "system_proxy_enabled": true,
+            "system_proxy_bypass": "localhost,127.0.0.1"
         }"#;
         let info: RuntimeInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.pid, 12345);

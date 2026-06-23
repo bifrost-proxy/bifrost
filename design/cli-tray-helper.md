@@ -137,7 +137,7 @@ helper 启动后：
    - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
    - 重新渲染菜单启用状态；
-   - 不把系统代理状态放入高频心跳；当 Running 状态下缓存缺失时，后台菜单快照允许补齐一次 `/api/proxy/system`，缓存已有后仅保留旧值，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
+   - 不把系统代理状态放入高频心跳；系统代理菜单状态只读取当前实例 Admin API 的 `/api/proxy/system`，与 WebUI 使用同一语义 `enabled && managed_by_bifrost != false`。当 Admin API 快照暂不可用时，菜单项保留但禁用，不读取本机 OS 系统代理做兜底；后续后台刷新、用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需重新获取。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
 
@@ -189,6 +189,7 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 
 - tray helper 的后台菜单快照线程可以刷新 runtime、rules、active rules 和本地配置，但不得定时请求 `/api/proxy/system`。
 - `System Proxy` 菜单项在服务 Running 且 runtime 可用时必须稳定显示；缓存为空时先按未选中、可点击状态渲染，不能因为状态尚未返回而从菜单中消失。
+- helper 进入 Stopped/Disconnected 后必须丢弃并忽略 Running 时的 `system_proxy` 缓存，菜单不得继续展示旧的 System Proxy 勾选状态；系统代理真实清理由 stop/lifecycle helper 完成，Stopped 菜单只保留 Start 等服务控制能力。
 - 第一次后台远端快照如果发现 Running 状态下系统代理缓存为空，可以请求一次 `/api/proxy/system` 补齐缓存；缓存已有后普通后台刷新必须复用旧值，避免把系统代理查询放进高频轮询。
 - 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
 - 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
@@ -508,6 +509,7 @@ Quit Tray
 - 组权限列表：`GET /_bifrost/api/group`，以远端返回的用户权限为准，`level >= 1`（Owner/Master）才进入 tray 组菜单。
 - 组规则列表：对每个可展示组调用 `GET /_bifrost/api/group-rules/{group_id}`，以远端接口同步后的组规则为准；本地组目录不能作为组权限或组列表来源。
 - 当前启用规则：`GET /_bifrost/api/rules/active-summary`，用于标记勾选状态和顶层 `Rules: <当前启用规则>` 文案。
+- 组规则列表可以继续使用 `/api/group-rules/<id>` 提供的排序与可见规则集合，但菜单勾选状态必须以 `active-summary` 为准；`group-rules` 返回的静态 `enabled` 字段可能与当前运行态不一致，不能覆盖 active-summary。
 - `active-summary` 必须在没有 Sync session 或远端 group cache 解析失败时保留本地组规则 fallback；否则 tray 点击本地组规则后会把顶层错误刷新成 `Rules: None`。
 - 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
 - 组规则切换：`PUT /_bifrost/api/group-rules/{group_name_or_id}/{rule_name}/enable|disable`。

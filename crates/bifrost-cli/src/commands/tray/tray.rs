@@ -88,6 +88,8 @@ const MENU_DATA_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
 const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const ACTION_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
+const ACTION_STATE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
 const LOG_RETENTION_DAYS: u64 = 30;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 #[cfg(target_os = "macos")]
@@ -118,6 +120,7 @@ struct MenuDataSnapshot {
     rules: Vec<menu::TrayRule>,
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
+    system_proxy_needs_recheck: bool,
     bin_available: bool,
     update_available: Option<String>,
     #[cfg(target_os = "macos")]
@@ -165,7 +168,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
-    let initial_menu_data = load_menu_data_snapshot(&args, state, false, false);
+    let initial_menu_data = load_menu_data_snapshot(&args, state, true, true);
     #[cfg(target_os = "macos")]
     let initial_menu_bar_title = menu_bar_stats_title(&initial_menu_data, state);
     let menu_items =
@@ -499,6 +502,10 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             reload_requested,
             action_triggered,
             data_changed,
+            #[cfg(target_os = "macos")]
+            native_menu_lifecycle_changed,
+            #[cfg(not(target_os = "macos"))]
+            false,
         );
 
         #[cfg(target_os = "macos")]
@@ -2015,8 +2022,14 @@ fn should_refresh_native_menu(
     reload_requested: bool,
     action_triggered: bool,
     data_changed: bool,
+    native_menu_lifecycle_changed: bool,
 ) -> bool {
-    state_changed || operation_changed || reload_requested || action_triggered || data_changed
+    state_changed
+        || operation_changed
+        || reload_requested
+        || action_triggered
+        || data_changed
+        || native_menu_lifecycle_changed
 }
 
 fn should_replace_native_menu(
@@ -2422,7 +2435,7 @@ fn load_menu_data_snapshot(
     let custom_config = load_custom_config_safe(&args.data_dir);
     let bin_available = trusted_bifrost_binary_available(args);
     let recent_rule_targets = load_recent_rule_targets(&args.data_dir);
-    let (rules, system_proxy) = if include_remote {
+    let (rules, system_proxy_snapshot) = if include_remote {
         (
             load_rules_for_menu(runtime.as_ref(), state),
             if include_system_proxy {
@@ -2432,7 +2445,18 @@ fn load_menu_data_snapshot(
             },
         )
     } else {
-        (Vec::new(), None)
+        (
+            Vec::new(),
+            if include_system_proxy {
+                load_system_proxy_for_menu(runtime.as_ref(), state)
+            } else {
+                None
+            },
+        )
+    };
+    let (system_proxy, system_proxy_needs_recheck) = match system_proxy_snapshot {
+        Some(snapshot) => (Some(snapshot.state), snapshot.needs_recheck),
+        None => (None, false),
     };
 
     MenuDataSnapshot {
@@ -2441,6 +2465,7 @@ fn load_menu_data_snapshot(
         rules,
         recent_rule_targets,
         system_proxy,
+        system_proxy_needs_recheck,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
         #[cfg(target_os = "macos")]
@@ -2564,11 +2589,17 @@ fn refresh_update_cache_from_github(data_dir: &Path) -> bool {
 fn load_system_proxy_for_menu(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
-) -> Option<menu::SystemProxyMenuState> {
+) -> Option<SystemProxyMenuSnapshot> {
     if state != ServiceState::Running {
         return None;
     }
     runtime.and_then(|rt| load_system_proxy_state(&rt.admin_url()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SystemProxyMenuSnapshot {
+    state: menu::SystemProxyMenuState,
+    needs_recheck: bool,
 }
 
 fn clone_menu_data_snapshot(menu_data: &Arc<Mutex<MenuDataSnapshot>>) -> MenuDataSnapshot {
@@ -2637,6 +2668,7 @@ struct SystemProxyStatusResponse {
     supported: bool,
     enabled: bool,
     managed_by_bifrost: Option<bool>,
+    configured_enabled: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2648,7 +2680,6 @@ struct GroupRulesResponseForTray {
 #[derive(Debug, Deserialize)]
 struct GroupRuleInfoForTray {
     name: String,
-    enabled: bool,
     sort_order: i32,
 }
 
@@ -2753,6 +2784,7 @@ fn load_rules_from_admin(admin_url: &str) -> Vec<menu::TrayRule> {
                 &agent,
                 base,
                 &managed_groups,
+                &active_targets,
             ));
         }
         None => {
@@ -2786,6 +2818,7 @@ fn load_group_rules_from_managed_groups(
     agent: &ureq::Agent,
     base: &str,
     groups: &[ManagedGroupForTray],
+    active_targets: &[RuleTarget],
 ) -> Vec<menu::TrayRule> {
     let mut rules = Vec::new();
     for group in groups {
@@ -2798,14 +2831,17 @@ fn load_group_rules_from_managed_groups(
                     } else {
                         group_rules.group_name
                     };
-                    rules.extend(group_rules.rules.into_iter().map(|rule| menu::TrayRule {
-                        target: menu::RuleTarget::Group {
+                    rules.extend(group_rules.rules.into_iter().map(|rule| {
+                        let target = menu::RuleTarget::Group {
                             group_name: group_name.clone(),
                             name: rule.name,
-                        },
-                        enabled: rule.enabled,
-                        sort_order: rule.sort_order,
-                        managed_group: true,
+                        };
+                        menu::TrayRule {
+                            enabled: active_targets.contains(&target),
+                            target,
+                            sort_order: rule.sort_order,
+                            managed_group: true,
+                        }
                     }));
                 }
                 Err(error) => {
@@ -2830,16 +2866,28 @@ fn load_group_rules_from_managed_groups(
     rules
 }
 
-fn load_system_proxy_state(admin_url: &str) -> Option<menu::SystemProxyMenuState> {
+fn load_system_proxy_state(admin_url: &str) -> Option<SystemProxyMenuSnapshot> {
     let base = admin_url.trim_end_matches('/');
     let url = format!("{base}/api/proxy/system");
     let agent = http_agent();
     match agent.get(&url).call() {
         Ok(resp) => match resp.into_json::<SystemProxyStatusResponse>() {
-            Ok(status) => Some(menu::SystemProxyMenuState {
-                supported: status.supported,
-                enabled: status.enabled && status.managed_by_bifrost.unwrap_or(true),
-            }),
+            Ok(status) => {
+                let enabled_by_bifrost =
+                    status.enabled && status.managed_by_bifrost.unwrap_or(true);
+                let owned_by_other = status.enabled && status.managed_by_bifrost == Some(false);
+                let needs_recheck = status.supported
+                    && status.configured_enabled.unwrap_or(false)
+                    && !enabled_by_bifrost
+                    && !owned_by_other;
+                Some(SystemProxyMenuSnapshot {
+                    state: menu::SystemProxyMenuState {
+                        supported: status.supported,
+                        enabled: enabled_by_bifrost,
+                    },
+                    needs_recheck,
+                })
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "failed to decode system proxy status for tray menu");
                 None
@@ -3570,6 +3618,9 @@ fn execute_action(
         MenuItemAction::SetSystemProxy { url, enabled } => {
             let url = url.clone();
             let enabled = *enabled;
+            let admin_url = runtime_for_menu(args)
+                .map(|rt| rt.admin_url())
+                .unwrap_or_else(|| admin_url_from_system_proxy_endpoint(&url));
             let args = args.clone();
             let reload_flag = reload_flag.clone();
             let menu_data = menu_data.clone();
@@ -3579,7 +3630,7 @@ fn execute_action(
                 system_proxy_refresh_in_flight.store(true, Ordering::Relaxed);
                 let agent = http_agent();
                 let body = format!(r#"{{"enabled":{enabled}}}"#);
-                match agent
+                let request_succeeded = match agent
                     .put(&url)
                     .set("Content-Type", "application/json")
                     .send_string(&body)
@@ -3591,10 +3642,15 @@ fn execute_action(
                             url = %url,
                             "system proxy toggle called"
                         );
+                        true
                     }
                     Err(error) => {
                         tracing::error!(enabled = enabled, url = %url, error = %error, "system proxy toggle failed");
+                        false
                     }
+                };
+                if request_succeeded {
+                    wait_for_system_proxy_menu_state(&admin_url, enabled);
                 }
                 refresh_menu_data_snapshot(
                     &args,
@@ -3719,15 +3775,34 @@ fn execute_action(
             let menu_data_generation = menu_data_generation.clone();
             spawn_tray_task("bifrost-tray-select-rule", move || {
                 if toggle_single_rule(&admin_url, &target, &enabled_targets, currently_enabled) {
+                    let next_enabled = !currently_enabled;
+                    thread::sleep(ACTION_STATE_SETTLE_INTERVAL);
+                    let settled =
+                        load_active_rule_targets(&admin_url)
+                            .as_ref()
+                            .is_some_and(|targets| {
+                                active_rule_targets_match_desired(targets, &target, next_enabled)
+                            });
+                    tracing::info!(
+                        target = ?target,
+                        desired_enabled = next_enabled,
+                        settled = settled,
+                        "rule tray state settle check completed"
+                    );
                     if !currently_enabled {
                         record_recent_rule_target(&data_dir, &target);
                     }
-                    refresh_menu_data_snapshot(
+                    let changed = refresh_menu_data_snapshot(
                         &args,
                         ServiceState::Running,
                         &menu_data,
                         &menu_data_generation,
                         false,
+                    );
+                    tracing::info!(
+                        target = ?target,
+                        changed = changed,
+                        "rule tray menu snapshot refreshed after action"
                     );
                     reload_flag.store(true, Ordering::Relaxed);
                 }
@@ -3740,6 +3815,81 @@ fn execute_action(
         }
         MenuItemAction::None => {}
     }
+}
+
+fn wait_for_system_proxy_menu_state(admin_url: &str, desired_enabled: bool) {
+    let deadline = Instant::now() + ACTION_STATE_SETTLE_TIMEOUT;
+    loop {
+        if load_system_proxy_state(admin_url)
+            .as_ref()
+            .is_some_and(|snapshot| {
+                system_proxy_snapshot_matches_desired(snapshot, desired_enabled)
+            })
+        {
+            return;
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                desired_enabled = desired_enabled,
+                "timed out waiting for system proxy tray state to settle"
+            );
+            return;
+        }
+        thread::sleep(ACTION_STATE_SETTLE_INTERVAL);
+    }
+}
+
+fn system_proxy_snapshot_matches_desired(
+    snapshot: &SystemProxyMenuSnapshot,
+    desired_enabled: bool,
+) -> bool {
+    snapshot.state.enabled == desired_enabled && !snapshot.needs_recheck
+}
+
+fn admin_url_from_system_proxy_endpoint(url: &str) -> String {
+    url.strip_suffix("/api/proxy/system")
+        .unwrap_or(url)
+        .to_string()
+}
+
+fn load_active_rule_targets(admin_url: &str) -> Option<Vec<RuleTarget>> {
+    let base = admin_url.trim_end_matches('/');
+    let url = format!("{base}/api/rules/active-summary");
+    let agent = http_agent();
+    match agent.get(&url).call() {
+        Ok(resp) => match resp.into_json::<ActiveSummaryResponse>() {
+            Ok(active) => Some(active_rule_targets_from_summary(active.rules)),
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to decode active rules while waiting for tray rule state");
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load active rules while waiting for tray rule state");
+            None
+        }
+    }
+}
+
+fn active_rule_targets_from_summary(active: Vec<ActiveRuleItem>) -> Vec<RuleTarget> {
+    active
+        .into_iter()
+        .map(|rule| match rule.group_name {
+            Some(group_name) => RuleTarget::Group {
+                group_name,
+                name: rule.name,
+            },
+            None => RuleTarget::Personal { name: rule.name },
+        })
+        .collect()
+}
+
+fn active_rule_targets_match_desired(
+    targets: &[RuleTarget],
+    target: &RuleTarget,
+    desired_enabled: bool,
+) -> bool {
+    targets.contains(target) == desired_enabled
 }
 
 fn toggle_single_rule(
@@ -4449,17 +4599,29 @@ fn refresh_menu_data_snapshot(
 ) -> bool {
     let should_load_system_proxy = include_system_proxy
         || match menu_data.lock() {
-            Ok(current) => state == ServiceState::Running && current.system_proxy.is_none(),
+            Ok(current) => {
+                state == ServiceState::Running
+                    && (current.system_proxy.is_none() || current.system_proxy_needs_recheck)
+            }
             Err(poisoned) => {
                 let current = poisoned.into_inner();
-                state == ServiceState::Running && current.system_proxy.is_none()
+                state == ServiceState::Running
+                    && (current.system_proxy.is_none() || current.system_proxy_needs_recheck)
             }
         };
     let mut next = load_menu_data_snapshot(args, state, true, should_load_system_proxy);
     let changed = match menu_data.lock() {
         Ok(mut current) => {
-            if !include_system_proxy && current.system_proxy.is_some() {
+            if state == ServiceState::Running
+                && !include_system_proxy
+                && current.system_proxy.is_some()
+                && !current.system_proxy_needs_recheck
+            {
                 next.system_proxy = current.system_proxy.clone();
+                next.system_proxy_needs_recheck = false;
+            }
+            if next.system_proxy.is_none() {
+                next.system_proxy_needs_recheck = false;
             }
             #[cfg(target_os = "macos")]
             if next.system_stats.is_some() {

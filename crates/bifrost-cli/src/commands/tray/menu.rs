@@ -227,14 +227,16 @@ pub fn build_menu(
     if let Some(rt) = runtime {
         let admin_url = rt.admin_url();
         let fallback_system_proxy;
-        let system_proxy = if let Some(system_proxy) = system_proxy {
-            Some(system_proxy)
-        } else if is_running {
-            fallback_system_proxy = SystemProxyMenuState {
-                supported: true,
-                enabled: false,
-            };
-            Some(&fallback_system_proxy)
+        let system_proxy = if is_running {
+            if let Some(system_proxy) = system_proxy {
+                Some(system_proxy)
+            } else {
+                fallback_system_proxy = SystemProxyMenuState {
+                    supported: false,
+                    enabled: false,
+                };
+                Some(&fallback_system_proxy)
+            }
         } else {
             None
         };
@@ -844,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn test_system_proxy_toggle_is_visible_while_running_without_cached_state() {
+    fn test_system_proxy_toggle_is_disabled_while_running_without_cached_state() {
         let rt = sample_runtime();
         let menu = build_menu(
             Some(&rt),
@@ -864,7 +866,7 @@ mod tests {
 
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
         assert_eq!(toggle.label, "System Proxy");
-        assert!(toggle.enabled);
+        assert!(!toggle.enabled);
         assert!(!toggle.checked);
         match &toggle.action {
             MenuItemAction::SetSystemProxy { url, enabled } => {
@@ -951,6 +953,10 @@ mod tests {
     #[test]
     fn test_menu_stopped_state() {
         let rt = sample_runtime();
+        let system_proxy = SystemProxyMenuState {
+            supported: true,
+            enabled: true,
+        };
         let menu = build_menu(
             Some(&rt),
             ServiceState::Stopped,
@@ -961,7 +967,7 @@ mod tests {
             true,
             &[],
             &[],
-            None,
+            Some(&system_proxy),
             None,
             false,
             None,
@@ -971,6 +977,7 @@ mod tests {
         assert!(find_item(&menu, "open_admin_ui").is_none());
         let open_traffic = find_item(&menu, "open_traffic").unwrap();
         assert!(!open_traffic.enabled);
+        assert!(find_item(&menu, "toggle_system_proxy").is_none());
         let quit = find_item(&menu, "quit_tray").unwrap();
         assert!(quit.enabled);
     }
