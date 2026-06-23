@@ -222,6 +222,24 @@ jobs:
         with:
           shared-key: rust-${{ matrix.target }}
 
+      - name: Fetch Rust dependencies with retry
+        shell: bash
+        run: |
+          target="${{ matrix.target }}"
+          for attempt in 1 2 3; do
+            echo "Fetching Rust dependencies for ${target} (attempt ${attempt}/3)"
+            if cargo fetch --target "${target}"; then
+              exit 0
+            fi
+
+            if [[ "${attempt}" == "3" ]]; then
+              echo "Failed to fetch Rust dependencies for ${target} after 3 attempts"
+              exit 1
+            fi
+
+            sleep "$((attempt * 20))"
+          done
+
       - name: Cache sherpa-onnx archive
         # Local ASR native assets are distributed only for the supported
         # Apple Silicon macOS CLI target. Windows/Linux release packages must
@@ -296,7 +314,7 @@ jobs:
           done
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: cli-${{ matrix.target }}
           path: |
@@ -397,6 +415,25 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: rust-${{ matrix.target }}
+
+      - name: Fetch Rust dependencies with retry
+        shell: bash
+        run: |
+          target="${{ matrix.target }}"
+          for attempt in 1 2 3; do
+            echo "Fetching Rust dependencies for ${target} (attempt ${attempt}/3)"
+            if cargo fetch --target "${target}" \
+              && cargo fetch --manifest-path desktop/src-tauri/Cargo.toml --target "${target}"; then
+              exit 0
+            fi
+
+            if [[ "${attempt}" == "3" ]]; then
+              echo "Failed to fetch Rust dependencies for ${target} after 3 attempts"
+              exit 1
+            fi
+
+            sleep "$((attempt * 20))"
+          done
 
       - name: Build desktop frontend
         run: pnpm --dir web run build:desktop
@@ -507,7 +544,7 @@ jobs:
           "$($hash.Hash.ToLower())  ${{ env.ASSET }}" | Out-File -FilePath "dist/${{ env.ASSET }}.sha256" -Encoding ascii
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: ./.github/actions/upload-artifact-with-retry
         with:
           name: desktop-${{ matrix.target }}
           path: |

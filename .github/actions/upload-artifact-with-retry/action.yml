@@ -1,0 +1,66 @@
+name: Upload artifact with retry
+description: Retry actions/upload-artifact for transient artifact service failures.
+
+inputs:
+  name:
+    description: Artifact name.
+    required: true
+  path:
+    description: Files or directories to upload.
+    required: true
+  retry-delay-seconds:
+    description: Base delay between attempts.
+    required: false
+    default: "20"
+
+runs:
+  using: composite
+  steps:
+    - name: Upload artifact (attempt 1)
+      id: upload_1
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        overwrite: true
+
+    - name: Wait before upload retry 2
+      if: steps.upload_1.outcome != 'success'
+      shell: bash
+      run: sleep "${{ inputs.retry-delay-seconds }}"
+
+    - name: Upload artifact (attempt 2)
+      id: upload_2
+      if: steps.upload_1.outcome != 'success'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        overwrite: true
+
+    - name: Wait before upload retry 3
+      if: steps.upload_1.outcome != 'success' && steps.upload_2.outcome != 'success'
+      shell: bash
+      run: sleep "$(( ${{ inputs.retry-delay-seconds }} * 2 ))"
+
+    - name: Upload artifact (attempt 3)
+      id: upload_3
+      if: steps.upload_1.outcome != 'success' && steps.upload_2.outcome != 'success'
+      continue-on-error: true
+      uses: actions/upload-artifact@v4
+      with:
+        name: ${{ inputs.name }}
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+        overwrite: true
+
+    - name: Fail when all upload attempts fail
+      if: steps.upload_1.outcome != 'success' && steps.upload_2.outcome != 'success' && steps.upload_3.outcome != 'success'
+      shell: bash
+      run: |
+        echo "Artifact upload failed after 3 attempts: ${{ inputs.name }}" >&2
+        exit 1
