@@ -137,7 +137,7 @@ helper 启动后：
    - 校验主进程 PID；当 runtime 文件缺失但父进程仍存活时，状态保持 Running，并使用启动参数提供的 Admin URL 与端口渲染菜单；
    - 探测 Admin API；
    - 重新渲染菜单启用状态；
-   - 不把系统代理状态放入高频心跳；当 Running 状态下缓存缺失时，后台菜单快照允许补齐一次 `/api/proxy/system`，缓存已有后仅保留旧值，并在用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需刷新。
+   - 不把系统代理状态放入高频心跳；系统代理菜单状态只读取当前实例 Admin API 的 `/api/proxy/system`，与 WebUI 使用同一语义 `enabled && managed_by_bifrost != false`。当 Admin API 快照暂不可用时，菜单项保留但禁用，不读取本机 OS 系统代理做兜底；后续后台刷新、用户展开托盘菜单、执行 System Proxy 开关或显式菜单动作后按需重新获取。
 6. 进入平台原生事件循环。
 7. 退出时删除 tray icon、释放 lock、删除 `tray.pid`。
 
@@ -172,11 +172,15 @@ v1 语义：
 - Windows 延迟替换 helper 在重启前必须确认统一代理端口的 TCP 与 UDP 监听都已释放，并给 Windows socket 释放窗口保留足够预算（当前为 30 秒）。统一代理会同时绑定 TCP/UDP；如果只探测 TCP，旧进程退出窗口中残留的 UDP socket 会让新 `start -d` 以 `WSAEADDRINUSE` 失败，表现为二进制已替换但代理没有自动重启。
 - Windows 延迟替换 helper 写 `<data_dir>/upgrade-progress.json` 时必须生成可解析 UTF-8 JSON。helper 应从 Rust 调度侧接收 `target_version` / `source` 兜底值，并在读取旧 progress 时显式按 UTF-8 解析；旧 progress 损坏不能阻断 helper 写入最终 `failed` / `completed` 状态。
 - 如果宽限期内用户点击 `Start Bifrost`，helper 不会在启动中途退出；服务恢复 Running 后计时清零。如果启动失败，空转计时从失败后的 Stopped 状态重新开始。
+- `Start Bifrost` 成功后，helper 必须立即刷新同一进程内的菜单快照，不能只依赖下次打开托盘或重启托盘。即使 `runtime.json` 在短窗口内暂不可读，只要服务状态已由 runtime/监听探测确认为 Running，菜单也必须使用启动参数中的 Admin URL/端口恢复 Open Traffic/Open Rules/Open Settings/Copy HTTP Proxy/System Proxy 和 Running footer；不能继续显示启动前的 `Bifrost: Unknown` 或缺失依赖 runtime 的菜单项。
 - `Start Bifrost`、`Stop Bifrost` 必须有用户可见的进行中状态：
   - 点击后下一次展开菜单立即显示 `Bifrost: Starting...` / `Stopping...`。
   - 进行中时禁用 Start/Stop，避免重复点击造成并发操作。
   - 成功后回到 Running/Stopped 状态。
   - 失败或超时后显示 `Bifrost: Start failed - open logs` 等错误状态，并允许用户重试或打开日志。
+- `System Proxy` 与 `Rules` 这类异步菜单动作也必须有用户可见的进行中状态：
+  - 点击 `System Proxy` 后立即显示 `Enabling System Proxy...` 或 `Disabling System Proxy...`，并置灰到 Admin API / OS 状态收敛，避免用户误以为点击无响应。
+  - 点击规则后立即显示 `Rules: Applying <rule>` 或 `Rules: Disabling <rule>`，目标规则项显示 `Applying <rule>...` / `Disabling <rule>...`，其它规则与 System Proxy 暂时置灰，避免多个异步请求并发造成状态错乱。
 - helper 进入 `Stopped/Disconnected` 状态：
   - 管理端、代理地址、系统代理切换置灰；
   - `Quit Tray` 可用；
@@ -189,9 +193,10 @@ System Proxy 状态属于高成本/平台敏感查询，不应作为托盘后台
 
 - tray helper 的后台菜单快照线程可以刷新 runtime、rules、active rules 和本地配置，但不得定时请求 `/api/proxy/system`。
 - `System Proxy` 菜单项在服务 Running 且 runtime 可用时必须稳定显示；缓存为空时先按未选中、可点击状态渲染，不能因为状态尚未返回而从菜单中消失。
+- helper 进入 Stopped/Disconnected 后必须丢弃并忽略 Running 时的 `system_proxy` 缓存，菜单不得继续展示旧的 System Proxy 勾选状态；系统代理真实清理由 stop/lifecycle helper 完成，Stopped 菜单只保留 Start 等服务控制能力。
 - 第一次后台远端快照如果发现 Running 状态下系统代理缓存为空，可以请求一次 `/api/proxy/system` 补齐缓存；缓存已有后普通后台刷新必须复用旧值，避免把系统代理查询放进高频轮询。
 - 用户点击/展开托盘菜单时，helper 异步请求一次 `/api/proxy/system` 更新缓存；请求不得阻塞原生事件循环，不得让菜单无法展开。
-- 用户执行 `System Proxy` 开关后，helper 在操作完成后刷新一次缓存并重绘菜单。
+- 用户执行 `System Proxy` 开关后，helper 必须先写入内存 pending 快照并重绘菜单，再异步调用 Admin API；操作完成或失败后清理 pending，刷新一次缓存并重绘菜单。
 - Windows 读取当前系统代理时不能 spawn `reg.exe` / `powershell.exe` / `cmd.exe` 这类 console 子进程；必须通过 registry API 或等价无窗口 API 完成。否则 Windows Terminal/OpenConsole 可能为短命 console 程序创建可见窗口，造成托盘常驻时反复闪窗。
 - Windows 托盘菜单打开 URL 或目录时不能走 `cmd /c start`；应使用 `ShellExecuteW` 等无控制台系统 API，避免用户点击 `Open Traffic` / `Open Settings` / `Open Logs` 时出现短暂终端窗口。
 - Windows Sync 自动登录提示打开浏览器时也不能走 `cmd /c start`；后台服务启动后的登录预检属于偶发路径，同样必须使用 `ShellExecuteW` 等无控制台系统 API。
@@ -494,7 +499,7 @@ Quit Tray
 - `System Proxy`：原生 check item，读取 `GET /_bifrost/api/proxy/system`；点击后调用 `PUT /_bifrost/api/proxy/system` 写入 `{ "enabled": <next> }`，刷新后更新勾选状态。未运行或平台不支持时置灰。
 - `Rules: <当前启用规则>`：原生子菜单，完全通过主服务 Admin API 读取与切换规则，不直接读写 `rules/` 或状态文件。
 - `Stop Bifrost`：调用可信 `bifrost stop` 并等待子进程退出，避免 Unix zombie。
-- `Start Bifrost`：调用可信 `bifrost start --daemon --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；daemon parent 可以成功退出，但 detached daemon child 必须进入长期 runtime。若启动器异常退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
+- `Start Bifrost`：调用可信 `bifrost start --daemon --no-tray --no-system-proxy`，并保留原启动必要参数（例如 `--host`、`--socks5-port`、`--log-level`、`--skip-cert-check`、`--unsafe-ssl`、`--yes`），监控 runtime PID ready；daemon parent 可以成功退出，但 detached daemon child 必须进入长期 runtime。runtime ready 后不能阻塞等待长期 daemon child 退出，必须异步回收 child 并立即把 helper 内部 state 与 menu snapshot 推到 Running。若启动器异常退出或 15 秒内未 ready，状态行显示失败并引导打开日志。
 - `Open Logs`：打开 `<data_dir>/logs`。
 - `Quit Tray`：退出 helper，不停止服务。
 
@@ -508,6 +513,7 @@ Quit Tray
 - 组权限列表：`GET /_bifrost/api/group`，以远端返回的用户权限为准，`level >= 1`（Owner/Master）才进入 tray 组菜单。
 - 组规则列表：对每个可展示组调用 `GET /_bifrost/api/group-rules/{group_id}`，以远端接口同步后的组规则为准；本地组目录不能作为组权限或组列表来源。
 - 当前启用规则：`GET /_bifrost/api/rules/active-summary`，用于标记勾选状态和顶层 `Rules: <当前启用规则>` 文案。
+- 组规则列表可以继续使用 `/api/group-rules/<id>` 提供的排序与可见规则集合，但菜单勾选状态必须以 `active-summary` 为准；`group-rules` 返回的静态 `enabled` 字段可能与当前运行态不一致，不能覆盖 active-summary。
 - `active-summary` 必须在没有 Sync session 或远端 group cache 解析失败时保留本地组规则 fallback；否则 tray 点击本地组规则后会把顶层错误刷新成 `Rules: None`。
 - 个人规则切换：`PUT /_bifrost/api/rules/{rule_name}/enable|disable`。
 - 组规则切换：`PUT /_bifrost/api/group-rules/{group_name_or_id}/{rule_name}/enable|disable`。
@@ -521,7 +527,7 @@ Quit Tray
 - 本地旧组候选若存在，只作为 `More...` 的触发 marker，不作为可展开组名；例如远端返回 `next-agent` Master 时必须展示 `next-agent`，而不是本地残留目录 `nextoncall`。
 - 若存在未展示的组规则，Rules 子菜单底部展示 `More...`，点击后打开 Admin Rules 页面，由管理端承载完整组规则浏览与测试。
 - 当前启用规则显示原生 check mark；无启用规则时顶层显示 `Rules: None`；多条规则同时启用时顶层显示 `Rules: Multiple`，点击未启用规则后收敛为单选并刷新最近规则快捷区；再次点击当前已启用规则后取消选中并回到 `Rules: None`。
-- 规则切换成功后必须立即调用同一套 `load_menu_data_snapshot` 刷新当前 helper 内存快照，而不是只等待 1 秒后台轮询；否则原生菜单关闭后用户马上再次打开，容易看到切换前的 `Rules: ...` 与勾选状态。
+- 规则切换开始时必须先写入内存 pending 快照并重绘菜单；规则切换成功或失败后必须清理 pending，并立即调用同一套 `load_menu_data_snapshot` 刷新当前 helper 内存快照，而不是只等待 1 秒后台轮询；否则原生菜单关闭后用户马上再次打开，容易看到切换前的 `Rules: ...` 与勾选状态。
 
 ## 自定义菜单
 

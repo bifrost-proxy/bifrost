@@ -329,11 +329,12 @@ mod tests {
 
     #[test]
     fn status_reports_inactive_fields_when_idle() {
-        // active_since_secs is None and battery_warning is None while idle.
+        // Idle state should not report an active assertion; battery warnings
+        // still reflect the host power source on supported platforms.
         let (m, _) = make_mgr(Mode::Off);
         let s = m.status();
         assert!(s.active_since_secs.is_none());
-        assert!(s.battery_warning.is_none());
+        assert_eq!(s.battery_warning.is_some(), s.supported && s.on_battery);
         assert!(!s.active);
     }
 

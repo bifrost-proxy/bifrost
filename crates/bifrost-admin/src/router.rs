@@ -1,6 +1,11 @@
 use std::net::SocketAddr;
 
-use hyper::{body::Incoming, header::HeaderValue, Method, Request, Response, StatusCode};
+use hyper::{
+    body::Incoming,
+    header::{HeaderMap, HeaderValue},
+    Method, Request, Response, StatusCode,
+};
+use serde::Serialize;
 use tracing::debug;
 
 use crate::cors::apply_cors_headers;
@@ -23,7 +28,7 @@ use crate::handlers::{
     group::handle_group,
     group_rules::handle_group_rules,
     im_gateway::handle_im_gateway,
-    method_not_allowed,
+    json_response, method_not_allowed,
     metrics::handle_metrics,
     mobile_devices::{handle_mobile_devices, handle_mobile_public},
     notification::handle_notification,
@@ -33,6 +38,7 @@ use crate::handlers::{
     remote_invoke::handle_remote_invoke,
     replay::handle_replay,
     room::handle_room,
+    rule_share_confirm::{handle_rule_share_confirm_api, handle_rule_share_confirm_page},
     rules::{handle_rules, share_env_exit_page},
     scripts::handle_scripts_request,
     search::handle_search,
@@ -55,6 +61,8 @@ use crate::push::SharedPushManager;
 use crate::state::SharedAdminState;
 use crate::static_files::serve_static_file;
 use crate::{is_remote_access_enabled, validate_admin_jwt, ADMIN_PATH_PREFIX};
+
+const CSRF_HEADER_NAME: &str = "x-bifrost-csrf";
 
 fn parse_query(query: &str) -> std::collections::HashMap<String, String> {
     serde_urlencoded::from_str(query).unwrap_or_default()
@@ -145,6 +153,8 @@ impl AdminRouter {
             } else {
                 method_not_allowed()
             }
+        } else if admin_path.starts_with("/share/rule") {
+            handle_rule_share_confirm_page(req, state).await
         } else if admin_path.starts_with("/api/") {
             // Ensure the ASR scheduled-task scheduler is running on first API
             // request so tasks execute even if the ASR page is never visited.
@@ -173,12 +183,30 @@ impl AdminRouter {
             return resp;
         }
 
+        if let Some(resp) = Self::check_browser_write_guard(&req, &state, path) {
+            return resp;
+        }
+
+        if path == "/api/security/csrf" {
+            return match req.method() {
+                &Method::GET => json_response(&CsrfResponse {
+                    csrf_token: state.csrf_token(),
+                    header_name: "X-Bifrost-CSRF",
+                }),
+                _ => method_not_allowed(),
+            };
+        }
+
         if path == "/api/docs" {
             return swagger::serve_swagger_ui();
         }
 
         if path == "/api/openapi.json" {
             return swagger::serve_openapi_spec();
+        }
+
+        if path == "/api/rules/share-confirm" {
+            return handle_rule_share_confirm_api(req, state, push_manager).await;
         }
 
         if path.starts_with("/api/auth") {
@@ -309,7 +337,12 @@ impl AdminRouter {
         }
     }
 
-    const AUTH_PUBLIC_PATHS: &[&str] = &["/api/auth/status", "/api/auth/login", "/api/auth/logout"];
+    const AUTH_PUBLIC_PATHS: &[&str] = &[
+        "/api/auth/status",
+        "/api/auth/login",
+        "/api/auth/logout",
+        "/api/security/csrf",
+    ];
 
     fn is_auth_public_path(path: &str) -> bool {
         Self::AUTH_PUBLIC_PATHS.contains(&path)
@@ -373,6 +406,99 @@ impl AdminRouter {
         }
         None
     }
+
+    fn check_browser_write_guard<T>(
+        req: &Request<T>,
+        state: &SharedAdminState,
+        path: &str,
+    ) -> Option<Response<BoxBody>> {
+        if is_safe_method(req.method()) {
+            return None;
+        }
+
+        if path == "/api/rules/share-env/exit" {
+            return None;
+        }
+
+        let headers = req.headers();
+        let has_browser_context = header_value(headers, "origin").is_some()
+            || header_value(headers, "referer").is_some()
+            || header_value(headers, "sec-fetch-site").is_some()
+            || header_value(headers, "sec-fetch-mode").is_some()
+            || header_value(headers, "sec-fetch-dest").is_some();
+        if !has_browser_context {
+            return None;
+        }
+
+        if matches!(
+            header_value(headers, "sec-fetch-site").as_deref(),
+            Some("cross-site")
+        ) {
+            return Some(error_response(
+                StatusCode::FORBIDDEN,
+                "Cross-site admin write request rejected",
+            ));
+        }
+
+        if let Some(origin) = header_value(headers, "origin") {
+            let host = header_value(headers, "host").unwrap_or_default();
+            if !crate::cors::is_allowed_origin(&origin) && !origin_matches_host(&origin, &host) {
+                return Some(error_response(
+                    StatusCode::FORBIDDEN,
+                    "Cross-origin admin write request rejected",
+                ));
+            }
+        }
+
+        let csrf_header = header_value(headers, CSRF_HEADER_NAME);
+        if csrf_header.as_deref() != Some(state.csrf_token()) {
+            return Some(error_response(
+                StatusCode::FORBIDDEN,
+                "Missing or invalid admin CSRF token",
+            ));
+        }
+
+        None
+    }
+}
+
+#[derive(Serialize)]
+struct CsrfResponse<'a> {
+    csrf_token: &'a str,
+    header_name: &'static str,
+}
+
+fn is_safe_method(method: &Method) -> bool {
+    matches!(method, &Method::GET | &Method::HEAD | &Method::OPTIONS)
+}
+
+fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn origin_matches_host(origin: &str, host: &str) -> bool {
+    if host.trim().is_empty() {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Some(origin_host) = url.host_str() else {
+        return false;
+    };
+    let origin_port = url.port_or_known_default();
+    let host_lower = host.trim().to_ascii_lowercase();
+    let origin_host_port = match origin_port {
+        Some(port) => format!("{origin_host}:{port}").to_ascii_lowercase(),
+        None => origin_host.to_ascii_lowercase(),
+    };
+    let origin_host_lower = origin_host.to_ascii_lowercase();
+
+    host_lower == origin_host_port || host_lower == origin_host_lower
 }
 
 #[cfg(test)]
@@ -607,5 +733,116 @@ mod tests {
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/asr/status", remote_peer())
             .expect("regular API should still require Authorization header");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_browser_write_guard_rejects_cross_site_fetch() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_bifrost/api/rules")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "http://evil.example")
+            .header("Sec-Fetch-Site", "cross-site")
+            .body(())
+            .unwrap();
+
+        let resp = AdminRouter::check_browser_write_guard(&req, &state, "/api/rules")
+            .expect("cross-site browser write should be rejected");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_browser_write_guard_allows_share_env_exit_cross_site_bridge() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_bifrost/api/rules/share-env/exit")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "https://www.coze.cn")
+            .header("Sec-Fetch-Site", "cross-site")
+            .body(())
+            .unwrap();
+
+        assert!(
+            AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/share-env/exit")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_browser_write_guard_requires_csrf_for_local_origin() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/_bifrost/api/rules/demo/enable")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "http://127.0.0.1:9900")
+            .header("Sec-Fetch-Site", "same-origin")
+            .body(())
+            .unwrap();
+
+        let resp = AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo/enable")
+            .expect("local browser write without CSRF should be rejected");
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn test_browser_write_guard_accepts_local_origin_with_csrf() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::PUT)
+            .uri("/_bifrost/api/rules/demo/enable")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .header("Origin", "http://127.0.0.1:9900")
+            .header("Sec-Fetch-Site", "same-origin")
+            .header("X-Bifrost-CSRF", state.csrf_token())
+            .body(())
+            .unwrap();
+
+        assert!(
+            AdminRouter::check_browser_write_guard(&req, &state, "/api/rules/demo/enable")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_browser_write_guard_allows_cli_without_browser_context() {
+        let harness = crate::test_support::TestAdminState::builder()
+            .port(9900)
+            .build();
+        let state = harness.state();
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/_bifrost/api/rules")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .body(())
+            .unwrap();
+
+        assert!(AdminRouter::check_browser_write_guard(&req, &state, "/api/rules").is_none());
+    }
+
+    #[test]
+    fn test_origin_matches_host_for_remote_admin_origin() {
+        assert!(origin_matches_host(
+            "http://192.168.1.25:9900",
+            "192.168.1.25:9900"
+        ));
+        assert!(!origin_matches_host(
+            "http://evil.example",
+            "192.168.1.25:9900"
+        ));
     }
 }

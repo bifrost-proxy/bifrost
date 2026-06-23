@@ -8,11 +8,11 @@ use crate::ensure_crypto_provider;
 use crate::http3::Http3Client;
 use crate::protocol::{ProtocolDetector, TransportProtocol};
 use bifrost_admin::{
-    rule_share_import::import_rule_share_payload, AdminRouter, AdminState, ConnectionInfo,
-    RequestTiming, SharedPushManager, TrafficRecord, TrafficType, ADMIN_PATH_PREFIX,
+    AdminRouter, AdminState, ConnectionInfo, RequestTiming, SharedPushManager, TrafficRecord,
+    TrafficType, ADMIN_PATH_PREFIX,
 };
 use bifrost_core::{
-    rule_share::{extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
+    rule_share::{encode_rule_share_payload, extract_rule_share_query, RULE_SHARE_QUERY_PARAM},
     BifrostError, Protocol, Result,
 };
 use bifrost_script::{RequestData, ResponseData};
@@ -1945,14 +1945,14 @@ async fn handle_intercepted_request_with_protocol(
     let start_time = Instant::now();
     let method = req.method().clone();
     let method_str = method.to_string();
-    let mut uri = req.uri().clone();
-    let mut path = uri
+    let uri = req.uri().clone();
+    let path = uri
         .path_and_query()
         .map(|pq| pq.as_str().to_string())
         .unwrap_or_else(|| "/".to_string());
-    let mut query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
+    let query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
 
-    let mut original_uri = format!("https://{}{}", original_host, path);
+    let original_uri = format!("https://{}{}", original_host, path);
     match handle_intercepted_rule_share_query(
         &mut req,
         &original_uri,
@@ -1965,15 +1965,6 @@ async fn handle_intercepted_request_with_protocol(
         InterceptedRuleShareAction::None => {}
         InterceptedRuleShareAction::Redirect(clean_url) => {
             return Ok(build_redirect_response(302, &clean_url));
-        }
-        InterceptedRuleShareAction::Cleaned(clean_url) => {
-            uri = req.uri().clone();
-            path = uri
-                .path_and_query()
-                .map(|pq| pq.as_str().to_string())
-                .unwrap_or_else(|| "/".to_string());
-            query_string = uri.query().map(|q| format!("?{}", q)).unwrap_or_default();
-            original_uri = clean_url;
         }
     }
 
@@ -5481,16 +5472,15 @@ struct UpstreamWebSocketHandshake {
 
 enum InterceptedRuleShareAction {
     None,
-    Cleaned(String),
     Redirect(String),
 }
 
 async fn handle_intercepted_rule_share_query(
-    req: &mut Request<Incoming>,
+    _req: &mut Request<Incoming>,
     request_url: &str,
     req_id: &str,
     admin_state: Option<&Arc<AdminState>>,
-    push_manager: Option<&SharedPushManager>,
+    _push_manager: Option<&SharedPushManager>,
 ) -> InterceptedRuleShareAction {
     if !request_url.contains(RULE_SHARE_QUERY_PARAM) {
         return InterceptedRuleShareAction::None;
@@ -5515,52 +5505,55 @@ async fn handle_intercepted_rule_share_query(
     };
 
     if let Some(state) = admin_state {
-        match import_rule_share_payload((*state).clone(), push_manager, payload).await {
-            Ok(outcome) => {
+        match build_rule_share_confirm_url(state.port(), &payload, &parts.clean_url) {
+            Ok(confirm_url) => {
                 info!(
                     target: "bifrost_proxy::rule_share",
                     req_id,
-                    action = ?outcome.action,
-                    rule_name = %outcome.rule_name,
-                    "imported intercepted rule share query"
+                    target_url = %parts.clean_url,
+                    confirm_url = %confirm_url,
+                    "redirecting intercepted rule share query to confirmation page"
                 );
+                return InterceptedRuleShareAction::Redirect(confirm_url);
             }
             Err(error) => {
                 warn!(
                     target: "bifrost_proxy::rule_share",
                     req_id,
                     error = %error,
-                    "failed to import intercepted rule share query"
+                    "failed to build intercepted rule share confirmation URL"
                 );
+                return InterceptedRuleShareAction::None;
             }
         }
-    } else {
-        warn!(
-            target: "bifrost_proxy::rule_share",
-            req_id,
-            "intercepted rule share query was present but admin state is unavailable"
-        );
     }
 
-    if *req.method() == hyper::Method::GET || *req.method() == hyper::Method::HEAD {
-        return InterceptedRuleShareAction::Redirect(parts.clean_url);
-    }
-
-    match apply_clean_url_to_intercepted_request(req, &parts.clean_url) {
-        Ok(()) => InterceptedRuleShareAction::Cleaned(parts.clean_url),
-        Err(error) => {
-            warn!(
-                target: "bifrost_proxy::rule_share",
-                req_id,
-                error = %error,
-                clean_url = %parts.clean_url,
-                "failed to apply clean intercepted rule share URL"
-            );
-            InterceptedRuleShareAction::None
-        }
-    }
+    warn!(
+        target: "bifrost_proxy::rule_share",
+        req_id,
+        "intercepted rule share query was present but admin state is unavailable"
+    );
+    InterceptedRuleShareAction::Redirect(parts.clean_url)
 }
 
+fn build_rule_share_confirm_url(
+    admin_port: u16,
+    payload: &bifrost_core::rule_share::RuleSharePayload,
+    clean_url: &str,
+) -> Result<String> {
+    let encoded = encode_rule_share_payload(payload)?;
+    let mut confirm = url::Url::parse(&format!(
+        "http://127.0.0.1:{admin_port}{ADMIN_PATH_PREFIX}/share/rule"
+    ))
+    .map_err(|error| BifrostError::Proxy(format!("invalid rule share confirm URL: {error}")))?;
+    confirm
+        .query_pairs_mut()
+        .append_pair("payload", &encoded)
+        .append_pair("target", clean_url);
+    Ok(confirm.to_string())
+}
+
+#[cfg(test)]
 fn apply_clean_url_to_intercepted_request(
     req: &mut Request<Incoming>,
     clean_url: &str,
@@ -9290,10 +9283,11 @@ mod coverage_boost_v4 {
     // ------------- additional handle_intercepted_rule_share_query tests -------------
 
     #[tokio::test]
-    async fn test_handle_intercepted_rule_share_query_cleans_post_url_v4() {
+    async fn test_handle_intercepted_rule_share_query_redirects_post_to_confirm_v4() {
         let payload = new_rule_share_payload("demo2", "example.com bp://127.0.0.1:4000").unwrap();
         let shared = append_rule_share_query("https://example.com/old?flag=1", &payload).unwrap();
         let shared_for_server = shared.clone();
+        let admin_state = Arc::new(AdminState::new(9900));
 
         let (client_side, server_side) = duplex(16 * 1024);
 
@@ -9301,24 +9295,20 @@ mod coverage_boost_v4 {
             let io = TokioIo::new(server_side);
             let service = service_fn(move |mut req: Request<Incoming>| {
                 let shared_url = shared_for_server.clone();
+                let admin_state = admin_state.clone();
                 async move {
                     let action = handle_intercepted_rule_share_query(
                         &mut req,
                         &shared_url,
                         "req-rule-share-post-v4",
-                        None,
+                        Some(&admin_state),
                         None,
                     )
                     .await;
 
                     match action {
-                        InterceptedRuleShareAction::Cleaned(clean) => {
-                            let current = req
-                                .uri()
-                                .path_and_query()
-                                .map(|pq| pq.as_str().to_string())
-                                .unwrap_or_default();
-                            let body = Full::new(Bytes::from(format!("{clean}|{current}")));
+                        InterceptedRuleShareAction::Redirect(confirm_url) => {
+                            let body = Full::new(Bytes::from(confirm_url));
                             Ok::<_, hyper::Error>(
                                 Response::builder()
                                     .status(StatusCode::OK)
@@ -9359,10 +9349,10 @@ mod coverage_boost_v4 {
         let resp = sender.send_request(req).await.unwrap();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body_str = std::str::from_utf8(&bytes).unwrap();
-        let parts: Vec<&str> = body_str.split('|').collect();
-        assert_eq!(parts.len(), 2);
-        assert_eq!(parts[0], "https://example.com/old?flag=1");
-        assert_eq!(parts[1], "/old?flag=1");
+        assert!(body_str.starts_with("http://127.0.0.1:9900/_bifrost/share/rule?"));
+        assert!(body_str.contains("payload="));
+        assert!(body_str.contains("target=https%3A%2F%2Fexample.com%2Fold%3Fflag%3D1"));
+        assert!(!body_str.contains("__bifrost_rule"));
 
         drop(sender);
         client_task.await.unwrap().unwrap();

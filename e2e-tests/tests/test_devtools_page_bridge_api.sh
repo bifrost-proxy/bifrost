@@ -477,17 +477,41 @@ const controlRuleContent = process.env.CONTROL_RULE_CONTENT;
 const tlsRuleContent = process.env.TLS_RULE_CONTENT;
 const admin = `http://127.0.0.1:${proxyPort}/_bifrost/api`;
 const webui = `http://127.0.0.1:${proxyPort}/_bifrost/`;
+let csrfToken = null;
+
+function isUnsafeMethod(method) {
+  return !['GET', 'HEAD', 'OPTIONS'].includes(String(method || 'GET').toUpperCase());
+}
+
+async function getCsrfToken() {
+  if (csrfToken) return csrfToken;
+  const response = await fetch(`${admin}/security/csrf`, { method: 'GET' });
+  if (!response.ok) {
+    throw new Error(`GET /security/csrf failed: ${response.status} ${await response.text()}`);
+  }
+  const data = await response.json();
+  if (!data.csrf_token) {
+    throw new Error(`GET /security/csrf missing csrf_token: ${JSON.stringify(data)}`);
+  }
+  csrfToken = data.csrf_token;
+  return csrfToken;
+}
 
 async function api(path, options = {}) {
+  const method = options.method || 'GET';
+  const headers = {
+    'Content-Type': 'application/json',
+    ...(options.headers || {}),
+  };
+  if (isUnsafeMethod(method) && !Object.keys(headers).some((key) => key.toLowerCase() === 'x-bifrost-csrf')) {
+    headers['X-Bifrost-CSRF'] = await getCsrfToken();
+  }
   const response = await fetch(admin + path, {
     ...options,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(options.headers || {}),
-    },
+    headers,
   });
   if (!response.ok) {
-    throw new Error(`${options.method || 'GET'} ${path} failed: ${response.status} ${await response.text()}`);
+    throw new Error(`${method} ${path} failed: ${response.status} ${await response.text()}`);
   }
   return response.json();
 }
