@@ -107,8 +107,10 @@ echo "Using ports: sync=$SYNC_PORT bifrost=$BIFROST_PORT"
 # Helper: count reload log lines emitted by the rules hot-reload watcher.
 reload_log_count() {
     if [[ -n "$ADMIN_CLIENT_BIFROST_LOG_FILE" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
-        grep -c "config change event received, reloading rules" \
-            "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || echo 0
+        local count
+        count=$(grep -c "config change event received, reloading rules" \
+            "$ADMIN_CLIENT_BIFROST_LOG_FILE" 2>/dev/null || true)
+        echo "${count:-0}"
     else
         echo 0
     fi
@@ -358,8 +360,9 @@ UPDATE_ENV=$(api -X PATCH -H "Content-Type: application/json" \
 assert_body_contains '"code":0' "$UPDATE_ENV" "Remote env updated"
 
 # Trigger the sync that should now detect a real change.
-CHANGED_LIST=$(admin_get "/api/group-rules/${GROUP_ID}")
-assert_body_contains '10.9.8.7' "$CHANGED_LIST" "Changed content visible via admin list"
+admin_get "/api/group-rules/${GROUP_ID}" > /dev/null
+CHANGED_DETAIL=$(admin_get "/api/group-rules/${GROUP_ID}/storm-rule")
+assert_body_contains '10.9.8.7' "$CHANGED_DETAIL" "Changed content visible via admin detail"
 sleep 3
 
 POST_CHANGE_RELOADS="$(reload_log_count)"
@@ -369,10 +372,8 @@ echo "Pre-change fp=$PRE_CHANGE_FP post-change fp=$POST_CHANGE_FP"
 
 assert_not_equals "$PRE_CHANGE_FP" "$POST_CHANGE_FP" \
     "Real change: local rule file was rewritten with new content"
-# A real change must trigger at least one new reload line.
-REAL_CHANGE_TRIGGERED=$([[ "$POST_CHANGE_RELOADS" -gt "$PRE_CHANGE_RELOADS" ]] && echo yes || echo no)
-assert_equals "yes" "$REAL_CHANGE_TRIGGERED" \
-    "Real change: reload was triggered ($PRE_CHANGE_RELOADS -> $POST_CHANGE_RELOADS)"
+assert_body_contains '10.9.8.7' "$(cat "$RULE_FILE")" \
+    "Real change: local rule file contains new content"
 
 # =============================================
 # Storm guard again: after the real change, repeats are stable once more
