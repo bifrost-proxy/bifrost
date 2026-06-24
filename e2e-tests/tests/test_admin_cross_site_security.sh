@@ -74,6 +74,26 @@ http_status() {
   curl -sS -o /tmp/bifrost-admin-security-response.json -w '%{http_code}' "$@"
 }
 
+assert_header_matches() {
+  local headers_file="$1"
+  local pattern="$2"
+  local message="$3"
+  if ! tr -d '\r' <"$headers_file" | grep -Eiq "$pattern"; then
+    echo "[admin-cross-site-security] header assertion failed: $message" >&2
+    echo "[admin-cross-site-security] expected pattern: $pattern" >&2
+    echo "[admin-cross-site-security] headers:" >&2
+    tr -d '\r' <"$headers_file" >&2
+    exit 1
+  fi
+}
+
+curl -sS -o /tmp/bifrost-admin-security-index.out \
+  -D /tmp/bifrost-admin-security-index.headers \
+  -H 'Accept-Encoding: gzip' \
+  "http://127.0.0.1:${PROXY_PORT}/_bifrost/" >/dev/null
+assert_header_matches /tmp/bifrost-admin-security-index.headers '^x-frame-options: DENY$' "admin index denies framing"
+assert_header_matches /tmp/bifrost-admin-security-index.headers "^content-security-policy: .*frame-ancestors 'none'" "admin index CSP denies frame ancestors"
+
 TOKEN="$(csrf_token)"
 
 CREATE_BODY='{"name":"safe-rule","content":"safe.test bp://127.0.0.1:3000","enabled":false}'
@@ -116,8 +136,8 @@ SHARE_URL="$(
 curl -sS -o /tmp/bifrost-admin-security-share.out \
   -D /tmp/bifrost-admin-security-share.headers \
   -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
-grep -Eiq '^HTTP/.* 302' /tmp/bifrost-admin-security-share.headers
-grep -Eiq "^location: http://127\\.0\\.0\\.1:${PROXY_PORT}/_bifrost/share/rule\\?" /tmp/bifrost-admin-security-share.headers
+assert_header_matches /tmp/bifrost-admin-security-share.headers '^HTTP/.* 302' "proxied share URL redirects to local confirmation page"
+assert_header_matches /tmp/bifrost-admin-security-share.headers "^location: http://127\\.0\\.0\\.1:${PROXY_PORT}/_bifrost/share/rule\\?" "share redirect targets local admin confirmation page"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-admin-security-rules-before-confirm.txt
 ! grep -F 'share/shared-security [enabled]' /tmp/bifrost-admin-security-rules-before-confirm.txt
 
@@ -130,12 +150,45 @@ for line in open("/tmp/bifrost-admin-security-share.headers", "rb"):
 PY
 )"
 
+curl -sS -o /tmp/bifrost-admin-security-confirm.out \
+  -D /tmp/bifrost-admin-security-confirm.headers \
+  "$CONFIRM_LOCATION" >/dev/null
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^cache-control: no-store$' "confirmation page is not cached"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^referrer-policy: no-referrer$' "confirmation page suppresses referrer"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^x-content-type-options: nosniff$' "confirmation page disables content sniffing"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^x-frame-options: DENY$' "confirmation page denies framing"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*frame-ancestors 'none'" "confirmation CSP denies frame ancestors"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*base-uri 'none'" "confirmation CSP blocks base URI injection"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*form-action 'none'" "confirmation CSP blocks form posts"
+grep -F 'Type the full content hash to apply' /tmp/bifrost-admin-security-confirm.out >/dev/null
+
 CONFIRM_JSON="$(python3 - "$CONFIRM_LOCATION" <<'PY'
+import base64
 import json
 import sys
 import urllib.parse
 query = urllib.parse.parse_qs(urllib.parse.urlparse(sys.argv[1]).query)
-print(json.dumps({"payload": query["payload"][0], "target_url": query["target"][0]}))
+encoded_payload = query["payload"][0]
+padding = "=" * (-len(encoded_payload) % 4)
+payload = json.loads(base64.urlsafe_b64decode(encoded_payload + padding).decode())
+print(json.dumps({
+    "payload": encoded_payload,
+    "target_url": query["target"][0],
+    "confirmation": payload["content_hash"],
+}))
+PY
+)"
+
+CONFIRM_JSON_WITHOUT_HASH="$(python3 - "$CONFIRM_LOCATION" <<'PY'
+import json
+import sys
+import urllib.parse
+query = urllib.parse.parse_qs(urllib.parse.urlparse(sys.argv[1]).query)
+print(json.dumps({
+    "payload": query["payload"][0],
+    "target_url": query["target"][0],
+    "confirmation": "",
+}))
 PY
 )"
 
@@ -145,6 +198,14 @@ STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules
   -H 'Sec-Fetch-Site: same-origin' \
   --data "$CONFIRM_JSON")"
 [[ "$STATUS" == "403" ]]
+
+STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" \
+  -H 'Content-Type: application/json' \
+  -H 'Origin: http://127.0.0.1:'"${PROXY_PORT}" \
+  -H 'Sec-Fetch-Site: same-origin' \
+  -H "X-Bifrost-CSRF: $TOKEN" \
+  --data "$CONFIRM_JSON_WITHOUT_HASH")"
+[[ "$STATUS" == "400" ]]
 
 STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" \
   -H 'Content-Type: application/json' \
