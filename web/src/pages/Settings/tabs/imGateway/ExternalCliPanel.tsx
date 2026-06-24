@@ -49,7 +49,7 @@ const DEFAULT_RUNNER: ExternalCliAgentSettings = {
 
 const ADAPTER_OPTIONS = [
   { label: "Codex CLI", value: "codex" },
-  { label: "Trae CLI", value: "traex" },
+  { label: "TreeX CLI", value: "traex" },
   { label: "ChatGPT Web", value: "chatgpt_web" },
 ];
 
@@ -186,7 +186,7 @@ export default function ExternalCliPanel({
   const selectedOverride =
     selectedProviderId && config ? config.channels[selectedProviderId] : undefined;
   const effectiveRunnerId =
-    selectedOverride?.runnerId || config?.defaultRunnerId || runnerIds[0] || "codex";
+    selectedOverride?.runnerId || config?.defaultRunnerId || runnerIds[0] || "Codex";
   const effectiveRunner = config?.runners[effectiveRunnerId] || DEFAULT_RUNNER;
 
   const syncChannelForm = useCallback(
@@ -370,7 +370,7 @@ export default function ExternalCliPanel({
     delete runners[runnerId];
     const fallbackRunnerId =
       config.defaultRunnerId === runnerId
-        ? Object.keys(runners)[0] || "codex"
+        ? Object.keys(runners)[0] || "Codex"
         : config.defaultRunnerId;
     const channels = Object.fromEntries(
       Object.entries(config.channels).map(([providerId, channel]) => [
@@ -647,7 +647,7 @@ export default function ExternalCliPanel({
               },
             ]}
           >
-            <Input disabled={Boolean(editingRunnerId)} placeholder="codex" />
+            <Input disabled={Boolean(editingRunnerId)} placeholder="Codex" />
           </Form.Item>
           <Form.Item name="enabled" label="Runner Enabled" valuePropName="checked">
             <Switch />
@@ -730,7 +730,7 @@ export default function ExternalCliPanel({
               ) : (
                 <>
                   <Form.Item name="executable" label="Executable">
-                    <Input placeholder="codex" />
+                    <Input placeholder="Codex" />
                   </Form.Item>
                   <Form.Item name="args" label="Arguments">
                     <Input.TextArea rows={3} placeholder="One argument per line" />

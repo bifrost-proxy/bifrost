@@ -212,12 +212,21 @@ impl<'de> Deserialize<'de> for AgentRunnerMode {
     {
         let value = String::deserialize(deserializer)?;
         let trimmed = value.trim();
-        if trimmed.is_empty() || trimmed == "bifrost_agent" {
+        if is_builtin_runner_id(trimmed) {
             Ok(Self::BifrostAgent)
         } else {
             Ok(Self::Custom(trimmed.to_string()))
         }
     }
+}
+
+fn is_builtin_runner_id(value: &str) -> bool {
+    let normalized = value.trim().to_ascii_lowercase();
+    normalized.is_empty()
+        || normalized == "bifrost_agent"
+        || normalized == "bifrost agent"
+        || normalized == "builtin"
+        || normalized == "bifrost"
 }
 
 fn default_message_target_mode() -> MessageTargetMode {
@@ -1396,6 +1405,16 @@ enabled = true
         let ids = builtin_provider_ids();
         assert!(ids.contains(&"openai"));
         assert!(ids.contains(&"aidp_crawl"));
+    }
+
+    #[test]
+    fn agent_runner_mode_accepts_display_name_for_builtin_runner() {
+        for value in ["Bifrost Agent", "bifrost_agent", "builtin", "bifrost", ""] {
+            let parsed: AgentRunnerMode = toml::from_str(&format!("runner = \"{value}\""))
+                .map(|config: AgentConfig| config.runner.expect("runner"))
+                .expect("parse runner");
+            assert_eq!(parsed, AgentRunnerMode::BifrostAgent);
+        }
     }
 
     #[test]

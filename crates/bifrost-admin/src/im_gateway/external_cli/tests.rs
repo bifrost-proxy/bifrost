@@ -1459,7 +1459,10 @@ fn taskkill_missing_process_messages_are_idempotent() {
 #[test]
 fn effective_config_marks_channel_overrides() {
     let mut config = ExternalCliGatewayConfig::default();
-    let runner = config.runners.get_mut("codex").expect("codex runner");
+    let runner = config
+        .runners
+        .get_mut(DEFAULT_CODEX_RUNNER_ID)
+        .expect("Codex runner");
     runner.enabled = true;
     runner.adapter = "codex".to_string();
     runner.inject_bifrost_tools = true;
@@ -1490,6 +1493,136 @@ fn effective_config_marks_channel_overrides() {
         Some("channel")
     );
     assert_eq!(effective.runner_id, "mock-runner");
+}
+
+#[test]
+fn default_gateway_config_contains_enabled_codex_and_treex_runners() {
+    let config = ExternalCliGatewayConfig::default();
+
+    assert_eq!(config.default_runner_id, DEFAULT_CODEX_RUNNER_ID);
+    let codex = config
+        .runners
+        .get(DEFAULT_CODEX_RUNNER_ID)
+        .expect("Codex default runner");
+    assert!(codex.enabled);
+    assert_eq!(codex.adapter, DEFAULT_ADAPTER);
+    let treex = config
+        .runners
+        .get(DEFAULT_TREEX_RUNNER_ID)
+        .expect("TreeX default runner");
+    assert!(treex.enabled);
+    assert_eq!(treex.adapter, TRAEX_ADAPTER);
+}
+
+#[test]
+fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_runners() {
+    let mut config = ExternalCliGatewayConfig {
+        default_runner_id: "custom".to_string(),
+        runners: BTreeMap::from([(
+            "custom".to_string(),
+            ExternalCliAgentSettings {
+                enabled: false,
+                adapter: "mock".to_string(),
+                ..Default::default()
+            },
+        )]),
+        ..Default::default()
+    };
+    config.runners.remove(DEFAULT_CODEX_RUNNER_ID);
+    config.runners.remove(DEFAULT_TREEX_RUNNER_ID);
+
+    let normalized = normalized_gateway_config(config);
+
+    assert_eq!(normalized.default_runner_id, "custom");
+    assert_eq!(
+        normalized
+            .runners
+            .get("custom")
+            .map(|settings| settings.adapter.as_str()),
+        Some("mock")
+    );
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_CODEX_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, DEFAULT_ADAPTER))
+    );
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_TREEX_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, TRAEX_ADAPTER))
+    );
+}
+
+#[test]
+fn normalized_gateway_config_empty_runners_uses_enabled_named_defaults() {
+    let normalized = normalized_gateway_config(ExternalCliGatewayConfig {
+        default_runner_id: "codex".to_string(),
+        runners: BTreeMap::new(),
+        channels: BTreeMap::new(),
+        version: 0,
+    });
+
+    assert_eq!(normalized.default_runner_id, DEFAULT_CODEX_RUNNER_ID);
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_CODEX_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, DEFAULT_ADAPTER))
+    );
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_TREEX_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, TRAEX_ADAPTER))
+    );
+    assert!(!normalized.runners.contains_key("codex"));
+}
+
+#[test]
+fn effective_config_resolves_legacy_runner_aliases_to_named_defaults() {
+    let config = ExternalCliGatewayConfig::default();
+
+    let codex = effective_config_for_provider_and_runner(&config, None, Some("codex"));
+    assert_eq!(codex.runner_id, DEFAULT_CODEX_RUNNER_ID);
+    assert_eq!(codex.settings.adapter, DEFAULT_ADAPTER);
+    assert!(codex.settings.enabled);
+
+    let treex = effective_config_for_provider_and_runner(&config, None, Some("traex"));
+    assert_eq!(treex.runner_id, DEFAULT_TREEX_RUNNER_ID);
+    assert_eq!(treex.settings.adapter, TRAEX_ADAPTER);
+    assert!(treex.settings.enabled);
+}
+
+#[test]
+fn config_store_new_persists_missing_default_runners_on_startup() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let config_path = temp_dir
+        .path()
+        .join("admin")
+        .join("im_gateway_external_cli_agent.json");
+    std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &config_path,
+        r#"{"version":1,"defaultRunnerId":"legacy","runners":{"legacy":{"enabled":true,"adapter":"mock","adapterConfig":{},"injectBifrostTools":true,"skillPaths":[],"deliveryMode":"final_reply"}},"channels":{}}"#,
+    )
+    .unwrap();
+
+    let store = ExternalCliConfigStore::new(temp_dir.path());
+    let loaded = store.load();
+    let persisted: ExternalCliGatewayConfig =
+        serde_json::from_str(&std::fs::read_to_string(config_path).unwrap()).unwrap();
+
+    for config in [loaded, persisted] {
+        assert!(config.runners.contains_key("legacy"));
+        assert!(config.runners.contains_key(DEFAULT_CODEX_RUNNER_ID));
+        assert!(config.runners.contains_key(DEFAULT_TREEX_RUNNER_ID));
+    }
 }
 
 #[test]

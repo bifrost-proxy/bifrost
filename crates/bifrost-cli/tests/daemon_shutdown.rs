@@ -15,6 +15,7 @@ mod unix_tests {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bifrost"));
         command.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1");
         command.env("BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL", "1");
+        command.env_remove("BIFROST_DETACHED_DAEMON_CHILD");
         command
     }
 
@@ -31,7 +32,7 @@ mod unix_tests {
             l.local_addr().unwrap().port()
         };
 
-        let output = bifrost_command()
+        let status = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("--log-dir")
             .arg(&log_dir)
@@ -44,13 +45,12 @@ mod unix_tests {
             .arg("--skip-cert-check")
             .arg("--no-system-proxy")
             .arg("--no-intercept")
-            .output()
+            .status()
             .unwrap();
         assert!(
-            output.status.success(),
-            "start failed: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            status.success(),
+            "start failed with status: {status}; logs: {}",
+            log_dir.display()
         );
 
         let runtime_file = data_dir.join("runtime.json");
@@ -148,7 +148,7 @@ mod unix_tests {
             l.local_addr().unwrap().port()
         };
 
-        let output = bifrost_command()
+        let status = bifrost_command()
             .env("BIFROST_DATA_DIR", &data_dir)
             .arg("--log-dir")
             .arg(&log_dir)
@@ -161,13 +161,12 @@ mod unix_tests {
             .arg("--skip-cert-check")
             .arg("--no-system-proxy")
             .arg("--no-intercept")
-            .output()
+            .status()
             .unwrap();
         assert!(
-            output.status.success(),
-            "start failed: {} {}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
+            status.success(),
+            "start failed with status: {status}; logs: {}",
+            log_dir.display()
         );
 
         let runtime_file = data_dir.join("runtime.json");

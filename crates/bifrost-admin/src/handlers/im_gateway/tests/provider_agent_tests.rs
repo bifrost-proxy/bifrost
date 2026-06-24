@@ -267,11 +267,11 @@ pub(super) fn im_help_includes_im_only_commands_without_dropping_builtins() {
 #[test]
 pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
     let mut config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
-        default_runner_id: "codex".to_string(),
+        default_runner_id: "Codex".to_string(),
         ..Default::default()
     };
     config.runners.insert(
-        "traex".to_string(),
+        "TreeX".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
             adapter: "traex".to_string(),
             ..Default::default()
@@ -283,15 +283,15 @@ pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
         Some(ImRunnerCommand::List)
     );
     assert_eq!(
-        parse_im_runner_command("/Runner traex"),
-        Some(ImRunnerCommand::Switch("traex".to_string()))
+        parse_im_runner_command("/Runner TreeX"),
+        Some(ImRunnerCommand::Switch("TreeX".to_string()))
     );
     assert_eq!(parse_im_runner_command("/runnerish"), None);
 
     let runner_list = format_im_runner_list(&config);
-    assert!(runner_list.contains("bifrost_agent"));
-    assert!(runner_list.contains("codex"));
-    assert!(runner_list.contains("traex"));
+    assert!(runner_list.contains("Bifrost Agent"));
+    assert!(runner_list.contains("Codex"));
+    assert!(runner_list.contains("TreeX"));
 }
 
 #[test]
@@ -302,7 +302,7 @@ pub(super) fn im_runner_command_rejects_unknown_runner() {
 
     assert!(error.contains("找不到 Runner"));
     assert!(error.contains("missing"));
-    assert!(error.contains("bifrost_agent"));
+    assert!(error.contains("Bifrost Agent"));
 }
 
 #[test]
