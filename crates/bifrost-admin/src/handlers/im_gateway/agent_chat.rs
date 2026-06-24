@@ -45,7 +45,14 @@ pub(super) struct ImRunnerSelection {
     adapter: Option<String>,
 }
 
-const BUILTIN_IM_RUNNER_ID: &str = "bifrost_agent";
+const BUILTIN_IM_RUNNER_ID: &str = "Bifrost Agent";
+
+fn is_builtin_im_runner_id(runner_id: &str) -> bool {
+    matches!(
+        runner_id.trim().to_ascii_lowercase().as_str(),
+        "bifrost agent" | "bifrost_agent" | "builtin" | "bifrost"
+    )
+}
 
 pub(super) async fn handle_idle_im_command(
     msg_text: &str,
@@ -237,7 +244,7 @@ pub(super) fn resolve_im_runner_selection(
     if runner_id.is_empty() {
         return Err("用法: /runner <Runner>".to_string());
     }
-    if runner_id == BUILTIN_IM_RUNNER_ID {
+    if is_builtin_im_runner_id(runner_id) {
         return Ok(ImRunnerSelection {
             runner_id: BUILTIN_IM_RUNNER_ID.to_string(),
             runner: bifrost_agent::AgentRunnerMode::BifrostAgent,

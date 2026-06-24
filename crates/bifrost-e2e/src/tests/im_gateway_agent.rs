@@ -114,6 +114,47 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ));
                 }
 
+                let runner_response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/im-gateway/chat/config",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET runner config failed: {}", e))?;
+
+                assert_status(&runner_response, 200)?;
+
+                let runner_json: serde_json::Value = runner_response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse runner config JSON: {}", e))?;
+                if runner_json.get("defaultRunnerId").and_then(|v| v.as_str()) != Some("Codex") {
+                    return Err(format!(
+                        "Expected defaultRunnerId Codex, got: {runner_json}"
+                    ));
+                }
+                let runners = runner_json
+                    .get("runners")
+                    .and_then(|value| value.as_object())
+                    .ok_or_else(|| format!("Expected runners object, got: {runner_json}"))?;
+                let codex = runners
+                    .get("Codex")
+                    .ok_or_else(|| format!("Expected Codex runner, got: {runner_json}"))?;
+                if codex.get("enabled").and_then(|v| v.as_bool()) != Some(true)
+                    || codex.get("adapter").and_then(|v| v.as_str()) != Some("codex")
+                {
+                    return Err(format!("Expected enabled Codex runner, got: {codex}"));
+                }
+                let treex = runners
+                    .get("TreeX")
+                    .ok_or_else(|| format!("Expected TreeX runner, got: {runner_json}"))?;
+                if treex.get("enabled").and_then(|v| v.as_bool()) != Some(true)
+                    || treex.get("adapter").and_then(|v| v.as_str()) != Some("traex")
+                {
+                    return Err(format!("Expected enabled TreeX runner, got: {treex}"));
+                }
+
                 Ok(())
             },
         ),

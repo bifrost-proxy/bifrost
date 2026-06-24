@@ -16,6 +16,8 @@ use tokio::time::sleep;
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const TRAEX_ADAPTER: &str = "traex";
+pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
+pub const DEFAULT_TREEX_RUNNER_ID: &str = "TreeX";
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
@@ -305,7 +307,7 @@ pub enum ExternalCliDeliveryMode {
     ProgressCard,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliAgentSettings {
     #[serde(default)]
@@ -338,7 +340,7 @@ impl Default for ExternalCliAgentSettings {
     }
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliChannelSettings {
     #[serde(default)]
@@ -349,7 +351,7 @@ pub struct ExternalCliChannelSettings {
     pub delivery_mode: Option<ExternalCliDeliveryMode>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExternalCliGatewayConfig {
     pub version: u32,
@@ -366,7 +368,7 @@ impl Default for ExternalCliGatewayConfig {
         Self {
             version: CONFIG_VERSION,
             default_runner_id: default_runner_id(),
-            runners: BTreeMap::from([(default_runner_id(), ExternalCliAgentSettings::default())]),
+            runners: default_external_cli_runners(),
             channels: BTreeMap::new(),
         }
     }
@@ -389,7 +391,17 @@ pub struct ExternalCliConfigStore {
 impl ExternalCliConfigStore {
     pub fn new(data_dir: &Path) -> Self {
         let file_path = data_dir.join("admin").join(CONFIG_FILENAME);
-        let data = load_config_from_disk(&file_path).unwrap_or_default();
+        let loaded = load_config_from_disk(&file_path);
+        let data = normalized_gateway_config(loaded.clone().unwrap_or_default());
+        if loaded.as_ref() != Some(&data) {
+            if let Err(error) = save_config_to_disk(&file_path, &data) {
+                tracing::warn!(
+                    path = %file_path.display(),
+                    %error,
+                    "external_cli config: failed to persist normalized default runners"
+                );
+            }
+        }
         Self {
             file_path,
             data: RwLock::new(data),
@@ -463,6 +475,7 @@ pub fn effective_config_for_provider_and_runner(
             }
         }
     }
+    runner_id = canonical_runner_id(config, &runner_id);
     let mut settings = config.runners.get(&runner_id).cloned().unwrap_or_default();
     let mut sources = BTreeMap::new();
     sources.insert("runnerId".to_string(), "runner".to_string());
@@ -2536,10 +2549,7 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
         config.default_runner_id = default_runner_id();
     }
     if config.runners.is_empty() {
-        config.runners.insert(
-            config.default_runner_id.clone(),
-            ExternalCliAgentSettings::default(),
-        );
+        config.runners = default_external_cli_runners();
     } else {
         config.runners = config
             .runners
@@ -2549,10 +2559,18 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
                 (!runner_id.is_empty()).then_some((runner_id, normalized_agent_settings(settings)))
             })
             .collect();
-        config
-            .runners
-            .entry(config.default_runner_id.clone())
-            .or_default();
+    }
+    ensure_default_external_cli_runners(&mut config.runners);
+    if !config.runners.contains_key(&config.default_runner_id) {
+        let canonical_default_runner_id = canonical_runner_id(&config, &config.default_runner_id);
+        if config.runners.contains_key(&canonical_default_runner_id) {
+            config.default_runner_id = canonical_default_runner_id;
+        } else {
+            config
+                .runners
+                .entry(config.default_runner_id.clone())
+                .or_default();
+        }
     }
     config.channels = config
         .channels
@@ -2563,6 +2581,45 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
         })
         .collect();
     config
+}
+
+fn default_external_cli_runners() -> BTreeMap<String, ExternalCliAgentSettings> {
+    let mut runners = BTreeMap::new();
+    ensure_default_external_cli_runners(&mut runners);
+    runners
+}
+
+fn ensure_default_external_cli_runners(runners: &mut BTreeMap<String, ExternalCliAgentSettings>) {
+    runners
+        .entry(DEFAULT_CODEX_RUNNER_ID.to_string())
+        .or_insert_with(|| default_runner_settings(DEFAULT_ADAPTER));
+    runners
+        .entry(DEFAULT_TREEX_RUNNER_ID.to_string())
+        .or_insert_with(|| default_runner_settings(TRAEX_ADAPTER));
+}
+
+fn default_runner_settings(adapter: &str) -> ExternalCliAgentSettings {
+    ExternalCliAgentSettings {
+        enabled: true,
+        adapter: adapter.to_string(),
+        ..ExternalCliAgentSettings::default()
+    }
+}
+
+fn canonical_runner_id(config: &ExternalCliGatewayConfig, runner_id: &str) -> String {
+    let runner_id = runner_id.trim();
+    if config.runners.contains_key(runner_id) {
+        return runner_id.to_string();
+    }
+    match runner_id.to_ascii_lowercase().as_str() {
+        "codex" if config.runners.contains_key(DEFAULT_CODEX_RUNNER_ID) => {
+            DEFAULT_CODEX_RUNNER_ID.to_string()
+        }
+        "treex" | "traex" | "trae" if config.runners.contains_key(DEFAULT_TREEX_RUNNER_ID) => {
+            DEFAULT_TREEX_RUNNER_ID.to_string()
+        }
+        _ => runner_id.to_string(),
+    }
 }
 
 fn normalized_agent_settings(mut settings: ExternalCliAgentSettings) -> ExternalCliAgentSettings {
@@ -2607,8 +2664,7 @@ fn normalize_string_list(values: Vec<String>) -> Vec<String> {
 
 fn load_config_from_disk(path: &Path) -> Option<ExternalCliGatewayConfig> {
     let content = std::fs::read_to_string(path).ok()?;
-    let config = serde_json::from_str::<ExternalCliGatewayConfig>(&content).ok()?;
-    Some(normalized_gateway_config(config))
+    serde_json::from_str::<ExternalCliGatewayConfig>(&content).ok()
 }
 
 fn save_config_to_disk(path: &Path, config: &ExternalCliGatewayConfig) -> Result<(), String> {
@@ -2635,7 +2691,7 @@ fn default_operation() -> String {
 }
 
 fn default_runner_id() -> String {
-    DEFAULT_ADAPTER.to_string()
+    DEFAULT_CODEX_RUNNER_ID.to_string()
 }
 
 fn default_true() -> bool {

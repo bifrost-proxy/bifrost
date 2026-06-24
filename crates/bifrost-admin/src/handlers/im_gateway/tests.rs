@@ -1279,7 +1279,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
     let runner = external_cli_config
         .runners
-        .get_mut("codex")
+        .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
         .expect("default codex runner");
     runner.enabled = false;
     runner.adapter = "mock".to_string();
