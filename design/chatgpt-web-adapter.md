@@ -164,6 +164,8 @@ pub struct ExternalCliGatewayConfig {
 - `adapterConfig` 是 adapter-specific schema，由 `adapter` 决定解析方式。
 - 后端必须按 adapter capabilities 校验 `adapterConfig`，拒绝未知 adapter 和不适用字段。
 - WebUI 根据 adapter capabilities 展示字段，不再假设所有 adapter 都有 executable、args、skillPaths、injectBifrostTools。
+- ChatGPT Web Runner 的浏览器用户数据只能来自配置中的共享 profile：默认路径为 `BIFROST_DATA_DIR/agent/im_gateway/chatgpt_web/browser_profile`。无论是创建新对话还是续接已有 conversation，发送和等待阶段都必须复用这一个 `profileDir`，以便登录态、CDP tab 池和浏览器进程生命周期统一管理。
+- `BIFROST_DATA_DIR/im_gateway/runs/<run_id>/` 只允许保存 run artifact（如 `prompt.md`、`conversation_handoff.json`、`conversation_final.json`、诊断文件和下载产物），禁止在 run 目录下创建 `chatgpt_web_fresh_profile` 或其他完整 Chromium 用户数据目录。run-local profile 会绕开共享 profile 的进程池和清理入口，导致孤儿 Edge/Chrome 进程、数百 MB 缓存和长期性能损耗。
 
 ### ChatGPT Web Runner 配置示例
 
