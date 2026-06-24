@@ -103,6 +103,83 @@ pub fn apply_cors_headers(
     }
 }
 
+/// Returns `true` when an `Origin` header refers to the same host as the
+/// request's `Host` header. Used to accept the admin UI when it is served from
+/// a non-loopback bind address (e.g. a LAN IP with remote access enabled),
+/// where the origin is not in the static loopback allowlist but still matches
+/// the host the browser connected to.
+pub fn origin_matches_host(origin: &str, host: &str) -> bool {
+    if host.trim().is_empty() {
+        return false;
+    }
+    let Ok(url) = url::Url::parse(origin) else {
+        return false;
+    };
+    let Some(origin_host) = url.host_str() else {
+        return false;
+    };
+    let origin_port = url.port_or_known_default();
+    let host_lower = host.trim().to_ascii_lowercase();
+    let origin_host_port = match origin_port {
+        Some(port) => format!("{origin_host}:{port}").to_ascii_lowercase(),
+        None => origin_host.to_ascii_lowercase(),
+    };
+    let origin_host_lower = origin_host.to_ascii_lowercase();
+
+    host_lower == origin_host_port || host_lower == origin_host_lower
+}
+
+/// CSRF-equivalent guard for WebSocket upgrade requests.
+///
+/// WebSocket upgrades are `GET` requests, so they bypass the
+/// `check_browser_write_guard` CSRF protection (which only runs for unsafe
+/// methods) and they cannot carry the `X-Bifrost-CSRF` header. Without this
+/// guard a malicious web page could open an authenticated socket to the admin
+/// server — a Cross-Site WebSocket Hijacking (CSWSH) attack.
+///
+/// This mirrors the origin rules of `check_browser_write_guard`: when the
+/// request carries any browser-controlled context (`Origin` / `Referer` /
+/// `Sec-Fetch-*`) we reject cross-site and cross-origin upgrades. Native
+/// clients (desktop app, CLI, mobile SDK) do not send browser context headers
+/// and are gated by the auth layer instead, so they are left untouched.
+///
+/// Returns `None` when the upgrade is allowed, or `Some(reason)` describing why
+/// it was rejected (suitable for structured logging).
+pub fn websocket_origin_rejection(headers: &hyper::HeaderMap) -> Option<&'static str> {
+    let header_value = |name: &str| -> Option<String> {
+        headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+
+    let has_browser_context = header_value("origin").is_some()
+        || header_value("referer").is_some()
+        || header_value("sec-fetch-site").is_some()
+        || header_value("sec-fetch-mode").is_some()
+        || header_value("sec-fetch-dest").is_some();
+    if !has_browser_context {
+        return None;
+    }
+
+    if matches!(
+        header_value("sec-fetch-site").as_deref(),
+        Some("cross-site")
+    ) {
+        return Some("cross_site");
+    }
+
+    if let Some(origin) = header_value("origin") {
+        let host = header_value("host").unwrap_or_default();
+        if !is_allowed_origin(&origin) && !origin_matches_host(&origin, &host) {
+            return Some("cross_origin");
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,5 +299,107 @@ mod tests {
         apply_cors_headers(&mut resp, None);
 
         assert!(resp.headers().get("Access-Control-Allow-Origin").is_none());
+    }
+
+    fn ws_headers(pairs: &[(&str, &str)]) -> hyper::HeaderMap {
+        let mut headers = hyper::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                hyper::header::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                hyper::header::HeaderValue::from_str(value).unwrap(),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn origin_matches_host_accepts_same_host_port() {
+        assert!(origin_matches_host(
+            "http://192.168.1.50:9000",
+            "192.168.1.50:9000"
+        ));
+        assert!(origin_matches_host(
+            "http://localhost:8800",
+            "localhost:8800"
+        ));
+    }
+
+    #[test]
+    fn origin_matches_host_rejects_mismatch_or_garbage() {
+        assert!(!origin_matches_host(
+            "http://evil.example",
+            "localhost:8800"
+        ));
+        assert!(!origin_matches_host("not a url", "localhost:8800"));
+        assert!(!origin_matches_host("http://localhost:8800", ""));
+    }
+
+    #[test]
+    fn ws_guard_allows_native_client_without_browser_context() {
+        // No Origin / Referer / Sec-Fetch headers => native client => allowed.
+        let headers = ws_headers(&[("Sec-WebSocket-Key", "dGhlIHNhbXBsZSBub25jZQ==")]);
+        assert_eq!(websocket_origin_rejection(&headers), None);
+    }
+
+    #[test]
+    fn ws_guard_allows_same_origin_loopback() {
+        let headers = ws_headers(&[
+            ("origin", "http://localhost:8800"),
+            ("host", "localhost:8800"),
+            ("sec-fetch-site", "same-origin"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), None);
+    }
+
+    #[test]
+    fn ws_guard_allows_allowlisted_loopback_origin() {
+        let headers = ws_headers(&[
+            ("origin", "http://127.0.0.1:9000"),
+            ("host", "127.0.0.1:9000"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), None);
+    }
+
+    #[test]
+    fn ws_guard_rejects_cross_site_via_sec_fetch() {
+        let headers = ws_headers(&[
+            ("origin", "http://localhost:8800"),
+            ("host", "localhost:8800"),
+            ("sec-fetch-site", "cross-site"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), Some("cross_site"));
+    }
+
+    #[test]
+    fn ws_guard_rejects_cross_origin_attacker() {
+        let headers = ws_headers(&[
+            ("origin", "http://evil.example.com"),
+            ("host", "localhost:8800"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), Some("cross_origin"));
+    }
+
+    #[test]
+    fn ws_guard_accepts_matching_remote_host_origin() {
+        // Remote-access admin served on a LAN IP: origin not in static
+        // allowlist but matches the Host the browser connected to.
+        let headers = ws_headers(&[
+            ("origin", "http://192.168.1.50:9000"),
+            ("host", "192.168.1.50:9000"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), None);
+    }
+
+    #[test]
+    fn ws_guard_rejects_referer_only_cross_origin() {
+        // Some browsers may omit Origin but send Referer; the guard still
+        // engages because browser context is present, and with no Origin the
+        // request is allowed (origin check is skipped) — but a cross-site
+        // Sec-Fetch-Site must still be rejected.
+        let headers = ws_headers(&[
+            ("referer", "http://evil.example.com/page"),
+            ("sec-fetch-site", "cross-site"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), Some("cross_site"));
     }
 }

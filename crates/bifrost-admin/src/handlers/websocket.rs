@@ -35,6 +35,13 @@ pub async fn handle_websocket_upgrade(
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
     }
 
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(reason, "push WebSocket upgrade rejected (CSWSH guard)");
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Cross-site WebSocket upgrade rejected",
+        );
+    }
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
         None => {

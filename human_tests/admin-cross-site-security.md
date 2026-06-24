@@ -153,6 +153,27 @@
 - bridge 连接仍依赖页面专属 token，不能扩展为普通 Admin API 或 Admin Push 的跨站访问。
 - `/_bifrost/api/push` 经 HTTP proxy 伪造访问仍返回 HTTP 403。
 
+### TC-ACS-11 全部 Admin WebSocket 端点的 CSWSH 跨站劫持被拒绝
+
+操作步骤：
+1. 启动 Bifrost（`allow_all` 模式，监听 127.0.0.1:<port>）。
+2. 对以下每个 WebSocket 端点分别发起原始 WebSocket 升级请求（携带 `Upgrade: websocket`、`Connection: Upgrade`、`Sec-WebSocket-Version: 13`、`Sec-WebSocket-Key`）：
+   - `/_bifrost/api/push`
+   - `/_bifrost/api/replay/execute/ws`
+   - `/_bifrost/api/devtools/sessions/<id>/ws`
+   - `/_bifrost/api/voice/listen-ws`
+   - `/_bifrost/api/asr/transcribe-ws`
+   （注意：`/_bifrost/api/devtools/bridge/<page_id>/ws` 不在此列表内——它是注入到被代理页面的入口，跨源属于设计预期，由页面专属 token 鉴权，见 TC-ACS-10。）
+3. 每个端点依次发送四类请求并记录 HTTP 状态：
+   - (a) 跨站：`Origin: http://evil.example.com` + `Sec-Fetch-Site: cross-site`。
+   - (b) 跨源无 Sec-Fetch：`Origin: http://attacker.example.com`。
+   - (c) 原生客户端：不带任何 `Origin` / `Referer` / `Sec-Fetch-*` 头。
+   - (d) 同源：`Origin: http://127.0.0.1:<port>` + `Sec-Fetch-Site: same-origin`。
+
+预期结果：
+- (a) 与 (b) 全部返回 HTTP 403（CSWSH 守卫拦截）。
+- (c) 与 (d) 不返回 403（守卫放行，握手进入正常协议升级或后续鉴权流程）。
+- WebSocket 升级（GET）不再绕过跨站写入防护边界。
 ## 清理步骤
 
 1. 终止测试启动的 Bifrost 进程。
@@ -163,3 +184,4 @@
 - 2026-06-23：已执行 `e2e-tests/tests/test_admin_cross_site_security.sh`，TC-ACS-01 到 TC-ACS-08 全部通过。
 - 2026-06-23：已执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_traffic_push_e2e.sh`，其中 `WebSocket Admin Push Via HTTP Proxy Rejected` 断言经代理连接 `/_bifrost/api/push` 返回 `Unexpected server response: 403`，本地直连 WebSocket、traffic delta、overview、metrics、channel limit、polling fallback、pending ids 和 incremental sequence 均通过。
 - 2026-06-23：已执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`，验证 DevTools page bridge 可在被代理页面内通过专属 bridge WebSocket 连接并完成页面调试能力回归。
+- 2026-06-24：已执行 `cargo test -p bifrost-admin cors:: cswsh`（cors WS 守卫 18 项 + replay CSWSH 接线 4 项全部通过）以及 `bash e2e-tests/tests/test_admin_cross_site_security.sh`（含新增 TC-ACS-11，对 `/_bifrost/api/push` 与 `/_bifrost/api/replay/execute/ws` 的跨站/跨源 WebSocket 升级返回 403，原生客户端与同源放行），覆盖 P0 CSWSH 修复。

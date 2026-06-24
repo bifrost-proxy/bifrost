@@ -360,6 +360,13 @@ async fn handle_bridge_websocket(
     if !upgrade_header.eq_ignore_ascii_case("websocket") {
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
     }
+    // NOTE: No CSWSH origin guard here. The DevTools page bridge is injected
+    // into arbitrary proxied pages, so it is cross-origin *by design* and the
+    // browser always sends a foreign Origin / Sec-Fetch-Site: cross-site. It is
+    // authenticated instead by a page-specific bridge token presented in the
+    // first WS frame (see bridge_ws_attach), which an attacker page cannot
+    // forge, so it is not CSWSH-exploitable. Applying the origin guard here
+    // would break legitimate injected bridge connections.
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
         None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
@@ -403,6 +410,16 @@ async fn handle_session_websocket(
         .unwrap_or("");
     if !upgrade_header.eq_ignore_ascii_case("websocket") {
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
+    }
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(
+            reason,
+            "DevTools session WebSocket upgrade rejected (CSWSH guard)"
+        );
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Cross-site WebSocket upgrade rejected",
+        );
     }
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
