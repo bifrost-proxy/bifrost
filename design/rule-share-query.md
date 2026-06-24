@@ -8,15 +8,16 @@
 
 1. 分享 Query 参数名固定为 `__bifrost_rule`。
 2. 分享 payload 必须同时携带规则名称和规则内容。
-3. 访问分享链接后必须先展示本机确认页，确认页必须展示规则名称、内容 hash、独占范围、返回目标和完整规则内容。
+3. 访问分享链接后必须先展示本机确认页，确认页必须展示规则名称、内容 hash、独占范围、返回目标和完整规则内容；确认页必须防止被第三方页面嵌入。
 4. 用户确认导入成功后必须启用目标规则，并禁用其它 My Rules。
 5. `exclusive_scope` 第一版固定为 `my_rules`；`all` 不进入第一版实现。
 6. 同名同内容必须复用，避免每次刷新产生重复规则。
 7. 同名不同内容必须创建递增名称，例如 `name 2`、`name 3`。
 8. 确认完成后必须重定向到 clean URL。
 9. clean URL 必须移除 `__bifrost_rule`，并保留其它业务 query 和 fragment。
-10. 导入成功后必须给用户可见提示，不能只写日志或只刷新规则列表。
-11. Web UI 右键 Share 和 CLI 生成链接必须使用同一套协议编码。
+10. 导入前用户必须输入完整 `content_hash`，服务端也必须校验该确认值，不能只依赖前端按钮状态。
+11. 导入成功后必须给用户可见提示，不能只写日志或只刷新规则列表。
+12. Web UI 右键 Share 和 CLI 生成链接必须使用同一套协议编码。
 
 第一版非目标：
 
@@ -33,6 +34,9 @@
 - 代理能识别目标 URL 上的 `__bifrost_rule` Query。
 - payload 能还原出规则名称、规则内容、协议版本和内容 hash。
 - 首次访问分享链接后只展示确认页，不创建或启用规则。
+- 确认页响应必须携带 `Content-Security-Policy: frame-ancestors 'none'` 与 `X-Frame-Options: DENY`，防止 clickjacking。
+- 确认页必须要求用户输入完整内容 hash 后才能点击 Apply。
+- `POST /api/rules/share-confirm` 必须校验 `confirmation` 等于 payload 的完整 `content_hash`。
 - 用户确认后创建或复用 My Rule。
 - 确认导入成功后立即启用目标规则。
 - 确认导入成功后禁用其它 My Rules。
@@ -56,6 +60,7 @@
 - 使用 CLI 生成链接，再由代理导入。
 - 使用 Web UI 右键 Share 生成并复制链接。
 - 分享链接返回本机确认页重定向，确认成功后返回 clean URL。
+- 确认页安全头真实存在，跨站/缺 CSRF/缺完整 hash 的确认请求均不能导入规则。
 - 导入提示包含最终规则名和导入动作。
 - 重复访问同一分享链接不会增加规则数量。
 - 同名不同内容分享链接会创建递增规则名。
@@ -456,6 +461,9 @@ return Redirect(parts.clean_url)                # admin 不可用时不写规则
 - 代理层不直接调用 `import_rule_share_payload`，避免任意网页通过代理流量静默写入规则。
 - 确认页 GET 只解码并展示 payload；真正写入发生在 `POST /api/rules/share-confirm`。
 - `POST /api/rules/share-confirm` 复用 Admin API 浏览器写请求防护，浏览器上下文必须携带同源 CSRF token。
+- 确认页响应必须使用 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY` 和 `Content-Security-Policy`（至少包含 `frame-ancestors 'none'`、`base-uri 'none'`、`form-action 'none'`）。
+- Admin Router 必须对所有 `text/html` 管理端页面统一追加防嵌入响应头：`X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` 的 `Content-Security-Policy`。该全局策略只按 HTML 响应生效，避免影响 JSON API、JS、CSS、图片等资源加载；确认页可在此基础上保留更严格 CSP。
+- 确认页的 Apply 按钮默认禁用，只有用户输入完整内容 hash 后才启用；服务端仍以 `confirmation == payload.content_hash` 作为最终门禁，防止绕过页面直接 POST。
 - admin 不可用时，代理只重定向到 clean URL，不创建规则。
 
 ## 7. Admin API 设计

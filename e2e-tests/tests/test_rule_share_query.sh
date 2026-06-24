@@ -101,6 +101,7 @@ confirm_location() {
   local location="$1"
   python3 - "$location" "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" <<'PY'
 import json
+import base64
 import sys
 import urllib.parse
 import urllib.request
@@ -108,9 +109,13 @@ import urllib.request
 location = sys.argv[1]
 endpoint = sys.argv[2]
 query = urllib.parse.parse_qs(urllib.parse.urlparse(location).query)
+encoded_payload = query["payload"][0]
+padding = "=" * (-len(encoded_payload) % 4)
+payload = json.loads(base64.urlsafe_b64decode(encoded_payload + padding).decode())
 body = json.dumps({
-    "payload": query["payload"][0],
+    "payload": encoded_payload,
     "target_url": query["target"][0],
+    "confirmation": payload["content_hash"],
 }).encode()
 req = urllib.request.Request(
     endpoint,

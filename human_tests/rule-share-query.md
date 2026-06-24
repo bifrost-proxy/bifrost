@@ -128,6 +128,27 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - 导入规则正文保留 `@a` 规则引用行，不因校验失败而拒绝导入。
 - 真实用户默认数据目录中不会新增 `share/<payload name>`，也不会修改真实 `a` / `d` 规则。
 
+### TC-RSQ-09 管理端页面防嵌入与分享完整 hash 确认
+
+操作步骤：
+1. 使用临时数据目录启动 Bifrost 测试服务。
+2. 请求普通管理端页面 `http://127.0.0.1:<PROXY_PORT>/_bifrost/`，检查响应头。
+3. 生成一条分享链接，目标 URL 指向本地 HTTP fixture。
+4. 通过代理访问分享链接，读取 302 `Location` 指向的 `/_bifrost/share/rule?...` 确认页。
+5. 对确认页执行 `curl -D -`，检查响应头和 HTML。
+6. 直接向 `POST /_bifrost/api/rules/share-confirm` 发送三类请求：跨站请求、同源但缺 CSRF 请求、同源且带 CSRF 但 `confirmation` 为空或错误的请求。
+7. 再发送同源、带 CSRF、`confirmation` 等于 payload 完整 `content_hash` 的请求。
+8. 查看规则列表。
+
+预期结果：
+- 普通管理端 HTML 页面包含 `X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` 的 `Content-Security-Policy`。
+- 确认页响应包含 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`。
+- 确认页响应的 `Content-Security-Policy` 包含 `frame-ancestors 'none'`、`base-uri 'none'` 和 `form-action 'none'`。
+- HTML 展示完整 content hash，并要求输入完整 content hash 后才允许 Apply。
+- 跨站请求返回 `403`，同源缺 CSRF 返回 `403`。
+- 同源、带 CSRF 但缺少或错误 `confirmation` 返回 `400`，且不导入规则。
+- 同源、带 CSRF 且完整 hash 确认的请求返回 `200`，导入并启用 `share/<payload name>`。
+
 ## 清理步骤
 
 - 停止测试 Bifrost 进程。
@@ -152,3 +173,12 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - TC-RSQ-06：通过。`POST /_bifrost/api/rules/share-link` 返回 `query_param="__bifrost_rule"`、`payload_version=1` 和可导入 URL；分享 `share/...` 规则时响应 `rule_name` 为原始分享名；裸域名 `a.com` 不返回 400，响应 URL 规范成 `http://a.com/...`。
 - TC-RSQ-07：通过。真实浏览器中 Rules 右键菜单显示 Share；弹窗可生成包含 `__bifrost_rule` 的链接；Copy 按钮显示 `Copied`。
 - TC-RSQ-08：通过。使用用户提供的精确 `https://a.com/?__bifrost_rule=...` payload，通过真实 Chromium/Playwright 浏览器和隔离 Bifrost 代理访问后，浏览器响应为 `302` 且 `Location=https://a.com/`；临时规则列表为 `share/d [enabled]`、`d [disabled]`、`a [disabled]`；通过 Admin API 读取 `share/d` 正文，正文保留 `@a`，内容 SHA-256 为 `d6409597953c58aa91ca4679ee9c5f8064f09a6c1adca45d17b537118903bf68`；复核真实默认数据目录仍为 `a [disabled]`、`d [enabled]`、`NextOncall双前端本地开发 [enabled]`，未新增 `share/d`。
+
+执行时间：2026-06-24
+
+测试环境：
+- `BIFROST_DATA_DIR=/tmp/bifrost-admin-security.*`，临时 `config.toml` 已设置 `[sync] enabled = false` / `auto_sync = false`
+- Bifrost 测试服务：`127.0.0.1:<随机端口>`
+
+结果：
+- TC-RSQ-09：通过。普通管理端 HTML 页面真实响应包含 `X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` 的 CSP；确认页真实响应包含 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` / `base-uri 'none'` / `form-action 'none'` 的 CSP；页面要求完整 content hash 后才能 Apply；跨站确认请求返回 `403`，缺 CSRF 返回 `403`，有 CSRF 但空 confirmation 返回 `400`，带完整 hash 返回 `200` 并导入 `share/shared-security [enabled]`。

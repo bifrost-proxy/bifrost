@@ -97,6 +97,44 @@ fn apply_share_env_exit_cors(resp: &mut Response<BoxBody>, origin: Option<&str>)
     );
 }
 
+fn apply_admin_page_frame_protection(resp: &mut Response<BoxBody>) {
+    let is_html = resp
+        .headers()
+        .get(hyper::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_ascii_lowercase().contains("text/html"))
+        .unwrap_or(false);
+    if !is_html {
+        return;
+    }
+
+    let headers = resp.headers_mut();
+    headers
+        .entry("X-Frame-Options")
+        .or_insert_with(|| HeaderValue::from_static("DENY"));
+
+    let existing_csp = headers
+        .get("Content-Security-Policy")
+        .and_then(|value| value.to_str().ok())
+        .map(ToString::to_string);
+    match existing_csp.as_deref() {
+        Some(existing) if existing.to_ascii_lowercase().contains("frame-ancestors") => {}
+        Some(existing) => {
+            if let Ok(value) =
+                HeaderValue::from_str(&format!("{}; frame-ancestors 'none'", existing.trim()))
+            {
+                headers.insert("Content-Security-Policy", value);
+            }
+        }
+        None => {
+            headers.insert(
+                "Content-Security-Policy",
+                HeaderValue::from_static("frame-ancestors 'none'"),
+            );
+        }
+    }
+}
+
 pub struct AdminRouter;
 
 impl AdminRouter {
@@ -169,6 +207,7 @@ impl AdminRouter {
         } else if should_apply_cors(&admin_path) {
             apply_cors_headers(&mut resp, origin.as_deref());
         }
+        apply_admin_page_frame_protection(&mut resp);
         resp
     }
 
@@ -567,6 +606,64 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Content-Type")
         );
+    }
+
+    #[test]
+    fn test_admin_page_frame_protection_applies_to_html() {
+        let mut resp = Response::builder()
+            .status(200)
+            .header("Content-Type", "text/html; charset=utf-8")
+            .body(crate::handlers::empty_body())
+            .unwrap();
+
+        apply_admin_page_frame_protection(&mut resp);
+
+        assert_eq!(
+            resp.headers()
+                .get("X-Frame-Options")
+                .and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            resp.headers()
+                .get("Content-Security-Policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("frame-ancestors 'none'")
+        );
+    }
+
+    #[test]
+    fn test_admin_page_frame_protection_preserves_existing_csp() {
+        let mut resp = Response::builder()
+            .status(200)
+            .header("Content-Type", "text/html")
+            .header("Content-Security-Policy", "default-src 'none'")
+            .body(crate::handlers::empty_body())
+            .unwrap();
+
+        apply_admin_page_frame_protection(&mut resp);
+
+        let csp = resp
+            .headers()
+            .get("Content-Security-Policy")
+            .and_then(|value| value.to_str().ok())
+            .expect("csp");
+        assert!(csp.contains("default-src 'none'"));
+        assert!(csp.contains("frame-ancestors 'none'"));
+    }
+
+    #[test]
+    fn test_admin_page_frame_protection_skips_non_html() {
+        let mut resp = Response::builder()
+            .status(200)
+            .header("Content-Type", "application/json")
+            .body(crate::handlers::empty_body())
+            .unwrap();
+
+        apply_admin_page_frame_protection(&mut resp);
+
+        assert!(resp.headers().get("X-Frame-Options").is_none());
+        assert!(resp.headers().get("Content-Security-Policy").is_none());
     }
 
     #[test]
