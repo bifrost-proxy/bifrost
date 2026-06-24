@@ -2499,13 +2499,13 @@ export default function AgentChatSection() {
               </div>
               <div style={styles.composerTrack} data-testid="agent-chat-composer-track">
                 <AgentChatTokenHud telemetry={telemetry} styles={styles} />
+                <AgentChatPlan
+                  plan={telemetry.plan}
+                  styles={styles}
+                  successColor={token.colorSuccess}
+                  primaryColor={token.colorPrimary}
+                />
                 <Space direction="vertical" size={6} style={{ width: "100%" }}>
-                  <AgentChatPlan
-                    plan={telemetry.plan}
-                    styles={styles}
-                    successColor={token.colorSuccess}
-                    primaryColor={token.colorPrimary}
-                  />
                   <AgentChatPromptChips prompts={PROMPT_CHIPS} onSelect={setDraft} />
                   {queuedInputs.length > 0 ? (
                     <div style={styles.queuePanel} data-testid="agent-chat-queue-panel">

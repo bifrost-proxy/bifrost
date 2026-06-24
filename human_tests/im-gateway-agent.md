@@ -1263,6 +1263,7 @@ rm -rf ./.bifrost-test
   - 底部状态默认折叠，通常折叠标题只显示 token 消耗；当 guide/queue 刚被注入或修改时，标题追加一条轻量提示，避免用户误以为输入没有反馈。
   - 展开底部状态后显示 loop 次数、context 用量、压缩次数、工作路径、queue 和 guide 状态。
   - 过程思考信息不混入最终输出区；如模型在工具调用前输出过程文本，底部“思考过程”模块默认直接展示最后一次完整过程文本，不再需要点击展开。
+  - 长任务执行过程主动控体积：当工具调用超过 30 次时，`agent_process_panel` 只保留最新 30 次工具调用对应的过程信息，并在面板顶部提示前面已省略的调用次数。
   - 最终输出模块位于卡片最后，任务计划、工具状态、底部状态和思考过程的相对顺序保持不变。
   - 聊天栏摘要在完成后不再停留在 `[生成中...]`。
 - **执行记录（2026-05-10）**:
@@ -2845,21 +2846,27 @@ rm -rf ./.bifrost-test
   - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
   - 准备 Feishu OpenAPI mock 服务，覆盖 `tenant_access_token`、CardKit card entity 创建/整卡更新/settings 更新和 IM interactive 消息发送。
   - mock 服务在第 1 次 `PUT /open-apis/cardkit/v1/cards/{card_id}` 整卡更新时返回 `{"code":300305,"msg":"ErrMsg: element exceeds the limit"}`。
+  - 补充异常场景：mock 服务在 rollover 后第 2 次 `POST /open-apis/cardkit/v1/cards` 创建完整新卡时也返回相同 `300305`。
 - **操作步骤**:
   1. 启动同一 `session_key` 的 Feishu progress card session，记录首张卡片 `card_1/om_1`。
-  2. 发送会触发整卡更新的 progress event，例如 `PlanUpdated` 或进入最终 `Finished` phase。
+  2. 发送会触发整卡更新的 progress event，例如 `PlanUpdated`、包含超大工具输出的 `ToolFinished`、连续超过 30 次工具调用，或进入最终 `Finished` phase。
   3. 检查 registry 当前 `message_info`。
-  4. 检查 Feishu mock 的 card create/send/update/settings 调用次数。
+  4. 检查 Feishu mock 的 card create/send/update/settings 调用次数与 create/update payload。
   5. 继续发送后续 progress event 或执行 final close，确认后续更新使用新的 `card_id`。
 - **预期结果**:
   - 第 1 次整卡更新失败后，系统不把 Agent loop 标记为异常中断，也不停止 Feishu 回复链路。
+  - 完整进度卡在进入超限兜底前会主动控制执行过程长度：超过 30 次工具调用时只显示最新 30 次，并提示前面省略的调用次数。
   - 系统立即创建并发送新 CardKit card entity，例如 `card_2/om_2`，后续进展和最终结论继续更新新卡片。
+  - 如果完整新卡片创建也因为 `300305 element exceeds the limit` 失败，系统立即重试精简状态卡，例如切换到 `card_3/om_2`；精简卡包含“精简状态卡”“Agent 仍在运行”和最新状态，不包含超大 process/tool 详情。
+  - 进入精简模式后，后续 progress event 继续更新同一张精简卡，不再回退到沉默失败。
   - registry `message_info.card_id` 指向新卡片，final outbound log 也应记录新 `card_id`。
   - 旧卡片冻结和关闭 streaming 只做 best-effort；即使旧卡冻结也触发超限，只记录 warn，不阻断新卡片发送。
   - Feishu mock 未收到 `DELETE /open-apis/im/v1/messages/{旧 message_id}`。
 - **清理步骤**:
   - 停止 mock Feishu 服务；删除临时数据目录。
 - **执行记录（2026-06-13）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture`，28 个 progress card 相关测试全部通过。新增覆盖 `progress_event_rolls_over_when_feishu_card_entity_exceeds_limit` 和 `finish_rolls_over_when_final_feishu_card_entity_exceeds_limit`：Feishu mock 第 1 次整卡更新返回 `code=300305 element exceeds the limit` 后，registry 新建并切换到 `card_2/om_2`，旧卡 freeze/settings close 为 best-effort，DELETE 调用次数保持 0，final `message_info` 指向新卡。
+- **执行记录（2026-06-24）**: PASS — 更新用例后立即执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_event_uses_compact_card_when_rollover_create_also_exceeds_limit --lib -- --nocapture`，本地 Feishu OpenAPI mock 验证旧卡第 1 次整卡更新返回 `300305`、完整新卡第 2 次 create 也返回 `300305` 后，系统降级创建 `card_3/om_2` 精简状态卡；compact payload 包含“精简状态卡”和“Agent 仍在运行”，不包含 `OVERSIZED_TOOL_OUTPUT_MARKER` 与 `agent_process_panel`，后续 progress event 继续更新 `card_3`，DELETE 调用次数保持 0。
+- **执行记录（2026-06-24）**: PASS — 补充执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice --lib -- --nocapture`，验证 35 次工具调用时完整进度卡标题仍显示总计 35 条命令，`agent_process_panel` 顶部提示“已省略前面 5 次工具调用，仅显示最新 30 次”，payload 不包含第 0-4 次调用详情，并保留第 5-34 次调用详情。
 
 ### TC-IMA-151: WebView 多线程切换后旧流收尾不污染当前线程状态
 

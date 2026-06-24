@@ -23,6 +23,7 @@ const TOOL_PANEL_ELEMENT_ID: &str = "agent_tool_panel";
 const TOOL_LOG_ELEMENT_ID: &str = "agent_tool_log";
 const STATUS_PANEL_ELEMENT_ID: &str = "agent_status_panel";
 const FOOTER_ELEMENT_ID: &str = "agent_footer";
+const COMPACT_NOTICE_ELEMENT_ID: &str = "agent_compact";
 const THINKING_PANEL_ELEMENT_ID: &str = "agent_thinking_panel";
 const PROCESS_PANEL_ELEMENT_ID: &str = "agent_process_panel";
 const PROCESS_LOG_ELEMENT_ID: &str = "agent_process_log";
@@ -32,6 +33,7 @@ const PROCESS_TOOL_DETAIL_ELEMENT_PREFIX: &str = "ap_td";
 const PROCESS_TOOL_GROUP_ELEMENT_PREFIX: &str = "ap_tg";
 const PROCESS_TOOL_INPUT_PREVIEW_CHARS: usize = 300;
 const PROCESS_TOOL_OUTPUT_PREVIEW_CHARS: usize = 700;
+const PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT: usize = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImProgressCardCapability {
@@ -505,6 +507,7 @@ pub struct FeishuProgressCardSession {
     snapshot: ImAgentProgressSnapshot,
     handle: Option<FeishuProgressCardHandle>,
     generation: u64,
+    compact_card_mode: bool,
 }
 
 impl FeishuProgressCardSession {
@@ -521,6 +524,7 @@ impl FeishuProgressCardSession {
             snapshot,
             handle: None,
             generation: 0,
+            compact_card_mode: false,
         }
     }
 
@@ -597,12 +601,14 @@ impl FeishuProgressCardSession {
         let previous_handle = self.handle.clone();
         let previous_snapshot = self.snapshot.clone();
         let previous_generation = self.generation;
+        let previous_compact_card_mode = self.compact_card_mode;
         let session_key = self.snapshot.session_key.clone();
         self.snapshot = ImAgentProgressSnapshot::new(session_key, initial_message);
         if let Err(error) = self.send_initial_card().await {
             self.snapshot = previous_snapshot;
             self.handle = previous_handle;
             self.generation = previous_generation;
+            self.compact_card_mode = previous_compact_card_mode;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -622,9 +628,11 @@ impl FeishuProgressCardSession {
         let previous_handle = self.handle.clone();
         let previous_snapshot = self.snapshot.clone();
         let previous_generation = self.generation;
+        let previous_compact_card_mode = self.compact_card_mode;
         if let Err(error) = self.send_initial_card().await {
             self.handle = previous_handle;
             self.generation = previous_generation;
+            self.compact_card_mode = previous_compact_card_mode;
             return Err(error);
         }
         self.freeze_previous_card_after_rollover(
@@ -724,30 +732,75 @@ impl FeishuProgressCardSession {
 
     async fn send_initial_card(&mut self) -> Result<SendResult> {
         self.generation = self.generation.saturating_add(1);
+        self.compact_card_mode = false;
         let card = build_feishu_progress_card(&self.snapshot, true);
-        let card_id = self.feishu.create_card_entity(&self.provider, card).await?;
+        let (card_id, compact_card_mode) = match self
+            .feishu
+            .create_card_entity(&self.provider, card)
+            .await
+        {
+            Ok(card_id) => (card_id, false),
+            Err(error) if is_feishu_card_entity_limit_error(&error) => {
+                warn!(
+                    error = %error,
+                    "Feishu progress card create hit CardKit entity limit; retrying with compact card"
+                );
+                let compact_card = build_feishu_compact_progress_card(&self.snapshot, true);
+                let card_id = self
+                    .feishu
+                    .create_card_entity(&self.provider, compact_card)
+                    .await?;
+                (card_id, true)
+            }
+            Err(error) => return Err(error),
+        };
         let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
         let send_result = self
             .feishu
             .send_card_entity(&self.provider, &self.target, &card_id, Some(&send_uuid))
             .await?;
+        self.compact_card_mode = compact_card_mode;
         self.handle = Some(FeishuProgressCardHandle {
             card_id,
             message_id: send_result.message_id.clone(),
             sequence: 1,
             generation: self.generation,
             rendered_title: header_title(&self.snapshot).to_string(),
-            rendered_has_plan: has_plan_state(&self.snapshot),
-            rendered_has_tool: has_tool_state(&self.snapshot),
-            rendered_has_thinking: has_thinking_state(&self.snapshot),
-            rendered_has_process: has_process_state(&self.snapshot),
+            rendered_has_plan: !compact_card_mode && has_plan_state(&self.snapshot),
+            rendered_has_tool: !compact_card_mode && has_tool_state(&self.snapshot),
+            rendered_has_thinking: !compact_card_mode && has_thinking_state(&self.snapshot),
+            rendered_has_process: !compact_card_mode && has_process_state(&self.snapshot),
             rendered_phase: self.snapshot.phase,
-            rendered_output_hash: output_hash(&self.snapshot),
-            rendered_plan_hash: current_has_plan_hash(&self.snapshot),
-            rendered_tool_hash: current_has_tool_hash(&self.snapshot),
-            rendered_status_hash: status_hash(&self.snapshot),
-            rendered_thinking_hash: current_has_thinking_hash(&self.snapshot),
-            rendered_process_hash: current_has_process_hash(&self.snapshot),
+            rendered_output_hash: if compact_card_mode {
+                compact_card_hash(&self.snapshot, true)
+            } else {
+                output_hash(&self.snapshot)
+            },
+            rendered_plan_hash: if compact_card_mode {
+                None
+            } else {
+                current_has_plan_hash(&self.snapshot)
+            },
+            rendered_tool_hash: if compact_card_mode {
+                None
+            } else {
+                current_has_tool_hash(&self.snapshot)
+            },
+            rendered_status_hash: if compact_card_mode {
+                compact_status_hash(&self.snapshot)
+            } else {
+                status_hash(&self.snapshot)
+            },
+            rendered_thinking_hash: if compact_card_mode {
+                None
+            } else {
+                current_has_thinking_hash(&self.snapshot)
+            },
+            rendered_process_hash: if compact_card_mode {
+                None
+            } else {
+                current_has_process_hash(&self.snapshot)
+            },
         });
         if let Some(handle) = self.handle.as_ref() {
             info!(
@@ -764,6 +817,31 @@ impl FeishuProgressCardSession {
         let Some(handle) = self.handle.as_mut() else {
             return Ok(());
         };
+        if self.compact_card_mode {
+            let card = build_feishu_compact_progress_card(&self.snapshot, true);
+            let card_hash = compact_card_hash(&self.snapshot, true);
+            if handle.rendered_output_hash != card_hash
+                || handle.rendered_phase != self.snapshot.phase
+            {
+                let (sequence, uuid) = handle.next_sequence();
+                self.feishu
+                    .update_card_entity(&self.provider, &handle.card_id, card, sequence, &uuid)
+                    .await?;
+                handle.rendered_title = header_title(&self.snapshot).to_string();
+                handle.rendered_has_plan = false;
+                handle.rendered_has_tool = false;
+                handle.rendered_has_thinking = false;
+                handle.rendered_has_process = false;
+                handle.rendered_phase = self.snapshot.phase;
+                handle.rendered_output_hash = card_hash;
+                handle.rendered_plan_hash = None;
+                handle.rendered_tool_hash = None;
+                handle.rendered_status_hash = compact_status_hash(&self.snapshot);
+                handle.rendered_thinking_hash = None;
+                handle.rendered_process_hash = None;
+            }
+            return Ok(());
+        }
         let current_title = header_title(&self.snapshot).to_string();
         let current_has_plan = has_plan_state(&self.snapshot);
         let current_has_process = has_process_state(&self.snapshot);
@@ -1158,6 +1236,52 @@ pub fn build_feishu_progress_card(
     })
 }
 
+pub fn build_feishu_compact_progress_card(
+    snapshot: &ImAgentProgressSnapshot,
+    streaming_mode: bool,
+) -> serde_json::Value {
+    let elements = vec![
+        build_status_panel_element(snapshot),
+        build_compact_notice_element(snapshot),
+        serde_json::json!({
+            "tag": "markdown",
+            "content": format_compact_output_markdown(snapshot),
+            "element_id": OUTPUT_ELEMENT_ID
+        }),
+    ];
+
+    serde_json::json!({
+        "schema": "2.0",
+        "config": {
+            "width_mode": "fill",
+            "update_multi": true,
+            "streaming_mode": streaming_mode,
+            "summary": {
+                "content": if streaming_mode { "[精简状态更新中...]".to_string() } else { compact_summary(snapshot) }
+            },
+            "streaming_config": {
+                "print_frequency_ms": { "default": 70 },
+                "print_step": { "default": 1 },
+                "print_strategy": "fast"
+            }
+        },
+        "header": {
+            "template": match snapshot.phase {
+                ImProgressPhase::Running => "blue",
+                ImProgressPhase::Finished => "green",
+                ImProgressPhase::Failed => "red",
+            },
+            "title": {
+                "tag": "plain_text",
+                "content": header_title(snapshot)
+            }
+        },
+        "body": {
+            "elements": elements
+        }
+    })
+}
+
 fn header_title(snapshot: &ImAgentProgressSnapshot) -> &str {
     snapshot.title.as_deref().unwrap_or("Bifrost AI")
 }
@@ -1236,6 +1360,21 @@ fn element_hash(element: &serde_json::Value) -> u64 {
     stable_hash(&serde_json::to_string(element).unwrap_or_default())
 }
 
+fn compact_card_hash(snapshot: &ImAgentProgressSnapshot, streaming_mode: bool) -> u64 {
+    element_hash(&build_feishu_compact_progress_card(
+        snapshot,
+        streaming_mode,
+    ))
+}
+
+fn compact_status_hash(snapshot: &ImAgentProgressSnapshot) -> u64 {
+    stable_hash(&format!(
+        "{}\n{}",
+        format_footer_markdown(snapshot),
+        format_compact_notice_markdown(snapshot)
+    ))
+}
+
 fn stable_hash(value: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     value.hash(&mut hasher);
@@ -1246,7 +1385,8 @@ fn is_feishu_card_entity_limit_error(error: &BifrostError) -> bool {
     let BifrostError::Network(message) = error else {
         return false;
     };
-    message.contains("feishu update card")
+    message.contains("feishu")
+        && message.contains("card")
         && message.contains("code=300305")
         && message.contains("element exceeds the limit")
 }
@@ -1265,6 +1405,77 @@ fn rollover_frozen_summary(snapshot: &ImAgentProgressSnapshot) -> String {
         .filter(|value| !value.trim().is_empty())
         .map(|value| truncate_str(value, 80))
         .unwrap_or_else(|| "已冻结进度快照".to_string())
+}
+
+fn build_compact_notice_element(snapshot: &ImAgentProgressSnapshot) -> serde_json::Value {
+    serde_json::json!({
+        "tag": "markdown",
+        "content": format_compact_notice_markdown(snapshot),
+        "element_id": COMPACT_NOTICE_ELEMENT_ID
+    })
+}
+
+fn format_compact_notice_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+    let mut lines = vec![
+        "**精简状态卡**".to_string(),
+        "上一张飞书进度卡片内容过大，已切换到精简模式；Agent 仍在运行，后续状态会继续更新在这张卡片。".to_string(),
+    ];
+    if let Some(notice) = snapshot
+        .activity_notice
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!("提示：{}", truncate_one_line(notice, 80)));
+    }
+    if let Some(tool) = snapshot.latest_tool.as_ref() {
+        let status = match tool.success {
+            Some(true) => "完成",
+            Some(false) => "失败",
+            None => "执行中",
+        };
+        lines.push(format!(
+            "最新工具：`{}` · {}",
+            truncate_one_line(&tool.tool_name, 32),
+            status
+        ));
+    }
+    let process_count = process_tool_count(snapshot);
+    if process_count > 0 {
+        lines.push(format!(
+            "执行过程：已记录 {process_count} 条工具事件，详情已省略以避免飞书卡片超限。"
+        ));
+    }
+    lines.join("\n")
+}
+
+fn format_compact_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
+    if !snapshot.output.trim().is_empty() {
+        return crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
+            &snapshot.output,
+            1000,
+        ));
+    }
+    if let Some(thought) = snapshot
+        .last_thought
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        return format!(
+            "**最新进展**\n\n{}",
+            crate::im_gateway::markdown_converter::convert_to_feishu_markdown(&truncate_str(
+                thought, 600
+            ))
+        );
+    }
+    "处理中...".to_string()
+}
+
+fn compact_summary(snapshot: &ImAgentProgressSnapshot) -> String {
+    match snapshot.phase {
+        ImProgressPhase::Running => "精简状态卡更新中".to_string(),
+        ImProgressPhase::Finished => truncate_str(&snapshot.output, 80),
+        ImProgressPhase::Failed => truncate_str(&snapshot.output, 80),
+    }
 }
 
 fn format_plan_markdown(steps: &[PlanStep]) -> String {
@@ -1398,10 +1609,16 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
     let mut elements = Vec::new();
     let mut markdown_lines = Vec::<String>::new();
     let mut markdown_element_count = 0;
+    let (omitted_tool_count, visible_timeline) = visible_process_timeline(snapshot);
+    if omitted_tool_count > 0 {
+        markdown_lines.push(format!(
+            "已省略前面 {omitted_tool_count} 次工具调用，仅显示最新 {PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT} 次。"
+        ));
+    }
 
     let mut timeline_index = 0;
-    while timeline_index < snapshot.timeline.len() {
-        let item = &snapshot.timeline[timeline_index];
+    while timeline_index < visible_timeline.len() {
+        let (item_index, item) = visible_timeline[timeline_index];
         match item.kind {
             ProgressTimelineKind::Thinking | ProgressTimelineKind::Status => {
                 markdown_lines.push(format_process_timeline_line(item));
@@ -1413,16 +1630,16 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
                     &mut markdown_lines,
                     &mut markdown_element_count,
                 );
-                let batch_start = timeline_index;
+                let batch_start = item_index;
                 let mut batch = Vec::new();
-                while timeline_index < snapshot.timeline.len()
-                    && snapshot.timeline[timeline_index].kind == ProgressTimelineKind::Tool
+                while timeline_index < visible_timeline.len()
+                    && visible_timeline[timeline_index].1.kind == ProgressTimelineKind::Tool
                 {
-                    batch.push((timeline_index, &snapshot.timeline[timeline_index]));
+                    batch.push(visible_timeline[timeline_index]);
                     timeline_index += 1;
                 }
                 if batch.len() == 1 {
-                    elements.push(build_process_tool_detail_element(batch_start, item));
+                    elements.push(build_process_tool_detail_element(item_index, item));
                 } else {
                     elements.push(build_process_tool_group_element(batch_start, &batch));
                 }
@@ -1436,6 +1653,39 @@ fn build_process_loop_elements(snapshot: &ImAgentProgressSnapshot) -> Vec<serde_
         &mut markdown_element_count,
     );
     elements
+}
+
+fn visible_process_timeline(
+    snapshot: &ImAgentProgressSnapshot,
+) -> (usize, Vec<(usize, &ProgressTimelineItem)>) {
+    let total_tool_count = process_tool_count(snapshot);
+    if total_tool_count <= PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT {
+        return (0, snapshot.timeline.iter().enumerate().collect());
+    }
+
+    let omitted_tool_count = total_tool_count - PROCESS_TIMELINE_VISIBLE_TOOL_LIMIT;
+    let mut seen_tool_count = 0;
+    let mut start_index = 0;
+    for (index, item) in snapshot.timeline.iter().enumerate() {
+        if item.kind != ProgressTimelineKind::Tool {
+            continue;
+        }
+        if seen_tool_count == omitted_tool_count {
+            start_index = index;
+            break;
+        }
+        seen_tool_count += 1;
+    }
+
+    (
+        omitted_tool_count,
+        snapshot
+            .timeline
+            .iter()
+            .enumerate()
+            .skip(start_index)
+            .collect(),
+    )
 }
 
 fn flush_process_markdown(
