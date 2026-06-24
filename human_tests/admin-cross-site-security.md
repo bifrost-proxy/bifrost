@@ -161,9 +161,9 @@
    - `/_bifrost/api/push`
    - `/_bifrost/api/replay/execute/ws`
    - `/_bifrost/api/devtools/sessions/<id>/ws`
-   - `/_bifrost/api/devtools/bridge/<page_id>/ws`
    - `/_bifrost/api/voice/listen-ws`
    - `/_bifrost/api/asr/transcribe-ws`
+   （注意：`/_bifrost/api/devtools/bridge/<page_id>/ws` 不在此列表内——它是注入到被代理页面的入口，跨源属于设计预期，由页面专属 token 鉴权，见 TC-ACS-10。）
 3. 每个端点依次发送四类请求并记录 HTTP 状态：
    - (a) 跨站：`Origin: http://evil.example.com` + `Sec-Fetch-Site: cross-site`。
    - (b) 跨源无 Sec-Fetch：`Origin: http://attacker.example.com`。
