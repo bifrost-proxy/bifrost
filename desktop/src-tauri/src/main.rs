@@ -1,6 +1,6 @@
 mod native_launcher;
 
-use bifrost_core::direct_blocking_reqwest_client_builder;
+use bifrost_core::{cleanup_bifrost_log_dir, direct_blocking_reqwest_client_builder};
 use bifrost_storage::data_dir as shared_bifrost_data_dir;
 use bifrost_tls::{ensure_valid_ca, generate_root_ca, save_root_ca, CertInstaller, CertStatus};
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Mutex,
+    Mutex, OnceLock,
 };
 use std::time::{Duration, Instant, SystemTime};
 
@@ -35,6 +35,7 @@ const DEFAULT_BACKEND_PORT: u16 = 9900;
 const MAX_PORT_INCREMENT_ATTEMPTS: u16 = 64;
 const HOST_WINDOW_LABEL: &str = "host";
 const MAIN_WINDOW_LABEL: &str = "main";
+const DESKTOP_LOG_RETENTION_DAYS: u32 = bifrost_core::DEFAULT_LOG_RETENTION_DAYS;
 const INITIAL_WINDOW_WIDTH: f64 = 360.0;
 const INITIAL_WINDOW_HEIGHT: f64 = 260.0;
 const TARGET_WINDOW_WIDTH: f64 = 1440.0;
@@ -1657,11 +1658,32 @@ fn log_dir(data_dir: &Path) -> PathBuf {
     data_dir.join("logs")
 }
 
+fn cleanup_desktop_logs_once(data_dir: &Path) {
+    static CLEANED_DIRS: OnceLock<Mutex<Vec<PathBuf>>> = OnceLock::new();
+    let log_dir = log_dir(data_dir);
+    let should_cleanup = CLEANED_DIRS
+        .get_or_init(|| Mutex::new(Vec::new()))
+        .lock()
+        .map(|mut dirs| {
+            if dirs.iter().any(|dir| dir == &log_dir) {
+                false
+            } else {
+                dirs.push(log_dir.clone());
+                true
+            }
+        })
+        .unwrap_or(true);
+    if should_cleanup {
+        let _ = cleanup_bifrost_log_dir(&log_dir, DESKTOP_LOG_RETENTION_DAYS);
+    }
+}
+
 fn append_desktop_bootstrap_log(data_dir: &Path, message: impl AsRef<str>) {
     let log_dir = log_dir(data_dir);
     if fs::create_dir_all(&log_dir).is_err() {
         return;
     }
+    cleanup_desktop_logs_once(data_dir);
 
     let log_path = log_dir.join("desktop-bootstrap.log");
     let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) else {
@@ -1675,6 +1697,7 @@ fn open_sidecar_log_file(data_dir: &Path, file_name: &str) -> tauri::Result<fs::
     let log_dir = log_dir(data_dir);
     fs::create_dir_all(&log_dir)
         .map_err(|error| anyhow(format!("failed to create log dir: {error}")))?;
+    cleanup_desktop_logs_once(data_dir);
 
     OpenOptions::new()
         .create(true)

@@ -6,13 +6,21 @@
 
 本模块在 `bifrost start` 常驻进程中监听规则存储目录的系统文件事件，并使用文件快照做最终变化判定。系统 watcher 负责低延迟触发；低频 fallback scan 负责兜底，避免极端平台事件丢失或目录重建导致漏更新。变化被确认稳定后，向现有 `ConfigManager` 发送 `RulesChanged`，复用现有热更新链路完成 resolver、Badge cache 和临时端口规则刷新。
 
+2026-06 日志风暴回归修复后，规则热更新区分“运行时语义变化”和“同步元信息变化”：
+
+- Group 规则列表同步必须幂等。远端 rule 先转换成本地 canonical 内容，再和已落盘规则比较，避免 legacy 协议别名、最终换行和 `last_synced_at` 导致每次 GET 都写盘。
+- 多个 WebUI/CLI 端同时读取同一个 Group 时，同一进程内按 group 串行执行本地落盘同步，避免并发请求都读到旧文件后重复写入。
+- 文件 watcher 的快照只指纹运行时会使用的规则字段：相对路径、规则名、启用状态、排序、group 和 canonical 规则正文。`last_synced_at`、`remote_updated_at`、`last_synced_content_hash` 等同步元信息变化不会触发 runtime reload。
+- 真实规则正文、启用状态、排序、group 或文件增删仍必须触发 runtime reload，避免 CLI/API/直接文件编辑后的代理运行时使用旧规则。
+- `RulesChanged` 事件带来源。`LocalApi` 和经过 runtime 指纹确认的 `Filesystem` 变化会立即唤醒 Sync，确保 CLI/直接文件编辑的真实规则内容变化不会漏同步；`RemoteSync` 直接通知只刷新 runtime，不立即反过来唤醒 Sync，避免同步写盘自身形成自激环。
+
 ## 实现逻辑
 
 1. 启动规则 resolver 后，同时启动 `spawn_rules_filesystem_watcher_task`。
 2. watcher 递归监听 `RulesStorage::base_dir()`；收到 create/modify/remove/any 事件后触发一次快照校验。
-3. 快照记录相对路径、文件长度和内容 hash，避免同长度内容修改被漏判。
+3. 快照记录相对路径和运行时语义指纹；`.bifrost` 文件优先解析 rule meta/content 后忽略同步元信息，无法解析或 legacy `.json` 文件退回全文 hash。
 4. 如果系统 watcher 创建失败或事件丢失，30 秒 fallback scan 会重新比较快照并补发事件。
-5. 发现快照变化后等待短 debounce，再重新采样；稳定变化才触发 `ConfigChangeEvent::RulesChanged`。
+5. 发现快照变化后等待短 debounce，再重新采样；稳定变化才触发 `ConfigChangeEvent::RulesChanged(RulesChangeOrigin::Filesystem)`。
 6. 现有 `spawn_rules_watcher_task` 收到事件后继续执行：
    - 重新加载启用规则；
    - 按当前 Sync 登录态过滤 group 子目录；
@@ -24,7 +32,7 @@
 
 - `notify = "6"`：跨平台系统文件 watcher。该 crate 已被 workspace 中 `skills` crate 使用，本模块只是在 `bifrost-cli` 中显式声明直接依赖。
 - 使用 `std::fs` 递归扫描和 `DefaultHasher` 生成进程内变更指纹。
-- 复用现有 `ConfigManager::notify(ConfigChangeEvent::RulesChanged)`。
+- 复用现有 `ConfigManager::notify(ConfigChangeEvent::rules_changed(...))`。
 
 ## 测试方案
 
@@ -33,6 +41,10 @@
 - `rules_filesystem_snapshot_detects_same_length_content_changes`：同长度规则内容替换也会改变快照。
 - `rules_filesystem_snapshot_tracks_nested_rule_files`：子目录规则文件被纳入快照。
 - `rules_filesystem_snapshot_ignores_dot_json_cache_files`：`.group_cache.json` 等点文件不会触发规则 reload，旧版 `legacy.json` 仍被纳入。
+- `rules_filesystem_snapshot_ignores_sync_metadata_only_changes`：只修改同步元信息时不触发 runtime snapshot 变化。
+- `rules_filesystem_snapshot_detects_runtime_rule_content_changes`：真实规则正文变化仍触发 runtime snapshot 变化。
+- `sync_envs_to_local_skips_unchanged_normalized_remote_rule_write`：远端 legacy 格式规则同步到本地 canonical 后，第二次相同远端 env 不写盘、不刷新 `last_synced_at`。
+- `group_sync_lock_reuses_lock_for_same_group`：同一 group 的同步落盘使用同一把进程内锁，避免多端同时读取时重复写。
 
 ### E2E 测试
 
@@ -48,6 +60,7 @@
 ### 真实场景测试
 
 - `human_tests/rules-filesystem-hot-reload.md` 覆盖 CLI 本地规则写入、直接文件编辑、直接文件删除三条用户可感知路径。
+- 同一文档新增 Group 同步日志风暴回归：重复 Group env 同步不写盘，metadata-only 文件变化不触发 runtime snapshot，真实规则内容变化仍触发 snapshot。
 - 执行方式优先使用同一 E2E 脚本，因为该脚本运行真实 CLI、真实代理、真实 Admin active summary 和真实 HTTP 代理请求。
 
 ## Review/Fix/Test 闭环方案
@@ -65,6 +78,7 @@
 ## 校验要求
 
 - `cargo test -p bifrost-cli rules_filesystem_snapshot -- --nocapture`
+- `cargo test -p bifrost-admin group_rules::tests:: -- --nocapture`
 - `BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_rules_filesystem_hot_reload.sh`
 - `cargo fmt --all -- --check`
 - 按 `rust-project-validate` 技能执行适用校验。

@@ -32,8 +32,9 @@ pub use http_client::{
     direct_ureq_agent_builder, load_reqwest_certificate, proxied_reqwest_client_builder,
 };
 pub use logging::{
-    init_logging, init_logging_with_config, reinit_logging_for_daemon, rotate_daemon_err_log,
-    LogConfig, LogGuard, LogOutput,
+    cleanup_bifrost_log_dir, init_logging, init_logging_with_config, reinit_logging_for_daemon,
+    rotate_daemon_err_log, LogConfig, LogGuard, LogOutput, DEFAULT_LOG_DIR_MAX_BYTES,
+    DEFAULT_LOG_RETENTION_DAYS,
 };
 pub use matcher::{
     factory::parse_pattern, DomainMatcher, IpMatcher, MatchResult, Matcher, RegexMatcher,

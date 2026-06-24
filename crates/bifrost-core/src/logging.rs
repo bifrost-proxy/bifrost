@@ -1,4 +1,7 @@
-use std::{path::PathBuf, sync::OnceLock};
+use std::{
+    path::{Path, PathBuf},
+    sync::OnceLock,
+};
 
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -50,7 +53,7 @@ impl Default for LogConfig {
             level: "info".to_string(),
             outputs: vec![LogOutput::File],
             log_dir: PathBuf::from("."),
-            retention_days: 7,
+            retention_days: DEFAULT_LOG_RETENTION_DAYS,
             file_prefix: "bifrost".to_string(),
         }
     }
@@ -80,6 +83,9 @@ pub struct LogGuard {
     _file_guard: Option<tracing_appender::non_blocking::WorkerGuard>,
 }
 
+pub const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
+pub const DEFAULT_LOG_DIR_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+
 static DAEMON_LOG_GUARD: OnceLock<tracing_appender::non_blocking::WorkerGuard> = OnceLock::new();
 
 fn build_env_filter(level: &str) -> Result<EnvFilter> {
@@ -91,7 +97,15 @@ fn build_env_filter(level: &str) -> Result<EnvFilter> {
     }
 }
 
-fn cleanup_old_logs(log_dir: &std::path::Path, prefix: &str, retention_days: u32) -> Result<()> {
+fn cleanup_old_logs(log_dir: &Path, prefix: &str, retention_days: u32) -> Result<()> {
+    cleanup_bifrost_log_dir(log_dir, retention_days)?;
+    cleanup_prefixed_rolling_logs(log_dir, prefix, retention_days)
+}
+
+fn cleanup_prefixed_rolling_logs(log_dir: &Path, prefix: &str, retention_days: u32) -> Result<()> {
+    if retention_days == 0 {
+        return Ok(());
+    }
     let entries = match std::fs::read_dir(log_dir) {
         Ok(entries) => entries,
         Err(e) => {
@@ -125,6 +139,176 @@ fn cleanup_old_logs(log_dir: &std::path::Path, prefix: &str, retention_days: u32
     Ok(())
 }
 
+pub fn cleanup_bifrost_log_dir(log_dir: &Path, retention_days: u32) -> Result<()> {
+    cleanup_bifrost_log_dir_with_limits(log_dir, retention_days, DEFAULT_LOG_DIR_MAX_BYTES)
+}
+
+fn cleanup_bifrost_log_dir_with_limits(
+    log_dir: &Path,
+    retention_days: u32,
+    max_total_bytes: u64,
+) -> Result<()> {
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("Failed to read log directory for cleanup: {}", e);
+            return Ok(());
+        }
+    };
+
+    if retention_days > 0 {
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(retention_days as i64);
+        let cutoff_date = cutoff.date_naive();
+
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+                continue;
+            };
+
+            let expired = dated_log_name_date(name)
+                .map(|date| date < cutoff_date)
+                .unwrap_or_else(|| fixed_log_artifact_is_expired(&path, name, cutoff));
+            if expired {
+                remove_log_file(&path, name);
+            }
+        }
+    }
+
+    enforce_log_dir_size_limit(log_dir, max_total_bytes)?;
+    Ok(())
+}
+
+struct LogArtifact {
+    path: PathBuf,
+    name: String,
+    modified: std::time::SystemTime,
+    size: u64,
+}
+
+fn enforce_log_dir_size_limit(log_dir: &Path, max_total_bytes: u64) -> Result<()> {
+    if max_total_bytes == 0 {
+        return Ok(());
+    }
+    let entries = match std::fs::read_dir(log_dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!("Failed to read log directory for size cleanup: {}", e);
+            return Ok(());
+        }
+    };
+
+    let mut artifacts = Vec::new();
+    let mut total_size = 0u64;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if !is_bifrost_log_artifact(&name) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let size = metadata.len();
+        total_size = total_size.saturating_add(size);
+        artifacts.push(LogArtifact {
+            path,
+            name,
+            modified: metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+            size,
+        });
+    }
+
+    if total_size <= max_total_bytes {
+        return Ok(());
+    }
+
+    artifacts.sort_by(|a, b| {
+        a.modified
+            .cmp(&b.modified)
+            .then_with(|| a.name.cmp(&b.name))
+    });
+    for artifact in artifacts {
+        if total_size <= max_total_bytes {
+            break;
+        }
+        let removed_size = artifact.size;
+        remove_log_file(&artifact.path, &artifact.name);
+        if !artifact.path.exists() {
+            total_size = total_size.saturating_sub(removed_size);
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_log_file(path: &Path, name: &str) {
+    tracing::info!("Removing old log file: {}", name);
+    if let Err(e) = std::fs::remove_file(path) {
+        tracing::warn!("Failed to remove old log file {}: {}", name, e);
+    }
+}
+
+fn dated_log_name_date(filename: &str) -> Option<chrono::NaiveDate> {
+    let date = extract_date_from_filename(filename, "bifrost")
+        .or_else(|| extract_date_from_filename(filename, "log"))
+        .or_else(|| {
+            filename
+                .strip_prefix("log-")
+                .and_then(|s| s.strip_suffix(".log"))
+                .map(str::to_string)
+        })
+        .or_else(|| extract_date_from_suffix(filename, "bifrost.err"))
+        .or_else(|| extract_date_from_suffix(filename, "tray.log"))?;
+    chrono::NaiveDate::parse_from_str(&date, "%Y-%m-%d").ok()
+}
+
+fn fixed_log_artifact_is_expired(
+    path: &Path,
+    filename: &str,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> bool {
+    if !is_known_fixed_log_artifact(filename) {
+        return false;
+    }
+    path.metadata()
+        .and_then(|metadata| metadata.modified())
+        .map(|modified| chrono::DateTime::<chrono::Utc>::from(modified) < cutoff)
+        .unwrap_or(false)
+}
+
+fn is_bifrost_log_artifact(filename: &str) -> bool {
+    dated_log_name_date(filename).is_some() || is_known_fixed_log_artifact(filename)
+}
+
+fn is_known_fixed_log_artifact(filename: &str) -> bool {
+    matches!(
+        filename,
+        "bifrost.log"
+            | "bifrost.err"
+            | "desktop-bootstrap.log"
+            | "desktop-sidecar.out.log"
+            | "desktop-sidecar.err.log"
+            | "guardian.log"
+            | "guardian.launchd.out.log"
+            | "guardian.launchd.err.log"
+            | "restart.log"
+            | "upgrade-background.log"
+    ) || filename.ends_with("-audit.json")
+}
+
 fn extract_date_from_filename(filename: &str, prefix: &str) -> Option<String> {
     let without_prefix = filename.strip_prefix(prefix)?;
     let without_dot = without_prefix.strip_prefix('.')?;
@@ -139,9 +323,6 @@ fn extract_date_from_suffix(filename: &str, base_name: &str) -> Option<String> {
 }
 
 fn start_log_cleanup_thread(log_dir: PathBuf, prefix: String, retention_days: u32) {
-    if retention_days == 0 {
-        return;
-    }
     std::thread::spawn(move || loop {
         std::thread::sleep(std::time::Duration::from_secs(24 * 60 * 60));
         let _ = cleanup_old_logs(&log_dir, &prefix, retention_days);
@@ -174,11 +355,7 @@ pub fn init_logging(level: &str) -> Result<()> {
     Ok(())
 }
 
-fn rotate_file_if_day_changed(
-    log_dir: &std::path::Path,
-    base_name: &str,
-    today: chrono::NaiveDate,
-) {
+fn rotate_file_if_day_changed(log_dir: &Path, base_name: &str, today: chrono::NaiveDate) {
     let current = log_dir.join(base_name);
     if !current.exists() {
         return;
@@ -196,11 +373,7 @@ fn rotate_file_if_day_changed(
     }
 }
 
-fn cleanup_rotated_files(
-    log_dir: &std::path::Path,
-    base_name: &str,
-    retention_days: u32,
-) -> Result<()> {
+fn cleanup_rotated_files(log_dir: &Path, base_name: &str, retention_days: u32) -> Result<()> {
     if retention_days == 0 {
         return Ok(());
     }
@@ -230,7 +403,7 @@ fn cleanup_rotated_files(
     Ok(())
 }
 
-pub fn rotate_daemon_err_log(log_dir: &std::path::Path, retention_days: u32) -> Result<()> {
+pub fn rotate_daemon_err_log(log_dir: &Path, retention_days: u32) -> Result<()> {
     std::fs::create_dir_all(log_dir).map_err(|e| {
         BifrostError::Config(format!(
             "Failed to create log directory '{}': {}",
@@ -375,11 +548,7 @@ pub fn init_logging_with_config(config: &LogConfig) -> Result<LogGuard> {
     })
 }
 
-pub fn reinit_logging_for_daemon(
-    log_dir: &std::path::Path,
-    retention_days: u32,
-    level: &str,
-) -> Result<()> {
+pub fn reinit_logging_for_daemon(log_dir: &Path, retention_days: u32, level: &str) -> Result<()> {
     std::fs::create_dir_all(log_dir).map_err(|e| {
         BifrostError::Config(format!(
             "Failed to create log directory '{}': {}",
@@ -597,6 +766,94 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_bifrost_log_dir_removes_legacy_and_shared_dated_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_legacy_dash = dir.path().join("log-2000-01-01.log");
+        let old_legacy_dot = dir.path().join("log.2000-01-02.log");
+        let old_tray = dir.path().join("tray.log.2000-01-03");
+        let old_err = dir.path().join("bifrost.err.2000-01-04");
+        let today = chrono::Utc::now().date_naive().format("%Y-%m-%d");
+        let recent_bifrost = dir.path().join(format!("bifrost.{today}.log"));
+        let unrelated = dir.path().join("notes.2000-01-01.log");
+        for path in [
+            &old_legacy_dash,
+            &old_legacy_dot,
+            &old_tray,
+            &old_err,
+            &recent_bifrost,
+            &unrelated,
+        ] {
+            std::fs::write(path, b"x").unwrap();
+        }
+
+        cleanup_bifrost_log_dir(dir.path(), 30).unwrap();
+
+        assert!(!old_legacy_dash.exists());
+        assert!(!old_legacy_dot.exists());
+        assert!(!old_tray.exists());
+        assert!(!old_err.exists());
+        assert!(recent_bifrost.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn cleanup_bifrost_log_dir_removes_old_fixed_log_artifacts_by_mtime() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_bootstrap = dir.path().join("desktop-bootstrap.log");
+        let old_sidecar = dir.path().join("desktop-sidecar.out.log");
+        let old_audit = dir.path().join(".abc-audit.json");
+        let recent_restart = dir.path().join("restart.log");
+        let unrelated = dir.path().join("payload.json");
+        for path in [
+            &old_bootstrap,
+            &old_sidecar,
+            &old_audit,
+            &recent_restart,
+            &unrelated,
+        ] {
+            std::fs::write(path, b"x").unwrap();
+        }
+        let old_time = filetime::FileTime::from_unix_time(946684800, 0);
+        for path in [&old_bootstrap, &old_sidecar, &old_audit] {
+            filetime::set_file_mtime(path, old_time).unwrap();
+        }
+
+        cleanup_bifrost_log_dir(dir.path(), 30).unwrap();
+
+        assert!(!old_bootstrap.exists());
+        assert!(!old_sidecar.exists());
+        assert!(!old_audit.exists());
+        assert!(recent_restart.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn cleanup_bifrost_log_dir_enforces_total_size_by_removing_oldest_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        let oldest = dir.path().join("bifrost.2026-06-20.log");
+        let middle = dir.path().join("bifrost.2026-06-21.log");
+        let newest = dir.path().join("bifrost.2026-06-22.log");
+        let unrelated = dir.path().join("payload.bin");
+        for path in [&oldest, &middle, &newest] {
+            std::fs::write(path, vec![b'x'; 8]).unwrap();
+        }
+        std::fs::write(&unrelated, vec![b'x'; 100]).unwrap();
+        let t1 = filetime::FileTime::from_unix_time(1_780_000_001, 0);
+        let t2 = filetime::FileTime::from_unix_time(1_780_000_002, 0);
+        let t3 = filetime::FileTime::from_unix_time(1_780_000_003, 0);
+        filetime::set_file_mtime(&oldest, t1).unwrap();
+        filetime::set_file_mtime(&middle, t2).unwrap();
+        filetime::set_file_mtime(&newest, t3).unwrap();
+
+        cleanup_bifrost_log_dir_with_limits(dir.path(), 0, 16).unwrap();
+
+        assert!(!oldest.exists());
+        assert!(middle.exists());
+        assert!(newest.exists());
+        assert!(unrelated.exists());
+    }
+
+    #[test]
     fn extract_date_from_filename_none_paths() {
         // Wrong prefix.
         assert!(extract_date_from_filename("other.2020-01-01.log", "bifrost").is_none());
@@ -703,7 +960,7 @@ mod tests {
 
     #[test]
     fn start_log_cleanup_thread_retention_zero_returns() {
-        // retention_days == 0 -> early return, no thread spawned, no panic.
+        // retention_days == 0 disables age cleanup but keeps the size cap thread path alive.
         start_log_cleanup_thread(PathBuf::from("/tmp"), "bifrost".to_string(), 0);
     }
 

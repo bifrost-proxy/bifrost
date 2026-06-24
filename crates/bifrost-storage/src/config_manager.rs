@@ -22,6 +22,20 @@ use crate::{
 
 pub type SharedConfigManager = Arc<ConfigManager>;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RulesChangeOrigin {
+    LocalApi,
+    Filesystem,
+    RemoteSync,
+    Unknown,
+}
+
+impl RulesChangeOrigin {
+    pub fn should_wake_sync(self) -> bool {
+        matches!(self, Self::LocalApi | Self::Filesystem | Self::Unknown)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum ConfigChangeEvent {
     TlsConfigChanged(TlsConfig),
@@ -32,10 +46,20 @@ pub enum ConfigChangeEvent {
     ServerConfigChanged,
     TrafficConfigChanged,
     SyncConfigChanged,
-    RulesChanged,
+    RulesChanged(RulesChangeOrigin),
     ScriptsChanged,
     ValuesChanged(String),
     StateChanged,
+}
+
+impl ConfigChangeEvent {
+    pub fn rules_changed(origin: RulesChangeOrigin) -> Self {
+        Self::RulesChanged(origin)
+    }
+
+    pub fn is_rules_changed(&self) -> bool {
+        matches!(self, Self::RulesChanged(_))
+    }
 }
 
 pub struct ConfigManager {
@@ -449,7 +473,9 @@ impl ConfigManager {
     pub async fn save_rule(&self, rule: &RuleFile) -> Result<()> {
         let storage = self.rules_storage.write().await;
         storage.save(rule)?;
-        let _ = self.change_notifier.send(ConfigChangeEvent::RulesChanged);
+        let _ = self.change_notifier.send(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        ));
         Ok(())
     }
 
@@ -466,7 +492,9 @@ impl ConfigManager {
     pub async fn delete_rule(&self, name: &str) -> Result<()> {
         let storage = self.rules_storage.write().await;
         storage.delete(name)?;
-        let _ = self.change_notifier.send(ConfigChangeEvent::RulesChanged);
+        let _ = self.change_notifier.send(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        ));
         Ok(())
     }
 
@@ -483,14 +511,18 @@ impl ConfigManager {
     pub async fn set_rule_enabled(&self, name: &str, enabled: bool) -> Result<()> {
         let storage = self.rules_storage.write().await;
         storage.set_enabled(name, enabled)?;
-        let _ = self.change_notifier.send(ConfigChangeEvent::RulesChanged);
+        let _ = self.change_notifier.send(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        ));
         Ok(())
     }
 
     pub async fn reorder_rules(&self, order: &[String]) -> Result<()> {
         let storage = self.rules_storage.write().await;
         storage.reorder(order)?;
-        let _ = self.change_notifier.send(ConfigChangeEvent::RulesChanged);
+        let _ = self.change_notifier.send(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        ));
         Ok(())
     }
 
@@ -1325,6 +1357,14 @@ mod tests {
         manager.notify(ConfigChangeEvent::ScriptsChanged).unwrap();
         let event = receiver.try_recv().unwrap();
         assert!(matches!(event, ConfigChangeEvent::ScriptsChanged));
+    }
+
+    #[test]
+    fn test_rules_change_origin_sync_wake_policy_matches_event_source() {
+        assert!(RulesChangeOrigin::LocalApi.should_wake_sync());
+        assert!(RulesChangeOrigin::Filesystem.should_wake_sync());
+        assert!(RulesChangeOrigin::Unknown.should_wake_sync());
+        assert!(!RulesChangeOrigin::RemoteSync.should_wake_sync());
     }
 
     #[tokio::test]

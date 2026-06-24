@@ -21,11 +21,13 @@ use bifrost_admin::{
     AsyncTrafficWriter, BodyStore, PortRebindManager, PortRebindRequest, PushManager,
     ReplayDbStore, RuntimeConfig, WsPayloadStore,
 };
-use bifrost_core::{expand_rule_references, Rule, UserPassAccountConfig, UserPassAuthConfig};
+use bifrost_core::{
+    expand_rule_references, normalize_rule_content, Rule, UserPassAccountConfig, UserPassAuthConfig,
+};
 use bifrost_proxy::{AccessMode, ProxyConfig, ProxyServer};
 use bifrost_storage::{
-    set_data_dir, ConfigChangeEvent, ConfigManager, TrafficConfigUpdate, DEFAULT_REMOTE_BASE_URL,
-    MAX_TRAFFIC_MAX_RECORDS,
+    set_data_dir, ConfigChangeEvent, ConfigManager, RulesChangeOrigin, TrafficConfigUpdate,
+    DEFAULT_REMOTE_BASE_URL, MAX_TRAFFIC_MAX_RECORDS,
 };
 use bifrost_sync::SyncManager;
 use bifrost_tls::{get_platform_name, CertInstaller, CertStatus};
@@ -3543,7 +3545,7 @@ fn load_stored_rules(
                     }
                 }
 
-                tracing::info!(
+                tracing::debug!(
                     target: "bifrost_cli::rules",
                     file = %rule_file.name,
                     enabled = rule_file.enabled,
@@ -3629,6 +3631,36 @@ fn is_rules_storage_file(path: &Path) -> bool {
     )
 }
 
+fn rules_file_runtime_fingerprint(path: &Path, content: &[u8]) -> RulesFileFingerprint {
+    if path.extension().and_then(|ext| ext.to_str()) == Some("bifrost") {
+        if let Ok(text) = std::str::from_utf8(content) {
+            if let Ok(file) = bifrost_core::bifrost_file::BifrostFileParser::parse_rules(text) {
+                let normalized_content = normalize_rule_content(&file.content);
+                let runtime_key = (
+                    file.meta.name,
+                    file.meta.enabled,
+                    file.meta.sort_order,
+                    file.meta.group,
+                    normalized_content,
+                );
+                let mut hasher = DefaultHasher::new();
+                runtime_key.hash(&mut hasher);
+                return RulesFileFingerprint {
+                    len: runtime_key.4.len() as u64,
+                    hash: hasher.finish(),
+                };
+            }
+        }
+    }
+
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    RulesFileFingerprint {
+        len: content.len() as u64,
+        hash: hasher.finish(),
+    }
+}
+
 fn collect_rules_filesystem_snapshot(base_dir: &Path) -> io::Result<RulesFilesystemSnapshot> {
     let mut entries = BTreeMap::new();
     collect_rules_filesystem_snapshot_dir(base_dir, base_dir, &mut entries)?;
@@ -3661,15 +3693,10 @@ fn collect_rules_filesystem_snapshot_dir(
         }
 
         let content = std::fs::read(&path)?;
-        let mut hasher = DefaultHasher::new();
-        content.hash(&mut hasher);
         let relative_path = path.strip_prefix(base_dir).unwrap_or(&path).to_path_buf();
         entries.insert(
             relative_path,
-            RulesFileFingerprint {
-                len: content.len() as u64,
-                hash: hasher.finish(),
-            },
+            rules_file_runtime_fingerprint(&path, &content),
         );
     }
 
@@ -3849,7 +3876,9 @@ fn spawn_rules_filesystem_watcher_task(
                 trigger = ?trigger,
                 "rules files changed on disk, notifying runtime reload"
             );
-            if let Err(error) = config_manager.notify(ConfigChangeEvent::RulesChanged) {
+            if let Err(error) = config_manager.notify(ConfigChangeEvent::rules_changed(
+                RulesChangeOrigin::Filesystem,
+            )) {
                 tracing::warn!(
                     target: "bifrost_cli::rules",
                     error = %error,
@@ -3891,7 +3920,7 @@ fn spawn_rules_watcher_task(
                 Ok(event) => {
                     if matches!(
                         event,
-                        ConfigChangeEvent::RulesChanged | ConfigChangeEvent::ValuesChanged(_)
+                        ConfigChangeEvent::RulesChanged(_) | ConfigChangeEvent::ValuesChanged(_)
                     ) {
                         tracing::info!(
                             target: "bifrost_cli::rules",
@@ -3917,7 +3946,7 @@ fn spawn_rules_watcher_task(
                             manager.reload_all().await;
                         }
 
-                        if matches!(event, ConfigChangeEvent::RulesChanged) {
+                        if event.is_rules_changed() {
                             let should_disconnect = {
                                 let config = runtime_config.read().await;
                                 config.disconnect_on_config_change
@@ -4070,7 +4099,7 @@ fn spawn_admin_push_watcher_task(
                     ConfigChangeEvent::ValuesChanged(_) => {
                         push_manager.broadcast_values_snapshot().await;
                     }
-                    ConfigChangeEvent::RulesChanged | ConfigChangeEvent::SyncConfigChanged => {}
+                    ConfigChangeEvent::RulesChanged(_) | ConfigChangeEvent::SyncConfigChanged => {}
                     ConfigChangeEvent::StateChanged => {
                         push_manager
                             .broadcast_settings_scope(SETTINGS_SCOPE_WHITELIST_STATUS)
@@ -5319,7 +5348,9 @@ second content
             Some(temp_ports),
         );
 
-        let _ = config_manager.notify(ConfigChangeEvent::RulesChanged);
+        let _ = config_manager.notify(ConfigChangeEvent::rules_changed(
+            RulesChangeOrigin::LocalApi,
+        ));
 
         tokio::time::sleep(Duration::from_millis(20)).await;
 
@@ -5403,6 +5434,49 @@ second content
         let first = collect_rules_filesystem_snapshot(&dir).unwrap();
         let second = collect_rules_filesystem_snapshot(&dir).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_ignores_sync_metadata_only_changes() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        let storage = RulesStorage::with_dir(dir.clone()).unwrap();
+        let mut rule = bifrost_storage::RuleFile::new("synced", "a.test statusCode://200");
+        rule.mark_synced(
+            "remote-1",
+            "user-1",
+            "2026-06-20T00:00:00Z",
+            "remote-updated",
+        );
+        storage.save(&rule).unwrap();
+        let first = collect_rules_filesystem_snapshot(&dir).unwrap();
+
+        rule.sync.last_synced_at = Some("2026-06-20T00:00:01Z".to_string());
+        rule.sync.remote_updated_at = Some("remote-updated-2".to_string());
+        storage.save(&rule).unwrap();
+        let second = collect_rules_filesystem_snapshot(&dir).unwrap();
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn rules_filesystem_snapshot_detects_runtime_rule_content_changes() {
+        let (_tmp, dir) = make_temp_rules_dir();
+        let storage = RulesStorage::with_dir(dir.clone()).unwrap();
+        let mut rule = bifrost_storage::RuleFile::new("synced", "a.test statusCode://200");
+        rule.mark_synced(
+            "remote-1",
+            "user-1",
+            "2026-06-20T00:00:00Z",
+            "remote-updated",
+        );
+        storage.save(&rule).unwrap();
+        let first = collect_rules_filesystem_snapshot(&dir).unwrap();
+
+        rule.content = "a.test statusCode://201".to_string();
+        storage.save(&rule).unwrap();
+        let second = collect_rules_filesystem_snapshot(&dir).unwrap();
+
+        assert_ne!(first, second);
     }
 
     #[test]

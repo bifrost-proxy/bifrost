@@ -11,6 +11,7 @@
 - `start`（前台模式）：日志默认仅输出到文件，stdout/stderr 不出现 tracing 标准日志行
 - 其他所有命令：日志默认仅输出到文件，stdout/stderr 只保留命令协议或用户可见结果
 - 用户可通过全局 `--log-output console` 或 `--log-output console,file` 显式启用 Console Terminal 日志；文件日志仍保留
+- 日志目录清理默认保留 7 天，并设置 1GiB 目录总量上限；超过年龄或容量上限的已知 Bifrost 日志产物会按旧到新删除，避免资源持续膨胀
 
 ## 前置条件
 
@@ -441,6 +442,34 @@ PY
 
 ---
 
+### TC-LOD-13：日志目录按 7 天保留并按 1GiB 上限清理（回归验证）
+
+**操作步骤**：
+1. 执行核心日志清理 focused 单测：
+   ```bash
+   source ~/.zshrc
+   cargo test -p bifrost-core cleanup_bifrost_log_dir -- --nocapture
+   ```
+2. 检查单测覆盖点：
+   - `cleanup_bifrost_log_dir_removes_legacy_and_shared_dated_logs`
+   - `cleanup_bifrost_log_dir_removes_old_fixed_log_artifacts_by_mtime`
+   - `cleanup_bifrost_log_dir_enforces_total_size_by_removing_oldest_logs`
+3. 确认 CLI、daemon、Tray 和 Desktop 都调用共享清理路径：
+   ```bash
+   rg -n "cleanup_bifrost_log_dir|DEFAULT_LOG_RETENTION_DAYS|DEFAULT_LOG_DIR_MAX_BYTES" \
+     crates/bifrost-core/src/logging.rs \
+     crates/bifrost-cli/src/commands/tray/tray.rs \
+     desktop/src-tauri/src/main.rs
+   ```
+
+**预期结果**：
+- 7 天保留清理覆盖 `bifrost.YYYY-MM-DD.log`、历史 `log-YYYY-MM-DD.log`、`tray.log.YYYY-MM-DD` 和 `bifrost.err.YYYY-MM-DD`。
+- 固定文件名日志如 `desktop-bootstrap.log`、`desktop-sidecar.out.log`、`desktop-sidecar.err.log`、`guardian.log`、`restart.log`、`upgrade-background.log` 和 `*-audit.json` 按 mtime 清理。
+- 总量超过 1GiB 时，即使文件仍在 7 天窗口内，也会从最旧的已知 Bifrost 日志产物开始删除，直到目录总量不超过上限。
+- 未知普通文件不被清理，避免误删用户放在日志目录中的非日志文件。
+
+---
+
 ## 清理步骤
 
 ```bash
@@ -459,3 +488,4 @@ rm -rf /tmp/bifrost-human-launchd-log
 | 2026-06-12 | TC-LOD-11 | PR #225 CI 中 Linux/macOS `E2E Shell shard 3/3` 均失败于 `test_rule_match_logging_noise.sh`。已将脚本断言从旧 `rule MATCHED` 更新为 `rule matcher candidate matched` 与 `rule selected`，并执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 e2e-tests/tests/test_rule_match_logging_noise.sh`，结果通过。 | 通过 |
 | 2026-06-12 | TC-LOD-11 | PR #227 CI run `27423667730` macOS `E2E Shell (aarch64-apple-darwin, shard 1/3)` failed because `test_rule_match_logging_noise.sh` used fixed debug port `18888`, which was already occupied on the runner. The script now allocates info/debug ports dynamically through `allocate_free_port` while preserving `INFO_PORT` / `DEBUG_PORT` overrides; `bash -n e2e-tests/tests/test_rule_match_logging_noise.sh` passed. | 通过 |
 | 2026-06-13 | TC-LOD-12 | PR #236 CI run `27472448398` 中 macOS shard 1 先显示 `console-file admin request` 通过，随后 `test_cli_start_log_output_default_file.sh` 在停止流程卡到 900 秒 timeout。已将脚本的 `bifrost stop` 改为有界 best-effort helper，并在 stop 超时后使用 `safe_cleanup_proxy` 与端口清理兜底。执行 `bash -n e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过；执行 `BIFROST_E2E_STOP_TIMEOUT=3 SKIP_BUILD=true BIFROST_BIN="$(pwd)/target/release/bifrost" e2e-tests/tests/test_cli_start_log_output_default_file.sh` 通过，输出 10/10 passed，总耗时 7.6 秒。 | 通过 |
+| 2026-06-23 | TC-LOD-13 | 已执行 `cargo test -p bifrost-core cleanup_bifrost_log_dir -- --nocapture`；覆盖历史日期日志、desktop/sidecar/audit 固定日志 mtime 清理，以及容量超限时从旧到新删除到 1GiB 上限的路径。 | 通过 |

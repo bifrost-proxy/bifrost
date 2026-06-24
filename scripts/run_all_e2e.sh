@@ -628,6 +628,7 @@ shell_test_weight() {
     test_remote_invoke_e2e.sh) echo 52 ;;
     test_remote_job_real_e2e.sh) echo 64 ;;
     test_group_sync_e2e.sh) echo 43 ;;
+    test_group_sync_no_logstorm_e2e.sh) echo 45 ;;
     test_agent_builtin_status_runtime.sh) echo 43 ;;
     test_replay_websocket_frames.sh) echo 42 ;;
     test_traffic_persistence_e2e.sh) echo 40 ;;

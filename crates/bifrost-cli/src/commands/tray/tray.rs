@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 #[cfg(target_os = "macos")]
 use notify::{EventKind, RecursiveMode, Watcher};
@@ -90,7 +90,7 @@ const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(3);
 const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 const ACTION_STATE_SETTLE_TIMEOUT: Duration = Duration::from_secs(3);
 const ACTION_STATE_SETTLE_INTERVAL: Duration = Duration::from_millis(100);
-const LOG_RETENTION_DAYS: u64 = 30;
+const LOG_RETENTION_DAYS: u32 = bifrost_core::DEFAULT_LOG_RETENTION_DAYS;
 const MENU_REBUILD_SUPPRESSION_AFTER_CLICK: Duration = Duration::from_secs(3);
 #[cfg(target_os = "macos")]
 const MENU_STRUCTURAL_STATUS_UPDATE_SUPPRESSION: Duration = Duration::from_secs(2);
@@ -646,7 +646,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
 fn init_logging(data_dir: &Path) {
     let log_dir = data_dir.join("logs");
     let _ = std::fs::create_dir_all(&log_dir);
-    cleanup_old_logs(&log_dir);
+    let _ = bifrost_core::cleanup_bifrost_log_dir(&log_dir, LOG_RETENTION_DAYS);
 
     let file_appender = tracing_appender::rolling::daily(&log_dir, "tray.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking::NonBlockingBuilder::default()
@@ -661,35 +661,6 @@ fn init_logging(data_dir: &Path) {
         .with_ansi(false)
         .with_target(false)
         .init();
-}
-
-fn cleanup_old_logs(log_dir: &Path) {
-    let cutoff = Duration::from_secs(LOG_RETENTION_DAYS * 24 * 60 * 60);
-    let now = SystemTime::now();
-    let Ok(entries) = fs::read_dir(log_dir) else {
-        return;
-    };
-
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !name.starts_with("tray.log") {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        let Ok(modified) = metadata.modified() else {
-            continue;
-        };
-        if now.duration_since(modified).is_ok_and(|age| age > cutoff) {
-            if let Err(error) = fs::remove_file(&path) {
-                tracing::warn!(path = %path.display(), error = %error, "failed to remove old tray log");
-            }
-        }
-    }
 }
 
 #[cfg(target_os = "macos")]
