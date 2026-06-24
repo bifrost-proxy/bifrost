@@ -158,4 +158,65 @@ BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-admin-secur
 grep -F 'share/shared-security [enabled]' /tmp/bifrost-admin-security-rules-after-confirm.txt
 ! grep -F 'evil-cross-site' /tmp/bifrost-admin-security-rules-after-confirm.txt
 
+# --- CSWSH (Cross-Site WebSocket Hijacking) regression --------------------
+# WebSocket upgrades are GET requests and bypass the CSRF write guard. The
+# dedicated WS origin guard must reject cross-site / cross-origin upgrades for
+# every admin WebSocket endpoint while allowing same-origin and native clients.
+ws_upgrade_status() {
+  # $1 = path, remaining args = extra "Header: value" lines
+  local path="$1"
+  shift
+  python3 - "$PROXY_PORT" "$path" "$@" <<'PY'
+import socket, sys
+port = int(sys.argv[1])
+path = sys.argv[2]
+extra = sys.argv[3:]
+lines = [
+    f"GET {path} HTTP/1.1",
+    f"Host: 127.0.0.1:{port}",
+    "Upgrade: websocket",
+    "Connection: Upgrade",
+    "Sec-WebSocket-Version: 13",
+    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+]
+lines.extend(extra)
+request = "\r\n".join(lines) + "\r\n\r\n"
+s = socket.create_connection(("127.0.0.1", port), timeout=5)
+s.sendall(request.encode())
+data = s.recv(1024).decode("latin1", "replace")
+s.close()
+status_line = data.splitlines()[0] if data else ""
+parts = status_line.split()
+print(parts[1] if len(parts) > 1 else "0")
+PY
+}
+
+WS_ENDPOINTS=(
+  "/_bifrost/api/push"
+  "/_bifrost/api/replay/execute/ws"
+)
+
+for ws_path in "${WS_ENDPOINTS[@]}"; do
+  # Cross-site upgrade => rejected (403).
+  STATUS="$(ws_upgrade_status "$ws_path" \
+    'Origin: http://evil.example.com' \
+    'Sec-Fetch-Site: cross-site')"
+  [[ "$STATUS" == "403" ]] || { echo "CSWSH cross-site not rejected for $ws_path (got $STATUS)" >&2; exit 1; }
+
+  # Cross-origin upgrade without Sec-Fetch => rejected (403).
+  STATUS="$(ws_upgrade_status "$ws_path" \
+    'Origin: http://attacker.example.com')"
+  [[ "$STATUS" == "403" ]] || { echo "CSWSH cross-origin not rejected for $ws_path (got $STATUS)" >&2; exit 1; }
+
+  # Native client (no browser context) => not rejected by the guard.
+  STATUS="$(ws_upgrade_status "$ws_path")"
+  [[ "$STATUS" != "403" ]] || { echo "CSWSH guard wrongly rejected native client for $ws_path" >&2; exit 1; }
+
+  # Same-origin upgrade => not rejected by the guard.
+  STATUS="$(ws_upgrade_status "$ws_path" \
+    "Origin: http://127.0.0.1:${PROXY_PORT}" \
+    'Sec-Fetch-Site: same-origin')"
+  [[ "$STATUS" != "403" ]] || { echo "CSWSH guard wrongly rejected same-origin for $ws_path" >&2; exit 1; }
+done
+
 echo "admin cross-site security E2E passed"

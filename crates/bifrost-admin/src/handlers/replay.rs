@@ -1608,6 +1608,14 @@ async fn execute_replay_websocket(
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
     }
 
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(reason, "[REPLAY] WebSocket upgrade rejected (CSWSH guard)");
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Cross-site WebSocket upgrade rejected",
+        );
+    }
+
     let connection_header = req
         .headers()
         .get("Connection")
@@ -4395,5 +4403,125 @@ mod coverage_boost_v3 {
         let headers = vec![("content-encoding".to_string(), "gzip".to_string())];
         let body = b"not-a-valid-gzip-stream";
         assert_eq!(decode_replay_body(&headers, body), None);
+    }
+}
+#[cfg(test)]
+mod cswsh_guard_tests {
+    use super::*;
+
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{body::Incoming, Request};
+    use hyper_util::rt::TokioIo;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    use crate::state::SharedAdminState;
+    use crate::test_support::TestAdminState;
+
+    async fn spawn_server(
+        state: SharedAdminState,
+    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind cswsh test listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let state_clone = state.clone();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let io = TokioIo::new(stream);
+                let state_inner = state_clone.clone();
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: Request<Incoming>| {
+                        let state = state_inner.clone();
+                        async move {
+                            let path = req.uri().path().to_string();
+                            let resp = handle_replay(req, state, None, &path).await;
+                            Ok::<_, hyper::Error>(resp)
+                        }
+                    });
+                    let _ = http1::Builder::new().serve_connection(io, service).await;
+                });
+            }
+        });
+        (addr, handle)
+    }
+
+    /// Send a raw WebSocket upgrade request and return the HTTP status line.
+    async fn raw_ws_upgrade_status(addr: std::net::SocketAddr, extra_headers: &str) -> u16 {
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let request = format!(
+            "GET /api/replay/execute/ws HTTP/1.1\r\n\
+             Host: {host}\r\n\
+             Upgrade: websocket\r\n\
+             Connection: Upgrade\r\n\
+             Sec-WebSocket-Version: 13\r\n\
+             Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\
+             {extra}\r\n",
+            host = addr,
+            extra = extra_headers
+        );
+        stream.write_all(request.as_bytes()).await.expect("write");
+        stream.flush().await.expect("flush");
+        let mut buf = vec![0u8; 1024];
+        let n = stream.read(&mut buf).await.expect("read");
+        let response = String::from_utf8_lossy(&buf[..n]);
+        let status_line = response.lines().next().unwrap_or_default();
+        // e.g. "HTTP/1.1 403 Forbidden"
+        status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|code| code.parse::<u16>().ok())
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn replay_ws_rejects_cross_site_upgrade() {
+        let harness = TestAdminState::builder().build();
+        let (addr, handle) = spawn_server(harness.state()).await;
+        // A cross-site browser attempts the WebSocket upgrade. The CSWSH guard
+        // must reject it with 403 before any upgrade handshake completes.
+        let status = raw_ws_upgrade_status(
+            addr,
+            "Origin: http://evil.example.com\r\nSec-Fetch-Site: cross-site\r\n",
+        )
+        .await;
+        assert_eq!(status, 403, "cross-site WS upgrade must be rejected");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn replay_ws_rejects_cross_origin_upgrade_without_sec_fetch() {
+        let harness = TestAdminState::builder().build();
+        let (addr, handle) = spawn_server(harness.state()).await;
+        // Even without Sec-Fetch-Site, a foreign Origin must be rejected.
+        let status = raw_ws_upgrade_status(addr, "Origin: http://attacker.example.com\r\n").await;
+        assert_eq!(status, 403, "cross-origin WS upgrade must be rejected");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn replay_ws_allows_same_origin_upgrade() {
+        let harness = TestAdminState::builder().build();
+        let (addr, handle) = spawn_server(harness.state()).await;
+        // Same-origin upgrade must pass the CSWSH guard (status switches to 101
+        // protocol upgrade, never the guard's 403).
+        let origin = format!("Origin: http://{addr}\r\n");
+        let status = raw_ws_upgrade_status(addr, &origin).await;
+        assert_ne!(status, 403, "same-origin WS upgrade must not be rejected");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn replay_ws_allows_native_client_without_browser_context() {
+        let harness = TestAdminState::builder().build();
+        let (addr, handle) = spawn_server(harness.state()).await;
+        // Native client: no Origin / Referer / Sec-Fetch headers => not rejected.
+        let status = raw_ws_upgrade_status(addr, "").await;
+        assert_ne!(status, 403, "native WS client must not be rejected");
+        handle.abort();
     }
 }

@@ -198,6 +198,10 @@ pub async fn handle_asr_ws_upgrade(req: Request<Incoming>) -> Response<BoxBody> 
         );
     }
 
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(reason, "ASR WebSocket upgrade rejected (CSWSH guard)");
+        return error_response(StatusCode::FORBIDDEN, "Cross-site WebSocket upgrade rejected");
+    }
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
         None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),

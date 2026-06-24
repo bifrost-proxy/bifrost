@@ -360,6 +360,16 @@ async fn handle_bridge_websocket(
     if !upgrade_header.eq_ignore_ascii_case("websocket") {
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
     }
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(
+            reason,
+            "DevTools bridge WebSocket upgrade rejected (CSWSH guard)"
+        );
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Cross-site WebSocket upgrade rejected",
+        );
+    }
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),
         None => return error_response(StatusCode::BAD_REQUEST, "Missing Sec-WebSocket-Key header"),
@@ -403,6 +413,16 @@ async fn handle_session_websocket(
         .unwrap_or("");
     if !upgrade_header.eq_ignore_ascii_case("websocket") {
         return error_response(StatusCode::BAD_REQUEST, "Invalid upgrade header");
+    }
+    if let Some(reason) = crate::cors::websocket_origin_rejection(req.headers()) {
+        warn!(
+            reason,
+            "DevTools session WebSocket upgrade rejected (CSWSH guard)"
+        );
+        return error_response(
+            StatusCode::FORBIDDEN,
+            "Cross-site WebSocket upgrade rejected",
+        );
     }
     let ws_key = match req.headers().get("Sec-WebSocket-Key") {
         Some(key) => key.to_str().unwrap_or("").to_string(),

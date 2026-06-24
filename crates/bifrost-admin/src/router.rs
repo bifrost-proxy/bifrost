@@ -442,7 +442,9 @@ impl AdminRouter {
 
         if let Some(origin) = header_value(headers, "origin") {
             let host = header_value(headers, "host").unwrap_or_default();
-            if !crate::cors::is_allowed_origin(&origin) && !origin_matches_host(&origin, &host) {
+            if !crate::cors::is_allowed_origin(&origin)
+                && !crate::cors::origin_matches_host(&origin, &host)
+            {
                 return Some(error_response(
                     StatusCode::FORBIDDEN,
                     "Cross-origin admin write request rejected",
@@ -479,28 +481,6 @@ fn header_value(headers: &HeaderMap, name: &str) -> Option<String> {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
 }
-
-fn origin_matches_host(origin: &str, host: &str) -> bool {
-    if host.trim().is_empty() {
-        return false;
-    }
-    let Ok(url) = url::Url::parse(origin) else {
-        return false;
-    };
-    let Some(origin_host) = url.host_str() else {
-        return false;
-    };
-    let origin_port = url.port_or_known_default();
-    let host_lower = host.trim().to_ascii_lowercase();
-    let origin_host_port = match origin_port {
-        Some(port) => format!("{origin_host}:{port}").to_ascii_lowercase(),
-        None => origin_host.to_ascii_lowercase(),
-    };
-    let origin_host_lower = origin_host.to_ascii_lowercase();
-
-    host_lower == origin_host_port || host_lower == origin_host_lower
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -836,11 +816,11 @@ mod tests {
 
     #[test]
     fn test_origin_matches_host_for_remote_admin_origin() {
-        assert!(origin_matches_host(
+        assert!(crate::cors::origin_matches_host(
             "http://192.168.1.25:9900",
             "192.168.1.25:9900"
         ));
-        assert!(!origin_matches_host(
+        assert!(!crate::cors::origin_matches_host(
             "http://evil.example",
             "192.168.1.25:9900"
         ));
