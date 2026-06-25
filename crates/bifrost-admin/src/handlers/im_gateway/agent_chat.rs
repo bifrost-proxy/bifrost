@@ -1546,11 +1546,12 @@ pub(super) async fn process_agent_chat(
         session.work_dir.clone(),
     );
 
+    let worker_agent_config = im_worker_agent_config(agent_config);
     let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
         session_key.to_string(),
         user_message.clone(),
         images.to_vec(),
-        agent_config,
+        &worker_agent_config,
         session.work_dir.clone(),
         history_path,
         Some(format!("{:?}", provider.provider_type).to_lowercase()),
@@ -1577,6 +1578,7 @@ pub(super) async fn process_agent_chat(
                 session_key,
                 worker_pid,
                 stop_tx,
+                progress_tx_for_finish.clone(),
             );
 
             loop {
@@ -1592,9 +1594,13 @@ pub(super) async fn process_agent_chat(
                         continue;
                     }
                     maybe_stop = stop_rx.recv() => {
+                        let stop_reason = maybe_stop
+                            .as_ref()
+                            .and_then(|request| request.reason().map(ToString::to_string))
+                            .unwrap_or_else(|| "已收到 /stop，Agent worker 子进程已停止。".to_string());
                         let _ = worker.terminate().await;
                         stop_ack = maybe_stop;
-                        result = Err("已收到 /stop，Agent worker 子进程已停止。".to_string());
+                        result = Err(stop_reason);
                         break;
                     }
                     event = worker.next_event() => {
@@ -1968,6 +1974,19 @@ pub(super) async fn process_agent_chat(
     .await;
 }
 
+fn im_worker_agent_config(
+    config: &crate::im_gateway::agent::ImAgentConfig,
+) -> crate::im_gateway::agent::ImAgentConfig {
+    const IM_LONG_TASK_STALL_THRESHOLD: u32 = 2;
+    let mut config = config.clone();
+    config.long_task_stall_threshold = match config.long_task_stall_threshold {
+        Some(0) => Some(0),
+        Some(value) => Some(value.min(IM_LONG_TASK_STALL_THRESHOLD)),
+        None => Some(IM_LONG_TASK_STALL_THRESHOLD),
+    };
+    config
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1984,6 +2003,36 @@ mod tests {
         recall: Arc<AtomicUsize>,
         card_update: Arc<AtomicUsize>,
         settings_update: Arc<AtomicUsize>,
+    }
+
+    #[test]
+    fn im_worker_agent_config_caps_default_stall_threshold() {
+        let mut config = crate::im_gateway::agent::ImAgentConfig {
+            long_task_stall_threshold: None,
+            ..Default::default()
+        };
+        assert_eq!(
+            im_worker_agent_config(&config).long_task_stall_threshold,
+            Some(2)
+        );
+
+        config.long_task_stall_threshold = Some(30);
+        assert_eq!(
+            im_worker_agent_config(&config).long_task_stall_threshold,
+            Some(2)
+        );
+
+        config.long_task_stall_threshold = Some(1);
+        assert_eq!(
+            im_worker_agent_config(&config).long_task_stall_threshold,
+            Some(1)
+        );
+
+        config.long_task_stall_threshold = Some(0);
+        assert_eq!(
+            im_worker_agent_config(&config).long_task_stall_threshold,
+            Some(0)
+        );
     }
 
     async fn spawn_progress_card_mock_server() -> (String, ProgressCardMockCounters) {

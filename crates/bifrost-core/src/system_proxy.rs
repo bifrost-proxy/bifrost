@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 #[cfg(target_os = "macos")]
-use std::time::Instant;
+use std::time::{Duration, Instant};
 #[cfg(target_os = "macos")]
 use std::{
     fs::{File, OpenOptions},
@@ -16,6 +16,12 @@ const RUNTIME_FILE_NAME: &str = "runtime.json";
 const STATE_FILE_NAME: &str = "proxy_state.json";
 #[cfg(target_os = "macos")]
 const LOCK_FILE_NAME: &str = ".system_proxy.lock";
+#[cfg(target_os = "macos")]
+const DEFAULT_LOCK_WAIT_TIMEOUT_MS: u64 = 60_000;
+#[cfg(target_os = "macos")]
+const LOCK_WAIT_LOG_INTERVAL_MS: u64 = 5_000;
+#[cfg(target_os = "macos")]
+const LOCK_WAIT_POLL_MS: u64 = 100;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ProxyBackup {
@@ -129,9 +135,7 @@ fn acquire_system_proxy_file_lock(
         context,
         "waiting for system proxy cross-process file lock"
     );
-    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX) } != 0 {
-        return Err(std::io::Error::last_os_error().into());
-    }
+    wait_for_system_proxy_file_lock(&file, data_dir, &lock_path, context)?;
     tracing::info!(
         data_dir = %data_dir.display(),
         lock_path = %lock_path.display(),
@@ -139,6 +143,77 @@ fn acquire_system_proxy_file_lock(
         "acquired system proxy cross-process file lock"
     );
     Ok(SystemProxyFileLock { file, context })
+}
+
+#[cfg(target_os = "macos")]
+fn wait_for_system_proxy_file_lock(
+    file: &File,
+    data_dir: &Path,
+    lock_path: &Path,
+    context: &'static str,
+) -> Result<()> {
+    let timeout = system_proxy_lock_wait_timeout();
+    let started = Instant::now();
+    let mut next_log_at = Duration::ZERO;
+
+    loop {
+        if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+            return Ok(());
+        }
+
+        let error = std::io::Error::last_os_error();
+        let would_block = error.raw_os_error() == Some(libc::EWOULDBLOCK)
+            || error.raw_os_error() == Some(libc::EAGAIN);
+        if !would_block {
+            return Err(error.into());
+        }
+
+        let elapsed = started.elapsed();
+        if elapsed >= timeout {
+            return Err(BifrostError::Config(format!(
+                "Timed out after {}ms waiting for system proxy cross-process file lock (context={context}, data_dir={}, lock_path={}). Another Bifrost process may be stuck while changing macOS system proxy settings.",
+                timeout.as_millis(),
+                data_dir.display(),
+                lock_path.display()
+            )));
+        }
+
+        if elapsed >= next_log_at {
+            tracing::warn!(
+                data_dir = %data_dir.display(),
+                lock_path = %lock_path.display(),
+                context,
+                elapsed_ms = elapsed.as_millis(),
+                timeout_ms = timeout.as_millis(),
+                "still waiting for system proxy cross-process file lock"
+            );
+            next_log_at = elapsed + Duration::from_millis(LOCK_WAIT_LOG_INTERVAL_MS);
+        }
+
+        let remaining = timeout.saturating_sub(elapsed);
+        std::thread::sleep(std::cmp::min(
+            Duration::from_millis(LOCK_WAIT_POLL_MS),
+            remaining,
+        ));
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn system_proxy_lock_wait_timeout() -> Duration {
+    system_proxy_lock_wait_timeout_from_env(
+        std::env::var("BIFROST_SYSTEM_PROXY_LOCK_TIMEOUT_MS")
+            .ok()
+            .as_deref(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn system_proxy_lock_wait_timeout_from_env(value: Option<&str>) -> Duration {
+    let timeout_ms = value
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_LOCK_WAIT_TIMEOUT_MS);
+    Duration::from_millis(timeout_ms)
 }
 
 #[cfg(target_os = "macos")]
@@ -3264,6 +3339,27 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("No enabled macOS network services"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn system_proxy_lock_timeout_env_defaults_and_overrides() {
+        assert_eq!(
+            system_proxy_lock_wait_timeout_from_env(None),
+            std::time::Duration::from_millis(DEFAULT_LOCK_WAIT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            system_proxy_lock_wait_timeout_from_env(Some("250")),
+            std::time::Duration::from_millis(250)
+        );
+        assert_eq!(
+            system_proxy_lock_wait_timeout_from_env(Some("0")),
+            std::time::Duration::from_millis(DEFAULT_LOCK_WAIT_TIMEOUT_MS)
+        );
+        assert_eq!(
+            system_proxy_lock_wait_timeout_from_env(Some("not-a-number")),
+            std::time::Duration::from_millis(DEFAULT_LOCK_WAIT_TIMEOUT_MS)
+        );
     }
 
     #[cfg(target_os = "macos")]

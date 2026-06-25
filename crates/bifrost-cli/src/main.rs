@@ -343,7 +343,7 @@ fn run_cli_main() {
             commands::agent::handle_agent_command("127.0.0.1", get_effective_port(cli.port), action)
         }
         Some(Commands::Script { action }) => handle_script_command(action),
-        Some(Commands::Upgrade { yes, restart }) => handle_upgrade(yes, restart),
+        Some(Commands::Upgrade { yes }) => handle_upgrade(yes),
         Some(Commands::SelfUpdate { target, source }) => {
             commands::handle_upgrade_background(target, source);
             Ok(())
@@ -916,10 +916,7 @@ mod tests {
         ));
         assert!(!should_run_update_notice(
             true,
-            Some(&Commands::Upgrade {
-                yes: false,
-                restart: false,
-            })
+            Some(&Commands::Upgrade { yes: false })
         ));
         assert!(should_run_update_notice(
             true,
@@ -1043,10 +1040,7 @@ mod tests {
         ));
         assert!(!should_run_update_notice(
             true,
-            Some(&Commands::Upgrade {
-                yes: false,
-                restart: false,
-            }),
+            Some(&Commands::Upgrade { yes: false }),
         ));
         assert!(should_run_update_notice(
             true,

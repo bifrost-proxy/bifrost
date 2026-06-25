@@ -12,7 +12,7 @@ export BIFROST_DISABLE_TRAY
 # 由于真实 upgrade 需要网络和版本差异，我们通过以下方式验证：
 # 1. 无 daemon 运行时 upgrade 不报错（不触发重启逻辑）
 # 2. 有 daemon 运行时 upgrade（版本已最新不触发重启）不报错
-# 3. --restart 参数与 daemon 模式启动的组合
+# 3. 默认自动重启语义与 daemon 模式启动的组合
 # 4. 验证 runtime.json 中信息正确性，确保重启时能正确读取
 # 5. 源码门禁验证 upgrade 的真实重启路径在 stop 后等待端口释放，避免 EADDRINUSE 崩溃
 
@@ -129,7 +129,7 @@ test_upgrade_no_daemon_no_error() {
     _log_info "case: upgrade without running daemon -> no error"
 
     local result
-    result=$(run_bifrost upgrade -y --restart)
+    result=$(run_bifrost upgrade)
     local exit_ok=$?
 
     if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check"; then
@@ -163,7 +163,7 @@ test_upgrade_with_daemon_version_current() {
     _log_pass "daemon started on port $PROXY_PORT (PID: $PROXY_PID)"
 
     local result
-    result=$(run_bifrost upgrade -y)
+    result=$(run_bifrost upgrade)
 
     if echo "$result" | grep -qi "already on the latest\|could not check"; then
         _log_pass "upgrade correctly reports version status with daemon running"
@@ -221,8 +221,8 @@ test_runtime_json_contains_correct_info() {
     stop_daemon
 }
 
-test_upgrade_restart_flag_with_daemon_no_update() {
-    _log_info "case: upgrade --restart with daemon but no version update -> daemon stays"
+test_upgrade_default_with_daemon_no_update() {
+    _log_info "case: upgrade with daemon but no version update -> daemon stays"
 
     if ! start_daemon; then
         _log_fail "daemon started" "running" "failed to start"
@@ -237,16 +237,16 @@ test_upgrade_restart_flag_with_daemon_no_update() {
     local old_pid="$PROXY_PID"
 
     local result
-    result=$(run_bifrost upgrade -y --restart)
+    result=$(run_bifrost upgrade)
 
     if echo "$result" | grep -qi "already on the latest\|could not check"; then
-        _log_pass "upgrade --restart reports version status correctly"
+        _log_pass "upgrade reports version status correctly"
     else
-        _log_fail "upgrade --restart output" "version status" "$result"
+        _log_fail "upgrade output" "version status" "$result"
     fi
 
     if kill -0 "$old_pid" 2>/dev/null; then
-        _log_pass "daemon not restarted (no version change, even with --restart)"
+        _log_pass "daemon not restarted when no version changed"
     else
         _log_fail "daemon still running" "running" "not running (incorrectly restarted)"
         PROXY_PID=""
@@ -256,23 +256,23 @@ test_upgrade_restart_flag_with_daemon_no_update() {
     stop_daemon
 }
 
-test_upgrade_restart_flag_in_help() {
-    _log_info "case: --restart flag documented in help"
+test_upgrade_restart_flag_removed_from_help() {
+    _log_info "case: --restart flag removed from help"
 
     local result
     result=$("$BIFROST_BIN" upgrade --help 2>&1 || true)
 
-    if echo "$result" | grep -q "\-\-restart"; then
-        _log_pass "--restart flag present in upgrade help"
+    if ! echo "$result" | grep -q "\-\-restart"; then
+        _log_pass "--restart flag absent from upgrade help"
     else
-        _log_fail "--restart in help" "flag listed" "not found"
+        _log_fail "--restart in help" "flag removed" "still listed"
         return 1
     fi
 
     if echo "$result" | grep -qi "restart.*running\|running.*proxy\|automatically restart"; then
-        _log_pass "--restart help description mentions proxy restart"
+        _log_pass "upgrade help description mentions default proxy restart"
     else
-        _log_fail "--restart description" "mentions restart" "description unclear"
+        _log_fail "upgrade restart description" "mentions default restart" "description unclear"
     fi
 }
 
@@ -285,7 +285,7 @@ test_upgrade_restart_port_release_guard_in_source() {
         && grep -q "fn restart_ports_from_runtime" "$source_file" \
         && grep -q "info.socks5_port" "$source_file" \
         && grep -q "restart_executable_for_install_method(&install_method)" "$source_file" \
-        && grep -q "maybe_restart_running_proxy(restart, &restart_executable)" "$source_file" \
+        && grep -q "maybe_restart_running_proxy(&restart_executable)" "$source_file" \
         && grep -q "Command::new(restart_executable)" "$source_file" \
         && grep -q "Proxy port .*still occupied after" "$source_file" \
         && grep -q "find_process_on_port(port)" "$source_file" \
@@ -404,7 +404,7 @@ test_windows_upgrade_defers_self_replacement_in_source() {
 main() {
     TEST_DATA_DIR="$(mktemp -d)"
 
-    test_upgrade_restart_flag_in_help || true
+    test_upgrade_restart_flag_removed_from_help || true
     test_upgrade_restart_port_release_guard_in_source || true
     test_upgrade_restart_port_guard_covers_windows || true
     test_macos_daemon_start_uses_exec_child_guard || true
@@ -413,7 +413,7 @@ main() {
     test_upgrade_no_daemon_no_error || true
     test_upgrade_with_daemon_version_current || true
     test_runtime_json_contains_correct_info || true
-    test_upgrade_restart_flag_with_daemon_no_update || true
+    test_upgrade_default_with_daemon_no_update || true
 
     print_test_summary || exit 1
 }

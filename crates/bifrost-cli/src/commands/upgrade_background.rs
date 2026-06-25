@@ -3,8 +3,8 @@
 //! This wraps the existing interactive upgrade engine ([`super::upgrade`]) with:
 //! 1. a process-global progress *sink* that records [`UpgradeProgress`] to the
 //!    shared file channel in `bifrost-core`, and
-//! 2. an unattended driver equivalent to `bifrost upgrade --yes --restart` that
-//!    never blocks on stdin.
+//! 2. an unattended driver equivalent to `bifrost upgrade` that never blocks on
+//!    stdin and auto-restarts a running proxy after installation.
 //!
 //! The reporting hooks called from `upgrade.rs` are no-ops unless a background
 //! upgrade has installed a sink, so the normal interactive CLI path is

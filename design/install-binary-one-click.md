@@ -23,7 +23,7 @@
 - Windows 上当前运行的 `bifrost.exe` 不能被同一进程直接替换；`bifrost upgrade` 检测到手动安装目标就是当前 exe 时必须提前给出明确错误，引导用户使用外部 PowerShell 安装脚本或 updater 进程，不能在 `remove_file` 阶段才暴露模糊的 permission denied。
 - macOS 和 Windows 上 `start --daemon` 不再让 fork 出来的 child 继续执行完整代理初始化，Windows 也不再返回 daemon unsupported。父进程改为通过 `std::process::Command` 启动当前二进制的 exec 子进程，并设置内部环境变量 `BIFROST_DETACHED_DAEMON_CHILD=1`。exec 子进程绕过二次 daemon fork，按前台启动路径初始化服务，但继续写入 `runtime_start_mode=daemon`，保留 daemon 的系统代理生命周期语义；父进程重定向 stdout/stderr 到 daemon log，切换 child working directory 到 `BIFROST_DATA_DIR`，macOS/Linux 使用 `setsid()` 脱离当前终端，Windows 使用 `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW`，并等待代理监听端口 ready 或 child 提前退出。ready 探测和 Admin UI 提示会把 `0.0.0.0`、`::`、`[::]` 归一到 `127.0.0.1`，避免 wildcard listener 被误当成不可连接地址。该链路避免 macOS Objective-C runtime 在 fork 后首次初始化时触发 `objc_initializeAfterForkError`，同时保留后台进程可 stop/restart/status 管理的用户行为。
 - `bifrost upgrade` 替换二进制后的 `bifrost --version` 校验必须有硬超时。该校验只用于判断新二进制是否可运行，不能把整个 upgrade 命令无限卡住；超时按校验失败处理并进入既有错误/回退提示路径。
-- Debug 构建提供本地 upgrade E2E 专用环境变量 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 和 `BIFROST_UPGRADE_TEST_ARCHIVE`，用于在无网络、无真实 GitHub release 的本机测试中构造“旧 daemon 正在运行 -> `upgrade -y --restart` 下载/解压本地 archive -> 替换安装路径二进制 -> stop 旧 daemon -> 用新二进制 restart”的完整链路。该测试入口只在 `debug_assertions` 下编译，正式 release 不读取这些变量。
+- Debug 构建提供本地 upgrade E2E 专用环境变量 `BIFROST_UPGRADE_TEST_LATEST_VERSION` 和 `BIFROST_UPGRADE_TEST_ARCHIVE`，用于在无网络、无真实 GitHub release 的本机测试中构造“旧 daemon 正在运行 -> `upgrade` 下载/解压本地 archive -> 替换安装路径二进制 -> stop 旧 daemon -> 用新二进制 restart”的完整链路。该测试入口只在 `debug_assertions` 下编译，正式 release 不读取这些变量。
 - 最新版本探测不再按 `github.com -> mirror` 串行等待完整超时；Bash 通过并发重定向探测抢最快结果，PowerShell 通过短超时探测先选源再读取 `releases/latest` 重定向，避免默认 GitHub 直连在受限网络中拖到完整下载超时。
 - `BIFROST_GITHUB_MIRROR` 仍作为优先候选源保留，`BIFROST_DOWNLOAD_CONNECT_TIMEOUT`、`BIFROST_DOWNLOAD_TIMEOUT`、`BIFROST_DOWNLOAD_TRIES` 继续控制下载；`BIFROST_MIRROR_PROBE_TIMEOUT` 控制镜像轻量探测超时，默认 5 秒。Bash installer 与 `bifrost upgrade` 均读取这些环境变量。
 - 默认 post-install 顺序固定为：
@@ -117,7 +117,7 @@
   - 验证 `BIFROST_INSTALL_POST_INSTALL_TIMEOUT=1` 时，卡住的 post-install 子命令返回 124，安装脚本不无限等待。
   - 验证 `--help` 展示 post-install opt-out 参数和环境变量。
 - 更新 `e2e-tests/tests/test_upgrade_restart_e2e.sh`：
-  - 保留无 daemon、有 daemon 但已最新、`--restart` 已最新和 runtime.json 参数回归。
+  - 保留无 daemon、有 daemon但已最新、默认自动重启帮助文案和 runtime.json 参数回归，并断言 `--restart` 已从 upgrade 帮助中移除。
   - 增加源码门禁，确认 upgrade 的真实重启路径包含 `wait_for_restart_ports_release`、HTTP/SOCKS5 多端口收集、端口占用错误文案、`find_process_on_port` 诊断和系统代理恢复，避免后续改动绕过端口释放保护或失败恢复。
   - 增加 Windows 覆盖门禁，确认 `wait_for_restart_port_release` 与 `wait_for_port_released` 以 `cfg(any(unix, windows))` 编译、不残留 `cfg(not(unix))` 的 unix-only 回退，避免 Windows upgrade 重启再次退回到不等端口释放的竞态路径。
   - 增加 macOS/Windows daemon exec child 源码门禁，确认 `start --daemon` 使用 exec 子进程、`BIFROST_DETACHED_DAEMON_CHILD`、`setsid()`、Windows detached process flags、`current_dir(&bifrost_dir)`、wildcard host ready 探测归一和 main daemon bypass，防止重回 fork 后初始化完整运行时的崩溃路径，并避免 Windows upgrade restart 无法启动后台服务。
@@ -125,7 +125,7 @@
 - 新增 `e2e-tests/tests/test_upgrade_local_restart_e2e.sh`：
   - 选择本机旧版 `0.0.99` 二进制作为运行中的旧 daemon；通过 `BIFROST_BIN` 指向当前源码构建出的新二进制。
   - 创建临时安装目录和本地 release archive，使用 debug-only upgrade hook 把 archive 作为最新版本下载源。
-  - 执行真实 `upgrade -y --restart`，断言输出包含检测运行中代理、停止旧代理、等待端口释放、重启成功四个里程碑。
+  - 执行真实 `upgrade`，断言输出包含检测运行中代理、停止旧代理、等待端口释放、重启成功四个里程碑。
   - 断言 restart 后 PID 变化、新 daemon 使用升级后的安装路径、Admin API ready、错误日志没有 ObjC fork-safety crash、upgrade 输出与新 runtime 都保留 `--no-system-proxy` 模式、stop 后端口释放且无同数据目录 tray helper 残留。
 
 ### 真实场景测试
@@ -146,7 +146,8 @@
   - 验证 `bifrost upgrade` 重启路径在 stop 后等待端口释放，端口仍被占用时先恢复系统代理、再输出明确诊断，不再把 `EADDRINUSE` 包装成模糊 readiness/network error。
   - 验证 runtime.json 缺失时 upgrade restart 等同于使用当前默认配置启动，仍保留默认配置中的 system proxy 开关和 bypass；legacy runtime 缺失 system proxy 字段时继续显式关闭 system proxy。
   - 验证 macOS/Windows daemon exec child 源码门禁、Windows detached process flags 和 wildcard listener ready 探测归一。
-  - 验证本地构造的真实 upgrade restart 链路：旧 daemon 运行中，`upgrade -y --restart` 替换为本地 archive 中的新二进制，新 daemon 自动启动并可停止。
+  - 验证本地构造的真实 upgrade restart 链路：旧 daemon 运行中，`upgrade` 替换为本地 archive 中的新二进制，新 daemon 自动启动并可停止。
+  - 验证 IM/Agent 场景的升级与重启收口：daemon shutdown 会先向 active worker 进度通道写入“Bifrost 正在重启或关闭”的失败终态，worker stdout BrokenPipe 被降级为管道关闭，IM 长任务默认 2 次无输出心跳后把控制权还给模型但不终止底层 exec session。
 - 更新 `human_tests/cli-start-stop-status.md`：
   - 新增 macOS daemon exec child 回归用例，使用临时数据目录启动真实 daemon，确认 start/status/stop 均正常、`runtime.json` 仍标记 daemon、日志中不再出现 `+[NSNumber initialize]` 或 `objc_initializeAfterForkError`，stop 后不残留同数据目录的 tray helper。
 

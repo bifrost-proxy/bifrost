@@ -77,12 +77,12 @@ cargo build --release -p bifrost
 只要用户没有明确要求"固定当前版本"或"禁止升级"，都应在首次检查通过后继续执行：
 
 ```bash
-bifrost upgrade -y
+bifrost upgrade
 bifrost --version
 bifrost install-skill -y 
 ```
 
-- `bifrost upgrade -y` 会跳过确认提示
+- `bifrost upgrade` 默认无交互执行升级；如果检测到正在运行的代理，升级成功后会自动重启代理以加载新二进制
 - 若升级失败，再回退到官方安装脚本重新安装最新版本
 - 如果用户只允许最小改动，至少要告知"当前跳过升级，后续行为基于现有版本"
 
@@ -628,7 +628,6 @@ JSON 字段包含 `pid / version / proxy_port / admin_port / uptime_ms / system_
 
 ```bash
 bifrost upgrade
-bifrost upgrade -y            # 跳过确认
 bifrost version-check         # 仅检查新版本，不升级
 ```
 
