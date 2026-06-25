@@ -22,6 +22,9 @@
   - `fetchNotifications` 支持同时透传通知类型与状态筛选。
   - `handleMarkAllRead`、`handleUpdateStatus` 支持按当前 Tab 与当前状态筛选刷新，避免操作后回退成未筛选列表。
   - `setActiveTab` 仅切换当前 Tab，由表格组件自己按默认筛选发起请求。
+- `crates/bifrost-admin/src/notification_db.rs`
+  - 通知持久化数据库只保留最新 `200` 条记录。
+  - 每次 `create_notification` 写入后立即执行清理，先删除超过 `90` 天的旧记录，再按 `id DESC` 保留最新 `200` 条，避免通知中心长期运行导致 `notifications.db` 继续膨胀。
 
 ## 依赖项
 
@@ -34,6 +37,7 @@
   - 新增 `web/src/stores/useNotificationStore.test.ts`
   - 验证 `fetchNotifications` 会按 tab/status 正确拼装请求参数
   - 验证 `handleMarkAllRead`、`handleUpdateStatus` 操作后会按当前筛选刷新
+  - `cargo test -p bifrost-admin notification_db --lib` 验证通知数据库超过上限时只保留最新 `200` 条，并覆盖每次写入后的清理路径
 - E2E 测试：
   - 新增 `web/tests/ui/notifications.spec.ts`
   - 验证三个通知表顶部均显示状态筛选，默认只展示未读消息
@@ -42,6 +46,7 @@
 - 真实场景测试（human_tests）：
   - 新增 `human_tests/webui-notifications.md`
   - 覆盖三张通知表默认未读、状态切换、固定分页三个核心场景
+  - 覆盖临时通知数据库写入 `205` 条后，真实清理结果仅保留最新 `200` 条
 
 ## 校验要求（含 rust-project-validate）
 

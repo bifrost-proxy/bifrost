@@ -1,19 +1,13 @@
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bifrost_core::{BifrostError, Result};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-const MAX_NOTIFICATION_RECORDS: i64 = 2000;
-const CLEANUP_TRIGGER_PERCENT: i64 = 110;
-const CLEANUP_TARGET_PERCENT: i64 = 80;
-const CLEANUP_CHECK_INTERVAL: u64 = 10;
+const MAX_NOTIFICATION_RECORDS: i64 = 200;
 const MAX_NOTIFICATION_AGE_DAYS: i64 = 90;
 const NOTIFICATION_SCHEMA_VERSION: u32 = 1;
-
-static WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationRecord {
@@ -334,10 +328,6 @@ pub fn count_unread() -> Result<i64> {
 }
 
 fn cleanup_old_records(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
-    let old = WRITE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    if !old.is_multiple_of(CLEANUP_CHECK_INTERVAL) {
-        return Ok(());
-    }
     do_cleanup(conn)
 }
 
@@ -348,22 +338,19 @@ fn do_cleanup(conn: &Connection) -> std::result::Result<(), rusqlite::Error> {
         params![cutoff_ts],
     )?;
 
-    let trigger_threshold = MAX_NOTIFICATION_RECORDS * CLEANUP_TRIGGER_PERCENT / 100;
     let current_count: i64 =
         conn.query_row("SELECT COUNT(1) FROM notifications", [], |row| row.get(0))?;
 
-    if current_count > trigger_threshold {
-        let target = MAX_NOTIFICATION_RECORDS * CLEANUP_TARGET_PERCENT / 100;
+    if current_count > MAX_NOTIFICATION_RECORDS {
         tracing::info!(
             current_count,
-            trigger_threshold,
-            target,
-            "[NOTIFICATION_DB] Cleanup triggered: trimming to {target} records"
+            max_records = MAX_NOTIFICATION_RECORDS,
+            "[NOTIFICATION_DB] Cleanup triggered: trimming to latest records"
         );
         conn.execute(
             "DELETE FROM notifications WHERE id NOT IN \
              (SELECT id FROM notifications ORDER BY id DESC LIMIT ?1)",
-            params![target],
+            params![MAX_NOTIFICATION_RECORDS],
         )?;
     }
 
@@ -470,7 +457,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_skips_when_below_trigger_threshold() {
+    fn test_cleanup_keeps_records_when_below_limit() {
         let (_tmp, conn) = setup_test_db();
         let now = chrono::Utc::now().timestamp();
 
@@ -492,13 +479,11 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_trims_to_target_when_over_trigger() {
+    fn test_cleanup_trims_to_latest_200_records() {
         let (_tmp, conn) = setup_test_db();
         let now = chrono::Utc::now().timestamp();
 
-        let trigger = MAX_NOTIFICATION_RECORDS * CLEANUP_TRIGGER_PERCENT / 100;
-        let target = MAX_NOTIFICATION_RECORDS * CLEANUP_TARGET_PERCENT / 100;
-        let insert_count = trigger + 10;
+        let insert_count = MAX_NOTIFICATION_RECORDS + 5;
         for i in 0..insert_count {
             conn.execute(
                 "INSERT INTO notifications(notification_type, title, message, status, created_at, updated_at) \
@@ -513,31 +498,36 @@ mod tests {
         let count: i64 = conn
             .query_row("SELECT COUNT(1) FROM notifications", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(count, target);
+        assert_eq!(count, MAX_NOTIFICATION_RECORDS);
+
+        let min_id: i64 = conn
+            .query_row("SELECT MIN(id) FROM notifications", [], |row| row.get(0))
+            .unwrap();
+        let max_id: i64 = conn
+            .query_row("SELECT MAX(id) FROM notifications", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(min_id, 6);
+        assert_eq!(max_id, insert_count);
     }
 
     #[test]
-    fn test_cleanup_respects_check_interval() {
-        let (_tmp, conn) = setup_test_db();
-        let now = chrono::Utc::now().timestamp();
-        let expired_ts = now - 91 * 86400;
+    fn test_cleanup_runs_after_every_notification_write() {
+        let tmp = tempfile::tempdir().unwrap();
+        let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(tmp.path());
 
-        WRITE_COUNTER.store(1, Ordering::Relaxed);
-
-        for i in 0..5 {
-            conn.execute(
-                "INSERT INTO notifications(notification_type, title, message, status, created_at, updated_at) \
-                 VALUES ('test', ?1, 'old', 'read', ?2, ?2)",
-                params![format!("old-{i}"), expired_ts],
-            )
+        for i in 0..(MAX_NOTIFICATION_RECORDS + 5) {
+            create_notification(&CreateNotification {
+                notification_type: "test".to_string(),
+                title: format!("n-{i}"),
+                message: "msg".to_string(),
+                metadata: None,
+            })
             .unwrap();
         }
 
-        cleanup_old_records(&conn).unwrap();
-
-        let count: i64 = conn
-            .query_row("SELECT COUNT(1) FROM notifications", [], |row| row.get(0))
-            .unwrap();
-        assert_eq!(count, 5, "should skip cleanup when not at check interval");
+        let records = list_notifications(None, None, 500, 0).unwrap();
+        assert_eq!(records.len(), MAX_NOTIFICATION_RECORDS as usize);
+        assert_eq!(records.first().unwrap().title, "n-204");
+        assert_eq!(records.last().unwrap().title, "n-5");
     }
 }
