@@ -636,8 +636,35 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 如果用户在授权页面完成登录，runner 等待授权流结束；若页面没有自动回到原 conversation，才主动跳回目标 URL 一次并继续任务。
 - 如果授权流一直未完成，用户可见反馈应指向“需要重新登录 ChatGPT Web”，而不是长期刷新浏览器页面。
 
+### TC-CWA-28：回归 - ChatGPT Web Runner 只使用共享浏览器 profile
+
+**前置条件**：使用已登录或 mock 的 `chatgpt_web` runner；准备隔离 `BIFROST_DATA_DIR`，确保 `agent/im_gateway/chatgpt_web/browser_profile` 是 Runner 配置中的唯一浏览器用户数据目录。
+
+**操作步骤**：
+1. 执行代码级回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile --lib -- --nocapture
+   ```
+2. 执行 E2E 包装脚本：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+3. 真实或 mock run 完成后，检查数据目录：
+   ```bash
+   find "$BIFROST_DATA_DIR/im_gateway/runs" -maxdepth 2 -type d -name chatgpt_web_fresh_profile -print
+   find "$BIFROST_DATA_DIR/agent/im_gateway/chatgpt_web" -maxdepth 2 -type d -name browser_profile -print
+   ```
+4. 检查浏览器进程命令行，确认 `--user-data-dir` 指向 `agent/im_gateway/chatgpt_web/browser_profile` 或用户显式配置的共享 `profileDir`，而不是任意 `im_gateway/runs/<run_id>/chatgpt_web_fresh_profile`。
+
+**预期结果**：
+- 新建 ChatGPT 对话和续接已有 conversation 都使用同一个共享 `profileDir`。
+- `im_gateway/runs/<run_id>/` 只保存 prompt、handoff、final、diagnostics、downloaded artifacts 等 run 产物，不出现 `chatgpt_web_fresh_profile`。
+- 不再出现由 run-local profile 持有的孤儿 Edge/Chrome 进程。
+- 登录态、CDP tab 池、conversation tab LRU 和浏览器复用仍由共享 profile 统一管理。
+
 ## 真实执行记录
 
+- 2026-06-25：执行 TC-CWA-28 代码级回归通过。确认 `ask_send_and_wait` 不再包含 `chatgpt_web_fresh_profile`、`with_profile_dir` 或 `cleanup_fresh_run_profile`，新建对话和续接 conversation 统一使用 `RuntimeConfig.profile_dir`。随后执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过，验证 E2E 包装脚本可在不依赖真实 ChatGPT 登录的情况下阻断 run-local Chromium profile 回归。
 - 2026-06-03：执行 TC-CWA-27 通过。现场确认默认任务 `76612de33e9740bc92440ce64a98a4cb` 的 Daily Agent 当前 run `1780447855777-aa643349-f391-4050-8e48-fd166b2786e7` 使用 `runner=web` 且仍为 running；前一条真实失败样本 `1780447535923-fb3febe2-74d3-4db4-ae80-f66b21f85523` 中 `auth_probe.json` 为 `loggedIn=true/accountStatus=403`，但 `failure_diagnostics.json` 的实际页面为 `https://chatgpt.com/auth/login`，正文包含“登录即可开始聊天”，错误为 `browser_ui: composer not ready`。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin auth_flow_pages_are_not_retryable_conversation_navigation --lib -- --nocapture` 通过，验证 ChatGPT 登录页与 Google OAuth 页面都被识别为授权流页面，且不会进入 conversation 重导航分支。
 - 2026-05-26：执行 TC-CWA-26 代码级与默认 Runner CDP 真实点击回归通过。使用用户提供的真实 ChatGPT DOM 结构确认问题形态：最终 assistant message `4cd623b5-3870-49a3-bb64-ffd3b06c769b` 中 5 张信息卡和 `5 张图片 ZIP` 都是 `button.behavior-btn` / `entity-underline`，不是 `<img>` 或 `<a href>`；历史 run `1779784377984-e0206a71-0333-4ac6-8dd5-9dd090ce24ab` 的 `conversation_final.json` 为 `imageCount=0` 且最终 response 停在 `打包下载：`。默认 Runner CDP 使用已有登录态打开 `https://chatgpt.com/c/6a155ad4-1d74-83ec-bc1d-bc1faccf276b`，点击 `大模型竞争格局` 后 dialog 出现 `alt=大模型竞争格局` 的原图 `<img>`，图片 URL 为 `backend-api/estuary/content?id=file_00000000c37c7230a857de6a3fd1c397&fn=ai_infographic_01_overview.png`，同时页面预取其余 4 张 `ai_infographic_02_timeline.png`、`ai_infographic_03_anthropic_profit.png`、`ai_infographic_04_llm_intelligence.png`、`ai_infographic_05_today_news.png`；点击 `5 张图片 ZIP` 后收到 `downloadWillBegin` / `downloadProgress completed`，下载 URL 为 `backend-api/estuary/content?id=file_000000007e9871fda9b7c4b602594f18&fn=ai_infographics_5_images.zip`，文件 `/tmp/bifrost-chatgpt-web-live-download-20260526180404/ai_infographics_5_images.zip` 大小 `1499429` 字节。修复后 targeted 单测确认 DOM 提取源码扫描 `button.behavior-btn`、输出 `artifactCount` / `chatgpt_behavior_button`，Runner 会下载 behavior 图片为本地 PNG Markdown、写入 `downloadedArtifacts`，并把 ZIP 本地链接追加到最终投递文本。
 - 2026-05-26：执行 TC-CWA-25 通过。代码级命令 `cargo test -p bifrost-admin chatgpt_web_startup_auth --lib` 通过 2 项，确认服务层会收集所有 `adapter=chatgpt_web` 的 runner（包括未启用但可被显式选择的自定义 runner），且 dry-run 模式下缺失登录态会返回“would open login browser”。E2E 命令 `bash e2e-tests/tests/test_chatgpt_web_startup_auth_preflight.sh` 使用隔离数据目录和自定义 runner `web` 启动 Bifrost，设置 `BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1` 避免 CI 弹真实浏览器；日志出现 `would open login browser` 与 `chatgpt_web startup auth: login still required`，随后 Auth Status API 返回 `state=logged_out`、`loggedIn=false`、`statePath` 指向测试配置的 `startup-auth-e2e.json`，证明启动预检已在首次使用 runner 前执行。

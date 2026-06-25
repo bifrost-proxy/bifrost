@@ -68,6 +68,24 @@ fn native_clipboard_paste_uses_browser_clipboard_api_not_system_clipboard() {
 }
 
 #[test]
+fn ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile() {
+    let source = include_str!("../chatgpt_web.rs");
+
+    assert!(
+        !source.contains("chatgpt_web_fresh_profile"),
+        "ChatGPT Web runs must not create a Chromium profile under im_gateway/runs"
+    );
+    assert!(
+        !source.contains("with_profile_dir"),
+        "ChatGPT Web send/wait must use the configured shared browser profile"
+    );
+    assert!(
+        !source.contains("cleanup_fresh_run_profile"),
+        "run-local profile cleanup is a symptom of the disallowed run-local profile path"
+    );
+}
+
+#[test]
 fn native_clipboard_paste_scales_send_button_waits_for_large_prompts() {
     assert_eq!(
         send_button_ready_max_wait(&"a".repeat(120)),
