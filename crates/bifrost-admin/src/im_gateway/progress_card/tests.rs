@@ -321,6 +321,54 @@ fn consecutive_process_tools_are_grouped_by_default() {
 }
 
 #[test]
+fn process_timeline_keeps_latest_thirty_tool_calls_with_omission_notice() {
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "long task");
+    for index in 0..35 {
+        snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
+            log: ToolCallLog {
+                tool_name: "exec_command".to_string(),
+                arguments: format!(r#"{{"cmd":"echo tool-{index}"}}"#),
+                result: format!("result-{index}"),
+                success: true,
+            },
+            duration_ms: 10 + index,
+        });
+    }
+
+    let card = build_feishu_progress_card(&snapshot, true);
+    let process_element = card["body"]["elements"]
+        .as_array()
+        .and_then(|elements| {
+            elements
+                .iter()
+                .find(|element| element["element_id"] == PROCESS_PANEL_ELEMENT_ID)
+        })
+        .expect("process element");
+    assert_eq!(
+        process_element["header"]["title"]["content"],
+        "执行过程：已运行 35 条命令"
+    );
+    let process_elements = process_element["elements"].as_array().unwrap();
+    assert_eq!(process_elements[0]["element_id"], PROCESS_LOG_ELEMENT_ID);
+    assert!(process_elements[0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("已省略前面 5 次工具调用，仅显示最新 30 次。"));
+    assert_eq!(process_elements[1]["element_id"], "ap_tg_5");
+
+    let grouped_tools = process_elements[1]["elements"].as_array().unwrap();
+    assert_eq!(grouped_tools.len(), 30);
+    assert_eq!(grouped_tools[0]["element_id"], "ap_t_5");
+    assert_eq!(grouped_tools[29]["element_id"], "ap_t_34");
+
+    let serialized = serde_json::to_string(&card).unwrap();
+    assert!(!serialized.contains("tool-0"));
+    assert!(!serialized.contains("result-4"));
+    assert!(serialized.contains("tool-5"));
+    assert!(serialized.contains("result-34"));
+}
+
+#[test]
 fn feishu_progress_card_expands_process_while_running_and_collapses_after_finish() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "stream task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantDelta {
@@ -856,27 +904,42 @@ struct MockFeishuProgressServer {
     recall_counter: Arc<std::sync::atomic::AtomicUsize>,
     card_update_counter: Arc<std::sync::atomic::AtomicUsize>,
     settings_update_counter: Arc<std::sync::atomic::AtomicUsize>,
+    card_create_payloads: Arc<std::sync::Mutex<Vec<String>>>,
+    card_update_payloads: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(None, None).await
+    spawn_mock_feishu_progress_server_with_failures(None, None, None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_send_failure(
     fail_message_send_number: Option<usize>,
 ) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(fail_message_send_number, None).await
+    spawn_mock_feishu_progress_server_with_failures(fail_message_send_number, None, None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_card_update_failure(
     fail_card_update_number: Option<usize>,
 ) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_number).await
+    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_number, None).await
+}
+
+async fn spawn_mock_feishu_progress_server_with_card_update_and_create_failure(
+    fail_card_update_number: Option<usize>,
+    fail_card_create_number: Option<usize>,
+) -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_failures(
+        None,
+        fail_card_update_number,
+        fail_card_create_number,
+    )
+    .await
 }
 
 async fn spawn_mock_feishu_progress_server_with_failures(
     fail_message_send_number: Option<usize>,
     fail_card_update_number: Option<usize>,
+    fail_card_create_number: Option<usize>,
 ) -> MockFeishuProgressServer {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -892,6 +955,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let recall_counter = Arc::new(AtomicUsize::new(0));
     let card_update_counter = Arc::new(AtomicUsize::new(0));
     let settings_update_counter = Arc::new(AtomicUsize::new(0));
+    let card_create_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let card_update_payloads = Arc::new(std::sync::Mutex::new(Vec::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind mock feishu server");
@@ -901,6 +966,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     let recall_counter_for_server = Arc::clone(&recall_counter);
     let card_update_counter_for_server = Arc::clone(&card_update_counter);
     let settings_update_counter_for_server = Arc::clone(&settings_update_counter);
+    let card_create_payloads_for_server = Arc::clone(&card_create_payloads);
+    let card_update_payloads_for_server = Arc::clone(&card_update_payloads);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -912,6 +979,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
             let recall_counter = Arc::clone(&recall_counter_for_server);
             let card_update_counter = Arc::clone(&card_update_counter_for_server);
             let settings_update_counter = Arc::clone(&settings_update_counter_for_server);
+            let card_create_payloads = Arc::clone(&card_create_payloads_for_server);
+            let card_update_payloads = Arc::clone(&card_update_payloads_for_server);
             tokio::spawn(async move {
                 let service = service_fn(move |req: Request<Incoming>| {
                     let card_counter = Arc::clone(&card_counter);
@@ -919,6 +988,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                     let recall_counter = Arc::clone(&recall_counter);
                     let card_update_counter = Arc::clone(&card_update_counter);
                     let settings_update_counter = Arc::clone(&settings_update_counter);
+                    let card_create_payloads = Arc::clone(&card_create_payloads);
+                    let card_update_payloads = Arc::clone(&card_update_payloads);
                     async move {
                         let method = req.method().clone();
                         let path = req.uri().path().to_string();
@@ -942,6 +1013,23 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                         }
                         if method == Method::POST && path == "/open-apis/cardkit/v1/cards" {
                             let idx = card_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                            let body: serde_json::Value =
+                                serde_json::from_slice(&body).expect("create card json");
+                            let data = body["data"].as_str().unwrap_or_default().to_string();
+                            card_create_payloads
+                                .lock()
+                                .expect("create payloads lock")
+                                .push(data);
+                            if fail_card_create_number == Some(idx) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(
+                                            br#"{"code":300305,"msg":"ErrMsg: element exceeds the limit"}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
                                     .status(StatusCode::OK)
@@ -969,6 +1057,10 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                             let body: serde_json::Value =
                                 serde_json::from_slice(&body).expect("update card json");
                             let data = body["card"]["data"].as_str().unwrap_or_default();
+                            card_update_payloads
+                                .lock()
+                                .expect("update payloads lock")
+                                .push(data.to_string());
                             assert!(data.contains("streaming_mode"));
                             return Ok::<_, hyper::Error>(
                                 Response::builder()
@@ -1049,6 +1141,8 @@ async fn spawn_mock_feishu_progress_server_with_failures(
         recall_counter,
         card_update_counter,
         settings_update_counter,
+        card_create_payloads,
+        card_update_payloads,
     }
 }
 
@@ -1206,6 +1300,100 @@ async fn progress_event_rolls_over_when_feishu_card_entity_exceeds_limit() {
     assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn progress_event_uses_compact_card_when_rollover_create_also_exceeds_limit() {
+    use std::sync::atomic::Ordering;
+
+    const OVERSIZED_MARKER: &str = "OVERSIZED_TOOL_OUTPUT_MARKER";
+
+    let server =
+        spawn_mock_feishu_progress_server_with_card_update_and_create_failure(Some(1), Some(2))
+            .await;
+    let registry = ImAgentProgressRegistry::new();
+    let session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "first turn",
+        )
+        .await
+        .expect("start progress card");
+
+    registry
+        .apply_event(
+            "s1",
+            AgentTurnProgressEvent::ToolFinished {
+                log: ToolCallLog {
+                    tool_name: "exec_command".to_string(),
+                    arguments: "{\"cmd\":\"generate huge output\"}".to_string(),
+                    result: format!("{OVERSIZED_MARKER}\n{}", "large output\n".repeat(100)),
+                    success: true,
+                },
+                duration_ms: 99,
+            },
+        )
+        .await;
+
+    let message_info = {
+        let session = session.lock().await;
+        assert!(session.compact_card_mode);
+        session.message_info().expect("message info")
+    };
+    assert_eq!(message_info.card_id, "card_3");
+    assert_eq!(message_info.message_id.as_deref(), Some("om_2"));
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 2);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
+
+    let create_payloads = server
+        .card_create_payloads
+        .lock()
+        .expect("create payloads")
+        .clone();
+    assert_eq!(create_payloads.len(), 3);
+    assert!(
+        create_payloads[1].contains(OVERSIZED_MARKER),
+        "full rollover create must still carry the oversized process detail before fallback"
+    );
+    assert!(create_payloads[2].contains("精简状态卡"));
+    assert!(create_payloads[2].contains("Agent 仍在运行"));
+    assert!(
+        !create_payloads[2].contains(OVERSIZED_MARKER),
+        "compact fallback must drop oversized process details"
+    );
+    assert!(!create_payloads[2].contains(PROCESS_PANEL_ELEMENT_ID));
+
+    registry
+        .apply_event(
+            "s1",
+            AgentTurnProgressEvent::AssistantDelta {
+                content: "继续检查恢复后的进度卡片。".to_string(),
+            },
+        )
+        .await;
+
+    let session = session.lock().await;
+    assert!(session.compact_card_mode);
+    assert_eq!(
+        session.message_info().expect("message info").card_id,
+        "card_3"
+    );
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 3);
+    let update_payloads = server
+        .card_update_payloads
+        .lock()
+        .expect("update payloads")
+        .clone();
+    let compact_update = update_payloads.last().expect("compact update payload");
+    assert!(compact_update.contains("精简状态卡"));
+    assert!(compact_update.contains("继续检查恢复后的进度卡片"));
+    assert!(!compact_update.contains(OVERSIZED_MARKER));
 }
 
 #[tokio::test(flavor = "current_thread")]

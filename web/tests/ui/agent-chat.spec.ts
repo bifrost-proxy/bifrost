@@ -1067,6 +1067,8 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
       contentType: "text/event-stream",
       body:
         'event: run_started\ndata: {"eventType":"run_started"}\n\n' +
+        'event: status\ndata: {"eventType":"status","status":{"state":"tool_execution","total_tokens_used":941800,"estimated_context_tokens":32400,"context_window_tokens":100000,"context_usage_percent":32.4}}\n\n' +
+        'event: context_updated\ndata: {"eventType":"context_updated","context":{"estimatedContextTokens":32400,"contextWindowTokens":100000,"contextUsagePercent":32.4,"totalTokensUsed":941800}}\n\n' +
         'event: plan_updated\ndata: {"eventType":"plan_updated","title":"Density check","steps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve hover details","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n' +
         'event: run_finished\ndata: {"eventType":"run_finished","response":"Done","planSteps":[{"step":"Gather context","status":"completed"},{"step":"Compress every row","status":"in_progress"},{"step":"Keep the long plan item on one compact line without growing the composer vertically","status":"pending"},{"step":"Check five row limit","status":"pending"},{"step":"Preserve hover details","status":"pending"},{"step":"Overflow item six","status":"pending"},{"step":"Overflow item seven","status":"pending"}]}\n\n',
     });
@@ -1193,22 +1195,25 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
       .poll(async () =>
         page.getByTestId("agent-chat-plan").evaluate((panel) => {
           const composer = document.querySelector('[data-testid="agent-chat-composer-track"]');
+          const hud = document.querySelector('[data-testid="agent-chat-token-hud"]');
           const input = document.querySelector('[data-testid="agent-chat-input"]');
           const popover = document.querySelector('[data-testid="agent-chat-plan-popover"]');
           const panelBox = panel.getBoundingClientRect();
           const composerBox = composer?.getBoundingClientRect();
+          const hudBox = hud?.getBoundingClientRect();
           const inputBox = input?.getBoundingClientRect();
           const popoverBox = popover?.getBoundingClientRect();
           return {
             panelIsCompact: panelBox.height <= 34,
-            contained:
+            capsuleFloatsAboveComposer:
               Boolean(composerBox) &&
               panelBox.left >= composerBox!.left &&
               panelBox.right <= composerBox!.right &&
-              panelBox.top >= composerBox!.top &&
-              panelBox.bottom <= composerBox!.bottom,
-            capsuleAboveInput:
-              Boolean(inputBox) && panelBox.bottom <= inputBox!.top + 1,
+              panelBox.bottom <= composerBox!.top - 24,
+            capsuleAboveContextHud:
+              Boolean(hudBox) && panelBox.bottom <= hudBox!.top - 6,
+            inputKeepsNormalTopPadding:
+              Boolean(inputBox) && Boolean(composerBox) && inputBox!.top <= composerBox!.top + 24,
             popoverFloatsAboveCapsule:
               Boolean(popoverBox) && popoverBox!.bottom <= panelBox.top - 6,
             popoverWidth: Math.round(popoverBox?.width ?? 999),
@@ -1216,8 +1221,9 @@ test("AI Agent Chat keeps plan content compact and scrolls after five steps", as
         }),
       )
       .toMatchObject({
-        capsuleAboveInput: true,
-        contained: true,
+        capsuleAboveContextHud: true,
+        capsuleFloatsAboveComposer: true,
+        inputKeepsNormalTopPadding: true,
         panelIsCompact: true,
         popoverFloatsAboveCapsule: true,
       });
