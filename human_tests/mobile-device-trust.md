@@ -358,7 +358,7 @@
 
 1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=certificate`。
 2. 查看 `iPhone and iPad` 区域中的统一流程、Configurator 送达方式、扫码/文件送达方式和共享 Settings 步骤。
-3. 若当前 Mac 未安装 Apple Configurator/cfgutil，检查 `Configurator Install` 按钮状态。
+3. 若当前 Mac 未安装 Apple Configurator/cfgutil，检查 `Configurator Install` 与 `Proxy Config` 按钮状态、按钮附近的禁用原因，以及 Apple Configurator 安装入口。
 4. 若当前 Mac 已安装 Apple Configurator/cfgutil 且只连接一台 iPhone/iPad，点击 `Configurator Install`。
 
 **预期结果**：
@@ -369,7 +369,8 @@
 - 手动扫码送达方式展示 `ios_qr_1` 和 `ios_qr_2` 两张图文步骤：相机扫 LAN QR 并点击黄色链接、允许下载 configuration profile。
 - 页面在送达方式之后展示 `2. Finish the shared iOS Settings steps`，让用户继续同一套 iOS 设置流程。
 - 页面没有把 Configurator 和手动扫码拆成互相割裂的两套安装模式；两者都指向同一套 Settings 安装和信任步骤。
-- 未安装 cfgutil 时，页面提示安装 Apple Configurator，`Configurator Install` 按钮禁用。
+- 未安装 cfgutil 时，页面在 Configurator 区域和设备按钮附近都提示按钮因缺少 `cfgutil` 被禁用，`Configurator Install` 和 `Proxy Config` 按钮禁用。
+- 未安装 cfgutil 时，页面提供 `Open Apple Configurator in the Mac App Store` 入口；点击后由 macOS/App Store 处理打开确认，Bifrost 不静默安装 App Store 应用。若安装 Apple Configurator 后仍缺少 `cfgutil`，页面文案提示在 Apple Configurator 中安装 Automation Tools。
 - 安装 cfgutil 且只连接一台 iOS 设备时，按钮可点击；点击后由本地 API 发起 `managed_auto_trust` 安装请求。
 - 未监督设备相关文案提示仍可能需要 Trust、解锁或屏幕确认。
 - 页面提示 Configurator 发送 profile 后，如果 iPhone 仍要求确认，要继续按同一套 Settings 步骤操作。

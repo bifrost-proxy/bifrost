@@ -72,6 +72,9 @@ const { Text, Paragraph } = Typography;
 
 const LOCAL_CA_TRUST_POLL_ATTEMPTS = 20;
 const LOCAL_CA_TRUST_POLL_INTERVAL_MS = 1000;
+const APPLE_CONFIGURATOR_APP_STORE_URL = "macappstore://itunes.apple.com/app/id1037126344";
+const APPLE_CONFIGURATOR_WEB_URL =
+  "https://apps.apple.com/us/app/apple-configurator/id1037126344";
 const MANAGED_WIFI_PROFILE_RISK_TEXT =
   "Experimental profile note: Bifrost's iOS Wi-Fi proxy profile uses Apple's managed Wi-Fi payload. It does not contain a Wi-Fi password, but uninstalling the profile can remove that managed Wi-Fi network entry from iOS. Manual Wi-Fi proxy setup is the safe cleanup path.";
 
@@ -998,6 +1001,31 @@ export default function CertificateTab({
                     then choose the device below. If the iPhone asks for confirmation, continue with
                     the same Settings steps below.
                   </Text>
+                  {!mobileInfo?.ios.configurator.cfgutil_available ? (
+                    <Space wrap size={8} data-testid="settings-mobile-ios-configurator-missing">
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        The Configurator buttons stay disabled until Apple Configurator and its
+                        cfgutil automation tool are installed.
+                      </Text>
+                      <Button
+                        size="small"
+                        href={APPLE_CONFIGURATOR_APP_STORE_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-testid="settings-mobile-ios-configurator-app-store"
+                      >
+                        Open Apple Configurator in the Mac App Store
+                      </Button>
+                      <a
+                        href={APPLE_CONFIGURATOR_WEB_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        data-testid="settings-mobile-ios-configurator-web-store"
+                      >
+                        Web fallback
+                      </a>
+                    </Space>
+                  ) : null}
                 </Space>
               }
             />
@@ -1071,6 +1099,17 @@ export default function CertificateTab({
                             Configurator Install
                           </Button>
                         </Tooltip>
+                        {!mobileInfo?.ios.configurator.cfgutil_available ? (
+                          <Text
+                            type="secondary"
+                            style={{ fontSize: 12 }}
+                            data-testid="settings-mobile-ios-configurator-disabled-reason"
+                          >
+                            Both Configurator buttons are disabled because cfgutil is not installed.
+                            Open Apple Configurator from the Mac App Store, then choose Install
+                            Automation Tools if cfgutil is still missing.
+                          </Text>
+                        ) : null}
                         <Tooltip
                           title={
                             mobileInfo?.ios.configurator.cfgutil_available

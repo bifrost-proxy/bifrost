@@ -212,6 +212,93 @@ test("Settings TLS 与证书页支持开关、模式和只读展示", async ({
   }
 });
 
+test("Certificate iOS Configurator 缺失时在禁用按钮旁显示安装入口", async ({
+  page,
+}) => {
+  await page.route("**/_bifrost/api/cert/info", async (route) => {
+    await route.fulfill({
+      json: {
+        available: true,
+        status: "installed_and_trusted",
+        status_label: "Installed and trusted",
+        installed: true,
+        trusted: true,
+        status_message: "Bifrost CA is installed and trusted.",
+        sha256_fingerprint: "00",
+        local_ips: ["127.0.0.1"],
+        download_urls: ["http://127.0.0.1:9910/_bifrost/public/cert/ca.pem"],
+        qrcode_urls: ["http://127.0.0.1:9910/_bifrost/public/cert/qrcode"],
+      },
+    });
+  });
+  await page.route("**/_bifrost/api/mobile-devices", async (route) => {
+    await route.fulfill({
+      json: {
+        android: {
+          adb_available: false,
+          adb_path: null,
+          devices: [],
+          message: "Android ADB is not available.",
+        },
+        ios: {
+          supported: true,
+          devices: [
+            {
+              id: "00008112000839C63621401E",
+              name: "iPad",
+              managed_install_target: null,
+              platform: "ios",
+              status: "connected",
+              capability: "guide_only",
+              certificate_status: null,
+              status_message:
+                "Detected over USB. Download the iOS profile, install it on the phone, then enable full trust in Certificate Trust Settings.",
+            },
+          ],
+          configurator: {
+            supported: true,
+            cfgutil_available: false,
+            cfgutil_path: null,
+            message:
+              "Apple Configurator cfgutil was not found. Install Apple Configurator from the Mac App Store to enable computer-side iPhone profile installation.",
+          },
+          message: "Detected 1 iOS USB device(s).",
+        },
+        ios_profile_url: "/_bifrost/public/mobileconfig/ios",
+        ios_profile_qrcode_url: "/_bifrost/public/mobileconfig/ios/qrcode",
+        ios_wifi_proxy_profile_url: "/_bifrost/public/mobileconfig/ios-wifi-proxy",
+        ios_wifi_proxy_profile_qrcode_url:
+          "/_bifrost/public/mobileconfig/ios-wifi-proxy/qrcode",
+        suggested_wifi_ssid: null,
+        suggested_wifi_ssid_message:
+          "Not detected. Enter the exact Wi-Fi name shown on the iPhone.",
+        ordinary_device_notice: "Ordinary devices require manual confirmation.",
+        managed_device_notice:
+          "Managed devices can support automatic trust through Configurator or MDM.",
+      },
+    });
+  });
+
+  await openPage(page, "settings?tab=certificate");
+
+  await expect(page.getByTestId("settings-certificate-tab")).toBeVisible();
+  await expect(page.locator("body")).toContainText("Detected 1 iOS USB device(s).");
+  await expect(page.getByTestId("settings-mobile-install-ios-configurator")).toBeDisabled();
+  await expect(page.getByTestId("settings-mobile-install-ios-proxy-config")).toBeDisabled();
+  await expect(page.getByTestId("settings-mobile-ios-configurator-missing")).toContainText(
+    "The Configurator buttons stay disabled",
+  );
+  await expect(
+    page.getByTestId("settings-mobile-ios-configurator-disabled-reason"),
+  ).toContainText("Both Configurator buttons are disabled because cfgutil is not installed");
+
+  const appStoreHref = await page
+    .getByTestId("settings-mobile-ios-configurator-app-store")
+    .getAttribute("href");
+  expect(appStoreHref).toContain("macappstore://");
+  expect(appStoreHref).toContain("id1037126344");
+});
+
 test("Settings 代理与证书卡片会反映 system proxy、cli proxy、下载与二维码真实状态", async ({
   page,
   request,
