@@ -34,6 +34,7 @@ Bifrost 已接入 Codex Runner 与 Traex Runner，并把二者的执行过程输
 - 标题处理：Codex/Traex `todo_list` 是协议字段，不作为卡片标题；只有通用 `plan_updated` 明确携带 `title` / `name` 时才更新标题。
 - Web UI：`record_external_cli_progress_event_to_timeline()` 把 `PlanUpdated` 写入 `ConversationRecorder::record_plan_updated()`；Agent Chat 历史与实时增量沿用现有 `plan_updated` telemetry 解析。
 - 不新增前端专用协议，不为 Codex/Traex 分叉 UI。
+- Web UI 任务计划胶囊采用 hover 展开详情浮层。胶囊、胶囊与浮层之间的透明桥接区域、浮层本身必须共享同一展开状态；鼠标从胶囊移动到浮层或在浮层内选择文本时不能因离开胶囊而关闭，离开整组区域后再延迟关闭。
 
 ## 测试方案
 
@@ -51,6 +52,7 @@ Bifrost 已接入 Codex Runner 与 Traex Runner，并把二者的执行过程输
 - 新增 `e2e-tests/tests/test_im_gateway_external_runner_plan_ui.sh`：使用真实 Bifrost 服务和 mock external runner 输出稳定 `plan_updated`，断言 `/chat/stream` 中出现 `plan_updated.steps`，run detail normalized events 保留 plan，session JSONL 持久化 `plan_updated`。
 - 真实 Codex/Traex 输出作为 `human_tests` 采样证据；Traex 若未在限定时间输出 todo list，应记录为环境/Runner 输出差异，不把 Bifrost parser 判失败。
 - Web UI 单测复用 Agent Chat history fixture，断言 external runner 历史页恢复任务计划。
+- Web UI 真实场景验证需要覆盖任务计划胶囊 hover、慢速跨过胶囊与浮层间隙、浮层内文本选择、离开后关闭。
 
 ### 真实场景测试
 

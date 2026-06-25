@@ -1049,8 +1049,26 @@
 4. 发送新消息运行中，消息列表仍保留多轮上下文，`Load older` 不因 timeline `has_more=false` 临时消失。
 5. 运行完成和刷新页面后，最新用户消息和 assistant 回复仍显示，旧消息窗口与 `Load older` 状态一致。
 
+### TC-IEC-52: Agent Chat 任务计划浮层 hover 与复制稳定性
+
+操作步骤：
+1. 用当前编译版本启动 9900，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`，并使用 `--no-system-proxy`、`--no-tray`、`--no-intercept`。
+2. 打开一个存在 external runner plan/todo 的 Agent Chat 会话，例如 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`。
+3. 将鼠标移动到输入框上方的任务计划胶囊，例如 `Step 2/4 ... +3`。
+4. 确认浮层显示 `Task progress` 和完整任务列表。
+5. 将鼠标从胶囊慢速移动到胶囊上方的浮层，经过胶囊与浮层之间的空隙后停留在浮层上。
+6. 在浮层内拖选一条任务文本，例如 `审查未提交 diff`。
+7. 将鼠标移出浮层和胶囊区域。
+
+预期结果：
+1. 鼠标停留在胶囊、胶囊与浮层之间的透明桥接区域、浮层本身任一区域时，浮层保持展开，不闪烁、不消失。
+2. 鼠标进入浮层并停留超过关闭延迟后，浮层仍展示完整 `Task progress` 内容。
+3. 浮层内任务文本可以被选中，便于复制。
+4. 鼠标离开整组区域后，浮层正常关闭。
+
 ## 最近执行记录
 
+- 2026-06-26：执行 TC-IEC-52 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `55951`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，确认存在任务计划胶囊 `Step 2/4审查未提交 diff+3`。鼠标 hover 胶囊后浮层出现，DOM 同时存在 `agent-chat-plan-hover-bridge` 与 `agent-chat-plan-popover`；鼠标移动到 8px 透明桥接区域并停留 `260ms` 后，浮层仍存在；继续移动到浮层中心并停留 `500ms` 后，浮层仍存在且文本包含 `Task progress1/4 completed...`；鼠标移到页面左上角 `260ms` 后浮层关闭。随后在浮层内拖选第二条任务文本，`window.getSelection()` 返回 `未提交 diff`，且浮层仍存在。截图保存为 `/tmp/bifrost-plan-hover-popover-open.png`、`/tmp/bifrost-plan-hover-popover-held.png`、`/tmp/bifrost-plan-hover-text-selection.png`。
 - 2026-06-26：执行 TC-IEC-51 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `73886`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 确认 `admin-chat-1782407491650` 的 session detail 有 `message_count=112`、`timeline_event_count=208`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`：初始页面 `Load older=true`，同时可见 `你好`、`你是干啥的`、`图片里面说的啥？` 和最新回复，不再只剩最后一条；点击 `Load older` 后 textLength 从 `2681` 增至 `3053`，等待 2.5 秒仍保持 `3053` 且旧首轮 `你是谁` 可见；刷新后恢复默认窗口且 `Load older=true`。随后在同一 Web UI 发送 `请用一句话回复：列表稳定验证二`，发送立即、运行 5 秒、完成后和最终刷新四个阶段均保持多轮历史可见，且 `Load older=true`；最终回复 `列表稳定验证二应同时检查会话列表 fallback title...` 可见。截图保存为 `/tmp/bifrost-chat-window-fixed-initial.png`、`/tmp/bifrost-chat-window-fixed-after-load-older-wait.png`、`/tmp/bifrost-chat-window-fixed-after-send-immediate.png`、`/tmp/bifrost-chat-window-fixed-after-final-reload.png`。
 - 2026-06-25：新增并执行 TC-IEC-50 的自动真实服务回归。命令 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 后运行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_traex_model_slash.sh`；脚本启动临时 Bifrost、配置 mock `traecli`，真实调用 `/chat/stream` 发送 `/models`、`/model Doubao-Unit` 和普通消息。断言 `/models` 响应包含 `Doubao-Unit` 与 `fast` tier、不包含 `SHOULD_NOT_LEAK` 或 hidden model；普通 run 的 `runtime_snapshot.args` 包含 `--model Doubao-Unit`；`session_state.json` 写入 `modelOverride:"Doubao-Unit"` 和 `modelOverrideSource:"session slash command"`。随后执行真实 Web UI 验证：`pnpm --dir web run build` 与 `cargo build --bin bifrost` 均通过；临时服务端口 `65110`，数据目录 `/tmp/bifrost-traex-webui-models.mNgvpy`，当前 Runner 为 `Traex`；浏览器打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，输入 `/` 后 slash 面板显示 `/models` 和 `/model`；点击 `/models` 后页面返回 `Doubao-UI`、`fast`、`visibility: list`，不包含 `WEB_UI_SHOULD_NOT_LEAK` 或 `hidden-ui`，且未展示“上下文正在自动压缩”；通过 Web UI 发送 `/model Doubao-UI` 后 `session_state.json` 写入 `modelOverride:"Doubao-UI"`；再发送普通消息 `hello after ui model switch`，页面返回 `BIFROST_TRAEX_WEB_UI_MODEL_OK`，run `1782399832370-576febaa-a224-4455-9d8c-13bf49bede39` 的 `runtime_snapshot.args` 包含 `--model Doubao-UI`。
 - 2026-06-25：继续执行 TC-IEC-50 的回归。当前编译版本通过 `cargo build --bin bifrost` 后重启 `9900`，PID `69582`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-1782405107022` 与 `/sessions/all` 均返回 `model:"Kimi-K2.6"`、`model_provider:"trae"`、`total_tokens_used/tokens:103688`、`estimated_tokens:103590`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782405107022&view=active`，刷新后 HUD 显示 `Tokens 77.6K · Context 31% · Model Kimi-K2.6 (trae)`；发送 `请用一句话回复：HUD 检查` 后 1 秒内 HUD 未清空，仍显示同一模型与 token/context；运行完成后 API usage 更新为 `103688/103590`，再次刷新页面 HUD 显示 `Tokens 103.7K · Context 41.4% · Model Kimi-K2.6 (trae)`，消息列表保留本轮用户消息。
