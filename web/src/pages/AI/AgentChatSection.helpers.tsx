@@ -28,7 +28,7 @@ export type ProcessStep = {
 
 export type ChatMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   contentParts?: ChatContentPart[];
   timestamp?: number;
@@ -304,22 +304,41 @@ export function titleFromChatMessages(items: ChatMessage[]) {
 
 export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
   return (detail.messages || [])
-    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter(
+      (message) =>
+        message.role === "user" ||
+        message.role === "assistant" ||
+        message.role === "system",
+    )
     .map((message, index, sourceMessages) => {
-      const role = message.role === "user" ? ("user" as const) : ("assistant" as const);
-      const runnerCall = inferPersistedRunnerCall(
-        detail.session_key,
-        role,
-        message.content || "",
-        sourceMessages[index + 1]?.content || "",
-      );
+      const role =
+        message.role === "user"
+          ? ("user" as const)
+          : message.role === "system"
+            ? ("system" as const)
+            : ("assistant" as const);
+      const runnerCall =
+        role === "system"
+          ? undefined
+          : inferPersistedRunnerCall(
+              detail.session_key,
+              role,
+              message.content || "",
+              sourceMessages[index + 1]?.content || "",
+            );
       return {
         id: `session-${detail.session_key}-${index}`,
         role,
         content: runnerCall?.content ?? message.content ?? "",
         contentParts: message.content_parts || message.contentParts,
         timestamp: message.timestamp,
-        meta: runnerCall ? "Runner call" : role === "user" ? "You" : "Bifrost Agent",
+        meta: runnerCall
+          ? "Runner call"
+          : role === "user"
+            ? "You"
+            : role === "system"
+              ? "System"
+              : "Bifrost Agent",
         runnerCall: runnerCall?.meta,
       };
     })

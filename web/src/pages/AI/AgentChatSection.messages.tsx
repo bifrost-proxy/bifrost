@@ -178,6 +178,7 @@ export function AgentChatMessageList({
     options: { forceProcessCompleted?: boolean; hideProcessSteps?: boolean } = {},
   ) => {
     const isUser = message.role === "user";
+    const isSystem = message.role === "system";
     const isRunningPlaceholder =
       !isUser &&
       (message.content === "Agent is running..." ||
@@ -218,6 +219,63 @@ export function AgentChatMessageList({
     if (!isVisibleMessage({ ...message, processSteps }, running)) {
       return null;
     }
+    if (isSystem) {
+      return (
+        <div
+          key={message.id}
+          data-testid="agent-chat-message-system"
+          style={{
+            display: "flex",
+            justifyContent: "center",
+            width: "100%",
+            minWidth: 0,
+          }}
+        >
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              maxWidth: "100%",
+              minWidth: 0,
+            }}
+          >
+            <div
+              data-testid="agent-chat-message-bubble-system"
+              style={{
+                width: "fit-content",
+                maxWidth: "min(100%, 760px)",
+                border: `1px solid ${token.colorBorderSecondary}`,
+                borderRadius: 8,
+                padding: "8px 12px",
+                background: token.colorFillQuaternary,
+                color: token.colorTextSecondary,
+                overflowWrap: "anywhere",
+                textAlign: "center",
+                whiteSpace: "pre-wrap",
+              }}
+            >
+              {message.content}
+            </div>
+            {!message.hideTimestamp ? (
+              <Text
+                type="secondary"
+                title={formatMessageTime(message.timestamp)}
+                data-testid="agent-chat-message-time"
+                style={{
+                  display: "block",
+                  marginTop: 4,
+                  fontSize: 11,
+                  textAlign: "center",
+                }}
+              >
+                {formatMessageTime(message.timestamp)}
+              </Text>
+            ) : null}
+          </div>
+        </div>
+      );
+    }
     return (
       <div
         key={message.id}
@@ -226,7 +284,7 @@ export function AgentChatMessageList({
           display: "flex",
           width: "100%",
           minWidth: 0,
-          justifyContent: isUser ? "flex-end" : "flex-start",
+          justifyContent: isSystem ? "center" : isUser ? "flex-end" : "flex-start",
         }}
       >
         <div
@@ -234,30 +292,35 @@ export function AgentChatMessageList({
             display: "flex",
             flexDirection: "row",
             alignItems: "flex-start",
-            width: isUser ? "auto" : "100%",
+            width: isSystem ? "min(100%, 760px)" : isUser ? "auto" : "100%",
             minWidth: 0,
-            maxWidth: isUser ? (isCompact ? "100%" : "78%") : "100%",
+            maxWidth: isSystem ? "100%" : isUser ? (isCompact ? "100%" : "78%") : "100%",
           }}
         >
           <div
             style={{
               display: "flex",
               flexDirection: "column",
-              flex: isUser ? "0 1 auto" : "1 1 auto",
+              flex: isUser || isSystem ? "0 1 auto" : "1 1 auto",
               minWidth: 0,
-              alignItems: isUser ? "flex-end" : "stretch",
+              alignItems: isSystem ? "center" : isUser ? "flex-end" : "stretch",
             }}
           >
             <div
               data-testid={`agent-chat-message-bubble-${message.role}`}
               style={{
-                width: isUser ? "auto" : "100%",
+                width: isSystem ? "100%" : isUser ? "auto" : "100%",
                 minWidth: 0,
-                border: "none",
-                borderRadius: 12,
-                padding: isUser ? "10px 12px" : "2px 0",
-                background: isUser ? token.colorPrimaryBg : "transparent",
+                border: isSystem ? `1px solid ${token.colorBorderSecondary}` : "none",
+                borderRadius: isSystem ? 8 : 12,
+                padding: isSystem ? "8px 10px" : isUser ? "10px 12px" : "2px 0",
+                background: isSystem
+                  ? token.colorFillQuaternary
+                  : isUser
+                    ? token.colorPrimaryBg
+                    : "transparent",
                 overflowWrap: "anywhere",
+                color: isSystem ? token.colorTextSecondary : undefined,
               }}
             >
               {message.runnerCall ? (
@@ -588,6 +651,11 @@ function buildMessageGroups(messages: ChatMessage[], running: boolean): MessageG
         assistants: [],
         completed: true,
       };
+      return;
+    }
+    if (message.role === "system") {
+      flushTurn(true);
+      groups.push({ type: "single", item: { message, index } });
       return;
     }
     if (openTurn) {

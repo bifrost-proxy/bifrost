@@ -209,7 +209,13 @@ export function useRunnerCallHandler({
         },
       };
       const callerMessages = messages
-        .filter((message) => message.content.trim().length > 0)
+        .filter(
+          (
+            message,
+          ): message is ChatMessage & { role: "user" | "assistant" } =>
+            (message.role === "user" || message.role === "assistant") &&
+            message.content.trim().length > 0,
+        )
         .map((message) => ({
           role: message.role,
           content: message.content,

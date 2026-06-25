@@ -500,6 +500,12 @@ async fn handle_im_model_command(
                 &effective.runner_id,
                 None,
             );
+            persist_im_model_system_message(
+                session_key,
+                &effective.settings.adapter,
+                &effective.runner_id,
+                "清除模型切换",
+            );
             format!(
                 "已清除 {adapter_label} Runner `{}` 的 session 模型 override。下一条消息将使用 Runner 配置或 {adapter_label} 默认模型。",
                 effective.runner_id
@@ -526,10 +532,17 @@ async fn handle_im_model_command(
                                 &effective.runner_id,
                                 Some(model.clone()),
                             );
-                            format!(
+                            let reply = format!(
                                 "已将 {adapter_label} Runner `{}` 的 session 模型设置为 `{}`。\n下一条消息会通过 `--model {}` 启动。",
                                 effective.runner_id, model, model
-                            )
+                            );
+                            persist_im_model_system_message(
+                                session_key,
+                                &effective.settings.adapter,
+                                &effective.runner_id,
+                                &format!("切换模型为 {model}"),
+                            );
+                            reply
                         }
                         Err(response) => response,
                     }
@@ -549,6 +562,52 @@ async fn handle_im_model_command(
     )
     .await;
     true
+}
+
+fn persist_im_model_system_message(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+    message: &str,
+) {
+    let message = message.trim();
+    if message.is_empty() {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    if let Err(error) =
+        crate::im_gateway::session_state::upsert_session_state(
+            session_key,
+            adapter,
+            Some(runner_id),
+            |state| {
+                if state.messages.last().is_some_and(|existing| {
+                    existing.role == "system" && existing.content == message
+                }) {
+                    return;
+                }
+                state
+                    .messages
+                    .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "system".to_string(),
+                        content: message.to_string(),
+                        timestamp: Some(timestamp),
+                        content_parts: None,
+                    });
+            },
+        )
+    {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist IM model system message"
+        );
+    }
 }
 
 fn persist_im_model_override(

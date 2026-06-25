@@ -2005,6 +2005,7 @@ async fn maybe_external_cli_model_slash_response(
     }
     let adapter_label =
         crate::im_gateway::external_cli::external_cli_model_adapter_label(&request.adapter);
+    let mut display_message: Option<String> = None;
     let response = match command {
         crate::im_gateway::external_cli::ExternalCliModelSlashCommand::List => {
             match crate::im_gateway::external_cli::load_external_cli_model_catalog(
@@ -2040,6 +2041,7 @@ async fn maybe_external_cli_model_slash_response(
         }
         crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Clear => {
             persist_session_model_override(request, &effective.runner_id, None);
+            display_message = Some("清除模型切换".to_string());
             format!(
                 "已清除 {adapter_label} Runner `{}` 的 session 模型 override。下一条消息将使用 Runner 配置或 {adapter_label} 默认模型。",
                 effective.runner_id,
@@ -2073,13 +2075,18 @@ async fn maybe_external_cli_model_slash_response(
                 }
             };
             persist_session_model_override(request, &effective.runner_id, Some(model.clone()));
+            display_message = Some(format!("切换模型为 {model}"));
             format!(
                 "已将 {adapter_label} Runner `{}` 的 session 模型设置为 `{}`。\n下一条消息会通过 `--model {}` 启动。",
                 effective.runner_id, model, model,
             )
         }
     };
-    remember_model_slash_result_state(request, &effective.runner_id, &response);
+    remember_model_slash_result_state(
+        request,
+        &effective.runner_id,
+        display_message.as_deref().unwrap_or(&response),
+    );
     Some(model_slash_success_response(&response, stream))
 }
 
@@ -2194,11 +2201,11 @@ fn remember_model_slash_result_state(
         Some(runner_id),
         |state| {
             state.title.get_or_insert(title);
-            state.last_user_message = Some(trimmed_message.to_string());
-            state.last_response = Some(response.to_string());
+            if state.last_user_message.is_none() {
+                state.last_user_message = Some(trimmed_message.to_string());
+            }
             state.status = Some("ended".to_string());
-            append_display_message_once(state, "user", trimmed_message, timestamp);
-            append_display_message_once(state, "assistant", response, timestamp);
+            append_display_message_once(state, "system", response, timestamp);
         },
     ) {
         warn!(

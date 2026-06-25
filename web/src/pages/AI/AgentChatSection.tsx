@@ -156,6 +156,25 @@ function isRunnerModelSlashCommand(content: string, runnerAdapter: string) {
   );
 }
 
+function runnerModelSlashSystemDisplayContent(command: string, response: string) {
+  const trimmed = command.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "/model clear") {
+    return "清除模型切换";
+  }
+  if (
+    lower.startsWith("/model ") &&
+    response.includes("已将") &&
+    response.includes("session 模型设置为")
+  ) {
+    const model = trimmed.slice("/model ".length).trim();
+    if (model) {
+      return `切换模型为 ${model}`;
+    }
+  }
+  return response;
+}
+
 type HistoryPagePayload = {
   events?: HistoryEvent[];
   count?: number;
@@ -1675,11 +1694,21 @@ export default function AgentChatSection() {
         : undefined;
     const content = parsedPlanSlash.message.trim();
     const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
-    const runnerModelCommand = isRunnerModelSlashCommand(rawContent, currentRunnerAdapter);
-    const silentCommand =
+    const activeRunnerId =
+      telemetry.status?.runner_id && telemetry.status.runner_id !== "bifrost_agent"
+        ? telemetry.status.runner_id
+        : runnerId;
+    const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
+    const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
+    const controlCommand =
       compactCommand ||
       runnerModelCommand ||
       (builtInAgentCommandsSupported && options?.silentCommand === true);
+    const hiddenControlCommand =
+      compactCommand ||
+      (builtInAgentCommandsSupported &&
+        options?.silentCommand === true &&
+        !runnerModelCommand);
     if (!content && imagesForSend.length === 0) {
       if (collaborationMode === "plan" && imagesForSend.length === 0) {
         antdMessage.warning("Type a task to start Plan Mode.");
@@ -1687,7 +1716,7 @@ export default function AgentChatSection() {
       }
       return;
     }
-    if (slashRunner && !running && !silentCommand) {
+    if (slashRunner && !running && !controlCommand) {
       setPendingImages([]);
       await handleRunnerCall(content, slashRunner, imagesForSend);
       return;
@@ -1704,10 +1733,10 @@ export default function AgentChatSection() {
     const assistantId = `assistant-${Date.now()}`;
     const assistantMessage: ChatMessage = {
       id: assistantId,
-      role: "assistant",
-      content: silentCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
+      role: runnerModelCommand ? "system" : "assistant",
+      content: controlCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
       timestamp: Date.now() / 1000,
-      meta: "Bifrost Agent",
+      meta: runnerModelCommand ? "System" : "Bifrost Agent",
       processSteps: compactCommand
         ? [
             {
@@ -1727,9 +1756,12 @@ export default function AgentChatSection() {
           : undefined,
     };
     pendingInstantScrollRef.current = true;
-    setMessages((prev) =>
-      silentCommand ? [...prev, assistantMessage] : [...prev, userMessage, assistantMessage],
-    );
+    setMessages((prev) => {
+      if (hiddenControlCommand || runnerModelCommand) {
+        return [...prev, assistantMessage];
+      }
+      return [...prev, userMessage, assistantMessage];
+    });
     setDraft("");
     setComposerMode(undefined);
     setActiveCollaborationMode(collaborationMode);
@@ -1741,8 +1773,11 @@ export default function AgentChatSection() {
       status: {
         ...(prev.status || {}),
         work_dir: workDir || undefined,
-        runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
-        runner_type: runnerId === "bifrost_agent" ? "bifrost_agent" : selectedRunnerAdapter(runnerOptions, runnerId),
+        runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
+        runner_type:
+          activeRunnerId === "bifrost_agent"
+            ? "bifrost_agent"
+            : selectedRunnerAdapter(runnerOptions, activeRunnerId),
       },
       plan: [],
       tools: [],
@@ -1750,7 +1785,7 @@ export default function AgentChatSection() {
     }));
     // Ensure the current session is visible in the threads list with first message as fallback title
     setThreads((prev) => {
-      const fallbackTitle = silentCommand
+      const fallbackTitle = hiddenControlCommand
         ? currentSessionFallbackTitle || (compactCommand ? "Context compaction" : "Runner command")
         : userVisibleContent.length > 40 ? `${userVisibleContent.slice(0, 40)}…` : userVisibleContent;
       return dedupeThreads([
@@ -1762,11 +1797,11 @@ export default function AgentChatSection() {
           start_time: Math.floor(Date.now() / 1000),
           last_active_time: Math.floor(Date.now() / 1000),
           duration_secs: 0,
-          runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
+          runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
           runner_type:
-            runnerId === "bifrost_agent"
+            activeRunnerId === "bifrost_agent"
               ? "bifrost_agent"
-              : selectedRunnerAdapter(runnerOptions, runnerId),
+              : selectedRunnerAdapter(runnerOptions, activeRunnerId),
           work_dir: workDir || undefined,
         },
         ...prev.filter((thread) => thread.session_key !== sessionKey),
@@ -1779,7 +1814,7 @@ export default function AgentChatSection() {
     let assistantSegmentId = assistantId;
     let assistantSegmentIndex = 0;
     let assistantSegmentHasText = false;
-    let assistantSegmentHasSteps = silentCommand;
+    let assistantSegmentHasSteps = compactCommand;
     let assistantSegmentHasProposedPlan = false;
     let nextAssistantDeltaStartsSegment = false;
     try {
@@ -2093,18 +2128,21 @@ export default function AgentChatSection() {
         sessionKey,
         historyPath,
         workDir: workDir || undefined,
-        runnerId,
-        runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
+        runnerId: activeRunnerId,
+        runnerAdapter: activeRunnerAdapter,
         collaborationMode,
         signal: abortController.signal,
         onEvent: (event) => {
           if (selectedSessionKeyRef.current !== sendSessionKey) return;
           setTelemetry((prev) => reduceTelemetry(prev, event));
-          if (silentCommand) {
+          if (compactCommand) {
             const step = eventToProcessStep(event);
             if (step?.type === "compaction") {
               appendProcessStep(step);
             }
+            return;
+          }
+          if (hiddenControlCommand) {
             return;
           }
           if (event.eventType === "proposed_plan" && typeof event.content === "string") {
@@ -2178,7 +2216,11 @@ export default function AgentChatSection() {
             finishSilentCommandCompaction("success", "上下文已自动压缩");
             return;
           }
-          applyFinalResponse(response);
+          applyFinalResponse(
+            runnerModelCommand
+              ? runnerModelSlashSystemDisplayContent(rawContent, response)
+              : response,
+          );
         },
       });
       if (selectedSessionKeyRef.current === sendSessionKey) {
@@ -2199,7 +2241,7 @@ export default function AgentChatSection() {
       setMessages((prev) =>
         prev.map((message) =>
           message.id === assistantSegmentId
-            ? silentCommand
+            ? compactCommand
               ? {
                   ...message,
                   content: "",

@@ -2397,7 +2397,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
             (Vec::new(), 0)
         };
     if !messages.is_empty() {
-        append_model_slash_display_messages(&mut messages, &state.messages);
+        append_system_display_messages(&mut messages, &state.messages);
     }
     if messages.is_empty() && state.messages.is_empty() {
         if let Some(content) = state
@@ -2530,27 +2530,15 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
     })
 }
 
-fn append_model_slash_display_messages(
+fn append_system_display_messages(
     output: &mut Vec<bifrost_agent::session::SessionMessage>,
     state_messages: &[crate::im_gateway::session_state::ImAgentSessionMessage],
 ) {
-    let mut index = 0usize;
-    while index < state_messages.len() {
-        let message = &state_messages[index];
-        if message.role != "user" || !is_model_slash_message(&message.content) {
-            index += 1;
-            continue;
-        }
+    for message in state_messages
+        .iter()
+        .filter(|message| message.role == "system")
+    {
         append_state_display_message(output, message);
-        if let Some(next) = state_messages
-            .get(index + 1)
-            .filter(|next| next.role == "assistant")
-        {
-            append_state_display_message(output, next);
-            index += 2;
-        } else {
-            index += 1;
-        }
     }
 }
 
@@ -2572,15 +2560,6 @@ fn append_state_display_message(
         content_parts: message.content_parts.clone(),
         tool_calls: None,
     });
-}
-
-fn is_model_slash_message(content: &str) -> bool {
-    let trimmed = content.trim();
-    trimmed.eq_ignore_ascii_case("/models")
-        || trimmed.eq_ignore_ascii_case("/model")
-        || trimmed
-            .get(.."/model ".len())
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("/model "))
 }
 
 fn external_runner_timeline_messages(
@@ -3205,6 +3184,68 @@ mod tests {
         assert_eq!(detail.messages[0].content, "canonical user");
         assert_eq!(detail.messages[1].content, "canonical assistant");
         assert!(detail.timeline_event_count >= 3);
+    }
+
+    #[test]
+    fn external_runner_session_detail_merges_system_display_messages() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-system-display-detail";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "first prompt")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "first answer")
+            .expect("record assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: "traex".to_string(),
+                runner_id: Some("Traex".to_string()),
+                history_path: Some(history_path),
+                status: Some("succeeded".to_string()),
+                messages: vec![crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "system".to_string(),
+                    content: "已将 Traex Runner 的 session 模型设置为 Kimi-K2.6。".to_string(),
+                    timestamp: Some(1_770_000_003),
+                    content_parts: None,
+                }],
+                updated_at: 1_770_000_004_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail(session_key))
+            .expect("detail");
+
+        assert_eq!(detail.message_count, 3);
+        assert_eq!(detail.user_turn_count, 1);
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content == "first prompt" }));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == "first answer" }));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "system" && message.content.contains("Kimi-K2.6") }));
     }
 
     #[test]
