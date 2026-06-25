@@ -43,6 +43,55 @@ describe("historyEventsToTelemetry", () => {
     expect(telemetry.plan).toEqual([]);
   });
 
+  it("restores external runner plan updates from persisted history", () => {
+    const events: HistoryEvent[] = [
+      {
+        timestamp: 1,
+        event_type: "session_start",
+        session_key: "external-plan",
+        content: { source: "admin-api", runtime: "external_cli", adapter: "codex" },
+      },
+      {
+        timestamp: 2,
+        event_type: "user_message",
+        session_key: "external-plan",
+        content: { message: "run task" },
+      },
+      {
+        timestamp: 3,
+        event_type: "plan_updated",
+        session_key: "external-plan",
+        content: {
+          plan: [
+            { step: "inspect output", status: "completed" },
+            { step: "map parser", status: "pending" },
+          ],
+        },
+      },
+      {
+        timestamp: 4,
+        event_type: "assistant_message",
+        session_key: "external-plan",
+        content: { message: "done" },
+      },
+    ];
+
+    const telemetry = historyEventsToTelemetry(events);
+    const messages = historyEventsToMessages(events);
+
+    expect(telemetry.plan).toEqual([
+      { step: "inspect output", status: "completed" },
+      { step: "map parser", status: "pending" },
+    ]);
+    expect(messages[messages.length - 1].processSteps).toEqual([
+      {
+        type: "plan",
+        summary: "Plan updated (2 steps)",
+        status: "success",
+      },
+    ]);
+  });
+
   it("keeps running thread token and context metrics newer than stale history events", () => {
     const thread: AgentThreadSummary = {
       session_key: "feishu-main:user",
