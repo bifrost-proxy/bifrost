@@ -102,17 +102,30 @@ export function useSlashRunnerSelection({
     [runnerOptions, slashQuery],
   );
   const slashCommandOptions = useMemo(
-    () =>
-      [
+    () => {
+      const commands = [
         ...(enableCommands ? SLASH_COMMAND_OPTIONS : []),
         ...(enableModelCommands ? MODEL_SLASH_COMMAND_OPTIONS : []),
-      ].filter((option) => {
+      ];
+      const matches = commands.filter((option) => {
         if (!slashQuery) {
           return true;
         }
         const searchable = `${option.command} ${option.label} ${option.description}`;
         return searchable.toLowerCase().includes(slashQuery);
-      }),
+      });
+      if (!slashQuery) {
+        return matches;
+      }
+      return [...matches].sort((left, right) => {
+        const leftExact = left.command.slice(1).toLowerCase() === slashQuery;
+        const rightExact = right.command.slice(1).toLowerCase() === slashQuery;
+        if (leftExact === rightExact) {
+          return 0;
+        }
+        return leftExact ? -1 : 1;
+      });
+    },
     [enableCommands, enableModelCommands, slashQuery],
   );
   const showSlashRunnerPanel =
