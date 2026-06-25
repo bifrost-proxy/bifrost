@@ -237,6 +237,10 @@ fn online_notification_work_dir(provider: &ImProviderConfig) -> String {
 pub(super) struct OnlineNotificationAgentContext {
     pub(super) runner_type: String,
     pub(super) runner_id: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) model_provider: Option<String>,
+    pub(super) model_reasoning_effort: Option<String>,
+    pub(super) model_reasoning_summary: Option<String>,
     pub(super) session_key: String,
     pub(super) user_turn_count: u32,
 }
@@ -248,7 +252,7 @@ pub(super) fn build_online_notification_agent_context(
     agent_session_manager: &bifrost_agent::AgentSessionManager,
 ) -> OnlineNotificationAgentContext {
     let effective_agent_config = effective_agent_config_for_provider(base_agent_config, provider);
-    let (runner_type, runner_id) = match effective_agent_config.runner.as_ref() {
+    let (runner_type, runner_id, model_config) = match effective_agent_config.runner.as_ref() {
         Some(bifrost_agent::AgentRunnerMode::Custom(runner_id)) => {
             let external =
                 crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
@@ -256,9 +260,17 @@ pub(super) fn build_online_notification_agent_context(
                     Some(provider.id.as_str()),
                     Some(runner_id.as_str()),
                 );
-            (external.settings.adapter, Some(external.runner_id))
+            let model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+                &external.settings.adapter,
+                &external.settings.adapter_config,
+            );
+            (
+                external.settings.adapter,
+                Some(external.runner_id),
+                Some(model_config),
+            )
         }
-        _ => ("bifrost_agent".to_string(), None),
+        _ => ("bifrost_agent".to_string(), None, None),
     };
     let session_key = build_session_key(&provider.id, provider.owner_open_id.as_deref());
     let user_turn_count = online_notification_user_turn_count(agent_session_manager, &session_key);
@@ -266,6 +278,21 @@ pub(super) fn build_online_notification_agent_context(
     OnlineNotificationAgentContext {
         runner_type,
         runner_id,
+        model: model_config
+            .as_ref()
+            .and_then(|config| config.model.clone()),
+        model_provider: model_config.as_ref().and_then(|config| {
+            config
+                .model_provider
+                .clone()
+                .or_else(|| config.model_source.clone())
+        }),
+        model_reasoning_effort: model_config
+            .as_ref()
+            .and_then(|config| config.reasoning_effort.clone()),
+        model_reasoning_summary: model_config
+            .as_ref()
+            .and_then(|config| config.reasoning_summary.clone()),
         session_key,
         user_turn_count,
     }
@@ -315,12 +342,26 @@ pub(super) fn build_online_notification_message_with_context(
     let session_key = agent_context
         .map(|context| context.session_key.as_str())
         .unwrap_or("N/A");
+    let model_text = agent_context
+        .map(|context| {
+            bifrost_agent::format_model_ref(
+                context.model.as_deref(),
+                context.model_provider.as_deref(),
+            )
+        })
+        .unwrap_or_else(|| "N/A".to_string());
+    let reasoning_effort_text = bifrost_agent::format_optional_status_text(
+        agent_context.and_then(|context| context.model_reasoning_effort.as_deref()),
+    );
+    let reasoning_summary_text = bifrost_agent::format_optional_status_text(
+        agent_context.and_then(|context| context.model_reasoning_summary.as_deref()),
+    );
     let user_turn_count = agent_context
         .map(|context| context.user_turn_count)
         .unwrap_or(0);
 
     format!(
-        "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Runner Type**: `{runner_type}`\n- **Runner ID**: `{runner_id}`\n- **Bound Session**: `{session_key}`\n- **Completed User Turns**: {user_turn_count}\n- **Status**: Ready",
+        "**Bifrost is online**\n\n- **Provider**: {} (`{}`)\n- **Device**: {device_name}\n- **Workspace**: `{work_dir}`\n- **Runner Type**: `{runner_type}`\n- **Runner ID**: `{runner_id}`\n- **Model**: `{model_text}`\n- **Reasoning Effort**: `{reasoning_effort_text}`\n- **Reasoning Summary**: `{reasoning_summary_text}`\n- **Bound Session**: `{session_key}`\n- **Completed User Turns**: {user_turn_count}\n- **Status**: Ready",
         provider.display_name, provider.id
     )
 }
@@ -424,6 +465,18 @@ pub(super) fn build_im_status_text(
                     .or(context.model_provider.as_ref())
                     .map(String::as_str),
             );
+            let reasoning_effort_text = bifrost_agent::format_optional_status_text(
+                d.model_reasoning_effort
+                    .as_ref()
+                    .or(context.model_reasoning_effort.as_ref())
+                    .map(String::as_str),
+            );
+            let reasoning_summary_text = bifrost_agent::format_optional_status_text(
+                d.model_reasoning_summary
+                    .as_ref()
+                    .or(context.model_reasoning_summary.as_ref())
+                    .map(String::as_str),
+            );
             let conversation_ref = bifrost_agent::format_conversation_ref(
                 d.external_thread_id
                     .as_ref()
@@ -445,12 +498,14 @@ pub(super) fn build_im_status_text(
             let context_management_text =
                 bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- 状态: 空闲{}",
                 work_dir,
                 agent_type,
                 runner_type,
                 runner_id,
                 model_text,
+                reasoning_effort_text,
+                reasoning_summary_text,
                 conversation_ref,
                 d.user_turn_count,
                 d.message_count,
@@ -508,6 +563,18 @@ pub(super) fn build_agent_api_status_text(
                     .or(context.model_provider.as_ref())
                     .map(String::as_str),
             );
+            let reasoning_effort_text = bifrost_agent::format_optional_status_text(
+                d.model_reasoning_effort
+                    .as_ref()
+                    .or(context.model_reasoning_effort.as_ref())
+                    .map(String::as_str),
+            );
+            let reasoning_summary_text = bifrost_agent::format_optional_status_text(
+                d.model_reasoning_summary
+                    .as_ref()
+                    .or(context.model_reasoning_summary.as_ref())
+                    .map(String::as_str),
+            );
             let conversation_ref = bifrost_agent::format_conversation_ref(
                 d.external_thread_id
                     .as_ref()
@@ -529,12 +596,14 @@ pub(super) fn build_agent_api_status_text(
             let context_management_text =
                 bifrost_agent::format_context_management_status(d.message_count);
             format!(
-                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
+                "会话状态:\n- 工作路径: {}\n- Agent 类型: {}\n- Runner 类型: {}\n- Runner ID: {}\n- 模型: {}\n- 思考强度: {}\n- 思考摘要: {}\n- 外部会话: {}\n- 历史对话轮次: {}\n- 消息数: {}\n- 估算 token: ~{}\n- API 累计 token: {}\n- Context 用量: ~{} / {} ({:.1}%)\n- 显式压缩次数: {}\n- 上下文管理: {}\n- 历史版本: {}\n- MCP 工具数: 0",
                 work_dir,
                 agent_type,
                 runner_type,
                 runner_id,
                 model_text,
+                reasoning_effort_text,
+                reasoning_summary_text,
                 conversation_ref,
                 d.user_turn_count,
                 d.message_count,
@@ -567,6 +636,8 @@ pub(super) fn status_context_from_agent_runner(
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
         },
@@ -579,6 +650,8 @@ pub(super) fn status_context_from_agent_config(
     let mut context = status_context_from_agent_runner(config.runner.as_ref());
     context.model = config.model.clone();
     context.model_provider = config.model_provider.clone();
+    context.model_reasoning_effort = config.model_reasoning_effort.clone();
+    context.model_reasoning_summary = config.model_reasoning_summary.clone();
     context
 }
 
@@ -592,6 +665,8 @@ pub(super) fn status_context_from_external_runner(
         runner_id: Some(runner_id.to_string()),
         model: None,
         model_provider: None,
+        model_reasoning_effort: None,
+        model_reasoning_summary: None,
         external_conversation_id: None,
         external_thread_id: None,
     }

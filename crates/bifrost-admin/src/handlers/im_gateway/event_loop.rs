@@ -956,18 +956,21 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         &effective.sources,
         input.delivery_override,
     );
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &settings.adapter,
+        &settings.adapter_config,
+    );
     let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
-    if let Some(model) = settings
-        .adapter_config
-        .model
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(model) = resolved_model_config.model.clone() {
         status_context.model = Some(model);
-        status_context.model_provider = Some("runner config".to_string());
     }
+    status_context.model_provider = resolved_model_config
+        .model_provider
+        .clone()
+        .or_else(|| resolved_model_config.model_source.clone());
+    status_context.model_reasoning_effort = resolved_model_config.reasoning_effort.clone();
+    status_context.model_reasoning_summary = resolved_model_config.reasoning_summary.clone();
 
     let provider_agent_config =
         effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider);
@@ -1093,6 +1096,15 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 request.allow_work_dirs = vec![work_dir.display().to_string()];
             }
         }
+        session.remember_runner_model_config(
+            resolved_model_config.model.clone(),
+            resolved_model_config
+                .model_provider
+                .clone()
+                .or_else(|| resolved_model_config.model_source.clone()),
+            resolved_model_config.reasoning_effort.clone(),
+            resolved_model_config.reasoning_summary.clone(),
+        );
         ensure_external_cli_session_recorder(
             &mut session,
             &mut recorder,
@@ -1237,14 +1249,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                             crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
                                 &input.session_key,
                                 &settings.adapter,
-                                Some(&effective.runner_id),
-                                request_for_progress.adapter_config.model.as_deref(),
-                                request_for_progress
-                                    .adapter_config
-                                    .model
-                                    .as_ref()
-                                    .map(|_| "runner config"),
-                                request_for_progress.work_dir.as_deref(),
+                                crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                                    Some(&effective.runner_id),
+                                    resolved_model_config.model.as_deref(),
+                                    resolved_model_config
+                                        .model_provider
+                                        .as_deref()
+                                        .or(resolved_model_config.model_source.as_deref()),
+                                    resolved_model_config.reasoning_effort.as_deref(),
+                                    resolved_model_config.reasoning_summary.as_deref(),
+                                    request_for_progress.work_dir.as_deref(),
+                                ),
                                 &progress_event,
                             ),
                         ) {
@@ -1298,14 +1313,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
                         &input.session_key,
                         &settings.adapter,
-                        Some(&effective.runner_id),
-                        request_for_progress.adapter_config.model.as_deref(),
-                        request_for_progress
-                            .adapter_config
-                            .model
-                            .as_ref()
-                            .map(|_| "runner config"),
-                        request_for_progress.work_dir.as_deref(),
+                        crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                            Some(&effective.runner_id),
+                            resolved_model_config.model.as_deref(),
+                            resolved_model_config
+                                .model_provider
+                                .as_deref()
+                                .or(resolved_model_config.model_source.as_deref()),
+                            resolved_model_config.reasoning_effort.as_deref(),
+                            resolved_model_config.reasoning_summary.as_deref(),
+                            request_for_progress.work_dir.as_deref(),
+                        ),
                         &progress_event,
                     ),
                 ) {
@@ -1885,6 +1903,10 @@ fn sync_external_cli_active_status(session: &bifrost_agent::session::AgentSessio
     status.agent_type = session.agent_type.clone();
     status.runner_type = session.runner_type.clone();
     status.runner_id = session.runner_id.clone();
+    status.model = session.model.clone();
+    status.model_provider = session.model_provider.clone();
+    status.model_reasoning_effort = session.model_reasoning_effort.clone();
+    status.model_reasoning_summary = session.model_reasoning_summary.clone();
     status.external_conversation_id = session.external_conversation_id.clone();
     status.external_thread_id = session.external_thread_id.clone();
     status.user_turn_count = session.user_turn_count();
@@ -1910,8 +1932,11 @@ fn external_cli_progress_runner_summary(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: Option<&std::collections::BTreeMap<String, String>>,
 ) -> crate::im_gateway::progress_card::ProgressRunnerSummary {
-    let configured_model = request
-        .adapter_config
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &request.adapter,
+        &request.adapter_config,
+    );
+    let configured_model = resolved_model_config
         .model
         .as_deref()
         .map(str::trim)
@@ -1923,7 +1948,11 @@ fn external_cli_progress_runner_summary(
         .filter(|value| !value.is_empty());
     let model = configured_model.or(metadata_model).map(str::to_string);
     let model_source = if configured_model.is_some() {
-        Some("runner 配置".to_string())
+        resolved_model_config
+            .model_provider
+            .clone()
+            .or_else(|| resolved_model_config.model_source.clone())
+            .map(|value| format_runner_model_source(&value))
     } else {
         metadata
             .and_then(|metadata| metadata.get("modelSource"))
@@ -1954,6 +1983,15 @@ fn external_cli_progress_runner_summary(
         adapter: adapter.trim().to_string(),
         model,
         model_source,
+        reasoning_effort: resolved_model_config.reasoning_effort.or_else(|| {
+            metadata.and_then(|metadata| metadata.get("modelReasoningEffort").cloned())
+        }),
+        reasoning_summary: resolved_model_config.reasoning_summary.or_else(|| {
+            metadata.and_then(|metadata| metadata.get("modelReasoningSummary").cloned())
+        }),
+        reasoning_source: resolved_model_config
+            .reasoning_source
+            .map(|value| format_runner_model_source(&value)),
         token_usage: metadata.and_then(external_cli_token_usage_from_metadata),
         work_dir: request
             .work_dir
@@ -1991,6 +2029,8 @@ fn format_runner_model_source(source: &str) -> String {
         "runner config" => "runner 配置".to_string(),
         "codex default" => "Codex 默认".to_string(),
         "trae default" => "Trae 默认".to_string(),
+        "codex config" => "Codex 配置".to_string(),
+        "trae config" => "Trae 配置".to_string(),
         value => value.to_string(),
     }
 }

@@ -22,8 +22,10 @@ import {
   formatDuration,
   formatLabel,
   formatLoopProgress,
+  formatModelRef,
   formatNumber,
   formatRelativeTime,
+  formatReasoningRef,
   formatRunPhase,
   formatRunnerTag,
   formatStatusMetricCount,
@@ -523,6 +525,8 @@ export function AgentChatSettingsModal({
                 <Tag>{formatLabel(telemetry.status.state)}</Tag>
               ) : null}
             </Space>
+            <MetricRow label="Model" value={formatModelRef(telemetry.status)} />
+            <MetricRow label="Reasoning" value={formatReasoningRef(telemetry.status)} />
             <MetricRow label="Loop" value={formatLoopProgress(telemetry.status)} />
             <MetricRow
               label="Messages"
@@ -592,6 +596,8 @@ export function AgentChatSettingsModal({
                     .filter(Boolean)
                     .join(" / ")}
                 </Text>
+                <MetricRow label="Model" value={formatModelRef(telemetry.status)} />
+                <MetricRow label="Reasoning" value={formatReasoningRef(telemetry.status)} />
               </>
             ) : null}
             {telemetry.status?.metadata ? (

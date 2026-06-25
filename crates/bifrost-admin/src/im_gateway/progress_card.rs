@@ -372,6 +372,9 @@ pub struct ProgressRunnerSummary {
     pub adapter: String,
     pub model: Option<String>,
     pub model_source: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_summary: Option<String>,
+    pub reasoning_source: Option<String>,
     pub token_usage: Option<ProgressRunnerTokenUsage>,
     pub work_dir: Option<String>,
     pub external_thread_id: Option<String>,
@@ -2001,7 +2004,15 @@ fn format_status_panel_title(snapshot: &ImAgentProgressSnapshot) -> String {
     if snapshot_has_external_runner(snapshot) {
         let runner_id = external_runner_id(snapshot);
         let model = external_runner_model_label(snapshot);
-        let title = format!("Runner：{} · 模型：{}", truncate_str(&runner_id, 24), model);
+        let reasoning = external_runner_reasoning_title(snapshot)
+            .map(|value| format!(" · {value}"))
+            .unwrap_or_default();
+        let title = format!(
+            "Runner：{} · 模型：{}{}",
+            truncate_str(&runner_id, 24),
+            model,
+            reasoning
+        );
         return if let Some(notice) = snapshot.activity_notice.as_deref() {
             format!("{title} · {notice}")
         } else {
@@ -2190,6 +2201,40 @@ fn external_runner_token_usage_line(snapshot: &ImAgentProgressSnapshot) -> Optio
     Some(format!("Token：总计 {total} · {}", parts.join(" · ")))
 }
 
+fn external_runner_reasoning_title(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let runner = snapshot.runner.as_ref()?;
+    runner
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| format!("思考：{}", truncate_one_line(value, 24)))
+}
+
+fn external_runner_reasoning_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
+    let runner = snapshot.runner.as_ref()?;
+    let effort = runner
+        .reasoning_effort
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let summary = runner
+        .reasoning_summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match (effort, summary) {
+        (Some(effort), Some(summary)) => Some(format!(
+            "思考：{} · 摘要：{}",
+            truncate_one_line(effort, 32),
+            truncate_one_line(summary, 32)
+        )),
+        (Some(effort), None) => Some(format!("思考：{}", truncate_one_line(effort, 32))),
+        (None, Some(summary)) => Some(format!("摘要：{}", truncate_one_line(summary, 32))),
+        (None, None) => None,
+    }
+}
+
 fn external_runner_context_usage_line(snapshot: &ImAgentProgressSnapshot) -> Option<String> {
     let usage = snapshot.runner.as_ref()?.token_usage.as_ref()?;
     let input = usage.input_tokens?;
@@ -2333,6 +2378,9 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
         let token_line = external_runner_token_usage_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
+        let reasoning_line = external_runner_reasoning_line(snapshot)
+            .map(|line| format!(" · {line}"))
+            .unwrap_or_default();
         let context_line = external_runner_context_usage_line(snapshot)
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
@@ -2340,13 +2388,14 @@ fn format_footer_markdown(snapshot: &ImAgentProgressSnapshot) -> String {
             .map(|line| format!("\n{line}"))
             .unwrap_or_default();
         return format!(
-            "{}状态：{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
+            "{}状态：{}{}\nRunner：`{}` · Adapter：`{}`\n模型：{}{}{}{}\n外部会话：{}\n队列：{} · 引导：{}\n工作路径：`{}`{}",
             prefix,
             phase,
             state_line,
             external_runner_id(snapshot),
             external_runner_adapter(snapshot),
             external_runner_model_label(snapshot),
+            reasoning_line,
             token_line,
             context_line,
             external_runner_conversation_ref(snapshot),

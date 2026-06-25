@@ -93,6 +93,12 @@ export type AgentThreadSummary = {
   agent_type?: string;
   runner_type?: string;
   runner_id?: string;
+  model?: string;
+  model_provider?: string;
+  modelReasoningEffort?: string;
+  modelReasoningSummary?: string;
+  model_reasoning_effort?: string;
+  model_reasoning_summary?: string;
   title?: string;
   history_path?: string;
   start_time?: number;
@@ -153,6 +159,12 @@ export type SessionDetail = {
   agent_type?: string;
   runner_type?: string;
   runner_id?: string;
+  model?: string;
+  model_provider?: string;
+  modelReasoningEffort?: string;
+  modelReasoningSummary?: string;
+  model_reasoning_effort?: string;
+  model_reasoning_summary?: string;
   history_path?: string;
   has_timeline?: boolean;
   timeline_event_count?: number;
@@ -203,6 +215,12 @@ export type RunStatusSnapshot = {
   agent_type?: string;
   runner_type?: string;
   runner_id?: string;
+  model?: string;
+  model_provider?: string;
+  modelReasoningEffort?: string;
+  modelReasoningSummary?: string;
+  model_reasoning_effort?: string;
+  model_reasoning_summary?: string;
   metadata?: Record<string, string>;
 };
 
@@ -646,6 +664,10 @@ export function telemetryFromThread(thread?: AgentThreadSummary): RunTelemetry {
       runner_type: thread.runner_type,
       runner_id: thread.runner_id,
       agent_type: thread.agent_type,
+      model: thread.model,
+      model_provider: thread.model_provider,
+      model_reasoning_effort: thread.model_reasoning_effort || thread.modelReasoningEffort,
+      model_reasoning_summary: thread.model_reasoning_summary || thread.modelReasoningSummary,
     },
     plan: [],
     tools: [],
@@ -708,6 +730,23 @@ export function telemetryFromSessionDetail(
       runner_type: detail.active_status?.runner_type || detail.runner_type || thread?.runner_type,
       runner_id: detail.active_status?.runner_id || detail.runner_id || thread?.runner_id,
       agent_type: detail.active_status?.agent_type || detail.agent_type || thread?.agent_type,
+      model: detail.active_status?.model || detail.model || thread?.model,
+      model_provider:
+        detail.active_status?.model_provider || detail.model_provider || thread?.model_provider,
+      model_reasoning_effort:
+        detail.active_status?.model_reasoning_effort ||
+        detail.active_status?.modelReasoningEffort ||
+        detail.model_reasoning_effort ||
+        detail.modelReasoningEffort ||
+        thread?.model_reasoning_effort ||
+        thread?.modelReasoningEffort,
+      model_reasoning_summary:
+        detail.active_status?.model_reasoning_summary ||
+        detail.active_status?.modelReasoningSummary ||
+        detail.model_reasoning_summary ||
+        detail.modelReasoningSummary ||
+        thread?.model_reasoning_summary ||
+        thread?.modelReasoningSummary,
       metadata: detail.active_status?.metadata || detail.metadata,
     },
   };
@@ -1207,6 +1246,24 @@ export function formatLoopProgress(status?: RunStatusSnapshot) {
   const current = status.current_loop_iteration ?? status.completed_loop_iterations ?? 0;
   const max = status.max_loop_iterations;
   return typeof max === "number" && max > 0 ? `${current}/${max}` : String(current);
+}
+
+export function formatModelRef(status?: RunStatusSnapshot) {
+  const model = status?.model?.trim();
+  const provider = status?.model_provider?.trim();
+  if (model && provider) {
+    return `${model} (${provider})`;
+  }
+  return model || (provider ? `N/A (${provider})` : "-");
+}
+
+export function formatReasoningRef(status?: RunStatusSnapshot) {
+  const effort = (status?.model_reasoning_effort || status?.modelReasoningEffort)?.trim();
+  const summary = (status?.model_reasoning_summary || status?.modelReasoningSummary)?.trim();
+  if (effort && summary) {
+    return `${effort} / ${summary}`;
+  }
+  return effort || summary || "-";
 }
 
 export function formatContextUsage(

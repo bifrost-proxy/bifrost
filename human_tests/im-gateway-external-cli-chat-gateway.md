@@ -967,8 +967,52 @@
 3. Web UI 显示 CLI、Prompt、Attachments、I/O、Tools、Tool time、Run time、First event、Resume 等行；缺失字段显示 `-`，不伪造 context window、剩余 context 或 billing token。
 4. `normalized_events.jsonl` 中 tool completed raw event 带 `observedAtMs`，同一 tool 有 started/completed 时带 `durationMs`。
 
+### TC-IEC-49: Codex/TraeX Runner 模型与思考配置在飞书卡片和 Web UI 状态栏展示
+
+操作步骤：
+1. 准备隔离的 Codex 与 TraeX 配置目录，分别写入默认模型和思考配置：
+   ```bash
+   codex_home=$(mktemp -d)
+   trae_home=$(mktemp -d)
+   cat >"$codex_home/config.toml" <<'TOML'
+   model = "gpt-5.1-codex"
+   model_provider = "codex-provider"
+   model_reasoning_effort = "high"
+   model_reasoning_summary = "auto"
+   TOML
+   cat >"$trae_home/traecli.toml" <<'TOML'
+   model = "trae-default-model"
+   model_provider = "trae-provider"
+   reasoning_effort = "medium"
+   reasoning_summary = "concise"
+   TOML
+   CODEX_HOME="$codex_home" TRAE_HOME="$trae_home" cargo test -p bifrost-admin codex_and_traex_model_config_resolves_user_defaults_and_overrides -- --nocapture
+   ```
+2. 执行飞书卡片摘要回归：
+   ```bash
+   cargo test -p bifrost-admin progress_card --lib -- --nocapture
+   cargo test -p bifrost-admin online_notification --lib -- --nocapture
+   ```
+3. 执行线上通知 E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_online_notification_runner_context.sh
+   ```
+4. 执行 Web UI 状态栏回归：
+   ```bash
+   pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts
+   pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "keeps running history token HUD synced with live status" --reporter=line
+   ```
+
+预期结果：
+1. Codex resolver 从 `CODEX_HOME/config.toml` 读取 `model`、`model_provider`、`model_reasoning_effort`、`model_reasoning_summary`；TraeX resolver 从 `TRAE_HOME/traecli.toml` 读取 `model`、`model_provider`、`reasoning_effort`、`reasoning_summary`。
+2. Runner 配置中的显式 `model/reasoningEffort/reasoningSummary` 覆盖默认配置，并在 run metadata、active status 和 session detail 中保持一致。
+3. 飞书 progress card 的摘要区域展示模型来源和思考配置，例如 `模型：gpt-5.1-codex（Codex 配置） · 思考：high · 摘要：auto`。
+4. Feishu online notification 摘要包含 `Model`、`Reasoning Effort`、`Reasoning Summary` 三行；未知值显示 `N/A`，不省略字段。
+5. Web UI Agent Chat 状态弹窗的 Context 区域展示 `Model` 和 `Reasoning`，运行中 live status 优先于陈旧历史快照。
+
 ## 最近执行记录
 
+- 2026-06-25：执行 TC-IEC-49 的本地回归。`cargo test -p bifrost-admin codex_and_traex_model_config_resolves_user_defaults_and_overrides -- --nocapture` 通过，确认 Codex 从 `CODEX_HOME/config.toml`、TraeX 从 `TRAE_HOME/traecli.toml` 读取默认模型和思考配置，runner 显式配置可覆盖默认值。`cargo test -p bifrost-admin progress_card --lib -- --nocapture` 通过 34 个用例，飞书 progress card 外部 runner 摘要包含模型来源、思考强度与思考摘要。`cargo test -p bifrost-admin online_notification --lib -- --nocapture` 通过 4 个用例，线上通知摘要包含 Model / Reasoning Effort / Reasoning Summary。`SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_online_notification_runner_context.sh` 通过，真实临时 Bifrost + mock Feishu API 发送的 interactive card content 包含新增三行，未知值稳定展示 `N/A`。`pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts` 通过 16 个用例，`pnpm --dir web exec playwright test tests/ui/agent-chat.spec.ts -g "keeps running history token HUD synced with live status" --reporter=line` 通过，真实浏览器打开 Agent Chat 状态弹窗后 Context 区域可见 `gpt-5.1-codex (codex config)` 与 `high / auto`。
 - 2026-06-25：执行 TC-IEC-43/44/46 的自动真实服务回归。先编译当前源码 `cargo build --bin bifrost`，再运行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`。脚本启动临时服务端口 `53049`，配置 `adapter=codex` 的 mock runner 和 `adapter=traex` 的 mock runner；普通 Web Chat 第一轮 run `1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4` 图片路径为 `.../attachments/session-web-image-session-e2e-1782381743/1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4/images/image-1.png`，同 session 第二轮 run `1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270` 图片路径为 `.../1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270/images/image-1.png`，断言第一轮字节仍为 `hello-image`。TraeX-compatible run `1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f` 图片路径为 `.../attachments/session-web-image-session-traex-e2e-1782381743/1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f/images/image-1.png`；runner-call image-only run `1782381743490-e375c12b-f907-41ce-a5cf-8f66873787b9` 成功。脚本同时断言 Codex/TraeX `result.json.metadata` 和 `/_bifrost/api/im-gateway/agent/sessions/<sessionKey>` 均包含 `cli.executable`、`cli.args`、`cli.version`、`runner.adapter`、prompt/attachment/io/timing/tool/resume/usage 字段，`normalized_events.jsonl` 的 tool completed raw event 包含 `durationMs`。
 - 2026-06-25：执行 TC-IEC-47/48 的 review 回归。先运行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，再执行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`。脚本启动临时服务端口 `49407`，在普通 `/chat/stream` 请求中传入恶意 `params.attachmentBaseDir`，断言该目录未创建，实际图片仍保存到服务端 session attachment dir 的 run-id 子目录；同一 session 第二轮图片继续写入新的 run-id 子目录并保留第一轮字节。脚本同时用真实常量 `callerRunnerId:"bifrost_agent"`、`callerRunnerAdapter:"bifrost_agent"` 触发 image-only runner-call，断言父 session detail 通过 `latest_run_id` 合并目标 external run metadata，覆盖 review 指出的内置 caller 分支。整理脚本缩进后再次执行同一命令，临时服务端口 `53350`，run `1782386027499-12c1ee2d-020f-497f-8638-723b43e7b359`、`1782386027556-908f78a7-a6e8-4bd9-960d-26afc2244953`、`1782386027671-d1c2e8e2-1c86-42aa-8335-56ad58687410`、`1782386027801-2eae2e40-305a-432a-844c-550c20578907` 全部通过。
 - 2026-06-25：执行 TC-IEC-46/47/48 的 9900 当前编译版本真实回归。用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 ./target/debug/bifrost start -d -y --skip-cert-check -p 9900 --host 0.0.0.0 --no-system-proxy --no-tray --no-intercept` 重启服务，PID `14428`，`system_proxy.enabled=false`。先通过 `/_bifrost/api/im-gateway/chat/stream` 向真实 `TreeX` 发送 PNG，并在 `params.attachmentBaseDir` 注入 `/tmp/bifrost-evil-attachments-9900-1782385605835`，返回 run `1782385605858-41ea0904-9ddf-4c02-9f9f-84bb9583580f`，响应图片路径为 `~/.bifrost/agent/sessions/.../attachments/session-admin-chat-review-attachment-9900-1782385605835-1782385605/1782385605858-41ea0904-9ddf-4c02-9f9f-84bb9583580f/images/image-1.png`，恶意目录未创建；session detail metadata 显示 `runner.adapter=traex`、`runner.id=TreeX`、`attachments.count=1`、`attachments.totalBytes=68`、`cli.version=traecli 0.200.12`。随后通过 `callerRunnerId:"bifrost_agent"`、`callerRunnerAdapter:"bifrost_agent"` 的 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 触发真实 TreeX image runner-call，父 session detail 同样合并出 `traex` metadata。最后使用真实浏览器打开 Web UI，点击 `New Chat` 创建会话，在 composer 输入 `/` 选择 `TreeX (traex)`，粘贴 `web-ui-review.png`，发送 `Web UI immediate diagnostics review: return the attached image absolute path only.`；页面完成后立即点击 `Status`，不重开线程即可看到 `Runner diagnostics`、`traex · traecli 0.200.12`、`Attachments 1 · 68 bytes`、Run time `4.2s`、First event `667ms`。

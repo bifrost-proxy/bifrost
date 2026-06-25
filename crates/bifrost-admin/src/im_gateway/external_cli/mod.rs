@@ -300,6 +300,16 @@ pub struct ExternalCliAdapterConfig {
     pub extra: BTreeMap<String, serde_json::Value>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExternalCliResolvedModelConfig {
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub reasoning_effort: Option<String>,
+    pub reasoning_summary: Option<String>,
+    pub model_source: Option<String>,
+    pub reasoning_source: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCliDeliveryMode {
@@ -1655,23 +1665,194 @@ fn usage_u64(map: &serde_json::Map<String, serde_json::Value>, key: &str) -> Opt
     map.get(key).and_then(serde_json::Value::as_u64)
 }
 
+pub fn resolve_external_cli_model_config(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+) -> ExternalCliResolvedModelConfig {
+    let mut resolved = if config.ignore_user_config.unwrap_or(false) {
+        ExternalCliResolvedModelConfig::default()
+    } else {
+        load_external_cli_user_model_config(adapter, config)
+    };
+    apply_config_overrides_to_model_config(&mut resolved, &config.config_overrides);
+    if let Some(model) = clean_optional_string(config.model.as_deref()) {
+        resolved.model = Some(model);
+        resolved.model_source = Some("runner config".to_string());
+    }
+    if let Some(effort) = clean_optional_string(config.reasoning_effort.as_deref()) {
+        resolved.reasoning_effort = Some(effort);
+        resolved.reasoning_source = Some("runner config".to_string());
+    }
+    if let Some(summary) = clean_optional_string(config.reasoning_summary.as_deref()) {
+        resolved.reasoning_summary = Some(summary);
+        resolved.reasoning_source = Some("runner config".to_string());
+    }
+    resolved
+}
+
+fn load_external_cli_user_model_config(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+) -> ExternalCliResolvedModelConfig {
+    let Some((config_path, profile_suffix, source)) = external_cli_user_config_path(adapter) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    let mut resolved = read_model_config_toml(&config_path, source);
+    if let Some(profile) = clean_optional_string(config.profile_v2.as_deref())
+        .or_else(|| clean_optional_string(config.profile.as_deref()))
+    {
+        let profile_path = config_path
+            .parent()
+            .unwrap_or_else(|| Path::new(""))
+            .join(format!("{profile}{profile_suffix}"));
+        let profile_config = read_model_config_toml(&profile_path, source);
+        merge_model_config(&mut resolved, profile_config);
+    }
+    resolved
+}
+
+fn external_cli_user_config_path(adapter: &str) -> Option<(PathBuf, &'static str, &'static str)> {
+    match adapter.trim() {
+        DEFAULT_ADAPTER => {
+            let home = std::env::var_os("CODEX_HOME")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bifrost_agent::config::user_home_dir().join(".codex"));
+            Some((home.join("config.toml"), ".config.toml", "codex config"))
+        }
+        TRAEX_ADAPTER => {
+            let home = std::env::var_os("TRAE_HOME")
+                .or_else(|| std::env::var_os("TRAEX_HOME"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bifrost_agent::config::user_home_dir().join(".trae"));
+            Some((home.join("traecli.toml"), ".traecli.toml", "trae config"))
+        }
+        _ => None,
+    }
+}
+
+fn read_model_config_toml(path: &Path, source: &str) -> ExternalCliResolvedModelConfig {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    let model = toml_string(&value, "model");
+    let model_provider = toml_string(&value, "model_provider");
+    let reasoning_effort = toml_string(&value, "model_reasoning_effort")
+        .or_else(|| toml_string(&value, "reasoning_effort"));
+    let reasoning_summary = toml_string(&value, "model_reasoning_summary")
+        .or_else(|| toml_string(&value, "reasoning_summary"));
+    ExternalCliResolvedModelConfig {
+        model,
+        model_provider,
+        reasoning_effort,
+        reasoning_summary,
+        model_source: Some(source.to_string()),
+        reasoning_source: Some(source.to_string()),
+    }
+}
+
+fn toml_string(value: &toml::Value, key: &str) -> Option<String> {
+    clean_optional_string(value.get(key).and_then(toml::Value::as_str))
+}
+
+fn merge_model_config(
+    base: &mut ExternalCliResolvedModelConfig,
+    overlay: ExternalCliResolvedModelConfig,
+) {
+    if overlay.model.is_some() {
+        base.model = overlay.model;
+        base.model_source = overlay.model_source.clone();
+    }
+    if overlay.model_provider.is_some() {
+        base.model_provider = overlay.model_provider;
+    }
+    if overlay.reasoning_effort.is_some() {
+        base.reasoning_effort = overlay.reasoning_effort;
+        base.reasoning_source = overlay.reasoning_source.clone();
+    }
+    if overlay.reasoning_summary.is_some() {
+        base.reasoning_summary = overlay.reasoning_summary;
+        base.reasoning_source = overlay.reasoning_source;
+    }
+}
+
+fn apply_config_overrides_to_model_config(
+    resolved: &mut ExternalCliResolvedModelConfig,
+    overrides: &[String],
+) {
+    for value in overrides {
+        let Some((key, raw_value)) = value.split_once('=') else {
+            continue;
+        };
+        let Some(parsed) = parse_config_override_string(raw_value) else {
+            continue;
+        };
+        match key.trim() {
+            "model" => {
+                resolved.model = Some(parsed);
+                resolved.model_source = Some("runner config".to_string());
+            }
+            "model_provider" => resolved.model_provider = Some(parsed),
+            "model_reasoning_effort" | "reasoning_effort" => {
+                resolved.reasoning_effort = Some(parsed);
+                resolved.reasoning_source = Some("runner config".to_string());
+            }
+            "model_reasoning_summary" | "reasoning_summary" => {
+                resolved.reasoning_summary = Some(parsed);
+                resolved.reasoning_source = Some("runner config".to_string());
+            }
+            _ => {}
+        }
+    }
+}
+
+fn parse_config_override_string(raw_value: &str) -> Option<String> {
+    let trimmed = raw_value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    toml::from_str::<toml::Value>(&format!("value = {trimmed}"))
+        .ok()
+        .and_then(|value| {
+            value
+                .get("value")
+                .and_then(toml::Value::as_str)
+                .map(str::to_string)
+        })
+        .or_else(|| clean_optional_string(Some(trimmed.trim_matches('"'))))
+}
+
+fn clean_optional_string(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn append_external_cli_request_metadata(
     request: &ExternalCliRunRequest,
     metadata: &mut BTreeMap<String, String>,
 ) {
-    if let Some(model) = request
-        .adapter_config
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
+    let resolved = resolve_external_cli_model_config(&request.adapter, &request.adapter_config);
+    if let Some(model) = resolved.model.as_deref() {
         metadata
             .entry("model".to_string())
             .or_insert_with(|| model.to_string());
+        if let Some(provider) = resolved.model_provider.as_deref() {
+            metadata
+                .entry("modelProvider".to_string())
+                .or_insert_with(|| provider.to_string());
+        }
         metadata
             .entry("modelSource".to_string())
-            .or_insert_with(|| "runner config".to_string());
+            .or_insert_with(|| {
+                resolved
+                    .model_source
+                    .clone()
+                    .unwrap_or_else(|| "runner config".to_string())
+            });
         metadata
             .entry("modelLabel".to_string())
             .or_insert_with(|| model.to_string());
@@ -1692,6 +1873,16 @@ fn append_external_cli_request_metadata(
         metadata
             .entry("modelSource".to_string())
             .or_insert_with(|| source.to_string());
+    }
+    if let Some(effort) = resolved.reasoning_effort.as_deref() {
+        metadata
+            .entry("modelReasoningEffort".to_string())
+            .or_insert_with(|| effort.to_string());
+    }
+    if let Some(summary) = resolved.reasoning_summary.as_deref() {
+        metadata
+            .entry("modelReasoningSummary".to_string())
+            .or_insert_with(|| summary.to_string());
     }
 }
 
@@ -2674,13 +2865,40 @@ fn parse_progress_event(raw: serde_json::Value) -> Option<ExternalCliProgressEve
     })
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExternalCliProgressStatusContext<'a> {
+    runner_id: Option<&'a str>,
+    model: Option<&'a str>,
+    model_source: Option<&'a str>,
+    reasoning_effort: Option<&'a str>,
+    reasoning_summary: Option<&'a str>,
+    work_dir: Option<&'a Path>,
+}
+
+impl<'a> ExternalCliProgressStatusContext<'a> {
+    pub fn new(
+        runner_id: Option<&'a str>,
+        model: Option<&'a str>,
+        model_source: Option<&'a str>,
+        reasoning_effort: Option<&'a str>,
+        reasoning_summary: Option<&'a str>,
+        work_dir: Option<&'a Path>,
+    ) -> Self {
+        Self {
+            runner_id,
+            model,
+            model_source,
+            reasoning_effort,
+            reasoning_summary,
+            work_dir,
+        }
+    }
+}
+
 pub fn external_progress_to_agent_turn_event(
     session_key: &str,
     adapter: &str,
-    runner_id: Option<&str>,
-    model: Option<&str>,
-    model_source: Option<&str>,
-    work_dir: Option<&Path>,
+    context: ExternalCliProgressStatusContext<'_>,
     event: &ExternalCliProgressEvent,
 ) -> Option<bifrost_agent::AgentTurnProgressEvent> {
     match event.event_type {
@@ -2692,10 +2910,12 @@ pub fn external_progress_to_agent_turn_event(
                 event.content.trim().to_string()
             };
             status.runner_type = Some(adapter.to_string());
-            status.runner_id = runner_id.map(str::to_string);
-            status.model = model.map(str::to_string);
-            status.model_provider = model_source.map(str::to_string);
-            status.work_dir = work_dir.map(|path| path.display().to_string());
+            status.runner_id = context.runner_id.map(str::to_string);
+            status.model = context.model.map(str::to_string);
+            status.model_provider = context.model_source.map(str::to_string);
+            status.model_reasoning_effort = context.reasoning_effort.map(str::to_string);
+            status.model_reasoning_summary = context.reasoning_summary.map(str::to_string);
+            status.work_dir = context.work_dir.map(|path| path.display().to_string());
             Some(bifrost_agent::AgentTurnProgressEvent::Status(Box::new(
                 status,
             )))

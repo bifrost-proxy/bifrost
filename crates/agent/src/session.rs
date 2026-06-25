@@ -200,6 +200,18 @@ pub struct AgentSession {
     /// Configured runner id for external runner sessions.
     pub runner_id: Option<String>,
 
+    /// Effective model used by the current runner, when known.
+    pub model: Option<String>,
+
+    /// Effective model provider or model source label, when known.
+    pub model_provider: Option<String>,
+
+    /// Effective model reasoning effort, when known.
+    pub model_reasoning_effort: Option<String>,
+
+    /// Effective model reasoning summary mode, when known.
+    pub model_reasoning_summary: Option<String>,
+
     /// External web runner conversation id, when available.
     pub external_conversation_id: Option<String>,
 
@@ -351,6 +363,10 @@ impl AgentSession {
             agent_type: None,
             runner_type: None,
             runner_id: None,
+            model: None,
+            model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
             recorder: None,
@@ -487,6 +503,19 @@ impl AgentSession {
         self.agent_type = Some("External Runner Agent".to_string());
         self.runner_type = Some(adapter.to_string());
         self.runner_id = Some(runner_id.to_string());
+    }
+
+    pub fn remember_runner_model_config(
+        &mut self,
+        model: Option<String>,
+        model_provider: Option<String>,
+        reasoning_effort: Option<String>,
+        reasoning_summary: Option<String>,
+    ) {
+        self.model = model;
+        self.model_provider = model_provider;
+        self.model_reasoning_effort = reasoning_effort;
+        self.model_reasoning_summary = reasoning_summary;
     }
 
     pub fn remember_external_conversation_ref(

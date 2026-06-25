@@ -33,6 +33,19 @@ async function routeBuiltinAgentChatConfig(page: Page) {
   });
 }
 
+async function dismissConnectedDeviceModal(page: Page, timeoutMs = 3000) {
+  const notNowButton = page.getByRole("button", { name: "Not now" });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await notNowButton.isVisible({ timeout: 300 }).catch(() => false)) {
+      await notNowButton.click();
+      await expect(notNowButton).toBeHidden();
+      return;
+    }
+    await page.waitForTimeout(200);
+  }
+}
+
 async function pasteImageFiles(page: Page, testId: string, files: Array<{ name: string; type: string; content: string }>) {
   await page.getByTestId(testId).evaluate((element, pastedFiles) => {
     const data = new DataTransfer();
@@ -1945,6 +1958,10 @@ test("AI Agent Chat keeps running history token HUD synced with live status", as
     runner_type: "bifrost_agent",
     runner_id: "bifrost",
     agent_type: "Bifrost Agent",
+    model: "gpt-5.1-codex",
+    model_provider: "codex config",
+    model_reasoning_effort: "high",
+    model_reasoning_summary: "auto",
   };
 
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
@@ -1972,6 +1989,10 @@ test("AI Agent Chat keeps running history token HUD synced with live status", as
             runner_type: liveStatus.runner_type,
             runner_id: liveStatus.runner_id,
             agent_type: liveStatus.agent_type,
+            model: liveStatus.model,
+            model_provider: liveStatus.model_provider,
+            model_reasoning_effort: liveStatus.model_reasoning_effort,
+            model_reasoning_summary: liveStatus.model_reasoning_summary,
             source: "feishu",
           },
         ],
@@ -2061,10 +2082,17 @@ test("AI Agent Chat keeps running history token HUD synced with live status", as
   await expect(hud).toContainText("29.7M");
   await expect(hud).toContainText("74.7%");
   await expect(hud).not.toContainText("19.5M");
+  await dismissConnectedDeviceModal(page);
   await page.getByTestId("agent-chat-settings-open").click();
   await expect(page.getByTestId("agent-chat-context")).toContainText("29.7M");
   await expect(page.getByTestId("agent-chat-context")).toContainText("74.7%");
   await expect(page.getByTestId("agent-chat-context")).toContainText("186.7K / 250K");
+  await expect(page.getByTestId("agent-chat-context")).toContainText(
+    "gpt-5.1-codex (codex config)",
+  );
+  await expect(page.getByTestId("agent-chat-context")).toContainText(
+    "high / auto",
+  );
 });
 
 test("AI Agent Chat continues external runner history with canonical history path", async ({

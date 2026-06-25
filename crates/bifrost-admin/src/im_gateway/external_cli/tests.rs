@@ -1,4 +1,14 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
+
+static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn external_cli_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    EXTERNAL_CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap()
+}
 
 struct EnvGuard {
     key: &'static str,
@@ -1216,10 +1226,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &event,
     )
     .expect("mapped event");
@@ -1240,10 +1254,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped_status = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &status_event,
     )
     .expect("mapped status event");
@@ -1253,6 +1271,8 @@ fn external_progress_maps_to_agent_turn_progress_events() {
             assert_eq!(status.runner_id.as_deref(), Some("traex"));
             assert_eq!(status.model.as_deref(), Some("trae-model"));
             assert_eq!(status.model_provider.as_deref(), Some("runner config"));
+            assert_eq!(status.model_reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(status.model_reasoning_summary.as_deref(), Some("auto"));
         }
         other => panic!("unexpected mapped status event: {other:?}"),
     }
@@ -1275,10 +1295,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped_plan = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &plan_event,
     )
     .expect("mapped plan event");
@@ -1785,6 +1809,11 @@ fn config_store_new_persists_missing_default_runners_on_startup() {
 
 #[test]
 fn codex_request_metadata_includes_configured_or_default_model_label() {
+    let _env_lock = external_cli_env_guard();
+    let codex_home = tempfile::tempdir().unwrap();
+    let trae_home = tempfile::tempdir().unwrap();
+    let _codex_home = EnvGuard::set("CODEX_HOME", codex_home.path());
+    let _trae_home = EnvGuard::set("TRAE_HOME", trae_home.path());
     let configured_request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "hello".to_string(),
@@ -1870,6 +1899,75 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
     assert_eq!(
         trae_metadata.get("modelLabel").map(String::as_str),
         Some("Trae default model (not explicitly configured)")
+    );
+}
+
+#[test]
+fn codex_and_traex_model_config_resolves_user_defaults_and_overrides() {
+    let _env_lock = external_cli_env_guard();
+    let codex_home = tempfile::tempdir().unwrap();
+    let trae_home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "gpt-codex-default"
+model_reasoning_effort = "high"
+model_reasoning_summary = "auto"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_home.path().join("work.config.toml"),
+        r#"
+model = "gpt-codex-profile"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        trae_home.path().join("traecli.toml"),
+        r#"
+model = "GPT-Trae"
+model_provider = "trae"
+"#,
+    )
+    .unwrap();
+    let _codex_home = EnvGuard::set("CODEX_HOME", codex_home.path());
+    let _trae_home = EnvGuard::set("TRAE_HOME", trae_home.path());
+
+    let codex = resolve_external_cli_model_config(
+        DEFAULT_ADAPTER,
+        &ExternalCliAdapterConfig {
+            profile: Some("work".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(codex.model.as_deref(), Some("gpt-codex-profile"));
+    assert_eq!(codex.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(codex.reasoning_summary.as_deref(), Some("auto"));
+    assert_eq!(codex.model_source.as_deref(), Some("codex config"));
+
+    let trae =
+        resolve_external_cli_model_config(TRAEX_ADAPTER, &ExternalCliAdapterConfig::default());
+    assert_eq!(trae.model.as_deref(), Some("GPT-Trae"));
+    assert_eq!(trae.model_provider.as_deref(), Some("trae"));
+
+    let overridden = resolve_external_cli_model_config(
+        DEFAULT_ADAPTER,
+        &ExternalCliAdapterConfig {
+            model: Some("gpt-runner".to_string()),
+            reasoning_effort: Some("low".to_string()),
+            config_overrides: vec!["model_reasoning_summary=\"detailed\"".to_string()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(overridden.model.as_deref(), Some("gpt-runner"));
+    assert_eq!(overridden.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(overridden.reasoning_summary.as_deref(), Some("detailed"));
+    assert_eq!(overridden.model_source.as_deref(), Some("runner config"));
+    assert_eq!(
+        overridden.reasoning_source.as_deref(),
+        Some("runner config")
     );
 }
 
