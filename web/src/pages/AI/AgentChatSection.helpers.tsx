@@ -845,6 +845,7 @@ export async function runAgentStream(params: {
 
 export async function runRunnerCallStream(params: {
   message: string;
+  images?: PendingChatImage[];
   sessionKey: string;
   historyPath?: string;
   workDir?: string;
@@ -864,6 +865,11 @@ export async function runRunnerCallStream(params: {
       callerRunnerAdapter: params.callerRunnerAdapter,
       targetRunnerId: params.targetRunnerId,
       message: params.message,
+      images: (params.images || []).map((image) => ({
+        mimeType: image.mimeType,
+        data: image.data,
+        name: image.name,
+      })),
       workDir: params.workDir,
       historyPath: params.historyPath,
       callerMessages: params.callerMessages,

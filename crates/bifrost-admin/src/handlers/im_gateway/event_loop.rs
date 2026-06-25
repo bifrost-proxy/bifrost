@@ -467,6 +467,15 @@ pub(super) async fn run_event_loop_with_options(
                                 },
                                 ExternalCliChatInput {
                                     message_text: agent_message,
+                                    images: external_cli_images_from_chat_images(
+                                        resolve_event_images(
+                                            &client,
+                                            &provider,
+                                            &event,
+                                            &msg.images,
+                                        )
+                                        .await,
+                                    ),
                                     session_key: session_key.clone(),
                                     adapter_override: None,
                                     instructions_override: None,
@@ -635,6 +644,18 @@ pub(super) async fn run_event_loop_with_options(
                         },
                         ExternalCliChatInput {
                             message_text,
+                            images: match event.message.as_ref() {
+                                Some(message) => external_cli_images_from_chat_images(
+                                    resolve_event_images(
+                                        &client,
+                                        &provider,
+                                        &event,
+                                        &message.images,
+                                    )
+                                    .await,
+                                ),
+                                None => Vec::new(),
+                            },
                             session_key: session_key.clone(),
                             adapter_override: None,
                             instructions_override: None,
@@ -756,6 +777,13 @@ pub(super) async fn run_event_loop_with_options(
                     },
                     ExternalCliChatInput {
                         message_text,
+                        images: match event.message.as_ref() {
+                            Some(message) => external_cli_images_from_chat_images(
+                                resolve_event_images(&client, &provider, &event, &message.images)
+                                    .await,
+                            ),
+                            None => Vec::new(),
+                        },
                         session_key: session_key.clone(),
                         adapter_override: adapter.clone(),
                         instructions_override: instructions.clone(),
@@ -796,12 +824,28 @@ struct ExternalCliChatContext<'a> {
 
 struct ExternalCliChatInput {
     message_text: String,
+    images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
     session_key: String,
     adapter_override: Option<String>,
     instructions_override: Option<String>,
     delivery_override: Option<crate::im_gateway::external_cli::ExternalCliDeliveryMode>,
     runner_id_override: Option<String>,
     runner_selected: bool,
+}
+
+fn external_cli_images_from_chat_images(
+    images: Vec<bifrost_agent::ChatImageInput>,
+) -> Vec<crate::im_gateway::external_cli::ExternalCliImageInput> {
+    images
+        .into_iter()
+        .map(
+            |image| crate::im_gateway::external_cli::ExternalCliImageInput {
+                mime_type: image.mime_type,
+                data: image.data,
+                name: None,
+            },
+        )
+        .collect()
 }
 
 pub(super) fn resolve_external_cli_delivery_mode(
@@ -976,6 +1020,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             .and_then(|h| h.max_bytes),
     );
     let mut current_message = input.message_text;
+    let mut current_images = input.images;
     let mut recorder = session.recorder.take();
     let mut runner_metadata = persisted_state
         .as_ref()
@@ -1025,6 +1070,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             Some(input.session_key.clone()),
             &settings,
         );
+        request.images = std::mem::take(&mut current_images);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
             request.work_dir =
@@ -1055,6 +1101,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             &effective.runner_id,
             &request,
         );
+        apply_external_cli_session_attachment_base_dir(&mut request, recorder.as_ref());
         record_external_cli_input(
             &mut session,
             &mut recorder,
@@ -1666,6 +1713,64 @@ fn ensure_external_cli_session_recorder(
     }
 }
 
+fn apply_external_cli_session_attachment_base_dir(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    recorder: Option<&ConversationRecorder>,
+) {
+    if request
+        .params
+        .get("attachmentBaseDir")
+        .or_else(|| request.params.get("attachment_base_dir"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+    {
+        return;
+    }
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let Some(session_dir) = recorder.file_path().parent() else {
+        return;
+    };
+    let Some(session_stem) = recorder.file_path().file_stem() else {
+        return;
+    };
+    if !request.params.is_object() {
+        request.params = serde_json::json!({});
+    }
+    if let Some(params) = request.params.as_object_mut() {
+        params
+            .entry("attachmentBaseDir".to_string())
+            .or_insert_with(|| {
+                serde_json::Value::String(
+                    session_dir
+                        .join("attachments")
+                        .join(session_stem)
+                        .display()
+                        .to_string(),
+                )
+            });
+        params.entry("historyPath".to_string()).or_insert_with(|| {
+            serde_json::Value::String(recorder.file_path().display().to_string())
+        });
+    }
+}
+
+fn external_cli_request_chat_images(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+) -> Vec<bifrost_agent::ChatImageInput> {
+    request
+        .images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .map(|image| bifrost_agent::ChatImageInput {
+            mime_type: image.mime_type.clone(),
+            data: image.data.clone(),
+        })
+        .collect()
+}
+
 fn record_external_cli_input(
     session: &mut bifrost_agent::session::AgentSession,
     recorder: &mut Option<ConversationRecorder>,
@@ -1673,10 +1778,16 @@ fn record_external_cli_input(
     _runner_id: &str,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
 ) {
-    append_session_message(session, bifrost_agent::ChatMessage::user(&request.message));
+    let images = external_cli_request_chat_images(request);
+    append_session_message(
+        session,
+        bifrost_agent::ChatMessage::user_with_images(&request.message, &images),
+    );
     sync_external_cli_active_status(session);
     if let Some(rec) = recorder.as_mut() {
-        if let Err(error) = rec.record_user_message(session_key, &request.message) {
+        if let Err(error) =
+            rec.record_user_message_with_images(session_key, &request.message, &images)
+        {
             warn!(error = %error, "failed to record external cli user message");
         }
     }
@@ -1930,6 +2041,19 @@ mod tests {
         dedup.evict_expired();
 
         assert_eq!(dedup.window.len(), 1);
+    }
+
+    #[test]
+    fn external_cli_images_from_chat_images_preserves_payloads() {
+        let images = external_cli_images_from_chat_images(vec![bifrost_agent::ChatImageInput {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        }]);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, "aGVsbG8=");
+        assert!(images[0].name.is_none());
     }
 
     fn external_cli_result_with_status(

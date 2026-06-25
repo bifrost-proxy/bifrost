@@ -1633,11 +1633,8 @@ export default function AgentChatSection() {
       return;
     }
     if (slashRunner && !running && !silentCommand) {
-      if (imagesForSend.length > 0) {
-        antdMessage.warning("Slash runner calls do not support image attachments yet. Select the runner and send from chat instead.");
-        return;
-      }
-      await handleRunnerCall(content, slashRunner);
+      setPendingImages([]);
+      await handleRunnerCall(content, slashRunner, imagesForSend);
       return;
     }
     const userVisibleContent = content || imageCountLabel(imagesForSend.length);

@@ -18,6 +18,7 @@ import {
   stringFrom,
   type AgentThreadSummary,
   type ChatMessage,
+  type PendingChatImage,
   type RunnerCallMessageMeta,
   type RunnerOption,
   type RunTelemetry,
@@ -143,11 +144,23 @@ export function useRunnerCallHandler({
   workDir: string;
 }) {
   return useCallback(
-    async (content: string, targetRunner: RunnerOption) => {
+    async (content: string, targetRunner: RunnerOption, images: PendingChatImage[] = []) => {
+      const userVisibleContent =
+        content || (images.length === 1 ? "Attached 1 image" : `Attached ${images.length} images`);
       const userMessage: ChatMessage = {
         id: `user-runner-call-${Date.now()}`,
         role: "user",
-        content,
+        content: userVisibleContent,
+        contentParts:
+          images.length > 0
+            ? [
+                ...(content.trim() ? [{ type: "text" as const, text: content }] : []),
+                ...images.map((image) => ({
+                  type: "image_url" as const,
+                  image_url: { url: image.previewUrl, detail: "auto" },
+                })),
+              ]
+            : undefined,
         timestamp: Date.now() / 1000,
         meta: "Runner call",
         runnerCall: {
@@ -186,7 +199,9 @@ export function useRunnerCallHandler({
       setThreads((prev) => {
         const now = Math.floor(Date.now() / 1000);
         const fallbackTitle =
-          content.length > 40 ? `${content.slice(0, 40)}...` : content;
+          userVisibleContent.length > 40
+            ? `${userVisibleContent.slice(0, 40)}...`
+            : userVisibleContent;
         return dedupeThreads([
           {
             session_key: sessionKey,
@@ -225,6 +240,7 @@ export function useRunnerCallHandler({
       try {
         await runRunnerCallStream({
           message: content,
+          images,
           sessionKey,
           historyPath,
           workDir: workDir || undefined,

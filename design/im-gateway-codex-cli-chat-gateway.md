@@ -209,6 +209,19 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 
 回归测试必须覆盖 stdout 中 `turn.completed` 早于最终 response 的场景，断言中间 timeline 仍保持 running，最终答案可见后才 completed。
 
+### 5.4 外部 Runner 图片附件桥接
+
+内置 Bifrost Agent 可以直接接收 `ChatImageInput`，但 Codex/Trae 这类外部 CLI runner 的稳定输入面仍是 stdin prompt。真实 IM 通道和 WebUI 传入图片时，外部 runner 必须走同一桥接策略：
+
+1. Feishu/Weixin 入站图片先由 provider resolver 下载为 `ChatImageInput`。命中自定义 runner 或 `ExternalCliAgentChat` route 时，event loop 将图片转换为 `ExternalCliImageInput` 并放入首轮 external CLI request；排队的后续文本消息不得复用上一轮图片。
+2. Web Chat 选择外部 runner 时，`/chat/stream` request 的 `images[]` 原样进入 external CLI request。
+3. Web slash runner-call 支持 `images[]`，允许 image-only call。父会话中仍显示用户可感知的图片消息，目标 runner 的 request 也带同一组图片。
+4. runtime 在执行前把图片解码落盘到当前 session JSONL 旁边的附件目录：`sessions/YYYY/MM/DD/attachments/<session-file-stem>/images/image-N.<ext>`。如果无法拿到 session recorder，则退回 run dir 内的 `attachments/images`。
+5. prompt envelope 在用户文本前追加 `## Attached Images`，列出每张图片的绝对路径、mime type 和大小，要求 Codex/Trae 使用本地文件路径理解图片。
+6. run result metadata 写入 `attachments.images`，session timeline 写入带图片的 user message，保证 Web History 和后续回放知道该轮包含图片。
+
+这样做避免把 base64 大图直接塞进外部 CLI prompt，也避免同一天多个 session 共享 `attachments/images` 造成覆盖。Codex 和 Trae 使用相同 bridge；adapter 后续如果原生支持图片参数，可以在 adapter capability 中声明并在 command builder 中升级为原生传参，但 session 附件落盘仍保留为审计和历史回放证据。
+
 ### 6. 能力声明与降级
 
 每个 adapter 需要声明能力，WebUI 和 API 根据能力展示配置项：
@@ -908,6 +921,9 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `agent_effective_config_rejects_channel_work_dir_expansion`：验证通道配置不能扩大到全局未允许目录。
 - `request_run_stop_treats_missing_active_pid_as_stopped`：验证 stop marker 已写入但 active pid 已消失时，停止请求仍按幂等成功收敛。
 - `taskkill_missing_process_messages_are_idempotent`：验证 Windows `taskkill` 返回进程不存在/无运行实例时按 Unix `ESRCH` 同等处理，权限拒绝等其它错误仍保留为失败。
+- `external_cli_images_from_chat_images_preserves_payloads`：验证 IM 下载后的 `ChatImageInput` 转入 external CLI request 时不丢 mime/data。
+- `session_attachment_base_dir_uses_history_file_stem`：验证 session JSONL 派生的附件目录包含文件 stem，避免同日期多 session 图片互相覆盖。
+- `external_cli_run_writes_image_attachments_and_injects_prompt_paths`：验证 external CLI runtime 把图片写入 session attachment base dir，并在 prompt 中注入绝对路径。
 
 ### E2E 测试
 
@@ -919,6 +935,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `test_im_gateway_codex_runner_streaming.sh`：显式启用真实 Codex CLI 后启动临时 Bifrost，调用 `/chat/stream` 触发 `pwd`，断言 `tool_started` 在 `run_finished` 前到达、`tool_finished`、usage metadata 和 final response 都进入 run detail 与 session timeline；同一 timeline 供飞书 progress card 的过程折叠展示复用。
 - `im_gateway_agent_config_webui_flow`：浏览器打开 Settings -> IM Gateway，配置 Agent Defaults、通道覆盖、Preview Effective Config 和 Run Test Message，断言最终快照、事件时间线和 run detail 可见。
 - `im_gateway_agent_config_webui_theme`：在亮色/暗色主题下检查 Agent Defaults、通道 Agent tab、Chat Gateway 测试抽屉和 Runs 详情没有不可读文本、重叠或危险配置提示丢失。
+- `im_gateway_external_runner_image_input`：启动真实 Bifrost 临时服务，配置 mock Codex/Trae 等价 runner，通过 `/chat/stream` 和 `/runner-calls/stream` 分别发送图片，断言 run prompt 含 `## Attached Images`、附件路径位于 session attachment dir、文件字节与请求一致且两个 session 路径不同。
+- `im_gateway_external_runner_im_images`：通过 mock/debug IM 入站或 provider resolver 覆盖 Feishu 图片下载后的 custom runner 分支，断言外部 runner 首轮 request 带图片，后续 queued text 不复用图片。
 
 ### 真实场景测试
 
@@ -935,6 +953,8 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - WebUI 中配置全局默认、单通道覆盖，预览有效配置，确认继承/覆盖来源清晰。
 - WebUI 中使用 Chat Gateway 测试抽屉发起测试，查看流式时间线、progress card 预览、final response 和 Runs 详情。
 - WebUI 亮色和暗色主题下完成同一配置/测试流程。
+- Feishu/Weixin 图片消息进入外部 Codex/Trae runner 时，图片被下载、保存到 session 附件目录，并以绝对路径注入 prompt。
+- WebUI 粘贴图片后选择外部 runner 或 slash runner-call，图片不被拒绝，image-only runner-call 也能成功进入目标 runner。
 
 ## IM Agent 会话状态持久化与默认续接
 

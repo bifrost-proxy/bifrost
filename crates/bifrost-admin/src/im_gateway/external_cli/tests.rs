@@ -1271,6 +1271,13 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
     let runtime = ExternalCliRuntime::new(temp_dir.path());
+    let session_attachment_dir = temp_dir
+        .path()
+        .join("sessions")
+        .join("2026")
+        .join("06")
+        .join("25")
+        .join("attachments");
     let request = ExternalCliRunRequest {
         images: vec![ExternalCliImageInput {
             mime_type: "image/png".to_string(),
@@ -1279,7 +1286,9 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         }],
         message: String::new(),
         operation: default_operation(),
-        params: serde_json::Value::Null,
+        params: serde_json::json!({
+            "attachmentBaseDir": session_attachment_dir.display().to_string()
+        }),
         provider_id: Some("provider-a".to_string()),
         runner_id: None,
         session_key: Some("chat-gateway-image-test".to_string()),
@@ -1317,6 +1326,7 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     .unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].mime_type, "image/png");
+    assert!(std::path::Path::new(&images[0].path).starts_with(&session_attachment_dir));
     assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
 }
 

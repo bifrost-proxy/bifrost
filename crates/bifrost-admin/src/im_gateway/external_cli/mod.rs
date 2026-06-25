@@ -925,7 +925,7 @@ impl ExternalCliRuntime {
         let snapshot_path = run_dir.join("runtime_snapshot.json");
         let events_path = run_dir.join("normalized_events.jsonl");
         let stop_marker_path = run_dir.join("stop_requested");
-        let saved_images = save_image_attachments(&run_dir, &request.images).await?;
+        let saved_images = save_image_attachments(&run_dir, &request).await?;
 
         let prompt = build_prompt(&request, &saved_images).await?;
         tokio::fs::write(&prompt_path, &prompt)
@@ -1423,8 +1423,9 @@ async fn build_prompt(
 
 async fn save_image_attachments(
     run_dir: &Path,
-    images: &[ExternalCliImageInput],
+    request: &ExternalCliRunRequest,
 ) -> Result<Vec<ExternalCliSavedImageAttachment>, String> {
+    let images = &request.images;
     let normalized: Vec<&ExternalCliImageInput> = images
         .iter()
         .filter(|image| !image.data.trim().is_empty())
@@ -1440,7 +1441,16 @@ async fn save_image_attachments(
             "too many external runner images in one request; truncating images"
         );
     }
-    let images_dir = run_dir.join("attachments").join("images");
+    let images_dir = request
+        .params
+        .get("attachmentBaseDir")
+        .or_else(|| request.params.get("attachment_base_dir"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| run_dir.join("attachments"))
+        .join("images");
     tokio::fs::create_dir_all(&images_dir)
         .await
         .map_err(|error| format!("create image attachments dir failed: {error}"))?;
