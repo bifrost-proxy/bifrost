@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
+import {
+  historyEventsToMessages,
+  historyEventsToTelemetry,
+  mergeDetailMessagesWithTimeline,
+  sliceRecentChatTurns,
+} from "./AgentChatSection.timeline";
 import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
   formatContextWindow,
@@ -282,6 +287,69 @@ describe("historyEventsToTelemetry", () => {
 });
 
 describe("historyEventsToMessages", () => {
+  it("keeps detail chat turns when a noisy timeline tail only contains the latest run", () => {
+    const detailMessages = [
+      { id: "d1", role: "user" as const, content: "first question", meta: "You" },
+      { id: "d2", role: "assistant" as const, content: "first answer", meta: "Agent" },
+      { id: "d3", role: "user" as const, content: "second question", meta: "You" },
+      { id: "d4", role: "assistant" as const, content: "second answer", meta: "Agent" },
+      { id: "d5", role: "user" as const, content: "latest question", meta: "You" },
+      { id: "d6", role: "assistant" as const, content: "latest answer", meta: "Agent" },
+    ];
+    const timelineMessages = historyEventsToMessages([
+      {
+        timestamp: 10,
+        event_type: "session_start",
+        session_key: "noisy-tail",
+        content: { runtime: "external_cli", adapter: "traex" },
+      },
+      {
+        timestamp: 11,
+        event_type: "user_message",
+        session_key: "noisy-tail",
+        content: { message: "latest question" },
+      },
+      {
+        timestamp: 12,
+        event_type: "tool_call",
+        session_key: "noisy-tail",
+        content: { tool_name: "exec_command", call_id: "tool_1" },
+      },
+      {
+        timestamp: 13,
+        event_type: "tool_result",
+        session_key: "noisy-tail",
+        content: { tool_name: "exec_command", call_id: "tool_1", result: "ok" },
+      },
+      {
+        timestamp: 14,
+        event_type: "assistant_message",
+        session_key: "noisy-tail",
+        content: { message: "latest answer" },
+      },
+    ]);
+
+    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
+    const visible = sliceRecentChatTurns(merged, 2);
+
+    expect(merged.map((message) => message.content)).toEqual([
+      "first question",
+      "first answer",
+      "second question",
+      "second answer",
+      "latest question",
+      "latest answer",
+    ]);
+    expect(visible.hasOlder).toBe(true);
+    expect(visible.messages.map((message) => message.content)).toEqual([
+      "second question",
+      "second answer",
+      "latest question",
+      "latest answer",
+    ]);
+    expect(visible.messages[3].processSteps).toHaveLength(1);
+  });
+
   it("renders persisted Plan Mode proposed plans as assistant results", () => {
     const messages = historyEventsToMessages([
       {

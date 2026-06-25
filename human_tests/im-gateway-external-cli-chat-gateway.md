@@ -1032,8 +1032,26 @@
 8. Agent Chat 输入框上方 token HUD 在刷新、发送下一条消息和 run 完成后持续展示当前模型、token 与 context，不因 history summary 或运行中空 status 快照退回 `Tokens -`、`Context 0%` 或隐藏模型名。
 9. Web UI 已有历史 assistant 回复后再次发送 `/model <name>`，页面立即追加独立居中的系统行 `切换模型为 <name>`，不替换、不隐藏、不合并最后一条 assistant 回复；刷新后历史显示与即时显示一致，且该系统行不作为 user/assistant 消息注入 runner prompt。
 
+### TC-IEC-51: Agent Chat 多轮历史分页与运行中刷新稳定性
+
+操作步骤：
+1. 用当前编译版本启动 9900，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`，并使用 `--no-system-proxy`、`--no-tray`、`--no-intercept`。
+2. 打开一个已有多轮 external runner 会话，例如 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`。
+3. 确认初始页面默认只展示最近若干轮对话，而不是只展示最后一条 running/assistant 消息；页面顶部存在 `Load older`。
+4. 点击 `Load older`，等待 2 秒以上，确认旧消息仍留在页面中，不被 timeline 刷新重新裁掉。
+5. 刷新页面，确认页面恢复为默认最近若干轮窗口，并继续显示 `Load older`。
+6. 在同一会话发送一条真实 external runner 消息，分别在发送后立即、运行中 5 秒、运行完成后和再次刷新后检查消息列表。
+
+预期结果：
+1. 后端 session detail 中的 user/assistant/system 聊天主干是 Web UI 消息列表的稳定锚点；timeline tail 只补充最后一轮过程信息，不能替换整段聊天历史。
+2. 默认窗口按“人类消息轮次”裁剪最近若干轮，而不是按 timeline event 数量裁剪；一个噪声很多的 run 不能把页面压缩成最后一条消息。
+3. `Load older` 点击后展开的旧消息在等待、运行中刷新、SSE catch-up 和完成后刷新期间不消失。
+4. 发送新消息运行中，消息列表仍保留多轮上下文，`Load older` 不因 timeline `has_more=false` 临时消失。
+5. 运行完成和刷新页面后，最新用户消息和 assistant 回复仍显示，旧消息窗口与 `Load older` 状态一致。
+
 ## 最近执行记录
 
+- 2026-06-26：执行 TC-IEC-51 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `73886`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 确认 `admin-chat-1782407491650` 的 session detail 有 `message_count=112`、`timeline_event_count=208`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`：初始页面 `Load older=true`，同时可见 `你好`、`你是干啥的`、`图片里面说的啥？` 和最新回复，不再只剩最后一条；点击 `Load older` 后 textLength 从 `2681` 增至 `3053`，等待 2.5 秒仍保持 `3053` 且旧首轮 `你是谁` 可见；刷新后恢复默认窗口且 `Load older=true`。随后在同一 Web UI 发送 `请用一句话回复：列表稳定验证二`，发送立即、运行 5 秒、完成后和最终刷新四个阶段均保持多轮历史可见，且 `Load older=true`；最终回复 `列表稳定验证二应同时检查会话列表 fallback title...` 可见。截图保存为 `/tmp/bifrost-chat-window-fixed-initial.png`、`/tmp/bifrost-chat-window-fixed-after-load-older-wait.png`、`/tmp/bifrost-chat-window-fixed-after-send-immediate.png`、`/tmp/bifrost-chat-window-fixed-after-final-reload.png`。
 - 2026-06-25：新增并执行 TC-IEC-50 的自动真实服务回归。命令 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 后运行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_traex_model_slash.sh`；脚本启动临时 Bifrost、配置 mock `traecli`，真实调用 `/chat/stream` 发送 `/models`、`/model Doubao-Unit` 和普通消息。断言 `/models` 响应包含 `Doubao-Unit` 与 `fast` tier、不包含 `SHOULD_NOT_LEAK` 或 hidden model；普通 run 的 `runtime_snapshot.args` 包含 `--model Doubao-Unit`；`session_state.json` 写入 `modelOverride:"Doubao-Unit"` 和 `modelOverrideSource:"session slash command"`。随后执行真实 Web UI 验证：`pnpm --dir web run build` 与 `cargo build --bin bifrost` 均通过；临时服务端口 `65110`，数据目录 `/tmp/bifrost-traex-webui-models.mNgvpy`，当前 Runner 为 `Traex`；浏览器打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，输入 `/` 后 slash 面板显示 `/models` 和 `/model`；点击 `/models` 后页面返回 `Doubao-UI`、`fast`、`visibility: list`，不包含 `WEB_UI_SHOULD_NOT_LEAK` 或 `hidden-ui`，且未展示“上下文正在自动压缩”；通过 Web UI 发送 `/model Doubao-UI` 后 `session_state.json` 写入 `modelOverride:"Doubao-UI"`；再发送普通消息 `hello after ui model switch`，页面返回 `BIFROST_TRAEX_WEB_UI_MODEL_OK`，run `1782399832370-576febaa-a224-4455-9d8c-13bf49bede39` 的 `runtime_snapshot.args` 包含 `--model Doubao-UI`。
 - 2026-06-25：继续执行 TC-IEC-50 的回归。当前编译版本通过 `cargo build --bin bifrost` 后重启 `9900`，PID `69582`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-1782405107022` 与 `/sessions/all` 均返回 `model:"Kimi-K2.6"`、`model_provider:"trae"`、`total_tokens_used/tokens:103688`、`estimated_tokens:103590`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782405107022&view=active`，刷新后 HUD 显示 `Tokens 77.6K · Context 31% · Model Kimi-K2.6 (trae)`；发送 `请用一句话回复：HUD 检查` 后 1 秒内 HUD 未清空，仍显示同一模型与 token/context；运行完成后 API usage 更新为 `103688/103590`，再次刷新页面 HUD 显示 `Tokens 103.7K · Context 41.4% · Model Kimi-K2.6 (trae)`，消息列表保留本轮用户消息。
 - 2026-06-25：重新执行自动 E2E。命令 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 通过，临时服务端口 `52213`，Codex run `1782406247186-39e421b5-1d0c-4332-969e-9d9bde18dbcd`、Traex run `1782406250690-3a71f7d6-af55-4799-bad0-ffe912fae72f` 均验证下一轮启动参数包含目标 `--model`。
