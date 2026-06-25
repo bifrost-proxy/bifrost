@@ -1,4 +1,4 @@
-import { expect, test, type APIRequestContext } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 import { apiBase, openPage, seedNotifications } from "./helpers/admin-helpers";
 
 function buildSeedNotifications() {
@@ -78,12 +78,26 @@ async function createAvailabilityCheckNotification(request: APIRequestContext) {
   expect(reportResponse.ok()).toBeTruthy();
 }
 
+async function dismissConnectedDeviceModal(page: Page, timeoutMs = 5000) {
+  const notNowButton = page.getByRole("button", { name: "Not now" });
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await notNowButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await notNowButton.click();
+      await expect(notNowButton).toBeHidden();
+      return;
+    }
+    await page.waitForTimeout(250);
+  }
+}
+
 test("Notifications tables default to unread filter and keep pagination size fixed", async ({
   page,
 }) => {
   await seedNotifications(buildSeedNotifications());
 
   await openPage(page, "notifications?tab=all");
+  await dismissConnectedDeviceModal(page);
   const activePane = page.locator(".ant-tabs-tabpane-active");
 
   await expect(activePane.getByText("TLS unread marker")).toBeVisible();
@@ -91,6 +105,7 @@ test("Notifications tables default to unread filter and keep pagination size fix
   await expect(activePane.getByText("TLS read marker")).toHaveCount(0);
   await expect(activePane.getByText("Authorization read marker")).toHaveCount(0);
   await expect(activePane.locator(".ant-pagination-options")).toHaveCount(0);
+  await dismissConnectedDeviceModal(page, 15000);
 
   const allFilter = page.getByTestId("notifications-status-filter-all");
   await allFilter.getByText("All", { exact: true }).click();
@@ -122,6 +137,7 @@ test("Availability check notification bubble sits lower, animates, drags, and op
   request,
 }) => {
   await openPage(page, "traffic");
+  await dismissConnectedDeviceModal(page);
   await page.evaluate(() => {
     window.localStorage.setItem(
       "bifrost-theme",
@@ -129,7 +145,9 @@ test("Availability check notification bubble sits lower, animates, drags, and op
     );
   });
   await page.reload();
+  await dismissConnectedDeviceModal(page, 15000);
   await createAvailabilityCheckNotification(request);
+  await dismissConnectedDeviceModal(page, 15000);
 
   const center = page.getByTestId("availability-check-notification-center");
   const bubble = page.getByTestId("availability-check-notification-bubble");
@@ -150,9 +168,11 @@ test("Availability check notification bubble sits lower, animates, drags, and op
     );
   });
   await page.reload();
+  await dismissConnectedDeviceModal(page, 15000);
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
   await expect(center).toBeVisible();
   await expect(center).toHaveClass(/availability-check-notification-center--alerting/);
+  await dismissConnectedDeviceModal(page, 15000);
 
   const darkBox = await center.boundingBox();
   expect(darkBox).not.toBeNull();

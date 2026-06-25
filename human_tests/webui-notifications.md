@@ -2,13 +2,13 @@
 
 ## 功能模块说明
 
-验证管理端 `Notifications` 页面三个通知表的顶部状态筛选、固定分页行为，以及全局可用性检查通知气泡交互：
+验证管理端 `Notifications` 页面三个通知表的顶部状态筛选、固定分页行为、通知数据库保留上限，以及全局可用性检查通知气泡交互：
 
 1. `All Notifications`
 2. `TLS Trust`
 3. `Authorization`
 
-每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页固定为每页 `10` 条，只允许默认翻页，不允许切换 page size。存在可用性检查通知时，右上角通知气泡应下移到 Toolbar 下方，显示轻微动画提示，并支持拖拽后继续点击展开。
+每个表都应提供 `All / Read / Unread` 顶部筛选，并在首次进入该表时默认显示未读消息；表格分页固定为每页 `10` 条，只允许默认翻页，不允许切换 page size。通知数据库每次写入后只保留最新 `200` 条记录，避免 `notifications.db` 长期膨胀。存在可用性检查通知时，右上角通知气泡应下移到 Toolbar 下方，显示轻微动画提示，并支持拖拽后继续点击展开。
 
 ## 前置条件
 
@@ -104,6 +104,28 @@ BACKEND_PORT=8800 pnpm exec vite --host 127.0.0.1 --port 4017
 - 拖拽后再次点击气泡可展开 `Availability Check` 卡片
 - 展开卡片展示设备标签、客户端 IP 和检查状态
 - 点击 `Open Availability Check` 后进入 Settings Certificate 的可用性检查区域
+
+### TC-WN-06：通知数据库只保留最新 200 条记录
+
+**步骤**：
+1. 在仓库根目录执行：
+   ```bash
+   cargo test -p bifrost-admin test_cleanup_runs_after_every_notification_write --lib -- --nocapture
+   ```
+2. 检查测试输出中的结果。
+3. 如需复核具体断言，查看 `crates/bifrost-admin/src/notification_db.rs` 中 `test_cleanup_runs_after_every_notification_write`：
+   - 连续写入 `205` 条通知
+   - 调用真实 `create_notification` 写入路径
+   - 通过 `list_notifications(None, None, 500, 0)` 读取当前通知列表
+
+**预期结果**：
+- 测试通过
+- 通知列表长度为 `200`
+- 最新一条标题为 `n-204`
+- 最旧一条标题为 `n-5`
+- 前 5 条旧通知已被清理，不会继续保留在 `notifications.db`
+
+**执行记录（2026-06-25）**：PASS — 执行 `cargo test -p bifrost-admin test_cleanup_runs_after_every_notification_write --lib -- --nocapture`，实际运行 `notification_db::tests::test_cleanup_runs_after_every_notification_write` 1 个测试并通过；该测试通过真实 `create_notification` 路径写入 205 条通知，随后读取通知列表并断言仅保留最新 200 条，最新标题为 `n-204`，最旧标题为 `n-5`。
 
 ## 清理步骤
 
