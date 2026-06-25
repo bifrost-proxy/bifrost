@@ -73,6 +73,37 @@ fn progress_snapshot_tracks_tool_plan_queue_and_final_output() {
 }
 
 #[test]
+fn external_runner_todo_list_plan_renders_in_feishu_progress_card() {
+    let event = crate::im_gateway::external_cli::parse_progress_events(
+        r#"{"type":"item.updated","item":{"id":"item_0","type":"todo_list","items":[{"text":"inspect output","completed":true},{"text":"map parser","completed":false}]}}"#,
+    )
+    .pop()
+    .expect("todo list event");
+    let agent_event = crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
+        "s1",
+        "codex",
+        Some("Codex"),
+        None,
+        None,
+        None,
+        &event,
+    )
+    .expect("agent plan event");
+
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "runner task");
+    snapshot.apply_event(agent_event);
+    assert_eq!(snapshot.title.as_deref(), Some("runner task"));
+    let card = build_feishu_progress_card(&snapshot, true);
+    let serialized = serde_json::to_string(&card).unwrap();
+
+    assert!(serialized.contains("任务计划"));
+    assert!(serialized.contains("inspect output"));
+    assert!(serialized.contains("map parser"));
+    assert!(serialized.contains("✅"));
+    assert!(serialized.contains("⏳"));
+}
+
+#[test]
 fn assistant_final_is_pipeline_content_until_turn_finished() {
     let mut snapshot = ImAgentProgressSnapshot::new("s1", "review task");
     snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {

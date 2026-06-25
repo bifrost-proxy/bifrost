@@ -298,8 +298,10 @@ pub(super) async fn handle_chat_gateway(
                                 ) {
                                     continue;
                                 }
-                                let line = serde_json::to_string(&event)
-                                    .unwrap_or_else(|_| "{}".to_string());
+                                let line = serde_json::to_string(
+                                    &external_cli_progress_event_payload(&event),
+                                )
+                                .unwrap_or_else(|_| "{}".to_string());
                                 let _ = http_progress_tx
                                     .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
                                         format!("{line}\n"),
@@ -333,8 +335,10 @@ pub(super) async fn handle_chat_gateway(
                                         ) {
                                             continue;
                                         }
-                                        let line = serde_json::to_string(event)
-                                            .unwrap_or_else(|_| "{}".to_string());
+                                        let line = serde_json::to_string(
+                                            &external_cli_progress_event_payload(event),
+                                        )
+                                        .unwrap_or_else(|_| "{}".to_string());
                                         let _ = tx
                                             .send(Ok(hyper::body::Frame::data(bytes::Bytes::from(
                                                 format!("{line}\n"),
@@ -737,7 +741,7 @@ async fn runner_call_stream_response(
                         );
                     }
                 }
-                let line = serde_json::to_value(&event).unwrap_or_else(|_| serde_json::json!({}));
+                let line = external_cli_progress_event_payload(&event);
                 let _ = send_ndjson_event(&call_progress_tx, &line).await;
             }
         });
@@ -757,8 +761,7 @@ async fn runner_call_stream_response(
                 );
                 if !streams_progress {
                     for event in &result.events {
-                        let line =
-                            serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({}));
+                        let line = external_cli_progress_event_payload(event);
                         let _ = send_ndjson_event(&tx, &line).await;
                     }
                 }
@@ -1152,6 +1155,26 @@ fn builtin_runner_call_progress_event_payload(
             "unchangedHeartbeats": unchanged_heartbeats,
         }),
     }
+}
+
+fn external_cli_progress_event_payload(
+    event: &crate::im_gateway::external_cli::ExternalCliProgressEvent,
+) -> serde_json::Value {
+    let mut payload = serde_json::to_value(event).unwrap_or_else(|_| serde_json::json!({}));
+    if event.event_type
+        == crate::im_gateway::external_cli::ExternalCliProgressEventType::PlanUpdated
+    {
+        if let Some(object) = payload.as_object_mut() {
+            object.insert(
+                "steps".to_string(),
+                serde_json::to_value(
+                    crate::im_gateway::external_cli::external_progress_plan_steps(event),
+                )
+                .unwrap_or_else(|_| serde_json::json!([])),
+            );
+        }
+    }
+    payload
 }
 
 async fn send_ndjson_event(
@@ -2276,6 +2299,18 @@ pub(super) fn record_external_cli_progress_event_to_timeline(
                 }
             }
         }
+        EventType::PlanUpdated => {
+            let steps = crate::im_gateway::external_cli::external_progress_plan_steps(event);
+            if !steps.is_empty() {
+                if let Err(error) =
+                    recorder.record_plan_updated(session_key, &steps, event.title.as_deref())
+                {
+                    tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner plan update");
+                } else {
+                    changed = true;
+                }
+            }
+        }
         EventType::ToolStarted => {
             let call_id = external_progress_call_id(adapter, event);
             let tool_name = external_progress_tool_name(event, adapter);
@@ -3136,6 +3171,92 @@ mod tests {
                     .and_then(|v| v.as_str())
                     .is_some_and(|value| value.contains("/tmp/work"))
         }));
+    }
+
+    #[test]
+    fn external_runner_plan_progress_is_recorded_as_plan_updated_event() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let session_key = "external-plan-history";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(
+                session_key,
+                serde_json::json!({"source": "admin-api", "adapter": "codex"}),
+            )
+            .expect("record start");
+
+        let events = crate::im_gateway::external_cli::parse_progress_events(
+            r#"{"type":"item.updated","item":{"id":"item_0","type":"todo_list","items":[{"text":"inspect output","completed":true},{"text":"map parser","completed":false}]}}"#,
+        );
+        assert_eq!(events.len(), 1);
+
+        let end_index = record_external_cli_progress_event_to_timeline(
+            &mut recorder,
+            session_key,
+            "web",
+            "codex",
+            "codex",
+            &events[0],
+        )
+        .expect("plan update changes timeline");
+
+        assert!(end_index > 0);
+        let persisted = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
+            .expect("load progress events");
+        let plan_event = persisted
+            .iter()
+            .find(|event| event.event_type == bifrost_agent::persistence::event_types::PLAN_UPDATED)
+            .expect("plan_updated event");
+        let plan = plan_event
+            .content
+            .get("plan")
+            .and_then(serde_json::Value::as_array)
+            .expect("plan array");
+        assert_eq!(plan.len(), 2);
+        assert_eq!(
+            plan[0].get("step").and_then(|v| v.as_str()),
+            Some("inspect output")
+        );
+        assert_eq!(
+            plan[0].get("status").and_then(|v| v.as_str()),
+            Some("completed")
+        );
+        assert_eq!(
+            plan[1].get("status").and_then(|v| v.as_str()),
+            Some("pending")
+        );
+    }
+
+    #[test]
+    fn external_runner_plan_progress_payload_includes_steps_for_stream_consumers() {
+        let event = crate::im_gateway::external_cli::parse_progress_events(
+            r#"{"type":"plan_updated","title":"Runner plan","items":[{"text":"inspect output","status":"completed"},{"text":"map parser","status":"in_progress"}]}"#,
+        )
+        .pop()
+        .expect("plan event");
+
+        let payload = external_cli_progress_event_payload(&event);
+
+        assert_eq!(
+            payload.get("eventType").and_then(|value| value.as_str()),
+            Some("plan_updated")
+        );
+        let steps = payload
+            .get("steps")
+            .and_then(serde_json::Value::as_array)
+            .expect("stream steps");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(
+            steps[0].get("status").and_then(|value| value.as_str()),
+            Some("completed")
+        );
+        assert_eq!(
+            steps[1].get("status").and_then(|value| value.as_str()),
+            Some("in_progress")
+        );
     }
 
     #[test]

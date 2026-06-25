@@ -13,6 +13,8 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
 
+use bifrost_agent::{PlanStep, PlanStepStatus};
+
 const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const TRAEX_ADAPTER: &str = "traex";
@@ -608,6 +610,7 @@ pub struct ExternalCliProgressEvent {
 pub enum ExternalCliProgressEventType {
     RunStarted,
     Status,
+    PlanUpdated,
     AssistantDelta,
     AssistantFinal,
     ToolStarted,
@@ -2115,6 +2118,17 @@ fn parse_progress_event(raw: serde_json::Value) -> Option<ExternalCliProgressEve
     if let Some(event) = parse_codex_cli_event(&event_type, &raw) {
         return Some(event);
     }
+    if matches!(event_type.as_str(), "plan_updated" | "todo_list") {
+        let steps = todo_list_steps_from_raw(&raw);
+        if !steps.is_empty() {
+            return Some(ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::PlanUpdated,
+                content: format!("plan updated ({} steps)", steps.len()),
+                title: value_text(&raw, &["title", "name"]),
+                raw,
+            });
+        }
+    }
     let content = value_text(
         &raw,
         &[
@@ -2183,6 +2197,17 @@ pub fn external_progress_to_agent_turn_event(
             Some(bifrost_agent::AgentTurnProgressEvent::AssistantFinal {
                 content: event.content.clone(),
             })
+        }
+        ExternalCliProgressEventType::PlanUpdated => {
+            let steps = external_progress_plan_steps(event);
+            if steps.is_empty() {
+                None
+            } else {
+                Some(bifrost_agent::AgentTurnProgressEvent::PlanUpdated {
+                    steps,
+                    title: event.title.clone(),
+                })
+            }
         }
         ExternalCliProgressEventType::ToolStarted => {
             Some(bifrost_agent::AgentTurnProgressEvent::ToolStarted {
@@ -2301,6 +2326,9 @@ fn parse_codex_cli_event(
         }),
         "item.started" => {
             let item_type = value_text_path(raw, &["item", "type"])?;
+            if item_type == "todo_list" {
+                return codex_todo_list_event(raw);
+            }
             match item_type.as_str() {
                 "command_execution" => Some(codex_command_execution_event(
                     raw,
@@ -2323,8 +2351,19 @@ fn parse_codex_cli_event(
                 }),
             }
         }
+        "item.updated" => {
+            let item_type = value_text_path(raw, &["item", "type"])?;
+            if item_type == "todo_list" {
+                codex_todo_list_event(raw)
+            } else {
+                None
+            }
+        }
         "item.completed" => {
             let item_type = value_text_path(raw, &["item", "type"])?;
+            if item_type == "todo_list" {
+                return codex_todo_list_event(raw);
+            }
             if item_type == "command_execution" {
                 return Some(codex_command_execution_event(
                     raw,
@@ -2356,6 +2395,62 @@ fn parse_codex_cli_event(
         }
         _ => None,
     }
+}
+
+fn codex_todo_list_event(raw: &serde_json::Value) -> Option<ExternalCliProgressEvent> {
+    let steps = todo_list_steps_from_raw(raw);
+    if steps.is_empty() {
+        return None;
+    }
+    Some(ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::PlanUpdated,
+        content: format!("plan updated ({} steps)", steps.len()),
+        title: None,
+        raw: raw.clone(),
+    })
+}
+
+pub fn external_progress_plan_steps(event: &ExternalCliProgressEvent) -> Vec<PlanStep> {
+    todo_list_steps_from_raw(&event.raw)
+}
+
+fn todo_list_steps_from_raw(raw: &serde_json::Value) -> Vec<PlanStep> {
+    raw.get("item")
+        .and_then(|item| item.get("items"))
+        .or_else(|| raw.get("items"))
+        .and_then(serde_json::Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(todo_list_item_to_plan_step)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn todo_list_item_to_plan_step(item: &serde_json::Value) -> Option<PlanStep> {
+    let step = item
+        .get("text")
+        .or_else(|| item.get("step"))
+        .or_else(|| item.get("content"))
+        .or_else(|| item.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    let status = if item
+        .get("completed")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        PlanStepStatus::Completed
+    } else {
+        item.get("status")
+            .and_then(serde_json::Value::as_str)
+            .and_then(|status| status.parse::<PlanStepStatus>().ok())
+            .unwrap_or(PlanStepStatus::Pending)
+    };
+    Some(PlanStep { step, status })
 }
 
 fn codex_command_execution_event(

@@ -221,6 +221,50 @@ fn codex_cli_parser_maps_real_jsonl_events() {
 }
 
 #[test]
+fn codex_cli_parser_maps_real_todo_list_events_to_plan_updates() {
+    let stdout = r#"{"type":"item.started","item":{"id":"item_0","type":"todo_list","items":[{"text":"inspect output","completed":false},{"text":"map parser","completed":false},{"text":"verify UI","completed":false}]}}
+{"type":"item.updated","item":{"id":"item_0","type":"todo_list","items":[{"text":"inspect output","completed":true},{"text":"map parser","completed":false},{"text":"verify UI","completed":false}]}}
+{"type":"item.completed","item":{"id":"item_0","type":"todo_list","items":[{"text":"inspect output","completed":true},{"text":"map parser","completed":false},{"text":"verify UI","completed":false}]}}"#;
+
+    let events = parse_progress_events(stdout);
+
+    assert_eq!(events.len(), 3);
+    assert!(events
+        .iter()
+        .all(|event| event.event_type == ExternalCliProgressEventType::PlanUpdated));
+    assert!(events.iter().all(|event| event.title.is_none()));
+    let initial_steps = external_progress_plan_steps(&events[0]);
+    assert_eq!(initial_steps.len(), 3);
+    assert_eq!(initial_steps[0].step, "inspect output");
+    assert_eq!(initial_steps[0].status, PlanStepStatus::Pending);
+    let updated_steps = external_progress_plan_steps(&events[1]);
+    assert_eq!(updated_steps[0].status, PlanStepStatus::Completed);
+    assert_eq!(
+        updated_steps[1].status,
+        PlanStepStatus::Pending,
+        "Codex todo_list currently exposes completed=true/false, not in_progress"
+    );
+}
+
+#[test]
+fn generic_plan_updated_parser_accepts_status_fields() {
+    let events = parse_progress_events(
+        r#"{"type":"plan_updated","title":"Runner plan","items":[{"text":"inspect","status":"completed"},{"text":"map","status":"in_progress"},{"text":"verify","status":"pending"}]}"#,
+    );
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::PlanUpdated
+    );
+    assert_eq!(events[0].title.as_deref(), Some("Runner plan"));
+    let steps = external_progress_plan_steps(&events[0]);
+    assert_eq!(steps[0].status, PlanStepStatus::Completed);
+    assert_eq!(steps[1].status, PlanStepStatus::InProgress);
+    assert_eq!(steps[2].status, PlanStepStatus::Pending);
+}
+
+#[test]
 fn codex_cli_parser_maps_real_command_execution_events() {
     let stdout = r#"{"type":"thread.started","thread_id":"019ea049-6138-7303-ab6e-dacccbd437a7"}
 {"type":"turn.started"}
@@ -1185,6 +1229,41 @@ fn external_progress_maps_to_agent_turn_progress_events() {
             assert_eq!(status.model_provider.as_deref(), Some("runner config"));
         }
         other => panic!("unexpected mapped status event: {other:?}"),
+    }
+
+    let plan_event = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::PlanUpdated,
+        content: "plan updated (2 steps)".to_string(),
+        title: None,
+        raw: serde_json::json!({
+            "type": "item.updated",
+            "item": {
+                "type": "todo_list",
+                "items": [
+                    {"text": "inspect output", "completed": true},
+                    {"text": "map parser", "completed": false}
+                ]
+            }
+        }),
+    };
+    let mapped_plan = external_progress_to_agent_turn_event(
+        "session-a",
+        TRAEX_ADAPTER,
+        Some("traex"),
+        Some("trae-model"),
+        Some("runner config"),
+        Some(Path::new("/tmp/work")),
+        &plan_event,
+    )
+    .expect("mapped plan event");
+    match mapped_plan {
+        bifrost_agent::AgentTurnProgressEvent::PlanUpdated { steps, title } => {
+            assert!(title.is_none());
+            assert_eq!(steps.len(), 2);
+            assert_eq!(steps[0].status, PlanStepStatus::Completed);
+            assert_eq!(steps[1].status, PlanStepStatus::Pending);
+        }
+        other => panic!("unexpected mapped plan event: {other:?}"),
     }
 }
 
