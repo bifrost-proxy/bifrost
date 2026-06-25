@@ -1063,6 +1063,7 @@ fn builtin_runner_call_stream_response(
                                 &run_call_id,
                                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
                                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                None,
                                 &run_user_message,
                                 &turn_result.response,
                                 run_started_at,
@@ -1687,6 +1688,7 @@ fn remember_runner_call_for_caller(
         call_id,
         &target_runner_id,
         &result.adapter,
+        Some(&result.run_id),
         raw_user_message,
         response,
         result.started_at,
@@ -1702,6 +1704,7 @@ fn remember_runner_call_result_for_caller(
     call_id: &str,
     target_runner_id: &str,
     target_adapter: &str,
+    latest_run_id: Option<&str>,
     raw_user_message: &str,
     response: &str,
     started_at: u64,
@@ -1778,6 +1781,9 @@ fn remember_runner_call_result_for_caller(
         |state| {
             state.last_response = Some(visible.clone());
             state.status = Some("succeeded".to_string());
+            if let Some(run_id) = latest_run_id {
+                state.latest_run_id = Some(run_id.to_string());
+            }
             update_session_runner_call_messages(
                 &mut state.messages,
                 &visible_user,
@@ -3604,6 +3610,7 @@ mod tests {
             "call-visible",
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
             "summarize this context",
             "done",
             1_000,
@@ -3683,6 +3690,7 @@ mod tests {
             "call-visible-history",
             "web",
             "chatgpt_web",
+            Some("run-visible-history"),
             "generate four images",
             "generated four images",
             1_000,
@@ -3691,6 +3699,16 @@ mod tests {
 
         let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
             .expect("load parent history");
+        let finished_state = crate::im_gateway::session_state::load_session_state(
+            source_session_key,
+            "chatgpt_web",
+            Some("web"),
+        )
+        .expect("finished parent state");
+        assert_eq!(
+            finished_state.latest_run_id.as_deref(),
+            Some("run-visible-history")
+        );
         assert!(events.iter().any(|event| {
             event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
                 && event
