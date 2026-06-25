@@ -199,6 +199,9 @@ assert "- **Device**: im-online-e2e" in content, content
 assert "- **Workspace**: `/tmp/im-provider-workdir`" in content, content
 assert "- **Runner Type**: `chatgpt_web`" in content, content
 assert "- **Runner ID**: `web-main`" in content, content
+assert "- **Model**: `N/A`" in content, content
+assert "- **Reasoning Effort**: `N/A`" in content, content
+assert "- **Reasoning Summary**: `N/A`" in content, content
 assert "- **Bound Session**: `feishu-main:ou_owner`" in content, content
 assert "- **Completed User Turns**: 2" in content, content
 assert "- **Status**: Ready" in content, content
@@ -215,6 +218,9 @@ assert send["body"]["msg_type"] == "interactive", send
 card = json.loads(send["body"]["content"])
 markdown = card["body"]["elements"][0]["content"]
 assert "Runner Type" in markdown and "chatgpt_web" in markdown, markdown
+assert "Model" in markdown and "N/A" in markdown, markdown
+assert "Reasoning Effort" in markdown and "N/A" in markdown, markdown
+assert "Reasoning Summary" in markdown and "N/A" in markdown, markdown
 assert "Completed User Turns" in markdown and "2" in markdown, markdown
 PY
 

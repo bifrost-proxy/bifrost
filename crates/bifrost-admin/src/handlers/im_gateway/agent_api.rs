@@ -365,6 +365,10 @@ pub(super) async fn handle_agent(
                 "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
                 "runner_type": runner_type,
                 "runner_id": runner_id,
+                "model": s.model.or_else(|| info.and_then(|item| item.model.clone())),
+                "model_provider": s.model_provider.or_else(|| info.and_then(|item| item.model_provider.clone())),
+                "model_reasoning_effort": s.model_reasoning_effort.or_else(|| info.and_then(|item| item.model_reasoning_effort.clone())),
+                "model_reasoning_summary": s.model_reasoning_summary.or_else(|| info.and_then(|item| item.model_reasoning_summary.clone())),
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": info.and_then(|item| item.title.clone()),
@@ -417,6 +421,10 @@ pub(super) async fn handle_agent(
                 "agent_type": s.agent_type,
                 "runner_type": runner_type,
                 "runner_id": runner_id,
+                "model": s.model,
+                "model_provider": s.model_provider,
+                "model_reasoning_effort": s.model_reasoning_effort,
+                "model_reasoning_summary": s.model_reasoning_summary,
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": s.title,
@@ -796,6 +804,7 @@ pub(super) async fn handle_agent(
             };
             if let Some(mut detail) = detail {
                 enrich_detail_with_history_runner_metadata(&mut detail);
+                merge_external_runner_detail_metadata(&session_key, &mut detail).await;
                 return json_response(&session_detail_response(
                     detail,
                     &service.queue_manager,
@@ -1778,6 +1787,8 @@ fn active_status_session_detail(
         "runner_id": status.runner_id.clone(),
         "model": status.model.clone(),
         "model_provider": status.model_provider.clone(),
+        "model_reasoning_effort": status.model_reasoning_effort.clone(),
+        "model_reasoning_summary": status.model_reasoning_summary.clone(),
         "external_conversation_id": status.external_conversation_id.clone(),
         "external_thread_id": status.external_thread_id.clone(),
         "title": null,
@@ -2115,6 +2126,18 @@ fn overlay_active_status_on_session_detail(
             serde_json::json!(status.model_provider.clone()),
         );
     }
+    if status.model_reasoning_effort.is_some() {
+        object.insert(
+            "model_reasoning_effort".to_string(),
+            serde_json::json!(status.model_reasoning_effort.clone()),
+        );
+    }
+    if status.model_reasoning_summary.is_some() {
+        object.insert(
+            "model_reasoning_summary".to_string(),
+            serde_json::json!(status.model_reasoning_summary.clone()),
+        );
+    }
     if status.external_conversation_id.is_some() {
         object.insert(
             "external_conversation_id".to_string(),
@@ -2207,8 +2230,11 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         runner_id: summary.runner_id,
         model: None,
         model_provider: None,
+        model_reasoning_effort: None,
+        model_reasoning_summary: None,
         external_conversation_id: None,
         external_thread_id: None,
+        metadata: None,
         title: summary.title.or(summary.first_user_message),
         messages,
         goal_status: runtime_state
@@ -2222,6 +2248,50 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         timeline_event_count: summary.event_count as usize,
         run_state: summary.run_state.unwrap_or_else(|| "completed".to_string()),
     })
+}
+
+async fn merge_external_runner_detail_metadata(
+    session_key: &str,
+    detail: &mut bifrost_agent::SessionDetail,
+) {
+    let Some(external_detail) = external_runner_session_detail(session_key).await else {
+        return;
+    };
+    if detail
+        .metadata
+        .as_ref()
+        .map(std::collections::BTreeMap::is_empty)
+        .unwrap_or(true)
+    {
+        detail.metadata = external_detail.metadata;
+    }
+    if detail.external_conversation_id.is_none() {
+        detail.external_conversation_id = external_detail.external_conversation_id;
+    }
+    if detail.external_thread_id.is_none() {
+        detail.external_thread_id = external_detail.external_thread_id;
+    }
+    if detail.agent_type.is_none() {
+        detail.agent_type = external_detail.agent_type;
+    }
+    if detail.runner_type.is_none() {
+        detail.runner_type = external_detail.runner_type;
+    }
+    if detail.runner_id.is_none() {
+        detail.runner_id = external_detail.runner_id;
+    }
+    if detail.model.is_none() {
+        detail.model = external_detail.model;
+    }
+    if detail.model_provider.is_none() {
+        detail.model_provider = external_detail.model_provider;
+    }
+    if detail.model_reasoning_effort.is_none() {
+        detail.model_reasoning_effort = external_detail.model_reasoning_effort;
+    }
+    if detail.model_reasoning_summary.is_none() {
+        detail.model_reasoning_summary = external_detail.model_reasoning_summary;
+    }
 }
 
 async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
@@ -2320,9 +2390,13 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
     let model = run_detail
         .as_ref()
         .and_then(|detail| detail.metadata.get("model").cloned());
-    let model_provider = run_detail
-        .as_ref()
-        .and_then(|detail| detail.metadata.get("modelSource").cloned());
+    let model_provider = run_detail.as_ref().and_then(|detail| {
+        detail
+            .metadata
+            .get("modelProvider")
+            .or_else(|| detail.metadata.get("modelSource"))
+            .cloned()
+    });
     let usage_total_tokens = run_detail
         .as_ref()
         .and_then(|detail| detail.metadata.get("usageTotalTokens"))
@@ -2332,6 +2406,10 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         .and_then(|detail| detail.metadata.get("usageInputTokens"))
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or_default();
+    let metadata = run_detail
+        .as_ref()
+        .map(|detail| detail.metadata.clone())
+        .filter(|metadata| !metadata.is_empty());
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -2354,8 +2432,15 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         runner_id: state.runner_id,
         model,
         model_provider,
+        model_reasoning_effort: run_detail
+            .as_ref()
+            .and_then(|detail| detail.metadata.get("modelReasoningEffort").cloned()),
+        model_reasoning_summary: run_detail
+            .as_ref()
+            .and_then(|detail| detail.metadata.get("modelReasoningSummary").cloned()),
         external_conversation_id: state.external_conversation_id,
         external_thread_id: state.external_thread_id,
+        metadata,
         title: state.title.or(state.last_user_message),
         messages,
         goal_status: None,
@@ -2475,6 +2560,10 @@ mod tests {
             agent_type: Some("Bifrost Agent".to_string()),
             runner_type: Some("bifrost_agent".to_string()),
             runner_id: None,
+            model: None,
+            model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
             title: Some("Idle active".to_string()),
@@ -2512,8 +2601,11 @@ mod tests {
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: Some("Idle detail".to_string()),
             messages: Vec::new(),
             goal_status: None,
@@ -2579,8 +2671,11 @@ mod tests {
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: Some("history title".to_string()),
             messages: Vec::new(),
             goal_status: None,
@@ -2616,6 +2711,8 @@ mod tests {
             runner_id: None,
             model: Some("gpt-5".to_string()),
             model_provider: Some("openai".to_string()),
+            model_reasoning_effort: Some("high".to_string()),
+            model_reasoning_summary: Some("auto".to_string()),
             external_conversation_id: None,
             external_thread_id: None,
             turn_timing: None,
@@ -3208,8 +3305,11 @@ mod tests {
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: None,
             messages: Vec::new(),
             goal_status: None,
@@ -3276,8 +3376,11 @@ mod tests {
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: None,
             messages: Vec::new(),
             goal_status: None,

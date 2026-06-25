@@ -418,10 +418,13 @@ impl AgentSessionManager {
                 agent_type: s.agent_type.clone(),
                 runner_type: s.runner_type.clone(),
                 runner_id: s.runner_id.clone(),
-                model: None,
-                model_provider: None,
+                model: s.model.clone(),
+                model_provider: s.model_provider.clone(),
+                model_reasoning_effort: s.model_reasoning_effort.clone(),
+                model_reasoning_summary: s.model_reasoning_summary.clone(),
                 external_conversation_id: s.external_conversation_id.clone(),
                 external_thread_id: s.external_thread_id.clone(),
+                metadata: None,
                 title: s
                     .title
                     .clone()
@@ -474,6 +477,10 @@ pub struct SessionInfo {
     pub agent_type: Option<String>,
     pub runner_type: Option<String>,
     pub runner_id: Option<String>,
+    pub model: Option<String>,
+    pub model_provider: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub model_reasoning_summary: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
     /// Session title (intent/topic) set by the agent via set_title tool.
@@ -503,6 +510,10 @@ impl SessionInfo {
             agent_type: None,
             runner_type: None,
             runner_id: None,
+            model: None,
+            model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
             title: None,
@@ -536,6 +547,10 @@ fn session_info_from_session(s: &AgentSession, running: bool) -> SessionInfo {
         agent_type: s.agent_type.clone(),
         runner_type: s.runner_type.clone(),
         runner_id: s.runner_id.clone(),
+        model: s.model.clone(),
+        model_provider: s.model_provider.clone(),
+        model_reasoning_effort: s.model_reasoning_effort.clone(),
+        model_reasoning_summary: s.model_reasoning_summary.clone(),
         external_conversation_id: s.external_conversation_id.clone(),
         external_thread_id: s.external_thread_id.clone(),
         title: s
@@ -614,8 +629,12 @@ pub struct SessionDetail {
     pub runner_id: Option<String>,
     pub model: Option<String>,
     pub model_provider: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub model_reasoning_summary: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
     pub messages: Vec<SessionMessage>,

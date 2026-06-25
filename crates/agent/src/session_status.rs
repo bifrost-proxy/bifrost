@@ -130,6 +130,8 @@ pub struct ActiveTurnStatus {
     pub runner_id: Option<String>,
     pub model: Option<String>,
     pub model_provider: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub model_reasoning_summary: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
     /// Turn timing metrics (TTFT, TTFM, total duration).
@@ -169,6 +171,8 @@ impl ActiveTurnStatus {
             runner_id: None,
             model: None,
             model_provider: None,
+            model_reasoning_effort: None,
+            model_reasoning_summary: None,
             external_conversation_id: None,
             external_thread_id: None,
             turn_timing: None,
@@ -184,6 +188,8 @@ pub struct StatusRuntimeContext {
     pub runner_id: Option<String>,
     pub model: Option<String>,
     pub model_provider: Option<String>,
+    pub model_reasoning_effort: Option<String>,
+    pub model_reasoning_summary: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
 }
@@ -290,8 +296,19 @@ pub(crate) fn refresh_active_turn_status(
         status.agent_type = session.agent_type.clone();
         status.runner_type = session.runner_type.clone();
         status.runner_id = session.runner_id.clone();
-        status.model = config.model.clone();
-        status.model_provider = config.model_provider.clone();
+        status.model = session.model.clone().or_else(|| config.model.clone());
+        status.model_provider = session
+            .model_provider
+            .clone()
+            .or_else(|| config.model_provider.clone());
+        status.model_reasoning_effort = session
+            .model_reasoning_effort
+            .clone()
+            .or_else(|| config.model_reasoning_effort.clone());
+        status.model_reasoning_summary = session
+            .model_reasoning_summary
+            .clone()
+            .or_else(|| config.model_reasoning_summary.clone());
         status.external_conversation_id = session.external_conversation_id.clone();
         status.external_thread_id = session.external_thread_id.clone();
         status.pending_guide_messages = session
@@ -365,6 +382,20 @@ pub fn format_active_turn_status_text_with_context(
             .or(context.model_provider.as_ref())
             .map(String::as_str),
     );
+    let reasoning_effort_text = format_optional_status_text(
+        status
+            .model_reasoning_effort
+            .as_ref()
+            .or(context.model_reasoning_effort.as_ref())
+            .map(String::as_str),
+    );
+    let reasoning_summary_text = format_optional_status_text(
+        status
+            .model_reasoning_summary
+            .as_ref()
+            .or(context.model_reasoning_summary.as_ref())
+            .map(String::as_str),
+    );
     let conversation_text = format_conversation_ref(
         status
             .external_thread_id
@@ -404,6 +435,8 @@ pub fn format_active_turn_status_text_with_context(
          - Runner 类型: {}\n\
          - Runner ID: {}\n\
          - 模型: {}\n\
+         - 思考强度: {}\n\
+         - 思考摘要: {}\n\
          - 外部会话: {}\n\
          - 历史对话轮次: {}\n\
          - Loop: 第 {} 次 / 最多 {} 次（已完成 {} 次）\n\
@@ -422,6 +455,8 @@ pub fn format_active_turn_status_text_with_context(
         runner_type,
         runner_id,
         model_text,
+        reasoning_effort_text,
+        reasoning_summary_text,
         conversation_text,
         status.user_turn_count,
         status.current_loop_iteration,
@@ -451,6 +486,14 @@ pub fn format_model_ref(model: Option<&str>, provider: Option<&str>) -> String {
         (None, Some(provider)) => format!("N/A（{}）", truncate_status_text(provider, 48)),
         (None, None) => "N/A".to_string(),
     }
+}
+
+pub fn format_optional_status_text(value: Option<&str>) -> String {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| truncate_status_text(value, 80))
+        .unwrap_or_else(|| "N/A".to_string())
 }
 
 pub fn format_context_management_status(message_count: usize) -> String {
@@ -556,6 +599,8 @@ mod tests {
             runner_id: None,
             model: Some("gpt-5".to_string()),
             model_provider: Some("openai".to_string()),
+            model_reasoning_effort: Some("high".to_string()),
+            model_reasoning_summary: Some("auto".to_string()),
             external_conversation_id: None,
             external_thread_id: Some("thread-runtime".to_string()),
             turn_timing: None,

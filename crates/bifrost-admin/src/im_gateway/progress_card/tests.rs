@@ -82,10 +82,14 @@ fn external_runner_todo_list_plan_renders_in_feishu_progress_card() {
     let agent_event = crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
         "s1",
         "codex",
-        Some("Codex"),
-        None,
-        None,
-        None,
+        crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+            Some("Codex"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        ),
         &event,
     )
     .expect("agent plan event");
@@ -500,6 +504,9 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
         adapter: "codex".to_string(),
         model: Some("gpt-test".to_string()),
         model_source: Some("runner 配置".to_string()),
+        reasoning_effort: Some("high".to_string()),
+        reasoning_summary: Some("auto".to_string()),
+        reasoning_source: Some("runner 配置".to_string()),
         token_usage: Some(ProgressRunnerTokenUsage {
             input_tokens: Some(1_200),
             cached_input_tokens: Some(300),
@@ -530,9 +537,11 @@ fn external_runner_status_footer_uses_runner_metadata_instead_of_agent_metrics()
 
     assert!(title.contains("Runner：codex"));
     assert!(title.contains("模型：gpt-test（runner 配置）"));
+    assert!(title.contains("思考：high"));
     assert!(footer.contains("状态：已完成"));
     assert!(footer.contains("Runner：`codex` · Adapter：`codex`"));
     assert!(footer.contains("模型：gpt-test（runner 配置）"));
+    assert!(footer.contains("思考：high · 摘要：auto"));
     assert!(footer.contains("Token：总计 1.3K · 输入 1.2K · 输出 80"));
     assert!(footer.contains("Context：最近输入 1.2K / N/A"));
     assert!(footer.contains("缓存输入 300"));
@@ -555,6 +564,9 @@ fn external_runner_footer_hides_machine_status_line() {
         adapter: "codex".to_string(),
         model: None,
         model_source: None,
+        reasoning_effort: None,
+        reasoning_summary: None,
+        reasoning_source: None,
         token_usage: None,
         work_dir: Some("/tmp/bifrost-codex".to_string()),
         external_thread_id: None,
@@ -598,6 +610,8 @@ fn active_status(compaction_count: u32) -> ActiveTurnStatus {
         runner_id: None,
         model: Some("gpt-5".to_string()),
         model_provider: Some("openai".to_string()),
+        model_reasoning_effort: Some("high".to_string()),
+        model_reasoning_summary: Some("auto".to_string()),
         external_conversation_id: None,
         external_thread_id: None,
         turn_timing: None,

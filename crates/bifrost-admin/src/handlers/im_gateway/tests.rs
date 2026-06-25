@@ -196,6 +196,9 @@ pub(super) fn online_notification_message_uses_provider_work_dir_override() {
     assert!(message.contains("- **Workspace**: `/custom/im-provider-workdir`"));
     assert!(message.contains("- **Runner Type**: `bifrost_agent`"));
     assert!(message.contains("- **Runner ID**: `N/A`"));
+    assert!(message.contains("- **Model**: `N/A`"));
+    assert!(message.contains("- **Reasoning Effort**: `N/A`"));
+    assert!(message.contains("- **Reasoning Summary**: `N/A`"));
     assert!(message.contains("- **Bound Session**: `N/A`"));
     assert!(message.contains("- **Completed User Turns**: 0"));
     assert!(message.contains("- **Status**: Ready"));
@@ -224,6 +227,10 @@ pub(super) fn online_notification_message_includes_runner_context_and_turns() {
     let context = OnlineNotificationAgentContext {
         runner_type: "chatgpt_web".to_string(),
         runner_id: Some("web-main".to_string()),
+        model: Some("gpt-5".to_string()),
+        model_provider: Some("chatgpt_web".to_string()),
+        model_reasoning_effort: Some("high".to_string()),
+        model_reasoning_summary: Some("auto".to_string()),
         session_key: "feishu-main:ou_owner".to_string(),
         user_turn_count: 7,
     };
@@ -233,6 +240,9 @@ pub(super) fn online_notification_message_includes_runner_context_and_turns() {
 
     assert!(message.contains("- **Runner Type**: `chatgpt_web`"));
     assert!(message.contains("- **Runner ID**: `web-main`"));
+    assert!(message.contains("- **Model**: `gpt-5（chatgpt_web）`"));
+    assert!(message.contains("- **Reasoning Effort**: `high`"));
+    assert!(message.contains("- **Reasoning Summary**: `auto`"));
     assert!(message.contains("- **Bound Session**: `feishu-main:ou_owner`"));
     assert!(message.contains("- **Completed User Turns**: 7"));
 }
@@ -575,6 +585,8 @@ pub(super) fn progress_events_flush_immediately_only_for_visible_chat_updates() 
         runner_id: None,
         model: None,
         model_provider: None,
+        model_reasoning_effort: None,
+        model_reasoning_summary: None,
         external_conversation_id: None,
         external_thread_id: None,
         turn_timing: None,

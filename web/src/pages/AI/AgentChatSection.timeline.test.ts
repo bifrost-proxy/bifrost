@@ -3,6 +3,8 @@ import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSe
 import { isThreadActive } from "./AgentChatSection.timelinePolling";
 import {
   formatContextWindow,
+  formatModelRef,
+  formatReasoningRef,
   formatStatusMetricCount,
   telemetryFromThread,
   type AgentThreadSummary,
@@ -545,5 +547,22 @@ describe("agent token metric formatting", () => {
         { estimated_context_tokens: 186_727, context_window_tokens: 250_000 },
       ),
     ).toBe("186.7K / 250K");
+  });
+
+  it("formats active runner model and reasoning details for the status panel", () => {
+    expect(
+      formatModelRef({
+        model: "gpt-5.1-codex",
+        model_provider: "codex config",
+      }),
+    ).toBe("gpt-5.1-codex (codex config)");
+    expect(
+      formatReasoningRef({
+        modelReasoningEffort: "high",
+        modelReasoningSummary: "auto",
+      }),
+    ).toBe("high / auto");
+    expect(formatModelRef({})).toBe("-");
+    expect(formatReasoningRef({})).toBe("-");
   });
 });

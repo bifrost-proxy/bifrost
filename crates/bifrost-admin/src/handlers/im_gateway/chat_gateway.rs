@@ -1,5 +1,5 @@
 use super::*;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn message_image_content_parts(
     message: &str,
@@ -48,6 +48,68 @@ fn image_message_preview(
         "Attached 1 image".to_string()
     } else {
         format!("Attached {count} images")
+    }
+}
+
+fn external_cli_request_chat_images(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+) -> Vec<bifrost_agent::ChatImageInput> {
+    request
+        .images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .map(|image| bifrost_agent::ChatImageInput {
+            mime_type: image.mime_type.clone(),
+            data: image.data.clone(),
+        })
+        .collect()
+}
+
+fn set_request_string_param(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    key: &str,
+    value: String,
+) {
+    if !request.params.is_object() {
+        request.params = serde_json::json!({});
+    }
+    if let Some(params) = request.params.as_object_mut() {
+        params.insert(key.to_string(), serde_json::Value::String(value));
+    }
+}
+
+fn session_attachment_base_dir_from_history_path(history_path: &str) -> Option<String> {
+    let path = Path::new(history_path);
+    let parent = path.parent()?;
+    let stem = path.file_stem()?.to_string_lossy();
+    Some(
+        parent
+            .join("attachments")
+            .join(stem.as_ref())
+            .display()
+            .to_string(),
+    )
+}
+
+fn prepare_external_cli_session_attachment_params(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) {
+    if let Some(params) = request.params.as_object_mut() {
+        params.remove("attachmentBaseDir");
+        params.remove("attachment_base_dir");
+    }
+    let history_path = persisted_history_path_for_request(request, runner_id).or_else(|| {
+        external_cli_timeline_recorder(request, runner_id)
+            .map(|recorder| recorder.file_path().display().to_string())
+    });
+    let Some(history_path) = history_path else {
+        return;
+    };
+    if let Some(attachment_base_dir) = session_attachment_base_dir_from_history_path(&history_path)
+    {
+        set_request_string_param(request, "historyPath", history_path);
+        set_request_string_param(request, "attachmentBaseDir", attachment_base_dir);
     }
 }
 
@@ -229,6 +291,7 @@ pub(super) async fn handle_chat_gateway(
                         );
                     }
                 }
+                prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
                 let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
                     crate::im_gateway::external_cli::default_runs_root(),
                 );
@@ -372,7 +435,12 @@ pub(super) async fn handle_chat_gateway(
                         };
                         current_request = request_for_state.clone();
                         current_request.message = next_message;
+                        current_request.images.clear();
                         apply_persisted_external_cli_state(
+                            &mut current_request,
+                            &runner_id_for_state,
+                        );
+                        prepare_external_cli_session_attachment_params(
                             &mut current_request,
                             &runner_id_for_state,
                         );
@@ -468,6 +536,7 @@ pub(super) async fn handle_chat_gateway(
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
                 let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
                     crate::im_gateway::external_cli::default_runs_root(),
                 );
@@ -553,6 +622,8 @@ struct RunnerCallStreamRequest {
     target_runner_id: String,
     message: String,
     #[serde(default)]
+    images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
+    #[serde(default)]
     work_dir: Option<PathBuf>,
     #[serde(default)]
     history_path: Option<String>,
@@ -623,9 +694,14 @@ async fn runner_call_stream_response(
     if target_runner_id.is_empty() {
         return Err("targetRunnerId is required".to_string());
     }
-    if user_message.is_empty() {
-        return Err("message is required".to_string());
+    let has_images = body
+        .images
+        .iter()
+        .any(|image| !image.data.trim().is_empty());
+    if user_message.is_empty() && !has_images {
+        return Err("message or images are required".to_string());
     }
+    let visible_user_message = image_message_preview(&user_message, &body.images);
 
     let config = service.external_cli_config_store.load();
     let target = resolve_runner_call_target(&config, &target_runner_id)?;
@@ -639,7 +715,7 @@ async fn runner_call_stream_response(
         target.adapter(),
         body.history_path.as_deref(),
         &body.caller_messages,
-        &user_message,
+        &visible_user_message,
     );
     if matches!(target, RunnerCallTarget::BuiltinAgent) {
         return Ok(builtin_runner_call_stream_response(
@@ -653,7 +729,16 @@ async fn runner_call_stream_response(
                 ),
                 child_session_key,
                 prompt,
-                user_message,
+                user_message: visible_user_message,
+                images: body
+                    .images
+                    .iter()
+                    .filter(|image| !image.data.trim().is_empty())
+                    .map(|image| bifrost_agent::ChatImageInput {
+                        mime_type: image.mime_type.clone(),
+                        data: image.data.clone(),
+                    })
+                    .collect(),
                 work_dir: body.work_dir,
             },
         ));
@@ -667,10 +752,12 @@ async fn runner_call_stream_response(
         Some(child_session_key.clone()),
         &effective.settings,
     );
+    request.images = body.images;
     request.runner_id = Some(target_runner_id.clone());
     request.work_dir = body.work_dir.clone();
     apply_provider_work_dir_to_external_cli_request(service, &mut request);
     apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+    prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
 
     let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
         crate::im_gateway::external_cli::default_runs_root(),
@@ -694,7 +781,7 @@ async fn runner_call_stream_response(
         });
         let _ = send_ndjson_event(&tx, &started).await;
         let request_snapshot = request.clone();
-        let raw_user_message = user_message.clone();
+        let raw_user_message = visible_user_message.clone();
         remember_runner_call_started_for_caller(
             &service_agent_sessions,
             &caller_scope,
@@ -812,6 +899,7 @@ struct BuiltinRunnerCallStreamInput {
     child_session_key: String,
     prompt: String,
     user_message: String,
+    images: Vec<bifrost_agent::ChatImageInput>,
     work_dir: Option<PathBuf>,
 }
 
@@ -880,7 +968,7 @@ fn builtin_runner_call_stream_response(
         let mut worker_request = crate::im_gateway::agent_worker::build_run_request(
             input.child_session_key.clone(),
             input.prompt.clone(),
-            Vec::new(),
+            input.images.clone(),
             &config,
             session.work_dir.clone(),
             history_path,
@@ -965,6 +1053,7 @@ fn builtin_runner_call_stream_response(
                                 &run_call_id,
                                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
                                 crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+                                None,
                                 &run_user_message,
                                 &turn_result.response,
                                 run_started_at,
@@ -1589,6 +1678,7 @@ fn remember_runner_call_for_caller(
         call_id,
         &target_runner_id,
         &result.adapter,
+        Some(&result.run_id),
         raw_user_message,
         response,
         result.started_at,
@@ -1604,6 +1694,7 @@ fn remember_runner_call_result_for_caller(
     call_id: &str,
     target_runner_id: &str,
     target_adapter: &str,
+    latest_run_id: Option<&str>,
     raw_user_message: &str,
     response: &str,
     started_at: u64,
@@ -1657,6 +1748,32 @@ fn remember_runner_call_result_for_caller(
                 "failed to persist imported runner context for busy built-in caller"
             );
         }
+        if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+            source_session_key,
+            caller_adapter,
+            None,
+            |state| {
+                state.last_response = Some(visible.clone());
+                state.status = Some("succeeded".to_string());
+                if let Some(run_id) = latest_run_id {
+                    state.latest_run_id = Some(run_id.to_string());
+                }
+                update_session_runner_call_messages(
+                    &mut state.messages,
+                    &visible_user,
+                    &running_message,
+                    &visible,
+                    started_at / 1000,
+                    finished_at / 1000,
+                );
+            },
+        ) {
+            tracing::warn!(
+                session_key = %source_session_key,
+                error = %error,
+                "failed to persist built-in caller runner-call result state"
+            );
+        }
         return;
     }
     if let Err(error) = crate::im_gateway::session_state::push_imported_context(
@@ -1680,6 +1797,9 @@ fn remember_runner_call_result_for_caller(
         |state| {
             state.last_response = Some(visible.clone());
             state.status = Some("succeeded".to_string());
+            if let Some(run_id) = latest_run_id {
+                state.latest_run_id = Some(run_id.to_string());
+            }
             update_session_runner_call_messages(
                 &mut state.messages,
                 &visible_user,
@@ -2192,7 +2312,10 @@ fn record_external_cli_web_turn_started(
     {
         tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner running state");
     }
-    if let Err(error) = recorder.record_user_message(session_key, &request.message) {
+    let images = external_cli_request_chat_images(request);
+    if let Err(error) =
+        recorder.record_user_message_with_images(session_key, &request.message, &images)
+    {
         tracing::warn!(session_key = %session_key, error = %error, "failed to record external runner user message");
     }
 }
@@ -3503,6 +3626,7 @@ mod tests {
             "call-visible",
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
             crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
             "summarize this context",
             "done",
             1_000,
@@ -3520,6 +3644,50 @@ mod tests {
             finished.messages[1].content,
             "Runner `bifrost_agent` completed this call.\n\ndone"
         );
+    }
+
+    #[test]
+    fn builtin_caller_runner_call_records_latest_external_run_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let manager = std::sync::Arc::new(bifrost_agent::AgentSessionManager::new(60));
+        let caller_scope = (
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+            None,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+        );
+
+        remember_runner_call_result_for_caller(
+            &manager,
+            &caller_scope,
+            "builtin-source-session",
+            "call-visible-built-in",
+            "TreeX",
+            "traex",
+            Some("external-run-visible-built-in"),
+            "inspect attached image",
+            "done",
+            1_000,
+            2_000,
+        );
+
+        let finished = crate::im_gateway::session_state::load_session_state(
+            "builtin-source-session",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
+        )
+        .expect("finished built-in caller state");
+        assert_eq!(
+            finished.latest_run_id.as_deref(),
+            Some("external-run-visible-built-in")
+        );
+        assert_eq!(finished.status.as_deref(), Some("succeeded"));
+        assert!(finished.messages.iter().any(|message| {
+            message.role == "assistant"
+                && message
+                    .content
+                    .contains("Runner `TreeX` completed this call.")
+        }));
     }
 
     #[test]
@@ -3582,6 +3750,7 @@ mod tests {
             "call-visible-history",
             "web",
             "chatgpt_web",
+            Some("run-visible-history"),
             "generate four images",
             "generated four images",
             1_000,
@@ -3590,6 +3759,16 @@ mod tests {
 
         let events = bifrost_agent::persistence::load_conversation_events(recorder.file_path())
             .expect("load parent history");
+        let finished_state = crate::im_gateway::session_state::load_session_state(
+            source_session_key,
+            "chatgpt_web",
+            Some("web"),
+        )
+        .expect("finished parent state");
+        assert_eq!(
+            finished_state.latest_run_id.as_deref(),
+            Some("run-visible-history")
+        );
         assert!(events.iter().any(|event| {
             event.event_type == bifrost_agent::persistence::event_types::USER_MESSAGE
                 && event
@@ -3787,6 +3966,7 @@ mod coverage_boost {
         assert_eq!(req.message, "hello");
         assert!(req.caller_runner_id.is_none());
         assert!(req.caller_runner_adapter.is_none());
+        assert!(req.images.is_empty());
         assert!(req.work_dir.is_none());
         assert!(req.history_path.is_none());
         assert!(req.caller_messages.is_empty());
@@ -3800,6 +3980,9 @@ mod coverage_boost {
             "callerRunnerAdapter": " chatgpt_web ",
             "targetRunnerId": "codex",
             "message": " hi ",
+            "images": [
+                {"mimeType": "image/png", "data": "aGVsbG8=", "name": "pasted.png"}
+            ],
             "workDir": "/tmp/work",
             "historyPath": " /tmp/history.jsonl ",
             "callerMessages": [
@@ -3814,6 +3997,9 @@ mod coverage_boost {
         assert_eq!(req.caller_runner_adapter.as_deref(), Some(" chatgpt_web "));
         assert_eq!(req.target_runner_id, "codex");
         assert_eq!(req.message, " hi ");
+        assert_eq!(req.images.len(), 1);
+        assert_eq!(req.images[0].mime_type, "image/png");
+        assert_eq!(req.images[0].name.as_deref(), Some("pasted.png"));
         assert_eq!(
             req.work_dir
                 .as_ref()
@@ -3825,6 +4011,48 @@ mod coverage_boost {
         assert_eq!(req.caller_messages.len(), 2);
         assert_eq!(req.caller_messages[0].role, "user");
         assert_eq!(req.caller_messages[1].content, "second");
+    }
+
+    #[test]
+    fn session_attachment_base_dir_uses_history_file_stem() {
+        let base = session_attachment_base_dir_from_history_path(
+            "/tmp/bifrost/agent/sessions/2026/06/25/session-web-image-1782377498.jsonl",
+        )
+        .expect("attachment base dir");
+
+        assert_eq!(
+            base,
+            std::path::PathBuf::from("/tmp/bifrost/agent/sessions/2026/06/25")
+                .join("attachments")
+                .join("session-web-image-1782377498")
+                .display()
+                .to_string()
+        );
+    }
+
+    #[test]
+    fn prepare_attachment_params_overwrites_untrusted_client_base_dir() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let mut request = sample_run_request();
+        request.params = serde_json::json!({
+            "historyPath": "/tmp/attacker-history.jsonl",
+            "attachmentBaseDir": "/tmp/attacker-attachments",
+            "attachment_base_dir": "/tmp/attacker-snake-attachments"
+        });
+
+        prepare_external_cli_session_attachment_params(&mut request, "web");
+
+        let params = request.params.as_object().expect("params object");
+        let attachment_base_dir = params
+            .get("attachmentBaseDir")
+            .and_then(serde_json::Value::as_str)
+            .expect("attachment base dir");
+        assert!(!params.contains_key("attachment_base_dir"));
+        assert!(!attachment_base_dir.starts_with("/tmp/attacker"));
+        let normalized_attachment_base_dir = attachment_base_dir.replace('\\', "/");
+        assert!(normalized_attachment_base_dir.contains("/agent/sessions/"));
+        assert!(normalized_attachment_base_dir.contains("/attachments/"));
     }
 
     #[test]
@@ -4003,6 +4231,7 @@ mod coverage_boost {
             caller_runner_adapter: None,
             target_runner_id: "codex".to_string(),
             message: "hello".to_string(),
+            images: Vec::new(),
             work_dir: None,
             history_path: None,
             caller_messages: Vec::new(),
@@ -4034,12 +4263,29 @@ mod coverage_boost {
             &service,
             RunnerCallStreamRequest {
                 message: "   ".to_string(),
-                ..base
+                ..base.clone()
             },
         )
         .await
         .unwrap_err();
-        assert_eq!(err, "message is required");
+        assert_eq!(err, "message or images are required");
+
+        let image_only_result = runner_call_stream_response(
+            &service,
+            RunnerCallStreamRequest {
+                message: "   ".to_string(),
+                images: vec![crate::im_gateway::external_cli::ExternalCliImageInput {
+                    mime_type: "image/png".to_string(),
+                    data: "aGVsbG8=".to_string(),
+                    name: Some("only.png".to_string()),
+                }],
+                ..base
+            },
+        )
+        .await;
+        if let Err(error) = image_only_result {
+            assert_ne!(error, "message or images are required");
+        }
     }
 
     #[test]

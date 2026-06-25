@@ -467,6 +467,15 @@ pub(super) async fn run_event_loop_with_options(
                                 },
                                 ExternalCliChatInput {
                                     message_text: agent_message,
+                                    images: external_cli_images_from_chat_images(
+                                        resolve_event_images(
+                                            &client,
+                                            &provider,
+                                            &event,
+                                            &msg.images,
+                                        )
+                                        .await,
+                                    ),
                                     session_key: session_key.clone(),
                                     adapter_override: None,
                                     instructions_override: None,
@@ -635,6 +644,18 @@ pub(super) async fn run_event_loop_with_options(
                         },
                         ExternalCliChatInput {
                             message_text,
+                            images: match event.message.as_ref() {
+                                Some(message) => external_cli_images_from_chat_images(
+                                    resolve_event_images(
+                                        &client,
+                                        &provider,
+                                        &event,
+                                        &message.images,
+                                    )
+                                    .await,
+                                ),
+                                None => Vec::new(),
+                            },
                             session_key: session_key.clone(),
                             adapter_override: None,
                             instructions_override: None,
@@ -756,6 +777,13 @@ pub(super) async fn run_event_loop_with_options(
                     },
                     ExternalCliChatInput {
                         message_text,
+                        images: match event.message.as_ref() {
+                            Some(message) => external_cli_images_from_chat_images(
+                                resolve_event_images(&client, &provider, &event, &message.images)
+                                    .await,
+                            ),
+                            None => Vec::new(),
+                        },
                         session_key: session_key.clone(),
                         adapter_override: adapter.clone(),
                         instructions_override: instructions.clone(),
@@ -796,12 +824,28 @@ struct ExternalCliChatContext<'a> {
 
 struct ExternalCliChatInput {
     message_text: String,
+    images: Vec<crate::im_gateway::external_cli::ExternalCliImageInput>,
     session_key: String,
     adapter_override: Option<String>,
     instructions_override: Option<String>,
     delivery_override: Option<crate::im_gateway::external_cli::ExternalCliDeliveryMode>,
     runner_id_override: Option<String>,
     runner_selected: bool,
+}
+
+fn external_cli_images_from_chat_images(
+    images: Vec<bifrost_agent::ChatImageInput>,
+) -> Vec<crate::im_gateway::external_cli::ExternalCliImageInput> {
+    images
+        .into_iter()
+        .map(
+            |image| crate::im_gateway::external_cli::ExternalCliImageInput {
+                mime_type: image.mime_type,
+                data: image.data,
+                name: None,
+            },
+        )
+        .collect()
 }
 
 pub(super) fn resolve_external_cli_delivery_mode(
@@ -912,18 +956,21 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         &effective.sources,
         input.delivery_override,
     );
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &settings.adapter,
+        &settings.adapter_config,
+    );
     let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
-    if let Some(model) = settings
-        .adapter_config
-        .model
-        .as_ref()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-    {
+    if let Some(model) = resolved_model_config.model.clone() {
         status_context.model = Some(model);
-        status_context.model_provider = Some("runner config".to_string());
     }
+    status_context.model_provider = resolved_model_config
+        .model_provider
+        .clone()
+        .or_else(|| resolved_model_config.model_source.clone());
+    status_context.model_reasoning_effort = resolved_model_config.reasoning_effort.clone();
+    status_context.model_reasoning_summary = resolved_model_config.reasoning_summary.clone();
 
     let provider_agent_config =
         effective_agent_config_for_provider(&ctx.agent_config_store.load(), ctx.provider);
@@ -976,6 +1023,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             .and_then(|h| h.max_bytes),
     );
     let mut current_message = input.message_text;
+    let mut current_images = input.images;
     let mut recorder = session.recorder.take();
     let mut runner_metadata = persisted_state
         .as_ref()
@@ -1025,6 +1073,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             Some(input.session_key.clone()),
             &settings,
         );
+        request.images = std::mem::take(&mut current_images);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
             request.work_dir =
@@ -1047,6 +1096,15 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                 request.allow_work_dirs = vec![work_dir.display().to_string()];
             }
         }
+        session.remember_runner_model_config(
+            resolved_model_config.model.clone(),
+            resolved_model_config
+                .model_provider
+                .clone()
+                .or_else(|| resolved_model_config.model_source.clone()),
+            resolved_model_config.reasoning_effort.clone(),
+            resolved_model_config.reasoning_summary.clone(),
+        );
         ensure_external_cli_session_recorder(
             &mut session,
             &mut recorder,
@@ -1055,6 +1113,7 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             &effective.runner_id,
             &request,
         );
+        apply_external_cli_session_attachment_base_dir(&mut request, recorder.as_ref());
         record_external_cli_input(
             &mut session,
             &mut recorder,
@@ -1190,14 +1249,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                             crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
                                 &input.session_key,
                                 &settings.adapter,
-                                Some(&effective.runner_id),
-                                request_for_progress.adapter_config.model.as_deref(),
-                                request_for_progress
-                                    .adapter_config
-                                    .model
-                                    .as_ref()
-                                    .map(|_| "runner config"),
-                                request_for_progress.work_dir.as_deref(),
+                                crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                                    Some(&effective.runner_id),
+                                    resolved_model_config.model.as_deref(),
+                                    resolved_model_config
+                                        .model_provider
+                                        .as_deref()
+                                        .or(resolved_model_config.model_source.as_deref()),
+                                    resolved_model_config.reasoning_effort.as_deref(),
+                                    resolved_model_config.reasoning_summary.as_deref(),
+                                    request_for_progress.work_dir.as_deref(),
+                                ),
                                 &progress_event,
                             ),
                         ) {
@@ -1251,14 +1313,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                     crate::im_gateway::external_cli::external_progress_to_agent_turn_event(
                         &input.session_key,
                         &settings.adapter,
-                        Some(&effective.runner_id),
-                        request_for_progress.adapter_config.model.as_deref(),
-                        request_for_progress
-                            .adapter_config
-                            .model
-                            .as_ref()
-                            .map(|_| "runner config"),
-                        request_for_progress.work_dir.as_deref(),
+                        crate::im_gateway::external_cli::ExternalCliProgressStatusContext::new(
+                            Some(&effective.runner_id),
+                            resolved_model_config.model.as_deref(),
+                            resolved_model_config
+                                .model_provider
+                                .as_deref()
+                                .or(resolved_model_config.model_source.as_deref()),
+                            resolved_model_config.reasoning_effort.as_deref(),
+                            resolved_model_config.reasoning_summary.as_deref(),
+                            request_for_progress.work_dir.as_deref(),
+                        ),
                         &progress_event,
                     ),
                 ) {
@@ -1666,6 +1731,55 @@ fn ensure_external_cli_session_recorder(
     }
 }
 
+fn apply_external_cli_session_attachment_base_dir(
+    request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
+    recorder: Option<&ConversationRecorder>,
+) {
+    let Some(recorder) = recorder else {
+        return;
+    };
+    let Some(session_dir) = recorder.file_path().parent() else {
+        return;
+    };
+    let Some(session_stem) = recorder.file_path().file_stem() else {
+        return;
+    };
+    if !request.params.is_object() {
+        request.params = serde_json::json!({});
+    }
+    if let Some(params) = request.params.as_object_mut() {
+        params.remove("attachment_base_dir");
+        params.insert(
+            "attachmentBaseDir".to_string(),
+            serde_json::Value::String(
+                session_dir
+                    .join("attachments")
+                    .join(session_stem)
+                    .display()
+                    .to_string(),
+            ),
+        );
+        params.insert(
+            "historyPath".to_string(),
+            serde_json::Value::String(recorder.file_path().display().to_string()),
+        );
+    }
+}
+
+fn external_cli_request_chat_images(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+) -> Vec<bifrost_agent::ChatImageInput> {
+    request
+        .images
+        .iter()
+        .filter(|image| !image.data.trim().is_empty())
+        .map(|image| bifrost_agent::ChatImageInput {
+            mime_type: image.mime_type.clone(),
+            data: image.data.clone(),
+        })
+        .collect()
+}
+
 fn record_external_cli_input(
     session: &mut bifrost_agent::session::AgentSession,
     recorder: &mut Option<ConversationRecorder>,
@@ -1673,10 +1787,16 @@ fn record_external_cli_input(
     _runner_id: &str,
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
 ) {
-    append_session_message(session, bifrost_agent::ChatMessage::user(&request.message));
+    let images = external_cli_request_chat_images(request);
+    append_session_message(
+        session,
+        bifrost_agent::ChatMessage::user_with_images(&request.message, &images),
+    );
     sync_external_cli_active_status(session);
     if let Some(rec) = recorder.as_mut() {
-        if let Err(error) = rec.record_user_message(session_key, &request.message) {
+        if let Err(error) =
+            rec.record_user_message_with_images(session_key, &request.message, &images)
+        {
             warn!(error = %error, "failed to record external cli user message");
         }
     }
@@ -1783,6 +1903,10 @@ fn sync_external_cli_active_status(session: &bifrost_agent::session::AgentSessio
     status.agent_type = session.agent_type.clone();
     status.runner_type = session.runner_type.clone();
     status.runner_id = session.runner_id.clone();
+    status.model = session.model.clone();
+    status.model_provider = session.model_provider.clone();
+    status.model_reasoning_effort = session.model_reasoning_effort.clone();
+    status.model_reasoning_summary = session.model_reasoning_summary.clone();
     status.external_conversation_id = session.external_conversation_id.clone();
     status.external_thread_id = session.external_thread_id.clone();
     status.user_turn_count = session.user_turn_count();
@@ -1808,8 +1932,11 @@ fn external_cli_progress_runner_summary(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     metadata: Option<&std::collections::BTreeMap<String, String>>,
 ) -> crate::im_gateway::progress_card::ProgressRunnerSummary {
-    let configured_model = request
-        .adapter_config
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &request.adapter,
+        &request.adapter_config,
+    );
+    let configured_model = resolved_model_config
         .model
         .as_deref()
         .map(str::trim)
@@ -1821,7 +1948,11 @@ fn external_cli_progress_runner_summary(
         .filter(|value| !value.is_empty());
     let model = configured_model.or(metadata_model).map(str::to_string);
     let model_source = if configured_model.is_some() {
-        Some("runner 配置".to_string())
+        resolved_model_config
+            .model_provider
+            .clone()
+            .or_else(|| resolved_model_config.model_source.clone())
+            .map(|value| format_runner_model_source(&value))
     } else {
         metadata
             .and_then(|metadata| metadata.get("modelSource"))
@@ -1852,6 +1983,15 @@ fn external_cli_progress_runner_summary(
         adapter: adapter.trim().to_string(),
         model,
         model_source,
+        reasoning_effort: resolved_model_config.reasoning_effort.or_else(|| {
+            metadata.and_then(|metadata| metadata.get("modelReasoningEffort").cloned())
+        }),
+        reasoning_summary: resolved_model_config.reasoning_summary.or_else(|| {
+            metadata.and_then(|metadata| metadata.get("modelReasoningSummary").cloned())
+        }),
+        reasoning_source: resolved_model_config
+            .reasoning_source
+            .map(|value| format_runner_model_source(&value)),
         token_usage: metadata.and_then(external_cli_token_usage_from_metadata),
         work_dir: request
             .work_dir
@@ -1889,6 +2029,8 @@ fn format_runner_model_source(source: &str) -> String {
         "runner config" => "runner 配置".to_string(),
         "codex default" => "Codex 默认".to_string(),
         "trae default" => "Trae 默认".to_string(),
+        "codex config" => "Codex 配置".to_string(),
+        "trae config" => "Trae 配置".to_string(),
         value => value.to_string(),
     }
 }
@@ -1930,6 +2072,19 @@ mod tests {
         dedup.evict_expired();
 
         assert_eq!(dedup.window.len(), 1);
+    }
+
+    #[test]
+    fn external_cli_images_from_chat_images_preserves_payloads() {
+        let images = external_cli_images_from_chat_images(vec![bifrost_agent::ChatImageInput {
+            mime_type: "image/png".to_string(),
+            data: "aGVsbG8=".to_string(),
+        }]);
+
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].mime_type, "image/png");
+        assert_eq!(images[0].data, "aGVsbG8=");
+        assert!(images[0].name.is_none());
     }
 
     fn external_cli_result_with_status(

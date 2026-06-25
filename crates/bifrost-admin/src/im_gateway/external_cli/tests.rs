@@ -1,4 +1,40 @@
 use super::*;
+use std::sync::{Mutex, OnceLock};
+
+static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn external_cli_env_guard() -> std::sync::MutexGuard<'static, ()> {
+    EXTERNAL_CLI_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 fn delayed_final_command(content: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
@@ -1190,10 +1226,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &event,
     )
     .expect("mapped event");
@@ -1214,10 +1254,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped_status = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &status_event,
     )
     .expect("mapped status event");
@@ -1227,6 +1271,8 @@ fn external_progress_maps_to_agent_turn_progress_events() {
             assert_eq!(status.runner_id.as_deref(), Some("traex"));
             assert_eq!(status.model.as_deref(), Some("trae-model"));
             assert_eq!(status.model_provider.as_deref(), Some("runner config"));
+            assert_eq!(status.model_reasoning_effort.as_deref(), Some("high"));
+            assert_eq!(status.model_reasoning_summary.as_deref(), Some("auto"));
         }
         other => panic!("unexpected mapped status event: {other:?}"),
     }
@@ -1249,10 +1295,14 @@ fn external_progress_maps_to_agent_turn_progress_events() {
     let mapped_plan = external_progress_to_agent_turn_event(
         "session-a",
         TRAEX_ADAPTER,
-        Some("traex"),
-        Some("trae-model"),
-        Some("runner config"),
-        Some(Path::new("/tmp/work")),
+        ExternalCliProgressStatusContext::new(
+            Some("traex"),
+            Some("trae-model"),
+            Some("runner config"),
+            Some("high"),
+            Some("auto"),
+            Some(Path::new("/tmp/work")),
+        ),
         &plan_event,
     )
     .expect("mapped plan event");
@@ -1270,7 +1320,15 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 #[tokio::test]
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let runtime = ExternalCliRuntime::new(temp_dir.path());
+    let _guard = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
+    let runs_root = temp_dir.path().join("runs");
+    let runtime = ExternalCliRuntime::new(&runs_root);
+    let session_attachment_dir = bifrost_agent::config::agent_home_dir()
+        .join("sessions")
+        .join("2026")
+        .join("06")
+        .join("25")
+        .join("attachments");
     let request = ExternalCliRunRequest {
         images: vec![ExternalCliImageInput {
             mime_type: "image/png".to_string(),
@@ -1279,7 +1337,9 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         }],
         message: String::new(),
         operation: default_operation(),
-        params: serde_json::Value::Null,
+        params: serde_json::json!({
+            "attachmentBaseDir": session_attachment_dir.display().to_string()
+        }),
         provider_id: Some("provider-a".to_string()),
         runner_id: None,
         session_key: Some("chat-gateway-image-test".to_string()),
@@ -1300,6 +1360,12 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         inject_bifrost_tools: false,
         skill_paths: Vec::new(),
     };
+    let mut second_request = request.clone();
+    second_request.images = vec![ExternalCliImageInput {
+        mime_type: "image/png".to_string(),
+        data: "d29ybGQ=".to_string(),
+        name: Some("second.png".to_string()),
+    }];
 
     let result = runtime.run(request).await.unwrap();
 
@@ -1317,7 +1383,44 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     .unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].mime_type, "image/png");
+    let first_image_path = std::path::PathBuf::from(&images[0].path);
+    assert_eq!(
+        first_image_path.parent(),
+        Some(
+            session_attachment_dir
+                .join(&result.run_id)
+                .join("images")
+                .as_path()
+        )
+    );
     assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
+
+    let second_result = runtime.run(second_request).await.unwrap();
+    let second_images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
+        second_result
+            .metadata
+            .get("attachments.images")
+            .expect("attachments metadata"),
+    )
+    .unwrap();
+    assert_eq!(second_images.len(), 1);
+    let second_image_path = std::path::PathBuf::from(&second_images[0].path);
+    assert_ne!(first_image_path, second_image_path);
+    assert_eq!(
+        second_image_path.parent(),
+        Some(
+            session_attachment_dir
+                .join(&second_result.run_id)
+                .join("images")
+                .as_path()
+        )
+    );
+    assert_eq!(
+        tokio::fs::read(&first_image_path).await.unwrap(),
+        b"hello",
+        "second run must not overwrite first run attachment"
+    );
+    assert_eq!(tokio::fs::read(&second_image_path).await.unwrap(), b"world");
 }
 
 #[tokio::test]
@@ -1706,6 +1809,11 @@ fn config_store_new_persists_missing_default_runners_on_startup() {
 
 #[test]
 fn codex_request_metadata_includes_configured_or_default_model_label() {
+    let _env_lock = external_cli_env_guard();
+    let codex_home = tempfile::tempdir().unwrap();
+    let trae_home = tempfile::tempdir().unwrap();
+    let _codex_home = EnvGuard::set("CODEX_HOME", codex_home.path());
+    let _trae_home = EnvGuard::set("TRAE_HOME", trae_home.path());
     let configured_request = ExternalCliRunRequest {
         images: Vec::new(),
         message: "hello".to_string(),
@@ -1795,6 +1903,75 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
 }
 
 #[test]
+fn codex_and_traex_model_config_resolves_user_defaults_and_overrides() {
+    let _env_lock = external_cli_env_guard();
+    let codex_home = tempfile::tempdir().unwrap();
+    let trae_home = tempfile::tempdir().unwrap();
+    std::fs::write(
+        codex_home.path().join("config.toml"),
+        r#"
+model = "gpt-codex-default"
+model_reasoning_effort = "high"
+model_reasoning_summary = "auto"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        codex_home.path().join("work.config.toml"),
+        r#"
+model = "gpt-codex-profile"
+model_reasoning_effort = "medium"
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        trae_home.path().join("traecli.toml"),
+        r#"
+model = "GPT-Trae"
+model_provider = "trae"
+"#,
+    )
+    .unwrap();
+    let _codex_home = EnvGuard::set("CODEX_HOME", codex_home.path());
+    let _trae_home = EnvGuard::set("TRAE_HOME", trae_home.path());
+
+    let codex = resolve_external_cli_model_config(
+        DEFAULT_ADAPTER,
+        &ExternalCliAdapterConfig {
+            profile: Some("work".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(codex.model.as_deref(), Some("gpt-codex-profile"));
+    assert_eq!(codex.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(codex.reasoning_summary.as_deref(), Some("auto"));
+    assert_eq!(codex.model_source.as_deref(), Some("codex config"));
+
+    let trae =
+        resolve_external_cli_model_config(TRAEX_ADAPTER, &ExternalCliAdapterConfig::default());
+    assert_eq!(trae.model.as_deref(), Some("GPT-Trae"));
+    assert_eq!(trae.model_provider.as_deref(), Some("trae"));
+
+    let overridden = resolve_external_cli_model_config(
+        DEFAULT_ADAPTER,
+        &ExternalCliAdapterConfig {
+            model: Some("gpt-runner".to_string()),
+            reasoning_effort: Some("low".to_string()),
+            config_overrides: vec!["model_reasoning_summary=\"detailed\"".to_string()],
+            ..Default::default()
+        },
+    );
+    assert_eq!(overridden.model.as_deref(), Some("gpt-runner"));
+    assert_eq!(overridden.reasoning_effort.as_deref(), Some("low"));
+    assert_eq!(overridden.reasoning_summary.as_deref(), Some("detailed"));
+    assert_eq!(overridden.model_source.as_deref(), Some("runner config"));
+    assert_eq!(
+        overridden.reasoning_source.as_deref(),
+        Some("runner config")
+    );
+}
+
+#[test]
 fn codex_like_metadata_includes_turn_usage_tokens() {
     let events = parse_progress_events(
         r#"{"type":"thread.started","thread_id":"thread-usage"}
@@ -1829,6 +2006,174 @@ fn codex_like_metadata_includes_turn_usage_tokens() {
     assert_eq!(
         metadata.get("usageTotalTokens").map(String::as_str),
         Some("59810")
+    );
+}
+
+#[test]
+fn codex_and_traex_metadata_include_runner_observability() {
+    for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
+        let request = ExternalCliRunRequest {
+            images: Vec::new(),
+            message: "inspect image".to_string(),
+            operation: default_operation(),
+            params: serde_json::json!({"threadId": "thread-existing"}),
+            provider_id: Some("web".to_string()),
+            runner_id: Some(adapter.to_string()),
+            session_key: Some("session-observe".to_string()),
+            runtime: DEFAULT_RUNTIME.to_string(),
+            adapter: adapter.to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/work")),
+            instructions: None,
+            adapter_config: ExternalCliAdapterConfig {
+                approval_policy: Some("never".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
+                permission_mode: Some("bypassPermissions".to_string()),
+                danger_full_access: Some(true),
+                add_dirs: vec!["/tmp/extra".to_string()],
+                enable_features: vec!["network".to_string()],
+                timeout_secs: Some(30),
+                ..Default::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: true,
+            skill_paths: Vec::new(),
+        };
+        let spec = CommandSpec {
+            executable: adapter.to_string(),
+            args: vec!["exec".to_string(), "--json".to_string()],
+            env: std::collections::BTreeMap::new(),
+            work_dir: request.work_dir.clone(),
+            timeout_secs: Some(30),
+        };
+        let events = vec![
+            ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::ToolFinished,
+                content: "tool output".to_string(),
+                title: Some("Shell".to_string()),
+                raw: serde_json::json!({
+                    "type": "item.completed",
+                    "observedAtMs": 1120,
+                    "durationMs": 120,
+                    "item": {
+                        "id": "tool-1",
+                        "type": "command_execution",
+                        "command": "pwd",
+                        "exit_code": 0,
+                        "status": "completed"
+                    }
+                }),
+            },
+            ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::AssistantFinal,
+                content: "done".to_string(),
+                title: None,
+                raw: serde_json::json!({"type": "assistant_final", "observedAtMs": 1150}),
+            },
+        ];
+        let saved_images = vec![ExternalCliSavedImageAttachment {
+            path: "/tmp/session/run/images/image-1.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size_bytes: 42,
+            name: Some("image.png".to_string()),
+        }];
+        let mut metadata = std::collections::BTreeMap::new();
+
+        append_external_cli_observability_metadata(
+            ExternalCliObservabilityInput {
+                request: &request,
+                spec: &spec,
+                prompt: "## Attached Images\n- /tmp/session/run/images/image-1.png\n",
+                saved_images: &saved_images,
+                stdout: b"{\"type\":\"assistant_final\"}\n",
+                stderr: b"warning\n",
+                events: &events,
+                timings: ExternalCliObservabilityTimings {
+                    started_at: 1000,
+                    command_started_at: Some(1010),
+                    command_finished_at: Some(1200),
+                    finished_at: 1250,
+                },
+                cli_version: Some("runner 1.2.3"),
+            },
+            &mut metadata,
+        );
+
+        assert_eq!(
+            metadata.get("runner.adapter").map(String::as_str),
+            Some(adapter)
+        );
+        assert_eq!(
+            metadata.get("cli.version").map(String::as_str),
+            Some("runner 1.2.3")
+        );
+        assert_eq!(
+            metadata.get("prompt.attachmentPathCount"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            metadata.get("attachments.totalBytes"),
+            Some(&"42".to_string())
+        );
+        assert_eq!(metadata.get("io.stdoutLines"), Some(&"1".to_string()));
+        assert_eq!(
+            metadata.get("timing.commandDurationMs"),
+            Some(&"190".to_string())
+        );
+        assert_eq!(
+            metadata.get("timing.firstEventLatencyMs"),
+            Some(&"120".to_string())
+        );
+        assert_eq!(metadata.get("tools.count"), Some(&"1".to_string()));
+        assert_eq!(
+            metadata.get("tools.totalDurationMs"),
+            Some(&"120".to_string())
+        );
+        assert_eq!(
+            metadata.get("resume.requested").map(String::as_str),
+            Some("true")
+        );
+    }
+}
+
+#[test]
+fn progress_event_observation_adds_tool_duration() {
+    let mut starts = std::collections::HashMap::new();
+    let mut started = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolStarted,
+        content: "pwd".to_string(),
+        title: None,
+        raw: serde_json::json!({"type": "item.started", "item": {"id": "tool-1"}}),
+    };
+    let mut finished = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "/tmp".to_string(),
+        title: None,
+        raw: serde_json::json!({"type": "item.completed", "item": {"id": "tool-1"}}),
+    };
+
+    enrich_progress_event_observation(&mut started, 2000, &mut starts);
+    enrich_progress_event_observation(&mut finished, 2125, &mut starts);
+
+    assert_eq!(
+        started
+            .raw
+            .get("observedAtMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(2000)
+    );
+    assert_eq!(
+        finished
+            .raw
+            .get("observedAtMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(2125)
+    );
+    assert_eq!(
+        finished
+            .raw
+            .get("durationMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(125)
     );
 }
 
