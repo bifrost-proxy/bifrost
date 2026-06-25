@@ -3944,7 +3944,11 @@ mod coverage_boost {
 
         assert_eq!(
             base,
-            "/tmp/bifrost/agent/sessions/2026/06/25/attachments/session-web-image-1782377498"
+            std::path::PathBuf::from("/tmp/bifrost/agent/sessions/2026/06/25")
+                .join("attachments")
+                .join("session-web-image-1782377498")
+                .display()
+                .to_string()
         );
     }
 
