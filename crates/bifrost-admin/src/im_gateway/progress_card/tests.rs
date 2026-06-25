@@ -154,7 +154,7 @@ fn assistant_final_is_pipeline_content_until_turn_finished() {
 
 #[test]
 fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
-    let mut snapshot = ImAgentProgressSnapshot::new("s1", "检查 Trae X 版本");
+    let mut snapshot = ImAgentProgressSnapshot::new("s1", "检查 Traex 版本");
     for state in [
         "turn started",
         "model rerouted: Test-O-New-Thinking -> claude_46_opus (HighRiskCyberActivity)",
@@ -168,7 +168,7 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
         snapshot.apply_event(AgentTurnProgressEvent::Status(Box::new(status)));
     }
     snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
-        content: "检查当前 Trae X 版本并与最新可用版本对比。".to_string(),
+        content: "检查当前 Traex 版本并与最新可用版本对比。".to_string(),
     });
     snapshot.apply_event(AgentTurnProgressEvent::ToolFinished {
         log: ToolCallLog {
@@ -179,15 +179,15 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
         },
         duration_ms: 88,
     });
-    let final_output = "**结论：** 当前 Trae X 版本为 `0.200.9`，已是最新版本，无需更新。";
+    let final_output = "**结论：** 当前 Traex 版本为 `0.200.9`，已是最新版本，无需更新。";
     snapshot.apply_event(AgentTurnProgressEvent::AssistantFinal {
         content: final_output.to_string(),
     });
 
     let running_card = build_feishu_progress_card(&snapshot, true);
     let running_serialized = serde_json::to_string(&running_card).unwrap();
-    assert!(running_serialized.contains("检查当前 Trae X 版本并与最新可用版本对比"));
-    assert!(running_serialized.contains("当前 Trae X 版本为"));
+    assert!(running_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
+    assert!(running_serialized.contains("当前 Traex 版本为"));
     assert!(running_serialized.contains("已完成：exec_command"));
     assert!(!running_serialized.contains("状态：tool_calls"));
     assert!(!running_serialized.contains("状态：waiting_on_session"));
@@ -202,7 +202,7 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
     assert_eq!(snapshot.output, final_output);
     assert_eq!(
         snapshot.last_thought.as_deref(),
-        Some("检查当前 Trae X 版本并与最新可用版本对比。")
+        Some("检查当前 Traex 版本并与最新可用版本对比。")
     );
     assert_eq!(snapshot.timeline.len(), 2);
     assert_eq!(snapshot.timeline[0].kind, ProgressTimelineKind::Thinking);
@@ -221,10 +221,10 @@ fn traex_model_messages_stay_visible_while_machine_statuses_are_hidden() {
             .expect("process element"),
     )
     .unwrap();
-    assert!(finished_serialized.contains("检查当前 Trae X 版本并与最新可用版本对比"));
+    assert!(finished_serialized.contains("检查当前 Traex 版本并与最新可用版本对比"));
     assert!(finished_serialized.contains("已完成：exec_command"));
-    assert!(finished_serialized.contains("当前 Trae X 版本为"));
-    assert!(!process_serialized.contains("当前 Trae X 版本为"));
+    assert!(finished_serialized.contains("当前 Traex 版本为"));
+    assert!(!process_serialized.contains("当前 Traex 版本为"));
     assert!(!finished_serialized.contains("状态：tool_calls"));
     assert!(!finished_serialized.contains("model rerouted"));
 }

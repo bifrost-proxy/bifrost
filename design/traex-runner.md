@@ -13,6 +13,7 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - 新增内置 adapter `traex`，默认命令为 `traex --cd <work_dir> exec --json --output-last-message <last_message.md> -`。
 - 支持按持久化 `threadId` 续接：`traex --cd <work_dir> exec resume --json --output-last-message <last_message.md> <thread_id> -`。
 - 支持 Trae 常用执行参数：`model`、`profile`、`permissionMode`、`sandbox`、`dangerFullAccess`、`skipGitRepoCheck`、`ignoreUserConfig`、`ignoreRules`、`addDirs`、`configOverrides`、feature enable/disable、`outputSchema`、`color`、`ephemeral`。
+- 支持 Bifrost 层 Codex/Traex slash 命令：`/models` 通过当前 runner executable 执行 `debug models` 并白名单展示模型；`/model [slug]` 查看或设置当前 session 的模型 override；`/model clear` 清除 override。
 - External CLI runtime 必须逐行读取 stdout/stderr，解析到 JSONL progress event 后立即向调用方推送，不能等 CLI 进程结束后才批量解析。
 - Web Chat `/chat/stream` 与 slash runner-call stream 必须把 Trae progress event 实时写入同一份 conversation timeline。
 - IM event loop 必须把 Trae progress event 同时推给 progress card 和 conversation timeline。
@@ -26,6 +27,8 @@ Bifrost 的 Agent Runner 已经把 Codex、ChatGPT Web、custom CLI 收敛到同
 - 不把外层 `traex` wrapper 调用作为用户可见工具步骤写进 timeline；用户应该看到 Trae 自己输出的状态、工具和最终回答。
 - 不伪造 Trae 没有输出的细粒度工具事件。若 Trae 本次 JSONL 只提供状态和最终消息，Bifrost 只展示真实状态和最终消息；若 Trae 输出 tool started/finished，Bifrost 再展示工具步骤。
 - 不向 Trae exec 传递不支持的 `--permission-mode default`。配置为空或 `default` 时必须默认启用 full access；当前 Trae CLI 不允许同时设置 sandbox override 和 permission mode override，因此 full access 模式只传 `--dangerously-bypass-approvals-and-sandbox`，不再同时传 `--permission-mode bypass_permissions`。
+- `/models` 不能透出 Traex raw catalog 中的 `base_instructions` 等大字段或内部字段；只展示 slug/display name/description/reasoning/tier/visibility 等白名单字段，并过滤 hidden model。
+- `/model` 只影响当前 `sessionKey + adapter + runnerId`，不能修改全局 runner 配置；session slash override 会覆盖 runner 默认模型，并在 Web UI、API 和 IM event loop 的下一轮 run 中统一生效。
 - 未显式配置 `timeoutSecs` 时，不对 Trae/external runner 设置固定超时；长任务由用户显式 `/stop` 或 runner 自然结束控制。
 - 飞书 progress card 展示工具输入/输出预览，完整 stdout/stderr 与 normalized events 保存在 run artifacts；重复的 running tool start 事件必须去重，避免卡片体过大导致中间刷新丢失。
 - 飞书绑定 Codex/Trae external runner 时，如果 IM channel 没有显式配置 `deliveryMode`，必须默认使用 progress card；runner 级默认 `final_reply` 只作为非飞书或显式 channel 继承外的普通回退，不能让飞书过程卡片被静默短路。
@@ -78,6 +81,19 @@ Agent Chat 右侧 Threads 列表支持折叠：卡片标题右侧按钮向右收
 
 Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae CLI、ChatGPT Web。后端仍接受历史或测试用途的 `custom`/`mock` adapter，保证已有配置和自动化测试不被破坏，但新建/编辑弹窗不再把这些未来扩展项暴露给普通用户。
 
+### Codex/Traex Slash Model 命令
+
+Bifrost 使用 `traecli exec --json ... -` 的一轮一进程模式，不依赖 Traex TUI 的交互 slash popup。模型切换在 Bifrost 层解析：
+
+- `/models`：调用当前 runner 配置的 executable 执行 `debug models`，解析 JSON 后仅返回 `slug`、`displayName`、`description`、`defaultReasoningLevel`、`supportedReasoningLevels`、`visibility`、`supportedInApi`、`additionalSpeedTiers`、`serviceTiers`、`priority`。隐藏模型和 raw catalog 内部字段不进入响应。
+- `/model`：展示当前 session override；没有 override 时展示 runner/user config 解析出的模型，仍为空则说明使用 Traex 默认模型。
+- `/model <slug>`：先用 `debug models` catalog 校验 slug；不存在时返回可见拒绝消息且不写入 override。存在时把 `<slug>` 写入 `session_state.json` 的 `modelOverride`，来源为 `session slash command`。后续同 session 同 runner 的 Codex/Traex run 在 Web Chat、runner-call 和 IM event loop 中合并为 `adapterConfig.model`，最终由 command spec 追加 `--model <slug>`，包括 `exec resume`。
+- `/model clear`：删除 session override，让下一轮回到 runner 配置或 Traex 默认模型。
+
+Web UI 在当前 runner adapter 为 `codex` 或 `traex` 时展示 `/models` 和 `/model`。`/models` 在补全菜单中回车会直接发送；`/model` 回车或 Tab 会补齐命令并把光标放到末尾，方便继续输入模型 slug。IM 通道空闲时支持同一命令，运行中发送 `/model` 只提示等待当前任务结束，避免把控制命令当普通 prompt 送入 Codex/Traex。Slash 命令结果作为控制消息写入会话历史供刷新回放，但不注入 runner prompt，避免污染模型上下文。
+
+Agent Chat 底部 token HUD 需要从 session detail、history summary 和外部 runner metadata 合并 `model`、`modelProvider`、`usageTotalTokens`、`usageInputTokens`。刷新页面、加载 history、发送下一轮消息以及运行中的 status 空快照都不能把已知模型、token 和 context 覆盖为空或 0。
+
 ## 依赖项
 
 - 本机已安装 `traex` CLI，并支持 `exec --json --output-last-message`。
@@ -106,6 +122,9 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 - `historyEventsToMessages deduplicates repeated external runner tool events by call id`：验证 Web timeline 按 `call_id` 合并重复 start 与 result，保留输入输出。
 - `feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override`：验证飞书 Codex/Trae runner 即使 runner 级配置为 `final_reply`，没有 channel delivery override 时仍使用 progress card；显式 channel/input override 仍优先。
 - `historyEventsToMessages attaches external runner process steps to the final assistant message`：验证已保存的飞书/Trae history 展开最终 assistant 时可以看到同轮 thinking/tool 过程，而不会产生单独 `Agent is running...` 占位结果。
+- `external_cli_model_slash_command_parser_handles_list_show_set_and_clear`：验证 Codex/Traex `/models`、`/model`、`/model <slug>`、`/model clear` 解析和非法 slug 拒绝。
+- `traex_model_catalog_parser_filters_raw_catalog_to_safe_public_fields`：验证 raw catalog 只输出白名单字段，过滤 hidden model，不泄露 `base_instructions`。
+- `apply_persisted_state_applies_codex_and_traex_session_model_override`：验证 session override 合并到 Codex/Traex request，并覆盖 runner 默认模型。
 
 ### E2E 测试
 
@@ -113,6 +132,7 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 - 使用 WebUI 真实浏览器打开 Agent Chat，发送 Trae runner 长任务消息，断言运行中过程块默认展开并持续更新，工具行展示命令片段；完成后过程块默认折叠且最终回答位于底部。
 - 使用 Playwright 断言 external runner 运行中输入只显示 Queue 并发送 `/q ...`；断言 Threads 折叠状态写入 localStorage，刷新后仍保持；断言 Trae fallback thread mark 不显示为 `Bf`；断言运行中 history 由 `timeline_changed` SSE 触发增量更新，其他线程的 timeline 事件不会污染当前消息区，且不会高频请求 `/sessions/all`。
 - 使用 Playwright 打开 Agent Runners 的 Add Runner 弹窗，断言 Adapter 下拉包含 Codex CLI、Trae CLI、ChatGPT Web，且不包含 Custom、Mock。
+- 使用 mock `codex` 和 mock `traecli` 启动真实 Bifrost，调用 `/chat/stream` 发送 `/models`、`/model Doubao-Unit` 和普通消息，断言模型列表不泄露 raw 字段，非法模型被拒绝且不写入 override，后续 run snapshot 带目标 `--model`，session state 写入 override。
 
 ### 真实场景测试
 
@@ -120,6 +140,7 @@ Runners 配置页的 Adapter 下拉只展示产品化入口：Codex CLI、Trae C
 - 对本轮回归新增飞书 Codex/Trae progress card 默认投递和 Web history 最终回复过程挂载用例。
 - 按用例真实执行：临时端口、临时数据目录、`--no-system-proxy`、禁用 Sync 自动登录弹窗。
 - WebUI 亮色/暗色至少验证 Agent Chat 过程块可读性；本轮主要变更不新增硬编码主题色。
+- 更新 `human_tests/im-gateway-external-cli-chat-gateway.md` 的 TC-IEC-50，覆盖 Traex `/models` 与 `/model` session 模型切换，并按真实临时服务/API/Web UI 链路执行。
 
 ## Review/Fix/Test 闭环方案
 

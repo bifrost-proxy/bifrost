@@ -20,7 +20,7 @@
 14. 真实 Bifrost `/agent/chat` 派发 Codex CLI 创建宣传网页，并通过 `exec_command` + `write_stdin` 持续观察/追加引导消息
 15. 终端工具协议运行时与 schema 一致：拒绝未暴露的权限/沙箱字段、隐藏 `input` 字段和旧字符串 session id
 16. 默认模型可见终端工具和 base instructions 只保留 `exec_command` / `write_stdin` 终端协议；历史 `shell` / `shell_pty` 不再注册，真实 `/agent/chat` 工具列表和 prompt 不得出现第二套 shell 入口
-17. 服务启动时默认创建 `Bifrost Agent`、`Codex`、`TreeX` 三个用户可见 Runner；`Codex` / `TreeX` external runner 可通过旧小写 ID 兼容访问
+17. 服务启动时默认创建 `Bifrost Agent`、`Codex`、`Traex` 三个用户可见 Runner；`Codex` / `Traex` external runner 可通过旧小写 ID 兼容访问
 
 ## 前置条件
 
@@ -233,15 +233,15 @@ mkdir -p ./.bifrost-test
 
 - **操作步骤**:
   ```bash
-  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin default_gateway_config_contains_enabled_codex_and_treex_runners -- --nocapture
+  CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin default_gateway_config_contains_enabled_codex_and_traex_runners -- --nocapture
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin normalized_gateway_config_empty_runners_uses_enabled_named_defaults -- --nocapture
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin config_store_new_persists_missing_default_runners_on_startup -- --nocapture
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin effective_config_resolves_legacy_runner_aliases_to_named_defaults -- --nocapture
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-admin im_runner_command_lists_builtin_and_configured_runners -- --nocapture
   CARGO_TARGET_DIR=./.bifrost-test/agent-builtin-tools-target cargo test -p bifrost-agent agent_runner_mode_accepts_display_name_for_builtin_runner -- --nocapture
   ```
-- **预期结果**: 默认 external runner registry 包含 enabled 的 `Codex` 与 `TreeX`，adapter 分别为 `codex` 和 `traex`；启动配置 store 会把缺失的默认 runner 写回磁盘；旧 ID `codex` / `traex` 兼容解析到 `Codex` / `TreeX`；IM `/runner` 列表展示 `Bifrost Agent`、`Codex`、`TreeX`；`Bifrost Agent` 展示名可反序列化为内置 Agent。
-- **本次执行结果**: 2026-06-24 执行通过；`default_gateway_config_contains_enabled_codex_and_treex_runners` 验证默认 registry 为 `defaultRunnerId=Codex` 且包含 enabled 的 `Codex` / `TreeX`；`normalized_gateway_config_empty_runners_uses_enabled_named_defaults` 验证旧空 `runners` 配置不会生成 disabled 的 `Codex` fallback，而是归一到 enabled 的 `Codex` / `TreeX`；`config_store_new_persists_missing_default_runners_on_startup` 验证启动配置 store 会把缺失默认 runner 写回磁盘；`effective_config_resolves_legacy_runner_aliases_to_named_defaults` 验证旧 `codex` / `traex` 解析到 `Codex` / `TreeX`；`im_runner_command_lists_builtin_and_configured_runners` 验证 `/runner` 列表展示 `Bifrost Agent`、`Codex`、`TreeX`；`agent_runner_mode_accepts_display_name_for_builtin_runner` 验证 `Bifrost Agent` 展示名可反序列化为内置 Agent。首次运行第一条命令时 crates.io index 出现一次 HTTP/2 framing 网络错误，单独重跑后通过。
+- **预期结果**: 默认 external runner registry 包含 enabled 的 `Codex` 与 `Traex`，adapter 分别为 `codex` 和 `traex`；启动配置 store 会把缺失的默认 runner 写回磁盘；旧 ID `codex` / `traex` 兼容解析到 `Codex` / `Traex`；IM `/runner` 列表展示 `Bifrost Agent`、`Codex`、`Traex`；`Bifrost Agent` 展示名可反序列化为内置 Agent。
+- **本次执行结果**: 2026-06-24 执行通过；`default_gateway_config_contains_enabled_codex_and_traex_runners` 验证默认 registry 为 `defaultRunnerId=Codex` 且包含 enabled 的 `Codex` / `Traex`；`normalized_gateway_config_empty_runners_uses_enabled_named_defaults` 验证旧空 `runners` 配置不会生成 disabled 的 `Codex` fallback，而是归一到 enabled 的 `Codex` / `Traex`；`config_store_new_persists_missing_default_runners_on_startup` 验证启动配置 store 会把缺失默认 runner 写回磁盘；`effective_config_resolves_legacy_runner_aliases_to_named_defaults` 验证旧 `codex` / `traex` 解析到 `Codex` / `Traex`；`im_runner_command_lists_builtin_and_configured_runners` 验证 `/runner` 列表展示 `Bifrost Agent`、`Codex`、`Traex`；`agent_runner_mode_accepts_display_name_for_builtin_runner` 验证 `Bifrost Agent` 展示名可反序列化为内置 Agent。首次运行第一条命令时 crates.io index 出现一次 HTTP/2 framing 网络错误，单独重跑后通过。
 
 ## 清理步骤
 

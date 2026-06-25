@@ -979,7 +979,10 @@ export function reduceTelemetry(
     return { ...telemetry, phase: "running" };
   }
   if (eventType === "status" && isRecord(event.status)) {
-    return { ...telemetry, status: event.status as RunStatusSnapshot };
+    return {
+      ...telemetry,
+      status: mergeRunStatusSnapshot(telemetry.status, event.status as RunStatusSnapshot),
+    };
   }
   if (eventType === "title_updated" && typeof event.title === "string") {
     return { ...telemetry, title: event.title };
@@ -1046,7 +1049,10 @@ export function reduceTelemetry(
   if (eventType === "context_updated" && isRecord(event.context)) {
     return {
       ...telemetry,
-      context: event.context as AgentContextSnapshot,
+      context: mergeContextSnapshot(
+        telemetry.context,
+        event.context as AgentContextSnapshot,
+      ),
     };
   }
   if (
@@ -1097,6 +1103,65 @@ export function reduceTelemetry(
 
 export function appendError(errors: string[], error: string) {
   return errors.includes(error) ? errors : [...errors, error];
+}
+
+function mergeRunStatusSnapshot(
+  previous: RunStatusSnapshot | undefined,
+  incoming: RunStatusSnapshot,
+): RunStatusSnapshot {
+  const next: RunStatusSnapshot = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(incoming) as Array<[
+    keyof RunStatusSnapshot,
+    RunStatusSnapshot[keyof RunStatusSnapshot],
+  ]>) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    const previousValue = previous?.[key];
+    if (
+      value === 0 &&
+      typeof previousValue === "number" &&
+      previousValue > 0 &&
+      isTelemetryMetricField(key)
+    ) {
+      continue;
+    }
+    next[key] = value as never;
+  }
+  if (previous?.metadata || incoming.metadata) {
+    next.metadata = {
+      ...(previous?.metadata || {}),
+      ...(incoming.metadata || {}),
+    };
+  }
+  return next;
+}
+
+function isTelemetryMetricField(key: keyof RunStatusSnapshot) {
+  return [
+    "total_tokens_used",
+    "estimated_context_tokens",
+    "context_window_tokens",
+    "context_usage_percent",
+    "last_response_tokens",
+  ].includes(key);
+}
+
+function mergeContextSnapshot(
+  previous: AgentContextSnapshot | undefined,
+  incoming: AgentContextSnapshot,
+): AgentContextSnapshot {
+  const next: AgentContextSnapshot = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(incoming) as Array<[
+    keyof AgentContextSnapshot,
+    AgentContextSnapshot[keyof AgentContextSnapshot],
+  ]>) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    next[key] = value as never;
+  }
+  return next;
 }
 
 export function finishTool(
@@ -1249,7 +1314,10 @@ export function formatLoopProgress(status?: RunStatusSnapshot) {
 }
 
 export function formatModelRef(status?: RunStatusSnapshot) {
-  const model = status?.model?.trim();
+  const model =
+    status?.model?.trim() ||
+    status?.metadata?.modelOverride?.trim() ||
+    status?.metadata?.model?.trim();
   const provider = status?.model_provider?.trim();
   if (model && provider) {
     return `${model} (${provider})`;
@@ -1258,8 +1326,16 @@ export function formatModelRef(status?: RunStatusSnapshot) {
 }
 
 export function formatReasoningRef(status?: RunStatusSnapshot) {
-  const effort = (status?.model_reasoning_effort || status?.modelReasoningEffort)?.trim();
-  const summary = (status?.model_reasoning_summary || status?.modelReasoningSummary)?.trim();
+  const effort = (
+    status?.model_reasoning_effort ||
+    status?.modelReasoningEffort ||
+    status?.metadata?.modelReasoningEffort
+  )?.trim();
+  const summary = (
+    status?.model_reasoning_summary ||
+    status?.modelReasoningSummary ||
+    status?.metadata?.modelReasoningSummary
+  )?.trim();
   if (effort && summary) {
     return `${effort} / ${summary}`;
   }

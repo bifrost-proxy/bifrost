@@ -6,15 +6,15 @@ AI Agent Runner registry 在服务启动时必须保证默认 Runner 可用。�
 
 - `Bifrost Agent`：内置 Agent runtime，不写入 external CLI runner map。
 - `Codex`：外部 CLI Runner，adapter 为 `codex`。
-- `TreeX`：外部 CLI Runner，adapter 为 `traex`。
+- `Traex`：外部 CLI Runner，adapter 为 `traex`。
 
 Runner ID 使用用户可见名称。为兼容历史配置和会话，后端继续接受 `bifrost_agent`、`codex`、`traex` / `trae` 等旧 ID，并在执行 external runner 时解析到新的默认 ID。
 
 ## 实现逻辑
 
-- `ExternalCliGatewayConfig::default()` 默认创建 enabled 的 `Codex` 和 `TreeX` external runners，`defaultRunnerId` 为 `Codex`。
+- `ExternalCliGatewayConfig::default()` 默认创建 enabled 的 `Codex` 和 `Traex` external runners，`defaultRunnerId` 为 `Codex`。
 - `ExternalCliConfigStore::new()` 读取磁盘配置后执行归一化；如果缺少默认 Runner，会写回 `admin/im_gateway_external_cli_agent.json`。写回失败只记录 warning，不阻断服务启动。
-- `effective_config_for_provider_and_runner()` 对请求级 runner override 做兼容解析：旧 `codex` 指向 `Codex`，旧 `traex` / `trae` 指向 `TreeX`。
+- `effective_config_for_provider_and_runner()` 对请求级 runner override 做兼容解析：旧 `codex` 指向 `Codex`，旧 `traex` / `trae` 指向 `Traex`。
 - IM `/runner` 列表展示 `Bifrost Agent`，同时接受 `/runner Bifrost Agent` 和旧 `/runner bifrost_agent`。
 - `AgentRunnerMode` 反序列化接受 `Bifrost Agent` 作为内置 Runner。
 
@@ -28,13 +28,13 @@ Runner ID 使用用户可见名称。为兼容历史配置和会话，后端继�
 ## 测试方案
 
 - 单元测试：
-  - 默认 registry 包含 enabled 的 `Codex` / `TreeX`。
-  - 旧配置归一化补齐 `Codex` / `TreeX` 且不覆盖自定义 Runner。
+  - 默认 registry 包含 enabled 的 `Codex` / `Traex`。
+  - 旧配置归一化补齐 `Codex` / `Traex` 且不覆盖自定义 Runner。
   - 旧 ID `codex` / `traex` 解析到新默认 ID。
   - `Bifrost Agent` 可反序列化为内置 Runner。
-  - IM `/runner` 列表展示 `Bifrost Agent`、`Codex`、`TreeX`。
+  - IM `/runner` 列表展示 `Bifrost Agent`、`Codex`、`Traex`。
 - E2E：
-  - `im_gateway_agent_config_get` 启动真实 Admin API，检查 `/api/im-gateway/chat/config` 默认返回 `defaultRunnerId=Codex`，且 `runners.Codex.adapter=codex`、`runners.TreeX.adapter=traex`。
+  - `im_gateway_agent_config_get` 启动真实 Admin API，检查 `/api/im-gateway/chat/config` 默认返回 `defaultRunnerId=Codex`，且 `runners.Codex.adapter=codex`、`runners.Traex.adapter=traex`。
 - human_tests：
   - 更新 `human_tests/agent-builtin-tools-completeness.md`，按真实命令执行默认 Runner 配置与旧 ID 兼容检查。
 

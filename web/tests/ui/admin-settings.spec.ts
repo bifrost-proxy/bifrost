@@ -933,7 +933,7 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
 
   const adapterDropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
   await expect(adapterDropdown).toContainText("Codex CLI");
-  await expect(adapterDropdown).toContainText("TreeX CLI");
+  await expect(adapterDropdown).toContainText("Traex CLI");
   await expect(adapterDropdown).toContainText("ChatGPT Web");
   await expect(adapterDropdown).not.toContainText("Custom");
   await expect(adapterDropdown).not.toContainText("Mock");

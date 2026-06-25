@@ -271,7 +271,7 @@ pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
         ..Default::default()
     };
     config.runners.insert(
-        "TreeX".to_string(),
+        "Traex".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
             adapter: "traex".to_string(),
             ..Default::default()
@@ -283,15 +283,22 @@ pub(super) fn im_runner_command_lists_builtin_and_configured_runners() {
         Some(ImRunnerCommand::List)
     );
     assert_eq!(
-        parse_im_runner_command("/Runner TreeX"),
-        Some(ImRunnerCommand::Switch("TreeX".to_string()))
+        parse_im_runner_command("/Runner Traex"),
+        Some(ImRunnerCommand::Switch("Traex".to_string()))
     );
+    let legacy_alias = ["Tree", "X"].concat();
+    let legacy_selection =
+        resolve_im_runner_selection(&config, &legacy_alias).expect("legacy Traex alias");
+    assert!(matches!(
+        legacy_selection.runner,
+        bifrost_agent::AgentRunnerMode::Custom(ref runner_id) if runner_id == "Traex"
+    ));
     assert_eq!(parse_im_runner_command("/runnerish"), None);
 
     let runner_list = format_im_runner_list(&config);
     assert!(runner_list.contains("Bifrost Agent"));
     assert!(runner_list.contains("Codex"));
-    assert!(runner_list.contains("TreeX"));
+    assert!(runner_list.contains("Traex"));
 }
 
 #[test]

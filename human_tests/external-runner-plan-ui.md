@@ -2,14 +2,14 @@
 
 ## 功能模块说明
 
-本模块验证 Codex Runner 与 TreeX/TraeX Runner 的 plan/todo list 输出被 Bifrost 解析为统一 `plan_updated`，并在飞书 progress card 与 Web UI Agent Chat 历史/实时展示中可见。
+本模块验证 Codex Runner 与 Traex/Traex Runner 的 plan/todo list 输出被 Bifrost 解析为统一 `plan_updated`，并在飞书 progress card 与 Web UI Agent Chat 历史/实时展示中可见。
 
 ## 前置条件
 
 1. 当前目录位于仓库根目录。
-2. 本地已安装 `codex`；TraeX 真实采样需要本地已安装 `traex`。
+2. 本地已安装 `codex`；Traex 真实采样需要本地已安装 `traex`。
 3. 启动 Bifrost 服务时必须使用临时 `BIFROST_DATA_DIR`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`。
-4. 真实 Codex/TraeX CLI 采样可能依赖当前账号、网络和模型状态；稳定回归以 mock external runner E2E、Rust 单测和 Web 单测为准。
+4. 真实 Codex/Traex CLI 采样可能依赖当前账号、网络和模型状态；稳定回归以 mock external runner E2E、Rust 单测和 Web 单测为准。
 
 ## 测试用例列表
 
@@ -34,10 +34,10 @@
 - `inspect output` 从 `completed:false` 更新为 `completed:true`；`map parser` 和 `verify UI` 仍为 `completed:false`。
 - 最终输出 `PLAN_STREAM_PROBE_DONE`。
 
-### TC-ERP-02：真实 TraeX JSONL 输出协议采样
+### TC-ERP-02：真实 Traex JSONL 输出协议采样
 
 **操作步骤**：
-1. 执行真实 TraeX 探针：
+1. 执行真实 Traex 探针：
    ```bash
    tmpdir=$(mktemp -d)
    prompt='Do not edit files. First call the update_plan tool with exactly three steps: inspect output, map parser, verify UI. Then call update_plan again marking inspect output completed and map parser in_progress. Then answer exactly TRAEX_PLAN_STREAM_PROBE_DONE.'
@@ -46,13 +46,13 @@
 2. 若 90 秒内没有新的 JSONL 事件，终止探针并记录当前输出。
 
 **预期结果**：
-- TraeX 至少输出与 Codex 兼容的 `thread.started` / `turn.started` JSONL。
-- 如果 TraeX 输出 `todo_list`，Bifrost 按 TC-ERP-01 同一规则解析。
-- 如果本次真实 TraeX 未在限定时间输出 todo list，记录为 Runner/环境输出差异，不作为 Bifrost parser 失败。
+- Traex 至少输出与 Codex 兼容的 `thread.started` / `turn.started` JSONL。
+- 如果 Traex 输出 `todo_list`，Bifrost 按 TC-ERP-01 同一规则解析。
+- 如果本次真实 Traex 未在限定时间输出 todo list，记录为 Runner/环境输出差异，不作为 Bifrost parser 失败。
 
 **实际结果（2026-06-25）**：
-- 通过。TraeX 输出 `thread.started` 和 `turn.started`。
-- 本次 90 秒内未继续输出 todo list 或最终消息，已终止探针；Bifrost parser 通过 Codex 真实 fixture 与通用 `plan_updated` fixture 覆盖 TraeX 同协议兼容。
+- 通过。Traex 输出 `thread.started` 和 `turn.started`。
+- 本次 90 秒内未继续输出 todo list 或最终消息，已终止探针；Bifrost parser 通过 Codex 真实 fixture 与通用 `plan_updated` fixture 覆盖 Traex 同协议兼容。
 
 ### TC-ERP-03：真实 Bifrost 服务把 external runner plan 推到 stream、run detail 和 history
 
@@ -117,4 +117,4 @@
 
 1. 删除测试临时目录。
 2. 确认没有残留 Bifrost 测试进程。
-3. 若手动执行真实 Codex/TraeX 探针且进程长时间无输出，应终止探针。
+3. 若手动执行真实 Codex/Traex 探针且进程长时间无输出，应终止探针。

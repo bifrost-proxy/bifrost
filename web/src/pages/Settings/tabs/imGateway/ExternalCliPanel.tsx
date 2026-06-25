@@ -49,7 +49,7 @@ const DEFAULT_RUNNER: ExternalCliAgentSettings = {
 
 const ADAPTER_OPTIONS = [
   { label: "Codex CLI", value: "codex" },
-  { label: "TreeX CLI", value: "traex" },
+  { label: "Traex CLI", value: "traex" },
   { label: "ChatGPT Web", value: "chatgpt_web" },
 ];
 

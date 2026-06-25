@@ -19,7 +19,8 @@ const DEFAULT_RUNTIME: &str = "external_cli";
 const DEFAULT_ADAPTER: &str = "codex";
 pub const TRAEX_ADAPTER: &str = "traex";
 pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
-pub const DEFAULT_TREEX_RUNNER_ID: &str = "TreeX";
+pub const DEFAULT_TRAEX_RUNNER_ID: &str = "Traex";
+const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
 const MAX_EXTERNAL_RUNNER_IMAGES_PER_MESSAGE: usize = 6;
@@ -310,6 +311,56 @@ pub struct ExternalCliResolvedModelConfig {
     pub reasoning_source: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ExternalCliModelSlashCommand {
+    List,
+    Show,
+    Clear,
+    Set(String),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliModelInfo {
+    pub slug: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_level: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub supported_reasoning_levels: Vec<ExternalCliReasoningLevelInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supported_in_api: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_speed_tiers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub service_tiers: Vec<ExternalCliServiceTierInfo>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliReasoningLevelInfo {
+    pub effort: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExternalCliServiceTierInfo {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExternalCliDeliveryMode {
@@ -487,7 +538,7 @@ pub fn effective_config_for_provider_and_runner(
             }
         }
     }
-    runner_id = canonical_runner_id(config, &runner_id);
+    runner_id = canonical_external_cli_runner_id(config, &runner_id);
     let mut settings = config.runners.get(&runner_id).cloned().unwrap_or_default();
     let mut sources = BTreeMap::new();
     sources.insert("runnerId".to_string(), "runner".to_string());
@@ -1688,6 +1739,292 @@ pub fn resolve_external_cli_model_config(
         resolved.reasoning_source = Some("runner config".to_string());
     }
     resolved
+}
+
+pub fn parse_external_cli_model_slash_command(
+    message: &str,
+) -> Option<Result<ExternalCliModelSlashCommand, String>> {
+    let trimmed = message.trim();
+    let mut parts = trimmed.splitn(2, char::is_whitespace);
+    let command = parts.next()?;
+    let rest = parts.next().unwrap_or("").trim();
+    if command.eq_ignore_ascii_case("/models") {
+        if rest.is_empty() {
+            return Some(Ok(ExternalCliModelSlashCommand::List));
+        }
+        return Some(Err("用法: /models".to_string()));
+    }
+    if !command.eq_ignore_ascii_case("/model") {
+        return None;
+    }
+    if rest.is_empty() {
+        return Some(Ok(ExternalCliModelSlashCommand::Show));
+    }
+    if matches!(
+        rest.to_ascii_lowercase().as_str(),
+        "clear" | "reset" | "default"
+    ) {
+        return Some(Ok(ExternalCliModelSlashCommand::Clear));
+    }
+    if let Err(reason) = validate_external_model_slug(rest) {
+        return Some(Err(reason));
+    }
+    Some(Ok(ExternalCliModelSlashCommand::Set(rest.to_string())))
+}
+
+pub async fn load_external_cli_model_catalog(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+    work_dir: Option<&Path>,
+) -> Result<Vec<ExternalCliModelInfo>, String> {
+    let adapter = adapter.trim();
+    let default_executable = match adapter {
+        DEFAULT_ADAPTER => DEFAULT_ADAPTER,
+        TRAEX_ADAPTER => TRAEX_ADAPTER,
+        _ => {
+            return Err(format!(
+                "adapter `{adapter}` does not support model catalog"
+            ))
+        }
+    };
+    let executable = config
+        .executable
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(default_executable);
+    let mut command = Command::new(executable);
+    command
+        .arg("debug")
+        .arg("models")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(work_dir) = work_dir {
+        command.current_dir(work_dir);
+    }
+    for (key, value) in &config.env {
+        command.env(key, value);
+    }
+    let output = timeout(Duration::from_secs(10), command.output())
+        .await
+        .map_err(|_| format!("{adapter} model catalog command timed out"))?
+        .map_err(|error| format!("spawn {adapter} model catalog command failed: {error}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let reason = stderr
+            .lines()
+            .chain(stdout.lines())
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("debug models failed");
+        return Err(format!(
+            "{adapter} model catalog command failed: {}",
+            truncate_metadata_value(reason, 500)
+        ));
+    }
+    let stdout = String::from_utf8(output.stdout)
+        .map_err(|error| format!("{adapter} model catalog was not utf-8: {error}"))?;
+    parse_external_cli_model_catalog(adapter, &stdout)
+}
+
+pub fn parse_external_cli_model_catalog(
+    adapter: &str,
+    raw_json: &str,
+) -> Result<Vec<ExternalCliModelInfo>, String> {
+    #[derive(Deserialize)]
+    struct Catalog {
+        #[serde(default)]
+        models: Vec<RawModel>,
+    }
+
+    #[derive(Deserialize)]
+    struct RawModel {
+        slug: Option<String>,
+        #[serde(default, alias = "displayName", alias = "name", alias = "title")]
+        display_name: Option<String>,
+        #[serde(default)]
+        description: Option<String>,
+        #[serde(default)]
+        default_reasoning_level: Option<String>,
+        #[serde(default)]
+        supported_reasoning_levels: Vec<ExternalCliReasoningLevelInfo>,
+        #[serde(default)]
+        visibility: Option<String>,
+        #[serde(default)]
+        supported_in_api: Option<bool>,
+        #[serde(default)]
+        additional_speed_tiers: Vec<String>,
+        #[serde(default)]
+        service_tiers: Vec<ExternalCliServiceTierInfo>,
+        #[serde(default)]
+        priority: Option<i64>,
+    }
+
+    let catalog: Catalog = serde_json::from_str(raw_json)
+        .map_err(|error| format!("parse {adapter} model catalog failed: {error}"))?;
+    let mut models = catalog
+        .models
+        .into_iter()
+        .filter_map(|model| {
+            let slug = clean_optional_string(model.slug.as_deref())?;
+            if matches!(
+                model.visibility.as_deref().map(str::trim),
+                Some(value) if !value.eq_ignore_ascii_case("list")
+            ) {
+                return None;
+            }
+            Some(ExternalCliModelInfo {
+                slug,
+                display_name: clean_optional_string(model.display_name.as_deref()),
+                description: clean_optional_string(model.description.as_deref()),
+                default_reasoning_level: clean_optional_string(
+                    model.default_reasoning_level.as_deref(),
+                ),
+                supported_reasoning_levels: model
+                    .supported_reasoning_levels
+                    .into_iter()
+                    .filter(|level| !level.effort.trim().is_empty())
+                    .collect(),
+                visibility: clean_optional_string(model.visibility.as_deref()),
+                supported_in_api: model.supported_in_api,
+                additional_speed_tiers: model
+                    .additional_speed_tiers
+                    .into_iter()
+                    .map(|tier| tier.trim().to_string())
+                    .filter(|tier| !tier.is_empty())
+                    .collect(),
+                service_tiers: model
+                    .service_tiers
+                    .into_iter()
+                    .filter(|tier| !tier.id.trim().is_empty())
+                    .collect(),
+                priority: model.priority,
+            })
+        })
+        .collect::<Vec<_>>();
+    models.sort_by(|left, right| {
+        left.priority
+            .unwrap_or(i64::MAX)
+            .cmp(&right.priority.unwrap_or(i64::MAX))
+            .then_with(|| left.slug.cmp(&right.slug))
+    });
+    Ok(models)
+}
+
+pub fn format_external_cli_model_catalog(adapter: &str, models: &[ExternalCliModelInfo]) -> String {
+    let label = external_cli_model_adapter_label(adapter);
+    if models.is_empty() {
+        return format!("{label} 当前没有返回可展示的模型。");
+    }
+    let mut lines = vec![format!("{label} 可用模型:")];
+    for model in models.iter().take(40) {
+        let mut extras = Vec::new();
+        if let Some(reasoning) = model.default_reasoning_level.as_deref() {
+            extras.push(format!("reasoning: {reasoning}"));
+        }
+        if !model.additional_speed_tiers.is_empty() {
+            extras.push(format!("tiers: {}", model.additional_speed_tiers.join(",")));
+        }
+        if let Some(visibility) = model.visibility.as_deref() {
+            extras.push(format!("visibility: {visibility}"));
+        }
+        let label = model.display_name.as_deref().unwrap_or(&model.slug);
+        let suffix = if extras.is_empty() {
+            String::new()
+        } else {
+            format!(" ({})", extras.join("; "))
+        };
+        lines.push(format!("- `{}` - {}{}", model.slug, label, suffix));
+        if let Some(description) = model.description.as_deref() {
+            lines.push(format!("  {}", truncate_metadata_value(description, 140)));
+        }
+    }
+    if models.len() > 40 {
+        lines.push(format!("... 另有 {} 个模型未展示", models.len() - 40));
+    }
+    lines.join("\n")
+}
+
+pub fn validate_external_cli_model_selection(
+    adapter: &str,
+    requested_model: &str,
+    models: &[ExternalCliModelInfo],
+) -> Result<String, String> {
+    let requested_model = requested_model.trim();
+    let label = external_cli_model_adapter_label(adapter);
+    if let Some(model) = models.iter().find(|model| model.slug == requested_model) {
+        return Ok(model.slug.clone());
+    }
+    if models.is_empty() {
+        return Err(format!(
+            "未切换模型：{label} 当前没有返回可展示的模型，不能设置为 `{requested_model}`。"
+        ));
+    }
+    let mut available = models
+        .iter()
+        .take(8)
+        .map(|model| format!("`{}`", model.slug))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if models.len() > 8 {
+        available.push_str(&format!(" 等 {} 个", models.len()));
+    }
+    Err(format!(
+        "未切换模型：`{requested_model}` 不在 {label} 可用模型列表中。\n可用模型包括: {available}\n请发送 `/models` 查看完整列表。"
+    ))
+}
+
+pub fn format_external_cli_model_status(
+    adapter: &str,
+    effective_model: Option<&str>,
+    source: Option<&str>,
+    runner_id: &str,
+) -> String {
+    let label = external_cli_model_adapter_label(adapter);
+    match effective_model
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(model) => format!(
+            "当前 {label} Runner `{}` 使用模型: `{}`\n来源: {}",
+            runner_id,
+            model,
+            source.unwrap_or("配置")
+        ),
+        None => format!(
+            "当前 {label} Runner `{runner_id}` 未设置模型 override，将使用 {label} 默认模型。"
+        ),
+    }
+}
+
+pub fn external_cli_model_adapter_label(adapter: &str) -> &'static str {
+    match adapter.trim() {
+        DEFAULT_ADAPTER => "Codex",
+        TRAEX_ADAPTER => "Traex",
+        _ => "External CLI",
+    }
+}
+
+pub fn supports_external_cli_model_slash(adapter: &str) -> bool {
+    matches!(adapter.trim(), DEFAULT_ADAPTER | TRAEX_ADAPTER)
+}
+
+fn validate_external_model_slug(value: &str) -> Result<(), String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err("用法: /model <model-slug>".to_string());
+    }
+    if value.len() > 128 {
+        return Err("模型名称过长，请使用 128 个字符以内的模型 slug。".to_string());
+    }
+    if !value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-' | '/' | ':' | '@'))
+    {
+        return Err("模型名称只能包含字母、数字、点、下划线、短横线、斜杠、冒号或 @。".to_string());
+    }
+    Ok(())
 }
 
 fn load_external_cli_user_model_config(
@@ -3387,9 +3724,11 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
             })
             .collect();
     }
+    migrate_legacy_traex_runner_id(&mut config);
     ensure_default_external_cli_runners(&mut config.runners);
     if !config.runners.contains_key(&config.default_runner_id) {
-        let canonical_default_runner_id = canonical_runner_id(&config, &config.default_runner_id);
+        let canonical_default_runner_id =
+            canonical_external_cli_runner_id(&config, &config.default_runner_id);
         if config.runners.contains_key(&canonical_default_runner_id) {
             config.default_runner_id = canonical_default_runner_id;
         } else {
@@ -3421,8 +3760,41 @@ fn ensure_default_external_cli_runners(runners: &mut BTreeMap<String, ExternalCl
         .entry(DEFAULT_CODEX_RUNNER_ID.to_string())
         .or_insert_with(|| default_runner_settings(DEFAULT_ADAPTER));
     runners
-        .entry(DEFAULT_TREEX_RUNNER_ID.to_string())
+        .entry(DEFAULT_TRAEX_RUNNER_ID.to_string())
         .or_insert_with(|| default_runner_settings(TRAEX_ADAPTER));
+}
+
+fn migrate_legacy_traex_runner_id(config: &mut ExternalCliGatewayConfig) {
+    let legacy_runner_id = config
+        .runners
+        .keys()
+        .find(|runner_id| runner_id.eq_ignore_ascii_case(LEGACY_TRAEX_RUNNER_ALIAS))
+        .cloned();
+    let Some(legacy_runner_id) = legacy_runner_id else {
+        return;
+    };
+    let Some(legacy_settings) = config.runners.remove(&legacy_runner_id) else {
+        return;
+    };
+    config
+        .runners
+        .entry(DEFAULT_TRAEX_RUNNER_ID.to_string())
+        .or_insert(legacy_settings);
+    if config
+        .default_runner_id
+        .eq_ignore_ascii_case(LEGACY_TRAEX_RUNNER_ALIAS)
+    {
+        config.default_runner_id = DEFAULT_TRAEX_RUNNER_ID.to_string();
+    }
+    for channel in config.channels.values_mut() {
+        if channel
+            .runner_id
+            .as_deref()
+            .is_some_and(|runner_id| runner_id.eq_ignore_ascii_case(LEGACY_TRAEX_RUNNER_ALIAS))
+        {
+            channel.runner_id = Some(DEFAULT_TRAEX_RUNNER_ID.to_string());
+        }
+    }
 }
 
 fn default_runner_settings(adapter: &str) -> ExternalCliAgentSettings {
@@ -3433,8 +3805,16 @@ fn default_runner_settings(adapter: &str) -> ExternalCliAgentSettings {
     }
 }
 
-fn canonical_runner_id(config: &ExternalCliGatewayConfig, runner_id: &str) -> String {
+pub fn canonical_external_cli_runner_id(
+    config: &ExternalCliGatewayConfig,
+    runner_id: &str,
+) -> String {
     let runner_id = runner_id.trim();
+    if runner_id.eq_ignore_ascii_case(LEGACY_TRAEX_RUNNER_ALIAS)
+        && config.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID)
+    {
+        return DEFAULT_TRAEX_RUNNER_ID.to_string();
+    }
     if config.runners.contains_key(runner_id) {
         return runner_id.to_string();
     }
@@ -3442,8 +3822,8 @@ fn canonical_runner_id(config: &ExternalCliGatewayConfig, runner_id: &str) -> St
         "codex" if config.runners.contains_key(DEFAULT_CODEX_RUNNER_ID) => {
             DEFAULT_CODEX_RUNNER_ID.to_string()
         }
-        "treex" | "traex" | "trae" if config.runners.contains_key(DEFAULT_TREEX_RUNNER_ID) => {
-            DEFAULT_TREEX_RUNNER_ID.to_string()
+        "traex" | "trae" if config.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID) => {
+            DEFAULT_TRAEX_RUNNER_ID.to_string()
         }
         _ => runner_id.to_string(),
     }

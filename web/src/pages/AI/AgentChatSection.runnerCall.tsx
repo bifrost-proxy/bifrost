@@ -53,14 +53,34 @@ const SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
   },
 ];
 
+const MODEL_SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
+  {
+    command: "/models",
+    label: "Runner models",
+    description: "列出当前 Runner 可用模型",
+    value: "runner-models",
+    action: "send",
+  },
+  {
+    command: "/model",
+    label: "Runner model",
+    description: "查看或切换当前 Runner 的 session 模型",
+    value: "runner-model",
+    action: "insert",
+    insertText: "/model ",
+  },
+];
+
 export function useSlashRunnerSelection({
   enableCommands,
+  enableModelCommands,
   draft,
   running,
   supplementSubmitting,
   runnerOptions,
 }: {
   enableCommands: boolean;
+  enableModelCommands: boolean;
   draft: string;
   running: boolean;
   supplementSubmitting: boolean;
@@ -68,7 +88,7 @@ export function useSlashRunnerSelection({
 }) {
   const [slashRunner, setSlashRunner] = useState<RunnerOption | undefined>();
   const slashQuery =
-    !slashRunner && draft.trimStart().startsWith("/")
+    draft.trimStart().startsWith("/")
       ? draft.trimStart().slice(1).trim().toLowerCase()
       : "";
   const slashRunnerOptions = useMemo(
@@ -83,19 +103,21 @@ export function useSlashRunnerSelection({
   );
   const slashCommandOptions = useMemo(
     () =>
-      (enableCommands ? SLASH_COMMAND_OPTIONS : []).filter((option) => {
+      [
+        ...(enableCommands ? SLASH_COMMAND_OPTIONS : []),
+        ...(enableModelCommands ? MODEL_SLASH_COMMAND_OPTIONS : []),
+      ].filter((option) => {
         if (!slashQuery) {
           return true;
         }
         const searchable = `${option.command} ${option.label} ${option.description}`;
         return searchable.toLowerCase().includes(slashQuery);
       }),
-    [enableCommands, slashQuery],
+    [enableCommands, enableModelCommands, slashQuery],
   );
   const showSlashRunnerPanel =
     !running &&
     !supplementSubmitting &&
-    !slashRunner &&
     draft.trimStart().startsWith("/") &&
     (slashCommandOptions.length > 0 || slashRunnerOptions.length > 0);
 
