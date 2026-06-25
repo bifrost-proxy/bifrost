@@ -112,6 +112,7 @@ export function useRunnerCallHandler({
   historyPath,
   messages,
   pendingInstantScrollRef,
+  refreshSessionDetailTelemetry,
   refreshThreads,
   runnerId,
   runnerOptions,
@@ -129,6 +130,7 @@ export function useRunnerCallHandler({
   historyPath?: string;
   messages: ChatMessage[];
   pendingInstantScrollRef: MutableRefObject<boolean>;
+  refreshSessionDetailTelemetry: () => Promise<void>;
   refreshThreads: () => void;
   runnerId: string;
   runnerOptions: RunnerOption[];
@@ -314,6 +316,7 @@ export function useRunnerCallHandler({
         });
         setHistoryPath(undefined);
         setSearchParamsForActiveSession();
+        await refreshSessionDetailTelemetry();
         refreshThreads();
       } catch (error) {
         const text = error instanceof Error ? error.message : "Runner call failed";
@@ -349,6 +352,7 @@ export function useRunnerCallHandler({
       historyPath,
       messages,
       pendingInstantScrollRef,
+      refreshSessionDetailTelemetry,
       refreshThreads,
       runnerId,
       runnerOptions,

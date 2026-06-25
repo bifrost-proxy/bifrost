@@ -640,6 +640,38 @@ export default function AgentChatSection() {
     }
   }, [historyPath, queryView, sessionKey]);
 
+  const refreshSessionDetailTelemetry = useCallback(async () => {
+    const response = await apiFetch(
+      `/api/im-gateway/agent/sessions/${encodeURIComponent(sessionKey)}`,
+    );
+    if (!response.ok) {
+      return;
+    }
+    const detail = (await response.json()) as SessionDetail;
+    const matchedThread = threadsRef.current.find((thread) =>
+      isSelectedThread(thread, sessionKey, undefined, "active"),
+    );
+    setTelemetry(telemetryFromSessionDetail(detail, matchedThread));
+    setThreads((prev) =>
+      prev.map((thread) =>
+        thread.session_key === sessionKey
+          ? {
+              ...thread,
+              source: detail.source || thread.source,
+              work_dir: detail.work_dir || thread.work_dir,
+              agent_type: detail.agent_type || thread.agent_type,
+              runner_type: detail.runner_type || thread.runner_type,
+              runner_id: detail.runner_id || thread.runner_id,
+              has_timeline: detail.has_timeline || thread.has_timeline,
+              timeline_event_count:
+                detail.timeline_event_count ?? thread.timeline_event_count,
+              run_state: detail.run_state || thread.run_state,
+            }
+          : thread,
+      ),
+    );
+  }, [sessionKey]);
+
   const setSearchParamsForActiveSession = useCallback(() => {
     setSearchParams(
       (prev) => {
@@ -2303,6 +2335,7 @@ export default function AgentChatSection() {
     historyPath,
     messages,
     pendingInstantScrollRef,
+    refreshSessionDetailTelemetry,
     refreshThreads,
     runnerId,
     runnerOptions,

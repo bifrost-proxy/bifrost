@@ -1465,15 +1465,9 @@ async fn save_image_attachments(
             "too many external runner images in one request; truncating images"
         );
     }
-    let images_dir = request
-        .params
-        .get("attachmentBaseDir")
-        .or_else(|| request.params.get("attachment_base_dir"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
+    let images_dir = trusted_session_attachment_base_dir(request)
         .map(|value| {
-            PathBuf::from(value).join(
+            value.join(
                 run_dir
                     .file_name()
                     .unwrap_or_else(|| std::ffi::OsStr::new("run")),
@@ -1500,6 +1494,31 @@ async fn save_image_attachments(
         });
     }
     Ok(saved)
+}
+
+fn trusted_session_attachment_base_dir(request: &ExternalCliRunRequest) -> Option<PathBuf> {
+    let value = request
+        .params
+        .get("attachmentBaseDir")
+        .or_else(|| request.params.get("attachment_base_dir"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let path = PathBuf::from(value);
+    let has_parent_dir = path
+        .components()
+        .any(|component| matches!(component, std::path::Component::ParentDir));
+    let sessions_root = bifrost_agent::config::agent_home_dir().join("sessions");
+    if path.is_absolute() && !has_parent_dir && path.starts_with(&sessions_root) {
+        Some(path)
+    } else {
+        tracing::warn!(
+            attachment_base_dir = %value,
+            sessions_root = %sessions_root.display(),
+            "ignoring untrusted external runner attachment base dir"
+        );
+        None
+    }
 }
 
 fn decode_image_data(data: &str) -> Result<Vec<u8>, String> {

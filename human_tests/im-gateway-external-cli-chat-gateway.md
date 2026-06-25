@@ -893,7 +893,7 @@
    ```bash
    curl -sS -N "http://127.0.0.1:<port>/_bifrost/api/im-gateway/chat/runner-calls/stream" \
      -H 'content-type: application/json' \
-     -d '{"callerSessionKey":"human-runner-call-parent","callerRunnerId":"Bifrost V4","callerRunnerAdapter":"builtin_agent","targetRunnerId":"mock-image","message":"","images":[{"mimeType":"image/png","data":"<base64>","name":"runner.png"}],"callerMessages":[]}'
+     -d '{"callerSessionKey":"human-runner-call-parent","callerRunnerId":"bifrost_agent","callerRunnerAdapter":"bifrost_agent","targetRunnerId":"mock-image","message":"","images":[{"mimeType":"image/png","data":"<base64>","name":"runner.png"}],"callerMessages":[]}'
    ```
 3. 读取返回的 `runId`、目标 child session 和 run artifacts。
 
@@ -903,6 +903,37 @@
 3. 目标 runner prompt 包含 `## Attached Images` 和绝对图片路径。
 4. 图片保存到目标 child session 独立的 `attachments/<session-file-stem>/<runId>/images/` 目录，不覆盖 TC-IEC-43 的普通 Web Chat 图片。
 5. 父会话可见用户触发了带图 runner-call，空文本时显示 `Attached 1 image` 语义。
+
+### TC-IEC-47: 外部 Runner 图片附件目录拒绝 API 调用方覆盖
+
+操作步骤：
+1. 启动临时 Bifrost 服务并配置 mock Codex/TraeX-compatible runner。
+2. 调用 `/_bifrost/api/im-gateway/chat/stream`，请求体在 `params` 中故意传入 `attachmentBaseDir` 指向服务数据目录外的可写路径：
+   ```bash
+   curl -sS -N "http://127.0.0.1:<port>/_bifrost/api/im-gateway/chat/stream" \
+     -H 'content-type: application/json' \
+     -d '{"runnerId":"mock-image","sessionKey":"human-malicious-attachment-base","message":"describe this","images":[{"mimeType":"image/png","data":"<base64>","name":"evil.png"}],"params":{"attachmentBaseDir":"/tmp/bifrost-evil-attachments"}}'
+   ```
+3. 读取 run `result.json.metadata["attachments.images"]` 和 prompt。
+4. 检查调用方指定的恶意目录是否被创建。
+
+预期结果：
+1. 恶意 `attachmentBaseDir` 不被使用，目录不会被创建。
+2. 图片落盘路径位于服务端 session attachment dir 的 `<run-id>/images/image-1.png` 下，或在无法取得 session recorder 时降级到 run dir 内部附件目录。
+3. prompt 中的 `## Attached Images` 只引用服务端生成的绝对路径。
+4. run metadata 与 session detail 中的附件审计路径一致。
+
+### TC-IEC-48: 内置 Bifrost Agent caller 的 runner-call 合并外部 run metadata
+
+操作步骤：
+1. 调用 `/_bifrost/api/im-gateway/chat/runner-calls/stream`，设置 `callerRunnerId:"bifrost_agent"`、`callerRunnerAdapter:"bifrost_agent"`，目标为 mock Codex/TraeX-compatible runner，并附带一张图片。
+2. 等待 runner-call 返回成功 run id。
+3. 调用 `/_bifrost/api/im-gateway/agent/sessions/<callerSessionKey>`。
+
+预期结果：
+1. 父 session detail 的 `metadata.runner.adapter`、`metadata.attachments.count`、`metadata.cli.*` 与目标外部 run 的 `result.json.metadata` 一致。
+2. 父 session 历史包含用户可见的 `Run with <target>` 触发消息。
+3. 不需要重新打开或重建父 session，也能通过 `latest_run_id` 合并目标 run metadata。
 
 ### TC-IEC-45: Feishu 图片消息进入 Codex/Trae 外部 Runner
 
@@ -939,6 +970,8 @@
 ## 最近执行记录
 
 - 2026-06-25：执行 TC-IEC-43/44/46 的自动真实服务回归。先编译当前源码 `cargo build --bin bifrost`，再运行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`。脚本启动临时服务端口 `53049`，配置 `adapter=codex` 的 mock runner 和 `adapter=traex` 的 mock runner；普通 Web Chat 第一轮 run `1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4` 图片路径为 `.../attachments/session-web-image-session-e2e-1782381743/1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4/images/image-1.png`，同 session 第二轮 run `1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270` 图片路径为 `.../1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270/images/image-1.png`，断言第一轮字节仍为 `hello-image`。TraeX-compatible run `1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f` 图片路径为 `.../attachments/session-web-image-session-traex-e2e-1782381743/1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f/images/image-1.png`；runner-call image-only run `1782381743490-e375c12b-f907-41ce-a5cf-8f66873787b9` 成功。脚本同时断言 Codex/TraeX `result.json.metadata` 和 `/_bifrost/api/im-gateway/agent/sessions/<sessionKey>` 均包含 `cli.executable`、`cli.args`、`cli.version`、`runner.adapter`、prompt/attachment/io/timing/tool/resume/usage 字段，`normalized_events.jsonl` 的 tool completed raw event 包含 `durationMs`。
+- 2026-06-25：执行 TC-IEC-47/48 的 review 回归。先运行 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`，再执行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`。脚本启动临时服务端口 `49407`，在普通 `/chat/stream` 请求中传入恶意 `params.attachmentBaseDir`，断言该目录未创建，实际图片仍保存到服务端 session attachment dir 的 run-id 子目录；同一 session 第二轮图片继续写入新的 run-id 子目录并保留第一轮字节。脚本同时用真实常量 `callerRunnerId:"bifrost_agent"`、`callerRunnerAdapter:"bifrost_agent"` 触发 image-only runner-call，断言父 session detail 通过 `latest_run_id` 合并目标 external run metadata，覆盖 review 指出的内置 caller 分支。整理脚本缩进后再次执行同一命令，临时服务端口 `53350`，run `1782386027499-12c1ee2d-020f-497f-8638-723b43e7b359`、`1782386027556-908f78a7-a6e8-4bd9-960d-26afc2244953`、`1782386027671-d1c2e8e2-1c86-42aa-8335-56ad58687410`、`1782386027801-2eae2e40-305a-432a-844c-550c20578907` 全部通过。
+- 2026-06-25：执行 TC-IEC-46/47/48 的 9900 当前编译版本真实回归。用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 ./target/debug/bifrost start -d -y --skip-cert-check -p 9900 --host 0.0.0.0 --no-system-proxy --no-tray --no-intercept` 重启服务，PID `14428`，`system_proxy.enabled=false`。先通过 `/_bifrost/api/im-gateway/chat/stream` 向真实 `TreeX` 发送 PNG，并在 `params.attachmentBaseDir` 注入 `/tmp/bifrost-evil-attachments-9900-1782385605835`，返回 run `1782385605858-41ea0904-9ddf-4c02-9f9f-84bb9583580f`，响应图片路径为 `~/.bifrost/agent/sessions/.../attachments/session-admin-chat-review-attachment-9900-1782385605835-1782385605/1782385605858-41ea0904-9ddf-4c02-9f9f-84bb9583580f/images/image-1.png`，恶意目录未创建；session detail metadata 显示 `runner.adapter=traex`、`runner.id=TreeX`、`attachments.count=1`、`attachments.totalBytes=68`、`cli.version=traecli 0.200.12`。随后通过 `callerRunnerId:"bifrost_agent"`、`callerRunnerAdapter:"bifrost_agent"` 的 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 触发真实 TreeX image runner-call，父 session detail 同样合并出 `traex` metadata。最后使用真实浏览器打开 Web UI，点击 `New Chat` 创建会话，在 composer 输入 `/` 选择 `TreeX (traex)`，粘贴 `web-ui-review.png`，发送 `Web UI immediate diagnostics review: return the attached image absolute path only.`；页面完成后立即点击 `Status`，不重开线程即可看到 `Runner diagnostics`、`traex · traecli 0.200.12`、`Attachments 1 · 68 bytes`、Run time `4.2s`、First event `667ms`。
 - 2026-06-25：执行 TC-IEC-46 的 9900 实服务 Web UI 回归。使用当前编译产物重启 `9900`，命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`，服务 PID `89308`。通过 `/_bifrost/api/im-gateway/chat/runner-calls/stream` 向真实 `TreeX` runner 发送 `latest-9900-api.png`，父会话 `admin-chat-web-ui-traex-metadata-1782384031439` 成功返回 run `1782384031460-4af24711-839e-4c9b-8246-f4047298e0e3`，图片保存到 `.../attachments/session-runner-call_admin-chat-web-ui-traex-metadata-1782384031439_TreeX-1782384031/1782384031460-4af24711-839e-4c9b-8246-f4047298e0e3/images/image-1.png`。随后用浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-web-ui-traex-metadata-1782384031439`，会话正文可见 `Run with TreeX` 和绝对图片路径；点击 `Status` 后确认 `Runner diagnostics` 展示 `traex · traecli 0.200.12`、`Attachments 1 · 79 bytes`、I/O、Tools、Run time `5.9s`、First event `1.9s`、Resume `false`。
 - 2026-06-25：执行 TC-IEC-43/44 的真实服务回归。临时服务端口 `18948`，数据目录 `/tmp/bifrost-runner-image-real2.LOZvE5`，启动命令使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`cargo run --bin bifrost -- start --host 127.0.0.1 -p 18948 --unsafe-ssl --skip-cert-check --no-system-proxy`。配置 mock runner `mock-image` 后，`/_bifrost/api/im-gateway/chat/stream` 带 `hello.png` 返回 run `1782377507822-55608d18-baf4-4923-beab-8a731a8f6dde`，`/_bifrost/api/im-gateway/chat/runner-calls/stream` image-only 返回 run `1782377530402-a904849d-f79b-4ce8-a362-ecf26fe4f6be`。两个 run 均返回 `BIFROST_IMAGE_PATH_OK`，prompt 均包含 `## Attached Images` 和 `/attachments/session-.../images/image-1.png`；普通 Web Chat 图片路径为 `.../attachments/session-web-image-session-1-1782377498/images/image-1.png`，字节为 `hello-image`；runner-call 图片路径为 `.../attachments/session-runner-call_human-runner-call-parent-real2_mock-image-1782377530/images/image-1.png`，字节为 `runner-call-image`，两者路径不同且互不覆盖。随后将该真实链路固化为自动 E2E，命令 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 通过，自动脚本再次验证普通 Web Chat run `1782377882467-f3974976-5584-4e96-a4a3-b155207e24d0` 与 runner-call run `1782377882519-f15c3c1a-90cc-40da-b21a-2e8b3756778c` 的图片路径位于不同 session 附件目录。TC-IEC-45 的 Feishu 真实发送本轮未执行，使用代码级 resolver/传递回归和 Web 真实链路覆盖修复主体，仍需后续接入真实 Feishu bot 做人工验收。
 - 2026-06-25：追加执行 TC-IEC-43 同 session 多轮图片覆盖复现。当前 9900 服务运行 `/Users/eden_studio/work/github/bifrost/target/debug/bifrost`，临时配置 mock runner 后，对同一个 `sessionKey=overwrite-live-same-session-1782380510` 连续调用两次 `/chat/stream`。修复前两次 run `1782380510858-b6eaf17e-04b4-4a2a-8e97-419a18819d93` 与 `1782380510912-6bc96012-83dd-4461-a528-9ffb145534c7` 的图片路径相同：`.../attachments/session-overwrite-live-same-session-1782380510-1782380510/images/image-1.png`，第二轮后第一轮路径文件字节从 `FIRST_IMAGE_BYTES_UNIQUE` 变成 `SECOND_IMAGE_BYTES_DIFFERENT`，确认 P1 覆盖问题真实存在。修复后自动 E2E `test_im_gateway_external_runner_image_input.sh` 必须验证同一 `sessionKey` 第二轮图片路径按 run id 分目录且第一轮字节保持 `hello-image`。

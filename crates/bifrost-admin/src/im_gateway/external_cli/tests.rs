@@ -1,5 +1,31 @@
 use super::*;
 
+struct EnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvGuard {
+    fn set(key: &'static str, value: &std::path::Path) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
 fn delayed_final_command(content: &str) -> (String, Vec<String>) {
     #[cfg(windows)]
     {
@@ -1270,9 +1296,10 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 #[tokio::test]
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let runtime = ExternalCliRuntime::new(temp_dir.path());
-    let session_attachment_dir = temp_dir
-        .path()
+    let _guard = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
+    let runs_root = temp_dir.path().join("runs");
+    let runtime = ExternalCliRuntime::new(&runs_root);
+    let session_attachment_dir = bifrost_agent::config::agent_home_dir()
         .join("sessions")
         .join("2026")
         .join("06")

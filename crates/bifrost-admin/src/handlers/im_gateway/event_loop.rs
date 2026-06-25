@@ -1717,16 +1717,6 @@ fn apply_external_cli_session_attachment_base_dir(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     recorder: Option<&ConversationRecorder>,
 ) {
-    if request
-        .params
-        .get("attachmentBaseDir")
-        .or_else(|| request.params.get("attachment_base_dir"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
-    {
-        return;
-    }
     let Some(recorder) = recorder else {
         return;
     };
@@ -1740,20 +1730,21 @@ fn apply_external_cli_session_attachment_base_dir(
         request.params = serde_json::json!({});
     }
     if let Some(params) = request.params.as_object_mut() {
-        params
-            .entry("attachmentBaseDir".to_string())
-            .or_insert_with(|| {
-                serde_json::Value::String(
-                    session_dir
-                        .join("attachments")
-                        .join(session_stem)
-                        .display()
-                        .to_string(),
-                )
-            });
-        params.entry("historyPath".to_string()).or_insert_with(|| {
-            serde_json::Value::String(recorder.file_path().display().to_string())
-        });
+        params.remove("attachment_base_dir");
+        params.insert(
+            "attachmentBaseDir".to_string(),
+            serde_json::Value::String(
+                session_dir
+                    .join("attachments")
+                    .join(session_stem)
+                    .display()
+                    .to_string(),
+            ),
+        );
+        params.insert(
+            "historyPath".to_string(),
+            serde_json::Value::String(recorder.file_path().display().to_string()),
+        );
     }
 }
 

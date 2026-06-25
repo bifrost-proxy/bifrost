@@ -222,6 +222,8 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 
 这样做避免把 base64 大图直接塞进外部 CLI prompt，也避免同一天多个 session 共享 `attachments/images` 或同一 session 多轮 `image-1.png` 造成覆盖。Codex 和 Trae 使用相同 bridge；adapter 后续如果原生支持图片参数，可以在 adapter capability 中声明并在 command builder 中升级为原生传参，但 session 附件落盘仍保留为审计和历史回放证据。
 
+安全边界：`attachmentBaseDir` 只能由服务端基于已验证的 session recorder 生成。来自 `/chat`、`/chat/stream`、`/runner-calls/stream` 或 IM 请求参数的 `attachmentBaseDir` / `attachment_base_dir` 必须被删除或覆盖，不允许调用方指定任意写入根目录。External CLI runtime 只信任位于 `agent_home_dir()/sessions` 下的绝对附件目录；不满足该约束时降级写入 run dir 内部附件目录。
+
 ### 5.5 Codex/TraeX Runner 诊断信息采集
 
 外部 runner 的状态展示应尽量使用 Bifrost 托管层能稳定观测到的数据，不猜测 CLI 内部未公开 telemetry。每个 run 完成后，runtime 将以下信息写入 `result.json.metadata`，并通过 `SessionDetail.metadata` 暴露给 Web UI：
@@ -234,6 +236,10 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 - 会话连续性：是否请求 resume、请求的 thread id，以及 Codex/TraeX JSONL 中解析到的 `threadId`。
 
 Web UI 的 Agent Chat 状态弹窗在已有 Context 卡片中展示紧凑的 `Runner diagnostics` 摘要。该摘要只展示真实 metadata 中存在的值；context window、剩余 context、自动压缩节省 token、billing token 等 Codex/TraeX CLI 未稳定输出的字段仍不得伪造，缺失时继续显示 `-` 或既有 N/A 行为。
+
+Web slash runner-call 完成后必须立即刷新当前 session detail，而不是只刷新 `/sessions/all` 列表。`/sessions/all` 只提供列表摘要，不携带 external runner metadata；只有 `/sessions/:key` 能把 `result.json.metadata` 合并为 `SessionDetail.metadata`，从而让状态弹窗在不重新打开线程的情况下展示最新 diagnostics。
+
+内置 Bifrost Agent 作为 caller 触发外部 runner-call 时，父 session key 使用真实 adapter 常量 `bifrost_agent`。该分支也必须写入 `latest_run_id` 和可见 runner-call 消息，后续 session detail 才能把目标外部 run metadata 合并回父会话。
 
 ### 6. 能力声明与降级
 

@@ -93,6 +93,7 @@ base_url = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/chat"
 agent_base_url = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/agent"
 test_path = pathlib.Path(test_dir)
 prompt_capture = test_path / "captured-prompts.txt"
+evil_attachment_dir = test_path / "evil-attachments"
 script = (
     'input="$(cat)"; '
     'printf "%s\\n---PROMPT-END---\\n" "$input" >> "$BIFROST_CAPTURE_PROMPTS"; '
@@ -281,6 +282,7 @@ chat_events = stream(
         "providerId": "web-e2e",
         "runnerId": runner_id,
         "sessionKey": chat_session_key,
+        "params": {"attachmentBaseDir": str(evil_attachment_dir)},
         "images": [
             {
                 "mimeType": "image/png",
@@ -292,6 +294,7 @@ chat_events = stream(
 )
 chat_finished = final_event(chat_events, "run_finished")
 chat_path = assert_run_image(chat_finished["runId"], "hello.png", b"hello-image")
+assert not evil_attachment_dir.exists(), evil_attachment_dir
 assert_runner_metadata(chat_finished["runId"], "codex")
 
 second_chat_events = stream(
@@ -346,8 +349,8 @@ runner_events = stream(
     "/runner-calls/stream",
     {
         "callerSessionKey": caller_session_key,
-        "callerRunnerId": "Bifrost V4",
-        "callerRunnerAdapter": "builtin_agent",
+        "callerRunnerId": "bifrost_agent",
+        "callerRunnerAdapter": "bifrost_agent",
         "targetRunnerId": runner_id,
         "message": "",
         "images": [
@@ -362,6 +365,8 @@ runner_events = stream(
 )
 runner_finished = final_event(runner_events, "runner_call_finished")
 runner_path = assert_run_image(runner_finished["runId"], "runner.png", b"runner-call-image")
+runner_metadata = assert_runner_metadata(runner_finished["runId"], "codex")
+assert_session_detail_metadata(caller_session_key, runner_metadata)
 
 assert chat_path != runner_path, (chat_path, runner_path)
 assert chat_path != traex_path, (chat_path, traex_path)

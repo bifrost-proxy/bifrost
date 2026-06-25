@@ -74,9 +74,7 @@ fn set_request_string_param(
         request.params = serde_json::json!({});
     }
     if let Some(params) = request.params.as_object_mut() {
-        params
-            .entry(key.to_string())
-            .or_insert_with(|| serde_json::Value::String(value));
+        params.insert(key.to_string(), serde_json::Value::String(value));
     }
 }
 
@@ -97,22 +95,14 @@ fn prepare_external_cli_session_attachment_params(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
 ) {
-    if request
-        .params
-        .get("attachmentBaseDir")
-        .or_else(|| request.params.get("attachment_base_dir"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::trim)
-        .is_some_and(|value| !value.is_empty())
-    {
-        return;
+    if let Some(params) = request.params.as_object_mut() {
+        params.remove("attachmentBaseDir");
+        params.remove("attachment_base_dir");
     }
-    let history_path = request_history_path(request)
-        .or_else(|| persisted_history_path_for_request(request, runner_id))
-        .or_else(|| {
-            external_cli_timeline_recorder(request, runner_id)
-                .map(|recorder| recorder.file_path().display().to_string())
-        });
+    let history_path = persisted_history_path_for_request(request, runner_id).or_else(|| {
+        external_cli_timeline_recorder(request, runner_id)
+            .map(|recorder| recorder.file_path().display().to_string())
+    });
     let Some(history_path) = history_path else {
         return;
     };
@@ -1756,6 +1746,32 @@ fn remember_runner_call_result_for_caller(
                 session_key = %source_session_key,
                 error = %error,
                 "failed to persist imported runner context for busy built-in caller"
+            );
+        }
+        if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+            source_session_key,
+            caller_adapter,
+            None,
+            |state| {
+                state.last_response = Some(visible.clone());
+                state.status = Some("succeeded".to_string());
+                if let Some(run_id) = latest_run_id {
+                    state.latest_run_id = Some(run_id.to_string());
+                }
+                update_session_runner_call_messages(
+                    &mut state.messages,
+                    &visible_user,
+                    &running_message,
+                    &visible,
+                    started_at / 1000,
+                    finished_at / 1000,
+                );
+            },
+        ) {
+            tracing::warn!(
+                session_key = %source_session_key,
+                error = %error,
+                "failed to persist built-in caller runner-call result state"
             );
         }
         return;
@@ -3631,6 +3647,50 @@ mod tests {
     }
 
     #[test]
+    fn builtin_caller_runner_call_records_latest_external_run_id() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let manager = std::sync::Arc::new(bifrost_agent::AgentSessionManager::new(60));
+        let caller_scope = (
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+            None,
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER.to_string(),
+        );
+
+        remember_runner_call_result_for_caller(
+            &manager,
+            &caller_scope,
+            "builtin-source-session",
+            "call-visible-built-in",
+            "TreeX",
+            "traex",
+            Some("external-run-visible-built-in"),
+            "inspect attached image",
+            "done",
+            1_000,
+            2_000,
+        );
+
+        let finished = crate::im_gateway::session_state::load_session_state(
+            "builtin-source-session",
+            crate::im_gateway::session_state::BUILTIN_AGENT_ADAPTER,
+            None,
+        )
+        .expect("finished built-in caller state");
+        assert_eq!(
+            finished.latest_run_id.as_deref(),
+            Some("external-run-visible-built-in")
+        );
+        assert_eq!(finished.status.as_deref(), Some("succeeded"));
+        assert!(finished.messages.iter().any(|message| {
+            message.role == "assistant"
+                && message
+                    .content
+                    .contains("Runner `TreeX` completed this call.")
+        }));
+    }
+
+    #[test]
     fn runner_call_visible_messages_are_recorded_in_parent_history() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
@@ -3968,6 +4028,30 @@ mod coverage_boost {
                 .display()
                 .to_string()
         );
+    }
+
+    #[test]
+    fn prepare_attachment_params_overwrites_untrusted_client_base_dir() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+        let mut request = sample_run_request();
+        request.params = serde_json::json!({
+            "historyPath": "/tmp/attacker-history.jsonl",
+            "attachmentBaseDir": "/tmp/attacker-attachments",
+            "attachment_base_dir": "/tmp/attacker-snake-attachments"
+        });
+
+        prepare_external_cli_session_attachment_params(&mut request, "web");
+
+        let params = request.params.as_object().expect("params object");
+        let attachment_base_dir = params
+            .get("attachmentBaseDir")
+            .and_then(serde_json::Value::as_str)
+            .expect("attachment base dir");
+        assert!(!params.contains_key("attachment_base_dir"));
+        assert!(!attachment_base_dir.starts_with("/tmp/attacker"));
+        assert!(attachment_base_dir.contains("/agent/sessions/"));
+        assert!(attachment_base_dir.contains("/attachments/"));
     }
 
     #[test]
