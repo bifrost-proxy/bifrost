@@ -4050,8 +4050,9 @@ mod coverage_boost {
             .expect("attachment base dir");
         assert!(!params.contains_key("attachment_base_dir"));
         assert!(!attachment_base_dir.starts_with("/tmp/attacker"));
-        assert!(attachment_base_dir.contains("/agent/sessions/"));
-        assert!(attachment_base_dir.contains("/attachments/"));
+        let normalized_attachment_base_dir = attachment_base_dir.replace('\\', "/");
+        assert!(normalized_attachment_base_dir.contains("/agent/sessions/"));
+        assert!(normalized_attachment_base_dir.contains("/attachments/"));
     }
 
     #[test]
