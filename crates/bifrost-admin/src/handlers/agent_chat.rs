@@ -313,6 +313,7 @@ impl AgentStreamSessionGuard {
             &self.session_key,
             worker_pid,
             stop_tx,
+            None,
         );
         self.worker_registered = true;
     }

@@ -25,7 +25,7 @@ unset BIFROST_DETACHED_DAEMON_CHILD
 #   GET /_bifrost/api/system/upgrade/progress  全程可读，最终 phase=completed
 #
 # 与 test_upgrade_local_restart_e2e.sh 的区别：
-#   那条测试走 CLI `bifrost upgrade --restart`；本测试走 Admin HTTP 端点，覆盖
+#   那条测试走 CLI `bifrost upgrade` 默认自动重启；本测试走 Admin HTTP 端点，覆盖
 #   本次新增的 admin 路由 + self-update 子进程派发 + 跨重启的进度文件通道。
 #
 # 真实性保证：

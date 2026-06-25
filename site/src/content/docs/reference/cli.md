@@ -644,11 +644,9 @@ bifrost search --interactive
 ```bash
 bifrost version-check
 bifrost upgrade
-bifrost upgrade -y
-bifrost upgrade -y --restart
 ```
 
-`upgrade --restart` 会在升级后停止并重新拉起当前运行中的代理。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身；如果传入 `--restart`，替换完成后会用新的 exe 启动 daemon。
+`upgrade` 默认无交互执行升级；如果检测到当前有代理在运行，会在升级成功后停止并重新拉起代理，让运行中的服务切换到新二进制。Windows 手动安装路径下，CLI 会先 stage 新的 `bifrost.exe`，等待当前 upgrade 进程退出后再替换自身，并用新的 exe 启动 daemon。
 
 ### 同步（sync）
 

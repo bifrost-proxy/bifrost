@@ -913,6 +913,7 @@ fn builtin_runner_call_stream_response(
             &input.child_session_key,
             worker_pid,
             stop_tx,
+            None,
         );
 
         let run_call_id = input.call_id.clone();

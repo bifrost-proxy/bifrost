@@ -20,7 +20,7 @@ BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 NC='\033[0m'
 
-BIFROST_BIN="${PROJECT_DIR}/target/release/bifrost"
+: "${BIFROST_BIN:=${PROJECT_DIR}/target/release/bifrost}"
 if [[ ! -x "$BIFROST_BIN" && -f "${BIFROST_BIN}.exe" ]]; then
     BIFROST_BIN="${BIFROST_BIN}.exe"
 fi
@@ -111,7 +111,7 @@ test_upgrade_help() {
         checks=$((checks + 1))
     fi
 
-    if echo "$result" | grep -q "\-\-yes\|\-y"; then
+    if ! echo "$result" | grep -q "\-\-yes\|\-y"; then
         checks=$((checks + 1))
     fi
 
@@ -119,12 +119,12 @@ test_upgrade_help() {
         checks=$((checks + 1))
     fi
 
-    if echo "$result" | grep -q "\-\-restart"; then
+    if ! echo "$result" | grep -q "\-\-restart"; then
         checks=$((checks + 1))
     fi
 
     if [[ $checks -eq 4 ]]; then
-        pass "upgrade --help 显示正确的帮助信息 (包含 --restart)"
+        pass "upgrade --help 显示正确的帮助信息且不包含 -y/--yes 或 --restart"
     else
         fail "upgrade --help 信息不完整 ($checks/4): $result"
     fi
@@ -136,7 +136,7 @@ test_upgrade_check_output() {
     cd "$PROJECT_DIR"
 
     local result
-    result=$(echo "n" | "$BIFROST_BIN" upgrade 2>&1 || true)
+    result=$("$BIFROST_BIN" upgrade 2>&1 || true)
 
     if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check"; then
         pass "upgrade 命令正确检查更新"
@@ -145,48 +145,18 @@ test_upgrade_check_output() {
     fi
 }
 
-test_upgrade_yes_flag_recognized() {
-    header "测试 upgrade -y 参数被识别"
-
-    cd "$PROJECT_DIR"
-
-    local result
-    result=$("$BIFROST_BIN" upgrade -y 2>&1 || true)
-
-    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check\|upgrade completed"; then
-        pass "upgrade -y 参数被正确识别"
-    else
-        fail "upgrade -y 参数输出异常: $result"
-    fi
-}
-
-test_upgrade_restart_flag_recognized() {
-    header "测试 upgrade --restart 参数被识别"
+test_upgrade_restart_flag_removed() {
+    header "测试 upgrade --restart 参数已移除"
 
     cd "$PROJECT_DIR"
 
     local result
     result=$("$BIFROST_BIN" upgrade --restart 2>&1 || true)
 
-    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check\|upgrade completed"; then
-        pass "upgrade --restart 参数被正确识别"
+    if echo "$result" | grep -qi "unexpected argument.*--restart\|unrecognized option.*--restart\|error:.*--restart"; then
+        pass "upgrade --restart 参数已被拒绝"
     else
-        fail "upgrade --restart 参数输出异常: $result"
-    fi
-}
-
-test_upgrade_yes_and_restart_combined() {
-    header "测试 upgrade -y --restart 参数组合"
-
-    cd "$PROJECT_DIR"
-
-    local result
-    result=$("$BIFROST_BIN" upgrade -y --restart 2>&1 || true)
-
-    if echo "$result" | grep -qi "checking for updates\|latest version\|already on the latest\|could not check\|upgrade completed"; then
-        pass "upgrade -y --restart 参数组合被正确识别"
-    else
-        fail "upgrade -y --restart 参数组合输出异常: $result"
+        fail "upgrade --restart 应被拒绝: $result"
     fi
 }
 
@@ -413,9 +383,7 @@ main() {
 
     test_upgrade_help
     test_upgrade_check_output
-    test_upgrade_yes_flag_recognized
-    test_upgrade_restart_flag_recognized
-    test_upgrade_yes_and_restart_combined
+    test_upgrade_restart_flag_removed
     test_upgrade_invalid_flag
 
     test_version_cache_creation

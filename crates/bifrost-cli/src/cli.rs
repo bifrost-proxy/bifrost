@@ -352,12 +352,16 @@ pub enum Commands {
         #[command(subcommand)]
         action: ScriptCommands,
     },
-    #[command(about = "Upgrade bifrost to the latest version")]
+    #[command(
+        about = "Upgrade bifrost to the latest version",
+        long_about = "Upgrade bifrost to the latest version.\n\n\
+Runs non-interactively by default. When a running Bifrost proxy is detected \
+and a new binary is installed, the proxy is automatically restarted with its \
+previous runtime settings."
+    )]
     Upgrade {
-        #[arg(short = 'y', long, help = "Skip confirmation prompt")]
+        #[arg(short = 'y', long, hide = true)]
         yes: bool,
-        #[arg(long, help = "Automatically restart the running proxy after upgrade")]
-        restart: bool,
     },
     #[command(
         hide = true,

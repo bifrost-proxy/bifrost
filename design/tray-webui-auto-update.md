@@ -81,9 +81,9 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 
 升级引擎已有的下载/安装/重启逻辑保持不变，仅新增一条“进度上报”旁路，**默认关闭**，避免影响普通 CLI 交互体验：
 
-- `handle_upgrade` 现有签名 `(force, restart)` 扩展为内部统一入口，新增 `progress_sink: Option<ProgressSink>`。对外保留：
-  - `pub fn handle_upgrade(force, restart)`：CLI 交互路径，`progress_sink = None`，行为完全不变。
-  - `pub fn handle_upgrade_background(target_version, source)`：后台路径，构造一个写文件的 `ProgressSink`，等价于 `force = true, restart = true`，并在各阶段写 `UpgradeProgress`。
+- `handle_upgrade` 统一为默认非交互入口，并在成功安装新二进制后自动重启运行中的代理。对外保留：
+  - `pub fn handle_upgrade(yes)`：CLI 路径默认无交互；`yes` 不再控制二次确认。
+  - `pub fn handle_upgrade_background(target_version, source)`：后台路径，构造一个写文件的 `ProgressSink`，等价于 `bifrost upgrade`，并在各阶段写 `UpgradeProgress`。
 - `ProgressSink` 是对 `data_dir` 的轻封装：
   - 阶段切换时写 `Checking/Downloading/Installing/Restarting/Completed/Failed`。
   - 下载阶段：在 `download_file_once_with_progress` 的渲染节流点（已有 250ms 节流）回调 `percent`，文案复用 `download_progress_line`。
@@ -101,7 +101,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
   ```
   - 隐藏命令（`hide = true`），不污染用户可见帮助，仅供托盘/admin 内部 spawn。
   - `main.rs` 路由到 `handle_upgrade_background(target, source)`。
-- 该命令等价于 `bifrost upgrade --yes --restart`，但全程写进度文件，无交互、无 stdin 阻塞。
+- 该命令等价于无交互的 `bifrost upgrade` 默认自重启路径，但全程写进度文件，无交互、无 stdin 阻塞。
 
 ### 4. 托盘后台更新入口（bifrost-cli/tray）
 
@@ -218,7 +218,7 @@ pub fn is_stale(progress: &UpgradeProgress, max_age_secs: i64) -> bool;
 - 点“稍后提示”后本会话不再自动弹窗。
 - 点“立即更新”展示下载进度 + 安装进度；安装后代理自动重启；重启后 Web UI 自动刷新一次且只刷新一次。
 - WebView 升级 active 状态下若 `GET /upgrade/progress` 返回 `idle`，弹窗不能卡在 Working；无连接断开时强制刷新 version-check，有连接断开时只 reload 一次。
-- 手动 `bifrost upgrade -y --restart` 与托盘/Admin 后台升级都在新二进制安装成功后自动覆盖安装 `bifrost` 和 `bifrost-remote` skills；测试必须使用临时 HOME/USERPROFILE、`BIFROST_INSTALL_SKILL_SOURCE=embedded`、`BIFROST_INSTALL_SKILL_DIR`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免污染真实 AI tool skills 目录、启动 Tray 或打开登录页。
+- 手动 `bifrost upgrade` 与托盘/Admin 后台升级都在新二进制安装成功后自动覆盖安装 `bifrost` 和 `bifrost-remote` skills，并在检测到运行中代理时自动重启；测试必须使用临时 HOME/USERPROFILE、`BIFROST_INSTALL_SKILL_SOURCE=embedded`、`BIFROST_INSTALL_SKILL_DIR`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免污染真实 AI tool skills 目录、启动 Tray 或打开登录页。
 - 升级失败（断网/坏归档）时托盘与 Web UI 都给出失败提示并可重试。
 - 双主题（Light/Dark）下弹窗与进度条样式正确。
 

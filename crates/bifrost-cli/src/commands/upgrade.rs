@@ -582,18 +582,6 @@ fn unique_pending_binary_path(target_path: &Path) -> PathBuf {
     target_path.with_file_name(format!(".{}.pending.{}", file_name, std::process::id()))
 }
 
-fn prompt_confirm(message: &str) -> bool {
-    print!("{} [y/N]: ", message);
-    io::stdout().flush().ok();
-
-    let mut input = String::new();
-    if io::stdin().read_line(&mut input).is_err() {
-        return false;
-    }
-
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
-}
-
 fn github_mirror_bases() -> Vec<String> {
     let preferred = env::var("BIFROST_GITHUB_MIRROR")
         .ok()
@@ -1403,18 +1391,14 @@ fn upgrade_manual(
 }
 
 pub fn handle_background_upgrade() -> Result<(), BifrostError> {
-    handle_upgrade_inner(true, true, true)
+    handle_upgrade_inner(true)
 }
 
-pub fn handle_upgrade(force: bool, restart: bool) -> Result<(), BifrostError> {
-    handle_upgrade_inner(force, restart, false)
+pub fn handle_upgrade(_yes: bool) -> Result<(), BifrostError> {
+    handle_upgrade_inner(false)
 }
 
-fn handle_upgrade_inner(
-    force: bool,
-    restart: bool,
-    restart_if_already_latest: bool,
-) -> Result<(), BifrostError> {
+fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostError> {
     let current_version = env!("CARGO_PKG_VERSION");
 
     println!(
@@ -1486,7 +1470,7 @@ fn handle_upgrade_inner(
             .bright_green()
             .bold()
         );
-        if should_restart_when_already_latest(restart, restart_if_already_latest) {
+        if should_restart_when_already_latest(restart_if_already_latest) {
             let install_method = detect_install_method();
             let restart_executable = restart_executable_for_install_method(&install_method)?;
             println!(
@@ -1494,7 +1478,7 @@ fn handle_upgrade_inner(
                 "  On-disk binary is current; restarting any running proxy so it adopts this version."
                     .bright_cyan()
             );
-            maybe_restart_running_proxy(true, &restart_executable)?;
+            maybe_restart_running_proxy(&restart_executable)?;
         }
         return Ok(());
     }
@@ -1507,13 +1491,6 @@ fn handle_upgrade_inner(
         "Install method:".dimmed(),
         format!("{}", install_method).bright_white()
     );
-    println!();
-
-    if !force && !prompt_confirm("Do you want to upgrade now?") {
-        println!("{}", "Upgrade cancelled.".dimmed());
-        return Ok(());
-    }
-
     println!();
 
     let restart_executable = restart_executable_for_install_method(&install_method)?;
@@ -1548,25 +1525,22 @@ fn handle_upgrade_inner(
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
             install_skills_after_upgrade_best_effort(&restart_executable);
-            maybe_restart_running_proxy(restart, &restart_executable)?
+            maybe_restart_running_proxy(&restart_executable)?
         }
         #[cfg(windows)]
         UpgradeInstallOutcome::DeferredWindows(deferred_install) => {
-            maybe_restart_running_proxy_after_windows_deferred_install(restart, deferred_install)?
+            maybe_restart_running_proxy_after_windows_deferred_install(deferred_install)?
         }
     }
 
     Ok(())
 }
 
-fn should_restart_when_already_latest(restart: bool, restart_if_already_latest: bool) -> bool {
-    restart && restart_if_already_latest
+fn should_restart_when_already_latest(restart_if_already_latest: bool) -> bool {
+    restart_if_already_latest
 }
 
-fn maybe_restart_running_proxy(
-    auto_restart: bool,
-    restart_executable: &Path,
-) -> Result<(), BifrostError> {
+fn maybe_restart_running_proxy(restart_executable: &Path) -> Result<(), BifrostError> {
     let pid = match read_pid() {
         Some(pid) if is_process_running(pid) => pid,
         _ => return Ok(()),
@@ -1580,32 +1554,7 @@ fn maybe_restart_running_proxy(
             .bold()
     );
 
-    let should_restart = if auto_restart {
-        println!(
-            "{}",
-            "  Auto-restarting due to --restart flag...".bright_cyan()
-        );
-        true
-    } else {
-        println!(
-            "{}",
-            "  The proxy needs to be restarted to use the new version.".bright_yellow()
-        );
-        println!(
-            "{}",
-            "  Tip: use `bifrost upgrade --restart` to restart automatically next time.".dimmed()
-        );
-        println!();
-        prompt_confirm("  Restart the proxy now?")
-    };
-
-    if !should_restart {
-        println!(
-            "{}",
-            "  You can restart manually with: bifrost stop && bifrost start -d".dimmed()
-        );
-        return Ok(());
-    }
+    println!("{}", "  Auto-restarting the running proxy...".bright_cyan());
 
     let runtime_info = read_runtime_info();
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
@@ -1673,7 +1622,6 @@ fn maybe_restart_running_proxy(
 
 #[cfg(windows)]
 fn maybe_restart_running_proxy_after_windows_deferred_install(
-    auto_restart: bool,
     deferred_install: WindowsDeferredInstall,
 ) -> Result<(), BifrostError> {
     let data_dir = get_bifrost_dir()?;
@@ -1702,35 +1650,10 @@ fn maybe_restart_running_proxy_after_windows_deferred_install(
             .bold()
     );
 
-    let should_restart = if auto_restart {
-        println!(
-            "{}",
-            "  Auto-restarting due to --restart flag...".bright_cyan()
-        );
-        true
-    } else {
-        println!(
-            "{}",
-            "  Windows needs the running proxy to stop before replacing bifrost.exe."
-                .bright_yellow()
-        );
-        println!(
-            "{}",
-            "  Tip: use `bifrost upgrade --restart` to replace and restart automatically.".dimmed()
-        );
-        println!();
-        prompt_confirm("  Restart the proxy now?")
-    };
-
-    if !should_restart {
-        let _ = fs::remove_file(&deferred_install.staged_binary);
-        println!(
-            "{}",
-            "  Upgrade replacement was not applied because the running proxy was kept alive."
-                .dimmed()
-        );
-        return Ok(());
-    }
+    println!(
+        "{}",
+        "  Auto-restarting the running proxy so Windows can replace bifrost.exe...".bright_cyan()
+    );
 
     let runtime_info = read_runtime_info();
     let system_proxy_snapshot = capture_runtime_system_proxy_snapshot(runtime_info.as_ref());
@@ -2143,30 +2066,23 @@ mod tests {
     }
 
     #[test]
-    fn test_cli_upgrade_restart_flag_parsed() {
-        use crate::cli::{Cli, Commands};
+    fn test_cli_upgrade_rejects_restart_flag() {
+        use crate::cli::Cli;
         use clap::Parser;
 
-        let cli = Cli::parse_from(["bifrost", "upgrade", "--restart"]);
-        match cli.command {
-            Some(Commands::Upgrade { yes, restart }) => {
-                assert!(!yes);
-                assert!(restart);
-            }
-            _ => panic!("Expected Upgrade command"),
-        }
+        let result = Cli::try_parse_from(["bifrost", "upgrade", "--restart"]);
+        assert!(result.is_err(), "--restart should be removed from upgrade");
     }
 
     #[test]
-    fn test_cli_upgrade_yes_and_restart_flags() {
+    fn test_cli_upgrade_hidden_yes_flag_is_accepted() {
         use crate::cli::{Cli, Commands};
         use clap::Parser;
 
-        let cli = Cli::parse_from(["bifrost", "upgrade", "-y", "--restart"]);
+        let cli = Cli::parse_from(["bifrost", "upgrade", "-y"]);
         match cli.command {
-            Some(Commands::Upgrade { yes, restart }) => {
+            Some(Commands::Upgrade { yes }) => {
                 assert!(yes);
-                assert!(restart);
             }
             _ => panic!("Expected Upgrade command"),
         }
@@ -2179,9 +2095,8 @@ mod tests {
 
         let cli = Cli::parse_from(["bifrost", "upgrade"]);
         match cli.command {
-            Some(Commands::Upgrade { yes, restart }) => {
+            Some(Commands::Upgrade { yes }) => {
                 assert!(!yes);
-                assert!(!restart);
             }
             _ => panic!("Expected Upgrade command"),
         }
@@ -2189,10 +2104,8 @@ mod tests {
 
     #[test]
     fn background_upgrade_restarts_when_disk_binary_is_already_latest() {
-        assert!(!should_restart_when_already_latest(false, false));
-        assert!(!should_restart_when_already_latest(true, false));
-        assert!(!should_restart_when_already_latest(false, true));
-        assert!(should_restart_when_already_latest(true, true));
+        assert!(!should_restart_when_already_latest(false));
+        assert!(should_restart_when_already_latest(true));
     }
 
     #[test]

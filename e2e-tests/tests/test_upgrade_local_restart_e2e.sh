@@ -138,9 +138,22 @@ find_old_bifrost_bin() {
         return 0
     fi
 
+    local workspace_version
+    workspace_version="$(grep -m1 '^version' "${PROJECT_DIR}/Cargo.toml" 2>/dev/null \
+        | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+)".*/\1/')"
     for candidate in /Users/eden/.cargo/bin/bifrost "$(command -v bifrost 2>/dev/null || true)"; do
-        if [[ -n "$candidate" && -x "$candidate" ]] \
-            && "$candidate" --version 2>/dev/null | grep -q '0\.0\.99'; then
+        if [[ -z "$candidate" || ! -x "$candidate" ]]; then
+            continue
+        fi
+        local candidate_version
+        candidate_version="$("$candidate" --version 2>/dev/null \
+            | sed -nE 's/^bifrost ([0-9]+\.[0-9]+\.[0-9]+).*/\1/p' \
+            | head -n1)"
+        if [[ -z "$candidate_version" || -z "$workspace_version" ]]; then
+            continue
+        fi
+        if [[ "$candidate_version" != "$workspace_version" ]] \
+            && [[ "$(printf '%s\n%s\n' "$candidate_version" "$workspace_version" | sort -V | head -n1)" == "$candidate_version" ]]; then
             echo "$candidate"
             return 0
         fi
@@ -256,9 +269,9 @@ test_local_upgrade_restarts_old_daemon_with_new_binary() {
         _log_pass "start binary selected: installed test binary $start_bin"
     else
         if ! start_bin="$(find_old_bifrost_bin)"; then
-            _log_fail "old bifrost binary available" "0.0.99 binary via OLD_BIFROST_BIN or ~/.cargo/bin/bifrost" "not found"
-            return 1
-        fi
+        _log_fail "old bifrost binary available" "older bifrost binary via OLD_BIFROST_BIN or ~/.cargo/bin/bifrost" "not found"
+        return 1
+    fi
         _log_pass "old binary selected: $start_bin"
     fi
 
@@ -339,7 +352,7 @@ PY
     BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
     BIFROST_UPGRADE_TEST_LATEST_VERSION="$TEST_VERSION" \
     BIFROST_UPGRADE_TEST_ARCHIVE="$(bifrost_process_path "$archive_path")" \
-    "$INSTALL_BIN" upgrade -y --restart >"$upgrade_log" 2>&1
+    "$INSTALL_BIN" upgrade >"$upgrade_log" 2>&1
     local upgrade_status=$?
     if [[ $upgrade_status -ne 0 ]]; then
         _log_fail "upgrade command exits successfully" "0" "$(cat "$upgrade_log")"

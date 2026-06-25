@@ -1160,7 +1160,12 @@ pub(super) async fn handle_agent(
             crate::im_gateway::agent_worker::AgentWorkerStopRequest,
         >();
         let worker_pid = worker.child_id().unwrap_or(0);
-        crate::im_gateway::agent_worker::register_active_worker(&session_key, worker_pid, stop_tx);
+        crate::im_gateway::agent_worker::register_active_worker(
+            &session_key,
+            worker_pid,
+            stop_tx,
+            None,
+        );
         let mut stop_ack = None;
         let result = loop {
             tokio::select! {

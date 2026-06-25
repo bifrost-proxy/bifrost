@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 
 const WORKER_PROTOCOL_VERSION: u32 = 1;
 const WORKER_STOP_GRACE_MS: u64 = 1500;
+const WORKER_OUTPUT_CLOSED: &str = "__bifrost_agent_worker_output_closed__";
 
 static ACTIVE_WORKERS: once_cell::sync::Lazy<dashmap::DashMap<String, AgentWorkerStopHandle>> =
     once_cell::sync::Lazy::new(dashmap::DashMap::new);
@@ -19,15 +20,21 @@ static ACTIVE_WORKERS: once_cell::sync::Lazy<dashmap::DashMap<String, AgentWorke
 struct AgentWorkerStopHandle {
     pid: u32,
     stop_tx: mpsc::UnboundedSender<AgentWorkerStopRequest>,
+    final_event_tx: Option<mpsc::UnboundedSender<bifrost_agent::AgentTurnProgressEvent>>,
 }
 
 pub struct AgentWorkerStopRequest {
     ack_tx: oneshot::Sender<()>,
+    reason: Option<String>,
 }
 
 impl AgentWorkerStopRequest {
     pub fn ack(self) {
         let _ = self.ack_tx.send(());
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
     }
 }
 
@@ -269,10 +276,15 @@ pub fn register_active_worker(
     session_key: &str,
     pid: u32,
     stop_tx: mpsc::UnboundedSender<AgentWorkerStopRequest>,
+    final_event_tx: Option<mpsc::UnboundedSender<bifrost_agent::AgentTurnProgressEvent>>,
 ) {
     ACTIVE_WORKERS.insert(
         session_key.to_string(),
-        AgentWorkerStopHandle { pid, stop_tx },
+        AgentWorkerStopHandle {
+            pid,
+            stop_tx,
+            final_event_tx,
+        },
     );
 }
 
@@ -294,6 +306,7 @@ fn drain_active_workers() -> Vec<(String, AgentWorkerStopHandle)> {
 async fn stop_active_worker_entries(
     entries: Vec<(String, AgentWorkerStopHandle)>,
     grace: Duration,
+    reason: Option<&str>,
 ) {
     if entries.is_empty() {
         return;
@@ -301,10 +314,18 @@ async fn stop_active_worker_entries(
     let mut signaled_entries = Vec::new();
     for (session_key, handle) in entries {
         tracing::info!(session_key = %session_key, pid = handle.pid, "agent worker: stopping active worker");
+        if let (Some(reason), Some(final_event_tx)) = (reason, handle.final_event_tx.as_ref()) {
+            let _ = final_event_tx.send(bifrost_agent::AgentTurnProgressEvent::TurnFailed {
+                error: reason.to_string(),
+            });
+        }
         let (ack_tx, ack_rx) = oneshot::channel();
         if handle
             .stop_tx
-            .send(AgentWorkerStopRequest { ack_tx })
+            .send(AgentWorkerStopRequest {
+                ack_tx,
+                reason: reason.map(str::to_string),
+            })
             .is_ok()
         {
             signaled_entries.push((session_key, handle.pid, ack_rx));
@@ -364,6 +385,7 @@ pub async fn kill_all_active_workers() {
     stop_active_worker_entries(
         drain_active_workers(),
         Duration::from_millis(WORKER_STOP_GRACE_MS),
+        Some("Bifrost 正在重启或关闭，当前 Agent worker 任务已中断。请在服务恢复后重新发起任务。"),
     )
     .await;
 }
@@ -375,7 +397,10 @@ pub async fn request_session_stop(session_key: &str) -> bool {
     let (ack_tx, mut ack_rx) = oneshot::channel();
     if handle
         .stop_tx
-        .send(AgentWorkerStopRequest { ack_tx })
+        .send(AgentWorkerStopRequest {
+            ack_tx,
+            reason: Some("已收到 /stop，Agent worker 子进程已停止。".to_string()),
+        })
         .is_err()
     {
         tracing::warn!(
@@ -639,7 +664,13 @@ pub fn run_worker_stdio() -> Result<(), String> {
         .thread_name("bifrost-agent-worker")
         .build()
         .map_err(|error| format!("build agent worker runtime failed: {error}"))?;
-    runtime.block_on(run_worker_stdio_async())
+    match runtime.block_on(run_worker_stdio_async()) {
+        Err(error) if error == WORKER_OUTPUT_CLOSED => {
+            tracing::debug!("agent worker stdout closed; exiting without reporting worker failure");
+            Ok(())
+        }
+        result => result,
+    }
 }
 
 async fn run_worker_stdio_async() -> Result<(), String> {
@@ -1040,13 +1071,22 @@ fn send_worker_event(event: &AgentWorkerEvent) -> Result<(), String> {
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(line.as_bytes())
-        .map_err(|error| format!("write agent worker event failed: {error}"))?;
+        .map_err(map_worker_event_write_error)?;
     stdout
         .write_all(b"\n")
-        .map_err(|error| format!("write agent worker event newline failed: {error}"))?;
-    stdout
-        .flush()
-        .map_err(|error| format!("flush agent worker event failed: {error}"))
+        .map_err(map_worker_event_write_error)?;
+    stdout.flush().map_err(map_worker_event_write_error)
+}
+
+fn map_worker_event_write_error(error: std::io::Error) -> String {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+    ) {
+        WORKER_OUTPUT_CLOSED.to_string()
+    } else {
+        format!("write agent worker event failed: {error}")
+    }
 }
 
 #[cfg(test)]
@@ -1225,14 +1265,53 @@ mod tests {
         let _lock = active_workers_registry_lock().lock().await;
         let _ = drain_active_workers();
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
-        register_active_worker("test-stop-all-workers", 0, stop_tx);
+        register_active_worker("test-stop-all-workers", 0, stop_tx, None);
 
         let entries = drain_active_workers();
         assert_eq!(entries.len(), 1);
-        stop_active_worker_entries(entries, Duration::ZERO).await;
+        stop_active_worker_entries(entries, Duration::ZERO, Some("test shutdown")).await;
+
+        let request = stop_rx
+            .recv()
+            .await
+            .expect("stop receiver should be signalled");
+        assert_eq!(request.reason(), Some("test shutdown"));
+        assert!(!request_session_stop("test-stop-all-workers").await);
+    }
+
+    #[tokio::test]
+    async fn stop_active_worker_entries_sends_progress_finalizer() {
+        let _lock = active_workers_registry_lock().lock().await;
+        let _ = drain_active_workers();
+        let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
+        let (progress_tx, mut progress_rx) = mpsc::unbounded_channel();
+        register_active_worker("test-stop-finalizer", 0, stop_tx, Some(progress_tx));
+
+        let entries = drain_active_workers();
+        stop_active_worker_entries(entries, Duration::ZERO, Some("host restart")).await;
 
         assert!(stop_rx.recv().await.is_some());
-        assert!(!request_session_stop("test-stop-all-workers").await);
+        match progress_rx.recv().await {
+            Some(bifrost_agent::AgentTurnProgressEvent::TurnFailed { error }) => {
+                assert_eq!(error, "host restart");
+            }
+            other => panic!("expected TurnFailed finalizer, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn map_worker_event_write_error_treats_broken_pipe_as_closed_output() {
+        let broken_pipe = std::io::Error::new(std::io::ErrorKind::BrokenPipe, "closed by parent");
+        assert_eq!(
+            map_worker_event_write_error(broken_pipe),
+            WORKER_OUTPUT_CLOSED
+        );
+
+        let reset = std::io::Error::new(std::io::ErrorKind::ConnectionReset, "parent disconnected");
+        assert_eq!(map_worker_event_write_error(reset), WORKER_OUTPUT_CLOSED);
+
+        let other = std::io::Error::other("disk full");
+        assert!(map_worker_event_write_error(other).contains("disk full"));
     }
 
     #[cfg(unix)]
@@ -1255,10 +1334,10 @@ mod tests {
         let pid = child.id();
         let (stop_tx, stop_rx) = mpsc::unbounded_channel();
         drop(stop_rx);
-        register_active_worker("test-stale-worker-entry", pid, stop_tx);
+        register_active_worker("test-stale-worker-entry", pid, stop_tx, None);
 
         let entries = drain_active_workers();
-        stop_active_worker_entries(entries, Duration::from_millis(20)).await;
+        stop_active_worker_entries(entries, Duration::from_millis(20), None).await;
 
         assert!(
             child.try_wait().expect("poll protected process").is_none(),
@@ -1287,7 +1366,7 @@ mod tests {
             .expect("spawn protected process");
         let pid = child.id();
         let (stop_tx, mut stop_rx) = mpsc::unbounded_channel();
-        register_active_worker("test-acked-worker-entry", pid, stop_tx);
+        register_active_worker("test-acked-worker-entry", pid, stop_tx, None);
         let ack_task = tokio::spawn(async move {
             if let Some(stop_request) = stop_rx.recv().await {
                 stop_request.ack();
@@ -1295,7 +1374,7 @@ mod tests {
         });
 
         let entries = drain_active_workers();
-        stop_active_worker_entries(entries, Duration::from_millis(20)).await;
+        stop_active_worker_entries(entries, Duration::from_millis(20), None).await;
         ack_task.await.expect("ack task");
 
         assert!(
