@@ -80,7 +80,7 @@
 | [file-access-webui.md](./file-access-webui.md) | File Access WebUI 策略配置 | 17 | Grants 行级 File Access 入口、禁止手动录入不存在 grant、只读/读写与指定/所有目录策略、SSH Key grant 继承默认 All Directories 策略、grant 删除自动清理策略、重新连接后重新配置、deny patterns、字节限制、API 验证 |
 | [webui-groups.md](./webui-groups.md) | Web UI Groups 页面 | 13 | Group 列表、详情、规则管理、搜索 |
 | [webui-search.md](./webui-search.md) | Web UI 搜索模式 | 12 | 搜索模式进入/退出、关键词搜索、过滤器、结果高亮、状态持久化 |
-| [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 5 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器，以及可用性检查通知气泡下移、动画提示、拖拽和拖拽后展开 |
+| [webui-notifications.md](./webui-notifications.md) | Web UI Notifications 页面 | 6 | 三个通知表顶部状态筛选、默认未读展示、固定分页无 page size 选择器、通知数据库只保留最新 200 条记录，以及可用性检查通知气泡下移、动画提示、拖拽和拖拽后展开 |
 | [webui-layout-navigation.md](./webui-layout-navigation.md) | Web UI 布局与导航 | 17 | 侧边栏导航、侧边栏小窗口滚动、分割面板、状态栏、状态栏 Sync 快速跳转 Settings Sync、Toolbar、主题切换、版本检查、升级命令复制、拖拽导入 |
 | [tray-webui-auto-update.md](./tray-webui-auto-update.md) | Tray 与 WebView 后台升级 | 6 | 后台升级 download/install/restart、磁盘二进制已更新但旧 daemon 未重启回归、WebView active→idle 不再卡住 Working、后台子进程诊断日志与退出回收、Tray helper 自主低频后台检查更新与当前版本展示 |
 | [webui-ai-skill-assistant.md](./webui-ai-skill-assistant.md) | WebUI AI Skill Assistant | 6 | 底部状态栏版本号旁边的 Skill 引导入口、点击后在入口上方弹出安装浮层、移除旧右下角悬浮气泡、安装命令复制、仓库 SKILL.md 链接、亮色/暗色主题验证 |
