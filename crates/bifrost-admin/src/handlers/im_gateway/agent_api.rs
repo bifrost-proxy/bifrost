@@ -796,6 +796,7 @@ pub(super) async fn handle_agent(
             };
             if let Some(mut detail) = detail {
                 enrich_detail_with_history_runner_metadata(&mut detail);
+                merge_external_runner_detail_metadata(&session_key, &mut detail).await;
                 return json_response(&session_detail_response(
                     detail,
                     &service.queue_manager,
@@ -2209,6 +2210,7 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         model_provider: None,
         external_conversation_id: None,
         external_thread_id: None,
+        metadata: None,
         title: summary.title.or(summary.first_user_message),
         messages,
         goal_status: runtime_state
@@ -2222,6 +2224,44 @@ fn history_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDet
         timeline_event_count: summary.event_count as usize,
         run_state: summary.run_state.unwrap_or_else(|| "completed".to_string()),
     })
+}
+
+async fn merge_external_runner_detail_metadata(
+    session_key: &str,
+    detail: &mut bifrost_agent::SessionDetail,
+) {
+    let Some(external_detail) = external_runner_session_detail(session_key).await else {
+        return;
+    };
+    if detail
+        .metadata
+        .as_ref()
+        .map(std::collections::BTreeMap::is_empty)
+        .unwrap_or(true)
+    {
+        detail.metadata = external_detail.metadata;
+    }
+    if detail.external_conversation_id.is_none() {
+        detail.external_conversation_id = external_detail.external_conversation_id;
+    }
+    if detail.external_thread_id.is_none() {
+        detail.external_thread_id = external_detail.external_thread_id;
+    }
+    if detail.agent_type.is_none() {
+        detail.agent_type = external_detail.agent_type;
+    }
+    if detail.runner_type.is_none() {
+        detail.runner_type = external_detail.runner_type;
+    }
+    if detail.runner_id.is_none() {
+        detail.runner_id = external_detail.runner_id;
+    }
+    if detail.model.is_none() {
+        detail.model = external_detail.model;
+    }
+    if detail.model_provider.is_none() {
+        detail.model_provider = external_detail.model_provider;
+    }
 }
 
 async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_agent::SessionDetail> {
@@ -2332,6 +2372,10 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         .and_then(|detail| detail.metadata.get("usageInputTokens"))
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or_default();
+    let metadata = run_detail
+        .as_ref()
+        .map(|detail| detail.metadata.clone())
+        .filter(|metadata| !metadata.is_empty());
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -2356,6 +2400,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         model_provider,
         external_conversation_id: state.external_conversation_id,
         external_thread_id: state.external_thread_id,
+        metadata,
         title: state.title.or(state.last_user_message),
         messages,
         goal_status: None,
@@ -2514,6 +2559,7 @@ mod tests {
             model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: Some("Idle detail".to_string()),
             messages: Vec::new(),
             goal_status: None,
@@ -2581,6 +2627,7 @@ mod tests {
             model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: Some("history title".to_string()),
             messages: Vec::new(),
             goal_status: None,
@@ -3210,6 +3257,7 @@ mod tests {
             model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: None,
             messages: Vec::new(),
             goal_status: None,
@@ -3278,6 +3326,7 @@ mod tests {
             model_provider: None,
             external_conversation_id: None,
             external_thread_id: None,
+            metadata: None,
             title: None,
             messages: Vec::new(),
             goal_status: None,

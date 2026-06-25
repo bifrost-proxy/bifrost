@@ -422,6 +422,7 @@ impl AgentSessionManager {
                 model_provider: None,
                 external_conversation_id: s.external_conversation_id.clone(),
                 external_thread_id: s.external_thread_id.clone(),
+                metadata: None,
                 title: s
                     .title
                     .clone()
@@ -616,6 +617,8 @@ pub struct SessionDetail {
     pub model_provider: Option<String>,
     pub external_conversation_id: Option<String>,
     pub external_thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<std::collections::BTreeMap<String, String>>,
     /// Session title (intent/topic) set by the agent via set_title tool.
     pub title: Option<String>,
     pub messages: Vec<SessionMessage>,

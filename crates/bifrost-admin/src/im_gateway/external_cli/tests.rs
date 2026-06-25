@@ -1309,6 +1309,12 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         inject_bifrost_tools: false,
         skill_paths: Vec::new(),
     };
+    let mut second_request = request.clone();
+    second_request.images = vec![ExternalCliImageInput {
+        mime_type: "image/png".to_string(),
+        data: "d29ybGQ=".to_string(),
+        name: Some("second.png".to_string()),
+    }];
 
     let result = runtime.run(request).await.unwrap();
 
@@ -1326,8 +1332,44 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     .unwrap();
     assert_eq!(images.len(), 1);
     assert_eq!(images[0].mime_type, "image/png");
-    assert!(std::path::Path::new(&images[0].path).starts_with(&session_attachment_dir));
+    let first_image_path = std::path::PathBuf::from(&images[0].path);
+    assert_eq!(
+        first_image_path.parent(),
+        Some(
+            session_attachment_dir
+                .join(&result.run_id)
+                .join("images")
+                .as_path()
+        )
+    );
     assert_eq!(tokio::fs::read(&images[0].path).await.unwrap(), b"hello");
+
+    let second_result = runtime.run(second_request).await.unwrap();
+    let second_images: Vec<ExternalCliSavedImageAttachment> = serde_json::from_str(
+        second_result
+            .metadata
+            .get("attachments.images")
+            .expect("attachments metadata"),
+    )
+    .unwrap();
+    assert_eq!(second_images.len(), 1);
+    let second_image_path = std::path::PathBuf::from(&second_images[0].path);
+    assert_ne!(first_image_path, second_image_path);
+    assert_eq!(
+        second_image_path.parent(),
+        Some(
+            session_attachment_dir
+                .join(&second_result.run_id)
+                .join("images")
+                .as_path()
+        )
+    );
+    assert_eq!(
+        tokio::fs::read(&first_image_path).await.unwrap(),
+        b"hello",
+        "second run must not overwrite first run attachment"
+    );
+    assert_eq!(tokio::fs::read(&second_image_path).await.unwrap(), b"world");
 }
 
 #[tokio::test]
@@ -1839,6 +1881,174 @@ fn codex_like_metadata_includes_turn_usage_tokens() {
     assert_eq!(
         metadata.get("usageTotalTokens").map(String::as_str),
         Some("59810")
+    );
+}
+
+#[test]
+fn codex_and_traex_metadata_include_runner_observability() {
+    for adapter in [DEFAULT_ADAPTER, TRAEX_ADAPTER] {
+        let request = ExternalCliRunRequest {
+            images: Vec::new(),
+            message: "inspect image".to_string(),
+            operation: default_operation(),
+            params: serde_json::json!({"threadId": "thread-existing"}),
+            provider_id: Some("web".to_string()),
+            runner_id: Some(adapter.to_string()),
+            session_key: Some("session-observe".to_string()),
+            runtime: DEFAULT_RUNTIME.to_string(),
+            adapter: adapter.to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/work")),
+            instructions: None,
+            adapter_config: ExternalCliAdapterConfig {
+                approval_policy: Some("never".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
+                permission_mode: Some("bypassPermissions".to_string()),
+                danger_full_access: Some(true),
+                add_dirs: vec!["/tmp/extra".to_string()],
+                enable_features: vec!["network".to_string()],
+                timeout_secs: Some(30),
+                ..Default::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: true,
+            skill_paths: Vec::new(),
+        };
+        let spec = CommandSpec {
+            executable: adapter.to_string(),
+            args: vec!["exec".to_string(), "--json".to_string()],
+            env: std::collections::BTreeMap::new(),
+            work_dir: request.work_dir.clone(),
+            timeout_secs: Some(30),
+        };
+        let events = vec![
+            ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::ToolFinished,
+                content: "tool output".to_string(),
+                title: Some("Shell".to_string()),
+                raw: serde_json::json!({
+                    "type": "item.completed",
+                    "observedAtMs": 1120,
+                    "durationMs": 120,
+                    "item": {
+                        "id": "tool-1",
+                        "type": "command_execution",
+                        "command": "pwd",
+                        "exit_code": 0,
+                        "status": "completed"
+                    }
+                }),
+            },
+            ExternalCliProgressEvent {
+                event_type: ExternalCliProgressEventType::AssistantFinal,
+                content: "done".to_string(),
+                title: None,
+                raw: serde_json::json!({"type": "assistant_final", "observedAtMs": 1150}),
+            },
+        ];
+        let saved_images = vec![ExternalCliSavedImageAttachment {
+            path: "/tmp/session/run/images/image-1.png".to_string(),
+            mime_type: "image/png".to_string(),
+            size_bytes: 42,
+            name: Some("image.png".to_string()),
+        }];
+        let mut metadata = std::collections::BTreeMap::new();
+
+        append_external_cli_observability_metadata(
+            ExternalCliObservabilityInput {
+                request: &request,
+                spec: &spec,
+                prompt: "## Attached Images\n- /tmp/session/run/images/image-1.png\n",
+                saved_images: &saved_images,
+                stdout: b"{\"type\":\"assistant_final\"}\n",
+                stderr: b"warning\n",
+                events: &events,
+                timings: ExternalCliObservabilityTimings {
+                    started_at: 1000,
+                    command_started_at: Some(1010),
+                    command_finished_at: Some(1200),
+                    finished_at: 1250,
+                },
+                cli_version: Some("runner 1.2.3"),
+            },
+            &mut metadata,
+        );
+
+        assert_eq!(
+            metadata.get("runner.adapter").map(String::as_str),
+            Some(adapter)
+        );
+        assert_eq!(
+            metadata.get("cli.version").map(String::as_str),
+            Some("runner 1.2.3")
+        );
+        assert_eq!(
+            metadata.get("prompt.attachmentPathCount"),
+            Some(&"1".to_string())
+        );
+        assert_eq!(
+            metadata.get("attachments.totalBytes"),
+            Some(&"42".to_string())
+        );
+        assert_eq!(metadata.get("io.stdoutLines"), Some(&"1".to_string()));
+        assert_eq!(
+            metadata.get("timing.commandDurationMs"),
+            Some(&"190".to_string())
+        );
+        assert_eq!(
+            metadata.get("timing.firstEventLatencyMs"),
+            Some(&"120".to_string())
+        );
+        assert_eq!(metadata.get("tools.count"), Some(&"1".to_string()));
+        assert_eq!(
+            metadata.get("tools.totalDurationMs"),
+            Some(&"120".to_string())
+        );
+        assert_eq!(
+            metadata.get("resume.requested").map(String::as_str),
+            Some("true")
+        );
+    }
+}
+
+#[test]
+fn progress_event_observation_adds_tool_duration() {
+    let mut starts = std::collections::HashMap::new();
+    let mut started = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolStarted,
+        content: "pwd".to_string(),
+        title: None,
+        raw: serde_json::json!({"type": "item.started", "item": {"id": "tool-1"}}),
+    };
+    let mut finished = ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: "/tmp".to_string(),
+        title: None,
+        raw: serde_json::json!({"type": "item.completed", "item": {"id": "tool-1"}}),
+    };
+
+    enrich_progress_event_observation(&mut started, 2000, &mut starts);
+    enrich_progress_event_observation(&mut finished, 2125, &mut starts);
+
+    assert_eq!(
+        started
+            .raw
+            .get("observedAtMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(2000)
+    );
+    assert_eq!(
+        finished
+            .raw
+            .get("observedAtMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(2125)
+    );
+    assert_eq!(
+        finished
+            .raw
+            .get("durationMs")
+            .and_then(serde_json::Value::as_u64),
+        Some(125)
     );
 }
 

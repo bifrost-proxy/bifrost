@@ -162,6 +162,7 @@ export type SessionDetail = {
   queueLength?: number;
   queueItems?: QueuedInput[];
   active_status?: RunStatusSnapshot;
+  metadata?: Record<string, string>;
   messages?: SessionDetailMessage[];
 };
 
@@ -202,6 +203,7 @@ export type RunStatusSnapshot = {
   agent_type?: string;
   runner_type?: string;
   runner_id?: string;
+  metadata?: Record<string, string>;
 };
 
 export type AgentContextSnapshot = {
@@ -706,6 +708,7 @@ export function telemetryFromSessionDetail(
       runner_type: detail.active_status?.runner_type || detail.runner_type || thread?.runner_type,
       runner_id: detail.active_status?.runner_id || detail.runner_id || thread?.runner_id,
       agent_type: detail.active_status?.agent_type || detail.agent_type || thread?.agent_type,
+      metadata: detail.active_status?.metadata || detail.metadata,
     },
   };
 }

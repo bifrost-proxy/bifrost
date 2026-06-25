@@ -874,14 +874,16 @@
    ```
 2. 配置一个 mock external runner，executable 从 stdin 读取 prompt 并输出 `{"type":"assistant_final","content":"BIFROST_IMAGE_PATH_OK"}`。
 3. 调用 `/_bifrost/api/im-gateway/chat/stream`，请求体包含 `runnerId`、`sessionKey` 和 `images:[{"mimeType":"image/png","data":"<base64>","name":"hello.png"}]`。
-4. 读取返回的 `runId`，检查 `agent/im_gateway/chat_runs/<runId>/prompt.md`、`result.json` 和 session 附件目录。
+4. 使用同一个 `sessionKey` 再调用一次 `/_bifrost/api/im-gateway/chat/stream`，传入不同字节的第二张图片。
+5. 读取两次返回的 `runId`，检查 `agent/im_gateway/chat_runs/<runId>/prompt.md`、`result.json` 和 session 附件目录。
 
 预期结果：
 1. stream 返回 `eventType:"run_finished"`、`status:"succeeded"`，response 为 `BIFROST_IMAGE_PATH_OK`。
 2. `prompt.md` 包含 `## Attached Images`，并列出本地绝对图片路径。
-3. 图片文件位于 `agent/sessions/YYYY/MM/DD/attachments/<session-file-stem>/images/image-1.png`，文件字节与请求图片一致。
+3. 图片文件位于 `agent/sessions/YYYY/MM/DD/attachments/<session-file-stem>/<runId>/images/image-1.png`，文件字节与请求图片一致。
 4. `result.json.metadata["attachments.images"]` 记录图片 path、mimeType、sizeBytes 和 name。
 5. session timeline 中该 user message 带图片内容，Web History 回放能感知这一轮包含图片。
+6. 同一个 `sessionKey` 的第二轮图片路径与第一轮不同，第一轮 `result.json.metadata["attachments.images"]` 中记录的旧路径仍存在且文件字节未被第二轮覆盖。
 
 ### TC-IEC-44: Web Slash Runner Call 支持 image-only 图片输入
 
@@ -899,7 +901,7 @@
 1. image-only 请求不再返回 `message or images are required`。
 2. stream 返回 `runner_call_started`、`assistant_final`、`runner_call_finished`，最终 status 为 `succeeded`。
 3. 目标 runner prompt 包含 `## Attached Images` 和绝对图片路径。
-4. 图片保存到目标 child session 独立的 `attachments/<session-file-stem>/images/` 目录，不覆盖 TC-IEC-43 的普通 Web Chat 图片。
+4. 图片保存到目标 child session 独立的 `attachments/<session-file-stem>/<runId>/images/` 目录，不覆盖 TC-IEC-43 的普通 Web Chat 图片。
 5. 父会话可见用户触发了带图 runner-call，空文本时显示 `Attached 1 image` 语义。
 
 ### TC-IEC-45: Feishu 图片消息进入 Codex/Trae 外部 Runner
@@ -909,17 +911,36 @@
 2. 从飞书给该 bot 发送一条带图片的消息，正文可为空或为“请看这张图”。
 3. 在本地数据目录中查找对应 session JSONL、chat run 目录和 runner prompt。
 4. 再紧接着发送一条纯文本消息，验证 queued/下一轮不会复用上一轮图片。
+5. 再发送第二条带不同图片的消息，验证同一飞书会话下两次带图消息分别保存到不同 run id 子目录。
 
 预期结果：
 1. event loop 调用 provider resolver 下载图片后，将图片转成 external CLI request 的 `images[]`。
 2. Codex/Trae prompt 包含 `## Attached Images` 和 session 附件绝对路径；附件文件字节可读取。
 3. progress card 或 final reply 正常发送到原飞书会话，不出现“看不到图片”这类因未传图导致的失败。
 4. 后续纯文本消息的 runner prompt 不再包含上一轮图片路径。
-5. 内置 Bifrost V4 Agent 的图片链路不受影响，仍使用原生多模态输入。
+5. 第二条带图消息不会覆盖第一条带图消息的附件文件；第一条 run 的 metadata 路径仍可读取原始图片字节。
+6. 内置 Bifrost V4 Agent 的图片链路不受影响，仍使用原生多模态输入。
+
+### TC-IEC-46: Codex/TraeX Runner diagnostics 采集并在 Web UI 展示
+
+操作步骤：
+1. 使用当前源码编译产物启动 9900 或临时端口服务，必须包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。
+2. 配置一个 Codex-compatible mock runner 和一个 TraeX-compatible mock runner，二者都从 stdin 读取 prompt，输出包含 tool started、tool completed、assistant final 的 JSONL，并让 executable 支持 `--version`。
+3. 分别调用 `/_bifrost/api/im-gateway/chat/stream`，请求体包含对应 `runnerId`、`sessionKey`、文本和一张图片。
+4. 读取两个 run 的 `result.json.metadata`，并调用 `/_bifrost/api/agent/sessions/detail?session_key=<sessionKey>`。
+5. 打开 Web UI Agent Chat 对应 session 的状态弹窗，查看 Context 卡片下方的 `Runner diagnostics`。
+
+预期结果：
+1. Codex 与 TraeX run metadata 均包含 `cli.executable`、`cli.args`、`cli.version`、`runner.adapter`、`prompt.estimatedTokens`、`attachments.count`、`attachments.totalBytes`、`io.stdoutBytes`、`io.stderrBytes`、`timing.totalDurationMs`、`tools.count`、`tools.totalDurationMs`、`resume.requested`。
+2. session detail 响应包含同一组 metadata，Web UI 可从 `SessionDetail.metadata` 展示 diagnostics，不依赖仅存在于 run artifact 的本地文件读取。
+3. Web UI 显示 CLI、Prompt、Attachments、I/O、Tools、Tool time、Run time、First event、Resume 等行；缺失字段显示 `-`，不伪造 context window、剩余 context 或 billing token。
+4. `normalized_events.jsonl` 中 tool completed raw event 带 `observedAtMs`，同一 tool 有 started/completed 时带 `durationMs`。
 
 ## 最近执行记录
 
+- 2026-06-25：执行 TC-IEC-43/44/46 的自动真实服务回归。先编译当前源码 `cargo build --bin bifrost`，再运行 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh`。脚本启动临时服务端口 `53049`，配置 `adapter=codex` 的 mock runner 和 `adapter=traex` 的 mock runner；普通 Web Chat 第一轮 run `1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4` 图片路径为 `.../attachments/session-web-image-session-e2e-1782381743/1782381743199-a7e58df0-386b-412c-899c-3c9b7a1ad7d4/images/image-1.png`，同 session 第二轮 run `1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270` 图片路径为 `.../1782381743258-ce882dbb-b5df-4e94-8b8b-b13902fae270/images/image-1.png`，断言第一轮字节仍为 `hello-image`。TraeX-compatible run `1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f` 图片路径为 `.../attachments/session-web-image-session-traex-e2e-1782381743/1782381743368-d14c605e-391a-4b83-80fd-f2b1b779104f/images/image-1.png`；runner-call image-only run `1782381743490-e375c12b-f907-41ce-a5cf-8f66873787b9` 成功。脚本同时断言 Codex/TraeX `result.json.metadata` 和 `/_bifrost/api/im-gateway/agent/sessions/<sessionKey>` 均包含 `cli.executable`、`cli.args`、`cli.version`、`runner.adapter`、prompt/attachment/io/timing/tool/resume/usage 字段，`normalized_events.jsonl` 的 tool completed raw event 包含 `durationMs`。
 - 2026-06-25：执行 TC-IEC-43/44 的真实服务回归。临时服务端口 `18948`，数据目录 `/tmp/bifrost-runner-image-real2.LOZvE5`，启动命令使用 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`cargo run --bin bifrost -- start --host 127.0.0.1 -p 18948 --unsafe-ssl --skip-cert-check --no-system-proxy`。配置 mock runner `mock-image` 后，`/_bifrost/api/im-gateway/chat/stream` 带 `hello.png` 返回 run `1782377507822-55608d18-baf4-4923-beab-8a731a8f6dde`，`/_bifrost/api/im-gateway/chat/runner-calls/stream` image-only 返回 run `1782377530402-a904849d-f79b-4ce8-a362-ecf26fe4f6be`。两个 run 均返回 `BIFROST_IMAGE_PATH_OK`，prompt 均包含 `## Attached Images` 和 `/attachments/session-.../images/image-1.png`；普通 Web Chat 图片路径为 `.../attachments/session-web-image-session-1-1782377498/images/image-1.png`，字节为 `hello-image`；runner-call 图片路径为 `.../attachments/session-runner-call_human-runner-call-parent-real2_mock-image-1782377530/images/image-1.png`，字节为 `runner-call-image`，两者路径不同且互不覆盖。随后将该真实链路固化为自动 E2E，命令 `SKIP_BUILD=true BIFROST_BIN=/Users/eden_studio/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_im_gateway_external_runner_image_input.sh` 通过，自动脚本再次验证普通 Web Chat run `1782377882467-f3974976-5584-4e96-a4a3-b155207e24d0` 与 runner-call run `1782377882519-f15c3c1a-90cc-40da-b21a-2e8b3756778c` 的图片路径位于不同 session 附件目录。TC-IEC-45 的 Feishu 真实发送本轮未执行，使用代码级 resolver/传递回归和 Web 真实链路覆盖修复主体，仍需后续接入真实 Feishu bot 做人工验收。
+- 2026-06-25：追加执行 TC-IEC-43 同 session 多轮图片覆盖复现。当前 9900 服务运行 `/Users/eden_studio/work/github/bifrost/target/debug/bifrost`，临时配置 mock runner 后，对同一个 `sessionKey=overwrite-live-same-session-1782380510` 连续调用两次 `/chat/stream`。修复前两次 run `1782380510858-b6eaf17e-04b4-4a2a-8e97-419a18819d93` 与 `1782380510912-6bc96012-83dd-4461-a528-9ffb145534c7` 的图片路径相同：`.../attachments/session-overwrite-live-same-session-1782380510-1782380510/images/image-1.png`，第二轮后第一轮路径文件字节从 `FIRST_IMAGE_BYTES_UNIQUE` 变成 `SECOND_IMAGE_BYTES_DIFFERENT`，确认 P1 覆盖问题真实存在。修复后自动 E2E `test_im_gateway_external_runner_image_input.sh` 必须验证同一 `sessionKey` 第二轮图片路径按 run id 分目录且第一轮字节保持 `hello-image`。
 - 2026-06-14：执行 TC-IEC-42。先在 `main` 启动临时服务，端口 `51754`，数据目录 `/tmp/bifrost-traex-visible-1781401190`，命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `--no-system-proxy`；配置真实 TraeX runner `/Users/eden/.local/bin/traex` 后调用 `/chat/stream`，run `1781401268378-9439e402-6e4c-4b12-85a9-09e6f889b792`。`cli.stdout.log` 与 `normalized_events.jsonl` 显示 TraeX 先输出 `agent_message`“检查当前 Trae X 版本并与最新可用版本对比。”，再交叉输出 `command_execution` 工具事件，最后输出 `agent_message`“**结论：** 当前 Trae X 版本为 `0.200.9`，已是最新版本，无需更新。”；session JSONL 同步记录工具前 `assistant_delta`、工具调用、最终 `assistant_delta` 和 `assistant_message`。补充单测 `traex_model_messages_stay_visible_while_machine_statuses_are_hidden` 后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin im_gateway::progress_card --lib` 通过，29 个 progress card 用例全部通过，确认机器状态隐藏、工具前模型公开 content 保留、终态重复结论不再留在过程区。
 - 2026-06-12：执行 TC-IEC-41 的本地回归步骤，命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_marks_stopped_run_before_late_stdout --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_stops_active_run_by_session_key --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin request_run_stop_treats_missing_active_pid_as_stopped --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin taskkill_missing_process_messages_are_idempotent --lib -- --nocapture` 均通过。Windows Unit Tests 的真实 `taskkill` missing pid 路径待 PR GitHub Actions 验证。
 - 2026-06-08：执行 TC-IEC-39/40 的本轮回归验证。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin feishu_codex_like_external_runner_defaults_to_progress_card_without_channel_override --lib -- --nocapture` 通过，确认 Feishu + Trae/Codex external runner 在没有 channel delivery override 时解析为 `ProgressCard`，且显式 channel/input override 与非 Feishu Provider 行为不变。命令 `pnpm --dir web exec vitest run src/pages/AI/AgentChatSection.timeline.test.ts` 通过，1 个测试文件 10 个用例全部通过，确认 external runner 的 thinking/tool `processSteps` 挂在最终 assistant message 上，不再生成额外 `Agent is running...` 占位消息。

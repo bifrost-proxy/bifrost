@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, Write as StdWrite};
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::process::Command;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 use bifrost_agent::{PlanStep, PlanStepStatus};
 
@@ -933,6 +933,7 @@ impl ExternalCliRuntime {
             .map_err(|error| format!("write prompt failed: {error}"))?;
 
         let spec = build_command_spec(&request, &last_message_path)?;
+        let cli_version = detect_cli_version(&request.adapter, &spec).await;
         let snapshot = command_snapshot(&request, &spec);
         write_json_pretty(&snapshot_path, &snapshot).await?;
 
@@ -955,6 +956,8 @@ impl ExternalCliRuntime {
             ACTIVE_SESSIONS.insert(session_key.to_string(), run_id.clone());
         }
 
+        let mut command_started_at = None;
+        let mut command_finished_at = None;
         let run_output = if request.adapter == crate::im_gateway::chatgpt_web::ADAPTER_ID {
             let output_result =
                 crate::im_gateway::chatgpt_web::run_adapter(&request, &prompt, &run_dir).await;
@@ -1027,15 +1030,17 @@ impl ExternalCliRuntime {
             }
         } else {
             let session_key_for_stop = request.session_key.clone();
+            command_started_at = Some(now_ms());
             let command_output = run_command(
                 &run_id,
                 session_key_for_stop.as_deref(),
-                spec,
-                prompt,
+                spec.clone(),
+                prompt.clone(),
                 stop_marker_path.clone(),
                 progress_tx,
             )
             .await?;
+            command_finished_at = Some(now_ms());
             remove_active_sessions_for_run(&run_id);
             let was_stopped = tokio::fs::try_exists(&stop_marker_path)
                 .await
@@ -1088,9 +1093,29 @@ impl ExternalCliRuntime {
                 metadata: BTreeMap::new(),
             }
         };
+        let finished_at = now_ms();
         let mut metadata = run_output.metadata;
         append_external_cli_metadata(&request.adapter, &run_output.events, &mut metadata);
         append_external_cli_request_metadata(&request, &mut metadata);
+        append_external_cli_observability_metadata(
+            ExternalCliObservabilityInput {
+                request: &request,
+                spec: &spec,
+                prompt: &prompt,
+                saved_images: &saved_images,
+                stdout: &run_output.stdout,
+                stderr: &run_output.stderr,
+                events: &run_output.events,
+                timings: ExternalCliObservabilityTimings {
+                    started_at,
+                    command_started_at,
+                    command_finished_at,
+                    finished_at,
+                },
+                cli_version: cli_version.as_deref(),
+            },
+            &mut metadata,
+        );
         if !saved_images.is_empty() {
             metadata.insert(
                 "attachments.images".to_string(),
@@ -1104,7 +1129,6 @@ impl ExternalCliRuntime {
             .await
             .map_err(|error| format!("write stderr failed: {error}"))?;
         write_events_jsonl(&events_path, &run_output.events).await?;
-        let finished_at = now_ms();
         let artifacts = ExternalCliRunArtifacts {
             run_dir: run_dir.display().to_string(),
             prompt: prompt_path.display().to_string(),
@@ -1448,7 +1472,13 @@ async fn save_image_attachments(
         .and_then(serde_json::Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+        .map(|value| {
+            PathBuf::from(value).join(
+                run_dir
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("run")),
+            )
+        })
         .unwrap_or_else(|| run_dir.join("attachments"))
         .join("images");
     tokio::fs::create_dir_all(&images_dir)
@@ -1662,6 +1692,415 @@ fn command_snapshot(request: &ExternalCliRunRequest, spec: &CommandSpec) -> Comm
     }
 }
 
+async fn detect_cli_version(adapter: &str, spec: &CommandSpec) -> Option<String> {
+    if !is_codex_like_adapter(adapter) {
+        return None;
+    }
+    let mut command = Command::new(&spec.executable);
+    command
+        .arg("--version")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(work_dir) = spec.work_dir.as_ref() {
+        command.current_dir(work_dir);
+    }
+    for (key, value) in &spec.env {
+        command.env(key, value);
+    }
+    let output = timeout(Duration::from_secs(3), command.output())
+        .await
+        .ok()?
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let value = stdout
+        .lines()
+        .chain(stderr.lines())
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    Some(truncate_metadata_value(value, 200))
+}
+
+struct ExternalCliObservabilityInput<'a> {
+    request: &'a ExternalCliRunRequest,
+    spec: &'a CommandSpec,
+    prompt: &'a str,
+    saved_images: &'a [ExternalCliSavedImageAttachment],
+    stdout: &'a [u8],
+    stderr: &'a [u8],
+    events: &'a [ExternalCliProgressEvent],
+    timings: ExternalCliObservabilityTimings,
+    cli_version: Option<&'a str>,
+}
+
+#[derive(Clone, Copy)]
+struct ExternalCliObservabilityTimings {
+    started_at: u64,
+    command_started_at: Option<u64>,
+    command_finished_at: Option<u64>,
+    finished_at: u64,
+}
+
+fn append_external_cli_observability_metadata(
+    input: ExternalCliObservabilityInput<'_>,
+    metadata: &mut BTreeMap<String, String>,
+) {
+    let request = input.request;
+    let spec = input.spec;
+    let prompt = input.prompt;
+    let saved_images = input.saved_images;
+    let stdout = input.stdout;
+    let stderr = input.stderr;
+    let events = input.events;
+    let timings = input.timings;
+    insert_metadata(metadata, "cli.executable", &spec.executable);
+    insert_metadata_json(metadata, "cli.args", &spec.args);
+    if let Some(work_dir) = spec.work_dir.as_ref() {
+        insert_metadata(metadata, "cli.workDir", &work_dir.display().to_string());
+    }
+    if let Some(timeout_secs) = spec.timeout_secs {
+        insert_metadata_u64(metadata, "cli.timeoutSecs", timeout_secs);
+    }
+    if let Some(version) = input.cli_version {
+        insert_metadata(metadata, "cli.version", version);
+    }
+    insert_metadata(metadata, "runner.adapter", &request.adapter);
+    if let Some(runner_id) = request.runner_id.as_deref() {
+        insert_metadata(metadata, "runner.id", runner_id);
+    }
+    insert_metadata_bool(
+        metadata,
+        "runner.injectBifrostTools",
+        request.inject_bifrost_tools,
+    );
+    insert_metadata_json(metadata, "config.addDirs", &request.adapter_config.add_dirs);
+    insert_metadata_json(
+        metadata,
+        "config.enableFeatures",
+        &request.adapter_config.enable_features,
+    );
+    insert_metadata_json(
+        metadata,
+        "config.disableFeatures",
+        &request.adapter_config.disable_features,
+    );
+    if let Some(policy) = request.adapter_config.approval_policy.as_deref() {
+        insert_metadata(metadata, "config.approvalPolicy", policy);
+    }
+    if let Some(sandbox) = request.adapter_config.sandbox.as_deref() {
+        insert_metadata(metadata, "config.sandbox", sandbox);
+    }
+    if let Some(permission_mode) = request.adapter_config.permission_mode.as_deref() {
+        insert_metadata(metadata, "config.permissionMode", permission_mode);
+    }
+    if let Some(danger_full_access) = request.adapter_config.danger_full_access {
+        insert_metadata_bool(metadata, "config.dangerFullAccess", danger_full_access);
+    }
+    if let Some(search) = request.adapter_config.search {
+        insert_metadata_bool(metadata, "config.search", search);
+    }
+    if let Some(ephemeral) = request.adapter_config.ephemeral {
+        insert_metadata_bool(metadata, "config.ephemeral", ephemeral);
+    }
+
+    insert_metadata_u64(metadata, "prompt.bytes", prompt.len() as u64);
+    insert_metadata_u64(metadata, "prompt.chars", prompt.chars().count() as u64);
+    insert_metadata_u64(
+        metadata,
+        "prompt.estimatedTokens",
+        estimate_tokens_from_chars(prompt.chars().count()),
+    );
+    insert_metadata_u64(
+        metadata,
+        "prompt.attachmentPathCount",
+        saved_images.len() as u64,
+    );
+    insert_metadata_u64(metadata, "attachments.count", saved_images.len() as u64);
+    insert_metadata_u64(
+        metadata,
+        "attachments.totalBytes",
+        saved_images.iter().map(|image| image.size_bytes).sum(),
+    );
+    insert_metadata_json(
+        metadata,
+        "attachments.summary",
+        &saved_images
+            .iter()
+            .map(|image| {
+                serde_json::json!({
+                    "mimeType": image.mime_type,
+                    "name": image.name,
+                    "sizeBytes": image.size_bytes,
+                    "path": image.path,
+                })
+            })
+            .collect::<Vec<_>>(),
+    );
+
+    insert_metadata_u64(metadata, "io.stdoutBytes", stdout.len() as u64);
+    insert_metadata_u64(metadata, "io.stderrBytes", stderr.len() as u64);
+    insert_metadata_u64(metadata, "io.stdoutLines", line_count(stdout));
+    insert_metadata_u64(metadata, "io.stderrLines", line_count(stderr));
+    insert_metadata_bool(metadata, "io.stdoutTruncated", false);
+    insert_metadata_bool(metadata, "io.stderrTruncated", false);
+
+    if let Some(command_started_at) = timings.command_started_at {
+        insert_metadata_u64(
+            metadata,
+            "timing.commandStartLatencyMs",
+            command_started_at.saturating_sub(timings.started_at),
+        );
+    }
+    if let (Some(command_started_at), Some(command_finished_at)) =
+        (timings.command_started_at, timings.command_finished_at)
+    {
+        insert_metadata_u64(
+            metadata,
+            "timing.commandDurationMs",
+            command_finished_at.saturating_sub(command_started_at),
+        );
+    }
+    if let Some(first_event_at) = events
+        .iter()
+        .filter_map(|event| raw_u64(&event.raw, "observedAtMs"))
+        .min()
+    {
+        insert_metadata_u64(
+            metadata,
+            "timing.firstEventLatencyMs",
+            first_event_at.saturating_sub(timings.started_at),
+        );
+    }
+    insert_metadata_u64(
+        metadata,
+        "timing.totalDurationMs",
+        timings.finished_at.saturating_sub(timings.started_at),
+    );
+
+    if let Some(thread_id) = request
+        .params
+        .get("threadId")
+        .and_then(serde_json::Value::as_str)
+    {
+        insert_metadata_bool(metadata, "resume.requested", true);
+        insert_metadata(metadata, "resume.requestedThreadId", thread_id);
+    } else {
+        insert_metadata_bool(metadata, "resume.requested", false);
+    }
+
+    append_tool_observability_metadata(events, metadata);
+    append_plan_observability_metadata(events, metadata);
+    append_message_observability_metadata(events, metadata);
+}
+
+fn append_tool_observability_metadata(
+    events: &[ExternalCliProgressEvent],
+    metadata: &mut BTreeMap<String, String>,
+) {
+    let calls = events
+        .iter()
+        .filter(|event| event.event_type == ExternalCliProgressEventType::ToolFinished)
+        .map(|event| {
+            let success = raw_bool(&event.raw, "success")
+                .or_else(|| status_success(&event.raw))
+                .unwrap_or_else(|| !event.content.to_ascii_lowercase().contains("failed"));
+            let output_bytes = event.content.len() as u64;
+            serde_json::json!({
+                "id": raw_tool_id(&event.raw),
+                "name": raw_tool_name(&event.raw).unwrap_or_else(|| event.title.clone().unwrap_or_else(|| "tool".to_string())),
+                "command": raw_string_path(&event.raw, &["item", "command"]).or_else(|| raw_string_path(&event.raw, &["command"])),
+                "exitCode": raw_i64_path(&event.raw, &["item", "exit_code"]).or_else(|| raw_i64_path(&event.raw, &["exitCode"])),
+                "success": success,
+                "durationMs": raw_u64(&event.raw, "durationMs"),
+                "outputBytes": output_bytes,
+            })
+        })
+        .collect::<Vec<_>>();
+    let failed_count = calls
+        .iter()
+        .filter(|call| call.get("success").and_then(serde_json::Value::as_bool) == Some(false))
+        .count() as u64;
+    let total_duration = calls
+        .iter()
+        .filter_map(|call| call.get("durationMs").and_then(serde_json::Value::as_u64))
+        .sum::<u64>();
+    let total_output_bytes = calls
+        .iter()
+        .filter_map(|call| call.get("outputBytes").and_then(serde_json::Value::as_u64))
+        .sum::<u64>();
+
+    insert_metadata_u64(metadata, "tools.count", calls.len() as u64);
+    insert_metadata_u64(metadata, "tools.failedCount", failed_count);
+    insert_metadata_u64(metadata, "tools.totalDurationMs", total_duration);
+    insert_metadata_u64(metadata, "tools.outputBytes", total_output_bytes);
+    insert_metadata_json(metadata, "tools.calls", &calls);
+}
+
+fn append_plan_observability_metadata(
+    events: &[ExternalCliProgressEvent],
+    metadata: &mut BTreeMap<String, String>,
+) {
+    let plan_updates = events
+        .iter()
+        .filter(|event| event.event_type == ExternalCliProgressEventType::PlanUpdated)
+        .count() as u64;
+    let latest_plan = events
+        .iter()
+        .rev()
+        .find(|event| event.event_type == ExternalCliProgressEventType::PlanUpdated)
+        .and_then(|event| event.raw.get("plan").or_else(|| event.raw.get("todos")))
+        .and_then(serde_json::Value::as_array);
+    insert_metadata_u64(metadata, "plan.updates", plan_updates);
+    if let Some(plan) = latest_plan {
+        let total = plan.len() as u64;
+        let completed = plan_status_count(plan, "completed");
+        let in_progress = plan_status_count(plan, "in_progress");
+        let pending = total.saturating_sub(completed).saturating_sub(in_progress);
+        insert_metadata_u64(metadata, "plan.total", total);
+        insert_metadata_u64(metadata, "plan.completed", completed);
+        insert_metadata_u64(metadata, "plan.inProgress", in_progress);
+        insert_metadata_u64(metadata, "plan.pending", pending);
+        insert_metadata_u64(
+            metadata,
+            "plan.completionPercent",
+            completed
+                .saturating_mul(100)
+                .checked_div(total)
+                .unwrap_or(0),
+        );
+    }
+}
+
+fn append_message_observability_metadata(
+    events: &[ExternalCliProgressEvent],
+    metadata: &mut BTreeMap<String, String>,
+) {
+    let assistant_chars = events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.event_type,
+                ExternalCliProgressEventType::AssistantDelta
+                    | ExternalCliProgressEventType::AssistantFinal
+            )
+        })
+        .map(|event| event.content.chars().count() as u64)
+        .sum();
+    let reasoning_chars = events
+        .iter()
+        .filter(|event| {
+            event
+                .title
+                .as_deref()
+                .map(|title| title.to_ascii_lowercase().contains("reasoning"))
+                .unwrap_or(false)
+                || raw_string_path(&event.raw, &["type"])
+                    .map(|event_type| event_type.contains("reasoning"))
+                    .unwrap_or(false)
+        })
+        .map(|event| event.content.chars().count() as u64)
+        .sum();
+    insert_metadata_u64(metadata, "messages.assistantChars", assistant_chars);
+    insert_metadata_u64(metadata, "messages.reasoningChars", reasoning_chars);
+}
+
+fn insert_metadata(metadata: &mut BTreeMap<String, String>, key: &str, value: &str) {
+    if !value.trim().is_empty() {
+        metadata.insert(key.to_string(), truncate_metadata_value(value, 2000));
+    }
+}
+
+fn insert_metadata_u64(metadata: &mut BTreeMap<String, String>, key: &str, value: u64) {
+    metadata.insert(key.to_string(), value.to_string());
+}
+
+fn insert_metadata_bool(metadata: &mut BTreeMap<String, String>, key: &str, value: bool) {
+    metadata.insert(key.to_string(), value.to_string());
+}
+
+fn insert_metadata_json<T: Serialize>(
+    metadata: &mut BTreeMap<String, String>,
+    key: &str,
+    value: &T,
+) {
+    if let Ok(serialized) = serde_json::to_string(value) {
+        metadata.insert(key.to_string(), truncate_metadata_value(&serialized, 4000));
+    }
+}
+
+fn truncate_metadata_value(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for ch in value.chars().take(max_chars) {
+        output.push(ch);
+    }
+    output
+}
+
+fn estimate_tokens_from_chars(chars: usize) -> u64 {
+    chars.div_ceil(4) as u64
+}
+
+fn line_count(bytes: &[u8]) -> u64 {
+    if bytes.is_empty() {
+        return 0;
+    }
+    bytes.iter().filter(|byte| **byte == b'\n').count() as u64
+}
+
+fn raw_u64(raw: &serde_json::Value, key: &str) -> Option<u64> {
+    raw.get(key).and_then(serde_json::Value::as_u64)
+}
+
+fn raw_bool(raw: &serde_json::Value, key: &str) -> Option<bool> {
+    raw.get(key).and_then(serde_json::Value::as_bool)
+}
+
+fn raw_string_path(raw: &serde_json::Value, path: &[&str]) -> Option<String> {
+    let mut current = raw;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str().map(str::to_string)
+}
+
+fn raw_i64_path(raw: &serde_json::Value, path: &[&str]) -> Option<i64> {
+    let mut current = raw;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_i64()
+}
+
+fn raw_tool_id(raw: &serde_json::Value) -> Option<String> {
+    raw_string_path(raw, &["item", "id"])
+        .or_else(|| raw_string_path(raw, &["item_id"]))
+        .or_else(|| raw_string_path(raw, &["id"]))
+}
+
+fn raw_tool_name(raw: &serde_json::Value) -> Option<String> {
+    raw_string_path(raw, &["item", "name"])
+        .or_else(|| raw_string_path(raw, &["name"]))
+        .or_else(|| raw_string_path(raw, &["item", "type"]))
+        .or_else(|| raw_string_path(raw, &["tool"]))
+}
+
+fn status_success(raw: &serde_json::Value) -> Option<bool> {
+    raw_string_path(raw, &["item", "status"])
+        .or_else(|| raw_string_path(raw, &["status"]))
+        .map(|status| matches!(status.as_str(), "completed" | "success" | "succeeded"))
+}
+
+fn plan_status_count(plan: &[serde_json::Value], status: &str) -> u64 {
+    plan.iter()
+        .filter(|step| {
+            step.get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(|value| value == status)
+                .unwrap_or(false)
+        })
+        .count() as u64
+}
+
 async fn run_command(
     run_id: &str,
     session_key: Option<&str>,
@@ -1853,6 +2292,7 @@ async fn read_stdout_events(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut bytes = Vec::new();
     let mut events = Vec::new();
+    let mut tool_started_at: HashMap<String, u64> = HashMap::new();
     while let Some(line) = lines
         .next_line()
         .await
@@ -1860,7 +2300,9 @@ async fn read_stdout_events(
     {
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        if let Some(event) = parse_progress_event_line(&line) {
+        if let Some(mut event) = parse_progress_event_line(&line) {
+            let observed_at = now_ms();
+            enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
             if let Some(progress_tx) = progress_tx.as_ref() {
                 let _ = progress_tx.send(event.clone());
             }
@@ -1868,6 +2310,47 @@ async fn read_stdout_events(
         }
     }
     Ok((bytes, events))
+}
+
+fn enrich_progress_event_observation(
+    event: &mut ExternalCliProgressEvent,
+    observed_at: u64,
+    tool_started_at: &mut HashMap<String, u64>,
+) {
+    if let Some(object) = event.raw.as_object_mut() {
+        object
+            .entry("observedAtMs".to_string())
+            .or_insert_with(|| serde_json::json!(observed_at));
+    }
+    let Some(item_id) = event
+        .raw
+        .get("item")
+        .and_then(|item| item.get("id"))
+        .or_else(|| event.raw.get("item_id"))
+        .or_else(|| event.raw.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    match event.event_type {
+        ExternalCliProgressEventType::ToolStarted => {
+            tool_started_at.insert(item_id, observed_at);
+        }
+        ExternalCliProgressEventType::ToolFinished => {
+            if let Some(started_at) = tool_started_at.remove(&item_id) {
+                let duration_ms = observed_at.saturating_sub(started_at);
+                if let Some(object) = event.raw.as_object_mut() {
+                    object
+                        .entry("durationMs".to_string())
+                        .or_insert_with(|| serde_json::json!(duration_ms));
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 async fn read_stderr_lines(stderr: tokio::process::ChildStderr) -> Result<Vec<u8>, String> {

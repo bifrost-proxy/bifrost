@@ -63,6 +63,68 @@ type AgentThreadListCardProps = {
   onCollapse?: () => void;
 };
 
+function metadataValue(
+  metadata: Record<string, string> | undefined,
+  keys: string[],
+) {
+  for (const key of keys) {
+    const value = metadata?.[key];
+    if (value && value.trim()) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function metadataNumber(
+  metadata: Record<string, string> | undefined,
+  keys: string[],
+) {
+  const value = metadataValue(metadata, keys);
+  if (!value) {
+    return undefined;
+  }
+  const number = Number(value);
+  return Number.isFinite(number) ? number : undefined;
+}
+
+function formatMetadataNumber(
+  metadata: Record<string, string> | undefined,
+  keys: string[],
+) {
+  return formatNumber(metadataNumber(metadata, keys));
+}
+
+function formatMetadataCount(
+  metadata: Record<string, string> | undefined,
+  keys: string[],
+) {
+  return formatStatusMetricCount(metadataNumber(metadata, keys));
+}
+
+function formatMetadataDurationMs(
+  metadata: Record<string, string> | undefined,
+  keys: string[],
+) {
+  const value = metadataNumber(metadata, keys);
+  if (typeof value !== "number") {
+    return "-";
+  }
+  if (value < 1000) {
+    return `${Math.max(0, Math.round(value))}ms`;
+  }
+  return `${(value / 1000).toFixed(value < 10_000 ? 1 : 0)}s`;
+}
+
+function formatRunnerCli(metadata: Record<string, string> | undefined) {
+  const executable = metadataValue(metadata, ["cli.executable"]);
+  const version = metadataValue(metadata, ["cli.version"]);
+  if (executable && version) {
+    return `${executable} · ${version}`;
+  }
+  return executable || version || "-";
+}
+
 export function AgentThreadListCard({
   threads,
   sessionKey,
@@ -530,6 +592,72 @@ export function AgentChatSettingsModal({
                     .filter(Boolean)
                     .join(" / ")}
                 </Text>
+              </>
+            ) : null}
+            {telemetry.status?.metadata ? (
+              <>
+                <Divider style={{ margin: "4px 0" }} />
+                <Text type="secondary">Runner diagnostics</Text>
+                <MetricRow
+                  label="CLI"
+                  value={formatRunnerCli(telemetry.status.metadata)}
+                />
+                <MetricRow
+                  label="Prompt"
+                  value={`${formatMetadataCount(telemetry.status.metadata, [
+                    "prompt.estimatedTokens",
+                  ])} tok · ${formatMetadataCount(telemetry.status.metadata, [
+                    "prompt.bytes",
+                  ])} bytes`}
+                />
+                <MetricRow
+                  label="Attachments"
+                  value={`${formatMetadataNumber(telemetry.status.metadata, [
+                    "attachments.count",
+                  ])} · ${formatMetadataCount(telemetry.status.metadata, [
+                    "attachments.totalBytes",
+                  ])} bytes`}
+                />
+                <MetricRow
+                  label="I/O"
+                  value={`${formatMetadataCount(telemetry.status.metadata, [
+                    "io.stdoutBytes",
+                  ])} out · ${formatMetadataCount(telemetry.status.metadata, [
+                    "io.stderrBytes",
+                  ])} err`}
+                />
+                <MetricRow
+                  label="Tools"
+                  value={`${formatMetadataNumber(telemetry.status.metadata, [
+                    "tools.count",
+                  ])} calls · ${formatMetadataNumber(telemetry.status.metadata, [
+                    "tools.failedCount",
+                  ])} failed`}
+                />
+                <MetricRow
+                  label="Tool time"
+                  value={formatMetadataDurationMs(telemetry.status.metadata, [
+                    "tools.totalDurationMs",
+                  ])}
+                />
+                <MetricRow
+                  label="Run time"
+                  value={formatMetadataDurationMs(telemetry.status.metadata, [
+                    "timing.totalDurationMs",
+                  ])}
+                />
+                <MetricRow
+                  label="First event"
+                  value={formatMetadataDurationMs(telemetry.status.metadata, [
+                    "timing.firstEventLatencyMs",
+                  ])}
+                />
+                <MetricRow
+                  label="Resume"
+                  value={metadataValue(telemetry.status.metadata, [
+                    "resume.requested",
+                  ]) || "-"}
+                />
               </>
             ) : null}
             {telemetry.compaction ? (
