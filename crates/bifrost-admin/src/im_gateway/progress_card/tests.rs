@@ -954,19 +954,32 @@ struct MockFeishuProgressServer {
 }
 
 async fn spawn_mock_feishu_progress_server() -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(None, None, None).await
+    spawn_mock_feishu_progress_server_with_failures(None, None, None, None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_send_failure(
     fail_message_send_number: Option<usize>,
 ) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(fail_message_send_number, None, None).await
+    spawn_mock_feishu_progress_server_with_failures(fail_message_send_number, None, None, None)
+        .await
+}
+
+async fn spawn_mock_feishu_progress_server_with_invalid_card_id_send_failure(
+    fail_invalid_card_id_send_number: Option<usize>,
+) -> MockFeishuProgressServer {
+    spawn_mock_feishu_progress_server_with_failures(
+        None,
+        None,
+        None,
+        fail_invalid_card_id_send_number,
+    )
+    .await
 }
 
 async fn spawn_mock_feishu_progress_server_with_card_update_failure(
     fail_card_update_number: Option<usize>,
 ) -> MockFeishuProgressServer {
-    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_number, None).await
+    spawn_mock_feishu_progress_server_with_failures(None, fail_card_update_number, None, None).await
 }
 
 async fn spawn_mock_feishu_progress_server_with_card_update_and_create_failure(
@@ -977,6 +990,7 @@ async fn spawn_mock_feishu_progress_server_with_card_update_and_create_failure(
         None,
         fail_card_update_number,
         fail_card_create_number,
+        None,
     )
     .await
 }
@@ -985,6 +999,7 @@ async fn spawn_mock_feishu_progress_server_with_failures(
     fail_message_send_number: Option<usize>,
     fail_card_update_number: Option<usize>,
     fail_card_create_number: Option<usize>,
+    fail_invalid_card_id_send_number: Option<usize>,
 ) -> MockFeishuProgressServer {
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
@@ -1142,6 +1157,16 @@ async fn spawn_mock_feishu_progress_server_with_failures(
                                         .status(StatusCode::INTERNAL_SERVER_ERROR)
                                         .body(Full::new(Bytes::from_static(
                                             br#"{"code":99991664,"msg":"send denied"}"#,
+                                        )))
+                                        .unwrap(),
+                                );
+                            }
+                            if fail_invalid_card_id_send_number == Some(idx) {
+                                return Ok::<_, hyper::Error>(
+                                    Response::builder()
+                                        .status(StatusCode::OK)
+                                        .body(Full::new(Bytes::from_static(
+                                            br#"{"code":230099,"msg":"Failed to create card content, ext=ErrCode: 11310; ErrMsg: cardid is invalid;"}"#,
                                         )))
                                         .unwrap(),
                                 );
@@ -1748,6 +1773,69 @@ async fn start_feishu_after_finished_card_sends_new_card_without_recalling_histo
     assert_eq!(server.message_counter.load(Ordering::SeqCst), 2);
     assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 0);
     assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 0);
+    assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn start_feishu_after_finished_card_recovers_from_invalid_card_id_send() {
+    use std::sync::atomic::Ordering;
+
+    let server = spawn_mock_feishu_progress_server_with_invalid_card_id_send_failure(Some(2)).await;
+    let registry = ImAgentProgressRegistry::new();
+    let first_session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "finished turn",
+        )
+        .await
+        .expect("start first progress card");
+
+    registry
+        .finish("s1", Some("first turn done".to_string()), false)
+        .await
+        .expect("finish first progress card");
+
+    assert!(
+        !registry
+            .rollover_existing("s1", "next turn after finish")
+            .await
+    );
+    let second_session = registry
+        .start_feishu(
+            "s1",
+            Arc::new(FeishuProvider::new()),
+            mock_feishu_provider(&server.base_url),
+            mock_progress_target(),
+            "next turn after finish",
+        )
+        .await
+        .expect("start second progress card after invalid card_id retry");
+
+    let first_session = first_session.lock().await;
+    assert_eq!(
+        first_session
+            .message_info()
+            .expect("first message info")
+            .card_id,
+        "card_1"
+    );
+    drop(first_session);
+
+    let second_session = second_session.lock().await;
+    let message_info = second_session.message_info().expect("second message info");
+    assert_eq!(message_info.card_id, "card_3");
+    assert_eq!(message_info.message_id.as_deref(), Some("om_3"));
+    assert_eq!(
+        second_session.snapshot().title.as_deref(),
+        Some("next turn after finish")
+    );
+    assert_eq!(server.card_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.message_counter.load(Ordering::SeqCst), 3);
+    assert_eq!(server.card_update_counter.load(Ordering::SeqCst), 1);
+    assert_eq!(server.settings_update_counter.load(Ordering::SeqCst), 1);
     assert_eq!(server.recall_counter.load(Ordering::SeqCst), 0);
 }
 

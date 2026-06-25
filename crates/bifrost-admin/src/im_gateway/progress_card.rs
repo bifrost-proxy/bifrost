@@ -736,32 +736,29 @@ impl FeishuProgressCardSession {
     async fn send_initial_card(&mut self) -> Result<SendResult> {
         self.generation = self.generation.saturating_add(1);
         self.compact_card_mode = false;
-        let card = build_feishu_progress_card(&self.snapshot, true);
-        let (card_id, compact_card_mode) = match self
-            .feishu
-            .create_card_entity(&self.provider, card)
-            .await
-        {
-            Ok(card_id) => (card_id, false),
-            Err(error) if is_feishu_card_entity_limit_error(&error) => {
-                warn!(
-                    error = %error,
-                    "Feishu progress card create hit CardKit entity limit; retrying with compact card"
-                );
-                let compact_card = build_feishu_compact_progress_card(&self.snapshot, true);
-                let card_id = self
-                    .feishu
-                    .create_card_entity(&self.provider, compact_card)
-                    .await?;
-                (card_id, true)
+        let mut invalid_card_id_retried = false;
+        let (card_id, compact_card_mode, send_result) = loop {
+            let (card_id, compact_card_mode) = self.create_initial_card_entity().await?;
+            let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
+            match self
+                .feishu
+                .send_card_entity(&self.provider, &self.target, &card_id, Some(&send_uuid))
+                .await
+            {
+                Ok(send_result) => break (card_id, compact_card_mode, send_result),
+                Err(error)
+                    if !invalid_card_id_retried && is_feishu_card_id_invalid_error(&error) =>
+                {
+                    invalid_card_id_retried = true;
+                    warn!(
+                        card_id = %card_id,
+                        error = %error,
+                        "Feishu rejected newly created progress card entity; recreating once"
+                    );
+                }
+                Err(error) => return Err(error),
             }
-            Err(error) => return Err(error),
         };
-        let send_uuid = format!("progress_send_{}", uuid::Uuid::new_v4().simple());
-        let send_result = self
-            .feishu
-            .send_card_entity(&self.provider, &self.target, &card_id, Some(&send_uuid))
-            .await?;
         self.compact_card_mode = compact_card_mode;
         self.handle = Some(FeishuProgressCardHandle {
             card_id,
@@ -814,6 +811,26 @@ impl FeishuProgressCardSession {
             );
         }
         Ok(send_result)
+    }
+
+    async fn create_initial_card_entity(&self) -> Result<(String, bool)> {
+        let card = build_feishu_progress_card(&self.snapshot, true);
+        match self.feishu.create_card_entity(&self.provider, card).await {
+            Ok(card_id) => Ok((card_id, false)),
+            Err(error) if is_feishu_card_entity_limit_error(&error) => {
+                warn!(
+                    error = %error,
+                    "Feishu progress card create hit CardKit entity limit; retrying with compact card"
+                );
+                let compact_card = build_feishu_compact_progress_card(&self.snapshot, true);
+                let card_id = self
+                    .feishu
+                    .create_card_entity(&self.provider, compact_card)
+                    .await?;
+                Ok((card_id, true))
+            }
+            Err(error) => Err(error),
+        }
     }
 
     async fn flush_snapshot(&mut self) -> Result<()> {
@@ -1392,6 +1409,17 @@ fn is_feishu_card_entity_limit_error(error: &BifrostError) -> bool {
         && message.contains("card")
         && message.contains("code=300305")
         && message.contains("element exceeds the limit")
+}
+
+fn is_feishu_card_id_invalid_error(error: &BifrostError) -> bool {
+    let BifrostError::Network(message) = error else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("feishu")
+        && message.contains("send error")
+        && message.contains("card")
+        && (message.contains("cardid is invalid") || message.contains("card_id is invalid"))
 }
 
 fn format_output_markdown(snapshot: &ImAgentProgressSnapshot) -> String {

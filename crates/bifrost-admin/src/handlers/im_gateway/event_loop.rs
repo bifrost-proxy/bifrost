@@ -1218,25 +1218,11 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         warn!(
                             session_key = %input.session_key,
                             error = %error,
-                            "failed to start external runner progress card; falling back to final reply"
+                            "failed to start external runner progress card; final reply will be sent when the run finishes"
                         );
                     }
                 }
             }
-        }
-        if matches!(
-            delivery_mode,
-            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
-        ) && !progress_enabled
-        {
-            send_agent_reply(
-                ctx.client,
-                ctx.provider,
-                ctx.event,
-                "已开始处理 Runner 任务。",
-                ctx.message_log_store,
-            )
-            .await;
         }
         let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
             crate::im_gateway::external_cli::default_runs_root(),

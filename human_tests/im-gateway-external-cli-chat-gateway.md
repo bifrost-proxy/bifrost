@@ -1086,8 +1086,30 @@
 3. session detail 中该用户消息的 `content_parts` 包含文本 part 与 `data:image/png;base64,...` 图片 part。
 4. Runner 能读取图片并完成回复；本用例重点验收 Web UI 消息气泡展示，不要求模型回复内容固定。
 
+### TC-IEC-54: Feishu Runner 进度卡 card_id 瞬时失效恢复
+
+操作步骤：
+1. 使用当前源码执行 Feishu progress card mock 回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin start_feishu_after_finished_card_recovers_from_invalid_card_id_send --lib -- --nocapture
+   ```
+2. mock Feishu 服务先创建并发送第一轮进度卡，随后将该轮标记完成并关闭 streaming。
+3. 模拟同一 session 立即开始下一轮外部 Runner 消息；mock 服务让下一轮第一次 `send card entity` 返回：
+   ```json
+   {"code":230099,"msg":"Failed to create card content, ext=ErrCode: 11310; ErrMsg: cardid is invalid;"}
+   ```
+4. 检查测试断言和请求计数。
+5. 在真实飞书环境中，上一轮 Runner 结束后立即发送下一轮消息，观察 IM 消息流。
+
+预期结果：
+1. progress session 识别 `cardid is invalid` 为可恢复错误，重新创建新的 CardKit card entity 并重试发送一次。
+2. 第二轮进度卡发送成功后，registry handle 指向重试后的新 `card_id`，后续进展和最终结论更新同一张新进度卡。
+3. 旧的已完成卡片不被撤回、不被改写；新一轮只在最新用户消息之后创建新进度卡。
+4. 即使进度卡启动仍失败，外部 Runner `ProgressCard` delivery 也不得先发送 `已开始处理 Runner 任务。` 占位消息，避免最终结果之外多出一张无实时过程的卡片。
+
 ## 最近执行记录
 
+- 2026-06-26：执行 TC-IEC-54 的 Feishu progress card mock 回归。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin start_feishu_after_finished_card_recovers_from_invalid_card_id_send --lib -- --nocapture` 通过；mock 服务先发送第一轮 `card_1/om_1` 并 finish，第二轮第一次 `send card entity` 返回 `code=230099`、`cardid is invalid`，实现重新创建 `card_3` 并发送成功，最终 handle 指向 `card_3/om_3`，请求计数为 `card_counter=3`、`message_counter=3`、`card_update_counter=1`、`settings_update_counter=1`、`recall_counter=0`。同时执行旧语义回归 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_send_failure_keeps_previous_running_handle --lib -- --nocapture` 通过，确认非 `cardid is invalid` 的普通发送失败仍不切换 handle；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture`，35 个 progress_card 相关测试全部通过。
 - 2026-06-26：执行 TC-IEC-53 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `23043`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，在 `agent-chat-input` 粘贴 PNG 并发送 `图片气泡展示回归：这张测试图里有什么？`。发送后 DOM 中包含该文本的 `agent-chat-message-bubble-user` 同时包含 1 个 `agent-chat-previewable-image`，图片 `src` 前缀为 `data:image/png;base64,iVBORw0K`；刷新页面后同一文本气泡仍包含 1 张图片。session detail API 返回最后一条用户消息 `content_parts` 同时包含 text 和 image_url。截图保存为 `/tmp/bifrost-user-image-bubble-sent.png`、`/tmp/bifrost-user-image-bubble-reload.png`。
 - 2026-06-26：执行 TC-IEC-52 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `55951`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，确认存在任务计划胶囊 `Step 2/4审查未提交 diff+3`。鼠标 hover 胶囊后浮层出现，DOM 同时存在 `agent-chat-plan-hover-bridge` 与 `agent-chat-plan-popover`；鼠标移动到 8px 透明桥接区域并停留 `260ms` 后，浮层仍存在；继续移动到浮层中心并停留 `500ms` 后，浮层仍存在且文本包含 `Task progress1/4 completed...`；鼠标移到页面左上角 `260ms` 后浮层关闭。随后在浮层内拖选第二条任务文本，`window.getSelection()` 返回 `未提交 diff`，且浮层仍存在。截图保存为 `/tmp/bifrost-plan-hover-popover-open.png`、`/tmp/bifrost-plan-hover-popover-held.png`、`/tmp/bifrost-plan-hover-text-selection.png`。
 - 2026-06-26：执行 TC-IEC-51 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `73886`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 确认 `admin-chat-1782407491650` 的 session detail 有 `message_count=112`、`timeline_event_count=208`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`：初始页面 `Load older=true`，同时可见 `你好`、`你是干啥的`、`图片里面说的啥？` 和最新回复，不再只剩最后一条；点击 `Load older` 后 textLength 从 `2681` 增至 `3053`，等待 2.5 秒仍保持 `3053` 且旧首轮 `你是谁` 可见；刷新后恢复默认窗口且 `Load older=true`。随后在同一 Web UI 发送 `请用一句话回复：列表稳定验证二`，发送立即、运行 5 秒、完成后和最终刷新四个阶段均保持多轮历史可见，且 `Load older=true`；最终回复 `列表稳定验证二应同时检查会话列表 fallback title...` 可见。截图保存为 `/tmp/bifrost-chat-window-fixed-initial.png`、`/tmp/bifrost-chat-window-fixed-after-load-older-wait.png`、`/tmp/bifrost-chat-window-fixed-after-send-immediate.png`、`/tmp/bifrost-chat-window-fixed-after-final-reload.png`。

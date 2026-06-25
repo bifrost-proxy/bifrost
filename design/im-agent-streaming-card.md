@@ -101,6 +101,11 @@ IM message received
        -> if previous card is Finished/Failed, keep it in history and create a new card directly
        -> send a new CardKit card entity below the latest user message
        -> subsequent progress events update the new card_id
+  -> send card entity returns `cardid is invalid`
+       -> treat the just-created CardKit entity as unusable
+       -> create a fresh CardKit card entity and retry sending once
+       -> if retry succeeds, subsequent progress and final updates target the fresh card_id
+       -> if retry still fails, do not emit a synthetic "started runner task" IM message; only send the final fallback reply when the run finishes
 ```
 
 ## 实现逻辑
@@ -114,6 +119,7 @@ IM message received
 - `handle_busy_message` 在 guide / queue / remove queue 成功后通知 progress session 更新 snapshot。只有当前 progress session 仍处于 `Running` 时才执行 rollover：先在最新用户消息下方发送新卡片并把 registry handle 切到新 `card_id`，再 best-effort 把旧进度卡片更新为冻结快照并关闭 streaming；如果 progress session 已经 `Finished` / `Failed`，不能改写历史卡片，必须返回未更新并回退到普通确认消息或下一轮新卡片。
 - `process_agent_chat` 在下一轮启动 progress session 时优先调用 `rollover_existing`：只有旧卡片仍处于 `Running` 时才把旧 snapshot 冻结到旧卡片、重置当前 snapshot、创建新的 CardKit card entity 并发送新 interactive 消息；如果旧卡片已终态，`rollover_existing` 返回 false，上层直接 `start_feishu` 新建下一张进度卡片。旧卡冻结失败只记录 warn，不阻断新卡片发送；新卡片发送失败则返回错误并保持旧 running card/handle。
 - Feishu CardKit 整卡更新返回 `code=300305` 且错误信息包含 `element exceeds the limit` 时，progress session 复用 rollover 机制发送一张承载当前 snapshot 的新卡片，并把 registry handle 切到新 `card_id`；旧卡片冻结和关闭 streaming 仍是 best-effort，失败只记录 warn。完整卡片在正常渲染时主动控制 `agent_process_panel` 体积：执行过程只展示最近 30 次工具调用对应的 timeline 后缀，并在面板顶部明示前面已省略多少次工具调用，避免长任务上百轮调用提前触发 CardKit 元素大小限制。若新建完整 snapshot 卡片时 `create card entity` 仍返回 `code=300305`，说明当前 snapshot 自身已经超出 CardKit 限制，此时立即重试一张精简状态卡：只保留 status/footer、精简提示、截断后的最终输出或最新思考，不渲染 plan/process/tool 详情，并进入 compact card mode；后续 progress event / final close 继续更新这张精简卡，避免 Agent 仍在运行但飞书通道无任何状态。该恢复路径覆盖运行中 progress event、runner/status 刷新、restart 和 final flush；`finish` 完成后返回的新 `message_info` 必须指向恢复后的新卡片，便于 outbound log 和后续排查定位。
+- Feishu IM send API 偶发返回 `code=230099` 且错误信息包含 `cardid is invalid` 时，说明刚创建出的 CardKit card entity 还不能被发送或已被 Feishu 判定失效。progress session 会重新创建一张 card entity 并重试发送一次；重试成功后 registry handle 指向新的 `card_id`，旧的无效 card entity 不再参与后续更新。外部 runner 的 `ProgressCard` delivery 在进度卡启动失败时不再发送“已开始处理 Runner 任务。”这类合成占位 IM，避免上一轮刚结束后下一轮退化时产生额外卡片；真正失败时仍保留最终回复 fallback。
 - `run_agent_chat_with_interleave` 在 `process_agent_chat` 刚结束后、清理 guide/queue 前，会非阻塞 drain 当前 IM channel 中已经到达的事件，并复用 busy-message 处理逻辑把同 session 消息落入 guide/queue。这样模型正在输出最后回复或刚结束时到达的 IM 消息不会只被 ACK 而丢失。
 - 当 `set_title` 工具刷新标题时，通过 CardKit 整卡更新刷新 header；如果没有工具标题，则初始标题使用用户消息。
 - CardKit 更新 uuid 使用短随机值，不拼接 `card_id`；loop 结束时即使最终内容 flush 失败，也会 best-effort 关闭 `streaming_mode=false`。
@@ -139,6 +145,7 @@ IM message received
 - Feishu 撤回消息 API 仍保留独立方法并覆盖 tenant token 测试，但 progress card rollover 不调用 `DELETE /im/v1/messages/{message_id}`。
 - CardKit 更新 uuid 长度保持在 Feishu 字段限制内；final flush 失败时仍尝试关闭 streaming。
 - Feishu CardKit 整卡更新遇到 `code=300305 element exceeds the limit` 时应发送新 card entity，并把后续 progress event / final close 指向新 `card_id`；长任务执行过程应主动截断为最近 30 次工具调用并显示省略数量；如果新完整卡片创建也超限，应降级为 compact card mode，断言 compact payload 不包含超大 process/tool 详情但仍持续展示“Agent 仍在运行”和最新状态；旧卡片冻结失败不影响新卡片继续更新。
+- Feishu send card entity 遇到 `code=230099 cardid is invalid` 时应重新创建 card entity 并重试一次；已结束历史卡片后的下一轮消息必须恢复为新的实时进度卡，不能发出“已开始处理 Runner 任务。”占位消息。
 
 ### E2E 测试
 
