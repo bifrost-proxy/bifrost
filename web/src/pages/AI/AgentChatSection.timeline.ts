@@ -139,12 +139,15 @@ export function historyEventsToMessages(
     }
     if (event.event_type === "user_message") {
       lastEventWasAssistantDelta = false;
-      const content = event.content.message;
-      if (typeof content === "string" && content.trim().length > 0) {
+      const rawContent = event.content.message;
+      const content = typeof rawContent === "string" ? rawContent : "";
+      const contentParts = contentPartsFromHistoryUserMessage(event.content);
+      if (content.trim().length > 0 || hasImageContentParts(contentParts)) {
         messages.push({
           id: `history-${index}`,
           role: "user",
-          content,
+          content: content.trim().length > 0 ? content : "Attached image",
+          contentParts,
           timestamp: event.timestamp,
           meta: "History user",
         });
@@ -343,7 +346,12 @@ export function historyEventsToMessages(
     });
   }
   return hideIntermediateAssistantTimestamps(
-    messages.filter((item) => item.content.trim().length > 0 || item.processSteps?.length),
+    messages.filter(
+      (item) =>
+        item.content.trim().length > 0 ||
+        hasImageContentParts(item.contentParts) ||
+        item.processSteps?.length,
+    ),
   );
 
   function hasLatestStatusStep(summary: string) {
@@ -397,6 +405,48 @@ function mergeChatMessage(detailMessage: ChatMessage, timelineMessage: ChatMessa
     timestamp: timelineMessage.timestamp || detailMessage.timestamp,
     processSteps: timelineMessage.processSteps || detailMessage.processSteps,
   };
+}
+
+function contentPartsFromHistoryUserMessage(
+  content: Record<string, unknown>,
+): ChatMessage["contentParts"] | undefined {
+  const text = stringFrom(content.message);
+  const imageParts = imagePartsFromHistoryImages(content.images);
+  if (imageParts.length === 0) {
+    return undefined;
+  }
+  const parts: NonNullable<ChatMessage["contentParts"]> = [];
+  if (text?.trim()) {
+    parts.push({ type: "text", text });
+  }
+  parts.push(...imageParts);
+  return parts;
+}
+
+function imagePartsFromHistoryImages(images: unknown) {
+  if (!Array.isArray(images)) {
+    return [];
+  }
+  return images.flatMap((image) => {
+    if (!image || typeof image !== "object") {
+      return [];
+    }
+    const record = image as Record<string, unknown>;
+    const data = stringFrom(record.data);
+    if (!data) {
+      return [];
+    }
+    const mimeType =
+      stringFrom(record.mime_type) || stringFrom(record.mimeType) || "image/png";
+    const url = data.startsWith("data:") ? data : `data:${mimeType};base64,${data}`;
+    return [{ type: "image_url" as const, image_url: { url, detail: "auto" } }];
+  });
+}
+
+function hasImageContentParts(contentParts: ChatMessage["contentParts"] | undefined) {
+  return (contentParts || []).some(
+    (part) => part.type === "image_url" && Boolean(part.image_url?.url),
+  );
 }
 
 function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {

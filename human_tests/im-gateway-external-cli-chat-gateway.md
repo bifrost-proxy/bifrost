@@ -1066,8 +1066,29 @@
 3. 浮层内任务文本可以被选中，便于复制。
 4. 鼠标离开整组区域后，浮层正常关闭。
 
+### TC-IEC-53: Agent Chat Web UI 图文用户消息气泡刷新后保留图片
+
+操作步骤：
+1. 使用当前编译版本重启 `9900` 服务，启动参数包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。
+2. 打开真实 Web UI 会话：
+   ```text
+   http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active
+   ```
+3. 在 composer 中粘贴一张 PNG 图片，并输入文本 `图片气泡展示回归：这张测试图里有什么？`。
+4. 发送消息后等待用户消息出现在消息列表。
+5. 检查该用户消息的同一个气泡内同时展示文本和图片预览。
+6. 刷新页面，重新检查同一条用户消息。
+7. 查询 session detail API，确认最后一条用户消息包含 text 和 `image_url` 两类 `content_parts`。
+
+预期结果：
+1. 发送后用户气泡内有文本和图片预览，图片不被拆到独立消息，也不只出现在发送前预览区。
+2. 刷新后该用户气泡仍显示同一张图片，timeline/history 恢复不会丢弃 `content.images`。
+3. session detail 中该用户消息的 `content_parts` 包含文本 part 与 `data:image/png;base64,...` 图片 part。
+4. Runner 能读取图片并完成回复；本用例重点验收 Web UI 消息气泡展示，不要求模型回复内容固定。
+
 ## 最近执行记录
 
+- 2026-06-26：执行 TC-IEC-53 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `23043`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，在 `agent-chat-input` 粘贴 PNG 并发送 `图片气泡展示回归：这张测试图里有什么？`。发送后 DOM 中包含该文本的 `agent-chat-message-bubble-user` 同时包含 1 个 `agent-chat-previewable-image`，图片 `src` 前缀为 `data:image/png;base64,iVBORw0K`；刷新页面后同一文本气泡仍包含 1 张图片。session detail API 返回最后一条用户消息 `content_parts` 同时包含 text 和 image_url。截图保存为 `/tmp/bifrost-user-image-bubble-sent.png`、`/tmp/bifrost-user-image-bubble-reload.png`。
 - 2026-06-26：执行 TC-IEC-52 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `55951`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，确认存在任务计划胶囊 `Step 2/4审查未提交 diff+3`。鼠标 hover 胶囊后浮层出现，DOM 同时存在 `agent-chat-plan-hover-bridge` 与 `agent-chat-plan-popover`；鼠标移动到 8px 透明桥接区域并停留 `260ms` 后，浮层仍存在；继续移动到浮层中心并停留 `500ms` 后，浮层仍存在且文本包含 `Task progress1/4 completed...`；鼠标移到页面左上角 `260ms` 后浮层关闭。随后在浮层内拖选第二条任务文本，`window.getSelection()` 返回 `未提交 diff`，且浮层仍存在。截图保存为 `/tmp/bifrost-plan-hover-popover-open.png`、`/tmp/bifrost-plan-hover-popover-held.png`、`/tmp/bifrost-plan-hover-text-selection.png`。
 - 2026-06-26：执行 TC-IEC-51 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `73886`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 确认 `admin-chat-1782407491650` 的 session detail 有 `message_count=112`、`timeline_event_count=208`。真实浏览器打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`：初始页面 `Load older=true`，同时可见 `你好`、`你是干啥的`、`图片里面说的啥？` 和最新回复，不再只剩最后一条；点击 `Load older` 后 textLength 从 `2681` 增至 `3053`，等待 2.5 秒仍保持 `3053` 且旧首轮 `你是谁` 可见；刷新后恢复默认窗口且 `Load older=true`。随后在同一 Web UI 发送 `请用一句话回复：列表稳定验证二`，发送立即、运行 5 秒、完成后和最终刷新四个阶段均保持多轮历史可见，且 `Load older=true`；最终回复 `列表稳定验证二应同时检查会话列表 fallback title...` 可见。截图保存为 `/tmp/bifrost-chat-window-fixed-initial.png`、`/tmp/bifrost-chat-window-fixed-after-load-older-wait.png`、`/tmp/bifrost-chat-window-fixed-after-send-immediate.png`、`/tmp/bifrost-chat-window-fixed-after-final-reload.png`。
 - 2026-06-25：新增并执行 TC-IEC-50 的自动真实服务回归。命令 `SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost` 后运行 `SKIP_BUILD=true BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_im_gateway_traex_model_slash.sh`；脚本启动临时 Bifrost、配置 mock `traecli`，真实调用 `/chat/stream` 发送 `/models`、`/model Doubao-Unit` 和普通消息。断言 `/models` 响应包含 `Doubao-Unit` 与 `fast` tier、不包含 `SHOULD_NOT_LEAK` 或 hidden model；普通 run 的 `runtime_snapshot.args` 包含 `--model Doubao-Unit`；`session_state.json` 写入 `modelOverride:"Doubao-Unit"` 和 `modelOverrideSource:"session slash command"`。随后执行真实 Web UI 验证：`pnpm --dir web run build` 与 `cargo build --bin bifrost` 均通过；临时服务端口 `65110`，数据目录 `/tmp/bifrost-traex-webui-models.mNgvpy`，当前 Runner 为 `Traex`；浏览器打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat`，输入 `/` 后 slash 面板显示 `/models` 和 `/model`；点击 `/models` 后页面返回 `Doubao-UI`、`fast`、`visibility: list`，不包含 `WEB_UI_SHOULD_NOT_LEAK` 或 `hidden-ui`，且未展示“上下文正在自动压缩”；通过 Web UI 发送 `/model Doubao-UI` 后 `session_state.json` 写入 `modelOverride:"Doubao-UI"`；再发送普通消息 `hello after ui model switch`，页面返回 `BIFROST_TRAEX_WEB_UI_MODEL_OK`，run `1782399832370-576febaa-a224-4455-9d8c-13bf49bede39` 的 `runtime_snapshot.args` 包含 `--model Doubao-UI`。

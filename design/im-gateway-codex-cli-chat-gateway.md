@@ -218,7 +218,8 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 3. Web slash runner-call 支持 `images[]`，允许 image-only call。父会话中仍显示用户可感知的图片消息，目标 runner 的 request 也带同一组图片。
 4. runtime 在执行前把图片解码落盘到当前 session JSONL 旁边的附件目录，并按 run id 再分层：`sessions/YYYY/MM/DD/attachments/<session-file-stem>/<run-id>/images/image-N.<ext>`。如果无法拿到 session recorder，则退回 run dir 内的 `attachments/images`。
 5. prompt envelope 在用户文本前追加 `## Attached Images`，列出每张图片的绝对路径、mime type 和大小，要求 Codex/Trae 使用本地文件路径理解图片。
-6. run result metadata 写入 `attachments.images`，session timeline 写入带图片的 user message，保证 Web History 和后续回放知道该轮包含图片。
+6. Web UI 展示层必须把用户 timeline 中持久化的图片恢复成同一条用户气泡内的 `contentParts`。刷新、运行中 timeline 增量更新、history tail 替换本地乐观消息时，都不能只保留 `content.message` 而丢弃 `content.images`；纯图片消息也必须保留可见气泡。
+7. run result metadata 写入 `attachments.images`，session timeline 写入带图片的 user message，保证 Web History 和后续回放知道该轮包含图片。
 
 这样做避免把 base64 大图直接塞进外部 CLI prompt，也避免同一天多个 session 共享 `attachments/images` 或同一 session 多轮 `image-1.png` 造成覆盖。Codex 和 Trae 使用相同 bridge；adapter 后续如果原生支持图片参数，可以在 adapter capability 中声明并在 command builder 中升级为原生传参，但 session 附件落盘仍保留为审计和历史回放证据。
 

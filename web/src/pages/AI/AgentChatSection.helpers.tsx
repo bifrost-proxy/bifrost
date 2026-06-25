@@ -288,6 +288,8 @@ export function sameChatMessages(left: ChatMessage[], right: ChatMessage[]) {
         message.role === other.role &&
         message.content === other.content &&
         message.meta === other.meta &&
+        JSON.stringify(message.contentParts || []) ===
+          JSON.stringify(other.contentParts || []) &&
         JSON.stringify(message.processSteps || []) ===
           JSON.stringify(other.processSteps || [])
       );

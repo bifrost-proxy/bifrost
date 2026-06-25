@@ -287,6 +287,71 @@ describe("historyEventsToTelemetry", () => {
 });
 
 describe("historyEventsToMessages", () => {
+  it("restores user message images from persisted timeline events", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "image-text",
+        content: {
+          message: "图片里面说的啥？",
+          images: [
+            {
+              mime_type: "image/png",
+              data: "aGVsbG8=",
+            },
+          ],
+        },
+      },
+      {
+        timestamp: 2,
+        event_type: "assistant_message",
+        session_key: "image-text",
+        content: { message: "图片里是 hello。" },
+      },
+    ]);
+
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      content: "图片里面说的啥？",
+    });
+    expect(messages[0].contentParts).toEqual([
+      { type: "text", text: "图片里面说的啥？" },
+      {
+        type: "image_url",
+        image_url: { url: "data:image/png;base64,aGVsbG8=", detail: "auto" },
+      },
+    ]);
+  });
+
+  it("keeps image-only user timeline messages visible", () => {
+    const messages = historyEventsToMessages([
+      {
+        timestamp: 1,
+        event_type: "user_message",
+        session_key: "image-only",
+        content: {
+          images: [
+            {
+              mimeType: "image/jpeg",
+              data: "aW1hZ2U=",
+            },
+          ],
+        },
+      },
+    ]);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: "user",
+      content: "Attached image",
+    });
+    expect(messages[0].contentParts?.[0]).toEqual({
+      type: "image_url",
+      image_url: { url: "data:image/jpeg;base64,aW1hZ2U=", detail: "auto" },
+    });
+  });
+
   it("keeps detail chat turns when a noisy timeline tail only contains the latest run", () => {
     const detailMessages = [
       { id: "d1", role: "user" as const, content: "first question", meta: "You" },
