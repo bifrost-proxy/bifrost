@@ -121,6 +121,7 @@ struct MenuDataSnapshot {
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     system_proxy_needs_recheck: bool,
+    tls_interception_enabled: bool,
     pending_action: Option<menu::PendingMenuAction>,
     bin_available: bool,
     update_available: Option<String>,
@@ -163,13 +164,15 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let event_loop = EventLoopBuilder::new().build();
 
-    let icon_running = load_icon(false);
-    let icon_stopped = load_icon(true);
     let runtime = runtime_for_menu(&args);
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
     let initial_menu_data = load_menu_data_snapshot(&args, state, true, true);
+    let icon_running = load_icon(false, false);
+    let icon_running_tls = load_icon(false, true);
+    let icon_stopped = load_icon(true, false);
+    let icon_stopped_tls = load_icon(true, true);
     #[cfg(target_os = "macos")]
     let initial_menu_bar_title = menu_bar_stats_title(&initial_menu_data, state);
     let menu_items =
@@ -187,7 +190,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut action_map = native_menu.action_map.clone();
 
     let initial_icon = match state {
+        ServiceState::Running if initial_menu_data.tls_interception_enabled => &icon_running_tls,
         ServiceState::Running => &icon_running,
+        _ if initial_menu_data.tls_interception_enabled => &icon_stopped_tls,
         _ => &icon_stopped,
     };
 
@@ -210,6 +215,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         ServiceState::Stopped => STATE_STOPPED,
         ServiceState::Disconnected => STATE_DISCONNECTED,
     }));
+    let initial_tls_interception_enabled = initial_menu_data.tls_interception_enabled;
     let menu_data = Arc::new(Mutex::new(initial_menu_data));
     let menu_data_generation = Arc::new(AtomicU64::new(0));
     #[cfg(target_os = "macos")]
@@ -351,6 +357,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
+    let mut last_rendered_tls_badge = initial_tls_interception_enabled;
     #[cfg(target_os = "macos")]
     let mut last_rendered_menu_bar_title = initial_menu_bar_title;
     #[cfg(target_os = "macos")]
@@ -464,20 +471,25 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
+        let current_tls_badge = clone_menu_data_snapshot(&menu_data).tls_interception_enabled;
 
-        if state_changed {
+        if state_changed || current_tls_badge != last_rendered_tls_badge {
             last_rendered_state = new_state;
+            last_rendered_tls_badge = current_tls_badge;
 
             // Do not replace the native menu from background polling. Replacing
             // the menu object closes the currently open system menu on
             // macOS/Windows, which makes the tray feel impossible to open while
             // data is refreshing. State polling only updates non-menu
             // affordances; explicit reloads/actions rebuild the menu below.
-            let new_icon = if new_state == STATE_RUNNING {
-                &icon_running
-            } else {
-                &icon_stopped
-            };
+            let new_icon = tray_icon_for_state(
+                new_state,
+                current_tls_badge,
+                &icon_running,
+                &icon_running_tls,
+                &icon_stopped,
+                &icon_stopped_tls,
+            );
             #[cfg(target_os = "macos")]
             {
                 if let Some(native_stats_item) = native_stats_item.as_mut() {
@@ -530,7 +542,9 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                             tray_icon,
                             new_title.as_deref(),
                             match svc_state {
+                                ServiceState::Running if current_tls_badge => &icon_running_tls,
                                 ServiceState::Running => &icon_running,
+                                _ if current_tls_badge => &icon_stopped_tls,
                                 _ => &icon_stopped,
                             },
                         );
@@ -668,10 +682,13 @@ fn menu_bar_stats_title(snapshot: &MenuDataSnapshot, state: ServiceState) -> Opt
     if state != ServiceState::Running {
         return None;
     }
-    snapshot
-        .system_stats
-        .as_ref()
-        .map(|stats| stats.menu_bar.clone())
+    snapshot.system_stats.as_ref().map(|stats| {
+        if snapshot.tls_interception_enabled {
+            format!("TLS | {}", stats.menu_bar)
+        } else {
+            stats.menu_bar.clone()
+        }
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2054,7 +2071,7 @@ fn tray_event_may_open_menu(event: &TrayIconEvent) -> bool {
     )
 }
 
-fn load_icon(dimmed: bool) -> tray_icon::Icon {
+fn load_icon(dimmed: bool, tls_badge: bool) -> tray_icon::Icon {
     #[cfg(target_os = "macos")]
     let icon_bytes: &[u8] = include_bytes!("../../../../../assets/trayTemplate@2x.png");
     #[cfg(target_os = "windows")]
@@ -2079,8 +2096,63 @@ fn load_icon(dimmed: bool) -> tray_icon::Icon {
         }
     }
 
+    if tls_badge {
+        apply_tls_badge_to_icon(&mut rgba);
+    }
+
     let (width, height) = rgba.dimensions();
     tray_icon::Icon::from_rgba(rgba.into_raw(), width, height).expect("failed to create icon")
+}
+
+fn apply_tls_badge_to_icon(rgba: &mut image::RgbaImage) {
+    let (width, height) = rgba.dimensions();
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let radius = (width.min(height) as f32 * 0.24).max(3.0);
+    let center_x = width as f32 - radius - 1.0;
+    let center_y = radius + 1.0;
+
+    for y in 0..height {
+        for x in 0..width {
+            let dx = x as f32 - center_x;
+            let dy = y as f32 - center_y;
+            if dx * dx + dy * dy <= radius * radius {
+                let pixel = rgba.get_pixel_mut(x, y);
+                #[cfg(target_os = "macos")]
+                {
+                    pixel[0] = 0;
+                    pixel[1] = 0;
+                    pixel[2] = 0;
+                    pixel[3] = 255;
+                }
+                #[cfg(not(target_os = "macos"))]
+                {
+                    pixel[0] = 225;
+                    pixel[1] = 36;
+                    pixel[2] = 36;
+                    pixel[3] = 255;
+                }
+            }
+        }
+    }
+}
+
+fn tray_icon_for_state<'a>(
+    state: u8,
+    tls_badge: bool,
+    icon_running: &'a tray_icon::Icon,
+    icon_running_tls: &'a tray_icon::Icon,
+    icon_stopped: &'a tray_icon::Icon,
+    icon_stopped_tls: &'a tray_icon::Icon,
+) -> &'a tray_icon::Icon {
+    match (state, tls_badge) {
+        (STATE_RUNNING, true) => icon_running_tls,
+        (STATE_RUNNING, false) => icon_running,
+        (_, true) => icon_stopped_tls,
+        (_, false) => icon_stopped,
+    }
 }
 
 fn determine_state(runtime: Option<&RuntimeInfo>, parent_pid: u32) -> ServiceState {
@@ -2457,6 +2529,11 @@ fn load_menu_data_snapshot(
         Some(snapshot) => (Some(snapshot.state), snapshot.needs_recheck),
         None => (None, false),
     };
+    let tls_interception_enabled = if include_remote {
+        load_tls_interception_enabled_for_menu(runtime.as_ref(), state)
+    } else {
+        false
+    };
 
     MenuDataSnapshot {
         runtime,
@@ -2465,6 +2542,7 @@ fn load_menu_data_snapshot(
         recent_rule_targets,
         system_proxy,
         system_proxy_needs_recheck,
+        tls_interception_enabled,
         pending_action: None,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
@@ -2596,6 +2674,18 @@ fn load_system_proxy_for_menu(
     runtime.and_then(|rt| load_system_proxy_state(&rt.admin_url()))
 }
 
+fn load_tls_interception_enabled_for_menu(
+    runtime: Option<&RuntimeInfo>,
+    state: ServiceState,
+) -> bool {
+    if state != ServiceState::Running {
+        return false;
+    }
+    runtime
+        .and_then(|rt| load_tls_interception_enabled(&rt.admin_url()))
+        .unwrap_or(false)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SystemProxyMenuSnapshot {
     state: menu::SystemProxyMenuState,
@@ -2670,6 +2760,11 @@ struct SystemProxyStatusResponse {
     enabled: bool,
     managed_by_bifrost: Option<bool>,
     configured_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TlsConfigStatusResponse {
+    enable_tls_interception: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2883,6 +2978,7 @@ fn load_system_proxy_state(admin_url: &str) -> Option<SystemProxyMenuSnapshot> {
                     && !owned_by_other;
                 Some(SystemProxyMenuSnapshot {
                     state: menu::SystemProxyMenuState {
+                        known: true,
                         supported: status.supported,
                         enabled: enabled_by_bifrost,
                     },
@@ -2896,6 +2992,28 @@ fn load_system_proxy_state(admin_url: &str) -> Option<SystemProxyMenuSnapshot> {
         },
         Err(error) => {
             tracing::warn!(error = %error, "failed to load system proxy status for tray menu");
+            None
+        }
+    }
+}
+
+fn load_tls_interception_enabled(admin_url: &str) -> Option<bool> {
+    let base = admin_url.trim_end_matches('/');
+    let url = format!("{base}/api/config/tls");
+    let agent = http_agent();
+    match agent.get(&url).call() {
+        Ok(resp) => match resp.into_json::<TlsConfigStatusResponse>() {
+            Ok(config) => Some(config.enable_tls_interception),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to decode TLS config status for tray icon"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load TLS config status for tray icon");
             None
         }
     }
@@ -4594,6 +4712,7 @@ fn dashboard_runtime_label(runtime: Option<&RuntimeInfo>, state: ServiceState) -
 #[cfg(target_os = "macos")]
 fn dashboard_system_proxy_label(system_proxy: Option<&menu::SystemProxyMenuState>) -> String {
     match system_proxy {
+        Some(state) if !state.known => "System proxy checking".to_string(),
         Some(state) if !state.supported => "System proxy unsupported".to_string(),
         Some(state) if state.enabled => "System proxy On".to_string(),
         Some(_) => "System proxy Off".to_string(),

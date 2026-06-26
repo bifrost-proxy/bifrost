@@ -96,6 +96,81 @@ test("底部 Sync 状态栏点击后跳转到 Settings Sync", async ({ page }) =
   await expect(page).toHaveURL(/\/_bifrost\/settings\?tab=sync/);
 });
 
+test("底部状态栏展示全局 HTTPS Interception 动画警示", async ({
+  page,
+  request,
+}) => {
+  const tlsRes = await request.get(`${apiBase}/config/tls`);
+  const originalTls = await tlsRes.json();
+  await request.put(`${apiBase}/config/tls`, {
+    data: {
+      ...originalTls,
+      enable_tls_interception: true,
+      intercept_exclude: [],
+      intercept_include: [],
+      app_intercept_exclude: [],
+      app_intercept_include: [],
+      ip_intercept_exclude: [],
+      ip_intercept_include: [],
+    },
+  });
+  await page.route("**/_bifrost/api/proxy/system", async (route) => {
+    await route.fulfill({
+      json: {
+        supported: true,
+        enabled: true,
+        host: "127.0.0.1",
+        port: backendPort,
+        bypass: "localhost,127.0.0.1",
+        managed_by_bifrost: true,
+        configured_enabled: true,
+      },
+    });
+  });
+
+  try {
+    await openPage(page, "traffic");
+
+    const tlsStatus = page.getByTestId("statusbar-tls-interception");
+    const expectTlsStatusReadable = async () => {
+      const metrics = await tlsStatus.evaluate((element) => {
+        const value = element.querySelector(".statusbar-tls-value--active");
+        const valueStyle = value ? window.getComputedStyle(value) : null;
+        const rect = element.getBoundingClientRect();
+        return {
+          color: valueStyle?.color ?? "",
+          background: window.getComputedStyle(document.body).backgroundColor,
+          width: rect.width,
+          height: rect.height,
+        };
+      });
+      expect(metrics.color).not.toBe(metrics.background);
+      expect(metrics.width).toBeGreaterThan(70);
+      expect(metrics.height).toBeGreaterThan(12);
+    };
+
+    await expect(tlsStatus).toBeVisible();
+    await expect(tlsStatus).toHaveAttribute("data-tls-state", "full");
+    await expect(tlsStatus).toContainText("TLS:");
+    await expect(tlsStatus).toContainText("Full On");
+    await expect(tlsStatus.locator(".statusbar-tls-dot--active")).toBeVisible();
+    await expect(tlsStatus.locator(".statusbar-tls-value--active")).toHaveText("Full On");
+    await expectTlsStatusReadable();
+
+    await page.getByTestId("theme-toggle").click();
+    await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+    await expect(tlsStatus).toHaveAttribute("data-tls-state", "full");
+    await expect(tlsStatus.locator(".statusbar-tls-dot--active")).toBeVisible();
+    await expect(tlsStatus.locator(".statusbar-tls-value--active")).toHaveText("Full On");
+    await expectTlsStatusReadable();
+
+    await tlsStatus.click();
+    await expect(page).toHaveURL(/\/_bifrost\/settings\?tab=tls/);
+  } finally {
+    await request.put(`${apiBase}/config/tls`, { data: originalTls });
+  }
+});
+
 test("Settings 访问控制支持模式切换、白名单、临时白名单和 LAN 开关", async ({
   page,
 }) => {

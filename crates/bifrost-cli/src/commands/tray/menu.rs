@@ -71,6 +71,7 @@ pub struct TrayRule {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemProxyMenuState {
+    pub known: bool,
     pub supported: bool,
     pub enabled: bool,
 }
@@ -284,6 +285,7 @@ pub fn build_menu_with_pending(
                 Some(system_proxy)
             } else {
                 fallback_system_proxy = SystemProxyMenuState {
+                    known: false,
                     supported: false,
                     enabled: false,
                 };
@@ -293,28 +295,13 @@ pub fn build_menu_with_pending(
             None
         };
         if let Some(system_proxy) = system_proxy {
-            let pending_system_proxy = pending_action.and_then(|pending| match pending {
-                PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
-                PendingMenuAction::Rule { .. } => None,
-            });
-            let label = match pending_system_proxy {
-                Some(true) => "Enabling System Proxy...",
-                Some(false) => "Disabling System Proxy...",
-                None => "System Proxy",
-            };
-            items.push(item(MenuItemDef {
-                id: "toggle_system_proxy".to_string(),
-                label: label.to_string(),
-                enabled: is_running
-                    && system_proxy.supported
-                    && !service_action_busy
-                    && pending_action.is_none(),
-                checked: system_proxy.enabled,
-                action: MenuItemAction::SetSystemProxy {
-                    url: format!("{}api/proxy/system", admin_url),
-                    enabled: !system_proxy.enabled,
-                },
-            }));
+            items.push(MenuEntry::Submenu(build_system_proxy_menu(
+                system_proxy,
+                is_running,
+                service_action_busy,
+                pending_action,
+                &format!("{}api/proxy/system", admin_url),
+            )));
         }
     }
 
@@ -464,6 +451,70 @@ fn build_rules_menu(
         enabled: true,
         children,
     })
+}
+
+fn build_system_proxy_menu(
+    system_proxy: &SystemProxyMenuState,
+    is_running: bool,
+    service_action_busy: bool,
+    pending_action: Option<&PendingMenuAction>,
+    url: &str,
+) -> SubmenuDef {
+    let pending_system_proxy = pending_action.and_then(|pending| match pending {
+        PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
+        PendingMenuAction::Rule { .. } => None,
+    });
+    let status_label = match pending_system_proxy {
+        Some(true) => "Enabling...",
+        Some(false) => "Disabling...",
+        None if !system_proxy.known => "Checking...",
+        None if !system_proxy.supported => "Unsupported",
+        None if system_proxy.enabled => "On",
+        None => "Off",
+    };
+    let detail_label = match pending_system_proxy {
+        Some(true) => "Status: enabling Bifrost system proxy",
+        Some(false) => "Status: disabling Bifrost system proxy",
+        None if !system_proxy.known => "Status: checking current OS proxy",
+        None if !system_proxy.supported => "Status: unsupported on this platform",
+        None if system_proxy.enabled => "Status: enabled by Bifrost",
+        None => "Status: disabled",
+    };
+    let action_enabled = is_running
+        && system_proxy.known
+        && system_proxy.supported
+        && !service_action_busy
+        && pending_action.is_none();
+    let action_label = if system_proxy.enabled {
+        "Disable System Proxy"
+    } else {
+        "Enable System Proxy"
+    };
+
+    SubmenuDef {
+        id: "system_proxy".to_string(),
+        label: format!("System Proxy: {status_label}"),
+        enabled: true,
+        children: vec![
+            item(MenuItemDef {
+                id: "system_proxy_status".to_string(),
+                label: detail_label.to_string(),
+                enabled: false,
+                checked: false,
+                action: MenuItemAction::None,
+            }),
+            item(MenuItemDef {
+                id: "toggle_system_proxy".to_string(),
+                label: action_label.to_string(),
+                enabled: action_enabled,
+                checked: system_proxy.enabled,
+                action: MenuItemAction::SetSystemProxy {
+                    url: url.to_string(),
+                    enabled: !system_proxy.enabled,
+                },
+            }),
+        ],
+    }
 }
 
 fn build_recent_rule_entries(
@@ -925,6 +976,7 @@ mod tests {
     fn test_system_proxy_toggle_is_below_stop_without_restart_or_data_dir() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -946,20 +998,24 @@ mod tests {
 
         let labels = menu
             .iter()
-            .filter_map(|entry| match entry {
-                MenuEntry::Item(item) => Some(item.label.as_str()),
-                MenuEntry::Submenu(_) => None,
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => item.label.as_str(),
+                MenuEntry::Submenu(submenu) => submenu.label.as_str(),
             })
             .collect::<Vec<_>>();
         let stop_index = labels
             .iter()
             .position(|label| *label == "Stop Bifrost")
             .unwrap();
-        assert_eq!(labels.get(stop_index + 1), Some(&"System Proxy"));
+        assert_eq!(labels.get(stop_index + 1), Some(&"System Proxy: On"));
         assert!(!labels.contains(&"Restart Bifrost"));
         assert!(!labels.contains(&"Open Data Directory"));
 
+        let submenu = find_submenu(&menu, "system_proxy").unwrap();
+        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
+        assert_eq!(status.label, "Status: enabled by Bifrost");
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "Disable System Proxy");
         assert!(toggle.enabled);
         assert!(toggle.checked);
         match &toggle.action {
@@ -990,8 +1046,12 @@ mod tests {
             None,
         );
 
-        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "System Proxy");
+        let submenu = find_submenu(&menu, "system_proxy").unwrap();
+        assert_eq!(submenu.label, "System Proxy: Checking...");
+        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
+        assert_eq!(status.label, "Status: checking current OS proxy");
+        let toggle = find_item(&submenu.children, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "Enable System Proxy");
         assert!(!toggle.enabled);
         assert!(!toggle.checked);
         match &toggle.action {
@@ -1007,6 +1067,7 @@ mod tests {
     fn test_system_proxy_pending_shows_busy_label_and_disables_async_toggles() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: false,
         };
@@ -1028,8 +1089,12 @@ mod tests {
             Some(&PendingMenuAction::SystemProxy { enabled: true }),
         );
 
-        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Enabling System Proxy...");
+        let submenu = find_submenu(&menu, "system_proxy").unwrap();
+        assert_eq!(submenu.label, "System Proxy: Enabling...");
+        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
+        assert_eq!(status.label, "Status: enabling Bifrost system proxy");
+        let toggle = find_item(&submenu.children, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "Enable System Proxy");
         assert!(!toggle.enabled);
         assert!(!toggle.checked);
 
@@ -1117,6 +1182,7 @@ mod tests {
     fn test_menu_stopped_state() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -1403,6 +1469,7 @@ mod tests {
     fn test_rules_pending_shows_busy_label_and_disables_async_toggles() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -1440,7 +1507,7 @@ mod tests {
         assert!(!beta.enabled);
 
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "System Proxy");
+        assert_eq!(toggle.label, "Disable System Proxy");
         assert!(!toggle.enabled);
         assert!(toggle.checked);
     }
