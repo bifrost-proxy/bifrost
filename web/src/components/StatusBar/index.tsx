@@ -10,17 +10,22 @@ import { useNavigate } from "react-router-dom";
 import { theme, Tooltip, Popover, Switch } from "antd";
 import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
+import type { TlsConfig } from "../../api/config";
 import { useMetricsStore } from "../../stores/useMetricsStore";
 import {
   isSystemProxyConfiguredEnabled,
   isSystemProxyLiveEnabledByBifrost,
   useProxyStore,
 } from "../../stores/useProxyStore";
+import { useTlsConfigStore } from "../../stores/useTlsConfigStore";
 import { useVersionStore } from "../../stores/useVersionStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import type { SyncStatus } from "../../api/sync";
+import pushService, { type SettingsScope } from "../../services/pushService";
 import VersionModal from "../VersionModal";
 import AiSkillAssistant from "../AiSkillAssistant";
+import { getTlsInterceptionIndicator } from "./statusIndicators";
+import "./index.css";
 
 function formatSyncAction(action?: SyncStatus["last_sync_action"]): string | null {
   switch (action) {
@@ -62,6 +67,22 @@ function formatUptime(seconds: number): string {
   return h > 0 ? `${d}d ${h}h` : `${d}d`;
 }
 
+function withSettingsScope(scope: SettingsScope): SettingsScope[] {
+  return Array.from(
+    new Set([...(pushService.getSubscription().settings_scopes ?? []), scope]),
+  );
+}
+
+function tlsConfigFromPushData(data: unknown): TlsConfig | null {
+  if (!data || typeof data !== "object") {
+    return null;
+  }
+  const candidate = data as Partial<TlsConfig>;
+  return typeof candidate.enable_tls_interception === "boolean"
+    ? (candidate as TlsConfig)
+    : null;
+}
+
 const StatusBar = memo(function StatusBar() {
   const navigate = useNavigate();
   const { token } = theme.useToken();
@@ -77,6 +98,11 @@ const StatusBar = memo(function StatusBar() {
   const fetchSystemProxy = useProxyStore((state) => state.fetchSystemProxy);
   const toggleSystemProxy = useProxyStore((state) => state.toggleSystemProxy);
   const proxyLoading = useProxyStore((state) => state.loading);
+  const tlsConfig = useTlsConfigStore((state) => state.config);
+  const fetchTlsConfig = useTlsConfigStore((state) => state.fetchConfig);
+  const applyTlsConfigSnapshot = useTlsConfigStore(
+    (state) => state.applyConfigSnapshot,
+  );
   const syncStatus = useSyncStore((state) => state.syncStatus);
   const startPolling = useSyncStore((state) => state.startPolling);
   const stopPolling = useSyncStore((state) => state.stopPolling);
@@ -88,13 +114,37 @@ const StatusBar = memo(function StatusBar() {
 
   useEffect(() => {
     fetchSystemProxy();
+    fetchTlsConfig();
+    pushService.connect({
+      ...pushService.getSubscription(),
+      settings_scopes: withSettingsScope("tls_config"),
+    });
+    const unsubscribeTlsSettings = pushService.onSettingsUpdate((update) => {
+      if (update.scope !== "tls_config") {
+        return;
+      }
+      const nextConfig = tlsConfigFromPushData(update.data);
+      if (nextConfig) {
+        applyTlsConfigSnapshot(nextConfig);
+      }
+    });
     enablePush({ needOverview: true, needMetrics: true });
     startPolling();
     return () => {
+      unsubscribeTlsSettings();
       disablePush();
       stopPolling();
+      pushService.disconnectIfIdle();
     };
-  }, [fetchSystemProxy, enablePush, disablePush, startPolling, stopPolling]);
+  }, [
+    fetchSystemProxy,
+    fetchTlsConfig,
+    applyTlsConfigSnapshot,
+    enablePush,
+    disablePush,
+    startPolling,
+    stopPolling,
+  ]);
 
   const metrics = current || overview?.metrics;
 
@@ -137,6 +187,11 @@ const StatusBar = memo(function StatusBar() {
       running: managedByCurrentBifrost,
     };
   }, [systemProxy]);
+
+  const tlsIndicator = useMemo(
+    () => getTlsInterceptionIndicator(tlsConfig),
+    [tlsConfig],
+  );
 
   const handleToggleSystemProxy = useCallback(
     (checked: boolean) => {
@@ -366,6 +421,31 @@ const StatusBar = memo(function StatusBar() {
         ? token.colorSuccess
         : token.colorTextQuaternary,
     },
+    tlsDot: {
+      width: 7,
+      height: 7,
+      borderRadius: "50%",
+      color: tlsIndicator.active ? token.colorError : token.colorTextQuaternary,
+      backgroundColor: tlsIndicator.active
+        ? token.colorError
+        : token.colorTextQuaternary,
+      boxShadow: tlsIndicator.active ? `0 0 8px ${token.colorError}` : "none",
+      flexShrink: 0,
+    },
+    tlsButton: {
+      cursor: "pointer",
+      borderRadius: 3,
+      padding: "1px 4px",
+      margin: "0 -4px",
+      transition: "background-color 0.2s",
+    },
+    tlsValue: {
+      fontFamily: "monospace",
+      minWidth: 48,
+      color: tlsIndicator.active ? token.colorError : token.colorTextTertiary,
+      fontWeight: tlsIndicator.active ? 700 : 400,
+      display: "inline-block",
+    },
     syncDot: {
       width: 6,
       height: 6,
@@ -432,6 +512,47 @@ const StatusBar = memo(function StatusBar() {
             <span style={styles.valueStatus}>{proxyStatus.text}</span>
           </div>
         </Popover>
+
+        <Tooltip title={tlsIndicator.detail}>
+          <div
+            style={{ ...styles.item, ...styles.tlsButton }}
+            role="button"
+            tabIndex={0}
+            aria-label="Open TLS interception settings"
+            data-testid="statusbar-tls-interception"
+            data-tls-state={tlsIndicator.state}
+            onClick={() => navigate("/settings?tab=tls")}
+            onKeyDown={(event) => {
+              if (event.key !== "Enter" && event.key !== " ") {
+                return;
+              }
+              event.preventDefault();
+              navigate("/settings?tab=tls");
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.backgroundColor = token.colorFillSecondary;
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.backgroundColor = "transparent";
+            }}
+          >
+            <div
+              className={`statusbar-tls-dot ${
+                tlsIndicator.active ? "statusbar-tls-dot--active" : ""
+              }`}
+              style={styles.tlsDot}
+            />
+            <span style={styles.label}>TLS:</span>
+            <span
+              className={
+                tlsIndicator.active ? "statusbar-tls-value--active" : undefined
+              }
+              style={styles.tlsValue}
+            >
+              {tlsIndicator.text}
+            </span>
+          </div>
+        </Tooltip>
 
         <Tooltip title={syncIndicator.detail}>
           <div

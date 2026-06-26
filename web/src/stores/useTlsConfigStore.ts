@@ -11,6 +11,7 @@ interface TlsConfigState {
   config: TlsConfig | null;
   loading: boolean;
   error: string | null;
+  applyConfigSnapshot: (config: TlsConfig) => void;
   fetchConfig: () => Promise<void>;
   addAppToIntercept: (app: string) => Promise<boolean>;
   removeAppFromIntercept: (app: string) => Promise<boolean>;
@@ -36,6 +37,10 @@ export const useTlsConfigStore = create<TlsConfigState>((set, get) => ({
   config: null,
   loading: false,
   error: null,
+
+  applyConfigSnapshot: (config: TlsConfig) => {
+    set({ config, loading: false, error: null });
+  },
 
   fetchConfig: async () => {
     set({ loading: true, error: null });

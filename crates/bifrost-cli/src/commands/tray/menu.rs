@@ -40,6 +40,10 @@ pub enum MenuItemAction {
         url: String,
         enabled: bool,
     },
+    SetTlsInterception {
+        url: String,
+        enabled: bool,
+    },
     StartService,
     StopService,
     StartUpgrade {
@@ -71,6 +75,7 @@ pub struct TrayRule {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SystemProxyMenuState {
+    pub known: bool,
     pub supported: bool,
     pub enabled: bool,
 }
@@ -85,6 +90,7 @@ pub struct SystemStatsMenuLines {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingMenuAction {
     SystemProxy { enabled: bool },
+    TlsInterception { enabled: bool },
     Rule { target: RuleTarget, enabled: bool },
 }
 
@@ -104,7 +110,7 @@ pub fn build_menu(
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
 ) -> Vec<MenuEntry> {
-    build_menu_with_pending(
+    build_menu_with_pending_and_tls(
         runtime,
         state,
         status_override,
@@ -115,6 +121,8 @@ pub fn build_menu(
         rules,
         recent_rule_targets,
         system_proxy,
+        false,
+        false,
         update_available,
         upgrade_in_progress,
         system_stats,
@@ -122,7 +130,7 @@ pub fn build_menu(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub fn build_menu_with_pending(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
@@ -134,6 +142,45 @@ pub fn build_menu_with_pending(
     rules: &[TrayRule],
     recent_rule_targets: &[RuleTarget],
     system_proxy: Option<&SystemProxyMenuState>,
+    update_available: Option<&str>,
+    upgrade_in_progress: bool,
+    system_stats: Option<&SystemStatsMenuLines>,
+    pending_action: Option<&PendingMenuAction>,
+) -> Vec<MenuEntry> {
+    build_menu_with_pending_and_tls(
+        runtime,
+        state,
+        status_override,
+        service_action_busy,
+        custom_config,
+        data_dir,
+        bin_available,
+        rules,
+        recent_rule_targets,
+        system_proxy,
+        false,
+        false,
+        update_available,
+        upgrade_in_progress,
+        system_stats,
+        pending_action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_menu_with_pending_and_tls(
+    runtime: Option<&RuntimeInfo>,
+    state: ServiceState,
+    status_override: Option<&str>,
+    service_action_busy: bool,
+    custom_config: Option<&TrayConfig>,
+    data_dir: &str,
+    bin_available: bool,
+    rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
+    system_proxy: Option<&SystemProxyMenuState>,
+    tls_interception_known: bool,
+    tls_interception_enabled: bool,
     update_available: Option<&str>,
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
@@ -284,6 +331,7 @@ pub fn build_menu_with_pending(
                 Some(system_proxy)
             } else {
                 fallback_system_proxy = SystemProxyMenuState {
+                    known: false,
                     supported: false,
                     enabled: false,
                 };
@@ -295,7 +343,7 @@ pub fn build_menu_with_pending(
         if let Some(system_proxy) = system_proxy {
             let pending_system_proxy = pending_action.and_then(|pending| match pending {
                 PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
-                PendingMenuAction::Rule { .. } => None,
+                PendingMenuAction::Rule { .. } | PendingMenuAction::TlsInterception { .. } => None,
             });
             let label = match pending_system_proxy {
                 Some(true) => "Enabling System Proxy...",
@@ -306,6 +354,7 @@ pub fn build_menu_with_pending(
                 id: "toggle_system_proxy".to_string(),
                 label: label.to_string(),
                 enabled: is_running
+                    && system_proxy.known
                     && system_proxy.supported
                     && !service_action_busy
                     && pending_action.is_none(),
@@ -313,6 +362,34 @@ pub fn build_menu_with_pending(
                 action: MenuItemAction::SetSystemProxy {
                     url: format!("{}api/proxy/system", admin_url),
                     enabled: !system_proxy.enabled,
+                },
+            }));
+        }
+
+        let has_pending_tls = matches!(
+            pending_action,
+            Some(PendingMenuAction::TlsInterception { .. })
+        );
+        if is_running && (tls_interception_known || has_pending_tls) {
+            let pending_tls = pending_action.and_then(|pending| match pending {
+                PendingMenuAction::TlsInterception { enabled } => Some(*enabled),
+                PendingMenuAction::Rule { .. } | PendingMenuAction::SystemProxy { .. } => None,
+            });
+            let label = match pending_tls {
+                Some(true) => "Enabling TLS Interception...",
+                Some(false) => "Disabling TLS Interception...",
+                None if !tls_interception_known => "TLS Interception: Checking...",
+                None if tls_interception_enabled => "TLS Interception: On",
+                None => "TLS Interception: Off",
+            };
+            items.push(item(MenuItemDef {
+                id: "toggle_tls_interception".to_string(),
+                label: label.to_string(),
+                enabled: tls_interception_known && !service_action_busy && pending_action.is_none(),
+                checked: tls_interception_enabled,
+                action: MenuItemAction::SetTlsInterception {
+                    url: format!("{}api/config/tls", admin_url),
+                    enabled: !tls_interception_enabled,
                 },
             }));
         }
@@ -407,7 +484,7 @@ fn build_rules_menu(
         .any(|rule| matches!(rule.target, RuleTarget::Group { .. }));
     let pending_rule = pending_action.and_then(|pending| match pending {
         PendingMenuAction::Rule { target, enabled } => Some((target, *enabled)),
-        PendingMenuAction::SystemProxy { .. } => None,
+        PendingMenuAction::SystemProxy { .. } | PendingMenuAction::TlsInterception { .. } => None,
     });
     let rule_items_enabled = is_running && pending_action.is_none();
     let label = if let Some((target, enabled)) = pending_rule {
@@ -925,6 +1002,7 @@ mod tests {
     fn test_system_proxy_toggle_is_below_stop_without_restart_or_data_dir() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -946,9 +1024,9 @@ mod tests {
 
         let labels = menu
             .iter()
-            .filter_map(|entry| match entry {
-                MenuEntry::Item(item) => Some(item.label.as_str()),
-                MenuEntry::Submenu(_) => None,
+            .map(|entry| match entry {
+                MenuEntry::Item(item) => item.label.as_str(),
+                MenuEntry::Submenu(submenu) => submenu.label.as_str(),
             })
             .collect::<Vec<_>>();
         let stop_index = labels
@@ -960,6 +1038,7 @@ mod tests {
         assert!(!labels.contains(&"Open Data Directory"));
 
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
         assert!(toggle.enabled);
         assert!(toggle.checked);
         match &toggle.action {
@@ -1007,6 +1086,7 @@ mod tests {
     fn test_system_proxy_pending_shows_busy_label_and_disables_async_toggles() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: false,
         };
@@ -1117,6 +1197,7 @@ mod tests {
     fn test_menu_stopped_state() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -1403,6 +1484,7 @@ mod tests {
     fn test_rules_pending_shows_busy_label_and_disables_async_toggles() {
         let rt = sample_runtime();
         let system_proxy = SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };

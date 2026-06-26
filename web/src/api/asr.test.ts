@@ -1,12 +1,15 @@
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildAsrQueryForTest,
   buildVoiceRealtimeUrl,
+  createAsrTask,
   defaultAsrParams,
   defaultModelManagementParams,
   defaultVoiceRealtimeParams,
   loadVoiceRealtimeParams,
   saveAsrParams,
+  streamAsrTranscription,
+  updateDailyAgentConfig,
 } from "./asr";
 
 describe("Voice realtime ASR params", () => {
@@ -75,5 +78,58 @@ describe("Voice realtime ASR params", () => {
     expect(managementQuery.get("owner_module")).toBe("model_management");
     expect(workbenchQuery.get("model")).toBe("Qwen3-ASR-0.6B");
     expect(managementQuery.get("model")).toBe("Qwen3-ASR-0.6B");
+  });
+});
+
+describe("ASR admin API CSRF headers", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("adds the admin CSRF token to unsafe ASR module requests", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/security/csrf")) {
+        return new Response(
+          JSON.stringify({
+            csrf_token: "csrf-token-for-test",
+            header_name: "X-Bifrost-CSRF",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/transcribe-stream")) {
+        return new Response('event: done\ndata: {"ok":true}\n\n', { status: 200 });
+      }
+      return new Response(JSON.stringify({ ok: true, id: "task-1", config: {} }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createAsrTask({ audio_dir: "/tmp/audio" });
+    await streamAsrTranscription(
+      new Blob(["sample"], { type: "audio/wav" }),
+      "sample.wav",
+      defaultAsrParams(),
+      () => {},
+    );
+    await updateDailyAgentConfig("task-1", { enabled: true });
+
+    const unsafeAsrCalls = fetchMock.mock.calls.filter(([input]) => {
+      const url = String(input);
+      return (
+        !url.includes("/security/csrf") &&
+        (url.includes("/asr/tasks") || url.includes("/asr/transcribe-stream"))
+      );
+    });
+
+    expect(unsafeAsrCalls).toHaveLength(3);
+    unsafeAsrCalls.forEach(([, init]) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("X-Bifrost-CSRF")).toBe("csrf-token-for-test");
+    });
   });
 });

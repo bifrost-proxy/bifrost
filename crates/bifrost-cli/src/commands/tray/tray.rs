@@ -121,6 +121,8 @@ struct MenuDataSnapshot {
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     system_proxy_needs_recheck: bool,
+    tls_interception_known: bool,
+    tls_interception_enabled: bool,
     pending_action: Option<menu::PendingMenuAction>,
     bin_available: bool,
     update_available: Option<String>,
@@ -163,13 +165,13 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     #[cfg(not(target_os = "macos"))]
     let event_loop = EventLoopBuilder::new().build();
 
-    let icon_running = load_icon(false);
-    let icon_stopped = load_icon(true);
     let runtime = runtime_for_menu(&args);
     let state = determine_state(runtime.as_ref(), args.parent_pid);
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
     let initial_menu_data = load_menu_data_snapshot(&args, state, true, true);
+    let icon_running = load_icon(false);
+    let icon_stopped = load_icon(true);
     #[cfg(target_os = "macos")]
     let initial_menu_bar_title = menu_bar_stats_title(&initial_menu_data, state);
     let menu_items =
@@ -464,7 +466,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
-
         if state_changed {
             last_rendered_state = new_state;
 
@@ -473,11 +474,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             // macOS/Windows, which makes the tray feel impossible to open while
             // data is refreshing. State polling only updates non-menu
             // affordances; explicit reloads/actions rebuild the menu below.
-            let new_icon = if new_state == STATE_RUNNING {
-                &icon_running
-            } else {
-                &icon_stopped
-            };
+            let new_icon = tray_icon_for_state(new_state, &icon_running, &icon_stopped);
             #[cfg(target_os = "macos")]
             {
                 if let Some(native_stats_item) = native_stats_item.as_mut() {
@@ -1462,7 +1459,6 @@ fn menu_bar_stats_columns(
     columns
 }
 
-#[cfg(target_os = "macos")]
 fn is_menu_bar_network_column(value: Option<&String>, label: Option<&String>) -> bool {
     value.is_some_and(|text| text.starts_with('↑') || text.starts_with('↓'))
         || label.is_some_and(|text| text.starts_with('↑') || text.starts_with('↓'))
@@ -2083,6 +2079,17 @@ fn load_icon(dimmed: bool) -> tray_icon::Icon {
     tray_icon::Icon::from_rgba(rgba.into_raw(), width, height).expect("failed to create icon")
 }
 
+fn tray_icon_for_state<'a>(
+    state: u8,
+    icon_running: &'a tray_icon::Icon,
+    icon_stopped: &'a tray_icon::Icon,
+) -> &'a tray_icon::Icon {
+    match state {
+        STATE_RUNNING => icon_running,
+        _ => icon_stopped,
+    }
+}
+
 fn determine_state(runtime: Option<&RuntimeInfo>, parent_pid: u32) -> ServiceState {
     match runtime {
         Some(rt) => {
@@ -2457,6 +2464,13 @@ fn load_menu_data_snapshot(
         Some(snapshot) => (Some(snapshot.state), snapshot.needs_recheck),
         None => (None, false),
     };
+    let tls_interception = if include_remote {
+        load_tls_interception_enabled_for_menu(runtime.as_ref(), state)
+    } else {
+        None
+    };
+    let tls_interception_known = tls_interception.is_some();
+    let tls_interception_enabled = tls_interception.unwrap_or(false);
 
     MenuDataSnapshot {
         runtime,
@@ -2465,6 +2479,8 @@ fn load_menu_data_snapshot(
         recent_rule_targets,
         system_proxy,
         system_proxy_needs_recheck,
+        tls_interception_known,
+        tls_interception_enabled,
         pending_action: None,
         bin_available,
         update_available: detect_update_available(&args.data_dir),
@@ -2596,6 +2612,16 @@ fn load_system_proxy_for_menu(
     runtime.and_then(|rt| load_system_proxy_state(&rt.admin_url()))
 }
 
+fn load_tls_interception_enabled_for_menu(
+    runtime: Option<&RuntimeInfo>,
+    state: ServiceState,
+) -> Option<bool> {
+    if state != ServiceState::Running {
+        return None;
+    }
+    runtime.and_then(|rt| load_tls_interception_enabled(&rt.admin_url()))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SystemProxyMenuSnapshot {
     state: menu::SystemProxyMenuState,
@@ -2622,7 +2648,7 @@ fn build_menu_from_snapshot(
 ) -> Vec<MenuEntry> {
     let menu_system_stats = None;
 
-    menu::build_menu_with_pending(
+    menu::build_menu_with_pending_and_tls(
         snapshot.runtime.as_ref(),
         state,
         status_override,
@@ -2633,6 +2659,8 @@ fn build_menu_from_snapshot(
         &snapshot.rules,
         &snapshot.recent_rule_targets,
         snapshot.system_proxy.as_ref(),
+        snapshot.tls_interception_known,
+        snapshot.tls_interception_enabled,
         snapshot.update_available.as_deref(),
         upgrade_in_progress,
         menu_system_stats,
@@ -2670,6 +2698,11 @@ struct SystemProxyStatusResponse {
     enabled: bool,
     managed_by_bifrost: Option<bool>,
     configured_enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TlsConfigStatusResponse {
+    enable_tls_interception: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2883,6 +2916,7 @@ fn load_system_proxy_state(admin_url: &str) -> Option<SystemProxyMenuSnapshot> {
                     && !owned_by_other;
                 Some(SystemProxyMenuSnapshot {
                     state: menu::SystemProxyMenuState {
+                        known: true,
                         supported: status.supported,
                         enabled: enabled_by_bifrost,
                     },
@@ -2899,6 +2933,54 @@ fn load_system_proxy_state(admin_url: &str) -> Option<SystemProxyMenuSnapshot> {
             None
         }
     }
+}
+
+fn load_tls_interception_enabled(admin_url: &str) -> Option<bool> {
+    let base = admin_url.trim_end_matches('/');
+    let url = format!("{base}/api/config/tls");
+    let agent = http_agent();
+    match agent.get(&url).call() {
+        Ok(resp) => match resp.into_json::<TlsConfigStatusResponse>() {
+            Ok(config) => Some(config.enable_tls_interception),
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "failed to decode TLS config status for tray icon"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to load TLS config status for tray icon");
+            None
+        }
+    }
+}
+
+fn set_tls_interception_enabled(url: &str, enabled: bool) -> Result<(), String> {
+    let agent = http_agent();
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("failed to load current TLS config: {error}"))?;
+    let mut config = resp
+        .into_json::<serde_json::Value>()
+        .map_err(|error| format!("failed to decode current TLS config: {error}"))?;
+    let Some(config_object) = config.as_object_mut() else {
+        return Err("current TLS config response is not a JSON object".to_string());
+    };
+    config_object.insert(
+        "enable_tls_interception".to_string(),
+        serde_json::Value::Bool(enabled),
+    );
+    let body = serde_json::to_string(&config)
+        .map_err(|error| format!("failed to encode updated TLS config: {error}"))?;
+    agent
+        .put(url)
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .map_err(|error| format!("failed to update TLS config: {error}"))?;
+    Ok(())
 }
 
 fn load_managed_groups_from_admin(
@@ -3400,7 +3482,9 @@ fn append_menu_item(
     if item.checked
         || matches!(
             item.action,
-            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+            MenuItemAction::SelectRule { .. }
+                | MenuItemAction::SetSystemProxy { .. }
+                | MenuItemAction::SetTlsInterception { .. }
         )
     {
         let menu_item = CheckMenuItem::with_id(
@@ -3556,7 +3640,9 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
     } else if item.checked
         || matches!(
             item.action,
-            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+            MenuItemAction::SelectRule { .. }
+                | MenuItemAction::SetSystemProxy { .. }
+                | MenuItemAction::SetTlsInterception { .. }
         )
     {
         NativeMenuShapeKind::Check
@@ -3672,6 +3758,44 @@ fn execute_action(
                     true,
                 );
                 system_proxy_refresh_in_flight.store(false, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+            });
+        }
+        MenuItemAction::SetTlsInterception { url, enabled } => {
+            let url = url.clone();
+            let enabled = *enabled;
+            if !set_pending_menu_action(
+                menu_data,
+                menu_data_generation,
+                menu::PendingMenuAction::TlsInterception { enabled },
+            ) {
+                tracing::warn!(
+                    "ignoring TLS interception toggle while another tray action is pending"
+                );
+                return;
+            }
+            reload_flag.store(true, Ordering::Relaxed);
+            let args = args.clone();
+            let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
+            spawn_tray_task("bifrost-tray-tls-interception", move || {
+                if let Err(error) = set_tls_interception_enabled(&url, enabled) {
+                    tracing::error!(
+                        enabled = enabled,
+                        url = %url,
+                        error = %error,
+                        "TLS interception toggle failed"
+                    );
+                }
+                clear_pending_menu_action(&menu_data, &menu_data_generation);
+                refresh_menu_data_snapshot(
+                    &args,
+                    ServiceState::Running,
+                    &menu_data,
+                    &menu_data_generation,
+                    false,
+                );
                 reload_flag.store(true, Ordering::Relaxed);
             });
         }
@@ -4594,6 +4718,7 @@ fn dashboard_runtime_label(runtime: Option<&RuntimeInfo>, state: ServiceState) -
 #[cfg(target_os = "macos")]
 fn dashboard_system_proxy_label(system_proxy: Option<&menu::SystemProxyMenuState>) -> String {
     match system_proxy {
+        Some(state) if !state.known => "System proxy checking".to_string(),
         Some(state) if !state.supported => "System proxy unsupported".to_string(),
         Some(state) if state.enabled => "System proxy On".to_string(),
         Some(_) => "System proxy Off".to_string(),
@@ -4742,6 +4867,10 @@ fn set_pending_menu_action(
             if current.pending_action.is_some() {
                 return false;
             }
+            if let menu::PendingMenuAction::TlsInterception { enabled } = &pending_action {
+                current.tls_interception_known = true;
+                current.tls_interception_enabled = *enabled;
+            }
             current.pending_action = Some(pending_action);
             generation.fetch_add(1, Ordering::Relaxed);
             true
@@ -4750,6 +4879,10 @@ fn set_pending_menu_action(
             let mut current = poisoned.into_inner();
             if current.pending_action.is_some() {
                 return false;
+            }
+            if let menu::PendingMenuAction::TlsInterception { enabled } = &pending_action {
+                current.tls_interception_known = true;
+                current.tls_interception_enabled = *enabled;
             }
             current.pending_action = Some(pending_action);
             generation.fetch_add(1, Ordering::Relaxed);

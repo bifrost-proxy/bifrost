@@ -54,6 +54,7 @@
         assert_eq!(
             status.state,
             menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: false,
             }
@@ -78,6 +79,7 @@
         assert_eq!(
             status.state,
             menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: false,
             }
@@ -93,6 +95,7 @@
     fn test_system_proxy_snapshot_matches_desired_state_only_after_recheck_clears() {
         let rechecking = SystemProxyMenuSnapshot {
             state: menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: false,
             },
@@ -102,6 +105,7 @@
 
         let disabled = SystemProxyMenuSnapshot {
             state: menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: false,
             },
@@ -112,6 +116,7 @@
 
         let enabled = SystemProxyMenuSnapshot {
             state: menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: true,
             },
@@ -192,6 +197,8 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -208,6 +215,35 @@
             Some("C20% | M55% | D55% | ↑1.5 M/s ↓512 K/s".to_string())
         );
         assert_eq!(menu_bar_stats_title(&snapshot, ServiceState::Stopped), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn test_menu_bar_stats_title_does_not_include_tls_state() {
+        let snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: true,
+            pending_action: None,
+            bin_available: true,
+            update_available: None,
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 23%".to_string(),
+                network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+                menu_bar: "C20% | M55%".to_string(),
+            }),
+            dashboard: None,
+        };
+
+        assert_eq!(
+            menu_bar_stats_title(&snapshot, ServiceState::Running),
+            Some("C20% | M55%".to_string())
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -489,6 +525,8 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -882,6 +920,8 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -1075,6 +1115,7 @@
                 "HTTP/1.1 200 OK",
                 r#"{"supported":true,"enabled":true,"managed_by_bifrost":true}"#,
             ),
+            ("HTTP/1.1 200 OK", r#"{"enable_tls_interception":true}"#),
         ]);
         let data_dir = std::env::temp_dir().join(format!(
             "bifrost-tray-initial-full-admin-snapshot-{}",
@@ -1104,10 +1145,45 @@
         assert_eq!(
             snapshot.system_proxy,
             Some(menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: true,
             })
         );
+        assert!(snapshot.tls_interception_enabled);
+        let menu = build_menu_from_snapshot(
+            &snapshot,
+            ServiceState::Running,
+            None,
+            false,
+            data_dir.to_string_lossy().as_ref(),
+            false,
+        );
+        let labels = menu
+            .iter()
+            .map(|entry| match entry {
+                menu::MenuEntry::Item(item) => item.label.as_str(),
+                menu::MenuEntry::Submenu(submenu) => submenu.label.as_str(),
+            })
+            .collect::<Vec<_>>();
+        let system_proxy_index = labels
+            .iter()
+            .position(|label| *label == "System Proxy")
+            .expect("system proxy row");
+        assert_eq!(
+            labels.get(system_proxy_index + 1),
+            Some(&"TLS Interception: On")
+        );
+        let tls_toggle = find_menu_item(&menu, "toggle_tls_interception").unwrap();
+        assert!(tls_toggle.enabled);
+        assert!(tls_toggle.checked);
+        match &tls_toggle.action {
+            menu::MenuItemAction::SetTlsInterception { url, enabled } => {
+                assert!(url.ends_with("/_bifrost/api/config/tls"));
+                assert!(!enabled);
+            }
+            other => panic!("unexpected TLS action: {other:?}"),
+        }
         assert_eq!(
             *seen.lock().unwrap(),
             vec![
@@ -1115,6 +1191,7 @@
                 "GET /_bifrost/api/group HTTP/1.1",
                 "GET /_bifrost/api/rules/active-summary HTTP/1.1",
                 "GET /_bifrost/api/proxy/system HTTP/1.1",
+                "GET /_bifrost/api/config/tls HTTP/1.1",
             ]
         );
     }
@@ -1135,6 +1212,7 @@
             start_args: Vec::new(),
         };
         let cached = menu::SystemProxyMenuState {
+            known: true,
             supported: true,
             enabled: true,
         };
@@ -1145,6 +1223,8 @@
             recent_rule_targets: Vec::new(),
             system_proxy: Some(cached.clone()),
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -1169,6 +1249,49 @@
     }
 
     #[test]
+    fn test_tls_pending_action_updates_menu_snapshot_without_badge_title() {
+        let snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
+            pending_action: None,
+            bin_available: true,
+            update_available: None,
+            #[cfg(target_os = "macos")]
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 23%".to_string(),
+                network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+                menu_bar: "C20% | M55%".to_string(),
+            }),
+            #[cfg(target_os = "macos")]
+            dashboard: None,
+        };
+        let menu_data = Arc::new(Mutex::new(snapshot));
+        let generation = AtomicU64::new(0);
+
+        assert!(set_pending_menu_action(
+            &menu_data,
+            &generation,
+            menu::PendingMenuAction::TlsInterception { enabled: true },
+        ));
+
+        let snapshot = clone_menu_data_snapshot(&menu_data);
+        assert!(snapshot.tls_interception_known);
+        assert!(snapshot.tls_interception_enabled);
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            menu_bar_stats_title(&snapshot, ServiceState::Running),
+            Some("C20% | M55%".to_string())
+        );
+    }
+
+    #[test]
     fn test_background_menu_refresh_loads_missing_system_proxy_cache_once() {
         let (admin_url, seen, handle) = spawn_test_http_server(vec![
             ("HTTP/1.1 200 OK", r#"[]"#),
@@ -1181,6 +1304,7 @@
                 "HTTP/1.1 200 OK",
                 r#"{"supported":true,"enabled":true,"managed_by_bifrost":true}"#,
             ),
+            ("HTTP/1.1 200 OK", r#"{"enable_tls_interception":false}"#),
         ]);
         let data_dir = std::env::temp_dir().join(format!(
             "bifrost-tray-system-proxy-fill-cache-{}",
@@ -1202,6 +1326,8 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -1226,6 +1352,7 @@
         assert_eq!(
             snapshot.system_proxy,
             Some(menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: true,
             })
@@ -1237,6 +1364,7 @@
                 "GET /_bifrost/api/group HTTP/1.1",
                 "GET /_bifrost/api/rules/active-summary HTTP/1.1",
                 "GET /_bifrost/api/proxy/system HTTP/1.1",
+                "GET /_bifrost/api/config/tls HTTP/1.1",
             ]
         );
 
@@ -1267,6 +1395,7 @@
                 "HTTP/1.1 200 OK",
                 r#"{"supported":true,"enabled":true,"managed_by_bifrost":true,"configured_enabled":true}"#,
             ),
+            ("HTTP/1.1 200 OK", r#"{"enable_tls_interception":false}"#),
         ]);
         let data_dir = std::env::temp_dir().join(format!(
             "bifrost-tray-system-proxy-recheck-cache-{}",
@@ -1287,10 +1416,13 @@
             rules: Vec::new(),
             recent_rule_targets: Vec::new(),
             system_proxy: Some(menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: false,
             }),
             system_proxy_needs_recheck: true,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
             update_available: None,
@@ -1315,6 +1447,7 @@
         assert_eq!(
             snapshot.system_proxy,
             Some(menu::SystemProxyMenuState {
+                known: true,
                 supported: true,
                 enabled: true,
             })
@@ -1327,6 +1460,7 @@
                 "GET /_bifrost/api/group HTTP/1.1",
                 "GET /_bifrost/api/rules/active-summary HTTP/1.1",
                 "GET /_bifrost/api/proxy/system HTTP/1.1",
+                "GET /_bifrost/api/config/tls HTTP/1.1",
             ]
         );
     }

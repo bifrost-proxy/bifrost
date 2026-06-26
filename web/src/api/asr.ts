@@ -1,6 +1,6 @@
 import { buildApiUrl, buildWsUrl } from "../runtime";
-import { getClientId } from "../services/clientId";
 import { getAdminToken } from "../services/adminAuth";
+import { apiFetch } from "./apiFetch";
 import { get, post } from "./client";
 
 export interface AsrConnectionParams {
@@ -967,8 +967,8 @@ export async function getVoiceWakeEvents(): Promise<VoiceWakeEventsResponse> {
 export async function initAsrDiarizationProfile(
   profile = "sherpa-onnx-balanced",
 ): Promise<AsrDiarizationStatus> {
-  const response = await fetch(
-    buildApiUrl(`/asr/diarization/init-stream?profile=${encodeURIComponent(profile)}`),
+  const response = await asrFetch(
+    `/asr/diarization/init-stream?profile=${encodeURIComponent(profile)}`,
     {
       method: "GET",
       headers: buildStreamHeaders(),
@@ -999,8 +999,8 @@ export async function listAsrSpeakerProfiles(): Promise<AsrSpeakerProfileSummary
 }
 
 export async function deleteAsrSpeakerProfile(profileId: string): Promise<void> {
-  const response = await fetch(
-    buildApiUrl(`/asr/speaker-profiles/${encodeURIComponent(profileId)}`),
+  const response = await asrFetch(
+    `/asr/speaker-profiles/${encodeURIComponent(profileId)}`,
     {
       method: "DELETE",
       headers: {
@@ -1026,7 +1026,7 @@ export type AsrSpeakerIdentifyResult = {
 export async function identifyAsrSpeakerVoice(
   pcm16leBase64: string,
 ): Promise<AsrSpeakerIdentifyResult> {
-  const response = await fetch(buildApiUrl("/asr/speaker-profiles/identify"), {
+  const response = await asrFetch("/asr/speaker-profiles/identify", {
     method: "POST",
     headers: {
       ...buildJsonHeaders(),
@@ -1045,7 +1045,7 @@ export async function createAsrSpeakerEnrollmentSession(
   name: string,
   diarizationProfile = "sherpa-onnx-balanced",
 ): Promise<AsrSpeakerEnrollmentSession> {
-  const response = await fetch(buildApiUrl("/asr/speaker-profiles/enrollment-sessions"), {
+  const response = await asrFetch("/asr/speaker-profiles/enrollment-sessions", {
     method: "POST",
     headers: {
       ...buildJsonHeaders(),
@@ -1063,10 +1063,8 @@ export async function appendAsrSpeakerEnrollmentAudio(
   pcm16leBase64: string,
   finalChunk = true,
 ): Promise<void> {
-  const response = await fetch(
-    buildApiUrl(
-      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/audio`,
-    ),
+  const response = await asrFetch(
+    `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/audio`,
     {
       method: "POST",
       headers: {
@@ -1097,10 +1095,8 @@ export async function verifyAsrSpeakerEnrollmentPrompt(
   promptId: string,
   pcm16leBase64: string,
 ): Promise<AsrSpeakerEnrollmentVerifyResult> {
-  const response = await fetch(
-    buildApiUrl(
-      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/verify`,
-    ),
+  const response = await asrFetch(
+    `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/verify`,
     {
       method: "POST",
       headers: {
@@ -1121,10 +1117,8 @@ export async function verifyAsrSpeakerEnrollmentPrompt(
 export async function finishAsrSpeakerEnrollment(
   sessionId: string,
 ): Promise<AsrSpeakerEnrollmentResult> {
-  const response = await fetch(
-    buildApiUrl(
-      `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/finish`,
-    ),
+  const response = await asrFetch(
+    `/asr/speaker-profiles/enrollment-sessions/${encodeURIComponent(sessionId)}/finish`,
     {
       method: "POST",
       headers: {
@@ -1140,7 +1134,7 @@ export async function finishAsrSpeakerEnrollment(
 export async function startAsrService(
   params: AsrConnectionParams,
 ): Promise<AsrServiceResult> {
-  const response = await fetch(buildApiUrl(`/asr/service/start?${buildAsrQuery(params)}`), {
+  const response = await asrFetch(`/asr/service/start?${buildAsrQuery(params)}`, {
     method: "POST",
     headers: buildStreamHeaders(),
   });
@@ -1150,7 +1144,7 @@ export async function startAsrService(
 export async function stopAsrService(
   params: AsrConnectionParams,
 ): Promise<AsrServiceResult> {
-  const response = await fetch(buildApiUrl(`/asr/service/stop?${buildAsrQuery(params)}`), {
+  const response = await asrFetch(`/asr/service/stop?${buildAsrQuery(params)}`, {
     method: "POST",
     headers: buildStreamHeaders(),
   });
@@ -1193,7 +1187,7 @@ export function buildAsrTaskFileSourceUrl(taskId: string, fileKey: string): stri
 export async function createAsrTask(
   request: CreateAsrTaskRequest,
 ): Promise<AsrDirectoryTask> {
-  const response = await fetch(buildApiUrl("/asr/tasks"), {
+  const response = await asrFetch("/asr/tasks", {
     method: "POST",
     headers: {
       ...buildStreamHeaders(),
@@ -1208,7 +1202,7 @@ export async function updateAsrTask(
   id: string,
   request: UpdateAsrTaskRequest,
 ): Promise<AsrDirectoryTask> {
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}`), {
+  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: {
       ...buildStreamHeaders(),
@@ -1241,8 +1235,8 @@ export async function runAsrExternalImport(
   running?: boolean;
   progress?: AsrExternalImportRunProgress;
 }> {
-  const response = await fetch(
-    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/external-import/run`),
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/external-import/run`,
     {
       method: "POST",
       headers: buildStreamHeaders(),
@@ -1258,7 +1252,7 @@ export async function runAsrExternalImport(
 }
 
 export async function runAsrTask(id: string): Promise<RunAsrTaskResult> {
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/run`), {
+  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}/run`, {
     method: "POST",
     headers: buildStreamHeaders(),
   });
@@ -1277,8 +1271,8 @@ export async function pauseAsrTask(
     query.set("mode", options.mode);
   }
   const queryString = query.toString() ? `?${query.toString()}` : "";
-  const response = await fetch(
-    buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/pause${queryString}`),
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(id)}/pause${queryString}`,
     {
       method: "POST",
       headers: buildStreamHeaders(),
@@ -1288,7 +1282,7 @@ export async function pauseAsrTask(
 }
 
 export async function resumeAsrTask(id: string): Promise<ControlAsrTaskResult> {
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}/resume`), {
+  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}/resume`, {
     method: "POST",
     headers: buildStreamHeaders(),
   });
@@ -1297,7 +1291,7 @@ export async function resumeAsrTask(id: string): Promise<ControlAsrTaskResult> {
 
 export async function deleteAsrTask(id: string, confirmName: string): Promise<void> {
   const query = new URLSearchParams({ confirm_name: confirmName });
-  const response = await fetch(buildApiUrl(`/asr/tasks/${encodeURIComponent(id)}?${query}`), {
+  const response = await asrFetch(`/asr/tasks/${encodeURIComponent(id)}?${query}`, {
     method: "DELETE",
     headers: buildStreamHeaders(),
   });
@@ -1308,10 +1302,8 @@ export async function retryFailedChunks(
   taskId: string,
   fileKey: string,
 ): Promise<RetryChunksResult> {
-  const response = await fetch(
-    buildApiUrl(
-      `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/retry-chunks`,
-    ),
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/files/${encodeURIComponent(fileKey)}/retry-chunks`,
     {
       method: "POST",
       headers: buildStreamHeaders(),
@@ -1323,8 +1315,8 @@ export async function retryFailedChunks(
 export async function retryAllFailedChunks(
   taskId: string,
 ): Promise<RetryAllFailedChunksResult> {
-  const response = await fetch(
-    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/retry-failed-chunks`),
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/retry-failed-chunks`,
     {
       method: "POST",
       headers: buildStreamHeaders(),
@@ -1336,8 +1328,8 @@ export async function retryAllFailedChunks(
 export async function cleanupAsrSourceAudio(
   taskId: string,
 ): Promise<CleanupAsrSourceAudioResult> {
-  const response = await fetch(
-    buildApiUrl(`/asr/tasks/${encodeURIComponent(taskId)}/cleanup-source-audio`),
+  const response = await asrFetch(
+    `/asr/tasks/${encodeURIComponent(taskId)}/cleanup-source-audio`,
     {
       method: "POST",
       headers: buildStreamHeaders(),
@@ -1351,7 +1343,7 @@ export async function streamAsrInitialization(
   onEvent: (event: AsrStreamEvent) => void,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(buildApiUrl(`/asr/init-stream?${buildAsrQuery(params)}`), {
+  const response = await asrFetch(`/asr/init-stream?${buildAsrQuery(params)}`, {
     method: "GET",
     headers: buildStreamHeaders(),
     signal,
@@ -1371,15 +1363,12 @@ export async function streamAsrTranscription(
   form.append("language", params.language || defaultAsrParams().language);
   form.append("response_format", "text");
 
-  const response = await fetch(
-    buildApiUrl(`/asr/transcribe-stream?${buildAsrQuery(params)}`),
-    {
-      method: "POST",
-      headers: buildStreamHeaders(),
-      body: form,
-      signal,
-    },
-  );
+  const response = await asrFetch(`/asr/transcribe-stream?${buildAsrQuery(params)}`, {
+    method: "POST",
+    headers: buildStreamHeaders(),
+    body: form,
+    signal,
+  });
   await readSseResponse(response, onEvent);
 }
 
@@ -1408,7 +1397,7 @@ export async function createAsrOfflineJob(
     options.pipelineProfile || "offline-speaker-subtitle-local",
   );
   query.set("speaker_aware", options.speakerAware === false ? "0" : "1");
-  const response = await fetch(buildApiUrl(`/asr/offline-jobs?${query.toString()}`), {
+  const response = await asrFetch(`/asr/offline-jobs?${query.toString()}`, {
     method: "POST",
     headers: {
       ...buildStreamHeaders(),
@@ -1427,10 +1416,8 @@ export async function getAsrOfflineJobArtifact(
   jobId: string,
   format: string,
 ): Promise<string> {
-  const response = await fetch(
-    buildApiUrl(
-      `/asr/offline-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(format)}`,
-    ),
+  const response = await asrFetch(
+    `/asr/offline-jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(format)}`,
     {
       headers: buildStreamHeaders(),
     },
@@ -1485,16 +1472,14 @@ function buildAsrQuery(params: AsrConnectionParams): string {
   return query.toString();
 }
 
+function asrFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  return apiFetch(buildApiUrl(path), init);
+}
+
 function buildStreamHeaders(): HeadersInit {
-  const headers: Record<string, string> = {
+  return {
     Accept: "text/event-stream",
-    "X-Client-Id": getClientId(),
   };
-  const token = getAdminToken();
-  if (token) {
-    headers.Authorization = `Bearer ${token}`;
-  }
-  return headers;
 }
 
 function buildJsonHeaders(): HeadersInit {
@@ -1741,10 +1726,7 @@ export interface AsrDailyAgentReportDetail {
 export async function getDailyAgentConfig(
   taskId: string,
 ): Promise<AsrDailyAgentConfigResponse> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent`);
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
-  });
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent`);
   return readJsonResponse(response);
 }
 
@@ -1752,12 +1734,10 @@ export async function updateDailyAgentConfig(
   taskId: string,
   config: Partial<AsrDailyAgentConfig>,
 ): Promise<{ ok: boolean; config: AsrDailyAgentConfig }> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent`);
-  const response = await fetch(url, {
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${getAdminToken()}`,
     },
     body: JSON.stringify(config),
   });
@@ -1771,10 +1751,7 @@ export async function getDailyAgentInstructions(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
-  });
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
   return readJsonResponse(response);
 }
 
@@ -1786,12 +1763,10 @@ export async function updateDailyAgentInstructions(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/agents${query}`);
-  const response = await fetch(url, {
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/agents${query}`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${getAdminToken()}`,
     },
     body: JSON.stringify({ content }),
   });
@@ -1807,10 +1782,8 @@ export async function triggerDailyAgentRun(
   if (options?.date) params.set("date", options.date);
   if (options?.agentId) params.set("agent_id", options.agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/run${query}`);
-  const response = await fetch(url, {
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/run${query}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
   });
   return readJsonResponse(response);
 }
@@ -1822,10 +1795,8 @@ export async function sendDailyAgentReport(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/send${query}`);
-  const response = await fetch(url, {
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/send${query}`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
   });
   return readJsonResponse(response);
 }
@@ -1833,10 +1804,8 @@ export async function sendDailyAgentReport(
 export async function syncDailyAgentReports(
   taskId: string,
 ): Promise<{ ok: boolean; sync: AsrDailyAgentReportSyncResult }> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/sync`);
-  const response = await fetch(url, {
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/sync`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
   });
   return readJsonResponse(response);
 }
@@ -1844,10 +1813,7 @@ export async function syncDailyAgentReports(
 export async function getDailyAgentRuns(
   taskId: string,
 ): Promise<AsrDailyAgentRunsResponse> {
-  const url = buildApiUrl(`/asr/tasks/${taskId}/daily-agent/runs`);
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
-  });
+  const response = await asrFetch(`/asr/tasks/${taskId}/daily-agent/runs`);
   return readJsonResponse(response);
 }
 
@@ -1859,11 +1825,8 @@ export async function getDailyAgentReport(
   const params = new URLSearchParams();
   if (agentId) params.set("agent_id", agentId);
   const query = params.toString() ? `?${params.toString()}` : "";
-  const url = buildApiUrl(
+  const response = await asrFetch(
     `/asr/tasks/${encodeURIComponent(taskId)}/daily-agent/reports/${encodeURIComponent(date)}${query}`,
   );
-  const response = await fetch(url, {
-    headers: { Authorization: `Bearer ${getAdminToken()}` },
-  });
   return readJsonResponse(response);
 }
