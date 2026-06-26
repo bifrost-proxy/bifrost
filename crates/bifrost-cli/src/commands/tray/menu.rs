@@ -40,6 +40,10 @@ pub enum MenuItemAction {
         url: String,
         enabled: bool,
     },
+    SetTlsInterception {
+        url: String,
+        enabled: bool,
+    },
     StartService,
     StopService,
     StartUpgrade {
@@ -86,6 +90,7 @@ pub struct SystemStatsMenuLines {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PendingMenuAction {
     SystemProxy { enabled: bool },
+    TlsInterception { enabled: bool },
     Rule { target: RuleTarget, enabled: bool },
 }
 
@@ -105,7 +110,7 @@ pub fn build_menu(
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
 ) -> Vec<MenuEntry> {
-    build_menu_with_pending(
+    build_menu_with_pending_and_tls(
         runtime,
         state,
         status_override,
@@ -116,6 +121,8 @@ pub fn build_menu(
         rules,
         recent_rule_targets,
         system_proxy,
+        false,
+        false,
         update_available,
         upgrade_in_progress,
         system_stats,
@@ -123,7 +130,7 @@ pub fn build_menu(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, dead_code)]
 pub fn build_menu_with_pending(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
@@ -135,6 +142,45 @@ pub fn build_menu_with_pending(
     rules: &[TrayRule],
     recent_rule_targets: &[RuleTarget],
     system_proxy: Option<&SystemProxyMenuState>,
+    update_available: Option<&str>,
+    upgrade_in_progress: bool,
+    system_stats: Option<&SystemStatsMenuLines>,
+    pending_action: Option<&PendingMenuAction>,
+) -> Vec<MenuEntry> {
+    build_menu_with_pending_and_tls(
+        runtime,
+        state,
+        status_override,
+        service_action_busy,
+        custom_config,
+        data_dir,
+        bin_available,
+        rules,
+        recent_rule_targets,
+        system_proxy,
+        false,
+        false,
+        update_available,
+        upgrade_in_progress,
+        system_stats,
+        pending_action,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_menu_with_pending_and_tls(
+    runtime: Option<&RuntimeInfo>,
+    state: ServiceState,
+    status_override: Option<&str>,
+    service_action_busy: bool,
+    custom_config: Option<&TrayConfig>,
+    data_dir: &str,
+    bin_available: bool,
+    rules: &[TrayRule],
+    recent_rule_targets: &[RuleTarget],
+    system_proxy: Option<&SystemProxyMenuState>,
+    tls_interception_known: bool,
+    tls_interception_enabled: bool,
     update_available: Option<&str>,
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
@@ -295,13 +341,57 @@ pub fn build_menu_with_pending(
             None
         };
         if let Some(system_proxy) = system_proxy {
-            items.push(MenuEntry::Submenu(build_system_proxy_menu(
-                system_proxy,
-                is_running,
-                service_action_busy,
-                pending_action,
-                &format!("{}api/proxy/system", admin_url),
-            )));
+            let pending_system_proxy = pending_action.and_then(|pending| match pending {
+                PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
+                PendingMenuAction::Rule { .. } | PendingMenuAction::TlsInterception { .. } => None,
+            });
+            let label = match pending_system_proxy {
+                Some(true) => "Enabling System Proxy...",
+                Some(false) => "Disabling System Proxy...",
+                None => "System Proxy",
+            };
+            items.push(item(MenuItemDef {
+                id: "toggle_system_proxy".to_string(),
+                label: label.to_string(),
+                enabled: is_running
+                    && system_proxy.known
+                    && system_proxy.supported
+                    && !service_action_busy
+                    && pending_action.is_none(),
+                checked: system_proxy.enabled,
+                action: MenuItemAction::SetSystemProxy {
+                    url: format!("{}api/proxy/system", admin_url),
+                    enabled: !system_proxy.enabled,
+                },
+            }));
+        }
+
+        let has_pending_tls = matches!(
+            pending_action,
+            Some(PendingMenuAction::TlsInterception { .. })
+        );
+        if is_running && (tls_interception_known || has_pending_tls) {
+            let pending_tls = pending_action.and_then(|pending| match pending {
+                PendingMenuAction::TlsInterception { enabled } => Some(*enabled),
+                PendingMenuAction::Rule { .. } | PendingMenuAction::SystemProxy { .. } => None,
+            });
+            let label = match pending_tls {
+                Some(true) => "Enabling TLS Interception...",
+                Some(false) => "Disabling TLS Interception...",
+                None if !tls_interception_known => "TLS Interception: Checking...",
+                None if tls_interception_enabled => "TLS Interception: On",
+                None => "TLS Interception: Off",
+            };
+            items.push(item(MenuItemDef {
+                id: "toggle_tls_interception".to_string(),
+                label: label.to_string(),
+                enabled: tls_interception_known && !service_action_busy && pending_action.is_none(),
+                checked: tls_interception_enabled,
+                action: MenuItemAction::SetTlsInterception {
+                    url: format!("{}api/config/tls", admin_url),
+                    enabled: !tls_interception_enabled,
+                },
+            }));
         }
     }
 
@@ -394,7 +484,7 @@ fn build_rules_menu(
         .any(|rule| matches!(rule.target, RuleTarget::Group { .. }));
     let pending_rule = pending_action.and_then(|pending| match pending {
         PendingMenuAction::Rule { target, enabled } => Some((target, *enabled)),
-        PendingMenuAction::SystemProxy { .. } => None,
+        PendingMenuAction::SystemProxy { .. } | PendingMenuAction::TlsInterception { .. } => None,
     });
     let rule_items_enabled = is_running && pending_action.is_none();
     let label = if let Some((target, enabled)) = pending_rule {
@@ -451,70 +541,6 @@ fn build_rules_menu(
         enabled: true,
         children,
     })
-}
-
-fn build_system_proxy_menu(
-    system_proxy: &SystemProxyMenuState,
-    is_running: bool,
-    service_action_busy: bool,
-    pending_action: Option<&PendingMenuAction>,
-    url: &str,
-) -> SubmenuDef {
-    let pending_system_proxy = pending_action.and_then(|pending| match pending {
-        PendingMenuAction::SystemProxy { enabled } => Some(*enabled),
-        PendingMenuAction::Rule { .. } => None,
-    });
-    let status_label = match pending_system_proxy {
-        Some(true) => "Enabling...",
-        Some(false) => "Disabling...",
-        None if !system_proxy.known => "Checking...",
-        None if !system_proxy.supported => "Unsupported",
-        None if system_proxy.enabled => "On",
-        None => "Off",
-    };
-    let detail_label = match pending_system_proxy {
-        Some(true) => "Status: enabling Bifrost system proxy",
-        Some(false) => "Status: disabling Bifrost system proxy",
-        None if !system_proxy.known => "Status: checking current OS proxy",
-        None if !system_proxy.supported => "Status: unsupported on this platform",
-        None if system_proxy.enabled => "Status: enabled by Bifrost",
-        None => "Status: disabled",
-    };
-    let action_enabled = is_running
-        && system_proxy.known
-        && system_proxy.supported
-        && !service_action_busy
-        && pending_action.is_none();
-    let action_label = if system_proxy.enabled {
-        "Disable System Proxy"
-    } else {
-        "Enable System Proxy"
-    };
-
-    SubmenuDef {
-        id: "system_proxy".to_string(),
-        label: format!("System Proxy: {status_label}"),
-        enabled: true,
-        children: vec![
-            item(MenuItemDef {
-                id: "system_proxy_status".to_string(),
-                label: detail_label.to_string(),
-                enabled: false,
-                checked: false,
-                action: MenuItemAction::None,
-            }),
-            item(MenuItemDef {
-                id: "toggle_system_proxy".to_string(),
-                label: action_label.to_string(),
-                enabled: action_enabled,
-                checked: system_proxy.enabled,
-                action: MenuItemAction::SetSystemProxy {
-                    url: url.to_string(),
-                    enabled: !system_proxy.enabled,
-                },
-            }),
-        ],
-    }
 }
 
 fn build_recent_rule_entries(
@@ -1007,15 +1033,12 @@ mod tests {
             .iter()
             .position(|label| *label == "Stop Bifrost")
             .unwrap();
-        assert_eq!(labels.get(stop_index + 1), Some(&"System Proxy: On"));
+        assert_eq!(labels.get(stop_index + 1), Some(&"System Proxy"));
         assert!(!labels.contains(&"Restart Bifrost"));
         assert!(!labels.contains(&"Open Data Directory"));
 
-        let submenu = find_submenu(&menu, "system_proxy").unwrap();
-        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
-        assert_eq!(status.label, "Status: enabled by Bifrost");
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Disable System Proxy");
+        assert_eq!(toggle.label, "System Proxy");
         assert!(toggle.enabled);
         assert!(toggle.checked);
         match &toggle.action {
@@ -1046,12 +1069,8 @@ mod tests {
             None,
         );
 
-        let submenu = find_submenu(&menu, "system_proxy").unwrap();
-        assert_eq!(submenu.label, "System Proxy: Checking...");
-        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
-        assert_eq!(status.label, "Status: checking current OS proxy");
-        let toggle = find_item(&submenu.children, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Enable System Proxy");
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "System Proxy");
         assert!(!toggle.enabled);
         assert!(!toggle.checked);
         match &toggle.action {
@@ -1089,12 +1108,8 @@ mod tests {
             Some(&PendingMenuAction::SystemProxy { enabled: true }),
         );
 
-        let submenu = find_submenu(&menu, "system_proxy").unwrap();
-        assert_eq!(submenu.label, "System Proxy: Enabling...");
-        let status = find_item(&submenu.children, "system_proxy_status").unwrap();
-        assert_eq!(status.label, "Status: enabling Bifrost system proxy");
-        let toggle = find_item(&submenu.children, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Enable System Proxy");
+        let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
+        assert_eq!(toggle.label, "Enabling System Proxy...");
         assert!(!toggle.enabled);
         assert!(!toggle.checked);
 
@@ -1507,7 +1522,7 @@ mod tests {
         assert!(!beta.enabled);
 
         let toggle = find_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Disable System Proxy");
+        assert_eq!(toggle.label, "System Proxy");
         assert!(!toggle.enabled);
         assert!(toggle.checked);
     }

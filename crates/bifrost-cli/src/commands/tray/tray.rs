@@ -121,6 +121,7 @@ struct MenuDataSnapshot {
     recent_rule_targets: Vec<RuleTarget>,
     system_proxy: Option<menu::SystemProxyMenuState>,
     system_proxy_needs_recheck: bool,
+    tls_interception_known: bool,
     tls_interception_enabled: bool,
     pending_action: Option<menu::PendingMenuAction>,
     bin_available: bool,
@@ -2529,11 +2530,13 @@ fn load_menu_data_snapshot(
         Some(snapshot) => (Some(snapshot.state), snapshot.needs_recheck),
         None => (None, false),
     };
-    let tls_interception_enabled = if include_remote {
+    let tls_interception = if include_remote {
         load_tls_interception_enabled_for_menu(runtime.as_ref(), state)
     } else {
-        false
+        None
     };
+    let tls_interception_known = tls_interception.is_some();
+    let tls_interception_enabled = tls_interception.unwrap_or(false);
 
     MenuDataSnapshot {
         runtime,
@@ -2542,6 +2545,7 @@ fn load_menu_data_snapshot(
         recent_rule_targets,
         system_proxy,
         system_proxy_needs_recheck,
+        tls_interception_known,
         tls_interception_enabled,
         pending_action: None,
         bin_available,
@@ -2677,13 +2681,11 @@ fn load_system_proxy_for_menu(
 fn load_tls_interception_enabled_for_menu(
     runtime: Option<&RuntimeInfo>,
     state: ServiceState,
-) -> bool {
+) -> Option<bool> {
     if state != ServiceState::Running {
-        return false;
+        return None;
     }
-    runtime
-        .and_then(|rt| load_tls_interception_enabled(&rt.admin_url()))
-        .unwrap_or(false)
+    runtime.and_then(|rt| load_tls_interception_enabled(&rt.admin_url()))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2712,7 +2714,7 @@ fn build_menu_from_snapshot(
 ) -> Vec<MenuEntry> {
     let menu_system_stats = None;
 
-    menu::build_menu_with_pending(
+    menu::build_menu_with_pending_and_tls(
         snapshot.runtime.as_ref(),
         state,
         status_override,
@@ -2723,6 +2725,8 @@ fn build_menu_from_snapshot(
         &snapshot.rules,
         &snapshot.recent_rule_targets,
         snapshot.system_proxy.as_ref(),
+        snapshot.tls_interception_known,
+        snapshot.tls_interception_enabled,
         snapshot.update_available.as_deref(),
         upgrade_in_progress,
         menu_system_stats,
@@ -3017,6 +3021,32 @@ fn load_tls_interception_enabled(admin_url: &str) -> Option<bool> {
             None
         }
     }
+}
+
+fn set_tls_interception_enabled(url: &str, enabled: bool) -> Result<(), String> {
+    let agent = http_agent();
+    let resp = agent
+        .get(url)
+        .call()
+        .map_err(|error| format!("failed to load current TLS config: {error}"))?;
+    let mut config = resp
+        .into_json::<serde_json::Value>()
+        .map_err(|error| format!("failed to decode current TLS config: {error}"))?;
+    let Some(config_object) = config.as_object_mut() else {
+        return Err("current TLS config response is not a JSON object".to_string());
+    };
+    config_object.insert(
+        "enable_tls_interception".to_string(),
+        serde_json::Value::Bool(enabled),
+    );
+    let body = serde_json::to_string(&config)
+        .map_err(|error| format!("failed to encode updated TLS config: {error}"))?;
+    agent
+        .put(url)
+        .set("Content-Type", "application/json")
+        .send_string(&body)
+        .map_err(|error| format!("failed to update TLS config: {error}"))?;
+    Ok(())
 }
 
 fn load_managed_groups_from_admin(
@@ -3518,7 +3548,9 @@ fn append_menu_item(
     if item.checked
         || matches!(
             item.action,
-            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+            MenuItemAction::SelectRule { .. }
+                | MenuItemAction::SetSystemProxy { .. }
+                | MenuItemAction::SetTlsInterception { .. }
         )
     {
         let menu_item = CheckMenuItem::with_id(
@@ -3674,7 +3706,9 @@ fn menu_item_shape(item: &MenuItemDef) -> NativeMenuShape {
     } else if item.checked
         || matches!(
             item.action,
-            MenuItemAction::SelectRule { .. } | MenuItemAction::SetSystemProxy { .. }
+            MenuItemAction::SelectRule { .. }
+                | MenuItemAction::SetSystemProxy { .. }
+                | MenuItemAction::SetTlsInterception { .. }
         )
     {
         NativeMenuShapeKind::Check
@@ -3790,6 +3824,44 @@ fn execute_action(
                     true,
                 );
                 system_proxy_refresh_in_flight.store(false, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+            });
+        }
+        MenuItemAction::SetTlsInterception { url, enabled } => {
+            let url = url.clone();
+            let enabled = *enabled;
+            if !set_pending_menu_action(
+                menu_data,
+                menu_data_generation,
+                menu::PendingMenuAction::TlsInterception { enabled },
+            ) {
+                tracing::warn!(
+                    "ignoring TLS interception toggle while another tray action is pending"
+                );
+                return;
+            }
+            reload_flag.store(true, Ordering::Relaxed);
+            let args = args.clone();
+            let reload_flag = reload_flag.clone();
+            let menu_data = menu_data.clone();
+            let menu_data_generation = menu_data_generation.clone();
+            spawn_tray_task("bifrost-tray-tls-interception", move || {
+                if let Err(error) = set_tls_interception_enabled(&url, enabled) {
+                    tracing::error!(
+                        enabled = enabled,
+                        url = %url,
+                        error = %error,
+                        "TLS interception toggle failed"
+                    );
+                }
+                clear_pending_menu_action(&menu_data, &menu_data_generation);
+                refresh_menu_data_snapshot(
+                    &args,
+                    ServiceState::Running,
+                    &menu_data,
+                    &menu_data_generation,
+                    false,
+                );
                 reload_flag.store(true, Ordering::Relaxed);
             });
         }

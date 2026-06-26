@@ -197,6 +197,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
@@ -226,6 +227,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: true,
             pending_action: None,
             bin_available: true,
@@ -523,6 +525,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
@@ -917,6 +920,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
@@ -1090,7 +1094,7 @@
         let status = find_menu_item(&menu, "_status").expect("status item");
         assert!(status.label.starts_with("Bifrost: Running on 127.0.0.1:"));
         let toggle = find_menu_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Enable System Proxy");
+        assert_eq!(toggle.label, "System Proxy");
         assert!(!toggle.enabled);
         assert!(!toggle.checked);
     }
@@ -1147,6 +1151,39 @@
             })
         );
         assert!(snapshot.tls_interception_enabled);
+        let menu = build_menu_from_snapshot(
+            &snapshot,
+            ServiceState::Running,
+            None,
+            false,
+            data_dir.to_string_lossy().as_ref(),
+            false,
+        );
+        let labels = menu
+            .iter()
+            .map(|entry| match entry {
+                menu::MenuEntry::Item(item) => item.label.as_str(),
+                menu::MenuEntry::Submenu(submenu) => submenu.label.as_str(),
+            })
+            .collect::<Vec<_>>();
+        let system_proxy_index = labels
+            .iter()
+            .position(|label| *label == "System Proxy")
+            .expect("system proxy row");
+        assert_eq!(
+            labels.get(system_proxy_index + 1),
+            Some(&"TLS Interception: On")
+        );
+        let tls_toggle = find_menu_item(&menu, "toggle_tls_interception").unwrap();
+        assert!(tls_toggle.enabled);
+        assert!(tls_toggle.checked);
+        match &tls_toggle.action {
+            menu::MenuItemAction::SetTlsInterception { url, enabled } => {
+                assert!(url.ends_with("/_bifrost/api/config/tls"));
+                assert!(!enabled);
+            }
+            other => panic!("unexpected TLS action: {other:?}"),
+        }
         assert_eq!(
             *seen.lock().unwrap(),
             vec![
@@ -1186,6 +1223,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: Some(cached.clone()),
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
@@ -1245,6 +1283,7 @@
             recent_rule_targets: Vec::new(),
             system_proxy: None,
             system_proxy_needs_recheck: false,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
@@ -1295,7 +1334,7 @@
             false,
         );
         let toggle = find_menu_item(&menu, "toggle_system_proxy").unwrap();
-        assert_eq!(toggle.label, "Disable System Proxy");
+        assert_eq!(toggle.label, "System Proxy");
         assert!(toggle.enabled);
         assert!(toggle.checked);
     }
@@ -1339,6 +1378,7 @@
                 enabled: false,
             }),
             system_proxy_needs_recheck: true,
+            tls_interception_known: true,
             tls_interception_enabled: false,
             pending_action: None,
             bin_available: true,
