@@ -1837,7 +1837,10 @@ export default function AgentChatSection() {
     };
     pendingInstantScrollRef.current = true;
     setMessages((prev) => {
-      if (hiddenControlCommand || runnerModelCommand) {
+      if (runnerModelCommand) {
+        return prev;
+      }
+      if (hiddenControlCommand) {
         return [...prev, assistantMessage];
       }
       return [...prev, userMessage, assistantMessage];
@@ -2181,6 +2184,34 @@ export default function AgentChatSection() {
         });
       };
 
+      const appendSystemDisplayMessage = (content: string) => {
+        const trimmedContent = content.trim();
+        if (!trimmedContent) {
+          return;
+        }
+        const timestamp = Date.now() / 1000;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (
+            last?.role === "system" &&
+            last.content === trimmedContent &&
+            Math.abs((last.timestamp || 0) - timestamp) < 3
+          ) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              id: `system-${Date.now()}`,
+              role: "system",
+              content: trimmedContent,
+              timestamp,
+              meta: "System",
+            },
+          ];
+        });
+      };
+
       const appendProposedPlan = (planContent: string) => {
         const trimmedPlan = planContent.trim();
         if (!trimmedPlan || assistantSegmentHasProposedPlan) {
@@ -2296,11 +2327,13 @@ export default function AgentChatSection() {
             finishSilentCommandCompaction("success", "上下文已自动压缩");
             return;
           }
-          applyFinalResponse(
-            runnerModelCommand
-              ? runnerModelSlashSystemDisplayContent(rawContent, response)
-              : response,
-          );
+          if (runnerModelCommand) {
+            appendSystemDisplayMessage(
+              runnerModelSlashSystemDisplayContent(rawContent, response),
+            );
+            return;
+          }
+          applyFinalResponse(response);
         },
       });
       if (selectedSessionKeyRef.current === sendSessionKey) {

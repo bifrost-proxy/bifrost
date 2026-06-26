@@ -232,40 +232,34 @@ export function AgentChatMessageList({
           }}
         >
           <div
+            data-testid="agent-chat-message-bubble-system"
             style={{
               display: "flex",
-              flexDirection: "column",
+              flexDirection: "row",
               alignItems: "center",
-              maxWidth: "100%",
+              justifyContent: "center",
+              gap: 8,
+              width: "fit-content",
+              maxWidth: "min(100%, 760px)",
               minWidth: 0,
+              color: token.colorTextTertiary,
+              fontSize: 11,
+              lineHeight: "18px",
+              overflowWrap: "anywhere",
+              textAlign: "center",
+              whiteSpace: "pre-wrap",
             }}
           >
-            <div
-              data-testid="agent-chat-message-bubble-system"
-              style={{
-                width: "fit-content",
-                maxWidth: "min(100%, 760px)",
-                border: `1px solid ${token.colorBorderSecondary}`,
-                borderRadius: 8,
-                padding: "8px 12px",
-                background: token.colorFillQuaternary,
-                color: token.colorTextSecondary,
-                overflowWrap: "anywhere",
-                textAlign: "center",
-                whiteSpace: "pre-wrap",
-              }}
-            >
-              {message.content}
-            </div>
+            <span>{message.content}</span>
             {!message.hideTimestamp ? (
               <Text
                 type="secondary"
                 title={formatMessageTime(message.timestamp)}
                 data-testid="agent-chat-message-time"
                 style={{
-                  display: "block",
-                  marginTop: 4,
+                  flex: "0 0 auto",
                   fontSize: 11,
+                  lineHeight: "18px",
                   textAlign: "center",
                 }}
               >
