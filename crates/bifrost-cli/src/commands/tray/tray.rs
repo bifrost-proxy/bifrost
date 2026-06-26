@@ -1016,6 +1016,8 @@ struct MenuBarStatsBitmap {
 const MENU_BAR_STATS_SEPARATOR_GAP: u32 = 6;
 #[cfg(target_os = "macos")]
 const MENU_BAR_STATS_SEPARATOR_WIDTH: u32 = 2;
+#[cfg(target_os = "macos")]
+const TLS_BADGE_FONT_SCALE: f32 = 0.5;
 
 #[cfg(target_os = "macos")]
 fn menu_bar_stats_icon(title: &str) -> Option<tray_icon::Icon> {
@@ -1449,7 +1451,11 @@ fn menu_bar_stats_columns(
     for idx in 0..count {
         let value = rows.values.get(idx);
         let label = rows.labels.get(idx);
-        let value_font = value_font_px;
+        let value_font = if is_tls_badge_column(value, label) {
+            value_font_px * TLS_BADGE_FONT_SCALE
+        } else {
+            value_font_px
+        };
         let label_font = if is_menu_bar_network_column(value, label) {
             value_font_px
         } else {
@@ -1478,6 +1484,11 @@ fn menu_bar_stats_columns(
             .saturating_add(MENU_BAR_STATS_SEPARATOR_GAP * 2 + MENU_BAR_STATS_SEPARATOR_WIDTH);
     }
     columns
+}
+
+#[cfg(target_os = "macos")]
+fn is_tls_badge_column(value: Option<&String>, label: Option<&String>) -> bool {
+    value.is_some_and(|text| text == "TLS") && label.is_none_or(|text| text.is_empty())
 }
 
 #[cfg(target_os = "macos")]
@@ -4933,6 +4944,10 @@ fn set_pending_menu_action(
             if current.pending_action.is_some() {
                 return false;
             }
+            if let menu::PendingMenuAction::TlsInterception { enabled } = &pending_action {
+                current.tls_interception_known = true;
+                current.tls_interception_enabled = *enabled;
+            }
             current.pending_action = Some(pending_action);
             generation.fetch_add(1, Ordering::Relaxed);
             true
@@ -4941,6 +4956,10 @@ fn set_pending_menu_action(
             let mut current = poisoned.into_inner();
             if current.pending_action.is_some() {
                 return false;
+            }
+            if let menu::PendingMenuAction::TlsInterception { enabled } = &pending_action {
+                current.tls_interception_known = true;
+                current.tls_interception_enabled = *enabled;
             }
             current.pending_action = Some(pending_action);
             generation.fetch_add(1, Ordering::Relaxed);

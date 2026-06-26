@@ -297,6 +297,19 @@
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn test_menu_bar_tls_badge_column_uses_half_size_font() {
+        let font = menu_bar_stats_font().expect("font");
+        let rows = menu_bar_stats_rows("TLS | C20% | M55%");
+        let columns = menu_bar_stats_columns(font, &rows, 28.0, 9.5);
+
+        assert_eq!(rows.values, vec!["TLS", "C20%", "M55%"]);
+        assert_eq!(columns[0].value_font_px, 14.0);
+        assert_eq!(columns[1].value_font_px, 28.0);
+        assert!(columns[0].width < columns[1].width);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn test_native_stats_view_is_default_on_with_explicit_opt_out() {
         assert!(native_stats_view_enabled_from_env(None));
         assert!(native_stats_view_enabled_from_env(Some("1")));
@@ -1246,6 +1259,49 @@
 
         let snapshot = clone_menu_data_snapshot(&menu_data);
         assert_eq!(snapshot.system_proxy, Some(cached));
+    }
+
+    #[test]
+    fn test_tls_pending_action_updates_badge_snapshot_immediately() {
+        let snapshot = MenuDataSnapshot {
+            runtime: Some(sample_runtime()),
+            custom_config: None,
+            rules: Vec::new(),
+            recent_rule_targets: Vec::new(),
+            system_proxy: None,
+            system_proxy_needs_recheck: false,
+            tls_interception_known: true,
+            tls_interception_enabled: false,
+            pending_action: None,
+            bin_available: true,
+            update_available: None,
+            #[cfg(target_os = "macos")]
+            system_stats: Some(SystemStatsMenuLines {
+                system: "System: CPU 23%".to_string(),
+                network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
+                menu_bar: "C20% | M55%".to_string(),
+            }),
+            #[cfg(target_os = "macos")]
+            dashboard: None,
+        };
+        let menu_data = Arc::new(Mutex::new(snapshot));
+        let generation = AtomicU64::new(0);
+
+        assert!(set_pending_menu_action(
+            &menu_data,
+            &generation,
+            menu::PendingMenuAction::TlsInterception { enabled: true },
+        ));
+
+        let snapshot = clone_menu_data_snapshot(&menu_data);
+        assert!(snapshot.tls_interception_known);
+        assert!(snapshot.tls_interception_enabled);
+        assert_eq!(generation.load(Ordering::Relaxed), 1);
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            menu_bar_stats_title(&snapshot, ServiceState::Running),
+            Some("TLS | C20% | M55%".to_string())
+        );
     }
 
     #[test]
