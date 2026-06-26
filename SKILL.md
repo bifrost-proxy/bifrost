@@ -928,16 +928,16 @@ bifrost remote file find   '<regex>' [--path <sub>] [--max-matches <N>] \
 bifrost remote file hash   <path> [--algo sha256]
 
 # 读写
-bifrost remote file write  <path> [--content-file <local|->] \
+bifrost remote file write  <path> [--content-file/--from-local <local|->] \
                                    [--content-b64 <base64>] \
                                    [--base-sha256 <sha>] \
                                    [--allow-overwrite true|false] \
                                    [--create-parents]
-bifrost remote file edit   <path> --edits '<json>' [--base-sha256 <sha>]
+bifrost remote file edit   <path> (--edits '<json>' | --from-local <local-json|->) [--base-sha256 <sha>]
 bifrost remote file mkdir  <path> [--parents]
 bifrost remote file move   <from> <to>
 bifrost remote file delete <path> [--recursive]
-bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <base64>)
+bifrost remote file patch  (--patch-file/--from-local <local|->) | (--patch-b64 <base64>)
 ```
 
 所有子命令共享 `--cwd <path>`（工作目录覆盖）、`--output human|json`、`--relay-url`、`--client-id`。
@@ -950,6 +950,7 @@ bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <base64>)
 - **Symlink 语义**：`stat` 和 `list` 对符号链接采用 **lstat** 语义，不跟随链接，额外返回 `symlink_target`；Windows 上自动去除 `\\?\` / `\\?\UNC\` NT verbatim 前缀，跨平台一致。
 - **原子写 + 乐观锁**：`write` / `edit` 采用 tmp+rename 两阶段提交，失败自动快照回滚；传 `--base-sha256` 时若与当前文件不一致，返回错误码 `[file.sha_mismatch]`，agent 应重新 `read` 再重试。
 - **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
+- **`--from-local`**：caller 侧本地 payload 入口。`write --from-local ./file` 读取本地文件内容，`edit --from-local ./edits.json` 读取 edits JSON，`patch --from-local ./change.diff` 读取 unified diff；`mkdir/move/delete` 没有本地 payload，不使用该参数。
 - **`--content-b64` / `--patch-b64`**：用于传输二进制或含特殊字符的文本，caller 在本地 base64，admin 侧解码后写入；比 `--content-file -` + stdin 管道更适合非交互 / Windows agent。
 - **`--create-parents`**：`write` 自带 `mkdir -p` 语义，避免 agent 先 `mkdir` 再 `write` 的两次往返。
 - **搜索过滤**：`find` 的 `-i` 等价于 `(?i)` 前缀；`--glob '*.rs'` 用于在同一次 regex 扫描里按文件名进一步收窄。

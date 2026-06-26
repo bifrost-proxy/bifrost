@@ -569,19 +569,19 @@ bifrost remote file find        [pattern] [-e REGEX]... [--path P] [-i] [-F] [-w
                                  [--no-ignore] [--exclude NAME]... [--cwd DIR]   # alias: search
 bifrost remote file hash        <path> [--algo sha256] [--cwd DIR]
 bifrost remote file outline     <path> [--max-symbols N] [--max-bytes N] [--cwd DIR]
-bifrost remote file write       <path> [--content STR | --content-file <local|-> | --content-b64 B64]
+bifrost remote file write       <path> [--content STR | --content-file/--from-local <local|-> | --content-b64 B64]
                                  [--base-sha256 SHA] [--allow-overwrite BOOL] [--create-parents] [--cwd DIR]
-bifrost remote file edit        <path> --edits JSON [--base-sha256 SHA] [--cwd DIR]
+bifrost remote file edit        <path> (--edits JSON | --from-local <local-json|->) [--base-sha256 SHA] [--cwd DIR]
 bifrost remote file mkdir       <path> [--parents] [--cwd DIR]
 bifrost remote file move        <from> <to> [--base-sha256 SHA] [--allow-overwrite BOOL] [--cwd DIR]   # alias: mv
 bifrost remote file delete      <path> [--recursive] [--cwd DIR]                                      # alias: rm
-bifrost remote file patch       [--patch-file <local|-> | --patch-b64 B64] [--base-sha PATH=SHA]... [--cwd DIR]   # alias: apply-patch
+bifrost remote file patch       [--patch-file/--from-local <local|-> | --patch-b64 B64] [--base-sha PATH=SHA]... [--cwd DIR]   # alias: apply-patch
 ```
 
 注意：
 - 内容检索子命令真名为 `find`（`search` 是 visible alias），同时支持位置正则与可重复 `-e/--regex` 多模式 OR 组合，并提供 `-A/-B/-C` 上下文与 `-F/-w/--glob/--no-ignore/--exclude` 控制；服务端方法名保持 `file.search`。
 - `move` / `delete` / `patch` 是真名，`mv` / `rm` / `apply-patch` 为 visible alias，保持向后兼容。
-- `read` / `list` / `glob` / `find` 等读路径均支持 `--cursor`/`--max-matches` 分页与 `--no-ignore`/`--exclude` 控制；`write` 接受 `--content`/`--content-file`/`--content-b64`/stdin 四种内容输入。
+- `read` / `list` / `glob` / `find` 等读路径均支持 `--cursor`/`--max-matches` 分页与 `--no-ignore`/`--exclude` 控制；`write` 接受 `--content`/`--content-file`/`--from-local`/`--content-b64`/stdin 内容输入；`edit --from-local` 读取 caller 本地 edits JSON；`patch --from-local` 读取 caller 本地 unified diff。
 - `move` 暴露 `--base-sha256` 与 `--allow-overwrite`，覆盖了早期文档中 "file.move 未实现 sha256 前置校验" 的限制。
 
 ---

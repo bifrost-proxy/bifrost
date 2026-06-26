@@ -840,6 +840,121 @@ PATCH
 }
 
 # ---------------------------------------------------------------------------
+#  TC-FILE-13B: write/edit/patch caller-side --from-local exactness
+# ---------------------------------------------------------------------------
+test_file_from_local_sources_exact() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-13B: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-13B: file.write/edit/patch --from-local — exact caller→relay→target bytes"
+
+    local local_write remote_write
+    local_write="$(mktemp)"
+    remote_write="$(mktemp)"
+    printf 'alpha UTF-8 雪\nsymbols $PATH `tick` | pipe\nlast line\n' > "$local_write"
+
+    local out
+    out=$(run_remote_file_cmd write --path from-local-write.txt --from-local "$local_write" --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-13B: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        rm -f "$local_write" "$remote_write"
+        return 0
+    fi
+    if echo "$out" | jq -e '.bytes_written // .path' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-13B: file.write --from-local returns success JSON"
+    else
+        _log_fail "TC-FILE-13B: file.write --from-local returns valid JSON" "JSON with bytes_written or path" "$out"
+    fi
+
+    out=$(run_remote_file_cmd read from-local-write.txt --cwd "$SANDBOX_DIR") || true
+    if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
+        echo "$out" | jq -r '.content_b64' | base64 -d > "$remote_write"
+        if cmp -s "$local_write" "$remote_write" && cmp -s "$local_write" "$SANDBOX_DIR/from-local-write.txt"; then
+            _log_pass "TC-FILE-13B: write --from-local matches local source via remote read and target disk byte-for-byte"
+        else
+            _log_fail "TC-FILE-13B: write --from-local exact byte comparison" \
+                "$(shasum -a 256 "$local_write" | awk '{print $1}')" \
+                "remote_read=$(shasum -a 256 "$remote_write" | awk '{print $1}') target_disk=$(shasum -a 256 "$SANDBOX_DIR/from-local-write.txt" | awk '{print $1}')"
+        fi
+    else
+        _log_fail "TC-FILE-13B: read after write --from-local returns content_b64" "JSON with content_b64" "$out"
+    fi
+
+    local edits_file expected_edit remote_edit
+    edits_file="$(mktemp)"
+    expected_edit="$(mktemp)"
+    remote_edit="$(mktemp)"
+    cat > "$edits_file" <<'JSON'
+[{"old_string":"symbols $PATH `tick` | pipe","new_string":"symbols literal-preserved ✓"}]
+JSON
+    printf 'alpha UTF-8 雪\nsymbols literal-preserved ✓\nlast line\n' > "$expected_edit"
+
+    out=$(run_remote_file_cmd edit from-local-write.txt --from-local "$edits_file" --cwd "$SANDBOX_DIR") || true
+    if echo "$out" | jq -e '.bytes_written // .applied_edits // .path' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-13B: file.edit --from-local returns success JSON"
+    else
+        _log_fail "TC-FILE-13B: file.edit --from-local returns valid JSON" "JSON with bytes_written/applied_edits/path" "$out"
+    fi
+
+    out=$(run_remote_file_cmd read from-local-write.txt --cwd "$SANDBOX_DIR") || true
+    if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
+        echo "$out" | jq -r '.content_b64' | base64 -d > "$remote_edit"
+        if cmp -s "$expected_edit" "$remote_edit" && cmp -s "$expected_edit" "$SANDBOX_DIR/from-local-write.txt"; then
+            _log_pass "TC-FILE-13B: edit --from-local matches expected content via remote read and target disk byte-for-byte"
+        else
+            _log_fail "TC-FILE-13B: edit --from-local exact byte comparison" \
+                "$(shasum -a 256 "$expected_edit" | awk '{print $1}')" \
+                "remote_read=$(shasum -a 256 "$remote_edit" | awk '{print $1}') target_disk=$(shasum -a 256 "$SANDBOX_DIR/from-local-write.txt" | awk '{print $1}')"
+        fi
+    else
+        _log_fail "TC-FILE-13B: read after edit --from-local returns content_b64" "JSON with content_b64" "$out"
+    fi
+
+    local patch_file expected_patch remote_patch
+    patch_file="$(mktemp)"
+    expected_patch="$(mktemp)"
+    remote_patch="$(mktemp)"
+    cat > "$patch_file" <<'PATCH'
+--- a/from-local-write.txt
++++ b/from-local-write.txt
+@@ -1,3 +1,4 @@
+ alpha UTF-8 雪
+-symbols literal-preserved ✓
++symbols patched from local diff ✓
+ last line
++patch tail line
+PATCH
+    printf 'alpha UTF-8 雪\nsymbols patched from local diff ✓\nlast line\npatch tail line\n' > "$expected_patch"
+
+    out=$(run_remote_file_cmd patch --from-local "$patch_file" --cwd "$SANDBOX_DIR") || true
+    if echo "$out" | jq -e '.files' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-13B: file.patch --from-local returns files JSON"
+    else
+        _log_fail "TC-FILE-13B: file.patch --from-local returns valid JSON" "JSON with files array" "$out"
+    fi
+
+    out=$(run_remote_file_cmd read from-local-write.txt --cwd "$SANDBOX_DIR") || true
+    if echo "$out" | jq -e '.content_b64' >/dev/null 2>&1; then
+        echo "$out" | jq -r '.content_b64' | base64 -d > "$remote_patch"
+        if cmp -s "$expected_patch" "$remote_patch" && cmp -s "$expected_patch" "$SANDBOX_DIR/from-local-write.txt"; then
+            _log_pass "TC-FILE-13B: patch --from-local matches expected content via remote read and target disk byte-for-byte"
+        else
+            _log_fail "TC-FILE-13B: patch --from-local exact byte comparison" \
+                "$(shasum -a 256 "$expected_patch" | awk '{print $1}')" \
+                "remote_read=$(shasum -a 256 "$remote_patch" | awk '{print $1}') target_disk=$(shasum -a 256 "$SANDBOX_DIR/from-local-write.txt" | awk '{print $1}')"
+        fi
+    else
+        _log_fail "TC-FILE-13B: read after patch --from-local returns content_b64" "JSON with content_b64" "$out"
+    fi
+
+    rm -f "$local_write" "$remote_write" "$edits_file" "$expected_edit" "$remote_edit" \
+        "$patch_file" "$expected_patch" "$remote_patch"
+}
+
+# ---------------------------------------------------------------------------
 #  TC-FILE-14: file.read with --offset/--limit (line-range reading)
 # ---------------------------------------------------------------------------
 test_file_read_offset_limit() {
@@ -2055,6 +2170,7 @@ main() {
     require_cmd jq
     require_cmd node
     require_cmd base64
+    require_cmd shasum
 
     TARGET_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-remote-file-target-XXXXXX")"
     CALLER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-remote-file-caller-XXXXXX")"
@@ -2100,6 +2216,7 @@ EOF
     test_file_search
     test_file_edit
     test_file_apply_patch
+    test_file_from_local_sources_exact
 
     # Coding-agent enhancement accuracy tests
     test_file_read_offset_limit

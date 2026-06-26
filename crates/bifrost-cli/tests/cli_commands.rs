@@ -3,7 +3,7 @@ use std::fs;
 use bifrost_cli::cli::{
     AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
     AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
-    Commands, RemoteCommands, SettingCommands, SyncCommands,
+    Commands, RemoteCommands, RemoteFileCommands, SettingCommands, SyncCommands,
 };
 use bifrost_cli::commands::handle_install_skill;
 use clap::{CommandFactory, Parser};
@@ -679,6 +679,101 @@ fn remote_run_parses_script_upload_options_and_args() {
                 _ => panic!("unexpected remote action"),
             }
         }
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_file_write_parses_from_local_alias() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "file",
+        "write",
+        "--path",
+        "remote.txt",
+        "--from-local",
+        "/tmp/local.txt",
+    ])
+    .expect("remote file write --from-local should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::File { action } => match action.as_ref() {
+                RemoteFileCommands::Write {
+                    path,
+                    path_flag,
+                    content_file,
+                    ..
+                } => {
+                    assert!(path.is_none());
+                    assert_eq!(path_flag.as_deref(), Some("remote.txt"));
+                    assert_eq!(content_file.as_deref(), Some("/tmp/local.txt"));
+                }
+                _ => panic!("unexpected remote file action"),
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_file_edit_parses_from_local_edits_file() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "file",
+        "edit",
+        "remote.txt",
+        "--from-local",
+        "/tmp/edits.json",
+    ])
+    .expect("remote file edit --from-local should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::File { action } => match action.as_ref() {
+                RemoteFileCommands::Edit {
+                    path,
+                    edits,
+                    edits_file,
+                    ..
+                } => {
+                    assert_eq!(path, "remote.txt");
+                    assert!(edits.is_none());
+                    assert_eq!(edits_file.as_deref(), Some("/tmp/edits.json"));
+                }
+                _ => panic!("unexpected remote file action"),
+            },
+            _ => panic!("unexpected remote action"),
+        },
+        _ => panic!("unexpected command"),
+    }
+}
+
+#[test]
+fn remote_file_patch_parses_from_local_alias() {
+    let cli = Cli::try_parse_from([
+        "bifrost",
+        "remote",
+        "file",
+        "patch",
+        "--from-local",
+        "/tmp/change.patch",
+    ])
+    .expect("remote file patch --from-local should parse");
+
+    match cli.command.expect("command should exist") {
+        Commands::Remote { action, .. } => match action {
+            RemoteCommands::File { action } => match action.as_ref() {
+                RemoteFileCommands::Patch { patch_file, .. } => {
+                    assert_eq!(patch_file.as_deref(), Some("/tmp/change.patch"));
+                }
+                _ => panic!("unexpected remote file action"),
+            },
+            _ => panic!("unexpected remote action"),
+        },
         _ => panic!("unexpected command"),
     }
 }

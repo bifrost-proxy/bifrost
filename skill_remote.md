@@ -36,11 +36,11 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | 多关键词 OR 搜 / 字面量 / 整词 | `remote file find -e p1 -e p2 [--fixed-strings] [--word]` | 多次 grep 后人肉合并 |
 | 搜到点想看上下文 | `remote file find <regex> --around 3` | 再单独 `read` 那几行 |
 | 写一个短文本文件 | `remote file write <path> --content "..." --create-parents` | `shell-text "echo ... > file"` |
-| 从本地文件写过去 | `remote file write <path> --content-file ./local.txt --create-parents` | `scp` / `echo`+重定向 |
+| 从本地文件写过去 | `remote file write <path> --from-local ./local.txt --create-parents`（等价 `--content-file`） | `scp` / `echo`+重定向 |
 | 放临时脚本 / 日志 | `remote file scratch-dir [--name .bifrost-tmp]` 后写入返回目录 | 写 `/tmp/...` 或 `target/...` 反复撞 FileAccessPolicy |
-| 改已有文件的几行（按行号） | `remote file edit --base-sha256 <sha> --edits '[{"start_line":..}]'` | `sed -i` / `echo`+重定向 |
+| 改已有文件的几行（按行号） | `remote file edit --base-sha256 <sha> --edits '[{"start_line":..}]'`；大 JSON 可用 `--from-local ./edits.json` | `sed -i` / `echo`+重定向 |
 | 按内容锚点改（不数行号） | `remote file edit --edits '[{"old_string":"..","new_string":".."}]'` | `sed`/正则替换 |
-| 多文件统一 patch（含改名/复制） | `remote file patch --patch-file ./diff.patch` | 循环 shell-text 的 sed |
+| 多文件统一 patch（含改名/复制） | `remote file patch --from-local ./diff.patch`（等价 `--patch-file`） | 循环 shell-text 的 sed |
 | 创建目录 | `remote file mkdir --parents` | `shell-text "mkdir -p ..."` |
 | 移动/删除 | `remote file move` / `remote file delete --recursive` | `shell-text "mv" / "rm -rf"` |
 | 传输大文件 / 二进制 / 特殊字符 | `remote file write --content-b64 "$(base64 < ./blob.bin)"` | echo 管道 base64 |
@@ -345,14 +345,14 @@ bifrost remote file hash   <path> [--algo sha256]
 bifrost remote file outline <path> [--max-symbols N] [--max-bytes N]
 
 # —— 读写（需 remote_file_write）——
-bifrost remote file write  <path> (--content <text>) | (--content-file <local|->) | (--content-b64 <b64>) \
+bifrost remote file write  <path> (--content <text>) | (--content-file/--from-local <local|->) | (--content-b64 <b64>) \
                                    [--base-sha256 SHA] [--allow-overwrite true|false] \
                                    [--create-parents]
-bifrost remote file edit   <path> --edits '<json>' [--base-sha256 SHA]
+bifrost remote file edit   <path> (--edits '<json>' | --from-local <local-json|->) [--base-sha256 SHA]
 bifrost remote file mkdir  <path> [--parents]
 bifrost remote file move   <from> <to>
 bifrost remote file delete <path> [--recursive]
-bifrost remote file patch  (--patch-file <local|->) | (--patch-b64 <b64>)
+bifrost remote file patch  (--patch-file/--from-local <local|->) | (--patch-b64 <b64>)
 ```
 
 所有子命令共享 `--cwd <path>`、`--output human|json`、`--relay-url`、`--client-id`。
@@ -460,7 +460,8 @@ bifrost remote file find 'fn main' --around 3
 - **乐观锁**：`write` / `edit` 传 `--base-sha256` 后，文件已被改动会返回 `file.sha_mismatch`；Agent 应重新 `read` 再重试，不要盲目覆盖。
 - **EOL 保留**：`edit` 自动识别并保留 LF / CRLF 风格；跨风格 replacement 会被归一到目标文件风格。
 - **字符列定位**：`find` 返回的 `column` 是**字符列（char-based）**；`byte_column` 是字节偏移，二者在 CJK / 多字节场景会不同。
-- **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` 从本地文件或 stdin；`--content-b64 <b64>` 由 caller 本地 base64、目标端解码。优先级：`--content-b64` > `--content` > `--content-file`。二进制、含 CRLF、含特殊字符的文本走 `--content-b64` 最安全，远比 echo 管道 base64 + shell 重定向可靠。
+- **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` / `--from-local <local|->` 从 caller 本地文件或 stdin；`--content-b64 <b64>` 由 caller 本地 base64、目标端解码。优先级：`--content-b64` > `--content` > `--content-file/--from-local`。二进制、含 CRLF、含特殊字符的文本走 `--content-b64` 最安全，远比 echo 管道 base64 + shell 重定向可靠。
+- **本地 payload 统一入口**：`write`、`edit`、`patch` 都支持 `--from-local` 从 caller 本地路径读取 payload：`write --from-local ./file.bin` 读取文件内容，`edit --from-local ./edits.json` 读取 edits JSON 数组，`patch --from-local ./change.diff` 读取 unified diff。`mkdir` / `move` / `delete` 没有 caller 本地 payload，不使用 `--from-local`。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
 - **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错并给出示例**（不再静默吞错发 null）。两种形态：行号区间 `[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`（1-based 闭区间），或内容锚定 `[{"old_string":"foo","new_string":"bar","expected_count":1}]`（按字面子串定位，`expected_count` 默认 1，命中数不符则报错）；单次调用两种形态不可混用。
 - **错误自带修复建议**：file 操作失败时，CLI 会根据服务端的 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→用 `scratch-dir` 或让目标端加白名单而非改 cwd）。错误码含义见下方"错误码契约"。
@@ -601,7 +602,7 @@ bifrost remote conn status
 9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
 10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job list` 找到本地记录的 call，并用 `remote job watch/logs/status <call_id>` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
 11. **远端跑本地脚本用 `remote run`**：Python/Node/shell smoke 脚本、查询脚本和带复杂字符的脚本都优先用 `remote run --script-file ... --interpreter ... -- <args>`；不要 `cat <<EOF` heredoc 到远端 shell。
-12. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--content-file`；二进制 / 特殊字符 / 大文件用 `--content-b64`。避免 echo 管道 base64。`file write --path <p>` 仅是兼容误用，推荐仍写成 `file write <p>`。
+12. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin 用 `--from-local`（`write` 兼容 `--content-file`，`patch` 兼容 `--patch-file`）；二进制 / 特殊字符 / 大文件用 `--content-b64`。`edit --from-local ./edits.json` 适合复杂 edits JSON，`patch --from-local ./change.diff` 适合统一 diff。避免 echo 管道 base64。`file write --path <p>` 仅是兼容误用，推荐仍写成 `file write <p>`。
 13. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
 14. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 

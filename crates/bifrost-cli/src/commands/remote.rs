@@ -3223,7 +3223,7 @@ fn build_remote_file_command(
                     }
                     None => {
                         return Err(BifrostError::Config(
-                            "missing content source for file.write: use --content, --content-file, --content-b64, or --content-file - to read stdin".to_string(),
+                            "missing content source for file.write: use --content, --from-local/--content-file, --content-b64, or --from-local - to read stdin".to_string(),
                         ));
                     }
                     Some(p) => std::fs::read(p)
@@ -3252,11 +3252,13 @@ fn build_remote_file_command(
         RemoteFileCommands::Edit {
             path,
             edits,
+            edits_file,
             base_sha256,
             cwd,
             output,
         } => {
-            let edits_val: serde_json::Value = serde_json::from_str(edits).map_err(|e| {
+            let edits_text = read_remote_file_edit_source(edits, edits_file)?;
+            let edits_val: serde_json::Value = serde_json::from_str(&edits_text).map_err(|e| {
                 BifrostError::Config(format!(
                     "invalid --edits JSON: {e}. Expected a JSON array like \
                      '[{{\"start_line\":10,\"end_line\":12,\"replacement\":\"new text\\n\"}}]' \
@@ -3360,7 +3362,7 @@ fn build_remote_file_command(
                 }
             } else {
                 return Err(BifrostError::Config(
-                    "apply-patch requires --patch-file or --patch-b64".to_string(),
+                    "apply-patch requires --from-local/--patch-file or --patch-b64".to_string(),
                 ));
             };
             // Parse `--base-sha PATH=SHA` pairs into a map for the server-side
@@ -3516,6 +3518,35 @@ fn remote_shell_exec_env(env_pairs: &[(String, String)]) -> Option<BTreeMap<Stri
     Some(env_pairs.iter().cloned().collect())
 }
 
+fn read_remote_file_edit_source(
+    edits: &Option<String>,
+    edits_file: &Option<String>,
+) -> Result<String, BifrostError> {
+    match (edits.as_deref(), edits_file.as_deref()) {
+        (Some(text), None) => Ok(text.to_string()),
+        (None, Some("-")) => {
+            let mut buf = String::new();
+            std::io::stdin().read_to_string(&mut buf).map_err(|e| {
+                BifrostError::Io(std::io::Error::other(format!(
+                    "read stdin for file.edit --from-local: {e}"
+                )))
+            })?;
+            Ok(buf)
+        }
+        (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "read edits file {path}: {e}"
+            )))
+        }),
+        (Some(_), Some(_)) => Err(BifrostError::Config(
+            "file.edit accepts either --edits or --from-local, not both".to_string(),
+        )),
+        (None, None) => Err(BifrostError::Config(
+            "file.edit requires --edits JSON or --from-local <local-json-file>".to_string(),
+        )),
+    }
+}
+
 fn resolve_file_write_path(
     positional: &Option<String>,
     path_flag: &Option<String>,
@@ -3526,7 +3557,7 @@ fn resolve_file_write_path(
             "[file.invalid_args] pass the target path only once: use `bifrost remote file write <path> ...` or the compatibility form `--path <path>`, not both".to_string(),
         )),
         (None, None) => Err(BifrostError::Config(
-            "[file.invalid_args] missing target path for file write\n→ Use: bifrost remote file write <path> --content-file <local-file>".to_string(),
+            "[file.invalid_args] missing target path for file write\n→ Use: bifrost remote file write <path> --from-local <local-file>".to_string(),
         )),
     }
 }
@@ -10659,7 +10690,7 @@ mod coverage_boost_v3 {
         match err {
             BifrostError::Config(msg) => {
                 assert!(msg.contains("missing content source for file.write"));
-                assert!(msg.contains("--content-file -"));
+                assert!(msg.contains("--from-local -"));
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -10737,7 +10768,8 @@ mod coverage_boost_v3 {
     fn file_edit_parses_valid_edits_json() {
         let cmd = RemoteFileCommands::Edit {
             path: "file.txt".to_string(),
-            edits: "[{\"op\":\"replace\"}]".to_string(),
+            edits: Some("[{\"op\":\"replace\"}]".to_string()),
+            edits_file: None,
             base_sha256: Some("abc".to_string()),
             cwd: None,
             output: "human".to_string(),
@@ -10749,10 +10781,37 @@ mod coverage_boost_v3 {
     }
 
     #[test]
+    fn file_edit_reads_edits_from_local_file() {
+        let mut tmp = NamedTempFile::new().expect("temp edits");
+        write!(
+            tmp,
+            "[{{\"old_string\":\"before\",\"new_string\":\"after\"}}]"
+        )
+        .expect("write edits");
+        let path = tmp.path().to_path_buf();
+
+        let cmd = RemoteFileCommands::Edit {
+            path: "file.txt".to_string(),
+            edits: None,
+            edits_file: Some(path.display().to_string()),
+            base_sha256: None,
+            cwd: Some("/repo".to_string()),
+            output: "human".to_string(),
+        };
+        let built = build_file_command(cmd);
+        let v = args_json(&built);
+        assert_eq!(v["path"], "file.txt");
+        assert_eq!(v["cwd"], "/repo");
+        assert_eq!(v["edits"][0]["old_string"], "before");
+        assert_eq!(v["edits"][0]["new_string"], "after");
+    }
+
+    #[test]
     fn file_edit_rejects_invalid_edits_json() {
         let cmd = RemoteFileCommands::Edit {
             path: "file.txt".to_string(),
-            edits: "not-json".to_string(),
+            edits: Some("not-json".to_string()),
+            edits_file: None,
             base_sha256: None,
             cwd: None,
             output: "human".to_string(),

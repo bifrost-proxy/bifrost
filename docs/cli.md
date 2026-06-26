@@ -714,11 +714,13 @@ bifrost remote file glob "src/**/*.rs" --cwd /path/to/repo
 bifrost remote file find "TODO" --path src --cwd /path/to/repo
 bifrost remote file hash Cargo.toml --cwd /path/to/repo
 printf 'hello\n' | bifrost remote file write notes.txt --content-file - --cwd /tmp
+bifrost remote file write notes.txt --from-local ./notes.txt --cwd /tmp
 bifrost remote file edit README.md --edits '[{"start_line":1,"end_line":1,"replacement":"# Title\n"}]' --cwd /path/to/repo
+bifrost remote file edit README.md --from-local ./edits.json --cwd /path/to/repo
 bifrost remote file mkdir notes --parents --cwd /tmp
 bifrost remote file move old.txt new.txt --cwd /tmp
 bifrost remote file delete stale.txt --cwd /tmp
-bifrost remote file patch --patch-file ./change.diff --cwd /path/to/repo
+bifrost remote file patch --from-local ./change.diff --cwd /path/to/repo
 
 bifrost remote traffic list --limit 20
 bifrost remote traffic list --listener-port 50831
