@@ -260,6 +260,11 @@ pub(super) async fn handle_chat_gateway(
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                if let Some(response) =
+                    maybe_external_cli_model_slash_response(&request, &effective, true).await
+                {
+                    return response;
+                }
                 if request.message.trim() == "/stop" {
                     return stop_external_cli_stream_response(
                         request.session_key.as_deref().unwrap_or_default(),
@@ -536,6 +541,11 @@ pub(super) async fn handle_chat_gateway(
                 }
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
+                if let Some(response) =
+                    maybe_external_cli_model_slash_response(&request, &effective, false).await
+                {
+                    return response;
+                }
                 prepare_external_cli_session_attachment_params(&mut request, &effective.runner_id);
                 let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
                     crate::im_gateway::external_cli::default_runs_root(),
@@ -1976,6 +1986,265 @@ async fn clear_chat_gateway_session_response(
         .unwrap()
 }
 
+async fn maybe_external_cli_model_slash_response(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+    stream: bool,
+) -> Option<Response<BoxBody>> {
+    let command =
+        crate::im_gateway::external_cli::parse_external_cli_model_slash_command(&request.message)?;
+    let command = match command {
+        Ok(command) => command,
+        Err(error) => return Some(model_slash_error_response(&error, stream)),
+    };
+    if !crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter) {
+        return Some(model_slash_error_response(
+            "/model 和 /models 当前仅支持 Codex 或 Traex Runner。",
+            stream,
+        ));
+    }
+    let adapter_label =
+        crate::im_gateway::external_cli::external_cli_model_adapter_label(&request.adapter);
+    let mut display_message: Option<String> = None;
+    let response = match command {
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::List => {
+            match crate::im_gateway::external_cli::load_external_cli_model_catalog(
+                &request.adapter,
+                &request.adapter_config,
+                request.work_dir.as_deref(),
+            )
+            .await
+            {
+                Ok(models) => crate::im_gateway::external_cli::format_external_cli_model_catalog(
+                    &request.adapter,
+                    &models,
+                ),
+                Err(error) => format!("无法获取 {adapter_label} 模型列表：{error}"),
+            }
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Show => {
+            let (model, source) = current_session_model_override(request, &effective.runner_id)
+                .unwrap_or_else(|| {
+                    let resolved =
+                        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+                            &request.adapter,
+                            &request.adapter_config,
+                        );
+                    (resolved.model, resolved.model_source)
+                });
+            crate::im_gateway::external_cli::format_external_cli_model_status(
+                &request.adapter,
+                model.as_deref(),
+                source.as_deref(),
+                &effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Clear => {
+            persist_session_model_override(request, &effective.runner_id, None);
+            display_message = Some("清除模型切换".to_string());
+            format!(
+                "已清除 {adapter_label} Runner `{}` 的 session 模型 override。下一条消息将使用 Runner 配置或 {adapter_label} 默认模型。",
+                effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Set(model) => {
+            let models = match crate::im_gateway::external_cli::load_external_cli_model_catalog(
+                &request.adapter,
+                &request.adapter_config,
+                request.work_dir.as_deref(),
+            )
+            .await
+            {
+                Ok(models) => models,
+                Err(error) => {
+                    let response =
+                        format!("未切换模型：无法验证 {adapter_label} 模型 `{model}`：{error}");
+                    remember_model_slash_result_state(request, &effective.runner_id, &response);
+                    return Some(model_slash_success_response(&response, stream));
+                }
+            };
+            let model = match crate::im_gateway::external_cli::validate_external_cli_model_selection(
+                &request.adapter,
+                &model,
+                &models,
+            ) {
+                Ok(model) => model,
+                Err(response) => {
+                    remember_model_slash_result_state(request, &effective.runner_id, &response);
+                    return Some(model_slash_success_response(&response, stream));
+                }
+            };
+            persist_session_model_override(request, &effective.runner_id, Some(model.clone()));
+            display_message = Some(format!("切换模型为 {model}"));
+            format!(
+                "已将 {adapter_label} Runner `{}` 的 session 模型设置为 `{}`。\n下一条消息会通过 `--model {}` 启动。",
+                effective.runner_id, model, model,
+            )
+        }
+    };
+    remember_model_slash_result_state(
+        request,
+        &effective.runner_id,
+        display_message.as_deref().unwrap_or(&response),
+    );
+    Some(model_slash_success_response(&response, stream))
+}
+
+fn model_slash_success_response(response: &str, stream: bool) -> Response<BoxBody> {
+    if !stream {
+        return json_response(&serde_json::json!({
+            "status": "succeeded",
+            "response": response,
+        }));
+    }
+    let assistant = serde_json::json!({
+        "eventType": "assistant_final",
+        "content": response,
+    });
+    let finished = serde_json::json!({
+        "eventType": "run_finished",
+        "status": "succeeded",
+        "response": response,
+    });
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/x-ndjson")
+        .body(crate::handlers::full_body(format!(
+            "{assistant}\n{finished}\n"
+        )))
+        .unwrap()
+}
+
+fn model_slash_error_response(error: &str, stream: bool) -> Response<BoxBody> {
+    if !stream {
+        return error_response(StatusCode::BAD_REQUEST, error);
+    }
+    let failed = serde_json::json!({
+        "eventType": "run_failed",
+        "error": error,
+    });
+    Response::builder()
+        .status(StatusCode::BAD_REQUEST)
+        .header("Content-Type", "application/x-ndjson")
+        .body(crate::handlers::full_body(format!("{failed}\n")))
+        .unwrap()
+}
+
+fn current_session_model_override(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let session_key = request.session_key.as_deref()?;
+    let state = crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    )?;
+    if state.model_override.is_none() && state.model_override_source.is_none() {
+        return None;
+    }
+    Some((state.model_override, state.model_override_source))
+}
+
+fn persist_session_model_override(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    model: Option<String>,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let source = model.as_ref().map(|_| "session slash command".to_string());
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        |state| {
+            state.model_override = model;
+            state.model_override_source = source;
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %request.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist Traex model override"
+        );
+    }
+}
+
+fn remember_model_slash_result_state(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    response: &str,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let trimmed_message = request.message.trim();
+    let title = if trimmed_message.eq_ignore_ascii_case("/models") {
+        format!(
+            "{} models",
+            crate::im_gateway::external_cli::external_cli_model_adapter_label(&request.adapter)
+        )
+    } else {
+        trimmed_message.to_string()
+    };
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        |state| {
+            state.title.get_or_insert(title);
+            if state.last_user_message.is_none() {
+                state.last_user_message = Some(trimmed_message.to_string());
+            }
+            state.status = Some("ended".to_string());
+            append_display_message_once(state, "system", response, timestamp);
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %request.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist Traex model slash response"
+        );
+    }
+}
+
+fn append_display_message_once(
+    state: &mut crate::im_gateway::session_state::ImAgentSessionState,
+    role: &str,
+    content: &str,
+    timestamp: u64,
+) {
+    let content = content.trim();
+    if content.is_empty() {
+        return;
+    }
+    if state
+        .messages
+        .last()
+        .is_some_and(|message| message.role == role && message.content == content)
+    {
+        return;
+    }
+    state
+        .messages
+        .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+            role: role.to_string(),
+            content: content.to_string(),
+            timestamp: Some(timestamp),
+            content_parts: None,
+        });
+}
+
 fn apply_persisted_external_cli_state(
     request: &mut crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
@@ -1998,6 +2267,16 @@ fn apply_persisted_external_cli_state(
     }
     let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
     apply_external_cli_resume_metadata(request, &metadata);
+    if crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter) {
+        if let Some(model) = state
+            .model_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            request.adapter_config.model = Some(model.to_string());
+        }
+    }
     consume_imported_contexts_for_external_runner(request, runner_id);
 }
 
@@ -3662,7 +3941,7 @@ mod tests {
             &caller_scope,
             "builtin-source-session",
             "call-visible-built-in",
-            "TreeX",
+            "Traex",
             "traex",
             Some("external-run-visible-built-in"),
             "inspect attached image",
@@ -3686,7 +3965,7 @@ mod tests {
             message.role == "assistant"
                 && message
                     .content
-                    .contains("Runner `TreeX` completed this call.")
+                    .contains("Runner `Traex` completed this call.")
         }));
     }
 
@@ -4699,6 +4978,62 @@ mod coverage_boost {
         )
         .expect("take contexts");
         assert!(contexts.is_empty());
+    }
+
+    #[test]
+    fn apply_persisted_state_applies_codex_and_traex_session_model_override() {
+        let temp_dir = tempfile::tempdir().expect("temp dir");
+        let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
+
+        crate::im_gateway::session_state::upsert_session_state(
+            "traex-model-session",
+            crate::im_gateway::external_cli::TRAEX_ADAPTER,
+            Some("Traex"),
+            |state| {
+                state.model_override = Some("gpt-5.5".to_string());
+                state.model_override_source = Some("session slash command".to_string());
+            },
+        )
+        .expect("persist model override");
+
+        let mut req = sample_run_request();
+        req.session_key = Some("traex-model-session".to_string());
+        req.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
+        req.runner_id = Some("Traex".to_string());
+
+        apply_persisted_external_cli_state(&mut req, "Traex");
+
+        assert_eq!(req.adapter_config.model.as_deref(), Some("gpt-5.5"));
+
+        let mut runner_default = req.clone();
+        runner_default.adapter_config.model = Some("gpt-runner-default".to_string());
+
+        apply_persisted_external_cli_state(&mut runner_default, "Traex");
+
+        assert_eq!(
+            runner_default.adapter_config.model.as_deref(),
+            Some("gpt-5.5")
+        );
+
+        crate::im_gateway::session_state::upsert_session_state(
+            "codex-model-session",
+            "codex",
+            Some("Codex"),
+            |state| {
+                state.model_override = Some("gpt-5.5".to_string());
+                state.model_override_source = Some("session slash command".to_string());
+            },
+        )
+        .expect("persist codex model override");
+
+        let mut codex = sample_run_request();
+        codex.session_key = Some("codex-model-session".to_string());
+        codex.adapter = "codex".to_string();
+        codex.runner_id = Some("Codex".to_string());
+
+        apply_persisted_external_cli_state(&mut codex, "Codex");
+
+        assert_eq!(codex.adapter_config.model.as_deref(), Some("gpt-5.5"));
     }
 
     #[test]

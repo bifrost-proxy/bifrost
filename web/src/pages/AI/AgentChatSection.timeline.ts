@@ -17,6 +17,62 @@ export type HistoryMessagesOptions = {
   runningState?: string;
 };
 
+export function mergeDetailMessagesWithTimeline(
+  detailMessages: ChatMessage[],
+  timelineMessages: ChatMessage[],
+): ChatMessage[] {
+  if (detailMessages.length === 0) {
+    return timelineMessages;
+  }
+  if (timelineMessages.length === 0) {
+    return detailMessages;
+  }
+  const merged = detailMessages.map((message) => ({ ...message }));
+  let searchStart = Math.max(0, merged.length - timelineMessages.length - 8);
+  timelineMessages.forEach((timelineMessage) => {
+    const matchIndex = findMergeMessageIndex(merged, timelineMessage, searchStart);
+    if (matchIndex >= 0) {
+      merged[matchIndex] = mergeChatMessage(merged[matchIndex], timelineMessage);
+      searchStart = matchIndex + 1;
+      return;
+    }
+    if (!hasEquivalentMessage(merged, timelineMessage)) {
+      merged.push(timelineMessage);
+      searchStart = merged.length;
+    }
+  });
+  return merged;
+}
+
+export function sliceRecentChatTurns(
+  messages: ChatMessage[],
+  visibleTurns: number,
+): { messages: ChatMessage[]; hasOlder: boolean } {
+  if (visibleTurns <= 0) {
+    return { messages, hasOlder: false };
+  }
+  let seenUserTurns = 0;
+  let startIndex = 0;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role !== "user") {
+      continue;
+    }
+    seenUserTurns += 1;
+    if (seenUserTurns === visibleTurns) {
+      startIndex = index;
+    } else if (seenUserTurns > visibleTurns) {
+      break;
+    }
+  }
+  while (startIndex > 0 && messages[startIndex - 1].role === "system") {
+    startIndex -= 1;
+  }
+  return {
+    messages: messages.slice(startIndex),
+    hasOlder: startIndex > 0,
+  };
+}
+
 export function historyEventsToMessages(
   events: HistoryEvent[],
   options: HistoryMessagesOptions = {},
@@ -83,12 +139,15 @@ export function historyEventsToMessages(
     }
     if (event.event_type === "user_message") {
       lastEventWasAssistantDelta = false;
-      const content = event.content.message;
-      if (typeof content === "string" && content.trim().length > 0) {
+      const rawContent = event.content.message;
+      const content = typeof rawContent === "string" ? rawContent : "";
+      const contentParts = contentPartsFromHistoryUserMessage(event.content);
+      if (content.trim().length > 0 || hasImageContentParts(contentParts)) {
         messages.push({
           id: `history-${index}`,
           role: "user",
-          content,
+          content: content.trim().length > 0 ? content : "Attached image",
+          contentParts,
           timestamp: event.timestamp,
           meta: "History user",
         });
@@ -287,7 +346,12 @@ export function historyEventsToMessages(
     });
   }
   return hideIntermediateAssistantTimestamps(
-    messages.filter((item) => item.content.trim().length > 0 || item.processSteps?.length),
+    messages.filter(
+      (item) =>
+        item.content.trim().length > 0 ||
+        hasImageContentParts(item.contentParts) ||
+        item.processSteps?.length,
+    ),
   );
 
   function hasLatestStatusStep(summary: string) {
@@ -299,6 +363,90 @@ export function historyEventsToMessages(
         : pendingSteps[pendingSteps.length - 1];
     return latestStep?.type === "status" && latestStep.summary === summary;
   }
+}
+
+function findMergeMessageIndex(
+  messages: ChatMessage[],
+  target: ChatMessage,
+  startIndex: number,
+) {
+  for (let index = Math.max(0, startIndex); index < messages.length; index += 1) {
+    if (isSameConversationMessage(messages[index], target)) {
+      return index;
+    }
+  }
+  for (let index = Math.max(0, startIndex) - 1; index >= 0; index -= 1) {
+    if (isSameConversationMessage(messages[index], target)) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function hasEquivalentMessage(messages: ChatMessage[], target: ChatMessage) {
+  return messages.some((message) => isSameConversationMessage(message, target));
+}
+
+function isSameConversationMessage(left: ChatMessage, right: ChatMessage) {
+  return (
+    left.role === right.role &&
+    normalizedAssistantText(left.content) === normalizedAssistantText(right.content)
+  );
+}
+
+function mergeChatMessage(detailMessage: ChatMessage, timelineMessage: ChatMessage) {
+  return {
+    ...timelineMessage,
+    id: detailMessage.id,
+    role: detailMessage.role,
+    content: detailMessage.content || timelineMessage.content,
+    contentParts: detailMessage.contentParts || timelineMessage.contentParts,
+    meta: detailMessage.meta || timelineMessage.meta,
+    timestamp: timelineMessage.timestamp || detailMessage.timestamp,
+    processSteps: timelineMessage.processSteps || detailMessage.processSteps,
+  };
+}
+
+function contentPartsFromHistoryUserMessage(
+  content: Record<string, unknown>,
+): ChatMessage["contentParts"] | undefined {
+  const text = stringFrom(content.message);
+  const imageParts = imagePartsFromHistoryImages(content.images);
+  if (imageParts.length === 0) {
+    return undefined;
+  }
+  const parts: NonNullable<ChatMessage["contentParts"]> = [];
+  if (text?.trim()) {
+    parts.push({ type: "text", text });
+  }
+  parts.push(...imageParts);
+  return parts;
+}
+
+function imagePartsFromHistoryImages(images: unknown) {
+  if (!Array.isArray(images)) {
+    return [];
+  }
+  return images.flatMap((image) => {
+    if (!image || typeof image !== "object") {
+      return [];
+    }
+    const record = image as Record<string, unknown>;
+    const data = stringFrom(record.data);
+    if (!data) {
+      return [];
+    }
+    const mimeType =
+      stringFrom(record.mime_type) || stringFrom(record.mimeType) || "image/png";
+    const url = data.startsWith("data:") ? data : `data:${mimeType};base64,${data}`;
+    return [{ type: "image_url" as const, image_url: { url, detail: "auto" } }];
+  });
+}
+
+function hasImageContentParts(contentParts: ChatMessage["contentParts"] | undefined) {
+  return (contentParts || []).some(
+    (part) => part.type === "image_url" && Boolean(part.image_url?.url),
+  );
 }
 
 function insertProcessStep(steps: ProcessStep[], step: ProcessStep) {

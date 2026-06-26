@@ -631,6 +631,17 @@ export function createAgentChatStyles(
       boxShadow: token.boxShadowSecondary,
       boxSizing: "border-box",
     },
+    planHoverBridge: {
+      position: "absolute",
+      left: "50%",
+      bottom: "100%",
+      zIndex: 11,
+      width: "min(480px, calc(100vw - 32px))",
+      height: 8,
+      transform: "translateX(-50%)",
+      background: "transparent",
+      pointerEvents: "auto",
+    },
     planPopoverHeader: {
       display: "flex",
       alignItems: "center",

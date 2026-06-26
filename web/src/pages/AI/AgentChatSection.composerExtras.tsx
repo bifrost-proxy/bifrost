@@ -1,4 +1,11 @@
-import { useState, type CSSProperties } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type FocusEvent,
+} from "react";
 import { Button, Space, Tag, Typography } from "antd";
 import {
   CheckCircleOutlined,
@@ -66,6 +73,42 @@ export function AgentChatPlan({
   primaryColor,
 }: AgentChatPlanProps) {
   const [expanded, setExpanded] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
+  const collapseTimerRef = useRef<ReturnType<typeof window.setTimeout> | null>(null);
+
+  const clearCollapseTimer = useCallback(() => {
+    if (collapseTimerRef.current === null) {
+      return;
+    }
+    window.clearTimeout(collapseTimerRef.current);
+    collapseTimerRef.current = null;
+  }, []);
+
+  const openPlanDetails = useCallback(() => {
+    clearCollapseTimer();
+    setExpanded(true);
+  }, [clearCollapseTimer]);
+
+  const scheduleClosePlanDetails = useCallback(() => {
+    clearCollapseTimer();
+    collapseTimerRef.current = window.setTimeout(() => {
+      collapseTimerRef.current = null;
+      setExpanded(false);
+    }, 180);
+  }, [clearCollapseTimer]);
+
+  const handlePlanBlur = useCallback(
+    (event: FocusEvent<HTMLDivElement>) => {
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && panelRef.current?.contains(nextTarget)) {
+        return;
+      }
+      scheduleClosePlanDetails();
+    },
+    [scheduleClosePlanDetails],
+  );
+
+  useEffect(() => clearCollapseTimer, [clearCollapseTimer]);
 
   if (plan.length === 0) {
     return null;
@@ -81,12 +124,13 @@ export function AgentChatPlan({
 
   return (
     <div
+      ref={panelRef}
       data-testid="agent-chat-plan"
       style={styles.planPanel}
-      onMouseEnter={() => setExpanded(true)}
-      onMouseLeave={() => setExpanded(false)}
-      onFocus={() => setExpanded(true)}
-      onBlur={() => setExpanded(false)}
+      onMouseEnter={openPlanDetails}
+      onMouseLeave={scheduleClosePlanDetails}
+      onFocus={openPlanDetails}
+      onBlur={handlePlanBlur}
     >
       <button
         type="button"
@@ -138,58 +182,71 @@ export function AgentChatPlan({
         </span>
       </button>
       {expanded ? (
-        <div
-          data-testid="agent-chat-plan-popover"
-          role="dialog"
-          aria-label="Task progress details"
-          style={styles.planPopover}
-        >
-          <div style={styles.planPopoverHeader}>
-            <Text strong style={{ fontSize: 13, lineHeight: "18px" }}>
-              Task progress
-            </Text>
-            <Text type="secondary" style={{ fontSize: 12, lineHeight: "18px" }}>
-              {current.completedCount}/{plan.length} completed
-            </Text>
+        <>
+          <div
+            aria-hidden="true"
+            data-testid="agent-chat-plan-hover-bridge"
+            style={styles.planHoverBridge}
+            onMouseEnter={openPlanDetails}
+            onMouseLeave={scheduleClosePlanDetails}
+          />
+          <div
+            data-testid="agent-chat-plan-popover"
+            role="dialog"
+            aria-label="Task progress details"
+            style={styles.planPopover}
+            onMouseEnter={openPlanDetails}
+            onMouseLeave={scheduleClosePlanDetails}
+            onFocus={openPlanDetails}
+            onBlur={handlePlanBlur}
+          >
+            <div style={styles.planPopoverHeader}>
+              <Text strong style={{ fontSize: 13, lineHeight: "18px" }}>
+                Task progress
+              </Text>
+              <Text type="secondary" style={{ fontSize: 12, lineHeight: "18px" }}>
+                {current.completedCount}/{plan.length} completed
+              </Text>
+            </div>
+            <div data-testid="agent-chat-plan-list" style={styles.planList}>
+              {plan.map((step, index) => (
+                <div
+                  key={`${index}-${step.step}`}
+                  data-testid="agent-chat-plan-item"
+                  style={styles.planItem}
+                >
+                  {step.status === "completed" ? (
+                    <CheckCircleOutlined
+                      aria-label="completed"
+                      data-testid="agent-chat-plan-status-completed"
+                      style={{ ...styles.planStatusIcon, color: successColor }}
+                    />
+                  ) : step.status === "in_progress" ? (
+                    <LoadingOutlined
+                      spin
+                      aria-label="in progress"
+                      data-testid="agent-chat-plan-status-in-progress"
+                      style={{ ...styles.planStatusIcon, color: primaryColor }}
+                    />
+                  ) : (
+                    <span
+                      aria-label="pending"
+                      data-testid="agent-chat-plan-status-pending"
+                      style={styles.planPendingIcon}
+                    />
+                  )}
+                  <Text title={step.step} style={styles.planStepText}>
+                    {step.step}
+                  </Text>
+                  <Text type="secondary" style={styles.planStatusText}>
+                    {planStatusLabel(step.status)}
+                  </Text>
+                  <span style={srOnlyStyle}>{planStatusLabel(step.status)}</span>
+                </div>
+              ))}
+            </div>
           </div>
-          <div data-testid="agent-chat-plan-list" style={styles.planList}>
-            {plan.map((step, index) => (
-              <div
-                key={`${index}-${step.step}`}
-                data-testid="agent-chat-plan-item"
-                style={styles.planItem}
-              >
-                {step.status === "completed" ? (
-                  <CheckCircleOutlined
-                    aria-label="completed"
-                    data-testid="agent-chat-plan-status-completed"
-                    style={{ ...styles.planStatusIcon, color: successColor }}
-                  />
-                ) : step.status === "in_progress" ? (
-                  <LoadingOutlined
-                    spin
-                    aria-label="in progress"
-                    data-testid="agent-chat-plan-status-in-progress"
-                    style={{ ...styles.planStatusIcon, color: primaryColor }}
-                  />
-                ) : (
-                  <span
-                    aria-label="pending"
-                    data-testid="agent-chat-plan-status-pending"
-                    style={styles.planPendingIcon}
-                  />
-                )}
-                <Text title={step.step} style={styles.planStepText}>
-                  {step.step}
-                </Text>
-                <Text type="secondary" style={styles.planStatusText}>
-                  {planStatusLabel(step.status)}
-                </Text>
-                <span style={srOnlyStyle}>{planStatusLabel(step.status)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
+        </>
       ) : null}
     </div>
   );

@@ -1678,7 +1678,7 @@ fn effective_config_marks_channel_overrides() {
 }
 
 #[test]
-fn default_gateway_config_contains_enabled_codex_and_treex_runners() {
+fn default_gateway_config_contains_enabled_codex_and_traex_runners() {
     let config = ExternalCliGatewayConfig::default();
 
     assert_eq!(config.default_runner_id, DEFAULT_CODEX_RUNNER_ID);
@@ -1688,12 +1688,12 @@ fn default_gateway_config_contains_enabled_codex_and_treex_runners() {
         .expect("Codex default runner");
     assert!(codex.enabled);
     assert_eq!(codex.adapter, DEFAULT_ADAPTER);
-    let treex = config
+    let traex_runner = config
         .runners
-        .get(DEFAULT_TREEX_RUNNER_ID)
-        .expect("TreeX default runner");
-    assert!(treex.enabled);
-    assert_eq!(treex.adapter, TRAEX_ADAPTER);
+        .get(DEFAULT_TRAEX_RUNNER_ID)
+        .expect("Traex default runner");
+    assert!(traex_runner.enabled);
+    assert_eq!(traex_runner.adapter, TRAEX_ADAPTER);
 }
 
 #[test]
@@ -1711,7 +1711,7 @@ fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_ru
         ..Default::default()
     };
     config.runners.remove(DEFAULT_CODEX_RUNNER_ID);
-    config.runners.remove(DEFAULT_TREEX_RUNNER_ID);
+    config.runners.remove(DEFAULT_TRAEX_RUNNER_ID);
 
     let normalized = normalized_gateway_config(config);
 
@@ -1733,7 +1733,7 @@ fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_ru
     assert_eq!(
         normalized
             .runners
-            .get(DEFAULT_TREEX_RUNNER_ID)
+            .get(DEFAULT_TRAEX_RUNNER_ID)
             .map(|settings| (settings.enabled, settings.adapter.as_str())),
         Some((true, TRAEX_ADAPTER))
     );
@@ -1759,7 +1759,7 @@ fn normalized_gateway_config_empty_runners_uses_enabled_named_defaults() {
     assert_eq!(
         normalized
             .runners
-            .get(DEFAULT_TREEX_RUNNER_ID)
+            .get(DEFAULT_TRAEX_RUNNER_ID)
             .map(|settings| (settings.enabled, settings.adapter.as_str())),
         Some((true, TRAEX_ADAPTER))
     );
@@ -1775,10 +1775,51 @@ fn effective_config_resolves_legacy_runner_aliases_to_named_defaults() {
     assert_eq!(codex.settings.adapter, DEFAULT_ADAPTER);
     assert!(codex.settings.enabled);
 
-    let treex = effective_config_for_provider_and_runner(&config, None, Some("traex"));
-    assert_eq!(treex.runner_id, DEFAULT_TREEX_RUNNER_ID);
-    assert_eq!(treex.settings.adapter, TRAEX_ADAPTER);
-    assert!(treex.settings.enabled);
+    let traex = effective_config_for_provider_and_runner(&config, None, Some("traex"));
+    assert_eq!(traex.runner_id, DEFAULT_TRAEX_RUNNER_ID);
+    assert_eq!(traex.settings.adapter, TRAEX_ADAPTER);
+    assert!(traex.settings.enabled);
+
+    let legacy_alias = ["Tree", "X"].concat();
+    let legacy_traex = effective_config_for_provider_and_runner(&config, None, Some(&legacy_alias));
+    assert_eq!(legacy_traex.runner_id, DEFAULT_TRAEX_RUNNER_ID);
+    assert_eq!(legacy_traex.settings.adapter, TRAEX_ADAPTER);
+    assert!(legacy_traex.settings.enabled);
+}
+
+#[test]
+fn normalized_gateway_config_migrates_legacy_traex_runner_id() {
+    let legacy_alias = ["Tree", "X"].concat();
+    let normalized = normalized_gateway_config(ExternalCliGatewayConfig {
+        default_runner_id: legacy_alias.clone(),
+        runners: BTreeMap::from([(
+            legacy_alias.clone(),
+            ExternalCliAgentSettings {
+                enabled: true,
+                adapter: TRAEX_ADAPTER.to_string(),
+                ..Default::default()
+            },
+        )]),
+        channels: BTreeMap::from([(
+            "feishu-main".to_string(),
+            ExternalCliChannelSettings {
+                runner_id: Some(legacy_alias.clone()),
+                ..Default::default()
+            },
+        )]),
+        version: 1,
+    });
+
+    assert_eq!(normalized.default_runner_id, DEFAULT_TRAEX_RUNNER_ID);
+    assert!(normalized.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID));
+    assert!(!normalized.runners.contains_key(&legacy_alias));
+    assert_eq!(
+        normalized
+            .channels
+            .get("feishu-main")
+            .and_then(|channel| channel.runner_id.as_deref()),
+        Some(DEFAULT_TRAEX_RUNNER_ID)
+    );
 }
 
 #[test]
@@ -1803,7 +1844,7 @@ fn config_store_new_persists_missing_default_runners_on_startup() {
     for config in [loaded, persisted] {
         assert!(config.runners.contains_key("legacy"));
         assert!(config.runners.contains_key(DEFAULT_CODEX_RUNNER_ID));
-        assert!(config.runners.contains_key(DEFAULT_TREEX_RUNNER_ID));
+        assert!(config.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID));
     }
 }
 
@@ -2192,6 +2233,106 @@ fn codex_cli_parser_maps_reasoning_summary_to_assistant_delta() {
         events[0].content,
         "I checked the workspace and will run the focused tests."
     );
+}
+
+#[test]
+fn traex_model_slash_command_parser_handles_list_show_set_and_clear() {
+    assert_eq!(
+        parse_external_cli_model_slash_command("/models"),
+        Some(Ok(ExternalCliModelSlashCommand::List))
+    );
+    assert!(matches!(
+        parse_external_cli_model_slash_command("/models extra"),
+        Some(Err(_))
+    ));
+    assert_eq!(
+        parse_external_cli_model_slash_command(" /model "),
+        Some(Ok(ExternalCliModelSlashCommand::Show))
+    );
+    assert_eq!(
+        parse_external_cli_model_slash_command("/model gpt-5.5"),
+        Some(Ok(ExternalCliModelSlashCommand::Set("gpt-5.5".to_string())))
+    );
+    assert_eq!(
+        parse_external_cli_model_slash_command("/model clear"),
+        Some(Ok(ExternalCliModelSlashCommand::Clear))
+    );
+    assert!(matches!(
+        parse_external_cli_model_slash_command("/model bad model"),
+        Some(Err(_))
+    ));
+    assert_eq!(parse_external_cli_model_slash_command("/modelish"), None);
+}
+
+#[test]
+fn external_cli_model_catalog_parser_filters_raw_catalog_to_safe_public_fields() {
+    let models = parse_external_cli_model_catalog(
+        TRAEX_ADAPTER,
+        r#"{
+          "models": [
+            {
+              "slug": "hidden-model",
+              "visibility": "hidden",
+              "base_instructions": "do not leak"
+            },
+            {
+              "slug": "Doubao-Seed-2.1-Pro",
+              "description": "flagship",
+              "default_reasoning_level": "high",
+              "supported_reasoning_levels": [{"effort": "low", "description": "fast"}],
+              "visibility": "list",
+              "supported_in_api": true,
+              "priority": 2,
+              "additional_speed_tiers": ["fast"],
+              "service_tiers": [{"id": "default", "name": "Default", "description": "standard"}],
+              "base_instructions": "do not leak"
+            },
+            {
+              "slug": "DeepSeek-V4-Flash",
+              "visibility": "list",
+              "priority": 1
+            }
+          ]
+        }"#,
+    )
+    .expect("parse catalog");
+
+    assert_eq!(models.len(), 2);
+    assert_eq!(models[0].slug, "DeepSeek-V4-Flash");
+    assert_eq!(models[1].slug, "Doubao-Seed-2.1-Pro");
+    assert_eq!(models[1].default_reasoning_level.as_deref(), Some("high"));
+    assert_eq!(models[1].additional_speed_tiers, vec!["fast"]);
+    let serialized = serde_json::to_string(&models).expect("serialize sanitized catalog");
+    assert!(!serialized.contains("base_instructions"));
+    assert!(!serialized.contains("do not leak"));
+}
+
+#[test]
+fn external_cli_model_catalog_parser_accepts_codex_catalog() {
+    let models = parse_external_cli_model_catalog(
+        DEFAULT_ADAPTER,
+        r#"{
+          "models": [
+            {
+              "slug": "gpt-5.5",
+              "description": "Frontier model",
+              "default_reasoning_level": "medium",
+              "visibility": "list",
+              "priority": 0,
+              "additional_speed_tiers": ["fast"],
+              "base_instructions": "do not leak"
+            }
+          ]
+        }"#,
+    )
+    .expect("parse codex catalog");
+
+    assert_eq!(models.len(), 1);
+    assert_eq!(models[0].slug, "gpt-5.5");
+    assert_eq!(models[0].default_reasoning_level.as_deref(), Some("medium"));
+    let serialized = serde_json::to_string(&models).expect("serialize sanitized catalog");
+    assert!(!serialized.contains("base_instructions"));
+    assert!(!serialized.contains("do not leak"));
 }
 
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {

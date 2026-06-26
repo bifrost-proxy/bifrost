@@ -1,6 +1,8 @@
 import type { CSSProperties } from "react";
 import {
   formatContextWindow,
+  formatModelRef,
+  formatReasoningRef,
   formatStatusMetricCount,
   type RunTelemetry,
 } from "./AgentChatSection.helpers";
@@ -15,11 +17,15 @@ export function AgentChatTokenHud({ telemetry, styles }: AgentChatTokenHudProps)
     telemetry.status?.total_tokens_used ?? telemetry.context?.totalTokensUsed;
   const contextPercent = contextUsagePercent(telemetry);
   const contextUsage = formatContextPercent(contextPercent);
-  if (totalTokens === undefined && contextUsage === "-") {
+  const model = formatOptionalRef(formatModelRef(telemetry.status));
+  const strength = formatOptionalRef(formatReasoningRef(telemetry.status));
+  if (totalTokens === undefined && contextUsage === "-" && !model) {
     return null;
   }
 
-  const label = `Tokens ${formatStatusMetricCount(totalTokens)} · Context ${contextUsage}`;
+  const modelLabel = model ? ` · Model ${model}` : "";
+  const strengthLabel = strength ? ` · Strength ${strength}` : "";
+  const label = `Tokens ${formatStatusMetricCount(totalTokens)} · Context ${contextUsage}${modelLabel}${strengthLabel}`;
   const progress = contextPercent ?? 0;
   const title = `${label} · Context window: ${formatContextWindow(telemetry.status, telemetry.context)}`;
 
@@ -44,6 +50,18 @@ export function AgentChatTokenHud({ telemetry, styles }: AgentChatTokenHudProps)
         <span style={styles.tokenHudValue}>{formatStatusMetricCount(totalTokens)}</span>
         <span style={styles.tokenHudLabel}> · Context </span>
         <span style={styles.tokenHudValue}>{contextUsage}</span>
+        {model ? (
+          <>
+            <span style={styles.tokenHudLabel}> · Model </span>
+            <span style={styles.tokenHudValue}>{model}</span>
+          </>
+        ) : null}
+        {strength ? (
+          <>
+            <span style={styles.tokenHudLabel}> · Strength </span>
+            <span style={styles.tokenHudValue}>{strength}</span>
+          </>
+        ) : null}
       </span>
     </div>
   );
@@ -88,4 +106,9 @@ function clampPercent(value?: number) {
     return undefined;
   }
   return Math.max(0, Math.min(100, value));
+}
+
+function formatOptionalRef(value: string) {
+  const trimmed = value.trim();
+  return trimmed && trimmed !== "-" ? trimmed : undefined;
 }

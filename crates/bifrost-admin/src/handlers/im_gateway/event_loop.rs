@@ -950,16 +950,34 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
         return;
     }
 
+    let persisted_state = crate::im_gateway::session_state::load_session_state(
+        &input.session_key,
+        &settings.adapter,
+        Some(&effective.runner_id),
+    );
     let delivery_mode = resolve_external_cli_delivery_mode(
         ctx.provider,
         &settings,
         &effective.sources,
         input.delivery_override,
     );
-    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
-        &settings.adapter,
-        &settings.adapter_config,
-    );
+    let mut resolved_model_config =
+        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+            &settings.adapter,
+            &settings.adapter_config,
+        );
+    if let Some(model) = persisted_state
+        .as_ref()
+        .and_then(|state| state.model_override.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter(|_| {
+            crate::im_gateway::external_cli::supports_external_cli_model_slash(&settings.adapter)
+        })
+    {
+        resolved_model_config.model = Some(model.to_string());
+        resolved_model_config.model_source = Some("session slash command".to_string());
+    }
     let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
     if let Some(model) = resolved_model_config.model.clone() {
@@ -1007,11 +1025,6 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
     let guide_channel = ctx
         .queue_manager
         .get_or_create_guide_channel(&input.session_key);
-    let persisted_state = crate::im_gateway::session_state::load_session_state(
-        &input.session_key,
-        &settings.adapter,
-        Some(&effective.runner_id),
-    );
     restore_session_from_persisted_history(
         &mut session,
         &input.session_key,
@@ -1073,6 +1086,17 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             Some(input.session_key.clone()),
             &settings,
         );
+        if let Some(model) = persisted_state
+            .as_ref()
+            .and_then(|state| state.model_override.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .filter(|_| {
+                crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter)
+            })
+        {
+            request.adapter_config.model = Some(model.to_string());
+        }
         request.images = std::mem::take(&mut current_images);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
@@ -1194,25 +1218,11 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
                         warn!(
                             session_key = %input.session_key,
                             error = %error,
-                            "failed to start external runner progress card; falling back to final reply"
+                            "failed to start external runner progress card; final reply will be sent when the run finishes"
                         );
                     }
                 }
             }
-        }
-        if matches!(
-            delivery_mode,
-            crate::im_gateway::external_cli::ExternalCliDeliveryMode::ProgressCard
-        ) && !progress_enabled
-        {
-            send_agent_reply(
-                ctx.client,
-                ctx.provider,
-                ctx.event,
-                "已开始处理 Runner 任务。",
-                ctx.message_log_store,
-            )
-            .await;
         }
         let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
             crate::im_gateway::external_cli::default_runs_root(),

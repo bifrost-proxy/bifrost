@@ -32,6 +32,14 @@ struct ImRunnerCommandContext<'a> {
     session_manager: &'a Arc<ImAgentSessionManager>,
 }
 
+struct ImModelCommandContext<'a> {
+    client: &'a ImProviderClient,
+    provider: &'a ImProviderConfig,
+    external_cli_config_store: &'a Arc<crate::im_gateway::external_cli::ExternalCliConfigStore>,
+    event: &'a ImEvent,
+    message_log_store: &'a Arc<ImMessageLogStore>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum ImRunnerCommand {
     List,
@@ -40,9 +48,9 @@ pub(super) enum ImRunnerCommand {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ImRunnerSelection {
-    runner_id: String,
-    runner: bifrost_agent::AgentRunnerMode,
-    adapter: Option<String>,
+    pub(super) runner_id: String,
+    pub(super) runner: bifrost_agent::AgentRunnerMode,
+    pub(super) adapter: Option<String>,
 }
 
 const BUILTIN_IM_RUNNER_ID: &str = "Bifrost Agent";
@@ -134,6 +142,23 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_model_command(
+        trimmed,
+        session_key,
+        agent_config,
+        ImModelCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
     {
@@ -161,6 +186,8 @@ pub(super) fn append_im_channel_help(mut help_text: String) -> String {
         "\n\nIM 通道命令:\n\
          /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
          /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
+         /models       查看当前 Codex/Traex Runner 可选模型\n\
+         /model [模型]  查看或切换当前 Codex/Traex Runner 的 session 模型；/model clear 清除\n\
          /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
          /rq <序号>      取消一条排队消息\n\
          /g <引导内容>   给正在运行的内置 Agent 注入引导；外部 Runner 会按队列处理",
@@ -251,7 +278,9 @@ pub(super) fn resolve_im_runner_selection(
             adapter: None,
         });
     }
-    let Some(settings) = config.runners.get(runner_id) else {
+    let canonical_runner_id =
+        crate::im_gateway::external_cli::canonical_external_cli_runner_id(config, runner_id);
+    let Some(settings) = config.runners.get(&canonical_runner_id) else {
         return Err(format!(
             "找不到 Runner: `{}`\n\n支持的 Runner:\n{}",
             runner_id,
@@ -259,8 +288,8 @@ pub(super) fn resolve_im_runner_selection(
         ));
     };
     Ok(ImRunnerSelection {
-        runner_id: runner_id.to_string(),
-        runner: bifrost_agent::AgentRunnerMode::Custom(runner_id.to_string()),
+        runner_id: canonical_runner_id.clone(),
+        runner: bifrost_agent::AgentRunnerMode::Custom(canonical_runner_id),
         adapter: Some(settings.adapter.clone()),
     })
 }
@@ -354,6 +383,257 @@ async fn handle_im_runner_command(
     )
     .await;
     true
+}
+
+async fn handle_im_model_command(
+    message: &str,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    ctx: ImModelCommandContext<'_>,
+) -> bool {
+    let Some(command) =
+        crate::im_gateway::external_cli::parse_external_cli_model_slash_command(message)
+    else {
+        return false;
+    };
+    let command = match command {
+        Ok(command) => command,
+        Err(reason) => {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ {reason}"),
+                ctx.message_log_store,
+            )
+            .await;
+            return true;
+        }
+    };
+    let config = ctx.external_cli_config_store.load();
+    let Some(configured_runner_id) = agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id())
+        .map(ToString::to_string)
+    else {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+        "/model 和 /models 当前仅支持 Codex 或 Traex Runner。请先用 `/runner Codex` 或 `/runner Traex` 切换。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        Some(ctx.provider.id.as_str()),
+        Some(configured_runner_id.as_str()),
+    );
+    if !crate::im_gateway::external_cli::supports_external_cli_model_slash(
+        &effective.settings.adapter,
+    ) {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "/model 和 /models 当前仅支持 Codex 或 Traex Runner。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+    let adapter_label = crate::im_gateway::external_cli::external_cli_model_adapter_label(
+        &effective.settings.adapter,
+    );
+    let reply = match command {
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::List => {
+            match crate::im_gateway::external_cli::load_external_cli_model_catalog(
+                &effective.settings.adapter,
+                &effective.settings.adapter_config,
+                None,
+            )
+            .await
+            {
+                Ok(models) => crate::im_gateway::external_cli::format_external_cli_model_catalog(
+                    &effective.settings.adapter,
+                    &models,
+                ),
+                Err(error) => format!("无法获取 {adapter_label} 模型列表：{error}"),
+            }
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Show => {
+            let state = crate::im_gateway::session_state::load_session_state(
+                session_key,
+                &effective.settings.adapter,
+                Some(&effective.runner_id),
+            );
+            let (model, source) = state
+                .and_then(|state| {
+                    if state.model_override.is_none() && state.model_override_source.is_none() {
+                        None
+                    } else {
+                        Some((state.model_override, state.model_override_source))
+                    }
+                })
+                .unwrap_or_else(|| {
+                    let resolved =
+                        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+                            &effective.settings.adapter,
+                            &effective.settings.adapter_config,
+                        );
+                    (resolved.model, resolved.model_source)
+                });
+            crate::im_gateway::external_cli::format_external_cli_model_status(
+                &effective.settings.adapter,
+                model.as_deref(),
+                source.as_deref(),
+                &effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Clear => {
+            persist_im_model_override(
+                session_key,
+                &effective.settings.adapter,
+                &effective.runner_id,
+                None,
+            );
+            persist_im_model_system_message(
+                session_key,
+                &effective.settings.adapter,
+                &effective.runner_id,
+                "清除模型切换",
+            );
+            format!(
+                "已清除 {adapter_label} Runner `{}` 的 session 模型 override。下一条消息将使用 Runner 配置或 {adapter_label} 默认模型。",
+                effective.runner_id
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliModelSlashCommand::Set(model) => {
+            match crate::im_gateway::external_cli::load_external_cli_model_catalog(
+                &effective.settings.adapter,
+                &effective.settings.adapter_config,
+                None,
+            )
+            .await
+            {
+                Ok(models) => {
+                    match crate::im_gateway::external_cli::validate_external_cli_model_selection(
+                        &effective.settings.adapter,
+                        &model,
+                        &models,
+                    ) {
+                        Ok(model) => {
+                            persist_im_model_override(
+                                session_key,
+                                &effective.settings.adapter,
+                                &effective.runner_id,
+                                Some(model.clone()),
+                            );
+                            let reply = format!(
+                                "已将 {adapter_label} Runner `{}` 的 session 模型设置为 `{}`。\n下一条消息会通过 `--model {}` 启动。",
+                                effective.runner_id, model, model
+                            );
+                            persist_im_model_system_message(
+                                session_key,
+                                &effective.settings.adapter,
+                                &effective.runner_id,
+                                &format!("切换模型为 {model}"),
+                            );
+                            reply
+                        }
+                        Err(response) => response,
+                    }
+                }
+                Err(error) => {
+                    format!("未切换模型：无法验证 {adapter_label} 模型 `{model}`：{error}")
+                }
+            }
+        }
+    };
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
+}
+
+fn persist_im_model_system_message(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+    message: &str,
+) {
+    let message = message.trim();
+    if message.is_empty() {
+        return;
+    }
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    if let Err(error) =
+        crate::im_gateway::session_state::upsert_session_state(
+            session_key,
+            adapter,
+            Some(runner_id),
+            |state| {
+                if state.messages.last().is_some_and(|existing| {
+                    existing.role == "system" && existing.content == message
+                }) {
+                    return;
+                }
+                state
+                    .messages
+                    .push(crate::im_gateway::session_state::ImAgentSessionMessage {
+                        role: "system".to_string(),
+                        content: message.to_string(),
+                        timestamp: Some(timestamp),
+                        content_parts: None,
+                    });
+            },
+        )
+    {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist IM model system message"
+        );
+    }
+}
+
+fn persist_im_model_override(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+    model: Option<String>,
+) {
+    let source = model.as_ref().map(|_| "session slash command".to_string());
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        Some(runner_id),
+        |state| {
+            state.model_override = model;
+            state.model_override_source = source;
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist IM Traex model override"
+        );
+    }
 }
 
 pub(super) fn apply_im_cwd_switch_to_session(
@@ -600,6 +880,18 @@ pub(super) async fn handle_busy_message(
             }
         };
         send_agent_reply(client, provider, event, &reply, message_log_store).await;
+        return;
+    }
+
+    if crate::im_gateway::external_cli::parse_external_cli_model_slash_command(trimmed).is_some() {
+        send_agent_reply(
+            client,
+            provider,
+            event,
+            "当前任务正在处理中，请等待任务结束后再切换 Runner 模型。",
+            message_log_store,
+        )
+        .await;
         return;
     }
 

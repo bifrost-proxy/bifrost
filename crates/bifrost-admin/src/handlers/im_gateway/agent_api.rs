@@ -340,6 +340,25 @@ pub(super) async fn handle_agent(
                     .or_else(|| info.and_then(|item| item.runner_id.clone())),
                 history.map(|(_, summary)| summary),
             );
+            let external_detail =
+                if is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref()) {
+                    external_runner_session_detail(&s.session_key).await
+                } else {
+                    None
+                };
+            let total_tokens_used = s.total_tokens_used.or_else(|| {
+                external_detail
+                    .as_ref()
+                    .and_then(|detail| detail.total_tokens_used)
+            });
+            let estimated_tokens = if s.estimated_context_tokens > 0 {
+                s.estimated_context_tokens
+            } else {
+                external_detail
+                    .as_ref()
+                    .map(|detail| detail.estimated_tokens)
+                    .unwrap_or_default()
+            };
             let duration_secs = s.updated_at.saturating_sub(s.started_at);
             let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
                 &service.queue_manager,
@@ -353,22 +372,22 @@ pub(super) async fn handle_agent(
                 "source": info.map(|item| item.source.clone()).unwrap_or_else(|| "admin-api".to_string()),
                 "work_dir": s.work_dir.or_else(|| info.and_then(|item| item.work_dir.clone())),
                 "turns": s.message_count.max(info.map(|item| item.message_count).unwrap_or(0)),
-                "tokens": s.total_tokens_used,
+                "tokens": total_tokens_used,
                 "start_time": s.started_at,
                 "last_active_time": s.updated_at,
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
-                "estimated_tokens": s.estimated_context_tokens,
+                "estimated_tokens": estimated_tokens,
                 "context_window_tokens": s.context_window_tokens,
                 "context_usage_percent": s.context_usage_percent,
                 "last_response_tokens": s.last_response_tokens,
                 "agent_type": s.agent_type.or_else(|| info.and_then(|item| item.agent_type.clone())),
                 "runner_type": runner_type,
                 "runner_id": runner_id,
-                "model": s.model.or_else(|| info.and_then(|item| item.model.clone())),
-                "model_provider": s.model_provider.or_else(|| info.and_then(|item| item.model_provider.clone())),
-                "model_reasoning_effort": s.model_reasoning_effort.or_else(|| info.and_then(|item| item.model_reasoning_effort.clone())),
-                "model_reasoning_summary": s.model_reasoning_summary.or_else(|| info.and_then(|item| item.model_reasoning_summary.clone())),
+                "model": s.model.or_else(|| external_detail.as_ref().and_then(|detail| detail.model.clone())).or_else(|| info.and_then(|item| item.model.clone())),
+                "model_provider": s.model_provider.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_provider.clone())).or_else(|| info.and_then(|item| item.model_provider.clone())),
+                "model_reasoning_effort": s.model_reasoning_effort.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_effort.clone())).or_else(|| info.and_then(|item| item.model_reasoning_effort.clone())),
+                "model_reasoning_summary": s.model_reasoning_summary.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone())).or_else(|| info.and_then(|item| item.model_reasoning_summary.clone())),
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": info.and_then(|item| item.title.clone()),
@@ -397,6 +416,25 @@ pub(super) async fn handle_agent(
                 s.runner_id,
                 history.map(|(_, summary)| summary),
             );
+            let external_detail =
+                if is_external_runner_metadata(runner_type.as_deref(), runner_id.as_deref()) {
+                    external_runner_session_detail(&s.session_key).await
+                } else {
+                    None
+                };
+            let total_tokens_used = s.total_tokens_used.or_else(|| {
+                external_detail
+                    .as_ref()
+                    .and_then(|detail| detail.total_tokens_used)
+            });
+            let estimated_tokens = if s.estimated_tokens > 0 {
+                s.estimated_tokens
+            } else {
+                external_detail
+                    .as_ref()
+                    .map(|detail| detail.estimated_tokens)
+                    .unwrap_or_default()
+            };
             let duration_secs = s.last_active_at.saturating_sub(s.created_at);
             let queue_snapshot = crate::handlers::agent_chat::queue_snapshot_payload(
                 &service.queue_manager,
@@ -412,19 +450,19 @@ pub(super) async fn handle_agent(
                 "source": s.source,
                 "work_dir": s.work_dir,
                 "turns": s.message_count,
-                "tokens": s.total_tokens_used,
+                "tokens": total_tokens_used,
                 "start_time": s.created_at,
                 "last_active_time": s.last_active_at,
                 "duration_secs": duration_secs,
                 "compaction_count": s.compaction_count,
-                "estimated_tokens": s.estimated_tokens,
+                "estimated_tokens": estimated_tokens,
                 "agent_type": s.agent_type,
                 "runner_type": runner_type,
                 "runner_id": runner_id,
-                "model": s.model,
-                "model_provider": s.model_provider,
-                "model_reasoning_effort": s.model_reasoning_effort,
-                "model_reasoning_summary": s.model_reasoning_summary,
+                "model": s.model.or_else(|| external_detail.as_ref().and_then(|detail| detail.model.clone())),
+                "model_provider": s.model_provider.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_provider.clone())),
+                "model_reasoning_effort": s.model_reasoning_effort.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_effort.clone())),
+                "model_reasoning_summary": s.model_reasoning_summary.or_else(|| external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone())),
                 "external_conversation_id": s.external_conversation_id,
                 "external_thread_id": s.external_thread_id,
                 "title": s.title,
@@ -459,6 +497,27 @@ pub(super) async fn handle_agent(
             if active_keys.contains(&session_key) {
                 continue; // skip duplicate
             }
+            let is_external_runner = is_external_runner_metadata(
+                summary.runner_type.as_deref(),
+                summary.runner_id.as_deref(),
+            );
+            let external_detail = if is_external_runner {
+                external_runner_session_detail(&session_key).await
+            } else {
+                None
+            };
+            let total_tokens_used = if summary.total_tokens > 0 {
+                summary.total_tokens
+            } else {
+                external_detail
+                    .as_ref()
+                    .and_then(|detail| detail.total_tokens_used)
+                    .unwrap_or_default()
+            };
+            let estimated_tokens = external_detail
+                .as_ref()
+                .map(|detail| detail.estimated_tokens)
+                .filter(|tokens| *tokens > 0);
             // Skip sessions older than the retention cutoff
             let last_time = if summary.end_time > 0 {
                 summary.end_time
@@ -476,23 +535,25 @@ pub(super) async fn handle_agent(
                 "source": summary.source,
                 "work_dir": summary.work_dir,
                 "turns": (summary.user_turns as usize) + (summary.assistant_turns as usize),
-                "tokens": summary.total_tokens,
+                "tokens": total_tokens_used,
+                "estimated_tokens": estimated_tokens,
                 "start_time": summary.start_time,
                 "last_active_time": summary.end_time,
                 "duration_secs": summary.end_time.saturating_sub(summary.start_time),
                 "history_path": p.display().to_string(),
                 "has_timeline": true,
                 "timeline_event_count": summary.event_count,
-                "agent_type": if is_external_runner_metadata(
-                    summary.runner_type.as_deref(),
-                    summary.runner_id.as_deref(),
-                ) {
+                "agent_type": if is_external_runner {
                     Some("external_cli".to_string())
                 } else {
                     None
                 },
                 "runner_type": summary.runner_type,
                 "runner_id": summary.runner_id,
+                "model": external_detail.as_ref().and_then(|detail| detail.model.clone()),
+                "model_provider": external_detail.as_ref().and_then(|detail| detail.model_provider.clone()),
+                "model_reasoning_effort": external_detail.as_ref().and_then(|detail| detail.model_reasoning_effort.clone()),
+                "model_reasoning_summary": external_detail.as_ref().and_then(|detail| detail.model_reasoning_summary.clone()),
                 "run_state": history_session_list_run_state(&summary),
                 "title": summary.title.or(summary.first_user_message),
             }));
@@ -2257,6 +2318,11 @@ async fn merge_external_runner_detail_metadata(
     let Some(external_detail) = external_runner_session_detail(session_key).await else {
         return;
     };
+    append_system_session_messages(&mut detail.messages, &external_detail.messages);
+    detail
+        .messages
+        .sort_by_key(|message| message.timestamp.unwrap_or(u64::MAX));
+    detail.message_count = detail.messages.len();
     if detail
         .metadata
         .as_ref()
@@ -2291,6 +2357,12 @@ async fn merge_external_runner_detail_metadata(
     }
     if detail.model_reasoning_summary.is_none() {
         detail.model_reasoning_summary = external_detail.model_reasoning_summary;
+    }
+    if detail.total_tokens_used.unwrap_or_default() == 0 {
+        detail.total_tokens_used = external_detail.total_tokens_used;
+    }
+    if detail.estimated_tokens == 0 {
+        detail.estimated_tokens = external_detail.estimated_tokens;
     }
 }
 
@@ -2329,6 +2401,9 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         } else {
             (Vec::new(), 0)
         };
+    if !messages.is_empty() {
+        append_system_display_messages(&mut messages, &state.messages);
+    }
     if messages.is_empty() && state.messages.is_empty() {
         if let Some(content) = state
             .last_user_message
@@ -2370,6 +2445,7 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
             }
         }));
     }
+    messages.sort_by_key(|message| message.timestamp.unwrap_or(u64::MAX));
     let updated_at = state.updated_at / 1000;
     let created_at = messages
         .iter()
@@ -2387,9 +2463,12 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         _ => "completed",
     }
     .to_string();
-    let model = run_detail
-        .as_ref()
-        .and_then(|detail| detail.metadata.get("model").cloned());
+    let state_metadata = crate::im_gateway::session_state::metadata_from_state(&state);
+    let model = state.model_override.clone().or_else(|| {
+        run_detail
+            .as_ref()
+            .and_then(|detail| detail.metadata.get("model").cloned())
+    });
     let model_provider = run_detail.as_ref().and_then(|detail| {
         detail
             .metadata
@@ -2406,10 +2485,14 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         .and_then(|detail| detail.metadata.get("usageInputTokens"))
         .and_then(|value| value.trim().parse::<u32>().ok())
         .unwrap_or_default();
-    let metadata = run_detail
+    let mut metadata = run_detail
         .as_ref()
         .map(|detail| detail.metadata.clone())
-        .filter(|metadata| !metadata.is_empty());
+        .unwrap_or_default();
+    for (key, value) in state_metadata {
+        metadata.entry(key).or_insert(value);
+    }
+    let metadata = (!metadata.is_empty()).then_some(metadata);
     Some(bifrost_agent::SessionDetail {
         session_key: state.session_key,
         user_id: None,
@@ -2450,6 +2533,64 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         timeline_event_count,
         run_state,
     })
+}
+
+fn append_system_display_messages(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    state_messages: &[crate::im_gateway::session_state::ImAgentSessionMessage],
+) {
+    for message in state_messages
+        .iter()
+        .filter(|message| message.role == "system")
+    {
+        append_state_display_message(output, message);
+    }
+}
+
+fn append_system_session_messages(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    state_messages: &[bifrost_agent::session::SessionMessage],
+) {
+    for message in state_messages
+        .iter()
+        .filter(|message| message.role == "system")
+    {
+        append_session_display_message(output, message);
+    }
+}
+
+fn append_state_display_message(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    message: &crate::im_gateway::session_state::ImAgentSessionMessage,
+) {
+    if output.iter().any(|existing| {
+        existing.role == message.role
+            && existing.content == message.content
+            && existing.timestamp == message.timestamp
+    }) {
+        return;
+    }
+    output.push(bifrost_agent::session::SessionMessage {
+        role: message.role.clone(),
+        content: message.content.clone(),
+        timestamp: message.timestamp,
+        content_parts: message.content_parts.clone(),
+        tool_calls: None,
+    });
+}
+
+fn append_session_display_message(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    message: &bifrost_agent::session::SessionMessage,
+) {
+    if output.iter().any(|existing| {
+        existing.role == message.role
+            && existing.content == message.content
+            && existing.timestamp == message.timestamp
+    }) {
+        return;
+    }
+    output.push(message.clone());
 }
 
 fn external_runner_timeline_messages(
@@ -3074,6 +3215,135 @@ mod tests {
         assert_eq!(detail.messages[0].content, "canonical user");
         assert_eq!(detail.messages[1].content, "canonical assistant");
         assert!(detail.timeline_event_count >= 3);
+    }
+
+    #[test]
+    fn external_runner_session_detail_merges_system_display_messages() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-system-display-detail";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "first prompt")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "first answer")
+            .expect("record assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: "traex".to_string(),
+                runner_id: Some("Traex".to_string()),
+                history_path: Some(history_path),
+                status: Some("succeeded".to_string()),
+                messages: vec![crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "system".to_string(),
+                    content: "已将 Traex Runner 的 session 模型设置为 Kimi-K2.6。".to_string(),
+                    timestamp: Some(1_770_000_003),
+                    content_parts: None,
+                }],
+                updated_at: 1_770_000_004_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let detail = runtime
+            .block_on(external_runner_session_detail(session_key))
+            .expect("detail");
+
+        assert_eq!(detail.message_count, 3);
+        assert_eq!(detail.user_turn_count, 1);
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "user" && message.content == "first prompt" }));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "assistant" && message.content == "first answer" }));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| { message.role == "system" && message.content.contains("Kimi-K2.6") }));
+    }
+
+    #[test]
+    fn session_detail_metadata_merge_preserves_external_system_display_messages() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-system-display-merge";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "existing prompt")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "existing answer")
+            .expect("record assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: "traex".to_string(),
+                runner_id: Some("Traex".to_string()),
+                history_path: Some(history_path),
+                model_override: Some("Kimi-K2.6".to_string()),
+                model_override_source: Some("session slash command".to_string()),
+                status: Some("succeeded".to_string()),
+                messages: vec![crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "system".to_string(),
+                    content: "切换模型为 Kimi-K2.6".to_string(),
+                    timestamp: Some(1_770_000_003),
+                    content_parts: None,
+                }],
+                updated_at: 1_770_000_004_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let mut detail = history_session_detail(session_key).expect("history detail");
+        assert_eq!(detail.message_count, 2);
+        assert!(!detail
+            .messages
+            .iter()
+            .any(|message| message.role == "system"));
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(merge_external_runner_detail_metadata(
+            session_key,
+            &mut detail,
+        ));
+
+        assert_eq!(detail.message_count, 3);
+        assert_eq!(detail.model.as_deref(), Some("Kimi-K2.6"));
+        assert!(detail.metadata.as_ref().is_some_and(|metadata| metadata
+            .get("modelOverride")
+            .is_some_and(|model| model == "Kimi-K2.6")));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| message.role == "system" && message.content == "切换模型为 Kimi-K2.6"));
     }
 
     #[test]

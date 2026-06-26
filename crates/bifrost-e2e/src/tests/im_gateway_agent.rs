@@ -146,13 +146,13 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 {
                     return Err(format!("Expected enabled Codex runner, got: {codex}"));
                 }
-                let treex = runners
-                    .get("TreeX")
-                    .ok_or_else(|| format!("Expected TreeX runner, got: {runner_json}"))?;
-                if treex.get("enabled").and_then(|v| v.as_bool()) != Some(true)
-                    || treex.get("adapter").and_then(|v| v.as_str()) != Some("traex")
+                let traex_runner = runners
+                    .get("Traex")
+                    .ok_or_else(|| format!("Expected Traex runner, got: {runner_json}"))?;
+                if traex_runner.get("enabled").and_then(|v| v.as_bool()) != Some(true)
+                    || traex_runner.get("adapter").and_then(|v| v.as_str()) != Some("traex")
                 {
-                    return Err(format!("Expected enabled TreeX runner, got: {treex}"));
+                    return Err(format!("Expected enabled Traex runner, got: {traex_runner}"));
                 }
 
                 Ok(())

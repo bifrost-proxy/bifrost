@@ -53,14 +53,34 @@ const SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
   },
 ];
 
+const MODEL_SLASH_COMMAND_OPTIONS: SlashCommandOption[] = [
+  {
+    command: "/models",
+    label: "Runner models",
+    description: "列出当前 Runner 可用模型",
+    value: "runner-models",
+    action: "send",
+  },
+  {
+    command: "/model",
+    label: "Runner model",
+    description: "查看或切换当前 Runner 的 session 模型",
+    value: "runner-model",
+    action: "insert",
+    insertText: "/model ",
+  },
+];
+
 export function useSlashRunnerSelection({
   enableCommands,
+  enableModelCommands,
   draft,
   running,
   supplementSubmitting,
   runnerOptions,
 }: {
   enableCommands: boolean;
+  enableModelCommands: boolean;
   draft: string;
   running: boolean;
   supplementSubmitting: boolean;
@@ -68,7 +88,7 @@ export function useSlashRunnerSelection({
 }) {
   const [slashRunner, setSlashRunner] = useState<RunnerOption | undefined>();
   const slashQuery =
-    !slashRunner && draft.trimStart().startsWith("/")
+    draft.trimStart().startsWith("/")
       ? draft.trimStart().slice(1).trim().toLowerCase()
       : "";
   const slashRunnerOptions = useMemo(
@@ -82,20 +102,35 @@ export function useSlashRunnerSelection({
     [runnerOptions, slashQuery],
   );
   const slashCommandOptions = useMemo(
-    () =>
-      (enableCommands ? SLASH_COMMAND_OPTIONS : []).filter((option) => {
+    () => {
+      const commands = [
+        ...(enableCommands ? SLASH_COMMAND_OPTIONS : []),
+        ...(enableModelCommands ? MODEL_SLASH_COMMAND_OPTIONS : []),
+      ];
+      const matches = commands.filter((option) => {
         if (!slashQuery) {
           return true;
         }
         const searchable = `${option.command} ${option.label} ${option.description}`;
         return searchable.toLowerCase().includes(slashQuery);
-      }),
-    [enableCommands, slashQuery],
+      });
+      if (!slashQuery) {
+        return matches;
+      }
+      return [...matches].sort((left, right) => {
+        const leftExact = left.command.slice(1).toLowerCase() === slashQuery;
+        const rightExact = right.command.slice(1).toLowerCase() === slashQuery;
+        if (leftExact === rightExact) {
+          return 0;
+        }
+        return leftExact ? -1 : 1;
+      });
+    },
+    [enableCommands, enableModelCommands, slashQuery],
   );
   const showSlashRunnerPanel =
     !running &&
     !supplementSubmitting &&
-    !slashRunner &&
     draft.trimStart().startsWith("/") &&
     (slashCommandOptions.length > 0 || slashRunnerOptions.length > 0);
 
@@ -187,7 +222,13 @@ export function useRunnerCallHandler({
         },
       };
       const callerMessages = messages
-        .filter((message) => message.content.trim().length > 0)
+        .filter(
+          (
+            message,
+          ): message is ChatMessage & { role: "user" | "assistant" } =>
+            (message.role === "user" || message.role === "assistant") &&
+            message.content.trim().length > 0,
+        )
         .map((message) => ({
           role: message.role,
           content: message.content,

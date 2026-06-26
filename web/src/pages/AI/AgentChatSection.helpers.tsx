@@ -28,7 +28,7 @@ export type ProcessStep = {
 
 export type ChatMessage = {
   id: string;
-  role: "user" | "assistant";
+  role: "user" | "assistant" | "system";
   content: string;
   contentParts?: ChatContentPart[];
   timestamp?: number;
@@ -288,6 +288,8 @@ export function sameChatMessages(left: ChatMessage[], right: ChatMessage[]) {
         message.role === other.role &&
         message.content === other.content &&
         message.meta === other.meta &&
+        JSON.stringify(message.contentParts || []) ===
+          JSON.stringify(other.contentParts || []) &&
         JSON.stringify(message.processSteps || []) ===
           JSON.stringify(other.processSteps || [])
       );
@@ -304,22 +306,41 @@ export function titleFromChatMessages(items: ChatMessage[]) {
 
 export function sessionDetailToMessages(detail: SessionDetail): ChatMessage[] {
   return (detail.messages || [])
-    .filter((message) => message.role === "user" || message.role === "assistant")
+    .filter(
+      (message) =>
+        message.role === "user" ||
+        message.role === "assistant" ||
+        message.role === "system",
+    )
     .map((message, index, sourceMessages) => {
-      const role = message.role === "user" ? ("user" as const) : ("assistant" as const);
-      const runnerCall = inferPersistedRunnerCall(
-        detail.session_key,
-        role,
-        message.content || "",
-        sourceMessages[index + 1]?.content || "",
-      );
+      const role =
+        message.role === "user"
+          ? ("user" as const)
+          : message.role === "system"
+            ? ("system" as const)
+            : ("assistant" as const);
+      const runnerCall =
+        role === "system"
+          ? undefined
+          : inferPersistedRunnerCall(
+              detail.session_key,
+              role,
+              message.content || "",
+              sourceMessages[index + 1]?.content || "",
+            );
       return {
         id: `session-${detail.session_key}-${index}`,
         role,
         content: runnerCall?.content ?? message.content ?? "",
         contentParts: message.content_parts || message.contentParts,
         timestamp: message.timestamp,
-        meta: runnerCall ? "Runner call" : role === "user" ? "You" : "Bifrost Agent",
+        meta: runnerCall
+          ? "Runner call"
+          : role === "user"
+            ? "You"
+            : role === "system"
+              ? "System"
+              : "Bifrost Agent",
         runnerCall: runnerCall?.meta,
       };
     })
@@ -979,7 +1000,10 @@ export function reduceTelemetry(
     return { ...telemetry, phase: "running" };
   }
   if (eventType === "status" && isRecord(event.status)) {
-    return { ...telemetry, status: event.status as RunStatusSnapshot };
+    return {
+      ...telemetry,
+      status: mergeRunStatusSnapshot(telemetry.status, event.status as RunStatusSnapshot),
+    };
   }
   if (eventType === "title_updated" && typeof event.title === "string") {
     return { ...telemetry, title: event.title };
@@ -1046,7 +1070,10 @@ export function reduceTelemetry(
   if (eventType === "context_updated" && isRecord(event.context)) {
     return {
       ...telemetry,
-      context: event.context as AgentContextSnapshot,
+      context: mergeContextSnapshot(
+        telemetry.context,
+        event.context as AgentContextSnapshot,
+      ),
     };
   }
   if (
@@ -1097,6 +1124,65 @@ export function reduceTelemetry(
 
 export function appendError(errors: string[], error: string) {
   return errors.includes(error) ? errors : [...errors, error];
+}
+
+function mergeRunStatusSnapshot(
+  previous: RunStatusSnapshot | undefined,
+  incoming: RunStatusSnapshot,
+): RunStatusSnapshot {
+  const next: RunStatusSnapshot = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(incoming) as Array<[
+    keyof RunStatusSnapshot,
+    RunStatusSnapshot[keyof RunStatusSnapshot],
+  ]>) {
+    if (value === undefined || value === null || value === "") {
+      continue;
+    }
+    const previousValue = previous?.[key];
+    if (
+      value === 0 &&
+      typeof previousValue === "number" &&
+      previousValue > 0 &&
+      isTelemetryMetricField(key)
+    ) {
+      continue;
+    }
+    next[key] = value as never;
+  }
+  if (previous?.metadata || incoming.metadata) {
+    next.metadata = {
+      ...(previous?.metadata || {}),
+      ...(incoming.metadata || {}),
+    };
+  }
+  return next;
+}
+
+function isTelemetryMetricField(key: keyof RunStatusSnapshot) {
+  return [
+    "total_tokens_used",
+    "estimated_context_tokens",
+    "context_window_tokens",
+    "context_usage_percent",
+    "last_response_tokens",
+  ].includes(key);
+}
+
+function mergeContextSnapshot(
+  previous: AgentContextSnapshot | undefined,
+  incoming: AgentContextSnapshot,
+): AgentContextSnapshot {
+  const next: AgentContextSnapshot = { ...(previous || {}) };
+  for (const [key, value] of Object.entries(incoming) as Array<[
+    keyof AgentContextSnapshot,
+    AgentContextSnapshot[keyof AgentContextSnapshot],
+  ]>) {
+    if (value === undefined || value === null) {
+      continue;
+    }
+    next[key] = value as never;
+  }
+  return next;
 }
 
 export function finishTool(
@@ -1249,7 +1335,10 @@ export function formatLoopProgress(status?: RunStatusSnapshot) {
 }
 
 export function formatModelRef(status?: RunStatusSnapshot) {
-  const model = status?.model?.trim();
+  const model =
+    status?.model?.trim() ||
+    status?.metadata?.modelOverride?.trim() ||
+    status?.metadata?.model?.trim();
   const provider = status?.model_provider?.trim();
   if (model && provider) {
     return `${model} (${provider})`;
@@ -1258,8 +1347,16 @@ export function formatModelRef(status?: RunStatusSnapshot) {
 }
 
 export function formatReasoningRef(status?: RunStatusSnapshot) {
-  const effort = (status?.model_reasoning_effort || status?.modelReasoningEffort)?.trim();
-  const summary = (status?.model_reasoning_summary || status?.modelReasoningSummary)?.trim();
+  const effort = (
+    status?.model_reasoning_effort ||
+    status?.modelReasoningEffort ||
+    status?.metadata?.modelReasoningEffort
+  )?.trim();
+  const summary = (
+    status?.model_reasoning_summary ||
+    status?.modelReasoningSummary ||
+    status?.metadata?.modelReasoningSummary
+  )?.trim();
   if (effort && summary) {
     return `${effort} / ${summary}`;
   }

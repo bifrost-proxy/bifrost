@@ -38,7 +38,12 @@ import {
   type RunTelemetry,
   type SessionDetail,
 } from "./AgentChatSection.helpers";
-import { historyEventsToMessages, historyEventsToTelemetry } from "./AgentChatSection.timeline";
+import {
+  historyEventsToMessages,
+  historyEventsToTelemetry,
+  mergeDetailMessagesWithTimeline,
+  sliceRecentChatTurns,
+} from "./AgentChatSection.timeline";
 import { isRunStateActive, isThreadActive } from "./AgentChatSection.timelinePolling";
 import { AgentChatMessageList } from "./AgentChatSection.messages";
 import { AgentChatPlan, AgentChatPromptChips } from "./AgentChatSection.composerExtras";
@@ -57,6 +62,7 @@ const { TextArea } = Input;
 const { useBreakpoint } = Grid;
 const MAX_PASTED_IMAGES = 6;
 const HISTORY_EVENT_PAGE_SIZE = 300;
+const ACTIVE_CHAT_TURN_PAGE_SIZE = 20;
 const THREAD_RAIL_COLLAPSED_STORAGE_KEY = "bifrost.agentChat.threadRailCollapsed";
 type AgentCollaborationMode = "plan";
 
@@ -138,6 +144,41 @@ function supportsBuiltInAgentCommands({
 
 function proposedPlanMessageContent(content: string) {
   return `**Plan Mode result**\n\n${content.trim()}`;
+}
+
+function supportsRunnerModelSlashCommand(runnerAdapter: string) {
+  return runnerAdapter === "codex" || runnerAdapter === "traex";
+}
+
+function isRunnerModelSlashCommand(content: string, runnerAdapter: string) {
+  if (!supportsRunnerModelSlashCommand(runnerAdapter)) {
+    return false;
+  }
+  const trimmed = content.trim();
+  return (
+    trimmed === "/models" ||
+    trimmed === "/model" ||
+    trimmed.startsWith("/model ")
+  );
+}
+
+function runnerModelSlashSystemDisplayContent(command: string, response: string) {
+  const trimmed = command.trim();
+  const lower = trimmed.toLowerCase();
+  if (lower === "/model clear") {
+    return "清除模型切换";
+  }
+  if (
+    lower.startsWith("/model ") &&
+    response.includes("已将") &&
+    response.includes("session 模型设置为")
+  ) {
+    const model = trimmed.slice("/model ".length).trim();
+    if (model) {
+      return `切换模型为 ${model}`;
+    }
+  }
+  return response;
 }
 
 type HistoryPagePayload = {
@@ -268,6 +309,7 @@ export default function AgentChatSection() {
   const [composerMode, setComposerMode] = useState<AgentCollaborationMode | undefined>();
   const [activeCollaborationMode, setActiveCollaborationMode] = useState<AgentCollaborationMode | undefined>();
   const [slashActiveIndex, setSlashActiveIndex] = useState(0);
+  const slashActiveIndexRef = useRef(0);
   const [defaultWorkDir, setDefaultWorkDir] = useState("");
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
@@ -285,6 +327,9 @@ export default function AgentChatSection() {
   const historyEventEndIndexRef = useRef<number | undefined>(undefined);
   const historyOlderCursorRef = useRef<number | undefined>(undefined);
   const historyLoadingOlderRef = useRef(false);
+  const activeDetailMessagesRef = useRef<ChatMessage[]>([]);
+  const activeVisibleTurnCountRef = useRef(ACTIVE_CHAT_TURN_PAGE_SIZE);
+  const activeTimelineHasOlderRef = useRef(false);
   const loadOlderHistoryPageRef = useRef<() => void>(() => {});
   const initialThreadAutoSelectRef = useRef(false);
   const streamAbortRef = useRef<AbortController | null>(null);
@@ -403,11 +448,36 @@ export default function AgentChatSection() {
     });
   }, []);
 
+  const visibleActiveMessagesFromTimeline = useCallback((timelineMessages: ChatMessage[]) => {
+    const detailMessages = activeDetailMessagesRef.current;
+    if (detailMessages.length === 0) {
+      return { messages: timelineMessages, hasOlder: false };
+    }
+    const merged = mergeDetailMessagesWithTimeline(detailMessages, timelineMessages);
+    return sliceRecentChatTurns(merged, activeVisibleTurnCountRef.current);
+  }, []);
+
+  const timelineMessagesFromCurrentEvents = useCallback(
+    (thread?: AgentThreadSummary) => {
+      const terminalTimeline = telemetryPhaseRef.current === "finished" || telemetryPhaseRef.current === "failed";
+      const timelineRunning = telemetryPhaseRef.current === "running" && isThreadActive(thread);
+      return historyEventsToMessages(historyEventsRef.current, {
+        ensureRunningAssistant:
+          timelineRunning || (!terminalTimeline && isThreadActive(thread)),
+        runningState: thread?.run_state || thread?.state,
+      });
+    },
+    [],
+  );
+
   const resetHistoryEventWindow = useCallback(() => {
     historyEventsRef.current = [];
     historyEventStartIndexRef.current = undefined;
     historyEventEndIndexRef.current = undefined;
     historyOlderCursorRef.current = undefined;
+    activeDetailMessagesRef.current = [];
+    activeVisibleTurnCountRef.current = ACTIVE_CHAT_TURN_PAGE_SIZE;
+    activeTimelineHasOlderRef.current = false;
     setHistoryHasOlder(false);
   }, []);
 
@@ -426,7 +496,7 @@ export default function AgentChatSection() {
         typeof page.next_cursor === "number"
           ? page.next_cursor
           : historyEventStartIndexRef.current;
-      setHistoryHasOlder(Boolean(page.has_more));
+      activeTimelineHasOlderRef.current = Boolean(page.has_more);
       const nextTelemetry = historyEventsToTelemetry(
         events,
         matchedThread,
@@ -441,12 +511,14 @@ export default function AgentChatSection() {
           timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)),
         runningState: matchedThread?.run_state || matchedThread?.state,
       });
-      replaceLoadedMessages(restored, shouldStickToBottom);
+      const visible = visibleActiveMessagesFromTimeline(restored);
+      setHistoryHasOlder(activeTimelineHasOlderRef.current || visible.hasOlder);
+      replaceLoadedMessages(visible.messages, shouldStickToBottom);
       setTelemetry(nextTelemetry);
       setRunning(timelineRunning || (!terminalTimeline && isThreadActive(matchedThread)));
-      return { restored, nextTelemetry };
+      return { restored: visible.messages, nextTelemetry };
     },
-    [replaceLoadedMessages],
+    [replaceLoadedMessages, visibleActiveMessagesFromTimeline],
   );
 
   const querySessionKey = searchParams.get("session") || undefined;
@@ -476,6 +548,33 @@ export default function AgentChatSection() {
 
   const loadOlderHistoryPage = useCallback(async () => {
     const timelineHistoryPath = historyPath || selectedThread?.history_path;
+    if (
+      !historyPath &&
+      activeDetailMessagesRef.current.length > 0 &&
+      !historyLoadingOlderRef.current &&
+      !historyLoadingOlder
+    ) {
+      const currentTimelineMessages = timelineMessagesFromCurrentEvents(selectedThread);
+      const currentWindow = visibleActiveMessagesFromTimeline(currentTimelineMessages);
+      if (currentWindow.hasOlder) {
+        const element = messagesScrollRef.current;
+        const previousScrollHeight = element?.scrollHeight ?? 0;
+        const previousScrollTop = element?.scrollTop ?? 0;
+        activeVisibleTurnCountRef.current += ACTIVE_CHAT_TURN_PAGE_SIZE;
+        const expandedWindow = visibleActiveMessagesFromTimeline(currentTimelineMessages);
+        replaceLoadedMessages(expandedWindow.messages, false);
+        setHistoryHasOlder(activeTimelineHasOlderRef.current || expandedWindow.hasOlder);
+        requestAnimationFrame(() => {
+          const nextElement = messagesScrollRef.current;
+          if (!nextElement) {
+            return;
+          }
+          const addedHeight = nextElement.scrollHeight - previousScrollHeight;
+          nextElement.scrollTop = previousScrollTop + addedHeight;
+        });
+        return;
+      }
+    }
     const cursor = historyOlderCursorRef.current;
     if (
       !timelineHistoryPath ||
@@ -529,7 +628,10 @@ export default function AgentChatSection() {
     historyHasOlder,
     historyLoadingOlder,
     historyPath,
+    replaceLoadedMessages,
     selectedThread,
+    timelineMessagesFromCurrentEvents,
+    visibleActiveMessagesFromTimeline,
   ]);
 
   useEffect(() => {
@@ -571,12 +673,22 @@ export default function AgentChatSection() {
   const terminalTimeline = telemetry.phase === "finished" || telemetry.phase === "failed";
   const displayRunning = running || (!terminalTimeline && isThreadActive(selectedThread));
   const currentStateTag = formatCurrentStateTag(telemetry, selectedThread, displayRunning);
+  const activeDetailHasOlder =
+    activeDetailMessagesRef.current.length > 0
+      ? sliceRecentChatTurns(
+          activeDetailMessagesRef.current,
+          activeVisibleTurnCountRef.current,
+        ).hasOlder
+      : false;
+  const showLoadOlder = historyHasOlder || activeDetailHasOlder;
   const builtInAgentCommandsSupported = supportsBuiltInAgentCommands({
     runnerId,
     runnerOptions,
     selectedThread,
     status: telemetry.status,
   });
+  const currentRunnerAdapter = selectedRunnerAdapter(runnerOptions, runnerId);
+  const modelCommandsSupported = supportsRunnerModelSlashCommand(currentRunnerAdapter);
   const guideSupported = builtInAgentCommandsSupported;
   const {
     slashRunner,
@@ -586,6 +698,7 @@ export default function AgentChatSection() {
     showSlashRunnerPanel,
   } = useSlashRunnerSelection({
     enableCommands: builtInAgentCommandsSupported,
+    enableModelCommands: modelCommandsSupported,
     draft,
     running,
     supplementSubmitting,
@@ -854,6 +967,7 @@ export default function AgentChatSection() {
             return;
           }
           const restored = sessionDetailToMessages(detail);
+          activeDetailMessagesRef.current = restored;
           const timelineHistoryPath =
             detail.history_path ||
             matchedThread?.history_path ||
@@ -892,7 +1006,7 @@ export default function AgentChatSection() {
                 typeof payload.next_cursor === "number"
                   ? payload.next_cursor
                   : historyEventStartIndexRef.current;
-              setHistoryHasOlder(Boolean(payload.has_more));
+              activeTimelineHasOlderRef.current = Boolean(payload.has_more);
               timelineMessages = historyEventsToMessages(timelineEvents, {
                 ensureRunningAssistant:
                   isThreadActive(timelineThread) ||
@@ -907,8 +1021,12 @@ export default function AgentChatSection() {
               // Keep the active detail fallback usable while timeline is being written.
             }
           }
-          const loadedMessages =
-            timelineMessages && timelineMessages.length > 0 ? timelineMessages : restored;
+          const loadedWindow =
+            timelineMessages && timelineMessages.length > 0
+              ? visibleActiveMessagesFromTimeline(timelineMessages)
+              : sliceRecentChatTurns(restored, activeVisibleTurnCountRef.current);
+          const loadedMessages = loadedWindow.messages;
+          setHistoryHasOlder(activeTimelineHasOlderRef.current || loadedWindow.hasOlder);
           if (loadedMessages.length > 0) {
             replaceLoadedMessages(loadedMessages, shouldStickToBottom);
           }
@@ -1067,6 +1185,7 @@ export default function AgentChatSection() {
     querySessionKey,
     resetHistoryEventWindow,
     setSearchParams,
+    visibleActiveMessagesFromTimeline,
   ]);
 
   const mergeTimelineEvents = useCallback(
@@ -1654,9 +1773,22 @@ export default function AgentChatSection() {
         ? parsedPlanSlash.collaborationMode || composerMode
         : undefined;
     const content = parsedPlanSlash.message.trim();
-    const silentCommand =
-      builtInAgentCommandsSupported &&
-      (options?.silentCommand === true || rawContent === "/compact");
+    const compactCommand = builtInAgentCommandsSupported && rawContent === "/compact";
+    const activeRunnerId =
+      telemetry.status?.runner_id && telemetry.status.runner_id !== "bifrost_agent"
+        ? telemetry.status.runner_id
+        : runnerId;
+    const activeRunnerAdapter = selectedRunnerAdapter(runnerOptions, activeRunnerId);
+    const runnerModelCommand = isRunnerModelSlashCommand(rawContent, activeRunnerAdapter);
+    const controlCommand =
+      compactCommand ||
+      runnerModelCommand ||
+      (builtInAgentCommandsSupported && options?.silentCommand === true);
+    const hiddenControlCommand =
+      compactCommand ||
+      (builtInAgentCommandsSupported &&
+        options?.silentCommand === true &&
+        !runnerModelCommand);
     if (!content && imagesForSend.length === 0) {
       if (collaborationMode === "plan" && imagesForSend.length === 0) {
         antdMessage.warning("Type a task to start Plan Mode.");
@@ -1664,7 +1796,7 @@ export default function AgentChatSection() {
       }
       return;
     }
-    if (slashRunner && !running && !silentCommand) {
+    if (slashRunner && !running && !controlCommand) {
       setPendingImages([]);
       await handleRunnerCall(content, slashRunner, imagesForSend);
       return;
@@ -1681,11 +1813,11 @@ export default function AgentChatSection() {
     const assistantId = `assistant-${Date.now()}`;
     const assistantMessage: ChatMessage = {
       id: assistantId,
-      role: "assistant",
-      content: silentCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
+      role: runnerModelCommand ? "system" : "assistant",
+      content: controlCommand ? "" : collaborationMode === "plan" ? "Planning..." : "Agent is running...",
       timestamp: Date.now() / 1000,
-      meta: "Bifrost Agent",
-      processSteps: silentCommand
+      meta: runnerModelCommand ? "System" : "Bifrost Agent",
+      processSteps: compactCommand
         ? [
             {
               type: "compaction",
@@ -1704,29 +1836,40 @@ export default function AgentChatSection() {
           : undefined,
     };
     pendingInstantScrollRef.current = true;
-    setMessages((prev) =>
-      silentCommand ? [...prev, assistantMessage] : [...prev, userMessage, assistantMessage],
-    );
+    setMessages((prev) => {
+      if (runnerModelCommand) {
+        return prev;
+      }
+      if (hiddenControlCommand) {
+        return [...prev, assistantMessage];
+      }
+      return [...prev, userMessage, assistantMessage];
+    });
     setDraft("");
     setComposerMode(undefined);
     setActiveCollaborationMode(collaborationMode);
     setPendingImages([]);
     setRunning(true);
-    setTelemetry({
+    setTelemetry((prev) => ({
+      ...prev,
       phase: "running",
       status: {
+        ...(prev.status || {}),
         work_dir: workDir || undefined,
-        runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
-        runner_type: runnerId === "bifrost_agent" ? "bifrost_agent" : selectedRunnerAdapter(runnerOptions, runnerId),
+        runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
+        runner_type:
+          activeRunnerId === "bifrost_agent"
+            ? "bifrost_agent"
+            : selectedRunnerAdapter(runnerOptions, activeRunnerId),
       },
       plan: [],
       tools: [],
       errors: [],
-    });
+    }));
     // Ensure the current session is visible in the threads list with first message as fallback title
     setThreads((prev) => {
-      const fallbackTitle = silentCommand
-        ? currentSessionFallbackTitle || "Context compaction"
+      const fallbackTitle = hiddenControlCommand
+        ? currentSessionFallbackTitle || (compactCommand ? "Context compaction" : "Runner command")
         : userVisibleContent.length > 40 ? `${userVisibleContent.slice(0, 40)}…` : userVisibleContent;
       return dedupeThreads([
         {
@@ -1737,11 +1880,11 @@ export default function AgentChatSection() {
           start_time: Math.floor(Date.now() / 1000),
           last_active_time: Math.floor(Date.now() / 1000),
           duration_secs: 0,
-          runner_id: runnerId === "bifrost_agent" ? undefined : runnerId,
+          runner_id: activeRunnerId === "bifrost_agent" ? undefined : activeRunnerId,
           runner_type:
-            runnerId === "bifrost_agent"
+            activeRunnerId === "bifrost_agent"
               ? "bifrost_agent"
-              : selectedRunnerAdapter(runnerOptions, runnerId),
+              : selectedRunnerAdapter(runnerOptions, activeRunnerId),
           work_dir: workDir || undefined,
         },
         ...prev.filter((thread) => thread.session_key !== sessionKey),
@@ -1754,7 +1897,7 @@ export default function AgentChatSection() {
     let assistantSegmentId = assistantId;
     let assistantSegmentIndex = 0;
     let assistantSegmentHasText = false;
-    let assistantSegmentHasSteps = silentCommand;
+    let assistantSegmentHasSteps = compactCommand;
     let assistantSegmentHasProposedPlan = false;
     let nextAssistantDeltaStartsSegment = false;
     try {
@@ -2041,6 +2184,34 @@ export default function AgentChatSection() {
         });
       };
 
+      const appendSystemDisplayMessage = (content: string) => {
+        const trimmedContent = content.trim();
+        if (!trimmedContent) {
+          return;
+        }
+        const timestamp = Date.now() / 1000;
+        setMessages((prev) => {
+          const last = prev[prev.length - 1];
+          if (
+            last?.role === "system" &&
+            last.content === trimmedContent &&
+            Math.abs((last.timestamp || 0) - timestamp) < 3
+          ) {
+            return prev;
+          }
+          return [
+            ...prev,
+            {
+              id: `system-${Date.now()}`,
+              role: "system",
+              content: trimmedContent,
+              timestamp,
+              meta: "System",
+            },
+          ];
+        });
+      };
+
       const appendProposedPlan = (planContent: string) => {
         const trimmedPlan = planContent.trim();
         if (!trimmedPlan || assistantSegmentHasProposedPlan) {
@@ -2068,18 +2239,21 @@ export default function AgentChatSection() {
         sessionKey,
         historyPath,
         workDir: workDir || undefined,
-        runnerId,
-        runnerAdapter: selectedRunnerAdapter(runnerOptions, runnerId),
+        runnerId: activeRunnerId,
+        runnerAdapter: activeRunnerAdapter,
         collaborationMode,
         signal: abortController.signal,
         onEvent: (event) => {
           if (selectedSessionKeyRef.current !== sendSessionKey) return;
           setTelemetry((prev) => reduceTelemetry(prev, event));
-          if (silentCommand) {
+          if (compactCommand) {
             const step = eventToProcessStep(event);
             if (step?.type === "compaction") {
               appendProcessStep(step);
             }
+            return;
+          }
+          if (hiddenControlCommand) {
             return;
           }
           if (event.eventType === "proposed_plan" && typeof event.content === "string") {
@@ -2149,8 +2323,14 @@ export default function AgentChatSection() {
         },
         onFinal: (response) => {
           if (selectedSessionKeyRef.current !== sendSessionKey) return;
-          if (silentCommand) {
+          if (compactCommand) {
             finishSilentCommandCompaction("success", "上下文已自动压缩");
+            return;
+          }
+          if (runnerModelCommand) {
+            appendSystemDisplayMessage(
+              runnerModelSlashSystemDisplayContent(rawContent, response),
+            );
             return;
           }
           applyFinalResponse(response);
@@ -2174,7 +2354,7 @@ export default function AgentChatSection() {
       setMessages((prev) =>
         prev.map((message) =>
           message.id === assistantSegmentId
-            ? silentCommand
+            ? compactCommand
               ? {
                   ...message,
                   content: "",
@@ -2235,29 +2415,37 @@ export default function AgentChatSection() {
 
   const handleSlashCommand = (option: SlashCommandOption) => {
     setSlashRunner(undefined);
+    const focusComposerAtEnd = (value?: string) => {
+      setTimeout(() => {
+        const input = document.querySelector<HTMLTextAreaElement>(
+          '[data-testid="agent-chat-input"]',
+        );
+        input?.focus();
+        const cursor = (value ?? input?.value ?? "").length;
+        input?.setSelectionRange(cursor, cursor);
+      }, 0);
+    };
     if (option.value === "plan") {
       setComposerMode("plan");
       setDraft("");
-      setTimeout(() => {
-        const input = document.querySelector<HTMLTextAreaElement>(
-          '[data-testid="agent-chat-input"]',
-        );
-        input?.focus();
-      }, 0);
+      focusComposerAtEnd("");
       return;
     }
     if (option.action === "insert") {
-      setDraft(option.insertText || `${option.command} `);
-      setTimeout(() => {
-        const input = document.querySelector<HTMLTextAreaElement>(
-          '[data-testid="agent-chat-input"]',
-        );
-        input?.focus();
-      }, 0);
+      const inserted = option.insertText || `${option.command} `;
+      setDraft(inserted);
+      focusComposerAtEnd(inserted);
       return;
     }
     void handleSend({ contentOverride: option.command, silentCommand: true });
   };
+
+  const updateSlashActiveIndex = useCallback((nextIndex: number | ((index: number) => number)) => {
+    const resolvedIndex =
+      typeof nextIndex === "function" ? nextIndex(slashActiveIndexRef.current) : nextIndex;
+    slashActiveIndexRef.current = resolvedIndex;
+    setSlashActiveIndex(resolvedIndex);
+  }, []);
 
   const slashOptionCount = slashCommandOptions.length + slashRunnerOptions.length;
   const slashOptionKey = useMemo(
@@ -2271,25 +2459,26 @@ export default function AgentChatSection() {
 
   useEffect(() => {
     if (!showSlashRunnerPanel || slashOptionCount <= 0) {
-      setSlashActiveIndex(0);
+      updateSlashActiveIndex(0);
       return;
     }
-    setSlashActiveIndex((index) => Math.min(index, slashOptionCount - 1));
-  }, [showSlashRunnerPanel, slashOptionCount, slashOptionKey]);
+    updateSlashActiveIndex((index) => Math.min(index, slashOptionCount - 1));
+  }, [showSlashRunnerPanel, slashOptionCount, slashOptionKey, updateSlashActiveIndex]);
 
   const selectActiveSlashOption = useCallback(() => {
     if (!showSlashRunnerPanel || slashOptionCount <= 0) {
       return false;
     }
-    if (slashActiveIndex < slashCommandOptions.length) {
-      const option = slashCommandOptions[slashActiveIndex];
+    const activeIndex = Math.min(slashActiveIndexRef.current, slashOptionCount - 1);
+    if (activeIndex < slashCommandOptions.length) {
+      const option = slashCommandOptions[activeIndex];
       if (!option) {
         return false;
       }
       handleSlashCommand(option);
       return true;
     }
-    const runner = slashRunnerOptions[slashActiveIndex - slashCommandOptions.length];
+    const runner = slashRunnerOptions[activeIndex - slashCommandOptions.length];
     if (!runner) {
       return false;
     }
@@ -2299,7 +2488,6 @@ export default function AgentChatSection() {
     return true;
   }, [
     showSlashRunnerPanel,
-    slashActiveIndex,
     slashCommandOptions,
     slashOptionCount,
     slashRunnerOptions,
@@ -2311,15 +2499,20 @@ export default function AgentChatSection() {
     if (showSlashRunnerPanel && slashOptionCount > 0) {
       if (event.key === "ArrowDown") {
         event.preventDefault();
-        setSlashActiveIndex((index) => (index + 1) % slashOptionCount);
+        updateSlashActiveIndex((index) => (index + 1) % slashOptionCount);
         return;
       }
       if (event.key === "ArrowUp") {
         event.preventDefault();
-        setSlashActiveIndex((index) => (index - 1 + slashOptionCount) % slashOptionCount);
+        updateSlashActiveIndex((index) => (index - 1 + slashOptionCount) % slashOptionCount);
         return;
       }
       if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        selectActiveSlashOption();
+        return;
+      }
+      if (event.key === "Tab") {
         event.preventDefault();
         selectActiveSlashOption();
         return;
@@ -2471,7 +2664,7 @@ export default function AgentChatSection() {
             style={styles.conversation}
           >
             <div style={styles.conversationTrack} data-testid="agent-chat-message-track">
-              {historyHasOlder ? (
+              {showLoadOlder ? (
                 <div style={{ display: "flex", justifyContent: "center", padding: "4px 0 8px" }}>
                   <Button
                     size="small"
@@ -2609,7 +2802,7 @@ export default function AgentChatSection() {
                   options={slashRunnerOptions}
                   activeIndex={slashActiveIndex}
                   styles={styles}
-                  onActiveIndexChange={setSlashActiveIndex}
+                  onActiveIndexChange={updateSlashActiveIndex}
                   onSelectCommand={(option) => {
                     handleSlashCommand(option);
                   }}
@@ -2656,7 +2849,13 @@ export default function AgentChatSection() {
                   data-testid="agent-chat-input"
                   data-session-key={sessionKey}
                   value={draft}
-                  onChange={(event) => setDraft(event.target.value)}
+                  onChange={(event) => {
+                    const nextDraft = event.target.value;
+                    if (nextDraft.trimStart().startsWith("/") && slashRunner) {
+                      setSlashRunner(undefined);
+                    }
+                    setDraft(nextDraft);
+                  }}
                   onPaste={handlePasteImages}
                   onKeyDown={handleComposerKeyDown}
                   placeholder={

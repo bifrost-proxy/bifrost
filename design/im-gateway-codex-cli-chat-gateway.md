@@ -218,13 +218,14 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 3. Web slash runner-call 支持 `images[]`，允许 image-only call。父会话中仍显示用户可感知的图片消息，目标 runner 的 request 也带同一组图片。
 4. runtime 在执行前把图片解码落盘到当前 session JSONL 旁边的附件目录，并按 run id 再分层：`sessions/YYYY/MM/DD/attachments/<session-file-stem>/<run-id>/images/image-N.<ext>`。如果无法拿到 session recorder，则退回 run dir 内的 `attachments/images`。
 5. prompt envelope 在用户文本前追加 `## Attached Images`，列出每张图片的绝对路径、mime type 和大小，要求 Codex/Trae 使用本地文件路径理解图片。
-6. run result metadata 写入 `attachments.images`，session timeline 写入带图片的 user message，保证 Web History 和后续回放知道该轮包含图片。
+6. Web UI 展示层必须把用户 timeline 中持久化的图片恢复成同一条用户气泡内的 `contentParts`。刷新、运行中 timeline 增量更新、history tail 替换本地乐观消息时，都不能只保留 `content.message` 而丢弃 `content.images`；纯图片消息也必须保留可见气泡。
+7. run result metadata 写入 `attachments.images`，session timeline 写入带图片的 user message，保证 Web History 和后续回放知道该轮包含图片。
 
 这样做避免把 base64 大图直接塞进外部 CLI prompt，也避免同一天多个 session 共享 `attachments/images` 或同一 session 多轮 `image-1.png` 造成覆盖。Codex 和 Trae 使用相同 bridge；adapter 后续如果原生支持图片参数，可以在 adapter capability 中声明并在 command builder 中升级为原生传参，但 session 附件落盘仍保留为审计和历史回放证据。
 
 安全边界：`attachmentBaseDir` 只能由服务端基于已验证的 session recorder 生成。来自 `/chat`、`/chat/stream`、`/runner-calls/stream` 或 IM 请求参数的 `attachmentBaseDir` / `attachment_base_dir` 必须被删除或覆盖，不允许调用方指定任意写入根目录。External CLI runtime 只信任位于 `agent_home_dir()/sessions` 下的绝对附件目录；不满足该约束时降级写入 run dir 内部附件目录。
 
-### 5.5 Codex/TraeX Runner 诊断信息采集
+### 5.5 Codex/Traex Runner 诊断信息采集
 
 外部 runner 的状态展示应尽量使用 Bifrost 托管层能稳定观测到的数据，不猜测 CLI 内部未公开 telemetry。每个 run 完成后，runtime 将以下信息写入 `result.json.metadata`，并通过 `SessionDetail.metadata` 暴露给 Web UI：
 
@@ -233,9 +234,9 @@ Codex/Trae 当前 JSONL 的 `turn.completed.usage` 会输出最近一轮 token u
 - Prompt 与附件：prompt bytes/chars/估算 tokens、附件数量、总字节、附件 path/mime/name 摘要，以及 `attachments.images` 的完整审计记录。
 - I/O 与阶段耗时：stdout/stderr bytes/lines、command start latency、command duration、first event latency、total duration。
 - 工具与计划：工具调用数量、失败数、输出字节、总耗时、单个工具的 command/exitCode/success/duration；plan 更新次数、最终完成率。
-- 会话连续性：是否请求 resume、请求的 thread id，以及 Codex/TraeX JSONL 中解析到的 `threadId`。
+- 会话连续性：是否请求 resume、请求的 thread id，以及 Codex/Traex JSONL 中解析到的 `threadId`。
 
-Web UI 的 Agent Chat 状态弹窗在已有 Context 卡片中展示紧凑的 `Runner diagnostics` 摘要。该摘要只展示真实 metadata 中存在的值；context window、剩余 context、自动压缩节省 token、billing token 等 Codex/TraeX CLI 未稳定输出的字段仍不得伪造，缺失时继续显示 `-` 或既有 N/A 行为。
+Web UI 的 Agent Chat 状态弹窗在已有 Context 卡片中展示紧凑的 `Runner diagnostics` 摘要。该摘要只展示真实 metadata 中存在的值；context window、剩余 context、自动压缩节省 token、billing token 等 Codex/Traex CLI 未稳定输出的字段仍不得伪造，缺失时继续显示 `-` 或既有 N/A 行为。
 
 Web slash runner-call 完成后必须立即刷新当前 session detail，而不是只刷新 `/sessions/all` 列表。`/sessions/all` 只提供列表摘要，不携带 external runner metadata；只有 `/sessions/:key` 能把 `result.json.metadata` 合并为 `SessionDetail.metadata`，从而让状态弹窗在不重新打开线程的情况下展示最新 diagnostics。
 
@@ -933,7 +934,7 @@ Runs 页面用于排查 Chat Gateway 和真实 IM Agent 执行。列表字段：
 - `feishu_progress_card_expands_process_while_running_and_collapses_after_finish`：验证状态面板位于顶部、运行中过程区默认展开、工具详情默认折叠、完成后最终结论位于底部且过程区默认折叠。
 - `codex_cli_parser_maps_reasoning_summary_to_assistant_delta`：验证 Codex/Trae 明确输出的 reasoning summary 会进入公开过程 timeline。
 - `codex_request_metadata_includes_configured_or_default_model_label`：验证 Codex run metadata 对显式模型和默认模型标签均可追踪。
-- `codex_and_traex_metadata_include_runner_observability`：验证 Codex/TraeX 共享采集 CLI/version/config/prompt/attachments/io/timing/tool/resume metadata。
+- `codex_and_traex_metadata_include_runner_observability`：验证 Codex/Traex 共享采集 CLI/version/config/prompt/attachments/io/timing/tool/resume metadata。
 - `progress_event_observation_adds_tool_duration`：验证 stdout 实时事件观测时间和同一 tool started/completed 的 durationMs。
 - `external_cli_adapter_capabilities_drive_config_schema`：验证 adapter 能力声明会决定 WebUI/API 可配置字段，未声明能力不会被错误下发。
 - `external_cli_runtime_accepts_manifest_adapter`：验证简单 manifest adapter 能构造 `CommandSpec` 并复用 run dir / artifact / event pipeline。
