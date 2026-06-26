@@ -170,10 +170,8 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let data_dir_str = args.data_dir.to_string_lossy().to_string();
 
     let initial_menu_data = load_menu_data_snapshot(&args, state, true, true);
-    let icon_running = load_icon(false, false);
-    let icon_running_tls = load_icon(false, true);
-    let icon_stopped = load_icon(true, false);
-    let icon_stopped_tls = load_icon(true, true);
+    let icon_running = load_icon(false);
+    let icon_stopped = load_icon(true);
     #[cfg(target_os = "macos")]
     let initial_menu_bar_title = menu_bar_stats_title(&initial_menu_data, state);
     let menu_items =
@@ -191,9 +189,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut action_map = native_menu.action_map.clone();
 
     let initial_icon = match state {
-        ServiceState::Running if initial_menu_data.tls_interception_enabled => &icon_running_tls,
         ServiceState::Running => &icon_running,
-        _ if initial_menu_data.tls_interception_enabled => &icon_stopped_tls,
         _ => &icon_stopped,
     };
 
@@ -216,7 +212,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
         ServiceState::Stopped => STATE_STOPPED,
         ServiceState::Disconnected => STATE_DISCONNECTED,
     }));
-    let initial_tls_interception_enabled = initial_menu_data.tls_interception_enabled;
     let menu_data = Arc::new(Mutex::new(initial_menu_data));
     let menu_data_generation = Arc::new(AtomicU64::new(0));
     #[cfg(target_os = "macos")]
@@ -358,7 +353,6 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
     let mut last_rendered_state = current_state.load(Ordering::Relaxed);
     let mut last_rendered_operation = current_operation.load(Ordering::Relaxed);
     let mut last_rendered_data_generation = menu_data_generation.load(Ordering::Relaxed);
-    let mut last_rendered_tls_badge = initial_tls_interception_enabled;
     #[cfg(target_os = "macos")]
     let mut last_rendered_menu_bar_title = initial_menu_bar_title;
     #[cfg(target_os = "macos")]
@@ -472,25 +466,15 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
             STATE_STOPPED => ServiceState::Stopped,
             _ => ServiceState::Disconnected,
         };
-        let current_tls_badge = clone_menu_data_snapshot(&menu_data).tls_interception_enabled;
-
-        if state_changed || current_tls_badge != last_rendered_tls_badge {
+        if state_changed {
             last_rendered_state = new_state;
-            last_rendered_tls_badge = current_tls_badge;
 
             // Do not replace the native menu from background polling. Replacing
             // the menu object closes the currently open system menu on
             // macOS/Windows, which makes the tray feel impossible to open while
             // data is refreshing. State polling only updates non-menu
             // affordances; explicit reloads/actions rebuild the menu below.
-            let new_icon = tray_icon_for_state(
-                new_state,
-                current_tls_badge,
-                &icon_running,
-                &icon_running_tls,
-                &icon_stopped,
-                &icon_stopped_tls,
-            );
+            let new_icon = tray_icon_for_state(new_state, &icon_running, &icon_stopped);
             #[cfg(target_os = "macos")]
             {
                 if let Some(native_stats_item) = native_stats_item.as_mut() {
@@ -543,9 +527,7 @@ pub fn run(args: TrayArgs) -> Result<(), String> {
                             tray_icon,
                             new_title.as_deref(),
                             match svc_state {
-                                ServiceState::Running if current_tls_badge => &icon_running_tls,
                                 ServiceState::Running => &icon_running,
-                                _ if current_tls_badge => &icon_stopped_tls,
                                 _ => &icon_stopped,
                             },
                         );
@@ -683,13 +665,10 @@ fn menu_bar_stats_title(snapshot: &MenuDataSnapshot, state: ServiceState) -> Opt
     if state != ServiceState::Running {
         return None;
     }
-    snapshot.system_stats.as_ref().map(|stats| {
-        if snapshot.tls_interception_enabled {
-            format!("TLS | {}", stats.menu_bar)
-        } else {
-            stats.menu_bar.clone()
-        }
-    })
+    snapshot
+        .system_stats
+        .as_ref()
+        .map(|stats| stats.menu_bar.clone())
 }
 
 #[cfg(target_os = "macos")]
@@ -1016,8 +995,6 @@ struct MenuBarStatsBitmap {
 const MENU_BAR_STATS_SEPARATOR_GAP: u32 = 6;
 #[cfg(target_os = "macos")]
 const MENU_BAR_STATS_SEPARATOR_WIDTH: u32 = 2;
-#[cfg(target_os = "macos")]
-const TLS_BADGE_FONT_SCALE: f32 = 0.5;
 
 #[cfg(target_os = "macos")]
 fn menu_bar_stats_icon(title: &str) -> Option<tray_icon::Icon> {
@@ -1451,11 +1428,7 @@ fn menu_bar_stats_columns(
     for idx in 0..count {
         let value = rows.values.get(idx);
         let label = rows.labels.get(idx);
-        let value_font = if is_tls_badge_column(value, label) {
-            value_font_px * TLS_BADGE_FONT_SCALE
-        } else {
-            value_font_px
-        };
+        let value_font = value_font_px;
         let label_font = if is_menu_bar_network_column(value, label) {
             value_font_px
         } else {
@@ -1486,12 +1459,6 @@ fn menu_bar_stats_columns(
     columns
 }
 
-#[cfg(target_os = "macos")]
-fn is_tls_badge_column(value: Option<&String>, label: Option<&String>) -> bool {
-    value.is_some_and(|text| text == "TLS") && label.is_none_or(|text| text.is_empty())
-}
-
-#[cfg(target_os = "macos")]
 fn is_menu_bar_network_column(value: Option<&String>, label: Option<&String>) -> bool {
     value.is_some_and(|text| text.starts_with('↑') || text.starts_with('↓'))
         || label.is_some_and(|text| text.starts_with('↑') || text.starts_with('↓'))
@@ -2083,7 +2050,7 @@ fn tray_event_may_open_menu(event: &TrayIconEvent) -> bool {
     )
 }
 
-fn load_icon(dimmed: bool, tls_badge: bool) -> tray_icon::Icon {
+fn load_icon(dimmed: bool) -> tray_icon::Icon {
     #[cfg(target_os = "macos")]
     let icon_bytes: &[u8] = include_bytes!("../../../../../assets/trayTemplate@2x.png");
     #[cfg(target_os = "windows")]
@@ -2108,62 +2075,18 @@ fn load_icon(dimmed: bool, tls_badge: bool) -> tray_icon::Icon {
         }
     }
 
-    if tls_badge {
-        apply_tls_badge_to_icon(&mut rgba);
-    }
-
     let (width, height) = rgba.dimensions();
     tray_icon::Icon::from_rgba(rgba.into_raw(), width, height).expect("failed to create icon")
 }
 
-fn apply_tls_badge_to_icon(rgba: &mut image::RgbaImage) {
-    let (width, height) = rgba.dimensions();
-    if width == 0 || height == 0 {
-        return;
-    }
-
-    let radius = (width.min(height) as f32 * 0.24).max(3.0);
-    let center_x = width as f32 - radius - 1.0;
-    let center_y = radius + 1.0;
-
-    for y in 0..height {
-        for x in 0..width {
-            let dx = x as f32 - center_x;
-            let dy = y as f32 - center_y;
-            if dx * dx + dy * dy <= radius * radius {
-                let pixel = rgba.get_pixel_mut(x, y);
-                #[cfg(target_os = "macos")]
-                {
-                    pixel[0] = 0;
-                    pixel[1] = 0;
-                    pixel[2] = 0;
-                    pixel[3] = 255;
-                }
-                #[cfg(not(target_os = "macos"))]
-                {
-                    pixel[0] = 225;
-                    pixel[1] = 36;
-                    pixel[2] = 36;
-                    pixel[3] = 255;
-                }
-            }
-        }
-    }
-}
-
 fn tray_icon_for_state<'a>(
     state: u8,
-    tls_badge: bool,
     icon_running: &'a tray_icon::Icon,
-    icon_running_tls: &'a tray_icon::Icon,
     icon_stopped: &'a tray_icon::Icon,
-    icon_stopped_tls: &'a tray_icon::Icon,
 ) -> &'a tray_icon::Icon {
-    match (state, tls_badge) {
-        (STATE_RUNNING, true) => icon_running_tls,
-        (STATE_RUNNING, false) => icon_running,
-        (_, true) => icon_stopped_tls,
-        (_, false) => icon_stopped,
+    match state {
+        STATE_RUNNING => icon_running,
+        _ => icon_stopped,
     }
 }
 

@@ -219,7 +219,7 @@
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn test_menu_bar_stats_title_prefixes_tls_when_interception_enabled() {
+    fn test_menu_bar_stats_title_does_not_include_tls_state() {
         let snapshot = MenuDataSnapshot {
             runtime: Some(sample_runtime()),
             custom_config: None,
@@ -242,7 +242,7 @@
 
         assert_eq!(
             menu_bar_stats_title(&snapshot, ServiceState::Running),
-            Some("TLS | C20% | M55%".to_string())
+            Some("C20% | M55%".to_string())
         );
     }
 
@@ -293,19 +293,6 @@
             pair[1].x - (pair[0].x + pair[0].width)
                 == MENU_BAR_STATS_SEPARATOR_GAP * 2 + MENU_BAR_STATS_SEPARATOR_WIDTH
         }));
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn test_menu_bar_tls_badge_column_uses_half_size_font() {
-        let font = menu_bar_stats_font().expect("font");
-        let rows = menu_bar_stats_rows("TLS | C20% | M55%");
-        let columns = menu_bar_stats_columns(font, &rows, 28.0, 9.5);
-
-        assert_eq!(rows.values, vec!["TLS", "C20%", "M55%"]);
-        assert_eq!(columns[0].value_font_px, 14.0);
-        assert_eq!(columns[1].value_font_px, 28.0);
-        assert!(columns[0].width < columns[1].width);
     }
 
     #[cfg(target_os = "macos")]
@@ -1262,7 +1249,7 @@
     }
 
     #[test]
-    fn test_tls_pending_action_updates_badge_snapshot_immediately() {
+    fn test_tls_pending_action_updates_menu_snapshot_without_badge_title() {
         let snapshot = MenuDataSnapshot {
             runtime: Some(sample_runtime()),
             custom_config: None,
@@ -1300,7 +1287,7 @@
         #[cfg(target_os = "macos")]
         assert_eq!(
             menu_bar_stats_title(&snapshot, ServiceState::Running),
-            Some("TLS | C20% | M55%".to_string())
+            Some("C20% | M55%".to_string())
         );
     }
 
