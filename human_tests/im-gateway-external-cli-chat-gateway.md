@@ -1107,8 +1107,31 @@
 3. 旧的已完成卡片不被撤回、不被改写；新一轮只在最新用户消息之后创建新进度卡。
 4. 即使进度卡启动仍失败，外部 Runner `ProgressCard` delivery 也不得先发送 `已开始处理 Runner 任务。` 占位消息，避免最终结果之外多出一张无实时过程的卡片。
 
+### TC-IEC-55: Agent Chat 已有对话记录中模型切换系统消息刷新后保留
+
+操作步骤：
+1. 使用当前编译版本重启 `9900` 服务，启动参数包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。
+2. 打开一个已有多轮 external runner 对话记录的 Web UI 会话，例如：
+   ```text
+   http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-direct-system-check-1782409300&view=active
+   ```
+3. 在该会话内执行 `/model <可用模型>`，确认页面立即显示独立居中的系统提示 `切换模型为 <可用模型>`。
+4. 查询 session detail API：
+   ```bash
+   curl -sS 'http://127.0.0.1:9900/_bifrost/api/im-gateway/agent/sessions/<sessionKey>'
+   ```
+5. 刷新 Web UI 页面，重新检查消息列表。
+6. 确认普通 user/assistant 对话记录仍完整显示，系统提示没有被折叠进某条 user/assistant 气泡，也没有替换最后一条 assistant 回复。
+
+预期结果：
+1. session detail 的 `messages` 同时包含 canonical timeline 的 user/assistant 消息和 `role:"system"` 的模型切换展示消息。
+2. 刷新后 Web UI 仍展示独立居中的 `切换模型为 <可用模型>` 系统行，系统行有 `agent-chat-message-system` 与 `agent-chat-message-bubble-system`。
+3. user/assistant 正常对话仍按轮次展示，不会因为系统消息合并而消失、塌缩或只剩最后一轮。
+4. 模型切换系统消息仅用于 Web UI display/detail，不作为正式 user/assistant prompt 污染后续 runner 上下文。
+
 ## 最近执行记录
 
+- 2026-06-26：执行 TC-IEC-55 的真实 9900 回归。先确认问题根因：`session_state.json` 中 `admin-chat-direct-system-check-1782409300::traex::Traex` 已持久化多条 `role:"system"` 模型切换消息，但 session detail 主路径先从 canonical JSONL 读到 user/assistant timeline 后，只合并 external runner metadata，没有把 external state 的 system display messages 合并回 `messages`，导致刷新后系统提示丢失。修复后执行 `cargo test -p bifrost-admin handlers::im_gateway::agent_api::tests::session_detail_metadata_merge_preserves_external_system_display_messages -- --nocapture` 通过；执行 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `46889`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。API 验证 `/_bifrost/api/im-gateway/agent/sessions/admin-chat-direct-system-check-1782409300` 返回 `message_count=11`，包含 5 条 `role:"system"` 的 `切换模型为 ...` 消息，同时保留 `你好`、`你是谁` 等 user/assistant 对话。真实 Edge/Playwright 打开同一 URL 并刷新，DOM 中 `agent-chat-message-system` 数量为 5，页面文本同时包含 `切换模型为 Kimi-K2.6`、`切换模型为 GPT-5.5`、`你好`、`你是谁`，HUD 显示 `Model Kimi-K2.6 (trae)`。
 - 2026-06-26：追加执行 TC-IEC-50 的真实 9900 slash 键盘回归。先发现 `/model` 后按 Tab 会错误选中 `/models` 并提交，输入框被清空且后端返回 `runner 'codex' is not enabled`；修复后重新执行 `pnpm --dir web build` 与 `cargo build --bin bifrost`，覆盖重启 9900，PID `83008`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=codex-ui-slash-smoke-1782430796490&view=active`：输入 `/mo` 后按 Enter，页面发送 `/models` 并收到后端响应；再次输入 `/model` 后按 Tab，输入框值保持为 `/model `，焦点仍在 `agent-chat-input`，未发送请求。截图保存为 `/tmp/bifrost-9900-slash-smoke-fixed.png`。同时通过真实 `/chat/stream` API 验证 Traex `/models` 返回 Traex 模型列表、Traex 非法 `/model definitely-not-a-real-model-for-smoke` 返回“未切换模型”、Traex `/model Kimi-K2.6` 在 session detail 中写入 `messages[0].role="system"`、`content="切换模型为 Kimi-K2.6"` 与 `metadata.modelOverride="Kimi-K2.6"`；Codex `/models` 返回 Codex 模型列表，Codex 非法 `/model definitely-not-a-real-codex-model-for-smoke` 返回“未切换模型”。
 - 2026-06-26：执行 TC-IEC-54 的 Feishu progress card mock 回归。命令 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin start_feishu_after_finished_card_recovers_from_invalid_card_id_send --lib -- --nocapture` 通过；mock 服务先发送第一轮 `card_1/om_1` 并 finish，第二轮第一次 `send card entity` 返回 `code=230099`、`cardid is invalid`，实现重新创建 `card_3` 并发送成功，最终 handle 指向 `card_3/om_3`，请求计数为 `card_counter=3`、`message_counter=3`、`card_update_counter=1`、`settings_update_counter=1`、`recall_counter=0`。同时执行旧语义回归 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin queue_state_rollover_send_failure_keeps_previous_running_handle --lib -- --nocapture` 通过，确认非 `cardid is invalid` 的普通发送失败仍不切换 handle；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin progress_card --lib -- --nocapture`，35 个 progress_card 相关测试全部通过。
 - 2026-06-26：执行 TC-IEC-53 的真实 Web UI 回归。当前编译版本 `cargo build --bin bifrost` 后覆盖重启 `9900`，PID `23043`，启动命令包含 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`、`--no-tray`、`--no-intercept`。Playwright 打开 `http://127.0.0.1:9900/_bifrost/ai?aiSection=agent-chat&agentSection=chat&session=admin-chat-1782407491650&view=active`，在 `agent-chat-input` 粘贴 PNG 并发送 `图片气泡展示回归：这张测试图里有什么？`。发送后 DOM 中包含该文本的 `agent-chat-message-bubble-user` 同时包含 1 个 `agent-chat-previewable-image`，图片 `src` 前缀为 `data:image/png;base64,iVBORw0K`；刷新页面后同一文本气泡仍包含 1 张图片。session detail API 返回最后一条用户消息 `content_parts` 同时包含 text 和 image_url。截图保存为 `/tmp/bifrost-user-image-bubble-sent.png`、`/tmp/bifrost-user-image-bubble-reload.png`。

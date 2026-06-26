@@ -2318,6 +2318,11 @@ async fn merge_external_runner_detail_metadata(
     let Some(external_detail) = external_runner_session_detail(session_key).await else {
         return;
     };
+    append_system_session_messages(&mut detail.messages, &external_detail.messages);
+    detail
+        .messages
+        .sort_by_key(|message| message.timestamp.unwrap_or(u64::MAX));
+    detail.message_count = detail.messages.len();
     if detail
         .metadata
         .as_ref()
@@ -2542,6 +2547,18 @@ fn append_system_display_messages(
     }
 }
 
+fn append_system_session_messages(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    state_messages: &[bifrost_agent::session::SessionMessage],
+) {
+    for message in state_messages
+        .iter()
+        .filter(|message| message.role == "system")
+    {
+        append_session_display_message(output, message);
+    }
+}
+
 fn append_state_display_message(
     output: &mut Vec<bifrost_agent::session::SessionMessage>,
     message: &crate::im_gateway::session_state::ImAgentSessionMessage,
@@ -2560,6 +2577,20 @@ fn append_state_display_message(
         content_parts: message.content_parts.clone(),
         tool_calls: None,
     });
+}
+
+fn append_session_display_message(
+    output: &mut Vec<bifrost_agent::session::SessionMessage>,
+    message: &bifrost_agent::session::SessionMessage,
+) {
+    if output.iter().any(|existing| {
+        existing.role == message.role
+            && existing.content == message.content
+            && existing.timestamp == message.timestamp
+    }) {
+        return;
+    }
+    output.push(message.clone());
 }
 
 fn external_runner_timeline_messages(
@@ -3246,6 +3277,73 @@ mod tests {
             .messages
             .iter()
             .any(|message| { message.role == "system" && message.content.contains("Kimi-K2.6") }));
+    }
+
+    #[test]
+    fn session_detail_metadata_merge_preserves_external_system_display_messages() {
+        let _lock = AGENT_API_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _guard = AgentApiEnvGuard::new(dir.path());
+        let session_key = "external-system-display-merge";
+        let data_dir = bifrost_agent::config::agent_home_dir();
+        let mut recorder =
+            bifrost_agent::persistence::ConversationRecorder::new(&data_dir, session_key);
+        recorder
+            .record_session_start(session_key, serde_json::json!({"source": "web"}))
+            .expect("record start");
+        recorder
+            .record_user_message(session_key, "existing prompt")
+            .expect("record user");
+        recorder
+            .record_assistant_message(session_key, "existing answer")
+            .expect("record assistant");
+        let history_path = recorder.file_path().display().to_string();
+
+        crate::im_gateway::session_state::remember_session_state(
+            crate::im_gateway::session_state::ImAgentSessionState {
+                session_key: session_key.to_string(),
+                adapter: "traex".to_string(),
+                runner_id: Some("Traex".to_string()),
+                history_path: Some(history_path),
+                model_override: Some("Kimi-K2.6".to_string()),
+                model_override_source: Some("session slash command".to_string()),
+                status: Some("succeeded".to_string()),
+                messages: vec![crate::im_gateway::session_state::ImAgentSessionMessage {
+                    role: "system".to_string(),
+                    content: "切换模型为 Kimi-K2.6".to_string(),
+                    timestamp: Some(1_770_000_003),
+                    content_parts: None,
+                }],
+                updated_at: 1_770_000_004_000,
+                ..crate::im_gateway::session_state::ImAgentSessionState::default()
+            },
+        )
+        .expect("remember state");
+
+        let mut detail = history_session_detail(session_key).expect("history detail");
+        assert_eq!(detail.message_count, 2);
+        assert!(!detail
+            .messages
+            .iter()
+            .any(|message| message.role == "system"));
+
+        let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
+        runtime.block_on(merge_external_runner_detail_metadata(
+            session_key,
+            &mut detail,
+        ));
+
+        assert_eq!(detail.message_count, 3);
+        assert_eq!(detail.model.as_deref(), Some("Kimi-K2.6"));
+        assert!(detail.metadata.as_ref().is_some_and(|metadata| metadata
+            .get("modelOverride")
+            .is_some_and(|model| model == "Kimi-K2.6")));
+        assert!(detail
+            .messages
+            .iter()
+            .any(|message| message.role == "system" && message.content == "切换模型为 Kimi-K2.6"));
     }
 
     #[test]
