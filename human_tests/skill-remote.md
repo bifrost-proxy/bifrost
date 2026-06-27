@@ -7,7 +7,8 @@
 ## 前置条件
 
 - 当前工作目录为 Bifrost 仓库根目录。
-- 不启动 Bifrost 代理服务，不修改系统代理。
+- TC-SR-01 到 TC-SR-12 为文档/CLI 静态验证，不启动 Bifrost 代理服务，不修改系统代理。
+- TC-SR-13 为真实端到端验证，必须启动仓库内 relay server、target Bifrost 与 caller Bifrost CLI，且 target 启动必须禁用系统代理、自动登录弹窗和托盘。
 - 使用临时目录验证 skill 安装输出。
 - 所有命令显式设置：
   ```bash
@@ -278,6 +279,164 @@
 执行记录（2026-06-27）：
 
 - PASS：执行 `tmpdir=$(mktemp -d); BIFROST_INSTALL_SKILL_SOURCE=embedded cargo run -p bifrost-cli -- install-skill --tool codex --dir "$tmpdir/skills/bifrost" -y` 后，`$tmpdir/skills/bifrost-remote/SKILL.md` 存在；`rg -n -- '--from-local.*write|write.*--from-local|edit.*--from-local|patch.*--from-local' "$tmpdir/skills/bifrost-remote/SKILL.md"` 命中 `write/edit/patch` 命令面、行为要点和入口选择；`rg -n 'mkdir.*move.*delete.*没有 caller 本地 payload|mkdir.*move.*delete.*不使用 `--from-local`' "$tmpdir/skills/bifrost-remote/SKILL.md"` 命中本地 payload 边界说明。
+
+### TC-SR-12 remote skill 文档与当前 CLI 命令面保持一致
+
+操作步骤：
+
+1. 检查 traffic 输出格式文档使用 `--format` 而不是 `--output`：
+   ```bash
+   rg -n '输出格式走 `-f\\|--format`|list/get.*table\\|compact\\|json\\|json-pretty|search.*ndjson' skill_remote.md
+   ! rg -n '输出格式统一：`--output human\\|json\\|json-pretty`' skill_remote.md
+   target/debug/bifrost remote traffic list --help | rg -- '-f, --format <FORMAT>'
+   target/debug/bifrost remote traffic search --help | rg -- 'ndjson'
+   ```
+2. 检查 `remote traffic search` 只承诺核心过滤项，并明确 `--include` / `--max-body` 需要 `remote exec`：
+   ```bash
+   rg -n '核心过滤项|`--include` / `--max-body`' skill_remote.md
+   target/debug/bifrost search --help | rg -- '--include|--max-body'
+   ! target/debug/bifrost remote traffic search --help | rg -- '--include|--max-body'
+   ```
+3. 检查 file 子命令 synopsis 包含已实现参数：
+   ```bash
+   rg -n 'file list.*--max-matches.*--cursor|file glob.*--max-matches.*--cursor|file find.*--cursor|file move.*--base-sha256|file patch.*--base-sha' skill_remote.md
+   target/debug/bifrost remote file list --help | rg -- '--max-matches|--cursor'
+   target/debug/bifrost remote file glob --help | rg -- '--cursor|--exclude'
+   target/debug/bifrost remote file find --help | rg -- '--cursor'
+   target/debug/bifrost remote file move --help | rg -- '--base-sha256|--allow-overwrite'
+   target/debug/bifrost remote file patch --help | rg -- '--base-sha'
+   ```
+4. 检查 `--around` 文档与实现一致，明确覆盖 `-A/-B`：
+   ```bash
+   rg -n '`--around`.*覆盖.*-B/-A|需要非对称上下文时只用 `-B/-A`' skill_remote.md
+   target/debug/bifrost remote file find --help | rg -- 'takes precedence over -A/-B'
+   ```
+5. 检查错误码表覆盖 FileAccess、anchored edit、patch 特殊错误和 IO 错误：
+   ```bash
+   rg -n 'file.deny_pattern|file.symlink_escape|file.ignored_by_gitignore|file.anchor_not_found|file.anchor_not_unique|file.binary_patch_unsupported|file.unsupported_diff|file.io_error' skill_remote.md
+   ```
+6. 检查二进制 / 本地大文件推荐 `--from-local`，且不再推荐 macOS 不兼容的 `base64 -w0`：
+   ```bash
+   rg -n '本地大文件 / 二进制 / 特殊字符优先用 `--from-local`|write <remote-path> --from-local ./local.bin' skill_remote.md
+   ! rg -n 'base64 -w0' skill_remote.md
+   ```
+
+预期结果：
+
+- 文档中的 traffic 输出参数与当前 CLI help 一致，使用 `-f|--format`。
+- 文档不再过度承诺 remote search 支持 `--include` / `--max-body`。
+- 文档列出的 remote file 参数覆盖当前 help 中的分页、乐观锁和 overwrite 保护参数。
+- `--around` 语义与实现一致：存在时覆盖 `-A/-B`。
+- 错误码表包含当前实现会返回、且 Agent 需要处理的主要 file 错误码。
+- 本地大文件和二进制写入推荐 `--from-local`，不依赖平台特定 `base64 -w0`。
+
+执行记录（2026-06-28）：
+
+- PASS：执行 TC-SR-12 的静态文档断言，确认 `skill_remote.md` 使用 `-f|--format` 描述 remote traffic 输出，未再出现旧的 `--output human|json|json-pretty` 说法；remote search 只承诺核心过滤项并明确 `--include` / `--max-body` 需走 `remote exec`；file synopsis 包含 list/glob/find 分页、move 乐观锁/overwrite、patch `--base-sha`；`--around` 文档写明覆盖 `-A/-B`；错误码表包含 deny/symlink/gitignore/anchor/binary patch/unsupported diff/io；文档中不再出现 `base64 -w0`。
+- PASS：执行当前源码构建出的 `target/debug/bifrost --version`，输出 `bifrost 0.0.124`；随后执行 `remote traffic list/search --help`、本地 `search --help`、`remote file list/glob/find/move/patch/write/edit --help`，确认 help 中暴露 `--format`、search `ndjson`、本地 search `--include/--max-body` 而 remote search 不暴露、file 分页/乐观锁/`--from-local`/`--base-sha` 参数与文档一致。
+- PASS：执行离线参数解析验证，在临时 `BIFROST_DATA_DIR` 下依次运行 `remote traffic list --format json`、`remote traffic search --format ndjson`、`remote file list --max-matches --cursor`、`remote file glob --cursor --exclude`、`remote file find --around -A --cursor`、`remote file write --from-local`、`remote file edit --from-local`、`remote file patch --from-local --base-sha`、`remote file move --base-sha256 --allow-overwrite`。所有命令都通过 clap 参数解析并在无远端连接阶段失败，未出现 `unexpected argument` / `unrecognized subcommand` / `invalid value` / 缺 required argument 等文档参数错误。
+- PASS：执行 `BIFROST_INSTALL_SKILL_SOURCE=embedded cargo run -q -p bifrost-cli --bin bifrost -- install-skill --tool codex --dir "$tmpdir/skills/bifrost" -y` 安装到临时目录，确认 `$tmpdir/skills/bifrost-remote/SKILL.md` 包含更新后的 `--format`、`--include` / `--max-body` 边界、`--around` 覆盖语义、`file.binary_patch_unsupported`、patch `--base-sha` 与 `write --from-local ./local.bin` 推荐；同时确认安装产物不含 `base64 -w0` 和旧 `--output human|json|json-pretty` 说法。测试完成后删除临时目录。
+
+### TC-SR-13 remote skill 全量用法真实端到端验收
+
+操作步骤：
+
+1. 使用当前仓库源码编译出的 `target/debug/bifrost`，通过仓库内 relay server 启动真实三端链路：
+   - relay：`packages/bifrost-sync-server`
+   - target：临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`
+   - caller：独立临时 `BIFROST_DATA_DIR`
+2. 执行 remote file relay E2E，逐项覆盖 `skill_remote.md` 推荐的 file surface：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   REMOTE_FILE_CMD_TIMEOUT_SECS=45 \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_file_relay_e2e.sh
+   ```
+3. 执行 remote invoke E2E，覆盖 `conn up --label/status/down`、`traffic list/get/search`、取消、断连清理和 relay token 安全：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_invoke_e2e.sh
+   ```
+4. 执行 SSH remote invoke E2E，覆盖 `--ssh-key` 文件、`BIFROST_REMOTE_SSH_KEY`、SSH grant 权限升降级、同一 SSH key 多 caller identity 隔离，以及通过 `remote exec` 调目标端本机 Bifrost CLI 的 fallback：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+5. 执行 shell streaming E2E，覆盖 `remote exec --shell-text`、argv、stdin、`--cwd`、`--env`、`--login`、`--timeout-ms`、`BIFROST_REMOTE=1`、`TERM=dumb` 与 Recent Calls 元数据：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh
+   ```
+6. 执行 remote job / run E2E，覆盖 `remote exec --detach`、`remote job list/status/logs/watch --output-file`、call_id-only job cache、真实 exit code，以及 `remote run --script-file --interpreter --cwd --env --detach -- <args>`：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_job_real_e2e.sh
+   ```
+7. 执行 CLI tooling E2E，覆盖 `remote run` help、`BIFROST_REMOTE_CLIENT_ID`、`--client-id`、`file write --path` 兼容和 `write/edit/patch --from-local` 参数解析：
+   ```bash
+   NODE_BIN="$(command -v node)" \
+   BIFROST_BIN="$PWD/target/debug/bifrost" \
+   SKIP_BUILD=true \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh
+   ```
+8. 对 `read-many` 回归运行最小 Rust 测试，确认服务端 handler 仍支持部分失败和总量限制：
+   ```bash
+   cargo test -p bifrost-admin read_many --lib -- --nocapture
+   ```
+
+预期结果：
+
+- remote file E2E 启动真实 relay/target/caller 后全部通过，且至少包含：
+  - `read/list/stat/hash/write/mkdir/move/delete/glob/find/edit/patch`
+  - `write/edit/patch --from-local` 后通过 remote read 和 target disk `cmp -s` 做 byte-for-byte 校验
+  - `read-many`、`scratch-dir`、`outline`
+  - `find -B/-A`、`--exclude`、`.gitignore`、CRLF、CJK、sha mismatch、readonly scope 等边界
+- remote invoke E2E 全部通过，说明文档中的连接、label、traffic 和断连恢复推荐用法可用。
+- SSH E2E 全部通过，且通过 `remote exec` 在目标端本机执行并校验：
+  - `bifrost status --format json`
+  - `bifrost search <marker> --include bodies,headers --max-body 32768 --format ndjson`
+  - `bifrost traffic get --ids <id> --max-body 32768 --format ndjson`
+  - `bifrost traffic auth-status <id> --format json`
+  - `bifrost traffic export <id> --as curl`
+  - `bifrost traffic replay <id> --refresh-auth --format json`，并在目标端本机 CLI help 验证 `--patch <PATCH>` 参数存在
+  - `bifrost capture wait --host ... --timeout 1s --format json`，并确认远端 124 timeout exit code 经 `remote exec --timeout-ms` 保留
+- shell streaming E2E 全部通过，说明文档中的 shell stdout streaming、stdin、`--cwd`、`--env`、`--login`、`--timeout-ms` 和远端环境变量说明可用。
+- remote job / run E2E 全部通过，说明文档中的 detach/job 续接和本地脚本上传到远端执行路径可用。
+- CLI tooling E2E 全部通过，说明文档中的本地参数写法没有 clap/命令面漂移。
+- `read-many` 不再触发目标端 stack overflow。
+
+执行记录（2026-06-28）：
+
+- FAIL → FIX → PASS：新增 `read-many/scratch-dir/outline` 真实用例后，首次发现 `read-many` 在真实 target tokio worker 中触发 `thread 'tokio-rt-worker' has overflowed its stack` 并导致目标端 `Abort trap: 6`；修复 `handle_file_read_many`，将 per-file `handle_file_read` future 与 outer future boxing，重新编译 `target/debug/bifrost` 后复跑通过。
+- PASS：`cargo test -p bifrost-admin read_many --lib -- --nocapture`，3 passed。
+- PASS：`cargo build -p bifrost-cli --bin bifrost` 成功生成新 `target/debug/bifrost`。
+- PASS：`e2e-tests/tests/test_remote_file_relay_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 89, Passed: 89, Failed: 0`；其中 `TC-FILE-13B` 对 `write/edit/patch --from-local` 均通过 remote read 与目标端磁盘文件逐字节比较，`TC-FILE-21/22/23` 覆盖 `read-many/scratch-dir/outline`。
+- PASS：`e2e-tests/tests/test_remote_invoke_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `total=73 passed=73 failed=0`；新增 `TC-RI-01A` 验证 `remote conn up --label` 真实到达目标端 pending pairing。
+- PASS：`e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 使用真实 relay/target/caller 和本地 mock target 通过；验证 SSH key 文件路径、`BIFROST_REMOTE_SSH_KEY`、grant 权限升降级、两个 caller fingerprint 隔离、remote traffic search/get，并通过 `remote exec` 调目标端本机 CLI 验证 `status/search --include/traffic get --ids/auth-status/export/replay --refresh-auth/capture wait` 的真实输出和 marker 数据；`--patch <PATCH>` 在目标端本机 CLI help 中验证存在，避免把 replay JSON Patch 参数覆盖绑定到 CI 上不稳定的请求体捕获策略。
+- PASS：`e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 51, Passed: 51, Failed: 0`；验证 shell_text/argv/stdin streaming，以及 `--cwd` 在 login shell rc 后仍生效、`--env` 到达远端进程、`BIFROST_REMOTE=1`、`TERM=dumb` 与 Recent Calls policy/exec_mode/stdout_digest。
+- PASS：`e2e-tests/tests/test_remote_job_real_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 76, Passed: 76, Failed: 0`；验证 detach job 的 call_id-only status/logs/watch、`--output-file`、真实 exit code、local job cache 加密 token，以及 `remote run` 本地脚本上传、`--cwd`、`--env`、`--detach` 和 `-- <args>`。
+- PASS：`e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过，确认 `remote run`、client-id/env fallback、`file write --path` 兼容与 `write/edit/patch --from-local` 参数面可用。
 
 ## 清理步骤
 

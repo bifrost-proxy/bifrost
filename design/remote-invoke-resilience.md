@@ -54,6 +54,7 @@
 - 启动 fixture 后从日志中的 `Starting HTTP Echo Server on <host>:<actual_port>...` 解析实际绑定端口。
 - 只对实际绑定端口执行 `/health` 探活，避免误命中占用原端口的其他服务。
 - 如果实际端口与请求端口不同，输出 fallback 日志，并更新后续 Recent Calls 流量使用的 `MOCK_HTTP_PORT`。
+- 使用 `python3 -u` 启动 fixture，并把 `/health` ready 等待预算提升到 60 秒，避免 macOS shell shard 高并发/高负载时 Python 进程尚未打印端口或完成启动就被 10 秒窗口误判失败。
 - 保持 `http_echo_server.py --retries 5` 行为不变，避免影响其他复用该 fixture 的测试。
 
 ### 改进 5：未登录 sync session 时的 relay 注册日志降噪
@@ -81,6 +82,7 @@
 - 使用 e2e-test 技能验证 SSE 重连对账
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：pair-code 授权后先断言 Grants API 有 `first_connected_at` 且 `last_command_at` 为空；执行一次远程搜索命令后断言 `last_command_at` 非空且不早于 `first_connected_at`。
 - 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：当本地 echo fixture 请求端口被占用并 fallback 到新端口时，脚本必须解析实际端口、使用实际端口生成 Recent Calls 流量，并完整通过参数预览、长参数截断、落盘恢复与清理断言。
+- 更新 `e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`：在 CI 高负载下 fixture 日志为空或启动变慢时，脚本必须等待到 60 秒并通过无缓冲输出拿到实际端口；提前退出仍要打印 mock server 日志。
 - 新增 `e2e-tests/tests/test_remote_invoke_missing_sync_token_log_e2e.sh`：使用空临时数据目录启动 Bifrost，断言日志只出现一次等待 sync session token 的 INFO，且不再出现缺 token 导致的 `failed to register with relay` ERROR。
 
 ### 真实场景测试

@@ -150,10 +150,10 @@ trap cleanup EXIT
 start_mock_server() {
     local requested_port="$MOCK_HTTP_PORT"
     log "Starting local HTTP echo fixture on port $requested_port"
-    python3 "$REPO_DIR/e2e-tests/mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_SERVER_LOG" 2>&1 &
+    python3 -u "$REPO_DIR/e2e-tests/mock_servers/http_echo_server.py" --port "$MOCK_HTTP_PORT" --retries 5 >"$MOCK_SERVER_LOG" 2>&1 &
     MOCK_SERVER_PID=$!
 
-    for _ in $(seq 1 50); do
+    for _ in $(seq 1 120); do
         if ! kill -0 "$MOCK_SERVER_PID" 2>/dev/null; then
             _log_fail "本地 echo fixture 提前退出" "server keeps running" "$(cat "$MOCK_SERVER_LOG")"
             exit 1
@@ -168,7 +168,7 @@ start_mock_server() {
             fi
             return 0
         fi
-        sleep 0.2
+        sleep 0.5
     done
 
     _log_fail "本地 echo fixture 未在超时内就绪" "GET /health 返回 200" "$(cat "$MOCK_SERVER_LOG")"

@@ -5149,6 +5149,31 @@ rm -rf /tmp/bifrost-remote-overload.*
 |---------|------|---------|
 | TC-RI-回归-149 | ✅ PASS | 2026-06-23 执行 `bash -n e2e-tests/test_utils/admin_client.sh e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；执行 `ADMIN_HOST=0.0.0.0 ADMIN_PORT=12345 bash -lc 'source e2e-tests/test_utils/admin_client.sh >/dev/null; admin_base_url; admin_client_host'` 输出 `http://127.0.0.1:12345/_bifrost` 与 `127.0.0.1`。随后执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过。脚本启动本地 relay `62895`、target admin `-H 0.0.0.0 -p 62896`、本地 echo fixture `62897`，并完整通过 relay 注册、sync session、pair-code 授权、Grants 首次连接/最近命令时间、Recent Calls 参数预览、120 字符长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。 |
 
+## TC-RI-回归-150：Recent Calls 本地 echo fixture 在 CI 高负载下必须稳定 ready
+
+**背景**：GitHub Actions PR #302 的 macOS aarch64 shell shard 在 `test_remote_invoke_recent_calls_args_preview_e2e.sh` 中启动本地 HTTP echo fixture 后 10 秒内没有拿到 `/health`，artifact 中 mock server log 为空，导致用例在真正进入 Remote Invoke 参数预览断言前失败。修复要求脚本对高负载启动更宽容，同时保留端口 fallback 与提前退出诊断。
+
+### 操作步骤
+
+1. 执行脚本语法检查：
+   `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+2. 使用已构建 release 二进制复跑 Recent Calls 参数预览 E2E；本机若 `better-sqlite3` 原生模块由系统 Node 构建，则显式传入同一 Node：
+   `NODE_BIN=/opt/homebrew/bin/node BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+3. 检查脚本中本地 echo fixture 启动命令使用 `python3 -u`，ready 循环允许 120 次、每次 0.5 秒，总预算 60 秒；提前退出仍打印 `$MOCK_SERVER_LOG`。
+
+### 预期结果
+
+- 本地 echo fixture stdout 无缓冲写入，脚本能及时解析 `Starting HTTP Echo Server on <host>:<actual_port>...`。
+- CI 高负载下 fixture ready 可等待到 60 秒；如果进程提前退出，失败信息包含 mock server 日志。
+- Recent Calls E2E 仍完整通过 relay 注册、sync session、pair-code 授权、Grants 时间字段、Recent Calls 参数预览、长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。
+- 全流程使用随机端口和隔离数据目录，启动参数包含 `--no-system-proxy`，不使用 9900，不修改系统代理。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-150 | ✅ PASS | 2026-06-28 执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；第一次直接执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true ...` 因本机 `better-sqlite3` ABI 与 helper 默认 Node 不一致而在 relay 启动前失败，随后按当前 node_modules ABI 显式执行 `NODE_BIN=/opt/homebrew/bin/node BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过。脚本启动本地 relay `62502`、target admin `62503` 与本地 echo fixture `62504`，完整通过 relay 注册、sync session、pair-code 授权、Grants 首次连接/最近命令时间、Recent Calls 参数预览、120 字符长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。源码复核确认 fixture 使用 `python3 -u`，ready 等待预算为 120 × 0.5 秒，提前退出路径仍打印 mock server 日志。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。

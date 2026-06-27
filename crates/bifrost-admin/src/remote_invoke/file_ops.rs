@@ -17,6 +17,7 @@ use bifrost_core::file_access::{
     DenyMatcher, FileAccessError, FileOp, GlobMatcher, PolicyDecision,
 };
 use bifrost_core::{BifrostError, Result};
+use futures_util::FutureExt;
 use ring::digest::{Context, SHA256};
 use serde_json::{json, Value};
 use tokio::fs;
@@ -523,44 +524,52 @@ pub async fn handle_file_read_many(
         )));
     }
 
-    let futs = items.into_iter().map(|(path, dec)| async move {
-        match dec {
-            Err(error) => json!({
-                "path": path,
-                "ok": false,
-                "error_code": error
-                    .split(']')
-                    .next()
-                    .map(|s| s.trim_start_matches('[').to_string())
-                    .unwrap_or_default(),
-                "error": error,
-            }),
-            Ok(decision) => {
-                match handle_file_read(&decision, max_bytes, allow_binary, None, None).await {
-                    Ok(mut v) => {
-                        if let Some(obj) = v.as_object_mut() {
-                            obj.insert("path".to_string(), json!(path));
-                            obj.insert("ok".to_string(), json!(true));
+    let futs = items.into_iter().map(|(path, dec)| {
+        async move {
+            match dec {
+                Err(error) => json!({
+                    "path": path,
+                    "ok": false,
+                    "error_code": error
+                        .split(']')
+                        .next()
+                        .map(|s| s.trim_start_matches('[').to_string())
+                        .unwrap_or_default(),
+                    "error": error,
+                }),
+                Ok(decision) => {
+                    // Keep the large file-read future off the tokio worker stack.
+                    // The real remote worker has a smaller stack than unit tests.
+                    match handle_file_read(&decision, max_bytes, allow_binary, None, None)
+                        .boxed()
+                        .await
+                    {
+                        Ok(mut v) => {
+                            if let Some(obj) = v.as_object_mut() {
+                                obj.insert("path".to_string(), json!(path));
+                                obj.insert("ok".to_string(), json!(true));
+                            }
+                            v
                         }
-                        v
-                    }
-                    Err(e) => {
-                        let msg = e.to_string();
-                        let code = msg
-                            .split(']')
-                            .next()
-                            .map(|s| s.trim_start_matches('[').to_string())
-                            .unwrap_or_default();
-                        json!({
-                            "path": path,
-                            "ok": false,
-                            "error_code": code,
-                            "error": msg,
-                        })
+                        Err(e) => {
+                            let msg = e.to_string();
+                            let code = msg
+                                .split(']')
+                                .next()
+                                .map(|s| s.trim_start_matches('[').to_string())
+                                .unwrap_or_default();
+                            json!({
+                                "path": path,
+                                "ok": false,
+                                "error_code": code,
+                                "error": msg,
+                            })
+                        }
                     }
                 }
             }
         }
+        .boxed()
     });
     let files: Vec<Value> = futures_util::future::join_all(futs).await;
     let ok_count = files

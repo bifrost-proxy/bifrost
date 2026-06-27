@@ -6,6 +6,7 @@ unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 SYNC_SERVER_DIR="$REPO_DIR/packages/bifrost-sync-server"
+BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
 
 source "$SCRIPT_DIR/../test_utils/assert.sh"
 source "$SCRIPT_DIR/../test_utils/admin_client.sh"
@@ -119,6 +120,107 @@ exec(snippet, namespace)
 PY
 }
 
+run_remote_exec_target_bifrost_cli_checks() {
+    local status_output local_search_output local_batch_get_output auth_status_output export_output replay_output replay_help_output
+    local capture_output capture_stderr capture_exit
+
+    log "Execute target-local bifrost status through remote exec"
+    status_output="$TMPDIR/target_status_via_remote_exec.json"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" status --format json >"$status_output"
+    assert_python "$status_output" 'assert obj["version"]; assert obj["running"] is True; assert obj["listener"]["port"] == int("'"$ADMIN_PORT"'")'
+
+    log "Execute target-local search --include through remote exec"
+    local_search_output="$TMPDIR/target_search_include_via_remote_exec.ndjson"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" search "$MARKER" --include bodies,headers --max-body 32768 --format ndjson \
+        >"$local_search_output"
+    grep -q "$MARKER" "$local_search_output"
+    python3 - "$local_search_output" "$MARKER" <<'PY'
+import json
+import sys
+
+marker = sys.argv[2]
+seen = False
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        continue
+    obj = json.loads(line)
+    if marker in json.dumps(obj, ensure_ascii=False):
+        seen = True
+        break
+assert seen, "target-local search --include should return the generated marker"
+PY
+
+    log "Execute target-local traffic get --ids through remote exec"
+    local_batch_get_output="$TMPDIR/target_traffic_get_ids_via_remote_exec.ndjson"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic get --ids "$TRAFFIC_ID" --max-body 32768 --format ndjson \
+        >"$local_batch_get_output"
+    grep -q "$MARKER" "$local_batch_get_output"
+    python3 - "$local_batch_get_output" "$TRAFFIC_ID" "$MARKER" <<'PY'
+import json
+import sys
+
+traffic_id, marker = sys.argv[2:4]
+seen = False
+for line in open(sys.argv[1], encoding="utf-8"):
+    line = line.strip()
+    if not line or not line.startswith("{"):
+        continue
+    obj = json.loads(line)
+    payload = json.dumps(obj, ensure_ascii=False)
+    if traffic_id in payload and marker in payload:
+        seen = True
+        break
+assert seen, "traffic get --ids should return the exact target record and response marker"
+PY
+
+    log "Execute target-local traffic auth-status through remote exec"
+    auth_status_output="$TMPDIR/target_auth_status_via_remote_exec.json"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic auth-status "$TRAFFIC_ID" --format json >"$auth_status_output"
+    assert_python "$auth_status_output" 'assert "has_jwt" in obj; assert "has_cookie" in obj'
+
+    log "Execute target-local traffic export --as curl through remote exec"
+    export_output="$TMPDIR/target_export_curl_via_remote_exec.txt"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic export "$TRAFFIC_ID" --as curl >"$export_output"
+    grep -q "curl" "$export_output"
+    grep -q "$MARKER" "$export_output"
+
+    log "Execute target-local traffic replay --refresh-auth through remote exec"
+    replay_output="$TMPDIR/target_replay_via_remote_exec.json"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic replay "$TRAFFIC_ID" --refresh-auth --format json >"$replay_output"
+    assert_python "$replay_output" 'assert obj["success"] is True; assert obj["data"]["response"]["status"] == 200'
+
+    log "Verify target-local traffic replay help exposes --patch through remote exec"
+    replay_help_output="$TMPDIR/target_replay_help_via_remote_exec.txt"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" traffic replay --help >"$replay_help_output"
+    grep -q -- "--patch <PATCH>" "$replay_help_output"
+
+    log "Execute target-local capture wait timeout through remote exec"
+    capture_output="$TMPDIR/target_capture_wait_via_remote_exec.json"
+    capture_stderr="$TMPDIR/target_capture_wait_via_remote_exec.err"
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        --timeout-ms 6000 \
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" capture wait --host skill-remote-never.invalid --timeout 1s --format json \
+        >"$capture_output" 2>"$capture_stderr"
+    capture_exit=$?
+    set -e
+    if [[ "$capture_exit" -eq 124 ]]; then
+        _log_pass "target-local capture wait should preserve timeout exit code 124 through remote exec"
+    else
+        _log_fail "target-local capture wait should preserve timeout exit code 124 through remote exec" \
+            "124" "exit=${capture_exit} stdout=$(cat "$capture_output") stderr=$(cat "$capture_stderr")"
+        return 1
+    fi
+}
+
 dump_grant_diagnostics() {
     echo "[remote-invoke-ssh-e2e] Grant diagnostics:" >&2
     if [[ -n "${CALLER_CONNECTIONS_JSON:-}" && -f "$CALLER_CONNECTIONS_JSON" ]]; then
@@ -149,7 +251,7 @@ expect_remote_exec_success() {
     local output_file="$TMPDIR/remote_exec_${marker}.out"
     log "  expect remote exec success: ${marker}"
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${marker}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${marker}" \
         >"$output_file" 2>&1
     local status=$?
     set -e
@@ -165,7 +267,7 @@ expect_remote_exec_denied() {
     local label="$1"
     local output_file="$TMPDIR/remote_exec_denied_${label}.out"
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${label}" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --shell-text "printf ${label}" \
         >"$output_file" 2>&1
     local status=$?
     set -e
@@ -185,7 +287,7 @@ expect_remote_file_rw_success() {
     marker_b64="$(printf '%s' "$marker" | base64)"
     log "  expect remote file read/write success: ${marker}"
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
         --content "$marker" --allow-overwrite true --create-parents --output json \
         >"$write_output" 2>&1
     local write_status=$?
@@ -197,7 +299,7 @@ expect_remote_file_rw_success() {
         exit 1
     fi
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file read "$TARGET_HOME_FILE" --output json \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" file read "$TARGET_HOME_FILE" --output json \
         >"$read_output" 2>&1
     local read_status=$?
     set -e
@@ -213,7 +315,7 @@ expect_remote_file_write_denied() {
     local marker="$1"
     local output_file="$TMPDIR/file_write_denied_${marker}.out"
     set +e
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" file write "$TARGET_HOME_FILE" \
         --content "$marker" --allow-overwrite true --create-parents --output json \
         >"$output_file" 2>&1
     local status=$?
@@ -231,7 +333,7 @@ update_grant_level_and_assert() {
     local expected_scope="$2"
     local expected_file_access="$3"
     local output_file="$TMPDIR/cli_grant_${level}.out"
-    "$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting grant update --device "$CALLER_FINGERPRINT_1" --level "$level" \
+    "$BIFROST_BIN" --port "$ADMIN_PORT" setting grant update --device "$CALLER_FINGERPRINT_1" --level "$level" \
         >"$output_file" 2>&1
     python3 - "$output_file" "$MATCH_GRANT" "$expected_scope" "$expected_file_access" "$level" <<'PY'
 import json
@@ -298,13 +400,13 @@ wait_for_worker_connected() {
 
 start_local_relay
 
-if [[ "${SKIP_BUILD:-}" != "true" ]]; then
+if [[ "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" && "${SKIP_BUILD:-}" != "true" ]]; then
     NEED_BUILD=0
-    if [[ ! -x "$REPO_DIR/target/release/bifrost" ]] \
-        || [[ "$REPO_DIR/Cargo.toml" -nt "$REPO_DIR/target/release/bifrost" ]] \
-        || [[ "$REPO_DIR/Cargo.lock" -nt "$REPO_DIR/target/release/bifrost" ]]; then
+    if [[ ! -x "$BIFROST_BIN" ]] \
+        || [[ "$REPO_DIR/Cargo.toml" -nt "$BIFROST_BIN" ]] \
+        || [[ "$REPO_DIR/Cargo.lock" -nt "$BIFROST_BIN" ]]; then
         NEED_BUILD=1
-    elif find "$REPO_DIR/crates" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$REPO_DIR/target/release/bifrost" -print -quit | grep -q .; then
+    elif find "$REPO_DIR/crates" -type f \( -name '*.rs' -o -name 'Cargo.toml' \) -newer "$BIFROST_BIN" -print -quit | grep -q .; then
         NEED_BUILD=1
     fi
 
@@ -312,6 +414,10 @@ if [[ "${SKIP_BUILD:-}" != "true" ]]; then
         log "Build bifrost (release)..."
         (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null 2>&1)
     fi
+fi
+if [[ ! -x "$BIFROST_BIN" ]]; then
+    echo "bifrost binary not found at $BIFROST_BIN" >&2
+    exit 1
 fi
 
 log "Start bifrost client on port $ADMIN_PORT..."
@@ -347,13 +453,42 @@ CLIENT_INSTANCE_ID="$(json_get "$IDENTITY_JSON" "instance_id")"
 assert_not_empty "$CLIENT_INSTANCE_ID" "client instance id 不应为空"
 
 log "Start mock target on port $MOCK_PORT..."
-python3 -m http.server "$MOCK_PORT" --directory "$MOCK_DIR" >"$MOCK_LOG" 2>&1 &
+python3 - "$MOCK_DIR" "$MOCK_PORT" <<'PY' >"$MOCK_LOG" 2>&1 &
+import json
+import sys
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+directory = sys.argv[1]
+port = int(sys.argv[2])
+
+class Handler(SimpleHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or "0")
+        raw = self.rfile.read(length)
+        try:
+            body = json.loads(raw.decode("utf-8"))
+        except Exception:
+            body = raw.decode("utf-8", "replace")
+        payload = json.dumps({"path": self.path, "received": body}, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, fmt, *args):
+        return
+
+handler = partial(Handler, directory=directory)
+ThreadingHTTPServer(("127.0.0.1", port), handler).serve_forever()
+PY
 MOCK_PID=$!
 
 log "Create SSH key through CLI against the running Bifrost service"
 CLI_KEY_PATH="$TMPDIR/cli-created.bifrost"
 CLI_CREATE_KEY_OUTPUT="$TMPDIR/cli_create_key.out"
-"$REPO_DIR/target/release/bifrost" --port "$ADMIN_PORT" setting ssh-key create \
+"$BIFROST_BIN" --port "$ADMIN_PORT" setting ssh-key create \
     --label "CI Agent" --grant-mode permanent --output "$CLI_KEY_PATH" \
     >"$CLI_CREATE_KEY_OUTPUT" 2>&1
 grep -q "Remote-invoke SSH key created" "$CLI_CREATE_KEY_OUTPUT"
@@ -389,7 +524,7 @@ log "Use CLI remote conn up --ssh-key"
 CALLER_DATA_DIR="$(mktemp -d)"
 CLI_CONNECT_OUTPUT="$TMPDIR/cli_connect.out"
 printf '%s' "$KEY_FILE" >"$TMPDIR/cli-test.bifrost"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up --ssh-key "$TMPDIR/cli-test.bifrost" --relay-url "$RELAY_URL" \
     >"$CLI_CONNECT_OUTPUT" 2>&1
 grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT"
 CALLER_CONNECTIONS_JSON="$CALLER_DATA_DIR/remote-connections.json"
@@ -487,7 +622,7 @@ expect_remote_file_rw_success "ssh-files-file-ok"
 log "Switch SSH grant to Read-only watch and verify command/file denial plus status access"
 update_grant_level_and_assert "query" "remote_query" "none"
 CLI_QUERY_STATUS_OUTPUT="$TMPDIR/cli_query_status.out"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn status --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status --relay-url "$RELAY_URL" \
     >"$CLI_QUERY_STATUS_OUTPUT" 2>&1
 python3 - "$CLI_QUERY_STATUS_OUTPUT" <<'PY'
 import json
@@ -508,7 +643,7 @@ log "Use same SSH key from another caller sandbox and verify caller identity iso
 CALLER_DATA_DIR_2="$(mktemp -d)"
 CLI_CONNECT_OUTPUT_2="$TMPDIR/cli_connect_2.out"
 BIFROST_REMOTE_SSH_KEY="$KEY_FILE" \
-BIFROST_DATA_DIR="$CALLER_DATA_DIR_2" "$REPO_DIR/target/release/bifrost" remote conn up --ssh-key --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR_2" "$BIFROST_BIN" remote conn up --ssh-key --relay-url "$RELAY_URL" \
     >"$CLI_CONNECT_OUTPUT_2" 2>&1
 grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT_2"
 CALLER_CONNECTIONS_JSON_2="$CALLER_DATA_DIR_2/remote-connections.json"
@@ -572,7 +707,7 @@ assert_python "$KEY_AFTER_USE_JSON" 'assert obj["last_used_at"] is not None'
 
 log "Execute remote conn status via saved SSH connection"
 CLI_STATUS_OUTPUT="$TMPDIR/cli_status.out"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote conn status --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status --relay-url "$RELAY_URL" \
     >"$CLI_STATUS_OUTPUT" 2>&1
 python3 - "$CLI_STATUS_OUTPUT" "$CLIENT_INSTANCE_ID" <<'PY'
 import json
@@ -665,7 +800,7 @@ PY
 )"
 SEARCH_OUTPUT="$TMPDIR/search.out"
 SEARCH_STDERR="$TMPDIR/search.err"
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic search "$MARKER" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic search "$MARKER" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --limit 10 \
     >"$SEARCH_OUTPUT" 2>"$SEARCH_STDERR"
 grep -q "$MARKER" "$SEARCH_OUTPUT"
@@ -703,7 +838,7 @@ TRAFFIC_OUTPUT="$TMPDIR/traffic.out"
 TRAFFIC_STDERR="$TMPDIR/traffic.err"
 # Parse stdout as JSON; keep stderr (warn/info logs) in a sidecar file so the
 # JSON parser never sees stray log lines that would otherwise corrupt it.
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$REPO_DIR/target/release/bifrost" remote traffic get "$TRAFFIC_ID" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote traffic get "$TRAFFIC_ID" \
     --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" --response-body \
     >"$TRAFFIC_OUTPUT" 2>"$TRAFFIC_STDERR"
 if [[ ! -s "$TRAFFIC_OUTPUT" ]]; then
@@ -735,6 +870,8 @@ calls.sort(key=lambda call: call.get("started_at") or 0, reverse=True)
 latest = calls[0]
 assert str(latest.get("status", "")).lower() == "completed"
 '
+
+run_remote_exec_target_bifrost_cli_checks
 
 log "Revoke SSH key"
 REVOKE_JSON="$TMPDIR/revoke.json"
