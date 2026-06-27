@@ -380,6 +380,116 @@ fn traex_cli_parser_maps_real_jsonl_events() {
 }
 
 #[test]
+fn claude_code_parser_maps_stream_json_events() {
+    let stdout = r#"{"type":"system","subtype":"init","session_id":"claude-session-1"}
+{"type":"assistant","message":{"content":[{"type":"text","text":"BIFROST_CLAUDE_CODE_OK"}],"usage":{"input_tokens":10,"output_tokens":4}}}
+{"type":"result","subtype":"success","is_error":false,"result":"BIFROST_CLAUDE_CODE_OK","session_id":"claude-session-1","usage":{"input_tokens":10,"output_tokens":4}}"#;
+
+    let events = parse_progress_events(stdout);
+
+    assert_eq!(events.len(), 3);
+    assert_eq!(
+        events[0].event_type,
+        ExternalCliProgressEventType::RunStarted
+    );
+    assert_eq!(events[0].content, "claude-session-1");
+    assert_eq!(
+        events[1].event_type,
+        ExternalCliProgressEventType::AssistantFinal
+    );
+    assert_eq!(events[1].content, "BIFROST_CLAUDE_CODE_OK");
+    assert_eq!(
+        events[2].event_type,
+        ExternalCliProgressEventType::RunFinished
+    );
+
+    let mut metadata = std::collections::BTreeMap::new();
+    append_external_cli_metadata(CLAUDE_CODE_ADAPTER, &events, &mut metadata);
+
+    assert_eq!(
+        metadata.get("threadId").map(String::as_str),
+        Some("claude-session-1")
+    );
+    assert_eq!(
+        metadata.get("usageInputTokens").map(String::as_str),
+        Some("10")
+    );
+    assert_eq!(
+        metadata.get("usageOutputTokens").map(String::as_str),
+        Some("4")
+    );
+    assert_eq!(
+        metadata.get("usageTotalTokens").map(String::as_str),
+        Some("14")
+    );
+}
+
+#[test]
+fn claude_code_parser_maps_tool_use_and_tool_result() {
+    let stdout = r#"{"type":"system","subtype":"init","session_id":"claude-session-tool"}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"tooluse_1","name":"Bash","input":{"command":"pwd"}}]}}
+{"type":"user","message":{"content":[{"tool_use_id":"tooluse_1","type":"tool_result","content":"/Users/bytedance/project/bifrost","is_error":false}]},"tool_use_result":{"stdout":"/Users/bytedance/project/bifrost","stderr":"","interrupted":false}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"BIFROST_CLAUDE_TOOL_OK"}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"BIFROST_CLAUDE_TOOL_OK","session_id":"claude-session-tool","usage":{"input_tokens":20,"output_tokens":6}}"#;
+
+    let events = parse_progress_events(stdout);
+
+    assert_eq!(
+        events
+            .iter()
+            .map(|event| &event.event_type)
+            .collect::<Vec<_>>(),
+        vec![
+            &ExternalCliProgressEventType::RunStarted,
+            &ExternalCliProgressEventType::ToolStarted,
+            &ExternalCliProgressEventType::ToolFinished,
+            &ExternalCliProgressEventType::AssistantFinal,
+            &ExternalCliProgressEventType::RunFinished,
+        ]
+    );
+    assert_eq!(events[1].title.as_deref(), Some("Bash"));
+    assert_eq!(events[1].content, "pwd");
+    assert_eq!(events[2].title.as_deref(), Some("Bash"));
+    assert_eq!(events[2].content, "/Users/bytedance/project/bifrost");
+    assert_eq!(external_progress_arguments_text(&events[2]), "pwd");
+    assert_eq!(
+        events[2]
+            .raw
+            .get("success")
+            .and_then(serde_json::Value::as_bool),
+        Some(true)
+    );
+
+    let context = ExternalCliProgressStatusContext::new(
+        Some(DEFAULT_CLAUDE_CODE_RUNNER_ID),
+        None,
+        None,
+        None,
+        None,
+        None,
+    );
+    let turn_started =
+        external_progress_to_agent_turn_event("session", CLAUDE_CODE_ADAPTER, context, &events[1])
+            .expect("tool started event");
+    assert!(matches!(
+        turn_started,
+        bifrost_agent::AgentTurnProgressEvent::ToolStarted { .. }
+    ));
+    let turn_finished =
+        external_progress_to_agent_turn_event("session", CLAUDE_CODE_ADAPTER, context, &events[2])
+            .expect("tool finished event");
+    match turn_finished {
+        bifrost_agent::AgentTurnProgressEvent::ToolFinished { log, .. } => {
+            assert_eq!(log.tool_name, "Bash");
+            assert_eq!(log.arguments, "pwd");
+            assert_eq!(log.result, "/Users/bytedance/project/bifrost");
+            assert!(log.success);
+        }
+        other => panic!("expected tool finished event, got {other:?}"),
+    }
+}
+
+#[test]
 fn codex_adapter_builds_exec_command_with_prompt_stdin() {
     let request = ExternalCliRunRequest {
         images: Vec::new(),
@@ -1694,6 +1804,12 @@ fn default_gateway_config_contains_enabled_codex_and_traex_runners() {
         .expect("Traex default runner");
     assert!(traex_runner.enabled);
     assert_eq!(traex_runner.adapter, TRAEX_ADAPTER);
+    let claude_code = config
+        .runners
+        .get(DEFAULT_CLAUDE_CODE_RUNNER_ID)
+        .expect("Claude Code default runner");
+    assert!(claude_code.enabled);
+    assert_eq!(claude_code.adapter, CLAUDE_CODE_ADAPTER);
 }
 
 #[test]
@@ -1712,6 +1828,7 @@ fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_ru
     };
     config.runners.remove(DEFAULT_CODEX_RUNNER_ID);
     config.runners.remove(DEFAULT_TRAEX_RUNNER_ID);
+    config.runners.remove(DEFAULT_CLAUDE_CODE_RUNNER_ID);
 
     let normalized = normalized_gateway_config(config);
 
@@ -1736,6 +1853,13 @@ fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_ru
             .get(DEFAULT_TRAEX_RUNNER_ID)
             .map(|settings| (settings.enabled, settings.adapter.as_str())),
         Some((true, TRAEX_ADAPTER))
+    );
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_CLAUDE_CODE_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, CLAUDE_CODE_ADAPTER))
     );
 }
 
@@ -1763,6 +1887,13 @@ fn normalized_gateway_config_empty_runners_uses_enabled_named_defaults() {
             .map(|settings| (settings.enabled, settings.adapter.as_str())),
         Some((true, TRAEX_ADAPTER))
     );
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_CLAUDE_CODE_RUNNER_ID)
+            .map(|settings| (settings.enabled, settings.adapter.as_str())),
+        Some((true, CLAUDE_CODE_ADAPTER))
+    );
     assert!(!normalized.runners.contains_key("codex"));
 }
 
@@ -1785,6 +1916,11 @@ fn effective_config_resolves_legacy_runner_aliases_to_named_defaults() {
     assert_eq!(legacy_traex.runner_id, DEFAULT_TRAEX_RUNNER_ID);
     assert_eq!(legacy_traex.settings.adapter, TRAEX_ADAPTER);
     assert!(legacy_traex.settings.enabled);
+
+    let claude_code = effective_config_for_provider_and_runner(&config, None, Some("claude-code"));
+    assert_eq!(claude_code.runner_id, DEFAULT_CLAUDE_CODE_RUNNER_ID);
+    assert_eq!(claude_code.settings.adapter, CLAUDE_CODE_ADAPTER);
+    assert!(claude_code.settings.enabled);
 }
 
 #[test]
@@ -1845,6 +1981,7 @@ fn config_store_new_persists_missing_default_runners_on_startup() {
         assert!(config.runners.contains_key("legacy"));
         assert!(config.runners.contains_key(DEFAULT_CODEX_RUNNER_ID));
         assert!(config.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID));
+        assert!(config.runners.contains_key(DEFAULT_CLAUDE_CODE_RUNNER_ID));
     }
 }
 
@@ -1926,7 +2063,7 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
     let trae_request = ExternalCliRunRequest {
         adapter: TRAEX_ADAPTER.to_string(),
         runner_id: Some("traex".to_string()),
-        ..default_request
+        ..default_request.clone()
     };
     let mut trae_metadata = std::collections::BTreeMap::new();
 
@@ -1940,6 +2077,25 @@ fn codex_request_metadata_includes_configured_or_default_model_label() {
     assert_eq!(
         trae_metadata.get("modelLabel").map(String::as_str),
         Some("Trae default model (not explicitly configured)")
+    );
+
+    let claude_code_request = ExternalCliRunRequest {
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        ..default_request
+    };
+    let mut claude_code_metadata = std::collections::BTreeMap::new();
+
+    append_external_cli_request_metadata(&claude_code_request, &mut claude_code_metadata);
+
+    assert_eq!(claude_code_metadata.get("model"), None);
+    assert_eq!(
+        claude_code_metadata.get("modelSource").map(String::as_str),
+        Some("claude code default")
+    );
+    assert_eq!(
+        claude_code_metadata.get("modelLabel").map(String::as_str),
+        Some("Claude Code default model (not explicitly configured)")
     );
 }
 

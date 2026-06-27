@@ -1063,6 +1063,10 @@ $BIFROST_DATA_DIR/agent/im_gateway/session_state.json
 - 新增 `GET /api/im-gateway/chat/runs/:run_id`，用于读取 runtime snapshot、stdout/stderr、normalized events 和 final response。
 - 新增 `human_tests/im-gateway-external-cli-chat-gateway.md` 并同步 `human_tests/readme.md` 索引。
 - 新增 `im_gateway_external_cli_agent.json` 配置存储，支持 `defaultRunnerId + runners{}` 的多 CLI runner 注册表；Codex 只是默认 runner，后续 Claude/Gemini/Trae/自定义 CLI 通过新增 runner 接入。
+- 默认 runner registry 现在内置展示名 `Claude Code`，adapter 为 `claude_code`；`defaultRunnerId` 仍保持 `Codex`，避免升级后改变既有 IM/Web Chat 默认执行器。`claude-code` / `claude_code` / `claude` 作为兼容别名会解析到 `Claude Code`。
+- `claude_code` adapter 默认执行 `claude -p --verbose --output-format stream-json --input-format text`，并复用 external CLI runtime 的 stdin prompt、work_dir、progress event、artifact 和 session state 机制。未显式设置 permission mode 时默认追加 `--dangerously-skip-permissions`，显式 `permissionMode` 会映射到 Claude Code 的 camelCase 取值；`model`、`reasoningEffort` 和 `addDirs` 分别映射为 `--model`、`--effort`、`--add-dir`。
+- Claude Code 的 `stream-json` 输出按现有 generic JSON event parser 归一化；包含 `session_id`/`thread_id`/`threadId` 的事件会写入 metadata `threadId`，用于排队消息、schedule 和 session state 续接。当前统一会话展示仍使用通用 `threadId` 字段，后续如需要可把展示文案从 `Codex threadId=` 泛化为 adapter-aware 文案。
+- Claude Code `assistant.message.content[].tool_use` 和后续 `user.message.content[].tool_result` 会按 `tool_use_id` 成对归一化为 `ToolStarted` / `ToolFinished`；Bash 工具优先展示 `input.command` 与 `tool_use_result.stdout/stderr`，保证 Web History / IM progress card 看到与 Codex/Trae 同类的工具过程。
 - 新增 Chat Gateway 配置 API：`GET/PATCH /chat/config` 保存完整 runner registry，`/chat/config/channels/:provider_id` 只保存 IM 通道的 `runnerId/enabled/deliveryMode` 覆盖。Chat Gateway 的 `/chat` 和 `/chat/stream` 会始终合并默认 runner；带 providerId 时再叠加 provider/channel 语义。
 - 新增 `POST /api/im-gateway/chat/stream` NDJSON 测试入口，用于 WebUI 测试抽屉和接口级测试。
 - 新增 `POST /api/im-gateway/chat/runs/:run_id/stop`，写 stop marker，并对 active CLI process 发送终止信号；Unix 下只在确认子进程拥有独立 process group 时才终止同组进程，避免 pid 0 或父进程组误伤；run 收敛阶段会优先识别 stop marker，即使 shell 迟到输出也固定返回 `status:"stopped"`。

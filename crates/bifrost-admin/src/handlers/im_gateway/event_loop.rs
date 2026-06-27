@@ -869,7 +869,9 @@ pub(super) fn resolve_external_cli_delivery_mode(
 fn is_im_progress_card_external_adapter(adapter: &str) -> bool {
     matches!(
         adapter,
-        "codex" | crate::im_gateway::external_cli::TRAEX_ADAPTER
+        "codex"
+            | crate::im_gateway::external_cli::TRAEX_ADAPTER
+            | crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
     )
 }
 
@@ -1624,7 +1626,9 @@ pub(super) fn apply_external_cli_resume_metadata(
     }
     if !matches!(
         request.adapter.as_str(),
-        "codex" | crate::im_gateway::external_cli::TRAEX_ADAPTER
+        "codex"
+            | crate::im_gateway::external_cli::TRAEX_ADAPTER
+            | crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
     ) {
         return;
     }

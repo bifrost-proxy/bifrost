@@ -733,6 +733,72 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
+            "im_gateway_chat_config_default_includes_claude_code_runner",
+            "Validate GET /api/im-gateway/chat/config returns default Claude Code runner without changing the default runner",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) = start_im_gateway_admin(port).await?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+
+                let response = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/im-gateway/chat/config",
+                        port
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET chat config failed: {}", e))?;
+
+                assert_status(&response, 200)?;
+
+                let json: serde_json::Value = response
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse chat config JSON: {}", e))?;
+                if json.get("defaultRunnerId").and_then(|v| v.as_str()) != Some("Codex") {
+                    return Err(format!(
+                        "Expected defaultRunnerId to stay Codex, got: {}",
+                        serde_json::to_string_pretty(&json).unwrap_or_default()
+                    ));
+                }
+                if json
+                    .pointer("/runners/Codex/adapter")
+                    .and_then(|v| v.as_str())
+                    != Some("codex")
+                {
+                    return Err(format!(
+                        "Expected default codex runner, got: {}",
+                        serde_json::to_string_pretty(&json).unwrap_or_default()
+                    ));
+                }
+                if json
+                    .pointer("/runners/Claude Code/adapter")
+                    .and_then(|v| v.as_str())
+                    != Some("claude_code")
+                {
+                    return Err(format!(
+                        "Expected Claude Code runner with claude_code adapter, got: {}",
+                        serde_json::to_string_pretty(&json).unwrap_or_default()
+                    ));
+                }
+                if json
+                    .pointer("/runners/Claude Code/enabled")
+                    .and_then(|v| v.as_bool())
+                    != Some(true)
+                {
+                    return Err("Expected Claude Code runner to be enabled by default".to_string());
+                }
+
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "im_gateway_agent_chat_stop_active_loop",
             "Validate /agent/chat accepts /stop and cancels an active agent loop",
             "admin",

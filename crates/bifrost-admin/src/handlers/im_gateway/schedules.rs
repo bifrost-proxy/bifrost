@@ -888,7 +888,12 @@ fn schedule_conversation_ref_for_adapter<'a>(
             .filter(|value| !value.is_empty())
             .map(|_| conversation_ref);
     }
-    if adapter == "codex" {
+    if matches!(
+        adapter,
+        "codex"
+            | crate::im_gateway::external_cli::TRAEX_ADAPTER
+            | crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
+    ) {
         return conversation_ref
             .thread_id
             .as_deref()
@@ -917,7 +922,12 @@ fn apply_schedule_conversation_ref_to_request(
         {
             request.params = serde_json::json!({ "conversationId": conversation_id });
         }
-    } else if adapter == "codex" {
+    } else if matches!(
+        adapter,
+        "codex"
+            | crate::im_gateway::external_cli::TRAEX_ADAPTER
+            | crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
+    ) {
         if let Some(thread_id) = conversation_ref
             .thread_id
             .as_deref()
@@ -946,7 +956,12 @@ pub(super) fn schedule_conversation_ref_from_external_result(
             updated_at: now,
         });
     }
-    if adapter == "codex" {
+    if matches!(
+        adapter,
+        "codex"
+            | crate::im_gateway::external_cli::TRAEX_ADAPTER
+            | crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
+    ) {
         let thread_id = result_string_field(result, &["threadId", "thread_id"])?;
         return Some(crate::im_gateway::types::ScheduleConversationRef {
             adapter: adapter.to_string(),

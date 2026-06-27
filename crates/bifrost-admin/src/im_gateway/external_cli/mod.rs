@@ -20,6 +20,8 @@ const DEFAULT_ADAPTER: &str = "codex";
 pub const TRAEX_ADAPTER: &str = "traex";
 pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
 pub const DEFAULT_TRAEX_RUNNER_ID: &str = "Traex";
+pub const CLAUDE_CODE_ADAPTER: &str = "claude_code";
+pub const DEFAULT_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
@@ -1656,6 +1658,8 @@ fn append_external_cli_metadata(
                 .raw
                 .get("thread_id")
                 .or_else(|| event.raw.get("threadId"))
+                .or_else(|| event.raw.get("session_id"))
+                .or_else(|| event.raw.get("sessionId"))
                 .and_then(serde_json::Value::as_str)
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
@@ -1674,6 +1678,12 @@ fn append_external_cli_usage_metadata(
         event
             .raw
             .get("usage")
+            .or_else(|| {
+                event
+                    .raw
+                    .get("message")
+                    .and_then(|message| message.get("usage"))
+            })
             .and_then(serde_json::Value::as_object)
     }) else {
         return;
@@ -2198,6 +2208,10 @@ fn append_external_cli_request_metadata(
             TRAEX_ADAPTER => (
                 "Trae default model (not explicitly configured)",
                 "trae default",
+            ),
+            CLAUDE_CODE_ADAPTER => (
+                "Claude Code default model (not explicitly configured)",
+                "claude code default",
             ),
             _ => (
                 "Codex default model (not explicitly configured)",
@@ -2839,6 +2853,7 @@ async fn read_stdout_events(
     let mut lines = tokio::io::BufReader::new(stdout).lines();
     let mut bytes = Vec::new();
     let mut events = Vec::new();
+    let mut parse_state = ExternalCliParseState::default();
     let mut tool_started_at: HashMap<String, u64> = HashMap::new();
     while let Some(line) = lines
         .next_line()
@@ -2847,7 +2862,7 @@ async fn read_stdout_events(
     {
         bytes.extend_from_slice(line.as_bytes());
         bytes.push(b'\n');
-        if let Some(mut event) = parse_progress_event_line(&line) {
+        if let Some(mut event) = parse_progress_event_line_with_state(&line, &mut parse_state) {
             let observed_at = now_ms();
             enrich_progress_event_observation(&mut event, observed_at, &mut tool_started_at);
             if let Some(progress_tx) = progress_tx.as_ref() {
@@ -3136,26 +3151,47 @@ fn windows_process_exists(pid: u32) -> bool {
 
 pub fn parse_progress_events(stdout: &str) -> Vec<ExternalCliProgressEvent> {
     let mut events = Vec::new();
+    let mut state = ExternalCliParseState::default();
     for line in stdout.lines() {
-        if let Some(event) = parse_progress_event_line(line) {
+        if let Some(event) = parse_progress_event_line_with_state(line, &mut state) {
             events.push(event);
         }
     }
     events
 }
 
-fn parse_progress_event_line(line: &str) -> Option<ExternalCliProgressEvent> {
+#[derive(Default)]
+struct ExternalCliParseState {
+    claude_tools: BTreeMap<String, ClaudeCodeToolContext>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ClaudeCodeToolContext {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+fn parse_progress_event_line_with_state(
+    line: &str,
+    state: &mut ExternalCliParseState,
+) -> Option<ExternalCliProgressEvent> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
     let raw = serde_json::from_str::<serde_json::Value>(trimmed).ok()?;
-    parse_progress_event(raw)
+    parse_progress_event(raw, state)
 }
 
-fn parse_progress_event(raw: serde_json::Value) -> Option<ExternalCliProgressEvent> {
+fn parse_progress_event(
+    raw: serde_json::Value,
+    state: &mut ExternalCliParseState,
+) -> Option<ExternalCliProgressEvent> {
     let event_type = value_text(&raw, &["type", "event", "kind"])?;
     if let Some(event) = parse_codex_cli_event(&event_type, &raw) {
+        return Some(event);
+    }
+    if let Some(event) = parse_claude_code_event(&event_type, &raw, state) {
         return Some(event);
     }
     if matches!(event_type.as_str(), "plan_updated" | "todo_list") {
@@ -3318,7 +3354,7 @@ pub fn external_progress_to_agent_turn_event(
 }
 
 fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String {
-    event
+    if let Some(text) = event
         .raw
         .get("arguments")
         .and_then(|value| {
@@ -3342,7 +3378,14 @@ fn external_progress_arguments_text(event: &ExternalCliProgressEvent) -> String 
                 .and_then(|item| item.get("arguments"))
                 .and_then(serde_json::Value::as_str)
         })
-        .map(str::to_string)
+    {
+        return text.to_string();
+    }
+    event
+        .raw
+        .get("arguments")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::to_string(value).ok())
         .unwrap_or_default()
 }
 
@@ -3366,7 +3409,10 @@ fn event_title_or_default(event: &ExternalCliProgressEvent, default: &str) -> St
 }
 
 fn is_codex_like_adapter(adapter: &str) -> bool {
-    matches!(adapter, DEFAULT_ADAPTER | TRAEX_ADAPTER)
+    matches!(
+        adapter,
+        DEFAULT_ADAPTER | TRAEX_ADAPTER | CLAUDE_CODE_ADAPTER
+    )
 }
 
 fn parse_codex_cli_event(
@@ -3556,6 +3602,217 @@ fn codex_command_execution_event(
         title: Some("exec_command".to_string()),
         raw: enriched_raw,
     }
+}
+
+fn parse_claude_code_event(
+    event_type: &str,
+    raw: &serde_json::Value,
+    state: &mut ExternalCliParseState,
+) -> Option<ExternalCliProgressEvent> {
+    match event_type {
+        "system" => {
+            let subtype = value_text(raw, &["subtype"]).unwrap_or_default();
+            let session_id = value_text(raw, &["session_id", "sessionId"]);
+            if subtype == "init" || session_id.is_some() {
+                Some(ExternalCliProgressEvent {
+                    event_type: ExternalCliProgressEventType::RunStarted,
+                    content: session_id.unwrap_or_else(|| "session started".to_string()),
+                    title: Some("Claude Code session".to_string()),
+                    raw: raw.clone(),
+                })
+            } else {
+                Some(ExternalCliProgressEvent {
+                    event_type: ExternalCliProgressEventType::Status,
+                    content: subtype,
+                    title: Some("Claude Code".to_string()),
+                    raw: raw.clone(),
+                })
+            }
+        }
+        "assistant" => {
+            if let Some(event) = claude_code_tool_use_event(raw, state) {
+                return Some(event);
+            }
+            let content = claude_code_message_text(raw).unwrap_or_default();
+            let event_type = if content.trim().is_empty() {
+                ExternalCliProgressEventType::Status
+            } else {
+                ExternalCliProgressEventType::AssistantFinal
+            };
+            Some(ExternalCliProgressEvent {
+                event_type,
+                content,
+                title: Some("Claude Code assistant".to_string()),
+                raw: raw.clone(),
+            })
+        }
+        "user" => claude_code_tool_result_event(raw, state),
+        "result" => {
+            let is_error = raw
+                .get("is_error")
+                .or_else(|| raw.get("isError"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false);
+            let content = value_text(raw, &["result", "error", "message"]).unwrap_or_default();
+            Some(ExternalCliProgressEvent {
+                event_type: if is_error {
+                    ExternalCliProgressEventType::RunFailed
+                } else {
+                    ExternalCliProgressEventType::RunFinished
+                },
+                content,
+                title: Some("Claude Code result".to_string()),
+                raw: raw.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn claude_code_tool_use_event(
+    raw: &serde_json::Value,
+    state: &mut ExternalCliParseState,
+) -> Option<ExternalCliProgressEvent> {
+    let tool_use = claude_code_message_content(raw).and_then(|content| {
+        content
+            .as_array()?
+            .iter()
+            .find(|part| part.get("type").and_then(serde_json::Value::as_str) == Some("tool_use"))
+    })?;
+    let tool_use_id = value_text(tool_use, &["id", "tool_use_id", "toolUseId"])?;
+    let tool_name = value_text(tool_use, &["name"]).unwrap_or_else(|| "tool".to_string());
+    let arguments = tool_use
+        .get("input")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
+    state.claude_tools.insert(
+        tool_use_id.clone(),
+        ClaudeCodeToolContext {
+            name: tool_name.clone(),
+            arguments: arguments.clone(),
+        },
+    );
+    let mut enriched_raw = raw.clone();
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object
+            .entry("tool_name".to_string())
+            .or_insert_with(|| serde_json::json!(tool_name));
+        object
+            .entry("tool_use_id".to_string())
+            .or_insert_with(|| serde_json::json!(tool_use_id));
+        object
+            .entry("arguments".to_string())
+            .or_insert(arguments.clone());
+    }
+    Some(ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolStarted,
+        content: claude_code_tool_arguments_text(&arguments),
+        title: Some(tool_name),
+        raw: enriched_raw,
+    })
+}
+
+fn claude_code_tool_result_event(
+    raw: &serde_json::Value,
+    state: &mut ExternalCliParseState,
+) -> Option<ExternalCliProgressEvent> {
+    let tool_result = claude_code_message_content(raw).and_then(|content| {
+        content.as_array()?.iter().find(|part| {
+            part.get("type").and_then(serde_json::Value::as_str) == Some("tool_result")
+        })
+    })?;
+    let tool_use_id = value_text(tool_result, &["tool_use_id", "toolUseId"])?;
+    let context = state.claude_tools.get(&tool_use_id).cloned();
+    let tool_name = context
+        .as_ref()
+        .map(|ctx| ctx.name.clone())
+        .unwrap_or_else(|| "tool".to_string());
+    let arguments = context
+        .as_ref()
+        .map(|ctx| ctx.arguments.clone())
+        .unwrap_or(serde_json::Value::Null);
+    let content = value_text(tool_result, &["content"])
+        .or_else(|| value_text_path(raw, &["tool_use_result", "stdout"]))
+        .unwrap_or_default();
+    let stderr = value_text_path(raw, &["tool_use_result", "stderr"]).unwrap_or_default();
+    let result = if stderr.trim().is_empty() {
+        content.clone()
+    } else if content.trim().is_empty() {
+        stderr.clone()
+    } else {
+        format!("{content}\n{stderr}")
+    };
+    let is_error = tool_result
+        .get("is_error")
+        .or_else(|| tool_result.get("isError"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let interrupted = raw
+        .get("tool_use_result")
+        .and_then(|value| value.get("interrupted"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut enriched_raw = raw.clone();
+    if let Some(object) = enriched_raw.as_object_mut() {
+        object
+            .entry("tool_name".to_string())
+            .or_insert_with(|| serde_json::json!(tool_name));
+        object
+            .entry("tool_use_id".to_string())
+            .or_insert_with(|| serde_json::json!(tool_use_id));
+        object
+            .entry("arguments".to_string())
+            .or_insert(arguments.clone());
+        object
+            .entry("success".to_string())
+            .or_insert_with(|| serde_json::json!(!is_error && !interrupted));
+    }
+    Some(ExternalCliProgressEvent {
+        event_type: ExternalCliProgressEventType::ToolFinished,
+        content: result,
+        title: Some(tool_name),
+        raw: enriched_raw,
+    })
+}
+
+fn claude_code_message_content(raw: &serde_json::Value) -> Option<&serde_json::Value> {
+    raw.get("message")
+        .and_then(|message| message.get("content"))
+        .or_else(|| raw.get("content"))
+}
+
+fn claude_code_tool_arguments_text(arguments: &serde_json::Value) -> String {
+    if let Some(command) = arguments
+        .get("command")
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return command.to_string();
+    }
+    match arguments {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(text) => text.clone(),
+        value => serde_json::to_string(value).unwrap_or_default(),
+    }
+}
+
+fn claude_code_message_text(raw: &serde_json::Value) -> Option<String> {
+    let content = claude_code_message_content(raw)?;
+    if let Some(text) = content.as_str() {
+        return Some(text.to_string());
+    }
+    let parts = content.as_array()?;
+    let texts = parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| part.as_str())
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    (!texts.is_empty()).then(|| texts.join("\n"))
 }
 
 fn value_text(raw: &serde_json::Value, keys: &[&str]) -> Option<String> {
@@ -3762,6 +4019,9 @@ fn ensure_default_external_cli_runners(runners: &mut BTreeMap<String, ExternalCl
     runners
         .entry(DEFAULT_TRAEX_RUNNER_ID.to_string())
         .or_insert_with(|| default_runner_settings(TRAEX_ADAPTER));
+    runners
+        .entry(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string())
+        .or_insert_with(|| default_runner_settings(CLAUDE_CODE_ADAPTER));
 }
 
 fn migrate_legacy_traex_runner_id(config: &mut ExternalCliGatewayConfig) {
@@ -3824,6 +4084,11 @@ pub fn canonical_external_cli_runner_id(
         }
         "traex" | "trae" if config.runners.contains_key(DEFAULT_TRAEX_RUNNER_ID) => {
             DEFAULT_TRAEX_RUNNER_ID.to_string()
+        }
+        "claude_code" | "claude-code" | "claude" | "claude code"
+            if config.runners.contains_key(DEFAULT_CLAUDE_CODE_RUNNER_ID) =>
+        {
+            DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()
         }
         _ => runner_id.to_string(),
     }
