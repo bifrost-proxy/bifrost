@@ -1788,6 +1788,9 @@ pub async fn load_external_cli_model_catalog(
     work_dir: Option<&Path>,
 ) -> Result<Vec<ExternalCliModelInfo>, String> {
     let adapter = adapter.trim();
+    if adapter == CLAUDE_CODE_ADAPTER {
+        return Ok(default_claude_code_model_catalog());
+    }
     let default_executable = match adapter {
         DEFAULT_ADAPTER => DEFAULT_ADAPTER,
         TRAEX_ADAPTER => TRAEX_ADAPTER,
@@ -1963,6 +1966,14 @@ pub fn validate_external_cli_model_selection(
 ) -> Result<String, String> {
     let requested_model = requested_model.trim();
     let label = external_cli_model_adapter_label(adapter);
+    if adapter.trim() == CLAUDE_CODE_ADAPTER {
+        validate_external_model_slug(requested_model)?;
+        return Ok(models
+            .iter()
+            .find(|model| model.slug.eq_ignore_ascii_case(requested_model))
+            .map(|model| model.slug.clone())
+            .unwrap_or_else(|| requested_model.to_string()));
+    }
     if let Some(model) = models.iter().find(|model| model.slug == requested_model) {
         return Ok(model.slug.clone());
     }
@@ -2012,12 +2023,37 @@ pub fn external_cli_model_adapter_label(adapter: &str) -> &'static str {
     match adapter.trim() {
         DEFAULT_ADAPTER => "Codex",
         TRAEX_ADAPTER => "Traex",
+        CLAUDE_CODE_ADAPTER => "Claude Code",
         _ => "External CLI",
     }
 }
 
 pub fn supports_external_cli_model_slash(adapter: &str) -> bool {
-    matches!(adapter.trim(), DEFAULT_ADAPTER | TRAEX_ADAPTER)
+    matches!(
+        adapter.trim(),
+        DEFAULT_ADAPTER | TRAEX_ADAPTER | CLAUDE_CODE_ADAPTER
+    )
+}
+
+fn default_claude_code_model_catalog() -> Vec<ExternalCliModelInfo> {
+    const MODELS: &[(&str, &str, i64)] = &[
+        ("sonnet", "Claude Sonnet alias", 0),
+        ("opus", "Claude Opus alias", 1),
+        ("fable", "Claude Fable alias", 2),
+    ];
+    MODELS
+        .iter()
+        .map(|(slug, display_name, priority)| ExternalCliModelInfo {
+            slug: (*slug).to_string(),
+            display_name: Some((*display_name).to_string()),
+            description: Some(
+                "Claude Code accepts aliases or full model names via --model.".to_string(),
+            ),
+            visibility: Some("list".to_string()),
+            priority: Some(*priority),
+            ..Default::default()
+        })
+        .collect()
 }
 
 fn validate_external_model_slug(value: &str) -> Result<(), String> {

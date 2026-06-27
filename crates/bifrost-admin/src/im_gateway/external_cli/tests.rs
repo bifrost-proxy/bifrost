@@ -1156,6 +1156,44 @@ fn codex_adapter_applies_config_flags_to_custom_args() {
     assert_eq!(spec.args.last().map(String::as_str), Some("-"));
 }
 
+#[test]
+fn claude_code_adapter_applies_session_model_to_command_spec() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        session_key: Some("session:claude".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            model: Some("claude-opus-4-5-20251101".to_string()),
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert_eq!(spec.executable, "claude");
+    assert!(spec.args.contains(&"-p".to_string()));
+    assert!(has_arg_pair(
+        &spec.args,
+        "--model",
+        "claude-opus-4-5-20251101"
+    ));
+    assert!(spec
+        .args
+        .contains(&"--dangerously-skip-permissions".to_string()));
+}
+
 #[tokio::test]
 async fn final_response_prefers_assistant_message_over_run_finished() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2489,6 +2527,43 @@ fn external_cli_model_catalog_parser_accepts_codex_catalog() {
     let serialized = serde_json::to_string(&models).expect("serialize sanitized catalog");
     assert!(!serialized.contains("base_instructions"));
     assert!(!serialized.contains("do not leak"));
+}
+
+#[tokio::test]
+async fn claude_code_model_slash_uses_builtin_catalog_and_accepts_full_model_slug() {
+    assert!(supports_external_cli_model_slash(CLAUDE_CODE_ADAPTER));
+    assert_eq!(
+        external_cli_model_adapter_label(CLAUDE_CODE_ADAPTER),
+        "Claude Code"
+    );
+
+    let models = load_external_cli_model_catalog(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+        None,
+    )
+    .await
+    .expect("load claude code catalog");
+
+    assert!(models.iter().any(|model| model.slug == "sonnet"));
+    assert!(models.iter().any(|model| model.slug == "opus"));
+    assert_eq!(
+        validate_external_cli_model_selection(CLAUDE_CODE_ADAPTER, "sonnet", &models)
+            .expect("known alias"),
+        "sonnet"
+    );
+    assert_eq!(
+        validate_external_cli_model_selection(
+            CLAUDE_CODE_ADAPTER,
+            "claude-opus-4-5-20251101",
+            &models,
+        )
+        .expect("full model name"),
+        "claude-opus-4-5-20251101"
+    );
+    assert!(
+        validate_external_cli_model_selection(CLAUDE_CODE_ADAPTER, "bad model", &models,).is_err()
+    );
 }
 
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {

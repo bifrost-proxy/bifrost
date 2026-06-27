@@ -57,6 +57,8 @@ MOCK_TRAECLI="$TEST_DIR/mock-traecli"
 MOCK_ARGV_LOG="$TEST_DIR/mock-traecli-argv.log"
 MOCK_CODEX="$TEST_DIR/mock-codex"
 MOCK_CODEX_ARGV_LOG="$TEST_DIR/mock-codex-argv.log"
+MOCK_CLAUDE="$TEST_DIR/mock-claude"
+MOCK_CLAUDE_ARGV_LOG="$TEST_DIR/mock-claude-argv.log"
 cat >"$MOCK_CODEX" <<'SH'
 #!/usr/bin/env sh
 printf '%s\n' "$*" >> "$BIFROST_MOCK_CODEX_ARGV_LOG"
@@ -125,6 +127,15 @@ printf '%s\n' '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens
 SH
 chmod +x "$MOCK_TRAECLI"
 
+cat >"$MOCK_CLAUDE" <<'SH'
+#!/usr/bin/env sh
+printf '%s\n' "$*" >> "$BIFROST_MOCK_CLAUDE_ARGV_LOG"
+cat >/dev/null
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"BIFROST_CLAUDE_MODEL_SLASH_OK"}]}}'
+printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"BIFROST_CLAUDE_MODEL_SLASH_OK","session_id":"thread-claude-model-slash","usage":{"input_tokens":1,"output_tokens":1}}'
+SH
+chmod +x "$MOCK_CLAUDE"
+
 if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
   BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/debug/bifrost}"
   echo "[im-gateway-traex-model-slash] skipping build, using $BIFROST_BIN"
@@ -149,9 +160,12 @@ python3 - "$BIFROST_PORT" "$TEST_DIR" "$MOCK_CODEX" "$MOCK_CODEX_ARGV_LOG" "$MOC
 import json
 import pathlib
 import sys
+import urllib.error
 import urllib.request
 
 port, test_dir, mock_codex, codex_argv_log, mock_traecli, traex_argv_log = sys.argv[1:7]
+mock_claude = pathlib.Path(test_dir) / "mock-claude"
+claude_argv_log = pathlib.Path(test_dir) / "mock-claude-argv.log"
 base_url = f"http://127.0.0.1:{port}/_bifrost/api/im-gateway/chat"
 test_path = pathlib.Path(test_dir)
 
@@ -179,6 +193,18 @@ def patch_config():
                 "adapterConfig": {
                     "executable": mock_traecli,
                     "env": {"BIFROST_MOCK_TRAECLI_ARGV_LOG": traex_argv_log},
+                    "timeoutSecs": 30,
+                },
+                "injectBifrostTools": False,
+                "skillPaths": [],
+                "deliveryMode": "final_reply",
+            },
+            "mock-claude-code-models": {
+                "enabled": True,
+                "adapter": "claude_code",
+                "adapterConfig": {
+                    "executable": str(mock_claude),
+                    "env": {"BIFROST_MOCK_CLAUDE_ARGV_LOG": str(claude_argv_log)},
                     "timeoutSecs": 30,
                 },
                 "injectBifrostTools": False,
@@ -219,6 +245,29 @@ def stream(runner_id, session_key, message):
             if line:
                 events.append(json.loads(line))
     return events
+
+
+def stream_bad_request(runner_id, session_key, message):
+    payload = {
+        "message": message,
+        "providerId": "web-e2e",
+        "runnerId": runner_id,
+        "sessionKey": session_key,
+    }
+    req = urllib.request.Request(
+        f"{base_url}/stream",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=90) as resp:
+            body = resp.read().decode("utf-8")
+            raise AssertionError(f"expected HTTP 400, got {resp.status}: {body}")
+    except urllib.error.HTTPError as error:
+        body = error.read().decode("utf-8")
+        assert error.code == 400, body
+        return body
 
 
 def final_response(events):
@@ -273,15 +322,59 @@ traex_run_id = assert_runner_model_flow(
     traex_argv_log,
 )
 
+claude_models_response = final_response(stream(
+    "mock-claude-code-models",
+    "claude-code-model-slash-e2e",
+    "/models",
+))
+assert "sonnet" in claude_models_response, claude_models_response
+assert "opus" in claude_models_response, claude_models_response
+assert "fable" in claude_models_response, claude_models_response
+assert "base_instructions" not in claude_models_response, claude_models_response
+
+claude_bad_model = stream_bad_request(
+    "mock-claude-code-models",
+    "claude-code-model-slash-e2e",
+    "/model bad model",
+)
+assert "模型名称只能包含" in claude_bad_model, claude_bad_model
+
+claude_set_response = final_response(stream(
+    "mock-claude-code-models",
+    "claude-code-model-slash-e2e",
+    "/model sonnet",
+))
+assert "sonnet" in claude_set_response, claude_set_response
+
+claude_events = stream(
+    "mock-claude-code-models",
+    "claude-code-model-slash-e2e",
+    "hello after claude code model switch",
+)
+claude_response = final_response(claude_events)
+assert "BIFROST_CLAUDE_MODEL_SLASH_OK" in claude_response, claude_response
+claude_run_id = [event for event in claude_events if event.get("eventType") == "run_finished"][0]["runId"]
+claude_snapshot = json.loads((test_path / "agent" / "im_gateway" / "chat_runs" / claude_run_id / "runtime_snapshot.json").read_text(encoding="utf-8"))
+claude_args = claude_snapshot["args"]
+assert "--model" in claude_args, claude_args
+assert claude_args[claude_args.index("--model") + 1] == "sonnet", claude_args
+claude_argv = pathlib.Path(claude_argv_log).read_text(encoding="utf-8")
+assert "debug models" not in claude_argv, claude_argv
+assert "--model sonnet" in claude_argv, claude_argv
+
 state = json.loads((test_path / "agent" / "im_gateway" / "session_state.json").read_text(encoding="utf-8"))
 codex_session = next(value for value in state["sessions"].values() if value.get("runnerId") == "mock-codex-models")
 traex_session = next(value for value in state["sessions"].values() if value.get("runnerId") == "mock-traex-models")
+claude_session = next(value for value in state["sessions"].values() if value.get("runnerId") == "mock-claude-code-models")
 assert codex_session["modelOverride"] == "gpt-unit", codex_session
 assert traex_session["modelOverride"] == "Doubao-Unit", traex_session
+assert claude_session["modelOverride"] == "sonnet", claude_session
 assert codex_session["modelOverrideSource"] == "session slash command", codex_session
 assert traex_session["modelOverrideSource"] == "session slash command", traex_session
+assert claude_session["modelOverrideSource"] == "session slash command", claude_session
 
 print("[im-gateway-model-slash] PASS")
 print(f"codex_run_id={codex_run_id}")
 print(f"traex_run_id={traex_run_id}")
+print(f"claude_run_id={claude_run_id}")
 PY

@@ -186,8 +186,8 @@ pub(super) fn append_im_channel_help(mut help_text: String) -> String {
         "\n\nIM 通道命令:\n\
          /cwd <绝对路径>  切换当前 IM 通道绑定的工作目录；路径必须存在且是目录，运行中会排队到当前任务结束后执行\n\
          /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
-         /models       查看当前 Codex/Traex Runner 可选模型\n\
-         /model [模型]  查看或切换当前 Codex/Traex Runner 的 session 模型；/model clear 清除\n\
+         /models       查看当前 Codex/Traex/Claude Code Runner 可选模型\n\
+         /model [模型]  查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除\n\
          /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
          /rq <序号>      取消一条排队消息\n\
          /g <引导内容>   给正在运行的内置 Agent 注入引导；外部 Runner 会按队列处理",
@@ -421,7 +421,7 @@ async fn handle_im_model_command(
             ctx.client,
             ctx.provider,
             ctx.event,
-        "/model 和 /models 当前仅支持 Codex 或 Traex Runner。请先用 `/runner Codex` 或 `/runner Traex` 切换。",
+        "/model 和 /models 当前仅支持 Codex、Traex 或 Claude Code Runner。请先用 `/runner Codex`、`/runner Traex` 或 `/runner Claude Code` 切换。",
             ctx.message_log_store,
         )
         .await;
@@ -439,7 +439,7 @@ async fn handle_im_model_command(
             ctx.client,
             ctx.provider,
             ctx.event,
-            "/model 和 /models 当前仅支持 Codex 或 Traex Runner。",
+            "/model 和 /models 当前仅支持 Codex、Traex 或 Claude Code Runner。",
             ctx.message_log_store,
         )
         .await;
@@ -631,7 +631,7 @@ fn persist_im_model_override(
             adapter = %adapter,
             runner_id = %runner_id,
             error = %error,
-            "failed to persist IM Traex model override"
+            "failed to persist IM external CLI model override"
         );
     }
 }

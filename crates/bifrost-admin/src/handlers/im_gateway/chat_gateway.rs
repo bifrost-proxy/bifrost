@@ -1999,7 +1999,7 @@ async fn maybe_external_cli_model_slash_response(
     };
     if !crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter) {
         return Some(model_slash_error_response(
-            "/model 和 /models 当前仅支持 Codex 或 Traex Runner。",
+            "/model 和 /models 当前仅支持 Codex、Traex 或 Claude Code Runner。",
             stream,
         ));
     }
@@ -2169,7 +2169,7 @@ fn persist_session_model_override(
             adapter = %request.adapter,
             runner_id = %runner_id,
             error = %error,
-            "failed to persist Traex model override"
+            "failed to persist external CLI model override"
         );
     }
 }
@@ -2213,7 +2213,7 @@ fn remember_model_slash_result_state(
             adapter = %request.adapter,
             runner_id = %runner_id,
             error = %error,
-            "failed to persist Traex model slash response"
+            "failed to persist external CLI model slash response"
         );
     }
 }
@@ -5034,6 +5034,30 @@ mod coverage_boost {
         apply_persisted_external_cli_state(&mut codex, "Codex");
 
         assert_eq!(codex.adapter_config.model.as_deref(), Some("gpt-5.5"));
+
+        crate::im_gateway::session_state::upsert_session_state(
+            "claude-code-model-session",
+            crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER,
+            Some(crate::im_gateway::external_cli::DEFAULT_CLAUDE_CODE_RUNNER_ID),
+            |state| {
+                state.model_override = Some("sonnet".to_string());
+                state.model_override_source = Some("session slash command".to_string());
+            },
+        )
+        .expect("persist claude code model override");
+
+        let mut claude_code = sample_run_request();
+        claude_code.session_key = Some("claude-code-model-session".to_string());
+        claude_code.adapter = crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string();
+        claude_code.runner_id =
+            Some(crate::im_gateway::external_cli::DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string());
+
+        apply_persisted_external_cli_state(
+            &mut claude_code,
+            crate::im_gateway::external_cli::DEFAULT_CLAUDE_CODE_RUNNER_ID,
+        );
+
+        assert_eq!(claude_code.adapter_config.model.as_deref(), Some("sonnet"));
     }
 
     #[test]

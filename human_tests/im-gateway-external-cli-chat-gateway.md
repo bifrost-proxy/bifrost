@@ -1010,25 +1010,26 @@
 4. Feishu online notification 摘要包含 `Model`、`Reasoning Effort`、`Reasoning Summary` 三行；未知值显示 `N/A`，不省略字段。
 5. Web UI Agent Chat 状态弹窗的 Context 区域展示 `Model` 和 `Reasoning`，运行中 live status 优先于陈旧历史快照。
 
-### TC-IEC-50: Codex/Traex `/models` 与 `/model` session 模型切换
+### TC-IEC-50: Codex/Traex/Claude Code `/models` 与 `/model` session 模型切换
 
 操作步骤：
 1. 启动临时 Bifrost 服务，必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`，并使用 `--no-system-proxy`。
 2. 配置 Codex-compatible runner 和 Traex-compatible runner，分别让 `adapterConfig.executable` 指向 mock `codex` / mock `traecli`；两个 mock 的 `debug models` 都返回包含 `Doubao-Unit`、`visibility:"list"`、`base_instructions` 的模型 catalog，同时包含一个 `visibility:"hidden"` 的模型。
-3. 通过 `/_bifrost/api/im-gateway/chat/stream` 分别对 Codex 与 Traex session 发送 `/models`。
-4. 通过同一接口发送 `/model definitely-not-a-real-model`，再发送 `/model Doubao-Unit`。
-5. 再发送普通消息，读取该 run 的 `runtime_snapshot.json` 和 `session_state.json`。
-6. 打开 Web UI Agent Chat，选中 Codex 或 Traex runner 时在 composer 输入 `/`，验证 slash 面板包含 `/models` 和 `/model`；`/models` 在输入过程中默认选中，回车直接发送；`/model` 回车或 Tab 只补齐命令并把光标放在尾部，方便继续输入模型名。
-7. 在已有历史对话线程中发送 `/models`、`/model Doubao-Unit` 和一条普通消息，然后刷新页面并继续发送下一条消息。
+3. 配置 Claude Code runner，adapter 为 `claude_code`；无需 mock `debug models`，因为 Claude Code CLI 当前没有稳定模型枚举命令，Bifrost 使用内置 alias catalog。
+4. 通过 `/_bifrost/api/im-gateway/chat/stream` 分别对 Codex、Traex 与 Claude Code session 发送 `/models`。
+5. 通过同一接口对 Codex/Traex 发送 `/model definitely-not-a-real-model`，再发送 `/model Doubao-Unit`；对 Claude Code 发送 `/model bad model`、`/model sonnet` 与 `/model claude-opus-4-5-20251101`。
+6. 再发送普通消息，读取该 run 的 `runtime_snapshot.json` 和 `session_state.json`。
+7. 打开 Web UI Agent Chat，选中 Codex、Traex 或 Claude Code runner 时在 composer 输入 `/`，验证 slash 面板包含 `/models` 和 `/model`；`/models` 在输入过程中默认选中，回车直接发送；`/model` 回车或 Tab 只补齐命令并把光标放在尾部，方便继续输入模型名。
+8. 在已有历史对话线程中发送 `/models`、`/model Doubao-Unit` 或 `/model sonnet` 和一条普通消息，然后刷新页面并继续发送下一条消息。
 
 预期结果：
-1. `/models` 返回 `Doubao-Unit`、reasoning/tier/visibility 等白名单信息，不包含 `base_instructions` 或隐藏模型。
-2. 非法模型返回可见拒绝消息，不写入 `modelOverride`，下一条普通 run 不使用非法模型。
-3. `/model Doubao-Unit` 将当前 `sessionKey + adapter + runnerId` 的 `modelOverride` 持久化为 `Doubao-Unit`，来源为 `session slash command`。
-4. 下一条普通 Codex/Traex run 的启动参数包含 `--model Doubao-Unit`；session slash override 覆盖 runner 默认模型。
-5. Web UI 仅在当前 runner adapter 为 `codex` 或 `traex` 时展示 model slash 命令；Bifrost Agent 不展示这两个入口。
+1. Codex/Traex `/models` 返回 `Doubao-Unit`、reasoning/tier/visibility 等白名单信息，不包含 `base_instructions` 或隐藏模型；Claude Code `/models` 返回 `sonnet`、`opus`、`fable` alias，并说明 Claude Code 可接受 alias 或完整模型名。
+2. Codex/Traex 非法模型返回可见拒绝消息，不写入 `modelOverride`，下一条普通 run 不使用非法模型；Claude Code 包含空格等非法 slug 时同样拒绝。
+3. `/model Doubao-Unit` 或 `/model sonnet` 将当前 `sessionKey + adapter + runnerId` 的 `modelOverride` 持久化为对应模型，来源为 `session slash command`。
+4. 下一条普通 Codex/Traex run 的启动参数包含 `--model Doubao-Unit`；下一条普通 Claude Code run 的启动参数包含 `--model sonnet` 或 `--model claude-opus-4-5-20251101`；session slash override 覆盖 runner 默认模型。
+5. Web UI 仅在当前 runner adapter 为 `codex`、`traex` 或 `claude_code` 时展示 model slash 命令；Bifrost Agent 不展示这两个入口。
 6. slash 命令和系统回执刷新后仍在消息列表中，发送下一条普通消息后不消失，但不会作为用户 prompt 注入 runner 上下文。
-7. 飞书 IM 空闲状态下 `/models`、`/model` 使用同一 session override；运行中发送 `/model` 明确提示等待当前任务结束，不把 `/model` 当普通 prompt 送进 Codex/Traex。
+7. 飞书 IM 空闲状态下 `/models`、`/model` 使用同一 session override；运行中发送 `/model` 明确提示等待当前任务结束，不把 `/model` 当普通 prompt 送进 Codex/Traex/Claude Code。
 8. Agent Chat 输入框上方 token HUD 在刷新、发送下一条消息和 run 完成后持续展示当前模型、token 与 context，不因 history summary 或运行中空 status 快照退回 `Tokens -`、`Context 0%` 或隐藏模型名。
 9. Web UI 已有历史 assistant 回复后再次发送 `/model <name>`，页面立即追加独立居中的系统行 `切换模型为 <name>`，不替换、不隐藏、不合并最后一条 assistant 回复；刷新后历史显示与即时显示一致，且该系统行不作为 user/assistant 消息注入 runner prompt。
 
