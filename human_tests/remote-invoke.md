@@ -5113,7 +5113,7 @@ rm -rf /tmp/bifrost-remote-overload.*
 | TC-RI-CLI-01 | `remote run` 参数解析 | 执行 `cargo test -p bifrost-cli remote_run_parses_script_upload_options_and_args --test cli_commands` | `remote --client-id devbox run --script-file ./q.py --interpreter python3 --cwd /repo --env TOKEN=redacted --detach -- --limit 5` 可被解析；`--client-id` 保持父命令参数；脚本参数保留在 `args` |
 | TC-RI-CLI-02 | `remote run` 使用 argv_exec | 执行 `cargo test -p bifrost-cli remote_run_builds_argv_exec_payload_for_uploaded_script --lib` | 上传后的脚本以 `argv_exec` 运行，argv 为 `interpreter remote-script-path --limit 5`，不经过 shell 拼接；stream/output-file/digest 参数进入 streaming prefs |
 | TC-RI-CLI-03 | 多目标选择与 idle timeout 提示 | 执行 `cargo test -p bifrost-cli 'resolve_local_connection_explicit_device_label_prefix_matches|resolve_local_connection_multiple_noninteractive_lists_choices|idle_timeout_message_mentions_seconds_and_job_watch' --lib` | selector 支持设备 label/name 前缀；非交互多连接报错列出可复制 `--client-id` 候选和 `BIFROST_REMOTE_CLIENT_ID`；300s idle timeout 文案提示 `remote exec --detach` + `remote job watch --output-file` |
-| TC-RI-CLI-04 | `file write --path` 兼容与黑盒 CLI | 执行 `bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` | `remote run --help` 暴露 `--script-file`/`--interpreter`/`--detach`；`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误；`file write` 缺路径错误给出 `file write <path> --content-file` 引导；`--path` 兼容由单元测试覆盖 |
+| TC-RI-CLI-04 | `file write --path` / `--from-local` 兼容与黑盒 CLI | 执行 `bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` | `remote run --help` 暴露 `--script-file`/`--interpreter`/`--detach`；`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误；`file write` 缺路径错误给出 `file write <path> --from-local` 引导；`file write/edit/patch --from-local` 帮助和真实二进制离线路径均进入连接解析而非 clap 参数错误；`--path` 兼容由单元测试覆盖 |
 
 ### 实际执行结果
 
@@ -5122,7 +5122,7 @@ rm -rf /tmp/bifrost-remote-overload.*
 | TC-RI-CLI-01 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote_run --test cli_commands`，过滤到 `remote_run_parses_script_upload_options_and_args`，结果 1/1 PASS。 |
 | TC-RI-CLI-02 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote:: --lib` 时 `remote_run_builds_argv_exec_payload_for_uploaded_script` 通过；同集合中并发敏感的既有 `test_encrypt_local_secret_roundtrip` 首次失败，随后单独执行 `cargo test -p bifrost-cli test_encrypt_local_secret_roundtrip --lib -- --test-threads=1` 通过，确认非本次改动引入。 |
 | TC-RI-CLI-03 | ✅ PASS | 2026-06-17 执行 `cargo test -p bifrost-cli remote:: --lib` 时三条新增回归均通过：label 前缀选择、多连接非交互候选提示、idle timeout detach/job watch 文案。 |
-| TC-RI-CLI-04 | ✅ PASS | 2026-06-17 执行 `BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过。脚本未启动代理、未修改系统代理，验证 `remote --help` 包含 `BIFROST_REMOTE_CLIENT_ID` 与 `run` 子命令，`remote run --help` 包含 `--script-file` / `--interpreter` / `--detach`，`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误，`remote file write --path flag-path.txt --content-file -` 也进入连接解析，证明 `--path` 兼容入口可用。 |
+| TC-RI-CLI-04 | ✅ PASS | 2026-06-27 执行 `BIFROST_BIN=$PWD/target/debug/bifrost bash e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过。脚本未启动代理、未修改系统代理，验证 `remote --help` 包含 `BIFROST_REMOTE_CLIENT_ID` 与 `run` 子命令，`remote run --help` 包含 `--script-file` / `--interpreter` / `--detach`，`remote --client-id devbox run ...` 在无连接时进入连接解析而非 clap 参数错误，`remote file write --path flag-path.txt --content-file -` 进入连接解析；`remote file write/edit/patch --help` 均暴露 `--from-local`，三条 `--from-local` 命令也进入连接解析而非 clap 参数错误。 |
 
 ## TC-RI-回归-149：E2E admin helper 绑定 0.0.0.0 时客户端探测必须走 loopback
 

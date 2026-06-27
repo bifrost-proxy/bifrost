@@ -93,6 +93,38 @@ bifrost remote file read agent-write.txt --cwd <USER_HOME>/work/github/bifrost-r
 - `write` 返回 `bytes_written / sha256 / previous_sha256`；
 - 后续 `read` 解码内容为 `hello remote file\n`。
 
+### TC-1.8B file.write/edit/patch — `--from-local` 本地 payload 入口逐字节验证
+**步骤**：
+```bash
+printf 'alpha UTF-8 雪\nsymbols $PATH `tick` | pipe\nlast line\n' > /tmp/bifrost-from-local.txt
+bifrost remote file write --path from-local-write.txt --from-local /tmp/bifrost-from-local.txt --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file read from-local-write.txt --cwd <USER_HOME>/work/github/bifrost-remote-file --output json | jq -r .content_b64 | base64 -d > /tmp/bifrost-from-local.remote
+cmp /tmp/bifrost-from-local.txt /tmp/bifrost-from-local.remote
+
+cat > /tmp/bifrost-from-local-edits.json <<'JSON'
+[{"old_string":"symbols $PATH `tick` | pipe","new_string":"symbols literal-preserved ✓"}]
+JSON
+bifrost remote file edit from-local-write.txt --from-local /tmp/bifrost-from-local-edits.json --cwd <USER_HOME>/work/github/bifrost-remote-file
+
+cat > /tmp/bifrost-from-local.patch <<'PATCH'
+--- a/from-local-write.txt
++++ b/from-local-write.txt
+@@ -1,3 +1,4 @@
+ alpha UTF-8 雪
+-symbols literal-preserved ✓
++symbols patched from local diff ✓
+ last line
++patch tail line
+PATCH
+bifrost remote file patch --from-local /tmp/bifrost-from-local.patch --cwd <USER_HOME>/work/github/bifrost-remote-file
+bifrost remote file read from-local-write.txt --cwd <USER_HOME>/work/github/bifrost-remote-file --output json | jq -r .content_b64 | base64 -d > /tmp/bifrost-from-local.final
+printf 'alpha UTF-8 雪\nsymbols patched from local diff ✓\nlast line\npatch tail line\n' > /tmp/bifrost-from-local.expected
+cmp /tmp/bifrost-from-local.expected /tmp/bifrost-from-local.final
+```
+**期望**：
+- `write --from-local`、`edit --from-local`、`patch --from-local` 均通过真实 caller → relay → target 链路执行成功；
+- 每次 `remote file read` 解码内容与 caller 本地源文件或预期文件逐字节一致，不丢失多字节字符、反引号、`$`、管道符或尾随换行。
+
 ### TC-1.9 file.edit — 行范围编辑
 **步骤**：
 ```bash
@@ -585,6 +617,7 @@ bifrost remote file apply-patch --patch-file /tmp/bifrost-bad.patch --cwd <USER_
 | 2026-04-27 | TC-6.2 SSH Key 默认 File Policy 可配置且 reset 后保留 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy/debug/bifrost start -p 18890 --unsafe-ssl --no-system-proxy` + SSH key/file-access/reset API 断言 | PASS：旧 fingerprint `55a9ccae` reset 到新 fingerprint `2a018c79` 后，`file-access-config` 仅保留新 `match.ssh_fingerprint`，roots 仍为 `<USER_HOME>/work/code/nextoncall/next_agent`，ops 包含 `write/edit/apply_patch` |
 | 2026-04-27 | TC-6.3 SSH Key 默认 File Policy 被误删后自动恢复落盘 | `TMPDIR=$PWD/.codex-tmp CARGO_TARGET_DIR=./.codex-target/ssh-file-policy-restore cargo build --bin bifrost && BIFROST_DATA_DIR=<tmp> ./.codex-target/ssh-file-policy-restore/debug/bifrost start -p 18891 --unsafe-ssl --no-system-proxy` + `PUT {"grant":[]}` / GET / grep file-access.toml 断言 | PASS：PUT 空策略后自动恢复 fingerprint `fed9b02c`；API 返回 12 个 file ops；`file-access.toml` 已写入 `match.ssh_fingerprint` |
 | 2026-04-28 | TC-6.4 旧 SSH grant 使用 caller fingerprint 时 file.write 仍命中 active SSH Key 默认策略 | `cargo test -p bifrost-admin legacy_ssh_grant -- --nocapture` | PASS：旧 SSH grant 的 `ssh_key_fingerprint=caller_fingerprint` 被修正为 active SSH key fingerprint；随后 `FileAccessPolicyStore::resolve()` 命中 `match.ssh_fingerprint` 的 `roots=["/"]` 写策略，`FileOp::Write` 检查通过，不再走 readonly fallback |
+| 2026-06-27 | TC-1.8B `write/edit/patch --from-local` 真实 relay 逐字节验证 | `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 NODE_BIN=$(command -v node) BIFROST_BIN=$PWD/target/debug/bifrost SKIP_BUILD=true bash e2e-tests/tests/test_remote_file_relay_e2e.sh` | PASS：脚本启动仓库 relay server、目标端 Bifrost 和 caller 数据目录，通过 pair-code 授权并将 file_access 升级为 read_write；新增 `TC-FILE-13B` 对 `write --from-local`、`edit --from-local`、`patch --from-local` 分别执行 remote read 解码与目标端磁盘文件双重 `cmp`，确认 caller 本地源/预期内容与远端结果逐字节一致，包含 UTF-8 多字节字符、反引号、`$`、管道符和尾随换行；全脚本 Summary 85/85 passed |
 | 2026-04-25 | workspace 全量测试 | `cargo test --workspace --all-features` | PASS：全部通过 |
 | 2026-04-25 | clippy + fmt | `cargo clippy -p bifrost-admin -p bifrost-cli -- -D warnings && cargo fmt --all -- --check` | PASS：无警告无格式问题 |
 

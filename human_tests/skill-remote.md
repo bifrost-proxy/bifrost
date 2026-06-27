@@ -252,6 +252,33 @@
 - 文档包含可直接读取最新原文的 raw 地址，便于无浏览器环境下刷新技能内容。
 - PASS（2026-06-17）：对仓库源文件 `skill_remote.md` 执行更新后的关键字检查，命中 `remote job list`、`job cache`、call_id-only `status/logs/watch`，且未命中 `remote job ... --relay-token <token>`。
 
+### TC-SR-11 `--from-local` 本地 payload 能力出现在安装后的 remote skill
+
+操作步骤：
+
+1. 检查安装后的 remote skill 说明 `write/edit/patch` 都支持 caller 本地 payload：
+   ```bash
+   rg -n -- '--from-local.*write|write.*--from-local|edit.*--from-local|patch.*--from-local' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+2. 检查文档明确 `mkdir/move/delete` 不使用 `--from-local`：
+   ```bash
+   rg -n 'mkdir.*move.*delete.*没有 caller 本地 payload|mkdir.*move.*delete.*不使用 `--from-local`' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
+3. 检查仓库源文件也包含同样说明：
+   ```bash
+   rg -n -- '--from-local.*write|write.*--from-local|edit.*--from-local|patch.*--from-local' skill_remote.md
+   rg -n 'mkdir.*move.*delete.*没有 caller 本地 payload|mkdir.*move.*delete.*不使用 `--from-local`' skill_remote.md
+   ```
+
+预期结果：
+
+- 安装后的 `bifrost-remote/SKILL.md` 明确告诉 Agent：`write --from-local` 读取本地文件内容，`edit --from-local` 读取 edits JSON，`patch --from-local` 读取 unified diff。
+- 文档明确 `mkdir` / `move` / `delete` 没有 caller 本地 payload，避免 Agent 误以为所有写操作都需要或支持本地路径。
+
+执行记录（2026-06-27）：
+
+- PASS：执行 `tmpdir=$(mktemp -d); BIFROST_INSTALL_SKILL_SOURCE=embedded cargo run -p bifrost-cli -- install-skill --tool codex --dir "$tmpdir/skills/bifrost" -y` 后，`$tmpdir/skills/bifrost-remote/SKILL.md` 存在；`rg -n -- '--from-local.*write|write.*--from-local|edit.*--from-local|patch.*--from-local' "$tmpdir/skills/bifrost-remote/SKILL.md"` 命中 `write/edit/patch` 命令面、行为要点和入口选择；`rg -n 'mkdir.*move.*delete.*没有 caller 本地 payload|mkdir.*move.*delete.*不使用 `--from-local`' "$tmpdir/skills/bifrost-remote/SKILL.md"` 命中本地 payload 边界说明。
+
 ## 清理步骤
 
 ```bash

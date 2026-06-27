@@ -61,11 +61,39 @@ assert_contains "$run_help" "--detach" "remote run help exposes detach"
 
 write_help="$(run_cli remote file write --help)"
 assert_contains "$write_help" "[PATH]" "file write still documents positional path"
+assert_contains "$write_help" "--from-local" "file write help exposes from-local alias"
+
+edit_help="$(run_cli remote file edit --help)"
+assert_contains "$edit_help" "--from-local" "file edit help exposes from-local edits file"
+
+patch_help="$(run_cli remote file patch --help)"
+assert_contains "$patch_help" "--from-local" "file patch help exposes from-local alias"
 
 missing_connection_output="$(run_cli remote --client-id devbox run --script-file ./q.py --interpreter python3 -- --limit 5 || true)"
 assert_contains "$missing_connection_output" "no saved connection matching 'devbox'" "remote run accepts parent client-id before connection resolution"
 
 path_alias_output="$(printf 'hello' | run_cli remote file write --path flag-path.txt --content-file - || true)"
 assert_contains "$path_alias_output" "no saved connection" "file write --path compatibility reaches connection resolution"
+
+from_local_dir="$TEST_DATA_DIR/from-local"
+mkdir -p "$from_local_dir"
+printf 'hello from local\n' > "$from_local_dir/content.txt"
+printf '[{"old_string":"a","new_string":"b"}]\n' > "$from_local_dir/edits.json"
+cat > "$from_local_dir/change.diff" <<'PATCH'
+--- a/a.txt
++++ b/a.txt
+@@ -1 +1 @@
+-a
++b
+PATCH
+
+write_from_local_output="$(run_cli remote file write --path from-local.txt --from-local "$from_local_dir/content.txt" || true)"
+assert_contains "$write_from_local_output" "no saved connection" "file write --from-local reaches connection resolution"
+
+edit_from_local_output="$(run_cli remote file edit from-local.txt --from-local "$from_local_dir/edits.json" || true)"
+assert_contains "$edit_from_local_output" "no saved connection" "file edit --from-local reaches connection resolution"
+
+patch_from_local_output="$(run_cli remote file patch --from-local "$from_local_dir/change.diff" || true)"
+assert_contains "$patch_from_local_output" "no saved connection" "file patch --from-local reaches connection resolution"
 
 echo "Remote CLI tooling regression tests passed."

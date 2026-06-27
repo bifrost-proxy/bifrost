@@ -404,7 +404,7 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(
-        about = "Write a file atomically. Content comes from --content, --content-file, --content-b64, or stdin."
+        about = "Write a file atomically. Content comes from --content, --content-file/--from-local, --content-b64, or stdin."
     )]
     Write {
         #[arg(help = "Target path (absolute, or relative to --cwd)")]
@@ -420,11 +420,16 @@ pub enum RemoteFileCommands {
             help = "Inline UTF-8 content to write (simplest option for short text)"
         )]
         content: Option<String>,
-        #[arg(long, value_hint = ValueHint::FilePath, help = "Read content from a local file (or '-' for stdin)")]
+        #[arg(
+            long,
+            visible_alias = "from-local",
+            value_hint = ValueHint::FilePath,
+            help = "Read content from a caller-side local file (or '-' for stdin). Alias: --from-local"
+        )]
         content_file: Option<String>,
         #[arg(
             long = "content-b64",
-            help = "Provide content as a base64-encoded string (overrides --content/--content-file)"
+            help = "Provide content as a base64-encoded string (overrides --content/--content-file/--from-local)"
         )]
         content_b64: Option<String>,
         #[arg(long, help = "Expected current sha256 for optimistic locking")]
@@ -439,13 +444,26 @@ pub enum RemoteFileCommands {
         output: String,
     },
     #[command(
-        about = "Apply line-range edits atomically. --edits is a JSON array of {start_line,end_line,replacement}."
+        about = "Apply line-range or anchored edits atomically. --edits is a JSON array of edit objects."
     )]
     Edit {
         #[arg(help = "Target path")]
         path: String,
-        #[arg(long, help = "JSON array of edit ranges")]
-        edits: String,
+        #[arg(
+            long,
+            required_unless_present = "edits_file",
+            conflicts_with = "edits_file",
+            help = "JSON array of line-range or anchored edit objects"
+        )]
+        edits: Option<String>,
+        #[arg(
+            long = "from-local",
+            value_hint = ValueHint::FilePath,
+            required_unless_present = "edits",
+            conflicts_with = "edits",
+            help = "Read the JSON edits array from a caller-side local file (or '-' for stdin)"
+        )]
+        edits_file: Option<String>,
         #[arg(long, help = "Expected current sha256 for optimistic locking")]
         base_sha256: Option<String>,
         #[arg(long, help = "Working directory override")]
@@ -507,11 +525,16 @@ pub enum RemoteFileCommands {
         about = "Apply a unified diff across multiple files atomically"
     )]
     Patch {
-        #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a unified diff file (or '-' for stdin)")]
+        #[arg(
+            long,
+            visible_alias = "from-local",
+            value_hint = ValueHint::FilePath,
+            help = "Path to a caller-side local unified diff file (or '-' for stdin). Alias: --from-local"
+        )]
         patch_file: Option<String>,
         #[arg(
             long = "patch-b64",
-            help = "Provide the unified diff as a base64 string (overrides --patch-file)"
+            help = "Provide the unified diff as a base64 string (overrides --patch-file/--from-local)"
         )]
         patch_b64: Option<String>,
         #[arg(
