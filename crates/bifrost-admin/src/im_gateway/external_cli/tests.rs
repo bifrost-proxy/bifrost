@@ -23,6 +23,14 @@ impl EnvGuard {
         }
         Self { key, previous }
     }
+
+    fn unset(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe {
+            std::env::remove_var(key);
+        }
+        Self { key, previous }
+    }
 }
 
 impl Drop for EnvGuard {
@@ -2204,6 +2212,69 @@ model_provider = "trae"
         overridden.reasoning_source.as_deref(),
         Some("runner config")
     );
+}
+
+#[test]
+fn claude_code_model_config_resolves_settings_aliases_and_env_overrides() {
+    let _env_lock = external_cli_env_guard();
+    let home = tempfile::tempdir().unwrap();
+    let claude_home = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(
+        claude_home.join("settings.json"),
+        r#"{
+          "model": "sonnet",
+          "env": {
+            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-custom",
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-custom"
+          }
+        }"#,
+    )
+    .unwrap();
+    let _home = EnvGuard::set("HOME", home.path());
+    let _claude_config_dir = EnvGuard::unset("CLAUDE_CONFIG_DIR");
+    let _claude_home = EnvGuard::unset("CLAUDE_HOME");
+    let _anthropic_model = EnvGuard::unset("ANTHROPIC_MODEL");
+    let _default_sonnet = EnvGuard::unset("ANTHROPIC_DEFAULT_SONNET_MODEL");
+    let _default_opus = EnvGuard::unset("ANTHROPIC_DEFAULT_OPUS_MODEL");
+    let _default_haiku = EnvGuard::unset("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+
+    let claude = resolve_external_cli_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(claude.model.as_deref(), Some("claude-opus-4-7"));
+    assert_eq!(claude.model_provider.as_deref(), Some("sonnet"));
+    assert_eq!(claude.model_source.as_deref(), Some("claude settings"));
+
+    let direct_env = resolve_external_cli_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig {
+            env: BTreeMap::from([(
+                "ANTHROPIC_MODEL".to_string(),
+                "custom-direct-model".to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(direct_env.model.as_deref(), Some("custom-direct-model"));
+    assert_eq!(direct_env.model_provider, None);
+    assert_eq!(direct_env.model_source.as_deref(), Some("runner config"));
+
+    let alias_env = resolve_external_cli_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig {
+            env: BTreeMap::from([(
+                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
+                "claude-sonnet-runner-env".to_string(),
+            )]),
+            ..Default::default()
+        },
+    );
+    assert_eq!(alias_env.model.as_deref(), Some("claude-sonnet-runner-env"));
+    assert_eq!(alias_env.model_provider.as_deref(), Some("sonnet"));
+    assert_eq!(alias_env.model_source.as_deref(), Some("runner config"));
 }
 
 #[test]

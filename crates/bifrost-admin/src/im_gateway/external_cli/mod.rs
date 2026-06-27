@@ -2019,6 +2019,24 @@ pub fn format_external_cli_model_status(
     }
 }
 
+pub fn external_cli_default_model_label(adapter: &str) -> Option<(&'static str, &'static str)> {
+    match adapter.trim() {
+        DEFAULT_ADAPTER => Some((
+            "Codex default model (not explicitly configured)",
+            "codex default",
+        )),
+        TRAEX_ADAPTER => Some((
+            "Trae default model (not explicitly configured)",
+            "trae default",
+        )),
+        CLAUDE_CODE_ADAPTER => Some((
+            "Claude Code default model (not explicitly configured)",
+            "claude code default",
+        )),
+        _ => None,
+    }
+}
+
 pub fn external_cli_model_adapter_label(adapter: &str) -> &'static str {
     match adapter.trim() {
         DEFAULT_ADAPTER => "Codex",
@@ -2077,6 +2095,9 @@ fn load_external_cli_user_model_config(
     adapter: &str,
     config: &ExternalCliAdapterConfig,
 ) -> ExternalCliResolvedModelConfig {
+    if adapter.trim() == CLAUDE_CODE_ADAPTER {
+        return load_claude_code_model_config(config);
+    }
     let Some((config_path, profile_suffix, source)) = external_cli_user_config_path(adapter) else {
         return ExternalCliResolvedModelConfig::default();
     };
@@ -2113,6 +2134,113 @@ fn external_cli_user_config_path(adapter: &str) -> Option<(PathBuf, &'static str
     }
 }
 
+fn load_claude_code_model_config(
+    config: &ExternalCliAdapterConfig,
+) -> ExternalCliResolvedModelConfig {
+    let settings_path = config
+        .extra
+        .get("settings")
+        .or_else(|| config.extra.get("settingsPath"))
+        .or_else(|| config.extra.get("settings_path"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| clean_optional_string(Some(value)))
+        .map(PathBuf::from);
+    let mut resolved = settings_path
+        .as_deref()
+        .map(read_claude_code_model_config_json)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .or_else(|| std::env::var_os("CLAUDE_HOME"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bifrost_agent::config::user_home_dir().join(".claude"));
+            let mut resolved = read_claude_code_model_config_json(&home.join("settings.json"));
+            merge_model_config(
+                &mut resolved,
+                read_claude_code_model_config_json(&home.join("settings.local.json")),
+            );
+            resolved
+        });
+    apply_claude_code_env_model_aliases(&mut resolved, "claude env", |key| std::env::var(key));
+    apply_claude_code_env_model_aliases(&mut resolved, "runner config", |key| {
+        config
+            .env
+            .get(key)
+            .cloned()
+            .ok_or(std::env::VarError::NotPresent)
+    });
+    resolved
+}
+
+fn read_claude_code_model_config_json(path: &Path) -> ExternalCliResolvedModelConfig {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    parse_claude_code_model_config_json(&content, "claude settings")
+}
+
+fn parse_claude_code_model_config_json(
+    content: &str,
+    source: &str,
+) -> ExternalCliResolvedModelConfig {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    let model = json_string(&value, "model");
+    let mut resolved = ExternalCliResolvedModelConfig {
+        model,
+        model_source: Some(source.to_string()),
+        ..Default::default()
+    };
+    if let Some(env) = value.get("env").and_then(serde_json::Value::as_object) {
+        apply_claude_code_env_model_aliases(&mut resolved, source, |key| {
+            env.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or(std::env::VarError::NotPresent)
+        });
+    }
+    resolved
+}
+
+fn apply_claude_code_env_model_aliases(
+    resolved: &mut ExternalCliResolvedModelConfig,
+    source: &str,
+    get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+) {
+    if let Some(model) = clean_optional_string(get_env("ANTHROPIC_MODEL").ok().as_deref()) {
+        resolved.model = Some(model);
+        resolved.model_provider = None;
+        resolved.model_source = Some(source.to_string());
+        return;
+    }
+    let Some(model) = resolved
+        .model_provider
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| claude_code_model_alias_env_key(value).is_some())
+        .or_else(|| resolved.model.as_deref().map(str::trim))
+    else {
+        return;
+    };
+    let key = claude_code_model_alias_env_key(model);
+    if let Some(alias_model) =
+        key.and_then(|key| clean_optional_string(get_env(key).ok().as_deref()))
+    {
+        resolved.model_provider = Some(model.to_string());
+        resolved.model = Some(alias_model);
+        resolved.model_source = Some(source.to_string());
+    }
+}
+
+fn claude_code_model_alias_env_key(alias: &str) -> Option<&'static str> {
+    match alias.to_ascii_lowercase().as_str() {
+        "opus" => Some("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        "sonnet" => Some("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        "haiku" => Some("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        _ => None,
+    }
+}
+
 fn read_model_config_toml(path: &Path, source: &str) -> ExternalCliResolvedModelConfig {
     let Ok(content) = std::fs::read_to_string(path) else {
         return ExternalCliResolvedModelConfig::default();
@@ -2138,6 +2266,10 @@ fn read_model_config_toml(path: &Path, source: &str) -> ExternalCliResolvedModel
 
 fn toml_string(value: &toml::Value, key: &str) -> Option<String> {
     clean_optional_string(value.get(key).and_then(toml::Value::as_str))
+}
+
+fn json_string(value: &serde_json::Value, key: &str) -> Option<String> {
+    clean_optional_string(value.get(key).and_then(serde_json::Value::as_str))
 }
 
 fn merge_model_config(
@@ -2239,21 +2371,7 @@ fn append_external_cli_request_metadata(
         metadata
             .entry("modelLabel".to_string())
             .or_insert_with(|| model.to_string());
-    } else if is_codex_like_adapter(&request.adapter) {
-        let (label, source) = match request.adapter.trim() {
-            TRAEX_ADAPTER => (
-                "Trae default model (not explicitly configured)",
-                "trae default",
-            ),
-            CLAUDE_CODE_ADAPTER => (
-                "Claude Code default model (not explicitly configured)",
-                "claude code default",
-            ),
-            _ => (
-                "Codex default model (not explicitly configured)",
-                "codex default",
-            ),
-        };
+    } else if let Some((label, source)) = external_cli_default_model_label(&request.adapter) {
         metadata
             .entry("modelLabel".to_string())
             .or_insert_with(|| label.to_string());

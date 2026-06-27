@@ -6,9 +6,11 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 mod busy_message_mode_tests;
+
+static IM_GATEWAY_TEST_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(super) struct EnvGuard {
     _guard: crate::test_env::BifrostDataDirGuard,
@@ -305,6 +307,75 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
     assert_eq!(context.runner_id.as_deref(), Some("web-main"));
     assert_eq!(context.session_key, "feishu-main:ou_owner");
     assert_eq!(context.user_turn_count, 2);
+}
+
+#[test]
+pub(super) fn online_notification_context_resolves_claude_code_settings_model() {
+    let _env_lock = IM_GATEWAY_TEST_ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap();
+    let temp_dir = tempfile::tempdir().expect("temp data dir");
+    let home = tempfile::tempdir().expect("home dir");
+    let claude_home = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_home).expect("create claude home");
+    std::fs::write(
+        claude_home.join("settings.json"),
+        r#"{
+          "model": "sonnet",
+          "env": {
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7"
+          }
+        }"#,
+    )
+    .expect("write claude settings");
+    let _env_guard = EnvGuard::set_data_dir(temp_dir.path());
+    let _home_guard = EnvVarGuard::set("HOME", &home.path().display().to_string());
+    let _claude_config_guard = EnvVarGuard::remove("CLAUDE_CONFIG_DIR");
+    let _anthropic_model_guard = EnvVarGuard::remove("ANTHROPIC_MODEL");
+    let mut provider = test_provider();
+    provider.agent_config = Some(ImProviderAgentConfig {
+        runner: Some(bifrost_agent::AgentRunnerMode::Custom(
+            "Claude Code".to_string(),
+        )),
+        work_dir: None,
+        base_instructions: None,
+        developer_instructions: None,
+        user_instructions: None,
+    });
+    let base_config = bifrost_agent::config::AgentConfig::default();
+    let external_config = crate::im_gateway::external_cli::ExternalCliGatewayConfig {
+        version: 1,
+        default_runner_id: "Codex".to_string(),
+        runners: std::collections::BTreeMap::from([(
+            "Claude Code".to_string(),
+            crate::im_gateway::external_cli::ExternalCliAgentSettings {
+                adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string(),
+                enabled: true,
+                ..Default::default()
+            },
+        )]),
+        channels: std::collections::BTreeMap::new(),
+    };
+    let manager = bifrost_agent::AgentSessionManager::new(3600);
+
+    let context = build_online_notification_agent_context(
+        &provider,
+        &base_config,
+        &external_config,
+        &manager,
+    );
+    let message =
+        build_online_notification_message_with_context(&provider, "eden-macbook", Some(&context));
+
+    assert_eq!(
+        context.runner_type,
+        crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
+    );
+    assert_eq!(context.runner_id.as_deref(), Some("Claude Code"));
+    assert_eq!(context.model.as_deref(), Some("claude-opus-4-7"));
+    assert_eq!(context.model_provider.as_deref(), Some("sonnet"));
+    assert!(message.contains("- **Model**: `claude-opus-4-7（sonnet）`"));
 }
 
 #[test]
