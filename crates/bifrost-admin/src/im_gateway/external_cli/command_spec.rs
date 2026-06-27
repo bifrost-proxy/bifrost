@@ -17,7 +17,7 @@ pub(super) fn build_command_spec(
     let executable = config
         .executable
         .clone()
-        .unwrap_or_else(|| request.adapter.clone());
+        .unwrap_or_else(|| default_executable_for_adapter(&request.adapter).to_string());
     let mut args = config.args.clone();
 
     if request.adapter == DEFAULT_ADAPTER {
@@ -78,6 +78,27 @@ pub(super) fn build_command_spec(
             }
             args.push("-".to_string());
         }
+    } else if request.adapter == CLAUDE_CODE_ADAPTER {
+        if args.is_empty() {
+            args = vec![
+                "-p".to_string(),
+                "--verbose".to_string(),
+                "--output-format".to_string(),
+                "stream-json".to_string(),
+                "--input-format".to_string(),
+                "text".to_string(),
+            ];
+        }
+        if !config.args.is_empty() {
+            append_claude_code_config_args(&mut args, config);
+        }
+        if config.args.is_empty() {
+            append_claude_code_config_args(&mut args, config);
+            if let Some(session_id) = claude_code_session_id_from_params(request) {
+                args.push("--resume".to_string());
+                args.push(session_id);
+            }
+        }
     } else if config.executable.is_none() && args.is_empty() {
         return Err(format!(
             "adapter '{}' requires explicit adapterConfig.args",
@@ -92,6 +113,72 @@ pub(super) fn build_command_spec(
         work_dir: request.work_dir.clone(),
         timeout_secs: config.timeout_secs,
     })
+}
+
+fn append_claude_code_config_args(args: &mut Vec<String>, config: &ExternalCliAdapterConfig) {
+    remove_overridden_claude_code_args(args, config);
+    let mut generated = Vec::new();
+    if let Some(model) = config.model.as_deref() {
+        generated.push("--model".to_string());
+        generated.push(model.to_string());
+    }
+    let danger_full_access = effective_claude_code_danger_full_access(config);
+    if let Some(permission_mode) =
+        effective_claude_code_permission_mode(config).filter(|_| !danger_full_access)
+    {
+        generated.push("--permission-mode".to_string());
+        generated.push(permission_mode);
+    }
+    if danger_full_access {
+        generated.push("--dangerously-skip-permissions".to_string());
+    }
+    if let Some(effort) = config.reasoning_effort.as_deref().map(str::trim) {
+        if !effort.is_empty() {
+            generated.push("--effort".to_string());
+            generated.push(effort.to_string());
+        }
+    }
+    append_repeatable_codex_pairs(&mut generated, "--add-dir", &config.add_dirs);
+    insert_codex_args_before_stdin(args, generated);
+}
+
+fn default_executable_for_adapter(adapter: &str) -> &str {
+    match adapter {
+        CLAUDE_CODE_ADAPTER => "claude",
+        other => other,
+    }
+}
+
+fn effective_claude_code_permission_mode(config: &ExternalCliAdapterConfig) -> Option<String> {
+    let value = config.permission_mode.as_deref().map(str::trim)?;
+    if value.is_empty() || value == "default" {
+        return None;
+    }
+    Some(
+        match value {
+            "accept_edits" | "accept-edits" => "acceptEdits",
+            "bypass_permissions" | "bypass-permissions" => "bypassPermissions",
+            "dont_ask" | "dont-ask" => "dontAsk",
+            other => other,
+        }
+        .to_string(),
+    )
+}
+
+fn effective_claude_code_danger_full_access(config: &ExternalCliAdapterConfig) -> bool {
+    config
+        .danger_full_access
+        .unwrap_or_else(|| effective_claude_code_permission_mode(config).is_none())
+}
+
+fn remove_overridden_claude_code_args(args: &mut Vec<String>, config: &ExternalCliAdapterConfig) {
+    if config.model.is_some() {
+        remove_codex_arg_with_value(args, "--model");
+    }
+    remove_codex_arg_with_value(args, "--permission-mode");
+    if config.reasoning_effort.is_some() {
+        remove_codex_arg_with_value(args, "--effort");
+    }
 }
 
 fn append_traex_config_args(
@@ -414,6 +501,19 @@ fn codex_thread_id_from_params(request: &ExternalCliRunRequest) -> Option<String
     request
         .params
         .get("threadId")
+        .or_else(|| request.params.get("thread_id"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn claude_code_session_id_from_params(request: &ExternalCliRunRequest) -> Option<String> {
+    request
+        .params
+        .get("sessionId")
+        .or_else(|| request.params.get("session_id"))
+        .or_else(|| request.params.get("threadId"))
         .or_else(|| request.params.get("thread_id"))
         .and_then(serde_json::Value::as_str)
         .map(str::trim)

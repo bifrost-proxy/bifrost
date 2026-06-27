@@ -162,6 +162,42 @@ fn traex_runner_metadata_resumes_queued_messages_after_current_run() {
 }
 
 #[test]
+fn claude_code_runner_metadata_resumes_queued_messages_after_current_run() {
+    let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "queued continuation".to_string(),
+        operation: "chat".to_string(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some("claude-code".to_string()),
+        session_key: Some("im:provider-a:user-a".to_string()),
+        runtime: "external_cli".to_string(),
+        adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: None,
+        instructions: None,
+        adapter_config: Default::default(),
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: true,
+        skill_paths: Vec::new(),
+    };
+    let mut metadata = std::collections::BTreeMap::new();
+    metadata.insert(
+        "threadId".to_string(),
+        "claude-session-existing".to_string(),
+    );
+
+    apply_external_cli_resume_metadata(&mut request, &metadata);
+
+    assert_eq!(
+        request
+            .params
+            .get("threadId")
+            .and_then(|value| value.as_str()),
+        Some("claude-session-existing")
+    );
+}
+
+#[test]
 fn codex_runner_metadata_does_not_override_explicit_thread() {
     let mut request = crate::im_gateway::external_cli::ExternalCliRunRequest {
         images: Vec::new(),

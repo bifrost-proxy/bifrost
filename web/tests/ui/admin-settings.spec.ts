@@ -1075,6 +1075,7 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
         runners: {
           codex: { enabled: true, adapter: "codex", adapterConfig: {} },
           traex: { enabled: true, adapter: "traex", adapterConfig: {} },
+          "Claude-Code": { enabled: true, adapter: "claude_code", adapterConfig: {} },
           web: { enabled: true, adapter: "chatgpt_web", adapterConfig: {} },
         },
         channels: {},
@@ -1096,6 +1097,7 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
   const adapterDropdown = page.locator(".ant-select-dropdown:not(.ant-select-dropdown-hidden)");
   await expect(adapterDropdown).toContainText("Codex CLI");
   await expect(adapterDropdown).toContainText("Traex CLI");
+  await expect(adapterDropdown).toContainText("Claude Code");
   await expect(adapterDropdown).toContainText("ChatGPT Web");
   await expect(adapterDropdown).not.toContainText("Custom");
   await expect(adapterDropdown).not.toContainText("Mock");

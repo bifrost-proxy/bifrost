@@ -147,7 +147,11 @@ function proposedPlanMessageContent(content: string) {
 }
 
 function supportsRunnerModelSlashCommand(runnerAdapter: string) {
-  return runnerAdapter === "codex" || runnerAdapter === "traex";
+  return (
+    runnerAdapter === "codex" ||
+    runnerAdapter === "traex" ||
+    runnerAdapter === "claude_code"
+  );
 }
 
 function isRunnerModelSlashCommand(content: string, runnerAdapter: string) {

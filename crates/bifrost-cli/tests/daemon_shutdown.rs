@@ -15,6 +15,7 @@ mod unix_tests {
         let mut command = Command::new(env!("CARGO_BIN_EXE_bifrost"));
         command.env("BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT", "1");
         command.env("BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL", "1");
+        command.env("BIFROST_DISABLE_TRAY", "1");
         command.env_remove("BIFROST_DETACHED_DAEMON_CHILD");
         command
     }

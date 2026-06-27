@@ -1458,6 +1458,49 @@ test("AI Agent Chat new chat can select an external runner", async ({ page }) =>
   });
 });
 
+test("AI Agent Chat shows model slash commands for Claude Code runner", async ({ page }) => {
+  await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ sessions: [] }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/agent/instructions", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ work_dir: "/tmp/default-agent-workspace" }),
+    });
+  });
+  await page.route("**/_bifrost/api/im-gateway/chat/config", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        defaultRunnerId: "Claude-Code",
+        runners: {
+          "Claude-Code": { enabled: true, adapter: "claude_code" },
+          codex: { enabled: true, adapter: "codex" },
+        },
+        channels: {},
+      }),
+    });
+  });
+
+  await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("Claude-Code");
+
+  await page.getByTestId("agent-chat-input").fill("/");
+  const slashOptions = page.getByTestId("agent-chat-slash-command-option");
+  await expect(
+    slashOptions.filter({ hasText: "/models" }),
+  ).toContainText("列出当前 Runner 可用模型");
+  await expect(slashOptions.nth(1)).toContainText("/model");
+  await expect(slashOptions.nth(1)).toContainText("查看或切换当前 Runner 的 session 模型");
+});
+
 test("AI Agent Chat selects the first thread on initial entry", async ({ page }) => {
   await page.route("**/_bifrost/api/im-gateway/agent/sessions/all**", async (route) => {
     await route.fulfill({
