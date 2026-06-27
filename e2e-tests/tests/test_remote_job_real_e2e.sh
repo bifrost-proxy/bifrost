@@ -195,7 +195,34 @@ configure_shell_policies() {
         --stdin \
         --timeout-ms 60000 >/dev/null
 
-    _log_pass "target Shell Access includes long-running shell_text policy"
+    BIFROST_DATA_DIR="$TARGET_DATA_DIR" "$BIFROST_BIN" setting shell policy add \
+        --id remote-run-argv \
+        --name "Remote Run Argv" \
+        --mode argv_exec \
+        --program "$PYTHON_BIN" \
+        --cwd "$WORK_DIR" \
+        --env RUN_ENV \
+        --timeout-ms 60000 >/dev/null
+
+    _log_pass "target Shell Access includes long-running shell_text and remote_run argv policies"
+}
+
+write_file_access_policy() {
+    log "Writing file-access policy for remote run under $WORK_DIR"
+    cat >"$TARGET_DATA_DIR/file-access.toml" <<EOF
+[[grant]]
+grant_id = "$GRANT_ID"
+name = "remote-job-real-e2e"
+roots = ["$WORK_DIR"]
+denies = ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"]
+write_denies = []
+ops = ["read", "list", "stat", "glob", "search", "hash", "write", "mkdir", "delete"]
+max_read_bytes = 2097152
+max_write_bytes = 2097152
+respect_gitignore = false
+allow_overwrite = true
+allow_recursive_delete = true
+EOF
 }
 
 pair_and_upgrade_grant() {
@@ -287,9 +314,10 @@ pair_and_upgrade_grant() {
         sleep 0.5
     done
     assert_not_empty "$GRANT_ID" "grant_id 不应为空" || return 1
+    write_file_access_policy
 
     local grant_update_ok=0
-    local update_body='{"grant_scope":"remote_shell_exec","policy_binding":{"mode":"all"},"interactive_allowed":false,"stdin_allowed":true}'
+    local update_body='{"grant_scope":"remote_shell_exec","policy_binding":{"mode":"all"},"interactive_allowed":false,"stdin_allowed":true,"file_access":"read_write"}'
     for _ in $(seq 1 20); do
         http_patch_json "${CLIENT_ADMIN_URL}/api/remote-invoke/grants/${GRANT_ID}" "$update_body"
         if [[ "$HTTP_STATUS" == "200" ]]; then
@@ -517,6 +545,82 @@ run_failure_job_case() {
     wait_for_target_call_exit "$call_id" "7" || return 1
 }
 
+run_remote_run_case() {
+    local script_file run_out detach_out watch_out watch_file call_id run_exit watch_exit
+
+    log "Running remote run upload+argv execution case..."
+    script_file="$WORK_DIR/local-remote-run.py"
+    run_out="$WORK_DIR/remote-run.out"
+    detach_out="$WORK_DIR/remote-run.detach.out"
+    watch_out="$WORK_DIR/remote-run.watch.out"
+    watch_file="$WORK_DIR/remote-run.watch.txt"
+
+    cat >"$script_file" <<'PY'
+import os
+import sys
+import time
+
+print("REMOTE_RUN_BEGIN", flush=True)
+print("REMOTE_RUN_CWD=" + os.getcwd(), flush=True)
+print("REMOTE_RUN_ENV=" + os.environ.get("RUN_ENV", ""), flush=True)
+print("REMOTE_RUN_ARGS=" + ",".join(sys.argv[1:]), flush=True)
+if "--wait" in sys.argv:
+    time.sleep(0.5)
+print("REMOTE_RUN_END", flush=True)
+PY
+
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote run \
+        --relay-url "$RELAY_URL" \
+        --client-id "$CLIENT_INSTANCE_SHORT" \
+        --script-file "$script_file" \
+        --interpreter "$PYTHON_BIN" \
+        --cwd "$WORK_DIR" \
+        --env RUN_ENV=remote-run-ok \
+        --scratch-name .skill-remote-run \
+        -- --limit 5 >"$run_out" 2>&1
+    run_exit=$?
+    set -e
+    assert_equals "0" "$run_exit" "remote run should execute uploaded local script" || {
+        cat "$run_out" >&2
+        return 1
+    }
+    assert_body_contains "REMOTE_RUN_BEGIN" "$(cat "$run_out")" "remote run should stream script stdout" || return 1
+    local expected_cwd actual_cwd
+    expected_cwd=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$WORK_DIR")
+    actual_cwd=$(grep '^REMOTE_RUN_CWD=' "$run_out" | head -1 | cut -d= -f2-)
+    actual_cwd=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$actual_cwd")
+    assert_equals "$expected_cwd" "$actual_cwd" "remote run should honor --cwd" || return 1
+    assert_body_contains "REMOTE_RUN_ENV=remote-run-ok" "$(cat "$run_out")" "remote run should pass --env" || return 1
+    assert_body_contains "REMOTE_RUN_ARGS=--limit,5" "$(cat "$run_out")" "remote run should pass args after --" || return 1
+
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote run \
+        --relay-url "$RELAY_URL" \
+        --client-id "$CLIENT_INSTANCE_SHORT" \
+        --script-file "$script_file" \
+        --interpreter "$PYTHON_BIN" \
+        --detach \
+        --cwd "$WORK_DIR" \
+        --env RUN_ENV=remote-run-detached \
+        --scratch-name .skill-remote-run \
+        --remote-name detached-run.py \
+        -- --wait >"$detach_out" 2>&1
+
+    assert_body_contains "Detached remote job started" "$(cat "$detach_out")" "remote run --detach should start a detached job" || return 1
+    assert_body_contains "uploaded script" "$(cat "$detach_out")" "remote run --detach should report uploaded script path" || return 1
+    call_id="$(extract_call_id "$detach_out")"
+    assert_not_empty "$call_id" "remote run --detach call_id should be printed" || return 1
+
+    set +e
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote job watch "$call_id" --no-verify-digest --output-file "$watch_file" >"$watch_out" 2>&1
+    watch_exit=$?
+    set -e
+    assert_equals "0" "$watch_exit" "remote run detached job watch should exit successfully" || return 1
+    assert_body_contains "REMOTE_RUN_ENV=remote-run-detached" "$(cat "$watch_file")" "remote run --detach should preserve env in job output" || return 1
+    assert_body_contains "REMOTE_RUN_ARGS=--wait" "$(cat "$watch_file")" "remote run --detach should pass args after --" || return 1
+    wait_for_target_call_exit "$call_id" "0" || return 1
+}
+
 run_error_contract_cases() {
     local first_call_id old_arg_out fresh_out help_out
     first_call_id="$(jq -r '(.jobs // [])[0].call_id // ""' "$(remote_job_cache_file)")"
@@ -613,6 +717,7 @@ EOF
     configure_shell_policies
     pair_and_upgrade_grant
     run_success_job_case
+    run_remote_run_case
     run_failure_job_case
     run_error_contract_cases
 

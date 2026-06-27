@@ -388,9 +388,10 @@ PAIR_CODE=$(echo "$HTTP_BODY" | jq -r '.session.pair_code')
 assert_not_empty "$PAIR_CODE" "pair_code 不应为空"
 log "Generated pair_code: $PAIR_CODE"
 
+CALLER_LABEL="skill-remote-label-${RANDOM}"
 CALLER_CONNECT_LOG="$(mktemp)"
 log "Start bifrost remote conn up in background (Caller)..."
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" \
+BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up "$PAIR_CODE" --relay-url "$RELAY_URL" --label "$CALLER_LABEL" \
     > "$CALLER_CONNECT_LOG" 2>&1 &
 CALLER_CONNECT_PID=$!
 
@@ -415,6 +416,8 @@ fi
 
 PAIRING_ID=$(echo "$HTTP_BODY" | jq -r '.pairings[0].pairing_id')
 assert_not_empty "$PAIRING_ID" "pairing_id 不应为空"
+PENDING_CALLER_LABEL=$(echo "$HTTP_BODY" | jq -r '.pairings[0].caller_info.label // .pairings[0].label // ""')
+assert_equals "$CALLER_LABEL" "$PENDING_CALLER_LABEL" "TC-RI-01A: remote conn up --label should reach target pending pairing"
 log "Pairing request arrived: $PAIRING_ID"
 
 log "Approve pairing with mode=persistent"

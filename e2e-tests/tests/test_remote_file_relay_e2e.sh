@@ -356,8 +356,43 @@ run_remote_file_cmd() {
     # NOTE: this suite asserts the machine-readable JSON contract (content_b64,
     # bytes_written, applied_edits, file_sha256, ...), so it explicitly opts into
     # --output json. Interactive/agent callers get the human default instead.
-    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote file "$@" \
-        --relay-url "$RELAY_URL" --client-id "$CLIENT_INSTANCE_SHORT" --output json 2>&1
+    local out_file status_file pid waited timeout_secs rc
+    out_file="$(mktemp)"
+    status_file="$(mktemp)"
+    timeout_secs="${REMOTE_FILE_CMD_TIMEOUT_SECS:-45}"
+
+    (
+        BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote file "$@" \
+            --relay-url "$RELAY_URL" --client-id "$CLIENT_INSTANCE_SHORT" --output json \
+            >"$out_file" 2>&1
+        echo "$?" >"$status_file"
+    ) &
+    pid=$!
+
+    waited=0
+    while kill -0 "$pid" 2>/dev/null; do
+        if (( waited >= timeout_secs )); then
+            kill "$pid" 2>/dev/null || true
+            wait "$pid" 2>/dev/null || true
+            cat "$out_file" 2>/dev/null || true
+            echo "remote file command timed out after ${timeout_secs}s: $*"
+            rm -f "$out_file" "$status_file" 2>/dev/null || true
+            return 124
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    wait "$pid" 2>/dev/null || true
+
+    rc=0
+    if [[ -f "$status_file" ]]; then
+        rc="$(cat "$status_file" 2>/dev/null || echo 1)"
+    else
+        rc=1
+    fi
+    cat "$out_file" 2>/dev/null || true
+    rm -f "$out_file" "$status_file" 2>/dev/null || true
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -1266,6 +1301,116 @@ test_file_edit_empty_replacement() {
 }
 
 # ---------------------------------------------------------------------------
+#  TC-FILE-21: file.read-many
+# ---------------------------------------------------------------------------
+test_file_read_many() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-21: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-21: file.read-many — read two files in one round-trip"
+    local out
+    out=$(run_remote_file_cmd read-many --path hello.txt --path multiline.txt --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-21: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.files | length == 2' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-21: file.read-many returns two file results"
+    else
+        _log_fail "TC-FILE-21: file.read-many returns valid JSON with two files" "files length = 2" "$out"
+        return 0
+    fi
+
+    local decoded
+    decoded=$(echo "$out" | jq -r '.files[] | select(.path | endswith("hello.txt")) | .content_b64' | base64 -d)
+    if [[ "$decoded" == "hello world" ]]; then
+        _log_pass "TC-FILE-21: file.read-many hello.txt content matches byte-for-byte after decode"
+    else
+        _log_fail "TC-FILE-21: file.read-many hello.txt content" "hello world" "$decoded"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-22: file.scratch-dir
+# ---------------------------------------------------------------------------
+test_file_scratch_dir() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-22: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-22: file.scratch-dir — create safe scratch directory under cwd"
+    local out
+    out=$(run_remote_file_cmd scratch-dir --name .agent-scratch --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-22: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    local path
+    path=$(echo "$out" | jq -r '.path // ""' 2>/dev/null || true)
+    local expected_path real_expected real_actual
+    expected_path="$SANDBOX_DIR/.agent-scratch"
+    real_expected=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$expected_path")
+    real_actual=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path")
+    if [[ "$real_actual" == "$real_expected" && -d "$path" ]]; then
+        _log_pass "TC-FILE-22: file.scratch-dir returns path and creates directory on target disk"
+    else
+        _log_fail "TC-FILE-22: file.scratch-dir creates expected directory" "$real_expected" "path=${path:-<empty>} real=$real_actual exists=$([[ -d "$path" ]] && echo yes || echo no)"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-23: file.outline
+# ---------------------------------------------------------------------------
+test_file_outline() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-23: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-23: file.outline — extract symbols from a Rust source file"
+    local source="$SANDBOX_DIR/outline.rs"
+    cat >"$source" <<'RS'
+pub struct RemoteDocCase {
+    pub value: i32,
+}
+
+impl RemoteDocCase {
+    pub fn marker_method(&self) -> i32 {
+        self.value
+    }
+}
+
+pub fn skill_remote_marker() -> i32 {
+    42
+}
+RS
+
+    local out
+    out=$(run_remote_file_cmd outline outline.rs --cwd "$SANDBOX_DIR") || true
+
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-23: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        return 0
+    fi
+
+    if echo "$out" | jq -e '.. | objects | select(.name? == "RemoteDocCase" or .name? == "skill_remote_marker")' >/dev/null 2>&1; then
+        _log_pass "TC-FILE-23: file.outline returns expected Rust symbols"
+    else
+        _log_fail "TC-FILE-23: file.outline returns expected Rust symbols" "RemoteDocCase and skill_remote_marker" "$out"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 #  TC-FILE-09: readonly scope rejection
 # ---------------------------------------------------------------------------
 
@@ -2131,7 +2276,7 @@ name = "remote-file-relay-e2e"
 roots = ["$SANDBOX_DIR"]
 denies = ["**/.git/**", "**/target/**", "**/*.key", "**/*.pem"]
 write_denies = []
-ops = ["read", "list", "stat", "glob", "search", "hash", "write", "edit", "mkdir", "move", "delete", "apply_patch"]
+ops = ["read", "read_many", "list", "stat", "glob", "search", "hash", "outline", "write", "edit", "mkdir", "move", "delete", "apply_patch"]
 max_read_bytes = 2097152
 max_write_bytes = 2097152
 respect_gitignore = false
@@ -2147,6 +2292,13 @@ cleanup() {
     if [[ -n "${CALLER_CONNECT_PID:-}" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
         wait "$CALLER_CONNECT_PID" 2>/dev/null || true
+    fi
+    if [[ "${BIFROST_E2E_DUMP_TARGET_LOG_ON_CLEANUP:-0}" == "1" \
+        && -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" \
+        && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
+        echo "----- target bifrost log tail -----" >&2
+        tail -200 "$ADMIN_CLIENT_BIFROST_LOG_FILE" >&2 || true
+        echo "----- end target bifrost log tail -----" >&2
     fi
     admin_cleanup_bifrost || true
     if [[ -n "${RELAY_PID:-}" ]] && kill -0 "$RELAY_PID" 2>/dev/null; then
@@ -2226,6 +2378,9 @@ EOF
     test_file_glob_exclude
     test_file_list_exclude
     test_file_edit_empty_replacement
+    test_file_read_many
+    test_file_scratch_dir
+    test_file_outline
 
     # ---- gap-targeting cases (expected RED-LIGHT until P0/P1 fixes land) ----
     test_gap_write_preserves_mode

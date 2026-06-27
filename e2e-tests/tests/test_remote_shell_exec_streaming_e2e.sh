@@ -23,6 +23,7 @@ TARGET_DATA_DIR=""
 CALLER_DATA_DIR=""
 CALLER_CONNECT_PID=""
 CALLER_CONNECT_LOG=""
+WORK_DIR=""
 
 HTTP_STATUS=""
 HTTP_HEADERS=""
@@ -188,6 +189,8 @@ configure_shell_policies() {
         --mode shell_text \
         --pattern '^(?s:.*)$' \
         --shell /bin/sh \
+        --cwd "$WORK_DIR" \
+        --env FOO \
         --stdin \
         --timeout-ms 10000 >/dev/null
 
@@ -196,6 +199,8 @@ configure_shell_policies() {
         --name "Stream Argv" \
         --mode argv_exec \
         --program "$PYTHON_BIN" \
+        --cwd "$WORK_DIR" \
+        --env FOO \
         --timeout-ms 10000 >/dev/null
 
     _log_pass "target Shell Access includes shell_text and argv_exec streaming policies"
@@ -538,6 +543,44 @@ run_stdin_first_frame_case() {
     rm -f "$stdin_log"
 }
 
+run_shell_text_context_case() {
+    local prev_started_at context_log context_exit context_output expected_work_dir
+
+    log "Running shell_text cwd/env/login/timeout regression..."
+    prev_started_at="$(latest_shell_exec_started_at)"
+    context_log="$(mktemp)"
+    expected_work_dir="$(cd "$WORK_DIR" && pwd -P)"
+
+    if BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec \
+        --relay-url "$RELAY_URL" \
+        --client-id "$CLIENT_INSTANCE_SHORT" \
+        --cwd "$WORK_DIR" \
+        --env FOO=skill-remote-env-ok \
+        --login \
+        --timeout-ms 10000 \
+        --shell-text 'printf "PWD=%s\nFOO=%s\nBIFROST_REMOTE=%s\nTERM=%s\n" "$(pwd -P)" "$FOO" "${BIFROST_REMOTE:-}" "${TERM:-}"' \
+        >"$context_log" 2>&1; then
+        context_exit=0
+    else
+        context_exit=$?
+    fi
+    context_output="$(cat "$context_log")"
+
+    if [[ "$context_exit" -eq 0 ]]; then
+        _log_pass "shell_text context command should exit successfully"
+    else
+        _log_fail "shell_text context command should exit successfully" "0" "exit=${context_exit} output=${context_output}"
+        return 1
+    fi
+    assert_body_contains "PWD=${expected_work_dir}" "$context_output" "--cwd should apply on target after login shell setup" || return 1
+    assert_body_contains "FOO=skill-remote-env-ok" "$context_output" "--env should reach the remote process" || return 1
+    assert_body_contains "BIFROST_REMOTE=1" "$context_output" "remote exec should expose BIFROST_REMOTE=1" || return 1
+    assert_body_contains "TERM=dumb" "$context_output" "remote exec should default TERM=dumb" || return 1
+    assert_recent_call_metadata "$prev_started_at" "stream-shell" "shell_text" "shell-context" || return 1
+
+    rm -f "$context_log"
+}
+
 cleanup() {
     if [[ -n "${CALLER_CONNECT_PID:-}" ]] && kill -0 "$CALLER_CONNECT_PID" 2>/dev/null; then
         kill "$CALLER_CONNECT_PID" 2>/dev/null || true
@@ -550,6 +593,7 @@ cleanup() {
     fi
     [[ -n "${RELAY_LOG:-}" ]] && rm -f "$RELAY_LOG" 2>/dev/null || true
     [[ -n "${CALLER_CONNECT_LOG:-}" ]] && rm -f "$CALLER_CONNECT_LOG" 2>/dev/null || true
+    [[ -n "${WORK_DIR:-}" ]] && rm -rf "$WORK_DIR" 2>/dev/null || true
     [[ -n "${TARGET_DATA_DIR:-}" ]] && rm -rf "$TARGET_DATA_DIR" 2>/dev/null || true
     [[ -n "${CALLER_DATA_DIR:-}" ]] && rm -rf "$CALLER_DATA_DIR" 2>/dev/null || true
 }
@@ -566,6 +610,7 @@ main() {
 
     TARGET_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-remote-shell-target-XXXXXX")"
     CALLER_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-remote-shell-caller-XXXXXX")"
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-remote-shell-work-XXXXXX")"
 
     export ADMIN_HOST="127.0.0.1"
     export ADMIN_PORT="${ADMIN_PORT:-$(pick_free_port)}"
@@ -590,6 +635,7 @@ EOF
     run_shell_text_streaming_case
     run_argv_streaming_case
     run_stdin_first_frame_case
+    run_shell_text_context_case
 
     print_test_summary
 }
