@@ -1063,7 +1063,7 @@ $BIFROST_DATA_DIR/agent/im_gateway/session_state.json
 - 新增 `GET /api/im-gateway/chat/runs/:run_id`，用于读取 runtime snapshot、stdout/stderr、normalized events 和 final response。
 - 新增 `human_tests/im-gateway-external-cli-chat-gateway.md` 并同步 `human_tests/readme.md` 索引。
 - 新增 `im_gateway_external_cli_agent.json` 配置存储，支持 `defaultRunnerId + runners{}` 的多 CLI runner 注册表；Codex 只是默认 runner，后续 Claude/Gemini/Trae/自定义 CLI 通过新增 runner 接入。
-- 默认 runner registry 现在内置展示名 `Claude Code`，adapter 为 `claude_code`；`defaultRunnerId` 仍保持 `Codex`，避免升级后改变既有 IM/Web Chat 默认执行器。`claude-code` / `claude_code` / `claude` 作为兼容别名会解析到 `Claude Code`。
+- 默认 runner registry 现在内置展示名 `Claude-Code`，adapter 为 `claude_code`；`defaultRunnerId` 仍保持 `Codex`，避免升级后改变既有 IM/Web Chat 默认执行器。`claude-code` / `claude_code` / `claude` 作为兼容别名会解析到 `Claude-Code`。
 - `claude_code` adapter 默认执行 `claude -p --verbose --output-format stream-json --input-format text`，并复用 external CLI runtime 的 stdin prompt、work_dir、progress event、artifact 和 session state 机制。未显式设置 permission mode 时默认追加 `--dangerously-skip-permissions`，显式 `permissionMode` 会映射到 Claude Code 的 camelCase 取值；`model`、`reasoningEffort` 和 `addDirs` 分别映射为 `--model`、`--effort`、`--add-dir`。
 - Claude Code 复用 Codex/Traex 现有 `/models` 与 `/model` session 模型切换能力。由于 Claude Code CLI 当前没有 `debug models` 等稳定模型枚举命令，`/models` 展示 CLI help 明确支持的 `sonnet`、`opus`、`fable` alias；`/model <slug>` 会持久化到 `sessionKey + adapter + runnerId` 的 `modelOverride`，下一条普通消息通过 `claude --model <slug>` 启动。Claude Code 同时接受合法的完整模型名，例如 `claude-opus-4-5-20251101`。
 - `reasoningEffort` 仍保持 runner config / schedule config 级静态配置，运行时映射到 Claude Code `--effort` 或 Codex `model_reasoning_effort`。Codex/Traex 既有能力中没有 session 级 `/effort` 动态切换命令，因此本轮不新增 reasoning effort slash command，避免让三个 adapter 的用户语义不一致。

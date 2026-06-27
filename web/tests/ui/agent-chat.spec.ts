@@ -1479,9 +1479,9 @@ test("AI Agent Chat shows model slash commands for Claude Code runner", async ({
       contentType: "application/json",
       body: JSON.stringify({
         version: 1,
-        defaultRunnerId: "Claude Code",
+        defaultRunnerId: "Claude-Code",
         runners: {
-          "Claude Code": { enabled: true, adapter: "claude_code" },
+          "Claude-Code": { enabled: true, adapter: "claude_code" },
           codex: { enabled: true, adapter: "codex" },
         },
         channels: {},
@@ -1490,7 +1490,7 @@ test("AI Agent Chat shows model slash commands for Claude Code runner", async ({
   });
 
   await openPage(page, "ai?aiSection=agent-chat&agentSection=chat");
-  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("Claude Code");
+  await expect(page.getByTestId("agent-chat-runner-tag")).toContainText("Claude-Code");
 
   await page.getByTestId("agent-chat-input").fill("/");
   const slashOptions = page.getByTestId("agent-chat-slash-command-option");

@@ -21,7 +21,8 @@ pub const TRAEX_ADAPTER: &str = "traex";
 pub const DEFAULT_CODEX_RUNNER_ID: &str = "Codex";
 pub const DEFAULT_TRAEX_RUNNER_ID: &str = "Traex";
 pub const CLAUDE_CODE_ADAPTER: &str = "claude_code";
-pub const DEFAULT_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
+pub const DEFAULT_CLAUDE_CODE_RUNNER_ID: &str = "Claude-Code";
+const LEGACY_CLAUDE_CODE_RUNNER_ID: &str = "Claude Code";
 const LEGACY_TRAEX_RUNNER_ALIAS: &str = concat!("tre", "ex");
 const CONFIG_FILENAME: &str = "im_gateway_external_cli_agent.json";
 const CONFIG_VERSION: u32 = 1;
@@ -4136,6 +4137,7 @@ fn normalized_gateway_config(mut config: ExternalCliGatewayConfig) -> ExternalCl
             .collect();
     }
     migrate_legacy_traex_runner_id(&mut config);
+    migrate_legacy_claude_code_runner_id(&mut config);
     ensure_default_external_cli_runners(&mut config.runners);
     if !config.runners.contains_key(&config.default_runner_id) {
         let canonical_default_runner_id =
@@ -4176,6 +4178,44 @@ fn ensure_default_external_cli_runners(runners: &mut BTreeMap<String, ExternalCl
     runners
         .entry(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string())
         .or_insert_with(|| default_runner_settings(CLAUDE_CODE_ADAPTER));
+}
+
+fn migrate_legacy_claude_code_runner_id(config: &mut ExternalCliGatewayConfig) {
+    let legacy_runner_id = config
+        .runners
+        .keys()
+        .find(|runner_id| {
+            runner_id.eq_ignore_ascii_case(LEGACY_CLAUDE_CODE_RUNNER_ID)
+                || runner_id.eq_ignore_ascii_case("claude-code")
+                || runner_id.eq_ignore_ascii_case("claude_code")
+                || runner_id.eq_ignore_ascii_case("claude")
+        })
+        .cloned();
+    let Some(legacy_runner_id) = legacy_runner_id else {
+        return;
+    };
+    let Some(legacy_settings) = config.runners.remove(&legacy_runner_id) else {
+        return;
+    };
+    config
+        .runners
+        .entry(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string())
+        .or_insert(legacy_settings);
+    if config
+        .default_runner_id
+        .eq_ignore_ascii_case(&legacy_runner_id)
+    {
+        config.default_runner_id = DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string();
+    }
+    for channel in config.channels.values_mut() {
+        if channel
+            .runner_id
+            .as_deref()
+            .is_some_and(|runner_id| runner_id.eq_ignore_ascii_case(&legacy_runner_id))
+        {
+            channel.runner_id = Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string());
+        }
+    }
 }
 
 fn migrate_legacy_traex_runner_id(config: &mut ExternalCliGatewayConfig) {

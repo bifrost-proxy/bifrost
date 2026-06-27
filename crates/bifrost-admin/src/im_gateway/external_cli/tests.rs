@@ -1910,6 +1910,52 @@ fn normalized_gateway_config_adds_named_defaults_without_overwriting_existing_ru
 }
 
 #[test]
+fn normalized_gateway_config_migrates_legacy_claude_code_runner_id() {
+    let config = ExternalCliGatewayConfig {
+        default_runner_id: "Claude Code".to_string(),
+        runners: BTreeMap::from([(
+            "Claude Code".to_string(),
+            ExternalCliAgentSettings {
+                enabled: true,
+                adapter: CLAUDE_CODE_ADAPTER.to_string(),
+                ..Default::default()
+            },
+        )]),
+        channels: BTreeMap::from([(
+            "feishu-main".to_string(),
+            ExternalCliChannelSettings {
+                runner_id: Some("Claude Code".to_string()),
+                ..Default::default()
+            },
+        )]),
+        version: 1,
+    };
+
+    let normalized = normalized_gateway_config(config);
+
+    assert!(!normalized.runners.contains_key("Claude Code"));
+    assert_eq!(normalized.default_runner_id, DEFAULT_CLAUDE_CODE_RUNNER_ID);
+    assert_eq!(
+        normalized
+            .runners
+            .get(DEFAULT_CLAUDE_CODE_RUNNER_ID)
+            .map(|settings| settings.adapter.as_str()),
+        Some(CLAUDE_CODE_ADAPTER)
+    );
+    assert_eq!(
+        normalized
+            .channels
+            .get("feishu-main")
+            .and_then(|channel| channel.runner_id.as_deref()),
+        Some(DEFAULT_CLAUDE_CODE_RUNNER_ID)
+    );
+    assert_eq!(
+        canonical_external_cli_runner_id(&normalized, "claude code"),
+        DEFAULT_CLAUDE_CODE_RUNNER_ID
+    );
+}
+
+#[test]
 fn normalized_gateway_config_empty_runners_uses_enabled_named_defaults() {
     let normalized = normalized_gateway_config(ExternalCliGatewayConfig {
         default_runner_id: "codex".to_string(),

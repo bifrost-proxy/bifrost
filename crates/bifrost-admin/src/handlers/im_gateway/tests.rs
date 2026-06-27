@@ -336,7 +336,7 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
         runner: Some(bifrost_agent::AgentRunnerMode::Custom(
-            "Claude Code".to_string(),
+            "Claude-Code".to_string(),
         )),
         work_dir: None,
         base_instructions: None,
@@ -348,7 +348,7 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
         version: 1,
         default_runner_id: "Codex".to_string(),
         runners: std::collections::BTreeMap::from([(
-            "Claude Code".to_string(),
+            "Claude-Code".to_string(),
             crate::im_gateway::external_cli::ExternalCliAgentSettings {
                 adapter: crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER.to_string(),
                 enabled: true,
@@ -372,7 +372,7 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
         context.runner_type,
         crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
     );
-    assert_eq!(context.runner_id.as_deref(), Some("Claude Code"));
+    assert_eq!(context.runner_id.as_deref(), Some("Claude-Code"));
     assert_eq!(context.model.as_deref(), Some("claude-opus-4-7"));
     assert_eq!(context.model_provider.as_deref(), Some("sonnet"));
     assert!(message.contains("- **Model**: `claude-opus-4-7（sonnet）`"));

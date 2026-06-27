@@ -1075,7 +1075,7 @@ test("Agent Runners 新增弹窗只展示当前支持的 Adapter", async ({ page
         runners: {
           codex: { enabled: true, adapter: "codex", adapterConfig: {} },
           traex: { enabled: true, adapter: "traex", adapterConfig: {} },
-          "Claude Code": { enabled: true, adapter: "claude_code", adapterConfig: {} },
+          "Claude-Code": { enabled: true, adapter: "claude_code", adapterConfig: {} },
           web: { enabled: true, adapter: "chatgpt_web", adapterConfig: {} },
         },
         channels: {},

@@ -778,7 +778,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ));
                 }
                 if json
-                    .pointer("/runners/Claude Code/adapter")
+                    .pointer("/runners/Claude-Code/adapter")
                     .and_then(|v| v.as_str())
                     != Some("claude_code")
                 {
@@ -788,7 +788,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     ));
                 }
                 if json
-                    .pointer("/runners/Claude Code/enabled")
+                    .pointer("/runners/Claude-Code/enabled")
                     .and_then(|v| v.as_bool())
                     != Some(true)
                 {
