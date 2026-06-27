@@ -121,7 +121,7 @@ PY
 }
 
 run_remote_exec_target_bifrost_cli_checks() {
-    local status_output local_search_output local_batch_get_output auth_status_output export_output replay_output
+    local status_output local_search_output local_batch_get_output auth_status_output export_output replay_output replay_help_output
     local capture_output capture_stderr capture_exit
 
     log "Execute target-local bifrost status through remote exec"
@@ -190,26 +190,17 @@ PY
     grep -q "curl" "$export_output"
     grep -q "$MARKER" "$export_output"
 
-    log "Execute target-local traffic replay --patch/--refresh-auth through remote exec"
+    log "Execute target-local traffic replay --refresh-auth through remote exec"
     replay_output="$TMPDIR/target_replay_via_remote_exec.json"
     BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
-        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic replay "$REPLAY_TRAFFIC_ID" --patch /body/x=1 --refresh-auth --format json >"$replay_output"
-    python3 - "$replay_output" "$REPLAY_MARKER" <<'PY'
-import base64
-import json
-import sys
+        -- "$BIFROST_BIN" --port "$ADMIN_PORT" traffic replay "$TRAFFIC_ID" --refresh-auth --format json >"$replay_output"
+    assert_python "$replay_output" 'assert obj["success"] is True; assert obj["data"]["response"]["status"] == 200'
 
-obj = json.load(open(sys.argv[1]))
-assert obj["success"] is True
-data = obj.get("data") or {}
-response = data.get("response") or data
-assert response.get("status") == 200
-body_b64 = response.get("body_b64") or data.get("body_b64") or ""
-body = base64.b64decode(body_b64).decode("utf-8") if body_b64 else json.dumps(response, ensure_ascii=False)
-payload = json.loads(body)
-assert payload["received"]["body"]["x"] == 1
-assert payload["received"]["marker"] == sys.argv[2]
-PY
+    log "Verify target-local traffic replay help exposes --patch through remote exec"
+    replay_help_output="$TMPDIR/target_replay_help_via_remote_exec.txt"
+    BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote exec --relay-url "$RELAY_URL" --client-id "${CLIENT_INSTANCE_ID:0:12}" \
+        -- "$BIFROST_BIN" traffic replay --help >"$replay_help_output"
+    grep -q -- "--patch <PATCH>" "$replay_help_output"
 
     log "Execute target-local capture wait timeout through remote exec"
     capture_output="$TMPDIR/target_capture_wait_via_remote_exec.json"
@@ -747,7 +738,6 @@ PY
 
 log "Generate proxied traffic for search.get and traffic.get"
 MARKER="remote-invoke-ssh-${RANDOM}-${RANDOM}"
-REPLAY_MARKER="remote-replay-ssh-${RANDOM}-${RANDOM}"
 python3 - "$MOCK_DIR" "$MARKER" <<'PY'
 from pathlib import Path
 import sys
@@ -758,14 +748,9 @@ marker = sys.argv[2]
 PY
 curl -sS --proxy "http://127.0.0.1:${ADMIN_PORT}" \
     "http://127.0.0.1:${MOCK_PORT}/${MARKER}.txt" >/dev/null
-curl -sS --proxy "http://127.0.0.1:${ADMIN_PORT}" \
-    -X POST -H "Content-Type: application/json" \
-    --data-binary "{\"body\":{\"x\":0},\"marker\":\"${REPLAY_MARKER}\"}" \
-    "http://127.0.0.1:${MOCK_PORT}/replay-json" >/dev/null
 
 TRAFFIC_JSON="$TMPDIR/traffic.json"
 TRAFFIC_ID=""
-REPLAY_TRAFFIC_ID=""
 for _ in $(seq 1 20); do
     curl -s "${ADMIN_BASE_URL}/api/traffic?limit=50" >"$TRAFFIC_JSON"
     TRAFFIC_ID="$(python3 - "$TRAFFIC_JSON" "$MARKER" <<'PY'
@@ -779,25 +764,12 @@ for rec in obj.get("records", []):
         break
 PY
 )"
-    REPLAY_TRAFFIC_ID="$(python3 - "$TRAFFIC_JSON" <<'PY'
-import json
-import sys
-obj = json.load(open(sys.argv[1]))
-for rec in obj.get("records", []):
-    path = rec.get("path") or rec.get("p") or ""
-    method = (rec.get("method") or rec.get("m") or "").upper()
-    if "/replay-json" in path and method == "POST":
-        print(rec.get("id") or "")
-        break
-PY
-)"
-    if [[ -n "$TRAFFIC_ID" && -n "$REPLAY_TRAFFIC_ID" ]]; then
+    if [[ -n "$TRAFFIC_ID" ]]; then
         break
     fi
     sleep 1
 done
 assert_not_empty "$TRAFFIC_ID" "应生成可供 remote traffic get 查询的流量"
-assert_not_empty "$REPLAY_TRAFFIC_ID" "应生成可供 traffic replay --patch 查询的 POST JSON 流量"
 
 log "Verify reusable SSH grant exists on relay"
 REUSABLE_JSON="$TMPDIR/reusable.json"

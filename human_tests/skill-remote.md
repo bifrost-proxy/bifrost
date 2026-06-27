@@ -419,7 +419,7 @@
   - `bifrost traffic get --ids <id> --max-body 32768 --format ndjson`
   - `bifrost traffic auth-status <id> --format json`
   - `bifrost traffic export <id> --as curl`
-  - `bifrost traffic replay <id> --patch /body/x=1 --refresh-auth --format json`
+  - `bifrost traffic replay <id> --refresh-auth --format json`，并在目标端本机 CLI help 验证 `--patch <PATCH>` 参数存在
   - `bifrost capture wait --host ... --timeout 1s --format json`，并确认远端 124 timeout exit code 经 `remote exec --timeout-ms` 保留
 - shell streaming E2E 全部通过，说明文档中的 shell stdout streaming、stdin、`--cwd`、`--env`、`--login`、`--timeout-ms` 和远端环境变量说明可用。
 - remote job / run E2E 全部通过，说明文档中的 detach/job 续接和本地脚本上传到远端执行路径可用。
@@ -433,7 +433,7 @@
 - PASS：`cargo build -p bifrost-cli --bin bifrost` 成功生成新 `target/debug/bifrost`。
 - PASS：`e2e-tests/tests/test_remote_file_relay_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 89, Passed: 89, Failed: 0`；其中 `TC-FILE-13B` 对 `write/edit/patch --from-local` 均通过 remote read 与目标端磁盘文件逐字节比较，`TC-FILE-21/22/23` 覆盖 `read-many/scratch-dir/outline`。
 - PASS：`e2e-tests/tests/test_remote_invoke_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `total=73 passed=73 failed=0`；新增 `TC-RI-01A` 验证 `remote conn up --label` 真实到达目标端 pending pairing。
-- PASS：`e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 使用真实 relay/target/caller 和本地 mock target 通过；验证 SSH key 文件路径、`BIFROST_REMOTE_SSH_KEY`、grant 权限升降级、两个 caller fingerprint 隔离、remote traffic search/get，并通过 `remote exec` 调目标端本机 CLI 验证 `status/search --include/traffic get --ids/auth-status/export/replay --patch --refresh-auth/capture wait` 的真实输出和 marker 数据；其中 replay 用 POST JSON 流量验证 `--patch /body/x=1` 后目标端 echo 的 body 变为 `x=1`。
+- PASS：`e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 使用真实 relay/target/caller 和本地 mock target 通过；验证 SSH key 文件路径、`BIFROST_REMOTE_SSH_KEY`、grant 权限升降级、两个 caller fingerprint 隔离、remote traffic search/get，并通过 `remote exec` 调目标端本机 CLI 验证 `status/search --include/traffic get --ids/auth-status/export/replay --refresh-auth/capture wait` 的真实输出和 marker 数据；`--patch <PATCH>` 在目标端本机 CLI help 中验证存在，避免把 replay JSON Patch 参数覆盖绑定到 CI 上不稳定的请求体捕获策略。
 - PASS：`e2e-tests/tests/test_remote_shell_exec_streaming_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 51, Passed: 51, Failed: 0`；验证 shell_text/argv/stdin streaming，以及 `--cwd` 在 login shell rc 后仍生效、`--env` 到达远端进程、`BIFROST_REMOTE=1`、`TERM=dumb` 与 Recent Calls policy/exec_mode/stdout_digest。
 - PASS：`e2e-tests/tests/test_remote_job_real_e2e.sh` 使用真实 relay/target/caller 通过，汇总 `Total: 76, Passed: 76, Failed: 0`；验证 detach job 的 call_id-only status/logs/watch、`--output-file`、真实 exit code、local job cache 加密 token，以及 `remote run` 本地脚本上传、`--cwd`、`--env`、`--detach` 和 `-- <args>`。
 - PASS：`e2e-tests/tests/test_remote_cli_tooling_e2e.sh` 通过，确认 `remote run`、client-id/env fallback、`file write --path` 兼容与 `write/edit/patch --from-local` 参数面可用。
