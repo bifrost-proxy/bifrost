@@ -535,12 +535,14 @@ const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
 
 pub fn derive_open_call_session_key(
     shared_secret: &[u8],
-    grant_id: &str,
+    _grant_id: &str,
     caller_ephemeral_pub: Option<&str>,
     client_ephemeral_pub: Option<&str>,
     command_kind: CommandKind,
 ) -> Result<[u8; 32]> {
-    let salt = Salt::new(HKDF_SHA256, grant_id.as_bytes());
+    // v5 callers no longer see grant_id, so the open-call key schedule cannot
+    // depend on it. The grant_id parameter is kept for source compatibility.
+    let salt = Salt::new(HKDF_SHA256, b"bifrost-open-call-v5");
     let prk = salt.extract(shared_secret);
 
     let caller_pub = decode_base64_or_raw(caller_ephemeral_pub.unwrap_or_default());
