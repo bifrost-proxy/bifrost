@@ -1,9 +1,10 @@
 import crypto from 'crypto';
-import mysql, { type Pool, type RowDataPacket, type ResultSetHeader } from 'mysql2/promise';
+import mysql, { type ExecuteValues, type Pool, type RowDataPacket, type ResultSetHeader } from 'mysql2/promise';
 import { nanoid } from 'nanoid';
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, MysqlConfig,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
+  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord,
 } from '../types';
 import type { IUserDao, IEnvDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao } from './types';
 
@@ -493,6 +494,409 @@ export class MysqlGroupSettingDao implements IGroupSettingDao {
   }
 }
 
+export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
+  constructor(private pool: Pool) {}
+
+  async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
+    await this.pool.execute(
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time],
+    );
+    return p;
+  }
+
+  async getPairing(pairingId: string): Promise<RemoteInvokePairing | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_pairings WHERE id = ?', [pairingId]);
+    return rows[0] as RemoteInvokePairing | undefined;
+  }
+
+  async getPairingByClaimTokenHash(hash: string): Promise<RemoteInvokePairing | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_pairings WHERE claim_token_hash = ? LIMIT 1', [hash]);
+    return rows[0] as RemoteInvokePairing | undefined;
+  }
+
+  async getPairingByWatchTokenHash(hash: string): Promise<RemoteInvokePairing | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_pairings WHERE watch_token_hash = ? LIMIT 1', [hash]);
+    return rows[0] as RemoteInvokePairing | undefined;
+  }
+
+  async setPairingClaimTokens(pairingId: string, claimHash: string, watchHash: string, claimExpiresAt: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_pairings SET claim_token_hash = ?, watch_token_hash = ?, claim_expires_at = ?, update_time = ? WHERE id = ?',
+      [claimHash, watchHash, claimExpiresAt, new Date().toISOString(), pairingId],
+    );
+  }
+
+  async markPairingClaimed(pairingId: string, claimedAt: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_pairings SET claimed_at = ?, claim_token_hash = ?, update_time = ? WHERE id = ?',
+      [claimedAt, '', claimedAt, pairingId],
+    );
+  }
+
+  async updatePairing(pairingId: string, fields: Partial<RemoteInvokePairing>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(pairingId);
+    await this.pool.execute(`UPDATE bifrost_remote_invoke_pairings SET ${sets.join(', ')} WHERE id = ?`, params as ExecuteValues[]);
+  }
+
+  async findPairingByCode(userId: string, clientInstanceId: string, pairCode: string): Promise<RemoteInvokePairing | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_pairings WHERE user_id = ? AND client_instance_id = ? AND pair_code = ? AND status = ? ORDER BY create_time DESC LIMIT 1',
+      [userId, clientInstanceId, pairCode, 'pending_approval'],
+    );
+    return rows[0] as RemoteInvokePairing | undefined;
+  }
+
+  async countPendingPairings(clientInstanceId: string): Promise<number> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT COUNT(*) as total FROM bifrost_remote_invoke_pairings WHERE client_instance_id = ? AND status = ?',
+      [clientInstanceId, 'pending_approval'],
+    );
+    return rows[0]?.total as number ?? 0;
+  }
+
+  async listPendingPairings(clientInstanceId: string): Promise<RemoteInvokePairing[]> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_pairings WHERE client_instance_id = ? AND status = ? ORDER BY create_time DESC',
+      [clientInstanceId, 'pending_approval'],
+    );
+    return rows as RemoteInvokePairing[];
+  }
+
+  async cancelPendingPairings(clientInstanceId: string): Promise<number> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      'UPDATE bifrost_remote_invoke_pairings SET status = ?, update_time = ? WHERE client_instance_id = ? AND status = ?',
+      ['rejected', new Date().toISOString(), clientInstanceId, 'pending_approval'],
+    );
+    return result.affectedRows;
+  }
+
+  async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
+    const callerPubkeyFp = g.caller_pubkey_fp ?? g.caller_fingerprint;
+    await this.pool.execute(
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_pubkey, caller_pubkey_fp, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, file_access, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, session_token_hash, session_token_expires_at, last_nonce_seen, revoked_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [g.id, g.user_id, g.client_instance_id, g.caller_fingerprint, g.caller_display_name, g.caller_pubkey ?? '', callerPubkeyFp, g.caller_ephemeral_pub ?? '', g.client_ephemeral_pub ?? '', g.grant_mode, g.grant_scope, g.file_access ?? 'none', g.ssh_key_id ?? '', g.ssh_key_fingerprint ?? '', g.status, g.first_authorized_at, g.expires_at, g.session_token_hash ?? '', g.session_token_expires_at ?? '', g.last_nonce_seen ?? '', g.revoked_at ?? '', g.last_used_at, g.max_calls, g.remaining_calls, g.created_by, g.update_time],
+    );
+    return g;
+  }
+
+  async getGrant(grantId: string): Promise<RemoteInvokeGrant | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_grants WHERE id = ?', [grantId]);
+    return rows[0] as RemoteInvokeGrant | undefined;
+  }
+
+  async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
+    const params = userId
+      ? [userId, clientInstanceId, callerFingerprint, 'active']
+      : [clientInstanceId, callerFingerprint, 'active'];
+    const where = userId
+      ? 'user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ?'
+      : 'client_instance_id = ? AND caller_fingerprint = ? AND status = ?';
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT * FROM bifrost_remote_invoke_grants WHERE ${where} ORDER BY first_authorized_at DESC LIMIT 1`,
+      params,
+    );
+    return rows[0] as RemoteInvokeGrant | undefined;
+  }
+
+  async getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<RemoteInvokeGrant | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_pubkey_fp = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1',
+      [clientInstanceId, callerFp, 'active'],
+    );
+    return rows[0] as RemoteInvokeGrant | undefined;
+  }
+
+  async getGrantBySessionTokenHash(hash: string): Promise<RemoteInvokeGrant | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE session_token_hash = ? LIMIT 1',
+      [hash],
+    );
+    return rows[0] as RemoteInvokeGrant | undefined;
+  }
+
+  async updateGrantCallerPubkey(grantId: string, pubkey: string, fp: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET caller_pubkey = ?, caller_pubkey_fp = ?, caller_fingerprint = ?, update_time = ? WHERE id = ?',
+      [pubkey, fp, fp, new Date().toISOString(), grantId],
+    );
+  }
+
+  async updateGrantCallerEphemeralPub(grantId: string, pub: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET caller_ephemeral_pub = ?, update_time = ? WHERE id = ?',
+      [pub, new Date().toISOString(), grantId],
+    );
+  }
+
+  async updateGrantClientEphemeralPub(grantId: string, pub: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET client_ephemeral_pub = ?, update_time = ? WHERE id = ?',
+      [pub, new Date().toISOString(), grantId],
+    );
+  }
+
+  async updateGrantSessionToken(grantId: string, hash: string, expiresAt: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET session_token_hash = ?, session_token_expires_at = ?, update_time = ? WHERE id = ?',
+      [hash, expiresAt, new Date().toISOString(), grantId],
+    );
+  }
+
+  async revokeGrant(grantId: string, revokedAt: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET status = ?, revoked_at = ?, session_token_hash = ?, update_time = ? WHERE id = ?',
+      ['revoked', revokedAt, '', revokedAt, grantId],
+    );
+  }
+
+  async markNonceUsed(callerFp: string, nonce: string, seenAt: string): Promise<boolean> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      'INSERT IGNORE INTO bifrost_remote_invoke_nonces (caller_pubkey_fp, nonce, seen_at) VALUES (?, ?, ?)',
+      [callerFp, nonce, seenAt],
+    );
+    if (result.affectedRows > 0) {
+      await this.pool.execute(
+        'UPDATE bifrost_remote_invoke_grants SET last_nonce_seen = ?, update_time = ? WHERE caller_pubkey_fp = ?',
+        [nonce, seenAt, callerFp],
+      );
+      return true;
+    }
+    return false;
+  }
+
+  async gcNonces(before: string): Promise<number> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      'DELETE FROM bifrost_remote_invoke_nonces WHERE seen_at < ?',
+      [before],
+    );
+    return result.affectedRows;
+  }
+
+  async listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeGrant[]; total: number }> {
+    const conditions: string[] = ['user_id = ?'];
+    const params: unknown[] = [userId];
+    if (query.client_instance_id) {
+      conditions.push('client_instance_id = ?');
+      params.push(query.client_instance_id);
+    }
+    if (query.status) {
+      conditions.push('status = ?');
+      params.push(query.status);
+    }
+    const where = conditions.join(' AND ');
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 100;
+    const [countRows] = await this.pool.execute<RowDataPacket[]>(`SELECT COUNT(*) as total FROM bifrost_remote_invoke_grants WHERE ${where}`, params as ExecuteValues[]);
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT * FROM bifrost_remote_invoke_grants WHERE ${where} ORDER BY first_authorized_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset] as ExecuteValues[],
+    );
+    return { list: rows as RemoteInvokeGrant[], total: countRows[0]?.total as number ?? 0 };
+  }
+
+  async countActiveGrantsForClient(clientInstanceId: string): Promise<number> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT COUNT(*) as total FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ?',
+      [clientInstanceId, 'active'],
+    );
+    return rows[0]?.total as number ?? 0;
+  }
+
+  async listActiveGrantsForClient(clientInstanceId: string): Promise<RemoteInvokeGrant[]> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND status = ? ORDER BY first_authorized_at DESC',
+      [clientInstanceId, 'active'],
+    );
+    return rows as RemoteInvokeGrant[];
+  }
+
+  async revokeActiveGrantsForCaller(clientInstanceId: string, callerFingerprint: string, excludeGrantId?: string): Promise<number> {
+    const now = new Date().toISOString();
+    const params = excludeGrantId
+      ? ['removed', now, clientInstanceId, callerFingerprint, 'active', excludeGrantId]
+      : ['removed', now, clientInstanceId, callerFingerprint, 'active'];
+    const suffix = excludeGrantId ? ' AND id != ?' : '';
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE bifrost_remote_invoke_grants SET status = ?, update_time = ? WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ?${suffix}`,
+      params,
+    );
+    return result.affectedRows;
+  }
+
+  async updateGrant(grantId: string, fields: Partial<RemoteInvokeGrant>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(grantId);
+    await this.pool.execute(`UPDATE bifrost_remote_invoke_grants SET ${sets.join(', ')} WHERE id = ?`, params as ExecuteValues[]);
+  }
+
+  async deleteGrant(grantId: string): Promise<boolean> {
+    const [result] = await this.pool.execute<ResultSetHeader>('DELETE FROM bifrost_remote_invoke_grants WHERE id = ?', [grantId]);
+    return result.affectedRows > 0;
+  }
+
+  async revokeSshGrantsForClient(clientInstanceId: string): Promise<number> {
+    const now = new Date().toISOString();
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      'UPDATE bifrost_remote_invoke_grants SET status = ?, update_time = ? WHERE client_instance_id = ? AND status = ? AND created_by = ?',
+      ['removed', now, clientInstanceId, 'active', 'ssh_publickey'],
+    );
+    return result.affectedRows;
+  }
+
+  async touchGrantLastUsed(grantId: string, ts: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET last_used_at = ?, update_time = ? WHERE id = ?',
+      [ts, ts, grantId],
+    );
+  }
+
+  async consumeGrantCall(grantId: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_grants SET remaining_calls = GREATEST(remaining_calls - 1, 0), update_time = ? WHERE id = ?',
+      [new Date().toISOString(), grantId],
+    );
+  }
+
+  async createCall(c: RemoteInvokeCall): Promise<RemoteInvokeCall> {
+    await this.pool.execute(
+      `INSERT INTO bifrost_remote_invoke_calls (id, user_id, grant_id, pairing_id, client_instance_id, caller_fingerprint, source_ip, caller_display_name, status, command_summary_json, command_json, payload_digest, stdout_digest, stderr_digest, exit_code, started_at, ended_at, duration_ms, bytes_in, bytes_out) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [c.id, c.user_id, c.grant_id, c.pairing_id, c.client_instance_id, c.caller_fingerprint, c.source_ip, c.caller_display_name, c.status, c.command_summary_json, c.command_json, c.payload_digest, c.stdout_digest, c.stderr_digest, c.exit_code, c.started_at, c.ended_at, c.duration_ms, c.bytes_in, c.bytes_out],
+    );
+    return c;
+  }
+
+  async getCall(callId: string): Promise<RemoteInvokeCall | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_calls WHERE id = ?', [callId]);
+    return rows[0] as RemoteInvokeCall | undefined;
+  }
+
+  async updateCall(callId: string, fields: Partial<RemoteInvokeCall>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(callId);
+    await this.pool.execute(`UPDATE bifrost_remote_invoke_calls SET ${sets.join(', ')} WHERE id = ?`, params as ExecuteValues[]);
+  }
+
+  async listCalls(userId: string, query: { client_instance_id?: string; caller_fingerprint?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeCall[]; total: number }> {
+    const conditions: string[] = ['user_id = ?'];
+    const params: unknown[] = [userId];
+    if (query.client_instance_id) {
+      conditions.push('client_instance_id = ?');
+      params.push(query.client_instance_id);
+    }
+    if (query.caller_fingerprint) {
+      conditions.push('caller_fingerprint = ?');
+      params.push(query.caller_fingerprint);
+    }
+    if (query.status) {
+      conditions.push('status = ?');
+      params.push(query.status);
+    }
+    const where = conditions.join(' AND ');
+    const offset = query.offset ?? 0;
+    const limit = query.limit ?? 100;
+    const [countRows] = await this.pool.execute<RowDataPacket[]>(`SELECT COUNT(*) as total FROM bifrost_remote_invoke_calls WHERE ${where}`, params as ExecuteValues[]);
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT * FROM bifrost_remote_invoke_calls WHERE ${where} ORDER BY started_at DESC LIMIT ? OFFSET ?`,
+      [...params, limit, offset] as ExecuteValues[],
+    );
+    return { list: rows as RemoteInvokeCall[], total: countRows[0]?.total as number ?? 0 };
+  }
+
+  async appendEvent(event: RemoteInvokeEvent): Promise<void> {
+    await this.pool.execute(
+      'INSERT INTO bifrost_remote_invoke_events (id, call_id, event_type, seq, direction, event_summary_json, create_time) VALUES (?, ?, ?, ?, ?, ?, ?)',
+      [event.id, event.call_id, event.event_type, event.seq, event.direction, event.event_summary_json, event.create_time],
+    );
+  }
+
+  async listCallEvents(callId: string, query?: { offset?: number; limit?: number }): Promise<{ list: RemoteInvokeEvent[]; total: number }> {
+    const offset = query?.offset ?? 0;
+    const limit = query?.limit ?? 500;
+    const [countRows] = await this.pool.execute<RowDataPacket[]>('SELECT COUNT(*) as total FROM bifrost_remote_invoke_events WHERE call_id = ?', [callId]);
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_remote_invoke_events WHERE call_id = ? ORDER BY create_time ASC LIMIT ? OFFSET ?',
+      [callId, limit, offset],
+    );
+    return { list: rows as RemoteInvokeEvent[], total: countRows[0]?.total as number ?? 0 };
+  }
+
+  async registerClient(record: RemoteInvokeClientRecord): Promise<void> {
+    await this.pool.execute(
+      `INSERT INTO bifrost_remote_invoke_clients (client_instance_id, user_id, client_name, platform, bifrost_version, client_auth_token, client_pubkey_hash, token_expires_at, last_heartbeat_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE user_id = VALUES(user_id), client_name = VALUES(client_name), platform = VALUES(platform), bifrost_version = VALUES(bifrost_version), client_auth_token = VALUES(client_auth_token), client_pubkey_hash = VALUES(client_pubkey_hash), token_expires_at = VALUES(token_expires_at), last_heartbeat_at = VALUES(last_heartbeat_at), update_time = VALUES(update_time)`,
+      [record.client_instance_id, record.user_id, record.client_name, record.platform, record.bifrost_version, record.client_auth_token, record.client_pubkey_hash, record.token_expires_at, record.last_heartbeat_at, record.create_time, record.update_time],
+    );
+  }
+
+  async getClientRecord(clientInstanceId: string): Promise<RemoteInvokeClientRecord | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_clients WHERE client_instance_id = ?', [clientInstanceId]);
+    return rows[0] as RemoteInvokeClientRecord | undefined;
+  }
+
+  async updateClientRecord(clientInstanceId: string, fields: Partial<RemoteInvokeClientRecord>): Promise<void> {
+    const sets: string[] = [];
+    const params: unknown[] = [];
+    for (const [key, val] of Object.entries(fields)) {
+      if (key === 'client_instance_id') continue;
+      sets.push(`${key} = ?`);
+      params.push(val);
+    }
+    if (sets.length === 0) return;
+    params.push(clientInstanceId);
+    await this.pool.execute(`UPDATE bifrost_remote_invoke_clients SET ${sets.join(', ')} WHERE client_instance_id = ?`, params as ExecuteValues[]);
+  }
+
+  async cleanupExpiredData(_now: string, retentionDays: number, maxRecords: number): Promise<number> {
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
+    let total = 0;
+
+    for (const [sql, params] of [
+      ['DELETE FROM bifrost_remote_invoke_events WHERE create_time < ?', [cutoff]],
+      ['DELETE FROM bifrost_remote_invoke_calls WHERE started_at < ?', [cutoff]],
+      ['DELETE FROM bifrost_remote_invoke_pairings WHERE create_time < ?', [cutoff]],
+    ] as const) {
+      const [result] = await this.pool.execute<ResultSetHeader>(sql, params as unknown as ExecuteValues[]);
+      total += result.affectedRows;
+    }
+
+    const [countRows] = await this.pool.execute<RowDataPacket[]>('SELECT COUNT(*) as cnt FROM bifrost_remote_invoke_calls');
+    const count = countRows[0]?.cnt as number ?? 0;
+    if (count > maxRecords) {
+      const excess = count - maxRecords;
+      const [result] = await this.pool.execute<ResultSetHeader>(
+        'DELETE FROM bifrost_remote_invoke_calls WHERE id IN (SELECT id FROM (SELECT id FROM bifrost_remote_invoke_calls ORDER BY started_at ASC LIMIT ?) AS old_calls)',
+        [excess],
+      );
+      total += result.affectedRows;
+    }
+
+    return total;
+  }
+}
+
 export class MysqlStorage implements IStorage {
   public user: MysqlUserDao;
   public env: MysqlEnvDao;
@@ -517,9 +921,7 @@ export class MysqlStorage implements IStorage {
     this.group = new MysqlGroupDao(this.pool);
     this.groupMember = new MysqlGroupMemberDao(this.pool);
     this.groupSetting = new MysqlGroupSettingDao(this.pool);
-    this.remoteInvoke = new Proxy({} as IRemoteInvokeDao, {
-      get: () => () => { throw new Error('remote invoke not supported for MySQL storage'); },
-    });
+    this.remoteInvoke = new MysqlRemoteInvokeDao(this.pool);
   }
 
   async close(): Promise<void> {

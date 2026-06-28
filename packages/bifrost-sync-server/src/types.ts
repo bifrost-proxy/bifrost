@@ -233,6 +233,10 @@ export interface RemoteInvokePairing {
   relay_token: string;
   call_id: string;
   grant_id: string;
+  watch_token_hash?: string;
+  claim_token_hash?: string;
+  claim_expires_at?: string;
+  claimed_at?: string;
   expires_at: string;
   create_time: string;
   update_time: string;
@@ -244,6 +248,8 @@ export interface RemoteInvokeGrant {
   client_instance_id: string;
   caller_fingerprint: string;
   caller_display_name: string;
+  caller_pubkey?: string;
+  caller_pubkey_fp?: string;
   caller_ephemeral_pub?: string;
   client_ephemeral_pub?: string;
   grant_mode: GrantMode;
@@ -254,6 +260,10 @@ export interface RemoteInvokeGrant {
   status: GrantStatus;
   first_authorized_at: string;
   expires_at: string;
+  session_token_hash?: string;
+  session_token_expires_at?: string;
+  last_nonce_seen?: string;
+  revoked_at?: string;
   last_used_at: string;
   max_calls: number;
   remaining_calls: number;

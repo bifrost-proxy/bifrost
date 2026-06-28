@@ -418,13 +418,33 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.expires_at, p.create_time, p.update_time);
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time);
     return p;
   }
 
   async getPairing(pairingId: string): Promise<RemoteInvokePairing | undefined> {
     return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE id = ?').get(pairingId) as RemoteInvokePairing | undefined;
+  }
+
+  async getPairingByClaimTokenHash(hash: string): Promise<RemoteInvokePairing | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE claim_token_hash = ? LIMIT 1').get(hash) as RemoteInvokePairing | undefined;
+  }
+
+  async getPairingByWatchTokenHash(hash: string): Promise<RemoteInvokePairing | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_pairings WHERE watch_token_hash = ? LIMIT 1').get(hash) as RemoteInvokePairing | undefined;
+  }
+
+  async setPairingClaimTokens(pairingId: string, claimHash: string, watchHash: string, claimExpiresAt: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_pairings SET claim_token_hash = ?, watch_token_hash = ?, claim_expires_at = ?, update_time = ? WHERE id = ?',
+    ).run(claimHash, watchHash, claimExpiresAt, new Date().toISOString(), pairingId);
+  }
+
+  async markPairingClaimed(pairingId: string, claimedAt: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_pairings SET claimed_at = ?, claim_token_hash = ?, update_time = ? WHERE id = ?',
+    ).run(claimedAt, '', claimedAt, pairingId);
   }
 
   async updatePairing(pairingId: string, fields: Partial<RemoteInvokePairing>): Promise<void> {
@@ -459,14 +479,17 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
   }
 
   async createGrant(g: RemoteInvokeGrant): Promise<RemoteInvokeGrant> {
+    const callerPubkeyFp = g.caller_pubkey_fp ?? g.caller_fingerprint;
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, file_access, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO bifrost_remote_invoke_grants (id, user_id, client_instance_id, caller_fingerprint, caller_display_name, caller_pubkey, caller_pubkey_fp, caller_ephemeral_pub, client_ephemeral_pub, grant_mode, grant_scope, file_access, ssh_key_id, ssh_key_fingerprint, status, first_authorized_at, expires_at, session_token_hash, session_token_expires_at, last_nonce_seen, revoked_at, last_used_at, max_calls, remaining_calls, created_by, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(
       g.id,
       g.user_id,
       g.client_instance_id,
       g.caller_fingerprint,
       g.caller_display_name,
+      g.caller_pubkey ?? '',
+      callerPubkeyFp,
       g.caller_ephemeral_pub ?? '',
       g.client_ephemeral_pub ?? '',
       g.grant_mode,
@@ -477,6 +500,10 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
       g.status,
       g.first_authorized_at,
       g.expires_at,
+      g.session_token_hash ?? '',
+      g.session_token_expires_at ?? '',
+      g.last_nonce_seen ?? '',
+      g.revoked_at ?? '',
       g.last_used_at,
       g.max_calls,
       g.remaining_calls,
@@ -495,6 +522,66 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
       return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
     }
     return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
+  }
+
+  async getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<RemoteInvokeGrant | undefined> {
+    return this.db.prepare(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_pubkey_fp = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1',
+    ).get(clientInstanceId, callerFp, 'active') as RemoteInvokeGrant | undefined;
+  }
+
+  async getGrantBySessionTokenHash(hash: string): Promise<RemoteInvokeGrant | undefined> {
+    return this.db.prepare(
+      'SELECT * FROM bifrost_remote_invoke_grants WHERE session_token_hash = ? LIMIT 1',
+    ).get(hash) as RemoteInvokeGrant | undefined;
+  }
+
+  async updateGrantCallerPubkey(grantId: string, pubkey: string, fp: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_grants SET caller_pubkey = ?, caller_pubkey_fp = ?, caller_fingerprint = ?, update_time = ? WHERE id = ?',
+    ).run(pubkey, fp, fp, new Date().toISOString(), grantId);
+  }
+
+  async updateGrantCallerEphemeralPub(grantId: string, pub: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_grants SET caller_ephemeral_pub = ?, update_time = ? WHERE id = ?',
+    ).run(pub, new Date().toISOString(), grantId);
+  }
+
+  async updateGrantClientEphemeralPub(grantId: string, pub: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_grants SET client_ephemeral_pub = ?, update_time = ? WHERE id = ?',
+    ).run(pub, new Date().toISOString(), grantId);
+  }
+
+  async updateGrantSessionToken(grantId: string, hash: string, expiresAt: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_grants SET session_token_hash = ?, session_token_expires_at = ?, update_time = ? WHERE id = ?',
+    ).run(hash, expiresAt, new Date().toISOString(), grantId);
+  }
+
+  async revokeGrant(grantId: string, revokedAt: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_grants SET status = ?, revoked_at = ?, session_token_hash = ?, update_time = ? WHERE id = ?',
+    ).run('revoked', revokedAt, '', revokedAt, grantId);
+  }
+
+  async markNonceUsed(callerFp: string, nonce: string, seenAt: string): Promise<boolean> {
+    const result = this.db.prepare(
+      'INSERT OR IGNORE INTO bifrost_remote_invoke_nonces (caller_pubkey_fp, nonce, seen_at) VALUES (?, ?, ?)',
+    ).run(callerFp, nonce, seenAt);
+    if (result.changes > 0) {
+      this.db.prepare(
+        'UPDATE bifrost_remote_invoke_grants SET last_nonce_seen = ?, update_time = ? WHERE caller_pubkey_fp = ?',
+      ).run(nonce, seenAt, callerFp);
+      return true;
+    }
+    return false;
+  }
+
+  async gcNonces(before: string): Promise<number> {
+    const result = this.db.prepare('DELETE FROM bifrost_remote_invoke_nonces WHERE seen_at < ?').run(before);
+    return result.changes;
   }
 
   async listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: RemoteInvokeGrant[]; total: number }> {
@@ -803,18 +890,26 @@ export class SqliteStorage implements IStorage {
         relay_token           TEXT NOT NULL DEFAULT '',
         call_id               TEXT NOT NULL DEFAULT '',
         grant_id              TEXT NOT NULL DEFAULT '',
+        watch_token_hash      TEXT NOT NULL DEFAULT '',
+        claim_token_hash      TEXT NOT NULL DEFAULT '',
+        claim_expires_at      TEXT NOT NULL DEFAULT '',
+        claimed_at            TEXT NOT NULL DEFAULT '',
         expires_at            TEXT NOT NULL DEFAULT '',
         create_time           TEXT NOT NULL,
         update_time           TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_ri_pairings_user_code ON bifrost_remote_invoke_pairings(user_id, pair_code, status);
       CREATE INDEX IF NOT EXISTS idx_ri_pairings_client ON bifrost_remote_invoke_pairings(client_instance_id, status);
+      CREATE INDEX IF NOT EXISTS idx_ri_pairings_claim ON bifrost_remote_invoke_pairings(claim_token_hash);
+      CREATE INDEX IF NOT EXISTS idx_ri_pairings_watch ON bifrost_remote_invoke_pairings(watch_token_hash);
       CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_grants (
         id                    TEXT PRIMARY KEY,
         user_id               TEXT NOT NULL,
         client_instance_id    TEXT NOT NULL,
         caller_fingerprint    TEXT NOT NULL DEFAULT '',
         caller_display_name   TEXT NOT NULL DEFAULT '',
+        caller_pubkey         TEXT NOT NULL DEFAULT '',
+        caller_pubkey_fp      TEXT NOT NULL DEFAULT '',
         caller_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         grant_mode            TEXT NOT NULL DEFAULT 'once',
@@ -825,6 +920,10 @@ export class SqliteStorage implements IStorage {
         status                TEXT NOT NULL DEFAULT 'active',
         first_authorized_at   TEXT NOT NULL DEFAULT '',
         expires_at            TEXT NOT NULL DEFAULT '',
+        session_token_hash    TEXT NOT NULL DEFAULT '',
+        session_token_expires_at TEXT NOT NULL DEFAULT '',
+        last_nonce_seen       TEXT NOT NULL DEFAULT '',
+        revoked_at            TEXT NOT NULL DEFAULT '',
         last_used_at          TEXT NOT NULL DEFAULT '',
         max_calls             INTEGER NOT NULL DEFAULT 1,
         remaining_calls       INTEGER NOT NULL DEFAULT 1,
@@ -833,6 +932,8 @@ export class SqliteStorage implements IStorage {
       );
       CREATE INDEX IF NOT EXISTS idx_ri_grants_reusable ON bifrost_remote_invoke_grants(user_id, client_instance_id, caller_fingerprint, status);
       CREATE INDEX IF NOT EXISTS idx_ri_grants_user ON bifrost_remote_invoke_grants(user_id, status, expires_at);
+      CREATE INDEX IF NOT EXISTS idx_ri_grants_caller_fp ON bifrost_remote_invoke_grants(caller_pubkey_fp);
+      CREATE INDEX IF NOT EXISTS idx_ri_grants_session ON bifrost_remote_invoke_grants(session_token_hash);
       CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_calls (
         id                    TEXT PRIMARY KEY,
         user_id               TEXT NOT NULL,
@@ -881,15 +982,38 @@ export class SqliteStorage implements IStorage {
         create_time           TEXT NOT NULL,
         update_time           TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_nonces (
+        caller_pubkey_fp      TEXT NOT NULL,
+        nonce                 TEXT NOT NULL,
+        seen_at               TEXT NOT NULL,
+        PRIMARY KEY (caller_pubkey_fp, nonce)
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_nonces_seen ON bifrost_remote_invoke_nonces(seen_at);
     `);
   }
 
   private resetRemoteInvokeSchemaIfNeeded() {
-    const columns = this.db.pragma('table_info(bifrost_remote_invoke_grants)') as Array<{ name: string }>;
+    const grantColumns = this.db.pragma('table_info(bifrost_remote_invoke_grants)') as Array<{ name: string }>;
+    const pairingColumns = this.db.pragma('table_info(bifrost_remote_invoke_pairings)') as Array<{ name: string }>;
+    const nonceTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bifrost_remote_invoke_nonces'",
+    ).get() as { name: string } | undefined;
     const required = [
       'ssh_key_id',
       'ssh_key_fingerprint',
       'file_access',
+      'caller_pubkey',
+      'caller_pubkey_fp',
+      'session_token_hash',
+      'session_token_expires_at',
+      'last_nonce_seen',
+      'revoked_at',
+    ];
+    const requiredPairing = [
+      'watch_token_hash',
+      'claim_token_hash',
+      'claim_expires_at',
+      'claimed_at',
     ];
     const forbidden = [
       'policy_binding',
@@ -898,8 +1022,10 @@ export class SqliteStorage implements IStorage {
       'stdin_allowed',
     ];
     const schemaMismatch =
-      required.some(name => !columns.some(col => col.name === name)) ||
-      forbidden.some(name => columns.some(col => col.name === name));
+      required.some(name => !grantColumns.some(col => col.name === name)) ||
+      requiredPairing.some(name => !pairingColumns.some(col => col.name === name)) ||
+      !nonceTable ||
+      forbidden.some(name => grantColumns.some(col => col.name === name));
     if (!schemaMismatch) {
       return;
     }
@@ -907,6 +1033,7 @@ export class SqliteStorage implements IStorage {
     this.db.exec(`
       DROP TABLE IF EXISTS bifrost_remote_invoke_events;
       DROP TABLE IF EXISTS bifrost_remote_invoke_calls;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_nonces;
       DROP TABLE IF EXISTS bifrost_remote_invoke_grants;
       DROP TABLE IF EXISTS bifrost_remote_invoke_pairings;
       DROP TABLE IF EXISTS bifrost_remote_invoke_clients;
