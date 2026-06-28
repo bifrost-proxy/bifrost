@@ -322,7 +322,14 @@ async fn start_sync_server() -> Result<(SyncServerGuard, String), String> {
         .ok_or_else(|| "cannot resolve repo root".to_string())?
         .to_path_buf();
 
-    let mut child = Command::new("pnpm")
+    let mut command = if cfg!(windows) {
+        let mut command = Command::new("cmd");
+        command.args(["/C", "pnpm"]);
+        command
+    } else {
+        Command::new("pnpm")
+    };
+    let mut child = command
         .current_dir(&repo_root)
         .args([
             "-C",
