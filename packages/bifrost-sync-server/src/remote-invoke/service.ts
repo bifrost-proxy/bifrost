@@ -11,7 +11,11 @@ import type {
   ClientCallFrameRequest,
   ClientCallStreamFrameRequest,
   ClientCallExitRequest,
-  OpenCallRequest,
+  OpenCallRequestV5,
+  GrantClaimRequest,
+  GrantLookupRequest,
+  GrantSessionResponse,
+  GrantSummary,
   CallsQueryParams,
   ClientRegistrationChallengeResponse,
   ClientRegistrationRequest,
@@ -50,6 +54,8 @@ const SHELL_VIEWER_RESUME_TTL_MS = 10 * 60 * 1000;
 const SHELL_RETENTION_TTL_MS = 24 * 60 * 60 * 1000;
 const SSH_CONNECT_STREAM_WAIT_MS = 10_000;
 const SSH_CONNECT_STREAM_POLL_MS = 100;
+const CLAIM_TOKEN_TTL_MS = 180_000;
+const GRANT_SESSION_TOKEN_TTL_MS = 30 * 60_000;
 
 interface CallRuntimeMeta {
   commandKind: RemoteCommandKind;
@@ -62,6 +68,14 @@ interface CallRuntimeMeta {
 
 function generateRelayToken(): string {
   return crypto.randomBytes(32).toString('hex');
+}
+
+function randomToken(): string {
+  return crypto.randomBytes(32).toString('hex');
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 function computeStoredPubkeyHash(pubkeyDer: Buffer): string {
@@ -325,7 +339,7 @@ export class RemoteInvokeService {
     return this.storage.remoteInvoke.cancelPendingPairings(clientInstanceId);
   }
 
-  async startPairing(userId: string, req: StartPairingRequest, sourceIp: string): Promise<{ pairing_id: string; status: string }> {
+  async startPairing(userId: string, req: StartPairingRequest, sourceIp: string): Promise<{ pairing_id: string; status: string; watch_token: string; client_instance_id: string }> {
     const result = findClientByPairCode(req.pair_code);
     if (!result.found) {
       if (result.reason === 'consumed') {
@@ -351,6 +365,7 @@ export class RemoteInvokeService {
     }
 
     const pairingId = nanoid();
+    const watchToken = randomToken();
     const now = new Date().toISOString();
     const expiresAt = new Date(Date.now() + this.config.pair_code_ttl_secs * 1000).toISOString();
 
@@ -370,6 +385,10 @@ export class RemoteInvokeService {
       relay_token: '',
       call_id: '',
       grant_id: '',
+      watch_token_hash: sha256Hex(watchToken),
+      claim_token_hash: '',
+      claim_expires_at: '',
+      claimed_at: '',
       expires_at: expiresAt,
       create_time: now,
       update_time: now,
@@ -400,10 +419,10 @@ export class RemoteInvokeService {
       create_time: now,
     });
 
-    return { pairing_id: pairingId, status: 'pending_approval' };
+    return { pairing_id: pairingId, status: 'pending_approval', watch_token: watchToken, client_instance_id: resolvedClientId };
   }
 
-  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ grant_id?: string; status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string; file_access?: string }> {
+  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string; file_access?: string; claim_token?: string; claim_expires_at?: string; grant_summary?: GrantSummary }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
     if (this.isPendingPairingExpired(pairing)) {
@@ -502,15 +521,14 @@ export class RemoteInvokeService {
     const deviceName = clientRecord?.client_name || pairing.client_instance_id;
     const platform = clientRecord?.platform || '';
 
+    const claim = await this.mintClaimToken(pairing.id);
+    const grantSummary = this.toGrantSummary(grant);
+
     pushToPairingWatcher(pairing.id, 'approved', {
-      status: 'approved',
-      grant_id: grantId,
-      client_instance_id: pairing.client_instance_id,
-      device_name: deviceName,
-      platform,
-      grant_mode: grantMode,
-      caller_ephemeral_pub: pairing.caller_ephemeral_pub,
-      client_ephemeral_pub: req.client_ephemeral_pub,
+      type: 'approved',
+      claim_token: claim.claim_token,
+      claim_expires_at: claim.claim_expires_at,
+      grant_summary: grantSummary,
     });
 
     let callerInfoObj: any = {};
@@ -534,12 +552,11 @@ export class RemoteInvokeService {
       event_type: 'pairing_approved',
       seq: 0,
       direction: '',
-      event_summary_json: JSON.stringify({ pairing_id: pairing.id, grant_id: grantId, grant_mode: grantMode }),
+      event_summary_json: JSON.stringify({ pairing_id: pairing.id, grant_mode: grantMode }),
       create_time: now,
     });
 
     return {
-      grant_id: grantId,
       status: 'approved',
       client_instance_id: pairing.client_instance_id,
       device_name: deviceName,
@@ -547,7 +564,100 @@ export class RemoteInvokeService {
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
       file_access: normalizeFileAccess(req.file_access),
+      claim_token: claim.claim_token,
+      claim_expires_at: claim.claim_expires_at,
+      grant_summary: grantSummary,
     };
+  }
+
+  async mintClaimToken(pairingId: string): Promise<{ claim_token: string; claim_expires_at: string }> {
+    const pairing = await this.storage.remoteInvoke.getPairing(pairingId);
+    if (!pairing) throw new Error('pairing_not_found');
+    const claimToken = randomToken();
+    const claimExpiresAt = new Date(Date.now() + CLAIM_TOKEN_TTL_MS).toISOString();
+    await this.storage.remoteInvoke.setPairingClaimTokens(
+      pairingId,
+      sha256Hex(claimToken),
+      pairing.watch_token_hash ?? '',
+      claimExpiresAt,
+    );
+    return { claim_token: claimToken, claim_expires_at: claimExpiresAt };
+  }
+
+  async redeemClaim(req: GrantClaimRequest, callerPubkeyFp: string): Promise<GrantSessionResponse> {
+    const pairing = await this.storage.remoteInvoke.getPairingByClaimTokenHash(sha256Hex(req.claim_token));
+    if (!pairing) throw new Error('claim_token_invalid');
+    if (pairing.claimed_at) throw new Error('claim_token_invalid');
+    if (pairing.claim_expires_at && new Date(pairing.claim_expires_at) < new Date()) {
+      throw new Error('claim_token_invalid');
+    }
+    if (!constantTimeCompare(pairing.pair_code, req.pair_code)) {
+      throw new Error('claim_token_invalid');
+    }
+    if (pairing.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_instance_id_mismatch');
+    }
+    if (pairing.status !== 'approved' || !pairing.grant_id) {
+      throw new Error('claim_token_invalid');
+    }
+    const grant = await this.storage.remoteInvoke.getGrant(pairing.grant_id);
+    if (!grant) throw new Error('grant_not_found');
+    await this.storage.remoteInvoke.updateGrantCallerPubkey(grant.id, req.caller_pubkey, callerPubkeyFp);
+    await this.storage.remoteInvoke.updateGrantCallerEphemeralPub(grant.id, req.caller_ephemeral_pub);
+    await this.storage.remoteInvoke.markPairingClaimed(pairing.id, new Date().toISOString());
+    const updated = await this.storage.remoteInvoke.getGrant(grant.id);
+    if (!updated) throw new Error('grant_not_found');
+    return this.mintGrantSessionToken(updated.id);
+  }
+
+  async lookupGrantSession(req: GrantLookupRequest, callerPubkeyFp: string): Promise<GrantSessionResponse> {
+    const grant = await this.storage.remoteInvoke.getGrantByCallerFp(callerPubkeyFp, req.client_instance_id);
+    if (!grant || grant.revoked_at || grant.status !== 'active') {
+      throw new Error('grant_not_found');
+    }
+    if (grant.expires_at && new Date(grant.expires_at) < new Date()) {
+      await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'expired' });
+      throw new Error('grant_not_found');
+    }
+    if (grant.caller_ephemeral_pub !== req.caller_ephemeral_pub) {
+      await this.storage.remoteInvoke.updateGrantCallerEphemeralPub(grant.id, req.caller_ephemeral_pub);
+    }
+    return this.mintGrantSessionToken(grant.id);
+  }
+
+  async mintGrantSessionToken(grantId: string): Promise<GrantSessionResponse> {
+    const grant = await this.storage.remoteInvoke.getGrant(grantId);
+    if (!grant) throw new Error('grant_not_found');
+    const token = randomToken();
+    const expiresAt = new Date(Date.now() + GRANT_SESSION_TOKEN_TTL_MS).toISOString();
+    await this.storage.remoteInvoke.updateGrantSessionToken(grantId, sha256Hex(token), expiresAt);
+    return {
+      grant_session_token: token,
+      expires_at: expiresAt,
+      grant_summary: this.toGrantSummary(grant, true),
+    };
+  }
+
+  async resolveGrantBySessionToken(bearer: string): Promise<RemoteInvokeGrant | null> {
+    const grant = await this.storage.remoteInvoke.getGrantBySessionTokenHash(sha256Hex(bearer));
+    if (!grant) return null;
+    if (grant.revoked_at) return null;
+    if (grant.status !== 'active') return null;
+    if (grant.session_token_expires_at && new Date(grant.session_token_expires_at) < new Date()) {
+      return null;
+    }
+    return grant;
+  }
+
+  async revokeGrantByBearer(bearer: string, callerFp: string): Promise<void> {
+    const grant = await this.resolveGrantBySessionToken(bearer);
+    if (!grant) throw new Error('grant_session_token_invalid');
+    if (grant.caller_pubkey_fp !== callerFp) throw new Error('caller_pubkey_mismatch');
+    const revokedAt = new Date().toISOString();
+    await this.storage.remoteInvoke.revokeGrant(grant.id, revokedAt);
+    pushToClient(grant.client_instance_id, 'grant_revoked', {
+      grant_id: grant.id,
+    });
   }
 
   async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | null> {
@@ -586,8 +696,8 @@ export class RemoteInvokeService {
   }
 
   async openCall(
-    userId: string,
-    req: OpenCallRequest,
+    grant: RemoteInvokeGrant,
+    req: OpenCallRequestV5,
   ): Promise<{
     call_id: string;
     relay_token: string;
@@ -600,13 +710,6 @@ export class RemoteInvokeService {
       relay_token_ttl_ms: number;
     };
   }> {
-    const grant = await this.storage.remoteInvoke.getGrant(req.grant_id);
-    if (!grant) throw new Error('grant_not_found');
-
-    if (grant.caller_fingerprint !== req.caller_fingerprint) {
-      throw new Error('caller_fingerprint_mismatch');
-    }
-
     if (grant.client_instance_id !== req.client_instance_id) {
       throw new Error('client_instance_id_mismatch');
     }
@@ -630,6 +733,14 @@ export class RemoteInvokeService {
 
     if (!req.command_encrypted) {
       throw new Error('command_encrypted_required');
+    }
+
+    if (!grant.caller_ephemeral_pub) {
+      throw new Error('caller_ephemeral_pub_required');
+    }
+
+    if (!grant.client_ephemeral_pub) {
+      throw new Error('client_ephemeral_pub_required');
     }
 
     const ptyEnabled = !!req.pty_enabled;
@@ -668,7 +779,7 @@ export class RemoteInvokeService {
 
     const call: RemoteInvokeCall = {
       id: callId,
-      user_id: userId,
+      user_id: grant.user_id,
       grant_id: grant.id,
       pairing_id: '',
       client_instance_id: req.client_instance_id,
@@ -700,7 +811,9 @@ export class RemoteInvokeService {
       file_access: normalizeFileAccess(grant.file_access),
       caller_fingerprint: grant.caller_fingerprint,
       ssh_key_fingerprint: grant.ssh_key_fingerprint || '',
-      caller_pubkey: req.caller_pubkey,
+      caller_pubkey: req.caller_pubkey ?? grant.caller_pubkey ?? '',
+      caller_ephemeral_pub: grant.caller_ephemeral_pub,
+      client_ephemeral_pub: grant.client_ephemeral_pub,
       command_kind: commandKind,
       command_encrypted: req.command_encrypted,
       command_summary: commandSummary,
@@ -734,6 +847,18 @@ export class RemoteInvokeService {
         relay_token_ttl_ms: relayTokenTtlMs,
       },
     };
+  }
+
+  private toGrantSummary(grant: RemoteInvokeGrant, includeCryptoContext = false): GrantSummary {
+    const summary: GrantSummary = {
+      scope: normalizeGrantScope(grant.grant_scope),
+      mode: grant.grant_mode,
+      file_access: normalizeFileAccess(grant.file_access),
+    };
+    if (includeCryptoContext && grant.client_ephemeral_pub) {
+      summary.client_ephemeral_pub = grant.client_ephemeral_pub;
+    }
+    return summary;
   }
 
   verifyCallToken(callId: string, token: string): boolean {

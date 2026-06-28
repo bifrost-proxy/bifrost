@@ -206,6 +206,42 @@ export interface OpenCallRequest {
   timeout_hint_ms?: number;
 }
 
+export interface OpenCallRequestV5 {
+  client_instance_id: string;
+  caller_pubkey?: string;
+  command_summary: CommandSummary;
+  command_kind: RemoteCommandKind;
+  command_encrypted: CommandEncryptedPayload;
+  pty_enabled?: boolean;
+  timeout_hint_ms?: number;
+}
+
+export interface GrantClaimRequest {
+  client_instance_id: string;
+  pair_code: string;
+  claim_token: string;
+  caller_pubkey: string;
+  caller_ephemeral_pub: string;
+}
+
+export interface GrantLookupRequest {
+  client_instance_id: string;
+  caller_ephemeral_pub: string;
+}
+
+export interface GrantSummary {
+  scope: RemoteInvokeGrantScope;
+  mode: GrantMode;
+  file_access: FileAccessScope;
+  client_ephemeral_pub?: string;
+}
+
+export interface GrantSessionResponse {
+  grant_session_token: string;
+  expires_at: string;
+  grant_summary: GrantSummary;
+}
+
 export interface CallsQueryParams {
   client_instance_id?: string;
   caller_fingerprint?: string;
