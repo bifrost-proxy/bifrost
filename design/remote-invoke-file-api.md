@@ -649,6 +649,24 @@ bifrost remote file patch       [--patch-file/--from-local <local|-> | --patch-b
 
 This preserves the coding-agent ergonomics of partial batch success while making `ReadMany` a meaningful policy capability instead of only an enum/documentation alias.
 
+### SSH-key Full Trust op-set migration
+
+SSH-key authorization has no pair-code scope dialog, so an auto-seeded SSH-key
+file policy with empty seed ops means Full Trust: full-computer roots plus the
+complete `file.*` operation surface. When new file operations are added later,
+existing SSH-key policies seeded by older versions must not get stuck on the
+old operation list.
+
+The compatibility rule is intentionally narrow:
+
+- if an existing `match.ssh_fingerprint` policy contains every legacy Full
+  Trust op, the worker appends any newly introduced current Full Trust ops
+  such as `read_many` and `outline`;
+- roots, denies, write-denies, byte caps, gitignore behavior, and destructive
+  operation flags are preserved;
+- explicitly narrowed policies, for example `ops = ["read", "list"]`, are not
+  expanded automatically.
+
 ### file.move safety contract
 
 `file.move` exposes the same optimistic-lock and overwrite controls expected from top-level coding-agent file mutations:
