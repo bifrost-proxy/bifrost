@@ -137,6 +137,7 @@ async function main() {
   console.log(`  rate-limit/ip/min: ${config.server.rate_limit_per_ip ?? 200}`);
   console.log(`  auth-rate-limit/ip/min: ${config.server.auth_rate_limit_per_ip ?? 20}`);
   console.log(`  remote-invoke: ${config.remote_invoke?.enabled ? 'enabled' : 'disabled'}`);
+  console.log(`  remote-invoke protocol_version: v5`);
   if (config.server.trust_forwarded_for) {
     console.warn(`\x1b[33m  ⚠ trust-forwarded-for: ENABLED (DANGEROUS — only use behind a trusted reverse proxy)\x1b[0m`);
   }
