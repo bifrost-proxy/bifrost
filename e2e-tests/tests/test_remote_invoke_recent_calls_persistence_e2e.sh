@@ -97,7 +97,7 @@ ADMIN_PORT="$(pick_free_port)"
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 ADMIN_PATH_PREFIX="${ADMIN_PATH_PREFIX:-/_bifrost}"
 CLIENT_ADMIN_URL="http://127.0.0.1:${ADMIN_PORT}${ADMIN_PATH_PREFIX}"
-BIFROST_DATA_DIR="${BIFROST_DATA_DIR:-$REPO_DIR/.bifrost-e2e-remote-invoke-calls-persistence-$RANDOM}"
+BIFROST_DATA_DIR="${BIFROST_E2E_TARGET_DATA_DIR:-$REPO_DIR/.bifrost-e2e-remote-invoke-calls-persistence-$RANDOM}"
 CALLER_DATA_DIR="$(mktemp -d)"
 RELAY_DATA_DIR="$(mktemp -d)"
 RELAY_LOG="$(mktemp)"
@@ -159,7 +159,7 @@ if [[ "${SKIP_BUILD:-}" != "true" ]]; then
     log "Building release bifrost"
     (cd "$REPO_DIR" && cargo build --release --bin bifrost >/dev/null)
 fi
-BIFROST_BIN="$REPO_DIR/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
 
 mkdir -p "$BIFROST_DATA_DIR"
 cat > "$BIFROST_DATA_DIR/config.toml" <<EOF
@@ -222,7 +222,7 @@ for _ in $(seq 1 30); do
 done
 assert_not_empty "$PAIRING_ID" "pairing_id 不应为空"
 
-http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent"}'
+http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
 assert_status "200" "$HTTP_STATUS" "批准配对应返回 200"
 
 CONNECT_OK=0
@@ -243,9 +243,26 @@ if [[ "$CONNECT_OK" -ne 1 ]]; then
     exit 1
 fi
 
-BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
+GRANT_READY=0
+for _ in $(seq 1 30); do
+    http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+    if [[ "$HTTP_STATUS" == "200" ]] && echo "$HTTP_BODY" | jq -e '((.grants // .data.grants // []) | length) > 0' >/dev/null; then
+        GRANT_READY=1
+        break
+    fi
+    sleep 0.5
+done
+if [[ "$GRANT_READY" -ne 1 ]]; then
+    _log_fail "target grant 应在 status 前完成本地同步" "grant list non-empty" "${HTTP_BODY:-<empty>}"
+    exit 1
+fi
+
+if ! BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn status \
     --relay-url "$RELAY_URL" \
-    --client-id "${CLIENT_INSTANCE_ID:0:12}" >"$STATUS_LOG" 2>&1
+    --client-id "${CLIENT_INSTANCE_ID:0:12}" >"$STATUS_LOG" 2>&1; then
+    _log_fail "remote conn status 应成功" "exit 0" "$(cat "$STATUS_LOG")"
+    exit 1
+fi
 
 http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
 assert_status "200" "$HTTP_STATUS" "读取 Recent Calls API 应返回 200"

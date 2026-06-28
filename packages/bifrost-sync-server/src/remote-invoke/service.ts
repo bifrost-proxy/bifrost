@@ -422,7 +422,7 @@ export class RemoteInvokeService {
     return { pairing_id: pairingId, status: 'pending_approval', watch_token: watchToken, client_instance_id: resolvedClientId };
   }
 
-  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ status: string; client_instance_id?: string; device_name?: string; platform?: string; grant_mode?: string; grant_scope?: string; file_access?: string; claim_token?: string; claim_expires_at?: string; grant_summary?: GrantSummary }> {
+  async submitGrantDecision(userId: string, req: GrantDecisionRequest): Promise<{ status: string; grant_id?: string; client_instance_id?: string; device_name?: string; platform?: string; caller_fingerprint?: string; caller_display_name?: string; grant_mode?: string; grant_scope?: string; file_access?: string; claim_token?: string; claim_expires_at?: string; grant_summary?: GrantSummary }> {
     const pairing = await this.storage.remoteInvoke.getPairing(req.pairing_id);
     if (!pairing) throw new Error('pairing_not_found');
     if (this.isPendingPairingExpired(pairing)) {
@@ -558,9 +558,12 @@ export class RemoteInvokeService {
 
     return {
       status: 'approved',
+      grant_id: grantId,
       client_instance_id: pairing.client_instance_id,
       device_name: deviceName,
       platform,
+      caller_fingerprint: pairing.caller_fingerprint,
+      caller_display_name: callerDisplayName,
       grant_mode: grantMode,
       grant_scope: normalizeGrantScope(req.grant_scope),
       file_access: normalizeFileAccess(req.file_access),

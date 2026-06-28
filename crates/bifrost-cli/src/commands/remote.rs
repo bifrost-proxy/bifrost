@@ -1286,6 +1286,27 @@ fn reconcile_reusable_grant_for_transport(
     Ok(grant)
 }
 
+fn local_grant_from_saved_session(conn: &LocalConnection) -> Option<GrantInfo> {
+    if conn.grant_session_token.is_none()
+        || conn.caller_ephemeral_pub.is_none()
+        || conn.client_ephemeral_pub.is_none()
+        || conn.shared_secret_encrypted.is_none()
+    {
+        return None;
+    }
+
+    Some(GrantInfo {
+        grant_id: conn.grant_id.clone(),
+        status: "active".to_string(),
+        grant_session_token: None,
+        expires_at: conn.grant_session_expires_at.clone(),
+        grant_summary: None,
+        caller_ephemeral_pub: conn.caller_ephemeral_pub.clone(),
+        client_ephemeral_pub: conn.client_ephemeral_pub.clone(),
+        shared_secret_encrypted: conn.shared_secret_encrypted.clone(),
+    })
+}
+
 fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
     matches!(err, BifrostError::Network(msg)
         if msg.contains("open_call failed with status 403")
@@ -1781,42 +1802,48 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         Some(build_remote_command_checked(&opts.action)?)
     };
 
-    let grant = caller
-        .find_reusable_grant(&conn.client_instance_id, &caller_identity)
-        .await?;
+    let grant = if let Some(local_grant) = local_grant_from_saved_session(&conn) {
+        debug!("using saved v5 grant session");
+        local_grant
+    } else {
+        let grant = caller
+            .find_reusable_grant(&conn.client_instance_id, &caller_identity)
+            .await?;
 
-    let grant = match grant {
-        Some(g) => g,
-        None => {
-            let conn_label = if conn.device_name.is_empty() {
-                &conn.client_instance_id
-            } else {
-                &conn.device_name
-            };
-            eprintln!(
-                "{}",
-                format!(
-                    "✗ Authorization for '{}' expired or revoked on the relay.",
-                    conn_label
-                )
-                .bright_red()
-            );
-            connections.retain(|c| {
-                !(c.client_instance_id == conn.client_instance_id && c.relay_url == conn.relay_url)
-            });
-            if let Err(error) = save_connections(&connections) {
-                warn!(error = %error, "failed to remove stale connection");
-            } else {
+        match grant {
+            Some(g) => g,
+            None => {
+                let conn_label = if conn.device_name.is_empty() {
+                    &conn.client_instance_id
+                } else {
+                    &conn.device_name
+                };
                 eprintln!(
-                    "  {} Stale connection removed from local cache.",
+                    "{}",
+                    format!(
+                        "✗ Authorization for '{}' expired or revoked on the relay.",
+                        conn_label
+                    )
+                    .bright_red()
+                );
+                connections.retain(|c| {
+                    !(c.client_instance_id == conn.client_instance_id
+                        && c.relay_url == conn.relay_url)
+                });
+                if let Err(error) = save_connections(&connections) {
+                    warn!(error = %error, "failed to remove stale connection");
+                } else {
+                    eprintln!(
+                        "  {} Stale connection removed from local cache.",
+                        "→".bright_yellow()
+                    );
+                }
+                eprintln!(
+                    "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
                     "→".bright_yellow()
                 );
+                std::process::exit(1);
             }
-            eprintln!(
-                "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
-                "→".bright_yellow()
-            );
-            std::process::exit(1);
         }
     };
 

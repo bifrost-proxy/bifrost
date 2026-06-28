@@ -20,7 +20,7 @@ RELAY_PORT="${RELAY_PORT:-$(allocate_free_port)}"
 ADMIN_BASE_URL="http://127.0.0.1:${PROXY_PORT}/_bifrost/api"
 RELAY_URL="http://127.0.0.1:${RELAY_PORT}"
 MOCK_SERVER_SCRIPT="${ROOT_DIR}/e2e-tests/mock_servers/start_servers.sh"
-BIFROST_BIN="${ROOT_DIR}/target/release/bifrost"
+BIFROST_BIN="${BIFROST_BIN:-${ROOT_DIR}/target/release/bifrost}"
 
 TARGET_DATA_DIR=""
 CALLER_DATA_DIR=""
@@ -342,7 +342,7 @@ pair_caller() {
         exit 1
     }
 
-    admin_post_json "/remote-invoke/pairings/${pairing_id}/approve" '{"grant_mode":"permanent"}' >/dev/null
+    admin_post_json "/remote-invoke/pairings/${pairing_id}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}' >/dev/null
 
     wait "$CALLER_CONNECT_PID" || connect_exit=$?
     connect_exit="${connect_exit:-0}"
@@ -351,6 +351,23 @@ pair_caller() {
     if [[ "$connect_exit" -ne 0 ]] || ! grep -q "Connected! Authorization granted" "$CALLER_CONNECT_LOG"; then
         echo "remote conn up failed" >&2
         cat "$CALLER_CONNECT_LOG" >&2 || true
+        exit 1
+    fi
+
+    local grant_ready=0
+    for _ in $(seq 1 30); do
+        local grants_json
+        grants_json="$(admin_get "/remote-invoke/grants" 2>/dev/null || true)"
+        if [[ -n "$grants_json" ]] && printf '%s' "$grants_json" | jq -e '((.grants // .data.grants // []) | length) > 0' >/dev/null 2>&1; then
+            grant_ready=1
+            break
+        fi
+        sleep 0.5
+    done
+
+    if [[ "$grant_ready" -ne 1 ]]; then
+        echo "target grant did not materialize before remote CLI calls" >&2
+        admin_get "/remote-invoke/grants" >&2 || true
         exit 1
     fi
 
