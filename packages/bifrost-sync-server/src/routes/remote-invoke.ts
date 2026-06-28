@@ -1,5 +1,6 @@
 import type { IStorage } from '../dao/types';
 import type { RequestContext } from '../http';
+import crypto from 'crypto';
 import {
   sendJson,
   sendError,
@@ -28,6 +29,7 @@ import {
 import { startCleanupScheduler } from '../remote-invoke/cleanup';
 import type { ClientStreamState } from '../remote-invoke/types';
 import { normalizeGrantScope, resolveCommandKind } from '../remote-invoke/types';
+import { verifyPoP, type PoPRequestEnvelope } from '../remote-invoke/pop';
 import { customAlphabet } from 'nanoid';
 
 const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz_', 21);
@@ -45,10 +47,12 @@ const clientStreamFrameLimiter = new RateLimiter(60_000, 10_000);
 const MAX_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
 
 let serviceInstance: RemoteInvokeService | null = null;
+let serviceStorage: IStorage | null = null;
 
 function getService(storage: IStorage, config: RemoteInvokeConfig): RemoteInvokeService {
-  if (!serviceInstance) {
+  if (!serviceInstance || serviceStorage !== storage) {
     serviceInstance = new RemoteInvokeService(storage, config);
+    serviceStorage = storage;
     activeConfig = config;
     startKeepalive(config.sse_keepalive_ms);
     startCleanupScheduler(storage, config);
@@ -74,6 +78,10 @@ function extractBearerToken(ctx: RequestContext): string | null {
   const auth = ctx.req.headers['authorization'] || '';
   if (auth.startsWith('Bearer ')) return auth.slice(7);
   return null;
+}
+
+function sha256Hex(value: string): string {
+  return crypto.createHash('sha256').update(value, 'utf8').digest('hex');
 }
 
 let activeConfig: RemoteInvokeConfig = DEFAULT_REMOTE_INVOKE_CONFIG;
@@ -124,6 +132,74 @@ function callerAccessKey(ctx: RequestContext): string {
   return bearer ? `bearer:${bearer}` : `ip:${ctx.clientIp || 'unknown'}`;
 }
 
+function protocolVersionNotSupported(ctx: RequestContext): boolean {
+  sendJson(ctx.res, 410, { error: 'protocol_version_not_supported' });
+  return true;
+}
+
+function validateCallerEphemeralPub(ctx: RequestContext, value: unknown): string | null {
+  if (typeof value !== 'string' || value.length === 0) {
+    sendError(ctx.res, 400, 'caller_ephemeral_pub_required');
+    return null;
+  }
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(value)) {
+    sendError(ctx.res, 400, 'caller_ephemeral_pub_invalid');
+    return null;
+  }
+  const decoded = Buffer.from(value, 'base64');
+  if (decoded.length !== 32 || decoded.toString('base64') !== value) {
+    sendError(ctx.res, 400, 'caller_ephemeral_pub_invalid');
+    return null;
+  }
+  return value;
+}
+
+async function requirePoP(
+  ctx: RequestContext,
+  storage: IStorage,
+  expectedFp?: string,
+): Promise<{ callerPubkey: string; callerPubkeyFp: string; body: any } | null> {
+  let body: PoPRequestEnvelope;
+  try {
+    body = parseJsonBody<any>(ctx.body);
+  } catch {
+    sendError(ctx.res, 400, 'invalid_json');
+    return null;
+  }
+  try {
+    const nonceGcBefore = new Date(Date.now() - 60_000).toISOString();
+    await storage.remoteInvoke.gcNonces(nonceGcBefore);
+    const result = await verifyPoP(
+      body,
+      { expectedCallerPubkeyFp: expectedFp },
+      (fp, nonce, seenAt) => storage.remoteInvoke.markNonceUsed(fp, nonce, seenAt),
+    );
+    return { ...result, body };
+  } catch (e: unknown) {
+    const message = e instanceof Error ? e.message : 'signature_invalid';
+    const status = message === 'caller_pubkey_mismatch' ? 403 : 401;
+    sendError(ctx.res, status, message);
+    return null;
+  }
+}
+
+async function extractBearerGrantSession(
+  ctx: RequestContext,
+  service: RemoteInvokeService,
+): Promise<RemoteInvokeGrant | null> {
+  const bearer = extractBearerToken(ctx);
+  if (!bearer) {
+    sendError(ctx.res, 401, 'grant_session_token_invalid');
+    return null;
+  }
+  const grant = await service.resolveGrantBySessionToken(bearer);
+  if (!grant) {
+    sendError(ctx.res, 401, 'grant_session_token_invalid');
+    return null;
+  }
+  return grant;
+}
+
 function checkPairRateLimit(ip: string): boolean {
   const limit = activeConfig.pair_rate_limit_per_ip;
   const now = Date.now();
@@ -146,7 +222,7 @@ export async function handleRemoteInvoke(
   const method = req.method ?? 'GET';
   const pathname = url.pathname.replace(/\/$/, '') || '/';
 
-  if (!pathname.startsWith('/v4/remote-invoke')) return false;
+  if (!pathname.startsWith('/v4/remote-invoke') && !pathname.startsWith('/v5/remote-invoke')) return false;
 
   const config = remoteInvokeConfig ?? DEFAULT_REMOTE_INVOKE_CONFIG;
 
@@ -158,6 +234,30 @@ export async function handleRemoteInvoke(
   const service = getService(storage, config);
 
   try {
+    if (pathname === '/v5/remote-invoke/pairings/start' && method === 'POST') {
+      return await handleStartPairing(ctx, service, 'v5');
+    }
+
+    if (pathname.match(/^\/v5\/remote-invoke\/pairings\/[^/]+\/watch$/) && method === 'GET') {
+      return await handlePairingWatchV5(ctx, storage);
+    }
+
+    if (pathname === '/v5/remote-invoke/grants/lookup' && method === 'POST') {
+      return await handleGrantsLookupV5(ctx, storage, service);
+    }
+
+    if (pathname === '/v5/remote-invoke/grants/claim' && method === 'POST') {
+      return await handleGrantsClaimV5(ctx, storage, service);
+    }
+
+    if (pathname === '/v5/remote-invoke/grants/revoke' && method === 'POST') {
+      return await handleGrantsRevokeV5(ctx, storage, service);
+    }
+
+    if (pathname === '/v5/remote-invoke/calls/open' && method === 'POST') {
+      return await handleOpenCallV5(ctx, storage, service);
+    }
+
     if (pathname === '/v4/remote-invoke/client/register/challenge' && method === 'POST') {
       return await handleClientRegisterChallenge(ctx, storage, service);
     }
@@ -278,19 +378,19 @@ export async function handleRemoteInvoke(
     }
 
     if (pathname === '/v4/remote-invoke/pairings/start' && method === 'POST') {
-      return await handleStartPairing(ctx, service);
+      return protocolVersionNotSupported(ctx);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/pairings\/[^/]+\/watch$/) && method === 'GET') {
-      return handlePairingWatch(ctx);
+      return protocolVersionNotSupported(ctx);
     }
 
     if (pathname === '/v4/remote-invoke/grants/reusable' && method === 'GET') {
-      return await handleFindReusableGrant(ctx, service);
+      return protocolVersionNotSupported(ctx);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/grants\/[^/]+$/) && method === 'DELETE') {
-      return await handleDeleteGrant(ctx, service);
+      return protocolVersionNotSupported(ctx);
     }
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/input$/) && method === 'POST') {
@@ -310,7 +410,7 @@ export async function handleRemoteInvoke(
     }
 
     if (pathname === '/v4/remote-invoke/calls/open' && method === 'POST') {
-      return await handleOpenCall(ctx, service);
+      return protocolVersionNotSupported(ctx);
     }
 
     sendError(ctx.res, 404, 'remote invoke endpoint not found');
@@ -799,7 +899,7 @@ async function handleListActiveGrantsForClient(
   return true;
 }
 
-async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeService, protocol: 'v4' | 'v5' = 'v4'): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
   if (!body?.pair_code || !body?.caller_info || !body?.caller_ephemeral_pub) {
     sendError(ctx.res, 400, 'pair_code, caller_info and caller_ephemeral_pub are required');
@@ -819,7 +919,7 @@ async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeServ
       message: 'ok',
       data: {
         ...result,
-        approval_sse_url: `/v4/remote-invoke/pairings/${result.pairing_id}/watch`,
+        approval_sse_url: `/${protocol}/remote-invoke/pairings/${result.pairing_id}/watch`,
       },
     });
   } catch (e: unknown) {
@@ -833,6 +933,36 @@ async function handleStartPairing(ctx: RequestContext, service: RemoteInvokeServ
   return true;
 }
 
+async function handlePairingWatchV5(ctx: RequestContext, storage: IStorage): Promise<boolean> {
+  const parts = ctx.url.pathname.match(/\/v5\/remote-invoke\/pairings\/([^/]+)\/watch/);
+  const pairingId = parts?.[1] ?? '';
+  const watchToken = ctx.url.searchParams.get('watch_token') ?? '';
+  if (!watchToken) {
+    sendError(ctx.res, 401, 'watch_token_invalid');
+    return true;
+  }
+  const pairing = await storage.remoteInvoke.getPairingByWatchTokenHash(sha256Hex(watchToken));
+  if (!pairing || pairing.id !== pairingId) {
+    sendError(ctx.res, 401, 'watch_token_invalid');
+    return true;
+  }
+  if (pairing.expires_at && new Date(pairing.expires_at) < new Date()) {
+    sendError(ctx.res, 401, 'watch_token_invalid');
+    return true;
+  }
+
+  openSse(ctx.res);
+  registerPairingWatcher(pairingId, ctx.res, sha256Hex(watchToken));
+
+  writeSseEvent(ctx.res, 'connected', { pairing_id: pairingId });
+
+  ctx.req.on('close', () => {
+    unregisterPairingWatcher(pairingId, ctx.res);
+  });
+
+  return true;
+}
+
 function handlePairingWatch(ctx: RequestContext): boolean {
   const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/pairings\/([^/]+)\/watch/);
   const pairingId = parts?.[1] ?? '';
@@ -843,9 +973,135 @@ function handlePairingWatch(ctx: RequestContext): boolean {
   writeSseEvent(ctx.res, 'connected', { pairing_id: pairingId });
 
   ctx.req.on('close', () => {
-    unregisterPairingWatcher(pairingId);
+    unregisterPairingWatcher(pairingId, ctx.res);
   });
 
+  return true;
+}
+
+async function handleGrantsLookupV5(
+  ctx: RequestContext,
+  storage: IStorage,
+  service: RemoteInvokeService,
+): Promise<boolean> {
+  const pop = await requirePoP(ctx, storage);
+  if (!pop) return true;
+  const clientInstanceId = String(pop.body.client_instance_id ?? '');
+  if (!clientInstanceId) {
+    sendError(ctx.res, 400, 'client_instance_id is required');
+    return true;
+  }
+  const callerEphemeralPub = validateCallerEphemeralPub(ctx, pop.body.caller_ephemeral_pub);
+  if (!callerEphemeralPub) return true;
+  if (!applyRateLimit(ctx, callerLookupLimiter, `${pop.callerPubkeyFp}:${clientInstanceId}:lookup`)) {
+    return true;
+  }
+  try {
+    const session = await service.lookupGrantSession({
+      client_instance_id: clientInstanceId,
+      caller_ephemeral_pub: callerEphemeralPub,
+    }, pop.callerPubkeyFp);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: session });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'grant_not_found';
+    sendError(ctx.res, 404, msg);
+  }
+  return true;
+}
+
+async function handleGrantsClaimV5(
+  ctx: RequestContext,
+  storage: IStorage,
+  service: RemoteInvokeService,
+): Promise<boolean> {
+  const pop = await requirePoP(ctx, storage);
+  if (!pop) return true;
+  const body = pop.body;
+  if (!body.client_instance_id || !body.pair_code || !body.claim_token) {
+    sendError(ctx.res, 400, 'client_instance_id, pair_code and claim_token are required');
+    return true;
+  }
+  const callerEphemeralPub = validateCallerEphemeralPub(ctx, body.caller_ephemeral_pub);
+  if (!callerEphemeralPub) return true;
+  try {
+    const session = await service.redeemClaim({
+      client_instance_id: String(body.client_instance_id),
+      pair_code: String(body.pair_code),
+      claim_token: String(body.claim_token),
+      caller_pubkey: pop.callerPubkey,
+      caller_ephemeral_pub: callerEphemeralPub,
+    }, pop.callerPubkeyFp);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: session });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'claim_token_invalid';
+    const status = msg === 'client_instance_id_mismatch' ? 403 : 401;
+    sendError(ctx.res, status, msg);
+  }
+  return true;
+}
+
+async function handleGrantsRevokeV5(
+  ctx: RequestContext,
+  storage: IStorage,
+  service: RemoteInvokeService,
+): Promise<boolean> {
+  const grant = await extractBearerGrantSession(ctx, service);
+  if (!grant) return true;
+  const pop = await requirePoP(ctx, storage, grant.caller_pubkey_fp);
+  if (!pop) return true;
+  try {
+    await service.revokeGrantByBearer(extractBearerToken(ctx) ?? '', pop.callerPubkeyFp);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok' });
+  } catch (e: unknown) {
+    sendError(ctx.res, 401, e instanceof Error ? e.message : 'grant_session_token_invalid');
+  }
+  return true;
+}
+
+async function handleOpenCallV5(
+  ctx: RequestContext,
+  storage: IStorage,
+  service: RemoteInvokeService,
+): Promise<boolean> {
+  const grant = await extractBearerGrantSession(ctx, service);
+  if (!grant) return true;
+  const pop = await requirePoP(ctx, storage, grant.caller_pubkey_fp);
+  if (!pop) return true;
+  const body = pop.body;
+  const commandKind = resolveCommandKind(body?.command_kind);
+  if (!body?.client_instance_id || !body?.command_encrypted) {
+    sendError(ctx.res, 400, 'client_instance_id and command_encrypted are required');
+    return true;
+  }
+  if (Object.prototype.hasOwnProperty.call(body, 'grant_id')) {
+    sendError(ctx.res, 400, 'grant_id is not accepted in v5');
+    return true;
+  }
+  if (!applyRateLimit(ctx, callerOpenLimiter, `${pop.callerPubkeyFp}:${body.client_instance_id}:open`)) {
+    return true;
+  }
+
+  try {
+    const result = await service.openCall(grant, {
+      client_instance_id: String(body.client_instance_id),
+      caller_pubkey: pop.callerPubkey,
+      command_summary: body.command_summary ?? { command_preview: commandKind },
+      command_kind: commandKind,
+      command_encrypted: body.command_encrypted,
+      pty_enabled: body.pty_enabled,
+      timeout_hint_ms: body.timeout_hint_ms,
+    });
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'open call failed';
+    if (msg === 'client_instance_id_mismatch' || msg === 'grant_expired' || msg === 'grant_not_active' || msg === 'grant_consumed' || msg === 'grant_scope_mismatch') {
+      sendError(ctx.res, 403, msg);
+    } else if (msg === 'grant_not_found') {
+      sendError(ctx.res, 404, msg);
+    } else {
+      sendError(ctx.res, 400, msg);
+    }
+  }
   return true;
 }
 
@@ -1138,7 +1394,7 @@ async function handleCancelPendingPairings(
   return true;
 }
 
-async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
+async function handleOpenCall(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
   const body = parseJsonBody<any>(ctx.body);
   const commandKind = resolveCommandKind(body?.command_kind);
   if (!body?.grant_id || !body?.client_instance_id || !body?.caller_fingerprint) {
@@ -1154,10 +1410,13 @@ async function handleOpenCall(ctx: RequestContext, service: RemoteInvokeService)
   }
 
   try {
-    const result = await service.openCall('', {
-      grant_id: body.grant_id,
+    const grant = await storage.remoteInvoke.getGrant(String(body.grant_id));
+    if (!grant) {
+      sendError(ctx.res, 404, 'grant_not_found');
+      return true;
+    }
+    const result = await service.openCall(grant, {
       client_instance_id: body.client_instance_id,
-      caller_fingerprint: body.caller_fingerprint,
       caller_pubkey: body.caller_pubkey ?? '',
       command_summary: body.command_summary ?? { command_preview: commandKind },
       command_kind: commandKind,
