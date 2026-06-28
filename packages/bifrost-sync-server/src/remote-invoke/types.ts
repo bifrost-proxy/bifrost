@@ -323,6 +323,7 @@ export function normalizeGrantScope(scope?: string | null): RemoteInvokeGrantSco
   switch (scope) {
     case 'remote_shell_exec':
     case 'remote_shell_interactive':
+    case 'remote_power_mgmt':
       return scope;
     case 'remote_query':
     case undefined:
@@ -356,7 +357,12 @@ export function isShellCommandKind(kind?: string | null): kind is 'shell.exec' {
 export function resolveCommandKind(
   explicitKind?: string | null,
 ): RemoteCommandKind {
-  if (explicitKind === 'shell.exec' || explicitKind === 'query.readonly' || explicitKind === 'file') {
+  if (
+    explicitKind === 'shell.exec'
+    || explicitKind === 'query.readonly'
+    || explicitKind === 'file'
+    || explicitKind === 'power.mgmt'
+  ) {
     return explicitKind;
   }
   throw new Error('command_kind_required');
@@ -370,6 +376,9 @@ export function grantScopeAllowsCommand(scope: string | undefined, commandKind: 
   const normalizedScope = normalizeGrantScope(scope);
   if (commandKind === 'shell.exec') {
     return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
+  }
+  if (commandKind === 'power.mgmt') {
+    return normalizedScope === 'remote_power_mgmt';
   }
   // query.readonly is always allowed
   return true;

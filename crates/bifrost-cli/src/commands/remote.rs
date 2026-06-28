@@ -6577,6 +6577,14 @@ async fn run_streaming_dispatch(
     // dispatcher tells `streaming_result_from_outcome` to downgrade a final
     // digest mismatch to a warning instead of failing the whole run.
     let mut reconnected = false;
+    // Heads observed at the previous DisconnectResume. When a subsequent
+    // disconnect resumes from the exact same offsets we made zero forward
+    // progress -- the usual signature of an already-finished job whose relay
+    // keeps the SSE channel open (or closes it without a terminal frame). In
+    // that case we probe the terminal-status endpoint instead of spinning in
+    // the reconnect loop until the idle timeout fires (the `remote job logs`
+    // on a finished job hang).
+    let mut last_disconnect_heads: Option<(u64, u64)> = None;
 
     loop {
         let outcome = caller
@@ -6636,6 +6644,48 @@ async fn run_streaming_dispatch(
                     stderr_head = offsets.1,
                     "streaming dispatch disconnected, resuming"
                 );
+                // No forward progress since the last disconnect: the job is
+                // almost certainly finished and the relay simply has nothing
+                // more to send. Confirm via the terminal-status endpoint so we
+                // can return immediately instead of reconnecting until the idle
+                // timeout. A probe failure (e.g. a relay without the status
+                // route) is non-fatal -- we fall through to the normal resume.
+                if last_disconnect_heads == Some(offsets) {
+                    match caller
+                        .poll_call_terminal_status(call_id, relay_token, Duration::from_secs(2))
+                        .await
+                    {
+                        Ok(Some(status)) => {
+                            if let Err(e) = state.finish() {
+                                return Err(BifrostError::Network(format!(
+                                    "flush output sinks on completion: {e}"
+                                )));
+                            }
+                            let exit_code = status.exit_code.unwrap_or(0);
+                            if let Some(hint) = streaming_completion_hint(exit_code) {
+                                eprintln!("{hint}");
+                            }
+                            return Ok(CallResult {
+                                exit_code,
+                                stdout: None,
+                                stderr: None,
+                                duration_ms: status.duration_ms,
+                                cancelled: status.status == "cancelled",
+                            });
+                        }
+                        Ok(None) => {
+                            // Still running: fall through and keep streaming.
+                        }
+                        Err(e) => {
+                            warn!(
+                                call_id = %call_id,
+                                error = %e,
+                                "terminal status probe failed during disconnect; continuing reconnect"
+                            );
+                        }
+                    }
+                }
+                last_disconnect_heads = Some(offsets);
                 attempt += 1;
                 if attempt > max_reconnects {
                     return Err(BifrostError::Network(
