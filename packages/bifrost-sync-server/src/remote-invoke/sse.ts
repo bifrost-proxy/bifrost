@@ -5,7 +5,8 @@ import type { ClientStreamState } from './types';
 const clientStreams = new Map<string, ClientStreamState>();
 const callerStreams = new Map<string, { res: ServerResponse; callId: string }>();
 const callerEventBuffers = new Map<string, Array<{ event: string; data: unknown; id?: string }>>();
-const pairingWatchers = new Map<string, { res: ServerResponse; pairingId: string }>();
+type WatcherEntry = { res: ServerResponse; pairingId: string; watchTokenHash?: string };
+const pairingWatchers = new Map<string, Set<WatcherEntry>>();
 const pairingEventBuffers = new Map<string, Array<{ event: string; data: unknown }>>();
 const MAX_BUFFERED_CALLER_EVENTS = 256;
 
@@ -29,10 +30,15 @@ export function startKeepalive(intervalMs: number) {
         callerStreams.delete(key);
       }
     }
-    for (const [key, watcher] of pairingWatchers) {
-      try {
-        writeSseComment(watcher.res, 'keepalive');
-      } catch {
+    for (const [key, watchers] of pairingWatchers) {
+      for (const watcher of [...watchers]) {
+        try {
+          writeSseComment(watcher.res, 'keepalive');
+        } catch {
+          watchers.delete(watcher);
+        }
+      }
+      if (watchers.size === 0) {
         pairingWatchers.delete(key);
       }
     }
@@ -75,16 +81,13 @@ export function getAllClientStreams(): Map<string, ClientStreamState> {
 export function pushToClient(clientInstanceId: string, event: string, data: unknown, id?: string): boolean {
   const state = clientStreams.get(clientInstanceId);
   if (!state) {
-    console.log(`[pushToClient] NO stream for ${clientInstanceId}, event=${event}, streams=[${[...clientStreams.keys()].join(',')}]`);
     return false;
   }
   try {
-    console.log(`[pushToClient] writing event=${event} to client=${clientInstanceId}, streamId=${state.streamId}`);
+    console.debug('[pushToClient]', { event, clientInstanceId, streamId: state.streamId });
     writeSseEvent(state.res, event, data, id);
-    console.log(`[pushToClient] SUCCESS event=${event} to client=${clientInstanceId}`);
     return true;
   } catch (e) {
-    console.log(`[pushToClient] FAILED event=${event} to client=${clientInstanceId}: ${e}`);
     clientStreams.delete(clientInstanceId);
     return false;
   }
@@ -145,42 +148,67 @@ export function pushToCallerStream(callId: string, event: string, data: unknown,
   }
 }
 
-export function registerPairingWatcher(pairingId: string, res: ServerResponse): void {
-  pairingWatchers.set(pairingId, { res, pairingId });
+export function registerPairingWatcher(pairingId: string, res: ServerResponse, watchTokenHash?: string): void {
+  const entry: WatcherEntry = { res, pairingId, watchTokenHash };
+  const watchers = pairingWatchers.get(pairingId) ?? new Set<WatcherEntry>();
+  watchers.add(entry);
+  pairingWatchers.set(pairingId, watchers);
   const buffered = pairingEventBuffers.get(pairingId);
   if (buffered?.length) {
-    pairingEventBuffers.delete(pairingId);
     for (const ev of buffered) {
       try {
         writeSseEvent(res, ev.event, ev.data);
       } catch {
-        pairingWatchers.delete(pairingId);
+        watchers.delete(entry);
         break;
       }
+    }
+    if (watchers.size === 0) {
+      pairingWatchers.delete(pairingId);
     }
   }
 }
 
-export function unregisterPairingWatcher(pairingId: string): void {
-  pairingWatchers.delete(pairingId);
-  pairingEventBuffers.delete(pairingId);
+export function unregisterPairingWatcher(pairingId: string, res?: ServerResponse): void {
+  const watchers = pairingWatchers.get(pairingId);
+  if (!watchers) {
+    return;
+  }
+  if (!res) {
+    pairingWatchers.delete(pairingId);
+    return;
+  }
+  for (const watcher of [...watchers]) {
+    if (watcher.res === res) {
+      watchers.delete(watcher);
+    }
+  }
+  if (watchers.size === 0) {
+    pairingWatchers.delete(pairingId);
+  }
 }
 
 export function pushToPairingWatcher(pairingId: string, event: string, data: unknown): boolean {
-  const entry = pairingWatchers.get(pairingId);
-  if (!entry) {
+  const watchers = pairingWatchers.get(pairingId);
+  if (!watchers || watchers.size === 0) {
     const existing = pairingEventBuffers.get(pairingId) ?? [];
     existing.push({ event, data });
     pairingEventBuffers.set(pairingId, existing);
     return true;
   }
-  try {
-    writeSseEvent(entry.res, event, data);
-    return true;
-  } catch {
-    pairingWatchers.delete(pairingId);
-    return false;
+  let delivered = false;
+  for (const entry of [...watchers]) {
+    try {
+      writeSseEvent(entry.res, event, data);
+      delivered = true;
+    } catch {
+      watchers.delete(entry);
+    }
   }
+  if (watchers.size === 0) {
+    pairingWatchers.delete(pairingId);
+  }
+  return delivered;
 }
 
 export function updateClientDiscovery(
