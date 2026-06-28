@@ -1722,6 +1722,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
+        caller_pubkey: Some(pop::caller_pubkey_b64(&caller_identity.key_pair)),
         display_name: Some(label.clone().unwrap_or_else(|| hostname.clone())),
         user_agent: Some(CALLER_USER_AGENT.to_string()),
         platform: Some(std::env::consts::OS.to_string()),
@@ -2394,6 +2395,11 @@ async fn handle_connect_with_ssh(
                 )
             })?;
             let grant_mode = result.grant_mode.unwrap_or_else(|| "permanent".to_string());
+            let grant_session_token = result
+                .grant_session_token
+                .as_deref()
+                .map(encrypt_grant_session_token)
+                .transpose()?;
             let caller_fingerprint = result
                 .caller_fingerprint
                 .unwrap_or_else(|| caller_info.fingerprint.clone());
@@ -2421,8 +2427,8 @@ async fn handle_connect_with_ssh(
                 caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
                 client_ephemeral_pub: Some(transport.client_ephemeral_pub),
                 shared_secret_encrypted: Some(transport.shared_secret_encrypted),
-                grant_session_token: None,
-                grant_session_expires_at: None,
+                grant_session_token,
+                grant_session_expires_at: result.grant_session_expires_at,
             };
 
             let mut connections = load_connections().unwrap_or_default();
@@ -5118,6 +5124,8 @@ enum DeleteGrantOutcome {
 struct CallerInfo {
     fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    caller_pubkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     user_agent: Option<String>,
@@ -5250,6 +5258,12 @@ struct SshConnectResult {
     client_ephemeral_pub: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shared_secret_encrypted: Option<String>,
+    #[serde(default)]
+    grant_session_token: Option<String>,
+    #[serde(default)]
+    grant_session_expires_at: Option<String>,
+    #[serde(default)]
+    grant_summary: Option<GrantSummary>,
 }
 
 struct LoadedSshKey {
@@ -10179,6 +10193,7 @@ mod coverage_boost {
             pair_code: "CODE".to_string(),
             caller_info: CallerInfo {
                 fingerprint: "fp-1".to_string(),
+                caller_pubkey: None,
                 display_name: None,
                 user_agent: None,
                 platform: None,

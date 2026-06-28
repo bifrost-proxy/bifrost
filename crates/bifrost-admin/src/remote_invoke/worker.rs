@@ -178,6 +178,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn caller_pubkey_fingerprint_from_b64(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(trimmed.as_bytes())
+        .ok()?;
+    Some(sha256_hex(&der))
+}
+
 #[derive(Clone)]
 struct GrantCryptoMaterial {
     shared_secret: Vec<u8>,
@@ -1496,6 +1507,10 @@ impl RemoteInvokeWorker {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                caller_pubkey: p
+                    .get("caller_pubkey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 display_name: p
                     .get("caller_display_name")
                     .and_then(|v| v.as_str())
@@ -2232,9 +2247,15 @@ impl RemoteInvokeWorker {
         let caller_fingerprint = event
             .caller_info
             .as_ref()
-            .map(|info| info.fingerprint.trim())
-            .filter(|fingerprint| !fingerprint.is_empty())
-            .map(str::to_string)
+            .and_then(|info| {
+                info.caller_pubkey
+                    .as_deref()
+                    .and_then(caller_pubkey_fingerprint_from_b64)
+                    .or_else(|| {
+                        let fingerprint = info.fingerprint.trim();
+                        (!fingerprint.is_empty()).then(|| fingerprint.to_string())
+                    })
+            })
             .unwrap_or_else(|| active_key.record.ssh_key_fingerprint.clone());
         if let Err(error) = ensure_default_ssh_key_shell_policy() {
             warn!(error = %error, "seed default SSH-key shell policy failed before ssh connect");
@@ -2355,6 +2376,10 @@ impl RemoteInvokeWorker {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                caller_pubkey: data
+                    .get("caller_pubkey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 display_name: data
                     .get("caller_display_name")
                     .and_then(|v| v.as_str())
@@ -6610,6 +6635,7 @@ mod coverage_boost {
 
         let caller_info = CallerInfo {
             fingerprint: "caller-fp".to_string(),
+            caller_pubkey: None,
             display_name: Some("Caller".to_string()),
             user_agent: None,
             source_ip: None,

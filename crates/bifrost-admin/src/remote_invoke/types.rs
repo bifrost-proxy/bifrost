@@ -330,6 +330,8 @@ pub struct CallerInfo {
     #[serde(default)]
     pub fingerprint: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub caller_pubkey: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,

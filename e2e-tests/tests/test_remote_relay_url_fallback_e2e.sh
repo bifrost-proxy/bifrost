@@ -117,8 +117,9 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(200, {"ok": True})
             return
 
-        if self.path.startswith("/v4/remote-invoke/pairings/") and self.path.endswith("/watch"):
+        if self.path.startswith("/v5/remote-invoke/pairings/") and self.path.split("?")[0].endswith("/watch"):
             pairing_id = self.path.split("/")[4]
+            meta = pairings.get(pairing_id, {})
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
@@ -129,13 +130,13 @@ class Handler(BaseHTTPRequestHandler):
             time.sleep(0.05)
             payload = {
                 "status": "approved",
-                "grant_id": f"grant-{label}",
-                "client_instance_id": f"client-{label}-123456",
-                "device_name": f"{label}-device",
-                "platform": "macos",
-                "grant_mode": "permanent",
-                "pair_code": pairings.get(pairing_id, ""),
-                "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
+                "claim_token": meta.get("claim_token", f"claim-{label}"),
+                "claim_expires_at": "2099-01-01T00:00:00Z",
+                "grant_summary": {
+                    "scope": "remote_shell_exec",
+                    "mode": "permanent",
+                    "file_access": "read_write",
+                },
             }
             self.wfile.write(b"event: approved\n")
             self.wfile.write(f"data: {json.dumps(payload)}\n\n".encode())
@@ -145,7 +146,27 @@ class Handler(BaseHTTPRequestHandler):
         self._write_json(404, {"code": 404, "message": "not_found", "data": None})
 
     def do_POST(self):
-        if self.path != "/v4/remote-invoke/pairings/start":
+        if self.path == "/v5/remote-invoke/grants/claim":
+            self._write_json(
+                200,
+                {
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "grant_session_token": f"session-{label}",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "grant_summary": {
+                            "scope": "remote_shell_exec",
+                            "mode": "permanent",
+                            "file_access": "read_write",
+                            "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
+                        },
+                    },
+                },
+            )
+            return
+
+        if self.path != "/v5/remote-invoke/pairings/start":
             self._write_json(404, {"code": 404, "message": "not_found", "data": None})
             return
 
@@ -154,7 +175,7 @@ class Handler(BaseHTTPRequestHandler):
         body = json.loads(raw.decode() or "{}")
         pair_code = body.get("pair_code", "")
         pairing_id = f"{label}-pairing-{pair_code}"
-        pairings[pairing_id] = pair_code
+        pairings[pairing_id] = {"pair_code": pair_code, "claim_token": f"claim-{label}-{pair_code}"}
         print(f"relay={label} pair_code={pair_code}", flush=True)
         self._write_json(
             200,
@@ -163,7 +184,9 @@ class Handler(BaseHTTPRequestHandler):
                 "message": "ok",
                 "data": {
                     "pairing_id": pairing_id,
-                    "approval_sse_url": f"/v4/remote-invoke/pairings/{pairing_id}/watch",
+                    "watch_token": f"watch-{label}",
+                    "client_instance_id": f"client-{label}-123456",
+                    "approval_sse_url": f"/v5/remote-invoke/pairings/{pairing_id}/watch",
                 },
             },
         )
@@ -293,7 +316,10 @@ mkdir -p "$CASE1_DIR"
 log "Case 1: explicit --relay-url should override running sync config"
 CASE1_OUTPUT="$(run_connect "$CASE1_DIR" --port "$RUNTIME_PORT" remote conn up 881001 --relay-url "$EXPLICIT_URL")"
 CASE1_EXIT=$?
-assert_status "0" "$CASE1_EXIT" "explicit relay-url should succeed" || exit 1
+if ! assert_status "0" "$CASE1_EXIT" "explicit relay-url should succeed"; then
+    echo "$CASE1_OUTPUT" >&2
+    exit 1
+fi
 assert_body_contains "Connected! Authorization granted" "$CASE1_OUTPUT" "explicit relay-url should connect successfully" || exit 1
 assert_connections_file_has "$CASE1_DIR" "$EXPLICIT_URL"
 assert_connections_file_has "$CASE1_DIR" "client-explicit-123456"
@@ -307,7 +333,10 @@ mkdir -p "$CASE2_DIR"
 log "Case 2: running sync config should be used when --relay-url is omitted"
 CASE2_OUTPUT="$(run_connect "$CASE2_DIR" --port "$RUNTIME_PORT" remote conn up 881002)"
 CASE2_EXIT=$?
-assert_status "0" "$CASE2_EXIT" "runtime sync relay-url should succeed" || exit 1
+if ! assert_status "0" "$CASE2_EXIT" "runtime sync relay-url should succeed"; then
+    echo "$CASE2_OUTPUT" >&2
+    exit 1
+fi
 assert_body_contains "Connected! Authorization granted" "$CASE2_OUTPUT" "runtime sync relay-url should connect successfully" || exit 1
 assert_connections_file_has "$CASE2_DIR" "$RUNTIME_RELAY_URL"
 assert_connections_file_has "$CASE2_DIR" "client-runtime-123456"
@@ -331,7 +360,10 @@ EOF
 log "Case 3: local config should be used when runtime sync config is unavailable"
 CASE3_OUTPUT="$(run_connect "$CASE3_DIR" --port "$RUNTIME_PORT" remote conn up 881003)"
 CASE3_EXIT=$?
-assert_status "0" "$CASE3_EXIT" "configured relay-url should succeed" || exit 1
+if ! assert_status "0" "$CASE3_EXIT" "configured relay-url should succeed"; then
+    echo "$CASE3_OUTPUT" >&2
+    exit 1
+fi
 assert_body_contains "Connected! Authorization granted" "$CASE3_OUTPUT" "configured relay-url should connect successfully" || exit 1
 assert_connections_file_has "$CASE3_DIR" "$CONFIG_RELAY_URL"
 assert_connections_file_has "$CASE3_DIR" "client-config-123456"

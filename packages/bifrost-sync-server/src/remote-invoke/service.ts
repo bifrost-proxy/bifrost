@@ -33,6 +33,7 @@ import {
   grantScopeAllowsCommand,
 } from './types';
 import { SshAuthService } from './ssh-auth';
+import { ed25519FingerprintFromBase64 } from './pop';
 import {
   pushToClient,
   getClientStream,
@@ -1085,9 +1086,15 @@ export class RemoteInvokeService {
     req: SshConnectResultRequest,
   ): Promise<void> {
     const result = this.sshAuth.completeConnect(clientInstanceId, req);
+    let grantSession: GrantSessionResponse | null = null;
+    let effectiveCallerFingerprint = result.caller_fingerprint;
     if (result.status === 'approved' && result.grant_id && result.caller_fingerprint) {
       const now = new Date().toISOString();
       const grantMode = 'permanent';
+      const callerPubkey = result.caller_info?.caller_pubkey || '';
+      effectiveCallerFingerprint = callerPubkey
+        ? ed25519FingerprintFromBase64(callerPubkey)
+        : result.caller_fingerprint;
       const callerDisplayName =
         result.caller_info?.hostname ||
         result.caller_info?.username ||
@@ -1095,15 +1102,17 @@ export class RemoteInvokeService {
 
       await this.storage.remoteInvoke.revokeActiveGrantsForCaller(
         clientInstanceId,
-        result.caller_fingerprint,
+        effectiveCallerFingerprint,
       );
 
       const grant: RemoteInvokeGrant = {
         id: result.grant_id,
         user_id: '',
         client_instance_id: clientInstanceId,
-        caller_fingerprint: result.caller_fingerprint,
+        caller_fingerprint: effectiveCallerFingerprint,
         caller_display_name: callerDisplayName,
+        caller_pubkey: callerPubkey,
+        caller_pubkey_fp: effectiveCallerFingerprint,
         caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
         client_ephemeral_pub: req.client_ephemeral_pub ?? '',
         grant_mode: grantMode,
@@ -1121,12 +1130,17 @@ export class RemoteInvokeService {
         update_time: now,
       };
       await this.storage.remoteInvoke.createGrant(grant);
+      grantSession = await this.mintGrantSessionToken(result.grant_id);
     }
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {
       ...result,
       client_instance_id: clientInstanceId,
+      caller_fingerprint: effectiveCallerFingerprint,
       caller_ephemeral_pub: req.caller_ephemeral_pub ?? null,
       client_ephemeral_pub: req.client_ephemeral_pub ?? null,
+      grant_session_token: grantSession?.grant_session_token ?? null,
+      grant_session_expires_at: grantSession?.expires_at ?? null,
+      grant_summary: grantSession?.grant_summary ?? null,
     });
     this.expireCallToken(result.connect_id);
   }

@@ -529,14 +529,17 @@ BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn up --ssh-key "$TM
 grep -q "Connected with SSH key" "$CLI_CONNECT_OUTPUT"
 CALLER_CONNECTIONS_JSON="$CALLER_DATA_DIR/remote-connections.json"
 assert_python "$CALLER_CONNECTIONS_JSON" '
+import re
 assert obj["connections"], "caller 应写入 remote-connections.json"
 conn = obj["connections"][0]
 assert conn["client_instance_id"] == "'"$CLIENT_INSTANCE_ID"'"
 assert conn["grant_mode"] == "permanent"
-assert conn["caller_fingerprint"].startswith("caller-")
+assert re.fullmatch(r"[0-9a-f]{64}", conn["caller_fingerprint"])
 assert conn["caller_fingerprint"] != "'"$FINGERPRINT"'"
 assert conn["device_code"] == "'"$DEVICE_CODE"'"
 assert conn["auth_method"] == "ssh_publickey"
+assert conn.get("grant_session_token")
+assert conn.get("shared_secret_encrypted")
 '
 CALLER_FINGERPRINT_1="$(jq -r '.connections[0].caller_fingerprint' "$CALLER_CONNECTIONS_JSON")"
 
@@ -577,29 +580,14 @@ else:
     raise AssertionError("grant not found")
 '
 
-log "Wait for relay reusable SSH grant to become queryable"
-for _ in $(seq 1 60); do
-    REUSABLE_AFTER_CONNECT_JSON="$TMPDIR/reusable_after_connect.json"
-    curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >"$REUSABLE_AFTER_CONNECT_JSON"
-    if python3 - "$REUSABLE_AFTER_CONNECT_JSON" "$MATCH_GRANT" <<'PY'
+log "Verify SSH grant is visible on target Admin grants"
+GRANTS_AFTER_CONNECT_JSON="$TMPDIR/grants_after_connect.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >"$GRANTS_AFTER_CONNECT_JSON"
+python3 - "$GRANTS_AFTER_CONNECT_JSON" "$MATCH_GRANT" <<'PY'
 import json
 import sys
 obj = json.load(open(sys.argv[1]))
-data = obj.get("data") or {}
-assert data.get("grant_id") == sys.argv[2]
-assert data.get("grant_scope") == "remote_shell_interactive"
-assert data.get("file_access") == "read_write"
-PY
-    then
-        break
-    fi
-    sleep 0.5
-done
-python3 - "$REUSABLE_AFTER_CONNECT_JSON" "$MATCH_GRANT" <<'PY'
-import json
-import sys
-obj = json.load(open(sys.argv[1]))
-data = obj.get("data") or {}
+data = next((g for g in obj.get("grants", []) if g.get("grant_id") == sys.argv[2]), {})
 assert data.get("grant_id") == sys.argv[2]
 assert data.get("grant_scope") == "remote_shell_interactive"
 assert data.get("file_access") == "read_write"
@@ -771,15 +759,16 @@ PY
 done
 assert_not_empty "$TRAFFIC_ID" "应生成可供 remote traffic get 查询的流量"
 
-log "Verify reusable SSH grant exists on relay"
-REUSABLE_JSON="$TMPDIR/reusable.json"
-curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >"$REUSABLE_JSON"
-assert_python "$REUSABLE_JSON" '
-assert obj["data"]["grant_id"] == "'"$MATCH_GRANT"'"
-assert obj["data"]["grant_mode"] == "permanent"
-assert obj["data"]["expires_at"] in (None, "")
-assert obj["data"]["caller_fingerprint"] == "'"$CALLER_FINGERPRINT_1"'"
-assert obj["data"]["ssh_key_fingerprint"] == "'"$FINGERPRINT"'"
+log "Verify SSH grant remains visible on target before traffic.get"
+GRANTS_BEFORE_TRAFFIC_GET_JSON="$TMPDIR/grants_before_traffic_get.json"
+curl -s "${ADMIN_BASE_URL}/api/remote-invoke/grants" >"$GRANTS_BEFORE_TRAFFIC_GET_JSON"
+assert_python "$GRANTS_BEFORE_TRAFFIC_GET_JSON" '
+grant = next((g for g in obj.get("grants", []) if g.get("grant_id") == "'"$MATCH_GRANT"'"), None)
+assert grant is not None
+assert grant["grant_mode"] == "permanent"
+assert grant.get("expires_at") in (None, "")
+assert grant["caller_fingerprint"] == "'"$CALLER_FINGERPRINT_1"'"
+assert grant["ssh_key_fingerprint"] == "'"$FINGERPRINT"'"
 '
 
 log "Execute search.get via SSH grant"

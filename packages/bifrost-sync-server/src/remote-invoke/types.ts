@@ -285,6 +285,8 @@ export interface SshChallengeResponse {
 }
 
 export interface SshCallerInfo {
+  fingerprint?: string;
+  caller_pubkey?: string;
   hostname?: string;
   username?: string;
   platform?: string;
