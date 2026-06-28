@@ -17,6 +17,7 @@ pub mod mock_traffic;
 pub mod protocols;
 pub mod public;
 pub mod remote_file_api;
+pub mod remote_invoke_pop;
 pub mod remote_shell_exec;
 pub mod replay_sse;
 pub mod request;
@@ -52,6 +53,7 @@ pub fn all_tests() -> Vec<TestCase> {
     tests.extend(template::tests());
     tests.extend(public::tests());
     tests.extend(remote_file_api::get_all_tests());
+    tests.extend(remote_invoke_pop::get_all_tests());
     tests.extend(remote_shell_exec::get_all_tests());
     tests.extend(curl_mock::get_all_tests());
     tests.extend(https::get_all_tests());
