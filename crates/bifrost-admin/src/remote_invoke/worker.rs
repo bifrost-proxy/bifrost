@@ -26,6 +26,7 @@ use super::call_history_store::{
 };
 use super::executor::RemoteInvokeExecutor;
 use super::file_policy_store::{
+    ensure_ssh_fingerprint_grant_full_ops as file_policy_ensure_ssh_grant_full_ops,
     full_file_ops as file_policy_full_ops, full_trust_file_roots,
     has_ssh_fingerprint_grant as file_policy_has_ssh_grant,
     rekey_ssh_fingerprint_grant as file_policy_rekey_ssh_grant,
@@ -549,6 +550,14 @@ impl RemoteInvokeWorker {
         };
         if !file_policy_has_ssh_grant(&record.ssh_key_fingerprint) {
             self.seed_ssh_file_access_grant(&record, None);
+        } else if let Err(error) =
+            file_policy_ensure_ssh_grant_full_ops(&record.ssh_key_fingerprint)
+        {
+            warn!(
+                fingerprint = %record.ssh_key_fingerprint,
+                error = %error,
+                "failed to migrate SSH key file-access grant to current full-op set"
+            );
         }
         Ok(Some(record))
     }
@@ -618,6 +627,14 @@ impl RemoteInvokeWorker {
         });
         if !moved {
             self.seed_ssh_file_access_grant(&reset.record, None);
+        } else if let Err(error) =
+            file_policy_ensure_ssh_grant_full_ops(&reset.record.ssh_key_fingerprint)
+        {
+            warn!(
+                fingerprint = %reset.record.ssh_key_fingerprint,
+                error = %error,
+                "failed to migrate reset SSH key file-access policy to current full-op set"
+            );
         }
         ensure_default_ssh_key_shell_policy()?;
         self.trigger_ssh_route_refresh();
@@ -6781,6 +6798,62 @@ mod coverage_boost {
             .ensure_active_ssh_file_access_policy()
             .expect("ensure policy");
         assert!(result.is_some());
+    }
+
+    #[test]
+    fn ensure_active_ssh_file_access_policy_migrates_legacy_full_ops() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let material = worker
+            .create_ssh_key(
+                "legacy-policy-label".to_string(),
+                GrantMode::Permanent,
+                None,
+            )
+            .expect("create ssh key");
+        let legacy_ops = file_policy_full_ops()
+            .into_iter()
+            .filter(|op| {
+                !matches!(
+                    op,
+                    bifrost_core::file_access::FileOp::ReadMany
+                        | bifrost_core::file_access::FileOp::Outline
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut cfg = crate::remote_invoke::file_policy_store::load_raw_config();
+        let grant = cfg
+            .grants
+            .iter_mut()
+            .find(|grant| {
+                grant.match_.ssh_fingerprint.as_deref()
+                    == Some(material.record.ssh_key_fingerprint.as_str())
+            })
+            .expect("seeded ssh file-access grant");
+        grant.ops = legacy_ops;
+        crate::remote_invoke::file_policy_store::save_raw_config(&cfg)
+            .expect("save legacy file-access config");
+
+        worker
+            .ensure_active_ssh_file_access_policy()
+            .expect("ensure policy");
+
+        let cfg = crate::remote_invoke::file_policy_store::load_raw_config();
+        let grant = cfg
+            .grants
+            .iter()
+            .find(|grant| {
+                grant.match_.ssh_fingerprint.as_deref()
+                    == Some(material.record.ssh_key_fingerprint.as_str())
+            })
+            .expect("migrated ssh file-access grant");
+        assert!(grant
+            .ops
+            .contains(&bifrost_core::file_access::FileOp::ReadMany));
+        assert!(grant
+            .ops
+            .contains(&bifrost_core::file_access::FileOp::Outline));
+        assert_eq!(grant.ops.len(), file_policy_full_ops().len());
     }
 
     // ---------------------------------------------------------------------

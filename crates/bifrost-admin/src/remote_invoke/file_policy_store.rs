@@ -398,6 +398,70 @@ pub(crate) fn raw_config_has_ssh_fingerprint_grant(cfg: &RawConfig, fingerprint:
         .any(|g| g.match_.ssh_fingerprint.as_deref() == Some(fingerprint))
 }
 
+/// Best-effort compatibility migration for SSH-key policies that were seeded
+/// when the "full file surface" was smaller.
+///
+/// Explicitly narrowed policies are preserved. We only append newly introduced
+/// full-trust ops when the existing entry already contains every legacy full
+/// op, which indicates it was an old default Full Trust grant rather than a
+/// user-authored allow-list.
+pub fn ensure_ssh_fingerprint_grant_full_ops(fingerprint: &str) -> Result<bool, String> {
+    let mut cfg = load_raw_config();
+    if !ensure_ssh_fingerprint_grant_full_ops_in_place(&mut cfg, fingerprint) {
+        return Ok(false);
+    }
+    save_raw_config(&cfg)?;
+    Ok(true)
+}
+
+pub(crate) fn ensure_ssh_fingerprint_grant_full_ops_in_place(
+    cfg: &mut RawConfig,
+    fingerprint: &str,
+) -> bool {
+    let full_ops = full_file_ops();
+    let legacy_full_ops = legacy_ssh_full_file_ops();
+    let mut changed = false;
+
+    for grant in cfg
+        .grants
+        .iter_mut()
+        .filter(|g| g.match_.ssh_fingerprint.as_deref() == Some(fingerprint))
+    {
+        if full_ops.iter().all(|op| grant.ops.contains(op)) {
+            continue;
+        }
+        if !legacy_full_ops.iter().all(|op| grant.ops.contains(op)) {
+            continue;
+        }
+
+        for op in &full_ops {
+            if !grant.ops.contains(op) {
+                grant.ops.push(*op);
+                changed = true;
+            }
+        }
+    }
+
+    changed
+}
+
+fn legacy_ssh_full_file_ops() -> Vec<FileOp> {
+    vec![
+        FileOp::Read,
+        FileOp::List,
+        FileOp::Stat,
+        FileOp::Glob,
+        FileOp::Search,
+        FileOp::Hash,
+        FileOp::Write,
+        FileOp::Edit,
+        FileOp::Mkdir,
+        FileOp::Move,
+        FileOp::Delete,
+        FileOp::ApplyPatch,
+    ]
+}
+
 /// Remove `[[grant]]` entries that are pinned to an exact grant id.
 ///
 /// This is called when a remote-invoke grant is deleted locally so the
@@ -1178,6 +1242,74 @@ ops = ["read"]
             &mut cfg, "missing", "new-fp", None,
         ));
         assert!(cfg.grants.is_empty());
+    }
+
+    #[test]
+    fn ensure_ssh_fingerprint_grant_full_ops_migrates_legacy_full_policy() {
+        let mut cfg = RawConfig {
+            grants: vec![RawGrantPolicy {
+                match_: GrantMatch {
+                    ssh_fingerprint: Some("legacy-fp".to_string()),
+                    ..Default::default()
+                },
+                name: Some("ssh-key:legacy".to_string()),
+                roots: vec![PathBuf::from("/Users/tester")],
+                denies: vec!["**/.secret".to_string()],
+                write_denies: vec!["**/readonly/**".to_string()],
+                ops: legacy_ssh_full_file_ops(),
+                max_read_bytes: Some(1024),
+                max_write_bytes: Some(2048),
+                respect_gitignore: Some(true),
+                allow_overwrite: Some(false),
+                allow_recursive_delete: Some(false),
+                ..Default::default()
+            }],
+            default: None,
+        };
+
+        assert!(ensure_ssh_fingerprint_grant_full_ops_in_place(
+            &mut cfg,
+            "legacy-fp"
+        ));
+
+        let grant = &cfg.grants[0];
+        assert_eq!(grant.ops.len(), full_file_ops().len());
+        for op in full_file_ops() {
+            assert!(grant.ops.contains(&op), "missing migrated op {:?}", op);
+        }
+        assert_eq!(grant.roots, vec![PathBuf::from("/Users/tester")]);
+        assert_eq!(grant.denies, vec!["**/.secret"]);
+        assert_eq!(grant.write_denies, vec!["**/readonly/**"]);
+        assert_eq!(grant.max_read_bytes, Some(1024));
+        assert_eq!(grant.max_write_bytes, Some(2048));
+        assert_eq!(grant.respect_gitignore, Some(true));
+        assert_eq!(grant.allow_overwrite, Some(false));
+        assert_eq!(grant.allow_recursive_delete, Some(false));
+    }
+
+    #[test]
+    fn ensure_ssh_fingerprint_grant_full_ops_preserves_narrowed_policy() {
+        let mut cfg = RawConfig {
+            grants: vec![RawGrantPolicy {
+                match_: GrantMatch {
+                    ssh_fingerprint: Some("narrow-fp".to_string()),
+                    ..Default::default()
+                },
+                name: Some("ssh-key:narrow".to_string()),
+                roots: vec![PathBuf::from("/Users/tester/work")],
+                ops: vec![FileOp::Read, FileOp::List],
+                ..Default::default()
+            }],
+            default: None,
+        };
+
+        assert!(!ensure_ssh_fingerprint_grant_full_ops_in_place(
+            &mut cfg,
+            "narrow-fp"
+        ));
+        assert_eq!(cfg.grants[0].ops, vec![FileOp::Read, FileOp::List]);
+        assert!(!cfg.grants[0].ops.contains(&FileOp::ReadMany));
+        assert!(!cfg.grants[0].ops.contains(&FileOp::Outline));
     }
 
     #[test]
