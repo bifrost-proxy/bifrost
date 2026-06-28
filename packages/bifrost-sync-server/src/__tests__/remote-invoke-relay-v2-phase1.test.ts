@@ -6,6 +6,7 @@ import path from 'path';
 
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
 import { buildRegistrationSignaturePayload, grantScopeAllowsCommand, normalizeGrantScope, resolveCommandKind } from '../remote-invoke/types';
+import { base64X25519Pub, makeCallerKeypair, seedActiveGrant, sha256Hex, signPopBody } from './remote-invoke-v5-test-utils';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-remote-invoke-relay-v2-phase1');
 const TEST_CONFIG: SyncServerConfig = {
@@ -55,7 +56,7 @@ function req(
   urlPath: string,
   body?: unknown,
   headers: Record<string, string> = {},
-): Promise<{ status: number; data: { code: number; message: string; data?: any } }> {
+): Promise<{ status: number; data: { code?: number; message?: string; error?: string; data?: any } }> {
   return new Promise((resolve, reject) => {
     const url = new URL(urlPath, baseUrl);
     const request = http.request({
@@ -272,6 +273,26 @@ async function registerClient(
   return response.data.data.client_auth_token as string;
 }
 
+function createGrantSession(sessionToken: string): { session_token_hash: string; session_token_expires_at: string } {
+  return {
+    session_token_hash: sha256Hex(sessionToken),
+    session_token_expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+}
+
+function postOpenCallV5(
+  sessionToken: string,
+  callerKeys: ReturnType<typeof makeCallerKeypair>,
+  body: Record<string, unknown>,
+) {
+  return req(
+    'POST',
+    '/v5/remote-invoke/calls/open',
+    signPopBody(body, callerKeys),
+    { Authorization: `Bearer ${sessionToken}` },
+  );
+}
+
 beforeAll(async () => {
   if (fs.existsSync(TEST_DATA_DIR)) {
     fs.rmSync(TEST_DATA_DIR, { recursive: true });
@@ -326,8 +347,8 @@ describe('remote invoke relay v2 phase 1', () => {
       command_summary: { command_preview: 'status' },
     });
 
-    expect(response.status).toBe(400);
-    expect(response.data.message).toBe('command_encrypted is required');
+    expect(response.status).toBe(410);
+    expect(response.data.error).toBe('protocol_version_not_supported');
   });
 
   it('persists only route-level metadata for shell.exec encrypted openCall', async () => {
@@ -336,6 +357,8 @@ describe('remote invoke relay v2 phase 1', () => {
     const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
     const clientAuthToken = await registerClient('ri-phase1-client', clientPubkey, clientKeys.privateKey, token);
     const now = new Date().toISOString();
+    const callerKeys = makeCallerKeypair();
+    const sessionToken = 'ri-phase1-shell-session';
 
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-phase1-shell-grant',
@@ -343,11 +366,17 @@ describe('remote invoke relay v2 phase 1', () => {
       client_instance_id: 'ri-phase1-client',
       caller_fingerprint: 'phase1-caller',
       caller_display_name: 'phase1-caller',
+      caller_pubkey: callerKeys.caller_pubkey,
+      caller_pubkey_fp: callerKeys.caller_pubkey_fp,
+      caller_ephemeral_pub: base64X25519Pub('phase1-shell-caller'),
+      client_ephemeral_pub: base64X25519Pub('phase1-shell-client'),
       grant_mode: 'permanent',
       grant_scope: 'remote_shell_exec',
       status: 'active',
       first_authorized_at: now,
       expires_at: '',
+      session_token_hash: sha256Hex(sessionToken),
+      session_token_expires_at: new Date(Date.now() + 60_000).toISOString(),
       last_used_at: now,
       max_calls: 999999,
       remaining_calls: 999999,
@@ -355,10 +384,8 @@ describe('remote invoke relay v2 phase 1', () => {
       update_time: now,
     });
 
-    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
-      grant_id: 'ri-phase1-shell-grant',
+    const openResponse = await req('POST', '/v5/remote-invoke/calls/open', signPopBody({
       client_instance_id: 'ri-phase1-client',
-      caller_fingerprint: 'phase1-caller',
       command_kind: 'shell.exec',
       command_encrypted: {
         version: 2,
@@ -371,7 +398,7 @@ describe('remote invoke relay v2 phase 1', () => {
       },
       timeout_hint_ms: 60_000,
       pty_enabled: true,
-    });
+    }, callerKeys), { Authorization: `Bearer ${sessionToken}` });
 
     expect(openResponse.status).toBe(200);
     expect(openResponse.data.data.call_meta.command_kind).toBe('shell.exec');
@@ -508,14 +535,18 @@ describe('remote invoke relay v2 phase 1', () => {
 
     expect(response.status, JSON.stringify(response.data)).toBe(200);
 
-    const reusable = await req(
+    const legacyReusable = await req(
       'GET',
       `/v4/remote-invoke/grants/reusable?client_instance_id=${encodeURIComponent(clientInstanceId)}&caller_fingerprint=${encodeURIComponent('phase1-replace-caller')}`,
     );
-    expect(reusable.status).toBe(200);
-    expect(reusable.data.data.grant_id).not.toBe('ri-phase1-old-grant');
-    expect(reusable.data.data.caller_ephemeral_pub).toBe('new-caller-epk');
-    expect(reusable.data.data.client_ephemeral_pub).toBe('new-client-epk');
+    expect(legacyReusable.status).toBe(410);
+    expect(legacyReusable.data.error).toBe('protocol_version_not_supported');
+
+    const activeGrants = await server.storage.remoteInvoke.listActiveGrantsForClient(clientInstanceId);
+    expect(activeGrants).toHaveLength(1);
+    expect(activeGrants[0].id).not.toBe('ri-phase1-old-grant');
+    expect(activeGrants[0].caller_ephemeral_pub).toBe('new-caller-epk');
+    expect(activeGrants[0].client_ephemeral_pub).toBe('new-client-epk');
 
     const oldGrant = await server.storage.remoteInvoke.getGrant('ri-phase1-old-grant');
     expect(oldGrant?.status).toBe('removed');
@@ -527,6 +558,8 @@ describe('remote invoke relay v2 phase 1', () => {
     const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
     const clientAuthToken = await registerClient('ri-phase1-exit-client', clientPubkey, clientKeys.privateKey, token);
     const now = new Date().toISOString();
+    const callerKeys = makeCallerKeypair();
+    const sessionToken = 'ri-phase1-exit-session';
 
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-phase1-exit-grant',
@@ -534,11 +567,16 @@ describe('remote invoke relay v2 phase 1', () => {
       client_instance_id: 'ri-phase1-exit-client',
       caller_fingerprint: 'phase1-exit-caller',
       caller_display_name: 'phase1-exit-caller',
+      caller_pubkey: callerKeys.caller_pubkey,
+      caller_pubkey_fp: callerKeys.caller_pubkey_fp,
+      caller_ephemeral_pub: base64X25519Pub('phase1-exit-caller'),
+      client_ephemeral_pub: base64X25519Pub('phase1-exit-client'),
       grant_mode: 'permanent',
       grant_scope: 'remote_shell_exec',
       status: 'active',
       first_authorized_at: now,
       expires_at: '',
+      ...createGrantSession(sessionToken),
       last_used_at: now,
       max_calls: 999999,
       remaining_calls: 999999,
@@ -546,10 +584,8 @@ describe('remote invoke relay v2 phase 1', () => {
       update_time: now,
     });
 
-    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
-      grant_id: 'ri-phase1-exit-grant',
+    const openResponse = await postOpenCallV5(sessionToken, callerKeys, {
       client_instance_id: 'ri-phase1-exit-client',
-      caller_fingerprint: 'phase1-exit-caller',
       command_kind: 'shell.exec',
       command_encrypted: {
         version: 2,
@@ -561,6 +597,7 @@ describe('remote invoke relay v2 phase 1', () => {
         command_preview: 'collect logs',
       },
     });
+    expect(openResponse.status).toBe(200);
 
     const callId = openResponse.data.data.call_id as string;
     const relayToken = openResponse.data.data.relay_token as string;
@@ -617,17 +654,26 @@ describe('remote invoke relay v2 phase 1', () => {
     await clientEvents.nextEvent('client_hello_ack');
 
     const now = new Date().toISOString();
+    const callerKeys = makeCallerKeypair();
+    const sessionToken = 'ri-phase1-roundtrip-session';
+    const callerEphemeralPub = base64X25519Pub('phase1-roundtrip-caller');
+    const clientEphemeralPub = base64X25519Pub('phase1-roundtrip-client');
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-phase1-roundtrip-grant',
       user_id: 'ri_phase1_roundtrip_owner',
       client_instance_id: 'ri-phase1-roundtrip-client',
       caller_fingerprint: 'phase1-roundtrip-caller',
       caller_display_name: 'phase1-roundtrip-caller',
+      caller_pubkey: callerKeys.caller_pubkey,
+      caller_pubkey_fp: callerKeys.caller_pubkey_fp,
+      caller_ephemeral_pub: callerEphemeralPub,
+      client_ephemeral_pub: clientEphemeralPub,
       grant_mode: 'permanent',
       grant_scope: 'remote_query',
       status: 'active',
       first_authorized_at: now,
       expires_at: '',
+      ...createGrantSession(sessionToken),
       last_used_at: now,
       max_calls: 999999,
       remaining_calls: 999999,
@@ -635,11 +681,8 @@ describe('remote invoke relay v2 phase 1', () => {
       update_time: now,
     });
 
-    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
-      grant_id: 'ri-phase1-roundtrip-grant',
+    const openResponse = await postOpenCallV5(sessionToken, callerKeys, {
       client_instance_id: 'ri-phase1-roundtrip-client',
-      caller_fingerprint: 'phase1-roundtrip-caller',
-      caller_pubkey: 'roundtrip-caller-pubkey',
       command_kind: 'query.readonly',
       command_encrypted: {
         version: 2,
@@ -663,6 +706,8 @@ describe('remote invoke relay v2 phase 1', () => {
       grant_id: 'ri-phase1-roundtrip-grant',
       grant_scope: 'remote_query',
       caller_fingerprint: 'phase1-roundtrip-caller',
+      caller_ephemeral_pub: callerEphemeralPub,
+      client_ephemeral_pub: clientEphemeralPub,
       command_kind: 'query.readonly',
       command_encrypted: {
         version: 2,
@@ -770,6 +815,8 @@ describe('remote invoke relay v2 phase 1', () => {
     const clientPubkey = clientKeys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
     const clientAuthToken = await registerClient('ri-phase1-restart-client', clientPubkey, clientKeys.privateKey, token);
     const now = new Date().toISOString();
+    const callerKeys = makeCallerKeypair();
+    const sessionToken = 'ri-phase1-restart-session';
 
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-phase1-restart-grant',
@@ -777,11 +824,16 @@ describe('remote invoke relay v2 phase 1', () => {
       client_instance_id: 'ri-phase1-restart-client',
       caller_fingerprint: 'phase1-restart-caller',
       caller_display_name: 'phase1-restart-caller',
+      caller_pubkey: callerKeys.caller_pubkey,
+      caller_pubkey_fp: callerKeys.caller_pubkey_fp,
+      caller_ephemeral_pub: base64X25519Pub('phase1-restart-caller'),
+      client_ephemeral_pub: base64X25519Pub('phase1-restart-client'),
       grant_mode: 'permanent',
       grant_scope: 'remote_shell_exec',
       status: 'active',
       first_authorized_at: now,
       expires_at: '',
+      ...createGrantSession(sessionToken),
       last_used_at: now,
       max_calls: 999999,
       remaining_calls: 999999,
@@ -789,10 +841,8 @@ describe('remote invoke relay v2 phase 1', () => {
       update_time: now,
     });
 
-    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
-      grant_id: 'ri-phase1-restart-grant',
+    const openResponse = await postOpenCallV5(sessionToken, callerKeys, {
       client_instance_id: 'ri-phase1-restart-client',
-      caller_fingerprint: 'phase1-restart-caller',
       command_kind: 'shell.exec',
       command_encrypted: {
         version: 2,
@@ -832,6 +882,56 @@ describe('remote invoke relay v2 phase 1', () => {
     expect(JSON.parse(callAfterRestart!.command_json)).toEqual({ kind: 'shell.exec' });
     expect(JSON.stringify(callAfterRestart)).not.toContain('PHASE1-RESTART-CMD');
     expect(JSON.stringify(callAfterRestart)).not.toContain('PHASE1-RESTART-EXIT');
+  });
+
+  it('opens v5 calls through bearer plus PoP and rejects grant_id in the caller body', async () => {
+    const keypair = makeCallerKeypair();
+    const sessionToken = 'phase1-v5-session-token';
+    const grant = await seedActiveGrant(server, {
+      id: 'ri-phase1-v5-open-grant',
+      client_instance_id: 'ri-phase1-v5-client',
+      caller_pubkey: keypair.caller_pubkey,
+      caller_pubkey_fp: keypair.caller_pubkey_fp,
+      caller_ephemeral_pub: base64X25519Pub('phase1-v5-caller'),
+      client_ephemeral_pub: base64X25519Pub('phase1-v5-client'),
+      session_token_hash: sha256Hex(sessionToken),
+      session_token_expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const rejected = await req('POST', '/v5/remote-invoke/calls/open', signPopBody({
+      grant_id: grant.id,
+      client_instance_id: grant.client_instance_id,
+      command_kind: 'shell.exec',
+      command_encrypted: {
+        version: 2,
+        nonce: 'phase1-v5-open-nonce',
+        ciphertext: 'PHASE1-V5-CMD',
+        tag: 'phase1-v5-open-tag',
+      },
+    }, keypair), { Authorization: `Bearer ${sessionToken}` });
+    expect(rejected.status).toBe(400);
+    expect(rejected.data.message).toBe('grant_id is not accepted in v5');
+
+    const opened = await req('POST', '/v5/remote-invoke/calls/open', signPopBody({
+      client_instance_id: grant.client_instance_id,
+      command_kind: 'shell.exec',
+      command_encrypted: {
+        version: 2,
+        nonce: 'phase1-v5-open-nonce',
+        ciphertext: 'PHASE1-V5-CMD',
+        tag: 'phase1-v5-open-tag',
+      },
+      command_summary: {
+        command_preview: 'v5-safe-command',
+      },
+    }, keypair), { Authorization: `Bearer ${sessionToken}` });
+    expect(opened.status).toBe(200);
+    expect(opened.data.data.call_id).toBeTruthy();
+    expect(opened.data.data).not.toHaveProperty('grant_id');
+
+    const call = await server.storage.remoteInvoke.getCall(opened.data.data.call_id);
+    expect(call?.grant_id).toBe(grant.id);
+    expect(call?.command_json).toBe(JSON.stringify({ kind: 'shell.exec' }));
   });
 
 });

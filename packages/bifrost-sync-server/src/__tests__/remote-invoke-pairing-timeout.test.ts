@@ -6,6 +6,7 @@ import path from 'path';
 
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
+import { base64X25519Pub } from './remote-invoke-v5-test-utils';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-remote-invoke-pairing-timeout');
 const TEST_CONFIG: SyncServerConfig = {
@@ -256,13 +257,13 @@ describe('remote invoke pairing timeout cleanup', () => {
       update_time: expiredNow,
     });
 
-    const startPairingResponse = await req('POST', '/v4/remote-invoke/pairings/start', {
+    const startPairingResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
       pair_code: pairCode,
       caller_info: {
         fingerprint: 'caller-fresh',
         display_name: 'fresh-caller',
       },
-      caller_ephemeral_pub: 'fresh-ephemeral',
+      caller_ephemeral_pub: base64X25519Pub('fresh-ephemeral'),
     });
     expect(startPairingResponse.status).toBe(200);
     expect(startPairingResponse.data.code).toBe(0);
