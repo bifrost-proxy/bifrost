@@ -508,8 +508,16 @@ run_remote_matrix() {
     file scratch-dir --cwd "$scratch" --name ppe --output json >/dev/null
   BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
     file write "$scratch/write.txt" --content "write-$label" --allow-overwrite true --cwd "$FILE_ROOT" --output json >/dev/null
+  printf 'local-write-%s\n' "$label" >"$TMP_ROOT/$label-local-write.txt"
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    file write "$scratch/write-local.txt" --from-local "$TMP_ROOT/$label-local-write.txt" \
+    --allow-overwrite true --cwd "$FILE_ROOT" --output json >/dev/null
   BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
     file edit "$scratch/write.txt" --edits '[{"start_line":1,"end_line":1,"replacement":"edit-'"$label"'\n"}]' --cwd "$FILE_ROOT" --output json >/dev/null
+  printf '[{"start_line":1,"end_line":1,"replacement":"edit-local-%s\\n"}]\n' "$label" >"$TMP_ROOT/$label-local-edits.json"
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    file edit "$scratch/write-local.txt" --from-local "$TMP_ROOT/$label-local-edits.json" \
+    --cwd "$FILE_ROOT" --output json >/dev/null
 
   cat >"$TMP_ROOT/$label.patch" <<PATCH
 *** Begin Patch
@@ -564,6 +572,21 @@ PY
   else
     wait "$logs_pid" || fail "$label remote job logs exited early: $(cat "$TMP_ROOT/$label-job-logs.out")"
   fi
+
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    exec --detach --shell-text "printf ${label}-long-begin; sleep 1; printf ${label}-long-middle; sleep 1; printf ${label}-long-end" \
+    >"$TMP_ROOT/$label-long-detach.out" 2>&1
+  local long_call_id
+  long_call_id="$(grep -Eo '[A-Za-z0-9_-]{16,}' "$TMP_ROOT/$label-long-detach.out" | tail -1)"
+  [[ -n "$long_call_id" ]] || fail "$label long detach call id missing: $(cat "$TMP_ROOT/$label-long-detach.out")"
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote job logs "$long_call_id" \
+    --no-verify-digest --output-file "$TMP_ROOT/$label-long-job-logs.log" >"$TMP_ROOT/$label-long-job-logs.out" 2>&1
+  grep -q "${label}-long-begin" "$TMP_ROOT/$label-long-job-logs.log"
+  grep -q "${label}-long-middle" "$TMP_ROOT/$label-long-job-logs.log"
+  grep -q "${label}-long-end" "$TMP_ROOT/$label-long-job-logs.log"
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote job status "$long_call_id" --wait-ms 1000 \
+    >"$TMP_ROOT/$label-long-job-status.out" 2>&1
+  grep -Eq 'status=(exited|completed)' "$TMP_ROOT/$label-long-job-status.out"
 
   BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
     run --detach --script-file "$TMP_ROOT/$label-run.py" --interpreter "$PYTHON_BIN" --cwd "$FILE_ROOT" \

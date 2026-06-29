@@ -324,8 +324,13 @@ Steps:
    ordinary Remote matrix:
    `remote conn status`, `remote traffic list/get/search`,
    `remote file read/read-many/scratch-dir/list/stat/glob/find/hash/outline/write/edit/mkdir/move/delete/patch`,
+   including local-payload `file write --from-local`,
+   `file edit --from-local`, and `file patch --from-local`,
    `remote exec`, `remote run`, `remote exec --detach`,
    `remote run --detach`, and `remote job logs/watch/list/status`.
+   The job matrix must include a running long task where `remote job logs`
+   stays attached until the job emits begin/middle/end output and reaches a
+   terminal status.
 8. Verify Code power authorization and SSH key default Full Trust both execute
    the power-management matrix: `remote keep-awake status`,
    `remote keep-awake on`, `remote keep-awake mode get`,
@@ -377,6 +382,11 @@ Execution result:
   fix that treats SSH key default Full Trust (`remote_shell_interactive`) as
   allowed for `power.mgmt`; rerun the full PPE command after the updated
   `bifrost-server-v4` is deployed.
+- After auditing the full `bifrost remote` CLI definition, the script was also
+  expanded to cover local-payload file write/edit/patch and a true running
+  long-task `remote job logs` path that verifies begin/middle/end output plus
+  terminal `remote job status`. This remote relay phase is pending the same
+  updated `bifrost-server-v4` deployment before final PPE execution.
 
 ## TC-P0-10: async remote grant tests do not hold std mutex across await
 
