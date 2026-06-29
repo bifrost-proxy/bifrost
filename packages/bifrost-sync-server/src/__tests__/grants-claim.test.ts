@@ -62,6 +62,7 @@ describe('remote invoke v5 grants claim', () => {
     const clientEphemeralPub = base64X25519Pub('claim-client');
     const { grant } = await seedApprovedPairingWithGrant(app.server, {
       claimToken: 'claim-ok',
+      callerPubkey: keypair.caller_pubkey,
       callerPubkeyFp: keypair.caller_pubkey_fp,
       clientEphemeralPub,
     });

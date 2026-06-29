@@ -1,7 +1,7 @@
 import crypto from 'crypto';
 import { customAlphabet } from 'nanoid';
 import type { IStorage } from '../dao/types';
-import type { RemoteInvokeConfig, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokePairing, RemoteInvokeClientRecord } from '../types';
+import type { RemoteInvokeConfig, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokePairing, RemoteInvokeClientRecord, GrantMode } from '../types';
 import type {
   StartPairingRequest,
   GrantDecisionRequest,
@@ -90,6 +90,12 @@ function constantTimeCompare(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
+function clampSshGrantMode(mode: string | undefined): GrantMode {
+  // P0-3: SSH-initiated grants must not be permanent.
+  const allowed: GrantMode[] = ['once', '30m', '1h', '1d'];
+  if (mode && (allowed as string[]).includes(mode)) return mode as GrantMode;
+  return 'once';
+}
 function isoTimestampToMillis(value: string | undefined | null): number | null {
   if (!value) return null;
   const millis = new Date(value).getTime();
@@ -226,7 +232,7 @@ export class RemoteInvokeService {
     // null = client has no active SSH key, clear relay route;
     // object = publish/update active route.
     if (Object.prototype.hasOwnProperty.call(req, 'ssh_device_route')) {
-      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route ?? null);
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, userId, req.ssh_device_route ?? null);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
       }
@@ -365,6 +371,18 @@ export class RemoteInvokeService {
       throw new Error('pair_slot_occupied');
     }
 
+    // P0-4: caller_pubkey is required, and the server derives the canonical fingerprint.
+    const callerPubkey = (req.caller_pubkey ?? '').trim();
+    if (!callerPubkey) {
+      throw new Error('caller_pubkey_required');
+    }
+    let derivedCallerFp = '';
+    try {
+      derivedCallerFp = ed25519FingerprintFromBase64(callerPubkey);
+    } catch {
+      throw new Error('caller_pubkey_invalid');
+    }
+
     const pairingId = nanoid();
     const watchToken = randomToken();
     const now = new Date().toISOString();
@@ -374,13 +392,13 @@ export class RemoteInvokeService {
       id: pairingId,
       user_id: userId,
       client_instance_id: resolvedClientId,
-      caller_fingerprint: req.caller_info.fingerprint,
+      caller_fingerprint: derivedCallerFp,
       pair_code: req.pair_code,
       status: 'pending_approval',
-      caller_pubkey: '',
+      caller_pubkey: callerPubkey,
       caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       client_ephemeral_pub: '',
-      caller_info_json: JSON.stringify(req.caller_info),
+      caller_info_json: JSON.stringify({ ...req.caller_info, fingerprint: derivedCallerFp }),
       command_summary_json: '{}',
       command_json: '{}',
       relay_token: '',
@@ -401,9 +419,9 @@ export class RemoteInvokeService {
 
     pushToClient(resolvedClientId, 'pairing_request', {
       pairing_id: pairingId,
-      caller_fingerprint: req.caller_info.fingerprint,
+      caller_fingerprint: derivedCallerFp,
       caller_display_name: req.caller_info.display_name ?? '',
-      caller_info: req.caller_info,
+      caller_info: { ...req.caller_info, fingerprint: derivedCallerFp },
       caller_ephemeral_pub: req.caller_ephemeral_pub ?? '',
       source_ip: sourceIp,
       user_agent: req.caller_info.user_agent ?? '',
@@ -416,7 +434,7 @@ export class RemoteInvokeService {
       event_type: 'pairing_created',
       seq: 0,
       direction: '',
-      event_summary_json: JSON.stringify({ pairing_id: pairingId, caller_fingerprint: req.caller_info.fingerprint }),
+      event_summary_json: JSON.stringify({ pairing_id: pairingId, caller_fingerprint: derivedCallerFp }),
       create_time: now,
     });
 
@@ -604,6 +622,18 @@ export class RemoteInvokeService {
     if (pairing.status !== 'approved' || !pairing.grant_id) {
       throw new Error('claim_token_invalid');
     }
+    // P0-4: redeem must be performed by the same caller_pubkey that started the pairing,
+    // and the PoP envelope's caller pubkey must derive to that fingerprint.
+    if (!pairing.caller_pubkey) {
+      throw new Error('pairing_caller_pubkey_missing');
+    }
+    if (!constantTimeCompare(pairing.caller_pubkey, req.caller_pubkey)) {
+      throw new Error('caller_pubkey_mismatch');
+    }
+    const expectedFp = ed25519FingerprintFromBase64(pairing.caller_pubkey);
+    if (!constantTimeCompare(expectedFp, callerPubkeyFp)) {
+      throw new Error('caller_pubkey_mismatch');
+    }
     const grant = await this.storage.remoteInvoke.getGrant(pairing.grant_id);
     if (!grant) throw new Error('grant_not_found');
     await this.storage.remoteInvoke.updateGrantCallerPubkey(grant.id, req.caller_pubkey, callerPubkeyFp);
@@ -614,6 +644,36 @@ export class RemoteInvokeService {
     return this.mintGrantSessionToken(updated.id);
   }
 
+  async redeemSshClaim(
+    req: { claim_token: string; client_instance_id: string; caller_pubkey: string; caller_ephemeral_pub?: string },
+    callerPubkeyFp: string,
+  ): Promise<GrantSessionResponse> {
+    const claim = await this.storage.remoteInvoke.getSshClaimByTokenHash(sha256Hex(req.claim_token));
+    if (!claim) throw new Error('claim_token_invalid');
+    if (claim.claimed_at) throw new Error('claim_token_invalid');
+    if (claim.expires_at && new Date(claim.expires_at) < new Date()) {
+      throw new Error('claim_token_invalid');
+    }
+    if (claim.client_instance_id !== req.client_instance_id) {
+      throw new Error('client_instance_id_mismatch');
+    }
+    // P0-3 + P0-4: PoP pubkey fingerprint must match the fingerprint frozen at SSH approval time.
+    const expectedFp = ed25519FingerprintFromBase64(req.caller_pubkey);
+    if (!constantTimeCompare(expectedFp, callerPubkeyFp)) {
+      throw new Error('caller_pubkey_mismatch');
+    }
+    if (claim.caller_pubkey_fp && !constantTimeCompare(claim.caller_pubkey_fp, callerPubkeyFp)) {
+      throw new Error('caller_pubkey_mismatch');
+    }
+    const grant = await this.storage.remoteInvoke.getGrant(claim.grant_id);
+    if (!grant) throw new Error('grant_not_found');
+    if (grant.status !== 'active') throw new Error('grant_not_found');
+    if (req.caller_ephemeral_pub) {
+      await this.storage.remoteInvoke.updateGrantCallerEphemeralPub(grant.id, req.caller_ephemeral_pub);
+    }
+    await this.storage.remoteInvoke.markSshClaimRedeemed(claim.claim_token_hash, new Date().toISOString());
+    return this.mintGrantSessionToken(grant.id);
+  }
   async lookupGrantSession(req: GrantLookupRequest, callerPubkeyFp: string): Promise<GrantSessionResponse> {
     const grant = await this.storage.remoteInvoke.getGrantByCallerFp(callerPubkeyFp, req.client_instance_id);
     if (!grant || grant.revoked_at || grant.status !== 'active') {
@@ -623,7 +683,13 @@ export class RemoteInvokeService {
       await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'expired' });
       throw new Error('grant_not_found');
     }
-    if (grant.caller_ephemeral_pub !== req.caller_ephemeral_pub) {
+    if (grant.caller_ephemeral_pub) {
+      // P0-2: an established ephemeral_pub is frozen for the lifetime of the grant.
+      if (grant.caller_ephemeral_pub !== req.caller_ephemeral_pub) {
+        throw new Error('ephemeral_pub_rotation_not_allowed');
+      }
+    } else if (req.caller_ephemeral_pub) {
+      // First-time set: only allowed when the grant has no ephemeral_pub yet.
       await this.storage.remoteInvoke.updateGrantCallerEphemeralPub(grant.id, req.caller_ephemeral_pub);
     }
     return this.mintGrantSessionToken(grant.id);
@@ -1044,7 +1110,10 @@ export class RemoteInvokeService {
     // Keep SSH route sync three-state. See registerClient for the protocol
     // meaning of omitted vs null vs object.
     if (Object.prototype.hasOwnProperty.call(req, 'ssh_device_route')) {
-      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, req.ssh_device_route ?? null);
+      // P0-1: the heartbeat route owner must match the client record's user_id.
+      const record = await this.storage.remoteInvoke.getClientRecord(req.client_instance_id);
+      const ownerUserId = record?.user_id ?? '';
+      const routeState = this.sshAuth.syncSshRoute(req.client_instance_id, ownerUserId, req.ssh_device_route ?? null);
       if (routeState.routeChanged) {
         await this.storage.remoteInvoke.revokeSshGrantsForClient(req.client_instance_id);
       }
@@ -1086,15 +1155,25 @@ export class RemoteInvokeService {
     req: SshConnectResultRequest,
   ): Promise<void> {
     const result = this.sshAuth.completeConnect(clientInstanceId, req);
-    let grantSession: GrantSessionResponse | null = null;
     let effectiveCallerFingerprint = result.caller_fingerprint;
-    if (result.status === 'approved' && result.grant_id && result.caller_fingerprint) {
+    let claimToken: string | null = null;
+    let claimExpiresAt: string | null = null;
+    let grantIdForClaim: string | null = null;
+    if (result.status === 'approved' && result.grant_id) {
       const now = new Date().toISOString();
-      const grantMode = 'permanent';
+      // P0-3: clamp SSH-minted grant mode to non-permanent values.
+      const grantMode = clampSshGrantMode(req.grant_mode);
       const callerPubkey = result.caller_info?.caller_pubkey || '';
-      effectiveCallerFingerprint = callerPubkey
-        ? ed25519FingerprintFromBase64(callerPubkey)
-        : result.caller_fingerprint;
+      if (!callerPubkey) {
+        throw new Error('ssh_caller_pubkey_required');
+      }
+      let derivedFp = '';
+      try {
+        derivedFp = ed25519FingerprintFromBase64(callerPubkey);
+      } catch {
+        throw new Error('ssh_caller_pubkey_invalid');
+      }
+      effectiveCallerFingerprint = derivedFp;
       const callerDisplayName =
         result.caller_info?.hostname ||
         result.caller_info?.username ||
@@ -1105,9 +1184,10 @@ export class RemoteInvokeService {
         effectiveCallerFingerprint,
       );
 
+      const maxCalls = Math.max(1, Math.floor(this.config.ssh_grant_max_calls ?? 1000));
       const grant: RemoteInvokeGrant = {
         id: result.grant_id,
-        user_id: '',
+        user_id: result.user_id ?? '',
         client_instance_id: clientInstanceId,
         caller_fingerprint: effectiveCallerFingerprint,
         caller_display_name: callerDisplayName,
@@ -1124,13 +1204,27 @@ export class RemoteInvokeService {
         first_authorized_at: now,
         expires_at: '',
         last_used_at: now,
-        max_calls: 999999,
-        remaining_calls: 999999,
+        max_calls: maxCalls,
+        remaining_calls: maxCalls,
         created_by: 'ssh_publickey',
         update_time: now,
       };
       await this.storage.remoteInvoke.createGrant(grant);
-      grantSession = await this.mintGrantSessionToken(result.grant_id);
+
+      // P0-3: do NOT issue a grant_session_token here. Instead mint a single-use
+      // claim_token; the caller must redeem it via PoP at /v5/remote-invoke/grants/ssh-claim.
+      claimToken = randomToken();
+      claimExpiresAt = new Date(Date.now() + CLAIM_TOKEN_TTL_MS).toISOString();
+      grantIdForClaim = result.grant_id;
+      await this.storage.remoteInvoke.createSshClaim({
+        claim_token_hash: sha256Hex(claimToken),
+        grant_id: result.grant_id,
+        client_instance_id: clientInstanceId,
+        caller_pubkey_fp: effectiveCallerFingerprint,
+        expires_at: claimExpiresAt,
+        create_time: now,
+        claimed_at: '',
+      });
     }
     pushToCallerStream(result.connect_id, 'ssh_connect_result', {
       ...result,
@@ -1138,13 +1232,12 @@ export class RemoteInvokeService {
       caller_fingerprint: effectiveCallerFingerprint,
       caller_ephemeral_pub: req.caller_ephemeral_pub ?? null,
       client_ephemeral_pub: req.client_ephemeral_pub ?? null,
-      grant_session_token: grantSession?.grant_session_token ?? null,
-      grant_session_expires_at: grantSession?.expires_at ?? null,
-      grant_summary: grantSession?.grant_summary ?? null,
+      claim_token: claimToken,
+      claim_expires_at: claimExpiresAt,
+      grant_id: grantIdForClaim,
     });
     this.expireCallToken(result.connect_id);
   }
-
   async removeGrant(userId: string, grantId: string, callerFingerprint: string): Promise<void> {
     const grant = await this.storage.remoteInvoke.getGrant(grantId);
     if (!grant) throw new Error('grant_not_found');

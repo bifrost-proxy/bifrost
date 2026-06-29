@@ -177,6 +177,7 @@ export interface RemoteInvokeConfig {
   max_sse_connections_per_ip: number;
   pair_rate_limit_per_ip: number;
   pair_rate_limit_global_per_client: number;
+  ssh_grant_max_calls?: number;
 }
 
 export interface CallerInfo {
@@ -316,4 +317,14 @@ export interface RemoteInvokeClientRecord {
   last_heartbeat_at: string;
   create_time: string;
   update_time: string;
+}
+
+export interface RemoteInvokeSshClaim {
+  claim_token_hash: string;
+  grant_id: string;
+  client_instance_id: string;
+  caller_pubkey_fp: string;
+  expires_at: string;
+  create_time: string;
+  claimed_at: string;
 }

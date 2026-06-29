@@ -182,6 +182,7 @@ export async function seedApprovedPairingWithGrant(
     grantId?: string;
     pairCode?: string;
     clientInstanceId?: string;
+    callerPubkey?: string;
     callerPubkeyFp?: string;
     clientEphemeralPub?: string;
   },
@@ -200,7 +201,7 @@ export async function seedApprovedPairingWithGrant(
     caller_fingerprint: 'caller-fp',
     pair_code: fields.pairCode ?? 'PAIR123',
     status: 'approved',
-    caller_pubkey: '',
+    caller_pubkey: fields.callerPubkey ?? '',
     caller_ephemeral_pub: '',
     client_ephemeral_pub: grant.client_ephemeral_pub,
     caller_info_json: '{}',

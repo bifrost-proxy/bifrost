@@ -1749,6 +1749,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 ssh_key,
                 device_code.as_deref(),
                 &caller_info,
+                &caller_identity,
                 &opts.relay_url,
             )
             .await;
@@ -2223,6 +2224,7 @@ async fn handle_connect(
         &StartPairingRequest {
             pair_code: pair_code.to_string(),
             caller_info: caller_info.clone(),
+            caller_pubkey: pop::caller_pubkey_b64(&caller_identity.key_pair),
             caller_ephemeral_pub: pending_transport.caller_ephemeral_pub.clone(),
         },
     )
@@ -2339,6 +2341,7 @@ async fn handle_connect_with_ssh(
     ssh_key: &str,
     device_code_override: Option<&str>,
     caller_info: &CallerInfo,
+    caller_identity: &CallerPopIdentity,
     relay_url: &str,
 ) -> bifrost_core::Result<()> {
     let pending_transport = PendingCallerTransport::generate()?;
@@ -2388,27 +2391,81 @@ async fn handle_connect_with_ssh(
 
     match result.status.as_str() {
         "approved" => {
-            let grant_id = result.grant_id.unwrap_or_else(|| "unknown".to_string());
-            let client_instance_id = result.client_instance_id.ok_or_else(|| {
+            let grant_id = result
+                .grant_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let client_instance_id = result.client_instance_id.clone().ok_or_else(|| {
                 BifrostError::Config(
                     "ssh connect succeeded but relay did not return client_instance_id".to_string(),
                 )
             })?;
-            let grant_mode = result.grant_mode.unwrap_or_else(|| "permanent".to_string());
-            let grant_session_token = result
-                .grant_session_token
+            let grant_mode = result
+                .grant_mode
+                .clone()
+                .unwrap_or_else(|| "once".to_string());
+            let caller_fingerprint = result
+                .caller_fingerprint
+                .clone()
+                .unwrap_or_else(|| caller_info.fingerprint.clone());
+
+            // P0-3: prefer single-use claim_token exchanged for a real grant_session_token via PoP.
+            let (grant_session_token_plain, grant_session_expires_at, transport) =
+                if let Some(claim_token) = result.claim_token.as_deref() {
+                    let redeemed = caller
+                        .redeem_ssh_claim(
+                            &client_instance_id,
+                            claim_token,
+                            pending_transport,
+                            caller_identity,
+                        )
+                        .await?;
+                    let transport_finalized = redeemed
+                        .client_ephemeral_pub
+                        .as_deref()
+                        .and_then(|client_eph| {
+                            redeemed.caller_ephemeral_pub.as_deref().map(|caller_eph| {
+                                StoredTransportContext {
+                                    caller_ephemeral_pub: caller_eph.to_string(),
+                                    client_ephemeral_pub: client_eph.to_string(),
+                                    shared_secret_encrypted: redeemed
+                                        .shared_secret_encrypted
+                                        .clone()
+                                        .unwrap_or_default(),
+                                }
+                            })
+                        })
+                        .ok_or_else(|| {
+                            BifrostError::Network(
+                                "redeem_ssh_claim response missing transport context".to_string(),
+                            )
+                        })?;
+                    (
+                        redeemed.grant_session_token,
+                        redeemed.expires_at,
+                        transport_finalized,
+                    )
+                } else {
+                    // Legacy path (should not occur after P0-3 server changes).
+                    let client_ephemeral_pub =
+                        result.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                            BifrostError::Config(
+                            "ssh connect succeeded but relay did not return client_ephemeral_pub"
+                                .to_string(),
+                        )
+                        })?;
+                    let t = pending_transport.finalize(client_ephemeral_pub)?;
+                    (
+                        result.grant_session_token.clone(),
+                        result.grant_session_expires_at.clone(),
+                        t,
+                    )
+                };
+
+            let grant_session_token = grant_session_token_plain
                 .as_deref()
                 .map(encrypt_grant_session_token)
                 .transpose()?;
-            let caller_fingerprint = result
-                .caller_fingerprint
-                .unwrap_or_else(|| caller_info.fingerprint.clone());
-            let client_ephemeral_pub = result.client_ephemeral_pub.as_deref().ok_or_else(|| {
-                BifrostError::Config(
-                    "ssh connect succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
-                )
-            })?;
-            let transport = pending_transport.finalize(client_ephemeral_pub)?;
 
             let new_conn = LocalConnection {
                 client_instance_id: client_instance_id.clone(),
@@ -2428,7 +2485,7 @@ async fn handle_connect_with_ssh(
                 client_ephemeral_pub: Some(transport.client_ephemeral_pub),
                 shared_secret_encrypted: Some(transport.shared_secret_encrypted),
                 grant_session_token,
-                grant_session_expires_at: result.grant_session_expires_at,
+                grant_session_expires_at,
             };
 
             let mut connections = load_connections().unwrap_or_default();
@@ -5183,6 +5240,7 @@ fn get_os_version() -> Option<String> {
 struct StartPairingRequest {
     pair_code: String,
     caller_info: CallerInfo,
+    caller_pubkey: String,
     caller_ephemeral_pub: String,
 }
 
@@ -5264,8 +5322,11 @@ struct SshConnectResult {
     grant_session_expires_at: Option<String>,
     #[serde(default)]
     grant_summary: Option<GrantSummary>,
+    #[serde(default)]
+    claim_token: Option<String>,
+    #[serde(default)]
+    claim_expires_at: Option<String>,
 }
-
 struct LoadedSshKey {
     key_pair: Ed25519KeyPair,
     device_code: String,
@@ -5655,6 +5716,56 @@ impl CallerRelayClient {
             .ok_or_else(|| {
                 BifrostError::Network(
                     "claim_grant response missing client_ephemeral_pub".to_string(),
+                )
+            })?;
+        let transport = pending_transport.finalize(client_ephemeral_pub)?;
+        Ok(GrantInfo {
+            grant_id: String::new(),
+            status: "active".to_string(),
+            grant_session_token: session.grant_session_token,
+            expires_at: session.expires_at,
+            grant_summary: session.grant_summary,
+            caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+            client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+            shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+        })
+    }
+
+    async fn redeem_ssh_claim(
+        &self,
+        client_instance_id: &str,
+        claim_token: &str,
+        pending_transport: PendingCallerTransport,
+        caller_identity: &CallerPopIdentity,
+    ) -> bifrost_core::Result<GrantInfo> {
+        let url = format!("{}/v5/remote-invoke/grants/ssh-claim", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::json!({
+                "client_instance_id": client_instance_id,
+                "claim_token": claim_token,
+                "caller_ephemeral_pub": pending_transport.caller_ephemeral_pub.clone(),
+            }),
+            &caller_identity.key_pair,
+        )?;
+        let response = self
+            .http
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("redeem ssh claim failed: {e}")))?;
+        let data: Value = self
+            .parse_response_data(response, "redeem_ssh_claim")
+            .await?;
+        let session: GrantInfo = serde_json::from_value(data)
+            .map_err(|e| BifrostError::Network(format!("parse ssh claim response failed: {e}")))?;
+        let client_ephemeral_pub = session
+            .grant_summary
+            .as_ref()
+            .and_then(|summary| summary.client_ephemeral_pub.as_deref())
+            .ok_or_else(|| {
+                BifrostError::Network(
+                    "redeem_ssh_claim response missing client_ephemeral_pub".to_string(),
                 )
             })?;
         let transport = pending_transport.finalize(client_ephemeral_pub)?;
@@ -10203,6 +10314,7 @@ mod coverage_boost {
                 os_version: None,
                 arch: None,
             },
+            caller_pubkey: "pubkey".to_string(),
             caller_ephemeral_pub: "epk".to_string(),
         };
 

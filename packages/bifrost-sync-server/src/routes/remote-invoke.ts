@@ -72,6 +72,7 @@ const DEFAULT_REMOTE_INVOKE_CONFIG: RemoteInvokeConfig = {
   max_sse_connections_per_ip: 10,
   pair_rate_limit_per_ip: 5,
   pair_rate_limit_global_per_client: 10,
+  ssh_grant_max_calls: 1000,
 };
 
 function extractBearerToken(ctx: RequestContext): string | null {
@@ -248,6 +249,9 @@ export async function handleRemoteInvoke(
 
     if (pathname === '/v5/remote-invoke/grants/claim' && method === 'POST') {
       return await handleGrantsClaimV5(ctx, storage, service);
+    }
+    if (pathname === '/v5/remote-invoke/grants/ssh-claim' && method === 'POST') {
+      return await handleGrantsSshClaimV5(ctx, storage, service);
     }
 
     if (pathname === '/v5/remote-invoke/grants/revoke' && method === 'POST') {
@@ -1004,7 +1008,8 @@ async function handleGrantsLookupV5(
     sendJson(ctx.res, 200, { code: 0, message: 'ok', data: session });
   } catch (e: unknown) {
     const msg = e instanceof Error ? e.message : 'grant_not_found';
-    sendError(ctx.res, 404, msg);
+    const status = msg === 'ephemeral_pub_rotation_not_allowed' ? 401 : 404;
+    sendError(ctx.res, status, msg);
   }
   return true;
 }
@@ -1040,6 +1045,37 @@ async function handleGrantsClaimV5(
   return true;
 }
 
+async function handleGrantsSshClaimV5(
+  ctx: RequestContext,
+  storage: IStorage,
+  service: RemoteInvokeService,
+): Promise<boolean> {
+  const pop = await requirePoP(ctx, storage);
+  if (!pop) return true;
+  const body = pop.body;
+  if (!body.client_instance_id || !body.claim_token) {
+    sendError(ctx.res, 400, 'client_instance_id and claim_token are required');
+    return true;
+  }
+  const callerEphemeralPub = validateCallerEphemeralPub(ctx, body.caller_ephemeral_pub);
+  if (!callerEphemeralPub) return true;
+  try {
+    const session = await service.redeemSshClaim({
+      claim_token: String(body.claim_token),
+      client_instance_id: String(body.client_instance_id),
+      caller_pubkey: pop.callerPubkey,
+      caller_ephemeral_pub: callerEphemeralPub,
+    }, pop.callerPubkeyFp);
+    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: session });
+  } catch (e: unknown) {
+    const msg = e instanceof Error ? e.message : 'claim_token_invalid';
+    const status = msg === 'client_instance_id_mismatch' ? 403
+      : msg === 'caller_pubkey_mismatch' ? 403
+      : 401;
+    sendError(ctx.res, status, msg);
+  }
+  return true;
+}
 async function handleGrantsRevokeV5(
   ctx: RequestContext,
   storage: IStorage,

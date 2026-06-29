@@ -131,6 +131,7 @@ export interface EncryptedEnvelope {
 export interface StartPairingRequest {
   pair_code: string;
   caller_info: CallerInfo;
+  caller_pubkey: string;
   caller_ephemeral_pub?: string;
 }
 

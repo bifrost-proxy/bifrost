@@ -8,7 +8,7 @@ const nanoid = customAlphabet('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklm
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
-  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord,
+  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord, RemoteInvokeSshClaim,
 } from '../types';
 import type { IUserDao, IEnvDao, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao, IStorage } from './types';
 
@@ -759,6 +759,31 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     this.db.prepare(`UPDATE bifrost_remote_invoke_clients SET ${sets.join(', ')} WHERE client_instance_id = ?`).run(...params);
   }
 
+  async createSshClaim(claim: RemoteInvokeSshClaim): Promise<void> {
+    const now = claim.create_time || new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO bifrost_remote_invoke_ssh_claims (claim_token_hash, grant_id, client_instance_id, caller_pubkey_fp, expires_at, create_time, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      claim.claim_token_hash,
+      claim.grant_id,
+      claim.client_instance_id ?? '',
+      claim.caller_pubkey_fp ?? '',
+      claim.expires_at,
+      now,
+      claim.claimed_at ?? '',
+    );
+  }
+
+  async getSshClaimByTokenHash(hash: string): Promise<RemoteInvokeSshClaim | undefined> {
+    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_ssh_claims WHERE claim_token_hash = ? LIMIT 1').get(hash) as RemoteInvokeSshClaim | undefined;
+  }
+
+  async markSshClaimRedeemed(hash: string, claimedAt: string): Promise<void> {
+    this.db.prepare(
+      'UPDATE bifrost_remote_invoke_ssh_claims SET claimed_at = ? WHERE claim_token_hash = ?'
+    ).run(claimedAt, hash);
+  }
+
   async cleanupExpiredData(now: string, retentionDays: number, maxRecords: number): Promise<number> {
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     let total = 0;
@@ -771,6 +796,9 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
     const r3 = this.db.prepare('DELETE FROM bifrost_remote_invoke_pairings WHERE create_time < ?').run(cutoff);
     total += r3.changes;
+
+    const rc = this.db.prepare('DELETE FROM bifrost_remote_invoke_ssh_claims WHERE expires_at < ?').run(now).changes;
+    total += rc;
 
     const countRow = this.db.prepare('SELECT COUNT(*) as cnt FROM bifrost_remote_invoke_calls').get() as { cnt: number };
     if (countRow.cnt > maxRecords) {
@@ -989,6 +1017,17 @@ export class SqliteStorage implements IStorage {
         PRIMARY KEY (caller_pubkey_fp, nonce)
       );
       CREATE INDEX IF NOT EXISTS idx_ri_nonces_seen ON bifrost_remote_invoke_nonces(seen_at);
+      CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_ssh_claims (
+        claim_token_hash      TEXT PRIMARY KEY,
+        grant_id              TEXT NOT NULL,
+        client_instance_id    TEXT NOT NULL DEFAULT '',
+        caller_pubkey_fp      TEXT NOT NULL DEFAULT '',
+        expires_at            TEXT NOT NULL,
+        create_time           TEXT NOT NULL,
+        claimed_at            TEXT NOT NULL DEFAULT ''
+      );
+      CREATE INDEX IF NOT EXISTS idx_ri_ssh_claims_grant ON bifrost_remote_invoke_ssh_claims(grant_id);
+      CREATE INDEX IF NOT EXISTS idx_ri_ssh_claims_expires ON bifrost_remote_invoke_ssh_claims(expires_at);
     `);
   }
 
@@ -997,6 +1036,9 @@ export class SqliteStorage implements IStorage {
     const pairingColumns = this.db.pragma('table_info(bifrost_remote_invoke_pairings)') as Array<{ name: string }>;
     const nonceTable = this.db.prepare(
       "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bifrost_remote_invoke_nonces'",
+    ).get() as { name: string } | undefined;
+    const sshClaimsTable = this.db.prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'bifrost_remote_invoke_ssh_claims'",
     ).get() as { name: string } | undefined;
     const required = [
       'ssh_key_id',
@@ -1025,6 +1067,7 @@ export class SqliteStorage implements IStorage {
       required.some(name => !grantColumns.some(col => col.name === name)) ||
       requiredPairing.some(name => !pairingColumns.some(col => col.name === name)) ||
       !nonceTable ||
+      !sshClaimsTable ||
       forbidden.some(name => grantColumns.some(col => col.name === name));
     if (!schemaMismatch) {
       return;
@@ -1034,6 +1077,7 @@ export class SqliteStorage implements IStorage {
       DROP TABLE IF EXISTS bifrost_remote_invoke_events;
       DROP TABLE IF EXISTS bifrost_remote_invoke_calls;
       DROP TABLE IF EXISTS bifrost_remote_invoke_nonces;
+      DROP TABLE IF EXISTS bifrost_remote_invoke_ssh_claims;
       DROP TABLE IF EXISTS bifrost_remote_invoke_grants;
       DROP TABLE IF EXISTS bifrost_remote_invoke_pairings;
       DROP TABLE IF EXISTS bifrost_remote_invoke_clients;
