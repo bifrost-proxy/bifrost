@@ -159,6 +159,23 @@ pub(super) async fn handle_idle_im_command(
         return true;
     }
 
+    if handle_im_effort_command(
+        trimmed,
+        session_key,
+        agent_config,
+        ImModelCommandContext {
+            client: ctx.client,
+            provider: ctx.provider,
+            external_cli_config_store: ctx.external_cli_config_store,
+            event: ctx.event,
+            message_log_store: ctx.message_log_store,
+        },
+    )
+    .await
+    {
+        return true;
+    }
+
     if let Some(response) =
         bifrost_agent::handle_session_free_command(session_key, msg_text, agent_config)
     {
@@ -188,6 +205,7 @@ pub(super) fn append_im_channel_help(mut help_text: String) -> String {
          /runner [Runner]  查看或切换当前 IM 通道绑定的 Runner\n\
          /models       查看当前 Codex/Traex/Claude Code Runner 可选模型\n\
          /model [模型]  查看或切换当前 Codex/Traex/Claude Code Runner 的 session 模型；/model clear 清除\n\
+         /effort [级别] 查看或切换当前 Codex/Traex/Claude Code Runner 的 Reasoning Effort；/effort clear 清除\n\
          /q <消息>       将消息加入队列，当前任务结束后自动继续处理\n\
          /rq <序号>      取消一条排队消息\n\
          /g <引导内容>   给正在运行的内置 Agent 注入引导；外部 Runner 会按队列处理",
@@ -564,6 +582,194 @@ async fn handle_im_model_command(
     true
 }
 
+async fn handle_im_effort_command(
+    message: &str,
+    session_key: &str,
+    agent_config: &crate::im_gateway::agent::ImAgentConfig,
+    ctx: ImModelCommandContext<'_>,
+) -> bool {
+    let Some(command) =
+        crate::im_gateway::external_cli::parse_external_cli_effort_slash_command(message)
+    else {
+        return false;
+    };
+    let command = match command {
+        Ok(command) => command,
+        Err(reason) => {
+            send_agent_reply(
+                ctx.client,
+                ctx.provider,
+                ctx.event,
+                &format!("❌ {reason}"),
+                ctx.message_log_store,
+            )
+            .await;
+            return true;
+        }
+    };
+    let config = ctx.external_cli_config_store.load();
+    let Some(configured_runner_id) = agent_config
+        .runner
+        .as_ref()
+        .and_then(|runner| runner.custom_runner_id())
+        .map(ToString::to_string)
+    else {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+        "/effort 当前仅支持 Codex、Traex 或 Claude Code Runner。请先用 `/runner Codex`、`/runner Traex` 或 `/runner Claude Code` 切换。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    };
+    let effective = crate::im_gateway::external_cli::effective_config_for_provider_and_runner(
+        &config,
+        Some(ctx.provider.id.as_str()),
+        Some(configured_runner_id.as_str()),
+    );
+    if crate::im_gateway::external_cli::external_cli_effort_options(&effective.settings.adapter)
+        .is_empty()
+    {
+        send_agent_reply(
+            ctx.client,
+            ctx.provider,
+            ctx.event,
+            "/effort 当前仅支持 Codex、Traex 或 Claude Code Runner。",
+            ctx.message_log_store,
+        )
+        .await;
+        return true;
+    }
+    let adapter_label = crate::im_gateway::external_cli::external_cli_model_adapter_label(
+        &effective.settings.adapter,
+    );
+    let mut resolved_model_config =
+        crate::im_gateway::external_cli::resolve_external_cli_model_config(
+            &effective.settings.adapter,
+            &effective.settings.adapter_config,
+        );
+    if let Some(state) = crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &effective.settings.adapter,
+        Some(&effective.runner_id),
+    ) {
+        if let Some(model) = state
+            .model_override
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            resolved_model_config.model = Some(model.to_string());
+            resolved_model_config.model_source = state.model_override_source;
+        }
+    }
+    let model_catalog = crate::im_gateway::external_cli::load_external_cli_model_catalog(
+        &effective.settings.adapter,
+        &effective.settings.adapter_config,
+        None,
+    )
+    .await
+    .unwrap_or_default();
+    let reply = match command {
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::List => {
+            crate::im_gateway::external_cli::format_external_cli_effort_catalog_for_model(
+                &effective.settings.adapter,
+                resolved_model_config.model.as_deref(),
+                &model_catalog,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Show => {
+            let state = crate::im_gateway::session_state::load_session_state(
+                session_key,
+                &effective.settings.adapter,
+                Some(&effective.runner_id),
+            );
+            let (effort, source) = state
+                .and_then(|state| {
+                    if state.reasoning_effort_override.is_none()
+                        && state.reasoning_effort_override_source.is_none()
+                    {
+                        None
+                    } else {
+                        Some((
+                            state.reasoning_effort_override,
+                            state.reasoning_effort_override_source,
+                        ))
+                    }
+                })
+                .unwrap_or_else(|| {
+                    (
+                        resolved_model_config.reasoning_effort.clone(),
+                        resolved_model_config.reasoning_source.clone(),
+                    )
+                });
+            crate::im_gateway::external_cli::format_external_cli_effort_status(
+                &effective.settings.adapter,
+                effort.as_deref(),
+                source.as_deref(),
+                &effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Clear => {
+            persist_im_reasoning_effort_override(
+                session_key,
+                &effective.settings.adapter,
+                &effective.runner_id,
+                None,
+            );
+            persist_im_model_system_message(
+                session_key,
+                &effective.settings.adapter,
+                &effective.runner_id,
+                "清除 Reasoning Effort 切换",
+            );
+            format!(
+                "已清除 {adapter_label} Runner `{}` 的 session Reasoning Effort override。下一条消息将使用 Runner 配置或 {adapter_label} 默认值。",
+                effective.runner_id
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Set(effort) => {
+            match crate::im_gateway::external_cli::validate_external_cli_effort_selection_for_model(
+                &effective.settings.adapter,
+                &effort,
+                resolved_model_config.model.as_deref(),
+                &model_catalog,
+            ) {
+                Ok(effort) => {
+                    persist_im_reasoning_effort_override(
+                        session_key,
+                        &effective.settings.adapter,
+                        &effective.runner_id,
+                        Some(effort.clone()),
+                    );
+                    persist_im_model_system_message(
+                        session_key,
+                        &effective.settings.adapter,
+                        &effective.runner_id,
+                        &format!("切换 Reasoning Effort 为 {effort}"),
+                    );
+                    format!(
+                        "已将 {adapter_label} Runner `{}` 的 session Reasoning Effort 设置为 `{}`。下一条消息会使用该推理强度启动。",
+                        effective.runner_id, effort
+                    )
+                }
+                Err(response) => response,
+            }
+        }
+    };
+    send_agent_reply(
+        ctx.client,
+        ctx.provider,
+        ctx.event,
+        &reply,
+        ctx.message_log_store,
+    )
+    .await;
+    true
+}
+
 fn persist_im_model_system_message(
     session_key: &str,
     adapter: &str,
@@ -632,6 +838,32 @@ fn persist_im_model_override(
             runner_id = %runner_id,
             error = %error,
             "failed to persist IM external CLI model override"
+        );
+    }
+}
+
+fn persist_im_reasoning_effort_override(
+    session_key: &str,
+    adapter: &str,
+    runner_id: &str,
+    effort: Option<String>,
+) {
+    let source = effort.as_ref().map(|_| "session slash command".to_string());
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        adapter,
+        Some(runner_id),
+        |state| {
+            state.reasoning_effort_override = effort;
+            state.reasoning_effort_override_source = source;
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist IM external CLI reasoning effort override"
         );
     }
 }

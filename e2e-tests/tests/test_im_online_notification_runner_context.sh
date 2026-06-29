@@ -10,6 +10,7 @@ cd "$ROOT_DIR"
 
 TEST_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-im-online-context.XXXXXX")"
 DATA_DIR="$TEST_DIR/data"
+CLAUDE_CONFIG_DIR="$TEST_DIR/claude-config"
 SERVER_LOG="$TEST_DIR/bifrost.log"
 MOCK_LOG="$TEST_DIR/feishu_requests.ndjson"
 MOCK_PORT_FILE="$TEST_DIR/mock_port"
@@ -35,7 +36,17 @@ cleanup() {
 }
 trap cleanup EXIT
 
-mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent/sessions/2026/06/04"
+mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent/sessions/2026/06/04" "$CLAUDE_CONFIG_DIR"
+
+cat >"$CLAUDE_CONFIG_DIR/settings.json" <<'JSON'
+{
+  "model": "sonnet",
+  "effortLevel": "low",
+  "env": {
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7"
+  }
+}
+JSON
 
 python3 - "$MOCK_LOG" "$MOCK_PORT_FILE" <<'PY' &
 import http.server
@@ -99,7 +110,8 @@ cat >"$DATA_DIR/admin/im_gateway_external_cli_agent.json" <<'JSON'
   "defaultRunnerId": "codex-default",
   "runners": {
     "codex-default": {"enabled": true, "adapter": "codex"},
-    "web-main": {"enabled": true, "adapter": "chatgpt_web", "adapterConfig": {"auth": {"statePath": "startup-auth-e2e.json"}}}
+    "web-main": {"enabled": true, "adapter": "chatgpt_web", "adapterConfig": {"auth": {"statePath": "startup-auth-e2e.json"}}},
+    "Claude-Code": {"enabled": true, "adapter": "claude_code", "adapterConfig": {"env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}}
   },
   "channels": {}
 }
@@ -132,7 +144,7 @@ s.close()
 PY
 )"
 
-BIFROST_DATA_DIR="$DATA_DIR" BIFROST_DEVICE_NAME="im-online-e2e" BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1 "$BIFROST_BIN" start \
+BIFROST_DATA_DIR="$DATA_DIR" CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR" BIFROST_DEVICE_NAME="im-online-e2e" BIFROST_CHATGPT_WEB_STARTUP_AUTH_DRY_RUN=1 "$BIFROST_BIN" start \
   -p "$PORT" \
   --unsafe-ssl \
   --no-system-proxy \
@@ -222,6 +234,61 @@ assert "Model" in markdown and "N/A" in markdown, markdown
 assert "Reasoning Effort" in markdown and "N/A" in markdown, markdown
 assert "Reasoning Summary" in markdown and "N/A" in markdown, markdown
 assert "Completed User Turns" in markdown and "2" in markdown, markdown
+PY
+
+curl --noproxy '*' -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/im-gateway/providers" \
+  -H 'Content-Type: application/json' \
+  -d "{
+    \"id\": \"feishu-claude\",
+    \"provider_type\": \"feishu\",
+    \"display_name\": \"Feishu Claude\",
+    \"enabled\": true,
+    \"base_url\": \"http://127.0.0.1:$MOCK_PORT/open-apis\",
+    \"app_id\": \"cli_online_context_claude\",
+    \"app_secret\": \"cli_secret\",
+    \"owner_open_id\": \"ou_owner_claude\",
+    \"event_connection_enabled\": false,
+    \"agent_config\": {
+      \"runner\": \"Claude-Code\",
+      \"work_dir\": \"/tmp/im-provider-workdir\"
+    }
+  }" >/dev/null
+
+curl --noproxy '*' -fsS -X POST "http://127.0.0.1:$PORT/_bifrost/api/im-gateway/providers/feishu-claude/connect" >/dev/null
+
+CLAUDE_MESSAGES_JSON="$TEST_DIR/claude_messages.json"
+for _ in $(seq 1 80); do
+  curl --noproxy '*' -fsS "http://127.0.0.1:$PORT/_bifrost/api/im-gateway/providers/feishu-claude/messages?direction=outbound&limit=20" >"$CLAUDE_MESSAGES_JSON"
+  if python3 - "$CLAUDE_MESSAGES_JSON" <<'PY'
+import json, sys
+messages = json.load(open(sys.argv[1], encoding="utf-8"))
+if any((m.get("trigger") == "online" and m.get("status") == "success") for m in messages):
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+  then
+    break
+  fi
+  sleep 0.25
+done
+
+python3 - "$CLAUDE_MESSAGES_JSON" <<'PY'
+import json
+import sys
+
+messages = json.load(open(sys.argv[1], encoding="utf-8"))
+online = next((m for m in messages if m.get("trigger") == "online"), None)
+assert online is not None, messages
+assert online.get("status") == "success", online
+content = online.get("content_preview") or ""
+assert "- **Provider**: Feishu Claude (`feishu-claude`)" in content, content
+assert "- **Runner Type**: `claude_code`" in content, content
+assert "- **Runner ID**: `Claude-Code`" in content, content
+assert "- **Model**: `N/A`" in content, content
+assert "claude settings" not in content, content
+assert "claude-opus-4-7" not in content, content
+assert "- **Reasoning Effort**: `high`" in content, content
+assert "- **Reasoning Summary**: `N/A`" in content, content
 PY
 
 echo "[im-online-notification-runner-context] PASS"

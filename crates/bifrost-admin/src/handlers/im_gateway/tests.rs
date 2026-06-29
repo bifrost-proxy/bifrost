@@ -310,7 +310,7 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
 }
 
 #[test]
-pub(super) fn online_notification_context_resolves_claude_code_settings_model() {
+pub(super) fn online_notification_context_resolves_claude_code_settings_effort() {
     let _env_lock = IM_GATEWAY_TEST_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -323,8 +323,10 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
         claude_home.join("settings.json"),
         r#"{
           "model": "sonnet",
+          "effortLevel": "low",
           "env": {
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7"
+            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7",
+            "CLAUDE_CODE_EFFORT_LEVEL": "high"
           }
         }"#,
     )
@@ -333,6 +335,7 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
     let _home_guard = EnvVarGuard::set("HOME", &home.path().display().to_string());
     let _claude_config_guard = EnvVarGuard::remove("CLAUDE_CONFIG_DIR");
     let _anthropic_model_guard = EnvVarGuard::remove("ANTHROPIC_MODEL");
+    let _claude_effort_guard = EnvVarGuard::remove("CLAUDE_CODE_EFFORT_LEVEL");
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
         runner: Some(bifrost_agent::AgentRunnerMode::Custom(
@@ -373,9 +376,11 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
         crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
     );
     assert_eq!(context.runner_id.as_deref(), Some("Claude-Code"));
-    assert_eq!(context.model.as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(context.model_provider.as_deref(), Some("sonnet"));
-    assert!(message.contains("- **Model**: `claude-opus-4-7（sonnet）`"));
+    assert_eq!(context.model, None);
+    assert_eq!(context.model_provider, None);
+    assert_eq!(context.model_reasoning_effort.as_deref(), Some("high"));
+    assert!(message.contains("- **Model**: `N/A`"));
+    assert!(message.contains("- **Reasoning Effort**: `high`"));
 }
 
 #[test]

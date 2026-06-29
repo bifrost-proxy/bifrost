@@ -2922,3 +2922,50 @@ rm -rf ./.bifrost-test
   - active status 只作为当前进程内锁和实时预览，刷新与历史恢复以 JSONL terminal state 为终态事实源。
   - 正常完成和异常终止都不会让 queue 永久卡在上一轮；显式 Stop 不自动续跑队列。
 - **执行记录（2026-06-16）**: PASS — 执行 `CARGO_TARGET_DIR=./.bifrost-test/agent-session-target cargo test -p bifrost-agent test_request_stop_releases_stale_active_status_without_stop_signal --lib -- --nocapture` 通过，验证 stale active stop 兜底清理后同 session 可重新 take；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin agent_stream_session_guard_returns_checked_out_session_on_drop --lib -- --nocapture` 通过，验证 Web stream RAII guard drop 后归还 checked-out session；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin records_builtin_worker_terminal_state_to_requested_history --lib -- --nocapture` 通过，验证内置 worker 异常终态写入指定 JSONL 并被 summary 扫描为 `failed`；执行 `CARGO_TARGET_DIR=./.bifrost-test/admin-agent-chat-target cargo test -p bifrost-admin queue_control_stream_input --lib -- --nocapture` 通过，验证 Web `/q`/`/rq` 队列控制仍不落普通消息且 FIFO 行为保持。
+
+### TC-IMA-153: External Code Runner `/model` 与 `/effort` 控制命令
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
+  - 准备 mock Codex、Traex、Claude Code CLI；Codex/Traex 支持 `debug models` 输出公开模型 JSON，Claude Code mock 不支持 `debug models`。
+  - Bifrost 启动时必须设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`，并使用 `--no-system-proxy`。
+- **操作步骤**:
+  1. 启动临时 Bifrost 服务，PATCH `/_bifrost/api/im-gateway/chat/config` 注册三个 runner：`codex`、`traex`、`claude_code`。
+  2. 对 Codex/Traex 分别发送 `/models`，检查只展示 visibility=list 模型，不包含 hidden 模型或 `base_instructions`。
+  3. 对 Traex `/models` 检查响应包含 `Model load: 93%`。
+  4. 对 Claude Code 发送 `/models`，检查响应包含 `sonnet`、`opus`、`haiku`、`fable` 以及版本描述（如 `Sonnet 4.6`、`Opus 4.8`），且 Claude mock 没有收到 `debug models` 调用。
+  5. 对 Codex/Traex/Claude Code 分别发送 `/model <slug>`，再发送普通消息，检查 runtime snapshot args 包含对应 `--model <slug>`。
+  6. 对 Codex/Traex/Claude Code 分别发送 `/efforts`、`/effort <level>`，再发送普通消息。
+  7. 对 Traex 当前模型尝试不支持的 `/effort high`，检查 Bifrost 返回不切换提示，不进入底层模型。
+  8. 读取 `agent/im_gateway/session_state.json`。
+- **预期结果**:
+  - `/model` 和 `/effort` 都是不进入模型正文的控制命令。
+  - Codex/Traex 的普通消息 runtime args 使用 `--config model_reasoning_effort="<level>"`。
+  - Claude Code 的普通消息 runtime args 使用 `--effort <level>`。
+  - Traex 当前模型声明的 `supported_reasoning_levels` 会限制 `/effort` 可选值。
+  - `session_state.json` 同时保存 `modelOverride`、`modelOverrideSource`、`reasoningEffortOverride`、`reasoningEffortOverrideSource`。
+  - Claude Code `/models` 不读取 `.claude/settings.json` 作为模型列表来源；完整模型名仍可通过 `/model <full-model-name>` 传入。
+- **清理步骤**:
+  - 停止临时 Bifrost 服务。
+  - 删除 `.bifrost-e2e-traex-models.*` 临时目录。
+  - 确认没有指向临时目录的 mock runner 或 Bifrost 进程残留。
+- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh`，真实启动临时 Bifrost 服务并使用 mock Codex/Traex/Claude Code CLI 验证 `/models`、`/model`、`/efforts`、`/effort`。Traex `/models` 返回 `Model load: 93%`；Traex 当前模型只支持 `low/medium` 时 `/effort high` 被 Bifrost 拒绝；Codex/Traex 普通消息 runtime args 分别包含 `model_reasoning_effort="minimal"` 和 `model_reasoning_effort="low"`；Claude Code 普通消息 runtime args 包含 `--effort xhigh`；`session_state.json` 保存三个 runner 的 model/effort override 和 source。E2E 输出 run id：Codex `1782743125354-142d6a5f-f823-4761-a557-87db41e40854`，Traex `1782743125761-de490e37-7a2a-43c9-b8bf-1ceff0ce0210`，Claude Code `1782743126849-8fa841d1-0cc2-4907-babf-2cd73932fbe2`，Codex effort `1782743126128-5867a93f-c521-4690-88a0-595e6c15655d`，Traex effort `1782743126349-93aee9ba-ea5c-4c44-89fc-52fdee6dcf01`，Claude effort `1782743131125-f6f5f89a-06b7-426c-aabf-c44bd3764c14`。
+
+### TC-IMA-154: Claude Code 上线通知展示 Reasoning Effort 且不展示 settings 模型来源
+
+- **前置条件**:
+  - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
+  - 临时 HOME 下创建 `.claude/settings.json`，内容包含 `model: "sonnet"`、`effortLevel: "low"`，以及 env 中 `CLAUDE_CODE_EFFORT_LEVEL: "high"`、`ANTHROPIC_DEFAULT_SONNET_MODEL`。
+  - 创建 Feishu provider，Agent runner 指向 `Claude-Code`，并触发上线通知。
+- **操作步骤**:
+  1. 调用 `build_online_notification_agent_context` 等价真实路径，或通过 Feishu provider connect 触发上线通知。
+  2. 检查通知正文的 `Runner Type`、`Runner ID`、`Model`、`Reasoning Effort`、`Reasoning Summary`。
+  3. 检查通知正文不含 `claude settings` 模型来源和 `ANTHROPIC_DEFAULT_SONNET_MODEL` 映射后的模型名。
+- **预期结果**:
+  - `Runner Type` 为 `claude_code`，`Runner ID` 为 `Claude-Code`。
+  - `Model` 显示 `N/A` 或显式 runner/session 配置的模型，不因为 `.claude/settings.json` 的 `model` 字段变成 `sonnet（claude settings）`。
+  - `Reasoning Effort` 显示 `high`（runner env 优先于 settings 默认），不再是 `N/A`。
+  - `Reasoning Summary` 未配置时显示 `N/A`。
+- **清理步骤**:
+  - 删除临时 HOME 和 Bifrost 数据目录。
+- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `SKIP_BUILD=true BIFROST_BIN=/Users/bytedance/project/bifrost-claude-code-runner-task/target/debug/bifrost PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_online_notification_runner_context.sh`。脚本使用临时 `CLAUDE_CONFIG_DIR` 写入 `settings.json`（含 `model:"sonnet"`、`effortLevel:"low"`、`ANTHROPIC_DEFAULT_SONNET_MODEL:"claude-opus-4-7"`），同时 runner env 设置 `CLAUDE_CODE_EFFORT_LEVEL=high`。真实 Feishu provider connect 后上线通知显示 `Runner Type: claude_code`、`Runner ID: Claude-Code`、`Model: N/A`、`Reasoning Effort: high`、`Reasoning Summary: N/A`，且不包含 `claude settings` 或 `claude-opus-4-7`。

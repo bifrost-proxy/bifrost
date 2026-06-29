@@ -206,6 +206,7 @@ fn append_traex_config_args(
         generated.push("--model".to_string());
         generated.push(model.to_string());
     }
+    append_codex_reasoning_config(&mut generated, config);
     if let Some(permission_mode) = permission_mode.filter(|_| !danger_full_access) {
         generated.push("--permission-mode".to_string());
         generated.push(permission_mode);
@@ -282,6 +283,12 @@ fn remove_overridden_traex_args(args: &mut Vec<String>, config: &ExternalCliAdap
     }
     if config.color.is_some() {
         remove_codex_arg_with_value(args, "--color");
+    }
+    if config.reasoning_effort.is_some() || config.reasoning_summary.is_some() {
+        remove_codex_config_with_key(args, "model_reasoning_effort");
+        remove_codex_config_with_key(args, "reasoning_effort");
+        remove_codex_config_with_key(args, "model_reasoning_summary");
+        remove_codex_config_with_key(args, "reasoning_summary");
     }
 }
 
@@ -420,6 +427,12 @@ fn remove_overridden_codex_args(args: &mut Vec<String>, config: &ExternalCliAdap
     if config.color.is_some() {
         remove_codex_arg_with_value(args, "--color");
     }
+    if config.reasoning_effort.is_some() || config.reasoning_summary.is_some() {
+        remove_codex_config_with_key(args, "model_reasoning_effort");
+        remove_codex_config_with_key(args, "reasoning_effort");
+        remove_codex_config_with_key(args, "model_reasoning_summary");
+        remove_codex_config_with_key(args, "reasoning_summary");
+    }
 }
 
 fn insert_codex_args_before_stdin(args: &mut Vec<String>, generated: Vec<String>) {
@@ -442,6 +455,18 @@ fn remove_codex_arg_with_value(args: &mut Vec<String>, flag: &str) {
             if index < args.len() && !args[index].starts_with('-') {
                 args.remove(index);
             }
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn remove_codex_config_with_key(args: &mut Vec<String>, key: &str) {
+    let mut index = 0;
+    while index + 1 < args.len() {
+        if args[index] == "--config" && config_override_key(&args[index + 1]) == Some(key) {
+            args.remove(index);
+            args.remove(index);
         } else {
             index += 1;
         }
