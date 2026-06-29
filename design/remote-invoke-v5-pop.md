@@ -108,6 +108,20 @@
 | `watch_token_invalid` | watch_token 不存在 / 已过期 |
 | `protocol_version_not_supported` | 旧 v4 客户端访问 v5 路由 |
 
+### 3.5 Relay hardening follow-up
+
+- `client_auth_token` is accepted only from `Authorization: Bearer ...` on
+  client-authenticated relay endpoints. Query-string fallback is removed so the
+  30-day client token cannot be copied into access logs, proxy logs, browser
+  history, or monitoring URL fields.
+- `openCall` consumes grant call budget through a database conditional update:
+  `status='active' AND remaining_calls > 0`. The service proceeds only when
+  the update affects exactly one row, so concurrent requests against a once
+  grant cannot both pass a stale pre-check and create multiple calls.
+- The caller open rate limiter is `600` requests/minute per caller+client key.
+  This preserves a normal high-frequency workload of `500` opens/minute while
+  still bounding accidental tight loops.
+
 ---
 
 ## 四、Schema DDL（破坏式：直接 drop & recreate）

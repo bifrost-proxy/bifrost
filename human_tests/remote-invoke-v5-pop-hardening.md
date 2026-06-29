@@ -179,3 +179,61 @@ Execution result:
   全部 remote file 子命令、`remote exec`、`remote run`、`remote exec --detach`、
   `remote run --detach`、`remote job logs/watch/list/status` 均 PASS。
 - `remote conn down --all` 清理通过；验证完成后未发现当前分支 Bifrost 残留进程。
+
+## TC-P0-7: client_auth_token query fallback rejected
+
+Regression target: target/client SSE streams must not accept
+`client_auth_token` from URL query parameters. Tokens must be sent with
+`Authorization: Bearer ...` only.
+
+Steps:
+
+1. Execute:
+   `pnpm --dir packages/bifrost-sync-server test -- src/__tests__/remote-invoke-security.test.ts`.
+2. In `remote-invoke-security.test.ts`, verify the case
+   `rejects client SSE authentication tokens in URL query parameters` registers
+   a client, opens `/v4/remote-invoke/client/stream?...&client_auth_token=...`
+   without an Authorization header, and asserts HTTP `401`.
+3. Verify normal authenticated SSE cases in the same file pass with
+   `Authorization: Bearer <client_auth_token>`.
+
+Expected:
+
+- Query-string client tokens are rejected with `401`.
+- Existing client SSE flows keep working when the token is sent in the
+  Authorization header.
+
+Execution result:
+
+- PASS. 2026-06-29 executed
+  `pnpm --dir packages/bifrost-sync-server test -- src/__tests__/remote-invoke-security.test.ts src/__tests__/remote-invoke-relay-v2-phase1.test.ts src/__tests__/remote-invoke-pairing-timeout.test.ts`;
+  all `15` selected test files and `196` tests passed.
+
+## TC-P0-8: once grant concurrent openCall consumes atomically
+
+Regression target: concurrent `/v5/remote-invoke/calls/open` requests against a
+once grant with `remaining_calls=1` must not both create calls.
+
+Steps:
+
+1. Execute:
+   `pnpm --dir packages/bifrost-sync-server test -- src/__tests__/remote-invoke-relay-v2-phase1.test.ts`.
+2. In `remote-invoke-relay-v2-phase1.test.ts`, verify the case
+   `atomically consumes once grants under concurrent v5 openCall requests`
+   seeds a once grant with `max_calls=1` and `remaining_calls=1`.
+3. Verify the test sends two concurrent `/v5/remote-invoke/calls/open`
+   requests using the same grant session token and caller PoP key.
+
+Expected:
+
+- Exactly one request succeeds with HTTP `200`.
+- The other request is rejected as `grant_consumed` or
+  `grant_session_token_invalid`, depending on whether it reaches service logic
+  before or after the successful request marks the grant consumed.
+- The stored grant has `remaining_calls=0`.
+- Only one call row is created for the target client.
+
+Execution result:
+
+- PASS. 2026-06-29 executed the selected sync-server remote-invoke test set;
+  the atomic once-grant regression passed as part of `196` passing tests.

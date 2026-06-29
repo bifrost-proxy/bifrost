@@ -671,8 +671,13 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     this.db.prepare('UPDATE bifrost_remote_invoke_grants SET last_used_at = ?, update_time = ? WHERE id = ?').run(ts, ts, grantId);
   }
 
-  async consumeGrantCall(grantId: string): Promise<void> {
-    this.db.prepare('UPDATE bifrost_remote_invoke_grants SET remaining_calls = MAX(remaining_calls - 1, 0), update_time = ? WHERE id = ?').run(new Date().toISOString(), grantId);
+  async consumeGrantCall(grantId: string): Promise<boolean> {
+    const result = this.db.prepare(
+      `UPDATE bifrost_remote_invoke_grants
+       SET remaining_calls = remaining_calls - 1, update_time = ?
+       WHERE id = ? AND status = ? AND remaining_calls > 0`,
+    ).run(new Date().toISOString(), grantId, 'active');
+    return result.changes === 1;
   }
 
   async createCall(c: RemoteInvokeCall): Promise<RemoteInvokeCall> {

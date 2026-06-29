@@ -38,7 +38,7 @@ const registerLimiter = new RateLimiter(60, 60_000);
 const clientQueryLimiter = new RateLimiter(240, 60_000);
 const clientDataLimiter = new RateLimiter(1_500, 10_000);
 const callerLookupLimiter = new RateLimiter(240, 60_000);
-const callerOpenLimiter = new RateLimiter(120, 60_000);
+const callerOpenLimiter = new RateLimiter(600, 60_000);
 const callerControlLimiter = new RateLimiter(240, 60_000);
 const callerPopPreflightLimiter = new RateLimiter(600, 60_000);
 // PR#6a-followup: high-throughput stream_frame endpoint gets its own dedicated
@@ -100,7 +100,7 @@ async function requireClientAuth(
   ctx: RequestContext,
   service: RemoteInvokeService,
 ): Promise<{ client_instance_id: string; user_id: string } | null> {
-  const token = extractBearerToken(ctx) || ctx.url.searchParams.get('client_auth_token') || '';
+  const token = extractBearerToken(ctx) || '';
   const clientId = ctx.url.searchParams.get('client_instance_id') || (() => {
     try {
       const body = parseJsonBody<any>(ctx.body);

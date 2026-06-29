@@ -990,11 +990,14 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
     );
   }
 
-  async consumeGrantCall(grantId: string): Promise<void> {
-    await this.pool.execute(
-      'UPDATE bifrost_remote_invoke_grants SET remaining_calls = GREATEST(remaining_calls - 1, 0), update_time = ? WHERE id = ?',
-      [new Date().toISOString(), grantId],
+  async consumeGrantCall(grantId: string): Promise<boolean> {
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      `UPDATE bifrost_remote_invoke_grants
+       SET remaining_calls = remaining_calls - 1, update_time = ?
+       WHERE id = ? AND status = ? AND remaining_calls > 0`,
+      [new Date().toISOString(), grantId, 'active'],
     );
+    return result.affectedRows === 1;
   }
 
   async createCall(c: RemoteInvokeCall): Promise<RemoteInvokeCall> {

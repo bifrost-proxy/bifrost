@@ -871,9 +871,16 @@ export class RemoteInvokeService {
       bytes_in: 0,
       bytes_out: 0,
     };
-    await this.storage.remoteInvoke.createCall(call);
+    const consumed = await this.storage.remoteInvoke.consumeGrantCall(grant.id);
+    if (!consumed) {
+      const latestGrant = await this.storage.remoteInvoke.getGrant(grant.id);
+      if (latestGrant?.status === 'active' && latestGrant.remaining_calls <= 0) {
+        await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'consumed' });
+      }
+      throw new Error('grant_consumed');
+    }
 
-    await this.storage.remoteInvoke.consumeGrantCall(grant.id);
+    await this.storage.remoteInvoke.createCall(call);
     await this.storage.remoteInvoke.touchGrantLastUsed(grant.id, now);
 
     pushToClient(req.client_instance_id, 'call_open', {

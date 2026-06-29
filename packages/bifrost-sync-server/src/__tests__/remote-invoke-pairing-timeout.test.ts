@@ -228,7 +228,8 @@ describe('remote invoke pairing timeout cleanup', () => {
     const clientAuthToken = await registerClient(clientInstanceId, clientPubkey, clientKeys.privateKey, token);
 
     const stream = await openSse(
-      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-timeout-stream&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+      `/v4/remote-invoke/client/stream?client_instance_id=${encodeURIComponent(clientInstanceId)}&stream_id=pairing-timeout-stream`,
+      { Authorization: `Bearer ${clientAuthToken}` },
     );
     expect(stream.status).toBe(200);
 

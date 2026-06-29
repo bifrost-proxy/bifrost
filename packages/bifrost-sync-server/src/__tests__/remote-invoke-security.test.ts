@@ -462,12 +462,12 @@ describe('Remote Invoke security', () => {
     const forwardedHeaders = { 'x-forwarded-for': '203.0.113.99' };
 
     const streamA = await openSse(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-a&stream_id=stream-a&client_auth_token=${encodeURIComponent(clientAuthA)}`,
-      forwardedHeaders,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-a&stream_id=stream-a',
+      { ...forwardedHeaders, Authorization: `Bearer ${clientAuthA}` },
     );
     const streamB = await openSse(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-b&stream_id=stream-b&client_auth_token=${encodeURIComponent(clientAuthB)}`,
-      forwardedHeaders,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-b&stream_id=stream-b',
+      { ...forwardedHeaders, Authorization: `Bearer ${clientAuthB}` },
     );
 
     try {
@@ -476,6 +476,24 @@ describe('Remote Invoke security', () => {
     } finally {
       streamA.close();
       streamB.close();
+    }
+  });
+
+  it('rejects client SSE authentication tokens in URL query parameters', async () => {
+    const token = await registerUser('ri_sse_query_token_owner', 'password123');
+    const { publicKey, privateKey } = generateClientKeypair();
+    const publicKeyDerBase64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const client = await registerClient('ri-client-sse-query-token', publicKeyDerBase64, privateKey, token);
+    const clientAuthToken = client.data.data.client_auth_token as string;
+
+    const rejected = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-query-token&stream_id=stream-query-token&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+    );
+
+    try {
+      expect(rejected.status).toBe(401);
+    } finally {
+      rejected.close();
     }
   });
 
@@ -814,7 +832,8 @@ describe('Remote Invoke security', () => {
     const clientAuthToken = registration.data.data.client_auth_token as string;
 
     const clientStream = await openSseWithEvents(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-shell-client&stream_id=ri-shell-stream&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-shell-client&stream_id=ri-shell-stream',
+      { Authorization: `Bearer ${clientAuthToken}` },
     );
     expect(clientStream.status).toBe(200);
     await clientStream.nextEvent('client_hello_ack');

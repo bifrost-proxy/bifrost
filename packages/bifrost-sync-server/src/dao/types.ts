@@ -80,7 +80,7 @@ export interface IRemoteInvokeDao {
   deleteGrant(grantId: string): Promise<boolean>;
   revokeSshGrantsForClient(clientInstanceId: string): Promise<number>;
   touchGrantLastUsed(grantId: string, ts: string): Promise<void>;
-  consumeGrantCall(grantId: string): Promise<void>;
+  consumeGrantCall(grantId: string): Promise<boolean>;
 
   createCall(call: import('../types').RemoteInvokeCall): Promise<import('../types').RemoteInvokeCall>;
   getCall(callId: string): Promise<import('../types').RemoteInvokeCall | undefined>;
