@@ -16,6 +16,7 @@ REMOTE_RELAY_HEADERS="${BIFROST_REMOTE_RELAY_HEADERS-}"
 SYNC_STATE_FILE="${BIFROST_SYNC_STATE_FILE:-$HOME/.bifrost/sync-state.json}"
 BIFROST_BIN="${BIFROST_BIN:-$REPO/target/debug/bifrost}"
 KEEP_TMP="${KEEP_TMP:-0}"
+FAILED=0
 
 if [[ -n "$REMOTE_RELAY_HEADERS" ]]; then
   export BIFROST_REMOTE_RELAY_HEADERS="$REMOTE_RELAY_HEADERS"
@@ -118,7 +119,12 @@ RESULTS="$TMP_ROOT/results.log"
 mkdir -p "$TARGET_DATA" "$CALLER_CODE_DATA" "$CALLER_SSH_DATA" "$FILE_ROOT"
 
 pass() { echo "PASS $*" | tee -a "$RESULTS"; }
-fail() { echo "FAIL $*" | tee -a "$RESULTS" >&2; exit 1; }
+fail() {
+  FAILED=1
+  echo "FAIL $*" | tee -a "$RESULTS" >&2
+  echo "DIAG preserved failed temp dir: $TMP_ROOT" | tee -a "$RESULTS" >&2
+  exit 1
+}
 json() { jq -c . 2>/dev/null || cat; }
 http_post() {
   local path="$1" data="$2"
@@ -134,13 +140,19 @@ cleanup() {
   [[ -n "$TARGET_PID" ]] && kill "$TARGET_PID" 2>/dev/null || true
   [[ -n "$MOCK_PID" ]] && kill "$MOCK_PID" 2>/dev/null || true
   pkill -f "bifrost __tray --data-dir $TARGET_DATA" 2>/dev/null || true
-  if [[ "$KEEP_TMP" != "1" ]]; then
+  if [[ "$KEEP_TMP" != "1" && "$FAILED" != "1" ]]; then
     rm -rf "$TMP_ROOT"
   else
-    echo "KEEP_TMP=1, preserved $TMP_ROOT"
+    echo "preserved $TMP_ROOT"
   fi
 }
 trap cleanup EXIT
+
+if [[ -n "$REMOTE_RELAY_HEADERS" ]]; then
+  pass "relay mode=PPE relay_url=$RELAY_URL headers=$REMOTE_RELAY_HEADERS"
+else
+  pass "relay mode=default relay_url=$RELAY_URL headers=<none>; set BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' for PPE"
+fi
 
 cat >"$TARGET_DATA/config.toml" <<CFG
 [sync]

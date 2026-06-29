@@ -153,6 +153,8 @@ Expected:
 
 - CI 环境中脚本只打印 skip 并 0 退出；该脚本禁止在 GitHub CI 中真实连接
   外部 relay。
+- 脚本启动时打印当前 relay mode、relay URL 和是否设置 relay headers；失败时
+  自动保留临时目录用于排查。
 - 未设置 `BIFROST_REMOTE_RELAY_HEADERS` 时，caller 的 pairing start、watch、
   claim/open 以及 target 的注册、pair-code、stream 请求均走正式 relay。
 - 设置该环境变量后，同一脚本用于 PPE TLB 路由验证。
