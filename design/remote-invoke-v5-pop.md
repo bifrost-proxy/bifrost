@@ -125,7 +125,11 @@
   regression entry for release validation. It runs, by default, the local
   sync-server Remote Invoke security/relay/PoP Vitest suites, the Rust CLI
   remote unit-test filter, the adjacent `bifrost-server-v4` hardening suite,
-  and the deployed relay Code + SSH key end-to-end matrix. The PPE request header is
+  and the deployed relay Code + SSH key end-to-end matrix. The deployed relay
+  matrix includes ordinary shell/file/traffic/job commands under both Code and
+  SSH key authorization, a separate Code `remote_power_mgmt` grant for
+  `remote keep-awake`, and SSH key default Full Trust `remote keep-awake`
+  coverage. The PPE request header is
   intentionally an environment-only test knob
   (`BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`);
   no UI or persistent runtime configuration is introduced for it.

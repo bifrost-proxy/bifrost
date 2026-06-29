@@ -417,7 +417,7 @@ export function grantScopeAllowsCommand(scope: string | undefined, commandKind: 
     return normalizedScope === 'remote_shell_exec' || normalizedScope === 'remote_shell_interactive';
   }
   if (commandKind === 'power.mgmt') {
-    return normalizedScope === 'remote_power_mgmt';
+    return normalizedScope === 'remote_power_mgmt' || normalizedScope === 'remote_shell_interactive';
   }
   // query.readonly is always allowed
   return true;

@@ -316,6 +316,9 @@ describe('remote invoke relay v2 phase 1', () => {
     expect(() => resolveCommandKind(undefined)).toThrow('command_kind_required');
     expect(grantScopeAllowsCommand('remote_query', 'shell.exec')).toBe(false);
     expect(grantScopeAllowsCommand('remote_shell_exec', 'shell.exec')).toBe(true);
+    expect(grantScopeAllowsCommand('remote_shell_exec', 'power.mgmt')).toBe(false);
+    expect(grantScopeAllowsCommand('remote_power_mgmt', 'power.mgmt')).toBe(true);
+    expect(grantScopeAllowsCommand('remote_shell_interactive', 'power.mgmt')).toBe(true);
   });
 
   it('rejects legacy plaintext openCall payloads', async () => {

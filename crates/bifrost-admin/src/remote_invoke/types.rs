@@ -72,6 +72,7 @@ impl GrantScope {
             (_, CommandKind::QueryReadonly)
                 | (Self::RemoteShellExec, CommandKind::ShellExec)
                 | (Self::RemoteShellInteractive, CommandKind::ShellExec)
+                | (Self::RemoteShellInteractive, CommandKind::PowerMgmt)
                 | (Self::RemotePowerMgmt, CommandKind::PowerMgmt)
                 | (Self::RemoteImGateway, CommandKind::ImGateway)
         )
@@ -1383,6 +1384,11 @@ mod tests {
             GrantScope::RemoteShellInteractive,
             FileAccessScope::ReadWrite,
             CommandKind::File
+        ));
+        assert!(scope_allows_command(
+            GrantScope::RemoteShellInteractive,
+            FileAccessScope::ReadWrite,
+            CommandKind::PowerMgmt
         ));
 
         // Query only + no file = minimal access

@@ -317,14 +317,20 @@ Steps:
    that same binary for both local Bifrost clients: one target and one caller
    at a time.
 6. Verify the deployed relay phase connects to
-   `https://bifrost.bytedance.net`, runs the Code authorization path, then the
-   SSH key authorization path.
-7. Verify both authorization paths execute the full Remote matrix:
+   `https://bifrost.bytedance.net`, runs the Code authorization path, runs a
+   separate Code `remote_power_mgmt` authorization path, then runs the SSH key
+   authorization path.
+7. Verify Code shell/file and SSH key authorization paths execute the full
+   ordinary Remote matrix:
    `remote conn status`, `remote traffic list/get/search`,
    `remote file read/read-many/scratch-dir/list/stat/glob/find/hash/outline/write/edit/mkdir/move/delete/patch`,
    `remote exec`, `remote run`, `remote exec --detach`,
    `remote run --detach`, and `remote job logs/watch/list/status`.
-8. Execute `CI=true e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`.
+8. Verify Code power authorization and SSH key default Full Trust both execute
+   the power-management matrix: `remote keep-awake status`,
+   `remote keep-awake on`, `remote keep-awake mode get`,
+   `remote keep-awake mode set off`, and `remote keep-awake off`.
+9. Execute `CI=true e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`.
 
 Expected:
 
@@ -359,15 +365,15 @@ Execution result:
   request-send failures only, and server-v4 regression tests were expanded to
   assert client frame/stream-frame/exit queue delivery uses
   `ri:mq:{caller:<callId>}`.
-- The final full PPE run passed with target client id
+- The previous final full PPE run passed before `remote keep-awake` was added
+  to the one-click matrix: target client id
   `06c2776a-d62f-4a8e-b1c3-47149edf71c3`, temp dir
   `/tmp/bifrost-relay-full.UODRT5`, target port `51792`, binary
-  `/Users/eden/work/github/bifrost/target/debug/bifrost`, and binary sha256
-  `68e7c6455028991986d4a4320d28913ac169c2d0c953bf68409d17e6b66115b9`.
-  Code grant `5fa75bfc0edc9527` connected successfully.
-- Code authorization passed the full matrix: `remote conn status`,
-  `remote traffic list/get/search`, all remote file subcommands,
-  `remote exec`, `remote run`, detached exec/run jobs, and
-  `remote job logs/watch/list/status`.
-- SSH key authorization passed the same full matrix.
-- `remote conn down --all` cleanup passed and no test Bifrost process remained.
+  `/Users/eden/work/github/bifrost/target/debug/bifrost`, binary sha256
+  `68e7c6455028991986d4a4320d28913ac169c2d0c953bf68409d17e6b66115b9`,
+  Code grant `5fa75bfc0edc9527`.
+- After auditing `remote --help`, the script was expanded to include the
+  remaining `remote keep-awake` command family. This requires the server-side
+  fix that treats SSH key default Full Trust (`remote_shell_interactive`) as
+  allowed for `power.mgmt`; rerun the full PPE command after the updated
+  `bifrost-server-v4` is deployed.

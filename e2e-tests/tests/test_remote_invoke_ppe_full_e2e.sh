@@ -191,6 +191,7 @@ TMP_ROOT_REAL="$(cd "$TMP_ROOT" && pwd -P)"
 FILE_ROOT="$TMP_ROOT_REAL/remote-files"
 TARGET_DATA="$TMP_ROOT/target"
 CALLER_CODE_DATA="$TMP_ROOT/caller-code"
+CALLER_POWER_DATA="$TMP_ROOT/caller-power"
 CALLER_SSH_DATA="$TMP_ROOT/caller-ssh"
 TARGET_PORT="$(free_port)"
 MOCK_PORT="$(free_port)"
@@ -202,7 +203,7 @@ TARGET_LOG="$TMP_ROOT/target.log"
 MOCK_LOG="$TMP_ROOT/mock.log"
 RESULTS="$TMP_ROOT/results.log"
 
-mkdir -p "$TARGET_DATA" "$CALLER_CODE_DATA" "$CALLER_SSH_DATA" "$FILE_ROOT"
+mkdir -p "$TARGET_DATA" "$CALLER_CODE_DATA" "$CALLER_POWER_DATA" "$CALLER_SSH_DATA" "$FILE_ROOT"
 
 json() { jq -c . 2>/dev/null || cat; }
 http_post() {
@@ -360,7 +361,7 @@ connect_code() {
   pair_code="$(jq -r '.session.pair_code // empty' <<<"$pair_json")"
   [[ -n "$pair_code" ]] || fail "pair code empty: $pair_json"
 
-  BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
+  BIFROST_DATA_DIR="$CALLER_POWER_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
     --relay-url "$RELAY_URL" >"$out" 2>&1 &
   cp=$!
 
@@ -391,6 +392,69 @@ connect_code() {
   [[ -n "$grant_id" ]] || fail "code grant missing"
   http_post /api/remote-invoke/discovery/exit '{}' >/dev/null 2>&1 || true
   pass "code authorization connected grant=$grant_id"
+}
+
+connect_code_power() {
+  local out="$TMP_ROOT/code-power-connect.out"
+  local pair_json pair_code pairing cp grant_id
+  pair_json="$(http_post /api/remote-invoke/discovery/enter '{}')"
+  pair_code="$(jq -r '.session.pair_code // empty' <<<"$pair_json")"
+  [[ -n "$pair_code" ]] || fail "power pair code empty: $pair_json"
+
+  BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
+    --relay-url "$RELAY_URL" >"$out" 2>&1 &
+  cp=$!
+
+  pairing=""
+  for _ in {1..60}; do
+    pairing="$(http_get /api/remote-invoke/pairings/pending \
+      | jq -r '.pairings[0].pairing_id // empty' 2>/dev/null || true)"
+    [[ -n "$pairing" ]] && break
+    sleep 1
+  done
+  [[ -n "$pairing" ]] || fail "no pending pairing for power grant; caller=$(cat "$out")"
+
+  for _ in {1..30}; do
+    grep -q 'Waiting for approval' "$out" && break
+    sleep 1
+  done
+  grep -q 'Waiting for approval' "$out" || fail "power caller did not enter pairing watch: $(cat "$out")"
+  sleep 2
+
+  http_post "/api/remote-invoke/pairings/$pairing/approve" \
+    '{"grant_mode":"permanent","grant_scope":"remote_power_mgmt","file_access":"none","policy_binding":{"mode":"selected","policy_ids":["ppe-shell"]},"stdin_allowed":false}' \
+    >"$TMP_ROOT/code-power-approve.json"
+  wait "$cp" || fail "code power remote conn up failed: $(cat "$out")"
+  grep -q 'Connected' "$out" || fail "code power connect output missing Connected: $(cat "$out")"
+
+  grant_id="$(http_get /api/remote-invoke/grants | jq -r '.grants[0].grant_id // .grants[0].id // empty')"
+  [[ -n "$grant_id" ]] || fail "code power grant missing"
+  http_post /api/remote-invoke/discovery/exit '{}' >/dev/null 2>&1 || true
+  pass "code power authorization connected grant=$grant_id"
+}
+
+run_keep_awake_matrix() {
+  local caller_data="$1" label="$2"
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    keep-awake status >"$TMP_ROOT/$label-keep-awake-status.json"
+  jq -e 'type == "object"' "$TMP_ROOT/$label-keep-awake-status.json" >/dev/null
+
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    keep-awake on >"$TMP_ROOT/$label-keep-awake-on.json"
+  jq -e 'type == "object"' "$TMP_ROOT/$label-keep-awake-on.json" >/dev/null
+
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    keep-awake mode get >"$TMP_ROOT/$label-keep-awake-mode-get.json"
+  jq -e 'type == "object"' "$TMP_ROOT/$label-keep-awake-mode-get.json" >/dev/null
+
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    keep-awake mode set off >"$TMP_ROOT/$label-keep-awake-mode-set-off.json"
+  jq -e 'type == "object"' "$TMP_ROOT/$label-keep-awake-mode-set-off.json" >/dev/null
+
+  BIFROST_DATA_DIR="$caller_data" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" \
+    keep-awake off >"$TMP_ROOT/$label-keep-awake-off.json"
+  jq -e 'type == "object"' "$TMP_ROOT/$label-keep-awake-off.json" >/dev/null
+  pass "$label remote keep-awake all subcommands"
 }
 
 run_remote_matrix() {
@@ -515,6 +579,8 @@ PY
 
 connect_code
 run_remote_matrix "$CALLER_CODE_DATA" code
+connect_code_power
+run_keep_awake_matrix "$CALLER_POWER_DATA" code-power
 
 KEY_PATH="$TMP_ROOT/ppe-ssh.bifrost"
 BIFROST_DATA_DIR="$TARGET_DATA" "$BIFROST_BIN" setting ssh-key create \
@@ -546,8 +612,10 @@ grep -q 'Connected with SSH key' "$TMP_ROOT/ssh-connect.out" \
   || fail "ssh connect missing success: $(cat "$TMP_ROOT/ssh-connect.out")"
 pass "ssh-key authorization connected via relay"
 run_remote_matrix "$CALLER_SSH_DATA" ssh
+run_keep_awake_matrix "$CALLER_SSH_DATA" ssh
 
 BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" conn down --all >/dev/null 2>&1 || true
+BIFROST_DATA_DIR="$CALLER_POWER_DATA" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" conn down --all >/dev/null 2>&1 || true
 BIFROST_DATA_DIR="$CALLER_SSH_DATA" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" conn down --all >/dev/null 2>&1 || true
 pass "remote conn down cleanup"
 
