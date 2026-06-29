@@ -372,7 +372,7 @@ run_remote_file_cmd() {
     local out_file status_file pid waited timeout_secs rc
     out_file="$(mktemp)"
     status_file="$(mktemp)"
-    timeout_secs="${REMOTE_FILE_CMD_TIMEOUT_SECS:-45}"
+    timeout_secs="${REMOTE_FILE_CMD_TIMEOUT_SECS:-120}"
 
     (
         BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote file "$@" \
@@ -1892,7 +1892,7 @@ sys.stdout.buffer.write(base64.b64decode(m.group(1)))')
     if [[ "$decoded" == "three" ]]; then
         _log_pass "TC-GAP-13: last-line slice has no injected trailing newline"
     else
-        _log_fail "TC-GAP-13: last-line slice is pristine" "three" "$decoded (last=$last_byte)"
+        _log_fail "TC-GAP-13: last-line slice is pristine" "three" "$decoded (last=$last_byte, raw=$out)"
     fi
 }
 

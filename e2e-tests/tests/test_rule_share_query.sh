@@ -32,6 +32,8 @@ TARGET_PORT="$(free_port)"
 PROXY_PID=""
 SITE_PID=""
 
+echo "rule share confirmation E2E starting (proxy=${PROXY_PORT}, target=${TARGET_PORT})"
+
 cat >"$DATA_DIR/config.toml" <<'EOF'
 [sync]
 enabled = false
@@ -60,6 +62,23 @@ echo '<html><body>rule share api target</body></html>' >"$SITE_DIR/from-api"
 python3 -m http.server "$TARGET_PORT" --bind 127.0.0.1 --directory "$SITE_DIR" >/tmp/bifrost-rule-share-site.log 2>&1 &
 SITE_PID=$!
 
+for _ in {1..80}; do
+  if curl -fsS "http://127.0.0.1:${TARGET_PORT}/hello" >/dev/null 2>&1; then
+    break
+  fi
+  if ! kill -0 "$SITE_PID" 2>/dev/null; then
+    echo "target site exited early:" >&2
+    cat /tmp/bifrost-rule-share-site.log >&2 || true
+    exit 1
+  fi
+  sleep 0.25
+done
+if ! curl -fsS "http://127.0.0.1:${TARGET_PORT}/hello" >/dev/null; then
+  echo "target site did not become ready:" >&2
+  cat /tmp/bifrost-rule-share-site.log >&2 || true
+  exit 1
+fi
+
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" start \
   -p "$PROXY_PORT" \
   --host 127.0.0.1 \
@@ -76,7 +95,11 @@ for _ in {1..80}; do
   fi
   sleep 0.25
 done
-curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules" >/dev/null
+if ! curl -fsS "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules" >/dev/null; then
+  echo "bifrost proxy did not become ready:" >&2
+  cat /tmp/bifrost-rule-share-proxy.log >&2 || true
+  exit 1
+fi
 
 header_location() {
   python3 - "$1" <<'PY'

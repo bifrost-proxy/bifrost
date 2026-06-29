@@ -213,3 +213,16 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 结果：
 - TC-RSQ-09：通过。确认页真实响应包含 `connect-src 'self'`、`frame-ancestors 'none'`、`base-uri 'none'` 和 `form-action 'none'`；HTML 展示 `Content hash` 但不包含 `id="confirmation"` 或 `Type the full content hash to apply`；Apply Rule 按钮默认可点击；跨站确认请求返回 `403`，同源缺 CSRF 返回 `403`，同源带 CSRF 且不携带 `confirmation` 返回 `200` 并导入 `share/shared-security [enabled]`。
 - TC-RSQ-10：通过。真实 Chrome 打开 `/_bifrost/share/rule?...` 后不需要填写页面 hash，直接点击 Apply Rule 输出 `browser apply succeeded without hash`；浏览器未捕获 `Failed to fetch`、`Refused to connect` 或 CSP 报错；规则列表出现 `share/rsq-browser [enabled]`，页面跳转到 clean target URL。
+
+执行时间：2026-06-29
+
+测试环境：
+- `BIFROST_DATA_DIR=/tmp/bifrost-rule-share-*`，临时 `config.toml` 已设置 `[sync] enabled = false` / `auto_sync = false`
+- Bifrost 测试服务：`127.0.0.1:<随机端口>`，启动参数包含 `--no-system-proxy`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` / `BIFROST_DISABLE_TRAY=1`
+- 本地 HTTP fixture：`python3 -m http.server <随机端口> --bind 127.0.0.1`
+
+执行命令：
+- `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_rule_share_query.sh`
+
+结果：
+- TC-RSQ-01 至 TC-RSQ-06：通过。脚本输出 `rule share confirmation E2E passed`；启动阶段先等待本地 HTTP fixture 和 Bifrost 代理 ready，避免 CI 并发环境下目标站点尚未监听时空日志退出；裸域名、代理导入、重复导入、同名不同内容后缀、reshare 与 share-link API 均通过真实 CLI/API 链路验证。
