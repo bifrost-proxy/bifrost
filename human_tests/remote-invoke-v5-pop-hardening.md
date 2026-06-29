@@ -197,6 +197,23 @@ Execution result:
   `relay_queue_overflow`。server-v4 修复为 hash-tag key
   `ri:mq:{client:<id>}` / `ri:mq:{client:<id>}:bytes` 后需重新部署，再复跑
   本用例完整矩阵。
+- PASS。2026-06-29 在 `bifrost-server-v4`
+  `fix-p0-remote-invoke-hardening` commit
+  `847fe2cf201ad15f3c335ef033cf16193c328511` 部署到 PPE 后，当前分支
+  `a280a1c01c31bf2841304ea25a5b1ff0b4a80765` 执行：
+  `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' KEEP_TMP=1 e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
+  脚本从当前分支重新构建 `/Users/eden/work/github/bifrost/target/debug/bifrost`，
+  二进制 sha256 为
+  `0b05e9c68d5b1566fca450bf0c0b104c512b579e626bdb74951165a6c6501781`。
+  target client id 为 `3545d8d8-7a7e-40fe-a4ab-525a62b1438f`，临时目录为
+  `/tmp/bifrost-relay-full.3Xe4Ak`。
+- Code 授权链路通过：grant `b90946b8272b3ee1` 创建成功，`remote conn status`、
+  `remote traffic list/get/search`、全部 remote file 子命令、`remote exec`、
+  `remote run`、`remote exec --detach`、`remote run --detach`、
+  `remote job logs/watch/list/status` 均 PASS。
+- SSH key 授权链路通过：`remote conn status`、`remote traffic list/get/search`、
+  全部 remote file 子命令、`remote exec`、`remote run`、`remote exec --detach`、
+  `remote run --detach`、`remote job logs/watch/list/status` 均 PASS。
 - `remote conn down --all` 清理通过；验证完成后未发现当前分支 Bifrost 残留进程。
 
 ## TC-P0-7: client_auth_token query fallback rejected
