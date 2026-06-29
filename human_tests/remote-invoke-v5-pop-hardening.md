@@ -214,6 +214,18 @@ Execution result:
 - SSH key 授权链路通过：`remote conn status`、`remote traffic list/get/search`、
   全部 remote file 子命令、`remote exec`、`remote run`、`remote exec --detach`、
   `remote run --detach`、`remote job logs/watch/list/status` 均 PASS。
+- PASS。2026-06-29 为确认最新 HEAD，重新执行同一 PPE 全量脚本：
+  `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' KEEP_TMP=1 e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
+  本轮脚本从最新分支重新构建
+  `/Users/eden/work/github/bifrost/target/debug/bifrost`，HEAD 为
+  `1e8844b8f767f1602fda73682b80305789eff07d`，二进制 sha256 仍为
+  `0b05e9c68d5b1566fca450bf0c0b104c512b579e626bdb74951165a6c6501781`。
+  target client id 为 `5b81ab9e-7b7f-422a-a4cd-15f6f0417815`，临时目录为
+  `/tmp/bifrost-relay-full.v46Fg5`。Code 授权 grant
+  `b86654fe07edd5c0` 创建成功；Code 和 SSH key 两条链路的
+  `remote conn status`、`remote traffic list/get/search`、全部 remote file
+  子命令、`remote exec`、`remote run`、detach job 与
+  `remote job logs/watch/list/status` 均 PASS。
 - `remote conn down --all` 清理通过；验证完成后未发现当前分支 Bifrost 残留进程。
 
 ## TC-P0-7: client_auth_token query fallback rejected
