@@ -105,18 +105,18 @@ class Handler(BaseHTTPRequestHandler):
             self._write_json(200, {"ok": True})
             return
 
-        if self.path.startswith("/v4/remote-invoke/pairings/") and self.path.endswith("/watch"):
+        if self.path.startswith("/v5/remote-invoke/pairings/") and self.path.split("?")[0].endswith("/watch"):
             pairing_id = self.path.split("/")[4]
             meta = pairings.get(pairing_id, {})
             payload = {
                 "status": "approved",
-                "grant_id": "grant-retry-ok",
-                "client_instance_id": "client-retry-ok-123456",
-                "device_name": "Retry Device",
-                "platform": "macos",
-                "grant_mode": "permanent",
-                "pair_code": meta.get("pair_code", ""),
-                "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
+                "claim_token": meta.get("claim_token", ""),
+                "claim_expires_at": "2099-01-01T00:00:00Z",
+                "grant_summary": {
+                    "scope": "remote_shell_exec",
+                    "mode": "permanent",
+                    "file_access": "read_write",
+                },
             }
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -134,13 +134,34 @@ class Handler(BaseHTTPRequestHandler):
         self._write_json(404, {"code": 404, "message": "not_found", "data": None})
 
     def do_POST(self):
-        if self.path != "/v4/remote-invoke/pairings/start":
-            self._write_json(404, {"code": 404, "message": "not_found", "data": None})
-            return
-
         content_length = int(self.headers.get("Content-Length", "0"))
         raw = self.rfile.read(content_length or 0)
         body = json.loads(raw.decode() or "{}")
+
+        if self.path == "/v5/remote-invoke/grants/claim":
+            self._write_json(
+                200,
+                {
+                    "code": 0,
+                    "message": "ok",
+                    "data": {
+                        "grant_session_token": "grant-session-retry-ok",
+                        "expires_at": "2099-01-01T00:00:00Z",
+                        "grant_summary": {
+                            "scope": "remote_shell_exec",
+                            "mode": "permanent",
+                            "file_access": "read_write",
+                            "client_ephemeral_pub": "ZRGxH2hR6PqQEaOn6Hxc1eTHFH0CyK2xm8lfajUKXTg=",
+                        },
+                    },
+                },
+            )
+            return
+
+        if self.path != "/v5/remote-invoke/pairings/start":
+            self._write_json(404, {"code": 404, "message": "not_found", "data": None})
+            return
+
         pair_code = body.get("pair_code", "")
         attempts[pair_code] = attempts.get(pair_code, 0) + 1
         current = attempts[pair_code]
@@ -157,7 +178,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         pairing_id = f"pairing-{pair_code}"
-        pairings[pairing_id] = {"pair_code": pair_code}
+        pairings[pairing_id] = {"pair_code": pair_code, "claim_token": f"claim-token-{pair_code}"}
         self._write_json(
             200,
             {
@@ -165,7 +186,9 @@ class Handler(BaseHTTPRequestHandler):
                 "message": "ok",
                 "data": {
                     "pairing_id": pairing_id,
-                    "approval_sse_url": f"/v4/remote-invoke/pairings/{pairing_id}/watch",
+                    "watch_token": f"watch-token-{pair_code}",
+                    "client_instance_id": "client-retry-ok-123456",
+                    "approval_sse_url": f"/v5/remote-invoke/pairings/{pairing_id}/watch",
                 },
             },
         )

@@ -1353,7 +1353,7 @@ wss://app.example.test/ ws://localhost:8000/
         let parser = bifrost_core::RuleParser::new();
         let rules = parser
             .parse_rules(
-                "example.com redirect://http://target-a.com\nexample.com redirect://http://target-b.com",
+                "example.com redirect://(http://target-a.com)\nexample.com redirect://(http://target-b.com)",
             )
             .unwrap();
         let resolver = CoreRulesResolver::new(rules);

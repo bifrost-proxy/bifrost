@@ -15,22 +15,23 @@ const SSH_CONNECT_TTL_MS = 30_000;
 const SSH_TIMESTAMP_SKEW_MS = 30_000;
 const SSH_CHALLENGE_RATE_LIMIT = 60;
 const SSH_CHALLENGE_RATE_WINDOW_MS = 60_000;
-
 type RouteEntry = SshDeviceRoute & {
   clientInstanceId: string;
+  userId: string;
   expiresAt: number;
 };
 
 type ChallengeEntry = {
   challengeId: string;
   deviceCode: string;
-  challenge: string;
   expiresAt: number;
+  challenge: string;
 };
 
 type PendingConnectEntry = {
   connectId: string;
   clientInstanceId: string;
+  userId: string;
   deviceCode: string;
   relayToken: string;
   expiresAt: number;
@@ -77,7 +78,7 @@ export class SshAuthService {
   private pendingConnects = new Map<string, PendingConnectEntry>();
   private challengeRateLimit = new Map<string, { count: number; resetAt: number }>();
 
-  syncSshRoute(clientInstanceId: string, route: SshDeviceRoute | null | undefined): {
+  syncSshRoute(clientInstanceId: string, userId: string, route: SshDeviceRoute | null | undefined): {
     routeCleared: boolean;
     routeChanged: boolean;
   } {
@@ -99,6 +100,17 @@ export class SshAuthService {
     }
 
     this.assertRouteMatchesPublicKey(route);
+    // P0-1: cross-user device_code hijack prevention
+    const collision = this.routeByDeviceCode.get(route.device_code);
+    if (
+      collision &&
+      collision.clientInstanceId !== clientInstanceId &&
+      collision.userId &&
+      userId &&
+      collision.userId !== userId
+    ) {
+      throw new Error('device_code_owned_by_other_user');
+    }
     if (previousDeviceCode && previousDeviceCode !== route.device_code) {
       this.routeByDeviceCode.delete(previousDeviceCode);
     }
@@ -107,6 +119,7 @@ export class SshAuthService {
     this.routeByDeviceCode.set(route.device_code, {
       ...route,
       clientInstanceId,
+      userId,
       expiresAt,
     });
     this.deviceCodeByClientInstanceId.set(clientInstanceId, route.device_code);
@@ -115,7 +128,8 @@ export class SshAuthService {
       routeChanged:
         !previousRoute ||
         previousRoute.device_code !== route.device_code ||
-        previousRoute.public_key_pem !== route.public_key_pem,
+        previousRoute.public_key_pem !== route.public_key_pem ||
+        previousRoute.userId !== userId,
     };
   }
 
@@ -145,6 +159,7 @@ export class SshAuthService {
 
   verifyAndPrepareConnect(body: SshConnectRequest): SshConnectResponse & {
     client_instance_id: string;
+    user_id: string;
     ssh_key_fingerprint: string;
   } {
     this.cleanupExpiredState();
@@ -189,6 +204,7 @@ export class SshAuthService {
     this.pendingConnects.set(connectId, {
       connectId,
       clientInstanceId: route.clientInstanceId,
+      userId: route.userId,
       deviceCode: route.device_code,
       relayToken,
       expiresAt,
@@ -201,10 +217,10 @@ export class SshAuthService {
       relay_token: relayToken,
       expires_at: expiresAt,
       client_instance_id: route.clientInstanceId,
+      user_id: route.userId,
       ssh_key_fingerprint: fingerprint,
     };
   }
-
   verifyPendingConnectToken(connectId: string, relayToken: string): boolean {
     this.cleanupExpiredState();
     const pending = this.pendingConnects.get(connectId);
@@ -228,6 +244,7 @@ export class SshAuthService {
     grant_mode?: SshConnectResultRequest['grant_mode'];
     caller_info?: SshConnectRequest['caller_info'];
     ssh_key_fingerprint: string;
+    user_id: string;
   } {
     this.cleanupExpiredState();
     const pending = this.pendingConnects.get(body.connect_id);
@@ -252,9 +269,9 @@ export class SshAuthService {
       grant_mode: body.grant_mode,
       caller_info: pending.callerInfo,
       ssh_key_fingerprint: pending.sshKeyFingerprint,
+      user_id: pending.userId,
     };
   }
-
   private assertRouteMatchesPublicKey(route: SshDeviceRoute): void {
     const derived = deriveSshDeviceCode(route.public_key_pem);
     if (derived !== route.device_code) {

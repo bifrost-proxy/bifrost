@@ -162,6 +162,29 @@ http_post_json() {
     http_request "$url" "POST" "$data" "$extra_headers"
 }
 
+wait_for_target_grant_id() {
+    local timeout_seconds="${1:-20}"
+    local grant_id=""
+    for _ in $(seq 1 "$timeout_seconds"); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            grant_id="$(echo "$HTTP_BODY" | jq -r '
+                (.grants // [])
+                | map(.grant_id // .id // "")
+                | map(select(length > 0))
+                | .[0] // ""
+            ')"
+            if [[ -n "$grant_id" ]]; then
+                echo "$grant_id"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    echo ""
+    return 1
+}
+
 wait_for_client_grants_at_least() {
     local min_count="$1"
     local timeout_seconds="${2:-10}"
@@ -421,7 +444,7 @@ assert_equals "$CALLER_LABEL" "$PENDING_CALLER_LABEL" "TC-RI-01A: remote conn up
 log "Pairing request arrived: $PAIRING_ID"
 
 log "Approve pairing with mode=persistent"
-http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent"}'
+http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
 assert_status "200" "$HTTP_STATUS" "审批配对应返回 200"
 log "Pairing approved"
 
@@ -1172,7 +1195,7 @@ done
 if [[ "$PAIRING_FOUND_3" -eq 1 ]]; then
     PAIRING_ID_3=$(echo "$HTTP_BODY" | jq -r '.pairings[0].pairing_id')
     assert_not_empty "$PAIRING_ID_3" "disconnect 回归前新的 pairing_id 不应为空"
-    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID_3}/approve" '{"grant_mode":"permanent"}'
+    http_post_json "${CLIENT_ADMIN_URL}/api/remote-invoke/pairings/${PAIRING_ID_3}/approve" '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write"}'
     assert_status "200" "$HTTP_STATUS" "disconnect 回归前审批新的配对应返回 200"
 
     RECONNECT_OK=0
@@ -1217,19 +1240,19 @@ assert_status "200" "$HTTP_STATUS" "disconnect 回归前退出 discovery 模式�
 # =========================================================================
 log "=== TC-RI-08: Disconnect ==="
 
+LOCAL_GRANT_ID="$(wait_for_target_grant_id 20)"
 CALLER_CONNECTIONS_FILE="$(find "$CALLER_DATA_DIR" -name remote-connections.json -print -quit)"
 assert_not_empty "$CALLER_CONNECTIONS_FILE" "caller 侧 remote-connections.json 路径不应为空"
-LOCAL_GRANT_ID="$(jq -r '.connections[0].grant_id // ""' "$CALLER_CONNECTIONS_FILE")"
 LOCAL_CALLER_FINGERPRINT="$(jq -r '.connections[0].caller_fingerprint // ""' "$CALLER_CONNECTIONS_FILE")"
-assert_not_empty "$LOCAL_GRANT_ID" "disconnect 前本地 grant_id 不应为空"
+assert_not_empty "$LOCAL_GRANT_ID" "disconnect 前 target grant_id 不应为空"
 assert_not_empty "$LOCAL_CALLER_FINGERPRINT" "disconnect 前本地 caller_fingerprint 不应为空"
 
 ENCODED_CALLER_FINGERPRINT="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$LOCAL_CALLER_FINGERPRINT")"
 http_request "${RELAY_URL}/v4/remote-invoke/grants/${LOCAL_GRANT_ID}?caller_fingerprint=${ENCODED_CALLER_FINGERPRINT}" "DELETE"
-if [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "204" ]]; then
-    _log_pass "TC-RI-08A: 预先删除 relay grant，制造 disconnect 404 场景"
+if [[ "$HTTP_STATUS" == "410" ]]; then
+    _log_pass "TC-RI-08A: v4 grant delete endpoint 已按 v5 协议下线为 410"
 else
-    _log_fail "TC-RI-08A: 预先删除 relay grant 失败" "200/204" "status=$HTTP_STATUS body=$HTTP_BODY"
+    _log_fail "TC-RI-08A: v4 grant delete endpoint 应返回 410" "410" "status=$HTTP_STATUS body=$HTTP_BODY"
 fi
 
 DISCONNECT_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn down --all \

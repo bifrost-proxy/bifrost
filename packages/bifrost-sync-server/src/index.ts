@@ -26,11 +26,14 @@ export interface SyncServerInstance {
 }
 
 function isRemoteInvokePath(pathname: string): boolean {
-  return pathname.startsWith('/v4/remote-invoke/');
+  return pathname.startsWith('/v4/remote-invoke/')
+    || pathname.startsWith('/v5/remote-invoke/')
+    || pathname.startsWith('/remote-invoke/');
 }
 
 export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const storage = createStorage(config.storage);
+  const storageReady = storage.ready?.() ?? Promise.resolve();
   const authMode = config.auth.mode;
   const oauth2Config = config.auth.oauth2;
   const trustForwardedFor = config.server.trust_forwarded_for ?? false;
@@ -46,6 +49,15 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const globalLimiter = new RateLimiter(rateLimitPerIp, 60_000);
   const authLimiter = new RateLimiter(authRateLimitPerIp, 60_000);
   const accountLock = new AccountLockManager(5, 15 * 60_000, 30 * 60_000);
+  const nonceGcTimer = config.remote_invoke?.enabled
+    ? setInterval(() => {
+      const cutoff = new Date(Date.now() - 120_000).toISOString();
+      storageReady.then(() => storage.remoteInvoke.gcNonces(cutoff)).catch((e: unknown) => {
+        console.debug('[bifrost-sync-server] remote-invoke nonce gc failed:', e);
+      });
+    }, 60_000)
+    : null;
+  nonceGcTimer?.unref?.();
 
   const server = createServer(async (req: IncomingMessage, res: ServerResponse) => {
     setSecurityHeaders(res);
@@ -62,6 +74,14 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    try {
+      await storageReady;
+    } catch (e: unknown) {
+      console.error('[bifrost-sync-server] storage initialization failed:', e);
+      sendError(res, 500, 'storage_initialization_failed');
       return;
     }
 
@@ -125,6 +145,7 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
     storage,
     port: config.server.port,
     close: async () => {
+      if (nonceGcTimer) clearInterval(nonceGcTimer);
       globalLimiter.destroy();
       authLimiter.destroy();
       accountLock.destroy();

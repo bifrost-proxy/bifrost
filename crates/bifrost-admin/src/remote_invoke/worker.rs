@@ -178,6 +178,17 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
+fn caller_pubkey_fingerprint_from_b64(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(trimmed.as_bytes())
+        .ok()?;
+    Some(sha256_hex(&der))
+}
+
 #[derive(Clone)]
 struct GrantCryptoMaterial {
     shared_secret: Vec<u8>,
@@ -1169,16 +1180,11 @@ impl RemoteInvokeWorker {
         let stream_id = uuid::Uuid::new_v4().to_string();
         *self.current_stream_id.write() = Some(stream_id.clone());
 
-        let url = self.relay_client.build_stream_url(&stream_id);
         info!(stream_id = %stream_id, "connecting SSE stream");
 
-        let http = bifrost_core::direct_reqwest_client_builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| BifrostError::Network(format!("build sse client: {}", e)))?;
-
-        let response = http
-            .get(&url)
+        let response = self
+            .relay_client
+            .build_sse_request(&stream_id)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("SSE connect failed: {}", e)))?;
@@ -1190,12 +1196,10 @@ impl RemoteInvokeWorker {
             )));
         }
 
-        if let Err(e) = self.relay_client.cancel_pending_pairings().await {
-            debug!(error = %e, "cancel_pending_pairings on SSE connect (non-fatal)");
-        } else {
-            self.pending_pairings.write().clear();
-            info!("cleared stale pending pairings on SSE reconnect");
-        }
+        // A relay/TLB may close long-lived SSE streams periodically. Reconnect
+        // must not reject active pairing offers that are still waiting for
+        // local user approval; only prune entries that are already expired.
+        self.cleanup_expired_pairings();
 
         match self.relay_client.fetch_active_grants().await {
             Ok(grants_data) => {
@@ -1496,6 +1500,10 @@ impl RemoteInvokeWorker {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                caller_pubkey: p
+                    .get("caller_pubkey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 display_name: p
                     .get("caller_display_name")
                     .and_then(|v| v.as_str())
@@ -2232,9 +2240,15 @@ impl RemoteInvokeWorker {
         let caller_fingerprint = event
             .caller_info
             .as_ref()
-            .map(|info| info.fingerprint.trim())
-            .filter(|fingerprint| !fingerprint.is_empty())
-            .map(str::to_string)
+            .and_then(|info| {
+                info.caller_pubkey
+                    .as_deref()
+                    .and_then(caller_pubkey_fingerprint_from_b64)
+                    .or_else(|| {
+                        let fingerprint = info.fingerprint.trim();
+                        (!fingerprint.is_empty()).then(|| fingerprint.to_string())
+                    })
+            })
             .unwrap_or_else(|| active_key.record.ssh_key_fingerprint.clone());
         if let Err(error) = ensure_default_ssh_key_shell_policy() {
             warn!(error = %error, "seed default SSH-key shell policy failed before ssh connect");
@@ -2355,6 +2369,10 @@ impl RemoteInvokeWorker {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string(),
+                caller_pubkey: data
+                    .get("caller_pubkey")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 display_name: data
                     .get("caller_display_name")
                     .and_then(|v| v.as_str())
@@ -2442,7 +2460,12 @@ impl RemoteInvokeWorker {
 
     async fn handle_call_open(&self, data: Value) {
         debug!(
-            data = %data,
+            call_id = data.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+            grant_id = data.get("grant_id").and_then(|v| v.as_str()).unwrap_or(""),
+            command_kind = data
+                .get("command_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             "handle_call_open received"
         );
         let call_id = match data.get("call_id").and_then(|v| v.as_str()) {
@@ -4006,6 +4029,14 @@ fn build_grant_info_from_grant_created(
         .get("file_access")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_else(|| FileAccessScope::default_for(grant_scope));
+    let max_calls = data
+        .get("max_calls")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
+    let remaining_calls = data
+        .get("remaining_calls")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
 
     Some(GrantInfo {
         grant_id,
@@ -4031,16 +4062,16 @@ fn build_grant_info_from_grant_created(
         last_command_at: data.get("last_command_at").and_then(|v| v.as_u64()),
         expires_at,
         last_used_at: None,
-        max_calls: if grant_mode == GrantMode::Once {
+        max_calls: max_calls.or(if grant_mode == GrantMode::Once {
             Some(1)
         } else {
             None
-        },
-        remaining_calls: if grant_mode == GrantMode::Once {
+        }),
+        remaining_calls: remaining_calls.or(if grant_mode == GrantMode::Once {
             Some(1)
         } else {
             None
-        },
+        }),
         use_count: data.get("use_count").and_then(|v| v.as_u64()).unwrap_or(0),
         ssh_key_id,
         ssh_key_fingerprint,
@@ -4232,6 +4263,11 @@ fn min_optional_u32(left: Option<u32>, right: Option<u32>) -> Option<u32> {
 
 fn preserve_existing_grant_runtime_state(grant: &mut GrantInfo, existing: &GrantInfo) {
     grant.auth_method = existing.auth_method;
+    if existing.auth_method == AuthMethod::SshPublickey
+        && existing.grant_mode == GrantMode::Permanent
+    {
+        grant.grant_mode = existing.grant_mode;
+    }
     grant.first_authorized_at = existing.first_authorized_at;
     grant.last_command_at = max_optional_u64(existing.last_command_at, grant.last_command_at);
     grant.last_used_at = max_optional_u64(existing.last_used_at, grant.last_used_at);
@@ -4818,6 +4854,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_grant_info_from_grant_created_preserves_relay_call_budget() {
+        let payload = serde_json::json!({
+            "grant_id": "grant-budget",
+            "caller_fingerprint": "caller-fp",
+            "grant_mode": "once",
+            "max_calls": 1000,
+            "remaining_calls": 997
+        });
+
+        let grant = build_grant_info_from_grant_created(&payload, "client-budget", 5678)
+            .expect("grant should parse");
+
+        assert_eq!(grant.grant_mode, GrantMode::Once);
+        assert_eq!(grant.max_calls, Some(1000));
+        assert_eq!(grant.remaining_calls, Some(997));
+    }
+
+    #[test]
     fn test_build_grant_info_from_grant_created_rejects_missing_grant_id() {
         let payload = serde_json::json!({
             "caller_fingerprint": "caller-fp",
@@ -4878,6 +4932,24 @@ mod tests {
         assert_eq!(rebuilt.ssh_key_fingerprint, existing.ssh_key_fingerprint);
         assert_eq!(rebuilt.caller_ephemeral_pub, existing.caller_ephemeral_pub);
         assert_eq!(rebuilt.client_ephemeral_pub, existing.client_ephemeral_pub);
+    }
+
+    #[test]
+    fn test_preserve_existing_grant_runtime_state_keeps_ssh_key_grant_mode() {
+        let mut existing = make_active_grant("grant-ssh-mode", GrantMode::Permanent);
+        existing.auth_method = AuthMethod::SshPublickey;
+
+        let mut rebuilt = make_active_grant("grant-ssh-mode", GrantMode::Once);
+        rebuilt.auth_method = AuthMethod::PairCode;
+        rebuilt.max_calls = Some(1000);
+        rebuilt.remaining_calls = Some(997);
+
+        preserve_existing_grant_runtime_state(&mut rebuilt, &existing);
+
+        assert_eq!(rebuilt.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(rebuilt.grant_mode, GrantMode::Permanent);
+        assert_eq!(rebuilt.max_calls, Some(1000));
+        assert_eq!(rebuilt.remaining_calls, Some(997));
     }
 
     #[test]
@@ -6610,6 +6682,7 @@ mod coverage_boost {
 
         let caller_info = CallerInfo {
             fingerprint: "caller-fp".to_string(),
+            caller_pubkey: None,
             display_name: Some("Caller".to_string()),
             user_agent: None,
             source_ip: None,

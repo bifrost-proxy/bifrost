@@ -7,6 +7,7 @@ import path from 'path';
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
 import { deriveSshDeviceCode } from '../remote-invoke/ssh-auth';
+import { base64X25519Pub, makeCallerKeypair, sha256Hex, signPopBody } from './remote-invoke-v5-test-utils';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-remote-invoke-security');
 
@@ -18,7 +19,7 @@ function req(
   urlPath: string,
   body?: unknown,
   headers: Record<string, string> = {},
-): Promise<{ status: number; data: { code: number; message: string; data?: any } }> {
+): Promise<{ status: number; data: { code?: number; message?: string; error?: string; data?: any } }> {
   return new Promise((resolve, reject) => {
     const url = new URL(urlPath, baseUrl);
     const request = http.request({
@@ -461,12 +462,12 @@ describe('Remote Invoke security', () => {
     const forwardedHeaders = { 'x-forwarded-for': '203.0.113.99' };
 
     const streamA = await openSse(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-a&stream_id=stream-a&client_auth_token=${encodeURIComponent(clientAuthA)}`,
-      forwardedHeaders,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-a&stream_id=stream-a',
+      { ...forwardedHeaders, Authorization: `Bearer ${clientAuthA}` },
     );
     const streamB = await openSse(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-b&stream_id=stream-b&client_auth_token=${encodeURIComponent(clientAuthB)}`,
-      forwardedHeaders,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-shared-ip-b&stream_id=stream-b',
+      { ...forwardedHeaders, Authorization: `Bearer ${clientAuthB}` },
     );
 
     try {
@@ -475,6 +476,24 @@ describe('Remote Invoke security', () => {
     } finally {
       streamA.close();
       streamB.close();
+    }
+  });
+
+  it('rejects client SSE authentication tokens in URL query parameters', async () => {
+    const token = await registerUser('ri_sse_query_token_owner', 'password123');
+    const { publicKey, privateKey } = generateClientKeypair();
+    const publicKeyDerBase64 = publicKey.export({ type: 'spki', format: 'der' }).toString('base64');
+    const client = await registerClient('ri-client-sse-query-token', publicKeyDerBase64, privateKey, token);
+    const clientAuthToken = client.data.data.client_auth_token as string;
+
+    const rejected = await openSse(
+      `/v4/remote-invoke/client/stream?client_instance_id=ri-client-sse-query-token&stream_id=stream-query-token&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+    );
+
+    try {
+      expect(rejected.status).toBe(401);
+    } finally {
+      rejected.close();
     }
   });
 
@@ -729,7 +748,7 @@ describe('Remote Invoke security', () => {
     expect(ownerFrame.status).toBe(200);
   });
 
-  it('rejects shell.exec openCall when the grant scope is only remote_query', async () => {
+  it('rejects legacy v4 caller openCall with protocol_version_not_supported', async () => {
     const now = new Date().toISOString();
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-remote-query-grant',
@@ -766,8 +785,37 @@ describe('Remote Invoke security', () => {
       timeout_hint_ms: 120_000,
     });
 
-    expect(response.status).toBe(403);
-    expect(response.data.message).toBe('grant_scope_mismatch');
+    expect(response.status).toBe(410);
+    expect(response.data.error).toBe('protocol_version_not_supported');
+  });
+
+  it('returns 410 for legacy v4 caller-sensitive endpoints', async () => {
+    const cases: Array<[string, string, unknown?]> = [
+      ['POST', '/v4/remote-invoke/pairings/start', { pair_code: 'PAIR123' }],
+      ['GET', '/v4/remote-invoke/pairings/pairing-1/watch'],
+      ['GET', '/v4/remote-invoke/grants/reusable?client_instance_id=client-1&caller_fingerprint=caller-1'],
+      ['DELETE', '/v4/remote-invoke/grants/grant-1?caller_fingerprint=caller-1'],
+      ['POST', '/v4/remote-invoke/calls/open', { grant_id: 'grant-1' }],
+    ];
+
+    for (const [method, path, body] of cases) {
+      const response = await req(method, path, body);
+      expect(response.status).toBe(410);
+      expect(response.data.error).toBe('protocol_version_not_supported');
+    }
+  });
+
+  it('rejects v5 caller-sensitive endpoints without PoP signature', async () => {
+    const keypair = makeCallerKeypair();
+    const response = await req('POST', '/v5/remote-invoke/grants/lookup', {
+      ts: Date.now(),
+      nonce: '0123456789abcdef0123456789abcdef',
+      caller_pubkey: keypair.caller_pubkey,
+      client_instance_id: 'client-1',
+    });
+
+    expect(response.status).toBe(401);
+    expect(response.data.message).toBe('signature_invalid');
   });
 
   it('passes through shell.exec encrypted openCall payloads and shell grant scope metadata', async () => {
@@ -784,23 +832,34 @@ describe('Remote Invoke security', () => {
     const clientAuthToken = registration.data.data.client_auth_token as string;
 
     const clientStream = await openSseWithEvents(
-      `/v4/remote-invoke/client/stream?client_instance_id=ri-shell-client&stream_id=ri-shell-stream&client_auth_token=${encodeURIComponent(clientAuthToken)}`,
+      '/v4/remote-invoke/client/stream?client_instance_id=ri-shell-client&stream_id=ri-shell-stream',
+      { Authorization: `Bearer ${clientAuthToken}` },
     );
     expect(clientStream.status).toBe(200);
     await clientStream.nextEvent('client_hello_ack');
 
     const now = new Date().toISOString();
+    const keypair = makeCallerKeypair();
+    const sessionToken = 'ri-shell-session-token';
+    const callerEphemeralPub = base64X25519Pub('ri-shell-caller');
+    const clientEphemeralPub = base64X25519Pub('ri-shell-client');
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-shell-grant',
       user_id: 'ri_shell_exec_owner',
       client_instance_id: 'ri-shell-client',
       caller_fingerprint: 'caller-shell-exec',
       caller_display_name: 'shell-caller',
+      caller_pubkey: keypair.caller_pubkey,
+      caller_pubkey_fp: keypair.caller_pubkey_fp,
+      caller_ephemeral_pub: callerEphemeralPub,
+      client_ephemeral_pub: clientEphemeralPub,
       grant_mode: 'permanent',
       grant_scope: 'remote_shell_exec',
       status: 'active',
       first_authorized_at: now,
       expires_at: '',
+      session_token_hash: sha256Hex(sessionToken),
+      session_token_expires_at: new Date(Date.now() + 60_000).toISOString(),
       last_used_at: now,
       max_calls: 999999,
       remaining_calls: 999999,
@@ -808,11 +867,8 @@ describe('Remote Invoke security', () => {
       update_time: now,
     });
 
-    const openResponse = await req('POST', '/v4/remote-invoke/calls/open', {
-      grant_id: 'ri-shell-grant',
+    const openResponse = await req('POST', '/v5/remote-invoke/calls/open', signPopBody({
       client_instance_id: 'ri-shell-client',
-      caller_fingerprint: 'caller-shell-exec',
-      caller_pubkey: 'caller-pubkey',
       command_kind: 'shell.exec',
       command_encrypted: {
         version: 1,
@@ -826,7 +882,7 @@ describe('Remote Invoke security', () => {
       },
       pty_enabled: true,
       timeout_hint_ms: 120_000,
-    });
+    }, keypair), { Authorization: `Bearer ${sessionToken}` });
 
     expect(openResponse.status).toBe(200);
     expect(openResponse.data.data.call_meta.command_kind).toBe('shell.exec');
@@ -839,6 +895,9 @@ describe('Remote Invoke security', () => {
       grant_id: 'ri-shell-grant',
       grant_scope: 'remote_shell_exec',
       caller_fingerprint: 'caller-shell-exec',
+      caller_pubkey: keypair.caller_pubkey,
+      caller_ephemeral_pub: callerEphemeralPub,
+      client_ephemeral_pub: clientEphemeralPub,
       command_kind: 'shell.exec',
       pty_enabled: true,
       timeout_hint_ms: 120_000,

@@ -58,6 +58,7 @@ base64 = "0.22"
 ring = "0.17"
 uuid.workspace = true
 fs2 = "0.4"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile.workspace = true

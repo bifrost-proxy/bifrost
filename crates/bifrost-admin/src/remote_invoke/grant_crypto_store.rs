@@ -181,6 +181,7 @@ impl GrantCryptoStore {
                     parent.display()
                 )))
             })?;
+            harden_private_dir(parent)?;
         }
         let content = serde_json::to_string_pretty(file)
             .map_err(|e| BifrostError::Config(format!("serialize grant crypto store: {e}")))?;
@@ -190,6 +191,7 @@ impl GrantCryptoStore {
                 self.file_path.display()
             )))
         })?;
+        harden_private_file(&self.file_path)?;
         Ok(())
     }
 
@@ -221,6 +223,7 @@ impl GrantCryptoStore {
                     )));
                 }
             };
+            harden_private_file(&self.key_path)?;
             return Ok(key);
         }
 
@@ -231,6 +234,7 @@ impl GrantCryptoStore {
                     parent.display()
                 )))
             })?;
+            harden_private_dir(parent)?;
         }
 
         let mut key = [0u8; 32];
@@ -244,6 +248,7 @@ impl GrantCryptoStore {
                 self.key_path.display()
             )))
         })?;
+        harden_private_file(&self.key_path)?;
         Ok(key)
     }
 
@@ -335,6 +340,38 @@ fn now_millis() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+#[cfg(unix)]
+fn harden_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "chmod 0700 {}: {e}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(not(unix))]
+fn harden_private_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_private_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "chmod 0600 {}: {e}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(not(unix))]
+fn harden_private_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

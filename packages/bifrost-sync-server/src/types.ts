@@ -177,6 +177,7 @@ export interface RemoteInvokeConfig {
   max_sse_connections_per_ip: number;
   pair_rate_limit_per_ip: number;
   pair_rate_limit_global_per_client: number;
+  ssh_grant_max_calls?: number;
 }
 
 export interface CallerInfo {
@@ -233,6 +234,10 @@ export interface RemoteInvokePairing {
   relay_token: string;
   call_id: string;
   grant_id: string;
+  watch_token_hash?: string;
+  claim_token_hash?: string;
+  claim_expires_at?: string;
+  claimed_at?: string;
   expires_at: string;
   create_time: string;
   update_time: string;
@@ -244,6 +249,8 @@ export interface RemoteInvokeGrant {
   client_instance_id: string;
   caller_fingerprint: string;
   caller_display_name: string;
+  caller_pubkey?: string;
+  caller_pubkey_fp?: string;
   caller_ephemeral_pub?: string;
   client_ephemeral_pub?: string;
   grant_mode: GrantMode;
@@ -254,6 +261,10 @@ export interface RemoteInvokeGrant {
   status: GrantStatus;
   first_authorized_at: string;
   expires_at: string;
+  session_token_hash?: string;
+  session_token_expires_at?: string;
+  last_nonce_seen?: string;
+  revoked_at?: string;
   last_used_at: string;
   max_calls: number;
   remaining_calls: number;
@@ -306,4 +317,14 @@ export interface RemoteInvokeClientRecord {
   last_heartbeat_at: string;
   create_time: string;
   update_time: string;
+}
+
+export interface RemoteInvokeSshClaim {
+  claim_token_hash: string;
+  grant_id: string;
+  client_instance_id: string;
+  caller_pubkey_fp: string;
+  expires_at: string;
+  create_time: string;
+  claimed_at: string;
 }

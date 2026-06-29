@@ -46,6 +46,10 @@ cargo test -p bifrost-cli -- test_merge_file_non_multi_match test_merge_tpl_non_
 - 所有 4 个测试通过
 - file/tpl/rawfile/redirect 两条同域名规则时，只有第一条匹配到的规则生效
 
+**执行记录（2026-06-29 CI 覆盖率回归）**：
+- 执行命令：`cargo test -p bifrost-cli parsing::rules::tests::test_merge_redirect_non_multi_match -- --nocapture`
+- 实际结果：通过。redirect non-multi_match 用例使用 `redirect://(...)` 内联目标值，避免 CI 覆盖率任务把 `http://target-a.com` 当作远程内容加载并引入外部 HTML。
+
 ### TC-RMS-03: 单元测试 - 修改类标量值 single-match
 
 **操作步骤**：

@@ -28,14 +28,18 @@ impl Identity {
             let data = std::fs::read_to_string(&path)?;
             let stored: StoredIdentity = serde_json::from_str(&data)?;
             if let Some(identity) = Self::from_stored(stored)? {
+                harden_private_dir(data_dir)?;
+                harden_private_file(&path)?;
                 return Ok(identity);
             }
         }
 
         let identity = Self::generate();
         std::fs::create_dir_all(data_dir)?;
+        harden_private_dir(data_dir)?;
         let json = serde_json::to_string_pretty(&identity)?;
         std::fs::write(&path, json)?;
+        harden_private_file(&path)?;
 
         Ok(identity)
     }
@@ -169,6 +173,30 @@ fn current_platform() -> &'static str {
     } else {
         "unknown"
     }
+}
+
+#[cfg(unix)]
+fn harden_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_private_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_private_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn harden_private_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

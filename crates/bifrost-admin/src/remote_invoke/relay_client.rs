@@ -1,8 +1,12 @@
 use std::time::Duration;
 
-use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_core::{
+    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
+    remote_relay_headers_from_env, BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
+};
 use parking_lot::RwLock;
-use serde::Deserialize;
+use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
+use serde::{Deserialize, Serialize};
 
 use super::types::{
     ClientCallExitRequest, ClientCallFrameRequest, ClientCallStreamFrameRequest,
@@ -10,6 +14,8 @@ use super::types::{
     ClientRegistrationChallengeResponse, ClientRegistrationRequest, ClientRegistrationResponse,
     GrantDecisionRequest, PublishPairCodeRequest, SshConnectResultRequest, UpdateGrantRequest,
 };
+
+const CALL_FRAME_SEND_RETRY_DELAYS_MS: &[u64] = &[150, 500, 1_000];
 
 #[derive(Debug, Deserialize)]
 struct RelayApiResponse<T> {
@@ -21,7 +27,9 @@ struct RelayApiResponse<T> {
 
 pub struct RelayClient {
     http: reqwest::Client,
+    sse_http: reqwest::Client,
     base_url: RwLock<String>,
+    relay_headers: HeaderMap,
     client_auth_token: RwLock<Option<String>>,
     client_instance_id: String,
     device_name: String,
@@ -41,10 +49,24 @@ impl RelayClient {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build relay http client");
+        let sse_http = direct_sse_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to build relay sse http client");
+        let relay_headers = remote_relay_headers_from_env().unwrap_or_else(|error| {
+            tracing::warn!(
+                env = REMOTE_RELAY_HEADERS_ENV,
+                error = %error,
+                "ignoring invalid remote relay header configuration"
+            );
+            HeaderMap::new()
+        });
 
         Self {
             http,
+            sse_http,
             base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
+            relay_headers,
             client_auth_token: RwLock::new(None),
             client_instance_id: client_instance_id.to_string(),
             device_name: device_name.to_string(),
@@ -68,7 +90,7 @@ impl RelayClient {
         user_auth_token: Option<&str>,
     ) -> Result<ClientRegistrationResponse> {
         let url = format!("{}/v4/remote-invoke/client/register", self.base_url());
-        let mut request = self.http.post(&url).json(req);
+        let mut request = self.relay_post(&url).json(req);
         if let Some(token) = user_auth_token {
             request = request.header("x-bifrost-token", token);
         }
@@ -89,7 +111,7 @@ impl RelayClient {
             "{}/v4/remote-invoke/client/register/challenge",
             self.base_url()
         );
-        let mut request = self.http.post(&url).json(req);
+        let mut request = self.relay_post(&url).json(req);
         if let Some(token) = user_auth_token {
             request = request.header("x-bifrost-token", token);
         }
@@ -179,13 +201,8 @@ impl RelayClient {
             call_id
         );
         let response = self
-            .authorized_post(&url)
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| {
-                BifrostError::Network(format!("relay post call frame request failed: {e}"))
-            })?;
+            .authorized_post_json_with_send_retry(&url, req, "relay post call frame")
+            .await?;
         self.parse_response_empty(response, "post_call_frame").await
     }
 
@@ -201,13 +218,8 @@ impl RelayClient {
             call_id
         );
         let response = self
-            .authorized_post(&url)
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| {
-                BifrostError::Network(format!("relay post call stream_frame request failed: {e}"))
-            })?;
+            .authorized_post_json_with_send_retry(&url, req, "relay post call stream_frame")
+            .await?;
         self.parse_response_empty(response, "post_call_stream_frame")
             .await
     }
@@ -361,30 +373,45 @@ impl RelayClient {
     }
 
     pub fn build_stream_url(&self, stream_id: &str) -> String {
-        let token_part = self
-            .client_auth_token
-            .read()
-            .as_deref()
-            .map(|t| format!("&client_auth_token={}", urlencoding::encode(t)))
-            .unwrap_or_default();
         format!(
-            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}&client_name={}&platform={}{}",
+            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}&client_name={}&platform={}",
             self.base_url(),
             urlencoding::encode(&self.client_instance_id),
             urlencoding::encode(stream_id),
             urlencoding::encode(&self.device_name),
             urlencoding::encode(&self.platform),
-            token_part,
         )
     }
 
     pub fn build_sse_request(&self, stream_id: &str) -> reqwest::RequestBuilder {
         let url = self.build_stream_url(stream_id);
-        self.authorized_get(&url)
+        let mut builder = apply_remote_relay_headers(self.sse_http.get(&url), &self.relay_headers)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::CACHE_CONTROL, "no-transform");
+        if let Some(token) = self.client_auth_token.read().as_deref() {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        builder
+    }
+
+    fn relay_get(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.get(url), &self.relay_headers)
+    }
+
+    fn relay_post(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.post(url), &self.relay_headers)
+    }
+
+    fn relay_delete(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.delete(url), &self.relay_headers)
+    }
+
+    fn relay_patch(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.patch(url), &self.relay_headers)
     }
 
     fn authorized_get(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.get(url);
+        let mut builder = self.relay_get(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -392,15 +419,48 @@ impl RelayClient {
     }
 
     fn authorized_post(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.post(url);
+        let mut builder = self.relay_post(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
         builder
     }
 
+    async fn authorized_post_json_with_send_retry<T>(
+        &self,
+        url: &str,
+        body: &T,
+        label: &str,
+    ) -> Result<reqwest::Response>
+    where
+        T: Serialize + ?Sized,
+    {
+        let mut attempt = 0usize;
+        loop {
+            match self.authorized_post(url).json(body).send().await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    if attempt >= CALL_FRAME_SEND_RETRY_DELAYS_MS.len() {
+                        return Err(BifrostError::Network(format!(
+                            "{label} request failed: {error}"
+                        )));
+                    }
+                    let delay_ms = CALL_FRAME_SEND_RETRY_DELAYS_MS[attempt];
+                    attempt += 1;
+                    tracing::warn!(
+                        error = %error,
+                        attempt,
+                        delay_ms,
+                        "{label} request send failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
     fn authorized_delete(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.delete(url);
+        let mut builder = self.relay_delete(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -408,7 +468,7 @@ impl RelayClient {
     }
 
     fn authorized_patch(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.patch(url);
+        let mut builder = self.relay_patch(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -525,5 +585,67 @@ fn truncate_for_log(s: &str, max_len: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_len).collect();
         format!("{truncated}...(truncated, total {} bytes)", s.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn post_call_frame_retries_send_failure_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock relay");
+        let addr = listener.local_addr().expect("mock relay addr");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_server = Arc::clone(&attempts);
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.expect("accept mock relay connection");
+                let attempt = attempts_for_server.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    drop(stream);
+                    continue;
+                }
+
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"code":0,"message":null,"data":null}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write mock relay response");
+                break;
+            }
+        });
+
+        let client = RelayClient::new(
+            &format!("http://{addr}"),
+            "client-retry",
+            "device",
+            "platform",
+        );
+        client.set_auth_token("token".to_string());
+        client
+            .post_call_frame(
+                "call-retry",
+                &ClientCallFrameRequest {
+                    call_id: "call-retry".to_string(),
+                    client_instance_id: "client-retry".to_string(),
+                    envelope_json: "{}".to_string(),
+                },
+            )
+            .await
+            .expect("post_call_frame should retry send failure");
+
+        server.join().expect("mock relay thread");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

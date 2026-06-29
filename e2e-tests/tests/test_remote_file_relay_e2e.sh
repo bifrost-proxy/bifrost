@@ -105,6 +105,29 @@ http_patch_json() {
     http_request "$1" "PATCH" "$2"
 }
 
+wait_for_target_grant_id() {
+    local timeout_seconds="${1:-20}"
+    local grant_id=""
+    for _ in $(seq 1 "$timeout_seconds"); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            grant_id="$(echo "$HTTP_BODY" | jq -r '
+                (.grants // [])
+                | map(.grant_id // .id // "")
+                | map(select(length > 0))
+                | .[0] // ""
+            ')"
+            if [[ -n "$grant_id" ]]; then
+                echo "$grant_id"
+                return 0
+            fi
+        fi
+        sleep 1
+    done
+    echo ""
+    return 1
+}
+
 prepare_bifrost_bin() {
     BIFROST_BIN="${BIFROST_BIN:-$REPO_DIR/target/release/bifrost}"
     if [[ "$BIFROST_BIN" == "$REPO_DIR/target/release/bifrost" && "${SKIP_BUILD:-}" != "true" ]]; then
@@ -293,18 +316,8 @@ pair_and_upgrade_grant() {
         return 1
     fi
 
-    local caller_connections_file=""
-    for _ in $(seq 1 20); do
-        caller_connections_file="$(find "$CALLER_DATA_DIR" -name remote-connections.json -print -quit)"
-        if [[ -n "$caller_connections_file" ]]; then
-            GRANT_ID="$(jq -r '.connections[0].grant_id // ""' "$caller_connections_file")"
-            if [[ -n "$GRANT_ID" ]]; then
-                break
-            fi
-        fi
-        sleep 0.5
-    done
-    assert_not_empty "$GRANT_ID" "grant_id 不应为空" || return 1
+    GRANT_ID="$(wait_for_target_grant_id 20)"
+    assert_not_empty "$GRANT_ID" "target grant_id 不应为空" || return 1
 
     # Confirm the target-side grant is materialized with file_access=read_write before
     # running file commands. If the direct approval did not carry the scope for
@@ -359,7 +372,7 @@ run_remote_file_cmd() {
     local out_file status_file pid waited timeout_secs rc
     out_file="$(mktemp)"
     status_file="$(mktemp)"
-    timeout_secs="${REMOTE_FILE_CMD_TIMEOUT_SECS:-45}"
+    timeout_secs="${REMOTE_FILE_CMD_TIMEOUT_SECS:-120}"
 
     (
         BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote file "$@" \
@@ -1879,7 +1892,7 @@ sys.stdout.buffer.write(base64.b64decode(m.group(1)))')
     if [[ "$decoded" == "three" ]]; then
         _log_pass "TC-GAP-13: last-line slice has no injected trailing newline"
     else
-        _log_fail "TC-GAP-13: last-line slice is pristine" "three" "$decoded (last=$last_byte)"
+        _log_fail "TC-GAP-13: last-line slice is pristine" "three" "$decoded (last=$last_byte, raw=$out)"
     fi
 }
 

@@ -859,6 +859,82 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
     .toBe("ready");
 });
 
+test("Settings Sync 轮询刷新不会覆盖正在编辑的 Remote URL", async ({ page }) => {
+  let signedIn = false;
+  let savedRemoteBaseUrl = "";
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: true,
+        remote_base_url: "https://sync-poll.example.test",
+        has_session: signedIn,
+        reachable: true,
+        authorized: signedIn,
+        syncing: false,
+        reason: signedIn ? "ready" : "unauthorized",
+        last_sync_at: signedIn ? "2026-06-19T08:00:00Z" : null,
+        last_sync_action: signedIn ? "no_change" : null,
+        last_error: null,
+        user: signedIn
+          ? {
+              user_id: "poll-user",
+              nickname: "Poll User",
+              avatar: "",
+              email: "poll-user@example.test",
+            }
+          : null,
+      }),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/config", async (route) => {
+    const payload = route.request().postDataJSON() as { remote_base_url?: string };
+    savedRemoteBaseUrl = payload.remote_base_url ?? "";
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        enabled: true,
+        auto_sync: true,
+        remote_base_url: savedRemoteBaseUrl,
+        has_session: true,
+        reachable: true,
+        authorized: true,
+        syncing: false,
+        reason: "ready",
+        last_sync_at: "2026-06-19T08:00:00Z",
+        last_sync_action: "no_change",
+        last_error: null,
+        user: {
+          user_id: "poll-user",
+          nickname: "Poll User",
+          avatar: "",
+          email: "poll-user@example.test",
+        },
+      }),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+  const remoteUrlInput = page.getByTestId("settings-sync-remote-url-input");
+  await expect(remoteUrlInput).toHaveValue("https://sync-poll.example.test");
+
+  await remoteUrlInput.fill("http://127.0.0.1:61580/custom/");
+  signedIn = true;
+  await expect(page.getByText("Ready")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId("settings-sync-last-action")).toHaveText(
+    "No changes detected",
+  );
+  await expect(remoteUrlInput).toHaveValue("http://127.0.0.1:61580/custom/");
+
+  await page.getByTestId("settings-sync-remote-url-save").click();
+  await waitForToast(page, "Remote sync URL updated");
+  expect(savedRemoteBaseUrl).toBe("http://127.0.0.1:61580/custom/");
+  await expect(remoteUrlInput).toHaveValue("http://127.0.0.1:61580/custom/");
+});
+
 test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }) => {
   let patchPayload: Record<string, unknown> | null = null;
   const agentConfig = {

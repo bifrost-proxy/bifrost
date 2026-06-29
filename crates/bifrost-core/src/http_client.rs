@@ -1,7 +1,17 @@
 use std::path::Path;
 
+pub const REMOTE_RELAY_HEADERS_ENV: &str = "BIFROST_REMOTE_RELAY_HEADERS";
+
 pub fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
+}
+
+pub fn direct_sse_reqwest_client_builder() -> reqwest::ClientBuilder {
+    direct_reqwest_client_builder()
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
 }
 
 pub fn direct_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuilder {
@@ -46,11 +56,88 @@ pub fn direct_ureq_agent() -> ureq::Agent {
     direct_ureq_agent_builder().build()
 }
 
+pub fn remote_relay_headers_from_env() -> std::result::Result<reqwest::header::HeaderMap, String> {
+    let raw = match std::env::var(REMOTE_RELAY_HEADERS_ENV) {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(reqwest::header::HeaderMap::new()),
+        Err(error) => return Err(format!("read {REMOTE_RELAY_HEADERS_ENV}: {error}")),
+    };
+    parse_remote_relay_headers(&raw)
+}
+
+pub fn apply_remote_relay_headers(
+    mut builder: reqwest::RequestBuilder,
+    headers: &reqwest::header::HeaderMap,
+) -> reqwest::RequestBuilder {
+    for (name, value) in headers.iter() {
+        builder = builder.header(name, value);
+    }
+    builder
+}
+
+pub fn parse_remote_relay_headers(
+    raw: &str,
+) -> std::result::Result<reqwest::header::HeaderMap, String> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    for (index, pair) in raw.split(',').enumerate() {
+        let pair = pair.trim();
+        if pair.is_empty() {
+            continue;
+        }
+        let Some((name, value)) = pair.split_once('=') else {
+            return Err(format!(
+                "{REMOTE_RELAY_HEADERS_ENV} entry #{} must be name=value",
+                index + 1
+            ));
+        };
+        let name = name.trim();
+        let value = value.trim();
+        if name.is_empty() {
+            return Err(format!(
+                "{REMOTE_RELAY_HEADERS_ENV} entry #{} has empty header name",
+                index + 1
+            ));
+        }
+        let header_name =
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+                format!(
+                    "{REMOTE_RELAY_HEADERS_ENV} entry #{} has invalid header name '{name}': {error}",
+                    index + 1
+                )
+            })?;
+        if is_restricted_remote_relay_header(&header_name) {
+            return Err(format!(
+                "{REMOTE_RELAY_HEADERS_ENV} entry #{} cannot set restricted header '{}'",
+                index + 1,
+                header_name
+            ));
+        }
+        let header_value = reqwest::header::HeaderValue::from_str(value).map_err(|error| {
+            format!(
+                "{REMOTE_RELAY_HEADERS_ENV} entry #{} has invalid value for '{}': {error}",
+                index + 1,
+                header_name
+            )
+        })?;
+        headers.insert(header_name, header_value);
+    }
+    Ok(headers)
+}
+
+fn is_restricted_remote_relay_header(name: &reqwest::header::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "authorization" | "cookie" | "host" | "x-bifrost-token"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        direct_blocking_reqwest_client_builder, direct_reqwest_client_builder, direct_ureq_agent,
-        direct_ureq_agent_builder, load_reqwest_certificate, proxied_reqwest_client_builder,
+        apply_remote_relay_headers, direct_blocking_reqwest_client_builder,
+        direct_reqwest_client_builder, direct_ureq_agent, direct_ureq_agent_builder,
+        load_reqwest_certificate, parse_remote_relay_headers, proxied_reqwest_client_builder,
+        REMOTE_RELAY_HEADERS_ENV,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -205,5 +292,33 @@ mod tests {
         std::fs::write(&ca, b"# empty bundle\n").unwrap();
         let builder = proxied_reqwest_client_builder("http://127.0.0.1:8080", Some(&ca)).unwrap();
         assert!(builder.build().is_ok());
+    }
+
+    #[test]
+    fn parse_remote_relay_headers_accepts_ppe_headers() {
+        let headers =
+            parse_remote_relay_headers("x-tt-env=ppe_ticket_system, x-use-ppe=1").unwrap();
+
+        assert_eq!(headers.get("x-tt-env").unwrap(), "ppe_ticket_system");
+        assert_eq!(headers.get("x-use-ppe").unwrap(), "1");
+    }
+
+    #[test]
+    fn parse_remote_relay_headers_rejects_restricted_headers() {
+        let err = parse_remote_relay_headers("Authorization=Bearer token").unwrap_err();
+
+        assert!(err.contains(REMOTE_RELAY_HEADERS_ENV));
+        assert!(err.contains("restricted"));
+    }
+
+    #[test]
+    fn apply_remote_relay_headers_adds_headers_to_request() {
+        let headers = parse_remote_relay_headers("x-use-ppe=1").unwrap();
+        let client = direct_reqwest_client_builder().build().unwrap();
+        let request = apply_remote_relay_headers(client.get("http://example.test"), &headers)
+            .build()
+            .unwrap();
+
+        assert_eq!(request.headers().get("x-use-ppe").unwrap(), "1");
     }
 }

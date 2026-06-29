@@ -50,6 +50,10 @@ export interface IGroupSettingDao {
 export interface IRemoteInvokeDao {
   createPairing(pairing: import('../types').RemoteInvokePairing): Promise<import('../types').RemoteInvokePairing>;
   getPairing(pairingId: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  getPairingByClaimTokenHash(hash: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  getPairingByWatchTokenHash(hash: string): Promise<import('../types').RemoteInvokePairing | undefined>;
+  setPairingClaimTokens(pairingId: string, claimHash: string, watchHash: string, claimExpiresAt: string): Promise<void>;
+  markPairingClaimed(pairingId: string, claimedAt: string): Promise<void>;
   updatePairing(pairingId: string, fields: Partial<import('../types').RemoteInvokePairing>): Promise<void>;
   findPairingByCode(userId: string, clientInstanceId: string, pairCode: string): Promise<import('../types').RemoteInvokePairing | undefined>;
   countPendingPairings(clientInstanceId: string): Promise<number>;
@@ -59,6 +63,15 @@ export interface IRemoteInvokeDao {
   createGrant(grant: import('../types').RemoteInvokeGrant): Promise<import('../types').RemoteInvokeGrant>;
   getGrant(grantId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
+  getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
+  getGrantBySessionTokenHash(hash: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
+  updateGrantCallerPubkey(grantId: string, pubkey: string, fp: string): Promise<void>;
+  updateGrantCallerEphemeralPub(grantId: string, pub: string): Promise<void>;
+  updateGrantClientEphemeralPub(grantId: string, pub: string): Promise<void>;
+  updateGrantSessionToken(grantId: string, hash: string, expiresAt: string): Promise<void>;
+  revokeGrant(grantId: string, revokedAt: string): Promise<void>;
+  markNonceUsed(callerFp: string, nonce: string, seenAt: string): Promise<boolean>;
+  gcNonces(before: string): Promise<number>;
   listGrants(userId: string, query: { client_instance_id?: string; status?: string; offset?: number; limit?: number }): Promise<{ list: import('../types').RemoteInvokeGrant[]; total: number }>;
   countActiveGrantsForClient(clientInstanceId: string): Promise<number>;
   listActiveGrantsForClient(clientInstanceId: string): Promise<import('../types').RemoteInvokeGrant[]>;
@@ -67,7 +80,7 @@ export interface IRemoteInvokeDao {
   deleteGrant(grantId: string): Promise<boolean>;
   revokeSshGrantsForClient(clientInstanceId: string): Promise<number>;
   touchGrantLastUsed(grantId: string, ts: string): Promise<void>;
-  consumeGrantCall(grantId: string): Promise<void>;
+  consumeGrantCall(grantId: string): Promise<boolean>;
 
   createCall(call: import('../types').RemoteInvokeCall): Promise<import('../types').RemoteInvokeCall>;
   getCall(callId: string): Promise<import('../types').RemoteInvokeCall | undefined>;
@@ -81,6 +94,10 @@ export interface IRemoteInvokeDao {
   getClientRecord(clientInstanceId: string): Promise<import('../types').RemoteInvokeClientRecord | undefined>;
   updateClientRecord(clientInstanceId: string, fields: Partial<import('../types').RemoteInvokeClientRecord>): Promise<void>;
 
+  createSshClaim(claim: import('../types').RemoteInvokeSshClaim): Promise<void>;
+  getSshClaimByTokenHash(hash: string): Promise<import('../types').RemoteInvokeSshClaim | undefined>;
+  markSshClaimRedeemed(hash: string, claimedAt: string): Promise<void>;
+
   cleanupExpiredData(now: string, retentionDays: number, maxRecords: number): Promise<number>;
 }
 
@@ -91,5 +108,6 @@ export interface IStorage {
   groupMember: IGroupMemberDao;
   groupSetting: IGroupSettingDao;
   remoteInvoke: IRemoteInvokeDao;
+  ready?(): Promise<void>;
   close(): Promise<void>;
 }

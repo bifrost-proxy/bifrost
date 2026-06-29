@@ -12,10 +12,14 @@ use bifrost_command::{
     CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope, TrafficGetArgs,
     TrafficListArgs, TrafficListDirection,
 };
-use bifrost_core::{direct_reqwest_client_builder, BifrostError};
+use bifrost_core::{
+    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
+    remote_relay_headers_from_env, BifrostError, REMOTE_RELAY_HEADERS_ENV,
+};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
+use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305, NONCE_LEN};
 use ring::agreement::{self, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
@@ -32,6 +36,8 @@ use crate::cli::{
     RemoteCommandExecArgs, RemoteCommands, RemoteConnCommands, RemoteFileCommands,
     RemoteJobCommands, RemoteRunArgs, RemoteSearchArgs, RemoteTrafficCommands,
 };
+
+mod pop;
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 // PR #5a: interpreted as an IDLE deadline (resets on every chunk/event),
@@ -60,6 +66,13 @@ const ENCRYPTED_OPEN_CALL_VERSION: u32 = 2;
 const LOCAL_SECRET_FORMAT_VERSION: u32 = 1;
 const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
 const CALL_EVENT_HKDF_INFO_PREFIX: &[u8] = b"bifrost-e2e-v1";
+const GRANT_SESSION_REFRESH_SKEW_SECS: i64 = 60;
+
+#[cfg(test)]
+static REMOTE_TEST_DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+static REMOTE_TEST_DATA_DIR_ASYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn is_false(value: &bool) -> bool {
     !*value
@@ -327,6 +340,10 @@ struct LocalConnection {
     client_ephemeral_pub: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     shared_secret_encrypted: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_session_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    grant_session_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -376,13 +393,48 @@ fn remote_jobs_path() -> PathBuf {
 struct CallerIdentityFile {
     version: u32,
     caller_fingerprint: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    caller_pubkey_b64: Option<String>,
 }
 
-fn load_or_create_caller_fingerprint() -> bifrost_core::Result<String> {
-    load_or_create_caller_fingerprint_at(&caller_identity_path())
+struct CallerPopIdentity {
+    caller_fingerprint: String,
+    key_pair: Ed25519KeyPair,
 }
 
+fn default_remote_device_key_path() -> PathBuf {
+    bifrost_storage::data_dir().join("remote-device.key")
+}
+
+fn load_or_create_caller_identity() -> bifrost_core::Result<CallerPopIdentity> {
+    load_or_create_caller_identity_at(&caller_identity_path(), &default_remote_device_key_path())
+}
+
+#[cfg(test)]
 fn load_or_create_caller_fingerprint_at(path: &Path) -> bifrost_core::Result<String> {
+    let key_path = path
+        .parent()
+        .map(|parent| parent.join("remote-device.key"))
+        .unwrap_or_else(default_remote_device_key_path);
+    Ok(load_or_create_caller_identity_at(path, &key_path)?.caller_fingerprint)
+}
+
+fn load_or_create_caller_identity_at(
+    identity_path: &Path,
+    key_path: &Path,
+) -> bifrost_core::Result<CallerPopIdentity> {
+    let key_pair = load_or_create_caller_pop_key(key_path)?;
+    let caller_pubkey_b64 = pop::caller_pubkey_b64(&key_pair);
+    let caller_fingerprint = load_or_create_caller_fingerprint_value(identity_path)?;
+
+    write_caller_identity_file(identity_path, &caller_fingerprint, Some(&caller_pubkey_b64))?;
+    Ok(CallerPopIdentity {
+        caller_fingerprint,
+        key_pair,
+    })
+}
+
+fn load_or_create_caller_fingerprint_value(path: &Path) -> bifrost_core::Result<String> {
     if path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| {
             BifrostError::Io(std::io::Error::other(format!(
@@ -402,6 +454,15 @@ fn load_or_create_caller_fingerprint_at(path: &Path) -> bifrost_core::Result<Str
     }
 
     let caller_fingerprint = generate_random_caller_fingerprint()?;
+    write_caller_identity_file(path, &caller_fingerprint, None)?;
+    Ok(caller_fingerprint)
+}
+
+fn write_caller_identity_file(
+    path: &Path,
+    caller_fingerprint: &str,
+    caller_pubkey_b64: Option<&str>,
+) -> bifrost_core::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| {
             BifrostError::Io(std::io::Error::other(format!(
@@ -412,7 +473,8 @@ fn load_or_create_caller_fingerprint_at(path: &Path) -> bifrost_core::Result<Str
     }
     let content = serde_json::to_string_pretty(&CallerIdentityFile {
         version: 1,
-        caller_fingerprint: caller_fingerprint.clone(),
+        caller_fingerprint: caller_fingerprint.to_string(),
+        caller_pubkey_b64: caller_pubkey_b64.map(str::to_string),
     })
     .map_err(|e| BifrostError::Config(format!("serialize caller identity: {e}")))?;
     std::fs::write(path, content).map_err(|e| {
@@ -421,7 +483,50 @@ fn load_or_create_caller_fingerprint_at(path: &Path) -> bifrost_core::Result<Str
             path.display()
         )))
     })?;
-    Ok(caller_fingerprint)
+    Ok(())
+}
+
+fn load_or_create_caller_pop_key(path: &Path) -> bifrost_core::Result<Ed25519KeyPair> {
+    if path.exists() {
+        return Ok(load_ssh_key(path.to_string_lossy().as_ref(), None)?.key_pair);
+    }
+
+    let rng = SystemRandom::new();
+    let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng)
+        .map_err(|_| BifrostError::Config("generate caller PoP key failed".to_string()))?;
+    let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref())
+        .map_err(|_| BifrostError::Config("parse generated caller PoP key failed".to_string()))?;
+    let public_key_der = ed25519_public_key_to_spki_der(key_pair.public_key().as_ref());
+    let device_code = derive_device_code(&public_key_der);
+    let rendered = render_bifrost_key_file(&device_code, pkcs8.as_ref());
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            BifrostError::Io(std::io::Error::other(format!(
+                "mkdir {}: {e}",
+                parent.display()
+            )))
+        })?;
+    }
+    std::fs::write(path, rendered).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "write {}: {e}",
+            path.display()
+        )))
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)) {
+            tracing::warn!("failed to set 0600 permissions on {}: {e}", path.display());
+        }
+    }
+    Ok(key_pair)
+}
+
+fn render_bifrost_key_file(device_code: &str, private_key_pkcs8: &[u8]) -> String {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(private_key_pkcs8);
+    format!("{BIFROST_KEY_BEGIN}\nDevice-Code: {device_code}\n{encoded}\n{BIFROST_KEY_END}\n")
 }
 
 fn generate_random_caller_fingerprint() -> bifrost_core::Result<String> {
@@ -1042,6 +1147,30 @@ fn decrypt_local_secret(encoded: &str) -> bifrost_core::Result<Vec<u8>> {
     Ok(plaintext.to_vec())
 }
 
+fn encrypt_grant_session_token(token: &str) -> bifrost_core::Result<String> {
+    encrypt_local_secret(token.as_bytes())
+}
+
+fn decrypt_grant_session_token(conn: &LocalConnection) -> bifrost_core::Result<String> {
+    let encoded = conn.grant_session_token.as_deref().ok_or_else(|| {
+        BifrostError::Config(
+            "saved connection is missing grant_session_token; reconnect to refresh authorization"
+                .to_string(),
+        )
+    })?;
+    let decrypted = decrypt_local_secret(encoded)?;
+    String::from_utf8(decrypted).map_err(|e| {
+        BifrostError::Config(format!(
+            "decrypt saved grant_session_token as utf-8 failed: {e}"
+        ))
+    })
+}
+
+fn store_grant_session_token(conn: &mut LocalConnection, token: &str) -> bifrost_core::Result<()> {
+    conn.grant_session_token = Some(encrypt_grant_session_token(token)?);
+    Ok(())
+}
+
 fn merge_transport_context(
     conn: &LocalConnection,
     grant: &GrantInfo,
@@ -1096,39 +1225,58 @@ fn reconcile_reusable_grant_for_transport(
     conn: &mut LocalConnection,
     grant: GrantInfo,
 ) -> bifrost_core::Result<GrantInfo> {
-    if conn.grant_id.is_empty() || grant.grant_id == conn.grant_id {
+    let grant_id_changed =
+        !grant.grant_id.is_empty() && !conn.grant_id.is_empty() && grant.grant_id != conn.grant_id;
+    if grant_id_changed {
+        let saved_caller_pub = conn.caller_ephemeral_pub.as_deref().unwrap_or_default();
+        let saved_client_pub = conn.client_ephemeral_pub.as_deref().unwrap_or_default();
+        let relay_caller_pub = grant
+            .caller_ephemeral_pub
+            .as_deref()
+            .unwrap_or(saved_caller_pub);
+        let relay_client_pub = grant
+            .client_ephemeral_pub
+            .as_deref()
+            .unwrap_or(saved_client_pub);
+
+        if !saved_caller_pub.is_empty()
+            && !relay_caller_pub.is_empty()
+            && relay_caller_pub != saved_caller_pub
+        {
+            return Err(BifrostError::Config(
+                "saved connection transport no longer matches relay reusable authorization; reconnect required"
+                    .to_string(),
+            ));
+        }
+
+        if !saved_client_pub.is_empty()
+            && !relay_client_pub.is_empty()
+            && relay_client_pub != saved_client_pub
+        {
+            return Err(BifrostError::Config(
+                "saved connection transport no longer matches relay reusable authorization; reconnect required"
+                    .to_string(),
+            ));
+        }
+    }
+
+    if let Some(token) = &grant.grant_session_token {
+        store_grant_session_token(conn, token)?;
+    }
+    if let Some(expires_at) = &grant.expires_at {
+        conn.grant_session_expires_at = Some(expires_at.clone());
+    }
+    if grant.caller_ephemeral_pub.is_some() {
+        conn.caller_ephemeral_pub = grant.caller_ephemeral_pub.clone();
+    }
+    if grant.client_ephemeral_pub.is_some() {
+        conn.client_ephemeral_pub = grant.client_ephemeral_pub.clone();
+    }
+    if grant.shared_secret_encrypted.is_some() {
+        conn.shared_secret_encrypted = grant.shared_secret_encrypted.clone();
+    }
+    if !grant_id_changed {
         return Ok(grant);
-    }
-
-    let saved_caller_pub = conn.caller_ephemeral_pub.as_deref().unwrap_or_default();
-    let saved_client_pub = conn.client_ephemeral_pub.as_deref().unwrap_or_default();
-    let relay_caller_pub = grant
-        .caller_ephemeral_pub
-        .as_deref()
-        .unwrap_or(saved_caller_pub);
-    let relay_client_pub = grant
-        .client_ephemeral_pub
-        .as_deref()
-        .unwrap_or(saved_client_pub);
-
-    if !saved_caller_pub.is_empty()
-        && !relay_caller_pub.is_empty()
-        && relay_caller_pub != saved_caller_pub
-    {
-        return Err(BifrostError::Config(
-            "saved connection transport no longer matches relay reusable authorization; reconnect required"
-                .to_string(),
-        ));
-    }
-
-    if !saved_client_pub.is_empty()
-        && !relay_client_pub.is_empty()
-        && relay_client_pub != saved_client_pub
-    {
-        return Err(BifrostError::Config(
-            "saved connection transport no longer matches relay reusable authorization; reconnect required"
-                .to_string(),
-        ));
     }
 
     warn!(
@@ -1146,10 +1294,50 @@ fn reconcile_reusable_grant_for_transport(
     Ok(grant)
 }
 
+fn local_grant_from_saved_session(conn: &LocalConnection) -> Option<GrantInfo> {
+    if conn.grant_session_token.is_none()
+        || conn.caller_ephemeral_pub.is_none()
+        || conn.client_ephemeral_pub.is_none()
+        || conn.shared_secret_encrypted.is_none()
+    {
+        return None;
+    }
+
+    Some(GrantInfo {
+        grant_id: conn.grant_id.clone(),
+        status: "active".to_string(),
+        grant_session_token: None,
+        expires_at: conn.grant_session_expires_at.clone(),
+        grant_summary: None,
+        caller_ephemeral_pub: conn.caller_ephemeral_pub.clone(),
+        client_ephemeral_pub: conn.client_ephemeral_pub.clone(),
+        shared_secret_encrypted: conn.shared_secret_encrypted.clone(),
+    })
+}
+
+fn grant_session_needs_refresh(conn: &LocalConnection) -> bool {
+    if conn.grant_session_token.is_none() {
+        return true;
+    }
+    let Some(expires_at) = conn.grant_session_expires_at.as_deref() else {
+        return true;
+    };
+    let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        return true;
+    };
+    expires_at.timestamp() <= chrono::Utc::now().timestamp() + GRANT_SESSION_REFRESH_SKEW_SECS
+}
+
 fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
     matches!(err, BifrostError::Network(msg)
         if msg.contains("open_call failed with status 403")
             && msg.contains("grant_scope_mismatch"))
+}
+
+fn is_grant_session_token_invalid_error(err: &BifrostError) -> bool {
+    matches!(err, BifrostError::Network(msg)
+        if msg.contains("open_call failed with status 401")
+            && msg.contains("grant_session_token_invalid"))
 }
 
 fn is_stale_remote_grant_error(err: &BifrostError) -> bool {
@@ -1227,12 +1415,14 @@ fn shell_scope_upgrade_error(conn: &LocalConnection) -> BifrostError {
 
 fn derive_open_call_key(
     shared_secret: &[u8],
-    grant_id: &str,
+    _grant_id: &str,
     caller_ephemeral_pub: &str,
     client_ephemeral_pub: &str,
     command_kind: CommandKind,
 ) -> bifrost_core::Result<[u8; 32]> {
-    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, grant_id.as_bytes());
+    // v5 keeps grant_id server-side, so caller and client derive this key from
+    // the ECDH context and command kind only.
+    let salt = hkdf::Salt::new(hkdf::HKDF_SHA256, b"bifrost-open-call-v5");
     let prk = salt.extract(shared_secret);
     let caller_pub = decode_base64_or_raw(caller_ephemeral_pub);
     let client_pub = decode_base64_or_raw(client_ephemeral_pub);
@@ -1545,7 +1735,8 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let caller = CallerRelayClient::new(&opts.relay_url);
     let hostname = get_hostname();
     let username = get_username();
-    let caller_fingerprint = load_or_create_caller_fingerprint()?;
+    let caller_identity = load_or_create_caller_identity()?;
+    let caller_fingerprint = caller_identity.caller_fingerprint.clone();
 
     // Extract --label from conn up if present
     let label = if let RemoteCommands::Conn {
@@ -1558,6 +1749,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
+        caller_pubkey: Some(pop::caller_pubkey_b64(&caller_identity.key_pair)),
         display_name: Some(label.clone().unwrap_or_else(|| hostname.clone())),
         user_agent: Some(CALLER_USER_AGENT.to_string()),
         platform: Some(std::env::consts::OS.to_string()),
@@ -1584,6 +1776,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 ssh_key,
                 device_code.as_deref(),
                 &caller_info,
+                &caller_identity,
                 &opts.relay_url,
             )
             .await;
@@ -1595,7 +1788,14 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                     .to_string(),
             )
         })?;
-        return handle_connect(&caller, pair_code, &caller_info, &opts.relay_url).await;
+        return handle_connect(
+            &caller,
+            pair_code,
+            &caller_info,
+            &caller_identity,
+            &opts.relay_url,
+        )
+        .await;
     }
 
     let mut connections = load_connections()?;
@@ -1607,6 +1807,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         return handle_disconnect(
             &caller,
             &connections,
+            &caller_identity,
             opts.client_id.as_deref(),
             *all,
             grant_id.as_deref(),
@@ -1619,12 +1820,6 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
 
     let mut conn = resolve_local_connection(&connections, opts.client_id.as_deref())?;
-    let caller_fingerprint = if conn.caller_fingerprint.is_empty() {
-        caller_fingerprint
-    } else {
-        conn.caller_fingerprint.clone()
-    };
-
     if let RemoteCommands::Exec(exec_args) = &opts.action {
         if let Err(msg) = validate_remote_command_exec_flags(exec_args) {
             return Err(BifrostError::Config(msg));
@@ -1636,42 +1831,54 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         Some(build_remote_command_checked(&opts.action)?)
     };
 
-    let grant = caller
-        .find_reusable_grant(&conn.client_instance_id, &caller_fingerprint)
-        .await?;
+    let grant = if !grant_session_needs_refresh(&conn) {
+        local_grant_from_saved_session(&conn)
+    } else {
+        debug!("saved v5 grant session is expired or near expiry; refreshing before open_call");
+        None
+    };
+    let grant = if let Some(local_grant) = grant {
+        debug!("using saved v5 grant session");
+        local_grant
+    } else {
+        let grant = caller
+            .find_reusable_grant(&conn.client_instance_id, &caller_identity, Some(&conn))
+            .await?;
 
-    let grant = match grant {
-        Some(g) => g,
-        None => {
-            let conn_label = if conn.device_name.is_empty() {
-                &conn.client_instance_id
-            } else {
-                &conn.device_name
-            };
-            eprintln!(
-                "{}",
-                format!(
-                    "✗ Authorization for '{}' expired or revoked on the relay.",
-                    conn_label
-                )
-                .bright_red()
-            );
-            connections.retain(|c| {
-                !(c.client_instance_id == conn.client_instance_id && c.relay_url == conn.relay_url)
-            });
-            if let Err(error) = save_connections(&connections) {
-                warn!(error = %error, "failed to remove stale connection");
-            } else {
+        match grant {
+            Some(g) => g,
+            None => {
+                let conn_label = if conn.device_name.is_empty() {
+                    &conn.client_instance_id
+                } else {
+                    &conn.device_name
+                };
                 eprintln!(
-                    "  {} Stale connection removed from local cache.",
+                    "{}",
+                    format!(
+                        "✗ Authorization for '{}' expired or revoked on the relay.",
+                        conn_label
+                    )
+                    .bright_red()
+                );
+                connections.retain(|c| {
+                    !(c.client_instance_id == conn.client_instance_id
+                        && c.relay_url == conn.relay_url)
+                });
+                if let Err(error) = save_connections(&connections) {
+                    warn!(error = %error, "failed to remove stale connection");
+                } else {
+                    eprintln!(
+                        "  {} Stale connection removed from local cache.",
+                        "→".bright_yellow()
+                    );
+                }
+                eprintln!(
+                    "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
                     "→".bright_yellow()
                 );
+                std::process::exit(1);
             }
-            eprintln!(
-                "  {} Run `bifrost remote conn up <pair-code>` to re-authorize.",
-                "→".bright_yellow()
-            );
-            std::process::exit(1);
         }
     };
 
@@ -1684,13 +1891,13 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         save_connections(&connections)?;
     }
 
-    debug!(grant_id = %grant.grant_id, "found reusable grant");
+    debug!("found reusable v5 grant session");
     if should_print_remote_progress_banner(std::io::stdout().is_terminal()) {
         println!(
             "{}",
             format!(
-                "✓ Using authorization (grant: {})",
-                &grant.grant_id[..grant.grant_id.len().min(8)]
+                "✓ Using authorization for {}",
+                remote_client_short_id(&conn.client_instance_id)
             )
             .bright_green()
         );
@@ -1751,7 +1958,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             &caller,
             &conn,
             &grant,
-            &caller_fingerprint,
+            &caller_identity,
             &transport,
             run_args,
         )
@@ -1788,22 +1995,52 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         &active_grant_id,
         &transport,
     )?;
+    let open_request = OpenCallRequest {
+        client_instance_id: conn.client_instance_id.clone(),
+        command_summary: command_summary.clone(),
+        command_kind: command.kind,
+        command_encrypted,
+        pty_enabled: command
+            .shell_exec
+            .as_ref()
+            .and_then(|payload| payload.pty.as_ref())
+            .map(|pty| pty.enabled),
+    };
+    let mut grant_session_token = decrypt_grant_session_token(&conn)?;
 
-    let call_result = caller
-        .open_call(&OpenCallRequest {
-            grant_id: grant.grant_id.clone(),
-            client_instance_id: conn.client_instance_id.clone(),
-            caller_fingerprint: caller_fingerprint.clone(),
-            command_summary: command_summary.clone(),
-            command_kind: command.kind,
-            command_encrypted,
-            pty_enabled: command
-                .shell_exec
-                .as_ref()
-                .and_then(|payload| payload.pty.as_ref())
-                .map(|pty| pty.enabled),
-        })
+    let mut call_result = caller
+        .open_call(&open_request, &grant_session_token, &caller_identity)
         .await;
+    if let Err(err) = &call_result {
+        if is_grant_session_token_invalid_error(err) {
+            debug!(
+                "saved v5 grant session token was rejected; refreshing and retrying open_call once"
+            );
+            let refreshed = caller
+                .find_reusable_grant(&conn.client_instance_id, &caller_identity, Some(&conn))
+                .await?;
+            if let Some(refreshed) = refreshed {
+                let refreshed_grant = reconcile_reusable_grant_for_transport(&mut conn, refreshed)?;
+                if let Some(existing) = connections.iter_mut().find(|existing| {
+                    existing.client_instance_id == conn.client_instance_id
+                        && existing.relay_url == conn.relay_url
+                }) {
+                    *existing = conn.clone();
+                    save_connections(&connections)?;
+                }
+                grant_session_token = decrypt_grant_session_token(&conn)?;
+                call_result = caller
+                    .open_call(&open_request, &grant_session_token, &caller_identity)
+                    .await;
+                if call_result.is_ok() {
+                    debug!(
+                        grant_id = %refreshed_grant.grant_id,
+                        "open_call succeeded after refreshing v5 grant session token"
+                    );
+                }
+            }
+        }
+    }
 
     let call_result = match call_result {
         Ok(result) => result,
@@ -1898,7 +2135,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
                 &caller,
                 &conn,
                 &grant,
-                &caller_fingerprint,
+                &caller_identity,
                 &transport,
                 cwd.clone(),
                 remote_path,
@@ -2008,7 +2245,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             &caller,
             &conn,
             &grant,
-            &caller_fingerprint,
+            &caller_identity,
             &transport,
             cwd.clone(),
             remote_path,
@@ -2029,6 +2266,7 @@ async fn handle_connect(
     caller: &CallerRelayClient,
     pair_code: &str,
     caller_info: &CallerInfo,
+    caller_identity: &CallerPopIdentity,
     relay_url: &str,
 ) -> bifrost_core::Result<()> {
     let pending_transport = PendingCallerTransport::generate()?;
@@ -2046,6 +2284,7 @@ async fn handle_connect(
         &StartPairingRequest {
             pair_code: pair_code.to_string(),
             caller_info: caller_info.clone(),
+            caller_pubkey: pop::caller_pubkey_b64(&caller_identity.key_pair),
             caller_ephemeral_pub: pending_transport.caller_ephemeral_pub.clone(),
         },
     )
@@ -2056,30 +2295,45 @@ async fn handle_connect(
         "⏳ Waiting for approval on the remote device...".bright_yellow()
     );
 
-    let approval = caller.watch_pairing(&pairing_result.pairing_id).await?;
+    let approval = caller
+        .watch_pairing(&pairing_result.pairing_id, &pairing_result.watch_token)
+        .await?;
 
     match approval.status.as_str() {
         "approved" => {
-            let grant_id = approval.grant_id.unwrap_or_else(|| "unknown".to_string());
-            let client_instance_id = approval.client_instance_id.unwrap_or_default();
-            let device_name = approval
-                .device_name
-                .unwrap_or_else(|| "unknown".to_string());
-            let platform = approval.platform.unwrap_or_else(|| "unknown".to_string());
-            let grant_mode = approval.grant_mode.unwrap_or_else(|| "unknown".to_string());
-            let client_ephemeral_pub = approval.client_ephemeral_pub.as_deref().ok_or_else(|| {
-                BifrostError::Config(
-                    "pairing succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
-                )
+            let claim_token = approval.claim_token.as_deref().ok_or_else(|| {
+                BifrostError::Config("pairing approved without claim_token".to_string())
             })?;
-            let transport = pending_transport.finalize(client_ephemeral_pub)?;
+            let grant = caller
+                .claim_grant(
+                    &pairing_result.client_instance_id,
+                    pair_code,
+                    claim_token,
+                    pending_transport,
+                    caller_identity,
+                )
+                .await?;
+            let device_name =
+                remote_client_short_id(&pairing_result.client_instance_id).to_string();
+            let short_id = remote_client_short_id(&pairing_result.client_instance_id);
+            let platform = "unknown".to_string();
+            let grant_mode = grant
+                .grant_summary
+                .as_ref()
+                .and_then(|summary| summary.mode.clone())
+                .unwrap_or_else(|| "unknown".to_string());
+            let grant_session_token = grant
+                .grant_session_token
+                .as_deref()
+                .map(encrypt_grant_session_token)
+                .transpose()?;
 
             let new_conn = LocalConnection {
-                client_instance_id: client_instance_id.clone(),
+                client_instance_id: pairing_result.client_instance_id.clone(),
                 device_name: device_name.clone(),
                 platform: platform.clone(),
                 relay_url: relay_url.to_string(),
-                grant_id: grant_id.clone(),
+                grant_id: String::new(),
                 grant_mode,
                 caller_fingerprint: caller_info.fingerprint.clone(),
                 connected_at: std::time::SystemTime::now()
@@ -2091,23 +2345,22 @@ async fn handle_connect(
                 ssh_key_source: None,
                 device_code: None,
                 transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-                caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
-                client_ephemeral_pub: Some(transport.client_ephemeral_pub),
-                shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+                caller_ephemeral_pub: grant.caller_ephemeral_pub,
+                client_ephemeral_pub: grant.client_ephemeral_pub,
+                shared_secret_encrypted: grant.shared_secret_encrypted,
+                grant_session_token,
+                grant_session_expires_at: grant.expires_at,
             };
 
             let mut connections = load_connections().unwrap_or_default();
             upsert_local_connection(&mut connections, new_conn);
             save_connections(&connections)?;
 
-            let short_id = &client_instance_id[..client_instance_id.len().min(12)];
             println!(
                 "{}",
-                format!(
-                    "✓ Connected! Authorization granted (grant: {})",
-                    &grant_id[..grant_id.len().min(8)]
-                )
-                .bright_green()
+                "✓ Connected! Authorization granted."
+                    .to_string()
+                    .bright_green()
             );
             println!(
                 "{}",
@@ -2148,6 +2401,7 @@ async fn handle_connect_with_ssh(
     ssh_key: &str,
     device_code_override: Option<&str>,
     caller_info: &CallerInfo,
+    caller_identity: &CallerPopIdentity,
     relay_url: &str,
 ) -> bifrost_core::Result<()> {
     let pending_transport = PendingCallerTransport::generate()?;
@@ -2197,22 +2451,81 @@ async fn handle_connect_with_ssh(
 
     match result.status.as_str() {
         "approved" => {
-            let grant_id = result.grant_id.unwrap_or_else(|| "unknown".to_string());
-            let client_instance_id = result.client_instance_id.ok_or_else(|| {
+            let grant_id = result
+                .grant_id
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let client_instance_id = result.client_instance_id.clone().ok_or_else(|| {
                 BifrostError::Config(
                     "ssh connect succeeded but relay did not return client_instance_id".to_string(),
                 )
             })?;
-            let grant_mode = result.grant_mode.unwrap_or_else(|| "permanent".to_string());
+            let grant_mode = result
+                .grant_mode
+                .clone()
+                .unwrap_or_else(|| "once".to_string());
             let caller_fingerprint = result
                 .caller_fingerprint
+                .clone()
                 .unwrap_or_else(|| caller_info.fingerprint.clone());
-            let client_ephemeral_pub = result.client_ephemeral_pub.as_deref().ok_or_else(|| {
-                BifrostError::Config(
-                    "ssh connect succeeded but relay did not return client_ephemeral_pub required for encrypted remote commands".to_string(),
-                )
-            })?;
-            let transport = pending_transport.finalize(client_ephemeral_pub)?;
+
+            // P0-3: prefer single-use claim_token exchanged for a real grant_session_token via PoP.
+            let (grant_session_token_plain, grant_session_expires_at, transport) =
+                if let Some(claim_token) = result.claim_token.as_deref() {
+                    let redeemed = caller
+                        .redeem_ssh_claim(
+                            &client_instance_id,
+                            claim_token,
+                            pending_transport,
+                            caller_identity,
+                        )
+                        .await?;
+                    let transport_finalized = redeemed
+                        .client_ephemeral_pub
+                        .as_deref()
+                        .and_then(|client_eph| {
+                            redeemed.caller_ephemeral_pub.as_deref().map(|caller_eph| {
+                                StoredTransportContext {
+                                    caller_ephemeral_pub: caller_eph.to_string(),
+                                    client_ephemeral_pub: client_eph.to_string(),
+                                    shared_secret_encrypted: redeemed
+                                        .shared_secret_encrypted
+                                        .clone()
+                                        .unwrap_or_default(),
+                                }
+                            })
+                        })
+                        .ok_or_else(|| {
+                            BifrostError::Network(
+                                "redeem_ssh_claim response missing transport context".to_string(),
+                            )
+                        })?;
+                    (
+                        redeemed.grant_session_token,
+                        redeemed.expires_at,
+                        transport_finalized,
+                    )
+                } else {
+                    // Legacy path (should not occur after P0-3 server changes).
+                    let client_ephemeral_pub =
+                        result.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                            BifrostError::Config(
+                            "ssh connect succeeded but relay did not return client_ephemeral_pub"
+                                .to_string(),
+                        )
+                        })?;
+                    let t = pending_transport.finalize(client_ephemeral_pub)?;
+                    (
+                        result.grant_session_token.clone(),
+                        result.grant_session_expires_at.clone(),
+                        t,
+                    )
+                };
+
+            let grant_session_token = grant_session_token_plain
+                .as_deref()
+                .map(encrypt_grant_session_token)
+                .transpose()?;
 
             let new_conn = LocalConnection {
                 client_instance_id: client_instance_id.clone(),
@@ -2231,6 +2544,8 @@ async fn handle_connect_with_ssh(
                 caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
                 client_ephemeral_pub: Some(transport.client_ephemeral_pub),
                 shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+                grant_session_token,
+                grant_session_expires_at,
             };
 
             let mut connections = load_connections().unwrap_or_default();
@@ -2325,17 +2640,17 @@ fn start_pairing_overload_error() -> BifrostError {
 async fn handle_disconnect(
     caller: &CallerRelayClient,
     connections: &[LocalConnection],
+    caller_identity: &CallerPopIdentity,
     client_id: Option<&str>,
     all: bool,
     grant_id: Option<&str>,
 ) -> bifrost_core::Result<()> {
     if let Some(gid) = grant_id {
-        let caller_fingerprint = connections
+        let conn = connections
             .iter()
             .find(|conn| conn.grant_id == gid)
-            .map(|conn| conn.caller_fingerprint.as_str())
-            .unwrap_or("");
-        let outcome = caller.delete_grant(gid, caller_fingerprint).await?;
+            .ok_or_else(|| BifrostError::Config(format!("no saved connection for grant {gid}")))?;
+        let outcome = caller.delete_grant(conn, caller_identity).await?;
         let mut conns = connections.to_vec();
         conns.retain(|c| c.grant_id != gid);
         save_connections(&conns)?;
@@ -2371,13 +2686,7 @@ async fn handle_disconnect(
 
         for (i, conn) in connections.iter().enumerate() {
             let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
-            match revoke_all_matching_grants(
-                caller,
-                &conn.client_instance_id,
-                &conn.caller_fingerprint,
-            )
-            .await
-            {
+            match revoke_saved_connection(caller, conn, caller_identity).await {
                 Ok(_revoked) => {
                     deleted += 1;
                     to_remove.push(i);
@@ -2415,7 +2724,7 @@ async fn handle_disconnect(
     let conn = resolve_local_connection(connections, client_id)?;
     let short_id = &conn.grant_id[..conn.grant_id.len().min(12)];
 
-    revoke_all_matching_grants(caller, &conn.client_instance_id, &conn.caller_fingerprint).await?;
+    revoke_saved_connection(caller, &conn, caller_identity).await?;
 
     let mut conns = connections.to_vec();
     conns.retain(|c| {
@@ -2434,40 +2743,14 @@ async fn handle_disconnect(
     Ok(())
 }
 
-async fn revoke_all_matching_grants(
+async fn revoke_saved_connection(
     caller: &CallerRelayClient,
-    client_instance_id: &str,
-    caller_fingerprint: &str,
+    conn: &LocalConnection,
+    caller_identity: &CallerPopIdentity,
 ) -> bifrost_core::Result<usize> {
-    let mut revoked = 0usize;
-    let mut seen = HashSet::new();
-
-    loop {
-        let grant = caller
-            .find_reusable_grant(client_instance_id, caller_fingerprint)
-            .await?;
-        let Some(grant) = grant else {
-            break;
-        };
-
-        if !seen.insert(grant.grant_id.clone()) {
-            return Err(BifrostError::Config(
-                "relay reusable grant lookup returned the same grant repeatedly during disconnect cleanup"
-                    .to_string(),
-            ));
-        }
-
-        match caller
-            .delete_grant(&grant.grant_id, caller_fingerprint)
-            .await?
-        {
-            DeleteGrantOutcome::Deleted | DeleteGrantOutcome::AlreadyMissing => {
-                revoked += 1;
-            }
-        }
+    match caller.delete_grant(conn, caller_identity).await? {
+        DeleteGrantOutcome::Deleted | DeleteGrantOutcome::AlreadyMissing => Ok(1),
     }
-
-    Ok(revoked)
 }
 
 #[cfg(test)]
@@ -2628,7 +2911,7 @@ async fn open_and_wait_remote_command(
     caller: &CallerRelayClient,
     conn: &LocalConnection,
     grant: &GrantInfo,
-    caller_fingerprint: &str,
+    caller_identity: &CallerPopIdentity,
     transport: &OpenCallTransportContext,
     command: &BuiltRemoteCommand,
     timeout_secs: u64,
@@ -2643,21 +2926,40 @@ async fn open_and_wait_remote_command(
         &grant.grant_id,
         transport,
     )?;
-    let call_result = caller
-        .open_call(&OpenCallRequest {
-            grant_id: grant.grant_id.clone(),
-            client_instance_id: conn.client_instance_id.clone(),
-            caller_fingerprint: caller_fingerprint.to_string(),
-            command_summary,
-            command_kind: command.kind,
-            command_encrypted,
-            pty_enabled: command
-                .shell_exec
-                .as_ref()
-                .and_then(|payload| payload.pty.as_ref())
-                .map(|pty| pty.enabled),
-        })
-        .await?;
+    let open_request = OpenCallRequest {
+        client_instance_id: conn.client_instance_id.clone(),
+        command_summary,
+        command_kind: command.kind,
+        command_encrypted,
+        pty_enabled: command
+            .shell_exec
+            .as_ref()
+            .and_then(|payload| payload.pty.as_ref())
+            .map(|pty| pty.enabled),
+    };
+    let grant_session_token = decrypt_grant_session_token(conn)?;
+    let mut call_result = caller
+        .open_call(&open_request, &grant_session_token, caller_identity)
+        .await;
+    if let Err(err) = &call_result {
+        if is_grant_session_token_invalid_error(err) {
+            debug!(
+                "saved v5 grant session token was rejected in helper path; refreshing and retrying open_call once"
+            );
+            let refreshed = caller
+                .find_reusable_grant(&conn.client_instance_id, caller_identity, Some(conn))
+                .await?;
+            if let Some(refreshed) = refreshed {
+                let mut refreshed_conn = conn.clone();
+                reconcile_reusable_grant_for_transport(&mut refreshed_conn, refreshed)?;
+                let refreshed_token = decrypt_grant_session_token(&refreshed_conn)?;
+                call_result = caller
+                    .open_call(&open_request, &refreshed_token, caller_identity)
+                    .await;
+            }
+        }
+    }
+    let call_result = call_result?;
     caller
         .subscribe_call_events(
             &call_result.call_id,
@@ -2673,7 +2975,7 @@ async fn run_remote_file_command_or_fail(
     caller: &CallerRelayClient,
     conn: &LocalConnection,
     grant: &GrantInfo,
-    caller_fingerprint: &str,
+    caller_identity: &CallerPopIdentity,
     transport: &OpenCallTransportContext,
     command: &BuiltRemoteCommand,
     phase: &str,
@@ -2682,7 +2984,7 @@ async fn run_remote_file_command_or_fail(
         caller,
         conn,
         grant,
-        caller_fingerprint,
+        caller_identity,
         transport,
         command,
         CALL_EVENT_TIMEOUT_SECS,
@@ -2701,7 +3003,7 @@ async fn prepare_remote_run_script(
     caller: &CallerRelayClient,
     conn: &LocalConnection,
     grant: &GrantInfo,
-    caller_fingerprint: &str,
+    caller_identity: &CallerPopIdentity,
     transport: &OpenCallTransportContext,
     run_args: &RemoteRunArgs,
 ) -> bifrost_core::Result<String> {
@@ -2718,7 +3020,7 @@ async fn prepare_remote_run_script(
         caller,
         conn,
         grant,
-        caller_fingerprint,
+        caller_identity,
         transport,
         &scratch_command,
         "creating the remote scratch directory",
@@ -2740,7 +3042,7 @@ async fn prepare_remote_run_script(
         caller,
         conn,
         grant,
-        caller_fingerprint,
+        caller_identity,
         transport,
         &write_command,
         "uploading the local script",
@@ -2753,7 +3055,7 @@ async fn cleanup_remote_run_script(
     caller: &CallerRelayClient,
     conn: &LocalConnection,
     grant: &GrantInfo,
-    caller_fingerprint: &str,
+    caller_identity: &CallerPopIdentity,
     transport: &OpenCallTransportContext,
     cwd: Option<String>,
     remote_path: &str,
@@ -2770,7 +3072,7 @@ async fn cleanup_remote_run_script(
         caller,
         conn,
         grant,
-        caller_fingerprint,
+        caller_identity,
         transport,
         &delete_command,
         CALL_EVENT_TIMEOUT_SECS,
@@ -4943,6 +5245,7 @@ fn render_file_patch_human(value: &Value) {
 struct CallerRelayClient {
     http: reqwest::Client,
     base_url: String,
+    relay_headers: HeaderMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4954,6 +5257,8 @@ enum DeleteGrantOutcome {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct CallerInfo {
     fingerprint: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_pubkey: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5012,12 +5317,15 @@ fn get_os_version() -> Option<String> {
 struct StartPairingRequest {
     pair_code: String,
     caller_info: CallerInfo,
+    caller_pubkey: String,
     caller_ephemeral_pub: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StartPairingResponse {
     pairing_id: String,
+    watch_token: String,
+    client_instance_id: String,
     #[serde(default)]
     approval_sse_url: Option<String>,
 }
@@ -5026,19 +5334,11 @@ struct StartPairingResponse {
 struct PairingWatchResult {
     status: String,
     #[serde(default)]
-    grant_id: Option<String>,
+    claim_token: Option<String>,
     #[serde(default)]
-    client_instance_id: Option<String>,
+    claim_expires_at: Option<String>,
     #[serde(default)]
-    device_name: Option<String>,
-    #[serde(default)]
-    platform: Option<String>,
-    #[serde(default)]
-    grant_mode: Option<String>,
-    #[serde(default)]
-    caller_ephemeral_pub: Option<String>,
-    #[serde(default)]
-    client_ephemeral_pub: Option<String>,
+    grant_summary: Option<GrantSummary>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5091,8 +5391,19 @@ struct SshConnectResult {
     caller_ephemeral_pub: Option<String>,
     #[serde(default)]
     client_ephemeral_pub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_secret_encrypted: Option<String>,
+    #[serde(default)]
+    grant_session_token: Option<String>,
+    #[serde(default)]
+    grant_session_expires_at: Option<String>,
+    #[serde(default)]
+    grant_summary: Option<GrantSummary>,
+    #[serde(default)]
+    claim_token: Option<String>,
+    #[serde(default)]
+    claim_expires_at: Option<String>,
 }
-
 struct LoadedSshKey {
     key_pair: Ed25519KeyPair,
     device_code: String,
@@ -5102,20 +5413,39 @@ struct LoadedSshKey {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GrantInfo {
+    #[serde(default)]
     grant_id: String,
     #[serde(default)]
     status: String,
     #[serde(default)]
+    grant_session_token: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    grant_summary: Option<GrantSummary>,
+    #[serde(default)]
     caller_ephemeral_pub: Option<String>,
+    #[serde(default)]
+    client_ephemeral_pub: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared_secret_encrypted: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GrantSummary {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
+    file_access: Option<String>,
     #[serde(default)]
     client_ephemeral_pub: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenCallRequest {
-    grant_id: String,
     client_instance_id: String,
-    caller_fingerprint: String,
     command_summary: OpenCallCommandSummary,
     command_kind: CommandKind,
     command_encrypted: EncryptedPayload,
@@ -5187,27 +5517,49 @@ impl CallerRelayClient {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build caller http client");
+        let relay_headers = remote_relay_headers_from_env().unwrap_or_else(|error| {
+            warn!(
+                env = REMOTE_RELAY_HEADERS_ENV,
+                error = %error,
+                "ignoring invalid remote relay header configuration"
+            );
+            HeaderMap::new()
+        });
 
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
+            relay_headers,
         }
+    }
+
+    fn post(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.post(url), &self.relay_headers)
+    }
+
+    fn sse_get(&self, client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(client.get(url), &self.relay_headers)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::CACHE_CONTROL, "no-transform")
     }
 
     async fn delete_grant(
         &self,
-        grant_id: &str,
-        caller_fingerprint: &str,
+        conn: &LocalConnection,
+        caller_identity: &CallerPopIdentity,
     ) -> bifrost_core::Result<DeleteGrantOutcome> {
-        let url = format!(
-            "{}/v4/remote-invoke/grants/{}?caller_fingerprint={}",
-            self.base_url,
-            grant_id,
-            urlencoding::encode(caller_fingerprint),
-        );
+        let token = decrypt_grant_session_token(conn)?;
+        let url = format!("{}/v5/remote-invoke/grants/revoke", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::json!({
+                "client_instance_id": conn.client_instance_id,
+            }),
+            &caller_identity.key_pair,
+        )?;
         let response = self
-            .http
-            .delete(&url)
+            .post(&url)
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&body)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("delete grant failed: {e}")))?;
@@ -5232,21 +5584,49 @@ impl CallerRelayClient {
     async fn find_reusable_grant(
         &self,
         client_instance_id: &str,
-        caller_fingerprint: &str,
+        caller_identity: &CallerPopIdentity,
+        saved_connection: Option<&LocalConnection>,
     ) -> bifrost_core::Result<Option<GrantInfo>> {
-        let url = format!(
-            "{}/v4/remote-invoke/grants/reusable?client_instance_id={}&caller_fingerprint={}",
-            self.base_url,
-            urlencoding::encode(client_instance_id),
-            urlencoding::encode(caller_fingerprint),
-        );
+        let pending_transport = if saved_connection.is_some() {
+            None
+        } else {
+            Some(PendingCallerTransport::generate()?)
+        };
+        let caller_ephemeral_pub = saved_connection
+            .and_then(|conn| conn.caller_ephemeral_pub.clone())
+            .or_else(|| pending_transport.as_ref().map(|t| t.caller_ephemeral_pub.clone()))
+            .ok_or_else(|| {
+                BifrostError::Config(
+                    "saved connection is missing caller_ephemeral_pub; reconnect to refresh authorization"
+                        .to_string(),
+                )
+            })?;
+        let url = format!("{}/v5/remote-invoke/grants/lookup", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::json!({
+                "client_instance_id": client_instance_id,
+                "caller_ephemeral_pub": caller_ephemeral_pub,
+            }),
+            &caller_identity.key_pair,
+        )?;
 
         let response = self
-            .http
-            .get(&url)
+            .post(&url)
+            .json(&body)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("find reusable grant failed: {e}")))?;
+
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            let body = response.text().await.unwrap_or_default();
+            if body.contains("grant_not_found") {
+                return Ok(None);
+            }
+            return Err(BifrostError::Network(format!(
+                "find_reusable_grant failed with status 404: {}",
+                truncate(&body, 500)
+            )));
+        }
 
         let data: Value = self
             .parse_response_data(response, "find_reusable_grant")
@@ -5254,11 +5634,61 @@ impl CallerRelayClient {
         if data.is_null() {
             return Ok(None);
         }
-        let grant: GrantInfo = serde_json::from_value(data)
-            .map_err(|e| BifrostError::Network(format!("parse grant failed: {e}")))?;
-        if grant.grant_id.is_empty() {
-            return Ok(None);
-        }
+        let session: GrantInfo = serde_json::from_value(data)
+            .map_err(|e| BifrostError::Network(format!("parse grant session failed: {e}")))?;
+        let client_ephemeral_pub = session
+            .grant_summary
+            .as_ref()
+            .and_then(|summary| summary.client_ephemeral_pub.as_deref())
+            .or(session.client_ephemeral_pub.as_deref())
+            .ok_or_else(|| {
+                BifrostError::Network(
+                    "find_reusable_grant response missing client_ephemeral_pub".to_string(),
+                )
+            })?;
+        let transport = if let Some(conn) = saved_connection {
+            let saved_client_pub = conn.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                BifrostError::Config(
+                    "saved connection is missing client_ephemeral_pub; reconnect to refresh authorization"
+                        .to_string(),
+                )
+            })?;
+            if saved_client_pub != client_ephemeral_pub {
+                return Err(BifrostError::Config(
+                    "relay grant client_ephemeral_pub does not match saved encrypted transport context; reconnect required"
+                        .to_string(),
+                ));
+            }
+            StoredTransportContext {
+                caller_ephemeral_pub: conn.caller_ephemeral_pub.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "saved connection is missing caller_ephemeral_pub; reconnect to refresh authorization"
+                            .to_string(),
+                    )
+                })?,
+                client_ephemeral_pub: saved_client_pub.to_string(),
+                shared_secret_encrypted: conn.shared_secret_encrypted.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "saved connection is missing encrypted transport secret; reconnect to refresh authorization"
+                            .to_string(),
+                    )
+                })?,
+            }
+        } else {
+            pending_transport
+                .expect("pending transport exists without saved connection")
+                .finalize(client_ephemeral_pub)?
+        };
+        let grant = GrantInfo {
+            grant_id: String::new(),
+            status: "active".to_string(),
+            grant_session_token: session.grant_session_token,
+            expires_at: session.expires_at,
+            grant_summary: session.grant_summary,
+            caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+            client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+            shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+        };
         Ok(Some(grant))
     }
 
@@ -5266,9 +5696,8 @@ impl CallerRelayClient {
         &self,
         req: &StartPairingRequest,
     ) -> bifrost_core::Result<StartPairingResponse> {
-        let url = format!("{}/v4/remote-invoke/pairings/start", self.base_url);
+        let url = format!("{}/v5/remote-invoke/pairings/start", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(req)
             .send()
@@ -5278,19 +5707,25 @@ impl CallerRelayClient {
         self.parse_response_typed(response, "start_pairing").await
     }
 
-    async fn watch_pairing(&self, pairing_id: &str) -> bifrost_core::Result<PairingWatchResult> {
+    async fn watch_pairing(
+        &self,
+        pairing_id: &str,
+        watch_token: &str,
+    ) -> bifrost_core::Result<PairingWatchResult> {
         let url = format!(
-            "{}/v4/remote-invoke/pairings/{}/watch",
-            self.base_url, pairing_id
+            "{}/v5/remote-invoke/pairings/{}/watch?watch_token={}",
+            self.base_url,
+            pairing_id,
+            urlencoding::encode(watch_token),
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("watch pairing failed: {e}")))?;
@@ -5334,41 +5769,26 @@ impl CallerRelayClient {
                                                 if let Ok(v) = serde_json::from_str::<Value>(&data_buf) {
                                                     let status = v.get("status")
                                                         .or_else(|| v.get("decision"))
+                                                        .or_else(|| v.get("type"))
                                                         .and_then(|s| s.as_str())
                                                         .unwrap_or(&event_name)
                                                         .to_string();
-                                                    let grant_id = v.get("grant_id")
+                                                    let claim_token = v.get("claim_token")
                                                         .and_then(|g| g.as_str())
                                                         .map(|s| s.to_string());
-                                                    let client_instance_id = v.get("client_instance_id")
+                                                    let claim_expires_at = v.get("claim_expires_at")
                                                         .and_then(|g| g.as_str())
                                                         .map(|s| s.to_string());
-                                                    let device_name = v.get("device_name")
-                                                        .and_then(|g| g.as_str())
-                                                        .map(|s| s.to_string());
-                                                    let platform = v.get("platform")
-                                                        .and_then(|g| g.as_str())
-                                                        .map(|s| s.to_string());
-                                                    let grant_mode = v.get("grant_mode")
-                                                        .and_then(|g| g.as_str())
-                                                        .map(|s| s.to_string());
-                                                    let caller_ephemeral_pub = v.get("caller_ephemeral_pub")
-                                                        .and_then(|g| g.as_str())
-                                                        .map(|s| s.to_string());
-                                                    let client_ephemeral_pub = v.get("client_ephemeral_pub")
-                                                        .and_then(|g| g.as_str())
-                                                        .map(|s| s.to_string());
+                                                    let grant_summary = v.get("grant_summary")
+                                                        .cloned()
+                                                        .and_then(|summary| serde_json::from_value(summary).ok());
 
                                                     if status == "approved" || status == "rejected" || status == "expired" || status == "cancelled" {
                                                         return Ok(PairingWatchResult {
                                                             status,
-                                                            grant_id,
-                                                            client_instance_id,
-                                                            device_name,
-                                                            platform,
-                                                            grant_mode,
-                                                            caller_ephemeral_pub,
-                                                            client_ephemeral_pub,
+                                                            claim_token,
+                                                            claim_expires_at,
+                                                            grant_summary,
                                                         });
                                                     }
                                                 }
@@ -5400,12 +5820,121 @@ impl CallerRelayClient {
         }
     }
 
-    async fn open_call(&self, req: &OpenCallRequest) -> bifrost_core::Result<OpenCallResponse> {
-        let url = format!("{}/v4/remote-invoke/calls/open", self.base_url);
+    async fn claim_grant(
+        &self,
+        client_instance_id: &str,
+        pair_code: &str,
+        claim_token: &str,
+        pending_transport: PendingCallerTransport,
+        caller_identity: &CallerPopIdentity,
+    ) -> bifrost_core::Result<GrantInfo> {
+        let url = format!("{}/v5/remote-invoke/grants/claim", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::json!({
+                "client_instance_id": client_instance_id,
+                "pair_code": pair_code,
+                "claim_token": claim_token,
+                "caller_ephemeral_pub": pending_transport.caller_ephemeral_pub.clone(),
+            }),
+            &caller_identity.key_pair,
+        )?;
         let response = self
-            .http
             .post(&url)
-            .json(req)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("claim grant failed: {e}")))?;
+        let data: Value = self.parse_response_data(response, "claim_grant").await?;
+        let session: GrantInfo = serde_json::from_value(data)
+            .map_err(|e| BifrostError::Network(format!("parse grant claim failed: {e}")))?;
+        let client_ephemeral_pub = session
+            .grant_summary
+            .as_ref()
+            .and_then(|summary| summary.client_ephemeral_pub.as_deref())
+            .ok_or_else(|| {
+                BifrostError::Network(
+                    "claim_grant response missing client_ephemeral_pub".to_string(),
+                )
+            })?;
+        let transport = pending_transport.finalize(client_ephemeral_pub)?;
+        Ok(GrantInfo {
+            grant_id: String::new(),
+            status: "active".to_string(),
+            grant_session_token: session.grant_session_token,
+            expires_at: session.expires_at,
+            grant_summary: session.grant_summary,
+            caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+            client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+            shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+        })
+    }
+
+    async fn redeem_ssh_claim(
+        &self,
+        client_instance_id: &str,
+        claim_token: &str,
+        pending_transport: PendingCallerTransport,
+        caller_identity: &CallerPopIdentity,
+    ) -> bifrost_core::Result<GrantInfo> {
+        let url = format!("{}/v5/remote-invoke/grants/ssh-claim", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::json!({
+                "client_instance_id": client_instance_id,
+                "claim_token": claim_token,
+                "caller_ephemeral_pub": pending_transport.caller_ephemeral_pub.clone(),
+            }),
+            &caller_identity.key_pair,
+        )?;
+        let response = self
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| BifrostError::Network(format!("redeem ssh claim failed: {e}")))?;
+        let data: Value = self
+            .parse_response_data(response, "redeem_ssh_claim")
+            .await?;
+        let session: GrantInfo = serde_json::from_value(data)
+            .map_err(|e| BifrostError::Network(format!("parse ssh claim response failed: {e}")))?;
+        let client_ephemeral_pub = session
+            .grant_summary
+            .as_ref()
+            .and_then(|summary| summary.client_ephemeral_pub.as_deref())
+            .ok_or_else(|| {
+                BifrostError::Network(
+                    "redeem_ssh_claim response missing client_ephemeral_pub".to_string(),
+                )
+            })?;
+        let transport = pending_transport.finalize(client_ephemeral_pub)?;
+        Ok(GrantInfo {
+            grant_id: String::new(),
+            status: "active".to_string(),
+            grant_session_token: session.grant_session_token,
+            expires_at: session.expires_at,
+            grant_summary: session.grant_summary,
+            caller_ephemeral_pub: Some(transport.caller_ephemeral_pub),
+            client_ephemeral_pub: Some(transport.client_ephemeral_pub),
+            shared_secret_encrypted: Some(transport.shared_secret_encrypted),
+        })
+    }
+
+    async fn open_call(
+        &self,
+        req: &OpenCallRequest,
+        grant_session_token: &str,
+        caller_identity: &CallerPopIdentity,
+    ) -> bifrost_core::Result<OpenCallResponse> {
+        let url = format!("{}/v5/remote-invoke/calls/open", self.base_url);
+        let body = pop::sign_envelope(
+            serde_json::to_value(req).map_err(|e| {
+                BifrostError::Config(format!("serialize open_call body failed: {e}"))
+            })?,
+            &caller_identity.key_pair,
+        )?;
+        let response = self
+            .post(&url)
+            .header("Authorization", format!("Bearer {grant_session_token}"))
+            .json(&body)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("open call failed: {e}")))?;
@@ -5419,7 +5948,6 @@ impl CallerRelayClient {
             self.base_url, call_id
         );
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
@@ -5438,7 +5966,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<()> {
         let url = format!("{}/v4/remote-invoke/calls/{}/input", self.base_url, call_id);
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .json(&serde_json::json!({ "envelope_json": envelope_json }))
@@ -5458,7 +5985,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<SshChallengeResponse> {
         let url = format!("{}/v4/remote-invoke/ssh/challenge", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(&SshChallengeRequest {
                 device_code: device_code.to_string(),
@@ -5476,7 +6002,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<SshConnectResponse> {
         let url = format!("{}/v4/remote-invoke/ssh/connect", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(req)
             .send()
@@ -5496,13 +6021,13 @@ impl CallerRelayClient {
             self.base_url, connect_id
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build ssh connect sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -5586,13 +6111,13 @@ impl CallerRelayClient {
             self.base_url, call_id
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build call events sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -5860,12 +6385,12 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/events",
             self.base_url, call_id
         );
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -6008,15 +6533,15 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/status",
             self.base_url, call_id
         );
-        let http = direct_reqwest_client_builder()
+        let http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build job status client: {e}")))?;
         let deadline = tokio::time::Instant::now() + wait;
 
         loop {
-            let response = http
-                .get(&url)
+            let response = self
+                .sse_get(&http, &url)
                 .header("Authorization", format!("Bearer {relay_token}"))
                 .send()
                 .await
@@ -6753,6 +7278,14 @@ mod tests {
         bifrost_storage::set_data_dir(dir.path().to_path_buf());
     }
 
+    fn with_test_data_dir_lock<T>(f: impl FnOnce() -> T) -> T {
+        let _async_guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.blocking_lock();
+        let _guard = REMOTE_TEST_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        f()
+    }
+
     fn with_remote_ssh_key_env<T>(value: Option<&str>, f: impl FnOnce() -> T) -> T {
         static ENV_LOCK: Mutex<()> = Mutex::new(());
         let _guard = ENV_LOCK.lock().expect("lock env");
@@ -6794,7 +7327,9 @@ mod tests {
             transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
             caller_ephemeral_pub: Some("caller-epk".to_string()),
             client_ephemeral_pub: Some("client-epk".to_string()),
-            shared_secret_encrypted: Some("secret".to_string()),
+            shared_secret_encrypted: None,
+            grant_session_token: None,
+            grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
         }
     }
 
@@ -7826,13 +8361,15 @@ mod tests {
 
     #[test]
     fn test_encrypt_local_secret_roundtrip() {
-        init_test_data_dir();
-        let plaintext = b"shared-secret-test";
+        with_test_data_dir_lock(|| {
+            init_test_data_dir();
+            let plaintext = b"shared-secret-test";
 
-        let encrypted = encrypt_local_secret(plaintext).expect("encrypt local secret");
-        let decrypted = decrypt_local_secret(&encrypted).expect("decrypt local secret");
+            let encrypted = encrypt_local_secret(plaintext).expect("encrypt local secret");
+            let decrypted = decrypt_local_secret(&encrypted).expect("decrypt local secret");
 
-        assert_eq!(decrypted, plaintext);
+            assert_eq!(decrypted, plaintext);
+        });
     }
 
     #[test]
@@ -7938,9 +8475,7 @@ mod tests {
     #[test]
     fn test_open_call_request_serialization_omits_plaintext_command_fields() {
         let request = OpenCallRequest {
-            grant_id: "grant-1".to_string(),
             client_instance_id: "client-1".to_string(),
-            caller_fingerprint: "fp-1".to_string(),
             command_summary: OpenCallCommandSummary {
                 command_preview: "traffic.get".to_string(),
                 masked_args_json: Some(
@@ -7961,6 +8496,8 @@ mod tests {
         let json = serde_json::to_value(&request).expect("serialize request");
         assert_eq!(json["command_kind"], "query.readonly");
         assert!(json.get("command_encrypted").is_some());
+        assert!(json.get("grant_id").is_none());
+        assert!(json.get("caller_fingerprint").is_none());
         assert!(json.get("command").is_none());
         assert_eq!(json["command_summary"]["command_preview"], "traffic.get");
         assert_eq!(
@@ -8009,12 +8546,18 @@ mod tests {
             caller_ephemeral_pub: Some("caller-epk".to_string()),
             client_ephemeral_pub: Some("client-epk".to_string()),
             shared_secret_encrypted: None,
+            grant_session_token: None,
+            grant_session_expires_at: None,
         };
         let grant = GrantInfo {
             grant_id: "grant-1".to_string(),
             status: "active".to_string(),
+            grant_session_token: None,
+            expires_at: None,
+            grant_summary: None,
             caller_ephemeral_pub: None,
             client_ephemeral_pub: None,
+            shared_secret_encrypted: None,
         };
 
         let err = merge_transport_context(&conn, &grant).expect_err("should require shared secret");
@@ -8025,81 +8568,14 @@ mod tests {
 
     #[test]
     fn test_reconcile_reusable_grant_updates_saved_grant_when_transport_matches() {
-        let mut conn = LocalConnection {
-            client_instance_id: "client-1".to_string(),
-            device_name: "device".to_string(),
-            platform: "macos".to_string(),
-            relay_url: "https://relay".to_string(),
-            grant_id: "saved-grant".to_string(),
-            grant_mode: "permanent".to_string(),
-            caller_fingerprint: "fp-1".to_string(),
-            connected_at: 1,
-            auth_method: Some("pair_code".to_string()),
-            ssh_key_fingerprint: None,
-            ssh_key_source: None,
-            device_code: None,
-            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
-            client_ephemeral_pub: Some("saved-client-epk".to_string()),
-            shared_secret_encrypted: Some("secret".to_string()),
-        };
-        let relay_grant = GrantInfo {
-            grant_id: "relay-grant".to_string(),
-            status: "active".to_string(),
-            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
-            client_ephemeral_pub: Some("saved-client-epk".to_string()),
-        };
-
-        let preferred = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
-            .expect("matching transport should reconcile");
-
-        assert_eq!(preferred.grant_id, "relay-grant");
-        assert_eq!(conn.grant_id, "relay-grant");
-    }
-
-    #[test]
-    fn test_reconcile_reusable_grant_rejects_transport_mismatch() {
-        let mut conn = LocalConnection {
-            client_instance_id: "client-1".to_string(),
-            device_name: "device".to_string(),
-            platform: "macos".to_string(),
-            relay_url: "https://relay".to_string(),
-            grant_id: "saved-grant".to_string(),
-            grant_mode: "permanent".to_string(),
-            caller_fingerprint: "fp-1".to_string(),
-            connected_at: 1,
-            auth_method: Some("pair_code".to_string()),
-            ssh_key_fingerprint: None,
-            ssh_key_source: None,
-            device_code: None,
-            transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-            caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
-            client_ephemeral_pub: Some("saved-client-epk".to_string()),
-            shared_secret_encrypted: Some("secret".to_string()),
-        };
-        let relay_grant = GrantInfo {
-            grant_id: "relay-grant".to_string(),
-            status: "active".to_string(),
-            caller_ephemeral_pub: Some("relay-caller-epk".to_string()),
-            client_ephemeral_pub: Some("saved-client-epk".to_string()),
-        };
-
-        let err = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
-            .expect_err("mismatched transport should require reconnect");
-        assert!(err
-            .to_string()
-            .contains("saved connection transport no longer matches relay reusable authorization"));
-    }
-
-    #[test]
-    fn test_upsert_local_connection_replaces_duplicate_client_entries() {
-        let mut connections = vec![
-            LocalConnection {
+        with_test_data_dir_lock(|| {
+            init_test_data_dir();
+            let mut conn = LocalConnection {
                 client_instance_id: "client-1".to_string(),
-                device_name: "old".to_string(),
+                device_name: "device".to_string(),
                 platform: "macos".to_string(),
                 relay_url: "https://relay".to_string(),
-                grant_id: "grant-old".to_string(),
+                grant_id: "saved-grant".to_string(),
                 grant_mode: "permanent".to_string(),
                 caller_fingerprint: "fp-1".to_string(),
                 connected_at: 1,
@@ -8108,59 +8584,169 @@ mod tests {
                 ssh_key_source: None,
                 device_code: None,
                 transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-                caller_ephemeral_pub: Some("old-caller".to_string()),
-                client_ephemeral_pub: Some("old-client".to_string()),
-                shared_secret_encrypted: Some("secret-1".to_string()),
-            },
-            LocalConnection {
-                client_instance_id: "client-2".to_string(),
-                device_name: "other".to_string(),
-                platform: "linux".to_string(),
-                relay_url: "https://relay".to_string(),
-                grant_id: "grant-other".to_string(),
-                grant_mode: "permanent".to_string(),
-                caller_fingerprint: "fp-2".to_string(),
-                connected_at: 2,
-                auth_method: Some("pair_code".to_string()),
-                ssh_key_fingerprint: None,
-                ssh_key_source: None,
-                device_code: None,
-                transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-                caller_ephemeral_pub: Some("other-caller".to_string()),
-                client_ephemeral_pub: Some("other-client".to_string()),
-                shared_secret_encrypted: Some("secret-2".to_string()),
-            },
-        ];
+                caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+                client_ephemeral_pub: Some("saved-client-epk".to_string()),
+                shared_secret_encrypted: Some("secret".to_string()),
+                grant_session_token: Some(
+                    encrypt_grant_session_token("session-token").expect("encrypt grant session"),
+                ),
+                grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+            };
+            let relay_grant = GrantInfo {
+                grant_id: "relay-grant".to_string(),
+                status: "active".to_string(),
+                grant_session_token: Some("session-new".to_string()),
+                expires_at: None,
+                grant_summary: None,
+                caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+                client_ephemeral_pub: Some("saved-client-epk".to_string()),
+                shared_secret_encrypted: None,
+            };
 
-        upsert_local_connection(
-            &mut connections,
-            LocalConnection {
+            let preferred = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
+                .expect("matching transport should reconcile");
+
+            assert_eq!(preferred.grant_id, "relay-grant");
+            assert_eq!(conn.grant_id, "relay-grant");
+            assert_ne!(conn.grant_session_token.as_deref(), Some("session-new"));
+            assert_eq!(
+                decrypt_grant_session_token(&conn).expect("decrypt saved grant session"),
+                "session-new"
+            );
+        });
+    }
+
+    #[test]
+    fn test_reconcile_reusable_grant_rejects_transport_mismatch() {
+        with_test_data_dir_lock(|| {
+            init_test_data_dir();
+            let mut conn = LocalConnection {
                 client_instance_id: "client-1".to_string(),
-                device_name: "new".to_string(),
+                device_name: "device".to_string(),
                 platform: "macos".to_string(),
                 relay_url: "https://relay".to_string(),
-                grant_id: "grant-new".to_string(),
+                grant_id: "saved-grant".to_string(),
                 grant_mode: "permanent".to_string(),
                 caller_fingerprint: "fp-1".to_string(),
-                connected_at: 3,
+                connected_at: 1,
                 auth_method: Some("pair_code".to_string()),
                 ssh_key_fingerprint: None,
                 ssh_key_source: None,
                 device_code: None,
                 transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
-                caller_ephemeral_pub: Some("new-caller".to_string()),
-                client_ephemeral_pub: Some("new-client".to_string()),
-                shared_secret_encrypted: Some("secret-3".to_string()),
-            },
-        );
+                caller_ephemeral_pub: Some("saved-caller-epk".to_string()),
+                client_ephemeral_pub: Some("saved-client-epk".to_string()),
+                shared_secret_encrypted: Some("secret".to_string()),
+                grant_session_token: Some(
+                    encrypt_grant_session_token("session-token").expect("encrypt grant session"),
+                ),
+                grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+            };
+            let relay_grant = GrantInfo {
+                grant_id: "relay-grant".to_string(),
+                status: "active".to_string(),
+                grant_session_token: None,
+                expires_at: None,
+                grant_summary: None,
+                caller_ephemeral_pub: Some("relay-caller-epk".to_string()),
+                client_ephemeral_pub: Some("saved-client-epk".to_string()),
+                shared_secret_encrypted: None,
+            };
 
-        assert_eq!(connections.len(), 2);
-        let replaced = connections
-            .iter()
-            .find(|conn| conn.client_instance_id == "client-1")
-            .expect("replaced connection should remain");
-        assert_eq!(replaced.device_name, "new");
-        assert_eq!(replaced.grant_id, "grant-new");
+            let err = reconcile_reusable_grant_for_transport(&mut conn, relay_grant)
+                .expect_err("mismatched transport should require reconnect");
+            assert!(err.to_string().contains(
+                "saved connection transport no longer matches relay reusable authorization"
+            ));
+        });
+    }
+
+    #[test]
+    fn test_upsert_local_connection_replaces_duplicate_client_entries() {
+        with_test_data_dir_lock(|| {
+            init_test_data_dir();
+            let mut connections = vec![
+                LocalConnection {
+                    client_instance_id: "client-1".to_string(),
+                    device_name: "old".to_string(),
+                    platform: "macos".to_string(),
+                    relay_url: "https://relay".to_string(),
+                    grant_id: "grant-old".to_string(),
+                    grant_mode: "permanent".to_string(),
+                    caller_fingerprint: "fp-1".to_string(),
+                    connected_at: 1,
+                    auth_method: Some("pair_code".to_string()),
+                    ssh_key_fingerprint: None,
+                    ssh_key_source: None,
+                    device_code: None,
+                    transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                    caller_ephemeral_pub: Some("old-caller".to_string()),
+                    client_ephemeral_pub: Some("old-client".to_string()),
+                    shared_secret_encrypted: Some("secret-1".to_string()),
+                    grant_session_token: Some(
+                        encrypt_grant_session_token("session-old").expect("encrypt grant session"),
+                    ),
+                    grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+                },
+                LocalConnection {
+                    client_instance_id: "client-2".to_string(),
+                    device_name: "other".to_string(),
+                    platform: "linux".to_string(),
+                    relay_url: "https://relay".to_string(),
+                    grant_id: "grant-other".to_string(),
+                    grant_mode: "permanent".to_string(),
+                    caller_fingerprint: "fp-2".to_string(),
+                    connected_at: 2,
+                    auth_method: Some("pair_code".to_string()),
+                    ssh_key_fingerprint: None,
+                    ssh_key_source: None,
+                    device_code: None,
+                    transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                    caller_ephemeral_pub: Some("other-caller".to_string()),
+                    client_ephemeral_pub: Some("other-client".to_string()),
+                    shared_secret_encrypted: Some("secret-2".to_string()),
+                    grant_session_token: Some(
+                        encrypt_grant_session_token("session-other")
+                            .expect("encrypt grant session"),
+                    ),
+                    grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+                },
+            ];
+
+            upsert_local_connection(
+                &mut connections,
+                LocalConnection {
+                    client_instance_id: "client-1".to_string(),
+                    device_name: "new".to_string(),
+                    platform: "macos".to_string(),
+                    relay_url: "https://relay".to_string(),
+                    grant_id: "grant-new".to_string(),
+                    grant_mode: "permanent".to_string(),
+                    caller_fingerprint: "fp-1".to_string(),
+                    connected_at: 3,
+                    auth_method: Some("pair_code".to_string()),
+                    ssh_key_fingerprint: None,
+                    ssh_key_source: None,
+                    device_code: None,
+                    transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
+                    caller_ephemeral_pub: Some("new-caller".to_string()),
+                    client_ephemeral_pub: Some("new-client".to_string()),
+                    shared_secret_encrypted: Some("secret-3".to_string()),
+                    grant_session_token: Some(
+                        encrypt_grant_session_token("session-new").expect("encrypt grant session"),
+                    ),
+                    grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
+                },
+            );
+
+            assert_eq!(connections.len(), 2);
+            let replaced = connections
+                .iter()
+                .find(|conn| conn.client_instance_id == "client-1")
+                .expect("replaced connection should remain");
+            assert_eq!(replaced.device_name, "new");
+            assert_eq!(replaced.grant_id, "grant-new");
+        });
     }
 
     #[test]
@@ -8199,6 +8785,24 @@ mod tests {
         );
 
         assert!(!is_stale_remote_grant_error(&err));
+    }
+
+    #[test]
+    fn test_is_grant_session_token_invalid_error_detects_open_call_401() {
+        let err = BifrostError::Network(
+            "open_call failed with status 401 Unauthorized: {\"code\":-1,\"message\":\"grant_session_token_invalid\"}".to_string(),
+        );
+
+        assert!(is_grant_session_token_invalid_error(&err));
+    }
+
+    #[test]
+    fn test_is_grant_session_token_invalid_error_rejects_other_401() {
+        let err = BifrostError::Network(
+            "open_call failed with status 401 Unauthorized: {\"code\":-1,\"message\":\"caller_pubkey_mismatch\"}".to_string(),
+        );
+
+        assert!(!is_grant_session_token_invalid_error(&err));
     }
 
     #[test]
@@ -8892,13 +9496,15 @@ mod coverage_boost {
     use crate::commands::search::SearchResultItem;
     use bifrost_command::{SearchArgs, TrafficClearArgs};
     use serde_json::{json, Value};
-    use std::sync::{Mutex, OnceLock};
-    use wiremock::matchers::{method, path};
+    use std::sync::OnceLock;
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn with_connections_lock<T>(f: impl FnOnce() -> T) -> T {
-        static LOCK: Mutex<()> = Mutex::new(());
-        let _guard = LOCK.lock().expect("lock connections");
+        let _async_guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.blocking_lock();
+        let _guard = REMOTE_TEST_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         f()
     }
 
@@ -8925,8 +9531,19 @@ mod coverage_boost {
             transport_context_version: Some(TRANSPORT_CONTEXT_VERSION),
             caller_ephemeral_pub: Some("caller-epk".to_string()),
             client_ephemeral_pub: Some("client-epk".to_string()),
-            shared_secret_encrypted: Some("secret".to_string()),
+            shared_secret_encrypted: None,
+            grant_session_token: None,
+            grant_session_expires_at: Some("2099-01-01T00:00:00Z".to_string()),
         }
+    }
+
+    fn sample_authorized_connection(client_id: &str, relay_url: &str) -> LocalConnection {
+        let mut conn = sample_local_connection(client_id, relay_url);
+        conn.shared_secret_encrypted =
+            Some(encrypt_local_secret(b"secret").expect("encrypt shared secret"));
+        conn.grant_session_token =
+            Some(encrypt_grant_session_token("session-token").expect("encrypt grant session"));
+        conn
     }
 
     fn sample_remote_job(call_id: &str, relay_url: &str, token: &str) -> RemoteJobRecord {
@@ -9749,18 +10366,44 @@ mod coverage_boost {
 
     // --- HTTP helpers using wiremock ---
 
+    fn test_caller_identity() -> CallerPopIdentity {
+        let rng = SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("generate pkcs8");
+        let key_pair = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("key pair");
+        CallerPopIdentity {
+            caller_fingerprint: "caller-test".to_string(),
+            key_pair,
+        }
+    }
+
+    fn test_x25519_pub_b64() -> String {
+        let rng = SystemRandom::new();
+        let private_key =
+            agreement::EphemeralPrivateKey::generate(&X25519, &rng).expect("x25519 private");
+        base64::engine::general_purpose::STANDARD.encode(
+            private_key
+                .compute_public_key()
+                .expect("x25519 public")
+                .as_ref(),
+        )
+    }
+
     #[tokio::test]
     async fn caller_delete_grant_treats_2xx_as_deleted() {
+        let _guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.lock().await;
         let mock_server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/v4/remote-invoke/grants/grant-ok"))
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/revoke"))
             .respond_with(ResponseTemplate::new(204))
             .mount(&mock_server)
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
+        init_test_data_dir();
+        let conn = sample_authorized_connection("client-1", &mock_server.uri());
+        let identity = test_caller_identity();
         let outcome = client
-            .delete_grant("grant-ok", "fp-1")
+            .delete_grant(&conn, &identity)
             .await
             .expect("delete should succeed");
         assert_eq!(outcome, DeleteGrantOutcome::Deleted);
@@ -9768,9 +10411,10 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn caller_delete_grant_treats_404_grant_not_found_as_already_missing() {
+        let _guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.lock().await;
         let mock_server = MockServer::start().await;
-        Mock::given(method("DELETE"))
-            .and(path("/v4/remote-invoke/grants/grant-missing"))
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/revoke"))
             .respond_with(ResponseTemplate::new(404).set_body_raw(
                 "{\"code\":404,\"message\":\"grant_not_found\"}",
                 "application/json",
@@ -9779,8 +10423,11 @@ mod coverage_boost {
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
+        init_test_data_dir();
+        let conn = sample_authorized_connection("client-1", &mock_server.uri());
+        let identity = test_caller_identity();
         let outcome = client
-            .delete_grant("grant-missing", "fp-1")
+            .delete_grant(&conn, &identity)
             .await
             .expect("delete should succeed");
         assert_eq!(outcome, DeleteGrantOutcome::AlreadyMissing);
@@ -9789,8 +10436,8 @@ mod coverage_boost {
     #[tokio::test]
     async fn find_reusable_grant_returns_none_for_null_data() {
         let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v4/remote-invoke/grants/reusable"))
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/lookup"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": 0,
                 "message": null,
@@ -9800,8 +10447,9 @@ mod coverage_boost {
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
+        let identity = test_caller_identity();
         let grant = client
-            .find_reusable_grant("client-1", "fp-1")
+            .find_reusable_grant("client-1", &identity, None)
             .await
             .expect("request should succeed");
         assert!(grant.is_none());
@@ -9810,36 +10458,99 @@ mod coverage_boost {
     #[tokio::test]
     async fn find_reusable_grant_returns_some_for_valid_grant() {
         let mock_server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/v4/remote-invoke/grants/reusable"))
+        let client_ephemeral_pub = test_x25519_pub_b64();
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/lookup"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": 0,
                 "message": null,
                 "data": {
-                    "grant_id": "grant-1",
-                    "status": "active",
-                    "caller_ephemeral_pub": "caller-epk",
-                    "client_ephemeral_pub": "client-epk"
+                    "grant_session_token": "session-token",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "grant_summary": {
+                        "scope": "remote_shell_exec",
+                        "mode": "permanent",
+                        "file_access": "read_write",
+                        "client_ephemeral_pub": client_ephemeral_pub
+                    }
                 }
             })))
             .mount(&mock_server)
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
+        let identity = test_caller_identity();
         let grant = client
-            .find_reusable_grant("client-1", "fp-1")
+            .find_reusable_grant("client-1", &identity, None)
             .await
             .expect("request should succeed")
             .expect("grant should be present");
-        assert_eq!(grant.grant_id, "grant-1");
+        assert_eq!(grant.grant_session_token.as_deref(), Some("session-token"));
         assert_eq!(grant.status, "active");
+        assert!(grant.shared_secret_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn find_reusable_grant_reuses_saved_transport_for_session_refresh() {
+        let mock_server = MockServer::start().await;
+        let saved_conn = sample_authorized_connection("client-1", &mock_server.uri());
+        let saved_caller_ephemeral_pub = saved_conn.caller_ephemeral_pub.clone().unwrap();
+        let saved_client_ephemeral_pub = saved_conn.client_ephemeral_pub.clone().unwrap();
+        let saved_secret = saved_conn.shared_secret_encrypted.clone().unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/lookup"))
+            .and(body_partial_json(serde_json::json!({
+                "caller_ephemeral_pub": saved_caller_ephemeral_pub
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": {
+                    "grant_session_token": "session-refreshed",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "grant_summary": {
+                        "scope": "remote_shell_exec",
+                        "mode": "permanent",
+                        "file_access": "read_write",
+                        "client_ephemeral_pub": saved_client_ephemeral_pub
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let identity = test_caller_identity();
+        let grant = client
+            .find_reusable_grant("client-1", &identity, Some(&saved_conn))
+            .await
+            .expect("request should succeed")
+            .expect("grant should be present");
+
+        assert_eq!(
+            grant.grant_session_token.as_deref(),
+            Some("session-refreshed")
+        );
+        assert_eq!(
+            grant.caller_ephemeral_pub.as_deref(),
+            saved_conn.caller_ephemeral_pub.as_deref()
+        );
+        assert_eq!(
+            grant.client_ephemeral_pub.as_deref(),
+            saved_conn.client_ephemeral_pub.as_deref()
+        );
+        assert_eq!(
+            grant.shared_secret_encrypted.as_deref(),
+            Some(saved_secret.as_str())
+        );
     }
 
     #[tokio::test]
     async fn start_pairing_nonzero_code_maps_to_error() {
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
-            .and(path("/v4/remote-invoke/pairings/start"))
+            .and(path("/v5/remote-invoke/pairings/start"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({
                 "code": 123,
                 "message": "bad things",
@@ -9853,6 +10564,7 @@ mod coverage_boost {
             pair_code: "CODE".to_string(),
             caller_info: CallerInfo {
                 fingerprint: "fp-1".to_string(),
+                caller_pubkey: None,
                 display_name: None,
                 user_agent: None,
                 platform: None,
@@ -9862,6 +10574,7 @@ mod coverage_boost {
                 os_version: None,
                 arch: None,
             },
+            caller_pubkey: "pubkey".to_string(),
             caller_ephemeral_pub: "epk".to_string(),
         };
 
@@ -10210,32 +10923,44 @@ mod coverage_boost_v2 {
     #[tokio::test]
     async fn watch_pairing_returns_approved_result() {
         let mock_server = MockServer::start().await;
-        let body = "event: decision\n\
-                    data: {\"status\":\"approved\",\"grant_id\":\"g1\",\"client_instance_id\":\"c1\",\"device_name\":\"Dev\",\"platform\":\"macos\",\"grant_mode\":\"permanent\",\"caller_ephemeral_pub\":\"cpub\",\"client_ephemeral_pub\":\"epub\"}\n\n";
+        let body = "event: approved\n\
+                    data: {\"type\":\"approved\",\"claim_token\":\"claim-1\",\"claim_expires_at\":\"2099-01-01T00:00:00Z\",\"grant_summary\":{\"scope\":\"remote_shell_exec\",\"mode\":\"permanent\",\"file_access\":\"read_write\"}}\n\n";
         Mock::given(method("GET"))
-            .and(path("/v4/remote-invoke/pairings/p1/watch"))
+            .and(path("/v5/remote-invoke/pairings/p1/watch"))
             .respond_with(ResponseTemplate::new(200).set_body_raw(body, "text/event-stream"))
             .mount(&mock_server)
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
-        let result = client.watch_pairing("p1").await.expect("watch_pairing");
+        let result = client
+            .watch_pairing("p1", "watch-token")
+            .await
+            .expect("watch_pairing");
         assert_eq!(result.status, "approved");
-        assert_eq!(result.grant_id.as_deref(), Some("g1"));
-        assert_eq!(result.client_instance_id.as_deref(), Some("c1"));
+        assert_eq!(result.claim_token.as_deref(), Some("claim-1"));
+        assert_eq!(
+            result
+                .grant_summary
+                .as_ref()
+                .and_then(|s| s.mode.as_deref()),
+            Some("permanent")
+        );
     }
 
     #[tokio::test]
     async fn watch_pairing_non_success_status_maps_to_error() {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/v4/remote-invoke/pairings/p1/watch"))
+            .and(path("/v5/remote-invoke/pairings/p1/watch"))
             .respond_with(ResponseTemplate::new(500).set_body_string("oops"))
             .mount(&mock_server)
             .await;
 
         let client = CallerRelayClient::new(&mock_server.uri());
-        let err = client.watch_pairing("p1").await.expect_err("should fail");
+        let err = client
+            .watch_pairing("p1", "watch-token")
+            .await
+            .expect_err("should fail");
         assert!(err.to_string().contains("watch pairing returned"));
     }
 
