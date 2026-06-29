@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL 的 `__bifrost_rule` query 中。Bifrost 代理劫持到该请求后，会导入并启用这条个人规则，禁用其他个人规则，并在 `GET` / `HEAD` 请求上重定向到移除私有 query 的 clean URL。
+Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL 的 `__bifrost_rule` query 中。Bifrost 代理劫持到该请求后，会先跳到本机确认页；用户点击 Apply Rule 后才导入并启用这条个人规则，禁用其他个人规则，并重定向到移除私有 query 的 clean URL。
 
 导入后的本地规则统一使用 `share/` 命名空间，例如 payload 名称 `cli-share-test` 会落为 `share/cli-share-test`。再次分享这类导入规则时，生成的协议 payload 必须剥掉 `share/` 前缀，并优先使用导入元数据中的原始分享名。
 
@@ -128,7 +128,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - 导入规则正文保留 `@a` 规则引用行，不因校验失败而拒绝导入。
 - 真实用户默认数据目录中不会新增 `share/<payload name>`，也不会修改真实 `a` / `d` 规则。
 
-### TC-RSQ-09 管理端页面防嵌入与分享完整 hash 确认
+### TC-RSQ-09 管理端页面防嵌入与分享确认 API
 
 操作步骤：
 1. 使用临时数据目录启动 Bifrost 测试服务。
@@ -136,18 +136,33 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 3. 生成一条分享链接，目标 URL 指向本地 HTTP fixture。
 4. 通过代理访问分享链接，读取 302 `Location` 指向的 `/_bifrost/share/rule?...` 确认页。
 5. 对确认页执行 `curl -D -`，检查响应头和 HTML。
-6. 直接向 `POST /_bifrost/api/rules/share-confirm` 发送三类请求：跨站请求、同源但缺 CSRF 请求、同源且带 CSRF 但 `confirmation` 为空或错误的请求。
-7. 再发送同源、带 CSRF、`confirmation` 等于 payload 完整 `content_hash` 的请求。
-8. 查看规则列表。
+6. 直接向 `POST /_bifrost/api/rules/share-confirm` 发送三类请求：跨站请求、同源但缺 CSRF 请求、同源且带 CSRF 但不携带 `confirmation` 字段的请求。
+7. 查看规则列表。
 
 预期结果：
 - 普通管理端 HTML 页面包含 `X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` 的 `Content-Security-Policy`。
 - 确认页响应包含 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`。
-- 确认页响应的 `Content-Security-Policy` 包含 `frame-ancestors 'none'`、`base-uri 'none'` 和 `form-action 'none'`。
-- HTML 展示完整 content hash，并要求输入完整 content hash 后才允许 Apply。
+- 确认页响应的 `Content-Security-Policy` 包含 `frame-ancestors 'none'`、`connect-src 'self'`、`base-uri 'none'` 和 `form-action 'none'`。
+- HTML 展示完整 content hash 供人工核对，但不展示 hash 输入框；Apply Rule 按钮默认可点击。
 - 跨站请求返回 `403`，同源缺 CSRF 返回 `403`。
-- 同源、带 CSRF 但缺少或错误 `confirmation` 返回 `400`，且不导入规则。
-- 同源、带 CSRF 且完整 hash 确认的请求返回 `200`，导入并启用 `share/<payload name>`。
+- 同源、带 CSRF 且不携带 `confirmation` 的请求返回 `200`，导入并启用 `share/<payload name>`。
+
+### TC-RSQ-10 真实浏览器 Apply Rule 不需要填写页面 hash
+
+操作步骤：
+1. 使用临时数据目录启动 Bifrost 测试服务，并生成一条目标指向本地 HTTP fixture 的分享链接。
+2. 通过 Bifrost 代理访问分享链接，取得 `/_bifrost/share/rule?...` 确认页地址。
+3. 使用真实 Chromium/Chrome 打开确认页。
+4. 不填写任何页面 hash，直接点击 Apply Rule。
+5. 等待页面跳转回 clean target URL，并查看本地规则列表。
+6. 在浏览器控制台或自动化执行结果中检查没有 `Failed to fetch` 报错。
+
+预期结果：
+- 页面展示规则名、content hash、返回目标和完整规则内容。
+- 页面没有 hash 输入框或“Type the full content hash to apply”文案。
+- Apply Rule 按钮无需输入即可点击。
+- 点击后不出现 `Failed to fetch`；规则导入成功并启用 `share/<payload name>`。
+- 浏览器跳转到不含 `__bifrost_rule` 的 clean target URL。
 
 ## 清理步骤
 
@@ -182,3 +197,19 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-09：通过。普通管理端 HTML 页面真实响应包含 `X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` 的 CSP；确认页真实响应包含 `Cache-Control: no-store`、`Referrer-Policy: no-referrer`、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY` 和包含 `frame-ancestors 'none'` / `base-uri 'none'` / `form-action 'none'` 的 CSP；页面要求完整 content hash 后才能 Apply；跨站确认请求返回 `403`，缺 CSRF 返回 `403`，有 CSRF 但空 confirmation 返回 `400`，带完整 hash 返回 `200` 并导入 `share/shared-security [enabled]`。
+
+执行时间：2026-06-29
+
+测试环境：
+- `BIFROST_DATA_DIR=/tmp/bifrost-rule-share-*` 与 `/tmp/bifrost-admin-security-*`，临时 `config.toml` 已设置 `[sync] enabled = false` / `auto_sync = false`
+- Bifrost 测试服务：`127.0.0.1:<随机端口>`，启动参数包含 `--no-system-proxy`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` / `BIFROST_DISABLE_TRAY=1`
+- 真实 Chrome headless：`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+
+执行命令：
+- `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_share_query.sh`
+- `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_share_confirm_browser.sh`
+- `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_admin_cross_site_security.sh`
+
+结果：
+- TC-RSQ-09：通过。确认页真实响应包含 `connect-src 'self'`、`frame-ancestors 'none'`、`base-uri 'none'` 和 `form-action 'none'`；HTML 展示 `Content hash` 但不包含 `id="confirmation"` 或 `Type the full content hash to apply`；Apply Rule 按钮默认可点击；跨站确认请求返回 `403`，同源缺 CSRF 返回 `403`，同源带 CSRF 且不携带 `confirmation` 返回 `200` 并导入 `share/shared-security [enabled]`。
+- TC-RSQ-10：通过。真实 Chrome 打开 `/_bifrost/share/rule?...` 后不需要填写页面 hash，直接点击 Apply Rule 输出 `browser apply succeeded without hash`；浏览器未捕获 `Failed to fetch`、`Refused to connect` 或 CSP 报错；规则列表出现 `share/rsq-browser [enabled]`，页面跳转到 clean target URL。

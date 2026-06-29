@@ -332,7 +332,6 @@ payload = json.loads(base64.urlsafe_b64decode(encoded_payload + padding).decode(
 body = json.dumps({
     "payload": encoded_payload,
     "target_url": query["target"][0],
-    "confirmation": payload["content_hash"],
 }).encode()
 req = urllib.request.Request(
     endpoint,

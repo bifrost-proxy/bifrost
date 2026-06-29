@@ -115,7 +115,6 @@ payload = json.loads(base64.urlsafe_b64decode(encoded_payload + padding).decode(
 body = json.dumps({
     "payload": encoded_payload,
     "target_url": query["target"][0],
-    "confirmation": payload["content_hash"],
 }).encode()
 req = urllib.request.Request(
     endpoint,
@@ -161,6 +160,10 @@ CONFIRM_PAGE="$(curl -fsS "$CONFIRM_URL")"
 [[ "$CONFIRM_PAGE" == *"Apply Shared Bifrost Rule"* ]]
 [[ "$CONFIRM_PAGE" == *"rsq-e2e"* ]]
 [[ "$CONFIRM_PAGE" == *"share.test bp://127.0.0.1:3000"* ]]
+[[ "$CONFIRM_PAGE" == *"Content hash"* ]]
+[[ "$CONFIRM_PAGE" != *"Type the full content hash to apply"* ]]
+[[ "$CONFIRM_PAGE" != *'id="confirmation"'* ]]
+[[ "$CONFIRM_PAGE" == *"connect-src 'self'"* ]]
 
 CONFIRMED_RULE="$(confirm_location "$CONFIRM_URL")"
 [[ "$CONFIRMED_RULE" == "share/rsq-e2e" ]]
