@@ -111,6 +111,43 @@
 - `bifrost setting grant update --device <caller-fingerprint> --level full` 成功恢复 Full Trust。
 - 仅通过 pair/code 的交互式授权流程允许用户手动选择权限级别；SSH key 自动连接默认必须是 Full Trust。
 
+### TC-RISK-04：SSH v5 once-with-budget 不会在多次调用后误消费 grant
+
+**操作步骤**
+
+1. 执行：
+   ```bash
+   NODE_BIN="$HOME/.local/share/mise/installs/node/22.22.0/bin/node" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   BIFROST_BIN="$PWD/target/release/bifrost" \
+   SKIP_BUILD=true \
+   bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh
+   ```
+2. 观察脚本中以下阶段：
+   - `Verify default SSH-key Full Trust can run commands and read/write files`
+   - `Switch SSH grant to Run commands & read/write files and verify capabilities`
+   - `Switch SSH grant to Files only and verify command denial plus file access`
+   - `Switch SSH grant back to Full Trust and verify command access is restored`
+   - `Verify SSH grant remains visible on target before traffic.get`
+3. 在 `Verify SSH grant remains visible on target before traffic.get` 前后查询 target Admin API：
+   ```bash
+   curl -s "$ADMIN_BASE_URL/api/remote-invoke/grants"
+   ```
+4. 确认第一个 caller 的 saved connection 继续执行：
+   - `remote conn status`
+   - `remote search`
+   - `remote traffic get`
+   - target-local `traffic get --ids`、`auth-status`、`export`、`replay --refresh-auth`
+
+**预期结果**
+
+- SSH key grant 在 relay 侧使用 v5 PoP claim/session token，并可配置多次调用预算；第一次 `file.write` 后不会把 relay grant 标记为 consumed。
+- target worker 从 relay 同步 active grant 时保留 relay 返回的 `max_calls` / `remaining_calls`，不会把 once-with-budget 降级为本地 1 次调用。
+- target Admin API 中同一 SSH key grant 在多次 file/exec/traffic 调用后仍可见，`grant_mode=permanent`，`expires_at` 为空，`caller_fingerprint` 和 `ssh_key_fingerprint` 保持不变。
+- 权限级别在 `shell` / `files` / `query` / `full` 之间切换后，原 saved connection 不需要重新授权即可继续按当前权限执行允许的操作。
+- 脚本最终输出 `All SSH remote invoke E2E checks passed`。
+
 ## 清理步骤
 
 - 脚本退出时会清理 key 生成、relay、target、caller、mock server 临时目录和进程。
@@ -135,3 +172,9 @@
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
 | TC-RISK-03 | PASS | 2026-06-15 执行 `bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本启动本地 relay、真实 Bifrost target、mock target 和两个 caller；通过 `bifrost setting ssh-key create --label "CI Agent" --grant-mode permanent --output ...` 在运行中的 target 上创建 key，再用该 key 执行 `remote conn up --ssh-key`。验证默认 SSH key grant 可真实 `file.write`/`file.read` 和 `remote exec`，并确认 `setting grant update --device ... --level shell/files/query/full` 后分别满足 commands+files、files-only、read-only watch、恢复 Full Trust 的能力矩阵；files-only/query 下 `remote exec` 被拒绝且不会自动重新 SSH 授权绕过降权。脚本还验证同一 SSH key 的第二 caller 使用不同 `caller_fingerprint`，target 保留两条 `auth_method=ssh_publickey` grant，随后 `remote conn status`、`remote traffic search/get` 和 revoke 全部通过。 |
+
+### 2026-06-29 SSH v5 once-with-budget grant 消费回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-04 | PASS | 2026-06-29 执行 `NODE_BIN="$HOME/.local/share/mise/installs/node/22.22.0/bin/node" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本完成默认 Full Trust file.read/write、remote exec、grant level shell/files/query/full 多轮切换、第二 caller 隔离、`remote conn status`、`remote search`、`remote traffic get`、target-local `traffic get --ids` / `auth-status` / `export` / `replay --refresh-auth`，并在 `Verify SSH grant remains visible on target before traffic.get` 阶段确认原 SSH grant 仍为 `grant_mode=permanent` 且未被 consumed，最终输出 `All SSH remote invoke E2E checks passed`。 |

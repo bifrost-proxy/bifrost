@@ -4031,6 +4031,14 @@ fn build_grant_info_from_grant_created(
         .get("file_access")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_else(|| FileAccessScope::default_for(grant_scope));
+    let max_calls = data
+        .get("max_calls")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
+    let remaining_calls = data
+        .get("remaining_calls")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok());
 
     Some(GrantInfo {
         grant_id,
@@ -4056,16 +4064,16 @@ fn build_grant_info_from_grant_created(
         last_command_at: data.get("last_command_at").and_then(|v| v.as_u64()),
         expires_at,
         last_used_at: None,
-        max_calls: if grant_mode == GrantMode::Once {
+        max_calls: max_calls.or(if grant_mode == GrantMode::Once {
             Some(1)
         } else {
             None
-        },
-        remaining_calls: if grant_mode == GrantMode::Once {
+        }),
+        remaining_calls: remaining_calls.or(if grant_mode == GrantMode::Once {
             Some(1)
         } else {
             None
-        },
+        }),
         use_count: data.get("use_count").and_then(|v| v.as_u64()).unwrap_or(0),
         ssh_key_id,
         ssh_key_fingerprint,
@@ -4257,6 +4265,11 @@ fn min_optional_u32(left: Option<u32>, right: Option<u32>) -> Option<u32> {
 
 fn preserve_existing_grant_runtime_state(grant: &mut GrantInfo, existing: &GrantInfo) {
     grant.auth_method = existing.auth_method;
+    if existing.auth_method == AuthMethod::SshPublickey
+        && existing.grant_mode == GrantMode::Permanent
+    {
+        grant.grant_mode = existing.grant_mode;
+    }
     grant.first_authorized_at = existing.first_authorized_at;
     grant.last_command_at = max_optional_u64(existing.last_command_at, grant.last_command_at);
     grant.last_used_at = max_optional_u64(existing.last_used_at, grant.last_used_at);
@@ -4843,6 +4856,24 @@ mod tests {
     }
 
     #[test]
+    fn test_build_grant_info_from_grant_created_preserves_relay_call_budget() {
+        let payload = serde_json::json!({
+            "grant_id": "grant-budget",
+            "caller_fingerprint": "caller-fp",
+            "grant_mode": "once",
+            "max_calls": 1000,
+            "remaining_calls": 997
+        });
+
+        let grant = build_grant_info_from_grant_created(&payload, "client-budget", 5678)
+            .expect("grant should parse");
+
+        assert_eq!(grant.grant_mode, GrantMode::Once);
+        assert_eq!(grant.max_calls, Some(1000));
+        assert_eq!(grant.remaining_calls, Some(997));
+    }
+
+    #[test]
     fn test_build_grant_info_from_grant_created_rejects_missing_grant_id() {
         let payload = serde_json::json!({
             "caller_fingerprint": "caller-fp",
@@ -4903,6 +4934,24 @@ mod tests {
         assert_eq!(rebuilt.ssh_key_fingerprint, existing.ssh_key_fingerprint);
         assert_eq!(rebuilt.caller_ephemeral_pub, existing.caller_ephemeral_pub);
         assert_eq!(rebuilt.client_ephemeral_pub, existing.client_ephemeral_pub);
+    }
+
+    #[test]
+    fn test_preserve_existing_grant_runtime_state_keeps_ssh_key_grant_mode() {
+        let mut existing = make_active_grant("grant-ssh-mode", GrantMode::Permanent);
+        existing.auth_method = AuthMethod::SshPublickey;
+
+        let mut rebuilt = make_active_grant("grant-ssh-mode", GrantMode::Once);
+        rebuilt.auth_method = AuthMethod::PairCode;
+        rebuilt.max_calls = Some(1000);
+        rebuilt.remaining_calls = Some(997);
+
+        preserve_existing_grant_runtime_state(&mut rebuilt, &existing);
+
+        assert_eq!(rebuilt.auth_method, AuthMethod::SshPublickey);
+        assert_eq!(rebuilt.grant_mode, GrantMode::Permanent);
+        assert_eq!(rebuilt.max_calls, Some(1000));
+        assert_eq!(rebuilt.remaining_calls, Some(997));
     }
 
     #[test]

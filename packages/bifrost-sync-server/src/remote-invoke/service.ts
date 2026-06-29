@@ -1056,7 +1056,7 @@ export class RemoteInvokeService {
     });
 
     const grant = await this.storage.remoteInvoke.getGrant(call.grant_id);
-    if (grant && grant.grant_mode === 'once') {
+    if (grant && grant.grant_mode === 'once' && grant.remaining_calls <= 0) {
       await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'consumed' });
     }
 

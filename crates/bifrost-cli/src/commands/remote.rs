@@ -1327,6 +1327,12 @@ fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
             && msg.contains("grant_scope_mismatch"))
 }
 
+fn is_grant_session_token_invalid_error(err: &BifrostError) -> bool {
+    matches!(err, BifrostError::Network(msg)
+        if msg.contains("open_call failed with status 401")
+            && msg.contains("grant_session_token_invalid"))
+}
+
 fn is_stale_remote_grant_error(err: &BifrostError) -> bool {
     let BifrostError::Network(msg) = err else {
         return false;
@@ -1982,25 +1988,52 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         &active_grant_id,
         &transport,
     )?;
-    let grant_session_token = decrypt_grant_session_token(&conn)?;
+    let open_request = OpenCallRequest {
+        client_instance_id: conn.client_instance_id.clone(),
+        command_summary: command_summary.clone(),
+        command_kind: command.kind,
+        command_encrypted,
+        pty_enabled: command
+            .shell_exec
+            .as_ref()
+            .and_then(|payload| payload.pty.as_ref())
+            .map(|pty| pty.enabled),
+    };
+    let mut grant_session_token = decrypt_grant_session_token(&conn)?;
 
-    let call_result = caller
-        .open_call(
-            &OpenCallRequest {
-                client_instance_id: conn.client_instance_id.clone(),
-                command_summary: command_summary.clone(),
-                command_kind: command.kind,
-                command_encrypted,
-                pty_enabled: command
-                    .shell_exec
-                    .as_ref()
-                    .and_then(|payload| payload.pty.as_ref())
-                    .map(|pty| pty.enabled),
-            },
-            &grant_session_token,
-            &caller_identity,
-        )
+    let mut call_result = caller
+        .open_call(&open_request, &grant_session_token, &caller_identity)
         .await;
+    if let Err(err) = &call_result {
+        if is_grant_session_token_invalid_error(err) {
+            debug!(
+                "saved v5 grant session token was rejected; refreshing and retrying open_call once"
+            );
+            let refreshed = caller
+                .find_reusable_grant(&conn.client_instance_id, &caller_identity, Some(&conn))
+                .await?;
+            if let Some(refreshed) = refreshed {
+                let refreshed_grant = reconcile_reusable_grant_for_transport(&mut conn, refreshed)?;
+                if let Some(existing) = connections.iter_mut().find(|existing| {
+                    existing.client_instance_id == conn.client_instance_id
+                        && existing.relay_url == conn.relay_url
+                }) {
+                    *existing = conn.clone();
+                    save_connections(&connections)?;
+                }
+                grant_session_token = decrypt_grant_session_token(&conn)?;
+                call_result = caller
+                    .open_call(&open_request, &grant_session_token, &caller_identity)
+                    .await;
+                if call_result.is_ok() {
+                    debug!(
+                        grant_id = %refreshed_grant.grant_id,
+                        "open_call succeeded after refreshing v5 grant session token"
+                    );
+                }
+            }
+        }
+    }
 
     let call_result = match call_result {
         Ok(result) => result,
@@ -2886,24 +2919,40 @@ async fn open_and_wait_remote_command(
         &grant.grant_id,
         transport,
     )?;
+    let open_request = OpenCallRequest {
+        client_instance_id: conn.client_instance_id.clone(),
+        command_summary,
+        command_kind: command.kind,
+        command_encrypted,
+        pty_enabled: command
+            .shell_exec
+            .as_ref()
+            .and_then(|payload| payload.pty.as_ref())
+            .map(|pty| pty.enabled),
+    };
     let grant_session_token = decrypt_grant_session_token(conn)?;
-    let call_result = caller
-        .open_call(
-            &OpenCallRequest {
-                client_instance_id: conn.client_instance_id.clone(),
-                command_summary,
-                command_kind: command.kind,
-                command_encrypted,
-                pty_enabled: command
-                    .shell_exec
-                    .as_ref()
-                    .and_then(|payload| payload.pty.as_ref())
-                    .map(|pty| pty.enabled),
-            },
-            &grant_session_token,
-            caller_identity,
-        )
-        .await?;
+    let mut call_result = caller
+        .open_call(&open_request, &grant_session_token, caller_identity)
+        .await;
+    if let Err(err) = &call_result {
+        if is_grant_session_token_invalid_error(err) {
+            debug!(
+                "saved v5 grant session token was rejected in helper path; refreshing and retrying open_call once"
+            );
+            let refreshed = caller
+                .find_reusable_grant(&conn.client_instance_id, caller_identity, Some(conn))
+                .await?;
+            if let Some(refreshed) = refreshed {
+                let mut refreshed_conn = conn.clone();
+                reconcile_reusable_grant_for_transport(&mut refreshed_conn, refreshed)?;
+                let refreshed_token = decrypt_grant_session_token(&refreshed_conn)?;
+                call_result = caller
+                    .open_call(&open_request, &refreshed_token, caller_identity)
+                    .await;
+            }
+        }
+    }
+    let call_result = call_result?;
     caller
         .subscribe_call_events(
             &call_result.call_id,
@@ -8668,6 +8717,24 @@ mod tests {
         );
 
         assert!(!is_stale_remote_grant_error(&err));
+    }
+
+    #[test]
+    fn test_is_grant_session_token_invalid_error_detects_open_call_401() {
+        let err = BifrostError::Network(
+            "open_call failed with status 401 Unauthorized: {\"code\":-1,\"message\":\"grant_session_token_invalid\"}".to_string(),
+        );
+
+        assert!(is_grant_session_token_invalid_error(&err));
+    }
+
+    #[test]
+    fn test_is_grant_session_token_invalid_error_rejects_other_401() {
+        let err = BifrostError::Network(
+            "open_call failed with status 401 Unauthorized: {\"code\":-1,\"message\":\"caller_pubkey_mismatch\"}".to_string(),
+        );
+
+        assert!(!is_grant_session_token_invalid_error(&err));
     }
 
     #[test]

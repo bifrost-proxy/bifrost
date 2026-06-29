@@ -2,7 +2,6 @@ use super::*;
 use std::sync::{Mutex, OnceLock};
 
 static EXTERNAL_CLI_ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
 fn external_cli_env_guard() -> std::sync::MutexGuard<'static, ()> {
     EXTERNAL_CLI_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
@@ -1476,15 +1475,8 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 #[tokio::test]
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let _guard = EnvGuard::set("BIFROST_DATA_DIR", temp_dir.path());
     let runs_root = temp_dir.path().join("runs");
     let runtime = ExternalCliRuntime::new(&runs_root);
-    let session_attachment_dir = bifrost_agent::config::agent_home_dir()
-        .join("sessions")
-        .join("2026")
-        .join("06")
-        .join("25")
-        .join("attachments");
     let request = ExternalCliRunRequest {
         images: vec![ExternalCliImageInput {
             mime_type: "image/png".to_string(),
@@ -1493,9 +1485,7 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
         }],
         message: String::new(),
         operation: default_operation(),
-        params: serde_json::json!({
-            "attachmentBaseDir": session_attachment_dir.display().to_string()
-        }),
+        params: serde_json::Value::Null,
         provider_id: Some("provider-a".to_string()),
         runner_id: None,
         session_key: Some("chat-gateway-image-test".to_string()),
@@ -1543,8 +1533,9 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     assert_eq!(
         first_image_path.parent(),
         Some(
-            session_attachment_dir
+            runs_root
                 .join(&result.run_id)
+                .join("attachments")
                 .join("images")
                 .as_path()
         )
@@ -1565,8 +1556,9 @@ async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     assert_eq!(
         second_image_path.parent(),
         Some(
-            session_attachment_dir
+            runs_root
                 .join(&second_result.run_id)
+                .join("attachments")
                 .join("images")
                 .as_path()
         )

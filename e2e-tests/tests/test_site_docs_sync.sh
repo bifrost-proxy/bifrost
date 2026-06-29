@@ -16,11 +16,16 @@ EN_RULE_DIST="$SITE_DIR/dist/en/reference/rules/routing/index.html"
 LEGACY_CLI_DIST="$SITE_DIR/dist/reference/getting-started/cli-quick-start/index.html"
 
 cleanup() {
+  local cleanup_status=0
   rm -f "$TEMP_DOC"
   rm -f "$TEMP_EN_DOC"
   rm -rf "$SITE_DIR/dist"
-  pnpm --dir "$SITE_DIR" run docs:sync >/dev/null
-  pnpm --dir "$SITE_DIR" run docs:verify >/dev/null
+  pnpm --dir "$SITE_DIR" run docs:sync >/dev/null || cleanup_status=$?
+  pnpm --dir "$SITE_DIR" run docs:verify >/dev/null || cleanup_status=$?
+  if [[ "$cleanup_status" -ne 0 ]]; then
+    echo "Warning: docs sync cleanup failed with status ${cleanup_status}" >&2
+  fi
+  return 0
 }
 
 trap cleanup EXIT

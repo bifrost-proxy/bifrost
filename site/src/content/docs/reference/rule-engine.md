@@ -193,7 +193,7 @@ bifrost rule add draft --json --allow-invalid --content "@missing-shared"
 
 Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
 
-第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。`GET` / `HEAD` 请求导入后会重定向到移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容；其他方法会在代理内部清理 query 后继续转发。
+第一版导入行为固定为 `mode=enable_exclusive`、`exclusive_scope=my_rules`：当 Bifrost 代理劫持到带 `__bifrost_rule` 的请求时，不会静默写入规则，而是重定向到本机 `/_bifrost/share/rule` 确认页面。确认页会展示规则名称、内容 hash、独占范围、返回目标和完整规则内容；只有用户点击 Apply Rule 后，Bifrost 才会把 payload 导入到个人规则列表，启用该规则，并禁用其他个人规则；不会创建、修改或禁用 Group 规则。确认完成后会跳回移除私有 query 的 clean URL，避免目标页面 JavaScript 读取到规则内容。
 
 生成分享链接时，目标网站支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到并导入分享 query。显式输入 `https://...` 时会保持 HTTPS；显式非 HTTP(S) scheme 会被拒绝。
 

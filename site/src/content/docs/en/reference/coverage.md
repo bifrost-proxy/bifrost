@@ -4,7 +4,7 @@ description: "Automatically synced English Test Coverage Mechanism documentation
 editUrl: false
 sidebar:
   label: "Test Coverage Mechanism"
-  order: 934
+  order: 935
 ---
 
 > This page is automatically synced from `docs-en/coverage.md`.

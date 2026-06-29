@@ -6,6 +6,7 @@ import path from 'path';
 
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
 import { remoteInvokeSchemaNeedsReset } from '../dao/mysql';
+import { RemoteInvokeService } from '../remote-invoke/service';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
 import { deriveSshDeviceCode } from '../remote-invoke/ssh-auth';
 import { ed25519FingerprintFromBase64 } from '../remote-invoke/pop';
@@ -283,5 +284,126 @@ describe('P0-2: lookupGrantSession freezes caller_ephemeral_pub (service-level)'
 
     const after = await server.storage.remoteInvoke.getGrant(grantId);
     expect(after?.caller_ephemeral_pub).toBe(oldEph);
+  });
+});
+
+describe('P0-3: once-mode grants consume only after call budget is exhausted', () => {
+  async function seedOnceGrantWithCall(
+    grantId: string,
+    callId: string,
+    remainingCalls: number,
+  ) {
+    const now = new Date().toISOString();
+    await server.storage.remoteInvoke.createGrant({
+      id: grantId,
+      user_id: '',
+      client_instance_id: 'client-p03-budget',
+      caller_fingerprint: 'caller-p03-budget',
+      caller_display_name: 'p03-budget',
+      caller_pubkey: '',
+      caller_pubkey_fp: 'caller-p03-budget',
+      caller_ephemeral_pub: crypto.randomBytes(32).toString('base64'),
+      client_ephemeral_pub: crypto.randomBytes(32).toString('base64'),
+      grant_mode: 'once' as any,
+      grant_scope: 'remote_shell_exec',
+      file_access: 'read_write',
+      ssh_key_id: '',
+      ssh_key_fingerprint: '',
+      status: 'active',
+      first_authorized_at: now,
+      expires_at: '',
+      session_token_hash: '',
+      session_token_expires_at: '',
+      last_nonce_seen: '',
+      revoked_at: '',
+      last_used_at: now,
+      max_calls: 1000,
+      remaining_calls: remainingCalls,
+      created_by: 'ssh_publickey',
+      update_time: now,
+    });
+    await server.storage.remoteInvoke.createCall({
+      id: callId,
+      user_id: '',
+      grant_id: grantId,
+      pairing_id: '',
+      client_instance_id: 'client-p03-budget',
+      caller_fingerprint: 'caller-p03-budget',
+      source_ip: '',
+      caller_display_name: 'p03-budget',
+      status: 'authorized',
+      command_summary_json: '{}',
+      command_json: '{}',
+      payload_digest: '',
+      stdout_digest: '',
+      stderr_digest: '',
+      exit_code: -1,
+      started_at: now,
+      ended_at: '',
+      duration_ms: 0,
+      bytes_in: 0,
+      bytes_out: 0,
+    });
+  }
+
+  it('keeps SSH once-mode grant active while remaining_calls is still positive', async () => {
+    const grantId = 'grant-p03-budget-active-' + crypto.randomBytes(4).toString('hex');
+    const callId = 'call-p03-budget-active-' + crypto.randomBytes(4).toString('hex');
+    await seedOnceGrantWithCall(grantId, callId, 999);
+    const service = new RemoteInvokeService(server.storage, {
+      enabled: true,
+      sse_keepalive_ms: 30_000,
+      pair_code_ttl_secs: 120,
+      max_active_calls_per_client: 5,
+      max_grants_per_client: 20,
+      retention_days: 90,
+      max_records: 10_000,
+      max_sse_connections_per_client: 2,
+      max_sse_connections_per_ip: 10,
+      pair_rate_limit_per_ip: 50,
+      pair_rate_limit_global_per_client: 50,
+      ssh_grant_max_calls: 1000,
+    });
+
+    await service.postClientExit({
+      call_id: callId,
+      client_instance_id: 'client-p03-budget',
+      exit_code: 0,
+      duration_ms: 1,
+    });
+
+    const updated = await server.storage.remoteInvoke.getGrant(grantId);
+    expect(updated?.status).toBe('active');
+    expect(updated?.remaining_calls).toBe(999);
+  });
+
+  it('marks once-mode grant consumed when remaining_calls reaches zero', async () => {
+    const grantId = 'grant-p03-budget-consumed-' + crypto.randomBytes(4).toString('hex');
+    const callId = 'call-p03-budget-consumed-' + crypto.randomBytes(4).toString('hex');
+    await seedOnceGrantWithCall(grantId, callId, 0);
+    const service = new RemoteInvokeService(server.storage, {
+      enabled: true,
+      sse_keepalive_ms: 30_000,
+      pair_code_ttl_secs: 120,
+      max_active_calls_per_client: 5,
+      max_grants_per_client: 20,
+      retention_days: 90,
+      max_records: 10_000,
+      max_sse_connections_per_client: 2,
+      max_sse_connections_per_ip: 10,
+      pair_rate_limit_per_ip: 50,
+      pair_rate_limit_global_per_client: 50,
+      ssh_grant_max_calls: 1000,
+    });
+
+    await service.postClientExit({
+      call_id: callId,
+      client_instance_id: 'client-p03-budget',
+      exit_code: 0,
+      duration_ms: 1,
+    });
+
+    const updated = await server.storage.remoteInvoke.getGrant(grantId);
+    expect(updated?.status).toBe('consumed');
   });
 });
