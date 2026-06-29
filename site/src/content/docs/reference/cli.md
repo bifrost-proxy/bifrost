@@ -445,7 +445,7 @@ bifrost rule reorder <name1> <name2> ...
 
 - `rule active` 需要代理服务运行中（通过管理接口获取运行时已启用规则摘要）
 - `rule share` 会生成带 `__bifrost_rule` query 的分享链接。目标 URL 支持完整 `http://` / `https://` 地址，也支持 `a.com`、`example.com/path`、`localhost:3000` 这类裸域名输入；裸域名会默认规范成 `http://...`，确保普通 HTTP 代理请求能在不依赖 TLS 拦截的情况下看到分享 query。显式输入 `https://...` 时会保持 HTTPS。未传 `--content` 或 `--file` 时读取同名本地规则；传入 `--content` 或 `--file` 时只生成链接，不把规则写入本地规则目录。
-- 分享链接被 Bifrost 代理劫持后会先跳到本机确认页面，展示规则名、内容 hash、独占范围、返回目标和完整规则内容。用户确认后才会导入到 `share/<规则名>` 命名空间并启用它，同时禁用其他个人规则；第一版固定 `exclusive_scope=my_rules`，不会修改 Group 规则。对已导入的 `share/...` 规则再次执行 `rule share` 时，协议 payload 会自动剥掉 `share/` 前缀，继续使用原始分享名。
+- 分享链接被 Bifrost 代理劫持后会先跳到本机确认页面，展示规则名、内容 hash、独占范围、返回目标和完整规则内容；content hash 仅用于人工核对，用户不需要手工输入。用户确认后才会导入到 `share/<规则名>` 命名空间并启用它，同时禁用其他个人规则；第一版固定 `exclusive_scope=my_rules`，不会修改 Group 规则。对已导入的 `share/...` 规则再次执行 `rule share` 时，协议 payload 会自动剥掉 `share/` 前缀，继续使用原始分享名。
 - `rule add` / `rule update` 默认会在保存前执行语法检查。规则无效时命令退出码为 2，不写入规则文件；加 `--json` 可获得 `saved=false`、`syntax.errors[]` 和 `syntax.guidance` 结构化反馈，便于 Agent 按建议修复后重试。
 - `--allow-invalid` 只用于显式保存临时草稿；命令仍会返回语法报告，且无效规则的 `syntax.valid` 保持为 `false`。
 

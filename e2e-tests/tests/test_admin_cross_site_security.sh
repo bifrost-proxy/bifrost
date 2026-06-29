@@ -158,28 +158,15 @@ assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^referrer-pol
 assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^x-content-type-options: nosniff$' "confirmation page disables content sniffing"
 assert_header_matches /tmp/bifrost-admin-security-confirm.headers '^x-frame-options: DENY$' "confirmation page denies framing"
 assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*frame-ancestors 'none'" "confirmation CSP denies frame ancestors"
+assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*connect-src 'self'" "confirmation CSP allows same-origin apply fetch"
 assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*base-uri 'none'" "confirmation CSP blocks base URI injection"
 assert_header_matches /tmp/bifrost-admin-security-confirm.headers "^content-security-policy: .*form-action 'none'" "confirmation CSP blocks form posts"
-grep -F 'Type the full content hash to apply' /tmp/bifrost-admin-security-confirm.out >/dev/null
+grep -F 'Content hash' /tmp/bifrost-admin-security-confirm.out >/dev/null
+grep -F '<button id="apply" type="button">Apply Rule</button>' /tmp/bifrost-admin-security-confirm.out >/dev/null
+! grep -F 'Type the full content hash to apply' /tmp/bifrost-admin-security-confirm.out >/dev/null
+! grep -F 'id="confirmation"' /tmp/bifrost-admin-security-confirm.out >/dev/null
 
 CONFIRM_JSON="$(python3 - "$CONFIRM_LOCATION" <<'PY'
-import base64
-import json
-import sys
-import urllib.parse
-query = urllib.parse.parse_qs(urllib.parse.urlparse(sys.argv[1]).query)
-encoded_payload = query["payload"][0]
-padding = "=" * (-len(encoded_payload) % 4)
-payload = json.loads(base64.urlsafe_b64decode(encoded_payload + padding).decode())
-print(json.dumps({
-    "payload": encoded_payload,
-    "target_url": query["target"][0],
-    "confirmation": payload["content_hash"],
-}))
-PY
-)"
-
-CONFIRM_JSON_WITHOUT_HASH="$(python3 - "$CONFIRM_LOCATION" <<'PY'
 import json
 import sys
 import urllib.parse
@@ -187,7 +174,6 @@ query = urllib.parse.parse_qs(urllib.parse.urlparse(sys.argv[1]).query)
 print(json.dumps({
     "payload": query["payload"][0],
     "target_url": query["target"][0],
-    "confirmation": "",
 }))
 PY
 )"
@@ -198,14 +184,6 @@ STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules
   -H 'Sec-Fetch-Site: same-origin' \
   --data "$CONFIRM_JSON")"
 [[ "$STATUS" == "403" ]]
-
-STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" \
-  -H 'Content-Type: application/json' \
-  -H 'Origin: http://127.0.0.1:'"${PROXY_PORT}" \
-  -H 'Sec-Fetch-Site: same-origin' \
-  -H "X-Bifrost-CSRF: $TOKEN" \
-  --data "$CONFIRM_JSON_WITHOUT_HASH")"
-[[ "$STATUS" == "400" ]]
 
 STATUS="$(http_status -X POST "http://127.0.0.1:${PROXY_PORT}/_bifrost/api/rules/share-confirm" \
   -H 'Content-Type: application/json' \

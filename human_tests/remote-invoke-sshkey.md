@@ -178,3 +178,9 @@
 | 用例 | 结果 | 证据 |
 | --- | --- | --- |
 | TC-RISK-04 | PASS | 2026-06-29 执行 `NODE_BIN="$HOME/.local/share/mise/installs/node/22.22.0/bin/node" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本完成默认 Full Trust file.read/write、remote exec、grant level shell/files/query/full 多轮切换、第二 caller 隔离、`remote conn status`、`remote search`、`remote traffic get`、target-local `traffic get --ids` / `auth-status` / `export` / `replay --refresh-auth`，并在 `Verify SSH grant remains visible on target before traffic.get` 阶段确认原 SSH grant 仍为 `grant_mode=permanent` 且未被 consumed，最终输出 `All SSH remote invoke E2E checks passed`。 |
+
+### 2026-06-29 合并主干后 SSH grant 回归
+
+| 用例 | 结果 | 证据 |
+| --- | --- | --- |
+| TC-RISK-04 | PASS | 2026-06-29 将 `origin/main` 合入 `feat/remote-invoke-v5-pop` 并解决 `site/src/content/docs/reference/rule-engine.md` 冲突后，重新执行 `NODE_BIN="$HOME/.local/share/mise/installs/node/22.22.0/bin/node" PATH="$HOME/.local/share/mise/installs/node/22.22.0/bin:$PATH" BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_ssh_e2e.sh` 通过。脚本完成 SSH key grant 创建、默认 Full Trust 文件读写与命令执行、shell/files/query/full 权限切换、第二 caller 隔离、`remote conn status`、`remote search`、`remote traffic get`、target-local `traffic get --ids` / `auth-status` / `export` / `replay --refresh-auth` 和 revoke，最终输出 `All SSH remote invoke E2E checks passed`。 |
