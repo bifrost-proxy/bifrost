@@ -370,23 +370,27 @@ Execution result:
   request-send failures only, and server-v4 regression tests were expanded to
   assert client frame/stream-frame/exit queue delivery uses
   `ri:mq:{caller:<callId>}`.
-- The previous final full PPE run passed before `remote keep-awake` was added
-  to the one-click matrix: target client id
-  `06c2776a-d62f-4a8e-b1c3-47149edf71c3`, temp dir
-  `/tmp/bifrost-relay-full.UODRT5`, target port `51792`, binary
-  `/Users/eden/work/github/bifrost/target/debug/bifrost`, binary sha256
-  `68e7c6455028991986d4a4320d28913ac169c2d0c953bf68409d17e6b66115b9`,
-  Code grant `5fa75bfc0edc9527`.
-- After auditing `remote --help`, the script was expanded to include the
-  remaining `remote keep-awake` command family. This requires the server-side
-  fix that treats SSH key default Full Trust (`remote_shell_interactive`) as
-  allowed for `power.mgmt`; rerun the full PPE command after the updated
-  `bifrost-server-v4` is deployed.
-- After auditing the full `bifrost remote` CLI definition, the script was also
-  expanded to cover local-payload file write/edit/patch and a true running
-  long-task `remote job logs` path that verifies begin/middle/end output plus
-  terminal `remote job status`. This remote relay phase is pending the same
-  updated `bifrost-server-v4` deployment before final PPE execution.
+- PASS. 2026-06-29 after the updated `bifrost-server-v4` PPE deployment,
+  executed the full command again against
+  `https://bifrost.bytedance.net` with PPE headers. The run used the current
+  branch binary for both local Bifrost clients and reported `GIT_DIRTY=false`.
+  Evidence:
+  - Temp dir: `/tmp/bifrost-relay-full.228i8D`.
+  - Target port: `64188`; target client id:
+    `04ff0777-85ed-40a2-87cd-b0bd7e1dc214`.
+  - Binary: `/Users/eden/work/github/bifrost/target/debug/bifrost`.
+  - Binary sha256:
+    `a90f234dd066906a6802826b4d1c5ac5cf2d63821c54526228ce7c0a9c691355`.
+  - HEAD: `eac81d8177c14620820974c83a13848527d9d988`.
+  - Code authorization passed `conn status`, traffic `list/get/search`, all
+    file subcommands including `write/edit/patch --from-local`, `exec`, `run`,
+    detached `exec/run`, `job watch/list/status/logs`, and running long-task
+    `job logs` begin/middle/end verification.
+  - Code `remote_power_mgmt` authorization passed all `remote keep-awake`
+    subcommands.
+  - SSH key authorization passed the same ordinary Remote matrix and SSH key
+    default Full Trust passed all `remote keep-awake` subcommands.
+  - `remote conn down --all` cleanup passed.
 
 ## TC-P0-10: async remote grant tests do not hold std mutex across await
 
