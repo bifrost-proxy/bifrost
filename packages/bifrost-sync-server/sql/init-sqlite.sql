@@ -176,3 +176,15 @@ CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_nonces (
   PRIMARY KEY (caller_pubkey_fp, nonce)
 );
 CREATE INDEX IF NOT EXISTS idx_ri_nonces_seen ON bifrost_remote_invoke_nonces(seen_at);
+
+CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_ssh_claims (
+  claim_token_hash      TEXT PRIMARY KEY,
+  grant_id              TEXT NOT NULL,
+  client_instance_id    TEXT NOT NULL DEFAULT '',
+  caller_pubkey_fp      TEXT NOT NULL DEFAULT '',
+  expires_at            TEXT NOT NULL,
+  create_time           TEXT NOT NULL,
+  claimed_at            TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_ri_ssh_claims_grant ON bifrost_remote_invoke_ssh_claims(grant_id);
+CREATE INDEX IF NOT EXISTS idx_ri_ssh_claims_expires ON bifrost_remote_invoke_ssh_claims(expires_at);

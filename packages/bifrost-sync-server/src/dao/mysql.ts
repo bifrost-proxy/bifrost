@@ -4,7 +4,7 @@ import { nanoid } from 'nanoid';
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, MysqlConfig,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
-  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord,
+  RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord, RemoteInvokeSshClaim,
 } from '../types';
 import type { IUserDao, IEnvDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao } from './types';
 
@@ -855,7 +855,6 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
     const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_clients WHERE client_instance_id = ?', [clientInstanceId]);
     return rows[0] as RemoteInvokeClientRecord | undefined;
   }
-
   async updateClientRecord(clientInstanceId: string, fields: Partial<RemoteInvokeClientRecord>): Promise<void> {
     const sets: string[] = [];
     const params: unknown[] = [];
@@ -869,6 +868,25 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
     await this.pool.execute(`UPDATE bifrost_remote_invoke_clients SET ${sets.join(', ')} WHERE client_instance_id = ?`, params as ExecuteValues[]);
   }
 
+  async createSshClaim(claim: RemoteInvokeSshClaim): Promise<void> {
+    await this.pool.execute(
+      `INSERT INTO bifrost_remote_invoke_ssh_claims (claim_token_hash, grant_id, client_instance_id, caller_pubkey_fp, expires_at, create_time, claimed_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [claim.claim_token_hash, claim.grant_id, claim.client_instance_id, claim.caller_pubkey_fp, claim.expires_at, claim.create_time, claim.claimed_at ?? ''],
+    );
+  }
+
+  async getSshClaimByTokenHash(hash: string): Promise<RemoteInvokeSshClaim | undefined> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>('SELECT * FROM bifrost_remote_invoke_ssh_claims WHERE claim_token_hash = ? LIMIT 1', [hash]);
+    return rows[0] as RemoteInvokeSshClaim | undefined;
+  }
+
+  async markSshClaimRedeemed(hash: string, claimedAt: string): Promise<void> {
+    await this.pool.execute(
+      'UPDATE bifrost_remote_invoke_ssh_claims SET claimed_at = ? WHERE claim_token_hash = ?',
+      [claimedAt, hash],
+    );
+  }
+
   async cleanupExpiredData(_now: string, retentionDays: number, maxRecords: number): Promise<number> {
     const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000).toISOString();
     let total = 0;
@@ -877,6 +895,7 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
       ['DELETE FROM bifrost_remote_invoke_events WHERE create_time < ?', [cutoff]],
       ['DELETE FROM bifrost_remote_invoke_calls WHERE started_at < ?', [cutoff]],
       ['DELETE FROM bifrost_remote_invoke_pairings WHERE create_time < ?', [cutoff]],
+      ['DELETE FROM bifrost_remote_invoke_ssh_claims WHERE expires_at < ?', [_now]],
     ] as const) {
       const [result] = await this.pool.execute<ResultSetHeader>(sql, params as unknown as ExecuteValues[]);
       total += result.affectedRows;

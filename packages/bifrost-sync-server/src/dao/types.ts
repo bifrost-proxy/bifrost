@@ -94,6 +94,10 @@ export interface IRemoteInvokeDao {
   getClientRecord(clientInstanceId: string): Promise<import('../types').RemoteInvokeClientRecord | undefined>;
   updateClientRecord(clientInstanceId: string, fields: Partial<import('../types').RemoteInvokeClientRecord>): Promise<void>;
 
+  createSshClaim(claim: import('../types').RemoteInvokeSshClaim): Promise<void>;
+  getSshClaimByTokenHash(hash: string): Promise<import('../types').RemoteInvokeSshClaim | undefined>;
+  markSshClaimRedeemed(hash: string, claimedAt: string): Promise<void>;
+
   cleanupExpiredData(now: string, retentionDays: number, maxRecords: number): Promise<number>;
 }
 

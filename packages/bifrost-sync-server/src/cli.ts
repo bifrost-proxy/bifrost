@@ -126,6 +126,7 @@ async function main() {
       max_sse_connections_per_ip: 10,
       pair_rate_limit_per_ip: 5,
       pair_rate_limit_global_per_client: 10,
+      ssh_grant_max_calls: 1000,
     };
   }
 

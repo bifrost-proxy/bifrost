@@ -179,3 +179,15 @@ CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_nonces (
   PRIMARY KEY (caller_pubkey_fp, nonce),
   KEY idx_ri_nonces_seen (seen_at)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_ssh_claims (
+  claim_token_hash      VARCHAR(128) NOT NULL PRIMARY KEY,
+  grant_id              VARCHAR(64)  NOT NULL,
+  client_instance_id    VARCHAR(128) NOT NULL DEFAULT '',
+  caller_pubkey_fp      VARCHAR(128) NOT NULL DEFAULT '',
+  expires_at            VARCHAR(32)  NOT NULL,
+  create_time           VARCHAR(32)  NOT NULL,
+  claimed_at            VARCHAR(32)  NOT NULL DEFAULT '',
+  KEY idx_ri_ssh_claims_grant (grant_id),
+  KEY idx_ri_ssh_claims_expires (expires_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
