@@ -361,7 +361,7 @@ connect_code() {
   pair_code="$(jq -r '.session.pair_code // empty' <<<"$pair_json")"
   [[ -n "$pair_code" ]] || fail "pair code empty: $pair_json"
 
-  BIFROST_DATA_DIR="$CALLER_POWER_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
+  BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
     --relay-url "$RELAY_URL" >"$out" 2>&1 &
   cp=$!
 
@@ -401,7 +401,7 @@ connect_code_power() {
   pair_code="$(jq -r '.session.pair_code // empty' <<<"$pair_json")"
   [[ -n "$pair_code" ]] || fail "power pair code empty: $pair_json"
 
-  BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
+  BIFROST_DATA_DIR="$CALLER_POWER_DATA" "$BIFROST_BIN" remote conn up "$pair_code" \
     --relay-url "$RELAY_URL" >"$out" 2>&1 &
   cp=$!
 
