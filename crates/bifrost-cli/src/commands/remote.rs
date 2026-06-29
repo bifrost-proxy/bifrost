@@ -12,10 +12,14 @@ use bifrost_command::{
     CanonicalQueryCommand, FilterCondition, SearchArgs, SearchFilters, SearchScope, TrafficGetArgs,
     TrafficListArgs, TrafficListDirection,
 };
-use bifrost_core::{direct_reqwest_client_builder, BifrostError};
+use bifrost_core::{
+    apply_remote_relay_headers, direct_reqwest_client_builder, remote_relay_headers_from_env,
+    BifrostError, REMOTE_RELAY_HEADERS_ENV,
+};
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
+use reqwest::header::HeaderMap;
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305, NONCE_LEN};
 use ring::agreement::{self, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
@@ -5238,6 +5242,7 @@ fn render_file_patch_human(value: &Value) {
 struct CallerRelayClient {
     http: reqwest::Client,
     base_url: String,
+    relay_headers: HeaderMap,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5509,11 +5514,28 @@ impl CallerRelayClient {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build caller http client");
+        let relay_headers = remote_relay_headers_from_env().unwrap_or_else(|error| {
+            warn!(
+                env = REMOTE_RELAY_HEADERS_ENV,
+                error = %error,
+                "ignoring invalid remote relay header configuration"
+            );
+            HeaderMap::new()
+        });
 
         Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
+            relay_headers,
         }
+    }
+
+    fn post(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.post(url), &self.relay_headers)
+    }
+
+    fn sse_get(&self, client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(client.get(url), &self.relay_headers)
     }
 
     async fn delete_grant(
@@ -5530,7 +5552,6 @@ impl CallerRelayClient {
             &caller_identity.key_pair,
         )?;
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {token}"))
             .json(&body)
@@ -5585,7 +5606,6 @@ impl CallerRelayClient {
         )?;
 
         let response = self
-            .http
             .post(&url)
             .json(&body)
             .send()
@@ -5673,7 +5693,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<StartPairingResponse> {
         let url = format!("{}/v5/remote-invoke/pairings/start", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(req)
             .send()
@@ -5700,8 +5719,8 @@ impl CallerRelayClient {
             .build()
             .map_err(|e| BifrostError::Network(format!("build sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("watch pairing failed: {e}")))?;
@@ -5815,7 +5834,6 @@ impl CallerRelayClient {
             &caller_identity.key_pair,
         )?;
         let response = self
-            .http
             .post(&url)
             .json(&body)
             .send()
@@ -5863,7 +5881,6 @@ impl CallerRelayClient {
             &caller_identity.key_pair,
         )?;
         let response = self
-            .http
             .post(&url)
             .json(&body)
             .send()
@@ -5910,7 +5927,6 @@ impl CallerRelayClient {
             &caller_identity.key_pair,
         )?;
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {grant_session_token}"))
             .json(&body)
@@ -5927,7 +5943,6 @@ impl CallerRelayClient {
             self.base_url, call_id
         );
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
@@ -5946,7 +5961,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<()> {
         let url = format!("{}/v4/remote-invoke/calls/{}/input", self.base_url, call_id);
         let response = self
-            .http
             .post(&url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .json(&serde_json::json!({ "envelope_json": envelope_json }))
@@ -5966,7 +5980,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<SshChallengeResponse> {
         let url = format!("{}/v4/remote-invoke/ssh/challenge", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(&SshChallengeRequest {
                 device_code: device_code.to_string(),
@@ -5984,7 +5997,6 @@ impl CallerRelayClient {
     ) -> bifrost_core::Result<SshConnectResponse> {
         let url = format!("{}/v4/remote-invoke/ssh/connect", self.base_url);
         let response = self
-            .http
             .post(&url)
             .json(req)
             .send()
@@ -6009,8 +6021,8 @@ impl CallerRelayClient {
             .build()
             .map_err(|e| BifrostError::Network(format!("build ssh connect sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -6099,8 +6111,8 @@ impl CallerRelayClient {
             .build()
             .map_err(|e| BifrostError::Network(format!("build call events sse client: {e}")))?;
 
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -6372,8 +6384,8 @@ impl CallerRelayClient {
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
-        let response = sse_http
-            .get(&url)
+        let response = self
+            .sse_get(&sse_http, &url)
             .header("Authorization", format!("Bearer {relay_token}"))
             .send()
             .await
@@ -6523,8 +6535,8 @@ impl CallerRelayClient {
         let deadline = tokio::time::Instant::now() + wait;
 
         loop {
-            let response = http
-                .get(&url)
+            let response = self
+                .sse_get(&http, &url)
                 .header("Authorization", format!("Bearer {relay_token}"))
                 .send()
                 .await

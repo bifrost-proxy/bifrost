@@ -1475,6 +1475,7 @@ fn external_progress_maps_to_agent_turn_progress_events() {
 #[tokio::test]
 async fn external_cli_run_writes_image_attachments_and_injects_prompt_paths() {
     let temp_dir = tempfile::tempdir().unwrap();
+    let _data_dir_guard = crate::test_env::BifrostDataDirGuard::set(temp_dir.path());
     let runs_root = temp_dir.path().join("runs");
     let runtime = ExternalCliRuntime::new(&runs_root);
     let request = ExternalCliRunRequest {

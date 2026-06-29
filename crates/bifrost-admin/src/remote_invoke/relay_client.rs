@@ -1,7 +1,11 @@
 use std::time::Duration;
 
-use bifrost_core::{direct_reqwest_client_builder, BifrostError, Result};
+use bifrost_core::{
+    apply_remote_relay_headers, direct_reqwest_client_builder, remote_relay_headers_from_env,
+    BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
+};
 use parking_lot::RwLock;
+use reqwest::header::HeaderMap;
 use serde::Deserialize;
 
 use super::types::{
@@ -22,6 +26,7 @@ struct RelayApiResponse<T> {
 pub struct RelayClient {
     http: reqwest::Client,
     base_url: RwLock<String>,
+    relay_headers: HeaderMap,
     client_auth_token: RwLock<Option<String>>,
     client_instance_id: String,
     device_name: String,
@@ -41,10 +46,19 @@ impl RelayClient {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build relay http client");
+        let relay_headers = remote_relay_headers_from_env().unwrap_or_else(|error| {
+            tracing::warn!(
+                env = REMOTE_RELAY_HEADERS_ENV,
+                error = %error,
+                "ignoring invalid remote relay header configuration"
+            );
+            HeaderMap::new()
+        });
 
         Self {
             http,
             base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
+            relay_headers,
             client_auth_token: RwLock::new(None),
             client_instance_id: client_instance_id.to_string(),
             device_name: device_name.to_string(),
@@ -68,7 +82,7 @@ impl RelayClient {
         user_auth_token: Option<&str>,
     ) -> Result<ClientRegistrationResponse> {
         let url = format!("{}/v4/remote-invoke/client/register", self.base_url());
-        let mut request = self.http.post(&url).json(req);
+        let mut request = self.relay_post(&url).json(req);
         if let Some(token) = user_auth_token {
             request = request.header("x-bifrost-token", token);
         }
@@ -89,7 +103,7 @@ impl RelayClient {
             "{}/v4/remote-invoke/client/register/challenge",
             self.base_url()
         );
-        let mut request = self.http.post(&url).json(req);
+        let mut request = self.relay_post(&url).json(req);
         if let Some(token) = user_auth_token {
             request = request.header("x-bifrost-token", token);
         }
@@ -383,8 +397,24 @@ impl RelayClient {
         self.authorized_get(&url)
     }
 
+    fn relay_get(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.get(url), &self.relay_headers)
+    }
+
+    fn relay_post(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.post(url), &self.relay_headers)
+    }
+
+    fn relay_delete(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.delete(url), &self.relay_headers)
+    }
+
+    fn relay_patch(&self, url: &str) -> reqwest::RequestBuilder {
+        apply_remote_relay_headers(self.http.patch(url), &self.relay_headers)
+    }
+
     fn authorized_get(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.get(url);
+        let mut builder = self.relay_get(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -392,7 +422,7 @@ impl RelayClient {
     }
 
     fn authorized_post(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.post(url);
+        let mut builder = self.relay_post(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -400,7 +430,7 @@ impl RelayClient {
     }
 
     fn authorized_delete(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.delete(url);
+        let mut builder = self.relay_delete(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }
@@ -408,7 +438,7 @@ impl RelayClient {
     }
 
     fn authorized_patch(&self, url: &str) -> reqwest::RequestBuilder {
-        let mut builder = self.http.patch(url);
+        let mut builder = self.relay_patch(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
             builder = builder.header("Authorization", format!("Bearer {token}"));
         }

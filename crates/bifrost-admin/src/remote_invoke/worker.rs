@@ -1180,16 +1180,11 @@ impl RemoteInvokeWorker {
         let stream_id = uuid::Uuid::new_v4().to_string();
         *self.current_stream_id.write() = Some(stream_id.clone());
 
-        let url = self.relay_client.build_stream_url(&stream_id);
         info!(stream_id = %stream_id, "connecting SSE stream");
 
-        let http = bifrost_core::direct_reqwest_client_builder()
-            .connect_timeout(Duration::from_secs(10))
-            .build()
-            .map_err(|e| BifrostError::Network(format!("build sse client: {}", e)))?;
-
-        let response = http
-            .get(&url)
+        let response = self
+            .relay_client
+            .build_sse_request(&stream_id)
             .send()
             .await
             .map_err(|e| BifrostError::Network(format!("SSE connect failed: {}", e)))?;
