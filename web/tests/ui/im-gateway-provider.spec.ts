@@ -4,9 +4,35 @@ import { apiBase, openPage, uniqueName, waitForToast } from "./helpers/admin-hel
 test.describe.configure({ mode: "serial" });
 
 test("IM Gateway Provider 创建后会立即启动长连接", async ({ page, request }) => {
-  const providerId = uniqueName("im-provider-auto-connect");
+  const providerId = "feishu-main2";
   let connectCalls = 0;
 
+  await page.route("**/im-gateway/providers", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.fallback();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([
+        {
+          id: "feishu-main",
+          provider_type: "feishu",
+          display_name: "Feishu Main",
+          enabled: true,
+          base_url: "https://open.feishu.cn/open-apis",
+          app_id: "cli_existing_provider_id",
+          secret_configured: true,
+          owner_open_id: "ou_existing_owner",
+          event_connection_enabled: true,
+          event_types: ["message.receive"],
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        },
+      ]),
+    });
+  });
   await page.route("**/im-gateway/providers/feishu-setup/start", async (route) => {
     await route.fulfill({
       status: 200,
@@ -39,6 +65,7 @@ test("IM Gateway Provider 创建后会立即启动长连接", async ({ page, req
   });
   await page.route("**/im-gateway/providers/feishu-setup/setup-session-1/provider", async (route) => {
     const requestBody = route.request().postDataJSON() as { id: string; display_name?: string };
+    expect(requestBody.id).toBe(providerId);
     await route.fulfill({
       status: 200,
       contentType: "application/json",
@@ -108,13 +135,12 @@ test("IM Gateway Provider 创建后会立即启动长连接", async ({ page, req
     await expect(dialog.getByText("Agent Working Directory")).toHaveCount(0);
     await page.getByText("Feishu", { exact: true }).click();
     await page.getByRole("button", { name: "Next" }).click();
-    await page.getByLabel("Provider ID").fill(providerId);
+    await expect(page.getByLabel("Provider ID")).toHaveValue(providerId);
+    await expect(page.getByLabel("Provider ID")).toBeEnabled();
     await expect(page.getByText("https://open.feishu.cn/page/launcher?user_code=123")).toBeVisible();
     await expect(dialog.getByLabel("App ID")).toHaveCount(0);
     await expect(dialog.getByLabel("App Secret")).toHaveCount(0);
-    await expect(page.getByText("App created. Bifrost has the App ID and Secret on the server.")).toBeVisible();
     await expect(dialog.getByText("Open Setup Page")).toBeVisible();
-    await page.getByRole("button", { name: "Connect", exact: true }).click();
     await waitForToast(page, "Feishu provider connected");
     await expect(dialog.getByText("Connection")).toBeVisible();
     await expect(dialog.getByText("Agent Runner", { exact: true })).toBeVisible();
