@@ -5,6 +5,7 @@ use base64::Engine;
 use ring::rand::{SecureRandom, SystemRandom};
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde_json::{Map, Value};
+use unicode_normalization::UnicodeNormalization;
 
 use bifrost_core::{BifrostError, Result};
 
@@ -60,6 +61,7 @@ fn canonicalize(value: &Value) -> Value {
             }
             Value::Object(out)
         }
+        Value::String(s) => Value::String(s.nfc().collect()),
         _ => value.clone(),
     }
 }
@@ -124,5 +126,17 @@ mod tests {
             .and_then(Value::as_str)
             .is_some());
         assert!(signed.get("signature").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn canonical_json_normalizes_strings_to_nfc() {
+        let decomposed = "Cafe\u{0301}";
+        let rendered = canonical_json(&serde_json::json!({
+            "text": decomposed,
+            "nested": { "path": decomposed }
+        }))
+        .expect("canonical JSON");
+
+        assert_eq!(rendered, r#"{"nested":{"path":"Café"},"text":"Café"}"#);
     }
 }

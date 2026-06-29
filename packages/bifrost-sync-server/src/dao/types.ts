@@ -108,5 +108,6 @@ export interface IStorage {
   groupMember: IGroupMemberDao;
   groupSetting: IGroupSettingDao;
   remoteInvoke: IRemoteInvokeDao;
+  ready?(): Promise<void>;
   close(): Promise<void>;
 }

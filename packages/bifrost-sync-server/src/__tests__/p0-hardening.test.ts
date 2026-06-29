@@ -5,12 +5,30 @@ import http from 'http';
 import path from 'path';
 
 import { createSyncServer, type SyncServerConfig, type SyncServerInstance } from '../index';
+import { remoteInvokeSchemaNeedsReset } from '../dao/mysql';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
 import { deriveSshDeviceCode } from '../remote-invoke/ssh-auth';
 import { ed25519FingerprintFromBase64 } from '../remote-invoke/pop';
 import { makeCallerKeypair, sha256Hex, signPopBody } from './remote-invoke-v5-test-utils';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-p0-hardening');
+const V5_GRANT_COLUMNS = [
+  'ssh_key_id',
+  'ssh_key_fingerprint',
+  'file_access',
+  'caller_pubkey',
+  'caller_pubkey_fp',
+  'session_token_hash',
+  'session_token_expires_at',
+  'last_nonce_seen',
+  'revoked_at',
+];
+const V5_PAIRING_COLUMNS = [
+  'watch_token_hash',
+  'claim_token_hash',
+  'claim_expires_at',
+  'claimed_at',
+];
 
 let server: SyncServerInstance;
 let baseUrl: string;
@@ -122,6 +140,25 @@ beforeAll(async () => {
 afterAll(async () => {
   await server?.close();
   if (fs.existsSync(TEST_DATA_DIR)) fs.rmSync(TEST_DATA_DIR, { recursive: true });
+});
+
+describe('MySQL remote-invoke v5 schema reset detection', () => {
+  it('does not reset when all v5 columns and tables are present', () => {
+    expect(remoteInvokeSchemaNeedsReset(V5_GRANT_COLUMNS, V5_PAIRING_COLUMNS, true, true)).toBe(false);
+  });
+
+  it('resets when legacy schema is missing v5 token columns', () => {
+    expect(remoteInvokeSchemaNeedsReset(['ssh_key_id', 'file_access'], V5_PAIRING_COLUMNS, true, true)).toBe(true);
+  });
+
+  it('resets when removed policy columns are still present', () => {
+    expect(remoteInvokeSchemaNeedsReset([...V5_GRANT_COLUMNS, 'policy_binding'], V5_PAIRING_COLUMNS, true, true)).toBe(true);
+  });
+
+  it('resets when nonce or ssh claim tables are missing', () => {
+    expect(remoteInvokeSchemaNeedsReset(V5_GRANT_COLUMNS, V5_PAIRING_COLUMNS, false, true)).toBe(true);
+    expect(remoteInvokeSchemaNeedsReset(V5_GRANT_COLUMNS, V5_PAIRING_COLUMNS, true, false)).toBe(true);
+  });
 });
 
 describe('P0-1: SSH route is bound to the registering user', () => {

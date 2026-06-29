@@ -49,6 +49,7 @@ STABLE_SHELL_TESTS=(
   "test_replay_rules.sh"
   "test_remote_file_api_e2e.sh"
   "test_remote_file_relay_e2e.sh"
+  "test_remote_invoke_v5_session_refresh_e2e.sh"
 )
 
 header() {
@@ -831,6 +832,7 @@ run_shell_tests_parallel() {
     "test_remote_connect_overload_retry_e2e.sh"
     "test_client_process_transport_attribution.sh"
     "test_remote_job_real_e2e.sh"
+    "test_remote_invoke_v5_session_refresh_e2e.sh"
     "test_remote_shell_exec_streaming_e2e.sh"
     "test_traffic_db_e2e.sh"
     "test_openai_like_sse_search_e2e.sh"

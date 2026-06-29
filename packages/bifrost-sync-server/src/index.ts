@@ -31,6 +31,7 @@ function isRemoteInvokePath(pathname: string): boolean {
 
 export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const storage = createStorage(config.storage);
+  const storageReady = storage.ready?.() ?? Promise.resolve();
   const authMode = config.auth.mode;
   const oauth2Config = config.auth.oauth2;
   const trustForwardedFor = config.server.trust_forwarded_for ?? false;
@@ -49,7 +50,7 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
   const nonceGcTimer = config.remote_invoke?.enabled
     ? setInterval(() => {
       const cutoff = new Date(Date.now() - 120_000).toISOString();
-      storage.remoteInvoke.gcNonces(cutoff).catch((e: unknown) => {
+      storageReady.then(() => storage.remoteInvoke.gcNonces(cutoff)).catch((e: unknown) => {
         console.debug('[bifrost-sync-server] remote-invoke nonce gc failed:', e);
       });
     }, 60_000)
@@ -71,6 +72,14 @@ export function createSyncServer(config: SyncServerConfig): SyncServerInstance {
     if (req.method === 'OPTIONS') {
       res.writeHead(204);
       res.end();
+      return;
+    }
+
+    try {
+      await storageReady;
+    } catch (e: unknown) {
+      console.error('[bifrost-sync-server] storage initialization failed:', e);
+      sendError(res, 500, 'storage_initialization_failed');
       return;
     }
 

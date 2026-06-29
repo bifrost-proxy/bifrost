@@ -69,6 +69,45 @@ function rowToGroupSetting(row: RowDataPacket): GroupSetting {
   };
 }
 
+const REQUIRED_REMOTE_INVOKE_GRANT_COLUMNS = [
+  'ssh_key_id',
+  'ssh_key_fingerprint',
+  'file_access',
+  'caller_pubkey',
+  'caller_pubkey_fp',
+  'session_token_hash',
+  'session_token_expires_at',
+  'last_nonce_seen',
+  'revoked_at',
+];
+
+const REQUIRED_REMOTE_INVOKE_PAIRING_COLUMNS = [
+  'watch_token_hash',
+  'claim_token_hash',
+  'claim_expires_at',
+  'claimed_at',
+];
+
+const FORBIDDEN_REMOTE_INVOKE_GRANT_COLUMNS = [
+  'policy_binding',
+  'shell_policy_set_version_snapshot',
+  'interactive_allowed',
+  'stdin_allowed',
+];
+
+export function remoteInvokeSchemaNeedsReset(
+  grantColumns: string[],
+  pairingColumns: string[],
+  nonceTableExists: boolean,
+  sshClaimsTableExists: boolean,
+): boolean {
+  return REQUIRED_REMOTE_INVOKE_GRANT_COLUMNS.some(name => !grantColumns.includes(name)) ||
+    REQUIRED_REMOTE_INVOKE_PAIRING_COLUMNS.some(name => !pairingColumns.includes(name)) ||
+    !nonceTableExists ||
+    !sshClaimsTableExists ||
+    FORBIDDEN_REMOTE_INVOKE_GRANT_COLUMNS.some(name => grantColumns.includes(name));
+}
+
 export class MysqlUserDao implements IUserDao {
   constructor(private pool: Pool) {}
 
@@ -495,7 +534,192 @@ export class MysqlGroupSettingDao implements IGroupSettingDao {
 }
 
 export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
-  constructor(private pool: Pool) {}
+  private schemaReady: Promise<void>;
+
+  constructor(private pool: Pool) {
+    this.schemaReady = this.resetRemoteInvokeSchemaIfNeeded();
+  }
+
+  ready(): Promise<void> {
+    return this.schemaReady;
+  }
+
+  private async tableExists(table: string): Promise<boolean> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+      [table],
+    );
+    return rows.length > 0;
+  }
+
+  private async tableColumns(table: string): Promise<string[]> {
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      `SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?`,
+      [table],
+    );
+    return rows.map(row => String(row.COLUMN_NAME));
+  }
+
+  private async resetRemoteInvokeSchemaIfNeeded(): Promise<void> {
+    const grantColumns = await this.tableColumns('bifrost_remote_invoke_grants');
+    const pairingColumns = await this.tableColumns('bifrost_remote_invoke_pairings');
+    const nonceTable = await this.tableExists('bifrost_remote_invoke_nonces');
+    const sshClaimsTable = await this.tableExists('bifrost_remote_invoke_ssh_claims');
+    if (!remoteInvokeSchemaNeedsReset(grantColumns, pairingColumns, nonceTable, sshClaimsTable)) {
+      return;
+    }
+
+    for (const statement of [
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_events',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_calls',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_nonces',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_ssh_claims',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_grants',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_pairings',
+      'DROP TABLE IF EXISTS bifrost_remote_invoke_clients',
+    ]) {
+      await this.pool.query(statement);
+    }
+
+    await this.createRemoteInvokeTables();
+  }
+
+  private async createRemoteInvokeTables(): Promise<void> {
+    const statements = [
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_pairings (
+        id                    VARCHAR(32)  NOT NULL PRIMARY KEY,
+        user_id               VARCHAR(128) NOT NULL,
+        client_instance_id    VARCHAR(128) NOT NULL,
+        caller_fingerprint    VARCHAR(128) NOT NULL DEFAULT '',
+        pair_code             VARCHAR(32)  NOT NULL DEFAULT '',
+        status                VARCHAR(32)  NOT NULL DEFAULT 'created',
+        caller_pubkey         TEXT         NOT NULL,
+        caller_ephemeral_pub  TEXT         NOT NULL,
+        client_ephemeral_pub  TEXT         NOT NULL,
+        caller_info_json      LONGTEXT     NOT NULL,
+        command_summary_json  LONGTEXT     NOT NULL,
+        command_json          LONGTEXT     NOT NULL,
+        relay_token           VARCHAR(128) NOT NULL DEFAULT '',
+        call_id               VARCHAR(32)  NOT NULL DEFAULT '',
+        grant_id              VARCHAR(32)  NOT NULL DEFAULT '',
+        watch_token_hash      VARCHAR(128) NOT NULL DEFAULT '',
+        claim_token_hash      VARCHAR(128) NOT NULL DEFAULT '',
+        claim_expires_at      VARCHAR(32)  NOT NULL DEFAULT '',
+        claimed_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        expires_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        create_time           VARCHAR(32)  NOT NULL,
+        update_time           VARCHAR(32)  NOT NULL,
+        KEY idx_ri_pairings_user_code (user_id, pair_code, status),
+        KEY idx_ri_pairings_client (client_instance_id, status),
+        KEY idx_ri_pairings_claim (claim_token_hash),
+        KEY idx_ri_pairings_watch (watch_token_hash)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_grants (
+        id                    VARCHAR(32)  NOT NULL PRIMARY KEY,
+        user_id               VARCHAR(128) NOT NULL,
+        client_instance_id    VARCHAR(128) NOT NULL,
+        caller_fingerprint    VARCHAR(128) NOT NULL DEFAULT '',
+        caller_display_name   VARCHAR(255) NOT NULL DEFAULT '',
+        caller_pubkey         TEXT         NOT NULL,
+        caller_pubkey_fp      VARCHAR(128) NOT NULL DEFAULT '',
+        caller_ephemeral_pub  TEXT         NOT NULL,
+        client_ephemeral_pub  TEXT         NOT NULL,
+        grant_mode            VARCHAR(32)  NOT NULL DEFAULT 'once',
+        grant_scope           VARCHAR(64)  NOT NULL DEFAULT 'remote_query',
+        file_access           VARCHAR(32)  NOT NULL DEFAULT 'none',
+        ssh_key_id            VARCHAR(128) NOT NULL DEFAULT '',
+        ssh_key_fingerprint   VARCHAR(128) NOT NULL DEFAULT '',
+        status                VARCHAR(32)  NOT NULL DEFAULT 'active',
+        first_authorized_at   VARCHAR(32)  NOT NULL DEFAULT '',
+        expires_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        session_token_hash    VARCHAR(128) NOT NULL DEFAULT '',
+        session_token_expires_at VARCHAR(32) NOT NULL DEFAULT '',
+        last_nonce_seen       VARCHAR(128) NOT NULL DEFAULT '',
+        revoked_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        last_used_at          VARCHAR(32)  NOT NULL DEFAULT '',
+        max_calls             INT          NOT NULL DEFAULT 1,
+        remaining_calls       INT          NOT NULL DEFAULT 1,
+        created_by            VARCHAR(128) NOT NULL DEFAULT '',
+        update_time           VARCHAR(32)  NOT NULL,
+        KEY idx_ri_grants_reusable (user_id, client_instance_id, caller_fingerprint, status),
+        KEY idx_ri_grants_user (user_id, status, expires_at),
+        KEY idx_ri_grants_caller_fp (caller_pubkey_fp),
+        KEY idx_ri_grants_session (session_token_hash)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_calls (
+        id                    VARCHAR(32)  NOT NULL PRIMARY KEY,
+        user_id               VARCHAR(128) NOT NULL,
+        grant_id              VARCHAR(32)  NOT NULL DEFAULT '',
+        pairing_id            VARCHAR(32)  NOT NULL DEFAULT '',
+        client_instance_id    VARCHAR(128) NOT NULL DEFAULT '',
+        caller_fingerprint    VARCHAR(128) NOT NULL DEFAULT '',
+        source_ip             VARCHAR(64)  NOT NULL DEFAULT '',
+        caller_display_name   VARCHAR(255) NOT NULL DEFAULT '',
+        status                VARCHAR(32)  NOT NULL DEFAULT 'pending',
+        command_summary_json  LONGTEXT     NOT NULL,
+        command_json          LONGTEXT     NOT NULL,
+        payload_digest        VARCHAR(128) NOT NULL DEFAULT '',
+        stdout_digest         VARCHAR(128) NOT NULL DEFAULT '',
+        stderr_digest         VARCHAR(128) NOT NULL DEFAULT '',
+        exit_code             INT          NOT NULL DEFAULT -1,
+        started_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        ended_at              VARCHAR(32)  NOT NULL DEFAULT '',
+        duration_ms           INT          NOT NULL DEFAULT 0,
+        bytes_in              INT          NOT NULL DEFAULT 0,
+        bytes_out             INT          NOT NULL DEFAULT 0,
+        KEY idx_ri_calls_user (user_id, started_at),
+        KEY idx_ri_calls_grant (grant_id),
+        KEY idx_ri_calls_status (status, started_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_events (
+        id                    VARCHAR(32) NOT NULL PRIMARY KEY,
+        call_id               VARCHAR(32) NOT NULL DEFAULT '',
+        event_type            VARCHAR(64) NOT NULL DEFAULT '',
+        seq                   INT         NOT NULL DEFAULT 0,
+        direction             VARCHAR(32) NOT NULL DEFAULT '',
+        event_summary_json    LONGTEXT    NOT NULL,
+        create_time           VARCHAR(32) NOT NULL,
+        KEY idx_ri_events_call (call_id, create_time)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_clients (
+        client_instance_id    VARCHAR(128) NOT NULL PRIMARY KEY,
+        user_id               VARCHAR(128) NOT NULL DEFAULT '',
+        client_name           VARCHAR(255) NOT NULL DEFAULT '',
+        platform              VARCHAR(64)  NOT NULL DEFAULT '',
+        bifrost_version       VARCHAR(64)  NOT NULL DEFAULT '',
+        client_auth_token     VARCHAR(128) NOT NULL DEFAULT '',
+        client_pubkey_hash    VARCHAR(128) NOT NULL DEFAULT '',
+        token_expires_at      VARCHAR(32)  NOT NULL DEFAULT '',
+        last_heartbeat_at     VARCHAR(32)  NOT NULL DEFAULT '',
+        create_time           VARCHAR(32)  NOT NULL,
+        update_time           VARCHAR(32)  NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_nonces (
+        caller_pubkey_fp      VARCHAR(128) NOT NULL,
+        nonce                 VARCHAR(128) NOT NULL,
+        seen_at               VARCHAR(32)  NOT NULL,
+        PRIMARY KEY (caller_pubkey_fp, nonce),
+        KEY idx_ri_nonces_seen (seen_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+      `CREATE TABLE IF NOT EXISTS bifrost_remote_invoke_ssh_claims (
+        claim_token_hash      VARCHAR(128) NOT NULL PRIMARY KEY,
+        grant_id              VARCHAR(64)  NOT NULL,
+        client_instance_id    VARCHAR(128) NOT NULL DEFAULT '',
+        caller_pubkey_fp      VARCHAR(128) NOT NULL DEFAULT '',
+        expires_at            VARCHAR(32)  NOT NULL,
+        create_time           VARCHAR(32)  NOT NULL,
+        claimed_at            VARCHAR(32)  NOT NULL DEFAULT '',
+        KEY idx_ri_ssh_claims_grant (grant_id),
+        KEY idx_ri_ssh_claims_expires (expires_at)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci`,
+    ];
+
+    for (const statement of statements) {
+      await this.pool.query(statement);
+    }
+  }
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     await this.pool.execute(
@@ -922,7 +1146,7 @@ export class MysqlStorage implements IStorage {
   public group: MysqlGroupDao;
   public groupMember: MysqlGroupMemberDao;
   public groupSetting: MysqlGroupSettingDao;
-  public remoteInvoke: IRemoteInvokeDao;
+  public remoteInvoke: MysqlRemoteInvokeDao;
   private pool: Pool;
 
   constructor(config: MysqlConfig) {
@@ -943,7 +1167,12 @@ export class MysqlStorage implements IStorage {
     this.remoteInvoke = new MysqlRemoteInvokeDao(this.pool);
   }
 
+  async ready(): Promise<void> {
+    await this.remoteInvoke.ready();
+  }
+
   async close(): Promise<void> {
+    await this.ready().catch(() => undefined);
     await this.pool.end();
   }
 }

@@ -94,6 +94,7 @@ async fn run_remote_invoke_pop_flow() -> Result<(), String> {
         &format!("{base_url}/v5/remote-invoke/pairings/start"),
         json!({
             "pair_code": pair_code,
+            "caller_pubkey": ed25519_pubkey_b64(&caller_keys),
             "caller_info": {
                 "fingerprint": "caller-pop-e2e",
                 "display_name": "PoP E2E caller"
@@ -168,14 +169,13 @@ async fn run_remote_invoke_pop_flow() -> Result<(), String> {
         return Err("claim response did not return client_ephemeral_pub".to_string());
     }
 
-    let lookup_caller_ephemeral = random_x25519_pub_b64()?;
     let lookup = post_ok(
         &http,
         &format!("{base_url}/v5/remote-invoke/grants/lookup"),
         sign_pop_body(
             json!({
                 "client_instance_id": client_instance_id,
-                "caller_ephemeral_pub": lookup_caller_ephemeral,
+                "caller_ephemeral_pub": claim_caller_ephemeral,
             }),
             &caller_keys,
         )?,
@@ -232,9 +232,9 @@ async fn run_remote_invoke_pop_flow() -> Result<(), String> {
     if call_open
         .get("caller_ephemeral_pub")
         .and_then(Value::as_str)
-        != Some(lookup_caller_ephemeral.as_str())
+        != Some(claim_caller_ephemeral.as_str())
     {
-        return Err("client call_open did not receive latest caller_ephemeral_pub".to_string());
+        return Err("client call_open did not receive frozen caller_ephemeral_pub".to_string());
     }
     if call_open
         .get("client_ephemeral_pub")

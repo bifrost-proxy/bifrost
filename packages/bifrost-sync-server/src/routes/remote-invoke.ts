@@ -40,6 +40,7 @@ const clientDataLimiter = new RateLimiter(1_500, 10_000);
 const callerLookupLimiter = new RateLimiter(240, 60_000);
 const callerOpenLimiter = new RateLimiter(120, 60_000);
 const callerControlLimiter = new RateLimiter(240, 60_000);
+const callerPopPreflightLimiter = new RateLimiter(600, 60_000);
 // PR#6a-followup: high-throughput stream_frame endpoint gets its own dedicated
 // limiter so large-output streams do not share quota with legacy /frame.
 const clientStreamFrameLimiter = new RateLimiter(60_000, 10_000);
@@ -131,6 +132,10 @@ function syncTokenKey(ctx: RequestContext): string {
 function callerAccessKey(ctx: RequestContext): string {
   const bearer = extractBearerToken(ctx)?.trim();
   return bearer ? `bearer:${bearer}` : `ip:${ctx.clientIp || 'unknown'}`;
+}
+
+function callerPopPreflightKey(ctx: RequestContext, route: string): string {
+  return `${callerAccessKey(ctx)}:${route}`;
 }
 
 function protocolVersionNotSupported(ctx: RequestContext): boolean {
@@ -988,6 +993,9 @@ async function handleGrantsLookupV5(
   storage: IStorage,
   service: RemoteInvokeService,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, callerPopPreflightLimiter, callerPopPreflightKey(ctx, 'lookup'))) {
+    return true;
+  }
   const pop = await requirePoP(ctx, storage);
   if (!pop) return true;
   const clientInstanceId = String(pop.body.client_instance_id ?? '');
@@ -1019,6 +1027,9 @@ async function handleGrantsClaimV5(
   storage: IStorage,
   service: RemoteInvokeService,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, callerPopPreflightLimiter, callerPopPreflightKey(ctx, 'claim'))) {
+    return true;
+  }
   const pop = await requirePoP(ctx, storage);
   if (!pop) return true;
   const body = pop.body;
@@ -1050,6 +1061,9 @@ async function handleGrantsSshClaimV5(
   storage: IStorage,
   service: RemoteInvokeService,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, callerPopPreflightLimiter, callerPopPreflightKey(ctx, 'ssh_claim'))) {
+    return true;
+  }
   const pop = await requirePoP(ctx, storage);
   if (!pop) return true;
   const body = pop.body;
@@ -1081,6 +1095,9 @@ async function handleGrantsRevokeV5(
   storage: IStorage,
   service: RemoteInvokeService,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, callerPopPreflightLimiter, callerPopPreflightKey(ctx, 'revoke'))) {
+    return true;
+  }
   const grant = await extractBearerGrantSession(ctx, service);
   if (!grant) return true;
   const pop = await requirePoP(ctx, storage, grant.caller_pubkey_fp);
@@ -1099,6 +1116,9 @@ async function handleOpenCallV5(
   storage: IStorage,
   service: RemoteInvokeService,
 ): Promise<boolean> {
+  if (!applyRateLimit(ctx, callerPopPreflightLimiter, callerPopPreflightKey(ctx, 'open'))) {
+    return true;
+  }
   const grant = await extractBearerGrantSession(ctx, service);
   if (!grant) return true;
   const pop = await requirePoP(ctx, storage, grant.caller_pubkey_fp);

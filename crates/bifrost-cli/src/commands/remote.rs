@@ -62,6 +62,7 @@ const ENCRYPTED_OPEN_CALL_VERSION: u32 = 2;
 const LOCAL_SECRET_FORMAT_VERSION: u32 = 1;
 const OPEN_CALL_HKDF_INFO_PREFIX: &[u8] = b"bifrost-open-call-v2";
 const CALL_EVENT_HKDF_INFO_PREFIX: &[u8] = b"bifrost-e2e-v1";
+const GRANT_SESSION_REFRESH_SKEW_SECS: i64 = 60;
 
 #[cfg(test)]
 static REMOTE_TEST_DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -1307,6 +1308,19 @@ fn local_grant_from_saved_session(conn: &LocalConnection) -> Option<GrantInfo> {
     })
 }
 
+fn grant_session_needs_refresh(conn: &LocalConnection) -> bool {
+    if conn.grant_session_token.is_none() {
+        return true;
+    }
+    let Some(expires_at) = conn.grant_session_expires_at.as_deref() else {
+        return true;
+    };
+    let Ok(expires_at) = chrono::DateTime::parse_from_rfc3339(expires_at) else {
+        return true;
+    };
+    expires_at.timestamp() <= chrono::Utc::now().timestamp() + GRANT_SESSION_REFRESH_SKEW_SECS
+}
+
 fn is_grant_scope_mismatch_error(err: &BifrostError) -> bool {
     matches!(err, BifrostError::Network(msg)
         if msg.contains("open_call failed with status 403")
@@ -1804,12 +1818,18 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
         Some(build_remote_command_checked(&opts.action)?)
     };
 
-    let grant = if let Some(local_grant) = local_grant_from_saved_session(&conn) {
+    let grant = if !grant_session_needs_refresh(&conn) {
+        local_grant_from_saved_session(&conn)
+    } else {
+        debug!("saved v5 grant session is expired or near expiry; refreshing before open_call");
+        None
+    };
+    let grant = if let Some(local_grant) = grant {
         debug!("using saved v5 grant session");
         local_grant
     } else {
         let grant = caller
-            .find_reusable_grant(&conn.client_instance_id, &caller_identity)
+            .find_reusable_grant(&conn.client_instance_id, &caller_identity, Some(&conn))
             .await?;
 
         match grant {
@@ -5490,13 +5510,27 @@ impl CallerRelayClient {
         &self,
         client_instance_id: &str,
         caller_identity: &CallerPopIdentity,
+        saved_connection: Option<&LocalConnection>,
     ) -> bifrost_core::Result<Option<GrantInfo>> {
-        let pending_transport = PendingCallerTransport::generate()?;
+        let pending_transport = if saved_connection.is_some() {
+            None
+        } else {
+            Some(PendingCallerTransport::generate()?)
+        };
+        let caller_ephemeral_pub = saved_connection
+            .and_then(|conn| conn.caller_ephemeral_pub.clone())
+            .or_else(|| pending_transport.as_ref().map(|t| t.caller_ephemeral_pub.clone()))
+            .ok_or_else(|| {
+                BifrostError::Config(
+                    "saved connection is missing caller_ephemeral_pub; reconnect to refresh authorization"
+                        .to_string(),
+                )
+            })?;
         let url = format!("{}/v5/remote-invoke/grants/lookup", self.base_url);
         let body = pop::sign_envelope(
             serde_json::json!({
                 "client_instance_id": client_instance_id,
-                "caller_ephemeral_pub": pending_transport.caller_ephemeral_pub.clone(),
+                "caller_ephemeral_pub": caller_ephemeral_pub,
             }),
             &caller_identity.key_pair,
         )?;
@@ -5538,7 +5572,39 @@ impl CallerRelayClient {
                     "find_reusable_grant response missing client_ephemeral_pub".to_string(),
                 )
             })?;
-        let transport = pending_transport.finalize(client_ephemeral_pub)?;
+        let transport = if let Some(conn) = saved_connection {
+            let saved_client_pub = conn.client_ephemeral_pub.as_deref().ok_or_else(|| {
+                BifrostError::Config(
+                    "saved connection is missing client_ephemeral_pub; reconnect to refresh authorization"
+                        .to_string(),
+                )
+            })?;
+            if saved_client_pub != client_ephemeral_pub {
+                return Err(BifrostError::Config(
+                    "relay grant client_ephemeral_pub does not match saved encrypted transport context; reconnect required"
+                        .to_string(),
+                ));
+            }
+            StoredTransportContext {
+                caller_ephemeral_pub: conn.caller_ephemeral_pub.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "saved connection is missing caller_ephemeral_pub; reconnect to refresh authorization"
+                            .to_string(),
+                    )
+                })?,
+                client_ephemeral_pub: saved_client_pub.to_string(),
+                shared_secret_encrypted: conn.shared_secret_encrypted.clone().ok_or_else(|| {
+                    BifrostError::Config(
+                        "saved connection is missing encrypted transport secret; reconnect to refresh authorization"
+                            .to_string(),
+                    )
+                })?,
+            }
+        } else {
+            pending_transport
+                .expect("pending transport exists without saved connection")
+                .finalize(client_ephemeral_pub)?
+        };
         let grant = GrantInfo {
             grant_id: String::new(),
             status: "active".to_string(),
@@ -9296,7 +9362,7 @@ mod coverage_boost {
     use bifrost_command::{SearchArgs, TrafficClearArgs};
     use serde_json::{json, Value};
     use std::sync::OnceLock;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn with_connections_lock<T>(f: impl FnOnce() -> T) -> T {
@@ -10245,7 +10311,7 @@ mod coverage_boost {
         let client = CallerRelayClient::new(&mock_server.uri());
         let identity = test_caller_identity();
         let grant = client
-            .find_reusable_grant("client-1", &identity)
+            .find_reusable_grant("client-1", &identity, None)
             .await
             .expect("request should succeed");
         assert!(grant.is_none());
@@ -10277,13 +10343,69 @@ mod coverage_boost {
         let client = CallerRelayClient::new(&mock_server.uri());
         let identity = test_caller_identity();
         let grant = client
-            .find_reusable_grant("client-1", &identity)
+            .find_reusable_grant("client-1", &identity, None)
             .await
             .expect("request should succeed")
             .expect("grant should be present");
         assert_eq!(grant.grant_session_token.as_deref(), Some("session-token"));
         assert_eq!(grant.status, "active");
         assert!(grant.shared_secret_encrypted.is_some());
+    }
+
+    #[tokio::test]
+    async fn find_reusable_grant_reuses_saved_transport_for_session_refresh() {
+        let mock_server = MockServer::start().await;
+        let saved_conn = sample_authorized_connection("client-1", &mock_server.uri());
+        let saved_caller_ephemeral_pub = saved_conn.caller_ephemeral_pub.clone().unwrap();
+        let saved_client_ephemeral_pub = saved_conn.client_ephemeral_pub.clone().unwrap();
+        let saved_secret = saved_conn.shared_secret_encrypted.clone().unwrap();
+
+        Mock::given(method("POST"))
+            .and(path("/v5/remote-invoke/grants/lookup"))
+            .and(body_partial_json(serde_json::json!({
+                "caller_ephemeral_pub": saved_caller_ephemeral_pub
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "code": 0,
+                "message": null,
+                "data": {
+                    "grant_session_token": "session-refreshed",
+                    "expires_at": "2099-01-01T00:00:00Z",
+                    "grant_summary": {
+                        "scope": "remote_shell_exec",
+                        "mode": "permanent",
+                        "file_access": "read_write",
+                        "client_ephemeral_pub": saved_client_ephemeral_pub
+                    }
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = CallerRelayClient::new(&mock_server.uri());
+        let identity = test_caller_identity();
+        let grant = client
+            .find_reusable_grant("client-1", &identity, Some(&saved_conn))
+            .await
+            .expect("request should succeed")
+            .expect("grant should be present");
+
+        assert_eq!(
+            grant.grant_session_token.as_deref(),
+            Some("session-refreshed")
+        );
+        assert_eq!(
+            grant.caller_ephemeral_pub.as_deref(),
+            saved_conn.caller_ephemeral_pub.as_deref()
+        );
+        assert_eq!(
+            grant.client_ephemeral_pub.as_deref(),
+            saved_conn.client_ephemeral_pub.as_deref()
+        );
+        assert_eq!(
+            grant.shared_secret_encrypted.as_deref(),
+            Some(saved_secret.as_str())
+        );
     }
 
     #[tokio::test]
