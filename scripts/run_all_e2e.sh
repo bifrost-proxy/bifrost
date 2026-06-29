@@ -566,6 +566,11 @@ run_and_capture() {
 
 SKIP_IN_CI_TESTS=(
   "test_memory_pressure_e2e.sh"
+  # This full Remote Invoke relay regression connects to the deployed
+  # ByteDance relay and requires a local logged-in sync token plus internal
+  # network reachability. CI runners cannot access that environment, so keep it
+  # as an explicit local/PPE release-gate script.
+  "test_remote_invoke_ppe_full_e2e.sh"
   # System proxy tests mutate host network settings and are too flaky in
   # ephemeral CI runners. Keep them as local-only full-shell coverage.
   "test_system_proxy_e2e.sh"

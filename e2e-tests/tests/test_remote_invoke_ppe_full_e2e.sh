@@ -1,24 +1,35 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Full Remote Invoke regression against the deployed ByteDance PPE relay.
+# Full Remote Invoke regression against the deployed ByteDance relay.
 #
 # This intentionally uses two local Bifrost processes built from the current
 # checkout: one target daemon and two isolated caller data dirs. The relay is
 # always remote (default: https://bifrost.bytedance.net), never a local relay.
+# Set BIFROST_REMOTE_RELAY_HEADERS only when a pre-release PPE route must be
+# exercised, for example: x-tt-env=ppe_ticket_system,x-use-ppe=1.
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
 RELAY_URL="${BIFROST_REMOTE_RELAY_URL:-https://bifrost.bytedance.net}"
-PPE_HEADERS="${BIFROST_REMOTE_RELAY_HEADERS:-x-tt-env=ppe_ticket_system,x-use-ppe=1}"
+REMOTE_RELAY_HEADERS="${BIFROST_REMOTE_RELAY_HEADERS-}"
 SYNC_STATE_FILE="${BIFROST_SYNC_STATE_FILE:-$HOME/.bifrost/sync-state.json}"
 BIFROST_BIN="${BIFROST_BIN:-$REPO/target/debug/bifrost}"
 KEEP_TMP="${KEEP_TMP:-0}"
 
-export BIFROST_REMOTE_RELAY_HEADERS="$PPE_HEADERS"
+if [[ -n "$REMOTE_RELAY_HEADERS" ]]; then
+  export BIFROST_REMOTE_RELAY_HEADERS="$REMOTE_RELAY_HEADERS"
+else
+  unset BIFROST_REMOTE_RELAY_HEADERS
+fi
 export BIFROST_DISABLE_TRAY=1
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY no_proxy NO_PROXY
+
+if [[ "${CI:-}" == "true" || "${GITHUB_ACTIONS:-}" == "true" ]]; then
+  echo "SKIP: remote relay full regression requires local/internal network access and is not supported in CI."
+  exit 0
+fi
 
 require_cmd() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -31,6 +42,31 @@ require_cmd curl
 require_cmd jq
 require_cmd python3
 require_cmd shasum
+
+relay_header_args() {
+  if [[ -z "$REMOTE_RELAY_HEADERS" ]]; then
+    return 0
+  fi
+  python3 - "$REMOTE_RELAY_HEADERS" <<'PY'
+import sys
+for item in sys.argv[1].split(","):
+    item = item.strip()
+    if not item:
+        continue
+    if ":" in item:
+        name, value = item.split(":", 1)
+    elif "=" in item:
+        name, value = item.split("=", 1)
+    else:
+        raise SystemExit(f"invalid relay header: {item}")
+    name = name.strip()
+    value = value.strip()
+    if not name:
+        raise SystemExit(f"invalid relay header: {item}")
+    print("-H")
+    print(f"{name}: {value}")
+PY
+}
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   cargo build --manifest-path "$REPO/Cargo.toml" --bin bifrost
@@ -63,7 +99,7 @@ s.close()
 PY
 }
 
-TMP_ROOT="$(mktemp -d /tmp/bifrost-ppe-full.XXXXXX)"
+TMP_ROOT="$(mktemp -d /tmp/bifrost-relay-full.XXXXXX)"
 TMP_ROOT_REAL="$(cd "$TMP_ROOT" && pwd -P)"
 FILE_ROOT="$TMP_ROOT_REAL/remote-files"
 TARGET_DATA="$TMP_ROOT/target"
@@ -191,10 +227,10 @@ for _ in {1..90}; do
   sleep 1
 done
 [[ "$(http_get /api/remote-invoke/status | jq -r '.state // empty')" == "Connected" ]] \
-  || fail "target worker not connected to PPE: $(http_get /api/remote-invoke/status | json)"
+  || fail "target worker not connected to relay: $(http_get /api/remote-invoke/status | json)"
 CLIENT_ID="$(http_get /api/remote-invoke/identity | jq -r '.instance_id // empty')"
 [[ -n "$CLIENT_ID" ]] || fail "missing target client id"
-pass "target registered with PPE client_id=$CLIENT_ID"
+pass "target registered with relay client_id=$CLIENT_ID"
 
 BIFROST_DATA_DIR="$TARGET_DATA" "$BIFROST_BIN" setting shell policy add \
   --id ppe-shell \
@@ -245,6 +281,13 @@ connect_code() {
     sleep 1
   done
   [[ -n "$pairing" ]] || fail "no pending pairing for code; caller=$(cat "$out")"
+
+  for _ in {1..30}; do
+    grep -q 'Waiting for approval' "$out" && break
+    sleep 1
+  done
+  grep -q 'Waiting for approval' "$out" || fail "caller did not enter pairing watch: $(cat "$out")"
+  sleep 2
 
   http_post "/api/remote-invoke/pairings/$pairing/approve" \
     '{"grant_mode":"permanent","grant_scope":"remote_shell_exec","file_access":"read_write","policy_binding":{"mode":"selected","policy_ids":["ppe-shell","ppe-run"]},"stdin_allowed":true}' \
@@ -390,24 +433,27 @@ DEVICE_CODE="$(grep -Eo 'BF-[0-9A-F]{16}' "$TMP_ROOT/ssh-create.out" | head -1)"
 [[ -n "$DEVICE_CODE" ]] || fail "missing SSH device code"
 
 code=""
+relay_headers=()
+while IFS= read -r header_arg; do
+  relay_headers+=("$header_arg")
+done < <(relay_header_args)
 for _ in {1..60}; do
   code="$(curl -sS -o "$TMP_ROOT/ssh-challenge.json" -w '%{http_code}' --max-time 10 \
     -H 'Content-Type: application/json' \
-    -H 'x-tt-env: ppe_ticket_system' \
-    -H 'x-use-ppe: 1' \
+    "${relay_headers[@]}" \
     -X POST "$RELAY_URL/v4/remote-invoke/ssh/challenge" \
     -d "{\"device_code\":\"$DEVICE_CODE\"}" || true)"
   [[ "$code" == "200" ]] && break
   sleep 1
 done
-[[ "$code" == "200" ]] || fail "ssh challenge not visible on PPE for $DEVICE_CODE: $(cat "$TMP_ROOT/ssh-challenge.json" 2>/dev/null || true)"
+[[ "$code" == "200" ]] || fail "ssh challenge not visible on relay for $DEVICE_CODE: $(cat "$TMP_ROOT/ssh-challenge.json" 2>/dev/null || true)"
 
 BIFROST_DATA_DIR="$CALLER_SSH_DATA" "$BIFROST_BIN" remote conn up \
   --ssh-key "$KEY_PATH" --relay-url "$RELAY_URL" >"$TMP_ROOT/ssh-connect.out" 2>&1 \
   || fail "ssh connect failed: $(cat "$TMP_ROOT/ssh-connect.out")"
 grep -q 'Connected with SSH key' "$TMP_ROOT/ssh-connect.out" \
   || fail "ssh connect missing success: $(cat "$TMP_ROOT/ssh-connect.out")"
-pass "ssh-key authorization connected via PPE"
+pass "ssh-key authorization connected via relay"
 run_remote_matrix "$CALLER_SSH_DATA" ssh
 
 BIFROST_DATA_DIR="$CALLER_CODE_DATA" "$BIFROST_BIN" remote --relay-url "$RELAY_URL" conn down --all >/dev/null 2>&1 || true

@@ -120,12 +120,13 @@ Execution result (2026-06-29, local dist entry):
     `remote invoke endpoint not found`.
   - Temporary data dir and process were cleaned up by the test trap.
 
-## TC-P0-6: 发布前 PPE relay header 环境变量真实链路
+## TC-P0-6: 正式 relay 默认链路与 PPE header 开关真实链路
 
 Regression target: caller 和 target 都使用当前分支编译出的 Bifrost 二进制，
-直连正式域名 `https://bifrost.bytedance.net`，仅通过发布前测试环境变量
-`BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`
-启用 PPE TLB header，不依赖 UI、不改持久化配置。
+直连正式域名 `https://bifrost.bytedance.net`。默认不设置
+`BIFROST_REMOTE_RELAY_HEADERS`，用于正式环境回归；发布前 PPE 验证时才显式
+设置 `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`。
+该开关不依赖 UI、不改持久化配置。
 
 Steps:
 
@@ -139,7 +140,7 @@ Steps:
    token 不打印到日志。
 4. 脚本创建临时 target / caller-code / caller-ssh 数据目录，target 使用
    `--no-system-proxy --no-tray --skip-cert-check --unsafe-ssl` 启动当前分支
-   Bifrost，并通过 `BIFROST_REMOTE_RELAY_HEADERS` 默认注入 PPE header。
+   Bifrost。未设置 `BIFROST_REMOTE_RELAY_HEADERS` 时不注入任何 relay header。
 5. 脚本直连正式域名 `https://bifrost.bytedance.net`，先执行 Code 授权
    pair-code 流程，再执行 SSH key 授权流程。
 6. 两种授权方式均执行同一 Remote 能力矩阵：`remote conn status`、
@@ -150,11 +151,11 @@ Steps:
 
 Expected:
 
-- 未设置 `BIFROST_REMOTE_RELAY_HEADERS` 时，caller 访问
-  `https://bifrost.bytedance.net/v5/remote-invoke/pairings/start` 会命中非
-  PPE 路由并返回后端 404。
-- 设置该环境变量后，caller 的 pairing start、watch、claim/open 以及 target
-  的注册、pair-code、stream 请求均通过 PPE 路由，完整远程调用链路成功。
+- CI 环境中脚本只打印 skip 并 0 退出；该脚本禁止在 GitHub CI 中真实连接
+  外部 relay。
+- 未设置 `BIFROST_REMOTE_RELAY_HEADERS` 时，caller 的 pairing start、watch、
+  claim/open 以及 target 的注册、pair-code、stream 请求均走正式 relay。
+- 设置该环境变量后，同一脚本用于 PPE TLB 路由验证。
 - UI 与持久化配置中不出现该测试开关。
 - 仓库脚本覆盖 Code 授权与 SSH key 授权两条入口，并覆盖发布前 Remote
   常用 CLI 能力矩阵；任一命令失败时脚本非 0 退出。
@@ -178,6 +179,24 @@ Execution result:
 - SSH key 授权链路通过：`remote conn status`、`remote traffic list/get/search`、
   全部 remote file 子命令、`remote exec`、`remote run`、`remote exec --detach`、
   `remote run --detach`、`remote job logs/watch/list/status` 均 PASS。
+- PASS。2026-06-29 在当前分支模拟 CI 执行
+  `CI=true e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`，脚本只输出
+  `SKIP: remote relay full regression requires local/internal network access and is not supported in CI.`
+  后 0 退出，未连接外部 relay。
+- FAIL。2026-06-29 在当前分支 `2117b6fa341f568025004fe0d294f1fcedf332f9`
+  上移除 PPE header 后执行正式 relay 回归：
+  `env -u BIFROST_REMOTE_RELAY_HEADERS KEEP_TMP=1 e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
+  脚本确认 target 已注册到正式 relay，但 Code 授权入口在
+  `start_pairing` 阶段稳定返回 `429 Too Many Requests`：
+  `{"code":429,"message":"relay_queue_overflow","data":null}`。
+  本地保留证据目录 `/tmp/bifrost-ppe-full.lOBYqj` 与
+  `/tmp/bifrost-ppe-full.yFQwto`。
+- 根因定位到已发布的 `bifrost-server-v4`：Redis-backed SSE queue 的 Lua
+  仍同时访问 `ri:mq:client:<id>` 和 `ri:mq:client:<id>:bytes` 两个不同
+  cluster slot，正式 Redis Cluster 返回 CROSSSLOT，服务端包装成
+  `relay_queue_overflow`。server-v4 修复为 hash-tag key
+  `ri:mq:{client:<id>}` / `ri:mq:{client:<id>}:bytes` 后需重新部署，再复跑
+  本用例完整矩阵。
 - `remote conn down --all` 清理通过；验证完成后未发现当前分支 Bifrost 残留进程。
 
 ## TC-P0-7: client_auth_token query fallback rejected
