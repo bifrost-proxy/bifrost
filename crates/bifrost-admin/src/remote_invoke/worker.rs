@@ -61,6 +61,7 @@ const MAX_RECONNECT_DELAY_MS: u64 = 60000;
 const PAIR_CODE_DIGITS: u32 = 6;
 const PAIR_CODE_REFRESH_CHECK_SECS: u64 = 5;
 const GRANT_CLEANUP_INTERVAL_SECS: u64 = 60;
+const STALE_GRANT_RETENTION_MS: u64 = 2 * 24 * 60 * 60 * 1000;
 const PENDING_PAIRING_POLL_SECS: u64 = 5;
 const ACTIVE_CALL_RECONCILE_INTERVAL_MS: u64 = 1000;
 
@@ -1633,9 +1634,16 @@ impl RemoteInvokeWorker {
         let mut grants = self.local_grants.write();
         let mut dead_ids = Vec::new();
         let mut live = Vec::new();
+        let active_grant_ids: HashSet<String> = self
+            .active_calls
+            .read()
+            .values()
+            .map(|active| active.grant_id.clone())
+            .collect();
 
         for (id, info) in grants.iter() {
-            if is_grant_info_dead(info, now) {
+            let can_remove = !active_grant_ids.contains(id);
+            if can_remove && (is_grant_info_dead(info, now) || is_grant_info_stale(info, now)) {
                 dead_ids.push(id.clone());
             } else if let Ok(mut val) = serde_json::to_value(info) {
                 if let Some(obj) = val.as_object_mut() {
@@ -1663,7 +1671,7 @@ impl RemoteInvokeWorker {
             debug!(
                 removed = count,
                 remaining = self.local_grants.read().len(),
-                "cleaned up expired/dead grants from local_grants"
+                "cleaned up expired/dead/stale grants from local_grants"
             );
         }
 
@@ -3634,6 +3642,22 @@ fn is_grant_info_dead(info: &GrantInfo, now_ms: u64) -> bool {
         }
     }
     false
+}
+
+fn grant_activity_at(info: &GrantInfo) -> u64 {
+    [
+        Some(info.first_authorized_at),
+        info.last_used_at,
+        info.last_command_at,
+    ]
+    .into_iter()
+    .flatten()
+    .max()
+    .unwrap_or(info.first_authorized_at)
+}
+
+fn is_grant_info_stale(info: &GrantInfo, now_ms: u64) -> bool {
+    now_ms.saturating_sub(grant_activity_at(info)) > STALE_GRANT_RETENTION_MS
 }
 
 fn validate_grant_for_call(
@@ -7016,14 +7040,11 @@ mod coverage_boost {
     // list_grants_and_cleanup & revoke_local_ssh_grants
     // ---------------------------------------------------------------------
 
-    #[test]
-    fn list_grants_and_cleanup_returns_live_and_prunes_dead() {
-        let (_harness, worker) = make_ssh_test_worker();
-        let now = now_millis();
-        let grant_live = GrantInfo {
-            grant_id: "live".to_string(),
+    fn grant_fixture(grant_id: &str, timestamp: u64) -> GrantInfo {
+        GrantInfo {
+            grant_id: grant_id.to_string(),
             client_instance_id: "inst".to_string(),
-            caller_fingerprint: "fp-live".to_string(),
+            caller_fingerprint: format!("fp-{grant_id}"),
             caller_display_name: None,
             label: None,
             grant_mode: GrantMode::Permanent,
@@ -7031,7 +7052,7 @@ mod coverage_boost {
             file_access: FileAccessScope::None,
             auth_method: AuthMethod::PairCode,
             status: GrantStatus::Active,
-            first_authorized_at: now,
+            first_authorized_at: timestamp,
             last_command_at: None,
             expires_at: None,
             last_used_at: None,
@@ -7048,7 +7069,14 @@ mod coverage_boost {
             stdin_allowed: None,
             os_version: None,
             arch: None,
-        };
+        }
+    }
+
+    #[test]
+    fn list_grants_and_cleanup_returns_live_and_prunes_dead() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let grant_live = grant_fixture("live", now);
         let mut grant_dead = grant_live.clone();
         grant_dead.grant_id = "dead".to_string();
         grant_dead.status = GrantStatus::Expired;
@@ -7066,6 +7094,82 @@ mod coverage_boost {
         assert_eq!(live_values.len(), 1);
         assert_eq!(live_values[0]["grant_id"], "live");
         assert!(worker.local_grants.read().get("dead").is_none());
+    }
+
+    #[test]
+    fn list_grants_and_cleanup_prunes_stale_inactive_grants() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let stale_at = now.saturating_sub(STALE_GRANT_RETENTION_MS + 1);
+        let recent_at = now.saturating_sub(STALE_GRANT_RETENTION_MS - 1);
+        let mut recently_used = grant_fixture("recently-used", stale_at);
+        recently_used.last_command_at = Some(now);
+
+        for grant in [
+            grant_fixture("stale", stale_at),
+            grant_fixture("recent", recent_at),
+            recently_used,
+        ] {
+            worker
+                .local_grants
+                .write()
+                .insert(grant.grant_id.clone(), grant);
+        }
+
+        let live_values = worker.list_grants_and_cleanup();
+        let live_ids = live_values
+            .iter()
+            .filter_map(|value| value.get("grant_id").and_then(Value::as_str))
+            .collect::<HashSet<_>>();
+
+        assert!(!live_ids.contains("stale"));
+        assert!(live_ids.contains("recent"));
+        assert!(live_ids.contains("recently-used"));
+        assert!(worker.local_grants.read().get("stale").is_none());
+    }
+
+    #[test]
+    fn list_grants_and_cleanup_keeps_stale_grant_with_active_call() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let stale_at = now.saturating_sub(STALE_GRANT_RETENTION_MS + 1);
+        let grant = grant_fixture("running", stale_at);
+        worker
+            .local_grants
+            .write()
+            .insert(grant.grant_id.clone(), grant);
+        worker.active_calls.write().insert(
+            "call-running".to_string(),
+            Arc::new(ActiveCallControl::new("running".to_string(), now)),
+        );
+
+        let live_values = worker.list_grants_and_cleanup();
+
+        assert_eq!(live_values.len(), 1);
+        assert_eq!(live_values[0]["grant_id"], "running");
+        assert!(worker.local_grants.read().get("running").is_some());
+    }
+
+    #[test]
+    fn list_grants_and_cleanup_keeps_dead_grant_with_active_call() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let now = now_millis();
+        let mut grant = grant_fixture("consumed-running", now);
+        grant.status = GrantStatus::Consumed;
+        worker
+            .local_grants
+            .write()
+            .insert(grant.grant_id.clone(), grant);
+        worker.active_calls.write().insert(
+            "call-consumed-running".to_string(),
+            Arc::new(ActiveCallControl::new("consumed-running".to_string(), now)),
+        );
+
+        let live_values = worker.list_grants_and_cleanup();
+
+        assert_eq!(live_values.len(), 1);
+        assert_eq!(live_values[0]["grant_id"], "consumed-running");
+        assert!(worker.local_grants.read().get("consumed-running").is_some());
     }
 
     #[test]
