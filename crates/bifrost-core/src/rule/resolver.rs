@@ -35,6 +35,15 @@ impl ResolvedRule {
                     .unwrap_or_else(|| rule.value.clone()),
                 _ => rule.value.clone(),
             }
+        } else if matches!(rule.protocol, crate::protocol::Protocol::Redirect) {
+            match &rule.value_source {
+                ValueSource::ParenContent(content) => content.clone(),
+                ValueSource::ValueRef(var_name) => values
+                    .get(var_name)
+                    .cloned()
+                    .unwrap_or_else(|| rule.value.clone()),
+                _ => rule.value.clone(),
+            }
         } else if matches!(
             rule.protocol,
             crate::protocol::Protocol::File
