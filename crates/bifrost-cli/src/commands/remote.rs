@@ -71,6 +71,9 @@ const GRANT_SESSION_REFRESH_SKEW_SECS: i64 = 60;
 #[cfg(test)]
 static REMOTE_TEST_DATA_DIR_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+#[cfg(test)]
+static REMOTE_TEST_DATA_DIR_ASYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn is_false(value: &bool) -> bool {
     !*value
 }
@@ -7276,6 +7279,7 @@ mod tests {
     }
 
     fn with_test_data_dir_lock<T>(f: impl FnOnce() -> T) -> T {
+        let _async_guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.blocking_lock();
         let _guard = REMOTE_TEST_DATA_DIR_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -9493,13 +9497,11 @@ mod coverage_boost {
     use bifrost_command::{SearchArgs, TrafficClearArgs};
     use serde_json::{json, Value};
     use std::sync::OnceLock;
-    use tokio::sync::Mutex as AsyncMutex;
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    static REMOTE_TEST_DATA_DIR_ASYNC_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
-
     fn with_connections_lock<T>(f: impl FnOnce() -> T) -> T {
+        let _async_guard = REMOTE_TEST_DATA_DIR_ASYNC_LOCK.blocking_lock();
         let _guard = REMOTE_TEST_DATA_DIR_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
