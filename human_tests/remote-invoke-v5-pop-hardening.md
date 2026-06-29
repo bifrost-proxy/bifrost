@@ -377,3 +377,30 @@ Execution result:
   fix that treats SSH key default Full Trust (`remote_shell_interactive`) as
   allowed for `power.mgmt`; rerun the full PPE command after the updated
   `bifrost-server-v4` is deployed.
+
+## TC-P0-10: async remote grant tests do not hold std mutex across await
+
+Regression target: Remote Invoke CLI grant revocation tests must pass
+`cargo clippy --workspace --all-targets --all-features -- -D warnings` without
+holding a `std::sync::MutexGuard` across `await`.
+
+Steps:
+
+1. Execute:
+   `cargo test -p bifrost-cli caller_delete_grant_treats -- --nocapture`.
+2. Execute:
+   `cargo clippy -p bifrost-cli --all-targets --all-features -- -D warnings`.
+3. Execute:
+   `cargo clippy --workspace --all-targets --all-features -- -D warnings`.
+
+Expected:
+
+- Both async delete-grant tests pass.
+- Clippy does not report `clippy::await_holding_lock` for
+  `crates/bifrost-cli/src/commands/remote.rs`.
+
+Execution result:
+
+- PASS. 2026-06-29 executed the two commands above after moving the async tests
+  to an async-aware test data-dir mutex, then executed the workspace clippy
+  command; all checks passed.
