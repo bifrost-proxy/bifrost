@@ -1762,6 +1762,74 @@ pub fn resolve_external_cli_model_config(
     resolved
 }
 
+pub fn resolve_external_cli_status_model_config(
+    adapter: &str,
+    config: &ExternalCliAdapterConfig,
+) -> ExternalCliResolvedModelConfig {
+    let mut resolved = resolve_external_cli_model_config(adapter, config);
+    if adapter.trim() == CLAUDE_CODE_ADAPTER && resolved.model.is_none() {
+        let mut model_config = load_claude_code_status_model_config(config);
+        apply_config_overrides_to_model_config(&mut model_config, &config.config_overrides);
+        if let Some(model) = clean_optional_string(config.model.as_deref()) {
+            model_config.model = Some(model);
+            model_config.model_source = Some("runner config".to_string());
+        }
+        if model_config.model.is_some() {
+            resolved.model = model_config.model;
+            resolved.model_provider = model_config.model_provider;
+            resolved.model_source = model_config.model_source;
+        }
+    }
+    resolved
+}
+
+pub fn apply_external_cli_session_overrides_to_model_config(
+    adapter: &str,
+    state: Option<&crate::im_gateway::session_state::ImAgentSessionState>,
+    config: &mut ExternalCliResolvedModelConfig,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    if supports_external_cli_model_slash(adapter) {
+        if let Some(model) = clean_optional_string(state.model_override.as_deref()) {
+            config.model = Some(model);
+            config.model_source = Some(
+                state
+                    .model_override_source
+                    .clone()
+                    .unwrap_or_else(|| "session slash command".to_string()),
+            );
+        }
+    }
+    if let Some(effort) = clean_optional_string(state.reasoning_effort_override.as_deref()) {
+        config.reasoning_effort = Some(effort);
+        config.reasoning_source = Some(
+            state
+                .reasoning_effort_override_source
+                .clone()
+                .unwrap_or_else(|| "session slash command".to_string()),
+        );
+    }
+}
+
+pub fn apply_external_cli_session_overrides_to_run_request(
+    request: &mut ExternalCliRunRequest,
+    state: Option<&crate::im_gateway::session_state::ImAgentSessionState>,
+) {
+    let Some(state) = state else {
+        return;
+    };
+    if supports_external_cli_model_slash(&request.adapter) {
+        if let Some(model) = clean_optional_string(state.model_override.as_deref()) {
+            request.adapter_config.model = Some(model);
+        }
+    }
+    if let Some(effort) = clean_optional_string(state.reasoning_effort_override.as_deref()) {
+        request.adapter_config.reasoning_effort = Some(effort);
+    }
+}
+
 pub fn parse_external_cli_model_slash_command(
     message: &str,
 ) -> Option<Result<ExternalCliModelSlashCommand, String>> {
@@ -2112,8 +2180,8 @@ pub fn format_external_cli_effort_catalog_for_model(
     models: &[ExternalCliModelInfo],
 ) -> String {
     let label = external_cli_model_adapter_label(adapter);
-    let options = external_cli_effort_options_for_model(adapter, effective_model, models);
-    if options.is_empty() {
+    let (levels, source) = external_cli_effort_levels_for_model(adapter, effective_model, models);
+    if levels.is_empty() {
         return format!("{label} 当前没有可展示的 reasoning effort 选项。");
     }
     let model_suffix = effective_model
@@ -2121,14 +2189,29 @@ pub fn format_external_cli_effort_catalog_for_model(
         .filter(|value| !value.is_empty())
         .map(|model| format!("（当前模型 `{model}`）"))
         .unwrap_or_default();
-    format!(
+    let mut lines = vec![format!(
         "{label} 可用 Reasoning Effort{model_suffix}:\n{}",
-        options
+        levels
             .iter()
-            .map(|option| format!("- `{option}`"))
+            .map(|level| match level.description.as_deref() {
+                Some(description) if !description.trim().is_empty() => {
+                    format!("- `{}` - {}", level.effort, description.trim())
+                }
+                _ => format!("- `{}`", level.effort),
+            })
             .collect::<Vec<_>>()
             .join("\n")
-    )
+    )];
+    match source {
+        ExternalCliEffortOptionSource::ModelCatalog => {
+            lines.push("来源: 当前模型目录。".to_string());
+        }
+        ExternalCliEffortOptionSource::RunnerFallback => {
+            lines
+                .push("来源: 未读取到当前模型的推理强度列表，使用 Runner 兼容默认值。".to_string());
+        }
+    }
+    lines.join("\n")
 }
 
 pub fn validate_external_cli_effort_selection(
@@ -2160,14 +2243,17 @@ pub fn validate_external_cli_effort_selection_for_model(
 ) -> Result<String, String> {
     let effort = requested_effort.trim().to_ascii_lowercase();
     validate_external_effort_value(&effort)?;
-    let options = external_cli_effort_options_for_model(adapter, effective_model, models);
-    if options.iter().any(|option| option == &effort) {
+    let (levels, _) = external_cli_effort_levels_for_model(adapter, effective_model, models);
+    if levels
+        .iter()
+        .any(|level| level.effort.eq_ignore_ascii_case(&effort))
+    {
         return Ok(effort);
     }
     let label = external_cli_model_adapter_label(adapter);
-    let available = options
+    let available = levels
         .iter()
-        .map(|option| format!("`{option}`"))
+        .map(|level| format!("`{}`", level.effort))
         .collect::<Vec<_>>()
         .join(", ");
     let model_hint = effective_model
@@ -2203,12 +2289,21 @@ pub fn format_external_cli_effort_status(
     }
 }
 
-fn external_cli_effort_options_for_model(
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExternalCliEffortOptionSource {
+    ModelCatalog,
+    RunnerFallback,
+}
+
+fn external_cli_effort_levels_for_model(
     adapter: &str,
     effective_model: Option<&str>,
     models: &[ExternalCliModelInfo],
-) -> Vec<String> {
-    let mut options = Vec::new();
+) -> (
+    Vec<ExternalCliReasoningLevelInfo>,
+    ExternalCliEffortOptionSource,
+) {
+    let mut levels = Vec::new();
     if let Some(model) = effective_model
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -2220,25 +2315,52 @@ fn external_cli_effort_options_for_model(
     {
         if !model.supported_reasoning_levels.is_empty() {
             for level in &model.supported_reasoning_levels {
-                push_unique_effort(&mut options, level.effort.as_str());
+                push_unique_effort_level(&mut levels, level);
             }
+            return (levels, ExternalCliEffortOptionSource::ModelCatalog);
+        }
+        if let Some(default) = clean_optional_string(model.default_reasoning_level.as_deref()) {
+            push_unique_effort_level(
+                &mut levels,
+                &ExternalCliReasoningLevelInfo {
+                    effort: default,
+                    description: Some(
+                        "Default reasoning level reported by the model catalog.".to_string(),
+                    ),
+                },
+            );
+            return (levels, ExternalCliEffortOptionSource::ModelCatalog);
         }
     }
-    if options.is_empty() {
-        for option in external_cli_effort_options(adapter) {
-            push_unique_effort(&mut options, option);
-        }
+    for option in external_cli_effort_options(adapter) {
+        push_unique_effort_level(
+            &mut levels,
+            &ExternalCliReasoningLevelInfo {
+                effort: (*option).to_string(),
+                description: None,
+            },
+        );
     }
-    options
+    (levels, ExternalCliEffortOptionSource::RunnerFallback)
 }
 
-fn push_unique_effort(options: &mut Vec<String>, value: &str) {
-    let Some(value) = clean_optional_string(Some(value)).map(|value| value.to_ascii_lowercase())
+fn push_unique_effort_level(
+    levels: &mut Vec<ExternalCliReasoningLevelInfo>,
+    level: &ExternalCliReasoningLevelInfo,
+) {
+    let Some(effort) =
+        clean_optional_string(Some(level.effort.as_str())).map(|value| value.to_ascii_lowercase())
     else {
         return;
     };
-    if !options.iter().any(|existing| existing == &value) {
-        options.push(value);
+    if !levels
+        .iter()
+        .any(|existing| existing.effort.eq_ignore_ascii_case(&effort))
+    {
+        levels.push(ExternalCliReasoningLevelInfo {
+            effort,
+            description: clean_optional_string(level.description.as_deref()),
+        });
     }
 }
 
@@ -2443,6 +2565,43 @@ fn load_claude_code_model_config(
     resolved
 }
 
+fn load_claude_code_status_model_config(
+    config: &ExternalCliAdapterConfig,
+) -> ExternalCliResolvedModelConfig {
+    let settings_path = config
+        .extra
+        .get("settings")
+        .or_else(|| config.extra.get("settingsPath"))
+        .or_else(|| config.extra.get("settings_path"))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| clean_optional_string(Some(value)))
+        .map(PathBuf::from);
+    let mut resolved = settings_path
+        .as_deref()
+        .map(read_claude_code_model_config_json)
+        .unwrap_or_else(|| {
+            let home = std::env::var_os("CLAUDE_CONFIG_DIR")
+                .or_else(|| std::env::var_os("CLAUDE_HOME"))
+                .map(PathBuf::from)
+                .unwrap_or_else(|| bifrost_agent::config::user_home_dir().join(".claude"));
+            let mut resolved = read_claude_code_model_config_json(&home.join("settings.json"));
+            merge_model_config(
+                &mut resolved,
+                read_claude_code_model_config_json(&home.join("settings.local.json")),
+            );
+            resolved
+        });
+    apply_claude_code_env_model_aliases(&mut resolved, "claude env", |key| std::env::var(key));
+    apply_claude_code_env_model_aliases(&mut resolved, "runner config", |key| {
+        config
+            .env
+            .get(key)
+            .cloned()
+            .ok_or(std::env::VarError::NotPresent)
+    });
+    resolved
+}
+
 fn read_claude_code_effort_config_json(path: &Path) -> ExternalCliResolvedModelConfig {
     let Ok(content) = std::fs::read_to_string(path) else {
         return ExternalCliResolvedModelConfig::default();
@@ -2472,6 +2631,69 @@ fn parse_claude_code_effort_config_json(
         });
     }
     resolved
+}
+
+fn read_claude_code_model_config_json(path: &Path) -> ExternalCliResolvedModelConfig {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    parse_claude_code_model_config_json(&content, "claude settings")
+}
+
+fn parse_claude_code_model_config_json(
+    content: &str,
+    source: &str,
+) -> ExternalCliResolvedModelConfig {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(content) else {
+        return ExternalCliResolvedModelConfig::default();
+    };
+    let mut resolved = ExternalCliResolvedModelConfig {
+        model: json_string(&value, "model"),
+        model_source: Some(source.to_string()),
+        ..Default::default()
+    };
+    if let Some(env) = value.get("env").and_then(serde_json::Value::as_object) {
+        apply_claude_code_env_model_aliases(&mut resolved, source, |key| {
+            env.get(key)
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .ok_or(std::env::VarError::NotPresent)
+        });
+    }
+    resolved
+}
+
+fn apply_claude_code_env_model_aliases(
+    resolved: &mut ExternalCliResolvedModelConfig,
+    source: &str,
+    get_env: impl Fn(&str) -> Result<String, std::env::VarError>,
+) {
+    if let Some(model) = clean_optional_string(get_env("ANTHROPIC_MODEL").ok().as_deref()) {
+        resolved.model = Some(model);
+        resolved.model_provider = None;
+        resolved.model_source = Some(source.to_string());
+        return;
+    }
+    let Some(model) = resolved.model.as_deref().map(str::trim) else {
+        return;
+    };
+    let Some(key) = claude_code_model_alias_env_key(model) else {
+        return;
+    };
+    if let Some(alias_model) = clean_optional_string(get_env(key).ok().as_deref()) {
+        resolved.model_provider = Some(model.to_string());
+        resolved.model = Some(alias_model);
+        resolved.model_source = Some(source.to_string());
+    }
+}
+
+fn claude_code_model_alias_env_key(alias: &str) -> Option<&'static str> {
+    match alias.to_ascii_lowercase().as_str() {
+        "opus" => Some("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+        "sonnet" => Some("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+        "haiku" => Some("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+        _ => None,
+    }
 }
 
 fn apply_claude_code_env_effort(

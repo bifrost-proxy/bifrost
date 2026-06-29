@@ -2425,24 +2425,10 @@ fn apply_persisted_external_cli_state(
     }
     let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
     apply_external_cli_resume_metadata(request, &metadata);
-    if crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter) {
-        if let Some(model) = state
-            .model_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            request.adapter_config.model = Some(model.to_string());
-        }
-    }
-    if let Some(effort) = state
-        .reasoning_effort_override
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        request.adapter_config.reasoning_effort = Some(effort.to_string());
-    }
+    crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_run_request(
+        request,
+        Some(&state),
+    );
     consume_imported_contexts_for_external_runner(request, runner_id);
 }
 

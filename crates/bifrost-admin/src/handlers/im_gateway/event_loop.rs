@@ -968,18 +968,11 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             &settings.adapter,
             &settings.adapter_config,
         );
-    if let Some(model) = persisted_state
-        .as_ref()
-        .and_then(|state| state.model_override.as_deref())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .filter(|_| {
-            crate::im_gateway::external_cli::supports_external_cli_model_slash(&settings.adapter)
-        })
-    {
-        resolved_model_config.model = Some(model.to_string());
-        resolved_model_config.model_source = Some("session slash command".to_string());
-    }
+    crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_model_config(
+        &settings.adapter,
+        persisted_state.as_ref(),
+        &mut resolved_model_config,
+    );
     let mut status_context =
         status_context_from_external_runner(&effective.runner_id, &settings.adapter);
     if let Some(model) = resolved_model_config.model.clone() {
@@ -1088,17 +1081,10 @@ async fn run_external_cli_agent_chat(ctx: ExternalCliChatContext<'_>, input: Ext
             Some(input.session_key.clone()),
             &settings,
         );
-        if let Some(model) = persisted_state
-            .as_ref()
-            .and_then(|state| state.model_override.as_deref())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .filter(|_| {
-                crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter)
-            })
-        {
-            request.adapter_config.model = Some(model.to_string());
-        }
+        crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_run_request(
+            &mut request,
+            persisted_state.as_ref(),
+        );
         request.images = std::mem::take(&mut current_images);
         apply_external_cli_resume_metadata(&mut request, &runner_metadata);
         if request.work_dir.is_none() {
@@ -2099,6 +2085,48 @@ mod tests {
         assert_eq!(images[0].mime_type, "image/png");
         assert_eq!(images[0].data, "aGVsbG8=");
         assert!(images[0].name.is_none());
+    }
+
+    #[test]
+    fn external_cli_progress_runner_summary_uses_session_effort_override() {
+        let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+            message: "hello".to_string(),
+            images: Vec::new(),
+            operation: "chat".to_string(),
+            params: serde_json::Value::Null,
+            provider_id: Some("feishu-main".to_string()),
+            runner_id: Some("Traex".to_string()),
+            session_key: Some("feishu-main:owner-open-id".to_string()),
+            runtime: "external_cli".to_string(),
+            adapter: crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string(),
+            work_dir: Some(std::path::PathBuf::from("/tmp/bifrost")),
+            instructions: None,
+            adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+                model: Some("GPT-5.5".to_string()),
+                reasoning_effort: Some("high".to_string()),
+                config_overrides: vec![
+                    "model_reasoning_effort=\"xhigh\"".to_string(),
+                    "model_provider=\"trae\"".to_string(),
+                ],
+                ..Default::default()
+            },
+            allow_work_dirs: Vec::new(),
+            inject_bifrost_tools: false,
+            skill_paths: Vec::new(),
+        };
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("modelReasoningEffort".to_string(), "xhigh".to_string());
+
+        let summary = external_cli_progress_runner_summary(
+            "Traex",
+            crate::im_gateway::external_cli::TRAEX_ADAPTER,
+            &request,
+            Some(&metadata),
+        );
+
+        assert_eq!(summary.model.as_deref(), Some("GPT-5.5"));
+        assert_eq!(summary.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(summary.reasoning_source.as_deref(), Some("runner 配置"));
     }
 
     fn external_cli_result_with_status(

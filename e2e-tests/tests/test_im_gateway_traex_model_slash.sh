@@ -75,6 +75,7 @@ if [ "${1:-}" = "debug" ] && [ "${2:-}" = "models" ]; then
       "slug": "gpt-unit",
       "description": "Codex unit model",
       "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [{"effort": "minimal"}, {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}],
       "visibility": "list",
       "supported_in_api": true,
       "priority": 1,

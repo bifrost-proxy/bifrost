@@ -1166,11 +1166,11 @@ Codex、Traex 和 Claude Code 作为 external CLI runner 时，`/model`、`/mode
 1. Codex / Traex 使用对应 CLI 的 `debug models` JSON 输出作为 `/models` 数据源，解析时只保留公开字段：`slug`、展示名、描述、reasoning level、service tier、visibility、model load 和 priority，不透出 `base_instructions` 等内部 prompt。
 2. Traex `/models` 若返回 `model_load`、`modelLoad`、`loadPercent` 或 `load`，展示为 `Model load: N%`；底层返回 `0.93` 时格式化为 `93%`。
 3. Claude Code 不再读取 `.claude/settings.json` 的 `model` 或 alias 环境变量作为 Bifrost `/model` 数据源；`/models` 使用内置的 Claude Code alias 目录（Sonnet/Opus/Haiku/Fable）并允许用户通过 `/model <full-model-name>` 输入完整模型名。
-4. Claude Code 的 settings/env 只读取 `effortLevel`、`CLAUDE_CODE_EFFORT_LEVEL` 或 `CLAUDE_EFFORT`，用于联通通知和默认 `/effort` 展示，不把 settings 的 model source 显示为 Bifrost 模型来源。
+4. Claude Code 的 `/models` 列表不由 settings 生成；但联通通知和 `/effort` 默认展示会读取 settings 当前模型与 `effortLevel`，让用户看到 Claude Code 当前真实状态。
 
 Reasoning Effort 规则：
 
-1. `/efforts` 展示当前 runner 支持的 effort 选项；如果当前模型目录含 `supported_reasoning_levels`，优先按当前模型限制选项，否则回退到 runner 默认选项。
+1. `/efforts` 展示当前 runner 支持的 effort 选项；优先按当前模型目录返回的 `supported_reasoning_levels` 展示；如果目录只返回 `default_reasoning_level`，只展示该默认值；如果读不到当前模型能力，再回退到 runner 兼容默认值并标明来源。
 2. Claude Code 支持 `low / medium / high / xhigh / max`，运行时通过 `claude --effort <level>` 生效。
 3. Codex 和 Traex 使用 `--config model_reasoning_effort="<level>"` 生效；Codex/Traex 默认选项为 `minimal / low / medium / high / xhigh`，但 Traex 可被当前模型目录进一步收窄。
 4. `/effort clear` / `/effort auto` 清除 session override，后续消息回退到 runner 配置或 CLI 默认值。

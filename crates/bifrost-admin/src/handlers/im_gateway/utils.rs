@@ -260,10 +260,11 @@ pub(super) fn build_online_notification_agent_context(
                     Some(provider.id.as_str()),
                     Some(runner_id.as_str()),
                 );
-            let model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
-                &external.settings.adapter,
-                &external.settings.adapter_config,
-            );
+            let model_config =
+                crate::im_gateway::external_cli::resolve_external_cli_status_model_config(
+                    &external.settings.adapter,
+                    &external.settings.adapter_config,
+                );
             (
                 external.settings.adapter,
                 Some(external.runner_id),

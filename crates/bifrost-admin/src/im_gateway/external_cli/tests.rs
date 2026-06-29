@@ -2380,6 +2380,56 @@ fn claude_code_model_config_ignores_settings_model_but_resolves_effort() {
         runner_effort.reasoning_source.as_deref(),
         Some("runner config")
     );
+
+    let status = resolve_external_cli_status_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(status.model.as_deref(), Some("claude-opus-4-7"));
+    assert_eq!(status.model_provider.as_deref(), Some("sonnet"));
+    assert_eq!(status.model_source.as_deref(), Some("claude settings"));
+    assert_eq!(status.reasoning_effort.as_deref(), Some("medium"));
+}
+
+#[test]
+fn claude_code_status_model_config_reads_plain_settings_model_without_catalog_coupling() {
+    let _env_lock = external_cli_env_guard();
+    let home = tempfile::tempdir().unwrap();
+    let claude_home = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(
+        claude_home.join("settings.json"),
+        r#"{
+          "model": "opus",
+          "effortLevel": "low"
+        }"#,
+    )
+    .unwrap();
+    let _home = EnvGuard::set("HOME", home.path());
+    let _claude_config_dir = EnvGuard::unset("CLAUDE_CONFIG_DIR");
+    let _claude_home = EnvGuard::unset("CLAUDE_HOME");
+    let _anthropic_model = EnvGuard::unset("ANTHROPIC_MODEL");
+    let _default_sonnet = EnvGuard::unset("ANTHROPIC_DEFAULT_SONNET_MODEL");
+    let _default_opus = EnvGuard::unset("ANTHROPIC_DEFAULT_OPUS_MODEL");
+    let _default_haiku = EnvGuard::unset("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    let _claude_effort = EnvGuard::unset("CLAUDE_CODE_EFFORT_LEVEL");
+    let _claude_effort_short = EnvGuard::unset("CLAUDE_EFFORT");
+
+    let runtime = resolve_external_cli_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(runtime.model, None);
+    assert_eq!(runtime.reasoning_effort.as_deref(), Some("low"));
+
+    let status = resolve_external_cli_status_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(status.model.as_deref(), Some("opus"));
+    assert_eq!(status.model_provider, None);
+    assert_eq!(status.model_source.as_deref(), Some("claude settings"));
+    assert_eq!(status.reasoning_effort.as_deref(), Some("low"));
 }
 
 #[test]

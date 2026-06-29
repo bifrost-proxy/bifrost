@@ -40,11 +40,8 @@ mkdir -p "$DATA_DIR/admin" "$DATA_DIR/agent/sessions/2026/06/04" "$CLAUDE_CONFIG
 
 cat >"$CLAUDE_CONFIG_DIR/settings.json" <<'JSON'
 {
-  "model": "sonnet",
-  "effortLevel": "low",
-  "env": {
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7"
-  }
+  "model": "opus",
+  "effortLevel": "low"
 }
 JSON
 
@@ -111,7 +108,7 @@ cat >"$DATA_DIR/admin/im_gateway_external_cli_agent.json" <<'JSON'
   "runners": {
     "codex-default": {"enabled": true, "adapter": "codex"},
     "web-main": {"enabled": true, "adapter": "chatgpt_web", "adapterConfig": {"auth": {"statePath": "startup-auth-e2e.json"}}},
-    "Claude-Code": {"enabled": true, "adapter": "claude_code", "adapterConfig": {"env": {"CLAUDE_CODE_EFFORT_LEVEL": "high"}}}
+    "Claude-Code": {"enabled": true, "adapter": "claude_code"}
   },
   "channels": {}
 }
@@ -284,10 +281,8 @@ content = online.get("content_preview") or ""
 assert "- **Provider**: Feishu Claude (`feishu-claude`)" in content, content
 assert "- **Runner Type**: `claude_code`" in content, content
 assert "- **Runner ID**: `Claude-Code`" in content, content
-assert "- **Model**: `N/A`" in content, content
-assert "claude settings" not in content, content
-assert "claude-opus-4-7" not in content, content
-assert "- **Reasoning Effort**: `high`" in content, content
+assert "- **Model**: `opus（claude settings）`" in content, content
+assert "- **Reasoning Effort**: `low`" in content, content
 assert "- **Reasoning Summary**: `N/A`" in content, content
 PY
 

@@ -2949,23 +2949,23 @@ rm -rf ./.bifrost-test
   - 停止临时 Bifrost 服务。
   - 删除 `.bifrost-e2e-traex-models.*` 临时目录。
   - 确认没有指向临时目录的 mock runner 或 Bifrost 进程残留。
-- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh`，真实启动临时 Bifrost 服务并使用 mock Codex/Traex/Claude Code CLI 验证 `/models`、`/model`、`/efforts`、`/effort`。Traex `/models` 返回 `Model load: 93%`；Traex 当前模型只支持 `low/medium` 时 `/effort high` 被 Bifrost 拒绝；Codex/Traex 普通消息 runtime args 分别包含 `model_reasoning_effort="minimal"` 和 `model_reasoning_effort="low"`；Claude Code 普通消息 runtime args 包含 `--effort xhigh`；`session_state.json` 保存三个 runner 的 model/effort override 和 source。E2E 输出 run id：Codex `1782743125354-142d6a5f-f823-4761-a557-87db41e40854`，Traex `1782743125761-de490e37-7a2a-43c9-b8bf-1ceff0ce0210`，Claude Code `1782743126849-8fa841d1-0cc2-4907-babf-2cd73932fbe2`，Codex effort `1782743126128-5867a93f-c521-4690-88a0-595e6c15655d`，Traex effort `1782743126349-93aee9ba-ea5c-4c44-89fc-52fdee6dcf01`，Claude effort `1782743131125-f6f5f89a-06b7-426c-aabf-c44bd3764c14`。
+- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_gateway_traex_model_slash.sh`，真实启动临时 Bifrost 服务并使用 mock Codex/Traex/Claude Code CLI 验证 `/models`、`/model`、`/efforts`、`/effort`。Traex `/models` 返回 `Model load: 93%`；Traex 当前模型只支持 `low/medium` 时 `/effort high` 被 Bifrost 拒绝；Codex/Traex 普通消息 runtime args 分别包含 `model_reasoning_effort="minimal"` 和 `model_reasoning_effort="low"`；Claude Code 普通消息 runtime args 包含 `--effort xhigh`；`session_state.json` 保存三个 runner 的 model/effort override 和 source。E2E 输出 run id：Codex `1782750697538-aaccd1d0-7da9-4956-8af8-6977226d9f37`，Traex `1782750697927-8aa99653-4e95-4df3-92dc-cfcc49ab751b`，Claude Code `1782750699226-54a46f02-1c57-42eb-9218-fd13ffa7c64e`，Codex effort `1782750698445-383d1055-e0fa-43cf-99d5-7ba885a8ef50`，Traex effort `1782750698935-c27126b0-9872-4010-b1b8-3024b21699d8`，Claude effort `1782750703928-a75df617-47bb-4976-bc9d-f0af23b72342`。
 
-### TC-IMA-154: Claude Code 上线通知展示 Reasoning Effort 且不展示 settings 模型来源
+### TC-IMA-154: Claude Code 上线通知展示 settings 当前模型与 Reasoning Effort
 
 - **前置条件**:
   - 使用当前源码和临时数据目录，不复用用户真实 Bifrost 数据。
-  - 临时 HOME 下创建 `.claude/settings.json`，内容包含 `model: "sonnet"`、`effortLevel: "low"`，以及 env 中 `CLAUDE_CODE_EFFORT_LEVEL: "high"`、`ANTHROPIC_DEFAULT_SONNET_MODEL`。
+  - 临时 `CLAUDE_CONFIG_DIR` 下创建 `settings.json`，内容包含 `model: "opus"`、`effortLevel: "low"`。
   - 创建 Feishu provider，Agent runner 指向 `Claude-Code`，并触发上线通知。
 - **操作步骤**:
   1. 调用 `build_online_notification_agent_context` 等价真实路径，或通过 Feishu provider connect 触发上线通知。
   2. 检查通知正文的 `Runner Type`、`Runner ID`、`Model`、`Reasoning Effort`、`Reasoning Summary`。
-  3. 检查通知正文不含 `claude settings` 模型来源和 `ANTHROPIC_DEFAULT_SONNET_MODEL` 映射后的模型名。
+  3. 检查通知正文使用 Claude Code settings 的当前模型和 effort。
 - **预期结果**:
   - `Runner Type` 为 `claude_code`，`Runner ID` 为 `Claude-Code`。
-  - `Model` 显示 `N/A` 或显式 runner/session 配置的模型，不因为 `.claude/settings.json` 的 `model` 字段变成 `sonnet（claude settings）`。
-  - `Reasoning Effort` 显示 `high`（runner env 优先于 settings 默认），不再是 `N/A`。
+  - `Model` 显示 `opus（claude settings）`。
+  - `Reasoning Effort` 显示 `low`，不再是 `N/A`。
   - `Reasoning Summary` 未配置时显示 `N/A`。
 - **清理步骤**:
   - 删除临时 HOME 和 Bifrost 数据目录。
-- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `SKIP_BUILD=true BIFROST_BIN=/Users/bytedance/project/bifrost-claude-code-runner-task/target/debug/bifrost PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_online_notification_runner_context.sh`。脚本使用临时 `CLAUDE_CONFIG_DIR` 写入 `settings.json`（含 `model:"sonnet"`、`effortLevel:"low"`、`ANTHROPIC_DEFAULT_SONNET_MODEL:"claude-opus-4-7"`），同时 runner env 设置 `CLAUDE_CODE_EFFORT_LEVEL=high`。真实 Feishu provider connect 后上线通知显示 `Runner Type: claude_code`、`Runner ID: Claude-Code`、`Model: N/A`、`Reasoning Effort: high`、`Reasoning Summary: N/A`，且不包含 `claude settings` 或 `claude-opus-4-7`。
+- **执行记录（2026-06-29）**: PASS — 创建用例后立即执行 `SKIP_BUILD=true BIFROST_BIN=/Users/bytedance/project/bifrost-claude-code-runner-task/target/debug/bifrost PATH=/Users/bytedance/.cargo/bin:$PATH bash e2e-tests/tests/test_im_online_notification_runner_context.sh`。脚本使用临时 `CLAUDE_CONFIG_DIR` 写入 `settings.json`（含 `model:"opus"`、`effortLevel:"low"`）。真实 Feishu provider connect 后上线通知显示 `Runner Type: claude_code`、`Runner ID: Claude-Code`、`Model: opus（claude settings）`、`Reasoning Effort: low`、`Reasoning Summary: N/A`。
