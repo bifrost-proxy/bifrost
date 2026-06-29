@@ -67,6 +67,23 @@
 - 保留原有退避唤醒机制，后续一旦 token 可用，worker 会重新进入正常注册流程。
 - 真正的 relay 网络错误、401 后重新注册失败、SSE 失败仍按原有 `ERROR` / `WARN` 级别输出，避免把真实故障静默掉。
 
+### 改进 6：target 上报 call frame 的发送层短重试
+
+**现状**：target worker 执行远端命令时会通过
+`/v4/remote-invoke/client/calls/:callId/frame` 和
+`/stream-frame` 把输出帧回传给 relay。PPE 全链路验证中出现过一次
+reqwest 发送层错误：部署侧 `bifrost.server.v4` access log 能看到同一 call
+的其它 frame/stream-frame/exit 均为 HTTP 200，且没有 `relay_queue` 错误，
+说明问题发生在 target 到 TLB/relay 的连接发送层，而不是业务拒绝。
+
+**改进**：
+- 只对 `post_call_frame` / `post_call_stream_frame` 的 request send error
+  做短重试，延迟为 `150ms/500ms/1000ms`。
+- 如果 relay 已返回 HTTP 4xx/5xx 或业务 `code != 0`，仍按原逻辑立即失败，
+  避免掩盖真正的权限、队列或服务端错误。
+- 单元测试用本地 TCP mock relay 模拟第一次连接断开、第二次成功，验证
+  target frame post 能恢复。
+
 ## 测试方案
 
 ### 单元测试
@@ -77,6 +94,9 @@
 - `test_validate_grant_accepts_once_and_consumes`: 验证 once grant 消耗时也写入 `last_command_at`（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
 - `test_normalize_registration_session_token_rejects_missing_or_empty`: 验证缺失或纯空白 token 不会进入 relay 注册（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
 - `test_normalize_registration_session_token_trims_valid_token`: 验证有效 token 会被 trim 后继续注册（已实现，位于 `crates/bifrost-admin/src/remote_invoke/worker.rs`）。
+- `post_call_frame_retries_send_failure_once`: 验证 target 上报 call frame
+  时遇到一次发送层断连会短重试并成功（已实现，位于
+  `crates/bifrost-admin/src/remote_invoke/relay_client.rs`）。
 
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账

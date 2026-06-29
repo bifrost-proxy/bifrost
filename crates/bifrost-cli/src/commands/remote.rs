@@ -10385,6 +10385,9 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn caller_delete_grant_treats_2xx_as_deleted() {
+        let _guard = REMOTE_TEST_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v5/remote-invoke/grants/revoke"))
@@ -10405,6 +10408,9 @@ mod coverage_boost {
 
     #[tokio::test]
     async fn caller_delete_grant_treats_404_grant_not_found_as_already_missing() {
+        let _guard = REMOTE_TEST_DATA_DIR_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let mock_server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v5/remote-invoke/grants/revoke"))

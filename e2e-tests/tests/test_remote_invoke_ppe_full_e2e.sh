@@ -16,6 +16,10 @@ REMOTE_RELAY_HEADERS="${BIFROST_REMOTE_RELAY_HEADERS-}"
 SYNC_STATE_FILE="${BIFROST_SYNC_STATE_FILE:-$HOME/.bifrost/sync-state.json}"
 BIFROST_BIN="${BIFROST_BIN:-$REPO/target/debug/bifrost}"
 KEEP_TMP="${KEEP_TMP:-0}"
+BIFROST_SERVER_V4_DIR="${BIFROST_SERVER_V4_DIR:-$REPO/bifrost-server-v4}"
+RUN_LOCAL_CASES="${RUN_LOCAL_CASES:-1}"
+RUN_SERVER_V4_CASES="${RUN_SERVER_V4_CASES:-1}"
+RUN_REMOTE_RELAY_CASES="${RUN_REMOTE_RELAY_CASES:-1}"
 FAILED=0
 
 if [[ -n "$REMOTE_RELAY_HEADERS" ]]; then
@@ -44,6 +48,77 @@ require_cmd jq
 require_cmd python3
 require_cmd shasum
 
+pass() {
+  echo "PASS $*"
+  if [[ -n "${RESULTS:-}" ]]; then
+    echo "PASS $*" >>"$RESULTS"
+  fi
+}
+
+fail() {
+  FAILED=1
+  echo "FAIL $*" >&2
+  if [[ -n "${RESULTS:-}" ]]; then
+    echo "FAIL $*" >>"$RESULTS"
+    echo "DIAG preserved failed temp dir: ${TMP_ROOT:-<not-created>}" | tee -a "$RESULTS" >&2
+  else
+    echo "DIAG preserved failed temp dir: ${TMP_ROOT:-<not-created>}" >&2
+  fi
+  exit 1
+}
+
+run_cmd() {
+  echo "+ $*" >&2
+  "$@"
+}
+
+run_local_case_suites() {
+  if [[ "$RUN_LOCAL_CASES" != "1" ]]; then
+    pass "local remote invoke case suites skipped RUN_LOCAL_CASES=$RUN_LOCAL_CASES"
+    return 0
+  fi
+
+  require_cmd cargo
+  require_cmd pnpm
+
+  local sync_server_dir="$REPO/packages/bifrost-sync-server"
+  local vitest_cases=(
+    src/__tests__/p0-hardening.test.ts
+    src/__tests__/remote-invoke-security.test.ts
+    src/__tests__/remote-invoke-relay-v2-phase1.test.ts
+    src/__tests__/remote-invoke-pairing-timeout.test.ts
+    src/__tests__/sse-multi-watcher.test.ts
+    src/__tests__/remote-invoke-sse.test.ts
+    src/__tests__/remote-invoke-stream-frame.test.ts
+    src/__tests__/grants-claim.test.ts
+    src/__tests__/grants-lookup.test.ts
+    src/__tests__/grants-revoke.test.ts
+    src/__tests__/pop.test.ts
+  )
+
+  run_cmd pnpm --dir "$sync_server_dir" exec vitest run "${vitest_cases[@]}"
+  pass "sync-server remote invoke vitest suites"
+
+  run_cmd cargo test -p bifrost-cli remote -- --nocapture
+  pass "bifrost-cli remote invoke unit suites"
+}
+
+run_server_v4_case_suites() {
+  if [[ "$RUN_SERVER_V4_CASES" != "1" ]]; then
+    pass "server-v4 remote invoke case suites skipped RUN_SERVER_V4_CASES=$RUN_SERVER_V4_CASES"
+    return 0
+  fi
+
+  if [[ ! -f "$BIFROST_SERVER_V4_DIR/package.json" ]]; then
+    fail "missing bifrost-server-v4 checkout at $BIFROST_SERVER_V4_DIR; set RUN_SERVER_V4_CASES=0 to skip or BIFROST_SERVER_V4_DIR to override"
+  fi
+
+  require_cmd pnpm
+  run_cmd pnpm --dir "$BIFROST_SERVER_V4_DIR" run build
+  run_cmd pnpm --dir "$BIFROST_SERVER_V4_DIR" run test:remote-invoke-hardening
+  pass "bifrost-server-v4 remote invoke hardening suites"
+}
+
 relay_header_args() {
   if [[ -z "$REMOTE_RELAY_HEADERS" ]]; then
     return 0
@@ -68,6 +143,17 @@ for item in sys.argv[1].split(","):
     print(f"{name}: {value}")
 PY
 }
+
+if [[ "$RUN_LOCAL_CASES" == "1" || "$RUN_SERVER_V4_CASES" == "1" ]]; then
+  pass "one-click regression phases local=$RUN_LOCAL_CASES server_v4=$RUN_SERVER_V4_CASES remote_relay=$RUN_REMOTE_RELAY_CASES"
+fi
+run_local_case_suites
+run_server_v4_case_suites
+
+if [[ "$RUN_REMOTE_RELAY_CASES" != "1" ]]; then
+  pass "remote relay full regression skipped RUN_REMOTE_RELAY_CASES=$RUN_REMOTE_RELAY_CASES"
+  exit 0
+fi
 
 if [[ "${SKIP_BUILD:-false}" != "true" ]]; then
   cargo build --manifest-path "$REPO/Cargo.toml" --bin bifrost
@@ -118,13 +204,6 @@ RESULTS="$TMP_ROOT/results.log"
 
 mkdir -p "$TARGET_DATA" "$CALLER_CODE_DATA" "$CALLER_SSH_DATA" "$FILE_ROOT"
 
-pass() { echo "PASS $*" | tee -a "$RESULTS"; }
-fail() {
-  FAILED=1
-  echo "FAIL $*" | tee -a "$RESULTS" >&2
-  echo "DIAG preserved failed temp dir: $TMP_ROOT" | tee -a "$RESULTS" >&2
-  exit 1
-}
 json() { jq -c . 2>/dev/null || cat; }
 http_post() {
   local path="$1" data="$2"
@@ -474,10 +553,17 @@ pass "remote conn down cleanup"
 
 printf '\nSUMMARY\n'
 cat "$RESULTS"
-printf 'TMP_ROOT=%s\nTARGET_PORT=%s\nCLIENT_ID=%s\nBIN=%s\nSHA256=%s\nHEAD=%s\n' \
+GIT_STATUS_SHORT="$(git -C "$REPO" status --short)"
+if [[ -n "$GIT_STATUS_SHORT" ]]; then
+  GIT_DIRTY=true
+else
+  GIT_DIRTY=false
+fi
+printf 'TMP_ROOT=%s\nTARGET_PORT=%s\nCLIENT_ID=%s\nBIN=%s\nSHA256=%s\nHEAD=%s\nGIT_DIRTY=%s\n' \
   "$TMP_ROOT" \
   "$TARGET_PORT" \
   "$CLIENT_ID" \
   "$BIFROST_BIN" \
   "$(shasum -a 256 "$BIFROST_BIN" | awk '{print $1}')" \
-  "$(git -C "$REPO" rev-parse HEAD)"
+  "$(git -C "$REPO" rev-parse HEAD)" \
+  "$GIT_DIRTY"

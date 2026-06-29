@@ -6,7 +6,7 @@ use bifrost_core::{
 };
 use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use super::types::{
     ClientCallExitRequest, ClientCallFrameRequest, ClientCallStreamFrameRequest,
@@ -14,6 +14,8 @@ use super::types::{
     ClientRegistrationChallengeResponse, ClientRegistrationRequest, ClientRegistrationResponse,
     GrantDecisionRequest, PublishPairCodeRequest, SshConnectResultRequest, UpdateGrantRequest,
 };
+
+const CALL_FRAME_SEND_RETRY_DELAYS_MS: &[u64] = &[150, 500, 1_000];
 
 #[derive(Debug, Deserialize)]
 struct RelayApiResponse<T> {
@@ -199,13 +201,8 @@ impl RelayClient {
             call_id
         );
         let response = self
-            .authorized_post(&url)
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| {
-                BifrostError::Network(format!("relay post call frame request failed: {e}"))
-            })?;
+            .authorized_post_json_with_send_retry(&url, req, "relay post call frame")
+            .await?;
         self.parse_response_empty(response, "post_call_frame").await
     }
 
@@ -221,13 +218,8 @@ impl RelayClient {
             call_id
         );
         let response = self
-            .authorized_post(&url)
-            .json(req)
-            .send()
-            .await
-            .map_err(|e| {
-                BifrostError::Network(format!("relay post call stream_frame request failed: {e}"))
-            })?;
+            .authorized_post_json_with_send_retry(&url, req, "relay post call stream_frame")
+            .await?;
         self.parse_response_empty(response, "post_call_stream_frame")
             .await
     }
@@ -434,6 +426,39 @@ impl RelayClient {
         builder
     }
 
+    async fn authorized_post_json_with_send_retry<T>(
+        &self,
+        url: &str,
+        body: &T,
+        label: &str,
+    ) -> Result<reqwest::Response>
+    where
+        T: Serialize + ?Sized,
+    {
+        let mut attempt = 0usize;
+        loop {
+            match self.authorized_post(url).json(body).send().await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    if attempt >= CALL_FRAME_SEND_RETRY_DELAYS_MS.len() {
+                        return Err(BifrostError::Network(format!(
+                            "{label} request failed: {error}"
+                        )));
+                    }
+                    let delay_ms = CALL_FRAME_SEND_RETRY_DELAYS_MS[attempt];
+                    attempt += 1;
+                    tracing::warn!(
+                        error = %error,
+                        attempt,
+                        delay_ms,
+                        "{label} request send failed, retrying"
+                    );
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                }
+            }
+        }
+    }
+
     fn authorized_delete(&self, url: &str) -> reqwest::RequestBuilder {
         let mut builder = self.relay_delete(url);
         if let Some(token) = self.client_auth_token.read().as_deref() {
@@ -560,5 +585,67 @@ fn truncate_for_log(s: &str, max_len: usize) -> String {
     } else {
         let truncated: String = s.chars().take(max_len).collect();
         format!("{truncated}...(truncated, total {} bytes)", s.len())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn post_call_frame_retries_send_failure_once() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock relay");
+        let addr = listener.local_addr().expect("mock relay addr");
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let attempts_for_server = Arc::clone(&attempts);
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.expect("accept mock relay connection");
+                let attempt = attempts_for_server.fetch_add(1, Ordering::SeqCst);
+                if attempt == 0 {
+                    drop(stream);
+                    continue;
+                }
+
+                let mut buf = [0_u8; 4096];
+                let _ = stream.read(&mut buf);
+                let body = r#"{"code":0,"message":null,"data":null}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body,
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write mock relay response");
+                break;
+            }
+        });
+
+        let client = RelayClient::new(
+            &format!("http://{addr}"),
+            "client-retry",
+            "device",
+            "platform",
+        );
+        client.set_auth_token("token".to_string());
+        client
+            .post_call_frame(
+                "call-retry",
+                &ClientCallFrameRequest {
+                    call_id: "call-retry".to_string(),
+                    client_instance_id: "client-retry".to_string(),
+                    envelope_json: "{}".to_string(),
+                },
+            )
+            .await
+            .expect("post_call_frame should retry send failure");
+
+        server.join().expect("mock relay thread");
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

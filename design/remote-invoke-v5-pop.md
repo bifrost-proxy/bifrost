@@ -121,6 +121,14 @@
 - The caller open rate limiter is `600` requests/minute per caller+client key.
   This preserves a normal high-frequency workload of `500` opens/minute while
   still bounding accidental tight loops.
+- `e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh` is the one-click local
+  regression entry for release validation. It runs, by default, the local
+  sync-server Remote Invoke security/relay/PoP Vitest suites, the Rust CLI
+  remote unit-test filter, the adjacent `bifrost-server-v4` hardening suite,
+  and the deployed relay Code + SSH key end-to-end matrix. The PPE request header is
+  intentionally an environment-only test knob
+  (`BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`);
+  no UI or persistent runtime configuration is introduced for it.
 
 ---
 

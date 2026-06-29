@@ -287,3 +287,87 @@ Execution result:
 
 - PASS. 2026-06-29 executed the selected sync-server remote-invoke test set;
   the atomic once-grant regression passed as part of `196` passing tests.
+
+## TC-P0-9: one-click full local release regression
+
+Regression target: the local release gate for Remote Invoke must be a single
+script that covers local protocol/security regressions, the adjacent
+`bifrost-server-v4` hardening checks, and the deployed relay Code + SSH key
+end-to-end matrix. The script must stay out of CI because CI cannot access the
+internal relay network.
+
+Steps:
+
+1. From the repository root, execute:
+   `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' KEEP_TMP=1 e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`.
+2. Verify the script first runs the local sync-server Remote Invoke Vitest
+   suites:
+   `p0-hardening`, `remote-invoke-security`,
+   `remote-invoke-relay-v2-phase1`, `remote-invoke-pairing-timeout`,
+   `sse-multi-watcher`, `remote-invoke-sse`,
+   `remote-invoke-stream-frame`, `grants-claim`, `grants-lookup`,
+   `grants-revoke`, and `pop`.
+3. Verify the script runs the Rust Remote Invoke CLI filter:
+   `cargo test -p bifrost-cli remote -- --nocapture`.
+4. Verify the script runs the adjacent server-v4 checks from
+   `BIFROST_SERVER_V4_DIR` (default:
+   `./bifrost-server-v4`): `pnpm run build` and
+   `pnpm run test:remote-invoke-hardening`.
+5. Verify the script then builds the current branch `bifrost` binary and uses
+   that same binary for both local Bifrost clients: one target and one caller
+   at a time.
+6. Verify the deployed relay phase connects to
+   `https://bifrost.bytedance.net`, runs the Code authorization path, then the
+   SSH key authorization path.
+7. Verify both authorization paths execute the full Remote matrix:
+   `remote conn status`, `remote traffic list/get/search`,
+   `remote file read/read-many/scratch-dir/list/stat/glob/find/hash/outline/write/edit/mkdir/move/delete/patch`,
+   `remote exec`, `remote run`, `remote exec --detach`,
+   `remote run --detach`, and `remote job logs/watch/list/status`.
+8. Execute `CI=true e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`.
+
+Expected:
+
+- The default local command runs all three phases. Individual phases can be
+  narrowed only by explicit local env flags: `RUN_LOCAL_CASES=0`,
+  `RUN_SERVER_V4_CASES=0`, or `RUN_REMOTE_RELAY_CASES=0`.
+- Missing `bifrost-server-v4` checkout fails fast unless
+  `RUN_SERVER_V4_CASES=0` is explicitly set.
+- PPE routing is enabled only by `BIFROST_REMOTE_RELAY_HEADERS`; the switch is
+  not persisted and is not exposed in UI.
+- The CI invocation prints skip and exits 0 before any local/server-v4/remote
+  network work starts.
+- On failure, the script exits non-zero and preserves the temp directory when
+  one has been created.
+
+Execution result:
+
+- PASS. 2026-06-29 executed
+  `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' KEEP_TMP=1 e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`.
+- The local phase passed:
+  - sync-server Remote Invoke Vitest suites: `11` files, `60` tests passed.
+  - `cargo test -p bifrost-cli remote -- --nocapture`: `245` lib tests,
+    `15` CLI command tests passed.
+  - `pnpm --dir bifrost-server-v4 run build`: PASS.
+  - `pnpm --dir bifrost-server-v4 run test:remote-invoke-hardening`: PASS.
+- During the first full run after expanding coverage, `remote run` exposed a
+  target-to-relay send error while posting a call frame. We checked deployed
+  `bifrost.server.v4` with `bytedcli log search-psm-log` for call
+  `86d6226fb4cd87f1`; PPE access logs showed `/frame`, `/stream-frame` and
+  `/exit` requests returning HTTP `200` and no `relay_queue` errors. The
+  client-side target relay client was hardened with short retry for
+  request-send failures only, and server-v4 regression tests were expanded to
+  assert client frame/stream-frame/exit queue delivery uses
+  `ri:mq:{caller:<callId>}`.
+- The final full PPE run passed with target client id
+  `06c2776a-d62f-4a8e-b1c3-47149edf71c3`, temp dir
+  `/tmp/bifrost-relay-full.UODRT5`, target port `51792`, binary
+  `/Users/eden/work/github/bifrost/target/debug/bifrost`, and binary sha256
+  `68e7c6455028991986d4a4320d28913ac169c2d0c953bf68409d17e6b66115b9`.
+  Code grant `5fa75bfc0edc9527` connected successfully.
+- Code authorization passed the full matrix: `remote conn status`,
+  `remote traffic list/get/search`, all remote file subcommands,
+  `remote exec`, `remote run`, detached exec/run jobs, and
+  `remote job logs/watch/list/status`.
+- SSH key authorization passed the same full matrix.
+- `remote conn down --all` cleanup passed and no test Bifrost process remained.
