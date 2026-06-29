@@ -26,7 +26,9 @@ export interface SyncServerInstance {
 }
 
 function isRemoteInvokePath(pathname: string): boolean {
-  return pathname.startsWith('/v4/remote-invoke/') || pathname.startsWith('/v5/remote-invoke/');
+  return pathname.startsWith('/v4/remote-invoke/')
+    || pathname.startsWith('/v5/remote-invoke/')
+    || pathname.startsWith('/remote-invoke/');
 }
 
 export function createSyncServer(config: SyncServerConfig): SyncServerInstance {

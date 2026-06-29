@@ -29,9 +29,9 @@ pub use access_control::{
 pub use error::{BifrostError, Result};
 pub use http_client::{
     apply_remote_relay_headers, direct_blocking_reqwest_client_builder,
-    direct_reqwest_client_builder, direct_ureq_agent, direct_ureq_agent_builder,
-    load_reqwest_certificate, parse_remote_relay_headers, proxied_reqwest_client_builder,
-    remote_relay_headers_from_env, REMOTE_RELAY_HEADERS_ENV,
+    direct_reqwest_client_builder, direct_sse_reqwest_client_builder, direct_ureq_agent,
+    direct_ureq_agent_builder, load_reqwest_certificate, parse_remote_relay_headers,
+    proxied_reqwest_client_builder, remote_relay_headers_from_env, REMOTE_RELAY_HEADERS_ENV,
 };
 pub use logging::{
     cleanup_bifrost_log_dir, init_logging, init_logging_with_config, reinit_logging_for_daemon,

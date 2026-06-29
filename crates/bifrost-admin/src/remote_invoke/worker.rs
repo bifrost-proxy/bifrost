@@ -1196,12 +1196,10 @@ impl RemoteInvokeWorker {
             )));
         }
 
-        if let Err(e) = self.relay_client.cancel_pending_pairings().await {
-            debug!(error = %e, "cancel_pending_pairings on SSE connect (non-fatal)");
-        } else {
-            self.pending_pairings.write().clear();
-            info!("cleared stale pending pairings on SSE reconnect");
-        }
+        // A relay/TLB may close long-lived SSE streams periodically. Reconnect
+        // must not reject active pairing offers that are still waiting for
+        // local user approval; only prune entries that are already expired.
+        self.cleanup_expired_pairings();
 
         match self.relay_client.fetch_active_grants().await {
             Ok(grants_data) => {

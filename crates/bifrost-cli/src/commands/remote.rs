@@ -13,13 +13,13 @@ use bifrost_command::{
     TrafficListArgs, TrafficListDirection,
 };
 use bifrost_core::{
-    apply_remote_relay_headers, direct_reqwest_client_builder, remote_relay_headers_from_env,
-    BifrostError, REMOTE_RELAY_HEADERS_ENV,
+    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
+    remote_relay_headers_from_env, BifrostError, REMOTE_RELAY_HEADERS_ENV,
 };
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
 use futures::StreamExt;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
 use ring::aead::{Aad, LessSafeKey, Nonce, UnboundKey, AES_256_GCM, CHACHA20_POLY1305, NONCE_LEN};
 use ring::agreement::{self, UnparsedPublicKey, X25519};
 use ring::digest::{digest, SHA256};
@@ -5536,6 +5536,8 @@ impl CallerRelayClient {
 
     fn sse_get(&self, client: &reqwest::Client, url: &str) -> reqwest::RequestBuilder {
         apply_remote_relay_headers(client.get(url), &self.relay_headers)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::CACHE_CONTROL, "no-transform")
     }
 
     async fn delete_grant(
@@ -5714,7 +5716,7 @@ impl CallerRelayClient {
             urlencoding::encode(watch_token),
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build sse client: {e}")))?;
@@ -6016,7 +6018,7 @@ impl CallerRelayClient {
             self.base_url, connect_id
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build ssh connect sse client: {e}")))?;
@@ -6106,7 +6108,7 @@ impl CallerRelayClient {
             self.base_url, call_id
         );
 
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build call events sse client: {e}")))?;
@@ -6380,7 +6382,7 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/events",
             self.base_url, call_id
         );
-        let sse_http = direct_reqwest_client_builder()
+        let sse_http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
@@ -6528,7 +6530,7 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/status",
             self.base_url, call_id
         );
-        let http = direct_reqwest_client_builder()
+        let http = direct_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build job status client: {e}")))?;

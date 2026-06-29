@@ -1,11 +1,11 @@
 use std::time::Duration;
 
 use bifrost_core::{
-    apply_remote_relay_headers, direct_reqwest_client_builder, remote_relay_headers_from_env,
-    BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
+    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
+    remote_relay_headers_from_env, BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
 };
 use parking_lot::RwLock;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
 use serde::Deserialize;
 
 use super::types::{
@@ -25,6 +25,7 @@ struct RelayApiResponse<T> {
 
 pub struct RelayClient {
     http: reqwest::Client,
+    sse_http: reqwest::Client,
     base_url: RwLock<String>,
     relay_headers: HeaderMap,
     client_auth_token: RwLock<Option<String>>,
@@ -46,6 +47,10 @@ impl RelayClient {
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build relay http client");
+        let sse_http = direct_sse_reqwest_client_builder()
+            .connect_timeout(Duration::from_secs(10))
+            .build()
+            .expect("failed to build relay sse http client");
         let relay_headers = remote_relay_headers_from_env().unwrap_or_else(|error| {
             tracing::warn!(
                 env = REMOTE_RELAY_HEADERS_ENV,
@@ -57,6 +62,7 @@ impl RelayClient {
 
         Self {
             http,
+            sse_http,
             base_url: RwLock::new(base_url.trim_end_matches('/').to_string()),
             relay_headers,
             client_auth_token: RwLock::new(None),
@@ -387,7 +393,13 @@ impl RelayClient {
 
     pub fn build_sse_request(&self, stream_id: &str) -> reqwest::RequestBuilder {
         let url = self.build_stream_url(stream_id);
-        self.authorized_get(&url)
+        let mut builder = apply_remote_relay_headers(self.sse_http.get(&url), &self.relay_headers)
+            .header(ACCEPT_ENCODING, "identity")
+            .header(reqwest::header::CACHE_CONTROL, "no-transform");
+        if let Some(token) = self.client_auth_token.read().as_deref() {
+            builder = builder.header("Authorization", format!("Bearer {token}"));
+        }
+        builder
     }
 
     fn relay_get(&self, url: &str) -> reqwest::RequestBuilder {

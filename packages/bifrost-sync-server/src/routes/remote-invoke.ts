@@ -88,6 +88,14 @@ function sha256Hex(value: string): string {
 
 let activeConfig: RemoteInvokeConfig = DEFAULT_REMOTE_INVOKE_CONFIG;
 
+function normalizeRemoteInvokePath(pathname: string): string {
+  const normalized = pathname.replace(/\/$/, '') || '/';
+  if (normalized.startsWith('/remote-invoke/')) {
+    return `/v5${normalized}`;
+  }
+  return normalized;
+}
+
 async function requireClientAuth(
   ctx: RequestContext,
   service: RemoteInvokeService,
@@ -226,7 +234,7 @@ export async function handleRemoteInvoke(
 ): Promise<boolean> {
   const { url, req } = ctx;
   const method = req.method ?? 'GET';
-  const pathname = url.pathname.replace(/\/$/, '') || '/';
+  const pathname = normalizeRemoteInvokePath(url.pathname);
 
   if (!pathname.startsWith('/v4/remote-invoke') && !pathname.startsWith('/v5/remote-invoke')) return false;
 

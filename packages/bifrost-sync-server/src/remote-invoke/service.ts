@@ -91,8 +91,10 @@ function constantTimeCompare(a: string, b: string): boolean {
 }
 
 function clampSshGrantMode(mode: string | undefined): GrantMode {
-  // P0-3: SSH-initiated grants must not be permanent.
-  const allowed: GrantMode[] = ['once', '30m', '1h', '1d'];
+  // SSH-key grants are target-approved. Preserve the target's explicit mode
+  // so default Full Trust remains reusable; fall back to once for malformed
+  // or missing relay payloads.
+  const allowed: GrantMode[] = ['once', '30m', '1h', '1d', 'permanent'];
   if (mode && (allowed as string[]).includes(mode)) return mode as GrantMode;
   return 'once';
 }
@@ -1161,7 +1163,8 @@ export class RemoteInvokeService {
     let grantIdForClaim: string | null = null;
     if (result.status === 'approved' && result.grant_id) {
       const now = new Date().toISOString();
-      // P0-3: clamp SSH-minted grant mode to non-permanent values.
+      // Preserve target-approved SSH grant mode; invalid relay payloads
+      // are clamped by clampSshGrantMode.
       const grantMode = clampSshGrantMode(req.grant_mode);
       const callerPubkey = result.caller_info?.caller_pubkey || '';
       if (!callerPubkey) {

@@ -10,7 +10,7 @@ import { RemoteInvokeService } from '../remote-invoke/service';
 import { buildRegistrationSignaturePayload } from '../remote-invoke/types';
 import { deriveSshDeviceCode } from '../remote-invoke/ssh-auth';
 import { ed25519FingerprintFromBase64 } from '../remote-invoke/pop';
-import { makeCallerKeypair, sha256Hex, signPopBody } from './remote-invoke-v5-test-utils';
+import { base64X25519Pub, makeCallerKeypair, sha256Hex, signPopBody } from './remote-invoke-v5-test-utils';
 
 const TEST_DATA_DIR = path.join(__dirname, '.test-data-p0-hardening');
 const V5_GRANT_COLUMNS = [
@@ -193,6 +193,20 @@ describe('P0-1: SSH route is bound to the registering user', () => {
 });
 
 describe('P0-4: pairing fingerprint is derived from server-trusted PoP key', () => {
+  it('accepts v5 caller routes when a TLB strips the /v5 prefix', async () => {
+    const stripped = await req('POST', '/remote-invoke/pairings/start', {});
+    expect(stripped.status).toBe(400);
+    expect(stripped.data.message).toMatch(/pair_code, caller_info and caller_ephemeral_pub are required/);
+
+    const legacy = await req('POST', '/v4/remote-invoke/pairings/start', {});
+    expect(legacy.status).toBe(410);
+    expect(legacy.data.error).toBe('protocol_version_not_supported');
+
+    const strippedClientRoute = await req('POST', '/remote-invoke/client/register', {});
+    expect(strippedClientRoute.status).toBe(404);
+    expect(strippedClientRoute.data.message).toBe('remote invoke endpoint not found');
+  });
+
   it('rejects start_pairing payloads without caller_pubkey (server has no key to derive fp)', async () => {
     const r = await req('POST', '/v5/remote-invoke/pairings/start', {
       pair_code: 'ANYCODE1',
@@ -236,6 +250,75 @@ describe('P0-3: SSH approval mints a single-use claim_token (DAO sanity)', () =>
     await server.storage.remoteInvoke.markSshClaimRedeemed(claim_token_hash, ts);
     const after = await server.storage.remoteInvoke.getSshClaimByTokenHash(claim_token_hash);
     expect(after?.claimed_at).toBe(ts);
+  });
+
+  it('redeemed SSH claim grant_session_token can open multiple calls', async () => {
+    const keypair = makeCallerKeypair();
+    const grantId = 'grant-p03-ssh-multi-' + crypto.randomBytes(4).toString('hex');
+    const claimToken = 'claim-p03-ssh-multi-' + crypto.randomBytes(4).toString('hex');
+    const clientInstanceId = 'client-p03-ssh-multi';
+    const now = new Date().toISOString();
+    await server.storage.remoteInvoke.createGrant({
+      id: grantId,
+      user_id: 'p03-user',
+      client_instance_id: clientInstanceId,
+      caller_fingerprint: keypair.caller_pubkey_fp,
+      caller_display_name: 'ssh-caller',
+      caller_pubkey: keypair.caller_pubkey,
+      caller_pubkey_fp: keypair.caller_pubkey_fp,
+      caller_ephemeral_pub: base64X25519Pub('ssh-multi-caller'),
+      client_ephemeral_pub: base64X25519Pub('ssh-multi-client'),
+      grant_mode: 'permanent',
+      grant_scope: 'remote_shell_interactive',
+      file_access: 'read_write',
+      ssh_key_id: 'ssh-key-p03',
+      ssh_key_fingerprint: 'ssh-fp-p03',
+      status: 'active',
+      first_authorized_at: now,
+      expires_at: '',
+      session_token_hash: '',
+      session_token_expires_at: '',
+      last_nonce_seen: '',
+      revoked_at: '',
+      last_used_at: now,
+      max_calls: 1000,
+      remaining_calls: 1000,
+      created_by: 'ssh_publickey',
+      update_time: now,
+    });
+    await server.storage.remoteInvoke.createSshClaim({
+      claim_token_hash: sha256Hex(claimToken),
+      grant_id: grantId,
+      client_instance_id: clientInstanceId,
+      caller_pubkey_fp: keypair.caller_pubkey_fp,
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+      create_time: now,
+      claimed_at: '',
+    });
+
+    const claim = await req('POST', '/v5/remote-invoke/grants/ssh-claim', signPopBody({
+      client_instance_id: clientInstanceId,
+      claim_token: claimToken,
+      caller_ephemeral_pub: base64X25519Pub('ssh-multi-caller'),
+    }, keypair));
+    expect(claim.status, JSON.stringify(claim.data)).toBe(200);
+    const sessionToken = claim.data.data.grant_session_token;
+    expect(sessionToken).toMatch(/^[a-f0-9]{64}$/);
+
+    for (const label of ['first', 'second']) {
+      const opened = await req('POST', '/v5/remote-invoke/calls/open', signPopBody({
+        client_instance_id: clientInstanceId,
+        command_kind: 'file',
+        command_encrypted: {
+          version: 1,
+          nonce: `nonce-${label}`,
+          ciphertext: `ciphertext-${label}`,
+          tag: `tag-${label}`,
+        },
+        command_summary: { command_preview: `file.read ${label}` },
+      }, keypair), { Authorization: `Bearer ${sessionToken}` });
+      expect(opened.status, JSON.stringify(opened.data)).toBe(200);
+    }
   });
 });
 

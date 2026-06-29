@@ -6,6 +6,14 @@ pub fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
 }
 
+pub fn direct_sse_reqwest_client_builder() -> reqwest::ClientBuilder {
+    direct_reqwest_client_builder()
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+}
+
 pub fn direct_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder().no_proxy()
 }
