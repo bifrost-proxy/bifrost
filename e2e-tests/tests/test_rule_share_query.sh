@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 : "${BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT:=1}"
 : "${BIFROST_DISABLE_TRAY:=1}"
@@ -55,6 +55,7 @@ cleanup() {
   rm -rf "$DATA_DIR" "$SITE_DIR"
 }
 trap cleanup EXIT
+trap 'rc=$?; echo "rule share query failed at line ${LINENO} rc=${rc}" >&2; cat /tmp/bifrost-rule-share-site.log >&2 2>/dev/null || true; cat /tmp/bifrost-rule-share-proxy.log >&2 2>/dev/null || true' ERR
 
 echo '<html><body>rule share target</body></html>' >"$SITE_DIR/hello"
 echo '<html><body>rule share api target</body></html>' >"$SITE_DIR/from-api"
@@ -171,7 +172,7 @@ SHARE_URL="$(
 
 curl -sS -o /tmp/bifrost-rule-share-body.out \
   -D /tmp/bifrost-rule-share.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL" >/dev/null
+  -x "http://127.0.0.1:${PROXY_PORT}" --noproxy "" "$SHARE_URL" >/dev/null
 grep -Eiq '^HTTP/.* 302' /tmp/bifrost-rule-share.headers
 CONFIRM_URL="$(header_location /tmp/bifrost-rule-share.headers)"
 assert_confirm_location "$CONFIRM_URL"
@@ -204,7 +205,7 @@ SHARE_URL_2="$(
 )"
 curl -sS -o /tmp/bifrost-rule-share-second.out \
   -D /tmp/bifrost-rule-share-second.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$SHARE_URL_2" >/dev/null
+  -x "http://127.0.0.1:${PROXY_PORT}" --noproxy "" "$SHARE_URL_2" >/dev/null
 CONFIRM_URL_2="$(header_location /tmp/bifrost-rule-share-second.headers)"
 assert_confirm_location "$CONFIRM_URL_2"
 CONFIRMED_RULE_2="$(confirm_location "$CONFIRM_URL_2")"
@@ -219,7 +220,7 @@ RESHARE_URL="$(
 [[ "$RESHARE_URL" == *"__bifrost_rule="* ]]
 curl -sS -o /tmp/bifrost-rule-share-reshare.out \
   -D /tmp/bifrost-rule-share-reshare.headers \
-  -x "http://127.0.0.1:${PROXY_PORT}" "$RESHARE_URL" >/dev/null
+  -x "http://127.0.0.1:${PROXY_PORT}" --noproxy "" "$RESHARE_URL" >/dev/null
 CONFIRM_URL_RESHARE="$(header_location /tmp/bifrost-rule-share-reshare.headers)"
 assert_confirm_location "$CONFIRM_URL_RESHARE"
 CONFIRMED_RESHARE="$(confirm_location "$CONFIRM_URL_RESHARE")"
