@@ -193,6 +193,7 @@ export default function Settings() {
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null);
   const [syncLoading, setSyncLoading] = useState(false);
   const [syncRemoteBaseUrlDraft, setSyncRemoteBaseUrlDraft] = useState("");
+  const syncRemoteBaseUrlDirtyRef = useRef(false);
   const beginDesktopCoreRestart = useDesktopCoreStore(
     (state) => state.beginRestart,
   );
@@ -209,6 +210,26 @@ export default function Settings() {
     desktopCoreVisible &&
     desktopCorePhase !== "idle" &&
     desktopCorePhase !== "error";
+
+  const applySyncStatus = useCallback(
+    (status: SyncStatus, options?: { syncRemoteBaseUrlDraft?: boolean }) => {
+      setSyncStatus(status);
+      if (
+        options?.syncRemoteBaseUrlDraft ||
+        !syncRemoteBaseUrlDirtyRef.current
+      ) {
+        syncRemoteBaseUrlDirtyRef.current = false;
+        setSyncRemoteBaseUrlDraft(status.remote_base_url);
+      }
+      useSyncStore.getState().setSyncStatus(status);
+    },
+    [],
+  );
+
+  const handleSyncRemoteBaseUrlDraftChange = useCallback((value: string) => {
+    syncRemoteBaseUrlDirtyRef.current = true;
+    setSyncRemoteBaseUrlDraft(value);
+  }, []);
 
   const fetchProxySettings = useCallback(async () => {
     try {
@@ -273,9 +294,7 @@ export default function Settings() {
     setSyncLoading(true);
     try {
       const status = await getSyncStatus();
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
     } catch (error) {
       if (!suppressRestartErrors && !isConnectionIssueError(error)) {
         console.error("Failed to fetch sync status");
@@ -283,7 +302,7 @@ export default function Settings() {
     } finally {
       setSyncLoading(false);
     }
-  }, [suppressRestartErrors]);
+  }, [applySyncStatus, suppressRestartErrors]);
 
   const fetchCertInfoData = useCallback(async () => {
     try {
@@ -850,9 +869,7 @@ export default function Settings() {
       try {
         const status = await getSyncStatus();
         if (stopped) return;
-        setSyncStatus(status);
-        setSyncRemoteBaseUrlDraft(status.remote_base_url);
-        useSyncStore.getState().setSyncStatus(status);
+        applySyncStatus(status);
       } catch (error) {
         if (!suppressRestartErrors && !isConnectionIssueError(error)) {
           console.error("Failed to refresh sync status");
@@ -867,7 +884,7 @@ export default function Settings() {
       stopped = true;
       window.clearInterval(timer);
     };
-  }, [activeTab, suppressRestartErrors]);
+  }, [activeTab, applySyncStatus, suppressRestartErrors]);
 
   useEffect(() => {
     const timers = perfUpdateTimers.current;
@@ -889,31 +906,27 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     setSyncLoading(true);
     try {
       const status = await updateSyncConfig({ enabled });
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
       message.success(enabled ? "Remote sync enabled" : "Remote sync disabled");
     } catch {
       message.error("Failed to update sync setting");
     } finally {
       setSyncLoading(false);
     }
-  }, []);
+  }, [applySyncStatus]);
 
   const handleSyncAutoToggle = useCallback(async (autoSync: boolean) => {
     setSyncLoading(true);
     try {
       const status = await updateSyncConfig({ auto_sync: autoSync });
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
       message.success(autoSync ? "Auto sync enabled" : "Auto sync disabled");
     } catch {
       message.error("Failed to update auto sync");
     } finally {
       setSyncLoading(false);
     }
-  }, []);
+  }, [applySyncStatus]);
 
   const handleSyncRemoteBaseUrlSave = useCallback(async () => {
     const remoteBaseUrl = syncRemoteBaseUrlDraft.trim();
@@ -924,58 +937,50 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     setSyncLoading(true);
     try {
       const status = await updateSyncConfig({ remote_base_url: remoteBaseUrl });
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status, { syncRemoteBaseUrlDraft: true });
       message.success("Remote sync URL updated");
     } catch {
       message.error("Failed to update remote sync URL");
     } finally {
       setSyncLoading(false);
     }
-  }, [syncRemoteBaseUrlDraft]);
+  }, [applySyncStatus, syncRemoteBaseUrlDraft]);
 
   const handleSyncSignIn = useCallback(async () => {
     try {
       const status = await openSyncLogin();
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
       message.success("Remote sign-in window opened");
     } catch {
       message.error("Failed to open remote sign-in page");
     }
-  }, []);
+  }, [applySyncStatus]);
 
   const handleSyncSignOut = useCallback(async () => {
     setSyncLoading(true);
     try {
       const status = await logoutSyncSession();
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
       message.success("Sync session cleared");
     } catch {
       message.error("Failed to sign out from remote sync");
     } finally {
       setSyncLoading(false);
     }
-  }, []);
+  }, [applySyncStatus]);
 
   const handleSyncRunNow = useCallback(async () => {
     setSyncLoading(true);
     try {
       const status = await runSyncNow();
-      setSyncStatus(status);
-      setSyncRemoteBaseUrlDraft(status.remote_base_url);
-      useSyncStore.getState().setSyncStatus(status);
+      applySyncStatus(status);
       message.success("Sync requested");
     } catch {
       message.error("Failed to trigger sync");
     } finally {
       setSyncLoading(false);
     }
-  }, []);
+  }, [applySyncStatus]);
 
   const handleDesktopProxyPortApply = useCallback(async () => {
     if (!isDesktopShell()) {
@@ -1332,7 +1337,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           syncStatus={syncStatus}
           syncLoading={syncLoading}
           remoteBaseUrlDraft={syncRemoteBaseUrlDraft}
-          setRemoteBaseUrlDraft={setSyncRemoteBaseUrlDraft}
+          setRemoteBaseUrlDraft={handleSyncRemoteBaseUrlDraftChange}
           onToggleEnabled={handleSyncToggle}
           onToggleAutoSync={handleSyncAutoToggle}
           onSaveRemoteBaseUrl={handleSyncRemoteBaseUrlSave}

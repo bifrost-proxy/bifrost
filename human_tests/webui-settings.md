@@ -8,7 +8,7 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 
 1. 启动 Bifrost 服务（使用临时数据目录避免污染正式环境）：
    ```bash
-   BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsafe-ssl
+   BIFROST_DATA_DIR=./.bifrost-test BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 cargo run --bin bifrost -- start -p 8800 --unsafe-ssl --no-system-proxy
    ```
 2. 在浏览器中打开 `http://127.0.0.1:8800/_bifrost/settings`
 3. 确保端口 8800 未被防火墙阻止
@@ -531,6 +531,23 @@ Settings 页面是 Bifrost 管理端的系统设置中心，包含多个功能 T
 - 同步完成后显示成功提示
 - 上次同步时间更新为当前时间
 - 配置数据与云端保持一致
+
+---
+
+#### TC-WST-39：Remote URL 编辑时不被 Sync 状态轮询回滚
+
+**操作步骤**：
+1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=sync`
+2. 等待 Remote Sync 卡片显示当前状态和 Remote URL 输入框
+3. 在 Remote URL 输入框中输入 `http://127.0.0.1:61580/custom/`
+4. 停留至少 3 秒，等待页面完成一次 Sync 状态轮询刷新
+5. 点击 Remote URL 输入框右侧的 "Save" 按钮
+
+**预期结果**：
+- 等待轮询刷新期间，输入框内容保持为 `http://127.0.0.1:61580/custom/`，不会回滚到旧的默认地址
+- 状态、Session、Last Sync 等只读信息仍可随轮询刷新
+- 点击 Save 后，提交的是当前输入框内容
+- 保存成功后输入框显示后端返回的 Remote URL，且仍与刚提交的当前输入保持一致
 
 ---
 
