@@ -55,7 +55,7 @@ cleanup() {
   rm -rf "$DATA_DIR" "$SITE_DIR"
 }
 trap cleanup EXIT
-trap 'rc=$?; echo "rule share query failed at line ${LINENO} rc=${rc}" >&2; cat /tmp/bifrost-rule-share-site.log >&2 2>/dev/null || true; cat /tmp/bifrost-rule-share-proxy.log >&2 2>/dev/null || true' ERR
+trap 'rc=$?; echo "rule share query failed at line ${LINENO} rc=${rc}" >&2; cat /tmp/bifrost-rule-share-confirm.headers >&2 2>/dev/null || true; cat /tmp/bifrost-rule-share-site.log >&2 2>/dev/null || true; cat /tmp/bifrost-rule-share-proxy.log >&2 2>/dev/null || true' ERR
 
 echo '<html><body>rule share target</body></html>' >"$SITE_DIR/hello"
 echo '<html><body>rule share api target</body></html>' >"$SITE_DIR/from-api"
@@ -180,14 +180,14 @@ assert_confirm_location "$CONFIRM_URL"
 BIFROST_DATA_DIR="$DATA_DIR" "$BIFROST_BIN" rule list > /tmp/bifrost-rule-share-list-before-confirm.txt
 ! grep -F 'share/rsq-e2e [enabled]' /tmp/bifrost-rule-share-list-before-confirm.txt
 
-CONFIRM_PAGE="$(curl -fsS "$CONFIRM_URL")"
+CONFIRM_PAGE="$(curl -fsS -D /tmp/bifrost-rule-share-confirm.headers "$CONFIRM_URL")"
 [[ "$CONFIRM_PAGE" == *"Apply Shared Bifrost Rule"* ]]
 [[ "$CONFIRM_PAGE" == *"rsq-e2e"* ]]
 [[ "$CONFIRM_PAGE" == *"share.test bp://127.0.0.1:3000"* ]]
 [[ "$CONFIRM_PAGE" == *"Content hash"* ]]
 [[ "$CONFIRM_PAGE" != *"Type the full content hash to apply"* ]]
 [[ "$CONFIRM_PAGE" != *'id="confirmation"'* ]]
-[[ "$CONFIRM_PAGE" == *"connect-src 'self'"* ]]
+grep -F "connect-src 'self'" /tmp/bifrost-rule-share-confirm.headers >/dev/null
 
 CONFIRMED_RULE="$(confirm_location "$CONFIRM_URL")"
 [[ "$CONFIRMED_RULE" == "share/rsq-e2e" ]]

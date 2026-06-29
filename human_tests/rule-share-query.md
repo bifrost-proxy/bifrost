@@ -227,3 +227,11 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-01 至 TC-RSQ-06：通过。脚本输出 `rule share confirmation E2E passed`；启动阶段先等待本地 HTTP fixture 和 Bifrost 代理 ready，避免 CI 并发环境下目标站点尚未监听时空日志退出；显式代理访问均设置 `--noproxy ""`，在 `NO_PROXY=127.0.0.1` 环境下仍会经过 Bifrost 代理并得到 `302` 确认页跳转；裸域名、代理导入、重复导入、同名不同内容后缀、reshare 与 share-link API 均通过真实 CLI/API 链路验证。
+
+执行时间：2026-06-29
+
+执行命令：
+- `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_rule_share_query.sh`
+
+结果：
+- TC-RSQ-09：通过。确认页 `Content-Security-Policy` 使用真实响应头验证，包含 `connect-src 'self'`；HTML body 继续验证 `Content hash` 展示、无需手填 hash、无 `id="confirmation"`，避免把安全头错误当作页面正文断言。
