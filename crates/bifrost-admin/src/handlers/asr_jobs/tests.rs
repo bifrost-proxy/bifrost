@@ -73,6 +73,39 @@ mod tests {
     }
 
     #[test]
+    fn load_tasks_normalizes_legacy_home_and_relative_audio_dirs() {
+        let _lock = test_data_dir_lock();
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let home = dirs::home_dir().expect("home directory should be available in tests");
+        let home_task = test_directory_task("legacy-home-task", PathBuf::from("~/audio"));
+        let relative_task =
+            test_directory_task("legacy-relative-task", PathBuf::from("recordings/audio"));
+
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![home_task, relative_task],
+        })
+        .unwrap();
+
+        let loaded = load_tasks();
+        let loaded_home = loaded
+            .tasks
+            .iter()
+            .find(|task| task.id == "legacy-home-task")
+            .unwrap();
+        let loaded_relative = loaded
+            .tasks
+            .iter()
+            .find(|task| task.id == "legacy-relative-task")
+            .unwrap();
+        assert_eq!(loaded_home.audio_dir, home.join("audio"));
+        assert_eq!(loaded_relative.audio_dir, home.join("recordings/audio"));
+        assert!(!loaded_home.audio_dir.starts_with(temp.path()));
+        assert!(!loaded_relative.audio_dir.starts_with(temp.path()));
+    }
+
+    #[test]
     fn max_concurrent_files_is_clamped_and_effective_for_fork_per_chunk() {
         let temp = tempfile::tempdir().unwrap();
         let mut task = test_directory_task("concurrency-task", temp.path().join("audio"));

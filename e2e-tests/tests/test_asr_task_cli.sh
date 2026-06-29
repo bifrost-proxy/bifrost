@@ -16,6 +16,7 @@ fail() {
 
 ADMIN_PORT="${BIFROST_ASR_TASK_CLI_E2E_PORT:-${ADMIN_PORT:-18990}}"
 ADMIN_DATA_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-cli.XXXXXX")"
+HOME_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-home.XXXXXX")"
 AUDIO_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-audio.XXXXXX")"
 SYNC_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-asr-task-sync.XXXXXX")"
 OUTPUT_DOC="$(mktemp "${TMPDIR:-/tmp}/bifrost-asr-task-day.XXXXXX.md")"
@@ -26,7 +27,7 @@ cleanup() {
     kill "$ADMIN_PID" >/dev/null 2>&1 || true
     wait "$ADMIN_PID" >/dev/null 2>&1 || true
   fi
-  rm -rf "$ADMIN_DATA_DIR" "$AUDIO_DIR" "$SYNC_DIR" "$OUTPUT_DOC"
+  rm -rf "$ADMIN_DATA_DIR" "$HOME_DIR" "$AUDIO_DIR" "$SYNC_DIR" "$OUTPUT_DOC"
 }
 trap cleanup EXIT
 
@@ -44,7 +45,7 @@ if [[ ! -x "$BIFROST_BIN" ]]; then
 fi
 
 echo "[asr-task-cli-e2e] start temporary Bifrost on ${ADMIN_PORT}"
-BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" start \
+HOME="$HOME_DIR" BIFROST_DATA_DIR="$ADMIN_DATA_DIR" "$BIFROST_BIN" start \
   -p "$ADMIN_PORT" \
   --unsafe-ssl \
   --skip-cert-check \
@@ -88,6 +89,62 @@ with open(sys.argv[1], "r", encoding="utf-8") as f:
     print(json.load(f)["id"])
 PY
 )"
+
+echo "[asr-task-cli-e2e] create ASR task with home-relative audio_dir"
+HOME_PATH_TASK_JSON="$(python3 - <<'PY'
+import json
+print(json.dumps({
+    "name": "ASR home path task",
+    "audio_dir": "~/bifrost-asr-home-audio",
+    "recursive": True,
+    "enabled": False,
+    "schedule": {"kind": "daily", "hour": 2, "minute": 0},
+    "language": "chinese",
+    "model": "Qwen3-ASR-1.7B",
+}))
+PY
+)"
+curl -fsS -X POST "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks" \
+  -H 'Content-Type: application/json' \
+  --data "$HOME_PATH_TASK_JSON" >"$ADMIN_DATA_DIR/home-task-create.json"
+HOME_TASK_ID="$(python3 - "$ADMIN_DATA_DIR/home-task-create.json" "$HOME_DIR" "$ADMIN_DATA_DIR" <<'PY'
+import json
+import pathlib
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    task = json.load(f)
+home = pathlib.Path(sys.argv[2])
+data_dir = pathlib.Path(sys.argv[3])
+expected = home / "bifrost-asr-home-audio"
+assert pathlib.Path(task["audio_dir"]) == expected, task
+assert pathlib.Path(task["audio_dir"]).is_absolute(), task
+assert not pathlib.Path(task["audio_dir"]).is_relative_to(data_dir), task
+assert expected.is_dir(), expected
+print(task["id"])
+PY
+)"
+curl -fsS -X PATCH "http://127.0.0.1:${ADMIN_PORT}/_bifrost/api/asr/tasks/${HOME_TASK_ID}" \
+  -H 'Content-Type: application/json' \
+  --data '{"audio_dir":"relative-audio","enabled":false}' >"$ADMIN_DATA_DIR/home-task-patch.json"
+python3 - "$ADMIN_DATA_DIR/home-task-patch.json" "$ADMIN_DATA_DIR/asr/tasks.json" "$HOME_DIR" "$ADMIN_DATA_DIR" "$HOME_TASK_ID" <<'PY'
+import json
+import pathlib
+import sys
+with open(sys.argv[1], "r", encoding="utf-8") as f:
+    patched = json.load(f)
+with open(sys.argv[2], "r", encoding="utf-8") as f:
+    store = json.load(f)
+home = pathlib.Path(sys.argv[3])
+data_dir = pathlib.Path(sys.argv[4])
+task_id = sys.argv[5]
+expected = home / "relative-audio"
+assert pathlib.Path(patched["audio_dir"]) == expected, patched
+stored = next(task for task in store["tasks"] if task["id"] == task_id)
+assert pathlib.Path(stored["audio_dir"]) == expected, stored
+assert pathlib.Path(stored["audio_dir"]).is_absolute(), stored
+assert not pathlib.Path(stored["audio_dir"]).is_relative_to(data_dir), stored
+assert expected.is_dir(), expected
+PY
 
 mkdir -p "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/.daily"
 cat > "$ADMIN_DATA_DIR/asr/data/text/${TASK_ID}/.daily/2026-05-17.md" <<'EOF'
