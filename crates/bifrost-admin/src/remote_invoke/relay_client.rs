@@ -375,20 +375,13 @@ impl RelayClient {
     }
 
     pub fn build_stream_url(&self, stream_id: &str) -> String {
-        let token_part = self
-            .client_auth_token
-            .read()
-            .as_deref()
-            .map(|t| format!("&client_auth_token={}", urlencoding::encode(t)))
-            .unwrap_or_default();
         format!(
-            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}&client_name={}&platform={}{}",
+            "{}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id={}&client_name={}&platform={}",
             self.base_url(),
             urlencoding::encode(&self.client_instance_id),
             urlencoding::encode(stream_id),
             urlencoding::encode(&self.device_name),
             urlencoding::encode(&self.platform),
-            token_part,
         )
     }
 

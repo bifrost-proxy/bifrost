@@ -65,13 +65,13 @@ async fn run_remote_invoke_pop_flow() -> Result<(), String> {
     )
     .await?;
 
-    let mut client_stream = open_sse(
+    let mut client_stream = open_sse_auth(
         &http,
         &format!(
-            "{base_url}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id=ri-pop-stream&client_auth_token={}",
+            "{base_url}/v4/remote-invoke/client/stream?client_instance_id={}&stream_id=ri-pop-stream",
             urlencoding::encode(&client_instance_id),
-            urlencoding::encode(&client_auth_token),
         ),
+        &client_auth_token,
     )
     .await?;
     let _ = next_sse_event(&mut client_stream, Some("client_hello_ack")).await?;

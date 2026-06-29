@@ -2462,7 +2462,12 @@ impl RemoteInvokeWorker {
 
     async fn handle_call_open(&self, data: Value) {
         debug!(
-            data = %data,
+            call_id = data.get("call_id").and_then(|v| v.as_str()).unwrap_or(""),
+            grant_id = data.get("grant_id").and_then(|v| v.as_str()).unwrap_or(""),
+            command_kind = data
+                .get("command_kind")
+                .and_then(|v| v.as_str())
+                .unwrap_or(""),
             "handle_call_open received"
         );
         let call_id = match data.get("call_id").and_then(|v| v.as_str()) {
