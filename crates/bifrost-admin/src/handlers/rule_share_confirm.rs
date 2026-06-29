@@ -16,7 +16,6 @@ use crate::SharedPushManager;
 struct ConfirmRuleShareRequest {
     payload: String,
     target_url: String,
-    confirmation: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -112,13 +111,6 @@ pub async fn handle_rule_share_confirm_api(
             )
         }
     };
-    if !confirmation_matches(&payload, &request.confirmation) {
-        return error_response(
-            StatusCode::BAD_REQUEST,
-            "Rule share confirmation must match the full content hash",
-        );
-    }
-
     match import_rule_share_payload(state, push_manager.as_ref(), payload).await {
         Ok(outcome) => json_response(&ConfirmRuleShareResponse {
             success: true,
@@ -133,10 +125,6 @@ pub async fn handle_rule_share_confirm_api(
             &format!("Failed to import rule share payload: {error}"),
         ),
     }
-}
-
-fn confirmation_matches(payload: &RuleSharePayload, confirmation: &str) -> bool {
-    confirmation.trim() == payload.content_hash
 }
 
 fn validate_target_url(target_url: &str) -> Result<(), String> {
@@ -196,8 +184,6 @@ fn render_confirm_page(
     button {{ background: #1b6bd8; color: #fff; }}
     button:disabled {{ cursor: not-allowed; opacity: .55; }}
     a.button {{ background: #fff; color: #1b6bd8; }}
-    label {{ display: block; margin-top: 18px; font-weight: 600; }}
-    input {{ box-sizing: border-box; width: 100%; margin-top: 8px; padding: 10px 12px; border: 1px solid #aab4c0; border-radius: 6px; font: 13px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }}
     #status {{ color: #8a3b0d; min-height: 20px; }}
     @media (prefers-color-scheme: dark) {{
       body {{ background: #111827; color: #e5e7eb; }}
@@ -219,10 +205,8 @@ fn render_confirm_page(
         <dt>Return target</dt><dd>{target}</dd>
       </dl>
       <pre>{content}</pre>
-      <label for="confirmation">Type the full content hash to apply</label>
-      <input id="confirmation" name="confirmation" autocomplete="off" autocapitalize="none" spellcheck="false" inputmode="text">
       <div class="actions">
-        <button id="apply" type="button" disabled>Apply Rule</button>
+        <button id="apply" type="button">Apply Rule</button>
         <a class="button" href="{target_href}">Cancel</a>
         <span id="status" role="status"></span>
       </div>
@@ -232,15 +216,8 @@ fn render_confirm_page(
     const payload = {payload_json};
     const targetUrl = {target_json};
     const csrfToken = {csrf_json};
-    const requiredConfirmation = {hash_json};
     const applyButton = document.getElementById('apply');
-    const confirmationInput = document.getElementById('confirmation');
     const statusEl = document.getElementById('status');
-    confirmationInput.addEventListener('input', () => {{
-      const matches = confirmationInput.value.trim() === requiredConfirmation;
-      applyButton.disabled = !matches;
-      statusEl.textContent = matches ? '' : 'Content hash confirmation is required.';
-    }});
     applyButton.addEventListener('click', async () => {{
       applyButton.disabled = true;
       statusEl.textContent = 'Applying...';
@@ -254,7 +231,6 @@ fn render_confirm_page(
           body: JSON.stringify({{
             payload,
             target_url: targetUrl,
-            confirmation: confirmationInput.value.trim(),
           }}),
         }});
         const data = await response.json().catch(() => ({{}}));
@@ -280,7 +256,6 @@ fn render_confirm_page(
         payload_json = payload_json,
         target_json = target_json,
         csrf_json = csrf_json,
-        hash_json = serde_json::to_string(&payload.content_hash).unwrap_or_else(|_| "\"\"".into()),
     )
 }
 
@@ -294,7 +269,7 @@ fn html_response(body: String) -> Response<BoxBody> {
         .header("X-Frame-Options", "DENY")
         .header(
             "Content-Security-Policy",
-            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+            "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
         )
         .body(full_body(body))
         .unwrap()
@@ -341,16 +316,17 @@ mod tests {
     }
 
     #[test]
-    fn render_confirm_page_requires_full_hash_confirmation() {
+    fn render_confirm_page_allows_apply_without_hash_confirmation() {
         let payload =
             new_rule_share_payload("debug", "example.com bp://127.0.0.1:3000").expect("payload");
         let html = render_confirm_page(&payload, "payload", "https://example.com/app", "csrf");
 
-        assert!(html.contains("Type the full content hash to apply"));
-        assert!(html.contains(r#"<button id="apply" type="button" disabled>Apply Rule</button>"#));
-        assert!(html.contains("confirmationInput.value.trim()"));
+        assert!(!html.contains("Type the full content hash to apply"));
+        assert!(!html.contains(r#"id="confirmation""#));
+        assert!(html.contains(r#"<button id="apply" type="button">Apply Rule</button>"#));
         assert!(html.contains(&payload.content_hash));
-        assert!(html.contains("confirmation: confirmationInput.value.trim()"));
+        assert!(!html.contains("confirmation:"));
+        assert!(html.contains("fetch('/_bifrost/api/rules/share-confirm'"));
     }
 
     #[test]
@@ -385,19 +361,6 @@ mod tests {
             .expect("csp header");
         assert!(csp.contains("frame-ancestors 'none'"));
         assert!(csp.contains("form-action 'none'"));
-    }
-
-    #[test]
-    fn confirmation_must_match_full_content_hash() {
-        let payload =
-            new_rule_share_payload("debug", "example.com bp://127.0.0.1:3000").expect("payload");
-
-        assert!(confirmation_matches(
-            &payload,
-            &format!("  {}  ", payload.content_hash)
-        ));
-        assert!(!confirmation_matches(&payload, &payload.content_hash[..12]));
-        assert!(!confirmation_matches(&payload, "debug"));
-        assert!(!confirmation_matches(&payload, ""));
+        assert!(csp.contains("connect-src 'self'"));
     }
 }

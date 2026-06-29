@@ -34,9 +34,10 @@ Bifrost 同时暴露本机 Admin API 和 HTTP/HTTPS 代理入口。未知网页�
 1. 代理层识别 `__bifrost_rule` 后只生成本机确认 URL：
    `http://127.0.0.1:<port>/_bifrost/share/rule?payload=...&target=<clean_url>`。
 2. 代理层不再调用 `import_rule_share_payload`，未知网页只能触发确认页，不能静默写规则。
-3. 确认页展示规则名称、内容 hash、模式、独占范围、返回目标和完整规则内容。
+3. 确认页展示规则名称、内容 hash、模式、独占范围、返回目标和完整规则内容；content hash 仅用于人工核对，不要求用户手工输入。
 4. 用户点击 Apply Rule 后，页面以同源 `POST /_bifrost/api/rules/share-confirm` 应用规则，再跳回 clean URL。
 5. `share-confirm` 属于 unsafe Admin API，浏览器上下文必须通过 CSRF 校验。
+6. 确认页 CSP 必须包含 `connect-src 'self'`，确保 Apply Rule 的同源 `fetch` 不被浏览器 CSP 拦截。
 
 ## 测试计划
 
