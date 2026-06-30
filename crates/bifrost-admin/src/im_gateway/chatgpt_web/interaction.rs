@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 use std::sync::Arc;
 
@@ -201,6 +202,7 @@ struct TerminalReadyCandidate {
     waited: WaitedFinal,
     text_len: usize,
     image_count: usize,
+    signature: String,
     stable_since: tokio::time::Instant,
 }
 
@@ -366,6 +368,12 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
+                let final_text = waited
+                    .final_message
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                let ready_signature = dom_ready_signature(&waited);
                 let now = tokio::time::Instant::now();
                 let stable_since = *terminal_idle_since.get_or_insert(now);
                 let terminal_idle_stable_for = options.terminal_idle_stable_for;
@@ -382,7 +390,8 @@ pub(super) async fn wait_final(
                     continue;
                 }
 
-                let settle_for = dom_terminal_content_settle_for(dom_text_len, dom_image_count);
+                let settle_for =
+                    dom_terminal_content_settle_for_text(final_text, dom_text_len, dom_image_count);
                 if settle_for.is_zero() {
                     tracing::info!(
                         conversation_id,
@@ -397,6 +406,7 @@ pub(super) async fn wait_final(
                     waited,
                     text_len: dom_text_len,
                     image_count: dom_image_count,
+                    signature: ready_signature,
                     stable_since: now,
                 };
                 match terminal_ready_candidate.as_mut() {
@@ -412,7 +422,8 @@ pub(super) async fn wait_final(
                     }
                     Some(candidate)
                         if ready_candidate.text_len > candidate.text_len
-                            || ready_candidate.image_count > candidate.image_count =>
+                            || ready_candidate.image_count > candidate.image_count
+                            || ready_candidate.signature != candidate.signature =>
                     {
                         tracing::info!(
                             conversation_id,
@@ -421,7 +432,7 @@ pub(super) async fn wait_final(
                             previous_image_count = candidate.image_count,
                             dom_image_count = ready_candidate.image_count,
                             required_stable_ms = settle_for.as_millis(),
-                            "chatgpt_web wait_final: terminal DOM content grew, resetting settle timer"
+                            "chatgpt_web wait_final: terminal DOM content changed, resetting settle timer"
                         );
                         terminal_ready_candidate = Some(ready_candidate);
                     }
@@ -2282,6 +2293,59 @@ pub(super) fn dom_terminal_content_settle_poll_for() -> std::time::Duration {
     std::time::Duration::from_millis(500)
 }
 
+fn dom_terminal_content_settle_for_text(
+    text: &str,
+    text_len: usize,
+    image_count: usize,
+) -> std::time::Duration {
+    let base = dom_terminal_content_settle_for(text_len, image_count);
+    if dom_text_looks_like_intermediate_planning(text) {
+        return base.max(std::time::Duration::from_secs(45));
+    }
+    base
+}
+
+fn dom_ready_signature(waited: &WaitedFinal) -> String {
+    let text = waited
+        .final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let turn_id = waited
+        .final_message
+        .get("turnId")
+        .or_else(|| waited.final_message.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let image_count = waited
+        .final_message
+        .get("imageCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let artifact_count = waited
+        .summary
+        .get("artifactCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let text_lengths = waited
+        .all_texts
+        .iter()
+        .map(|value| value.len().to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let text_hash = stable_hash_text(text);
+    format!(
+        "turn={turn_id};text_hash={text_hash};parts={};part_lens={text_lengths};images={image_count};artifacts={artifact_count}",
+        waited.all_texts.len()
+    )
+}
+
+fn stable_hash_text(text: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    hasher.finish()
+}
+
 fn normalize_dom_status_text(text: &str) -> &str {
     text.trim()
         .trim_start_matches('\u{feff}')
@@ -2318,6 +2382,57 @@ fn dom_text_is_pending_status(normalized: &str) -> bool {
             | "Finishing up"
             | "Making final adjustments"
     )
+}
+
+fn dom_text_looks_like_intermediate_planning(text: &str) -> bool {
+    let normalized = normalize_dom_status_text(text);
+    if normalized.chars().count() > 360 {
+        return false;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    let chinese_intro = normalized.starts_with("我会")
+        || normalized.starts_with("我先")
+        || normalized.starts_with("我来")
+        || normalized.starts_with("我将")
+        || normalized.starts_with("接下来我")
+        || normalized.starts_with("下面我");
+    let chinese_action = [
+        "筛",
+        "挑",
+        "查",
+        "搜",
+        "检索",
+        "整理",
+        "汇总",
+        "看一下",
+        "找一下",
+        "先按",
+    ]
+    .iter()
+    .any(|needle| normalized.contains(needle));
+    if chinese_intro && chinese_action {
+        return true;
+    }
+
+    let english_intro = lower.starts_with("i'll ")
+        || lower.starts_with("i will ")
+        || lower.starts_with("i’m going to ")
+        || lower.starts_with("i'm going to ")
+        || lower.starts_with("let me ")
+        || lower.starts_with("i’ll ");
+    let english_action = [
+        "search",
+        "browse",
+        "look up",
+        "research",
+        "gather",
+        "check",
+        "filter",
+        "summarize",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle));
+    english_intro && english_action
 }
 
 fn dom_text_is_waiting_for_complete_reply(trimmed: &str) -> bool {
@@ -2435,6 +2550,46 @@ mod tests {
             dom_terminal_content_settle_poll_for(),
             std::time::Duration::from_millis(500)
         );
+    }
+
+    #[test]
+    fn dom_terminal_content_settle_for_text_extends_short_planning_preludes() {
+        let planning = "我会按你平时关注的方向筛：模型/Agent、开发工具、开源项目、基础设施和产品化落地，优先挑今天或最近 24–48 小时内有证据的技术进展。";
+        assert!(dom_text_looks_like_intermediate_planning(planning));
+        assert_eq!(
+            dom_terminal_content_settle_for_text(planning, planning.len(), 0).as_secs(),
+            45
+        );
+        assert_eq!(
+            dom_terminal_content_settle_for_text("这是完整答案。", "这是完整答案。".len(), 0),
+            std::time::Duration::from_millis(750)
+        );
+    }
+
+    #[test]
+    fn dom_ready_signature_tracks_same_length_text_changes() {
+        let first = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "abc",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["abc".to_string()],
+            had_429_or_fallback: true,
+        };
+        let second = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "xyz",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["xyz".to_string()],
+            had_429_or_fallback: true,
+        };
+
+        assert_ne!(dom_ready_signature(&first), dom_ready_signature(&second));
     }
 
     #[test]
