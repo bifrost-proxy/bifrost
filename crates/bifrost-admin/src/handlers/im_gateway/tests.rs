@@ -1361,6 +1361,9 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
 
     let mut external_cli_config =
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    #[cfg(windows)]
+    let mock_traex = temp_dir.path().join("mock-traex.cmd");
+    #[cfg(not(windows))]
     let mock_traex = temp_dir.path().join("mock-traex");
     #[cfg(unix)]
     {
