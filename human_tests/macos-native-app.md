@@ -119,6 +119,23 @@
 - 设计文档明确说明当前 PR 是 scaffold，不得作为核心交互 1:1 已还原的 Native MVP 验收。
 - 若后续实现了真实交互，需要同步更新本用例：移除对应 disabled/sample/constant 断言，改为真实 UI/API 操作验证。
 
+### TC-MNA-08：Coverage CI 的 TLS switch E2E 端口 bind race 有重试
+
+**操作步骤：**
+1. 执行：
+   ```bash
+   rg -n "START_PROXY_MAX_ATTEMPTS|start_proxy_with_admin_retry|is_bind_race" crates/bifrost-e2e/src/tests/tls_switch_test.rs
+   ```
+2. 执行：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-e2e tls_switch_test -- --nocapture
+   ```
+
+**预期结果：**
+- `tls_switch_test.rs` 包含端口 bind race retry helper。
+- helper 对 `Failed to bind` 或 `already listening on this port` 重试，不因 `portpicker` 与实际 bind 之间的瞬时竞态直接失败。
+- `cargo test -p bifrost-e2e tls_switch_test -- --nocapture` 通过。
+
 ## 清理步骤
 
 ```bash
