@@ -261,7 +261,7 @@ pub(super) async fn handle_chat_gateway(
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
                 if let Some(response) =
-                    maybe_external_cli_model_slash_response(&request, &effective, true).await
+                    maybe_external_cli_slash_response(&request, &effective, true).await
                 {
                     return response;
                 }
@@ -542,7 +542,7 @@ pub(super) async fn handle_chat_gateway(
                 apply_provider_work_dir_to_external_cli_request(_service, &mut request);
                 apply_persisted_external_cli_state(&mut request, &effective.runner_id);
                 if let Some(response) =
-                    maybe_external_cli_model_slash_response(&request, &effective, false).await
+                    maybe_external_cli_slash_response(&request, &effective, false).await
                 {
                     return response;
                 }
@@ -2090,6 +2090,116 @@ async fn maybe_external_cli_model_slash_response(
     Some(model_slash_success_response(&response, stream))
 }
 
+async fn maybe_external_cli_slash_response(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+    stream: bool,
+) -> Option<Response<BoxBody>> {
+    if let Some(response) =
+        maybe_external_cli_model_slash_response(request, effective, stream).await
+    {
+        return Some(response);
+    }
+    maybe_external_cli_effort_slash_response(request, effective, stream).await
+}
+
+async fn maybe_external_cli_effort_slash_response(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+    stream: bool,
+) -> Option<Response<BoxBody>> {
+    let command =
+        crate::im_gateway::external_cli::parse_external_cli_effort_slash_command(&request.message)?;
+    let command = match command {
+        Ok(command) => command,
+        Err(error) => return Some(model_slash_error_response(&error, stream)),
+    };
+    if crate::im_gateway::external_cli::external_cli_effort_options(&request.adapter).is_empty() {
+        return Some(model_slash_error_response(
+            "/effort 当前仅支持 Codex、Traex 或 Claude Code Runner。",
+            stream,
+        ));
+    }
+    let adapter_label =
+        crate::im_gateway::external_cli::external_cli_model_adapter_label(&request.adapter);
+    let resolved_model_config = crate::im_gateway::external_cli::resolve_external_cli_model_config(
+        &request.adapter,
+        &request.adapter_config,
+    );
+    let model_catalog = crate::im_gateway::external_cli::load_external_cli_model_catalog(
+        &request.adapter,
+        &request.adapter_config,
+        request.work_dir.as_deref(),
+    )
+    .await
+    .unwrap_or_default();
+    let mut display_message: Option<String> = None;
+    let response = match command {
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::List => {
+            crate::im_gateway::external_cli::format_external_cli_effort_catalog_for_model(
+                &request.adapter,
+                resolved_model_config.model.as_deref(),
+                &model_catalog,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Show => {
+            let (effort, source) =
+                current_session_reasoning_effort_override(request, &effective.runner_id)
+                    .unwrap_or_else(|| {
+                        (
+                            resolved_model_config.reasoning_effort.clone(),
+                            resolved_model_config.reasoning_source.clone(),
+                        )
+                    });
+            crate::im_gateway::external_cli::format_external_cli_effort_status(
+                &request.adapter,
+                effort.as_deref(),
+                source.as_deref(),
+                &effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Clear => {
+            persist_session_reasoning_effort_override(request, &effective.runner_id, None);
+            display_message = Some("清除 Reasoning Effort 切换".to_string());
+            format!(
+                "已清除 {adapter_label} Runner `{}` 的 session Reasoning Effort override。下一条消息将使用 Runner 配置或 {adapter_label} 默认值。",
+                effective.runner_id,
+            )
+        }
+        crate::im_gateway::external_cli::ExternalCliEffortSlashCommand::Set(effort) => {
+            let effort =
+                match crate::im_gateway::external_cli::validate_external_cli_effort_selection_for_model(
+                    &request.adapter,
+                    &effort,
+                    resolved_model_config.model.as_deref(),
+                    &model_catalog,
+                ) {
+                    Ok(effort) => effort,
+                    Err(response) => {
+                        remember_model_slash_result_state(request, &effective.runner_id, &response);
+                        return Some(model_slash_success_response(&response, stream));
+                    }
+                };
+            persist_session_reasoning_effort_override(
+                request,
+                &effective.runner_id,
+                Some(effort.clone()),
+            );
+            display_message = Some(format!("切换 Reasoning Effort 为 {effort}"));
+            format!(
+                "已将 {adapter_label} Runner `{}` 的 session Reasoning Effort 设置为 `{}`。下一条消息会使用该推理强度启动。",
+                effective.runner_id, effort,
+            )
+        }
+    };
+    remember_model_slash_result_state(
+        request,
+        &effective.runner_id,
+        display_message.as_deref().unwrap_or(&response),
+    );
+    Some(model_slash_success_response(&response, stream))
+}
+
 fn model_slash_success_response(response: &str, stream: bool) -> Response<BoxBody> {
     if !stream {
         return json_response(&serde_json::json!({
@@ -2146,6 +2256,26 @@ fn current_session_model_override(
     Some((state.model_override, state.model_override_source))
 }
 
+fn current_session_reasoning_effort_override(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+) -> Option<(Option<String>, Option<String>)> {
+    let session_key = request.session_key.as_deref()?;
+    let state = crate::im_gateway::session_state::load_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+    )?;
+    if state.reasoning_effort_override.is_none() && state.reasoning_effort_override_source.is_none()
+    {
+        return None;
+    }
+    Some((
+        state.reasoning_effort_override,
+        state.reasoning_effort_override_source,
+    ))
+}
+
 fn persist_session_model_override(
     request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
     runner_id: &str,
@@ -2170,6 +2300,34 @@ fn persist_session_model_override(
             runner_id = %runner_id,
             error = %error,
             "failed to persist external CLI model override"
+        );
+    }
+}
+
+fn persist_session_reasoning_effort_override(
+    request: &crate::im_gateway::external_cli::ExternalCliRunRequest,
+    runner_id: &str,
+    effort: Option<String>,
+) {
+    let Some(session_key) = request.session_key.as_deref() else {
+        return;
+    };
+    let source = effort.as_ref().map(|_| "session slash command".to_string());
+    if let Err(error) = crate::im_gateway::session_state::upsert_session_state(
+        session_key,
+        &request.adapter,
+        Some(runner_id),
+        |state| {
+            state.reasoning_effort_override = effort;
+            state.reasoning_effort_override_source = source;
+        },
+    ) {
+        warn!(
+            session_key = %session_key,
+            adapter = %request.adapter,
+            runner_id = %runner_id,
+            error = %error,
+            "failed to persist external CLI reasoning effort override"
         );
     }
 }
@@ -2267,16 +2425,10 @@ fn apply_persisted_external_cli_state(
     }
     let metadata = crate::im_gateway::session_state::metadata_from_state(&state);
     apply_external_cli_resume_metadata(request, &metadata);
-    if crate::im_gateway::external_cli::supports_external_cli_model_slash(&request.adapter) {
-        if let Some(model) = state
-            .model_override
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        {
-            request.adapter_config.model = Some(model.to_string());
-        }
-    }
+    crate::im_gateway::external_cli::apply_external_cli_session_overrides_to_run_request(
+        request,
+        Some(&state),
+    );
     consume_imported_contexts_for_external_runner(request, runner_id);
 }
 
@@ -4981,7 +5133,7 @@ mod coverage_boost {
     }
 
     #[test]
-    fn apply_persisted_state_applies_codex_and_traex_session_model_override() {
+    fn apply_persisted_state_applies_external_runner_session_model_and_effort_override() {
         let temp_dir = tempfile::tempdir().expect("temp dir");
         let _guard = crate::handlers::im_gateway::tests::EnvGuard::set_data_dir(temp_dir.path());
 
@@ -4992,6 +5144,8 @@ mod coverage_boost {
             |state| {
                 state.model_override = Some("gpt-5.5".to_string());
                 state.model_override_source = Some("session slash command".to_string());
+                state.reasoning_effort_override = Some("high".to_string());
+                state.reasoning_effort_override_source = Some("session slash command".to_string());
             },
         )
         .expect("persist model override");
@@ -5004,6 +5158,7 @@ mod coverage_boost {
         apply_persisted_external_cli_state(&mut req, "Traex");
 
         assert_eq!(req.adapter_config.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(req.adapter_config.reasoning_effort.as_deref(), Some("high"));
 
         let mut runner_default = req.clone();
         runner_default.adapter_config.model = Some("gpt-runner-default".to_string());
@@ -5022,6 +5177,8 @@ mod coverage_boost {
             |state| {
                 state.model_override = Some("gpt-5.5".to_string());
                 state.model_override_source = Some("session slash command".to_string());
+                state.reasoning_effort_override = Some("minimal".to_string());
+                state.reasoning_effort_override_source = Some("session slash command".to_string());
             },
         )
         .expect("persist codex model override");
@@ -5034,6 +5191,10 @@ mod coverage_boost {
         apply_persisted_external_cli_state(&mut codex, "Codex");
 
         assert_eq!(codex.adapter_config.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(
+            codex.adapter_config.reasoning_effort.as_deref(),
+            Some("minimal")
+        );
 
         crate::im_gateway::session_state::upsert_session_state(
             "claude-code-model-session",
@@ -5042,6 +5203,8 @@ mod coverage_boost {
             |state| {
                 state.model_override = Some("sonnet".to_string());
                 state.model_override_source = Some("session slash command".to_string());
+                state.reasoning_effort_override = Some("xhigh".to_string());
+                state.reasoning_effort_override_source = Some("session slash command".to_string());
             },
         )
         .expect("persist claude code model override");
@@ -5058,6 +5221,10 @@ mod coverage_boost {
         );
 
         assert_eq!(claude_code.adapter_config.model.as_deref(), Some("sonnet"));
+        assert_eq!(
+            claude_code.adapter_config.reasoning_effort.as_deref(),
+            Some("xhigh")
+        );
     }
 
     #[test]

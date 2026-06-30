@@ -86,6 +86,8 @@ Protocol::ReqHeaders => {
 | `rawfile://` | `Option<String>` | 同上 | ❌ | ✅ 正确 |
 | `redirect://` | `Option<String>` | 同上 | ❌ | ✅ 正确 |
 
+> 2026-06-29 补充：`redirect://` 的值是 HTTP `Location` 头目标，不是 mock/response body 内容源。即使目标是 `http://...` 或 `https://...`，resolver 也必须保留 URL 字符串，不得像 `file://` / `tpl://` 的内容值一样通过 `ValueSource::RemoteUrl` 去下载远程页面。回归覆盖 `test_merge_redirect_non_multi_match`，防止当前网络环境把 `redirect://http://target-a.com` 解析成真实站点 HTML。
+
 #### 修改类 - KV 集合 — ⚠️ 需要修复
 
 | 协议 | 字段类型 | 当前策略 | 是否 multi_match | 预期策略 | 状态 |

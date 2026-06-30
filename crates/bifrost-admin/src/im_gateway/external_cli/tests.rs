@@ -1201,6 +1201,67 @@ fn claude_code_adapter_applies_session_model_to_command_spec() {
         .contains(&"--dangerously-skip-permissions".to_string()));
 }
 
+#[test]
+fn claude_code_adapter_applies_session_effort_to_command_spec() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_CLAUDE_CODE_RUNNER_ID.to_string()),
+        session_key: Some("session:claude".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: CLAUDE_CODE_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            reasoning_effort: Some("xhigh".to_string()),
+            danger_full_access: Some(true),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(&spec.args, "--effort", "xhigh"));
+}
+
+#[test]
+fn traex_adapter_applies_session_effort_to_command_spec() {
+    let request = ExternalCliRunRequest {
+        images: Vec::new(),
+        message: "hello".to_string(),
+        operation: default_operation(),
+        params: serde_json::Value::Null,
+        provider_id: Some("provider-a".to_string()),
+        runner_id: Some(DEFAULT_TRAEX_RUNNER_ID.to_string()),
+        session_key: Some("session:traex".to_string()),
+        runtime: DEFAULT_RUNTIME.to_string(),
+        adapter: TRAEX_ADAPTER.to_string(),
+        work_dir: Some(PathBuf::from("/tmp/work")),
+        instructions: None,
+        adapter_config: ExternalCliAdapterConfig {
+            reasoning_effort: Some("high".to_string()),
+            ..Default::default()
+        },
+        allow_work_dirs: Vec::new(),
+        inject_bifrost_tools: false,
+        skill_paths: Vec::new(),
+    };
+
+    let spec = build_command_spec(&request, Path::new("/tmp/last.md")).unwrap();
+
+    assert!(has_arg_pair(
+        &spec.args,
+        "--config",
+        "model_reasoning_effort=\"high\""
+    ));
+}
+
 #[tokio::test]
 async fn final_response_prefers_assistant_message_over_run_finished() {
     let temp_dir = tempfile::tempdir().unwrap();
@@ -2254,7 +2315,7 @@ model_provider = "trae"
 }
 
 #[test]
-fn claude_code_model_config_resolves_settings_aliases_and_env_overrides() {
+fn claude_code_model_config_ignores_settings_model_but_resolves_effort() {
     let _env_lock = external_cli_env_guard();
     let home = tempfile::tempdir().unwrap();
     let claude_home = home.path().join(".claude");
@@ -2263,10 +2324,12 @@ fn claude_code_model_config_resolves_settings_aliases_and_env_overrides() {
         claude_home.join("settings.json"),
         r#"{
           "model": "sonnet",
+          "effortLevel": "low",
           "env": {
             "ANTHROPIC_DEFAULT_HAIKU_MODEL": "claude-haiku-custom",
             "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7",
-            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-custom"
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-custom",
+            "CLAUDE_CODE_EFFORT_LEVEL": "medium"
           }
         }"#,
     )
@@ -2278,16 +2341,20 @@ fn claude_code_model_config_resolves_settings_aliases_and_env_overrides() {
     let _default_sonnet = EnvGuard::unset("ANTHROPIC_DEFAULT_SONNET_MODEL");
     let _default_opus = EnvGuard::unset("ANTHROPIC_DEFAULT_OPUS_MODEL");
     let _default_haiku = EnvGuard::unset("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    let _claude_effort = EnvGuard::unset("CLAUDE_CODE_EFFORT_LEVEL");
+    let _claude_effort_short = EnvGuard::unset("CLAUDE_EFFORT");
 
     let claude = resolve_external_cli_model_config(
         CLAUDE_CODE_ADAPTER,
         &ExternalCliAdapterConfig::default(),
     );
-    assert_eq!(claude.model.as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(claude.model_provider.as_deref(), Some("sonnet"));
-    assert_eq!(claude.model_source.as_deref(), Some("claude settings"));
+    assert_eq!(claude.model, None);
+    assert_eq!(claude.model_provider, None);
+    assert_eq!(claude.model_source, None);
+    assert_eq!(claude.reasoning_effort.as_deref(), Some("medium"));
+    assert_eq!(claude.reasoning_source.as_deref(), Some("claude settings"));
 
-    let direct_env = resolve_external_cli_model_config(
+    let runner_model = resolve_external_cli_model_config(
         CLAUDE_CODE_ADAPTER,
         &ExternalCliAdapterConfig {
             env: BTreeMap::from([(
@@ -2297,23 +2364,72 @@ fn claude_code_model_config_resolves_settings_aliases_and_env_overrides() {
             ..Default::default()
         },
     );
-    assert_eq!(direct_env.model.as_deref(), Some("custom-direct-model"));
-    assert_eq!(direct_env.model_provider, None);
-    assert_eq!(direct_env.model_source.as_deref(), Some("runner config"));
+    assert_eq!(runner_model.model, None);
+    assert_eq!(runner_model.reasoning_effort.as_deref(), Some("medium"));
 
-    let alias_env = resolve_external_cli_model_config(
+    let runner_effort = resolve_external_cli_model_config(
         CLAUDE_CODE_ADAPTER,
         &ExternalCliAdapterConfig {
-            env: BTreeMap::from([(
-                "ANTHROPIC_DEFAULT_SONNET_MODEL".to_string(),
-                "claude-sonnet-runner-env".to_string(),
-            )]),
+            env: BTreeMap::from([("CLAUDE_CODE_EFFORT_LEVEL".to_string(), "high".to_string())]),
             ..Default::default()
         },
     );
-    assert_eq!(alias_env.model.as_deref(), Some("claude-sonnet-runner-env"));
-    assert_eq!(alias_env.model_provider.as_deref(), Some("sonnet"));
-    assert_eq!(alias_env.model_source.as_deref(), Some("runner config"));
+    assert_eq!(runner_effort.model, None);
+    assert_eq!(runner_effort.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(
+        runner_effort.reasoning_source.as_deref(),
+        Some("runner config")
+    );
+
+    let status = resolve_external_cli_status_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(status.model.as_deref(), Some("claude-opus-4-7"));
+    assert_eq!(status.model_provider.as_deref(), Some("sonnet"));
+    assert_eq!(status.model_source.as_deref(), Some("claude settings"));
+    assert_eq!(status.reasoning_effort.as_deref(), Some("medium"));
+}
+
+#[test]
+fn claude_code_status_model_config_reads_plain_settings_model_without_catalog_coupling() {
+    let _env_lock = external_cli_env_guard();
+    let home = tempfile::tempdir().unwrap();
+    let claude_home = home.path().join(".claude");
+    std::fs::create_dir_all(&claude_home).unwrap();
+    std::fs::write(
+        claude_home.join("settings.json"),
+        r#"{
+          "model": "opus",
+          "effortLevel": "low"
+        }"#,
+    )
+    .unwrap();
+    let _home = EnvGuard::set("HOME", home.path());
+    let _claude_config_dir = EnvGuard::unset("CLAUDE_CONFIG_DIR");
+    let _claude_home = EnvGuard::unset("CLAUDE_HOME");
+    let _anthropic_model = EnvGuard::unset("ANTHROPIC_MODEL");
+    let _default_sonnet = EnvGuard::unset("ANTHROPIC_DEFAULT_SONNET_MODEL");
+    let _default_opus = EnvGuard::unset("ANTHROPIC_DEFAULT_OPUS_MODEL");
+    let _default_haiku = EnvGuard::unset("ANTHROPIC_DEFAULT_HAIKU_MODEL");
+    let _claude_effort = EnvGuard::unset("CLAUDE_CODE_EFFORT_LEVEL");
+    let _claude_effort_short = EnvGuard::unset("CLAUDE_EFFORT");
+
+    let runtime = resolve_external_cli_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(runtime.model, None);
+    assert_eq!(runtime.reasoning_effort.as_deref(), Some("low"));
+
+    let status = resolve_external_cli_status_model_config(
+        CLAUDE_CODE_ADAPTER,
+        &ExternalCliAdapterConfig::default(),
+    );
+    assert_eq!(status.model.as_deref(), Some("opus"));
+    assert_eq!(status.model_provider, None);
+    assert_eq!(status.model_source.as_deref(), Some("claude settings"));
+    assert_eq!(status.reasoning_effort.as_deref(), Some("low"));
 }
 
 #[test]
@@ -2569,6 +2685,39 @@ fn traex_model_slash_command_parser_handles_list_show_set_and_clear() {
 }
 
 #[test]
+fn external_cli_effort_slash_command_parser_handles_list_show_set_and_clear() {
+    assert_eq!(
+        parse_external_cli_effort_slash_command("/efforts"),
+        Some(Ok(ExternalCliEffortSlashCommand::List))
+    );
+    assert!(matches!(
+        parse_external_cli_effort_slash_command("/efforts extra"),
+        Some(Err(_))
+    ));
+    assert_eq!(
+        parse_external_cli_effort_slash_command(" /effort "),
+        Some(Ok(ExternalCliEffortSlashCommand::Show))
+    );
+    assert_eq!(
+        parse_external_cli_effort_slash_command("/effort xhigh"),
+        Some(Ok(ExternalCliEffortSlashCommand::Set("xhigh".to_string())))
+    );
+    assert_eq!(
+        parse_external_cli_effort_slash_command("/effort clear"),
+        Some(Ok(ExternalCliEffortSlashCommand::Clear))
+    );
+    assert_eq!(
+        parse_external_cli_effort_slash_command("/effort auto"),
+        Some(Ok(ExternalCliEffortSlashCommand::Clear))
+    );
+    assert!(matches!(
+        parse_external_cli_effort_slash_command("/effort bad value"),
+        Some(Err(_))
+    ));
+    assert_eq!(parse_external_cli_effort_slash_command("/effortish"), None);
+}
+
+#[test]
 fn external_cli_model_catalog_parser_filters_raw_catalog_to_safe_public_fields() {
     let models = parse_external_cli_model_catalog(
         TRAEX_ADAPTER,
@@ -2586,6 +2735,7 @@ fn external_cli_model_catalog_parser_filters_raw_catalog_to_safe_public_fields()
               "supported_reasoning_levels": [{"effort": "low", "description": "fast"}],
               "visibility": "list",
               "supported_in_api": true,
+              "model_load": 115,
               "priority": 2,
               "additional_speed_tiers": ["fast"],
               "service_tiers": [{"id": "default", "name": "Default", "description": "standard"}],
@@ -2606,9 +2756,12 @@ fn external_cli_model_catalog_parser_filters_raw_catalog_to_safe_public_fields()
     assert_eq!(models[1].slug, "Doubao-Seed-2.1-Pro");
     assert_eq!(models[1].default_reasoning_level.as_deref(), Some("high"));
     assert_eq!(models[1].additional_speed_tiers, vec!["fast"]);
+    assert_eq!(models[1].model_load.as_deref(), Some("115%"));
     let serialized = serde_json::to_string(&models).expect("serialize sanitized catalog");
     assert!(!serialized.contains("base_instructions"));
     assert!(!serialized.contains("do not leak"));
+    let rendered = format_external_cli_model_catalog(TRAEX_ADAPTER, &models);
+    assert!(rendered.contains("Model load: 115%"));
 }
 
 #[test]
@@ -2657,6 +2810,12 @@ async fn claude_code_model_slash_uses_builtin_catalog_and_accepts_full_model_slu
 
     assert!(models.iter().any(|model| model.slug == "sonnet"));
     assert!(models.iter().any(|model| model.slug == "opus"));
+    assert!(models.iter().any(|model| model.slug == "haiku"));
+    assert!(models.iter().any(|model| model.slug == "fable"));
+    let rendered = format_external_cli_model_catalog(CLAUDE_CODE_ADAPTER, &models);
+    assert!(rendered.contains("Sonnet 4.6"));
+    assert!(rendered.contains("Opus 4.8"));
+    assert!(rendered.contains("Haiku 4.5"));
     assert_eq!(
         validate_external_cli_model_selection(CLAUDE_CODE_ADAPTER, "sonnet", &models)
             .expect("known alias"),
@@ -2674,6 +2833,83 @@ async fn claude_code_model_slash_uses_builtin_catalog_and_accepts_full_model_slu
     assert!(
         validate_external_cli_model_selection(CLAUDE_CODE_ADAPTER, "bad model", &models,).is_err()
     );
+}
+
+#[test]
+fn external_cli_effort_validation_uses_runner_specific_options() {
+    assert_eq!(
+        validate_external_cli_effort_selection(CLAUDE_CODE_ADAPTER, "xhigh").unwrap(),
+        "xhigh"
+    );
+    assert_eq!(
+        validate_external_cli_effort_selection(CLAUDE_CODE_ADAPTER, "MAX").unwrap(),
+        "max"
+    );
+    assert!(validate_external_cli_effort_selection(CLAUDE_CODE_ADAPTER, "minimal").is_err());
+    assert_eq!(
+        validate_external_cli_effort_selection(DEFAULT_ADAPTER, "minimal").unwrap(),
+        "minimal"
+    );
+    assert!(validate_external_cli_effort_selection(DEFAULT_ADAPTER, "max").is_err());
+    assert_eq!(
+        validate_external_cli_effort_selection(TRAEX_ADAPTER, "high").unwrap(),
+        "high"
+    );
+}
+
+#[test]
+fn external_cli_effort_validation_honors_current_model_supported_levels() {
+    let models = vec![ExternalCliModelInfo {
+        slug: "thinking-model".to_string(),
+        default_reasoning_level: Some("medium".to_string()),
+        supported_reasoning_levels: vec![
+            ExternalCliReasoningLevelInfo {
+                effort: "low".to_string(),
+                description: None,
+            },
+            ExternalCliReasoningLevelInfo {
+                effort: "medium".to_string(),
+                description: None,
+            },
+        ],
+        ..Default::default()
+    }];
+
+    assert_eq!(
+        validate_external_cli_effort_selection_for_model(
+            TRAEX_ADAPTER,
+            "low",
+            Some("thinking-model"),
+            &models,
+        )
+        .unwrap(),
+        "low"
+    );
+    assert!(validate_external_cli_effort_selection_for_model(
+        TRAEX_ADAPTER,
+        "high",
+        Some("thinking-model"),
+        &models,
+    )
+    .is_err());
+    assert_eq!(
+        validate_external_cli_effort_selection_for_model(
+            TRAEX_ADAPTER,
+            "high",
+            Some("unknown-model"),
+            &models,
+        )
+        .unwrap(),
+        "high"
+    );
+    let rendered = format_external_cli_effort_catalog_for_model(
+        TRAEX_ADAPTER,
+        Some("thinking-model"),
+        &models,
+    );
+    assert!(rendered.contains("当前模型 `thinking-model`"));
+    assert!(rendered.contains("`low`"));
+    assert!(!rendered.contains("`high`"));
 }
 
 fn has_arg_pair(args: &[String], left: &str, right: &str) -> bool {

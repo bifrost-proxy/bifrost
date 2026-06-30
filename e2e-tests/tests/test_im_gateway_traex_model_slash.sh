@@ -75,6 +75,7 @@ if [ "${1:-}" = "debug" ] && [ "${2:-}" = "models" ]; then
       "slug": "gpt-unit",
       "description": "Codex unit model",
       "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [{"effort": "minimal"}, {"effort": "low"}, {"effort": "medium"}, {"effort": "high"}],
       "visibility": "list",
       "supported_in_api": true,
       "priority": 1,
@@ -109,8 +110,10 @@ if [ "${1:-}" = "debug" ] && [ "${2:-}" = "models" ]; then
       "slug": "Doubao-Unit",
       "description": "Unit test model",
       "default_reasoning_level": "medium",
+      "supported_reasoning_levels": [{"effort": "low"}, {"effort": "medium"}],
       "visibility": "list",
       "supported_in_api": true,
+      "model_load": 93,
       "priority": 1,
       "additional_speed_tiers": ["fast"],
       "base_instructions": "SHOULD_NOT_LEAK"
@@ -302,6 +305,25 @@ def assert_runner_model_flow(runner_id, session_key, model, expected_response, l
     assert "exec --json" in argv, argv
     return run_id
 
+def assert_runner_effort_flow(runner_id, session_key, effort, expected_response, expected_arg_fragment, argv_log):
+    efforts_response = final_response(stream(runner_id, session_key, "/efforts"))
+    assert effort in efforts_response, efforts_response
+
+    set_response = final_response(stream(runner_id, session_key, f"/effort {effort}"))
+    assert effort in set_response, set_response
+
+    run_events = stream(runner_id, session_key, "hello after effort switch")
+    run_response = final_response(run_events)
+    assert expected_response in run_response, run_response
+    run_id = [event for event in run_events if event.get("eventType") == "run_finished"][0]["runId"]
+    snapshot = json.loads((test_path / "agent" / "im_gateway" / "chat_runs" / run_id / "runtime_snapshot.json").read_text(encoding="utf-8"))
+    args = snapshot["args"]
+    joined = " ".join(args)
+    assert expected_arg_fragment in joined, args
+    argv = pathlib.Path(argv_log).read_text(encoding="utf-8")
+    assert expected_arg_fragment in argv, argv
+    return run_id
+
 
 codex_run_id = assert_runner_model_flow(
     "mock-codex-models",
@@ -321,6 +343,35 @@ traex_run_id = assert_runner_model_flow(
     "hidden-unit",
     traex_argv_log,
 )
+traex_models_response = final_response(stream(
+    "mock-traex-models",
+    "traex-model-slash-e2e",
+    "/models",
+))
+assert "Model load: 93%" in traex_models_response, traex_models_response
+traex_bad_effort = final_response(stream(
+    "mock-traex-models",
+    "traex-model-slash-e2e",
+    "/effort high",
+))
+assert "不在 Traex 当前模型 `Doubao-Unit` 支持列表中" in traex_bad_effort, traex_bad_effort
+
+codex_effort_run_id = assert_runner_effort_flow(
+    "mock-codex-models",
+    "codex-model-slash-e2e",
+    "minimal",
+    "BIFROST_CODEX_MODEL_SLASH_OK",
+    'model_reasoning_effort="minimal"',
+    codex_argv_log,
+)
+traex_effort_run_id = assert_runner_effort_flow(
+    "mock-traex-models",
+    "traex-model-slash-e2e",
+    "low",
+    "BIFROST_TRAEX_MODEL_SLASH_OK",
+    'model_reasoning_effort="low"',
+    traex_argv_log,
+)
 
 claude_models_response = final_response(stream(
     "mock-claude-code-models",
@@ -329,7 +380,10 @@ claude_models_response = final_response(stream(
 ))
 assert "sonnet" in claude_models_response, claude_models_response
 assert "opus" in claude_models_response, claude_models_response
+assert "haiku" in claude_models_response, claude_models_response
 assert "fable" in claude_models_response, claude_models_response
+assert "Sonnet 4.6" in claude_models_response, claude_models_response
+assert "Opus 4.8" in claude_models_response, claude_models_response
 assert "base_instructions" not in claude_models_response, claude_models_response
 
 claude_bad_model = stream_bad_request(
@@ -361,6 +415,14 @@ assert claude_args[claude_args.index("--model") + 1] == "sonnet", claude_args
 claude_argv = pathlib.Path(claude_argv_log).read_text(encoding="utf-8")
 assert "debug models" not in claude_argv, claude_argv
 assert "--model sonnet" in claude_argv, claude_argv
+claude_effort_run_id = assert_runner_effort_flow(
+    "mock-claude-code-models",
+    "claude-code-model-slash-e2e",
+    "xhigh",
+    "BIFROST_CLAUDE_MODEL_SLASH_OK",
+    "--effort xhigh",
+    claude_argv_log,
+)
 
 state = json.loads((test_path / "agent" / "im_gateway" / "session_state.json").read_text(encoding="utf-8"))
 codex_session = next(value for value in state["sessions"].values() if value.get("runnerId") == "mock-codex-models")
@@ -369,12 +431,21 @@ claude_session = next(value for value in state["sessions"].values() if value.get
 assert codex_session["modelOverride"] == "gpt-unit", codex_session
 assert traex_session["modelOverride"] == "Doubao-Unit", traex_session
 assert claude_session["modelOverride"] == "sonnet", claude_session
+assert codex_session["reasoningEffortOverride"] == "minimal", codex_session
+assert traex_session["reasoningEffortOverride"] == "low", traex_session
+assert claude_session["reasoningEffortOverride"] == "xhigh", claude_session
 assert codex_session["modelOverrideSource"] == "session slash command", codex_session
 assert traex_session["modelOverrideSource"] == "session slash command", traex_session
 assert claude_session["modelOverrideSource"] == "session slash command", claude_session
+assert codex_session["reasoningEffortOverrideSource"] == "session slash command", codex_session
+assert traex_session["reasoningEffortOverrideSource"] == "session slash command", traex_session
+assert claude_session["reasoningEffortOverrideSource"] == "session slash command", claude_session
 
 print("[im-gateway-model-slash] PASS")
 print(f"codex_run_id={codex_run_id}")
 print(f"traex_run_id={traex_run_id}")
 print(f"claude_run_id={claude_run_id}")
+print(f"codex_effort_run_id={codex_effort_run_id}")
+print(f"traex_effort_run_id={traex_effort_run_id}")
+print(f"claude_effort_run_id={claude_effort_run_id}")
 PY

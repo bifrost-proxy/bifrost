@@ -1,6 +1,7 @@
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use bifrost_admin::{AdminState, QueryParams};
+use futures_util::StreamExt;
 use serde_json::Value;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -178,7 +179,14 @@ async fn start_proxy_sse_request(
     }))
 }
 
-async fn collect_detail_sse_body(admin_base: &str, traffic_id: &str) -> Result<String, String> {
+async fn collect_detail_sse_body_until(
+    admin_base: &str,
+    traffic_id: &str,
+    expected_events: usize,
+    count_events: fn(&str) -> usize,
+    is_complete: fn(&str) -> bool,
+    label: &str,
+) -> Result<String, String> {
     let client = admin_http_client()?;
     let response = client
         .get(format!(
@@ -193,10 +201,36 @@ async fn collect_detail_sse_body(admin_base: &str, traffic_id: &str) -> Result<S
         return Err(format!("Detail SSE stream status: {}", response.status()));
     }
 
-    response
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read detail SSE stream body: {}", e))
+    let mut body = String::new();
+    let mut stream = response.bytes_stream();
+    let collect = async {
+        while let Some(chunk) = stream.next().await {
+            let chunk =
+                chunk.map_err(|e| format!("Failed to read detail SSE stream body: {}", e))?;
+            body.push_str(&String::from_utf8_lossy(&chunk));
+            if count_events(&body) >= expected_events && is_complete(&body) {
+                return Ok(());
+            }
+        }
+
+        Err(format!(
+            "Detail SSE stream ended before {}; events={}, body_tail={}",
+            label,
+            count_events(&body),
+            body_tail(&body)
+        ))
+    };
+
+    match tokio::time::timeout(Duration::from_secs(15), collect).await {
+        Ok(Ok(())) => Ok(body),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(format!(
+            "Detail SSE stream did not reach {} within 15s; events={}, body_tail={}",
+            label,
+            count_events(&body),
+            body_tail(&body)
+        )),
+    }
 }
 
 fn count_sse_frames(text: &str) -> usize {
@@ -238,6 +272,10 @@ fn count_live_detail_events_by_data_prefix(text: &str, prefix: &str) -> usize {
         .count()
 }
 
+fn count_live_detail_msg_events(text: &str) -> usize {
+    count_live_detail_events_by_data_prefix(text, "msg-")
+}
+
 fn live_detail_contains_finish_event(text: &str) -> bool {
     let normalized = text.replace("\r\n", "\n");
     normalized
@@ -249,6 +287,21 @@ fn live_detail_contains_finish_event(text: &str) -> bool {
         })
         .filter_map(|json| serde_json::from_str::<Value>(json).ok())
         .any(|event| event["event"].as_str() == Some("finish"))
+}
+
+fn live_detail_contains_done_event(text: &str) -> bool {
+    text.contains("\"data\":\"[DONE]\"")
+}
+
+fn body_tail(text: &str) -> &str {
+    if text.len() <= 400 {
+        return text;
+    }
+    let mut start = text.len() - 400;
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    &text[start..]
 }
 
 async fn wait_for_sse_record_id(admin_state: &Arc<AdminState>) -> Result<String, String> {
@@ -343,7 +396,15 @@ async fn test_replay_sse_live_stream_keeps_tail_events() -> Result<(), String> {
             ));
         }
     };
-    let live_detail_body = collect_detail_sse_body(&admin_base, &traffic_id).await?;
+    let live_detail_body = collect_detail_sse_body_until(
+        &admin_base,
+        &traffic_id,
+        TOTAL_EVENTS,
+        count_live_detail_msg_events,
+        live_detail_contains_finish_event,
+        "all message events and synthetic finish",
+    )
+    .await?;
     let live_detail_count = count_live_detail_events_by_data_prefix(&live_detail_body, "msg-");
     let replay_count = proxied_request_handle
         .await
@@ -393,7 +454,7 @@ async fn test_replay_sse_live_stream_keeps_tail_events() -> Result<(), String> {
         return Err(format!(
             "Detail live SSE stream missing synthetic finish event: traffic_id={}, body_tail={}",
             traffic_id,
-            &live_detail_body[live_detail_body.len().saturating_sub(400)..]
+            body_tail(&live_detail_body)
         ));
     }
 
@@ -456,7 +517,15 @@ async fn test_replay_sse_live_stream_keeps_done_event() -> Result<(), String> {
         }
     };
 
-    let live_detail_body = collect_detail_sse_body(&admin_base, &traffic_id).await?;
+    let live_detail_body = collect_detail_sse_body_until(
+        &admin_base,
+        &traffic_id,
+        TOTAL_EVENTS_WITH_DONE,
+        count_sse_frames,
+        live_detail_contains_done_event,
+        "all OpenAI-style events and [DONE]",
+    )
+    .await?;
     let live_detail_count = count_sse_frames(&live_detail_body);
     let replay_count = proxied_request_handle
         .await
@@ -510,7 +579,7 @@ async fn test_replay_sse_live_stream_keeps_done_event() -> Result<(), String> {
         return Err(format!(
             "Detail live OpenAI-style SSE stream missing [DONE]: traffic_id={}, body_tail={}",
             traffic_id,
-            &live_detail_body[live_detail_body.len().saturating_sub(400)..]
+            body_tail(&live_detail_body)
         ));
     }
 

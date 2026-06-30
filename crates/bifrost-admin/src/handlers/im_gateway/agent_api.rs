@@ -2515,9 +2515,11 @@ async fn external_runner_session_detail(session_key: &str) -> Option<bifrost_age
         runner_id: state.runner_id,
         model,
         model_provider,
-        model_reasoning_effort: run_detail
-            .as_ref()
-            .and_then(|detail| detail.metadata.get("modelReasoningEffort").cloned()),
+        model_reasoning_effort: state.reasoning_effort_override.clone().or_else(|| {
+            run_detail
+                .as_ref()
+                .and_then(|detail| detail.metadata.get("modelReasoningEffort").cloned())
+        }),
         model_reasoning_summary: run_detail
             .as_ref()
             .and_then(|detail| detail.metadata.get("modelReasoningSummary").cloned()),

@@ -1157,6 +1157,30 @@ MessageList 不渲染 user/assistant 头像，左右位置、气泡背景和顶�
 
 Threads 列表的详情 tooltip 只属于左侧 runner/source 图标，不属于整行。用户悬浮在线程标题、meta 或空白区域时不能弹出详情；只有鼠标停在图标上超过 0.5 秒才显示 Workspace、Runner、Source、State、Created、Duration，降低扫列表时的误触干扰。
 
+## 外部 Code Runner 模型与 Reasoning Effort Slash 命令
+
+Codex、Traex 和 Claude Code 作为 external CLI runner 时，`/model`、`/models`、`/effort`、`/efforts` 必须作为控制命令在 Bifrost 层处理，不进入模型正文。控制状态按 `session_key + adapter + runner_id` 持久化到 `im_gateway/session_state.json`，下一次普通消息发起前再写入该 runner 的 `adapter_config`。
+
+模型目录规则：
+
+1. Codex / Traex 使用对应 CLI 的 `debug models` JSON 输出作为 `/models` 数据源，解析时只保留公开字段：`slug`、展示名、描述、reasoning level、service tier、visibility、model load 和 priority，不透出 `base_instructions` 等内部 prompt。
+2. Traex `/models` 若返回 `model_load`、`modelLoad`、`loadPercent` 或 `load`，展示为 `Model load: N%`；底层返回 `0.93` 时格式化为 `93%`。
+3. Claude Code 不再读取 `.claude/settings.json` 的 `model` 或 alias 环境变量作为 Bifrost `/model` 数据源；`/models` 使用内置的 Claude Code alias 目录（Sonnet/Opus/Haiku/Fable）并允许用户通过 `/model <full-model-name>` 输入完整模型名。
+4. Claude Code 的 `/models` 列表不由 settings 生成；但联通通知和 `/effort` 默认展示会读取 settings 当前模型与 `effortLevel`，让用户看到 Claude Code 当前真实状态。
+
+Reasoning Effort 规则：
+
+1. `/efforts` 展示当前 runner 支持的 effort 选项；优先按当前模型目录返回的 `supported_reasoning_levels` 展示；如果目录只返回 `default_reasoning_level`，只展示该默认值；如果读不到当前模型能力，再回退到 runner 兼容默认值并标明来源。
+2. Claude Code 支持 `low / medium / high / xhigh / max`，运行时通过 `claude --effort <level>` 生效。
+3. Codex 和 Traex 使用 `--config model_reasoning_effort="<level>"` 生效；Codex/Traex 默认选项为 `minimal / low / medium / high / xhigh`，但 Traex 可被当前模型目录进一步收窄。
+4. `/effort clear` / `/effort auto` 清除 session override，后续消息回退到 runner 配置或 CLI 默认值。
+
+测试方案：
+
+- 单元测试覆盖 slash parser、runner 级和模型级 effort 校验、Claude Code 内置模型目录、settings model 不再作为模型来源、settings/env effort 解析、Traex model load 展示、Codex/Traex/Claude Code 命令行参数拼接和 session override 应用。
+- E2E 使用 `e2e-tests/tests/test_im_gateway_traex_model_slash.sh` 通过 mock Codex/Traex/Claude CLI 验证 `/models`、`/model`、`/efforts`、`/effort` 端到端行为、session state 持久化和 runtime args。
+- 真实场景测试更新 `human_tests/im-gateway-agent.md`，按真实 Admin API 和临时数据目录验证 `/models`、`/efforts`、普通消息运行参数和上线通知 Reasoning Effort。
+
 ## 扩展性考虑
 
 ### 未来可能的功能扩展

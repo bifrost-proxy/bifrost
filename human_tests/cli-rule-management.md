@@ -547,6 +547,28 @@
 
 ---
 
+### TC-CRM-51：redirect URL 不被解析为远程内容
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   cargo test -p bifrost-cli test_merge_redirect_non_multi_match -- --nocapture
+   ```
+2. 执行：
+   ```bash
+   cargo test -p bifrost-core test_bp_remote_url_is_preserved_as_script_reference -- --nocapture
+   ```
+
+**预期结果**：
+- `redirect://http://target-a.com` 的 resolved redirect 保留为 `http://target-a.com`
+- resolver 不会把 redirect 的 `http://...` 目标当作 remote value source 下载真实网页内容
+- `bp://http://...` 仍保持既有“脚本引用不提前下载”的行为
+
+**执行结果（2026-06-29，本地开发分支）**：
+- ✅ PASS：执行 `SKIP_FRONTEND_BUILD=1 /Users/bytedance/.cargo/bin/cargo test -p bifrost-cli test_merge_redirect_non_multi_match -- --nocapture`，验证 redirect 目标保留 URL 字符串，不再被当前网络解析成 IONOS HTML。执行 `/Users/bytedance/.cargo/bin/cargo test -p bifrost-core test_bp_remote_url_is_preserved_as_script_reference -- --nocapture`，验证 `bp://http://...` 仍保持远程脚本引用、不提前下载。
+
+---
+
 ### TC-CRM-39：规则同步（未配置远程服务）
 
 **操作步骤**：

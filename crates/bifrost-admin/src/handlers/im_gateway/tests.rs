@@ -310,7 +310,7 @@ pub(super) fn online_notification_context_resolves_external_runner_adapter_and_t
 }
 
 #[test]
-pub(super) fn online_notification_context_resolves_claude_code_settings_model() {
+pub(super) fn online_notification_context_resolves_claude_code_settings_effort() {
     let _env_lock = IM_GATEWAY_TEST_ENV_LOCK
         .get_or_init(|| Mutex::new(()))
         .lock()
@@ -322,10 +322,8 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
     std::fs::write(
         claude_home.join("settings.json"),
         r#"{
-          "model": "sonnet",
-          "env": {
-            "ANTHROPIC_DEFAULT_SONNET_MODEL": "claude-opus-4-7"
-          }
+          "model": "opus",
+          "effortLevel": "low"
         }"#,
     )
     .expect("write claude settings");
@@ -333,6 +331,7 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
     let _home_guard = EnvVarGuard::set("HOME", &home.path().display().to_string());
     let _claude_config_guard = EnvVarGuard::remove("CLAUDE_CONFIG_DIR");
     let _anthropic_model_guard = EnvVarGuard::remove("ANTHROPIC_MODEL");
+    let _claude_effort_guard = EnvVarGuard::remove("CLAUDE_CODE_EFFORT_LEVEL");
     let mut provider = test_provider();
     provider.agent_config = Some(ImProviderAgentConfig {
         runner: Some(bifrost_agent::AgentRunnerMode::Custom(
@@ -373,9 +372,11 @@ pub(super) fn online_notification_context_resolves_claude_code_settings_model() 
         crate::im_gateway::external_cli::CLAUDE_CODE_ADAPTER
     );
     assert_eq!(context.runner_id.as_deref(), Some("Claude-Code"));
-    assert_eq!(context.model.as_deref(), Some("claude-opus-4-7"));
-    assert_eq!(context.model_provider.as_deref(), Some("sonnet"));
-    assert!(message.contains("- **Model**: `claude-opus-4-7（sonnet）`"));
+    assert_eq!(context.model.as_deref(), Some("opus"));
+    assert_eq!(context.model_provider.as_deref(), Some("claude settings"));
+    assert_eq!(context.model_reasoning_effort.as_deref(), Some("low"));
+    assert!(message.contains("- **Model**: `opus（claude settings）`"));
+    assert!(message.contains("- **Reasoning Effort**: `low`"));
 }
 
 #[test]
@@ -1360,22 +1361,44 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
 
     let mut external_cli_config =
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    #[cfg(windows)]
+    let mock_traex = temp_dir.path().join("mock-traex.cmd");
+    #[cfg(not(windows))]
+    let mock_traex = temp_dir.path().join("mock-traex");
+    #[cfg(unix)]
+    {
+        std::fs::write(
+            &mock_traex,
+            "#!/usr/bin/env sh\ncat >/dev/null\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"thread-effort-override\"}'\nprintf '%s\\n' '{\"type\":\"assistant_final\",\"content\":\"EXTERNAL_RUNNER_OK\"}'\nprintf '%s\\n' '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n",
+        )
+        .expect("write mock traex");
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = std::fs::metadata(&mock_traex)
+            .expect("mock metadata")
+            .permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&mock_traex, permissions).expect("chmod mock traex");
+    }
+    #[cfg(windows)]
+    {
+        std::fs::write(
+            &mock_traex,
+            "@echo off\r\nmore >nul\r\necho {\"type\":\"thread.started\",\"thread_id\":\"thread-effort-override\"}\r\necho {\"type\":\"assistant_final\",\"content\":\"EXTERNAL_RUNNER_OK\"}\r\necho {\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}\r\n",
+        )
+        .expect("write mock traex");
+    }
     let runner = external_cli_config
         .runners
         .get_mut(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID)
         .expect("default codex runner");
     runner.enabled = false;
-    runner.adapter = "mock".to_string();
+    runner.adapter = crate::im_gateway::external_cli::TRAEX_ADAPTER.to_string();
     runner.inject_bifrost_tools = false;
-    runner.adapter_config =
-        crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-            executable: Some("sh".to_string()),
-            args: vec![
-                "-c".to_string(),
-                "cat >/dev/null; printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"EXTERNAL_RUNNER_OK\"}'".to_string(),
-            ],
-            ..Default::default()
-        };
+    runner.adapter_config = crate::im_gateway::external_cli::ExternalCliAdapterConfig {
+        executable: Some(mock_traex.display().to_string()),
+        reasoning_effort: Some("xhigh".to_string()),
+        ..Default::default()
+    };
     service
         .external_cli_config_store
         .save(external_cli_config)
@@ -1389,6 +1412,17 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         .provider_store
         .add(provider.clone())
         .expect("add provider");
+    let session_key = build_session_key(&provider.id, Some("owner-open-id"));
+    crate::im_gateway::session_state::upsert_session_state(
+        &session_key,
+        crate::im_gateway::external_cli::TRAEX_ADAPTER,
+        Some(crate::im_gateway::external_cli::DEFAULT_CODEX_RUNNER_ID),
+        |state| {
+            state.reasoning_effort_override = Some("high".to_string());
+            state.reasoning_effort_override_source = Some("session slash command".to_string());
+        },
+    )
+    .expect("persist session effort override");
 
     let (tx, rx) = mpsc::unbounded_channel();
     let handle = tokio::spawn(run_event_loop(
@@ -1441,13 +1475,19 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
 
     let runs_root = crate::im_gateway::external_cli::default_runs_root();
     let mut found = false;
+    let mut runtime_snapshot = None;
     for entry in std::fs::read_dir(runs_root).expect("runs dir") {
-        let result_path = entry.expect("run dir").path().join("result.json");
+        let run_dir = entry.expect("run dir").path();
+        let result_path = run_dir.join("result.json");
         if !result_path.exists() {
             continue;
         }
         let result = std::fs::read_to_string(result_path).expect("result json");
         if result.contains("EXTERNAL_RUNNER_OK") {
+            runtime_snapshot = Some(
+                std::fs::read_to_string(run_dir.join("runtime_snapshot.json"))
+                    .expect("runtime snapshot"),
+            );
             found = true;
             break;
         }
@@ -1456,13 +1496,32 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
         found,
         "external runner should execute even when defaults.enabled is false"
     );
+    let runtime_snapshot: serde_json::Value =
+        serde_json::from_str(&runtime_snapshot.expect("runtime snapshot for matching run"))
+            .expect("runtime snapshot json");
+    let args = runtime_snapshot["args"].as_array().expect("args array");
+    let joined_args = args
+        .iter()
+        .filter_map(|arg| arg.as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        !joined_args.contains("xhigh"),
+        "runner config effort must be overridden by session slash command: {args:?}"
+    );
+    assert!(
+        joined_args.contains("model_reasoning_effort=\"high\""),
+        "session effort override must reach external runner args: {args:?}"
+    );
 
-    let session_key = build_session_key(&provider.id, Some("owner-open-id"));
     let detail = service
         .agent_session_manager
         .get_session_detail(&session_key)
         .expect("external runner session detail should be visible in WebUI");
-    assert_eq!(detail.source, "mock");
+    assert_eq!(
+        detail.source,
+        crate::im_gateway::external_cli::TRAEX_ADAPTER
+    );
     assert_eq!(detail.message_count, 2);
     assert_eq!(detail.messages[0].role, "user");
     assert_eq!(detail.messages[0].content, "run external cli");
@@ -1487,7 +1546,7 @@ pub(super) async fn im_event_loop_provider_external_cli_runner_bypasses_disabled
                 .content
                 .get("adapter")
                 .and_then(|value| value.as_str())
-                == Some("mock")));
+                == Some(crate::im_gateway::external_cli::TRAEX_ADAPTER)));
     assert!(events.iter().any(|event| event.event_type == "user_message"
         && event
             .content
