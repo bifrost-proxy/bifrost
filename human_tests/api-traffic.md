@@ -455,6 +455,31 @@
 
 ---
 
+### TC-ATR-24：回归 — live SSE 详情流收集不依赖连接 EOF
+
+**关联修复**：PR #310 Windows `runner:bifrost-e2e` 中 `replay_sse_live_stream_keeps_tail_events` 在 live 详情流功能已满足后仍等待 HTTP stream EOF，导致单用例 120s timeout。
+
+**操作步骤**：
+1. 使用当前源码构建并运行 `bifrost-e2e` 的 replay_sse 分类：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 \
+     cargo run -p bifrost-e2e -- --category replay_sse --jobs 8 --test-timeout 20 --timeout 90
+   ```
+2. 确认 `replay_sse_live_stream_keeps_tail_events` 收到 90 个 `msg-*` live detail 事件和 synthetic finish 后主动结束详情订阅。
+3. 确认 `replay_sse_live_stream_keeps_done_event` 收到 12 个 JSON token 与 `data: [DONE]` 后主动结束详情订阅。
+4. 确认两个用例随后仍读取 `/response-body`，并分别与 replay/persisted 事件数做一致性断言。
+
+**预期结果**：
+- 两个 replay_sse 用例均通过，单用例耗时应在 20s timeout 内。
+- live 详情流收集以“目标事件数 + finish 或 `[DONE]`”为完成边界，不再依赖底层 SSE HTTP stream 在 Windows 上及时 EOF。
+- 事件数断言、`[DONE]` 断言和 synthetic finish 断言保持有效，不能通过缩短读取时间掩盖丢事件。
+
+**本次执行记录（2026-06-30）**：
+- 通过。执行 `SKIP_FRONTEND_BUILD=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 cargo run -p bifrost-e2e -- --category replay_sse --test-timeout 20 --timeout 90 --verbose`，结果 `2 passed`，总耗时 6.77s。
+- 通过。执行 `SKIP_FRONTEND_BUILD=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 cargo run -p bifrost-e2e -- --category replay_sse --jobs 8 --test-timeout 20 --timeout 90`，结果 `2 passed`，总耗时 4.40s，覆盖 CI 的并发 runner 模式。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：
