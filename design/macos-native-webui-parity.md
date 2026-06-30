@@ -94,7 +94,7 @@
 
 ## 当前实现状态（2026-06-30）
 
-- Shell / Network：已实现共享 daemon、标题栏工具区、固定窄竖栏、macOS 窗口按钮嵌入左侧菜单区域、明暗主题、真实 REST 初始数据、`/_bifrost/api/push` WebSocket、SSE header 探测、Network 选中详情与 Request/Response / Overview/Header/Body/Raw 分段。仍需继续补齐 WebUI 的虚拟滚动细节、右键菜单、detached detail、body 专用渲染、breakpoint 编辑 resume、load more 与键盘多选。
+- Shell / Network：已实现共享 daemon、标题栏工具区、固定窄竖栏、macOS 窗口按钮嵌入左侧菜单区域、明暗主题、真实 REST 初始数据、`/_bifrost/api/push` WebSocket、SSE header 探测、Network 选中详情与 Request/Response / Overview/Header/Body/Raw 分段。Network table 已完成高频性能路径重构：使用 `NSTableView.makeView(withIdentifier:)` 复用 cell、`TrafficRowViewModel` 预计算显示文本/颜色、AppModel 按 16ms batch 合并 WebSocket delta 并用 id 索引增量落表、append/remove/update 优先走 `insertRows`/`removeRows`/`reloadData(forRowIndexes:columnIndexes:)`，相同行序更新只为真实变化行重建 view model，避免每次 SwiftUI 更新都全量 `reloadData()` 或全量重算。仍需继续补齐右键菜单、detached detail、body 专用渲染、breakpoint 编辑 resume、load more、键盘多选等 WebUI parity 交互。
 - Rules：本轮已补齐原生核心 CRUD，包括真实列表、选择详情、新建、保存、启停、重命名、删除确认、复制、Revert、未保存标记，并由 `--check-admin-data` 的 `crud=rules,values,scripts` smoke 覆盖 create/update/enable/rename/delete。仍未完成 reorder、share link、import/export、组规则、语法诊断、引用候选和 push 后细粒度同步。
 - Values：本轮已补齐原生核心 CRUD，包括真实列表、新建、编辑保存、格式化 JSON/XML、复制、重命名、删除确认、Revert、未保存标记，并由同一 smoke 覆盖 create/update/rename/delete。仍未完成 import/export、多选右键和 WebUI 级高亮。
 - Scripts：本轮已补齐 Request / Response / Decode / Parser 类型切换、真实列表、编辑保存、新建、重命名、删除确认、复制、Revert、未保存标记，并由同一 smoke 覆盖 Request script create/update/rename/delete。仍未完成树/文件夹、多选右键、测试结果/日志面板、sandbox 配置、import/export。
@@ -110,6 +110,21 @@
 6. UI 细节按 WebUI 对照，但使用 macOS 原生控件表达：toolbar 用 icon button/switch/segmented control，表格用 NSTableView 或等价高性能组件，弹窗用 sheet/dialog。
 7. 每个页面完成后更新本矩阵和 `human_tests/macos-native-webui-parity.md`，再进入下一页。
 
+## Network 表格性能架构
+
+目标是让 macOS Native Network 列表在真实高频流量下明显快于 WebUI，而不是复刻 WebUI 的 DOM/virtual list 成本。
+
+### 已实施路径
+
+- `NSTableView` cell 复用：每列固定 `NSUserInterfaceItemIdentifier`，通过 `makeView(withIdentifier:)` 复用 `TrafficCellView`，滚动时不反复创建 view hierarchy。
+- 行视图模型预计算：`TrafficRowViewModel` 在数据进入表格层时计算 sequence、protocol/method/status tag、status dot、client label、rules badge、size/time/type 等展示值，cell draw 只消费 view model。
+- 数据增量合并：`AppModel` 维护 `trafficRecordIndexById`，WebSocket `traffic_delta` 先进入 16ms pending batch，再按 id 原地 merge 或 append；append-only 请求不再把全量 `trafficRecords` 字典化再 sort，也不会逐条 push 触发 SwiftUI update。
+- 差量 UI patch：append 走 `insertRows`，尾部删除走 `removeRows`，行更新走 `reloadData(forRowIndexes:columnIndexes:)`；相同行序的 update 先比较原始 `TrafficRecordSummary`，只有真实变化行才重建 `TrafficRowViewModel`。
+- 图标缓存：client app icon 使用 `NSCache`、miss cache 和异步解析；cell draw 只读取缓存或 placeholder，加载完成后只刷新可见 Client 列，避免滚动绘制路径重复扫描 `/Applications`。
+- 浮动 New Traffic 胶囊独立于表格行渲染，不参与 cell layout。
+- 10 万行 smoke：`Bifrost --check-traffic-table-performance` 构造 100k synthetic rows、追加 1k rows、稀疏更新 100k rows 中的真实变化行，校验行数和 changed row bookkeeping，并输出 build/append/update 毫秒级耗时。
+- Instruments 基线：交互验收时继续用 Time Profiler / Animation Hitches 采集滚动帧与主线程 commit，作为性能证据，不作为未完成代码路径。
+
 ## 验证方法
 
 ### 静态验证
@@ -118,6 +133,7 @@
 - `swift run --package-path apps/macos BifrostNativeCoreChecks`
 - `swift run --package-path apps/macos Bifrost --check-icon`
 - `swift run --package-path apps/macos Bifrost --check-admin-data`，必须同时输出 REST 数据摘要、`push_client_id=` 和 `sse_streams=...text/event-stream`，证明 Native 已连接 WebUI 同源 `/_bifrost/api/push` WebSocket，并能建立 WebUI 使用的 SSE stream。
+- `swift run --package-path apps/macos Bifrost --check-traffic-table-performance`，必须输出 `base_rows=100000 append_rows=1000 changed_rows=...`，证明 10 万行 view model 构建、append 和稀疏 update bookkeeping 正常。
 - `scripts/build-macos-native.sh --skip-sidecar --test`
 
 ### WebUI 基准采集

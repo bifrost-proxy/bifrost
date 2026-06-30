@@ -19,6 +19,9 @@ struct BifrostApp: App {
         if CommandLine.arguments.contains("--check-admin-data") {
             AdminDataSmokeCheck.run()
         }
+        if CommandLine.arguments.contains("--check-traffic-table-performance") {
+            TrafficTablePerformanceSmoke.run()
+        }
     }
 
     var body: some Scene {

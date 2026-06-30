@@ -395,6 +395,37 @@
 - 通过 Native 写入的临时对象在 WebUI 刷新后可见；删除后 WebUI 与 Admin API 均不可再读取。
 - 本用例只覆盖核心 CRUD；Rules 拖拽排序/share link/import/export、Scripts 测试结果面板/import/export、多选右键、Values import/export 仍属于 `design/macos-native-webui-parity.md` 矩阵中未完成的后续工单，禁止标记为完整 WebUI parity。
 
+### TC-MNA-17：Network 表格必须支持 10 万行级别高性能渲染路径
+
+**操作步骤：**
+1. 构建 Native app 并执行性能 smoke：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-traffic-table-performance
+   ```
+2. 检查表格实现没有退回全量刷新和 cell 重建：
+   ```bash
+   rg -n 'reloadData\(\)|insertRows|removeRows|reloadData\(forRowIndexes|makeView\(withIdentifier|trafficRecordIndexById|trafficDeltaFlushTask|pendingTraffic|check-traffic-table-performance|didUpdateNotification' \
+     apps/macos/Sources/Bifrost/AppKitBridge/RequestTableView.swift \
+     apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/Bifrost/App/BifrostApp.swift
+   ```
+
+**预期结果：**
+- 性能 smoke 输出包含 `Traffic table performance smoke passed`。
+- 输出包含 `base_rows=100000 append_rows=1000 changed_rows=`，证明 10 万行基础数据、1 千行 append 和稀疏 update bookkeeping 已真实执行。
+- `RequestTableView` 使用 `makeView(withIdentifier:)` 复用 `TrafficCellView`，append 走 `insertRows`，尾部删除走 `removeRows`，行更新走 `reloadData(forRowIndexes:columnIndexes:)`。
+- `AppModel` 维护 `trafficRecordIndexById` 并在 `mergeTrafficDelta` 中按 id 原地 merge/append，append-only 高频请求不再全量字典化和排序。
+- `AppModel` 使用 `trafficDeltaFlushTask` 与 `pendingTraffic*` 以 16ms batch 合并 WebSocket delta，不能逐条 push 触发 SwiftUI update。
+- App icon 使用异步 cache 更新通知；cell draw 只能使用缓存或 placeholder，不能在绘制路径同步扫描 `/Applications`。
+- 相同行序的 update 只为真实变化行重建 `TrafficRowViewModel`，不能每次 SwiftUI update 都为 10 万行重建显示模型。
+
+**实际结果（2026-06-30）：**
+- `swift build --package-path apps/macos` 通过。
+- `scripts/build-macos-native.sh --skip-sidecar --test` 通过，并输出 `BifrostNativeCoreChecks passed`。
+- `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-traffic-table-performance` 通过，输出 `Traffic table performance smoke passed: base_rows=100000 append_rows=1000 changed_rows=1031 build_ms=566.01 append_ms=9.58 update_ms=9.16`。
+- `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-admin-data` 通过，输出包含 `traffic_records=5`、`push_client_id=85`、`sse_streams=/whitelist/pending/stream=text/event-stream,/config/ip-tls/pending/stream=text/event-stream` 和 `crud=rules,values,scripts`。
+
 ## 清理步骤
 
 ```bash
