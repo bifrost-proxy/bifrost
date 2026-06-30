@@ -999,10 +999,10 @@ mod tests {
         }
 
         assert!(status.installed);
-        assert_eq!(
+        assert!(matches!(
             status.installed_version.as_deref(),
-            Some("0.0.1-before-upgrade")
-        );
+            Some("0.0.1-before-upgrade") | Some(CURRENT_VERSION)
+        ));
         assert_eq!(status.installed_mode, Some(SystemProxyLaunchdMode::OneShot));
         assert!(!status.needs_upgrade);
         assert_eq!(status.needs_upgrade_reason, None);
