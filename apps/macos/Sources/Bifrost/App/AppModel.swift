@@ -49,9 +49,13 @@ final class AppModel: ObservableObject {
 
     private let sidecarManager: SidecarManager?
     private var didEnsureService = false
+    private var trafficRecordIndexById: [String: Int] = [:]
     private var pushClient: PushClient?
     private var realtimeTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
+    private var trafficDeltaFlushTask: Task<Void, Never>?
+    private var pendingTrafficInserts: [TrafficRecordSummary] = []
+    private var pendingTrafficUpdates: [TrafficRecordSummary] = []
 
     init() {
         if let binaryPath = SidecarResolver.resolveBundledBinary()
@@ -117,7 +121,9 @@ final class AppModel: ObservableObject {
             async let breakpointSettings = client.fetchBreakpointSettings()
 
             self.overview = try await overview
+            self.clearPendingTrafficDelta()
             self.trafficRecords = try await traffic.records
+            self.rebuildTrafficRecordIndex()
             self.rules = try await rules
             self.values = try await values.values
             self.scriptsByType = (try await scripts).asDictionary()
@@ -537,7 +543,9 @@ final class AppModel: ObservableObject {
         do {
             let client = try BifrostClient(baseURL: adminURL)
             try await client.clearTraffic()
+            clearPendingTrafficDelta()
             trafficRecords = []
+            trafficRecordIndexById = [:]
             dataError = nil
             await refreshData()
         } catch {
@@ -577,7 +585,10 @@ final class AppModel: ObservableObject {
     }
 
     var displayedTrafficRecords: [TrafficRecordSummary] {
-        trafficRecords.filter { record in
+        if networkToolbarFilters.isEmpty && networkSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return trafficRecords
+        }
+        return trafficRecords.filter { record in
             networkToolbarFilters.matches(record)
                 && matchesSearchText(record)
         }
@@ -721,6 +732,10 @@ final class AppModel: ObservableObject {
     private func startRealtimeSync() {
         realtimeTask?.cancel()
         pollingTask?.cancel()
+        trafficDeltaFlushTask?.cancel()
+        trafficDeltaFlushTask = nil
+        pendingTrafficInserts.removeAll(keepingCapacity: true)
+        pendingTrafficUpdates.removeAll(keepingCapacity: true)
         realtimeState = .connecting
         realtimeFallbackActive = false
 
@@ -789,9 +804,9 @@ final class AppModel: ObservableObject {
             realtimeFallbackActive = false
             updateRealtimeSubscription()
         case .trafficDelta(let data):
-            mergeTrafficDelta(data)
-            updateRealtimeSubscription()
+            enqueueTrafficDelta(data)
         case .trafficDeleted(let data):
+            flushPendingTrafficDelta()
             removeTraffic(ids: data.ids)
             updateRealtimeSubscription()
         case .valuesUpdate(let data):
@@ -808,26 +823,81 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func mergeTrafficDelta(_ data: TrafficDeltaData) {
-        var recordsById = Dictionary(uniqueKeysWithValues: trafficRecords.map { ($0.id, $0) })
-        for record in data.updates {
-            recordsById[record.id] = mergeTrafficRecord(existing: recordsById[record.id], incoming: record)
+    private func enqueueTrafficDelta(_ data: TrafficDeltaData) {
+        pendingTrafficUpdates.append(contentsOf: data.updates)
+        pendingTrafficInserts.append(contentsOf: data.inserts)
+        guard trafficDeltaFlushTask == nil else {
+            return
         }
-        for record in data.inserts {
-            recordsById[record.id] = mergeTrafficRecord(existing: recordsById[record.id], incoming: record)
+        trafficDeltaFlushTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 16_000_000)
+            if Task.isCancelled {
+                return
+            }
+            self?.flushPendingTrafficDelta()
         }
-        trafficRecords = recordsById.values.sorted { lhs, rhs in
-            switch (lhs.seq, rhs.seq) {
-            case let (left?, right?) where left != right:
-                return left < right
-            case (_?, nil):
-                return true
-            case (nil, _?):
-                return false
-            default:
-                return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+    }
+
+    private func flushPendingTrafficDelta() {
+        trafficDeltaFlushTask?.cancel()
+        trafficDeltaFlushTask = nil
+        guard !pendingTrafficUpdates.isEmpty || !pendingTrafficInserts.isEmpty else {
+            return
+        }
+        let updates = pendingTrafficUpdates
+        let inserts = pendingTrafficInserts
+        pendingTrafficUpdates.removeAll(keepingCapacity: true)
+        pendingTrafficInserts.removeAll(keepingCapacity: true)
+        mergeTrafficRecords(updates: updates, inserts: inserts)
+        updateRealtimeSubscription()
+    }
+
+    private func clearPendingTrafficDelta() {
+        trafficDeltaFlushTask?.cancel()
+        trafficDeltaFlushTask = nil
+        pendingTrafficUpdates.removeAll(keepingCapacity: true)
+        pendingTrafficInserts.removeAll(keepingCapacity: true)
+    }
+
+    private func mergeTrafficRecords(updates: [TrafficRecordSummary], inserts: [TrafficRecordSummary]) {
+        if trafficRecordIndexById.count != trafficRecords.count {
+            rebuildTrafficRecordIndex()
+        }
+        var needsSort = false
+        var lastSequence = trafficRecords.last?.seq ?? Int.min
+
+        for record in updates {
+            if let index = trafficRecordIndexById[record.id] {
+                trafficRecords[index] = mergeTrafficRecord(existing: trafficRecords[index], incoming: record)
+            } else {
+                trafficRecordIndexById[record.id] = trafficRecords.count
+                trafficRecords.append(record)
+                let sequence = record.seq ?? Int.max
+                if sequence < lastSequence {
+                    needsSort = true
+                }
+                lastSequence = max(lastSequence, sequence)
             }
         }
+        for record in inserts {
+            if let index = trafficRecordIndexById[record.id] {
+                trafficRecords[index] = mergeTrafficRecord(existing: trafficRecords[index], incoming: record)
+            } else {
+                trafficRecordIndexById[record.id] = trafficRecords.count
+                trafficRecords.append(record)
+                let sequence = record.seq ?? Int.max
+                if sequence < lastSequence {
+                    needsSort = true
+                }
+                lastSequence = max(lastSequence, sequence)
+            }
+        }
+
+        if needsSort {
+            trafficRecords.sort(by: trafficRecordSortOrder)
+            rebuildTrafficRecordIndex()
+        }
+
         Task {
             await selectInitialTrafficRecordIfNeeded()
         }
@@ -868,6 +938,7 @@ final class AppModel: ObservableObject {
         }
         let deleted = Set(ids)
         trafficRecords.removeAll { deleted.contains($0.id) }
+        rebuildTrafficRecordIndex()
         if let selectedTrafficId, deleted.contains(selectedTrafficId) {
             self.selectedTrafficId = nil
             selectedTrafficDetailText = ""
@@ -915,6 +986,23 @@ final class AppModel: ObservableObject {
             return
         }
         await selectTrafficRecord(firstRecord)
+    }
+
+    private func rebuildTrafficRecordIndex() {
+        trafficRecordIndexById = Dictionary(uniqueKeysWithValues: trafficRecords.enumerated().map { ($0.element.id, $0.offset) })
+    }
+
+    private func trafficRecordSortOrder(_ lhs: TrafficRecordSummary, _ rhs: TrafficRecordSummary) -> Bool {
+        switch (lhs.seq, rhs.seq) {
+        case let (left?, right?) where left != right:
+            return left < right
+        case (_?, nil):
+            return true
+        case (nil, _?):
+            return false
+        default:
+            return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
+        }
     }
 }
 
@@ -979,6 +1067,14 @@ struct NetworkToolbarFilters: Equatable, Sendable {
     var type: String?
     var status: String?
     var imported: String?
+
+    var isEmpty: Bool {
+        rule == nil
+            && networkProtocol == nil
+            && type == nil
+            && status == nil
+            && imported == nil
+    }
 
     func selectedTag(for group: NetworkToolbarFilterGroup) -> String? {
         switch group {
