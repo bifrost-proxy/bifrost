@@ -1,0 +1,40 @@
+name: BifrostMac
+options:
+  bundleIdPrefix: com.bifrost
+  deploymentTarget:
+    macOS: "13.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.9"
+packages:
+  BifrostMac:
+    path: .
+targets:
+  BifrostMacCore:
+    type: framework
+    platform: macOS
+    sources:
+      - Sources/BifrostMacCore
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bifrost.native.mac.core
+  BifrostMac:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/BifrostMac
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.bifrost.native.mac
+        PRODUCT_NAME: Bifrost
+        INFOPLIST_KEY_LSApplicationCategoryType: public.app-category.developer-tools
+        INFOPLIST_KEY_NSPrincipalClass: NSApplication
+    dependencies:
+      - target: BifrostMacCore
+  BifrostMacCoreChecks:
+    type: tool
+    platform: macOS
+    sources:
+      - Sources/BifrostMacCoreChecks
+    dependencies:
+      - target: BifrostMacCore
