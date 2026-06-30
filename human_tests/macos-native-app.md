@@ -106,6 +106,19 @@
 - CI shell 覆盖守卫通过，确认新增分片不丢失 shell E2E 用例。
 - GitHub Actions `e2e-shell` job 配置包含 `matrix.shard: [1, 2, 3, 4]`、`BIFROST_E2E_SHARD_INDEX` 和 `BIFROST_E2E_SHARD_TOTAL=4`。
 
+### TC-MNA-07：核心交互 1:1 还原状态必须明确标注
+
+**操作步骤：**
+1. 执行：
+   ```bash
+   ruby -e 'checks={"Overview Start disabled"=>File.read("apps/macos/Sources/BifrostMac/Features/Dashboard/DashboardView.swift").include?(".disabled(true)"),"Traffic sample rows"=>File.read("apps/macos/Sources/BifrostMac/Features/Traffic/TrafficView.swift").include?("TrafficRecord.sampleRows"),"Rules disabled actions"=>File.read("apps/macos/Sources/BifrostMac/Features/Rules/RulesView.swift").scan(".disabled(true)").size>=2,"Settings constant toggles"=>File.read("apps/macos/Sources/BifrostMac/Features/Settings/SettingsView.swift").include?(".constant(true)"),"Design audit says not restored"=>File.read("design/macos-native-app.md").include?("核心交互 1:1 还原审计")&&File.read("design/macos-native-app.md").include?("未还原")}; failed=checks.reject{|_name,ok| ok}; abort("failed checks: #{failed.keys.join(", ")}") unless failed.empty?; puts "macOS native interaction parity audit is explicit"'
+   ```
+
+**预期结果：**
+- 命令输出 `macOS native interaction parity audit is explicit`。
+- 设计文档明确说明当前 PR 是 scaffold，不得作为核心交互 1:1 已还原的 Native MVP 验收。
+- 若后续实现了真实交互，需要同步更新本用例：移除对应 disabled/sample/constant 断言，改为真实 UI/API 操作验证。
+
 ## 清理步骤
 
 ```bash

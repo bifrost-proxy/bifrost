@@ -42,6 +42,22 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 - Traffic 表格从第一版使用 AppKit `NSTableView` bridge，给后续高吞吐流量列表留出性能边界。
 - Rules 编辑器从第一版使用 AppKit `NSTextView` bridge，后续再补规则 DSL 高亮和诊断。
 
+## 核心交互 1:1 还原审计
+
+本切片是 PR1 工程骨架，不满足"核心功能 1:1 交互还原"。以下审计结果是合并前的明确边界，避免把构建通过误判为产品体验完成：
+
+| 交互域 | 目标交互 | 当前实现 | 状态 |
+| --- | --- | --- | --- |
+| Sidecar lifecycle | Start / Stop / Restart、端口冲突回退、复用已有 daemon、health check、watchdog 和日志入口 | `SidecarManager` 只能生成启动计划并 `Process.run()`，UI `Start Sidecar` 仍 disabled，无 health check / watchdog / 复用逻辑 | 未还原 |
+| Overview | 后端状态、版本、端口、系统代理、TLS/CA、代理地址、Open Web UI 均来自真实 Admin API | Dashboard 大部分是静态 tile，`Open Web UI` 可打开固定 9900 URL | 未还原 |
+| Traffic Studio | 真实 Traffic 列表、搜索/过滤、选中详情、headers/body 懒加载、AppKit 表格高性能滚动 | `TrafficView` 使用 `TrafficRecord.sampleRows`，没有 Admin API 加载、选择态、搜索、详情 tab 或 body 懒加载 | 未还原 |
+| Rules | 规则列表、编辑、校验、保存、启停、模板和错误反馈 | `RulesView` 只有 `NSTextView` 草稿，Validate/Save disabled，无规则 API 调用 | 未还原 |
+| System Proxy / Certificates | 可查看并切换系统代理，查看/安装/信任 CA，展示失败原因 | 只有 Settings/Overview 文案，占位 toggles 使用 `.constant(true)` | 未还原 |
+| Devices / Scripts / Replay / Metrics | 对应 sidebar 入口进入真实工作流 | 只有 sidebar 和 placeholder 页面 | 未还原 |
+| 基础设施 | Admin API URL/header 构造、sidecar 参数安全开关、AppKit Table/Text bridge、SwiftPM 可构建 | 已实现并通过 `BifrostMacCoreChecks` 与 smoke 验证 | 已具备骨架 |
+
+因此本 PR 只能作为 Native App scaffold 合并；若验收标准是"Mac Native MVP 核心交互 1:1 可用"，必须继续实现 SidecarManager 可操作化、typed `BifrostClient`、Overview 真实状态、Traffic 真实列表/详情/搜索、Rules 真实 CRUD/启停，以及证书/系统代理真实操作后再交付。
+
 ## 依赖项
 
 - macOS 13+
