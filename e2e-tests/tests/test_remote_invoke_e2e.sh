@@ -1249,10 +1249,10 @@ assert_not_empty "$LOCAL_CALLER_FINGERPRINT" "disconnect 前本地 caller_finger
 
 ENCODED_CALLER_FINGERPRINT="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$LOCAL_CALLER_FINGERPRINT")"
 http_request "${RELAY_URL}/v4/remote-invoke/grants/${LOCAL_GRANT_ID}?caller_fingerprint=${ENCODED_CALLER_FINGERPRINT}" "DELETE"
-if [[ "$HTTP_STATUS" == "410" ]]; then
-    _log_pass "TC-RI-08A: v4 grant delete endpoint 已按 v5 协议下线为 410"
+if [[ "$HTTP_STATUS" == "404" ]]; then
+    _log_pass "TC-RI-08A: v4 grant delete endpoint 遗留路由已移除为 404"
 else
-    _log_fail "TC-RI-08A: v4 grant delete endpoint 应返回 410" "410" "status=$HTTP_STATUS body=$HTTP_BODY"
+    _log_fail "TC-RI-08A: v4 grant delete endpoint 应返回 404" "404" "status=$HTTP_STATUS body=$HTTP_BODY"
 fi
 
 DISCONNECT_OUTPUT=$(BIFROST_DATA_DIR="$CALLER_DATA_DIR" "$BIFROST_BIN" remote conn down --all \

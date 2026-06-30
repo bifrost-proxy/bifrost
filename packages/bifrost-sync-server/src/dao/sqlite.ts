@@ -517,13 +517,6 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
     return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE id = ?').get(grantId) as RemoteInvokeGrant | undefined;
   }
 
-  async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
-    if (userId) {
-      return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(userId, clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
-    }
-    return this.db.prepare('SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_fingerprint = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1').get(clientInstanceId, callerFingerprint, 'active') as RemoteInvokeGrant | undefined;
-  }
-
   async getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<RemoteInvokeGrant | undefined> {
     return this.db.prepare(
       'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_pubkey_fp = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1',

@@ -817,20 +817,6 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
     return rows[0] as RemoteInvokeGrant | undefined;
   }
 
-  async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | undefined> {
-    const params = userId
-      ? [userId, clientInstanceId, callerFingerprint, 'active']
-      : [clientInstanceId, callerFingerprint, 'active'];
-    const where = userId
-      ? 'user_id = ? AND client_instance_id = ? AND caller_fingerprint = ? AND status = ?'
-      : 'client_instance_id = ? AND caller_fingerprint = ? AND status = ?';
-    const [rows] = await this.pool.execute<RowDataPacket[]>(
-      `SELECT * FROM bifrost_remote_invoke_grants WHERE ${where} ORDER BY first_authorized_at DESC LIMIT 1`,
-      params,
-    );
-    return rows[0] as RemoteInvokeGrant | undefined;
-  }
-
   async getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<RemoteInvokeGrant | undefined> {
     const [rows] = await this.pool.execute<RowDataPacket[]>(
       'SELECT * FROM bifrost_remote_invoke_grants WHERE client_instance_id = ? AND caller_pubkey_fp = ? AND status = ? ORDER BY first_authorized_at DESC LIMIT 1',

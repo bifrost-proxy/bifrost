@@ -235,11 +235,6 @@ dump_grant_diagnostics() {
         curl -s "${ADMIN_BASE_URL}/api/remote-invoke/calls" >&2 || true
         echo >&2
     fi
-    if [[ -n "${RELAY_URL:-}" && -n "${CLIENT_INSTANCE_ID:-}" && -n "${CALLER_FINGERPRINT_1:-}" ]]; then
-        echo "[remote-invoke-ssh-e2e] relay reusable grant:" >&2
-        curl -s "${RELAY_URL}/v4/remote-invoke/grants/reusable?client_instance_id=${CLIENT_INSTANCE_ID}&caller_fingerprint=${CALLER_FINGERPRINT_1}" >&2 || true
-        echo >&2
-    fi
     if [[ -n "${ADMIN_CLIENT_BIFROST_LOG_FILE:-}" && -f "$ADMIN_CLIENT_BIFROST_LOG_FILE" ]]; then
         echo "[remote-invoke-ssh-e2e] Bifrost log tail:" >&2
         tail -n 180 "$ADMIN_CLIENT_BIFROST_LOG_FILE" >&2 || true

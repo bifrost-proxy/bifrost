@@ -199,8 +199,8 @@ describe('P0-4: pairing fingerprint is derived from server-trusted PoP key', () 
     expect(stripped.data.message).toMatch(/pair_code, caller_info and caller_ephemeral_pub are required/);
 
     const legacy = await req('POST', '/v4/remote-invoke/pairings/start', {});
-    expect(legacy.status).toBe(410);
-    expect(legacy.data.error).toBe('protocol_version_not_supported');
+    expect(legacy.status).toBe(404);
+    expect(legacy.data.message).toBe('remote invoke endpoint not found');
 
     const strippedClientRoute = await req('POST', '/remote-invoke/client/register', {});
     expect(strippedClientRoute.status).toBe(404);
