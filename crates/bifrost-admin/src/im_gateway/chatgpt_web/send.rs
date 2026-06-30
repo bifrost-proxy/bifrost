@@ -21,6 +21,7 @@ const TARGET_PAGE_STABLE_MS: u64 = 1_000;
 const TARGET_PAGE_POLL_MS: u64 = 250;
 const COMPOSER_PASTE_THRESHOLD_CHARS: usize = 120;
 const AUTH_FLOW_RECOVERY_TIMEOUT_SECS: u64 = 10 * 60;
+const SEND_BUTTON_SELECTOR: &str = r#"[data-testid="send-button"], [data-testid="composer-submit-button"], button[aria-label="Send prompt"], button[aria-label*="发送"]"#;
 
 pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
     config: &RuntimeConfig,
@@ -2963,8 +2964,8 @@ async fn verify_composer_text_exact(cdp: &CdpClient, text: &str) -> Result<Value
           const btn =
             document.querySelector('[data-testid="send-button"]') ||
             document.querySelector('[data-testid="composer-submit-button"]') ||
-            document.querySelector('button[aria-label*="发送"]') ||
-            document.querySelector('button.composer-submit-btn');
+            document.querySelector('button[aria-label="Send prompt"]') ||
+            document.querySelector('button[aria-label*="发送"]');
           return {{
             ok: actualNorm === expectedNorm || actual.length > 0 && actualNorm.includes(expectedNorm.substring(0, Math.min(100, expectedNorm.length))),
             url: location.href,
@@ -3188,10 +3189,9 @@ fn paste_modifier_key() -> (&'static str, &'static str, i32) {
 /// Returns coordinates and state without clicking. Uses check_actionability
 /// which verifies visible, stable, enabled, and receives-events.
 async fn locate_send_button(cdp: &CdpClient) -> Result<Value, String> {
-    let selector = r#"[data-testid="send-button"], [data-testid="composer-submit-button"], button[aria-label*="发送"], button.composer-submit-btn"#;
     // Short timeout since wait_send_button_ready already ensured actionability.
     match cdp
-        .check_actionability(selector, Duration::from_secs(3))
+        .check_actionability(SEND_BUTTON_SELECTOR, Duration::from_secs(3))
         .await
     {
         Ok(info) => {
@@ -3220,8 +3220,10 @@ async fn wait_send_button_ready(cdp: &CdpClient, duration: Duration) -> Result<(
     // Use Playwright-style actionability check: waits for the send button to be
     // visible, stable (not animating), enabled, and receiving events (not obscured).
     // Replaces the old 250ms polling loop with an event-driven approach.
-    let selector = r#"[data-testid="send-button"], [data-testid="composer-submit-button"], button[aria-label*="发送"], button.composer-submit-btn"#;
-    match cdp.check_actionability(selector, duration).await {
+    match cdp
+        .check_actionability(SEND_BUTTON_SELECTOR, duration)
+        .await
+    {
         Ok(info) => {
             let tag = info.get("tag").and_then(|v| v.as_str()).unwrap_or("?");
             let x = info.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -3243,8 +3245,8 @@ async fn click_send_button_dom(cdp: &CdpClient) -> Result<Value, String> {
           const btn =
             document.querySelector('[data-testid="send-button"]') ||
             document.querySelector('[data-testid="composer-submit-button"]') ||
-            document.querySelector('button[aria-label*="发送"]') ||
-            document.querySelector('button.composer-submit-btn');
+            document.querySelector('button[aria-label="Send prompt"]') ||
+            document.querySelector('button[aria-label*="发送"]');
           if (!btn || !(btn.offsetWidth || btn.offsetHeight || btn.getClientRects().length)) {
             return { ok: false, error: "send_button_not_found" };
           }
@@ -3455,6 +3457,14 @@ mod tests {
             send_button_ready_max_wait(&very_long),
             Duration::from_secs(180),
         );
+    }
+
+    #[test]
+    fn send_button_selector_excludes_stop_button_class_fallback() {
+        assert!(SEND_BUTTON_SELECTOR.contains(r#"[data-testid="send-button"]"#));
+        assert!(SEND_BUTTON_SELECTOR.contains(r#"[data-testid="composer-submit-button"]"#));
+        assert!(!SEND_BUTTON_SELECTOR.contains("composer-submit-btn"));
+        assert!(!SEND_BUTTON_SELECTOR.contains("stop-button"));
     }
 
     #[test]

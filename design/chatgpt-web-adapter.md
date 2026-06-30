@@ -118,6 +118,7 @@ ChatGPT Web 页面可能把一次回答渲染成多条 assistant message：前�
 - IM 通道：只投递过程批次和最终答案，不投递工具调用事件，避免 IM 中出现调试噪音。
 - 图片结果：ChatGPT 生成图会先缓存到本机附件目录。IM 文本卡片会移除本地图片 Markdown，随后按图片出现顺序逐张发送图片消息；CLI JSON 保留最终文本中的本地图片 Markdown，便于调用方读取附件路径。
 - DOM fallback 不能只凭文本判断最终态。文本只作为候选内容；真正允许重新提取最新消息并返回前，必须确认页面控制态已经恢复：stop/cancel 按钮消失、composer 可见且可用，且当 composer 内仍有待发送文本时提交按钮必须可见。空 composer 下 ChatGPT 会把发送位切回语音/提交控制，不能要求 send button 仍显示或处于 disabled 状态，否则会把已完成回答误判为仍在输出。“正在创建图片 / 正在生成图片 / 正在打草稿 / Drafting / Thinking”等状态文案只是额外保护，不能取代按钮状态判定。若用户 prompt 中明确要求 `N` 张图片，下载阶段以 `N` 作为最低期望数量；首次 DOM 只看到较少图片时继续滚动/监听网络补齐，避免页面懒加载导致少发最后几张。
+- DOM fallback 的候选稳定性必须基于内容签名，而不是只看文本长度。签名至少覆盖 turn/message id、最终文本、自然批次数、图片数和附件数；同长度文本变化或新增批次都必须重置稳定窗口。对短的过程性 prelude（例如“我会先筛选/搜索/整理...”）必须采用更长的稳定窗口，避免 ChatGPT Web 在真正搜索、浏览或最终答案节点出现前，把第一段计划说明误判为最终回复。若发送阶段已经发生 `stream_handoff` 但没有捕获到可解析的 SSE final，DOM fallback 还必须增加结构性最小等待窗口；即使 composer 已恢复、发送位变成语音按钮，也不能只按控件空闲就返回。`data-testid="stop-button"` 以及中英文 Stop/Cancel aria-label 表示仍在处理，`Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮配合 composer 空闲表示可收尾；发送按钮 selector 不得使用 `composer-submit-btn` 这类 stop button 也会携带的非语义 class。微信/飞书等 IM 通道绑定 `chatgpt_web` runner 时，最终回写必须来自真正完成后的答案文本，而不是这类短 planning 段。
 - ChatGPT Web 的生成图结果有时不会出现在 `data-message-author-role="assistant"` 节点中，而是渲染成后续 `section[data-testid^="conversation-turn-"]`，正文只有 `ChatGPT 说：`，图片在 section 内的 `estuary/content` URL。DOM fallback 必须把最后一个 user turn 之后的这类 image-only section 当作 assistant 结果处理，否则 CLI/IM 会一直等待，或漏发最后一张图片；但如果 section 还只是空壳 `ChatGPT 说：` 或 `最后微调一下...`，且图片数为 0，必须继续等待。
 - DOM 提取和 `allMarkdownTexts` 自然批次必须保存完整文本，不允许使用固定字符数截断；`textLength` 只用于诊断，`response`、`last_message.md` 和 `result.json` 必须能保留长任务最终输出全文。
 
@@ -841,6 +842,7 @@ Schedule 选择 runner，由 runner 的 adapter 决定执行实现：
 - `generated_image_tool_result_is_final_and_counts_all_images` 同时覆盖 ChatGPT Web `image_asset_pointer: sediment://file_...` 被解析成 `fileId`，下载阶段优先调用 `/backend-api/files/{fileId}/download` 获取签名原图 URL；DOM/Network 中的 estuary URL 只作为懒加载兜底。
 - `dom_content_accepts_short_text_replies` 覆盖 DOM fallback 不再用固定字符数阈值过滤短回答，`OK`、`好` 等有效短回复必须投递到 IM。
 - `dom_output_state_waits_for_generation_controls_to_finish` 覆盖 DOM fallback 的完成判定必须同时观察输出状态、stop 按钮、composer 与提交控制恢复状态；页面仍显示 `正在创建图片` 且发送区未恢复时只能继续等待，空 composer 下语音/提交控制恢复不应被误判为仍在输出。
+- `stream_handoff_without_sse_requires_dom_grace` 覆盖 `stream_handoff` 且没有 SSE final 时，DOM fallback 必须等待结构性宽限窗口，不能在 ChatGPT 仍处理时把早期 DOM 段落当最终回复。
 - `try_extract_dom_outcome` 的页面脚本覆盖 role-less image turn 兼容：最后一个 user turn 后若出现只有 `ChatGPT 说：` 与 `estuary/content` 图片的 conversation section，也必须作为 assistant 图片结果提取；只有空壳文本或 `最后微调一下...` 状态且无图片时必须继续等待。
 - `page_url_matches_conversation` / `BrowserSession::find_conversation_page` 覆盖服务重启后的 headed browser 复用：当内存 tab pool 为空但 CDP `/json/list` 仍有目标 `/c/{conversation_id}` 时，发送阶段 attach 到现有 target、重新注册入池并复用，避免不断新开同一个 conversation 的重复 tab。
 - `generated_image_assets_without_finished_path_list_are_final_when_not_streaming` / `generated_image_assets_wait_when_any_message_is_in_progress` 覆盖 asset-only 图片结果：无 `in_progress` 时可直接用 `image_asset_pointer` 完成，仍有消息生成中时不得提前结束。

@@ -197,6 +197,14 @@ pub(super) struct WaitedFinal {
     pub(super) had_429_or_fallback: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct WaitFinalOptions<'a> {
+    pub(super) duration: std::time::Duration,
+    pub(super) stop_marker_path: &'a Path,
+    pub(super) profile_dir: Option<&'a Path>,
+    pub(super) finality_hints: DomFinalityHints,
+}
+
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
 /// This avoids polling the conversation detail API (which triggers 429).
 ///
@@ -291,30 +299,29 @@ pub(super) async fn wait_final(
     _auth: &AuthState,
     conversation_id: &str,
     _after_time: Option<f64>,
-    duration: std::time::Duration,
-    stop_marker_path: &Path,
-    profile_dir: Option<&Path>,
+    options: WaitFinalOptions<'_>,
 ) -> Result<WaitedFinal, String> {
     // NOTE: This function no longer makes active API requests to ChatGPT.
     // All data should be captured via CDP network interception in wait_send_handoff.
     // This function only serves as a DOM-based fallback when CDP interception fails.
-    let deadline = tokio::time::Instant::now() + duration;
-    let Some(pdir) = profile_dir else {
+    let wait_started = tokio::time::Instant::now();
+    let deadline = wait_started + options.duration;
+    let Some(pdir) = options.profile_dir else {
         return Err("wait_final: no profile_dir available for DOM extraction".to_string());
     };
 
     tracing::info!(
         conversation_id,
-        timeout_secs = duration.as_secs(),
+        timeout_secs = options.duration.as_secs(),
         "chatgpt_web wait_final: DOM-only mode (no API polling)"
     );
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
-    let mut ready_candidate: Option<(usize, tokio::time::Instant)> = None;
+    let mut ready_candidate: Option<(String, tokio::time::Instant)> = None;
 
     while tokio::time::Instant::now() < deadline {
-        if stop_requested(stop_marker_path).await {
+        if stop_requested(options.stop_marker_path).await {
             return Err(stopped_error());
         }
 
@@ -351,12 +358,18 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
+                let ready_signature = dom_ready_signature(&waited);
                 let required_stable_for = required_dom_stable_for(dom_text_len);
+                let required_min_elapsed = required_dom_min_elapsed(options.finality_hints);
                 let now = tokio::time::Instant::now();
                 let stable_since = match ready_candidate {
-                    Some((previous_len, since)) if previous_len == dom_text_len => since,
+                    Some((ref previous_signature, since))
+                        if previous_signature == &ready_signature =>
+                    {
+                        since
+                    }
                     _ => {
-                        ready_candidate = Some((dom_text_len, now));
+                        ready_candidate = Some((ready_signature, now));
                         now
                     }
                 };
@@ -368,6 +381,20 @@ pub(super) async fn wait_final(
                         stable_for_ms = now.duration_since(stable_since).as_millis(),
                         required_stable_ms = required_stable_for.as_millis(),
                         "chatgpt_web wait_final: DOM content candidate waiting for stability"
+                    );
+                    sleep(std::time::Duration::from_secs(1)).await;
+                    continue;
+                }
+                let elapsed = now.duration_since(wait_started);
+                if elapsed < required_min_elapsed {
+                    tracing::info!(
+                        conversation_id,
+                        dom_text_len,
+                        dom_image_count,
+                        elapsed_ms = elapsed.as_millis(),
+                        required_elapsed_ms = required_min_elapsed.as_millis(),
+                        stream_handoff_without_sse = options.finality_hints.stream_handoff_without_sse,
+                        "chatgpt_web wait_final: DOM content candidate waiting for stream handoff grace"
                     );
                     sleep(std::time::Duration::from_secs(1)).await;
                     continue;
@@ -2166,6 +2193,72 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     !normalized.is_empty() && !dom_text_is_pending_status(normalized)
 }
 
+fn dom_ready_signature(waited: &WaitedFinal) -> String {
+    let turn_id = waited
+        .final_message
+        .get("turnId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message_id = waited
+        .final_message
+        .get("messageId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = waited
+        .final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let image_count = waited
+        .final_message
+        .get("generatedImages")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .or_else(|| {
+            waited
+                .final_message
+                .get("imageCount")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+        })
+        .unwrap_or_default();
+    let artifact_count = waited
+        .summary
+        .get("artifactCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    format!(
+        "{turn_id}\n{message_id}\n{}\n{image_count}\n{artifact_count}\n{text}",
+        waited.all_texts.len()
+    )
+}
+
+const STREAM_HANDOFF_DOM_MIN_ELAPSED: std::time::Duration = std::time::Duration::from_secs(120);
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) struct DomFinalityHints {
+    stream_handoff_without_sse: bool,
+}
+
+impl DomFinalityHints {
+    pub(super) fn from_send_event_types(event_types: &[String], has_sse_detail: bool) -> Self {
+        Self {
+            stream_handoff_without_sse: !has_sse_detail
+                && event_types
+                    .iter()
+                    .any(|event_type| event_type == "stream_handoff"),
+        }
+    }
+}
+
+fn required_dom_min_elapsed(hints: DomFinalityHints) -> std::time::Duration {
+    if hints.stream_handoff_without_sse {
+        STREAM_HANDOFF_DOM_MIN_ELAPSED
+    } else {
+        std::time::Duration::ZERO
+    }
+}
+
 fn required_dom_stable_for(text_len: usize) -> std::time::Duration {
     let secs = if text_len < 512 {
         8
@@ -2246,6 +2339,29 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
     {
         return Some("stop_button_visible");
     }
+    if data
+        .get("waitingForCompleteReply")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("waiting_for_complete_reply");
+    }
+    let composer_visible = data
+        .get("composerVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let composer_disabled = data
+        .get("composerDisabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let composer_text_length = data
+        .get("composerTextLength")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let composer_idle = composer_visible && !composer_disabled && composer_text_length == 0;
+    if composer_idle {
+        return None;
+    }
     let image_count = data
         .get("imageCount")
         .and_then(Value::as_u64)
@@ -2260,30 +2376,20 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         return Some("pending_output_status_text");
     }
     if data
-        .get("waitingForCompleteReply")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Some("waiting_for_complete_reply");
-    }
-    if data
         .get("isStreaming")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
         return Some("output_busy");
     }
-    let composer_text_length = data
-        .get("composerTextLength")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if composer_text_length > 0
-        && !data
-            .get("sendButtonVisible")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    {
-        return Some("send_button_not_ready");
+    if !composer_visible {
+        return Some("composer_not_visible");
+    }
+    if composer_disabled {
+        return Some("composer_disabled");
+    }
+    if composer_text_length > 0 {
+        return Some("composer_has_unsent_text");
     }
     None
 }
@@ -2299,6 +2405,56 @@ mod tests {
         assert_eq!(required_dom_stable_for(8_000).as_secs(), 15);
         assert_eq!(required_dom_stable_for(12_000).as_secs(), 30);
         assert_eq!(required_dom_stable_for(40_000).as_secs(), 30);
+    }
+
+    #[test]
+    fn stream_handoff_without_sse_requires_dom_grace() {
+        let event_types = vec!["patch".to_string(), "stream_handoff".to_string()];
+
+        let hints = DomFinalityHints::from_send_event_types(&event_types, false);
+
+        assert!(hints.stream_handoff_without_sse);
+        assert_eq!(
+            required_dom_min_elapsed(hints),
+            STREAM_HANDOFF_DOM_MIN_ELAPSED
+        );
+        assert_eq!(
+            required_dom_min_elapsed(DomFinalityHints::from_send_event_types(&event_types, true)),
+            std::time::Duration::ZERO
+        );
+        assert_eq!(
+            required_dom_min_elapsed(DomFinalityHints::from_send_event_types(
+                &["patch".to_string()],
+                false
+            )),
+            std::time::Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn dom_ready_signature_tracks_same_length_text_changes() {
+        let first = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "abc",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["abc".to_string()],
+            had_429_or_fallback: true,
+        };
+        let second = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "xyz",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["xyz".to_string()],
+            had_429_or_fallback: true,
+        };
+
+        assert_ne!(dom_ready_signature(&first), dom_ready_signature(&second));
     }
 
     #[test]
