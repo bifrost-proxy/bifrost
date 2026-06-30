@@ -17,6 +17,19 @@ Agent 功能集成在 Bifrost 的 IM Gateway 模块中，通过 Azure 兼容的 
                      └──────────────┘      └─────────────────┘
 ```
 
+## IM Provider 创建体验
+
+Settings -> IM Gateway -> Add IM Provider 使用分步创建流程。Provider ID 默认由前端根据 Provider 类型生成，并在当前 Provider 列表中做去重：首个飞书通道使用 `feishu-main`，已存在时依次使用 `feishu-main2`、`feishu-main3` 等。自动生成只是默认值，用户在真正创建 Provider 前仍可手动修改。
+
+飞书自动应用创建进入 Connect 步骤后，页面轮询 setup session 状态。当后端确认已经拿到飞书 App ID 与 Secret，即 setup 状态为 confirmed 时，前端不再要求用户再点击 Connect，而是自动提交当前 Provider ID、Display Name 和凭据创建 Provider，并立即调用 connect。自动连接每个 setup session 只尝试一次，避免失败后无限重试；如果创建或连接失败，按钮保留为 Retry Connect，用户可以修正 Provider ID 后手动重试。
+
+### 测试方案
+
+- WebUI 类型检查：`pnpm --dir web exec tsc -b --pretty false`
+- WebUI lint：`pnpm --dir web exec eslint src/pages/Settings/tabs/ImGatewayTab.tsx tests/ui/im-gateway-provider.spec.ts --max-warnings 0`
+- WebUI E2E：`pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts`
+- 真实场景测试：`human_tests/im-gateway-agent.md` 的 `TC-IMA-53D` 验证 Provider ID 自动去重、仍可编辑、飞书 confirmed 后无需手动点击 Connect 即自动连接，失败时不会无限自动重试且保留 Retry Connect。
+
 ## Agent Loop tool message 序列稳定性
 
 ### 问题根因

@@ -5174,6 +5174,34 @@ rm -rf /tmp/bifrost-remote-overload.*
 |---------|------|---------|
 | TC-RI-回归-150 | ✅ PASS | 2026-06-28 执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；第一次直接执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true ...` 因本机 `better-sqlite3` ABI 与 helper 默认 Node 不一致而在 relay 启动前失败，随后按当前 node_modules ABI 显式执行 `NODE_BIN=/opt/homebrew/bin/node BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过。脚本启动本地 relay `62502`、target admin `62503` 与本地 echo fixture `62504`，完整通过 relay 注册、sync session、pair-code 授权、Grants 首次连接/最近命令时间、Recent Calls 参数预览、120 字符长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。源码复核确认 fixture 使用 `python3 -u`，ready 等待预算为 120 × 0.5 秒，提前退出路径仍打印 mock server 日志。 |
 
+## TC-RI-回归-151：Grants 列表清理 48 小时未活动的 stale session grant
+
+**背景**：Settings -> Remote Invoke -> Grants 列表会展示每次远程连接生成的 grant。SSH key 可长期有效，但单次 session grant 如果永久保留，重复连接会让列表持续增长。修复要求后端在 grants 数据源清理 stale session，而不是只在 WebUI 隐藏。
+
+### 操作步骤
+
+1. 执行单元回归：
+   `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin list_grants_and_cleanup_ --lib`
+2. 覆盖构造：
+   - 一个 `first_authorized_at` 早于当前时间 48 小时以上且无 `last_used_at` / `last_command_at` 的 stale grant。
+   - 一个接近但未超过 48 小时的 recent grant。
+   - 一个创建时间很旧但 `last_command_at` 为当前时间的 recently-used grant。
+   - 一个创建时间很旧但仍存在 active call 的 running grant。
+3. 调用 `RemoteInvokeWorker::list_grants_and_cleanup()`。
+
+### 预期结果
+
+- stale inactive grant 从返回列表与 `local_grants` 中移除，并清理本地 grant crypto / policy / info 存储入口。
+- recent grant 与 recently-used grant 保留。
+- 正在执行 active call 的旧 grant 保留，避免列表刷新误删长任务的授权上下文。
+- SSH key 本身与 SSH key 级默认 file policy 不被 stale grant cleanup 删除；后续 caller 重新连接会创建新的 session grant。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-151 | ✅ PASS | 2026-06-30 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin list_grants_and_cleanup_ --lib` 通过，4/4 PASS。测试构造 stale inactive grant、recent grant、recently-used grant、active-call grant 与 consumed active-call grant，确认 `list_grants_and_cleanup()` 只清理超过 48 小时未活动且没有 active call 的 stale grant，并保留最近活动和运行中授权上下文。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。

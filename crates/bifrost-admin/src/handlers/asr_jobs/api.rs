@@ -286,7 +286,11 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
             );
         }
     };
-    if let Err(error) = ensure_task_audio_dir(&create.audio_dir) {
+    let audio_dir = match normalize_task_audio_dir_path(&create.audio_dir) {
+        Ok(path) => path,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    if let Err(error) = ensure_task_audio_dir(&audio_dir) {
         return error_response(
             StatusCode::BAD_REQUEST,
             &error,
@@ -323,7 +327,7 @@ async fn create_task_response(req: Request<Incoming>) -> Response<BoxBody> {
             .name
             .filter(|name| !name.trim().is_empty())
             .unwrap_or_else(|| "ASR directory task".to_string()),
-        audio_dir: create.audio_dir,
+        audio_dir,
         recursive: create.recursive.unwrap_or(true),
         enabled,
         paused: false,
@@ -415,6 +419,8 @@ fn update_task_config(
         return Err((StatusCode::NOT_FOUND, "ASR task not found".to_string()));
     };
     if let Some(audio_dir) = update.audio_dir {
+        let audio_dir = normalize_task_audio_dir_path(&audio_dir)
+            .map_err(|error| (StatusCode::BAD_REQUEST, error))?;
         ensure_task_audio_dir(&audio_dir).map_err(|error| (StatusCode::BAD_REQUEST, error))?;
         task.audio_dir = audio_dir;
     }
@@ -490,6 +496,34 @@ fn ensure_task_audio_dir(audio_dir: &Path) -> Result<(), String> {
             audio_dir.display()
         )
     })
+}
+
+fn normalize_task_audio_dir_path(audio_dir: &Path) -> Result<PathBuf, String> {
+    let raw = audio_dir.to_string_lossy();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("ASR task audio_dir must not be empty".to_string());
+    }
+    let path = PathBuf::from(trimmed);
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let home = dirs::home_dir().ok_or_else(|| {
+        format!(
+            "Failed to resolve home directory for ASR task audio_dir {}",
+            audio_dir.display()
+        )
+    })?;
+    if trimmed == "~" {
+        return Ok(home);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("~/")
+        .or_else(|| trimmed.strip_prefix("~\\"))
+    {
+        return Ok(home.join(rest));
+    }
+    Ok(home.join(path))
 }
 
 fn list_tasks_response() -> Response<BoxBody> {
@@ -1029,5 +1063,31 @@ mod api_tests {
         let dir_path = temp.path().join("audio/dir");
         ensure_task_audio_dir(&dir_path).unwrap();
         assert!(dir_path.is_dir());
+    }
+
+    #[test]
+    fn normalize_task_audio_dir_path_expands_home_and_relative_inputs() {
+        let home = dirs::home_dir().expect("home directory should be available in tests");
+
+        assert_eq!(
+            normalize_task_audio_dir_path(Path::new("~/audio")).unwrap(),
+            home.join("audio")
+        );
+        assert_eq!(
+            normalize_task_audio_dir_path(Path::new("audio/nested")).unwrap(),
+            home.join("audio/nested")
+        );
+
+        let absolute = home.join("absolute-audio");
+        assert_eq!(
+            normalize_task_audio_dir_path(&absolute).unwrap(),
+            absolute
+        );
+    }
+
+    #[test]
+    fn normalize_task_audio_dir_path_rejects_empty_input() {
+        let err = normalize_task_audio_dir_path(Path::new("   ")).unwrap_err();
+        assert!(err.contains("must not be empty"));
     }
 }

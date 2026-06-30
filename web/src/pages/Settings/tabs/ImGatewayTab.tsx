@@ -75,6 +75,17 @@ function defaultProviderId(type: SetupProviderType): string {
   return type === "weixin" ? "weixin-main" : "feishu-main";
 }
 
+function nextProviderId(type: SetupProviderType, providers: ImProviderConfig[]): string {
+  const base = defaultProviderId(type);
+  const used = new Set(providers.map((provider) => provider.id));
+  if (!used.has(base)) return base;
+  let index = 2;
+  while (used.has(`${base}${index}`)) {
+    index += 1;
+  }
+  return `${base}${index}`;
+}
+
 function OverflowText({
   value,
   code,
@@ -377,6 +388,9 @@ function ConnectionsPanel({
     errorMessage?: string;
   } | null>(null);
   const [feishuSetupLoading, setFeishuSetupLoading] = useState(false);
+  const [feishuAutoConnecting, setFeishuAutoConnecting] = useState(false);
+  const [feishuAutoConnectAttemptedSessionId, setFeishuAutoConnectAttemptedSessionId] =
+    useState<string | null>(null);
   const [weixinLogin, setWeixinLogin] = useState<{
     providerId: string;
     scanUrl: string;
@@ -474,14 +488,14 @@ function ConnectionsPanel({
     return undefined;
   };
 
-  const providerRunnerFormValue = (provider: ImProviderConfig) => {
+  const providerRunnerFormValue = useCallback((provider: ImProviderConfig) => {
     if (provider.agent_config?.runner === "bifrost_agent") return "bifrost_agent";
     if (provider.agent_config?.runner) return provider.agent_config.runner;
     if (externalCliConfig?.channels[provider.id]?.runnerId) {
       return externalCliConfig.channels[provider.id].runnerId;
     }
     return "__inherit__";
-  };
+  }, [externalCliConfig?.channels]);
 
   const normalizeProviderValues = (
     values: Record<string, unknown>,
@@ -564,6 +578,8 @@ function ConnectionsPanel({
     setSetupProviderType("weixin");
     setCreatedProvider(null);
     setFeishuSetup(null);
+    setFeishuAutoConnectAttemptedSessionId(null);
+    setFeishuAutoConnecting(false);
     form.resetFields();
     form.setFieldsValue({
       provider_type: "weixin",
@@ -581,6 +597,8 @@ function ConnectionsPanel({
     setCreateStep(2);
     setCreatedProvider(null);
     setFeishuSetup(null);
+    setFeishuAutoConnectAttemptedSessionId(null);
+    setFeishuAutoConnecting(false);
     form.setFieldsValue({
       ...provider,
       app_secret: undefined,
@@ -599,6 +617,7 @@ function ConnectionsPanel({
     try {
       setFeishuSetupLoading(true);
       setFeishuSetup(null);
+      setFeishuAutoConnectAttemptedSessionId(null);
       const result = await imGatewayApi.startFeishuSetup({ brand: "feishu" });
       setFeishuSetup({
         sessionId: result.session_id,
@@ -617,6 +636,7 @@ function ConnectionsPanel({
         status: "error",
         errorMessage,
       });
+      setFeishuAutoConnectAttemptedSessionId(null);
       message.error(errorMessage);
     } finally {
       setFeishuSetupLoading(false);
@@ -627,7 +647,7 @@ function ConnectionsPanel({
     const nextType = setupProviderType;
     form.resetFields();
     form.setFieldsValue({
-      id: defaultProviderId(nextType),
+      id: nextProviderId(nextType, providers),
       provider_type: nextType,
       enabled: true,
       event_connection_enabled: true,
@@ -672,9 +692,10 @@ function ConnectionsPanel({
     }
   };
 
-  const createConnectedFeishuProvider = async () => {
+  const createConnectedFeishuProvider = useCallback(async () => {
     if (!feishuSetup || feishuSetup.status !== "confirmed") return;
     try {
+      setFeishuAutoConnecting(true);
       const values = await form.validateFields(["id", "display_name"]);
       const result = await imGatewayApi.createFeishuSetupProvider(feishuSetup.sessionId, {
         id: values.id,
@@ -705,8 +726,10 @@ function ConnectionsPanel({
     } catch (err) {
       if (err && typeof err === "object" && "errorFields" in err) return;
       message.error(normalizeApiErrorMessage(err, "Failed to create Feishu provider"));
+    } finally {
+      setFeishuAutoConnecting(false);
     }
-  };
+  }, [feishuSetup, fetchStatuses, form, onRefresh, providerRunnerFormValue]);
 
   const handleSaveProvider = async () => {
     try {
@@ -933,7 +956,9 @@ function ConnectionsPanel({
     return () => window.clearInterval(timer);
   }, [
     fetchStatuses,
+    form,
     onRefresh,
+    providerRunnerFormValue,
     refreshWeixinLogin,
     weixinLogin,
     weixinLoginLoading,
@@ -957,7 +982,7 @@ function ConnectionsPanel({
                 }
               : current,
           );
-          message.success("Feishu app created. Continue to connect it.");
+          message.success("Feishu app created. Connecting provider...");
           return;
         }
         if (result.status === "expired") {
@@ -973,6 +998,32 @@ function ConnectionsPanel({
     }, delay);
     return () => window.clearInterval(timer);
   }, [feishuSetup, feishuSetupLoading]);
+
+  useEffect(() => {
+    if (
+      editingProvider ||
+      createStep !== 1 ||
+      setupProviderType !== "feishu" ||
+      !feishuSetup ||
+      feishuSetup.status !== "confirmed" ||
+      createdProvider ||
+      feishuAutoConnecting ||
+      feishuAutoConnectAttemptedSessionId === feishuSetup.sessionId
+    ) {
+      return;
+    }
+    setFeishuAutoConnectAttemptedSessionId(feishuSetup.sessionId);
+    void createConnectedFeishuProvider();
+  }, [
+    createStep,
+    createdProvider,
+    editingProvider,
+    feishuAutoConnectAttemptedSessionId,
+    feishuAutoConnecting,
+    feishuSetup,
+    createConnectedFeishuProvider,
+    setupProviderType,
+  ]);
 
   useEffect(() => {
     if (weixinLogin || weixinLoginLoading) return;
@@ -1028,15 +1079,18 @@ function ConnectionsPanel({
       ? createdProvider
         ? "Waiting for Scan"
         : "Create and Show QR"
+      : feishuAutoConnecting
+      ? "Connecting"
       : feishuSetup?.status === "confirmed"
-      ? "Connect"
+      ? "Retry Connect"
       : "Waiting for Setup"
     : "Save Configuration";
   const addProviderOkDisabled =
     !editingProvider &&
     createStep === 1 &&
     ((setupProviderType === "weixin" && !!createdProvider) ||
-      (setupProviderType === "feishu" && feishuSetup?.status !== "confirmed"));
+      (setupProviderType === "feishu" &&
+        (feishuSetup?.status !== "confirmed" || feishuAutoConnecting)));
 
   return (
     <div>
@@ -1257,6 +1311,8 @@ function ConnectionsPanel({
           setCreateStep(0);
           setCreatedProvider(null);
           setFeishuSetup(null);
+          setFeishuAutoConnectAttemptedSessionId(null);
+          setFeishuAutoConnecting(false);
           form.resetFields();
         }}
         okText={addProviderOkText}
@@ -1339,10 +1395,16 @@ function ConnectionsPanel({
                 label="Provider ID"
                 rules={[{ required: true, message: "Required" }]}
               >
-                <Input placeholder={defaultProviderId(setupProviderType)} disabled={!!createdProvider} />
+                <Input
+                  placeholder={nextProviderId(setupProviderType, providers)}
+                  disabled={!!createdProvider || feishuAutoConnecting}
+                />
               </Form.Item>
               <Form.Item name="display_name" label="Display Name">
-                <Input placeholder="Optional display name" disabled={!!createdProvider} />
+                <Input
+                  placeholder="Optional display name"
+                  disabled={!!createdProvider || feishuAutoConnecting}
+                />
               </Form.Item>
               {setupProviderType === "weixin" ? (
                 <Alert

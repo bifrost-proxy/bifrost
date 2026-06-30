@@ -781,6 +781,24 @@ BIFROST_DATA_DIR=./.bifrost-test cargo run --bin bifrost -- start -p 8800 --unsa
   - 亮色和暗色主题下字段可读、按钮可识别
 - **回归执行记录（2026-05-05）**: PASS — 使用真实浏览器打开 Settings → IM Gateway，对已有 `clear-regression-provider` 点击图标 Edit，清空 `Base Instructions / System Prompt` 后保存；GET `/providers/clear-regression-provider` 返回的 `agent_config` 不再包含 `base_instructions`，同时保留 `developer_instructions = "PROVIDER_DEV_KEEP"`、`user_instructions = "PROVIDER_USER_KEEP"` 与 `work_dir = "/tmp/clear-regression"`，验证单字段清空不会被省略为“保留旧值”。
 
+### TC-IMA-53D: WebUI Add IM Provider 默认 ID 与飞书自动连接
+
+- **操作步骤**:
+  1. 打开 `http://127.0.0.1:8800/_bifrost/ai?aiSection=im-gateway-connections&imGatewaySection=connections`
+  2. 预置已有 Provider `feishu-main`。
+  3. 点击 Connections 区域的 Add Provider，选择 Feishu 后点击 Next。
+  4. 检查 Provider ID 输入框默认值。
+  5. 保持 Provider ID 可编辑，不手动点击 Connect。
+  6. 模拟飞书 setup status 返回 `confirmed`，且 setup provider 创建响应已包含 App ID、Secret configured、Owner Open ID。
+  7. 观察 WebUI 是否自动调用 `/providers/<provider_id>/connect` 并进入 Configure 步骤。
+- **预期结果**:
+  - Provider ID 自动生成为不重复的 `feishu-main2`；如果 `feishu-main2` 也存在，则继续使用 `feishu-main3` 等序号。
+  - Provider ID 在创建前仍可手动编辑。
+  - Feishu app 创建成功且服务端可获取 App ID / Secret 后，WebUI 自动发起 Connect，不需要用户再点击 Connect 按钮。
+  - 自动连接成功后弹窗进入 Configure 步骤，展示 Connection=Connected 和 Agent Runner 配置项。
+  - 自动连接失败时不会无限重试；用户可通过 Retry Connect 手动重试。
+- **执行记录（2026-06-29）**: PASS — 执行 `pnpm --dir web exec playwright test tests/ui/im-gateway-provider.spec.ts`，真实 Chromium 覆盖 6 条 IM Provider UI 回归；其中 Feishu 用例预置 `feishu-main`，Add Provider 默认生成 `feishu-main2`，输入框保持 enabled，setup confirmed 后未点击 Connect 但自动调用 `/providers/feishu-main2/connect` 1 次，并进入 Configure 步骤。同步执行 `pnpm --dir web exec tsc -b --pretty false` 与 `pnpm --dir web exec eslint src/pages/Settings/tabs/ImGatewayTab.tsx tests/ui/im-gateway-provider.spec.ts --max-warnings 0` 通过。
+
 ### TC-IMA-53A: 新建 IM Provider 的 agent_config 经 IM 事件链路生效
 
 - **操作步骤**:

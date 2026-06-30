@@ -16,6 +16,9 @@ fn load_tasks() -> TaskStore {
         });
     for task in &mut store.tasks {
         normalize_daily_agent_config_in_place(&mut task.daily_agent);
+        if let Ok(audio_dir) = normalize_task_audio_dir_path(&task.audio_dir) {
+            task.audio_dir = audio_dir;
+        }
     }
     store
 }
@@ -1331,6 +1334,11 @@ fn summarize_task_records(
 
     let (diarization_ready, diarization_running, diarized_files, speaker_count) =
         summarize_diarization(task, file_store);
+    let (cleanable_source_file_count, cleanable_source_bytes) = if discovered.is_some() {
+        cleanable_source_audio_totals(task, file_store)
+    } else {
+        (0, 0)
+    };
     TaskSummary {
         discovered: discovered.map(|paths| paths.len()).unwrap_or(file_store.files.len()),
         processed,
@@ -1343,8 +1351,8 @@ fn summarize_task_records(
             .map(|paths| paths.iter().filter_map(|path| source_size(path)).sum())
             .unwrap_or(0),
         audio_source_file_count: discovered.map(|paths| paths.len()).unwrap_or(0),
-        cleanable_source_bytes: 0,
-        cleanable_source_file_count: 0,
+        cleanable_source_bytes,
+        cleanable_source_file_count,
         running: RUNNING_TASKS.lock().unwrap().contains(&task.id),
         max_concurrent_files: normalize_max_concurrent_files(task.max_concurrent_files),
         effective_max_concurrent_files: effective_max_concurrent_files(task),

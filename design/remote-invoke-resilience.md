@@ -84,6 +84,17 @@ reqwest 发送层错误：部署侧 `bifrost.server.v4` access log 能看到同�
 - 单元测试用本地 TCP mock relay 模拟第一次连接断开、第二次成功，验证
   target frame post 能恢复。
 
+### 改进 7：Grants stale session 保留上限
+
+**现状**：`bifrost remote conn up --ssh-key` 等复用连接会为每次成功连接生成新的本地 grant。SSH key 本身可以长期有效，但单次 session grant 如果一直保留，Settings -> Remote Invoke -> Grants 列表会随着重复连接无限增长，影响排查和页面可读性。
+
+**改进**：
+- Grants 列表仍以 `RemoteInvokeWorker::list_grants_and_cleanup()` 为数据源，清理发生在后端而不是只在 WebUI 隐藏。
+- 每次列出 grants 和周期性 cleanup 时，按 `max(first_authorized_at, last_used_at, last_command_at)` 计算 grant 最近活动时间。
+- 最近活动时间超过 48 小时的本地 stale grant 会被移除，并同步清理该 grant 的本地 crypto、policy、grant_info 记录。
+- 如果 grant 当前仍有 active call 正在运行，即使已经过期或时间戳超过 48 小时也不会清理，避免长任务被列表刷新误删授权上下文。
+- SSH key 记录和 SSH key 级默认文件策略不受 stale grant cleanup 影响；后续 caller 再次连接会创建新的 session grant。
+
 ## 测试方案
 
 ### 单元测试
@@ -97,6 +108,8 @@ reqwest 发送层错误：部署侧 `bifrost.server.v4` access log 能看到同�
 - `post_call_frame_retries_send_failure_once`: 验证 target 上报 call frame
   时遇到一次发送层断连会短重试并成功（已实现，位于
   `crates/bifrost-admin/src/remote_invoke/relay_client.rs`）。
+- `list_grants_and_cleanup_prunes_stale_inactive_grants`: 验证超过 48 小时未活动的 grant 会被清理，最近 grant 与最近执行过命令的 grant 保留。
+- `list_grants_and_cleanup_keeps_stale_grant_with_active_call`: 验证正在执行 active call 的旧 grant 不会被 cleanup 误删。
 
 ### E2E 测试
 - 使用 e2e-test 技能验证 SSE 重连对账
@@ -109,3 +122,4 @@ reqwest 发送层错误：部署侧 `bifrost.server.v4` access log 能看到同�
 - 更新 `human_tests/remote-invoke.md`，新增 Grants 时间字段回归用例，并按文档逐条执行：进入 discovery、批准授权、查看 Grants、执行远程命令、再次查看 Grants。
 - 更新 `human_tests/remote-invoke.md`，新增 Recent Calls fixture 端口 fallback 回归用例，并按文档执行：预占 mock 请求端口、运行脚本、确认脚本切换到实际端口且 Recent Calls 断言全部通过。
 - 更新 `human_tests/remote-invoke.md`，新增缺 sync session token 日志降噪回归用例，并按文档执行：使用空临时数据目录启动 Bifrost，确认只输出一次等待登录提示且没有重复 ERROR。
+- 更新 `human_tests/remote-invoke.md`，新增 Grants stale session cleanup 回归用例，并按文档执行：构造超过 48 小时未活动、近期活动、正在执行 active call 的 grants，确认列表 cleanup 只移除 stale inactive grant。
