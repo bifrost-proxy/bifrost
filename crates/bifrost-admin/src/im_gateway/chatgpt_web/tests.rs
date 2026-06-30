@@ -584,7 +584,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "sendButtonVisible": true,
             "sendButtonDisabled": false
         })),
-        None
+        Some("send_button_not_ready")
     );
     assert_eq!(
         interaction::dom_output_in_progress_reason(&json!({
@@ -645,6 +645,19 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "sendButtonDisabled": false
         })),
         Some("composer_not_visible")
+    );
+    assert_eq!(
+        interaction::dom_output_in_progress_reason(&json!({
+            "text": "partial answer before final state",
+            "imageCount": 0,
+            "pendingOutputStatusText": false,
+            "composerVisible": true,
+            "composerDisabled": true,
+            "composerTextLength": 0,
+            "sendButtonVisible": true,
+            "sendButtonDisabled": true
+        })),
+        Some("composer_disabled")
     );
 }
 

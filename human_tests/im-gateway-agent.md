@@ -1963,21 +1963,24 @@ rm -rf ./.bifrost-test
 ### TC-IMA-96: ChatGPT Web 长回复经 Weixin 失败后拆分补发
 
 - **前置条件**:
-  - 当前源码已包含 ChatGPT Web DOM 提取不截断修复。
+  - 当前源码已包含 ChatGPT Web DOM 提取不截断修复，以及 DOM fallback 最终态必须依赖 composer/send button 状态的回归修复。
   - 使用 Weixin mock `sendmessage` 服务模拟首次长文本发送返回 `ret=-2`，后续分片发送返回成功。
   - 不需要启动系统代理；自动化脚本只运行 provider/adapter 回归测试。
 - **操作步骤**:
   1. 执行 `e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh`。
   2. 检查脚本中的 `chatgpt_web_dom_extraction_does_not_truncate_response_text` 断言。
   3. 检查脚本中的 `send_text_retries_failed_long_message_as_split_messages` 断言。
+  4. 执行 `cargo test -p bifrost-admin chatgpt_web::tests::dom_output_state_waits_for_generation_controls_to_finish --lib`。
 - **预期结果**:
   - ChatGPT Web DOM 提取脚本中不存在 `text.slice(0, 10000)` 或 `t.slice(0, 10000)`，长回复 artifact 可保存全文。
+  - ChatGPT Web DOM fallback 不再按“我会/我先/我来”等回答文本前缀判断中间态；只有 composer 可见、未禁用、输入框为空且发送按钮因空输入处于禁用态时，才允许把 DOM 内容视为最终回复。
   - Weixin mock 收到的第 1 条 `sendmessage` 为完整原文；该请求失败后，provider 继续发送多条带 `[i/N]` 前缀的小文本。
   - 去掉分片前缀后按顺序拼接，内容与完整原文完全一致，中文和换行不被破坏。
   - 补发成功后 `send_text` 返回成功，不把最终回复整体标记为失败。
 - **清理步骤**:
   - 自动化脚本退出后 mock server 随测试进程释放，无需保留临时数据。
 - **执行记录（2026-05-22）**: PASS — 执行 `source ~/.zshrc && e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 通过：`chatgpt_web_dom_extraction_does_not_truncate_response_text` 确认 DOM 提取脚本不存在固定 10000 字符截断；`send_text_retries_failed_long_message_as_split_messages` 使用 Weixin mock 首次返回 `ret=-2`，随后收到多条 `[i/N]` 分片，去前缀后拼接等于完整原文。补充执行 `source ~/.zshrc && cargo test -p bifrost-admin split_text_for_retry_preserves_multibyte_content --lib -- --nocapture` 通过，确认中文、多字节字符和换行切分保真。
+- **回归执行记录（2026-06-30）**: PASS — 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::tests::dom_output_state_waits_for_generation_controls_to_finish --lib`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::interaction::tests --lib` 与 `SKIP_FRONTEND_BUILD=1 bash e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh` 均通过。确认 ChatGPT Web DOM fallback 已删除基于“我会/我先/我来”等回答内容的中间态匹配，改为依赖 composer/send button 结构状态；长回复提取和 Weixin 失败后分片补发仍通过。
 
 ### TC-IMA-97: AI Agent Chat 页面深链与真实流式 API 交互
 
