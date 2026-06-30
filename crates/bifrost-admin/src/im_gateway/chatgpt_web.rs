@@ -43,8 +43,7 @@ use interaction::{
     conversation_id_from_params, event, extract_text_parts, get_conversation_detail,
     is_transient_conversation_read_error, requested_or_session_conversation,
     save_session_conversation, stop_requested, stopped_error, summarize_conversation_detail,
-    summarize_conversations, try_waited_final_from_sse, wait_final, DomFinalityHints,
-    WaitFinalOptions, WaitedFinal,
+    summarize_conversations, try_waited_final_from_sse, wait_final, WaitFinalOptions, WaitedFinal,
 };
 use native::native_account_probe;
 use send::send_with_browser;
@@ -928,7 +927,6 @@ async fn run_authenticated_operation(
                     duration: Duration::from_secs(config.chatgpt.timeout_secs),
                     stop_marker_path,
                     profile_dir: Some(&config.profile_dir),
-                    finality_hints: DomFinalityHints::default(),
                 },
             )
             .await?;
@@ -1114,7 +1112,6 @@ async fn run_authenticated_operation(
                             duration: Duration::from_secs(config.chatgpt.timeout_secs),
                             stop_marker_path,
                             profile_dir: Some(&config.profile_dir),
-                            finality_hints: DomFinalityHints::default(),
                         },
                     )
                     .await?;
@@ -1626,10 +1623,6 @@ async fn ask_send_and_wait(
             duration: Duration::from_secs(config.chatgpt.timeout_secs),
             stop_marker_path,
             profile_dir: Some(&config.profile_dir),
-            finality_hints: DomFinalityHints::from_send_event_types(
-                &send.event_types,
-                send.sse_detail.is_some(),
-            ),
         },
     )
     .await

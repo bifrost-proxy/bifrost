@@ -202,7 +202,6 @@ pub(super) struct WaitFinalOptions<'a> {
     pub(super) duration: std::time::Duration,
     pub(super) stop_marker_path: &'a Path,
     pub(super) profile_dir: Option<&'a Path>,
-    pub(super) finality_hints: DomFinalityHints,
 }
 
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
@@ -359,8 +358,7 @@ pub(super) async fn wait_final(
                     .map(|a| a.len())
                     .unwrap_or(0);
                 let ready_signature = dom_ready_signature(&waited);
-                let required_stable_for = required_dom_stable_for(dom_text_len);
-                let required_min_elapsed = required_dom_min_elapsed(options.finality_hints);
+                let required_stable_for = required_dom_stable_for(dom_text_len, dom_image_count);
                 let now = tokio::time::Instant::now();
                 let stable_since = match ready_candidate {
                     Some((ref previous_signature, since))
@@ -381,20 +379,6 @@ pub(super) async fn wait_final(
                         stable_for_ms = now.duration_since(stable_since).as_millis(),
                         required_stable_ms = required_stable_for.as_millis(),
                         "chatgpt_web wait_final: DOM content candidate waiting for stability"
-                    );
-                    sleep(std::time::Duration::from_secs(1)).await;
-                    continue;
-                }
-                let elapsed = now.duration_since(wait_started);
-                if elapsed < required_min_elapsed {
-                    tracing::info!(
-                        conversation_id,
-                        dom_text_len,
-                        dom_image_count,
-                        elapsed_ms = elapsed.as_millis(),
-                        required_elapsed_ms = required_min_elapsed.as_millis(),
-                        stream_handoff_without_sse = options.finality_hints.stream_handoff_without_sse,
-                        "chatgpt_web wait_final: DOM content candidate waiting for stream handoff grace"
                     );
                     sleep(std::time::Duration::from_secs(1)).await;
                     continue;
@@ -2233,39 +2217,13 @@ fn dom_ready_signature(waited: &WaitedFinal) -> String {
     )
 }
 
-const STREAM_HANDOFF_DOM_MIN_ELAPSED: std::time::Duration = std::time::Duration::from_secs(120);
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) struct DomFinalityHints {
-    stream_handoff_without_sse: bool,
-}
-
-impl DomFinalityHints {
-    pub(super) fn from_send_event_types(event_types: &[String], has_sse_detail: bool) -> Self {
-        Self {
-            stream_handoff_without_sse: !has_sse_detail
-                && event_types
-                    .iter()
-                    .any(|event_type| event_type == "stream_handoff"),
-        }
-    }
-}
-
-fn required_dom_min_elapsed(hints: DomFinalityHints) -> std::time::Duration {
-    if hints.stream_handoff_without_sse {
-        STREAM_HANDOFF_DOM_MIN_ELAPSED
-    } else {
-        std::time::Duration::ZERO
-    }
-}
-
-fn required_dom_stable_for(text_len: usize) -> std::time::Duration {
-    let secs = if text_len < 512 {
-        8
+fn required_dom_stable_for(text_len: usize, image_count: usize) -> std::time::Duration {
+    let secs = if image_count > 0 || text_len < 512 {
+        2
     } else if text_len < 12_000 {
-        15
+        3
     } else {
-        30
+        5
     };
     std::time::Duration::from_secs(secs)
 }
@@ -2400,35 +2358,12 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
-    fn required_dom_stable_for_is_conservative_for_long_outputs() {
-        assert_eq!(required_dom_stable_for(100).as_secs(), 8);
-        assert_eq!(required_dom_stable_for(8_000).as_secs(), 15);
-        assert_eq!(required_dom_stable_for(12_000).as_secs(), 30);
-        assert_eq!(required_dom_stable_for(40_000).as_secs(), 30);
-    }
-
-    #[test]
-    fn stream_handoff_without_sse_requires_dom_grace() {
-        let event_types = vec!["patch".to_string(), "stream_handoff".to_string()];
-
-        let hints = DomFinalityHints::from_send_event_types(&event_types, false);
-
-        assert!(hints.stream_handoff_without_sse);
-        assert_eq!(
-            required_dom_min_elapsed(hints),
-            STREAM_HANDOFF_DOM_MIN_ELAPSED
-        );
-        assert_eq!(
-            required_dom_min_elapsed(DomFinalityHints::from_send_event_types(&event_types, true)),
-            std::time::Duration::ZERO
-        );
-        assert_eq!(
-            required_dom_min_elapsed(DomFinalityHints::from_send_event_types(
-                &["patch".to_string()],
-                false
-            )),
-            std::time::Duration::ZERO
-        );
+    fn required_dom_stable_for_keeps_completed_dom_responsive() {
+        assert_eq!(required_dom_stable_for(100, 0).as_secs(), 2);
+        assert_eq!(required_dom_stable_for(8_000, 0).as_secs(), 3);
+        assert_eq!(required_dom_stable_for(12_000, 0).as_secs(), 5);
+        assert_eq!(required_dom_stable_for(40_000, 0).as_secs(), 5);
+        assert_eq!(required_dom_stable_for(0, 1).as_secs(), 2);
     }
 
     #[test]
