@@ -33,13 +33,13 @@ TLB 或服务框架将 `/v5` 前缀剥掉后转发为 `/remote-invoke/*`。
 
 - server 入口将 `/remote-invoke/*` 仅归一化为 v5 caller 协议路径
   `/v5/remote-invoke/*`。
-- 保持 `/v4/remote-invoke/pairings/start`、`watch`、`grants/reusable`、
-  `calls/open` 等旧 caller 敏感入口返回 `410 protocol_version_not_supported`。
+- 移除 `/v4/remote-invoke/pairings/start`、`watch`、`grants/reusable`、
+  `calls/open` 等旧 caller 敏感入口的路由注册。
 - 不把无版本 `/remote-invoke/client/*` 映射到 v4 client 注册/stream 路由，
   避免扩大 client 面暴露。
 - 补充 Vitest 回归：模拟 TLB strip prefix 的
   `POST /remote-invoke/pairings/start` 必须进入 v5 route 并返回 400 业务错误，
-  同时 v4 caller 入口仍为 410。
+  同时 v4 caller 入口不再注册并返回 404。
 
 ### 发布前 PPE header 验证开关
 
@@ -590,7 +590,7 @@ sqlite3 ... "SELECT grant_mode, max_calls FROM bifrost_remote_invoke_grants ORDE
 |---|---|---|---|
 | 正常 pair_code 流程 | ✅ | ✅ | 主路径不变 |
 | 正常 SSH key 流程 | ✅ (直接 grant) | ✅ (claim → grant) | caller CLI 需要支持 claim 兑换；当前 CLI 已支持（v5 pair_code 路径同 endpoint） |
-| 老 v4 CLI 试图调 v5 端点 | 410 | 410 | 不变 |
+| 老 v4 CLI 调 legacy v4 caller 端点 | 410 | 404 | 路由代码已移除 |
 | 老 v4 CLI 走 SSH 通路 | grant 直接落 | 收到 `ssh_connect_complete` 含 claim_token，需升级 CLI | 文档标注 BREAKING |
 
 ### E. CI 全量覆盖清单

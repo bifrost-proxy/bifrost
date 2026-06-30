@@ -146,11 +146,6 @@ function callerPopPreflightKey(ctx: RequestContext, route: string): string {
   return `${callerAccessKey(ctx)}:${route}`;
 }
 
-function protocolVersionNotSupported(ctx: RequestContext): boolean {
-  sendJson(ctx.res, 410, { error: 'protocol_version_not_supported' });
-  return true;
-}
-
 function validateCallerEphemeralPub(ctx: RequestContext, value: unknown): string | null {
   if (typeof value !== 'string' || value.length === 0) {
     sendError(ctx.res, 400, 'caller_ephemeral_pub_required');
@@ -394,22 +389,6 @@ export async function handleRemoteInvoke(
       return await handleGetCall(ctx, service, auth.client_instance_id);
     }
 
-    if (pathname === '/v4/remote-invoke/pairings/start' && method === 'POST') {
-      return protocolVersionNotSupported(ctx);
-    }
-
-    if (pathname.match(/^\/v4\/remote-invoke\/pairings\/[^/]+\/watch$/) && method === 'GET') {
-      return protocolVersionNotSupported(ctx);
-    }
-
-    if (pathname === '/v4/remote-invoke/grants/reusable' && method === 'GET') {
-      return protocolVersionNotSupported(ctx);
-    }
-
-    if (pathname.match(/^\/v4\/remote-invoke\/grants\/[^/]+$/) && method === 'DELETE') {
-      return protocolVersionNotSupported(ctx);
-    }
-
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/input$/) && method === 'POST') {
       return await handleCallInput(ctx, service);
     }
@@ -424,10 +403,6 @@ export async function handleRemoteInvoke(
 
     if (pathname.match(/^\/v4\/remote-invoke\/calls\/[^/]+\/cancel$/) && method === 'POST') {
       return await handleCancelCall(ctx, service);
-    }
-
-    if (pathname === '/v4/remote-invoke/calls/open' && method === 'POST') {
-      return protocolVersionNotSupported(ctx);
     }
 
     sendError(ctx.res, 404, 'remote invoke endpoint not found');
@@ -980,22 +955,6 @@ async function handlePairingWatchV5(ctx: RequestContext, storage: IStorage): Pro
   return true;
 }
 
-function handlePairingWatch(ctx: RequestContext): boolean {
-  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/pairings\/([^/]+)\/watch/);
-  const pairingId = parts?.[1] ?? '';
-
-  openSse(ctx.res);
-  registerPairingWatcher(pairingId, ctx.res);
-
-  writeSseEvent(ctx.res, 'connected', { pairing_id: pairingId });
-
-  ctx.req.on('close', () => {
-    unregisterPairingWatcher(pairingId, ctx.res);
-  });
-
-  return true;
-}
-
 async function handleGrantsLookupV5(
   ctx: RequestContext,
   storage: IStorage,
@@ -1198,52 +1157,6 @@ function toGrantApi(g: RemoteInvokeGrant) {
     ssh_key_fingerprint: g.ssh_key_fingerprint || null,
     file_access: g.file_access || 'none',
   };
-}
-
-async function handleFindReusableGrant(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
-  const clientInstanceId = ctx.url.searchParams.get('client_instance_id') ?? '';
-  const callerFingerprint = ctx.url.searchParams.get('caller_fingerprint') ?? '';
-
-  if (!clientInstanceId || !callerFingerprint) {
-    sendError(ctx.res, 400, 'client_instance_id and caller_fingerprint are required');
-    return true;
-  }
-  if (!applyRateLimit(ctx, callerLookupLimiter, `${callerAccessKey(ctx)}:reusable_grant:${clientInstanceId}:${callerFingerprint}`)) {
-    return true;
-  }
-
-  const grant = await service.findReusableGrant('', clientInstanceId, callerFingerprint);
-  sendJson(ctx.res, 200, { code: 0, message: 'ok', data: grant ? toGrantApi(grant) : null });
-  return true;
-}
-
-async function handleDeleteGrant(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
-  const parts = ctx.url.pathname.match(/\/v4\/remote-invoke\/grants\/([^/]+)$/);
-  const grantId = parts?.[1] ?? '';
-  const callerFingerprint = ctx.url.searchParams.get('caller_fingerprint') ?? '';
-
-  if (!callerFingerprint) {
-    sendError(ctx.res, 400, 'caller_fingerprint query parameter is required');
-    return true;
-  }
-  if (!applyRateLimit(ctx, callerControlLimiter, `${callerAccessKey(ctx)}:delete_grant:${grantId}:${callerFingerprint}`)) {
-    return true;
-  }
-
-  try {
-    await service.removeGrant('', grantId, callerFingerprint);
-    sendJson(ctx.res, 200, { code: 0, message: 'ok' });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'delete failed';
-    if (msg === 'caller_fingerprint_mismatch') {
-      sendError(ctx.res, 403, msg);
-    } else if (msg === 'grant_not_found') {
-      sendError(ctx.res, 404, msg);
-    } else {
-      sendError(ctx.res, 400, msg);
-    }
-  }
-  return true;
 }
 
 async function handleCallInput(ctx: RequestContext, service: RemoteInvokeService): Promise<boolean> {
@@ -1455,49 +1368,5 @@ async function handleCancelPendingPairings(
   }
   const cancelled = await service.cancelPendingPairings(clientInstanceId);
   sendJson(ctx.res, 200, { code: 0, message: 'ok', data: { cancelled } });
-  return true;
-}
-
-async function handleOpenCall(ctx: RequestContext, storage: IStorage, service: RemoteInvokeService): Promise<boolean> {
-  const body = parseJsonBody<any>(ctx.body);
-  const commandKind = resolveCommandKind(body?.command_kind);
-  if (!body?.grant_id || !body?.client_instance_id || !body?.caller_fingerprint) {
-    sendError(ctx.res, 400, 'grant_id, client_instance_id, and caller_fingerprint are required');
-    return true;
-  }
-  if (!body?.command_encrypted) {
-    sendError(ctx.res, 400, 'command_encrypted is required');
-    return true;
-  }
-  if (!applyRateLimit(ctx, callerOpenLimiter, `${callerAccessKey(ctx)}:open:${body.grant_id}:${body.client_instance_id}:${body.caller_fingerprint}`)) {
-    return true;
-  }
-
-  try {
-    const grant = await storage.remoteInvoke.getGrant(String(body.grant_id));
-    if (!grant) {
-      sendError(ctx.res, 404, 'grant_not_found');
-      return true;
-    }
-    const result = await service.openCall(grant, {
-      client_instance_id: body.client_instance_id,
-      caller_pubkey: body.caller_pubkey ?? '',
-      command_summary: body.command_summary ?? { command_preview: commandKind },
-      command_kind: commandKind,
-      command_encrypted: body.command_encrypted,
-      pty_enabled: body.pty_enabled,
-      timeout_hint_ms: body.timeout_hint_ms,
-    });
-    sendJson(ctx.res, 200, { code: 0, message: 'ok', data: result });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : 'open call failed';
-    if (msg === 'caller_fingerprint_mismatch' || msg === 'client_instance_id_mismatch' || msg === 'grant_expired' || msg === 'grant_not_active' || msg === 'grant_consumed' || msg === 'grant_scope_mismatch') {
-      sendError(ctx.res, 403, msg);
-    } else if (msg === 'grant_not_found') {
-      sendError(ctx.res, 404, msg);
-    } else {
-      sendError(ctx.res, 400, msg);
-    }
-  }
   return true;
 }

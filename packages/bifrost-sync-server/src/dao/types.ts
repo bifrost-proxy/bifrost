@@ -62,7 +62,6 @@ export interface IRemoteInvokeDao {
 
   createGrant(grant: import('../types').RemoteInvokeGrant): Promise<import('../types').RemoteInvokeGrant>;
   getGrant(grantId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
-  findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   getGrantByCallerFp(callerFp: string, clientInstanceId: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   getGrantBySessionTokenHash(hash: string): Promise<import('../types').RemoteInvokeGrant | undefined>;
   updateGrantCallerPubkey(grantId: string, pubkey: string, fp: string): Promise<void>;

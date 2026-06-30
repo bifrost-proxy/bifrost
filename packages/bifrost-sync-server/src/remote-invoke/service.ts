@@ -732,23 +732,6 @@ export class RemoteInvokeService {
     });
   }
 
-  async findReusableGrant(userId: string, clientInstanceId: string, callerFingerprint: string): Promise<RemoteInvokeGrant | null> {
-    const grant = await this.storage.remoteInvoke.findReusableGrant(userId, clientInstanceId, callerFingerprint);
-    if (!grant) return null;
-
-    if (grant.expires_at && new Date(grant.expires_at) < new Date()) {
-      await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'expired' });
-      return null;
-    }
-
-    if (grant.grant_mode === 'once' && grant.remaining_calls <= 0) {
-      await this.storage.remoteInvoke.updateGrant(grant.id, { status: 'consumed' });
-      return null;
-    }
-
-    return grant;
-  }
-
   async listActiveGrantsForClient(clientInstanceId: string): Promise<RemoteInvokeGrant[]> {
     const grants = await this.storage.remoteInvoke.listActiveGrantsForClient(clientInstanceId);
     const now = new Date();

@@ -321,7 +321,7 @@ describe('remote invoke relay v2 phase 1', () => {
     expect(grantScopeAllowsCommand('remote_shell_interactive', 'power.mgmt')).toBe(true);
   });
 
-  it('rejects legacy plaintext openCall payloads', async () => {
+  it('does not register legacy plaintext openCall routes', async () => {
     const now = new Date().toISOString();
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-plaintext-grant',
@@ -350,8 +350,8 @@ describe('remote invoke relay v2 phase 1', () => {
       command_summary: { command_preview: 'status' },
     });
 
-    expect(response.status).toBe(410);
-    expect(response.data.error).toBe('protocol_version_not_supported');
+    expect(response.status).toBe(404);
+    expect(response.data.message).toBe('remote invoke endpoint not found');
   });
 
   it('persists only route-level metadata for shell.exec encrypted openCall', async () => {
@@ -542,8 +542,8 @@ describe('remote invoke relay v2 phase 1', () => {
       'GET',
       `/v4/remote-invoke/grants/reusable?client_instance_id=${encodeURIComponent(clientInstanceId)}&caller_fingerprint=${encodeURIComponent('phase1-replace-caller')}`,
     );
-    expect(legacyReusable.status).toBe(410);
-    expect(legacyReusable.data.error).toBe('protocol_version_not_supported');
+    expect(legacyReusable.status).toBe(404);
+    expect(legacyReusable.data.message).toBe('remote invoke endpoint not found');
 
     const activeGrants = await server.storage.remoteInvoke.listActiveGrantsForClient(clientInstanceId);
     expect(activeGrants).toHaveLength(1);

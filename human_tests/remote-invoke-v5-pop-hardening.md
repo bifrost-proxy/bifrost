@@ -97,8 +97,8 @@ Steps:
 3. Send `POST /v5/remote-invoke/pairings/start` with `{}`.
    Expect: the same HTTP 400 v5 pairing handler response.
 4. Send `POST /v4/remote-invoke/pairings/start` with `{}`.
-   Expect: HTTP 410 and `protocol_version_not_supported`, proving legacy v4
-   caller paths remain blocked.
+   Expect: HTTP 404 and `remote invoke endpoint not found`, proving legacy v4
+   caller route code is no longer registered.
 5. Send `POST /remote-invoke/client/register` with `{}`.
    Expect: HTTP 404 `remote invoke endpoint not found`, proving stripped v5
    compatibility does not map unversioned paths back to v4 client registration.
@@ -114,8 +114,8 @@ Execution result (2026-06-29, local dist entry):
     `pair_code, caller_info and caller_ephemeral_pub are required`.
   - `POST /v5/remote-invoke/pairings/start` -> HTTP 400 with the same v5
     pairing-handler message.
-  - `POST /v4/remote-invoke/pairings/start` -> HTTP 410,
-    `protocol_version_not_supported`.
+  - `POST /v4/remote-invoke/pairings/start` -> HTTP 404,
+    `remote invoke endpoint not found`.
   - `POST /remote-invoke/client/register` -> HTTP 404,
     `remote invoke endpoint not found`.
   - Temporary data dir and process were cleaned up by the test trap.

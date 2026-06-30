@@ -748,7 +748,7 @@ describe('Remote Invoke security', () => {
     expect(ownerFrame.status).toBe(200);
   });
 
-  it('rejects legacy v4 caller openCall with protocol_version_not_supported', async () => {
+  it('does not register legacy v4 caller openCall', async () => {
     const now = new Date().toISOString();
     await server.storage.remoteInvoke.createGrant({
       id: 'ri-remote-query-grant',
@@ -785,11 +785,11 @@ describe('Remote Invoke security', () => {
       timeout_hint_ms: 120_000,
     });
 
-    expect(response.status).toBe(410);
-    expect(response.data.error).toBe('protocol_version_not_supported');
+    expect(response.status).toBe(404);
+    expect(response.data.message).toBe('remote invoke endpoint not found');
   });
 
-  it('returns 410 for legacy v4 caller-sensitive endpoints', async () => {
+  it('does not register legacy v4 caller-sensitive endpoints', async () => {
     const cases: Array<[string, string, unknown?]> = [
       ['POST', '/v4/remote-invoke/pairings/start', { pair_code: 'PAIR123' }],
       ['GET', '/v4/remote-invoke/pairings/pairing-1/watch'],
@@ -800,8 +800,8 @@ describe('Remote Invoke security', () => {
 
     for (const [method, path, body] of cases) {
       const response = await req(method, path, body);
-      expect(response.status).toBe(410);
-      expect(response.data.error).toBe('protocol_version_not_supported');
+      expect(response.status).toBe(404);
+      expect(response.data.message).toBe('remote invoke endpoint not found');
     }
   });
 
