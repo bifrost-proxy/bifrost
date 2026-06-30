@@ -82,8 +82,33 @@
 - `desktop/`、Tauri sidecar 准备脚本和现有 desktop npm scripts 没有非预期 diff。
 - Native Preview 与 Tauri 继续并行存在。
 
+### TC-MNA-06：Linux shell E2E CI 使用分片避免 60 分钟超时
+
+**操作步骤：**
+1. 执行：
+   ```bash
+   for shard in 1 2 3 4; do
+     bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build \
+       --shard "${shard}/4" --list-shell-tests
+   done >/tmp/bifrost-shell-shard-list.txt
+   ```
+2. 执行：
+   ```bash
+   bash scripts/ci/check-e2e-shell-ci-coverage.sh
+   ```
+3. 执行：
+   ```bash
+   ruby -e 'require "yaml"; ci=YAML.load_file(".github/workflows/ci.yml"); job=ci.fetch("jobs").fetch("e2e-shell"); raise "missing matrix" unless job.fetch("strategy").fetch("matrix").fetch("shard")==[1,2,3,4]; env=job.fetch("env"); raise "missing shard env" unless env.fetch("BIFROST_E2E_SHARD_INDEX").include?("matrix.shard") && env.fetch("BIFROST_E2E_SHARD_TOTAL")=="4"; puts "linux e2e-shell sharding ok"'
+   ```
+
+**预期结果：**
+- `run_all_e2e.sh` 能按 `--shard N/4` 列出 shell E2E 子集，且不实际启动代理测试。
+- CI shell 覆盖守卫通过，确认新增分片不丢失 shell E2E 用例。
+- GitHub Actions `e2e-shell` job 配置包含 `matrix.shard: [1, 2, 3, 4]`、`BIFROST_E2E_SHARD_INDEX` 和 `BIFROST_E2E_SHARD_TOTAL=4`。
+
 ## 清理步骤
 
 ```bash
 rm -rf apps/macos/.build/sidecar
+rm -f /tmp/bifrost-shell-shard-list.txt
 ```
