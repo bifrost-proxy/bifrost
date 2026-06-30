@@ -2,7 +2,10 @@ use crate::mock::HttpbinMockServer;
 use crate::proxy::ProxyInstance;
 use crate::runner::TestCase;
 use serde_json::Value;
+use std::sync::Arc;
 use std::time::Duration;
+
+const START_PROXY_MAX_ATTEMPTS: usize = 10;
 
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
@@ -19,6 +22,46 @@ pub fn get_all_tests() -> Vec<TestCase> {
             test_tls_switch_tunnel_to_intercept,
         ),
     ]
+}
+
+async fn start_proxy_with_admin_retry(
+    rule_refs: &[&str],
+    enable_tls_interception: bool,
+) -> Result<(u16, ProxyInstance, Arc<bifrost_admin::AdminState>), String> {
+    for attempt in 1..=START_PROXY_MAX_ATTEMPTS {
+        let port = portpicker::pick_unused_port().ok_or("Failed to pick unused port")?;
+        println!(
+            "[SETUP] Proxy will run on port {} (attempt {}/{})",
+            port, attempt, START_PROXY_MAX_ATTEMPTS
+        );
+
+        match ProxyInstance::start_with_admin(
+            port,
+            rule_refs.to_vec(),
+            enable_tls_interception,
+            true,
+        )
+        .await
+        {
+            Ok((proxy, admin_state)) => return Ok((port, proxy, admin_state)),
+            Err(error)
+                if is_bind_race(&error.to_string()) && attempt < START_PROXY_MAX_ATTEMPTS =>
+            {
+                println!(
+                    "[SETUP] Port {} became unavailable before bind: {}; retrying",
+                    port, error
+                );
+                continue;
+            }
+            Err(error) => return Err(format!("Failed to start proxy: {error}")),
+        }
+    }
+
+    Err("Failed to start proxy after retrying port bind races".to_string())
+}
+
+fn is_bind_race(error: &str) -> bool {
+    error.contains("Failed to bind") || error.contains("already listening on this port")
 }
 
 fn get_traffic_as_json(admin_state: &bifrost_admin::AdminState) -> Value {
@@ -107,15 +150,10 @@ async fn test_tls_switch_intercept_to_tunnel() -> Result<(), String> {
     println!("       TLS SWITCH TEST: ON -> OFF (Intercept to Tunnel)");
     println!("======================================================================\n");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    println!("[SETUP] Proxy will run on port {}", port);
-
     let mock = HttpbinMockServer::start().await;
     let rules = mock.http_rules();
     let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, true, true)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, proxy, admin_state) = start_proxy_with_admin_retry(&rule_refs, true).await?;
 
     println!("[SETUP] Proxy started with TLS interception ENABLED");
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -199,15 +237,10 @@ async fn test_tls_switch_tunnel_to_intercept() -> Result<(), String> {
     println!("       This is the user-reported issue scenario!");
     println!("======================================================================\n");
 
-    let port = portpicker::pick_unused_port().unwrap();
-    println!("[SETUP] Proxy will run on port {}", port);
-
     let mock = HttpbinMockServer::start().await;
     let rules = mock.http_rules();
     let rule_refs: Vec<&str> = rules.iter().map(String::as_str).collect();
-    let (proxy, admin_state) = ProxyInstance::start_with_admin(port, rule_refs, false, true)
-        .await
-        .map_err(|e| format!("Failed to start proxy: {}", e))?;
+    let (port, proxy, admin_state) = start_proxy_with_admin_retry(&rule_refs, false).await?;
 
     println!("[SETUP] Proxy started with TLS interception DISABLED (tunnel mode)");
     tokio::time::sleep(Duration::from_millis(200)).await;
