@@ -18,29 +18,33 @@ apps/macos/
   Package.swift
   Project.yml
   Sources/
-    BifrostMac/
-    BifrostMacCore/
+    Bifrost/              # internal Swift target; executable product is Bifrost
+    BifrostNativeCore/
   Tests/
-    BifrostMacCoreTests/
+    BifrostNativeCoreTests/
 ```
 
 SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为后续 XcodeGen 工程入口。
 
 ## 实现逻辑
 
-### BifrostMacCore
+### BifrostNativeCore
 
 - `AdminAPIRequestFactory` 统一构造 `/_bifrost/api/` URL、`X-Client-Id`、`Authorization` 和 unsafe method 的 CSRF header。
 - `BifrostClient` 作为 actor 包装 URLSession，第一阶段暴露 System、Traffic、Rules、Cert、Proxy 的 Data 级方法，避免在 schema 稳定前过早绑定大量 DTO。
 - `SidecarConfiguration` 保持与现有 Tauri 端一致的默认值：默认端口 `9900`、sidecar 绑定 `0.0.0.0`、Admin 探测 `127.0.0.1`、数据目录默认 `~/.bifrost`。
-- `SidecarManager` 先落启动命令计划、端口候选策略和最小 start/stop；开发默认加 `--no-system-proxy`、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免污染开发机。
+- `SidecarManager` 负责 `ensureRunning`：先通过同一个 `bifrost status --format json` 探测默认数据目录里的已运行 daemon；若 CLI 或其他桌面端已经启动服务，Native app 只消费这个服务，不再启动第二个 daemon。
+- 只有没有已运行服务时，`SidecarManager` 才使用 bundled sidecar CLI 以 `bifrost start --daemon` 启动共享默认数据目录的服务。开发默认保留 `--no-system-proxy`、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`，避免 Native app 意外改系统代理或拉起托盘。
 
-### BifrostMac
+### Bifrost
 
 - 主界面使用 `NavigationSplitView`。
 - Overview/Traffic/Rules 先提供可编译页面骨架。
 - Traffic 表格从第一版使用 AppKit `NSTableView` bridge，给后续高吞吐流量列表留出性能边界。
 - Rules 编辑器从第一版使用 AppKit `NSTextView` bridge，后续再补规则 DSL 高亮和诊断。
+- 对外可执行产品名固定为 `Bifrost`，避免 Dock、App Switcher、Console 或 `open` 启动路径暴露内部工程名。
+- 启动时优先从 `.app` bundle 的 `Contents/Resources/bifrost.icns` 加载图标，SwiftPM 直接运行时回退到 `Bundle.module` 里的 `bifrost.png`。`swift run --package-path apps/macos Bifrost --check-icon` 作为无窗口 smoke check，验证资源可加载且尺寸有效。
+- 开发启动必须打开 `apps/macos/.build/Bifrost.app`，不能打开裸 `apps/macos/.build/.../debug/Bifrost` Mach-O；后者会被 macOS 当成终端可执行文件启动，不是桌面 app 体验。
 
 ## 核心交互 1:1 还原审计
 
@@ -48,15 +52,17 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 
 | 交互域 | 目标交互 | 当前实现 | 状态 |
 | --- | --- | --- | --- |
-| Sidecar lifecycle | Start / Stop / Restart、端口冲突回退、复用已有 daemon、health check、watchdog 和日志入口 | `SidecarManager` 只能生成启动计划并 `Process.run()`，UI `Start Sidecar` 仍 disabled，无 health check / watchdog / 复用逻辑 | 未还原 |
+| Sidecar lifecycle | Start / Stop / Restart、端口冲突回退、复用已有 daemon、health check、watchdog 和日志入口 | `SidecarManager` 已能先复用默认数据目录下已有 daemon，无服务时再 `--daemon` 启动；仍缺 Stop / Restart / watchdog / 日志入口 | 部分还原 |
 | Overview | 后端状态、版本、端口、系统代理、TLS/CA、代理地址、Open Web UI 均来自真实 Admin API | Dashboard 大部分是静态 tile，`Open Web UI` 可打开固定 9900 URL | 未还原 |
 | Traffic Studio | 真实 Traffic 列表、搜索/过滤、选中详情、headers/body 懒加载、AppKit 表格高性能滚动 | `TrafficView` 使用 `TrafficRecord.sampleRows`，没有 Admin API 加载、选择态、搜索、详情 tab 或 body 懒加载 | 未还原 |
 | Rules | 规则列表、编辑、校验、保存、启停、模板和错误反馈 | `RulesView` 只有 `NSTextView` 草稿，Validate/Save disabled，无规则 API 调用 | 未还原 |
 | System Proxy / Certificates | 可查看并切换系统代理，查看/安装/信任 CA，展示失败原因 | 只有 Settings/Overview 文案，占位 toggles 使用 `.constant(true)` | 未还原 |
 | Devices / Scripts / Replay / Metrics | 对应 sidebar 入口进入真实工作流 | 只有 sidebar 和 placeholder 页面 | 未还原 |
-| 基础设施 | Admin API URL/header 构造、sidecar 参数安全开关、AppKit Table/Text bridge、SwiftPM 可构建 | 已实现并通过 `BifrostMacCoreChecks` 与 smoke 验证 | 已具备骨架 |
+| 基础设施 | Admin API URL/header 构造、sidecar 参数安全开关、AppKit Table/Text bridge、SwiftPM 可构建 | 已实现并通过 `BifrostNativeCoreChecks` 与 smoke 验证 | 已具备骨架 |
 
 因此本 PR 只能作为 Native App scaffold 合并；若验收标准是"Mac Native MVP 核心交互 1:1 可用"，必须继续实现 SidecarManager 可操作化、typed `BifrostClient`、Overview 真实状态、Traffic 真实列表/详情/搜索、Rules 真实 CRUD/启停，以及证书/系统代理真实操作后再交付。
+
+后续从 scaffold 进入 WebUI 全量能力对齐时，以 `design/macos-native-webui-parity.md` 为范围、实现顺序和验收矩阵。任何页面不能只以"入口出现"或"截图相似"标记完成，必须完成真实 Admin API 数据、交互、状态同步和 human_tests 验证。
 
 ## 依赖项
 
@@ -82,7 +88,8 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 执行命令：
 
 ```bash
-swift run --package-path apps/macos BifrostMacCoreChecks
+swift run --package-path apps/macos BifrostNativeCoreChecks
+swift run --package-path apps/macos Bifrost --check-icon
 ```
 
 ### E2E 测试
@@ -93,7 +100,7 @@ swift run --package-path apps/macos BifrostMacCoreChecks
 scripts/build-macos-native.sh --test
 ```
 
-该命令构建 Rust sidecar、复制到 Native app 本地 sidecar 目录，并运行 SwiftPM build 与 `BifrostMacCoreChecks`。真实代理启动留到 SidecarManager 接入 UI 控制后补充。
+该命令构建 Rust sidecar、复制到 Native app 本地 sidecar 目录，并运行 SwiftPM build 与 `BifrostNativeCoreChecks`。真实代理启动留到 SidecarManager 接入 UI 控制后补充。
 
 ### 真实场景测试
 
@@ -105,6 +112,8 @@ scripts/build-macos-native.sh --test
 - sidecar 命令计划包含开发安全开关。
 - `desktop/` Tauri 文件未被修改。
 - Linux shell E2E CI 使用现有 shard 机制拆成 4 个 job，避免全量 shell 套件在单个 60 分钟 job 中超时，同时通过覆盖守卫确认用例不丢失。
+- Native app 对外进程/窗口名为 `Bifrost`，且启动时设置 Bifrost app icon。
+- Native app 启动时复用默认数据目录里的已有 CLI daemon；无服务时按需启动共享默认数据目录的 daemon。
 
 ## Review/Fix/Test 闭环方案
 
@@ -113,7 +122,7 @@ scripts/build-macos-native.sh --test
 - 复核用户目标：新增 native client，不改 Tauri，不做 FFI/NetworkExtension。
 - 执行 `git status --short`、`git diff`。
 - Review `apps/macos`、`scripts/build-macos-native.sh`、`scripts/prepare-macos-native-sidecar.sh`、`docs/macos-native.md`、`human_tests/macos-native-app.md`。
-- 复跑 `swift run --package-path apps/macos BifrostMacCoreChecks` 和脚本 smoke。
+- 复跑 `swift run --package-path apps/macos BifrostNativeCoreChecks`、`swift run --package-path apps/macos Bifrost --check-icon` 和脚本 smoke。
 
 ### 第 2 轮
 
@@ -123,7 +132,8 @@ scripts/build-macos-native.sh --test
 
 ## 校验要求
 
-- `swift run --package-path apps/macos BifrostMacCoreChecks`
+- `swift run --package-path apps/macos BifrostNativeCoreChecks`
+- `swift run --package-path apps/macos Bifrost --check-icon`
 - `scripts/build-macos-native.sh --skip-sidecar --test`
 - `scripts/prepare-macos-native-sidecar.sh --skip-cargo-build` 在已有 binary 时可复用
 - `cargo fmt --all -- --check`

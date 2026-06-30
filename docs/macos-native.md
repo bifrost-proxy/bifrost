@@ -1,11 +1,11 @@
 # macOS Native App
 
-Bifrost Mac Native is a SwiftUI/AppKit client that runs beside the existing Tauri desktop app. It does not replace `desktop/` yet. The native app owns the macOS control experience, while the Rust `bifrost` CLI remains the proxy server, TLS engine, rules engine, script runtime, storage layer, and Admin API provider.
+Bifrost's native macOS app is a SwiftUI/AppKit client that runs beside the existing Tauri desktop app. It does not replace `desktop/` yet. The native app owns the macOS control experience, while the Rust `bifrost` CLI remains the proxy server, TLS engine, rules engine, script runtime, storage layer, and Admin API provider.
 
 ## Architecture
 
 ```text
-Bifrost Mac Native
+Bifrost native macOS app
 SwiftUI / AppKit / Swift Concurrency
         |
 BifrostClient
@@ -26,7 +26,24 @@ The first native preview uses HTTP Admin API endpoints under `/_bifrost/api/`. I
 scripts/build-macos-native.sh --test
 ```
 
-The script builds the Rust CLI sidecar, copies it to `apps/macos/.build/sidecar/bin/bifrost`, then runs SwiftPM build plus `BifrostMacCoreChecks` for `apps/macos`.
+The script builds the Rust CLI sidecar, copies it to `apps/macos/.build/sidecar/bin/bifrost`, then runs SwiftPM build plus `BifrostNativeCoreChecks` for `apps/macos`.
+
+The user-facing executable product is `Bifrost`:
+
+```bash
+swift run --package-path apps/macos Bifrost --check-icon
+```
+
+The icon check loads the bundled Bifrost app icon and verifies that the native app can set a non-empty Dock/App Switcher icon.
+
+For the actual desktop preview, open the generated `.app` bundle:
+
+```bash
+scripts/build-macos-native.sh --skip-sidecar --test
+open -n apps/macos/.build/Bifrost.app
+```
+
+Do not open the bare SwiftPM executable under `.build/.../debug/Bifrost`; macOS treats that path as a terminal executable instead of a desktop app bundle.
 
 If only the Swift scaffold should be checked:
 
@@ -44,7 +61,7 @@ Native development smoke runs must not alter the developer machine proxy state. 
 - `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`
 - `BIFROST_DATA_DIR` pointing at the selected Bifrost data directory
 
-The default data directory stays `~/.bifrost` for compatibility with the current Tauri desktop and CLI behavior.
+The default data directory stays `~/.bifrost` for compatibility with the current Tauri desktop, CLI behavior, and Web UI. On launch, the native app first runs `bifrost status --format json` through the bundled sidecar CLI. If an existing CLI-started daemon is already running, the native app consumes that daemon and does not start a second service. If no daemon is running, it starts `bifrost start --daemon` against the same default data directory.
 
 ## MVP Scope
 

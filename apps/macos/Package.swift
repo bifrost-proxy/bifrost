@@ -3,29 +3,32 @@
 import PackageDescription
 
 let package = Package(
-    name: "BifrostMac",
+    name: "Bifrost",
     platforms: [
         .macOS(.v13)
     ],
     products: [
-        .executable(name: "BifrostMac", targets: ["BifrostMac"]),
-        .executable(name: "BifrostMacCoreChecks", targets: ["BifrostMacCoreChecks"]),
-        .library(name: "BifrostMacCore", targets: ["BifrostMacCore"])
+        .executable(name: "Bifrost", targets: ["Bifrost"]),
+        .executable(name: "BifrostNativeCoreChecks", targets: ["BifrostNativeCoreChecks"]),
+        .library(name: "BifrostNativeCore", targets: ["BifrostNativeCore"])
     ],
     targets: [
         .target(
-            name: "BifrostMacCore",
-            path: "Sources/BifrostMacCore"
+            name: "BifrostNativeCore",
+            path: "Sources/BifrostNativeCore"
         ),
         .executableTarget(
-            name: "BifrostMac",
-            dependencies: ["BifrostMacCore"],
-            path: "Sources/BifrostMac"
+            name: "Bifrost",
+            dependencies: ["BifrostNativeCore"],
+            path: "Sources/Bifrost",
+            resources: [
+                .copy("Resources")
+            ]
         ),
         .executableTarget(
-            name: "BifrostMacCoreChecks",
-            dependencies: ["BifrostMacCore"],
-            path: "Sources/BifrostMacCoreChecks"
+            name: "BifrostNativeCoreChecks",
+            dependencies: ["BifrostNativeCore"],
+            path: "Sources/BifrostNativeCoreChecks"
         )
     ]
 )
