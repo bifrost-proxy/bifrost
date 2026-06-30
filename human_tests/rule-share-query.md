@@ -156,6 +156,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 4. 不填写任何页面 hash，直接点击 Apply Rule。
 5. 等待页面跳转回 clean target URL，并查看本地规则列表。
 6. 在浏览器控制台或自动化执行结果中检查没有 `Failed to fetch` 报错。
+7. 结束测试并触发清理流程，确认 Chrome 临时 profile 目录的后台 helper 退出竞态不会让已通过的浏览器确认用例返回失败。
 
 预期结果：
 - 页面展示规则名、content hash、返回目标和完整规则内容。
@@ -163,6 +164,7 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 - Apply Rule 按钮无需输入即可点击。
 - 点击后不出现 `Failed to fetch`；规则导入成功并启用 `share/<payload name>`。
 - 浏览器跳转到不含 `__bifrost_rule` 的 clean target URL。
+- 测试脚本对 Chrome profile 清理执行有界重试；即使 Chrome 后台 helper 短暂占用 `Default/`，也不会把已经通过的业务断言误报为 suite 失败。
 
 ## 清理步骤
 
@@ -235,3 +237,17 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-09：通过。确认页 `Content-Security-Policy` 使用真实响应头验证，包含 `connect-src 'self'`；HTML body 继续验证 `Content hash` 展示、无需手填 hash、无 `id="confirmation"`，避免把安全头错误当作页面正文断言。
+
+执行时间：2026-06-30
+
+测试环境：
+- `BIFROST_DATA_DIR=/tmp/bifrost-rule-share-browser.*`，临时 `config.toml` 已设置 `[sync] enabled = false` / `auto_sync = false`
+- Bifrost 测试服务：`127.0.0.1:<随机端口>`，启动参数包含 `--no-system-proxy`，并设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` / `BIFROST_DISABLE_TRAY=1`
+- 真实 Chrome headless：`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+
+执行命令：
+- `PATH="$HOME/.cargo/bin:$PATH" SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost`
+- `PATH="$HOME/.cargo/bin:$PATH" bash e2e-tests/tests/test_rule_share_confirm_browser.sh`
+
+结果：
+- TC-RSQ-10：通过。真实 Chrome 打开 `/_bifrost/share/rule?...` 后不需要填写页面 hash，直接点击 Apply Rule 输出 `browser apply succeeded without hash`；浏览器未捕获 `Failed to fetch`、`Refused to connect` 或 CSP 报错；规则列表出现 `share/rsq-browser [enabled]`；测试结束 cleanup 对 Chrome profile 先终止 helper 再重试删除，脚本退出码为 0，没有再因 `rm: ... Directory not empty` 把成功业务断言误报为 suite 失败。

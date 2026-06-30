@@ -72,6 +72,42 @@ terminate_pid() {
   wait "$pid" 2>/dev/null || true
 }
 
+terminate_chrome_profile() {
+  terminate_pid "$CHROME_PID"
+
+  local pids
+  for _ in {1..20}; do
+    pids="$(pgrep -f "$CHROME_DIR" 2>/dev/null || true)"
+    if [[ -z "$pids" ]]; then
+      return 0
+    fi
+    kill $pids 2>/dev/null || true
+    sleep 0.1
+  done
+
+  pids="$(pgrep -f "$CHROME_DIR" 2>/dev/null || true)"
+  if [[ -n "$pids" ]]; then
+    kill -9 $pids 2>/dev/null || true
+    sleep 0.1
+  fi
+}
+
+remove_dir_with_retry() {
+  local dir="$1"
+  [[ -n "$dir" ]] || return 0
+
+  for _ in {1..20}; do
+    rm -rf "$dir" 2>/dev/null || true
+    if [[ ! -e "$dir" ]]; then
+      return 0
+    fi
+    sleep 0.1
+  done
+
+  echo "WARN: failed to remove temporary directory after retries: $dir" >&2
+  return 0
+}
+
 cat >"$DATA_DIR/config.toml" <<'EOF'
 [sync]
 enabled = false
@@ -82,7 +118,7 @@ connect_timeout_ms = 100
 EOF
 
 cleanup() {
-  terminate_pid "$CHROME_PID"
+  terminate_chrome_profile
   if [[ -n "$PROXY_PID" ]] && kill -0 "$PROXY_PID" 2>/dev/null; then
     kill "$PROXY_PID" 2>/dev/null || true
     wait "$PROXY_PID" 2>/dev/null || true
@@ -91,7 +127,9 @@ cleanup() {
     kill "$SITE_PID" 2>/dev/null || true
     wait "$SITE_PID" 2>/dev/null || true
   fi
-  rm -rf "$DATA_DIR" "$SITE_DIR" "$CHROME_DIR"
+  remove_dir_with_retry "$DATA_DIR"
+  remove_dir_with_retry "$SITE_DIR"
+  remove_dir_with_retry "$CHROME_DIR"
 }
 trap cleanup EXIT
 

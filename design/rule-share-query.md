@@ -606,7 +606,7 @@ Enabled existing rule '<final-name>'. Other My Rules were disabled.
 - `docs/rule.md`：已增加分享 Query 协议说明和示例。
 - `docs/cli.md`：已增加 `bifrost rule share` 用法（目标 URL 是位置参数，不是 `--url`）。
 - CLI help：`bifrost rule share -h` 能看到 target URL、content/file、scope 说明。
-- `human_tests/readme.md`：已在表格中新增 `rule-share-query.md` 行（8 个用例）。
+- `human_tests/readme.md`：已在表格中新增 `rule-share-query.md` 行（10 个用例）。
 
 第一版不要求更新（仍未更新，符合预期）：
 
@@ -660,9 +660,12 @@ Vitest 或 Playwright：
 
 ```text
 e2e-tests/tests/test_rule_share_query.sh
+e2e-tests/tests/test_rule_share_confirm_browser.sh
 ```
 
 Rust `crates/bifrost-e2e/src/tests/rule_share_query.rs` 仍未创建（planned, not yet shipped as of 2026-06-17）。当前 shell 脚本已经覆盖：裸域名经 HTTP 代理导入、HTTPS TLS 解包路径导入、带 `@规则引用` 的内容、重复访问不创建副本、同名不同内容创建递增 `share/<name> 2`、对其它 My Rules 独占启用等关键路径。
+
+`test_rule_share_confirm_browser.sh` 额外覆盖真实 Chrome/DevTools 打开确认页、无需填写 hash 点击 Apply Rule、跳回 clean URL，以及测试结束时 Chrome profile 临时目录被后台 helper 短暂占用时不能把已通过的业务断言误报为 E2E 失败。
 
 真实流程：
 
