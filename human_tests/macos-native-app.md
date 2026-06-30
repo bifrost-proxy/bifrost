@@ -18,12 +18,12 @@
 **操作步骤：**
 1. 在仓库根目录执行：
    ```bash
-   swift run --package-path apps/macos BifrostMacCoreChecks
+   swift run --package-path apps/macos BifrostNativeCoreChecks
    ```
 
 **预期结果：**
 - SwiftPM 成功解析 `apps/macos/Package.swift`。
-- `BifrostMacCoreChecks` 输出 `BifrostMacCoreChecks passed`。
+- `BifrostNativeCoreChecks` 输出 `BifrostNativeCoreChecks passed`。
 - 测试覆盖 Admin API URL/header 构造、默认数据目录、sidecar 启动参数和端口候选策略。
 
 ### TC-MNA-02：Native build 脚本可只验证 Swift 工程
@@ -62,7 +62,7 @@
 **操作步骤：**
 1. 执行：
    ```bash
-   swift run --package-path apps/macos BifrostMacCoreChecks
+   swift run --package-path apps/macos BifrostNativeCoreChecks
    ```
 
 **预期结果：**
@@ -106,18 +106,18 @@
 - CI shell 覆盖守卫通过，确认新增分片不丢失 shell E2E 用例。
 - GitHub Actions `e2e-shell` job 配置包含 `matrix.shard: [1, 2, 3, 4]`、`BIFROST_E2E_SHARD_INDEX` 和 `BIFROST_E2E_SHARD_TOTAL=4`。
 
-### TC-MNA-07：核心交互 1:1 还原状态必须明确标注
+### TC-MNA-07：Native UI 不得继续使用 scaffold 假数据
 
 **操作步骤：**
 1. 执行：
    ```bash
-   ruby -e 'checks={"Overview Start disabled"=>File.read("apps/macos/Sources/BifrostMac/Features/Dashboard/DashboardView.swift").include?(".disabled(true)"),"Traffic sample rows"=>File.read("apps/macos/Sources/BifrostMac/Features/Traffic/TrafficView.swift").include?("TrafficRecord.sampleRows"),"Rules disabled actions"=>File.read("apps/macos/Sources/BifrostMac/Features/Rules/RulesView.swift").scan(".disabled(true)").size>=2,"Settings constant toggles"=>File.read("apps/macos/Sources/BifrostMac/Features/Settings/SettingsView.swift").include?(".constant(true)"),"Design audit says not restored"=>File.read("design/macos-native-app.md").include?("核心交互 1:1 还原审计")&&File.read("design/macos-native-app.md").include?("未还原")}; failed=checks.reject{|_name,ok| ok}; abort("failed checks: #{failed.keys.join(", ")}") unless failed.empty?; puts "macOS native interaction parity audit is explicit"'
+   ruby -e 'paths=Dir["apps/macos/Sources/Bifrost/**/*.swift"]; text=paths.map{|p| File.read(p)}.join("\n"); forbidden=["TrafficRecord.sampleRows","REQ-preview","api.local","Native preview rule editor scaffold","example.com proxy://127.0.0.1:8080",".constant(true)"]; found=forbidden.select{|needle| text.include?(needle)}; abort("forbidden scaffold data remains: #{found.join(", ")}") unless found.empty?; puts "macOS native scaffold fake data removed"'
    ```
 
 **预期结果：**
-- 命令输出 `macOS native interaction parity audit is explicit`。
-- 设计文档明确说明当前 PR 是 scaffold，不得作为核心交互 1:1 已还原的 Native MVP 验收。
-- 若后续实现了真实交互，需要同步更新本用例：移除对应 disabled/sample/constant 断言，改为真实 UI/API 操作验证。
+- 命令输出 `macOS native scaffold fake data removed`。
+- Traffic、Rules、顶部开关和 Settings 不再使用 scaffold sample rows、固定 `.constant(true)` 或假规则文案。
+- Native 页面表格数据必须来自 Admin API 或明确显示空态/错误态。
 
 ### TC-MNA-08：Coverage CI 的 TLS switch E2E 端口 bind race 有重试
 
@@ -136,9 +136,270 @@
 - helper 对 `Failed to bind` 或 `already listening on this port` 重试，不因 `portpicker` 与实际 bind 之间的瞬时竞态直接失败。
 - `cargo test -p bifrost-e2e tls_switch_test -- --nocapture` 通过。
 
+### TC-MNA-09：Native app 对外命名为 Bifrost 且启动图标有效
+
+**操作步骤：**
+1. 执行无窗口图标资源检查：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-icon
+   ```
+2. 如已有旧的 native preview 进程，先结束：
+   ```bash
+   pkill -x BifrostMac || true
+   pkill -x Bifrost || true
+   ```
+3. 构建 Swift 工程并生成开发用 `.app` bundle：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   test -x apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost
+   test -f apps/macos/.build/Bifrost.app/Contents/Resources/bifrost.icns
+   ```
+4. 用 LaunchServices 启动 `.app`，不要启动裸 Mach-O 可执行文件：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+5. 查询进程与窗口名：
+   ```bash
+   pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to get name of windows'
+   ```
+6. 查询运行中应用图标尺寸：
+   ```bash
+   APP_PID="$(pgrep -f 'Bifrost.app/Contents/MacOS/Bifrost' | head -1)"
+   swift -e 'import AppKit; let pid = pid_t(Int32(CommandLine.arguments[1])!); guard let app = NSRunningApplication(processIdentifier: pid), let icon = app.icon else { fatalError("missing running app icon") }; print("running app icon: \(Int(icon.size.width))x\(Int(icon.size.height))")' "$APP_PID"
+   ```
+
+**预期结果：**
+- 图标资源检查输出 `Bifrost icon check passed: 1000x1000`。
+- SwiftPM 构建输出包含 `Linking Bifrost` 或 `Build of product 'Bifrost' complete!`。
+- 开发用 app bundle 存在于 `apps/macos/.build/Bifrost.app`，并包含 `Contents/MacOS/Bifrost` 与 `Contents/Resources/bifrost.icns`。
+- 运行中的 native app 来自 `Bifrost.app/Contents/MacOS/Bifrost`，不是裸 `debug/Bifrost` 终端可执行文件。
+- 运行中的 native app 对外进程名是 `Bifrost`，不是 `BifrostMac`。
+- System Events 能读取到名为 `Bifrost` 的窗口。
+- AppKit 能读取到运行中应用的非空图标尺寸，例如 `running app icon: 32x32`。
+- 启动过程中不启动 sidecar、不启用系统代理、不拉起托盘、不打开 Sync 登录页。
+
+### TC-MNA-10：Native app 复用默认数据目录里的既有 CLI daemon
+
+**操作步骤：**
+1. 确认默认数据目录中已有 CLI daemon 正在运行：
+   ```bash
+   bifrost status --format json
+   ```
+2. 构建开发用 `.app` bundle：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+3. 关闭旧 native app 窗口，但不要停止默认 `bifrost` daemon：
+   ```bash
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   ```
+4. 打开 Native app bundle：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+5. 检查 Native app 进程、子进程和 sidecar 启动情况：
+   ```bash
+   APP_PID="$(pgrep -f 'Bifrost.app/Contents/MacOS/Bifrost' | head -1)"
+   ps -p "$APP_PID" -o pid= -o comm=
+   sleep 2
+   ps -axo pid,ppid,command | awk -v app="$APP_PID" '$2 == app { print }'
+   ps -axo pid,ppid,command | rg 'Bifrost\.app.*/bifrost start' | rg -v 'rg|zsh -lc' || true
+   bifrost status --format json
+   ```
+
+**预期结果：**
+- `bifrost status --format json` 显示 `running: true`，`data_dir` 为默认 `~/.bifrost`，并带有 listener port。
+- Native app 进程路径是 `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost`。
+- Native app 允许短暂派生 `bifrost status --format json` 做服务发现；2 秒后没有持久子进程。
+- 没有 `Bifrost.app/.../bifrost start` 进程，说明已有 CLI daemon 被复用，没有启动第二个服务。
+- Native app 与 CLI/Web UI 消费同一个默认数据目录。
+
+### TC-MNA-11：Network 页面按 Web UI 本地化布局并使用固定窄竖栏菜单
+
+**操作步骤：**
+1. 打开真实 Web UI 作为对照：
+   ```bash
+   open http://127.0.0.1:9900/_bifrost/
+   ```
+2. 构建并打开 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 将 Native 窗口移动到可见区域并截取固定窄竖栏布局：
+   ```bash
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to set position of window 1 to {120, 80}'
+   osascript -e 'tell application "System Events" to set frontmost of process "Bifrost" to true'
+   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-fixed-rail.png
+   ```
+
+**预期结果：**
+- Native 左侧菜单为固定窄竖栏，贯穿窗口顶部和底部，不再提供展开/折叠按钮。
+- macOS 红黄绿三个窗口按钮位于左侧竖栏顶部区域，背景与菜单 rail 连成一体，不得浮在独立白色 titlebar 上。
+- 左侧竖栏顶部不展示额外 Logo 或 `Bifrost` 文案，避免占用菜单空间。
+- 左侧 rail 使用清爽的浅色背景，不能比内容区更重或显得灰脏。
+- 菜单顺序与 Web UI 一致：Network、Replay、Rules、Values、Scripts、AI、DevTools、Groups、Notify、Settings。
+- 每个菜单项图标在上、文字在下，选中项有蓝色激活线和浅蓝选中背景，Notify badge 和底部主题按钮保留。
+- 右侧顶部标题空间包含 Network 操作区：过滤面板开关、清空、协议/类型/状态 tag、Add Filter、Fuzzy Search、Breakpoint、TLS Decode、System Proxy、详情面板开关。
+- 中间内容为 Web UI 风格三栏：Filters 面板、Network 请求表格、右侧请求详情空态。
+- 底部状态栏很矮，展示 Proxy、Sync、TLS、上下行速率、Total、Conn、Req、Mem、CPU、Uptime、版本和 Skill。
+- `/tmp/bifrost-native-fixed-rail.png` 中 UI 不得出现 Dashboard 卡片式 scaffold、假数据表格、旧展开型侧栏或侧栏折叠按钮。
+
+### TC-MNA-12：Native 明暗主题切换可用且 Network 数据来自真实 Admin API
+
+**操作步骤：**
+1. 执行真实 Admin API smoke：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-admin-data
+   ```
+2. 截取亮色固定竖栏和暗色固定竖栏：
+   ```bash
+   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-fixed-rail-light.png
+   osascript -e 'tell application "System Events" to click at {154, 835}'
+   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-dark.png
+   ```
+3. 对照 Admin API：
+   ```bash
+   curl -s http://127.0.0.1:9900/_bifrost/api/traffic?limit=5
+   curl -s http://127.0.0.1:9900/_bifrost/api/system/overview
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/system
+   curl -s http://127.0.0.1:9900/_bifrost/api/config/tls
+   ```
+
+**预期结果：**
+- `--check-admin-data` 输出 `Bifrost admin data check passed`，且包含真实 `port`、`pid`、`traffic_records`、`rules`。
+- Native Network 表格中显示的 seq、protocol、method、status、client、port、host/path 与 `/traffic?limit=5` 返回的真实记录一致。
+- Filters 面板中的 Client IP、Applications、Domains 计数来自当前加载的真实 traffic records。
+- System Proxy 和 TLS Decode 开关状态分别来自 `/proxy/system` 与 `/config/tls`。
+- 点击主题按钮后，Native app 切换到暗色主题；Network 表格、Filters、详情空态、状态栏均为暗色，不出现白底残留或文字不可读。
+
+### TC-MNA-13：Network 工具区使用 macOS 标题栏空间且关键开关接真实 Admin API
+
+**操作步骤：**
+1. 构建并打开 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+2. 将 Native 窗口移动到可见区域并截图：
+   ```bash
+   osascript -e 'tell application "System Events" to set frontmost of process "Bifrost" to true'
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to set position of window 1 to {120, 80}'
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to set size of window 1 to {1220, 820}'
+   screencapture -x -R 120,80,1220,820 /tmp/bifrost-native-titlebar-network.png
+   ```
+3. 验证 Native 源码中不存在固定真假绑定或 scaffold 假数据：
+   ```bash
+   ruby -e 'paths=Dir["apps/macos/Sources/Bifrost/**/*.swift"]; text=paths.map{|p| File.read(p)}.join("\n"); forbidden=["TrafficRecord.sampleRows","REQ-preview","api.local","Native preview rule editor scaffold","example.com proxy://127.0.0.1:8080",".constant(true)",".constant(false)"]; found=forbidden.select{|needle| text.include?(needle)}; abort("forbidden scaffold data remains: #{found.join(", ")}") unless found.empty?; puts "macOS native scaffold fake data removed"'
+   ```
+4. 验证 Breakpoint、System Proxy、TLS Decode 的数据来源：
+   ```bash
+   curl -s http://127.0.0.1:9900/_bifrost/api/breakpoint/settings
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/system
+   curl -s http://127.0.0.1:9900/_bifrost/api/config/tls
+   ```
+
+**预期结果：**
+- `/tmp/bifrost-native-titlebar-network.png` 中顶部 macOS 标题栏不再显示单独的 `Network` 标题占位，标题栏空间直接承载 Network 操作区。
+- 内容区不再额外占用一条顶部 toolbar；Network 内容从 Filters / Traffic table / Detail 三栏开始。
+- Breakpoint 开关来自 `/breakpoint/settings`，不是固定 false。
+- TLS Decode 开关来自 `/config/tls`，System Proxy 开关来自 `/proxy/system`。
+- Clear traffic、filter tags、Fuzzy Search、Add Filter、detail panel toggle 均有实际 UI 状态变化或真实 API 行为，不是空按钮。
+- 源码扫描输出 `macOS native scaffold fake data removed`。
+
+### TC-MNA-14：顶层页面不得保留纯 placeholder，未完成页面必须展示真实 API 状态
+
+**操作步骤：**
+1. 执行占位扫描：
+   ```bash
+   rg -n "Reserved for the next native milestone|PlaceholderFeatureView\\(" apps/macos/Sources/Bifrost -g '*.swift' || true
+   ```
+2. 执行增强后的 Admin API smoke：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-admin-data
+   ```
+3. 打开 Native `.app`，逐个点击 Replay、Scripts、AI、DevTools、Groups、Notify：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- 占位扫描无输出。
+- `--check-admin-data` 输出包含 `traffic_records`、`rules`、`first_rule_detail`、`values`、`system_proxy`、`tls_decode`、`breakpoint`。
+- Replay、Scripts、AI、DevTools、Groups、Notify 不显示 `Reserved for the next native milestone`，而是展示对应 Admin API endpoint 的真实 JSON 结果或明确错误/gating 状态。
+- 这些页面仍未标记为完整交互完成；后续必须继续按 `design/macos-native-webui-parity.md` 扩展到 WebUI 的完整编辑、执行、过滤、弹窗和写操作。
+
+### TC-MNA-15：Native 必须建立 WebUI 同源 `/api/push` WebSocket 并支持 Network 选中详情
+
+**操作步骤：**
+1. 执行增强后的 Admin API smoke，验证 REST 数据和 WebSocket push 同时可用：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-admin-data
+   ```
+2. 执行 Swift build/icon smoke，确保新增实时同步代码可编译：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-icon
+   ```
+3. 打开 Native `.app`，进入 Network 页面，点击任意 traffic 行：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   open -n apps/macos/.build/Bifrost.app
+   ```
+4. 对照 Admin API 详情与 body 接口：
+   ```bash
+   first_id="$(curl -s http://127.0.0.1:9900/_bifrost/api/traffic?limit=1 | jq -r '.records[0].id')"
+   curl -s "http://127.0.0.1:9900/_bifrost/api/traffic/$first_id"
+   curl -s "http://127.0.0.1:9900/_bifrost/api/traffic/$first_id/request-body"
+   curl -s "http://127.0.0.1:9900/_bifrost/api/traffic/$first_id/response-body"
+   ```
+
+**预期结果：**
+- `--check-admin-data` 输出包含 `push_client_id=`，证明 Native smoke 已建立 `/_bifrost/api/push` WebSocket 并收到服务端 `connected` 消息。
+- `--check-admin-data` 输出包含 `sse_streams=/whitelist/pending/stream=text/event-stream,/config/ip-tls/pending/stream=text/event-stream`，证明 Native smoke 对 WebUI 使用的全局 SSE stream 建立了真实连接并校验响应头。
+- 状态栏不再固定显示 `Sync: Synced`；WebSocket 成功时显示 `Sync: Live #<client_id>`，失败时显示 fallback/poll 状态。
+- Network 表格行可选中；选中后右侧详情区域展示真实 `/traffic/{id}`、request body、response body，不再只显示空态。
+- 详情区域必须提供与 WebUI 同类的 Request / Response 分段，以及 Overview / Header / Body / Raw 子页；Overview 至少展示 URL、Method、Status、Protocol、Proxy Port、Host、Client 等真实字段。
+- push 连接失败时 Native 仍通过轮询 fallback 自动刷新数据，不能停留在启动时快照。
+
+### TC-MNA-16：Rules / Values / Scripts 原生页必须具备真实核心 CRUD
+
+**操作步骤：**
+1. 执行真实 Admin API smoke，验证原生客户端的核心写链路：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-admin-data
+   ```
+2. 打开 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 在 Rules 页面验证：
+   - 左侧列表显示真实 `/rules` 数据，带启停开关、新建、刷新、搜索。
+   - 点击规则后右侧加载 `/rules/{name}` 内容。
+   - 编辑内容后出现未保存标记，Save 调用真实更新接口，Revert 恢复服务端内容。
+   - 更多菜单可 Rename / Delete，Delete 必须出现确认弹窗。
+4. 在 Values 页面验证：
+   - 左侧列表显示真实 `/values` 数据，支持新建、刷新、搜索。
+   - 右侧编辑器支持 Save、Revert、Copy、Rename、Delete。
+   - JSON/XML 内容时 Format 按内容类型格式化。
+5. 在 Scripts 页面验证：
+   - 顶部 segmented control 可切换 Request / Response / Decode / Parser。
+   - 每类列表来自 `/scripts` 对应字段，不显示 JSON placeholder。
+   - 右侧编辑器支持 New、Save、Revert、Copy、Rename、Delete，并调用 `/scripts/{type}/{name}` 系列接口。
+
+**预期结果：**
+- `--check-admin-data` 输出包含 `crud=rules,values,scripts`，证明 smoke 已完成临时 Rule、Value、Request Script 的 create/update/rename/delete，并清理测试对象。
+- Rules/Values/Scripts 页面不再只读或只展示 API JSON；每个页面都有真实列表、编辑器、保存按钮、重命名和删除确认。
+- 通过 Native 写入的临时对象在 WebUI 刷新后可见；删除后 WebUI 与 Admin API 均不可再读取。
+- 本用例只覆盖核心 CRUD；Rules 拖拽排序/share link/import/export、Scripts 测试结果面板/import/export、多选右键、Values import/export 仍属于 `design/macos-native-webui-parity.md` 矩阵中未完成的后续工单，禁止标记为完整 WebUI parity。
+
 ## 清理步骤
 
 ```bash
 rm -rf apps/macos/.build/sidecar
 rm -f /tmp/bifrost-shell-shard-list.txt
+pkill -x Bifrost || true
+pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
 ```
