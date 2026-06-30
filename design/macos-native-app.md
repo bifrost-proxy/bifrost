@@ -88,6 +88,7 @@ scripts/build-macos-native.sh --test
 - build 脚本 `--skip-sidecar --test` 可只验证 Swift 工程。
 - sidecar 命令计划包含开发安全开关。
 - `desktop/` Tauri 文件未被修改。
+- Linux shell E2E CI 使用现有 shard 机制拆成 4 个 job，避免全量 shell 套件在单个 60 分钟 job 中超时，同时通过覆盖守卫确认用例不丢失。
 
 ## Review/Fix/Test 闭环方案
 
@@ -114,6 +115,8 @@ scripts/build-macos-native.sh --test
 - `cargo test --workspace --all-features`
 - `cargo build --all-targets --all-features`
 - `make coverage` 或记录覆盖率门禁对 Swift scaffold 的不适用/阻塞原因
+- `bash scripts/ci/check-e2e-shell-ci-coverage.sh`
+- YAML 检查确认 `.github/workflows/ci.yml` 的 Linux `e2e-shell` job 配置 `matrix.shard: [1, 2, 3, 4]`
 
 ## 文档更新要求
 
