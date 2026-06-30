@@ -1740,12 +1740,16 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             (composerEl.value || composerEl.innerText || composerEl.textContent || '').trim().length
           ) : 0;
 
-          const sendBtn = document.querySelector('[data-testid="send-button"]') ||
-                          document.querySelector('[data-testid="composer-submit-button"]') ||
-                          document.querySelector('button[aria-label="Send prompt"]') ||
-                          document.querySelector('button[aria-label*="发送"]') ||
-                          document.querySelector('button[class*="composer-submit-button"]') ||
-                          document.querySelector('button.composer-submit-btn');
+          const sendButtonCandidates = Array.from(document.querySelectorAll(
+            '[data-testid="send-button"], [data-testid="composer-submit-button"], button[aria-label="Send prompt"], button[aria-label*="发送"]'
+          ));
+          const sendBtn = sendButtonCandidates.find((button) => {{
+            const label = ((button.getAttribute('aria-label') || '') + ' ' + (button.innerText || '')).trim();
+            if (/语音|听写|voice|dictat/i.test(label)) return false;
+            return /send\s*prompt|发送\s*(提示|消息|请求)?/i.test(label) ||
+              button.getAttribute('data-testid') === 'send-button' ||
+              button.getAttribute('data-testid') === 'composer-submit-button';
+          }}) || null;
           const sendButtonVisible = isVisible(sendBtn);
           const sendButtonDisabled = sendBtn ? (
             !!sendBtn.disabled ||
@@ -2016,6 +2020,13 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
             "artifactCount": artifact_count,
             "artifacts": artifacts,
             "toolCalls": data.get("toolCalls").cloned().unwrap_or_else(|| json!([])),
+            "composer": {
+                "visible": data.get("composerVisible").cloned().unwrap_or(Value::Bool(false)),
+                "disabled": data.get("composerDisabled").cloned().unwrap_or(Value::Bool(true)),
+                "textLength": data.get("composerTextLength").cloned().unwrap_or(Value::from(0)),
+                "sendButtonVisible": data.get("sendButtonVisible").cloned().unwrap_or(Value::Bool(false)),
+                "sendButtonDisabled": data.get("sendButtonDisabled").cloned().unwrap_or(Value::Null),
+            },
         }),
         all_texts: if artifact_count > 0 {
             vec![final_text]
@@ -2485,21 +2496,31 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         .get("composerTextLength")
         .and_then(Value::as_u64)
         .unwrap_or_default();
+    let send_button_visible = data
+        .get("sendButtonVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let send_button_disabled = data
+        .get("sendButtonDisabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let pending_status_text = data
+        .get("pendingOutputStatusText")
+        .or_else(|| data.get("pendingImageStatusText"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let composer_idle = composer_visible && !composer_disabled && composer_text_length == 0;
     if composer_idle {
+        if !pending_status_text && send_button_visible && !send_button_disabled {
+            return Some("send_button_not_ready");
+        }
         return None;
     }
     let image_count = data
         .get("imageCount")
         .and_then(Value::as_u64)
         .unwrap_or_default();
-    if image_count == 0
-        && data
-            .get("pendingOutputStatusText")
-            .or_else(|| data.get("pendingImageStatusText"))
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    {
+    if image_count == 0 && pending_status_text {
         return Some("pending_output_status_text");
     }
     if data
@@ -2517,6 +2538,9 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
     }
     if composer_text_length > 0 {
         return Some("composer_has_unsent_text");
+    }
+    if send_button_visible && !send_button_disabled {
+        return Some("send_button_not_ready");
     }
     None
 }
