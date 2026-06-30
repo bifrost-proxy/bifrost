@@ -83,3 +83,4 @@ ureq = { version = "2", default-features = false, features = [
 
 [patch.crates-io]
 sysproxy = { path = "vendor/sysproxy" }
+cookie = { path = "vendor/cookie" }
