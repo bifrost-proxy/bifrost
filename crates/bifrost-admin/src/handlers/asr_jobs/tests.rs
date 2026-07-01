@@ -2593,6 +2593,40 @@ mod tests {
     }
 
     #[test]
+    fn startup_recovery_marks_running_daily_agent_items_interrupted() {
+        let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new().unwrap();
+        let _guard = EnvGuard::set_data_dir(temp.path());
+        let audio_dir = temp.path().join("audio");
+        std::fs::create_dir_all(&audio_dir).unwrap();
+        let mut task = test_directory_task("recover-daily-agent-items", audio_dir);
+        task.daily_agent.last_status = Some("running".to_string());
+        task.daily_agent.agents = normalized_daily_agents(&task.daily_agent);
+        task.daily_agent.agents[0].last_status = Some("success".to_string());
+        task.daily_agent.agents[1].last_status = Some("running".to_string());
+
+        save_tasks(&TaskStore {
+            version: TASK_STORE_VERSION,
+            tasks: vec![task],
+        })
+        .unwrap();
+
+        let recovery = recover_interrupted_task_runs_on_startup();
+        assert!(recovery.is_empty());
+
+        let store = load_tasks();
+        let recovered = &store.tasks[0];
+        assert_eq!(
+            recovered.daily_agent.agents[0].last_status.as_deref(),
+            Some("success")
+        );
+        assert_eq!(
+            recovered.daily_agent.agents[1].last_status.as_deref(),
+            Some("interrupted")
+        );
+    }
+
+    #[test]
     fn startup_recovery_does_not_requeue_paused_task() {
         let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         RUNNING_TASKS.lock().unwrap_or_else(|e| e.into_inner()).clear();

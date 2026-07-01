@@ -1293,6 +1293,65 @@ async fn run_external_daily_agent_prompt_with_params(
     Ok(run_result)
 }
 
+async fn wait_chatgpt_web_daily_agent_conversation(
+    task: &AsrDirectoryTask,
+    runner_id: &str,
+    daily_dir: &Path,
+    conversation_id: &str,
+    effective: &crate::im_gateway::external_cli::ExternalCliEffectiveConfig,
+) -> Result<crate::im_gateway::external_cli::ExternalCliRunResult, String> {
+    let adapter_config = daily_agent_external_runner_adapter_config(
+        effective.settings.adapter.as_str(),
+        &effective.settings.adapter_config,
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(task.daily_agent.timeout_ms),
+    );
+    let request = crate::im_gateway::external_cli::ExternalCliRunRequest {
+        images: Vec::new(),
+        message: String::new(),
+        operation: "wait".to_string(),
+        params: serde_json::json!({ "conversationId": conversation_id }),
+        provider_id: None,
+        runner_id: Some(runner_id.to_string()),
+        session_key: None,
+        runtime: "external_cli".to_string(),
+        adapter: effective.settings.adapter.clone(),
+        work_dir: Some(daily_dir.to_path_buf()),
+        instructions: None,
+        adapter_config,
+        allow_work_dirs: vec![
+            daily_dir.to_string_lossy().to_string(),
+            daily_dir_for_task(&task.id).to_string_lossy().to_string(),
+        ],
+        inject_bifrost_tools: effective.settings.inject_bifrost_tools,
+        skill_paths: effective.settings.skill_paths.clone(),
+    };
+
+    let runtime = crate::im_gateway::external_cli::ExternalCliRuntime::new(
+        bifrost_storage::data_dir().join("im_gateway/runs"),
+    );
+    let wait_timeout_ms =
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(task.daily_agent.timeout_ms);
+    let timeout_duration = Duration::from_millis(wait_timeout_ms);
+    let run_result = tokio::time::timeout(timeout_duration, runtime.run(request))
+        .await
+        .map_err(|_| {
+            format!(
+                "daily agent wait timed out after {}ms",
+                wait_timeout_ms
+            )
+        })?
+        .map_err(|e| format!("external CLI wait failed: {e}"))?;
+
+    if run_result.status != crate::im_gateway::external_cli::ExternalCliRunStatus::Succeeded {
+        return Err(format!(
+            "external CLI wait failed with status {:?}: {}",
+            run_result.status, run_result.response
+        ));
+    }
+
+    Ok(run_result)
+}
+
 fn daily_agent_external_runner_adapter_config(
     adapter: &str,
     config: &crate::im_gateway::external_cli::ExternalCliAdapterConfig,
@@ -1317,6 +1376,12 @@ fn daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms: u64) -> u64 {
     daily_timeout_secs
         .saturating_sub(OUTER_TIMEOUT_HEADROOM_SECS)
         .max(MIN_TIMEOUT_SECS)
+}
+
+fn daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(daily_timeout_ms: u64) -> u64 {
+    const SAME_CONVERSATION_WAIT_MAX_MS: u64 = 90_000;
+    const SAME_CONVERSATION_WAIT_MIN_MS: u64 = 5_000;
+    daily_timeout_ms.clamp(SAME_CONVERSATION_WAIT_MIN_MS, SAME_CONVERSATION_WAIT_MAX_MS)
 }
 
 fn daily_agent_external_runner_params(
@@ -1469,6 +1534,61 @@ async fn run_daily_agent_inner(
                                 agent_id,
                                 conversation_id = %conversation_id,
                                 error = %first_error,
+                                "chatgpt_web daily agent response failed validation; waiting for same conversation before retry"
+                            );
+                            let mut same_conversation_response = None;
+                            let waited_result = wait_chatgpt_web_daily_agent_conversation(
+                                task,
+                                &runner_id,
+                                &agent_work_dir,
+                                &conversation_id,
+                                &effective,
+                            )
+                            .await;
+                            if let Ok(waited_result) = waited_result {
+                                last_metadata = Some(waited_result.metadata.clone());
+                                let waited_response = waited_result.response.trim().to_string();
+                                if validate_chatgpt_web_daily_agent_response(
+                                    &waited_response,
+                                    &entry.date,
+                                    agent_id,
+                                    output_dir,
+                                )
+                                .is_ok()
+                                {
+                                    tracing::info!(
+                                        date = %entry.date,
+                                        agent_id,
+                                        conversation_id = %conversation_id,
+                                        "chatgpt_web daily agent same-conversation wait produced valid final response"
+                                    );
+                                    same_conversation_response = Some(waited_response);
+                                } else {
+                                    tracing::warn!(
+                                        date = %entry.date,
+                                        agent_id,
+                                        conversation_id = %conversation_id,
+                                        waited_len = waited_response.len(),
+                                        "chatgpt_web daily agent same-conversation wait still failed validation; retrying with explicit final-output instruction"
+                                    );
+                                }
+                            } else if let Err(wait_error) = waited_result {
+                                tracing::warn!(
+                                    date = %entry.date,
+                                    agent_id,
+                                    conversation_id = %conversation_id,
+                                    error = %wait_error,
+                                    "chatgpt_web daily agent same-conversation wait failed; retrying with explicit final-output instruction"
+                                );
+                            }
+                            if let Some(valid_response) = same_conversation_response {
+                                valid_response
+                            } else {
+                            tracing::warn!(
+                                date = %entry.date,
+                                agent_id,
+                                conversation_id = %conversation_id,
+                                error = %first_error,
                                 "chatgpt_web daily agent response failed validation; retrying with explicit final-output instruction"
                             );
                             let retry_prompt = chatgpt_web_daily_agent_retry_prompt(
@@ -1555,6 +1675,7 @@ async fn run_daily_agent_inner(
                                 output_dir,
                             )?;
                             retry_response
+                            }
                         }
                     };
                     let report_path = PathBuf::from(&entry.report_target);

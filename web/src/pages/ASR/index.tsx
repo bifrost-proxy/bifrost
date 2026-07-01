@@ -56,6 +56,7 @@ import {
   VOICE_REALTIME_CHUNK_MS,
   VOICE_REALTIME_SAMPLE_RATE,
   voiceRealtimeSegmentFromEvent,
+  hasRunningDailyAgent,
   type WorkState,
 } from "./asrUtils";
 import ASRHomeTabs from "./components/ASRHomeTabs";
@@ -1292,12 +1293,17 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
     void loadDailyAgentReport(selectedTaskId, selectedDailyAgentReportDate, selectedDailyAgentReportAgentId);
   }, [asrSupported, loadDailyAgentReport, selectedDailyAgentReportAgentId, selectedDailyAgentReportDate, selectedTaskId]);
 
-  // Auto-refresh task detail every 3 seconds while the task or bulk chunk retry is running.
+  // Auto-refresh task detail every 3 seconds while the task, bulk chunk retry,
+  // or a Daily Agent child run is running.
   useEffect(() => {
     const bulkRetryActive =
       taskDetail?.bulk_retry?.status === "queued" ||
       taskDetail?.bulk_retry?.status === "running";
-    if ((!taskDetail?.summary?.running && !bulkRetryActive) || !taskDetail?.id) return;
+    const dailyAgentActive = hasRunningDailyAgent(taskDetail?.daily_agent);
+    if (
+      (!taskDetail?.summary?.running && !bulkRetryActive && !dailyAgentActive) ||
+      !taskDetail?.id
+    ) return;
     const timer = setInterval(() => {
       void (async () => {
         try {
@@ -1306,7 +1312,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
           const updatedBulkRetryActive =
             updated.bulk_retry?.status === "queued" ||
             updated.bulk_retry?.status === "running";
-          if (!updated.summary.running && !updatedBulkRetryActive) {
+          const updatedDailyAgentActive = hasRunningDailyAgent(updated.daily_agent);
+          if (!updated.summary.running && !updatedBulkRetryActive && !updatedDailyAgentActive) {
             // Task finished — also refresh the task list.
             void refreshTasks();
           }
@@ -1319,6 +1326,8 @@ registerProcessor("bifrost-voice-pcm16", BifrostVoicePcm16Processor);
   }, [
     taskDetail?.summary?.running,
     taskDetail?.bulk_retry?.status,
+    taskDetail?.daily_agent?.last_status,
+    taskDetail?.daily_agent?.agents,
     taskDetail?.id,
     refreshTasks,
   ]);

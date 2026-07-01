@@ -873,6 +873,13 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
             task.updated_at_ms = now_ms();
             task_store_changed = true;
         }
+        for agent in &mut task.daily_agent.agents {
+            if agent.last_status.as_deref() == Some("running") {
+                agent.last_status = Some("interrupted".to_string());
+                task.updated_at_ms = now_ms();
+                task_store_changed = true;
+            }
+        }
         if (stale_lock || reset_count > 0 || retryable_failed_count > 0)
             && task.enabled
             && !task.paused

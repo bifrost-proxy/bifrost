@@ -672,10 +672,10 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 3. 观察 IM outbound 消息日志或真实微信侧收到的最终消息。
 
 **预期结果**：
-- 如果 ChatGPT Web 页面先出现 `我会按...筛选/搜索/整理...` 这类短 planning 段，adapter 不得在 stop button 仍可见或 DOM 内容签名仍变化时直接返回。
-- DOM ready 判定使用内容签名而非仅文本长度；同长度文本变化、新增 assistant 批次、图片或附件状态变化都会重置稳定窗口。
+- 如果 ChatGPT Web 页面先出现 `我会按...筛选/搜索/整理...` 这类短 planning 段，adapter 不得在 stop button 仍可见时直接返回。
+- DOM ready 判定以页面生成控件为核心：stop button 必须消失，composer 必须可见、可输入且为空，并且该终态需要连续稳定一段时间；文本内容变化不能作为主要完成条件。
 - `result.json.response`、`last_message.md` 和 IM 最终回写包含真正完成后的答案正文，而不是只包含第一段 planning 说明。
-- 如果页面最终只生成 planning 段且长时间无后续内容，adapter 在延长稳定窗口后可返回该文本，并在 artifacts 中保留 DOM fallback 证据，便于人工判断 ChatGPT 是否确实停止。
+- 如果页面最终只生成 planning 段且 stop button 已消失、composer 已连续稳定回到空闲，adapter 可返回该文本，并在 artifacts 中保留 DOM fallback 证据，便于人工判断 ChatGPT 是否确实停止。
 
 ### TC-CWA-30：回归 - stream_handoff 后 ChatGPT 仍在处理时不能按输入框空闲提前回写
 
@@ -690,9 +690,9 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 如果 `conversation_handoff.json.eventTypes` 包含 `stream_handoff`，但没有可解析的 SSE final，DOM fallback 不得只因为 composer 空闲、send button 消失或语音按钮出现就返回。
 - `data-testid="stop-button"` 与中英文 Stop/Cancel aria-label 必须作为仍在生成的状态；发送按钮查找不得使用 `composer-submit-btn` 这类 stop button 也会携带的非语义 class。
 - `Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮本身不是处理中状态；当 composer 可见、未 disabled 且文本为空时，DOM 状态可视为 idle。
-- `conversation_final.json.source=dom_fallback_outcome` 时，最终返回前必须已经观察到 stop button 消失且 DOM 内容签名稳定；页面空闲后不应再出现固定 8-30 秒或 120 秒 grace 延迟。
+- `conversation_final.json.source=dom_fallback_outcome` 时，最终返回前必须已经观察到 stop button 消失，且 composer 可输入、无待发送文本的终态连续稳定；不得靠文本长度、文本变化或 planning 文案判断完成。
 - `result.json.response` 和 IM outbound 最终消息包含完整答案或明确超时错误，不得只包含“我会按...重新拉取/筛选/整理...”这类开头说明。
-- 不允许恢复纯字符串匹配规则；判定必须基于 DOM 输出状态、stop button、composer idle、内容签名稳定性和 SSE final 是否存在。
+- 不允许恢复纯字符串匹配规则；判定必须基于 DOM 输出状态、stop button、composer idle 和 SSE final 是否存在。
 
 ### TC-CWA-31：回归 - headless 遇到人工阻塞时临时切换 headed 并恢复 headless
 
@@ -721,8 +721,34 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 当前 run 使用刷新后的登录态回到 headless 模式重试发送；后续 run 也重新按 headless 模式启动，避免长期占用用户桌面窗口。
 - 普通发送按钮不可点击、CDP 超时、错误页等非人工阻塞错误仍走既有重试/失败路径，不误弹 headed 窗口。
 
+### TC-CWA-32：回归 - Daily Agent 不得在 ChatGPT Web 仍在生成时连续补发 retry
+
+**前置条件**：ASR Daily Agent 的 `daily_report` 或 `tomorrow_todo` runner 指向 `chatgpt_web`；登录态有效。适合使用默认数据目录 `~/.bifrost` 做安装后真实复测，也可用代码级回归先覆盖控件判定。
+
+**操作步骤**：
+1. 触发一个 Daily Agent 运行，输入内容足够长，使 ChatGPT Web 先返回类似 `我会直接把这份上传的 Markdown 当作完整输入来整理...` 的短 planning 段。
+2. 在 ChatGPT Web 页面观察右下角按钮状态。如果仍显示 `data-testid="stop-button"`，或 aria-label 为 `停止回答`、`Stop answering`、`Stop streaming`、`Cancel generation` 等 Stop/Cancel 语义，说明模型仍在生成。
+3. 在 stop button 仍可见期间，检查 Bifrost 不应向同一 conversation 发送 `上一条回复不是最终日报...` 或 `上一条回复不是最终明日待办...` retry prompt。
+4. 等待 stop button 消失，并确认 composer 可见、未 disabled 且文本为空；再等待 run 完成后检查 `conversation_handoff.json`、`conversation_final.json`、`result.json` 和 `normalized_events.jsonl`。
+5. 执行代码级哨兵：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin dom_output_in_progress_reason_uses_stop_button_before_text_state --lib -- --nocapture
+   ```
+
+**预期结果**：
+- stop button 可见时，DOM fallback 返回 `Streaming`，reason 为 `stop_button_visible`，不会把短 planning 段交给 Daily Agent validator。
+- Daily Agent validator 首次收到短 planning 或不合约输出时，必须先对同一 `conversationId` 执行 `wait`，重新观察 stop button/composer 终态；不得立刻发送 retry prompt。
+- 如果 retry 发送阶段发现目标 conversation 的 stop button 仍可见，send 层必须返回 `conversation_busy`，且该错误不可进入 `MAX_SEND_ATTEMPTS` 的整轮发送重试。
+- `normalized_events.jsonl` 不出现多条重复的 retry 用户消息紧贴 planning 段；若最终输出不合契约，也只在 adapter 确认页面终态后进入一次 retry/continuation 流程。
+- `result.json.response` 最终要么是完整日报/明日待办正文，要么是明确的超时/失败错误；不得是“我会直接...”这类正在处理的说明。
+
 ## 真实执行记录
 
+- 2026-07-01：补充执行 TC-CWA-32 代码级与本机安装验证。先从默认日志确认真实异常样本：Daily Agent `daily_report` run 在 ChatGPT Web `stream_handoff` 后 2 秒内把 141 字短 planning 段作为 `dom_fallback_outcome` 返回，随后 validator 立即向同一 conversation 发送 `上一条回复不是最终日报...`，而后续发送现场显示 `stopButton=VISIBLE(response in progress?)`。第一次修复后用户复测 conversation `6a453a61-b778-83ec-9b76-a9919bdb036b`，仍复现 Tomorrow ToDo retry 在 stop button 可见时进入 `browser_send_not_submitted` 并被 send 层按 `MAX_SEND_ATTEMPTS=5` 连续重试。二次修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin dom_output_in_progress_reason_uses_stop_button_before_text_state --lib -- --nocapture` 和 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin is_retryable_send_error_matches_known_prefixes --lib -- --nocapture` 通过，覆盖 stop button 可见时继续等待、`conversation_busy` 不可 retry；随后完整前端构建 `cargo build -p bifrost-cli --bin bifrost` 通过，生成 105 个 gzip 前端资源，安装到 `~/.local/bin/bifrost` 并重启默认 9900 服务，确认 PID `32724` 运行、系统代理收敛 enabled，`/_bifrost/` 返回完整 `Bifrost Proxy` HTML 与 `/assets/` 引用。
+- 2026-07-01：补充执行 TC-CWA-32 的 running 状态收敛回归。用户复测后观察到 ChatGPT Web stop button 已消失、页面生成结束，但 Tomorrow ToDo Agent 仍显示 `running`。检查任务 API 发现外层 `last_run_id=1782922594841-b9b849b6-4f04-4196-acc4-e6f1beebc0bc` 保持 running；首个子 run `1782922594891-4afcfbe4-2e57-41bc-be9f-0e088ba891ab` 已成功返回 `# 明日 To Do List - 2026-06-30`，但缺少 `## 需要确认`，触发 same-conversation wait；wait 子 run `1782922712700-6f012093-2cae-433a-b449-9b53f6cee848` 仅写入 `auth_probe.json`、空 `prompt.md` 和 `runtime_snapshot.json`，未落 `result.json`，导致外层继承 7170 秒等待。修复后 same-conversation wait 单独限制为 5-90 秒短预算，超时后立即进入显式 retry/失败收尾，且 wait operation 顶层 metadata 保留 `conversationId`；代码级执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_same_conversation_wait_uses_short_timeout --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout --lib -- --nocapture` 通过。
+- 2026-07-01：根据真实页面观察继续收敛 TC-CWA-32 完成判定：stop button 可见是仍在生成的一阶信号；stop button 消失且 composer/输出状态不再 pending 时即认为 ChatGPT Web 已结束，不再按 stream handoff 额外等待 8 秒或普通 DOM fallback 额外等待 3 秒。代码级执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin required_dom_terminal_idle_for_returns_immediately_after_controls_idle --lib -- --nocapture` 和 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin dom_output_in_progress_reason_uses_stop_button_before_text_state --lib -- --nocapture` 通过。
+- 2026-07-01：补充执行 TC-CWA-32 的重启状态恢复回归。真实 9900 重启后任务 API 仍返回 `tomorrow_todo.last_status=running`，确认既有启动恢复只修正顶层 `daily_agent.last_status`，漏掉多 Agent 子项 `daily_agent.agents[*].last_status`。修复后启动恢复会把子 Agent stale `running` 持久化为 `interrupted`；代码级执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin startup_recovery_marks_running_daily_agent_items_interrupted --lib -- --nocapture` 与 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent --lib -- --nocapture` 通过。
+- 2026-07-01：补充执行 TC-CWA-32 的长 Markdown DOM 落盘回归。用户复测 `tomorrow_todo` 时，ChatGPT 页面已经显示完整 `# 明日 To Do List - 2026-06-11`，但 run `1782923938304-3f858a67-3470-4811-b72f-28ee7d400843` 的 `last_message.md` 只保存到 `## 明天必须完成` 前半段，缺少 `## 可选推进` 与 `## 需要确认`，触发 validator 误判并追加“上一条回复不是最终明日待办”。确认根因是 stop button 消失后 DOM fallback 立即读取，遇到长 Markdown 时 React/Markdown 仍在补全文本。修复后 stop button 仍作为唯一生成中信号；stop button 消失后仅进入短暂 `dom_terminal_content_settle_for` 落盘稳定窗口，保留最长 DOM 文本，不再把第一帧短内容当最终输出。代码级执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin dom_terminal_content_settle_waits_after_controls_idle_for_markdown_render --lib -- --nocapture` 通过。
 - 2026-07-01：补充执行 TC-CWA-31 代码级和 E2E 哨兵回归。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin headless_manual_intervention_errors_trigger_temporary_headed_fallback --lib -- --nocapture` 验证 headless 下 `auth_required`、真人验证中文页面会触发临时 headed fallback，headed 配置和普通发送按钮错误不会触发；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin page_state_is_human_verification_page_matches_cloudflare_challenge --lib -- --nocapture` 验证 Cloudflare / 真人验证页面返回 `human_verification_required`。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 增加源码哨兵，确认 fallback 不恢复 run-local profile，且包含 `send_with_temporary_headed_fallback`、`open_login_and_capture`、`human_verification_required` 和恢复 headless 当前重试的日志文本。
 - 2026-06-30：安装本机 live hotfix `bifrost 0.0.131+chatgpt-dom-finality.3` 后，使用默认数据目录 `~/.bifrost` 和启用的 `gpt` / `chatgpt_web` runner 连续执行 TC-CWA-30 三轮 CLI 真实回归。短回复 run `1782836594878-383512a5-6b12-4fed-baae-65900d8b1e8b` 成功，`conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，`durationMs=143016`，最终 `response=SHORT_DOM_FINALITY_OK`。长任务 run `1782836747906-e65a479f-f917-4edd-803a-0574e783c217` 成功，`durationMs=140512`，`normalized_events.jsonl` 包含 2 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 5559 字完整分类清单，不再把前两段筛选说明作为最终回复。第三轮 run `1782836914615-229b7136-0b14-4cd7-a98f-95ce35c3be71` 成功，`durationMs=140711`，`normalized_events.jsonl` 包含 1 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 2095 字编号列表。三轮均证明 `stream_handoff` 且无 SSE final 时不会在约 30 秒按 composer/send 空闲提前结束。
 - 2026-06-30：根据真实页面观察补充 TC-CWA-30 控件状态判定。`<button id="composer-submit-button" data-testid="stop-button" aria-label="停止回答">` 与英文 `<button id="composer-submit-button" data-testid="stop-button" aria-label="Stop answering">` 都表示仍在处理中；`Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮区域表示 idle。代码级回归 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture` 在主仓库和本机 hotfix worktree 均通过 241 项，新增覆盖发送按钮 selector 不再包含 `composer-submit-btn`，避免把 stop button 误识别为 send button。

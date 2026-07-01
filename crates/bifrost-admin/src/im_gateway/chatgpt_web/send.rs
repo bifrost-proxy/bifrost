@@ -69,6 +69,9 @@ async fn send_with_browser_attempts(
     let mut last_error = String::new();
     let mut consecutive_cdp_errors: u32 = 0;
     for attempt in 1..=MAX_SEND_ATTEMPTS {
+        if stop_requested(stop_marker_path).await {
+            return Err(stopped_error());
+        }
         if attempt > 1 {
             // CDP errors get progressively longer backoff (capped at MAX_BACKOFF_SECS).
             // Non-CDP transient errors get a short 1s backoff.
@@ -201,6 +204,9 @@ async fn send_with_temporary_headed_fallback(
 
 /// Check if a send error is transient and worth retrying the whole operation.
 fn is_retryable_send_error(error: &str) -> bool {
+    if error.contains("stopButton=VISIBLE") || error.contains("conversation_busy:") {
+        return false;
+    }
     error.contains("browser_send_not_submitted")
         || error.contains("send_button_not_found")
         || error.contains("browser_wrong_page")
@@ -1876,6 +1882,9 @@ async fn wait_send_handoff(
         "chatgpt_web handoff: timed out waiting for f/conversation"
     );
     if request_ids.is_empty() {
+        if diag_summary.contains("stopButton=VISIBLE") {
+            return Err(format!("conversation_busy: {diag_summary}"));
+        }
         return Err(format!("browser_send_not_submitted: {diag_summary}"));
     }
     Err(format!(
@@ -3566,6 +3575,12 @@ mod tests {
             assert!(is_retryable_send_error(msg), "{msg} should be retryable");
         }
         assert!(!is_retryable_send_error("permanent_failure: auth_required"));
+        assert!(!is_retryable_send_error(
+            "browser_send_not_submitted: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
+        ));
+        assert!(!is_retryable_send_error(
+            "conversation_busy: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
+        ));
     }
 
     #[test]

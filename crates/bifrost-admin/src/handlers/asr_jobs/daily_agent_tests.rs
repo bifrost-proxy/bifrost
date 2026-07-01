@@ -538,6 +538,22 @@ fn daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_same_conversation_wait_uses_short_timeout() {
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(7_200_000),
+        90_000
+    );
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(30_000),
+        30_000
+    );
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(1_000),
+        5_000
+    );
+}
+
+#[test]
 fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
     assert!(validate_chatgpt_web_daily_report_response(
         "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"

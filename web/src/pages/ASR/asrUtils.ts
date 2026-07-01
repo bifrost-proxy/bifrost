@@ -1,4 +1,5 @@
 import type {
+  AsrDailyAgentConfig,
   AsrTaskFileRecord,
   AsrTaskSchedule,
   VoiceRealtimeEvent,
@@ -11,6 +12,23 @@ export const VOICE_REALTIME_SAMPLE_RATE = 16_000;
 export const VOICE_REALTIME_CHUNK_MS = 1000;
 export const MIC_METER_BARS = 40;
 export const EMPTY_MIC_LEVELS = Array.from({ length: MIC_METER_BARS }, () => 0);
+
+export function hasRunningDailyAgent(
+  dailyAgent?: Pick<AsrDailyAgentConfig, "last_status" | "agents"> | null,
+  agentId?: string | null,
+): boolean {
+  if (!dailyAgent) return false;
+  if (agentId) {
+    const agent = dailyAgent.agents?.find((item) => item.id === agentId);
+    if (agent) {
+      return agent.last_status === "running";
+    }
+  }
+  return (
+    dailyAgent.last_status === "running" ||
+    Boolean(dailyAgent.agents?.some((agent) => agent.last_status === "running"))
+  );
+}
 
 export function resampleFloat32Linear(
   samples: Float32Array,
