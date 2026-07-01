@@ -215,7 +215,7 @@
 - 没有 `Bifrost.app/.../bifrost start` 进程，说明已有 CLI daemon 被复用，没有启动第二个服务。
 - Native app 与 CLI/Web UI 消费同一个默认数据目录。
 
-### TC-MNA-11：Network 页面按 Web UI 本地化布局并使用固定窄竖栏菜单
+### TC-MNA-11：Network 页面按 Web UI 本地化布局并使用顶部三段式 tab
 
 **操作步骤：**
 1. 打开真实 Web UI 作为对照：
@@ -227,24 +227,23 @@
    scripts/build-macos-native.sh --skip-sidecar --test
    open -n apps/macos/.build/Bifrost.app
    ```
-3. 将 Native 窗口移动到可见区域并截取固定窄竖栏布局：
+3. 将 Native 窗口移动到可见区域并截取顶部 tab 布局：
    ```bash
    osascript -e 'tell application "System Events" to tell process "Bifrost" to set position of window 1 to {120, 80}'
    osascript -e 'tell application "System Events" to set frontmost of process "Bifrost" to true'
-   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-fixed-rail.png
+   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-top-tabs.png
    ```
 
 **预期结果：**
-- Native 左侧菜单为固定窄竖栏，贯穿窗口顶部和底部，不再提供展开/折叠按钮。
-- macOS 红黄绿三个窗口按钮位于左侧竖栏顶部区域，背景与菜单 rail 连成一体，不得浮在独立白色 titlebar 上。
-- 左侧竖栏顶部不展示额外 Logo 或 `Bifrost` 文案，避免占用菜单空间。
-- 左侧 rail 使用清爽的浅色背景，不能比内容区更重或显得灰脏。
-- 菜单顺序与 Web UI 一致：Network、Replay、Rules、Values、Scripts、AI、DevTools、Groups、Notify、Settings。
-- 每个菜单项图标在上、文字在下，选中项有蓝色激活线和浅蓝选中背景，Notify badge 和底部主题按钮保留。
+- Native 不显示左侧菜单/竖栏，不提供侧栏展开/折叠按钮。
+- macOS 红黄绿三个窗口按钮使用系统原生标题栏按钮，不再由应用自绘。
+- 标题栏顶部显示 Network、Rules、Settings 三段式 tab，底层使用 AppKit 原生 `NSSegmentedControl`，不是自绘 tab。
+- Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得有入口。
+- 顶部保留主题切换按钮，切换后仍覆盖 Network、Rules、Settings。
 - 右侧顶部标题空间包含 Network 操作区：过滤面板开关、清空、协议/类型/状态 tag、Add Filter、Fuzzy Search、Breakpoint、TLS Decode、System Proxy、详情面板开关。
 - 中间内容为 Web UI 风格三栏：Filters 面板、Network 请求表格、右侧请求详情空态。
 - 底部状态栏很矮，展示 Proxy、Sync、TLS、上下行速率、Total、Conn、Req、Mem、CPU、Uptime、版本和 Skill。
-- `/tmp/bifrost-native-fixed-rail.png` 中 UI 不得出现 Dashboard 卡片式 scaffold、假数据表格、旧展开型侧栏或侧栏折叠按钮。
+- `/tmp/bifrost-native-top-tabs.png` 中 UI 不得出现 Dashboard 卡片式 scaffold、假数据表格、左侧菜单、旧展开型侧栏或侧栏折叠按钮。
 
 ### TC-MNA-12：Native 明暗主题切换可用且 Network 数据来自真实 Admin API
 
@@ -253,10 +252,10 @@
    ```bash
    swift run --package-path apps/macos Bifrost --check-admin-data
    ```
-2. 截取亮色固定竖栏和暗色固定竖栏：
+2. 截取亮色顶部 tab 和暗色顶部 tab：
    ```bash
-   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-fixed-rail-light.png
-   osascript -e 'tell application "System Events" to click at {154, 835}'
+   screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-top-tabs-light.png
+   osascript -e 'tell application "System Events" to click at {1300, 96}'
    screencapture -x -R 120,80,1180,792 /tmp/bifrost-native-dark.png
    ```
 3. 对照 Admin API：
@@ -309,27 +308,28 @@
 - Clear traffic、filter tags、Fuzzy Search、Add Filter、detail panel toggle 均有实际 UI 状态变化或真实 API 行为，不是空按钮。
 - 源码扫描输出 `macOS native scaffold fake data removed`。
 
-### TC-MNA-14：顶层页面不得保留纯 placeholder，未完成页面必须展示真实 API 状态
+### TC-MNA-14：首版本顶部 tab 不得暴露未完成页面入口
 
 **操作步骤：**
-1. 执行占位扫描：
+1. 执行 release scope smoke：
    ```bash
-   rg -n "Reserved for the next native milestone|PlaceholderFeatureView\\(" apps/macos/Sources/Bifrost -g '*.swift' || true
+   swift run --package-path apps/macos Bifrost --check-release-scope
    ```
-2. 执行增强后的 Admin API smoke：
+2. 执行源码入口扫描：
    ```bash
-   swift run --package-path apps/macos Bifrost --check-admin-data
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case network = \\"Network\\"","case rules = \\"Rules\\"","case settings = \\"Settings\\""]; forbidden=["Replay","Values","Scripts","AI","DevTools","Groups","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
    ```
-3. 打开 Native `.app`，逐个点击 Replay、Scripts、AI、DevTools、Groups、Notify：
+3. 执行完整 Native build smoke：
    ```bash
-   open -n apps/macos/.build/Bifrost.app
+   scripts/build-macos-native.sh --skip-sidecar --test
    ```
 
 **预期结果：**
-- 占位扫描无输出。
-- `--check-admin-data` 输出包含 `traffic_records`、`rules`、`first_rule_detail`、`values`、`system_proxy`、`tls_decode`、`breakpoint`。
-- Replay、Scripts、AI、DevTools、Groups、Notify 不显示 `Reserved for the next native milestone`，而是展示对应 Admin API endpoint 的真实 JSON 结果或明确错误/gating 状态。
-- 这些页面仍未标记为完整交互完成；后续必须继续按 `design/macos-native-webui-parity.md` 扩展到 WebUI 的完整编辑、执行、过滤、弹窗和写操作。
+- `--check-release-scope` 输出 `Bifrost release scope check passed: Network,Rules,Settings`。
+- 源码入口扫描输出 `macOS native release navigation scope ok`。
+- Native build smoke 通过。
+- 用户侧顶部 tab 只能进入 Network、Rules、Settings；Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
+- 长期 WebUI parity 仍在 `design/macos-native-webui-parity.md` 维护；后续页面必须达到真实交互完成后再开放入口。
 
 ### TC-MNA-15：Native 必须建立 WebUI 同源 `/api/push` WebSocket 并支持 Network 选中详情
 
@@ -363,7 +363,7 @@
 - 详情区域必须提供与 WebUI 同类的 Request / Response 分段，以及 Overview / Header / Body / Raw 子页；Overview 至少展示 URL、Method、Status、Protocol、Proxy Port、Host、Client 等真实字段。
 - push 连接失败时 Native 仍通过轮询 fallback 自动刷新数据，不能停留在启动时快照。
 
-### TC-MNA-16：Rules / Values / Scripts 原生页必须具备真实核心 CRUD
+### TC-MNA-16：Rules 原生页必须具备真实核心 CRUD，Values / Scripts 不暴露入口
 
 **操作步骤：**
 1. 执行真实 Admin API smoke，验证原生客户端的核心写链路：
@@ -380,20 +380,17 @@
    - 点击规则后右侧加载 `/rules/{name}` 内容。
    - 编辑内容后出现未保存标记，Save 调用真实更新接口，Revert 恢复服务端内容。
    - 更多菜单可 Rename / Delete，Delete 必须出现确认弹窗。
-4. 在 Values 页面验证：
-   - 左侧列表显示真实 `/values` 数据，支持新建、刷新、搜索。
-   - 右侧编辑器支持 Save、Revert、Copy、Rename、Delete。
-   - JSON/XML 内容时 Format 按内容类型格式化。
-5. 在 Scripts 页面验证：
-   - 顶部 segmented control 可切换 Request / Response / Decode / Parser。
-   - 每类列表来自 `/scripts` 对应字段，不显示 JSON placeholder。
-   - 右侧编辑器支持 New、Save、Revert、Copy、Rename、Delete，并调用 `/scripts/{type}/{name}` 系列接口。
+4. 检查顶部 tab 没有 Values / Scripts 入口：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-release-scope
+   ```
 
 **预期结果：**
 - `--check-admin-data` 输出包含 `crud=rules,values,scripts`，证明 smoke 已完成临时 Rule、Value、Request Script 的 create/update/rename/delete，并清理测试对象。
-- Rules/Values/Scripts 页面不再只读或只展示 API JSON；每个页面都有真实列表、编辑器、保存按钮、重命名和删除确认。
-- 通过 Native 写入的临时对象在 WebUI 刷新后可见；删除后 WebUI 与 Admin API 均不可再读取。
-- 本用例只覆盖核心 CRUD；Rules 拖拽排序/share link/import/export、Scripts 测试结果面板/import/export、多选右键、Values import/export 仍属于 `design/macos-native-webui-parity.md` 矩阵中未完成的后续工单，禁止标记为完整 WebUI parity。
+- Rules 页面不再只读或只展示 API JSON；页面有真实列表、编辑器、保存按钮、重命名和删除确认。
+- 通过 Native 写入的临时 Rule 在 WebUI 刷新后可见；删除后 WebUI 与 Admin API 均不可再读取。
+- `--check-release-scope` 证明 Values / Scripts 没有用户侧入口。
+- 本用例只覆盖首版本 Rules 核心 CRUD；Rules 拖拽排序/share link/import/export，以及 Values/Scripts 完整原生交互仍属于 `design/macos-native-webui-parity.md` 矩阵中未完成的后续工单，禁止标记为完整 WebUI parity。
 
 ### TC-MNA-17：Network 表格必须支持 10 万行级别高性能渲染路径
 
@@ -425,6 +422,70 @@
 - `scripts/build-macos-native.sh --skip-sidecar --test` 通过，并输出 `BifrostNativeCoreChecks passed`。
 - `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-traffic-table-performance` 通过，输出 `Traffic table performance smoke passed: base_rows=100000 append_rows=1000 changed_rows=1031 build_ms=566.01 append_ms=9.58 update_ms=9.16`。
 - `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-admin-data` 通过，输出包含 `traffic_records=5`、`push_client_id=85`、`sse_streams=/whitelist/pending/stream=text/event-stream,/config/ip-tls/pending/stream=text/event-stream` 和 `crud=rules,values,scripts`。
+
+### TC-MNA-18：首版本 release scope smoke 固化 Network / Rules / Settings 三入口
+
+**操作步骤：**
+1. 执行 release scope smoke：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-release-scope
+   ```
+2. 执行构建产物 release scope smoke：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-release-scope
+   ```
+
+**预期结果：**
+- 两次 smoke 均输出 `Bifrost release scope check passed: Network,Rules,Settings`。
+- Native app 的 `SidebarItem.releaseScopeItems` 只包含 `.network`、`.rules`、`.settings`。
+- Native app 的 `SidebarItem.allCases` 与 `releaseScopeItems` 完全一致，不保留隐藏页面枚举 case。
+- 顶部 tab 使用 AppKit `NSSegmentedControl`；切换行为由系统控件处理。
+- Replay、Values、Scripts、AI、DevTools、Groups、Notify 没有顶部 tab 入口；后续恢复入口时必须先补齐真实交互和对应 human_tests。
+
+### TC-MNA-19：Settings 使用系统设置式左侧导航并覆盖四个首版页面
+
+**操作步骤：**
+1. 构建 Native app 并执行 Settings 真实接口 smoke：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 \
+     apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data
+   ```
+2. 打开 Native `.app` 并进入顶部 `Settings`：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 在 Settings 内部逐项点击左侧子页面：
+   - Proxy
+   - Certificate
+   - Sync
+   - Remote Invoke
+4. 对照真实 Admin API：
+   ```bash
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/system
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/system/launchd
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/cli
+   curl -s http://127.0.0.1:9900/_bifrost/api/proxy/address
+   curl -s http://127.0.0.1:9900/_bifrost/api/cert/info
+   curl -s http://127.0.0.1:9900/_bifrost/api/mobile-devices
+   curl -s http://127.0.0.1:9900/_bifrost/api/sync/status
+   curl -s http://127.0.0.1:9900/_bifrost/api/remote-invoke/status
+   curl -s http://127.0.0.1:9900/_bifrost/api/remote-invoke/identity
+   curl -s http://127.0.0.1:9900/_bifrost/api/remote-invoke/pairings/pending
+   curl -s http://127.0.0.1:9900/_bifrost/api/remote-invoke/grants
+   curl -s 'http://127.0.0.1:9900/_bifrost/api/remote-invoke/calls?limit=5'
+   ```
+
+**预期结果：**
+- `--check-settings-data` 输出 `Bifrost settings data check passed`，并包含 `proxy_supported`、`proxy_addresses`、`cert_status`、`sync_reason`、`remote_state`、`remote_identity`、`pending_pairings`、`grants`、`calls`、`ssh_key`。
+- Settings 内部不是顶部多 Tab，而是类似 macOS 系统设置的左侧列表；左侧只显示 Proxy、Certificate、Sync、Remote Invoke。
+- Proxy 页面展示真实 System Proxy、LaunchAgent、CLI Proxy、Proxy Addresses，并可通过系统 Switch 调用真实接口；除本用例明确操作外，不得自动修改系统代理。
+- Certificate 页面展示真实 CA 状态、SHA256、下载/QR 入口、移动设备 discovery，并提供本机 CA 安装入口。
+- Sync 页面展示真实状态、remote base URL、enable/auto sync、sign in/out、sync now；测试环境设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 时不得自动弹登录页。
+- Remote Invoke 页面展示真实 connection status、identity、discovery pair code、pending pairings、SSH key、grants、recent calls，并提供 pair approve/reject、grant revoke、calls clear、SSH key create/export/reset/revoke 的真实入口。
+- Remote Invoke 历史中缺少 `created_at` 的旧 call 记录不能导致 Settings 页面或 smoke 崩溃。
+- Metrics、Access Control、Performance、Tray、Remote Access 等未完成 Settings 子页面本期不得暴露入口。
 
 ## 清理步骤
 

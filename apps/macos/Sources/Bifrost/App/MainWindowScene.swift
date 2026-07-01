@@ -5,21 +5,15 @@ struct MainWindowScene: View {
     @EnvironmentObject private var appModel: AppModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            Sidebar(selection: $appModel.selectedSidebarItem)
+        VStack(spacing: 0) {
+            content
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
 
             Divider()
 
-            VStack(spacing: 0) {
-                content
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
-
-                Divider()
-
-                StatusBar()
-            }
-            .padding(.top, 36)
+            StatusBar()
         }
+        .padding(.top, 36)
         .frame(minWidth: 1180, minHeight: 760)
         .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(appModel.colorSchemeMode.colorScheme)
@@ -34,59 +28,8 @@ struct MainWindowScene: View {
         switch appModel.selectedSidebarItem {
         case .network:
             TrafficView()
-        case .replay:
-            APIBackedFeatureView(
-                title: "Replay",
-                systemImage: "bolt",
-                endpoints: [
-                    FeatureEndpoint(title: "Stats", path: "/replay/stats"),
-                    FeatureEndpoint(title: "Groups", path: "/replay/groups"),
-                    FeatureEndpoint(title: "Saved Requests", path: "/replay/requests", queryItems: [URLQueryItem(name: "limit", value: "20")]),
-                    FeatureEndpoint(title: "History", path: "/replay/history", queryItems: [URLQueryItem(name: "limit", value: "20")]),
-                ]
-            )
         case .rules:
             RulesView()
-        case .values:
-            ValuesView()
-        case .scripts:
-            ScriptsView()
-        case .ai:
-            APIBackedFeatureView(
-                title: "AI",
-                systemImage: "face.smiling",
-                endpoints: [
-                    FeatureEndpoint(title: "IM Providers", path: "/im-gateway/providers"),
-                    FeatureEndpoint(title: "External CLI Config", path: "/im-gateway/external-cli/config"),
-                    FeatureEndpoint(title: "ASR Capabilities", path: "/asr/capabilities"),
-                ]
-            )
-        case .devTools:
-            APIBackedFeatureView(
-                title: "DevTools",
-                systemImage: "ladybug",
-                endpoints: [
-                    FeatureEndpoint(title: "Pages", path: "/devtools/pages", queryItems: [URLQueryItem(name: "online", value: "true")]),
-                ]
-            )
-        case .groups:
-            APIBackedFeatureView(
-                title: "Groups",
-                systemImage: "person.2.badge.gearshape",
-                endpoints: [
-                    FeatureEndpoint(title: "Groups", path: "/group", queryItems: [URLQueryItem(name: "offset", value: "0"), URLQueryItem(name: "limit", value: "50")]),
-                ]
-            )
-        case .notify:
-            APIBackedFeatureView(
-                title: "Notify",
-                systemImage: "bell",
-                endpoints: [
-                    FeatureEndpoint(title: "Notifications", path: "/notifications", queryItems: [URLQueryItem(name: "limit", value: "20")]),
-                    FeatureEndpoint(title: "Unread Count", path: "/notifications/unread-count"),
-                    FeatureEndpoint(title: "Client Trust", path: "/notifications/client-trust"),
-                ]
-            )
         case .settings:
             SettingsView()
         }
@@ -117,8 +60,6 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
-        private let sidebarWidth: CGFloat = 72
-        private let titlebarRailBackgroundIdentifier = NSUserInterfaceItemIdentifier("BifrostTitlebarRailBackground")
         private weak var window: NSWindow?
         private var accessory: NSTitlebarAccessoryViewController?
         private var hostingView: NSHostingView<AnyView>?
@@ -135,7 +76,7 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
                 }
                 configure(window)
                 let hostingView = NSHostingView(rootView: AnyView(TopToolbar().environmentObject(appModel)))
-                hostingView.frame = NSRect(x: 0, y: 0, width: max(window.frame.width - sidebarWidth, 820), height: 36)
+                hostingView.frame = NSRect(x: 0, y: 0, width: max(window.frame.width - 96, 920), height: 36)
                 hostingView.autoresizingMask = [.width]
 
                 let accessory = NSTitlebarAccessoryViewController()
@@ -155,9 +96,8 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
             guard let window else {
                 return
             }
-            hostingView?.frame.size = NSSize(width: max(window.frame.width - sidebarWidth, 820), height: 36)
+            hostingView?.frame.size = NSSize(width: max(window.frame.width - 96, 920), height: 36)
             hostingView?.rootView = AnyView(TopToolbar().environmentObject(appModel))
-            hideSystemWindowButtons(in: window)
         }
 
         private func configure(_ window: NSWindow) {
@@ -169,35 +109,6 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
                 window.titlebarSeparatorStyle = .none
             }
             window.isReleasedWhenClosed = false
-            hideSystemWindowButtons(in: window)
-        }
-
-        private func hideSystemWindowButtons(in window: NSWindow) {
-            hideSystemWindowButtonsOnce(in: window)
-            DispatchQueue.main.async { [weak window] in
-                guard let window else {
-                    return
-                }
-                self.hideSystemWindowButtonsOnce(in: window)
-            }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak window] in
-                guard let window else {
-                    return
-                }
-                self.hideSystemWindowButtonsOnce(in: window)
-            }
-        }
-
-        private func hideSystemWindowButtonsOnce(in window: NSWindow) {
-            let buttons: [NSWindow.ButtonType] = [.closeButton, .miniaturizeButton, .zoomButton]
-            for type in buttons {
-                guard let button = window.standardWindowButton(type) else {
-                    continue
-                }
-                button.isHidden = true
-                button.alphaValue = 0
-                button.isEnabled = false
-            }
         }
     }
 }
@@ -212,16 +123,34 @@ private struct TopToolbar: View {
 
     var body: some View {
         HStack(spacing: 10) {
+            topTabs
+
+            Divider()
+                .frame(height: 18)
+
             if appModel.selectedSidebarItem == .network {
                 networkToolbar
             } else {
                 sectionToolbar
             }
+
+            ToolbarIconButton(
+                systemImage: appModel.colorSchemeMode.systemImage,
+                help: "Toggle \(appModel.colorSchemeMode.next.rawValue) Theme"
+            ) {
+                appModel.colorSchemeMode = appModel.colorSchemeMode.next
+            }
         }
         .frame(height: 32)
-        .padding(.leading, 4)
+        .padding(.leading, 0)
         .padding(.trailing, 10)
         .background(.bar)
+    }
+
+    private var topTabs: some View {
+        NativeSectionTabs(selection: $appModel.selectedSidebarItem)
+        .frame(width: 268)
+        .help("Switch Bifrost section")
     }
 
     private var networkToolbar: some View {
@@ -358,17 +287,10 @@ private struct TopToolbar: View {
         switch appModel.selectedSidebarItem {
         case .rules:
             return "\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled"
-        case .values:
-            return "\(appModel.values.count) values"
-        case .scripts:
-            let count = appModel.scriptsByType[appModel.selectedScriptType]?.count ?? 0
-            return "\(appModel.selectedScriptType.label) · \(count) scripts"
         case .settings:
             return appModel.adminHostPortLabel
         case .network:
             return "\(appModel.displayedTrafficRecords.count) records"
-        default:
-            return "API status"
         }
     }
 
@@ -405,6 +327,61 @@ private struct TopToolbar: View {
             return "System proxy is not supported on this platform"
         }
         return "Toggle macOS system proxy for \(appModel.adminHostPortLabel)"
+    }
+}
+
+private struct NativeSectionTabs: NSViewRepresentable {
+    @Binding var selection: SidebarItem
+
+    private let items = SidebarItem.releaseScopeItems
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(selection: $selection, items: items)
+    }
+
+    func makeNSView(context: Context) -> NSSegmentedControl {
+        let control = NSSegmentedControl(frame: .zero)
+        control.segmentCount = items.count
+        control.trackingMode = .selectOne
+        control.segmentStyle = .automatic
+        control.controlSize = .regular
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.selectionChanged(_:))
+        control.setContentHuggingPriority(.required, for: .horizontal)
+        control.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        for (index, item) in items.enumerated() {
+            control.setLabel(item.rawValue, forSegment: index)
+            control.setToolTip(item.rawValue, forSegment: index)
+            control.setWidth(82, forSegment: index)
+        }
+        updateNSView(control, context: context)
+        return control
+    }
+
+    func updateNSView(_ control: NSSegmentedControl, context: Context) {
+        context.coordinator.selection = $selection
+        let selectedIndex = items.firstIndex(of: selection) ?? 0
+        if control.selectedSegment != selectedIndex {
+            control.selectedSegment = selectedIndex
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var selection: Binding<SidebarItem>
+        let items: [SidebarItem]
+
+        init(selection: Binding<SidebarItem>, items: [SidebarItem]) {
+            self.selection = selection
+            self.items = items
+        }
+
+        @objc func selectionChanged(_ sender: NSSegmentedControl) {
+            guard sender.selectedSegment >= 0, sender.selectedSegment < items.count else {
+                return
+            }
+            selection.wrappedValue = items[sender.selectedSegment]
+        }
     }
 }
 

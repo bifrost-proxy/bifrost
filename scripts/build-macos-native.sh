@@ -94,6 +94,8 @@ create_dev_app_bundle() {
   <string>13.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSPrincipalClass</key>
+  <string>NSApplication</string>
 </dict>
 </plist>
 PLIST

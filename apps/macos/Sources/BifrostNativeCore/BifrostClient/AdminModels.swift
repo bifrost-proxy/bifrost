@@ -540,6 +540,52 @@ public struct SystemProxyStatus: Decodable, Equatable, Sendable {
     }
 }
 
+public struct SystemProxyLaunchdStatus: Decodable, Equatable, Sendable {
+    public var supported: Bool
+    public var installed: Bool
+    public var loaded: Bool
+    public var label: String?
+    public var plistPath: String?
+    public var program: String?
+    public var dataDir: String?
+    public var installedVersion: String?
+    public var installedMode: String?
+    public var currentVersion: String?
+    public var needsUpgrade: Bool?
+    public var needsUpgradeReason: String?
+    public var message: String?
+
+    enum CodingKeys: String, CodingKey {
+        case supported
+        case installed
+        case loaded
+        case label
+        case plistPath = "plist_path"
+        case program
+        case dataDir = "data_dir"
+        case installedVersion = "installed_version"
+        case installedMode = "installed_mode"
+        case currentVersion = "current_version"
+        case needsUpgrade = "needs_upgrade"
+        case needsUpgradeReason = "needs_upgrade_reason"
+        case message
+    }
+}
+
+public struct CliProxyStatus: Decodable, Equatable, Sendable {
+    public var enabled: Bool
+    public var shell: String?
+    public var configFiles: [String]
+    public var proxyURL: String?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case shell
+        case configFiles = "config_files"
+        case proxyURL = "proxy_url"
+    }
+}
+
 public struct SetSystemProxyRequest: Encodable, Equatable, Sendable {
     public var enabled: Bool
     public var bypass: String?
@@ -547,6 +593,495 @@ public struct SetSystemProxyRequest: Encodable, Equatable, Sendable {
     public init(enabled: Bool, bypass: String? = nil) {
         self.enabled = enabled
         self.bypass = bypass
+    }
+}
+
+public struct SetSystemProxyLaunchdRequest: Encodable, Equatable, Sendable {
+    public var enabled: Bool
+
+    public init(enabled: Bool) {
+        self.enabled = enabled
+    }
+}
+
+public struct ProxyAddress: Decodable, Equatable, Identifiable, Sendable {
+    public var ip: String
+    public var address: String
+    public var qrcodeURL: String?
+    public var isPreferred: Bool
+
+    public var id: String { address }
+
+    enum CodingKeys: String, CodingKey {
+        case ip
+        case address
+        case qrcodeURL = "qrcode_url"
+        case isPreferred = "is_preferred"
+    }
+}
+
+public struct ProxyAddressInfo: Decodable, Equatable, Sendable {
+    public var port: Int
+    public var localIPs: [String]
+    public var addresses: [ProxyAddress]
+
+    enum CodingKeys: String, CodingKey {
+        case port
+        case localIPs = "local_ips"
+        case addresses
+    }
+}
+
+public struct CertInfo: Decodable, Equatable, Sendable {
+    public var available: Bool
+    public var status: String
+    public var statusLabel: String
+    public var installed: Bool
+    public var trusted: Bool
+    public var statusMessage: String
+    public var sha256Fingerprint: String?
+    public var localIPs: [String]
+    public var downloadURLs: [String]
+    public var qrcodeURLs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case available
+        case status
+        case statusLabel = "status_label"
+        case installed
+        case trusted
+        case statusMessage = "status_message"
+        case sha256Fingerprint = "sha256_fingerprint"
+        case localIPs = "local_ips"
+        case downloadURLs = "download_urls"
+        case qrcodeURLs = "qrcode_urls"
+    }
+}
+
+public struct LocalCAInstallRequest: Encodable, Equatable, Sendable {
+    public var confirmation: String
+
+    public init(confirmation: String = "install_local_ca_certificate") {
+        self.confirmation = confirmation
+    }
+}
+
+public struct MobileDevicesResponse: Decodable, Equatable, Sendable {
+    public var android: MobileDiscovery?
+    public var ios: MobileDiscovery?
+    public var iosProfileURL: String?
+    public var iosProfileQRCodeURL: String?
+    public var iosWifiProxyProfileURL: String?
+    public var iosWifiProxyProfileQRCodeURL: String?
+    public var suggestedWifiSSID: String?
+    public var suggestedWifiSSIDMessage: String?
+    public var ordinaryDeviceNotice: String?
+    public var managedDeviceNotice: String?
+
+    enum CodingKeys: String, CodingKey {
+        case android
+        case ios
+        case iosProfileURL = "ios_profile_url"
+        case iosProfileQRCodeURL = "ios_profile_qrcode_url"
+        case iosWifiProxyProfileURL = "ios_wifi_proxy_profile_url"
+        case iosWifiProxyProfileQRCodeURL = "ios_wifi_proxy_profile_qrcode_url"
+        case suggestedWifiSSID = "suggested_wifi_ssid"
+        case suggestedWifiSSIDMessage = "suggested_wifi_ssid_message"
+        case ordinaryDeviceNotice = "ordinary_device_notice"
+        case managedDeviceNotice = "managed_device_notice"
+    }
+}
+
+public struct MobileDiscovery: Decodable, Equatable, Sendable {
+    public var supported: Bool?
+    public var adbAvailable: Bool?
+    public var devices: [MobileDevice]
+    public var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case supported
+        case adbAvailable = "adb_available"
+        case devices
+        case message
+    }
+}
+
+public struct MobileDevice: Decodable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var name: String?
+    public var managedInstallTarget: String?
+    public var platform: String
+    public var status: String
+    public var capability: String
+    public var statusMessage: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case managedInstallTarget = "managed_install_target"
+        case platform
+        case status
+        case capability
+        case statusMessage = "status_message"
+    }
+}
+
+public struct SyncUser: Decodable, Equatable, Sendable {
+    public var userID: String
+    public var nickname: String?
+    public var avatar: String?
+    public var email: String?
+
+    enum CodingKeys: String, CodingKey {
+        case userID = "user_id"
+        case nickname
+        case avatar
+        case email
+    }
+}
+
+public struct SyncStatus: Decodable, Equatable, Sendable {
+    public var enabled: Bool
+    public var autoSync: Bool
+    public var remoteBaseURL: String
+    public var hasSession: Bool
+    public var reachable: Bool
+    public var authorized: Bool
+    public var syncing: Bool
+    public var reason: String
+    public var lastSyncAt: String?
+    public var lastSyncAction: String?
+    public var lastError: String?
+    public var user: SyncUser?
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case autoSync = "auto_sync"
+        case remoteBaseURL = "remote_base_url"
+        case hasSession = "has_session"
+        case reachable
+        case authorized
+        case syncing
+        case reason
+        case lastSyncAt = "last_sync_at"
+        case lastSyncAction = "last_sync_action"
+        case lastError = "last_error"
+        case user
+    }
+}
+
+public struct UpdateSyncConfigRequest: Encodable, Equatable, Sendable {
+    public var enabled: Bool?
+    public var autoSync: Bool?
+    public var remoteBaseURL: String?
+
+    public init(enabled: Bool? = nil, autoSync: Bool? = nil, remoteBaseURL: String? = nil) {
+        self.enabled = enabled
+        self.autoSync = autoSync
+        self.remoteBaseURL = remoteBaseURL
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case enabled
+        case autoSync = "auto_sync"
+        case remoteBaseURL = "remote_base_url"
+    }
+}
+
+public struct RemoteInvokeStatus: Decodable, Equatable, Sendable {
+    public var state: String
+    public var discoverySession: DiscoverySession?
+    public var pendingPairingsCount: Int
+    public var activeCallIDs: [String]
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case discoverySession = "discovery_session"
+        case pendingPairingsCount = "pending_pairings_count"
+        case activeCallIDs = "active_call_ids"
+    }
+}
+
+public struct DiscoverySession: Decodable, Equatable, Sendable {
+    public var sessionID: String
+    public var pairCode: String
+    public var expiresAt: Double
+    public var createdAt: Double
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "session_id"
+        case pairCode = "pair_code"
+        case expiresAt = "expires_at"
+        case createdAt = "created_at"
+    }
+}
+
+public struct ClientIdentity: Decodable, Equatable, Sendable {
+    public var instanceID: String
+    public var deviceName: String
+    public var platform: String
+
+    enum CodingKeys: String, CodingKey {
+        case instanceID = "instance_id"
+        case deviceName = "device_name"
+        case platform
+    }
+}
+
+public struct DiscoveryResponse: Decodable, Equatable, Sendable {
+    public var success: Bool
+    public var session: DiscoverySession
+}
+
+public struct PendingPairingsResponse: Decodable, Equatable, Sendable {
+    public var pairings: [PairingRequest]
+}
+
+public struct PairingRequest: Decodable, Equatable, Identifiable, Sendable {
+    public var pairingID: String
+    public var callerInfo: CallerInfo
+    public var commandSummary: CommandSummary
+    public var callerPubkey: String?
+
+    public var id: String { pairingID }
+
+    enum CodingKeys: String, CodingKey {
+        case pairingID = "pairing_id"
+        case callerInfo = "caller_info"
+        case commandSummary = "command_summary"
+        case callerPubkey = "caller_pubkey"
+    }
+}
+
+public struct CallerInfo: Decodable, Equatable, Sendable {
+    public var fingerprint: String
+    public var displayName: String?
+    public var userAgent: String?
+    public var sourceIP: String?
+    public var platform: String?
+
+    enum CodingKeys: String, CodingKey {
+        case fingerprint
+        case displayName = "display_name"
+        case userAgent = "user_agent"
+        case sourceIP = "source_ip"
+        case platform
+    }
+}
+
+public struct CommandSummary: Decodable, Equatable, Sendable {
+    public var commandPreview: String
+    public var maskedArgsJSON: String?
+    public var payloadDigest: String?
+    public var payloadSize: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case commandPreview = "command_preview"
+        case maskedArgsJSON = "masked_args_json"
+        case payloadDigest = "payload_digest"
+        case payloadSize = "payload_size"
+    }
+}
+
+public struct PairingApprovalInput: Encodable, Equatable, Sendable {
+    public var grantMode: String
+    public var grantScope: String?
+    public var interactiveAllowed: Bool?
+    public var stdinAllowed: Bool?
+    public var fileAccess: String?
+
+    public init(
+        grantMode: String = "1h",
+        grantScope: String? = "remote_query",
+        interactiveAllowed: Bool? = false,
+        stdinAllowed: Bool? = false,
+        fileAccess: String? = "none"
+    ) {
+        self.grantMode = grantMode
+        self.grantScope = grantScope
+        self.interactiveAllowed = interactiveAllowed
+        self.stdinAllowed = stdinAllowed
+        self.fileAccess = fileAccess
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case grantMode = "grant_mode"
+        case grantScope = "grant_scope"
+        case interactiveAllowed = "interactive_allowed"
+        case stdinAllowed = "stdin_allowed"
+        case fileAccess = "file_access"
+    }
+}
+
+public struct Grant: Decodable, Equatable, Identifiable, Sendable {
+    public var grantID: String
+    public var callerFingerprint: String
+    public var callerDisplayName: String?
+    public var authMethod: String?
+    public var grantMode: String
+    public var grantScope: String
+    public var status: String
+    public var createdAt: Double?
+    public var expiresAt: Double?
+    public var lastUsedAt: Double?
+    public var useCount: Int?
+
+    public var id: String { grantID }
+
+    enum CodingKeys: String, CodingKey {
+        case grantID = "grant_id"
+        case callerFingerprint = "caller_fingerprint"
+        case callerDisplayName = "caller_display_name"
+        case authMethod = "auth_method"
+        case grantMode = "grant_mode"
+        case grantScope = "grant_scope"
+        case status
+        case createdAt = "created_at"
+        case expiresAt = "expires_at"
+        case lastUsedAt = "last_used_at"
+        case useCount = "use_count"
+    }
+}
+
+public struct GrantsListResponse: Decodable, Equatable, Sendable {
+    public var grants: [Grant]
+}
+
+public struct RemoteCall: Decodable, Equatable, Identifiable, Sendable {
+    public var callID: String
+    public var grantID: String?
+    public var callerFingerprint: String?
+    public var callerDisplayName: String?
+    public var status: String
+    public var commandSummary: CommandSummary?
+    public var commandKind: String?
+    public var createdAt: Double?
+    public var finishedAt: Double?
+    public var exitCode: Int?
+    public var durationMs: Int?
+
+    public var id: String { callID }
+
+    enum CodingKeys: String, CodingKey {
+        case callID = "call_id"
+        case grantID = "grant_id"
+        case callerFingerprint = "caller_fingerprint"
+        case callerDisplayName = "caller_display_name"
+        case status
+        case commandSummary = "command_summary"
+        case commandKind = "command_kind"
+        case createdAt = "created_at"
+        case finishedAt = "finished_at"
+        case exitCode = "exit_code"
+        case durationMs = "duration_ms"
+    }
+}
+
+public struct CallsListResponse: Decodable, Equatable, Sendable {
+    public var calls: [RemoteCall]
+    public var nextCursor: Double?
+    public var limit: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case calls
+        case nextCursor = "next_cursor"
+        case limit
+    }
+}
+
+public struct RemoteInvokeSshCallerInfo: Decodable, Equatable, Sendable {
+    public var hostname: String?
+    public var username: String?
+    public var platform: String?
+    public var userAgent: String?
+    public var sourceIP: String?
+    public var ip: String?
+
+    enum CodingKeys: String, CodingKey {
+        case hostname
+        case username
+        case platform
+        case userAgent = "user_agent"
+        case sourceIP = "source_ip"
+        case ip
+    }
+}
+
+public struct RemoteInvokeSshKeyRecord: Decodable, Equatable, Sendable {
+    public var id: String?
+    public var label: String?
+    public var deviceCode: String
+    public var sshKeyFingerprint: String?
+    public var status: String?
+    public var grantMode: String?
+    public var createdAt: FlexibleString?
+    public var lastUsedAt: FlexibleString?
+    public var lastCallerInfo: RemoteInvokeSshCallerInfo?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case deviceCode = "device_code"
+        case sshKeyFingerprint = "ssh_key_fingerprint"
+        case status
+        case grantMode = "grant_mode"
+        case createdAt = "created_at"
+        case lastUsedAt = "last_used_at"
+        case lastCallerInfo = "last_caller_info"
+    }
+}
+
+public struct RemoteInvokeSshKeySecretPayload: Decodable, Equatable, Sendable {
+    public var id: String?
+    public var label: String?
+    public var deviceCode: String
+    public var sshKeyFingerprint: String
+    public var bifrostKeyFile: String
+    public var publicKeyPEM: String?
+    public var grantMode: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case label
+        case deviceCode = "device_code"
+        case sshKeyFingerprint = "ssh_key_fingerprint"
+        case bifrostKeyFile = "bifrost_key_file"
+        case publicKeyPEM = "public_key_pem"
+        case grantMode = "grant_mode"
+    }
+}
+
+public struct CreateRemoteInvokeSshKeyInput: Encodable, Equatable, Sendable {
+    public var label: String
+    public var grantMode: String
+
+    public init(label: String, grantMode: String = "permanent") {
+        self.label = label
+        self.grantMode = grantMode
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case label
+        case grantMode = "grant_mode"
+    }
+}
+
+public struct FlexibleString: Decodable, Equatable, Sendable, CustomStringConvertible {
+    public var value: String
+
+    public var description: String { value }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let string = try? container.decode(String.self) {
+            value = string
+        } else if let double = try? container.decode(Double.self) {
+            value = String(double)
+        } else if let int = try? container.decode(Int.self) {
+            value = String(int)
+        } else {
+            value = ""
+        }
     }
 }
 

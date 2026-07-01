@@ -21,13 +21,14 @@ public enum HTTPMethod: String, Sendable {
     case get = "GET"
     case post = "POST"
     case put = "PUT"
+    case patch = "PATCH"
     case delete = "DELETE"
 
     public var isUnsafe: Bool {
         switch self {
         case .get:
             return false
-        case .post, .put, .delete:
+        case .post, .put, .patch, .delete:
             return true
         }
     }
