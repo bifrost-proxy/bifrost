@@ -387,25 +387,51 @@ impl AdminRouter {
         Self::AUTH_PUBLIC_PATHS.contains(&path)
     }
 
+    fn is_internal_devtools_bridge_path(path: &str) -> bool {
+        path.starts_with("/api/devtools/bridge/")
+    }
+
     fn check_api_auth<T>(
         req: &Request<T>,
         state: &SharedAdminState,
         path: &str,
         peer_addr: Option<SocketAddr>,
     ) -> Option<Response<BoxBody>> {
-        if !is_remote_access_enabled(state) {
+        let is_loopback = peer_addr
+            .map(|addr| addr.ip().is_loopback())
+            .unwrap_or(false);
+        let loopback_host_ok = is_loopback
+            && req
+                .headers()
+                .get(hyper::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(crate::cors::is_allowed_host)
+                .unwrap_or(false);
+
+        // The injected DevTools page bridge is intentionally cross-origin and
+        // reaches the admin router through the bifrost.local virtual host with
+        // peer_addr=None. It authenticates with a page-specific bridge token in
+        // the bridge protocol itself, so router-level bearer auth would break
+        // the intended internal channel while not adding useful protection.
+        if Self::is_internal_devtools_bridge_path(path) {
             return None;
+        }
+
+        if !is_remote_access_enabled(state) {
+            if loopback_host_ok || Self::is_auth_public_path(path) {
+                return None;
+            }
+            return Some(error_response(
+                StatusCode::UNAUTHORIZED,
+                "Admin API requires local loopback access or remote authentication",
+            ));
         }
 
         if Self::is_auth_public_path(path) {
             return None;
         }
 
-        let is_loopback = peer_addr
-            .map(|addr| addr.ip().is_loopback())
-            .unwrap_or(false);
-
-        if is_loopback {
+        if loopback_host_ok {
             // Anti-DNS-rebinding: a loopback peer is necessary but not
             // sufficient. A browser tricked by DNS rebinding connects to
             // 127.0.0.1 (peer looks loopback) yet sends the attacker's domain
@@ -413,15 +439,7 @@ impl AdminRouter {
             // `Host` header is a recognized local name, which the legitimate
             // desktop UI always sends. Requests without a Host header (or with
             // a foreign Host) fall through to bearer-token validation.
-            let host_ok = req
-                .headers()
-                .get(hyper::header::HOST)
-                .and_then(|v| v.to_str().ok())
-                .map(crate::cors::is_allowed_host)
-                .unwrap_or(false);
-            if host_ok {
-                return None;
-            }
+            return None;
         }
 
         let token = extract_bearer_token(req).or_else(|| {
@@ -527,6 +545,17 @@ mod tests {
     use crate::state::AdminState;
 
     fn new_state_remote_enabled() -> (SharedAdminState, tempfile::TempDir) {
+        let (state, tmp) = new_state_remote_disabled();
+        state
+            .auth_db
+            .as_ref()
+            .unwrap()
+            .set_remote_access_enabled(true)
+            .expect("enable remote access");
+        (state, tmp)
+    }
+
+    fn new_state_remote_disabled() -> (SharedAdminState, tempfile::TempDir) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let auth_db_path = tmp.path().join("auth.db");
         let auth_db = AuthDb::open(&auth_db_path).expect("auth db");
@@ -535,12 +564,6 @@ mod tests {
 
         let state = AdminState::new_for_test(19998, rules_storage).with_auth_db(auth_db);
         let state = std::sync::Arc::new(state);
-        state
-            .auth_db
-            .as_ref()
-            .unwrap()
-            .set_remote_access_enabled(true)
-            .expect("enable remote access");
         (state, tmp)
     }
 
@@ -781,6 +804,47 @@ mod tests {
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", None)
             .expect("None peer_addr should default to non-local and require token");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_rejects_none_peer_when_remote_disabled() {
+        let (state, _tmp) = new_state_remote_disabled();
+        let req = Request::builder()
+            .uri("/_bifrost/api/system/status")
+            .header(hyper::header::HOST, "bifrost.local")
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", None)
+            .expect("None peer_addr should not get local bypass when remote is disabled");
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_allows_internal_devtools_bridge_with_none_peer() {
+        let (state, _tmp) = new_state_remote_disabled();
+        let req = Request::builder()
+            .uri("/_bifrost/api/devtools/bridge/pg_123/ws")
+            .header(hyper::header::HOST, "bifrost.local")
+            .body(())
+            .unwrap();
+        let resp =
+            AdminRouter::check_api_auth(&req, &state, "/api/devtools/bridge/pg_123/ws", None);
+        assert!(
+            resp.is_none(),
+            "internal DevTools bridge uses its own page token"
+        );
+    }
+
+    #[test]
+    fn test_check_api_auth_allows_loopback_when_remote_disabled() {
+        let (state, _tmp) = new_state_remote_disabled();
+        let req = Request::builder()
+            .uri("/_bifrost/api/system/status")
+            .header(hyper::header::HOST, "127.0.0.1:9900")
+            .body(())
+            .unwrap();
+        let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", loopback_peer());
+        assert!(resp.is_none(), "local loopback UI remains available");
     }
 
     #[test]

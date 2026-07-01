@@ -1368,4 +1368,7 @@ jobs:
         # This intentionally verifies Windows can compile/test the workspace
         # without ASR native runtime assets; bifrost-asr full local engines are
         # target-gated to macOS aarch64 and must stay unavailable here.
-        run: cargo test --workspace --all-features --target x86_64-pc-windows-msvc
+        shell: bash
+        run: |
+          cargo test --workspace --all-features --target x86_64-pc-windows-msvc -- --skip test_https_interception_websocket_applies_request_and_response_header_rules
+          cargo test -p bifrost-tests --test https_proxy_test --all-features --target x86_64-pc-windows-msvc test_https_interception_websocket_applies_request_and_response_header_rules -- --test-threads=1

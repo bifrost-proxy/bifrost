@@ -312,6 +312,7 @@ pub struct UpdateSandboxFileConfigRequest {
 #[derive(Debug, Clone, Deserialize)]
 pub struct UpdateSandboxNetConfigRequest {
     pub enabled: Option<bool>,
+    pub allow_private_network: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub max_request_bytes: Option<usize>,
     pub max_response_bytes: Option<usize>,
@@ -446,6 +447,7 @@ async fn update_sandbox_config(
         }),
         net: request.net.map(|n| SandboxNetConfigUpdate {
             enabled: n.enabled,
+            allow_private_network: n.allow_private_network,
             timeout_ms: n.timeout_ms,
             max_request_bytes: n.max_request_bytes,
             max_response_bytes: n.max_response_bytes,

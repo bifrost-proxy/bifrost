@@ -196,6 +196,7 @@ export interface ClientCallExitRequest {
 }
 
 export interface OpenCallRequest {
+  call_id?: string;
   grant_id: string;
   client_instance_id: string;
   caller_fingerprint: string;
@@ -208,6 +209,7 @@ export interface OpenCallRequest {
 }
 
 export interface OpenCallRequestV5 {
+  call_id?: string;
   client_instance_id: string;
   caller_pubkey?: string;
   command_summary: CommandSummary;

@@ -2,7 +2,7 @@ use std::net::TcpListener;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bifrost_storage::{RuleFile, RulesStorage};
+use bifrost_storage::{RuleFile, RulesStorage, SyncConfigUpdate};
 
 use crate::assertions::{assert_json_field, assert_status};
 use crate::{ProxyInstance, TestCase};
@@ -2097,11 +2097,23 @@ async fn save_sync_session(
         .sync_manager
         .as_ref()
         .ok_or("Expected sync manager for group rule runtime test")?;
-    sync_manager
-        .save_login_session(sync_token.to_string(), sync_base_url.to_string())
+    let config_manager = admin_state
+        .config_manager
+        .as_ref()
+        .ok_or("Expected config manager for group rule runtime test")?;
+    config_manager
+        .update_sync_config(SyncConfigUpdate {
+            enabled: Some(true),
+            auto_sync: Some(true),
+            remote_base_url: Some(sync_base_url.to_string()),
+            ..Default::default()
+        })
         .await
-        .map(|_| ())
-        .map_err(|e| format!("Failed to save test sync session: {e}"))
+        .map_err(|e| format!("Failed to save test sync config: {e}"))?;
+    sync_manager
+        .save_token(sync_token.to_string())
+        .await
+        .map_err(|e| format!("Failed to save test sync token: {e}"))
 }
 
 async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> Result<(), String> {
@@ -2116,11 +2128,23 @@ async fn save_test_sync_token(admin_state: &Arc<bifrost_admin::AdminState>) -> R
         let base_url = base_url.trim();
         let token = token.trim();
         if !base_url.is_empty() && !token.is_empty() {
-            return sync_manager
-                .save_login_session(token.to_string(), base_url.to_string())
+            let config_manager = admin_state
+                .config_manager
+                .as_ref()
+                .ok_or("Expected config manager for group rule runtime test")?;
+            config_manager
+                .update_sync_config(SyncConfigUpdate {
+                    enabled: Some(true),
+                    auto_sync: Some(true),
+                    remote_base_url: Some(base_url.to_string()),
+                    ..Default::default()
+                })
                 .await
-                .map(|_| ())
-                .map_err(|e| format!("Failed to save test sync session: {}", e));
+                .map_err(|e| format!("Failed to save test sync config: {e}"))?;
+            return sync_manager
+                .save_token(token.to_string())
+                .await
+                .map_err(|e| format!("Failed to save test sync token: {e}"));
         }
     }
 

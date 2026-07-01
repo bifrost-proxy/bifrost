@@ -1680,7 +1680,7 @@ pub fn run_foreground(
 
     let mut cli_proxy_enabled = false;
     let cli_proxy_no_proxy =
-        cli_proxy_no_proxy.unwrap_or_else(|| "localhost,127.0.0.1,::1,*.local".to_string());
+        cli_proxy_no_proxy.unwrap_or_else(|| "localhost,127.0.0.1,::1".to_string());
     let cli_proxy_host = if config.host == "0.0.0.0" {
         "127.0.0.1".to_string()
     } else {
@@ -2982,7 +2982,7 @@ pub fn run_daemon(
 
             let mut cli_proxy_enabled = false;
             let cli_proxy_no_proxy =
-                cli_proxy_no_proxy.unwrap_or_else(|| "localhost,127.0.0.1,::1,*.local".to_string());
+                cli_proxy_no_proxy.unwrap_or_else(|| "localhost,127.0.0.1,::1".to_string());
             let cli_proxy_host = if config.host == "0.0.0.0" {
                 "127.0.0.1".to_string()
             } else {

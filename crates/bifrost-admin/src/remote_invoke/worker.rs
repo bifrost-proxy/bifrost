@@ -6473,8 +6473,21 @@ mod coverage_boost {
             ..Default::default()
         };
 
-        let payload = encrypt_encrypted_payload_without_aad(&original, &open_key, 2)
-            .expect("encrypt payload");
+        let aad = EnvelopeAad {
+            version: 2,
+            call_id: call_id.to_string(),
+            seq: 0,
+            direction: FrameDirection::CallerToClient,
+            token_hash: None,
+            frame_type: Some("command".to_string()),
+            command_kind: Some(kind),
+            grant_scope: Some(scope),
+            sender_key_id: None,
+            metadata: None,
+        };
+        let payload =
+            crate::remote_invoke::types::encrypt_encrypted_payload(&original, &open_key, &aad)
+                .expect("encrypt payload");
 
         worker
             .grant_crypto
@@ -6796,7 +6809,7 @@ mod coverage_boost {
 
         assert_eq!(updated.id, material.record.id);
         assert_eq!(updated.label, "new-label");
-        assert_eq!(updated.grant_mode, GrantMode::Permanent);
+        assert_eq!(updated.grant_mode, GrantMode::ThirtyMinutes);
     }
 
     #[test]

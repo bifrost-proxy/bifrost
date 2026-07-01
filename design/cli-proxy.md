@@ -39,7 +39,7 @@ bifrost start --cli-proxy [--cli-proxy-no-proxy <LIST>]
 
 ```bash
 bifrost -p <PORT> start --cli-proxy
-bifrost -p <PORT> start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,::1,*.local"
+bifrost -p <PORT> start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,::1"
 ```
 
 写入变量集合：
@@ -51,7 +51,7 @@ bifrost -p <PORT> start --cli-proxy --cli-proxy-no-proxy "localhost,127.0.0.1,::
 
 通过以下入口展示当前 CLI 代理状态：
 
-- 前台 `bifrost start` 输出的 `🖥️  CLI PROXY (ENV)` 块：实时显示 `Status`（`✓ Enabled` / `⚠ Requested but not enabled` / `Disabled`）、`Proxy` 地址、`No Proxy` 列表（默认 `localhost,127.0.0.1,::1,*.local`）。
+- 前台 `bifrost start` 输出的 `🖥️  CLI PROXY (ENV)` 块：实时显示 `Status`（`✓ Enabled` / `⚠ Requested but not enabled` / `Disabled`）、`Proxy` 地址、`No Proxy` 列表（默认 `localhost,127.0.0.1,::1`）。
 - `bifrost status -t` TUI：通过 Admin push (`SETTINGS_SCOPE_CLI_PROXY`) 拿到 `CliProxyStatus { enabled, shell, config_files, proxy_url }` 并渲染。
 - Web UI / 程序化查询：`GET /api/proxy/cli`，返回 `{ enabled, shell, config_files, proxy_url }`；其中 `enabled` 由 rc 文件中是否包含 `START_MARKER` 决定，`config_files` 为当前 shell 对应的目标 rc 文件路径数组。
 

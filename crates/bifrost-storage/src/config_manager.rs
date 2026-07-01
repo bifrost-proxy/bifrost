@@ -78,15 +78,22 @@ impl ConfigManager {
         let mut config = Self::load_config_with_migration(&data_dir)?;
         let original_max_records = config.traffic.max_records;
         let original_max_db_size_bytes = config.traffic.max_db_size_bytes;
+        let normalized_system_proxy_bypass = config.system_proxy.normalize_legacy_default_bypass();
         config.traffic.normalize();
         if config.traffic.max_records != original_max_records
             || config.traffic.max_db_size_bytes != original_max_db_size_bytes
+            || normalized_system_proxy_bypass
         {
             if config.traffic.max_db_size_bytes != original_max_db_size_bytes {
                 tracing::warn!(
                     old = original_max_db_size_bytes,
                     new = config.traffic.max_db_size_bytes,
                     "[CONFIG] max_db_size_bytes was out of range, normalized"
+                );
+            }
+            if normalized_system_proxy_bypass {
+                tracing::info!(
+                    "[CONFIG] migrated legacy default system proxy bypass to keep bifrost.local proxy-routable"
                 );
             }
             Self::save_config_to_file(&data_dir.join("config.toml"), &config)?;
@@ -383,6 +390,9 @@ impl ConfigManager {
         if let Some(net) = update.net {
             if let Some(enabled) = net.enabled {
                 config.sandbox.net.enabled = enabled;
+            }
+            if let Some(allow_private_network) = net.allow_private_network {
+                config.sandbox.net.allow_private_network = allow_private_network;
             }
             if let Some(timeout_ms) = net.timeout_ms {
                 config.sandbox.net.timeout_ms = timeout_ms;
@@ -750,10 +760,14 @@ impl ConfigManager {
             },
             proxy: ProxySettings::default(),
             tray: TrayConfig::default(),
-            system_proxy: SystemProxyConfig {
-                enabled: legacy.system_proxy.enabled,
-                bypass: legacy.system_proxy.bypass.clone(),
-                auto_enable: false,
+            system_proxy: {
+                let mut system_proxy = SystemProxyConfig {
+                    enabled: legacy.system_proxy.enabled,
+                    bypass: legacy.system_proxy.bypass.clone(),
+                    auto_enable: false,
+                };
+                system_proxy.normalize_legacy_default_bypass();
+                system_proxy
             },
             sync: SyncConfig::default(),
             traffic: TrafficConfig {
@@ -1207,6 +1221,7 @@ mod tests {
                 }),
                 net: Some(SandboxNetConfigUpdate {
                     enabled: Some(true),
+                    allow_private_network: Some(true),
                     timeout_ms: Some(2000),
                     max_request_bytes: Some(3000),
                     max_response_bytes: Some(4000),
@@ -1223,6 +1238,7 @@ mod tests {
         assert_eq!(result.file.sandbox_dir, "/tmp/sb");
         assert_eq!(result.file.max_bytes, 1000);
         assert!(result.net.enabled);
+        assert!(result.net.allow_private_network);
         assert_eq!(result.net.timeout_ms, 2000);
         assert_eq!(result.limits.timeout_ms, 5000);
         assert_eq!(result.limits.max_memory_bytes, 6000);

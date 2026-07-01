@@ -818,7 +818,11 @@ export class RemoteInvokeService {
       relay_token_ttl_ms: relayTokenTtlMs,
     };
 
-    const callId = nanoid();
+    const requestedCallId = typeof req.call_id === 'string' ? req.call_id.trim() : '';
+    if (requestedCallId && !/^[A-Za-z0-9_-]{8,80}$/.test(requestedCallId)) {
+      throw new Error('invalid_call_id');
+    }
+    const callId = requestedCallId || nanoid();
     const relayToken = generateRelayToken();
     this.callTokens.set(callId, { token: relayToken });
     this.callRuntimeMeta.set(callId, {

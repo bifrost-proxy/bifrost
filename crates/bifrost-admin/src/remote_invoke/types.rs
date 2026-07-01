@@ -600,7 +600,9 @@ pub fn decrypt_remote_command_payload(
     fallback_aad: EnvelopeAad,
 ) -> Result<RemoteCommand> {
     if payload.aad.is_none() {
-        return decrypt_encrypted_payload_without_aad(payload, session_key);
+        return Err(BifrostError::Config(
+            "encrypted remote command payload requires authenticated AAD".to_string(),
+        ));
     }
     decrypt_encrypted_payload(payload, session_key, fallback_aad)
 }
@@ -1573,7 +1575,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decrypt_remote_command_payload_without_aad_roundtrip() {
+    fn test_decrypt_remote_command_payload_without_aad_rejected() {
         let session_key = derive_open_call_session_key(
             b"shared-secret",
             "grant-crypto",
@@ -1603,11 +1605,9 @@ mod tests {
             metadata: None,
         };
 
-        let decrypted = decrypt_remote_command_payload(&payload, &session_key, fallback_aad)
-            .expect("decrypt payload");
-        assert_eq!(decrypted.kind, CommandKind::QueryReadonly);
-        assert_eq!(decrypted.command, "status");
-        assert_eq!(decrypted.args_json.as_deref(), Some(r#"{"limit":5}"#));
+        let err = decrypt_remote_command_payload(&payload, &session_key, fallback_aad)
+            .expect_err("missing aad must be rejected");
+        assert!(err.to_string().contains("requires authenticated AAD"));
     }
 
     #[test]

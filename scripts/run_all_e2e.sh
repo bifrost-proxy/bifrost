@@ -578,6 +578,11 @@ SKIP_IN_CI_TESTS=(
   # binary. CI runners do not carry the previous release binary, so keep it as
   # explicit local coverage.
   "test_upgrade_local_restart_e2e.sh"
+  # Aggregated security hardening wrapper runs many cargo unit filters, installer
+  # checks, sync relay tests, web build, and functional shell coverage. These
+  # paths are covered by dedicated CI jobs and the standalone functional shell
+  # script; keep the aggregate wrapper for local/release-gate execution.
+  "test_security_hardening.sh"
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"
@@ -585,12 +590,14 @@ SKIP_IN_CI_TESTS=(
   # E2E flows. Keep them local-only so CI shell jobs do not compile again after
   # the dedicated unit/integration jobs already covered the Rust paths.
   "test_agent_codex_parity_contracts.sh"
+  "test_chatgpt_web_shared_profile.sh"
   "test_im_agent_markdown_image_reply.sh"
   "test_im_agent_streaming_progress_card.sh"
   "test_utf8_safe_preview_e2e.sh"
   # ASR/voice runtime tests may initialize local models, native audio stacks, or
   # external model downloads. Keep all ASR capability validation local-only so
   # CI never fails because a runtime dependency or model host is unavailable.
+  "test_asr_admin_csrf.sh"
   "test_asr_daily_agent_template.sh"
   "test_asr_daily_agents_api.sh"
   "test_asr_diarization_cli.sh"

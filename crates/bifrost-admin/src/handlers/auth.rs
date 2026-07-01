@@ -80,7 +80,7 @@ pub async fn handle_auth(
         } else {
             0
         };
-        let locked_out = !remote_enabled && !has_admin_password(&state);
+        let locked_out = false;
         return json_response(&AuthStatusResponse {
             remote_access_enabled: remote_enabled,
             auth_required: remote_enabled && !is_loopback,
@@ -171,7 +171,7 @@ pub async fn handle_auth(
                 return json_response_with_status(
                     StatusCode::FORBIDDEN,
                     &serde_json::json!({
-                        "error": "Account locked due to too many failed login attempts. Remote access has been disabled. Please re-enable from local access.",
+                        "error": "Too many failed login attempts. Try again later or use the correct administrator password.",
                         "locked_out": true,
                     }),
                 );

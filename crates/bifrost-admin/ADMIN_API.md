@@ -1438,7 +1438,86 @@ PUT /api/config/performance
 | ws_payload_flush_interval_ms | number | 否   | WS payload flush 间隔（ms）     |
 | ws_payload_max_open_files    | number | 否   | WS payload 最大打开文件数       |
 
-### 9.6 清除缓存
+### 9.6 获取 Sandbox 配置
+
+```
+GET /api/config/sandbox
+```
+
+**响应**:
+
+```json
+{
+  "file": {
+    "sandbox_dir": "_sandbox",
+    "allowed_dirs": [],
+    "max_bytes": 1048576
+  },
+  "net": {
+    "enabled": true,
+    "allow_private_network": false,
+    "timeout_ms": 5000,
+    "max_request_bytes": 262144,
+    "max_response_bytes": 1048576
+  },
+  "limits": {
+    "timeout_ms": 10000,
+    "max_memory_bytes": 33554432,
+    "max_decode_input_bytes": 2097152,
+    "max_decompress_output_bytes": 10485760
+  }
+}
+```
+
+### 9.7 更新 Sandbox 配置
+
+```
+PUT /api/config/sandbox
+```
+
+**请求体**:
+
+```json
+{
+  "file": {
+    "sandbox_dir": "_sandbox",
+    "allowed_dirs": ["/Users/example/data"],
+    "max_bytes": 1048576
+  },
+  "net": {
+    "enabled": true,
+    "allow_private_network": false,
+    "timeout_ms": 5000,
+    "max_request_bytes": 262144,
+    "max_response_bytes": 1048576
+  },
+  "limits": {
+    "timeout_ms": 10000,
+    "max_memory_bytes": 33554432,
+    "max_decode_input_bytes": 2097152,
+    "max_decompress_output_bytes": 10485760
+  }
+}
+```
+
+| 字段 | 类型 | 必填 | 说明 |
+| ---- | ---- | ---- | ---- |
+| file.sandbox_dir | string | 否 | 脚本沙箱目录，支持相对 scripts 目录名称或绝对路径 |
+| file.allowed_dirs | string[] | 否 | 允许脚本访问的额外系统目录，必须为绝对路径 |
+| file.max_bytes | number | 否 | 单个沙箱文件最大字节数 |
+| net.enabled | boolean | 否 | 是否允许脚本使用 `net.fetch` |
+| net.allow_private_network | boolean | 否 | 是否允许 `net.fetch` 访问 loopback、私网、link-local、metadata 等地址；默认 false |
+| net.timeout_ms | number | 否 | `net.fetch` 请求超时 |
+| net.max_request_bytes | number | 否 | `net.fetch` 最大请求体字节数 |
+| net.max_response_bytes | number | 否 | `net.fetch` 最大响应体字节数 |
+| limits.timeout_ms | number | 否 | 脚本执行超时 |
+| limits.max_memory_bytes | number | 否 | 脚本运行时最大内存 |
+| limits.max_decode_input_bytes | number | 否 | 解码脚本最大输入字节数 |
+| limits.max_decompress_output_bytes | number | 否 | HTTP 解压最大输出字节数 |
+
+**应用场景**: 调整脚本沙箱的文件、网络和资源限制。`net.allow_private_network` 仅应在脚本必须访问本机或内网服务时显式开启。
+
+### 9.8 清除缓存
 
 ```
 DELETE /api/config/performance/clear-cache
@@ -1458,7 +1537,7 @@ DELETE /api/config/performance/clear-cache
 
 **应用场景**: 释放磁盘空间，清理历史数据。
 
-### 9.7 按域名断开连接
+### 9.9 按域名断开连接
 
 ```
 POST /api/config/connections/disconnect

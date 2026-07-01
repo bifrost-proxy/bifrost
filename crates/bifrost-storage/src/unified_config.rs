@@ -12,6 +12,8 @@ pub const MAX_TRAFFIC_MAX_DB_SIZE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 pub const DEFAULT_BREAKPOINT_TIMEOUT_MS: u64 = 30_000;
 pub const MIN_BREAKPOINT_TIMEOUT_MS: u64 = 5_000;
 pub const MAX_BREAKPOINT_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_SYSTEM_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1";
+pub const LEGACY_DEFAULT_SYSTEM_PROXY_BYPASS: &str = "localhost,127.0.0.1,::1,*.local";
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
@@ -88,6 +90,7 @@ impl Default for SandboxFileConfig {
 #[serde(default)]
 pub struct SandboxNetConfig {
     pub enabled: bool,
+    pub allow_private_network: bool,
     pub timeout_ms: u64,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
@@ -97,6 +100,7 @@ impl Default for SandboxNetConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            allow_private_network: false,
             timeout_ms: 5_000,
             max_request_bytes: 256 * 1024,
             max_response_bytes: 1024 * 1024,
@@ -143,6 +147,7 @@ pub struct SandboxFileConfigUpdate {
 #[derive(Debug, Clone, Default)]
 pub struct SandboxNetConfigUpdate {
     pub enabled: Option<bool>,
+    pub allow_private_network: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub max_request_bytes: Option<usize>,
     pub max_response_bytes: Option<usize>,
@@ -346,9 +351,19 @@ impl Default for SystemProxyConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
+            bypass: DEFAULT_SYSTEM_PROXY_BYPASS.to_string(),
             auto_enable: false,
         }
+    }
+}
+
+impl SystemProxyConfig {
+    pub fn normalize_legacy_default_bypass(&mut self) -> bool {
+        if self.bypass == LEGACY_DEFAULT_SYSTEM_PROXY_BYPASS {
+            self.bypass = DEFAULT_SYSTEM_PROXY_BYPASS.to_string();
+            return true;
+        }
+        false
     }
 }
 
@@ -585,6 +600,8 @@ mod tests {
         assert!(config.tls.intercept_exclude.is_empty());
         assert_eq!(config.access.mode, AccessMode::Interactive);
         assert!(config.system_proxy.enabled);
+        assert_eq!(config.system_proxy.bypass, DEFAULT_SYSTEM_PROXY_BYPASS);
+        assert!(!config.system_proxy.bypass.contains("*.local"));
         assert!(config.tray.enabled);
         assert!(config.tray.show_system_stats);
         assert!(config.tray.system_stats_items.cpu);
@@ -595,6 +612,7 @@ mod tests {
         assert!(config.sync.enabled);
         assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
+        assert!(!config.sandbox.net.allow_private_network);
     }
 
     #[test]
@@ -617,6 +635,23 @@ mod tests {
         assert_eq!(paths.values_dir, temp_dir.path().join("values"));
         assert_eq!(paths.cert_dir, temp_dir.path().join("certs"));
         assert_eq!(paths.traffic_dir, temp_dir.path().join("traffic"));
+    }
+
+    #[test]
+    fn system_proxy_config_migrates_only_legacy_default_bypass() {
+        let mut legacy_default = SystemProxyConfig {
+            bypass: LEGACY_DEFAULT_SYSTEM_PROXY_BYPASS.to_string(),
+            ..Default::default()
+        };
+        assert!(legacy_default.normalize_legacy_default_bypass());
+        assert_eq!(legacy_default.bypass, DEFAULT_SYSTEM_PROXY_BYPASS);
+
+        let mut custom = SystemProxyConfig {
+            bypass: "localhost,127.0.0.1,*.local,10.0.0.0/8".to_string(),
+            ..Default::default()
+        };
+        assert!(!custom.normalize_legacy_default_bypass());
+        assert_eq!(custom.bypass, "localhost,127.0.0.1,*.local,10.0.0.0/8");
     }
 
     #[test]

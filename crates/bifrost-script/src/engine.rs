@@ -55,6 +55,7 @@ impl ScriptEngine {
             file_root: Some(self.config.scripts_dir.join("_sandbox")),
             file_allowed_dirs: Vec::new(),
             allow_network: true,
+            allow_private_network: false,
             ..Default::default()
         }
     }
@@ -86,6 +87,7 @@ impl ScriptEngine {
             file_root: Some(file_root),
             file_allowed_dirs: allowed_dirs,
             allow_network: cfg.sandbox.net.enabled,
+            allow_private_network: cfg.sandbox.net.allow_private_network,
             network_timeout_ms: cfg.sandbox.net.timeout_ms,
             max_file_bytes: cfg.sandbox.file.max_bytes,
             max_net_request_bytes: cfg.sandbox.net.max_request_bytes,

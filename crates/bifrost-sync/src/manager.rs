@@ -320,9 +320,9 @@ impl SyncManager {
                 "remote_base_url is required".to_string(),
             ));
         }
-        if !(remote_base_url.starts_with("http://") || remote_base_url.starts_with("https://")) {
+        if !remote_base_url.starts_with("https://") {
             return Err(BifrostError::Config(
-                "remote_base_url must start with http:// or https://".to_string(),
+                "remote_base_url must start with https://".to_string(),
             ));
         }
 
@@ -1680,6 +1680,12 @@ mod tests {
             .save_login_session("token".to_string(), "relay.test".to_string())
             .await
             .is_err());
+        assert!(manager
+            .save_login_session("token".to_string(), "http://relay.test".to_string())
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("https://"));
     }
 
     #[tokio::test]

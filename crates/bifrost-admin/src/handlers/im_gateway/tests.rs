@@ -96,6 +96,28 @@ pub(super) fn fake_external_runner_workdir_command() -> (String, Vec<String>) {
     }
 }
 
+pub(super) fn fake_external_runner_override_command() -> (String, Vec<String>) {
+    if cfg!(windows) {
+        (
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-NonInteractive".to_string(),
+                "-Command".to_string(),
+                "[Console]::In.ReadToEnd() | Out-Null; if ($env:MODEL_OVERRIDE -eq 'gpt-schedule' -and $env:BASE_ENV -eq 'runner') { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_OK\"}') } else { [Console]::Out.WriteLine('{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_MISSING\"}') }".to_string(),
+            ],
+        )
+    } else {
+        (
+            "sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "cat >/dev/null; if [ \"$MODEL_OVERRIDE\" = \"gpt-schedule\" ] && [ \"$BASE_ENV\" = \"runner\" ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_MISSING\"}'; fi".to_string(),
+            ],
+        )
+    }
+}
+
 #[test]
 pub(super) fn chatgpt_web_startup_auth_runners_include_all_web_runners() {
     let temp_dir = tempfile::TempDir::new().unwrap();

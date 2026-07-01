@@ -401,8 +401,10 @@ ctx.output = { code: "0", data: JSON.parse(resp.body).hex, msg: "" };
         matched_rules: vec![],
     };
 
+    let mut cfg = UnifiedConfig::default();
+    cfg.sandbox.net.allow_private_network = true;
     let (out, _) = engine
-        .execute_parser_script(
+        .execute_parser_script_with_config(
             &script_ref,
             "response",
             &request,
@@ -410,6 +412,7 @@ ctx.output = { code: "0", data: JSON.parse(resp.body).hex, msg: "" };
             &response,
             &[0x00, 0xff, 0x41],
             &ctx,
+            &cfg,
         )
         .await
         .unwrap();
@@ -557,8 +560,10 @@ async fn test_build_in_bp_decodes_real_next_agent_thrift_rpc_bytes() {
         values: HashMap::new(),
         matched_rules: vec![],
     };
+    let mut cfg = UnifiedConfig::default();
+    cfg.sandbox.net.allow_private_network = true;
     let (req_out, _) = engine
-        .execute_parser_script(
+        .execute_parser_script_with_config(
             &base_ref,
             "request",
             &request,
@@ -569,6 +574,7 @@ async fn test_build_in_bp_decodes_real_next_agent_thrift_rpc_bytes() {
             &response,
             &[],
             &ctx,
+            &cfg,
         )
         .await
         .unwrap();
@@ -585,7 +591,7 @@ async fn test_build_in_bp_decodes_real_next_agent_thrift_rpc_bytes() {
         matched_rules: vec![],
     };
     let (res_out, _) = engine
-        .execute_parser_script(
+        .execute_parser_script_with_config(
             &response_ref,
             "response",
             &request,
@@ -596,6 +602,7 @@ async fn test_build_in_bp_decodes_real_next_agent_thrift_rpc_bytes() {
                 0, 7, 0x0c, 0, 0, 0x0b, 0, 1, 0, 0, 0, 2, b'o', b'k', 0x0c, 0, 0xff, 0, 0, 0,
             ],
             &ctx,
+            &cfg,
         )
         .await
         .unwrap();
@@ -705,9 +712,11 @@ async fn test_build_in_bp_decodes_next_agent_http_rpc_response() {
         values: HashMap::new(),
         matched_rules: vec![],
     };
+    let mut cfg = UnifiedConfig::default();
+    cfg.sandbox.net.allow_private_network = true;
 
     let (out, _) = engine
-        .execute_parser_script(
+        .execute_parser_script_with_config(
             &script_ref,
             "response",
             &request,
@@ -715,6 +724,7 @@ async fn test_build_in_bp_decodes_next_agent_http_rpc_response() {
             &response,
             br#"{"status":"ok","BaseResp":{}}"#,
             &ctx,
+            &cfg,
         )
         .await
         .unwrap();

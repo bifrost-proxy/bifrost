@@ -1,4 +1,7 @@
-use super::{super::*, fake_external_runner_workdir_command, test_provider, EnvGuard};
+use super::{
+    super::*, fake_external_runner_override_command, fake_external_runner_workdir_command,
+    test_provider, EnvGuard,
+};
 
 #[test]
 pub(super) fn schedule_chatgpt_web_initial_prompt_is_sent_as_first_message_only() {
@@ -295,6 +298,7 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
 
     let mut external_cli_config =
         crate::im_gateway::external_cli::ExternalCliGatewayConfig::default();
+    let (override_executable, override_args) = fake_external_runner_override_command();
     external_cli_config.runners.insert(
         "codex-override-test".to_string(),
         crate::im_gateway::external_cli::ExternalCliAgentSettings {
@@ -302,11 +306,8 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
             adapter: "mock".to_string(),
             instructions: None,
             adapter_config: crate::im_gateway::external_cli::ExternalCliAdapterConfig {
-                executable: Some("sh".to_string()),
-                args: vec![
-                    "-c".to_string(),
-                    "cat >/dev/null; if [ \"$MODEL_OVERRIDE\" = \"gpt-schedule\" ] && [ \"$BASE_ENV\" = \"runner\" ]; then printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_OK\"}'; else printf '%s\n' '{\"type\":\"assistant_final\",\"content\":\"OVERRIDE_MISSING\"}'; fi".to_string(),
-                ],
+                executable: Some(override_executable),
+                args: override_args,
                 env: std::collections::BTreeMap::from([(
                     "BASE_ENV".to_string(),
                     "runner".to_string(),

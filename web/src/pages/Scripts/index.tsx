@@ -1723,6 +1723,7 @@ export default function ScriptsPage() {
   const [sandboxNetMaxReqBytes, setSandboxNetMaxReqBytes] = useState(256 * 1024);
   const [sandboxNetMaxRespBytes, setSandboxNetMaxRespBytes] = useState(1024 * 1024);
   const [sandboxNetTimeoutMs, setSandboxNetTimeoutMs] = useState(5000);
+  const [sandboxAllowPrivateNetwork, setSandboxAllowPrivateNetwork] = useState(false);
   const [sandboxTimeoutMs, setSandboxTimeoutMs] = useState(10000);
   const [sandboxMaxMemoryBytes, setSandboxMaxMemoryBytes] = useState(32 * 1024 * 1024);
   const [sandboxMaxDecodeInputBytes, setSandboxMaxDecodeInputBytes] = useState(2 * 1024 * 1024);
@@ -1949,6 +1950,7 @@ export default function ScriptsPage() {
       setSandboxNetMaxReqBytes(cfg.net.max_request_bytes);
       setSandboxNetMaxRespBytes(cfg.net.max_response_bytes);
       setSandboxNetTimeoutMs(cfg.net.timeout_ms);
+      setSandboxAllowPrivateNetwork(cfg.net.allow_private_network);
       setSandboxTimeoutMs(cfg.limits.timeout_ms);
       setSandboxMaxMemoryBytes(cfg.limits.max_memory_bytes);
       setSandboxMaxDecodeInputBytes(cfg.limits.max_decode_input_bytes);
@@ -2015,6 +2017,7 @@ export default function ScriptsPage() {
         },
         net: {
           enabled: sandboxEnabled,
+          allow_private_network: sandboxAllowPrivateNetwork,
           timeout_ms: netTimeout,
           max_request_bytes: netReqMax,
           max_response_bytes: netRespMax,
@@ -2038,6 +2041,7 @@ export default function ScriptsPage() {
     sandboxDirName,
     sandboxFileMaxBytes,
     sandboxEnabled,
+    sandboxAllowPrivateNetwork,
     sandboxNetTimeoutMs,
     sandboxNetMaxReqBytes,
     sandboxNetMaxRespBytes,
@@ -2236,6 +2240,15 @@ export default function ScriptsPage() {
                 type="number"
                 value={sandboxNetTimeoutMs}
                 onChange={(e) => setSandboxNetTimeoutMs(Number(e.target.value))}
+              />
+            </Form.Item>
+            <Form.Item
+              label="Allow Private Network Fetch (net.allow_private_network)"
+              extra="Off by default. Enable only for scripts that must call loopback, private LAN, link-local, or metadata addresses."
+            >
+              <Switch
+                checked={sandboxAllowPrivateNetwork}
+                onChange={setSandboxAllowPrivateNetwork}
               />
             </Form.Item>
             <Form.Item label="Script Timeout (limits.timeout_ms)">
