@@ -1,7 +1,7 @@
 ---
 
 name: "bifrost-remote"
-description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接管理、状态/流量查询、远端 shell 执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/find/read/write/edit/patch。重要：修改远端文件必须优先使用 bifrost remote file 子命令。"
+description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接管理、状态/流量查询、远端 shell 执行；以及对目标仓库做 coding-agent 级的文件读写/搜索/原子 edit/批量 patch/大文件分块 upload/download（受 FileAccessPolicy 约束）。触发词包括：连接另一台电脑、远程执行命令、远程改代码、远端仓库编辑/重构/批量修改文件、在远端机器上跑 coding agent、远程 grep/find/read/write/edit/patch/upload/download。重要：修改或传输远端文件必须优先使用 bifrost remote file 子命令。"
 
 ---
 
@@ -43,7 +43,8 @@ description: "通过 Bifrost Remote Invoke 远程操作另一台电脑：连接�
 | 多文件统一 patch（含改名/复制） | `remote file patch --from-local ./diff.patch`（等价 `--patch-file`） | 循环 shell-text 的 sed |
 | 创建目录 | `remote file mkdir --parents` | `shell-text "mkdir -p ..."` |
 | 移动/删除 | `remote file move` / `remote file delete --recursive` | `shell-text "mv" / "rm -rf"` |
-| 传输本地大文件 / 二进制 / 特殊字符 | `remote file write <path> --from-local ./blob.bin --create-parents`；只有内容已是 base64 字符串时才用 `--content-b64` | echo 管道 base64 |
+| 传输本地大文件 / 二进制 / 压缩包 | `remote file upload ./blob.bin <remote> --create-parents --resume`；下载用 `remote file download <remote> ./blob.bin --resume` | `write --from-local` 传大文件、`scp`、echo 管道 base64 |
+| 写小型本地文件 / 特殊字符文本 | `remote file write <path> --from-local ./local.txt --create-parents`；只有内容已是 base64 字符串时才用 `--content-b64` | echo 管道 base64 |
 | 校验文件哈希 | `remote file hash <path> --algo sha256` | `shell-text "shasum ..."` |
 
 **只有下列场景才回落到 `remote exec`**：
@@ -102,7 +103,7 @@ bifrost start
 |---|---|---|---|
 | 只读查询 | Access = `query` | `remote_query` | `conn status` / `traffic list/get/search` |
 | 远端 shell | Access = `selected` 或 `all` | `remote_shell_exec`（加 stdin/interactive 则升级为 `remote_shell_interactive`） | `exec` |
-| 远端文件 | File Access = read / read-write | `remote_file_read` / `remote_file_write` | 所有 `file <cmd>` |
+| 远端文件 | File Access = read / read-write | `remote_file_read` / `remote_file_write` | 所有 `file <cmd>`；`download` 需 read，`upload` 需 read-write |
 
 三类 scope **互相独立**，请用户在目标端 Web UI 的 Remote Invoke 授权请求里按需勾选。比如 Agent 只能调用 `remote file read` 但没勾 File Access=read-write，`remote file write` 会以 `file.permission_denied` 拒绝。
 
@@ -345,6 +346,9 @@ bifrost remote file find   ['<regex>']  [-e '<regex>']... \
                                          [--no-ignore] [--exclude NAME]...
 bifrost remote file hash   <path> [--algo sha256]
 bifrost remote file outline <path> [--max-symbols N] [--max-bytes N]
+bifrost remote file download <remote> <local> [--chunk-size N] \
+                                   [--overwrite] [--resume] [--no-progress] \
+                                   [--cwd DIR] [--output human|json]
 
 # —— 读写（需 remote_file_write）——
 bifrost remote file write  <path> (--content <text>) | (--content-file/--from-local <local|->) | (--content-b64 <b64>) \
@@ -356,6 +360,10 @@ bifrost remote file move   <from> <to> [--base-sha256 SHA] [--allow-overwrite tr
 bifrost remote file delete <path> [--recursive]
 bifrost remote file patch  (--patch-file/--from-local <local|->) | (--patch-b64 <b64>) \
                                    [--base-sha PATH=SHA256]...
+bifrost remote file upload <local> <remote> [--chunk-size N] \
+                                   [--overwrite] [--create-parents] \
+                                   [--resume] [--no-progress] \
+                                   [--cwd DIR] [--output human|json]
 ```
 
 所有子命令共享 `--cwd <path>`、`--output human|json`、`--relay-url`、`--client-id`。
@@ -466,6 +474,7 @@ bifrost remote file find 'fn main' --around 3
 - **字符列定位**：`find` 返回的 `column` 是**字符列（char-based）**；`byte_column` 是字节偏移，二者在 CJK / 多字节场景会不同。
 - **写文件三种入口**：`--content <text>` 内联短 UTF-8 文本（最简单，适合一两行字符串）；`--content-file <local|->` / `--from-local <local|->` 从 caller 本地文件或 stdin 读取原始 bytes 并由 CLI 安全编码传输，适合本地大文件、二进制、CRLF 和特殊字符；`--content-b64 <b64>` 只在调用方已经拿到 base64 字符串时使用。优先级：`--content-b64` > `--content` > `--content-file/--from-local`。不要用 shell 拼 `echo "$B64" | base64 -d > ...`。
 - **本地 payload 统一入口**：`write`、`edit`、`patch` 都支持 `--from-local` 从 caller 本地路径读取 payload：`write --from-local ./file.bin` 读取文件内容，`edit --from-local ./edits.json` 读取 edits JSON 数组，`patch --from-local ./change.diff` 读取 unified diff。`mkdir` / `move` / `delete` 没有 caller 本地 payload，不使用 `--from-local`。
+- **大文件分块传输**：本地文件明显大于单次 File API 预算、需要断点续传、或是二进制/压缩包时，优先用 `upload` / `download`，不要用 `write --from-local`。两者走 `file.upload_*` / `file.download_*` 分块协议，支持 `--chunk-size`（目标端会 clamp 到策略上限）、`--resume`、逐块 sha256 和整文件 sha256 校验。`upload` 需要 `remote_file_write` 与 policy `upload` op；`download` 需要 `remote_file_read` 与 policy `download` op。
 - **`--create-parents`**：`write` 自带 `mkdir -p`，一次 round-trip 搞定。
 - **`edit` 的 `--edits` 严格校验**：传非法 JSON 或非数组会**立即报错**（不再静默吞错发 null）。两种形态：行号区间 `[{"start_line":10,"end_line":12,"replacement":"new text\n"}]`（1-based 闭区间），或内容锚定 `[{"old_string":"foo","new_string":"bar","expected_count":1}]`（按字面子串定位，`expected_count` 默认 1，命中数不符则报错）；单次调用两种形态不可混用。当前 CLI 的非法 JSON 示例仍偏向行号区间，看到该提示时不要误判为不支持锚定 edit。
 - **错误自带修复建议**：file 操作失败时，CLI 会根据常见服务端 `[file.xxx]` 错误码在 stderr 自动追加一行可操作的 `→` 提示（如 sha 不匹配→重新 read 取最新 sha；out_of_scope→用 `scratch-dir` 或让目标端加白名单而非改 cwd）。不是每个错误码都有 CLI hint；遇到未提示的 code 按下方"错误码契约"处理。
@@ -484,8 +493,9 @@ bifrost remote file find 'fn main' --around 3
 | `file.symlink_escape` | 路径经 symlink 解析后逃出授权 roots | 改用 `scratch-dir` 或让用户把真实路径纳入 roots，不要猜 `/tmp` |
 | `file.ignored_by_gitignore` | 默认 respect gitignore 时路径被忽略 | 确实需要时加 `--no-ignore`，否则换到未忽略路径 |
 | `file.op_not_permitted` | 当前 grant/policy 未开放该 file op | 按操作降级：`read-many` 被 deny 时回落多次 `remote file read`；`outline` 被 deny 时回落 `read --offset/--limit` 或 `find`；需要长期使用则请用户重授权或调整 FileAccessPolicy ops |
+| `file.size_too_large` | `upload` / `download` 文件超过 `max_transfer_bytes` | 拆分文件，或让用户在目标端明确提高策略上限 |
 | `file.binary_not_allowed` | 是二进制但没加 `--allow-binary` | 显式加 `--allow-binary`，或改用 `hash` + 分片 |
-| `file.sha_mismatch` | 乐观锁失败 | 重新 `read` + 重算 sha + 重试 |
+| `file.sha_mismatch` | 乐观锁失败，或传输块/整文件完整性校验失败 | 乐观锁失败时重新 `read` + 重算 sha + 重试；传输失败时保留 `.part` 并用 `--resume` 重试 |
 | `file.not_found` | 路径不存在 | 视任务决定 `mkdir` / `write --create-parents` |
 | `file.already_exists` | 目标已存在且当前操作不允许覆盖 | 对 `mkdir` 可加 `--parents`；对 `move/write` 视任务加 overwrite 或换路径 |
 | `file.cross_device` | 跨文件系统无法 atomic rename | 不用 `move` 跨盘；改为 read/write/copy 语义 |
@@ -534,10 +544,16 @@ bifrost remote file edit src/lib.rs \
 bifrost remote file write docs/changelog.md \
   --content "## v1.2.3\n- fix something\n" --create-parents
 
-# 5b. 新建 / 覆盖写——本地大文件 / 二进制 / 特殊字符优先走 --from-local
+# 5b. 新建 / 覆盖写——小型本地文件 / 二进制 / 特殊字符可走 --from-local
 bifrost remote file write assets/logo.png \
   --from-local ./local-logo.png \
   --allow-overwrite true --create-parents
+
+# 5c. 大文件 / 压缩包 / 需要断点续传的二进制：优先走分块传输
+bifrost remote file upload ./dist/archive.zip dist/archive.zip \
+  --create-parents --overwrite --resume --cwd <USER_HOME>/work/repo
+bifrost remote file download dist/archive.zip ./archive.zip \
+  --overwrite --resume --cwd <USER_HOME>/work/repo
 
 # 6. 多文件 patch
 bifrost remote file patch --from-local ./refactor.diff --base-sha src/lib.rs=<sha>
@@ -616,7 +632,7 @@ bifrost remote conn status
 9. **不要承诺 OS 级 sandbox**：`exec` 是 Shell Access policy 级限制，不是 sandbox。
 10. **长任务必须优先 detach**：构建、测试、CI watch、数据库迁移等用 `remote exec --detach`，再用 `remote job list` 找到本地记录的 call，并用 `remote job watch/logs/status <call_id>` 追踪真实 exit code。`--stream --output-file` 只适合短观察；出现 digest mismatch / 143 / wall-clock timeout 时，不要盲目重试，改走 job 模型。
 11. **远端跑本地脚本用 `remote run`**：Python/Node/shell smoke 脚本、查询脚本和带复杂字符的脚本都优先用 `remote run --script-file ... --interpreter ... -- <args>`；不要 `cat <<EOF` heredoc 到远端 shell。
-12. **写文件入口选择**：短文本用 `--content`；本地文件 / stdin / 二进制 / 特殊字符 / 大文件优先用 `--from-local`（`write` 兼容 `--content-file`，`patch` 兼容 `--patch-file`）；只有调用方已经持有 base64 字符串时才用 `--content-b64`。`edit --from-local ./edits.json` 适合复杂 edits JSON，`patch --from-local ./change.diff` 适合统一 diff，关键文件加 `--base-sha PATH=SHA256`。避免 echo 管道 base64。`file write --path <p>` 仅是兼容误用，推荐仍写成 `file write <p>`。
+12. **写文件入口选择**：短文本用 `--content`；小型本地文件 / stdin / 特殊字符文本用 `write --from-local`（`write` 兼容 `--content-file`，`patch` 兼容 `--patch-file`）；大文件、压缩包、二进制往返或需要断点续传时用 `remote file upload/download --resume`；只有调用方已经持有 base64 字符串时才用 `--content-b64`。`edit --from-local ./edits.json` 适合复杂 edits JSON，`patch --from-local ./change.diff` 适合统一 diff，关键文件加 `--base-sha PATH=SHA256`。避免 echo 管道 base64。`file write --path <p>` 仅是兼容误用，推荐仍写成 `file write <p>`。
 13. **临时文件先 scratch-dir**：不要写 `/tmp`、`.git` 或 `target` 试运气；用 `remote file scratch-dir` 获取 policy 内落点。
 14. **只读先行**：在做 write 之前，至少 `list` + `read` 侦察一次，别盲写。
 
@@ -636,8 +652,8 @@ A: `remote file read` 看内容并从 footer 拿 sha → `remote file edit --bas
 **Q: 我要写一个就两三行的小文件，还得先在本地建临时文件吗？**
 A: 不用。直接 `remote file write <path> --content "第一行\n第二行\n" --create-parents`。
 
-**Q: 我要把本地一个 500KB 的二进制部署到远端？**
-A: `bifrost remote file write <remote-path> --from-local ./local.bin --allow-overwrite true --create-parents`。`--from-local` 由 CLI 读取本地 bytes 并安全编码传输，跨 macOS/Linux/Windows 都比手写 `base64` 命令可靠。
+**Q: 我要把本地一个二进制部署到远端？**
+A: 小文件用 `bifrost remote file write <remote-path> --from-local ./local.bin --allow-overwrite true --create-parents`。大文件、压缩包或需要续传时用 `bifrost remote file upload ./local.bin <remote-path> --create-parents --overwrite --resume`，下载反向用 `bifrost remote file download <remote-path> ./local.bin --resume`。不要手写 `base64` 命令。
 
 **Q: 远端上已有一个 git 仓库，我想 `git pull` 再跑测试？**
 A: `remote exec --detach --cwd /path/to/repo --shell-text "git pull --ff-only && cargo test"`，再用 `remote job watch <call_id>`。忘了 call id 时先跑 `remote job list`。git / 测试用 shell，代码改动用 file。

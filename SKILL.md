@@ -1,6 +1,6 @@
 ---
 name: "bifrost"
-description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询（含 JSONPath/header 等值/时间窗高级过滤、search --include 直接挂 body/headers、traffic 批量 get、auth-status JWT/Cookie 诊断、export curl/fetch/HAR、replay + JSON Patch、capture wait 等下一条请求、status --format json），以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）；8) 诊断 JWT/Cookie 过期/重放请求/导出 curl/fetch/HAR/等待下一条匹配请求/批量取多条 traffic。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''导出 xxxxx 为 curl''重放 xxxxx 这条请求''看下 xxxxx 的 JWT 还有效吗''等下一条 POST xxxxx 的请求''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash）。"
+description: "使用 bifrost 命令行工具管理代理生命周期、规则、Group 规则、证书、脚本、系统代理、运行时配置与流量查询（含 JSONPath/header 等值/时间窗高级过滤、search --include 直接挂 body/headers、traffic 批量 get、auth-status JWT/Cookie 诊断、export curl/fetch/HAR、replay + JSON Patch、capture wait 等下一条请求、status --format json），以及远程调用（remote shell 执行、授权管理、远程流量排查）。当用户提到以下任意场景时触发：1) 启动/停止/检查 bifrost 代理；2) 配置 TLS 拦截（域名白名单、应用白名单）；3) 调试或管理规则/Group 规则/脚本；4) 查看流量记录、搜索请求；5) 通过一个少于 6 位的数字 ID 获取请求详情（如「获取 57544 的详情」「获取 47544 请求的内容」「查看 12345」等）；6) 修改 values/config/CA 证书/系统代理；7) 远程调用：连接/断开远端 Bifrost、远程执行命令（shell exec）、管理 Shell Access 策略与 Profile、管理远程授权（grant）；8) 诊断 JWT/Cookie 过期/重放请求/导出 curl/fetch/HAR/等待下一条匹配请求/批量取多条 traffic。常见触发表述：'使用 bifrost 获取 xxxxx 的详情''获取 xxxxx 的请求内容''查看 xxxxx 的内容''bifrost traffic get xxxxx''导出 xxxxx 为 curl''重放 xxxxx 这条请求''看下 xxxxx 的 JWT 还有效吗''等下一条 POST xxxxx 的请求''远程执行命令''管理远程授权' 等、远程文件操作（file.read/list/stat/glob/search/hash/upload/download）。"
 ---
 
 # Bifrost
@@ -732,6 +732,8 @@ bifrost remote traffic get    <id> [OPTIONS]    # 远程获取流量详情
 bifrost remote file read-many --path a --path b --cwd <repo>  # 一次读多个文件
 bifrost remote file scratch-dir --cwd <repo>      # 获取 policy 允许的临时目录
 bifrost remote file outline src/lib.rs --cwd <repo>  # 获取符号地图
+bifrost remote file upload ./large.bin assets/large.bin --create-parents --resume  # 分块上传大文件
+bifrost remote file download assets/large.bin ./large.bin --resume                 # 分块下载大文件
 bifrost remote run --script-file ./smoke.py --interpreter python3 --cwd <repo> -- --json  # 上传本地脚本到远端执行
 bifrost remote exec --shell-text "pwd"          # 受 Shell Access policy 限制的 shell.exec
 bifrost remote exec --detach -- cargo test       # 长时间静默任务先 detach
@@ -905,8 +907,8 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 
 | 能力         | 所需 scope           | 覆盖子命令                                  |
 | ---------- | ------------------ | -------------------------------------- |
-| 只读         | `remote_file_read` | `read` / `list` / `stat` / `glob` / `find` / `hash` |
-| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `move` / `delete` / `patch` |
+| 只读         | `remote_file_read` | `read` / `read-many` / `list` / `stat` / `glob` / `find` / `hash` / `outline` / `download` |
+| 读写 / patch | `remote_file_write` | `write` / `edit` / `mkdir` / `move` / `delete` / `patch` / `upload` |
 
 ### 子命令一览
 
@@ -914,6 +916,8 @@ bifrost <command> <action> -h # 子动作帮助（如 bifrost rule add -h、bifr
 # 只读
 bifrost remote file read   <path> [--max-bytes <N>] [--allow-binary] \
                                    [--offset <line>] [--limit <lines>]
+bifrost remote file read-many --path <p1> --path <p2> ...
+bifrost remote file scratch-dir [--cwd <repo>] [--name .bifrost-tmp]
 bifrost remote file list   [path] [--depth <N>] [--no-ignore] \
                                    [--exclude <name>]...
 bifrost remote file stat   <path>
@@ -926,6 +930,9 @@ bifrost remote file find   '<regex>' [--path <sub>] [--max-matches <N>] \
                                       [--glob '<pat>'] [--no-ignore] \
                                       [--exclude <name>]...
 bifrost remote file hash   <path> [--algo sha256]
+bifrost remote file outline <path> [--max-symbols <N>] [--max-bytes <N>]
+bifrost remote file download <remote> <local> [--chunk-size <bytes>] \
+                                   [--overwrite] [--resume] [--no-progress]
 
 # 读写
 bifrost remote file write  <path> [--content-file/--from-local <local|->] \
@@ -938,6 +945,9 @@ bifrost remote file mkdir  <path> [--parents]
 bifrost remote file move   <from> <to>
 bifrost remote file delete <path> [--recursive]
 bifrost remote file patch  (--patch-file/--from-local <local|->) | (--patch-b64 <base64>)
+bifrost remote file upload <local> <remote> [--chunk-size <bytes>] \
+                                   [--overwrite] [--create-parents] \
+                                   [--resume] [--no-progress]
 ```
 
 所有子命令共享 `--cwd <path>`（工作目录覆盖）、`--output human|json`、`--relay-url`、`--client-id`。
@@ -947,6 +957,7 @@ bifrost remote file patch  (--patch-file/--from-local <local|->) | (--patch-b64 
 - **gitignore 感知**：`list` / `glob` / `search` 默认跳过 `.gitignore` 命中的路径；agent 需要扫隐藏/忽略文件时加 `--no-ignore`。
 - **truncated 标志**：`list` / `glob` / `search` / `read` 超过上限时在 JSON 响应中返回 `"truncated": true`；agent 应据此分片重试或收窄范围。
 - **完整文件 sha256**：`read` 在 `truncated=true` 时响应体额外带 `file_sha256`（整文件哈希，不是截断片段的），用于 agent 做 resume / 一致性校验。
+- **分块大文件传输**：`upload` / `download` 走 `file.upload_*` / `file.download_*` 分块协议，支持 `--chunk-size`、`--resume`、逐块 sha256 和整文件 sha256 校验。上传需要 `remote_file_write`，下载只需要 `remote_file_read`。
 - **Symlink 语义**：`stat` 和 `list` 对符号链接采用 **lstat** 语义，不跟随链接，额外返回 `symlink_target`；Windows 上自动去除 `\\?\` / `\\?\UNC\` NT verbatim 前缀，跨平台一致。
 - **原子写 + 乐观锁**：`write` / `edit` 采用 tmp+rename 两阶段提交，失败自动快照回滚；传 `--base-sha256` 时若与当前文件不一致，返回错误码 `[file.sha_mismatch]`，agent 应重新 `read` 再重试。
 - **EOL 保留**：`edit` 自动识别并保留原文件的 LF / CRLF 行尾风格。
@@ -963,6 +974,9 @@ agent 应按以下错误码做分支逻辑：
 | ----------------------------- | ------------------------------- | ----------------------------------- |
 | `file.out_of_scope`           | 路径落在 `roots` 之外                 | 不要自动改 `--cwd`；请用户确认                 |
 | `file.permission_denied`      | 命中 denies 或 policy 不允许写         | 放弃写入；可降级为只读流程                       |
+| `file.op_not_permitted`       | 当前 FileAccessPolicy 未开放对应 op     | 调整授权或 policy；`upload` 需 `upload` op，`download` 需 `download` op |
+| `file.size_too_large`         | 文件超过策略 `max_transfer_bytes`       | 拆分文件或让用户明确提高策略上限                  |
+| `file.precondition_failed`    | 目标存在且未 overwrite、offset/patch 不匹配 | 重新读取状态；需要覆盖时显式加 overwrite          |
 | `file.binary_not_allowed`     | 二进制且未传 `--allow-binary`         | 加 `--allow-binary` 或改 `hash` + 下载分片 |
 | `file.sha_mismatch`           | 乐观锁失败，文件已被他人修改                  | 重新 `read` + 重算 sha + 重试             |
 | `file.not_found`              | 路径不存在                           | 视任务决定是否 `mkdir` / `write`            |
@@ -988,7 +1002,13 @@ bifrost remote file edit src/lib.rs \
   --edits '[{"start_line":10,"end_line":12,"replacement":"// new\n"}]' \
   --output json
 
-# 5. 大文件直写（base64，适合含换行/特殊字符内容）
+# 5. 大文件 / 二进制传输
+bifrost remote file upload ./local.bin assets/local.bin \
+  --create-parents --overwrite --resume
+bifrost remote file download assets/local.bin ./roundtrip.bin \
+  --overwrite --resume
+
+# 5b. 短文件直写（base64，适合含换行/特殊字符内容）
 bifrost remote file write docs/notes.md \
   --content-b64 "$(base64 < ./local-notes.md)" \
   --create-parents --output json

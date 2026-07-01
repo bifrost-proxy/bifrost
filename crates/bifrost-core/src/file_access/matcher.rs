@@ -25,7 +25,30 @@ pub struct DenyMatcher {
 #[derive(Debug, Clone)]
 struct CompiledGlob {
     raw: String,
-    regex: regex::Regex,
+    tokens: Vec<GlobToken>,
+    case_insensitive: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum GlobToken {
+    Literal(char),
+    Star,
+    DoubleStar,
+    DoubleStarSlash,
+    Question,
+    Class(CharClass),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CharClass {
+    negated: bool,
+    items: Vec<CharClassItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CharClassItem {
+    Char(char),
+    Range(char, char),
 }
 
 impl GlobMatcher {
@@ -42,7 +65,7 @@ impl GlobMatcher {
     /// Returns `true` if any pattern matches the given root-relative path.
     pub fn is_match<P: AsRef<Path>>(&self, rel: P) -> bool {
         let s = to_posix(rel.as_ref());
-        self.patterns.iter().any(|p| p.regex.is_match(&s))
+        self.patterns.iter().any(|p| p.is_match(&s))
     }
 
     /// Returns all raw patterns, useful for diagnostics / audit logs.
@@ -72,76 +95,190 @@ impl DenyMatcher {
         let s = to_posix(rel.as_ref());
         self.patterns
             .iter()
-            .find(|p| p.regex.is_match(&s))
+            .find(|p| p.is_match(&s))
             .map(|p| p.raw.as_str())
     }
 }
 
 impl CompiledGlob {
     fn compile(raw: &str, case_insensitive: bool) -> Result<Self, FileAccessError> {
-        let regex_src = glob_to_regex(raw);
-        let regex = regex::RegexBuilder::new(&regex_src)
-            .case_insensitive(case_insensitive)
-            .build()
-            .map_err(|e| FileAccessError::InvalidGlob {
-                pattern: raw.to_string(),
-                reason: e.to_string(),
-            })?;
+        let pattern = if case_insensitive {
+            raw.to_lowercase()
+        } else {
+            raw.to_string()
+        };
+        let tokens = parse_glob(&pattern).map_err(|reason| FileAccessError::InvalidGlob {
+            pattern: raw.to_string(),
+            reason,
+        })?;
         Ok(Self {
             raw: raw.to_string(),
-            regex,
+            tokens,
+            case_insensitive,
         })
+    }
+
+    fn is_match(&self, rel_posix: &str) -> bool {
+        let input = if self.case_insensitive {
+            rel_posix.to_lowercase()
+        } else {
+            rel_posix.to_string()
+        };
+        glob_match(&self.tokens, &input)
     }
 }
 
-/// Convert POSIX-style glob to regex.
-///
-/// Supported tokens:
-/// - `?`    — any single non-slash char
-/// - `*`    — any run of non-slash chars
-/// - `**`   — any run including slashes
-/// - `[...]`— character class (passed through; caller must ensure validity)
-///
-/// The resulting regex is anchored (`^...$`) so callers only need
-/// `is_match`.
-fn glob_to_regex(pat: &str) -> String {
-    let mut out = String::with_capacity(pat.len() * 2 + 4);
-    out.push('^');
-    let bytes = pat.as_bytes();
+fn parse_glob(pat: &str) -> Result<Vec<GlobToken>, String> {
+    let chars: Vec<char> = pat.chars().collect();
+    let mut out = Vec::with_capacity(chars.len());
     let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'*' => {
-                if i + 1 < bytes.len() && bytes[i + 1] == b'*' {
-                    if i + 2 < bytes.len() && bytes[i + 2] == b'/' {
-                        out.push_str("(?:.*/)?");
+    while i < chars.len() {
+        match chars[i] {
+            '*' => {
+                if i + 1 < chars.len() && chars[i + 1] == '*' {
+                    if i + 2 < chars.len() && chars[i + 2] == '/' {
+                        out.push(GlobToken::DoubleStarSlash);
                         i += 3;
                     } else {
-                        out.push_str(".*");
+                        out.push(GlobToken::DoubleStar);
                         i += 2;
                     }
                 } else {
-                    out.push_str("[^/]*");
+                    out.push(GlobToken::Star);
                     i += 1;
                 }
             }
-            b'?' => {
-                out.push_str("[^/]");
+            '?' => {
+                out.push(GlobToken::Question);
                 i += 1;
             }
-            b'.' | b'+' | b'(' | b')' | b'|' | b'^' | b'$' | b'{' | b'}' | b'\\' => {
-                out.push('\\');
-                out.push(bytes[i] as char);
-                i += 1;
+            '[' => {
+                let (class, next) = parse_char_class(&chars, i)?;
+                out.push(GlobToken::Class(class));
+                i = next;
             }
             c => {
-                out.push(c as char);
+                out.push(GlobToken::Literal(c));
                 i += 1;
             }
         }
     }
-    out.push('$');
-    out
+    Ok(out)
+}
+
+fn parse_char_class(chars: &[char], start: usize) -> Result<(CharClass, usize), String> {
+    debug_assert_eq!(chars.get(start), Some(&'['));
+    let mut i = start + 1;
+    if i >= chars.len() {
+        return Err("unterminated character class".to_string());
+    }
+    let negated = matches!(chars[i], '!' | '^');
+    if negated {
+        i += 1;
+    }
+    let mut items = Vec::new();
+    while i < chars.len() {
+        if chars[i] == ']' {
+            if items.is_empty() {
+                return Err("empty character class".to_string());
+            }
+            return Ok((CharClass { negated, items }, i + 1));
+        }
+        let first = chars[i];
+        if i + 2 < chars.len() && chars[i + 1] == '-' && chars[i + 2] != ']' {
+            let last = chars[i + 2];
+            if first > last {
+                return Err(format!("invalid character range {}-{}", first, last));
+            }
+            items.push(CharClassItem::Range(first, last));
+            i += 3;
+        } else {
+            items.push(CharClassItem::Char(first));
+            i += 1;
+        }
+    }
+    Err("unterminated character class".to_string())
+}
+
+fn glob_match(tokens: &[GlobToken], input: &str) -> bool {
+    let chars: Vec<char> = input.chars().collect();
+    let mut memo = vec![vec![None; chars.len() + 1]; tokens.len() + 1];
+    glob_match_at(tokens, &chars, 0, 0, &mut memo)
+}
+
+fn glob_match_at(
+    tokens: &[GlobToken],
+    chars: &[char],
+    ti: usize,
+    ci: usize,
+    memo: &mut [Vec<Option<bool>>],
+) -> bool {
+    if let Some(hit) = memo[ti][ci] {
+        return hit;
+    }
+    let matched = if ti == tokens.len() {
+        ci == chars.len()
+    } else {
+        match &tokens[ti] {
+            GlobToken::Literal(ch) => {
+                ci < chars.len()
+                    && chars[ci] == *ch
+                    && glob_match_at(tokens, chars, ti + 1, ci + 1, memo)
+            }
+            GlobToken::Question => {
+                ci < chars.len()
+                    && chars[ci] != '/'
+                    && glob_match_at(tokens, chars, ti + 1, ci + 1, memo)
+            }
+            GlobToken::Star => {
+                glob_match_at(tokens, chars, ti + 1, ci, memo)
+                    || (ci < chars.len()
+                        && chars[ci] != '/'
+                        && glob_match_at(tokens, chars, ti, ci + 1, memo))
+            }
+            GlobToken::DoubleStar => {
+                glob_match_at(tokens, chars, ti + 1, ci, memo)
+                    || (ci < chars.len() && glob_match_at(tokens, chars, ti, ci + 1, memo))
+            }
+            GlobToken::DoubleStarSlash => {
+                if glob_match_at(tokens, chars, ti + 1, ci, memo) {
+                    true
+                } else {
+                    let mut j = ci;
+                    let mut hit = false;
+                    while j < chars.len() {
+                        if chars[j] == '/' && glob_match_at(tokens, chars, ti + 1, j + 1, memo) {
+                            hit = true;
+                            break;
+                        }
+                        j += 1;
+                    }
+                    hit
+                }
+            }
+            GlobToken::Class(class) => {
+                ci < chars.len()
+                    && class.matches(chars[ci])
+                    && glob_match_at(tokens, chars, ti + 1, ci + 1, memo)
+            }
+        }
+    };
+    memo[ti][ci] = Some(matched);
+    matched
+}
+
+impl CharClass {
+    fn matches(&self, ch: char) -> bool {
+        let hit = self.items.iter().any(|item| match item {
+            CharClassItem::Char(item_ch) => *item_ch == ch,
+            CharClassItem::Range(start, end) => *start <= ch && ch <= *end,
+        });
+        if self.negated {
+            !hit
+        } else {
+            hit
+        }
+    }
 }
 
 fn to_posix(p: &Path) -> String {

@@ -262,6 +262,22 @@ fn str_field<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
         .ok_or_else(|| config_err(format!("server response missing string field '{}'", key)))
 }
 
+fn download_begin_args(remote: &str, cwd: Option<String>, chunk_size: Option<u64>) -> Value {
+    json!({
+        "path": remote,
+        "cwd": cwd,
+        "chunk_size": chunk_size,
+    })
+}
+
+fn download_chunk_args(download_id: &str, offset: u64, length: u64) -> Value {
+    json!({
+        "transfer_id": download_id,
+        "chunk_offset": offset,
+        "length": length,
+    })
+}
+
 fn print_progress(no_progress: bool, label: &str, done: u64, total: u64) {
     if no_progress {
         return;
@@ -546,7 +562,7 @@ async fn run_download(
     transport: &OpenCallTransportContext,
     remote: &str,
     local: &str,
-    _chunk_size: Option<u64>,
+    chunk_size: Option<u64>,
     overwrite: bool,
     resume: bool,
     no_progress: bool,
@@ -577,13 +593,14 @@ async fn run_download(
         transport,
         "file.download_begin",
         &format!("download begin {}", remote),
-        json!({ "path": remote, "cwd": cwd }),
+        download_begin_args(remote, cwd, chunk_size),
         true,
     )
     .await?;
     let download_id = str_field(&begin, "download_id")?.to_string();
     let total_size = u64_field(&begin, "total_size")?;
     let total_sha256 = str_field(&begin, "total_sha256")?.to_string();
+    let effective_chunk_size = u64_field(&begin, "effective_chunk_size")?.max(1);
 
     // Write to a sibling .part; rename on success for atomicity + resume.
     let part_path = final_path.with_extension(format!(
@@ -624,7 +641,7 @@ async fn run_download(
             transport,
             "file.download_chunk",
             &format!("download chunk @{}", offset),
-            json!({ "transfer_id": download_id, "chunk_offset": offset }),
+            download_chunk_args(&download_id, offset, effective_chunk_size),
             true,
         )
         .await?;
@@ -769,6 +786,19 @@ mod tests {
         let args: Value = serde_json::from_str(cmd.args_json.as_deref().unwrap()).unwrap();
         assert_eq!(args["transfer_id"], "id");
         assert_eq!(args["chunk_offset"], 0);
+    }
+
+    #[test]
+    fn download_transfer_args_include_requested_and_effective_chunk_sizes() {
+        let begin = download_begin_args("remote.bin", Some("/repo".to_string()), Some(65_536));
+        assert_eq!(begin["path"], "remote.bin");
+        assert_eq!(begin["cwd"], "/repo");
+        assert_eq!(begin["chunk_size"].as_u64(), Some(65_536));
+
+        let chunk = download_chunk_args("download-1", 131_072, 65_536);
+        assert_eq!(chunk["transfer_id"], "download-1");
+        assert_eq!(chunk["chunk_offset"].as_u64(), Some(131_072));
+        assert_eq!(chunk["length"].as_u64(), Some(65_536));
     }
 
     #[tokio::test]

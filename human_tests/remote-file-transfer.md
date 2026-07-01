@@ -169,6 +169,21 @@ bifrost remote file upload /tmp/xfer-resume.bin xfer-resume.bin \
 
 ---
 
-## 6. 自动化对照
+## 6. 技能安装源同步
+
+### TC-XFER-6.1 `install-skill` 嵌入的两个 skill 文件包含新命令
+**步骤**（仓库根目录）：
+```bash
+rg -n "remote file upload|remote file download|file\\.upload_\\*|file\\.download_\\*" SKILL.md skill_remote.md
+cargo test -p bifrost-cli install_skill_installs_remote_skill_from_embedded_bundle -- --nocapture
+```
+**期望**：
+- `SKILL.md` 和 `skill_remote.md` 都包含 `bifrost remote file upload` / `bifrost remote file download` 的命令说明；
+- `skill_remote.md` 明确大文件、压缩包、需要断点续传的二进制优先走 `remote file upload/download --resume`，而不是 `write --from-local` 或 `remote exec + base64`；
+- `install_skill_installs_remote_skill_from_embedded_bundle` 通过，证明 `install-skill` 嵌入源会同时安装更新后的 `bifrost` 与 `bifrost-remote` skill。
+
+---
+
+## 7. 自动化对照
 
 上述真实场景与 `e2e-tests/tests/test_remote_file_relay_e2e.sh` 中 `TC-FILE-XFER-01`（多块 upload/download 往返 + 双端 sha256）与 `TC-FILE-XFER-02`（--resume 续传提交）保持一致；该脚本自建 relay + target + caller，走真实数据路径。人工执行时以本文档的大文件 / 压缩归档 / 中断续传场景为准，覆盖自动化脚本因体量受限未覆盖的规模边界。
