@@ -1125,6 +1125,39 @@
 - 第 2 步能定位到 `DOWNSTREAM_PROXY_PORT` 的默认值链路。
 - 第 3 步上游 Bifrost 使用 `PROXY_PORT=19373` 和 `SOCKS5_PORT=19379`；下游 Bifrost 使用 `ECHO_PROXY_PORT=19380`，不再尝试绑定 `19379`；脚本所有断言通过并清理临时进程。
 
+### TC-CS-46: 重型低频 shell 用例跳出默认 PR CI 且本地 full-shell 保留
+
+**背景**：GitHub Actions macOS shell shard 近期日志显示 `test_asr_admin_csrf.sh` 耗时约 583s，`test_chatgpt_web_shared_profile.sh` 耗时约 879s。前者在 shell 脚本内执行 Web unit test、重新构建 debug bifrost 并跑 Admin cross-site 安全链路；后者是 shell 包装的 Rust 单测。二者都属于低频模块专项回归，不应占用每次 PR 的默认 shell shard 预算。
+
+**操作步骤**：
+1. 语法检查 shell E2E 调度器：
+   ```bash
+   bash -n scripts/run_all_e2e.sh
+   ```
+2. 验证默认 CI shell 列表不再收集这两个重型用例：
+   ```bash
+   bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
+     | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\.sh$'
+   ```
+3. 验证本地 full-shell 仍保留这两个用例，供 ASR/Admin CSRF 或 ChatGPT Web profile 相关修改专项执行：
+   ```bash
+   for script in test_asr_admin_csrf.sh test_chatgpt_web_shared_profile.sh; do
+     bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests \
+       | rg -q "^${script}$"
+   done
+   ```
+4. 验证 shell CI coverage guard 仍通过，确认被跳出的脚本已显式登记而不是遗漏：
+   ```bash
+   bash scripts/ci/check-e2e-shell-ci-coverage.sh
+   ```
+
+**预期结果**：
+- 第 1 步语法检查通过。
+- 第 2 步 `rg` 无匹配并返回 1，表示默认 PR CI shell shard 不再运行这两个重型低频脚本。
+- 第 3 步两个脚本均能在本地 full-shell 列表中找到，说明专项回归入口没有删除。
+- 第 4 步输出 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.`。
+- 上述命令均为列表或静态校验，不启动 Bifrost、不使用 9900、不修改系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1167,6 +1200,7 @@
 | TC-CS-43 | 通过 | 2026-06-13 本轮执行：静态执行 CI shell 列表排除检查，输出 `skipped test_agent_codex_parity_contracts.sh`、`skipped test_im_agent_markdown_image_reply.sh`、`skipped test_im_agent_streaming_progress_card.sh`、`skipped test_utf8_safe_preview_e2e.sh`；确认这些纯 cargo contract 脚本不再进入 CI shell E2E。该回归只列测试，不启动 Bifrost、未使用 9900、未修改系统代理。 |
 | TC-CS-44 | 通过 | 2026-06-17 本轮执行：GitHub Actions `CI` run `27676908356` 仅失败 `E2E Shell (aarch64-apple-darwin, shard 1/2)`，失败套件为 `shell:test_proxy_chain_auth_e2e.sh`，断言 `双代理链路请求成功` 期望 2xx 实际 502；同 run 中 `test_sync_login_direct_e2e.sh`、coverage 90% gate、Unit & Integration、Linux E2E、Windows/macOS/Linux build 与其它 E2E rules/runner 均通过。确认该 proxy chain 用例使用本机 `127.0.0.1` mock，不访问公网；随后把端口从 `$$ % 200` 固定小窗口改为 `pick_available_base_port` 动态连续端口段，并在非 2xx 时输出响应与 entry/upstream/mock 日志。执行 `bash -n e2e-tests/tests/test_proxy_chain_auth_e2e.sh` 通过；执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_proxy_chain_auth_e2e.sh`，输出 HTTP echo、proxy echo、Bifrost ready，双代理链路与下游代理鉴权全部通过，汇总 `Total: 11 / Passed: 11 / Failed: 0`，实际端口为动态非 9900 端口。 |
 | TC-CS-45 | 通过 | 2026-06-22 本轮执行：GitHub Actions `CI` run `27924364360` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_socks5_tls_routing_exceptions.sh`，失败原因为 `Network error: Failed to bind to 0.0.0.0:19379: Address already in use`。完整 job log 显示 runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下也算成 `19379`，下游代理和独立 SOCKS5 listener 端口碰撞。修复为 `DOWNSTREAM_PROXY_PORT` 优先使用 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，再 fallback 到 `PROXY_PORT+7`。执行 `bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 通过；执行静态 `rg` 确认默认值链路存在；随后使用 `PROXY_PORT=19373 SOCKS5_PORT=19379 ECHO_PROXY_PORT=19380 MOCK_ECHO_PROXY_PORT=19380 ECHO_HTTP_PORT=19374 ECHO_HTTPS_PORT=19375 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 真实复现 CI 端口形态，脚本完成所有 routing exception 断言并退出 0，全程未使用 9900，未修改系统代理。 |
+| TC-CS-46 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集两个重型低频脚本；随后分别确认 `bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_asr_admin_csrf\\.sh$'` 和同命令匹配 `test_chatgpt_web_shared_profile.sh` 均通过，说明本地 full-shell 专项入口仍保留；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 
