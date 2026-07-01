@@ -550,6 +550,52 @@ pub enum RemoteFileCommands {
         #[arg(long, default_value = "human")]
         output: String,
     },
+    #[command(about = "Upload a large local file to the remote host in resumable chunks")]
+    Upload {
+        #[arg(value_hint = ValueHint::FilePath, help = "Local source file path")]
+        local: String,
+        #[arg(help = "Remote destination path (absolute, or relative to --cwd)")]
+        remote: String,
+        #[arg(
+            long,
+            help = "Requested chunk size in bytes (server clamps to its max)"
+        )]
+        chunk_size: Option<u64>,
+        #[arg(long, help = "Allow overwriting an existing remote file")]
+        overwrite: bool,
+        #[arg(long, help = "Create missing remote parent directories")]
+        create_parents: bool,
+        #[arg(long, help = "Resume a previously interrupted upload")]
+        resume: bool,
+        #[arg(long = "no-progress", help = "Suppress the progress indicator")]
+        no_progress: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
+    #[command(about = "Download a large remote file to the local host in resumable chunks")]
+    Download {
+        #[arg(help = "Remote source path (absolute, or relative to --cwd)")]
+        remote: String,
+        #[arg(value_hint = ValueHint::FilePath, help = "Local destination file path")]
+        local: String,
+        #[arg(
+            long,
+            help = "Requested chunk size in bytes (server clamps to its max)"
+        )]
+        chunk_size: Option<u64>,
+        #[arg(long, help = "Overwrite an existing local file")]
+        overwrite: bool,
+        #[arg(long, help = "Resume a previously interrupted download")]
+        resume: bool,
+        #[arg(long = "no-progress", help = "Suppress the progress indicator")]
+        no_progress: bool,
+        #[arg(long, help = "Working directory override")]
+        cwd: Option<String>,
+        #[arg(long, default_value = "human")]
+        output: String,
+    },
 }
 
 #[derive(Subcommand, Clone, Debug)]

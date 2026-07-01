@@ -38,6 +38,7 @@ use crate::cli::{
 };
 
 mod pop;
+mod transfer;
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 // PR #5a: interpreted as an IDLE deadline (resets on every chunk/event),
@@ -236,6 +237,11 @@ enum RemoteFileOp {
 #[derive(Debug, Clone)]
 enum RemoteRenderMode {
     Raw,
+    /// Capture stdout into `CallResult.stdout` without streaming or printing
+    /// anything. Used by orchestrated multi-call flows (e.g. chunked file
+    /// transfer) that need to parse each intermediate op's JSON result
+    /// programmatically instead of surfacing it to the terminal.
+    Capture,
     File {
         op: RemoteFileOp,
         json: bool,
@@ -1834,7 +1840,15 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             return Err(BifrostError::Config(msg));
         }
     }
-    let mut command = if matches!(&opts.action, RemoteCommands::Run(_)) {
+    let is_file_transfer = matches!(
+        &opts.action,
+        RemoteCommands::File { action }
+            if matches!(
+                action.as_ref(),
+                RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. }
+            )
+    );
+    let mut command = if matches!(&opts.action, RemoteCommands::Run(_)) || is_file_transfer {
         None
     } else {
         Some(build_remote_command_checked(&opts.action)?)
@@ -1961,6 +1975,22 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
 
     let transport = merge_transport_context(&conn, &grant)?;
+    if let RemoteCommands::File { action } = &opts.action {
+        if matches!(
+            action.as_ref(),
+            RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. }
+        ) {
+            return transfer::handle_remote_file_transfer(
+                &caller,
+                &conn,
+                &grant,
+                &caller_identity,
+                &transport,
+                action.as_ref(),
+            )
+            .await;
+        }
+    }
     let mut remote_run_cleanup: Option<(String, Option<String>)> = None;
     if let RemoteCommands::Run(run_args) = &opts.action {
         let remote_script_path = prepare_remote_run_script(
@@ -3689,6 +3719,13 @@ fn build_remote_file_command(
                 output.clone(),
             )
         }
+        RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. } => {
+            return Err(BifrostError::Config(
+                "`remote file upload`/`download` use the chunked transfer orchestrator and \
+                 do not build a single encrypted command"
+                    .to_string(),
+            ));
+        }
     };
 
     let render_op = match action {
@@ -3707,6 +3744,9 @@ fn build_remote_file_command(
         RemoteFileCommands::Move { .. } => RemoteFileOp::Move,
         RemoteFileCommands::Delete { .. } => RemoteFileOp::Delete,
         RemoteFileCommands::Patch { .. } => RemoteFileOp::Patch,
+        RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. } => {
+            unreachable!("upload/download handled by the transfer orchestrator")
+        }
     };
     let render_json = output.eq_ignore_ascii_case("json");
 
@@ -4727,6 +4767,9 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
                         println!();
                     }
                 }
+                // Capture mode is consumed programmatically by the caller
+                // (chunked transfer orchestrator); never echo it to stdout.
+                RemoteRenderMode::Capture => {}
                 RemoteRenderMode::File { op, json } => {
                     if *json {
                         print!("{stdout}");

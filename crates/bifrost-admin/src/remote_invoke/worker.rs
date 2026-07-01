@@ -4529,6 +4529,8 @@ mod tests {
                 respect_gitignore: None,
                 allow_overwrite: Some(true),
                 allow_recursive_delete: Some(false),
+                max_transfer_bytes: None,
+                transfer_chunk_max_bytes: None,
             }],
             default: None,
         };

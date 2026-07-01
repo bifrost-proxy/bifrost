@@ -99,6 +99,10 @@ pub(crate) struct RawGrantPolicy {
     pub allow_overwrite: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_recursive_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_transfer_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_chunk_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
@@ -121,6 +125,10 @@ pub(crate) struct RawDefaultPolicy {
     pub allow_overwrite: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_recursive_delete: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_transfer_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transfer_chunk_max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -230,6 +238,12 @@ impl FileAccessPolicyStore {
             if let Some(allow) = g.allow_recursive_delete {
                 policy.allow_recursive_delete = allow;
             }
+            if let Some(max) = g.max_transfer_bytes {
+                policy.max_transfer_bytes = max;
+            }
+            if let Some(max) = g.transfer_chunk_max_bytes {
+                policy.transfer_chunk_max_bytes = max;
+            }
             entries.push((g.match_, policy));
         }
 
@@ -257,6 +271,12 @@ impl FileAccessPolicyStore {
             }
             if let Some(allow) = d.allow_recursive_delete {
                 policy.allow_recursive_delete = allow;
+            }
+            if let Some(max) = d.max_transfer_bytes {
+                policy.max_transfer_bytes = max;
+            }
+            if let Some(max) = d.transfer_chunk_max_bytes {
+                policy.transfer_chunk_max_bytes = max;
             }
             policy
         });
@@ -331,6 +351,8 @@ pub fn full_file_ops() -> Vec<FileOp> {
         FileOp::Move,
         FileOp::Delete,
         FileOp::ApplyPatch,
+        FileOp::Upload,
+        FileOp::Download,
     ]
 }
 
@@ -558,6 +580,8 @@ pub(crate) fn merge_ssh_fingerprint_grant_in_place(
         respect_gitignore: None,
         allow_overwrite,
         allow_recursive_delete,
+        max_transfer_bytes: None,
+        transfer_chunk_max_bytes: None,
     };
     for g in cfg.grants.iter_mut() {
         if g.match_.ssh_fingerprint.as_deref() == Some(fingerprint) {
@@ -1089,7 +1113,7 @@ ops = ["read"]
     #[test]
     fn full_file_ops_covers_complete_file_surface() {
         let ops = full_file_ops();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 16);
         for expected in [
             FileOp::Read,
             FileOp::ReadMany,
@@ -1105,6 +1129,8 @@ ops = ["read"]
             FileOp::Move,
             FileOp::Delete,
             FileOp::ApplyPatch,
+            FileOp::Upload,
+            FileOp::Download,
         ] {
             assert!(ops.contains(&expected), "missing op {:?}", expected);
         }

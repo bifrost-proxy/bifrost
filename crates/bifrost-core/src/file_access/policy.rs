@@ -37,6 +37,11 @@ pub enum FileOp {
     Delete,
     // --- Phase 3 (unified-diff apply) ---
     ApplyPatch,
+    // --- Phase 4 (chunked large-file transfer) ---
+    /// Caller -> remote chunked write (large-file upload). Write-class.
+    Upload,
+    /// Remote -> caller chunked read (large-file download). Read-class.
+    Download,
 }
 
 impl FileOp {
@@ -56,6 +61,8 @@ impl FileOp {
             FileOp::Move => "move",
             FileOp::Delete => "delete",
             FileOp::ApplyPatch => "apply_patch",
+            FileOp::Upload => "upload",
+            FileOp::Download => "download",
         }
     }
 
@@ -69,6 +76,7 @@ impl FileOp {
                 | FileOp::Move
                 | FileOp::Delete
                 | FileOp::ApplyPatch
+                | FileOp::Upload
         )
     }
 }
@@ -147,6 +155,20 @@ pub struct FileAccessPolicy {
     /// Whether `file.delete` may remove non-empty directories. Default: false.
     #[serde(default)]
     pub allow_recursive_delete: bool,
+
+    /// Maximum total bytes for a single chunked transfer (upload or
+    /// download). Guards against disk exhaustion. Default: 5 GiB.
+    #[serde(default = "default_max_transfer_bytes")]
+    pub max_transfer_bytes: u64,
+
+    /// Server-side clamp (raw bytes) for a single transfer chunk. Download
+    /// chunk bytes are sealed into a POP call frame and POSTed back to the
+    /// caller through the Relay, whose per-frame body limit is 2 MiB. A raw
+    /// chunk is base64-inflated twice (chunk_b64, then the enveloped stdout)
+    /// plus JSON overhead — roughly 2x — so the clamp keeps the largest
+    /// possible frame safely under that ceiling. Default: 1 MiB.
+    #[serde(default = "default_transfer_chunk_max_bytes")]
+    pub transfer_chunk_max_bytes: u64,
 }
 
 fn default_max_read_bytes() -> u64 {
@@ -154,6 +176,12 @@ fn default_max_read_bytes() -> u64 {
 }
 fn default_max_write_bytes() -> u64 {
     2 * 1024 * 1024
+}
+fn default_max_transfer_bytes() -> u64 {
+    5 * 1024 * 1024 * 1024
+}
+fn default_transfer_chunk_max_bytes() -> u64 {
+    1024 * 1024
 }
 fn default_true() -> bool {
     true
@@ -311,12 +339,15 @@ impl FileAccessPolicy {
                 FileOp::Search,
                 FileOp::Hash,
                 FileOp::Outline,
+                FileOp::Download,
             ],
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
             respect_gitignore: true,
             allow_overwrite: true,
             allow_recursive_delete: false,
+            max_transfer_bytes: default_max_transfer_bytes(),
+            transfer_chunk_max_bytes: default_transfer_chunk_max_bytes(),
         }
     }
 
@@ -342,12 +373,16 @@ impl FileAccessPolicy {
                 FileOp::Move,
                 FileOp::Delete,
                 FileOp::ApplyPatch,
+                FileOp::Upload,
+                FileOp::Download,
             ],
             max_read_bytes: default_max_read_bytes(),
             max_write_bytes: default_max_write_bytes(),
             respect_gitignore: true,
             allow_overwrite: true,
             allow_recursive_delete: false,
+            max_transfer_bytes: default_max_transfer_bytes(),
+            transfer_chunk_max_bytes: default_transfer_chunk_max_bytes(),
         }
     }
 }
