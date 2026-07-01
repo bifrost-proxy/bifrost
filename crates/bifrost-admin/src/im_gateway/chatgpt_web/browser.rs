@@ -432,9 +432,8 @@ impl BrowserSession {
         }
 
         // Try to recover an orphaned browser from a previous service run.
-        // Note: orphaned browsers have unknown headless state; we recover
-        // optimistically and will relaunch on next mode mismatch.
-        if let Some(port) = try_recover_orphaned_browser(&config.profile_dir).await {
+        // Only reuse it when its command line proves the same headed/headless mode.
+        if let Some(port) = try_recover_orphaned_browser(&config.profile_dir, headless).await {
             browser_ports().insert(config.profile_dir.clone(), (port, headless));
             return Ok(Self {
                 port,
@@ -796,8 +795,8 @@ fn page_url_matches_conversation(url: &str, base_url: &str, conversation_id: &st
 mod tests {
     use super::{
         browser_process_candidate_from_line, browser_process_pid_from_line, conversation_tabs,
-        get_conversation_tab, page_url_matches_conversation, register_conversation_tab, CdpClient,
-        CONVERSATION_TAB_POOL_SIZE,
+        get_conversation_tab, page_url_matches_conversation, recovered_browser_mode_matches,
+        register_conversation_tab, CdpClient, CONVERSATION_TAB_POOL_SIZE,
     };
     use dashmap::DashMap;
     use serde_json::Value;
@@ -885,6 +884,16 @@ mod tests {
             browser_process_candidate_from_line(&main_line, profile),
             Some((53843, 94982, true))
         );
+    }
+
+    #[test]
+    fn recovered_browser_mode_must_match_requested_execution_mode() {
+        assert!(recovered_browser_mode_matches(true, Some(true)));
+        assert!(recovered_browser_mode_matches(false, Some(false)));
+        assert!(!recovered_browser_mode_matches(false, Some(true)));
+        assert!(!recovered_browser_mode_matches(true, Some(false)));
+        assert!(!recovered_browser_mode_matches(false, None));
+        assert!(!recovered_browser_mode_matches(true, None));
     }
 
     #[test]
@@ -977,10 +986,11 @@ mod tests {
 /// When the service restarts, the in-memory BROWSER_PORTS map is lost, but the
 /// browser process may still be alive. This function scans the OS process list
 /// for a browser using the same `--user-data-dir` and extracts its debug port.
-async fn try_recover_orphaned_browser(profile_dir: &Path) -> Option<u16> {
+async fn try_recover_orphaned_browser(profile_dir: &Path, requested_headless: bool) -> Option<u16> {
     let profile_str = profile_dir.display().to_string();
     info!(
         profile_dir = %profile_str,
+        headless = requested_headless,
         "chatgpt_web browser: checking for orphaned browser process"
     );
 
@@ -990,26 +1000,65 @@ async fn try_recover_orphaned_browser(profile_dir: &Path) -> Option<u16> {
         if let Some(port_str) = contents.lines().next() {
             if let Ok(port) = port_str.trim().parse::<u16>() {
                 if is_browser_responsive(port).await {
-                    info!(
-                        port,
-                        "chatgpt_web browser: recovered orphaned browser via DevToolsActivePort"
-                    );
-                    // Try to find the PID for tracking.
-                    if let Some(pid) = find_browser_pid_for_profile(&profile_str).await {
+                    let Some(pid) = find_browser_pid_for_profile(&profile_str).await else {
+                        warn!(
+                            port,
+                            "chatgpt_web browser: orphaned browser has responsive port but unknown PID; relaunching"
+                        );
+                        return None;
+                    };
+                    if recovered_browser_process_matches_requested_mode(
+                        &profile_str,
+                        pid,
+                        requested_headless,
+                    )
+                    .await
+                    {
+                        info!(
+                            port,
+                            pid,
+                            headless = requested_headless,
+                            "chatgpt_web browser: recovered orphaned browser via DevToolsActivePort"
+                        );
                         browser_pids().insert(profile_dir.to_path_buf(), pid);
+                        return Some(port);
                     }
-                    return Some(port);
+                    warn!(
+                        port,
+                        pid,
+                        requested_headless,
+                        "chatgpt_web browser: orphaned browser mode mismatch via DevToolsActivePort; killing before relaunch"
+                    );
+                    kill_process(pid);
+                    sleep(Duration::from_secs(1)).await;
+                    return None;
                 }
             }
         }
     }
 
     // Method 2: Scan process list for matching --user-data-dir and extract --remote-debugging-port.
-    if let Some((port, pid)) = find_orphaned_browser_from_processes(&profile_str).await {
+    if let Some((port, pid, actual_headless)) =
+        find_orphaned_browser_from_processes(&profile_str).await
+    {
+        if !recovered_browser_mode_matches(requested_headless, Some(actual_headless)) {
+            warn!(
+                port,
+                pid,
+                requested_headless,
+                actual_headless,
+                "chatgpt_web browser: orphaned browser mode mismatch via process scan; killing before relaunch"
+            );
+            kill_process(pid);
+            sleep(Duration::from_secs(1)).await;
+            return None;
+        }
         if is_browser_responsive(port).await {
             info!(
                 port,
-                pid, "chatgpt_web browser: recovered orphaned browser via process scan"
+                pid,
+                headless = actual_headless,
+                "chatgpt_web browser: recovered orphaned browser via process scan"
             );
             browser_pids().insert(profile_dir.to_path_buf(), pid);
             return Some(port);
@@ -1026,6 +1075,19 @@ async fn try_recover_orphaned_browser(profile_dir: &Path) -> Option<u16> {
     }
 
     None
+}
+
+fn recovered_browser_mode_matches(requested_headless: bool, actual_headless: Option<bool>) -> bool {
+    actual_headless == Some(requested_headless)
+}
+
+async fn recovered_browser_process_matches_requested_mode(
+    profile_str: &str,
+    pid: u32,
+    requested_headless: bool,
+) -> bool {
+    let actual_headless = browser_process_headless_for_profile(profile_str, pid).await;
+    recovered_browser_mode_matches(requested_headless, actual_headless)
 }
 
 /// Find the main browser PID matching a profile directory.
@@ -1058,7 +1120,7 @@ async fn find_browser_pid_for_profile(profile_str: &str) -> Option<u32> {
 }
 
 /// Scan running processes for a browser with the given user-data-dir and extract its debug port.
-async fn find_orphaned_browser_from_processes(profile_str: &str) -> Option<(u16, u32)> {
+async fn find_orphaned_browser_from_processes(profile_str: &str) -> Option<(u16, u32, bool)> {
     let profile_str = profile_str.to_string();
     tokio::task::spawn_blocking(move || {
         let output = std::process::Command::new("ps")
@@ -1068,19 +1130,44 @@ async fn find_orphaned_browser_from_processes(profile_str: &str) -> Option<(u16,
             .output()
             .ok()?;
         let stdout = String::from_utf8_lossy(&output.stdout);
-        let mut fallback: Option<(u16, u32)> = None;
+        let mut fallback: Option<(u16, u32, bool)> = None;
         for line in stdout.lines() {
-            let Some((port, pid, is_main_browser)) =
-                browser_process_candidate_from_line(line, &profile_str)
+            let Some((port, pid, is_main_browser, headless)) =
+                browser_process_candidate_with_mode_from_line(line, &profile_str)
             else {
                 continue;
             };
             if is_main_browser {
-                return Some((port, pid));
+                return Some((port, pid, headless));
             }
-            fallback.get_or_insert((port, pid));
+            fallback.get_or_insert((port, pid, headless));
         }
         fallback
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn browser_process_headless_for_profile(profile_str: &str, pid: u32) -> Option<bool> {
+    let profile_str = profile_str.to_string();
+    tokio::task::spawn_blocking(move || {
+        let output = std::process::Command::new("ps")
+            .args(["axo", "pid,command"])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let Some((line_pid, _)) = browser_process_pid_from_line(line, &profile_str) else {
+                continue;
+            };
+            if line_pid == pid {
+                return Some(line.contains("--headless"));
+            }
+        }
+        None
     })
     .await
     .ok()
@@ -1127,13 +1214,23 @@ fn browser_process_pid_from_line(line: &str, profile_str: &str) -> Option<(u32, 
     Some((pid, is_main_browser))
 }
 
+#[cfg(test)]
 fn browser_process_candidate_from_line(line: &str, profile_str: &str) -> Option<(u16, u32, bool)> {
+    let (port, pid, is_main_browser, _) =
+        browser_process_candidate_with_mode_from_line(line, profile_str)?;
+    Some((port, pid, is_main_browser))
+}
+
+fn browser_process_candidate_with_mode_from_line(
+    line: &str,
+    profile_str: &str,
+) -> Option<(u16, u32, bool, bool)> {
     let (pid, is_main_browser) = browser_process_pid_from_line(line, profile_str)?;
     let port = line
         .split_whitespace()
         .find_map(|arg| arg.strip_prefix("--remote-debugging-port="))
         .and_then(|val| val.parse::<u16>().ok())?;
-    Some((port, pid, is_main_browser))
+    Some((port, pid, is_main_browser, line.contains("--headless")))
 }
 
 fn kill_process(pid: u32) {

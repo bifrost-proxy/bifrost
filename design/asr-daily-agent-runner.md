@@ -46,6 +46,8 @@ ASR 定时任务完成音频转写后，自动触发 Daily Agent Runner 队列�
 | 11 | 默认 Agent | 默认启用两个 Agent：`daily_report` 输出到 `report/`；`tomorrow_todo` 输出到 `tomorrow_todo/`，并默认绑定 `owner:feishu-main` 发送完整报告 |
 | 12 | Agent 标识约束 | `id`、`name`、`output_dir` 必须只包含英文字符、数字、`_`、`-`，避免跨平台路径与 URL 参数歧义 |
 | 13 | Agent 工作目录 | Runner cwd 必须是 `.daily/agents/<agent_id>`；源文件消费路径固定为 `input/YYYY-MM-DD.md`，报告输出路径固定为 `output/<output_dir>/YYYY-MM-DD-report.md` |
+| 14 | ChatGPT Web 最终输出契约 | `daily_report` 必须输出 `# YYYY-MM-DD 日报`、`## 今日概览`、`## 证据与不确定性`；`tomorrow_todo` 必须输出 `# 明日 To Do List - YYYY-MM-DD`、`## 明天必须完成`、`## 可选推进`、`## 需要确认`。重试与续写提示必须按 Agent 契约分流，禁止把 `tomorrow_todo` 误导为日报 |
+| 15 | ChatGPT Web browser 恢复 | 服务重启或模式切换后只恢复与当前 `execution_mode` 可确认一致的 orphan browser；headed 请求不得复用旧 headless 进程，headless 请求也不得复用旧 headed 进程 |
 
 ---
 
@@ -915,7 +917,7 @@ build_daily_agent_change_plan(task, trigger, date, force)
       │                │                    │◀─response─────────│
       │◀─result + conv_ref─────────────────│                   │
       │                │                    │                   │
-      │─validate report title/date/sections/length              │
+      │─validate agent-specific title/date/sections/length      │
       │                │                    │                   │
       │─[invalid + conv_ref] retry same conversation───────────▶│
       │                │                    │─msg: output final │
@@ -940,6 +942,21 @@ build_daily_agent_change_plan(task, trigger, date, force)
       │◀─result────────────────────────────│                   │
       │                │                    │                   │
 ```
+
+校验与纠偏必须从当前 Agent 的配置派生：
+
+- `daily_report` 或 `output_dir=report` 使用日报契约：`# YYYY-MM-DD 日报`、`## 今日概览`、`## 证据与不确定性`，并保持最小长度、目标日期和 placeholder 拒绝逻辑。
+- `tomorrow_todo` 或 `output_dir=tomorrow_todo` 使用明日待办契约：`# 明日 To Do List - YYYY-MM-DD`、`## 明天必须完成`、`## 可选推进`、`## 需要确认`，并拒绝日报标题和 ChatGPT 状态占位文本。
+- 其它自定义 Agent 只做通用最终 Markdown 防护：内容非空、包含目标日期或 Markdown 一级标题，且不等于状态/错误占位文本，避免把自定义 Agent 锁死到默认模板。
+- retry prompt 与 continuation prompt 必须使用同一份契约说明；`tomorrow_todo` 的重试提示不得出现“日报正文”“今日概览”或“证据与不确定性”。
+- ChatGPT Web 浏览器池恢复 orphan browser 时，必须从进程命令行确认 `--headless` 与请求模式一致。无法确认或不一致时不恢复该端口，并清理同 profile 的旧进程，保证用户切到 headed run 后能获得可见窗口。
+
+本次回归验证计划：
+
+- 单元测试覆盖 `daily_report` 旧契约、`tomorrow_todo` 新契约、`tomorrow_todo` 拒绝日报响应、续写合并、以及 browser recovery 的 headed/headless/unknown 决策。
+- E2E 在 `test_asr_daily_agents_api.sh` 中保留真实 Admin API + Runner 链路，并增加源码级断言，防止 `tomorrow_todo` 重试提示回退为日报。
+- human_tests 在 `asr-daily-agents.md` 中新增 ChatGPT Web 多 Agent 输出契约与 headed browser recovery 回归用例，并按文档真实执行对应自动化/静态验收命令。
+- Review/Fix/Test 第 1 轮复核目标、`git diff`、Daily Agent validator、browser recovery 和新增测试后运行相关最小测试；第 2 轮基于修复后的最新 diff 再复核文档、human_tests、E2E 和 workspace 级验证，若发现阻塞问题继续追加轮次。
 
 ### 13.3 Bifrost Agent / Codex 本地运行
 

@@ -30,6 +30,31 @@ pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
     text: &str,
     stop_marker_path: &Path,
 ) -> Result<SendResult, String> {
+    let result =
+        send_with_browser_attempts(config, auth, conversation_id, text, stop_marker_path).await;
+    match result {
+        Ok(result) => Ok(result),
+        Err(error) if should_retry_headless_with_temporary_headed(config, &error) => {
+            send_with_temporary_headed_fallback(
+                config,
+                conversation_id,
+                text,
+                stop_marker_path,
+                &error,
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn send_with_browser_attempts(
+    config: &RuntimeConfig,
+    auth: &AuthState,
+    conversation_id: Option<&str>,
+    text: &str,
+    stop_marker_path: &Path,
+) -> Result<SendResult, String> {
     // Retry the entire send operation if we hit transient browser UI issues
     // (e.g. send button not found, click didn't trigger POST, CDP timeout).
     // CDP errors get more attempts because the first retry closes the dead
@@ -109,6 +134,69 @@ pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
         }
     }
     Err(last_error)
+}
+
+fn should_retry_headless_with_temporary_headed(config: &RuntimeConfig, error: &str) -> bool {
+    !config.browser.execution_mode.eq_ignore_ascii_case("headed")
+        && send_error_needs_manual_intervention(error)
+}
+
+fn send_error_needs_manual_intervention(error: &str) -> bool {
+    let error_lower = error.to_ascii_lowercase();
+    error_lower.contains("auth_required:")
+        || error_lower.contains("human_verification_required:")
+        || error_lower.contains("verify you are human")
+        || error_lower.contains("checking if the site connection is secure")
+        || error_lower.contains("just a moment")
+        || error_lower.contains("cloudflare")
+        || error.contains("验证您是真人")
+        || error.contains("请稍候")
+}
+
+async fn send_with_temporary_headed_fallback(
+    config: &RuntimeConfig,
+    conversation_id: Option<&str>,
+    text: &str,
+    stop_marker_path: &Path,
+    original_error: &str,
+) -> Result<SendResult, String> {
+    warn!(
+        conversation_id = ?conversation_id,
+        original_error = %original_error,
+        "chatgpt_web send: headless run needs manual intervention; temporarily switching to headed"
+    );
+    BrowserSession::kill_headless_for_profile(config).await;
+
+    let mut headed_config = config.clone();
+    headed_config.browser.execution_mode = "headed".to_string();
+    headed_config.browser.keep_browser_open_after_login = false;
+    let refreshed_auth = match super::open_login_and_capture(&headed_config).await {
+        Ok(auth) => auth,
+        Err(error) => {
+            BrowserSession::kill_for_profile(&headed_config).await;
+            warn!(
+                conversation_id = ?conversation_id,
+                error = %error,
+                "chatgpt_web send: temporary headed intervention failed; restored headless mode for future runs"
+            );
+            return Err(format!(
+                "{original_error}; temporary_headed_intervention_failed: {error}"
+            ));
+        }
+    };
+    BrowserSession::kill_for_profile(&headed_config).await;
+    info!(
+        conversation_id = ?conversation_id,
+        "chatgpt_web send: temporary headed intervention completed; restored headless mode for current retry and future runs"
+    );
+    send_with_browser_attempts(
+        config,
+        &refreshed_auth,
+        conversation_id,
+        text,
+        stop_marker_path,
+    )
+    .await
 }
 
 /// Check if a send error is transient and worth retrying the whole operation.
@@ -378,11 +466,12 @@ async fn send_with_browser_once(
         let mut expected_conversation_id = conversation_id;
         let strong_consistency = config.chatgpt.is_strong_consistency();
 
-        recover_visible_auth_flow_if_needed(
+        recover_visible_manual_intervention_if_needed(
             cdp,
             &navigate_url,
             expected_conversation_id,
             Duration::from_secs(AUTH_FLOW_RECOVERY_TIMEOUT_SECS),
+            headless,
         )
         .await?;
 
@@ -2143,8 +2232,8 @@ async fn wait_composer(
     while tokio::time::Instant::now() < deadline {
         let diagnostic = inspect_page(cdp).await?;
         last = diagnostic.clone();
-        if page_state_is_auth_flow_page(&diagnostic) {
-            return Err(auth_required_page_error(&diagnostic));
+        if page_state_needs_manual_intervention(&diagnostic) {
+            return Err(manual_intervention_page_error(&diagnostic));
         }
         if target_page_matches(&diagnostic, expected_conversation_id, true) {
             // Brief settling wait — allows React to finish any micro-task
@@ -2411,8 +2500,8 @@ async fn wait_target_page(
     while tokio::time::Instant::now() < deadline {
         let state = inspect_page(cdp).await?;
         last = state.clone();
-        if page_state_is_auth_flow_page(&state) {
-            return Err(auth_required_page_error(&state));
+        if page_state_needs_manual_intervention(&state) {
+            return Err(manual_intervention_page_error(&state));
         }
 
         let ready = state
@@ -2546,8 +2635,8 @@ async fn assert_target_page(
     if target_page_matches(&state, expected_conversation_id, require_composer) {
         return Ok(());
     }
-    if page_state_is_auth_flow_page(&state) {
-        return Err(auth_required_page_error(&state));
+    if page_state_needs_manual_intervention(&state) {
+        return Err(manual_intervention_page_error(&state));
     }
     Err(target_page_error(&state, expected_conversation_id))
 }
@@ -2635,8 +2724,8 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_error(
     state: &Value,
     expected_conversation_id: Option<&str>,
 ) -> String {
-    if page_state_is_auth_flow_page(state) {
-        return auth_required_page_error(state);
+    if page_state_needs_manual_intervention(state) {
+        return manual_intervention_page_error(state);
     }
     let actual = state.get("conversationId").and_then(Value::as_str);
     let url_conversation_id = state.get("urlConversationId").and_then(Value::as_str);
@@ -2660,34 +2749,38 @@ pub(in crate::im_gateway::chatgpt_web) fn target_page_error(
     )
 }
 
-async fn recover_visible_auth_flow_if_needed(
+async fn recover_visible_manual_intervention_if_needed(
     cdp: &CdpClient,
     navigate_url: &str,
     expected_conversation_id: Option<&str>,
     duration: Duration,
+    headless: bool,
 ) -> Result<(), String> {
     let mut state = inspect_page(cdp).await?;
-    if !page_state_is_auth_flow_page(&state) {
+    if !page_state_needs_manual_intervention(&state) {
         return Ok(());
+    }
+    if headless {
+        return Err(manual_intervention_page_error(&state));
     }
     warn!(
         page_state = %state,
         expected_conversation_id,
-        "chatgpt_web send: browser entered auth flow; waiting instead of re-navigating"
+        "chatgpt_web send: browser needs manual intervention; waiting instead of re-navigating"
     );
 
     let deadline = tokio::time::Instant::now() + duration;
     while tokio::time::Instant::now() < deadline {
         sleep(Duration::from_secs(1)).await;
         state = inspect_page(cdp).await?;
-        if page_state_is_auth_flow_page(&state) {
+        if page_state_needs_manual_intervention(&state) {
             continue;
         }
         if target_page_matches(&state, expected_conversation_id, false) {
             info!(
                 page_state = %state,
                 expected_conversation_id,
-                "chatgpt_web send: auth flow returned to expected page"
+                "chatgpt_web send: manual intervention returned to expected page"
             );
             return Ok(());
         }
@@ -2695,14 +2788,14 @@ async fn recover_visible_auth_flow_if_needed(
             %navigate_url,
             page_state = %state,
             expected_conversation_id,
-            "chatgpt_web send: auth flow finished away from target, navigating back once"
+            "chatgpt_web send: manual intervention finished away from target, navigating back once"
         );
         cdp.navigate_and_wait(navigate_url, Duration::from_secs(20))
             .await?;
         return Ok(());
     }
 
-    Err(auth_required_page_error(&state))
+    Err(manual_intervention_page_error(&state))
 }
 
 /// This is not an auth validator. Full login-state validation remains in
@@ -2751,6 +2844,39 @@ pub(in crate::im_gateway::chatgpt_web) fn page_state_is_auth_flow_page(state: &V
         || body.contains("使用 google 账号继续")
 }
 
+fn page_state_needs_manual_intervention(state: &Value) -> bool {
+    page_state_is_auth_flow_page(state) || page_state_is_human_verification_page(state)
+}
+
+fn page_state_is_human_verification_page(state: &Value) -> bool {
+    let title = state
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let body = state
+        .get("bodyText")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let combined_lower = format!("{title}\n{body}").to_ascii_lowercase();
+    combined_lower.contains("verify you are human")
+        || combined_lower.contains("checking if the site connection is secure")
+        || combined_lower.contains("just a moment")
+        || combined_lower.contains("cloudflare")
+        || combined_lower.contains("cf-turnstile")
+        || title.contains("请稍候")
+        || body.contains("请验证您是真人")
+        || body.contains("验证您是真人")
+        || body.contains("正在检查站点连接是否安全")
+}
+
+fn manual_intervention_page_error(state: &Value) -> String {
+    if page_state_is_auth_flow_page(state) {
+        auth_required_page_error(state)
+    } else {
+        human_verification_page_error(state)
+    }
+}
+
 fn auth_required_page_error(state: &Value) -> String {
     let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
     let title = state
@@ -2763,6 +2889,21 @@ fn auth_required_page_error(state: &Value) -> String {
         .unwrap_or_default();
     format!(
         "auth_required: ChatGPT Web browser is still in auth flow: url={url} title={title:?} readyState={ready}"
+    )
+}
+
+fn human_verification_page_error(state: &Value) -> String {
+    let url = state.get("url").and_then(Value::as_str).unwrap_or_default();
+    let title = state
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let ready = state
+        .get("readyState")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    format!(
+        "human_verification_required: ChatGPT Web browser needs manual verification: url={url} title={title:?} readyState={ready}"
     )
 }
 
@@ -3580,8 +3721,10 @@ mod tests {
 
 #[cfg(test)]
 mod coverage_boost {
+    use super::super::{BrowserConfig, ChatGptConfig};
     use super::*;
     use serde_json::{json, Value};
+    use std::path::PathBuf;
 
     // --- parse_send_sse additional coverage ---
 
@@ -3901,6 +4044,49 @@ mod coverage_boost {
         assert!(err.contains("readyState=complete"));
     }
 
+    #[test]
+    fn page_state_is_human_verification_page_matches_cloudflare_challenge() {
+        let state = json!({
+            "url": "https://chatgpt.com/",
+            "title": "请稍候…",
+            "readyState": "complete",
+            "bodyText": "请验证您是真人。Checking if the site connection is secure. Cloudflare",
+        });
+        assert!(page_state_is_human_verification_page(&state));
+        assert!(page_state_needs_manual_intervention(&state));
+        let err = manual_intervention_page_error(&state);
+        assert!(err.starts_with("human_verification_required:"));
+        assert!(err.contains("title=\"请稍候…\""));
+    }
+
+    #[test]
+    fn headless_manual_intervention_errors_trigger_temporary_headed_fallback() {
+        let headless = test_runtime_config_with_execution_mode("headless");
+        let headed = test_runtime_config_with_execution_mode("headed");
+
+        assert!(should_retry_headless_with_temporary_headed(
+            &headless,
+            "auth_required: ChatGPT Web browser is still in auth flow"
+        ));
+        assert!(should_retry_headless_with_temporary_headed(
+            &headless,
+            "browser_ui: composer not ready: {\"title\":\"请稍候…\",\"bodyText\":\"请验证您是真人\"}"
+        ));
+        assert!(!should_retry_headless_with_temporary_headed(
+            &headed,
+            "human_verification_required: verify you are human"
+        ));
+        let titled_headed = test_runtime_config_with_execution_mode("Headed");
+        assert!(!should_retry_headless_with_temporary_headed(
+            &titled_headed,
+            "auth_required: ChatGPT Web browser is still in auth flow"
+        ));
+        assert!(!should_retry_headless_with_temporary_headed(
+            &headless,
+            "browser_ui: send button not actionable"
+        ));
+    }
+
     // --- small helpers: page_body_has_fatal_error, should_retry_as_new_conversation ---
 
     #[test]
@@ -4017,6 +4203,24 @@ mod coverage_boost {
         } else {
             assert_eq!(modifier, 2);
             assert_eq!((key, vk), ("Control", 17));
+        }
+    }
+
+    fn test_runtime_config_with_execution_mode(execution_mode: &str) -> RuntimeConfig {
+        let browser = BrowserConfig {
+            execution_mode: execution_mode.to_string(),
+            ..Default::default()
+        };
+        let root = PathBuf::from(format!(
+            "/tmp/bifrost-chatgpt-web-send-test-{execution_mode}"
+        ));
+        RuntimeConfig {
+            browser,
+            chatgpt: ChatGptConfig::default(),
+            profile_dir: root.join("profile"),
+            state_path: root.join("auth_state.json"),
+            sessions_path: root.join("sessions.json"),
+            attachments_dir: root.join("attachments"),
         }
     }
 }
