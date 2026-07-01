@@ -54,6 +54,7 @@
 - 本地 payload 入口：`remote file write/edit/patch` 均应支持 caller 侧 `--from-local <path|->`。`write --from-local` 等价 `--content-file`，`edit --from-local` 读取 edits JSON 数组，`patch --from-local` 等价 `--patch-file`；`mkdir/move/delete` 不存在 caller 本地 payload，不提供该参数。
 - 连接恢复边界：客户端 stream 断开、digest mismatch 或本地切线程时，优先用 `remote job logs/watch/status` 续接已有 call；只有 grant/authorization/transport identity 失效时，才执行 `remote conn down/up` 重建连接。
 - 调用异常恢复：当 `bifrost remote` 调用出现子命令不存在、参数不兼容、协议错误、行为与本地 skill 不一致等异常时，Agent 必须主动获取远端最新 `skill_remote.md`，以 https://github.com/bifrost-proxy/bifrost/blob/main/skill_remote.md 为权威入口核对命令面、参数、错误码和恢复流程，避免用过期本地 skill 误判能力不存在。
+- Relay HTTPS 信任：remote skill 必须说明 remote relay client 默认读取系统 CA，支持 `BIFROST_REMOTE_RELAY_CA_BUNDLE` 与常见 CA env 追加私有根证书；当 CA 无法注入时，`BIFROST_REMOTE_UNSAFE_SSL=1` 可作为最终兜底跳过 remote relay 证书信任校验，且该开关只作用于 remote relay HTTP/SSE client，不等同于代理服务 `--unsafe-ssl`。
 - shell 环境语义：默认 shell-text 使用非 login shell 保持 stdout 干净；需要用户 PATH/rc 时显式 `--login`，并说明 CLI 注入 `BIFROST_REMOTE=1`、`TERM=dumb` 等降噪环境，`--cwd` 在 shell 内部再次生效。
 - 查询类前置条件：目标 Bifrost 已启动、Relay Connection 在线、目标端 Remote Invoke 页面已通过 SSH key 或 pair code 授权 caller，并可用 `bifrost remote conn status` 验证。
 - shell 执行类前置条件：满足查询类前置条件，且目标端已配置 Shell Access profile/policy，授权请求选择 `selected` 或 `all`，必要时开启 stdin/interactive。
@@ -100,6 +101,7 @@
 - `resolve_local_connection_explicit_device_label_prefix_matches` / `resolve_local_connection_multiple_noninteractive_lists_choices`：验证 label/name 前缀选择与多连接候选提示。
 - `idle_timeout_message_mentions_seconds_and_job_watch`：验证 300 秒 idle timeout 的错误提示包含 detach/job watch 引导。
 - 验证 remote skill 要求调用异常时主动获取远端最新技能，并包含 https://github.com/bifrost-proxy/bifrost/blob/main/skill_remote.md 链接。
+- 验证 remote skill 包含 `BIFROST_REMOTE_RELAY_CA_BUNDLE`、常见 CA env 和 `BIFROST_REMOTE_UNSAFE_SSL` 的使用顺序、作用范围与风险说明。
 
 ### E2E 测试
 
@@ -123,6 +125,7 @@
 - remote skill 强制要求任何远端工程任务开始前先读取目标工程约束信息：`AGENTS.md` / `agents.md` 与 `.agents/skills/` 全量 skill 元信息，详细 skill 内容按需加载。
 - remote skill 指导 coding agent 使用新远程能力：长任务 detach/job cache 续接、断线后 job list/watch/logs/status 恢复、scratch-dir 安全临时目录、read-many policy deny 降级、login shell 降噪和连接身份漂移时的重连边界。
 - remote skill 指导 coding agent 在需要远端执行本地脚本时使用 `remote run`，在多远端任务中固定 `--client-id` 或 `BIFROST_REMOTE_CLIENT_ID`，并在 caller 侧避免 sleep 轮询。
+- remote skill 指导 coding agent 在 relay TLS 失败时优先使用系统/显式 CA，只有 CA 无法注入时才使用 `BIFROST_REMOTE_UNSAFE_SSL=1`。
 
 ## 校验要求
 

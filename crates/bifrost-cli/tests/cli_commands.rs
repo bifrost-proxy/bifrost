@@ -1514,6 +1514,10 @@ fn install_skill_installs_remote_skill_from_embedded_bundle() {
     // Bifrost remote file-API guidance (core value of the rewrite).
     assert!(remote_content.contains("bifrost remote file"));
     assert!(remote_content.contains("FileAccessPolicy"));
+    // Relay TLS trust guidance must be present in the installed remote skill.
+    assert!(remote_content.contains("BIFROST_REMOTE_RELAY_CA_BUNDLE"));
+    assert!(remote_content.contains("BIFROST_REMOTE_UNSAFE_SSL"));
+    assert!(remote_content.contains("remote relay HTTP/SSE client"));
     // `traffic.clear` is mutating and must not be advertised by the installed
     // remote skill.
     assert!(!remote_content.contains("traffic.clear"));

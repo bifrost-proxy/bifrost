@@ -740,6 +740,8 @@ bifrost remote exec --detach -- cargo test       # 长时间静默任务先 deta
 bifrost remote job watch <call_id> --output-file ./x.log  # 续接 detached job
 ```
 
+Relay HTTPS 私有 CA / 企业 MITM 优先通过系统 trust store 或 `BIFROST_REMOTE_RELAY_CA_BUNDLE=/path/to/ca.pem` 解决；只有 CA 无法注入的受控环境，才用 `BIFROST_REMOTE_UNSAFE_SSL=1 bifrost remote ...` 作为最终兜底跳过 remote relay 证书信任校验。该环境变量只作用于 remote relay HTTP/SSE client，不等同于代理服务 `--unsafe-ssl`。
+
 > **4-tier 命名（2026 Q2）**：旧的 `remote connect / disconnect / status（顶层）/ search（顶层）` 仍有过渡别名但运行时会打印 deprecation warning，下个 minor release 会移除；`remote command exec` 已硬切为 `remote exec`，没有别名。`remote file {mv, rm, search, apply-patch}` 也已硬切为 `{move, delete, find, patch}`。CI 有 `scripts/ci/check-remote-cli-legacy.sh` 守卫，引用旧名会让流水线红。
 
 边界说明：
