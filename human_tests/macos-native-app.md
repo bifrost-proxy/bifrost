@@ -487,6 +487,31 @@
 - Remote Invoke 历史中缺少 `created_at` 的旧 call 记录不能导致 Settings 页面或 smoke 崩溃。
 - Metrics、Access Control、Performance、Tray、Remote Access 等未完成 Settings 子页面本期不得暴露入口。
 
+### TC-MNA-20：Network 列表重复 ID、标题栏开关和应用图标布局回归
+
+**操作步骤：**
+1. 构建 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+2. 打开 Native `.app`，保持 Network 页面处于可见状态：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 在真实流量持续进入时等待 60 秒，并反复切换 Network / Rules / Settings / Network。
+4. 观察 Network 左侧 Filters 的 Applications 区域和顶部标题栏开关。
+5. 如需要从命令行确认进程仍存活：
+   ```bash
+   pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'
+   ```
+
+**预期结果：**
+- 即使 Admin 初始列表与 WebSocket delta 出现相同 request id，Network 表格也只保留同一 id 的最新行，不因 `Dictionary(uniqueKeysWithValues:)` 重复 key 触发 Swift runtime assertion 闪退。
+- 顶部 Breakpoint、TLS Decode、System Proxy 使用紧凑的系统 `NSSwitch`，尺寸接近 Rules 列表里的小 switch，不撑高标题栏。
+- Filters > Applications 的应用图标固定在 16x16 行内；Edge、Doubao、Codex、Lark 等图标不得溢出到后续行或覆盖 Domains 标题。
+- 持续滚动或新增流量时，过滤列表图标缓存不得加载原始大图到行布局；图标异常时显示系统 `app` 占位。
+- Network 页面 60 秒内不闪退，窗口仍名为 `Bifrost`。
+
 ## 清理步骤
 
 ```bash

@@ -418,19 +418,61 @@ private struct CompactToolbarToggle: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
 
-            Toggle("", isOn: Binding(
-                get: { isOn },
-                set: action
-            ))
-            .labelsHidden()
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .disabled(isDisabled)
+            MiniToolbarSwitch(
+                isOn: isOn,
+                isEnabled: !isDisabled,
+                action: action
+            )
         }
         .frame(height: 22)
         .opacity(isDisabled ? 0.48 : 1)
         .help(help)
         .animation(.easeInOut(duration: 0.12), value: isOn)
+    }
+}
+
+private struct MiniToolbarSwitch: NSViewRepresentable {
+    let isOn: Bool
+    let isEnabled: Bool
+    let action: (Bool) -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(action: action)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView(frame: NSRect(x: 0, y: 0, width: 28, height: 16))
+        let control = NSSwitch(frame: NSRect(x: 0, y: 0, width: 46, height: 26))
+        control.controlSize = .mini
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.changed(_:))
+        control.scaleUnitSquare(to: NSSize(width: 0.58, height: 0.58))
+        control.frame.origin = NSPoint(x: 0, y: 1)
+        container.addSubview(control)
+        context.coordinator.control = control
+        return container
+    }
+
+    func updateNSView(_ container: NSView, context: Context) {
+        context.coordinator.action = action
+        guard let control = context.coordinator.control else {
+            return
+        }
+        control.state = isOn ? .on : .off
+        control.isEnabled = isEnabled
+    }
+
+    final class Coordinator: NSObject {
+        weak var control: NSSwitch?
+        var action: (Bool) -> Void
+
+        init(action: @escaping (Bool) -> Void) {
+            self.action = action
+        }
+
+        @objc func changed(_ sender: NSSwitch) {
+            action(sender.state == .on)
+        }
     }
 }
 

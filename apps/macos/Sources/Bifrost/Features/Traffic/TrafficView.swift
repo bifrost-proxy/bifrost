@@ -222,14 +222,21 @@ private struct AppFilterIcon: View {
     var body: some View {
         Group {
             if let image = LocalAppIconResolver.image(for: appName) ?? image {
-                NativeAppIconImage(image: image)
+                Image(nsImage: image)
+                    .resizable()
+                    .interpolation(.high)
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 16, height: 16)
+                    .clipShape(RoundedRectangle(cornerRadius: 3, style: .continuous))
             } else {
                 Image(systemName: "app")
                     .font(.system(size: 10))
                     .foregroundStyle(.tertiary)
+                    .frame(width: 16, height: 16)
             }
         }
-        .frame(width: 18, height: 18)
+        .frame(width: 16, height: 16)
+        .clipped()
         .onAppear {
             loadIcon()
         }
@@ -243,23 +250,6 @@ private struct AppFilterIcon: View {
         Task {
             image = await AppIconImageCache.shared.image(for: appName, baseURL: appModel.adminURL)
         }
-    }
-}
-
-private struct NativeAppIconImage: NSViewRepresentable {
-    let image: NSImage
-
-    func makeNSView(context: Context) -> NSImageView {
-        let imageView = NSImageView()
-        imageView.imageScaling = .scaleProportionallyUpOrDown
-        imageView.imageFrameStyle = .none
-        imageView.wantsLayer = true
-        return imageView
-    }
-
-    func updateNSView(_ imageView: NSImageView, context: Context) {
-        image.isTemplate = false
-        imageView.image = image
     }
 }
 
@@ -304,12 +294,13 @@ private final class AppIconImageCache {
             return nil
         }
 
-        image.isTemplate = false
-        images[appName] = image
-        return image
+        let thumbnail = makeAppIconThumbnail(image)
+        images[appName] = thumbnail
+        return thumbnail
     }
 }
 
+@MainActor
 private enum LocalAppIconResolver {
     private static var images: [String: NSImage] = [:]
     private static var misses: Set<String> = []
@@ -323,9 +314,9 @@ private enum LocalAppIconResolver {
         }
         for appPath in candidateAppPaths(appName: appName) where FileManager.default.fileExists(atPath: appPath) {
             let icon = NSWorkspace.shared.icon(forFile: appPath)
-            icon.isTemplate = false
-            images[appName] = icon
-            return icon
+            let thumbnail = makeAppIconThumbnail(icon)
+            images[appName] = thumbnail
+            return thumbnail
         }
         misses.insert(appName)
         return nil
@@ -408,6 +399,22 @@ private enum LocalAppIconResolver {
             }
         }
     }
+}
+
+@MainActor
+private func makeAppIconThumbnail(_ image: NSImage, size: CGFloat = 16) -> NSImage {
+    let output = NSImage(size: NSSize(width: size, height: size))
+    output.lockFocus()
+    NSGraphicsContext.current?.imageInterpolation = .high
+    image.draw(
+        in: NSRect(x: 0, y: 0, width: size, height: size),
+        from: .zero,
+        operation: .sourceOver,
+        fraction: 1
+    )
+    output.unlockFocus()
+    output.isTemplate = false
+    return output
 }
 
 private struct RequestDetailView: View {
