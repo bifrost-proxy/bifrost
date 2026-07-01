@@ -7,8 +7,6 @@ INSTALL_DIR="${BIFROST_INSTALL_DIR:-${HOME:-/tmp}/.local/bin}"
 
 DEFAULT_GITHUB_MIRROR_URLS=(
     "https://github.com"
-    "https://ghfast.top/https://github.com"
-    "https://github.moeyy.xyz/https://github.com"
 )
 
 RED='\033[0;31m'
@@ -1309,7 +1307,7 @@ show_help() {
     echo "Environment variables:"
     echo "  BIFROST_INSTALL_DIR   Custom installation directory"
     echo "  BIFROST_DOWNLOADER    Preferred downloader: auto|aria2c|axel|wget|curl"
-    echo "  BIFROST_GITHUB_MIRROR Preferred mirror base URL"
+    echo "  BIFROST_GITHUB_MIRROR Preferred mirror base URL (explicit opt-in)"
     echo "  BIFROST_DOWNLOAD_CONNECT_TIMEOUT  Connection timeout in seconds"
     echo "  BIFROST_MIRROR_PROBE_TIMEOUT      Fast mirror probe timeout in seconds"
     echo "  BIFROST_DOWNLOAD_TIMEOUT          Total timeout per download attempt in seconds"
@@ -1329,7 +1327,7 @@ show_help() {
     echo "  curl -fsSL ... | bash -s -- --no-modify-path"
     echo "  curl -fsSL ... | bash -s -- --no-post-install"
     echo ""
-    echo "If raw.githubusercontent.com is unreachable, use a mirror to download this script:"
+    echo "If raw.githubusercontent.com is unreachable, explicitly opt in to a mirror you trust:"
     echo "  curl -fsSL https://ghfast.top/https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
     echo "  curl -fsSL https://github.moeyy.xyz/https://raw.githubusercontent.com/${REPO}/main/install-binary.sh | bash"
 }
@@ -1565,7 +1563,8 @@ install_binary_for_target() {
         expected_checksum=$(grep -F "$cli_archive" "$tmpdir/checksums.txt" 2>/dev/null | awk '{print $1}')
         if [[ -n "$expected_checksum" ]]; then
             if ! verify_checksum "$tmpdir/$cli_archive" "$expected_checksum"; then
-                print_warning "Checksum mismatch (continuing anyway)"
+                print_error "Checksum mismatch for $cli_archive; aborting install"
+                exit 1
             fi
         else
             print_warning "Checksum not found for $cli_archive, skipping verification"

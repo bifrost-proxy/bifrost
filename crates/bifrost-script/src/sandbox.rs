@@ -6,6 +6,7 @@ use rquickjs::{Context, Ctx, Function, Object, Runtime, Value};
 use serde_json::Value as JsonValue;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::net::{IpAddr, ToSocketAddrs};
 use std::path::{Component, Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,6 +28,8 @@ pub struct SandboxConfig {
     pub file_allowed_dirs: Vec<PathBuf>,
     /// 是否允许脚本发起网络请求（`net.xxx`）。
     pub allow_network: bool,
+    /// 是否允许 `net.fetch` 访问回环、私网、链路本地和云元数据地址。
+    pub allow_private_network: bool,
     pub network_timeout_ms: u64,
     pub max_file_bytes: usize,
     pub max_net_request_bytes: usize,
@@ -52,6 +55,7 @@ impl Default for SandboxConfig {
             file_root: None,
             file_allowed_dirs: Vec::new(),
             allow_network: false,
+            allow_private_network: false,
             network_timeout_ms: DEFAULT_NETWORK_TIMEOUT_MS,
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             max_net_request_bytes: DEFAULT_MAX_NET_REQUEST_BYTES,
@@ -87,6 +91,84 @@ impl InterruptState {
 
     fn is_timed_out(&self) -> bool {
         self.timed_out.load(Ordering::SeqCst)
+    }
+}
+
+fn validate_net_fetch_target(
+    url: &reqwest::Url,
+    allow_private_network: bool,
+) -> std::result::Result<(), String> {
+    if allow_private_network {
+        return Ok(());
+    }
+
+    let host = url
+        .host_str()
+        .ok_or_else(|| "net.fetch URL must include a host".to_string())?;
+    let host_lower = host.trim_matches('.').to_ascii_lowercase();
+    if host_lower == "localhost" || host_lower.ends_with(".localhost") {
+        return Err("net.fetch target is not allowed: localhost is private".to_string());
+    }
+
+    let ip_host = host
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(host);
+    if let Ok(ip) = ip_host.parse::<IpAddr>() {
+        return validate_public_ip(ip);
+    }
+
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "net.fetch URL must include a port for unknown schemes".to_string())?;
+    let resolved = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("resolve net.fetch target failed: {e}"))?;
+    for addr in resolved {
+        validate_public_ip(addr.ip())?;
+    }
+    Ok(())
+}
+
+fn validate_public_ip(ip: IpAddr) -> std::result::Result<(), String> {
+    if is_private_netfetch_ip(ip) {
+        Err(format!(
+            "net.fetch target is not allowed: {ip} is private or non-routable"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
+fn is_private_netfetch_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let [a, b, _, _] = ip.octets();
+            ip.is_loopback()
+                || ip.is_private()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+                || ip.is_documentation()
+                || a == 0
+                || a == 10
+                || a == 127
+                || (a == 100 && (64..=127).contains(&b))
+                || (a == 169 && b == 254)
+                || (a == 172 && (16..=31).contains(&b))
+                || (a == 192 && b == 168)
+                || (a == 198 && (18..=19).contains(&b))
+        }
+        IpAddr::V6(ip) => {
+            let segments = ip.segments();
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+                || (segments[0] & 0xfe00) == 0xfc00
+                || (segments[0] & 0xffc0) == 0xfe80
+                || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+        }
     }
 }
 
@@ -1280,6 +1362,7 @@ impl Sandbox {
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
 
         let allow_network = self.config.allow_network;
+        let allow_private_network = self.config.allow_private_network;
         let timeout_ms = self.config.network_timeout_ms;
         let max_req = self.config.max_net_request_bytes;
         let max_resp = self.config.max_net_response_bytes;
@@ -1360,6 +1443,10 @@ impl Sandbox {
                         ));
                     }
                 }
+
+                validate_net_fetch_target(&parsed, allow_private_network).map_err(|message| {
+                    rquickjs::Error::new_from_js_message("net", "fetch", message)
+                })?;
 
                 let m = reqwest::Method::from_bytes(method.as_bytes())
                     .map_err(|e| js_err("net", "fetch", e))?;
@@ -2430,6 +2517,33 @@ mod tests {
     }
 
     #[test]
+    fn test_net_fetch_rejects_private_targets_by_default() {
+        let mut sb = Sandbox::new(SandboxConfig {
+            allow_network: true,
+            ..Default::default()
+        })
+        .unwrap();
+        let r = req("GET");
+        for url in [
+            "http://127.0.0.1/",
+            "http://localhost/",
+            "http://10.0.0.1/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://[::1]/",
+        ] {
+            let script = format!(r#"net.fetch("{url}", null);"#);
+            let err = sb
+                .execute_request_script(&script, &r, &ctx(ScriptType::Request))
+                .unwrap_err();
+            let message = err.to_string();
+            assert!(
+                message.contains("private") || message.contains("not allowed"),
+                "expected private target rejection for {url}, got {message}"
+            );
+        }
+    }
+
+    #[test]
     fn test_net_fetch_request_body_too_large() {
         let mut sb = Sandbox::new(SandboxConfig {
             allow_network: true,
@@ -2567,6 +2681,7 @@ mod tests {
 
         let mut sb = Sandbox::new(SandboxConfig {
             allow_network: true,
+            allow_private_network: true,
             ..Default::default()
         })
         .unwrap();
@@ -2975,6 +3090,7 @@ mod more_tests {
 
         let mut sandbox = Sandbox::new(SandboxConfig {
             allow_network: true,
+            allow_private_network: true,
             max_net_response_bytes: 16,
             ..Default::default()
         })

@@ -837,7 +837,7 @@ pub async fn handle_file_glob(
         };
         while let Some(entry) = rd.next_entry().await.ok().flatten() {
             let path = entry.path();
-            let md = match entry.metadata().await {
+            let md = match fs::symlink_metadata(&path).await {
                 Ok(md) => md,
                 Err(_) => continue,
             };
@@ -850,6 +850,9 @@ pub async fn handle_file_glob(
                 if dm.match_raw(&rel).is_some() {
                     continue;
                 }
+            }
+            if md.file_type().is_symlink() && !symlink_target_stays_within_root(&path, &root) {
+                continue;
             }
             if md.is_dir() {
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
@@ -884,6 +887,16 @@ pub async fn handle_file_glob(
         out["next_cursor"] = json!(nc);
     }
     Ok(out)
+}
+
+fn symlink_target_stays_within_root(path: &Path, root: &Path) -> bool {
+    let Ok(target) = std::fs::canonicalize(path) else {
+        return false;
+    };
+    let Ok(root) = std::fs::canonicalize(root) else {
+        return false;
+    };
+    target.starts_with(root)
 }
 
 /// `file.search` — regex grep across files under the policy root.
@@ -5293,6 +5306,38 @@ type Alias = u32;
         assert!(
             !matches.iter().any(|m| m.contains("key.pem")),
             "denied pem must not leak via glob: {:?}",
+            matches
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn glob_does_not_follow_symlink_outside_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("inside.txt"), b"ok").unwrap();
+        std::fs::write(outside.path().join("secret.txt"), b"secret").unwrap();
+        std::os::unix::fs::symlink(outside.path(), tmp.path().join("outside-link")).unwrap();
+
+        let policy = mk_policy(tmp.path());
+        let dec = policy
+            .check(Path::new("."), tmp.path(), FileOp::Glob)
+            .unwrap();
+        let v = handle_file_glob(&dec, "**/*", None, &[], false, &[], None)
+            .await
+            .unwrap();
+        let matches: Vec<&str> = v["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|m| m.as_str().unwrap())
+            .collect();
+        assert!(matches.contains(&"inside.txt"));
+        assert!(
+            !matches
+                .iter()
+                .any(|m| m.contains("secret.txt") || m.contains("outside-link")),
+            "glob must not leak outside symlink paths: {:?}",
             matches
         );
     }

@@ -74,9 +74,21 @@ test_select_fastest_github_base_skips_unavailable_default() {
     }
 
     local selected
-    selected=$(select_fastest_github_base "${REPO}/releases/latest")
+    selected=$(BIFROST_GITHUB_MIRROR="https://ghfast.top/https://github.com" select_fastest_github_base "${REPO}/releases/latest")
     assert_eq "$selected" "https://ghfast.top/https://github.com" \
-        "fast mirror wins when github.com probe fails"
+        "explicit fast mirror wins when github.com probe fails"
+}
+
+test_default_mirrors_exclude_third_party_hosts() {
+    local mirrors
+    mirrors=$(build_mirror_url_list)
+
+    if echo "$mirrors" | grep -Eq 'ghfast\.top|github\.moeyy\.xyz'; then
+        fail "third-party mirrors are opt-in only" "default mirrors: $mirrors"
+    fi
+
+    assert_eq "$(echo "$mirrors" | sed -n '1p')" "https://github.com" \
+        "github.com is the only default mirror"
 }
 
 test_latest_version_uses_raced_redirect_result() {
@@ -97,9 +109,9 @@ test_latest_version_uses_raced_redirect_result() {
     }
 
     local version
-    version=$(get_latest_version)
+    version=$(BIFROST_GITHUB_MIRROR="https://ghfast.top/https://github.com" get_latest_version)
     assert_eq "$version" "v9.8.7" \
-        "latest version detection accepts fastest mirror redirect"
+        "latest version detection accepts explicit fastest mirror redirect"
 }
 
 test_download_uses_selected_source_first() {
@@ -239,7 +251,46 @@ test_optional_archive_skips_full_race_when_probe_fails() {
     pass "optional archive skips full mirror race"
 }
 
+test_checksum_mismatch_aborts_install() {
+    local tmpdir
+    tmpdir=$(mktemp -d)
+    trap 'rm -rf "$tmpdir"' RETURN
+
+    local script='
+set -euo pipefail
+set --
+BIFROST_INSTALL_BINARY_SKIP_MAIN=1
+export BIFROST_INSTALL_BINARY_SKIP_MAIN
+source "$SCRIPT_PATH"
+get_archive_ext_candidates() {
+    echo "tar.gz"
+}
+download_github_file() {
+    case "$1" in
+        *checksums.txt)
+            printf "0000000000000000000000000000000000000000000000000000000000000000  bifrost-v1.0.0-test-target.tar.gz\n" > "$2"
+            ;;
+        *)
+            printf "archive" > "$2"
+            ;;
+    esac
+}
+install_binary_for_target "test-target" "v1.0.0" "linux" "$INSTALL_TMP" "$DOWNLOAD_TMP"
+'
+
+    if SCRIPT_PATH="$PROJECT_DIR/install-binary.sh" INSTALL_TMP="$tmpdir/install" DOWNLOAD_TMP="$tmpdir" bash -c "$script" >"$tmpdir/stdout" 2>"$tmpdir/stderr"; then
+        fail "checksum mismatch aborts install" "install unexpectedly continued"
+    fi
+
+    if ! grep -q "Checksum mismatch" "$tmpdir/stderr"; then
+        fail "checksum mismatch reports fatal error" "stderr: $(cat "$tmpdir/stderr")"
+    fi
+
+    pass "checksum mismatch aborts install"
+}
+
 run_case "preferred mirror ordering" test_preferred_mirror_is_first_without_duplicates
+run_case "third-party mirrors opt-in" test_default_mirrors_exclude_third_party_hosts
 run_case "fastest mirror probe selection" test_select_fastest_github_base_skips_unavailable_default
 run_case "latest version redirect race" test_latest_version_uses_raced_redirect_result
 run_case "selected source full download" test_download_uses_selected_source_first
@@ -247,6 +298,7 @@ run_case "fallback full mirror race" test_download_falls_back_to_full_race_after
 run_case "visible curl progress" test_download_file_enables_visible_progress_by_default
 run_case "quiet race candidate progress" test_race_download_suppresses_candidate_progress
 run_case "optional archive fast fallback" test_optional_archive_skips_full_race_when_probe_fails
+run_case "checksum mismatch fail-close" test_checksum_mismatch_aborts_install
 
 help_output=$(bash "$PROJECT_DIR/install-binary.sh" --help)
 if [[ "$help_output" != *"BIFROST_MIRROR_PROBE_TIMEOUT"* ]]; then

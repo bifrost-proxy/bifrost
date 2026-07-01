@@ -77,7 +77,9 @@ impl SshKeyStore {
 
         let init = || -> std::result::Result<Connection, String> {
             std::fs::create_dir_all(&admin_dir).map_err(|e| format!("create admin dir: {e}"))?;
+            harden_private_dir(&admin_dir).map_err(|e| format!("harden admin dir: {e}"))?;
             let conn = Connection::open(&db_path).map_err(|e| format!("open ssh key db: {e}"))?;
+            harden_private_file(&db_path).map_err(|e| format!("harden ssh key db: {e}"))?;
             initialize_schema(&conn).map_err(|e| format!("init ssh key schema: {e}"))?;
             Ok(conn)
         };
@@ -335,8 +337,8 @@ impl StoredSshKeyRow {
     }
 }
 
-fn normalize_ssh_grant_mode(_mode: GrantMode) -> GrantMode {
-    GrantMode::Permanent
+fn normalize_ssh_grant_mode(mode: GrantMode) -> GrantMode {
+    mode
 }
 
 fn initialize_schema(conn: &Connection) -> rusqlite::Result<()> {
@@ -446,6 +448,7 @@ impl EncryptionKeyProvider {
                 self.key_path.display()
             )))
         })?;
+        harden_private_file(&self.key_path)?;
         Ok(key)
     }
 
@@ -493,6 +496,38 @@ impl EncryptionKeyProvider {
             .map_err(|_| BifrostError::Config("decrypt ssh private key failed".to_string()))?;
         Ok(plaintext.to_vec())
     }
+}
+
+#[cfg(unix)]
+fn harden_private_dir(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "chmod 0700 {}: {e}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(not(unix))]
+fn harden_private_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn harden_private_file(path: &Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(|e| {
+        BifrostError::Io(std::io::Error::other(format!(
+            "chmod 0600 {}: {e}",
+            path.display()
+        )))
+    })
+}
+
+#[cfg(not(unix))]
+fn harden_private_file(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn ed25519_public_key_to_spki_der(public_key: &[u8]) -> Vec<u8> {
@@ -581,7 +616,7 @@ mod tests {
             .create_or_replace_key("Agent".to_string(), GrantMode::OneHour)
             .expect("replace key");
         assert_ne!(first.record.device_code, second.record.device_code);
-        assert_eq!(second.record.grant_mode, GrantMode::Permanent);
+        assert_eq!(second.record.grant_mode, GrantMode::OneHour);
 
         let exported = store
             .export_active_key_file()
@@ -591,7 +626,7 @@ mod tests {
     }
 
     #[test]
-    fn update_active_key_keeps_ssh_grant_mode_permanent() {
+    fn update_active_key_preserves_requested_ssh_grant_mode() {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let store = SshKeyStore::new(tempdir.path());
 
@@ -605,6 +640,34 @@ mod tests {
             .expect("active key");
 
         assert_eq!(updated.label, "Agent");
-        assert_eq!(updated.grant_mode, GrantMode::Permanent);
+        assert_eq!(updated.grant_mode, GrantMode::ThirtyMinutes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn ssh_key_store_hardens_private_files() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let store = SshKeyStore::new(tempdir.path());
+        store
+            .create_or_replace_key("CI".to_string(), GrantMode::Permanent)
+            .expect("create key");
+
+        let admin_dir = tempdir.path().join("admin");
+        let key_path = admin_dir.join(SSH_KEYS_ENCRYPTION_KEY_FILE);
+        let db_path = admin_dir.join(SSH_KEYS_DB_FILE);
+        assert_eq!(
+            std::fs::metadata(&admin_dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            std::fs::metadata(&key_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&db_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

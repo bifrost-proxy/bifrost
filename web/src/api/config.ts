@@ -145,6 +145,7 @@ export interface SandboxFileConfig {
 
 export interface SandboxNetConfig {
   enabled: boolean;
+  allow_private_network: boolean;
   timeout_ms: number;
   max_request_bytes: number;
   max_response_bytes: number;

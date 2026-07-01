@@ -1484,14 +1484,13 @@ fn short_fingerprint(bytes: &[u8]) -> String {
 }
 
 fn encrypt_remote_command(
-    command_kind: CommandKind,
-    command: Option<&str>,
-    args_json: Option<&str>,
-    query: Option<&CanonicalQueryCommand>,
-    shell_exec: Option<&ShellExecPayload>,
+    call_id: &str,
+    command: &BuiltRemoteCommand,
     grant_id: &str,
     transport: &OpenCallTransportContext,
 ) -> bifrost_core::Result<EncryptedPayload> {
+    let command_kind = command.kind;
+    let shell_exec = command.shell_exec.as_ref();
     let key_bytes = derive_open_call_key(
         &transport.shared_secret,
         grant_id,
@@ -1517,9 +1516,9 @@ fn encrypt_remote_command(
 
     let plaintext = serde_json::to_vec(&CommandEnvelope {
         kind: command_kind.as_str().to_string(),
-        command: command.unwrap_or_default().to_string(),
-        args_json: args_json.map(ToOwned::to_owned),
-        query: query.cloned(),
+        command: command.command.as_deref().unwrap_or_default().to_string(),
+        args_json: command.args_json.clone(),
+        query: command.query.clone(),
         exec_mode: shell_exec.map(|payload| payload.exec_mode.clone()),
         argv: shell_exec.and_then(|payload| payload.argv.clone()),
         command_text: shell_exec.and_then(|payload| payload.command_text.clone()),
@@ -1534,10 +1533,20 @@ fn encrypt_remote_command(
     .map_err(|e| {
         BifrostError::Config(format!("serialize encrypted command payload failed: {e}"))
     })?;
+    let aad = FrameEnvelopeAad {
+        version: ENCRYPTED_OPEN_CALL_VERSION,
+        call_id: call_id.to_string(),
+        seq: 0,
+        direction: "caller_to_client".to_string(),
+        frame_type: Some("command".to_string()),
+        command_kind: Some(command_kind.as_str().to_string()),
+    };
+    let aad_bytes = serde_json::to_vec(&aad)
+        .map_err(|e| BifrostError::Config(format!("serialize command payload aad failed: {e}")))?;
     let mut sealed = plaintext;
     key.seal_in_place_append_tag(
         Nonce::assume_unique_for_key(nonce),
-        Aad::empty(),
+        Aad::from(aad_bytes.as_slice()),
         &mut sealed,
     )
     .map_err(|_| BifrostError::Config("encrypt remote command payload failed".to_string()))?;
@@ -1548,7 +1557,7 @@ fn encrypt_remote_command(
         nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
         ciphertext: base64::engine::general_purpose::STANDARD.encode(sealed),
         tag: base64::engine::general_purpose::STANDARD.encode(tag),
-        aad: None,
+        aad: Some(aad),
     })
 }
 
@@ -1985,17 +1994,12 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
     let command = command.expect("remote command should be built before open_call");
     let active_grant_id = grant.grant_id.clone();
+    let call_id = uuid::Uuid::new_v4().to_string();
     let command_summary = build_open_call_command_summary(&command);
-    let command_encrypted = encrypt_remote_command(
-        command.kind,
-        command.command.as_deref(),
-        command.args_json.as_deref(),
-        command.query.as_ref(),
-        command.shell_exec.as_ref(),
-        &active_grant_id,
-        &transport,
-    )?;
+    let command_encrypted =
+        encrypt_remote_command(&call_id, &command, &active_grant_id, &transport)?;
     let open_request = OpenCallRequest {
+        call_id,
         client_instance_id: conn.client_instance_id.clone(),
         command_summary: command_summary.clone(),
         command_kind: command.kind,
@@ -2917,16 +2921,10 @@ async fn open_and_wait_remote_command(
     timeout_secs: u64,
 ) -> bifrost_core::Result<CallResult> {
     let command_summary = build_open_call_command_summary(command);
-    let command_encrypted = encrypt_remote_command(
-        command.kind,
-        command.command.as_deref(),
-        command.args_json.as_deref(),
-        command.query.as_ref(),
-        command.shell_exec.as_ref(),
-        &grant.grant_id,
-        transport,
-    )?;
+    let call_id = uuid::Uuid::new_v4().to_string();
+    let command_encrypted = encrypt_remote_command(&call_id, command, &grant.grant_id, transport)?;
     let open_request = OpenCallRequest {
+        call_id,
         client_instance_id: conn.client_instance_id.clone(),
         command_summary,
         command_kind: command.kind,
@@ -5445,6 +5443,7 @@ struct GrantSummary {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct OpenCallRequest {
+    call_id: String,
     client_instance_id: String,
     command_summary: OpenCallCommandSummary,
     command_kind: CommandKind,
@@ -7404,7 +7403,11 @@ mod tests {
         let plaintext = key
             .open_in_place(
                 Nonce::assume_unique_for_key(nonce),
-                Aad::empty(),
+                Aad::from(
+                    serde_json::to_vec(payload.aad.as_ref().expect("payload aad"))
+                        .expect("serialize aad")
+                        .as_slice(),
+                ),
                 &mut sealed,
             )
             .expect("decrypt payload");
@@ -8379,19 +8382,22 @@ mod tests {
             client_ephemeral_pub: "client-epk".to_string(),
             shared_secret: b"01234567890123456789012345678901".to_vec(),
         };
+        let command = BuiltRemoteCommand {
+            kind: CommandKind::QueryReadonly,
+            label: "status".to_string(),
+            command: Some("status".to_string()),
+            args_json: None,
+            query: None,
+            shell_exec: None,
+            render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
+        };
 
-        let payload = encrypt_remote_command(
-            CommandKind::QueryReadonly,
-            Some("status"),
-            None,
-            None,
-            None,
-            "grant-123",
-            &transport,
-        )
-        .expect("encrypt command");
+        let payload = encrypt_remote_command("call-123", &command, "grant-123", &transport)
+            .expect("encrypt command");
 
         assert_eq!(payload.version, ENCRYPTED_OPEN_CALL_VERSION);
+        assert_eq!(payload.aad.as_ref().unwrap().call_id, "call-123");
         let decrypted = decrypt_remote_command_for_test(
             &payload,
             &transport.shared_secret,
@@ -8433,17 +8439,19 @@ mod tests {
             pty: None,
             output_mode: None,
         };
+        let command = BuiltRemoteCommand {
+            kind: CommandKind::ShellExec,
+            label: "shell.exec".to_string(),
+            command: Some("./deploy.sh".to_string()),
+            args_json: None,
+            query: None,
+            shell_exec: Some(shell_exec),
+            render: RemoteRenderMode::Raw,
+            streaming_prefs: None,
+        };
 
-        let payload = encrypt_remote_command(
-            CommandKind::ShellExec,
-            Some("./deploy.sh"),
-            None,
-            None,
-            Some(&shell_exec),
-            "grant-123",
-            &transport,
-        )
-        .expect("encrypt command");
+        let payload = encrypt_remote_command("call-shell", &command, "grant-123", &transport)
+            .expect("encrypt command");
 
         let decrypted = decrypt_remote_command_for_test(
             &payload,
@@ -8475,6 +8483,7 @@ mod tests {
     #[test]
     fn test_open_call_request_serialization_omits_plaintext_command_fields() {
         let request = OpenCallRequest {
+            call_id: "call-1".to_string(),
             client_instance_id: "client-1".to_string(),
             command_summary: OpenCallCommandSummary {
                 command_preview: "traffic.get".to_string(),

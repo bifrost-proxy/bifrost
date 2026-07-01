@@ -138,9 +138,8 @@ pub fn record_failed_login(state: &AdminState) -> Result<u32> {
     if new_count >= MAX_LOGIN_ATTEMPTS {
         warn!(
             failed_count = new_count,
-            "Login attempts exhausted — executing lockout"
+            "Login attempts exhausted; applying non-destructive throttling"
         );
-        execute_lockout(state)?;
     }
     Ok(new_count)
 }
@@ -148,21 +147,6 @@ pub fn record_failed_login(state: &AdminState) -> Result<u32> {
 pub fn reset_failed_login_count(state: &AdminState) -> Result<()> {
     let db = require_auth_db(state)?;
     db.reset_failed_count()?;
-    Ok(())
-}
-
-pub fn clear_admin_password(state: &AdminState) -> Result<()> {
-    let db = require_auth_db(state)?;
-    db.clear_password_hash()?;
-    Ok(())
-}
-
-pub fn execute_lockout(state: &AdminState) -> Result<()> {
-    warn!("Executing brute-force lockout: disabling remote access, clearing password, revoking sessions");
-    set_remote_access_enabled(state, false)?;
-    clear_admin_password(state)?;
-    revoke_all_admin_sessions(state)?;
-    reset_failed_login_count(state)?;
     Ok(())
 }
 
@@ -503,7 +487,7 @@ mod tests {
     }
 
     #[test]
-    fn test_lockout_after_max_failures_disables_remote_and_clears_password() {
+    fn test_failed_login_limit_preserves_remote_and_password() {
         let (state, _tmp) = new_state();
         set_admin_password_hash(&state, "pass123abc").expect("set password");
         set_remote_access_enabled(&state, true).expect("enable remote");
@@ -515,13 +499,13 @@ mod tests {
             assert_eq!(count, i + 1);
         }
 
-        assert!(!is_remote_access_enabled(&state));
-        assert!(!has_admin_password(&state));
-        assert_eq!(get_failed_login_count(&state), 0);
+        assert!(is_remote_access_enabled(&state));
+        assert!(has_admin_password(&state));
+        assert_eq!(get_failed_login_count(&state), MAX_LOGIN_ATTEMPTS);
     }
 
     #[test]
-    fn test_lockout_resets_after_local_re_enable() {
+    fn test_failed_login_limit_allows_successful_recovery_without_local_reset() {
         let (state, _tmp) = new_state();
         set_admin_password_hash(&state, "pass123abc").expect("set password");
         set_remote_access_enabled(&state, true).expect("enable remote");
@@ -529,11 +513,11 @@ mod tests {
         for _ in 0..MAX_LOGIN_ATTEMPTS {
             let _ = record_failed_login(&state);
         }
-        assert!(!is_remote_access_enabled(&state));
-        assert!(!has_admin_password(&state));
+        assert!(is_remote_access_enabled(&state));
+        assert!(has_admin_password(&state));
+        assert!(verify_admin_credentials(&state, "admin", "pass123abc").expect("verify"));
 
-        set_admin_password_hash(&state, "newpass1abc").expect("new password");
-        set_remote_access_enabled(&state, true).expect("re-enable remote");
+        reset_failed_login_count(&state).expect("reset");
         assert!(has_admin_password(&state));
         assert!(is_remote_access_enabled(&state));
         assert_eq!(get_failed_login_count(&state), 0);

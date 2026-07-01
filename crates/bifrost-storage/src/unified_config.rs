@@ -88,6 +88,7 @@ impl Default for SandboxFileConfig {
 #[serde(default)]
 pub struct SandboxNetConfig {
     pub enabled: bool,
+    pub allow_private_network: bool,
     pub timeout_ms: u64,
     pub max_request_bytes: usize,
     pub max_response_bytes: usize,
@@ -97,6 +98,7 @@ impl Default for SandboxNetConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            allow_private_network: false,
             timeout_ms: 5_000,
             max_request_bytes: 256 * 1024,
             max_response_bytes: 1024 * 1024,
@@ -143,6 +145,7 @@ pub struct SandboxFileConfigUpdate {
 #[derive(Debug, Clone, Default)]
 pub struct SandboxNetConfigUpdate {
     pub enabled: Option<bool>,
+    pub allow_private_network: Option<bool>,
     pub timeout_ms: Option<u64>,
     pub max_request_bytes: Option<usize>,
     pub max_response_bytes: Option<usize>,
@@ -595,6 +598,7 @@ mod tests {
         assert!(config.sync.enabled);
         assert_eq!(config.sync.remote_base_url, DEFAULT_REMOTE_BASE_URL);
         assert_eq!(config.ui.rules_sort_mode, "manual");
+        assert!(!config.sandbox.net.allow_private_network);
     }
 
     #[test]
