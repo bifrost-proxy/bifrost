@@ -6,7 +6,7 @@ pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         TestCase::standalone(
             "brute_force_lockout_after_max_failures",
-            "Validate account locks out after 5 failed login attempts: remote access disabled, password cleared",
+            "Validate repeated failed logins are throttled without disabling remote access or clearing the password",
             "admin",
             || async move {
                 let port = pick_unused_port()?;
@@ -85,16 +85,30 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .get("remote_access_enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                if remote_enabled {
-                    return Err("Expected remote_access_enabled=false after lockout".to_string());
+                if !remote_enabled {
+                    return Err(
+                        "Expected remote_access_enabled=true after non-destructive throttle"
+                            .to_string(),
+                    );
                 }
                 let has_password = status
                     .get("has_password")
                     .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                if has_password {
-                    return Err("Expected has_password=false after lockout".to_string());
+                    .unwrap_or(false);
+                if !has_password {
+                    return Err("Expected has_password=true after non-destructive throttle".to_string());
                 }
+
+                let recovery_resp = client
+                    .post(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/auth/login",
+                        port
+                    ))
+                    .json(&serde_json::json!({"username": "admin", "password": "goodpass1"}))
+                    .send()
+                    .await
+                    .map_err(|e| format!("Recovery login failed: {}", e))?;
+                assert_status(&recovery_resp, 200)?;
 
                 Ok(())
             },

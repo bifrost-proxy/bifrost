@@ -1602,7 +1602,7 @@ impl ProxyInstance {
                 .expect("failed to create config manager"),
         );
         let sync_manager = Arc::new(
-            bifrost_sync::SyncManager::new(config_manager, port)
+            bifrost_sync::SyncManager::new(config_manager.clone(), port)
                 .expect("failed to create sync manager"),
         );
 
@@ -1632,6 +1632,7 @@ impl ProxyInstance {
             .with_traffic_db_store_shared(traffic_db_store)
             .with_async_traffic_writer(async_traffic_writer)
             .with_frame_store_shared(frame_store)
+            .with_config_manager_shared(config_manager)
             .with_sync_manager_shared(sync_manager)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
