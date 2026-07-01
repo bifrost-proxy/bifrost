@@ -89,6 +89,25 @@ if [[ "$ready" != "1" ]]; then
     exit 1
 fi
 
+remote_ready=0
+for _ in $(seq 1 60); do
+    if curl -fsS "${ADMIN_BASE_URL}/api/remote-invoke/status" >/dev/null 2>&1; then
+        remote_ready=1
+        break
+    fi
+    if ! kill -0 "$ADMIN_PID" 2>/dev/null; then
+        echo "bifrost admin exited before remote invoke became ready" >&2
+        cat "$ADMIN_LOG" >&2 || true
+        exit 1
+    fi
+    sleep 0.5
+done
+if [[ "$remote_ready" != "1" ]]; then
+    echo "remote invoke did not become ready" >&2
+    cat "$ADMIN_LOG" >&2 || true
+    exit 1
+fi
+
 log "Creating SSH key with default Full Trust policy"
 curl -fsS -X POST "${ADMIN_BASE_URL}/api/remote-invoke/ssh-key" \
     -H 'content-type: application/json' \
