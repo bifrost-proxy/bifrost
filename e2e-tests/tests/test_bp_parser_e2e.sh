@@ -306,6 +306,15 @@ admin_post_json() {
         --data-binary "$json"
 }
 
+admin_put_json() {
+    local path="$1"
+    local json="$2"
+    env NO_PROXY="*" no_proxy="*" curl -sf \
+        -H "content-type: application/json" \
+        -X PUT "${ADMIN_BASE_URL}${path}" \
+        --data-binary "$json"
+}
+
 run_cli() {
     CI=1 BIFROST_DATA_DIR="$TEST_DATA_DIR" "$BIFROST_BIN" -p "$PROXY_PORT" "$@" 2>&1
 }
@@ -681,6 +690,7 @@ main() {
     start_bam_mock_server
     start_mock_server
     start_bifrost
+    admin_put_json "/config/sandbox" '{"net":{"allow_private_network":true}}' >/dev/null
 
     test_local_parser_detail_and_search
     test_invalid_local_parser_name_is_rejected
