@@ -10,7 +10,7 @@ use sysproxy::Sysproxy;
 
 use crate::{BifrostError, Result};
 
-const DEFAULT_BYPASS: &str = "localhost,127.0.0.1,::1,*.local";
+const DEFAULT_BYPASS: &str = "localhost,127.0.0.1,::1";
 const BACKUP_FILE_NAME: &str = "proxy_backup.json";
 const RUNTIME_FILE_NAME: &str = "runtime.json";
 const STATE_FILE_NAME: &str = "proxy_state.json";

@@ -1509,8 +1509,9 @@ async fn handle_request(
         }
     }
 
+    let is_admin_virtual_host = is_admin_virtual_host_request(&req);
     let is_proxy_request_to_other_server =
-        is_proxy_request_targeting_other(&req, proxy_config.port, &proxy_config.host);
+        is_proxy_request_to_other_for_admin_routing(&req, proxy_config.port, &proxy_config.host);
 
     if is_devtools_bridge_admin_path(path) {
         if let Some(state) = admin_state {
@@ -1595,7 +1596,7 @@ async fn handle_request(
         return Ok(error_response(503, "Admin interface not enabled"));
     }
 
-    if is_admin_virtual_host_request(&req) && !is_proxy_request_to_other_server {
+    if is_admin_virtual_host && !is_proxy_request_to_other_server {
         if let Some(state) = admin_state {
             if is_loopback {
                 debug!(
@@ -1959,7 +1960,7 @@ fn redirect_response(location: &str) -> Response<BoxBody> {
         .unwrap()
 }
 
-fn is_admin_virtual_host_request(req: &Request<Incoming>) -> bool {
+fn is_admin_virtual_host_request<B>(req: &Request<B>) -> bool {
     if req.method() == hyper::Method::CONNECT {
         return false;
     }
@@ -1980,11 +1981,18 @@ fn is_admin_virtual_host_request(req: &Request<Incoming>) -> bool {
     false
 }
 
-fn is_proxy_request_targeting_other(
-    req: &Request<Incoming>,
+fn is_proxy_request_to_other_for_admin_routing<B>(
+    req: &Request<B>,
     self_port: u16,
     self_host: &str,
 ) -> bool {
+    if is_admin_virtual_host_request(req) {
+        return false;
+    }
+    is_proxy_request_targeting_other(req, self_port, self_host)
+}
+
+fn is_proxy_request_targeting_other<B>(req: &Request<B>, self_port: u16, self_host: &str) -> bool {
     let uri = req.uri();
     if uri.scheme().is_none() && uri.host().is_none() {
         return false;
@@ -2300,6 +2308,63 @@ mod tests {
         assert!(is_admin_request_path("/_bifrost/api/traffic"));
         assert!(!is_admin_request_path("/api/_bifrost"));
         assert!(!is_admin_request_path("/_bifrostish/api"));
+    }
+
+    #[test]
+    fn test_admin_virtual_host_absolute_uri_without_port_routes_to_admin() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://bifrost.local/")
+            .body(())
+            .unwrap();
+
+        assert!(is_admin_virtual_host_request(&req));
+        assert!(is_proxy_request_targeting_other(&req, 9900, "0.0.0.0"));
+        assert!(!is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_admin_virtual_host_absolute_uri_with_self_port_routes_to_admin() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://bifrost.local:9900/_bifrost/")
+            .body(())
+            .unwrap();
+
+        assert!(is_admin_virtual_host_request(&req));
+        assert!(!is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_external_absolute_uri_still_routes_to_proxy_target() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://example.test/")
+            .body(())
+            .unwrap();
+
+        assert!(!is_admin_virtual_host_request(&req));
+        assert!(is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_connect_to_admin_virtual_host_is_not_admin_ui_request() {
+        let req = Request::builder()
+            .method(Method::CONNECT)
+            .uri("http://bifrost.local/")
+            .body(())
+            .unwrap();
+
+        assert!(!is_admin_virtual_host_request(&req));
+        assert!(is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
     }
 
     #[test]

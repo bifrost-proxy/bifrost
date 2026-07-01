@@ -221,7 +221,7 @@ pub enum Commands {
         no_system_proxy: bool,
         #[arg(
             long,
-            help = "System proxy bypass list (comma-separated, e.g., 'localhost,127.0.0.1,*.local')"
+            help = "System proxy bypass list (comma-separated, e.g., 'localhost,127.0.0.1')"
         )]
         proxy_bypass: Option<String>,
         #[arg(
@@ -231,7 +231,7 @@ pub enum Commands {
         cli_proxy: bool,
         #[arg(
             long,
-            help = "CLI proxy no-proxy list (comma-separated, e.g., 'localhost,127.0.0.1,*.local')"
+            help = "CLI proxy no-proxy list (comma-separated, e.g., 'localhost,127.0.0.1')"
         )]
         cli_proxy_no_proxy: Option<String>,
 

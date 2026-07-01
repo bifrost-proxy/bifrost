@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::DEFAULT_TRAFFIC_MAX_RECORDS;
+use crate::{DEFAULT_SYSTEM_PROXY_BYPASS, DEFAULT_TRAFFIC_MAX_RECORDS};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(default)]
@@ -23,7 +23,7 @@ impl Default for LegacySystemProxyConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            bypass: "localhost,127.0.0.1,::1,*.local".to_string(),
+            bypass: DEFAULT_SYSTEM_PROXY_BYPASS.to_string(),
         }
     }
 }
@@ -109,7 +109,7 @@ mod tests {
     fn legacy_system_proxy_config_default() {
         let p = LegacySystemProxyConfig::default();
         assert!(!p.enabled);
-        assert_eq!(p.bypass, "localhost,127.0.0.1,::1,*.local");
+        assert_eq!(p.bypass, "localhost,127.0.0.1,::1");
     }
 
     #[test]
