@@ -387,6 +387,10 @@ impl AdminRouter {
         Self::AUTH_PUBLIC_PATHS.contains(&path)
     }
 
+    fn is_internal_devtools_bridge_path(path: &str) -> bool {
+        path.starts_with("/api/devtools/bridge/")
+    }
+
     fn check_api_auth<T>(
         req: &Request<T>,
         state: &SharedAdminState,
@@ -403,6 +407,15 @@ impl AdminRouter {
                 .and_then(|v| v.to_str().ok())
                 .map(crate::cors::is_allowed_host)
                 .unwrap_or(false);
+
+        // The injected DevTools page bridge is intentionally cross-origin and
+        // reaches the admin router through the bifrost.local virtual host with
+        // peer_addr=None. It authenticates with a page-specific bridge token in
+        // the bridge protocol itself, so router-level bearer auth would break
+        // the intended internal channel while not adding useful protection.
+        if Self::is_internal_devtools_bridge_path(path) {
+            return None;
+        }
 
         if !is_remote_access_enabled(state) {
             if loopback_host_ok || Self::is_auth_public_path(path) {
@@ -804,6 +817,22 @@ mod tests {
         let resp = AdminRouter::check_api_auth(&req, &state, "/api/system/status", None)
             .expect("None peer_addr should not get local bypass when remote is disabled");
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_check_api_auth_allows_internal_devtools_bridge_with_none_peer() {
+        let (state, _tmp) = new_state_remote_disabled();
+        let req = Request::builder()
+            .uri("/_bifrost/api/devtools/bridge/pg_123/ws")
+            .header(hyper::header::HOST, "bifrost.local")
+            .body(())
+            .unwrap();
+        let resp =
+            AdminRouter::check_api_auth(&req, &state, "/api/devtools/bridge/pg_123/ws", None);
+        assert!(
+            resp.is_none(),
+            "internal DevTools bridge uses its own page token"
+        );
     }
 
     #[test]
