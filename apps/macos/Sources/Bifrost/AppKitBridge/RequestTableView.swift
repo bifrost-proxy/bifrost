@@ -56,9 +56,10 @@ struct RequestTableView: NSViewRepresentable {
         private var iconObserver: NSObjectProtocol?
 
         init(records: [TrafficRecordSummary], selectedId: String?, onSelect: @escaping (TrafficRecordSummary) -> Void) {
+            let records = Self.deduplicatedRecords(records)
             self.records = records
             self.rows = records.map(TrafficRowViewModel.init)
-            self.rowById = Dictionary(uniqueKeysWithValues: records.enumerated().map { ($0.element.id, $0.offset) })
+            self.rowById = Self.indexRows(records)
             self.selectedId = selectedId
             self.onSelect = onSelect
             self.previousTailId = records.last?.id
@@ -98,6 +99,7 @@ struct RequestTableView: NSViewRepresentable {
         }
 
         func apply(records newRecords: [TrafficRecordSummary], selectedId: String?, onSelect: @escaping (TrafficRecordSummary) -> Void) {
+            let newRecords = Self.deduplicatedRecords(newRecords)
             guard let tableView = container?.tableView else {
                 records = newRecords
                 rows = newRecords.map(TrafficRowViewModel.init)
@@ -211,7 +213,7 @@ struct RequestTableView: NSViewRepresentable {
             let inserted = newIds.enumerated().compactMap { oldIdSet.contains($0.element) ? nil : $0.offset }
 
             if removed.count + inserted.count <= max(12, oldIds.count / 20), newIds.count < 20_000 {
-                let oldRowsById = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+                let oldRowsById = Self.indexRowsById(rows)
                 records = newRecords
                 rows = newRecords.map(TrafficRowViewModel.init)
                 rowById = Self.indexRows(newRecords)
@@ -333,7 +335,36 @@ struct RequestTableView: NSViewRepresentable {
         }
 
         private static func indexRows(_ records: [TrafficRecordSummary]) -> [String: Int] {
-            Dictionary(uniqueKeysWithValues: records.enumerated().map { ($0.element.id, $0.offset) })
+            var result: [String: Int] = [:]
+            result.reserveCapacity(records.count)
+            for (offset, record) in records.enumerated() {
+                result[record.id] = offset
+            }
+            return result
+        }
+
+        private static func indexRowsById(_ rows: [TrafficRowViewModel]) -> [String: TrafficRowViewModel] {
+            var result: [String: TrafficRowViewModel] = [:]
+            result.reserveCapacity(rows.count)
+            for row in rows {
+                result[row.id] = row
+            }
+            return result
+        }
+
+        fileprivate static func deduplicatedRecords(_ records: [TrafficRecordSummary]) -> [TrafficRecordSummary] {
+            var indexById: [String: Int] = [:]
+            var result: [TrafficRecordSummary] = []
+            result.reserveCapacity(records.count)
+            for record in records {
+                if let index = indexById[record.id] {
+                    result[index] = record
+                } else {
+                    indexById[record.id] = result.count
+                    result.append(record)
+                }
+            }
+            return result
         }
     }
 
@@ -991,9 +1022,18 @@ enum TrafficTablePerformanceSmoke {
             }
         }
         let updateMs = elapsedMs(since: updateStart)
+        let duplicateRecords = [
+            makeRecord(index: 1, method: "GET", status: 200),
+            makeRecord(index: 2, method: "POST", status: 201),
+            makeRecord(index: 1, method: "PATCH", status: 204),
+        ]
+        let deduplicatedRecords = RequestTableView.Coordinator.deduplicatedRecords(duplicateRecords)
 
         guard rows.count == baseCount + appendCount,
-              changedRows.count == Int(ceil(Double(baseCount) / Double(updateStride))) else {
+              changedRows.count == Int(ceil(Double(baseCount) / Double(updateStride))),
+              deduplicatedRecords.count == 2,
+              deduplicatedRecords.first?.id == "synthetic-1",
+              deduplicatedRecords.first?.method == "PATCH" else {
             fputs("Traffic table performance smoke failed: row bookkeeping mismatch\n", stderr)
             Foundation.exit(1)
         }
@@ -1011,27 +1051,35 @@ enum TrafficTablePerformanceSmoke {
 
     private static func makeRecords(count: Int, start: Int) -> [TrafficRecordSummary] {
         (start..<(start + count)).map { index in
-            TrafficRecordSummary(
-                id: "synthetic-\(index)",
-                seq: index,
-                method: index % 5 == 0 ? "POST" : "GET",
-                host: "api\(index % 64).example.test",
-                path: "/v1/items/\(index)",
-                status: index % 17 == 0 ? 204 : 200,
-                contentType: "application/json; charset=utf-8",
-                responseSize: 512 + index % 4096,
-                durationMs: 30 + index % 1200,
-                listenerPort: 9900,
-                protocolName: index % 11 == 0 ? "tunnel" : "https",
-                clientApp: index % 7 == 0 ? "Synthetic Helper" : "Microsoft Edge Helper",
-                clientIp: "127.0.0.1",
-                startTime: "2026-06-30T00:00:00Z",
-                endTime: "2026-06-30T00:00:01Z",
-                flags: 1 << 4,
-                matchedRuleCount: index % 3 + 1,
-                matchedProtocols: ["bp"]
-            )
+            makeRecord(index: index)
         }
+    }
+
+    private static func makeRecord(
+        index: Int,
+        method: String? = nil,
+        status: Int? = nil
+    ) -> TrafficRecordSummary {
+        TrafficRecordSummary(
+            id: "synthetic-\(index)",
+            seq: index,
+            method: method ?? (index % 5 == 0 ? "POST" : "GET"),
+            host: "api\(index % 64).example.test",
+            path: "/v1/items/\(index)",
+            status: status ?? (index % 17 == 0 ? 204 : 200),
+            contentType: "application/json; charset=utf-8",
+            responseSize: 512 + index % 4096,
+            durationMs: 30 + index % 1200,
+            listenerPort: 9900,
+            protocolName: index % 11 == 0 ? "tunnel" : "https",
+            clientApp: index % 7 == 0 ? "Synthetic Helper" : "Microsoft Edge Helper",
+            clientIp: "127.0.0.1",
+            startTime: "2026-06-30T00:00:00Z",
+            endTime: "2026-06-30T00:00:01Z",
+            flags: 1 << 4,
+            matchedRuleCount: index % 3 + 1,
+            matchedProtocols: ["bp"]
+        )
     }
 
     private static func elapsedMs(since start: DispatchTime) -> Double {

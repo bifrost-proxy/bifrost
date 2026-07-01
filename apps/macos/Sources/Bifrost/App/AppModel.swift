@@ -120,7 +120,7 @@ final class AppModel: ObservableObject {
 
             self.overview = try await overview
             self.clearPendingTrafficDelta()
-            self.trafficRecords = try await traffic.records
+            self.trafficRecords = deduplicatedTrafficRecords(try await traffic.records)
             self.rebuildTrafficRecordIndex()
             self.rules = try await rules
             self.systemProxyStatus = try await systemProxy
@@ -851,6 +851,7 @@ final class AppModel: ObservableObject {
 
     private func mergeTrafficRecords(updates: [TrafficRecordSummary], inserts: [TrafficRecordSummary]) {
         if trafficRecordIndexById.count != trafficRecords.count {
+            trafficRecords = deduplicatedTrafficRecords(trafficRecords)
             rebuildTrafficRecordIndex()
         }
         var needsSort = false
@@ -985,7 +986,27 @@ final class AppModel: ObservableObject {
     }
 
     private func rebuildTrafficRecordIndex() {
-        trafficRecordIndexById = Dictionary(uniqueKeysWithValues: trafficRecords.enumerated().map { ($0.element.id, $0.offset) })
+        var indexById: [String: Int] = [:]
+        indexById.reserveCapacity(trafficRecords.count)
+        for (offset, record) in trafficRecords.enumerated() {
+            indexById[record.id] = offset
+        }
+        trafficRecordIndexById = indexById
+    }
+
+    private func deduplicatedTrafficRecords(_ records: [TrafficRecordSummary]) -> [TrafficRecordSummary] {
+        var indexById: [String: Int] = [:]
+        var result: [TrafficRecordSummary] = []
+        result.reserveCapacity(records.count)
+        for record in records {
+            if let index = indexById[record.id] {
+                result[index] = mergeTrafficRecord(existing: result[index], incoming: record)
+            } else {
+                indexById[record.id] = result.count
+                result.append(record)
+            }
+        }
+        return result
     }
 
     private func trafficRecordSortOrder(_ lhs: TrafficRecordSummary, _ rhs: TrafficRecordSummary) -> Bool {
