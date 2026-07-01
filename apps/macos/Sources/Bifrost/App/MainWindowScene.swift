@@ -48,7 +48,7 @@ struct MainWindowScene: View {
         }
         .onChange(of: appModel.selectedSidebarItem) { _ in
             Task {
-                await appModel.refreshData()
+                await appModel.handleSidebarSelectionChanged()
             }
         }
     }

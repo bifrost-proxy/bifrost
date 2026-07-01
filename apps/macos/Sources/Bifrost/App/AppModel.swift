@@ -4,6 +4,12 @@ import SwiftUI
 
 @MainActor
 final class AppModel: ObservableObject {
+    private enum TrafficSyncPolicy {
+        static let initialWindowLimit = 500
+        static let historyBatchLimit = 500
+        static let maxPendingIds = 500
+    }
+
     @Published var sidecarState: SidecarState = .stopped
     @Published var selectedSidebarItem: SidebarItem = .network
     @Published var colorSchemeMode: ColorSchemeMode = .light
@@ -54,8 +60,14 @@ final class AppModel: ObservableObject {
     private var realtimeTask: Task<Void, Never>?
     private var pollingTask: Task<Void, Never>?
     private var trafficDeltaFlushTask: Task<Void, Never>?
+    private var trafficHistoryTask: Task<Void, Never>?
     private var pendingTrafficInserts: [TrafficRecordSummary] = []
     private var pendingTrafficUpdates: [TrafficRecordSummary] = []
+    private var trafficServerTotal = 0
+    private var trafficServerSequence: Int?
+    private var trafficHasMore = false
+    private var trafficOldestSequence: Int?
+    private var pendingTrafficIds = Set<String>()
 
     init() {
         if let binaryPath = SidecarResolver.resolveBundledBinary()
@@ -105,20 +117,20 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshData() async {
+    func refreshData(includeTraffic: Bool? = nil) async {
         isLoadingData = true
         defer { isLoadingData = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
             async let overview = client.fetchSystemOverview()
-            async let traffic = client.fetchTraffic(query: TrafficQuery(limit: 100))
             async let rules = client.fetchRules()
             async let systemProxy = client.fetchSystemProxy()
             async let tlsConfig = client.fetchTlsConfig()
             async let breakpointSettings = client.fetchBreakpointSettings()
 
             var errors: [String] = []
+            let shouldLoadTraffic = includeTraffic ?? (selectedSidebarItem == .network)
 
             do {
                 self.overview = try await overview
@@ -126,13 +138,12 @@ final class AppModel: ObservableObject {
                 errors.append("Overview: \(error.localizedDescription)")
             }
 
-            do {
-                let loadedTraffic = try await traffic
-                self.clearPendingTrafficDelta()
-                self.trafficRecords = deduplicatedTrafficRecords(loadedTraffic.records)
-                self.rebuildTrafficRecordIndex()
-            } catch {
-                errors.append("Traffic: \(error.localizedDescription)")
+            if shouldLoadTraffic {
+                do {
+                    try await reloadTrafficFromServer(client: client)
+                } catch {
+                    errors.append("Traffic: \(error.localizedDescription)")
+                }
             }
 
             do {
@@ -163,11 +174,23 @@ final class AppModel: ObservableObject {
                 selectedRuleName = self.rules.first?.name
             }
             self.dataError = errors.isEmpty ? nil : errors.joined(separator: " · ")
-            await selectInitialTrafficRecordIfNeeded()
+            if shouldLoadTraffic {
+                await selectInitialTrafficRecordIfNeeded()
+            }
             updateRealtimeSubscription()
         } catch {
             self.dataError = error.localizedDescription
         }
+    }
+
+    func handleSidebarSelectionChanged() async {
+        clearPendingTrafficDelta()
+        if selectedSidebarItem != .network {
+            trafficHistoryTask?.cancel()
+            trafficHistoryTask = nil
+        }
+        updateRealtimeSubscription()
+        await refreshData(includeTraffic: selectedSidebarItem == .network)
     }
 
     func selectRule(_ name: String) async {
@@ -752,11 +775,85 @@ final class AppModel: ObservableObject {
         return String(text.prefix(2_400)) + "\n..."
     }
 
+    private func reloadTrafficFromServer(client: BifrostClient) async throws {
+        trafficHistoryTask?.cancel()
+        trafficHistoryTask = nil
+        clearPendingTrafficDelta()
+
+        let response = try await client.fetchTrafficUpdates(
+            query: TrafficUpdatesQuery(limit: TrafficSyncPolicy.initialWindowLimit)
+        )
+        let initialRecords = deduplicatedTrafficRecords(response.newRecords + response.updatedRecords)
+            .sorted(by: trafficRecordSortOrder)
+
+        trafficRecords = initialRecords
+        rebuildTrafficRecordIndex()
+        trafficServerTotal = response.serverTotal
+        trafficServerSequence = response.serverSequence
+        trafficHasMore = response.hasMore
+        refreshTrafficBoundaryState()
+        rebuildPendingTrafficIds()
+        updateRealtimeSubscription()
+
+        if response.hasMore {
+            startTrafficHistoryBackfill()
+        }
+    }
+
+    private func startTrafficHistoryBackfill() {
+        trafficHistoryTask?.cancel()
+        trafficHistoryTask = Task { [weak self] in
+            await self?.backfillTrafficHistory()
+        }
+    }
+
+    private func backfillTrafficHistory() async {
+        while !Task.isCancelled {
+            guard selectedSidebarItem == .network,
+                  trafficHasMore,
+                  let cursor = trafficOldestSequence else {
+                return
+            }
+
+            do {
+                let client = try BifrostClient(baseURL: adminURL)
+                let response = try await client.fetchTraffic(
+                    query: TrafficQuery(
+                        limit: TrafficSyncPolicy.historyBatchLimit,
+                        cursor: cursor,
+                        direction: "backward"
+                    )
+                )
+
+                if Task.isCancelled {
+                    return
+                }
+
+                mergeTrafficRecords(updates: [], inserts: response.records)
+                trafficServerTotal = response.total ?? trafficServerTotal
+                trafficServerSequence = response.serverSequence ?? trafficServerSequence
+                trafficHasMore = response.hasMore ?? false
+                refreshTrafficBoundaryState()
+                updateRealtimeSubscription()
+
+                if response.records.isEmpty || !trafficHasMore {
+                    return
+                }
+                await Task.yield()
+            } catch {
+                dataError = "Traffic history: \(error.localizedDescription)"
+                return
+            }
+        }
+    }
+
     private func startRealtimeSync() {
         realtimeTask?.cancel()
         pollingTask?.cancel()
         trafficDeltaFlushTask?.cancel()
+        trafficHistoryTask?.cancel()
         trafficDeltaFlushTask = nil
+        trafficHistoryTask = nil
         pendingTrafficInserts.removeAll(keepingCapacity: true)
         pendingTrafficUpdates.removeAll(keepingCapacity: true)
         realtimeState = .connecting
@@ -799,8 +896,8 @@ final class AppModel: ObservableObject {
             return
         }
         realtimeFallbackActive = realtimeState != .connected
-        if realtimeFallbackActive || selectedSidebarItem == .network {
-            await refreshData()
+        if realtimeFallbackActive {
+            await refreshData(includeTraffic: selectedSidebarItem == .network)
         }
     }
 
@@ -827,7 +924,9 @@ final class AppModel: ObservableObject {
             realtimeFallbackActive = false
             updateRealtimeSubscription()
         case .trafficDelta(let data):
-            enqueueTrafficDelta(data)
+            if selectedSidebarItem == .network {
+                enqueueTrafficDelta(data)
+            }
         case .trafficDeleted(let data):
             flushPendingTrafficDelta()
             removeTraffic(ids: data.ids)
@@ -847,6 +946,8 @@ final class AppModel: ObservableObject {
     }
 
     private func enqueueTrafficDelta(_ data: TrafficDeltaData) {
+        trafficServerTotal = data.serverTotal
+        trafficServerSequence = data.serverSequence ?? trafficServerSequence
         pendingTrafficUpdates.append(contentsOf: data.updates)
         pendingTrafficInserts.append(contentsOf: data.inserts)
         guard trafficDeltaFlushTask == nil else {
@@ -921,6 +1022,8 @@ final class AppModel: ObservableObject {
             trafficRecords.sort(by: trafficRecordSortOrder)
             rebuildTrafficRecordIndex()
         }
+        refreshTrafficBoundaryState()
+        rebuildPendingTrafficIds()
 
         Task {
             await selectInitialTrafficRecordIfNeeded()
@@ -963,6 +1066,9 @@ final class AppModel: ObservableObject {
         let deleted = Set(ids)
         trafficRecords.removeAll { deleted.contains($0.id) }
         rebuildTrafficRecordIndex()
+        refreshTrafficBoundaryState()
+        rebuildPendingTrafficIds()
+        trafficServerTotal = max(trafficServerTotal - ids.count, 0)
         if let selectedTrafficId, deleted.contains(selectedTrafficId) {
             self.selectedTrafficId = nil
             selectedTrafficDetailText = ""
@@ -984,12 +1090,13 @@ final class AppModel: ObservableObject {
     }
 
     private func makePushSubscription() -> PushSubscription {
-        let lastRecord = trafficRecords.max { lhs, rhs in
-            (lhs.seq ?? -1) < (rhs.seq ?? -1)
-        }
+        let trafficEnabled = selectedSidebarItem == .network
+        let lastRecord = trafficEnabled ? trafficRecords.last : nil
         return PushSubscription(
             lastTrafficId: lastRecord?.id,
             lastSequence: lastRecord?.seq,
+            pendingIds: trafficEnabled ? Array(pendingTrafficIds) : [],
+            needTraffic: trafficEnabled,
             needValues: false,
             needScripts: false,
             settingsScopes: [
@@ -1025,6 +1132,29 @@ final class AppModel: ObservableObject {
             indexById[record.id] = offset
         }
         trafficRecordIndexById = indexById
+    }
+
+    private func refreshTrafficBoundaryState() {
+        trafficOldestSequence = trafficRecords.first?.seq
+    }
+
+    private func rebuildPendingTrafficIds() {
+        var ids = Set<String>()
+        ids.reserveCapacity(min(trafficRecords.count, TrafficSyncPolicy.maxPendingIds))
+        for record in trafficRecords where isPendingTrafficRecord(record) {
+            ids.insert(record.id)
+            if ids.count >= TrafficSyncPolicy.maxPendingIds {
+                break
+            }
+        }
+        pendingTrafficIds = ids
+    }
+
+    private func isPendingTrafficRecord(_ record: TrafficRecordSummary) -> Bool {
+        guard let status = record.status else {
+            return true
+        }
+        return status == 0
     }
 
     private func deduplicatedTrafficRecords(_ records: [TrafficRecordSummary]) -> [TrafficRecordSummary] {

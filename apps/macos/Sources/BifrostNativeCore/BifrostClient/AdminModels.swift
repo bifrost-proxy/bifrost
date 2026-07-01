@@ -67,11 +67,63 @@ public struct TrafficListResponse: Decodable, Equatable, Sendable {
     public var records: [TrafficRecordSummary]
     public var nextCursor: Int?
     public var total: Int?
+    public var hasMore: Bool?
+    public var serverSequence: Int?
+
+    public init(
+        records: [TrafficRecordSummary],
+        nextCursor: Int? = nil,
+        total: Int? = nil,
+        hasMore: Bool? = nil,
+        serverSequence: Int? = nil
+    ) {
+        self.records = records
+        self.nextCursor = nextCursor
+        self.total = total
+        self.hasMore = hasMore
+        self.serverSequence = serverSequence
+    }
 
     enum CodingKeys: String, CodingKey {
         case records
         case nextCursor = "next_cursor"
         case total
+        case hasMore = "has_more"
+        case serverSequence = "server_sequence"
+    }
+}
+
+public struct TrafficUpdatesResponse: Decodable, Equatable, Sendable {
+    public var newRecords: [TrafficRecordSummary]
+    public var updatedRecords: [TrafficRecordSummary]
+    public var hasMore: Bool
+    public var serverTotal: Int
+    public var serverSequence: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case newRecords = "new_records"
+        case updatedRecords = "updated_records"
+        case hasMore = "has_more"
+        case serverTotal = "server_total"
+        case serverSequence = "server_sequence"
+    }
+}
+
+public struct PerformanceConfigResponse: Decodable, Equatable, Sendable {
+    public var traffic: TrafficPerformanceConfig
+}
+
+public struct TrafficPerformanceConfig: Decodable, Equatable, Sendable {
+    public var maxRecords: Int
+    public var maxDatabaseSizeBytes: UInt64?
+    public var fileRetentionDays: UInt64?
+    public var binaryTrafficPerformanceMode: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case maxRecords = "max_records"
+        case maxDatabaseSizeBytes = "max_db_size_bytes"
+        case fileRetentionDays = "file_retention_days"
+        case binaryTrafficPerformanceMode = "binary_traffic_performance_mode"
     }
 }
 
