@@ -44,6 +44,9 @@ struct SettingsView: View {
         .task(id: appModel.adminURL) {
             await model.configure(baseURL: appModel.adminURL)
         }
+        .task(id: selectedSection) {
+            await model.refresh(section: selectedSection)
+        }
         .alert("Settings Error", isPresented: Binding(
             get: { model.errorMessage != nil },
             set: { if !$0 { model.errorMessage = nil } }
@@ -66,12 +69,30 @@ struct SettingsView: View {
                 .padding(.horizontal, 16)
                 .padding(.top, 18)
 
-            List(SettingsSection.allCases, selection: $selectedSection) { section in
-                Label(section.rawValue, systemImage: section.systemImage)
-                    .tag(section)
-                    .padding(.vertical, 3)
+            VStack(spacing: 2) {
+                ForEach(SettingsSection.allCases) { section in
+                    Button {
+                        selectedSection = section
+                    } label: {
+                        Label(section.rawValue, systemImage: section.systemImage)
+                            .font(.system(size: 13, weight: .medium))
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(selectedSection == section ? Color.primary : Color.secondary)
+                    .padding(.horizontal, 10)
+                    .frame(height: 32)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(selectedSection == section ? Color.primary.opacity(0.08) : Color.clear)
+                    )
+                    .help(section.rawValue)
+                }
             }
-            .listStyle(.sidebar)
+            .padding(.horizontal, 10)
+
+            Spacer()
         }
         .frame(width: 220)
         .background(Color(nsColor: .windowBackgroundColor))
@@ -130,6 +151,19 @@ private final class SettingsViewModel: ObservableObject {
         await refreshCertificate()
         await refreshSync()
         await refreshRemoteInvoke()
+    }
+
+    func refresh(section: SettingsSection) async {
+        switch section {
+        case .proxy:
+            await refreshProxy()
+        case .certificate:
+            await refreshCertificate()
+        case .sync:
+            await refreshSync()
+        case .remoteInvoke:
+            await refreshRemoteInvoke()
+        }
     }
 
     func refreshProxy() async {
@@ -362,14 +396,7 @@ private struct ProxySettingsPage: View {
             SettingsPageHeader(
                 title: "Proxy",
                 subtitle: "System proxy, shell proxy and LAN proxy addresses use the same Bifrost service."
-            ) {
-                Button {
-                    Task { await model.refreshProxy() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.isLoading || model.isMutating)
-            }
+            )
 
             SettingsCard("System Proxy", systemImage: "network") {
                 if let status = model.systemProxy {
@@ -481,14 +508,7 @@ private struct CertificateSettingsPage: View {
             SettingsPageHeader(
                 title: "Certificate",
                 subtitle: "Install and verify the Bifrost CA used for HTTPS inspection."
-            ) {
-                Button {
-                    Task { await model.refreshCertificate() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.isLoading || model.isMutating)
-            }
+            )
 
             SettingsCard("Local CA", systemImage: "checkmark.shield") {
                 if let cert = model.certInfo {
@@ -543,7 +563,7 @@ private struct CertificateSettingsPage: View {
                     Button {
                         Task { await model.refreshMobileDevices() }
                     } label: {
-                        Label("Refresh Devices", systemImage: "arrow.clockwise")
+                        Label("Scan Devices", systemImage: "dot.radiowaves.left.and.right")
                     }
                     .disabled(model.isMutating)
                 }
@@ -584,14 +604,7 @@ private struct SyncSettingsPage: View {
             SettingsPageHeader(
                 title: "Sync",
                 subtitle: "Remote sync remains optional. Local rules and traffic capture continue to work without login."
-            ) {
-                Button {
-                    Task { await model.refreshSync() }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-                .disabled(model.isLoading || model.isMutating)
-            }
+            )
 
             SettingsCard("Remote Sync", systemImage: "arrow.triangle.2.circlepath") {
                 if let status = model.syncStatus {
@@ -699,14 +712,7 @@ private struct RemoteInvokeSettingsPage: View {
         SettingsPageHeader(
             title: "Remote Invoke",
             subtitle: "Pair callers, approve access, manage SSH key authorization and inspect recent remote calls."
-        ) {
-            Button {
-                Task { await model.refreshRemoteInvoke() }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
-            }
-            .disabled(model.isLoading || model.isMutating)
-        }
+        )
     }
 
     private var statusCard: some View {
@@ -837,7 +843,7 @@ private struct DiscoverySessionView: View {
                 Button {
                     Task { await model.refreshPairCode() }
                 } label: {
-                    Label("Refresh Code", systemImage: "arrow.clockwise")
+                    Label("Regenerate Code", systemImage: "arrow.triangle.2.circlepath")
                 }
                 .disabled(model.isMutating)
                 Button(role: .destructive) {
@@ -1053,6 +1059,14 @@ private struct SettingsPageHeader<Trailing: View>: View {
             Spacer()
             trailing
         }
+    }
+}
+
+private extension SettingsPageHeader where Trailing == EmptyView {
+    init(title: String, subtitle: String) {
+        self.title = title
+        self.subtitle = subtitle
+        self.trailing = EmptyView()
     }
 }
 

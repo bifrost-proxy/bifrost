@@ -118,18 +118,51 @@ final class AppModel: ObservableObject {
             async let tlsConfig = client.fetchTlsConfig()
             async let breakpointSettings = client.fetchBreakpointSettings()
 
-            self.overview = try await overview
-            self.clearPendingTrafficDelta()
-            self.trafficRecords = deduplicatedTrafficRecords(try await traffic.records)
-            self.rebuildTrafficRecordIndex()
-            self.rules = try await rules
-            self.systemProxyStatus = try await systemProxy
-            self.tlsConfig = try await tlsConfig
-            self.breakpointSettings = try await breakpointSettings
+            var errors: [String] = []
+
+            do {
+                self.overview = try await overview
+            } catch {
+                errors.append("Overview: \(error.localizedDescription)")
+            }
+
+            do {
+                let loadedTraffic = try await traffic
+                self.clearPendingTrafficDelta()
+                self.trafficRecords = deduplicatedTrafficRecords(loadedTraffic.records)
+                self.rebuildTrafficRecordIndex()
+            } catch {
+                errors.append("Traffic: \(error.localizedDescription)")
+            }
+
+            do {
+                self.rules = try await rules
+            } catch {
+                errors.append("Rules: \(error.localizedDescription)")
+            }
+
+            do {
+                self.systemProxyStatus = try await systemProxy
+            } catch {
+                errors.append("System Proxy: \(error.localizedDescription)")
+            }
+
+            do {
+                self.tlsConfig = try await tlsConfig
+            } catch {
+                errors.append("TLS: \(error.localizedDescription)")
+            }
+
+            do {
+                self.breakpointSettings = try await breakpointSettings
+            } catch {
+                errors.append("Breakpoint: \(error.localizedDescription)")
+            }
+
             if selectedRuleName == nil {
                 selectedRuleName = self.rules.first?.name
             }
-            self.dataError = nil
+            self.dataError = errors.isEmpty ? nil : errors.joined(separator: " · ")
             await selectInitialTrafficRecordIfNeeded()
             updateRealtimeSubscription()
         } catch {

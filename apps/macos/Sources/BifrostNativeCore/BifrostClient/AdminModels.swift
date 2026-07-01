@@ -156,6 +156,28 @@ public struct TrafficRecordSummary: Decodable, Equatable, Identifiable, Sendable
         case matchedProtocols = "rp"
     }
 
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        seq = try container.decodeIfPresent(Int.self, forKey: .seq)
+        method = try container.decodeIfPresent(String.self, forKey: .method)
+        host = try container.decodeIfPresent(String.self, forKey: .host)
+        path = try container.decodeIfPresent(String.self, forKey: .path)
+        status = try container.decodeIfPresent(Int.self, forKey: .status)
+        contentType = try container.decodeIfPresent(String.self, forKey: .contentType)
+        responseSize = try container.decodeIfPresent(Int.self, forKey: .responseSize)
+        durationMs = try container.decodeIfPresent(Int.self, forKey: .durationMs)
+        listenerPort = try container.decodeIfPresent(Int.self, forKey: .listenerPort)
+        protocolName = try container.decodeIfPresent(String.self, forKey: .protocolName)
+        clientApp = try container.decodeIfPresent(String.self, forKey: .clientApp)
+        clientIp = try container.decodeIfPresent(String.self, forKey: .clientIp)
+        startTime = try container.decodeIfPresent(String.self, forKey: .startTime)
+        endTime = try container.decodeIfPresent(String.self, forKey: .endTime)
+        flags = try container.decodeIfPresent(Int.self, forKey: .flags)
+        matchedRuleCount = try container.decodeIfPresent(Int.self, forKey: .matchedRuleCount)
+        matchedProtocols = try container.decodeIfPresent([String].self, forKey: .matchedProtocols) ?? []
+    }
+
     public var hasRuleHit: Bool {
         if (matchedRuleCount ?? 0) > 0 {
             return true

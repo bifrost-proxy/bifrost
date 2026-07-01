@@ -3,23 +3,53 @@ import SwiftUI
 
 struct MainWindowScene: View {
     @EnvironmentObject private var appModel: AppModel
+    @State private var createRuleSheetVisible = false
 
     var body: some View {
-        VStack(spacing: 0) {
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        NavigationSplitView {
+            PrimarySidebar(selection: $appModel.selectedSidebarItem)
+                .navigationSplitViewColumnWidth(min: 188, ideal: 218, max: 252)
+        } detail: {
+            VStack(spacing: 0) {
+                if appModel.selectedSidebarItem != .settings {
+                    TopToolbar {
+                        createRuleSheetVisible = true
+                    }
 
-            Divider()
+                    Divider()
+                }
 
-            StatusBar()
+                content
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                Divider()
+
+                StatusBar()
+            }
+            .background(Color(nsColor: .windowBackgroundColor))
         }
-        .padding(.top, 36)
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1180, minHeight: 760)
         .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(appModel.colorSchemeMode.colorScheme)
-        .background(WindowTitlebarConfigurator())
+        .background(WindowChromeConfigurator())
+        .sheet(isPresented: $createRuleSheetVisible) {
+            NameEntrySheet(
+                title: "New Rule",
+                prompt: "Rule name",
+                initialValue: "",
+                confirmTitle: "Create"
+            ) { name in
+                Task { await appModel.createRule(name: name) }
+            }
+        }
         .task {
             await appModel.ensureService()
+        }
+        .onChange(of: appModel.selectedSidebarItem) { _ in
+            Task {
+                await appModel.refreshData()
+            }
         }
     }
 
@@ -36,9 +66,7 @@ struct MainWindowScene: View {
     }
 }
 
-private struct WindowTitlebarConfigurator: NSViewRepresentable {
-    @EnvironmentObject private var appModel: AppModel
-
+private struct WindowChromeConfigurator: NSViewRepresentable {
     func makeCoordinator() -> Coordinator {
         Coordinator()
     }
@@ -46,58 +74,30 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
     func makeNSView(context: Context) -> NSView {
         let view = NSView(frame: .zero)
         DispatchQueue.main.async {
-            context.coordinator.attach(to: view, appModel: appModel)
+            context.coordinator.attach(to: view)
         }
         return view
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
         DispatchQueue.main.async {
-            context.coordinator.attach(to: nsView, appModel: appModel)
-            context.coordinator.update(appModel: appModel)
+            context.coordinator.attach(to: nsView)
         }
     }
 
     @MainActor
     final class Coordinator {
         private weak var window: NSWindow?
-        private var accessory: NSTitlebarAccessoryViewController?
-        private var hostingView: NSHostingView<AnyView>?
 
-        func attach(to markerView: NSView, appModel: AppModel) {
+        func attach(to markerView: NSView) {
             guard let window = markerView.window else {
                 return
             }
 
             if self.window !== window {
-                if let existing = accessory,
-                   let index = window.titlebarAccessoryViewControllers.firstIndex(of: existing) {
-                    window.removeTitlebarAccessoryViewController(at: index)
-                }
                 configure(window)
-                let hostingView = NSHostingView(rootView: AnyView(TopToolbar().environmentObject(appModel)))
-                hostingView.frame = NSRect(x: 0, y: 0, width: max(window.frame.width - 96, 920), height: 36)
-                hostingView.autoresizingMask = [.width]
-
-                let accessory = NSTitlebarAccessoryViewController()
-                accessory.layoutAttribute = .right
-                accessory.view = hostingView
-                window.addTitlebarAccessoryViewController(accessory)
-
                 self.window = window
-                self.accessory = accessory
-                self.hostingView = hostingView
             }
-
-            update(appModel: appModel)
-        }
-
-        func update(appModel: AppModel) {
-            guard let window else {
-                return
-            }
-            hostingView?.frame.size = NSSize(width: max(window.frame.width - 96, 920), height: 36)
-            hostingView?.rootView = AnyView(TopToolbar().environmentObject(appModel))
         }
 
         private func configure(_ window: NSWindow) {
@@ -115,6 +115,7 @@ private struct WindowTitlebarConfigurator: NSViewRepresentable {
 
 private struct TopToolbar: View {
     @EnvironmentObject private var appModel: AppModel
+    let createRule: () -> Void
 
     private let ruleFilters = ["Hit Rule"]
     private let protocolFilters = ["HTTP", "HTTPS", "WS", "WSS", "H3"]
@@ -123,34 +124,18 @@ private struct TopToolbar: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            topTabs
-
-            Divider()
-                .frame(height: 18)
-
-            if appModel.selectedSidebarItem == .network {
+            switch appModel.selectedSidebarItem {
+            case .network:
                 networkToolbar
-            } else {
-                sectionToolbar
-            }
-
-            ToolbarIconButton(
-                systemImage: appModel.colorSchemeMode.systemImage,
-                help: "Toggle \(appModel.colorSchemeMode.next.rawValue) Theme"
-            ) {
-                appModel.colorSchemeMode = appModel.colorSchemeMode.next
+            case .rules:
+                rulesToolbar
+            case .settings:
+                EmptyView()
             }
         }
-        .frame(height: 32)
-        .padding(.leading, 0)
-        .padding(.trailing, 10)
+        .frame(height: 42)
+        .padding(.horizontal, 12)
         .background(.bar)
-    }
-
-    private var topTabs: some View {
-        NativeSectionTabs(selection: $appModel.selectedSidebarItem)
-        .frame(width: 268)
-        .help("Switch Bifrost section")
     }
 
     private var networkToolbar: some View {
@@ -200,6 +185,8 @@ private struct TopToolbar: View {
             .buttonStyle(.borderless)
             .font(.system(size: 12))
 
+            Spacer(minLength: 8)
+
             Button {
                 appModel.isNetworkSearchVisible.toggle()
             } label: {
@@ -214,8 +201,6 @@ private struct TopToolbar: View {
                     .font(.system(size: 11))
                     .frame(width: 190)
             }
-
-            Spacer(minLength: 8)
 
             CompactToolbarToggle(
                 title: "Breakpoint",
@@ -261,36 +246,27 @@ private struct TopToolbar: View {
         }
     }
 
-    private var sectionToolbar: some View {
+    private var rulesToolbar: some View {
         HStack(spacing: 8) {
-            Image(systemName: appModel.selectedSidebarItem.systemImage)
+            Image(systemName: SidebarItem.rules.systemImage)
                 .font(.system(size: 13, weight: .medium))
                 .foregroundStyle(.secondary)
-            Text(appModel.selectedSidebarItem.rawValue)
+            Text("Rules")
                 .font(.system(size: 13, weight: .semibold))
-            Text(sectionSubtitle)
+            Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
                 .font(.system(size: 11))
                 .foregroundStyle(.secondary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 2)
+                .background(.quaternary, in: Capsule())
+
             Spacer()
-            Button {
-                Task {
-                    await appModel.refreshData()
-                }
-            } label: {
-                Label("Refresh", systemImage: "arrow.clockwise")
+
+            Button(action: createRule) {
+                Label("New Rule", systemImage: "plus")
             }
             .buttonStyle(.borderless)
-        }
-    }
 
-    private var sectionSubtitle: String {
-        switch appModel.selectedSidebarItem {
-        case .rules:
-            return "\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled"
-        case .settings:
-            return appModel.adminHostPortLabel
-        case .network:
-            return "\(appModel.displayedTrafficRecords.count) records"
         }
     }
 
@@ -327,61 +303,6 @@ private struct TopToolbar: View {
             return "System proxy is not supported on this platform"
         }
         return "Toggle macOS system proxy for \(appModel.adminHostPortLabel)"
-    }
-}
-
-private struct NativeSectionTabs: NSViewRepresentable {
-    @Binding var selection: SidebarItem
-
-    private let items = SidebarItem.releaseScopeItems
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator(selection: $selection, items: items)
-    }
-
-    func makeNSView(context: Context) -> NSSegmentedControl {
-        let control = NSSegmentedControl(frame: .zero)
-        control.segmentCount = items.count
-        control.trackingMode = .selectOne
-        control.segmentStyle = .automatic
-        control.controlSize = .regular
-        control.target = context.coordinator
-        control.action = #selector(Coordinator.selectionChanged(_:))
-        control.setContentHuggingPriority(.required, for: .horizontal)
-        control.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        for (index, item) in items.enumerated() {
-            control.setLabel(item.rawValue, forSegment: index)
-            control.setToolTip(item.rawValue, forSegment: index)
-            control.setWidth(82, forSegment: index)
-        }
-        updateNSView(control, context: context)
-        return control
-    }
-
-    func updateNSView(_ control: NSSegmentedControl, context: Context) {
-        context.coordinator.selection = $selection
-        let selectedIndex = items.firstIndex(of: selection) ?? 0
-        if control.selectedSegment != selectedIndex {
-            control.selectedSegment = selectedIndex
-        }
-    }
-
-    final class Coordinator: NSObject {
-        var selection: Binding<SidebarItem>
-        let items: [SidebarItem]
-
-        init(selection: Binding<SidebarItem>, items: [SidebarItem]) {
-            self.selection = selection
-            self.items = items
-        }
-
-        @objc func selectionChanged(_ sender: NSSegmentedControl) {
-            guard sender.selectedSegment >= 0, sender.selectedSegment < items.count else {
-                return
-            }
-            selection.wrappedValue = items[sender.selectedSegment]
-        }
     }
 }
 
@@ -423,6 +344,7 @@ private struct CompactToolbarToggle: View {
                 isEnabled: !isDisabled,
                 action: action
             )
+            .frame(width: 28, height: 16)
         }
         .frame(height: 22)
         .opacity(isDisabled ? 0.48 : 1)

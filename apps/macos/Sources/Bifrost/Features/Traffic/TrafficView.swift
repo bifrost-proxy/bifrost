@@ -52,12 +52,13 @@ struct TrafficView: View {
                             .frame(minHeight: 360)
                     }
                 }
-                .frame(minWidth: 560, idealWidth: 720, maxWidth: 900)
+                .frame(minWidth: 420, idealWidth: 620, maxWidth: 760)
 
                 if !appModel.isDetailPanelCollapsed {
                     Divider()
 
                     RequestDetailView()
+                        .frame(minWidth: 420)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }

@@ -107,11 +107,22 @@ func runSidecarConfigurationChecks() async throws {
     try checkEqual(snapshot.dataDir, "/Users/tester/.bifrost", "status snapshot should decode shared default data dir")
 }
 
+func runAdminModelDecodingChecks() throws {
+    let missingMatchedProtocolsJSON = Data("""
+    {"records":[{"id":"1","seq":7,"m":"CONNECT","h":"chatgpt.com","s":200}],"total":1}
+    """.utf8)
+    let response = try JSONDecoder().decode(TrafficListResponse.self, from: missingMatchedProtocolsJSON)
+    try checkEqual(response.records.count, 1, "traffic response should decode one record")
+    try checkEqual(response.records[0].matchedProtocols, [], "missing traffic rp should default to empty matched protocol list")
+    try checkEqual(response.records[0].host, "chatgpt.com", "traffic compact host key should decode")
+}
+
 @main
 struct BifrostNativeCoreChecks {
     static func main() async {
         do {
             try runAdminAPIRequestFactoryChecks()
+            try runAdminModelDecodingChecks()
             try await runSidecarConfigurationChecks()
             print("BifrostNativeCoreChecks passed")
         } catch {
