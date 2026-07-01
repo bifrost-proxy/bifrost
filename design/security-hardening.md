@@ -51,6 +51,7 @@
 - Sync 登录使用 `e2e-tests/tests/test_sync_login_direct_e2e.sh` 验证 CLI/API 拒绝明文 HTTP relay，同时默认 HTTPS token login 仍可保存。
 - BP parser 使用 `e2e-tests/tests/test_bp_parser_e2e.sh` 验证 sandbox 私网默认收紧后，显式 opt-in 的 build-in BP parser 仍能访问本地 BAM mock。
 - DevTools 使用 `e2e-tests/tests/test_devtools_page_bridge_api.sh` 验证 H2 的虚拟主机鉴权不再误伤 token-protected DevTools bridge。
+- Windows CI 继续执行 workspace 全量单测，并将 `test_https_interception_websocket_applies_request_and_response_header_rules` 作为单独串行回归运行，避免 TLS/WebSocket CONNECT 夹具与同文件其它网络测试并发造成平台抖动，同时保持覆盖不降级。
 
 ### 真实场景测试
 
