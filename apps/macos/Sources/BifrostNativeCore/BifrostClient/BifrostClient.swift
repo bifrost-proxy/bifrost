@@ -173,11 +173,35 @@ public actor BifrostClient {
     }
 
     public func getCertInfo() async throws -> Data {
-        try await request(.get, path: "/cert")
+        try await request(.get, path: "/cert/info")
+    }
+
+    public func fetchCertInfo() async throws -> CertInfo {
+        try await decode(CertInfo.self, from: getCertInfo())
+    }
+
+    public func installLocalCA() async throws -> CertInfo {
+        let body = try JSONEncoder().encode(LocalCAInstallRequest())
+        let data = try await request(.post, path: "/cert/install", body: body)
+        return try await decode(CertInfo.self, from: data)
+    }
+
+    public func fetchMobileDevices() async throws -> MobileDevicesResponse {
+        let data = try await request(.get, path: "/mobile-devices")
+        return try await decode(MobileDevicesResponse.self, from: data)
+    }
+
+    public func refreshMobileDevices() async throws -> MobileDevicesResponse {
+        let data = try await request(.post, path: "/mobile-devices/refresh")
+        return try await decode(MobileDevicesResponse.self, from: data)
     }
 
     public func getProxyAddress() async throws -> Data {
         try await request(.get, path: "/proxy/address")
+    }
+
+    public func fetchProxyAddress() async throws -> ProxyAddressInfo {
+        try await decode(ProxyAddressInfo.self, from: getProxyAddress())
     }
 
     public func getSystemProxy() async throws -> Data {
@@ -192,6 +216,138 @@ public actor BifrostClient {
         let body = try JSONEncoder().encode(SetSystemProxyRequest(enabled: enabled, bypass: bypass))
         let data = try await request(.put, path: "/proxy/system", body: body)
         return try await decode(SystemProxyStatus.self, from: data)
+    }
+
+    public func fetchSystemProxyLaunchd() async throws -> SystemProxyLaunchdStatus {
+        let data = try await request(.get, path: "/proxy/system/launchd")
+        return try await decode(SystemProxyLaunchdStatus.self, from: data)
+    }
+
+    public func setSystemProxyLaunchd(enabled: Bool) async throws -> SystemProxyLaunchdStatus {
+        let body = try JSONEncoder().encode(SetSystemProxyLaunchdRequest(enabled: enabled))
+        let data = try await request(.put, path: "/proxy/system/launchd", body: body)
+        return try await decode(SystemProxyLaunchdStatus.self, from: data)
+    }
+
+    public func fetchCliProxy() async throws -> CliProxyStatus {
+        let data = try await request(.get, path: "/proxy/cli")
+        return try await decode(CliProxyStatus.self, from: data)
+    }
+
+    public func fetchSyncStatus() async throws -> SyncStatus {
+        let data = try await request(.get, path: "/sync/status")
+        return try await decode(SyncStatus.self, from: data)
+    }
+
+    public func updateSyncConfig(_ requestBody: UpdateSyncConfigRequest) async throws -> SyncStatus {
+        let body = try JSONEncoder().encode(requestBody)
+        let data = try await request(.put, path: "/sync/config", body: body)
+        return try await decode(SyncStatus.self, from: data)
+    }
+
+    public func openSyncLogin() async throws -> SyncStatus {
+        let data = try await request(.post, path: "/sync/login")
+        return try await decode(SyncStatus.self, from: data)
+    }
+
+    public func logoutSyncSession() async throws -> SyncStatus {
+        let data = try await request(.post, path: "/sync/logout")
+        return try await decode(SyncStatus.self, from: data)
+    }
+
+    public func runSyncNow() async throws -> SyncStatus {
+        let data = try await request(.post, path: "/sync/run")
+        return try await decode(SyncStatus.self, from: data)
+    }
+
+    public func fetchRemoteInvokeStatus() async throws -> RemoteInvokeStatus {
+        let data = try await request(.get, path: "/remote-invoke/status")
+        return try await decode(RemoteInvokeStatus.self, from: data)
+    }
+
+    public func fetchClientIdentity() async throws -> ClientIdentity {
+        let data = try await request(.get, path: "/remote-invoke/identity")
+        return try await decode(ClientIdentity.self, from: data)
+    }
+
+    public func enterDiscoveryMode() async throws -> DiscoveryResponse {
+        let data = try await request(.post, path: "/remote-invoke/discovery/enter")
+        return try await decode(DiscoveryResponse.self, from: data)
+    }
+
+    public func exitDiscoveryMode() async throws {
+        _ = try await request(.post, path: "/remote-invoke/discovery/exit")
+    }
+
+    public func refreshPairCode() async throws -> DiscoveryResponse {
+        let data = try await request(.post, path: "/remote-invoke/discovery/refresh")
+        return try await decode(DiscoveryResponse.self, from: data)
+    }
+
+    public func fetchPendingPairings() async throws -> PendingPairingsResponse {
+        let data = try await request(.get, path: "/remote-invoke/pairings/pending")
+        return try await decode(PendingPairingsResponse.self, from: data)
+    }
+
+    public func approvePairing(_ pairingID: String, input: PairingApprovalInput) async throws {
+        let body = try JSONEncoder().encode(input)
+        _ = try await request(
+            .post,
+            path: "/remote-invoke/pairings/\(encodePathSegment(pairingID))/approve",
+            body: body
+        )
+    }
+
+    public func rejectPairing(_ pairingID: String) async throws {
+        _ = try await request(.post, path: "/remote-invoke/pairings/\(encodePathSegment(pairingID))/reject")
+    }
+
+    public func fetchRemoteInvokeGrants() async throws -> GrantsListResponse {
+        let data = try await request(.get, path: "/remote-invoke/grants")
+        return try await decode(GrantsListResponse.self, from: data)
+    }
+
+    public func revokeRemoteInvokeGrant(_ grantID: String) async throws {
+        _ = try await request(.delete, path: "/remote-invoke/grants/\(encodePathSegment(grantID))")
+    }
+
+    public func fetchRemoteInvokeCalls(limit: Int = 50) async throws -> CallsListResponse {
+        let data = try await request(.get, path: "/remote-invoke/calls", queryItems: [
+            URLQueryItem(name: "limit", value: String(limit)),
+        ])
+        return try await decode(CallsListResponse.self, from: data)
+    }
+
+    public func clearRemoteInvokeCalls() async throws {
+        _ = try await request(.delete, path: "/remote-invoke/calls")
+    }
+
+    public func fetchRemoteInvokeSshKey() async throws -> RemoteInvokeSshKeyRecord? {
+        let data = try await request(.get, path: "/remote-invoke/ssh-key")
+        if data.isEmpty || String(data: data, encoding: .utf8) == "null" {
+            return nil
+        }
+        return try await decode(RemoteInvokeSshKeyRecord.self, from: data)
+    }
+
+    public func createRemoteInvokeSshKey(label: String, grantMode: String = "permanent") async throws -> RemoteInvokeSshKeySecretPayload {
+        let body = try JSONEncoder().encode(CreateRemoteInvokeSshKeyInput(label: label, grantMode: grantMode))
+        let data = try await request(.post, path: "/remote-invoke/ssh-key", body: body)
+        return try await decode(RemoteInvokeSshKeySecretPayload.self, from: data)
+    }
+
+    public func resetRemoteInvokeSshKey() async throws -> RemoteInvokeSshKeySecretPayload {
+        let data = try await request(.post, path: "/remote-invoke/ssh-key/reset")
+        return try await decode(RemoteInvokeSshKeySecretPayload.self, from: data)
+    }
+
+    public func revokeRemoteInvokeSshKey() async throws {
+        _ = try await request(.delete, path: "/remote-invoke/ssh-key")
+    }
+
+    public func fetchRemoteInvokeSshPrivateKey() async throws -> RemoteInvokeSshKeySecretPayload {
+        let data = try await request(.get, path: "/remote-invoke/ssh-key/private-key")
+        return try await decode(RemoteInvokeSshKeySecretPayload.self, from: data)
     }
 
     public func getTlsConfig() async throws -> Data {

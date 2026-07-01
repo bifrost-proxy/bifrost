@@ -19,8 +19,21 @@ struct BifrostApp: App {
         if CommandLine.arguments.contains("--check-admin-data") {
             AdminDataSmokeCheck.run()
         }
+        if CommandLine.arguments.contains("--check-settings-data") {
+            SettingsDataSmokeCheck.run()
+        }
         if CommandLine.arguments.contains("--check-traffic-table-performance") {
             TrafficTablePerformanceSmoke.run()
+        }
+        if CommandLine.arguments.contains("--check-release-scope") {
+            let items = SidebarItem.releaseScopeItems.map(\.rawValue)
+            let allItems = SidebarItem.allCases.map(\.rawValue)
+            guard items == ["Network", "Rules", "Settings"], allItems == items else {
+                fputs("Bifrost release scope check failed: visible=\(items.joined(separator: ",")) all=\(allItems.joined(separator: ","))\n", stderr)
+                Foundation.exit(1)
+            }
+            print("Bifrost release scope check passed: \(items.joined(separator: ","))")
+            Foundation.exit(0)
         }
     }
 

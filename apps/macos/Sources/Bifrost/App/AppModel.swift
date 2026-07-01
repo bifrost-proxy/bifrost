@@ -114,8 +114,6 @@ final class AppModel: ObservableObject {
             async let overview = client.fetchSystemOverview()
             async let traffic = client.fetchTraffic(query: TrafficQuery(limit: 100))
             async let rules = client.fetchRules()
-            async let values = client.fetchValues()
-            async let scripts = client.fetchScripts()
             async let systemProxy = client.fetchSystemProxy()
             async let tlsConfig = client.fetchTlsConfig()
             async let breakpointSettings = client.fetchBreakpointSettings()
@@ -125,19 +123,11 @@ final class AppModel: ObservableObject {
             self.trafficRecords = try await traffic.records
             self.rebuildTrafficRecordIndex()
             self.rules = try await rules
-            self.values = try await values.values
-            self.scriptsByType = (try await scripts).asDictionary()
             self.systemProxyStatus = try await systemProxy
             self.tlsConfig = try await tlsConfig
             self.breakpointSettings = try await breakpointSettings
             if selectedRuleName == nil {
                 selectedRuleName = self.rules.first?.name
-            }
-            if selectedValueName == nil {
-                selectedValueName = self.values.first?.name
-            }
-            if selectedScriptName == nil {
-                selectedScriptName = scriptsByType[selectedScriptType]?.first?.name
             }
             self.dataError = nil
             await selectInitialTrafficRecordIfNeeded()
@@ -809,8 +799,8 @@ final class AppModel: ObservableObject {
             flushPendingTrafficDelta()
             removeTraffic(ids: data.ids)
             updateRealtimeSubscription()
-        case .valuesUpdate(let data):
-            values = data.values
+        case .valuesUpdate:
+            break
         case .settingsUpdate(let data):
             applySettingsUpdate(data)
         case .breakpointSettingsUpdated(let data):
@@ -965,7 +955,13 @@ final class AppModel: ObservableObject {
         }
         return PushSubscription(
             lastTrafficId: lastRecord?.id,
-            lastSequence: lastRecord?.seq
+            lastSequence: lastRecord?.seq,
+            needValues: false,
+            needScripts: false,
+            settingsScopes: [
+                "system_proxy",
+                "tls_config",
+            ]
         )
     }
 
