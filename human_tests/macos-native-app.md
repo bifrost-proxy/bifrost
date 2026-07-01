@@ -570,6 +570,63 @@
 - 文字测量和绘制不再走 `NSString.size(withAttributes:)` / `NSStringDrawingEngine`；Network 滚动并发绘制时使用稳定的 CoreText/CG 路径和显式裁剪。
 - 右侧 Network 表格、Rules 详情、Settings 面板操作风格不受影响。
 
+### TC-MNA-23：Network 列表按 WebUI 加载策略展示全部服务端保留数据
+
+**操作步骤：**
+1. 构建 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+2. 确认服务端当前 traffic 保留策略：
+   ```bash
+   curl -s http://127.0.0.1:9900/_bifrost/api/config/performance
+   ```
+3. 用 WebUI 同款 initial window + backward history page 策略拉取 Network 列表，并与 100 条查询对照：
+   ```bash
+   python3 - <<'PY'
+   import json
+   import urllib.request
+
+   base = "http://127.0.0.1:9900/_bifrost/api"
+   perf = json.load(urllib.request.urlopen(f"{base}/config/performance", timeout=5))
+   limit = int(perf["traffic"]["max_records"])
+   initial = json.load(urllib.request.urlopen(f"{base}/traffic/updates?limit=500", timeout=10))
+   records_by_id = {record["id"]: record for record in initial.get("new_records", [])}
+   ordered = list(initial.get("new_records", []))
+   has_more = bool(initial.get("has_more"))
+   cursor = ordered[-1]["seq"] if ordered else None
+   while has_more and cursor is not None:
+       page = json.load(urllib.request.urlopen(f"{base}/traffic?limit=500&cursor={cursor}&direction=backward", timeout=10))
+       batch = list(reversed(page.get("records", [])))
+       for record in batch:
+           records_by_id[record["id"]] = record
+       ordered = batch + ordered
+       has_more = bool(page.get("has_more"))
+       cursor = ordered[0]["seq"] if ordered else None
+   full = json.load(urllib.request.urlopen(f"{base}/traffic?limit={limit}", timeout=10))
+   capped = json.load(urllib.request.urlopen(f"{base}/traffic?limit=100", timeout=10))
+   print(f"traffic.max_records={limit}")
+   print(f"webui_strategy_records={len(records_by_id)}")
+   print(f"full_records={len(full.get('records', []))} total={full.get('total')}")
+   print(f"capped_records={len(capped.get('records', []))} total={capped.get('total')}")
+   assert limit > 100
+   assert len(records_by_id) >= len(capped.get("records", []))
+   assert len(full.get("records", [])) >= len(capped.get("records", []))
+   PY
+   ```
+4. 运行 Native 真实 Admin 数据检查：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-admin-data
+   ```
+
+**预期结果：**
+- Native `TrafficQuery()` 默认值与服务端默认保留策略一致，不再是 100；Network 页面实际加载策略必须对齐 WebUI 的 `/traffic/updates?limit=500` 最新窗口和 `/traffic?cursor=<oldest>&direction=backward&limit=500` 历史回填。
+- Network 初始渲染先展示最新窗口，随后后台分批补齐服务端已保留的全部请求数据；不得由 macOS 客户端额外固定截断成 100 条。
+- 如果服务端当前数据少于 100 条，`webui_strategy_records`、`full_records` 可以等于 `capped_records`；但 smoke 输出仍必须包含 `traffic_limit=` 且该值大于 100。
+- 旧数据清理只能依赖服务端 `traffic.max_records`、数据库大小和 retention 策略；Native 客户端不得主动删除或按 UI 上限清理历史数据。
+- `--check-admin-data` 输出 `traffic_limit=<服务端 max_records>`、`traffic_initial_window=<最新窗口数>`、`traffic_history_page=<历史回填页数>` 和 `traffic_retained_records=<实际返回数>`。
+- 切换到 Rules 或 Settings 后，Native 必须发送 `need_traffic=false` 停止 traffic push/polling；切回 Network 时重新加载最新窗口并按 `last_sequence` / `pending_ids` 恢复增量同步。
+
 ## 清理步骤
 
 ```bash

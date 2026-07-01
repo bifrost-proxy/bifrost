@@ -23,6 +23,7 @@ enum AdminDataSmokeCheck {
                 let client = try BifrostClient(baseURL: URL(string: "http://127.0.0.1:\(port)")!)
                 async let overview = client.fetchSystemOverview()
                 async let traffic = client.fetchTraffic(query: TrafficQuery(limit: 5))
+                async let performanceConfig = client.fetchPerformanceConfig()
                 async let rules = client.fetchRules()
                 async let values = client.fetchValues()
                 async let systemProxy = client.fetchSystemProxy()
@@ -31,6 +32,30 @@ enum AdminDataSmokeCheck {
 
                 let loadedOverview = try await overview
                 let loadedTraffic = try await traffic
+                let loadedPerformanceConfig = try await performanceConfig
+                let trafficRetainedLimit = max(1, loadedPerformanceConfig.traffic.maxRecords)
+                try smokeCheck(trafficRetainedLimit > 100, "native Network traffic limit must come from server retention config")
+                let loadedInitialWindow = try await client.fetchTrafficUpdates(
+                    query: TrafficUpdatesQuery(limit: 500)
+                )
+                let loadedHistoryPage = loadedInitialWindow.hasMore
+                    ? try await client.fetchTraffic(
+                        query: TrafficQuery(
+                            limit: 500,
+                            cursor: loadedInitialWindow.newRecords.last?.seq,
+                            direction: "backward"
+                        )
+                    )
+                    : TrafficListResponse(records: [], nextCursor: nil, total: loadedInitialWindow.serverTotal, hasMore: false, serverSequence: loadedInitialWindow.serverSequence)
+                let loadedRetainedTraffic = try await client.fetchTraffic(query: TrafficQuery(limit: trafficRetainedLimit))
+                try smokeCheck(
+                    loadedRetainedTraffic.records.count >= loadedTraffic.records.count,
+                    "retained traffic query should include at least the small sample query"
+                )
+                try smokeCheck(
+                    !loadedInitialWindow.hasMore || !loadedHistoryPage.records.isEmpty,
+                    "native Network history backfill should use the same backward cursor strategy as WebUI"
+                )
                 let loadedRules = try await rules
                 let loadedValues = try await values
                 let loadedSystemProxy = try await systemProxy
@@ -51,7 +76,11 @@ enum AdminDataSmokeCheck {
                 print(
                     "Bifrost admin data check passed: port=\(port) " +
                     "pid=\(loadedOverview.system?.pid ?? -1) " +
-                    "traffic_records=\(loadedTraffic.records.count) " +
+                    "traffic_limit=\(trafficRetainedLimit) " +
+                    "traffic_initial_window=\(loadedInitialWindow.newRecords.count) " +
+                    "traffic_history_page=\(loadedHistoryPage.records.count) " +
+                    "traffic_sample_records=\(loadedTraffic.records.count) " +
+                    "traffic_retained_records=\(loadedRetainedTraffic.records.count) " +
                     "rules=\(loadedRules.count) " +
                     "first_rule_detail=\(firstRuleDetail?.name ?? "-") " +
                     "values=\(loadedValues.total) " +

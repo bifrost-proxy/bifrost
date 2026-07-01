@@ -30,6 +30,19 @@ public actor BifrostClient {
         try await decode(TrafficListResponse.self, from: listTraffic(query: query))
     }
 
+    public func listTrafficUpdates(query: TrafficUpdatesQuery) async throws -> Data {
+        try await request(.get, path: "/traffic/updates", queryItems: query.queryItems)
+    }
+
+    public func fetchTrafficUpdates(query: TrafficUpdatesQuery) async throws -> TrafficUpdatesResponse {
+        try await decode(TrafficUpdatesResponse.self, from: listTrafficUpdates(query: query))
+    }
+
+    public func fetchPerformanceConfig() async throws -> PerformanceConfigResponse {
+        let data = try await request(.get, path: "/config/performance")
+        return try await decode(PerformanceConfigResponse.self, from: data)
+    }
+
     public func fetchAppIcon(appName: String) async throws -> Data {
         try await request(.get, path: "/app-icon/\(appName)")
     }

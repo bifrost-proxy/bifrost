@@ -44,6 +44,30 @@ func runAdminAPIRequestFactoryChecks() throws {
         "http://127.0.0.1:9900/_bifrost/api/traffic?limit=50&host=example.com",
         "Admin API URL prefix or query construction changed"
     )
+    try checkEqual(
+        TrafficQuery().queryItems.first,
+        URLQueryItem(name: "limit", value: "5000"),
+        "default native traffic query must request the server-retained default instead of the Admin API 100-row fallback"
+    )
+    try checkEqual(
+        TrafficQuery(limit: 500, cursor: 42, direction: "backward").queryItems,
+        [
+            URLQueryItem(name: "limit", value: "500"),
+            URLQueryItem(name: "cursor", value: "42"),
+            URLQueryItem(name: "direction", value: "backward"),
+        ],
+        "native traffic history query must match the WebUI backward cursor strategy"
+    )
+    try checkEqual(
+        TrafficUpdatesQuery(afterId: "req-1", afterSequence: 7, pendingIds: ["req-open"], limit: 1_000).queryItems,
+        [
+            URLQueryItem(name: "limit", value: "1000"),
+            URLQueryItem(name: "after_id", value: "req-1"),
+            URLQueryItem(name: "after_seq", value: "7"),
+            URLQueryItem(name: "pending_ids", value: "req-open"),
+        ],
+        "native traffic updates query must match the WebUI incremental update strategy"
+    )
 
     let request = try factory.makeRequest(
         method: .post,
@@ -115,6 +139,22 @@ func runAdminModelDecodingChecks() throws {
     try checkEqual(response.records.count, 1, "traffic response should decode one record")
     try checkEqual(response.records[0].matchedProtocols, [], "missing traffic rp should default to empty matched protocol list")
     try checkEqual(response.records[0].host, "chatgpt.com", "traffic compact host key should decode")
+
+    let trafficUpdatesJSON = Data("""
+    {"new_records":[{"id":"2","seq":8,"m":"GET","h":"example.com","s":200}],"updated_records":[{"id":"1","seq":7,"m":"CONNECT","h":"chatgpt.com","s":200}],"has_more":true,"server_total":777,"server_sequence":888}
+    """.utf8)
+    let updates = try JSONDecoder().decode(TrafficUpdatesResponse.self, from: trafficUpdatesJSON)
+    try checkEqual(updates.newRecords.count, 1, "traffic updates new_records should decode")
+    try checkEqual(updates.updatedRecords.count, 1, "traffic updates updated_records should decode")
+    try checkEqual(updates.hasMore, true, "traffic updates has_more should decode")
+    try checkEqual(updates.serverTotal, 777, "traffic updates server_total should decode")
+
+    let performanceConfigJSON = Data("""
+    {"traffic":{"max_records":12000,"max_db_size_bytes":2147483648,"file_retention_days":7,"binary_traffic_performance_mode":true},"breakpoint":{"timeout_ms":30000},"resource_alerts":{}}
+    """.utf8)
+    let performanceConfig = try JSONDecoder().decode(PerformanceConfigResponse.self, from: performanceConfigJSON)
+    try checkEqual(performanceConfig.traffic.maxRecords, 12_000, "performance traffic retention limit should decode")
+    try checkEqual(performanceConfig.traffic.fileRetentionDays, 7, "performance retention days should decode")
 }
 
 @main
