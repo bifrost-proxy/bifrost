@@ -845,6 +845,43 @@ fn single_entry_change_plan(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatGptWebDailyAgentContract {
+    DailyReport,
+    TomorrowTodo,
+    GenericMarkdown,
+}
+
+fn chatgpt_web_daily_agent_contract(
+    agent_id: &str,
+    output_dir: &str,
+) -> ChatGptWebDailyAgentContract {
+    if agent_id == DEFAULT_TOMORROW_TODO_AGENT_ID
+        || output_dir == DEFAULT_TOMORROW_TODO_OUTPUT_DIR
+    {
+        ChatGptWebDailyAgentContract::TomorrowTodo
+    } else if agent_id == DEFAULT_DAILY_AGENT_ID || output_dir == DEFAULT_DAILY_AGENT_OUTPUT_DIR {
+        ChatGptWebDailyAgentContract::DailyReport
+    } else {
+        ChatGptWebDailyAgentContract::GenericMarkdown
+    }
+}
+
+fn chatgpt_web_normalized_response(response: &str) -> &str {
+    response
+        .trim()
+        .trim_start_matches("ChatGPT 说")
+        .trim_start_matches([':', '：'])
+        .trim()
+}
+
+fn chatgpt_web_response_is_placeholder(normalized: &str) -> bool {
+    normalized.starts_with("用户的消息为空")
+        || normalized.contains("上传的文件包含")
+        || normalized == "正在思考"
+        || normalized == "正在打草稿"
+}
+
 fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Result<(), String> {
     let trimmed = response.trim();
     if trimmed.len() < 512 {
@@ -858,10 +895,7 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
             "chatgpt_web daily report response missing target date {date}"
         ));
     }
-    let normalized = trimmed
-        .trim_start_matches("ChatGPT 说")
-        .trim_start_matches([':', '：'])
-        .trim();
+    let normalized = chatgpt_web_normalized_response(trimmed);
     let expected_heading = format!("# {date} 日报");
     if !normalized.starts_with(&expected_heading) {
         return Err(format!(
@@ -873,11 +907,7 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
             "chatgpt_web daily report response missing required report sections for {date}"
         ));
     }
-    if normalized.starts_with("用户的消息为空")
-        || normalized.contains("上传的文件包含")
-        || normalized == "正在思考"
-        || normalized == "正在打草稿"
-    {
+    if chatgpt_web_response_is_placeholder(normalized) {
         return Err(format!(
             "chatgpt_web daily report response is a status/error placeholder for {date}"
         ));
@@ -885,6 +915,127 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
     Ok(())
 }
 
+fn validate_chatgpt_web_tomorrow_todo_response(response: &str, date: &str) -> Result<(), String> {
+    let trimmed = response.trim();
+    if trimmed.len() < 128 {
+        return Err(format!(
+            "chatgpt_web tomorrow_todo response too short for {date}: {} bytes",
+            trimmed.len()
+        ));
+    }
+    if !trimmed.contains(date) {
+        return Err(format!(
+            "chatgpt_web tomorrow_todo response missing target date {date}"
+        ));
+    }
+    let normalized = chatgpt_web_normalized_response(trimmed);
+    let expected_heading = format!("# 明日 To Do List - {date}");
+    if !normalized.starts_with(&expected_heading) {
+        return Err(format!(
+            "chatgpt_web tomorrow_todo response missing leading todo heading {expected_heading}"
+        ));
+    }
+    if normalized.starts_with(&format!("# {date} 日报")) {
+        return Err(format!(
+            "chatgpt_web tomorrow_todo response was a daily report for {date}"
+        ));
+    }
+    for section in ["明天必须完成", "可选推进", "需要确认"] {
+        if !normalized.contains(section) {
+            return Err(format!(
+                "chatgpt_web tomorrow_todo response missing required section {section} for {date}"
+            ));
+        }
+    }
+    if chatgpt_web_response_is_placeholder(normalized) {
+        return Err(format!(
+            "chatgpt_web tomorrow_todo response is a status/error placeholder for {date}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_chatgpt_web_generic_markdown_response(
+    response: &str,
+    date: &str,
+    agent_id: &str,
+) -> Result<(), String> {
+    let trimmed = response.trim();
+    if trimmed.len() < 64 {
+        return Err(format!(
+            "chatgpt_web {agent_id} response too short for {date}: {} bytes",
+            trimmed.len()
+        ));
+    }
+    let normalized = chatgpt_web_normalized_response(trimmed);
+    if !trimmed.contains(date) && !normalized.starts_with("# ") {
+        return Err(format!(
+            "chatgpt_web {agent_id} response missing target date {date} or markdown heading"
+        ));
+    }
+    if chatgpt_web_response_is_placeholder(normalized) {
+        return Err(format!(
+            "chatgpt_web {agent_id} response is a status/error placeholder for {date}"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_chatgpt_web_daily_agent_response(
+    response: &str,
+    date: &str,
+    agent_id: &str,
+    output_dir: &str,
+) -> Result<(), String> {
+    match chatgpt_web_daily_agent_contract(agent_id, output_dir) {
+        ChatGptWebDailyAgentContract::DailyReport => {
+            validate_chatgpt_web_daily_report_response(response, date)
+        }
+        ChatGptWebDailyAgentContract::TomorrowTodo => {
+            validate_chatgpt_web_tomorrow_todo_response(response, date)
+        }
+        ChatGptWebDailyAgentContract::GenericMarkdown => {
+            validate_chatgpt_web_generic_markdown_response(response, date, agent_id)
+        }
+    }
+}
+
+fn chatgpt_web_daily_agent_retry_prompt(
+    date: &str,
+    contract: ChatGptWebDailyAgentContract,
+) -> String {
+    match contract {
+        ChatGptWebDailyAgentContract::DailyReport => format!(
+            "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装."
+        ),
+        ChatGptWebDailyAgentContract::TomorrowTodo => format!(
+            "上一条回复不是最终明日待办。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 明日 To Do List。必须包含 `# 明日 To Do List - {date}`、`## 明天必须完成`、`## 可选推进` 和 `## 需要确认`，不要使用代码块包装."
+        ),
+        ChatGptWebDailyAgentContract::GenericMarkdown => format!(
+            "上一条回复不是最终 Markdown 输出。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出 {date} 对应的最终正文。输出必须是 Markdown 正文，不要使用代码块包装."
+        ),
+    }
+}
+
+fn chatgpt_web_daily_agent_continuation_prompt(
+    date: &str,
+    contract: ChatGptWebDailyAgentContract,
+    tail: &str,
+) -> String {
+    match contract {
+        ChatGptWebDailyAgentContract::DailyReport => format!(
+            "上一条 {date} 日报正文在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 证据与不确定性`。\n\n上一条末尾：\n{tail}"
+        ),
+        ChatGptWebDailyAgentContract::TomorrowTodo => format!(
+            "上一条 {date} 明日 To Do List 在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 需要确认`。\n\n上一条末尾：\n{tail}"
+        ),
+        ChatGptWebDailyAgentContract::GenericMarkdown => format!(
+            "上一条 {date} Markdown 输出在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余正文。\n\n上一条末尾：\n{tail}"
+        ),
+    }
+}
+
+#[cfg(test)]
 fn merge_chatgpt_web_daily_report_continuation(
     base: &str,
     continuation: &str,
@@ -892,6 +1043,22 @@ fn merge_chatgpt_web_daily_report_continuation(
 ) -> String {
     let continuation = continuation.trim();
     if validate_chatgpt_web_daily_report_response(continuation, date).is_ok() {
+        continuation.to_string()
+    } else {
+        format!("{}\n{}", base.trim_end(), continuation.trim_start())
+    }
+}
+
+fn merge_chatgpt_web_daily_agent_continuation(
+    base: &str,
+    continuation: &str,
+    date: &str,
+    agent_id: &str,
+    output_dir: &str,
+) -> String {
+    let continuation = continuation.trim();
+    if validate_chatgpt_web_daily_agent_response(continuation, date, agent_id, output_dir).is_ok()
+    {
         continuation.to_string()
     } else {
         format!("{}\n{}", base.trim_end(), continuation.trim_start())
@@ -1256,6 +1423,10 @@ async fn run_daily_agent_inner(
             let mut last_metadata: Option<DailyAgentBTreeMap<String, String>> = None;
 
             if adapter == "chatgpt_web" {
+                let agent_id = task.daily_agent.agent_id.as_str();
+                let output_dir = task.daily_agent.output_dir.as_str();
+                let response_contract =
+                    chatgpt_web_daily_agent_contract(agent_id, output_dir);
                 let changed_entries: Vec<_> = plan
                     .entries
                     .iter()
@@ -1280,7 +1451,12 @@ async fn run_daily_agent_inner(
                     if response.is_empty() {
                         continue;
                     }
-                    let response = match validate_chatgpt_web_daily_report_response(response, &entry.date) {
+                    let response = match validate_chatgpt_web_daily_agent_response(
+                        response,
+                        &entry.date,
+                        agent_id,
+                        output_dir,
+                    ) {
                         Ok(()) => response.to_string(),
                         Err(first_error) => {
                             let Some(conversation_id) =
@@ -1290,13 +1466,14 @@ async fn run_daily_agent_inner(
                             };
                             tracing::warn!(
                                 date = %entry.date,
+                                agent_id,
                                 conversation_id = %conversation_id,
                                 error = %first_error,
-                                "chatgpt_web daily report response failed validation; retrying with explicit final-output instruction"
+                                "chatgpt_web daily agent response failed validation; retrying with explicit final-output instruction"
                             );
-                            let retry_prompt = format!(
-                                "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装。",
-                                date = entry.date
+                            let retry_prompt = chatgpt_web_daily_agent_retry_prompt(
+                                &entry.date,
+                                response_contract,
                             );
                             let retry_result = run_external_daily_agent_prompt_with_params(
                                 task,
@@ -1310,7 +1487,14 @@ async fn run_daily_agent_inner(
                             .await?;
                             last_metadata = Some(retry_result.metadata.clone());
                             let mut retry_response = retry_result.response.trim().to_string();
-                            if validate_chatgpt_web_daily_report_response(&retry_response, &entry.date).is_err() {
+                            if validate_chatgpt_web_daily_agent_response(
+                                &retry_response,
+                                &entry.date,
+                                agent_id,
+                                output_dir,
+                            )
+                            .is_err()
+                            {
                                 let retry_conversation_id = metadata_value(
                                     &retry_result.metadata,
                                     &["conversationId", "conversation_id"],
@@ -1320,15 +1504,17 @@ async fn run_daily_agent_inner(
                                     let tail = chatgpt_web_daily_report_tail(&retry_response, 1200);
                                     tracing::warn!(
                                         date = %entry.date,
+                                        agent_id,
                                         conversation_id = %retry_conversation_id,
                                         attempt,
-                                        "chatgpt_web daily report response appears truncated; requesting continuation"
+                                        "chatgpt_web daily agent response appears truncated; requesting continuation"
                                     );
-                                    let continuation_prompt = format!(
-                                        "上一条 {date} 日报正文在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 证据与不确定性`。\n\n上一条末尾：\n{tail}",
-                                        date = entry.date,
-                                        tail = tail
-                                    );
+                                    let continuation_prompt =
+                                        chatgpt_web_daily_agent_continuation_prompt(
+                                            &entry.date,
+                                            response_contract,
+                                            &tail,
+                                        );
                                     let continuation_result =
                                         run_external_daily_agent_prompt_with_params(
                                             task,
@@ -1343,14 +1529,18 @@ async fn run_daily_agent_inner(
                                         )
                                         .await?;
                                     last_metadata = Some(continuation_result.metadata.clone());
-                                    retry_response = merge_chatgpt_web_daily_report_continuation(
+                                    retry_response = merge_chatgpt_web_daily_agent_continuation(
                                         &retry_response,
                                         &continuation_result.response,
                                         &entry.date,
+                                        agent_id,
+                                        output_dir,
                                     );
-                                    if validate_chatgpt_web_daily_report_response(
+                                    if validate_chatgpt_web_daily_agent_response(
                                         &retry_response,
                                         &entry.date,
+                                        agent_id,
+                                        output_dir,
                                     )
                                     .is_ok()
                                     {
@@ -1358,7 +1548,12 @@ async fn run_daily_agent_inner(
                                     }
                                 }
                             }
-                            validate_chatgpt_web_daily_report_response(&retry_response, &entry.date)?;
+                            validate_chatgpt_web_daily_agent_response(
+                                &retry_response,
+                                &entry.date,
+                                agent_id,
+                                output_dir,
+                            )?;
                             retry_response
                         }
                     };

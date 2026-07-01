@@ -569,6 +569,40 @@ fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract() {
+    let todo = "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 整理上线 checklist，确认发布负责人和灰度窗口。\n\n## 可选推进\n\n- 梳理后续自动化回归项。\n\n## 需要确认\n\n- 是否需要同步给 Feishu owner channel。\n"
+        .repeat(8);
+
+    assert!(validate_chatgpt_web_daily_agent_response(
+        &todo,
+        "2026-06-15",
+        "tomorrow_todo",
+        "tomorrow_todo",
+    )
+    .is_ok());
+
+    let daily_report = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+        .repeat(20);
+    assert!(validate_chatgpt_web_daily_agent_response(
+        &daily_report,
+        "2026-06-15",
+        "tomorrow_todo",
+        "tomorrow_todo",
+    )
+    .is_err());
+
+    let retry_prompt = chatgpt_web_daily_agent_retry_prompt(
+        "2026-06-15",
+        ChatGptWebDailyAgentContract::TomorrowTodo,
+    );
+    assert!(retry_prompt.contains("# 明日 To Do List - 2026-06-15"));
+    assert!(retry_prompt.contains("## 明天必须完成"));
+    assert!(!retry_prompt.contains("今日概览"));
+    assert!(!retry_prompt.contains("证据与不确定性"));
+    assert!(!retry_prompt.contains("日报正文"));
+}
+
+#[test]
 fn daily_agent_chatgpt_web_report_continuation_can_complete_truncated_response() {
     let base = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 主要做了什么\n\n"
         .repeat(20);

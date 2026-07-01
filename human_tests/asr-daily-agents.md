@@ -290,8 +290,37 @@
 - `conversation_final.json.source` 可以是 `dom_fallback_outcome`，但 `last_message.md` / `result.json.response` 必须是完整日报正文，不是计划说明、状态文案或截断片段。
 - 本轮真实运行结束后，报告自动同步到 `/Users/eden_studio/Desktop/个人/report/daily_report/2026-06-17-report.md`，日志中 `failed_files=0`。
 
+### TC-ADA-18 回归：ChatGPT Web Tomorrow ToDo Agent 使用明日待办契约
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract --lib -- --nocapture`。
+2. 执行 `BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh`。
+3. 检查 E2E 脚本中的源码哨兵确认 `daily_agent.rs` 包含 `validate_chatgpt_web_tomorrow_todo_response` 与 `上一条回复不是最终明日待办`。
+4. 对照 `daily_agent.rs`，确认 `tomorrow_todo` 的 retry prompt 不包含 `今日概览`、`证据与不确定性` 或 `日报正文`。
+
+预期结果：
+- `daily_report` 仍要求 `# YYYY-MM-DD 日报`、`## 今日概览` 和 `## 证据与不确定性`。
+- `tomorrow_todo` 要求 `# 明日 To Do List - YYYY-MM-DD`、`## 明天必须完成`、`## 可选推进` 和 `## 需要确认`。
+- 如果 ChatGPT Web 首次对 `tomorrow_todo` 返回日报格式，后端拒绝该响应并用明日待办专用 prompt 在同 conversation 纠偏。
+- 真实 Admin API + Runner E2E 仍能生成两个默认 Agent 的 report、processed records 和 report sync，不因契约分流破坏旧链路。
+
+### TC-ADA-19 回归：Headed run 不复用历史 headless orphan browser
+
+操作步骤：
+1. 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recovered_browser_mode_must_match_requested_execution_mode --lib -- --nocapture`。
+2. 执行 `BIFROST_E2E_PORT=18997 BIFROST_DAILY_AGENT_MOCK_PORT=18998 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh`。
+3. 检查 E2E 脚本中的源码哨兵确认 `browser.rs` 包含 `orphaned browser mode mismatch`。
+4. 在真实服务中把 ChatGPT Web runner `browser.executionMode` 切到 `headed` 后，如存在同 profile 的旧 headless orphan，下一次 run 日志应出现 mode mismatch 并重新 launch headed browser，而不是直接记录 `recovered orphaned browser` 后无窗口。
+
+预期结果：
+- 请求 headless 时只恢复命令行含 `--headless` 的 orphan browser。
+- 请求 headed 时只恢复命令行不含 `--headless` 的 orphan browser。
+- 无法确认 PID 或模式时不恢复该 DevTools 端口，避免把未知历史进程错误登记为当前模式。
+- 真实 headed run 能启动可见浏览器窗口；不需要通过重启 Bifrost 服务来规避旧 headless 进程。
+
 ## 执行记录
 
+- 2026-07-01：执行 TC-ADA-18 / TC-ADA-19 回归验证。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract --lib -- --nocapture` 通过，确认 `tomorrow_todo` 接受 `# 明日 To Do List - 2026-06-15`、`## 明天必须完成`、`## 可选推进`、`## 需要确认`，拒绝 `# 2026-06-15 日报`，且 retry prompt 不包含 `今日概览`、`证据与不确定性` 或 `日报正文`。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin recovered_browser_mode_must_match_requested_execution_mode --lib -- --nocapture` 通过，确认 recovered browser 只有实际 headless/headed 与请求模式一致时才可复用，未知模式一律拒绝恢复。随后执行 `BIFROST_E2E_PORT=19197 BIFROST_DAILY_AGENT_MOCK_PORT=19198 SKIP_FRONTEND_BUILD=1 e2e-tests/tests/test_asr_daily_agents_api.sh` 通过，临时 task 为 `2e9972e09c1f45909a0b73835ea02715`，验证真实 Admin API + Runner 链路仍能生成 `daily_report` 与 `tomorrow_todo` 两个默认 Agent 的 report、processed records 和按 Agent 分目录 report sync；脚本源码哨兵确认 `daily_agent.rs` 包含 `validate_chatgpt_web_tomorrow_todo_response` 与 `上一条回复不是最终明日待办`，`browser.rs` 包含 `orphaned browser mode mismatch`。
 - 2026-06-18：执行 TC-ADA-17 真实运行服务回归验证。当前运行服务为 `/Users/eden_studio/.local/bin/bifrost 0.0.107`，`status --format json` 显示监听 `0.0.0.0:9900`，数据目录为 `/Users/eden_studio/.bifrost`；本轮按用户要求没有重启服务。任务 `c1c57318206c4f338f1267b7f37a81b8` 名称为 `work`，`daily_report.runner=chatgpt`，`timeout_ms=7200000`。先检查历史 run，发现同一 ChatGPT conversation `6a33f937-eaf0-83ec-9e44-9dd5b14b4336` 中 `1781791097556-6c4255ec-400f-47c9-a45f-de584021bed4` 返回约 14KB 且 tail 停在未完成表述，随后 `1781791307109-1c12c5d9-d314-40b5-9666-dfe8ab23a682` 从半句开头继续输出，证明旧问题不是输入粘贴失败，而是最终输出检查过早。日志还显示旧链路在 `stream_handoff` 后进入 `DOM-only mode`，遇到 `连接已中断。正在等待完整回复` 状态但未作为 in-progress 处理。随后触发真实 `2026-06-17` `daily_report`，外层 run `1781793348962-2a2bb9e1-cd66-48de-aff4-12f012372d62` 成功；ChatGPT Web 子 run `1781793348984-635cab44-13f5-4c92-be02-1dcb8aa3be3f` 的 `prompt.md` 为 114172 bytes，日志明确 `injection_mode=NativeClipboardPaste` 并走 native clipboard paste path，`conversationId=6a34025b-0158-83ec-90c4-6168fdb3f3a4`，`conversation_final.source=dom_fallback_outcome`。DOM fallback 文本从 41 持续增长到 39450 bytes，旧代码只等待 `required_stable_ms=3000` 后返回；本次代码修复把 12KB 以上长文本稳定窗口提升到 30 秒，并新增 `waitingForCompleteReply` 状态识别。最终报告保存到 `.daily/agents/daily_report/output/report/2026-06-17-report.md`，日志显示 `len=39450`、同步 `copied_files=1 failed_files=0`，`result.json.status=succeeded`，正文以 `# 2026-06-17 日报` 开头，包含 `## 今日概览` 与 `## 证据与不确定性`，tail 为完整不确定性列表。额外执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::interaction::tests --lib` 通过，覆盖长文本稳定窗口、`连接已中断。正在等待完整回复` pending 状态和 `waiting_for_complete_reply` in-progress 原因。
 - 2026-06-18：执行 TC-ADA-16 真实安装回归验证。先执行 `cargo install --path crates/bifrost-cli --bin bifrost --force` 安装 `bifrost 0.0.106`，并确认 `/Users/eden/.cargo/bin/bifrost` 与 `/Users/eden/.local/bin/bifrost` 的 sha256 均为 `4a5519bd6348f67357002609a56989afa5ea71cecbca25c87a8a4cdc260a79fd`。随后设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 与 `BIFROST_DISABLE_TRAY=1`，用 `/Users/eden/.cargo/bin/bifrost start -p 9900 -d --no-system-proxy` 重启真实服务，最终监听 PID 为 `63967`。旧失败链路先复现并定位出两类新问题：一次在有效 `auth_state.json` 已写入后仍因 `auth_required: ChatGPT browser login window was closed before login completed` 失败，确认是登录捕获完成后浏览器关闭/CDP 断开的竞态；另一次 ChatGPT Web 子 run 成功但响应截断在“灵感：把复杂甬道/代理封装成环境切换挂件”，缺少 `## 证据与不确定性`，Daily Agent 报错 `chatgpt_web daily report response missing required report sections for 2026-06-16`。修复后重新安装并重启真实 9900，强制触发 `2026-06-16` `daily_report`，run `1781745903066-18fb5379-7c81-4107-9a7c-beb9f75bb608` 成功；报告 API 的 `last_run_id` 等于该新 run id，report size 为 `44451`，`last_report_sync` 显示 `copied_files=1`、`failed_files=0`、`target_dir=/Users/eden/Desktop/个人/report/daily_report`。报告正文第 1 行是唯一的 `# 2026-06-16 日报`，第 5 行包含 `## 今日概览`，第 567 行包含 `## 证据与不确定性`；本地 `.daily/agents/daily_report/output/report/2026-06-16-report.md` 与桌面同步文件均为 `44451` bytes，mtime 为 2026-06-18 09:28:13。最新 ChatGPT Web 子 run `1781745903120-f2c8055f-4d6f-4d96-9c9d-7ba571cb4ec8` 的 `result.json.status=succeeded`、`durationMs=190569`、`responseLen=18751`，metadata `conversationId=6a334908-0790-83ec-b1cd-7d4f2e3cc941`，`runtime_snapshot.timeoutSecs=7170` 且 `params=null`。验证结论：本次修复不是只“看起来可用”，而是在安装后的真实服务上重跑 6 月 16 日报告成功，并证明登录捕获竞态和长报告截断续写两个实际失败点均被覆盖。
 - 2026-06-18：执行 TC-ADA-15 回归验证。旧失败 run `1781721910933-573fb907-f5a0-4ce5-ba4d-05ad81746a84` 只包含 `prompt.md` 与 `runtime_snapshot.json`，`runtime_snapshot.json.timeoutSecs=720000`，Daily Agent 外层报错为 `daily agent run timed out after 7200000ms`，确认旧链路由外层 timeout 截断且没有失败结果产物。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin external_cli_runtime_persists_chatgpt_web_adapter_errors --lib -- --nocapture` 通过，验证 ChatGPT Web 普通错误会落盘 failed `result.json`、stderr、events、last message 和 `failureDiagnostics` metadata；执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout --lib -- --nocapture` 通过，验证 2 小时 Daily timeout 下 Web adapter 内部 timeout 被压到 7170 秒，且不会放大 runner 显式更短 timeout。

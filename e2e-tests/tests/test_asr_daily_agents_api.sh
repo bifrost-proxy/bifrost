@@ -176,6 +176,10 @@ for _ in {1..120}; do
 done
 curl -fsS "http://127.0.0.1:$PORT/_bifrost/api/asr/capabilities" >/dev/null
 
+grep -q "validate_chatgpt_web_tomorrow_todo_response" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "上一条回复不是最终明日待办" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "orphaned browser mode mismatch" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
+
 curl -fsS -X PATCH "http://127.0.0.1:$PORT/_bifrost/api/im-gateway/agent" \
   -H 'content-type: application/json' \
   -d "{
