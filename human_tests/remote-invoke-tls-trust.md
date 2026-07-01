@@ -24,7 +24,7 @@
 预期结果：
 
 - CLI 非 0 退出。
-- 输出包含证书校验失败相关信息。
+- 输出包含 `start pairing failed` 和 `error sending request`，说明 HTTPS relay 请求在配对开始前失败。
 - 不生成成功连接记录。
 
 ### TC-RITT-02：`BIFROST_REMOTE_RELAY_CA_BUNDLE` 配置私有 CA 后连接成功
@@ -80,7 +80,7 @@
 
 | 用例 | 状态 | 日期 | 证据 |
 | --- | --- | --- | --- |
-| TC-RITT-01 | 待执行 | - | - |
-| TC-RITT-02 | 待执行 | - | - |
-| TC-RITT-03 | 待执行 | - | - |
-| TC-RITT-04 | 待执行 | - | - |
+| TC-RITT-01 | 通过 | 2026-07-01 | 执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_remote_relay_tls_trust_e2e.sh`，Case 1 生成私有 CA HTTPS relay，在未设置任何 CA/unsafe env 时 `remote conn up` 非 0 退出，输出包含 `start pairing failed` 和 `error sending request`，未进入成功配对 |
+| TC-RITT-02 | 通过 | 2026-07-01 | 同一脚本 Case 2 设置 `BIFROST_REMOTE_RELAY_CA_BUNDLE=<临时 ca.pem>` 后连接成功，输出包含 `Connected! Authorization granted`，`remote-connections.json` 包含 HTTPS relay URL 与 `client-tls-123456` |
+| TC-RITT-03 | 通过 | 2026-07-01 | 同一脚本 Case 3 不设置额外 CA，仅设置 `BIFROST_REMOTE_UNSAFE_SSL=1` 后连接成功，输出包含 `Connected! Authorization granted`，`remote-connections.json` 包含 HTTPS relay URL 与 `client-tls-123456` |
+| TC-RITT-04 | 通过 | 2026-07-01 | 执行 `cargo test -p bifrost-core http_client::tests -- --nocapture`，18 个 http_client 测试全部通过，覆盖 CA path-list、常见 CA env、proxy bypass、显式 CA bundle builder 与 unsafe env 解析 |

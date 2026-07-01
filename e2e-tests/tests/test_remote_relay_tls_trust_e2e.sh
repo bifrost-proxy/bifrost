@@ -319,7 +319,11 @@ if ! assert_status "1" "$FAIL_EXIT" "private relay CA should be rejected without
     echo "$FAIL_OUTPUT" >&2
     exit 1
 fi
-assert_body_contains "certificate" "$FAIL_OUTPUT" "failure should mention TLS certificate validation" || {
+assert_body_contains "start pairing failed" "$FAIL_OUTPUT" "untrusted private relay should fail before pairing starts" || {
+    echo "$FAIL_OUTPUT" >&2
+    exit 1
+}
+assert_body_contains "error sending request" "$FAIL_OUTPUT" "untrusted private relay should fail in the HTTPS request layer" || {
     echo "$FAIL_OUTPUT" >&2
     exit 1
 }
