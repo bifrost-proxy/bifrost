@@ -193,7 +193,7 @@ assert_text_contains() {
     local text="$1"
     local needle="$2"
     local message="$3"
-    if printf '%s' "$text" | grep -q -- "$needle"; then
+    if [[ "$text" == *"$needle"* ]]; then
         pass "$message"
     else
         fail "$message"
@@ -547,7 +547,7 @@ test_remote_traffic_list_get_clear() {
     assert_text_contains "$help_output" "list" "remote traffic help exposes list"
     assert_text_contains "$help_output" "get" "remote traffic help exposes get"
     assert_text_contains "$help_output" "search" "remote traffic help exposes search"
-    if printf '%s' "$help_output" | grep -qE '(^|[[:space:]])clear($|[[:space:]])'; then
+    if grep -qE '(^|[[:space:]])clear($|[[:space:]])' <<<"$help_output"; then
         fail "remote traffic clear remains hidden from CLI help"
         echo "    output: $(printf '%s' "$help_output" | head -n 20)" >&2
     else
