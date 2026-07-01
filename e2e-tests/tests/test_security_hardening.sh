@@ -52,3 +52,6 @@ run_step "Sync relay open-call accepts caller-provided encrypted call id" \
 
 run_step "Web config surface type-checks with sandbox private-network toggle" \
     pnpm --dir web build
+
+run_step "Functional regressions for hardened admin, remote invoke, sync, sandbox, and DevTools flows" \
+    bash e2e-tests/tests/test_security_hardening_functional.sh

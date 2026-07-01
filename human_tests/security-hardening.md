@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例覆盖 2026-07 安全审计修复：Remote Invoke Shell 策略、Admin 登录失败处理、脚本沙箱网络、Admin 虚拟主机鉴权、SSH 密钥权限与授权有效期、安装脚本供应链、file glob symlink、open_call AAD、Sync 明文 URL 与 unsafe SSL 默认值。
+本用例覆盖 2026-07 安全审计修复：Remote Invoke Shell 策略、Admin 登录失败处理、脚本沙箱网络、Admin 虚拟主机鉴权、SSH 密钥权限与授权有效期、安装脚本供应链、file glob symlink、open_call AAD、Sync 明文 URL 与 unsafe SSL 默认值。除安全断言外，还覆盖 Admin、Remote Invoke、Sync、BP parser、DevTools 的真实功能回归链路。
 
 ## 前置条件
 
@@ -114,7 +114,66 @@
 
 **预期结果**：
 - 脚本所有 section 均通过。
-- 输出覆盖 C1、C2、H1、H2、H3/H4、H5、M1、M2、M3、M4、sync relay、Web build。
+- 输出覆盖 C1、C2、H1、H2、H3/H4、H5、M1、M2、M3、M4、sync relay、Web build 和功能回归 wrapper。
+
+### TC-SH-12: Admin 登录失败功能回归
+
+**操作步骤**：
+1. 执行 `cargo run -p bifrost-e2e -- --category admin --test brute_force_lockout_after_max_failures --test-timeout 80`
+
+**预期结果**：
+- 测试通过。
+- 连续错误密码达到阈值后，Admin API 返回 lockout 语义但不清空密码、不关闭远程访问。
+- 随后使用正确密码仍可恢复登录并重置失败计数。
+
+### TC-SH-13: Remote Invoke pair/claim/open/revoke 功能回归
+
+**操作步骤**：
+1. 执行 `cargo run -p bifrost-e2e -- --category remote_invoke --test remote_invoke_pop_pair_claim_lookup_open_revoke --test-timeout 180`
+
+**预期结果**：
+- 测试通过。
+- 真实 relay 流程可完成 pair、claim、grant lookup、open call、events、exit、revoke。
+- AAD/call id 加固后，正常加密 open call 链路不回归。
+
+### TC-SH-14: Sync login CLI/API 功能回归
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_sync_login_direct_e2e.sh`
+
+**预期结果**：
+- 测试通过。
+- 配置到明文 HTTP relay 后，CLI/API token login fail-close。
+- 使用默认 HTTPS provider 的 token login 仍能保存 token，并输出默认远端 URL。
+
+### TC-SH-15: BP parser sandbox 私网 opt-in 功能回归
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_bp_parser_e2e.sh`
+
+**预期结果**：
+- 测试通过。
+- sandbox 默认收紧后，测试通过 Admin config 显式开启 `sandbox.net.allow_private_network=true`。
+- local/remote/build-in BP parser、Thrift、HTTP-RPC、BAM mock 解码链路均保持可用。
+
+### TC-SH-16: DevTools bridge 功能回归
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_devtools_page_bridge_api.sh`
+
+**预期结果**：
+- 测试通过。
+- H2 的 Admin 虚拟主机鉴权加固不影响 token-protected DevTools page bridge。
+- DevTools elements、network、storage、console、page switching、reload recovery 与 Chrome frontend cleanup 均通过。
+
+### TC-SH-17: 功能回归 wrapper
+
+**操作步骤**：
+1. 执行 `bash e2e-tests/tests/test_security_hardening_functional.sh`
+
+**预期结果**：
+- 脚本所有 section 均通过。
+- 输出覆盖 TC-SH-12 至 TC-SH-16 的真实功能链路。
 
 ## 清理步骤
 

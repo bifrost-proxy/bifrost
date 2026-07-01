@@ -42,14 +42,20 @@
 ### E2E 测试
 
 - `bash e2e-tests/tests/test_security_hardening.sh`
+- `bash e2e-tests/tests/test_security_hardening_functional.sh`
 - 其中 H5 复用并扩展 `e2e-tests/tests/test_install_binary_adaptive_download.sh`，真实执行 installer 函数路径，验证 checksum fail-close 与第三方镜像 opt-in。
 - sync relay 使用 `pnpm --dir packages/bifrost-sync-server test -- --runInBand --testPathPattern remote-invoke` 验证 open-call call id 与加密信封兼容。
 - Web UI 使用 `pnpm --dir web build` 验证 Scripts 设置中 sandbox private-network opt-in 类型和构建链路。
+- Admin 登录失败使用 `cargo run -p bifrost-e2e -- --category admin --test brute_force_lockout_after_max_failures --test-timeout 80` 验证真实 Admin API 达到失败阈值后不破坏密码/远程访问且正确密码可恢复。
+- Remote Invoke 使用 `cargo run -p bifrost-e2e -- --category remote_invoke --test remote_invoke_pop_pair_claim_lookup_open_revoke --test-timeout 180` 验证真实 relay 的 pair、claim、open call、revoke 链路仍可用。
+- Sync 登录使用 `e2e-tests/tests/test_sync_login_direct_e2e.sh` 验证 CLI/API 拒绝明文 HTTP relay，同时默认 HTTPS token login 仍可保存。
+- BP parser 使用 `e2e-tests/tests/test_bp_parser_e2e.sh` 验证 sandbox 私网默认收紧后，显式 opt-in 的 build-in BP parser 仍能访问本地 BAM mock。
+- DevTools 使用 `e2e-tests/tests/test_devtools_page_bridge_api.sh` 验证 H2 的虚拟主机鉴权不再误伤 token-protected DevTools bridge。
 
 ### 真实场景测试
 
-- `human_tests/security-hardening.md` 覆盖 11 个安全回归用例。
-- 执行入口为 `bash e2e-tests/tests/test_security_hardening.sh`，按输出 section 逐条核对 C1/C2/H1/H2/H3/H4/H5/M1/M2/M3/M4。
+- `human_tests/security-hardening.md` 覆盖安全断言和功能回归用例。
+- 执行入口为 `bash e2e-tests/tests/test_security_hardening.sh`，按输出 section 逐条核对 C1/C2/H1/H2/H3/H4/H5/M1/M2/M3/M4，以及 Admin、Remote Invoke、Sync、BP parser、DevTools 的真实功能链路。
 
 ## Review/Fix/Test 闭环方案
 
