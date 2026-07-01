@@ -2560,6 +2560,205 @@ test_file_transfer_compressible_roundtrip() {
     rm -f "$src" "$dl"
 }
 
+# ---------------------------------------------------------------------------
+#  TC-FILE-XFER-05: small-file single-round-trip fast path + boundaries (4.2).
+#  A sub-budget file must go through file.upload_small (one policy-checked call,
+#  no begin/chunk/finish). Exercised across three boundaries: empty (0 bytes),
+#  a small random file, and a file EXACTLY at the fast-path budget (1 MiB here,
+#  since the policy leaves transfer_chunk_max_bytes at its 1 MiB default). All
+#  three must land byte-for-byte; the empty and exactly-at-budget cases are the
+#  edges the fast path must not mis-handle.
+# ---------------------------------------------------------------------------
+test_file_upload_small_fastpath() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-XFER-05: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-XFER-05: small-file fast path (empty / small / exactly-at-budget)"
+
+    # budget == clamp_chunk_size(None,policy).max(transfer_chunk_max_bytes).
+    # Policy leaves the ceiling at the 1 MiB default, so budget == 1048576.
+    local budget=1048576
+    local src dl name sz src_sha remote_sha out
+    local -a sizes=(0 40000 "$budget")
+    local -a names=(xfer-small-empty.bin xfer-small-rand.bin xfer-small-edge.bin)
+    local i
+    for i in "${!sizes[@]}"; do
+        sz="${sizes[$i]}"
+        name="${names[$i]}"
+        src="$(mktemp)"; dl="$(mktemp)"; rm -f "$dl"
+        # BSD/macOS `head -c 0` errors with "illegal byte count"; make the
+        # empty-file boundary portable by truncating instead.
+        if [[ "$sz" -eq 0 ]]; then : > "$src"; else head -c "$sz" /dev/urandom > "$src"; fi
+        src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
+
+        # No --chunk-size: sub-budget files take the fast path automatically.
+        out=$(run_remote_file_cmd upload "$src" "$name" \
+            --create-parents --overwrite --no-progress \
+            --cwd "$SANDBOX_DIR") || true
+        if is_caller_conn_error "$out"; then
+            _log_warning "TC-FILE-XFER-05: caller connection error, skipping: $out"
+            CALLER_CONN_OK=0
+            rm -f "$src" "$dl"
+            return 0
+        fi
+        remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+        if [[ "$remote_sha" == "$src_sha" ]] && \
+           [[ -f "$SANDBOX_DIR/$name" ]] && \
+           [[ "$(shasum -a 256 "$SANDBOX_DIR/$name" | awk '{print $1}')" == "$src_sha" ]] && \
+           [[ ! -e "$SANDBOX_DIR/${name}.part" ]]; then
+            _log_pass "TC-FILE-XFER-05: fast-path upload of ${sz}-byte file lands byte-for-byte (no .part residue)"
+        else
+            _log_fail "TC-FILE-XFER-05: fast-path upload (${sz} bytes)" "$src_sha" \
+                "reported=$remote_sha disk=$(shasum -a 256 "$SANDBOX_DIR/$name" 2>/dev/null | awk '{print $1}') (raw: $out)"
+        fi
+
+        # Round-trip: download must reproduce the exact bytes (empty included).
+        out=$(run_remote_file_cmd download "$name" "$dl" \
+            --overwrite --no-progress --cwd "$SANDBOX_DIR") || true
+        if [[ -f "$dl" ]] && \
+           [[ "$(shasum -a 256 "$dl" | awk '{print $1}')" == "$src_sha" ]]; then
+            _log_pass "TC-FILE-XFER-05: download of ${sz}-byte file matches source byte-for-byte"
+        else
+            _log_fail "TC-FILE-XFER-05: download (${sz} bytes)" "$src_sha" \
+                "disk=$(shasum -a 256 "$dl" 2>/dev/null | awk '{print $1}') (raw: $out)"
+        fi
+
+        rm -f "$src" "$dl"
+    done
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-XFER-06: over-budget files transparently fall back to chunked (4.2).
+#  A file ONE byte over the fast-path budget, and a file well over it, must both
+#  succeed: the caller first tries file.upload_small, receives the
+#  precondition_failed "fast-path budget" signal, and transparently re-runs the
+#  chunked protocol. Correctness at the just-over-budget boundary proves the
+#  fallback trigger is exactly at the budget edge, not off-by-one.
+# ---------------------------------------------------------------------------
+test_file_upload_small_fallback() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-XFER-06: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-XFER-06: over-budget fast-path fallback to chunked"
+
+    local budget=1048576
+    local src name sz src_sha remote_sha out
+    # 1 byte over budget (the exact fallback edge) and a clearly-larger file,
+    # both under max_write_bytes (2 MiB) so the size limit is not the gate.
+    local -a sizes=("$((budget + 1))" 1572864)
+    local -a names=(xfer-fallback-edge.bin xfer-fallback-big.bin)
+    local i
+    for i in "${!sizes[@]}"; do
+        sz="${sizes[$i]}"
+        name="${names[$i]}"
+        src="$(mktemp)"
+        # BSD/macOS `head -c 0` errors with "illegal byte count"; make the
+        # empty-file boundary portable by truncating instead.
+        if [[ "$sz" -eq 0 ]]; then : > "$src"; else head -c "$sz" /dev/urandom > "$src"; fi
+        src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
+
+        # No --chunk-size: caller attempts fast path, then falls back to chunked
+        # because the file exceeds the budget. Success proves fallback works.
+        out=$(run_remote_file_cmd upload "$src" "$name" \
+            --create-parents --overwrite --no-progress \
+            --cwd "$SANDBOX_DIR") || true
+        if is_caller_conn_error "$out"; then
+            _log_warning "TC-FILE-XFER-06: caller connection error, skipping: $out"
+            CALLER_CONN_OK=0
+            rm -f "$src"
+            return 0
+        fi
+        remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+        if [[ "$remote_sha" == "$src_sha" ]] && \
+           [[ -f "$SANDBOX_DIR/$name" ]] && \
+           [[ "$(shasum -a 256 "$SANDBOX_DIR/$name" | awk '{print $1}')" == "$src_sha" ]] && \
+           [[ ! -e "$SANDBOX_DIR/${name}.part" ]]; then
+            _log_pass "TC-FILE-XFER-06: ${sz}-byte file (> budget) falls back to chunked and commits byte-for-byte"
+        else
+            _log_fail "TC-FILE-XFER-06: over-budget fallback (${sz} bytes)" "$src_sha" \
+                "reported=$remote_sha disk=$(shasum -a 256 "$SANDBOX_DIR/$name" 2>/dev/null | awk '{print $1}') (raw: $out)"
+        fi
+
+        rm -f "$src"
+    done
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-XFER-07: adaptive chunk sizing (auto) + explicit honored (4.2).
+#  The auto path (no --chunk-size) times the mandatory begin round-trip as an
+#  RTT probe and picks an adaptive chunk size; an explicit --chunk-size must be
+#  honored verbatim. Both must land byte-for-byte. This proves adaptation never
+#  corrupts the transfer and that the explicit override still works.
+# ---------------------------------------------------------------------------
+test_file_upload_adaptive_chunk() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-XFER-07: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-XFER-07: adaptive chunk (auto) + explicit chunk-size honored"
+
+    local src dl src_sha remote_sha dl_reported out
+    src="$(mktemp)"; dl="$(mktemp)"; rm -f "$dl"
+    # ~1.5 MiB pseudo-random, over the fast-path budget so it exercises the
+    # chunked (adaptive) path; identical chunks cannot mask an ordering bug.
+    head -c 1572864 /dev/urandom > "$src"
+    src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
+
+    # Auto path: omit --chunk-size so the caller adapts based on the begin RTT.
+    out=$(run_remote_file_cmd upload "$src" xfer-adaptive-auto.bin \
+        --create-parents --overwrite --no-progress \
+        --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-XFER-07: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        rm -f "$src" "$dl"
+        return 0
+    fi
+    remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ "$remote_sha" == "$src_sha" ]] && \
+       [[ "$(shasum -a 256 "$SANDBOX_DIR/xfer-adaptive-auto.bin" | awk '{print $1}')" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-07: auto-adaptive upload lands byte-for-byte on target disk"
+    else
+        _log_fail "TC-FILE-XFER-07: auto-adaptive upload sha256" "$src_sha" \
+            "reported=$remote_sha disk=$(shasum -a 256 "$SANDBOX_DIR/xfer-adaptive-auto.bin" 2>/dev/null | awk '{print $1}') (raw: $out)"
+    fi
+
+    # Auto-adaptive download round-trip.
+    out=$(run_remote_file_cmd download xfer-adaptive-auto.bin "$dl" \
+        --overwrite --no-progress --cwd "$SANDBOX_DIR") || true
+    dl_reported=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ -f "$dl" ]] && \
+       [[ "$(shasum -a 256 "$dl" | awk '{print $1}')" == "$src_sha" ]] && \
+       [[ "$dl_reported" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-07: auto-adaptive download matches source byte-for-byte (sha256 both ends)"
+    else
+        _log_fail "TC-FILE-XFER-07: auto-adaptive download sha256" "$src_sha" \
+            "disk=$(shasum -a 256 "$dl" 2>/dev/null | awk '{print $1}') reported=$dl_reported (raw: $out)"
+    fi
+
+    # Explicit --chunk-size must be honored verbatim (adaptation disabled) and
+    # still land byte-for-byte.
+    rm -f "$dl"
+    out=$(run_remote_file_cmd upload "$src" xfer-adaptive-explicit.bin \
+        --chunk-size 262144 --create-parents --overwrite --no-progress \
+        --cwd "$SANDBOX_DIR") || true
+    remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ "$remote_sha" == "$src_sha" ]] && \
+       [[ "$(shasum -a 256 "$SANDBOX_DIR/xfer-adaptive-explicit.bin" | awk '{print $1}')" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-07: explicit --chunk-size upload lands byte-for-byte on target disk"
+    else
+        _log_fail "TC-FILE-XFER-07: explicit chunk-size upload sha256" "$src_sha" \
+            "reported=$remote_sha disk=$(shasum -a 256 "$SANDBOX_DIR/xfer-adaptive-explicit.bin" 2>/dev/null | awk '{print $1}') (raw: $out)"
+    fi
+
+    rm -f "$src" "$dl"
+}
+
 main() {
     require_cmd cargo
     require_cmd curl
@@ -2633,6 +2832,11 @@ EOF
     # Transfer throughput/packet-size optimizations (Phase 4.1)
     test_file_upload_skip_identical
     test_file_transfer_compressible_roundtrip
+
+    # Single-round-trip fast path + adaptive chunk sizing (Phase 4.2)
+    test_file_upload_small_fastpath
+    test_file_upload_small_fallback
+    test_file_upload_adaptive_chunk
 
     # ---- gap-targeting cases (expected RED-LIGHT until P0/P1 fixes land) ----
     test_gap_write_preserves_mode

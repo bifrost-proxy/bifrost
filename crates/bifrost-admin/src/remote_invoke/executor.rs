@@ -610,7 +610,7 @@ impl RemoteInvokeExecutor {
             "file.delete" => FileOp::Delete,
             "file.apply_patch" => FileOp::ApplyPatch,
             "file.upload_begin" | "file.upload_chunk" | "file.upload_commit"
-            | "file.upload_abort" | "file.upload_status" => FileOp::Upload,
+            | "file.upload_abort" | "file.upload_status" | "file.upload_small" => FileOp::Upload,
             "file.download_begin" | "file.download_chunk" => FileOp::Download,
             _ => {
                 return Err(BifrostError::Config(format!(
@@ -813,6 +813,7 @@ impl RemoteInvokeExecutor {
         // chunk/commit/abort/status carry a transfer_id rather than a path.
         if matches!(op, FileOp::Upload | FileOp::Download)
             && file_op_name != "file.upload_begin"
+            && file_op_name != "file.upload_small"
             && file_op_name != "file.download_begin"
         {
             let value = super::file_transfer::handle_transfer_session_op(
@@ -1113,6 +1114,19 @@ impl RemoteInvokeExecutor {
                     params.allow_overwrite.or(Some(policy.allow_overwrite)),
                     params.create_parents.unwrap_or(false),
                     params.accept_encodings.as_deref(),
+                )
+                .await?
+            }
+            "file.upload_small" => {
+                super::file_transfer::handle_upload_small(
+                    &decision,
+                    &policy,
+                    params.total_size,
+                    params.total_sha256.as_deref(),
+                    params.chunk_b64.as_deref(),
+                    params.chunk_encoding.as_deref(),
+                    params.allow_overwrite.or(Some(policy.allow_overwrite)),
+                    params.create_parents.unwrap_or(false),
                 )
                 .await?
             }

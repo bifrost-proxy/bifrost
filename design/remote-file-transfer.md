@@ -284,3 +284,47 @@ Caller                                  Remote
 - E2E(真实 caller→relay→target,见 `e2e-tests/tests/test_remote_file_relay_e2e.sh`):
   - `TC-FILE-XFER-03`:相同内容二次上传短路(`skipped=true` + sha 一致 + 目标不变)。
   - `TC-FILE-XFER-04`:高可压缩载荷经自适应 zstd 上传+下载往返,两端 sha256 逐字节一致。
+
+## 14. Phase 4.2 —— 单次往返快速通道 / 自适应块大小
+
+> **动机**:Phase 4.1 的分块协议对**每一个**上传都要求「begin → 逐块 → finish」至少三段往返;但绝大多数配置/脚本/小产物只有几十 KiB,一帧就能装下。同时 chunk 大小此前是编译期常量(512 KiB),对高带宽链路欠切分、对弱链路又可能逼近 relay frame 上限。本阶段两项优化 **完全在 caller 侧 + 一个新 server op** 完成,不改 `.part` append-only 不变量、不改断点续传语义、不改现有分块协议。
+
+### 14.1 小文件快速通道(P1-#5,`file.upload_small`)
+
+- **新增 server op `file.upload_small`**:单次 policy-checked 调用完成「解码(可选 zstd)→ 对**原始字节**校验整文件 sha256 → 原子 `.part` 写入 + rename」。复用与分块路径**完全相同**的 policy 决策、overwrite/create_parents 门禁、skip-if-identical 短路、size 上限。
+- **预算守卫**:仅当文件 ≤ `budget = clamp_chunk_size(None, policy).max(transfer_chunk_max_bytes)`(即单帧能装下的原始字节)才走快速通道;超出预算的文件返回 `[file.precondition_failed]`(文案含 "fast-path budget"),caller **透明回落**到分块协议。
+- **完整性**:sha256 始终对解码后的**原始**字节计算,与线上是否 zstd 无关;写入沿用 sha-keyed `.part` + rename,失败清理,与分块路径一致的原子性保证。
+- **Caller**:`run_upload` 在 `!resume && total_size <= SMALL_FILE_FASTPATH_MAX` 时先试快速通道;仅当错误信号为 "fast-path budget" 时回落分块,其他错误直接上抛(不吞错)。
+
+### 14.2 自适应块大小(P1-#6,纯 caller 侧)
+
+- **无需改协议**:server 的 `clamp_chunk_size(requested, policy)` 早已接受 caller 请求的块大小并夹到 `[1, transfer_chunk_max_bytes]`,`upload_chunk`/`download_chunk` 均按请求大小逐块处理并回传 `effective_chunk_size`。因此自适应**完全是 caller 侧**决策。
+- **RTT 探针**:caller 把**本就必须发生**的 begin 往返计时作为 RTT 探针(零额外往返)。auto 路径请求 `MAX_ADAPTIVE_CHUNK`(768 KiB)以探明 server 上限(`effective_chunk_size`),再据 RTT 收敛:
+  - `rtt ≤ FAST_RTT_MS(20ms)` → `baseline`(512 KiB),快链路无谓放大无收益。
+  - `rtt ≥ SLOW_RTT_MS(200ms)` → `ceiling`(server 上限),弱链路用最大块摊薄 RTT。
+  - 中间线性爬坡,按 `ADAPTIVE_GRANULE`(64 KiB)取整,再 `clamp(floor, ceiling)`。
+- **显式优先**:用户传 `--chunk-size` 时**逐字尊重**(`plan_chunk_request` 返回 `(Some(explicit), adapt=false)`),自适应关闭。
+- **上限安全**:`MAX_ADAPTIVE_CHUNK = 768 KiB`,即便不可压缩载荷经双层 base64 膨胀(~1.85x)也稳在 2 MiB relay frame 上限内。下载走同一自适应路径。
+
+### 14.3 Phase 4.2 测试
+
+- 单元(server):`upload_small` 写入并校验、空文件 / 1 字节、预算边界(`== budget` 走通、`> budget` 拒绝)、超大先于预算被拒、坏 sha / 错 size 拒绝、zstd 载荷往返、未知编码拒绝、overwrite 门禁 + skip-identical、create_parents、非 hex sha 的 `.part` 命名字符安全。
+- 单元(caller):`read_chunk_at` 零长度、`upload_small_args` 字段形状、fast-path 仅在 budget 信号回落、阈值等于 default chunk、`plan_chunk_request` 显式/auto、自适应块在快/慢/中链路的 baseline/ceiling/单调有界、小 ceiling 夹取、floor 下限保护。
+- E2E(真实 caller→relay→target):
+  - `TC-FILE-XFER-05`:小文件(< 512 KiB)单次往返上传下载,sha 一致;空文件与恰好预算边界文件。
+  - `TC-FILE-XFER-06`:恰好超过快速通道预算的文件透明回落分块,sha 一致。
+  - `TC-FILE-XFER-07`:auto 路径(不带 `--chunk-size`)自适应上传大文件,`effective_chunk_size` 合法且落盘 sha 一致;显式 `--chunk-size` 被逐字尊重。
+
+## 15. 后续 PR(本分支范围外,已作用域界定)
+
+以下三项经评估会触碰**共享包络层**或破坏当前 `.part` **append-only 前缀不变量**,故不在本分支实现,各自作为独立后续 PR 交付,以控制本分支的爆炸半径(仅限文件传输)。
+
+### 15.1 去掉冗余的第二层 base64(P1-#4)——独立 PR
+
+- 现状:下载回传路径对一块原始字节 **两次 base64 膨胀**(见 §2),第二层来自 remote-invoke 包络把 stdout JSON 再次 base64。去掉第二层可把线上包体从 ~2x 降到 ~1.34x,直接放宽单帧能装的原始字节。
+- **为何独立 PR**:第二层 base64 位于 `remote_invoke` **共享包络层**,被**所有** remote op(exec / file.* / 等)复用,不是文件传输独有。在本分支改动会把爆炸半径扩大到全部远程能力,需独立 PR + 全 op 回归。
+
+### 15.2 delta / 增量传输(P2-#7 rsync 式 + P2-#8 块级去重)——合并为单个「delta transfer」PR
+
+- P2-#7(rsync 式增量)与 P2-#8(块级去重)本质是**同一套机制**:都需要 server 侧**块清单交换**(target 现有文件的固定/滚动窗口块 sha)+ 从现有 target **随机偏移拼接**未变块进 `.part`。
+- **为何独立 PR 且合并**:随机偏移拼接**直接违反**当前 `.part` **append-only 连续前缀不变量**——而断点续传(`received_offset = part 大小`)与 P0-1 乱序重排缓冲都依赖该不变量。引入 delta 需要新的 sparse-`.part` 状态机与块清单协议(`file.upload_probe_blocks` 类新 op),是比 Phase 4.1/4.2 重得多的协议面。两者共享清单+拼接机制,合并为单个 PR 避免重复造轮子。

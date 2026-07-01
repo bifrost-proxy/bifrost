@@ -39,6 +39,7 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Instant;
 
 use base64::Engine;
 use colored::Colorize;
@@ -72,6 +73,126 @@ const DOWNLOAD_WINDOW: usize = 8;
 
 /// zstd level for adaptive chunk compression (matches the server default).
 const ZSTD_LEVEL: i32 = 3;
+
+/// Baseline raw chunk size used on a fast/local relay where round-trips are
+/// cheap. Mirrors the server's `DEFAULT_CHUNK_SIZE` (512 KiB): a 512 KiB raw
+/// chunk lands near ~1 MiB on the wire, comfortably under the relay's 2 MiB
+/// per-frame body limit.
+const DEFAULT_CHUNK_SIZE: u64 = 512 * 1024;
+
+/// Upper bound (raw bytes) for the single-frame small-file fast path.
+///
+/// When the whole file fits in one frame we can collapse the
+/// `begin -> chunk -> commit` handshake (3 round-trips) into a single
+/// `file.upload_small` call. This threshold mirrors the server's default
+/// advertised chunk size (`DEFAULT_CHUNK_SIZE` = 512 KiB) and stays comfortably
+/// under the server's default single-frame budget (`transfer_chunk_max_bytes`,
+/// 1 MiB). If a target lowers its budget below this, the server replies with a
+/// `fast-path budget` precondition and the caller transparently falls back to
+/// the chunked protocol.
+const SMALL_FILE_FASTPATH_MAX: u64 = DEFAULT_CHUNK_SIZE;
+
+// ---- Adaptive chunk sizing (P1-#6) ----
+
+/// Lower bound for adaptive chunk sizing. Below this, per-call framing/base64
+/// overhead starts to dominate the useful payload, so we never shrink past it
+/// unless the server's own ceiling is even smaller.
+const MIN_ADAPTIVE_CHUNK: u64 = 128 * 1024; // 128 KiB
+
+/// Upper bound the caller will *request* at `begin` on the auto path so it can
+/// discover and use the server's ceiling. Capped at 768 KiB rather than the
+/// server's 1 MiB default so that even incompressible payloads (which get no
+/// zstd win and are inflated ~1.85x by base64 + envelope) stay under the 2 MiB
+/// relay frame limit. A power user can still request up to the server ceiling
+/// explicitly via `--chunk-size`.
+const MAX_ADAPTIVE_CHUNK: u64 = 768 * 1024; // 768 KiB
+
+/// Rounding granule for adaptive chunk sizes (keeps frames tidy).
+const ADAPTIVE_GRANULE: u64 = 64 * 1024; // 64 KiB
+
+/// RTT (ms) at or below which the relay is "fast": round-trips are cheap, so the
+/// baseline chunk keeps memory low without hurting throughput.
+const FAST_RTT_MS: u64 = 20;
+
+/// RTT (ms) at or above which the relay is "slow/distant": round-trip cost
+/// dominates, so push the chunk to the (wire-safe) ceiling to amortize it.
+const SLOW_RTT_MS: u64 = 200;
+
+/// Choose an effective chunk size from a handshake RTT probe, clamped to
+/// `[MIN_ADAPTIVE_CHUNK, ceiling]` and rounded down to an [`ADAPTIVE_GRANULE`]
+/// multiple.
+///
+/// Model: each chunk costs one fixed-latency relay round-trip, so a higher RTT
+/// warrants a larger chunk (fewer round-trips amortize the fixed cost), while a
+/// fast/local relay can stay at the baseline (cheap trips, less memory). The
+/// caller pipelines a fixed window of these chunks, so this trades round-trip
+/// count against per-chunk memory. `ceiling` is the server's advertised
+/// `effective_chunk_size`; the result never exceeds it (satisfies the server's
+/// per-session decode cap) and never drops below `MIN_ADAPTIVE_CHUNK` unless the
+/// ceiling itself is smaller (a constrained policy).
+fn adaptive_chunk_size(rtt_ms: u64, ceiling: u64) -> u64 {
+    let ceiling = ceiling.max(1);
+    let floor = MIN_ADAPTIVE_CHUNK.min(ceiling);
+    let baseline = DEFAULT_CHUNK_SIZE.min(ceiling);
+    let target = if rtt_ms <= FAST_RTT_MS {
+        baseline
+    } else if rtt_ms >= SLOW_RTT_MS {
+        ceiling
+    } else {
+        // Linear ramp from `baseline` (at FAST_RTT_MS) to `ceiling`
+        // (at SLOW_RTT_MS).
+        let span = ceiling.saturating_sub(baseline);
+        let frac = rtt_ms - FAST_RTT_MS;
+        let denom = SLOW_RTT_MS - FAST_RTT_MS;
+        baseline + span * frac / denom
+    };
+    // Round down to a tidy granule, then re-clamp (rounding can dip below floor).
+    let rounded = (target / ADAPTIVE_GRANULE) * ADAPTIVE_GRANULE;
+    rounded.clamp(floor, ceiling)
+}
+
+/// Resolve the chunk size to request at `begin` and whether to auto-adapt after
+/// the RTT probe. An explicit `--chunk-size` is honoured verbatim (no adapt);
+/// otherwise we request [`MAX_ADAPTIVE_CHUNK`] to discover the server ceiling.
+fn plan_chunk_request(user_chunk_size: Option<u64>) -> (Option<u64>, bool) {
+    match user_chunk_size {
+        Some(explicit) => (Some(explicit), false),
+        None => (Some(MAX_ADAPTIVE_CHUNK), true),
+    }
+}
+
+/// Build the `file.upload_small` argument object.
+#[allow(clippy::too_many_arguments)]
+fn upload_small_args(
+    remote: &str,
+    cwd: &Option<String>,
+    total_size: u64,
+    total_sha256: &str,
+    chunk_b64: String,
+    chunk_encoding: &str,
+    overwrite: bool,
+    create_parents: bool,
+) -> Value {
+    json!({
+        "path": remote,
+        "cwd": cwd,
+        "total_size": total_size,
+        "total_sha256": total_sha256,
+        "chunk_b64": chunk_b64,
+        "chunk_encoding": chunk_encoding,
+        "allow_overwrite": overwrite,
+        "create_parents": create_parents,
+    })
+}
+
+/// True only for the one server rejection that means "this target's single-frame
+/// budget is smaller than our fast-path threshold; retry with chunked upload".
+/// Every other error (sha mismatch, size-too-large, policy denial, IO) is
+/// terminal and applies equally to the chunked path, so it must not trigger a
+/// pointless second attempt.
+fn fast_path_should_fallback(err: &BifrostError) -> bool {
+    err.to_string().contains("fast-path budget")
+}
 
 /// Encodings this caller can produce (upload) and decode (download).
 fn accept_encodings() -> Value {
@@ -439,6 +560,46 @@ async fn run_upload(
     let total_size = md.len();
     let total_sha256 = sha256_file(local_path).await?;
 
+    // Small-file fast path: when the whole file fits a single frame, collapse
+    // the begin/chunk/commit handshake into one `file.upload_small` call. The
+    // server enforces the same policy, skip-if-identical, overwrite and size
+    // gating as the chunked path, so this is a pure round-trip optimization.
+    // A `--resume` request always uses the chunked path (there is nothing to
+    // resume in a single-shot upload).
+    if !resume && total_size <= SMALL_FILE_FASTPATH_MAX {
+        match run_upload_small(
+            caller,
+            conn,
+            grant,
+            caller_identity,
+            transport,
+            local_path,
+            remote,
+            total_size,
+            &total_sha256,
+            overwrite,
+            create_parents,
+            no_progress,
+            &cwd,
+            output,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) if fast_path_should_fallback(&e) => {
+                // The target's single-frame budget is below our threshold; fall
+                // through to the chunked protocol transparently.
+            }
+            Err(e) => return Err(e),
+        }
+    }
+
+    // Adaptive chunk sizing (P1-#6): on the auto path, request the caller's
+    // wire-safe ceiling so the server advertises its own ceiling, and time the
+    // mandatory begin round-trip as a cheap RTT probe. An explicit --chunk-size
+    // is honoured verbatim and disables adaptation.
+    let (requested_chunk, adapt) = plan_chunk_request(chunk_size);
+    let begin_started = Instant::now();
     let begin = run_op(
         caller,
         conn,
@@ -452,13 +613,14 @@ async fn run_upload(
             &cwd,
             total_size,
             &total_sha256,
-            chunk_size,
+            requested_chunk,
             overwrite,
             create_parents,
         ),
         true,
     )
     .await?;
+    let rtt_ms = begin_started.elapsed().as_millis() as u64;
 
     // Skip-if-identical: the target already holds byte-identical content, so
     // there is nothing to send. A single round-trip, zero chunks.
@@ -472,7 +634,14 @@ async fn run_upload(
     }
 
     let upload_id = str_field(&begin, "upload_id")?.to_string();
-    let chunk = u64_field(&begin, "effective_chunk_size")?.max(1);
+    // The server's advertised ceiling; on the auto path narrow it to the
+    // RTT-appropriate chunk, otherwise honour the (clamped) explicit request.
+    let ceiling = u64_field(&begin, "effective_chunk_size")?.max(1);
+    let chunk = if adapt {
+        adaptive_chunk_size(rtt_ms, ceiling)
+    } else {
+        ceiling
+    };
     let allow_zstd = begin
         .get("chunk_encoding")
         .and_then(Value::as_str)
@@ -519,7 +688,7 @@ async fn run_upload(
                 &cwd,
                 total_size,
                 &total_sha256,
-                chunk_size,
+                requested_chunk,
                 overwrite,
                 create_parents,
             ),
@@ -562,6 +731,76 @@ async fn run_upload(
         output,
     )
     .await
+}
+
+/// Small-file fast path: send the whole file in a single `file.upload_small`
+/// round-trip. The payload is adaptively zstd-compressed (never inflated) and
+/// the server verifies the whole-file sha over the RAW bytes before an atomic
+/// `.part` -> rename publish. Skip-if-identical is honoured server-side and
+/// reported here just like the chunked path.
+#[allow(clippy::too_many_arguments)]
+async fn run_upload_small(
+    caller: &CallerRelayClient,
+    conn: &LocalConnection,
+    grant: &GrantInfo,
+    caller_identity: &CallerPopIdentity,
+    transport: &OpenCallTransportContext,
+    local_path: &Path,
+    remote: &str,
+    total_size: u64,
+    total_sha256: &str,
+    overwrite: bool,
+    create_parents: bool,
+    no_progress: bool,
+    cwd: &Option<String>,
+    output: &str,
+) -> Result<()> {
+    print_progress(no_progress, "uploading", 0, total_size);
+    // The whole file fits one frame, so a single positional read at offset 0
+    // yields every byte. An empty file yields an empty buffer (valid payload).
+    let raw = read_chunk_at(local_path, 0, total_size as usize).await?;
+    // The caller advertises zstd; compress only when it actually shrinks the
+    // data so already-compressed content is never inflated over the wire.
+    let (payload, encoding) = encode_chunk(&raw, true);
+    let chunk_b64 = b64_encode(&payload);
+
+    let resp = run_op(
+        caller,
+        conn,
+        grant,
+        caller_identity,
+        transport,
+        "file.upload_small",
+        &format!("upload small {}", remote),
+        upload_small_args(
+            remote,
+            cwd,
+            total_size,
+            total_sha256,
+            chunk_b64,
+            encoding,
+            overwrite,
+            create_parents,
+        ),
+        // The op is deterministic and non-idempotent past a rename, but a
+        // transient relay failure before the server commits is safe to retry:
+        // the server re-verifies sha and re-publishes atomically.
+        true,
+    )
+    .await?;
+
+    print_progress(no_progress, "uploading", total_size, total_size);
+    finish_progress(no_progress);
+
+    let skipped = resp
+        .get("already_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let bytes = u64_field(&resp, "bytes_written").unwrap_or(total_size);
+    let remote_sha = str_field(&resp, "sha256").unwrap_or(total_sha256);
+    let remote_path = str_field(&resp, "path").unwrap_or(remote);
+    finish_upload_report(output, remote_path, bytes, remote_sha, skipped);
+    Ok(())
 }
 
 /// Read one chunk from `local_path` at `offset` (independent file handle so the
@@ -740,6 +979,11 @@ async fn run_download(
         }
     }
 
+    // Adaptive chunk sizing (P1-#6): request the wire-safe ceiling on the auto
+    // path and time the begin round-trip as an RTT probe; an explicit
+    // --chunk-size disables adaptation.
+    let (requested_chunk, adapt) = plan_chunk_request(chunk_size);
+    let begin_started = Instant::now();
     let begin = run_op(
         caller,
         conn,
@@ -748,14 +992,20 @@ async fn run_download(
         transport,
         "file.download_begin",
         &format!("download begin {}", remote),
-        download_begin_args(remote, cwd, chunk_size),
+        download_begin_args(remote, cwd, requested_chunk),
         true,
     )
     .await?;
+    let rtt_ms = begin_started.elapsed().as_millis() as u64;
     let download_id = str_field(&begin, "download_id")?.to_string();
     let total_size = u64_field(&begin, "total_size")?;
     let total_sha256 = str_field(&begin, "total_sha256")?.to_string();
-    let effective_chunk_size = u64_field(&begin, "effective_chunk_size")?.max(1);
+    let ceiling = u64_field(&begin, "effective_chunk_size")?.max(1);
+    let effective_chunk_size = if adapt {
+        adaptive_chunk_size(rtt_ms, ceiling)
+    } else {
+        ceiling
+    };
 
     // Write to a sibling .part; rename on success for atomicity + resume.
     let part_path = final_path.with_extension(format!(
@@ -1041,5 +1291,166 @@ mod tests {
         tokio::fs::write(&path, &data).await.unwrap();
         let got = read_chunk_at(&path, 100, 50).await.unwrap();
         assert_eq!(got, &data[100..150]);
+    }
+
+    #[tokio::test]
+    async fn read_chunk_at_zero_length_yields_empty() {
+        // The small-file fast path reads the whole file at offset 0; an empty
+        // file must produce an empty buffer without erroring on read_exact.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.bin");
+        tokio::fs::write(&path, b"").await.unwrap();
+        let got = read_chunk_at(&path, 0, 0).await.unwrap();
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn upload_small_args_shape_and_fields() {
+        let raw = b"hello world";
+        let sha = sha256_hex(raw);
+        let (payload, enc) = encode_chunk(raw, true);
+        let b64 = b64_encode(&payload);
+        let args = upload_small_args(
+            "dst.bin",
+            &Some("/repo".to_string()),
+            raw.len() as u64,
+            &sha,
+            b64.clone(),
+            enc,
+            true,
+            false,
+        );
+        assert_eq!(args["path"], "dst.bin");
+        assert_eq!(args["cwd"], "/repo");
+        assert_eq!(args["total_size"].as_u64(), Some(raw.len() as u64));
+        assert_eq!(args["total_sha256"], sha);
+        assert_eq!(args["chunk_b64"], b64);
+        assert_eq!(args["chunk_encoding"], enc);
+        assert_eq!(args["allow_overwrite"], true);
+        assert_eq!(args["create_parents"], false);
+        // upload_small never negotiates accept_encodings — the caller decides
+        // the encoding up front and tags it inline.
+        assert!(args.get("accept_encodings").is_none());
+        // Round-trip: the wire payload decodes back to the original bytes.
+        let decoded = decode_chunk(
+            &b64_decode(args["chunk_b64"].as_str().unwrap()).unwrap(),
+            args["chunk_encoding"].as_str(),
+            raw.len(),
+        )
+        .unwrap();
+        assert_eq!(decoded, raw);
+    }
+
+    #[test]
+    fn fast_path_fallback_only_on_budget_signal() {
+        // The single budget-precondition message must trigger fallback...
+        let budget = config_err(
+            "[file.precondition_failed] total_size 700000 exceeds the single-frame \
+             fast-path budget 262144; use chunked upload",
+        );
+        assert!(fast_path_should_fallback(&budget));
+        // ...every other terminal error must NOT (they apply to chunked too).
+        for msg in [
+            "[file.sha_mismatch] whole-file sha mismatch",
+            "[file.size_too_large] total_size exceeds max_transfer_bytes",
+            "[file.precondition_failed] target already exists and overwrite is disabled",
+            "[file.not_found] parent directory does not exist",
+            "relay transport error",
+        ] {
+            assert!(
+                !fast_path_should_fallback(&config_err(msg)),
+                "should not fall back on: {msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_path_threshold_matches_default_chunk() {
+        // Boundary: the fast-path threshold must not exceed the server's default
+        // single-frame budget, or every small upload would round-trip twice.
+        // 512 KiB threshold vs 1 MiB default server budget.
+        assert_eq!(SMALL_FILE_FASTPATH_MAX, 512 * 1024);
+        const { assert!(SMALL_FILE_FASTPATH_MAX <= 1024 * 1024) };
+    }
+
+    #[test]
+    fn plan_chunk_request_honours_explicit_and_auto() {
+        // Explicit --chunk-size: passed verbatim, adaptation disabled.
+        assert_eq!(plan_chunk_request(Some(4096)), (Some(4096), false));
+        assert_eq!(plan_chunk_request(Some(1)), (Some(1), false));
+        // Auto: request the wire-safe ceiling to discover the server's own, and
+        // enable adaptation.
+        assert_eq!(plan_chunk_request(None), (Some(MAX_ADAPTIVE_CHUNK), true));
+    }
+
+    #[test]
+    fn adaptive_chunk_fast_relay_uses_baseline() {
+        // RTT at/below the fast threshold -> baseline chunk (cheap round-trips,
+        // low memory). Includes the degenerate RTT=0 probe.
+        let ceiling = 768 * 1024;
+        assert_eq!(adaptive_chunk_size(0, ceiling), DEFAULT_CHUNK_SIZE);
+        assert_eq!(
+            adaptive_chunk_size(FAST_RTT_MS, ceiling),
+            DEFAULT_CHUNK_SIZE
+        );
+        assert_eq!(adaptive_chunk_size(5, ceiling), DEFAULT_CHUNK_SIZE);
+    }
+
+    #[test]
+    fn adaptive_chunk_slow_relay_uses_ceiling() {
+        // RTT at/above the slow threshold -> push to the ceiling to amortize the
+        // per-chunk round-trip cost. Ceiling is granule-aligned here.
+        let ceiling = 768 * 1024;
+        assert_eq!(adaptive_chunk_size(SLOW_RTT_MS, ceiling), ceiling);
+        assert_eq!(adaptive_chunk_size(1000, ceiling), ceiling);
+        assert_eq!(adaptive_chunk_size(u64::MAX, ceiling), ceiling);
+    }
+
+    #[test]
+    fn adaptive_chunk_mid_ramp_is_monotone_and_bounded() {
+        let ceiling = 768 * 1024;
+        let lo = adaptive_chunk_size(FAST_RTT_MS + 1, ceiling);
+        let mid = adaptive_chunk_size((FAST_RTT_MS + SLOW_RTT_MS) / 2, ceiling);
+        let hi = adaptive_chunk_size(SLOW_RTT_MS - 1, ceiling);
+        // Monotonically non-decreasing across the ramp...
+        assert!(lo <= mid, "lo {lo} !<= mid {mid}");
+        assert!(mid <= hi, "mid {mid} !<= hi {hi}");
+        // ...always within [baseline, ceiling] and granule-aligned.
+        for v in [lo, mid, hi] {
+            assert!(v >= DEFAULT_CHUNK_SIZE.min(ceiling));
+            assert!(v <= ceiling);
+            assert_eq!(v % ADAPTIVE_GRANULE, 0, "{v} not granule-aligned");
+        }
+    }
+
+    #[test]
+    fn adaptive_chunk_respects_small_ceiling() {
+        // A constrained policy (ceiling below the floor / baseline) must never be
+        // exceeded, regardless of RTT. The result is clamped to the ceiling.
+        let tiny = 64 * 1024; // below MIN_ADAPTIVE_CHUNK and baseline
+        for rtt in [0, FAST_RTT_MS, 100, SLOW_RTT_MS, 10_000] {
+            let got = adaptive_chunk_size(rtt, tiny);
+            assert!(got <= tiny, "rtt {rtt}: {got} > ceiling {tiny}");
+            assert!(got >= 1);
+        }
+        // Ceiling exactly 1 byte: must return 1, never 0.
+        assert_eq!(adaptive_chunk_size(0, 1), 1);
+        assert_eq!(adaptive_chunk_size(SLOW_RTT_MS, 1), 1);
+        // Degenerate ceiling 0 is defended (treated as 1).
+        assert_eq!(adaptive_chunk_size(50, 0), 1);
+    }
+
+    #[test]
+    fn adaptive_chunk_never_below_floor_when_ceiling_allows() {
+        // When the ceiling is comfortably above the floor, even a non-granule
+        // interpolation result stays >= MIN_ADAPTIVE_CHUNK.
+        let ceiling = MAX_ADAPTIVE_CHUNK;
+        for rtt in 0..=SLOW_RTT_MS {
+            let got = adaptive_chunk_size(rtt, ceiling);
+            assert!(
+                got >= MIN_ADAPTIVE_CHUNK,
+                "rtt {rtt}: {got} < floor {MIN_ADAPTIVE_CHUNK}"
+            );
+        }
     }
 }

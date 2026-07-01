@@ -254,6 +254,15 @@ async fn apply_mode(path: &Path, mode: Option<u32>) {
     }
 }
 
+/// Panic-safe `.part` file name derived from a (possibly caller-supplied)
+/// whole-file sha. Takes at most the first 32 *characters* (never a byte slice
+/// that could split a multi-byte char and panic) so a hostile non-hex sha can
+/// never crash the request path.
+fn part_file_name(total_sha256: &str) -> String {
+    let prefix: String = total_sha256.chars().take(32).collect();
+    format!(".bifrost-upload.{}.part", prefix)
+}
+
 /// 128-bit random hex id (unpredictable, so sessions cannot be guessed and
 /// hijacked by another caller sharing the same relay).
 fn random_id() -> String {
@@ -370,10 +379,7 @@ pub(crate) async fn handle_upload_begin(
     // Deterministic .part name so an interrupted upload can resume: it is
     // keyed by the whole-file sha, not the (random) session id, so a fresh
     // begin after a crash re-attaches the existing bytes.
-    let part_name = format!(
-        ".bifrost-upload.{}.part",
-        &total_sha256[..total_sha256.len().min(32)]
-    );
+    let part_name = part_file_name(&total_sha256);
     let part_path = parent.join(part_name);
 
     let received_offset = match fs::metadata(&part_path).await {
@@ -420,6 +426,135 @@ pub(crate) async fn handle_upload_begin(
         "received_offset": received_offset,
         "total_size": total_size,
         "chunk_encoding": if zstd { "zstd" } else { "none" },
+        "already_complete": false,
+    }))
+}
+
+/// Single round-trip fast path for a small file (`file.upload_small`).
+///
+/// When the whole file fits inside one relay frame budget, the three-call
+/// begin->chunk->commit dance is pure overhead. This handler does the entire
+/// upload in one policy-checked call: decode the (optionally zstd) payload,
+/// verify the whole-file sha over the raw bytes, then atomically write via a
+/// sibling `.part` + rename so a partial write is never observable at the
+/// final path. It reuses the exact policy decision, overwrite/create_parents
+/// gating, skip-if-identical short-circuit and size limit of `upload_begin`,
+/// so no new authorization surface is introduced.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_upload_small(
+    decision: &PolicyDecision,
+    policy: &FileAccessPolicy,
+    total_size: Option<u64>,
+    total_sha256: Option<&str>,
+    chunk_b64: Option<&str>,
+    chunk_encoding: Option<&str>,
+    allow_overwrite: Option<bool>,
+    create_parents: bool,
+) -> Result<Value> {
+    let total_size =
+        total_size.ok_or_else(|| invalid_args("'total_size' is required for file.upload_small"))?;
+    let declared_sha = total_sha256
+        .ok_or_else(|| invalid_args("'total_sha256' is required for file.upload_small"))?
+        .to_string();
+    let chunk_b64 =
+        chunk_b64.ok_or_else(|| invalid_args("'chunk_b64' is required for file.upload_small"))?;
+
+    if total_size > policy.max_transfer_bytes {
+        return Err(size_too_large(format!(
+            "total_size {} exceeds max_transfer_bytes {}",
+            total_size, policy.max_transfer_bytes
+        )));
+    }
+    // Guard the fast path to genuinely small files: the whole file is carried
+    // in a single frame, so it must fit the clamp ceiling. Larger files must
+    // use the chunked begin/chunk/commit protocol.
+    let budget = clamp_chunk_size(None, policy).max(policy.transfer_chunk_max_bytes);
+    if total_size > budget {
+        return Err(precondition_failed(format!(
+            "total_size {} exceeds the single-frame fast-path budget {}; use chunked upload",
+            total_size, budget
+        )));
+    }
+
+    // Decode the payload; the raw size may never exceed the declared total.
+    let payload = b64_decode(chunk_b64)?;
+    let raw = decode_chunk(&payload, chunk_encoding, total_size as usize)?;
+    if raw.len() as u64 != total_size {
+        return Err(precondition_failed(format!(
+            "decoded payload is {} bytes but total_size is {}",
+            raw.len(),
+            total_size
+        )));
+    }
+    // Whole-file integrity over the RAW bytes (encoding-independent).
+    let actual_sha = sha256_hex(&raw);
+    if !actual_sha.eq_ignore_ascii_case(&declared_sha) {
+        return Err(sha_mismatch(format!(
+            "whole-file sha mismatch: expected {}, got {}",
+            declared_sha, actual_sha
+        )));
+    }
+
+    let final_path = decision.path.as_path().to_path_buf();
+    let overwrite = allow_overwrite.unwrap_or(decision.allow_overwrite);
+
+    // Skip-if-identical: nothing to write.
+    if fs::try_exists(&final_path).await.unwrap_or(false) {
+        if let Ok(existing) = sha256_file(&final_path).await {
+            if existing.eq_ignore_ascii_case(&declared_sha) {
+                return Ok(json!({
+                    "path": final_path.to_string_lossy(),
+                    "bytes_written": total_size,
+                    "sha256": actual_sha,
+                    "already_complete": true,
+                }));
+            }
+        }
+    }
+
+    let parent = final_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    if create_parents {
+        fs::create_dir_all(&parent)
+            .await
+            .map_err(|e| io_err(&format!("create_dir_all {}", parent.display()), e))?;
+    }
+    if !fs::try_exists(&parent).await.unwrap_or(false) {
+        return Err(not_found(format!(
+            "parent directory does not exist: {} (pass create_parents=true)",
+            parent.display()
+        )));
+    }
+    if fs::try_exists(&final_path).await.unwrap_or(false) && !overwrite {
+        return Err(precondition_failed(format!(
+            "target already exists and overwrite is disabled: {}",
+            final_path.display()
+        )));
+    }
+
+    // Atomic publish: write to a sibling .part then rename. Reuse the sha-keyed
+    // part name so a crashed fast-path write leaves no colliding debris.
+    let prior_mode = capture_mode(&final_path).await;
+    let part_path = parent.join(part_file_name(&declared_sha));
+    fs::write(&part_path, &raw)
+        .await
+        .map_err(|e| io_err(&format!("write part {}", part_path.display()), e))?;
+    apply_mode(&part_path, prior_mode).await;
+    if let Err(e) = fs::rename(&part_path, &final_path).await {
+        // Best-effort cleanup so a failed rename does not leak the .part.
+        let _ = fs::remove_file(&part_path).await;
+        return Err(io_err(
+            &format!("rename part -> {}", final_path.display()),
+            e,
+        ));
+    }
+
+    Ok(json!({
+        "path": final_path.to_string_lossy(),
+        "bytes_written": total_size,
+        "sha256": actual_sha,
         "already_complete": false,
     }))
 }
@@ -808,372 +943,5 @@ async fn download_chunk(params: TransferOpParams) -> Result<Value> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn rw_policy(root: &Path) -> FileAccessPolicy {
-        FileAccessPolicy::new_read_write("t", vec![root.to_path_buf()])
-    }
-
-    fn zstd_accept() -> Vec<String> {
-        vec!["zstd".to_string()]
-    }
-
-    #[test]
-    fn clamp_chunk_size_defaults_and_caps() {
-        let tmp = std::env::temp_dir();
-        let mut p = rw_policy(&tmp);
-        p.transfer_chunk_max_bytes = 8 * 1024 * 1024;
-        // omitted -> default
-        assert_eq!(clamp_chunk_size(None, &p), DEFAULT_CHUNK_SIZE);
-        // zero -> default
-        assert_eq!(clamp_chunk_size(Some(0), &p), DEFAULT_CHUNK_SIZE);
-        // under cap -> passthrough
-        assert_eq!(clamp_chunk_size(Some(1024), &p), 1024);
-        // over cap -> clamped
-        assert_eq!(
-            clamp_chunk_size(Some(100 * 1024 * 1024), &p),
-            8 * 1024 * 1024
-        );
-    }
-
-    #[test]
-    fn random_id_is_hex_and_unique() {
-        let a = random_id();
-        let b = random_id();
-        assert_eq!(a.len(), 32);
-        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
-        assert_ne!(a, b);
-    }
-
-    #[test]
-    fn sha256_hex_matches_known_vector() {
-        // sha256("") = e3b0c442...
-        assert_eq!(
-            sha256_hex(b""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        );
-    }
-
-    #[test]
-    fn encode_chunk_compresses_compressible_and_skips_incompressible() {
-        // Highly compressible: zstd should win and tag zstd.
-        let compressible = vec![0u8; 64 * 1024];
-        let (payload, enc) = encode_chunk(&compressible, true);
-        assert_eq!(enc, "zstd");
-        assert!(payload.len() < compressible.len());
-        let back = decode_chunk(&payload, Some("zstd"), 64 * 1024).unwrap();
-        assert_eq!(back, compressible);
-
-        // Incompressible (random): fall back to raw / none, no inflation.
-        use ring::rand::{SecureRandom, SystemRandom};
-        let mut incompressible = vec![0u8; 4096];
-        SystemRandom::new().fill(&mut incompressible).unwrap();
-        let (payload2, enc2) = encode_chunk(&incompressible, true);
-        assert_eq!(enc2, "none");
-        assert_eq!(payload2, incompressible);
-
-        // allow_zstd = false always yields raw / none.
-        let (payload3, enc3) = encode_chunk(&compressible, false);
-        assert_eq!(enc3, "none");
-        assert_eq!(payload3, compressible);
-    }
-
-    #[test]
-    fn decode_chunk_rejects_unknown_encoding() {
-        let err = decode_chunk(b"x", Some("lz4"), 1024).unwrap_err();
-        assert!(format!("{:?}", err).contains("file.invalid_args"));
-    }
-
-    #[tokio::test]
-    async fn upload_roundtrip_commit_verifies_sha() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("out.bin");
-        let policy = rw_policy(dir.path());
-        let decision = policy
-            .check(
-                &target,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Upload,
-            )
-            .unwrap();
-        let data = b"hello chunked world".repeat(1000);
-        let sha = sha256_hex(&data);
-
-        let begin = handle_upload_begin(
-            &decision,
-            &policy,
-            Some(data.len() as u64),
-            Some(&sha),
-            Some(8),
-            Some(true),
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let id = begin["upload_id"].as_str().unwrap().to_string();
-        let chunk = begin["effective_chunk_size"].as_u64().unwrap() as usize;
-        assert_eq!(begin["received_offset"].as_u64().unwrap(), 0);
-        assert!(!begin["already_complete"].as_bool().unwrap());
-
-        let mut offset = 0u64;
-        for piece in data.chunks(chunk) {
-            let res = upload_chunk(TransferOpParams {
-                transfer_id: Some(id.clone()),
-                offset: Some(offset),
-                length: None,
-                chunk_b64: Some(b64_encode(piece)),
-                chunk_sha256: Some(sha256_hex(piece)),
-                chunk_encoding: Some("none".into()),
-                total_sha256: None,
-            })
-            .await
-            .unwrap();
-            offset = res["next_offset"].as_u64().unwrap();
-        }
-        assert_eq!(offset, data.len() as u64);
-
-        let commit = upload_commit(TransferOpParams {
-            transfer_id: Some(id.clone()),
-            offset: None,
-            length: None,
-            chunk_b64: None,
-            chunk_sha256: None,
-            chunk_encoding: None,
-            total_sha256: Some(sha.clone()),
-        })
-        .await
-        .unwrap();
-        assert_eq!(commit["sha256"].as_str().unwrap(), sha);
-        let on_disk = fs::read(&target).await.unwrap();
-        assert_eq!(on_disk, data);
-    }
-
-    #[tokio::test]
-    async fn upload_out_of_order_chunks_land_in_order() {
-        // Pipelined callers may deliver chunks out of order; the reorder buffer
-        // must still land a contiguous, byte-correct file.
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("ooo.bin");
-        let policy = rw_policy(dir.path());
-        let decision = policy
-            .check(
-                &target,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Upload,
-            )
-            .unwrap();
-        let chunk = 1024usize;
-        let data: Vec<u8> = (0..chunk * 5).map(|i| (i % 251) as u8).collect();
-        let sha = sha256_hex(&data);
-        let begin = handle_upload_begin(
-            &decision,
-            &policy,
-            Some(data.len() as u64),
-            Some(&sha),
-            Some(chunk as u64),
-            Some(true),
-            false,
-            Some(&zstd_accept()),
-        )
-        .await
-        .unwrap();
-        let id = begin["upload_id"].as_str().unwrap().to_string();
-        assert_eq!(begin["chunk_encoding"].as_str().unwrap(), "zstd");
-
-        // Send chunks 4,3,2,1 first (all ahead of the frontier -> buffered),
-        // each compressed adaptively, then chunk 0 which unblocks the drain.
-        let order = [4usize, 3, 2, 1, 0];
-        let mut last_received = 0u64;
-        for &i in &order {
-            let start = i * chunk;
-            let piece = &data[start..start + chunk];
-            let (payload, enc) = encode_chunk(piece, true);
-            let res = upload_chunk(TransferOpParams {
-                transfer_id: Some(id.clone()),
-                offset: Some(start as u64),
-                length: None,
-                chunk_b64: Some(b64_encode(&payload)),
-                chunk_sha256: Some(sha256_hex(piece)),
-                chunk_encoding: Some(enc.to_string()),
-                total_sha256: None,
-            })
-            .await
-            .unwrap();
-            last_received = res["received_offset"].as_u64().unwrap();
-        }
-        // After chunk 0, the whole buffer drains contiguously.
-        assert_eq!(last_received, data.len() as u64);
-
-        let commit = upload_commit(TransferOpParams {
-            transfer_id: Some(id.clone()),
-            offset: None,
-            length: None,
-            chunk_b64: None,
-            chunk_sha256: None,
-            chunk_encoding: None,
-            total_sha256: Some(sha.clone()),
-        })
-        .await
-        .unwrap();
-        assert_eq!(commit["sha256"].as_str().unwrap(), sha);
-        assert_eq!(fs::read(&target).await.unwrap(), data);
-    }
-
-    #[tokio::test]
-    async fn upload_begin_skips_when_identical() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("same.bin");
-        let data = b"already there".repeat(100);
-        fs::write(&target, &data).await.unwrap();
-        let sha = sha256_hex(&data);
-        let policy = rw_policy(dir.path());
-        let decision = policy
-            .check(
-                &target,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Upload,
-            )
-            .unwrap();
-        let begin = handle_upload_begin(
-            &decision,
-            &policy,
-            Some(data.len() as u64),
-            Some(&sha),
-            None,
-            Some(true),
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        assert!(begin["already_complete"].as_bool().unwrap());
-        assert_eq!(
-            begin["received_offset"].as_u64().unwrap(),
-            data.len() as u64
-        );
-        assert_eq!(begin["sha256"].as_str().unwrap(), sha);
-    }
-
-    #[tokio::test]
-    async fn upload_chunk_rejects_bad_sha() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("out.bin");
-        let policy = rw_policy(dir.path());
-        let decision = policy
-            .check(
-                &target,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Upload,
-            )
-            .unwrap();
-        let data = vec![7u8; 4096];
-        let sha = sha256_hex(&data);
-        let begin = handle_upload_begin(
-            &decision,
-            &policy,
-            Some(data.len() as u64),
-            Some(&sha),
-            Some(1024),
-            Some(true),
-            false,
-            None,
-        )
-        .await
-        .unwrap();
-        let id = begin["upload_id"].as_str().unwrap().to_string();
-
-        // Bad per-chunk sha.
-        let bad = upload_chunk(TransferOpParams {
-            transfer_id: Some(id.clone()),
-            offset: Some(0),
-            length: None,
-            chunk_b64: Some(b64_encode(&data[..1024])),
-            chunk_sha256: Some("deadbeef".into()),
-            chunk_encoding: Some("none".into()),
-            total_sha256: None,
-        })
-        .await;
-        assert!(format!("{:?}", bad.unwrap_err()).contains("file.sha_mismatch"));
-    }
-
-    #[tokio::test]
-    async fn download_roundtrip_chunks_and_verifies() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("src.bin");
-        let data = b"download me please".repeat(500);
-        fs::write(&src, &data).await.unwrap();
-        let policy = rw_policy(dir.path());
-        let decision = policy
-            .check(
-                &src,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Download,
-            )
-            .unwrap();
-        let begin = handle_download_begin(&decision, &policy, Some(4096), Some(&zstd_accept()))
-            .await
-            .unwrap();
-        // The caller-requested chunk size must be honoured (clamped) rather
-        // than silently replaced by the server default — otherwise a large
-        // default frame overruns the Relay's per-frame body limit.
-        assert_eq!(begin["effective_chunk_size"].as_u64().unwrap(), 4096);
-        assert_eq!(begin["content_encoding"].as_str().unwrap(), "zstd");
-        let id = begin["download_id"].as_str().unwrap().to_string();
-        let total = begin["total_size"].as_u64().unwrap();
-        let whole_sha = begin["total_sha256"].as_str().unwrap().to_string();
-
-        let mut got = Vec::new();
-        let mut offset = 0u64;
-        while offset < total {
-            let res = download_chunk(TransferOpParams {
-                transfer_id: Some(id.clone()),
-                offset: Some(offset),
-                length: Some(4096),
-                chunk_b64: None,
-                chunk_sha256: None,
-                chunk_encoding: None,
-                total_sha256: None,
-            })
-            .await
-            .unwrap();
-            let payload = b64_decode(res["chunk_b64"].as_str().unwrap()).unwrap();
-            let enc = res["chunk_encoding"].as_str();
-            let piece = decode_chunk(&payload, enc, 4096).unwrap();
-            assert_eq!(res["chunk_sha256"].as_str().unwrap(), sha256_hex(&piece));
-            got.extend_from_slice(&piece);
-            offset = res["next_offset"].as_u64().unwrap();
-        }
-        assert_eq!(got, data);
-        assert_eq!(sha256_hex(&got), whole_sha);
-    }
-
-    #[tokio::test]
-    async fn upload_begin_rejects_oversize() {
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("big.bin");
-        let mut policy = rw_policy(dir.path());
-        policy.max_transfer_bytes = 10;
-        let decision = policy
-            .check(
-                &target,
-                dir.path(),
-                bifrost_core::file_access::FileOp::Upload,
-            )
-            .unwrap();
-        let err = handle_upload_begin(
-            &decision,
-            &policy,
-            Some(1000),
-            Some("ab"),
-            None,
-            Some(true),
-            false,
-            None,
-        )
-        .await
-        .unwrap_err();
-        assert!(format!("{:?}", err).contains("file.size_too_large"));
-    }
-}
+#[path = "file_transfer_tests.rs"]
+mod tests;
