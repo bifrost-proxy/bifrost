@@ -578,6 +578,11 @@ SKIP_IN_CI_TESTS=(
   # binary. CI runners do not carry the previous release binary, so keep it as
   # explicit local coverage.
   "test_upgrade_local_restart_e2e.sh"
+  # Aggregated security hardening wrapper runs many cargo unit filters, installer
+  # checks, sync relay tests, web build, and functional shell coverage. These
+  # paths are covered by dedicated CI jobs and the standalone functional shell
+  # script; keep the aggregate wrapper for local/release-gate execution.
+  "test_security_hardening.sh"
   # test_tls_logic_simple runs `cargo test` (debug build), redundant with the
   # dedicated `cargo test --workspace` CI job and adds 5-10 min compile time.
   "test_tls_logic_simple.sh"

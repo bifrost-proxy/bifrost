@@ -43,6 +43,7 @@
 
 - `bash e2e-tests/tests/test_security_hardening.sh`
 - `bash e2e-tests/tests/test_security_hardening_functional.sh`
+- `test_security_hardening.sh` 是本地/release-gate 聚合入口，不进入默认 PR shell CI；PR CI 通过 workspace unit/integration、coverage gate、Web build、E2E runner、installer shell 与 `test_security_hardening_functional.sh` 分别覆盖同一组安全修复路径，避免聚合 wrapper 在 macOS shell shard 中重复执行并触发 900s per-test timeout。
 - 其中 H5 复用并扩展 `e2e-tests/tests/test_install_binary_adaptive_download.sh`，真实执行 installer 函数路径，验证 checksum fail-close 与第三方镜像 opt-in。
 - sync relay 使用 `pnpm --dir packages/bifrost-sync-server test -- --runInBand --testPathPattern remote-invoke` 验证 open-call call id 与加密信封兼容。
 - Web UI 使用 `pnpm --dir web build` 验证 Scripts 设置中 sandbox private-network opt-in 类型和构建链路。
