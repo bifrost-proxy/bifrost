@@ -4,7 +4,7 @@
 
 把 `apps/macos` 从 Native Preview 推进为 WebUI 能力对齐的原生 macOS 控制台。Native 端必须复用现有 Rust `bifrost` 服务、默认数据目录和 Admin API，不使用假数据、不另起孤立服务、不用 WebView 整页包 WebUI；页面交互、数据语义、错误态和持续更新能力以 `web/src` 为准。
 
-首版本发布范围主动收敛为 `Network`、`Rules`、`Settings` 三个入口。其他 WebUI 页面仍保留在长期 parity 方案中，但本期不在顶部 tab 中暴露入口，也不能以 API-backed 状态页或半成品形式出现在用户侧。
+首版本发布范围主动收敛为 `Network`、`Rules`、`Settings` 三个入口。其他 WebUI 页面仍保留在长期 parity 方案中，但本期不在左侧主导航中暴露入口，也不能以 API-backed 状态页或半成品形式出现在用户侧。
 
 本方案的验收标准不是"长得像"，而是每个 WebUI 能力都有 Native 入口、真实 API 读写、状态同步、错误反馈和可复测证据。
 
@@ -23,10 +23,10 @@
 
 - App 名、Dock、窗口和 Console 均为 `Bifrost`。
 - 启动优先复用默认数据目录中已有 `bifrost` daemon；没有服务时再启动共享默认数据目录 daemon。
-- macOS 窗口使用 full-size content titlebar。标题栏高度不单独浪费；右侧承载全局开关和当前页面工具按钮。
-- 不使用左侧菜单。首版本在 macOS 标题栏顶部使用 AppKit 原生 `NSSegmentedControl` 提供 Network、Rules、Settings 三段式 tab 切换，选中、hover、pressed、焦点和键盘行为由系统控件负责；Replay、Values、Scripts、AI、DevTools、Groups、Notify 暂不暴露入口。
+- macOS 窗口使用 full-size content titlebar。标题栏高度不单独浪费；左侧主导航与窗口按钮共享同一块背景区域，右侧承载全局开关和当前页面工具按钮。
+- 使用 SwiftUI `NavigationSplitView` + source-list 行构建左侧系统主导航，视觉参考 Apple Music 风格的侧栏；Network、Rules、Settings 是唯一首版入口，Replay、Values、Scripts、AI、DevTools、Groups、Notify 暂不暴露入口。
 - Settings 内部使用 macOS 系统设置式左侧列表导航，右侧展示当前设置页内容；本期只暴露 Proxy、Certificate、Sync、Remote Invoke 四个子页面。
-- 顶部工具栏提供浅色/深色主题切换；主题需要覆盖所有页面、弹窗、表格、编辑器、空态和错误态。
+- 左侧 source-list 底部提供浅色/深色主题切换；主题需要覆盖所有页面、弹窗、表格、编辑器、空态和错误态。
 - 底部状态栏保持 WebUI 的矮状态条能力：Proxy、Sync、TLS、上下行速率、Total、Conn、Req、Mem、CPU、Uptime、Version、Skill。
 - 统一 Admin API client、CSRF/header、错误解析、loading/empty/error 状态、toast/alert 反馈。
 - 统一 pushService 等价层，支持 traffic、metrics、settings、breakpoint、sync 等订阅范围。
@@ -83,7 +83,7 @@
 
 | 页面 | Native 必须交付 | 验证证据 |
 | --- | --- | --- |
-| Shell | full-size titlebar、顶部三段式 tab、系统窗口按钮、主题、状态栏、全局开关、共享 daemon | Native 截图、System Events 窗口检查、`bifrost status --format json` pid/data_dir 对比 |
+| Shell | full-size titlebar、左侧系统 source-list、系统窗口按钮、主题、状态栏、全局开关、共享 daemon | Native 截图、System Events 窗口检查、`bifrost status --format json` pid/data_dir 对比 |
 | Network | Toolbar、Filter panel、Table、Detail、Search、Breakpoint、Clear、Push 更新、轮询 fallback | WebUI/Native 对照截图、Admin API 记录数对比、`/api/push` connected 断言、真实请求流量回放、键盘/右键交互录像或截图 |
 | Rules | CRUD、enable、reorder、share、editor、unsaved、push | Admin API rules 对比、创建/保存/启停/删除真实规则后 WebUI 与 Native 双向可见 |
 | Values | CRUD、rename、editor、unsaved、push | Admin API values 对比、Native 写入后 WebUI 读取一致 |
@@ -97,7 +97,7 @@
 
 ## 当前实现状态（2026-06-30）
 
-- Shell / Network：已实现共享 daemon、标题栏工具区、顶部 Network / Rules / Settings 原生 `NSSegmentedControl`、系统窗口按钮、明暗主题、真实 REST 初始数据、`/_bifrost/api/push` WebSocket、SSE header 探测、Network 选中详情与 Request/Response / Overview/Header/Body/Raw 分段。首版本入口已收敛为 Network、Rules、Settings，避免用户侧暴露 Replay、Values、Scripts、AI、DevTools、Groups、Notify 半成品页面。Network table 已完成高频性能路径重构：使用 `NSTableView.makeView(withIdentifier:)` 复用 cell、`TrafficRowViewModel` 预计算显示文本/颜色、AppModel 按 16ms batch 合并 WebSocket delta 并用 id 索引增量落表、append/remove/update 优先走 `insertRows`/`removeRows`/`reloadData(forRowIndexes:columnIndexes:)`，相同行序更新只为真实变化行重建 view model，避免每次 SwiftUI 更新都全量 `reloadData()` 或全量重算。仍需继续补齐右键菜单、detached detail、body 专用渲染、breakpoint 编辑 resume、load more、键盘多选等 WebUI parity 交互。
+- Shell / Network：已实现共享 daemon、SwiftUI 左侧系统 source-list、右侧顶部 Network 工具区、系统窗口按钮、明暗主题、真实 REST 初始数据、`/_bifrost/api/push` WebSocket、SSE header 探测、Network 选中详情与 Request/Response / Overview/Header/Body/Raw 分段。首版本入口已收敛为 Network、Rules、Settings，避免用户侧暴露 Replay、Values、Scripts、AI、DevTools、Groups、Notify 半成品页面。Network table 已完成高频性能路径重构：使用 `NSTableView.makeView(withIdentifier:)` 复用 cell、`TrafficRowViewModel` 预计算显示文本/颜色、AppModel 按 16ms batch 合并 WebSocket delta 并用 id 索引增量落表、append/remove/update 优先走 `insertRows`/`removeRows`/`reloadData(forRowIndexes:columnIndexes:)`，相同行序更新只为真实变化行重建 view model，避免每次 SwiftUI 更新都全量 `reloadData()` 或全量重算。仍需继续补齐右键菜单、detached detail、body 专用渲染、breakpoint 编辑 resume、load more、键盘多选等 WebUI parity 交互。
 - Rules：本轮已补齐原生核心 CRUD，包括真实列表、选择详情、新建、保存、启停、重命名、删除确认、复制、Revert、未保存标记，并由 `--check-admin-data` 的 `crud=rules,values,scripts` smoke 覆盖 create/update/enable/rename/delete。仍未完成 reorder、share link、import/export、组规则、语法诊断、引用候选和 push 后细粒度同步。
 - Settings：本轮已移除占位 Form，改为 macOS 系统设置式左侧子页面列表，右侧展示 Proxy、Certificate、Sync、Remote Invoke。Proxy 连接 `/proxy/system`、`/proxy/system/launchd`、`/proxy/cli`、`/proxy/address`；Certificate 连接 `/cert/info`、`/cert/install`、`/mobile-devices`、iOS profile/QR 公开入口；Sync 连接 `/sync/status`、`/sync/config`、`/sync/login`、`/sync/logout`、`/sync/run`；Remote Invoke 连接 `/remote-invoke/status`、`/identity`、`/discovery/*`、`/pairings/pending`、`/grants`、`/calls`、`/ssh-key`。`--check-settings-data` 已覆盖四页真实读路径和旧 Remote Invoke call 记录兼容。仍需后续补齐 WebUI Remote Invoke shell policy/file access policy 高级编辑器，以及 Certificate trust probe 图文向导的完整等价 UI。
 - Values / Scripts：已有部分原生 CRUD 代码，但首版本不暴露菜单入口。后续若恢复入口，必须先补齐当前矩阵列出的 import/export、多选右键、WebUI 级高亮、脚本测试结果/日志面板、sandbox 配置等缺口。
@@ -150,7 +150,7 @@
 
 - 使用 `open -n apps/macos/.build/Bifrost.app` 启动真实 `.app`，不启动裸 Mach-O。
 - 对每个页面采集 `/tmp/bifrost-native-<page>-<state>.png`。
-- Native 与 WebUI 对照检查：布局层级、控件位置、可用操作、数据一致性、loading/empty/error、暗色主题、顶部 tab、窗口缩放。
+- Native 与 WebUI 对照检查：布局层级、控件位置、可用操作、数据一致性、loading/empty/error、暗色主题、左侧主导航、窗口缩放。
 - 对写操作使用 API 断言最终状态，并在 WebUI 刷新后确认一致。
 
 ### 真实链路验证
@@ -169,7 +169,7 @@
 - WebUI 能力审计完成，源码和 API 路径明确。
 - Native 无假数据，占位交互全部删除或在矩阵中标红为未完成。
 - 读写 API 使用真实服务验证。
-- 明暗主题、顶部 tab、窗口缩放、错误态、空态均截图验证。
+- 明暗主题、左侧主导航、窗口缩放、错误态、空态均截图验证。
 - `human_tests/` 对应用例已执行并记录实际结果。
 - 至少两轮 Review/Fix/Test 后没有 P0/P1/P2 用户可感知缺口。
 

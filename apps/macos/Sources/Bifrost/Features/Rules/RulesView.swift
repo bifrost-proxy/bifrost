@@ -116,33 +116,7 @@ struct RulesView: View {
     }
 
     private var listHeader: some View {
-        VStack(spacing: 8) {
-            HStack {
-                Text("Rules")
-                    .font(.system(size: 14, weight: .semibold))
-                Spacer()
-                Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count)")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(.quaternary, in: Capsule())
-                Button {
-                    createSheetVisible = true
-                } label: {
-                    Image(systemName: "plus")
-                }
-                .buttonStyle(.borderless)
-                .help("New Rule")
-                Button {
-                    Task { await appModel.refreshData() }
-                } label: {
-                    Image(systemName: "arrow.clockwise")
-                }
-                .buttonStyle(.borderless)
-                .help("Refresh Rules")
-            }
-
+        VStack(spacing: 0) {
             HStack(spacing: 6) {
                 Image(systemName: "magnifyingglass")
                     .foregroundStyle(.secondary)
@@ -150,9 +124,9 @@ struct RulesView: View {
                     .textFieldStyle(.plain)
             }
             .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .frame(height: 38)
         }
-        .padding(10)
-        .frame(height: 74)
         .background(.bar)
     }
 
