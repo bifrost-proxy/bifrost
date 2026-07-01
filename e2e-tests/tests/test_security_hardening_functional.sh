@@ -21,19 +21,62 @@ run_step() {
     "$@"
 }
 
+resolve_bifrost_bin() {
+    local candidate="${BIFROST_BIN:-}"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    for candidate in \
+        "${PROJECT_DIR}/target/release/bifrost" \
+        "${PROJECT_DIR}/target/release/bifrost.exe" \
+        "${PROJECT_DIR}/target/debug/bifrost" \
+        "${PROJECT_DIR}/target/debug/bifrost.exe"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
 ensure_release_bifrost() {
-    if [[ "${SKIP_BUILD:-false}" == "true" && -x "${PROJECT_DIR}/target/release/bifrost" ]]; then
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+        BIFROST_BIN="$(resolve_bifrost_bin || true)"
+        [[ -n "$BIFROST_BIN" ]] || {
+            echo "SKIP_BUILD=true but no executable bifrost binary was found" >&2
+            exit 1
+        }
+        export BIFROST_BIN
+        echo "[security-hardening-functional] using prebuilt $BIFROST_BIN"
         return
     fi
+
     cargo build --release --bin bifrost
+    BIFROST_BIN="$(resolve_bifrost_bin)"
+    export BIFROST_BIN
     export SKIP_BUILD=true
 }
 
-run_step "C2 functional admin brute-force lockout remains recoverable" \
-    cargo run -p bifrost-e2e -- --category admin --test brute_force_lockout_after_max_failures --test-timeout 80
+run_bifrost_e2e() {
+    local label="$1"
+    shift
+    if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+        echo "==> $label"
+        echo "[security-hardening-functional] SKIP_BUILD=true: skipping cargo-runner step in shell shard; covered by the dedicated bifrost-e2e job and local full wrapper"
+        return
+    fi
 
-run_step "Remote Invoke functional PoP pair-claim-open-revoke flow still works" \
-    cargo run -p bifrost-e2e -- --category remote_invoke --test remote_invoke_pop_pair_claim_lookup_open_revoke --test-timeout 180
+    run_step "$label" cargo run -p bifrost-e2e -- "$@"
+}
+
+run_bifrost_e2e "C2 functional admin brute-force lockout remains recoverable" \
+    --category admin --test brute_force_lockout_after_max_failures --test-timeout 80
+
+run_bifrost_e2e "Remote Invoke functional PoP pair-claim-open-revoke flow still works" \
+    --category remote_invoke --test remote_invoke_pop_pair_claim_lookup_open_revoke --test-timeout 180
 
 ensure_release_bifrost
 

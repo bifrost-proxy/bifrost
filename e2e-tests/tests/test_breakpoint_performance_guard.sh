@@ -188,10 +188,41 @@ assert_json_value() {
     [[ "$actual" == "$expected" ]] || fail "expected $expr to be '$expected', got '$actual' in $json"
 }
 
-log "building bifrost debug binary"
-TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_DIR/target}"
-cargo build --bin bifrost
-export BIFROST_BIN="$TARGET_DIR/debug/bifrost"
+resolve_bifrost_bin() {
+    local candidate="${BIFROST_BIN:-}"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        echo "$candidate"
+        return 0
+    fi
+
+    for candidate in \
+        "$REPO_DIR/target/release/bifrost" \
+        "$REPO_DIR/target/release/bifrost.exe" \
+        "$REPO_DIR/target/debug/bifrost" \
+        "$REPO_DIR/target/debug/bifrost.exe"; do
+        if [[ -x "$candidate" ]]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+if [[ "${SKIP_BUILD:-false}" == "true" ]]; then
+    BIFROST_BIN="$(resolve_bifrost_bin || true)"
+    [[ -n "$BIFROST_BIN" ]] || fail "SKIP_BUILD=true but no executable bifrost binary was found"
+    log "skipping build, using $BIFROST_BIN"
+else
+    log "building bifrost debug binary"
+    TARGET_DIR="${CARGO_TARGET_DIR:-$REPO_DIR/target}"
+    SKIP_FRONTEND_BUILD=1 cargo build --bin bifrost
+    BIFROST_BIN="$TARGET_DIR/debug/bifrost"
+    if [[ ! -x "$BIFROST_BIN" && -x "${BIFROST_BIN}.exe" ]]; then
+        BIFROST_BIN="${BIFROST_BIN}.exe"
+    fi
+fi
+export BIFROST_BIN
 
 start_mock_server
 admin_ensure_bifrost
