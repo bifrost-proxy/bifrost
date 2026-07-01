@@ -2564,10 +2564,9 @@ test_file_transfer_compressible_roundtrip() {
 #  TC-FILE-XFER-05: small-file single-round-trip fast path + boundaries (4.2).
 #  A sub-budget file must go through file.upload_small (one policy-checked call,
 #  no begin/chunk/finish). Exercised across three boundaries: empty (0 bytes),
-#  a small random file, and a file EXACTLY at the fast-path budget (1 MiB here,
-#  since the policy leaves transfer_chunk_max_bytes at its 1 MiB default). All
-#  three must land byte-for-byte; the empty and exactly-at-budget cases are the
-#  edges the fast path must not mis-handle.
+#  a small random file, and a file EXACTLY at the caller's wire-safe fast-path
+#  threshold (512 KiB). All three must land byte-for-byte; the empty and
+#  exactly-at-threshold cases are the edges the fast path must not mis-handle.
 # ---------------------------------------------------------------------------
 test_file_upload_small_fastpath() {
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
@@ -2577,9 +2576,9 @@ test_file_upload_small_fastpath() {
 
     log "TC-FILE-XFER-05: small-file fast path (empty / small / exactly-at-budget)"
 
-    # budget == clamp_chunk_size(None,policy).max(transfer_chunk_max_bytes).
-    # Policy leaves the ceiling at the 1 MiB default, so budget == 1048576.
-    local budget=1048576
+    # The caller's fast-path threshold stays below the relay open-call body
+    # budget after base64 + remote-invoke envelope inflation.
+    local budget=524288
     local src dl name sz src_sha remote_sha out
     local -a sizes=(0 40000 "$budget")
     local -a names=(xfer-small-empty.bin xfer-small-rand.bin xfer-small-edge.bin)
@@ -2631,11 +2630,10 @@ test_file_upload_small_fastpath() {
 
 # ---------------------------------------------------------------------------
 #  TC-FILE-XFER-06: over-budget files transparently fall back to chunked (4.2).
-#  A file ONE byte over the fast-path budget, and a file well over it, must both
-#  succeed: the caller first tries file.upload_small, receives the
-#  precondition_failed "fast-path budget" signal, and transparently re-runs the
-#  chunked protocol. Correctness at the just-over-budget boundary proves the
-#  fallback trigger is exactly at the budget edge, not off-by-one.
+#  A file ONE byte over the fast-path threshold, and a file well over it, must
+#  both succeed through the chunked protocol. Correctness at the
+#  just-over-threshold boundary proves the caller switches paths at the intended
+#  edge, not off-by-one.
 # ---------------------------------------------------------------------------
 test_file_upload_small_fallback() {
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
@@ -2645,10 +2643,11 @@ test_file_upload_small_fallback() {
 
     log "TC-FILE-XFER-06: over-budget fast-path fallback to chunked"
 
-    local budget=1048576
+    local budget=524288
     local src name sz src_sha remote_sha out
-    # 1 byte over budget (the exact fallback edge) and a clearly-larger file,
-    # both under max_write_bytes (2 MiB) so the size limit is not the gate.
+    # 1 byte over the fast-path threshold (the exact chunking edge) and a
+    # clearly-larger file, both under max_write_bytes (2 MiB) so the size limit
+    # is not the gate.
     local -a sizes=("$((budget + 1))" 1572864)
     local -a names=(xfer-fallback-edge.bin xfer-fallback-big.bin)
     local i
@@ -2661,8 +2660,9 @@ test_file_upload_small_fallback() {
         if [[ "$sz" -eq 0 ]]; then : > "$src"; else head -c "$sz" /dev/urandom > "$src"; fi
         src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
 
-        # No --chunk-size: caller attempts fast path, then falls back to chunked
-        # because the file exceeds the budget. Success proves fallback works.
+        # No --chunk-size: caller should use the chunked transfer path because
+        # the file exceeds the fast-path threshold. Success proves the automatic
+        # path switch works.
         out=$(run_remote_file_cmd upload "$src" "$name" \
             --create-parents --overwrite --no-progress \
             --cwd "$SANDBOX_DIR") || true
@@ -2690,9 +2690,10 @@ test_file_upload_small_fallback() {
 # ---------------------------------------------------------------------------
 #  TC-FILE-XFER-07: adaptive chunk sizing (auto) + explicit honored (4.2).
 #  The auto path (no --chunk-size) times the mandatory begin round-trip as an
-#  RTT probe and picks an adaptive chunk size; an explicit --chunk-size must be
-#  honored verbatim. Both must land byte-for-byte. This proves adaptation never
-#  corrupts the transfer and that the explicit override still works.
+#  RTT probe and picks an adaptive chunk size; an explicit wire-safe
+#  --chunk-size must be honored. Both must land byte-for-byte. This proves
+#  adaptation never corrupts the transfer and that the explicit override still
+#  works.
 # ---------------------------------------------------------------------------
 test_file_upload_adaptive_chunk() {
     if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
@@ -2741,8 +2742,8 @@ test_file_upload_adaptive_chunk() {
             "disk=$(shasum -a 256 "$dl" 2>/dev/null | awk '{print $1}') reported=$dl_reported (raw: $out)"
     fi
 
-    # Explicit --chunk-size must be honored verbatim (adaptation disabled) and
-    # still land byte-for-byte.
+    # Explicit wire-safe --chunk-size must be honored verbatim (adaptation
+    # disabled) and still land byte-for-byte.
     rm -f "$dl"
     out=$(run_remote_file_cmd upload "$src" xfer-adaptive-explicit.bin \
         --chunk-size 262144 --create-parents --overwrite --no-progress \

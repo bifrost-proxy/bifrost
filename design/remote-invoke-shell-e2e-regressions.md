@@ -103,6 +103,9 @@
   `http://127.0.0.1:<mock_port>/anything/<marker>` 代替公网 `httpbin.org`
 - 造流量请求改为显式重试 + 显式失败日志，确保失败时能看到 mock server 上下文
 - caller `remote connect` 改为可诊断的等待逻辑，避免 `wait` 被 `set -e` 提前中断
+- 保留同一数据目录重启 target admin 后，Recent Calls / Grants API 的首次读取改为等待
+  模块级 ready，避免 admin auth endpoint 已 ready 但 remote-invoke worker 仍异步初始化时
+  把短暂 `503` 误判为持久化或 grant 清理回归
 
 这样 Recent Calls 参数预览回归就只验证“远程搜索调用是否把参数摘要写入调用历史”，
 不再额外耦合公网网络质量。
@@ -139,6 +142,12 @@
 - 显式 `--relay-url` 仍优先于运行中实例 / 本地配置
 - `remote conn up --ssh-key` 后，`remote traffic search`、`remote traffic get` 与 `remote exec --shell-text` 能通过真实 CLI 成功执行
 - Recent Calls 参数预览回归脚本在离线/受限 CI 网络下仍能通过本地 mock 流量稳定生成调用记录
+- Recent Calls 参数预览 / 持久化回归脚本在重启 target admin 后会等待
+  `/api/remote-invoke/calls` 恢复 `200`，并继续断言本地 JSONL 历史可恢复
+- 主 Remote Invoke E2E 在 target client 重启后会等待 `/api/remote-invoke/grants`
+  恢复 `200`，并继续断言丢失 grant crypto 后本地 grants 被清理
+- caller 在 open_call 收到 `grant_session_token_invalid` 且 refresh 找不到可复用 grant 时，将其
+  归类为 stale grant，清理本地 `remote-connections.json` 中的连接并提示重新 connect
 
 同时同步更新 `human_tests/readme.md` 索引。
 

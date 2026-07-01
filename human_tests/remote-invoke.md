@@ -5174,6 +5174,39 @@ rm -rf /tmp/bifrost-remote-overload.*
 |---------|------|---------|
 | TC-RI-回归-150 | ✅ PASS | 2026-06-28 执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；第一次直接执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true ...` 因本机 `better-sqlite3` ABI 与 helper 默认 Node 不一致而在 relay 启动前失败，随后按当前 node_modules ABI 显式执行 `NODE_BIN=/opt/homebrew/bin/node BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过。脚本启动本地 relay `62502`、target admin `62503` 与本地 echo fixture `62504`，完整通过 relay 注册、sync session、pair-code 授权、Grants 首次连接/最近命令时间、Recent Calls 参数预览、120 字符长参数截断、JSONL 落盘、重启恢复和 DELETE 清理断言。源码复核确认 fixture 使用 `python3 -u`，ready 等待预算为 120 × 0.5 秒，提前退出路径仍打印 mock server 日志。 |
 
+## TC-RI-回归-150B：Remote Invoke 重启恢复必须等待模块 API 就绪
+
+**背景**：GitHub Actions PR #315 的 macOS aarch64 shell shard 在 `test_remote_invoke_recent_calls_args_preview_e2e.sh` / `test_remote_invoke_recent_calls_persistence_e2e.sh` 中已完成 Recent Calls 写入与 JSONL 落盘校验，但保留同一数据目录重启 target admin 后立即读取 `/_bifrost/api/remote-invoke/calls` 时偶发得到 `503`；同一 shard 的 `test_remote_invoke_e2e.sh` 在 TC-RI-07A target client 重启后立即读取 `/_bifrost/api/remote-invoke/grants` 时也偶发得到 `503`。根因是 `admin_start_bifrost` 只等待 `/api/auth/status` ready，而 remote-invoke worker 在高负载 CI 上仍可能异步初始化中。修复要求脚本在重启后等待对应 Remote Invoke API 恢复 `200`，但后续仍必须校验同一个 `call_id`、长参数截断记录和 grant crypto 丢失后的本地 grants 清理结果。
+
+### 操作步骤
+
+1. 执行脚本语法检查：`bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+2. 执行补充脚本语法检查：
+   `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh e2e-tests/tests/test_remote_invoke_e2e.sh`。
+3. 使用已构建 release 二进制复跑 Recent Calls 参数预览 E2E：
+   `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh`。
+4. 使用已构建 release 二进制复跑 Recent Calls 持久化 E2E：
+   `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh`。
+5. 使用已构建 release 二进制复跑主 Remote Invoke E2E：
+   `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh`。
+6. 观察脚本输出中的重启阶段，确认 `重启后读取 Recent Calls API 应返回 200` 与 `client 重启后 grants 列表应返回 200` 在 API ready 后通过。
+7. 继续确认 `TC-RI-ARGS-04`、`TC-RI-ARGS-04B`、`TC-RI-ARGS-05`、`TC-RI-PERSIST-01B` 和 `TC-RI-07A` 全部通过。
+
+### 预期结果
+
+- 重启后 Recent Calls / Grants API 短暂返回非 200 时脚本会最多等待 30 秒，而不是立刻失败。
+- 若 30 秒后仍非 200，失败日志包含最后一次 HTTP status/body 或 curl error，便于定位真实启动问题。
+- API ready 后仍按同一 `call_id` 验证普通 `search.stream` 调用恢复，长参数 `masked_args_json.keyword` 继续保持 120 字符以内。
+- Grants API ready 后仍验证丢失 grant crypto 后 target 本地 grants 被清空；caller 收到 `grant_session_token_invalid` 时会归一化为 expired/revoked/connect 提示，并清理本地连接记录。
+- 清理接口 `DELETE /_bifrost/api/remote-invoke/calls` 后 Recent Calls 返回空列表。
+- 全流程使用随机端口和隔离数据目录，启动参数包含 `--no-system-proxy`，不使用 9900，不修改系统代理。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-150B | ✅ PASS | 2026-07-02 执行 `bash -n e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh e2e-tests/tests/test_remote_invoke_e2e.sh` 通过；执行 `cargo test -p bifrost-cli test_is_stale_remote_grant_error_detects_open_call_403 --lib` 通过；执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_args_preview_e2e.sh` 通过；执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_recent_calls_persistence_e2e.sh` 通过；执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 SKIP_BUILD=true bash e2e-tests/tests/test_remote_invoke_e2e.sh` 通过。三条脚本均使用随机端口与隔离数据目录，完整覆盖 Recent Calls 参数预览、JSONL 落盘、重启后 API ready 等待、同一 `call_id` 恢复、长参数恢复、DELETE 清理，以及 TC-RI-07A 丢失 grant crypto 后 grants 清理、`grant_session_token_invalid` stale 归一化与 caller stale connection 清理；全程未使用 9900，未修改系统代理。 |
+
 ## TC-RI-回归-151：Grants 列表清理 48 小时未活动的 stale session grant
 
 **背景**：Settings -> Remote Invoke -> Grants 列表会展示每次远程连接生成的 grant。SSH key 可长期有效，但单次 session grant 如果永久保留，重复连接会让列表持续增长。修复要求后端在 grants 数据源清理 stale session，而不是只在 WebUI 隐藏。

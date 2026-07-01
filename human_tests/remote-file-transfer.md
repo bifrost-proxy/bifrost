@@ -59,10 +59,10 @@ DL_SHA=$(shasum -a 256 /tmp/xfer-24m.dl.bin | awk '{print $1}')
 - 由于默认 chunk（512 KiB）远小于 24 MiB，本用例实际经历约 48 个 `upload_chunk` / `download_chunk` 调用，验证多块顺序拼接正确。
 
 ### TC-XFER-1.2 自定义 chunk size
-**步骤**：对上例追加 `--chunk-size 262144`（256 KiB）与 `--chunk-size 4194304`（请求 4 MiB，超过服务端 1 MiB clamp 上限）。
+**步骤**：对上例追加 `--chunk-size 262144`（256 KiB）与 `--chunk-size 4194304`（请求 4 MiB，超过 caller wire-safe clamp 与服务端 1 MiB clamp 上限）。
 **期望**：
 - 两种请求均传输成功、sha 一致；
-- 请求 4 MiB 时服务端 clamp 到 1 MiB 并回传 `effective_chunk_size = 1048576`，客户端以回传值分块（不报错、不溢出 Relay body 上限）。
+- 请求 4 MiB 时 caller 先 clamp 到 512 KiB wire-safe ceiling，服务端回传 `effective_chunk_size = 524288`，客户端以回传值分块（不报错、不溢出 Relay body 上限）。
 
 ---
 
@@ -252,16 +252,16 @@ bifrost remote file download xfer-small.bin /tmp/xfer-small.dl.bin \
 - host-B 目标为原子 rename 结果，无 `.part` 残留。
 
 ### TC-XFER-7bis.2 空文件与恰好预算边界文件
-**步骤**：分别上传 0 字节文件、1 字节文件、以及恰好等于快速通道预算（`budget = clamp_chunk_size(None,policy).max(transfer_chunk_max_bytes)`，默认 1 MiB）的文件。
+**步骤**：分别上传 0 字节文件、1 字节文件、以及恰好等于 caller 快速通道预算（`SMALL_FILE_FASTPATH_MAX`，默认 512 KiB）的文件。
 **期望**：
 - 三者均走快速通道成功，双端 sha256 一致；
 - 0 字节文件产生 0 字节目标，sha 为空内容的 sha256；
 - 恰好 `== budget` 的文件**仍走**快速通道（边界包含），不回落分块。
 
 ### TC-XFER-7bis.3 超过预算透明回落分块
-**步骤**：上传恰好比预算大 1 字节、以及远大于预算的文件（均不带 `--chunk-size`）。
+**步骤**：上传恰好比 `SMALL_FILE_FASTPATH_MAX` 大 1 字节、以及远大于预算的文件（均不带 `--chunk-size`）。
 **期望**：
-- caller 先试快速通道，收到 `[file.precondition_failed]`（含 "fast-path budget"）后**透明回落**分块协议，最终成功；
+- caller 直接选择分块协议，或在 server 返回 `[file.precondition_failed]`（含 "fast-path budget"）时**透明回落**分块协议，最终成功；
 - 双端 sha256 一致；用户无需感知回落，仅日志/进度可见分块路径；
 - 非 budget 类错误（如 sha 不符）**不触发回落**，直接上抛。
 
@@ -272,16 +272,16 @@ bifrost remote file download xfer-small.bin /tmp/xfer-small.dl.bin \
 bifrost remote file upload /tmp/xfer-large.bin xfer-large.bin \
     --create-parents --overwrite --output json \
     --cwd <USER_HOME>/work/github/bifrost-xfer-sandbox
-# 同文件，显式 --chunk-size 262144（逐字尊重）
+# 同文件，显式 --chunk-size 262144（wire-safe，逐字尊重）
 bifrost remote file upload /tmp/xfer-large.bin xfer-large2.bin \
     --chunk-size 262144 --create-parents --overwrite --output json \
     --cwd <USER_HOME>/work/github/bifrost-xfer-sandbox
 ```
 **期望**：
-- auto 路径：begin 往返被用作 RTT 探针（零额外往返），选定的块大小落在 `[MIN_ADAPTIVE_CHUNK(128 KiB), MAX_ADAPTIVE_CHUNK(768 KiB)]` 且 ≤ server `effective_chunk_size`，按 64 KiB 取整；
-- 显式 `--chunk-size 262144`：`effective_chunk_size` 逐字为 262144（自适应关闭）；
+- auto 路径：begin 往返被用作 RTT 探针（零额外往返），选定的块大小落在 `[MIN_ADAPTIVE_CHUNK(128 KiB), MAX_ADAPTIVE_CHUNK(512 KiB)]` 且 ≤ server `effective_chunk_size`，按 64 KiB 取整；
+- 显式 `--chunk-size 262144`：`effective_chunk_size` 逐字为 262144（自适应关闭）；若显式值超过 caller wire-safe ceiling，则先 clamp 到 512 KiB；
 - 两次上传双端 sha256 均一致；
-- 任何自适应块大小经双层 base64 膨胀后仍 < 2 MiB relay frame 上限（无 413 / precondition_failed）。
+- 任何自适应块大小经 base64 + remote-invoke envelope 膨胀后仍低于 CI relay 的 1 MiB open-call body 限制（无 413 / precondition_failed）。
 
 ### TC-XFER-7bis.5 快速通道与 skip-if-identical / overwrite 门禁交互
 **步骤**：对同一小文件连续上传两次；再对已存在小文件不带 `--overwrite` 上传。
@@ -300,6 +300,6 @@ bifrost remote file upload /tmp/xfer-large.bin xfer-large2.bin \
 - `TC-FILE-XFER-04`：高可压缩载荷经自适应 zstd upload + download 往返，两端 sha256 逐字节一致。
 - `TC-FILE-XFER-05`：小文件走 `file.upload_small` 单次往返；空文件 + 恰好预算边界文件；
 - `TC-FILE-XFER-06`：恰好超过预算的文件透明回落分块，sha 一致；
-- `TC-FILE-XFER-07`：auto 自适应上传大文件 `effective_chunk_size` 合法 + sha 一致；显式 `--chunk-size` 逐字尊重。
+- `TC-FILE-XFER-07`：auto 自适应上传大文件 `effective_chunk_size` 合法 + sha 一致；显式 wire-safe `--chunk-size` 逐字尊重，超出 ceiling 时先 clamp。
 
 人工执行时以本文档的大文件 / 压缩归档 / 中断续传 / 流水线规模场景为准，覆盖自动化脚本因体量受限未覆盖的规模边界。

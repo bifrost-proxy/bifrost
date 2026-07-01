@@ -1347,6 +1347,9 @@ fn is_grant_session_token_invalid_error(err: &BifrostError) -> bool {
 }
 
 fn is_stale_remote_grant_error(err: &BifrostError) -> bool {
+    if is_grant_session_token_invalid_error(err) {
+        return true;
+    }
     let BifrostError::Network(msg) = err else {
         return false;
     };
@@ -8817,11 +8820,17 @@ mod tests {
             "grant_revoked",
             "grant_missing_shared_secret",
             "grant_not_found",
+            "grant_session_token_invalid",
         ];
 
         for message in stale_messages {
+            let status = if message == "grant_session_token_invalid" {
+                "401 Unauthorized"
+            } else {
+                "403 Forbidden"
+            };
             let err = BifrostError::Network(format!(
-                "open_call failed with status 403 Forbidden: {{\"code\":-1,\"message\":\"{message}\"}}"
+                "open_call failed with status {status}: {{\"code\":-1,\"message\":\"{message}\"}}"
             ));
             assert!(
                 is_stale_remote_grant_error(&err),

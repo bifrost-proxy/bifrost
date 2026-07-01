@@ -100,12 +100,11 @@ const SMALL_FILE_FASTPATH_MAX: u64 = DEFAULT_CHUNK_SIZE;
 const MIN_ADAPTIVE_CHUNK: u64 = 128 * 1024; // 128 KiB
 
 /// Upper bound the caller will *request* at `begin` on the auto path so it can
-/// discover and use the server's ceiling. Capped at 768 KiB rather than the
-/// server's 1 MiB default so that even incompressible payloads (which get no
-/// zstd win and are inflated ~1.85x by base64 + envelope) stay under the 2 MiB
-/// relay frame limit. A power user can still request up to the server ceiling
-/// explicitly via `--chunk-size`.
-const MAX_ADAPTIVE_CHUNK: u64 = 768 * 1024; // 768 KiB
+/// discover and use the server's ceiling. Keep this at the same conservative
+/// wire-safe size as the fast-path threshold: incompressible bytes expand through
+/// base64 plus the remote-invoke envelope, and CI relays currently reject open
+/// calls over 1 MiB.
+const MAX_ADAPTIVE_CHUNK: u64 = DEFAULT_CHUNK_SIZE;
 
 /// Rounding granule for adaptive chunk sizes (keeps frames tidy).
 const ADAPTIVE_GRANULE: u64 = 64 * 1024; // 64 KiB
@@ -152,11 +151,12 @@ fn adaptive_chunk_size(rtt_ms: u64, ceiling: u64) -> u64 {
 }
 
 /// Resolve the chunk size to request at `begin` and whether to auto-adapt after
-/// the RTT probe. An explicit `--chunk-size` is honoured verbatim (no adapt);
-/// otherwise we request [`MAX_ADAPTIVE_CHUNK`] to discover the server ceiling.
+/// the RTT probe. An explicit `--chunk-size` disables RTT adaptation but is
+/// still capped to the caller's wire-safe ceiling so a large request cannot
+/// negotiate a relay frame that later trips the open-call body limit.
 fn plan_chunk_request(user_chunk_size: Option<u64>) -> (Option<u64>, bool) {
     match user_chunk_size {
-        Some(explicit) => (Some(explicit), false),
+        Some(explicit) => (Some(explicit.min(MAX_ADAPTIVE_CHUNK)), false),
         None => (Some(MAX_ADAPTIVE_CHUNK), true),
     }
 }
@@ -1375,9 +1375,15 @@ mod tests {
 
     #[test]
     fn plan_chunk_request_honours_explicit_and_auto() {
-        // Explicit --chunk-size: passed verbatim, adaptation disabled.
+        // Explicit --chunk-size: honoured when wire-safe, adaptation disabled.
         assert_eq!(plan_chunk_request(Some(4096)), (Some(4096), false));
         assert_eq!(plan_chunk_request(Some(1)), (Some(1), false));
+        // Oversized explicit requests are capped before the server can
+        // negotiate a chunk that exceeds the relay open-call body budget.
+        assert_eq!(
+            plan_chunk_request(Some(4 * 1024 * 1024)),
+            (Some(MAX_ADAPTIVE_CHUNK), false)
+        );
         // Auto: request the wire-safe ceiling to discover the server's own, and
         // enable adaptation.
         assert_eq!(plan_chunk_request(None), (Some(MAX_ADAPTIVE_CHUNK), true));

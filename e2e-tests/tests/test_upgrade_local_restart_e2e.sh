@@ -3,6 +3,8 @@
 export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 : "${BIFROST_DISABLE_TRAY:=1}"
 export BIFROST_DISABLE_TRAY
+: "${BIFROST_DAEMON_READY_TIMEOUT_SECS:=90}"
+export BIFROST_DAEMON_READY_TIMEOUT_SECS
 
 set -uo pipefail
 
@@ -35,6 +37,48 @@ TEST_DATA_DIR=""
 INSTALL_BIN=""
 PROXY_PORT=""
 
+kill_windows_bifrost_for_install_bin() {
+    if ! is_windows || [[ -z "$INSTALL_BIN" ]]; then
+        return 0
+    fi
+
+    local install_bin_win
+    install_bin_win="$(windows_path "$INSTALL_BIN")"
+    BIFROST_E2E_INSTALL_BIN_WIN="$install_bin_win" \
+    BIFROST_E2E_INSTALL_BIN_MSYS="$INSTALL_BIN" \
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -Command '
+        $patterns = @($env:BIFROST_E2E_INSTALL_BIN_WIN, $env:BIFROST_E2E_INSTALL_BIN_MSYS) |
+            Where-Object { $_ -and $_.Trim().Length -gt 0 }
+        Get-CimInstance Win32_Process |
+            Where-Object {
+                $process = $_
+                $cmd = $process.CommandLine
+                $exe = $process.ExecutablePath
+                $process.Name -ieq "bifrost.exe" -and (
+                    ($exe -and $patterns -contains $exe) -or
+                    ($cmd -and (($patterns | Where-Object { $_ -and $cmd.Contains($_) }).Count -gt 0))
+                )
+            } |
+            ForEach-Object {
+                try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {}
+            }
+    ' >/dev/null 2>&1 || true
+}
+
+remove_test_root() {
+    if [[ -z "$TEST_ROOT" || ! -d "$TEST_ROOT" ]]; then
+        return 0
+    fi
+
+    local attempt
+    for attempt in $(seq 1 8); do
+        rm -rf "$TEST_ROOT" >/dev/null 2>&1 && return 0
+        kill_windows_bifrost_for_install_bin
+        sleep 0.5
+    done
+    rm -rf "$TEST_ROOT" >/dev/null 2>&1 || true
+}
+
 cleanup() {
     if [[ -n "$TEST_DATA_DIR" && -x "$INSTALL_BIN" ]]; then
         BIFROST_DATA_DIR="$(bifrost_process_path "$TEST_DATA_DIR")" "$INSTALL_BIN" stop >/dev/null 2>&1 || true
@@ -51,9 +95,8 @@ cleanup() {
                 [[ -n "$pid" ]] && kill "$pid" >/dev/null 2>&1 || true
             done
     fi
-    if [[ -n "$TEST_ROOT" && -d "$TEST_ROOT" ]]; then
-        rm -rf "$TEST_ROOT"
-    fi
+    kill_windows_bifrost_for_install_bin
+    remove_test_root
 }
 trap cleanup EXIT
 

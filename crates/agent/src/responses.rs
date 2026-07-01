@@ -550,8 +550,12 @@ mod tests {
             stream_max_retries: 0,
             wire_api: crate::config::ModelWireApi::Responses,
         };
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("client");
         let response = stream_model_response(
-            &reqwest::Client::new(),
+            &client,
             &effective,
             &[
                 ChatMessage::system("base instructions"),

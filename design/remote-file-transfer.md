@@ -292,28 +292,28 @@ Caller                                  Remote
 ### 14.1 小文件快速通道(P1-#5,`file.upload_small`)
 
 - **新增 server op `file.upload_small`**:单次 policy-checked 调用完成「解码(可选 zstd)→ 对**原始字节**校验整文件 sha256 → 原子 `.part` 写入 + rename」。复用与分块路径**完全相同**的 policy 决策、overwrite/create_parents 门禁、skip-if-identical 短路、size 上限。
-- **预算守卫**:仅当文件 ≤ `budget = clamp_chunk_size(None, policy).max(transfer_chunk_max_bytes)`(即单帧能装下的原始字节)才走快速通道;超出预算的文件返回 `[file.precondition_failed]`(文案含 "fast-path budget"),caller **透明回落**到分块协议。
+- **预算守卫**:caller 仅当文件 ≤ `SMALL_FILE_FASTPATH_MAX`(默认 512 KiB,为 base64 + remote-invoke envelope 预留 relay body 余量)才走快速通道;server 仍用 policy 单帧预算二次校验,预算不足时返回 `[file.precondition_failed]`(文案含 "fast-path budget"),caller **透明回落**到分块协议。
 - **完整性**:sha256 始终对解码后的**原始**字节计算,与线上是否 zstd 无关;写入沿用 sha-keyed `.part` + rename,失败清理,与分块路径一致的原子性保证。
 - **Caller**:`run_upload` 在 `!resume && total_size <= SMALL_FILE_FASTPATH_MAX` 时先试快速通道;仅当错误信号为 "fast-path budget" 时回落分块,其他错误直接上抛(不吞错)。
 
 ### 14.2 自适应块大小(P1-#6,纯 caller 侧)
 
 - **无需改协议**:server 的 `clamp_chunk_size(requested, policy)` 早已接受 caller 请求的块大小并夹到 `[1, transfer_chunk_max_bytes]`,`upload_chunk`/`download_chunk` 均按请求大小逐块处理并回传 `effective_chunk_size`。因此自适应**完全是 caller 侧**决策。
-- **RTT 探针**:caller 把**本就必须发生**的 begin 往返计时作为 RTT 探针(零额外往返)。auto 路径请求 `MAX_ADAPTIVE_CHUNK`(768 KiB)以探明 server 上限(`effective_chunk_size`),再据 RTT 收敛:
+- **RTT 探针**:caller 把**本就必须发生**的 begin 往返计时作为 RTT 探针(零额外往返)。auto 路径请求 `MAX_ADAPTIVE_CHUNK`(512 KiB)以探明 server 上限(`effective_chunk_size`),再据 RTT 收敛:
   - `rtt ≤ FAST_RTT_MS(20ms)` → `baseline`(512 KiB),快链路无谓放大无收益。
   - `rtt ≥ SLOW_RTT_MS(200ms)` → `ceiling`(server 上限),弱链路用最大块摊薄 RTT。
   - 中间线性爬坡,按 `ADAPTIVE_GRANULE`(64 KiB)取整,再 `clamp(floor, ceiling)`。
-- **显式优先**:用户传 `--chunk-size` 时**逐字尊重**(`plan_chunk_request` 返回 `(Some(explicit), adapt=false)`),自适应关闭。
-- **上限安全**:`MAX_ADAPTIVE_CHUNK = 768 KiB`,即便不可压缩载荷经双层 base64 膨胀(~1.85x)也稳在 2 MiB relay frame 上限内。下载走同一自适应路径。
+- **显式优先**:用户传 `--chunk-size` 时自适应关闭;caller 会先将显式值夹到 wire-safe ceiling,再进入 server clamp,避免协商出 relay 无法承载的块。
+- **上限安全**:`MAX_ADAPTIVE_CHUNK = 512 KiB`,不可压缩载荷经 base64 + remote-invoke envelope 膨胀后仍低于 CI relay 的 1 MiB open-call body 限制。下载走同一自适应路径。
 
 ### 14.3 Phase 4.2 测试
 
 - 单元(server):`upload_small` 写入并校验、空文件 / 1 字节、预算边界(`== budget` 走通、`> budget` 拒绝)、超大先于预算被拒、坏 sha / 错 size 拒绝、zstd 载荷往返、未知编码拒绝、overwrite 门禁 + skip-identical、create_parents、非 hex sha 的 `.part` 命名字符安全。
 - 单元(caller):`read_chunk_at` 零长度、`upload_small_args` 字段形状、fast-path 仅在 budget 信号回落、阈值等于 default chunk、`plan_chunk_request` 显式/auto、自适应块在快/慢/中链路的 baseline/ceiling/单调有界、小 ceiling 夹取、floor 下限保护。
 - E2E(真实 caller→relay→target):
-  - `TC-FILE-XFER-05`:小文件(< 512 KiB)单次往返上传下载,sha 一致;空文件与恰好预算边界文件。
+  - `TC-FILE-XFER-05`:小文件(≤ 512 KiB)单次往返上传下载,sha 一致;空文件与恰好预算边界文件。
   - `TC-FILE-XFER-06`:恰好超过快速通道预算的文件透明回落分块,sha 一致。
-  - `TC-FILE-XFER-07`:auto 路径(不带 `--chunk-size`)自适应上传大文件,`effective_chunk_size` 合法且落盘 sha 一致;显式 `--chunk-size` 被逐字尊重。
+  - `TC-FILE-XFER-07`:auto 路径(不带 `--chunk-size`)自适应上传大文件,`effective_chunk_size` 合法且落盘 sha 一致;显式 wire-safe `--chunk-size` 被逐字尊重。
 
 ## 15. 后续 PR(本分支范围外,已作用域界定)
 
