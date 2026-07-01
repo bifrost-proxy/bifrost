@@ -1,5 +1,6 @@
 import AppKit
 import BifrostNativeCore
+import CoreText
 import SwiftUI
 
 struct RequestTableView: NSViewRepresentable {
@@ -725,9 +726,7 @@ private final class TrafficCellView: NSTableCellView {
 
     private func drawTag(_ text: String, palette: TagPalette) {
         let font = NSFont.systemFont(ofSize: 11, weight: .medium)
-        let attributes = textAttributes(font: font, color: palette.text, alignment: .center)
-        let textSize = (text as NSString).size(withAttributes: attributes)
-        let width = max(34, ceil(textSize.width) + 14)
+        let width = max(34, ceil(measureTextWidth(text, font: font)) + 14)
         let rect = NSRect(x: 8, y: bounds.midY - 9, width: min(width, max(34, bounds.width - 12)), height: 18)
         let path = NSBezierPath(roundedRect: rect, xRadius: 4, yRadius: 4)
         palette.background.setFill()
@@ -735,7 +734,7 @@ private final class TrafficCellView: NSTableCellView {
         palette.border.setStroke()
         path.lineWidth = 1
         path.stroke()
-        (text as NSString).draw(in: rect.insetBy(dx: 4, dy: 2), withAttributes: attributes)
+        drawText(text, in: rect.insetBy(dx: 4, dy: 0), font: font, color: palette.text, alignment: .center)
     }
 
     private func drawClient(_ row: TrafficRowViewModel) {
@@ -781,27 +780,125 @@ private final class TrafficCellView: NSTableCellView {
         color: NSColor = .labelColor,
         alignment: NSTextAlignment = .left
     ) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-        paragraph.lineBreakMode = .byTruncatingMiddle
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph,
-        ]
-        let textRect = NSRect(x: rect.minX, y: rect.midY - font.ascender / 2 - 5, width: rect.width, height: 16)
-        (text as NSString).draw(in: textRect, withAttributes: attributes)
+        guard !text.isEmpty, rect.width > 1, rect.height > 1 else {
+            return
+        }
+
+        let textRect = NSRect(
+            x: rect.minX,
+            y: rect.midY - font.ascender / 2 - 5,
+            width: rect.width,
+            height: 16
+        )
+        guard textRect.width > 1,
+              textRect.height > 1,
+              let context = NSGraphicsContext.current?.cgContext else {
+            return
+        }
+
+        let fittedText = fittedText(text, font: font, maxWidth: textRect.width)
+        guard !fittedText.isEmpty else {
+            return
+        }
+
+        let textWidth = measureTextWidth(fittedText, font: font)
+        let x: CGFloat
+        switch alignment {
+        case .center:
+            x = textRect.midX - textWidth / 2
+        case .right:
+            x = textRect.maxX - textWidth
+        default:
+            x = textRect.minX
+        }
+
+        drawCoreText(
+            fittedText,
+            in: textRect,
+            baselineX: x,
+            font: font,
+            color: color,
+            context: context
+        )
     }
 
-    private func textAttributes(font: NSFont, color: NSColor, alignment: NSTextAlignment) -> [NSAttributedString.Key: Any] {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = alignment
-        paragraph.lineBreakMode = .byTruncatingTail
-        return [
-            .font: font,
-            .foregroundColor: color,
-            .paragraphStyle: paragraph,
-        ]
+    private func fittedText(_ text: String, font: NSFont, maxWidth: CGFloat) -> String {
+        guard maxWidth > 4 else {
+            return ""
+        }
+        if measureTextWidth(text, font: font) <= maxWidth {
+            return text
+        }
+
+        let ellipsis = "..."
+        if measureTextWidth(ellipsis, font: font) > maxWidth {
+            return ""
+        }
+
+        let characters = Array(text)
+        var low = 0
+        var high = characters.count
+        var best = ellipsis
+        while low <= high {
+            let keepCount = (low + high) / 2
+            let headCount = (keepCount + 1) / 2
+            let tailCount = keepCount / 2
+            let candidate = String(characters.prefix(headCount)) + ellipsis + String(characters.suffix(tailCount))
+            if measureTextWidth(candidate, font: font) <= maxWidth {
+                best = candidate
+                low = keepCount + 1
+            } else {
+                high = keepCount - 1
+            }
+        }
+        return best
+    }
+
+    private func measureTextWidth(_ text: String, font: NSFont) -> CGFloat {
+        let chars = Array(text.utf16)
+        guard !chars.isEmpty else {
+            return 0
+        }
+
+        let ctFont = font as CTFont
+        var glyphs = [CGGlyph](repeating: 0, count: chars.count)
+        CTFontGetGlyphsForCharacters(ctFont, chars, &glyphs, chars.count)
+        var advances = [CGSize](repeating: .zero, count: glyphs.count)
+        CTFontGetAdvancesForGlyphs(ctFont, .horizontal, glyphs, &advances, glyphs.count)
+        return advances.reduce(CGFloat(0)) { partial, advance in
+            partial + max(advance.width, font.pointSize * 0.5)
+        }
+    }
+
+    private func drawCoreText(
+        _ text: String,
+        in rect: NSRect,
+        baselineX: CGFloat,
+        font: NSFont,
+        color: NSColor,
+        context: CGContext
+    ) {
+        let ctFont = font as CTFont
+        let attributes: CFDictionary = [
+            kCTFontAttributeName: ctFont,
+            kCTForegroundColorAttributeName: color.cgColor,
+        ] as CFDictionary
+        guard let attributedText = CFAttributedStringCreate(nil, text as CFString, attributes) else {
+            return
+        }
+        let line = CTLineCreateWithAttributedString(attributedText)
+        let ascent = CTFontGetAscent(ctFont)
+        let descent = CTFontGetDescent(ctFont)
+        let baselineY = rect.minY + (rect.height - ascent - descent) / 2 + ascent
+
+        context.saveGState()
+        context.clip(to: rect)
+        context.textMatrix = .identity
+        context.translateBy(x: 0, y: bounds.height)
+        context.scaleBy(x: 1, y: -1)
+        context.textPosition = CGPoint(x: baselineX, y: bounds.height - baselineY)
+        CTLineDraw(line, context)
+        context.restoreGState()
     }
 }
 

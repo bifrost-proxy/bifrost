@@ -541,6 +541,35 @@
 - Settings 内部仍使用类似 macOS 系统设置的左侧子导航，Proxy、Certificate、Sync、Remote Invoke 四页可切换。
 - Request / Response、Overview / Header / Body / Raw 等 tab 只出现在请求详情内容内部，不得被提升为应用主导航。
 
+### TC-MNA-22：Network 表格文字绘制不得因 CoreText attribute 崩溃
+
+**操作步骤：**
+1. 构建 Native `.app`：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 打开 Native `.app` 并进入 Network 页面：
+   ```bash
+   osascript -e 'tell application "Bifrost" to quit' >/dev/null 2>&1 || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 确认真实 Admin 数据可以被 Native 读取：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-admin-data
+   ```
+4. 保持 Network 页面可见至少 8 秒，确认进程仍存活：
+   ```bash
+   sleep 8
+   pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'
+   ```
+
+**预期结果：**
+- Network 表格渲染真实请求行时，`TrafficCellView.drawText` 不得触发 `attempt to insert nil object` / CoreText / `NSString.draw` 崩溃。
+- `--check-admin-data` 输出 `Bifrost admin data check passed`，包含真实 traffic、rules、push client id 和 SSE stream 信息。
+- 8 秒后 Native app 进程仍存在，Network 页面可继续滚动和切换详情。
+- 文字测量和绘制不再走 `NSString.size(withAttributes:)` / `NSStringDrawingEngine`；Network 滚动并发绘制时使用稳定的 CoreText/CG 路径和显式裁剪。
+- 右侧 Network 表格、Rules 详情、Settings 面板操作风格不受影响。
+
 ## 清理步骤
 
 ```bash
