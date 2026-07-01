@@ -1617,6 +1617,63 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_net_fetch_target_allows_private_when_opted_in() {
+        let url = reqwest::Url::parse("http://127.0.0.1/admin").unwrap();
+        assert!(validate_net_fetch_target(&url, true).is_ok());
+    }
+
+    #[test]
+    fn test_validate_net_fetch_target_rejects_missing_and_localhost_hosts() {
+        let missing_host = reqwest::Url::parse("mailto:user@example.com").unwrap();
+        let err = validate_net_fetch_target(&missing_host, false).unwrap_err();
+        assert!(err.contains("host"));
+
+        for host in ["localhost", "service.localhost", "localhost."] {
+            let url = reqwest::Url::parse(&format!("http://{host}/")).unwrap();
+            let err = validate_net_fetch_target(&url, false).unwrap_err();
+            assert!(err.contains("localhost"));
+        }
+    }
+
+    #[test]
+    fn test_validate_public_ip_rejects_private_and_non_routable_ranges() {
+        for ip in [
+            "0.0.0.0",
+            "10.1.2.3",
+            "100.64.0.1",
+            "127.0.0.1",
+            "169.254.169.254",
+            "172.16.0.1",
+            "192.168.1.1",
+            "198.18.0.1",
+            "224.0.0.1",
+            "::1",
+            "fc00::1",
+            "fe80::1",
+            "2001:db8::1",
+        ] {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(
+                is_private_netfetch_ip(parsed),
+                "expected {ip} to be blocked"
+            );
+            assert!(validate_public_ip(parsed).is_err());
+        }
+    }
+
+    #[test]
+    fn test_validate_public_ip_allows_public_ranges() {
+        for ip in ["8.8.8.8", "1.1.1.1", "2001:4860:4860::8888"] {
+            let parsed: IpAddr = ip.parse().unwrap();
+            assert!(
+                !is_private_netfetch_ip(parsed),
+                "expected {ip} to be public"
+            );
+            assert!(validate_public_ip(parsed).is_ok());
+        }
+    }
+
+    #[test]
     fn test_simple_script() {
         let mut sandbox = Sandbox::new(SandboxConfig::default()).unwrap();
         let request = RequestData {
