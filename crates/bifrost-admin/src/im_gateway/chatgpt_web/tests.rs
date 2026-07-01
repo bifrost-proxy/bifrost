@@ -533,6 +533,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "imageCount": 0,
             "pendingOutputStatusText": true,
             "composerVisible": true,
+            "composerDisabled": true,
             "sendButtonVisible": true
         })),
         Some("pending_output_status_text")
@@ -543,6 +544,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "imageCount": 0,
             "pendingOutputStatusText": true,
             "composerVisible": true,
+            "composerDisabled": true,
             "sendButtonVisible": true
         })),
         Some("pending_output_status_text")
@@ -553,6 +555,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "imageCount": 0,
             "pendingOutputStatusText": true,
             "composerVisible": true,
+            "composerDisabled": true,
             "sendButtonVisible": true
         })),
         Some("pending_output_status_text")
@@ -585,6 +588,19 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
     );
     assert_eq!(
         interaction::dom_output_in_progress_reason(&json!({
+            "text": "ChatGPT 说：正在思考",
+            "imageCount": 0,
+            "pendingOutputStatusText": true,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerTextLength": 0,
+            "sendButtonVisible": true,
+            "sendButtonDisabled": false
+        })),
+        None
+    );
+    assert_eq!(
+        interaction::dom_output_in_progress_reason(&json!({
             "text": "OK",
             "imageCount": 0,
             "pendingOutputStatusText": false,
@@ -605,7 +621,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "composerTextLength": 2,
             "sendButtonVisible": false
         })),
-        Some("send_button_not_ready")
+        Some("composer_has_unsent_text")
     );
     assert_eq!(
         interaction::dom_output_in_progress_reason(&json!({
@@ -628,7 +644,7 @@ fn dom_output_state_waits_for_generation_controls_to_finish() {
             "sendButtonVisible": true,
             "sendButtonDisabled": false
         })),
-        None
+        Some("composer_not_visible")
     );
 }
 

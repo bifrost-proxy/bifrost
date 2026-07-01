@@ -43,7 +43,7 @@ use interaction::{
     conversation_id_from_params, event, extract_text_parts, get_conversation_detail,
     is_transient_conversation_read_error, requested_or_session_conversation,
     save_session_conversation, stop_requested, stopped_error, summarize_conversation_detail,
-    summarize_conversations, try_waited_final_from_sse, wait_final, WaitedFinal,
+    summarize_conversations, try_waited_final_from_sse, wait_final, WaitFinalOptions, WaitedFinal,
 };
 use native::native_account_probe;
 use send::send_with_browser;
@@ -923,9 +923,11 @@ async fn run_authenticated_operation(
                 auth,
                 &conversation_id,
                 None,
-                Duration::from_secs(config.chatgpt.timeout_secs),
-                stop_marker_path,
-                Some(&config.profile_dir),
+                WaitFinalOptions {
+                    duration: Duration::from_secs(config.chatgpt.timeout_secs),
+                    stop_marker_path,
+                    profile_dir: Some(&config.profile_dir),
+                },
             )
             .await?;
             let mut response = waited
@@ -1106,9 +1108,11 @@ async fn run_authenticated_operation(
                         auth,
                         cid,
                         None, // no after_time filter — pick up whatever is there
-                        Duration::from_secs(config.chatgpt.timeout_secs),
-                        stop_marker_path,
-                        Some(&config.profile_dir),
+                        WaitFinalOptions {
+                            duration: Duration::from_secs(config.chatgpt.timeout_secs),
+                            stop_marker_path,
+                            profile_dir: Some(&config.profile_dir),
+                        },
                     )
                     .await?;
                     // The 429 was a transient read error.  Since wait_final
@@ -1615,9 +1619,11 @@ async fn ask_send_and_wait(
         auth,
         &final_conversation_id,
         Some(after_time),
-        Duration::from_secs(config.chatgpt.timeout_secs),
-        stop_marker_path,
-        Some(&config.profile_dir),
+        WaitFinalOptions {
+            duration: Duration::from_secs(config.chatgpt.timeout_secs),
+            stop_marker_path,
+            profile_dir: Some(&config.profile_dir),
+        },
     )
     .await
     {

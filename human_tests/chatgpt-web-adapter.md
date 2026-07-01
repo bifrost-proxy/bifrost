@@ -662,8 +662,47 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - 不再出现由 run-local profile 持有的孤儿 Edge/Chrome 进程。
 - 登录态、CDP tab 池、conversation tab LRU 和浏览器复用仍由共享 profile 统一管理。
 
+### TC-CWA-29：回归 - IM 通道 ChatGPT Web 短 planning 段不能提前作为最终回复
+
+**前置条件**：`weixin` 或 mock IM provider 的当前 channel runner 指向 `chatgpt_web`；如执行真实微信链路，登录态有效且 provider 可发送 outbound。
+
+**操作步骤**：
+1. 通过微信或 mock inbound 向绑定 `chatgpt_web` runner 的 IM 会话发送一个需要联网/检索/整理的请求，例如 `帮我筛选今天或最近 24–48 小时内有证据的技术进展，按模型/Agent、开发工具、开源项目、基础设施和产品化落地分类输出。`
+2. 观察 run artifacts：`result.json`、`last_message.md`、`conversation_final.json` 和 `normalized_events.jsonl`。
+3. 观察 IM outbound 消息日志或真实微信侧收到的最终消息。
+
+**预期结果**：
+- 如果 ChatGPT Web 页面先出现 `我会按...筛选/搜索/整理...` 这类短 planning 段，adapter 不得在 stop button 仍可见或 DOM 内容签名仍变化时直接返回。
+- DOM ready 判定使用内容签名而非仅文本长度；同长度文本变化、新增 assistant 批次、图片或附件状态变化都会重置稳定窗口。
+- `result.json.response`、`last_message.md` 和 IM 最终回写包含真正完成后的答案正文，而不是只包含第一段 planning 说明。
+- 如果页面最终只生成 planning 段且长时间无后续内容，adapter 在延长稳定窗口后可返回该文本，并在 artifacts 中保留 DOM fallback 证据，便于人工判断 ChatGPT 是否确实停止。
+
+### TC-CWA-30：回归 - stream_handoff 后 ChatGPT 仍在处理时不能按输入框空闲提前回写
+
+**前置条件**：`weixin` 或 mock IM provider 的当前 channel runner 指向 `chatgpt_web`；登录态有效。适合使用真实微信消息触发，因为该问题表现为用户侧收到不完整回复。
+
+**操作步骤**：
+1. 通过微信或 mock inbound 向绑定 `chatgpt_web` runner 的 IM 会话发送一个会触发联网搜索、资料整理或多阶段生成的长任务。
+2. 观察 ChatGPT Web 页面：页面先出现短过渡段。若右下角按钮为 `data-testid="stop-button"`，且 `aria-label` 为 `停止回答`、`Stop answering`、`Stop streaming` 或同类 Stop/Cancel 文案，表示仍在处理中，不能结束；若右侧只显示 `Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 等语音/听写按钮，且 composer 可输入、无待发送文本，则表示已回到空闲。
+3. 等待 Bifrost run 完成后，检查本轮 `conversation_handoff.json`、`conversation_final.json`、`result.json`、`normalized_events.jsonl` 和 IM outbound 消息。
+
+**预期结果**：
+- 如果 `conversation_handoff.json.eventTypes` 包含 `stream_handoff`，但没有可解析的 SSE final，DOM fallback 不得只因为 composer 空闲、send button 消失或语音按钮出现就返回。
+- `data-testid="stop-button"` 与中英文 Stop/Cancel aria-label 必须作为仍在生成的状态；发送按钮查找不得使用 `composer-submit-btn` 这类 stop button 也会携带的非语义 class。
+- `Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮本身不是处理中状态；当 composer 可见、未 disabled 且文本为空时，DOM 状态可视为 idle。
+- `conversation_final.json.source=dom_fallback_outcome` 时，最终返回前必须已经观察到 stop button 消失且 DOM 内容签名稳定；页面空闲后不应再出现固定 8-30 秒或 120 秒 grace 延迟。
+- `result.json.response` 和 IM outbound 最终消息包含完整答案或明确超时错误，不得只包含“我会按...重新拉取/筛选/整理...”这类开头说明。
+- 不允许恢复纯字符串匹配规则；判定必须基于 DOM 输出状态、stop button、composer idle、内容签名稳定性和 SSE final 是否存在。
+
 ## 真实执行记录
 
+- 2026-06-30：安装本机 live hotfix `bifrost 0.0.131+chatgpt-dom-finality.3` 后，使用默认数据目录 `~/.bifrost` 和启用的 `gpt` / `chatgpt_web` runner 连续执行 TC-CWA-30 三轮 CLI 真实回归。短回复 run `1782836594878-383512a5-6b12-4fed-baae-65900d8b1e8b` 成功，`conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，`durationMs=143016`，最终 `response=SHORT_DOM_FINALITY_OK`。长任务 run `1782836747906-e65a479f-f917-4edd-803a-0574e783c217` 成功，`durationMs=140512`，`normalized_events.jsonl` 包含 2 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 5559 字完整分类清单，不再把前两段筛选说明作为最终回复。第三轮 run `1782836914615-229b7136-0b14-4cd7-a98f-95ce35c3be71` 成功，`durationMs=140711`，`normalized_events.jsonl` 包含 1 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 2095 字编号列表。三轮均证明 `stream_handoff` 且无 SSE final 时不会在约 30 秒按 composer/send 空闲提前结束。
+- 2026-06-30：根据真实页面观察补充 TC-CWA-30 控件状态判定。`<button id="composer-submit-button" data-testid="stop-button" aria-label="停止回答">` 与英文 `<button id="composer-submit-button" data-testid="stop-button" aria-label="Stop answering">` 都表示仍在处理中；`Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮区域表示 idle。代码级回归 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture` 在主仓库和本机 hotfix worktree 均通过 241 项，新增覆盖发送按钮 selector 不再包含 `composer-submit-btn`，避免把 stop button 误识别为 send button。
+- 2026-06-30：补充分析 UI 已结束后 IM 回写延迟。默认日志 `~/.bifrost/logs/bifrost.2026-06-30.log` 显示两轮真实 DOM fallback 在 stop button 消失后仍记录 `DOM content candidate waiting for stability`，短文本 `required_stable_ms=8000`，例如 04:43:57-04:44:07 与 04:44:35-04:44:45 均额外等待约 8 秒后才 `generation complete` 并回写 IM，证明用户观察到的 10 秒级延迟不是主观错觉。修复后删除 `stream_handoff` 固定 120 秒 grace，并将页面空闲后的 DOM 签名稳定窗口调整为图片/短文本 2 秒、中等文本 3 秒、超长文本 5 秒；仍以 stop button 可见作为处理中硬信号，避免提前回写。
+- 2026-06-30：执行低延迟最终性代码级回归通过。`cargo fmt --all -- --check`、`cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web::interaction::tests --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 bash e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh`、`SKIP_FRONTEND_BUILD=1 cargo clippy --all-targets --all-features -- -D warnings` 和 `git diff --check` 均通过。按用户要求未执行本地 coverage 脚本。
+- 2026-06-30：安装本机默认目录版本 `bifrost 0.0.131+chatgpt-dom-finality.7` 并重启 `~/.bifrost` 后执行状态确认，`pid=58969`、监听 `0.0.0.0:9900`、`errors=[]`。本次代码级回归执行 `cargo fmt --all -- --check`、`cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check`、`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture`、`SKIP_FRONTEND_BUILD=1 bash e2e-tests/tests/test_im_gateway_long_reply_delivery_regression.sh`、`SKIP_FRONTEND_BUILD=1 cargo clippy --all-targets --all-features -- -D warnings`、`SKIP_FRONTEND_BUILD=1 cargo test --workspace --all-features`、`SKIP_FRONTEND_BUILD=1 cargo build --all-targets --all-features` 和 `git diff --check`，均通过。按用户要求未执行本地 coverage 脚本。
+- 2026-06-30：补充 TC-CWA-30 回归记录。最新默认数据目录真实微信 run `1782835733560-347796f0-a92c-40ad-8c11-e3983f49497d` 状态为 `succeeded`，但 `result.response` 只有 78 字符开头说明，`conversation_final.json.source=dom_fallback_outcome`，composer 已空闲且 `sendButtonVisible=false`，证明仅靠输入框/发送按钮状态仍会在 ChatGPT 继续处理时提前回写。修复后新增结构化 `stream_handoff` DOM 宽限判定与单元测试；真实微信链路需安装新构建后连续复测多轮。
+- 2026-06-30：执行 TC-CWA-29 代码级回归通过。先确认本机真实异常样本 `~/.bifrost/agent/im_gateway/chat_runs/1782794652027-0fa9d63d-03ce-4c28-ad10-5f6299853bac` 的 `conversation_final.json.source=dom_fallback_outcome`，`result.response` 只有短 planning 段。随后执行 `cargo test -p bifrost-admin chatgpt_web::interaction::tests --lib -- --nocapture`，12 项通过，覆盖短 planning prelude 稳定窗口延长和同长度文本变化重置 DOM ready 签名。真实微信外部链路待本次构建安装后继续回归。
 - 2026-06-25：执行 TC-CWA-28 代码级回归通过。确认 `ask_send_and_wait` 不再包含 `chatgpt_web_fresh_profile`、`with_profile_dir` 或 `cleanup_fresh_run_profile`，新建对话和续接 conversation 统一使用 `RuntimeConfig.profile_dir`。随后执行 `bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 通过，验证 E2E 包装脚本可在不依赖真实 ChatGPT 登录的情况下阻断 run-local Chromium profile 回归。
 - 2026-06-03：执行 TC-CWA-27 通过。现场确认默认任务 `76612de33e9740bc92440ce64a98a4cb` 的 Daily Agent 当前 run `1780447855777-aa643349-f391-4050-8e48-fd166b2786e7` 使用 `runner=web` 且仍为 running；前一条真实失败样本 `1780447535923-fb3febe2-74d3-4db4-ae80-f66b21f85523` 中 `auth_probe.json` 为 `loggedIn=true/accountStatus=403`，但 `failure_diagnostics.json` 的实际页面为 `https://chatgpt.com/auth/login`，正文包含“登录即可开始聊天”，错误为 `browser_ui: composer not ready`。修复后执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin auth_flow_pages_are_not_retryable_conversation_navigation --lib -- --nocapture` 通过，验证 ChatGPT 登录页与 Google OAuth 页面都被识别为授权流页面，且不会进入 conversation 重导航分支。
 - 2026-05-26：执行 TC-CWA-26 代码级与默认 Runner CDP 真实点击回归通过。使用用户提供的真实 ChatGPT DOM 结构确认问题形态：最终 assistant message `4cd623b5-3870-49a3-bb64-ffd3b06c769b` 中 5 张信息卡和 `5 张图片 ZIP` 都是 `button.behavior-btn` / `entity-underline`，不是 `<img>` 或 `<a href>`；历史 run `1779784377984-e0206a71-0333-4ac6-8dd5-9dd090ce24ab` 的 `conversation_final.json` 为 `imageCount=0` 且最终 response 停在 `打包下载：`。默认 Runner CDP 使用已有登录态打开 `https://chatgpt.com/c/6a155ad4-1d74-83ec-bc1d-bc1faccf276b`，点击 `大模型竞争格局` 后 dialog 出现 `alt=大模型竞争格局` 的原图 `<img>`，图片 URL 为 `backend-api/estuary/content?id=file_00000000c37c7230a857de6a3fd1c397&fn=ai_infographic_01_overview.png`，同时页面预取其余 4 张 `ai_infographic_02_timeline.png`、`ai_infographic_03_anthropic_profit.png`、`ai_infographic_04_llm_intelligence.png`、`ai_infographic_05_today_news.png`；点击 `5 张图片 ZIP` 后收到 `downloadWillBegin` / `downloadProgress completed`，下载 URL 为 `backend-api/estuary/content?id=file_000000007e9871fda9b7c4b602594f18&fn=ai_infographics_5_images.zip`，文件 `/tmp/bifrost-chatgpt-web-live-download-20260526180404/ai_infographics_5_images.zip` 大小 `1499429` 字节。修复后 targeted 单测确认 DOM 提取源码扫描 `button.behavior-btn`、输出 `artifactCount` / `chatgpt_behavior_button`，Runner 会下载 behavior 图片为本地 PNG Markdown、写入 `downloadedArtifacts`，并把 ZIP 本地链接追加到最终投递文本。

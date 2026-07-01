@@ -197,6 +197,13 @@ pub(super) struct WaitedFinal {
     pub(super) had_429_or_fallback: bool,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct WaitFinalOptions<'a> {
+    pub(super) duration: std::time::Duration,
+    pub(super) stop_marker_path: &'a Path,
+    pub(super) profile_dir: Option<&'a Path>,
+}
+
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
 /// This avoids polling the conversation detail API (which triggers 429).
 ///
@@ -291,30 +298,29 @@ pub(super) async fn wait_final(
     _auth: &AuthState,
     conversation_id: &str,
     _after_time: Option<f64>,
-    duration: std::time::Duration,
-    stop_marker_path: &Path,
-    profile_dir: Option<&Path>,
+    options: WaitFinalOptions<'_>,
 ) -> Result<WaitedFinal, String> {
     // NOTE: This function no longer makes active API requests to ChatGPT.
     // All data should be captured via CDP network interception in wait_send_handoff.
     // This function only serves as a DOM-based fallback when CDP interception fails.
-    let deadline = tokio::time::Instant::now() + duration;
-    let Some(pdir) = profile_dir else {
+    let wait_started = tokio::time::Instant::now();
+    let deadline = wait_started + options.duration;
+    let Some(pdir) = options.profile_dir else {
         return Err("wait_final: no profile_dir available for DOM extraction".to_string());
     };
 
     tracing::info!(
         conversation_id,
-        timeout_secs = duration.as_secs(),
+        timeout_secs = options.duration.as_secs(),
         "chatgpt_web wait_final: DOM-only mode (no API polling)"
     );
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
-    let mut ready_candidate: Option<(usize, tokio::time::Instant)> = None;
+    let mut ready_candidate: Option<(String, tokio::time::Instant)> = None;
 
     while tokio::time::Instant::now() < deadline {
-        if stop_requested(stop_marker_path).await {
+        if stop_requested(options.stop_marker_path).await {
             return Err(stopped_error());
         }
 
@@ -351,12 +357,17 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                let required_stable_for = required_dom_stable_for(dom_text_len);
+                let ready_signature = dom_ready_signature(&waited);
+                let required_stable_for = required_dom_stable_for(dom_text_len, dom_image_count);
                 let now = tokio::time::Instant::now();
                 let stable_since = match ready_candidate {
-                    Some((previous_len, since)) if previous_len == dom_text_len => since,
+                    Some((ref previous_signature, since))
+                        if previous_signature == &ready_signature =>
+                    {
+                        since
+                    }
                     _ => {
-                        ready_candidate = Some((dom_text_len, now));
+                        ready_candidate = Some((ready_signature, now));
                         now
                     }
                 };
@@ -2166,13 +2177,53 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     !normalized.is_empty() && !dom_text_is_pending_status(normalized)
 }
 
-fn required_dom_stable_for(text_len: usize) -> std::time::Duration {
-    let secs = if text_len < 512 {
-        8
+fn dom_ready_signature(waited: &WaitedFinal) -> String {
+    let turn_id = waited
+        .final_message
+        .get("turnId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message_id = waited
+        .final_message
+        .get("messageId")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let text = waited
+        .final_message
+        .get("text")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let image_count = waited
+        .final_message
+        .get("generatedImages")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .or_else(|| {
+            waited
+                .final_message
+                .get("imageCount")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+        })
+        .unwrap_or_default();
+    let artifact_count = waited
+        .summary
+        .get("artifactCount")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    format!(
+        "{turn_id}\n{message_id}\n{}\n{image_count}\n{artifact_count}\n{text}",
+        waited.all_texts.len()
+    )
+}
+
+fn required_dom_stable_for(text_len: usize, image_count: usize) -> std::time::Duration {
+    let secs = if image_count > 0 || text_len < 512 {
+        2
     } else if text_len < 12_000 {
-        15
+        3
     } else {
-        30
+        5
     };
     std::time::Duration::from_secs(secs)
 }
@@ -2246,6 +2297,29 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
     {
         return Some("stop_button_visible");
     }
+    if data
+        .get("waitingForCompleteReply")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some("waiting_for_complete_reply");
+    }
+    let composer_visible = data
+        .get("composerVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let composer_disabled = data
+        .get("composerDisabled")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    let composer_text_length = data
+        .get("composerTextLength")
+        .and_then(Value::as_u64)
+        .unwrap_or_default();
+    let composer_idle = composer_visible && !composer_disabled && composer_text_length == 0;
+    if composer_idle {
+        return None;
+    }
     let image_count = data
         .get("imageCount")
         .and_then(Value::as_u64)
@@ -2260,30 +2334,20 @@ pub(super) fn dom_output_in_progress_reason(data: &Value) -> Option<&'static str
         return Some("pending_output_status_text");
     }
     if data
-        .get("waitingForCompleteReply")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return Some("waiting_for_complete_reply");
-    }
-    if data
         .get("isStreaming")
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
         return Some("output_busy");
     }
-    let composer_text_length = data
-        .get("composerTextLength")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    if composer_text_length > 0
-        && !data
-            .get("sendButtonVisible")
-            .and_then(Value::as_bool)
-            .unwrap_or(true)
-    {
-        return Some("send_button_not_ready");
+    if !composer_visible {
+        return Some("composer_not_visible");
+    }
+    if composer_disabled {
+        return Some("composer_disabled");
+    }
+    if composer_text_length > 0 {
+        return Some("composer_has_unsent_text");
     }
     None
 }
@@ -2294,11 +2358,38 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
-    fn required_dom_stable_for_is_conservative_for_long_outputs() {
-        assert_eq!(required_dom_stable_for(100).as_secs(), 8);
-        assert_eq!(required_dom_stable_for(8_000).as_secs(), 15);
-        assert_eq!(required_dom_stable_for(12_000).as_secs(), 30);
-        assert_eq!(required_dom_stable_for(40_000).as_secs(), 30);
+    fn required_dom_stable_for_keeps_completed_dom_responsive() {
+        assert_eq!(required_dom_stable_for(100, 0).as_secs(), 2);
+        assert_eq!(required_dom_stable_for(8_000, 0).as_secs(), 3);
+        assert_eq!(required_dom_stable_for(12_000, 0).as_secs(), 5);
+        assert_eq!(required_dom_stable_for(40_000, 0).as_secs(), 5);
+        assert_eq!(required_dom_stable_for(0, 1).as_secs(), 2);
+    }
+
+    #[test]
+    fn dom_ready_signature_tracks_same_length_text_changes() {
+        let first = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "abc",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["abc".to_string()],
+            had_429_or_fallback: true,
+        };
+        let second = WaitedFinal {
+            final_message: json!({
+                "turnId": "turn-a",
+                "text": "xyz",
+                "imageCount": 0,
+            }),
+            summary: json!({"artifactCount": 0}),
+            all_texts: vec!["xyz".to_string()],
+            had_429_or_fallback: true,
+        };
+
+        assert_ne!(dom_ready_signature(&first), dom_ready_signature(&second));
     }
 
     #[test]
