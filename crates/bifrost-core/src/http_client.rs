@@ -388,6 +388,14 @@ mod tests {
         vars
     }
 
+    fn env_name_matches(actual: &str, expected: &str) -> bool {
+        if cfg!(windows) {
+            actual.eq_ignore_ascii_case(expected)
+        } else {
+            actual == expected
+        }
+    }
+
     fn with_ca_envs_cleared<T>(f: impl FnOnce() -> T) -> T {
         let vars = ca_env_vars();
         let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = vars
@@ -553,7 +561,7 @@ mod tests {
                 assert!(
                     paths
                         .iter()
-                        .any(|(source, path)| source == env_name && path == &ca),
+                        .any(|(source, path)| env_name_matches(source, env_name) && path == &ca),
                     "{env_name} should be accepted as an extra CA bundle source"
                 );
                 std::env::remove_var(env_name);
