@@ -239,3 +239,48 @@ Caller                                  Remote
 
 ## 12. 文档更新
 - 本文件、`human_tests/remote-file-transfer.md`、`human_tests/readme.md` 索引、`design/remote-invoke-file-api.md`（能力矩阵追加 upload/download）、README（如需）。
+
+## 13. Phase 4.1 —— 传输吞吐 / 数据包优化
+
+> **动机**：Relay 是内容无关的哑管道，载荷如何编码、压缩、节流完全由应用层决定。基础版分块传输每块一次阻塞式往返（RTT 绑定）、无压缩、且服务端严格 `offset == part_size` 顺序追加。以下三项优化在 **完全不改变 `.part` append-only 不变量与断点续传语义** 的前提下提升吞吐、压缩线上包体。
+
+### 13.1 流水线 / 窗口化（Pipelining）
+
+- **Caller**：不再逐块阻塞，改为保持一个有界的在途窗口（`UPLOAD_WINDOW` / `DOWNLOAD_WINDOW = 8`），用 `futures::buffer_unordered` 并发发起多块调用，把 Relay RTT 摊薄到整个窗口。每块用独立文件句柄按 offset 读取，互不干扰。
+- **Server（上传落盘顺序）**：分块可能乱序到达，服务端用 **有界重排缓冲区**（`UploadWriteState.pending: BTreeMap<offset, bytes>`，上限 `MAX_PENDING_CHUNKS = 32`）：
+  - `offset < part_size`：重复块，幂等 ack。
+  - `offset > part_size`：领先于写前沿，缓冲（缓冲满则返回 `file.precondition_failed` 让 caller 收窄窗口）。
+  - `offset == part_size`：落盘该块后，循环 drain 缓冲区中已连续的后继块。
+  - 由此 `.part` 始终是文件的连续前缀，crash `--resume` 仍是「从 part 大小继续」，续传逻辑零改动。
+- **Server（下载）**：`download_chunk` 在 eof 时**不再删除会话**（流水线下末块可能先于前块完成，删除会使在途请求失败）；空闲会话由 TTL 回收。
+- **Caller（下载落盘顺序）**：并发取回的块先进本地 `BTreeMap` 重排缓冲，按写前沿连续 drain 写入本地 `.part`，保证本地文件同样是连续前缀（resume-safe）。
+- `UPLOAD_WINDOW = 8 < MAX_PENDING_CHUNKS = 32`，突发也不会触发「收窄窗口」错误。
+
+### 13.2 自适应逐块 zstd 压缩
+
+- **协商**：begin 请求携带 `accept_encodings: ["zstd"]`。上传时服务端总能解 zstd,故据此回传 `chunk_encoding`；下载时仅当 caller 声明可解码才压缩,回传 `content_encoding`。
+- **自适应**：`encode_chunk` 仅在 **压缩后确实更小** 时才用 zstd（level 3）并打 `chunk_encoding="zstd"`,否则原样返回 `"none"`——已压缩内容（jpg/mp4/tar.gz）永不被膨胀。
+- **完整性与编码解耦**：`chunk_sha256` 始终对 **原始（解码后）字节** 计算,故完整性与线上编码无关。
+- **解压炸弹防御**：`decode_chunk` 的 zstd 解压以协商 chunk_size 为上限（`cap`）,单块解压后不可能超过该值。
+- **预算影响**:压缩只会缩小线上包体,绝不会把块推过 2 MiB frame 上限。
+
+### 13.3 跳过相同文件（Skip-if-identical）
+
+- `upload_begin` 在目标已存在且其 sha256 与源 `total_sha256` 一致时,直接短路返回 `already_complete: true`(附 `received_offset = total_size`),caller 跳过整个分块循环——幂等重推（如同一构建产物)变为单次往返、零分块。
+- CLI 在 begin(及 stale-part abort 后的 re-begin)响应含 `already_complete` 时短路,human 输出 “already up to date”,JSON 输出附 `skipped: true`。
+
+### 13.4 新增/变更的返回字段
+
+| 方法 | 新增字段 |
+|---|---|
+| `upload_begin` | `chunk_encoding`("none"|"zstd")、`already_complete`(bool) |
+| `upload_chunk` | `received_offset`(= 当前写前沿,配合乱序 ack) |
+| `download_begin` | `content_encoding`("none"|"zstd") |
+| `download_chunk` | `chunk_encoding`("none"|"zstd") |
+
+### 13.5 Phase 4.1 测试
+
+- 单元:`encode_chunk` 对可压缩数据打 zstd、对随机数据回落 none 且不膨胀;`decode_chunk` 拒绝未知编码、以 cap 限界;上传乱序块(4,3,2,1,0)经重排缓冲仍落成连续正确文件;`upload_begin` 相同文件短路;下载往返解 `chunk_encoding` 后逐块 + 整文件 sha 一致;chunk offset 分区数学。
+- E2E(真实 caller→relay→target,见 `e2e-tests/tests/test_remote_file_relay_e2e.sh`):
+  - `TC-FILE-XFER-03`:相同内容二次上传短路(`skipped=true` + sha 一致 + 目标不变)。
+  - `TC-FILE-XFER-04`:高可压缩载荷经自适应 zstd 上传+下载往返,两端 sha256 逐字节一致。

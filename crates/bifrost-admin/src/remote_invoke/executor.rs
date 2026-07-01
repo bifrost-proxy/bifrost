@@ -705,6 +705,15 @@ impl RemoteInvokeExecutor {
             // files larger than u32::MAX bytes.
             #[serde(default)]
             chunk_offset: Option<u64>,
+            // Phase 4.1: throughput/packet-size optimizations.
+            // Per-chunk wire encoding tag ("none" | "zstd") for adaptive
+            // compression; sha256 is always over the raw (decoded) bytes.
+            #[serde(default)]
+            chunk_encoding: Option<String>,
+            // Encodings the caller can decode (upload) / wants applied
+            // (download). Negotiated at begin; e.g. ["zstd"].
+            #[serde(default)]
+            accept_encodings: Option<Vec<String>>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -816,6 +825,7 @@ impl RemoteInvokeExecutor {
                     length: params.length,
                     chunk_b64: params.chunk_b64.clone(),
                     chunk_sha256: params.chunk_sha256.clone(),
+                    chunk_encoding: params.chunk_encoding.clone(),
                     total_sha256: params.total_sha256.clone(),
                 },
             )
@@ -1102,12 +1112,18 @@ impl RemoteInvokeExecutor {
                     params.chunk_size,
                     params.allow_overwrite.or(Some(policy.allow_overwrite)),
                     params.create_parents.unwrap_or(false),
+                    params.accept_encodings.as_deref(),
                 )
                 .await?
             }
             "file.download_begin" => {
-                super::file_transfer::handle_download_begin(&decision, &policy, params.chunk_size)
-                    .await?
+                super::file_transfer::handle_download_begin(
+                    &decision,
+                    &policy,
+                    params.chunk_size,
+                    params.accept_encodings.as_deref(),
+                )
+                .await?
             }
             _ => unreachable!(),
         };

@@ -56,6 +56,7 @@ crossterm = "0.28"
 tokio-tungstenite = "0.26"
 base64 = "0.22"
 ring = "0.17"
+zstd = "0.13"
 uuid.workspace = true
 fs2 = "0.4"
 unicode-normalization = "0.1"

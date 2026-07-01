@@ -184,6 +184,58 @@ cargo test -p bifrost-cli install_skill_installs_remote_skill_from_embedded_bund
 
 ---
 
-## 7. 自动化对照
+## 7. Phase 4.1 —— 传输吞吐 / 数据包优化
 
-上述真实场景与 `e2e-tests/tests/test_remote_file_relay_e2e.sh` 中 `TC-FILE-XFER-01`（多块 upload/download 往返 + 双端 sha256）与 `TC-FILE-XFER-02`（--resume 续传提交）保持一致；该脚本自建 relay + target + caller，走真实数据路径。人工执行时以本文档的大文件 / 压缩归档 / 中断续传场景为准，覆盖自动化脚本因体量受限未覆盖的规模边界。
+> 关联设计：`design/remote-file-transfer.md` 第 13 节。这些优化在不改变 `.part` append-only 不变量与断点续传语义的前提下，提升吞吐、压缩线上包体、并对幂等重推短路。人工验证以「结果一致 + 行为可观察」为准。
+
+### TC-XFER-7.1 流水线窗口化不破坏顺序与续传
+**步骤**：对 TC-XFER-2.1 的 150 MiB 伪随机文件（不可压缩，避免相同块掩盖乱序 bug）执行 upload + download；传输中途 kill 一次再 `--resume` 续传。
+**期望**：
+- 传输显著快于逐块阻塞的旧行为（窗口 8 并发在途，Relay RTT 被摊薄）；
+- 双端 sha256 逐字节一致，证明服务端有界重排缓冲（`MAX_PENDING_CHUNKS = 32`）把乱序到达的块按写前沿落成连续前缀；
+- 中断后 host-B 的 `.part` 仍是文件的连续前缀，`--resume` 从 part 大小继续，无需重传已落盘部分；
+- 全程无 `file.precondition_failed`（`UPLOAD_WINDOW = 8 < MAX_PENDING_CHUNKS = 32`，突发不会触发收窄窗口）。
+
+### TC-XFER-7.2 自适应 zstd —— 高可压缩载荷线上包体缩小
+**步骤**：
+```bash
+# ~2 MiB 高可压缩内容（长零串 + 重复文本）
+head -c 1048576 /dev/zero > /tmp/xfer-zstd.bin
+{ yes "the quick brown fox jumps over the lazy dog 0123456789" || true; } | head -c 1048576 >> /tmp/xfer-zstd.bin
+SRC_SHA=$(shasum -a 256 /tmp/xfer-zstd.bin | awk '{print $1}')
+
+bifrost remote file upload /tmp/xfer-zstd.bin xfer-zstd.bin \
+    --chunk-size 65536 --create-parents --overwrite \
+    --cwd <USER_HOME>/work/github/bifrost-xfer-sandbox
+bifrost remote file download xfer-zstd.bin /tmp/xfer-zstd.dl.bin \
+    --chunk-size 65536 --overwrite --cwd <USER_HOME>/work/github/bifrost-xfer-sandbox
+```
+**期望**：
+- 双端 sha256 == `SRC_SHA`（完整性对 **原始字节** 计算，与线上编码解耦）；
+- 上传/下载协商 `chunk_encoding = "zstd"`，线上包体明显小于 raw + base64；
+- 解码以协商 chunk_size 为上限（解压炸弹防御），单块解压后不超过该值。
+
+### TC-XFER-7.3 已压缩内容不被 zstd 膨胀
+**步骤**：对 TC-XFER-3.1 的 `tar.gz`（或任意 jpg/mp4）执行 upload。
+**期望**：
+- `encode_chunk` 检测到 zstd 压缩后未变小，回落 `chunk_encoding = "none"`，线上包体不膨胀；
+- 双端 sha256 一致。
+
+### TC-XFER-7.4 跳过相同文件（skip-if-identical）
+**步骤**：对同一文件连续执行两次 `upload`（内容与目标 sha 一致）。
+**期望**：
+- 第二次 `upload_begin` 直接短路返回 `already_complete: true`（`received_offset = total_size`），caller 跳过整个分块循环；
+- human 输出 “already up to date”，`--output json` 附 `skipped: true`；
+- host-B 目标文件不被改动（mtime/inode 或内容不变）。
+
+---
+
+## 8. 自动化对照
+
+上述真实场景与 `e2e-tests/tests/test_remote_file_relay_e2e.sh` 中以下用例保持一致；该脚本自建 relay + target + caller，走真实数据路径：
+- `TC-FILE-XFER-01`：多块 upload/download 往返 + 双端 sha256；
+- `TC-FILE-XFER-02`：`--resume` 续传提交；
+- `TC-FILE-XFER-03`：相同内容二次上传短路（`skipped = true` + sha 一致 + 目标不变）；
+- `TC-FILE-XFER-04`：高可压缩载荷经自适应 zstd upload + download 往返，两端 sha256 逐字节一致。
+
+人工执行时以本文档的大文件 / 压缩归档 / 中断续传 / 流水线规模场景为准，覆盖自动化脚本因体量受限未覆盖的规模边界。

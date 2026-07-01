@@ -2448,6 +2448,118 @@ test_file_upload_resume() {
     rm -f "$src"
 }
 
+# ---------------------------------------------------------------------------
+#  TC-FILE-XFER-03: skip-if-identical upload short-circuit (Phase 4.1).
+#  Upload a file once, then re-upload the identical bytes. The second pass must
+#  short-circuit at begin (already_complete) reporting the same sha and the
+#  "skipped" flag, with zero chunk transfer, and the target must remain intact.
+# ---------------------------------------------------------------------------
+test_file_upload_skip_identical() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-XFER-03: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-XFER-03: skip-if-identical upload short-circuit"
+
+    local src
+    src="$(mktemp)"
+    head -c 524288 /dev/urandom > "$src"
+    local src_sha
+    src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
+
+    local out
+    out=$(run_remote_file_cmd upload "$src" xfer-skip.bin \
+        --chunk-size 65536 --create-parents --overwrite --no-progress \
+        --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-XFER-03: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        rm -f "$src"
+        return 0
+    fi
+
+    # Second pass over identical content must short-circuit.
+    out=$(run_remote_file_cmd upload "$src" xfer-skip.bin \
+        --chunk-size 65536 --overwrite --no-progress \
+        --cwd "$SANDBOX_DIR") || true
+    local skipped remote_sha
+    skipped=$(echo "$out" | jq -r '.skipped // false' 2>/dev/null || true)
+    remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ "$skipped" == "true" ]] && [[ "$remote_sha" == "$src_sha" ]] && \
+       [[ "$(shasum -a 256 "$SANDBOX_DIR/xfer-skip.bin" | awk '{print $1}')" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-03: re-upload of identical content short-circuits (skipped=true, sha matches)"
+    else
+        _log_fail "TC-FILE-XFER-03: skip-if-identical" "skipped=true sha=$src_sha" \
+            "skipped=$skipped sha=$remote_sha (raw: $out)"
+    fi
+
+    rm -f "$src"
+}
+
+# ---------------------------------------------------------------------------
+#  TC-FILE-XFER-04: compressible payload round-trip with adaptive zstd (4.1).
+#  A highly compressible file exercises the per-chunk zstd wire encoding in
+#  both directions; correctness (byte-for-byte + sha256 both ends) proves the
+#  encode/decode + raw-bytes sha path is sound regardless of on-wire encoding.
+# ---------------------------------------------------------------------------
+test_file_transfer_compressible_roundtrip() {
+    if [[ "$CALLER_CONN_OK" -eq 0 ]]; then
+        _log_warning "TC-FILE-XFER-04: skipped due to prior connection error"
+        return 0
+    fi
+
+    log "TC-FILE-XFER-04: compressible payload round-trip (adaptive zstd)"
+
+    local src dl
+    src="$(mktemp)"
+    dl="$(mktemp)"
+    rm -f "$dl"
+    # ~2 MiB of highly compressible data (long zero run + repeated text) so
+    # zstd wins on most chunks and the "none" fallback path is not taken.
+    head -c 1048576 /dev/zero > "$src"
+    # NB: `yes | head` makes `yes` exit via SIGPIPE (141); guard with `|| true`
+    # so `set -o pipefail` does not abort the suite once head has its 1 MiB.
+    { yes "the quick brown fox jumps over the lazy dog 0123456789" || true; } | head -c 1048576 >> "$src"
+    local src_sha
+    src_sha=$(shasum -a 256 "$src" | awk '{print $1}')
+
+    local out
+    out=$(run_remote_file_cmd upload "$src" xfer-zstd.bin \
+        --chunk-size 65536 --create-parents --overwrite --no-progress \
+        --cwd "$SANDBOX_DIR") || true
+    if is_caller_conn_error "$out"; then
+        _log_warning "TC-FILE-XFER-04: caller connection error, skipping: $out"
+        CALLER_CONN_OK=0
+        rm -f "$src" "$dl"
+        return 0
+    fi
+    local remote_sha
+    remote_sha=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ "$remote_sha" == "$src_sha" ]] && \
+       [[ "$(shasum -a 256 "$SANDBOX_DIR/xfer-zstd.bin" | awk '{print $1}')" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-04: zstd-encoded upload lands byte-for-byte on target disk"
+    else
+        _log_fail "TC-FILE-XFER-04: zstd upload sha256" "$src_sha" \
+            "reported=$remote_sha disk=$(shasum -a 256 "$SANDBOX_DIR/xfer-zstd.bin" 2>/dev/null | awk '{print $1}') (raw: $out)"
+    fi
+
+    out=$(run_remote_file_cmd download xfer-zstd.bin "$dl" \
+        --chunk-size 65536 --overwrite --no-progress --cwd "$SANDBOX_DIR") || true
+    local dl_reported
+    dl_reported=$(echo "$out" | jq -r '.sha256 // empty' 2>/dev/null || true)
+    if [[ -f "$dl" ]] && \
+       [[ "$(shasum -a 256 "$dl" | awk '{print $1}')" == "$src_sha" ]] && \
+       [[ "$dl_reported" == "$src_sha" ]]; then
+        _log_pass "TC-FILE-XFER-04: zstd-encoded download matches source byte-for-byte (sha256 both ends)"
+    else
+        _log_fail "TC-FILE-XFER-04: zstd download sha256" "$src_sha" \
+            "disk=$(shasum -a 256 "$dl" 2>/dev/null | awk '{print $1}') reported=$dl_reported (raw: $out)"
+    fi
+
+    rm -f "$src" "$dl"
+}
+
 main() {
     require_cmd cargo
     require_cmd curl
@@ -2517,6 +2629,10 @@ EOF
     # Chunked large-file transfer (Phase 4)
     test_file_upload_download_roundtrip
     test_file_upload_resume
+
+    # Transfer throughput/packet-size optimizations (Phase 4.1)
+    test_file_upload_skip_identical
+    test_file_transfer_compressible_roundtrip
 
     # ---- gap-targeting cases (expected RED-LIGHT until P0/P1 fixes land) ----
     test_gap_write_preserves_mode
