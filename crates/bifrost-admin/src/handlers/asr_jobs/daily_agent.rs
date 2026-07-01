@@ -915,41 +915,55 @@ fn validate_chatgpt_web_daily_report_response(response: &str, date: &str) -> Res
     Ok(())
 }
 
-fn validate_chatgpt_web_tomorrow_todo_response(response: &str, date: &str) -> Result<(), String> {
+fn tomorrow_todo_target_date(source_date: &str) -> String {
+    NaiveDate::parse_from_str(source_date, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.checked_add_signed(ChronoDuration::days(1)))
+        .map(|date| date.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| source_date.to_string())
+}
+
+fn validate_chatgpt_web_tomorrow_todo_response(
+    response: &str,
+    source_date: &str,
+) -> Result<(), String> {
+    let target_date = tomorrow_todo_target_date(source_date);
     let trimmed = response.trim();
     if trimmed.len() < 128 {
         return Err(format!(
-            "chatgpt_web tomorrow_todo response too short for {date}: {} bytes",
+            "chatgpt_web tomorrow_todo response too short for {source_date}: {} bytes",
             trimmed.len()
         ));
     }
-    if !trimmed.contains(date) {
+    if !trimmed.contains(&target_date) {
         return Err(format!(
-            "chatgpt_web tomorrow_todo response missing target date {date}"
+            "chatgpt_web tomorrow_todo response missing target date {target_date} for source {source_date}"
         ));
     }
     let normalized = chatgpt_web_normalized_response(trimmed);
-    let expected_heading = format!("# 明日 To Do List - {date}");
+    let expected_heading = format!("# 明日 To Do List - {target_date}");
     if !normalized.starts_with(&expected_heading) {
         return Err(format!(
             "chatgpt_web tomorrow_todo response missing leading todo heading {expected_heading}"
         ));
     }
-    if normalized.starts_with(&format!("# {date} 日报")) {
+    if normalized.starts_with(&format!("# {source_date} 日报"))
+        || normalized.starts_with(&format!("# {target_date} 日报"))
+    {
         return Err(format!(
-            "chatgpt_web tomorrow_todo response was a daily report for {date}"
+            "chatgpt_web tomorrow_todo response was a daily report for source {source_date}"
         ));
     }
     for section in ["明天必须完成", "可选推进", "需要确认"] {
         if !normalized.contains(section) {
             return Err(format!(
-                "chatgpt_web tomorrow_todo response missing required section {section} for {date}"
+                "chatgpt_web tomorrow_todo response missing required section {section} for source {source_date}"
             ));
         }
     }
     if chatgpt_web_response_is_placeholder(normalized) {
         return Err(format!(
-            "chatgpt_web tomorrow_todo response is a status/error placeholder for {date}"
+            "chatgpt_web tomorrow_todo response is a status/error placeholder for source {source_date}"
         ));
     }
     Ok(())
@@ -1009,7 +1023,9 @@ fn chatgpt_web_daily_agent_retry_prompt(
             "上一条回复不是最终日报。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 日报正文。必须包含 `# {date} 日报`、`## 今日概览` 和 `## 证据与不确定性`，不要使用代码块包装."
         ),
         ChatGptWebDailyAgentContract::TomorrowTodo => format!(
-            "上一条回复不是最终明日待办。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {date} 明日 To Do List。必须包含 `# 明日 To Do List - {date}`、`## 明天必须完成`、`## 可选推进` 和 `## 需要确认`，不要使用代码块包装."
+            "上一条回复不是最终明日待办。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出完整的 {} 明日 To Do List。必须包含 `# 明日 To Do List - {}`、`## 明天必须完成`、`## 可选推进` 和 `## 需要确认`，不要使用代码块包装.",
+            tomorrow_todo_target_date(date),
+            tomorrow_todo_target_date(date),
         ),
         ChatGptWebDailyAgentContract::GenericMarkdown => format!(
             "上一条回复不是最终 Markdown 输出。请不要说明计划，不要总结你将要做什么，立即根据刚刚上传或粘贴的完整 Markdown 内容，直接输出 {date} 对应的最终正文。输出必须是 Markdown 正文，不要使用代码块包装."
@@ -1027,7 +1043,8 @@ fn chatgpt_web_daily_agent_continuation_prompt(
             "上一条 {date} 日报正文在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 证据与不确定性`。\n\n上一条末尾：\n{tail}"
         ),
         ChatGptWebDailyAgentContract::TomorrowTodo => format!(
-            "上一条 {date} 明日 To Do List 在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 需要确认`。\n\n上一条末尾：\n{tail}"
+            "上一条 {} 明日 To Do List 在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余章节，最后必须包含 `## 需要确认`。\n\n上一条末尾：\n{tail}",
+            tomorrow_todo_target_date(date),
         ),
         ChatGptWebDailyAgentContract::GenericMarkdown => format!(
             "上一条 {date} Markdown 输出在中途截断了。请从下面这段末尾之后继续写，不要重复前文，不要使用代码块；继续补齐剩余正文。\n\n上一条末尾：\n{tail}"
@@ -1362,10 +1379,7 @@ fn daily_agent_external_runner_adapter_config(
         return config;
     }
     let inner_timeout_secs = daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms);
-    config.timeout_secs = Some(match config.timeout_secs {
-        Some(existing) => existing.min(inner_timeout_secs),
-        None => inner_timeout_secs,
-    });
+    config.timeout_secs = Some(inner_timeout_secs);
     config
 }
 
@@ -1379,9 +1393,17 @@ fn daily_agent_chatgpt_web_inner_timeout_secs(daily_timeout_ms: u64) -> u64 {
 }
 
 fn daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(daily_timeout_ms: u64) -> u64 {
-    const SAME_CONVERSATION_WAIT_MAX_MS: u64 = 90_000;
     const SAME_CONVERSATION_WAIT_MIN_MS: u64 = 5_000;
-    daily_timeout_ms.clamp(SAME_CONVERSATION_WAIT_MIN_MS, SAME_CONVERSATION_WAIT_MAX_MS)
+    const OUTER_TIMEOUT_HEADROOM_MS: u64 = 30_000;
+    if daily_timeout_ms <= SAME_CONVERSATION_WAIT_MIN_MS {
+        return SAME_CONVERSATION_WAIT_MIN_MS;
+    }
+    if daily_timeout_ms <= OUTER_TIMEOUT_HEADROOM_MS * 2 {
+        return daily_timeout_ms;
+    }
+    daily_timeout_ms
+        .saturating_sub(OUTER_TIMEOUT_HEADROOM_MS)
+        .clamp(SAME_CONVERSATION_WAIT_MIN_MS, daily_timeout_ms)
 }
 
 fn daily_agent_external_runner_params(

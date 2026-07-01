@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use serde_json::{json, Value};
@@ -21,6 +21,8 @@ const TARGET_PAGE_STABLE_MS: u64 = 1_000;
 const TARGET_PAGE_POLL_MS: u64 = 250;
 const COMPOSER_PASTE_THRESHOLD_CHARS: usize = 120;
 const AUTH_FLOW_RECOVERY_TIMEOUT_SECS: u64 = 10 * 60;
+const STOP_BUTTON_BUSY_POLL_MS: u64 = 2_000;
+const STOP_BUTTON_BUSY_MAX_WAIT_SECS: u64 = 20 * 60;
 const SEND_BUTTON_SELECTOR: &str = r#"[data-testid="send-button"], [data-testid="composer-submit-button"], button[aria-label="Send prompt"], button[aria-label*="发送"]"#;
 
 pub(in crate::im_gateway::chatgpt_web) async fn send_with_browser(
@@ -820,6 +822,13 @@ async fn send_with_browser_once(
             // after the composer became visible but before we type.
             dismiss_modal_and_wait(cdp).await;
             assert_target_page(cdp, expected_conversation_id, true).await?;
+            wait_until_conversation_not_busy(
+                cdp,
+                "before composer injection",
+                conversation_busy_wait_duration(config),
+                stop_marker_path,
+            )
+            .await?;
 
             // Set composer text — retry once after dismissing modal on failure
             // (modal overlay can cause CDP timeout under concurrent load).
@@ -855,6 +864,22 @@ async fn send_with_browser_once(
                     match wait_send_button_ready(cdp, send_button_retry_max_wait).await {
                         Ok(()) => true,
                         Err(e2) => {
+                            if conversation_busy_if_stop_button_visible(
+                                cdp,
+                                "send button not actionable after composer injection",
+                            )
+                            .await
+                            .is_some()
+                            {
+                                wait_until_conversation_not_busy(
+                                    cdp,
+                                    "send button not actionable after composer injection",
+                                    conversation_busy_wait_duration(config),
+                                    stop_marker_path,
+                                )
+                                .await?;
+                                continue;
+                            }
                             if native_clipboard_paste {
                                 return Err(format!(
                                     "browser_ui: send button not actionable after native clipboard paste upload wait: {e2}"
@@ -2417,6 +2442,112 @@ fn format_send_diagnostic(diag: &Value) -> String {
     parts.join(", ")
 }
 
+fn diagnostic_has_visible_stop_button(diag: &Value) -> bool {
+    diag.get("stopButtonVisible")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn conversation_busy_wait_duration(config: &RuntimeConfig) -> Duration {
+    Duration::from_secs(
+        config
+            .chatgpt
+            .timeout_secs
+            .clamp(5, STOP_BUTTON_BUSY_MAX_WAIT_SECS),
+    )
+}
+
+async fn wait_until_conversation_not_busy(
+    cdp: &CdpClient,
+    context: &str,
+    max_wait: Duration,
+    stop_marker_path: &Path,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let mut logged_busy = false;
+    loop {
+        if stop_requested(stop_marker_path).await {
+            return Err(stopped_error());
+        }
+
+        let diagnostic = inspect_page_detailed(cdp)
+            .await
+            .unwrap_or_else(|_| json!({}));
+        if !diagnostic_has_visible_stop_button(&diagnostic) {
+            if logged_busy {
+                info!(
+                    context,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "chatgpt_web send: conversation busy gate cleared"
+                );
+            }
+            return Ok(());
+        }
+
+        let diag_summary = format_send_diagnostic(&diagnostic);
+        if let Err(error) = clear_visible_composer(cdp).await {
+            warn!(
+                context,
+                error = %error,
+                diagnosis = %diag_summary,
+                "chatgpt_web send: failed to clear composer while waiting for busy conversation"
+            );
+        } else if !logged_busy {
+            warn!(
+                context,
+                max_wait_secs = max_wait.as_secs(),
+                diagnosis = %diag_summary,
+                "chatgpt_web send: stop button is visible; waiting before sending another message"
+            );
+        } else {
+            debug!(
+                context,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                diagnosis = %diag_summary,
+                "chatgpt_web send: still waiting for stop button to disappear"
+            );
+        }
+        logged_busy = true;
+
+        if started.elapsed() >= max_wait {
+            return Err(format!("conversation_busy: {context}: {diag_summary}"));
+        }
+        let remaining = max_wait
+            .checked_sub(started.elapsed())
+            .unwrap_or_else(|| Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS));
+        sleep(remaining.min(Duration::from_millis(STOP_BUTTON_BUSY_POLL_MS))).await;
+    }
+}
+
+async fn conversation_busy_if_stop_button_visible(
+    cdp: &CdpClient,
+    context: &str,
+) -> Option<String> {
+    let diagnostic = inspect_page_detailed(cdp)
+        .await
+        .unwrap_or_else(|_| json!({}));
+    if !diagnostic_has_visible_stop_button(&diagnostic) {
+        return None;
+    }
+
+    let diag_summary = format_send_diagnostic(&diagnostic);
+    if let Err(error) = clear_visible_composer(cdp).await {
+        warn!(
+            context,
+            error = %error,
+            diagnosis = %diag_summary,
+            "chatgpt_web send: failed to clear composer while conversation is busy"
+        );
+    } else {
+        warn!(
+            context,
+            diagnosis = %diag_summary,
+            "chatgpt_web send: cleared pending composer text because stop button is visible"
+        );
+    }
+    Some(format!("conversation_busy: {context}: {diag_summary}"))
+}
+
 async fn inspect_page(cdp: &CdpClient) -> Result<Value, String> {
     evaluate_value(
         cdp,
@@ -3581,6 +3712,9 @@ mod tests {
         assert!(!is_retryable_send_error(
             "conversation_busy: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
         ));
+        assert!(!is_retryable_send_error(
+            "conversation_busy: send button not actionable after composer injection: page=https://chatgpt.com/c/abc, stopButton=VISIBLE(response in progress?)"
+        ));
     }
 
     #[test]
@@ -3900,6 +4034,21 @@ mod coverage_boost {
         assert!(s.contains("busyElements=3"));
         assert!(s.contains("banner=\"Too many requests\""));
         assert!(!s.contains("banner=\"\""));
+    }
+
+    #[test]
+    fn diagnostic_has_visible_stop_button_is_the_busy_gate() {
+        assert!(diagnostic_has_visible_stop_button(&json!({
+            "stopButtonVisible": true,
+            "sendButtonFound": false,
+        })));
+        assert!(!diagnostic_has_visible_stop_button(&json!({
+            "stopButtonVisible": false,
+            "sendButtonFound": false,
+        })));
+        assert!(!diagnostic_has_visible_stop_button(&json!({
+            "sendButtonFound": false,
+        })));
     }
 
     // --- target_page_matches / terminal_mismatch / error ---

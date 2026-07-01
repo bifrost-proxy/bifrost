@@ -336,7 +336,7 @@ pub(super) async fn wait_final(
         // Timeout CDP calls to prevent indefinite hangs
         let dom_outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            try_extract_dom_outcome(pdir, conversation_id),
+            try_extract_dom_outcome(_config, pdir, conversation_id),
         )
         .await;
 
@@ -489,7 +489,7 @@ pub(super) async fn wait_final(
         conversation_id,
         "chatgpt_web wait_final: deadline exceeded, final forced extraction"
     );
-    if let Some(waited) = try_extract_latest_from_dom_force(pdir, conversation_id).await {
+    if let Some(waited) = try_extract_latest_from_dom_force(_config, pdir, conversation_id).await {
         return Ok(waited);
     }
 
@@ -1580,12 +1580,28 @@ async fn extract_latest_assistant_from_dom(cdp: &super::CdpClient) -> Option<Wai
 /// includes streaming status and text_len even when content is still streaming.
 /// This allows callers to track content stability without losing information.
 pub(super) async fn try_extract_dom_outcome(
+    config: &RuntimeConfig,
     profile_dir: &Path,
     conversation_id: &str,
 ) -> DomExtractOutcome {
     let tab = match super::browser::get_conversation_tab(profile_dir, conversation_id) {
         Some(tab) => tab,
-        None => return DomExtractOutcome::NotFound,
+        None => {
+            match super::browser::recover_conversation_tab_from_browser(config, conversation_id)
+                .await
+            {
+                Ok(Some(tab)) => tab,
+                Ok(None) => return DomExtractOutcome::NotFound,
+                Err(error) => {
+                    tracing::warn!(
+                        conversation_id,
+                        error = %error,
+                        "chatgpt_web DOM extract: failed to recover existing conversation tab"
+                    );
+                    return DomExtractOutcome::NotFound;
+                }
+            }
+        }
     };
     if tab.cdp.is_closed() {
         return DomExtractOutcome::NotFound;
@@ -2004,14 +2020,19 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
 /// Like `try_extract_latest_from_dom` but ignores streaming indicators.
 /// Used when content stability has been confirmed despite stale streaming flags.
 pub(super) async fn try_extract_latest_from_dom_force(
+    config: &RuntimeConfig,
     profile_dir: &Path,
     conversation_id: &str,
 ) -> Option<WaitedFinal> {
-    match try_extract_dom_outcome(profile_dir, conversation_id).await {
+    match try_extract_dom_outcome(config, profile_dir, conversation_id).await {
         DomExtractOutcome::Ready(waited) => Some(waited),
         DomExtractOutcome::Streaming { .. } => {
             // Force extraction — streaming is stale, get content anyway
-            let tab = super::browser::get_conversation_tab(profile_dir, conversation_id)?;
+            let tab =
+                super::browser::recover_conversation_tab_from_browser(config, conversation_id)
+                    .await
+                    .ok()
+                    .flatten()?;
             if tab.cdp.is_closed() {
                 return None;
             }

@@ -12,8 +12,13 @@ grep -q "required_dom_terminal_idle_for" crates/bifrost-admin/src/im_gateway/cha
 grep -q "dom_terminal_content_settle_for" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/interaction.rs
 grep -q "conversation_busy" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "conversation_busy_if_stop_button_visible" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "diagnostic_has_visible_stop_button" crates/bifrost-admin/src/im_gateway/chatgpt_web/send.rs
+grep -q "recover_conversation_tab_from_browser" crates/bifrost-admin/src/im_gateway/chatgpt_web/browser.rs
 grep -q "wait_chatgpt_web_daily_agent_conversation" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
 grep -q "daily_agent_chatgpt_web_same_conversation_wait_timeout_ms" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "tomorrow_todo_target_date" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent.rs
+grep -q "Tomorrow ToDo 日期规则" crates/bifrost-admin/src/handlers/asr_jobs/daily_agent_prompt.rs
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   ask_runs_use_shared_chatgpt_web_browser_profile_not_run_local_profile \
@@ -32,5 +37,13 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
   --lib -- --nocapture
 
 SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
-  daily_agent_chatgpt_web_same_conversation_wait_uses_short_timeout \
+  diagnostic_has_visible_stop_button_is_the_busy_gate \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_chatgpt_web_same_conversation_wait_uses_daily_timeout_with_headroom \
+  --lib -- --nocapture
+
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin \
+  daily_agent_chatgpt_web_tomorrow_todo \
   --lib -- --nocapture

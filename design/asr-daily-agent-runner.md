@@ -471,8 +471,10 @@ ExternalCliRuntime::run(ExternalCliRunRequest {
 
 **超时与失败诊断**：
 - Daily Agent 外层仍使用 `timeout_ms` 作为最终运行上限。
-- ChatGPT Web adapter 的内部 `timeout_secs` 会被下压到 `timeout_ms - 30s`（至少 1 秒），且不会放大用户在 runner 上配置的更短 timeout；这样浏览器 handoff、最终回复等待或页面扫描应先由 Web adapter 失败，外层 Daily timeout 只作为兜底。
+- ChatGPT Web adapter 的内部 `timeout_secs` 会覆盖为 `timeout_ms - 30s`（至少 1 秒），不再沿用普通 runner 60 秒这类短 timeout；这样长日报/长待办可以持续等到 stop button 消失和 DOM 终态稳定，外层 Daily timeout 仍保留收尾兜底。
 - 如果 `stream_handoff` 后无法及时取得后端 conversation detail，DOM fallback 只能作为保守兜底：长日报正文超过 12KB 时必须等待至少 30 秒文本长度稳定后才可返回，避免模型在长输出中短暂停顿时被误判为完成；页面出现 `连接已中断` / `正在等待完整回复` 等状态时必须视为仍在生成，不能把该状态或当时的半截正文保存为最终 report。
+- same-conversation `wait` 可能由新的 external-runner worker 进程执行；如果进程内没有上一阶段注册的 `ConversationTab`，ChatGPT Web adapter 必须从共享浏览器 DevTools target 中恢复既有 `/c/{conversationId}` tab 后再做 DOM 提取，避免页面已完成但 Daily Agent 仍卡在 running。
+- 如果 validator 需要继续在同一 conversation 发送纠偏/续写提示，但 ChatGPT Web 仍显示 stop button，发送层不能立即把 retry prompt 粘贴进去，也不能按普通 send attempts 连续重试。它必须先把任何已注入的草稿清空，等待 stop button 消失和 composer 回到可输入空闲态，然后在同一次 send 流程内重新注入并提交；只有等待超时才把 `conversation_busy` 作为失败交回 Daily Agent。
 - `ExternalCliRuntime` 必须把 ChatGPT Web 普通失败持久化为 failed run，而不是直接返回错误；run 目录必须包含 `result.json`、`cli.stderr.log`、`normalized_events.jsonl`、`last_message.md` 和必要的 `failure_diagnostics.json` 路径元数据。
 - 失败状态会返回到 Daily Agent 并记录到当前 Agent 的 `last_status`、`last_error` 和 `last_run_id`；不更新 processed state，也不写入缺失或未通过门禁的 report。
 - ChatGPT Web 登录浏览器关闭或 CDP 断开时，如果本轮已经捕获并写入有效 `auth_state.json`，后端会重新读取该 auth state 并恢复为登录成功，避免“登录已捕获但窗口关闭被误判失败”的竞态。
@@ -1209,12 +1211,14 @@ build_daily_agent_change_plan(task, trigger, date, force)
 
 3. **ChatGPT Web 大输入投递**：ChatGPT Web composer 超过 120 字符时必须走浏览器原生剪贴板 + 原生粘贴快捷键路径，避免把完整正文嵌入 `Input.insertText` 导致 CDP 卡死；不要再按固定字符数人为分片。该路径通过 CDP 写入当前浏览器上下文的 `navigator.clipboard`，再触发 `Meta+V` / `Ctrl+V`，不依赖系统剪贴板或用户授权弹窗。粘贴大文本后 ChatGPT 可能把内容上传为文件，此时输入框没有可采样正文是正常状态；adapter 不再对 composer 文本做 head/tail/长度采样校验，只轮询发送按钮是否变为可发送状态，按钮可用后立即继续；超时时间只是最大上限，用于覆盖长文档上传/解析耗时。
 
-4. **ChatGPT Web 长输出完成判定**：ChatGPT Web DOM fallback 不得只凭“stop button 消失 + 3 秒文本长度不变”结束长日报；超过 12KB 的输出至少等待 30 秒稳定，且 `连接已中断` / `正在等待完整回复` 这类页面状态必须进入 in-progress 分支继续等待。
+4. **ChatGPT Web 长输出完成判定**：ChatGPT Web DOM fallback 不得只凭“stop button 消失 + 3 秒文本长度不变”结束长日报；超过 12KB 的输出必须等待 DOM 内容进入终态稳定窗口，且 `连接已中断` / `正在等待完整回复` 这类页面状态必须进入 in-progress 分支继续等待。Daily Agent 在首次输出不合契约时，必须先对同一 `conversationId` 执行 wait，并让 ChatGPT Web adapter 基于 stop button/composer 控件状态判断是否完成；wait 的外层预算来自 Daily Agent 任务超时并预留收尾 headroom，不能再使用固定 90 秒短窗导致长日报仍在生成时补发 retry。
 
-5. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
+5. **Tomorrow ToDo 日期契约**：`tomorrow_todo` 的源文件日期仍用于 processed state、输入/输出文件名和同步路径；正文标题和验证目标日期必须是源日期 + 1 天。ChatGPT Web prompt 需要在已有输出基线之前显式声明“源转录日期 -> 明日待办目标日期”的映射，避免模型复用旧基线中的同日标题。
 
-6. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
+6. **`appended` 判定**：读取 processed state 中的 `source_len_bytes`，取当前文件前 N bytes 与前次 sha256 比对。如果前缀匹配，remainder 为 tail；否则判定为 `rewritten`。
 
-7. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。
+7. **资源释放顺序**：Daily Agent 排队前确认 ASR managed server / asr 进程 / ffmpeg 子进程均已释放，避免资源竞争。
+
+8. **`AsrDailyAgentProcessedState` 原子写入**：写入临时文件后 rename，避免写入中断导致状态损坏。
 
 8. **Terminology / TERMS.md**（2026-06 新增）：`AsrDailyAgentConfig.terminology` 保存用户配置的专有名词列表；`ensure_asr_daily_workspace` 通过 `sync_daily_agent_terms_file` 写入 `.daily/agents/<agent_id>/TERMS.md`，并由 `ensure_daily_agent_terms_reference` 在 `AGENTS.md` 中维护一个 managed reference block。Daily Agent prompt（`daily_agent_prompt.rs`）会在 TERMS 存在时把内容嵌入提示词，让 Runner 在写 report 前应用术语纠错。

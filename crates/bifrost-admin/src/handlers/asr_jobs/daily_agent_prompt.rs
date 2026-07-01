@@ -85,9 +85,28 @@ fn build_daily_agent_prompt(
     if is_chatgpt_web {
         // 每条消息都自带完成任务所需的全部信息：AGENTS.md 指令 + 已有日报完整内容 + 变更文件完整内容。
         let _ = chatgpt_first_turn;
-        prompt.push_str(
-            "\n本条消息已附带 AGENTS.md 指令、已有日报的完整内容，以及变更文件的完整内容。请在已有日报的基础上合并本轮新增或变更的内容，输出完整的最新日报。\n",
+        let response_contract = chatgpt_web_daily_agent_contract(
+            &task.daily_agent.agent_id,
+            &task.daily_agent.output_dir,
         );
+        prompt.push_str(
+            "\n本条消息已附带 AGENTS.md 指令、已有输出的完整内容，以及变更文件的完整内容。请在已有输出的基础上合并本轮新增或变更的内容，输出完整的最新正文。\n",
+        );
+
+        if response_contract == ChatGptWebDailyAgentContract::TomorrowTodo {
+            prompt.push_str("\n## Tomorrow ToDo 日期规则（优先级高于已有输出基线）\n");
+            for entry in &changed_entries {
+                let target_date = tomorrow_todo_target_date(&entry.date);
+                prompt.push_str(&format!(
+                    "- 源转录日期 `{}` 的明日待办目标日期是 `{}`；最终标题必须是 `# 明日 To Do List - {}`。\n",
+                    entry.date, target_date, target_date
+                ));
+                prompt.push_str(&format!(
+                    "- 如果已有输出标题仍是 `# 明日 To Do List - {}`，必须替换为 `# 明日 To Do List - {}`，不要沿用旧标题。\n",
+                    entry.date, target_date
+                ));
+            }
+        }
 
         let agents_path = daily_agent_instructions_path(task);
         if let Ok(agents_content) = std::fs::read_to_string(&agents_path) {
@@ -96,7 +115,7 @@ fn build_daily_agent_prompt(
             prompt.push_str("\n```\n");
         }
 
-        prompt.push_str("\n---\n## 已有日报完整内容（如存在，作为合并基线，请在此基础上更新）：\n");
+        prompt.push_str("\n---\n## 已有输出完整内容（如存在，作为合并基线，请在此基础上更新）：\n");
         for entry in &changed_entries {
             if let Ok(report_content) = std::fs::read_to_string(&entry.report_target) {
                 prompt.push_str(&format!(
