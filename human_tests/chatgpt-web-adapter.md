@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 IM Gateway Runner 的内置 `chatgpt_web` adapter：WebUI 可配置 ChatGPT Web Runner，后端可弹出 Edge/Chrome 完成登录并保存本机登录态，执行阶段默认使用 headed 可见浏览器创建新对话、向既有对话追加消息、等待最终 assistant 结果，并通过 Chat Gateway 返回脱敏 artifacts。当前真实 IM 验证期默认保留可见浏览器，便于观察真实页面输入和发送动作；稳定后可再切回 headless。该 adapter 不依赖 Agent 控制浏览器，不使用 probe 脚本作为正式流程。
+验证 IM Gateway Runner 的内置 `chatgpt_web` adapter：WebUI 可配置 ChatGPT Web Runner，后端可弹出 Edge/Chrome 完成登录并保存本机登录态，执行阶段可用 headless 浏览器创建新对话、向既有对话追加消息、等待最终 assistant 结果，并通过 Chat Gateway 返回脱敏 artifacts。headless 运行遇到登录页或真人验证等人工阻塞时，应临时切换到 headed 让用户处理，完成后恢复后续 headless 运行。该 adapter 不依赖 Agent 控制浏览器，不使用 probe 脚本作为正式流程。
 
 ## 前置条件
 
@@ -694,8 +694,36 @@ cargo clippy -p bifrost-admin --all-targets --all-features -- -D warnings
 - `result.json.response` 和 IM outbound 最终消息包含完整答案或明确超时错误，不得只包含“我会按...重新拉取/筛选/整理...”这类开头说明。
 - 不允许恢复纯字符串匹配规则；判定必须基于 DOM 输出状态、stop button、composer idle、内容签名稳定性和 SSE final 是否存在。
 
+### TC-CWA-31：回归 - headless 遇到人工阻塞时临时切换 headed 并恢复 headless
+
+**前置条件**：`chatgpt_web` runner 的 Browser Execution Mode 配置为 `Headless`；使用共享 profile；ChatGPT Web 登录态已失效，或可构造一个 Cloudflare / 真人验证页面状态。
+
+**操作步骤**：
+1. 执行代码级人工阻塞识别回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin headless_manual_intervention_errors_trigger_temporary_headed_fallback --lib -- --nocapture
+   ```
+2. 执行真人验证页面识别回归：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin page_state_is_human_verification_page_matches_cloudflare_challenge --lib -- --nocapture
+   ```
+3. 执行 ChatGPT Web profile / fallback 哨兵脚本：
+   ```bash
+   bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh
+   ```
+4. 如做真实浏览器复测，触发一次 `chatgpt_web` ask；当 headless 命中登录页或真人验证时，观察系统是否弹出 headed Edge/Chrome，人工完成登录或验证后等待 run 继续。
+5. 人工处理完成后检查浏览器进程和本次 run / 下一次 run 行为：临时 headed 浏览器应关闭，本次发送应回到 headless 重试，后续仍按 runner 配置以 headless 启动。
+
+**预期结果**：
+- headless 运行中的 `auth_required`、`human_verification_required`、Cloudflare / “verify you are human” / “请验证您是真人”等页面状态会触发临时 headed fallback。
+- fallback 只修改当前 run 的内存配置，不写回 runner 配置；原 runner 的 Execution Mode 仍为 `Headless`。
+- 用户在 headed 窗口完成登录或真人验证后，adapter 捕获刷新后的登录态并关闭临时 headed 浏览器。
+- 当前 run 使用刷新后的登录态回到 headless 模式重试发送；后续 run 也重新按 headless 模式启动，避免长期占用用户桌面窗口。
+- 普通发送按钮不可点击、CDP 超时、错误页等非人工阻塞错误仍走既有重试/失败路径，不误弹 headed 窗口。
+
 ## 真实执行记录
 
+- 2026-07-01：补充执行 TC-CWA-31 代码级和 E2E 哨兵回归。`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin headless_manual_intervention_errors_trigger_temporary_headed_fallback --lib -- --nocapture` 验证 headless 下 `auth_required`、真人验证中文页面会触发临时 headed fallback，headed 配置和普通发送按钮错误不会触发；`SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin page_state_is_human_verification_page_matches_cloudflare_challenge --lib -- --nocapture` 验证 Cloudflare / 真人验证页面返回 `human_verification_required`。`bash e2e-tests/tests/test_chatgpt_web_shared_profile.sh` 增加源码哨兵，确认 fallback 不恢复 run-local profile，且包含 `send_with_temporary_headed_fallback`、`open_login_and_capture`、`human_verification_required` 和恢复 headless 当前重试的日志文本。
 - 2026-06-30：安装本机 live hotfix `bifrost 0.0.131+chatgpt-dom-finality.3` 后，使用默认数据目录 `~/.bifrost` 和启用的 `gpt` / `chatgpt_web` runner 连续执行 TC-CWA-30 三轮 CLI 真实回归。短回复 run `1782836594878-383512a5-6b12-4fed-baae-65900d8b1e8b` 成功，`conversation_handoff.json.eventTypes=["patch","resume_conversation_token","stream_handoff","browser_ui"]`，`durationMs=143016`，最终 `response=SHORT_DOM_FINALITY_OK`。长任务 run `1782836747906-e65a479f-f917-4edd-803a-0574e783c217` 成功，`durationMs=140512`，`normalized_events.jsonl` 包含 2 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 5559 字完整分类清单，不再把前两段筛选说明作为最终回复。第三轮 run `1782836914615-229b7136-0b14-4cd7-a98f-95ce35c3be71` 成功，`durationMs=140711`，`normalized_events.jsonl` 包含 1 条 `assistant_delta` 和 1 条 `assistant_final`，最终 `response` 为 2095 字编号列表。三轮均证明 `stream_handoff` 且无 SSE final 时不会在约 30 秒按 composer/send 空闲提前结束。
 - 2026-06-30：根据真实页面观察补充 TC-CWA-30 控件状态判定。`<button id="composer-submit-button" data-testid="stop-button" aria-label="停止回答">` 与英文 `<button id="composer-submit-button" data-testid="stop-button" aria-label="Stop answering">` 都表示仍在处理中；`Start dictation` / `Start Voice` / `开始听写` / `启动语音功能` 语音按钮区域表示 idle。代码级回归 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin chatgpt_web --lib -- --nocapture` 在主仓库和本机 hotfix worktree 均通过 241 项，新增覆盖发送按钮 selector 不再包含 `composer-submit-btn`，避免把 stop button 误识别为 send button。
 - 2026-06-30：补充分析 UI 已结束后 IM 回写延迟。默认日志 `~/.bifrost/logs/bifrost.2026-06-30.log` 显示两轮真实 DOM fallback 在 stop button 消失后仍记录 `DOM content candidate waiting for stability`，短文本 `required_stable_ms=8000`，例如 04:43:57-04:44:07 与 04:44:35-04:44:45 均额外等待约 8 秒后才 `generation complete` 并回写 IM，证明用户观察到的 10 秒级延迟不是主观错觉。修复后删除 `stream_handoff` 固定 120 秒 grace，并将页面空闲后的 DOM 签名稳定窗口调整为图片/短文本 2 秒、中等文本 3 秒、超长文本 5 秒；仍以 stop button 可见作为处理中硬信号，避免提前回写。

@@ -32,6 +32,7 @@ runner_id = "chatgpt-web"
 - 新增 `chatgpt_web` adapter，支持创建对话、发起对话、列出对话、获取消息、等待输出结果、展示最终结果。
 - 一个设备只需要登录一次；登录态存储在运行 Bifrost 的本机数据目录，之后的 run 自动复用。
 - 每次 run 开始前自动检查登录态；登录失效时给出明确反馈，并由 Bifrost 后端自动弹出 Edge/Chromium 浏览器让用户完成登录。
+- 当 runner 配置为 headless 且运行中遇到登录页、Cloudflare/真人验证等必须人工介入的页面时，adapter 必须临时切换到 headed browser 等待用户处理并刷新登录态；处理完成后自动关闭 headed browser，并让当前重试与后续运行都恢复 headless，避免长期占用用户桌面窗口。
 - 登录弹窗、cookie/header 提取、登录状态验证都属于 `chatgpt_web` adapter 能力，不能依赖 Agent 操作浏览器，也不能封装为外部脚本或 skill。
 - 与 runner / adapter 抽象对齐：Chat Gateway、IM Provider、IM Route、Schedule、WebUI 都选择 runner；runner 再通过 `adapter = "chatgpt_web"` 进入 ChatGPT Web 执行实现。
 
@@ -43,6 +44,7 @@ runner_id = "chatgpt-web"
 - 不把登录态跨设备同步；登录态仅属于运行 Bifrost 的本机设备。
 - 不把 Bifrost Traffic 抓到的历史 token 当作长期认证来源；Traffic 只用于恢复接口契约和调试。
 - 不把 work dir 放回 runner 配置；ChatGPT Web adapter 不使用 repo work dir 作为认证或请求来源。
+- 不把 headless blocker 的临时 headed fallback 写回 runner 配置；fallback 只作用于当前 run，结束后必须清理 headed browser 状态。
 
 ### 必须真实验证
 
