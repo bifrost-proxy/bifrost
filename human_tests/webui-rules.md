@@ -878,6 +878,37 @@
 
 ---
 
+### TC-WRU-47：全局 Rules 状态胶囊跨页面显示、拖拽与跳转
+
+**前置条件**：
+1. 使用临时数据目录或当前开发服务启动 Bifrost 后端，至少启用 1 条规则。
+2. 启动纯前端开发服务：`cd web && WEB_PORT=3000 pnpm dev`，默认代理后端 `127.0.0.1:9900`。
+3. 使用 Chrome 打开 `http://127.0.0.1:3000/_bifrost/traffic`。
+
+**操作步骤**：
+1. 在 Traffic 页面观察 Rules 状态胶囊。
+2. 拖拽胶囊到页面右下方，再松开鼠标。
+3. 刷新当前页面，观察胶囊位置。
+4. 再次点击胶囊展开详情面板。
+5. 点击详情面板中的一条活跃规则。
+6. 从 Rules 页面切换到 Settings、Values 或 Traffic 页面，观察胶囊可见性。
+
+**预期结果**：
+- 胶囊在非 Rules 页面也可见，显示当前活跃规则数量，例如 `1 active`。
+- 拖拽后胶囊位置随鼠标移动，松开后停留在新位置，且不会被拖出视口。
+- 刷新页面后胶囊回到默认顶部居中位置，不保留上一次拖拽位置。
+- 点击胶囊能展开详情面板，详情中展示 My Rules / Group Rules 分组和 Merged Rules 入口。
+- 点击活跃规则后跳转到 `/_bifrost/rules?rule=<规则名>`；Group 规则跳转时 URL 包含 `group=<真实group_id>`。
+- 跳转到 Rules 页面后对应规则被选中，编辑器展示该规则详情。
+- 切换到其他主页面后胶囊仍保持可见。
+
+**回归目的**：覆盖 Rules 状态胶囊从 Rules 页面内组件提升为全局 AppLayout 组件后的可见性、单页会话内拖拽、刷新回原位、详情展开和深链跳转行为，防止仅 Rules 页面可用、刷新后位置丢失到不可见区域或跨页面跳转不选中规则。
+
+**执行结果（2026-07-02，本地纯前端 smoke）**：
+- ✅ PASS：执行 `WEB_PORT=3107 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' pnpm --dir web exec playwright test tests/ui/rules-dynamic-island-global.spec.ts --config=playwright.frontend.config.ts`。测试使用 Vite 纯前端服务和 mock Admin API，不启动 Rust 后端；验证 Traffic 页面出现 `2 active` 全局胶囊、拖拽后位置变化、刷新后回到默认位置、点击展开详情、点击 `global-active-rule` 后跳转到 `/_bifrost/rules?rule=global-active-rule`，并在 Rules 编辑器中显示目标规则。
+
+---
+
 ## 清理
 
 测试完成后清理临时数据：

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, type CSSProperties } from "react";
 import { theme, Badge, Tooltip, Button, message } from "antd";
 import {
   ThunderboltOutlined,
@@ -17,14 +17,15 @@ interface Props {
 }
 
 const DRAG_THRESHOLD = 4;
+const VIEWPORT_MARGIN = 8;
+
+type IslandPosition = { x: number; y: number };
 
 export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(
-    null,
-  );
+  const [position, setPosition] = useState<IslandPosition | null>(null);
   const [activeRules, setActiveRules] = useState<ActiveRuleItem[]>([]);
   const [variableConflicts, setVariableConflicts] = useState<VariableConflict[]>([]);
   const [mergedContent, setMergedContent] = useState("");
@@ -42,6 +43,18 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
 
   const rules = useRulesStore((s) => s.rules);
   const requestIdRef = useRef(0);
+
+  const clampPosition = useCallback((next: IslandPosition, rect?: DOMRect) => {
+    const elRect = rect ?? containerRef.current?.getBoundingClientRect();
+    const width = elRect?.width ?? 160;
+    const height = elRect?.height ?? 42;
+    const maxX = Math.max(VIEWPORT_MARGIN, window.innerWidth - width - VIEWPORT_MARGIN);
+    const maxY = Math.max(VIEWPORT_MARGIN, window.innerHeight - height - VIEWPORT_MARGIN);
+    return {
+      x: Math.max(VIEWPORT_MARGIN, Math.min(next.x, maxX)),
+      y: Math.max(VIEWPORT_MARGIN, Math.min(next.y, maxY)),
+    };
+  }, []);
 
   const refreshActiveRules = useCallback(() => {
     const id = ++requestIdRef.current;
@@ -90,41 +103,37 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     return () => document.removeEventListener("mousedown", handler);
   }, [expanded]);
 
+  useEffect(() => {
+    const handleResize = () => {
+      setPosition((current) => (current ? clampPosition(current) : current));
+    };
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [clampPosition]);
+
   const initPosition = useCallback(() => {
     if (position !== null || !containerRef.current) return;
-    const parent = containerRef.current.parentElement;
-    if (!parent) return;
-    const parentRect = parent.getBoundingClientRect();
     const rect = containerRef.current.getBoundingClientRect();
-    setPosition({
-      x: rect.left - parentRect.left,
-      y: rect.top - parentRect.top,
-    });
-  }, [position]);
+    setPosition(clampPosition({ x: rect.left, y: rect.top }, rect));
+  }, [clampPosition, position]);
 
-  const handleMouseDown = useCallback(
-    (e: React.MouseEvent) => {
-      if (e.button !== 0) return;
+  const handlePointerDown = useCallback(
+    (e: React.PointerEvent) => {
+      if (e.pointerType === "mouse" && e.button !== 0) return;
       initPosition();
 
-      const parent = containerRef.current?.parentElement;
-      if (!parent || !containerRef.current) return;
-
-      const parentRect = parent.getBoundingClientRect();
+      if (!containerRef.current) return;
       const rect = containerRef.current.getBoundingClientRect();
-
-      const currentX = rect.left - parentRect.left;
-      const currentY = rect.top - parentRect.top;
 
       dragRef.current = {
         startX: e.clientX,
         startY: e.clientY,
-        startPosX: currentX,
-        startPosY: currentY,
+        startPosX: rect.left,
+        startPosY: rect.top,
         hasMoved: false,
       };
 
-      const handleMouseMove = (ev: MouseEvent) => {
+      const handlePointerMove = (ev: PointerEvent) => {
         const dx = ev.clientX - dragRef.current.startX;
         const dy = ev.clientY - dragRef.current.startY;
         if (
@@ -137,23 +146,15 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         dragRef.current.hasMoved = true;
         setDragging(true);
 
-        const parentEl = containerRef.current?.parentElement;
-        if (!parentEl || !containerRef.current) return;
-        const pRect = parentEl.getBoundingClientRect();
-        const cRect = containerRef.current.getBoundingClientRect();
-
-        let newX = dragRef.current.startPosX + dx;
-        let newY = dragRef.current.startPosY + dy;
-
-        newX = Math.max(0, Math.min(newX, pRect.width - cRect.width));
-        newY = Math.max(0, Math.min(newY, pRect.height - cRect.height));
-
-        setPosition({ x: newX, y: newY });
+        setPosition(clampPosition({
+          x: dragRef.current.startPosX + dx,
+          y: dragRef.current.startPosY + dy,
+        }));
       };
 
-      const handleMouseUp = () => {
-        document.removeEventListener("mousemove", handleMouseMove);
-        document.removeEventListener("mouseup", handleMouseUp);
+      const handlePointerUp = () => {
+        document.removeEventListener("pointermove", handlePointerMove);
+        document.removeEventListener("pointerup", handlePointerUp);
         setDragging(false);
 
         if (!dragRef.current.hasMoved) {
@@ -161,10 +162,10 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         }
       };
 
-      document.addEventListener("mousemove", handleMouseMove);
-      document.addEventListener("mouseup", handleMouseUp);
+      document.addEventListener("pointermove", handlePointerMove);
+      document.addEventListener("pointerup", handlePointerUp);
     },
-    [initPosition],
+    [clampPosition, initPosition],
   );
 
   const handleCopyMergedRules = useCallback(async (e: React.MouseEvent) => {
@@ -187,10 +188,12 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     }
   }, [mergedContent]);
 
-  const positionStyle: React.CSSProperties =
+  const positionStyle: CSSProperties =
     position !== null
       ? { left: position.x, top: position.y }
-      : { top: 6, left: "50%", transform: "translateX(-50%)" };
+      : { top: 14, left: "50%", transform: "translateX(-50%)" };
+  const panelOpensUp =
+    position !== null && position.y > Math.max(180, window.innerHeight / 2);
 
   const ownRules = activeRules.filter((r) => !r.group_id);
   const groupRulesMap = new Map<string, { groupName: string; groupId: string; rules: ActiveRuleItem[] }>();
@@ -211,17 +214,17 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
     <div
       ref={containerRef}
       style={{
-        position: "absolute",
+        position: "fixed",
         ...positionStyle,
         display: "flex",
         justifyContent: "center",
-        zIndex: 10,
+        zIndex: 40,
         pointerEvents: "auto",
       }}
     >
       <div
         data-testid="rules-dynamic-island-trigger"
-        onMouseDown={handleMouseDown}
+        onPointerDown={handlePointerDown}
         style={{
           display: "inline-flex",
           alignItems: "center",
@@ -234,6 +237,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
             ? token.boxShadowSecondary
             : "0 1px 3px rgba(0,0,0,0.08)",
           cursor: dragging ? "grabbing" : "grab",
+          touchAction: "none",
           transition: dragging
             ? "none"
             : "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
@@ -286,14 +290,16 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         <div
           style={{
             position: "absolute",
-            top: "100%",
+            top: panelOpensUp ? undefined : "100%",
+            bottom: panelOpensUp ? "100%" : undefined,
             left: "50%",
             transform: "translateX(-50%)",
-            marginTop: 4,
+            marginTop: panelOpensUp ? undefined : 4,
+            marginBottom: panelOpensUp ? 4 : undefined,
             minWidth: 360,
-            maxWidth: 570,
+            maxWidth: "min(570px, calc(100vw - 24px))",
             width: "max-content",
-            maxHeight: 500,
+            maxHeight: "min(500px, calc(100vh - 84px))",
             overflowY: "auto",
             backgroundColor: token.colorBgElevated,
             border: `1px solid ${token.colorBorderSecondary}`,
@@ -302,6 +308,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
             padding: "4px 0",
             animation: "islandFadeIn 0.2s ease",
           }}
+          data-testid="rules-dynamic-island-panel"
         >
           {variableConflicts.length > 0 && (
             <div
@@ -505,10 +512,12 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
         <div
           style={{
             position: "absolute",
-            top: "100%",
+            top: panelOpensUp ? undefined : "100%",
+            bottom: panelOpensUp ? "100%" : undefined,
             left: "50%",
             transform: "translateX(-50%)",
-            marginTop: 4,
+            marginTop: panelOpensUp ? undefined : 4,
+            marginBottom: panelOpensUp ? 4 : undefined,
             minWidth: 200,
             backgroundColor: token.colorBgElevated,
             border: `1px solid ${token.colorBorderSecondary}`,
@@ -519,6 +528,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
             fontSize: 13,
             color: token.colorTextDescription,
           }}
+          data-testid="rules-dynamic-island-empty"
         >
           No active rules
         </div>
@@ -538,6 +548,8 @@ function RuleRow({
 }) {
   return (
     <div
+      data-testid="rules-dynamic-island-rule-row"
+      data-rule-name={rule.name}
       onClick={(e) => {
         e.stopPropagation();
         onClick();
