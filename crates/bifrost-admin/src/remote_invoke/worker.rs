@@ -920,7 +920,7 @@ impl RemoteInvokeWorker {
         // build_grant_crypto_material can verify the caller signed its own
         // ephemeral key (anti relay-MITM). Missing sig => legacy caller =>
         // auth = None (unsigned, no pinning).
-        let (caller_long_term_pubkey, caller_ephemeral_sig) = {
+        let (caller_long_term_pubkey, caller_fingerprint, caller_ephemeral_sig) = {
             self.pending_pairings
                 .read()
                 .get(pairing_id)
@@ -932,11 +932,28 @@ impl RemoteInvokeWorker {
                             .clone()
                             .filter(|s| !s.is_empty())
                             .unwrap_or_else(|| tp.request.caller_pubkey.clone()),
+                        tp.request.caller_info.fingerprint.clone(),
                         tp.caller_ephemeral_sig.clone(),
                     )
                 })
                 .unwrap_or_default()
         };
+        // P0-A FAIL-CLOSED: if the caller advertised a long-term pubkey it MUST
+        // also present a valid ephemeral signature. This forbids a relay from
+        // stripping the signature to silently downgrade to an unauthenticated
+        // (MITM-able) handshake. Only truly legacy callers (no pubkey at all)
+        // fall through to the unauthenticated path.
+        let has_caller_sig = caller_ephemeral_sig
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !caller_long_term_pubkey.is_empty() && !has_caller_sig {
+            return Err(BifrostError::Config(
+                "caller advertised a long-term pubkey but no ephemeral signature; \
+                 refusing potentially downgraded handshake"
+                    .to_string(),
+            ));
+        }
         let caller_auth = caller_ephemeral_sig
             .as_deref()
             .filter(|s| !s.is_empty())
@@ -944,8 +961,13 @@ impl RemoteInvokeWorker {
             .map(|sig| CallerEphemeralAuth {
                 long_term_pubkey: &caller_long_term_pubkey,
                 signature: sig,
-                binding_id: pairing_id,
-                signer_instance_id: pairing_id,
+                // Symmetric with the caller: binding_id and signer_instance_id
+                // are both the relay-forwarded caller fingerprint (a value both
+                // peers observe). pinned_fingerprint is None because the grant
+                // caller_fingerprint is an opaque random token, not the PoP key
+                // hash, so it cannot pin the long-term key here.
+                binding_id: &caller_fingerprint,
+                signer_instance_id: &caller_fingerprint,
                 pinned_fingerprint: None,
                 timestamp: 0,
             });
@@ -4203,8 +4225,10 @@ fn build_grant_crypto_material(
             let payload = super::types::build_ephemeral_signature_payload(
                 auth.binding_id,
                 auth.signer_instance_id,
-                &super::types::fingerprint_long_term_pubkey(client_long_term_pubkey)
-                    .unwrap_or_default(),
+                // Symmetric with the caller: the caller cannot know the target
+                // long-term fingerprint at pair time, so the signed peer_fingerprint
+                // slot is empty on both sides.
+                "",
                 caller_ephemeral_pub,
                 auth.timestamp,
             );

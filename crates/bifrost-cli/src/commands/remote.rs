@@ -2341,6 +2341,12 @@ async fn handle_connect(
             caller_info: caller_info.clone(),
             caller_pubkey: pop::caller_pubkey_b64(&caller_identity.key_pair),
             caller_ephemeral_pub: pending_transport.caller_ephemeral_pub.clone(),
+            // P0-A: authenticate the ephemeral key with the PoP long-term key.
+            caller_ephemeral_sig: Some(pop::sign_ephemeral_pub(
+                &caller_identity.key_pair,
+                &caller_info.fingerprint,
+                &pending_transport.caller_ephemeral_pub,
+            )),
         },
     )
     .await?;
@@ -5381,6 +5387,11 @@ struct StartPairingRequest {
     caller_info: CallerInfo,
     caller_pubkey: String,
     caller_ephemeral_pub: String,
+    // P0-A: Ed25519 signature (base64) over the caller ephemeral pubkey, made
+    // with the caller PoP long-term key. Always populated by this build so the
+    // target can enforce ephemeral-key authentication (anti relay-MITM).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    caller_ephemeral_sig: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -10655,6 +10666,7 @@ mod coverage_boost {
             },
             caller_pubkey: "pubkey".to_string(),
             caller_ephemeral_pub: "epk".to_string(),
+            caller_ephemeral_sig: None,
         };
 
         let err = client.start_pairing(&req).await.expect_err("should fail");
