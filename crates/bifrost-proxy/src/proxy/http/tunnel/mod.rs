@@ -2733,6 +2733,84 @@ async fn handle_intercepted_request_with_protocol(
                 }
             }
 
+            // FIX: run resScript on intercepted-HTTPS statusCode mock responses.
+            // The plaintext path (handler.rs) already runs res scripts in its statusCode branch;
+            // #188 "preserve statusCode rule pipeline" wired it up for plaintext but missed this
+            // tunnel branch. Mirror the forward path below (~4449-4518) / handler.rs (~1494-1562).
+            if has_res_scripts {
+                let (mut sc_parts, sc_body) = response.into_parts();
+                let mut sc_final_body = match response_body.take() {
+                    Some(b) => b,
+                    None => match sc_body.collect().await {
+                        Ok(c) => c.to_bytes(),
+                        Err(_) => Bytes::new(),
+                    },
+                };
+                let mut res_script_status = sc_parts.status.as_u16();
+                let mut res_script_status_text = sc_parts
+                    .status
+                    .canonical_reason()
+                    .unwrap_or("OK")
+                    .to_string();
+                let mut res_script_headers = header_map_to_hashmap(&sc_parts.headers);
+                let original_script_headers = res_script_headers.clone();
+                let current_res_headers: Vec<(String, String)> = sc_parts
+                    .headers
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                    .collect();
+                let mut res_script_body = body_to_script_string(
+                    &sc_final_body,
+                    get_content_encoding(&current_res_headers).as_deref(),
+                    max_decompress_output_bytes,
+                );
+                let req_script_headers = header_map_to_hashmap(&parts.headers);
+
+                let results = execute_response_scripts(
+                    &admin_state,
+                    &resolved_rules.res_scripts,
+                    &rule_ctx,
+                    &resolved_rules,
+                    &original_uri,
+                    &method_str,
+                    &req_script_headers,
+                    &mut res_script_status,
+                    &mut res_script_status_text,
+                    &mut res_script_headers,
+                    &mut res_script_body,
+                    &values,
+                )
+                .await;
+
+                if results.iter().any(|r| r.success) {
+                    if let Ok(new_status) = hyper::StatusCode::from_u16(res_script_status) {
+                        sc_parts.status = new_status;
+                    }
+                    sc_parts.headers = apply_script_headers_to_header_map(
+                        &sc_parts.headers,
+                        &original_script_headers,
+                        &res_script_headers,
+                    );
+                    if let Some(ref new_body) = res_script_body {
+                        let cur: Vec<(String, String)> = sc_parts
+                            .headers
+                            .iter()
+                            .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                            .collect();
+                        let encoded =
+                            script_string_to_body(new_body, get_content_encoding(&cur).as_deref());
+                        set_content_encoding_header(
+                            &mut sc_parts.headers,
+                            encoded.content_encoding.as_deref(),
+                        );
+                        sc_final_body = encoded.body;
+                    }
+                }
+
+                response_body = Some(sc_final_body.clone());
+                response = Response::from_parts(sc_parts, full_body(sc_final_body));
+            }
+
             if let Some(ref state) = admin_state {
                 let final_req_headers = super::handler::headers_to_pairs(&parts.headers);
                 record_direct_status_traffic(
