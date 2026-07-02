@@ -1400,6 +1400,14 @@ impl AdminState {
         let mut items = Vec::new();
         let mut content_parts = Vec::new();
 
+        if let Err(error) = self.rules_storage.ensure_default_rule() {
+            tracing::warn!(
+                target: "bifrost_admin::state",
+                error = %error,
+                "failed to initialize Default rule for badge rules cache"
+            );
+        }
+
         if let Ok(rules) = self.rules_storage.load_enabled() {
             for rule in rules {
                 let rule_count = rule

@@ -5,6 +5,13 @@ export interface RuleFile {
   rule_count: number;
   created_at: string;
   updated_at: string;
+  is_system?: boolean;
+  is_global_default?: boolean;
+  can_delete?: boolean;
+  can_disable?: boolean;
+  can_rename?: boolean;
+  can_reorder?: boolean;
+  can_edit_content?: boolean;
 }
 
 export interface RuleSyncInfo {
@@ -22,6 +29,13 @@ export interface RuleFileDetail {
   created_at: string;
   updated_at: string;
   sync: RuleSyncInfo;
+  is_system?: boolean;
+  is_global_default?: boolean;
+  can_delete?: boolean;
+  can_disable?: boolean;
+  can_rename?: boolean;
+  can_reorder?: boolean;
+  can_edit_content?: boolean;
 }
 
 export interface MatchedRule {

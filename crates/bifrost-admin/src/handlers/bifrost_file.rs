@@ -956,6 +956,13 @@ fn collect_default_active_rules(
         return Ok((rules, String::new()));
     }
 
+    if let Err(error) = state.rules_storage.ensure_default_rule() {
+        tracing::warn!(
+            error = %error,
+            "failed to initialize Default rule for active rules export"
+        );
+    }
+
     collect_enabled_rule_files(
         &state.rules_storage,
         None,

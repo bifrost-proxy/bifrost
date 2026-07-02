@@ -70,6 +70,12 @@ main() {
     export BIFROST_DATA_DIR="${TEST_DATA_DIR}"
 
     "${BIFROST_BIN}" rule add valid --content "example.com host://127.0.0.1:3000" >/dev/null
+    local add_default_output
+    if add_default_output="$("${BIFROST_BIN}" rule add default --content "blocked.example.com status://200" 2>&1)"; then
+        echo "FAIL: rule add rejects lowercase default reserved name"
+        exit 1
+    fi
+    assert_contains "${add_default_output}" "reserved for the global default rule" "rule add rejects lowercase default reserved name"
 
     mkdir -p "${TEST_DATA_DIR}/rules"
     cat > "${TEST_DATA_DIR}/rules/.group_cache" <<'EOF'
@@ -98,7 +104,8 @@ EOF
     local output
     output="$("${BIFROST_BIN}" rule list 2>&1)"
 
-    assert_contains "${output}" "Rules (1):" "rule list counts only valid local rules"
+    assert_contains "${output}" "Rules (2):" "rule list counts valid local rules plus global Default"
+    assert_contains "${output}" "Default [enabled, global, protected]" "rule list shows protected global Default rule"
     assert_contains "${output}" "valid [enabled]" "rule list keeps valid local rule"
     assert_not_contains "${output}" ".group_cache" "rule list ignores non-bifrost cache file"
     assert_not_contains "${output}" "Failed to load rule file" "rule list avoids parse warnings for ignored files"

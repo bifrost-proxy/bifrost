@@ -134,6 +134,10 @@ export default function RuleEditor() {
   const { resolvedTheme } = useThemeStore();
   const { values } = useValuesStore();
   const canEdit = !isGroupMode || groupWritable;
+  const isGlobalDefaultRule =
+    currentRule?.is_global_default === true || (!isGroupMode && currentRule?.name === "Default");
+  const canDeleteCurrentRule =
+    canEdit && !isGlobalDefaultRule && currentRule?.is_system !== true && currentRule?.can_delete !== false;
 
   const editorRef = useRef<MonacoEditor.IStandaloneCodeEditor | null>(null);
   const modelRef = useRef<MonacoEditor.ITextModel | null>(null);
@@ -500,6 +504,10 @@ export default function RuleEditor() {
 
   const handleDelete = useCallback(() => {
     if (!currentRule?.name) return;
+    if (!canDeleteCurrentRule) {
+      message.warning("Default rule cannot be deleted");
+      return;
+    }
     Modal.confirm({
       title: "Delete Rule",
       content: `Are you sure to delete "${currentRule.name}"?`,
@@ -513,7 +521,7 @@ export default function RuleEditor() {
         }
       },
     });
-  }, [currentRule, deleteRule]);
+  }, [canDeleteCurrentRule, currentRule, deleteRule]);
 
   const handleNavigate = useCallback(
     (location: ReferenceLocation) => {
@@ -715,6 +723,7 @@ export default function RuleEditor() {
           `Updated ${formatRuleTime(currentRule.updated_at)}`,
         ]
       : [
+          ...(isGlobalDefaultRule ? ["Global default", "Always enabled"] : []),
           `Sync ${formatSyncStatus(currentRule.sync)}`,
           `Created ${formatRuleTime(currentRule.created_at)}`,
           `Updated ${formatRuleTime(currentRule.updated_at)}`,
@@ -762,7 +771,7 @@ export default function RuleEditor() {
               Save
             </Button>
           )}
-          {canEdit && (
+          {canDeleteCurrentRule && (
             <Button
               size="small"
               danger

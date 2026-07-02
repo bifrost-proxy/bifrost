@@ -39,6 +39,7 @@ import { getUiConfig, updateUiConfig } from '../../../api/ui';
 import { createRuleShareLink as createRuleShareLinkApi } from '../../../api/rules';
 import { isConnectionIssueError } from '../../../api/client';
 import { copyToClipboard } from '../../../utils/clipboard';
+import type { RuleFile } from '../../../types';
 import styles from './index.module.css';
 import {
   buildRuleTree,
@@ -63,6 +64,24 @@ function isRuleSortMode(value: string | undefined): value is RuleSortMode {
 
 function getRuleItemId(name: string) {
   return `rule-item-${encodeURIComponent(name)}`;
+}
+
+function isGlobalDefaultRule(
+  rule: Pick<RuleFile, 'name' | 'is_global_default'> | undefined,
+  rootRulesMode: boolean
+): boolean {
+  return !!rule && (rule.is_global_default === true || (rootRulesMode && rule.name === 'Default'));
+}
+
+function isProtectedRule(rule: RuleFile | undefined, rootRulesMode: boolean): boolean {
+  return isGlobalDefaultRule(rule, rootRulesMode) || rule?.is_system === true;
+}
+
+function compareDefaultFirst(left: RuleFile, right: RuleFile, rootRulesMode: boolean): number {
+  const leftDefault = isGlobalDefaultRule(left, rootRulesMode);
+  const rightDefault = isGlobalDefaultRule(right, rootRulesMode);
+  if (leftDefault !== rightDefault) return leftDefault ? -1 : 1;
+  return 0;
 }
 
 export default function RuleList() {
@@ -119,6 +138,7 @@ export default function RuleList() {
   const loadingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const syncStatus = useSyncStore((state) => state.syncStatus);
   const showGroupSwitcher = !!(syncStatus?.enabled && syncStatus?.has_session && syncStatus?.authorized);
+  const rulesByName = useMemo(() => new Map(rules.map((rule) => [rule.name, rule])), [rules]);
 
   useEffect(() => {
     if (loading) {
@@ -307,6 +327,8 @@ export default function RuleList() {
 
   const filteredRules = useMemo(() => {
     const sortedRules = [...rules].sort((left, right) => {
+      const defaultOrder = compareDefaultFirst(left, right, !isGroupMode);
+      if (defaultOrder !== 0) return defaultOrder;
       if (sortMode === 'updated_desc') {
         return (
           Date.parse(right.updated_at) - Date.parse(left.updated_at) ||
@@ -321,7 +343,7 @@ export default function RuleList() {
     if (!searchKeyword) return sortedRules;
     const keyword = searchKeyword.toLowerCase();
     return sortedRules.filter((rule) => rule.name.toLowerCase().includes(keyword));
-  }, [rules, searchKeyword, sortMode]);
+  }, [isGroupMode, rules, searchKeyword, sortMode]);
 
   const ruleTree = useMemo(() => buildRuleTree(filteredRules), [filteredRules]);
   const allFolderPaths = useMemo(() => collectFolderPaths(ruleTree), [ruleTree]);
@@ -362,6 +384,11 @@ export default function RuleList() {
   };
 
   const handleDelete = async (name: string) => {
+    const rule = rulesByName.get(name);
+    if (isProtectedRule(rule, !isGroupMode) || rule?.can_delete === false) {
+      message.warning('Default rule cannot be deleted');
+      return;
+    }
     Modal.confirm({
       title: 'Delete Rule',
       content: `Are you sure to delete "${name}"?`,
@@ -378,20 +405,27 @@ export default function RuleList() {
   };
 
   const handleBulkDelete = async (names: string[]) => {
-    if (names.length === 0) return;
-    if (names.length === 1) {
-      handleDelete(names[0]);
+    const deletableNames = names.filter((name) => {
+      const rule = rulesByName.get(name);
+      return !isProtectedRule(rule, !isGroupMode) && rule?.can_delete !== false;
+    });
+    if (deletableNames.length !== names.length) {
+      message.warning('Default rule cannot be deleted');
+    }
+    if (deletableNames.length === 0) return;
+    if (deletableNames.length === 1) {
+      handleDelete(deletableNames[0]);
       return;
     }
     Modal.confirm({
       title: 'Delete Rules',
-      content: `Are you sure to delete ${names.length} rules?`,
+      content: `Are you sure to delete ${deletableNames.length} rules?`,
       okText: 'Delete',
       okType: 'danger',
       cancelText: 'Cancel',
       onOk: async () => {
         let successCount = 0;
-        for (const name of names) {
+        for (const name of deletableNames) {
           const success = await deleteRule(name);
           if (success) successCount++;
         }
@@ -404,6 +438,15 @@ export default function RuleList() {
   };
 
   const handleToggle = async (name: string, enabled: boolean) => {
+    const rule = rulesByName.get(name);
+    if (isProtectedRule(rule, !isGroupMode) && !enabled) {
+      message.warning('Default rule is always enabled');
+      return;
+    }
+    if (rule?.can_disable === false && !enabled) {
+      message.warning('This rule cannot be disabled');
+      return;
+    }
     const success = await toggleRule(name, enabled);
     if (success) {
       message.success(`Rule ${enabled ? 'enabled' : 'disabled'}`);
@@ -412,6 +455,12 @@ export default function RuleList() {
 
   const handleRename = async () => {
     if (!renameTarget || !newName.trim()) return;
+    const rule = rulesByName.get(renameTarget);
+    if (isProtectedRule(rule, !isGroupMode) || rule?.can_rename === false) {
+      message.warning('Default rule cannot be renamed');
+      setRenameModalVisible(false);
+      return;
+    }
     if (newName.trim() === renameTarget) {
       setRenameModalVisible(false);
       return;
@@ -514,8 +563,34 @@ export default function RuleList() {
   );
 
   const getContextMenuItems = (name: string, enabled: boolean): MenuProps['items'] => {
+    const rule = rulesByName.get(name);
     const isSelected = selectedRules.includes(name);
     const bulkNames = isSelected && selectedRules.length > 0 ? selectedRules : [name];
+    const deletableBulkNames = bulkNames.filter((ruleName) => {
+      const bulkRule = rulesByName.get(ruleName);
+      return !isProtectedRule(bulkRule, !isGroupMode) && bulkRule?.can_delete !== false;
+    });
+    const exportItems: MenuProps['items'] = [
+      {
+        key: 'export',
+        icon: <ExportOutlined />,
+        label: `Export${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+        onClick: () => handleExport(bulkNames),
+      },
+    ];
+
+    if (!isGroupMode) {
+      exportItems.push({
+        key: 'share',
+        icon: <ShareAltOutlined />,
+        label: 'Share',
+        onClick: () => openShareModal(name),
+      });
+    }
+
+    if (isProtectedRule(rule, !isGroupMode)) {
+      return exportItems;
+    }
 
     if (isReadOnlyGroup) {
       return [
@@ -560,9 +635,10 @@ export default function RuleList() {
         {
           key: 'delete',
           icon: <DeleteOutlined />,
-          label: `Delete${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+          label: `Delete${deletableBulkNames.length > 1 ? ` (${deletableBulkNames.length})` : ''}`,
           danger: true,
-          onClick: () => handleBulkDelete(bulkNames),
+          disabled: deletableBulkNames.length === 0,
+          onClick: () => handleBulkDelete(deletableBulkNames),
         },
       ];
     }
@@ -605,9 +681,10 @@ export default function RuleList() {
       {
         key: 'delete',
         icon: <DeleteOutlined />,
-        label: `Delete${bulkNames.length > 1 ? ` (${bulkNames.length})` : ''}`,
+        label: `Delete${deletableBulkNames.length > 1 ? ` (${deletableBulkNames.length})` : ''}`,
         danger: true,
-        onClick: () => handleBulkDelete(bulkNames),
+        disabled: deletableBulkNames.length === 0,
+        onClick: () => handleBulkDelete(deletableBulkNames),
       },
     ];
   };
@@ -615,6 +692,18 @@ export default function RuleList() {
   const handleRuleDrop = useCallback(
     async (targetName: string, position: 'before' | 'after') => {
       if (!draggedRuleName || draggedRuleName === targetName) {
+        setDraggedRuleName(null);
+        setDropTarget(null);
+        stopAutoScroll();
+        return;
+      }
+      const draggedRule = rulesByName.get(draggedRuleName);
+      const targetRule = rulesByName.get(targetName);
+      if (
+        isProtectedRule(draggedRule, !isGroupMode) ||
+        draggedRule?.can_reorder === false ||
+        isProtectedRule(targetRule, !isGroupMode)
+      ) {
         setDraggedRuleName(null);
         setDropTarget(null);
         stopAutoScroll();
@@ -702,7 +791,7 @@ export default function RuleList() {
         message.success('Rule order updated');
       }
     },
-    [draggedRuleName, reorderRules, rules, stopAutoScroll]
+    [draggedRuleName, isGroupMode, reorderRules, rules, rulesByName, stopAutoScroll]
   );
 
   const handleListKeyDown = useCallback(
@@ -816,26 +905,38 @@ export default function RuleList() {
       const rule = child.rule;
       const isSelected = selectedRuleName === rule.name;
       const hasChanges = hasUnsavedChanges(rule.name);
+      const protectedRule = isProtectedRule(rule, !isGroupMode);
+      const globalDefaultRule = isGlobalDefaultRule(rule, !isGroupMode);
+      const canReorderRule = !protectedRule && rule.can_reorder !== false;
+      const canToggleRule = !protectedRule && rule.can_disable !== false;
+      const ruleNameNode = (
+        <span className={styles.itemName} title={rule.name}>
+          {child.label}
+        </span>
+      );
 
       nodes.push(
         <Dropdown
           key={rule.name}
           menu={{ items: getContextMenuItems(rule.name, rule.enabled) }}
           trigger={['contextMenu']}
+          disabled={globalDefaultRule}
         >
           <div
             id={getRuleItemId(rule.name)}
             className={`${styles.item} ${isSelected ? styles.selected : ''} ${selectedRules.includes(rule.name) ? styles.multiSelected : ''}`}
             role="option"
             aria-selected={isSelected}
-            draggable={!isGroupMode && sortMode === 'manual'}
+            draggable={!isGroupMode && sortMode === 'manual' && canReorderRule}
             onClick={(e) => {
               listContainerRef.current?.focus();
               handleSelect(rule.name, e);
             }}
-            onDoubleClick={() => handleToggle(rule.name, !rule.enabled)}
+            onDoubleClick={() => {
+              if (canToggleRule) handleToggle(rule.name, !rule.enabled);
+            }}
             onDragStart={() => {
-              if (isGroupMode || sortMode !== 'manual') return;
+              if (isGroupMode || sortMode !== 'manual' || !canReorderRule) return;
               setDraggedRuleName(rule.name);
             }}
             onDragEnd={() => {
@@ -844,7 +945,12 @@ export default function RuleList() {
               stopAutoScroll();
             }}
             onDragOver={(e) => {
-              if (sortMode !== 'manual' || !draggedRuleName || draggedRuleName === rule.name) {
+              if (
+                sortMode !== 'manual' ||
+                !draggedRuleName ||
+                draggedRuleName === rule.name ||
+                protectedRule
+              ) {
                 return;
               }
               e.preventDefault();
@@ -856,7 +962,7 @@ export default function RuleList() {
               }
             }}
             onDrop={(e) => {
-              if (sortMode !== 'manual') return;
+              if (sortMode !== 'manual' || protectedRule) return;
               e.preventDefault();
               stopAutoScroll();
               const rect = e.currentTarget.getBoundingClientRect();
@@ -871,14 +977,21 @@ export default function RuleList() {
             data-drop-position={dropTarget?.name === rule.name ? dropTarget.position : undefined}
           >
             <div className={styles.itemContent}>
-              {!isGroupMode && sortMode === 'manual' && (
+              {!isGroupMode && sortMode === 'manual' && canReorderRule && (
                 <Tooltip title="Drag to reorder">
                   <HolderOutlined className={styles.dragHandle} />
                 </Tooltip>
               )}
-              <span className={styles.itemName} title={rule.name}>
-                {child.label}
-              </span>
+              {globalDefaultRule ? (
+                <Tooltip
+                  title="Default applies globally with the highest priority. It cannot be disabled; clear its content if you do not need global rules."
+                  placement="right"
+                >
+                  {ruleNameNode}
+                </Tooltip>
+              ) : (
+                ruleNameNode
+              )}
               <div className={styles.itemMeta}>
                 {hasChanges && (
                   <Tooltip title="Unsaved changes">
@@ -901,8 +1014,10 @@ export default function RuleList() {
               <Switch
                 size="small"
                 checked={rule.enabled}
+                disabled={!canToggleRule}
                 onChange={(checked, e) => {
                   e.stopPropagation();
+                  if (!canToggleRule) return;
                   handleToggle(rule.name, checked);
                 }}
               />

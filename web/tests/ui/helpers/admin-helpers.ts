@@ -30,8 +30,15 @@ export async function clearTraffic(request: APIRequestContext): Promise<void> {
 
 export async function clearRules(request: APIRequestContext): Promise<void> {
   const response = await request.get(`${apiBase}/rules`);
-  const rules = (await readJson(response)) as Array<{ name: string }>;
+  const rules = (await readJson(response)) as Array<{
+    name: string;
+    is_global_default?: boolean;
+    can_delete?: boolean;
+  }>;
   for (const rule of rules || []) {
+    if (rule.is_global_default || rule.name === "Default" || rule.can_delete === false) {
+      continue;
+    }
     await request.delete(`${apiBase}/rules/${encodeURIComponent(rule.name)}`);
   }
 }

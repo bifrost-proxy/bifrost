@@ -26,6 +26,7 @@ pub fn handle_rule_command(action: RuleCommands) -> bifrost_core::Result<()> {
 
 fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
     let storage = RulesStorage::new()?;
+    storage.ensure_default_rule()?;
 
     match action {
         RuleCommands::List => {
@@ -36,7 +37,11 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
                 println!("Rules ({}):", rules.len());
                 for rule in rules {
                     let status = if rule.enabled { "enabled" } else { "disabled" };
-                    println!("  {} [{}]", rule.name, status);
+                    if RulesStorage::is_default_rule_name(&rule.name) {
+                        println!("  {} [{}, global, protected]", rule.name, status);
+                    } else {
+                        println!("  {} [{}]", rule.name, status);
+                    }
                 }
             }
         }
@@ -47,6 +52,11 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
             allow_invalid,
             json,
         } => {
+            if RulesStorage::is_default_rule_name(&name) {
+                return Err(bifrost_core::BifrostError::Config(
+                    "Rule name 'Default' is reserved for the global default rule".to_string(),
+                ));
+            }
             let rule_content = load_rule_content(content, file)?;
             let syntax = validate_local_rule_syntax(&storage, &name, &rule_content)?;
             if !syntax.valid && !allow_invalid {
@@ -93,6 +103,10 @@ fn handle_rule_local(action: RuleCommands) -> bifrost_core::Result<()> {
                 "Status: {}",
                 if rule.enabled { "enabled" } else { "disabled" }
             );
+            if RulesStorage::is_default_rule_name(&rule.name) {
+                println!("Scope: global default");
+                println!("Protection: cannot be disabled, deleted, renamed, or reordered");
+            }
             println!("Content:");
             println!("{}", rule.content);
         }

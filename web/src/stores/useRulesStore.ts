@@ -15,8 +15,18 @@ import {
   type GroupRuleInfo,
 } from '../api/group';
 
+function isGlobalDefaultRule(
+  rule: Pick<RuleFile, 'name' | 'is_global_default'>,
+  rootRulesMode = true
+): boolean {
+  return rule.is_global_default === true || (rootRulesMode && rule.name === 'Default');
+}
+
 function sortRulesByManualOrder(rules: RuleFile[]): RuleFile[] {
   return [...rules].sort((left, right) => {
+    const leftDefault = isGlobalDefaultRule(left);
+    const rightDefault = isGlobalDefaultRule(right);
+    if (leftDefault !== rightDefault) return leftDefault ? -1 : 1;
     return left.sort_order - right.sort_order || left.name.localeCompare(right.name);
   });
 }
@@ -29,6 +39,13 @@ function groupRuleToRuleFile(info: GroupRuleInfo): RuleFile {
     rule_count: info.rule_count,
     created_at: info.created_at,
     updated_at: info.updated_at,
+    is_system: false,
+    is_global_default: false,
+    can_delete: true,
+    can_disable: true,
+    can_rename: true,
+    can_reorder: true,
+    can_edit_content: true,
   };
 }
 
@@ -287,6 +304,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
       }
     }
 
+    if (isGlobalDefaultRule({ name })) {
+      message.warning('Rule name "Default" is reserved for the global default rule');
+      return false;
+    }
+
     set({ loading: true, error: null });
     try {
       await api.createRule(name, content);
@@ -418,6 +440,11 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
   deleteRule: async (name: string) => {
     const { isGroupMode, groupWritable, activeGroupId } = get();
+    const rule = get().rules.find((item) => item.name === name);
+    if (!isGroupMode && (isGlobalDefaultRule(rule ?? { name }) || rule?.can_delete === false)) {
+      message.warning('Default rule cannot be deleted');
+      return false;
+    }
 
     if (isGroupMode) {
       if (!groupWritable || !activeGroupId) return false;
@@ -482,6 +509,15 @@ export const useRulesStore = create<RulesState>((set, get) => ({
 
   toggleRule: async (name: string, enabled: boolean) => {
     const { isGroupMode, activeGroupId } = get();
+    const currentRule = get().rules.find((item) => item.name === name);
+    if (
+      !isGroupMode &&
+      !enabled &&
+      (isGlobalDefaultRule(currentRule ?? { name }) || currentRule?.can_disable === false)
+    ) {
+      message.warning('Default rule is always enabled');
+      return false;
+    }
     const previousRules = get().rules;
     set({
       rules: previousRules.map((r) =>
@@ -541,6 +577,16 @@ export const useRulesStore = create<RulesState>((set, get) => ({
   },
 
   renameRule: async (oldName: string, newName: string) => {
+    const { isGroupMode } = get();
+    const rule = get().rules.find((item) => item.name === oldName);
+    if (!isGroupMode && (isGlobalDefaultRule(rule ?? { name: oldName }) || rule?.can_rename === false)) {
+      message.warning('Default rule cannot be renamed');
+      return false;
+    }
+    if (!isGroupMode && isGlobalDefaultRule({ name: newName })) {
+      message.warning('Rule name "Default" is reserved for the global default rule');
+      return false;
+    }
     set({ loading: true, error: null });
     try {
       await api.renameRule(oldName, newName);

@@ -148,6 +148,9 @@ bifrost search "keyword" --res-body
 
 # 添加规则
 bifrost rule add local-dev --content "example.com host://127.0.0.1:3000"
+
+# 编辑全局默认规则，主端口和所有临时端口都会自动生效
+bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
 ```
 
 搜索命令补充说明：
@@ -165,6 +168,8 @@ api.example.com reqHeaders://x-debug=1
 chatgpt.com http3://
 internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
 ```
+
+`Default` 是 Bifrost 自动创建的全局默认规则，始终启用且列表置顶。它不能删除、停用、重命名或同步到远端，但内容可以编辑；适合放统一 DNS、通用 header、TLS 兜底等所有端口都需要共享的配置。详见 [`docs/rule.md`](docs/rule.md#10-全局默认规则-default)。
 
 ## 文档索引
 
