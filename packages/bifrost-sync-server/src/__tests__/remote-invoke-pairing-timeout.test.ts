@@ -259,6 +259,7 @@ describe('remote invoke pairing timeout cleanup', () => {
     });
 
     const callerKey = makeCallerKeypair();
+    const callerEphemeralSig = 'fresh-ephemeral-signature';
     const startPairingResponse = await req('POST', '/v5/remote-invoke/pairings/start', {
       pair_code: pairCode,
       caller_info: {
@@ -267,6 +268,7 @@ describe('remote invoke pairing timeout cleanup', () => {
       },
       caller_pubkey: callerKey.caller_pubkey,
       caller_ephemeral_pub: base64X25519Pub('fresh-ephemeral'),
+      caller_ephemeral_sig: callerEphemeralSig,
     });
     expect(startPairingResponse.status).toBe(200);
     expect(startPairingResponse.data.code).toBe(0);
@@ -281,6 +283,10 @@ describe('remote invoke pairing timeout cleanup', () => {
     expect(pendingResponse.data.code).toBe(0);
     expect(pendingResponse.data.data).toHaveLength(1);
     expect(pendingResponse.data.data[0].pairing_id).toBe(startPairingResponse.data.data.pairing_id);
+    expect(pendingResponse.data.data[0].caller_ephemeral_sig).toBe(callerEphemeralSig);
+
+    const freshPairing = await server.storage.remoteInvoke.getPairing(startPairingResponse.data.data.pairing_id);
+    expect(freshPairing?.caller_ephemeral_sig).toBe(callerEphemeralSig);
 
     const expiredPairing = await server.storage.remoteInvoke.getPairing('expired-pending-pairing');
     expect(expiredPairing?.status).toBe('expired');

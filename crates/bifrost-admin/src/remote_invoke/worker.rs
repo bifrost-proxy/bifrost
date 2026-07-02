@@ -44,14 +44,15 @@ use super::stream_emit;
 use super::types::{
     build_registration_signature_payload, decrypt_encrypted_payload_without_aad,
     decrypt_remote_command_payload, derive_call_session_key, derive_open_call_session_key,
-    encrypt_encrypted_payload_counter, grant_mode_ttl_ms, scope_allows_command, AuthMethod,
-    CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
-    ClientCallStreamFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
-    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
-    EncryptedPayload, EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision,
-    GrantDecisionRequest, GrantInfo, GrantMode, GrantScope, GrantStatus, PairingRequest,
-    PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig, SshConnectEvent,
-    SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest, WorkerState,
+    encrypt_encrypted_payload_counter, grant_mode_ttl_ms, scope_allows_command,
+    verify_encrypted_payload_counter_nonce, AuthMethod, CallInfo, CallStatus, CallerInfo,
+    ClientCallExitRequest, ClientCallFrameRequest, ClientCallStreamFrameRequest,
+    ClientHeartbeatRequest, ClientRegistrationChallengeRequest, ClientRegistrationRequest,
+    CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope, EncryptedPayload,
+    EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo,
+    GrantMode, GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
+    RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
+    UpdateGrantRequest, WorkerState,
 };
 use crate::state::SharedAdminState;
 
@@ -3393,18 +3394,6 @@ impl RemoteInvokeWorker {
             return;
         };
 
-        // P1-B: reject replayed / out-of-window caller input frames before we
-        // decrypt or forward them. seq is authenticated by the AEAD tag via the
-        // P1-A counter nonce (nonce = direction || seq), so a tampered seq makes
-        // decryption fail; the window guards against verbatim frame replays.
-        if !active_call.accept_inbound_seq(envelope.seq) {
-            warn!(
-                call_id = %call_id,
-                seq = envelope.seq,
-                "rejecting replayed or out-of-window caller input frame"
-            );
-            return;
-        }
         let Some(grant_crypto) = self.get_grant_crypto(&active_call.grant_id) else {
             warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
             return;
@@ -3435,16 +3424,20 @@ impl RemoteInvokeWorker {
             tag: envelope.tag,
             aad: envelope.aad,
         };
-        // P1-C: this inbound stdin frame path stays on the no-AEAD-AAD codec
-        // for wire-compat with deployed callers (encrypt_caller_input_frame
-        // seals with Aad::empty()). Integrity/authenticity is NOT weakened:
-        //   * the session key is bound to both ephemeral pubkeys + long-term
-        //     fingerprints (channel binding), so only the paired caller can
-        //     produce a valid tag;
-        //   * P1-A gives each frame a unique (key, nonce) via direction||seq;
-        //   * P1-B rejects replays above via accept_inbound_seq().
-        // Full AEAD-AAD binding here requires a lockstep caller protocol bump
-        // (tracked separately) and is intentionally deferred.
+        if let Err(error) = verify_encrypted_payload_counter_nonce(
+            &payload,
+            FrameDirection::CallerToClient,
+            envelope.seq,
+        ) {
+            warn!(call_id = %call_id, seq = envelope.seq, error = %error, "rejecting caller input frame with invalid counter nonce");
+            return;
+        }
+        // P1-C: stdin frames stay on the no-AEAD-AAD codec, but their transmitted
+        // counter nonce must match the outer direction/seq before decryption.
+        // That binds relay-visible ordering metadata to the AEAD nonce and closes
+        // the replay bypass where a relay reuses the same ciphertext under a new
+        // outer seq. The replay window advances only after a valid decrypt, so
+        // unauthenticated high seq values cannot poison it.
         let frame = match decrypt_encrypted_payload_without_aad::<CallerInputFramePayload>(
             &payload,
             &session_key,
@@ -3455,6 +3448,14 @@ impl RemoteInvokeWorker {
                 return;
             }
         };
+        if !active_call.accept_inbound_seq(envelope.seq) {
+            warn!(
+                call_id = %call_id,
+                seq = envelope.seq,
+                "rejecting replayed or out-of-window caller input frame"
+            );
+            return;
+        }
         let bytes = if !frame.data_b64.is_empty() {
             match base64::engine::general_purpose::STANDARD.decode(frame.data_b64.as_bytes()) {
                 Ok(bytes) => bytes,
@@ -6367,7 +6368,6 @@ mod helper_tests {
 #[cfg(test)]
 mod coverage_boost {
     use super::*;
-    use crate::remote_invoke::types::encrypt_encrypted_payload_without_aad;
     use crate::remote_invoke::{Identity, RemoteInvokeConfig};
     use crate::test_support::TestAdminState;
 
@@ -7701,8 +7701,14 @@ mod coverage_boost {
 
         // Encrypt a JSON payload compatible with CallerInputFramePayload
         let frame_json = json!({ "data": "hello-stdin" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7722,6 +7728,75 @@ mod coverage_boost {
 
         let received = rx.recv().await.expect("stdin bytes should arrive");
         assert_eq!(received, b"hello-stdin".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_rejects_seq_mismatch_without_poisoning_replay_window() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-replay";
+        let call_id = "call-frame-replay";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let frame_json = json!({ "data": "fresh-after-reject" });
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
+        let bad_envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 99,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce.clone(),
+            ciphertext: payload.ciphertext.clone(),
+            tag: payload.tag.clone(),
+            aad: payload.aad.clone(),
+        };
+        worker
+            .handle_call_frame(json!({
+                "call_id": call_id,
+                "envelope_json": serde_json::to_string(&bad_envelope).unwrap(),
+            }))
+            .await;
+        assert!(rx.try_recv().is_err());
+
+        let good_envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        worker
+            .handle_call_frame(json!({
+                "call_id": call_id,
+                "envelope_json": serde_json::to_string(&good_envelope).unwrap(),
+            }))
+            .await;
+
+        let received = rx.recv().await.expect("valid stdin bytes should arrive");
+        assert_eq!(received, b"fresh-after-reject".to_vec());
     }
 
     #[tokio::test]
@@ -7861,8 +7936,14 @@ mod coverage_boost {
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"from-b64".as_ref());
         let frame_json = json!({ "data_b64": encoded, "data": "ignored" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7906,8 +7987,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data_b64": "***not-base64***" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7951,8 +8038,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data": "" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7994,8 +8087,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data": "hello" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),

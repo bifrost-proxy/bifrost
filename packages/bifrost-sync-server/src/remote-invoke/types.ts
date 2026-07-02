@@ -133,6 +133,7 @@ export interface StartPairingRequest {
   caller_info: CallerInfo;
   caller_pubkey: string;
   caller_ephemeral_pub?: string;
+  caller_ephemeral_sig?: string;
 }
 
 export interface GrantDecisionRequest {

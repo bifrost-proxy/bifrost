@@ -440,6 +440,13 @@ fn load_or_create_caller_identity_at(
     })
 }
 
+fn caller_pubkey_fingerprint(caller_pubkey_b64: &str) -> bifrost_core::Result<String> {
+    let der = base64::engine::general_purpose::STANDARD
+        .decode(caller_pubkey_b64)
+        .map_err(|e| BifrostError::Config(format!("decode caller_pubkey: {e}")))?;
+    Ok(sha256_hex(&der))
+}
+
 fn load_or_create_caller_fingerprint_value(path: &Path) -> bifrost_core::Result<String> {
     if path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| {
@@ -1493,12 +1500,38 @@ fn decode_base64_or_raw(value: &str) -> Vec<u8> {
 /// 8-byte big-endian seq keeps each direction collision-free. Must byte-match
 /// `bifrost_admin::remote_invoke::types::counter_nonce` for the caller side.
 const CALLER_NONCE_DIRECTION_PREFIX: [u8; 4] = [0, 0, 0, 0];
+const CLIENT_NONCE_DIRECTION_PREFIX: [u8; 4] = [0, 0, 0, 1];
 
 fn caller_counter_nonce(seq: u64) -> [u8; NONCE_LEN] {
     let mut nonce = [0u8; NONCE_LEN];
     nonce[..4].copy_from_slice(&CALLER_NONCE_DIRECTION_PREFIX);
     nonce[4..].copy_from_slice(&seq.to_be_bytes());
     nonce
+}
+
+fn client_counter_nonce(seq: u64) -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    nonce[..4].copy_from_slice(&CLIENT_NONCE_DIRECTION_PREFIX);
+    nonce[4..].copy_from_slice(&seq.to_be_bytes());
+    nonce
+}
+
+fn verify_payload_counter_nonce(
+    payload: &EncryptedPayload,
+    expected: [u8; NONCE_LEN],
+) -> bifrost_core::Result<()> {
+    let nonce_raw = base64::engine::general_purpose::STANDARD
+        .decode(&payload.nonce)
+        .map_err(|e| BifrostError::Config(format!("decode encrypted payload nonce failed: {e}")))?;
+    let nonce: [u8; NONCE_LEN] = nonce_raw.try_into().map_err(|_| {
+        BifrostError::Config("encrypted payload nonce must be 12 bytes".to_string())
+    })?;
+    if nonce != expected {
+        return Err(BifrostError::Config(
+            "encrypted payload counter nonce does not match envelope direction/seq".to_string(),
+        ));
+    }
+    Ok(())
 }
 fn short_fingerprint(bytes: &[u8]) -> String {
     digest(&SHA256, bytes).as_ref()[..6]
@@ -1666,6 +1699,19 @@ fn decrypt_frame_chunk(
     if payload.nonce.is_empty() || payload.tag.is_empty() {
         return Ok(payload.ciphertext);
     }
+    if payload.aad.is_none() {
+        let seq = envelope.get("seq").and_then(|s| s.as_u64()).unwrap_or(0);
+        let direction = envelope
+            .get("direction")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        if direction != "client_to_caller" {
+            return Err(BifrostError::Config(
+                "encrypted frame direction must be client_to_caller".to_string(),
+            ));
+        }
+        verify_payload_counter_nonce(&payload, client_counter_nonce(seq))?;
+    }
 
     let key = derive_call_event_key(
         &transport.shared_secret,
@@ -1751,6 +1797,7 @@ fn decrypt_exit_payload(
                 .map_err(|e| BifrostError::Config(format!("serialize exit aad failed: {e}")))?,
         )
     } else {
+        verify_payload_counter_nonce(payload, client_counter_nonce(0))?;
         None
     };
     let plaintext = decrypt_payload_bytes(payload, &key, aad_bytes.as_deref())?;
@@ -1772,7 +1819,9 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     let hostname = get_hostname();
     let username = get_username();
     let caller_identity = load_or_create_caller_identity()?;
-    let caller_fingerprint = caller_identity.caller_fingerprint.clone();
+    let caller_pubkey_b64 = pop::caller_pubkey_b64(&caller_identity.key_pair);
+    let caller_fingerprint = caller_pubkey_fingerprint(&caller_pubkey_b64)
+        .unwrap_or_else(|_| caller_identity.caller_fingerprint.clone());
 
     // Extract --label from conn up if present
     let label = if let RemoteCommands::Conn {
@@ -1785,7 +1834,7 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     };
     let caller_info = CallerInfo {
         fingerprint: caller_fingerprint.clone(),
-        caller_pubkey: Some(pop::caller_pubkey_b64(&caller_identity.key_pair)),
+        caller_pubkey: Some(caller_pubkey_b64.clone()),
         display_name: Some(label.clone().unwrap_or_else(|| hostname.clone())),
         user_agent: Some(CALLER_USER_AGENT.to_string()),
         platform: Some(std::env::consts::OS.to_string()),
@@ -10372,6 +10421,51 @@ mod coverage_boost {
     }
 
     #[test]
+    fn decrypt_frame_chunk_rejects_outer_seq_tamper_for_counter_nonce() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+        let call_id = "call-frame-counter";
+        let key_bytes = derive_call_event_key(
+            &transport.shared_secret,
+            call_id,
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+        )
+        .expect("derive key");
+        let unbound =
+            UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).expect("build encryption key");
+        let key = LessSafeKey::new(unbound);
+        let nonce = client_counter_nonce(1);
+        let mut sealed = serde_json::to_vec(&EncryptedFramePayload {
+            chunk: "hello".into(),
+        })
+        .expect("frame");
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::empty(),
+            &mut sealed,
+        )
+        .expect("seal frame");
+        let tag = sealed.split_off(sealed.len().saturating_sub(16));
+        let envelope = json!({
+            "version": ENCRYPTED_OPEN_CALL_VERSION,
+            "call_id": call_id,
+            "seq": 2u64,
+            "direction": "client_to_caller",
+            "nonce": base64::engine::general_purpose::STANDARD.encode(nonce),
+            "ciphertext": base64::engine::general_purpose::STANDARD.encode(sealed),
+            "tag": base64::engine::general_purpose::STANDARD.encode(tag),
+        });
+
+        let err = decrypt_frame_chunk(&transport, call_id, &envelope)
+            .expect_err("outer seq tamper must be rejected");
+        assert!(err.to_string().contains("counter nonce"));
+    }
+
+    #[test]
     fn decrypt_exit_payload_with_aad_roundtrip() {
         let transport = OpenCallTransportContext {
             caller_ephemeral_pub: "caller-epk".to_string(),
@@ -10430,6 +10524,53 @@ mod coverage_boost {
         assert_eq!(decrypted.exit_code, 7);
         assert_eq!(decrypted.duration_ms, Some(42));
         assert_eq!(decrypted.stderr.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn decrypt_exit_payload_without_aad_requires_exit_counter_nonce() {
+        let transport = OpenCallTransportContext {
+            caller_ephemeral_pub: "caller-epk".to_string(),
+            client_ephemeral_pub: "client-epk".to_string(),
+            shared_secret: b"01234567890123456789012345678901".to_vec(),
+        };
+        let call_id = "call-exit-counter";
+        let key_bytes = derive_call_event_key(
+            &transport.shared_secret,
+            call_id,
+            &transport.caller_ephemeral_pub,
+            &transport.client_ephemeral_pub,
+        )
+        .expect("derive key");
+        let unbound =
+            UnboundKey::new(&CHACHA20_POLY1305, &key_bytes).expect("build encryption key");
+        let key = LessSafeKey::new(unbound);
+        let nonce = client_counter_nonce(1);
+        let mut sealed = serde_json::to_vec(&EncryptedExitPayload {
+            exit_code: 0,
+            duration_ms: Some(1),
+            stderr: None,
+            stdout_digest: None,
+            stderr_digest: None,
+        })
+        .expect("encode exit");
+        key.seal_in_place_append_tag(
+            Nonce::assume_unique_for_key(nonce),
+            Aad::empty(),
+            &mut sealed,
+        )
+        .expect("seal exit");
+        let tag = sealed.split_off(sealed.len().saturating_sub(16));
+        let payload = EncryptedPayload {
+            version: ENCRYPTED_OPEN_CALL_VERSION,
+            nonce: base64::engine::general_purpose::STANDARD.encode(nonce),
+            ciphertext: base64::engine::general_purpose::STANDARD.encode(sealed),
+            tag: base64::engine::general_purpose::STANDARD.encode(tag),
+            aad: None,
+        };
+
+        let err = decrypt_exit_payload(&transport, call_id, &payload)
+            .expect_err("exit must reserve seq 0 counter nonce");
+        assert!(err.to_string().contains("counter nonce"));
     }
 
     // --- Hostname / username / os version helpers ---

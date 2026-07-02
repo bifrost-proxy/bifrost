@@ -236,6 +236,30 @@ fn counter_nonce(direction: FrameDirection, seq: u64) -> [u8; 12] {
     nonce
 }
 
+pub fn verify_encrypted_payload_counter_nonce(
+    payload: &EncryptedPayload,
+    direction: FrameDirection,
+    seq: u64,
+) -> Result<()> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let nonce_bytes = engine.decode(&payload.nonce).map_err(|e| {
+        BifrostError::Config(format!("invalid encrypted payload counter nonce: {e}"))
+    })?;
+    if nonce_bytes.len() != 12 {
+        return Err(BifrostError::Config(format!(
+            "invalid encrypted payload counter nonce length: {}",
+            nonce_bytes.len()
+        )));
+    }
+    let expected = counter_nonce(direction, seq);
+    if nonce_bytes.as_slice() != expected {
+        return Err(BifrostError::Config(
+            "encrypted payload counter nonce does not match envelope direction/seq".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantDecision {

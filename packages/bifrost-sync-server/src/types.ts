@@ -227,6 +227,7 @@ export interface RemoteInvokePairing {
   status: PairingStatus;
   caller_pubkey: string;
   caller_ephemeral_pub?: string;
+  caller_ephemeral_sig?: string;
   client_ephemeral_pub?: string;
   caller_info_json: string;
   command_summary_json: string;

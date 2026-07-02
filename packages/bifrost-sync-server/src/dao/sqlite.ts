@@ -418,8 +418,8 @@ export class SqliteRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     this.db.prepare(
-      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time);
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, caller_ephemeral_sig, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.caller_ephemeral_sig ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time);
     return p;
   }
 
@@ -909,6 +909,7 @@ export class SqliteStorage implements IStorage {
         status                TEXT NOT NULL DEFAULT 'created',
         caller_pubkey         TEXT NOT NULL DEFAULT '',
         caller_ephemeral_pub  TEXT NOT NULL DEFAULT '',
+        caller_ephemeral_sig  TEXT NOT NULL DEFAULT '',
         client_ephemeral_pub  TEXT NOT NULL DEFAULT '',
         caller_info_json      TEXT NOT NULL DEFAULT '{}',
         command_summary_json  TEXT NOT NULL DEFAULT '{}',
@@ -1054,6 +1055,7 @@ export class SqliteStorage implements IStorage {
       'claim_token_hash',
       'claim_expires_at',
       'claimed_at',
+      'caller_ephemeral_sig',
     ];
     const forbidden = [
       'policy_binding',
