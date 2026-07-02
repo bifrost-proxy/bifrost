@@ -17,7 +17,7 @@ Template variables (`${...}`) expand unconditionally inside any value — backti
 
 ## Categories
 
-- Routing: `host`, `xhost`, `proxy`, `http`, `https`, `ws`, `wss`, `pac` (not yet implemented — `pac://` only extracts a literal `PROXY host:port`, it does not fetch or evaluate a remote/JS PAC file).
+- Routing: `host`, `xhost`, `proxy`, `http`, `https`, `ws`, `wss`, `pac` (Proxy Auto-Config via inline scripts, embedded/global Values, local files, or remote URLs).
 - Request modification: `reqHeaders`, `reqCookies`, `urlParams`, `reqBody`, `method`, `auth`.
 - Response modification: `resHeaders`, `resCookies`, `statusCode`, `replaceStatus`, `resBody`, `file`, `tpl`.
 - Timing and throttling: `reqDelay`, `resDelay`, `reqSpeed`, `resSpeed`.

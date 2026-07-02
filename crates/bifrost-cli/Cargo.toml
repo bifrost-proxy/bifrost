@@ -43,6 +43,7 @@ serde.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true
 urlencoding = "2.1"
+url.workspace = true
 regex = "1"
 futures = "0.3"
 reqwest.workspace = true

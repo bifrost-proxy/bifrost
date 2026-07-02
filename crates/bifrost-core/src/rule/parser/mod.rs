@@ -2127,6 +2127,16 @@ fn looks_like_host_pattern(part: &str) -> bool {
     DOMAIN_LIKE_PATTERN_REGEX.is_match(part)
 }
 
+fn has_path_like_component(part: &str) -> bool {
+    let rest = if let Some(idx) = part.find("://") {
+        &part[idx + 3..]
+    } else {
+        part
+    };
+
+    rest.contains('/') || rest.contains('?') || rest.contains('#')
+}
+
 fn is_target_address(value: &str) -> bool {
     let host_part = if let Some(idx) = value.find('/') {
         &value[..idx]
@@ -2356,7 +2366,9 @@ fn extract_pattern_and_protocols(parts: &[String]) -> Result<ParsedPatternResult
                 protocol_values.push((Protocol::Passthrough, String::new()));
             } else if !patterns.is_empty()
                 && protocol_values.is_empty()
-                && is_bare_host_target_with_path(part)
+                && (is_bare_host_target_with_path(part)
+                    || (looks_like_host_pattern(part)
+                        && patterns.iter().any(|p| has_path_like_component(p))))
             {
                 protocol_values.push((Protocol::Host, part.clone()));
             } else {
@@ -2728,6 +2740,23 @@ reqHeaders://{test=1}"#;
         assert_eq!(rules[0].pattern, "gamingpop-boe.bifrost.local/manager");
         assert_eq!(rules[0].protocol, Protocol::Host);
         assert_eq!(rules[0].value, "gamingpop-boe.bifrost.local/manager");
+    }
+
+    #[test]
+    fn test_parse_bare_domain_as_host_target_when_pattern_exists() {
+        let rules = parse_line("www.example.com/api www.example.com").unwrap();
+        assert_eq!(rules.len(), 1);
+        assert_eq!(rules[0].pattern, "www.example.com/api");
+        assert_eq!(rules[0].protocol, Protocol::Host);
+        assert_eq!(rules[0].value, "www.example.com");
+    }
+
+    #[test]
+    fn test_parse_bare_domain_without_path_still_reports_missing_protocol() {
+        let result = parse_rules_tolerant("example.com another.com");
+        assert_eq!(result.rules.len(), 0);
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code.as_deref(), Some("E001"));
     }
 
     #[test]

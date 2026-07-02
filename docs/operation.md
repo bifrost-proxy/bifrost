@@ -443,7 +443,7 @@ key1=value1&key2=value2&keyN=valueN
 | `ws` | WebSocket 转发 |
 | `wss` | 安全 WebSocket 转发 |
 | `proxy` | HTTP 代理转发 |
-| `pac` | PAC 脚本路由（尚未实现 / not yet implemented） |
+| `pac` | PAC 脚本路由（支持内嵌/Values/本地文件/远程 URL） |
 | `redirect` | URL 重定向（301/302） |
 | `file` | 返回文件内容作为响应 |
 | `tpl` | 模板响应（支持变量替换） |

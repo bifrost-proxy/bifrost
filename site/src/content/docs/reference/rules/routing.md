@@ -279,22 +279,40 @@ example.com proxy://user:pass@proxy.com:8080
 
 ## pac
 
-> ⚠️ **未实现**：完整的 PAC (Proxy Auto-Config) 支持尚未实现。代理**不会**拉取远程 `.pac` 文件，也**不会**执行任何 JavaScript PAC 脚本。
+`pac://` 执行 PAC (Proxy Auto-Config) 脚本的 `FindProxyForURL(url, host)`，根据脚本返回值为当前请求选择直连或上游代理。PAC 脚本只在显式命中的 Bifrost 规则中生效；Bifrost 自身的 Sync、upgrade、remote relay、AI provider 等外部链路不会因此读取系统代理或系统 PAC。
 
-当前 `pac://` 仅识别规则值中字面量的 `PROXY host:port`（或 `DIRECT`）字符串，并从中提取 `host:port` 作为上游；远程 `.pac` URL 和内联 JS PAC 脚本不会被拉取或执行。
+支持的 PAC 来源：
+
+- 规则文件内嵌值或全局 Values：`pac://{corp.pac}`
+- 本地文件：`pac:///Users/me/proxy.pac`
+- 远程 URL：`pac://https://example.com/proxy.pac`
+- 短内联脚本：`pac://(function FindProxyForURL(url, host) { return "DIRECT"; })`
+
+支持的返回值包括 `DIRECT`、`PROXY host:port`、`HTTP host:port` 和 `HTTPS host:port`。`DIRECT` 会清除当前请求已有的上游代理；`PROXY`/`HTTP`/`HTTPS` 会映射到 Bifrost 现有的上游代理转发链路。若返回多个候选，Bifrost 选择第一个当前支持的候选。
 
 ### 语法
 
 ```
-pattern pac://PROXY host:port
+pattern pac://value [filters...]
 ```
 
 ### 示例
 
-```bash
-# 仅支持字面量 PROXY host:port，从中提取上游
-* pac://PROXY 127.0.0.1:8080
+````bash
+# 内嵌 PAC 脚本
+``` corp.pac
+function FindProxyForURL(url, host) {
+  if (dnsDomainIs(host, ".corp.example")) {
+    return "PROXY 127.0.0.1:8080";
+  }
+  return "DIRECT";
+}
 ```
+*.corp.example pac://{corp.pac}
+
+# 远程 PAC 脚本
+* pac://https://example.com/proxy.pac
+````
 
 ---
 

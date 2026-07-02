@@ -62,6 +62,33 @@ fn system_proxy_reconcile_interval() -> Duration {
         None => Duration::from_secs(30),
     }
 }
+
+#[cfg(test)]
+fn with_system_proxy_reconcile_env_for_test<F>(value: Option<&str>, f: F)
+where
+    F: FnOnce() + std::panic::UnwindSafe,
+{
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
+
+    let _guard = LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let prev = std::env::var(VAR).ok();
+    match value {
+        Some(v) => std::env::set_var(VAR, v),
+        None => std::env::remove_var(VAR),
+    }
+    let result = std::panic::catch_unwind(f);
+    match prev {
+        Some(v) => std::env::set_var(VAR, v),
+        None => std::env::remove_var(VAR),
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
 #[cfg(target_os = "macos")]
 const SYSTEM_PROXY_WAKE_CHECK_INTERVAL: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
@@ -4812,18 +4839,11 @@ mod coverage_boost {
         port
     }
 
-    fn with_reconcile_env<F: FnOnce()>(value: Option<&str>, f: F) {
-        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
-        let prev = std::env::var(VAR).ok();
-        match value {
-            Some(v) => std::env::set_var(VAR, v),
-            None => std::env::remove_var(VAR),
-        }
-        f();
-        match prev {
-            Some(v) => std::env::set_var(VAR, v),
-            None => std::env::remove_var(VAR),
-        }
+    fn with_reconcile_env<F>(value: Option<&str>, f: F)
+    where
+        F: FnOnce() + std::panic::UnwindSafe,
+    {
+        with_system_proxy_reconcile_env_for_test(value, f);
     }
 
     #[test]
@@ -5232,28 +5252,16 @@ mod coverage_boost_v3 {
 
     #[test]
     fn system_proxy_reconcile_interval_trims_whitespace() {
-        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
-        let prev = std::env::var(VAR).ok();
-        std::env::set_var(VAR, " 7 ");
-        assert_eq!(system_proxy_reconcile_interval().as_secs(), 7);
-        if let Some(v) = prev {
-            std::env::set_var(VAR, v);
-        } else {
-            std::env::remove_var(VAR);
-        }
+        with_system_proxy_reconcile_env_for_test(Some(" 7 "), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 7);
+        });
     }
 
     #[test]
     fn system_proxy_reconcile_interval_ignores_negative_numbers() {
-        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
-        let prev = std::env::var(VAR).ok();
-        std::env::set_var(VAR, "-5");
-        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
-        if let Some(v) = prev {
-            std::env::set_var(VAR, v);
-        } else {
-            std::env::remove_var(VAR);
-        }
+        with_system_proxy_reconcile_env_for_test(Some("-5"), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
     }
 
     #[test]
@@ -5580,26 +5588,16 @@ second content
 
     #[test]
     fn system_proxy_reconcile_interval_uses_default_when_env_missing() {
-        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
-        let prev = std::env::var(VAR).ok();
-        std::env::remove_var(VAR);
-        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
-        if let Some(v) = prev {
-            std::env::set_var(VAR, v);
-        }
+        with_system_proxy_reconcile_env_for_test(None, || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
     }
 
     #[test]
     fn system_proxy_reconcile_interval_ignores_zero_value() {
-        const VAR: &str = "BIFROST_SYSTEM_PROXY_RECONCILE_SECS";
-        let prev = std::env::var(VAR).ok();
-        std::env::set_var(VAR, "0");
-        assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
-        if let Some(v) = prev {
-            std::env::set_var(VAR, v);
-        } else {
-            std::env::remove_var(VAR);
-        }
+        with_system_proxy_reconcile_env_for_test(Some("0"), || {
+            assert_eq!(system_proxy_reconcile_interval().as_secs(), 30);
+        });
     }
 
     #[test]

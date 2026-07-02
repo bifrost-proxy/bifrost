@@ -2,7 +2,7 @@
 
 ## 背景
 
-Bifrost 目前已经把 `pac` 注册为规则协议，但它只是占位能力：`pac://` 不会拉取远程 PAC 文件，也不会执行 `FindProxyForURL` JavaScript。现有 CLI 解析仅从字面量 `PROXY host:port` 中提取目标，并把它写入 `host` 路由字段。这与 PAC 的真实语义不一致，也容易让用户误以为远程 `.pac` 或内联脚本已经可用。
+Bifrost 已经把 `pac` 注册为规则协议。本方案第一阶段把 `pac://` 从占位能力升级为可执行的 PAC 路由：支持内嵌/Values/本地文件/远程 URL 加载 PAC 脚本，执行 `FindProxyForURL(url, host)`，并把 `DIRECT`、`PROXY`、`HTTP`、`HTTPS` 决策映射到当前请求的直连或上游代理链路。
 
 本方案把 `pac://` 设计为 Bifrost rules 的一等路由协议。用户通过规则显式声明哪些请求需要执行 PAC，PAC 脚本返回 `DIRECT`、`PROXY host:port`、`HTTPS host:port`、`SOCKS host:port` 或 `SOCKS5 host:port` 后，Bifrost 再把该决策映射到自身的上游路由/代理转发链路。
 
@@ -29,13 +29,14 @@ Bifrost 目前已经把 `pac` 注册为规则协议，但它只是占位能力�
 - 不在 PAC 脚本内支持异步 JavaScript、Promise、fetch、XMLHttpRequest 或 Node API。
 - 不支持 PAC 脚本修改请求头、响应体或 TLS 拦截策略；这些继续由其它 rule protocol 负责。
 
-## 当前实现差距
+## 当前实现状态
 
-- `Protocol::Pac` 已注册，但语法提示仍写着 not yet implemented。
-- CLI 解析函数 `parse_pac_proxy_target` 只从字面量 PAC 输出中提取 `PROXY host:port`。
-- `Protocol::Pac` 当前写入 `result.host` 和 `Protocol::Host`，不会生成 `result.proxy`。
-- 没有 PAC 脚本加载、编译、缓存、执行、helper 函数、诊断字段或 E2E。
-- 当前 `docs/rules/routing.md` 明确提示 PAC 未实现。
+- `Protocol::Pac` 语法提示、规则文档和站点文档已从占位说明更新为可用路由协议。
+- 旧的字面量 `PROXY host:port` -> `host` 路由映射已移除，PAC 决策现在作用于 `result.proxy`，`DIRECT` 会清除已有上游代理。
+- `bifrost-script` 已新增 PAC 专用 rquickjs 执行器，提供常见 PAC helper、脚本大小限制和执行超时。
+- `pac://{name}`、`pac:///abs/path.pac`、`pac://http(s)://...` 和短内联脚本均可作为 PAC 来源；远程 PAC 下载复用 Bifrost outbound client builder，仍不读取系统代理。
+- 已补充单元测试和真实 E2E：Values PAC、远程 PAC、PAC + host/proxy 转发、双 Bifrost 上游代理链路。
+- 尚未落地：`enable://proxyHost` 高级语义、Traffic/Overview PAC 诊断字段、连接失败后的多候选 fallback、WebUI 专用展示。
 
 ## 用户语法
 
@@ -252,7 +253,7 @@ pub struct ProxyHostOverride {
 
 ### bifrost-core
 
-- 扩展 `Protocol::Pac` 语义描述，移除 not yet implemented。
+- 扩展 `Protocol::Pac` 语义描述，移除占位提示。
 - 扩展 rule parser，保留 `pac://` value 的完整 `ValueSource`。
 - 增加 PAC rule config 和 resolved PAC diagnostic 字段。
 - 修改 resolver 为两阶段：原始请求解析 -> Final URL 构造 -> PAC 规则匹配与执行。
