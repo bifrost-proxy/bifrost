@@ -285,6 +285,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: RuleCommands,
     },
+    #[command(about = "Inspect and convert proxy profiles")]
+    Profile {
+        #[command(subcommand)]
+        action: ProfileCommands,
+    },
     #[command(about = "Manage groups and group rules")]
     Group {
         #[command(subcommand)]
@@ -1768,6 +1773,54 @@ pub enum TrafficCommands {
         #[arg(short, long, default_value = "human", value_parser = ["human", "json", "json-pretty"], help = "Output format")]
         format: String,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ProfileCommands {
+    #[command(
+        about = "Import a Surge profile in dry-run mode",
+        long_about = "Parse a Surge profile, preserve source locations, and print a compatibility report. This command never enables the profile or writes proxy runtime state."
+    )]
+    Import {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge .conf/.dconf/.sgmodule profile")]
+        profile: PathBuf,
+        #[arg(
+            long,
+            help = "Required for now; active import will be added in a later iteration"
+        )]
+        dry_run: bool,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    #[command(
+        about = "Explain a request under Surge profile semantics",
+        long_about = "Evaluate a URL or host against the parsed Surge [Rule] section using top-to-bottom first-match semantics."
+    )]
+    Explain {
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        profile: PathBuf,
+        #[arg(help = "URL or host to explain")]
+        target: String,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    #[command(
+        about = "Convert a Surge profile to a Bifrost preview",
+        long_about = "Generate a Bifrost native profile preview from a Surge profile. Unsupported or behavior-changing items stay commented for manual review."
+    )]
+    Convert {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        profile: PathBuf,
+        #[arg(long, value_enum, default_value_t = ProfileConvertTarget::Bifrost, help = "Conversion target")]
+        to: ProfileConvertTarget,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+}
+
+#[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ProfileConvertTarget {
+    Bifrost,
 }
 
 #[derive(Subcommand, Clone)]

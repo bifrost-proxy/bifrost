@@ -9,6 +9,7 @@ pub mod matcher;
 pub mod panic_handler;
 pub mod process_alias;
 pub mod process_start_time;
+pub mod profile;
 pub mod protocol;
 pub mod rule;
 pub mod rule_share;

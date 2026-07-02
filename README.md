@@ -151,6 +151,11 @@ bifrost rule add local-dev --content "example.com host://127.0.0.1:3000"
 
 # 编辑全局默认规则，主端口和所有临时端口都会自动生效
 bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
+
+# Surge profile 迁移预览（dry-run，不启用运行时）
+bifrost profile import ./surge.conf --dry-run
+bifrost profile explain --profile ./surge.conf https://example.com/path
+bifrost profile convert ./surge.conf --to bifrost
 ```
 
 搜索命令补充说明：

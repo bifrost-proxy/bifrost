@@ -22,11 +22,11 @@ use cli::{
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
     handle_config_command, handle_export_command, handle_group_command, handle_import_command,
-    handle_install_skill, handle_metrics_command, handle_port_command, handle_rule_command,
-    handle_script_command, handle_sync_command, handle_system_proxy_command, handle_upgrade,
-    handle_value_command, handle_whitelist_command, remote, run_restart, run_search, run_start,
-    run_status, run_status_tui, run_stop, run_traffic_auth_status, run_traffic_clear,
-    run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
+    handle_install_skill, handle_metrics_command, handle_port_command, handle_profile_command,
+    handle_rule_command, handle_script_command, handle_sync_command, handle_system_proxy_command,
+    handle_upgrade, handle_value_command, handle_whitelist_command, remote, run_restart,
+    run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_auth_status,
+    run_traffic_clear, run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
     spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions,
     TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
     TrafficReplayOptions,
@@ -321,6 +321,7 @@ fn run_cli_main() {
             }
         }
         Some(Commands::Rule { action }) => handle_rule_command(action),
+        Some(Commands::Profile { action }) => handle_profile_command(action),
         Some(Commands::Group { action }) => handle_group_command(action),
         Some(Commands::Port { action }) => handle_port_command(action),
         Some(Commands::Ca { action }) => handle_ca_command(action),
