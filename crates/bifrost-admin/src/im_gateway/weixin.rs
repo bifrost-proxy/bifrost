@@ -72,7 +72,7 @@ impl Default for WeixinProvider {
 
 impl WeixinProvider {
     pub fn new() -> Self {
-        let http = reqwest::Client::builder()
+        let http = bifrost_core::outbound_reqwest_client_builder()
             .timeout(Duration::from_secs(30))
             .build()
             .unwrap_or_default();

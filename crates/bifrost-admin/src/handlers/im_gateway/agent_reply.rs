@@ -443,7 +443,7 @@ pub(super) fn is_remote_markdown_image_attachment_candidate(raw_url: &str) -> bo
 async fn download_agent_reply_remote_image(
     image: &AgentReplyRemoteImage,
 ) -> bifrost_core::Result<AgentReplyLocalImage> {
-    let http = bifrost_core::direct_reqwest_client_builder()
+    let http = bifrost_core::outbound_reqwest_client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|error| {
@@ -452,7 +452,10 @@ async fn download_agent_reply_remote_image(
             ))
         })?;
     let response = http.get(&image.url).send().await.map_err(|error| {
-        bifrost_core::BifrostError::Network(format!("download agent reply image failed: {error}"))
+        bifrost_core::BifrostError::Network(format!(
+            "download agent reply image failed: {}",
+            bifrost_core::format_reqwest_error(&error)
+        ))
     })?;
     if !response.status().is_success() {
         return Err(bifrost_core::BifrostError::Network(format!(

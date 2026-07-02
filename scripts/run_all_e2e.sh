@@ -43,6 +43,7 @@ STABLE_SHELL_TESTS=(
   "test_tls_intercept_mode_api.sh"
   "test_bifrost_file_syntax_admin_api.sh"
   "test_sync_login_direct_e2e.sh"
+  "test_upgrade_tls_trust_e2e.sh"
   "test_setting_ssh_key_cli.sh"
   "test_ssh_key_file_policy_migration.sh"
   "test_multiline_rule_filter_e2e.sh"
@@ -653,6 +654,7 @@ shell_test_weight() {
     test_total_size_cleanup_admin_api.sh) echo 31 ;;
     test_remote_file_relay_e2e.sh) echo 29 ;;
     test_traffic_db_e2e.sh) echo 27 ;;
+    test_upgrade_tls_trust_e2e.sh) echo 26 ;;
     test_req_res_script_e2e.sh) echo 27 ;;
     test_large_body_protection.sh) echo 24 ;;
     test_socks5_tls_rules.sh) echo 23 ;;

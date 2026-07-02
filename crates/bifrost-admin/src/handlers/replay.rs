@@ -385,10 +385,11 @@ async fn execute_replay_unified(
         .unwrap_or(crate::replay_executor::DEFAULT_TIMEOUT_MS);
 
     let unsafe_ssl = state.runtime_config.read().await.unsafe_ssl;
-    let client = bifrost_core::direct_reqwest_client_builder()
-        .danger_accept_invalid_certs(unsafe_ssl)
-        .build()
-        .unwrap_or_default();
+    let mut client_builder = bifrost_core::outbound_reqwest_client_builder();
+    if unsafe_ssl {
+        client_builder = client_builder.danger_accept_invalid_certs(true);
+    }
+    let client = client_builder.build().unwrap_or_default();
 
     let mut req_builder = match applied_request.method.to_uppercase().as_str() {
         "POST" => client.post(&applied_request.url),

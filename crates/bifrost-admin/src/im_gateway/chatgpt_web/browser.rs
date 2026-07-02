@@ -44,7 +44,7 @@ fn browser_pids() -> &'static DashMap<PathBuf, u32> {
 }
 
 fn browser_http_client() -> reqwest::Client {
-    bifrost_core::direct_reqwest_client_builder()
+    bifrost_core::outbound_reqwest_client_builder()
         .build()
         .expect("build ChatGPT browser HTTP client")
 }

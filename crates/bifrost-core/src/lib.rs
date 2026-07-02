@@ -30,10 +30,14 @@ pub use error::{BifrostError, Result};
 pub use http_client::{
     apply_remote_relay_headers, direct_blocking_reqwest_client_builder,
     direct_reqwest_client_builder, direct_sse_reqwest_client_builder, direct_ureq_agent,
-    direct_ureq_agent_builder, load_reqwest_certificate, parse_remote_relay_headers,
-    proxied_reqwest_client_builder, remote_relay_headers_from_env,
+    direct_ureq_agent_builder, format_reqwest_error, github_blocking_reqwest_client_builder,
+    github_reqwest_client_builder, load_reqwest_certificate,
+    outbound_blocking_reqwest_client_builder, outbound_reqwest_client_builder,
+    parse_remote_relay_headers, proxied_reqwest_client_builder, remote_relay_headers_from_env,
     remote_relay_reqwest_client_builder, remote_relay_sse_reqwest_client_builder,
-    REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV, REMOTE_UNSAFE_SSL_ENV,
+    BIFROST_CA_BUNDLE_ENV, BIFROST_CA_DIR_ENV, BIFROST_UNSAFE_SSL_ENV, GITHUB_CA_BUNDLE_ENV,
+    GITHUB_CA_DIR_ENV, GITHUB_UNSAFE_SSL_ENV, REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV,
+    REMOTE_UNSAFE_SSL_ENV, UPGRADE_CA_BUNDLE_ENV, UPGRADE_CA_DIR_ENV, UPGRADE_UNSAFE_SSL_ENV,
 };
 pub use logging::{
     cleanup_bifrost_log_dir, init_logging, init_logging_with_config, reinit_logging_for_daemon,

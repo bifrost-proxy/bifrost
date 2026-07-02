@@ -631,6 +631,8 @@ bifrost upgrade
 bifrost version-check         # 仅检查新版本，不升级
 ```
 
+GitHub 更新检查、升级下载与 `install-skill` 拉取 GitHub raw 在企业 MITM / Linux 沙箱 / CI 私有根证书环境中，优先信任系统 CA；系统 trust store 不可控时可设置 `BIFROST_GITHUB_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_UPGRADE_CA_BUNDLE=/path/to/ca.pem`。Sync/登录/云端接口、AI/Agent provider、MCP OAuth、ASR/语音模型下载、脚本 `net.fetch`、规则远程 URL 等通用外部 HTTPS 链路可设置 `BIFROST_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_CA_DIR=/path/to/certs`。同时兼容 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` 等常见 CA 来源。只有确认 CA 无法注入且处于受控环境时，才用 `BIFROST_UPGRADE_UNSAFE_SSL=1`、`BIFROST_GITHUB_UNSAFE_SSL=1` 或 `BIFROST_UNSAFE_SSL=1` 作为最终兜底；它们不等同于代理服务 `--unsafe-ssl`，`bifrost remote` 仍优先使用 `BIFROST_REMOTE_UNSAFE_SSL` 作为 scoped 兜底。
+
 ### 15. 导入 / 导出
 
 ```bash

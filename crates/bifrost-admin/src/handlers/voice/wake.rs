@@ -1627,17 +1627,29 @@ fn download_voice_wake_kws_archive(destination: &Path) -> Result<(), String> {
         return Ok(());
     }
     let temp_path = destination.with_extension("download");
-    let agent = ureq::AgentBuilder::new()
+    let client = bifrost_core::outbound_blocking_reqwest_client_builder()
         .timeout(Duration::from_secs(30 * 60))
-        .build();
-    let response = agent
+        .build()
+        .map_err(|error| format!("create HTTP client: {error}"))?;
+    let mut response = client
         .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
-        .call()
-        .map_err(|error| format!("download voice wake KWS model: {error}"))?;
-    let mut reader = response.into_reader();
+        .send()
+        .map_err(|error| {
+            format!(
+                "download voice wake KWS model: {}",
+                bifrost_core::format_reqwest_error(&error)
+            )
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            format!(
+                "download voice wake KWS model: {}",
+                bifrost_core::format_reqwest_error(&error)
+            )
+        })?;
     let mut output = std::fs::File::create(&temp_path)
         .map_err(|error| format!("create {}: {error}", temp_path.display()))?;
-    std::io::copy(&mut reader, &mut output)
+    std::io::copy(&mut response, &mut output)
         .map_err(|error| format!("write {}: {error}", temp_path.display()))?;
     drop(output);
     let len = temp_path
@@ -1772,7 +1784,7 @@ async fn download_voice_wake_kws_archive_async(
     }
 
     let temp_path = destination.with_extension("download");
-    let client = reqwest::Client::builder()
+    let client = bifrost_core::outbound_reqwest_client_builder()
         .timeout(Duration::from_secs(30 * 60))
         .build()
         .map_err(|e| format!("create HTTP client: {e}"))?;
@@ -1781,7 +1793,12 @@ async fn download_voice_wake_kws_archive_async(
         .get(DEFAULT_WAKE_KWS_ARCHIVE_URL)
         .send()
         .await
-        .map_err(|e| format!("download KWS model: {e}"))?;
+        .map_err(|e| {
+            format!(
+                "download KWS model: {}",
+                bifrost_core::format_reqwest_error(&e)
+            )
+        })?;
 
     if !response.status().is_success() {
         return Err(format!("download KWS model: HTTP {}", response.status()));

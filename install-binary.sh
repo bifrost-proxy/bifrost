@@ -251,6 +251,54 @@ has_command() {
     command -v "$1" >/dev/null 2>&1
 }
 
+select_ca_bundle_file() {
+    local name value
+    for name in \
+        BIFROST_GITHUB_CA_BUNDLE \
+        BIFROST_UPGRADE_CA_BUNDLE \
+        BIFROST_CA_BUNDLE \
+        SSL_CERT_FILE \
+        CURL_CA_BUNDLE \
+        REQUESTS_CA_BUNDLE; do
+        value="${!name:-}"
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+select_ca_bundle_dir() {
+    local name value
+    for name in \
+        BIFROST_GITHUB_CA_DIR \
+        BIFROST_UPGRADE_CA_DIR \
+        BIFROST_CA_DIR \
+        SSL_CERT_DIR; do
+        value="${!name:-}"
+        if [[ -n "$value" ]]; then
+            echo "$value"
+            return 0
+        fi
+    done
+    return 1
+}
+
+unsafe_ssl_enabled() {
+    local name value lower
+    for name in BIFROST_GITHUB_UNSAFE_SSL BIFROST_UPGRADE_UNSAFE_SSL BIFROST_UNSAFE_SSL; do
+        value="${!name:-}"
+        lower="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+        case "$lower" in
+            1|true|yes|on)
+                return 0
+                ;;
+        esac
+    done
+    return 1
+}
+
 install_binary_atomically() {
     local source_path="$1"
     local dest_path="$2"
@@ -289,9 +337,19 @@ probe_github_url() {
     local url="$1"
     local connect_timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-5}"
     local probe_timeout="${BIFROST_MIRROR_PROBE_TIMEOUT:-5}"
+    local ca_file ca_dir
+    ca_file="$(select_ca_bundle_file || true)"
+    ca_dir="$(select_ca_bundle_dir || true)"
+    local unsafe_ssl=0
+    unsafe_ssl_enabled && unsafe_ssl=1
 
     if has_command curl; then
+        local curl_ca_args=()
+        [[ -n "$ca_file" ]] && curl_ca_args+=(--cacert "$ca_file")
+        [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
         curl -fsSIL \
+            "${curl_ca_args[@]}" \
             --connect-timeout "$connect_timeout" \
             --max-time "$probe_timeout" \
             -o /dev/null \
@@ -299,7 +357,12 @@ probe_github_url() {
     fi
 
     if has_command wget; then
+        local wget_ca_args=()
+        [[ -n "$ca_file" ]] && wget_ca_args+=(--ca-certificate="$ca_file")
+        [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
         wget -q --spider \
+            "${wget_ca_args[@]}" \
             --max-redirect=5 \
             --connect-timeout="$connect_timeout" \
             --timeout="$probe_timeout" \
@@ -446,6 +509,11 @@ download_with_tool() {
 
     output_dir="$(cd "$(dirname "$output")" && pwd)"
     output_name="$(basename "$output")"
+    local ca_file ca_dir
+    ca_file="$(select_ca_bundle_file || true)"
+    ca_dir="$(select_ca_bundle_dir || true)"
+    local unsafe_ssl=0
+    unsafe_ssl_enabled && unsafe_ssl=1
 
     case "$tool" in
         aria2c)
@@ -455,9 +523,13 @@ download_with_tool() {
             else
                 aria2_summary_arg=(--summary-interval=1 --console-log-level=notice)
             fi
+            local aria2_ca_args=()
+            [[ -n "$ca_file" ]] && aria2_ca_args+=(--ca-certificate="$ca_file")
+            [[ "$unsafe_ssl" == "1" ]] && aria2_ca_args+=(--check-certificate=false)
             aria2c --no-conf -x 16 -s 16 --max-connection-per-server=16 \
                    --min-split-size=1M --allow-overwrite=true \
                    "${aria2_summary_arg[@]}" \
+                   "${aria2_ca_args[@]}" \
                    --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                    --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                    --max-tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -468,6 +540,12 @@ download_with_tool() {
             local axel_args=(-n 16 -o "$output")
             if [[ "$show_progress" == "0" ]]; then
                 axel_args=(-q "${axel_args[@]}")
+            fi
+            if [[ -n "$ca_file" ]] && axel --help 2>&1 | grep -q -- '--ca-certificate'; then
+                axel_args=(--ca-certificate="$ca_file" "${axel_args[@]}")
+            fi
+            if [[ "$unsafe_ssl" == "1" ]] && axel --help 2>&1 | grep -q -- '--insecure'; then
+                axel_args=(--insecure "${axel_args[@]}")
             fi
             if has_command timeout; then
                 timeout "$axel_timeout" axel "${axel_args[@]}" "$url"
@@ -480,7 +558,12 @@ download_with_tool() {
             if [[ "$show_progress" != "0" ]]; then
                 wget_progress_args=(--show-progress --progress=bar:force:noscroll)
             fi
+            local wget_ca_args=()
+            [[ -n "$ca_file" ]] && wget_ca_args+=(--ca-certificate="$ca_file")
+            [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
+            [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
             wget "${wget_progress_args[@]}" \
+                "${wget_ca_args[@]}" \
                 --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -494,7 +577,12 @@ download_with_tool() {
             if [[ "$show_progress" != "0" ]]; then
                 curl_progress_args=(-fL --progress-bar)
             fi
+            local curl_ca_args=()
+            [[ -n "$ca_file" ]] && curl_ca_args+=(--cacert "$ca_file")
+            [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
+            [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
             curl "${curl_progress_args[@]}" \
+                "${curl_ca_args[@]}" \
                 --connect-timeout "${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --max-time "${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --retry "$curl_retries" \
@@ -544,20 +632,33 @@ validate_downloaded_file() {
 github_api_request() {
     local url="$1"
     local result=""
+    local ca_file ca_dir
+    ca_file="$(select_ca_bundle_file || true)"
+    ca_dir="$(select_ca_bundle_dir || true)"
+    local unsafe_ssl=0
+    unsafe_ssl_enabled && unsafe_ssl=1
 
     if command -v curl &> /dev/null; then
+        local curl_ca_args=()
+        [[ -n "$ca_file" ]] && curl_ca_args+=(--cacert "$ca_file")
+        [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            result=$(curl -sL --connect-timeout 10 --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(curl -sL "${curl_ca_args[@]}" --connect-timeout 10 --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         else
-            result=$(curl -sL --connect-timeout 10 --max-time 30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(curl -sL "${curl_ca_args[@]}" --connect-timeout 10 --max-time 30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         fi
     fi
 
     if command -v wget &> /dev/null; then
+        local wget_ca_args=()
+        [[ -n "$ca_file" ]] && wget_ca_args+=(--ca-certificate="$ca_file")
+        [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            result=$(wget -qO- --connect-timeout=10 --timeout=30 --header="Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(wget -qO- "${wget_ca_args[@]}" --connect-timeout=10 --timeout=30 --header="Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         else
-            result=$(wget -qO- --connect-timeout=10 --timeout=30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(wget -qO- "${wget_ca_args[@]}" --connect-timeout=10 --timeout=30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         fi
     fi
 
@@ -568,13 +669,26 @@ get_latest_version_via_redirect() {
     local base_url="${1:-https://github.com}"
     local redirect_url="${base_url}/${REPO}/releases/latest"
     local location=""
+    local ca_file ca_dir
+    ca_file="$(select_ca_bundle_file || true)"
+    ca_dir="$(select_ca_bundle_dir || true)"
+    local unsafe_ssl=0
+    unsafe_ssl_enabled && unsafe_ssl=1
 
     if command -v curl &> /dev/null; then
-        location=$(curl -sI -o /dev/null -w '%{url_effective}' -L --connect-timeout 10 --max-time 20 "$redirect_url" 2>/dev/null) || location=""
+        local curl_ca_args=()
+        [[ -n "$ca_file" ]] && curl_ca_args+=(--cacert "$ca_file")
+        [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
+        location=$(curl -sI "${curl_ca_args[@]}" -o /dev/null -w '%{url_effective}' -L --connect-timeout 10 --max-time 20 "$redirect_url" 2>/dev/null) || location=""
     fi
 
     if [[ -z "$location" ]] && command -v wget &> /dev/null; then
-        location=$(wget --spider -S --max-redirect=5 --connect-timeout=10 --timeout=20 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
+        local wget_ca_args=()
+        [[ -n "$ca_file" ]] && wget_ca_args+=(--ca-certificate="$ca_file")
+        [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
+        [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
+        location=$(wget "${wget_ca_args[@]}" --spider -S --max-redirect=5 --connect-timeout=10 --timeout=20 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
     fi
 
     if [[ -n "$location" ]]; then

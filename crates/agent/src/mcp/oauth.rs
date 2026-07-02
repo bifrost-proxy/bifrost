@@ -463,7 +463,7 @@ pub async fn discover_oauth_metadata(
     let parsed =
         Url::parse(base_url).map_err(|e| anyhow::anyhow!("invalid base URL '{base_url}': {e}"))?;
 
-    let client = bifrost_core::direct_reqwest_client_builder()
+    let client = bifrost_core::outbound_reqwest_client_builder()
         .timeout(DISCOVERY_TIMEOUT)
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
@@ -561,7 +561,7 @@ pub async fn register_client(
     client_name: &str,
     redirect_uri: &str,
 ) -> anyhow::Result<RegistrationResponse> {
-    let client = bifrost_core::direct_reqwest_client_builder()
+    let client = bifrost_core::outbound_reqwest_client_builder()
         .timeout(Duration::from_secs(10))
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
@@ -930,7 +930,7 @@ async fn exchange_code_for_token(
     redirect_uri: &str,
     code_verifier: &str,
 ) -> anyhow::Result<TokenResponse> {
-    let client = bifrost_core::direct_reqwest_client_builder()
+    let client = bifrost_core::outbound_reqwest_client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
@@ -989,7 +989,7 @@ impl OAuthTokenRefresher {
 
     /// Refresh an access token using a refresh_token.
     pub async fn refresh(&self, refresh_token: &str) -> anyhow::Result<TokenResponse> {
-        let client = bifrost_core::direct_reqwest_client_builder()
+        let client = bifrost_core::outbound_reqwest_client_builder()
             .timeout(Duration::from_secs(30))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;
@@ -1096,7 +1096,7 @@ impl AuthProvider {
         _oauth_resource: Option<&str>,
         data_dir: &Path,
     ) -> anyhow::Result<Self> {
-        let http_client = bifrost_core::direct_reqwest_client_builder()
+        let http_client = bifrost_core::outbound_reqwest_client_builder()
             .timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| anyhow::anyhow!("failed to build HTTP client: {e}"))?;

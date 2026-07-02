@@ -586,17 +586,29 @@ fn download_model_asset_if_needed(
             .map_err(|error| format!("create model asset dir: {error}"))?;
     }
     let temp_path = destination.with_extension("download");
-    let agent = ureq::AgentBuilder::new()
+    let client = bifrost_core::outbound_blocking_reqwest_client_builder()
         .timeout(Duration::from_secs(30 * 60))
-        .build();
-    let response = agent
+        .build()
+        .map_err(|error| format!("create HTTP client: {error}"))?;
+    let mut response = client
         .get(url)
-        .call()
-        .map_err(|error| format!("download diarization model {url}: {error}"))?;
-    let mut reader = response.into_reader();
+        .send()
+        .map_err(|error| {
+            format!(
+                "download diarization model {url}: {}",
+                bifrost_core::format_reqwest_error(&error)
+            )
+        })?
+        .error_for_status()
+        .map_err(|error| {
+            format!(
+                "download diarization model {url}: {}",
+                bifrost_core::format_reqwest_error(&error)
+            )
+        })?;
     let mut output = std::fs::File::create(&temp_path)
         .map_err(|error| format!("create model asset {}: {error}", temp_path.display()))?;
-    std::io::copy(&mut reader, &mut output)
+    std::io::copy(&mut response, &mut output)
         .map_err(|error| format!("write model asset {}: {error}", temp_path.display()))?;
     drop(output);
     if !model_file_has_min_size(&temp_path, min_bytes) {

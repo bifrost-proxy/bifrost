@@ -137,11 +137,15 @@ impl ValueSource {
             ValueSource::ValueRef(var_name) => store.get(var_name),
             ValueSource::FilePath(path) => std::fs::read_to_string(path).ok(),
             ValueSource::RemoteUrl(url) => {
-                let agent = crate::direct_ureq_agent_builder()
+                let client = crate::outbound_blocking_reqwest_client_builder()
                     .timeout(Duration::from_secs(5))
-                    .build();
-                let response = agent.get(url).call().ok()?;
-                response.into_string().ok()
+                    .build()
+                    .ok()?;
+                let response = client.get(url).send().ok()?;
+                if !response.status().is_success() {
+                    return None;
+                }
+                response.text().ok()
             }
         }
     }

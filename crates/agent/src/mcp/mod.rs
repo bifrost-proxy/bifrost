@@ -733,7 +733,7 @@ impl McpHttpNetwork {
                 },
             );
         }
-        Ok(bifrost_core::direct_reqwest_client_builder())
+        Ok(bifrost_core::outbound_reqwest_client_builder())
     }
 }
 
