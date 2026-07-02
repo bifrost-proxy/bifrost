@@ -5235,6 +5235,63 @@ rm -rf /tmp/bifrost-remote-overload.*
 |---------|------|---------|
 | TC-RI-回归-151 | ✅ PASS | 2026-06-30 执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin list_grants_and_cleanup_ --lib` 通过，4/4 PASS。测试构造 stale inactive grant、recent grant、recently-used grant、active-call grant 与 consumed active-call grant，确认 `list_grants_and_cleanup()` 只清理超过 48 小时未活动且没有 active call 的 stale grant，并保留最近活动和运行中授权上下文。 |
 
+## TC-RI-回归-152：Remote Invoke no-AAD frame 必须绑定 counter nonce 与外层 seq
+
+**背景**：Remote Invoke 加密 stream frame / exit frame 使用 no-AAD wire format 时，接收端必须校验 payload nonce 与外层 `direction + seq` 完全一致。否则攻击者可复用同一 ciphertext/nonce 并篡改外层 `seq` 绕过 HashSet replay window，或用高 `seq` 的伪造 envelope 污染 replay window，导致后续真实 frame 被拒绝。
+
+### 操作步骤
+
+1. 执行 target client 侧回归：
+   `cargo test -p bifrost-admin handle_call_frame_rejects_seq_mismatch_without_poisoning_replay_window --lib`
+2. 执行 caller 侧 stream frame 回归：
+   `cargo test -p bifrost-cli decrypt_frame_chunk_rejects_outer_seq_tamper_for_counter_nonce --lib`
+3. 执行 caller 侧 exit frame 回归：
+   `cargo test -p bifrost-cli decrypt_exit_payload_without_aad_requires_exit_counter_nonce --lib`
+4. 复跑 Remote Invoke 主流程 E2E：
+   `NODE_BIN=$(command -v node) BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh`
+
+### 预期结果
+
+- target client 收到 payload nonce 与外层 `seq` 不匹配的 caller input frame 时拒绝该 frame，且不更新 replay window；随后相同 payload 使用正确外层 `seq` 仍可被正常转发到 stdin。
+- caller 收到 client-to-caller frame 时必须校验 payload nonce 与外层 `seq` 一致；篡改外层 `seq` 的 no-AAD frame 返回 `counter nonce` 错误。
+- caller 解密 no-AAD exit payload 时只接受 `client_to_caller + seq=0` 的保留 counter nonce；其它 nonce 返回 `counter nonce` 错误。
+- Remote Invoke 主流程 E2E 继续通过，证明新增校验不破坏正常 pair-code、grant、frame、exit、重启与 stale connection 清理链路。
+- 全流程使用随机端口和隔离数据目录，启动参数包含 `--no-system-proxy`，不使用 9900，不修改系统代理。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-152 | ✅ PASS | 2026-07-02 执行 `cargo test -p bifrost-admin handle_call_frame_rejects_seq_mismatch_without_poisoning_replay_window --lib` 通过，确认 target client 拒绝 outer seq 与 payload counter nonce 不匹配的 stdin frame 且不污染 replay window；执行 `cargo test -p bifrost-cli counter_nonce --lib` 通过，确认 caller 侧 stream frame 篡改 outer seq 与 no-AAD exit 非保留 nonce 均返回 `counter nonce` 错误。随后执行 `NODE_BIN=$(command -v node) BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_e2e.sh`，本地 relay、target admin、caller 与 mock HTTP 全部使用随机端口和隔离数据目录，完整通过 pair-code connect、审批、grant 创建、remote status、traffic list/get/search、拒绝配对、relay token 鉴权、client 重启恢复、fresh reconnect、disconnect 与 grants 清理，最终 `All assertions: total=91 passed=91 failed=0`。本轮还先复现了 approve 500 根因：relay 未转发 caller ephemeral signature；修复后最小本机配对复现中 approve 返回 200，caller 输出 `Connected! Authorization granted`，证明 fail-closed 签名校验与真实 relay 链路同时可用。 |
+
+## TC-RI-回归-153：PPE V4 Relay 真实双端全 Remote 能力必须通过
+
+**背景**：`ppe_ticket_system` PPE 环境已部署 `https://bifrost.bytedance.net` 的 V4 Relay。发布前必须在本机启动两个 Bifrost 端：target 使用临时数据目录启动并从默认 `~/.bifrost/sync-state.json` 读取登录 token 注册到 PPE relay，caller 使用独立临时数据目录连接同一 relay，验证 code 授权、SSH key 授权、remote traffic、remote file、remote exec/run/job、remote keep-awake 与连接清理全部可用。
+
+### 操作步骤
+
+1. 确认默认 token 文件存在且包含 token：
+   `ls -l ~/.bifrost/sync-state.json && jq -r 'has("token"), (.token|type)' ~/.bifrost/sync-state.json`。
+2. 执行 PPE full remote 矩阵：
+   `RUN_LOCAL_CASES=0 RUN_SERVER_V4_CASES=0 RUN_REMOTE_RELAY_CASES=1 KEEP_TMP=1 BIFROST_REMOTE_RELAY_URL='https://bifrost.bytedance.net' BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1' BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。
+3. 若 target 在 `remote file read` 阶段退出，检查 `$TMP_ROOT/target/logs/bifrost.err`，确认没有 `stack overflow, aborting`。
+4. 检查脚本 SUMMARY，确认 code 授权、power grant、SSH key 授权和清理均 PASS。
+
+### 预期结果
+
+- target 端使用临时数据目录启动，启动参数包含 `--no-system-proxy --no-tray --skip-cert-check --unsafe-ssl`，不会修改系统代理。
+- target 从默认 sync-state 读取 token 后成功注册 PPE relay，并获得 `Connected` 状态与真实 `client_id`。
+- caller 通过 pair code 完成授权，approve 返回成功，后续 remote status、traffic list/get/search、file 全子命令、exec/run/job 全部通过。
+- power grant 下 `remote keep-awake status/on/mode get/mode set/off` 全部通过。
+- SSH key 授权通过 PPE relay 完成 challenge/connect，SSH grant 下 remote status、traffic、file、exec/run/job、keep-awake 全部通过。
+- 最后执行 `remote conn down --all` 清理连接；脚本退出码为 0。
+
+### 实际执行结果
+
+| 用例编号 | 结果 | 实际结果 |
+|---------|------|---------|
+| TC-RI-回归-153 | ✅ PASS | 2026-07-02 先执行 PPE full remote 矩阵复现问题：target 在 `remote file read` 阶段退出，`/tmp/bifrost-relay-full.evfjfw/target/logs/bifrost.err` 与 `/tmp/bifrost-relay-full.pOnDK3/target/logs/bifrost.err` 均显示 `thread 'tokio-rt-worker' ... has overflowed its stack` / `fatal runtime error: stack overflow, aborting`；修复 `bifrost start` runtime 使用 8 MiB tokio worker stack，并补充 `execute_file_read_with_absolute_temp_path_returns_json` 多线程 tokio 回归后，重新执行上述 PPE 命令通过。最终 SUMMARY 显示 `relay mode=PPE relay_url=https://bifrost.bytedance.net headers=x-tt-env=ppe_ticket_system,x-use-ppe=1`、target `port=53130`、`client_id=b2b3297e-c240-4553-83d1-ef8babe65fa1`、code grant `5ee9afe97fb5c001`、power grant `19b7057e2a1bcb36`；`code remote conn status`、`code remote traffic list`、`code remote traffic get/search`、`code remote file all subcommands`、`code remote exec/run/job`、`code-power remote keep-awake all subcommands`、`ssh-key authorization connected via relay`、`ssh remote traffic get/search`、`ssh remote file all subcommands`、`ssh remote exec/run/job`、`ssh remote keep-awake all subcommands` 和 `remote conn down cleanup` 全部 PASS。脚本退出码 0，保留临时目录 `/tmp/bifrost-relay-full.lavFJX`，二进制 `target/debug/bifrost` SHA256 为 `20b182e8e2d3a47a10ad67e859cb9864a557d78b7669dc2a6d7ebc4601195736`。 |
+
 > 说明：核心可测逻辑（行数推导 `visible_table_rows`、列宽预算 `adaptive_column_widths`）已抽成纯函数，
 > 由 `crates/bifrost-cli/src/commands/status_tui.rs` 的单元测试覆盖；TUI 实时渲染部分已在
 > macOS PTY 与临时 Bifrost E2E 中按上述用例核对。

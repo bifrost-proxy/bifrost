@@ -44,14 +44,15 @@ use super::stream_emit;
 use super::types::{
     build_registration_signature_payload, decrypt_encrypted_payload_without_aad,
     decrypt_remote_command_payload, derive_call_session_key, derive_open_call_session_key,
-    encrypt_encrypted_payload_without_aad, grant_mode_ttl_ms, scope_allows_command, AuthMethod,
-    CallInfo, CallStatus, CallerInfo, ClientCallExitRequest, ClientCallFrameRequest,
-    ClientCallStreamFrameRequest, ClientHeartbeatRequest, ClientRegistrationChallengeRequest,
-    ClientRegistrationRequest, CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope,
-    EncryptedPayload, EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision,
-    GrantDecisionRequest, GrantInfo, GrantMode, GrantScope, GrantStatus, PairingRequest,
-    PublishPairCodeRequest, RemoteCommand, RemoteInvokeConfig, SshConnectEvent,
-    SshConnectResultRequest, SshConnectResultStatus, UpdateGrantRequest, WorkerState,
+    encrypt_encrypted_payload_counter, grant_mode_ttl_ms, scope_allows_command,
+    verify_encrypted_payload_counter_nonce, AuthMethod, CallInfo, CallStatus, CallerInfo,
+    ClientCallExitRequest, ClientCallFrameRequest, ClientCallStreamFrameRequest,
+    ClientHeartbeatRequest, ClientRegistrationChallengeRequest, ClientRegistrationRequest,
+    CommandKind, CommandSummary, DiscoverySession, EncryptedEnvelope, EncryptedPayload,
+    EnvelopeAad, FileAccessScope, FrameDirection, GrantDecision, GrantDecisionRequest, GrantInfo,
+    GrantMode, GrantScope, GrantStatus, PairingRequest, PublishPairCodeRequest, RemoteCommand,
+    RemoteInvokeConfig, SshConnectEvent, SshConnectResultRequest, SshConnectResultStatus,
+    UpdateGrantRequest, WorkerState,
 };
 use crate::state::SharedAdminState;
 
@@ -74,6 +75,64 @@ fn normalize_registration_session_token(token: Option<String>) -> Option<String>
 struct TimestampedPairing {
     request: PairingRequest,
     received_at: u64,
+    // P0-A: caller-supplied Ed25519 signature over its own ephemeral pubkey
+    // (base64). None for legacy callers; verification is fail-closed only when
+    // present. The caller long-term pubkey travels in `request.caller_info`.
+    caller_ephemeral_sig: Option<String>,
+}
+/// P1-B: per-call sliding-window replay guard for inbound (caller->client)
+/// frames. Frames carry a monotonic `seq`; a duplicate or out-of-window
+/// regressed seq is rejected. Combined with the P1-A counter nonce this makes
+/// each accepted frame use a fresh (key, nonce) pair AND be non-replayable.
+///
+/// Window semantics (mirrors DTLS/IPsec anti-replay):
+///   * `highest` is the largest accepted seq so far.
+///   * `bitmap` marks acceptance of the `WINDOW` seqs ending at `highest`.
+///   * seq > highest            -> accept, slide window.
+///   * highest-WINDOW < seq <= highest and not yet seen -> accept.
+///   * otherwise (dup or too old) -> reject.
+#[derive(Default)]
+struct ReplayWindow {
+    highest: u64,
+    seen_highest: bool,
+    bitmap: u64,
+}
+
+impl ReplayWindow {
+    const WINDOW: u64 = 64;
+
+    /// Returns true if `seq` is fresh and should be accepted; false if it is a
+    /// replay/out-of-window frame that must be dropped.
+    fn accept(&mut self, seq: u64) -> bool {
+        if !self.seen_highest {
+            self.seen_highest = true;
+            self.highest = seq;
+            self.bitmap = 1;
+            return true;
+        }
+        if seq > self.highest {
+            let shift = seq - self.highest;
+            if shift >= Self::WINDOW {
+                self.bitmap = 1;
+            } else {
+                self.bitmap = (self.bitmap << shift) | 1;
+            }
+            self.highest = seq;
+            return true;
+        }
+        let offset = self.highest - seq;
+        if offset >= Self::WINDOW {
+            // Too old: outside the window, treat as replay.
+            return false;
+        }
+        let mask = 1u64 << offset;
+        if self.bitmap & mask != 0 {
+            // Already seen: duplicate.
+            return false;
+        }
+        self.bitmap |= mask;
+        true
+    }
 }
 
 struct ActiveCallControl {
@@ -83,6 +142,8 @@ struct ActiveCallControl {
     call_info: Mutex<Option<CallInfo>>,
     task: Mutex<Option<tokio::task::JoinHandle<()>>>,
     stdin_tx: Mutex<Option<tokio::sync::mpsc::Sender<Vec<u8>>>>,
+    // P1-B: per-call inbound (caller->client) anti-replay window.
+    inbound_replay: Mutex<ReplayWindow>,
 }
 
 impl ActiveCallControl {
@@ -94,6 +155,7 @@ impl ActiveCallControl {
             call_info: Mutex::new(None),
             task: Mutex::new(None),
             stdin_tx: Mutex::new(None),
+            inbound_replay: Mutex::new(ReplayWindow::default()),
         }
     }
 
@@ -151,6 +213,12 @@ impl ActiveCallControl {
         stdin_rx
     }
 
+    /// P1-B: returns true if the inbound (caller->client) frame `seq` is fresh
+    /// and should be processed; false if it is a replay/out-of-window frame.
+    fn accept_inbound_seq(&self, seq: u64) -> bool {
+        self.inbound_replay.lock().accept(seq)
+    }
+
     async fn send_stdin(&self, bytes: Vec<u8>) -> Result<()> {
         let tx = self.stdin_tx.lock().clone();
         let Some(tx) = tx else {
@@ -195,6 +263,16 @@ struct GrantCryptoMaterial {
     shared_secret: Vec<u8>,
     caller_ephemeral_pub: String,
     client_ephemeral_pub: String,
+    // P0-A #4 channel binding (DEFERRED ACTIVATION): SHA-256 fingerprints of
+    // both long-term keys, computed + pinned during build_grant_crypto_material.
+    // Currently NOT fed into the HKDF info at the production derive sites because
+    // the caller (bifrost-cli) does not yet append them, and "两端对称是硬约束".
+    // Kept here (and covered by unit tests) so both ends can be flipped on in
+    // lockstep later. #[allow(dead_code)] until that activation lands.
+    #[allow(dead_code)]
+    caller_long_term_fp: String,
+    #[allow(dead_code)]
+    client_long_term_fp: String,
 }
 
 #[derive(Debug, Clone)]
@@ -299,6 +377,8 @@ impl RemoteInvokeWorker {
                                 shared_secret: material.shared_secret,
                                 caller_ephemeral_pub: material.caller_ephemeral_pub,
                                 client_ephemeral_pub: material.client_ephemeral_pub,
+                                caller_long_term_fp: String::new(),
+                                client_long_term_fp: String::new(),
                             },
                         )
                     })
@@ -501,6 +581,8 @@ impl RemoteInvokeWorker {
                             shared_secret: material.shared_secret,
                             caller_ephemeral_pub: material.caller_ephemeral_pub,
                             client_ephemeral_pub: material.client_ephemeral_pub,
+                            caller_long_term_fp: String::new(),
+                            client_long_term_fp: String::new(),
                         },
                     )
                 })
@@ -835,7 +917,66 @@ impl RemoteInvokeWorker {
                     .to_string(),
             )
         })?;
-        let crypto_material = build_grant_crypto_material(&caller_ephemeral_pub)?;
+        // P0-A: gather the caller's long-term pubkey + ephemeral signature so
+        // build_grant_crypto_material can verify the caller signed its own
+        // ephemeral key (anti relay-MITM). Missing sig => legacy caller =>
+        // auth = None (unsigned, no pinning).
+        let (caller_long_term_pubkey, caller_fingerprint, caller_ephemeral_sig) = {
+            self.pending_pairings
+                .read()
+                .get(pairing_id)
+                .map(|tp| {
+                    (
+                        tp.request
+                            .caller_info
+                            .caller_pubkey
+                            .clone()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| tp.request.caller_pubkey.clone()),
+                        tp.request.caller_info.fingerprint.clone(),
+                        tp.caller_ephemeral_sig.clone(),
+                    )
+                })
+                .unwrap_or_default()
+        };
+        // P0-A FAIL-CLOSED: if the caller advertised a long-term pubkey it MUST
+        // also present a valid ephemeral signature. This forbids a relay from
+        // stripping the signature to silently downgrade to an unauthenticated
+        // (MITM-able) handshake. Only truly legacy callers (no pubkey at all)
+        // fall through to the unauthenticated path.
+        let has_caller_sig = caller_ephemeral_sig
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        if !caller_long_term_pubkey.is_empty() && !has_caller_sig {
+            return Err(BifrostError::Config(
+                "caller advertised a long-term pubkey but no ephemeral signature; \
+                 refusing potentially downgraded handshake"
+                    .to_string(),
+            ));
+        }
+        let caller_auth = caller_ephemeral_sig
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .filter(|_| !caller_long_term_pubkey.is_empty())
+            .map(|sig| CallerEphemeralAuth {
+                long_term_pubkey: &caller_long_term_pubkey,
+                signature: sig,
+                // Symmetric with the caller: binding_id and signer_instance_id
+                // are both the relay-forwarded caller fingerprint (a value both
+                // peers observe). pinned_fingerprint is None because the grant
+                // caller_fingerprint is an opaque random token, not the PoP key
+                // hash, so it cannot pin the long-term key here.
+                binding_id: &caller_fingerprint,
+                signer_instance_id: &caller_fingerprint,
+                pinned_fingerprint: None,
+                timestamp: 0,
+            });
+        let crypto_material = build_grant_crypto_material(
+            &caller_ephemeral_pub,
+            &self.identity.long_term_pubkey,
+            caller_auth,
+        )?;
         if shell_policy_binding_uses_default_ssh_key_policy(requested_policy_binding.as_ref()) {
             ensure_default_ssh_key_shell_policy()?;
         }
@@ -1575,6 +1716,11 @@ impl RemoteInvokeWorker {
             let timestamped = TimestampedPairing {
                 request,
                 received_at: now,
+                // P0-A: relay-forwarded caller ephemeral signature (if any).
+                caller_ephemeral_sig: p
+                    .get("caller_ephemeral_sig")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
             };
             self.pending_pairings
                 .write()
@@ -1836,6 +1982,11 @@ impl RemoteInvokeWorker {
             shared_secret: stored.shared_secret.clone(),
             caller_ephemeral_pub: stored.caller_ephemeral_pub.clone(),
             client_ephemeral_pub: stored.client_ephemeral_pub.clone(),
+            // Legacy persisted crypto predates channel binding; empty fps keep
+            // the derived key byte-identical to the caller (which also omits
+            // long-term fps until caller-side binding is wired).
+            caller_long_term_fp: String::new(),
+            client_long_term_fp: String::new(),
         };
         self.grant_crypto
             .write()
@@ -2202,7 +2353,14 @@ impl RemoteInvokeWorker {
 
         let now = now_millis();
         let crypto_material = match event.caller_ephemeral_pub.as_deref() {
-            Some(caller_ephemeral_pub) => match build_grant_crypto_material(caller_ephemeral_pub) {
+            Some(caller_ephemeral_pub) => match build_grant_crypto_material(
+                caller_ephemeral_pub,
+                &self.identity.long_term_pubkey,
+                // SSH-connect path is already authenticated by the SSH key
+                // fingerprint above, so no separate ephemeral signature is
+                // required here (auth = None keeps legacy channel binding).
+                None,
+            ) {
                 Ok(material) => material,
                 Err(error) => {
                     warn!(error = %error, "build ssh connect encrypted transport failed");
@@ -2460,6 +2618,11 @@ impl RemoteInvokeWorker {
         let timestamped = TimestampedPairing {
             request,
             received_at: now_millis(),
+            // P0-A: relay-forwarded caller ephemeral signature (if any).
+            caller_ephemeral_sig: data
+                .get("caller_ephemeral_sig")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
         };
         self.pending_pairings
             .write()
@@ -2919,8 +3082,8 @@ impl RemoteInvokeWorker {
             // PR #4c-2: register a session in the global ring so tee/resume can work.
             let _session_registered = session_ring::register_session_str(&cid);
 
-            let result = executor
-                .execute_with_stdout_sink(&command, stdin_rx, |chunk| {
+            let result = Box::pin(
+                executor.execute_with_stdout_sink(&command, stdin_rx, |chunk| {
                     let relay_client = Arc::clone(&relay_client);
                     let cid = cid.clone();
                     let instance_id = instance_id.clone();
@@ -2993,8 +3156,9 @@ impl RemoteInvokeWorker {
                         let (legacy_result, ()) = tokio::join!(legacy_fut, stream_fut);
                         legacy_result
                     }
-                })
-                .await;
+                }),
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             match result {
@@ -3230,6 +3394,7 @@ impl RemoteInvokeWorker {
             warn!(call_id = %call_id, "call_frame received for inactive call");
             return;
         };
+
         let Some(grant_crypto) = self.get_grant_crypto(&active_call.grant_id) else {
             warn!(call_id = %call_id, grant_id = %active_call.grant_id, "missing grant crypto for call_frame");
             return;
@@ -3240,6 +3405,12 @@ impl RemoteInvokeWorker {
             &call_id,
             Some(&grant_crypto.caller_ephemeral_pub),
             Some(&grant_crypto.client_ephemeral_pub),
+            // P0-A channel binding kept INERT on the wire: the caller (bifrost-cli)
+            // does not yet append long-term fps to its HKDF info, and "两端对称是硬
+            // 约束". Passing empty fps here makes the target HKDF info byte-identical
+            // to the caller. Activate both sides together (see report) later.
+            "",
+            "",
         ) {
             Ok(key) => key,
             Err(error) => {
@@ -3254,6 +3425,20 @@ impl RemoteInvokeWorker {
             tag: envelope.tag,
             aad: envelope.aad,
         };
+        if let Err(error) = verify_encrypted_payload_counter_nonce(
+            &payload,
+            FrameDirection::CallerToClient,
+            envelope.seq,
+        ) {
+            warn!(call_id = %call_id, seq = envelope.seq, error = %error, "rejecting caller input frame with invalid counter nonce");
+            return;
+        }
+        // P1-C: stdin frames stay on the no-AEAD-AAD codec, but their transmitted
+        // counter nonce must match the outer direction/seq before decryption.
+        // That binds relay-visible ordering metadata to the AEAD nonce and closes
+        // the replay bypass where a relay reuses the same ciphertext under a new
+        // outer seq. The replay window advances only after a valid decrypt, so
+        // unauthenticated high seq values cannot poison it.
         let frame = match decrypt_encrypted_payload_without_aad::<CallerInputFramePayload>(
             &payload,
             &session_key,
@@ -3264,6 +3449,14 @@ impl RemoteInvokeWorker {
                 return;
             }
         };
+        if !active_call.accept_inbound_seq(envelope.seq) {
+            warn!(
+                call_id = %call_id,
+                seq = envelope.seq,
+                "rejecting replayed or out-of-window caller input frame"
+            );
+            return;
+        }
         let bytes = if !frame.data_b64.is_empty() {
             match base64::engine::general_purpose::STANDARD.decode(frame.data_b64.as_bytes()) {
                 Ok(bytes) => bytes,
@@ -3304,6 +3497,8 @@ impl RemoteInvokeWorker {
             Some(&crypto.caller_ephemeral_pub),
             Some(&crypto.client_ephemeral_pub),
             command_kind,
+            "",
+            "",
         )?;
         debug!(
             grant_id = %grant_id,
@@ -3346,11 +3541,19 @@ impl RemoteInvokeWorker {
             call_id,
             Some(&crypto.caller_ephemeral_pub),
             Some(&crypto.client_ephemeral_pub),
+            "",
+            "",
         )?;
-        let payload = encrypt_encrypted_payload_without_aad(
+        // P1-A: deterministic counter nonce (direction=client_to_caller, seq).
+        // Frames use seq = 1.. ; disjoint from call-exit (seq = 0) under the
+        // same call session key, and from caller-input frames (opposite
+        // direction prefix).
+        let payload = encrypt_encrypted_payload_counter(
             &serde_json::json!({ "chunk": chunk }),
             &session_key,
             2,
+            FrameDirection::ClientToCaller,
+            seq,
         )?;
 
         Ok(EncryptedEnvelope {
@@ -3379,8 +3582,13 @@ impl RemoteInvokeWorker {
             call_id,
             Some(&crypto.caller_ephemeral_pub),
             Some(&crypto.client_ephemeral_pub),
+            "",
+            "",
         )?;
-        encrypt_encrypted_payload_without_aad(
+        // P1-A: deterministic counter nonce. Call-exit reserves seq = 0 in the
+        // client_to_caller direction so it never collides with stream frames
+        // (which start at seq = 1) under the shared call session key.
+        encrypt_encrypted_payload_counter(
             &serde_json::json!({
                 "exit_code": exit_code,
                 "duration_ms": duration_ms,
@@ -3390,6 +3598,8 @@ impl RemoteInvokeWorker {
             }),
             &session_key,
             2,
+            FrameDirection::ClientToCaller,
+            0,
         )
     }
 
@@ -3984,11 +4194,61 @@ fn resolve_shell_command_policy_for_grant(
     }
 }
 
-fn build_grant_crypto_material(caller_ephemeral_pub: &str) -> Result<GrantCryptoMaterial> {
+/// P0-A: authenticated ephemeral-key material for a caller.
+/// When `auth` is `Some`, the caller ephemeral pubkey signature is verified
+/// FAIL-CLOSED before ECDH; an invalid signature or fingerprint mismatch
+/// aborts the handshake. `client_long_term_pubkey` is this device's own
+/// long-term SPKI DER (base64) used for channel binding.
+struct CallerEphemeralAuth<'a> {
+    long_term_pubkey: &'a str,
+    signature: &'a str,
+    binding_id: &'a str,
+    signer_instance_id: &'a str,
+    pinned_fingerprint: Option<&'a str>,
+    timestamp: u64,
+}
+
+fn build_grant_crypto_material(
+    caller_ephemeral_pub: &str,
+    client_long_term_pubkey: &str,
+    auth: Option<CallerEphemeralAuth<'_>>,
+) -> Result<GrantCryptoMaterial> {
     let engine = base64::engine::general_purpose::STANDARD;
     let caller_public_key = engine.decode(caller_ephemeral_pub).map_err(|e| {
         BifrostError::Config(format!("invalid caller_ephemeral_pub encoding: {}", e))
     })?;
+
+    // P0-A: verify the caller signed its own ephemeral pubkey with its
+    // long-term Ed25519 key, then pin that long-term key. This defeats a
+    // relay-in-the-middle swapping ephemeral keys. FAIL-CLOSED: any error
+    // aborts before ECDH.
+    let caller_long_term_fp = match &auth {
+        Some(auth) => {
+            let payload = super::types::build_ephemeral_signature_payload(
+                auth.binding_id,
+                auth.signer_instance_id,
+                // Symmetric with the caller: the caller cannot know the target
+                // long-term fingerprint at pair time, so the signed peer_fingerprint
+                // slot is empty on both sides.
+                "",
+                caller_ephemeral_pub,
+                auth.timestamp,
+            );
+            super::types::verify_ephemeral_signature(
+                auth.long_term_pubkey,
+                payload.as_bytes(),
+                auth.signature,
+                auth.pinned_fingerprint,
+            )?;
+            super::types::fingerprint_long_term_pubkey(auth.long_term_pubkey)?
+        }
+        None => String::new(),
+    };
+    let client_long_term_fp = if client_long_term_pubkey.is_empty() {
+        String::new()
+    } else {
+        super::types::fingerprint_long_term_pubkey(client_long_term_pubkey).unwrap_or_default()
+    };
 
     let rng = SystemRandom::new();
     let my_private = EphemeralPrivateKey::generate(&X25519, &rng)
@@ -4001,11 +4261,12 @@ fn build_grant_crypto_material(caller_ephemeral_pub: &str) -> Result<GrantCrypto
     let peer = UnparsedPublicKey::new(&X25519, caller_public_key);
     let shared_secret = agree_ephemeral(my_private, &peer, |shared_secret| shared_secret.to_vec())
         .map_err(|_| BifrostError::Config("derive grant shared secret failed".to_string()))?;
-
     Ok(GrantCryptoMaterial {
         shared_secret,
         caller_ephemeral_pub: caller_ephemeral_pub.to_string(),
         client_ephemeral_pub,
+        caller_long_term_fp,
+        client_long_term_fp,
     })
 }
 
@@ -5009,6 +5270,7 @@ mod tests {
                 caller_ephemeral_pub: None,
             },
             received_at: 1_000,
+            caller_ephemeral_sig: None,
         };
 
         assert!(!pairing_request_is_alive(&pairing, 3_500, 120_000));
@@ -5286,6 +5548,8 @@ mod tests {
                 shared_secret: vec![1, 2, 3],
                 caller_ephemeral_pub: "caller-epk".to_string(),
                 client_ephemeral_pub: "client-epk".to_string(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
             },
         );
         assert!(has_usable_grant_crypto(&grant_crypto, &grant));
@@ -5296,6 +5560,8 @@ mod tests {
                 shared_secret: vec![1, 2, 3],
                 caller_ephemeral_pub: "other-caller".to_string(),
                 client_ephemeral_pub: "client-epk".to_string(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
             },
         );
         assert!(!has_usable_grant_crypto(&grant_crypto, &grant));
@@ -5948,7 +6214,8 @@ mod tests {
         let caller_public_b64 =
             base64::engine::general_purpose::STANDARD.encode(caller_public.as_ref());
 
-        let material = build_grant_crypto_material(&caller_public_b64).expect("grant crypto");
+        let material =
+            build_grant_crypto_material(&caller_public_b64, "", None).expect("grant crypto");
         assert_eq!(material.caller_ephemeral_pub, caller_public_b64);
         assert!(!material.client_ephemeral_pub.is_empty());
         assert_eq!(material.shared_secret.len(), 32);
@@ -6241,7 +6508,8 @@ mod coverage_boost {
         let engine = base64::engine::general_purpose::STANDARD;
         let caller_public_b64 = engine.encode(caller_public.as_ref());
 
-        let material = build_grant_crypto_material(&caller_public_b64).expect("grant crypto");
+        let material =
+            build_grant_crypto_material(&caller_public_b64, "", None).expect("grant crypto");
 
         let open_key = derive_open_call_session_key(
             &material.shared_secret,
@@ -6249,6 +6517,8 @@ mod coverage_boost {
             Some(&material.caller_ephemeral_pub),
             Some(&material.client_ephemeral_pub),
             kind,
+            &material.caller_long_term_fp,
+            &material.client_long_term_fp,
         )
         .expect("open-call key");
         let stream_key = derive_call_session_key(
@@ -6256,6 +6526,8 @@ mod coverage_boost {
             call_id,
             Some(&material.caller_ephemeral_pub),
             Some(&material.client_ephemeral_pub),
+            &material.caller_long_term_fp,
+            &material.client_long_term_fp,
         )
         .expect("stream key");
         (material, open_key, stream_key)
@@ -6387,6 +6659,7 @@ mod coverage_boost {
                 caller_ephemeral_pub: None,
             },
             received_at: 1_000,
+            caller_ephemeral_sig: None,
         };
         let ttl_ms = 5_000;
         assert!(pairing_request_is_alive(&pairing, 5_999, ttl_ms));
@@ -6417,7 +6690,7 @@ mod coverage_boost {
 
     #[test]
     fn build_grant_crypto_material_rejects_invalid_b64() {
-        let err = build_grant_crypto_material("not-base64");
+        let err = build_grant_crypto_material("not-base64", "", None);
         match err {
             Ok(_) => panic!("expected error for invalid base64 caller_ephemeral_pub"),
             Err(BifrostError::Config(msg)) => {
@@ -7429,8 +7702,14 @@ mod coverage_boost {
 
         // Encrypt a JSON payload compatible with CallerInputFramePayload
         let frame_json = json!({ "data": "hello-stdin" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7450,6 +7729,75 @@ mod coverage_boost {
 
         let received = rx.recv().await.expect("stdin bytes should arrive");
         assert_eq!(received, b"hello-stdin".to_vec());
+    }
+
+    #[tokio::test]
+    async fn handle_call_frame_rejects_seq_mismatch_without_poisoning_replay_window() {
+        let (_harness, worker) = make_ssh_test_worker();
+        let grant_id = "grant-frame-replay";
+        let call_id = "call-frame-replay";
+        let kind = CommandKind::ShellExec;
+        let (material, _open_key, stream_key) = build_test_grant_crypto(grant_id, call_id, kind);
+
+        worker
+            .grant_crypto
+            .write()
+            .insert(grant_id.to_string(), material.clone());
+
+        let active_call = Arc::new(ActiveCallControl::new(grant_id.to_string(), now_millis()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        active_call.set_stdin_sender(tx);
+        worker
+            .active_calls
+            .write()
+            .insert(call_id.to_string(), Arc::clone(&active_call));
+
+        let frame_json = json!({ "data": "fresh-after-reject" });
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
+        let bad_envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 99,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce.clone(),
+            ciphertext: payload.ciphertext.clone(),
+            tag: payload.tag.clone(),
+            aad: payload.aad.clone(),
+        };
+        worker
+            .handle_call_frame(json!({
+                "call_id": call_id,
+                "envelope_json": serde_json::to_string(&bad_envelope).unwrap(),
+            }))
+            .await;
+        assert!(rx.try_recv().is_err());
+
+        let good_envelope = EncryptedEnvelope {
+            version: payload.version,
+            call_id: call_id.to_string(),
+            seq: 1,
+            direction: FrameDirection::CallerToClient,
+            nonce: payload.nonce,
+            ciphertext: payload.ciphertext,
+            tag: payload.tag,
+            aad: payload.aad,
+        };
+        worker
+            .handle_call_frame(json!({
+                "call_id": call_id,
+                "envelope_json": serde_json::to_string(&good_envelope).unwrap(),
+            }))
+            .await;
+
+        let received = rx.recv().await.expect("valid stdin bytes should arrive");
+        assert_eq!(received, b"fresh-after-reject".to_vec());
     }
 
     #[tokio::test]
@@ -7589,8 +7937,14 @@ mod coverage_boost {
 
         let encoded = base64::engine::general_purpose::STANDARD.encode(b"from-b64".as_ref());
         let frame_json = json!({ "data_b64": encoded, "data": "ignored" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7634,8 +7988,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data_b64": "***not-base64***" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7679,8 +8039,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data": "" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7722,8 +8088,14 @@ mod coverage_boost {
             .insert(call_id.to_string(), Arc::clone(&active_call));
 
         let frame_json = json!({ "data": "hello" });
-        let payload = encrypt_encrypted_payload_without_aad(&frame_json, &stream_key, 2)
-            .expect("encrypt frame payload");
+        let payload = encrypt_encrypted_payload_counter(
+            &frame_json,
+            &stream_key,
+            2,
+            FrameDirection::CallerToClient,
+            1,
+        )
+        .expect("encrypt frame payload");
         let envelope = EncryptedEnvelope {
             version: payload.version,
             call_id: call_id.to_string(),
@@ -7860,6 +8232,7 @@ mod coverage_boost {
                     caller_ephemeral_pub: None,
                 },
                 received_at: now_millis(),
+                caller_ephemeral_sig: None,
             },
         );
         worker.local_grants.write().insert(
@@ -7900,6 +8273,8 @@ mod coverage_boost {
                 shared_secret: vec![1, 2, 3],
                 caller_ephemeral_pub: String::new(),
                 client_ephemeral_pub: String::new(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
             },
         );
 
@@ -8009,6 +8384,8 @@ mod coverage_boost {
                 shared_secret: vec![1],
                 caller_ephemeral_pub: String::new(),
                 client_ephemeral_pub: String::new(),
+                caller_long_term_fp: String::new(),
+                client_long_term_fp: String::new(),
             },
         );
         let payload = json!({
@@ -8025,5 +8402,36 @@ mod coverage_boost {
         let info = grants.get(grant_id).expect("grant should be inserted");
         assert_eq!(info.grant_id, grant_id);
         assert_eq!(info.caller_fingerprint, "fp-created");
+    }
+
+    #[test]
+    fn p1b_replay_window_accepts_fresh_and_rejects_duplicates() {
+        let mut w = ReplayWindow::default();
+        // First frame accepted; exact duplicate rejected.
+        assert!(w.accept(1));
+        assert!(!w.accept(1));
+        // Monotonic advance accepted.
+        assert!(w.accept(2));
+        assert!(w.accept(3));
+        assert!(!w.accept(2)); // replay of an in-window seq
+                               // Out-of-order but still in window and unseen -> accepted once.
+        assert!(w.accept(10));
+        assert!(w.accept(7));
+        assert!(!w.accept(7));
+        // Jump forward; frames older than the window are rejected as replays.
+        assert!(w.accept(200));
+        assert!(!w.accept(100)); // 100 is > WINDOW (64) below highest -> too old
+        assert!(w.accept(199)); // within window, unseen -> accepted
+        assert!(!w.accept(199));
+    }
+
+    #[test]
+    fn p1b_replay_window_first_seq_may_be_nonzero() {
+        let mut w = ReplayWindow::default();
+        // Exit uses seq = 0 while frames use 1.. ; a window that first sees a
+        // high seq still tracks correctly.
+        assert!(w.accept(0));
+        assert!(!w.accept(0));
+        assert!(w.accept(1));
     }
 }

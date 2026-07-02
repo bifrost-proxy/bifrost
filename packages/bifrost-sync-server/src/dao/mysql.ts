@@ -86,6 +86,7 @@ const REQUIRED_REMOTE_INVOKE_PAIRING_COLUMNS = [
   'claim_token_hash',
   'claim_expires_at',
   'claimed_at',
+  'caller_ephemeral_sig',
 ];
 
 const FORBIDDEN_REMOTE_INVOKE_GRANT_COLUMNS = [
@@ -597,6 +598,7 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
         status                VARCHAR(32)  NOT NULL DEFAULT 'created',
         caller_pubkey         TEXT         NOT NULL,
         caller_ephemeral_pub  TEXT         NOT NULL,
+        caller_ephemeral_sig  TEXT         NOT NULL,
         client_ephemeral_pub  TEXT         NOT NULL,
         caller_info_json      LONGTEXT     NOT NULL,
         command_summary_json  LONGTEXT     NOT NULL,
@@ -723,8 +725,8 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
 
   async createPairing(p: RemoteInvokePairing): Promise<RemoteInvokePairing> {
     await this.pool.execute(
-      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time],
+      `INSERT INTO bifrost_remote_invoke_pairings (id, user_id, client_instance_id, caller_fingerprint, pair_code, status, caller_pubkey, caller_ephemeral_pub, caller_ephemeral_sig, client_ephemeral_pub, caller_info_json, command_summary_json, command_json, relay_token, call_id, grant_id, watch_token_hash, claim_token_hash, claim_expires_at, claimed_at, expires_at, create_time, update_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [p.id, p.user_id, p.client_instance_id, p.caller_fingerprint, p.pair_code, p.status, p.caller_pubkey, p.caller_ephemeral_pub ?? '', p.caller_ephemeral_sig ?? '', p.client_ephemeral_pub ?? '', p.caller_info_json, p.command_summary_json, p.command_json, p.relay_token, p.call_id, p.grant_id, p.watch_token_hash ?? '', p.claim_token_hash ?? '', p.claim_expires_at ?? '', p.claimed_at ?? '', p.expires_at, p.create_time, p.update_time],
     );
     return p;
   }

@@ -29,6 +29,7 @@ const V5_PAIRING_COLUMNS = [
   'claim_token_hash',
   'claim_expires_at',
   'claimed_at',
+  'caller_ephemeral_sig',
 ];
 
 let server: SyncServerInstance;

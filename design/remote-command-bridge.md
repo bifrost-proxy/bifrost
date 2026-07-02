@@ -310,12 +310,13 @@
 - **核心威胁**：Relay 转发双方临时公钥时可替换为自己生成的密钥对，做经典中间人攻击。`relay_token` 由 Relay 签发，攻击者控制 Relay 后可同时伪造 token，因此仅靠 token 做 channel binding 不够。
 - **防护措施**：
   1. **引入 Relay 不可控的 binding 材料**：将 `sha256(pair_code)` 加入 HKDF 输入。`pair_code` 由客户端本地生成，调用方通过带外方式获取，Relay 即使截获也无法在替换公钥后让双方派生出一致的会话密钥。
-  2. **Session Fingerprint 验证**：密钥协商完成后，双方各自计算 session fingerprint：
+  2. **Caller ephemeral signature**：Caller 用自己的 PoP Ed25519 长期私钥签名本次 `caller_ephemeral_pub`，签名 payload 绑定 relay-derived `caller_fingerprint`（即 caller PoP 公钥 SPKI DER 的 SHA-256 hex）。Relay 必须在 SSE `pairing_request` 与 pending-pairings polling 响应中原样转发 `caller_ephemeral_sig`；Client 若看到 caller 长期公钥但缺失或验证失败的签名，必须 fail-closed 拒绝审批。
+  3. **Session Fingerprint 验证**：密钥协商完成后，双方各自计算 session fingerprint：
      - `fingerprint = sha256(caller_ephemeral_pub || client_ephemeral_pub || session_id)`
      - 客户端在 WebUI 的授权详情中展示此 fingerprint（截短为 8 位 hex）
      - 调用方 CLI 输出同样的 fingerprint
      - 用户可在高安全模式下人工比对（类似 Signal Safety Number）
-  3. **对于可复用授权的后续调用**：每次新 call 重新生成 ephemeral key pair 并协商新的 per-call 会话密钥，将 `grant_id` + `call_id` 加入 HKDF 输入，确保即使某次会话密钥泄露也不影响其他调用。
+  4. **对于可复用授权的后续调用**：每次新 call 重新生成 ephemeral key pair 并协商新的 per-call 会话密钥，将 `grant_id` + `call_id` 加入 HKDF 输入，确保即使某次会话密钥泄露也不影响其他调用。
 
 #### 4.2 Per-Call 密钥派生
 
@@ -337,6 +338,8 @@
   - `direction_byte`：`0x01` = caller_to_client，`0x02` = client_to_caller
 - 双方使用不同的 direction byte 确保 nonce 空间完全隔离。
 - 每个方向的 seq 从 0 单调递增，接收方必须拒绝 seq 回退或重复的帧。
+- 接收方必须先校验 wire payload 里的 nonce 与外层 `direction + seq` 精确匹配，再解密并更新 replay window；外层 `seq` 不能单独作为去重依据，避免篡改外层序号绕过重放保护或污染 replay window。
+- `call_exit` 的 no-AAD 加密载荷固定保留 `seq = 0` 的 counter nonce，普通 stream frame 使用其外层 `seq` 对应的 counter nonce。
 - 如果使用 `ChaCha20-Poly1305`（24 字节 nonce / XChaCha20），可改用 `direction_byte (1B) || zero_padding (15B) || seq_u64 (8B)`。
 
 ### 4.4 客户端身份认证（client_auth_token）
@@ -1060,13 +1063,13 @@ struct ReusableGrant {
   - 绑定长期授权（grant）
   - 支撑风控和审计
   - 作为"授权复用命中"的关键维度
-- **当前实现（2026-06-16）**（`crates/bifrost-cli/src/commands/remote.rs` 中 `load_or_create_caller_fingerprint` / `generate_random_caller_fingerprint`）：
-  - 生成算法：在 `{BIFROST_DATA_DIR}/remote-caller-identity.json` 中持久化随机 16 字节（128 bit）值，格式 `caller-<32 hex chars>`（来自 `ring::rand::SystemRandom`）
-  - 文件不存在或内容不合法时自动生成并写回，主机迁移可通过拷贝该文件保持身份
-  - **不再**基于 `username` / `hostname` / `device_id` / `app_version` / `platform` / `public_key_hash` 任何机器特征
+- **当前实现（2026-07-02）**：
+  - Relay 以 Caller PoP Ed25519 公钥的 SPKI DER `sha256` hex 作为权威 `caller_fingerprint`，不信任请求体中自报的 fingerprint。
+  - CLI 使用同一 PoP 公钥派生 `caller_fingerprint`，并用该值签名 `caller_ephemeral_pub`，保证 target 侧重建的签名 payload 与 caller 侧一致。
+  - 旧的 `{BIFROST_DATA_DIR}/remote-caller-identity.json` 随机 fingerprint 仅作为本地兼容 fallback；安全决策以 relay-derived PoP fingerprint 为准。
 - 要求：
-  - 稳定可迁移，按文件持久化
-  - 用户可手动删除文件触发轮换
+  - 稳定可迁移，随 PoP 私钥持久化
+  - 用户可手动删除 PoP 私钥触发身份轮换
   - 不直接暴露宿主机敏感信息
 
 #### `call_id`

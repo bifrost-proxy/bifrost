@@ -251,3 +251,15 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-10：通过。真实 Chrome 打开 `/_bifrost/share/rule?...` 后不需要填写页面 hash，直接点击 Apply Rule 输出 `browser apply succeeded without hash`；浏览器未捕获 `Failed to fetch`、`Refused to connect` 或 CSP 报错；规则列表出现 `share/rsq-browser [enabled]`；测试结束 cleanup 对 Chrome profile 先终止 helper 再重试删除，脚本退出码为 0，没有再因 `rm: ... Directory not empty` 把成功业务断言误报为 suite 失败。
+
+执行时间：2026-07-02
+
+测试环境：
+- 本地真实 Chromium-family headless：`/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge`
+- CI 失败样本：GitHub Actions run `28579767756` / job `84740021572`，`test_rule_share_confirm_browser.sh` 在 `document.readyState === complete` 后读取到空 `h1`，失败为 `unexpected confirmation title:`
+
+执行命令：
+- `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 CHROME_BIN="/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge" BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_rule_share_confirm_browser.sh`
+
+结果：
+- TC-RSQ-10：通过。浏览器确认脚本改为等待确认页 URL、`Apply Shared Bifrost Rule` 标题和 `#apply` 按钮同时就绪后再断言，避免 CI 上 Chrome DevTools `/json/new` 返回后仍停留在初始空文档导致误报；本机真实 Chromium-family E2E 输出 `browser apply succeeded without hash` 和 `rule share browser confirmation E2E passed`，规则列表包含 `share/rsq-browser [enabled]`。

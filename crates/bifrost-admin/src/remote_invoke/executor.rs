@@ -551,7 +551,7 @@ impl RemoteInvokeExecutor {
         };
         let path_hash = audit_path_hash(&path_for_hash);
 
-        let outcome = self.execute_file_op_inner(command).await;
+        let outcome = Box::pin(self.execute_file_op_inner(command)).await;
         let duration_ms = started.elapsed().as_millis() as u64;
 
         match &outcome {
@@ -5678,6 +5678,7 @@ mod helper_formatting_tests {
 #[cfg(test)]
 mod coverage_boost {
     use super::*;
+    use base64::Engine;
     use bifrost_command::{
         FilterCondition, SearchArgs, TrafficGetArgs, TrafficListArgs, TrafficListDirection,
     };
@@ -6179,5 +6180,65 @@ mod coverage_boost {
         let err = executor.execute_file_op(&cmd).await.unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("unknown file operation"), "msg={msg}");
+    }
+
+    #[test]
+    fn execute_file_read_with_absolute_temp_path_returns_json() {
+        let _guard = crate::remote_invoke::remote_shell_test_guard();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let data_dir = dir.path().join("bifrost-data");
+        let root = dir.path().join("remote-files");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        std::fs::create_dir_all(&root).expect("create root");
+        bifrost_storage::set_data_dir(data_dir.clone());
+
+        let file = root.join("hello.txt");
+        std::fs::write(&file, b"hello ppe remote\n").expect("write fixture");
+        let root_s = root
+            .to_string_lossy()
+            .replace('\\', "\\\\")
+            .replace('"', "\\\"");
+        std::fs::write(
+            data_dir.join("file-access.toml"),
+            format!("[default]\nroots = [\"{root_s}\"]\nops = [\"read\"]\n"),
+        )
+        .expect("write file access config");
+        crate::remote_invoke::file_policy_store::invalidate_cache_pub();
+
+        let executor = new_executor();
+        let cmd = RemoteCommand {
+            kind: super::super::types::CommandKind::File,
+            command: "file.read".to_string(),
+            args_json: Some(
+                serde_json::json!({
+                    "path": file.to_string_lossy(),
+                    "cwd": root.to_string_lossy(),
+                })
+                .to_string(),
+            ),
+            grant_id: Some("ppe-grant".to_string()),
+            file_access: super::super::types::FileAccessScope::Read,
+            ..Default::default()
+        };
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let body = runtime
+            .block_on(executor.execute_file_op(&cmd))
+            .expect("file read");
+        let value: serde_json::Value = serde_json::from_str(&body).expect("json response");
+        assert_eq!(value["size"], 17);
+        assert_eq!(value["truncated"], false);
+        assert!(value["sha256"].as_str().is_some());
+        let content = value["content_b64"].as_str().expect("content_b64");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(content)
+                .expect("decode content"),
+            b"hello ppe remote\n"
+        );
     }
 }

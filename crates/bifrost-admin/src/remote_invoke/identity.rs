@@ -4,7 +4,7 @@ use base64::Engine;
 use ring::rand::SystemRandom;
 use ring::signature::{Ed25519KeyPair, KeyPair};
 use serde::{Deserialize, Serialize};
-use sha1::{Digest, Sha1};
+use sha2::{Digest, Sha256};
 
 use bifrost_core::Result;
 
@@ -65,7 +65,7 @@ impl Identity {
             device_name,
             platform,
             long_term_pubkey,
-            long_term_pubkey_hash: sha1_hex(&public_key_der),
+            long_term_pubkey_hash: sha256_fingerprint(&public_key_der),
             long_term_private_key_pkcs8,
         }
     }
@@ -118,7 +118,7 @@ impl Identity {
             platform: stored.platform,
             long_term_pubkey: stored.long_term_pubkey,
             long_term_pubkey_hash: if stored.long_term_pubkey_hash.is_empty() {
-                sha1_hex(&public_key_der)
+                sha256_fingerprint(&public_key_der)
             } else {
                 stored.long_term_pubkey_hash
             },
@@ -150,15 +150,20 @@ fn ed25519_public_key_to_spki_der(public_key: &[u8]) -> Vec<u8> {
     der
 }
 
-fn sha1_hex(data: &[u8]) -> String {
-    let digest = Sha1::digest(data);
-    let mut out = String::with_capacity(digest.len() * 2);
+// P0-B: fingerprint upgraded from SHA-1 to SHA-256. The `sha256:` prefix makes
+// the format self-describing so a peer never silently compares a SHA-256 digest
+// against a legacy SHA-1 one. NOTE: this is a BREAKING change to the fingerprint
+// wire format; peers on older builds produce bare-hex SHA-1 fingerprints and will
+// not match. Pinning is fail-closed, so a mismatch rejects the handshake.
+fn sha256_fingerprint(data: &[u8]) -> String {
+    let digest = Sha256::digest(data);
+    let mut out = String::with_capacity(digest.len() * 2 + 7);
+    out.push_str("sha256:");
     for byte in digest {
         out.push_str(&format!("{byte:02x}"));
     }
     out
 }
-
 fn hostname() -> String {
     gethostname::gethostname().to_string_lossy().into_owned()
 }
