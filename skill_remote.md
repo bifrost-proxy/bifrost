@@ -185,16 +185,16 @@ bifrost --version
 `bifrost remote` 的 `conn/exec/file/job/traffic` 等命令都需要 caller 侧连接 remote relay；target worker 也会主动连接同一个 relay。若运行环境存在企业安全网关、Linux 沙箱 MITM、私有 relay 证书或自签根证书，优先按下面顺序处理 TLS 信任问题：
 
 1. **优先信任系统 CA**：新版 remote relay client 默认读取系统 native root store。把企业/沙箱根证书安装进系统 trust store 后，正常情况下不需要额外参数。
-2. **显式指定私有 CA bundle**：当系统 trust store 不可控，或沙箱只提供 PEM 文件时，设置：
+2. **显式指定私有 CA bundle**：当系统 trust store 不可控，或沙箱只提供 PEM 文件时，优先设置 remote scoped 变量：
    ```bash
    BIFROST_REMOTE_RELAY_CA_BUNDLE=/path/to/private-ca.pem bifrost remote conn status
    ```
-   兼容的常见 CA 变量还包括 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH`。
+   也支持通用 `BIFROST_CA_BUNDLE=/path/to/private-ca.pem`、`BIFROST_CA_DIR=/path/to/certs`，以及 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` 等常见 CA 变量。
 3. **最终兜底跳过证书信任校验**：只有在 CA 无法注入、临时诊断或受控沙箱环境中，才使用：
    ```bash
    BIFROST_REMOTE_UNSAFE_SSL=1 bifrost remote conn up --ssh-key ~/.bifrost/remote-device.key
    ```
-   `BIFROST_REMOTE_UNSAFE_SSL` 支持 `1/true/yes/on` 开启，`0/false/no/off` 或空值关闭。该开关只作用于 remote relay HTTP/SSE client，不等同于代理服务的 `--unsafe-ssl`，也不影响普通代理上游请求、replay、upgrade、sync 或其它非 remote HTTP client。
+   `BIFROST_REMOTE_UNSAFE_SSL` 支持 `1/true/yes/on` 开启，`0/false/no/off` 或空值关闭。该开关只作用于 remote relay HTTP/SSE client，不等同于代理服务的 `--unsafe-ssl`，也不影响普通代理上游请求、replay、upgrade、sync 或其它非 remote HTTP client。若用户明确希望所有外部 HTTPS client 都跳过校验，也可设置通用 `BIFROST_UNSAFE_SSL=1`，但 remote 排障优先使用 scoped 的 `BIFROST_REMOTE_UNSAFE_SSL`。
 
 排查建议：看到 `invalid peer certificate`、`UnknownIssuer`、`certificate verify failed` 这类 relay TLS 错误时，先尝试系统/显式 CA；确认只是受控 MITM 或临时私有证书且无法配置 CA 时，再用 `BIFROST_REMOTE_UNSAFE_SSL=1`。
 

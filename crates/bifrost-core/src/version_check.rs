@@ -170,9 +170,9 @@ pub fn classify_ureq_error(err: &ureq::Error) -> &'static str {
 }
 
 pub fn fetch_with_retry(
-    agent: &ureq::Agent,
+    client: &reqwest::blocking::Client,
     url: &str,
-) -> Result<ureq::Response, Box<ureq::Error>> {
+) -> Result<reqwest::blocking::Response, Box<GithubRequestError>> {
     let mut last_err = None;
     for attempt in 0..=MAX_RETRIES {
         if attempt > 0 {
@@ -186,44 +186,109 @@ pub fn fetch_with_retry(
                 RETRY_DELAY_MS * (attempt as u64),
             ));
         }
-        match agent.get(url).call() {
-            Ok(resp) => return Ok(resp),
-            Err(e) => {
-                let reason = classify_ureq_error(&e);
+        match client.get(url).send() {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) => {
+                let status = resp.status();
                 debug!(
                     url,
                     attempt = attempt + 1,
-                    error = %e,
+                    status = status.as_u16(),
+                    "request returned non-success status"
+                );
+                last_err = Some(Box::new(GithubRequestError::Status(status)));
+            }
+            Err(e) => {
+                let error = GithubRequestError::Transport(e);
+                let reason = classify_github_request_error(&error);
+                debug!(
+                    url,
+                    attempt = attempt + 1,
+                    error = %error,
                     reason,
                     "request failed"
                 );
-                last_err = Some(Box::new(e));
+                last_err = Some(Box::new(error));
             }
         }
     }
     Err(last_err.unwrap())
 }
 
+#[derive(Debug)]
+pub enum GithubRequestError {
+    Status(reqwest::StatusCode),
+    Transport(reqwest::Error),
+}
+
+impl std::fmt::Display for GithubRequestError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GithubRequestError::Status(status) => write!(f, "HTTP {}", status),
+            GithubRequestError::Transport(error) => write!(f, "{error}"),
+        }
+    }
+}
+
+impl std::error::Error for GithubRequestError {}
+
+pub fn classify_github_request_error(err: &GithubRequestError) -> &'static str {
+    match err {
+        GithubRequestError::Status(status) => {
+            if *status == reqwest::StatusCode::FORBIDDEN {
+                "GitHub API rate limit exceeded"
+            } else if *status == reqwest::StatusCode::NOT_FOUND {
+                "GitHub API endpoint not found"
+            } else {
+                "HTTP error from GitHub API"
+            }
+        }
+        GithubRequestError::Transport(error) => {
+            if error.is_timeout() {
+                "connection timed out (GitHub may be unreachable from your network)"
+            } else if error.is_connect() {
+                "connection failed (GitHub may be unreachable from your network)"
+            } else if error.is_request() {
+                "invalid URL or request"
+            } else {
+                let msg = crate::format_reqwest_error(error).to_lowercase();
+                if msg.contains("certificate")
+                    || msg.contains("tls")
+                    || msg.contains("ssl")
+                    || msg.contains("unknownissuer")
+                    || msg.contains("unknown issuer")
+                {
+                    "TLS/SSL certificate verification failed"
+                } else {
+                    "network error"
+                }
+            }
+        }
+    }
+}
+
 pub fn fetch_version_via_redirect_sync() -> Result<String, FetchError> {
-    let agent = crate::direct_ureq_agent_builder()
+    let client = crate::github_blocking_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent("bifrost-cli")
-        .build();
+        .build()
+        .map_err(|e| FetchError::Network(format!("failed to build GitHub HTTP client: {e}")))?;
 
     debug!(
         "fetching latest version via redirect from {}",
         GITHUB_RELEASES_LATEST_URL
     );
 
-    match agent.head(GITHUB_RELEASES_LATEST_URL).call() {
+    match client.head(GITHUB_RELEASES_LATEST_URL).send() {
         Ok(resp) => {
-            let final_url = resp.get_url().to_string();
+            let final_url = resp.url().to_string();
             debug!(final_url = %final_url, "redirect followed, extracting version from final URL");
             extract_version_from_redirect_url(&final_url)
         }
         Err(e) => {
-            let reason = classify_ureq_error(&e);
-            Err(FetchError::Network(format!("{}: {}", reason, e)))
+            let error = GithubRequestError::Transport(e);
+            let reason = classify_github_request_error(&error);
+            Err(FetchError::Network(format!("{}: {}", reason, error)))
         }
     }
 }
@@ -316,13 +381,20 @@ pub fn fetch_highlights_from_html_sync(version: &str) -> Vec<String> {
     let url = release_page_url(version);
     debug!(url = %url, "fetching release highlights from HTML page");
 
-    let agent = crate::direct_ureq_agent_builder()
+    let client = match crate::github_blocking_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(HIGHLIGHTS_TIMEOUT_SECS))
         .user_agent("bifrost-cli")
-        .build();
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            debug!(error = %e, "failed to build GitHub HTTP client for release page");
+            return Vec::new();
+        }
+    };
 
-    match agent.get(&url).call() {
-        Ok(resp) => match resp.into_string() {
+    match client.get(&url).send() {
+        Ok(resp) => match resp.text() {
             Ok(html) => {
                 let highlights = extract_highlights_from_html(&html);
                 if highlights.is_empty() {
@@ -348,13 +420,20 @@ pub fn fetch_release_body_for_version_sync(version: &str) -> Vec<String> {
 
     debug!(url = %url, "fetching release body via API (fallback)");
 
-    let agent = crate::direct_ureq_agent_builder()
+    let client = match crate::github_blocking_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(HIGHLIGHTS_TIMEOUT_SECS))
         .user_agent("bifrost-cli")
-        .build();
+        .build()
+    {
+        Ok(client) => client,
+        Err(e) => {
+            debug!(error = %e, "failed to build GitHub HTTP client for release API");
+            return Vec::new();
+        }
+    };
 
-    match agent.get(&url).call() {
-        Ok(response) => match response.into_json::<GitHubRelease>() {
+    match client.get(&url).send() {
+        Ok(response) => match response.json::<GitHubRelease>() {
             Ok(release) => parse_release_highlights(release.body.as_deref()),
             Err(e) => {
                 debug!(error = %e, "failed to parse release body");
@@ -369,10 +448,11 @@ pub fn fetch_release_body_for_version_sync(version: &str) -> Vec<String> {
 }
 
 pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> {
-    let agent = crate::direct_ureq_agent_builder()
+    let client = crate::github_blocking_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent("bifrost-cli")
-        .build();
+        .build()
+        .map_err(|e| FetchError::Network(format!("failed to build GitHub HTTP client: {e}")))?;
 
     match fetch_version_via_redirect_sync() {
         Ok(version) => {
@@ -388,8 +468,8 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    match fetch_with_retry(&agent, GITHUB_RELEASES_API_URL) {
-        Ok(response) => match response.into_json::<GitHubRelease>() {
+    match fetch_with_retry(&client, GITHUB_RELEASES_API_URL) {
+        Ok(response) => match response.json::<GitHubRelease>() {
             Ok(release) => {
                 let version = strip_tag_prefix(&release.tag_name);
                 let highlights = parse_release_highlights(release.body.as_deref());
@@ -400,7 +480,7 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
             }
         },
         Err(e) => {
-            let reason = classify_ureq_error(&e);
+            let reason = classify_github_request_error(&e);
             debug!(
                 error = %e,
                 reason,
@@ -409,20 +489,20 @@ pub fn fetch_latest_release_sync() -> Result<(String, Vec<String>), FetchError> 
         }
     }
 
-    let response = fetch_with_retry(&agent, GITHUB_TAGS_API_URL).map_err(|e| {
-        let is_rate_limit = matches!(&*e, ureq::Error::Status(403, _));
+    let response = fetch_with_retry(&client, GITHUB_TAGS_API_URL).map_err(|e| {
+        let is_rate_limit = matches!(&*e, GithubRequestError::Status(status) if *status == reqwest::StatusCode::FORBIDDEN);
         if is_rate_limit {
             FetchError::Network(
                 "all version detection methods failed (redirect + GitHub API rate limited). Check your network connection to github.com".to_string()
             )
         } else {
-            let reason = classify_ureq_error(&e);
+            let reason = classify_github_request_error(&e);
             FetchError::Network(format!("{}: {}", reason, e))
         }
     })?;
 
     let tags: Vec<GitHubTag> = response
-        .into_json()
+        .json()
         .map_err(|e| FetchError::Parse(format!("failed to parse tags response: {}", e)))?;
 
     let version = pick_latest_tag(tags)
@@ -437,7 +517,7 @@ pub async fn fetch_version_via_redirect_async() -> Option<String> {
         GITHUB_RELEASES_LATEST_URL
     );
 
-    let client = crate::direct_reqwest_client_builder()
+    let client = crate::github_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent("bifrost-admin")
         .build()
@@ -454,7 +534,7 @@ pub async fn fetch_highlights_from_html_async(version: &str) -> Vec<String> {
     let url = release_page_url(version);
     debug!(url = %url, "fetching release highlights from HTML page (async)");
 
-    let client = match crate::direct_reqwest_client_builder()
+    let client = match crate::github_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(HIGHLIGHTS_TIMEOUT_SECS))
         .user_agent("bifrost-admin")
         .build()
@@ -490,7 +570,7 @@ pub async fn fetch_release_body_for_version_async(version: &str) -> Vec<String> 
 
     debug!(url = %url, "fetching release body via API (async fallback)");
 
-    let client = match crate::direct_reqwest_client_builder()
+    let client = match crate::github_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(HIGHLIGHTS_TIMEOUT_SECS))
         .user_agent("bifrost-admin")
         .build()
@@ -515,7 +595,7 @@ pub async fn fetch_release_body_for_version_async(version: &str) -> Vec<String> 
 }
 
 pub async fn fetch_latest_release_async() -> Option<(String, Vec<String>)> {
-    let client = crate::direct_reqwest_client_builder()
+    let client = crate::github_reqwest_client_builder()
         .timeout(std::time::Duration::from_secs(REQUEST_TIMEOUT_SECS))
         .user_agent("bifrost-admin")
         .build()

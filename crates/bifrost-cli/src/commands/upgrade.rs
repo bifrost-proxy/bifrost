@@ -622,7 +622,7 @@ fn github_path_url(base_url: &str, github_path: &str) -> String {
 }
 
 fn probe_github_url(url: &str, tuning: DownloadTuning) -> bool {
-    let client = match bifrost_core::direct_blocking_reqwest_client_builder()
+    let client = match bifrost_core::github_blocking_reqwest_client_builder()
         .connect_timeout(Duration::from_secs(tuning.connect_timeout_secs))
         .timeout(Duration::from_secs(tuning.mirror_probe_timeout_secs))
         .redirect(reqwest::redirect::Policy::limited(5))
@@ -725,7 +725,7 @@ fn download_file_with_progress(
     output_path: &Path,
     tuning: DownloadTuning,
 ) -> Result<(), BifrostError> {
-    let client = bifrost_core::direct_blocking_reqwest_client_builder()
+    let client = bifrost_core::github_blocking_reqwest_client_builder()
         .connect_timeout(Duration::from_secs(tuning.connect_timeout_secs))
         .timeout(Duration::from_secs(tuning.download_timeout_secs))
         .redirect(reqwest::redirect::Policy::limited(10))
@@ -765,10 +765,12 @@ fn download_file_once_with_progress(
     url: &str,
     output_path: &Path,
 ) -> Result<(), BifrostError> {
-    let mut response = client
-        .get(url)
-        .send()
-        .map_err(|error| BifrostError::Network(format!("Failed to download {url} — {error}")))?;
+    let mut response = client.get(url).send().map_err(|error| {
+        BifrostError::Network(format!(
+            "Failed to download {url} — {}",
+            bifrost_core::format_reqwest_error(&error)
+        ))
+    })?;
 
     if !response.status().is_success() {
         return Err(BifrostError::Network(format!(

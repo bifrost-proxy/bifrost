@@ -311,14 +311,17 @@ impl ScriptEngine {
 
         std::fs::create_dir_all(&cache_dir)?;
         let download_url = Self::remote_download_url(script_ref);
-        let client = bifrost_core::direct_blocking_reqwest_client_builder()
+        let client = bifrost_core::outbound_blocking_reqwest_client_builder()
             .timeout(Duration::from_millis(network_timeout_ms))
             .build()
             .map_err(|e| {
                 ScriptError::ExecutionFailed(format!("remote parser client init failed: {e}"))
             })?;
         let response = client.get(&download_url).send().map_err(|e| {
-            ScriptError::ExecutionFailed(format!("remote parser download failed: {e}"))
+            ScriptError::ExecutionFailed(format!(
+                "remote parser download failed: {}",
+                bifrost_core::format_reqwest_error(&e)
+            ))
         })?;
         if !response.status().is_success() {
             return Err(ScriptError::ExecutionFailed(format!(

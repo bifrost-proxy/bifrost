@@ -1,8 +1,6 @@
 use std::time::Duration;
 
-use bifrost_core::{
-    direct_reqwest_client_builder, text::truncate_chars_with_suffix, BifrostError, Result,
-};
+use bifrost_core::{text::truncate_chars_with_suffix, BifrostError, Result};
 use bifrost_storage::SyncConfig;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
@@ -60,7 +58,7 @@ pub struct SyncHttpClient {
 
 impl SyncHttpClient {
     pub fn new(config: &SyncConfig) -> Result<Self> {
-        let http = direct_reqwest_client_builder()
+        let http = bifrost_core::outbound_reqwest_client_builder()
             .connect_timeout(Duration::from_millis(config.connect_timeout_ms.max(500)))
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()

@@ -1988,7 +1988,7 @@ async fn download_asr_assets(
 }
 
 fn build_asr_download_client() -> Result<reqwest::Client, String> {
-    bifrost_core::direct_reqwest_client_builder()
+    bifrost_core::outbound_reqwest_client_builder()
         .build()
         .map_err(|error| format!("build downloader client: {error}"))
 }

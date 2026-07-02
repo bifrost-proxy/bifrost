@@ -1450,7 +1450,7 @@ impl Sandbox {
 
                 let m = reqwest::Method::from_bytes(method.as_bytes())
                     .map_err(|e| js_err("net", "fetch", e))?;
-                let client = bifrost_core::direct_blocking_reqwest_client_builder()
+                let client = bifrost_core::outbound_blocking_reqwest_client_builder()
                     .timeout(std::time::Duration::from_millis(req_timeout_ms))
                     .build()
                     .map_err(|e| js_err("net", "fetch", e))?;

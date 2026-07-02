@@ -492,7 +492,7 @@ impl HttpClient for ReqwestClient {
     ) -> Result<RawResponse, String> {
         let method = reqwest::Method::from_bytes(method.as_bytes())
             .map_err(|e| format!("invalid method: {e}"))?;
-        let client = reqwest::Client::builder()
+        let client = bifrost_core::outbound_reqwest_client_builder()
             .timeout(timeout)
             .danger_accept_invalid_certs(true)
             .build()

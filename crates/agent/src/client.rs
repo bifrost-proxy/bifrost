@@ -28,7 +28,7 @@ impl Default for AgentClient {
 impl AgentClient {
     pub fn new() -> Self {
         Self {
-            http: bifrost_core::direct_reqwest_client_builder()
+            http: bifrost_core::outbound_reqwest_client_builder()
                 .build()
                 .unwrap_or_default(),
             model_proxy_url: None,

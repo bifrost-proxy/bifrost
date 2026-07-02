@@ -152,78 +152,6 @@ fn parse_tool(s: &str) -> Result<Vec<AiTool>, BifrostError> {
     }
 }
 
-fn format_network_error(err: &ureq::Error) -> String {
-    match err {
-        ureq::Error::Status(code, resp) => {
-            let url = resp.get_url();
-            match code {
-                404 => format!(
-                    "HTTP 404 Not Found: the remote file was not found at {url}. \
-                     The URL may have changed or the file may have been removed."
-                ),
-                403 => format!(
-                    "HTTP 403 Forbidden: access denied to {url}. \
-                     Check if the repository is public or if a token is required."
-                ),
-                429 => "HTTP 429 Too Many Requests: rate limited by the server. \
-                     Please wait a moment and try again."
-                    .to_string(),
-                500..=599 => format!(
-                    "HTTP {code} Server Error: the remote server returned an error. \
-                     This is likely a temporary issue — please retry later."
-                ),
-                _ => format!("HTTP {code}: unexpected status code from {url}."),
-            }
-        }
-        ureq::Error::Transport(transport) => {
-            let kind = transport.kind();
-            let detail = transport
-                .message()
-                .map(|m| m.to_string())
-                .unwrap_or_default();
-            match kind {
-                ureq::ErrorKind::Dns => format!(
-                    "DNS resolution failed: could not resolve the hostname. \
-                     Check your internet connection and DNS settings. ({detail})"
-                ),
-                ureq::ErrorKind::ConnectionFailed => format!(
-                    "Connection failed: could not connect to the remote server. \
-                     The server may be down or a firewall may be blocking the connection. ({detail})"
-                ),
-                ureq::ErrorKind::Io => {
-                    let lower = detail.to_lowercase();
-                    if lower.contains("timed out") || lower.contains("timeout") {
-                        format!(
-                            "Connection timed out: the server did not respond in time. \
-                             Check your network or try again later. ({detail})"
-                        )
-                    } else if lower.contains("connection refused") {
-                        format!(
-                            "Connection refused: the server actively refused the connection. ({detail})"
-                        )
-                    } else if lower.contains("reset") {
-                        format!(
-                            "Connection reset: the connection was unexpectedly closed. ({detail})"
-                        )
-                    } else {
-                        format!("Network I/O error: {detail}")
-                    }
-                }
-                ureq::ErrorKind::TooManyRedirects => "Too many redirects: the server redirected too many times. \
-                     The URL may be misconfigured."
-                    .to_string(),
-                ureq::ErrorKind::BadStatus => format!(
-                    "Bad status line: received a malformed HTTP response. ({detail})"
-                ),
-                ureq::ErrorKind::BadHeader => format!(
-                    "Bad header: received a malformed HTTP header. ({detail})"
-                ),
-                _ => format!("Transport error ({}): {detail}", kind),
-            }
-        }
-    }
-}
-
 fn format_io_error(err: &io::Error, path: &Path, operation: &str) -> BifrostError {
     let path_display = path.display();
     match err.kind() {
@@ -295,19 +223,26 @@ fn download_skill_source(source: SkillSource) -> Result<String, BifrostError> {
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let attempt = (|| -> Result<String, String> {
-            let agent = ureq::AgentBuilder::new()
-                .timeout_connect(Duration::from_secs(10))
-                .timeout_read(Duration::from_secs(30))
-                .timeout_write(Duration::from_secs(30))
-                .build();
+            let client = bifrost_core::github_blocking_reqwest_client_builder()
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(30))
+                .build()
+                .map_err(|e| format!("Failed to build GitHub HTTP client: {e}"))?;
 
-            let response = agent
-                .get(source.raw_url)
-                .call()
-                .map_err(|e| format_network_error(&e))?;
+            let response = client.get(source.raw_url).send().map_err(|e| {
+                format!("Network error: {}", bifrost_core::format_reqwest_error(&e))
+            })?;
+
+            if !response.status().is_success() {
+                return Err(format!(
+                    "HTTP error: {} returned {}",
+                    source.raw_url,
+                    response.status()
+                ));
+            }
 
             response
-                .into_string()
+                .text()
                 .map_err(|e| format!("Failed to read response body: {e}"))
         })();
         let _ = tx.send(attempt);

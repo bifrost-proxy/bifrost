@@ -2068,8 +2068,7 @@ async fn fetch_ws_endpoint(
 }
 
 pub(crate) fn build_feishu_http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .no_proxy()
+    bifrost_core::outbound_reqwest_client_builder()
         .timeout(Duration::from_secs(30))
         .build()
         .expect("static Feishu HTTP client configuration should be valid")
