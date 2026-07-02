@@ -206,6 +206,29 @@ wait_for_client_grants_at_least() {
     return 1
 }
 
+wait_for_grants_api() {
+    local message="$1"
+    local timeout_seconds="${2:-30}"
+    local last_status=""
+    local last_body=""
+    local last_error=""
+
+    for _ in $(seq 1 "$timeout_seconds"); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            _log_pass "$message"
+            return 0
+        fi
+        last_status="$HTTP_STATUS"
+        last_body="$HTTP_BODY"
+        last_error="$CURL_ERROR"
+        sleep 1
+    done
+
+    _log_fail "$message" "200" "status=${last_status}; body=${last_body:-${last_error:-<empty>}}"
+    return 1
+}
+
 pick_free_port() {
     python3 - <<'PY'
 import socket
@@ -1135,8 +1158,7 @@ GRANT_CRYPTO_KEY="$BIFROST_DATA_DIR/admin/remote_invoke_grant_crypto.key"
 rm -f "$GRANT_CRYPTO_JSON" "$GRANT_CRYPTO_KEY"
 restart_target_client_preserve_data_dir
 
-http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/grants"
-assert_status "200" "$HTTP_STATUS" "client 重启后 grants 列表应返回 200"
+wait_for_grants_api "client 重启后 grants 列表应返回 200"
 GRANT_COUNT_AFTER_CRYPTO_LOSS=$(echo "$HTTP_BODY" | jq '.grants | length')
 if [[ "$GRANT_COUNT_AFTER_CRYPTO_LOSS" -eq 0 ]]; then
     _log_pass "TC-RI-07A: 丢失 grant crypto 后 client 会清理本地 grants"

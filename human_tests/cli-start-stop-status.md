@@ -78,6 +78,7 @@
 - 执行 `curl -x http://127.0.0.1:8800 http://httpbin.org/get` 返回正常响应
 - Unix/macOS 上 `ps aux | grep bifrost` 可以看到后台进程；Windows 上 `Get-Process bifrost` / `wmic process` 可以看到 detached child 仍在运行
 - `runtime.json` 中记录本次运行是 daemon 模式
+- 如 Windows CI 首次启动偶发超过默认 30 秒，可设置 `BIFROST_DAEMON_READY_TIMEOUT_SECS=90`，命令应等待到 listener ready 后再报告 daemon PID；该变量为 0、非法值或缺失时保持默认 30 秒，上限为 300 秒。
 
 **清理**：
 ```bash
@@ -651,6 +652,7 @@ PY
 - 2026-05-07 因统一代理增加 UDP relay ephemeral fallback，改为占用同端口 TCP 来覆盖主 listener readiness 失败。执行 `PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、非 9900 端口；断言 daemon 命令非零退出、输出包含 readiness 失败、输出不包含 `Daemon started with PID`、Admin API 不可达，脚本汇总通过。
 - 2026-05-07 同步覆盖 TCP holder 下的 Admin API 不可达探针超时保护；daemon 分支复用 `admin_unreachable`，因此同样要求探针在 2 秒内返回失败而不是挂起。`SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh` 已验证 daemon 分支通过。
 - 2026-05-07 CI run `25475008050` 的 Linux shard 3 显示 daemon 分支也会在非交互 auto-resolve 路径中直接输出 `Port 0.0.0.0:<port> is already in use`，而不是 readiness 等待文案。本次将 daemon 错误断言调整为同时接受 readiness 失败与端口占用提示，仍保留非零退出、无 `Daemon started with PID`、Admin API 不可达三个核心断言。随后执行 `SKIP_BUILD=true PROXY_PORT=18130 bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`，脚本汇总 `Total: 8 / Passed: 8 / Failed: 0`。
+- 2026-07-02 针对 PR #315 Windows x86 CI 首次 daemon 启动慢于 30 秒的回归，新增 `BIFROST_DAEMON_READY_TIMEOUT_SECS` 解析门禁并将 Windows upgrade restart E2E 默认设置为 90 秒；执行 `cargo test -p bifrost-cli detached_daemon_ready_timeout_env_value_defaults_and_clamps --lib` 验证默认值、非法值、0、90 秒和 300 秒上限，执行 `bash -n e2e-tests/tests/test_upgrade_local_restart_e2e.sh` 验证脚本语法，macOS 本地执行 `BIFROST_DAEMON_READY_TIMEOUT_SECS=90 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh` 覆盖非 Windows链路，Windows x86 真实 self-replacement 由 CI job `E2E Shell (x86_64-pc-windows-msvc)` 验证。
 
 ---
 

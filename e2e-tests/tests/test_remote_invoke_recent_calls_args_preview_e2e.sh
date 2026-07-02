@@ -88,6 +88,28 @@ http_get() {
     http_request "$1" "GET" "" "${2:-}"
 }
 
+wait_for_recent_calls_api() {
+    local message="$1"
+    local last_status=""
+    local last_body=""
+    local last_error=""
+
+    for _ in $(seq 1 30); do
+        http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
+        if [[ "$HTTP_STATUS" == "200" ]]; then
+            _log_pass "$message"
+            return 0
+        fi
+        last_status="$HTTP_STATUS"
+        last_body="$HTTP_BODY"
+        last_error="$CURL_ERROR"
+        sleep 1
+    done
+
+    _log_fail "$message" "200" "status=${last_status}; body=${last_body:-${last_error:-<empty>}}"
+    return 1
+}
+
 http_post_json() {
     http_request "$1" "POST" "$2" "${3:-}"
 }
@@ -486,8 +508,7 @@ log "Restarting bifrost admin with the same data dir"
 stop_bifrost_preserve_data
 admin_start_bifrost
 
-http_get "${CLIENT_ADMIN_URL}/api/remote-invoke/calls"
-assert_status "200" "$HTTP_STATUS" "重启后读取 Recent Calls API 应返回 200"
+wait_for_recent_calls_api "重启后读取 Recent Calls API 应返回 200"
 RESTORED_PREVIEW="$(echo "$HTTP_BODY" | jq -r --arg call_id "$LATEST_SEARCH_CALL_ID" '
     (.calls // [])
     | map(select(.call_id == $call_id))

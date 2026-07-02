@@ -4,6 +4,7 @@ pub mod executor;
 pub mod file_access_roots;
 pub mod file_ops;
 pub mod file_policy_store;
+pub mod file_transfer;
 pub mod grant_crypto_store;
 pub mod grant_info_store;
 pub mod grant_policy_store;

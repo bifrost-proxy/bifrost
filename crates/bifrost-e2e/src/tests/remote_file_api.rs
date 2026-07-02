@@ -176,6 +176,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     (FileOp::Move, "move"),
                     (FileOp::Delete, "delete"),
                     (FileOp::ApplyPatch, "apply_patch"),
+                    (FileOp::Upload, "upload"),
+                    (FileOp::Download, "download"),
                 ];
                 for (op, want) in cases {
                     let got = op.as_str();

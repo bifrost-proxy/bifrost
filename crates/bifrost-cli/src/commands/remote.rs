@@ -13,8 +13,8 @@ use bifrost_command::{
     TrafficListArgs, TrafficListDirection,
 };
 use bifrost_core::{
-    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
-    remote_relay_headers_from_env, BifrostError, REMOTE_RELAY_HEADERS_ENV,
+    apply_remote_relay_headers, remote_relay_headers_from_env, remote_relay_reqwest_client_builder,
+    remote_relay_sse_reqwest_client_builder, BifrostError, REMOTE_RELAY_HEADERS_ENV,
 };
 use colored::Colorize;
 use dialoguer::{theme::ColorfulTheme, Select};
@@ -38,6 +38,7 @@ use crate::cli::{
 };
 
 mod pop;
+mod transfer;
 
 const PAIRING_WATCH_TIMEOUT_SECS: u64 = 180;
 // PR #5a: interpreted as an IDLE deadline (resets on every chunk/event),
@@ -236,6 +237,11 @@ enum RemoteFileOp {
 #[derive(Debug, Clone)]
 enum RemoteRenderMode {
     Raw,
+    /// Capture stdout into `CallResult.stdout` without streaming or printing
+    /// anything. Used by orchestrated multi-call flows (e.g. chunked file
+    /// transfer) that need to parse each intermediate op's JSON result
+    /// programmatically instead of surfacing it to the terminal.
+    Capture,
     File {
         op: RemoteFileOp,
         json: bool,
@@ -1341,6 +1347,9 @@ fn is_grant_session_token_invalid_error(err: &BifrostError) -> bool {
 }
 
 fn is_stale_remote_grant_error(err: &BifrostError) -> bool {
+    if is_grant_session_token_invalid_error(err) {
+        return true;
+    }
     let BifrostError::Network(msg) = err else {
         return false;
     };
@@ -1834,7 +1843,15 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
             return Err(BifrostError::Config(msg));
         }
     }
-    let mut command = if matches!(&opts.action, RemoteCommands::Run(_)) {
+    let is_file_transfer = matches!(
+        &opts.action,
+        RemoteCommands::File { action }
+            if matches!(
+                action.as_ref(),
+                RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. }
+            )
+    );
+    let mut command = if matches!(&opts.action, RemoteCommands::Run(_)) || is_file_transfer {
         None
     } else {
         Some(build_remote_command_checked(&opts.action)?)
@@ -1961,6 +1978,22 @@ async fn async_handle_remote_command(opts: RemoteOptions) -> bifrost_core::Resul
     }
 
     let transport = merge_transport_context(&conn, &grant)?;
+    if let RemoteCommands::File { action } = &opts.action {
+        if matches!(
+            action.as_ref(),
+            RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. }
+        ) {
+            return transfer::handle_remote_file_transfer(
+                &caller,
+                &conn,
+                &grant,
+                &caller_identity,
+                &transport,
+                action.as_ref(),
+            )
+            .await;
+        }
+    }
     let mut remote_run_cleanup: Option<(String, Option<String>)> = None;
     if let RemoteCommands::Run(run_args) = &opts.action {
         let remote_script_path = prepare_remote_run_script(
@@ -3689,6 +3722,13 @@ fn build_remote_file_command(
                 output.clone(),
             )
         }
+        RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. } => {
+            return Err(BifrostError::Config(
+                "`remote file upload`/`download` use the chunked transfer orchestrator and \
+                 do not build a single encrypted command"
+                    .to_string(),
+            ));
+        }
     };
 
     let render_op = match action {
@@ -3707,6 +3747,9 @@ fn build_remote_file_command(
         RemoteFileCommands::Move { .. } => RemoteFileOp::Move,
         RemoteFileCommands::Delete { .. } => RemoteFileOp::Delete,
         RemoteFileCommands::Patch { .. } => RemoteFileOp::Patch,
+        RemoteFileCommands::Upload { .. } | RemoteFileCommands::Download { .. } => {
+            unreachable!("upload/download handled by the transfer orchestrator")
+        }
     };
     let render_json = output.eq_ignore_ascii_case("json");
 
@@ -4727,6 +4770,9 @@ fn print_remote_result(command: &BuiltRemoteCommand, result: &CallResult) {
                         println!();
                     }
                 }
+                // Capture mode is consumed programmatically by the caller
+                // (chunked transfer orchestrator); never echo it to stdout.
+                RemoteRenderMode::Capture => {}
                 RemoteRenderMode::File { op, json } => {
                     if *json {
                         print!("{stdout}");
@@ -5510,7 +5556,7 @@ struct RelayApiResponse<T> {
 
 impl CallerRelayClient {
     fn new(base_url: &str) -> Self {
-        let http = direct_reqwest_client_builder()
+        let http = remote_relay_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(5))
@@ -5718,7 +5764,7 @@ impl CallerRelayClient {
             urlencoding::encode(watch_token),
         );
 
-        let sse_http = direct_sse_reqwest_client_builder()
+        let sse_http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build sse client: {e}")))?;
@@ -6020,7 +6066,7 @@ impl CallerRelayClient {
             self.base_url, connect_id
         );
 
-        let sse_http = direct_sse_reqwest_client_builder()
+        let sse_http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build ssh connect sse client: {e}")))?;
@@ -6110,7 +6156,7 @@ impl CallerRelayClient {
             self.base_url, call_id
         );
 
-        let sse_http = direct_sse_reqwest_client_builder()
+        let sse_http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build call events sse client: {e}")))?;
@@ -6384,7 +6430,7 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/events",
             self.base_url, call_id
         );
-        let sse_http = direct_sse_reqwest_client_builder()
+        let sse_http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build streaming sse client: {e}")))?;
@@ -6532,7 +6578,7 @@ impl CallerRelayClient {
             "{}/v4/remote-invoke/calls/{}/status",
             self.base_url, call_id
         );
-        let http = direct_sse_reqwest_client_builder()
+        let http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .map_err(|e| BifrostError::Network(format!("build job status client: {e}")))?;
@@ -8774,11 +8820,17 @@ mod tests {
             "grant_revoked",
             "grant_missing_shared_secret",
             "grant_not_found",
+            "grant_session_token_invalid",
         ];
 
         for message in stale_messages {
+            let status = if message == "grant_session_token_invalid" {
+                "401 Unauthorized"
+            } else {
+                "403 Forbidden"
+            };
             let err = BifrostError::Network(format!(
-                "open_call failed with status 403 Forbidden: {{\"code\":-1,\"message\":\"{message}\"}}"
+                "open_call failed with status {status}: {{\"code\":-1,\"message\":\"{message}\"}}"
             ));
             assert!(
                 is_stale_remote_grant_error(&err),

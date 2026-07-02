@@ -1,6 +1,22 @@
-use std::path::Path;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
+pub const REMOTE_RELAY_CA_BUNDLE_ENV: &str = "BIFROST_REMOTE_RELAY_CA_BUNDLE";
 pub const REMOTE_RELAY_HEADERS_ENV: &str = "BIFROST_REMOTE_RELAY_HEADERS";
+pub const REMOTE_UNSAFE_SSL_ENV: &str = "BIFROST_REMOTE_UNSAFE_SSL";
+const COMMON_CA_FILE_ENVS: &[&str] = &[
+    "SSL_CERT_FILE",
+    "REQUESTS_CA_BUNDLE",
+    "CURL_CA_BUNDLE",
+    "NODE_EXTRA_CA_CERTS",
+    "GIT_SSL_CAINFO",
+    "AWS_CA_BUNDLE",
+    "PIP_CERT",
+    "NPM_CONFIG_CAFILE",
+    "npm_config_cafile",
+    "GRPC_DEFAULT_SSL_ROOTS_FILE_PATH",
+];
+const COMMON_CA_DIR_ENVS: &[&str] = &["SSL_CERT_DIR"];
 
 pub fn direct_reqwest_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder().no_proxy()
@@ -18,9 +34,41 @@ pub fn direct_blocking_reqwest_client_builder() -> reqwest::blocking::ClientBuil
     reqwest::blocking::Client::builder().no_proxy()
 }
 
+pub fn remote_relay_reqwest_client_builder() -> reqwest::ClientBuilder {
+    let builder = direct_reqwest_client_builder()
+        .tls_built_in_webpki_certs(true)
+        .tls_built_in_native_certs(true);
+    let builder = add_remote_relay_extra_root_certificates(builder);
+    if remote_relay_unsafe_ssl_from_env() {
+        tracing::warn!(
+            env = REMOTE_UNSAFE_SSL_ENV,
+            "remote relay TLS certificate verification is disabled by environment"
+        );
+        builder.danger_accept_invalid_certs(true)
+    } else {
+        builder
+    }
+}
+
+pub fn remote_relay_sse_reqwest_client_builder() -> reqwest::ClientBuilder {
+    remote_relay_reqwest_client_builder()
+        .no_gzip()
+        .no_brotli()
+        .no_zstd()
+        .no_deflate()
+}
+
 pub fn load_reqwest_certificate(path: &Path) -> std::result::Result<reqwest::Certificate, String> {
     let pem = std::fs::read(path).map_err(|error| format!("read CA certificate: {error}"))?;
     reqwest::Certificate::from_pem(&pem).map_err(|error| format!("parse CA certificate: {error}"))
+}
+
+pub fn load_reqwest_certificate_bundle(
+    path: &Path,
+) -> std::result::Result<Vec<reqwest::Certificate>, String> {
+    let pem = std::fs::read(path).map_err(|error| format!("read CA certificate: {error}"))?;
+    reqwest::Certificate::from_pem_bundle(&pem)
+        .map_err(|error| format!("parse CA certificate bundle: {error}"))
 }
 
 pub fn proxied_reqwest_client_builder(
@@ -54,6 +102,159 @@ pub fn direct_ureq_agent_builder() -> ureq::AgentBuilder {
 
 pub fn direct_ureq_agent() -> ureq::Agent {
     direct_ureq_agent_builder().build()
+}
+
+fn add_remote_relay_extra_root_certificates(
+    mut builder: reqwest::ClientBuilder,
+) -> reqwest::ClientBuilder {
+    for (source, path) in remote_relay_ca_file_paths_from_env() {
+        match load_reqwest_certificate_bundle(&path) {
+            Ok(certs) => {
+                let count = certs.len();
+                for cert in certs {
+                    builder = builder.add_root_certificate(cert);
+                }
+                tracing::debug!(
+                    env = source,
+                    ca_cert_path = %path.display(),
+                    cert_count = count,
+                    "loaded extra remote relay CA bundle"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    env = source,
+                    ca_cert_path = %path.display(),
+                    error = %error,
+                    "remote relay HTTP client could not load extra CA bundle"
+                );
+            }
+        }
+    }
+
+    for (source, dir) in remote_relay_ca_dir_paths_from_env() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::warn!(
+                    env = source,
+                    ca_cert_dir = %dir.display(),
+                    error = %error,
+                    "remote relay HTTP client could not read extra CA directory"
+                );
+                continue;
+            }
+        };
+        let mut paths = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+        for path in paths {
+            match load_reqwest_certificate_bundle(&path) {
+                Ok(certs) => {
+                    let count = certs.len();
+                    for cert in certs {
+                        builder = builder.add_root_certificate(cert);
+                    }
+                    tracing::debug!(
+                        env = source,
+                        ca_cert_path = %path.display(),
+                        cert_count = count,
+                        "loaded extra remote relay CA bundle from directory"
+                    );
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        env = source,
+                        ca_cert_path = %path.display(),
+                        error = %error,
+                        "skipping non-PEM file in remote relay CA directory"
+                    );
+                }
+            }
+        }
+    }
+
+    builder
+}
+
+fn remote_relay_ca_file_paths_from_env() -> Vec<(String, PathBuf)> {
+    let mut paths = paths_from_env_var(REMOTE_RELAY_CA_BUNDLE_ENV);
+    for env_name in COMMON_CA_FILE_ENVS {
+        paths.extend(paths_from_env_var(env_name));
+    }
+    paths.extend(remote_relay_system_ca_file_paths());
+    dedup_existing_paths(paths)
+}
+
+fn remote_relay_ca_dir_paths_from_env() -> Vec<(String, PathBuf)> {
+    let mut paths = Vec::new();
+    for env_name in COMMON_CA_DIR_ENVS {
+        paths.extend(paths_from_env_var(env_name));
+    }
+    paths.extend(remote_relay_system_ca_dir_paths());
+    dedup_existing_paths(paths)
+}
+
+fn paths_from_env_var(env_name: &str) -> Vec<(String, PathBuf)> {
+    let Some(raw) = std::env::var_os(env_name) else {
+        return Vec::new();
+    };
+    std::env::split_paths(&raw)
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(|path| (env_name.to_string(), path))
+        .collect()
+}
+
+fn remote_relay_system_ca_file_paths() -> Vec<(String, PathBuf)> {
+    openssl_probe::probe()
+        .cert_file
+        .into_iter()
+        .filter(|path| path.is_file())
+        .map(|path| ("system-ca-probe".to_string(), path))
+        .collect()
+}
+
+fn remote_relay_system_ca_dir_paths() -> Vec<(String, PathBuf)> {
+    openssl_probe::probe()
+        .cert_dir
+        .into_iter()
+        .filter(|path| path.is_dir())
+        .map(|path| ("system-ca-probe".to_string(), path))
+        .collect()
+}
+
+fn dedup_existing_paths(paths: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
+    let mut seen = HashSet::new();
+    paths
+        .into_iter()
+        .filter(|(_, path)| path.exists())
+        .filter(|(_, path)| seen.insert(path.clone()))
+        .collect()
+}
+
+fn remote_relay_unsafe_ssl_from_env() -> bool {
+    let Some(raw) = std::env::var_os(REMOTE_UNSAFE_SSL_ENV) else {
+        return false;
+    };
+    let value = raw.to_string_lossy();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    match trimmed.to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => true,
+        "0" | "false" | "no" | "off" => false,
+        _ => {
+            tracing::warn!(
+                env = REMOTE_UNSAFE_SSL_ENV,
+                value = trimmed,
+                "ignoring unrecognized remote unsafe SSL environment value"
+            );
+            false
+        }
+    }
 }
 
 pub fn remote_relay_headers_from_env() -> std::result::Result<reqwest::header::HeaderMap, String> {
@@ -136,8 +337,11 @@ mod tests {
     use super::{
         apply_remote_relay_headers, direct_blocking_reqwest_client_builder,
         direct_reqwest_client_builder, direct_ureq_agent, direct_ureq_agent_builder,
-        load_reqwest_certificate, parse_remote_relay_headers, proxied_reqwest_client_builder,
-        REMOTE_RELAY_HEADERS_ENV,
+        load_reqwest_certificate, load_reqwest_certificate_bundle, parse_remote_relay_headers,
+        proxied_reqwest_client_builder, remote_relay_ca_file_paths_from_env,
+        remote_relay_reqwest_client_builder, remote_relay_unsafe_ssl_from_env, COMMON_CA_DIR_ENVS,
+        COMMON_CA_FILE_ENVS, REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_RELAY_HEADERS_ENV,
+        REMOTE_UNSAFE_SSL_ENV,
     };
     use std::io::{Read, Write};
     use std::net::TcpListener;
@@ -164,6 +368,43 @@ mod tests {
             std::env::set_var(key, "http://127.0.0.1:1");
         }
         std::env::remove_var("NO_PROXY");
+
+        let result = f();
+
+        for (key, value) in saved {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        result
+    }
+
+    fn ca_env_vars() -> Vec<&'static str> {
+        let mut vars = vec![REMOTE_RELAY_CA_BUNDLE_ENV, REMOTE_UNSAFE_SSL_ENV];
+        vars.extend(COMMON_CA_FILE_ENVS.iter().copied());
+        vars.extend(COMMON_CA_DIR_ENVS.iter().copied());
+        vars
+    }
+
+    fn env_name_matches(actual: &str, expected: &str) -> bool {
+        if cfg!(windows) {
+            actual.eq_ignore_ascii_case(expected)
+        } else {
+            actual == expected
+        }
+    }
+
+    fn with_ca_envs_cleared<T>(f: impl FnOnce() -> T) -> T {
+        let vars = ca_env_vars();
+        let saved: Vec<(&'static str, Option<std::ffi::OsString>)> = vars
+            .iter()
+            .map(|key| (*key, std::env::var_os(key)))
+            .collect();
+        for key in &vars {
+            std::env::remove_var(key);
+        }
 
         let result = f();
 
@@ -267,6 +508,140 @@ mod tests {
         let path = dir.path().join("empty.pem");
         std::fs::write(&path, b"# no certificates here\n").unwrap();
         assert!(load_reqwest_certificate(&path).is_ok());
+    }
+
+    #[test]
+    fn load_certificate_bundle_accepts_valid_pem_bundle() {
+        let pem = include_bytes!("../../bifrost-tls/testdata/test-rsa-ca.crt");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ca-bundle.pem");
+        std::fs::write(&path, pem).unwrap();
+
+        let certs = load_reqwest_certificate_bundle(&path).unwrap();
+
+        assert!(!certs.is_empty());
+    }
+
+    #[test]
+    fn remote_relay_ca_bundle_env_accepts_path_lists() {
+        let _guard = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        with_ca_envs_cleared(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let ca1 = dir.path().join("ca1.pem");
+            let ca2 = dir.path().join("ca2.pem");
+            std::fs::write(&ca1, b"# empty bundle\n").unwrap();
+            std::fs::write(&ca2, b"# empty bundle\n").unwrap();
+            let joined = std::env::join_paths([&ca1, &ca2]).unwrap();
+            std::env::set_var(REMOTE_RELAY_CA_BUNDLE_ENV, joined);
+
+            let paths = remote_relay_ca_file_paths_from_env()
+                .into_iter()
+                .filter(|(source, _)| source == REMOTE_RELAY_CA_BUNDLE_ENV)
+                .map(|(_, path)| path)
+                .collect::<Vec<_>>();
+
+            assert_eq!(paths, vec![ca1, ca2]);
+        });
+    }
+
+    #[test]
+    fn remote_relay_ca_file_envs_include_common_tooling_overrides() {
+        let _guard = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        with_ca_envs_cleared(|| {
+            let dir = tempfile::tempdir().unwrap();
+            for env_name in COMMON_CA_FILE_ENVS {
+                let ca = dir.path().join(format!("{env_name}.pem"));
+                std::fs::write(&ca, b"# empty bundle\n").unwrap();
+                std::env::set_var(env_name, &ca);
+                let paths = remote_relay_ca_file_paths_from_env();
+                assert!(
+                    paths
+                        .iter()
+                        .any(|(source, path)| env_name_matches(source, env_name) && path == &ca),
+                    "{env_name} should be accepted as an extra CA bundle source"
+                );
+                std::env::remove_var(env_name);
+            }
+        });
+    }
+
+    #[test]
+    fn remote_relay_builder_bypasses_proxy_env() {
+        with_invalid_proxy_env(|| {
+            let url = spawn_local_http_server();
+            let runtime = tokio::runtime::Runtime::new().unwrap();
+            let response = runtime.block_on(async move {
+                remote_relay_reqwest_client_builder()
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .unwrap()
+                    .get(url)
+                    .send()
+                    .await
+                    .unwrap()
+                    .text()
+                    .await
+                    .unwrap()
+            });
+            assert_eq!(response, "ok");
+        });
+    }
+
+    #[test]
+    fn remote_relay_builder_builds_with_explicit_ca_bundle() {
+        let _guard = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let saved = std::env::var_os(REMOTE_RELAY_CA_BUNDLE_ENV);
+        let dir = tempfile::tempdir().unwrap();
+        let ca = dir.path().join("ca.pem");
+        std::fs::write(
+            &ca,
+            include_bytes!("../../bifrost-tls/testdata/test-rsa-ca.crt"),
+        )
+        .unwrap();
+        std::env::set_var(REMOTE_RELAY_CA_BUNDLE_ENV, &ca);
+
+        let result = remote_relay_reqwest_client_builder().build();
+
+        match saved {
+            Some(value) => std::env::set_var(REMOTE_RELAY_CA_BUNDLE_ENV, value),
+            None => std::env::remove_var(REMOTE_RELAY_CA_BUNDLE_ENV),
+        }
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn remote_relay_unsafe_ssl_env_parses_true_false_and_invalid_values() {
+        let _guard = proxy_env_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let saved = std::env::var_os(REMOTE_UNSAFE_SSL_ENV);
+
+        for value in ["1", "true", "TRUE", "yes", "on"] {
+            std::env::set_var(REMOTE_UNSAFE_SSL_ENV, value);
+            assert!(
+                remote_relay_unsafe_ssl_from_env(),
+                "{value} should enable remote unsafe SSL"
+            );
+        }
+
+        for value in ["", "0", "false", "FALSE", "no", "off", "maybe"] {
+            std::env::set_var(REMOTE_UNSAFE_SSL_ENV, value);
+            assert!(
+                !remote_relay_unsafe_ssl_from_env(),
+                "{value:?} should not enable remote unsafe SSL"
+            );
+        }
+
+        match saved {
+            Some(value) => std::env::set_var(REMOTE_UNSAFE_SSL_ENV, value),
+            None => std::env::remove_var(REMOTE_UNSAFE_SSL_ENV),
+        }
     }
 
     #[test]

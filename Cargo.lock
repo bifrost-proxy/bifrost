@@ -550,6 +550,7 @@ dependencies = [
  "windows-sys 0.59.0",
  "wiremock",
  "zip 2.4.2",
+ "zstd",
 ]
 
 [[package]]
@@ -573,6 +574,7 @@ dependencies = [
  "libc",
  "lru 0.16.4",
  "once_cell",
+ "openssl-probe",
  "parking_lot",
  "rand 0.8.6",
  "regex",
@@ -3445,6 +3447,7 @@ dependencies = [
  "hyper-util",
  "log",
  "rustls",
+ "rustls-native-certs",
  "tokio",
  "tokio-rustls",
  "tower-service",
@@ -6230,6 +6233,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",

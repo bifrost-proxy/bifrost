@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use bifrost_core::{
-    apply_remote_relay_headers, direct_reqwest_client_builder, direct_sse_reqwest_client_builder,
-    remote_relay_headers_from_env, BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
+    apply_remote_relay_headers, remote_relay_headers_from_env, remote_relay_reqwest_client_builder,
+    remote_relay_sse_reqwest_client_builder, BifrostError, Result, REMOTE_RELAY_HEADERS_ENV,
 };
 use parking_lot::RwLock;
 use reqwest::header::{HeaderMap, ACCEPT_ENCODING};
@@ -43,13 +43,13 @@ impl RelayClient {
         device_name: &str,
         platform: &str,
     ) -> Self {
-        let http = direct_reqwest_client_builder()
+        let http = remote_relay_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::limited(5))
             .build()
             .expect("failed to build relay http client");
-        let sse_http = direct_sse_reqwest_client_builder()
+        let sse_http = remote_relay_sse_reqwest_client_builder()
             .connect_timeout(Duration::from_secs(10))
             .build()
             .expect("failed to build relay sse http client");

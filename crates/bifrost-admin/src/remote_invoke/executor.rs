@@ -609,6 +609,9 @@ impl RemoteInvokeExecutor {
             "file.move" => FileOp::Move,
             "file.delete" => FileOp::Delete,
             "file.apply_patch" => FileOp::ApplyPatch,
+            "file.upload_begin" | "file.upload_chunk" | "file.upload_commit"
+            | "file.upload_abort" | "file.upload_status" | "file.upload_small" => FileOp::Upload,
+            "file.download_begin" | "file.download_chunk" => FileOp::Download,
             _ => {
                 return Err(BifrostError::Config(format!(
                     "unknown file operation: '{}'",
@@ -682,6 +685,35 @@ impl RemoteInvokeExecutor {
             // P1-4: symbol-outline cap.
             #[serde(default)]
             max_symbols: Option<usize>,
+            // Phase 4: chunked large-file transfer params.
+            #[serde(default)]
+            transfer_id: Option<String>,
+            #[serde(default)]
+            total_size: Option<u64>,
+            #[serde(default)]
+            total_sha256: Option<String>,
+            #[serde(default)]
+            chunk_size: Option<u64>,
+            #[serde(default)]
+            chunk_b64: Option<String>,
+            #[serde(default)]
+            chunk_sha256: Option<String>,
+            #[serde(default)]
+            length: Option<u64>,
+            // Byte offset into a chunked transfer. Distinct from the u32
+            // line-`offset` used by file.read/file.search so it can address
+            // files larger than u32::MAX bytes.
+            #[serde(default)]
+            chunk_offset: Option<u64>,
+            // Phase 4.1: throughput/packet-size optimizations.
+            // Per-chunk wire encoding tag ("none" | "zstd") for adaptive
+            // compression; sha256 is always over the raw (decoded) bytes.
+            #[serde(default)]
+            chunk_encoding: Option<String>,
+            // Encodings the caller can decode (upload) / wants applied
+            // (download). Negotiated at begin; e.g. ["zstd"].
+            #[serde(default)]
+            accept_encodings: Option<Vec<String>>,
         }
 
         let params: FileParams = match command.args_json.as_deref() {
@@ -768,6 +800,35 @@ impl RemoteInvokeExecutor {
                 decisions,
                 params.max_bytes,
                 params.allow_binary.unwrap_or(false),
+            )
+            .await?;
+            return serde_json::to_string(&value)
+                .map_err(|e| BifrostError::Config(format!("serialize file op result: {}", e)));
+        }
+
+        // Phase 4: chunked large-file transfer. These ops manage an
+        // in-memory session; `begin` runs policy.check on the target path,
+        // subsequent ops resolve the pre-validated canonical path from the
+        // session id. Handled here (before the single-path pipeline) because
+        // chunk/commit/abort/status carry a transfer_id rather than a path.
+        if matches!(op, FileOp::Upload | FileOp::Download)
+            && file_op_name != "file.upload_begin"
+            && file_op_name != "file.upload_small"
+            && file_op_name != "file.download_begin"
+        {
+            let value = super::file_transfer::handle_transfer_session_op(
+                file_op_name,
+                super::file_transfer::TransferOpParams {
+                    transfer_id: params.transfer_id.clone(),
+                    offset: params
+                        .chunk_offset
+                        .or_else(|| params.offset.map(|v| v as u64)),
+                    length: params.length,
+                    chunk_b64: params.chunk_b64.clone(),
+                    chunk_sha256: params.chunk_sha256.clone(),
+                    chunk_encoding: params.chunk_encoding.clone(),
+                    total_sha256: params.total_sha256.clone(),
+                },
             )
             .await?;
             return serde_json::to_string(&value)
@@ -1040,6 +1101,41 @@ impl RemoteInvokeExecutor {
                     &decisions,
                     patch_text,
                     &params.base_shas.clone().unwrap_or_default(),
+                )
+                .await?
+            }
+            "file.upload_begin" => {
+                super::file_transfer::handle_upload_begin(
+                    &decision,
+                    &policy,
+                    params.total_size,
+                    params.total_sha256.as_deref(),
+                    params.chunk_size,
+                    params.allow_overwrite.or(Some(policy.allow_overwrite)),
+                    params.create_parents.unwrap_or(false),
+                    params.accept_encodings.as_deref(),
+                )
+                .await?
+            }
+            "file.upload_small" => {
+                super::file_transfer::handle_upload_small(
+                    &decision,
+                    &policy,
+                    params.total_size,
+                    params.total_sha256.as_deref(),
+                    params.chunk_b64.as_deref(),
+                    params.chunk_encoding.as_deref(),
+                    params.allow_overwrite.or(Some(policy.allow_overwrite)),
+                    params.create_parents.unwrap_or(false),
+                )
+                .await?
+            }
+            "file.download_begin" => {
+                super::file_transfer::handle_download_begin(
+                    &decision,
+                    &policy,
+                    params.chunk_size,
+                    params.accept_encodings.as_deref(),
                 )
                 .await?
             }

@@ -2662,6 +2662,31 @@ fn detached_daemon_readiness_host(host: &str) -> &str {
     }
 }
 
+const DEFAULT_DETACHED_DAEMON_READY_TIMEOUT_SECS: u64 = 30;
+const MAX_DETACHED_DAEMON_READY_TIMEOUT_SECS: u64 = 300;
+
+fn detached_daemon_ready_timeout_from_env_value(value: Option<std::ffi::OsString>) -> Duration {
+    let Some(value) = value else {
+        return Duration::from_secs(DEFAULT_DETACHED_DAEMON_READY_TIMEOUT_SECS);
+    };
+    let Some(value) = value.to_str() else {
+        return Duration::from_secs(DEFAULT_DETACHED_DAEMON_READY_TIMEOUT_SECS);
+    };
+    let Ok(seconds) = value.trim().parse::<u64>() else {
+        return Duration::from_secs(DEFAULT_DETACHED_DAEMON_READY_TIMEOUT_SECS);
+    };
+    if seconds == 0 {
+        return Duration::from_secs(DEFAULT_DETACHED_DAEMON_READY_TIMEOUT_SECS);
+    }
+    Duration::from_secs(seconds.min(MAX_DETACHED_DAEMON_READY_TIMEOUT_SECS))
+}
+
+fn detached_daemon_ready_timeout() -> Duration {
+    detached_daemon_ready_timeout_from_env_value(std::env::var_os(
+        "BIFROST_DAEMON_READY_TIMEOUT_SECS",
+    ))
+}
+
 #[cfg(any(unix, windows))]
 fn wait_for_detached_daemon_ready(
     child: &mut std::process::Child,
@@ -2785,7 +2810,7 @@ fn run_daemon_via_exec(
         &mut child,
         &config.host,
         config.port,
-        Duration::from_secs(30),
+        detached_daemon_ready_timeout(),
     )
 }
 
@@ -2820,8 +2845,9 @@ pub fn run_daemon(
     let (mut ready_rx, mut ready_tx) = UnixStream::pair().map_err(|e| {
         bifrost_core::BifrostError::Config(format!("Failed to create daemon readiness pipe: {}", e))
     })?;
+    let readiness_timeout = detached_daemon_ready_timeout();
     ready_rx
-        .set_read_timeout(Some(Duration::from_secs(30)))
+        .set_read_timeout(Some(readiness_timeout))
         .map_err(|e| {
             bifrost_core::BifrostError::Config(format!(
                 "Failed to configure daemon readiness timeout: {}",
@@ -2869,7 +2895,8 @@ pub fn run_daemon(
                     ) =>
                 {
                     Err(bifrost_core::BifrostError::Network(format!(
-                        "Daemon did not become ready within 30s (PID: {})",
+                        "Daemon did not become ready within {}s (PID: {})",
+                        readiness_timeout.as_secs(),
                         child
                     )))
                 }
@@ -4601,6 +4628,30 @@ mod tests {
         assert_eq!(
             detached_daemon_readiness_host("192.168.1.20"),
             "192.168.1.20"
+        );
+    }
+
+    #[test]
+    fn detached_daemon_ready_timeout_env_value_defaults_and_clamps() {
+        assert_eq!(
+            detached_daemon_ready_timeout_from_env_value(None),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            detached_daemon_ready_timeout_from_env_value(Some("0".into())),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            detached_daemon_ready_timeout_from_env_value(Some("garbage".into())),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            detached_daemon_ready_timeout_from_env_value(Some("90".into())),
+            Duration::from_secs(90)
+        );
+        assert_eq!(
+            detached_daemon_ready_timeout_from_env_value(Some("999".into())),
+            Duration::from_secs(300)
         );
     }
 

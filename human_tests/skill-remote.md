@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径、远端工程任务开始前必须读取工程约束信息的要求、调用异常时主动获取远端最新技能的要求，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
+验证用户通过 `bifrost install-skill` 安装技能后，能够获得独立的 `bifrost-remote` skill，并且该 skill 正确表达 Remote Invoke 的远程设备控制能力、目标端默认启动方式、查询/shell/文件三类 scope 的前置准备、当前 relay-backed 子命令边界、`remote exec` 的授权操作路径、远端工程任务开始前必须读取工程约束信息的要求、调用异常时主动获取远端最新技能的要求、relay HTTPS 私有 CA 与 `BIFROST_REMOTE_UNSAFE_SSL` 最终兜底说明，不包含历史版本迁移文案，并且不提供 `remote traffic clear` 写操作命令。
 
 ## 前置条件
 
@@ -245,12 +245,18 @@
    ```bash
    rg -n 'https://raw\\.githubusercontent\\.com/bifrost-proxy/bifrost/main/skill_remote\\.md' "$tmpdir/skills/bifrost-remote/SKILL.md"
    ```
+4. 检查 skill 说明 relay HTTPS 私有 CA 与 unsafe 最终兜底：
+   ```bash
+   rg -n 'BIFROST_REMOTE_RELAY_CA_BUNDLE|SSL_CERT_FILE|SSL_CERT_DIR|BIFROST_REMOTE_UNSAFE_SSL' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   rg -n '只作用于 remote relay HTTP/SSE client|不等同于代理服务的 `--unsafe-ssl`|最终兜底' "$tmpdir/skills/bifrost-remote/SKILL.md"
+   ```
 
 预期结果：
 
 - 文档要求 Agent 在 `bifrost remote` 相关调用异常、本地 skill 可能过旧时，主动获取远端最新 `skill_remote.md`。
 - 文档包含用户提供的 GitHub 权威入口链接。
 - 文档包含可直接读取最新原文的 raw 地址，便于无浏览器环境下刷新技能内容。
+- 文档说明优先使用系统/显式 CA，只有 CA 无法注入时才使用 `BIFROST_REMOTE_UNSAFE_SSL=1`，并明确该开关只影响 remote relay HTTP/SSE client。
 - PASS（2026-06-17）：对仓库源文件 `skill_remote.md` 执行更新后的关键字检查，命中 `remote job list`、`job cache`、call_id-only `status/logs/watch`，且未命中 `remote job ... --relay-token <token>`。
 
 ### TC-SR-11 `--from-local` 本地 payload 能力出现在安装后的 remote skill
