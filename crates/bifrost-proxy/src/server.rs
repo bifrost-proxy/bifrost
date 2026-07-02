@@ -22,7 +22,7 @@ use bifrost_core::{BifrostError, Protocol, Result, UserPassAuthConfig};
 use bytes::Bytes;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use hyper::header::{HeaderName, HeaderValue};
+use hyper::header::{HeaderName, HeaderValue, HOST};
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use hyper::HeaderMap;
@@ -1442,7 +1442,12 @@ async fn handle_request(
     }
 
     if is_trust_probe_proxy_configured_request(&req) {
-        return Ok(handle_trust_probe_proxy_configured_request(req, peer_addr).await);
+        return Ok(handle_trust_probe_proxy_configured_request(
+            req,
+            peer_addr,
+            push_manager.as_ref(),
+        )
+        .await);
     }
 
     if is_proxy_request_to_trust_probe_direct_target(&req) {
@@ -2032,11 +2037,25 @@ fn is_devtools_bridge_admin_path(path: &str) -> bool {
         .is_some_and(|rest| rest.starts_with("/api/devtools/bridge/"))
 }
 
-fn is_trust_probe_proxy_configured_request(req: &Request<Incoming>) -> bool {
+fn is_trust_probe_proxy_configured_request<B>(req: &Request<B>) -> bool {
     let uri = req.uri();
-    uri.scheme_str() == Some("http")
+    let absolute_form_match = uri.scheme_str() == Some("http")
         && uri.host() == Some(TRUST_PROBE_PROXY_CONFIG_HOST)
+        && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH;
+    if absolute_form_match {
+        return true;
+    }
+    uri.scheme_str().is_none()
         && uri.path() == TRUST_PROBE_PROXY_CONFIG_PATH
+        && request_host_matches(req, TRUST_PROBE_PROXY_CONFIG_HOST)
+}
+
+fn request_host_matches<B>(req: &Request<B>, expected_host: &str) -> bool {
+    req.headers()
+        .get(HOST)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(':').next())
+        .is_some_and(|host| host.eq_ignore_ascii_case(expected_host))
 }
 
 fn proxy_request_trust_probe_target<B>(req: &Request<B>) -> Option<(String, u16)> {
@@ -2406,6 +2425,28 @@ mod tests {
 
         assert_eq!(proxy_request_trust_probe_target(&origin_form_req), None);
         assert_eq!(proxy_request_trust_probe_target(&proxy_config_req), None);
+    }
+
+    #[test]
+    fn test_trust_probe_proxy_configured_request_accepts_absolute_and_host_header_forms() {
+        let absolute_form_req = Request::builder()
+            .uri("http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=s1")
+            .body(())
+            .unwrap();
+        let origin_form_req = Request::builder()
+            .uri("/_bifrost/trust-probe/proxy-configured?sid=s1")
+            .header(HOST, "bifrost-proxy-check.invalid")
+            .body(())
+            .unwrap();
+        let wrong_host_req = Request::builder()
+            .uri("/_bifrost/trust-probe/proxy-configured?sid=s1")
+            .header(HOST, "example.invalid")
+            .body(())
+            .unwrap();
+
+        assert!(is_trust_probe_proxy_configured_request(&absolute_form_req));
+        assert!(is_trust_probe_proxy_configured_request(&origin_form_req));
+        assert!(!is_trust_probe_proxy_configured_request(&wrong_host_req));
     }
 
     #[test]

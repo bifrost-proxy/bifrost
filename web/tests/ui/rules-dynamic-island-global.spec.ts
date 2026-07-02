@@ -103,8 +103,6 @@ async function mockAdminApi(page: Page) {
         },
         ios_profile_url: "",
         ios_profile_qrcode_url: "",
-        ios_wifi_proxy_profile_url: "",
-        ios_wifi_proxy_profile_qrcode_url: "",
       });
       return;
     }

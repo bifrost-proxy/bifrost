@@ -4,14 +4,11 @@ import {
   Alert,
   Button,
   Card,
-  Checkbox,
   Col,
   Divider,
   Image,
-  Input,
   List,
   Row,
-  Select,
   Space,
   Steps,
   Tag,
@@ -36,12 +33,9 @@ import {
 import {
   getIosMobileConfigQRCodeUrl,
   getIosMobileConfigUrl,
-  getIosWifiProxyConfigQRCodeUrl,
-  getIosWifiProxyConfigUrl,
   getCertInfo,
   getMobileDevices,
   installLocalCa,
-  installIosWifiProxyProfile,
   installMobileCa,
   refreshMobileDevices,
   type CertInfo,
@@ -53,11 +47,6 @@ import {
 import { normalizeApiErrorMessage } from "../../../api/client";
 import AvailabilityCheckPanel from "../../../components/AvailabilityCheckPanel";
 import { pushService, type SettingsScope } from "../../../services/pushService";
-import {
-  getSharedIosWifiProxySsid,
-  setSharedIosWifiProxySsid,
-  subscribeSharedIosWifiProxySsid,
-} from "../../../utils/iosWifiProxySsid";
 import iosStep1Image from "../../../assets/ios/ios_1.png";
 import iosStep2Image from "../../../assets/ios/ios_2.png";
 import iosStep3Image from "../../../assets/ios/ios_3.png";
@@ -75,9 +64,6 @@ const LOCAL_CA_TRUST_POLL_INTERVAL_MS = 1000;
 const APPLE_CONFIGURATOR_APP_STORE_URL = "macappstore://itunes.apple.com/app/id1037126344";
 const APPLE_CONFIGURATOR_WEB_URL =
   "https://apps.apple.com/us/app/apple-configurator/id1037126344";
-const MANAGED_WIFI_PROFILE_RISK_TEXT =
-  "Experimental profile note: Bifrost's iOS Wi-Fi proxy profile uses Apple's managed Wi-Fi payload. It does not contain a Wi-Fi password, but uninstalling the profile can remove that managed Wi-Fi network entry from iOS. Manual Wi-Fi proxy setup is the safe cleanup path.";
-
 const CERTIFICATE_SECTION_IDS = [
   "certificate-trust-probe",
   "certificate-local-install",
@@ -316,12 +302,6 @@ export default function CertificateTab({
   const [installingIosConfiguratorDeviceId, setInstallingIosConfiguratorDeviceId] = useState<
     string | null
   >(null);
-  const [installingIosProxyDeviceId, setInstallingIosProxyDeviceId] = useState<string | null>(null);
-  const [iosProxyHost, setIosProxyHost] = useState("");
-  const [manualIosProxySsid, setManualIosProxySsid] = useState(() =>
-    getSharedIosWifiProxySsid(),
-  );
-  const [ackManagedWifiProfileRisk, setAckManagedWifiProfileRisk] = useState(false);
   const [installSession, setInstallSession] = useState<InstallSession | null>(null);
   const [installingLocalCa, setInstallingLocalCa] = useState(false);
   const [activeSectionId, setActiveSectionId] = useState<string>(() => {
@@ -334,8 +314,6 @@ export default function CertificateTab({
       : CERTIFICATE_SECTION_IDS[0];
   });
   const certStatus = certInfo?.status ?? "unknown";
-  const detectedIosProxySsid = mobileInfo?.suggested_wifi_ssid?.trim() ?? "";
-  const iosProxySsid = detectedIosProxySsid || manualIosProxySsid.trim();
   const certStatusLabel = certInfo?.status_label ?? "Check failed";
   const certStatusColor =
     certStatus === "installed_and_trusted"
@@ -369,27 +347,6 @@ export default function CertificateTab({
   useEffect(() => {
     void loadMobileDevices(false);
   }, [loadMobileDevices]);
-
-  useEffect(() => {
-    if (iosProxyHost || !certInfo?.local_ips?.length) {
-      return;
-    }
-    setIosProxyHost(certInfo.local_ips[0]);
-  }, [certInfo?.local_ips, iosProxyHost]);
-
-  useEffect(() => {
-    return subscribeSharedIosWifiProxySsid((ssid) => {
-      if (!detectedIosProxySsid) {
-        setManualIosProxySsid(ssid);
-      }
-    });
-  }, [detectedIosProxySsid]);
-
-  useEffect(() => {
-    if (detectedIosProxySsid) {
-      setSharedIosWifiProxySsid(detectedIosProxySsid);
-    }
-  }, [detectedIosProxySsid]);
 
   useEffect(() => {
     pushService.connect({
@@ -613,48 +570,6 @@ export default function CertificateTab({
       setInstallingIosConfiguratorDeviceId(null);
     }
   }, []);
-
-  const handleInstallIosProxyProfile = useCallback(
-    async (deviceId: string) => {
-      const ssid = iosProxySsid.trim();
-      if (!ssid) {
-        message.warning(
-          "Enter the exact Wi-Fi name shown on the iPhone before sending the proxy profile.",
-        );
-        return;
-      }
-      if (!iosProxyHost) {
-        message.warning("Select the proxy address before sending the proxy profile.");
-        return;
-      }
-      setInstallingIosProxyDeviceId(deviceId);
-      setInstallSession(null);
-      try {
-        setSharedIosWifiProxySsid(ssid);
-        const session = await installIosWifiProxyProfile(deviceId, ssid, iosProxyHost);
-        setInstallSession(session);
-        if (session.completed && !session.requires_user_confirmation) {
-          message.success("Apple Configurator installed the iOS Wi-Fi proxy profile.");
-        } else if (session.requires_user_confirmation) {
-          message.warning(
-            "Apple Configurator opened the proxy profile install flow. Confirm it on the iPhone.",
-          );
-        } else {
-          message.warning("Apple Configurator could not complete the proxy profile install flow.");
-        }
-      } catch (error) {
-        message.error(
-          normalizeApiErrorMessage(
-            error,
-            "Failed to install iOS Wi-Fi proxy profile with Apple Configurator",
-          ),
-        );
-      } finally {
-        setInstallingIosProxyDeviceId(null);
-      }
-    },
-    [iosProxyHost, iosProxySsid],
-  );
 
   const navigateToCertificateSection = useCallback((sectionId: string) => {
       const target = document.getElementById(sectionId);
@@ -897,95 +812,7 @@ export default function CertificateTab({
               ]}
             />
 
-            <Text strong>1. Choose how to send the profile</Text>
-            <Alert
-              type="info"
-              showIcon
-              message="Recommended: configure Wi-Fi proxy manually"
-              description="On ordinary iPhone, the safe cleanup path is Settings > Wi-Fi > current network > Configure Proxy > Manual, then later set it back to Off. The profile option below is experimental: iOS treats it as a managed Wi-Fi configuration, and removing the profile may also remove that Wi-Fi entry from the phone."
-            />
-            <Row gutter={[12, 12]} align="bottom">
-              <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Wi-Fi network for proxy profile
-                </Text>
-                {detectedIosProxySsid ? (
-                  <div style={{ marginTop: 4, minHeight: 32, display: "flex", alignItems: "center" }}>
-                    <Text code data-testid="settings-mobile-ios-proxy-ssid">
-                      {detectedIosProxySsid}
-                    </Text>
-                  </div>
-                ) : (
-                  <Input
-                    value={manualIosProxySsid}
-                    onChange={(event) => setManualIosProxySsid(event.target.value)}
-                    onBlur={(event) => {
-                      const ssid = event.target.value.trim();
-                      if (ssid) {
-                        setSharedIosWifiProxySsid(ssid);
-                      }
-                    }}
-                    onPressEnter={(event) => {
-                      const ssid = event.currentTarget.value.trim();
-                      if (ssid) {
-                        setSharedIosWifiProxySsid(ssid);
-                        message.success("Wi-Fi name shared with Availability Check pages.");
-                      }
-                    }}
-                    placeholder="Exact Wi-Fi name shown on the iPhone"
-                    data-testid="settings-mobile-ios-proxy-ssid-input"
-                    style={{ marginTop: 4 }}
-                  />
-                )}
-              </Col>
-              <Col xs={24} md={12}>
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Proxy address
-                </Text>
-                <Select
-                  value={iosProxyHost || undefined}
-                  onChange={setIosProxyHost}
-                  placeholder="Select this computer's LAN IP"
-                  options={(certInfo?.local_ips ?? []).map((ip) => ({
-                    value: ip,
-                    label: `${ip}:${window.location.port || "9900"}`,
-                  }))}
-                  disabled={!certInfo?.local_ips?.length}
-                  data-testid="settings-mobile-ios-proxy-host"
-                  style={{ width: "100%", marginTop: 4 }}
-                />
-              </Col>
-            </Row>
-            {!detectedIosProxySsid ? (
-              <Space direction="vertical" size={2}>
-                <Text type="secondary" data-testid="settings-mobile-ios-proxy-ssid-missing">
-                  {mobileInfo?.suggested_wifi_ssid_message ??
-                    "Not detected. Enter the exact Wi-Fi name shown on the iPhone."}
-                </Text>
-                <a
-                  href="x-apple.systempreferences:com.apple.preference.security?Privacy_LocationServices"
-                  data-testid="settings-mobile-ios-location-services"
-                >
-                  Open macOS Location Services
-                </a>
-              </Space>
-            ) : null}
-            <Text
-              type="secondary"
-              style={{ display: "block", fontSize: 12 }}
-              data-testid="settings-mobile-ios-ssid-sync-hint"
-            >
-              This Wi-Fi name is shared with open Availability Check panels. If the phone has the
-              check page open, it keeps checking the same session and updates the profile link.
-            </Text>
-            <Alert
-              type="warning"
-              showIcon
-              message="Experimental managed Wi-Fi profile"
-              description={MANAGED_WIFI_PROFILE_RISK_TEXT}
-              data-testid="settings-mobile-ios-wifi-risk-near-ssid"
-            />
-            <Divider style={{ margin: "4px 0" }} />
+            <Text strong>1. Choose how to send the CA profile</Text>
             <Alert
               type={mobileInfo?.ios.configurator.cfgutil_available ? "success" : "info"}
               showIcon
@@ -1004,7 +831,7 @@ export default function CertificateTab({
                   {!mobileInfo?.ios.configurator.cfgutil_available ? (
                     <Space wrap size={8} data-testid="settings-mobile-ios-configurator-missing">
                       <Text type="secondary" style={{ fontSize: 12 }}>
-                        The Configurator buttons stay disabled until Apple Configurator and its
+                        The Configurator button stays disabled until Apple Configurator and its
                         cfgutil automation tool are installed.
                       </Text>
                       <Button
@@ -1105,37 +932,11 @@ export default function CertificateTab({
                             style={{ fontSize: 12 }}
                             data-testid="settings-mobile-ios-configurator-disabled-reason"
                           >
-                            Both Configurator buttons are disabled because cfgutil is not installed.
-                            Open Apple Configurator from the Mac App Store, then choose Install
+                            Configurator install is disabled because cfgutil is not installed. Open
+                            Apple Configurator from the Mac App Store, then choose Install
                             Automation Tools if cfgutil is still missing.
                           </Text>
                         ) : null}
-                        <Tooltip
-                          title={
-                            mobileInfo?.ios.configurator.cfgutil_available
-                              ? "Send a Wi-Fi proxy profile through Apple Configurator"
-                              : "Install Apple Configurator on this Mac first"
-                          }
-                        >
-                          <Button
-                            icon={<SendOutlined />}
-                            size="small"
-                            disabled={
-                              !certInfo?.available ||
-                              !mobileInfo?.ios.configurator.cfgutil_available ||
-                              device.status !== "connected" ||
-                              !iosProxySsid.trim() ||
-                              !iosProxyHost ||
-                              !ackManagedWifiProfileRisk
-                            }
-                            loading={installingIosProxyDeviceId === device.id}
-                            onClick={() => void handleInstallIosProxyProfile(device.id)}
-                            data-testid="settings-mobile-install-ios-proxy-config"
-                            style={{ width: "100%" }}
-                          >
-                            Proxy Config
-                          </Button>
-                        </Tooltip>
                       </Space>
                     </Space>
                   </List.Item>
@@ -1227,40 +1028,6 @@ export default function CertificateTab({
             >
               Download iOS Profile
             </Button>
-            {iosProxySsid.trim() && iosProxyHost ? (
-              <Alert
-                type="warning"
-                showIcon
-                message="Experimental managed Wi-Fi profile"
-                description={
-                  <Space direction="vertical" size={6}>
-                    <Text type="secondary" style={{ fontSize: 12 }}>
-                      This profile uses Apple's managed Wi-Fi payload. It does not contain the Wi-Fi
-                      password, but uninstalling the profile can remove the managed Wi-Fi network
-                      entry from iOS. Use manual Wi-Fi proxy settings when you need clean removal.
-                    </Text>
-                    <Checkbox
-                      checked={ackManagedWifiProfileRisk}
-                      onChange={(event) => setAckManagedWifiProfileRisk(event.target.checked)}
-                      data-testid="settings-mobile-ios-managed-wifi-risk"
-                    >
-                      I understand removing this profile may remove this Wi-Fi entry.
-                    </Checkbox>
-                  </Space>
-                }
-              />
-            ) : null}
-            {iosProxySsid.trim() && iosProxyHost ? (
-              <Button
-                icon={<DownloadOutlined />}
-                href={getIosWifiProxyConfigUrl(iosProxySsid.trim(), iosProxyHost)}
-                download="bifrost-ios-wifi-proxy.mobileconfig"
-                disabled={!certInfo?.available || !ackManagedWifiProfileRisk}
-                data-testid="settings-mobile-ios-wifi-proxy-profile"
-              >
-                Download Experimental Wi-Fi Proxy Profile
-              </Button>
-            ) : null}
             {certInfo?.available ? (
               <Row gutter={[16, 16]} data-testid="settings-mobile-ios-profile-qr-list">
                 {(certInfo.local_ips.length > 0 ? certInfo.local_ips : [""]).map((ip, index) => (
@@ -1299,57 +1066,6 @@ export default function CertificateTab({
                     </div>
                   </Col>
                 ))}
-                {iosProxySsid.trim() && iosProxyHost ? (
-                  <Col data-testid="settings-mobile-ios-wifi-proxy-qr-list">
-                    <div style={{ textAlign: "center", width: 220 }}>
-                      <Space direction="vertical" size={2} style={{ marginBottom: 8 }}>
-                        <Text strong style={{ fontSize: 12 }}>
-                          Configure Wi-Fi proxy
-                        </Text>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          Scan after confirming the managed Wi-Fi profile risk.
-                        </Text>
-                      </Space>
-                      {ackManagedWifiProfileRisk ? (
-                        <Image
-                          src={getIosWifiProxyConfigQRCodeUrl(iosProxySsid.trim(), iosProxyHost)}
-                          alt={`iOS Wi-Fi Proxy Profile QR Code - ${iosProxyHost}`}
-                          width={120}
-                          height={120}
-                          preview={{
-                            mask: <QrcodeOutlined style={{ fontSize: 20 }} />,
-                          }}
-                          fallback="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mN8/+F9PQAJpAN4pokyXwAAAABJRU5ErkJggg=="
-                          data-testid="settings-mobile-ios-wifi-proxy-qrcode"
-                        />
-                      ) : (
-                        <div
-                          style={{
-                            width: 120,
-                            height: 120,
-                            display: "flex",
-                            alignItems: "center",
-                            justifyContent: "center",
-                            border: `1px solid ${token.colorBorderSecondary}`,
-                            borderRadius: token.borderRadius,
-                            color: token.colorTextSecondary,
-                            fontSize: 12,
-                            textAlign: "center",
-                            padding: 8,
-                          }}
-                        >
-                          Confirm risk to show QR
-                        </div>
-                      )}
-                      <div style={{ marginTop: 4 }}>
-                        <Text type="secondary" style={{ fontSize: 12 }}>
-                          Experimental proxy profile: {iosProxySsid.trim()} to {iosProxyHost}:
-                          {window.location.port || "9900"}
-                        </Text>
-                      </div>
-                    </div>
-                  </Col>
-                ) : null}
               </Row>
             ) : null}
             <Divider style={{ margin: "4px 0" }} />

@@ -1,4 +1,4 @@
-import { get, patch, post } from './client';
+import { get, post } from './client';
 import { buildPublicUrl } from '../runtime';
 
 export interface CertInfo {
@@ -24,7 +24,6 @@ export type DeviceStatus = "connected" | "unauthorized" | "offline" | "unsupport
 export type InstallMode =
   | "normal_guide"
   | "managed_auto_trust"
-  | "proxy_config"
   | "lab_root_mode";
 export type DeviceCertificateState =
   | "unknown"
@@ -76,10 +75,6 @@ export interface MobileDevicesResponse {
   ios: IosDiscovery;
   ios_profile_url: string;
   ios_profile_qrcode_url: string;
-  ios_wifi_proxy_profile_url: string;
-  ios_wifi_proxy_profile_qrcode_url: string;
-  suggested_wifi_ssid?: string | null;
-  suggested_wifi_ssid_message?: string | null;
   ordinary_device_notice: string;
   managed_device_notice: string;
 }
@@ -152,8 +147,6 @@ export interface TrustProbeSession {
   proxyAccessMessage?: string | null;
   proxyConfigured: boolean;
   proxyConfigurationMessage?: string | null;
-  suggestedWifiSsid?: string | null;
-  suggestedWifiSsidMessage?: string | null;
   networkReachable: boolean;
   tlsTrusted: boolean;
   clientIp?: string | null;
@@ -175,7 +168,6 @@ export interface TrustProbeSession {
 
 export const MOBILE_INSTALL_CONFIRMATION =
   "push_and_open_mobile_certificate_installer";
-export const IOS_PROXY_CONFIG_CONFIRMATION = "install_ios_wifi_proxy_profile";
 export const LOCAL_CA_INSTALL_CONFIRMATION = "install_local_ca_certificate";
 
 export async function getCertInfo(): Promise<CertInfo> {
@@ -209,23 +201,6 @@ export async function installMobileCa(
   );
 }
 
-export async function installIosWifiProxyProfile(
-  deviceId: string,
-  ssid: string,
-  proxyHost?: string,
-  proxyPort?: number,
-): Promise<InstallSession> {
-  return post<InstallSession>(
-    `/mobile-devices/${encodeURIComponent(deviceId)}/install-ios-proxy-profile`,
-    {
-      ssid,
-      proxy_host: proxyHost,
-      proxy_port: proxyPort,
-      confirmation: IOS_PROXY_CONFIG_CONFIRMATION,
-    },
-  );
-}
-
 export async function createTrustProbeSession(
   host: string,
   ttlSeconds = 600,
@@ -238,15 +213,6 @@ export async function createTrustProbeSession(
 
 export async function getTrustProbeSession(sessionId: string): Promise<TrustProbeSession> {
   return get<TrustProbeSession>(`/trust-probe/sessions/${encodeURIComponent(sessionId)}`);
-}
-
-export async function updateTrustProbeSessionWifiSsid(
-  sessionId: string,
-  wifiSsid: string,
-): Promise<TrustProbeSession> {
-  return patch<TrustProbeSession>(`/trust-probe/sessions/${encodeURIComponent(sessionId)}`, {
-    wifiSsid,
-  });
 }
 
 export function getCertDownloadUrl(): string {
@@ -271,38 +237,4 @@ export function getIosMobileConfigQRCodeUrl(ip?: string): string {
     return `${baseUrl}?ip=${encodeURIComponent(ip)}`;
   }
   return baseUrl;
-}
-
-export function getIosWifiProxyConfigUrl(
-  ssid: string,
-  ip?: string,
-  port?: number,
-): string {
-  const baseUrl = buildPublicUrl('/mobile/ios-wifi-proxy.mobileconfig');
-  const params = new URLSearchParams();
-  params.set('ssid', ssid);
-  if (ip) {
-    params.set('ip', ip);
-  }
-  if (port) {
-    params.set('port', String(port));
-  }
-  return `${baseUrl}?${params.toString()}`;
-}
-
-export function getIosWifiProxyConfigQRCodeUrl(
-  ssid: string,
-  ip?: string,
-  port?: number,
-): string {
-  const baseUrl = buildPublicUrl('/mobile/ios-wifi-proxy.mobileconfig/qrcode');
-  const params = new URLSearchParams();
-  params.set('ssid', ssid);
-  if (ip) {
-    params.set('ip', ip);
-  }
-  if (port) {
-    params.set('port', String(port));
-  }
-  return `${baseUrl}?${params.toString()}`;
 }
