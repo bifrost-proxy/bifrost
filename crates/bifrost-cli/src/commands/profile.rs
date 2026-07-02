@@ -208,6 +208,14 @@ fn print_explain_report(report: &ExplainReport) {
         }
         _ => println!("Matched: none"),
     }
+    if let Some(decision) = &report.policy_decision {
+        println!(
+            "Policy decision: {} (terminal {}; {})",
+            decision.chain.join(" -> "),
+            decision.terminal_policy,
+            decision.reason
+        );
+    }
 
     println!();
     println!("Decision timeline:");

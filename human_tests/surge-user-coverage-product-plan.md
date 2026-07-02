@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
+本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
 
 ## 前置条件
 
@@ -75,6 +75,7 @@
 - 输出包含 `Surge profile explain`。
 - 输出包含 `DOMAIN-SUFFIX`。
 - 输出包含 `Selected policy Proxy`。
+- 输出包含 `Policy decision: Proxy -> ProxyA`，证明 `select` policy group 已解析到 terminal proxy。
 - 命中 `DOMAIN-SUFFIX,example.com,Proxy`，而不是后续 `FINAL`。
 
 ### TC-SURGE-05：profile explain 可命中本地 RULE-SET 展开规则
@@ -90,7 +91,20 @@
 - 输出包含 `Selected policy Proxy`。
 - 命中展开后的 `DOMAIN-SUFFIX,ruleset.example`，而不是后续 `FINAL`。
 
-### TC-SURGE-06：profile convert 只输出 Bifrost Native Profile 预览
+### TC-SURGE-06：profile explain 展示 url-test dry-run policy decision
+
+操作步骤：
+
+1. 使用 TC-SURGE-02 的临时 profile，其中 `[Proxy Group]` 包含 `Auto = url-test, ProxyA, DIRECT, url=http://example.com/generate_204`，且 `[Rule]` 包含 `DOMAIN,auto.example,Auto`。
+2. 执行 `target/debug/bifrost profile explain --profile <profile> https://auto.example/path`。
+
+预期结果：
+
+- 输出包含 `Policy decision: Auto -> ProxyA`。
+- 输出包含 `active latency probing is not running`。
+- 说明 dry-run explain 不进行真实延迟探测，但会给出当前可解释的 terminal policy。
+
+### TC-SURGE-07：profile convert 只输出 Bifrost Native Profile 预览
 
 操作步骤：
 
@@ -105,7 +119,7 @@
 - 输出包含 `Compatibility summary`。
 - 对存在行为差异或暂不支持的能力以注释或 summary 保留，不静默丢弃。
 
-### TC-SURGE-07：managed profile URL 可直接作为 profile source
+### TC-SURGE-08：managed profile URL 可直接作为 profile source
 
 操作步骤：
 
@@ -118,7 +132,7 @@
 - 输出包含 `ManagedProfile`。
 - 输出包含 `managed.example`，证明 managed profile URL 已加载为 dry-run runtime plan。
 
-### TC-SURGE-08：自动 E2E 脚本覆盖 CLI 黑盒链路
+### TC-SURGE-09：自动 E2E 脚本覆盖 CLI 黑盒链路
 
 操作步骤：
 
@@ -128,7 +142,7 @@
 
 - 脚本自动构造临时 Surge profile。
 - 脚本自动启动本地 HTTP server，覆盖远程 include、RULE-SET、DOMAIN-SET、managed profile URL 和 cache-hit。
-- `profile import --dry-run`、`profile effective`、`profile explain`、`profile convert` 四条链路均通过断言。
+- `profile import --dry-run`、`profile effective`、`profile explain`、Policy Group decision explain、`profile convert` 五类链路均通过断言。
 - 测试结束后删除临时目录。
 
 ## 清理步骤

@@ -113,6 +113,7 @@ ProxyA = http, 127.0.0.1, 8080
 
 [Proxy Group]
 Proxy = select, ProxyA, DIRECT, MissingProxy
+Auto = url-test, ProxyA, DIRECT, url=http://example.com/generate_204
 
 [MITM]
 hostname = *.example.com
@@ -120,6 +121,7 @@ hostname = *.example.com
 [Rule]
 RULE-SET,rules.list,Proxy
 DOMAIN-SET,domains.list,DIRECT
+DOMAIN,auto.example,Auto
 DOMAIN,exact.example.com,DIRECT
 DOMAIN-SUFFIX,example.com,Proxy
 DOMAIN-KEYWORD,google,DIRECT
@@ -164,10 +166,15 @@ EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://s
 assert_body_contains "Matched: line" "$EXPLAIN_OUTPUT" "explain prints matched rule line"
 assert_body_contains "DOMAIN-SUFFIX" "$EXPLAIN_OUTPUT" "explain uses ordered DOMAIN-SUFFIX first match"
 assert_body_contains "Selected policy Proxy" "$EXPLAIN_OUTPUT" "explain prints selected policy"
+assert_body_contains "Policy decision: Proxy -> ProxyA (terminal ProxyA; proxy endpoint)" "$EXPLAIN_OUTPUT" "explain resolves select group to terminal proxy"
 
 RESOURCE_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://api.ruleset.example/path")"
 assert_body_contains "RULE-SET:rules.list" "$RESOURCE_EXPLAIN_OUTPUT" "explain evaluates expanded RULE-SET before FINAL"
 assert_body_contains "Selected policy Proxy" "$RESOURCE_EXPLAIN_OUTPUT" "expanded RULE-SET keeps parent policy"
+
+AUTO_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://auto.example/path")"
+assert_body_contains "Policy decision: Auto -> ProxyA (terminal ProxyA; proxy endpoint)" "$AUTO_EXPLAIN_OUTPUT" "explain resolves url-test group in dry-run"
+assert_body_contains "active latency probing is not running" "$AUTO_EXPLAIN_OUTPUT" "explain reports url-test dry-run health boundary"
 
 echo "Running bifrost profile convert..."
 CONVERT_OUTPUT="$("$BIFROST_BIN" profile convert "$PROFILE" --to bifrost)"

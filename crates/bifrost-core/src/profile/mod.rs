@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -174,8 +174,17 @@ pub struct ExplainReport {
     pub request: ExplainRequest,
     pub matched_rule: Option<RuleNode>,
     pub target_policy: Option<String>,
+    pub policy_decision: Option<PolicyDecisionTrace>,
     pub timeline: Vec<ExplainStep>,
     pub diagnostics: Vec<ProfileDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyDecisionTrace {
+    pub requested_policy: String,
+    pub terminal_policy: String,
+    pub chain: Vec<String>,
+    pub reason: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -498,6 +507,7 @@ pub fn explain_surge_request(document: &ProfileDocument, input: &str) -> Result<
                 request,
                 matched_rule: Some(rule.clone()),
                 target_policy: Some(rule.policy.clone()),
+                policy_decision: None,
                 timeline,
                 diagnostics,
             });
@@ -525,6 +535,7 @@ pub fn explain_surge_request(document: &ProfileDocument, input: &str) -> Result<
         request,
         matched_rule: None,
         target_policy: None,
+        policy_decision: None,
         timeline,
         diagnostics,
     })
@@ -756,6 +767,9 @@ pub fn explain_surge_request_with_plan(
                 line: Some(rule.source.line),
                 message: format!("Selected policy {}", rule.policy),
             });
+            let policy_decision = resolve_policy_decision(plan, &rule.policy, rule.source.line);
+            timeline.extend(policy_decision.steps);
+            diagnostics.extend(policy_decision.diagnostics);
             timeline.push(ExplainStep {
                 stage: "mitm".to_string(),
                 line: None,
@@ -765,6 +779,7 @@ pub fn explain_surge_request_with_plan(
                 request,
                 matched_rule: Some(rule),
                 target_policy: Some(runtime_rule.policy.clone()),
+                policy_decision: Some(policy_decision.trace),
                 timeline,
                 diagnostics,
             });
@@ -792,9 +807,195 @@ pub fn explain_surge_request_with_plan(
         request,
         matched_rule: None,
         target_policy: None,
+        policy_decision: None,
         timeline,
         diagnostics,
     })
+}
+
+struct PolicyDecisionResolution {
+    trace: PolicyDecisionTrace,
+    steps: Vec<ExplainStep>,
+    diagnostics: Vec<ProfileDiagnostic>,
+}
+
+fn resolve_policy_decision(
+    plan: &ProfileRuntimePlan,
+    policy: &str,
+    source_line: usize,
+) -> PolicyDecisionResolution {
+    let mut resolver = PolicyDecisionResolver {
+        plan,
+        steps: Vec::new(),
+        diagnostics: Vec::new(),
+        seen: BTreeSet::new(),
+    };
+    let (terminal_policy, reason, chain) = resolver.resolve(policy, source_line);
+    PolicyDecisionResolution {
+        trace: PolicyDecisionTrace {
+            requested_policy: policy.to_string(),
+            terminal_policy,
+            chain,
+            reason,
+        },
+        steps: resolver.steps,
+        diagnostics: resolver.diagnostics,
+    }
+}
+
+struct PolicyDecisionResolver<'a> {
+    plan: &'a ProfileRuntimePlan,
+    steps: Vec<ExplainStep>,
+    diagnostics: Vec<ProfileDiagnostic>,
+    seen: BTreeSet<String>,
+}
+
+impl<'a> PolicyDecisionResolver<'a> {
+    fn resolve(&mut self, policy: &str, source_line: usize) -> (String, String, Vec<String>) {
+        let normalized = policy.trim();
+        if normalized.is_empty() {
+            self.push_diagnostic(
+                source_line,
+                "surge.policy.empty",
+                "Matched rule selected an empty policy",
+                "Review the rule target policy",
+            );
+            return (
+                normalized.to_string(),
+                "empty policy target".to_string(),
+                vec![normalized.to_string()],
+            );
+        }
+
+        if is_builtin_policy(normalized) {
+            self.steps.push(ExplainStep {
+                stage: "policy".to_string(),
+                line: Some(source_line),
+                message: format!("Terminal built-in policy {normalized}"),
+            });
+            return (
+                normalized.to_string(),
+                "built-in policy".to_string(),
+                vec![normalized.to_string()],
+            );
+        }
+
+        if self
+            .plan
+            .proxies
+            .iter()
+            .any(|proxy| proxy.name == normalized)
+        {
+            self.steps.push(ExplainStep {
+                stage: "policy".to_string(),
+                line: Some(source_line),
+                message: format!("Terminal proxy policy {normalized}"),
+            });
+            return (
+                normalized.to_string(),
+                "proxy endpoint".to_string(),
+                vec![normalized.to_string()],
+            );
+        }
+
+        let Some(group) = self
+            .plan
+            .policy_groups
+            .iter()
+            .find(|group| group.name == normalized)
+        else {
+            self.push_diagnostic(
+                source_line,
+                "surge.policy.missing",
+                &format!("Selected policy {normalized} does not match a proxy, built-in policy, or policy group"),
+                "Inspect the effective profile for missing policy group members",
+            );
+            self.steps.push(ExplainStep {
+                stage: "policy".to_string(),
+                line: Some(source_line),
+                message: format!("Missing terminal policy {normalized}"),
+            });
+            return (
+                normalized.to_string(),
+                "missing policy target".to_string(),
+                vec![normalized.to_string()],
+            );
+        };
+
+        if !self.seen.insert(group.name.clone()) {
+            self.push_diagnostic(
+                group.source.line,
+                "surge.policy.cycle",
+                &format!("Policy group cycle detected at {}", group.name),
+                "Break the policy group cycle before activating this profile",
+            );
+            self.steps.push(ExplainStep {
+                stage: "policy-group".to_string(),
+                line: Some(group.source.line),
+                message: format!("Stopped policy group cycle at {}", group.name),
+            });
+            return (
+                group.name.clone(),
+                "policy group cycle".to_string(),
+                vec![group.name.clone()],
+            );
+        }
+
+        let Some(candidate) = self.select_group_candidate(group) else {
+            self.push_diagnostic(
+                group.source.line,
+                "surge.policy_group.empty",
+                &format!("Policy group {} has no candidate policies", group.name),
+                "Add at least one policy member to the group",
+            );
+            self.steps.push(ExplainStep {
+                stage: "policy-group".to_string(),
+                line: Some(group.source.line),
+                message: format!("Policy group {} has no candidates", group.name),
+            });
+            return (
+                group.name.clone(),
+                "empty policy group".to_string(),
+                vec![group.name.clone()],
+            );
+        };
+
+        self.steps.push(ExplainStep {
+            stage: "policy-group".to_string(),
+            line: Some(group.source.line),
+            message: format!(
+                "{} group {} selected {} ({})",
+                group.group_type,
+                group.name,
+                candidate,
+                group_selection_reason(group)
+            ),
+        });
+        let (terminal, reason, mut chain) = self.resolve(&candidate, group.source.line);
+        let mut full_chain = vec![group.name.clone()];
+        full_chain.append(&mut chain);
+        (terminal, reason, full_chain)
+    }
+
+    fn select_group_candidate(&self, group: &RuntimePolicyGroup) -> Option<String> {
+        if let Some(selected) = group.parameters.get("selected") {
+            if group.policies.iter().any(|policy| policy == selected) {
+                return Some(selected.clone());
+            }
+        }
+        group.policies.first().cloned()
+    }
+
+    fn push_diagnostic(&mut self, line: usize, code: &str, message: &str, suggestion: &str) {
+        self.diagnostics.push(ProfileDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            line,
+            column: 1,
+            code: code.to_string(),
+            message: message.to_string(),
+            suggestion: Some(suggestion.to_string()),
+        });
+    }
 }
 
 struct ProfileResolver {
@@ -1905,6 +2106,24 @@ fn rule_matches_request(rule: &RuleNode, request: &ExplainRequest) -> (bool, Str
     }
 }
 
+fn is_builtin_policy(policy: &str) -> bool {
+    matches!(
+        policy.to_ascii_uppercase().as_str(),
+        "DIRECT" | "REJECT" | "REJECT-TINYGIF" | "REJECT-DROP"
+    )
+}
+
+fn group_selection_reason(group: &RuntimePolicyGroup) -> &'static str {
+    match group.group_type.as_str() {
+        "select" => "dry-run uses selected parameter when present, otherwise the first candidate",
+        "fallback" => "dry-run uses the first candidate because Policy Health Store is not active",
+        "url-test" => {
+            "dry-run uses the first candidate because active latency probing is not running"
+        }
+        _ => "dry-run uses the first candidate for unknown group type",
+    }
+}
+
 fn explain_mitm(document: &ProfileDocument, host: &str) -> String {
     for section in &document.sections {
         if section.kind != ProfileSectionKind::Mitm {
@@ -2384,6 +2603,110 @@ FINAL,Proxy
                 .iter()
                 .any(|diagnostic| diagnostic.code == "surge.resource.stale_cache_used"));
         });
+    }
+
+    #[test]
+    fn policy_decision_resolves_select_group_to_selected_terminal_proxy() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy]
+ProxyA = http, 127.0.0.1, 8080
+ProxyB = http, 127.0.0.1, 8081
+[Proxy Group]
+Proxy = select, ProxyA, ProxyB, selected=ProxyB
+[Rule]
+DOMAIN,select.example,Proxy
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://select.example")
+                .unwrap();
+        let decision = report.policy_decision.unwrap();
+        assert_eq!(decision.requested_policy, "Proxy");
+        assert_eq!(decision.terminal_policy, "ProxyB");
+        assert_eq!(decision.chain, vec!["Proxy", "ProxyB"]);
+        assert!(report.timeline.iter().any(|step| {
+            step.stage == "policy-group" && step.message.contains("selected ProxyB")
+        }));
+    }
+
+    #[test]
+    fn policy_decision_resolves_url_test_group_to_first_candidate_in_dry_run() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy]
+ProxyA = http, 127.0.0.1, 8080
+[Proxy Group]
+Auto = url-test, ProxyA, DIRECT, url=http://example.com/generate_204
+[Rule]
+DOMAIN,auto.example,Auto
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://auto.example")
+                .unwrap();
+        let decision = report.policy_decision.unwrap();
+        assert_eq!(decision.terminal_policy, "ProxyA");
+        assert_eq!(decision.chain, vec!["Auto", "ProxyA"]);
+        assert!(report.timeline.iter().any(|step| {
+            step.message
+                .contains("active latency probing is not running")
+        }));
+    }
+
+    #[test]
+    fn policy_decision_reports_missing_policy_member() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy Group]
+Proxy = select, MissingProxy
+[Rule]
+DOMAIN,missing.example,Proxy
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://missing.example")
+                .unwrap();
+        let decision = report.policy_decision.unwrap();
+        assert_eq!(decision.terminal_policy, "MissingProxy");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "surge.policy.missing"));
+    }
+
+    #[test]
+    fn policy_decision_detects_policy_group_cycle() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy Group]
+A = select, B
+B = select, A
+[Rule]
+DOMAIN,cycle.example,A
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://cycle.example")
+                .unwrap();
+        let decision = report.policy_decision.unwrap();
+        assert_eq!(decision.terminal_policy, "A");
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "surge.policy.cycle"));
     }
 
     fn start_http_fixture(

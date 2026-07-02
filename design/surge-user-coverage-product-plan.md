@@ -11,6 +11,7 @@
 - Managed profile URL 可作为 CLI profile source 直接导入、解释、转换和输出 effective plan。
 - 远程 profile resource 支持 ETag / Last-Modified 条件请求、304 cache-hit 和 fetch 失败时的 stale cache fallback。
 - Policy Group 会生成 dry-run policy graph，并报告缺失成员。
+- `profile explain` 会递归解释 `select`、`fallback`、`url-test` policy group，输出 policy chain、terminal policy 和 dry-run health boundary。
 - `bifrost profile import <file> --dry-run` 只解析、分析和展示报告，不启用 profile。
 - `bifrost profile explain --profile <file> <url>` 按 Surge `[Rule]` top-to-bottom first-match 语义解释 DNS/Rule/Policy/MITM 决策摘要。
 - `bifrost profile convert <file> --to bifrost` 生成带行为说明的 Bifrost Native Profile 预览，不写入运行时。
@@ -60,6 +61,7 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - Managed profile URL 可作为顶层 profile source。
 - 远程资源写入 profile resource cache，并保留 ETag、Last-Modified、content hash 和 cache-hit 状态。
 - Effective profile dump 展示资源解析状态、cache key、policy graph、ordered rules、DNS/MITM/HTTP pipeline dry-run entries。
+- Explain policy decision 支持 `select` 的 selected/default 候选、`fallback` / `url-test` 的 dry-run 首候选，并报告 missing member 与 group cycle。
 
 ### 后续迭代一补齐
 
@@ -133,6 +135,7 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - 远程 include、RULE-SET、DOMAIN-SET fetch、ETag/Last-Modified cache metadata、304 cache-hit。
 - managed profile URL top-level source。
 - policy graph missing member diagnostics。
+- policy decision dry-run：select、fallback、url-test、missing member、cycle detection。
 - effective profile dry-run runtime plan。
 - rule parser 和 line number diagnostics。
 - compatibility analyzer 支持等级分类。
@@ -147,6 +150,7 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - 验证本地 HTTP server 提供的 remote include、RULE-SET、DOMAIN-SET 可 fetch、cache，并在第二次解析时命中 `cache-hit`。
 - 验证 managed profile URL 可直接作为 `profile effective` 输入。
 - 验证 `profile explain` 命中 ordered `DOMAIN-SUFFIX` 并输出 policy。
+- 验证 `profile explain` 输出 policy group chain、terminal policy 和 `url-test` dry-run health boundary。
 - 验证 `profile explain` 可命中本地 `RULE-SET` 展开规则。
 - 验证 `profile convert --to bifrost` 输出 preview 和 compatibility summary。
 
