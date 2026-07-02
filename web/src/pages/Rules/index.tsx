@@ -1,10 +1,9 @@
-import { useEffect, useRef, useCallback, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { theme } from 'antd';
 import SplitPane from '../../components/SplitPane';
 import RuleList from './RuleList';
 import RuleEditor from './RuleEditor';
-import RulesDynamicIsland from './RulesDynamicIsland';
 import { useRulesStore } from '../../stores/useRulesStore';
 import { useValuesStore } from '../../stores/useValuesStore';
 import { notifyApiBusinessError } from '../../api/client';
@@ -42,8 +41,9 @@ syncGroupFromUrl();
 
 export default function Rules() {
   const { token } = theme.useToken();
-  const [, setSearchParams] = useSearchParams();
-  const [initialRuleParam] = useState(() => getUrlParams().get(RULE_PARAM));
+  const [searchParams, setSearchParams] = useSearchParams();
+  const targetGroupParam = searchParams.get(GROUP_PARAM);
+  const targetRuleParam = searchParams.get(RULE_PARAM);
   const error = useRulesStore((state) => state.error);
   const clearError = useRulesStore((state) => state.clearError);
   const rules = useRulesStore((state) => state.rules);
@@ -95,7 +95,7 @@ export default function Rules() {
     initDoneRef.current = true;
     restoringRef.current = true;
 
-    const ruleParam = initialRuleParam;
+    const ruleParam = targetRuleParam;
     if (ruleParam) {
       const exists = rules.some((r) => r.name === ruleParam);
       if (exists) {
@@ -104,8 +104,35 @@ export default function Rules() {
       }
     }
     selectRule(rules[0].name);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [rules, loading]);
+  }, [rules, loading, targetRuleParam, selectRule]);
+
+  useEffect(() => {
+    if (!initDoneRef.current) return;
+
+    const targetGroupId = targetGroupParam || null;
+    if (targetGroupId !== activeGroupId) {
+      setActiveGroupId(targetGroupId);
+      void fetchRules().then(() => {
+        if (targetRuleParam) {
+          void selectRule(targetRuleParam);
+        }
+      });
+      return;
+    }
+
+    if (targetRuleParam && targetRuleParam !== selectedRuleName) {
+      restoringRef.current = true;
+      void selectRule(targetRuleParam);
+    }
+  }, [
+    activeGroupId,
+    fetchRules,
+    selectRule,
+    selectedRuleName,
+    setActiveGroupId,
+    targetGroupParam,
+    targetRuleParam,
+  ]);
 
   useEffect(() => {
     if (restoringRef.current) {
@@ -144,19 +171,6 @@ export default function Rules() {
     }
   }, [error, clearError]);
 
-  const handleNavigateRule = useCallback(
-    async (name: string, groupId: string | null) => {
-      const targetGroupId = groupId ?? null;
-      if (targetGroupId !== activeGroupId) {
-        setActiveGroupId(targetGroupId);
-        useRulesStore.setState({ selectedRuleName: name });
-        await fetchRules();
-      }
-      selectRule(name);
-    },
-    [activeGroupId, setActiveGroupId, fetchRules, selectRule],
-  );
-
   const containerStyle = {
     width: '100%',
     height: '100%',
@@ -169,7 +183,6 @@ export default function Rules() {
 
   return (
     <div style={containerStyle}>
-      <RulesDynamicIsland onNavigateRule={handleNavigateRule} />
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <SplitPane
           left={<RuleList />}

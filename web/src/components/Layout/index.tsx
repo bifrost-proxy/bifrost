@@ -15,7 +15,7 @@ import {
   BugOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
-import { useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo } from "react";
 import { usePendingAuthStore } from "../../stores/usePendingAuthStore";
 import { usePendingIpTlsStore } from "../../stores/usePendingIpTlsStore";
 import { usePairingRequestStore } from "../../stores/usePairingRequestStore";
@@ -27,6 +27,7 @@ import { setNavigateCallback, type ReferenceLocation } from "../BifrostEditor";
 import { getDesktopPlatform, isDesktopShell } from "../../runtime";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useSyncStore } from "../../stores/useSyncStore";
+import RulesDynamicIsland from "../../pages/Rules/RulesDynamicIsland";
 
 interface MenuItem {
   key: string;
@@ -307,6 +308,18 @@ export default function AppLayout() {
     navigate(key);
   };
 
+  const handleNavigateRuleFromIsland = useCallback(
+    (name: string, groupId: string | null) => {
+      const params = new URLSearchParams();
+      if (groupId) {
+        params.set("group", groupId);
+      }
+      params.set("rule", name);
+      navigate({ pathname: "/rules", search: `?${params.toString()}` });
+    },
+    [navigate],
+  );
+
   const isActive = (key: string) => {
     if (key === "/traffic" && location.pathname === "/") return true;
     return location.pathname === key || location.pathname.startsWith(key + "/");
@@ -347,6 +360,7 @@ export default function AppLayout() {
       <div style={styles.main}>
         <MobileDeviceTrustPrompt />
         <AvailabilityCheckNotificationCenter />
+        <RulesDynamicIsland onNavigateRule={handleNavigateRuleFromIsland} />
         <div style={styles.sidebar}>
           <div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">
             {menuItems.filter((item) => !item.hidden).map((item) => {
