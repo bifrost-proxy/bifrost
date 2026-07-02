@@ -136,23 +136,34 @@ impl ValueSource {
             ValueSource::ParenContent(s) => Some(s.clone()),
             ValueSource::ValueRef(var_name) => store.get(var_name),
             ValueSource::FilePath(path) => std::fs::read_to_string(path).ok(),
-            ValueSource::RemoteUrl(url) => {
-                let client = crate::outbound_blocking_reqwest_client_builder()
-                    .timeout(Duration::from_secs(5))
-                    .build()
-                    .ok()?;
-                let response = client.get(url).send().ok()?;
-                if !response.status().is_success() {
-                    return None;
-                }
-                response.text().ok()
-            }
+            ValueSource::RemoteUrl(url) => fetch_remote_url(url),
         }
     }
 
     pub fn resolve_with_fallback(&self, store: &dyn ValueStore) -> String {
         self.resolve(store).unwrap_or_else(|| self.get_raw_value())
     }
+}
+
+fn fetch_remote_url(url: &str) -> Option<String> {
+    let url = url.to_string();
+    std::thread::Builder::new()
+        .name("bifrost-value-source-fetch".to_string())
+        .spawn(move || {
+            let client = crate::outbound_blocking_reqwest_client_builder()
+                .timeout(Duration::from_secs(5))
+                .build()
+                .ok()?;
+            let response = client.get(&url).send().ok()?;
+            if !response.status().is_success() {
+                return None;
+            }
+            response.text().ok()
+        })
+        .ok()?
+        .join()
+        .ok()
+        .flatten()
 }
 
 fn parse_inline_params(value: &str) -> Vec<(String, String)> {
@@ -482,6 +493,25 @@ mod tests {
 
         let source = ValueSource::ValueRef("unknown".to_string());
         assert_eq!(source.resolve_with_fallback(&store), "{unknown}");
+    }
+
+    #[test]
+    fn test_remote_url_fallback_inside_tokio_runtime_does_not_panic() {
+        use super::super::MemoryValueStore;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime should build");
+
+        runtime.block_on(async {
+            let store = MemoryValueStore::new();
+            let source = ValueSource::RemoteUrl("http://127.0.0.1:9/unreachable".to_string());
+            assert_eq!(
+                source.resolve_with_fallback(&store),
+                "http://127.0.0.1:9/unreachable"
+            );
+        });
     }
 
     #[test]

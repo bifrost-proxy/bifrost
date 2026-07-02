@@ -108,6 +108,23 @@
 - `install-binary.sh` shell 语法检查通过。
 - `curl`、`wget`、`aria2c` 下载/probe/API/redirect 路径能看到 CA/unsafe 参数桥接。
 
+### TC-UTT-07：规则 URL 字面量在异步代理路径中不可达时安全 fallback
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   cargo test -p bifrost-core rule::value_source::tests::test_remote_url_fallback_inside_tokio_runtime_does_not_panic -- --nocapture
+   cargo test -p bifrost-e2e tests::request_modification::tests::test_combined -- --nocapture
+   ```
+2. 观察 `referer://https://combined.test.com` 这类 URL 字面量规则在代理异步请求路径中的解析结果。
+
+预期结果：
+
+- 两个测试均 0 退出。
+- 不出现 `Cannot drop a runtime in a context where blocking is not allowed` panic。
+- 远程 URL 拉取不可达时按既有语义 fallback 为原始 URL 字面量。
+
 ## 清理步骤
 
 - `test_upgrade_tls_trust_e2e.sh` 通过 `trap` 自动停止本地 HTTPS mirror 并删除临时目录。
@@ -121,3 +138,4 @@
 | 2026-07-02 | TC-UTT-04 | 通过 | 执行 `rg -n "BIFROST_GITHUB_CA_BUNDLE\|BIFROST_UPGRADE_CA_BUNDLE\|BIFROST_CA_BUNDLE\|BIFROST_UNSAFE_SSL\|BIFROST_REMOTE_UNSAFE_SSL" README.md SKILL.md skill_remote.md design/upgrade-tls-trust.md`，README、SKILL、skill_remote 与 design 文档均包含 scoped/global CA 与 unsafe 说明。 |
 | 2026-07-02 | TC-UTT-05 | 通过 | 执行外部 HTTPS 调用点 builder 扫描，`install_skill.rs` 命中 GitHub builder，Sync、AI provider、MCP OAuth、ASR/voice/IM/script/rule value 等路径命中 outbound builder。 |
 | 2026-07-02 | TC-UTT-06 | 通过 | 执行 `bash -n install-binary.sh` 与 CA/unsafe 参数扫描，脚本语法通过，curl/wget/aria2c/axel 相关下载/probe/API/redirect 路径包含 CA/unsafe 桥接参数。 |
+| 2026-07-02 | TC-UTT-07 | 通过 | 执行 `cargo test -p bifrost-core rule::value_source::tests::test_remote_url_fallback_inside_tokio_runtime_does_not_panic -- --nocapture` 与 `cargo test -p bifrost-e2e tests::request_modification::tests::test_combined -- --nocapture`，均通过；验证 URL 字面量规则在 async 代理路径中不会因 reqwest blocking runtime drop panic。 |

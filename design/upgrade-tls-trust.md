@@ -96,7 +96,7 @@ GitHub/upgrade 链路按以下来源追加私有根证书：
 - `agent` provider 请求、Responses API、MCP OAuth discovery/register/token/refresh。
 - `bifrost-admin` ASR、语音唤醒、diarization 模型下载，以及 IM gateway/ChatGPT Web/Feishu/Weixin 外部请求。
 - `bifrost-script` remote parser download 与 sandbox `net.fetch`。
-- `bifrost-core` 规则 value 的远程 URL 来源。
+- `bifrost-core` 规则 value 的远程 URL 来源；同步规则解析路径通过独立线程执行 reqwest blocking 拉取，确保在代理 async runtime 内遇到不可达 URL 字面量时仍按既有语义 fallback，不触发 nested runtime drop panic。
 - `install-binary.sh` probe、latest redirect、GitHub API 查询和下载工具参数桥接。
 
 ## 测试方案
@@ -109,6 +109,7 @@ GitHub/upgrade 链路按以下来源追加私有根证书：
 - 通用 outbound async/blocking reqwest builder 能加载显式 CA bundle。
 - `BIFROST_GITHUB_UNSAFE_SSL` 与 `BIFROST_UPGRADE_UNSAFE_SSL` 均可启用 unsafe SSL。
 - `BIFROST_UNSAFE_SSL` 可启用通用 outbound unsafe SSL，并作为 GitHub profile 兜底。
+- 规则远程 URL value 在 Tokio runtime 内不可达时不会 panic，并 fallback 为原始 URL 字面量。
 - 既有 remote relay 测试继续验证 remote 专用 CA/unsafe 行为不变。
 
 ### E2E 测试
