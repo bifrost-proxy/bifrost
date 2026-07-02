@@ -1,6 +1,6 @@
 use bifrost_core::profile::{
     analyze_compatibility, convert_resolved_surge_to_bifrost_preview,
-    explain_surge_request_with_plan, load_surge_profile_file, CompatibilityReport,
+    explain_surge_request_with_plan, load_surge_profile_path_or_url, CompatibilityReport,
     ConversionPreview, ExplainReport, ProfileDocument, ResolvedProfileDocument, SupportLevel,
 };
 
@@ -19,7 +19,7 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
                         .to_string(),
                 ));
             }
-            let resolved = load_surge_profile_file(&profile)?;
+            let resolved = load_surge_profile_path_or_url(&profile)?;
             let report = analyze_compatibility(&resolved.document);
             if json {
                 println!("{}", serde_json::to_string_pretty(&resolved)?);
@@ -33,7 +33,7 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
             target,
             json,
         } => {
-            let resolved = load_surge_profile_file(&profile)?;
+            let resolved = load_surge_profile_path_or_url(&profile)?;
             let report = explain_surge_request_with_plan(&resolved.runtime_plan, &target)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
@@ -42,7 +42,7 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
             }
         }
         ProfileCommands::Convert { profile, to, json } => {
-            let resolved = load_surge_profile_file(&profile)?;
+            let resolved = load_surge_profile_path_or_url(&profile)?;
             let preview = match to {
                 ProfileConvertTarget::Bifrost => {
                     convert_resolved_surge_to_bifrost_preview(&resolved)
@@ -55,7 +55,7 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
             }
         }
         ProfileCommands::Effective { profile, json } => {
-            let resolved = load_surge_profile_file(&profile)?;
+            let resolved = load_surge_profile_path_or_url(&profile)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&resolved.runtime_plan)?);
             } else {
@@ -74,15 +74,28 @@ fn print_resource_summary(resolved: &ResolvedProfileDocument) {
     println!();
     println!("Resolved resources:");
     for resource in &resolved.resources {
+        let cache_state = if resource.loaded_from_cache {
+            "cache-hit"
+        } else {
+            "fresh"
+        };
         println!(
-            "  line {:>4} [{:?}] {:?} {} ({} items, cache {})",
+            "  line {:>4} [{:?}] {:?} {} ({} items, {}, cache {})",
             resource.source_line,
             resource.status,
             resource.kind,
             resource.reference,
             resource.item_count,
+            cache_state,
             resource.cache_key.as_deref().unwrap_or("<none>")
         );
+        if resource.etag.is_some() || resource.last_modified.is_some() {
+            println!(
+                "       etag {} last-modified {}",
+                resource.etag.as_deref().unwrap_or("<none>"),
+                resource.last_modified.as_deref().unwrap_or("<none>")
+            );
+        }
     }
 }
 

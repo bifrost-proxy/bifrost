@@ -1779,10 +1779,10 @@ pub enum TrafficCommands {
 pub enum ProfileCommands {
     #[command(
         about = "Import a Surge profile in dry-run mode",
-        long_about = "Parse a Surge profile, preserve source locations, and print a compatibility report. This command never enables the profile or writes proxy runtime state."
+        long_about = "Parse a local or managed Surge profile, preserve source locations, fetch referenced resources into the profile cache, and print a compatibility report. This command never enables the profile or writes proxy runtime state."
     )]
     Import {
-        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge .conf/.dconf/.sgmodule profile")]
+        #[arg(value_hint = ValueHint::AnyPath, help = "Path or managed URL for a Surge .conf/.dconf/.sgmodule profile")]
         profile: PathBuf,
         #[arg(
             long,
@@ -1794,10 +1794,10 @@ pub enum ProfileCommands {
     },
     #[command(
         about = "Explain a request under Surge profile semantics",
-        long_about = "Evaluate a URL or host against the parsed Surge [Rule] section using top-to-bottom first-match semantics."
+        long_about = "Evaluate a URL or host against the resolved Surge runtime plan using top-to-bottom first-match semantics."
     )]
     Explain {
-        #[arg(long, value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        #[arg(long, value_hint = ValueHint::AnyPath, help = "Path or managed URL for a Surge profile")]
         profile: PathBuf,
         #[arg(help = "URL or host to explain")]
         target: String,
@@ -1809,7 +1809,7 @@ pub enum ProfileCommands {
         long_about = "Generate a Bifrost native profile preview from a Surge profile. Unsupported or behavior-changing items stay commented for manual review."
     )]
     Convert {
-        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        #[arg(value_hint = ValueHint::AnyPath, help = "Path or managed URL for a Surge profile")]
         profile: PathBuf,
         #[arg(long, value_enum, default_value_t = ProfileConvertTarget::Bifrost, help = "Conversion target")]
         to: ProfileConvertTarget,
@@ -1818,10 +1818,10 @@ pub enum ProfileCommands {
     },
     #[command(
         about = "Dump the resolved dry-run effective profile",
-        long_about = "Resolve local Surge includes, RULE-SET, and DOMAIN-SET resources into a dry-run runtime plan without enabling proxy state."
+        long_about = "Resolve local and remote Surge includes, RULE-SET, DOMAIN-SET, and managed profile resources into a dry-run runtime plan without enabling proxy state."
     )]
     Effective {
-        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        #[arg(value_hint = ValueHint::AnyPath, help = "Path or managed URL for a Surge profile")]
         profile: PathBuf,
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,

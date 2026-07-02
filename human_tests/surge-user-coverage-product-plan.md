@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地 Surge profile dry-run 导入、兼容性报告、本地 include/ruleset/domain-set resolved plan、Surge ordered rule explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
+本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
 
 ## 前置条件
 
@@ -19,20 +19,21 @@
 操作步骤：
 
 1. 执行 `test -f design/surge-user-coverage-product-plan.md`。
-2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|尚未实现|本次落地范围" design/surge-user-coverage-product-plan.md`。
+2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|尚未实现|本次落地范围|Managed profile URL|ETag" design/surge-user-coverage-product-plan.md`。
 
 预期结果：
 
 - 方案文档存在。
-- 检索结果能定位三次迭代、未实现清单和本次落地范围。
+- 检索结果能定位三次迭代、未实现清单、本次落地范围、managed profile URL 和 ETag/cache 说明。
 
 ### TC-SURGE-02：Surge profile dry-run 导入生成兼容性报告
 
 操作步骤：
 
-1. 创建临时 Surge profile，包含顶层 `#!include`、`[General]`、`[Proxy]`、`[Proxy Group]`、`[MITM]`、`[Rule]`。
+1. 创建临时 Surge profile，包含顶层 `#!include`、远程 `#!include`、`[General]`、`[Proxy]`、`[Proxy Group]`、`[MITM]`、`[Rule]`。
 2. 在同一临时目录创建 `included.conf`、`rules.list`、`domains.list`。
-3. 执行 `BIFROST_DATA_DIR=<tmp> BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile import <profile> --dry-run`。
+3. 启动本地 HTTP server 提供 `remote-include.conf`、`remote-rules.list`、`remote-domains.list`，响应包含 `ETag` 和 `Last-Modified`。
+4. 执行 `BIFROST_DATA_DIR=<tmp> BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile import <profile> --dry-run`。
 
 预期结果：
 
@@ -42,6 +43,7 @@
 - 输出包含 `Not supported yet`，用于提示 `GEOIP` 等未支持能力。
 - 输出包含 `Resolved resources`，并列出 `included.conf`、`rules.list` 或 `domains.list` 的解析状态。
 - 输出包含 `cache sha256:`，证明本地资源生成了可缓存内容身份。
+- 输出包含 `remote-rules.list` 和 `etag "surge-remote-v1"`，证明远程资源被拉取并保留 HTTP cache metadata。
 - 命令不创建运行时 profile，不启动代理服务。
 
 ### TC-SURGE-03：effective profile 展示 dry-run runtime plan
@@ -57,6 +59,8 @@
 - 输出包含 `Policy graph`。
 - 当策略组引用不存在的成员时，输出包含 `missing members`。
 - 输出包含 `RULE-SET:rules.list` 和 `DOMAIN-SET:domains.list`，证明本地资源已展开为 ordered rules。
+- 输出包含远程 `RULE-SET:<url>/remote-rules.list` 和 `DOMAIN-SET:<url>/remote-domains.list`，证明远程资源已展开为 ordered rules。
+- 第二次解析同一 profile 时输出包含 `cache-hit`，证明 ETag 条件请求和 304 cache 命中生效。
 - `Resolved resources` 行包含 cache key，便于后续持久 cache 和审计。
 
 ### TC-SURGE-04：profile explain 按 Surge ordered first-match 命中规则
@@ -101,7 +105,20 @@
 - 输出包含 `Compatibility summary`。
 - 对存在行为差异或暂不支持的能力以注释或 summary 保留，不静默丢弃。
 
-### TC-SURGE-07：自动 E2E 脚本覆盖 CLI 黑盒链路
+### TC-SURGE-07：managed profile URL 可直接作为 profile source
+
+操作步骤：
+
+1. 使用 TC-SURGE-02 的本地 HTTP server 提供 `managed.conf`，内容包含 `[Rule]`、`DOMAIN,managed.example,DIRECT` 和 `FINAL,DIRECT`。
+2. 执行 `target/debug/bifrost profile effective http://127.0.0.1:<port>/managed.conf`。
+
+预期结果：
+
+- 输出包含 `Source: http://127.0.0.1:<port>/managed.conf`。
+- 输出包含 `ManagedProfile`。
+- 输出包含 `managed.example`，证明 managed profile URL 已加载为 dry-run runtime plan。
+
+### TC-SURGE-08：自动 E2E 脚本覆盖 CLI 黑盒链路
 
 操作步骤：
 
@@ -110,6 +127,7 @@
 预期结果：
 
 - 脚本自动构造临时 Surge profile。
+- 脚本自动启动本地 HTTP server，覆盖远程 include、RULE-SET、DOMAIN-SET、managed profile URL 和 cache-hit。
 - `profile import --dry-run`、`profile effective`、`profile explain`、`profile convert` 四条链路均通过断言。
 - 测试结束后删除临时目录。
 

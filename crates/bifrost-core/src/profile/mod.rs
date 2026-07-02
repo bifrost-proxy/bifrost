@@ -1,13 +1,15 @@
 use std::collections::BTreeMap;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use ipnet::IpNet;
+use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::{BifrostError, Result};
+use crate::{direct_blocking_reqwest_client_builder, format_reqwest_error, BifrostError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileDocument {
@@ -204,6 +206,9 @@ pub struct ProfileResource {
     pub source_line: usize,
     pub status: ProfileResourceStatus,
     pub cache_key: Option<String>,
+    pub etag: Option<String>,
+    pub last_modified: Option<String>,
+    pub loaded_from_cache: bool,
     pub item_count: usize,
     pub diagnostics: Vec<ProfileDiagnostic>,
 }
@@ -219,8 +224,9 @@ pub enum ProfileResourceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProfileResourceStatus {
     Loaded,
-    RemoteDryRun,
+    CacheHit,
     Missing,
+    FetchFailed,
     Unsupported,
 }
 
@@ -284,6 +290,55 @@ pub fn load_surge_profile_file(path: &Path) -> Result<ResolvedProfileDocument> {
     let document = parse_surge_profile_file(path)?;
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     Ok(resolve_surge_profile(document, base_dir))
+}
+
+pub fn load_surge_profile_path_or_url(path_or_url: &Path) -> Result<ResolvedProfileDocument> {
+    let reference = path_or_url.to_string_lossy();
+    if is_remote_reference(reference.as_ref()) {
+        load_surge_profile_url(reference.as_ref())
+    } else {
+        load_surge_profile_file(path_or_url)
+    }
+}
+
+pub fn load_surge_profile_url(url: &str) -> Result<ResolvedProfileDocument> {
+    let mut resolver = ProfileResolver::new(Path::new("."));
+    let remote = match resolver.fetch_remote_text(ProfileResourceKind::ManagedProfile, url, 1) {
+        Ok(remote) => remote,
+        Err(message) => resolver
+            .read_cached_remote_text(ProfileResourceKind::ManagedProfile, url, 1, Some(message))
+            .ok_or_else(|| {
+                BifrostError::Network(format!(
+                    "fetch managed profile {url} and no cached copy is available"
+                ))
+            })?,
+    };
+    let document = parse_surge_profile(&remote.text, ProfileSource::ManagedUrl(url.to_string()));
+    let mut runtime_plan = resolver.build_runtime_plan(&document);
+    runtime_plan
+        .diagnostics
+        .extend(document.diagnostics.iter().cloned());
+    let mut resources = resolver.resources;
+    resources.insert(
+        0,
+        ProfileResource {
+            kind: ProfileResourceKind::ManagedProfile,
+            reference: url.to_string(),
+            source_line: 1,
+            status: remote.status,
+            cache_key: Some(remote.cache_key),
+            etag: remote.etag,
+            last_modified: remote.last_modified,
+            loaded_from_cache: remote.loaded_from_cache,
+            item_count: runtime_plan.rules.len(),
+            diagnostics: Vec::new(),
+        },
+    );
+    Ok(ResolvedProfileDocument {
+        document,
+        resources,
+        runtime_plan,
+    })
 }
 
 pub fn resolve_surge_profile(
@@ -744,6 +799,7 @@ pub fn explain_surge_request_with_plan(
 
 struct ProfileResolver {
     base_dir: PathBuf,
+    cache_dir: PathBuf,
     resources: Vec<ProfileResource>,
     diagnostics: Vec<ProfileDiagnostic>,
 }
@@ -752,6 +808,7 @@ impl ProfileResolver {
     fn new(base_dir: &Path) -> Self {
         Self {
             base_dir: base_dir.to_path_buf(),
+            cache_dir: profile_cache_dir(base_dir),
             resources: Vec::new(),
             diagnostics: Vec::new(),
         }
@@ -816,12 +873,7 @@ impl ProfileResolver {
     fn apply_directive(&mut self, directive: &DirectiveNode, plan: &mut ProfileRuntimePlan) {
         match directive.directive.as_str() {
             "INCLUDE" => self.load_include(directive, plan),
-            "MANAGED-CONFIG" => self.record_remote_resource(
-                ProfileResourceKind::ManagedProfile,
-                directive.arguments.clone(),
-                directive.source.line,
-                "Managed profile URL is recorded but not fetched during dry-run resolution",
-            ),
+            "MANAGED-CONFIG" => self.load_managed_profile(directive, plan),
             _ => {}
         }
     }
@@ -877,26 +929,19 @@ impl ProfileResolver {
             );
             return;
         }
-        if is_remote_reference(reference) {
-            self.record_remote_resource(
-                ProfileResourceKind::Include,
-                reference.to_string(),
-                directive.source.line,
-                "Remote include is recorded but not fetched during dry-run resolution",
-            );
-            return;
-        }
-        let path = self.resolve_path(reference);
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            self.record_missing_resource(
-                ProfileResourceKind::Include,
-                reference.to_string(),
-                directive.source.line,
-                "include target could not be read",
-            );
+        let Some(resource) = self.read_resource_text(
+            ProfileResourceKind::Include,
+            reference,
+            directive.source.line,
+        ) else {
             return;
         };
-        let included = parse_surge_profile(&text, ProfileSource::LocalPath(path.clone()));
+        let source = if is_remote_reference(reference) {
+            ProfileSource::ManagedUrl(reference.to_string())
+        } else {
+            ProfileSource::LocalPath(self.resolve_path(reference))
+        };
+        let included = parse_surge_profile(&resource.text, source);
         let before_rules = plan.rules.len();
         self.apply_document(&included, &format!("include:{}", reference), plan);
         let item_count = plan.rules.len().saturating_sub(before_rules);
@@ -904,35 +949,68 @@ impl ProfileResolver {
             kind: ProfileResourceKind::Include,
             reference: reference.to_string(),
             source_line: directive.source.line,
-            status: ProfileResourceStatus::Loaded,
-            cache_key: Some(content_cache_key(
-                ProfileResourceKind::Include,
-                reference,
-                &text,
-            )),
+            status: resource.status,
+            cache_key: Some(resource.cache_key),
+            etag: resource.etag,
+            last_modified: resource.last_modified,
+            loaded_from_cache: resource.loaded_from_cache,
             item_count,
             diagnostics: included.diagnostics,
         });
     }
 
-    fn load_rule_set(&mut self, rule: &RuleNode, plan: &mut ProfileRuntimePlan) {
-        let reference = rule.value.as_deref().unwrap_or("").trim();
-        if is_remote_reference(reference) {
-            self.record_remote_resource(
-                ProfileResourceKind::RuleSet,
+    fn load_managed_profile(&mut self, directive: &DirectiveNode, plan: &mut ProfileRuntimePlan) {
+        let reference = directive.arguments.trim();
+        if reference.is_empty() {
+            self.record_missing_resource(
+                ProfileResourceKind::ManagedProfile,
                 reference.to_string(),
-                rule.source.line,
-                "Remote RULE-SET is recorded but not fetched during dry-run resolution",
+                directive.source.line,
+                "managed profile directive has no URL",
             );
             return;
         }
-        let Some(text) =
-            self.read_local_resource(ProfileResourceKind::RuleSet, reference, rule.source.line)
+        let Some(resource) = self.read_resource_text(
+            ProfileResourceKind::ManagedProfile,
+            reference,
+            directive.source.line,
+        ) else {
+            return;
+        };
+        let managed = parse_surge_profile(
+            &resource.text,
+            if is_remote_reference(reference) {
+                ProfileSource::ManagedUrl(reference.to_string())
+            } else {
+                ProfileSource::LocalPath(self.resolve_path(reference))
+            },
+        );
+        let before_rules = plan.rules.len();
+        self.apply_document(&managed, &format!("managed:{}", reference), plan);
+        let item_count = plan.rules.len().saturating_sub(before_rules);
+        self.resources.push(ProfileResource {
+            kind: ProfileResourceKind::ManagedProfile,
+            reference: reference.to_string(),
+            source_line: directive.source.line,
+            status: resource.status,
+            cache_key: Some(resource.cache_key),
+            etag: resource.etag,
+            last_modified: resource.last_modified,
+            loaded_from_cache: resource.loaded_from_cache,
+            item_count,
+            diagnostics: managed.diagnostics,
+        });
+    }
+
+    fn load_rule_set(&mut self, rule: &RuleNode, plan: &mut ProfileRuntimePlan) {
+        let reference = rule.value.as_deref().unwrap_or("").trim();
+        let Some(resource) =
+            self.read_resource_text(ProfileResourceKind::RuleSet, reference, rule.source.line)
         else {
             return;
         };
         let mut count = 0;
-        for (index, raw_line) in text.lines().enumerate() {
+        for (index, raw_line) in resource.text.lines().enumerate() {
             let source = source_line(raw_line, index + 1);
             if source.content.trim().is_empty() || is_comment(source.content.trim()) {
                 continue;
@@ -972,12 +1050,11 @@ impl ProfileResolver {
             kind: ProfileResourceKind::RuleSet,
             reference: reference.to_string(),
             source_line: rule.source.line,
-            status: ProfileResourceStatus::Loaded,
-            cache_key: Some(content_cache_key(
-                ProfileResourceKind::RuleSet,
-                reference,
-                &text,
-            )),
+            status: resource.status,
+            cache_key: Some(resource.cache_key),
+            etag: resource.etag,
+            last_modified: resource.last_modified,
+            loaded_from_cache: resource.loaded_from_cache,
             item_count: count,
             diagnostics: Vec::new(),
         });
@@ -985,22 +1062,13 @@ impl ProfileResolver {
 
     fn load_domain_set(&mut self, rule: &RuleNode, plan: &mut ProfileRuntimePlan) {
         let reference = rule.value.as_deref().unwrap_or("").trim();
-        if is_remote_reference(reference) {
-            self.record_remote_resource(
-                ProfileResourceKind::DomainSet,
-                reference.to_string(),
-                rule.source.line,
-                "Remote DOMAIN-SET is recorded but not fetched during dry-run resolution",
-            );
-            return;
-        }
-        let Some(text) =
-            self.read_local_resource(ProfileResourceKind::DomainSet, reference, rule.source.line)
+        let Some(resource) =
+            self.read_resource_text(ProfileResourceKind::DomainSet, reference, rule.source.line)
         else {
             return;
         };
         let mut count = 0;
-        for (index, raw_line) in text.lines().enumerate() {
+        for (index, raw_line) in resource.text.lines().enumerate() {
             let source = source_line(raw_line, index + 1);
             let domain = source.content.trim().trim_start_matches('.');
             if domain.is_empty() || is_comment(domain) {
@@ -1026,23 +1094,22 @@ impl ProfileResolver {
             kind: ProfileResourceKind::DomainSet,
             reference: reference.to_string(),
             source_line: rule.source.line,
-            status: ProfileResourceStatus::Loaded,
-            cache_key: Some(content_cache_key(
-                ProfileResourceKind::DomainSet,
-                reference,
-                &text,
-            )),
+            status: resource.status,
+            cache_key: Some(resource.cache_key),
+            etag: resource.etag,
+            last_modified: resource.last_modified,
+            loaded_from_cache: resource.loaded_from_cache,
             item_count: count,
             diagnostics: Vec::new(),
         });
     }
 
-    fn read_local_resource(
+    fn read_resource_text(
         &mut self,
         kind: ProfileResourceKind,
         reference: &str,
         source_line: usize,
-    ) -> Option<String> {
+    ) -> Option<LoadedResourceText> {
         if reference.is_empty() {
             self.record_missing_resource(
                 kind,
@@ -1052,9 +1119,38 @@ impl ProfileResolver {
             );
             return None;
         }
+        if is_remote_reference(reference) {
+            match self.fetch_remote_text(kind, reference, source_line) {
+                Ok(resource) => return Some(resource),
+                Err(message) => {
+                    if let Some(resource) = self.read_cached_remote_text(
+                        kind,
+                        reference,
+                        source_line,
+                        Some(message.clone()),
+                    ) {
+                        return Some(resource);
+                    }
+                    self.record_fetch_failed_resource(
+                        kind,
+                        reference.to_string(),
+                        source_line,
+                        &message,
+                    );
+                    return None;
+                }
+            }
+        }
         let path = self.resolve_path(reference);
         match std::fs::read_to_string(&path) {
-            Ok(text) => Some(text),
+            Ok(text) => Some(LoadedResourceText {
+                text: text.clone(),
+                status: ProfileResourceStatus::Loaded,
+                cache_key: content_cache_key(kind, reference, &text),
+                etag: None,
+                last_modified: None,
+                loaded_from_cache: false,
+            }),
             Err(_) => {
                 self.record_missing_resource(
                     kind,
@@ -1065,6 +1161,124 @@ impl ProfileResolver {
                 None
             }
         }
+    }
+
+    fn fetch_remote_text(
+        &mut self,
+        kind: ProfileResourceKind,
+        reference: &str,
+        source_line: usize,
+    ) -> std::result::Result<LoadedResourceText, String> {
+        let cache_entry = RemoteCacheEntry::new(&self.cache_dir, kind, reference);
+        let cached_metadata = cache_entry.read_metadata();
+        let client = direct_blocking_reqwest_client_builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .map_err(|error| format!("build HTTP client: {error}"))?;
+        let mut request = client.get(reference);
+        if let Some(metadata) = &cached_metadata {
+            if let Some(etag) = &metadata.etag {
+                request = request.header(IF_NONE_MATCH, etag);
+            }
+            if let Some(last_modified) = &metadata.last_modified {
+                request = request.header(IF_MODIFIED_SINCE, last_modified);
+            }
+        }
+        let response = request.send().map_err(|error| {
+            format!(
+                "fetch remote resource {reference}: {}",
+                format_reqwest_error(&error)
+            )
+        })?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_MODIFIED {
+            return self
+                .read_cached_remote_text(kind, reference, source_line, None)
+                .ok_or_else(|| {
+                    format!("remote resource {reference} returned 304 but no cached body exists")
+                });
+        }
+        if !status.is_success() {
+            return Err(format!(
+                "remote resource {reference} returned HTTP {status}"
+            ));
+        }
+        let etag = response
+            .headers()
+            .get(ETAG)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let last_modified = response
+            .headers()
+            .get(LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let text = response.text().map_err(|error| {
+            format!(
+                "read remote resource {reference}: {}",
+                format_reqwest_error(&error)
+            )
+        })?;
+        let cache_key = content_cache_key(kind, reference, &text);
+        let metadata = RemoteResourceCacheMetadata {
+            kind,
+            reference: reference.to_string(),
+            cache_key: cache_key.clone(),
+            etag: etag.clone(),
+            last_modified: last_modified.clone(),
+        };
+        if let Err(error) = cache_entry.write(&text, &metadata) {
+            self.diagnostics.push(ProfileDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: source_line,
+                column: 1,
+                code: "surge.resource.cache_write_failed".to_string(),
+                message: format!("Remote resource loaded but cache write failed: {error}"),
+                suggestion: Some(
+                    "Check BIFROST_PROFILE_CACHE_DIR or BIFROST_DATA_DIR permissions".to_string(),
+                ),
+            });
+        }
+        Ok(LoadedResourceText {
+            text,
+            status: ProfileResourceStatus::Loaded,
+            cache_key,
+            etag,
+            last_modified,
+            loaded_from_cache: false,
+        })
+    }
+
+    fn read_cached_remote_text(
+        &mut self,
+        kind: ProfileResourceKind,
+        reference: &str,
+        source_line: usize,
+        stale_reason: Option<String>,
+    ) -> Option<LoadedResourceText> {
+        let cache_entry = RemoteCacheEntry::new(&self.cache_dir, kind, reference);
+        let metadata = cache_entry.read_metadata()?;
+        let text = std::fs::read_to_string(cache_entry.body_path()).ok()?;
+        if let Some(reason) = stale_reason {
+            self.diagnostics.push(ProfileDiagnostic {
+                severity: DiagnosticSeverity::Warning,
+                line: source_line,
+                column: 1,
+                code: "surge.resource.stale_cache_used".to_string(),
+                message: format!("Using cached remote resource after fetch failed: {reason}"),
+                suggestion: Some(
+                    "Refresh the profile when the remote endpoint is reachable".to_string(),
+                ),
+            });
+        }
+        Some(LoadedResourceText {
+            text,
+            status: ProfileResourceStatus::CacheHit,
+            cache_key: metadata.cache_key,
+            etag: metadata.etag,
+            last_modified: metadata.last_modified,
+            loaded_from_cache: true,
+        })
     }
 
     fn resolve_path(&self, reference: &str) -> PathBuf {
@@ -1104,31 +1318,30 @@ impl ProfileResolver {
         }
     }
 
-    fn record_remote_resource(
+    fn record_fetch_failed_resource(
         &mut self,
         kind: ProfileResourceKind,
         reference: String,
         source_line: usize,
         message: &str,
     ) {
-        let cache_key = reference_cache_key(kind, &reference);
         let diagnostic = ProfileDiagnostic {
-            severity: DiagnosticSeverity::Info,
+            severity: DiagnosticSeverity::Warning,
             line: source_line,
             column: 1,
-            code: "surge.resource.remote_dry_run".to_string(),
+            code: "surge.resource.fetch_failed".to_string(),
             message: message.to_string(),
-            suggestion: Some(
-                "Managed network fetching will be enabled behind explicit cache and trust controls"
-                    .to_string(),
-            ),
+            suggestion: Some("Check the remote URL or use an already cached copy".to_string()),
         };
         self.resources.push(ProfileResource {
             kind,
             reference,
             source_line,
-            status: ProfileResourceStatus::RemoteDryRun,
-            cache_key: Some(cache_key),
+            status: ProfileResourceStatus::FetchFailed,
+            cache_key: None,
+            etag: None,
+            last_modified: None,
+            loaded_from_cache: false,
             item_count: 0,
             diagnostics: vec![diagnostic.clone()],
         });
@@ -1156,10 +1369,70 @@ impl ProfileResolver {
             source_line,
             status: ProfileResourceStatus::Missing,
             cache_key: None,
+            etag: None,
+            last_modified: None,
+            loaded_from_cache: false,
             item_count: 0,
             diagnostics: vec![diagnostic.clone()],
         });
         self.diagnostics.push(diagnostic);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LoadedResourceText {
+    text: String,
+    status: ProfileResourceStatus,
+    cache_key: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+    loaded_from_cache: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct RemoteResourceCacheMetadata {
+    kind: ProfileResourceKind,
+    reference: String,
+    cache_key: String,
+    etag: Option<String>,
+    last_modified: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteCacheEntry {
+    body_path: PathBuf,
+    metadata_path: PathBuf,
+}
+
+impl RemoteCacheEntry {
+    fn new(cache_dir: &Path, kind: ProfileResourceKind, reference: &str) -> Self {
+        let key = reference_cache_key(kind, reference)
+            .trim_start_matches("remote-sha256:")
+            .to_string();
+        Self {
+            body_path: cache_dir.join(format!("{key}.body")),
+            metadata_path: cache_dir.join(format!("{key}.json")),
+        }
+    }
+
+    fn body_path(&self) -> &Path {
+        &self.body_path
+    }
+
+    fn read_metadata(&self) -> Option<RemoteResourceCacheMetadata> {
+        let text = std::fs::read_to_string(&self.metadata_path).ok()?;
+        serde_json::from_str(&text).ok()
+    }
+
+    fn write(&self, text: &str, metadata: &RemoteResourceCacheMetadata) -> std::io::Result<()> {
+        if let Some(parent) = self.body_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&self.body_path, text)?;
+        let metadata_text = serde_json::to_string_pretty(metadata)
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+        std::fs::write(&self.metadata_path, metadata_text)?;
+        Ok(())
     }
 }
 
@@ -1391,7 +1664,7 @@ fn analyze_rule(section: &ProfileSection, rule: &RuleNode) -> CompatibilityItem 
         ),
         "RULE-SET" | "DOMAIN-SET" => (
             SupportLevel::TranslatedWithBehaviorNote,
-            "Local set references are expanded in the resolved dry-run runtime plan; remote sets are recorded for cache/trust review",
+            "Local and remote set references are expanded in the resolved dry-run runtime plan; remote sets use conditional cache metadata",
             Some("Inspect the effective profile before activation, especially when the reference is remote"),
         ),
         "FINAL" => (
@@ -1468,11 +1741,11 @@ fn analyze_directive(section: &ProfileSection, directive: &DirectiveNode) -> Com
     let (level, message) = match directive.directive.as_str() {
         "INCLUDE" => (
             SupportLevel::TranslatedWithBehaviorNote,
-            "local include can be loaded into the resolved dry-run plan; remote include is recorded but not fetched",
+            "local and remote include directives can be loaded into the resolved dry-run plan",
         ),
         "MANAGED-CONFIG" => (
             SupportLevel::TranslatedWithBehaviorNote,
-            "managed profile directive is detected and preserved for review",
+            "managed profile directive can be fetched and expanded into the dry-run plan",
         ),
         "REQUIREMENT" | "IOS-ONLY" | "MACOS-ONLY" | "TVOS-ONLY" => (
             SupportLevel::NeedsManualReview,
@@ -1736,6 +2009,18 @@ fn is_remote_reference(reference: &str) -> bool {
     reference.starts_with("http://") || reference.starts_with("https://")
 }
 
+fn profile_cache_dir(base_dir: &Path) -> PathBuf {
+    if let Some(path) = std::env::var_os("BIFROST_PROFILE_CACHE_DIR") {
+        return PathBuf::from(path);
+    }
+    if let Some(data_dir) = std::env::var_os("BIFROST_DATA_DIR") {
+        return PathBuf::from(data_dir).join("profile-resource-cache");
+    }
+    dirs::cache_dir()
+        .map(|dir| dir.join("bifrost").join("profile-resource-cache"))
+        .unwrap_or_else(|| base_dir.join(".bifrost-profile-cache"))
+}
+
 fn content_cache_key(kind: ProfileResourceKind, reference: &str, content: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{kind:?}:{reference}:").as_bytes());
@@ -1782,6 +2067,10 @@ fn split_csv(value: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread::JoinHandle;
 
     const SAMPLE: &str = r#"
 [General]
@@ -1969,25 +2258,182 @@ FINAL,Proxy
     }
 
     #[test]
-    fn remote_resources_are_recorded_without_fetching() {
+    fn remote_resources_report_fetch_failure_when_unreachable() {
         let document = parse_surge_profile(
-            "[Rule]\nRULE-SET,https://example.com/rules.list,Proxy\nFINAL,DIRECT\n",
+            "[Rule]\nRULE-SET,http://127.0.0.1:9/rules.list,Proxy\nFINAL,DIRECT\n",
             ProfileSource::Inline,
         );
         let resolved = resolve_surge_profile(document, Path::new("."));
         assert_eq!(resolved.resources.len(), 1);
         assert_eq!(
             resolved.resources[0].status,
-            ProfileResourceStatus::RemoteDryRun
+            ProfileResourceStatus::FetchFailed
         );
-        assert!(resolved.resources[0]
-            .cache_key
-            .as_deref()
-            .is_some_and(|key| key.starts_with("remote-sha256:")));
+        assert!(resolved.resources[0].cache_key.is_none());
         assert!(resolved
             .runtime_plan
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "surge.resource.remote_dry_run"));
+            .any(|diagnostic| diagnostic.code == "surge.resource.fetch_failed"));
+    }
+
+    #[test]
+    fn remote_rule_set_is_fetched_cached_and_expanded() {
+        let temp = tempfile::tempdir().unwrap();
+        with_profile_cache_dir(temp.path().join("cache"), || {
+            let body = "DOMAIN-SUFFIX,remote.example\n";
+            let (url, handle, requests) = start_http_fixture(vec![http_ok(body)]);
+            let document = parse_surge_profile(
+                &format!("[Rule]\nRULE-SET,{url},Proxy\nFINAL,DIRECT\n"),
+                ProfileSource::Inline,
+            );
+            let resolved = resolve_surge_profile(document, temp.path());
+            handle.join().unwrap();
+
+            assert_eq!(requests.lock().unwrap().len(), 1);
+            let resource = &resolved.resources[0];
+            assert_eq!(resource.status, ProfileResourceStatus::Loaded);
+            assert_eq!(resource.etag.as_deref(), Some("\"surge-test-v1\""));
+            assert!(!resource.loaded_from_cache);
+            assert!(resource
+                .cache_key
+                .as_deref()
+                .is_some_and(|key| key.starts_with("sha256:")));
+            assert!(resolved.runtime_plan.rules.iter().any(|rule| {
+                rule.rule_type == "DOMAIN-SUFFIX"
+                    && rule.value.as_deref() == Some("remote.example")
+                    && rule.policy == "Proxy"
+            }));
+        });
+    }
+
+    #[test]
+    fn remote_rule_set_uses_conditional_cache_on_not_modified() {
+        let temp = tempfile::tempdir().unwrap();
+        with_profile_cache_dir(temp.path().join("cache"), || {
+            let body = "DOMAIN-SUFFIX,cached.example\n";
+            let (url, handle, requests) = start_http_fixture(vec![http_ok(body), http_304()]);
+            let profile = format!("[Rule]\nRULE-SET,{url},Proxy\nFINAL,DIRECT\n");
+
+            let first = resolve_surge_profile(
+                parse_surge_profile(&profile, ProfileSource::Inline),
+                temp.path(),
+            );
+            let second = resolve_surge_profile(
+                parse_surge_profile(&profile, ProfileSource::Inline),
+                temp.path(),
+            );
+            handle.join().unwrap();
+
+            let requests = requests.lock().unwrap();
+            assert_eq!(requests.len(), 2);
+            assert!(requests[1].contains("if-none-match: \"surge-test-v1\""));
+            assert_eq!(first.resources[0].status, ProfileResourceStatus::Loaded);
+            assert_eq!(second.resources[0].status, ProfileResourceStatus::CacheHit);
+            assert!(second.resources[0].loaded_from_cache);
+            assert!(second.runtime_plan.rules.iter().any(|rule| {
+                rule.rule_type == "DOMAIN-SUFFIX" && rule.value.as_deref() == Some("cached.example")
+            }));
+        });
+    }
+
+    #[test]
+    fn managed_profile_url_is_loaded_as_top_level_profile() {
+        let temp = tempfile::tempdir().unwrap();
+        with_profile_cache_dir(temp.path().join("cache"), || {
+            let body = "[Rule]\nDOMAIN,managed.example,DIRECT\nFINAL,Proxy\n";
+            let (url, handle, _) = start_http_fixture(vec![http_ok(body)]);
+            let resolved = load_surge_profile_url(&url).unwrap();
+            handle.join().unwrap();
+
+            assert!(matches!(
+                resolved.document.source,
+                ProfileSource::ManagedUrl(_)
+            ));
+            assert_eq!(
+                resolved.resources[0].kind,
+                ProfileResourceKind::ManagedProfile
+            );
+            assert_eq!(resolved.resources[0].status, ProfileResourceStatus::Loaded);
+            assert!(resolved.runtime_plan.rules.iter().any(|rule| {
+                rule.rule_type == "DOMAIN" && rule.value.as_deref() == Some("managed.example")
+            }));
+        });
+    }
+
+    #[test]
+    fn managed_profile_url_uses_stale_cache_when_remote_is_unreachable() {
+        let temp = tempfile::tempdir().unwrap();
+        with_profile_cache_dir(temp.path().join("cache"), || {
+            let body = "[Rule]\nDOMAIN,stale-managed.example,DIRECT\nFINAL,DIRECT\n";
+            let (url, handle, _) = start_http_fixture(vec![http_ok(body)]);
+            let first = load_surge_profile_url(&url).unwrap();
+            handle.join().unwrap();
+
+            let second = load_surge_profile_url(&url).unwrap();
+
+            assert_eq!(first.resources[0].status, ProfileResourceStatus::Loaded);
+            assert_eq!(second.resources[0].status, ProfileResourceStatus::CacheHit);
+            assert!(second.resources[0].loaded_from_cache);
+            assert!(second.runtime_plan.rules.iter().any(|rule| {
+                rule.rule_type == "DOMAIN" && rule.value.as_deref() == Some("stale-managed.example")
+            }));
+            assert!(second
+                .runtime_plan
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "surge.resource.stale_cache_used"));
+        });
+    }
+
+    fn start_http_fixture(
+        responses: Vec<String>,
+    ) -> (String, JoinHandle<()>, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/resource.conf", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let thread_requests = Arc::clone(&requests);
+        let handle = std::thread::spawn(move || {
+            for response in responses {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).unwrap();
+                thread_requests
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase());
+                stream.write_all(response.as_bytes()).unwrap();
+            }
+        });
+        (url, handle, requests)
+    }
+
+    fn http_ok(body: &str) -> String {
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nETag: \"surge-test-v1\"\r\nLast-Modified: Wed, 02 Jul 2026 00:00:00 GMT\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        )
+    }
+
+    fn http_304() -> String {
+        "HTTP/1.1 304 Not Modified\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string()
+    }
+
+    fn with_profile_cache_dir<T>(cache_dir: PathBuf, run: impl FnOnce() -> T) -> T {
+        let _guard = profile_cache_env_lock().lock().unwrap();
+        let previous = std::env::var_os("BIFROST_PROFILE_CACHE_DIR");
+        std::env::set_var("BIFROST_PROFILE_CACHE_DIR", cache_dir);
+        let result = run();
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_PROFILE_CACHE_DIR", value),
+            None => std::env::remove_var("BIFROST_PROFILE_CACHE_DIR"),
+        }
+        result
+    }
+
+    fn profile_cache_env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
     }
 }
