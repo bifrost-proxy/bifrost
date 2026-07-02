@@ -27,6 +27,7 @@ pub mod mobile_devices;
 pub mod notification;
 pub mod ports;
 pub mod power;
+pub mod profile;
 pub mod proxy;
 pub mod remote_invoke;
 pub mod replay;

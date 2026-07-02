@@ -1778,17 +1778,18 @@ pub enum TrafficCommands {
 #[derive(Subcommand, Clone)]
 pub enum ProfileCommands {
     #[command(
-        about = "Import a Surge profile in dry-run mode",
-        long_about = "Parse a local or managed Surge profile, preserve source locations, fetch referenced resources into the profile cache, and print a compatibility report. This command never enables the profile or writes proxy runtime state."
+        about = "Import a Surge profile",
+        long_about = "Parse a local or managed Surge profile, preserve source locations, fetch referenced resources into the profile cache, and print a compatibility report. Without --dry-run the converted Bifrost rule file is saved disabled by default for review."
     )]
     Import {
         #[arg(value_hint = ValueHint::AnyPath, help = "Path or managed URL for a Surge .conf/.dconf/.sgmodule profile")]
         profile: PathBuf,
-        #[arg(
-            long,
-            help = "Required for now; active import will be added in a later iteration"
-        )]
+        #[arg(long, help = "Analyze only; do not write a Bifrost rule file")]
         dry_run: bool,
+        #[arg(long, help = "Name for the saved Bifrost rule file")]
+        name: Option<String>,
+        #[arg(long, help = "Enable the saved rule immediately after import")]
+        enable: bool,
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },

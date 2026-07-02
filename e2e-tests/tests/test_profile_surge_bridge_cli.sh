@@ -219,6 +219,15 @@ assert_body_contains "host suffix ruleset.example -> Proxy" "$CONVERT_OUTPUT" "c
 assert_body_contains "host suffix remote-ruleset.example -> Proxy" "$CONVERT_OUTPUT" "convert includes expanded remote RULE-SET rule"
 assert_body_contains "Compatibility summary" "$CONVERT_OUTPUT" "convert prints compatibility summary"
 
+echo "Running bifrost profile import save for disabled rule review..."
+SAVE_OUTPUT="$("$BIFROST_BIN" profile import "$PROFILE" --name profile/surge-e2e)"
+assert_body_contains "Saved Bifrost rule 'profile/surge-e2e' [disabled for review]" "$SAVE_OUTPUT" "non-dry-run import saves disabled rule"
+RULE_SHOW_OUTPUT="$("$BIFROST_BIN" rule show profile/surge-e2e)"
+assert_body_contains "Status: disabled" "$RULE_SHOW_OUTPUT" "saved Surge import rule is disabled by default"
+assert_body_contains "api.hosted.example passthrough://" "$RULE_SHOW_OUTPUT" "saved rule contains DIRECT passthrough conversion"
+assert_body_contains "*.example.com proxy://http://127.0.0.1:8080" "$RULE_SHOW_OUTPUT" "saved rule contains proxy endpoint conversion"
+assert_body_contains "/.*/ proxy://http://127.0.0.1:8080" "$RULE_SHOW_OUTPUT" "saved rule contains FINAL proxy conversion"
+
 echo "Running bifrost profile effective for managed profile URL..."
 MANAGED_OUTPUT="$("$BIFROST_BIN" profile effective "${REMOTE_BASE}/managed.conf")"
 assert_body_contains "Source: ${REMOTE_BASE}/managed.conf" "$MANAGED_OUTPUT" "managed profile URL is accepted as profile source"

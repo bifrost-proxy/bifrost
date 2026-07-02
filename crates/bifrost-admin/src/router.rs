@@ -34,6 +34,7 @@ use crate::handlers::{
     notification::handle_notification,
     ports::handle_ports,
     power::handle_power,
+    profile::handle_profile,
     proxy::handle_proxy,
     remote_invoke::handle_remote_invoke,
     replay::handle_replay,
@@ -286,6 +287,8 @@ impl AdminRouter {
             handle_ports(req, state, path).await
         } else if path.starts_with("/api/power") {
             handle_power(req, state, path).await
+        } else if path.starts_with("/api/profile") {
+            handle_profile(req, path).await
         } else if path.starts_with("/api/system") {
             handle_system(req, state, path).await
         } else if path.starts_with("/api/values") {

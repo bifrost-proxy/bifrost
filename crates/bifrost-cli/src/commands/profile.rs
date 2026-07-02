@@ -1,31 +1,82 @@
 use bifrost_core::profile::{
-    analyze_compatibility, convert_resolved_surge_to_bifrost_preview,
-    explain_surge_request_with_plan, load_surge_profile_path_or_url, CompatibilityReport,
-    ConversionPreview, ExplainReport, ProfileDocument, ResolvedProfileDocument, SupportLevel,
+    analyze_compatibility, compile_resolved_surge_to_bifrost_rules,
+    convert_resolved_surge_to_bifrost_preview, explain_surge_request_with_plan,
+    load_surge_profile_path_or_url, CompatibilityReport, ConversionPreview, ExplainReport,
+    ProfileDocument, ResolvedProfileDocument, SupportLevel,
 };
+use bifrost_storage::{RuleFile, RulesStorage};
+use serde::Serialize;
 
 use crate::cli::{ProfileCommands, ProfileConvertTarget};
+
+#[derive(Debug, Serialize)]
+struct ProfileImportSaveResponse<'a> {
+    dry_run: bool,
+    saved: bool,
+    rule_name: Option<&'a str>,
+    enabled: bool,
+    compatibility: &'a CompatibilityReport,
+    rule_content: Option<&'a str>,
+}
 
 pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<()> {
     match action {
         ProfileCommands::Import {
             profile,
             dry_run,
+            name,
+            enable,
             json,
         } => {
-            if !dry_run {
-                return Err(bifrost_core::BifrostError::Config(
-                    "active profile import is not implemented yet; rerun with --dry-run"
-                        .to_string(),
-                ));
-            }
             let resolved = load_surge_profile_path_or_url(&profile)?;
             let report = analyze_compatibility(&resolved.document);
+            if dry_run {
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&resolved)?);
+                } else {
+                    print_import_report(&resolved.document, &report, true);
+                    print_resource_summary(&resolved);
+                }
+                return Ok(());
+            }
+
+            let rule_name = name.unwrap_or_else(|| default_rule_name(&profile));
+            let compiled = compile_resolved_surge_to_bifrost_rules(&resolved);
+            let storage = RulesStorage::new()?;
+            let rule = RuleFile::new(&rule_name, compiled.content.clone())
+                .with_enabled(enable)
+                .with_description(Some(
+                    "Imported from a Surge profile by Bifrost Profile".to_string(),
+                ));
+            storage.save(&rule)?;
+
             if json {
-                println!("{}", serde_json::to_string_pretty(&resolved)?);
+                let response = ProfileImportSaveResponse {
+                    dry_run: false,
+                    saved: true,
+                    rule_name: Some(&rule_name),
+                    enabled: enable,
+                    compatibility: &report,
+                    rule_content: Some(&compiled.content),
+                };
+                println!("{}", serde_json::to_string_pretty(&response)?);
             } else {
-                print_import_report(&resolved.document, &report);
+                print_import_report(&resolved.document, &report, false);
                 print_resource_summary(&resolved);
+                println!();
+                println!(
+                    "Saved Bifrost rule '{}' [{}].",
+                    rule_name,
+                    if enable {
+                        "enabled"
+                    } else {
+                        "disabled for review"
+                    }
+                );
+                println!(
+                    "Use `bifrost rule show {}` to inspect the generated rule.",
+                    rule_name
+                );
             }
         }
         ProfileCommands::Explain {
@@ -65,6 +116,15 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
     }
 
     Ok(())
+}
+
+fn default_rule_name(profile: &std::path::Path) -> String {
+    let raw = profile
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .filter(|stem| !stem.trim().is_empty())
+        .unwrap_or("surge-profile");
+    format!("profile/{}", raw.trim())
 }
 
 fn print_resource_summary(resolved: &ResolvedProfileDocument) {
@@ -150,8 +210,12 @@ fn print_effective_profile(resolved: &ResolvedProfileDocument) {
     }
 }
 
-fn print_import_report(document: &ProfileDocument, report: &CompatibilityReport) {
-    println!("Surge profile dry-run import");
+fn print_import_report(document: &ProfileDocument, report: &CompatibilityReport, dry_run: bool) {
+    if dry_run {
+        println!("Surge profile dry-run import");
+    } else {
+        println!("Surge profile import");
+    }
     println!("Source: {}", source_label(document));
     println!("Sections: {}", document.sections.len());
     println!(

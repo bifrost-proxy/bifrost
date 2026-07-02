@@ -13,6 +13,7 @@ import {
   UsergroupAddOutlined,
   BellOutlined,
   BugOutlined,
+  ImportOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo } from "react";
@@ -87,6 +88,7 @@ export default function AppLayout() {
       { key: "/traffic", icon: <GlobalOutlined />, label: "Network" },
       { key: "/replay", icon: <ThunderboltOutlined />, label: "Replay" },
       { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
+      { key: "/profile", icon: <ImportOutlined />, label: "Profile" },
       { key: "/values", icon: <DatabaseOutlined />, label: "Values" },
       { key: "/scripts", icon: <CodeOutlined />, label: "Scripts" },
       { key: "/ai", icon: <RobotOutlined />, label: "AI" },

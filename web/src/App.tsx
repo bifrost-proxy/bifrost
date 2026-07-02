@@ -7,6 +7,7 @@ import PendingAuthModal from "./components/PendingAuthModal";
 import PendingIpTlsModal from "./components/PendingIpTlsModal";
 import PairingApprovalModal from "./components/PairingApprovalModal";
 import Rules from "./pages/Rules";
+import Profile from "./pages/Profile";
 import Traffic from "./pages/Traffic";
 import TrafficDetailPage from "./pages/TrafficDetailPage";
 import Replay from "./pages/Replay";
@@ -283,6 +284,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="traffic" element={<Traffic />} />
                 <Route path="replay" element={<Replay />} />
                 <Route path="rules" element={<Rules />} />
+                <Route path="profile" element={<Profile />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
                 <Route path="ai" element={<AI />} />
@@ -319,6 +321,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                 <Route path="traffic" element={<Traffic />} />
                 <Route path="replay" element={<Replay />} />
                 <Route path="rules" element={<Rules />} />
+                <Route path="profile" element={<Profile />} />
                 <Route path="values" element={<Values />} />
                 <Route path="scripts" element={<Scripts />} />
                 <Route path="ai" element={<AI />} />

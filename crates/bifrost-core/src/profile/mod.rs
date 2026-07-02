@@ -763,6 +763,73 @@ pub fn convert_resolved_surge_to_bifrost_preview(
     }
 }
 
+pub fn compile_resolved_surge_to_bifrost_rules(
+    resolved: &ResolvedProfileDocument,
+) -> ConversionPreview {
+    let report = analyze_compatibility(&resolved.document);
+    let mut content = String::new();
+    content.push_str("# Generated from a resolved Surge profile.\n");
+    content.push_str("# Saved disabled by default; review the behavior notes before enabling.\n");
+    content.push_str("# Surge ordered first-match rules are emitted in source order.\n\n");
+
+    for resource in &resolved.resources {
+        content.push_str(&format!(
+            "# resource line {}: {:?} {} -> {:?} ({} items)\n",
+            resource.source_line,
+            resource.kind,
+            resource.reference,
+            resource.status,
+            resource.item_count
+        ));
+    }
+    if !resolved.resources.is_empty() {
+        content.push('\n');
+    }
+
+    for rule in &resolved.runtime_plan.rules {
+        let Some(patterns) = bifrost_patterns_for_surge_rule(rule) else {
+            content.push_str(&format!(
+                "# line {}: unsupported Surge rule {}\n",
+                rule.source.line, rule.source.content
+            ));
+            continue;
+        };
+        let decision =
+            resolve_policy_decision(&resolved.runtime_plan, &rule.policy, rule.source.line);
+        let Some(operation) =
+            bifrost_operation_for_policy(&resolved.runtime_plan, &decision.trace.terminal_policy)
+        else {
+            content.push_str(&format!(
+                "# line {}: {} -> {} cannot be activated yet ({})\n",
+                rule.source.line,
+                rule.source.content,
+                decision.trace.terminal_policy,
+                decision.trace.reason
+            ));
+            continue;
+        };
+        if decision.trace.chain.len() > 1 {
+            content.push_str(&format!(
+                "# line {} policy chain: {}\n",
+                rule.source.line,
+                decision.trace.chain.join(" -> ")
+            ));
+        }
+        for pattern in patterns {
+            content.push_str(&format!(
+                "{} {} # surge line {}, origin {}\n",
+                pattern, operation, rule.source.line, rule.origin
+            ));
+        }
+    }
+
+    ConversionPreview {
+        format: "bifrost-rule-file".to_string(),
+        content,
+        report,
+    }
+}
+
 pub fn explain_surge_request_with_plan(
     plan: &ProfileRuntimePlan,
     input: &str,
@@ -880,6 +947,59 @@ fn resolve_policy_decision(
         },
         steps: resolver.steps,
         diagnostics: resolver.diagnostics,
+    }
+}
+
+fn bifrost_patterns_for_surge_rule(rule: &RuntimeRule) -> Option<Vec<String>> {
+    let value = rule.value.as_deref().unwrap_or("").trim();
+    match rule.rule_type.as_str() {
+        "DOMAIN" => non_empty(value).map(|value| vec![value.to_string()]),
+        "DOMAIN-SUFFIX" => non_empty(value).map(|value| {
+            let suffix = value.trim_start_matches('.');
+            vec![suffix.to_string(), format!("*.{suffix}")]
+        }),
+        "DOMAIN-KEYWORD" => {
+            non_empty(value).map(|value| vec![format!("/.*{}.*/", regex::escape(value))])
+        }
+        "IP-CIDR" | "IP-CIDR6" => non_empty(value).map(|value| vec![value.to_string()]),
+        "FINAL" => Some(vec!["/.*/".to_string()]),
+        _ => None,
+    }
+}
+
+fn bifrost_operation_for_policy(plan: &ProfileRuntimePlan, policy: &str) -> Option<String> {
+    if policy.eq_ignore_ascii_case("DIRECT") {
+        return Some("passthrough://".to_string());
+    }
+    if policy.eq_ignore_ascii_case("REJECT")
+        || policy.eq_ignore_ascii_case("REJECT-TINYGIF")
+        || policy.eq_ignore_ascii_case("REJECT-DROP")
+    {
+        return Some("statusCode://403".to_string());
+    }
+    let proxy = plan.proxies.iter().find(|proxy| proxy.name == policy)?;
+    bifrost_proxy_operation(proxy)
+}
+
+fn bifrost_proxy_operation(proxy: &RuntimeProxy) -> Option<String> {
+    let host = proxy.fields.first()?.trim();
+    let port = proxy.fields.get(1)?.trim();
+    if host.is_empty() || port.is_empty() {
+        return None;
+    }
+    let scheme = match proxy.protocol.as_str() {
+        "http" | "https" | "socks5" | "socks" => proxy.protocol.as_str(),
+        _ => "http",
+    };
+    Some(format!("proxy://{scheme}://{host}:{port}"))
+}
+
+fn non_empty(value: &str) -> Option<&str> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed)
     }
 }
 
@@ -2964,6 +3084,33 @@ FINAL,Proxy
                 rule.rule_type == "DOMAIN" && rule.value.as_deref() == Some("managed.example")
             }));
         });
+    }
+
+    #[test]
+    fn compile_resolved_surge_to_bifrost_rules_emits_reviewable_rule_file() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy]
+ProxyA = http, 127.0.0.1, 8080
+[Proxy Group]
+Proxy = select, ProxyA, DIRECT
+[Rule]
+DOMAIN,api.example.com,DIRECT
+DOMAIN-SUFFIX,example.com,Proxy
+FINAL,REJECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let compiled = compile_resolved_surge_to_bifrost_rules(&resolved);
+
+        assert_eq!(compiled.format, "bifrost-rule-file");
+        assert!(compiled.content.contains("api.example.com passthrough://"));
+        assert!(compiled
+            .content
+            .contains("*.example.com proxy://http://127.0.0.1:8080"));
+        assert!(compiled.content.contains("/.*/ statusCode://403"));
+        assert!(compiled.content.contains("policy chain: Proxy -> ProxyA"));
     }
 
     #[test]

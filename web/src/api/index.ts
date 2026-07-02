@@ -2,6 +2,7 @@ export * from './rules';
 export * from './traffic';
 export * from './devtools';
 export * from './metrics';
+export * from './profile';
 export * from './values';
 export * from './whitelist';
 export * from './proxy';

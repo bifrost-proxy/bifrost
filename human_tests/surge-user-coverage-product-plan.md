@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、DNS/MITM/HTTP Pipeline dry-run explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
+本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Profile Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、DNS/MITM/HTTP Pipeline dry-run explain、Bifrost Native Profile conversion preview、非 dry-run 保存 disabled Bifrost rule file、WebUI Profile 工作台，以及方案文档完整性。
 
 ## 前置条件
 
@@ -10,7 +10,7 @@
 - 使用当前工作区编译出的 `target/debug/bifrost` 或由测试脚本自动执行 `cargo build --bin bifrost`。
 - 所有命令使用临时 `BIFROST_DATA_DIR`。
 - 设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 和 `BIFROST_DISABLE_TRAY=1`。
-- 本用例不启动代理服务，不修改系统代理，不启用 Surge profile。
+- 本用例默认不启动代理服务，不修改系统代理，不启用 Surge profile；非 dry-run 导入只保存 disabled 规则，除非用例显式传 `--enable`。
 
 ## 测试用例列表
 
@@ -19,12 +19,12 @@
 操作步骤：
 
 1. 执行 `test -f design/surge-user-coverage-product-plan.md`。
-2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|尚未实现|本次落地范围|Managed profile URL|ETag|DNS/MITM/HTTP Pipeline" design/surge-user-coverage-product-plan.md`。
+2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|仍需平台级 runtime|本次落地范围|Managed profile URL|ETag|DNS/MITM/HTTP Pipeline|WebUI 新增 Profile 工作台" design/surge-user-coverage-product-plan.md`。
 
 预期结果：
 
 - 方案文档存在。
-- 检索结果能定位三次迭代、未实现清单、本次落地范围、managed profile URL、ETag/cache 和 DNS/MITM/HTTP Pipeline explain 说明。
+- 检索结果能定位三次迭代、平台级 runtime 边界、本次落地范围、managed profile URL、ETag/cache、DNS/MITM/HTTP Pipeline explain 和 WebUI Profile 工作台说明。
 
 ### TC-SURGE-02：Surge profile dry-run 导入生成兼容性报告
 
@@ -166,7 +166,44 @@
 - `profile import --dry-run`、`profile effective`、`profile explain`、Policy Group decision explain、DNS/MITM/HTTP Pipeline explain、`profile convert` 五类链路均通过断言。
 - 测试结束后删除临时目录。
 
+### TC-SURGE-11：非 dry-run import 保存 disabled Bifrost rule file
+
+操作步骤：
+
+1. 创建临时 `BIFROST_DATA_DIR` 和 Surge profile，内容包含 `[Proxy] ProxyA = http, 127.0.0.1, 8080`、`[Proxy Group] Proxy = select, ProxyA, DIRECT`、`DOMAIN,api.example.com,DIRECT`、`DOMAIN-SUFFIX,example.com,Proxy`、`FINAL,REJECT`。
+2. 执行 `BIFROST_DATA_DIR=<tmp>/data BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile import <profile> --name profile/surge-smoke`。
+3. 执行 `BIFROST_DATA_DIR=<tmp>/data target/debug/bifrost rule show profile/surge-smoke`。
+
+预期结果：
+
+- import 输出包含 `Saved Bifrost rule 'profile/surge-smoke' [disabled for review]`。
+- `rule show` 输出 `Status: disabled`。
+- 规则内容包含 `api.example.com passthrough://`。
+- 规则内容包含 `*.example.com proxy://http://127.0.0.1:8080`。
+- 规则内容包含 `/.*/ statusCode://403`。
+- 本用例不启动代理服务、不修改系统代理、不把生成规则默认启用。
+
+### TC-SURGE-12：WebUI Profile 工作台展示兼容性与决策时间线
+
+操作步骤：
+
+1. 使用临时数据目录从源码启动 Bifrost：`BIFROST_DATA_DIR=<tmp>/data BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 cargo run -p bifrost-cli --bin bifrost -- start --host 127.0.0.1 --port <port> --no-system-proxy --skip-cert-check`。
+2. 在浏览器打开 `http://127.0.0.1:<port>/_bifrost/`。
+3. 点击侧边栏 `Profile`。
+4. 在 Profile 页面保留默认示例或粘贴 TC-SURGE-11 的 profile。
+5. 点击 `Analyze`。
+6. 切换 `Compatibility`、`Runtime Plan`、`Explain`、`Resources`、`Native Preview` 标签。
+
+预期结果：
+
+- 页面 URL 进入 `/profile`。
+- 兼容性汇总显示 `Fully Supported`、`Behavior Notes`、`Manual Review` 和 `Not Supported` 四项。
+- Runtime Plan 显示 mode、rules、policy groups、proxies、DNS 和 HTTP Pipeline 数量。
+- Explain 标签展示包含 rule/policy/MITM 等 stage 的 timeline。
+- Native Preview 显示 `Bifrost Native Profile Preview`。
+- 启动命令包含 `--no-system-proxy`，且本用例不启用系统代理。
+
 ## 清理步骤
 
 - 删除测试中创建的临时目录。
-- 不需要停止 Bifrost 服务，因为本用例不启动代理服务。
+- 如果执行了 TC-SURGE-12，停止对应临时 Bifrost 进程。

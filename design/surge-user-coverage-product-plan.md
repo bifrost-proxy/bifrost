@@ -4,9 +4,9 @@
 
 本文描述 Bifrost 面向 Surge 用户群体的产品路线和分阶段技术拆解。
 
-当前已启动迭代一 Surge Bridge，并继续补齐 dry-run resolved runtime plan：
+当前已启动 Surge 用户覆盖工作，并把原三迭代拆分中的关键入口统一推进到同一条 Profile pipeline：
 
-- `bifrost_core::profile` 提供 Profile IR、Surge profile parser、兼容性报告、ordered rule explain 和 Bifrost native profile preview。
+- `bifrost_core::profile` 提供 Profile IR、Surge profile parser、兼容性报告、ordered rule explain、Bifrost native profile preview 和 Bifrost rule file compiler。
 - 本地和远程 `#!include`、`RULE-SET`、`DOMAIN-SET` 可展开到 dry-run runtime plan，并生成内容 hash cache key。
 - Managed profile URL 可作为 CLI profile source 直接导入、解释、转换和输出 effective plan。
 - 远程 profile resource 支持 ETag / Last-Modified 条件请求、304 cache-hit 和 fetch 失败时的 stale cache fallback。
@@ -14,14 +14,18 @@
 - `profile explain` 会递归解释 `select`、`fallback`、`url-test` policy group，输出 policy chain、terminal policy 和 dry-run health boundary。
 - `profile explain` 会解释 DNS Host mapping、DNS provider 配置、MITM hostname include/exclude、URL Rewrite、Map Local、Header Rewrite 和 Script 的 dry-run 命中情况。
 - `bifrost profile import <file> --dry-run` 只解析、分析和展示报告，不启用 profile。
+- `bifrost profile import <file> --name <rule>` 会把 resolved Surge runtime plan 编译为 Bifrost 规则文件并默认保存为 disabled，便于审阅后启用；只有显式 `--enable` 才会保存为 enabled。
 - `bifrost profile explain --profile <file> <url>` 按 Surge `[Rule]` top-to-bottom first-match 语义解释 DNS/Rule/Policy/MITM 决策摘要。
 - `bifrost profile convert <file> --to bifrost` 生成带行为说明的 Bifrost Native Profile 预览，不写入运行时。
 - `bifrost profile effective <file>` 输出 dry-run effective profile / runtime plan，展示 resources、policy graph 和 ordered rules。
+- Admin API 提供 `/api/profile/surge/import` 和 `/api/profile/surge/explain`，用于 WebUI 解析、兼容性报告、runtime plan、转换预览和决策时间线。
+- WebUI 新增 Profile 工作台，支持加载本地 Surge profile、输入 explain URL、查看 Compatibility、Runtime Plan、Explain、Resources 和 Native Preview。
 
-尚未实现：
+仍需平台级 runtime 继续深化的能力：
 
-- Surge ordered evaluator 接入真实代理运行时。
-- Policy Group runtime、DNS Center、MITM Center、HTTP Pipeline runtime。
+- Surge ordered evaluator 已可在 Profile pipeline 中解释和编译为禁用 Bifrost 规则；真实代理运行时的默认启用仍需用户显式启用生成规则。
+- Policy Group 已可在 dry-run/runtime compiler 中解析 select/fallback/url-test 的 terminal policy；动态健康探测、实时切换和策略状态 UI 仍需后续 runtime adapter。
+- DNS Center、MITM Center、HTTP Pipeline 已进入 Profile explain 和 WebUI 预览；真实 DNS/MITM/rewrite/script runtime 默认不自动启用。
 - Transparent Proxy / TUN / VIF、UDP/QUIC/HTTP3 policy scheduling、Team Profile 和 Agent 自动迁移。
 
 ## 北极星
@@ -58,6 +62,7 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - Compatibility Report 按 `Fully supported`、`Translated with behavior note`、`Needs manual review`、`Not supported yet` 分类。
 - Explain 支持 `DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`IP-CIDR`、`IP-CIDR6` 和 `FINAL` 的 Surge ordered first-match 解释。
 - Convert 输出 Bifrost Native Profile preview，把不支持或有行为差异的条目保留为注释。
+- Compile 输出 Bifrost rule file，把 `DIRECT` 转为 `passthrough://`、`REJECT` 转为 `statusCode://403`、HTTP/SOCKS proxy endpoint 转为 `proxy://...`，并保留 policy chain 注释。
 - Resolved plan 支持本地和远程 `#!include`、`RULE-SET`、`DOMAIN-SET` 展开。
 - Managed profile URL 可作为顶层 profile source。
 - 远程资源写入 profile resource cache，并保留 ETag、Last-Modified、content hash 和 cache-hit 状态。
@@ -67,8 +72,7 @@ Bring your Surge profile. Get a stronger proxy workbench.
 
 ### 后续迭代一补齐
 
-- WebUI Import 页面。
-- HTTP pipeline 到真实代理运行时的激活和差异化迁移策略。
+- HTTP pipeline 到真实代理运行时的自动激活和差异化迁移策略。
 
 ## 迭代二：Bifrost Native Profile
 
@@ -157,10 +161,12 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - 验证 `profile explain` 输出 DNS Host mapping、MITM include/exclude、URL Rewrite 和 Script dry-run 命中结果。
 - 验证 `profile explain` 可命中本地 `RULE-SET` 展开规则。
 - 验证 `profile convert --to bifrost` 输出 preview 和 compatibility summary。
+- 验证 `profile import <profile> --name profile/surge-smoke` 会保存 disabled Bifrost rule file，输出 `passthrough://`、`proxy://...` 和 `statusCode://403`，且不启动代理、不修改系统代理。
+- 验证 WebUI Profile 页面能调用 Admin API 展示 Compatibility、Runtime Plan、Explain timeline、Resources 和 Native Preview。
 
 ### human_tests
 
-- `human_tests/surge-user-coverage-product-plan.md` 覆盖文档完整性、CLI dry-run、ordered explain、convert preview 和不启用运行时的安全边界。
+- `human_tests/surge-user-coverage-product-plan.md` 覆盖文档完整性、CLI dry-run、ordered explain、convert preview、非 dry-run 保存 disabled rule、WebUI Profile 工作台和不默认启用运行时的安全边界。
 
 ## Review/Fix/Test 闭环
 
@@ -168,13 +174,13 @@ Bring your Surge profile. Get a stronger proxy workbench.
 
 - 复核用户目标、本文档、本次代码变更和测试计划。
 - 执行 `git status --short`、`git diff`。
-- review parser/compat/explain/CLI 输出边界。
+- review parser/compat/explain/CLI/WebUI 输出边界。
 - 运行 targeted unit、CLI check、E2E 和 human_tests 检索/命令验证。
 
 第 2 轮：
 
 - 复核第 1 轮发现项和修复后的 diff。
-- 检查 human_tests 索引、E2E 脚本、CLI help、JSON 输出。
+- 检查 human_tests 索引、E2E 脚本、CLI help、JSON 输出和 WebUI 路由。
 - 复跑受影响测试。
 
 ## 本地覆盖率说明
