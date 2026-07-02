@@ -10,6 +10,7 @@ Bifrost Linux x64 / ARM64 同时发布 glibc 目标和 musl 目标。glibc 目�
 
 - `install-binary.sh` 保持 shell 安装入口的目标选择逻辑：Linux x86_64 / aarch64 在 glibc 版本低于 `2.39` 时选择 musl target。
 - npm 主包新增共享平台选择模块，`install.js` 和 `lib/index.js` 共用同一套逻辑，避免安装时和运行时选择不同包。
+- npm Linux x64 / ARM64 musl/static 平台包不声明 npm `libc` 字段，避免 glibc 主机安装主包时被 npm 过滤掉静态 fallback 包；glibc 包仍声明 `libc: ["glibc"]`，musl 主机不会安装 GNU 包。
 - `bifrost upgrade` 的手动 release 下载路径使用相同的最低 glibc 要求，glibc 低于 `2.39` 时直接选择 musl target；若 GNU 下载或安装后验证失败，也继续保留二次 musl fallback。
 - npm Linux x64 / ARM64 在以下情况下选择 musl 包：
   - `ldd --version` 显示 musl；
@@ -32,6 +33,9 @@ Bifrost Linux x64 / ARM64 同时发布 glibc 目标和 musl 目标。glibc 目�
   - glibc 2.39 输出 `linux-x64-glibc`；
   - musl ldd 输出 `linux-x64-musl`；
   - ARMv7 glibc 2.28 仍输出 `linux-arm-glibc`。
+- npm 平台包 manifest：
+  - GNU Linux x64 包保留 `libc: ["glibc"]`；
+  - Linux x64 / ARM64 musl 包不声明 `libc`，确保 glibc 主机可安装静态 fallback。
 - `bifrost upgrade` target 选择：
   - glibc 2.38 需要 musl fallback；
   - glibc 2.39 保持 GNU target；
@@ -42,6 +46,7 @@ Bifrost Linux x64 / ARM64 同时发布 glibc 目标和 musl 目标。glibc 目�
 - 新增 `e2e-tests/tests/test_install_musl_fallback.sh`：
   - source `install-binary.sh` 的函数并模拟 `ldd --version` 输出，验证 glibc 2.28 自动选择 `x86_64-unknown-linux-musl`；
   - 验证 npm 平台选择模块在 Debian 10 样例下选择 `@bifrost-proxy/bifrost-linux-x64-musl`；
+  - 验证 Linux musl 平台包 manifest 不再声明 npm `libc` 过滤；
   - 验证新 glibc 和 musl 场景不会回归。
 - 执行 `cargo test -p bifrost-cli glibc --all-features`，验证 `bifrost upgrade` 对 2.38 / 2.39 / unknown 三种 glibc 状态的 fallback 判断。
 

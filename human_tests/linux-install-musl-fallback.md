@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-验证 Linux 旧 glibc 环境（例如 Debian 10 / glibc 2.28）安装 Bifrost 时，不再选择要求 `GLIBC_2.39` 的 GNU 预编译包，而是自动回退到 musl/static 包。该用例覆盖 shell 安装脚本与 npm/npx 安装运行时的目标选择逻辑。
+验证 Linux 旧 glibc 环境（例如 Debian 10 / glibc 2.28）安装 Bifrost 时，不再选择要求 `GLIBC_2.39` 的 GNU 预编译包，而是自动回退到 musl/static 包。该用例覆盖 shell 安装脚本、npm/npx 安装运行时的目标选择逻辑，以及 musl/static 平台包不会被 npm `libc` 过滤跳过。
 
 ## 前置条件
 
@@ -75,7 +75,36 @@
 - 第一行输出 `linux-x64-musl`。
 - 第二行输出 `@bifrost-proxy/bifrost-linux-x64-musl`。
 
-### TC-LIMF-04 bifrost upgrade 在旧 glibc release 下载路径选择 musl
+### TC-LIMF-04 npm musl/static 平台包可作为 glibc fallback 安装
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   node - <<'NODE'
+   const fs = require("fs");
+   const linuxX64 = JSON.parse(fs.readFileSync("./npm/bifrost-linux-x64/package.json", "utf8"));
+   const linuxArm64 = JSON.parse(fs.readFileSync("./npm/bifrost-linux-arm64/package.json", "utf8"));
+   const linuxX64Musl = JSON.parse(fs.readFileSync("./npm/bifrost-linux-x64-musl/package.json", "utf8"));
+   const linuxArm64Musl = JSON.parse(fs.readFileSync("./npm/bifrost-linux-arm64-musl/package.json", "utf8"));
+   console.log(JSON.stringify({
+     x64Gnu: linuxX64.libc,
+     arm64Gnu: linuxArm64.libc,
+     x64MuslHasLibc: Object.prototype.hasOwnProperty.call(linuxX64Musl, "libc"),
+     arm64MuslHasLibc: Object.prototype.hasOwnProperty.call(linuxArm64Musl, "libc"),
+   }));
+   NODE
+   ```
+2. 观察输出 JSON。
+
+预期结果：
+
+- `x64Gnu` 和 `arm64Gnu` 均为 `["glibc"]`。
+- `x64MuslHasLibc` 为 `false`。
+- `arm64MuslHasLibc` 为 `false`。
+- 旧 glibc 主机通过 npm 安装主包时不会因为 musl 包声明 `libc: ["musl"]` 而跳过静态 fallback。
+
+### TC-LIMF-05 bifrost upgrade 在旧 glibc release 下载路径选择 musl
 
 操作步骤：
 
@@ -103,4 +132,8 @@
 | 2026-04-28 | TC-LIMF-01 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：glibc 2.28 输出 `x86_64-unknown-linux-musl`，aarch64 同步输出 `aarch64-unknown-linux-musl` |
 | 2026-04-28 | TC-LIMF-02 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：glibc 2.39 输出 `x86_64-unknown-linux-gnu` |
 | 2026-04-28 | TC-LIMF-03 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：npm 平台 key 为 `linux-x64-musl`，package 为 `@bifrost-proxy/bifrost-linux-x64-musl` |
-| 2026-04-28 | TC-LIMF-04 | `cargo test -p bifrost-cli glibc --all-features` | PASS：lib 与 bin 测试目标中 2.38/2.39/unknown 三个 upgrade fallback 判断均通过 |
+| 2026-07-02 | TC-LIMF-01 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：glibc 2.28 输出 `x86_64-unknown-linux-musl`，aarch64 同步输出 `aarch64-unknown-linux-musl` |
+| 2026-07-02 | TC-LIMF-02 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：glibc 2.39 输出 `x86_64-unknown-linux-gnu`，未误切到 musl |
+| 2026-07-02 | TC-LIMF-03 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：npm 平台 key 为 `linux-x64-musl`，package 为 `@bifrost-proxy/bifrost-linux-x64-musl` |
+| 2026-07-02 | TC-LIMF-04 | `bash e2e-tests/tests/test_install_musl_fallback.sh` | PASS：GNU x64/arm64 包保留 `libc: ["glibc"]`；x64/arm64 musl 包均不声明 `libc` |
+| 2026-07-02 | TC-LIMF-05 | `CARGO_BUILD_JOBS=2 cargo test -p bifrost-cli glibc --all-features` | PASS：lib 与 bin 测试目标中 2.38/2.39/unknown 三个 upgrade fallback 判断均通过；首次高并发执行曾因本机磁盘只剩 1.4G 失败，清理本 worktree `target/` 后低并发复跑通过 |
