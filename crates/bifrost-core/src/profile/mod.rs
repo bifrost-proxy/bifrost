@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use url::Url;
 
 use crate::{BifrostError, Result};
@@ -189,12 +190,116 @@ pub struct ConversionPreview {
     pub report: CompatibilityReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedProfileDocument {
+    pub document: ProfileDocument,
+    pub resources: Vec<ProfileResource>,
+    pub runtime_plan: ProfileRuntimePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileResource {
+    pub kind: ProfileResourceKind,
+    pub reference: String,
+    pub source_line: usize,
+    pub status: ProfileResourceStatus,
+    pub cache_key: Option<String>,
+    pub item_count: usize,
+    pub diagnostics: Vec<ProfileDiagnostic>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileResourceKind {
+    Include,
+    RuleSet,
+    DomainSet,
+    ManagedProfile,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProfileResourceStatus {
+    Loaded,
+    RemoteDryRun,
+    Missing,
+    Unsupported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProfileRuntimePlan {
+    pub mode: String,
+    pub proxies: Vec<RuntimeProxy>,
+    pub rules: Vec<RuntimeRule>,
+    pub policy_groups: Vec<RuntimePolicyGroup>,
+    pub dns: Vec<RuntimeKeyValue>,
+    pub mitm: Vec<RuntimeKeyValue>,
+    pub http_pipeline: Vec<RuntimeKeyValue>,
+    pub diagnostics: Vec<ProfileDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeProxy {
+    pub source: SourceLine,
+    pub name: String,
+    pub protocol: String,
+    pub fields: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeRule {
+    pub source: SourceLine,
+    pub rule_type: String,
+    pub value: Option<String>,
+    pub policy: String,
+    pub parameters: Vec<String>,
+    pub origin: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePolicyGroup {
+    pub source: SourceLine,
+    pub name: String,
+    pub group_type: String,
+    pub policies: Vec<String>,
+    pub parameters: BTreeMap<String, String>,
+    pub missing_members: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeKeyValue {
+    pub section: String,
+    pub key: String,
+    pub value: String,
+    pub source: SourceLine,
+}
+
 pub fn parse_surge_profile_file(path: &Path) -> Result<ProfileDocument> {
     let text = std::fs::read_to_string(path)?;
     Ok(parse_surge_profile(
         &text,
         ProfileSource::LocalPath(path.to_path_buf()),
     ))
+}
+
+pub fn load_surge_profile_file(path: &Path) -> Result<ResolvedProfileDocument> {
+    let document = parse_surge_profile_file(path)?;
+    let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    Ok(resolve_surge_profile(document, base_dir))
+}
+
+pub fn resolve_surge_profile(
+    document: ProfileDocument,
+    base_dir: &Path,
+) -> ResolvedProfileDocument {
+    let mut resolver = ProfileResolver::new(base_dir);
+    let mut runtime_plan = resolver.build_runtime_plan(&document);
+    runtime_plan
+        .diagnostics
+        .extend(document.diagnostics.iter().cloned());
+    ResolvedProfileDocument {
+        document,
+        resources: resolver.resources,
+        runtime_plan,
+    }
 }
 
 pub fn parse_surge_profile(text: &str, source: ProfileSource) -> ProfileDocument {
@@ -232,6 +337,18 @@ pub fn parse_surge_profile(text: &str, source: ProfileSource) -> ProfileDocument
         }
 
         let Some(section) = current.as_mut() else {
+            let source = source_line(raw_line, line_no);
+            if let Some(directive) = parse_directive(&source) {
+                let mut section = ProfileSection {
+                    name: "Directives".to_string(),
+                    kind: ProfileSectionKind::Unknown,
+                    line: line_no,
+                    entries: Vec::new(),
+                };
+                section.entries.push(ProfileEntry::Directive(directive));
+                document.sections.push(section);
+                continue;
+            }
             document.diagnostics.push(ProfileDiagnostic {
                 severity: DiagnosticSeverity::Warning,
                 line: line_no,
@@ -425,6 +542,624 @@ pub fn convert_surge_to_bifrost_preview(document: &ProfileDocument) -> Conversio
         format: "bifrost-native-profile-preview".to_string(),
         content,
         report,
+    }
+}
+
+pub fn convert_resolved_surge_to_bifrost_preview(
+    resolved: &ResolvedProfileDocument,
+) -> ConversionPreview {
+    let report = analyze_compatibility(&resolved.document);
+    let mut content = String::new();
+    content.push_str("# Bifrost Native Profile Preview\n");
+    content.push_str("# Generated from a resolved Surge profile in dry-run mode.\n");
+    content.push_str("# Includes local include/rule-set/domain-set expansion where available.\n\n");
+
+    content.push_str("[resources]\n");
+    for resource in &resolved.resources {
+        content.push_str(&format!(
+            "# line {}: {:?} {} -> {:?} ({} items)\n",
+            resource.source_line,
+            resource.kind,
+            resource.reference,
+            resource.status,
+            resource.item_count
+        ));
+    }
+
+    content.push_str("\n[policies]\n");
+    for proxy in &resolved.runtime_plan.proxies {
+        content.push_str(&format!(
+            "{} = proxy, {}, {}\n",
+            proxy.name,
+            proxy.protocol,
+            proxy.fields.join(", ")
+        ));
+    }
+    for group in &resolved.runtime_plan.policy_groups {
+        match group.group_type.as_str() {
+            "select" | "fallback" | "url-test" => {
+                content.push_str(&format!(
+                    "{} = {}, {}\n",
+                    group.name,
+                    group.group_type,
+                    group.policies.join(", ")
+                ));
+                if !group.missing_members.is_empty() {
+                    content.push_str(&format!(
+                        "#   missing members: {}\n",
+                        group.missing_members.join(", ")
+                    ));
+                }
+            }
+            _ => {
+                content.push_str(&format!(
+                    "# line {}: {} = {}, {}  # unsupported policy group type\n",
+                    group.source.line,
+                    group.name,
+                    group.group_type,
+                    group.policies.join(", ")
+                ));
+            }
+        }
+    }
+
+    content.push_str("\n[dns]\n");
+    for item in &resolved.runtime_plan.dns {
+        content.push_str(&format!("{} = {}\n", item.key, item.value));
+    }
+
+    content.push_str("\n[mitm]\n");
+    for item in &resolved.runtime_plan.mitm {
+        content.push_str(&format!("{} = {}\n", item.key, item.value));
+    }
+
+    content.push_str("\n[http_pipeline]\n");
+    for item in &resolved.runtime_plan.http_pipeline {
+        content.push_str(&format!(
+            "# line {} [{}] {} = {}\n",
+            item.source.line, item.section, item.key, item.value
+        ));
+    }
+
+    content.push_str("\n[rules]\n");
+    for rule in &resolved.runtime_plan.rules {
+        let line = match rule.rule_type.as_str() {
+            "DOMAIN" => format!(
+                "host == {} -> {}",
+                rule.value.as_deref().unwrap_or(""),
+                rule.policy
+            ),
+            "DOMAIN-SUFFIX" => format!(
+                "host suffix {} -> {}",
+                rule.value.as_deref().unwrap_or(""),
+                rule.policy
+            ),
+            "DOMAIN-KEYWORD" => format!(
+                "# line {}: host keyword {} -> {}  # behavior note: host-only keyword",
+                rule.source.line,
+                rule.value.as_deref().unwrap_or(""),
+                rule.policy
+            ),
+            "IP-CIDR" | "IP-CIDR6" => format!(
+                "ip cidr {} -> {}",
+                rule.value.as_deref().unwrap_or(""),
+                rule.policy
+            ),
+            "FINAL" => format!("final -> {}", rule.policy),
+            _ => format!(
+                "# line {}: {}  # not supported by resolved Bridge preview",
+                rule.source.line, rule.source.content
+            ),
+        };
+        content.push_str(&line);
+        content.push_str(&format!(" # origin: {}\n", rule.origin));
+    }
+
+    ConversionPreview {
+        format: "bifrost-native-profile-preview".to_string(),
+        content,
+        report,
+    }
+}
+
+pub fn explain_surge_request_with_plan(
+    plan: &ProfileRuntimePlan,
+    input: &str,
+) -> Result<ExplainReport> {
+    let request = parse_explain_request(input)?;
+    let mut timeline = vec![
+        ExplainStep {
+            stage: "input".to_string(),
+            line: None,
+            message: format!("URL={} host={}", request.url, request.host),
+        },
+        ExplainStep {
+            stage: "dns".to_string(),
+            line: None,
+            message: "Resolved runtime plan dry-run does not resolve DNS; using URL host and optional literal IP only".to_string(),
+        },
+    ];
+
+    let mut diagnostics = plan.diagnostics.clone();
+    for runtime_rule in &plan.rules {
+        let rule = RuleNode {
+            source: runtime_rule.source.clone(),
+            rule_type: runtime_rule.rule_type.clone(),
+            value: runtime_rule.value.clone(),
+            policy: runtime_rule.policy.clone(),
+            parameters: runtime_rule.parameters.clone(),
+        };
+        let (matched, reason) = rule_matches_request(&rule, &request);
+        timeline.push(ExplainStep {
+            stage: "rule".to_string(),
+            line: Some(rule.source.line),
+            message: format!("{reason} (origin: {})", runtime_rule.origin),
+        });
+        if matched {
+            timeline.push(ExplainStep {
+                stage: "policy".to_string(),
+                line: Some(rule.source.line),
+                message: format!("Selected policy {}", rule.policy),
+            });
+            timeline.push(ExplainStep {
+                stage: "mitm".to_string(),
+                line: None,
+                message: explain_mitm_from_plan(plan, &request.host),
+            });
+            return Ok(ExplainReport {
+                request,
+                matched_rule: Some(rule),
+                target_policy: Some(runtime_rule.policy.clone()),
+                timeline,
+                diagnostics,
+            });
+        }
+    }
+
+    diagnostics.push(ProfileDiagnostic {
+        severity: DiagnosticSeverity::Warning,
+        line: 1,
+        column: 1,
+        code: "surge.rule.no_match".to_string(),
+        message: "No resolved Surge rule matched this request; profiles should end with FINAL"
+            .to_string(),
+        suggestion: Some(
+            "Add a FINAL rule or inspect unsupported rules in the compatibility report".to_string(),
+        ),
+    });
+    timeline.push(ExplainStep {
+        stage: "rule".to_string(),
+        line: None,
+        message: "No matching rule found".to_string(),
+    });
+
+    Ok(ExplainReport {
+        request,
+        matched_rule: None,
+        target_policy: None,
+        timeline,
+        diagnostics,
+    })
+}
+
+struct ProfileResolver {
+    base_dir: PathBuf,
+    resources: Vec<ProfileResource>,
+    diagnostics: Vec<ProfileDiagnostic>,
+}
+
+impl ProfileResolver {
+    fn new(base_dir: &Path) -> Self {
+        Self {
+            base_dir: base_dir.to_path_buf(),
+            resources: Vec::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn build_runtime_plan(&mut self, document: &ProfileDocument) -> ProfileRuntimePlan {
+        let mut plan = ProfileRuntimePlan {
+            mode: "surge-compatible-dry-run".to_string(),
+            proxies: Vec::new(),
+            rules: Vec::new(),
+            policy_groups: Vec::new(),
+            dns: Vec::new(),
+            mitm: Vec::new(),
+            http_pipeline: Vec::new(),
+            diagnostics: Vec::new(),
+        };
+
+        self.apply_document(document, "root", &mut plan);
+        self.validate_policy_groups(&mut plan);
+        plan.diagnostics.extend(self.diagnostics.iter().cloned());
+        plan
+    }
+
+    fn apply_document(
+        &mut self,
+        document: &ProfileDocument,
+        origin: &str,
+        plan: &mut ProfileRuntimePlan,
+    ) {
+        for section in &document.sections {
+            for entry in &section.entries {
+                match entry {
+                    ProfileEntry::Directive(directive) => {
+                        self.apply_directive(directive, plan);
+                    }
+                    ProfileEntry::Rule(rule) => self.apply_rule(rule, origin, plan),
+                    ProfileEntry::Proxy(proxy) => {
+                        plan.proxies.push(RuntimeProxy {
+                            source: proxy.source.clone(),
+                            name: proxy.name.clone(),
+                            protocol: proxy.protocol.clone(),
+                            fields: proxy.fields.clone(),
+                        });
+                    }
+                    ProfileEntry::PolicyGroup(group) => {
+                        plan.policy_groups.push(RuntimePolicyGroup {
+                            source: group.source.clone(),
+                            name: group.name.clone(),
+                            group_type: group.group_type.clone(),
+                            policies: group.policies.clone(),
+                            parameters: group.parameters.clone(),
+                            missing_members: Vec::new(),
+                        });
+                    }
+                    ProfileEntry::KeyValue(kv) => self.apply_key_value(section, kv, plan),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    fn apply_directive(&mut self, directive: &DirectiveNode, plan: &mut ProfileRuntimePlan) {
+        match directive.directive.as_str() {
+            "INCLUDE" => self.load_include(directive, plan),
+            "MANAGED-CONFIG" => self.record_remote_resource(
+                ProfileResourceKind::ManagedProfile,
+                directive.arguments.clone(),
+                directive.source.line,
+                "Managed profile URL is recorded but not fetched during dry-run resolution",
+            ),
+            _ => {}
+        }
+    }
+
+    fn apply_rule(&mut self, rule: &RuleNode, origin: &str, plan: &mut ProfileRuntimePlan) {
+        match rule.rule_type.as_str() {
+            "RULE-SET" => self.load_rule_set(rule, plan),
+            "DOMAIN-SET" => self.load_domain_set(rule, plan),
+            _ => plan.rules.push(RuntimeRule {
+                source: rule.source.clone(),
+                rule_type: rule.rule_type.clone(),
+                value: rule.value.clone(),
+                policy: rule.policy.clone(),
+                parameters: rule.parameters.clone(),
+                origin: origin.to_string(),
+            }),
+        }
+    }
+
+    fn apply_key_value(
+        &mut self,
+        section: &ProfileSection,
+        kv: &KeyValueEntry,
+        plan: &mut ProfileRuntimePlan,
+    ) {
+        let item = RuntimeKeyValue {
+            section: section.name.clone(),
+            key: kv.key.clone(),
+            value: kv.value.clone(),
+            source: kv.source.clone(),
+        };
+        match section.kind {
+            ProfileSectionKind::General | ProfileSectionKind::Dns | ProfileSectionKind::Host => {
+                plan.dns.push(item)
+            }
+            ProfileSectionKind::Mitm => plan.mitm.push(item),
+            ProfileSectionKind::UrlRewrite
+            | ProfileSectionKind::MapLocal
+            | ProfileSectionKind::HeaderRewrite
+            | ProfileSectionKind::Script => plan.http_pipeline.push(item),
+            _ => {}
+        }
+    }
+
+    fn load_include(&mut self, directive: &DirectiveNode, plan: &mut ProfileRuntimePlan) {
+        let reference = directive.arguments.trim();
+        if reference.is_empty() {
+            self.record_missing_resource(
+                ProfileResourceKind::Include,
+                reference.to_string(),
+                directive.source.line,
+                "include directive has no target",
+            );
+            return;
+        }
+        if is_remote_reference(reference) {
+            self.record_remote_resource(
+                ProfileResourceKind::Include,
+                reference.to_string(),
+                directive.source.line,
+                "Remote include is recorded but not fetched during dry-run resolution",
+            );
+            return;
+        }
+        let path = self.resolve_path(reference);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            self.record_missing_resource(
+                ProfileResourceKind::Include,
+                reference.to_string(),
+                directive.source.line,
+                "include target could not be read",
+            );
+            return;
+        };
+        let included = parse_surge_profile(&text, ProfileSource::LocalPath(path.clone()));
+        let before_rules = plan.rules.len();
+        self.apply_document(&included, &format!("include:{}", reference), plan);
+        let item_count = plan.rules.len().saturating_sub(before_rules);
+        self.resources.push(ProfileResource {
+            kind: ProfileResourceKind::Include,
+            reference: reference.to_string(),
+            source_line: directive.source.line,
+            status: ProfileResourceStatus::Loaded,
+            cache_key: Some(content_cache_key(
+                ProfileResourceKind::Include,
+                reference,
+                &text,
+            )),
+            item_count,
+            diagnostics: included.diagnostics,
+        });
+    }
+
+    fn load_rule_set(&mut self, rule: &RuleNode, plan: &mut ProfileRuntimePlan) {
+        let reference = rule.value.as_deref().unwrap_or("").trim();
+        if is_remote_reference(reference) {
+            self.record_remote_resource(
+                ProfileResourceKind::RuleSet,
+                reference.to_string(),
+                rule.source.line,
+                "Remote RULE-SET is recorded but not fetched during dry-run resolution",
+            );
+            return;
+        }
+        let Some(text) =
+            self.read_local_resource(ProfileResourceKind::RuleSet, reference, rule.source.line)
+        else {
+            return;
+        };
+        let mut count = 0;
+        for (index, raw_line) in text.lines().enumerate() {
+            let source = source_line(raw_line, index + 1);
+            if source.content.trim().is_empty() || is_comment(source.content.trim()) {
+                continue;
+            }
+            let fields = split_csv(&source.content);
+            if fields.len() < 2 {
+                self.diagnostics.push(ProfileDiagnostic {
+                    severity: DiagnosticSeverity::Warning,
+                    line: rule.source.line,
+                    column: 1,
+                    code: "surge.ruleset.invalid_line".to_string(),
+                    message: format!(
+                        "RULE-SET {} contains an invalid line: {}",
+                        reference, source.content
+                    ),
+                    suggestion: Some("Use lines such as DOMAIN-SUFFIX,example.com".to_string()),
+                });
+                continue;
+            }
+            plan.rules.push(RuntimeRule {
+                source: SourceLine {
+                    line: rule.source.line,
+                    column: rule.source.column,
+                    raw: source.raw,
+                    content: source.content,
+                    comment: source.comment,
+                },
+                rule_type: fields[0].to_ascii_uppercase(),
+                value: Some(fields[1].clone()),
+                policy: rule.policy.clone(),
+                parameters: fields.into_iter().skip(2).collect(),
+                origin: format!("RULE-SET:{reference}:{}", index + 1),
+            });
+            count += 1;
+        }
+        self.resources.push(ProfileResource {
+            kind: ProfileResourceKind::RuleSet,
+            reference: reference.to_string(),
+            source_line: rule.source.line,
+            status: ProfileResourceStatus::Loaded,
+            cache_key: Some(content_cache_key(
+                ProfileResourceKind::RuleSet,
+                reference,
+                &text,
+            )),
+            item_count: count,
+            diagnostics: Vec::new(),
+        });
+    }
+
+    fn load_domain_set(&mut self, rule: &RuleNode, plan: &mut ProfileRuntimePlan) {
+        let reference = rule.value.as_deref().unwrap_or("").trim();
+        if is_remote_reference(reference) {
+            self.record_remote_resource(
+                ProfileResourceKind::DomainSet,
+                reference.to_string(),
+                rule.source.line,
+                "Remote DOMAIN-SET is recorded but not fetched during dry-run resolution",
+            );
+            return;
+        }
+        let Some(text) =
+            self.read_local_resource(ProfileResourceKind::DomainSet, reference, rule.source.line)
+        else {
+            return;
+        };
+        let mut count = 0;
+        for (index, raw_line) in text.lines().enumerate() {
+            let source = source_line(raw_line, index + 1);
+            let domain = source.content.trim().trim_start_matches('.');
+            if domain.is_empty() || is_comment(domain) {
+                continue;
+            }
+            plan.rules.push(RuntimeRule {
+                source: SourceLine {
+                    line: rule.source.line,
+                    column: rule.source.column,
+                    raw: source.raw,
+                    content: domain.to_string(),
+                    comment: source.comment,
+                },
+                rule_type: "DOMAIN-SUFFIX".to_string(),
+                value: Some(domain.to_string()),
+                policy: rule.policy.clone(),
+                parameters: rule.parameters.clone(),
+                origin: format!("DOMAIN-SET:{reference}:{}", index + 1),
+            });
+            count += 1;
+        }
+        self.resources.push(ProfileResource {
+            kind: ProfileResourceKind::DomainSet,
+            reference: reference.to_string(),
+            source_line: rule.source.line,
+            status: ProfileResourceStatus::Loaded,
+            cache_key: Some(content_cache_key(
+                ProfileResourceKind::DomainSet,
+                reference,
+                &text,
+            )),
+            item_count: count,
+            diagnostics: Vec::new(),
+        });
+    }
+
+    fn read_local_resource(
+        &mut self,
+        kind: ProfileResourceKind,
+        reference: &str,
+        source_line: usize,
+    ) -> Option<String> {
+        if reference.is_empty() {
+            self.record_missing_resource(
+                kind,
+                reference.to_string(),
+                source_line,
+                "resource reference is empty",
+            );
+            return None;
+        }
+        let path = self.resolve_path(reference);
+        match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(_) => {
+                self.record_missing_resource(
+                    kind,
+                    reference.to_string(),
+                    source_line,
+                    "local resource could not be read",
+                );
+                None
+            }
+        }
+    }
+
+    fn resolve_path(&self, reference: &str) -> PathBuf {
+        let path = Path::new(reference);
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            self.base_dir.join(path)
+        }
+    }
+
+    fn validate_policy_groups(&mut self, plan: &mut ProfileRuntimePlan) {
+        let proxies: std::collections::BTreeSet<String> = plan
+            .proxies
+            .iter()
+            .map(|proxy| proxy.name.clone())
+            .chain(plan.policy_groups.iter().map(|group| group.name.clone()))
+            .chain([
+                "DIRECT".to_string(),
+                "REJECT".to_string(),
+                "REJECT-TINYGIF".to_string(),
+                "REJECT-DROP".to_string(),
+            ])
+            .collect();
+        let group_names: std::collections::BTreeSet<String> = plan
+            .policy_groups
+            .iter()
+            .map(|group| group.name.clone())
+            .collect();
+        for group in &mut plan.policy_groups {
+            group.missing_members = group
+                .policies
+                .iter()
+                .filter(|policy| !proxies.contains(*policy) && !group_names.contains(*policy))
+                .cloned()
+                .collect();
+        }
+    }
+
+    fn record_remote_resource(
+        &mut self,
+        kind: ProfileResourceKind,
+        reference: String,
+        source_line: usize,
+        message: &str,
+    ) {
+        let cache_key = reference_cache_key(kind, &reference);
+        let diagnostic = ProfileDiagnostic {
+            severity: DiagnosticSeverity::Info,
+            line: source_line,
+            column: 1,
+            code: "surge.resource.remote_dry_run".to_string(),
+            message: message.to_string(),
+            suggestion: Some(
+                "Managed network fetching will be enabled behind explicit cache and trust controls"
+                    .to_string(),
+            ),
+        };
+        self.resources.push(ProfileResource {
+            kind,
+            reference,
+            source_line,
+            status: ProfileResourceStatus::RemoteDryRun,
+            cache_key: Some(cache_key),
+            item_count: 0,
+            diagnostics: vec![diagnostic.clone()],
+        });
+        self.diagnostics.push(diagnostic);
+    }
+
+    fn record_missing_resource(
+        &mut self,
+        kind: ProfileResourceKind,
+        reference: String,
+        source_line: usize,
+        message: &str,
+    ) {
+        let diagnostic = ProfileDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            line: source_line,
+            column: 1,
+            code: "surge.resource.missing".to_string(),
+            message: message.to_string(),
+            suggestion: Some("Check the path relative to the imported profile".to_string()),
+        };
+        self.resources.push(ProfileResource {
+            kind,
+            reference,
+            source_line,
+            status: ProfileResourceStatus::Missing,
+            cache_key: None,
+            item_count: 0,
+            diagnostics: vec![diagnostic.clone()],
+        });
+        self.diagnostics.push(diagnostic);
     }
 }
 
@@ -656,8 +1391,8 @@ fn analyze_rule(section: &ProfileSection, rule: &RuleNode) -> CompatibilityItem 
         ),
         "RULE-SET" | "DOMAIN-SET" => (
             SupportLevel::TranslatedWithBehaviorNote,
-            "Remote set references are parsed but not fetched or expanded in this dry-run slice",
-            Some("Run managed resource expansion in a later Bridge iteration before activation"),
+            "Local set references are expanded in the resolved dry-run runtime plan; remote sets are recorded for cache/trust review",
+            Some("Inspect the effective profile before activation, especially when the reference is remote"),
         ),
         "FINAL" => (
             SupportLevel::FullySupported,
@@ -699,14 +1434,14 @@ fn analyze_rule(section: &ProfileSection, rule: &RuleNode) -> CompatibilityItem 
 fn analyze_policy_group(section: &ProfileSection, group: &PolicyGroupNode) -> CompatibilityItem {
     let (level, message, suggestion) = match group.group_type.as_str() {
         "select" => (
-            SupportLevel::NeedsManualReview,
-            "select group is parsed but not active in the first Bridge runtime",
-            Some("Iteration two will add policy group runtime state"),
+            SupportLevel::TranslatedWithBehaviorNote,
+            "select group is parsed into the dry-run policy graph; active runtime switching is still gated",
+            Some("Inspect missing members in the effective profile before activation"),
         ),
         "url-test" | "fallback" => (
-            SupportLevel::NotSupportedYet,
-            "Active health-based policy group runtime is planned for iteration two",
-            Some("Keep this group as review-only until Policy Health Store exists"),
+            SupportLevel::NeedsManualReview,
+            "Health-based policy group is represented in the graph but active probing still needs Policy Health Store",
+            Some("Keep this group dry-run until active health probing exists"),
         ),
         "load-balance" | "subnet" => (
             SupportLevel::NotSupportedYet,
@@ -733,7 +1468,7 @@ fn analyze_directive(section: &ProfileSection, directive: &DirectiveNode) -> Com
     let (level, message) = match directive.directive.as_str() {
         "INCLUDE" => (
             SupportLevel::TranslatedWithBehaviorNote,
-            "include directive is detected and preserved; local/remote loading is not performed in this dry-run parser",
+            "local include can be loaded into the resolved dry-run plan; remote include is recorded but not fetched",
         ),
         "MANAGED-CONFIG" => (
             SupportLevel::TranslatedWithBehaviorNote,
@@ -917,6 +1652,18 @@ fn explain_mitm(document: &ProfileDocument, host: &str) -> String {
     "No MITM hostname scope found in parsed profile".to_string()
 }
 
+fn explain_mitm_from_plan(plan: &ProfileRuntimePlan, host: &str) -> String {
+    for kv in &plan.mitm {
+        if matches!(kv.key.as_str(), "hostname" | "hostnames") {
+            return format!(
+                "MITM hostname scope is present at line {}; dry-run only, review whether {} is included",
+                kv.source.line, host
+            );
+        }
+    }
+    "No MITM hostname scope found in resolved profile".to_string()
+}
+
 fn iter_rules(document: &ProfileDocument) -> impl Iterator<Item = &RuleNode> {
     document
         .sections
@@ -983,6 +1730,23 @@ fn is_comment(trimmed: &str) -> bool {
     (trimmed.starts_with('#') && !trimmed.starts_with("#!"))
         || trimmed.starts_with(';')
         || trimmed.starts_with("//")
+}
+
+fn is_remote_reference(reference: &str) -> bool {
+    reference.starts_with("http://") || reference.starts_with("https://")
+}
+
+fn content_cache_key(kind: ProfileResourceKind, reference: &str, content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{kind:?}:{reference}:").as_bytes());
+    hasher.update(content.as_bytes());
+    format!("sha256:{:x}", hasher.finalize())
+}
+
+fn reference_cache_key(kind: ProfileResourceKind, reference: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("{kind:?}:{reference}").as_bytes());
+    format!("remote-sha256:{:x}", hasher.finalize())
 }
 
 fn split_inline_comment(raw: &str) -> (String, Option<String>) {
@@ -1083,9 +1847,9 @@ FINAL,ProxyA
         let doc = parse_surge_profile(SAMPLE, ProfileSource::Inline);
         let report = analyze_compatibility(&doc);
         assert!(report.summary.fully_supported >= 4);
-        assert!(report.summary.translated_with_behavior_note >= 2);
+        assert!(report.summary.translated_with_behavior_note >= 3);
         assert!(report.summary.needs_manual_review >= 1);
-        assert!(report.summary.not_supported_yet >= 2);
+        assert!(report.summary.not_supported_yet >= 1);
     }
 
     #[test]
@@ -1117,5 +1881,113 @@ FINAL,ProxyA
         assert!(preview.content.contains("[policies]"));
         assert!(preview.content.contains("host suffix example.com -> Proxy"));
         assert!(preview.content.contains("behavior note: host-only keyword"));
+    }
+
+    #[test]
+    fn resolved_profile_expands_local_sets_and_include() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("included.conf"),
+            "[Rule]\nDOMAIN,included.example,DIRECT\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("rules.list"),
+            "DOMAIN-SUFFIX,rules.example\nDOMAIN,exact.rules.example\n",
+        )
+        .unwrap();
+        std::fs::write(
+            temp.path().join("domains.list"),
+            "domainset.example\n.sub.domainset.example\n",
+        )
+        .unwrap();
+        let profile = r#"
+#!include included.conf
+[Proxy]
+ProxyA = http, 127.0.0.1, 8080
+
+[Proxy Group]
+Proxy = select, ProxyA, DIRECT, MissingProxy
+
+[Rule]
+RULE-SET,rules.list,Proxy
+DOMAIN-SET,domains.list,DIRECT
+FINAL,Proxy
+"#;
+        let document = parse_surge_profile(profile, ProfileSource::Inline);
+        let resolved = resolve_surge_profile(document, temp.path());
+
+        assert_eq!(resolved.resources.len(), 3);
+        assert!(resolved
+            .resources
+            .iter()
+            .all(|resource| resource.status == ProfileResourceStatus::Loaded));
+        assert!(resolved.resources.iter().all(|resource| resource
+            .cache_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("sha256:"))));
+        assert!(resolved.runtime_plan.rules.iter().any(|rule| {
+            rule.rule_type == "DOMAIN" && rule.value.as_deref() == Some("included.example")
+        }));
+        assert!(resolved.runtime_plan.rules.iter().any(|rule| {
+            rule.rule_type == "DOMAIN-SUFFIX"
+                && rule.value.as_deref() == Some("rules.example")
+                && rule.policy == "Proxy"
+        }));
+        assert!(resolved.runtime_plan.rules.iter().any(|rule| {
+            rule.rule_type == "DOMAIN-SUFFIX"
+                && rule.value.as_deref() == Some("domainset.example")
+                && rule.policy == "DIRECT"
+        }));
+        let proxy = &resolved.runtime_plan.policy_groups[0];
+        assert_eq!(proxy.missing_members, vec!["MissingProxy"]);
+    }
+
+    #[test]
+    fn resolved_explain_uses_expanded_rule_set_before_final() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("rules.list"),
+            "DOMAIN-SUFFIX,expanded.example\n",
+        )
+        .unwrap();
+        let document = parse_surge_profile(
+            "[Rule]\nRULE-SET,rules.list,Proxy\nFINAL,DIRECT\n",
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, temp.path());
+        let report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://api.expanded.example")
+                .unwrap();
+        let matched = report.matched_rule.unwrap();
+        assert_eq!(matched.rule_type, "DOMAIN-SUFFIX");
+        assert_eq!(matched.policy, "Proxy");
+        assert!(report
+            .timeline
+            .iter()
+            .any(|step| step.message.contains("RULE-SET:rules.list")));
+    }
+
+    #[test]
+    fn remote_resources_are_recorded_without_fetching() {
+        let document = parse_surge_profile(
+            "[Rule]\nRULE-SET,https://example.com/rules.list,Proxy\nFINAL,DIRECT\n",
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        assert_eq!(resolved.resources.len(), 1);
+        assert_eq!(
+            resolved.resources[0].status,
+            ProfileResourceStatus::RemoteDryRun
+        );
+        assert!(resolved.resources[0]
+            .cache_key
+            .as_deref()
+            .is_some_and(|key| key.starts_with("remote-sha256:")));
+        assert!(resolved
+            .runtime_plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "surge.resource.remote_dry_run"));
     }
 }

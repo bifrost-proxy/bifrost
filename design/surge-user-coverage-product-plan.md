@@ -4,16 +4,19 @@
 
 本文描述 Bifrost 面向 Surge 用户群体的产品路线和分阶段技术拆解。
 
-当前已启动迭代一 Surge Bridge 的第一条可合入纵向切片：
+当前已启动迭代一 Surge Bridge，并继续补齐 dry-run resolved runtime plan：
 
 - `bifrost_core::profile` 提供 Profile IR、Surge profile parser、兼容性报告、ordered rule explain 和 Bifrost native profile preview。
+- 本地 `#!include`、本地 `RULE-SET`、本地 `DOMAIN-SET` 可展开到 dry-run runtime plan，并生成内容 hash cache key。
+- Policy Group 会生成 dry-run policy graph，并报告缺失成员。
 - `bifrost profile import <file> --dry-run` 只解析、分析和展示报告，不启用 profile。
 - `bifrost profile explain --profile <file> <url>` 按 Surge `[Rule]` top-to-bottom first-match 语义解释 DNS/Rule/Policy/MITM 决策摘要。
 - `bifrost profile convert <file> --to bifrost` 生成带行为说明的 Bifrost Native Profile 预览，不写入运行时。
+- `bifrost profile effective <file>` 输出 dry-run effective profile / runtime plan，展示 resources、policy graph 和 ordered rules。
 
 尚未实现：
 
-- managed profile URL、远程 `#!include` 拉取和 ETag/Last-Modified/cache。
+- managed profile URL、远程 `#!include` / `RULE-SET` / `DOMAIN-SET` 拉取和 ETag/Last-Modified/cache 持久化。
 - Surge ordered evaluator 接入真实代理运行时。
 - Policy Group runtime、DNS Center、MITM Center、HTTP Pipeline runtime。
 - Transparent Proxy / TUN / VIF、UDP/QUIC/HTTP3 policy scheduling、Team Profile 和 Agent 自动迁移。
@@ -52,12 +55,15 @@ Bring your Surge profile. Get a stronger proxy workbench.
 - Compatibility Report 按 `Fully supported`、`Translated with behavior note`、`Needs manual review`、`Not supported yet` 分类。
 - Explain 支持 `DOMAIN`、`DOMAIN-SUFFIX`、`DOMAIN-KEYWORD`、`IP-CIDR`、`IP-CIDR6` 和 `FINAL` 的 Surge ordered first-match 解释。
 - Convert 输出 Bifrost Native Profile preview，把不支持或有行为差异的条目保留为注释。
+- Resolved plan 支持本地 `#!include`、`RULE-SET`、`DOMAIN-SET` 展开。
+- Effective profile dump 展示资源解析状态、cache key、policy graph、ordered rules、DNS/MITM/HTTP pipeline dry-run entries。
+- Remote managed resources 只记录为 dry-run diagnostics，不触网、不信任、不缓存。
 
 ### 后续迭代一补齐
 
 - managed profile URL 下载。
-- 本地和远程 `#!include` 解析。
-- `RULE-SET` / `DOMAIN-SET` 远程资源加载与缓存。
+- 远程 `#!include` 解析。
+- `RULE-SET` / `DOMAIN-SET` 远程资源加载与 ETag/Last-Modified/content-hash cache。
 - WebUI Import 页面。
 - 更完整的 HTTP pipeline 迁移预览。
 
@@ -124,6 +130,9 @@ Bring your Surge profile. Get a stronger proxy workbench.
 
 - Surge section parser。
 - directive parser。
+- 本地 include、RULE-SET、DOMAIN-SET expansion。
+- policy graph missing member diagnostics。
+- effective profile dry-run runtime plan。
 - rule parser 和 line number diagnostics。
 - compatibility analyzer 支持等级分类。
 - ordered first-match explain。
@@ -133,7 +142,9 @@ Bring your Surge profile. Get a stronger proxy workbench.
 
 - `e2e-tests/tests/test_profile_surge_bridge_cli.sh` 构造真实 Surge profile。
 - 验证 `profile import --dry-run` 输出兼容报告。
+- 验证 `profile effective` 输出 resolved resources、policy graph 和 expanded ordered rules。
 - 验证 `profile explain` 命中 ordered `DOMAIN-SUFFIX` 并输出 policy。
+- 验证 `profile explain` 可命中本地 `RULE-SET` 展开规则。
 - 验证 `profile convert --to bifrost` 输出 preview 和 compatibility summary。
 
 ### human_tests

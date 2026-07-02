@@ -154,6 +154,7 @@ bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
 
 # Surge profile 迁移预览（dry-run，不启用运行时）
 bifrost profile import ./surge.conf --dry-run
+bifrost profile effective ./surge.conf
 bifrost profile explain --profile ./surge.conf https://example.com/path
 bifrost profile convert ./surge.conf --to bifrost
 ```

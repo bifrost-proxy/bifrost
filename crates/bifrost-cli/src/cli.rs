@@ -1816,6 +1816,16 @@ pub enum ProfileCommands {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    #[command(
+        about = "Dump the resolved dry-run effective profile",
+        long_about = "Resolve local Surge includes, RULE-SET, and DOMAIN-SET resources into a dry-run runtime plan without enabling proxy state."
+    )]
+    Effective {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Surge profile")]
+        profile: PathBuf,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
 }
 
 #[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]

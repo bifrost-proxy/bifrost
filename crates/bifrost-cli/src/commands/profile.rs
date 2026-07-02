@@ -1,7 +1,7 @@
 use bifrost_core::profile::{
-    analyze_compatibility, convert_surge_to_bifrost_preview, explain_surge_request,
-    parse_surge_profile_file, CompatibilityReport, ConversionPreview, ExplainReport,
-    ProfileDocument, SupportLevel,
+    analyze_compatibility, convert_resolved_surge_to_bifrost_preview,
+    explain_surge_request_with_plan, load_surge_profile_file, CompatibilityReport,
+    ConversionPreview, ExplainReport, ProfileDocument, ResolvedProfileDocument, SupportLevel,
 };
 
 use crate::cli::{ProfileCommands, ProfileConvertTarget};
@@ -19,12 +19,13 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
                         .to_string(),
                 ));
             }
-            let document = parse_surge_profile_file(&profile)?;
-            let report = analyze_compatibility(&document);
+            let resolved = load_surge_profile_file(&profile)?;
+            let report = analyze_compatibility(&resolved.document);
             if json {
-                println!("{}", serde_json::to_string_pretty(&report)?);
+                println!("{}", serde_json::to_string_pretty(&resolved)?);
             } else {
-                print_import_report(&document, &report);
+                print_import_report(&resolved.document, &report);
+                print_resource_summary(&resolved);
             }
         }
         ProfileCommands::Explain {
@@ -32,8 +33,8 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
             target,
             json,
         } => {
-            let document = parse_surge_profile_file(&profile)?;
-            let report = explain_surge_request(&document, &target)?;
+            let resolved = load_surge_profile_file(&profile)?;
+            let report = explain_surge_request_with_plan(&resolved.runtime_plan, &target)?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&report)?);
             } else {
@@ -41,9 +42,11 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
             }
         }
         ProfileCommands::Convert { profile, to, json } => {
-            let document = parse_surge_profile_file(&profile)?;
+            let resolved = load_surge_profile_file(&profile)?;
             let preview = match to {
-                ProfileConvertTarget::Bifrost => convert_surge_to_bifrost_preview(&document),
+                ProfileConvertTarget::Bifrost => {
+                    convert_resolved_surge_to_bifrost_preview(&resolved)
+                }
             };
             if json {
                 println!("{}", serde_json::to_string_pretty(&preview)?);
@@ -51,9 +54,87 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
                 print_conversion_preview(&preview);
             }
         }
+        ProfileCommands::Effective { profile, json } => {
+            let resolved = load_surge_profile_file(&profile)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&resolved.runtime_plan)?);
+            } else {
+                print_effective_profile(&resolved);
+            }
+        }
     }
 
     Ok(())
+}
+
+fn print_resource_summary(resolved: &ResolvedProfileDocument) {
+    if resolved.resources.is_empty() {
+        return;
+    }
+    println!();
+    println!("Resolved resources:");
+    for resource in &resolved.resources {
+        println!(
+            "  line {:>4} [{:?}] {:?} {} ({} items, cache {})",
+            resource.source_line,
+            resource.status,
+            resource.kind,
+            resource.reference,
+            resource.item_count,
+            resource.cache_key.as_deref().unwrap_or("<none>")
+        );
+    }
+}
+
+fn print_effective_profile(resolved: &ResolvedProfileDocument) {
+    println!("Surge effective profile dry-run");
+    println!("Source: {}", source_label(&resolved.document));
+    println!("Mode: {}", resolved.runtime_plan.mode);
+    println!(
+        "Runtime plan: {} proxies, {} policy groups, {} rules, {} dns entries, {} mitm entries, {} pipeline entries",
+        resolved.runtime_plan.proxies.len(),
+        resolved.runtime_plan.policy_groups.len(),
+        resolved.runtime_plan.rules.len(),
+        resolved.runtime_plan.dns.len(),
+        resolved.runtime_plan.mitm.len(),
+        resolved.runtime_plan.http_pipeline.len(),
+    );
+    print_resource_summary(resolved);
+
+    if !resolved.runtime_plan.policy_groups.is_empty() {
+        println!();
+        println!("Policy graph:");
+        for group in &resolved.runtime_plan.policy_groups {
+            println!(
+                "  line {:>4} {} = {}, {}",
+                group.source.line,
+                group.name,
+                group.group_type,
+                group.policies.join(", ")
+            );
+            if !group.missing_members.is_empty() {
+                println!(
+                    "       missing members: {}",
+                    group.missing_members.join(", ")
+                );
+            }
+        }
+    }
+
+    if !resolved.runtime_plan.rules.is_empty() {
+        println!();
+        println!("Ordered rules:");
+        for rule in &resolved.runtime_plan.rules {
+            println!(
+                "  line {:>4} {:<14} {:<32} -> {:<16} origin {}",
+                rule.source.line,
+                rule.rule_type,
+                rule.value.as_deref().unwrap_or("<none>"),
+                rule.policy,
+                rule.origin
+            );
+        }
+    }
 }
 
 fn print_import_report(document: &ProfileDocument, report: &CompatibilityReport) {
