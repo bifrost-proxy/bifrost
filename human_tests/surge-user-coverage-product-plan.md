@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
+本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Surge Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、DNS/MITM/HTTP Pipeline dry-run explain、Bifrost Native Profile conversion preview，以及方案文档完整性。
 
 ## 前置条件
 
@@ -19,18 +19,18 @@
 操作步骤：
 
 1. 执行 `test -f design/surge-user-coverage-product-plan.md`。
-2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|尚未实现|本次落地范围|Managed profile URL|ETag" design/surge-user-coverage-product-plan.md`。
+2. 执行 `rg -n "迭代一：Surge Bridge|迭代二：Bifrost Native Profile|迭代三：Bifrost Proxy Platform|尚未实现|本次落地范围|Managed profile URL|ETag|DNS/MITM/HTTP Pipeline" design/surge-user-coverage-product-plan.md`。
 
 预期结果：
 
 - 方案文档存在。
-- 检索结果能定位三次迭代、未实现清单、本次落地范围、managed profile URL 和 ETag/cache 说明。
+- 检索结果能定位三次迭代、未实现清单、本次落地范围、managed profile URL、ETag/cache 和 DNS/MITM/HTTP Pipeline explain 说明。
 
 ### TC-SURGE-02：Surge profile dry-run 导入生成兼容性报告
 
 操作步骤：
 
-1. 创建临时 Surge profile，包含顶层 `#!include`、远程 `#!include`、`[General]`、`[Proxy]`、`[Proxy Group]`、`[MITM]`、`[Rule]`。
+1. 创建临时 Surge profile，包含顶层 `#!include`、远程 `#!include`、`[General]`、`[Host]`、`[Proxy]`、`[Proxy Group]`、`[MITM]`、`[URL Rewrite]`、`[Map Local]`、`[Header Rewrite]`、`[Script]`、`[Rule]`。
 2. 在同一临时目录创建 `included.conf`、`rules.list`、`domains.list`。
 3. 启动本地 HTTP server 提供 `remote-include.conf`、`remote-rules.list`、`remote-domains.list`，响应包含 `ETag` 和 `Last-Modified`。
 4. 执行 `BIFROST_DATA_DIR=<tmp> BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile import <profile> --dry-run`。
@@ -104,7 +104,28 @@
 - 输出包含 `active latency probing is not running`。
 - 说明 dry-run explain 不进行真实延迟探测，但会给出当前可解释的 terminal policy。
 
-### TC-SURGE-07：profile convert 只输出 Bifrost Native Profile 预览
+### TC-SURGE-07：profile explain 展示 DNS/MITM/HTTP Pipeline dry-run 决策
+
+操作步骤：
+
+1. 使用 TC-SURGE-02 的临时 profile，其中 `[Host]` 包含 `api.hosted.example = 203.0.113.10`。
+2. 确认 `[MITM]` 包含 `hostname = %APPEND% *.example.com, -private.example.com`。
+3. 确认 `[URL Rewrite]` 包含 `^https://rewrite\.example/path https://target.example/path 302`。
+4. 确认 `[Script]` 包含 `http-response ^https://script\.example script-path=scripts/response.js`。
+5. 执行 `target/debug/bifrost profile explain --profile <profile> https://api.hosted.example/path`。
+6. 执行 `target/debug/bifrost profile explain --profile <profile> https://private.example.com/path`。
+7. 执行 `target/debug/bifrost profile explain --profile <profile> https://rewrite.example/path`。
+8. 执行 `target/debug/bifrost profile explain --profile <profile> https://script.example/path`。
+
+预期结果：
+
+- Host mapping 输出包含 `DNS decision: Host mapping api.hosted.example -> 203.0.113.10`。
+- MITM exclusion 输出包含 `MITM decision: host private.example.com is excluded from MITM`。
+- URL Rewrite 输出包含 `HTTP pipeline: 1 matched` 和 `matched [URL Rewrite]`。
+- Script 输出包含 `matched [Script]`。
+- 所有 explain 都只做 dry-run 解释，不启用真实 DNS/MITM/HTTP rewrite runtime。
+
+### TC-SURGE-08：profile convert 只输出 Bifrost Native Profile 预览
 
 操作步骤：
 
@@ -119,7 +140,7 @@
 - 输出包含 `Compatibility summary`。
 - 对存在行为差异或暂不支持的能力以注释或 summary 保留，不静默丢弃。
 
-### TC-SURGE-08：managed profile URL 可直接作为 profile source
+### TC-SURGE-09：managed profile URL 可直接作为 profile source
 
 操作步骤：
 
@@ -132,7 +153,7 @@
 - 输出包含 `ManagedProfile`。
 - 输出包含 `managed.example`，证明 managed profile URL 已加载为 dry-run runtime plan。
 
-### TC-SURGE-09：自动 E2E 脚本覆盖 CLI 黑盒链路
+### TC-SURGE-10：自动 E2E 脚本覆盖 CLI 黑盒链路
 
 操作步骤：
 
@@ -142,7 +163,7 @@
 
 - 脚本自动构造临时 Surge profile。
 - 脚本自动启动本地 HTTP server，覆盖远程 include、RULE-SET、DOMAIN-SET、managed profile URL 和 cache-hit。
-- `profile import --dry-run`、`profile effective`、`profile explain`、Policy Group decision explain、`profile convert` 五类链路均通过断言。
+- `profile import --dry-run`、`profile effective`、`profile explain`、Policy Group decision explain、DNS/MITM/HTTP Pipeline explain、`profile convert` 五类链路均通过断言。
 - 测试结束后删除临时目录。
 
 ## 清理步骤

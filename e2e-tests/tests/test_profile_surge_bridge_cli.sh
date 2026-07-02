@@ -108,6 +108,9 @@ cat > "$PROFILE" <<'PROFILE_EOF'
 [General]
 dns-server = 8.8.8.8
 
+[Host]
+api.hosted.example = 203.0.113.10
+
 [Proxy]
 ProxyA = http, 127.0.0.1, 8080
 
@@ -116,12 +119,30 @@ Proxy = select, ProxyA, DIRECT, MissingProxy
 Auto = url-test, ProxyA, DIRECT, url=http://example.com/generate_204
 
 [MITM]
-hostname = *.example.com
+hostname = %APPEND% *.example.com, -private.example.com
+
+[URL Rewrite]
+^https://rewrite\.example/path https://target.example/path 302
+
+[Map Local]
+^https://assets\.example/app\.js data/app.js
+
+[Header Rewrite]
+^https://headers\.example header-replace User-Agent Bifrost
+
+[Script]
+http-response ^https://script\.example script-path=scripts/response.js
 
 [Rule]
 RULE-SET,rules.list,Proxy
 DOMAIN-SET,domains.list,DIRECT
+DOMAIN,api.hosted.example,DIRECT
 DOMAIN,auto.example,Auto
+DOMAIN,rewrite.example,DIRECT
+DOMAIN,assets.example,DIRECT
+DOMAIN,headers.example,DIRECT
+DOMAIN,script.example,DIRECT
+DOMAIN,private.example.com,DIRECT
 DOMAIN,exact.example.com,DIRECT
 DOMAIN-SUFFIX,example.com,Proxy
 DOMAIN-KEYWORD,google,DIRECT
@@ -167,6 +188,7 @@ assert_body_contains "Matched: line" "$EXPLAIN_OUTPUT" "explain prints matched r
 assert_body_contains "DOMAIN-SUFFIX" "$EXPLAIN_OUTPUT" "explain uses ordered DOMAIN-SUFFIX first match"
 assert_body_contains "Selected policy Proxy" "$EXPLAIN_OUTPUT" "explain prints selected policy"
 assert_body_contains "Policy decision: Proxy -> ProxyA (terminal ProxyA; proxy endpoint)" "$EXPLAIN_OUTPUT" "explain resolves select group to terminal proxy"
+assert_body_contains "MITM decision: host sub.example.com is included in MITM dry-run scope" "$EXPLAIN_OUTPUT" "explain reports MITM include scope"
 
 RESOURCE_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://api.ruleset.example/path")"
 assert_body_contains "RULE-SET:rules.list" "$RESOURCE_EXPLAIN_OUTPUT" "explain evaluates expanded RULE-SET before FINAL"
@@ -175,6 +197,19 @@ assert_body_contains "Selected policy Proxy" "$RESOURCE_EXPLAIN_OUTPUT" "expande
 AUTO_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://auto.example/path")"
 assert_body_contains "Policy decision: Auto -> ProxyA (terminal ProxyA; proxy endpoint)" "$AUTO_EXPLAIN_OUTPUT" "explain resolves url-test group in dry-run"
 assert_body_contains "active latency probing is not running" "$AUTO_EXPLAIN_OUTPUT" "explain reports url-test dry-run health boundary"
+
+DNS_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://api.hosted.example/path")"
+assert_body_contains "DNS decision: Host mapping api.hosted.example -> 203.0.113.10" "$DNS_EXPLAIN_OUTPUT" "explain reports Host mapping decision"
+
+MITM_EXCLUDE_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://private.example.com/path")"
+assert_body_contains "MITM decision: host private.example.com is excluded from MITM" "$MITM_EXCLUDE_OUTPUT" "explain reports MITM exclusion"
+
+PIPELINE_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://rewrite.example/path")"
+assert_body_contains "HTTP pipeline: 1 matched" "$PIPELINE_EXPLAIN_OUTPUT" "explain reports matched HTTP pipeline count"
+assert_body_contains "matched [URL Rewrite]" "$PIPELINE_EXPLAIN_OUTPUT" "explain reports URL Rewrite pipeline match"
+
+SCRIPT_EXPLAIN_OUTPUT="$("$BIFROST_BIN" profile explain --profile "$PROFILE" "https://script.example/path")"
+assert_body_contains "matched [Script]" "$SCRIPT_EXPLAIN_OUTPUT" "explain reports Script pipeline match"
 
 echo "Running bifrost profile convert..."
 CONVERT_OUTPUT="$("$BIFROST_BIN" profile convert "$PROFILE" --to bifrost)"

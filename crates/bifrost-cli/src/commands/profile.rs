@@ -216,6 +216,24 @@ fn print_explain_report(report: &ExplainReport) {
             decision.reason
         );
     }
+    if let Some(mapping) = &report.dns_decision.matched_host_mapping {
+        println!("DNS decision: {mapping}");
+    } else if let Some(note) = report.dns_decision.notes.first() {
+        println!("DNS decision: {note}");
+    }
+    println!("MITM decision: {}", report.mitm_decision.reason);
+    let matched_pipeline = report
+        .http_pipeline
+        .iter()
+        .filter(|entry| entry.matched)
+        .count();
+    if !report.http_pipeline.is_empty() {
+        println!(
+            "HTTP pipeline: {} matched / {} total",
+            matched_pipeline,
+            report.http_pipeline.len()
+        );
+    }
 
     println!();
     println!("Decision timeline:");

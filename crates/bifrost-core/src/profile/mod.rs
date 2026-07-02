@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ipnet::IpNet;
+use regex::Regex;
 use reqwest::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -174,9 +175,18 @@ pub struct ExplainReport {
     pub request: ExplainRequest,
     pub matched_rule: Option<RuleNode>,
     pub target_policy: Option<String>,
+    pub dns_decision: DnsDecisionTrace,
     pub policy_decision: Option<PolicyDecisionTrace>,
+    pub mitm_decision: MitmDecisionTrace,
+    pub http_pipeline: Vec<HttpPipelineTrace>,
     pub timeline: Vec<ExplainStep>,
     pub diagnostics: Vec<ProfileDiagnostic>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DnsDecisionTrace {
+    pub matched_host_mapping: Option<String>,
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -184,6 +194,23 @@ pub struct PolicyDecisionTrace {
     pub requested_policy: String,
     pub terminal_policy: String,
     pub chain: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MitmDecisionTrace {
+    pub included: bool,
+    pub excluded: bool,
+    pub matched_patterns: Vec<String>,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HttpPipelineTrace {
+    pub section: String,
+    pub line: usize,
+    pub matched: bool,
+    pub action: String,
     pub reason: String,
 }
 
@@ -471,6 +498,8 @@ pub fn analyze_compatibility(document: &ProfileDocument) -> CompatibilityReport 
 
 pub fn explain_surge_request(document: &ProfileDocument, input: &str) -> Result<ExplainReport> {
     let request = parse_explain_request(input)?;
+    let dns_decision = legacy_dns_decision();
+    let mitm_decision = legacy_mitm_decision(document, &request.host);
     let mut timeline = vec![
         ExplainStep {
             stage: "input".to_string(),
@@ -507,7 +536,10 @@ pub fn explain_surge_request(document: &ProfileDocument, input: &str) -> Result<
                 request,
                 matched_rule: Some(rule.clone()),
                 target_policy: Some(rule.policy.clone()),
+                dns_decision,
                 policy_decision: None,
+                mitm_decision,
+                http_pipeline: Vec::new(),
                 timeline,
                 diagnostics,
             });
@@ -535,7 +567,10 @@ pub fn explain_surge_request(document: &ProfileDocument, input: &str) -> Result<
         request,
         matched_rule: None,
         target_policy: None,
+        dns_decision,
         policy_decision: None,
+        mitm_decision,
+        http_pipeline: Vec::new(),
         timeline,
         diagnostics,
     })
@@ -733,18 +768,13 @@ pub fn explain_surge_request_with_plan(
     input: &str,
 ) -> Result<ExplainReport> {
     let request = parse_explain_request(input)?;
-    let mut timeline = vec![
-        ExplainStep {
-            stage: "input".to_string(),
-            line: None,
-            message: format!("URL={} host={}", request.url, request.host),
-        },
-        ExplainStep {
-            stage: "dns".to_string(),
-            line: None,
-            message: "Resolved runtime plan dry-run does not resolve DNS; using URL host and optional literal IP only".to_string(),
-        },
-    ];
+    let (dns_decision, dns_steps) = explain_dns_from_plan(plan, &request);
+    let mut timeline = vec![ExplainStep {
+        stage: "input".to_string(),
+        line: None,
+        message: format!("URL={} host={}", request.url, request.host),
+    }];
+    timeline.extend(dns_steps);
 
     let mut diagnostics = plan.diagnostics.clone();
     for runtime_rule in &plan.rules {
@@ -770,16 +800,18 @@ pub fn explain_surge_request_with_plan(
             let policy_decision = resolve_policy_decision(plan, &rule.policy, rule.source.line);
             timeline.extend(policy_decision.steps);
             diagnostics.extend(policy_decision.diagnostics);
-            timeline.push(ExplainStep {
-                stage: "mitm".to_string(),
-                line: None,
-                message: explain_mitm_from_plan(plan, &request.host),
-            });
+            let (mitm_decision, mitm_steps) = explain_mitm_from_plan(plan, &request.host);
+            timeline.extend(mitm_steps);
+            let (http_pipeline, pipeline_steps) = explain_http_pipeline_from_plan(plan, &request);
+            timeline.extend(pipeline_steps);
             return Ok(ExplainReport {
                 request,
                 matched_rule: Some(rule),
                 target_policy: Some(runtime_rule.policy.clone()),
+                dns_decision,
                 policy_decision: Some(policy_decision.trace),
+                mitm_decision,
+                http_pipeline,
                 timeline,
                 diagnostics,
             });
@@ -807,7 +839,15 @@ pub fn explain_surge_request_with_plan(
         request,
         matched_rule: None,
         target_policy: None,
+        dns_decision,
         policy_decision: None,
+        mitm_decision: MitmDecisionTrace {
+            included: false,
+            excluded: false,
+            matched_patterns: Vec::new(),
+            reason: "MITM is not evaluated because no rule matched".to_string(),
+        },
+        http_pipeline: Vec::new(),
         timeline,
         diagnostics,
     })
@@ -1065,6 +1105,7 @@ impl ProfileResolver {
                         });
                     }
                     ProfileEntry::KeyValue(kv) => self.apply_key_value(section, kv, plan),
+                    ProfileEntry::Raw(raw) => self.apply_raw(section, raw, plan),
                     _ => {}
                 }
             }
@@ -1117,6 +1158,33 @@ impl ProfileResolver {
             | ProfileSectionKind::Script => plan.http_pipeline.push(item),
             _ => {}
         }
+    }
+
+    fn apply_raw(
+        &mut self,
+        section: &ProfileSection,
+        raw: &SourceLine,
+        plan: &mut ProfileRuntimePlan,
+    ) {
+        if !matches!(
+            section.kind,
+            ProfileSectionKind::UrlRewrite
+                | ProfileSectionKind::MapLocal
+                | ProfileSectionKind::HeaderRewrite
+                | ProfileSectionKind::Script
+        ) {
+            return;
+        }
+        let content = raw.content.trim();
+        if content.is_empty() {
+            return;
+        }
+        plan.http_pipeline.push(RuntimeKeyValue {
+            section: section.name.clone(),
+            key: "raw".to_string(),
+            value: content.to_string(),
+            source: raw.clone(),
+        });
     }
 
     fn load_include(&mut self, directive: &DirectiveNode, plan: &mut ProfileRuntimePlan) {
@@ -2124,6 +2192,92 @@ fn group_selection_reason(group: &RuntimePolicyGroup) -> &'static str {
     }
 }
 
+fn legacy_dns_decision() -> DnsDecisionTrace {
+    DnsDecisionTrace {
+        matched_host_mapping: None,
+        notes: vec![
+            "Legacy profile explain does not build the resolved DNS runtime plan".to_string(),
+        ],
+    }
+}
+
+fn explain_dns_from_plan(
+    plan: &ProfileRuntimePlan,
+    request: &ExplainRequest,
+) -> (DnsDecisionTrace, Vec<ExplainStep>) {
+    let mut notes = Vec::new();
+    let mut steps = Vec::new();
+    let mut matched_host_mapping = None;
+
+    for item in &plan.dns {
+        let section = item.section.to_ascii_lowercase();
+        if section == "host" {
+            if host_pattern_matches(&item.key, &request.host) {
+                let note = format!("Host mapping {} -> {}", item.key, item.value);
+                matched_host_mapping = Some(note.clone());
+                notes.push(note.clone());
+                steps.push(ExplainStep {
+                    stage: "dns".to_string(),
+                    line: Some(item.source.line),
+                    message: format!(
+                        "{note}; dry-run records the mapping but does not rewrite the request IP"
+                    ),
+                });
+            } else {
+                steps.push(ExplainStep {
+                    stage: "dns".to_string(),
+                    line: Some(item.source.line),
+                    message: format!(
+                        "skipped Host mapping {} for host {}",
+                        item.key, request.host
+                    ),
+                });
+            }
+            continue;
+        }
+
+        if matches!(
+            item.key.as_str(),
+            "dns-server" | "default-nameserver" | "encrypted-dns-server" | "doh-server"
+        ) {
+            let note = format!("DNS provider {} = {}", item.key, item.value);
+            notes.push(note.clone());
+            steps.push(ExplainStep {
+                stage: "dns".to_string(),
+                line: Some(item.source.line),
+                message: format!("{note}; dry-run explain does not perform network DNS resolution"),
+            });
+        } else {
+            steps.push(ExplainStep {
+                stage: "dns".to_string(),
+                line: Some(item.source.line),
+                message: format!(
+                    "preserved DNS config [{}] {} = {}",
+                    item.section, item.key, item.value
+                ),
+            });
+        }
+    }
+
+    if steps.is_empty() {
+        notes.push("No DNS or Host entries found in resolved profile".to_string());
+        steps.push(ExplainStep {
+            stage: "dns".to_string(),
+            line: None,
+            message: "No DNS or Host runtime entries; using URL host and optional literal IP only"
+                .to_string(),
+        });
+    }
+
+    (
+        DnsDecisionTrace {
+            matched_host_mapping,
+            notes,
+        },
+        steps,
+    )
+}
+
 fn explain_mitm(document: &ProfileDocument, host: &str) -> String {
     for section in &document.sections {
         if section.kind != ProfileSectionKind::Mitm {
@@ -2144,16 +2298,248 @@ fn explain_mitm(document: &ProfileDocument, host: &str) -> String {
     "No MITM hostname scope found in parsed profile".to_string()
 }
 
-fn explain_mitm_from_plan(plan: &ProfileRuntimePlan, host: &str) -> String {
+fn legacy_mitm_decision(document: &ProfileDocument, host: &str) -> MitmDecisionTrace {
+    MitmDecisionTrace {
+        included: false,
+        excluded: false,
+        matched_patterns: Vec::new(),
+        reason: explain_mitm(document, host),
+    }
+}
+
+fn explain_mitm_from_plan(
+    plan: &ProfileRuntimePlan,
+    host: &str,
+) -> (MitmDecisionTrace, Vec<ExplainStep>) {
+    let mut hostname_entries = Vec::new();
     for kv in &plan.mitm {
         if matches!(kv.key.as_str(), "hostname" | "hostnames") {
-            return format!(
-                "MITM hostname scope is present at line {}; dry-run only, review whether {} is included",
-                kv.source.line, host
-            );
+            hostname_entries.push(kv);
         }
     }
-    "No MITM hostname scope found in resolved profile".to_string()
+    if hostname_entries.is_empty() {
+        return (
+            MitmDecisionTrace {
+                included: false,
+                excluded: false,
+                matched_patterns: Vec::new(),
+                reason: "No MITM hostname scope found in resolved profile".to_string(),
+            },
+            vec![ExplainStep {
+                stage: "mitm".to_string(),
+                line: None,
+                message: "No MITM hostname scope found in resolved profile".to_string(),
+            }],
+        );
+    }
+
+    let mut matched_patterns = Vec::new();
+    let mut excluded = false;
+    let mut steps = Vec::new();
+    for kv in hostname_entries {
+        for raw_pattern in split_profile_list(&kv.value) {
+            let (is_exclusion, pattern) = mitm_pattern(raw_pattern.as_str());
+            if host_pattern_matches(pattern, host) {
+                matched_patterns.push(raw_pattern.clone());
+                if is_exclusion {
+                    excluded = true;
+                }
+                steps.push(ExplainStep {
+                    stage: "mitm".to_string(),
+                    line: Some(kv.source.line),
+                    message: format!(
+                        "{} MITM hostname pattern {} for host {}",
+                        if is_exclusion {
+                            "excluded by"
+                        } else {
+                            "included by"
+                        },
+                        raw_pattern,
+                        host
+                    ),
+                });
+            } else {
+                steps.push(ExplainStep {
+                    stage: "mitm".to_string(),
+                    line: Some(kv.source.line),
+                    message: format!(
+                        "skipped MITM hostname pattern {} for host {}",
+                        raw_pattern, host
+                    ),
+                });
+            }
+        }
+    }
+    let included = !excluded
+        && matched_patterns.iter().any(|pattern| {
+            !pattern.trim_start().starts_with('-') && !pattern.trim_start().starts_with('!')
+        });
+    let reason = if excluded {
+        format!("host {host} is excluded from MITM")
+    } else if included {
+        format!("host {host} is included in MITM dry-run scope")
+    } else {
+        format!("host {host} is not included in MITM dry-run scope")
+    };
+    (
+        MitmDecisionTrace {
+            included,
+            excluded,
+            matched_patterns,
+            reason,
+        },
+        steps,
+    )
+}
+
+fn explain_http_pipeline_from_plan(
+    plan: &ProfileRuntimePlan,
+    request: &ExplainRequest,
+) -> (Vec<HttpPipelineTrace>, Vec<ExplainStep>) {
+    let mut traces = Vec::new();
+    let mut steps = Vec::new();
+    for item in &plan.http_pipeline {
+        let (matched, action, reason) = pipeline_entry_decision(item, request);
+        traces.push(HttpPipelineTrace {
+            section: item.section.clone(),
+            line: item.source.line,
+            matched,
+            action: action.clone(),
+            reason: reason.clone(),
+        });
+        steps.push(ExplainStep {
+            stage: "http-pipeline".to_string(),
+            line: Some(item.source.line),
+            message: format!(
+                "{} [{}] {} ({})",
+                if matched { "matched" } else { "skipped" },
+                item.section,
+                action,
+                reason
+            ),
+        });
+    }
+    if steps.is_empty() {
+        steps.push(ExplainStep {
+            stage: "http-pipeline".to_string(),
+            line: None,
+            message: "No URL Rewrite, Map Local, Header Rewrite, or Script entries found"
+                .to_string(),
+        });
+    }
+    (traces, steps)
+}
+
+fn pipeline_entry_decision(
+    item: &RuntimeKeyValue,
+    request: &ExplainRequest,
+) -> (bool, String, String) {
+    let section = item.section.to_ascii_lowercase();
+    let content = runtime_item_content(item);
+    let pattern = pipeline_match_pattern(&section, item);
+    let matched = pattern
+        .as_deref()
+        .map(|pattern| url_pattern_matches(pattern, &request.url))
+        .unwrap_or(false);
+    let action = if item.key == "raw" {
+        content
+    } else {
+        format!("{} = {}", item.key, item.value)
+    };
+    let reason = match pattern {
+        Some(pattern) if matched => format!("pattern {pattern} matched {}", request.url),
+        Some(pattern) => format!("pattern {pattern} did not match {}", request.url),
+        None => "no URL pattern could be inferred in dry-run explain".to_string(),
+    };
+    (matched, action, reason)
+}
+
+fn pipeline_match_pattern(section: &str, item: &RuntimeKeyValue) -> Option<String> {
+    if section == "script" {
+        let content = runtime_item_content(item);
+        let fields: Vec<&str> = content.split_whitespace().collect();
+        if fields.len() >= 2 && fields[0].starts_with("http-") {
+            return Some(fields[1].to_string());
+        }
+    }
+    if item.key != "raw" {
+        return Some(item.key.clone());
+    }
+    runtime_item_content(item)
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+}
+
+fn runtime_item_content(item: &RuntimeKeyValue) -> String {
+    if item.key == "raw" {
+        item.value.clone()
+    } else {
+        format!("{} = {}", item.key, item.value)
+    }
+}
+
+fn url_pattern_matches(pattern: &str, url: &str) -> bool {
+    let trimmed = trim_profile_token(pattern);
+    if trimmed.is_empty() {
+        return false;
+    }
+    Regex::new(trimmed)
+        .map(|regex| regex.is_match(url))
+        .unwrap_or_else(|_| url.contains(trimmed))
+}
+
+fn split_profile_list(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(trim_profile_list_item)
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+fn mitm_pattern(raw_pattern: &str) -> (bool, &str) {
+    let pattern = raw_pattern.trim();
+    if let Some(rest) = pattern.strip_prefix('-') {
+        return (true, rest.trim());
+    }
+    if let Some(rest) = pattern.strip_prefix('!') {
+        return (true, rest.trim());
+    }
+    (false, pattern)
+}
+
+fn host_pattern_matches(pattern: &str, host: &str) -> bool {
+    let pattern = trim_profile_token(pattern).to_ascii_lowercase();
+    let host = host.to_ascii_lowercase();
+    if pattern == "*" {
+        return true;
+    }
+    if let Some(suffix) = pattern.strip_prefix("*.") {
+        return host.ends_with(&format!(".{suffix}"));
+    }
+    if let Some(suffix) = pattern.strip_prefix('.') {
+        return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+    host == pattern
+}
+
+fn trim_profile_token(value: &str) -> &str {
+    value.trim().trim_matches('"').trim_matches('\'').trim()
+}
+
+fn trim_profile_list_item(mut value: &str) -> &str {
+    value = trim_profile_token(value);
+    loop {
+        let trimmed = value.trim_start();
+        if !trimmed.starts_with('%') {
+            return trim_profile_token(trimmed);
+        }
+        let Some(end) = trimmed[1..].find('%') else {
+            return "";
+        };
+        value = &trimmed[end + 2..];
+    }
 }
 
 fn iter_rules(document: &ProfileDocument) -> impl Iterator<Item = &RuleNode> {
@@ -2707,6 +3093,90 @@ FINAL,DIRECT
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "surge.policy.cycle"));
+    }
+
+    #[test]
+    fn explain_reports_dns_mitm_and_http_pipeline_decisions() {
+        let document = parse_surge_profile(
+            r#"
+[General]
+dns-server = 8.8.8.8
+[Host]
+api.hosted.example = 203.0.113.10
+[MITM]
+hostname = %APPEND% *.example.com, -private.example.com
+[URL Rewrite]
+^https://rewrite\.example/path https://target.example/path 302
+[Map Local]
+^https://assets\.example/app\.js data/app.js
+[Header Rewrite]
+^https://headers\.example header-replace User-Agent Bifrost
+[Script]
+http-response ^https://script\.example script-path=scripts/response.js
+[Rule]
+DOMAIN,api.hosted.example,DIRECT
+DOMAIN,rewrite.example,DIRECT
+DOMAIN,assets.example,DIRECT
+DOMAIN,headers.example,DIRECT
+DOMAIN,script.example,DIRECT
+DOMAIN,private.example.com,DIRECT
+DOMAIN-SUFFIX,example.com,DIRECT
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        assert!(resolved
+            .runtime_plan
+            .http_pipeline
+            .iter()
+            .any(|item| item.section == "URL Rewrite" && item.key == "raw"));
+
+        let dns_report = explain_surge_request_with_plan(
+            &resolved.runtime_plan,
+            "https://api.hosted.example/path",
+        )
+        .unwrap();
+        assert_eq!(
+            dns_report.dns_decision.matched_host_mapping.as_deref(),
+            Some("Host mapping api.hosted.example -> 203.0.113.10")
+        );
+
+        let mitm_report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://sub.example.com/path")
+                .unwrap();
+        assert!(mitm_report.mitm_decision.included);
+        assert!(mitm_report
+            .mitm_decision
+            .matched_patterns
+            .contains(&"*.example.com".to_string()));
+
+        let excluded_report = explain_surge_request_with_plan(
+            &resolved.runtime_plan,
+            "https://private.example.com/path",
+        )
+        .unwrap();
+        assert!(excluded_report.mitm_decision.excluded);
+        assert!(excluded_report
+            .mitm_decision
+            .reason
+            .contains("excluded from MITM"));
+
+        let rewrite_report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://rewrite.example/path")
+                .unwrap();
+        assert!(rewrite_report
+            .http_pipeline
+            .iter()
+            .any(|entry| entry.section == "URL Rewrite" && entry.matched));
+
+        let script_report =
+            explain_surge_request_with_plan(&resolved.runtime_plan, "https://script.example/path")
+                .unwrap();
+        assert!(script_report
+            .http_pipeline
+            .iter()
+            .any(|entry| entry.section == "Script" && entry.matched));
     }
 
     fn start_http_fixture(
