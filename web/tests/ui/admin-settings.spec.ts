@@ -341,12 +341,6 @@ test("Certificate iOS Configurator 缺失时在禁用按钮旁显示安装入口
         },
         ios_profile_url: "/_bifrost/public/mobileconfig/ios",
         ios_profile_qrcode_url: "/_bifrost/public/mobileconfig/ios/qrcode",
-        ios_wifi_proxy_profile_url: "/_bifrost/public/mobileconfig/ios-wifi-proxy",
-        ios_wifi_proxy_profile_qrcode_url:
-          "/_bifrost/public/mobileconfig/ios-wifi-proxy/qrcode",
-        suggested_wifi_ssid: null,
-        suggested_wifi_ssid_message:
-          "Not detected. Enter the exact Wi-Fi name shown on the iPhone.",
         ordinary_device_notice: "Ordinary devices require manual confirmation.",
         managed_device_notice:
           "Managed devices can support automatic trust through Configurator or MDM.",
@@ -359,13 +353,13 @@ test("Certificate iOS Configurator 缺失时在禁用按钮旁显示安装入口
   await expect(page.getByTestId("settings-certificate-tab")).toBeVisible();
   await expect(page.locator("body")).toContainText("Detected 1 iOS USB device(s).");
   await expect(page.getByTestId("settings-mobile-install-ios-configurator")).toBeDisabled();
-  await expect(page.getByTestId("settings-mobile-install-ios-proxy-config")).toBeDisabled();
+  await expect(page.getByTestId("settings-mobile-install-ios-proxy-config")).toHaveCount(0);
   await expect(page.getByTestId("settings-mobile-ios-configurator-missing")).toContainText(
-    "The Configurator buttons stay disabled",
+    "The Configurator button stays disabled",
   );
   await expect(
     page.getByTestId("settings-mobile-ios-configurator-disabled-reason"),
-  ).toContainText("Both Configurator buttons are disabled because cfgutil is not installed");
+  ).toContainText("Configurator install is disabled because cfgutil is not installed");
 
   const appStoreHref = await page
     .getByTestId("settings-mobile-ios-configurator-app-store")

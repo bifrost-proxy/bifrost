@@ -266,8 +266,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
             },
         ),
         TestCase::standalone(
-            "admin_public_ios_wifi_proxy_mobileconfig_contains_proxy_payload",
-            "Validate public iOS Wi-Fi proxy mobileconfig and QR endpoints are available without auth and include CA plus proxy payloads",
+            "admin_public_ios_wifi_proxy_mobileconfig_removed",
+            "Validate experimental public iOS Wi-Fi proxy mobileconfig and QR endpoints are removed",
             "admin",
             || async move {
                 let port = pick_unused_port()?;
@@ -281,71 +281,25 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .no_proxy()
                     .build()
                     .map_err(|e| format!("Failed to create client: {}", e))?;
-                let ssid = "Bifrost Test Wi-Fi";
-                let encoded_ssid = urlencoding::encode(ssid);
-
                 let profile_response = client
                     .get(format!(
-                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
-                        port, encoded_ssid, port
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid=Bifrost&ip=127.0.0.1&port={}",
+                        port, port
                     ))
                     .send()
                     .await
                     .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig failed: {}", e))?;
-
-                assert_status(&profile_response, 200)?;
-                assert_header_contains(
-                    &profile_response,
-                    "content-type",
-                    "application/x-apple-aspen-config",
-                )?;
-                let profile = profile_response
-                    .text()
-                    .await
-                    .map_err(|e| format!("Failed to read iOS Wi-Fi proxy mobileconfig body: {}", e))?;
-                for expected in [
-                    "com.apple.security.root",
-                    "com.apple.wifi.managed",
-                    "SSID_STR",
-                    ssid,
-                    "ProxyType",
-                    "Manual",
-                    "ProxyServer",
-                    "127.0.0.1",
-                    "ProxyServerPort",
-                    &port.to_string(),
-                ] {
-                    if !profile.contains(expected) {
-                        return Err(format!(
-                            "Expected iOS Wi-Fi proxy profile to contain {expected:?}, got: {profile}"
-                        ));
-                    }
-                }
+                assert_status(&profile_response, 404)?;
 
                 let qrcode_response = client
                     .get(format!(
-                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid={}&ip=127.0.0.1&port={}",
-                        port, encoded_ssid, port
+                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid=Bifrost&ip=127.0.0.1&port={}",
+                        port, port
                     ))
                     .send()
                     .await
                     .map_err(|e| format!("GET iOS Wi-Fi proxy mobileconfig QR failed: {}", e))?;
-                assert_status(&qrcode_response, 200)?;
-                assert_header_contains(&qrcode_response, "content-type", "image/svg+xml")?;
-
-                let wrong_port_response = client
-                    .get(format!(
-                        "http://127.0.0.1:{}/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid={}&ip=127.0.0.1&port={}",
-                        port,
-                        encoded_ssid,
-                        port + 1
-                    ))
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        format!("GET iOS Wi-Fi proxy mobileconfig with wrong port failed: {}", e)
-                    })?;
-                assert_status(&wrong_port_response, 400)?;
+                assert_status(&qrcode_response, 404)?;
                 Ok(())
             },
         ),
@@ -425,30 +379,6 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 let device_a = "e2e-ios-device";
                 let device_b = "e2e-android-device";
 
-                let update_response = client
-                    .patch(format!(
-                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
-                        port, session_id
-                    ))
-                    .json(&serde_json::json!({ "wifiSsid": "Office Wi-Fi" }))
-                    .send()
-                    .await
-                    .map_err(|e| format!("PATCH trust probe session failed: {}", e))?;
-                assert_status(&update_response, 200)?;
-                let updated_session: serde_json::Value = update_response
-                    .json()
-                    .await
-                    .map_err(|e| format!("Failed to parse updated trust probe session: {}", e))?;
-                if updated_session
-                    .get("suggestedWifiSsid")
-                    .and_then(|value| value.as_str())
-                    != Some("Office Wi-Fi")
-                {
-                    return Err(format!(
-                        "Expected updated suggestedWifiSsid, got: {updated_session}"
-                    ));
-                }
-
                 let public_session_response = client
                     .get(format!(
                         "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?deviceId={device_a}"
@@ -461,14 +391,8 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     .json()
                     .await
                     .map_err(|e| format!("Failed to parse public trust probe session: {}", e))?;
-                if public_session
-                    .get("suggestedWifiSsid")
-                    .and_then(|value| value.as_str())
-                    != Some("Office Wi-Fi")
-                {
-                    return Err(format!(
-                        "Expected public session to expose updated Wi-Fi name, got: {public_session}"
-                    ));
+                if public_session.get("suggestedWifiSsid").is_some() {
+                    return Err(format!("Public session still exposes removed Wi-Fi name field: {public_session}"));
                 }
 
                 let landing_response = client
@@ -487,24 +411,31 @@ pub fn get_all_tests() -> Vec<TestCase> {
                     || !landing_html.contains("proxyAccessUrl")
                     || !landing_html.contains("proxyConfiguredUrl")
                     || !landing_html.contains("checkProxyConfiguration")
+                    || !landing_html.contains("setProxyConfiguredState")
+                    || !landing_html.contains("showProxyConfigurationResult")
                     || !landing_html.contains("runProbeLoop")
                     || !landing_html.contains("copyProxyAddress")
-                    || !landing_html.contains("iOS Proxy Setup")
-                    || !landing_html.contains("iosWifiProxyProfileUrl")
                     || !landing_html.contains("sessionPublicUrl")
                     || !landing_html.contains("bifrostAvailabilityDeviceId")
                     || !landing_html.contains("deviceId")
                     || !landing_html.contains("withDevice")
-                    || !landing_html.contains("Download Experimental Wi-Fi Proxy Profile")
-                    || !landing_html.contains("managedWifiRiskAccepted")
-                    || !landing_html.contains("suggestedWifiSsid")
-                    || !landing_html.contains("Wi-Fi name for this check")
-                    || !landing_html.contains("Experimental managed Wi-Fi profile")
-                    || !landing_html.contains("Manual Wi-Fi proxy setup is the safe cleanup path")
                     || !landing_html.contains("isTrustProbeProxyBypassRequired")
                     || !landing_html.contains("trust_probe_must_bypass_proxy")
-                    || !landing_html.contains("Proxy path detected.")
-                    || !landing_html.contains("Bifrost will still validate CA trust with the HTTPS probe.")
+                    || landing_html.contains("Proxy path detected.")
+                    || landing_html.contains("Checking browser HTTPS probe")
+                    || landing_html.contains("iOS Proxy Setup")
+                    || landing_html.contains("iosWifiProxyProfileUrl")
+                    || landing_html.contains("ios-wifi-proxy")
+                    || landing_html.contains("Download Experimental Wi-Fi Proxy Profile")
+                    || landing_html.contains("managedWifiRiskAccepted")
+                    || landing_html.contains("suggestedWifiSsid")
+                    || landing_html.contains("Wi-Fi name for this check")
+                    || landing_html.contains("Experimental managed Wi-Fi profile")
+                    || landing_html
+                        .contains("Bifrost will still validate CA trust with the HTTPS probe.")
+                    || landing_html.contains(
+                        "Checking whether this browser is actually using the Bifrost proxy...",
+                    )
                 {
                     return Err(format!("Unexpected trust probe landing page: {landing_html}"));
                 }
@@ -728,6 +659,15 @@ pub fn get_all_tests() -> Vec<TestCase> {
                         "Expected first device TLS trust success, got: {device_a_status}"
                     ));
                 }
+                if device_a_status
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(true)
+                {
+                    return Err(format!(
+                        "Expected first device proxy configured, got: {device_a_status}"
+                    ));
+                }
                 let device_b_status = devices
                     .iter()
                     .find(|device| {
@@ -741,6 +681,104 @@ pub fn get_all_tests() -> Vec<TestCase> {
                 {
                     return Err(format!(
                         "Expected second device platform hint, got: {device_b_status}"
+                    ));
+                }
+
+                let proxy_missing_report = client
+                    .post(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/report?deviceId={device_a}"
+                    ))
+                    .json(&serde_json::json!({
+                        "type": "proxy_config_failed",
+                        "deviceId": device_a,
+                        "message": "This browser did not reach Bifrost through the proxy.",
+                        "userAgent": "Bifrost E2E iOS Safari",
+                        "platformHint": "ios safari"
+                    }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("POST proxy missing report failed: {}", e))?;
+                assert_status(&proxy_missing_report, 200)?;
+
+                let public_session_after_proxy_removed = client
+                    .get(format!(
+                        "http://127.0.0.1:{port}/_bifrost/public/trust-probe/{session_id}/session?deviceId={device_a}"
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        format!("GET public trust probe session after proxy removal failed: {e}")
+                    })?;
+                assert_status(&public_session_after_proxy_removed, 200)?;
+                let public_session_after_proxy_removed: serde_json::Value =
+                    public_session_after_proxy_removed.json().await.map_err(|e| {
+                        format!("Failed to parse public session after proxy removal: {e}")
+                    })?;
+                if public_session_after_proxy_removed
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(false)
+                {
+                    return Err(format!(
+                        "Expected public session proxyConfigured=false after removal, got: {public_session_after_proxy_removed}"
+                    ));
+                }
+                if !public_session_after_proxy_removed
+                    .get("proxyConfigurationMessage")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or_default()
+                    .contains("did not reach Bifrost through the proxy")
+                {
+                    return Err(format!(
+                        "Expected public session proxy removal message, got: {public_session_after_proxy_removed}"
+                    ));
+                }
+
+                let status_after_proxy_removed = client
+                    .get(format!(
+                        "http://127.0.0.1:{}/_bifrost/api/trust-probe/sessions/{}",
+                        port, session_id
+                    ))
+                    .send()
+                    .await
+                    .map_err(|e| {
+                        format!("GET trust probe session after proxy removal failed: {e}")
+                    })?;
+                assert_status(&status_after_proxy_removed, 200)?;
+                let status_after_proxy_removed: serde_json::Value =
+                    status_after_proxy_removed.json().await.map_err(|e| {
+                        format!("Failed to parse status after proxy removal: {e}")
+                    })?;
+                if status_after_proxy_removed
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(false)
+                {
+                    return Err(format!(
+                        "Expected admin proxyConfigured=false after removal, got: {status_after_proxy_removed}"
+                    ));
+                }
+                let device_a_after_proxy_removed = status_after_proxy_removed
+                    .get("devices")
+                    .and_then(|value| value.as_array())
+                    .and_then(|devices| {
+                        devices.iter().find(|device| {
+                            device.get("deviceId").and_then(|value| value.as_str())
+                                == Some(device_a)
+                        })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "Missing first device after proxy removal: {status_after_proxy_removed}"
+                        )
+                    })?;
+                if device_a_after_proxy_removed
+                    .get("proxyConfigured")
+                    .and_then(|value| value.as_bool())
+                    != Some(false)
+                {
+                    return Err(format!(
+                        "Expected first device proxyConfigured=false after removal, got: {device_a_after_proxy_removed}"
                     ));
                 }
                 Ok(())

@@ -194,7 +194,7 @@
 - iPhone/iPad 区域先展示 `iOS uses one shared install and trust flow`，并明确四步：送达 profile、在 Settings 安装 profile、进入 `Settings > General > About > Certificate Trust Settings`、开启 Bifrost CA 完全信任。
 - iPhone/iPad 区域随后展示 `1. Choose how to send the profile`。
 - 送达方式里展示 `Send profile with Apple Configurator`，并显示每台设备的 `Configurator Install` 按钮。
-- iOS 设备列表中，设备名称、状态、ID、ECID 和说明文字应占满列表主体宽度；`Configurator Install` 与 `Proxy Config` 按钮位于设备详情下方并竖向排列，不挤在右侧 actions 栏导致文字被压窄。
+- iOS 设备列表中，设备名称、状态、ID、ECID 和说明文字应占满列表主体宽度；`Configurator Install` 按钮位于设备详情下方，不挤在右侧 actions 栏导致文字被压窄。
 - 送达方式里也展示 `Or send profile manually with QR or file`、`ios_qr_1`、`ios_qr_2`、`Download iOS Profile` 按钮和 profile QR。
 - iPhone/iPad 区域在送达方式之后展示 `2. Finish the shared iOS Settings steps` 图文步骤。
 - 页面说明明确表达：Apple Configurator 和扫码/文件安装只是把 profile 送到 iPhone；profile 到达后仍要按同一套 Settings 安装和信任步骤继续。
@@ -358,7 +358,7 @@
 
 1. 打开 `http://127.0.0.1:8800/_bifrost/settings?tab=certificate`。
 2. 查看 `iPhone and iPad` 区域中的统一流程、Configurator 送达方式、扫码/文件送达方式和共享 Settings 步骤。
-3. 若当前 Mac 未安装 Apple Configurator/cfgutil，检查 `Configurator Install` 与 `Proxy Config` 按钮状态、按钮附近的禁用原因，以及 Apple Configurator 安装入口。
+3. 若当前 Mac 未安装 Apple Configurator/cfgutil，检查 `Configurator Install` 按钮状态、按钮附近的禁用原因，以及 Apple Configurator 安装入口。
 4. 若当前 Mac 已安装 Apple Configurator/cfgutil 且只连接一台 iPhone/iPad，点击 `Configurator Install`。
 
 **预期结果**：
@@ -369,7 +369,7 @@
 - 手动扫码送达方式展示 `ios_qr_1` 和 `ios_qr_2` 两张图文步骤：相机扫 LAN QR 并点击黄色链接、允许下载 configuration profile。
 - 页面在送达方式之后展示 `2. Finish the shared iOS Settings steps`，让用户继续同一套 iOS 设置流程。
 - 页面没有把 Configurator 和手动扫码拆成互相割裂的两套安装模式；两者都指向同一套 Settings 安装和信任步骤。
-- 未安装 cfgutil 时，页面在 Configurator 区域和设备按钮附近都提示按钮因缺少 `cfgutil` 被禁用，`Configurator Install` 和 `Proxy Config` 按钮禁用。
+- 未安装 cfgutil 时，页面在 Configurator 区域和设备按钮附近都提示按钮因缺少 `cfgutil` 被禁用，`Configurator Install` 按钮禁用。
 - 未安装 cfgutil 时，页面提供 `Open Apple Configurator in the Mac App Store` 入口；点击后由 macOS/App Store 处理打开确认，Bifrost 不静默安装 App Store 应用。若安装 Apple Configurator 后仍缺少 `cfgutil`，页面文案提示在 Apple Configurator 中安装 Automation Tools。
 - 安装 cfgutil 且只连接一台 iOS 设备时，按钮可点击；点击后由本地 API 发起 `managed_auto_trust` 安装请求。
 - 未监督设备相关文案提示仍可能需要 Trust、解锁或屏幕确认。
@@ -443,7 +443,9 @@
 4. 使用目标手机扫码打开 HTTP landing page；如果当前电脑存在多个局域网 IP 且默认二维码 IP 无法连接，手动把 URL host 换成另一个同网段 IP 再打开同一路径。
 5. 在手机页面等待检测完成；如失败，按手机页面的 iOS/Android 下一步提示安装并信任 CA 后点击 Retry。
 6. 在电脑管理端观察 Availability Check 实时状态。
-7. 自动化验证可执行：
+7. 在手机上配置 Wi-Fi HTTP Proxy 指向页面顶部显示的 `<host>:<adminPort>`，等待手机页显示 `Proxy is configured`，同时观察管理端 `Connected devices` 中对应设备的代理标签自动变为 `Proxy configured` 或 `Proxy config detected`，期间不要刷新管理端页面。
+8. 保持手机页打开，在手机 Wi-Fi 设置中把 HTTP Proxy 改回 Off 或移除代理，回到手机页等待下一轮自动检查；期间不要手动刷新手机页或管理端页面。
+9. 自动化验证可执行：
    ```bash
    cargo run -p bifrost-e2e -- --test admin_trust_probe_verifies_https_trust_with_current_ca --test-timeout 120
    ```
@@ -453,24 +455,20 @@
 - 管理端生成二维码后不再展示 session 聚合状态条；扫码后的检测结果集中在 `Connected devices` 列表中按设备展示 `Page`、`Network`、`Browser HTTPS`、`Access`、`Proxy` 状态。
 - Certificate 页 Availability Check 卡片顶部直接展示当前已连接、需要做可用性检查的移动设备；每台设备显示自定义名称或 ID、iOS/Android 平台、连接状态和 CA 状态。这个目标设备列表不需要等手机扫码后才出现。
 - 手机页标题为 `Bifrost Availability Check`，并显示代理访问授权检查结果。
-- 手机页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`。默认情况下该值与管理端 Availability Check 选择的局域网 IP 和 Bifrost 代理端口一致；如果目标手机实际是用另一个可连通 LAN IP 打开同一个可用性页面，则手机页顶部、复制按钮、公开 proxy QR 和 iOS Wi-Fi proxy profile 下载链接都必须推荐当前页面 URL 中的 IP。
+- 手机页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`。默认情况下该值与管理端 Availability Check 选择的局域网 IP 和 Bifrost 代理端口一致；如果目标手机实际是用另一个可连通 LAN IP 打开同一个可用性页面，则手机页顶部、复制按钮和公开 proxy QR 都必须推荐当前页面 URL 中的 IP。
 - 手机页显示代理配置检查结果：已配置代理时显示 `Proxy is configured`；未配置代理时显示 `Proxy is not configured yet`。
 - 手机页每秒自动重跑代理授权、probe 端口、浏览器 HTTPS probe 和代理配置检测；完成浏览器 CA 信任、管理端授权或 Wi-Fi 代理配置后，手机页和管理端状态应自动更新，不需要手动刷新页面。
-- 手机页代理未配置时优先提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；实验 profile 入口放在手动步骤之后。
-- 手机页和管理端说明 Wi-Fi Proxy Profile 不包含 Wi-Fi 密码或入网凭据，但它是 managed Wi-Fi 配置，卸载 profile 可能移除对应 Wi-Fi 网络条目；安装过程中不应该要求用户输入 Wi-Fi 密码。
-- 只有 iOS 设备且代理尚未配置时，手机页才展示 `iOS Wi-Fi Proxy Profile` 工具区；该工具区优先显示 Bifrost 服务端下发的 Wi-Fi 名称，若服务端未检测到 Wi-Fi 名称，页面展示 Wi-Fi 名称输入框，用户输入当前 iPhone Wi-Fi 名并点击 `Use this Wi-Fi name` 后，下载按钮变为可用。
-- 当手机页检测到代理已经配置完成后，`iOS Wi-Fi Proxy Profile` 工具区隐藏；非 iOS 设备打开同一个公开 Availability Check 页面时也不展示该 iOS 专用工具区。
-- 手机页下载实验 Wi-Fi proxy profile 前必须勾选“removing this profile may remove this Wi-Fi entry”风险确认；未勾选时下载链接保持禁用。
-- 管理端 Availability Check 卡片包含 `Wi-Fi name for iOS proxy profile` 输入框；输入 Wi-Fi 名并点击 `Send Wi-Fi Name` 后，管理端通过 `trust_probe` push 更新当前 session，手机公开页在下一次公开页自检循环中同步更新 Wi-Fi 名和下载链接。
-- 管理端顶部 Availability Check、Certificate 页 iOS 区块、手机公开检测页的 Wi-Fi 名称配置区域下方，都直接展示 `Experimental managed Wi-Fi profile` 风险说明；说明必须写清 profile 不包含 Wi-Fi 密码，但卸载 profile 可能移除 iOS managed Wi-Fi 网络条目。
-- 在任意 Availability Check 卡片或 iOS 区块保存 Wi-Fi 名称后，其他已打开的 Availability Check 卡片和对应手机公开页会收到同一 SSID。
-- 手机页输入 Wi-Fi 名后会通过公开 `report` 写回同一个 session；管理端通过 `trust_probe` push 能看到 `wifi_ssid_updated` 事件和最新 Wi-Fi 名。
+- 手机页自动重跑时，请求发起前和请求进行中不得把已展示结论改回 `Checking...` 或反复重建同一区域；如果连续返回同一个代理配置结果，页面不应出现肉眼可见的闪烁、抖动或布局跳动。只有最终结果从未配置变为已配置、或从已配置变为未配置时，才更新代理配置区。
+- 手机页代理未配置时只提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写 Bifrost `host:port` 后重试；不展示实验 profile 入口。
+- 手机页和管理端都不再展示 Wi-Fi Proxy Profile、Wi-Fi 名称输入、managed Wi-Fi 风险确认或 `Send Wi-Fi Name`。
+- `/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig` 及其 QR endpoint 返回 404，不再生成或下发 managed Wi-Fi profile。
 - Availability Check 链接是固定 URL，不包含 `?t=<token>`；二维码内容也指向同一个固定 URL。手机页使用 `localStorage.bifrostAvailabilityDeviceId` 识别同一浏览器设备，刷新页面后仍归到同一台设备。
 - Certificate 页从 `localhost` 打开时，二维码图片本身必须通过当前 WebUI same-origin 路径加载；即使系统代理指向另一个 Bifrost 端口且未 bypass `10.x` LAN 地址，二维码也不能因为图片请求走代理而消失。二维码编码的目标 URL 仍然是局域网公开检测页。
 - 创建 session 或管理端 HEAD 探活不会提前占用 probe 端口；目标设备 GET 打开公开 Availability Check landing page 后，Bifrost 才按需监听该 session 的实际 `probePort`。本机 `127.0.0.1` 预览和 LAN IP 手机检查不能互相关闭对方的 probe listener。
 - 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示扫码后进入检测页的 `Connected devices` live status 列表，每台浏览器设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、浏览器 HTTPS probe、代理授权和代理配置状态。
 - 手机打开 HTTP landing page 后，管理端 `Connected devices` 中该设备的 `Page` 状态变为 `Page opened`。
 - 手机浏览器通过已配置代理访问专用 `.invalid` 探针 URL 后，管理端显示 `Proxy config detected`。
+- 手机浏览器代理配置成功后，管理端 `Connected devices` 不需要刷新页面即可显示对应设备；如果随后在手机上关闭 Wi-Fi 代理，手机页必须自动回落到 `Proxy is not configured yet`，管理端同一设备的代理标签也必须自动从 configured 回落为 missing/未配置状态，不能一直停留在 `Proxy configured`。
 - 手机能访问 probe 端口时，管理端显示 `Probe port reachable`。
 - 手机浏览器 HTTPS probe 成功时，管理端显示 `Browser HTTPS passed`，并展示代理地址 `<host>:<adminPort>` 和 proxy QR 链接；该通过态只代表当前浏览器完成直连 HTTPS probe，不代表 Android 已为所有 App 安装或信任 Bifrost CA。
 - 手机页成功后展示的代理地址是可点击复制的按钮，点击后显示 `Copied` 或清晰提示手动复制。
@@ -480,7 +478,7 @@
 - 如果 landing page 能打开但 probe 端口不可达，管理端显示 `Probe unreachable`，并提示检查防火墙、局域网隔离和 IP 选择。
 - 成功文案不承诺所有 App 都能被解密，只说明当前设备浏览器 TLS 链路已完成 Bifrost HTTPS probe。
 - 自动化 E2E 使用当前 Bifrost CA 作为 root CA 直连 HTTPS check，并断言 session 最终为 `tls_trusted`。
-- 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 最终包含 `proxyConfigured=true`；同一代理客户端携带当前 Bifrost CA 后访问 HTTPS trust probe 应返回 200，证明代理配置完成后仍能把证书检查推进为绿色。
+- 自动化 E2E 使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，并断言 session 包含 `proxyConfigured=true`；同一代理客户端携带当前 Bifrost CA 后访问 HTTPS trust probe 应返回 200，证明代理配置完成后仍能把证书检查推进为绿色；随后模拟同一 `deviceId` 上报 `proxy_config_failed`，断言手机 public session 和管理端 session 都回落为 `proxyConfigured=false`。
 - 自动化 E2E 使用两个不同 `deviceId` 模拟两台移动设备：第一台完成 netcheck、浏览器 HTTPS probe 和 proxy configured；第二台只上报页面打开和代理授权检查；最终断言 `GET /api/trust-probe/sessions/{id}` 返回至少两个 `devices[]` 条目，且两台设备状态互不覆盖。
 
 ### TC-MDT-16：Availability Check 公开入口和代理授权检查不被访问控制误拦截
@@ -528,39 +526,60 @@
 - 弹窗不展示 Availability Check 二维码、链接、Wi-Fi 名称输入或 managed Wi-Fi profile 风险说明；用户排障时应进入 Certificate 页顶部 Availability Check 卡片。
 - `Allow` / `Deny` 操作直接可见；审批后 pending 列表正常刷新。
 
-### TC-MDT-18：iOS Wi-Fi Proxy Profile POC 支持扫码下载和 Configurator 直推
+### TC-MDT-18：实验性 iOS Wi-Fi Proxy Profile 已移除
 
 **操作步骤**：
 
 1. 启动 Bifrost，打开 `Settings > Certificate > iOS Mobile Installation`。
-2. 确认 `Wi-Fi network for proxy profile` 优先显示 Bifrost 自动检测到的当前 Wi-Fi 名称；若为空，在输入框里填写 iPhone 当前 Wi-Fi 名称。
-3. 在 `Proxy address` 选择当前电脑的局域网 IP。
-4. 执行公开 profile 下载验证：
+2. 检查 iOS 区域、设备列表、手动 profile 下载和 QR 区域。
+3. 打开 Certificate 页顶部 Availability Check 卡片，生成或复用一个检查链接。
+4. 在手机公开 Availability Check 页检查代理未配置提示。
+5. 执行旧公开 profile URL 回归验证：
    ```bash
-   curl -sS "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid=<SSID>&ip=127.0.0.1&port=8800" -o /tmp/bifrost-ios-wifi-proxy.mobileconfig
-   plutil -lint /tmp/bifrost-ios-wifi-proxy.mobileconfig
-   grep -E "com.apple.security.root|com.apple.wifi.managed|SSID_STR|ProxyType|ProxyServer|ProxyServerPort" /tmp/bifrost-ios-wifi-proxy.mobileconfig
-   curl -sS "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid=<SSID>&ip=127.0.0.1&port=8800" | head -5
+   curl -sS -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig?ssid=test&ip=127.0.0.1&port=8800"
+   curl -sS -o /dev/null -w "%{http_code}\n" "http://127.0.0.1:8800/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig/qrcode?ssid=test&ip=127.0.0.1&port=8800"
    ```
-5. 在页面点击 `Download iOS Wi-Fi Proxy Profile` 或扫描 Wi-Fi proxy profile QR，确认 iPhone 提示下载/安装 configuration profile。
-6. 连接 iPhone 到 Mac，点击 `Refresh Devices`，确认列表中显示目标 iPhone 的自定义名称、型号、ID 和 ECID。
-7. 点击该设备行的 `Proxy Config`。
-8. 如果 iPhone 弹出 profile 安装确认，在手机上完成安装。
-9. 如安装完成后 Availability Check 仍显示代理不可用，断开并重新连接 iPhone Wi-Fi，再重新运行 Availability Check。
 
 **预期结果**：
 
-- 公开 Wi-Fi proxy profile endpoint 不需要授权，返回 `application/x-apple-aspen-config`，`plutil -lint` 通过。
-- profile 同时包含 `com.apple.security.root` 和 `com.apple.wifi.managed`，Wi-Fi payload 包含 Bifrost 服务端检测或用户输入的 SSID、`ProxyType=Manual`、所选 `ProxyServer` 和 Bifrost 端口。
-- profile 不包含 `<key>Password</key>`、`<key>Passphrase</key>` 或其他 Wi-Fi 密码字段；描述文案明确说明不携带 Wi-Fi 密码或 join credentials，并提示卸载 profile 可能移除 managed Wi-Fi 网络条目。
-- Wi-Fi proxy profile QR 返回 `image/svg+xml`，不会出现 403 或二维码白屏。
-- `Wi-Fi network for proxy profile` 区域下方展示 `Experimental managed Wi-Fi profile` 风险说明；该说明和 Availability Check 卡片、手机公开页中的 Wi-Fi 名称配置风险说明保持一致。
-- `Proxy Config` 与 `Configurator Install` 并列展示；缺少 SSID、缺少 proxy address、未安装 cfgutil、设备未 connected 或未勾选 managed Wi-Fi 风险确认时按钮禁用；在管理端手动输入 SSID 并勾选风险确认后，相关下载入口和 `Proxy Config` 按钮恢复可用。
-- 点击 `Proxy Config` 后，Bifrost 使用该设备 ECID 定向下发 profile；如果 `cfgutil` 返回 Code 625 或需要用户交互，页面显示需要在 iPhone 上确认，而不是误报硬失败。
-- 手机确认安装后，Availability Check 能用于验证代理授权、probe 端口和 HTTPS 信任是否改善。
-- 手机确认安装代理 profile 后，重新打开 Availability Check，应优先观察 `Proxy config detected` 是否出现；如果仍为 missing，按页面提示断开/重连 Wi-Fi 或改用手动 Wi-Fi proxy 配置。
-- 如果普通 iPhone 不接受“同 SSID、无 Wi-Fi 密码、只写代理配置”的 profile、安装后不接管现有 Wi-Fi 代理，或卸载后移除 Wi-Fi 网络条目，记录为 POC 边界；默认推荐路径保持为手动 Wi-Fi proxy 设置。
+- iOS 区域不展示 `Wi-Fi network for proxy profile`、`Proxy address`、managed Wi-Fi 风险确认、`Download Experimental Wi-Fi Proxy Profile` 或实验 proxy QR。
+- iOS 设备列表不展示 `Proxy Config`；只保留普通 CA profile 的 `Configurator Install`。
+- Availability Check 卡片不展示 `Wi-Fi name for iOS proxy profile` 或 `Send Wi-Fi Name`。
+- 手机公开页不展示 `iOS Proxy Setup`、Wi-Fi 名称输入、managed Wi-Fi 风险确认或实验 profile 下载入口。
+- 旧 `ios-wifi-proxy.mobileconfig` 和 `ios-wifi-proxy.mobileconfig/qrcode` endpoint 都返回 404。
+- 代理未配置时，手机页只提示手动进入 iPhone `Settings > Wi-Fi > current network > Configure Proxy > Manual`，填写页面顶部显示的代理地址。
 
+### TC-MDT-18B：移除实验入口后公开页脚本、设备上报和复制按钮仍可用
+
+**操作步骤**：
+
+1. 使用临时数据目录启动 Bifrost，并打开局域网公开检查页：
+   ```bash
+   BIFROST_DATA_DIR=./.bifrost-mobile-test \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   cargo run --bin bifrost -- start -p 18894 --allow-lan --access-mode allow_all --no-system-proxy --no-tray --skip-cert-check
+   ```
+2. 在手机或真实浏览器打开：
+   ```text
+   http://<lan-ip>:18894/_bifrost/public/trust-probe
+   ```
+3. 等待 2 到 3 秒，观察手机页状态区。
+4. 在管理端 Certificate 页的 Availability Check 卡片观察 `Connected devices`。
+5. 点击手机页顶部 `Target proxy service` 中的 `<host>:<port>` 地址按钮，然后到手机设置或任意输入框中粘贴验证。
+6. 使用代理请求形态验证专用代理配置探针兼容性：
+   ```bash
+   curl -sS "http://<lan-ip>:18894/_bifrost/trust-probe/proxy-configured?sid=<sessionId>&deviceId=human-origin-form" \
+     -H 'Host: bifrost-proxy-check.invalid' -i
+   ```
+
+**预期结果**：
+
+- 手机公开页不再停留在 `Checking proxy access authorization...`、`Preparing trust check...` 和 `Proxy configuration result will appear here.` 初始占位；页面脚本应自动推进到代理授权、probe/HTTPS、代理配置等真实状态。
+- 浏览器控制台不出现 `ReferenceError: renderIosWifiProxyTools is not defined` 或其它启动阶段 JavaScript runtime error。
+- 手机打开页面后，管理端 `Connected devices` 无需刷新即可出现该设备，并显示 `Page opened`、`Access allowed/pending/denied`、`Network`、`Browser HTTPS` 和 `Proxy` 等设备级状态。
+- 点击顶部目标代理地址后，剪贴板中可粘贴出完整 `<host>:<port>`；如果浏览器或系统拒绝写入剪贴板，页面必须提示 `Copy failed; select the address manually`，不能假提示 `Copied`。
+- 专用 `.invalid` 代理配置探针无论以 absolute-form 请求进入，还是以 origin-form + `Host: bifrost-proxy-check.invalid` 进入，都返回 HTTP 200，并把对应设备状态更新为 proxy configured。
 
 ### TC-MDT-19：fake cfgutil 脚本关闭文件句柄后再执行
 
@@ -584,6 +603,5 @@ rm -rf ./.bifrost-mobile-test
 rm -rf ./.bifrost-mobile-cli-test
 rm -f /tmp/bifrost-ca.mobileconfig
 rm -f /tmp/bifrost-lan-ios.mobileconfig
-rm -f /tmp/bifrost-ios-wifi-proxy.mobileconfig
 rm -f /tmp/bifrost-fake-adb-single /tmp/bifrost-fake-adb-single.log /tmp/bifrost-fake-adb-multi
 ```
