@@ -3114,6 +3114,86 @@ FINAL,REJECT
     }
 
     #[test]
+    fn compile_resolved_surge_to_bifrost_rules_covers_policy_and_pattern_edges() {
+        let document = parse_surge_profile(
+            r#"
+[Proxy]
+OddProxy = shadowsocks, 127.0.0.1, 9000
+EmptyProxy = http, , 8080
+[Rule]
+DOMAIN-KEYWORD,foo.bar,DIRECT
+IP-CIDR,10.0.0.0/8,REJECT-DROP
+IP-CIDR6,2001:db8::/32,REJECT-TINYGIF
+DOMAIN,odd.example,OddProxy
+DOMAIN,empty.example,EmptyProxy
+DOMAIN,missing.example,MissingPolicy
+PROCESS-NAME,Notes,DIRECT
+DOMAIN,,DIRECT
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let compiled = compile_resolved_surge_to_bifrost_rules(&resolved);
+
+        assert!(compiled.content.contains("/.*foo\\.bar.*/ passthrough://"));
+        assert!(compiled.content.contains("10.0.0.0/8 statusCode://403"));
+        assert!(compiled.content.contains("2001:db8::/32 statusCode://403"));
+        assert!(compiled
+            .content
+            .contains("odd.example proxy://http://127.0.0.1:9000"));
+        assert!(compiled
+            .content
+            .contains("DOMAIN,empty.example,EmptyProxy -> EmptyProxy cannot be activated yet"));
+        assert!(compiled.content.contains(
+            "DOMAIN,missing.example,MissingPolicy -> MissingPolicy cannot be activated yet"
+        ));
+        assert!(compiled
+            .content
+            .contains("unsupported Surge rule PROCESS-NAME,Notes,DIRECT"));
+        assert!(compiled.content.contains("/.*/ passthrough://"));
+    }
+
+    #[test]
+    fn bifrost_rule_compiler_helpers_reject_empty_rule_values() {
+        let rule = RuntimeRule {
+            source: source_line("DOMAIN,,DIRECT", 7),
+            rule_type: "DOMAIN".to_string(),
+            value: Some(" ".to_string()),
+            policy: "DIRECT".to_string(),
+            parameters: Vec::new(),
+            origin: "unit".to_string(),
+        };
+
+        assert!(bifrost_patterns_for_surge_rule(&rule).is_none());
+        assert!(non_empty(" \t ").is_none());
+    }
+
+    #[test]
+    fn compile_resolved_surge_to_bifrost_rules_keeps_resource_audit_comments() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("rules.list"),
+            "DOMAIN-SUFFIX,resource.example\n",
+        )
+        .unwrap();
+        let document = parse_surge_profile(
+            "[Rule]\nRULE-SET,rules.list,DIRECT\nFINAL,DIRECT\n",
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, temp.path());
+        let compiled = compile_resolved_surge_to_bifrost_rules(&resolved);
+
+        assert!(compiled
+            .content
+            .contains("# resource line 2: RuleSet rules.list"));
+        assert!(compiled.content.contains("resource.example passthrough://"));
+        assert!(compiled
+            .content
+            .contains("*.resource.example passthrough://"));
+    }
+
+    #[test]
     fn managed_profile_url_uses_stale_cache_when_remote_is_unreachable() {
         let temp = tempfile::tempdir().unwrap();
         with_profile_cache_dir(temp.path().join("cache"), || {
