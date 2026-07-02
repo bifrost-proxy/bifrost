@@ -3082,8 +3082,8 @@ impl RemoteInvokeWorker {
             // PR #4c-2: register a session in the global ring so tee/resume can work.
             let _session_registered = session_ring::register_session_str(&cid);
 
-            let result = executor
-                .execute_with_stdout_sink(&command, stdin_rx, |chunk| {
+            let result = Box::pin(
+                executor.execute_with_stdout_sink(&command, stdin_rx, |chunk| {
                     let relay_client = Arc::clone(&relay_client);
                     let cid = cid.clone();
                     let instance_id = instance_id.clone();
@@ -3156,8 +3156,9 @@ impl RemoteInvokeWorker {
                         let (legacy_result, ()) = tokio::join!(legacy_fut, stream_fut);
                         legacy_result
                     }
-                })
-                .await;
+                }),
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             match result {

@@ -72,6 +72,15 @@ const SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL_ENV: &str =
 pub(crate) const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHILD";
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
+const BIFROST_RUNTIME_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+
+fn create_bifrost_runtime() -> bifrost_core::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(BIFROST_RUNTIME_WORKER_STACK_SIZE)
+        .build()
+        .map_err(|e| bifrost_core::BifrostError::Config(format!("Failed to create runtime: {e}")))
+}
 
 fn env_flag_enabled(value: Option<std::ffi::OsString>) -> bool {
     value
@@ -1842,9 +1851,7 @@ pub fn run_foreground(
     println!("────────────────────────────────────────────────────────────────────────");
     println!();
 
-    let rt = tokio::runtime::Runtime::new().map_err(|e| {
-        bifrost_core::BifrostError::Config(format!("Failed to create runtime: {}", e))
-    })?;
+    let rt = create_bifrost_runtime()?;
 
     let runtime_result = rt.block_on(async {
         let result: bifrost_core::Result<()> = async {
@@ -3028,9 +3035,7 @@ pub fn run_daemon(
                 cli_proxy_enabled = true;
             }
 
-            let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                bifrost_core::BifrostError::Config(format!("Failed to create runtime: {}", e))
-            })?;
+            let rt = create_bifrost_runtime()?;
 
             rt.block_on(async {
                 let pid = std::process::id();
