@@ -274,22 +274,31 @@ await client.send("Log.enable");
 await client.send("Page.enable");
 await client.send("Network.enable");
 
-for (let i = 0; i < 80; i += 1) {
-  const ready = await evaluate(client, "document.readyState");
-  if (ready === "complete") break;
+let before = null;
+for (let i = 0; i < 120; i += 1) {
+  before = await evaluate(client, `(() => ({
+    href: window.location.href,
+    ready: document.readyState,
+    title: document.querySelector('h1')?.textContent || '',
+    hasApply: Boolean(document.querySelector('#apply')),
+    hasHashInput: Boolean(document.querySelector('#confirmation')),
+    requiresHashText: document.body.innerText.includes('Type the full content hash to apply'),
+    applyDisabled: document.querySelector('#apply')?.disabled ?? null,
+    status: document.querySelector('#status')?.textContent || '',
+    body: document.body?.innerText || ''
+  }))()`);
+  if (
+    before.href.startsWith(confirmUrl) &&
+    before.title.includes("Apply Shared Bifrost Rule") &&
+    before.hasApply
+  ) {
+    break;
+  }
   await new Promise(resolve => setTimeout(resolve, 100));
 }
 
-const before = await evaluate(client, `(() => ({
-  title: document.querySelector('h1')?.textContent || '',
-  hasHashInput: Boolean(document.querySelector('#confirmation')),
-  requiresHashText: document.body.innerText.includes('Type the full content hash to apply'),
-  applyDisabled: document.querySelector('#apply')?.disabled ?? null,
-  status: document.querySelector('#status')?.textContent || ''
-}))()`);
-
 if (!before.title.includes("Apply Shared Bifrost Rule")) {
-  throw new Error(`unexpected confirmation title: ${before.title}`);
+  throw new Error(`unexpected confirmation title: ${before.title}; state=${JSON.stringify(before)}`);
 }
 if (before.hasHashInput || before.requiresHashText) {
   throw new Error(`confirmation page still asks for hash: ${JSON.stringify(before)}`);
