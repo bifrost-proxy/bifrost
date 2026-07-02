@@ -125,6 +125,23 @@
 - 不出现 `Cannot drop a runtime in a context where blocking is not allowed` panic。
 - 远程 URL 拉取不可达时按既有语义 fallback 为原始 URL 字面量。
 
+### TC-UTT-08：安装脚本无 CA 环境变量时不触发 `set -u` 空数组错误
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   bash e2e-tests/tests/test_install_binary_adaptive_download.sh
+   bash -n install-binary.sh
+   ```
+2. 观察 `visible curl progress`、`quiet race candidate progress` 等未配置 CA bundle 的 install-binary 测试路径。
+
+预期结果：
+
+- 两个命令均 0 退出。
+- 不出现 `curl_ca_args[@]: unbound variable`、`wget_ca_args[@]: unbound variable` 或 `aria2_ca_args[@]: unbound variable`。
+- 证明 GitHub mirror probe、latest redirect、API 和下载工具参数桥接在无自定义 CA 时仍兼容 macOS bash 3.2 / `set -u`。
+
 ## 清理步骤
 
 - `test_upgrade_tls_trust_e2e.sh` 通过 `trap` 自动停止本地 HTTPS mirror 并删除临时目录。
@@ -139,3 +156,4 @@
 | 2026-07-02 | TC-UTT-05 | 通过 | 执行外部 HTTPS 调用点 builder 扫描，`install_skill.rs` 命中 GitHub builder，Sync、AI provider、MCP OAuth、ASR/voice/IM/script/rule value 等路径命中 outbound builder。 |
 | 2026-07-02 | TC-UTT-06 | 通过 | 执行 `bash -n install-binary.sh` 与 CA/unsafe 参数扫描，脚本语法通过，curl/wget/aria2c/axel 相关下载/probe/API/redirect 路径包含 CA/unsafe 桥接参数。 |
 | 2026-07-02 | TC-UTT-07 | 通过 | 执行 `cargo test -p bifrost-core rule::value_source::tests::test_remote_url_fallback_inside_tokio_runtime_does_not_panic -- --nocapture` 与 `cargo test -p bifrost-e2e tests::request_modification::tests::test_combined -- --nocapture`，均通过；验证 URL 字面量规则在 async 代理路径中不会因 reqwest blocking runtime drop panic。 |
+| 2026-07-02 | TC-UTT-08 | 通过 | 远端 CI run `28563744504` 首次暴露 `install-binary.sh: line 584: curl_ca_args[@]: unbound variable` 后，修复 optional CA 参数空数组展开；本地执行 `bash e2e-tests/tests/test_install_binary_adaptive_download.sh` 输出 `Passed: 11`，并执行 `bash -n install-binary.sh` 通过。 |

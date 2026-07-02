@@ -97,7 +97,7 @@ GitHub/upgrade 链路按以下来源追加私有根证书：
 - `bifrost-admin` ASR、语音唤醒、diarization 模型下载，以及 IM gateway/ChatGPT Web/Feishu/Weixin 外部请求。
 - `bifrost-script` remote parser download 与 sandbox `net.fetch`。
 - `bifrost-core` 规则 value 的远程 URL 来源；同步规则解析路径通过独立线程执行 reqwest blocking 拉取，确保在代理 async runtime 内遇到不可达 URL 字面量时仍按既有语义 fallback，不触发 nested runtime drop panic。
-- `install-binary.sh` probe、latest redirect、GitHub API 查询和下载工具参数桥接。
+- `install-binary.sh` probe、latest redirect、GitHub API 查询和下载工具参数桥接；无自定义 CA 环境变量时，optional CA 参数数组必须兼容 macOS bash 3.2 / `set -u`。
 
 ## 测试方案
 
@@ -138,4 +138,5 @@ GitHub/upgrade 链路按以下来源追加私有根证书：
 - `cargo test -p bifrost-core version_check::tests::`
 - `cargo test -p bifrost-cli upgrade_ --lib`
 - `bash e2e-tests/tests/test_upgrade_tls_trust_e2e.sh`
+- `bash e2e-tests/tests/test_install_binary_adaptive_download.sh`
 - 按项目规则执行 human_tests、两轮 Review/Fix/Test、coverage/rust-project-validate、本地与远端 CI 看护。

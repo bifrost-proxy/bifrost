@@ -349,7 +349,7 @@ probe_github_url() {
         [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
         curl -fsSIL \
-            "${curl_ca_args[@]}" \
+            ${curl_ca_args[@]+"${curl_ca_args[@]}"} \
             --connect-timeout "$connect_timeout" \
             --max-time "$probe_timeout" \
             -o /dev/null \
@@ -362,7 +362,7 @@ probe_github_url() {
         [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
         wget -q --spider \
-            "${wget_ca_args[@]}" \
+            ${wget_ca_args[@]+"${wget_ca_args[@]}"} \
             --max-redirect=5 \
             --connect-timeout="$connect_timeout" \
             --timeout="$probe_timeout" \
@@ -529,7 +529,7 @@ download_with_tool() {
             aria2c --no-conf -x 16 -s 16 --max-connection-per-server=16 \
                    --min-split-size=1M --allow-overwrite=true \
                    "${aria2_summary_arg[@]}" \
-                   "${aria2_ca_args[@]}" \
+                   ${aria2_ca_args[@]+"${aria2_ca_args[@]}"} \
                    --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                    --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                    --max-tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -563,7 +563,7 @@ download_with_tool() {
             [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
             [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
             wget "${wget_progress_args[@]}" \
-                "${wget_ca_args[@]}" \
+                ${wget_ca_args[@]+"${wget_ca_args[@]}"} \
                 --connect-timeout="${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --timeout="${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --tries="${BIFROST_DOWNLOAD_TRIES:-2}" \
@@ -582,7 +582,7 @@ download_with_tool() {
             [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
             [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
             curl "${curl_progress_args[@]}" \
-                "${curl_ca_args[@]}" \
+                ${curl_ca_args[@]+"${curl_ca_args[@]}"} \
                 --connect-timeout "${BIFROST_DOWNLOAD_CONNECT_TIMEOUT:-10}" \
                 --max-time "${BIFROST_DOWNLOAD_TIMEOUT:-120}" \
                 --retry "$curl_retries" \
@@ -644,9 +644,9 @@ github_api_request() {
         [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            result=$(curl -sL "${curl_ca_args[@]}" --connect-timeout 10 --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(curl -sL ${curl_ca_args[@]+"${curl_ca_args[@]}"} --connect-timeout 10 --max-time 30 -H "Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         else
-            result=$(curl -sL "${curl_ca_args[@]}" --connect-timeout 10 --max-time 30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(curl -sL ${curl_ca_args[@]+"${curl_ca_args[@]}"} --connect-timeout 10 --max-time 30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         fi
     fi
 
@@ -656,9 +656,9 @@ github_api_request() {
         [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
         if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            result=$(wget -qO- "${wget_ca_args[@]}" --connect-timeout=10 --timeout=30 --header="Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(wget -qO- ${wget_ca_args[@]+"${wget_ca_args[@]}"} --connect-timeout=10 --timeout=30 --header="Authorization: token ${GITHUB_TOKEN}" "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         else
-            result=$(wget -qO- "${wget_ca_args[@]}" --connect-timeout=10 --timeout=30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
+            result=$(wget -qO- ${wget_ca_args[@]+"${wget_ca_args[@]}"} --connect-timeout=10 --timeout=30 "$url" 2>/dev/null) && [[ -n "$result" ]] && { echo "$result"; return 0; }
         fi
     fi
 
@@ -680,7 +680,7 @@ get_latest_version_via_redirect() {
         [[ -n "$ca_file" ]] && curl_ca_args+=(--cacert "$ca_file")
         [[ -n "$ca_dir" ]] && curl_ca_args+=(--capath "$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && curl_ca_args+=(--insecure)
-        location=$(curl -sI "${curl_ca_args[@]}" -o /dev/null -w '%{url_effective}' -L --connect-timeout 10 --max-time 20 "$redirect_url" 2>/dev/null) || location=""
+        location=$(curl -sI ${curl_ca_args[@]+"${curl_ca_args[@]}"} -o /dev/null -w '%{url_effective}' -L --connect-timeout 10 --max-time 20 "$redirect_url" 2>/dev/null) || location=""
     fi
 
     if [[ -z "$location" ]] && command -v wget &> /dev/null; then
@@ -688,7 +688,7 @@ get_latest_version_via_redirect() {
         [[ -n "$ca_file" ]] && wget_ca_args+=(--ca-certificate="$ca_file")
         [[ -n "$ca_dir" ]] && wget_ca_args+=(--ca-directory="$ca_dir")
         [[ "$unsafe_ssl" == "1" ]] && wget_ca_args+=(--no-check-certificate)
-        location=$(wget "${wget_ca_args[@]}" --spider -S --max-redirect=5 --connect-timeout=10 --timeout=20 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
+        location=$(wget ${wget_ca_args[@]+"${wget_ca_args[@]}"} --spider -S --max-redirect=5 --connect-timeout=10 --timeout=20 "$redirect_url" 2>&1 | grep -i 'Location:' | tail -1 | sed 's/.*Location:[[:space:]]*//' | sed 's/[[:space:]].*//' | tr -d '\r')
     fi
 
     if [[ -n "$location" ]]; then
