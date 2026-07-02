@@ -42,8 +42,9 @@ pub use interaction::{clear_session_conversation, session_conversation_exists};
 use interaction::{
     conversation_id_from_params, event, extract_text_parts, get_conversation_detail,
     is_transient_conversation_read_error, requested_or_session_conversation,
-    save_session_conversation, stop_requested, stopped_error, summarize_conversation_detail,
-    summarize_conversations, try_waited_final_from_sse, wait_final, WaitFinalOptions, WaitedFinal,
+    required_dom_terminal_idle_for, save_session_conversation, stop_requested, stopped_error,
+    summarize_conversation_detail, summarize_conversations, try_waited_final_from_sse, wait_final,
+    WaitFinalOptions, WaitedFinal,
 };
 use native::native_account_probe;
 use send::send_with_browser;
@@ -927,6 +928,7 @@ async fn run_authenticated_operation(
                     duration: Duration::from_secs(config.chatgpt.timeout_secs),
                     stop_marker_path,
                     profile_dir: Some(&config.profile_dir),
+                    terminal_idle_stable_for: required_dom_terminal_idle_for(false),
                 },
             )
             .await?;
@@ -971,6 +973,7 @@ async fn run_authenticated_operation(
                 response,
                 json!({
                     "operation": "wait",
+                    "conversationId": conversation_id,
                     "conversation": waited.summary,
                     "downloadedArtifacts": downloaded_artifacts,
                 }),
@@ -1112,6 +1115,7 @@ async fn run_authenticated_operation(
                             duration: Duration::from_secs(config.chatgpt.timeout_secs),
                             stop_marker_path,
                             profile_dir: Some(&config.profile_dir),
+                            terminal_idle_stable_for: required_dom_terminal_idle_for(false),
                         },
                     )
                     .await?;
@@ -1623,6 +1627,11 @@ async fn ask_send_and_wait(
             duration: Duration::from_secs(config.chatgpt.timeout_secs),
             stop_marker_path,
             profile_dir: Some(&config.profile_dir),
+            terminal_idle_stable_for: required_dom_terminal_idle_for(
+                send.event_types
+                    .iter()
+                    .any(|event_type| event_type == "stream_handoff"),
+            ),
         },
     )
     .await

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   encodePcm16Chunk,
+  hasRunningDailyAgent,
   resampleFloat32Linear,
   VOICE_REALTIME_SAMPLE_RATE,
 } from "./asrUtils";
@@ -28,5 +29,80 @@ describe("ASR realtime audio helpers", () => {
     const resampled = resampleFloat32Linear(samples, 48_000, VOICE_REALTIME_SAMPLE_RATE);
     expect(resampled.length).toBe(160);
     expect(encodePcm16Chunk(samples, 48_000).byteLength).toBe(160 * 2);
+  });
+});
+
+describe("Daily Agent status helpers", () => {
+  it("detects a running child agent even when the top-level run is stale", () => {
+    expect(
+      hasRunningDailyAgent(
+        {
+          last_status: "failed",
+          agents: [
+            {
+              id: "daily_report",
+              name: "daily_report",
+              enabled: true,
+              runner: "gpt",
+              timeout_ms: 1000,
+              trigger_policy: "manual_only",
+              instructions_source: "custom",
+              im_delivery: { enabled: false, mode: "full_report", send_policy: "always" },
+              output_dir: "daily_report",
+              last_status: "failed",
+            },
+            {
+              id: "tomorrow_todo",
+              name: "tomorrow_todo",
+              enabled: true,
+              runner: "gpt",
+              timeout_ms: 1000,
+              trigger_policy: "manual_only",
+              instructions_source: "custom",
+              im_delivery: { enabled: false, mode: "full_report", send_policy: "always" },
+              output_dir: "tomorrow_todo",
+              last_status: "running",
+            },
+          ],
+        },
+        "tomorrow_todo",
+      ),
+    ).toBe(true);
+  });
+
+  it("does not treat another running child agent as the selected agent running", () => {
+    expect(
+      hasRunningDailyAgent(
+        {
+          agents: [
+            {
+              id: "daily_report",
+              name: "daily_report",
+              enabled: true,
+              runner: "gpt",
+              timeout_ms: 1000,
+              trigger_policy: "manual_only",
+              instructions_source: "custom",
+              im_delivery: { enabled: false, mode: "full_report", send_policy: "always" },
+              output_dir: "daily_report",
+              last_status: "running",
+            },
+            {
+              id: "tomorrow_todo",
+              name: "tomorrow_todo",
+              enabled: true,
+              runner: "gpt",
+              timeout_ms: 1000,
+              trigger_policy: "manual_only",
+              instructions_source: "custom",
+              im_delivery: { enabled: false, mode: "full_report", send_policy: "always" },
+              output_dir: "tomorrow_todo",
+              last_status: "interrupted",
+            },
+          ],
+        },
+        "tomorrow_todo",
+      ),
+    ).toBe(false);
   });
 });

@@ -491,6 +491,62 @@ fn daily_agent_prompt_uses_file_list_for_file_capable_runners() {
 }
 
 #[test]
+fn daily_agent_chatgpt_web_tomorrow_todo_prompt_overrides_existing_source_date_heading() {
+    let _lock = TEST_DATA_DIR_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let temp = TempDir::new().unwrap();
+    let _guard = EnvGuard::set_data_dir(temp.path());
+    let audio_dir = temp.path().join("audio");
+    std::fs::create_dir_all(&audio_dir).unwrap();
+    let task = AsrDirectoryTask {
+        id: "daily-agent-tomorrow-prompt-task".to_string(),
+        name: "Daily Agent Tomorrow Prompt Task".to_string(),
+        audio_dir,
+        recursive: true,
+        enabled: true,
+        paused: false,
+        paused_at_ms: None,
+        schedule: AsrTaskSchedule::Hourly { minute: 0 },
+        language: "chinese".to_string(),
+        model: "Qwen3-ASR-1.7B".to_string(),
+        runtime_strategy: AsrRuntimeStrategy::ReusePerFile,
+        max_concurrent_files: default_max_concurrent_files(),
+        diarization: AsrDiarizationConfig::default(),
+        created_at_ms: 1,
+        updated_at_ms: 1,
+        last_run_at_ms: None,
+        next_run_at_ms: Some(1),
+        last_error: None,
+        daily_agent: AsrDailyAgentConfig {
+            agent_id: DEFAULT_TOMORROW_TODO_AGENT_ID.to_string(),
+            name: DEFAULT_TOMORROW_TODO_AGENT_NAME.to_string(),
+            output_dir: DEFAULT_TOMORROW_TODO_OUTPUT_DIR.to_string(),
+            ..AsrDailyAgentConfig::default()
+        },
+        external_devices: Vec::new(),
+        import_policy: AsrExternalImportPolicy::default(),
+    };
+    ensure_asr_daily_workspace(&task).unwrap();
+    let daily_dir = daily_dir_for_task(&task.id);
+    std::fs::write(daily_dir.join("2026-06-15.md"), "今日转写里有明天事项").unwrap();
+    let stale_report = daily_agent_output_dir(&task).join("2026-06-15-report.md");
+    std::fs::create_dir_all(stale_report.parent().unwrap()).unwrap();
+    std::fs::write(
+        &stale_report,
+        "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 旧内容\n",
+    )
+    .unwrap();
+
+    let plan = build_daily_agent_change_plan(&task, "test", None, true).unwrap();
+    let prompt = build_daily_agent_prompt(&task, &plan, "chatgpt_web", false).unwrap();
+
+    assert!(prompt.contains("Tomorrow ToDo 日期规则"));
+    assert!(prompt.contains("源转录日期 `2026-06-15` 的明日待办目标日期是 `2026-06-16`"));
+    assert!(prompt.contains("最终标题必须是 `# 明日 To Do List - 2026-06-16`"));
+    assert!(prompt.contains("如果已有输出标题仍是 `# 明日 To Do List - 2026-06-15`"));
+    assert!(prompt.contains("# 明日 To Do List - 2026-06-15"));
+}
+
+#[test]
 fn daily_agent_chatgpt_web_external_params_start_fresh_conversation() {
     let state = AsrDailyAgentConversationState {
         initialized: true,
@@ -529,12 +585,28 @@ fn daily_agent_chatgpt_web_timeout_is_bounded_below_outer_timeout() {
     let bounded =
         daily_agent_external_runner_adapter_config("chatgpt_web", &already_short, 7_200_000);
 
-    assert_eq!(bounded.timeout_secs, Some(60));
+    assert_eq!(bounded.timeout_secs, Some(7_170));
 
     let non_web =
         daily_agent_external_runner_adapter_config("codex", &config, 7_200_000);
 
     assert_eq!(non_web.timeout_secs, Some(720_000));
+}
+
+#[test]
+fn daily_agent_chatgpt_web_same_conversation_wait_uses_daily_timeout_with_headroom() {
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(7_200_000),
+        7_170_000
+    );
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(30_000),
+        30_000
+    );
+    assert_eq!(
+        daily_agent_chatgpt_web_same_conversation_wait_timeout_ms(1_000),
+        5_000
+    );
 }
 
 #[test]
@@ -570,7 +642,7 @@ fn daily_agent_chatgpt_web_report_response_gate_rejects_placeholders() {
 
 #[test]
 fn daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract() {
-    let todo = "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 整理上线 checklist，确认发布负责人和灰度窗口。\n\n## 可选推进\n\n- 梳理后续自动化回归项。\n\n## 需要确认\n\n- 是否需要同步给 Feishu owner channel。\n"
+    let todo = "# 明日 To Do List - 2026-06-16\n\n## 明天必须完成\n\n- 整理上线 checklist，确认发布负责人和灰度窗口。\n\n## 可选推进\n\n- 梳理后续自动化回归项。\n\n## 需要确认\n\n- 是否需要同步给 Feishu owner channel。\n"
         .repeat(8);
 
     assert!(validate_chatgpt_web_daily_agent_response(
@@ -581,7 +653,17 @@ fn daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract() {
     )
     .is_ok());
 
-    let daily_report = "# 2026-06-15 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
+    let same_day_todo = "# 明日 To Do List - 2026-06-15\n\n## 明天必须完成\n\n- 旧标题。\n\n## 可选推进\n\n- 旧标题。\n\n## 需要确认\n\n- 旧标题。\n"
+        .repeat(8);
+    assert!(validate_chatgpt_web_daily_agent_response(
+        &same_day_todo,
+        "2026-06-15",
+        "tomorrow_todo",
+        "tomorrow_todo",
+    )
+    .is_err());
+
+    let daily_report = "# 2026-06-16 日报\n\n## 今日概览\n\n完整正文足够长。\n\n## 证据与不确定性\n\n"
         .repeat(20);
     assert!(validate_chatgpt_web_daily_agent_response(
         &daily_report,
@@ -595,7 +677,7 @@ fn daily_agent_chatgpt_web_tomorrow_todo_response_uses_todo_contract() {
         "2026-06-15",
         ChatGptWebDailyAgentContract::TomorrowTodo,
     );
-    assert!(retry_prompt.contains("# 明日 To Do List - 2026-06-15"));
+    assert!(retry_prompt.contains("# 明日 To Do List - 2026-06-16"));
     assert!(retry_prompt.contains("## 明天必须完成"));
     assert!(!retry_prompt.contains("今日概览"));
     assert!(!retry_prompt.contains("证据与不确定性"));

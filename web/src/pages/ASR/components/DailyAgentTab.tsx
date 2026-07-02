@@ -38,6 +38,7 @@ import type {
   AsrDailyAgentProcessedDocument,
   AsrDailyAgentRunsResponse,
 } from "../../../api/asr";
+import { hasRunningDailyAgent } from "../asrUtils";
 import * as imGatewayApi from "../../../api/imGateway";
 import type {
   ExternalCliGatewayConfig,
@@ -382,7 +383,7 @@ export default function DailyAgentTab({ taskId }: DailyAgentTabProps) {
         try {
           const config = await getDailyAgentConfig(taskId);
           setConfigData(config);
-          if (config.last_run?.status !== "running") {
+          if (!hasRunningDailyAgent(config.config, agentId)) {
             clearInterval(pollInterval);
             setRunningAgentId(null);
             fetchAll();

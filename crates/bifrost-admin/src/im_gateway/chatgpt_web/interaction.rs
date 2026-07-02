@@ -197,11 +197,19 @@ pub(super) struct WaitedFinal {
     pub(super) had_429_or_fallback: bool,
 }
 
+struct TerminalReadyCandidate {
+    waited: WaitedFinal,
+    text_len: usize,
+    image_count: usize,
+    stable_since: tokio::time::Instant,
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct WaitFinalOptions<'a> {
     pub(super) duration: std::time::Duration,
     pub(super) stop_marker_path: &'a Path,
     pub(super) profile_dir: Option<&'a Path>,
+    pub(super) terminal_idle_stable_for: std::time::Duration,
 }
 
 /// Try to construct a `WaitedFinal` directly from the SSE stream detail.
@@ -317,7 +325,8 @@ pub(super) async fn wait_final(
 
     // Brief initial wait for content to appear on page
     sleep(std::time::Duration::from_secs(1)).await;
-    let mut ready_candidate: Option<(String, tokio::time::Instant)> = None;
+    let mut terminal_idle_since: Option<tokio::time::Instant> = None;
+    let mut terminal_ready_candidate: Option<TerminalReadyCandidate> = None;
 
     while tokio::time::Instant::now() < deadline {
         if stop_requested(options.stop_marker_path).await {
@@ -327,7 +336,7 @@ pub(super) async fn wait_final(
         // Timeout CDP calls to prevent indefinite hangs
         let dom_outcome = tokio::time::timeout(
             std::time::Duration::from_secs(10),
-            try_extract_dom_outcome(pdir, conversation_id),
+            try_extract_dom_outcome(_config, pdir, conversation_id),
         )
         .await;
 
@@ -357,47 +366,100 @@ pub(super) async fn wait_final(
                     .and_then(|v| v.as_array())
                     .map(|a| a.len())
                     .unwrap_or(0);
-                let ready_signature = dom_ready_signature(&waited);
-                let required_stable_for = required_dom_stable_for(dom_text_len, dom_image_count);
                 let now = tokio::time::Instant::now();
-                let stable_since = match ready_candidate {
-                    Some((ref previous_signature, since))
-                        if previous_signature == &ready_signature =>
-                    {
-                        since
-                    }
-                    _ => {
-                        ready_candidate = Some((ready_signature, now));
-                        now
-                    }
-                };
-                if now.duration_since(stable_since) < required_stable_for {
+                let stable_since = *terminal_idle_since.get_or_insert(now);
+                let terminal_idle_stable_for = options.terminal_idle_stable_for;
+                if now.duration_since(stable_since) < terminal_idle_stable_for {
                     tracing::info!(
                         conversation_id,
                         dom_text_len,
                         dom_image_count,
                         stable_for_ms = now.duration_since(stable_since).as_millis(),
-                        required_stable_ms = required_stable_for.as_millis(),
-                        "chatgpt_web wait_final: DOM content candidate waiting for stability"
+                        required_stable_ms = terminal_idle_stable_for.as_millis(),
+                        "chatgpt_web wait_final: DOM terminal idle waiting for stop button/composer stability"
                     );
                     sleep(std::time::Duration::from_secs(1)).await;
                     continue;
                 }
 
-                tracing::info!(
-                    conversation_id,
-                    dom_text_len,
-                    dom_image_count,
-                    "chatgpt_web wait_final: generation complete (stop button gone), returning"
-                );
-                return Ok(waited);
+                let settle_for = dom_terminal_content_settle_for(dom_text_len, dom_image_count);
+                if settle_for.is_zero() {
+                    tracing::info!(
+                        conversation_id,
+                        dom_text_len,
+                        dom_image_count,
+                        "chatgpt_web wait_final: generation complete (stop button gone), returning"
+                    );
+                    return Ok(waited);
+                }
+
+                let ready_candidate = TerminalReadyCandidate {
+                    waited,
+                    text_len: dom_text_len,
+                    image_count: dom_image_count,
+                    stable_since: now,
+                };
+                match terminal_ready_candidate.as_mut() {
+                    None => {
+                        terminal_ready_candidate = Some(ready_candidate);
+                        tracing::info!(
+                            conversation_id,
+                            dom_text_len,
+                            dom_image_count,
+                            required_stable_ms = settle_for.as_millis(),
+                            "chatgpt_web wait_final: terminal DOM ready, waiting for rendered content to settle"
+                        );
+                    }
+                    Some(candidate)
+                        if ready_candidate.text_len > candidate.text_len
+                            || ready_candidate.image_count > candidate.image_count =>
+                    {
+                        tracing::info!(
+                            conversation_id,
+                            previous_text_len = candidate.text_len,
+                            dom_text_len = ready_candidate.text_len,
+                            previous_image_count = candidate.image_count,
+                            dom_image_count = ready_candidate.image_count,
+                            required_stable_ms = settle_for.as_millis(),
+                            "chatgpt_web wait_final: terminal DOM content grew, resetting settle timer"
+                        );
+                        terminal_ready_candidate = Some(ready_candidate);
+                    }
+                    Some(candidate) => {
+                        let stable_for = now.duration_since(candidate.stable_since);
+                        if stable_for >= settle_for {
+                            let candidate = terminal_ready_candidate
+                                .take()
+                                .expect("terminal candidate should exist");
+                            tracing::info!(
+                                conversation_id,
+                                dom_text_len = candidate.text_len,
+                                dom_image_count = candidate.image_count,
+                                stable_for_ms = stable_for.as_millis(),
+                                "chatgpt_web wait_final: generation complete and terminal DOM content settled"
+                            );
+                            return Ok(candidate.waited);
+                        }
+                        tracing::info!(
+                            conversation_id,
+                            dom_text_len = candidate.text_len,
+                            dom_image_count = candidate.image_count,
+                            stable_for_ms = stable_for.as_millis(),
+                            required_stable_ms = settle_for.as_millis(),
+                            "chatgpt_web wait_final: terminal DOM content still settling"
+                        );
+                    }
+                }
+                sleep(dom_terminal_content_settle_poll_for()).await;
+                continue;
             }
             DomExtractOutcome::Streaming {
                 text_len,
                 image_count,
                 reason,
             } => {
-                ready_candidate = None;
+                terminal_idle_since = None;
+                terminal_ready_candidate = None;
                 // Still generating — just log and wait.
                 // TODO: future enhancement — check if content is long enough for partial/batch output
                 tracing::info!(
@@ -410,7 +472,8 @@ pub(super) async fn wait_final(
                 );
             }
             DomExtractOutcome::NotFound => {
-                ready_candidate = None;
+                terminal_idle_since = None;
+                terminal_ready_candidate = None;
                 tracing::debug!(
                     conversation_id,
                     "chatgpt_web wait_final: no content found yet"
@@ -426,7 +489,7 @@ pub(super) async fn wait_final(
         conversation_id,
         "chatgpt_web wait_final: deadline exceeded, final forced extraction"
     );
-    if let Some(waited) = try_extract_latest_from_dom_force(pdir, conversation_id).await {
+    if let Some(waited) = try_extract_latest_from_dom_force(_config, pdir, conversation_id).await {
         return Ok(waited);
     }
 
@@ -1517,12 +1580,28 @@ async fn extract_latest_assistant_from_dom(cdp: &super::CdpClient) -> Option<Wai
 /// includes streaming status and text_len even when content is still streaming.
 /// This allows callers to track content stability without losing information.
 pub(super) async fn try_extract_dom_outcome(
+    config: &RuntimeConfig,
     profile_dir: &Path,
     conversation_id: &str,
 ) -> DomExtractOutcome {
     let tab = match super::browser::get_conversation_tab(profile_dir, conversation_id) {
         Some(tab) => tab,
-        None => return DomExtractOutcome::NotFound,
+        None => {
+            match super::browser::recover_conversation_tab_from_browser(config, conversation_id)
+                .await
+            {
+                Ok(Some(tab)) => tab,
+                Ok(None) => return DomExtractOutcome::NotFound,
+                Err(error) => {
+                    tracing::warn!(
+                        conversation_id,
+                        error = %error,
+                        "chatgpt_web DOM extract: failed to recover existing conversation tab"
+                    );
+                    return DomExtractOutcome::NotFound;
+                }
+            }
+        }
     };
     if tab.cdp.is_closed() {
         return DomExtractOutcome::NotFound;
@@ -1941,14 +2020,19 @@ async fn extract_dom_outcome_inner(cdp: &super::CdpClient) -> DomExtractOutcome 
 /// Like `try_extract_latest_from_dom` but ignores streaming indicators.
 /// Used when content stability has been confirmed despite stale streaming flags.
 pub(super) async fn try_extract_latest_from_dom_force(
+    config: &RuntimeConfig,
     profile_dir: &Path,
     conversation_id: &str,
 ) -> Option<WaitedFinal> {
-    match try_extract_dom_outcome(profile_dir, conversation_id).await {
+    match try_extract_dom_outcome(config, profile_dir, conversation_id).await {
         DomExtractOutcome::Ready(waited) => Some(waited),
         DomExtractOutcome::Streaming { .. } => {
             // Force extraction — streaming is stale, get content anyway
-            let tab = super::browser::get_conversation_tab(profile_dir, conversation_id)?;
+            let tab =
+                super::browser::recover_conversation_tab_from_browser(config, conversation_id)
+                    .await
+                    .ok()
+                    .flatten()?;
             if tab.cdp.is_closed() {
                 return None;
             }
@@ -2177,55 +2261,25 @@ pub(super) fn dom_content_is_usable(text: &str, image_count: usize) -> bool {
     !normalized.is_empty() && !dom_text_is_pending_status(normalized)
 }
 
-fn dom_ready_signature(waited: &WaitedFinal) -> String {
-    let turn_id = waited
-        .final_message
-        .get("turnId")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let message_id = waited
-        .final_message
-        .get("messageId")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let text = waited
-        .final_message
-        .get("text")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let image_count = waited
-        .final_message
-        .get("generatedImages")
-        .and_then(Value::as_array)
-        .map(Vec::len)
-        .or_else(|| {
-            waited
-                .final_message
-                .get("imageCount")
-                .and_then(Value::as_u64)
-                .map(|n| n as usize)
-        })
-        .unwrap_or_default();
-    let artifact_count = waited
-        .summary
-        .get("artifactCount")
-        .and_then(Value::as_u64)
-        .unwrap_or_default();
-    format!(
-        "{turn_id}\n{message_id}\n{}\n{image_count}\n{artifact_count}\n{text}",
-        waited.all_texts.len()
-    )
+pub(super) fn required_dom_terminal_idle_for(_stream_handoff: bool) -> std::time::Duration {
+    std::time::Duration::ZERO
 }
 
-fn required_dom_stable_for(text_len: usize, image_count: usize) -> std::time::Duration {
-    let secs = if image_count > 0 || text_len < 512 {
-        2
-    } else if text_len < 12_000 {
-        3
-    } else {
-        5
-    };
-    std::time::Duration::from_secs(secs)
+pub(super) fn dom_terminal_content_settle_for(
+    text_len: usize,
+    image_count: usize,
+) -> std::time::Duration {
+    if image_count > 0 {
+        return std::time::Duration::from_millis(1_500);
+    }
+    if text_len >= 256 {
+        return std::time::Duration::from_millis(2_000);
+    }
+    std::time::Duration::from_millis(750)
+}
+
+pub(super) fn dom_terminal_content_settle_poll_for() -> std::time::Duration {
+    std::time::Duration::from_millis(500)
 }
 
 fn normalize_dom_status_text(text: &str) -> &str {
@@ -2358,38 +2412,29 @@ mod tests {
     use serde_json::{json, Value};
 
     #[test]
-    fn required_dom_stable_for_keeps_completed_dom_responsive() {
-        assert_eq!(required_dom_stable_for(100, 0).as_secs(), 2);
-        assert_eq!(required_dom_stable_for(8_000, 0).as_secs(), 3);
-        assert_eq!(required_dom_stable_for(12_000, 0).as_secs(), 5);
-        assert_eq!(required_dom_stable_for(40_000, 0).as_secs(), 5);
-        assert_eq!(required_dom_stable_for(0, 1).as_secs(), 2);
+    fn required_dom_terminal_idle_for_returns_immediately_after_controls_idle() {
+        assert!(required_dom_terminal_idle_for(false).is_zero());
+        assert!(required_dom_terminal_idle_for(true).is_zero());
     }
 
     #[test]
-    fn dom_ready_signature_tracks_same_length_text_changes() {
-        let first = WaitedFinal {
-            final_message: json!({
-                "turnId": "turn-a",
-                "text": "abc",
-                "imageCount": 0,
-            }),
-            summary: json!({"artifactCount": 0}),
-            all_texts: vec!["abc".to_string()],
-            had_429_or_fallback: true,
-        };
-        let second = WaitedFinal {
-            final_message: json!({
-                "turnId": "turn-a",
-                "text": "xyz",
-                "imageCount": 0,
-            }),
-            summary: json!({"artifactCount": 0}),
-            all_texts: vec!["xyz".to_string()],
-            had_429_or_fallback: true,
-        };
-
-        assert_ne!(dom_ready_signature(&first), dom_ready_signature(&second));
+    fn dom_terminal_content_settle_waits_after_controls_idle_for_markdown_render() {
+        assert_eq!(
+            dom_terminal_content_settle_for(32, 0),
+            std::time::Duration::from_millis(750)
+        );
+        assert_eq!(
+            dom_terminal_content_settle_for(512, 0),
+            std::time::Duration::from_millis(2_000)
+        );
+        assert_eq!(
+            dom_terminal_content_settle_for(0, 1),
+            std::time::Duration::from_millis(1_500)
+        );
+        assert_eq!(
+            dom_terminal_content_settle_poll_for(),
+            std::time::Duration::from_millis(500)
+        );
     }
 
     #[test]
@@ -2413,6 +2458,28 @@ mod tests {
         assert_eq!(
             dom_output_in_progress_reason(&data),
             Some("waiting_for_complete_reply")
+        );
+    }
+
+    #[test]
+    fn dom_output_in_progress_reason_uses_stop_button_before_text_state() {
+        let data = json!({
+            "streamingSignal": false,
+            "imageGenBusy": false,
+            "stopButtonVisible": true,
+            "waitingForCompleteReply": false,
+            "composerVisible": true,
+            "composerDisabled": false,
+            "composerTextLength": 0,
+            "imageCount": 0,
+            "pendingOutputStatusText": false,
+            "isStreaming": false,
+            "text": "我会直接把这份上传的 Markdown 当作完整输入来整理。",
+        });
+
+        assert_eq!(
+            dom_output_in_progress_reason(&data),
+            Some("stop_button_visible")
         );
     }
 

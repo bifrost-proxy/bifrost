@@ -117,6 +117,48 @@ pub(super) fn get_conversation_tab(
     Some(tab)
 }
 
+/// Recover a conversation tab from the live browser when the process-local pool
+/// is empty.
+///
+/// External runner operations run in short-lived worker processes. A `send`
+/// worker can leave the real browser tab open, but its in-memory tab pool
+/// disappears when that process exits. Follow-up `wait` operations must be able
+/// to reattach to the existing `/c/{conversation_id}` target instead of waiting
+/// forever on an empty pool.
+pub(super) async fn recover_conversation_tab_from_browser(
+    config: &RuntimeConfig,
+    conversation_id: &str,
+) -> Result<Option<Arc<ConversationTab>>, String> {
+    if let Some(tab) = get_conversation_tab(&config.profile_dir, conversation_id) {
+        return Ok(Some(tab));
+    }
+
+    let headless = config.browser.execution_mode != "headed";
+    let browser = BrowserSession::get_or_launch(config, headless).await?;
+    let Some(page) = browser
+        .find_conversation_page(&config.chatgpt.base_url, conversation_id)
+        .await?
+    else {
+        return Ok(None);
+    };
+
+    let cdp = CdpClient::connect_with_retry(&page.web_socket_debugger_url, 3).await?;
+    cdp.enable_domains().await?;
+    let cdp = Arc::new(cdp);
+    if let Some(evicted) =
+        register_conversation_tab(&config.profile_dir, conversation_id, page.id.clone(), cdp)
+    {
+        evicted.shutdown(&browser).await;
+    }
+    info!(
+        conversation_id,
+        target_id = %page.id,
+        page_url = %page.url,
+        "chatgpt_web tab pool: recovered existing conversation tab for DOM wait"
+    );
+    Ok(get_conversation_tab(&config.profile_dir, conversation_id))
+}
+
 /// Register (or update) a conversation tab in the pool.
 ///
 /// Returns the eviction action the caller should take (if any) so the

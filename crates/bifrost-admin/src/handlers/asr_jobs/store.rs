@@ -804,6 +804,21 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
         if task_is_running(&task.id) {
             continue;
         }
+        // Daily Agent runs are in-process children of the previous daemon.
+        // After startup, any persisted "running" child status is stale even if
+        // an ASR task lock file still exists and is not yet considered stale.
+        if task.daily_agent.last_status.as_deref() == Some("running") {
+            task.daily_agent.last_status = Some("interrupted".to_string());
+            task.updated_at_ms = now_ms();
+            task_store_changed = true;
+        }
+        for agent in &mut task.daily_agent.agents {
+            if agent.last_status.as_deref() == Some("running") {
+                agent.last_status = Some("interrupted".to_string());
+                task.updated_at_ms = now_ms();
+                task_store_changed = true;
+            }
+        }
         let lock_path = task_run_lock_path(&task.id);
         let lock_exists = lock_path.exists();
         let stale_lock = lock_exists && is_task_run_lock_stale(&lock_path);
@@ -863,13 +878,6 @@ fn recover_interrupted_task_runs_on_startup() -> Vec<AsrDirectoryTask> {
             && task.last_error.is_some()
         {
             task.last_error = None;
-            task.updated_at_ms = now_ms();
-            task_store_changed = true;
-        }
-        // 修正 daily_agent.last_status 残留的 "running" 状态：进程已重启，
-        // 不可能还有运行中的 daily agent，将其修正为 "interrupted"。
-        if task.daily_agent.last_status.as_deref() == Some("running") {
-            task.daily_agent.last_status = Some("interrupted".to_string());
             task.updated_at_ms = now_ms();
             task_store_changed = true;
         }
