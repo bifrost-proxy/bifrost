@@ -60,6 +60,7 @@ echo "==> npm package fallback"
 
 node <<'NODE'
 const assert = require("assert");
+const fs = require("fs");
 const platform = require("./npm/bifrost/lib/platform.js");
 
 function key(lddOutput, arch = "x64") {
@@ -87,8 +88,23 @@ assert.strictEqual(key("ldd (Debian GLIBC 2.28-10) 2.28", "arm"), "linux-arm-gli
 assert.strictEqual(platform.parseGlibcVersion("ldd (GNU libc) 2.38"), "2.38");
 assert.strictEqual(platform.versionLt("2.28", platform.MIN_GLIBC_VERSION), true);
 assert.strictEqual(platform.versionLt("2.39", platform.MIN_GLIBC_VERSION), false);
+
+const linuxX64 = JSON.parse(fs.readFileSync("./npm/bifrost-linux-x64/package.json", "utf8"));
+const linuxArm64 = JSON.parse(fs.readFileSync("./npm/bifrost-linux-arm64/package.json", "utf8"));
+const linuxX64Musl = JSON.parse(
+  fs.readFileSync("./npm/bifrost-linux-x64-musl/package.json", "utf8")
+);
+const linuxArm64Musl = JSON.parse(
+  fs.readFileSync("./npm/bifrost-linux-arm64-musl/package.json", "utf8")
+);
+
+assert.deepStrictEqual(linuxX64.libc, ["glibc"]);
+assert.deepStrictEqual(linuxArm64.libc, ["glibc"]);
+assert.strictEqual(Object.prototype.hasOwnProperty.call(linuxX64Musl, "libc"), false);
+assert.strictEqual(Object.prototype.hasOwnProperty.call(linuxArm64Musl, "libc"), false);
 NODE
 pass "npm platform module selects musl for old glibc"
+pass "npm musl platform packages are installable as static fallbacks on glibc"
 
 echo ""
 echo "Passed: $PASSED"

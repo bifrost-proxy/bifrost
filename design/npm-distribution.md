@@ -41,18 +41,18 @@ npm install --save-dev @bifrost-proxy/bifrost
 
 ### 按平台安装机制
 
-安装时**只下载当前操作系统对应的二进制文件**，而非全部平台二进制。实现方式：
+安装时**只下载当前 OS/CPU 对应的二进制集合**，而非全部平台二进制。Linux glibc 主机会额外安装同架构 musl/static fallback 包，以覆盖旧 glibc 运行时回退。实现方式：
 
-1. **`optionalDependencies` + `os`/`cpu` 过滤**（主路径）：npm/yarn/pnpm 根据平台包 `package.json` 中的 `os` 和 `cpu` 字段自动过滤，只安装匹配当前平台的包
+1. **`optionalDependencies` + `os`/`cpu` 过滤**（主路径）：npm/yarn/pnpm 根据平台包 `package.json` 中的 `os` 和 `cpu` 字段自动过滤，只安装匹配当前平台的包；Linux musl/static 包不声明 `libc`，使 glibc 主机也能安装静态 fallback 包
 2. **`postinstall` 兜底脚本**（降级路径）：当 `--no-optional` 等场景导致平台包未安装时，通过三级容错自动获取二进制
 
 ### 平台包
 
 每个平台包包含：
-- `package.json`：声明 `os` 和 `cpu` 字段限制安装平台
+- `package.json`：声明 `os` 和 `cpu` 字段限制安装平台；glibc 包声明 `libc: ["glibc"]`，musl/static 包刻意不声明 `libc`，避免旧 glibc 主机因 npm libc 过滤跳过 fallback 包
 - 预编译的 bifrost 二进制文件
 
-npm 的 `optionalDependencies` + `os`/`cpu` 机制确保只有匹配当前平台的包会被安装。
+npm 的 `optionalDependencies` + `os`/`cpu` 机制确保只有匹配当前平台的包会被安装。Linux x64 / ARM64 的 musl/static 包不使用 npm `libc` 过滤，因此 glibc 主机会同时安装 GNU 包和静态 fallback 包；运行时如果检测到 glibc 版本过旧，会直接找到 musl 包，不依赖 postinstall 下载兜底。
 
 ### 主包
 
@@ -93,7 +93,7 @@ npm 的 `optionalDependencies` + `os`/`cpu` 机制确保只有匹配当前平台
 | win32-x64                    | x86_64-pc-windows-msvc            | @bifrost-proxy/bifrost-win32-x64           | win32   | x64   |
 | win32-arm64                  | aarch64-pc-windows-msvc           | @bifrost-proxy/bifrost-win32-arm64         | win32   | arm64 |
 
-平台包 `package.json` 中 `os`/`cpu` 字段对应上表（如 `darwin`+`arm64`），不区分 glibc/musl；libc 区分仅在主包侧通过 `getPlatformKey` 在运行时检测后挑选不同的 npm 包名。
+平台包 `package.json` 中 `os`/`cpu` 字段对应上表（如 `darwin`+`arm64`）。glibc Linux 包继续声明 npm `libc: ["glibc"]`，musl/static Linux 包不声明 npm `libc`，让 glibc 主机也能拿到 fallback 包；运行时仍由主包侧通过 `getPlatformKey` 检测 glibc/musl 并挑选不同的 npm 包名。
 
 ### Linux libc 检测（lib/platform.js）
 
