@@ -137,7 +137,18 @@ class EchoHandler(http.server.BaseHTTPRequestHandler):
 
     def _get_content_type_and_body(self, response_data):
         """根据请求路径确定 Content-Type 和响应体"""
-        path = self.path.lower()
+        parsed_request_path = urllib.parse.urlparse(self.path)
+        path = parsed_request_path.path.lower()
+
+        if path.endswith('.pac'):
+            query = urllib.parse.parse_qs(parsed_request_path.query)
+            proxy = query.get('proxy', ['127.0.0.1:9999'])[0]
+            proxy_result = json.dumps(f"PROXY {proxy}")
+            body = f"""function FindProxyForURL(url, host) {{
+  return {proxy_result};
+}}
+"""
+            return 'application/x-ns-proxy-autoconfig; charset=utf-8', body
 
         if path.endswith('.html') or path.endswith('.htm'):
             body = f"""<!DOCTYPE html>

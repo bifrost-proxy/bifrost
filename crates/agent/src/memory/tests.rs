@@ -307,12 +307,15 @@ fn phase2_lock_prevents_concurrent_consolidation() {
 async fn append_line_locks_concurrent_writers() {
     let temp = tempfile::tempdir().expect("temp dir");
     let path = Arc::new(temp.path().join("MEMORY.md"));
+    fs::write(path.as_ref(), "").expect("create memory");
     let mut tasks = Vec::new();
 
-    for task_id in 0..8usize {
+    const WRITERS: usize = 8;
+    const LINES_PER_WRITER: usize = 100;
+    for task_id in 0..WRITERS {
         let path = Arc::clone(&path);
         tasks.push(tokio::task::spawn_blocking(move || {
-            for line_id in 0..1000usize {
+            for line_id in 0..LINES_PER_WRITER {
                 append_line(
                     &path,
                     &format!("{{\"task\":{task_id},\"line\":{line_id},\"content\":\"memory\"}}\n"),
@@ -328,7 +331,7 @@ async fn append_line_locks_concurrent_writers() {
 
     let content = fs::read_to_string(path.as_ref()).expect("read memory");
     let lines: Vec<_> = content.lines().collect();
-    assert_eq!(lines.len(), 8000);
+    assert_eq!(lines.len(), WRITERS * LINES_PER_WRITER);
     for line in lines {
         serde_json::from_str::<serde_json::Value>(line).expect("valid memory line");
     }

@@ -1,1 +1,10 @@
-test-pac.local pac://(PROXY 127.0.0.1:3000)
+# PAC Proxy Auto-Config 语法 fixture。
+# 真实链路由 e2e-tests/tests/test_pac_proxy_auto_config.sh 单独覆盖，
+# 避免 parallel-fixtures 中嵌套 release build 触发 Cargo build lock 超时。
+test-pac.local pac://{pac_value}
+
+``` pac_value
+function FindProxyForURL(url, host) {
+  return "DIRECT";
+}
+```

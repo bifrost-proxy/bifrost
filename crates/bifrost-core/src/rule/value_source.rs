@@ -23,7 +23,7 @@ impl ValueSource {
             return ValueSource::RemoteUrl(value.to_string());
         }
 
-        if value.starts_with('/') && !value.starts_with("//") {
+        if is_local_file_path(value) {
             return ValueSource::FilePath(value.to_string());
         }
 
@@ -135,7 +135,7 @@ impl ValueSource {
             ),
             ValueSource::ParenContent(s) => Some(s.clone()),
             ValueSource::ValueRef(var_name) => store.get(var_name),
-            ValueSource::FilePath(path) => std::fs::read_to_string(path).ok(),
+            ValueSource::FilePath(path) => read_local_file_path(path),
             ValueSource::RemoteUrl(url) => fetch_remote_url(url),
         }
     }
@@ -143,6 +143,34 @@ impl ValueSource {
     pub fn resolve_with_fallback(&self, store: &dyn ValueStore) -> String {
         self.resolve(store).unwrap_or_else(|| self.get_raw_value())
     }
+}
+
+fn is_local_file_path(value: &str) -> bool {
+    (value.starts_with('/') && !value.starts_with("//")) || is_windows_absolute_path(value)
+}
+
+fn is_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[1] == b':'
+        && (bytes[2] == b'\\' || bytes[2] == b'/')
+        && bytes[0].is_ascii_alphabetic()
+}
+
+fn read_local_file_path(path: &str) -> Option<String> {
+    if let Ok(content) = std::fs::read_to_string(path) {
+        return Some(content);
+    }
+
+    #[cfg(windows)]
+    {
+        let without_leading_slash = path.strip_prefix('/')?;
+        if is_windows_absolute_path(without_leading_slash) {
+            return std::fs::read_to_string(without_leading_slash).ok();
+        }
+    }
+
+    None
 }
 
 fn fetch_remote_url(url: &str) -> Option<String> {
@@ -277,6 +305,21 @@ mod tests {
         assert_eq!(
             source,
             ValueSource::FilePath("/Users/test/data.json".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_windows_file_path() {
+        let source = ValueSource::parse(r"C:\path\to\proxy.pac");
+        assert_eq!(
+            source,
+            ValueSource::FilePath(r"C:\path\to\proxy.pac".to_string())
+        );
+
+        let forward_slash_source = ValueSource::parse("C:/path/to/proxy.pac");
+        assert_eq!(
+            forward_slash_source,
+            ValueSource::FilePath("C:/path/to/proxy.pac".to_string())
         );
     }
 

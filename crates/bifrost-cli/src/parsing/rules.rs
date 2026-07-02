@@ -7,7 +7,9 @@ use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
     RulesResolver as ProxyRulesResolverTrait,
 };
+use bifrost_script::{PacDecision, PacEngine, PacEngineConfig, PacProxyScheme};
 use parking_lot::RwLock;
+use url::Url;
 
 use super::{parse_cors_config, parse_header_value, parse_replace_value, parse_res_cookies_value};
 
@@ -131,35 +133,12 @@ fn parse_redirect_target(value: &str) -> (Option<u16>, String) {
     (None, value.to_string())
 }
 
-fn parse_pac_proxy_target(value: &str) -> Option<String> {
-    let upper = value.to_ascii_uppercase();
-    if upper.contains("DIRECT") && !upper.contains("PROXY") {
-        return None;
-    }
-
-    if let Some(proxy_pos) = upper.find("PROXY") {
-        let after = &value[proxy_pos + 5..];
-        let trimmed = after
-            .trim_start_matches(|c: char| c.is_whitespace() || c == ':')
-            .trim();
-        if trimmed.is_empty() {
-            return None;
-        }
-        let mut end = trimmed.len();
-        for (idx, ch) in trimmed.char_indices() {
-            if ch.is_whitespace() || ch == ';' || ch == '"' || ch == '\'' {
-                end = idx;
-                break;
-            }
-        }
-        let host_port = trimmed[..end].trim();
-        if host_port.is_empty() {
-            None
-        } else {
-            Some(host_port.to_string())
-        }
+fn normalize_pac_proxy_url(scheme: PacProxyScheme, host_port: &str) -> Option<String> {
+    let proxy_scheme = scheme.as_proxy_url_scheme()?;
+    if host_port.contains("://") {
+        Some(host_port.to_string())
     } else {
-        None
+        Some(format!("{}://{}", proxy_scheme, host_port))
     }
 }
 
@@ -414,6 +393,7 @@ fn resolve_rules_with_response_impl(
 
     let core_result = resolver.resolve_uncached(&ctx);
     let mut result = convert_core_result_to_proxy(&core_result);
+    apply_pac_rules(resolver, &core_result, &mut result, &ctx, true);
     result.values = resolver.values().clone();
     result
 }
@@ -464,6 +444,7 @@ fn resolve_rules_impl(
     }
 
     let mut result = convert_core_result_to_proxy(&core_result);
+    apply_pac_rules(resolver, &core_result, &mut result, &ctx, false);
     result.values = resolver.values().clone();
     result
 }
@@ -556,12 +537,7 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
             Protocol::Http3 => {
                 result.upstream_http3 = true;
             }
-            Protocol::Pac => {
-                if let Some(target) = parse_pac_proxy_target(value) {
-                    result.host = Some(target);
-                    result.host_protocol = Some(Protocol::Host);
-                }
-            }
+            Protocol::Pac => {}
             Protocol::ReqCors => {
                 let cors = parse_cors_config(value);
                 result.req_cors = cors;
@@ -790,6 +766,215 @@ fn convert_core_result_to_proxy(core_result: &bifrost_core::ResolvedRules) -> Pr
     result
 }
 
+fn apply_pac_rules(
+    resolver: &CoreRulesResolver,
+    initial_result: &bifrost_core::ResolvedRules,
+    result: &mut ProxyResolvedRules,
+    original_ctx: &RequestContext,
+    response_phase: bool,
+) {
+    let final_url =
+        build_final_url_for_pac(original_ctx, result).unwrap_or_else(|| original_ctx.url.clone());
+    let mut pac_ctx = RequestContext::from_url(&final_url);
+    pac_ctx.method = original_ctx.method.clone();
+    pac_ctx.client_ip = original_ctx.client_ip.clone();
+    pac_ctx.req_headers = original_ctx.req_headers.clone();
+    pac_ctx.req_cookies = original_ctx.req_cookies.clone();
+    if response_phase {
+        if let (Some(status), Some(headers)) =
+            (original_ctx.status_code, original_ctx.res_headers.clone())
+        {
+            pac_ctx.set_response(status, headers);
+        }
+    }
+
+    let pac_matches = if final_url == original_ctx.url {
+        initial_result.clone()
+    } else if response_phase {
+        resolver.resolve_uncached(&pac_ctx)
+    } else {
+        resolver.resolve(&pac_ctx)
+    };
+
+    let Some(pac_rule) = pac_matches
+        .rules
+        .iter()
+        .find(|resolved| resolved.rule.protocol == Protocol::Pac)
+    else {
+        return;
+    };
+
+    let engine = PacEngine::new(PacEngineConfig::default());
+    match engine.evaluate(
+        &pac_rule.resolved_value,
+        &pac_ctx.url,
+        pac_ctx.hostname.as_str(),
+    ) {
+        Ok(PacDecision::Direct) => {
+            result.proxy = None;
+        }
+        Ok(PacDecision::Proxy { scheme, host_port }) => {
+            if let Some(proxy_url) = normalize_pac_proxy_url(scheme, &host_port) {
+                result.proxy = Some(proxy_url);
+            } else {
+                set_pac_fail_closed_response(
+                    result,
+                    format!("unsupported PAC proxy scheme for {host_port}"),
+                );
+                tracing::warn!(
+                    target: "bifrost_cli::rules",
+                    pac_result = %host_port,
+                    "PAC returned an unsupported proxy scheme"
+                );
+            }
+        }
+        Err(err) => {
+            set_pac_fail_closed_response(result, err.to_string());
+            tracing::warn!(
+                target: "bifrost_cli::rules",
+                url = %pac_ctx.url,
+                error = %err,
+                "PAC evaluation failed"
+            );
+        }
+    }
+}
+
+fn set_pac_fail_closed_response(result: &mut ProxyResolvedRules, message: impl Into<String>) {
+    let message = message.into();
+    result.proxy = None;
+    result.status_code = Some(502);
+    result.res_body = Some(bytes::Bytes::from(format!(
+        "Bifrost PAC evaluation failed: {message}\n"
+    )));
+    result.res_headers.push((
+        "Content-Type".to_string(),
+        "text/plain; charset=utf-8".to_string(),
+    ));
+    result.res_headers.push((
+        "X-Bifrost-Error".to_string(),
+        "PAC_EVALUATION_FAILED".to_string(),
+    ));
+}
+
+fn build_final_url_for_pac(ctx: &RequestContext, result: &ProxyResolvedRules) -> Option<String> {
+    if result.ignored.host {
+        return Some(ctx.url.clone());
+    }
+
+    let Some(host_rule) = result.host.as_deref() else {
+        return Some(ctx.url.clone());
+    };
+    let protocol = result.host_protocol.unwrap_or(Protocol::Host);
+    if !matches!(
+        protocol,
+        Protocol::Host
+            | Protocol::XHost
+            | Protocol::Http
+            | Protocol::Https
+            | Protocol::Ws
+            | Protocol::Wss
+            | Protocol::Tunnel
+    ) {
+        return Some(ctx.url.clone());
+    }
+
+    let original = Url::parse(&ctx.url).ok()?;
+    let (target_scheme, target_authority_and_path) =
+        split_route_target(protocol, host_rule, original.scheme());
+    let target_url = if target_authority_and_path.contains("://") {
+        Url::parse(&target_authority_and_path).ok()?
+    } else {
+        Url::parse(&format!(
+            "{}://{}",
+            target_scheme, target_authority_and_path
+        ))
+        .ok()?
+    };
+
+    let target_path = target_url.path();
+    let source_path = source_path_from_rules(result);
+    let final_path = if (target_path.is_empty() || target_path == "/") && source_path.is_none() {
+        original.path().to_string()
+    } else {
+        rewrite_path_with_prefix_for_pac(original.path(), source_path, target_path)
+    };
+
+    let mut final_url = target_url;
+    final_url.set_path(&final_path);
+    final_url.set_query(original.query());
+    Some(final_url.to_string())
+}
+
+fn split_route_target(
+    protocol: Protocol,
+    host_rule: &str,
+    original_scheme: &str,
+) -> (&'static str, String) {
+    let default_scheme = match protocol {
+        Protocol::Http => "http",
+        Protocol::Https => "https",
+        Protocol::Ws => "ws",
+        Protocol::Wss => "wss",
+        _ if original_scheme == "https" || original_scheme == "wss" => "https",
+        _ => "http",
+    };
+    (default_scheme, host_rule.to_string())
+}
+
+fn source_path_from_rules(result: &ProxyResolvedRules) -> Option<&str> {
+    let host = result.host.as_ref()?;
+    let protocol = result.host_protocol?;
+    result.rules.iter().find_map(|rule| {
+        if rule.protocol == protocol && rule.value == *host {
+            extract_path_from_pattern_for_pac(&rule.pattern)
+        } else {
+            None
+        }
+    })
+}
+
+fn extract_path_from_pattern_for_pac(pattern: &str) -> Option<&str> {
+    let pattern = pattern.trim_start_matches('!');
+    let without_scheme = pattern
+        .strip_prefix("http://")
+        .or_else(|| pattern.strip_prefix("https://"))
+        .or_else(|| pattern.strip_prefix("ws://"))
+        .or_else(|| pattern.strip_prefix("wss://"))
+        .unwrap_or(pattern);
+    without_scheme.find('/').map(|idx| &without_scheme[idx..])
+}
+
+fn rewrite_path_with_prefix_for_pac(
+    original_path: &str,
+    source_path: Option<&str>,
+    target_path: &str,
+) -> String {
+    if let Some(source_path) = source_path {
+        let source = source_path.trim_end_matches('/');
+        if let Some(remaining) = original_path.strip_prefix(source) {
+            let target = target_path.trim_end_matches('/');
+            if remaining.is_empty() {
+                if target_path.ends_with('/') {
+                    format!("{}/", target)
+                } else {
+                    target.to_string()
+                }
+            } else if remaining.starts_with('/') {
+                format!("{}{}", target, remaining)
+            } else {
+                format!("{}/{}", target, remaining)
+            }
+        } else {
+            original_path.to_string()
+        }
+    } else if target_path == "/" {
+        original_path.to_string()
+    } else {
+        target_path.to_string()
+    }
+}
+
 fn should_update_route_target(result: &ProxyResolvedRules, protocol: Protocol) -> bool {
     if result.ignored.host {
         return false;
@@ -935,6 +1120,250 @@ mod tests {
         );
 
         assert!(resolved.upstream_http3);
+    }
+
+    #[test]
+    fn test_pac_value_ref_proxy_maps_to_upstream_proxy_not_host() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  return "PROXY proxy.example:8080";
+}
+```
+example.com pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy.as_deref(), Some("http://proxy.example:8080"));
+        assert_eq!(resolved.host, None);
+    }
+
+    #[test]
+    fn test_pac_direct_clears_explicit_proxy() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  return "DIRECT";
+}
+```
+example.com proxy://http://proxy.example:8080
+example.com pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy, None);
+    }
+
+    #[test]
+    fn test_pac_eval_error_fails_closed() {
+        let rules_text = r#"
+```pac
+function NotFindProxyForURL(url, host) {
+  return "DIRECT";
+}
+```
+example.com proxy://http://proxy.example:8080
+example.com pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy, None);
+        assert_eq!(resolved.status_code, Some(502));
+        assert!(String::from_utf8_lossy(resolved.res_body.as_ref().unwrap())
+            .contains("Bifrost PAC evaluation failed"));
+        assert!(resolved.res_headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("X-Bifrost-Error") && v == "PAC_EVALUATION_FAILED"
+        }));
+    }
+
+    #[test]
+    fn test_pac_unsupported_proxy_scheme_fails_closed() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  return "SOCKS5 proxy.example:1080";
+}
+```
+example.com pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy, None);
+        assert_eq!(resolved.status_code, Some(502));
+        assert!(String::from_utf8_lossy(resolved.res_body.as_ref().unwrap())
+            .contains("unsupported PAC proxy scheme"));
+    }
+
+    #[test]
+    fn test_pac_uses_rewritten_final_url_when_rule_is_split() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  if (url === "https://www.example.com/path") {
+    return "PROXY proxy.example:8080";
+  }
+  return "DIRECT";
+}
+```
+www.example.com/api www.example.com
+www.example.com/path pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://www.example.com/api/path",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy.as_deref(), Some("http://proxy.example:8080"));
+    }
+
+    #[test]
+    fn test_pac_local_file_script_maps_to_proxy() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pac_path = temp_dir.path().join("proxy.pac");
+        std::fs::write(
+            &pac_path,
+            r#"
+function FindProxyForURL(url, host) {
+  return "PROXY file-proxy.example:8080";
+}
+"#,
+        )
+        .unwrap();
+        let rules_text = format!("example.com pac://{}", pac_path.display());
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser.parse_rules(&rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(
+            resolved.proxy.as_deref(),
+            Some("http://file-proxy.example:8080")
+        );
+    }
+
+    #[test]
+    fn test_pac_remote_script_maps_to_proxy() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0_u8; 1024];
+            let _ = stream.read(&mut buf);
+            let body = r#"
+function FindProxyForURL(url, host) {
+  return "PROXY remote-proxy.example:8080";
+}
+"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/x-ns-proxy-autoconfig\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+
+        let rules_text = format!("example.com pac://http://{}/proxy.pac", addr);
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser.parse_rules(&rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://example.com/api",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        handle.join().unwrap();
+        assert_eq!(
+            resolved.proxy.as_deref(),
+            Some("http://remote-proxy.example:8080")
+        );
+    }
+
+    #[test]
+    fn test_single_rewrite_and_pac_rule_does_not_recurse_on_final_url() {
+        let rules_text = r#"
+```pac
+function FindProxyForURL(url, host) {
+  return "PROXY proxy.example:8080";
+}
+```
+www.example.com/api www.example.com pac://{pac}
+"#;
+        let parser = bifrost_core::RuleParser::new();
+        let (rules, values) = parser.parse_rules_with_inline_values(rules_text).unwrap();
+        let resolver = CoreRulesResolver::new(rules).with_values(values);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "https://www.example.com/api/path",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy, None);
+        assert_eq!(resolved.host.as_deref(), Some("www.example.com"));
     }
 
     #[test]

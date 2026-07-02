@@ -545,6 +545,7 @@ dependencies = [
  "tray-icon",
  "unicode-normalization",
  "ureq",
+ "url",
  "urlencoding",
  "uuid",
  "windows-sys 0.59.0",
