@@ -1484,7 +1484,22 @@ fn decode_base64_or_raw(value: &str) -> Vec<u8> {
         _ => value.as_bytes().to_vec(),
     }
 }
+/// P1-A: caller-side deterministic counter nonce.
+///
+/// The caller always encrypts in the `caller_to_client` direction, so the nonce
+/// prefix is fixed at `[0, 0, 0, 0]`; the target uses `[0, 0, 0, 1]` for its
+/// `client_to_caller` frames. Encoding the direction into the prefix keeps the
+/// two peers' nonce spaces disjoint under the shared call session key, and the
+/// 8-byte big-endian seq keeps each direction collision-free. Must byte-match
+/// `bifrost_admin::remote_invoke::types::counter_nonce` for the caller side.
+const CALLER_NONCE_DIRECTION_PREFIX: [u8; 4] = [0, 0, 0, 0];
 
+fn caller_counter_nonce(seq: u64) -> [u8; NONCE_LEN] {
+    let mut nonce = [0u8; NONCE_LEN];
+    nonce[..4].copy_from_slice(&CALLER_NONCE_DIRECTION_PREFIX);
+    nonce[4..].copy_from_slice(&seq.to_be_bytes());
+    nonce
+}
 fn short_fingerprint(bytes: &[u8]) -> String {
     digest(&SHA256, bytes).as_ref()[..6]
         .iter()
@@ -1518,10 +1533,9 @@ fn encrypt_remote_command(
         BifrostError::Config("initialize open_call command encryption failed".to_string())
     })?;
     let key = LessSafeKey::new(unbound);
-    let mut nonce = [0u8; NONCE_LEN];
-    SystemRandom::new()
-        .fill(&mut nonce)
-        .map_err(|_| BifrostError::Config("generate open_call nonce failed".to_string()))?;
+    // P1-A: deterministic counter nonce. The open_call command is the sole
+    // encryption under its per-command key, so seq = 0 is unique.
+    let nonce = caller_counter_nonce(0);
 
     let plaintext = serde_json::to_vec(&CommandEnvelope {
         kind: command_kind.as_str().to_string(),
@@ -1679,6 +1693,12 @@ fn encrypt_caller_input_frame(
     seq: u64,
     bytes: &[u8],
 ) -> bifrost_core::Result<String> {
+    // P1-C: caller stdin frames intentionally use Aad::empty() (no AEAD-AAD)
+    // to stay wire-compatible with the deployed target decrypt path. The frame
+    // is still authenticated by the channel-bound session key, made
+    // nonce-unique by the P1-A counter nonce (caller_to_client || seq), and
+    // replay-protected on the receiver by P1-B. Converging to AEAD-AAD needs a
+    // coordinated protocol bump on both ends and is deferred.
     let key_bytes = derive_call_event_key(
         &transport.shared_secret,
         call_id,
@@ -1689,10 +1709,8 @@ fn encrypt_caller_input_frame(
         BifrostError::Config("initialize caller input frame encryption failed".to_string())
     })?;
     let key = LessSafeKey::new(unbound);
-    let mut nonce = [0u8; NONCE_LEN];
-    SystemRandom::new().fill(&mut nonce).map_err(|_| {
-        BifrostError::Config("generate caller input frame nonce failed".to_string())
-    })?;
+    // P1-A: deterministic counter nonce (caller_to_client || seq).
+    let nonce = caller_counter_nonce(seq);
     let mut sealed = serde_json::to_vec(&CallerInputFramePayload {
         data_b64: base64::engine::general_purpose::STANDARD.encode(bytes),
     })

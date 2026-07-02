@@ -212,6 +212,30 @@ pub enum FrameDirection {
     ClientToCaller,
 }
 
+impl FrameDirection {
+    /// P1-A counter nonce: 4-byte direction prefix.
+    /// Both peers share ONE session key, so the direction MUST be encoded into
+    /// the nonce to guarantee caller->client and client->caller never collide
+    /// on the same (key, nonce) pair.
+    pub fn nonce_prefix(self) -> [u8; 4] {
+        match self {
+            FrameDirection::CallerToClient => [0, 0, 0, 0],
+            FrameDirection::ClientToCaller => [0, 0, 0, 1],
+        }
+    }
+}
+
+/// P1-A deterministic counter nonce = 4-byte direction prefix || 8-byte seq (BE).
+/// Replaces the previous random 12-byte nonce. Because both peers share the same
+/// session key, uniqueness is guaranteed by (direction, seq) rather than by RNG,
+/// eliminating the birthday-bound nonce-reuse risk of random nonces.
+fn counter_nonce(direction: FrameDirection, seq: u64) -> [u8; 12] {
+    let mut nonce = [0u8; 12];
+    nonce[..4].copy_from_slice(&direction.nonce_prefix());
+    nonce[4..].copy_from_slice(&seq.to_be_bytes());
+    nonce
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GrantDecision {
@@ -542,6 +566,11 @@ pub fn derive_open_call_session_key(
     caller_ephemeral_pub: Option<&str>,
     client_ephemeral_pub: Option<&str>,
     command_kind: CommandKind,
+    // P0-A #4 channel binding: long-term key fingerprints of both peers.
+    // Empty string == no binding (legacy). Caller and target MUST pass the
+    // SAME values in the SAME order or the derived key will not match.
+    caller_long_term_fp: &str,
+    client_long_term_fp: &str,
 ) -> Result<[u8; 32]> {
     // v5 callers no longer see grant_id, so the open-call key schedule cannot
     // depend on it. The grant_id parameter is kept for source compatibility.
@@ -550,11 +579,13 @@ pub fn derive_open_call_session_key(
 
     let caller_pub = decode_base64_or_raw(caller_ephemeral_pub.unwrap_or_default());
     let client_pub = decode_base64_or_raw(client_ephemeral_pub.unwrap_or_default());
-    let info_parts: [&[u8]; 4] = [
+    let info_parts: [&[u8]; 6] = [
         OPEN_CALL_HKDF_INFO_PREFIX,
         caller_pub.as_slice(),
         client_pub.as_slice(),
         command_kind.as_str().as_bytes(),
+        caller_long_term_fp.as_bytes(),
+        client_long_term_fp.as_bytes(),
     ];
 
     let okm = prk.expand(&info_parts, SessionKeyLen).map_err(|_| {
@@ -572,18 +603,22 @@ pub fn derive_call_session_key(
     call_id: &str,
     caller_ephemeral_pub: Option<&str>,
     client_ephemeral_pub: Option<&str>,
+    // P0-A #4 channel binding: see derive_open_call_session_key.
+    caller_long_term_fp: &str,
+    client_long_term_fp: &str,
 ) -> Result<[u8; 32]> {
     let salt = Salt::new(HKDF_SHA256, call_id.as_bytes());
     let prk = salt.extract(shared_secret);
 
     let caller_pub = decode_base64_or_raw(caller_ephemeral_pub.unwrap_or_default());
     let client_pub = decode_base64_or_raw(client_ephemeral_pub.unwrap_or_default());
-    let info_parts: [&[u8]; 3] = [
+    let info_parts: [&[u8]; 5] = [
         E2E_HKDF_INFO_PREFIX,
         caller_pub.as_slice(),
         client_pub.as_slice(),
+        caller_long_term_fp.as_bytes(),
+        client_long_term_fp.as_bytes(),
     ];
-
     let okm = prk
         .expand(&info_parts, SessionKeyLen)
         .map_err(|_| BifrostError::Config("expand remote invoke session key failed".to_string()))?;
@@ -624,10 +659,9 @@ where
         .map_err(|_| BifrostError::Config("build remote invoke encrypt key failed".to_string()))?;
     let key = LessSafeKey::new(unbound);
 
-    let mut nonce_bytes = [0u8; 12];
-    ring::rand::SystemRandom::new()
-        .fill(&mut nonce_bytes)
-        .map_err(|_| BifrostError::Config("generate encrypted payload nonce failed".to_string()))?;
+    // P1-A: deterministic counter nonce (direction || seq) instead of random.
+    // Still transmitted in payload.nonce so the peer decrypt path is unchanged.
+    let nonce_bytes = counter_nonce(aad.direction, aad.seq);
 
     let mut in_out = plaintext;
     let tag = key
@@ -667,6 +701,56 @@ where
     ring::rand::SystemRandom::new()
         .fill(&mut nonce_bytes)
         .map_err(|_| BifrostError::Config("generate encrypted payload nonce failed".to_string()))?;
+
+    let mut in_out = plaintext;
+    let tag = key
+        .seal_in_place_separate_tag(
+            Nonce::assume_unique_for_key(nonce_bytes),
+            Aad::empty(),
+            &mut in_out,
+        )
+        .map_err(|_| BifrostError::Config("encrypt remote invoke payload failed".to_string()))?;
+
+    let engine = base64::engine::general_purpose::STANDARD;
+    Ok(EncryptedPayload {
+        version,
+        nonce: engine.encode(nonce_bytes),
+        ciphertext: engine.encode(in_out),
+        tag: engine.encode(tag.as_ref()),
+        aad: None,
+    })
+}
+
+/// P1-A: counter-nonce variant of the no-AAD frame encryptor.
+///
+/// Identical wire format to `encrypt_encrypted_payload_without_aad` (empty AEAD
+/// AAD, nonce transmitted in `payload.nonce`), but the nonce is a deterministic
+/// `direction || seq` counter instead of a random value. Because both peers
+/// share ONE call session key, encoding the direction in the nonce prefix keeps
+/// the caller->client and client->caller nonce spaces disjoint, and the seq
+/// keeps each direction collision-free. The peer decrypt path is unchanged: it
+/// still reads the transmitted nonce, so this is fully wire-compatible.
+///
+/// CALLER CONTRACT: for a given (session_key, direction) the caller MUST pass a
+/// strictly unique `seq`. Frames use seq = 1.. and call-exit uses seq = 0.
+pub fn encrypt_encrypted_payload_counter<T>(
+    payload: &T,
+    session_key: &[u8; 32],
+    version: u32,
+    direction: FrameDirection,
+    seq: u64,
+) -> Result<EncryptedPayload>
+where
+    T: Serialize,
+{
+    let plaintext = serde_json::to_vec(payload)
+        .map_err(|e| BifrostError::Config(format!("encode encrypted payload json: {}", e)))?;
+
+    let unbound = UnboundKey::new(&CHACHA20_POLY1305, session_key)
+        .map_err(|_| BifrostError::Config("build remote invoke encrypt key failed".to_string()))?;
+    let key = LessSafeKey::new(unbound);
+
+    let nonce_bytes = counter_nonce(direction, seq);
 
     let mut in_out = plaintext;
     let tag = key
@@ -1084,6 +1168,103 @@ pub fn build_registration_signature_payload(
     .to_string()
 }
 
+// ---------------------------------------------------------------------------
+// P0-A: ephemeral-key handshake authentication + long-term key pinning.
+//
+// Both peers sign their own X25519 ephemeral public key with their Ed25519
+// long-term private key. The peer verifies the signature with the long-term
+// public key carried alongside it, then pins that long-term key by fingerprint.
+// This defeats a relay-in-the-middle that swaps ephemeral keys: it cannot
+// forge a signature without the long-term private key.
+// ---------------------------------------------------------------------------
+
+/// Domain-separation tag for the ephemeral-key authentication signature.
+pub const EPHEMERAL_SIG_DOMAIN: &str = "bifrost-remote-ephemeral-v1";
+
+/// Canonical JSON payload that each peer signs over its own ephemeral pubkey.
+/// The field order is FIXED and MUST be identical on caller and target.
+pub fn build_ephemeral_signature_payload(
+    binding_id: &str,
+    signer_instance_id: &str,
+    peer_fingerprint: &str,
+    ephemeral_pub_b64: &str,
+    timestamp: u64,
+) -> String {
+    serde_json::json!([
+        EPHEMERAL_SIG_DOMAIN,
+        binding_id,
+        signer_instance_id,
+        peer_fingerprint,
+        ephemeral_pub_b64,
+        timestamp,
+    ])
+    .to_string()
+}
+
+/// SHA-256 fingerprint of a long-term public key (base64 SPKI DER input),
+/// formatted identically to `identity::sha256_fingerprint` (`sha256:` prefix).
+pub fn fingerprint_long_term_pubkey(long_term_pubkey_b64: &str) -> Result<String> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    let der = engine
+        .decode(long_term_pubkey_b64)
+        .map_err(|e| BifrostError::Config(format!("invalid long-term pubkey encoding: {e}")))?;
+    Ok(sha256_fingerprint_hex(&der))
+}
+
+fn sha256_fingerprint_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(data);
+    let mut out = String::with_capacity(digest.len() * 2 + 7);
+    out.push_str("sha256:");
+    for byte in digest {
+        out.push_str(&format!("{byte:02x}"));
+    }
+    out
+}
+
+/// Verify an ephemeral-key signature and enforce long-term-key pinning.
+///
+/// P0-A is FAIL-CLOSED: if `signature`/`long_term_pubkey` are absent the caller
+/// (see wiring in worker.rs / cli) decides policy, but whenever they ARE present
+/// they MUST verify, and if `pinned_fingerprint` is Some it MUST match. Any
+/// mismatch or malformed input returns Err and the session is refused.
+pub fn verify_ephemeral_signature(
+    long_term_pubkey_b64: &str,
+    payload: &[u8],
+    signature_b64: &str,
+    pinned_fingerprint: Option<&str>,
+) -> Result<()> {
+    use ring::signature::{UnparsedPublicKey, ED25519};
+    let engine = base64::engine::general_purpose::STANDARD;
+    let der = engine
+        .decode(long_term_pubkey_b64)
+        .map_err(|e| BifrostError::Config(format!("invalid signer long-term pubkey: {e}")))?;
+    if der.len() < 13 {
+        return Err(BifrostError::Config(
+            "signer long-term pubkey too short for SPKI DER".to_string(),
+        ));
+    }
+    // Ed25519 SPKI DER prefix is 12 bytes; the raw key follows.
+    let raw = &der[12..];
+    let signature = engine
+        .decode(signature_b64)
+        .map_err(|e| BifrostError::Config(format!("invalid ephemeral signature: {e}")))?;
+    UnparsedPublicKey::new(&ED25519, raw)
+        .verify(payload, &signature)
+        .map_err(|_| {
+            BifrostError::Config("ephemeral key signature verification failed".to_string())
+        })?;
+    if let Some(pinned) = pinned_fingerprint {
+        let actual = sha256_fingerprint_hex(&der);
+        if actual != pinned {
+            return Err(BifrostError::Config(format!(
+                "long-term key fingerprint mismatch (pinned={pinned}, got={actual})"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublishPairCodeRequest {
     pub client_instance_id: String,
@@ -1496,6 +1677,8 @@ mod tests {
             "call-1",
             Some("Y2FsbGVyLXB1Yg=="),
             Some("Y2xpZW50LXB1Yg=="),
+            "",
+            "",
         )
         .expect("first key");
         let second = derive_call_session_key(
@@ -1503,6 +1686,8 @@ mod tests {
             "call-1",
             Some("Y2FsbGVyLXB1Yg=="),
             Some("Y2xpZW50LXB1Yg=="),
+            "",
+            "",
         )
         .expect("second key");
         let other = derive_call_session_key(
@@ -1510,6 +1695,8 @@ mod tests {
             "call-2",
             Some("Y2FsbGVyLXB1Yg=="),
             Some("Y2xpZW50LXB1Yg=="),
+            "",
+            "",
         )
         .expect("other key");
 
@@ -1524,6 +1711,8 @@ mod tests {
             "call-crypto",
             Some("caller-ephemeral"),
             Some("client-ephemeral"),
+            "",
+            "",
         )
         .expect("session key");
         let aad = EnvelopeAad {
@@ -1582,6 +1771,8 @@ mod tests {
             Some("caller-ephemeral"),
             Some("client-ephemeral"),
             CommandKind::QueryReadonly,
+            "",
+            "",
         )
         .expect("session key");
         let command = RemoteCommand {
@@ -1881,6 +2072,191 @@ mod pr1_large_output_protocol_tests {
         let b = ProtocolFeatures::default();
         assert!(a.negotiates_large_output(&b));
         assert_eq!(a.effective_max_frame_bytes(&b), 256 * 1024);
+    }
+
+    // ---- P1-A / P0-A security regression tests ---------------------------
+
+    const ED25519_SPKI_PREFIX: &[u8] = &[
+        0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+    ];
+
+    fn spki_der_b64(raw_pub: &[u8]) -> String {
+        let mut der = Vec::with_capacity(ED25519_SPKI_PREFIX.len() + raw_pub.len());
+        der.extend_from_slice(ED25519_SPKI_PREFIX);
+        der.extend_from_slice(raw_pub);
+        base64::engine::general_purpose::STANDARD.encode(der)
+    }
+
+    fn gen_ed25519() -> (ring::signature::Ed25519KeyPair, String) {
+        use ring::signature::{Ed25519KeyPair, KeyPair};
+        let rng = ring::rand::SystemRandom::new();
+        let pkcs8 = Ed25519KeyPair::generate_pkcs8(&rng).expect("gen pkcs8");
+        let kp = Ed25519KeyPair::from_pkcs8(pkcs8.as_ref()).expect("parse pkcs8");
+        let pub_b64 = spki_der_b64(kp.public_key().as_ref());
+        (kp, pub_b64)
+    }
+
+    #[test]
+    fn p1a_counter_nonce_is_deterministic_and_direction_separated() {
+        // Determinism: same (direction, seq) -> identical nonce.
+        assert_eq!(
+            counter_nonce(FrameDirection::CallerToClient, 7),
+            counter_nonce(FrameDirection::CallerToClient, 7)
+        );
+        // Seq is 8-byte big-endian in the low bytes.
+        let n = counter_nonce(FrameDirection::CallerToClient, 0x0102_0304_0506_0708);
+        assert_eq!(&n[..4], &[0, 0, 0, 0]);
+        assert_eq!(&n[4..], &0x0102_0304_0506_0708u64.to_be_bytes());
+        // Direction is encoded in the prefix so the two peers never collide.
+        let c2s = counter_nonce(FrameDirection::CallerToClient, 42);
+        let s2c = counter_nonce(FrameDirection::ClientToCaller, 42);
+        assert_ne!(c2s, s2c);
+        assert_eq!(&c2s[..4], &[0, 0, 0, 0]);
+        assert_eq!(&s2c[..4], &[0, 0, 0, 1]);
+        // Different seq -> different nonce within a direction.
+        assert_ne!(
+            counter_nonce(FrameDirection::ClientToCaller, 1),
+            counter_nonce(FrameDirection::ClientToCaller, 2)
+        );
+    }
+
+    #[test]
+    fn p1a_counter_encryptor_roundtrips_and_uses_counter_nonce() {
+        let key = [7u8; 32];
+        let payload = serde_json::json!({ "chunk": "hello-p1a" });
+        let sealed =
+            encrypt_encrypted_payload_counter(&payload, &key, 2, FrameDirection::ClientToCaller, 5)
+                .expect("encrypt");
+        // Nonce on the wire is the deterministic counter nonce.
+        let nonce = base64::engine::general_purpose::STANDARD
+            .decode(&sealed.nonce)
+            .expect("decode nonce");
+        assert_eq!(
+            nonce,
+            counter_nonce(FrameDirection::ClientToCaller, 5).to_vec()
+        );
+        // Roundtrip via the matching no-AAD decryptor.
+        let decoded: serde_json::Value =
+            decrypt_encrypted_payload_without_aad(&sealed, &key).expect("decrypt");
+        assert_eq!(decoded, payload);
+    }
+
+    #[test]
+    fn p0a_ephemeral_signature_verifies_and_binds_key_roundtrip() {
+        // Positive: caller signs its ephemeral pubkey; target verifies + pins fp,
+        // then both derive the SAME channel-bound session key and roundtrip.
+        let (caller_kp, caller_lt_b64) = gen_ed25519();
+        let (_client_kp, client_lt_b64) = gen_ed25519();
+        let caller_fp = fingerprint_long_term_pubkey(&caller_lt_b64).expect("caller fp");
+        let client_fp = fingerprint_long_term_pubkey(&client_lt_b64).expect("client fp");
+
+        let caller_eph = "oaNKFHB0HF2375h+0cywBEOqPbh1zUga5nvlpAaxhk0=";
+        let payload = build_ephemeral_signature_payload(
+            "binding-123",
+            "caller-instance",
+            &client_fp,
+            caller_eph,
+            1_700_000_000,
+        );
+        let sig = {
+            let s = caller_kp.sign(payload.as_bytes());
+            base64::engine::general_purpose::STANDARD.encode(s.as_ref())
+        };
+        // Verify succeeds and pinned fingerprint matches.
+        verify_ephemeral_signature(&caller_lt_b64, payload.as_bytes(), &sig, Some(&caller_fp))
+            .expect("verification should succeed");
+
+        // Channel binding: identical fp order on both sides -> identical key.
+        let shared = [0x11u8; 32];
+        let call_id = "call-p0a";
+        let key_target = derive_call_session_key(
+            &shared,
+            call_id,
+            Some(caller_eph),
+            Some("+28VjQSK28Z+0Ckn9lRCn/D1Lq84MyU9DZTO5X/oZHs="),
+            &caller_fp,
+            &client_fp,
+        )
+        .expect("target key");
+        let key_caller = derive_call_session_key(
+            &shared,
+            call_id,
+            Some(caller_eph),
+            Some("+28VjQSK28Z+0Ckn9lRCn/D1Lq84MyU9DZTO5X/oZHs="),
+            &caller_fp,
+            &client_fp,
+        )
+        .expect("caller key");
+        assert_eq!(key_target, key_caller);
+        let msg = serde_json::json!({ "chunk": "bound" });
+        let sealed = encrypt_encrypted_payload_counter(
+            &msg,
+            &key_caller,
+            2,
+            FrameDirection::ClientToCaller,
+            1,
+        )
+        .expect("encrypt");
+        let got: serde_json::Value =
+            decrypt_encrypted_payload_without_aad(&sealed, &key_target).expect("decrypt");
+        assert_eq!(got, msg);
+
+        // Wrong ephemeral pub -> different key (binding is effective).
+        let key_other = derive_call_session_key(
+            &shared,
+            call_id,
+            Some("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="),
+            Some("+28VjQSK28Z+0Ckn9lRCn/D1Lq84MyU9DZTO5X/oZHs="),
+            &caller_fp,
+            &client_fp,
+        )
+        .expect("other key");
+        assert_ne!(key_other, key_caller);
+    }
+
+    #[test]
+    fn p0a_ephemeral_signature_rejects_tamper_and_wrong_fingerprint() {
+        let (caller_kp, caller_lt_b64) = gen_ed25519();
+        let caller_fp = fingerprint_long_term_pubkey(&caller_lt_b64).expect("caller fp");
+        let caller_eph = "oaNKFHB0HF2375h+0cywBEOqPbh1zUga5nvlpAaxhk0=";
+        let payload = build_ephemeral_signature_payload(
+            "binding-123",
+            "caller-instance",
+            "sha256:peerfp",
+            caller_eph,
+            1_700_000_000,
+        );
+        let sig = base64::engine::general_purpose::STANDARD
+            .encode(caller_kp.sign(payload.as_bytes()).as_ref());
+
+        // Negative 1: tampered payload (different ephemeral pub) fails.
+        let tampered = build_ephemeral_signature_payload(
+            "binding-123",
+            "caller-instance",
+            "sha256:peerfp",
+            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            1_700_000_000,
+        );
+        assert!(verify_ephemeral_signature(
+            &caller_lt_b64,
+            tampered.as_bytes(),
+            &sig,
+            Some(&caller_fp)
+        )
+        .is_err());
+
+        // Negative 2: correct signature but wrong pinned fingerprint fails.
+        assert!(verify_ephemeral_signature(
+            &caller_lt_b64,
+            payload.as_bytes(),
+            &sig,
+            Some("sha256:0000000000000000000000000000000000000000000000000000000000000000")
+        )
+        .is_err());
+
+        // Negative 3: signature from a different key fails.
+        let (_other_kp, other_lt_b64) = gen_ed25519();
+        assert!(verify_ephemeral_signature(&other_lt_b64, payload.as_bytes(), &sig, None).is_err());
     }
 }
 // END PR#1 large-output protocol extensions
