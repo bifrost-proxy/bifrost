@@ -512,13 +512,18 @@ impl SyncManager {
         }
 
         let rules_storage = self.config_manager.rules_storage().await;
-        let local_count = rules_storage.load_all()?.len();
+        let local_count = rules_storage
+            .load_all()?
+            .into_iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .count();
 
         let result = self.sync_rules(&client, &config.sync, &token, &user).await;
         let state = self.state.lock().clone();
         let synced_count = rules_storage
             .load_all()?
             .iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
             .filter(|rule| rule.sync.remote_id.is_some())
             .count();
 
@@ -858,8 +863,17 @@ impl SyncManager {
         user: &RemoteUser,
     ) -> Result<()> {
         let rules_storage = self.config_manager.rules_storage().await;
-        let local_rules = rules_storage.load_all()?;
-        let remote_rules = client.search_envs(config, token, &user.user_id).await?;
+        let local_rules = rules_storage
+            .load_all()?
+            .into_iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .collect::<Vec<_>>();
+        let remote_rules = client
+            .search_envs(config, token, &user.user_id)
+            .await?
+            .into_iter()
+            .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+            .collect::<Vec<_>>();
         let now = Utc::now();
         tracing::debug!(
             target: "bifrost_sync::manager",
@@ -3040,6 +3054,64 @@ mod tests {
 
         let state = manager.state.lock();
         assert_eq!(state.last_sync_action, Some(SyncAction::RemotePulled));
+    }
+
+    #[tokio::test]
+    async fn sync_rules_filters_global_default_from_local_and_remote() {
+        let server = MockServer::start().await;
+        let (_temp_dir, config_manager, manager) = sync_manager_for_remote(&server.uri()).await;
+
+        let rules_storage = config_manager.rules_storage().await;
+        let default_rule = rules_storage.ensure_default_rule().unwrap();
+        assert_eq!(default_rule.name, bifrost_storage::DEFAULT_RULE_NAME);
+
+        let user = RemoteUser {
+            user_id: "user-1".to_string(),
+            ..Default::default()
+        };
+        let token = "token-sync";
+
+        let config = config_manager.config().await;
+        let sync_config = config.sync.clone();
+        let client = SyncHttpClient::new(&sync_config).unwrap();
+
+        let env_body = serde_json::json!({
+            "code": 0,
+            "message": "ok",
+            "data": {
+                "list": [
+                    {
+                        "id": "env-default",
+                        "user_id": "user-1",
+                        "name": "default",
+                        "rule": "remote-default.example.test status://218",
+                        "create_time": "2026-01-01T00:00:00Z",
+                        "update_time": "2026-01-02T00:00:00Z"
+                    }
+                ]
+            }
+        });
+
+        Mock::given(method("GET"))
+            .and(path("/v4/env"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(env_body))
+            .mount(&server)
+            .await;
+
+        manager
+            .sync_rules(&client, &sync_config, token, &user)
+            .await
+            .unwrap();
+
+        let default_rule = rules_storage
+            .load(bifrost_storage::DEFAULT_RULE_NAME)
+            .unwrap();
+        assert!(default_rule.sync.remote_id.is_none());
+        assert!(!default_rule.content.contains("remote-default.example.test"));
+        assert_eq!(rules_storage.load_all().unwrap().len(), 1);
+
+        let state = manager.state.lock();
+        assert_eq!(state.last_sync_action, Some(SyncAction::NoChange));
     }
 
     #[tokio::test]

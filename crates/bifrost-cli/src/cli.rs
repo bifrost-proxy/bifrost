@@ -297,7 +297,7 @@ pub enum Commands {
             "\n",
             "Multi-port model:\n",
             "  - The main proxy port keeps using the normal enabled-rule view.\n",
-            "  - Each temporary port uses only the rule refs passed via `bind` or `update`.\n",
+            "  - Each temporary port uses the global Default rule plus the refs passed via `bind` or `update`.\n",
             "  - Temporary ports share the same data dir, values, scripts, certs, and traffic DB.\n",
             "  - Destroying a temporary port stops only that listener and does not affect the main port.\n",
             "\n",
@@ -309,6 +309,7 @@ pub enum Commands {
             "  5. Remove the listener with `port destroy` when debugging is done.\n",
             "\n",
             "Rule sources:\n",
+            "  Default        Global rule applied automatically; do not pass it with --rule\n",
             "  --rule         Existing local rule name\n",
             "  --group-rule   Existing group rule in <group_id>/<rule_name> format\n",
             "  --rule-file    One-off rule file bound directly to the port\n",
@@ -1961,11 +1962,12 @@ pub enum PortCommands {
             "\n",
             "This creates an extra listener inside the running Bifrost process. The new port\n",
             "shares the same BIFROST_DATA_DIR, values, scripts, certificates, and traffic DB,\n",
-            "but it does not inherit the main port's enabled-rule view. Only the rule refs\n",
-            "passed here become active on the temporary port.\n",
+            "but it does not inherit the main port's enabled-rule view. The global Default\n",
+            "rule is applied automatically, then the rule refs passed here become active\n",
+            "on the temporary port.\n",
             "\n",
             "At least one of the following must be provided:\n",
-            "  --rule         Bind an existing local rule by name\n",
+            "  --rule         Bind an existing local rule by name; do not pass Default\n",
             "  --group-rule   Bind an existing group rule in <group_id>/<rule_name> format\n",
             "  --rule-file    Bind a rule file directly without writing to shared rules/\n",
             "  --rule-text    Bind inline rule text directly for one-off debugging\n",
@@ -2021,7 +2023,7 @@ pub enum PortCommands {
     },
     #[command(
         about = "Show active rules for a temporary proxy port",
-        long_about = "Show the resolved active-rule summary for one temporary proxy port. This is the port-scoped view and should differ from the main port whenever the temporary port binds a different rule set."
+        long_about = "Show the resolved active-rule summary for one temporary proxy port. This port-scoped view includes the automatic global Default rule plus the port's explicit bindings, and should differ from the main port whenever the temporary port binds a different rule set."
     )]
     Active {
         #[arg(help = "Temporary proxy port")]
@@ -2034,7 +2036,8 @@ pub enum PortCommands {
             "\n",
             "Like `port bind`, this command works against the running main proxy process and\n",
             "rebuilds only the selected temporary port's rule view. The main port and other\n",
-            "temporary ports are not affected.\n",
+            "temporary ports are not affected. The global Default rule remains active and is\n",
+            "not part of the replaceable binding list.\n",
             "\n",
             "Use the same rule source flags as `port bind`:\n",
             "  --rule, --group-rule, --rule-file, --rule-text\n",

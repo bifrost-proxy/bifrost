@@ -13,6 +13,10 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const SHARE_ENV_STATE_FILE: &str = ".share_env_state.json";
+pub const DEFAULT_RULE_NAME: &str = "Default";
+pub const DEFAULT_RULE_SORT_ORDER: i32 = -1_000_000_000;
+
+const DEFAULT_RULE_CONTENT: &str = "# Global default rules.\n# These rules are always enabled and apply to every proxy listener.\n";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -161,6 +165,23 @@ impl RuleFile {
             self.sync.remote_created_at = None;
             self.sync.remote_updated_at = None;
         }
+    }
+
+    fn normalize_global_default(&mut self) {
+        self.name = DEFAULT_RULE_NAME.to_string();
+        self.enabled = true;
+        self.sort_order = DEFAULT_RULE_SORT_ORDER;
+        let rule_id = self.sync.rule_id.clone();
+        self.sync = RuleSyncMetadata {
+            rule_id,
+            status: RuleSyncStatus::LocalOnly,
+            last_synced_at: None,
+            last_synced_content_hash: None,
+            remote_id: None,
+            remote_user_id: None,
+            remote_created_at: None,
+            remote_updated_at: None,
+        };
     }
 
     pub fn mark_synced(
@@ -337,6 +358,126 @@ impl RulesStorage {
         &self.base_dir
     }
 
+    fn protects_default_rule(&self) -> bool {
+        self.base_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .map(|name| name == "rules")
+            .unwrap_or(false)
+    }
+
+    pub fn is_default_rule_name(name: &str) -> bool {
+        name.eq_ignore_ascii_case(DEFAULT_RULE_NAME)
+    }
+
+    pub fn is_protected_default_rule(&self, name: &str) -> bool {
+        self.protects_default_rule() && Self::is_default_rule_name(name)
+    }
+
+    fn normalize_rule_for_storage(&self, rule: &mut RuleFile) -> bool {
+        if self.is_protected_default_rule(&rule.name) {
+            let before = (
+                rule.name.clone(),
+                rule.enabled,
+                rule.sort_order,
+                rule.sync.status,
+                rule.sync.last_synced_at.clone(),
+                rule.sync.last_synced_content_hash.clone(),
+                rule.sync.remote_id.clone(),
+                rule.sync.remote_user_id.clone(),
+                rule.sync.remote_created_at.clone(),
+                rule.sync.remote_updated_at.clone(),
+            );
+            rule.normalize_global_default();
+            let after = (
+                rule.name.clone(),
+                rule.enabled,
+                rule.sort_order,
+                rule.sync.status,
+                rule.sync.last_synced_at.clone(),
+                rule.sync.last_synced_content_hash.clone(),
+                rule.sync.remote_id.clone(),
+                rule.sync.remote_user_id.clone(),
+                rule.sync.remote_created_at.clone(),
+                rule.sync.remote_updated_at.clone(),
+            );
+            return before != after;
+        }
+        false
+    }
+
+    pub fn ensure_default_rule(&self) -> Result<RuleFile> {
+        if !self.protects_default_rule() {
+            return Err(BifrostError::Config(format!(
+                "Default rule can only be initialized in the root rules directory: {}",
+                self.base_dir.display()
+            )));
+        }
+
+        let existing_name = if self.exists(DEFAULT_RULE_NAME) {
+            DEFAULT_RULE_NAME.to_string()
+        } else {
+            self.list()?
+                .into_iter()
+                .find(|name| Self::is_default_rule_name(name))
+                .unwrap_or_else(|| DEFAULT_RULE_NAME.to_string())
+        };
+
+        match self.load(&existing_name) {
+            Ok(mut rule) => {
+                let before = (
+                    rule.name.clone(),
+                    rule.enabled,
+                    rule.sort_order,
+                    rule.sync.status,
+                    rule.sync.last_synced_at.clone(),
+                    rule.sync.last_synced_content_hash.clone(),
+                    rule.sync.remote_id.clone(),
+                    rule.sync.remote_user_id.clone(),
+                    rule.sync.remote_created_at.clone(),
+                    rule.sync.remote_updated_at.clone(),
+                );
+                rule.normalize_global_default();
+                let after = (
+                    rule.name.clone(),
+                    rule.enabled,
+                    rule.sort_order,
+                    rule.sync.status,
+                    rule.sync.last_synced_at.clone(),
+                    rule.sync.last_synced_content_hash.clone(),
+                    rule.sync.remote_id.clone(),
+                    rule.sync.remote_user_id.clone(),
+                    rule.sync.remote_created_at.clone(),
+                    rule.sync.remote_updated_at.clone(),
+                );
+                let should_save = before != after;
+                if should_save {
+                    rule.touch();
+                }
+                for name in self.list()? {
+                    if Self::is_default_rule_name(&name) && name != DEFAULT_RULE_NAME {
+                        self.remove_rule_files_unchecked(&name)?;
+                    }
+                }
+                if should_save || !self.exists(DEFAULT_RULE_NAME) {
+                    self.save(&rule)?;
+                }
+                Ok(rule)
+            }
+            Err(BifrostError::NotFound(_)) => {
+                let rule = RuleFile::new(DEFAULT_RULE_NAME, DEFAULT_RULE_CONTENT)
+                    .with_enabled(true)
+                    .with_sort_order(DEFAULT_RULE_SORT_ORDER)
+                    .with_description(Some(
+                        "Global default rules applied to every proxy listener".to_string(),
+                    ));
+                self.save(&rule)?;
+                self.load(DEFAULT_RULE_NAME)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     fn rule_path(&self, name: &str) -> PathBuf {
         self.base_dir
             .join(format!("{}.bifrost", Self::encode_rule_name(name)))
@@ -377,6 +518,9 @@ impl RulesStorage {
             if should_resave {
                 self.save(&rule)?;
             }
+            if self.normalize_rule_for_storage(&mut rule) {
+                self.save(&rule)?;
+            }
             Ok(rule)
         } else if raw_bifrost_path.exists() {
             ensure_file_size_within_limit(&raw_bifrost_path, MAX_RULE_FILE_BYTES)?;
@@ -388,6 +532,9 @@ impl RulesStorage {
             let mut should_resave = rule.content != file.content;
             should_resave |= ensure_sync_metadata(&mut rule);
             if should_resave {
+                self.save(&rule)?;
+            }
+            if self.normalize_rule_for_storage(&mut rule) {
                 self.save(&rule)?;
             }
             Ok(rule)
@@ -407,6 +554,10 @@ impl RulesStorage {
             let rule = RuleFile::new(legacy.name, legacy.content).with_enabled(legacy.enabled);
             self.save(&rule)?;
             fs::remove_file(&legacy_path)?;
+            let mut rule = rule;
+            if self.normalize_rule_for_storage(&mut rule) {
+                self.save(&rule)?;
+            }
             Ok(rule)
         } else if raw_legacy_path.exists() {
             #[derive(Deserialize)]
@@ -424,6 +575,10 @@ impl RulesStorage {
             let rule = RuleFile::new(legacy.name, legacy.content).with_enabled(legacy.enabled);
             self.save(&rule)?;
             fs::remove_file(&raw_legacy_path)?;
+            let mut rule = rule;
+            if self.normalize_rule_for_storage(&mut rule) {
+                self.save(&rule)?;
+            }
             Ok(rule)
         } else {
             Err(BifrostError::NotFound(format!("Rule '{}' not found", name)))
@@ -432,6 +587,8 @@ impl RulesStorage {
 
     pub fn save(&self, rule: &RuleFile) -> Result<()> {
         let path = self.rule_path(&rule.name);
+        let mut rule = rule.clone();
+        self.normalize_rule_for_storage(&mut rule);
         let meta = rule.to_bifrost_meta();
         let normalized_content = normalize_rule_content(&rule.content);
         let content = BifrostFileWriter::write_rules(&meta, &normalized_content);
@@ -473,6 +630,12 @@ impl RulesStorage {
     }
 
     pub fn delete(&self, name: &str) -> Result<()> {
+        if self.is_protected_default_rule(name) {
+            return Err(BifrostError::Config(
+                "Default rule cannot be deleted".to_string(),
+            ));
+        }
+
         let bifrost_path = self.rule_path(name);
         let legacy_path = self.legacy_rule_path(name);
         let raw_bifrost_path = self.raw_rule_path(name);
@@ -485,6 +648,15 @@ impl RulesStorage {
         if !exists {
             return Err(BifrostError::NotFound(format!("Rule '{}' not found", name)));
         }
+
+        self.remove_rule_files_unchecked(name)
+    }
+
+    fn remove_rule_files_unchecked(&self, name: &str) -> Result<()> {
+        let bifrost_path = self.rule_path(name);
+        let legacy_path = self.legacy_rule_path(name);
+        let raw_bifrost_path = self.raw_rule_path(name);
+        let raw_legacy_path = self.raw_legacy_rule_path(name);
 
         if bifrost_path.exists() {
             fs::remove_file(&bifrost_path)?;
@@ -502,6 +674,17 @@ impl RulesStorage {
     }
 
     pub fn rename(&self, old: &str, new: &str) -> Result<()> {
+        if self.is_protected_default_rule(old) {
+            return Err(BifrostError::Config(
+                "Default rule cannot be renamed".to_string(),
+            ));
+        }
+        if self.is_protected_default_rule(new) {
+            return Err(BifrostError::Config(
+                "Rule name 'Default' is reserved for the global default rule".to_string(),
+            ));
+        }
+
         if !self.exists(old) {
             return Err(BifrostError::NotFound(format!("Rule '{}' not found", old)));
         }
@@ -538,7 +721,7 @@ impl RulesStorage {
                 }
             }
         }
-        rules.sort_by_key(|r| r.sort_order);
+        self.sort_rule_files(&mut rules);
         Ok(rules)
     }
 
@@ -609,7 +792,6 @@ impl RulesStorage {
             }
         }
 
-        all_rules.sort_by_key(|r| r.sort_order);
         Ok(all_rules)
     }
 
@@ -629,6 +811,11 @@ impl RulesStorage {
     }
 
     pub fn set_enabled(&self, name: &str, enabled: bool) -> Result<()> {
+        if self.is_protected_default_rule(name) && !enabled {
+            return Err(BifrostError::Config(
+                "Default rule cannot be disabled".to_string(),
+            ));
+        }
         let mut rule = self.load(name)?;
         rule.enabled = enabled;
         rule.touch_local_change();
@@ -636,6 +823,9 @@ impl RulesStorage {
     }
 
     pub fn set_sort_order(&self, name: &str, sort_order: i32) -> Result<()> {
+        if self.is_protected_default_rule(name) {
+            return Ok(());
+        }
         let mut rule = self.load(name)?;
         rule.sort_order = sort_order;
         rule.touch_local_change();
@@ -662,17 +852,46 @@ impl RulesStorage {
             }
         }
 
-        summaries.sort_by_key(|r| r.sort_order);
+        self.sort_rule_summaries(&mut summaries);
         Ok(summaries)
     }
 
     pub fn reorder(&self, order: &[String]) -> Result<()> {
-        for (i, name) in order.iter().enumerate() {
+        let mut next_order = 0;
+        for name in order
+            .iter()
+            .filter(|name| !self.is_protected_default_rule(name))
+        {
             if self.exists(name) {
-                self.set_sort_order(name, i as i32)?;
+                self.set_sort_order(name, next_order)?;
+                next_order += 1;
             }
         }
         Ok(())
+    }
+
+    fn sort_rule_files(&self, rules: &mut [RuleFile]) {
+        let protects_default = self.protects_default_rule();
+        rules.sort_by(|left, right| {
+            let left_default = protects_default && Self::is_default_rule_name(&left.name);
+            let right_default = protects_default && Self::is_default_rule_name(&right.name);
+            right_default
+                .cmp(&left_default)
+                .then_with(|| left.sort_order.cmp(&right.sort_order))
+                .then_with(|| left.name.cmp(&right.name))
+        });
+    }
+
+    fn sort_rule_summaries(&self, summaries: &mut [RuleSummary]) {
+        let protects_default = self.protects_default_rule();
+        summaries.sort_by(|left, right| {
+            let left_default = protects_default && Self::is_default_rule_name(&left.name);
+            let right_default = protects_default && Self::is_default_rule_name(&right.name);
+            right_default
+                .cmp(&left_default)
+                .then_with(|| left.sort_order.cmp(&right.sort_order))
+                .then_with(|| left.name.cmp(&right.name))
+        });
     }
 
     pub fn load_share_env_state(&self) -> Result<Option<ShareEnvState>> {
@@ -734,8 +953,7 @@ impl RulesStorage {
 
             let parsed: RuleSummaryWrapper = toml::from_str(&raw.meta_raw)
                 .map_err(|e| BifrostError::Parse(format!("Failed to parse rule meta: {}", e)))?;
-
-            Ok(RuleSummary {
+            let mut summary = RuleSummary {
                 name: parsed.meta.name,
                 enabled: parsed.meta.enabled,
                 sort_order: parsed.meta.sort_order,
@@ -743,7 +961,12 @@ impl RulesStorage {
                 description: parsed.meta.description,
                 created_at: parsed.meta.created_at,
                 updated_at: parsed.meta.updated_at,
-            })
+            };
+            if self.is_protected_default_rule(&summary.name) {
+                summary.enabled = true;
+                summary.sort_order = DEFAULT_RULE_SORT_ORDER;
+            }
+            Ok(summary)
         } else if legacy_path.exists() {
             #[derive(Deserialize)]
             struct LegacyRuleFile {
@@ -782,6 +1005,102 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let storage = RulesStorage::with_dir(temp_dir.path().to_path_buf()).unwrap();
         (temp_dir, storage)
+    }
+
+    fn setup_root_rules() -> (TempDir, RulesStorage) {
+        let temp_dir = TempDir::new().unwrap();
+        let storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        (temp_dir, storage)
+    }
+
+    #[test]
+    fn ensure_default_rule_creates_enabled_protected_rule_first() {
+        let (_temp_dir, storage) = setup_root_rules();
+
+        let default_rule = storage.ensure_default_rule().unwrap();
+
+        assert_eq!(default_rule.name, DEFAULT_RULE_NAME);
+        assert!(default_rule.enabled);
+        assert_eq!(default_rule.sort_order, DEFAULT_RULE_SORT_ORDER);
+        assert_eq!(default_rule.sync.status, RuleSyncStatus::LocalOnly);
+
+        storage
+            .save(&RuleFile::new("z-rule", "z.test status://200"))
+            .unwrap();
+        let summaries = storage.list_summaries().unwrap();
+        assert_eq!(summaries[0].name, DEFAULT_RULE_NAME);
+    }
+
+    #[test]
+    fn default_rule_cannot_be_deleted_disabled_renamed_or_reordered() {
+        let (_temp_dir, storage) = setup_root_rules();
+        storage.ensure_default_rule().unwrap();
+
+        assert!(storage.delete(DEFAULT_RULE_NAME).is_err());
+        assert!(storage.set_enabled(DEFAULT_RULE_NAME, false).is_err());
+        assert!(storage.rename(DEFAULT_RULE_NAME, "other").is_err());
+        assert!(storage.rename("missing", DEFAULT_RULE_NAME).is_err());
+        assert!(storage.rename("missing", "default").is_err());
+
+        storage.set_sort_order(DEFAULT_RULE_NAME, 99).unwrap();
+        let default_rule = storage.load(DEFAULT_RULE_NAME).unwrap();
+        assert_eq!(default_rule.sort_order, DEFAULT_RULE_SORT_ORDER);
+        assert!(default_rule.enabled);
+    }
+
+    #[test]
+    fn default_rule_name_is_reserved_case_insensitively() {
+        assert!(RulesStorage::is_default_rule_name("Default"));
+        assert!(RulesStorage::is_default_rule_name("default"));
+        assert!(RulesStorage::is_default_rule_name("DEFAULT"));
+        assert!(RulesStorage::is_default_rule_name("DeFaUlT"));
+        assert!(!RulesStorage::is_default_rule_name("Default Copy"));
+    }
+
+    #[test]
+    fn ensure_default_rule_canonicalizes_case_variant_file() {
+        let (_temp_dir, storage) = setup_root_rules();
+        let rule = RuleFile::new("default", "lowercase-default.test status://218")
+            .with_enabled(false)
+            .with_sort_order(42);
+        let content = BifrostFileWriter::write_rules(&rule.to_bifrost_meta(), &rule.content);
+        std::fs::write(storage.base_dir().join("default.bifrost"), content).unwrap();
+
+        let default_rule = storage.ensure_default_rule().unwrap();
+
+        assert_eq!(default_rule.name, DEFAULT_RULE_NAME);
+        assert!(default_rule.enabled);
+        assert_eq!(default_rule.sort_order, DEFAULT_RULE_SORT_ORDER);
+        assert!(storage.base_dir().join("Default.bifrost").exists());
+        let listed_defaults = storage
+            .list()
+            .unwrap()
+            .into_iter()
+            .filter(|name| RulesStorage::is_default_rule_name(name))
+            .collect::<Vec<_>>();
+        assert_eq!(listed_defaults, vec![DEFAULT_RULE_NAME.to_string()]);
+        assert_eq!(
+            storage.load(DEFAULT_RULE_NAME).unwrap().content.trim(),
+            "lowercase-default.test status://218"
+        );
+    }
+
+    #[test]
+    fn saving_default_rule_normalizes_enabled_sort_and_sync_metadata() {
+        let (_temp_dir, storage) = setup_root_rules();
+        let mut default_rule = RuleFile::new(DEFAULT_RULE_NAME, "global.test status://218")
+            .with_enabled(false)
+            .with_sort_order(42);
+        default_rule.mark_synced("remote-id", "user-id", "created", "updated");
+
+        storage.save(&default_rule).unwrap();
+        let loaded = storage.load(DEFAULT_RULE_NAME).unwrap();
+
+        assert!(loaded.enabled);
+        assert_eq!(loaded.sort_order, DEFAULT_RULE_SORT_ORDER);
+        assert_eq!(loaded.sync.status, RuleSyncStatus::LocalOnly);
+        assert!(loaded.sync.remote_id.is_none());
+        assert_eq!(loaded.content, "global.test status://218");
     }
 
     #[test]

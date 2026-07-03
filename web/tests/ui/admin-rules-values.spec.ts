@@ -73,6 +73,78 @@ test.beforeEach(async ({ request }) => {
   await clearValues(request);
 });
 
+test("Rules 页面置顶并保护全局 Default 规则，同时允许编辑内容", async ({
+  page,
+  request,
+}) => {
+  const secondaryRuleName = uniqueName("default-switch-target");
+  const createSecondaryRes = await request.post(`${apiBase}/rules`, {
+    data: {
+      name: secondaryRuleName,
+      content: "switch-target.test status://219",
+      enabled: true,
+    },
+  });
+  if (!createSecondaryRes.ok()) {
+    throw new Error(await createSecondaryRes.text());
+  }
+
+  await openPage(page, "rules?rule=Default");
+  await expect(page.getByTestId("rules-list")).toBeVisible();
+
+  const defaultItem = page.getByTestId("rule-item").first();
+  await expect(defaultItem).toHaveAttribute("data-rule-name", "Default");
+  await expect(defaultItem.locator(".ant-switch")).toHaveClass(/ant-switch-disabled/);
+  await defaultItem.getByText("Default", { exact: true }).hover();
+  await expect(page.getByText("Default applies globally with the highest priority")).toBeVisible();
+  await expect(page.getByText("clear its content if you do not need global rules")).toBeVisible();
+
+  await defaultItem.click();
+  await expect(page.getByTestId("rule-editor-title")).toHaveText("Default");
+  await expect(page.getByTestId("rule-editor")).toBeVisible();
+  await expect(page.getByTestId("rule-editor-meta")).toContainText("Global default");
+  await expect(page.getByTestId("rule-delete-button")).toHaveCount(0);
+
+  await defaultItem.click({ button: "right" });
+  await expect(page.getByRole("menuitem")).toHaveCount(0);
+  await page.keyboard.press("Escape");
+
+  const content = `# Default UI test\n${uniqueName("default-ui")}.test status://218`;
+  const editorInput = page
+    .getByTestId("rule-editor-container")
+    .getByRole("textbox", { name: "Editor content" });
+  await editorInput.click({ force: true });
+  await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+  await page.keyboard.press("Backspace");
+  await page.keyboard.insertText(content);
+  const saveButton = page.getByTestId("rule-save-button");
+  await expect(saveButton).toBeEnabled();
+  await saveButton.click();
+  await waitForToast(page, "Saved");
+
+  const response = await request.get(`${apiBase}/rules/Default`);
+  expect(response.ok()).toBeTruthy();
+  const detail = (await response.json()) as {
+    enabled: boolean;
+    is_global_default?: boolean;
+    can_delete?: boolean;
+    can_disable?: boolean;
+    content: string;
+  };
+  expect(detail.enabled).toBeTruthy();
+  expect(detail.is_global_default).toBeTruthy();
+  expect(detail.can_delete).toBeFalsy();
+  expect(detail.can_disable).toBeFalsy();
+  expect(detail.content).toContain("Default UI test");
+
+  const secondaryItem = page.locator(`[data-testid="rule-item"][data-rule-name="${secondaryRuleName}"]`);
+  await secondaryItem.click();
+  await expect(page.getByTestId("rule-editor-title")).toHaveText(secondaryRuleName);
+  await expect(page).toHaveURL(new RegExp(`rule=${secondaryRuleName}`));
+  await expect(defaultItem).toHaveAttribute("aria-selected", "false");
+  await expect(secondaryItem).toHaveAttribute("aria-selected", "true");
+});
+
 test("Rules 页面会主动拉取 syntax 信息，并包含动态脚本与协议别名", async ({
   page,
   request,

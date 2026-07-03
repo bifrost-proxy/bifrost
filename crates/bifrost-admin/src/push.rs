@@ -2007,6 +2007,7 @@ pub fn start_push_tasks(manager: SharedPushManager) -> Vec<tokio::task::JoinHand
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestAdminState;
     use crate::{AdminState, TrafficDbStore, TrafficRecord};
     use std::env;
     use std::fs;
@@ -2518,8 +2519,8 @@ mod tests {
 
     #[test]
     fn ensure_bucket_capacity_evicts_oldest_bucket_when_capacity_exceeded() {
-        let state = Arc::new(AdminState::new(0));
-        let manager = PushManager::new(state);
+        let harness = TestAdminState::builder().build();
+        let manager = PushManager::new(harness.state());
 
         {
             let mut order = manager.bucket_order.lock();

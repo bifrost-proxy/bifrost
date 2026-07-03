@@ -114,15 +114,36 @@ impl CliTemporaryPortManager {
                 "At least one --rule or --group-rule must be provided",
             ));
         }
+        if refs.iter().any(|rule_ref| {
+            matches!(rule_ref, RuleSetRef::LocalRule { name } if RulesStorage::is_default_rule_name(name))
+        }) {
+            return Err(TemporaryPortError::bad_request(
+                "Default rule is global and is applied to every temporary port automatically",
+            ));
+        }
 
         let mut all_rules = Vec::new();
         let mut inline_values = HashMap::new();
         let mut missing = Vec::new();
+        let default_rule = self.rules_storage.ensure_default_rule().map_err(|error| {
+            TemporaryPortError::internal(format!("Failed to initialize Default rule: {error}"))
+        })?;
         let all_rule_files = self
             .rules_storage
             .load_all_with_subdirs()
             .unwrap_or_default();
         let mut reference_catalog = bifrost_storage::build_rule_reference_catalog(&all_rule_files);
+        reference_catalog
+            .entry(default_rule.name.clone())
+            .or_insert_with(|| default_rule.content.clone());
+
+        self.append_parsed_rule_file(
+            &default_rule,
+            "global:Default".to_string(),
+            &reference_catalog,
+            &mut all_rules,
+            &mut inline_values,
+        )?;
 
         for rule_ref in refs {
             match self.load_rule_file(rule_ref) {
@@ -131,41 +152,21 @@ impl CliTemporaryPortManager {
                     reference_catalog
                         .entry(source_name.clone())
                         .or_insert_with(|| rule_file.content.clone());
-                    let expanded_content = expand_rule_references(
-                        &source_name,
-                        &rule_file.content,
+                    let file_label = match rule_ref {
+                        RuleSetRef::LocalRule { name } => format!("local:{name}"),
+                        RuleSetRef::GroupRule { group_id, name } => {
+                            format!("group:{group_id}/{name}")
+                        }
+                        RuleSetRef::RuleFile { path } => format!("file:{path}"),
+                        RuleSetRef::InlineRule { content } => inline_rule_label(content),
+                    };
+                    self.append_parsed_rule_file(
+                        &rule_file,
+                        file_label,
                         &reference_catalog,
-                    )
-                    .map_err(|error| {
-                        TemporaryPortError::bad_request(format!(
-                            "Failed to expand rule '{}': {}",
-                            rule_file.name, error
-                        ))
-                    })?;
-                    let parser = RuleParser::new();
-                    let (result, file_inline_values) =
-                        parser.parse_rules_tolerant_with_inline_values(&expanded_content);
-                    if !result.errors.is_empty() {
-                        let first = &result.errors[0];
-                        return Err(TemporaryPortError::bad_request(format!(
-                            "Failed to parse rule '{}': line {}, column {}: {}",
-                            rule_file.name, first.line, first.start_column, first.message
-                        )));
-                    }
-                    for mut rule in result.rules {
-                        rule.file = Some(match rule_ref {
-                            RuleSetRef::LocalRule { name } => format!("local:{name}"),
-                            RuleSetRef::GroupRule { group_id, name } => {
-                                format!("group:{group_id}/{name}")
-                            }
-                            RuleSetRef::RuleFile { path } => format!("file:{path}"),
-                            RuleSetRef::InlineRule { content } => inline_rule_label(content),
-                        });
-                        all_rules.push(rule);
-                    }
-                    for (k, v) in file_inline_values {
-                        inline_values.entry(k).or_insert(v);
-                    }
+                        &mut all_rules,
+                        &mut inline_values,
+                    )?;
                 }
                 Err(error) => {
                     if fail_on_missing {
@@ -192,6 +193,44 @@ impl CliTemporaryPortManager {
             values,
             missing,
         })
+    }
+
+    fn append_parsed_rule_file(
+        &self,
+        rule_file: &RuleFile,
+        file_label: String,
+        reference_catalog: &HashMap<String, String>,
+        all_rules: &mut Vec<Rule>,
+        inline_values: &mut HashMap<String, String>,
+    ) -> Result<(), TemporaryPortError> {
+        let source_name = bifrost_storage::rule_reference_key(rule_file);
+        let expanded_content =
+            expand_rule_references(&source_name, &rule_file.content, reference_catalog).map_err(
+                |error| {
+                    TemporaryPortError::bad_request(format!(
+                        "Failed to expand rule '{}': {}",
+                        rule_file.name, error
+                    ))
+                },
+            )?;
+        let parser = RuleParser::new();
+        let (result, file_inline_values) =
+            parser.parse_rules_tolerant_with_inline_values(&expanded_content);
+        if !result.errors.is_empty() {
+            let first = &result.errors[0];
+            return Err(TemporaryPortError::bad_request(format!(
+                "Failed to parse rule '{}': line {}, column {}: {}",
+                rule_file.name, first.line, first.start_column, first.message
+            )));
+        }
+        for mut rule in result.rules {
+            rule.file = Some(file_label.clone());
+            all_rules.push(rule);
+        }
+        for (k, v) in file_inline_values {
+            inline_values.entry(k).or_insert(v);
+        }
+        Ok(())
     }
 
     fn load_rule_file(
@@ -271,6 +310,17 @@ impl CliTemporaryPortManager {
     ) -> Result<TemporaryPortActiveSummary, TemporaryPortError> {
         let mut content_parts = Vec::new();
         let mut rules = Vec::new();
+        let default_rule = self.rules_storage.ensure_default_rule().map_err(|error| {
+            TemporaryPortError::internal(format!("Failed to initialize Default rule: {error}"))
+        })?;
+        content_parts.push(default_rule.content.clone());
+        rules.push(TemporaryPortRuleItem {
+            name: default_rule.name.clone(),
+            rule_count: count_rules(&default_rule.content),
+            group_id: None,
+            group_name: None,
+            content: Some(default_rule.content.clone()),
+        });
         for rule_ref in &binding.rule_refs {
             let (rule_file, group_id, group_name) = self.load_rule_file(rule_ref)?;
             content_parts.push(rule_file.content.clone());
@@ -490,7 +540,15 @@ fn build_rule_refs(
     group_rules: Vec<String>,
 ) -> bifrost_core::Result<Vec<RuleSetRef>> {
     let mut refs = Vec::new();
-    refs.extend(rules.into_iter().map(|name| RuleSetRef::LocalRule { name }));
+    for name in rules {
+        if RulesStorage::is_default_rule_name(&name) {
+            return Err(bifrost_core::BifrostError::Config(
+                "Default rule is global and is applied to every temporary port automatically"
+                    .to_string(),
+            ));
+        }
+        refs.push(RuleSetRef::LocalRule { name });
+    }
     refs.extend(rule_files.into_iter().map(|path| RuleSetRef::RuleFile {
         path: path.to_string_lossy().to_string(),
     }));
@@ -582,6 +640,9 @@ fn print_active_summary(summary: &TemporaryPortActiveSummary) {
         match (&rule.group_id, &rule.group_name) {
             (Some(group_id), Some(group_name)) => {
                 println!("  - {}/{} ({})", group_id, rule.name, group_name)
+            }
+            _ if RulesStorage::is_default_rule_name(&rule.name) => {
+                println!("  - {} [global] ({} rules)", rule.name, rule.rule_count)
             }
             _ => println!("  - {} ({} rules)", rule.name, rule.rule_count),
         }
@@ -778,6 +839,18 @@ mod tests {
         let error = build_rule_refs(Vec::new(), Vec::new(), Vec::new(), Vec::new()).unwrap_err();
         assert!(error.to_string().contains("--rule-file"));
         assert!(error.to_string().contains("--rule-text"));
+    }
+
+    #[test]
+    fn test_parse_port_binding_rejects_explicit_default_rule() {
+        for name in [bifrost_storage::DEFAULT_RULE_NAME, "default", "DEFAULT"] {
+            let error = build_rule_refs(vec![name.to_string()], Vec::new(), Vec::new(), Vec::new())
+                .unwrap_err();
+
+            assert!(error
+                .to_string()
+                .contains("applied to every temporary port"));
+        }
     }
 
     #[test]

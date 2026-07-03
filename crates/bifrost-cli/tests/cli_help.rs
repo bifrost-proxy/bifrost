@@ -55,7 +55,7 @@ fn port_help_explains_multi_port_model() {
     for snippet in &[
         "Multi-port model",
         "main proxy port keeps using the normal enabled-rule view",
-        "Each temporary port uses only the rule refs passed via `bind` or `update`",
+        "Each temporary port uses the global Default rule plus the refs passed via `bind` or `update`",
         "Bind one or more temporary ports with `port bind`",
         "Replace a port's bound rule refs with `port update`",
         "destroy",

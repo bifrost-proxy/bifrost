@@ -299,6 +299,7 @@ main() {
     start_html_server
 
     "$BIFROST_BIN" rule add main-default -c "main-only.test status://209 resBody://(main-default)"
+    "$BIFROST_BIN" rule update Default -c "global-default.test status://218 resBody://(global-default)"
     "$BIFROST_BIN" rule add temp-bound -c "temp-only.test status://210 resBody://(temp-bound)"
     "$BIFROST_BIN" rule add main-badge -c "badge-main.test host://127.0.0.1:${HTML_PORT}"
     "$BIFROST_BIN" rule add temp-badge -c "badge-temp.test host://127.0.0.1:${HTML_PORT}"
@@ -317,9 +318,13 @@ main() {
     local main_body temp_body
     main_body="$(proxy_body "${MAIN_PORT}" "http://main-only.test/main-port")"
     assert_body_contains "main-default" "$main_body" "main port should use default enabled rule"
+    main_body="$(proxy_body "${MAIN_PORT}" "http://global-default.test/main-global-default")"
+    assert_body_contains "global-default" "$main_body" "main port should use global Default rule"
 
     temp_body="$(proxy_body "${TEMP_PORT}" "http://temp-only.test/temp-port")"
     assert_body_contains "temp-bound" "$temp_body" "temporary port should use explicitly bound disabled rule"
+    temp_body="$(proxy_body "${TEMP_PORT}" "http://global-default.test/temp-global-default")"
+    assert_body_contains "global-default" "$temp_body" "temporary port should use global Default rule"
 
     local main_badge_body temp_badge_body
     main_badge_body="$(proxy_body "${MAIN_PORT}" "http://badge-main.test/badge-main")"
@@ -363,7 +368,23 @@ main() {
 
     "$BIFROST_BIN" rule disable main-default
     "$BIFROST_BIN" rule enable main-default
+    if "$BIFROST_BIN" rule disable Default > "${TEST_DATA_DIR}/disable-default.log" 2>&1; then
+        _log_fail "Default rule cannot be disabled" "non-zero exit" "$(cat "${TEST_DATA_DIR}/disable-default.log")"
+        return 1
+    fi
+    assert_body_contains "Default rule cannot be disabled" "$(cat "${TEST_DATA_DIR}/disable-default.log")" "disable Default is rejected"
+    if "$BIFROST_BIN" port bind --port 0 --rule Default > "${TEST_DATA_DIR}/bind-default.log" 2>&1; then
+        _log_fail "Default rule cannot be explicitly bound" "non-zero exit" "$(cat "${TEST_DATA_DIR}/bind-default.log")"
+        return 1
+    fi
+    assert_body_contains "applied to every temporary port" "$(cat "${TEST_DATA_DIR}/bind-default.log")" "explicit Default temp-port binding is rejected"
+    if "$BIFROST_BIN" port bind --port 0 --rule default > "${TEST_DATA_DIR}/bind-lowercase-default.log" 2>&1; then
+        _log_fail "lowercase default rule cannot be explicitly bound" "non-zero exit" "$(cat "${TEST_DATA_DIR}/bind-lowercase-default.log")"
+        return 1
+    fi
+    assert_body_contains "applied to every temporary port" "$(cat "${TEST_DATA_DIR}/bind-lowercase-default.log")" "explicit lowercase default temp-port binding is rejected"
     "$BIFROST_BIN" port active "${TEMP_PORT}" > "${TEST_DATA_DIR}/active.log"
+    assert_body_contains "Default [global]" "$(cat "${TEST_DATA_DIR}/active.log")" "temporary active summary includes global Default"
     assert_body_contains "temp-bound" "$(cat "${TEST_DATA_DIR}/active.log")" "temporary active summary includes bound rule"
     if grep -q "main-default" "${TEST_DATA_DIR}/active.log"; then
         _log_fail "temporary active summary ignores default rule toggles" "no main-default" "$(cat "${TEST_DATA_DIR}/active.log")"

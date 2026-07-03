@@ -29,6 +29,13 @@ struct RuleFileInfo {
     rule_count: usize,
     created_at: String,
     updated_at: String,
+    is_system: bool,
+    is_global_default: bool,
+    can_delete: bool,
+    can_disable: bool,
+    can_rename: bool,
+    can_reorder: bool,
+    can_edit_content: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +55,13 @@ struct RuleFileDetail {
     created_at: String,
     updated_at: String,
     sync: RuleSyncInfo,
+    is_system: bool,
+    is_global_default: bool,
+    can_delete: bool,
+    can_disable: bool,
+    can_rename: bool,
+    can_reorder: bool,
+    can_edit_content: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -63,6 +77,74 @@ fn sync_status_label(status: bifrost_storage::RuleSyncStatus) -> &'static str {
         bifrost_storage::RuleSyncStatus::LocalOnly => "local_only",
         bifrost_storage::RuleSyncStatus::Synced => "synced",
         bifrost_storage::RuleSyncStatus::Modified => "modified",
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RuleCapabilities {
+    is_system: bool,
+    is_global_default: bool,
+    can_delete: bool,
+    can_disable: bool,
+    can_rename: bool,
+    can_reorder: bool,
+    can_edit_content: bool,
+}
+
+fn rule_capabilities(name: &str) -> RuleCapabilities {
+    let is_global_default = RulesStorage::is_default_rule_name(name);
+    RuleCapabilities {
+        is_system: is_global_default,
+        is_global_default,
+        can_delete: !is_global_default,
+        can_disable: !is_global_default,
+        can_rename: !is_global_default,
+        can_reorder: !is_global_default,
+        can_edit_content: true,
+    }
+}
+
+fn apply_capabilities_to_info(info: &mut RuleFileInfo, caps: RuleCapabilities) {
+    info.is_system = caps.is_system;
+    info.is_global_default = caps.is_global_default;
+    info.can_delete = caps.can_delete;
+    info.can_disable = caps.can_disable;
+    info.can_rename = caps.can_rename;
+    info.can_reorder = caps.can_reorder;
+    info.can_edit_content = caps.can_edit_content;
+}
+
+fn apply_capabilities_to_detail(detail: &mut RuleFileDetail, caps: RuleCapabilities) {
+    detail.is_system = caps.is_system;
+    detail.is_global_default = caps.is_global_default;
+    detail.can_delete = caps.can_delete;
+    detail.can_disable = caps.can_disable;
+    detail.can_rename = caps.can_rename;
+    detail.can_reorder = caps.can_reorder;
+    detail.can_edit_content = caps.can_edit_content;
+}
+
+fn ensure_default_rule_response(state: &SharedAdminState) -> Option<Response<BoxBody>> {
+    match state.rules_storage.ensure_default_rule() {
+        Ok(_) => None,
+        Err(error) => Some(error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to initialize Default rule: {}", error),
+        )),
+    }
+}
+
+fn is_default_rule_error(error: &bifrost_core::BifrostError) -> bool {
+    matches!(error, bifrost_core::BifrostError::Config(message) if message.contains("Default rule") || message.contains("Rule name 'Default'"))
+}
+
+fn storage_error_status(error: &bifrost_core::BifrostError) -> StatusCode {
+    if is_default_rule_error(error) {
+        StatusCode::BAD_REQUEST
+    } else if matches!(error, bifrost_core::BifrostError::NotFound(_)) {
+        StatusCode::NOT_FOUND
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
 }
 
@@ -531,17 +613,32 @@ async fn exit_share_env(
 }
 
 async fn list_rules(state: SharedAdminState) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
     match state.rules_storage.list_summaries() {
         Ok(rules) => {
             let infos: Vec<RuleFileInfo> = rules
                 .into_iter()
                 .map(|r: RuleSummary| RuleFileInfo {
-                    name: r.name,
+                    name: r.name.clone(),
                     enabled: r.enabled,
                     sort_order: r.sort_order,
                     rule_count: r.rule_count,
                     created_at: r.created_at,
                     updated_at: r.updated_at,
+                    is_system: false,
+                    is_global_default: false,
+                    can_delete: true,
+                    can_disable: true,
+                    can_rename: true,
+                    can_reorder: true,
+                    can_edit_content: true,
+                })
+                .map(|mut info| {
+                    let caps = rule_capabilities(&info.name);
+                    apply_capabilities_to_info(&mut info, caps);
+                    info
                 })
                 .collect();
             json_response(&infos)
@@ -554,6 +651,9 @@ async fn list_rules(state: SharedAdminState) -> Response<BoxBody> {
 }
 
 async fn list_reference_candidates(state: SharedAdminState) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
     let reverse_cache = {
         let cache = state.group_name_cache();
         cache
@@ -657,6 +757,9 @@ fn reverse_group_cache_for_dirs(
 }
 
 async fn active_summary(state: SharedAdminState) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
     let mut all_rules = Vec::new();
     let mut var_map: HashMap<String, Vec<InlineVarEntry>> = HashMap::new();
     let mut content_parts: Vec<String> = Vec::new();
@@ -1139,6 +1242,10 @@ async fn create_rule(
     state: SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
     let body = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
@@ -1156,6 +1263,10 @@ async fn create_rule(
 
     if request.name.is_empty() {
         return error_response(StatusCode::BAD_REQUEST, "Rule name is required");
+    }
+
+    if RulesStorage::is_default_rule_name(&request.name) {
+        return error_response(StatusCode::CONFLICT, "Rule with this name already exists");
     }
 
     if state.rules_storage.exists(&request.name) {
@@ -1181,7 +1292,13 @@ async fn create_rule(
         .rules_storage
         .list_summaries()
         .ok()
-        .and_then(|rules| rules.into_iter().map(|rule| rule.sort_order).min())
+        .and_then(|rules| {
+            rules
+                .into_iter()
+                .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
+                .map(|rule| rule.sort_order)
+                .min()
+        })
         .map(|value| value - 1)
         .unwrap_or(0);
 
@@ -1211,10 +1328,13 @@ async fn create_rule(
 }
 
 async fn get_rule(state: SharedAdminState, name: &str) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
     match state.rules_storage.load(name) {
         Ok(rule) => {
-            let detail = RuleFileDetail {
-                name: rule.name,
+            let mut detail = RuleFileDetail {
+                name: rule.name.clone(),
                 content: rule.content,
                 enabled: rule.enabled,
                 sort_order: rule.sort_order,
@@ -1226,7 +1346,16 @@ async fn get_rule(state: SharedAdminState, name: &str) -> Response<BoxBody> {
                     remote_id: rule.sync.remote_id,
                     remote_updated_at: rule.sync.remote_updated_at,
                 },
+                is_system: false,
+                is_global_default: false,
+                can_delete: true,
+                can_disable: true,
+                can_rename: true,
+                can_reorder: true,
+                can_edit_content: true,
             };
+            let caps = rule_capabilities(&rule.name);
+            apply_capabilities_to_detail(&mut detail, caps);
             json_response(&detail)
         }
         Err(_) => error_response(StatusCode::NOT_FOUND, &format!("Rule '{}' not found", name)),
@@ -1239,6 +1368,10 @@ async fn update_rule(
     name: &str,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
     let existing = match state.rules_storage.load(name) {
         Ok(r) => r,
         Err(_) => {
@@ -1260,6 +1393,9 @@ async fn update_rule(
         Ok(r) => r,
         Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
     };
+    if RulesStorage::is_default_rule_name(name) && request.enabled == Some(false) {
+        return error_response(StatusCode::BAD_REQUEST, "Default rule cannot be disabled");
+    }
     let content_changed = request.content.is_some();
     let enabled_changed = request.enabled.is_some();
     let next_content = request
@@ -1317,6 +1453,10 @@ async fn reorder_rules(
     state: SharedAdminState,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
     let body = match req.collect().await {
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
@@ -1350,6 +1490,14 @@ async fn delete_rule(
     name: &str,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
+    if RulesStorage::is_default_rule_name(name) {
+        return error_response(StatusCode::BAD_REQUEST, "Default rule cannot be deleted");
+    }
+
     let rule = match state.rules_storage.load(name) {
         Ok(rule) => rule,
         Err(_) => {
@@ -1386,7 +1534,7 @@ async fn delete_rule(
             success_response(&format!("Rule '{}' deleted successfully", name))
         }
         Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            storage_error_status(&e),
             &format!("Failed to delete rule: {}", e),
         ),
     }
@@ -1398,6 +1546,14 @@ async fn enable_rule(
     enabled: bool,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
+    if RulesStorage::is_default_rule_name(name) && !enabled {
+        return error_response(StatusCode::BAD_REQUEST, "Default rule cannot be disabled");
+    }
+
     match state.rules_storage.set_enabled(name, enabled) {
         Ok(_) => {
             notify_rules_changed(&state);
@@ -1406,7 +1562,7 @@ async fn enable_rule(
             success_response(&format!("Rule '{}' {} successfully", name, action))
         }
         Err(e) => error_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
+            storage_error_status(&e),
             &format!("Failed to update rule: {}", e),
         ),
     }
@@ -1418,6 +1574,14 @@ async fn rename_rule(
     name: &str,
     push_manager: Option<SharedPushManager>,
 ) -> Response<BoxBody> {
+    if let Some(response) = ensure_default_rule_response(&state) {
+        return response;
+    }
+
+    if RulesStorage::is_default_rule_name(name) {
+        return error_response(StatusCode::BAD_REQUEST, "Default rule cannot be renamed");
+    }
+
     if !state.rules_storage.exists(name) {
         return error_response(StatusCode::NOT_FOUND, &format!("Rule '{}' not found", name));
     }
@@ -1447,6 +1611,12 @@ async fn rename_rule(
             "New name is the same as the old name",
         );
     }
+    if RulesStorage::is_default_rule_name(&request.new_name) {
+        return error_response(
+            StatusCode::BAD_REQUEST,
+            "Rule name 'Default' is reserved for the global default rule",
+        );
+    }
 
     match state.rules_storage.rename(name, &request.new_name) {
         Ok(_) => {
@@ -1460,10 +1630,8 @@ async fn rename_rule(
         Err(e) => {
             let status = if e.to_string().contains("already exists") {
                 StatusCode::CONFLICT
-            } else if e.to_string().contains("not found") {
-                StatusCode::NOT_FOUND
             } else {
-                StatusCode::INTERNAL_SERVER_ERROR
+                storage_error_status(&e)
             };
             error_response(status, &format!("Failed to rename rule: {}", e))
         }
@@ -1583,6 +1751,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_rules_initializes_and_marks_default_rule_protected() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        storage
+            .save(&RuleFile::new(
+                "personal",
+                "personal.example.com statusCode://201",
+            ))
+            .unwrap();
+
+        let state =
+            std::sync::Arc::new(crate::state::AdminState::new(0).with_rules_storage(storage));
+        let response = list_rules(state).await;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let rules: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        let default_rule = &rules[0];
+
+        assert_eq!(default_rule["name"], "Default");
+        assert_eq!(default_rule["enabled"], true);
+        assert_eq!(default_rule["is_system"], true);
+        assert_eq!(default_rule["is_global_default"], true);
+        assert_eq!(default_rule["can_delete"], false);
+        assert_eq!(default_rule["can_disable"], false);
+        assert_eq!(default_rule["can_rename"], false);
+        assert_eq!(default_rule["can_reorder"], false);
+        assert_eq!(default_rule["can_edit_content"], true);
+    }
+
+    #[tokio::test]
     async fn active_summary_includes_local_group_rules_without_sync_session() {
         let temp_dir = tempfile::tempdir().unwrap();
         let storage = RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
@@ -1611,11 +1810,15 @@ mod tests {
 
         // active-summary is a read-only UI/tray summary. The proxy runtime keeps
         // its own no-session group protection in start::resolve_valid_group_dirs.
-        assert_eq!(summary.total, 1);
-        assert_eq!(summary.rules[0].name, "group-rule");
-        assert_eq!(summary.rules[0].group_id.as_deref(), Some("Tray Team"));
-        assert_eq!(summary.rules[0].group_name.as_deref(), Some("Tray Team"));
-        assert_eq!(summary.merged_content, "group.example.com statusCode://203");
+        assert_eq!(summary.total, 2);
+        assert_eq!(summary.rules[0].name, "Default");
+        assert_eq!(summary.rules[0].group_id.as_deref(), None);
+        assert_eq!(summary.rules[1].name, "group-rule");
+        assert_eq!(summary.rules[1].group_id.as_deref(), Some("Tray Team"));
+        assert_eq!(summary.rules[1].group_name.as_deref(), Some("Tray Team"));
+        assert!(summary
+            .merged_content
+            .contains("group.example.com statusCode://203"));
     }
 
     #[test]

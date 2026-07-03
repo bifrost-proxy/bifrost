@@ -3563,6 +3563,13 @@ fn load_stored_rules(
         base_dir = %rules_storage.base_dir().display(),
         "loading rules from storage"
     );
+    if let Err(error) = rules_storage.ensure_default_rule() {
+        tracing::warn!(
+            target: "bifrost_cli::rules",
+            error = %error,
+            "failed to initialize global Default rule"
+        );
+    }
     match rules_storage.load_all_with_subdirs_filtered(valid_subdirs) {
         Ok(rule_files) => {
             let stored_count = rule_files.iter().filter(|rule| rule.enabled).count();
@@ -5305,6 +5312,85 @@ mod coverage_boost_v3 {
         let (rules, values) = load_stored_rules(&rules_storage, None);
         assert!(rules.is_empty());
         assert!(values.is_empty());
+        assert!(rules_storage.exists(bifrost_storage::DEFAULT_RULE_NAME));
+    }
+
+    #[test]
+    fn load_stored_rules_includes_global_default_rule_content() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                bifrost_storage::DEFAULT_RULE_NAME,
+                "global-default.test status://218 resBody://(global-default)",
+            ))
+            .unwrap();
+
+        let (rules, values) = load_stored_rules(&rules_storage, None);
+
+        assert!(values.is_empty());
+        assert!(rules.iter().any(|rule| {
+            rule.file.as_deref() == Some(bifrost_storage::DEFAULT_RULE_NAME)
+                && rule.raw.contains("global-default.test")
+        }));
+    }
+
+    #[test]
+    fn load_stored_rules_restores_deleted_default_rule_on_startup() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        let default_rule = rules_storage.ensure_default_rule().unwrap();
+        let default_path = temp_dir.path().join("rules").join("Default.bifrost");
+        assert_eq!(default_rule.name, bifrost_storage::DEFAULT_RULE_NAME);
+        assert!(default_path.exists());
+
+        std::fs::remove_file(&default_path).unwrap();
+        assert!(!default_path.exists());
+
+        let (rules, values) = load_stored_rules(&rules_storage, None);
+
+        assert!(rules.is_empty());
+        assert!(values.is_empty());
+        assert!(default_path.exists());
+        assert!(rules_storage.exists(bifrost_storage::DEFAULT_RULE_NAME));
+    }
+
+    #[test]
+    fn load_stored_rules_parses_global_default_before_other_rules() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let rules_storage =
+            bifrost_storage::RulesStorage::with_dir(temp_dir.path().join("rules")).unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                bifrost_storage::DEFAULT_RULE_NAME,
+                "order.test status://218 resBody://(global-default)",
+            ))
+            .unwrap();
+        rules_storage
+            .save(&bifrost_storage::RuleFile::new(
+                "regular",
+                "order.test status://219 resBody://(regular)",
+            ))
+            .unwrap();
+
+        let (rules, values) = load_stored_rules(&rules_storage, None);
+
+        assert!(values.is_empty());
+        assert!(rules.len() >= 2);
+        let first_regular = rules
+            .iter()
+            .position(|rule| rule.file.as_deref() == Some("regular"))
+            .expect("regular rule should be parsed");
+        let last_default = rules
+            .iter()
+            .rposition(|rule| rule.file.as_deref() == Some(bifrost_storage::DEFAULT_RULE_NAME))
+            .expect("Default rule should be parsed");
+        assert!(
+            last_default < first_regular,
+            "all Default rules must be parsed before regular rules"
+        );
     }
 
     #[test]

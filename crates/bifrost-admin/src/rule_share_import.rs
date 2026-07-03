@@ -5,7 +5,7 @@ use bifrost_core::rule_share::{
 use bifrost_core::{
     normalize_rule_content, rule_reference_name, validate_rules, BifrostError, Result,
 };
-use bifrost_storage::{RuleFile, ShareEnvState};
+use bifrost_storage::{RuleFile, RulesStorage, ShareEnvState};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, warn};
@@ -88,6 +88,7 @@ pub async fn import_rule_share_payload(
     let rule_name = unique_rule_name(&rule_name_base, &existing_rules);
     let sort_order = existing_rules
         .iter()
+        .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
         .map(|rule| rule.sort_order)
         .min()
         .map(|value| value - 1)
@@ -140,6 +141,9 @@ pub async fn exit_rule_share_env(
     let mut disabled_rules = Vec::new();
 
     for mut rule in state.rules_storage.load_all()? {
+        if RulesStorage::is_default_rule_name(&rule.name) {
+            continue;
+        }
         let should_enable = enabled_set.contains(&rule.name);
         if rule.enabled == should_enable {
             continue;
@@ -304,6 +308,9 @@ async fn apply_exclusive_enable(
 ) -> Result<Vec<String>> {
     let mut disabled_rules = Vec::new();
     for mut rule in state.rules_storage.load_all()? {
+        if RulesStorage::is_default_rule_name(&rule.name) {
+            continue;
+        }
         let should_enable = rule.name == active_rule_name;
         if rule.enabled == should_enable {
             continue;
@@ -445,6 +452,14 @@ mod tests {
         Arc::new(crate::state::AdminState::new_for_test(0, storage))
     }
 
+    fn temp_root_rules_state() -> SharedAdminState {
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap().keep();
+        let storage = bifrost_storage::RulesStorage::with_dir(dir.join("rules")).unwrap();
+        Arc::new(crate::state::AdminState::new_for_test(0, storage))
+    }
+
     #[tokio::test]
     async fn import_reuses_same_name_same_content() {
         let state = temp_rules_state();
@@ -504,6 +519,47 @@ mod tests {
         assert_eq!(third.action, RuleShareImportAction::Reused);
         assert_eq!(third.rule_name, "share/shared 2");
         assert_eq!(state.rules_storage.list().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn import_exclusive_share_keeps_global_default_enabled() {
+        let state = temp_root_rules_state();
+        state.rules_storage.ensure_default_rule().unwrap();
+        state
+            .rules_storage
+            .save(&RuleFile::new(
+                bifrost_storage::DEFAULT_RULE_NAME,
+                "global-default.test statusCode://218",
+            ))
+            .unwrap();
+        state
+            .rules_storage
+            .save(&RuleFile::new(
+                "before-enabled",
+                "before.example.com statusCode://201",
+            ))
+            .unwrap();
+
+        let payload = bifrost_core::rule_share::new_rule_share_payload(
+            "shared",
+            "shared.example.com statusCode://202",
+        )
+        .unwrap();
+        let outcome = import_rule_share_payload(state.clone(), None, payload)
+            .await
+            .unwrap();
+
+        assert!(!outcome
+            .disabled_rules
+            .contains(&bifrost_storage::DEFAULT_RULE_NAME.to_string()));
+        assert!(
+            state
+                .rules_storage
+                .load(bifrost_storage::DEFAULT_RULE_NAME)
+                .unwrap()
+                .enabled
+        );
+        assert!(!state.rules_storage.load("before-enabled").unwrap().enabled);
     }
 
     #[tokio::test]

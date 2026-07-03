@@ -18,7 +18,8 @@ pub use remote_shell::{
 };
 pub use rules::{
     build_rule_reference_catalog, content_hash, rule_reference_key, RuleFile, RuleSummary,
-    RuleSyncMetadata, RuleSyncStatus, RulesStorage, ShareEnvState,
+    RuleSyncMetadata, RuleSyncStatus, RulesStorage, ShareEnvState, DEFAULT_RULE_NAME,
+    DEFAULT_RULE_SORT_ORDER,
 };
 pub use state::{RuntimeState, StateManager};
 pub use unified_config::{

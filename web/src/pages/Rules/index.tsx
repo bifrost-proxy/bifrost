@@ -12,6 +12,10 @@ import pushService from '../../services/pushService';
 const GROUP_PARAM = 'group';
 const RULE_PARAM = 'rule';
 
+function selectionKey(groupId: string | null, ruleName: string | null): string {
+  return `${groupId ?? ''}\n${ruleName ?? ''}`;
+}
+
 function getUrlParams(): URLSearchParams {
   const hash = window.location.hash;
   const qIdx = hash.indexOf('?');
@@ -58,6 +62,7 @@ export default function Rules() {
   const initDoneRef = useRef(false);
   const hasLoadedOnceRef = useRef(false);
   const restoringRef = useRef(false);
+  const handledUrlSelectionRef = useRef<string | null>(null);
 
   useEffect(() => {
     const storeHasState = rules.length > 0 && selectedRuleName !== null;
@@ -94,6 +99,7 @@ export default function Rules() {
     if (rules.length === 0) return;
     initDoneRef.current = true;
     restoringRef.current = true;
+    handledUrlSelectionRef.current = selectionKey(targetGroupParam || null, targetRuleParam || null);
 
     const ruleParam = targetRuleParam;
     if (ruleParam) {
@@ -110,6 +116,10 @@ export default function Rules() {
     if (!initDoneRef.current) return;
 
     const targetGroupId = targetGroupParam || null;
+    const currentUrlSelection = selectionKey(targetGroupId, targetRuleParam || null);
+    if (handledUrlSelectionRef.current === currentUrlSelection) return;
+    handledUrlSelectionRef.current = currentUrlSelection;
+
     if (targetGroupId !== activeGroupId) {
       setActiveGroupId(targetGroupId);
       void fetchRules().then(() => {
@@ -159,6 +169,7 @@ export default function Rules() {
       } else {
         next.delete(RULE_PARAM);
       }
+      handledUrlSelectionRef.current = selectionKey(activeGroupId, selectedRuleName);
       if (next.toString() === prev.toString()) return prev;
       return next;
     }, { replace: true });

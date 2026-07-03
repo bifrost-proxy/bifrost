@@ -2,7 +2,7 @@
 
 ## 功能目标
 
-新增一类临时代理端口绑定能力：用户可以通过 CLI 创建一个额外监听端口，并把该端口绑定到一个明确选择的规则集列表。所有端口共享同一个 Bifrost 数据目录、配置、证书、values、scripts、traffic 存储和 Group 本地缓存；差异只在“这个监听端口使用哪些转发规则集”。临时端口生命周期独立于主端口，用完可以销毁；主端口不中断、不重启、不继承临时端口绑定，临时端口也不会自动继承主端口当前启用的规则集合。
+新增一类临时代理端口绑定能力：用户可以通过 CLI 创建一个额外监听端口，并把该端口绑定到一个明确选择的规则集列表。所有端口共享同一个 Bifrost 数据目录、配置、证书、values、scripts、traffic 存储和 Group 本地缓存；差异只在“这个监听端口额外使用哪些显式绑定规则集”。临时端口生命周期独立于主端口，用完可以销毁；主端口不中断、不重启、不继承临时端口绑定，临时端口也不会自动继承主端口当前启用的普通规则集合，但全局 `Default` 规则会在主端口和所有临时端口上自动生效。
 
 核心体验：
 
@@ -142,8 +142,8 @@ bifrost port destroy 18888
 ### 行为断言
 
 - 主端口可以被理解为默认规则选择器：选择所有当前全局启用的本地规则和启用的 Group 规则。
-- 临时端口是额外规则选择器：只选择 `port bind` 显式绑定的规则引用。
-- 临时端口的流量完全不受默认规则启用状态影响。默认规则无论 enabled 还是 disabled，只要没有被该临时端口显式绑定，都不能进入该临时端口 resolver。
+- 临时端口是额外规则选择器：自动包含全局 `Default`，并选择 `port bind` 显式绑定的规则引用。
+- 临时端口的流量不受其它普通规则启用状态影响。全局 `Default` 始终启用、始终进入临时端口 resolver；其它普通规则只有被该临时端口显式绑定才会进入临时端口 resolver。
 - 主端口启用/禁用规则不会影响临时端口，除非临时端口绑定的同名共享规则文件内容本身被更新。
 - 临时端口绑定规则的启用状态不读取全局 `enabled`，因为绑定本身就是启用声明。
 - 临时端口规则排序按 CLI 传入顺序执行；同一个规则文件内仍按文件内顺序解析。
@@ -178,7 +178,7 @@ main ProxyServer :9900
 6. 复用主进程的 `TlsConfig`、`AccessControl`、`TrafficDbStore`、`ConnectionRegistry`、`AdminState` 中可共享资源。
 7. 调用 `ProxyServer::run_with_listener_ready(...)` 启动监听。
 
-关键点是规则选择隔离、数据共享：临时端口不调用“加载全部已启用规则”的 `load_stored_rules(...)`，也不能在 `EnabledGlobalRules` 结果上追加端口规则；它必须调用新的 `load_bound_rules(rule_refs)`，只从同一份规则存储中取被绑定的规则。
+关键点是规则选择隔离、数据共享：临时端口不调用“加载全部已启用规则”的 `load_stored_rules(...)`，也不能在 `EnabledGlobalRules` 结果上追加端口规则；它必须调用新的 `load_bound_rules(rule_refs)`，只从同一份规则存储中取全局 `Default` 和被显式绑定的规则。
 
 因此实现上推荐把现有“读取全局 enabled 规则”的逻辑也收敛成一个 `RuleSelection`（planned, not yet shipped as of 2026-06-17）：
 
@@ -308,18 +308,18 @@ bifrost port restore
 - `test_load_bound_rules_ignores_global_enabled_state`：绑定 disabled 规则仍加载，因为绑定本身就是启用声明。
 - `test_load_bound_rules_missing_ref_fails_atomically`：多个引用中任一缺失时创建失败且不启动监听。
 - `test_temp_port_resolver_does_not_include_main_enabled_rules`：主规则启用但未绑定时，临时 resolver 不命中。
-- `test_temp_port_resolver_ignores_default_rule_enabled_toggles`：切换默认规则 enabled/disabled 不改变临时端口 resolver 和 active-summary。
+- `test_temp_port_resolver_includes_global_default_rule`：全局 `Default` 自动进入临时端口 resolver 和 active-summary，且 `--rule Default` 被拒绝。
 - `test_temp_port_update_replaces_bound_resolver_only`：更新绑定只替换对应端口 resolver，不影响主 resolver。
 
 ### E2E 测试
 
 新增 `crates/bifrost-e2e/src/tests/temporary_ports.rs`：
 
-- `temporary_port_uses_only_bound_rules`：启动主代理和临时端口，主端口命中主规则，临时端口只命中绑定规则。
+- `temporary_port_uses_default_plus_bound_rules`：启动主代理和临时端口，主端口命中主规则和 Default，临时端口命中 Default 与绑定规则。
 - `temporary_port_destroy_does_not_stop_main_port`：销毁临时端口后，请求临时端口失败，主端口仍可请求成功。
 - `temporary_port_multiple_rule_sets_preserve_order`：绑定多个规则集，断言优先级/排序符合传入顺序。
 - `temporary_port_rule_content_hot_reload`：更新绑定规则内容后，临时端口生效；启用另一个未绑定规则不生效。
-- `temporary_port_ignores_default_rule_enable_disable`：默认规则启用/禁用前后，临时端口命中结果不变。
+- `temporary_port_includes_global_default_rule`：Default 规则内容更新后，主端口与临时端口均生效；尝试停用 Default 被拒绝。
 - `temporary_port_group_rule_binding`：绑定 Group 规则，临时端口命中 Group 规则，主端口不因该绑定新增命中。
 - `temporary_port_shares_values_scripts_and_certs`：临时端口规则可使用共享 values/scripts/TLS 证书能力。
 - `temporary_port_file_and_inline_inputs`：验证 `--rule-file` 和 `--rule-text` 直接绑定可生效，且不写入共享规则目录。
