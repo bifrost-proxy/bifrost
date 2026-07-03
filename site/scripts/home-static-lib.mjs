@@ -148,6 +148,12 @@ export async function collectHomeErrors({
   if (!html.includes('data-lang="zh"') || !html.includes('data-lang="en"')) {
     errors.push("Home page is missing the English/Chinese language switch.");
   }
+  if (!html.includes("bifrost start -d")) {
+    errors.push("Home page must guide first-run users to start the daemon with `bifrost start -d`.");
+  }
+  if (html.includes("bifrost start --no-system-proxy")) {
+    errors.push("Home page must not default first-run users to `bifrost start --no-system-proxy`.");
+  }
   errors.push(...assertImageDimensions(html));
 
   const htmlGzip = gzipSize(html);

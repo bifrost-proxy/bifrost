@@ -57,7 +57,7 @@ The top-level help intentionally stays short. Exact flag parsing is defined by e
 ## Common Workflows
 
 ```bash
-bifrost start
+bifrost start -d
 bifrost status
 bifrost rule add local-dev -c "example.com host://127.0.0.1:3000"
 bifrost traffic list --limit 20

@@ -7,7 +7,7 @@
 | 使用场景 | 首选命令 | 关键判断 |
 | --- | --- | --- |
 | 本机排障或联调，不污染默认规则 | `bifrost port bind ...` | 优先复用主服务，用多端口隔离规则和流量；不要默认用临时数据目录另起服务 |
-| 让命令、浏览器或应用走代理 | `bifrost start` / `curl -x ...` | 默认启动会启用系统代理，最快让浏览器和桌面应用进代理；只影响单个命令时再显式指定代理 |
+| 让命令、浏览器或应用走代理 | `bifrost start -d` / `curl -x ...` | 后台启动会按默认配置启用系统代理，浏览器和桌面应用无需额外配置；只影响单个命令时再显式指定代理 |
 | 把线上域名转到本地服务 | `bifrost rule add ... host://...` | HTTP 可直接转发；HTTPS 路径匹配通常需要 TLS 拦截 |
 | 改请求头、响应头、状态码或返回体 | `reqHeaders://` / `resHeaders://` / `statusCode://` / `file://` | 默认直接写内联 value 或规则文件内嵌值；特别大的内容才放全局 Values |
 | 查某个请求为什么没命中规则 | `bifrost traffic list/get/search` | 先看 `matched_rules`、入口端口、请求 URL、协议 |
@@ -24,7 +24,7 @@
 如果还没有启动主服务，直接启动代理即可。默认启动会启用系统代理，让浏览器和桌面应用自然进入 Bifrost；默认不要开启全局 TLS 抓包，也不要用 `--unsafe-ssl` 跳过上游证书校验：
 
 ```bash
-bifrost start
+bifrost start -d
 ```
 
 为本次调试单独绑定端口：
@@ -36,11 +36,11 @@ curl -x http://127.0.0.1:18888 http://debug.test/
 
 这组命令的含义：
 
-- `bifrost start`：启动主服务；普通用户默认走系统代理，浏览器和桌面应用不用单独配置。
+- `bifrost start -d`：后台启动主服务；普通用户默认走系统代理，浏览器和桌面应用不用单独配置。
 - `port bind --port 18888`：只给本次调试开一个独立入口端口，调试结束后可直接销毁。
 - `--rule-text`：传入一次性规则，不写入默认规则库。
 
-不带子命令运行 `bifrost` 等价于 `bifrost start`。默认监听 `0.0.0.0:9900`，TLS/HTTPS 拦截默认关闭；访问控制默认是 `interactive`：本机 loopback 直接允许，非本机地址需要通过管理端审批、白名单或 `--allow-lan` / `--access-mode` 显式放行。
+默认监听 `0.0.0.0:9900`，TLS/HTTPS 拦截默认关闭；访问控制默认是 `interactive`：本机 loopback 直接允许，非本机地址需要通过管理端审批、白名单或 `--allow-lan` / `--access-mode` 显式放行。
 
 常用服务动作：
 
@@ -53,11 +53,11 @@ bifrost port list
 bifrost port destroy 18888
 ```
 
-只有当你明确不希望影响系统网络、正在跑自动化测试、并发实验或破坏性配置验证时，才考虑加 `--no-system-proxy` 或设置临时 `BIFROST_DATA_DIR`。
+普通用户首次体验不要加测试隔离参数。`--no-system-proxy` 和临时 `BIFROST_DATA_DIR` 只用于 CI、自动化测试、并发实验或破坏性配置验证。
 
 ## 场景 2：让流量进入 Bifrost
 
-普通用户启动 `bifrost start` 后，系统代理会自动接管浏览器和桌面应用流量。单个命令也可以显式指定代理，这样最可控：
+普通用户启动 `bifrost start -d` 后，系统代理会自动接管浏览器和桌面应用流量。单个命令也可以显式指定代理，这样最可控：
 
 ```bash
 curl -x http://127.0.0.1:9900 http://httpbin.org/headers
@@ -74,7 +74,7 @@ bifrost system-proxy enable --host 127.0.0.1 --port 9900 --bypass "localhost,127
 bifrost system-proxy disable
 ```
 
-`--no-system-proxy` 是特殊场景选项，例如 CI、沙箱、只想用 `curl -x` 或应用内代理配置时才使用。
+`--no-system-proxy` 是测试/诊断选项，例如 CI、沙箱、只想用 `curl -x` 或应用内代理配置时才使用，不作为默认上手命令。
 
 `--cli-proxy` 是另一条路径：它会写入 shell rc 文件，让终端命令继承 `http_proxy` / `https_proxy` 等环境变量。它不是系统代理，适合只影响命令行工具：
 
@@ -253,7 +253,7 @@ bifrost search "keyword" --proxy-port 18888
 临时端口适合同时调试多套规则，互不影响主端口：
 
 ```bash
-bifrost start
+bifrost start -d
 bifrost port bind --port 18888 --rule local-dev
 bifrost port bind --port 18889 --rule-text "debug.test statusCode://218 resBody://(debug)"
 bifrost port list
@@ -270,7 +270,7 @@ bifrost port destroy 18888
 先启动一次主服务：
 
 ```bash
-bifrost start
+bifrost start -d
 ```
 
 再给不同任务绑定不同端口：
@@ -410,7 +410,7 @@ bifrost install-skill -y
 第二步，确认主服务已启动，并为本次采集绑定一个独立端口。需要抓 HTTPS 明文内容时，优先在规则里只对目标域名写 `tlsIntercept://`；启动流程会自动准备 CA，不要默认跳过 SSL 验证：
 
 ```bash
-bifrost start
+bifrost start -d
 bifrost port bind --port 18882 --rule-text "api.example.com tlsIntercept://"
 ```
 
@@ -428,7 +428,7 @@ bifrost start --intercept-include "api.example.com" --app-intercept-include "*Ch
 curl -x http://127.0.0.1:18882 https://api.example.com/v1/me
 ```
 
-浏览器或桌面应用默认会通过系统代理进入 Bifrost；如果你在沙箱或 CI 里明确不想影响系统网络，再使用 `--no-system-proxy` 并改用应用自己的代理设置或 `curl -x`。为了让 Agent 能写出可靠 skill，不要只抓一个成功请求，至少覆盖这些操作：
+浏览器或桌面应用默认会通过系统代理进入 Bifrost；沙箱或 CI 的隔离启动方式请按测试文档执行，不要把测试参数作为普通用户采集流量的默认路径。为了让 Agent 能写出可靠 skill，不要只抓一个成功请求，至少覆盖这些操作：
 
 - 登录或会话初始化：确认 token、cookie、CSRF、租户 ID 等从哪里来。
 - 列表和详情：确认分页、过滤、排序、资源 ID 字段。

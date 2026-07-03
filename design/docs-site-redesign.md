@@ -120,7 +120,7 @@ Bifrost 首页吸收了这些节奏，但表达为工程工具场景：
 - 首屏标题直接使用 `Bifrost`。
 - 首屏直接展示 CLI、Web UI、Rules 三个真实工作流 Tab。
 - 第二屏用 Capture、Rewrite、Replay、Automate 解释实际能力。
-- “Start” 区域保持四步：安装、无系统代理启动、添加规则、回放对比。
+- “Start” 区域保持四步：安装、后台启动服务、添加规则、回放对比。
 - 顶部提供 `EN / 中文` 轻量切换，默认英文 no-JS 可读，中文用户通过 JS 切换或浏览器语言自动进入中文文案。
 
 ## 实现架构
@@ -181,7 +181,7 @@ node scripts/verify-site-links.mjs
    - 首屏下半部露出工作台预览，保证桌面和移动端都能看到下一段内容的线索。
 
 3. 原生演示 Tab
-   - `CLI`：展示 `bifrost start --no-system-proxy` 和 traffic search。
+   - `CLI`：展示 `bifrost start -d` 和 traffic search；首页不向首次体验用户推荐 `--no-system-proxy`，该参数只保留给测试、CI、沙箱或明确诊断场景。
    - `Web UI`：展示 Traffic、Headers、Body、Replay 等 UI 信息层级。
    - `Rules`：展示规则片段。
    - Tab 使用 `<button role="tab" aria-selected>`；无 JS 时默认显示 CLI 静态面板。
@@ -197,7 +197,7 @@ node scripts/verify-site-links.mjs
 
 6. 如何开始
    - 01 Install the CLI。
-   - 02 Start without touching system proxy。
+   - 02 Start the daemon。
    - 03 Add a rule for one target。
    - 04 Replay and compare。
 
@@ -274,7 +274,7 @@ node scripts/verify-site-links.mjs
   - 临时新增中文源文档和英文源文档。
   - 执行 docs sync、docs verify 和完整 site build。
   - 验证新增文档进入 `site/dist`。
-  - 验证 `site/dist/index.html` 为静态首页，包含 `/bifrost/docs/`、`/bifrost/en/reference/`、`role="tablist"`、`data-lang="zh"`，且不包含 `/_astro/`。
+  - 验证 `site/dist/index.html` 为静态首页，包含 `bifrost start -d`、`/bifrost/docs/`、`/bifrost/en/reference/`、`role="tablist"`、`data-lang="zh"`，且不包含 `/_astro/` 或默认推荐 `bifrost start --no-system-proxy`。
   - 执行站内链接校验。
 
 ### 真实场景测试

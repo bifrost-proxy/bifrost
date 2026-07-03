@@ -35,14 +35,17 @@
 2. 执行 `test ! -f site/src/pages/index.astro`。
 3. 执行 `rg -n "astro-island|/_astro/|@vite/client|React|Vue" site/home`，预期无匹配。
 4. 执行 `rg -n "role=\"tablist\"|aria-selected|data-lang=\"zh\"|A proxy workbench for capturing traffic|%BASE_PATH%" site/home/index.html`。
-5. 执行 `rg -n "prefers-color-scheme: dark|color-scheme: light dark" site/home/styles.css`。
-6. 执行 `rg -n "translations|zh:|setLanguage|navigator.language" site/home/home.js`。
+5. 执行 `rg -n "bifrost start -d" site/home/index.html`。
+6. 执行 `! rg -n "bifrost start --no-system-proxy" site/home/index.html site/home/home.js`。
+7. 执行 `rg -n "prefers-color-scheme: dark|color-scheme: light dark" site/home/styles.css`。
+8. 执行 `rg -n "translations|zh:|setLanguage|navigator.language" site/home/home.js`。
 
 预期结果：
 - 首页源文件均存在。
 - 旧 Astro 首页不存在。
 - `site/home` 不包含 Astro runtime、React 或 Vue 标记。
 - 首页包含 base path 占位符、产品首屏文案、可访问 Tab 标记和中英文切换标记。
+- 首页首次启动示例为 `bifrost start -d`，不默认推荐 `bifrost start --no-system-proxy`。
 - 样式包含暗色模式自适应。
 - 原生 JS 包含中英文切换和浏览器中文语言自动适配。
 
@@ -80,8 +83,10 @@
 5. 执行 `grep -q 'href="/bifrost/en/reference/"' site/dist/index.html`。
 6. 执行 `grep -q 'role="tablist"' site/dist/index.html`。
 7. 执行 `grep -q 'data-lang="zh"' site/dist/index.html`。
-8. 执行 `! grep -q '/_astro/' site/dist/index.html`。
-9. 执行 `test -f site/dist/docs/index.html && test -f site/dist/en/reference/index.html`。
+8. 执行 `grep -q 'bifrost start -d' site/dist/index.html`。
+9. 执行 `! grep -q 'bifrost start --no-system-proxy' site/dist/index.html`。
+10. 执行 `! grep -q '/_astro/' site/dist/index.html`。
+11. 执行 `test -f site/dist/docs/index.html && test -f site/dist/en/reference/index.html`。
 
 预期结果：
 - 完整构建成功。
@@ -89,6 +94,7 @@
 - 首页链接使用 GitHub Pages `/bifrost/` base path。
 - 首页不包含 Astro runtime 资源。
 - 首页包含中英文切换控件。
+- 首页默认启动指引使用后台 daemon，不把测试隔离参数作为新用户首选命令。
 - 中文和英文文档区产物仍存在。
 
 ### TC-DSR-06 docs sync E2E 覆盖未来新增文档
@@ -113,12 +119,14 @@
 5. 检查首屏是否显示 Bifrost 标题、Install 和 Read Docs。
 6. 点击 `CLI`、`Web UI`、`Rules` 三个 Tab。
 7. 检查每次切换后只有当前 panel 可见，按钮 `aria-selected` 状态同步变化。
-8. 点击 `中文`，检查首屏、CTA、工作流和开始步骤切换为中文。
-9. 在浅色和暗色模式下分别截图，观察文本对比度、按钮状态、工作台面板和卡片层级。
-10. 打开移动宽度视图，检查标题、CTA、语言切换、工作台预览和下一段内容不重叠。
+8. 检查 CLI 面板首行是 `bifrost start -d`，页面没有出现 `bifrost start --no-system-proxy`。
+9. 点击 `中文`，检查首屏、CTA、工作流和开始步骤切换为中文，其中第 2 步为后台启动服务语义。
+10. 在浅色和暗色模式下分别截图，观察文本对比度、按钮状态、工作台面板和卡片层级。
+11. 打开移动宽度视图，检查标题、CTA、语言切换、工作台预览和下一段内容不重叠。
 
 预期结果：
 - 首页首屏可直接理解产品定位。
+- 首次体验路径不要求用户理解测试隔离参数或手动配置系统代理边界。
 - Tab 交互无需页面跳转。
 - 中英文切换不跳页，且中文文案没有撑破卡片或按钮。
 - 浅色和暗色模式都有清晰层级，不出现低对比文字。

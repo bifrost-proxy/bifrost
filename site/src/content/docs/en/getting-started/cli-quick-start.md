@@ -19,7 +19,7 @@ This guide is organized by tasks instead of listing every flag. For the full com
 | Scenario | First command | Key point |
 | --- | --- | --- |
 | Local debugging without polluting default rules | `bifrost port bind ...` | Reuse the main service and isolate rules by port. |
-| Route browser or app traffic through Bifrost | `bifrost start` or `curl -x ...` | System proxy is enabled by default; use explicit proxy only for a single command. |
+| Route browser or app traffic through Bifrost | `bifrost start -d` or `curl -x ...` | The background service enables the system proxy by default; use explicit proxy only for a single command. |
 | Redirect an online domain to a local service | `bifrost rule add ... host://...` | HTTP can route directly; HTTPS path matching usually needs TLS interception. |
 | Modify headers, status, or body | `reqHeaders://`, `resHeaders://`, `statusCode://`, `file://` | Inline values are preferred for small content. |
 | Understand why a request missed rules | `bifrost traffic list/get/search` | Check matched rules, entry port, URL, and protocol. |
@@ -30,7 +30,7 @@ This guide is organized by tasks instead of listing every flag. For the full com
 ## Safe Multi-port Debugging
 
 ```bash
-bifrost start
+bifrost start -d
 bifrost port bind --port 18888 --rule-text "debug.test statusCode://218 resBody://(debug)"
 curl -x http://127.0.0.1:18888 http://debug.test/
 ```
