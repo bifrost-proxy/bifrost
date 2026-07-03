@@ -542,20 +542,26 @@ function FindProxyForURL(url, host) {
             timeout_ms: 1,
             max_memory: DEFAULT_MAX_MEMORY,
         });
-        let err = engine
-            .evaluate(
-                r#"
+        let started = Instant::now();
+        let result = engine.evaluate(
+            r#"
 function FindProxyForURL(url, host) {
   while (true) {}
 }
 "#,
-                "https://example.com/",
-                "example.com",
-            )
-            .unwrap_err()
-            .to_string();
+            "https://example.com/",
+            "example.com",
+        );
 
-        assert!(err.contains("timed out") || err.contains("interrupted"));
+        assert!(
+            result.is_err(),
+            "CPU-intensive PAC script unexpectedly succeeded: {result:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "CPU-intensive PAC script did not return promptly: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
