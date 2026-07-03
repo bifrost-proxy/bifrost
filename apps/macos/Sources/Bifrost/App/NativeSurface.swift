@@ -43,8 +43,13 @@ extension NativePageScaffold where HeaderAccessory == EmptyView {
 
 struct NativePanel<Content: View>: View {
     var scaleOnHover: CGFloat = 1.004
+    var allowsHoverEffect = true
     @ViewBuilder var content: Content
     @State private var isHovering = false
+
+    private var effectiveHover: Bool {
+        allowsHoverEffect && isHovering
+    }
 
     var body: some View {
         content
@@ -72,11 +77,11 @@ struct NativePanel<Content: View>: View {
                         lineWidth: 1
                     )
             )
-            .shadow(color: AppSurface.cardGlow, radius: isHovering ? 22 : 12, x: 0, y: 0)
-            .shadow(color: isHovering ? AppSurface.hoverShadow : AppSurface.cardShadow, radius: isHovering ? 18 : 10, x: 0, y: isHovering ? 10 : 5)
-            .scaleEffect(isHovering ? scaleOnHover : 1)
+            .shadow(color: AppSurface.cardGlow, radius: effectiveHover ? 22 : 12, x: 0, y: 0)
+            .shadow(color: effectiveHover ? AppSurface.hoverShadow : AppSurface.cardShadow, radius: effectiveHover ? 18 : 10, x: 0, y: effectiveHover ? 10 : 5)
+            .scaleEffect(effectiveHover ? scaleOnHover : 1)
             .animation(.easeOut(duration: 0.16), value: isHovering)
-            .onHover { isHovering = $0 }
+            .onHover { isHovering = allowsHoverEffect && $0 }
     }
 }
 

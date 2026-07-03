@@ -56,6 +56,7 @@ final class AppModel: ObservableObject {
     @Published var lastRealtimeEventAt: Date?
     @Published private(set) var activityClientAppCounts: [(name: String, count: Int)] = []
     @Published private(set) var activityClientIpCounts: [(name: String, count: Int)] = []
+    @Published private(set) var activityRuleHitCount = 0
 
     private let sidecarManager: SidecarManager?
     private var didEnsureService = false
@@ -326,6 +327,10 @@ final class AppModel: ObservableObject {
         case .rules:
             await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
             await refreshRuleEditorDynamicData()
+            if let name = selectedRuleName,
+               selectedRuleDetail?.name != name {
+                await selectRule(name)
+            }
         case .network:
             await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: false)
         }
@@ -1345,6 +1350,7 @@ final class AppModel: ObservableObject {
     private func refreshActivityTrafficSummaries() {
         var apps: [String: Int] = [:]
         var ips: [String: Int] = [:]
+        var ruleHits = 0
         for record in trafficRecords {
             if let clientApp = record.clientApp, !clientApp.isEmpty {
                 apps[clientApp, default: 0] += 1
@@ -1352,9 +1358,13 @@ final class AppModel: ObservableObject {
             if let clientIp = record.clientIp, !clientIp.isEmpty {
                 ips[clientIp, default: 0] += 1
             }
+            if record.hasRuleHit {
+                ruleHits += 1
+            }
         }
         activityClientAppCounts = sortedCounts(apps)
         activityClientIpCounts = sortedCounts(ips)
+        activityRuleHitCount = ruleHits
     }
 
     private func sortedCounts(_ values: [String: Int]) -> [(name: String, count: Int)] {

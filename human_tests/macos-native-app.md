@@ -995,6 +995,35 @@
 - 2026-07-03：执行 release workflow Ruby 检查通过，输出 `macos native release workflow ok`。
 - 2026-07-03：执行 `rg -n 'BIFROST_VERSION|CFBundleShortVersionString|CFBundleVersion' scripts/build-macos-native.sh` 通过，确认 Info.plist 版本字段来自 `BIFROST_VERSION`。
 
+### TC-MNA-36：回归 - 核心面板切换不做重复拉取或大列表 render 扫描
+
+**操作步骤：**
+1. 执行 Swift core contract 与 app 构建：
+   ```bash
+   swift run --package-path apps/macos BifrostNativeCoreChecks
+   swift build --package-path apps/macos
+   ```
+2. 检查 Activity/Network 的统计缓存与 Rules 选择链路：
+   ```bash
+   rg -n 'activityRuleHitCount|refreshActivityTrafficSummaries|filter\(\\.hasRuleHit\)|task\(id: appModel.selectedRuleName\)|allowsHoverEffect: false' \
+     apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
+     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift
+   ```
+3. 执行 native 性能 smoke：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-traffic-table-performance
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-release-scope
+   ```
+
+**预期结果：**
+- `BifrostNativeCoreChecks` 与 Swift build 通过。
+- Network 页展示规则命中时读取 `activityRuleHitCount` 缓存，不在 SwiftUI render 阶段对 `trafficRecords` 执行 `filter(\.hasRuleHit)` 全量扫描。
+- Rules 页点击列表行只通过行 action 调用 `selectRule`，不存在 `.task(id: selectedRuleName)` 再次触发同一规则详情拉取。
+- 首次进入 Rules 页时，如果 AppModel 只选中了首条规则名但尚未加载详情，入口刷新流程会主动加载一次选中规则详情。
+- Rules 列表与详情两块大容器关闭 hover 缩放动画，保持白色卡片、描边和柔光，避免编辑器区域在 hover 时触发大面积重绘。
+- release scope 仍然只暴露 `活动,概览,规则,网络`，traffic table performance smoke 通过。
+
 ## 清理步骤
 
 ```bash
