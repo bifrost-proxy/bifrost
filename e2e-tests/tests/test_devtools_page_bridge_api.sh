@@ -699,6 +699,32 @@ async function closeOpenAntModals(page, label) {
   }, null, { timeout: 3000 });
 }
 
+async function openDevtoolsNetworkRow(adminPage, row, textPattern, label) {
+  await row.waitFor({ timeout: 8000 });
+  let lastError = null;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    await dispatchVisibleClick(row, `${label}:${attempt}`);
+    try {
+      await Promise.any([
+        adminPage.getByTestId('devtools-network-fallback-detail').getByText(textPattern).first().waitFor({ timeout: 5000 }),
+        adminPage.getByTestId('devtools-network-detail').getByText(textPattern).first().waitFor({ timeout: 5000 }),
+      ]);
+      return;
+    } catch (error) {
+      lastError = error;
+      await adminPage.waitForTimeout(250);
+    }
+  }
+  const debugState = await adminPage.evaluate(() => ({
+    detail: document.querySelector('[data-testid="devtools-network-detail"]')?.textContent?.slice(0, 1000) || '',
+    fallbackDetail: document.querySelector('[data-testid="devtools-network-fallback-detail"]')?.textContent?.slice(0, 1000) || '',
+    rows: Array.from(document.querySelectorAll('[data-testid="devtools-network-panel"] [data-testid="traffic-row"]')).map((node) =>
+      (node.textContent || '').slice(0, 300)
+    ),
+  }));
+  throw new Error(`Failed to open DevTools Network row ${label}: ${JSON.stringify(debugState)} ${lastError?.message || ''}`);
+}
+
 function mergeSnapshot(base, incoming) {
   const next = base ? { ...base } : {};
   if (incoming.page) next.page = incoming.page;
@@ -2045,9 +2071,7 @@ const bridgeOnlyDetailRow = adminPage
   .getByTestId('traffic-row')
   .filter({ hasText: 'bridge-only-detail' })
   .first();
-await bridgeOnlyDetailRow.waitFor({ timeout: 8000 });
-await bridgeOnlyDetailRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-detail/).first().waitFor({ timeout: 15000 });
+await openDevtoolsNetworkRow(adminPage, bridgeOnlyDetailRow, /bridge-only-detail/, 'bridge-only-detail-row');
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-query').getByText('foo').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-request-headers').getByText(/x-bifrost-fallback-header/i).waitFor({ timeout: 8000 });
@@ -2069,9 +2093,7 @@ const bridgeOnlyTagRow = adminPage
   .getByTestId('traffic-row')
   .filter({ hasText: 'bridge-only-tag-fallback' })
   .first();
-await bridgeOnlyTagRow.waitFor({ timeout: 8000 });
-await bridgeOnlyTagRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-fallback-detail').getByText(/bridge-only-tag-fallback/).first().waitFor({ timeout: 15000 });
+await openDevtoolsNetworkRow(adminPage, bridgeOnlyTagRow, /bridge-only-tag-fallback/, 'bridge-only-tag-row');
 await adminPage.getByTestId('devtools-network-fallback-detail').getByText('404').first().waitFor({ timeout: 8000 });
 await adminPage.unroute('**/_bifrost/api/devtools/network/traffic/**');
 await adminPage.unroute('**/_bifrost/api/traffic/**');
