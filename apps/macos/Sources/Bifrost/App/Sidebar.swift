@@ -23,9 +23,9 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 
     var needsTrafficRecords: Bool {
         switch self {
-        case .activity:
+        case .activity, .network:
             return true
-        case .overview, .rules, .network:
+        case .overview, .rules:
             return false
         }
     }

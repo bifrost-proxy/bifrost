@@ -1,6 +1,7 @@
 import AppKit
 import BifrostNativeCore
 import SwiftUI
+import WebKit
 
 struct ActivityView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -12,10 +13,8 @@ struct ActivityView: View {
     var body: some View {
         NativePageScaffold(title: "活动") {
             LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 18),
-                GridItem(.flexible(), spacing: 18),
-                GridItem(.flexible(), spacing: 18),
-            ], spacing: 18) {
+                GridItem(.adaptive(minimum: 210, maximum: 360), spacing: 18, alignment: .topLeading)
+            ], alignment: .leading, spacing: 18) {
                 NativeMetricCard(
                     title: "活动连接",
                     value: "\(metrics?.activeConnections ?? 0)",
@@ -106,9 +105,8 @@ struct DashboardView: View {
     var body: some View {
         NativePageScaffold(title: "概览") {
             LazyVGrid(columns: [
-                GridItem(.flexible(), spacing: 18),
-                GridItem(.flexible(), spacing: 18),
-            ], spacing: 18) {
+                GridItem(.adaptive(minimum: 260, maximum: 560), spacing: 18, alignment: .topLeading)
+            ], alignment: .leading, spacing: 18) {
                 OverviewToggleCard(
                     title: "系统代理",
                     subtitle: systemProxySubtitle,
@@ -121,27 +119,18 @@ struct DashboardView: View {
                 }
 
                 TlsInterceptionCard()
-
-                RemoteInvokeCard(model: model)
-                    .gridCellColumns(2)
-                SyncControlCard(model: model)
-                CertificateControlCard(model: model)
-                    .gridCellColumns(2)
-
-                NativeCard {
-                    VStack(alignment: .leading, spacing: 16) {
-                        HStack {
-                            NativeCardHeader(title: "本机服务", subtitle: appModel.adminHostPortLabel)
-                            Spacer()
-                        }
-                        HStack(spacing: 12) {
-                            CompactFact(title: "版本", value: appModel.overview?.system?.version ?? "-")
-                            CompactFact(title: "PID", value: appModel.overview?.system?.pid.map(String.init) ?? "-")
-                            CompactFact(title: "记录", value: "\(appModel.overview?.traffic?.recorded ?? appModel.trafficRecords.count)")
-                        }
-                    }
-                }
             }
+
+            RemoteInvokeCard(model: model)
+
+            LazyVGrid(columns: [
+                GridItem(.adaptive(minimum: 260, maximum: 560), spacing: 18, alignment: .topLeading)
+            ], alignment: .leading, spacing: 18) {
+                SyncControlCard(model: model)
+                CertificateManagementCard(model: model)
+            }
+
+            MobileConnectionCheckCard(model: model)
         }
         .task(id: appModel.adminURL) {
             await model.configure(baseURL: appModel.adminURL)
@@ -169,34 +158,45 @@ struct NetworkWebView: View {
         NativePageScaffold(title: "网络") {
             NativeCard {
                 VStack(alignment: .leading, spacing: 18) {
-                    HStack(spacing: 14) {
-                        Image(systemName: "globe")
-                            .font(.system(size: 28, weight: .medium))
-                            .foregroundStyle(.blue)
-                            .frame(width: 42, height: 42)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("网络详情")
-                                .font(.system(size: 18, weight: .semibold))
-                            Text(appModel.adminHostPortLabel)
-                                .font(.system(size: 12))
-                                .foregroundStyle(.secondary)
+                    ViewThatFits(in: .horizontal) {
+                        networkHeader
+                        VStack(alignment: .leading, spacing: 12) {
+                            networkHeader
                         }
-                        Spacer()
-                        Button {
-                            appModel.openWebUI()
-                        } label: {
-                            Label("在浏览器打开", systemImage: "arrow.up.right.square")
-                        }
-                        .buttonStyle(.borderedProminent)
                     }
                     Divider()
-                    HStack(spacing: 12) {
+                    AdaptiveFactGrid(minimum: 118) {
                         CompactFact(title: "当前记录", value: "\(appModel.overview?.traffic?.recorded ?? appModel.trafficRecords.count)")
                         CompactFact(title: "活动连接", value: "\(appModel.overview?.metrics?.activeConnections ?? 0)")
                         CompactFact(title: "规则命中", value: "\(appModel.activityRuleHitCount)")
                     }
                 }
             }
+        }
+    }
+
+    private var networkHeader: some View {
+        HStack(spacing: 14) {
+            Image(systemName: "globe")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(.blue)
+                .frame(width: 42, height: 42)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("网络详情")
+                    .font(.system(size: 18, weight: .semibold))
+                Text(appModel.adminHostPortLabel)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button {
+                appModel.openWebUI()
+            } label: {
+                Label("在浏览器打开", systemImage: "arrow.up.right.square")
+            }
+            .buttonStyle(.borderedProminent)
         }
     }
 }
@@ -458,63 +458,24 @@ private struct RemoteInvokeCard: View {
                     .disabled(model.remoteInvokeStatus == nil || model.isMutating)
                 }
 
-                HStack(spacing: 12) {
+                AdaptiveFactGrid(minimum: 126) {
                     CompactFact(title: "已授权客户端", value: model.remoteInvokeClientCountText)
                     CompactFact(title: "活动调用", value: "\(model.remoteInvokeStatus?.activeCallIDs.count ?? 0)")
                     CompactFact(title: "最近调用", value: model.remoteInvokeCallCountText)
                     CompactFact(title: "最近活跃", value: model.remoteInvokeRecentActivity)
                 }
 
-                HStack(alignment: .top, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("SSH Key")
-                            .font(.system(size: 13, weight: .semibold))
-                        HStack(spacing: 8) {
-                            StatusPill(
-                                title: model.remoteInvokeSshKey?.status ?? "未生成",
-                                color: model.remoteInvokeSshKey == nil ? .orange : .green
-                            )
-                            Text(shortFingerprint)
-                                .font(.system(size: 11, design: .monospaced))
-                                .foregroundStyle(.secondary)
-                                .lineLimit(1)
-                            Spacer()
-                        }
-                        HStack(spacing: 8) {
-                            Button(model.remoteInvokeSshKey == nil ? "生成 SSH Key" : "重新生成") {
-                                Task { await model.createRemoteInvokeSshKey() }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(model.isMutating)
-                            Button(copiedTitle) {
-                                Task { await model.copyRemoteInvokeSshKey() }
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(model.remoteInvokeSshKey == nil || model.isMutating)
-                        }
+                ViewThatFits(in: .horizontal) {
+                    remoteInvokeBody
+                    VStack(alignment: .leading, spacing: 14) {
+                        sshKeySection
+                        clientSection
                     }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("客户端")
-                            .font(.system(size: 13, weight: .semibold))
-                        if let grants = model.remoteInvokeGrants?.grants, !grants.isEmpty {
-                            ForEach(grants.prefix(3)) { grant in
-                                RemoteInvokeGrantRow(grant: grant)
-                            }
-                        } else {
-                            Text("暂无已授权客户端")
-                                .font(.system(size: 12))
-                                .foregroundStyle(.tertiary)
-                                .frame(height: 38, alignment: .center)
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
 
                 if let calls = model.remoteInvokeCalls?.calls, !calls.isEmpty {
                     Divider()
-                    HStack(spacing: 12) {
+                    AdaptiveFactGrid(minimum: 126) {
                         ForEach(calls.prefix(3)) { call in
                             CompactFact(
                                 title: call.callerDisplayName ?? call.commandKind ?? "调用",
@@ -523,6 +484,80 @@ private struct RemoteInvokeCard: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private var remoteInvokeBody: some View {
+        HStack(alignment: .top, spacing: 14) {
+            sshKeySection
+                .frame(maxWidth: .infinity, alignment: .leading)
+            clientSection
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var sshKeySection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("SSH Key")
+                .font(.system(size: 13, weight: .semibold))
+            HStack(spacing: 8) {
+                StatusPill(
+                    title: model.remoteInvokeSshKey?.status ?? "未生成",
+                    color: model.remoteInvokeSshKey == nil ? .orange : .green
+                )
+                Text(shortFingerprint)
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Spacer()
+            }
+            ViewThatFits(in: .horizontal) {
+                sshKeyButtons
+                VStack(alignment: .leading, spacing: 8) {
+                    sshKeyButtons
+                }
+            }
+        }
+    }
+
+    private var sshKeyButtons: some View {
+        HStack(spacing: 8) {
+            Button(model.remoteInvokeSshKey == nil ? "生成 SSH Key" : "重新生成") {
+                Task { await model.createRemoteInvokeSshKey() }
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.isMutating)
+            Button {
+                Task { await model.copyRemoteInvokeSshKey() }
+            } label: {
+                Label("复制 SSH Key", systemImage: "doc.on.doc")
+                    .labelStyle(.titleAndIcon)
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.remoteInvokeSshKey == nil || model.isMutating)
+            if sshKeyRecentlyCopied {
+                Text("已复制")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    private var clientSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("客户端")
+                .font(.system(size: 13, weight: .semibold))
+            if let grants = model.remoteInvokeGrants?.grants, !grants.isEmpty {
+                ForEach(grants.prefix(3)) { grant in
+                    RemoteInvokeGrantRow(grant: grant)
+                }
+            } else {
+                Text("暂无已授权客户端")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.tertiary)
+                    .frame(height: 38, alignment: .center)
             }
         }
     }
@@ -554,12 +589,12 @@ private struct RemoteInvokeCard: View {
         return String(value.prefix(22))
     }
 
-    private var copiedTitle: String {
+    private var sshKeyRecentlyCopied: Bool {
         guard let copiedAt = model.copiedSshKeyAt,
               Date().timeIntervalSince(copiedAt) < 3 else {
-            return "复制 SSH Key"
+            return false
         }
-        return "已复制"
+        return true
     }
 }
 
@@ -590,10 +625,8 @@ private struct TlsInterceptionCard: View {
                 }
 
                 LazyVGrid(columns: [
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10),
-                    GridItem(.flexible(), spacing: 10),
-                ], spacing: 10) {
+                    GridItem(.adaptive(minimum: 112, maximum: 180), spacing: 10, alignment: .topLeading)
+                ], alignment: .leading, spacing: 10) {
                     ForEach(TlsListKind.allCases) { kind in
                         Button {
                             editingKind = kind
@@ -779,7 +812,7 @@ private struct TlsListEditorSheet: View {
                     .font(.system(size: 13, design: .monospaced))
                     .scrollContentBackground(.hidden)
                     .padding(8)
-                    .background(.white, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .background(AppSurface.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
                     .overlay(
                         RoundedRectangle(cornerRadius: 8, style: .continuous)
                             .stroke(AppSurface.cardBorder)
@@ -829,41 +862,50 @@ private struct SyncControlCard: View {
                     .toggleStyle(.switch)
                     .disabled(model.syncStatus == nil || model.isMutating)
                 }
-                HStack(spacing: 10) {
-                    StatusPill(
-                        title: model.syncStatus?.authorized == true ? "已授权" : "未授权",
-                        color: model.syncStatus?.authorized == true ? .green : .orange
-                    )
-                    Toggle("自动同步", isOn: Binding(
-                        get: { model.syncStatus?.autoSync ?? false },
-                        set: { enabled in Task { await model.setAutoSyncEnabled(enabled) } }
-                    ))
-                    .toggleStyle(.switch)
-                    .font(.system(size: 12))
-                    .disabled(model.syncStatus == nil || model.isMutating)
-                    Spacer()
-                    Button(model.syncStatus?.hasSession == true ? "退出" : "登录") {
-                        Task {
-                            if model.syncStatus?.hasSession == true {
-                                await model.logoutSync()
-                            } else {
-                                await model.openSyncLogin()
-                            }
-                        }
+                ViewThatFits(in: .horizontal) {
+                    syncControls
+                    VStack(alignment: .leading, spacing: 10) {
+                        syncControls
                     }
-                    .buttonStyle(.borderless)
-                    Button("同步") {
-                        Task { await model.runSyncNow() }
-                    }
-                    .buttonStyle(.borderless)
-                    .disabled(model.syncStatus?.enabled != true || model.isMutating)
                 }
             }
         }
     }
+
+    private var syncControls: some View {
+        HStack(spacing: 10) {
+            StatusPill(
+                title: model.syncStatus?.authorized == true ? "已授权" : "未授权",
+                color: model.syncStatus?.authorized == true ? .green : .orange
+            )
+            Toggle("自动同步", isOn: Binding(
+                get: { model.syncStatus?.autoSync ?? false },
+                set: { enabled in Task { await model.setAutoSyncEnabled(enabled) } }
+            ))
+            .toggleStyle(.switch)
+            .font(.system(size: 12))
+            .disabled(model.syncStatus == nil || model.isMutating)
+            Spacer(minLength: 8)
+            Button(model.syncStatus?.hasSession == true ? "退出" : "登录") {
+                Task {
+                    if model.syncStatus?.hasSession == true {
+                        await model.logoutSync()
+                    } else {
+                        await model.openSyncLogin()
+                    }
+                }
+            }
+            .buttonStyle(.borderless)
+            Button("同步") {
+                Task { await model.runSyncNow() }
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.syncStatus?.enabled != true || model.isMutating)
+        }
+    }
 }
 
-private struct CertificateControlCard: View {
+private struct CertificateManagementCard: View {
     @ObservedObject var model: OverviewControlModel
 
     var body: some View {
@@ -871,8 +913,8 @@ private struct CertificateControlCard: View {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top) {
                     NativeCardHeader(
-                        title: "证书与移动端",
-                        subtitle: model.certInfo?.statusMessage ?? "CA 状态、移动设备与连接可用性"
+                        title: "证书管理",
+                        subtitle: model.certInfo?.statusMessage ?? "安装并验证本机 CA"
                     )
                     Spacer()
                     StatusPill(
@@ -881,44 +923,7 @@ private struct CertificateControlCard: View {
                     )
                 }
 
-                HStack(alignment: .top, spacing: 18) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        HStack(spacing: 12) {
-                            CompactFact(title: "本机 CA", value: model.certInfo?.statusLabel ?? "读取中")
-                            CompactFact(title: "代理地址", value: model.proxyAddressInfo?.addresses.first(where: \.isPreferred)?.address ?? "-")
-                            CompactFact(title: "移动设备", value: "\(model.detectedMobileDevices.count)")
-                        }
-                        Text(fingerprintText)
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
-                        HStack(spacing: 8) {
-                            Button("安装本机 CA") {
-                                Task { await model.installCertificate() }
-                            }
-                            .buttonStyle(.bordered)
-                            .disabled(model.certInfo == nil || model.certInfo?.available == false || model.isMutating)
-                        }
-
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("已连接设备")
-                                .font(.system(size: 13, weight: .semibold))
-                            if model.detectedMobileDevices.isEmpty {
-                                Text("暂无 USB 设备。可让手机扫描右侧二维码检查同网、证书与代理连接。")
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(.secondary)
-                            } else {
-                                ForEach(model.detectedMobileDevices.prefix(3)) { device in
-                                    MobileDeviceRow(device: device)
-                                }
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-
-                    AvailabilityProbePanel(model: model)
-                        .frame(width: 260, alignment: .topLeading)
-                }
+                CertificateSummarySection(model: model, fingerprintText: fingerprintText)
             }
         }
     }
@@ -928,6 +933,38 @@ private struct CertificateControlCard: View {
             return "SHA256: -"
         }
         return "SHA256: \(value)"
+    }
+}
+
+private struct CertificateSummarySection: View {
+    @ObservedObject var model: OverviewControlModel
+    let fingerprintText: String
+
+    private var factColumns: [GridItem] {
+        [
+            GridItem(.adaptive(minimum: 118, maximum: 180), spacing: 10, alignment: .topLeading)
+        ]
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            LazyVGrid(columns: factColumns, alignment: .leading, spacing: 10) {
+                CompactFact(title: "本机 CA", value: model.certInfo?.statusLabel ?? "读取中")
+                CompactFact(title: "代理地址", value: model.proxyAddressInfo?.addresses.first(where: \.isPreferred)?.address ?? "-")
+            }
+
+            Text(fingerprintText)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            Button("安装本机 CA") {
+                Task { await model.installCertificate() }
+            }
+            .buttonStyle(.bordered)
+            .disabled(model.certInfo == nil || model.certInfo?.available == false || model.isMutating)
+        }
     }
 }
 
@@ -983,22 +1020,43 @@ private struct MobileDeviceRow: View {
     }
 }
 
-private struct AvailabilityProbePanel: View {
+private struct MobileConnectionCheckCard: View {
     @ObservedObject var model: OverviewControlModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("可用性检查")
-                    .font(.system(size: 13, weight: .semibold))
-                Spacer()
-                StatusPill(title: probeStatusTitle, color: probeStatusColor)
+        NativeCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top) {
+                    NativeCardHeader(
+                        title: "移动端连接检查",
+                        subtitle: "扫码检查同网、证书与代理连接"
+                    )
+                    Spacer()
+                    StatusPill(title: probeStatusTitle, color: probeStatusColor)
+                }
+
+                ViewThatFits(in: .horizontal) {
+                    HStack(alignment: .top, spacing: 18) {
+                        QRPreview(urlString: model.trustProbeSession?.qrCodeURL)
+                        mobileProbeDetails
+                    }
+                    VStack(alignment: .leading, spacing: 14) {
+                        QRPreview(urlString: model.trustProbeSession?.qrCodeURL)
+                        mobileProbeDetails
+                    }
+                }
             }
-            QRPreview(urlString: model.trustProbeSession?.qrCodeURL)
+        }
+    }
+
+    private var mobileProbeDetails: some View {
+        VStack(alignment: .leading, spacing: 12) {
             Text(model.trustProbeSession?.landingURL ?? "等待生成检查链接")
-                .font(.system(size: 10, design: .monospaced))
+                .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.secondary)
                 .lineLimit(2)
+                .truncationMode(.middle)
+
             HStack(spacing: 8) {
                 Button("打开") {
                     model.openTrustProbeURL()
@@ -1010,9 +1068,28 @@ private struct AvailabilityProbePanel: View {
                 }
                 .buttonStyle(.borderless)
                 .disabled(model.trustProbeSession == nil)
+                Spacer()
             }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("已连接设备")
+                    .font(.system(size: 13, weight: .semibold))
+                if model.detectedMobileDevices.isEmpty {
+                    Text("暂无 USB 设备。可让手机扫描二维码检查同网、证书与代理连接。")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    ForEach(model.detectedMobileDevices.prefix(3)) { device in
+                        MobileDeviceRow(device: device)
+                    }
+                }
+            }
+
             if let devices = model.trustProbeSession?.devices, !devices.isEmpty {
                 VStack(alignment: .leading, spacing: 6) {
+                    Text("扫码设备")
+                        .font(.system(size: 13, weight: .semibold))
                     ForEach(devices.prefix(3)) { device in
                         TrustProbeDeviceRow(device: device)
                     }
@@ -1023,8 +1100,7 @@ private struct AvailabilityProbePanel: View {
                     .foregroundStyle(.tertiary)
             }
         }
-        .padding(14)
-        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private var probeStatusTitle: String {
@@ -1059,6 +1135,9 @@ private struct AvailabilityProbePanel: View {
 
 private struct QRPreview: View {
     let urlString: String?
+    @State private var svgText: String?
+    @State private var isLoading = false
+    @State private var didFail = false
 
     var body: some View {
         ZStack {
@@ -1068,30 +1147,135 @@ private struct QRPreview: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(AppSurface.cardBorder)
                 )
-            if let value = urlString, let url = URL(string: value) {
-                AsyncImage(url: url) { phase in
-                    switch phase {
-                    case .success(let image):
-                        image
-                            .resizable()
-                            .interpolation(.none)
-                            .scaledToFit()
-                            .padding(10)
-                    case .failure:
-                        Image(systemName: "qrcode")
-                            .font(.system(size: 42, weight: .regular))
-                            .foregroundStyle(.tertiary)
-                    default:
-                        ProgressView()
-                    }
-                }
+            if let svgText {
+                InlineSVGView(svgText: svgText)
+                    .padding(10)
+            } else if isLoading {
+                ProgressView()
             } else {
                 Image(systemName: "qrcode")
                     .font(.system(size: 42, weight: .regular))
-                    .foregroundStyle(.tertiary)
+                    .foregroundStyle(didFail ? AnyShapeStyle(.orange.opacity(0.7)) : AnyShapeStyle(.tertiary))
             }
         }
         .frame(width: 136, height: 136)
+        .task(id: urlString) {
+            await loadQRCode()
+        }
+    }
+
+    private func loadQRCode() async {
+        await MainActor.run {
+            svgText = nil
+            didFail = false
+            isLoading = urlString != nil
+        }
+        guard let value = urlString,
+              let originalURL = URL(string: value),
+              let loadURL = localQRCodeLoadURL(from: originalURL) else {
+            await MainActor.run {
+                isLoading = false
+                didFail = urlString != nil
+            }
+            return
+        }
+
+        do {
+            var request = URLRequest(url: loadURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
+            request.setValue("image/svg+xml", forHTTPHeaderField: "Accept")
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse,
+                  (200 ..< 300).contains(http.statusCode),
+                  let text = String(data: data, encoding: .utf8),
+                  let svg = normalizedSVG(from: text) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            await MainActor.run {
+                svgText = svg
+                isLoading = false
+                didFail = false
+            }
+        } catch {
+            await MainActor.run {
+                svgText = nil
+                isLoading = false
+                didFail = true
+            }
+        }
+    }
+
+    private func localQRCodeLoadURL(from url: URL) -> URL? {
+        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+            return nil
+        }
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        return components.url
+    }
+
+    private func normalizedSVG(from text: String) -> String? {
+        guard let range = text.range(of: "<svg", options: [.caseInsensitive]) else {
+            return nil
+        }
+        return String(text[range.lowerBound...])
+    }
+}
+
+private struct InlineSVGView: NSViewRepresentable {
+    let svgText: String
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator()
+    }
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.setValue(false, forKey: "drawsBackground")
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        guard context.coordinator.lastSVGText != svgText else {
+            return
+        }
+        context.coordinator.lastSVGText = svgText
+        webView.loadHTMLString(html(for: svgText), baseURL: nil)
+    }
+
+    private func html(for svgText: String) -> String {
+        """
+        <!doctype html>
+        <html>
+        <head>
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <style>
+            html, body {
+              margin: 0;
+              width: 100%;
+              height: 100%;
+              overflow: hidden;
+              background: transparent;
+            }
+            body {
+              display: flex;
+              align-items: center;
+              justify-content: center;
+            }
+            svg {
+              width: 100%;
+              height: 100%;
+              display: block;
+            }
+          </style>
+        </head>
+        <body>\(svgText)</body>
+        </html>
+        """
+    }
+
+    final class Coordinator {
+        var lastSVGText: String?
     }
 }
 

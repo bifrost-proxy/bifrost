@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -36,6 +37,51 @@ struct BifrostApp: App {
             print("Bifrost release scope check passed: \(items.joined(separator: ","))")
             Foundation.exit(0)
         }
+        if CommandLine.arguments.contains("--check-theme-contract") {
+            guard ColorSchemeMode.system.colorScheme == nil,
+                  ColorSchemeMode.system.next == .light,
+                  ColorSchemeMode.light.next == .dark,
+                  ColorSchemeMode.dark.next == .system else {
+                fputs("Bifrost theme contract check failed: color scheme cycle is not system -> light -> dark\n", stderr)
+                Foundation.exit(1)
+            }
+            guard AppSurface.resolvedContentColor(for: .aqua) != AppSurface.resolvedContentColor(for: .darkAqua) else {
+                fputs("Bifrost theme contract check failed: app surfaces are not appearance-adaptive\n", stderr)
+                Foundation.exit(1)
+            }
+            let darkEditorTheme = BifrostRuleEditorTheme(appearance: NSAppearance(named: .darkAqua) ?? NSApp.effectiveAppearance)
+            guard darkEditorTheme.background != NSColor.white,
+                  darkEditorTheme.rulerBackground != NSColor(calibratedWhite: 0.98, alpha: 1) else {
+                fputs("Bifrost theme contract check failed: rule editor still uses light-only backgrounds\n", stderr)
+                Foundation.exit(1)
+            }
+            print("Bifrost theme contract check passed")
+            Foundation.exit(0)
+        }
+        if CommandLine.arguments.contains("--check-rule-editor-layout") {
+            let editor = BifrostRuleEditorContainerView(frame: NSRect(x: 0, y: 0, width: 900, height: 560))
+            let sampleRule = "example.com host://127.0.0.1:3000\n// comment keeps syntax highlighting visible\n"
+            editor.update(text: sampleRule, editorContext: .empty, isReadOnly: false)
+            editor.layoutSubtreeIfNeeded()
+
+            let clipWidth = editor.scrollView.contentView.bounds.width
+            let textWidth = editor.textView.frame.width
+            guard editor.textView.isEditable,
+                  editor.textView.string == sampleRule,
+                  editor.textView.textContainer?.widthTracksTextView == true,
+                  !editor.textView.isHorizontallyResizable,
+                  textWidth >= clipWidth - 1,
+                  editor.textView.frame.height >= editor.scrollView.contentView.bounds.height - 1,
+                  editor.scrollView.contentView.isFlipped,
+                  editor.scrollView.contentView.bounds.origin == .zero,
+                  editor.scrollView.documentView === editor.textView,
+                  editor.scrollView.verticalRulerView != nil else {
+                fputs("Bifrost rule editor layout check failed: editable=\(editor.textView.isEditable) textWidth=\(textWidth) clipWidth=\(clipWidth) textLength=\(editor.textView.string.count)\n", stderr)
+                Foundation.exit(1)
+            }
+            print("Bifrost rule editor layout check passed")
+            Foundation.exit(0)
+        }
     }
 
     var body: some Scene {
@@ -43,6 +89,7 @@ struct BifrostApp: App {
             MainWindowScene()
                 .environmentObject(appModel)
         }
+        .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(after: .appInfo) {
                 Button("Open Web UI") {

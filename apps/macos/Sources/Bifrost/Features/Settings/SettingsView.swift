@@ -35,7 +35,7 @@ struct SettingsView: View {
             Divider()
             ScrollView {
                 selectedContent
-                    .frame(maxWidth: 980, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(24)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
