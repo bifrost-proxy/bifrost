@@ -263,3 +263,18 @@ Rule Share Query 允许 Web UI 或 CLI 把规则编码到任意 HTTP/HTTPS URL �
 
 结果：
 - TC-RSQ-10：通过。浏览器确认脚本改为等待确认页 URL、`Apply Shared Bifrost Rule` 标题和 `#apply` 按钮同时就绪后再断言，避免 CI 上 Chrome DevTools `/json/new` 返回后仍停留在初始空文档导致误报；本机真实 Chromium-family E2E 输出 `browser apply succeeded without hash` 和 `rule share browser confirmation E2E passed`，规则列表包含 `share/rsq-browser [enabled]`。
+
+执行时间：2026-07-03
+
+测试环境：
+- 本地 macOS worktree：`/Users/eden_studio/work/github/bifrost-surge-platform`
+- 不启动 Bifrost 服务，仅执行 Rule Share payload 编解码和目标 URL 解析的纯单元测试；本轮用于修复 GitHub Actions `Coverage (Unit + Integration) & 90% Gate` 中 `bifrost-core 88.99% < floor 89.00%` 的 coverage 缺口。
+
+执行命令：
+- `cargo test -p bifrost-core rule_share --lib`
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+
+结果：
+- TC-RSQ-01 至 TC-RSQ-06 相关 payload 边界：通过。新增单元测试覆盖 encoded payload 超过 `MAX_ENCODED_PAYLOAD_BYTES`、base64 解码后超过 `MAX_RULE_SHARE_BYTES`、以及无 scheme 但非法的分享目标 URL，均返回明确配置错误；原有分享链接生成、提取、重复 query 替换、裸域名/localhost 默认补 `http://`、hash mismatch 拒绝等测试继续通过。

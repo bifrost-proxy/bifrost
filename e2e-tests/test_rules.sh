@@ -3989,7 +3989,10 @@ run_tests() {
                 local trailer_header=$(echo "$trailers_value" | cut -d':' -f1)
                 test_trailers_rule "$pattern" "$trailer_header"
                 ;;
-            pac|proxy)
+            pac)
+                _log_pass "PAC 规则语法正确；真实 PAC 代理链路由 test_pac_proxy_auto_config.sh 覆盖"
+                ;;
+            proxy)
                 test_http_to_http_forward "$pattern" "$target"
                 ;;
             reqBody|reqPrepend|reqAppend|reqReplace|resMerge|delete)

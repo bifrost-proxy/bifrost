@@ -128,6 +128,20 @@
 - 第 2 步没有输出，表示脚本中不再存在默认 BRE 模式下的 `\|` alternation 断言。
 - 第 3 步全部通过，包含 `rule rename --help`、`rule reorder --help`、`script rename --help`，汇总为 106 个测试通过且 0 个失败。
 
+### TC-CS-48: CLI 详细文档系统代理断言稳定性回归
+
+**操作步骤**：
+1. 运行 `bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+2. 运行 `! rg -n '默认会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost' e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+3. 运行 `rg -n '默认启动会启用系统代理|--system-proxy.*修改操作系统代理配置|--no-system-proxy' e2e-tests/tests/test_cli_offline_commands_e2e.sh docs/cli-quick-start.md docs/cli.md`。
+4. 运行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`。
+
+**预期结果**：
+- 第 1 步退出码为 0。
+- 第 2 步退出码为 0，确认 CLI offline E2E 不再依赖 CI 中容易受文档快照影响的 `docs/cli.md` 前缀短语。
+- 第 3 步命中 quick-start 的默认系统代理说明、CLI 详细文档的 `--system-proxy` / `--no-system-proxy` 边界说明。
+- 第 4 步全部通过；该脚本只读取 CLI help 与文档，不启动 Bifrost、不使用 9900、不修改系统代理。
+
 ### TC-CS-12: unsafe_ssl shell E2E 自带 HTTPS mock fixture
 
 **操作步骤**：
@@ -1239,6 +1253,7 @@
 | TC-CS-45 | 通过 | 2026-06-22 本轮执行：GitHub Actions `CI` run `27924364360` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_socks5_tls_routing_exceptions.sh`，失败原因为 `Network error: Failed to bind to 0.0.0.0:19379: Address already in use`。完整 job log 显示 runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下也算成 `19379`，下游代理和独立 SOCKS5 listener 端口碰撞。修复为 `DOWNSTREAM_PROXY_PORT` 优先使用 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，再 fallback 到 `PROXY_PORT+7`。执行 `bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 通过；执行静态 `rg` 确认默认值链路存在；随后使用 `PROXY_PORT=19373 SOCKS5_PORT=19379 ECHO_PROXY_PORT=19380 MOCK_ECHO_PROXY_PORT=19380 ECHO_HTTP_PORT=19374 ECHO_HTTPS_PORT=19375 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 真实复现 CI 端口形态，脚本完成所有 routing exception 断言并退出 0，全程未使用 9900，未修改系统代理。 |
 | TC-CS-46 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集两个重型低频脚本；随后分别确认 `bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_asr_admin_csrf\\.sh$'` 和同命令匹配 `test_chatgpt_web_shared_profile.sh` 均通过，说明本地 full-shell 专项入口仍保留；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-47 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^test_security_hardening\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集安全聚合 wrapper；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening_functional\\.sh$'` 通过，确认安全功能子路径仍在默认 CI shell 覆盖中；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening\\.sh$'` 通过，确认本地 full-shell / release-gate 仍保留聚合入口；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-48 | 通过 | 2026-07-03 本轮执行：`bash -n e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过；`! rg -n '默认会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost' e2e-tests/tests/test_cli_offline_commands_e2e.sh` 通过，确认 CLI offline E2E 不再依赖 CI 中容易受文档快照影响的 `docs/cli.md` 前缀短语；`rg -n '默认启动会启用系统代理|--system-proxy.*修改操作系统代理配置|--no-system-proxy' e2e-tests/tests/test_cli_offline_commands_e2e.sh docs/cli-quick-start.md docs/cli.md` 命中 quick-start 默认系统代理说明、CLI 详细文档 `--system-proxy` 与 `--no-system-proxy` 边界说明。随后执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_cli_offline_commands_e2e.sh`，汇总 `通过: 160`、`失败: 0`。该回归只读取 CLI help 与文档，不启动 Bifrost，未使用 9900，未修改系统代理。 |
 
 ## 清理步骤
 

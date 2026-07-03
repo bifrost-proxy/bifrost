@@ -107,7 +107,10 @@ impl PacEngine {
 
 pub fn parse_pac_decision(raw: &str) -> Result<PacDecision> {
     for candidate in raw.split(';') {
-        let candidate = candidate.trim();
+        let candidate = candidate
+            .trim()
+            .trim_start_matches('(')
+            .trim_end_matches(')');
         if candidate.is_empty() {
             continue;
         }
@@ -133,6 +136,8 @@ pub fn parse_pac_decision(raw: &str) -> Result<PacDecision> {
             let host_port = parts
                 .next()
                 .unwrap_or("")
+                .trim_end_matches(')')
+                .trim_end_matches(',')
                 .trim_matches('"')
                 .trim_matches('\'');
             if host_port.is_empty() {
@@ -334,6 +339,13 @@ mod tests {
             PacDecision::Proxy {
                 scheme: PacProxyScheme::Http,
                 host_port: "proxy.example:8080".to_string()
+            }
+        );
+        assert_eq!(
+            parse_pac_decision("(PROXY 127.0.0.1:3000)").unwrap(),
+            PacDecision::Proxy {
+                scheme: PacProxyScheme::Http,
+                host_port: "127.0.0.1:3000".to_string()
             }
         );
     }

@@ -15,8 +15,8 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT
 #   2. The bifrost reload log line count does NOT grow across repeated syncs
 #      (RulesChangeOrigin::RemoteSync does not self-wake Sync, and an unchanged
 #      sync does not notify a rules change at all).
-#   3. A REAL remote content change still produces exactly one reload + one
-#      file rewrite (the fix does not break legitimate propagation).
+#   3. A REAL remote content change still rewrites the local file and updates
+#      the active runtime rules (the fix does not break legitimate propagation).
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -190,6 +190,21 @@ file_fingerprint() {
     echo "${mtime}:${size}:${sha}"
 }
 
+proxy_status_for_storm() {
+    local body_file
+    body_file=$(mktemp)
+    local status
+    status=$(env NO_PROXY="" no_proxy="" HTTP_PROXY="" http_proxy="" HTTPS_PROXY="" https_proxy="" \
+        curl -sS -o "$body_file" -w '%{http_code}' \
+            --proxy "http://127.0.0.1:${BIFROST_PORT}" \
+            --noproxy "" \
+            --connect-timeout 3 \
+            --max-time 8 \
+            "http://storm.example.com/runtime-check" 2>/dev/null) || status="000"
+    rm -f "$body_file"
+    echo "$status"
+}
+
 # =============================================
 # Start sync-server
 # =============================================
@@ -271,7 +286,7 @@ api -X PATCH -H "Content-Type: application/json" \
 
 CREATE_ENV=$(api -X POST -H "Content-Type: application/json" \
     -H "x-bifrost-token: ${TEST_TOKEN}" \
-    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"storm-rule\",\"rule\":\"storm.example.com host://127.0.0.1:8080\"}" \
+    -d "{\"user_id\":\"${GROUP_NAME}\",\"name\":\"storm-rule\",\"rule\":\"storm.example.com statusCode://218\"}" \
     "${SYNC_URL}/v4/env")
 assert_body_contains '"code":0' "$CREATE_ENV" "Create group env storm-rule"
 ENV_ID=$(echo "$CREATE_ENV" | jq -r '.data.id')
@@ -336,6 +351,9 @@ admin_put "/api/group-rules/${GROUP_ID}/storm-rule/enable" "{}" > /dev/null 2>&1
 
 # Let any enable-triggered reload settle.
 sleep 2
+INITIAL_RUNTIME_STATUS="$(proxy_status_for_storm)"
+assert_equals "218" "$INITIAL_RUNTIME_STATUS" \
+    "Initial runtime rule returns statusCode://218 after enable"
 
 RULE_FILE="$(group_rule_file "$GROUP_NAME" "storm-rule")"
 echo "Resolved rule file: $RULE_FILE"
@@ -384,7 +402,7 @@ PRE_CHANGE_FP="$(file_fingerprint "$RULE_FILE")"
 
 UPDATE_ENV=$(api -X PATCH -H "Content-Type: application/json" \
     -H "x-bifrost-token: ${TEST_TOKEN}" \
-    -d '{"rule":"storm.example.com host://10.9.8.7:9090"}' \
+    -d '{"rule":"storm.example.com statusCode://219"}' \
     "${SYNC_URL}/v4/env/${ENV_ID}")
 assert_body_contains '"code":0' "$UPDATE_ENV" "Remote env updated"
 
@@ -393,10 +411,17 @@ assert_body_contains '"code":0' "$UPDATE_ENV" "Remote env updated"
 # rule body, and the authoritative on-disk observable is the synced .bifrost file.
 admin_get "/api/group-rules/${GROUP_ID}" > /dev/null
 CHANGED_DETAIL=$(admin_get "/api/group-rules/${GROUP_ID}/storm-rule")
-assert_body_contains '10.9.8.7' "$CHANGED_DETAIL" "Changed content visible via admin detail"
+assert_body_contains 'statusCode://219' "$CHANGED_DETAIL" "Changed content visible via admin detail"
 sleep 3
 CHANGED_FILE_CONTENT="$(cat "$RULE_FILE" 2>/dev/null)"
-assert_body_contains '10.9.8.7' "$CHANGED_FILE_CONTENT" "Changed content visible in synced rule file"
+assert_body_contains 'statusCode://219' "$CHANGED_FILE_CONTENT" "Changed content visible in synced rule file"
+
+RUNTIME_STATUS_AFTER_CHANGE="000"
+for _ in $(seq 1 10); do
+    RUNTIME_STATUS_AFTER_CHANGE="$(proxy_status_for_storm)"
+    [[ "$RUNTIME_STATUS_AFTER_CHANGE" == "219" ]] && break
+    sleep 1
+done
 
 POST_CHANGE_RELOADS="$(reload_log_count)"
 POST_CHANGE_FP="$(file_fingerprint "$RULE_FILE")"
@@ -405,14 +430,10 @@ echo "Pre-change fp=$PRE_CHANGE_FP post-change fp=$POST_CHANGE_FP"
 
 assert_not_equals "$PRE_CHANGE_FP" "$POST_CHANGE_FP" \
     "Real change: local rule file was rewritten with new content"
-assert_body_contains '10.9.8.7' "$(cat "$RULE_FILE")" \
+assert_body_contains 'statusCode://219' "$(cat "$RULE_FILE")" \
     "Real change: local rule file contains new content"
-# A real change must trigger at least one new reload line. reload_log_count
-# aggregates the tracing line from the daemon rolling log, so this is the
-# authoritative observable that the hot-reload watcher actually fired.
-REAL_CHANGE_TRIGGERED=$([[ "$POST_CHANGE_RELOADS" -gt "$PRE_CHANGE_RELOADS" ]] && echo yes || echo no)
-assert_equals "yes" "$REAL_CHANGE_TRIGGERED" \
-    "Real change: reload was triggered ($PRE_CHANGE_RELOADS -> $POST_CHANGE_RELOADS)"
+assert_equals "219" "$RUNTIME_STATUS_AFTER_CHANGE" \
+    "Real change: active runtime rule was reloaded (statusCode://218 -> statusCode://219)"
 
 # =============================================
 # Storm guard again: after the real change, repeats are stable once more

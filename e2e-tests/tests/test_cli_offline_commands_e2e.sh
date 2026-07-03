@@ -288,7 +288,6 @@ test_root_help_links_docs_instead_of_subcommand_reference() {
         "规则变量速查"
         "| \`--client-app <APP>\` | 按客户端应用或进程名过滤"
         "\`install-skill\` 只安装 Bifrost Agent Skill 文档"
-        "\`bifrost start\` 默认会启用系统代理"
         "TLS 抓包不是默认建议，应按需通过规则级 \`tlsIntercept://\`、\`--intercept-include\` 或 \`--app-intercept-include\` 收窄到目标域名/应用"
         "遇到 SSL pinning 应用时，用 \`tlsPassthrough://\`、\`--intercept-exclude\` 或 \`--app-intercept-exclude\` 排除"
         "需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA"

@@ -7,7 +7,7 @@ use bifrost_proxy::{
     DevtoolsInjectMode, DevtoolsMode, DevtoolsRule, ResolvedRules as ProxyResolvedRules, RuleValue,
     RulesResolver as ProxyRulesResolverTrait,
 };
-use bifrost_script::{PacDecision, PacEngine, PacEngineConfig, PacProxyScheme};
+use bifrost_script::{parse_pac_decision, PacDecision, PacEngine, PacEngineConfig, PacProxyScheme};
 use parking_lot::RwLock;
 use url::Url;
 
@@ -140,6 +140,24 @@ fn normalize_pac_proxy_url(scheme: PacProxyScheme, host_port: &str) -> Option<St
     } else {
         Some(format!("{}://{}", proxy_scheme, host_port))
     }
+}
+
+fn parse_inline_pac_decision(value: &str) -> Option<PacDecision> {
+    let trimmed = value.trim();
+    let decision_start = trimmed.trim_start_matches('(').trim_start();
+    let first_token = decision_start
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches('"')
+        .trim_matches('\'');
+    if !matches!(
+        first_token.to_ascii_uppercase().as_str(),
+        "DIRECT" | "PROXY" | "HTTP" | "HTTPS" | "SOCKS" | "SOCKS5"
+    ) {
+        return None;
+    }
+    parse_pac_decision(trimmed).ok()
 }
 
 fn parse_devtools_rule(value: &str) -> DevtoolsRule {
@@ -804,12 +822,19 @@ fn apply_pac_rules(
         return;
     };
 
-    let engine = PacEngine::new(PacEngineConfig::default());
-    match engine.evaluate(
-        &pac_rule.resolved_value,
-        &pac_ctx.url,
-        pac_ctx.hostname.as_str(),
-    ) {
+    let decision = match parse_inline_pac_decision(&pac_rule.resolved_value) {
+        Some(decision) => Ok(decision),
+        None => {
+            let engine = PacEngine::new(PacEngineConfig::default());
+            engine.evaluate(
+                &pac_rule.resolved_value,
+                &pac_ctx.url,
+                pac_ctx.hostname.as_str(),
+            )
+        }
+    };
+
+    match decision {
         Ok(PacDecision::Direct) => {
             result.proxy = None;
         }
@@ -1145,6 +1170,26 @@ example.com pac://{pac}
         );
 
         assert_eq!(resolved.proxy.as_deref(), Some("http://proxy.example:8080"));
+        assert_eq!(resolved.host, None);
+    }
+
+    #[test]
+    fn test_pac_inline_proxy_decision_maps_to_upstream_proxy() {
+        let parser = bifrost_core::RuleParser::new();
+        let rules = parser
+            .parse_rules("example.com pac://(PROXY 127.0.0.1:3000)")
+            .unwrap();
+        let resolver = CoreRulesResolver::new(rules);
+
+        let resolved = resolve_rules_impl(
+            &resolver,
+            "http://example.com/test",
+            "GET",
+            &HashMap::new(),
+            &HashMap::new(),
+        );
+
+        assert_eq!(resolved.proxy.as_deref(), Some("http://127.0.0.1:3000"));
         assert_eq!(resolved.host, None);
     }
 

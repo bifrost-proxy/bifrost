@@ -32,9 +32,9 @@ sync_server_exec() {
         local candidate
         for candidate in \
             "${NODE_BIN:-}" \
+            "$(command -v node 2>/dev/null || true)" \
             "$HOME/.local/share/mise/installs/node/22.22.0/bin/node" \
-            "$HOME/.local/share/mise/installs/node/22/bin/node" \
-            "$(command -v node 2>/dev/null || true)"; do
+            "$HOME/.local/share/mise/installs/node/22/bin/node"; do
             if [[ -n "$candidate" && -x "$candidate" ]]; then
                 printf '%q %q' "$candidate" "$dir/dist/cli.js"
                 return 0

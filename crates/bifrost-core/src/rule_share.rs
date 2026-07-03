@@ -384,4 +384,28 @@ mod tests {
             .encode(serde_json::to_vec(&payload).unwrap());
         assert!(decode_rule_share_payload(&encoded).is_err());
     }
+
+    #[test]
+    fn decode_rejects_oversized_encoded_payload() {
+        let encoded = "a".repeat(MAX_ENCODED_PAYLOAD_BYTES + 1);
+        let err = decode_rule_share_payload(&encoded).unwrap_err();
+        assert!(err.to_string().contains("rule share payload is too large"));
+    }
+
+    #[test]
+    fn decode_rejects_payload_that_decodes_over_limit() {
+        let bytes = vec![b'a'; MAX_RULE_SHARE_BYTES + 1];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let err = decode_rule_share_payload(&encoded).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("rule share payload is too large after decoding"));
+    }
+
+    #[test]
+    fn append_rejects_invalid_schemeless_target() {
+        let payload = sample_payload();
+        let err = append_rule_share_query("exa mple .com/path", &payload).unwrap_err();
+        assert!(err.to_string().contains("invalid rule share target URL"));
+    }
 }

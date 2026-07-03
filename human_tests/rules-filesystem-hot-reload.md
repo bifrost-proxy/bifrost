@@ -124,6 +124,7 @@
 - 2026-06-23 执行 `cargo test -p bifrost-admin group_rules::tests:: -- --nocapture` 通过，确认重复 Group env 同步不写盘，legacy/canonical 内容重复同步不刷新 `last_synced_at`，同 group 同步锁复用。
 - 2026-06-23 执行 `cargo test -p bifrost-cli rules_filesystem_snapshot -- --nocapture` 通过，确认 sync metadata-only 变化不改变 runtime snapshot，真实规则内容变化会改变 runtime snapshot。
 - 2026-06-23 执行 `BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_BIN=target/debug/bifrost e2e-tests/tests/test_rules_filesystem_hot_reload.sh` 通过。真实脚本启动临时 Bifrost 和 HTTP echo server，覆盖 CLI add/update/delete、直接编辑 `.bifrost`、直接删除 `.bifrost`，所有代理状态码与 active summary 断言通过，全流程使用临时数据目录、`--no-system-proxy` 并完成清理。
+- 2026-07-03 执行 `SKIP_BUILD=true BIFROST_BIN=target/release/bifrost BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 bash e2e-tests/tests/test_group_sync_no_logstorm_e2e.sh` 通过，22/22 PASS。真实启动 sync-server 与 Bifrost，重复 15 次 unchanged group sync 后本地规则文件 mtime/size/sha 不变且 reload 计数不增长；远端真实规则从 `statusCode://218` 更新为 `statusCode://219` 后，本地文件重写、Admin detail 更新，并通过 Bifrost 代理真实请求确认运行时状态码从 218 切到 219；再次重复 15 次 unchanged sync 后保持稳定。
 
 ## 清理步骤
 

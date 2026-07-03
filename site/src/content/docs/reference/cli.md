@@ -239,9 +239,9 @@ bifrost port update 18888 --rule-file ./updated-temp-rule.bifrost
 bifrost port destroy 18888
 ```
 
-`port` 命令需要主代理正在运行。临时端口与主端口共享同一个 `BIFROST_DATA_DIR` 中的规则、values、scripts、证书、流量记录等数据；端口绑定只保存“这个端口选择哪些规则集”。临时端口流量不受默认规则 enabled/disabled 状态影响：只有 `port bind` / `port update` 显式绑定的本地规则或 Group 规则会进入该临时端口的 resolver。
+`port` 命令需要主代理正在运行。临时端口与主端口共享同一个 `BIFROST_DATA_DIR` 中的规则、values、scripts、证书、流量记录等数据；端口绑定只保存“这个端口选择哪些规则集”。临时端口 resolver 会先加载全局默认规则 `Default`，再加载 `port bind` / `port update` 显式绑定的本地规则或 Group 规则；它不继承主端口的其它 enabled 普通规则。
 
-`--rule` 引用本地规则名；`--group-rule` 使用 `<group_id>/<rule_name>` 格式；`--rule-file` 直接绑定规则文件；`--rule-text` 直接绑定规则原文。销毁临时端口只关闭该端口监听，不删除共享规则数据，也不影响主端口。
+`--rule` 引用本地规则名；`--group-rule` 使用 `<group_id>/<rule_name>` 格式；`--rule-file` 直接绑定规则文件；`--rule-text` 直接绑定规则原文。不要把 `Default` 作为 `--rule` 显式绑定，它会自动应用到所有临时端口，`default`/`DEFAULT` 等大小写变体也会被拒绝。销毁临时端口只关闭该端口监听，不删除共享规则数据，也不影响主端口。
 
 临时端口绑定状态只在当前运行进程内存里生效，不写入持久配置。Bifrost 重启后临时端口会被重置，不会自动重新监听，也不会恢复之前的规则绑定；需要时请重新执行 `bifrost port bind ...`。
 
@@ -251,14 +251,15 @@ Traffic 记录会带监听端口信息，即使请求没有命中任何规则也
 
 1. 先确认主代理已运行；默认用 `bifrost start`。如需 HTTPS 明文调试，优先在任务规则里使用 `tlsIntercept://`，或用 `--intercept-include` / `--app-intercept-include` 只放行目标域名/应用。
 2. 保持主端口继续承载默认启用规则。
-3. 为临时调试场景按需再开多个端口：
+3. 如需所有端口共享兜底规则，编辑全局 `Default`；它会自动排在每个端口 active rules 的最前面。
+4. 为临时调试场景按需再开多个端口：
    - `bifrost port bind --port 18888 --rule local-dev`
    - `bifrost port bind --port 18889 --group-rule 7152084678483132446/abc`
    - `bifrost port bind --port 0 --rule-file ./temp-debug.bifrost`
    - `bifrost port bind --port 18890 --rule-text "debug.test status://218 resBody://(debug)"`
-4. 用 `bifrost port list` 查看当前所有临时端口；用 `bifrost port show <port>` 看绑定元信息；用 `bifrost port active <port>` 看这个端口当前真正生效的规则视图。
-5. 当一个临时端口需要切换到另一组规则时，使用 `bifrost port update <port> ...` 传入新的完整规则引用集合。
-6. 调试结束后执行 `bifrost port destroy <port>` 回收对应监听端口。
+5. 用 `bifrost port list` 查看当前所有临时端口；用 `bifrost port show <port>` 看绑定元信息；用 `bifrost port active <port>` 看这个端口当前真正生效的规则视图。
+6. 当一个临时端口需要切换到另一组规则时，使用 `bifrost port update <port> ...` 传入新的完整规则引用集合。
+7. 调试结束后执行 `bifrost port destroy <port>` 回收对应监听端口。
 
 同一个 Bifrost 服务可以同时服务多个应用或开发任务。推荐做法是共享一个常驻主服务，让系统代理、CA、Web UI 和 traffic 存储保持统一；每个应用、任务或 Agent 分配一个独立入口端口，并只在该端口绑定对应规则：
 
