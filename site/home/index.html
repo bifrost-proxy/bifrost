@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="Bifrost is a fast proxy workbench for traffic capture, rewrite, replay, TLS interception, scripts, and desktop debugging workflows."
+    />
+    <title>Bifrost | Proxy Workbench</title>
+    <link rel="icon" type="image/png" href="%BASE_PATH%favicon.png" />
+    <link rel="stylesheet" href="%HOME_CSS%" />
+    <script src="%HOME_JS%" defer></script>
+  </head>
+  <body>
+    <header class="site-header" aria-label="Bifrost">
+      <a class="brand" href="%BASE_PATH%" aria-label="Bifrost home">
+        <img src="%BASE_PATH%favicon.png" alt="" width="32" height="32" decoding="async" />
+        <span>Bifrost</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary navigation">
+        <a href="%BASE_PATH%docs/" data-i18n="navDocs">Docs</a>
+        <a href="%BASE_PATH%getting-started/installation/" data-i18n="navInstall">Install</a>
+        <a href="%BASE_PATH%en/reference/" data-i18n="navEnglish">English</a>
+        <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
+      </nav>
+      <div class="language-switch" role="group" aria-label="Language">
+        <button type="button" data-lang="en" aria-pressed="true">EN</button>
+        <button type="button" data-lang="zh" aria-pressed="false">中文</button>
+      </div>
+    </header>
+
+    <main>
+      <section class="hero" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow" data-i18n="heroEyebrow">HTTP / HTTPS / SOCKS5 / WebSocket / Replay</p>
+          <h1 id="hero-title">Bifrost</h1>
+          <p class="hero-text" data-i18n="heroText">
+            A proxy workbench for capturing traffic, rewriting requests, replaying failures,
+            and debugging real applications from the terminal, desktop, or browser.
+          </p>
+          <div class="hero-actions" aria-label="Primary actions">
+            <a class="button primary" href="%BASE_PATH%getting-started/installation/" data-i18n="primaryCta"
+              >Install</a
+            >
+            <a class="button secondary" href="%BASE_PATH%docs/" data-i18n="secondaryCta">Read Docs</a>
+          </div>
+        </div>
+
+        <section class="workbench" aria-label="Bifrost workflow preview">
+          <div class="preview-tabs" role="tablist" aria-label="Preview modes">
+            <button type="button" role="tab" aria-selected="true" aria-controls="panel-cli" id="tab-cli">
+              CLI
+            </button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="panel-web" id="tab-web">
+              Web UI
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected="false"
+              aria-controls="panel-rules"
+              id="tab-rules"
+            >
+              Rules
+            </button>
+          </div>
+
+          <div class="preview-panel is-active" id="panel-cli" role="tabpanel" aria-labelledby="tab-cli">
+            <div class="terminal-window" aria-label="Bifrost terminal commands">
+              <p><span>$</span> bifrost start --no-system-proxy</p>
+              <p class="muted" data-i18n="terminalReady">
+                Admin UI ready at http://127.0.0.1:8800/_bifrost/
+              </p>
+              <p><span>$</span> bifrost traffic search --include headers,body api.example.com</p>
+              <p class="ok" data-i18n="terminalOk">24 matching requests · latest 200 OK · replay available</p>
+            </div>
+          </div>
+
+          <div class="preview-panel" id="panel-web" role="tabpanel" aria-labelledby="tab-web" hidden>
+            <div class="ui-window" aria-label="Bifrost web interface preview">
+              <div class="traffic-list">
+                <span class="status ok-dot"></span>
+                <strong>POST</strong>
+                <span>/v1/orders</span>
+                <em>200</em>
+              </div>
+              <div class="traffic-list">
+                <span class="status warn-dot"></span>
+                <strong>GET</strong>
+                <span>/api/session</span>
+                <em>401</em>
+              </div>
+              <div class="detail-card">Headers · Body · Cookies · Replay · Export</div>
+            </div>
+          </div>
+
+          <div class="preview-panel" id="panel-rules" role="tabpanel" aria-labelledby="tab-rules" hidden>
+            <pre class="rules-window"><code>api.example.com reqHeaders://x-debug=1
+api.example.com resDelay://350
+api.example.com replay://last-success
+*.internal.test passthrough://true</code></pre>
+          </div>
+        </section>
+      </section>
+
+      <section class="signal-strip" aria-label="Bifrost capabilities">
+        <span>Capture</span>
+        <span>Rewrite</span>
+        <span>Replay</span>
+        <span>TLS MITM</span>
+        <span>Scripts</span>
+        <span>Desktop</span>
+      </section>
+
+      <section class="workflow-section" aria-labelledby="workflow-title">
+        <div class="section-heading">
+          <p class="eyebrow">Workflow</p>
+          <h2 id="workflow-title" data-i18n="workflowTitle">One proxy, several honest debugging paths.</h2>
+        </div>
+        <div class="workflow-grid">
+          <article>
+            <h3 data-i18n="workflowOneTitle">Capture the real request</h3>
+            <p data-i18n="workflowOneText">
+              Inspect headers, bodies, cookies, streaming messages, and the listener port that saw it.
+            </p>
+          </article>
+          <article>
+            <h3 data-i18n="workflowTwoTitle">Rewrite without rebuilding</h3>
+            <p data-i18n="workflowTwoText">
+              Patch headers, bodies, URLs, status codes, latency, and routing with local rules.
+            </p>
+          </article>
+          <article>
+            <h3 data-i18n="workflowThreeTitle">Replay the failure</h3>
+            <p data-i18n="workflowThreeText">
+              Turn a captured request into a repeatable curl, HAR, or replay run while you iterate.
+            </p>
+          </article>
+          <article>
+            <h3 data-i18n="workflowFourTitle">Automate the edge cases</h3>
+            <p data-i18n="workflowFourText">
+              Use scripts and values when static rules are not enough for the flow you are chasing.
+            </p>
+          </article>
+        </div>
+      </section>
+
+      <section class="start-section" aria-labelledby="start-title">
+        <div class="section-heading">
+          <p class="eyebrow">Start</p>
+          <h2 id="start-title" data-i18n="startTitle">From zero to inspected traffic in four steps.</h2>
+        </div>
+        <div class="steps-grid">
+          <a href="%BASE_PATH%getting-started/installation/">
+            <strong>01</strong>
+            <span data-i18n="stepOne">Install the CLI</span>
+          </a>
+          <a href="%BASE_PATH%getting-started/cli-quick-start/">
+            <strong>02</strong>
+            <span data-i18n="stepTwo">Start without touching system proxy</span>
+          </a>
+          <a href="%BASE_PATH%reference/rules/">
+            <strong>03</strong>
+            <span data-i18n="stepThree">Add a rule for one target</span>
+          </a>
+          <a href="%BASE_PATH%reference/replay/">
+            <strong>04</strong>
+            <span data-i18n="stepFour">Replay and compare</span>
+          </a>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

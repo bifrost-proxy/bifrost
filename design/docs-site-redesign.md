@@ -2,22 +2,23 @@
 
 ## 功能模块
 
-文档站重构分为两个独立表面：
+文档站现在拆成两个明确的交付表面：
 
-1. 首页：`/` 使用手写静态 HTML、CSS 和极少量原生 JavaScript，不经过 Astro/Starlight/React/Vue 运行时生成。目标是把首屏性能、可读性和转化路径做到极致。
-2. 文档区：`/docs/`、`/getting-started/`、`/reference/`、`/en/...` 继续使用现有 Astro + Starlight + Pagefind 体系，保留 Markdown 同步、双语路由、侧边栏、搜索、代码高亮和内链校验。
+1. 首页：`/` 由 `site/home/index.html`、`site/home/styles.css` 和 `site/home/home.js` 直接维护。构建时由 `site/scripts/build-home.mjs` 复制到 `site/dist/index.html`，不经过 Astro 页面、Starlight layout、React/Vue runtime 或 hydration。
+2. 文档区：`/docs/`、`/getting-started/`、`/reference/`、`/en/...` 继续使用现有 Astro + Starlight + Pagefind。文档内容仍然从仓库根目录 `docs/` 与 `docs-en/` 自动同步到 `site/src/content/docs/`。
 
-本方案只设计重构方向，不在本次修改里落地运行时代码。
+这次实现的核心目标是：让首页保持极轻、极可控，同时让部署每次都重新同步全部源文档，避免文档站与 `docs/`、`docs-en/` 目录漂移。
 
 ## 用户目标验证清单
 
 ### 必须实现
 
-- 调研当前更好的文档站方案，明确是否替换现有 Starlight。
+- 调研更适合文档站的方案，并明确不替换现有文档区框架。
 - 首页不使用框架生成页面，不使用生成式模板方案，采用单独设计的纯 HTML 交付。
 - 首页性能优先，首屏不依赖框架运行时、hydration、客户端路由或大型 JS 包。
-- 首页体验参考 `https://bigmodel.cn/glm-coding` 的首屏交互、布局节奏和视觉表达，但不能照搬素材、文案和品牌。
-- 文档内容区继续保持可维护、可搜索、双语和可自动校验。
+- 首页体验参考 `https://bigmodel.cn/glm-coding` 的首屏交互、布局节奏和视觉表达，但不照搬素材、文案和品牌。
+- 部署构建每次都自动从 `docs/` 与 `docs-en/` 生成文档区内容，保持始终同步。
+- 英文文档源 `docs-en/**` 变更必须触发站点 CI 与部署。
 
 ### 必须不破坏
 
@@ -29,47 +30,61 @@
 ### 必须真实验证
 
 - 真实浏览器打开参考站，记录可借鉴的首屏、滚动段落和交互模式。
-- 用文档用例验证本方案是否覆盖首页、文档区、部署、性能预算、迁移、测试和回滚。
+- 执行 `pnpm --dir site run test` 验证文档同步与静态首页脚本单元测试。
+- 执行 `pnpm --dir site run build` 验证部署构建链路：sync docs -> verify docs -> Astro docs build -> static home overlay -> home verify -> site links verify。
+- 执行 `e2e-tests/tests/test_site_docs_sync.sh` 验证新增中文和英文源文档会被自动同步、构建和链接校验覆盖。
+- 用浏览器或本地静态服务打开 `site/dist/index.html`，验证首页布局、Tab 交互和静态资源加载。
 
 ### 必须交付
 
-- 新增技术方案文档。
-- 新增 `human_tests/` 方案验证用例并更新索引。
+- 更新技术方案文档。
+- 实现静态首页源文件、构建脚本、校验脚本和单元测试。
+- 更新站点构建脚本、部署触发路径和 docs sync E2E。
+- 更新 `human_tests/` 真实场景用例并执行。
 - 完成两轮 Review/Fix/Test。
 
 ## 任务启动与隔离证据
 
 - 主工作区启动检查：`git status --short --branch` 显示当前位于 `codex/default-global-rule-design`。
-- 本任务按用户要求从 `origin/main` 创建独立 worktree：`../bifrost-docs-site-plan`。
-- 方案分支：`codex/docs-site-redesign-plan`。
-- 本方案文档、human_tests 用例和索引更新只应保留在该独立 worktree，不污染主工作区的并行开发改动。
+- 本任务从 `origin/main` 创建独立 worktree：`../bifrost-docs-site-plan`。
+- 方案与实现分支：`codex/docs-site-redesign-plan`。
+- 变更只保留在该独立 worktree，不污染主工作区的并行开发改动。
 
-## 现状分析
+## 现状与落地结果
 
 当前仓库已经具备文档站基础：
 
 - `site/` 使用 Astro + Starlight。
-- `site/src/pages/index.astro` 是站点首页，当前仍由 Astro 构建链路生成。
 - `site/src/content/docs/` 由 `site/scripts/sync-docs.mjs` 从 `docs/` 与 `docs-en/` 同步生成。
-- `site/package.json` 中 `build` 会执行 docs sync、docs verify、Astro build 和站内链接验证。
+- `site/scripts/verify-docs-sync.mjs` 校验生成文档与源文档一致。
+- `site/scripts/verify-site-links.mjs` 校验最终 `site/dist` 内部链接。
 - `.github/workflows/site.yml` 使用 GitHub Pages 部署 `site/dist`。
-- `design/docs-site-generator.md` 和 `human_tests/docs-site-generator.md` 已覆盖双语文档同步与构建产物校验。
 
-当前体验问题不是“缺一个文档框架”，而是首页和文档区被放在同一个框架审美与构建心智里：首页视觉像普通站点页面，产品第一眼信号不够强，首屏虽然静态生成但仍依赖 Astro 页面源码和框架产物约束，无法把性能预算、资源加载、动效和 HTML 结构控制到最小闭环。
+本次已落地的变更：
+
+- 删除旧的 `site/src/pages/index.astro`，避免首页继续由 Astro 生成。
+- 新增 `site/home/index.html` 作为首页唯一源文件。
+- 新增 `site/home/styles.css`，首页样式不依赖 Starlight 或远程字体。
+- 新增 `site/home/home.js`，只负责原生 Tab 切换、键盘可访问性和中英文轻量切换。
+- 新增 `site/scripts/build-home.mjs`，在 Astro build 后写入 `site/dist/index.html`，并生成带 hash 的 CSS/JS 资源。
+- 新增 `site/scripts/verify-home.mjs` 与 `site/scripts/home-static-lib.mjs`，禁止首页引入 Astro runtime marker，校验 base path、ARIA、中英文切换、图片尺寸和 gzip 预算。
+- `site/package.json` 的 `build` 保持部署期自动 sync docs，并在文档区构建后覆盖静态首页。
+- `.github/workflows/site.yml` 增加 `docs-en/**` path filter，英文文档变更也会触发站点 CI/部署。
+- `e2e-tests/tests/test_site_docs_sync.sh` 增加静态首页断言，并继续验证临时新增中文和英文文档会自动出现在构建产物中。
 
 ## 外部调研结论
 
 ### Astro / Starlight
 
-官方定位适合内容驱动站点，Astro 默认只发送需要的 JavaScript；Starlight 提供文档导航、搜索、i18n、SEO、代码高亮和暗色模式。Starlight 默认集成 Pagefind，适合静态文档搜索。
+Astro 适合内容驱动站点，Starlight 提供文档导航、搜索、i18n、SEO、代码高亮和暗色模式。Starlight 默认集成 Pagefind，适合静态文档搜索。
 
-结论：继续用于文档区。它已经和当前仓库同步脚本匹配，替换成本高，收益主要不在文档区。
+结论：继续用于文档区。替换文档区框架成本高，收益主要不在文档阅读体验。
 
 ### Pagefind
 
-Pagefind 对任意静态 HTML 构建产物生成搜索索引，不需要搜索服务。官方说明强调大站点低带宽搜索，索引会分块加载。
+Pagefind 对静态 HTML 构建产物生成搜索索引，不需要搜索服务，适合静态文档站。
 
-结论：继续作为文档区搜索方案。首页如需要搜索入口，应跳转到文档区搜索或轻量 command palette，不应在首屏加载 Pagefind。
+结论：继续作为文档区搜索方案。首页不加载 Pagefind，避免首屏额外资源。
 
 ### Docusaurus
 
@@ -87,30 +102,28 @@ VitePress 是 Vite + Vue 文档静态站点生成器，Markdown 和 Vue 扩展�
 
 Cloudflare Pages 支持任意静态 HTML 部署，并可通过 `_headers` 控制响应头；GitHub Pages 当前已接入仓库 workflow，部署简单但响应头控制弱。
 
-结论：短期继续 GitHub Pages，方案中预留 Cloudflare Pages 作为性能增强部署目标。若需要更强缓存、压缩、安全头和边缘回滚，再迁移或双发布。
+结论：短期继续 GitHub Pages，方案中保留 Cloudflare Pages 作为后续性能增强部署目标。
 
 ## BigModel GLM Coding 首页体验参考
 
 2026-07-03 通过真实浏览器打开 `https://bigmodel.cn/glm-coding` 观察，提炼以下可借鉴模式：
 
-1. 首屏高度克制：顶部导航只保留 Logo、文档、控制台和登录；主体用超大产品名、短副标题、单主 CTA 直接建立定位。
-2. 产品演示前置：首屏下半部露出一个大尺寸终端/IDE 演示面板，让用户无需滚动就理解产品与工作流。
-3. 轻量 Tab 交互：演示面板提供“终端 / IDE”切换，切换不跳页，降低理解成本。
-4. 视觉语言集中：白底、大字号、少色彩，关键视觉只用蓝紫渐变面板、真实工具 Logo、价格卡高亮和少量浮动服务入口。
-5. 滚动叙事顺序清晰：首屏定位 -> 工具 Logo 信任带 -> 套餐/行动卡 -> 模型能力证据 -> IDE 推荐 -> 如何开始四步。
-6. 底部行动路径具体：用编号卡片把开始流程拆成四步，每张卡都有一个明确动作。
+1. 首屏高度克制：顶部导航只保留关键入口；主体用超大产品名、短副标题和单主 CTA 建立定位。
+2. 产品演示前置：首屏下半部露出大尺寸终端或 IDE 演示面板，让用户无需滚动就理解产品与工作流。
+3. 轻量 Tab 交互：演示面板提供切换，不跳页，降低理解成本。
+4. 视觉语言集中：白底、大字号、少色彩，关键视觉集中在演示面板。
+5. 滚动叙事顺序清晰：首屏定位 -> 能力信任带 -> 工作流证据 -> 如何开始。
+6. 底部行动路径具体：用编号卡片把开始流程拆成明确动作。
 
-Bifrost 首页不能复刻定价/模型营销结构，但可以吸收这种节奏：
+Bifrost 首页吸收了这些节奏，但表达为工程工具场景：
 
-- 首屏标题聚焦产品名和类别，不做宽泛口号。
-- 首屏直接展示 Bifrost 真实代理工作台或终端命令演示。
-- 用 2 到 3 个原生 Tab 切换“抓包 / 改写 / 回放”或“CLI / Desktop / Web UI”。
-- 第二屏承接真实协议能力和典型场景，而不是堆满装饰卡。
-- “如何开始”保持 3 到 4 步，面向安装、启动、信任证书、打开 Web UI。
+- 首屏标题直接使用 `Bifrost`。
+- 首屏直接展示 CLI、Web UI、Rules 三个真实工作流 Tab。
+- 第二屏用 Capture、Rewrite、Replay、Automate 解释实际能力。
+- “Start” 区域保持四步：安装、无系统代理启动、添加规则、回放对比。
+- 顶部提供 `EN / 中文` 轻量切换，默认英文 no-JS 可读，中文用户通过 JS 切换或浏览器语言自动进入中文文案。
 
-## 推荐技术方案
-
-### 总体架构
+## 实现架构
 
 ```
 site/
@@ -118,36 +131,21 @@ site/
     index.html
     styles.css
     home.js
-    assets/
-      bifrost-ui.avif
-      terminal-demo.svg
-      desktop-preview.avif
-  public/
-    _headers
-    images/
   src/
     pages/
       404.astro
-      docs/index.astro
     content/docs/
   scripts/
     build-home.mjs
     verify-home.mjs
+    home-static-lib.mjs
+    home-static.test.mjs
     sync-docs.mjs
     verify-docs-sync.mjs
     verify-site-links.mjs
 ```
 
-- `site/home/index.html` 是首页源文件，直接写完整 HTML，不用 Astro frontmatter、组件、layout 或 MDX。
-- `site/home/styles.css` 是首页唯一 CSS，构建时内联 critical CSS 或复制为 `/home.<hash>.css`。
-- `site/home/home.js` 只负责可选交互：Tab 切换、复制安装命令、减少动效偏好、简单可访问状态同步。目标 gzip 后小于 4 KiB。
-- `site/scripts/build-home.mjs` 把首页源文件复制到 `site/dist/index.html`，在 Astro build 之后执行，覆盖框架生成首页。
-- 文档区继续由 Astro/Starlight 输出到 `site/dist/docs/`、`site/dist/getting-started/`、`site/dist/reference/`、`site/dist/en/`。
-- `site/scripts/verify-home.mjs` 做静态验收：禁止首页引入框架 runtime，检查资源大小、首屏图片尺寸、ARIA、链接、base path 和 no-JS fallback。
-
-### 构建顺序
-
-`site/package.json` 的未来构建应调整为：
+构建顺序固定为：
 
 ```bash
 rm -rf dist
@@ -159,86 +157,90 @@ node scripts/verify-home.mjs
 node scripts/verify-site-links.mjs
 ```
 
-关键点：
+关键约束：
 
-- 首页构建必须在 `astro build` 之后执行，确保最终 `dist/index.html` 是手写 HTML。
-- `verify-site-links` 必须在首页覆盖后执行，确保首页链接也被扫描。
-- `build-home` 必须支持 GitHub Pages 的 `BASE_PATH`，例如 `/bifrost/`。
-- `404.astro` 和 docs redirect 可以继续由 Astro 管理。
+- `sync-docs.mjs` 每次部署构建都执行，确保 `docs/` 和 `docs-en/` 是唯一源。
+- `verify-docs-sync.mjs` 在 Astro build 前执行，源文档和生成文档不一致时提前失败。
+- `build-home.mjs` 必须在 Astro build 后执行，最终 `dist/index.html` 才是手写 HTML。
+- `verify-home.mjs` 必须在 `build-home.mjs` 后执行，防止首页重新引入框架 runtime、缺失 base path 或超出预算。
+- `verify-site-links.mjs` 必须最后执行，覆盖首页和文档区的最终链接状态。
+- `BASE_PATH` 或 `SITE_URL` 控制 GitHub Pages `/bifrost/` 前缀，首页链接和 hash 资源必须一致使用该前缀。
 
-### 首页内容结构
+## 首页内容结构
 
 1. 顶部导航
-   - 左侧：Bifrost 字标。
-   - 右侧：Docs、GitHub、Install、Open Web UI。
-   - 移动端：不使用重型菜单库，使用原生 `<details>` 或少量 JS 控制。
+   - 左侧：Bifrost 字标和 favicon。
+   - 右侧：Docs、Install、English、GitHub。
+   - 语言：`EN / 中文` segmented control，不跳页、不加载框架。
 
 2. 首屏
    - H1：`Bifrost`
-   - 副标题：`A proxy workbench for traffic capture, rewrite, replay, and debugging.`
+   - 副标题：`A proxy workbench for capturing traffic, rewriting requests, replaying failures...`
    - 主 CTA：Install。
-   - 次 CTA：Read docs / GitHub。
-   - 首屏下半部露出真实产品演示面板，保证桌面和移动端都能看到下一段内容的线索。
+   - 次 CTA：Read Docs。
+   - 首屏下半部露出工作台预览，保证桌面和移动端都能看到下一段内容的线索。
 
 3. 原生演示 Tab
-   - `CLI`：展示 `bifrost start --no-system-proxy`、`bifrost status`、`bifrost traffic search`。
-   - `Web UI`：展示 Traffic、Rules、Replay 三列或真实截图。
-   - `Desktop`：展示托盘/证书/系统代理状态。
-   - Tab 使用 `<button aria-selected>`，无 JS 时默认显示 CLI 静态面板。
+   - `CLI`：展示 `bifrost start --no-system-proxy` 和 traffic search。
+   - `Web UI`：展示 Traffic、Headers、Body、Replay 等 UI 信息层级。
+   - `Rules`：展示规则片段。
+   - Tab 使用 `<button role="tab" aria-selected>`；无 JS 时默认显示 CLI 静态面板。
 
 4. 信任带
-   - 不使用假 Logo。使用协议和场景标签：HTTP/2、HTTPS MITM、SOCKS5、WebSocket、SSE、Replay、Scripts。
+   - 使用能力标签：Capture、Rewrite、Replay、TLS MITM、Scripts、Desktop。
 
-5. 能力证据
-   - 用真实工作流分区：Capture、Rewrite、Replay、Automate。
-   - 每个分区配一个短代码片段或产品截图，不堆营销形容词。
+5. 工作流
+   - Capture the real request。
+   - Rewrite without rebuilding。
+   - Replay the failure。
+   - Automate the edge cases。
 
 6. 如何开始
-   - 01 Install
-   - 02 Start without touching system proxy by default in docs examples
-   - 03 Trust certificate only when HTTPS interception is needed
-   - 04 Open Web UI and inspect traffic
+   - 01 Install the CLI。
+   - 02 Start without touching system proxy。
+   - 03 Add a rule for one target。
+   - 04 Replay and compare。
 
-### 视觉方向
+## 视觉方向
 
-参考 BigModel 的克制首屏，但调整为 Bifrost 的工程工具气质：
+- 默认浅色以白色和浅灰为主，不做大面积深色或单一蓝紫渐变。
+- 暗色模式通过 `prefers-color-scheme: dark` 自动适配，保持终端/工作台的工程工具质感，避免只反转颜色导致的低对比。
+- 首屏标题使用大字号，但文档和工具内页不使用 hero 字号。
+- 视觉主角是产品状态，不是装饰图形。
+- 渐变只用于按钮和演示面板边缘。
+- 卡片半径控制在 8px 以内。
+- 不使用生成图片作为首页主视觉。
+- 不加载远程字体，使用 system font。
 
-- 背景以白色或极浅灰为主，不做大面积深色或单一蓝紫渐变。
-- 首屏标题使用极大字号，但文档和工具内页不使用 hero 字号。
-- 视觉主角是产品状态，而不是装饰图形：真实 UI 截图、终端输出、协议流动示意。
-- 渐变只用于演示面板边缘或主 CTA，不作为整站底色。
-- 卡片半径控制在 8px 以内，避免营销页式圆角堆叠。
-- 不使用生成图片作为首页主视觉；需要图片时使用真实截图或手工绘制的轻量 SVG/AVIF。
+## 性能预算
 
-### 性能预算
-
-首页预算按移动 4G 和冷缓存制定：
+首页预算按移动 4G 和冷缓存制定，由 `verify-home.mjs` 自动校验主要静态预算：
 
 | 项目 | 预算 |
 | --- | --- |
 | HTML | <= 28 KiB gzip |
 | CSS | <= 12 KiB gzip |
-| JS | <= 4 KiB gzip，允许 0 KiB |
-| 首屏图片 | <= 80 KiB AVIF/WebP，必须有宽高 |
-| 总首屏传输 | <= 150 KiB gzip/br |
+| JS | <= 4 KiB gzip |
+| 首屏图片 | 必须有 width/height |
+| 总首屏传输 | <= 150 KiB gzip |
 | 第三方请求 | 0 |
-| 字体 | 使用 system font，不加载远程字体 |
+| 字体 | system font，不加载远程字体 |
 | LCP | 本地 Lighthouse mobile <= 1.8s 作为目标 |
 | CLS | <= 0.02 |
 
-### 搜索策略
+## 搜索策略
 
 - 首页不加载 Pagefind。
-- 首页顶部搜索入口可以跳转到 `/docs/` 后由 Starlight/Pagefind 接管。
+- 首页顶部入口跳转到 `/docs/`，由 Starlight/Pagefind 接管搜索。
 - 后续如确实需要首页 command palette，必须按需加载 Pagefind，用户点击搜索后才请求搜索 bundle。
 
-### 部署策略
+## 部署策略
 
 短期：
 
 - 保持 `.github/workflows/site.yml` 部署 GitHub Pages。
-- 修复 workflow paths，必须包含 `docs-en/**`，否则英文文档变更不会触发站点 CI。
-- 继续上传 `site/dist`。
+- `site/package.json` 的 `build` 是部署唯一入口，始终先 sync `docs/` 和 `docs-en/`。
+- workflow path filter 包含 `site/**`、`docs/**`、`docs-en/**`、`assets/**`、`package.json`、`pnpm-lock.yaml`。
 
 中期：
 
@@ -248,107 +250,79 @@ node scripts/verify-site-links.mjs
   - hash 资源: 长缓存 immutable。
   - 安全头: `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`。
 
-### 迁移步骤
+## 回滚策略
 
-1. 新增 `site/home/` 手写首页源文件和静态资产。
-2. 新增 `build-home.mjs`，先只复制首页并处理 base path。
-3. 新增 `verify-home.mjs`：
-   - `dist/index.html` 不包含 Astro island、React、Vue、Starlight runtime 标记。
-   - 所有 `href` 和 `src` 在当前 `BASE_PATH` 下可解析。
-   - 图片有 width/height 或 CSS aspect-ratio。
-   - 关键 CTA 存在且可键盘访问。
-   - JS/CSS/图片大小不超过预算。
-4. 调整 `pnpm --dir site run build` 顺序。
-5. 用 Playwright 增加视觉和交互 smoke：
-   - 桌面首屏非空，演示 Tab 可切换。
-   - 移动首屏标题、CTA、演示面板不重叠。
-   - no-JS 模式仍显示核心内容和安装命令。
-6. 保留现有 `site/src/pages/index.astro` 一个版本作为迁移缓冲，确认稳定后删除或改成构建失败提示，避免误以为它仍是首页源。
-7. 发布后监控 GitHub Pages 或 Cloudflare Pages 产物，确认 `/`、`/docs/`、`/en/reference/`、历史 redirect 都正常。
-
-### 回滚策略
-
-- 回滚只需恢复 `site/package.json` 构建顺序，停止执行 `build-home.mjs`，让 `site/src/pages/index.astro` 重新生成首页。
-- 首页手写资产独立在 `site/home/`，不影响 `docs/` 同步和 Starlight 文档区。
-- 若 Cloudflare Pages 双部署失败，GitHub Pages 仍可作为主站或备用站。
+- 恢复 `site/src/pages/index.astro`，并从 `site/package.json` build 中移除 `build-home.mjs` 和 `verify-home.mjs`。
+- 首页手写资产独立在 `site/home/`，回滚不会影响 `docs/` 与 `docs-en/` 同步。
+- 若 GitHub Pages 或后续 Cloudflare Pages 部署异常，仍可通过前一个成功的 Pages artifact 回滚。
 
 ## 测试方案
 
 ### 单元测试
 
-未来实现时新增：
-
-- `node --test site/scripts/build-home.test.mjs`
+- `pnpm --dir site run home:test`
   - 验证 base path 替换、hash 资源引用、复制输出和 no-framework marker。
-- `node --test site/scripts/verify-home.test.mjs`
-  - 验证超预算资源失败、缺 CTA 失败、缺 width/height 失败、框架 runtime 误引入失败。
-
-本次只修改设计文档，不修改脚本或业务代码，单元测试不适用。
+  - 验证缺失图片尺寸、缺少中英文切换和框架 marker 会失败。
+- `pnpm --dir site run docs:test`
+  - 验证文档同步脚本行为。
+- `pnpm --dir site run test`
+  - 同时执行 docs sync 与静态首页脚本测试。
 
 ### E2E 测试
 
-未来实现时新增：
-
-- `e2e-tests/tests/test_site_home_static.sh`
-  - 执行 `pnpm --dir site run build`。
-  - 检查 `site/dist/index.html` 为手写首页。
-  - 检查 Starlight docs 产物仍存在。
-- Playwright UI smoke：
-  - 桌面和移动首屏截图。
-  - 首页 Tab 切换。
-  - no-JS fallback。
-  - `/docs/` 搜索入口可用。
-
-本次只修改设计文档，自动化 E2E 不适用。
+- `bash e2e-tests/tests/test_site_docs_sync.sh`
+  - 临时新增中文源文档和英文源文档。
+  - 执行 docs sync、docs verify 和完整 site build。
+  - 验证新增文档进入 `site/dist`。
+  - 验证 `site/dist/index.html` 为静态首页，包含 `/bifrost/docs/`、`/bifrost/en/reference/`、`role="tablist"`、`data-lang="zh"`，且不包含 `/_astro/`。
+  - 执行站内链接校验。
 
 ### 真实场景测试
 
 - `human_tests/docs-site-redesign.md`
-- 覆盖方案文档完整性、参考站体验吸收、首页纯 HTML 架构、文档区保留、性能预算、部署与回滚。
+- 覆盖首页纯 HTML 源、构建顺序、自动同步、部署触发路径、静态首页产物、Tab 交互、中英文、明暗模式和清理要求。
 
 ## Review/Fix/Test 闭环方案
 
 ### 第 1 轮
 
-- 复核用户目标：调研、BigModel 参考、首页纯 HTML、独立 worktree、方案交付。
+- 复核用户目标：BigModel 参考、首页纯 HTML、部署期自动同步、独立 worktree、实现交付。
 - 执行 `git status --short` 和 `git diff`。
-- Review `design/docs-site-redesign.md` 是否覆盖现状、选型、架构、性能预算、测试与回滚。
-- 执行 `human_tests/docs-site-redesign.md` 中的所有用例。
+- Review `site/home/*`、`site/scripts/home-static-*`、`site/package.json`、`.github/workflows/site.yml` 和 `e2e-tests/tests/test_site_docs_sync.sh`。
+- 执行 `pnpm --dir site run test`、`pnpm --dir site run build` 和 `bash e2e-tests/tests/test_site_docs_sync.sh`。
 
 ### 第 2 轮
 
 - 复查第 1 轮修复后的 diff。
-- 检查 `human_tests/readme.md` 只新增相关索引行，没有全局汇总数字。
-- 复核调研来源是否为官方资料或真实页面观察。
-- 复跑受影响 human_tests 用例和 Markdown 基础检查。
+- 检查 `human_tests/readme.md` 只更新相关索引行，没有全局汇总数字。
+- 复核 `site/dist/index.html` 是否来自 `site/home/index.html`，且不包含 Astro runtime marker。
+- 复跑受影响测试，并用本地静态服务做浏览器或 HTTP 验证。
 
 ## 校验要求
 
-本次方案文档变更必须执行：
+本次实现阶段必须执行：
 
 - `git status --short --branch`
 - `git diff`
 - `git diff --check`
-- `test -f design/docs-site-redesign.md`
-- `test -f human_tests/docs-site-redesign.md`
-- `rg -n "docs-site-redesign" human_tests/readme.md`
+- `pnpm --dir site run test`
+- `pnpm --dir site run build`
+- `bash e2e-tests/tests/test_site_docs_sync.sh`
 - 按 `human_tests/docs-site-redesign.md` 逐条执行用例
 
 以下项目不适用：
 
 - Rust 单元测试：未修改 Rust 代码。
-- Web 单元测试：未修改 Web/站点脚本。
-- 自动化 E2E：未修改运行时代码或构建脚本。
-- `cargo test --workspace --all-features`：文档-only 方案变更。
+- `cargo test --workspace --all-features`：站点静态首页、构建脚本和 CI path filter 变更，不触及 Rust workspace 行为。
 - `make coverage`：未修改业务代码，覆盖率门禁不适用。
-- `scripts/ci/local-ci.sh`：文档-only 方案变更，运行成本与收益不匹配。
+- `scripts/ci/local-ci.sh`：本次由站点单元测试、站点 build、docs sync E2E 和远端 CI 覆盖，完整 local-ci 成本与收益不匹配。
 
 ## 文档更新要求
 
-- 新增本文档。
-- 新增 `human_tests/docs-site-redesign.md`。
+- 更新本文档。
+- 更新 `human_tests/docs-site-redesign.md`。
 - 更新 `human_tests/readme.md` 索引。
-- 未来实现阶段必须同步更新 `design/docs-site-generator.md`、`human_tests/docs-site-generator.md`、站点 README 或部署文档。
+- 通过 `site/scripts/sync-docs.mjs` 让 `docs/` 与 `docs-en/` 持续生成文档站内容。
 
 ## 调研来源
 

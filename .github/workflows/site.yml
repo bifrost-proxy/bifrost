@@ -6,6 +6,7 @@ on:
     paths:
       - "site/**"
       - "docs/**"
+      - "docs-en/**"
       - "assets/**"
       - "package.json"
       - "pnpm-lock.yaml"
@@ -15,6 +16,7 @@ on:
     paths:
       - "site/**"
       - "docs/**"
+      - "docs-en/**"
       - "assets/**"
       - "package.json"
       - "pnpm-lock.yaml"

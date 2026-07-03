@@ -112,7 +112,15 @@ grep -q 'Future English Docs Probe' "$TEMP_EN_DIST"
 test -f "$EN_INDEX_DIST"
 test -f "$EN_INSTALL_DIST"
 test -f "$EN_RULE_DIST"
-grep -q 'English Docs' "$SITE_DIR/dist/index.html"
+grep -q 'A proxy workbench for capturing traffic' "$SITE_DIR/dist/index.html"
+grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
+grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"
+grep -q 'data-lang="zh"' "$SITE_DIR/dist/index.html"
+if grep -q '/_astro/' "$SITE_DIR/dist/index.html"; then
+  echo "Static homepage must not include Astro runtime assets" >&2
+  exit 1
+fi
+grep -q 'href="/bifrost/en/reference/"' "$SITE_DIR/dist/index.html"
 test -f "$LEGACY_CLI_DIST"
 grep -q '/bifrost/getting-started/cli-quick-start/' "$LEGACY_CLI_DIST"
 pnpm --dir "$SITE_DIR" run site:verify-links

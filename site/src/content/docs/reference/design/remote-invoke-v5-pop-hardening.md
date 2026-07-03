@@ -31,6 +31,61 @@ sidebar:
 3. **严格优先用 server 端可信值**，client / caller 自报字段一律降级为"展示性 hint"。
 4. **回滚**: 每个 P0 修改独立，若发现回归可独立 revert，无相互依赖。
 
+## 2026-06-29 PPE `/v5` 路由回归修复
+
+PPE TLB 已部署 `/v5/` 路由后，真实双 Bifrost 验证仍显示
+`POST /v5/remote-invoke/pairings/start` 返回后端 404，而本地
+`dist/cli.js --enable-remote-invoke` 构建产物对同一路径返回 v5 业务错误。
+这说明源码和发布产物已注册显式 `/v5/remote-invoke/*`，线上失败更像是
+TLB 或服务框架将 `/v5` 前缀剥掉后转发为 `/remote-invoke/*`。
+
+修复策略：
+
+- server 入口将 `/remote-invoke/*` 仅归一化为 v5 caller 协议路径
+  `/v5/remote-invoke/*`。
+- 移除 `/v4/remote-invoke/pairings/start`、`watch`、`grants/reusable`、
+  `calls/open` 等旧 caller 敏感入口的路由注册。
+- 不把无版本 `/remote-invoke/client/*` 映射到 v4 client 注册/stream 路由，
+  避免扩大 client 面暴露。
+- 补充 Vitest 回归：模拟 TLB strip prefix 的
+  `POST /remote-invoke/pairings/start` 必须进入 v5 route 并返回 400 业务错误，
+  同时 v4 caller 入口不再注册并返回 404。
+
+### 发布前 PPE header 验证开关
+
+远端正式域名 `https://bifrost.bytedance.net` 的 PPE 路由需要 TLB 请求头
+`x-tt-env=ppe_ticket_system` 与 `x-use-ppe=1`。该能力仅用于发布前真实环境
+验证，不进入 UI，也不写入 sync/config 持久化配置。
+
+实现策略：
+
+- 新增进程级环境变量 `BIFROST_REMOTE_RELAY_HEADERS`，格式为逗号分隔的
+  `name=value` 列表，例如：
+  `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`。
+- target 端 Remote Invoke worker 的 relay 注册、心跳、pair-code、SSE stream、
+  grant/call 请求均复用同一组 header。
+- caller 端 `bifrost remote *` 的 pairing、claim/lookup/open/revoke、SSH 复用、
+  SSE watch 与 job polling 均复用同一组 header。
+- relay SSE/watch/job polling 使用专用 direct SSE client，禁用 gzip/br/zstd/deflate
+  自动解压，并显式发送 `Accept-Encoding: identity` 与
+  `Cache-Control: no-transform`，避免 PPE TLB 对长连接做转换后触发 body decode
+  错误。
+- target SSE 重连只清理本地已过期 pairing，不再每次重连都调用 relay
+  `cancel_pending_pairings`。PPE/TLB 可能周期性关闭长连接，重连不能误拒绝仍在
+  等待本地审批的活跃 pairing。
+- 拒绝通过该变量覆盖 `authorization`、`cookie`、`host`、`x-bifrost-token`
+  等敏感或鉴权 header，避免测试开关变成凭据注入通道。
+- 环境变量解析失败只记录 warning 并忽略该开关，避免发布构建因测试变量写错而
+  阻断普通启动。
+- 发布前全量 PPE 回归脚本落在
+  `e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`。脚本默认构建当前分支
+  `target/debug/bifrost`，从默认 Bifrost 数据目录读取登录 token，连接
+  `https://bifrost.bytedance.net`，并覆盖 Code 授权、SSH key 授权、
+  remote traffic、remote file、remote exec/run/job 与连接清理矩阵。可通过
+  `SKIP_BUILD=true` 跳过构建，通过 `BIFROST_REMOTE_RELAY_URL`、
+  `BIFROST_REMOTE_RELAY_HEADERS`、`BIFROST_SYNC_STATE_FILE` 或
+  `BIFROST_SYNC_TOKEN` 覆盖默认环境。
+
 ---
 
 ## P0-1 / P0-3 合并: SSH 路由必须强绑定 user 与 client，且 SSH 审批不再绕过 v5 PoP
@@ -545,7 +600,7 @@ sqlite3 ... "SELECT grant_mode, max_calls FROM bifrost_remote_invoke_grants ORDE
 |---|---|---|---|
 | 正常 pair_code 流程 | ✅ | ✅ | 主路径不变 |
 | 正常 SSH key 流程 | ✅ (直接 grant) | ✅ (claim → grant) | caller CLI 需要支持 claim 兑换；当前 CLI 已支持（v5 pair_code 路径同 endpoint） |
-| 老 v4 CLI 试图调 v5 端点 | 410 | 410 | 不变 |
+| 老 v4 CLI 调 legacy v4 caller 端点 | 410 | 404 | 路由代码已移除 |
 | 老 v4 CLI 走 SSH 通路 | grant 直接落 | 收到 `ssh_connect_complete` 含 claim_token，需升级 CLI | 文档标注 BREAKING |
 
 ### E. CI 全量覆盖清单

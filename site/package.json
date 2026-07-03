@@ -10,10 +10,14 @@
     "docs:sync": "node scripts/sync-docs.mjs",
     "docs:test": "node --test scripts/docs-sync-lib.test.mjs",
     "docs:verify": "node scripts/verify-docs-sync.mjs",
+    "home:build": "node scripts/build-home.mjs",
+    "home:test": "node --test scripts/home-static.test.mjs",
+    "home:verify": "node scripts/verify-home.mjs",
     "site:verify-links": "node scripts/verify-site-links.mjs",
+    "test": "node --test scripts/docs-sync-lib.test.mjs scripts/home-static.test.mjs",
     "dev": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro dev",
-    "build": "rm -rf dist && ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 node scripts/verify-docs-sync.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build && node scripts/verify-site-links.mjs",
-    "preview": "ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 astro preview"
+    "build": "rm -rf dist && ASTRO_TELEMETRY_DISABLED=1 node scripts/sync-docs.mjs && ASTRO_TELEMETRY_DISABLED=1 node scripts/verify-docs-sync.mjs && ASTRO_TELEMETRY_DISABLED=1 astro build && node scripts/build-home.mjs && node scripts/verify-home.mjs && node scripts/verify-site-links.mjs",
+    "preview": "pnpm run build && ASTRO_TELEMETRY_DISABLED=1 astro preview"
   },
   "dependencies": {
     "@astrojs/starlight": "latest",
