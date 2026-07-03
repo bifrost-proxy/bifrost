@@ -1,191 +1,219 @@
 # npm 渠道分发
 
-## 功能模块详细描述
+## 背景
 
-通过 npm 渠道分发 bifrost CLI 二进制文件，用户可以通过 `npm install -g @bifrost-proxy/bifrost` 安装 bifrost。
+Bifrost CLI 通过多种渠道分发（`install.sh`、Homebrew、GitHub Release 二进制、macOS DMG、Windows MSI），npm 渠道让 Node/前端开发者可以直接通过 `npm install -g @bifrost-proxy/bifrost` 或 `npx @bifrost-proxy/bifrost start` 使用，无需手动下载二进制或 curl 脚本。
 
-采用 **平台包 + 主包** 的架构模式（与 esbuild、turbo、SWC 等项目一致）：
+方案参照 esbuild / turbo / SWC 的“平台包 + 主包”架构：
 
-- **平台包**：每个 target 对应一个独立的 npm 包，包含该平台的预编译二进制文件
-- **主包**（`@bifrost-proxy/bifrost`）：作为入口，根据当前平台自动选择并安装对应的平台包
+- 每个 target 对应一个独立平台包，只装当前 OS/CPU 的一份预编译二进制。
+- 主包 `@bifrost-proxy/bifrost` 通过 `optionalDependencies` 声明所有平台包，运行时按 platform 选中对应平台包并透传参数、退出码与信号。
+- Linux glibc 主机额外挂载同架构 musl/static fallback 包，覆盖旧 glibc 环境。
+
+## 用户目标验证清单
+
+### 必须实现
+
+- `npm install -g @bifrost-proxy/bifrost` 完成后 `bifrost --version` 可用。
+- `npx @bifrost-proxy/bifrost start` 可以直接启动主端口。
+- 平台过滤有效：Mac/ARM64 上不下载 Windows / Linux 二进制，反之亦然。
+- Linux glibc 主机同时安装 gnu 与 musl fallback 包；旧 glibc（< 2.39）自动 fallback 到 musl 静态包。
+- 主包 CLI 透传参数与环境变量，二进制退出码原样返回，SIGINT / SIGTERM 由 `process.kill(process.pid, error.signal)` 转发。
+- `--no-optional` 场景下 `install.js` 三级降级（require.resolve → 单独 `npm install` → registry tgz 直下）保证仍能落地二进制。
+
+### 必须不破坏
+
+- `install.sh` / Homebrew / GitHub Release DMG / MSI 渠道继续独立可用，npm 渠道不改动其它渠道产物。
+- CI 的 `release.yml` 生成的 9 个 CLI target artifact（每个非 Windows 至少 `.tar.gz` + `.tar.xz`，Windows 需 `.zip`）保持齐全。
+- CLI 二进制 outbound HTTP 不读取系统代理或 `HTTP_PROXY` / `HTTPS_PROXY`，npm 渠道下载不改变这一不变量。
+- `bifrost upgrade` 与既有升级路径不受 npm 包发布顺序影响。
+
+### 必须真实验证
+
+- `publish-npm` job 在正式 release 触发时全绿。
+- 至少一次 `npm install -g @bifrost-proxy/bifrost@<version>` + `bifrost --version` 真机验证。
+- `npx @bifrost-proxy/bifrost start --port 18888 --no-system-proxy` 在 macOS 与 Linux 真机各验证一次。
+
+## 产品语义
 
 ### 包结构
 
 ```
 @bifrost-proxy/bifrost              # 主包 - 入口 + 平台分发逻辑
-@bifrost-proxy/bifrost-linux-x64    # Linux x86_64
-@bifrost-proxy/bifrost-linux-arm64  # Linux aarch64
-@bifrost-proxy/bifrost-linux-x64-musl  # Linux x86_64 (musl)
-@bifrost-proxy/bifrost-linux-arm64-musl # Linux aarch64 (musl)
-@bifrost-proxy/bifrost-linux-arm    # Linux armv7
-@bifrost-proxy/bifrost-darwin-x64   # macOS Intel
-@bifrost-proxy/bifrost-darwin-arm64 # macOS Apple Silicon
-@bifrost-proxy/bifrost-win32-x64    # Windows x64
-@bifrost-proxy/bifrost-win32-arm64  # Windows ARM64
+@bifrost-proxy/bifrost-linux-x64
+@bifrost-proxy/bifrost-linux-arm64
+@bifrost-proxy/bifrost-linux-x64-musl
+@bifrost-proxy/bifrost-linux-arm64-musl
+@bifrost-proxy/bifrost-linux-arm
+@bifrost-proxy/bifrost-darwin-x64
+@bifrost-proxy/bifrost-darwin-arm64
+@bifrost-proxy/bifrost-win32-x64
+@bifrost-proxy/bifrost-win32-arm64
 ```
 
-### 用户安装方式
+### 平台映射
 
-```bash
-# 全局安装
-npm install -g @bifrost-proxy/bifrost
+| 平台键 | Rust Target | npm 包名 | os | cpu | npm libc |
+| --- | --- | --- | --- | --- | --- |
+| linux-x64-glibc | x86_64-unknown-linux-gnu | @bifrost-proxy/bifrost-linux-x64 | linux | x64 | glibc |
+| linux-arm64-glibc | aarch64-unknown-linux-gnu | @bifrost-proxy/bifrost-linux-arm64 | linux | arm64 | glibc |
+| linux-x64-musl | x86_64-unknown-linux-musl | @bifrost-proxy/bifrost-linux-x64-musl | linux | x64 | — |
+| linux-arm64-musl | aarch64-unknown-linux-musl | @bifrost-proxy/bifrost-linux-arm64-musl | linux | arm64 | — |
+| linux-arm-glibc | armv7-unknown-linux-gnueabihf | @bifrost-proxy/bifrost-linux-arm | linux | arm | — |
+| darwin-x64 | x86_64-apple-darwin | @bifrost-proxy/bifrost-darwin-x64 | darwin | x64 | — |
+| darwin-arm64 | aarch64-apple-darwin | @bifrost-proxy/bifrost-darwin-arm64 | darwin | arm64 | — |
+| win32-x64 | x86_64-pc-windows-msvc | @bifrost-proxy/bifrost-win32-x64 | win32 | x64 | — |
+| win32-arm64 | aarch64-pc-windows-msvc | @bifrost-proxy/bifrost-win32-arm64 | win32 | arm64 | — |
 
-# npx 直接运行
-npx @bifrost-proxy/bifrost start
+Linux musl/static 包**故意不声明** `libc`，从而在 glibc 主机上也能被 npm 拉下来作为 fallback；运行时由主包 `getPlatformKey` 检测 glibc 版本再决定用哪个 npm 包名。
 
-# 项目开发依赖
-npm install --save-dev @bifrost-proxy/bifrost
-```
+## 技术细节
 
-## 实现逻辑
-
-### 按平台安装机制
-
-安装时**只下载当前 OS/CPU 对应的二进制集合**，而非全部平台二进制。Linux glibc 主机会额外安装同架构 musl/static fallback 包，以覆盖旧 glibc 运行时回退。实现方式：
-
-1. **`optionalDependencies` + `os`/`cpu` 过滤**（主路径）：npm/yarn/pnpm 根据平台包 `package.json` 中的 `os` 和 `cpu` 字段自动过滤，只安装匹配当前平台的包；Linux musl/static 包不声明 `libc`，使 glibc 主机也能安装静态 fallback 包
-2. **`postinstall` 兜底脚本**（降级路径）：当 `--no-optional` 等场景导致平台包未安装时，通过三级容错自动获取二进制
-
-### 平台包
-
-每个平台包包含：
-- `package.json`：声明 `os` 和 `cpu` 字段限制安装平台；glibc 包声明 `libc: ["glibc"]`，musl/static 包刻意不声明 `libc`，避免旧 glibc 主机因 npm libc 过滤跳过 fallback 包
-- 预编译的 bifrost 二进制文件
-
-npm 的 `optionalDependencies` + `os`/`cpu` 机制确保只有匹配当前平台的包会被安装。Linux x64 / ARM64 的 musl/static 包不使用 npm `libc` 过滤，因此 glibc 主机会同时安装 GNU 包和静态 fallback 包；运行时如果检测到 glibc 版本过旧，会直接找到 musl 包，不依赖 postinstall 下载兜底。
-
-### 主包
-
-主包通过 `optionalDependencies` 声明所有平台包，并提供：
-- `bin/bifrost`：Node.js 入口脚本，调用 `lib/index.js` 的 `getBinaryPath()`，再用 `execFileSync` 透传 `process.argv.slice(2)` 与 `process.env` 启动二进制；二进制以非零状态退出时透传 `error.status`，被信号中断时用 `process.kill(process.pid, error.signal)` 透传信号
-- `lib/index.js`：导出 `getBinaryPath()`，先 `require.resolve` 平台包并校验 `bin/<binary>` 存在，否则回退到 `downloaded-*` 路径，全部缺失时抛出可读错误
-- `lib/platform.js`：平台/libc 检测，导出 `PLATFORM_MAP`、`getPlatformKey`、`getPackageName`、`detectLinuxLibc`、`parseGlibcVersion`、`versionLt`、`MIN_GLIBC_VERSION`（当前为 `2.39`）
-- `install.js`：`postinstall` 兜底脚本
-
-### postinstall 兜底机制（install.js）
-
-当 `optionalDependencies` 安装的平台包不可用时（如使用 `--no-optional`、npm 版本过旧不支持 `os`/`cpu` 过滤等），`install.js` 提供三级容错：
-
-1. **检测平台包是否已安装**：通过 `require.resolve("${pkg}/package.json")` 定位平台包目录，检查 `bin/<binary>` 是否存在，存在则直接使用并 `validateBinary`
-2. **通过 npm install 单独安装**：在 `__dirname/npm-install` 临时目录写入空 `package.json` 后执行 `npm install --loglevel=error --prefer-offline --no-audit --progress=false <平台包>@<版本号>`（清空 `npm_config_global` 避免污染全局），把 `node_modules/<pkg>/bin/<binary>` 复制到 `downloaded-<pkg>-<binary>` 文件并 `chmod 0o755`，最后递归清理临时目录
-3. **直接从 npm registry 下载 tgz**：通过 HTTPS 从 `https://registry.npmjs.org/<pkg>/-/<tarballName>-<version>.tgz` 下载（`tarballName` 即去掉 `@bifrost-proxy/` 前缀的包名），跟随 301/302 重定向；内置 mini tar+gzip 解析器从 `package/bin/<binary>` 解出二进制写入 `downloaded-*` 路径
-
-安装完成后通过 `execFileSync(binPath, ["--version"])` 解析输出（去掉 `bifrost ` 前缀）并与 `package.json.version` 比对，不一致时仅打印 warning；校验失败异常被吞掉（best-effort），不会阻塞安装。
-
-### 二进制查找优先级（lib/index.js）
-
-1. 用 `lib/platform.js` 的 `getPlatformKey({ platform, arch })` 解析当前平台键 → 在 `PLATFORM_MAP` 中查表得到 npm 包名；不支持时直接抛错并列出所有 supported keys
-2. 通过 `require.resolve("${packageName}/package.json")` 查找 `optionalDependencies` 安装的平台包，校验 `bin/<binaryName>`（Windows 为 `bifrost.exe`，其他为 `bifrost`）是否存在
-3. 回退到主包目录下的 `downloaded-<pkg>-<binaryName>` 二进制（由 `install.js` 兜底下载产生）
-4. 两条路径都没找到时抛出 `The platform-specific package ... is not installed. Please reinstall @bifrost-proxy/bifrost to fix this.`
-
-### 平台映射表
-
-| 平台键 (platform key)        | Rust Target                       | npm 包名                                   | os      | cpu   |
-|------------------------------|-----------------------------------|--------------------------------------------|---------|-------|
-| linux-x64-glibc              | x86_64-unknown-linux-gnu          | @bifrost-proxy/bifrost-linux-x64           | linux   | x64   |
-| linux-arm64-glibc            | aarch64-unknown-linux-gnu         | @bifrost-proxy/bifrost-linux-arm64         | linux   | arm64 |
-| linux-x64-musl               | x86_64-unknown-linux-musl         | @bifrost-proxy/bifrost-linux-x64-musl      | linux   | x64   |
-| linux-arm64-musl             | aarch64-unknown-linux-musl        | @bifrost-proxy/bifrost-linux-arm64-musl    | linux   | arm64 |
-| linux-arm-glibc              | armv7-unknown-linux-gnueabihf     | @bifrost-proxy/bifrost-linux-arm           | linux   | arm   |
-| darwin-x64                   | x86_64-apple-darwin               | @bifrost-proxy/bifrost-darwin-x64          | darwin  | x64   |
-| darwin-arm64                 | aarch64-apple-darwin              | @bifrost-proxy/bifrost-darwin-arm64        | darwin  | arm64 |
-| win32-x64                    | x86_64-pc-windows-msvc            | @bifrost-proxy/bifrost-win32-x64           | win32   | x64   |
-| win32-arm64                  | aarch64-pc-windows-msvc           | @bifrost-proxy/bifrost-win32-arm64         | win32   | arm64 |
-
-平台包 `package.json` 中 `os`/`cpu` 字段对应上表（如 `darwin`+`arm64`）。glibc Linux 包继续声明 npm `libc: ["glibc"]`，musl/static Linux 包不声明 npm `libc`，让 glibc 主机也能拿到 fallback 包；运行时仍由主包侧通过 `getPlatformKey` 检测 glibc/musl 并挑选不同的 npm 包名。
-
-### Linux libc 检测（lib/platform.js）
-
-- `linux-arm`（armv7）直接固定为 `linux-arm-glibc`，不做检测。
-- 其余 Linux 平台调用 `detectLinuxLibc`：
-  1. `execSync("ldd --version 2>&1 || true")`；输出含 `musl` → 判为 `musl`。
-  2. 否则解析 `GLIBC`/`GNU libc` 行中的 `X.Y` 版本号；版本 < `MIN_GLIBC_VERSION`（当前 `2.39`，常量在 `lib/platform.js`）→ 视为 `musl`（回退到 musl 静态包），否则 `glibc`。
-  3. 没有可解析的 glibc 版本时，检查 `/lib/ld-musl-*.so.1` 是否存在；命中视为 `musl`。
-  4. 仍无法判定时 **默认返回 `musl`**（musl 静态包在 glibc 系统上也能跑，避免低版本 glibc 主机加载失败）。
-- `detectLinuxLibc` 支持注入 `execSync`/`existsSync`/`lddOutput` 以便单测。
-
-## 依赖项
-
-- GitHub Actions Release workflow（`.github/workflows/release.yml` 中 `publish-npm` job，依赖 `prepare` / `build-cli` / `release` 三个 job）
-- npm registry（`https://registry.npmjs.org/`）
-- `secrets.NPM_TOKEN`（在 `Publish to npm` 步骤注入为 `NODE_AUTH_TOKEN`）
-- Node.js 22（由 `actions/setup-node@v4` 安装）
-- 9 个 CLI build job 上传的 `cli-<rustTarget>` artifact，且非 Windows 目标必须同时包含 `.tar.gz` 与 `.tar.xz`，Windows 目标必须包含 `.zip`
-
-## 文件结构
+### 主包结构
 
 ```
-npm/
-├── bifrost/                    # 主包 @bifrost-proxy/bifrost
-│   ├── package.json
-│   ├── bin/
-│   │   └── bifrost             # Node.js 入口脚本
-│   ├── lib/
-│   │   ├── index.js            # 平台解析逻辑（供 programmatic API 使用）
-│   │   └── platform.js         # 平台映射与检测逻辑
-│   └── install.js              # postinstall 兜底脚本
-├── bifrost-linux-x64/
-│   └── package.json
-├── bifrost-linux-arm64/
-│   └── package.json
-├── bifrost-linux-x64-musl/
-│   └── package.json
-├── bifrost-linux-arm64-musl/
-│   └── package.json
-├── bifrost-linux-arm/
-│   └── package.json
-├── bifrost-darwin-x64/
-│   └── package.json
-├── bifrost-darwin-arm64/
-│   └── package.json
-├── bifrost-win32-x64/
-│   └── package.json
-└── bifrost-win32-arm64/
-    └── package.json
-scripts/
-└── npm-publish.mjs             # 发布脚本：注入版本、复制二进制、执行 npm publish
+npm/bifrost/
+├── package.json        # 主包 metadata，optionalDependencies 声明所有平台包
+├── bin/bifrost         # Node.js 入口脚本
+├── lib/
+│   ├── index.js        # 导出 getBinaryPath()
+│   └── platform.js     # PLATFORM_MAP、getPlatformKey、detectLinuxLibc、parseGlibcVersion
+├── install.js          # postinstall 兜底
 ```
 
-## CI 流程
+### `bin/bifrost`
 
-`release.yml` 中 `publish-npm` job 依赖 `[prepare, build-cli, release]`，跑在 `ubuntu-latest`：
+- `execFileSync(getBinaryPath(), process.argv.slice(2), { stdio: 'inherit', env: process.env })`。
+- 子进程非零退出 → `process.exit(error.status)`。
+- 被信号中断 → `process.kill(process.pid, error.signal)`。
 
-1. `actions/checkout@v4` 切到 `prepare.outputs.tag`
-2. `actions/setup-node@v4` 安装 Node 22 并配置 `registry-url: https://registry.npmjs.org`
-3. `actions/download-artifact@v4` 以 `pattern: cli-*` 拉取全部 CLI 构建产物到 `artifacts/`
-4. **Verify artifacts** 步骤遍历 9 个 `EXPECTED_TARGETS`：检查 `cli-<target>/` 目录存在；非 Windows 目标要求 `bifrost-<tag>-<target>.tar.gz` **和** `.tar.xz` 同时存在（前者给 Homebrew/npm/legacy installer，后者给 install script 与 bifrost upgrade），Windows 目标要求 `.zip` 存在；任一缺失立即 `exit 1`
-5. **Publish to npm** 步骤执行 `node scripts/npm-publish.mjs`，注入 `BIFROST_VERSION=prepare.outputs.version`、`ARTIFACTS_DIR=$GITHUB_WORKSPACE/artifacts`、`NODE_AUTH_TOKEN=secrets.NPM_TOKEN`
+### `lib/index.js` 二进制查找优先级
 
-### scripts/npm-publish.mjs 行为
+1. `getPlatformKey({ platform, arch })` → `PLATFORM_MAP` → npm 包名；未支持 platform 抛出错误并列出全部 supported keys。
+2. `require.resolve("${packageName}/package.json")` 定位平台包 → 检查 `bin/<binaryName>`（Windows: `bifrost.exe`，其他 `bifrost`）。
+3. Fallback 到主包目录 `downloaded-<pkg>-<binaryName>`（由 `install.js` 兜底下载）。
+4. 全部失败 → 抛 `The platform-specific package ... is not installed. Please reinstall @bifrost-proxy/bifrost to fix this.`。
 
-- **入参**：`BIFROST_VERSION` 环境变量或第一个 positional 参数；可选 `--dry-run`、`--local`、`--token <NPM_TOKEN>`、`--otp <CODE>`；CI 模式还可用 `ARTIFACTS_DIR` 覆盖产物目录。
+### `lib/platform.js` Linux libc 检测
+
+- `linux-arm`（armv7）直接固定为 `linux-arm-glibc`。
+- 其余 Linux 平台走 `detectLinuxLibc`：
+  1. `execSync("ldd --version 2>&1 || true")` 输出含 `musl` → `musl`。
+  2. 否则解析 `GLIBC` / `GNU libc` `X.Y` 版本；`< MIN_GLIBC_VERSION`（当前 `2.39`）→ `musl`。
+  3. 没有可解析 glibc 版本 → 检查 `/lib/ld-musl-*.so.1` 是否存在。
+  4. 仍无法判定 → 默认 `musl`（musl 静态包在 glibc 系统也能跑，避免低版本 glibc 主机加载失败）。
+- `detectLinuxLibc` 支持注入 `execSync`/`existsSync`/`lddOutput`，便于单测。
+
+### `install.js` 三级兜底
+
+1. `require.resolve("${pkg}/package.json")` 定位平台包目录，`existsSync(bin/<binary>)` 命中即 `validateBinary`。
+2. 在 `__dirname/npm-install` 临时目录写空 `package.json`，`npm install --loglevel=error --prefer-offline --no-audit --progress=false <pkg>@<version>`（清空 `npm_config_global` 避免污染全局）。把 `node_modules/<pkg>/bin/<binary>` 复制到 `downloaded-<pkg>-<binary>` 并 `chmod 0o755`，最后递归清理临时目录。
+3. HTTPS 从 `https://registry.npmjs.org/<pkg>/-/<tarballName>-<version>.tgz` 下载（`tarballName` 即去掉 `@bifrost-proxy/` 前缀的包名）；跟随 301/302 重定向；内置 mini tar+gzip 解析器从 `package/bin/<binary>` 解出二进制。
+- `validateBinary`：`execFileSync(binPath, ["--version"])` 输出与 `package.json.version` 比对，不一致仅 warning，失败异常吞掉不阻塞。
+
+### CI 集成（`release.yml`）
+
+`publish-npm` job 依赖 `[prepare, build-cli, release]`，跑在 `ubuntu-latest`：
+
+1. `actions/checkout@v4` 切到 `prepare.outputs.tag`。
+2. `actions/setup-node@v4` 装 Node 22 并配置 `registry-url: https://registry.npmjs.org`。
+3. `actions/download-artifact@v4 pattern: cli-*` 拉全部 CLI 产物到 `artifacts/`。
+4. **Verify artifacts** 步骤遍历 9 个 `EXPECTED_TARGETS`：非 Windows 目标必须同时存在 `bifrost-<tag>-<target>.tar.gz` 与 `.tar.xz`；Windows 目标必须存在 `.zip`；缺失即 `exit 1`。
+5. **Publish to npm** 执行 `node scripts/npm-publish.mjs`，注入 `BIFROST_VERSION`、`ARTIFACTS_DIR`、`NODE_AUTH_TOKEN=secrets.NPM_TOKEN`。
+
+### `scripts/npm-publish.mjs`
+
+- **入参**：`BIFROST_VERSION` 环境变量或第一个 positional 参数；可选 `--dry-run` / `--local` / `--token <NPM_TOKEN>` / `--otp <CODE>`；CI 模式可用 `ARTIFACTS_DIR` 覆盖产物目录。
 - **CI 模式（默认）**：
-  1. 同步版本号到 9 个平台包 + 主包 `package.json`，并把主包 `optionalDependencies` 中所有 `@bifrost-proxy/*` 条目的版本号一起改写为 `BIFROST_VERSION`
-  2. 在 `artifacts/cli-<rustTarget>/` 中按 `tar.gz` → `tar.xz` → `zip` → 裸二进制顺序查找产物，解压到对应平台包的 `bin/`；先尝试 `--strip-components=1`，若提取后还找不到目标文件名则全量解压后 `find` 兜底；非 Windows 二进制 `chmod 0o755`
-  3. 把根目录 `README.md` 复制到每个平台包以及主包目录
-  4. 依次 `npm publish --access public --tag latest --registry https://registry.npmjs.org/`（带 `--dry-run` 时透传），平台包之间间隔 5s（`PUBLISH_INTERVAL_MS`），平台包发布失败收集到 `failedPlatforms`，全部完成后若有失败则 `exit 1` 不再发主包；主包发布前再等 5s 让平台包传播
-  5. 单个包发布支持最多 3 次重试（`PUBLISH_RETRY_COUNT`），仅在错误信息含 `E409`（冲突）时按 15s 间隔 (`PUBLISH_RETRY_DELAY_MS`) 重试，其他错误立即上抛
-  6. 通过 `--token` 传入时，会在每个包目录写入临时 `.npmrc`（`//registry.npmjs.org/:_authToken=${npm_token}`），同时设置 `npm_token` 与 `NODE_AUTH_TOKEN`
-- **`--local` 模式**：根据本机 `platform`/`arch` 选一个平台包，从 `target/release/<binary>` 或 `target/debug/<binary>` 注入二进制，其余平台包先写入空 stub 文件再发布（保证主包 `optionalDependencies` 解析成功），最后发主包；与 CI 模式共用 README 复制、版本同步、重试与节流逻辑。
+  1. 同步 9 个平台包 + 主包 `package.json` 的 `version`；改写主包 `optionalDependencies` 中所有 `@bifrost-proxy/*` 条目为 `BIFROST_VERSION`。
+  2. 在 `artifacts/cli-<rustTarget>/` 按 `tar.gz` → `tar.xz` → `zip` → 裸二进制 顺序找产物，解压到对应平台包 `bin/`；先试 `--strip-components=1`，找不到目标文件名再全量解压 + `find` 兜底；非 Windows 二进制 `chmod 0o755`。
+  3. 根 `README.md` 复制到每个平台包与主包目录。
+  4. 依次 `npm publish --access public --tag latest --registry https://registry.npmjs.org/`（`--dry-run` 透传），平台包之间间隔 `PUBLISH_INTERVAL_MS`（5 s）；平台包失败收集到 `failedPlatforms`，全部完成后若有失败 `exit 1` 不再发主包；主包发布前再等 5 s 让平台包传播。
+  5. 单包最多 3 次重试（`PUBLISH_RETRY_COUNT`），仅在 `E409` 冲突时按 15 s 间隔（`PUBLISH_RETRY_DELAY_MS`）重试；其它错误立即抛出。
+  6. `--token` 传入时，每个包目录写临时 `.npmrc`（`//registry.npmjs.org/:_authToken=${npm_token}`），同时设置 `npm_token` 与 `NODE_AUTH_TOKEN`。
+- **`--local` 模式**：按本机 `platform`/`arch` 选一个平台包，从 `target/release/<binary>` 或 `target/debug/<binary>` 注入二进制，其余平台包写入空 stub（保证主包 `optionalDependencies` 解析成功），最后发主包；README 复制 / 版本同步 / 重试 / 节流与 CI 模式共用。CI 入口不触发 `--local`。
 
-（CI 入口仅调用 CI 模式；`--local` 路径供本地手工发布调试，未在 release.yml 中触发。）
+### CLI + Web + Admin API 边界
+
+- npm 分发本身不新增 CLI 命令；`npx @bifrost-proxy/bifrost <subcommand>` 等价于 `bifrost <subcommand>`。
+- 主包 CLI 是 Node shim，不解析业务参数，也不注入代理配置；outbound HTTP 不变量继续维持。
+- Admin API 和 Web UI 不受影响，端口、路径、鉴权与常规 CLI 一致。
+
+### Sync 边界
+
+`bifrost sync` 走 Rust 端 HTTPS，不感知 npm 分发；npm 升级只是替换二进制，不改变 sync 协议或 rule 存储格式。
+
+## Phase 1-4
+
+### Phase 1：平台包骨架
+
+- 生成 9 个 `npm/bifrost-<target>/package.json` 骨架，声明正确的 `os`/`cpu`/`bin`；Linux musl 不声明 `libc`。
+- 主包 `package.json` 声明所有 `optionalDependencies`，`bin/bifrost` 指向 `lib/index.js`。
+
+### Phase 2：主包运行时
+
+- 实现 `lib/platform.js`（`getPlatformKey`、`detectLinuxLibc`）。
+- 实现 `lib/index.js`（`getBinaryPath`）。
+- 实现 `bin/bifrost`（透传参数、退出码、信号）。
+- 实现 `install.js`（三级降级）。
+
+### Phase 3：发布脚本
+
+- `scripts/npm-publish.mjs` CI 模式、`--local` 模式、`--dry-run`、重试节流。
+- `release.yml` `publish-npm` job 装配。
+- Verify artifacts 步骤覆盖 9 个 target。
+
+### Phase 4：真机验证 + 文档
+
+- `npm install -g` / `npx` 真机跑通。
+- README / 站点文档补 npm 安装段落（planned, not yet shipped as of 2026-06-16）。
+- Release Notes Installation 段已包含 `npm install -g @bifrost-proxy/bifrost` 与 `npx @bifrost-proxy/bifrost start`（`release.yml` 第 612-620 行附近）。
 
 ## 测试方案
 
-- 本地执行 `node npm/bifrost/bin/bifrost --version` 验证二进制查找逻辑
-- CI 中发布到 npm 后可通过 `npx @bifrost-proxy/bifrost --version` 验证
-- 验证各包管理器只安装当前平台包：`npm install --dry-run` / 实际安装后检查 `node_modules/@bifrost-proxy/` 目录
-- `lib/platform.js` 的 `detectLinuxLibc`/`getPlatformKey` 通过 `options.execSync`/`existsSync`/`lddOutput` 参数注入便于单测（自动化单测 planned, not yet shipped as of 2026-06-16）
+### 单元测试
 
-## 校验要求
+- `lib/platform.js` 的 `detectLinuxLibc` / `getPlatformKey` 通过 `options.execSync` / `existsSync` / `lddOutput` 注入进行单测（planned, not yet shipped as of 2026-06-16，待补 `npm/bifrost/lib/platform.test.js`）。
+- `node -c install.js` 语法检查（planned）。
 
-- npm publish 前的产物校验由 `publish-npm` job 的 *Verify artifacts* 步骤完成：9 个 `EXPECTED_TARGETS` 中任一 `.tar.gz`/`.tar.xz`（非 Windows）或 `.zip`（Windows）缺失即失败
-- `scripts/npm-publish.mjs` 解包后再次 `existsSync(binDir/binary)`，缺失则中止整次发布
-- 主包 + 9 个平台包版本号统一由 `updateVersion()` 改写为 `BIFROST_VERSION`，同时改写主包 `optionalDependencies` 中 `@bifrost-proxy/*` 条目的版本号
-- `install.js` 的 `validateBinary` 是 best-effort：版本不匹配只打 warning，不阻塞安装；自动化 `node -c install.js` 语法检查 (planned, not yet shipped as of 2026-06-16)
+### E2E / CI 校验
 
-## 文档更新要求
+- `publish-npm` job 的 Verify artifacts 步骤：任一 target 缺 `.tar.gz` / `.tar.xz` / `.zip` 即 `exit 1`。
+- 解包后 `existsSync(binDir/binary)` 缺失则中止发布。
+- `npx @bifrost-proxy/bifrost --version` 与 `--local` 模式 dry-run。
 
-- `release.yml` 生成的 GitHub Release Notes 中 Installation 段落已包含 `npm install -g @bifrost-proxy/bifrost` 与 `npx @bifrost-proxy/bifrost start` 两条说明（见 release.yml 第 612-620 行附近）
-- README / 站点文档同步 npm 安装方式 (planned, not yet shipped as of 2026-06-16)
+### 真实场景测试
+
+- 用例位于 `human_tests/npm-distribution.md`：
+  - TC-NPM-01：macOS arm64 `npm install -g @bifrost-proxy/bifrost@<v>` → `bifrost --version` 与 `bifrost start --port 18888 --no-system-proxy`。
+  - TC-NPM-02：Linux x64 glibc 主机验证同时安装 gnu + musl fallback 包。
+  - TC-NPM-03：Linux x64 旧 glibc（< 2.39）验证运行时选中 musl 包。
+  - TC-NPM-04：`npm install --no-optional @bifrost-proxy/bifrost` 触发 `install.js` 三级兜底并成功。
+  - TC-NPM-05：`npm-publish.mjs --local --dry-run` 本机跑通。
+
+### Coverage 门禁
+
+- npm 侧目前没有自动化覆盖率；Node shim 逻辑窄，靠 `install.js` 三级路径 + 真机 TC-NPM-01/02/03/04 兜底。
+- Rust 主线仍跑 `make coverage`。
+
+## Review/Fix/Test 闭环
+
+### 第 1 轮
+
+- 复核 9 个平台包 `os` / `cpu` / `libc` 声明与 Linux musl 特殊处理。
+- 复核 `install.js` 三级路径的错误处理与临时目录清理。
+- 跑 `--local --dry-run` 与 Verify artifacts。
+
+### 第 2 轮
+
+- 复核 `npm-publish.mjs` 重试节流、`.npmrc` 写入、README 复制。
+- 真机 `npm install -g` + `npx` 双路径验证。
+- 若 npm registry 409 / 502 高频，追加 retry 配置调整。
+
+## 风险与决策
+
+- **决策**：使用 `optionalDependencies` + `os`/`cpu` 过滤作为主路径；Linux musl 不声明 `libc` 让 glibc 主机也能拿到 fallback。
+- **决策**：`install.js` 采用 best-effort validate，`--version` 校验失败仅 warning，避免误伤 airgap / mirror 场景。
+- **风险**：npm registry 传播延迟可能导致主包发出去时平台包还没到；已用 5 s 间隔 + 409 重试兜底。
+- **风险**：`--local` 模式会往非本机平台包塞 stub 文件，若失误跑到 CI 会污染发布；因此仅本地手动使用，CI 不触发。
+- **风险**：Linux 旧 glibc 主机检测依赖 `ldd --version` 文本解析；默认策略选择 `musl` 静态包，最坏情况是二进制更大但可用。

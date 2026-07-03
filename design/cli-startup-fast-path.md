@@ -1,119 +1,161 @@
 # CLI 启动快路径优化
 
-## 功能模块详细描述
+## 背景
 
-优化 `bifrost start` 的前台启动体验，目标是让代理核心启动尽快进入监听态，并为后续慢启动问题提供稳定、可读的耗时日志。
+`bifrost start` 是 CLI 用户与代理服务的第一次接触。核心 SLO 是“秒级监听”——从命令回车到端口开始 accept 应尽量落在 1s 附近。历史实现里有若干阻塞主线程的操作：
 
-当前前台启动存在两个问题：
+- 同步 `check_and_print_update_notice()` 打 GitHub API，网络抖动时可能等数秒。
+- System proxy 恢复 + 启用（`SystemProxyManager::recover_from_crash` / `enable`）在启动关键路径上跑，`networksetup` / `osascript` 阻塞会拖慢 listener bind。
+- Remote Invoke worker 在启动路径上初始化，还要读整个 call history JSON，越用越慢。
+- `FrameStore` 启动时预热 `frames/*.meta.json` 全量文件。
+- Daemon 模式没有 readiness pipe，导致父进程可能在 listener 还没就绪时就报告成功。
+- 默认 `info` 日志刷了太多常态生命周期事件（连接提前关闭、SSE ping、规则命中详情），既噪音又慢。
+- 缺少统一的“阶段耗时”日志，用户报“启动慢”时无法定位。
 
-- CLI 在进入 `start` 主流程前会同步检查版本更新，网络抖动时可能阻塞数秒。
-- 启动路径缺少统一的阶段耗时日志，出现慢启动时难以判断是数据库、规则、帧缓存还是其他模块导致。
-- 若启用了 system proxy，启动/daemon 链路会同步执行系统代理恢复和设置，阻塞端口监听。
+本方案是一次“启动快路径 + 可观测性”重构，不改代理业务语义。目标是把关键路径压到最短，同时给运维留一条可诊断的日志。
 
-本次改动只调整 CLI 启动路径的执行时机和可观测性，不改变代理功能语义。
+## 用户目标验证清单
 
-## 实现逻辑
+### 必须实现
 
-### 1. 更新检查移出启动关键路径
+- `bifrost start` 前台模式下，不阻塞主线程做 GitHub 版本检查；改为后台线程异步执行。
+- `bifrost start --daemon` 下完全不打印 `Update available` 到控制台，避免污染 daemon 日志。
+- System proxy 恢复 (`recover_from_crash`) + 启用 (`enable`) 从启动关键路径拆出，放到 listener 成功 bind 之后的后台线程。
+- Remote Invoke worker 初始化从启动路径搬到后台任务，call history 从整文件 JSON 迁到 JSONL 追加。
+- `FrameStore` 启动时不再预热 `*.meta.json`，改用 SQLite `frame_connection_metadata` 表按需查询 + LRU cache。
+- 增加统一 `bifrost_cli::startup` 阶段日志（每阶段耗时 + 总耗时）。
+- Daemon 模式增加 readiness pipe：父进程只在子进程真正 bind listener 后才报告 `Daemon started`。
+- 前台 listener task 挂掉时主进程立即返回错误，避免“进程在、端口不监听”的假运行。
+- Daemon 日志级别继承 CLI `--log-level`，`RUST_LOG` 仍优先。
+- 默认 `info` 日志降噪：常态生命周期事件降级到 `debug`，规则命中详情降级到 `debug`/`trace`。
 
-- 对 `bifrost start` 前台模式，不再在主线程同步执行 `check_and_print_update_notice()`
-- 改为后台线程异步执行，避免 GitHub API 请求阻塞端口监听
-- 对非 `start` 命令，保持原有同步行为
-- 对 `start --daemon`，不打印更新提示，避免后台守护进程产生额外控制台输出
+### 必须不破坏
 
-### 2. 启动阶段耗时日志
+- `bifrost start` 无冲突场景下的用户观感（打印顺序、成功消息、system proxy 状态最终一致）与既往一致。
+- 代理业务语义（规则匹配、值解析、TLS 拦截、上游转发）零改动。
+- 端口重绑（`bifrost port bind/update`）仍复用同一套 listener 生命周期管理。
+- Remote Invoke 对外 API 语义不变；后台初始化未完成时短暂返回未启用是可接受降级。
+- 现有 `RUST_LOG` 精确过滤能力保留；能通过 `RUST_LOG=bifrost_core::rules=debug,bifrost_proxy::rules=trace,info` 恢复详细规则命中日志。
+- 旧 `admin/remote_invoke_call_history.json` 存在时被删除（不做 in-place 迁移），新 JSONL 文件按 client-key 分片。
+- 旧 `frames/*.meta.json` 存在时被忽略/不参与查询，`FrameStore` 只信 SQLite。
 
-- 在 `crates/bifrost-cli/src/commands/start.rs` 中为关键初始化阶段增加 `bifrost_cli::startup` 的 `info` 日志
-- 覆盖的阶段包括：
-  - 配置加载
-  - body / ws payload / traffic db / frame store 初始化
-  - config storage 加载
-  - app icon cache / script manager / replay db 初始化
-  - admin state 构建
-  - 规则解析与 resolver 初始化
-  - replay executor / push / metrics / watcher 启动
-  - 代理 listener bind
-- 增加启动总耗时日志，便于判断是否满足秒启动目标
+### 必须真实验证
 
-### 2.1 System proxy 改为后台 reconcile
+- 干净数据目录下从 `bifrost start` 回车到端口 accept 应在 1s 附近；`bifrost_cli::startup` 日志里能看到每阶段耗时和总耗时。
+- 断网环境下 `bifrost start` 不再因 GitHub API 超时被拖慢；`Update available` 提示可能延迟出现但不阻塞。
+- Daemon 模式下先起一个 dummy TCP holder 占端口，`bifrost start --daemon` 必须非零退出、不打印 `Daemon started with PID`。
+- 前台 listener bind 后手动 kill listener task（模拟 UDP relay bind fail），主进程立即错误退出。
+- 默认 `info` 日志下跑一天：不再看到规则命中详情、SSE ping、`hyper::Error(IncompleteMessage)`、WebSocket 正常关闭事件。
 
-- `bifrost start` / daemon 模式下，不再在关键启动路径里同步执行：
-  - `SystemProxyManager::recover_from_crash`
-  - `SystemProxyManager::enable`
-- 改为在代理 listener 成功绑定后启动后台线程执行：
-  - 先恢复 crash 遗留的系统代理 backup
-  - 再按当前配置尝试启用 system proxy
-- 这样即使系统层操作较慢、需要管理员授权、或 `networksetup` / `osascript` 阻塞，也不会拖慢核心代理启动
-- 前台状态展示改为：
-  - `Requested (applying asynchronously)`
-- 端口重绑时仍只在“system proxy 已成功启用”的前提下尝试同步更新；该路径不是常规启动热路径
+## 产品语义
 
-### 2.2 Daemon 日志级别继承 CLI 参数
+### 启动快路径的四条原则
 
-- `main.rs` 在 `start --daemon` 模式下不再提前初始化 tracing，避免父进程持有前台日志输出状态
-- daemon 子进程在 `fork` 后调用 `reinit_logging_for_daemon(...)` 时，会显式继承 CLI 传入的 `--log-level`
-- 若设置 `RUST_LOG`，仍保持 `RUST_LOG` 高于 `--log-level` 的优先级
-- 未显式传参时，默认值仍为 `info`，与 CLI 参数默认行为一致
-- 这样 daemon 模式下的 `bifrost_cli::startup`、规则加载和运行期 tracing 日志不再被硬编码为 `info`
+1. **主线程只做 listener bind 不可让路的事**：配置加载、DB 初始化、admin state 构建、规则解析、listener bind。
+2. **任何 I/O 到外部服务（GitHub、system proxy 系统调用、写系统级证书 trust）都必须能后台化**。
+3. **Daemon readiness = listener bind 完成**：父进程用 pipe 等 readiness 信号，不用 sleep。
+4. **可观测性优先于花活**：每个阶段一行 `startup phase X: Yms` 日志，总耗时一行。
 
-### 2.3 Listener 生命周期与 daemon readiness
+### 更新提示的两种形态
 
-- 前台模式不再把 `run_with_listener()` 作为只记录日志的 detached task。
-- `spawn_managed_proxy_task()` 返回 `JoinHandle<Result<()>>`，前台主循环通过 `tokio::select!` 同时监听：
-  - shutdown 信号
-  - 端口重绑请求
-  - proxy listener task 结束
-- 如果 listener task 因 UDP relay bind 失败、accept loop fatal error、panic 等原因提前退出，主流程立即返回错误，避免出现“进程仍在、runtime info 仍在、端口不监听”的假运行状态。
-- daemon 模式在 `fork()` 前创建 readiness pipe；父进程只在子进程完成真实 listener bind 并写入 readiness 信号后才打印 `Daemon started with PID` 并返回 0。
-- 子进程启动失败、listener bind 失败或初始化阶段提前退出时，父进程会收到 pipe EOF/超时并返回非零错误，避免 daemon 模式提前报告启动成功。
+- 前台模式：主线程 spawn 一个 `spawn_update_check_notice()` 后台线程。它异步查 GitHub，成功后追加打印一段 update banner；失败静默。
+- Daemon 模式：完全不打印 update banner。理由是 daemon 会被 systemd/launchd/自定义 supervisor 抓 stdout；控制台里出现意外的 banner 会污染日志格式，而且 daemon 用户没法看到。
 
-### 2.4 默认日志降噪
+### System proxy 后台 reconcile
 
-- 默认 `info` 日志只保留启动阶段、真实错误、用户可感知状态变化和必要的业务事件。
-- 以下常态生命周期事件降级为 `debug`：
-  - 短连接提前关闭导致的 `hyper::Error(IncompleteMessage)`
-  - macOS/短生命周期连接无法反查客户端进程的归因 miss
-  - WebUI push WebSocket 注册、正常关闭和客户端主动关闭
-  - Remote Invoke SSE `ping` 心跳分发
-- 保持真实异常路径的等级不变：HTTP 连接服务错误继续 `error`，WebSocket 协议/IO 错误继续 `warn`，异步进程解析任务失败继续 `warn`，非 ping SSE 事件继续按现有业务日志输出。
+启动流程改为：
 
-### 2.5 规则命中日志降噪
+```
+1. listener 成功 bind
+2. 打印 "Requested (applying asynchronously)"（system proxy 状态行）
+3. spawn 后台线程：
+   a. SystemProxyManager::recover_from_crash 收回上次崩溃留下的 backup
+   b. SystemProxyManager::enable 按当前配置真正启用
+4. 后台线程完成后，通过 admin state 更新 system proxy 展示状态
+```
 
-- 规则 resolver 的逐条命中日志属于高频调试信息，默认 `info` 下不再输出。
-- `bifrost_core::rules` 的 `rule matcher candidate matched` 与 `rule selected` 降级到 `debug`，用于分别定位某条规则是否进入候选以及是否通过 filter/skip 后最终生效。
-- `bifrost_proxy::rules` 的请求级 `rules matched for request` 降级到 `debug`，逐条 `matched rule detail` 降级到 `trace`。
-- 需要排查规则命中细节时，可显式使用：
-  - `RUST_LOG=bifrost_core::rules=debug,bifrost_proxy::rules=trace,info`
-  - 或通过 `--log-level debug` 打开较粗粒度调试日志，再按需使用 `RUST_LOG` 精确过滤。
-- 该调整不改变规则匹配、合并或转发语义，只减少默认日志量和高频字段格式化成本。
+即使系统层慢或需要授权，代理监听已经能承接流量。用户在 admin UI 上看到的状态可能短暂显示 “Requested”，几百毫秒后转为 `Enabled`。
 
-### 2.6 Remote Invoke worker 后台初始化
+### 阶段日志格式
 
-- Remote Invoke worker 构造只读取本地 identity、grant crypto、grant policy 与 grant info；call history 不再参与 worker 构造。
-- 启动路径改为在 `AdminState`、`SyncManager` 与基础运行时状态就绪后，调度后台任务初始化 Remote Invoke worker。
-- 后台任务完成后再调用 `AdminState::set_remote_invoke_worker` 并启动 SSE run loop。
-- 代理 listener bind、runtime info 写入、tray helper 与系统代理启动不再等待 Remote Invoke worker 初始化，更不会等待调用历史读取。
-- Remote Invoke API 在后台初始化完成前可能短暂返回未启用/不可用状态；这是可接受的降级，优先保证代理核心能力先启动。
-- 日志增加 `remote invoke worker initialization scheduled` 与 `remote invoke worker initialized asynchronously`，记录后台初始化耗时。
+`bifrost_cli::startup` target 下的 `info` 日志格式统一：
 
-### 2.7 Remote Invoke 调用历史 JSONL 滚动存储
+```
+startup phase config load: 12ms
+startup phase traffic db init: 43ms
+startup phase frame store init: 5ms
+startup phase config storage load: 21ms
+startup phase app icon cache init: 3ms
+startup phase script manager init: 6ms
+startup phase replay db init: 7ms
+startup phase admin state build: 14ms
+startup phase rules parse + resolver init: 22ms
+startup phase replay executor / push / metrics / watcher start: 9ms
+startup phase proxy listener bind: 18ms
+startup total: 187ms
+```
 
-- Remote Invoke 调用历史不再使用整文件 `admin/remote_invoke_call_history.json`。发现旧文件时直接删除，不做兼容读取或迁移。
-- 新格式写入 `admin/remote_invoke_call_history/<client-key>.jsonl`，每次调用开始、完成、失败或取消时追加一行完整快照，不在写路径先读取全量历史。
-- store 按 `call_id` 取最新快照，最终落盘记录硬上限为 `max_records=1000`；超过上限或发现坏 JSONL 行时触发 compaction，只保留最新 1000 条并清理坏行/旧行。
-- worker 内存不保留历史列表。正在执行的 call 只在 `ActiveCallControl` 中保存临时快照，结束或取消后释放；列表和详情接口按需读取 JSONL。
-- `/api/remote-invoke/calls` 支持 `limit` 与 `before` 游标分页，默认只返回一页，前端 Recent Calls 默认只拉取 100 条。
+用户报“启动慢”时，直接看这几行就能定位是数据库、规则、帧缓存还是其它模块。
 
-### 3. Frame metadata 落入 SQLite 独立表
+## 技术细节
 
-- `FrameStore metadata` 不再存储/读取 `frames/*.meta.json`
-- 改为写入现有 admin 侧 `traffic.db` 中的独立表 `frame_connection_metadata`
-- `FrameStore` 启动时只初始化 SQLite 连接与表结构，不再预热历史 metadata
-- 查询路径改为按需从 SQLite 读取，并用进程内 cache 做热点复用
-- 清理逻辑改为直接按 SQL 查询过期且已关闭的连接，再删除对应 frame 文件
-- 由于本次明确不兼容历史 metadata 文件，旧 `.meta.json` 不参与迁移
+### 关键文件
 
-表结构：
+- `crates/bifrost-cli/src/main.rs`：不在 daemon 分支提前初始化 tracing；把 update banner 移到后台。
+- `crates/bifrost-cli/src/commands/update_check.rs`：新增 `spawn_update_check_notice()`。
+- `crates/bifrost-cli/src/commands/start.rs`：
+  - 加各阶段 `startup phase X: Yms` 日志和总耗时日志。
+  - 新增 `spawn_managed_proxy_task()`：返回 `JoinHandle<Result<()>>`，主循环通过 `tokio::select!` 监听 shutdown、端口重绑、listener 结束。
+  - 加 readiness pipe（daemon）。
+  - system proxy reconcile 移到后台。
+  - Remote Invoke worker 移到后台调度。
+- `crates/bifrost-cli/src/commands/port.rs`：复用 `spawn_managed_proxy_task` 处理端口重绑。
+- `crates/bifrost-core/src/logging.rs`：`reinit_logging_for_daemon(cli_log_level: &str)`，daemon 子进程按 CLI 参数初始化。
+- `crates/bifrost-admin/src/state.rs`：`set_remote_invoke_worker(worker)` 支持后台注入。
+- `crates/bifrost-admin/src/remote_invoke/call_history_store.rs`：JSONL 追加 + 按 client-key 分片 + `max_records=1000` compaction。
+- `crates/bifrost-admin/src/frame_store.rs`：`frame_connection_metadata` 表 + LRU cache。
+- `crates/bifrost-core/src/rules` + `crates/bifrost-proxy/src/rules`：日志降级。
+
+### `spawn_managed_proxy_task` 语义
+
+- 输入：绑定后的 listener、shutdown token、reload channel。
+- 输出：`JoinHandle<Result<()>>`。
+- 前台主循环：
+
+```rust
+tokio::select! {
+    _ = shutdown.cancelled() => break,
+    Some(req) = reload_rx.recv() => handle_port_reload(req).await?,
+    result = &mut listener_handle => {
+        let err = result??.err().unwrap_or_else(|| anyhow!("listener exited unexpectedly"));
+        return Err(err);
+    }
+}
+```
+
+任何 listener 侧的 fatal 错误（UDP relay bind fail、accept loop 崩、内部 panic）都会立刻传播出来，主进程退出，runtime.json 由 stop 收敛。
+
+### Daemon readiness pipe
+
+```
+parent:
+  let (rx, tx) = pipe();
+  fork();
+  parent: close(tx); wait for rx (timeout N sec);
+    - EOF/timeout -> exit(1), print "daemon failed to become ready"
+    - byte 0x01 -> print "Daemon started with PID X", exit(0)
+
+child:
+  close(rx);
+  reinit tracing with --log-level;
+  do full startup...;
+  after listener bind ok: write(tx, 0x01); close(tx);
+  enter proxy loop.
+```
+
+Bind 失败或 startup 中途 panic 时，child 直接退出，parent 收到 EOF，从错误退出。
+
+### Frame metadata 表
 
 ```sql
 CREATE TABLE frame_connection_metadata (
@@ -124,55 +166,140 @@ CREATE TABLE frame_connection_metadata (
     last_frame_id INTEGER NOT NULL DEFAULT 0,
     is_closed INTEGER NOT NULL DEFAULT 0
 );
-
 CREATE INDEX idx_frame_metadata_updated
     ON frame_connection_metadata(updated_at DESC);
-
 CREATE INDEX idx_frame_metadata_closed_updated
     ON frame_connection_metadata(is_closed, updated_at DESC);
 ```
 
-读写策略：
+- 写 frame 文件时同步 upsert 一行。
+- 关闭连接时把 `is_closed=1`。
+- 读 metadata 优先命中 LRU；miss 走 SQL。
+- 过期清理直接 `SELECT connection_id WHERE is_closed=1 AND updated_at<?`，再删 frame 文件。
+- 旧 `.meta.json` 不迁移、不读、不 fallback。
 
-- 写入 frame 文件时同步 upsert metadata 行
-- 关闭连接时将 `is_closed` 标记为 `1`
-- 读取 metadata 时优先命中进程内 cache，miss 时按 `connection_id` 查 SQLite
-- 列出连接和过期清理直接走 SQLite，不再依赖启动期全量预热
+### Remote Invoke JSONL 存储
 
-## 依赖项
+- 路径：`admin/remote_invoke_call_history/<client-key>.jsonl`。
+- 写：每次 call 开始/完成/失败/取消 追加一行完整快照，不预读全量历史。
+- 读：`GET /_bifrost/api/remote-invoke/calls`，支持 `limit`、`before` 游标，按 `call_id` 取最新快照。
+- Compaction：超过 `max_records=1000` 或探测到坏行时，重写 JSONL 只留最新 1000 条。
+- 旧 `admin/remote_invoke_call_history.json` 在启动时被删除。
+- 前端 Recent Calls 默认拉 100 条。
 
-- `crates/bifrost-cli/src/main.rs`
-- `crates/bifrost-cli/src/commands/update_check.rs`（新增 `spawn_update_check_notice` 后台线程入口）
-- `crates/bifrost-cli/src/commands/start.rs`（阶段日志、`spawn_managed_proxy_task` + readiness pipe、system proxy 后台 reconcile、Remote Invoke worker 后台调度）
-- `crates/bifrost-cli/src/commands/port.rs`（复用 `spawn_managed_proxy_task` 处理端口重绑）
-- `crates/bifrost-core/src/logging.rs`（`reinit_logging_for_daemon` 接受 CLI `--log-level` 并继承到 daemon 子进程）
-- `crates/bifrost-admin/src/state.rs`（`set_remote_invoke_worker` 支持后台异步注入 worker）
-- `crates/bifrost-admin/src/remote_invoke/call_history_store.rs`（JSONL 滚动存储、按 client-key 分片、`max_records=1000` 硬上限、坏行 compaction）
-- `crates/bifrost-admin/src/frame_store.rs`（`frame_connection_metadata` SQLite 表、按需读取 + LRU cache，不再使用 `*.meta.json`）
-- `crates/bifrost-core/src/rules` 与 `crates/bifrost-proxy/src/rules`（规则命中日志降级到 `debug` / `trace`）
+### 日志降噪清单
 
-## 测试方案（含 e2e）
+- `hyper::Error(IncompleteMessage)`（短连接提前关闭）：`error` → `debug`。
+- macOS 短连接的 client attribution miss：`warn` → `debug`。
+- WebUI push WebSocket 注册/正常关闭/客户端主动关闭：`info` → `debug`。
+- Remote Invoke SSE `ping` 心跳：`debug` → `trace`（不再默认输出）。
+- `bifrost_core::rules::rule matcher candidate matched`：`info` → `debug`。
+- `bifrost_core::rules::rule selected`：`info` → `debug`。
+- `bifrost_proxy::rules::rules matched for request`：`info` → `debug`。
+- `bifrost_proxy::rules::matched rule detail`：`info` → `trace`。
+- 未变：HTTP 服务错误保持 `error`；WebSocket 协议/IO 错误保持 `warn`；非 ping SSE 事件保持业务日志级别。
 
-1. 使用临时数据目录执行 `BIFROST_DATA_DIR=./.bifrost-test-<run-id> cargo run --bin bifrost -- start -p <PORT> --unsafe-ssl`
-2. 确认服务可以正常监听，且更新提示不会阻塞启动
-3. 使用 `RUST_LOG=info` 观察 `bifrost_cli::startup` 日志，确认能看到阶段耗时与总耗时
-4. 使用 daemon 模式执行 `BIFROST_DATA_DIR=./.bifrost-test-<run-id> cargo run --bin bifrost -- -l debug start -p <PORT> --unsafe-ssl --daemon`，确认文件日志中出现 `DEBUG` 级别输出
-5. 执行 `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`：
-   - 前台启动时占用同端口 TCP，验证主 listener bind 失败后主进程退出且 admin API 不可达
-   - 前台 listener 失败日志断言接受直接 bind 错误 `another process is already listening on this port` 与 Linux 非交互 auto-resolve 提示 `already in use`
-   - daemon 启动时占用同端口 TCP，验证父进程返回非零、不会打印 daemon started；错误断言接受 readiness 等待失败与 Linux 非交互 auto-resolve 端口冲突提示
-   - Admin API 不可达探针必须使用短 `connect-timeout` / `max-time`，避免请求命中 TCP holder 后在 Linux CI 中挂起到 suite timeout
-6. 真实场景测试：更新并执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-26 / TC-CSS-27
-7. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-07，验证默认 `info` 日志不再反复输出常态连接关闭、进程归因 miss、WebSocket 正常关闭和 SSE ping
-8. 真实场景测试：更新并执行 `human_tests/cli-log-output-default.md` 中的 TC-LOD-08，验证默认 `info` 日志不再输出规则匹配摘要和逐条命中详情，同时 `trace` 下仍可按需看到详细规则命中信息
-9. 真实场景测试：执行 `human_tests/cli-start-stop-status.md` 中的 TC-CSS-32，构造旧 Remote Invoke JSON 历史和新版 JSONL 历史，确认旧 JSON 被删除、新版历史不在启动期读取，启动日志先出现 proxy listener bind，再异步完成 Remote Invoke worker 初始化，calls API 按页读取
-10. 执行与启动链路相关的 E2E / 校验命令，确认无回归
+## CLI / Web / Admin API 呈现
 
-## 校验要求（含 rust-project-validate）
+### CLI
 
-- 先执行本次改动涉及的启动链路验证或 E2E
-- 再执行 `rust-project-validate` 要求的 fmt / clippy / test / build
+- 无新增子命令；`bifrost start` 输出可能新增一行 `System proxy: Requested (applying asynchronously)`。
+- 前台模式 `Update available` banner 可能延迟出现或不出现（网络不可达时）。
+- `RUST_LOG=info` 下能看到 `bifrost_cli::startup phase ... : Xms` 阶段日志。
+
+### Web
+
+- Settings 页面显示的 system proxy 状态可能短暂显示 `Requested`，然后转 `Enabled`。前端已存在的 polling / websocket 通道无需改。
+
+### Admin API
+
+- 无 API 契约变化。`/api/remote-invoke/calls` 新增 `limit` + `before` 分页参数，默认返回一页。
+
+## Sync 边界
+
+- 本方案属于本机启动路径优化，不参与跨设备同步。
+- Remote Invoke JSONL 是每个 client 独立文件；relay 侧只做转发，不感知本地存储格式变化。
+- Frame metadata SQLite 表是本机流量记录一部分，不在 sync 范围内。
+
+## 实现切分
+
+### Phase 1：可观测性 & 更新检查异步化
+
+- 增加 `bifrost_cli::startup` 阶段日志与总耗时。
+- `check_and_print_update_notice` → `spawn_update_check_notice`（后台线程）；daemon 完全不打印。
+
+### Phase 2：System proxy 后台 reconcile
+
+- listener bind 后 spawn 后台线程执行 recover_from_crash + enable。
+- 前台状态展示 `Requested (applying asynchronously)`。
+
+### Phase 3：Listener 生命周期 + Daemon readiness
+
+- `spawn_managed_proxy_task` 返回 `JoinHandle`，主循环 `tokio::select!`。
+- Daemon readiness pipe：只在 listener bind 后写 readiness。
+- `main.rs` daemon 分支不提前初始化 tracing；子进程 `reinit_logging_for_daemon` 继承 `--log-level`。
+
+### Phase 4：Remote Invoke 后台 worker + JSONL 存储
+
+- Worker 构造只用 identity/crypto/policy/info，不读 call history。
+- 后台任务完成后 `set_remote_invoke_worker` 注入。
+- JSONL 追加 + 按 client-key 分片 + compaction。
+- 旧整文件历史在启动时删除。
+- API 增加 `limit` / `before` 分页。
+
+### Phase 5：Frame metadata SQLite 化
+
+- `frame_connection_metadata` 表 + 索引。
+- Upsert / mark_closed / lookup / list / cleanup 全部走 SQL + LRU cache。
+- 不再读 `*.meta.json`。
+
+### Phase 6：日志降噪 + 手工回归
+
+- 按降噪清单调等级。
+- 更新 `human_tests/cli-log-output-default.md` TC-LOD-07 / TC-LOD-08。
+
+## 测试方案
+
+### E2E
+
+1. 干净数据目录 `BIFROST_DATA_DIR=./.bifrost-test-<run-id> cargo run --bin bifrost -- start -p <PORT> --unsafe-ssl`，断言启动可访问、`bifrost_cli::startup` 日志包含 `startup total: <n>ms`。
+2. Daemon: `-l debug start ... --daemon`，断言文件日志出现 `DEBUG`；父进程仅在 readiness 到达后打印 `Daemon started with PID`。
+3. `bash e2e-tests/tests/test_startup_listener_readiness_e2e.sh`：
+   - 前台起 dummy TCP holder 占端口 → 主 listener bind 失败 → 主进程退出、admin API 不可达；
+   - 断言错误消息包含 `already in use` 或 `another process is already listening on this port`；
+   - Daemon 版本：父进程返回非零、不打印 `Daemon started`，接受 `readiness wait failed` 或 `already in use` 错误。
+   - Admin API 探针使用短 `connect-timeout` / `max-time` 避免 CI 挂起。
+
+### 真实场景
+
+- `human_tests/cli-start-stop-status.md` TC-CSS-26 / TC-CSS-27：交互重启回归。
+- `human_tests/cli-log-output-default.md` TC-LOD-07：默认 `info` 日志不再刷常态生命周期事件。
+- `human_tests/cli-log-output-default.md` TC-LOD-08：默认 `info` 不再输出规则命中详情；`RUST_LOG=bifrost_proxy::rules=trace` 时可看到。
+- `human_tests/cli-start-stop-status.md` TC-CSS-32：构造旧 JSON + 新 JSONL 历史，确认旧 JSON 被删、启动日志先出 proxy listener bind 再异步完成 Remote Invoke worker。
+
+### 单元
+
+- `spawn_update_check_notice`：后台线程执行、失败静默。
+- `check_and_resolve_port_conflict_returns_ok_when_port_free`（已落地）。
+- Frame metadata：upsert / mark_closed / cleanup by is_closed+updated_at 断言。
+- Remote Invoke JSONL：append → read → compaction 后仍能读到最新快照。
+
+## Review / Fix / Test 闭环
+
+- 先跑启动链路 E2E + `test_startup_listener_readiness_e2e.sh`。
+- `rust-project-validate`：fmt / clippy / test / build。
+- daemon 模式手动跑 TC-CSS-26 / TC-LOD-07 / TC-LOD-08 / TC-CSS-32。
+
+## 风险与决策
+
+- **决策 1**：Update banner 在 daemon 完全静默。理由：daemon stdout 可能被 systemd 抓成 journal，banner 会污染日志。用户仍可 `bifrost version-check` 手动查。
+- **决策 2**：system proxy 后台化时“先设 Requested，后转 Enabled”的两阶段状态是对外可见的。理由：不能骗用户说“已启用”；两阶段状态比同步阻塞几秒更能被用户理解。
+- **决策 3**：Frame metadata / Remote Invoke 历史都不做 in-place 迁移。理由：一次性丢弃可以省掉迁移路径的持续维护；用户可接受“历史 traffic 元数据丢失”，因为流量 body 本身仍在。
+- **决策 4**：默认 `info` 里彻底关掉规则命中详情。理由：即使一台机器 QPS 不高，规则命中日志一天也会打上百 MB；反例是保留摘要 + 关闭详情，但摘要格式化本身也不便宜。
+- **风险**：Daemon readiness pipe 在 Windows 上没有真正的 fork，需要另一条 handshake（例如共享内存 + Event）。当前实现优先覆盖 macOS / Linux；Windows 侧作为 P2 补齐。
+- **风险**：System proxy 后台 reconcile 期间用户如果立刻 `bifrost stop`，需要能 join 掉未完成的后台线程。缓解：把后台线程 handle 也放进 admin state，`stop` 走 shutdown token + join with timeout。
 
 ## 文档更新要求
 
-- 本次改动为 CLI 启动性能与可观测性优化，不涉及 README 或对外配置说明更新
+- 本方案是 CLI 启动性能与可观测性优化，README 无需改。
+- `docs/troubleshooting.md`：新增“启动慢排查”一节，引导看 `bifrost_cli::startup` 阶段日志。

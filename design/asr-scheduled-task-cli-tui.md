@@ -4,17 +4,34 @@
 
 ASR Directory Task 已经支持按 `schedule` 定时扫描音频目录并执行转写。当前查看任务进展主要依赖 WebUI ASR 页面，长时间观察时会额外占用浏览器内存和 CPU。新增 CLI TUI 的目标是：在不打开浏览器的情况下，用轻量终端界面持续观察 ASR 定时任务的执行状态、执行进展和消耗信息。
 
-用户目标验证清单：
+## 用户目标验证清单
 
-- 必须实现：提供 ASR 定时任务观察用 CLI TUI。
-- 必须实现：展示任务状态、下一次运行时间、当前运行进度、当前文件/分片进度、失败/部分成功信息。
-- 必须实现：展示消耗信息，包括已处理音频时长、推理耗时、RTF、处理文件大小、文本字符数、失败分片数，以及可用时的 ASR 服务/进程信息。
-- 必须实现：只有一个 ASR 定时任务时，执行命令后自动进入该任务详情 TUI。
-- 必须实现：多个 ASR 定时任务时，支持传入任务参数直接进入，也支持交互式选择。
-- 必须不破坏：现有 `bifrost ai asr task list/show/files/run/daily` 输出和脚本兼容性。
-- 必须不破坏：ASR scheduler、pause/resume、retry chunks、Daily Docs、外接设备导入链路。
-- 必须真实验证：CLI TUI 在真实 `bifrost start --no-system-proxy` 服务上可进入、刷新、退出，并能在单任务/多任务场景正确选择。
-- 必须交付：设计文档、CLI/API 单元测试、E2E、human_tests 用例和两轮 Review/Fix/Test 闭环。
+### 必须实现
+
+- 提供 ASR 定时任务观察用 CLI TUI，主命令 `bifrost ai asr task watch`，`tui` 为别名。
+- 展示任务状态、下一次运行时间、当前运行进度、当前文件/分片进度、失败/部分成功信息。
+- 展示消耗信息：已处理音频时长、推理耗时、RTF、处理文件大小、文本字符数、失败分片数、可用时的 ASR 服务/进程信息。事实值与估算值必须区分显示（RTF/ETA/source bytes 标注来源）。
+- 只有一个 ASR 定时任务时，执行命令自动进入该任务详情 TUI，无需传参。
+- 多个 ASR 定时任务时，支持传 `task` 参数直接进入，也支持 TTY 下交互式选择；非 TTY 场景报错并提示传 id/name/prefix。
+- 单任务详情页含 `Daily/Jennie Agent` 面板：enabled/runner/status、已处理/待处理、report/unindexed 统计、last run/error。
+- `Tab` 切换 `Recent Files` 与 `Daily Agent Docs` 列表；`Enter` 用系统默认程序打开当前行文件；`o` 在文件管理器定位；鼠标点击支持。
+- `R` 立即运行、`p` 暂停/恢复、`P` 强制暂停并释放计算资源；控制 API 的 JSON `message` 直接显示到底栏。
+- 引入 `--read-only` 模式屏蔽所有写操作快捷键。
+
+### 必须不破坏
+
+- 现有 `bifrost ai asr task list/show/files/run/daily` 输出和脚本兼容性。
+- ASR scheduler、pause/resume、retry chunks、Daily Docs、外接设备导入链路。
+- Admin `GET /api/asr/tasks` 现有语义与目录扫描代价不变；新的 watch 走独立 snapshot 路径，避免高频拉全量文件列表放大 JSON 与文件扫描成本。
+- Daily Agent 报告生成、report sync、terminology `TERMS.md` 写入语义。
+
+### 必须真实验证
+
+- CLI TUI 在真实 `bifrost start --no-system-proxy` 服务上可进入、刷新、退出，并能在单任务/多任务场景正确选择。
+- 单元测试：任务选择规则（唯一前缀/名称/id）、watch snapshot 聚合、Daily Agent watch summary（processed/pending/report-only）、`daily show` 参数解析兼容旧 `<task> <date>` 与新 `--task`、TUI 打开命令构造覆盖 macOS/Linux/Windows。
+- E2E：`e2e-tests/tests/test_asr_task_tui.sh` 构造 `.daily/*.md`、`report/*-report.md` 与 `daily_agent_processed.json`，验证 watch JSON、`daily list` 自动选择、TUI 渲染、刷新、暂停/恢复、强制暂停、暂停时 run 的用户可读错误。
+- human_tests：`human_tests/asr-task-cli-tui.md` 覆盖 TC-ASR-TUI-01..10（含 daily 命令交互选择、Agent 状态、文件打开）。
+- 交付：设计文档、CLI/API 单元测试、E2E、human_tests 用例和两轮 Review/Fix/Test 闭环。
 
 ## 本轮自查结论
 
@@ -572,3 +589,49 @@ Daily Agent 运行时需要参考随任务不断变化的专有名词、项目�
 5. 实现 ratatui 详情页、窄屏降级、ASCII 降级与 `--all` 总览页。
 6. 补 E2E 和 human_tests，真实启动服务验证。
 7. 两轮 Review/Fix/Test 后再进入提交/推送。
+
+## 分阶段落地计划
+
+### Phase 1：Watch snapshot API
+
+- 新增 `run_progress.json` 写入/恢复逻辑，明确文件级 vs chunk 级 progress 语义。
+- 新增轻量 watch snapshot 聚合 API：`/api/asr/tasks/{task_id}/watch`、`/api/asr/tasks/-/watch`，避免高频调用触发目录扫描。
+- 单元测试覆盖 snapshot 聚合、事实/估算标注、`daily_agent` 字段计算。
+
+### Phase 2：CLI 命令骨架
+
+- 抽出/复用 ASR task CLI client，新增 `task watch/tui` 命令定义与 `--json-snapshot` / `--read-only` / `--all` 参数。
+- 实现任务选择规则：唯一任务自动进入、多任务 TTY 交互、非 TTY 报错；`daily list/show` 复用同一选择器。
+- 实现命令层单元测试与 CLI help。
+
+### Phase 3：TUI 详情页与降级
+
+- 用 ratatui 实现单任务详情页、Recent Files / Daily Agent Docs 双 Tab、进度与消耗信息面板。
+- 窄屏降级、ASCII 降级、鼠标点击、平台化文件打开命令构造。
+- Daily Agent 触发门禁（daily Markdown 变更）、report 分 Agent 目录同步、terminology `TERMS.md` 注入等 daily 侧增量落地并与 TUI 状态展示对齐。
+- 补 E2E `test_asr_task_tui.sh` 与 `test_asr_daily_agents_api.sh`。
+
+### Phase 4：文档、human_tests 与两轮闭环
+
+- 更新 `human_tests/asr-task-cli-tui.md`、`human_tests/asr-daily-agents.md` 与 `human_tests/readme.md` 索引。
+- CLI help、API 文档、设计文档同步。
+- 完成两轮 Review/Fix/Test 后进入提交与推送。
+
+## Sync 边界
+
+CLI TUI 是本机观察工具，不引入新的 sync channel：
+
+- Watch snapshot API 的返回体只在会话内使用，不写回持久化 rule sync 或 group sync。
+- Daily Agent report sync 走既有 `report_sync_dir` 通道，本方案只在 TUI 里展示同步结果与状态，不改变同步语义。
+- `TERMS.md` 是 workspace 本地文件，通过 Bifrost 托管块引用；不进入 Rule Sync 或 Group 同步。
+- 多设备共享 ASR 任务状态目前未设计；`bifrost ai asr task watch` 只连接本机 admin API，`--admin-base` 若指向远端 Bifrost 需要用户显式提供，属于观察工具的扩展面，不改变任务持久化边界。
+
+## 风险与决策
+
+- **watch API 高频调用性能**：明确用哨兵段 `/api/asr/tasks/-/watch` 与 `/api/asr/tasks/{task_id}/watch` 分离集合与单任务；单任务 snapshot 每次只聚合本任务数据，避免目录扫描代价；刷新间隔默认 1s，用户可调。
+- **事实值 vs 估算值**：RTF、ETA、source bytes 必须在 UI 上标注来源；决策上宁可少展示估算，也不让用户误把估算当已完成。
+- **TUI 写操作确认**：`R`/`p`/`P` 走 admin API，返回体 `message` 直接显示到底栏，用户看到失败原因；`--read-only` 屏蔽所有写操作。
+- **非 Unicode / 窄屏**：TUI 检测终端能力自动降级到 ASCII 进度条；宽度不足时优先保留任务名、状态、进度、错误信息四栏。
+- **daily 命令兼容旧用法**：`daily show <task> <date>` 与 `daily show <date> --task <task>` 都必须工作；解析优先按新形态匹配，失败再退化旧形态。
+- **Daily Agent 自动触发门禁演进**：以 daily 合成文档变更代替 ASR failed 文件类型判断，避免因个别 failed 文件阻断 report 生成；相关回归用例写在 `human_tests/asr-daily-agents.md`。
+- **report 多 Agent 同步冲突**：所有 Daily Agent 报告按 `<report_sync_dir>/<agent_id>/YYYY-MM-DD-report.md` 分目录写入，避免同一天多 Agent 覆盖同名文件；手动 `Sync Reports` 遍历全部 Agent 汇总结果。

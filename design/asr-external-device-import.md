@@ -1,6 +1,6 @@
 # ASR 外接设备自动导入方案
 
-## 背景与目标
+## 背景
 
 当前 ASR Directory Task 的核心模型是：用户创建任务并指定 `audio_dir`，调度器按 `schedule` 定时扫描这个本地目录，发现音频文件后写入 `files.json`，再执行转写和 Daily Docs 生成。
 
@@ -19,26 +19,82 @@
   -> /Users/eden/Recordings/TX_MIC002/2026-05-20/A.wav
 ```
 
-用户目标验证清单：
+外接设备导入是 ASR Directory Task 的能力扩展，不引入独立的"设备任务"实体；导入完成后文件就是普通本地 `audio_dir` 文件，走既有转写/Daily Docs/Daily Agent 链路。
 
-- 必须实现：ASR 任务可绑定多个外接设备名称。
-- 必须实现：设备连接/挂载后自动触发导入。
-- 必须实现：如果平台事件漏掉或设备已在启动前连接，WebUI 和 API 必须提供手动补跑入口发现已挂载设备。
-- 必须实现：按设备名称作为 `audio_dir` 下一级根目录导入。
-- 必须实现：导入保持设备内相对目录结构和文件名不变。
-- 必须实现：只导入差异文件，避免每次全量重复复制。
-- 必须实现：ASR 处理前做内容哈希去重；如果同一任务内已有相同内容文件完成转写且转写产物存在，后续重复文件跳过模型推理并复用转写结果。
-- 必须实现：导入时检查大小、稳定性和完整性，避免复制半写入文件。
-- 必须实现：容错、去重、断点/临时文件恢复、异常状态可见。
-- 必须实现：打开 ASR 任务配置页面时，如果当前已有未绑定设备连接，逐个弹窗确认是否监听该设备并导入；用户确认后立即加入绑定列表并开始导入。
-- 必须实现：ASR 定时任务创建后允许编辑所有配置，包括任务名称、数据源目录、递归开关、启停状态、启动时间、定时周期、模型/语言/runtime、外接设备绑定和导入策略。
-- 必须实现：切换数据源目录只影响后续扫描和导入；已经转写过的文件记录、转写文本、timeline、metadata、Daily Docs 和 Daily Agent report 不迁移、不删除、不重算。
-- 必须实现：删除 ASR 任务视为危险操作，必须弹窗明确确认，并要求用户输入完整任务名称后才允许删除。
-- 必须实现：首版 V1 只承诺 macOS，但 macOS 必须完整、全面、可靠、稳定，包含设备事件监听、手动补跑、配置页确认、差异导入和异常恢复；外接设备导入不做后台定时扫描。
-- 必须不破坏：现有只指定本地目录的 ASR Directory Task 行为不变。
-- 必须不破坏：现有 `files.json`、Daily Docs、retry chunks、pause/resume 和 task scheduler 主链路不被重写。
-- 必须真实验证：macOS 真实挂载卷或可替代 disk image 触发导入。
-- 必须交付：设计文档、human_tests 用例、后续实现时的单元/E2E/真实场景验证。
+## 用户目标验证清单
+
+### 必须实现
+
+- ASR 任务可绑定多个外接设备名称。
+- 设备连接/挂载后自动触发导入（V1 macOS 通过 Disk Arbitration，planned；当前实现为手动补跑 + 配置页轮询兜底）。
+- 平台事件漏掉或设备已在启动前连接时，WebUI 和 API 必须提供手动补跑入口。
+- 按设备名称作为 `audio_dir` 下一级根目录导入。
+- 导入保持设备内相对目录结构和文件名不变。
+- 只导入差异文件，避免每次全量重复复制。
+- ASR 处理前做内容哈希去重；同一任务内已有相同内容文件完成转写且产物存在时，后续重复文件跳过模型推理并复用转写结果。
+- 导入时检查大小、稳定性和完整性，避免复制半写入文件。
+- 容错、去重、断点/临时文件恢复、异常状态可见。
+- 打开 ASR 任务配置页面时，如果当前已有未绑定设备连接，逐个弹窗确认是否监听并导入。
+- ASR 定时任务创建后允许编辑所有配置：任务名称、数据源目录、递归开关、启停状态、启动时间、定时周期、模型/语言/runtime、外接设备绑定与导入策略。
+- 切换数据源目录只影响后续扫描/导入；已转写文件记录、转写文本、timeline、metadata、Daily Docs 与 Daily Agent report 不迁移、不删除、不重算。
+- 删除 ASR 任务弹窗明确确认，要求输入完整任务名称。
+- V1 只承诺 macOS，但 macOS 必须完整、全面、可靠、稳定；外接设备导入不做后台定时扫描。
+
+### 必须不破坏
+
+- 现有只指定本地目录的 ASR Directory Task 行为不变。
+- 现有 `files.json`、Daily Docs、retry chunks、pause/resume 与 task scheduler 主链路不被重写。
+- 现有 ASR runtime、模型服务租约、Speech Workbench 与 CLI 主链路不受影响。
+- 现有 CLI `bifrost ai asr task ...` 兼容读写既有任务字段。
+
+### 必须真实验证
+
+- macOS 真实挂载卷或可替代 disk image 触发导入。
+- 重复连接同设备不重复复制（manifest 快路径）。
+- 跨设备/跨目录同内容文件只转写一次，重复文件在详情页仍能展示复用的转写文本。
+- 半写入文件被 `file_stable_secs` 稳定性闸口延迟到下一轮。
+- 设备中途拔出：当前文件失败，run 标记 `device_disconnected`，不触发 ASR。
+- 目标空间不足：停止本轮，记录 `insufficient_space`。
+- 删除任务危险确认；未输入完整任务名 Delete 按钮禁用。
+
+## 产品语义
+
+### 导入是 Directory Task 的能力扩展，不是新的任务实体
+
+外接设备导入不引入独立"Device Task"实体，而是给现有 `AsrDirectoryTask` 增加 `external_devices` 与 `import_policy` 字段。导入完成后文件成为普通本地 `audio_dir` 文件，走既有 ASR 转写、Daily Docs、Daily Agent 主链路。这样：
+
+- WebUI/CLI/详情页所有既有能力免改造。
+- Pause/Resume/删除/schedule 与原任务语义完全一致。
+- 未绑定设备的老任务与新任务共存，不需要迁移。
+
+### 设备目录一级根目录隔离
+
+多个设备的相对路径都挂到 `<audio_dir>/<binding.name>/...`，避免不同设备下同名目录/文件互相覆盖。`binding.name` 是用户可读名称，也是目录名，必须经过 `sanitize_device_root` 归一化；`volume_uuid` 优先用于卷匹配，卷名用于展示与目录命名。
+
+### 触发方式：事件为主，手动补跑兜底
+
+V1 以设备事件监听 + 手动补跑组合为主，禁止后台定时扫描：
+
+- macOS Disk Arbitration 事件订阅（planned, not yet shipped as of 2026-06-16）
+- 配置页设备候选发现确认
+- 手动 API/按钮补跑
+- ASR run 不隐式扫描外接设备；导入后的本地文件走既有 discover 流程
+
+### 差异导入与内容 hash 去重分层
+
+导入用 "路径 + size + mtime" 判定差异（保持设备目录结构完整），去重发生在 ASR 处理前：
+
+- T0 设备 manifest 快路径：同 UUID + relative_path + size + mtime 命中即零读取跳过。
+- T1 已处理记录：source_key 或产物存在时不再从外设拉回。
+- T2 轻量候选筛选：size/duration/codec/sample_fingerprint 缩小候选，不能单独跳过 ASR。
+- T3 精确 BLAKE3：复制流顺手计算或后台队列补齐；跳过 ASR 需 hash + 产物 + ASR 参数三重匹配。
+- T4 canonical audio hash：只在 normalize/ffmpeg 已发生时顺手计算。
+
+### 危险操作显式确认
+
+- 删除任务必须弹窗输入完整任务名。
+- 切换 `audio_dir` 弹窗提示"历史转写数据保留，新目录不影响历史"。
+- 运行中修改 `audio_dir` / `model` / `runtime_strategy` / `external_devices` 返回 `409 task_running`。
 
 ## 调研结论
 
@@ -699,6 +755,13 @@ CLI 和 WebUI 都调用同一 Admin API，不直接扫描设备。
 | hash 计算期间文件变化 | 记录 `hash_changed_during_read`，延迟到下一轮 |
 | Bifrost 重启且设备已连接 | 不自动扫盘；用户通过任务列表 `Import External` 或配置页确认触发，状态从 external_imports.json 恢复 |
 
+## Sync 边界
+
+- 外接设备绑定、`import_policy`、`external_imports.json`、`content_hash_index.json` 与设备事件均为本机运行时状态，不参与 Rules/Values sync。
+- Directory Task 本身当前也不参与 sync；若未来支持"任务云同步"，需要单独设计 device binding 冲突合并策略，本方案不承诺。
+- 导入产生的音频文件是本地素材，不通过 Bifrost 同步到远端；用户如需跨设备同步应使用外部工具（例如 iCloud / rsync）。
+- 转写产物（txt / metadata / timeline / Daily Docs）当前也不参与 sync。
+
 ## 实施计划
 
 ### Phase 1：V1 macOS 完整能力
@@ -774,6 +837,18 @@ CLI 和 WebUI 都调用同一 Admin API，不直接扫描设备。
 - 再次变更范围复核：执行 `git status --short`、`git diff`，检查新增文档和索引。
 - 复跑测试：重复文档验收命令。
 - 结论：若仍有缺口，追加第 3 轮。
+
+## 风险与决策点
+
+- V1 macOS 事件驱动 provider 尚未落地：当前仅手动补跑 + 配置页轮询兜底；Disk Arbitration 事件订阅、debounce 入队与 `ExternalDeviceImportManager` 是 planned 状态。若在 V1 发布前无法完成，需要明确以"手动 + 轮询"为 GA 交付，并在 UI 中标注设备事件监听为 beta。
+- 内容 hash 索引成本：BLAKE3 复制流顺手计算 CPU 成本可控，但历史文件补 hash 若大批量运行仍会占用 IO。后台队列必须串行、低优先级，避免抢占代理主服务。
+- 跨路径去重误伤：仅在同 task 内启用 hash 索引，避免跨 task 模型/语言/runtime 不同导致复用错的 transcript。
+- 同名卷冲突：同名多个卷插入时 V1 进入 ambiguous 状态不导入，需要用户在 WebUI 手动选卷。ambiguous 状态若长期占位可能造成用户体验困惑，需要在 UI 中主动提示。
+- 目标目录被用户手动改动：`target_modified` 场景默认不覆盖，用户可能困惑为何某些文件"没导入"；UI 需要明确展示该状态。
+- 半写入文件延迟：`file_stable_secs` 默认 10 秒，若设备写入速率不稳定可能持续延迟；本 V1 不引入复杂的写入速率探测。
+- 删除任务与转写产物：V1 删除任务不删除转写产物文件；若未来支持"同时删除生成数据"必须作为独立 danger option 再次确认。
+- 平台矩阵：V1 只承诺 macOS；Linux/Windows provider 抽象保留但不作为 GA 能力，避免宣传误导。
+- Sync：所有外接设备状态本机保留，不参与 sync；未来跨设备同步方案单独设计。
 
 ## 参考资料
 

@@ -4,15 +4,29 @@
 
 本方案把“说话人分离 / diarization”落到 Bifrost 当前 ASR Directory Task 的离线处理链路中。V1 不做实时麦克风、不做代理流量自动分析、不默认上传音频，只改造离线任务：用户给一个音频文件或目录任务后，Bifrost 先识别说话人并切片，再把切好的语音片段流式送入 ASR，最后生成带时间轴和说话人标签的转录文件。
 
-用户目标验证清单：
+本节仅陈述目标；具体的验证清单条目见下方 `用户目标验证清单` 独立章节。
 
-- 必须实现：仓库记录“双引擎 + 可插拔 profile”的工程选型，默认轻量引擎为 `sherpa-onnx-balanced`，高质量引擎为 `pyannote-community-quality` sidecar，DiariZen / Sortformer 只作为 lab profile。
-- 必须实现：V1 集成点放在 ASR Directory Task 离线处理环节，当前音频文件在进入 ASR 前先做 diarization、speaker 切片和角色信息整理。
-- 必须实现：ASR 输入不再只按固定 30 秒原始 chunk，而是优先消费 diarization 产生的 speech segment / merged ASR unit；每个 unit 处理完成后增量写入 timeline。
-- 必须实现：最终 `.timeline.json`、`.txt`、Daily Docs 和 WebUI timeline 都能表达 `speaker_00` / `speaker_01` 这类角色；当前版本未录入声纹时展示“用户A/用户B”，不得冒认真实身份。
-- 必须预留：声纹初始化、profile 存储、enroll 与跨任务身份匹配接口作为后续阶段能力；当前 MR 不把未来声纹身份识别描述成已交付功能。
-- 必须不破坏：未启用 diarization 的现有 Directory Task、外接设备导入、retry failed chunks、pause/resume、Daily Agent report、ASR model owner 隔离和 16k mono normalize 快路径。
-- 必须真实验证：设计、human_tests 与当前代码路径一致，后续实现必须有单元测试、E2E、human_tests 和 workspace all-features 校验。
+## 用户目标验证清单
+
+### 必须实现
+
+- 仓库记录「双引擎 + 可插拔 profile」的工程选型，默认轻量引擎为 `sherpa-onnx-balanced`，高质量引擎为 `pyannote-community-quality` sidecar，DiariZen / Sortformer 只作为 lab profile。
+- V1 集成点放在 ASR Directory Task 离线处理环节，当前音频文件在进入 ASR 前先做 diarization、speaker 切片和角色信息整理。
+- ASR 输入不再只按固定 30 秒原始 chunk，而是优先消费 diarization 产生的 speech segment / merged ASR unit；每个 unit 处理完成后增量写入 timeline。
+- 最终 `.timeline.json`、`.txt`、Daily Docs 和 WebUI timeline 都能表达 `speaker_00` / `speaker_01` 这类角色；当前版本未录入声纹时展示「用户A/用户B」，不得冒认真实身份。
+- 声纹初始化、profile 存储、enroll 与跨任务身份匹配接口作为后续阶段能力预留；当前 MR 不把未来声纹身份识别描述成已交付功能。
+
+### 必须不破坏
+
+- 未启用 diarization 的现有 Directory Task、外接设备导入、retry failed chunks、pause/resume、Daily Agent report、ASR model owner 隔离和 16k mono normalize 快路径。
+- 现有 `TranscriptTimeline` / `TimelineSegment` 序列化契约：新增 `speaker` 字段以 serde `default` 兼容旧 timeline。
+- ASR 任务系统底层不重写：diarization 是在 `normalize_to_temp()` 之后、`run_chunked_transcription()` 之前插入的可暂停/落盘/恢复 stage。
+- 现有 `asr-diarization-worker` / `/api/asr/diarization/*` / `/api/asr/speaker-profiles/*` HTTP 路由与 manifest 读写。
+
+### 必须真实验证
+
+- 设计、human_tests 与当前代码路径一致；后续实现必须有单元测试、E2E、human_tests 和 workspace all-features 校验。
+- 每个阶段（模型选型、离线任务接入、Admin API/CLI/WebUI、声纹录入与匹配）的 human_tests 用例必须真实跑通，不能只做静态验收。
 
 ## 当前代码基线
 
@@ -817,7 +831,7 @@ CLI 采集要求：
 - 主进程与 worker 通过 `runtime/asr-diarization-worker/request-*.json` 交换持久化请求，worker stdout 只返回结构化 JSON；刷新页面、重启 WebUI 或恢复对话不影响已经写入的 ASR job 状态。
 - 单元测试可以使用 in-process fallback，但生产路径和真实 CLI/WebUI 路径必须走 worker，避免声纹识别、diarization 或 enrollment 让 Admin 主进程承担模型内存和 CPU。
 
-## 实施顺序
+## 实现切分（实施顺序）
 
 1. 数据结构与测试骨架：新增 profile config、manifest schema、真实模型 ready 检查、slicer/overlap 单元测试；`TimelineSegment` 加 speaker 字段且 serde default 不破坏旧 timeline。
 2. 初始化闭环：新增 diarization profile registry、status API、init-stream API、CLI `diarization profiles/status/init`，WebUI ASR 页面展示 Speaker Diarization 初始化卡片。

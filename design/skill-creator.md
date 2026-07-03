@@ -1,745 +1,361 @@
-# Skill Creator — Bifrost Agent Loop 技能创建子系统设计
+# Skill Creator — Bifrost Agent Loop 技能创建子系统
 
-Status: Implemented (partial; refreshed against code as of 2026-06-17 — see notes below)
-Owners: bifrost-agent, bifrost-admin, webui
-Related: `design/long-term-memory.md`, `crates/agent/src/session.rs`, `crates/agent/src/skills.rs` (`SkillsManager`)
+> 实现状态：已发布 (implemented, refreshed against code as of 2026-07-03)。
+> 核心 crate `crates/skills` (`authoring/executor/model/packager/registry/store/tool_bridge/validator`)、
+> `crates/agent/src/skill_authoring.rs`、`crates/agent/src/slash.rs`、`crates/bifrost-admin/src/handlers/agent_skills.rs`
+> 均已落地。前端 SkillsSection 与向导已上线。E2E 集成入口位于 `crates/bifrost-e2e/src/tests/skill_creator.rs`。
 
----
+## 背景
 
-## 1. 背景与目标
+Bifrost Agent Loop 早期对 skill 的支持仅限于**只读发现**：
 
-### 1.1 现状
+- `SkillsManager`（`crates/agent/src/skills/mod.rs`）在进程启动时扫描 `~/.bifrost/skills/` 与工作区目录，
+  只读加载 `SKILL.md` frontmatter。
+- `GET /agent/skills` 只返回清单。
+- 斜杠命令（`/clear /reset /undo /compact /status /resume /remember /memories /forget`）在 `session.rs` 里
+  硬编码 `match`，skill 无法声明自己的 `/xxx`。
+- Skill 如何执行、如何声明工具、如何访问长期记忆，没有任何原语；WebUI 上也没有 skill 管理页。
 
-Bifrost Agent Loop 目前对 "skill" 的支持是**被动只读发现**：
+为让 Skill 成为 Agent Loop 的一等公民，我们把 skill 独立成 `crates/skills` crate，覆盖数据模型、存储、
+校验、执行、注册表、打包 6 个子模块，并在 Agent 与 Admin 侧接入。用户可以直接在会话内或 WebUI
+完成 skill 的 **create / edit / test / register / invoke / delete**，无需离开浏览器或手工摆放 SKILL.md。
 
-- `SkillsManager`（`crates/agent/src/skills.rs`）在进程启动时扫描 `~/.bifrost/skills/` 和工作区目录，把 `SKILL.md` frontmatter 读进内存。
-- `GET /agent/skills` 返回只读清单。
-- `crates/agent/src/prompt.rs` 把 enabled skill 的 `name + description` 渲染进 system prompt 的 "Available skills" 块。
-- Agent Loop 的斜杠命令（`/clear /reset /undo /compact /status /resume /remember /memories /forget`）在 `session.rs` 里是**硬编码 match**，skill 无法声明自己的 `/xxx`。
-- Skill 如何实际执行、如何访问工具、如何访问长期记忆，**没有任何原语**。
-- WebUI 侧 `AgentTab` 没有 skill 管理页；用户必须手动到磁盘摆 SKILL.md 才能"教" Agent 新能力。
+## 用户目标验证清单
 
-### 1.2 目标
+### 必须实现
 
-1. 在 Agent Loop 内新增 **Skill Creator** 能力：用户/Agent 在会话中即可完成 Skill 的 **create / edit / test / register / invoke / delete**，无需离开 WebUI 或聊天。
-2. Skill 成为**一等公民**：有独立 crate (`crates/skills`)、数据模型、存储层、注册表、执行器、校验器、REST CRUD、WebUI 管理页。
-3. Skill 可以**声明自己的 tools**（本期新增能力，不再受限于现有 ToolRegistry）。
-4. Skill 可以**访问长期记忆**（通过 `allowed_tools` 白名单里的 `memory.read` / `memory.write`）。
-5. Skill 可以声明**自己的斜杠命令**（slash_command），被 `SlashCommandRouter` 动态注册。
-6. **同名同 scope 只保留一个 active 版本**，老版本进 `.history/` 归档，简化 Registry。
-7. IM Gateway 场景下 Skill 执行**不需审批**（本期决定）。
-8. **一次到位，不分期**：本设计涵盖从数据模型到 WebUI 的全链路。
+- 用户/Agent 在会话内即可完成 skill 的创建、编辑、测试、注册、调用、删除全流程。
+- Skill 是一等公民：独立 crate、数据模型、存储层、注册表、校验器、执行器、打包器、REST CRUD、
+  WebUI 管理页。
+- Skill 可以声明自己的 tools（`allowed_tools` 白名单）。
+- Skill 可以通过 `memory.read` / `memory.write` 访问长期记忆。
+- Skill 可以声明自己的斜杠命令（`slash_command`），被 `SlashCommandRouter` 动态注册。
+- 同名同 scope 只保留一个 active 版本，老版本进 `.history/` 归档。
+- IM Gateway 场景下 skill 执行不需要审批（本期决定）。
+- Skill 支持 `.skill` zip 打包 / 解包，含 checksum 与 manifest 校验。
 
-### 1.3 非目标
+### 必须不破坏
 
-- 不做远程 Skill 市场 / 分发（留给后续 `bifrost-skill-market`）。
-- 不做 OS 级 sandbox（本期依赖子进程 + 环境隔离 + FileAccessPolicy）。
-- 不做多版本并行 active（只保留一个 active + 归档历史）。
-- 不做 Skill 级 RBAC（单 installation 范围内所有调用同权）。
+- 原 SkillsManager 只读扫描的 skill 目录布局仍能被识别（迁移到 SkillStore 后布局兼容）。
+- 内置斜杠命令 `/clear /reset /undo /compact /status /resume /remember /memories /forget` 优先级
+  高于 skill 定义的同名命令；skill 声明冲突名时创建应失败并返回 409。
+- Agent Loop 的 turn 循环行为、tools 调用协议保持稳定；skill 只是新增一路 tool 提供方。
+- 未安装任何 skill 时 Agent 行为与新 crate 引入前一致。
 
-### 1.4 Codex 任务巡检专用 Skill 设计补充
+### 必须真实验证
 
-为减少后续排查 `.codex-tasks/` 时反复走弯路，需要补充一个仓库级只读 Skill：`codex-task-inspector`。
+- `crates/skills` 各模块单测覆盖 CRUD、归档、slash 冲突、manifest 校验、执行超时、tool_bridge。
+- Admin handler 单测覆盖 REST CRUD、多种错误 → HTTP status 映射、multipart 导入。
+- E2E 集成 `crates/bifrost-e2e/src/tests/skill_creator.rs` 覆盖端到端创建 → 调用 → 归档路径。
+- 前端交互测试覆盖 SkillsSection 列表、SkillCreatorWizard、SkillEditor 三个入口。
 
-目标：
+## 产品语义
 
-1. 让 Agent 在用户提到“检查 Codex 任务 / 看看 Codex 状态 / 查异步任务进展 / 汇总 .codex-tasks”时自动触发统一流程。
-2. 固化 `.codex-tasks/` 的排查顺序，优先回答“本地进程是否还活着、最近报告是什么、CI 轮询是否有失败/仍在跑”。
-3. 避免每次都先读错文件、重复猜测任务来源，降低对历史上下文的依赖。
-4. 保持只读，不直接修改 `.codex-tasks/` 内容，也不自动清理 pid / log / report 文件。
-
-统一排查流程约束：
-
-1. **先看本地进程**：读取 `.codex-tasks/*.pid` 并用 `ps` 判断是否仍在运行；如果全部 `NOT_RUNNING`，必须明确告诉用户“本地 Codex 任务已停止”。
-2. **再看任务产物**：读取 `.codex-tasks/*-last.md`、必要时补充 `*.jsonl` / `*.meta` / `*-report-*.md`，提取最新结论和阻塞原因。
-3. **最后看 CI 轮询**：如果存在 `*.log`（尤其 `skill-creator-ci-poll.log`），优先读取尾部，输出 still running / completed / failure 三类状态。
-4. **输出必须分层**：至少分为“本地 Codex 进程”“任务产物摘要”“CI 状态”“建议下一步”四段，避免把本地任务与 CI job 混为一谈。
-5. **禁止误判**：不能把 `.codex-tasks` 文件存在视为任务仍在运行；必须以 PID + `ps` 结果为准。
-6. **建议动作有限定**：默认只建议“继续查失败原因”或“整理状态表”，不要直接假设要修代码或重跑任务。
-
-测试方案补充：
-
-- 设计文档对应新增 `human_tests/codex-task-inspector.md`。
-- 覆盖场景至少包括：
-  - 仅从 pid 判断本地任务已停止；
-  - 同时识别 `*-last.md` 的已完成结论；
-  - 从 CI poll 日志识别正在运行与失败中的 job；
-  - 最终输出不混淆“本地进程状态”和“CI 状态”。
-
----
-
-## 2. 架构总览
-
-### 2.1 分层
+### Skill 生命周期
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ WebUI: Settings → Agent → Skills                             │
-│  - SkillsSection (list + 启用开关)                           │
-│  - SkillCreatorWizard (向导：元信息→entrypoint→tools→test)  │
-│  - SkillEditor (Monaco)                                      │
-└──────────────────────────┬───────────────────────────────────┘
-                           │ REST
-┌──────────────────────────▼───────────────────────────────────┐
-│ bifrost-admin: handlers/agent_skills.rs (NEW)                │
-│   GET    /agent/skills                 列表                  │
-│   GET    /agent/skills/:name           详情 (含 SKILL.md)    │
-│   POST   /agent/skills                 创建（manifest+资产） │
-│   PATCH  /agent/skills/:name           更新 / enable-disable │
-│   DELETE /agent/skills/:name           删除（归档到 history） │
-│   POST   /agent/skills/:name/test      干跑（dry run）       │
-│   POST   /agent/skills/:name/package   导出 .skill zip       │
-│   POST   /agent/skills/import          导入 .skill zip       │
-│   POST   /agent/skills/validate        仅校验，不落盘         │
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│ crates/skills (NEW crate)                                    │
-│  ├─ model.rs         SkillManifest / Entrypoint / TriggerRule│
-│  ├─ store.rs         磁盘读写 + atomic commit + checksum     │
-│  ├─ registry.rs      内存索引 + 热更新 + slash_command 注册  │
-│  ├─ validator.rs     YAML + JSONSchema + allowed_tools 校验 │
-│  ├─ executor.rs      子进程起跑 + 超时/mem limit + tool 桥接│
-│  ├─ packager.rs      .skill zip 打包/解包/checksum           │
-│  ├─ authoring.rs     SkillAuthoringSession 状态机            │
-│  └─ tool_bridge.rs   Skill 声明的 tools 与 ToolRegistry 桥接│
-└──────────────────────────┬───────────────────────────────────┘
-                           │
-┌──────────────────────────▼───────────────────────────────────┐
-│ crates/agent                                                 │
-│  session.rs                                                  │
-│    - SlashCommandRouter 取代 L491 硬编码 match              │
-│    - 内置命令 → router.register_builtin()                   │
-│    - Skill 的 slash_command → router.register_skill()       │
-│  prompt.rs                                                   │
-│    - "Available skills" 块读 SkillRegistry::enabled()       │
-│    - 只渲染 name + description (progressive disclosure)     │
-│  memory_runtime.rs                                           │
-│    - 暴露 memory.read / memory.write 作为 Skill-scoped tool │
-│  skill_authoring.rs (SHIPPED; planned name was            │
-│  tools/skill_creator.rs)                                    │
-│    - SkillAuthoringHub exposes the meta-tool surface       │
-│      (start / interview / draft / test / commit / ...)     │
-└──────────────────────────────────────────────────────────────┘
+[Draft] --commit--> [Active vN] --update--> [Active vN+1]
+                        │                        │
+                        │                        └── vN → .history/vN/
+                        └── delete --> .history/vN/
 ```
 
-### 2.2 模块依赖图
+- 同名同 scope 只保留一个 `Active`；`update` 会先把当前 active 归档到 `.history/vN/`，再写入新版本。
+- 删除是软删除：把 active 归档到 `.history/vN/`，Registry 立即摘除；不会立刻回收磁盘。
+- `enable` / `disable` 只切换 `enabled` 位，不动版本；被 disable 的 skill 从 prompt 与 slash router 摘除。
 
-```
-bifrost-admin ──▶ crates/skills ──▶ crates/memory
-      │                │                  ▲
-      │                ├──▶ crates/agent ─┘
-      │                │        ▲
-      ▼                │        │
-  handlers/        (prompt/    session.rs
-  agent_skills      session     uses
-                    uses         SkillRegistry)
-                    registry)
-```
+### Scope 三级
 
-`crates/skills` 不依赖 `crates/agent`（避免循环）；反向 `agent` 依赖 `skills`。`skills` 依赖 `memory` 以便通过 `tool_bridge` 暴露 memory 读写能力。
+- `Global` → `~/.bifrost/skills/`
+- `User` → `~/.bifrost/skills/users/<user>/`
+- `Project` → `<workspace>/.bifrost/skills/`
 
----
+Registry 加载顺序：Global → User → Project；同名同 scope 冲突走 409；跨 scope 同名不冲突，
+但 prompt 展示会带 scope 前缀，slash 命令按 Project > User > Global 覆盖。
 
-## 3. 数据模型
+### Skill 声明自己的 tools
 
-### 3.1 SkillManifest（Rust）
+`SkillManifest::allowed_tools` 是白名单，支持两类绑定：
 
-位于 `crates/skills/src/model.rs`：
+- 引用 Bifrost `ToolRegistry` 已注册的内置 tool（如 `memory.read`、`memory.write`、`http.fetch`）。
+- 声明 skill 自己的 tool（本期支持子进程 + JSON stdio 协议）。
+
+`SkillToolBridge` 负责把 skill 声明的 tools 转成 Agent Loop 可调用的 tool 描述；同时把
+`memory.read` / `memory.write` 桥接到 `crates/agent/src/memory_runtime.rs`（progressive disclosure：
+只暴露 `read/write` 两个原语，不暴露内部存储路径）。
+
+### 斜杠命令动态注册
+
+`crates/agent/src/slash.rs` 引入 `SlashCommandRouter`：
+
+- 内置命令走 `register_builtin(name, handler)`；
+- Skill 声明的 `slash_command` 由 `SkillRegistry` 在 load / enable / update 时调用 `register_skill(name, skill_id)`；
+- 名字冲突返回 409（skill 侧创建 / 更新失败），不会覆盖内置。
+
+## 技术细节
+
+### crates/skills 分层
+
+| 文件 | 行数 | 职责 |
+| --- | --- | --- |
+| `model.rs` (213) | | `SkillManifest / SkillScope / Entrypoint / TriggerRule / ToolBinding / SkillAuthor` |
+| `store.rs` (856) | | 磁盘读写、atomic commit、checksum、`.history/vN/` 归档、`SkillDraft` |
+| `registry.rs` (610) | | 内存索引、热更新、`default_roots()`、`system_skills_cache_dir()`、slash 注册 |
+| `validator.rs` (729) | | YAML/JSON Schema、`allowed_tools` 校验、slash 命名规范、triggers 冲突 |
+| `executor.rs` (481) | | 子进程执行、超时、内存限制、`ExecutionEvent` / `SkillInvocation` / `SkillTestReport` |
+| `packager.rs` (229) | | `.skill` zip 打包/解包、checksum 校验 |
+| `authoring.rs` (395) | | `SkillAuthoringSession` 状态机、`AuthoringState` |
+| `tool_bridge.rs` (370) | | `SkillToolBridge`、`MemoryToolRequest/Response` |
+| `lib.rs` (26) | | 模块与 re-exports |
+
+### SkillManifest（简化）
 
 ```rust
-use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SkillManifest {
-    /// kebab-case, ^[a-z][a-z0-9-]{0,63}$
-    pub name: String,
-    /// semver
-    pub version: String,
-    /// <= 1024 chars; 描述匹配触发
-    pub description: String,
+    pub name: String,          // ^[a-z][a-z0-9-]{0,63}$
+    pub version: String,       // semver
+    pub description: String,   // <= 1024
     pub scope: SkillScope,
     pub entrypoint: Entrypoint,
-    /// Skill 被允许使用的工具白名单（本期允许声明 Skill 自己的 tools，也可引用 ToolRegistry 内置）
     pub allowed_tools: Vec<ToolBinding>,
-    /// 可选 "/xxx" 斜杠命令; 不可与内置冲突
     pub slash_command: Option<String>,
-    /// 描述匹配 / 关键词 / regex 触发规则
     pub triggers: Vec<TriggerRule>,
-    pub inputs_schema: Option<serde_json::Value>,  // JSON Schema
-    pub outputs_schema: Option<serde_json::Value>, // JSON Schema
+    pub inputs_schema: Option<serde_json::Value>,
+    pub outputs_schema: Option<serde_json::Value>,
     pub metadata: BTreeMap<String, String>,
     pub created_by: SkillAuthor,
     pub created_at_unix: i64,
     pub updated_at_unix: i64,
-    /// 整个 skill 目录的 sha256 (排除 manifest.json 本身)
-    pub checksum: String,
-    /// manifest 版本号, 当前固定 1
-    pub schema_version: u32,
+    pub checksum: String,      // 目录 sha256（不含 manifest.json 自身）
+    pub schema_version: u32,   // 当前 1
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillScope {
-    Global,   // ~/.bifrost/skills/
-    User,     // ~/.bifrost/skills/users/<user>/
-    Project,  // <workspace>/.bifrost/skills/
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Entrypoint {
-    /// 声明式: skill 本体只是一段提示词 + 规则, 无需执行外部进程
     Inline { instructions_md: String },
-    /// shell 脚本
     Shell { script: PathBuf, shell: ShellKind },
-    /// python 脚本 (同目录 requirements.txt 可选)
     Python { script: PathBuf, python: Option<String> },
-    /// node 脚本 (同目录 package.json 可选)
-    Node { script: PathBuf },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ShellKind { Bash, Sh, Zsh, PowerShell }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum ToolBinding {
-    /// 引用 ToolRegistry 中已有工具
-    Registry { name: String },
-    /// 引用 MCP server 暴露的 tool
-    Mcp { server: String, tool: String },
-    /// 访问长期记忆
-    Memory { op: MemoryOp },
-    /// Skill 自己声明的 tool (本期允许)
-    /// JSON Schema 描述 input; 执行时由 Skill entrypoint 通过 stdin/stdout 协议响应
-    Owned { name: String, description: String, input_schema: serde_json::Value },
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum MemoryOp { Read, Write, Both }
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TriggerRule {
-    DescriptionMatch,            // 默认: LLM 依据 description 自行决定
-    Keyword { any_of: Vec<String> },
-    Regex { pattern: String },
-    SlashCommand,                // 等价于 slash_command.is_some()
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SkillAuthor {
-    User { id: String },
-    Agent { session_id: String },
-    Imported { origin: String },
+    Node { script: PathBuf, node: Option<String> },
 }
 ```
 
-### 3.2 磁盘布局
+### Executor 与安全
 
-`<scope_root>/<name>/` 目录:
+- `SkillExecutor` 使用子进程 + JSON stdio；每次调用创建新的进程，不复用。
+- 通过 `env_clear` + 白名单 env（`PATH`、`HOME`、`BIFROST_*`）避免宿主 env 泄漏。
+- 超时可配置，默认 60s；超时后 SIGTERM → 3s → SIGKILL。
+- 内存限制通过 `prlimit` (Linux) / `setrlimit` (macOS) 施加；Windows 上仅记录未强制。
+- `FileAccessPolicy` 依赖 `crates/bifrost-core` 的 sandbox policy；本期不做 OS 级 sandbox。
 
-```
-<scope_root>/<name>/
-  SKILL.md               # 人写的 source of truth; YAML frontmatter + Markdown 正文
-  manifest.json          # 由 validator 生成; 机器可读; 带 checksum
-  scripts/               # entrypoint 指向的脚本及其辅助文件
-  references/            # 可选: 供 LLM 按需加载的参考文档
-  assets/                # 可选: 模板、样例、图片
-  .history/              # 被替换/删除的旧版本归档 (manifest.json + tarball)
-```
-
-**`SKILL.md` frontmatter 与 `manifest.json` 关系**：
-- `SKILL.md` 是 source of truth，用户/Agent 直接编辑。
-- 每次 write 触发 `Validator::regenerate_manifest()` 重写 `manifest.json`，包含 checksum。
-- Registry 热加载时以 `manifest.json` 为索引，`SKILL.md` 正文只在 skill 被"拉进对话"时按需 load。
-
-`SKILL.md` frontmatter 字段与 `SkillManifest` 一一对应，但用 YAML 写：
-
-```yaml
----
-name: weather-lookup
-version: 0.1.0
-description: Fetch current weather for a city via wttr.in.
-scope: global
-entrypoint:
-  kind: shell
-  script: scripts/run.sh
-  shell: bash
-allowed_tools:
-  - kind: registry
-    name: http.fetch
-  - kind: memory
-    op: read
-slash_command: /weather
-triggers:
-  - kind: description_match
-  - kind: keyword
-    any_of: [weather, 天气]
-inputs_schema:
-  type: object
-  properties:
-    city: { type: string }
-  required: [city]
----
-
-# Weather Lookup Skill
-
-This skill fetches current weather ...
-```
-
-### 3.3 scope 叠加规则
-
-Registry 加载顺序：`Global` → `User` → `Project`。
-
-- 同名冲突时**后者覆盖前者**（Project > User > Global）。
-- 对用户完全透明：`GET /agent/skills` 返回时附带 `effective_scope` 字段，WebUI 展示冲突徽标。
-- Delete 时只删当前 scope 的版本；如果更高优先级 scope 还有同名，Registry 自动暴露那个。
-
----
-
-## 4. 核心子系统详解
-
-### 4.1 `SkillStore`（`crates/skills/src/store.rs`）
-
-职责：**唯一的磁盘读写接入点**。
-
-核心 API：
-
-```rust
-pub struct SkillStore { roots: Vec<ScopeRoot> }
-
-impl SkillStore {
-    pub fn read_all(&self) -> Result<Vec<SkillRecord>>;
-    pub fn read_one(&self, scope: SkillScope, name: &str) -> Result<SkillRecord>;
-    /// 原子写入: 写 draft/ 目录 -> validator -> 生成 manifest.json
-    ///          -> 计算 checksum -> atomic rename 到正式目录
-    /// 若同名已存在, 把旧目录 tar 后移入 .history/<name>-<ts>.tar.zst
-    pub fn commit(&self, draft: SkillDraft) -> Result<SkillRecord>;
-    /// 删除: 归档到 .history/ 再移除正式目录
-    pub fn delete(&self, scope: SkillScope, name: &str) -> Result<()>;
-    pub fn enable(&self, scope: SkillScope, name: &str, enabled: bool) -> Result<()>;
-    pub fn verify_checksum(&self, scope: SkillScope, name: &str) -> Result<bool>;
-}
-```
-
-原子性实现：
-1. 所有写入先落到 `<scope_root>/.drafts/<authoring-session-id>/<name>/`。
-2. `commit()` 在 draft 中校验通过后，先归档旧目录（如果存在），再 `rename(draft, final)`。
-3. 失败路径：保留 draft，返回错误；`.drafts/` 有 TTL（7 天），过期清理。
-
-### 4.2 `SkillValidator`（`crates/skills/src/validator.rs`）
-
-校验规则（每条都是硬约束）：
-
-1. **name**: `^[a-z][a-z0-9-]{0,63}$`；不可与内置保留词冲突（`system, agent, memory, tools, admin`）。
-2. **version**: 合法 semver。
-3. **description**: 1 ≤ len ≤ 1024。
-4. **slash_command**:
-   - 必须 `/` 开头，`^/[a-z][a-z0-9-]{0,31}$`。
-   - 不可与 `SlashCommandRouter` 已注册的内置命令冲突。
-   - 不可在同一 scope 下重复。
-5. **allowed_tools**:
-   - `Registry { name }`：`ToolRegistry::has(&name)` 必须为 true。
-   - `Mcp { server, tool }`：MCP server 必须在当前配置里，且暴露该 tool。
-   - `Owned`：`input_schema` 必须是合法 JSON Schema（draft-07）。
-   - `Memory`：本期无额外约束（IM Gateway 场景下也不需审批）。
-6. **entrypoint**:
-   - 文件必须存在于 skill 目录下、不可引用 `..` / 绝对路径跳出。
-   - `Shell`: shell 必须在目标 OS 可用；`PowerShell` 仅 Windows。
-   - `Python`: 若声明 `python`，必须 `command -v` 验证；否则用系统默认。
-   - `Node`: 必须存在 `node` 可执行。
-7. **inputs_schema** / **outputs_schema**: 若给定，必须是合法 JSON Schema。
-8. **triggers**: 至少 1 条；若含 `SlashCommand`，必须 `slash_command.is_some()`。
-9. **checksum**: 对 skill 目录（排除 `manifest.json` 自身和 `.history/`）做稳定 sha256（文件路径升序 + `<path>\0<content>` 串接后 hash）。
-
-### 4.3 `SkillRegistry`（`crates/skills/src/registry.rs`）
-
-内存索引 + 热更新 + slash_command 桥接。
-
-```rust
-pub struct SkillRegistry {
-    by_name: HashMap<String, SkillRecord>,
-    by_slash: HashMap<String, String>,      // "/weather" -> "weather-lookup"
-    enabled: HashSet<String>,
-    store: Arc<SkillStore>,
-    watcher: notify::RecommendedWatcher,    // inotify / FSEvents / ReadDirectoryChangesW
-}
-
-impl SkillRegistry {
-    pub fn init(store: Arc<SkillStore>) -> Result<Self>;
-    pub fn list(&self) -> Vec<&SkillRecord>;
-    pub fn enabled(&self) -> Vec<&SkillRecord>;
-    pub fn resolve_slash(&self, cmd: &str) -> Option<&SkillRecord>;
-    pub fn reload_one(&self, name: &str) -> Result<()>;
-    pub fn reload_all(&self) -> Result<()>;
-}
-```
-
-热更新：
-- FS watcher 监听三个 scope_root；debounce 500ms；文件变动触发 `reload_one`。
-- `commit()` 成功后主动调 `reload_one` 避免等 watcher。
-- 并发安全：`RwLock<Inner>`。
-
-### 4.4 `SlashCommandRouter`（`crates/agent/src/slash.rs`，新增；替换 `session.rs` L491 硬编码 match）
-
-```rust
-pub struct SlashCommandRouter {
-    builtin: HashMap<String, BuiltinHandler>,
-    skills:  Arc<SkillRegistry>,
-}
-
-impl SlashCommandRouter {
-    pub fn register_builtin(&mut self, name: &str, handler: BuiltinHandler);
-    pub fn dispatch(&self, cmd: &str, ctx: &mut TurnContext) -> Dispatch;
-}
-
-pub enum Dispatch {
-    Handled(SessionResponse),
-    RunSkill(SkillRecord, SkillInvocation),
-    NotACommand,
-    Unknown(String),
-}
-```
-
-内置命令在 `AgentSession::new` 时注册：`/clear /reset /undo /compact /status /resume /remember /memories /forget /skill` （新增 `/skill` 作为 skill-creator 快捷入口，等价于调 `skill_creator.start`）。
-
-### 4.5 `SkillExecutor`（`crates/skills/src/executor.rs`）
-
-子进程模式 + tool 桥接协议。
-
-**生命周期**：
-1. `execute(record, input)` 启动子进程，cwd = skill 目录。
-2. stdin 写入 JSON：`{ "input": ..., "tool_ack_id": null }`，行分隔。
-3. 子进程在 stdout 按行写 JSON 事件：
-   - `{ "type": "log", "level": "info", "message": "..." }`
-   - `{ "type": "tool_call", "id": "...", "name": "http.fetch", "arguments": {...} }`
-   - `{ "type": "output", "data": ... }`
-   - `{ "type": "done" }`
-4. Executor 收到 `tool_call` → 在 `allowed_tools` 里校验 → 转发给 `ToolRegistry` / `MemoryRuntime` / `MCPRouter` → 结果回写给子进程 stdin：`{ "tool_ack_id": "...", "result": ... }`。
-5. `Inline` entrypoint 不起子进程，直接把 `instructions_md` 作为动态系统提示追加到当前 turn。
-
-**隔离与限制**：
-- cwd 固定为 skill 目录；env 白名单 + 目标机 OS 必要项。
-- 超时：默认 30s，SkillManifest 可 override（上限 10min）。
-- mem limit：rlimit_as（Linux/macOS）/ Job Object（Windows），默认 512MB。
-- stdout/stderr 总量上限 4MB；溢出截断并 log。
-- **禁止网络出站**由 entrypoint 声明决定（通过 allowed_tools 间接控制）；本期不做 netns/network sandbox。
-
-**事件审计**：
-每次 execute 的开始/结束 + 所有 tool_call 会落一条 `SkillExecutionEvent` 到 `persistence.rs` JSONL，跟 memory 走同一条事件总线。
-
-### 4.6 `SkillAuthoringSession`（`crates/skills/src/authoring.rs`）
-
-状态机，由 meta-tool `skill_creator` 驱动：
-
-```rust
-pub enum AuthoringState {
-    Started { session_id: String },
-    CapturedIntent { brief: String },
-    Interviewed { partial: SkillDraftInProgress },
-    Drafted { draft_dir: PathBuf, skill_md: String },
-    Validated { draft_dir: PathBuf, manifest: SkillManifest },
-    Tested { draft_dir: PathBuf, test_report: TestReport },
-    Committed { record: SkillRecord },
-    Cancelled,
-}
-```
-
-状态转移动作：
-- `start` → `Started`
-- `capture_intent(brief)` → `CapturedIntent`
-- `interview(answers)` → `Interviewed`（可多次迭代）
-- `draft()` → `Drafted`（写 SKILL.md 到 `.drafts/`）
-- `validate()` → `Validated`（自动在 draft 上触发）
-- `test(inputs)` → `Tested`
-- `commit()` → `Committed`（调 `SkillStore::commit`，归档旧版本）
-- `cancel()` → `Cancelled`（清理 draft 目录）
-
-### 4.7 `skill_creator` Meta-Tool（实现位于 `crates/agent/src/skill_authoring.rs`，导出 `SkillAuthoringHub`；原计划路径 `crates/agent/src/tools/skill_creator.rs` 未采用）
-
-在 ToolRegistry 注册以下 sub-tools（对 LLM 暴露）：
-
-| Tool | 输入 | 输出 |
-|---|---|---|
-| `skill_creator.start` | `{ "brief": string }` | `{ "session_id": string, "next": "interview" }` |
-| `skill_creator.interview` | `{ "session_id", "answers": {...} }` | `{ "next": "draft"\|"more_questions", "questions"?: [...] }` |
-| `skill_creator.draft` | `{ "session_id", "overrides"?: {...} }` | `{ "skill_md": string, "manifest": SkillManifest }` |
-| `skill_creator.test` | `{ "session_id", "inputs": {...} }` | `{ "stdout", "stderr", "tool_calls", "duration_ms", "exit_code" }` |
-| `skill_creator.commit` | `{ "session_id" }` | `{ "record": SkillRecord }` |
-| `skill_creator.cancel` | `{ "session_id" }` | `{ "ok": true }` |
-| `skill_creator.list_templates` | `{}` | `[ { "name", "description", "entrypoint_kind" } ]` |
-| `skill_creator.import` | `{ "path": string }` | `{ "record": SkillRecord }`（从 `.skill` zip 导入） |
-
-LLM 使用模式：用户说"帮我建一个天气 skill" → LLM 调 `start` → `interview`（自动 / 询问用户 / 查 knowledge base）→ `draft` → 把 SKILL.md 展示给用户 → `test`（dry run）→ 用户确认后 `commit`。
-
-### 4.8 Tool Bridge — Skill 声明自己的 tools
-
-Skill 在 `allowed_tools` 里可以声明 `Owned` 类型的 tool。该 tool **只在当前 skill 执行范围内可见**，生命周期与 SkillExecutor 一致。
-
-桥接协议：
-- Skill entrypoint 在 stdout 上写 `{"type": "owned_tool_call", "name": "...", "arguments": ...}`（LLM 的回传由 Skill 自己在 entrypoint 内部分流处理——Owned tool 本质上是 skill 自己提供的 function）。
-- 对 Agent Loop 而言：Skill 被调用时，Loop 把 `allowed_tools` 里的所有 tool（包括 Owned）一起加入**本次 turn 的 tool_schema**，允许 LLM 直接调用。
-- 与 Registry tool 的区别：Owned tool 的 execution 由 SkillExecutor 路由回自身的 entrypoint 进程，而不是 `ToolRegistry`。
-
-对 LLM 完全透明：两者都是标准 OpenAI tool schema。
-
-### 4.9 Memory 访问
-
-Skill 在 `allowed_tools` 里声明 `Memory { op: Read|Write|Both }` 即可。Executor 注入下列 tool 到 skill 的可用 tool 列表：
-
-- `memory.read(query, kinds?, scopes?, limit?)` → 返回 `MemoryRecaller::recall(query).take(limit)`.
-- `memory.write(content, kind, scope, tags?)` → 写入 `MemoryStore`，并记 `SkillExecutionEvent::MemoryWrite`。
-
-**本期不做审批**：IM Gateway 场景下 Skill 的 memory 读写直接生效（用户决策）。
-
----
-
-## 5. REST API 详细定义
-
-路径前缀 `/agent/skills`，全部要求 admin 认证（沿用现有 token / session 机制）。
-
-### 5.1 列表 / 详情
+### 归档结构
 
 ```
-GET /agent/skills
-  query: enabled=true|false, scope=global|user|project, slash_command=/weather
-  200: { "skills": [SkillRecord] }
-
-GET /agent/skills/:name
-  200: { "record": SkillRecord, "skill_md": string, "manifest": SkillManifest,
-         "effective_scope": "project", "shadow_scopes": ["global"] }
+~/.bifrost/skills/<name>/
+  ├─ SKILL.md
+  ├─ manifest.json
+  ├─ entrypoint/…
+  └─ .history/
+      ├─ v0.1.0/
+      │   ├─ SKILL.md
+      │   └─ manifest.json
+      └─ v0.2.0/
 ```
 
-### 5.2 创建
+`.history/` 只做审计与回滚基础，本期不暴露前端 UI。
 
-```
-POST /agent/skills
-  Content-Type: multipart/form-data
-  fields:
-    manifest (application/json): SkillManifest
-    skill_md (text/markdown): SKILL.md 正文
-    assets/* (任意 file parts, 保留相对路径): 同步落到 skill 目录
-  201: { "record": SkillRecord }
-  422: { "errors": [ValidationError] }
-  409: { "error": "slash_command_conflict" | "name_conflict_in_scope" }
-```
+### Codex 任务巡检 Skill
 
-### 5.3 更新
+内置一个仓库级只读 skill：`codex-task-inspector`。用户在会话中提到“检查 Codex 任务 / 查异步任务进展 /
+汇总 .codex-tasks”时自动触发，固化 `.codex-tasks/` 排查顺序：
 
-```
-PATCH /agent/skills/:name
-  body: { "enabled"?, "skill_md"?, "manifest_overrides"?, "assets_diff"? }
-  200: { "record": SkillRecord }
-  409: { "error": "checksum_mismatch", "expected_checksum": "..." }
-```
+1. 先读 `.codex-tasks/*.pid` + `ps` 判断本地任务是否仍在运行。
+2. 再读 `.codex-tasks/*-last.md`（必要时补 `*.jsonl` / `*.meta` / `*-report-*.md`）提取结论。
+3. 最后读 CI 轮询日志（`*.log`，尤其 `skill-creator-ci-poll.log`）尾部，输出 still running / completed /
+   failure 三态。
+4. 输出必须分四段：本地 Codex 进程 / 任务产物摘要 / CI 状态 / 建议下一步。
+5. 不能把 `.codex-tasks` 文件存在视为任务仍在运行；必须以 PID + `ps` 结果为准。
+6. 建议动作只限“继续查失败原因”或“整理状态表”，不假设要改代码或重跑任务。
 
-更新语义：若 `skill_md` 或任何 asset 变动，Registry 视为新版本——旧版本目录移入 `.history/<name>-<ts>.tar.zst`，新版本落到正式目录，保持"同名单版本 active"。
+对应真实场景在 `human_tests/codex-task-inspector.md`（另有独立设计
+`design/codex-task-inspector.md`）。
 
-### 5.4 删除
+## CLI + Web + Admin API
 
-```
-DELETE /agent/skills/:name
-  query: scope=project (删除特定 scope; 不传则删除 effective_scope)
-  204
-```
+### Admin API（`crates/bifrost-admin/src/handlers/agent_skills.rs`）
 
-删除后如果更高优先级 scope 还有同名，Registry 自动 fallback。
+| Method | Path | 处理函数 (line) | 说明 |
+| --- | --- | --- | --- |
+| GET | `/agent/skills` | `list_skills` (56) | 列表；含 name/version/scope/enabled/slash |
+| GET | `/agent/skills/:name` | `get_skill` (65) | 详情，含 SKILL.md 原文与 manifest |
+| POST | `/agent/skills` | `create_skill` (98) | 创建 draft → commit |
+| PATCH | `/agent/skills/:name` | `patch_skill` (114) | 更新元信息 / enable / disable |
+| DELETE | `/agent/skills/:name` | `delete_skill` (146) | 归档到 `.history/vN/`，从 Registry 摘除 |
+| POST | `/agent/skills/:name/test` | `test_skill` (169) | 干跑（dry-run），返回 `SkillTestReport` |
+| POST | `/agent/skills/:name/package` | `package_skill` (196) | 导出 `.skill` zip |
+| POST | `/agent/skills/import` | `import_skill` (214) | 导入 `.skill` zip（multipart） |
+| POST | `/agent/skills/validate` | `validate_skill` (249) | 仅校验，不落盘 |
 
-### 5.5 Test / Package / Import / Validate
+错误映射见 `AgentSkillError::from_store_error` (line 322)：
 
-```
-POST /agent/skills/:name/test
-  body: { "inputs": {...}, "timeout_ms"?: number }
-  200: { "stdout", "stderr", "tool_calls", "duration_ms", "exit_code" }
+- `AlreadyExists` → 409
+- `NotFound` → 404
+- `ValidationFailed` → 422
+- `SlashConflict` → 409
+- `PermissionDenied` → 403
+- 其它 → 500
 
-POST /agent/skills/:name/package
-  200: { "download_url": "/agent/skills/:name/download?token=...", "expires_at_unix": ... }
+### Agent 会话内 Meta-Tool
 
-POST /agent/skills/import
-  Content-Type: multipart/form-data (字段: archive=<.skill zip>)
-  201: { "record": SkillRecord }
-  422: { "errors": [...] }
+`crates/agent/src/skill_authoring.rs` (429 行) 暴露 `SkillAuthoringHub`：
 
-POST /agent/skills/validate
-  body: { "manifest": SkillManifest, "skill_md": string }
-  200: { "ok": true, "warnings": [] } | 422: { "errors": [...] }
-```
+- `skill_authoring.start(name, scope)` → 打开 draft session
+- `skill_authoring.interview(question, answer)` → 状态机推进
+- `skill_authoring.draft(fields)` → 更新 manifest / entrypoint
+- `skill_authoring.test(inputs)` → 调 `SkillExecutor` dry-run
+- `skill_authoring.commit()` → 走 SkillStore commit
+- `skill_authoring.list()` / `.get(name)` / `.delete(name)` / `.enable(name)` / `.disable(name)`
 
----
+会话内 meta-tool 不需要单独 API；直接走 Agent Loop tool 调用。
 
-## 6. WebUI 设计
+### CLI
 
-### 6.1 入口
+Skill 管理主入口在 WebUI / 会话内。CLI 保留最小面：
 
-`web/src/pages/Settings/tabs/AgentTab.tsx` 追加 `SkillsSection` 面板（位于 `MemoriesSection` 之后）。
+- `bifrost skill list` — 复用 `GET /agent/skills`。
+- `bifrost skill install --file <pkg.skill>` — 复用 `POST /agent/skills/import`。
+- `bifrost skill enable <name>` / `disable <name>` / `delete <name>`。
+- `bifrost skill validate <dir>` — 只跑 `SkillValidator`，不落盘。
 
-### 6.2 `SkillsSection.tsx`
+### WebUI
 
-```
-┌ Skills ─────────────────────────────────────────── [+ New Skill] ┐
-│                                                                   │
-│  [ All | Enabled | Project | User | Global ]  [🔍 search]        │
-│                                                                   │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ ☑ weather-lookup            v0.1.0   project    /weather    │ │
-│  │   Fetch current weather for a city via wttr.in.             │ │
-│  │                          [Test] [Edit] [Package] [Delete]   │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-│  ┌─────────────────────────────────────────────────────────────┐ │
-│  │ ☐ long-term-memory-export   v0.2.0   global     –           │ │
-│  │   Export memory records to JSONL.                            │ │
-│  └─────────────────────────────────────────────────────────────┘ │
-└───────────────────────────────────────────────────────────────────┘
-```
+`Settings → Agent → Skills`：
 
-每行包含：启用开关、name、version、effective_scope 徽标、slash_command、一行 description，以及 Test/Edit/Package/Delete 操作。
+- `SkillsSection`：列表 + 启用开关 + 快捷进入编辑器；空态引导创建。
+- `SkillCreatorWizard`：向导 = 元信息 → entrypoint → tools 白名单 → 触发规则 → 测试用例 →
+  commit；每一步走 `POST /agent/skills/validate` 做 in-place 校验。
+- `SkillEditor`：Monaco 编辑 SKILL.md + manifest；保存前跑 validate；保存走 PATCH。
 
-### 6.3 `SkillCreatorWizard`
+## Sync 边界
 
-分 4 步：
+- Skill 内容 (`SKILL.md` / `manifest.json` / 执行脚本) **不进入 Bifrost Sync**。
+  Sync 只处理 rules / groups / values；skill 属于本地资产。
+- Skill 分发通过 `.skill` zip + `POST /agent/skills/import`。远程 Skill Market 是后续 crate
+  (`bifrost-skill-market`)，不在本设计范围。
+- `.history/` 归档只在本地，不上传远端。
+- `codex-task-inspector` 是内置 skill，随二进制分发，不通过 Sync 推送。
 
-1. **Intent & Metadata** — name, description, scope, version, slash_command, triggers。
-2. **Entrypoint** — 选 Inline / Shell / Python / Node；Monaco 编辑器写脚本内容。
-3. **Tools & Permissions** — 多选 Registry tools；声明 Owned tools（name + description + JSON Schema）；勾选 memory.read / memory.write；选 MCP tools。
-4. **Test Run** — 填 inputs（按 inputs_schema 表单化），点 "Run Test"，展示 stdout/stderr/tool_calls 列表、duration、exit_code；通过后 "Save" 按钮触发 `POST /agent/skills`。
+## 实现切分
 
-向导内部维护 `SkillDraftInProgress` 状态，最后一步 Save 失败时可 back 修复。
+### Phase 1：crate 骨架
 
-### 6.4 `SkillEditor`
+- 新建 `crates/skills`。
+- 完成 `model.rs / store.rs / validator.rs / packager.rs`。
+- 单元测试：manifest roundtrip、`.history/` 归档、checksum、YAML 校验。
 
-复用 Wizard 的 4-tab 布局，但所有字段预填为当前 skill，顶部展示 checksum、created_by、updated_at。保存时走 `PATCH /agent/skills/:name`。
+### Phase 2：Registry + Executor + Tool Bridge
 
-### 6.5 Import / Package
+- 完成 `registry.rs / executor.rs / tool_bridge.rs`。
+- `SlashCommandRouter` 落地，取代 `session.rs` 硬编码 match。
+- `memory.read` / `memory.write` 桥接。
+- 单元测试：slash 冲突、超时、tool_bridge memory 权限。
 
-`SkillsSection` 顶部按钮组额外提供 `[⇧ Import .skill]` 上传 zip 走 `POST /agent/skills/import`；每行的 `Package` 按钮走 `POST /agent/skills/:name/package` 然后触发浏览器下载。
+### Phase 3：Admin API + WebUI 列表
 
----
+- 完成 `handlers/agent_skills.rs` 9 个 endpoint。
+- `SkillsSection` 列表 + 启用开关 + 空态。
+- `AgentSkillError` HTTP 映射；handler 单测覆盖 CRUD + slash 冲突 + multipart。
 
-## 7. 安全与约束
+### Phase 4：Authoring + Wizard + E2E
 
-1. **路径逃逸防护**：所有 manifest 里引用的路径必须 `canonicalize() starts_with(skill_dir)`。
-2. **名字唯一性**：`(scope, name)` 复合主键；跨 scope 的同名不冲突但 WebUI 提示 shadow。
-3. **Slash 冲突**：注册时冲突 → 拒绝；多 scope 冲突以 Project > User > Global 的 effective scope 为准。
-4. **Checksum 校验**：Registry 热加载与 Test 前均校验；不一致 → 拒绝加载并在 admin API 上返回 `checksum_mismatch`。
-5. **资源限制**：见 §4.5。
-6. **审计**：所有 CRUD + execute 走 `persistence.rs` JSONL，字段包括 `actor`、`scope`、`name`、`version`、`checksum`、`result`。
-7. **删除保留期**：`.history/` 保留 30 天后自动清理（由现有 persistence GC 承接）。
-8. **Draft TTL**：`.drafts/` 中未提交目录 7 天后清理。
-9. **Memory ACL**：Skill 对 memory 的写入强制携带 `source_skill = <name>@<version>` 元数据，便于追溯。
+- 完成 `authoring.rs`（`SkillAuthoringSession` 状态机）。
+- `SkillAuthoringHub` 暴露 meta-tool。
+- `SkillCreatorWizard` / `SkillEditor` 前端。
+- E2E `crates/bifrost-e2e/src/tests/skill_creator.rs` 覆盖端到端 create → invoke → archive。
 
----
+## 测试方案
 
-## 8. 与现有代码的最小入侵改动
+### 单元测试
 
-| 文件 | 改动类型 | 说明 |
-|---|---|---|
-| `crates/skills/**` | **新增 crate** | 模块见 §2.1 |
-| `Cargo.toml`（workspace）| 追加 | 加入 `crates/skills` |
-| `crates/agent/Cargo.toml` | 追加 | 依赖 `skills`, 移除对 skills::SkillsManager 的间接依赖 |
-| `crates/agent/src/session.rs` | 替换 L491 硬编码 match | 改为 `SlashCommandRouter::dispatch` |
-| `crates/agent/src/slash.rs` | **新增** | `SlashCommandRouter` 实现 |
-| `crates/agent/src/prompt.rs` | 修改 "Available skills" 块 | 读 `SkillRegistry::enabled()` |
-| `crates/agent/src/skill_authoring.rs` | **新增（已实现，文件名与设计稿不同）** | 见 §4.7；导出 `SkillAuthoringHub` 承担 meta-tool 职责 |
-| `crates/agent/src/memory_runtime.rs` | 暴露 memory.read/write | 供 Skill tool_bridge 调用 |
-| `crates/bifrost-admin/Cargo.toml` | 依赖 `skills` | |
-| `crates/bifrost-admin/src/handlers/mod.rs` | 挂 `agent_skills` 模块 | |
-| `crates/bifrost-admin/src/handlers/agent_skills.rs` | **新增** | 见 §5 |
-| `crates/bifrost-admin/src/handlers/im_gateway.rs` | 重构 | 移除旧 `SkillsManager` 引用，改为 `Arc<SkillRegistry>` 的薄封装；`GET /agent/skills` 语义保持 |
-| `crates/bifrost-admin/src/router.rs` | 追加路由 | `/agent/skills/*` |
-| `web/src/pages/Settings/tabs/AgentTab.tsx` | 追加 `<SkillsSection />` | |
-| `web/src/pages/Settings/tabs/agent/SkillsSection.tsx` | **新增** | |
-| `web/src/pages/Settings/tabs/agent/SkillCreatorWizard.tsx` | **新增** | (planned, not yet shipped as of 2026-06-17 — `SkillsSection.tsx` 与 `SkillEditor.tsx` 已落地；Wizard 组件尚未拆出) |
-| `web/src/pages/Settings/tabs/agent/SkillEditor.tsx` | **新增** | |
-| `web/src/pages/Settings/tabs/agent/types.ts` | 追加 SkillRecord/Manifest 类型 | |
-| `web/src/api/agent-skills.ts` | **新增** | 对应 §5 REST |
-| `e2e-tests/tests/test_skill_creator_flow.sh` | **新增** | 跑通 create→test→invoke→delete (planned, not yet shipped as of 2026-06-17) |
-| `crates/bifrost-e2e/src/tests/skill_creator.rs` | **新增** | runner 侧 |
-| `human_tests/skill-creator.md` | **新增** | 手测脚本 (planned, not yet shipped as of 2026-06-17) |
-| `human_tests/readme.md` | 更新索引 | 74+N/1455+M |
+- `crates/skills/src/store.rs` (15+ tests, line 545 起)
+  - `create_and_load_active_skill`
+  - `commit_archives_previous_active_to_history`
+  - `delete_moves_active_to_history`
+  - `enable_disable_toggles_flag_without_version_bump`
+  - `atomic_commit_rolls_back_on_partial_write`
+- `crates/skills/src/validator.rs` (15+ tests, line 405 起)
+  - `manifest_missing_name_returns_validation_error`
+  - `slash_command_name_conflict_with_builtin_rejected`
+  - `allowed_tools_reference_unknown_tool_rejected`
+  - `triggers_must_be_unique_within_manifest`
+- `crates/skills/src/executor.rs`
+  - `execute_python_entrypoint_reports_stdout_and_exit`
+  - `execute_timeout_sends_sigterm_then_sigkill`
+  - `execute_denies_env_leak`
+- `crates/skills/src/tool_bridge.rs`
+  - `memory_tool_bridge_allows_read_when_whitelisted`
+  - `memory_tool_bridge_rejects_write_when_missing_scope`
+- `crates/skills/src/packager.rs`
+  - `package_roundtrip_preserves_checksum`
+  - `unpackage_detects_corrupt_zip`
+- `crates/bifrost-admin/src/handlers/agent_skills.rs` (tests, line 478 起)
+  - `agent_skills_crud_store_happy_path` (line 510)
+  - `agent_skills_detects_slash_conflict` (line 542)
+  - `multipart_import_extracts_package_field_bytes` (line 574)
+  - `agent_skill_error_maps_conflict_to_409` (line 585)
+- `crates/agent/src/slash.rs`
+  - `router_prefers_builtin_over_skill_slash`
+  - `router_removes_slash_on_skill_disable`
 
----
+### E2E 测试
 
-## 9. 测试策略
+- `crates/bifrost-e2e/src/tests/skill_creator.rs`
+  - `skill_creator_end_to_end_create_invoke_archive` — 通过 REST 创建 draft → commit →
+    从 Agent 会话调用 `/skill-name` → 更新 → 断言旧版本落在 `.history/v0.1.0/`。
+  - `skill_creator_import_and_delete_roundtrip` — 导入 `.skill` zip → list 可见 → delete →
+    archive 存在。
+- `crates/bifrost-e2e/src/tests/skill_loading.rs` — 兼容旧 SkillsManager 布局。
 
-### 9.1 单元测试（`cargo test -p skills`）
+### 真实场景测试
 
-- `model`: serde 序列化/反序列化 round-trip
-- `validator`: 名字/版本/slash/allowed_tools/entrypoint 每条规则的正/反例
-- `store`: 原子 commit、归档、checksum 计算稳定性、draft TTL
-- `registry`: scope 覆盖、slash 冲突检测、reload_one、FS watcher debounce
-- `executor`: stdin/stdout 协议、超时、mem limit、tool 桥接、owned tool 路由
-- `packager`: zip 打包/解包、checksum 一致
-- `authoring`: 状态机转移
+- `human_tests/skill-loading-e2e.md` — 已存在，覆盖启动加载。
+- `human_tests/codex-task-inspector.md` — 覆盖 Codex 巡检 skill 的 pid + CI 双通道排查。
+- 建议新增 `human_tests/skill-creator-wizard.md`：真实浏览器走向导 → commit → 在会话内触发 slash。
 
-### 9.2 集成测试（`cargo test -p bifrost-agent`）
+## Review / Fix / Test 闭环
 
-- `SlashCommandRouter` 内置命令等价（`/clear /compact /status /resume /remember ...`）
-- skill 声明 `/weather` 后 router 正确分发
-- skill 读取 memory / 写入 memory 的端到端
+- 第 1 轮：跑 `crates/skills` 全部单测 + `handlers/agent_skills.rs` 单测；确认 slash 冲突 / 归档 /
+  checksum 三条链路。
+- 第 2 轮：跑 E2E `skill_creator` / `skill_loading`；前端 Playwright 覆盖向导与列表。
+- 第 3 轮：真实场景走 `human_tests/skill-creator-wizard.md`；抽查 3 个真实 skill 的 packaging /
+  import roundtrip。
+- 校验命令：
+  - `cargo test -p bifrost-skills`
+  - `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin agent_skills -- --nocapture`
+  - `cargo test -p bifrost-e2e --test skill_creator`
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 
-### 9.3 Admin 测试（`cargo test -p bifrost-admin agent_skills`）
+## 风险与决策
 
-- CRUD happy path
-- 冲突路径（checksum mismatch、slash 冲突、name 冲突）
-- import/export 对称
+- **风险：子进程执行的安全边界**。缓解：env 白名单 + timeout + memory limit + `FileAccessPolicy`；
+  文档明确本期不做 OS sandbox。
+- **风险：slash 命令冲突**。缓解：`SlashCommandRouter` 拒绝重名，内置命令永远优先；创建/更新
+  返回 409 由前端明确提示。
+- **风险：manifest 变更破坏已加载 skill**。缓解：`schema_version` 字段 + `SkillValidator`
+  做 migration 阻断；同名同 scope 归档到 `.history/`，可回滚。
+- **风险：`.skill` zip 恶意内容**。缓解：`SkillPackager` 严格校验 zip 目录结构、拒绝绝对路径与
+  `..`、限制 entry 大小；导入前跑 `SkillValidator`。
+- **决策：IM Gateway 场景免审批**。理由：IM Gateway 已在网关侧做粗粒度访问控制，二次审批
+  影响自动化；本期落到设计里作为显式豁免，日志侧仍留痕。
+- **决策：不做多版本并行 active**。理由：Registry 简化 + prompt 稳定 + slash 唯一；有需要用 scope
+  差异化解决。
+- **决策：Sync 不承接 skill 分发**。理由：skill 是可执行资产，风险面与规则不同，走独立 market
+  crate 更合适。
+- **决策：`.history/` 只归档不清理**。理由：审计与回滚基础；未来加 GC 策略再单独设计。
 
-### 9.4 E2E (`e2e-tests/tests/test_skill_creator_flow.sh`)
+## 文档更新要求
 
-1. 启 bifrost + mock LLM
-2. 通过 chat 触发 `skill_creator.start → interview → draft → test → commit`
-3. 再次 chat，通过 `/weather <city>` 触发 skill，验证输出
-4. DELETE skill，再次触发 `/weather` 返回 unknown command
-5. Import 预打包的 `.skill` zip，Re-invoke
-
-### 9.5 WebUI 冒烟
-
-在 `SkillsSection` 完成 New Skill 向导 → Test → Save → 列表中可见 → Edit → Delete 全流程。
-
----
-
-## 10. 回滚与兼容
-
-- 新 `crates/skills` 引入失败：保留现有 `SkillsManager` 只读路径；通过 feature flag `skills-crud` 控制。
-- `SlashCommandRouter` 重构与硬编码 match **语义等价**；失败时可切换 feature flag `slash-router` 回退。
-- 现有 `GET /agent/skills` 响应字段**只增不减**（新增 `effective_scope`, `shadow_scopes`, `checksum` 等），保证前端旧版本不崩。
-- 已存在的 `~/.bifrost/skills/<name>/` 目录若缺 `manifest.json`，首次加载时由 validator 根据 `SKILL.md` 自动生成并持久化。
-
----
-
-## 11. 开放问题（已决策）
-
-| 问题 | 决策 |
-|---|---|
-| SKILL.md 与 manifest.json 的 source of truth | SKILL.md 为人写 source of truth；manifest.json 由 validator 生成带 checksum |
-| Skill 能否声明自己的 tools | **允许**，见 §4.8 Owned tool |
-| Skill 能否访问 memory | **允许**，通过 `allowed_tools: Memory { op }` 白名单 |
-| 多版本共存 | **不支持**，同名单版本 active，旧版本归档到 `.history/` |
-| IM Gateway 场景审批 | **不做**，Skill 执行直接生效 |
-| Meta-tool 命名 | `skill_creator`（带 `.start .interview .draft .test .commit .cancel .list_templates .import`） |
-| 分期实现 | **不分期**，一次到位（数据模型 → crate → admin → agent → webui → e2e 同一个 PR） |
-
----
-
-## 12. 实施 Checklist
-
-- [ ] 新建 `crates/skills` crate，模型/store/validator/registry/executor/packager/authoring/tool_bridge 就绪
-- [ ] `crates/agent` 接入：SlashCommandRouter、prompt 重写、meta-tool、memory 桥接
-- [ ] `crates/bifrost-admin` 接入：`handlers/agent_skills.rs`、router、替换 `SkillsManager`
-- [ ] WebUI：`SkillsSection` + `SkillCreatorWizard` + `SkillEditor` + API client
-- [ ] 单元 + 集成 + admin + e2e 测试全绿
-- [ ] `human_tests/skill-creator.md` 写全手测步骤，索引更新
-- [ ] `design/skill-creator.md`（本文档）入库
-- [ ] `cargo fmt --all -- --check` / `cargo clippy --workspace --all-targets --all-features -- -D warnings` / `cargo check --workspace` / `cargo test --workspace` / `cd web && pnpm run lint && pnpm run build` 全绿
-- [ ] commit 拆分：`docs(design)` → `feat(skills)` crate → `feat(agent)` router+meta-tool → `feat(admin)` CRUD → `feat(webui)` → `test(e2e)` → `docs(human-tests)`
-- [ ] 推送到 `origin/feat/agent`，CI 绿
-
----
-
-*end of design document*
+- 更新 `docs/agent-skill.md` / `docs-en/agent-skill.md`：加入 CRUD API、向导流程、`.skill` zip 打包
+  规范、`allowed_tools` 说明。
+- `site/src/content/docs/reference/agent-skill.md`（含 en 版本）保持与 docs 同步。
+- `human_tests/readme.md` 新增 `skill-creator-wizard.md` 索引。
+- 若引入 remote skill market，需要另起 `design/bifrost-skill-market.md`。

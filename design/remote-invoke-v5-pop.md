@@ -1,57 +1,64 @@
 # Remote Invoke v5 — Proof-of-Possession 安全重构
 
-> 状态：设计草案 | 关联：design/remote-invoke-security-redesign.md
+> 状态：已交付并回归 | 关联：`design/remote-invoke-security-redesign.md`、`design/remote-invoke-v5-pop-hardening.md`
 >
-> 目标：修复 P0-1（远程调用关键端点无身份证明）与 P0-2（敏感字段在 SSE/响应中过度暴露）。
-> 决策（用户已确认）：
+> 目标：修复 P0-1（远程调用关键端点无身份证明）与 P0-2（敏感字段在 SSE / 响应中过度暴露）。
+> 关键决策（用户已确认）：
 > 1. 接受 schema 破坏式迁移；
 > 2. 统一使用 Ed25519；
-> 3. 引入 `grant_session_token`（claim_token 双 token 模式）；
-> 4. **不做兼容期，硬切**——sync server bump minor，旧客户端直接拒绝。
+> 3. 引入 `grant_session_token`（`claim_token` + `session_token` 双 token 模式）；
+> 4. 不做兼容期，硬切——sync server bump minor，旧客户端直接拒绝。
 
----
+## 背景
 
-## 一、问题与目标
+Remote Invoke v4 的 caller 端点 `GET /grants/reusable`、`DELETE /grants/:id`、`POST /calls/open`、`GET /pairings/:id/watch` 仅校验 `caller_fingerprint`（自报字段）+ `grant_id`（UUID）。攻击者一旦从 SSE / 日志 / 旁路拿到 `grant_id`，无任何签名即可冒充 caller 撤销 grant、开新 call 或订阅 pairing。同时 `pairing.approved` 事件 SSE 直接广播 `grant_id` 与 `caller_ephemeral_pub` 给所有订阅者；`sse.ts::pushToClient` 用 `console.log` 打印事件元数据；`pairing watch` 单订阅者会被任意订阅者顶替。
 
-### 1.1 现状漏洞（详见 `audit/remote-invoke-relay-security.md`）
+v5 引入 Ed25519 Proof-of-Possession（PoP）：caller 不需要账号，也不需要长期 Bearer，但每一个敏感请求都必须用其 Ed25519 长期私钥对 canonical body 签名。`grant_id` 全面从对外响应 / SSE / URL 中消失，caller 侧只持有 `grant_session_token`，server 内部通过 `session_token_hash` 反查 grant。pairing 事件改为派发一次性 `claim_token`，caller 调 `/grants/claim` 换 `grant_session_token`；watch 端点用 `watch_token` 支持多订阅者。所有 token 入库均 sha256，禁止打印明文。
 
-- **P0-1**：caller 端点 `GET /grants/reusable`、`DELETE /grants/:id`、`POST /calls/open`、`GET /pairings/:id/watch` 仅校验 `caller_fingerprint`（自报字段）+ `grant_id`（UUID）。攻击者一旦从 SSE/日志/旁路拿到 `grant_id`，无任何签名即可冒充 caller。
-- **P0-2**：`pairing.approved` 事件 SSE 直接广播 `grant_id` 与 `caller_ephemeral_pub` 给所有订阅者；`sse.ts pushToClient` 用 `console.log` 打印事件元数据；`pairing watch` 单订阅者会被任意订阅者顶替。
+## 用户目标验证清单
 
-### 1.2 目标
+### 必须实现
 
-- caller 不需要账号/不需要 token，但**每个敏感请求必须用其 Ed25519 长期私钥签名**（Proof-of-Possession）。
-- `grant_id` 不再出现在任何对外响应或事件中。caller 用 `grant_session_token` 操作 grant，server 内部映射回 grant。
-- `pairing approved` 事件改为派发**一次性 `claim_token`**，caller 调 `/grants/claim` 才换 `grant_session_token`；`watch` 端点改为持 `watch_token` 多订阅者。
-- 所有 token 入库 sha256，禁止打印明文。
+- caller 匿名，但每个敏感请求必须携带 `caller_pubkey` + `ts` + `nonce` + Ed25519 签名。
+- `grant_id` 不出现在任何对外响应、SSE event、日志或 URL query 中。
+- pairing approved 事件只广播一次性 `claim_token`，`claim_token` 消耗即销毁。
+- caller `POST /v5/grants/claim` 后拿到 `grant_session_token`（30 分钟 sliding），后续 `open call` / `revoke` 用 Bearer + PoP。
+- 多个 caller 可同时订阅同一 pairing 的 `watch_token`，watcher 之间不互相顶替。
+- 所有 token 只存 sha256；`console.log` / `debug!` 不允许出现 token 明文。
+- 旧 v4 客户端访问 v5 路由必须返回 `protocol_version_not_supported` 410。
+- sync server 检测到旧 schema 时直接 `drop & recreate` 所有 `bifrost_remote_invoke_*` 表。
 
-### 1.3 非目标
+### 必须不破坏
 
-- 不引入 OAuth/Account 体系；caller 仍匿名。
-- 不改 client（被调用端）现有 `client_auth_token` Bearer 流程。
-- 不改 ssh-auth 路径（`/ssh/challenge`、`/ssh/connect`）已是 Ed25519，复用其设计风格。
+- client（被调用端）现有 `client_auth_token` Bearer 语义、注册 / 心跳 / stream 上行链路不变。
+- ssh-auth 路径（`/ssh/challenge`、`/ssh/connect`）保持已有 Ed25519 设计。
+- Remote Invoke worker 上行 SSE / 事件框架不变。
+- `client_auth_token` 拒绝出现在 query string，仅接受 `Authorization: Bearer …`（v5.3 硬性收敛）。
 
----
+### 必须真实验证
 
-## 二、信任模型
+- vitest：`packages/bifrost-sync-server/src/__tests__/pop.test.ts`、`grants-claim.test.ts`、`grants-lookup.test.ts`、`grants-revoke.test.ts`、`sse-multi-watcher.test.ts`、`remote-invoke-security.test.ts`、`remote-invoke-v5-test-utils.ts`。
+- E2E：`e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh` 覆盖 session token 到期后自动续 lookup。
+- Rust caller mock：`crates/bifrost-cli/src/commands/remote.rs` 的测试模块。
+- Human tests：`human_tests/remote-invoke-v5-pop.md`、`human_tests/remote-invoke-v5-pop-hardening.md`。
+
+## 产品语义
+
+### 信任模型
 
 | 主体 | 长期凭据 | 会话凭据 | 用途 |
 |---|---|---|---|
-| client（被调用端） | `client_auth_token`（Bearer，sha256 入库） | — | 上行 SSE / 注册 / 完成 connect |
+| client（被调用端） | `client_auth_token`（Bearer，sha256 入库） | — | 上行 SSE、注册、完成 connect |
 | caller（调用端） | `caller_pubkey`（Ed25519，与 SSH key 同源） | `grant_session_token`（30 min sliding，sha256 入库） | 操作 grant、open call、订阅 SSE |
 | 配对中 | 一次性 `pair_code` | `claim_token` + `watch_token` | 兑换 grant、订阅 pairing |
 
----
-
-## 三、协议规格 v5（破坏式）
-
-### 3.1 Canonical Payload + Ed25519 PoP
+### Canonical Payload + Ed25519 PoP
 
 所有 PoP 请求 body 顶层必含：
 
 ```jsonc
 {
-  "ts": 1718650000000,      // 毫秒 ts；server: |now-ts| <= 30s
+  "ts": 1718650000000,      // 毫秒 ts；server: |now - ts| <= 30_000
   "nonce": "32-hex",        // server 持久化去重 120s
   "caller_pubkey": "<base64 SPKI DER>",
   "signature": "<base64 ed25519 sig over canonical_json(body without 'signature')>"
@@ -59,26 +66,30 @@
 }
 ```
 
-`canonical_json` 规则：递归按 key 字典序、无空格、无尾逗号、UTF-8 NFC，剔除 `signature` 字段。
+`canonical_json` 规则：递归按 key 字典序、无空格、无尾逗号、UTF-8 NFC，剔除 `signature` 字段。TS 端实现在 `packages/bifrost-sync-server/src/remote-invoke/pop.ts`；Rust 端在 `crates/bifrost-cli/src/commands/remote.rs`（`client/pop.rs` 子模块）。
 
-### 3.2 端点对照
+## 技术细节
+
+### 端点对照
 
 | 旧 v4 | 新 v5 | 鉴权 | 备注 |
 |---|---|---|---|
-| `POST /v4/.../pairings/start` | `POST /v5/.../pairings/start` | 同前（无） | 响应新增 `watch_token` |
-| `GET  /v4/.../pairings/:id/watch?token=` | `GET  /v5/.../pairings/:id/watch?watch_token=` | `watch_token` 校验 | 多订阅者 |
-| `POST /v4/.../pairings/:id/decision` | 不变 | requireAuth（owner 已登录） | approved 事件 payload 调整 |
-| —（新） | `POST /v5/.../grants/claim` | body PoP（`pair_code` + `caller_pubkey` + 签名） | 兑换 `grant_session_token` |
+| `POST /v4/.../pairings/start` | `POST /v5/.../pairings/start` | 无 | 响应新增 `watch_token` |
+| `GET  /v4/.../pairings/:id/watch?token=` | `GET  /v5/.../pairings/:id/watch?watch_token=` | `watch_token` | 多订阅者 |
+| `POST /v4/.../pairings/:id/decision` | 不变 | `requireAuth`（owner 已登录） | approved 事件 payload 调整 |
+| —（新） | `POST /v5/.../grants/claim` | body PoP + `pair_code` + `claim_token` | 兑换 `grant_session_token` |
+| —（新） | `POST /v5/.../grants/ssh-claim` | SSH-signed body | SSH key 直发 grant |
 | `GET  /v4/.../grants/reusable` | `POST /v5/.../grants/lookup` | PoP | 命中返回 `grant_session_token`，无 `grant_id` |
 | `DELETE /v4/.../grants/:id` | `POST /v5/.../grants/revoke` | Bearer `grant_session_token` + PoP | server 由 token 反查 grant |
 | `POST /v4/.../calls/open` | `POST /v5/.../calls/open` | Bearer `grant_session_token` + PoP | body 不含 `grant_id` |
-| `GET  /v4/.../calls/:id/events` | 不变 | `relay_token` 校验 | relay_token 仍由 open call 返回 |
+| `GET  /v4/.../calls/:id/events` | 不变 | `relay_token` | relay_token 仍由 open call 返回 |
 | `GET  /v4/.../calls/:id/stream` | 不变 | 同上 | — |
 
-### 3.3 `pairing.approved` 事件改造（关键修复）
+路由分发实现见 `packages/bifrost-sync-server/src/routes/remote-invoke.ts:234`：`/v5/remote-invoke/pairings/start`、`/v5/remote-invoke/pairings/:id/watch`、`/v5/remote-invoke/grants/lookup|claim|ssh-claim|revoke`、`/v5/remote-invoke/calls/open` 各自映射到 `handlePairingStartV5` / `handlePairingWatchV5`（`:928`）/ `handleGrantsLookupV5`（`:958`）/ `handleGrantsClaimV5`（`:992`）/ `handleGrantsRevokeV5`（`:1060`）/ `handleOpenCallV5`（`:1081`）。老 v4 路径统一返回 `{error:"protocol_version_not_supported"}` 410。
+
+### `pairing.approved` 事件改造
 
 ```jsonc
-// approved 事件 payload（new）
 {
   "type": "approved",
   "claim_token": "<32-hex>",       // 一次性，180s TTL
@@ -91,59 +102,29 @@
 }
 ```
 
-- 不含 `grant_id`、不含 `caller_ephemeral_pub`、不含 `client_ephemeral_pub`、不含 `caller_fingerprint`。
-- caller 收到后调 `POST /v5/grants/claim`：body 含 `pair_code` + `claim_token` + `caller_pubkey` + 签名；server 比对 `claim_token_hash`，命中即销毁（`markPairingClaimed`），写入该 grant 的 `caller_pubkey` 并颁发 `grant_session_token`。
+不含 `grant_id`、`caller_ephemeral_pub`、`client_ephemeral_pub`、`caller_fingerprint`。caller 收到后调 `POST /v5/grants/claim`：body 含 `pair_code` + `claim_token` + `caller_pubkey` + 签名；server 比对 `claim_token_hash`，命中即销毁（`markPairingClaimed`），写入该 grant 的 `caller_pubkey` 并颁发 `grant_session_token`。
 
-### 3.4 错误码
+### 错误码
 
-| code | 含义 |
-|---|---|
-| `signature_invalid` | Ed25519 校验失败 |
-| `timestamp_out_of_window` | `|now-ts| > 30_000` |
-| `replay_detected` | nonce 重复 |
-| `invalid_caller_pubkey` | 非 Ed25519 / 解析失败 |
-| `caller_pubkey_mismatch` | PoP pubkey ≠ grant.caller_pubkey |
-| `grant_session_token_invalid` | Bearer token 不存在 / 已撤销 / 过期 |
-| `claim_token_invalid` | claim_token 不存在 / 已用 / 已过期 |
-| `watch_token_invalid` | watch_token 不存在 / 已过期 |
-| `protocol_version_not_supported` | 旧 v4 客户端访问 v5 路由 |
+| code | HTTP | 含义 |
+|---|---|---|
+| `signature_invalid` | 401 | Ed25519 校验失败 |
+| `timestamp_out_of_window` | 401 | `|now-ts| > 30_000` |
+| `replay_detected` | 401 | nonce 重复 |
+| `invalid_caller_pubkey` | 400 | 非 Ed25519 / 解析失败 |
+| `caller_pubkey_mismatch` | 403 | PoP pubkey ≠ grant.caller_pubkey |
+| `grant_session_token_invalid` | 401 | Bearer token 不存在 / 已撤销 / 过期 |
+| `claim_token_invalid` | 401 | claim_token 不存在 / 已用 / 已过期 |
+| `watch_token_invalid` | 401 | watch_token 不存在 / 已过期 |
+| `protocol_version_not_supported` | 410 | 旧 v4 客户端访问 v5 路由 |
+| `pairing_expired` | 410 | 已过期 pairing 的 decision |
 
-### 3.5 Relay hardening follow-up
+### Schema DDL（破坏式：drop & recreate）
 
-- `client_auth_token` is accepted only from `Authorization: Bearer ...` on
-  client-authenticated relay endpoints. Query-string fallback is removed so the
-  30-day client token cannot be copied into access logs, proxy logs, browser
-  history, or monitoring URL fields.
-- `openCall` consumes grant call budget through a database conditional update:
-  `status='active' AND remaining_calls > 0`. The service proceeds only when
-  the update affects exactly one row, so concurrent requests against a once
-  grant cannot both pass a stale pre-check and create multiple calls.
-- The caller open rate limiter is `600` requests/minute per caller+client key.
-  This preserves a normal high-frequency workload of `500` opens/minute while
-  still bounding accidental tight loops.
-- `e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh` is the one-click local
-  regression entry for release validation. It runs, by default, the local
-  sync-server Remote Invoke security/relay/PoP Vitest suites, the Rust CLI
-  remote unit-test filter, the adjacent `bifrost-server-v4` hardening suite,
-  and the deployed relay Code + SSH key end-to-end matrix. The deployed relay
-  matrix includes ordinary shell/file/traffic/job commands under both Code and
-  SSH key authorization, a separate Code `remote_power_mgmt` grant for
-  `remote keep-awake`, and SSH key default Full Trust `remote keep-awake`
-  coverage. The PPE request header is
-  intentionally an environment-only test knob
-  (`BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`);
-  no UI or persistent runtime configuration is introduced for it.
-
----
-
-## 四、Schema DDL（破坏式：直接 drop & recreate）
-
-依据 `AGENTS.md` L511：协议更新时直接重建数据库，不考虑旧数据兼容。
-
-### 4.1 sqlite / mysql 同步变更
+依据 `AGENTS.md L511`：协议更新时直接重建数据库。sqlite / mysql 同步变更（见 `packages/bifrost-sync-server/sql/init-sqlite.sql`、`init-mysql.sql`）：
 
 ```sql
--- bifrost_remote_invoke_grants
+-- bifrost_remote_invoke_grants 新增列
 ALTER TABLE bifrost_remote_invoke_grants ADD COLUMN caller_pubkey            TEXT NOT NULL DEFAULT '';
 ALTER TABLE bifrost_remote_invoke_grants ADD COLUMN caller_pubkey_fp         TEXT NOT NULL DEFAULT '';
 ALTER TABLE bifrost_remote_invoke_grants ADD COLUMN session_token_hash       TEXT NOT NULL DEFAULT '';
@@ -153,7 +134,7 @@ ALTER TABLE bifrost_remote_invoke_grants ADD COLUMN revoked_at               TEX
 CREATE INDEX idx_ri_grants_caller_fp ON bifrost_remote_invoke_grants(caller_pubkey_fp);
 CREATE INDEX idx_ri_grants_session   ON bifrost_remote_invoke_grants(session_token_hash);
 
--- bifrost_remote_invoke_pairings
+-- bifrost_remote_invoke_pairings 新增列
 ALTER TABLE bifrost_remote_invoke_pairings ADD COLUMN watch_token_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE bifrost_remote_invoke_pairings ADD COLUMN claim_token_hash TEXT NOT NULL DEFAULT '';
 ALTER TABLE bifrost_remote_invoke_pairings ADD COLUMN claim_expires_at TEXT NOT NULL DEFAULT '';
@@ -161,7 +142,7 @@ ALTER TABLE bifrost_remote_invoke_pairings ADD COLUMN claimed_at       TEXT NOT 
 CREATE INDEX idx_ri_pairings_claim ON bifrost_remote_invoke_pairings(claim_token_hash);
 CREATE INDEX idx_ri_pairings_watch ON bifrost_remote_invoke_pairings(watch_token_hash);
 
--- 新增：nonces 去重表
+-- nonces 去重表（新）
 CREATE TABLE bifrost_remote_invoke_nonces (
   caller_pubkey_fp TEXT NOT NULL,
   nonce            TEXT NOT NULL,
@@ -171,9 +152,9 @@ CREATE TABLE bifrost_remote_invoke_nonces (
 CREATE INDEX idx_ri_nonces_seen ON bifrost_remote_invoke_nonces(seen_at);
 ```
 
-服务端启动时：检测 `bifrost_remote_invoke_*` 表缺少新列时，DROP 全部 `bifrost_remote_invoke_*` 表并按新 schema 重建（已有 `resetRemoteInvokeSchemaIfNeeded` 流程，扩展之）。
+启动时检测到缺列即触发 `resetRemoteInvokeSchemaIfNeeded`，DROP 全部 `bifrost_remote_invoke_*` 表再按新 schema 重建。
 
-### 4.2 DAO 接口（`src/dao/types.ts`）新增
+### DAO 接口新增（`packages/bifrost-sync-server/src/dao/types.ts`）
 
 ```ts
 getGrantByCallerFp(callerFp: string, clientInstanceId: string): RemoteInvokeGrantRow | null;
@@ -189,162 +170,144 @@ setPairingClaimTokens(pairingId: string, claimHash: string, watchHash: string, c
 markPairingClaimed(pairingId: string, claimedAt: string): void;
 ```
 
----
+## CLI + Web + Admin API
 
-## 五、源码改造清单
+### CLI 侧改造（`crates/bifrost-cli/src/commands/remote.rs`）
 
-### 5.1 新文件：`packages/bifrost-sync-server/src/remote-invoke/pop.ts`
+- caller 长期身份复用 `~/.bifrost/remote-device.key`（Ed25519 PKCS8）。首次使用时把公钥写入 `caller-identity.json` 的 `caller_pubkey_b64`。
+- 新增 `client/pop.rs`：`canonical_json`（Rust 版，与 TS 一致）、`sign_envelope(body_json, key) -> envelope_json`（注入 `ts/nonce/caller_pubkey/signature`）。
+- v4 → v5 迁移点：
+  - `grants/reusable` GET → `POST /v5/grants/lookup`（PoP body），失败→`None`，成功→存 `grant_session_token`。
+  - `DELETE grants/:id` → `POST /v5/grants/revoke`（Bearer + PoP）。
+  - `POST calls/open` → `POST /v5/calls/open`（Bearer + PoP，body 去掉 `grant_id`，新增 `client_instance_id`）。
+  - `pairings/:id/watch?token=` → `?watch_token=`；`watch_token` 由 `/v5/pairings/start` 返回。
+- caller 本地缓存 `~/.bifrost/remote-connections.json`：新增 `grant_session_token`，加密存储（复用 `remote-connections.key`）；过期后自动 `lookup` 续。
 
-```ts
-export interface PoPRequestEnvelope {
-  ts: number;
-  nonce: string;
-  caller_pubkey: string;     // base64 SPKI DER
-  signature: string;         // base64
-  [k: string]: unknown;
-}
+### Web 层（`web/src/api/remoteInvoke.ts`）
 
-export interface VerifyPoPOptions {
-  maxSkewMs?: number;        // default 30_000
-  expectedCallerPubkeyFp?: string;
-}
+- 全面切换 v5 URL；封装 `signRequest(body, key)` 帮助方法。
+- 已存 `caller_pubkey_b64` 的用户不再看到 `grant_id`；错误码走统一 toast 表。
 
-export interface VerifyPoPResult {
-  callerPubkey: string;
-  callerPubkeyFp: string;
-}
+### Admin / Server 侧关键 handler
 
-export function canonicalJson(value: unknown): string;
-export function ed25519FingerprintFromBase64(spkiB64: string): string;
-export function verifyPoP(
-  body: PoPRequestEnvelope,
-  opts: VerifyPoPOptions,
-  markNonce: (fp: string, nonce: string, seenAt: string) => boolean,
-): VerifyPoPResult;
-```
+- `remote-invoke/service.ts::submitGrantDecision` approved 分支：生成 `claim_token = randomHex(32)`、`watch_token = randomHex(32)`；DAO `setPairingClaimTokens(...)`；watcher payload = `{type, claim_token, claim_expires_at, grant_summary}`。
+- 新增：`mintClaimToken`、`redeemClaim`、`mintGrantSessionToken`、`resolveGrantBySessionToken`、`revokeGrantByBearer`。
+- `openCall` 改为 `openCall(grant: RemoteInvokeGrantRow, req: OpenCallRequestV5)`；不再读 `req.grant_id`；caller_pubkey_fp 一致性由 router 层完成。
 
-校验流程：解析 `caller_pubkey` → 计算 fp → `markNonce` → 时间窗 → canonical → `crypto.verify(null, payload, key, sig)`（Ed25519，与 `ssh-auth.ts:180` 一致）→ 可选 fp 一致性。
+### Relay hardening（v5.3 一次性收敛）
 
-### 5.2 `routes/remote-invoke.ts`
+- `client_auth_token` 只接受 `Authorization: Bearer …`，query-string fallback 已删除，避免 30 天 token 出现在访问日志 / 代理日志 / 浏览器历史。
+- `openCall` 通过 DB 条件更新消费 grant call budget：`status='active' AND remaining_calls > 0`，只有影响行数 = 1 才继续，防止并发 open 让 once grant 双开。
+- caller open 限流：`600` req/min per caller+client key，保留正常 `500` opens/min 的高频负载，仍能防止 tight loop。
+- SSE 卫生：`pairingWatchers: Map<string, Set<{res, pairingId, watchTokenHash}>>`；`pushToClient` 三条 `console.log` 全部删除；只保留 `debug` 级别的 event 名 + `client_instance_id`，禁止打印 payload 与 token。
 
-- 删除路由：`GET /grants/reusable`、`DELETE /grants/:id`、`POST /calls/open`、`GET /pairings/:id/watch`（保留 path 但返回 410+提示）。
-- 新增路由（全部 `/v5/remote-invoke/...`）：
-  - `POST /grants/claim` → `handleGrantsClaim`
-  - `POST /grants/lookup` → `handleGrantsLookup`
-  - `POST /grants/revoke` → `handleGrantsRevoke`
-  - `POST /calls/open`   → `handleOpenCall`
-  - `GET  /pairings/:id/watch` → `handlePairingWatch`
-- 中间件：`extractBearerGrantSession(req) → grantRow`、`requirePoP(req, expectedFp?) → fp`。
-- 老路径访问统一返回 `{error:"protocol_version_not_supported"}` 410。
+## Sync 边界
 
-### 5.3 `remote-invoke/service.ts`
+- 全部 v5 路由都是 relay 独有，不进入本地 Bifrost sync 流程。
+- Rust caller 端 `~/.bifrost/remote-connections.json` 仅本机存储；不同步到设备之间。
+- schema 变更走 sync server 自身版本升级，不通过 rules sync 广播。
 
-- `submitGrantDecision`（L406-551）：approved 分支
-  - 不再写 `caller_ephemeral_pub` / `client_ephemeral_pub` 到 SSE。
-  - 生成 `claim_token = randomHex(32)`、`watch_token = randomHex(32)`（watch_token 在创建 pairing 时已生成，这里只是再确认有效期）；DAO `setPairingClaimTokens(...)`。
-  - 推 watcher 的 payload = `{ type:"approved", claim_token, claim_expires_at, grant_summary }`。
-- 新增：
-  - `mintClaimToken(pairingId): {claim_token, claim_expires_at}`
-  - `redeemClaim(body): {grant_session_token, expires_at, grant_summary}`
-  - `mintGrantSessionToken(grantId): {token, expires_at}`
-  - `resolveGrantBySessionToken(bearer): grantRow | null`
-  - `revokeGrantByBearer(bearer, callerFp): void`
-- `openCall`（L588-737）：签名改为 `openCall(grant: RemoteInvokeGrantRow, req: OpenCallRequestV5)`；不再读 `req.grant_id`；caller_pubkey_fp 一致性 router 已做。
+## Phase 拆分
 
-### 5.4 `remote-invoke/sse.ts`
+### Phase 1：协议基线
 
-- `pairingWatchers: Map<string, Set<{res, pairingId, watchTokenHash}>>`；`registerPairingWatcher` → add；`unregisterPairingWatcher(pairingId, res?)`。
-- `pushToPairingWatcher` 改成遍历 set；写失败的 entry 单独删除。
-- `pushToClient` L78-87 三条 `console.log` 删除；保留 `debug` 级别的 `event` 名 + `client_instance_id`，禁止打印 payload 与 token。
+- pop.ts + canonical_json + Ed25519 校验（含 nonce/timestamp/replay 单元覆盖）。
+- Schema DDL + DAO 接口 + `resetRemoteInvokeSchemaIfNeeded` 分支。
 
-### 5.5 `index.ts` 入口
+### Phase 2：Server 端点切换
 
-- 启动日志加 `protocol_version=v5`；`/v5/remote-invoke/` 限流 key 改 `pop.callerPubkeyFp + client_instance_id`。
+- 路由分发 v5，v4 返回 410。
+- `submitGrantDecision`、`openCall`、`grants/*` handler 迁移。
+- SSE 多订阅者 + 日志卫生。
 
-### 5.6 Rust caller 端 `crates/bifrost-cli/src/commands/remote.rs`
+### Phase 3：Rust CLI + Web
 
-- 新增 ed25519 长期密钥管理：复用现有 `~/.bifrost/remote-device.key`（已是 Ed25519 PKCS8）作为 caller 长期身份；首次使用时在 `caller-identity.json` 写 `caller_pubkey_b64`。
-- 新增 `client/pop.rs`：
-  - `canonical_json` Rust 版（与 TS 一致）。
-  - `sign_envelope(body_json, key) -> envelope_json`：注入 `ts/nonce/caller_pubkey/signature`。
-- 替换所有 v4 调用：
-  - L5238 `grants/reusable` GET → `POST /v5/grants/lookup`（PoP body），失败→`None`，成功→存 `grant_session_token`。
-  - L5203 `DELETE grants/:id` → `POST /v5/grants/revoke`（Bearer+PoP）。
-  - L5404 `POST calls/open` → `POST /v5/calls/open`（Bearer+PoP，body 去掉 `grant_id`，新增 `client_instance_id`）。
-  - L5283 `pairings/:id/watch` → 查询参数从 `token` 改 `watch_token`；watch_token 由 `/v5/pairings/start` 响应返回。
-- 测试 mock（`#[cfg(test)] mod` L9706+）：升级到 v5 路径。
-- caller 本地缓存 `~/.bifrost/remote-connections.json`：新增 `grant_session_token`（加密存储，复用 `remote-connections.key`）；过期后自动 `lookup` 续。
+- CLI grants/pairings/calls 全部切 v5；caller-identity + session token 缓存。
+- Web API/UI 切 v5，错误码 toast。
 
----
+### Phase 4：Relay hardening（v5.3）
 
-## 六、测试矩阵
+- Bearer-only client token、grant budget CAS、caller 限流。
+- E2E `test_remote_invoke_ppe_full_e2e.sh` 一键回归。
 
-### 6.1 vitest 单元（`packages/bifrost-sync-server/src/__tests__/`）
+## 测试方案
 
-| 文件 | 用例 |
+### vitest 单元（`packages/bifrost-sync-server/src/__tests__/`）
+
+| 文件 | 关键用例 |
 |---|---|
-| `pop.test.ts` 新 | 合法签名通过 / 篡改字段失败 / nonce 重放失败 / ts 超窗失败 / 非 ed25519 失败 / canonical 排序稳定 / 不含 signature 字段 |
-| `grants-claim.test.ts` 新 | approved 后 claim 成功 + grant 绑定 caller_pubkey / 重复 claim 失败 / 过期 claim_token 失败 / 错配 caller_pubkey 失败 |
-| `grants-lookup.test.ts` 新 | active grant → 颁发 token / 无 grant → 404 / 撤销后查不到 / 不同 caller_pubkey 隔离 |
-| `grants-revoke.test.ts` 新 | Bearer + PoP 通过 → revoke / Bearer 错 → 401 / 跨 caller 不能 revoke |
-| `sse-multi-watcher.test.ts` 新 | 同 pairing 多 watcher 都能收到 approved 事件 / watch_token 错误 → 401 |
-| `remote-invoke-security.test.ts` 改 | v4 路径返回 410；v5 缺签名返回 401 |
-| `remote-invoke-relay-v2-phase1.test.ts` 改 | open call 不再接受 grant_id 字段 |
+| `pop.test.ts` | 合法签名通过 / 篡改字段失败 / nonce 重放失败 / ts 超窗失败 / 非 ed25519 失败 / canonical 排序稳定 / 剔除 signature 字段 |
+| `grants-claim.test.ts` | approved 后 claim 成功 + grant 绑定 caller_pubkey / 重复 claim 失败 / 过期 claim_token 失败 / 错配 caller_pubkey 失败 |
+| `grants-lookup.test.ts` | active grant → 颁发 token / 无 grant → 404 / 撤销后查不到 / 不同 caller_pubkey 隔离 |
+| `grants-revoke.test.ts` | Bearer + PoP 通过 → revoke / Bearer 错 → 401 / 跨 caller 不能 revoke |
+| `sse-multi-watcher.test.ts` | 同 pairing 多 watcher 都能收到 approved / watch_token 错误 → 401 |
+| `remote-invoke-security.test.ts` | v4 路径返回 410；v5 缺签名返回 401 |
+| `remote-invoke-relay-v2-phase1.test.ts` | open call 不再接受 `grant_id` 字段 |
+| `p0-hardening.test.ts` | client_auth_token 不再接受 query；grant budget CAS 单次成功；限流 600/min |
 
-### 6.2 e2e
+### E2E
 
+- `e2e-tests/tests/test_remote_invoke_v5_session_refresh_e2e.sh`：session token 到期 → 自动 `lookup` 续 → 继续 exec。
+- `e2e-tests/tests/test_remote_invoke_ppe_full_e2e.sh`：一键 release 回归，含本地 sync-server security/relay/PoP vitest、Rust CLI remote unit-test filter、`bifrost-server-v4` hardening 套件、部署 relay Code + SSH key 端到端矩阵。矩阵内含普通 shell / file / traffic / job 命令的 Code 与 SSH key 授权、独立 Code `remote_power_mgmt` grant 的 `remote keep-awake`、SSH key 默认 Full Trust `remote keep-awake`。
+- PPE header 注入仅通过环境变量 `BIFROST_REMOTE_RELAY_HEADERS='x-tt-env=ppe_ticket_system,x-use-ppe=1'`，不引入 UI / 持久化配置。
 - `crates/bifrost-e2e/src/tests/remote_shell_exec.rs`：升级到 v5。
-- 新增 `crates/bifrost-e2e/src/tests/remote_invoke_pop.rs`：完整 pair → claim → lookup → open → events 链路；approved 事件 payload 验证不含 grant_id；revoke 后 open 失败。
 
-### 6.3 human_tests
+### human_tests
 
-新建 `human_tests/remote-invoke-v5-pop.md`，索引 `human_tests/readme.md` 同步：
+`human_tests/remote-invoke-v5-pop.md`（+ 索引 `human_tests/readme.md`）：
+
 - TC-V5-01：pair → 桌面端审批 → CLI 自动 claim 拿 token → exec 成功。
 - TC-V5-02：偷到旧 grant_id 直接 curl `/v5/calls/open` → 401。
-- TC-V5-03：服务端日志 `grep -E 'token|secret|claim_token|grant_session'` → 仅出现 sha256 哈希或字面 `<redacted>`，不出现明文。
+- TC-V5-03：服务端日志 `grep -E 'token|secret|claim_token|grant_session'` → 仅出现 sha256 哈希或字面 `<redacted>`。
 - TC-V5-04：同 pairing 两个 watcher 都收到 approved。
 - TC-V5-05：revoke 后立刻 open call → 401。
 - TC-V5-06：旧 v0.0.127 CLI 连新 sync server → `protocol_version_not_supported`。
 
-### 6.4 覆盖率
+`human_tests/remote-invoke-v5-pop-hardening.md` 追加 v5.3 相关 case：
 
-- `pnpm -C packages/bifrost-sync-server coverage` 必须 ≥ 90%（pop.ts、grants-*.ts、sse 多订阅者分支全覆盖）。
+- TC-V5-Hardening-01：client_auth_token 只走 Header，query 拒绝。
+- TC-V5-Hardening-02：once grant 高并发 open call 仅一次成功。
+- TC-V5-Hardening-03：limiter tight loop 命中 600/min 阈值。
+
+### 覆盖率
+
+- `pnpm -C packages/bifrost-sync-server coverage`：`pop.ts`、`grants-*.ts`、`sse` 多订阅者分支全覆盖，目标 ≥ 90%。
 - Rust 侧 `bash scripts/ci/coverage-all.sh -p bifrost-cli --json --gate` 通过。
 - 收尾 `make coverage`。
 
----
+## Review/Fix/Test 闭环
 
-## 七、切换策略
+### 第 1 轮
 
-1. sync server 版本号 bump minor（`0.X.0` → `0.(X+1).0`）。
-2. 启动时若检测旧 schema → drop & recreate 所有 `bifrost_remote_invoke_*` 表。
-3. CLI 版本号同步 bump；旧客户端访问 v5 → `protocol_version_not_supported`。
-4. 部署窗口：停老 server → drop 表 → 升 server → 升客户端。不允许灰度并行。
+- 复核 v4 → v5 端点是否全部覆盖，无遗漏。
+- 复核 SSE payload、日志、URL、错误提示中不再出现 `grant_id` / caller ephemeral pub。
+- 复测：pop.test.ts、grants-*.test.ts、sse-multi-watcher.test.ts、v5_session_refresh E2E。
 
----
+### 第 2 轮
 
-## 八、残余风险
+- 复核 caller 长期私钥缓存路径与权限（0600）。
+- 复核 schema 检测 & drop-recreate 分支是否幂等。
+- 复测：ppe_full_e2e 全套；`make coverage` 关键文件 ≥ 90%。
+
+## 风险与决策
 
 | 风险 | 缓解 |
 |---|---|
-| caller 私钥泄露 | 文档建议用 ssh-agent / OS keychain 托管；revoke key 一键失效 |
+| caller 私钥泄露 | 文档建议 ssh-agent / OS keychain 托管；revoke key 一键失效 |
 | `grant_session_token` 泄露 | 30 min 短 TTL + 任意 revoke 即失效 |
 | nonce 表膨胀 | 周期任务清理 `seen_at < now - 120s` |
-| watch_token 泄露 | pairing 生命周期 ≤10 min；claim 后 watcher 自动 unregister |
+| watch_token 泄露 | pairing 生命周期 ≤ 10 min；claim 后 watcher 自动 unregister |
+| schema 强制重建对未升级客户端影响 | 版本 bump minor，部署窗口停老 server → drop 表 → 升 server → 升客户端，不允许灰度并行 |
 
----
+## 实施清单
 
-## 九、实施清单（TodoWrite 对齐）
-
-1. 设计稿 review 通过（本文件）。
-2. Schema + DAO + types 同步。
-3. pop.ts 工具 + 单测。
-4. service.ts handler 改造 + 单测。
-5. routes/remote-invoke.ts 路由切换 + 单测。
-6. sse.ts 多订阅者 + 日志卫生。
-7. Rust caller 端 commands/remote.rs + mock test。
-8. e2e 新增 remote_invoke_pop。
-9. human_tests 新文档。
-10. pnpm lint/typecheck/test/test:e2e/coverage 全绿；`make coverage` 全绿。
-11. 两轮 Review/Fix/Test。
-12. commit + push + MR + 远端 CI 看护到全绿。
+1. Schema + DAO + types 同步。
+2. pop.ts 工具 + 单测。
+3. service.ts handler 改造 + 单测。
+4. routes/remote-invoke.ts 路由切换 + 单测。
+5. sse.ts 多订阅者 + 日志卫生。
+6. Rust caller 端 commands/remote.rs + mock test。
+7. E2E `test_remote_invoke_v5_session_refresh_e2e.sh`、`test_remote_invoke_ppe_full_e2e.sh`。
+8. human_tests 新文档 + readme 索引。
+9. `pnpm lint/typecheck/test/test:e2e/coverage` 全绿；`make coverage` 全绿。
+10. 两轮 Review/Fix/Test；commit + push + MR + 远端 CI 看护到全绿。

@@ -1,6 +1,10 @@
 # Remote 命令同构化执行方案
 
-> 实施进展（截至 2026-06-16）：Phase 1 已落地——共享 crate `crates/bifrost-command` 上线，`CanonicalQueryCommand` 与 `AdminQueryService`（`crates/bifrost-admin/src/query_service.rs`）作为唯一查询内核，`bifrost-admin` 的 HTTP search/traffic handler 与 remote executor（当 `query_service` 注入时）均直接调用它；allowlist 已收敛到 canonical id（`ALLOWED_COMMANDS = ["status", "search.stream", "traffic.list", "traffic.get"]`，见 `crates/bifrost-admin/src/remote_invoke/types.rs`），`traffic.search` / `search.get` 等 legacy 别名不再在白名单中。Phase 2-5 仍在推进：CLI 仍以 HTTP（本地 admin）形式作为传输、`RemoteCommand` 同时保留 `command + args_json` legacy 字段和新增 `query` 字段（两条 wire 路径并存），`CommandEvent` 结构化事件流、`QueryRunner` / `QueryBackend` trait、`SearchRenderOptions` / `TrafficRenderOptions` 拆分以及统一 `CommandDescriptor` 结构体目前均为 (planned, not yet shipped as of 2026-06-16)，executor 仍保留 legacy HTTP fallback 与文本渲染分支。
+> 实施进展（截至 2026-07-03）：
+> - Phase 1 已落地：共享 crate `crates/bifrost-command`（`crates/bifrost-command/src/lib.rs` 存在，`CanonicalQueryCommand` 于第 250 行定义）与 `AdminQueryService`（`crates/bifrost-admin/src/query_service.rs` 第 31 行定义）已作为唯一查询内核，`bifrost-admin` 的 HTTP `search/traffic` handler 与 remote executor（当 `query_service` 注入时）均直接调用它。
+> - Allowlist 收敛：`ALLOWED_COMMANDS = ["status", "search.stream", "traffic.list", "traffic.get"]`（见 `crates/bifrost-admin/src/remote_invoke/types.rs:1511`），`traffic.search` / `search.get` 等 legacy 别名已不在白名单中。
+> - `RemoteCommand` wire 结构（`types.rs:404-412`）仍同时保留 legacy `command: String + args_json: Option<String>` 字段与新增的 `query: Option<CanonicalQueryCommand>` 字段——两条协议路径并存。
+> - Phase 2-5 仍在推进：CLI 仍以 HTTP（本地 admin）作为传输、`CommandEvent` 结构化事件流、`QueryRunner` / `QueryBackend` trait、`SearchRenderOptions` / `TrafficRenderOptions` 拆分以及统一 `CommandDescriptor` 结构体目前均为 (planned, not yet shipped as of 2026-07-03)，executor 仍保留 legacy HTTP fallback 与文本渲染分支。
 
 ## 背景
 
@@ -11,673 +15,296 @@
 
 这导致：
 
-1. 每新增一个查询命令或过滤条件，都要维护本地和 remote 两套实现
-2. allowlist 白名单绑定的是 remote 专用字符串命令，而不是主命令体系
-3. 远端执行结果是格式化后的文本，调用端无法复用本地 formatter
-4. `search.get`、`traffic.search` 这类 remote 内部命名与 CLI 主命令语义不一致
-5. `remote search`、`remote traffic search` 只能靠持续补丁追赶本地能力，无法从机制上消除漂移
+1. 每新增一个查询命令或过滤条件，都要维护本地和 remote 两套实现。
+2. allowlist 白名单绑定的是 remote 专用字符串命令（历史值：`search.get` / `traffic.search`），而不是主命令体系。
+3. 远端执行结果是格式化后的文本，调用端无法复用本地 formatter。
+4. `search.get`、`traffic.search` 这类 remote 内部命名与 CLI 主命令语义不一致。
+5. `remote search`、`remote traffic search` 只能靠持续补丁追赶本地能力，无法从机制上消除漂移。
 
-## 目标
+## 用户目标验证清单
 
-本方案把 remote `search/traffic` 查询命令改造成同构方案：
+### 必须实现
 
-1. 本地命令和远程命令共享同一套语义命令模型
-2. remote 层只负责传输、鉴权、白名单和流式转发，不再重复实现命令语义
-3. allowlist 基于统一命令 ID / capability 控制，而不是 remote 专用字符串
-4. 调用端复用本地 formatter，远端返回结构化事件流，不再返回 remote 专用渲染文本
-5. remote query 统一切换到 typed payload，不保留历史 query 协议
-6. 保持 remote invoke 当前“有输出就立即推送”的流式能力，不允许为了统一架构退化成命令结束后一次性返回
+- 本地 `bifrost search` 与远程 `bifrost remote traffic search` 共享同一个 canonical 查询命令模型，添加新 filter 只需要改一处。
+- Allowlist 基于 canonical command id / capability 判断，不再基于 remote 专用字符串。
+- `AdminQueryService` 是唯一的查询执行内核，HTTP handler、remote executor、以及未来的本地直连都通过它执行。
+- Remote executor 返回结构化事件（当前仍为文本渲染，目标状态为 typed events），调用端复用本地 formatter。
+- Remote invoke 保持 “emit 即推送” 的流式语义，查询命令不能倒退为一次性返回。
+- Legacy `command + args_json` 查询协议在最终 Phase 完成后被删除，`RemoteCommand` 只保留 typed `query` 字段。
 
-## 非目标
+### 必须不破坏
 
-本方案当前不覆盖：
+- `status` 命令作为特殊命令，保持现状协议、执行路径、渲染语义，不进入本次同构化。
+- `shell.exec` 及其它非 `search/traffic` 命令的行为、鉴权、白名单不受影响。
+- `relay` / `grant` / `frame` / `exit` 总体骨架保持不变。
+- 本地 CLI 的交互式选择器与 TTY 展示细节保持在 presentation 层，不进入 canonical command。
+- 现有 `admin/remote_invoke_call_history/*.jsonl` 历史文件继续可读，即使包含 legacy `search.get` / `traffic.search` 命令名。
 
-1. 一次性把所有 CLI 命令都纳入同构化，第一阶段只覆盖 `search/traffic`
-2. 重写 relay 整体远程调用协议
-3. 首轮就把写操作命令默认开放到 remote
-4. 首轮就把 `shell.exec` 与查询命令完全收敛到同一执行框架
+### 必须真实验证
 
-说明：
+- CLI 真实执行 `bifrost search` 与 `bifrost remote traffic search`，同一 seed 集合上结果一致。
+- CLI 真实执行 `bifrost traffic list` / `remote traffic list`，过滤语义一致。
+- CLI 真实执行 `bifrost traffic get --request-body --response-body` 与 `remote traffic get`，body 输出一致。
+- allowlist 拒绝路径：未开放的 canonical command 会在 caller 前置校验、client 最终校验两处均被拒绝。
+- 流式回归：远端 `traffic search` 大结果集下第一个 `frame` 事件早于命令 `exit` 事件到达。
 
-- `status` 是特殊命令，保持现状定义、现状协议和现状执行路径，不纳入这轮同构化改造
-- remote invoke 的流式 `frame/exit` 合同必须与当前其他远程命令保持一致，查询命令不能成为例外
+## 产品语义
 
-## 同构定义
+### 同构定义
 
-这里的“同构”固定为四层统一：
+- 本地命令与远端命令共享同一套 canonical 查询命令。用户在本地和远端看到的 flag、过滤条件、输出结构完全一致。
+- 远端命令 = 本地命令 + 传输 + 鉴权 + allowlist + 流式转发。不允许 remote executor 存在独立的“搜索/流量业务代码”。
+- 交互式能力属于 CLI presentation，只在本地生效；canonical command 不承载交互语义。
 
-1. 统一命令模型：本地和远端都构造同一个 typed command
-2. 统一执行语义：本地和远端都通过同一套 command runner 执行
-3. 统一输出事件模型：本地和远端都产出同一种 structured event stream
-4. 统一能力控制：allowlist 基于 canonical command id / capability
+### canonical command 模型
 
-固定差异边界如下：
-
-- 调用发起入口不同：本地直连，远端通过 relay
-- 传输载体不同：本地 admin API / remote invoke
-- 展示方式不同：本地 TTY 输出 / 远端 caller TTY 输出
-- 授权、在线性、审计元数据保持 remote 专属
-- 本地交互式选择器和 TTY 细节保持本地专属
-
-## 目标架构
-
-### 分层模型
-
-`search/traffic` 查询类命令按四层拆分：
-
-1. `CLI Parse Layer`
-2. `Canonical Command Layer`
-3. `Command Runner Layer`
-4. `Render Layer`
-
-目标链路：
-
-- 本地：`clap -> CanonicalCommand + RenderOptions -> QueryRunner(LocalAdapter) -> structured event stream -> LocalRenderer`
-- 远端：`clap -> CanonicalCommand + RenderOptions -> remote transport -> QueryRunner(ClientAdapter) -> structured event stream -> caller LocalRenderer`
-
-### 共享命令模块
-
-新增共享模块：
-
-- `crates/bifrost-command`
-
-职责：
-
-- 定义 canonical command types
-- 定义 command id / capability descriptor
-- 定义 structured event / stream types
-- 提供 remote typed payload 的编解码
-
-## Canonical Command 设计
-
-### 命令枚举
-
-> 状态：已落地。`crates/bifrost-command/src/lib.rs` 现已导出 `CanonicalQueryCommand`，含 `Search` / `TrafficList` / `TrafficGet` / `TrafficClear` 四个变体；`command_id()` 方法返回 `search.stream` / `traffic.list` / `traffic.get` / `traffic.clear`；`capability()` 方法返回 `CommandCapability::{Readonly, SensitiveBody, Mutating}`。所有四个变体的序列化均通过 `#[serde(tag = "type", content = "args", rename_all = "snake_case")]` 实现。
-
-第一阶段纳入以下命令：
+`crates/bifrost-command/src/lib.rs:250` 已定义：
 
 ```rust
-enum CanonicalQueryCommand {
-    Search(SearchArgs),
+pub enum CanonicalQueryCommand {
+    Search(CommandSearchArgs),
     TrafficList(TrafficListArgs),
     TrafficGet(TrafficGetArgs),
     TrafficClear(TrafficClearArgs),
+    // ... capability = Readonly | Mutating
 }
 ```
 
-说明：
+`TrafficClear` capability 标记为 `Mutating`，因此不会通过 `ALLOWED_COMMANDS` 暴露到 remote CLI 面。
 
-- `SearchArgs` 同时服务于 `bifrost search`、`bifrost traffic search`、`bifrost remote search`、`bifrost remote traffic search`
-- `traffic search` 只是 CLI alias，不再拥有独立语义命令 ID
-- `traffic.search` 不再作为 canonical id 存在
-- `search.get` 不再作为协议命令存在
+## 技术细节
 
-### 命令 ID 与 capability
+### 共享 crate `bifrost-command`
 
-> 状态：`CommandCapability` 枚举已落地（`Readonly` / `Mutating` / `SensitiveBody`）。独立的 `CommandDescriptor` 结构体与 `OutputMode` 枚举为 (planned, not yet shipped as of 2026-06-16) ——目前 `command_id()` / `capability()` 直接作为 `CanonicalQueryCommand` 的方法暴露，没有打包成单独的 descriptor 类型，`OutputMode` 由 CLI 侧 `RemoteRenderMode` / `OutputFormat` 自行维护。
+- 位置：`crates/bifrost-command/src/lib.rs`（已落地）。
+- 内容：`CanonicalQueryCommand` + 相关参数结构体 + serde。
+- 待补：`CommandEvent` 事件流（结构化 hit / traffic 行 / 分页游标 / done 边界）、`CommandDescriptor`（id / display name / capability / allowlist key）、`SearchRenderOptions` / `TrafficRenderOptions` presentation-only 结构体。
 
-```rust
-struct CommandDescriptor {
-    id: &'static str,
-    capability: CommandCapability,
-    output_mode: OutputMode,
-}
+### AdminQueryService
 
-enum CommandCapability {
-    Readonly,
-    Mutating,
-    SensitiveBody,
-}
-```
+- 位置：`crates/bifrost-admin/src/query_service.rs:31`。
+- 已实现方法：`execute`、`search`、`search_stream`、`list_traffic`、`query_traffic_params`、`get_traffic_record`、`get_traffic_json`、`clear_traffic`。
+- 使用方：HTTP `handlers/search.rs`、`handlers/traffic.rs`、`remote_invoke/executor.rs`（仅当运行时注入 service，否则回退到 legacy HTTP fallback）。
 
-第一阶段命令 ID：
+### Remote wire 协议
 
-- `search.stream`
-- `traffic.list`
-- `traffic.get`
-- `traffic.clear`
+- `RemoteCommand`（`crates/bifrost-admin/src/remote_invoke/types.rs:404`）：
+  - `command: String`（第 408 行）—— legacy 通道，仍在使用。
+  - `args_json: Option<String>`（第 410 行）—— legacy 参数字符串。
+  - `query: Option<CanonicalQueryCommand>`（第 412 行）—— 新 typed 通道。
+- 转发规则：优先使用 `query` 字段；若为 `None`，fallback 到 `command + args_json` 解析。Phase 5 后 legacy 字段整个删除。
 
-### 语义参数与展示参数分离
+### Allowlist
 
-- `SearchArgs`：关键字、scope、filters、cursor、limit、max_scan、max_results — 已在 `bifrost-command` 落地
-- `SearchRenderOptions`：format、no_color、interactive — (planned, not yet shipped as of 2026-06-16)
-- `TrafficListArgs`：过滤和分页 — 已落地，含 `direction` / 各过滤字段
-- `TrafficRenderOptions`：table、compact、json、json-pretty — (planned, not yet shipped as of 2026-06-16)
+`ALLOWED_COMMANDS = ["status", "search.stream", "traffic.list", "traffic.get"]`（`types.rs:1511`）。
 
-remote 只传语义参数，本地 CLI 负责展示参数和交互参数。当前展示参数（format / no_color / interactive）仍内嵌在 `crates/bifrost-cli/src/commands/remote.rs` 的 `RemoteRenderMode` 枚举里，没有拆出独立类型。
+- `is_allowed_command`（`types.rs:1513`）唯一入口。
+- caller 侧在 `cli` 生成 `RemoteCommand` 时前置校验。
+- client 侧 executor 在真正执行前二次校验。
+- 未开放命令返回 `PermissionDenied`。
 
-## Structured Event Stream 设计
+## CLI
 
-> 状态：(planned, not yet shipped as of 2026-06-16)。当前 `crates/bifrost-command` 未导出 `CommandEvent` / `CommandBegin` / `SearchResultItem` / `TrafficRow` / `TrafficDetailEvent` / `CommandProgress` / `CommandDone` 等结构化事件类型，`AdminQueryService::execute` 返回 `Result<Value>`，executor 通过 `dispatch_query_with_stdout_sink` 将 JSON body 一次性写入 stdout sink，再由现有 `frame` 通道按字节推送。所谓 "emit 即推送" 目前在字节流层面成立，但事件层面的 typed `CommandEvent` 仍待实现。
+### 本地命令（本次改造范围）
 
-### 原则
+- `bifrost search` — 主搜索入口，clap typed options。
+- `bifrost traffic search` — search 别名，共用同一 canonical command 构造函数。
+- `bifrost traffic list` — 按 filter/pagination 列表。
+- `bifrost traffic get <id> [--request-body] [--response-body]` — 明细。
+- `bifrost traffic clear` — 破坏性，capability=`Mutating`，只本地入口。
 
-1. `stream-first`：命令一旦产出可展示事件，就立即 emit
-2. 不允许等命令结束后再统一渲染并一次性回传
-3. remote transport 继续沿用当前 `frame/exit` 的实时推送语义
-4. 本地与远端的差异只能体现在 transport，不允许体现在是否流式输出
+### 远端命令
 
-### 事件模型
+- `bifrost remote traffic search` — 与本地 `search` 等价，走 canonical command。
+- `bifrost remote traffic list` — 与本地 `traffic list` 等价。
+- `bifrost remote traffic get` — 与本地 `traffic get` 等价，`--request-body` / `--response-body` 均支持。
+- `bifrost remote traffic clear` — 显式**不暴露**为 CLI 子命令；实际清理必须通过 `remote exec` 且需要 shell 授权。
 
-```rust
-enum CommandEvent {
-    Begin(CommandBegin),
-    SearchResult(SearchResultItem),
-    TrafficRow(TrafficRow),
-    TrafficDetail(TrafficDetailEvent),
-    Progress(CommandProgress),
-    Done(CommandDone),
-}
-```
+注意：仓库确认 `bifrost remote search` 顶层子命令并不存在，`RemoteCommands` 枚举只包含 `Conn / File / Traffic / Exec / Job / KeepAwake`。远端搜索一律通过 `remote traffic search` 入口。
 
-说明：
+## Web
 
-- `search` 持续产出 `SearchResult` / `Progress`
-- `traffic list` 逐条产出 `TrafficRow`
-- `traffic get` 按 detail / request_body / response_body 片段产出 `TrafficDetail`
-- `status` 不纳入这轮 canonical event stream
+不适用。本方案不改变 Web UI。
 
-### 现有 `frame/exit` 协议要求
+## Admin API
 
-- `frame`：承载 `CommandEvent` 的 JSON 编码
-- `exit`：只表示命令终态，不承担最终整段文本回传
+- `GET /_bifrost/api/search/*` — 由 `handlers/search.rs` 处理，内部委托 `AdminQueryService`。
+- `GET /_bifrost/api/traffic/*` — 由 `handlers/traffic.rs` 处理，内部委托 `AdminQueryService`。
+- `POST /_bifrost/api/remote-invoke/*` — remote executor 入口，参数中的 `query` 字段（typed）走 `AdminQueryService`；`command + args_json`（legacy）走 legacy HTTP 拼接 fallback。
+- `GET /_bifrost/api/remote-invoke/calls?limit=N&before=<cursor>` — 调用历史分页；历史文件位于 `admin/remote_invoke_call_history/<client-key>.jsonl`，向后兼容 legacy 命令 id。
 
-保证：
+## Sync 边界
 
-1. caller 在收到每个 frame 后立即渲染
-2. relay / caller / client 三侧保持现有实时输出体验
-3. `shell.exec` 与查询命令继续复用同一套流式传输骨架
+- 本方案不涉及 sync 上下行同步。
+- `admin/remote_invoke_call_history/*.jsonl` 属于本地历史，不同步。
+- allowlist 与 grant 状态属于本地 relay/client，不同步。
 
-## Query Runner 设计
+## Phase 1：canonical command 内核（已落地）
 
-> 状态：trait 抽象 (planned, not yet shipped as of 2026-06-16)。`QueryBackend` / `QueryRunner` / `CommandEventSink` 在仓库内尚无对应符号；当前唯一执行内核 `AdminQueryService` 直接提供 `execute(&CanonicalQueryCommand) -> Result<Value>` 与 `search_stream(..., on_result, on_progress)` 这类闭包 API，未抽象出统一 trait。下面的接口仍按目标设计列出。
+- 新增 crate `crates/bifrost-command`。
+- 新增 `CanonicalQueryCommand` + 参数结构体 + serde round-trip 测试。
+- 新增 `AdminQueryService` 并接入 HTTP handler。
+- Remote executor 支持在 `query_service` 已注入时直接调用 service。
+- Allowlist 收敛到 canonical id：`status` / `search.stream` / `traffic.list` / `traffic.get`。
 
-### 统一 backend 接口
+完成标志：源码存在 `crates/bifrost-command/src/lib.rs` + `crates/bifrost-admin/src/query_service.rs`，`ALLOWED_COMMANDS` 常量已收敛。
 
-```rust
-trait QueryBackend {
-    fn execute(
-        &self,
-        command: &CanonicalQueryCommand,
-        sink: &mut dyn CommandEventSink,
-    ) -> Result<()>;
-}
-```
-
-`QueryRunner` 只负责：
-
-- 接收 `CanonicalQueryCommand`
-- 分发到 backend
-- 统一错误模型
-- 统一 structured event stream
-- 约束 backend 遵守“有事件就立刻 emit”
-
-### Backend 实现
-
-`bifrost-admin` 内部 service backend 是唯一执行内核。
-
-> 状态（2026-06-16）：执行内核 `AdminQueryService`（`crates/bifrost-admin/src/query_service.rs`）已实装，HTTP search/traffic handler（`crates/bifrost-admin/src/handlers/search.rs`、`handlers/traffic.rs`）已迁移到调用它；remote executor 在 `query_service` 注入后会优先走 `AdminQueryService` 路径。仍未完成：(1) `CommandEventSink` 输出契约——目前 service 返回 `Result<Value>` / 闭包 callback，未抽出统一 sink；(2) 本地 CLI 仍走 HTTP admin API 而非直接 in-process 调用；(3) executor 在未注入 `query_service` 时仍保留 legacy `list_traffic` / `get_traffic` / `search_stream` HTTP 拼接路径作为 fallback。下面三层角色描述为目标态。
-
-实现拆成三层角色：
-
-1. `AdminQueryService / DirectAdminServiceBackend`
-   - 位于 `bifrost-admin`（已落地，`crates/bifrost-admin/src/query_service.rs`）
-   - 作为 `search/traffic` canonical command 的唯一执行内核
-   - 对外目前暴露 `execute(&CanonicalQueryCommand) -> Result<Value>` 与 `search_stream(..., on_result, on_progress)` 闭包接口；统一 `CommandEventSink` 输出契约为 (planned, not yet shipped as of 2026-06-16)
-2. `Local CLI Transport Adapter`
-   - 位于 `bifrost-cli`
-   - 目标：把 canonical command 发送给运行中的 admin 进程，并接收结构化事件流
-   - 当前状态：CLI 仍走 HTTP admin API（`crates/bifrost-cli/src/commands/search.rs::start_search_stream` 等），尚未改造为 thin canonical-command transport adapter — (planned, not yet shipped as of 2026-06-16)
-3. `Remote Executor Adapter`
-   - 位于 `bifrost-admin::remote_invoke`（部分落地）
-   - 现状：`crates/bifrost-admin/src/remote_invoke/executor.rs::dispatch_query_with_stdout_sink` 在 `query_service.is_some()` 时直接调用 `AdminQueryService`，否则回落到 `search_stream` / `list_traffic` / `get_traffic` 等历史 HTTP 调用与文本格式化路径——完全删除 legacy 分支为 (planned, not yet shipped as of 2026-06-16)
-
-关键原则：
-
-1. 执行内核只有一份，在 `bifrost-admin`（已成立）
-2. 本地 CLI 和 remote executor 都只是这份内核的适配层（remote executor 已部分接入，本地 CLI 仍走 HTTP 适配；完整收敛为 (planned, not yet shipped as of 2026-06-16)）
-3. HTTP handler 改为调用同一个 `AdminQueryService`（已成立，见 `handlers/search.rs`、`handlers/traffic.rs`）
-
-## Remote Transport 设计
-
-> 状态（2026-06-16）：typed `query` 字段已在 `RemoteCommand` 上线（`crates/bifrost-admin/src/remote_invoke/types.rs` 现有 `query: Option<CanonicalQueryCommand>`）。但 legacy `command: String + args_json: Option<String>` 字段同样保留，CLI 在构造请求时同时填充两套字段（见 `crates/bifrost-cli/src/commands/remote.rs` 中各 `BuiltRemoteCommand` 分支），executor 也未删除 legacy 解析路径。"caller 只发送 `query` / 不再接受 legacy 协议" 仍为 (planned, not yet shipped as of 2026-06-16)。
-
-### 协议定义
-
-remote invoke 查询命令统一改为 typed payload：
-
-```rust
-struct RemoteCommand {
-    kind: CommandKind,
-    query: CanonicalQueryCommand,
-}
-```
-
-现状（参考实现）：
-
-```rust
-pub struct RemoteCommand {
-    pub kind: CommandKind,
-    pub command: String,                       // legacy id（如 "search.stream"），仍在使用
-    pub args_json: Option<String>,             // legacy 参数 JSON，仍在使用
-    pub query: Option<CanonicalQueryCommand>,  // typed payload（已落地）
-    // ... 其余 shell/file/power 字段
-}
-```
-
-规则：
-
-1. caller 只发送 `query` — (planned, not yet shipped as of 2026-06-16)
-2. client 只执行 `query` — (planned, not yet shipped as of 2026-06-16)，executor 在 `query_service.is_none()` 时仍走 legacy HTTP 拼接路径
-3. remote query 路径不再接受 `command.command + args_json` 形式的 legacy 查询协议 — (planned, not yet shipped as of 2026-06-16)
-4. 现有 remote query 字符串命令实现直接删除，不保留兼容转换层 — (planned, not yet shipped as of 2026-06-16)
-
-### 流式约束
-
-1. client 每产生一个 `CommandEvent`，就立刻通过 `frame` 推送给 caller
-2. caller 不等待 `Done/Exit` 才开始渲染
-3. 任何 canonical command 都不能退化成先缓冲、后整包返回
-
-`status` 不参与这组 typed query 协议收敛，继续走现有特殊命令路径。
-
-## Allowlist / Policy 设计
-
-> 状态（2026-06-16）：allowlist 已切换到 canonical command id。`crates/bifrost-admin/src/remote_invoke/types.rs::ALLOWED_COMMANDS = ["status", "search.stream", "traffic.list", "traffic.get"]`；`traffic.clear`、`traffic.search`、`search.get` 等都不在白名单中，executor 对 `traffic.clear` 也做了显式 "not enabled for remote invoke" 拒绝。两层校验（caller 前置 + client 最终）落在 executor 的 `validate_query` / `validate_query_transport_kind` 中。`relay 前置校验` 部分（独立于 client）暂未抽出，为 (planned, not yet shipped as of 2026-06-16)；按 `CommandCapability` 分桶配置（`remote_mutating` 段）也是 (planned, not yet shipped as of 2026-06-16)。
-
-allowlist 面向 canonical command descriptor。
-
-示例：
-
-```toml
-[remote_query]
-allowed_commands = [
-  "search.stream",
-  "traffic.list",
-  "traffic.get",
-]
-
-[remote_mutating]
-allowed_commands = [
-  "traffic.clear",
-]
-```
-
-采用两层控制：
-
-1. relay / caller 前置校验
-2. client 本地最终校验
-
-`status` 保持现有 allowlist / policy 定义，不并入这轮 canonical allowlist。
-
-## 分阶段实施
-
-### Phase 0：冻结继续扩散
-
-> 状态：已落地。
-
-1. 不再新增 remote 专用查询字符串命令
-2. 现有 remote 查询字符串命令停止继续扩展
-3. `remote-search-limit-split.md`、`remote-traffic-cli-enum-size.md` 等存量改动只作为临时补丁
-
-### Phase 1：抽出 canonical command、event stream 与 admin service 内核
-
-> 状态（2026-06-16）：基本完成。`bifrost-command` crate、`CanonicalQueryCommand`、`AdminQueryService`、HTTP handler 迁移、`bifrost search` / `bifrost traffic search` 共享语义命令均已上线；唯一未完成的是 "event stream" 部分——`CommandEvent` 等 typed 事件类型尚未抽出（参见 Structured Event Stream 一节），"删除 remote query legacy 查询协议解析入口" 也仍在推进，executor 仍同时识别 legacy `command.command + args_json` 与 typed `query`。
+## Phase 2：CLI 与 executor 完全走 typed query（进行中）
 
 执行项：
 
-1. 新增共享 `CanonicalQueryCommand`
-2. 在 `bifrost-admin` 中新增 `AdminQueryService`
-3. 拆分 `search.rs` / `traffic.rs` 中的语义参数、service 执行、事件流发射、输出渲染
-4. admin HTTP handler 改为调用 `AdminQueryService`
-5. 删除 remote query 路径中的 legacy 查询协议解析入口
+1. 让 CLI 在构造 `RemoteCommand` 时始终填充 `query`，`command + args_json` 只作为 legacy 兼容分支。
+2. Remote executor 在有 `query` 时不再进入 legacy 分支；同步补齐 typed 路径对 `search.stream` / `traffic.list` / `traffic.get` 的分页、body flag、format 参数处理。
+3. `admin/remote_invoke_call_history/*.jsonl` 记录 typed command id，legacy id 只在历史读取时兼容展示。
 
-完成标准：
+完成标志：`git log --grep=isomorphic` 中出现将 `worker.rs` / `call_history_store.rs` 中所有 `search.get` / `traffic.search` 引用替换为 canonical id 的提交。
 
-- admin 内部存在唯一的 `search/traffic` 执行内核
-- HTTP handler 与后续 remote executor 复用该内核
-- `bifrost search` 与 `bifrost traffic search` 底层共享同一语义命令
+状态：(planned, not yet shipped as of 2026-07-03)。当前 `worker.rs` 与 `call_history_store.rs` 测试仍引用 legacy id 字符串。
 
-### Phase 2：本地 CLI 改为 thin transport adapter，remote client 改为直接执行 canonical command
-
-> 状态（2026-06-16）：(planned, not yet shipped as of 2026-06-16)。CLI 端仍以 HTTP admin API 形式与 admin 通信；remote caller 已能构造 `CanonicalQueryCommand` 并填到 `RemoteCommand.query`，但同时还在填 legacy `command + args_json`；client executor 走 `dispatch_query_with_stdout_sink`，在 `query_service` 已注入时直接调 `AdminQueryService`，但事件级（per-frame）实时推送仍依赖现有字节流 frame，没有 typed 事件层。
+## Phase 3：结构化事件流
 
 执行项：
 
-1. 本地 CLI 改为 thin transport adapter
-2. remote caller 构造 `query`
-3. client executor 反序列化 `query`
-4. client executor 直接调用 `QueryRunner(DirectAdminServiceBackend)`
+1. 新增 `CommandEvent`（`crates/bifrost-command`）：`Frame(Hit | TrafficRow | ProgressCursor) | Error | Done`。
+2. Remote executor 直接把 service 迭代结果转成 `CommandEvent`，不再在远端做文本渲染。
+3. CLI presentation 层新增 `SearchRenderOptions` / `TrafficRenderOptions`，本地与远端复用同一渲染器。
 
-完成标准：
+完成标志：远端 executor 中不存在 search/traffic 专用格式化字符串代码。
 
-- remote `search/traffic` 功能与本地语义对齐
-- 新增过滤条件时无需再改两套实现
-- client executor 发出的每个事件都能实时推送到 caller
+状态：(planned, not yet shipped as of 2026-07-03)。
 
-### Phase 3：caller 侧复用本地 renderer
-
-> 状态（2026-06-16）：(planned, not yet shipped as of 2026-06-16)。caller 端仍维护 `RemoteRenderMode` 一套渲染逻辑（`crates/bifrost-cli/src/commands/remote.rs`），尚未与本地 `search` / `traffic` renderer 完全复用同一份代码。
+## Phase 4：QueryRunner / QueryBackend 抽象
 
 执行项：
 
-1. remote 返回 structured event stream
-2. caller 使用与本地相同的 renderer，并按事件到达顺序增量渲染
-3. 删除 remote executor 中的文本渲染逻辑
+1. 定义 `QueryRunner` trait（同步/异步 + 流式）。
+2. `QueryBackend`：`LocalHttp` / `RemoteInvoke`（typed）两种实现。
+3. CLI 命令根据参数选择 backend，命令实现本身不感知本地还是远端。
 
-完成标准：
+完成标志：`commands/search.rs` / `commands/traffic.rs` / `commands/remote.rs` 之间不再存在实现重复。
 
-- local/remote 默认 summary 一致
-- local/remote `table|compact|json|json-pretty` 行为一致
-- remote 输出首帧不会被延迟到命令结束后
+状态：(planned, not yet shipped as of 2026-07-03)。
 
-### Phase 4：切换 allowlist 到 canonical command id
-
-> 状态（2026-06-16）：基本落地。`ALLOWED_COMMANDS` 已是 canonical id 列表，legacy `traffic.search` / `search.get` 不再出现在白名单中。仍待做：按 capability 维度拆出 `[remote_query]` / `[remote_mutating]` 等分桶 TOML（目前是一个扁平字符串数组），属 (planned, not yet shipped as of 2026-06-16)。
+## Phase 5：删除 legacy remote query DSL
 
 执行项：
 
-1. allowlist 改为配置 canonical command id / capability
-2. 删除 legacy 查询字符串命令对应的 allowlist 控制项
+1. `RemoteCommand` 上删除 `command: String` 与 `args_json: Option<String>` 字段，只保留 `query`。
+2. Executor `list_traffic` / `get_traffic` / `search_stream` legacy HTTP 拼接分支删除。
+3. `worker.rs` / `call_history_store.rs` 测试中的 `search.get` / `traffic.search` 字符串替换为 canonical id。
+4. `human_tests/remote-invoke.md` 中所有 legacy 命令示例更新为 typed 协议。
 
-完成标准：
+完成标志：仓库中 `rg "search\.get|traffic\.search"` 只在历史记录 fixture 中出现。
 
-- 白名单与产品能力一一对应
-- 新能力开放只改 policy，不再新增 remote 专用命令实现
-
-### Phase 5：删除 legacy remote query DSL
-
-> 状态（2026-06-16）：(planned, not yet shipped as of 2026-06-16)。`RemoteCommand` 上的 `command: String + args_json: Option<String>` 字段仍在使用，executor 的 `list_traffic` / `get_traffic` / `search_stream` 等 legacy HTTP 拼接 + 文本格式化路径在 `query_service` 未注入时仍是回退路径，相关测试（`worker.rs`、`call_history_store.rs`）也仍引用 `search.get` / `traffic.search` 等 legacy id 作为历史记录字符串。
-
-执行项：
-
-1. 删除 `search.get` / `traffic.search` / `traffic.list` / `traffic.get` / `traffic.clear` 这类 remote query legacy 主路径
-2. 删除 legacy 查询协议解析、转换、测试和文档
-
-完成标准：
-
-- remote 查询命令完全使用 typed command
-- remote executor 不再包含 legacy 搜索/流量专用格式化逻辑
-
-## 影响范围
-
-### 本次改造纳入范围
-
-本次改造只纳入下面两组命令：
-
-- 本地：`bifrost search`、`bifrost traffic search`、`bifrost traffic list`、`bifrost traffic get`、`bifrost traffic clear`
-- 远端：`bifrost remote traffic search`、`bifrost remote traffic list`、`bifrost remote traffic get`（注：截至 2026-06-16，`bifrost remote search` 顶层子命令并不存在，远端搜索一律通过 `bifrost remote traffic search` 入口；CLI 端 `RemoteCommands` 枚举只有 `Conn` / `File` / `Traffic` / `Exec` / `Job` / `KeepAwake`，无独立 `Search` 变体）
-
-### 必须修改的模块
-
-#### 共享命令与事件模型
-
-- 新增 `crates/bifrost-command`
-- 新增 `CanonicalQueryCommand`、`CommandDescriptor`、`CommandEvent`
-- 新增 remote typed payload 的 serde 编解码
-
-#### CLI 入口与参数解析
-
-- `crates/bifrost-cli/src/cli.rs`
-- `crates/bifrost-cli/src/main.rs`
-
-#### 本地命令执行与渲染
-
-- `crates/bifrost-cli/src/commands/search.rs`
-- `crates/bifrost-cli/src/commands/traffic.rs`
-- `crates/bifrost-cli/src/commands/remote.rs`
-
-#### Admin 执行内核
-
-- `crates/bifrost-admin/src/...` 下新增 `AdminQueryService`
-- `crates/bifrost-admin/src/search/engine.rs`
-- `crates/bifrost-admin/src/handlers/search.rs`
-- `crates/bifrost-admin/src/handlers/traffic.rs`
-
-#### Remote Query 执行链路
-
-- `crates/bifrost-admin/src/remote_invoke/types.rs`
-- `crates/bifrost-admin/src/remote_invoke/executor.rs`
-
-### 必须删除的实现
-
-- `search.get`、`traffic.search` 这类 remote query 字符串协议入口
-- remote query 的 `command.command + args_json` 查询协议解析路径
-- remote executor 内部 search/traffic 专用 URL 构造
-- remote executor 内部 search/traffic 专用文本渲染
-- legacy 查询协议对应的 allowlist 控制项
-- legacy 查询协议对应的测试、文档、脚本引用
-
-### 明确不改的范围
-
-- `status` 命令定义、协议、执行路径、allowlist 与渲染逻辑
-- `shell.exec` 及其他非 `search/traffic` 查询命令
-- relay / grant / 鉴权总体模型
-- 当前 remote invoke 的 `frame/exit` 流式骨架
-- 本地 CLI 的交互式选择器与 TTY 展示细节
-
-### 文档与测试范围
-
-本次改造同步覆盖以下文档与测试资产：
-
-- `human_tests/remote-invoke.md`
-- `human_tests/readme.md`
-- `search` / `traffic` / `remote` 相关 CLI 文档
-- remote query 协议相关 E2E、单元测试和 human_tests 用例
-
-## 风险与应对
-
-### 1. 切换窗口风险
-
-风险：
-
-- caller 与 client 必须同步升级到 typed query 协议
-- 切换窗口内旧脚本或旧调用方会立即失效
-
-应对：
-
-- 本次改造与 caller/client 同步发布
-- 合并前清点仓库内所有 remote query 调用入口并一次性迁移
-- 删除 legacy 实现前先完成仓库内脚本、测试、文档的全量替换
-
-### 2. 重构范围过大
-
-风险：
-
-- 一次性同时改 parse、runner、renderer、transport，回归面太大
-
-应对：
-
-- 强制按 Phase 分步推进
-- 先把 admin service 内核收敛出来，再让本地 CLI / remote / HTTP handler 逐步接入
-
-### 3. 进程边界与所有权不清
-
-风险：
-
-- 容易误把“本地 CLI 直接调用 service”理解成跨进程直连
-
-应对：
-
-- 明确 `AdminQueryService` 只存在于 `bifrost-admin` 进程内
-- 本地 CLI 通过 transport 与运行中的 admin 进程通信
-- remote executor 由于与 admin 同进程，可以直接调用 service
-
-### 4. 交互式能力边界不清
-
-风险：
-
-- 本地 `--interactive`、`traffic get` 交互选择器不适合直接进入 remote
-
-应对：
-
-- 明确交互仅属于 CLI presentation
-- canonical command 不包含交互语义
-
-### 5. 写操作命令开放过快
-
-风险：
-
-- 在 capability 和 policy 没稳定前，把 `traffic clear` 放进 remote 命令面，安全边界不清
-
-应对：
-
-- 第一阶段只让同构框架支持写命令类型定义
-- 默认 policy 仍只开放 readonly
+状态：(planned, not yet shipped as of 2026-07-03)。
 
 ## 测试方案
 
 ### 单元测试
 
-1. `search` 与 `traffic search` 构造出相同的 `CanonicalQueryCommand::Search`
-2. canonical command 的 serde 编解码稳定
-3. remote typed payload 的 serde 编解码稳定
-4. command descriptor / capability / allowlist 匹配正确
-5. local renderer 对本地与 remote 返回的 structured event 渲染一致
-6. runner 和 transport 遵守“emit 即推送”的流式约束
+- `crates/bifrost-command/src/lib.rs` 内 serde round-trip：`CanonicalQueryCommand::{Search,TrafficList,TrafficGet,TrafficClear}` 序列化/反序列化稳定。
+- `crates/bifrost-admin/src/query_service.rs` 内 `execute`、`search`、`list_traffic`、`get_traffic_json` 正确路由。
+- `crates/bifrost-admin/src/remote_invoke/types.rs` 内 `is_allowed_command` 拒绝 `search.get` / `traffic.search` / `traffic.clear` 等非白名单命令。
+- `crates/bifrost-admin/src/remote_invoke/worker.rs` 与 `call_history_store.rs`：legacy 与 typed 命令历史 round-trip。
 
-### E2E 测试
+### E2E 测试（`crates/bifrost-e2e`）
 
-1. `bifrost search` 与 `bifrost remote traffic search` 在同一批 seed traffic 上返回相同结果集（注：远端入口为 `traffic search`，并无独立 `remote search` 子命令）
-2. `bifrost traffic list` 与 `bifrost remote traffic list` 的过滤语义一致
-3. `bifrost traffic get` 与 `bifrost remote traffic get` 的 body 选项一致
-4. remote `traffic search` / `traffic list` / `traffic get` 的首个输出事件会在命令完成前到达 caller
-5. 仓库内所有 remote query 调用入口都使用 typed query 协议 — (planned, not yet shipped as of 2026-06-16)
-6. shell E2E 在 CI shard 中收到 `SKIP_BUILD=true` 时必须复用 workflow 已下载的 `target/release/bifrost`，禁止在单个测试脚本内再次执行 release build，避免 16 路并行 shell shard 因 Cargo 锁等待耗尽 `TIMEOUT`。
+- 覆盖 `bifrost search` 与 `bifrost remote traffic search` 在同一 seed traffic 集合下结果一致。
+- `traffic list` filter/pagination 本地与远端一致。
+- `traffic get` body flag 本地与远端一致。
+- 流式回归：大结果集下第一个 frame 早于 exit 到达 caller。
+- 未开放 canonical command 被拒绝：`traffic.clear` 通过 `bifrost remote` 入口被拒绝。
 
-### 真实场景测试（human_tests）
+### human_tests
 
-> 状态（2026-06-16）：`human_tests/remote-invoke.md` 中尚未出现 `TC-RI-ISO-*` 编号的用例（远端搜索 `TC-RI-ISO` 关键字在 `human_tests/` 下无匹配）；以下条目均为 (planned, not yet shipped as of 2026-06-16)。`TC-RI-ISO-01` 中的 `remote search` 应理解为 `bifrost remote traffic search`。
+必须在 `human_tests/remote-invoke.md` 追加或更新以下用例，并同步 `human_tests/readme.md` 索引：
 
-实现阶段必须更新 `human_tests/remote-invoke.md`，并新增以下用例：
+1. `TC-RI-ISO-01`：`remote traffic search` 与本地 `search` 支持相同过滤条件，结果一致。
+2. `TC-RI-ISO-02`：`remote traffic list` 与本地 `traffic list` 支持相同过滤条件，结果一致。
+3. `TC-RI-ISO-03`：`remote traffic get --request-body --response-body` 与本地行为一致。
+4. `TC-RI-ISO-04`：未开放到 allowlist 的 canonical command 被拒绝（`traffic.clear`、任意未列入 `ALLOWED_COMMANDS` 的 id）。
+5. `TC-RI-ISO-05`：仓库内所有 remote query 入口都已切换到 typed query 协议且可正常执行。
+6. `TC-RI-ISO-06`：远程调用执行后，输出内容一旦产生就立即推送到 caller，而不是等待命令结束。
 
-1. `TC-RI-ISO-01`：`remote traffic search` 与本地 `search` 支持相同过滤条件，结果一致
-2. `TC-RI-ISO-02`：`remote traffic list` 与本地 `traffic list` 支持相同过滤条件，结果一致
-3. `TC-RI-ISO-03`：`remote traffic get --request-body --response-body` 与本地行为一致
-4. `TC-RI-ISO-04`：未开放到 allowlist 的 canonical command 会被拒绝
-5. `TC-RI-ISO-05`：仓库内所有 remote query 入口都已切换到 typed query 协议且可正常执行
-6. `TC-RI-ISO-06`：远程调用执行后，输出内容一旦产生就立即推送到 caller，而不是等待命令结束
+状态（2026-07-03）：`human_tests/remote-invoke.md` 尚未出现 `TC-RI-ISO-*` 编号（`rg "TC-RI-ISO" human_tests/` 无匹配），以上均为 (planned, not yet shipped as of 2026-07-03)。TC-RI-ISO-01 中的 `remote search` 应理解为 `bifrost remote traffic search`。
 
-同时必须同步更新 `human_tests/readme.md`。
+### 影响关联的既有 human_tests
 
-### 改造后全面回归验证
+- `human_tests/cli-start-stop-status.md`（`admin/remote_invoke_call_history/*.jsonl` 兼容读取）— 不允许因 legacy 命令 id 删除而破坏历史读取。
+- `human_tests/ci-windows-unit-tests.md` TC-CWUT-05（`cargo test -p bifrost-admin remote_invoke::file_access_roots::tests`）— allowlist 收敛不得破坏 file access root 相关测试。
 
-改造完成后，除上述专项测试外，必须执行完整回归验证，覆盖以下范围：
+## Review / Fix / Test 闭环
 
-#### 1. 本地命令回归
+- 每个 Phase 落地前必须先跑：`cargo fmt --all -- --check`、`cargo clippy --workspace --all-targets --all-features -- -D warnings`、`cargo test --workspace --all-features`。
+- Phase 3 / 4 涉及 executor 与 renderer 拆分，必须在 review 阶段确认远端 executor 内不存在 search / traffic 专用格式化字符串。
+- Phase 5 删除 legacy 字段前，必须通过 `rg "args_json|command\.command"` 扫描仓库，确认所有调用点已切换。
+- human_tests 更新与代码提交同 PR，避免文档与实现漂移。
 
-1. `bifrost search` 主路径可用
-2. `bifrost traffic search` 与 `bifrost search` 结果一致
-3. `bifrost traffic list` 的过滤、分页、格式化输出保持可用
-4. `bifrost traffic get` 的详情、请求体、响应体输出保持可用
-5. `bifrost traffic clear` 的行为、返回码和提示文案保持可用
+## 风险与决策
 
-#### 2. 远端命令回归
+### 1. 切换窗口风险
 
-1. `bifrost remote traffic search` 主路径可用（顶层 `bifrost remote search` 子命令并不存在，搜索一律走 `traffic search`）
-2. `bifrost remote traffic search` 与本地 `bifrost search` / `bifrost traffic search` 结果一致
-3. `bifrost remote traffic list` 的过滤行为与本地一致
-4. `bifrost remote traffic get` 的详情、请求体、响应体输出与本地一致
-5. `bifrost remote traffic clear` 不暴露为 CLI 子命令（已确认：`ALLOWED_COMMANDS` 不含 `traffic.clear`，executor 显式拒绝）；清理远端流量需要明确 shell 授权后走 `remote exec`
+- 风险：caller 与 client 必须同步升级到 typed query 协议；切换窗口内旧脚本或旧调用方会立即失效。
+- 决策：本次改造与 caller/client 同步发布；合并前清点仓库内所有 remote query 调用入口并一次性迁移；删除 legacy 实现前先完成仓库内脚本、测试、文档的全量替换。
 
-#### 3. 流式输出回归
+### 2. 重构范围过大
 
-1. 本地查询命令保持增量输出
-2. 远端查询命令保持 `frame` 实时推送
-3. caller 在收到首个 `frame` 后立即开始渲染
-4. 命令结束前已经输出的内容不会被延迟到 `exit` 后才显示
-5. 大结果集场景下输出顺序稳定，`Done` 事件只在末尾出现一次
+- 风险：一次性同时改 parse、runner、renderer、transport，回归面太大。
+- 决策：按 Phase 分步推进；先把 admin service 内核收敛出来，再让本地 CLI / remote / HTTP handler 逐步接入。
 
-#### 4. 渲染与格式回归
+### 3. 进程边界与所有权不清
 
-1. local/remote 默认 summary 一致
-2. local/remote `table|compact|json|json-pretty` 输出一致
-3. `--no-color` 在本地和远端调用路径表现一致
-4. 请求体与响应体分段输出在本地和远端表现一致
+- 风险：容易误把“本地 CLI 直接调用 service”理解成跨进程直连。
+- 决策：明确 `AdminQueryService` 只存在于 `bifrost-admin` 进程内；本地 CLI 通过 transport 与运行中的 admin 进程通信；remote executor 由于与 admin 同进程，可以直接调用 service。
 
-#### 5. HTTP/Admin API 回归
+### 4. 交互式能力边界不清
 
-1. HTTP search handler 改造后仍返回正确数据
-2. HTTP traffic handler 改造后仍返回正确数据
-3. admin service 内核改造后，HTTP 路径与 CLI 路径结果一致
+- 风险：本地 `--interactive`、`traffic get` 交互选择器不适合直接进入 remote。
+- 决策：交互仅属于 CLI presentation；canonical command 不包含交互语义。
 
-#### 6. Allowlist 与拒绝路径回归
+### 5. 写操作命令开放过快
 
-1. 未开放的 canonical command 会被 caller 前置校验拒绝
-2. 未开放的 canonical command 会被 client 最终校验拒绝
-3. `traffic.clear` 不能通过 `remote traffic` CLI 执行
+- 风险：在 capability 和 policy 没稳定前，把 `traffic clear` 放进 remote 命令面，安全边界不清。
+- 决策：第一阶段只让同构框架支持写命令类型定义；默认 policy 仍只开放 readonly；`traffic.clear` 明确不出现在 `ALLOWED_COMMANDS`。
 
-#### 7. 非改动范围回归
+### 6. legacy id 历史兼容
 
-1. `status` 命令行为、协议和渲染保持不变
-2. `shell.exec` 与其他非 `search/traffic` remote 命令保持不变
-3. relay / grant / 鉴权总体模型保持不变
-4. 现有 `frame/exit` 流式骨架在非 query 命令上保持不变
+- 风险：`admin/remote_invoke_call_history/*.jsonl` 中存量数据仍是 `search.get` / `traffic.search` 命名。
+- 决策：Phase 5 删除 legacy wire 字段时，历史读取路径必须继续兼容，仅在写入时使用 canonical id。
 
-#### 8. 删除项回归
+## 影响范围
 
-1. 仓库内不再存在 remote query legacy 协议调用入口
-2. 仓库内不再存在 query `command.command + args_json` 解析路径
-3. 仓库内不再存在 remote executor 的 search/traffic 文本渲染逻辑
-4. 文档、测试、脚本中不再引用已删除的 remote query legacy 协议
+### 必须修改的模块
 
-#### 9. 文档回归
+- `crates/bifrost-command/src/lib.rs`（新增 CommandEvent / CommandDescriptor / render options）。
+- `crates/bifrost-admin/src/query_service.rs`（Phase 3 typed event 迭代器）。
+- `crates/bifrost-admin/src/remote_invoke/executor.rs`（删除 legacy 分支）。
+- `crates/bifrost-admin/src/remote_invoke/types.rs`（Phase 5 删除 legacy 字段）。
+- `crates/bifrost-admin/src/remote_invoke/worker.rs`（历史记录使用 canonical id）。
+- `crates/bifrost-admin/src/remote_invoke/call_history_store.rs`（读旧写新）。
+- `crates/bifrost-cli/src/commands/search.rs` / `traffic.rs` / `remote.rs`（QueryRunner 抽象）。
+- `crates/bifrost-admin/src/handlers/search.rs` / `traffic.rs`（保持委托 service）。
+- `crates/bifrost-e2e` 相关 E2E 用例。
 
-1. CLI 文档与实际参数一致
-2. remote query 协议文档与 typed payload 实现一致
-3. `human_tests/readme.md` 索引与新增用例一致
-4. 设计文档中的改动范围、非改动范围与最终实现一致
+### 必须删除的实现
 
-## 校验要求
+- `search.get` / `traffic.search` 等 legacy remote query 字符串入口。
+- Remote executor 内部 search / traffic 专用 URL 构造与文本渲染。
+- Legacy 查询协议对应的 allowlist 控制项（已完成）。
+- Legacy 协议相关的测试 fixture 中的字符串命令名。
 
-正式实施该方案时，至少执行：
+### 明确不改的范围
 
-1. 定向单元测试：canonical command / typed payload / renderer parity
-2. 对应 remote invoke E2E 套件
-3. `cargo fmt --all -- --check`
-4. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-5. `cargo test --workspace --all-features`
-6. `bash scripts/ci/local-ci.sh` 或按影响范围执行最小必要子集
-7. `human_tests/remote-invoke.md` 全量相关用例
-8. 全面回归验证清单 1-9 全量执行并逐项确认通过
-
-## 文档更新要求
-
-实施落地时，需要同步更新：
-
-1. `human_tests/remote-invoke.md`
-2. `human_tests/readme.md`
-3. CLI 文档中与 `search` / `traffic` / `remote` 相关的参数说明
-4. 若 allowlist / capability 对外可见，则更新对应 remote invoke 文档
-
-## 特殊命令例外
-
-`status` 在这轮改造中明确作为特殊命令保留现状：
-
-1. 保持当前 remote `status` 的命令名与协议定义
-2. 保持当前 `status` 的 caller / client 执行路径
-3. 不把 `status` 收编进 `CanonicalQueryCommand`
-4. 不为 `status` 新增 `status.get` 这类 canonical command id
-5. 不要求 `status` 跟随本轮 `search/traffic` renderer 和 event schema 重构
-
-`status` 的任何重构都必须另开独立设计，不与本方案绑定推进。
-
-## 当前决策
-
-1. 共享命令模型放在 `crates/bifrost-command`（已落地）
-2. `bifrost-admin` 内部 service backend 是唯一执行内核（`AdminQueryService` 已落地，HTTP handler 已接入；remote executor 在 `query_service` 注入时接入，未注入时仍走 legacy fallback）
-3. `traffic clear` 保留本地 canonical command 模型，但不进入 `remote traffic` CLI 命令面（已落地：`TrafficClear` 变体存在，capability=`Mutating`，`ALLOWED_COMMANDS` 不含 `traffic.clear`，executor 显式拒绝）
-4. legacy 查询协议不保留兼容窗口，随本次改造一次性删除 — (planned, not yet shipped as of 2026-06-16)；目前 `command + args_json` 与 `query` 字段在 `RemoteCommand` 上并存
+- `status` 命令定义、协议、执行路径、allowlist 与渲染逻辑。
+- `shell.exec` 及其他非 `search/traffic` 查询命令。
+- relay / grant / 鉴权总体模型。
+- 当前 remote invoke 的 `frame/exit` 流式骨架。
+- 本地 CLI 的交互式选择器与 TTY 展示细节。
 
 ## 与现有设计的关系
 
 本方案是对以下文档的上层收敛：
 
-- `design/remote-command-bridge.md`
-- `design/remote-search-limit-split.md`
-- `design/remote-traffic-cli-enum-size.md`
-
-关系说明：
-
-1. `remote-command-bridge.md` 继续负责 relay / grant / 鉴权 / 远程调用总体模型
-2. 本文专门负责查询命令如何做到本地与远端同构
-3. `remote-search-limit-split.md`、`remote-traffic-cli-enum-size.md` 在该方案落地后归类为过渡期增量补丁，不再作为长期架构依据
+- `design/remote-command-bridge.md`（relay / grant / 鉴权总体模型）。
+- `design/remote-search-limit-split.md`、`design/remote-traffic-cli-enum-size.md`（过渡期增量补丁，本方案落地后归档）。
+- `design/remote-invoke-call-args-preview.md`（args 预览与 masking 语义）。

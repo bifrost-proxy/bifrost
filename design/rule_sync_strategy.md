@@ -1,39 +1,56 @@
 # Rule Sync Strategy
 
-## 目标
+## 背景
 
-在远端服务不可修改的前提下，为 rule 同步定义一套简单、稳定、可落地的策略，避免出现：
+Bifrost 的规则同步（`crates/bifrost-sync/src/manager.rs`）需要在远端服务不可修改、且没有版本号 / CAS / `If-Match` 支持的前提下，稳定地把多台设备之间的 rule 变化收敛。之前的做法混用 `name` / `remote_id` / `last_synced_at` 做主键或冲突判定，导致：
 
-- 本地删除后又被远端同步回来
-- 多端同时编辑后出现莫名其妙的创建/更新/删除失败
-- 同名规则被误判为同一对象
-- 状态越补越复杂，最后谁也说不清该覆盖谁
+- 本地删除后又被远端同步回来。
+- 多端同时编辑后出现莫名其妙的创建/更新/删除失败。
+- 同名规则被误判为同一对象。
+- 状态越补越复杂，最后谁也说不清该覆盖谁。
 
 本方案明确选择：
 
-- 不做冲突管理
-- 不引入服务端版本协商
-- 直接覆盖
+- 不做冲突管理。
+- 不引入服务端版本协商。
+- 直接覆盖。
 
-换句话说，我们接受“最终一致 + 明确优先级”，不追求强一致。
+也就是接受“最终一致 + 明确优先级”，不追求强一致。
 
-## 总体原则
+## 用户目标验证清单
 
-1. 远端只当对象存储，不承担并发协调职责。
-2. 活规则的同步状态写在 rule 文件里。
-3. 删除意图写在 `sync-state.json` 的 tombstone 里。
-4. 同步主键优先使用 `remote_id`，不是 `name`。
-5. 不做 conflict 状态，不做人工合并。
-6. 同步优先级为：
-   - 删除优先
-   - 本地修改优先
-   - 本地未修改时才接受远端覆盖
+### 必须实现
 
-## 数据模型
+- 本地稳定 `rule_id` 作为逻辑主键；rename 不变。
+- 同步主键优先使用 `remote_id`（而不是 `name`）。
+- 删除意图写在 `sync-state.json::deleted_rules` 的 tombstone 中，tombstone 不清理就不允许把同 `remote_id` / 同 `rule_name` 对象拉回。
+- 本地 `modified` 一律 push；本地 `synced` 才允许 pull。
+- 本地新建 `local_only` 一律 create 到远端；失败时保持 `local_only` 等待重试。
+- `sync_envs_to_local` 幂等：同一远端 env 第二次同步不写盘、不刷新 `last_synced_at`。
+- 同一进程内同一 group 的落盘同步用同一把锁串行化，避免多端并发读取导致重复写。
+- Startup 自动登录提示去重（`startup_login_prompt`）。
 
-### 规则文件
+### 必须不破坏
 
-每个规则文件保存以下同步元数据：
+- 已同步规则的 `remote_id` / `remote_user_id` / `remote_created_at` / `remote_updated_at` 元数据。
+- 用户手工编辑 `.bifrost` 文件后运行时能通过 filesystem watcher 感知（详见 `rules-filesystem-hot-reload.md`）。
+- Group 规则的 legacy 协议别名 / 最终换行归一化：远端 rule 先转成本地 canonical 内容再比较，避免每次 GET 都重复写。
+- Group 同步不受 tombstone 影响（tombstone 只针对 My Rules 单文件规则）。
+
+### 必须真实验证
+
+- 多端删除：A 删本地 → tombstone 持续删远端；B synced 时如果远端已消失，删除本地副本。
+- 多端修改：谁后同步谁覆盖。
+- 本地 `modified` + 远端消失：重新 create，保留本地修改优先。
+- 远端删除，本地 `synced`：删除本地副本。
+- 远端删除，本地 `modified`：重新 create。
+- Legacy 协议别名规则：sync 后本地不产生 diff，也不重复刷 `last_synced_at`。
+
+## 产品语义
+
+### 数据模型：规则文件同步元数据
+
+规则文件保存 `[meta.sync]` 段（`crates/bifrost-storage/src/rules.rs::RuleSyncMetadata`）：
 
 ```toml
 [meta.sync]
@@ -49,32 +66,17 @@ remote_updated_at = "2026-03-25T10:00:00Z"
 
 字段说明：
 
-- `rule_id`
-  - 本地稳定 ID，创建时生成，rename 不变
-- `status`
-  - `local_only`：只有本地有，还没绑定远端
-  - `synced`：上次同步后，本地与远端一致
-  - `modified`：本地有未同步改动
-- `remote_id`
-  - 已绑定的远端对象 ID
-- `last_synced_content_hash`
-  - 上次确认同步时本地写回的内容 hash，用于判断本地是否变化
-- `remote_updated_at`
-  - 远端对象最近一次更新时间（拉取时由服务端给出）
+- `rule_id`：本地稳定 ID，创建时生成，rename 不变。
+- `status`：`local_only`（尚未绑远端）/ `synced`（上次同步一致）/ `modified`（本地有未同步改动）。
+- `remote_id`：已绑定的远端对象 ID。
+- `last_synced_content_hash`：上次确认同步时的本地内容 hash，用于判断本地是否变化。
+- `remote_updated_at`：远端对象最近一次更新时间。
 
-实际字段定义见 `crates/bifrost-storage/src/rules.rs` 的 `RuleSyncMetadata`。
+`origin_device_id` 与 `last_synced_remote_updated_at` 字段仍未落地（planned as of 2026-07-02），当前依赖 `last_synced_content_hash` + `remote_updated_at` 判断同步快照。这里不引入 `conflict`，因为策略是“直接覆盖”，不走冲突分支。
 
-`origin_device_id` 与 `last_synced_remote_updated_at` 字段（planned, not yet shipped as of 2026-06-17）暂未落地，当前依赖 `last_synced_content_hash` + `remote_updated_at` 判断同步快照。
+### sync-state.json 结构
 
-这里不引入 `conflict`，因为策略已经定为“直接覆盖”，不走冲突分支。
-
-### sync-state.json
-
-`sync-state.json` 保存：
-
-1. session（token / user / last_sync_at / last_sync_action）
-2. tombstone（`deleted_rules`）
-3. `startup_login_prompt`：首次启动自动唤起登录的去重记录（见 `crates/bifrost-sync/src/manager.rs` 的 `SyncStateFile` 与 `StartupLoginPromptFile`）
+`crates/bifrost-sync/src/manager.rs::SyncStateFile`：
 
 ```json
 {
@@ -92,262 +94,207 @@ remote_updated_at = "2026-03-25T10:00:00Z"
       "base_content_hash": "sha256:xxxx",
       "deleted_at": "2026-03-25T10:01:00Z"
     }
+  },
+  "startup_login_prompt": {
+    "prompted_at": "2026-03-25T10:00:00Z"
   }
 }
 ```
 
-为什么 tombstone 还必须存在：
+为什么 tombstone 必须存在：
 
-- rule 文件删掉后，活对象元数据也一起没了
-- 不保留 tombstone，就无法区分：
-  - 这是本地明确删除
-  - 这是本地暂时还没拉到远端对象
+- rule 文件删掉后，活对象元数据也一起没了。
+- 不保留 tombstone 就无法区分「本地明确删除」和「本地暂时还没拉到远端对象」。
+- Tombstone 让多端删除意图真正落到远端，而不是被下一次拉取回滚。
 
-## 远端限制
+## 技术细节
 
-远端服务不可修改，意味着：
+### 远端限制
 
-- 没有 version
-- 没有 CAS
-- 不能做 `If-Match`
-- 不能做服务端冲突判断
+远端服务不可修改：
 
-所以客户端只能依赖：
+- 没有 version。
+- 没有 CAS。
+- 不能做 `If-Match`。
+- 不能做服务端冲突判断。
 
-- `remote_id`
-- `name`
-- `rule`
-- `create_time`
-- `update_time`
+客户端能依赖：`remote_id` / `name` / `rule` / `create_time` / `update_time`。因此只能做保守的覆盖策略。
 
-在这个前提下，客户端不能做严格并发控制，只能做保守的覆盖策略。
+### 同步语义（保守但明确）
 
-## 最终同步语义
+1. **删除优先**：只要某个 `rule_id` 有 tombstone → 优先删远端；未清除前不允许拉回同 `remote_id` / 同名对象。
+2. **本地修改优先**：`modified` → 直接 push 覆盖远端；成功后回到 `synced`。
+3. **本地未修改时接受远端覆盖**：`synced` 且远端内容变化 → 直接 pull 覆盖本地，更新同步快照。
+4. **本地新建直接 create**：`local_only` → 直接 create；成功后写回 `remote_id` 和快照；同名冲突时报错让用户改名。
 
-### 1. 删除优先
+### 同步流程
 
-只要某个 `rule_id` 有 tombstone：
+1. 加载本地 rule 文件。
+2. 加载 tombstone。
+3. 拉取远端规则。
+4. 优先处理 tombstone。
+5. 再处理活规则。
+6. 持久化状态。
 
-- 优先删远端
-- tombstone 未清除前，不允许把同名远端对象重新拉回本地
-- tombstone 未清除前，不允许把同 `remote_id` 的对象当成新对象同步
+#### 第一步：处理 tombstone
 
-这是为了彻底解决“本地删除后远端又被拉回来”的问题。
+- 远端不再存在按 `remote_id` 或 `rule_name` 匹配的对象，且 tombstone 至少存在 `TOMBSTONE_MIN_AGE_SECS`（当前 120 秒）→ 清除 tombstone。
+- 远端对象存在（`env.id == tombstone.remote_id || env.name == tombstone.rule_name`）→ 请求删除。
+- 删除失败保留 tombstone，等待下次重试。
+- 超过 `TOMBSTONE_MAX_AGE_SECS`（当前 7 天）自动过期清除。
+- 严格收敛为“只按 `remote_id` 精确匹配”仍未落地（planned as of 2026-07-02）。
 
-### 2. 本地修改优先
+#### 第二步：处理活规则
 
-如果本地 rule 是 `modified`：
+本地存在、远端不存在：
 
-- 无论远端是否也更新过，都直接用本地内容覆盖远端
-- update 成功后，状态回到 `synced`
+- `local_only` → 直接 create。
+- `modified` 且有 `remote_id` → 直接重新 create（保留本地修改优先语义）。
+- `synced` 且有 `remote_id` → 远端被其他端删除 → **直接删除本地副本**（尊重远端删除意图）。这是解决多端删除冲突的关键。
 
-这就是“不要管理冲突，直接覆盖”的落地语义。
+本地存在、远端也存在：
 
-### 3. 本地未修改时接受远端覆盖
+- `modified` → 直接 update 远端。
+- `synced` → 远端 hash 或更新时间变化 → pull 覆盖本地。
+- `local_only`（未绑 `remote_id`）→ 直接 create；若因异常已有 `remote_id` → 按 `modified` 处理。
 
-如果本地 rule 是 `synced`，且远端内容变化：
+本地不存在、远端存在：
 
-- 直接用远端覆盖本地
-- 更新本地同步快照
+- 无 tombstone → 直接 pull 到本地。
+- 有 tombstone → 跳过 pull，继续删远端。
 
-这意味着：
+### Group 同步幂等
 
-- 本地没动时，远端优先
-- 本地动过时，本地优先
+- `crates/bifrost-admin/src/handlers/group_rules.rs::sync_envs_to_local`：远端 rule 先转成本地 canonical 内容（协议别名归一化、去掉最终换行、清理 `last_synced_at` 类同步元信息）后与已落盘规则比较；相同则不写盘、不刷 `last_synced_at`。
+- 同一进程内同一 group 的落盘同步用同一把锁（`group_sync_lock_reuses_lock_for_same_group`）串行化，避免多端并发读取导致重复写。
+- Group 同步不受 tombstone 影响；tombstone 只针对 My Rules 单文件规则。
 
-### 4. 本地新建直接创建远端
+## CLI + Web + Admin API
 
-如果本地 rule 是 `local_only`：
+- 本方案不新增 CLI 命令；同步走后台任务与 `bifrost login` / `bifrost sync now`（现有命令）。
+- Rule 编辑页顶部展示：Sync status、Created at、Updated at、Last synced at、Remote updated at。
+- Sync 面板展示：pending tombstone 数量、最近一次同步时间、最近一次同步动作。
+- 不展示 conflict，因为没有 conflict。
+- Admin API `GET /api/rules/{name}` 返回的 `sync` 字段包含 `status` / `remote_id` / `remote_updated_at` / `last_synced_content_hash` 等；WebUI 直接消费即可。
 
-- 直接 create
-- 成功后写回 `remote_id` 和同步快照
+## Sync 边界（本方案自身的自我约束）
 
-如果远端因同名创建失败：
+- 同一台设备的规则文件删除 → tombstone；tombstone 存在期间禁止拉回同 remote_id / 同 name 对象。
+- Group 规则和 My Rules 分别处理：Group 走 group handler + `sync_envs_to_local`，My Rules 走 `SyncManager` 主循环。
+- 若同名冲突（远端已有同名对象），客户端直接报错让用户改名，不做自动合并。
+- Startup 自动登录只提示一次，通过 `startup_login_prompt.prompted_at` 去重。
 
-- 不做复杂冲突管理
-- 当前策略直接报错给用户
-- 用户改名后再创建
+## Phase 划分
 
-## 同步流程
+### Phase 1：规则文件补齐同步元数据
 
-同步必须严格按顺序处理：
+- rule 文件补 `rule_id`。
+- rule 文件补 `last_synced_content_hash`。
+- tombstone 补 `base_remote_updated_at` 与 `base_content_hash`。
 
-1. 加载本地 rule 文件
-2. 加载 tombstone
-3. 拉取远端规则
-4. 优先处理 tombstone
-5. 再处理活规则
-6. 持久化状态
+### Phase 2：同步主循环收敛
 
-### 第一步：处理 tombstone
+- 明确 tombstone 永远优先；`modified` 永远 push；`synced` 才允许 pull。
+- 本地 `synced` + 远端消失 → 删除本地副本。
+- 本地 `modified` + 远端消失 → 重新 create。
 
-对每个 tombstone：
+### Phase 3：Group 幂等与并发
 
-1. 如果远端不再存在按 `remote_id` 或 `rule_name` 匹配的对象，且 tombstone 至少存在 `TOMBSTONE_MIN_AGE_SECS`（当前 120 秒），即可清除该 tombstone
-2. 如果远端对象存在（按 `remote_id` 或同 `rule_name` 命中），直接请求删除
-3. 删除失败则保留 tombstone，等待下次重试
-4. 超过 `TOMBSTONE_MAX_AGE_SECS`（当前 7 天）的 tombstone 自动过期清除
+- `sync_envs_to_local` 归一化远端 env 内容后比较。
+- 同一 group 加锁串行化落盘。
+- 单元测试 `sync_envs_to_local_skips_unchanged_normalized_remote_rule_write`、`group_sync_lock_reuses_lock_for_same_group`。
 
-注意：当前实现 tombstone 仍按 `remote_id` 或 `rule_name` 任一命中来匹配远端对象（见 `crates/bifrost-sync/src/manager.rs` 中 `env.id == tombstone.remote_id || env.name == tombstone.rule_name`）。严格收敛为只按 `remote_id` 精确匹配（planned, not yet shipped as of 2026-06-17）。
+### Phase 4：观测与真实场景验证
 
-也就是说：
-
-- 只要 tombstone 在，就持续按 `remote_id` 或同名匹配并删除目标远端对象
-- 直到删成功、远端再也找不到匹配对象（且 tombstone 满 120 秒）、或 7 天过期
-
-### 第二步：处理活规则
-
-#### 本地存在，远端不存在
-
-- `status = local_only`
-  - 直接 create 到远端
-- `status = modified` 且已有 `remote_id`
-  - 本地有未同步修改，远端对象消失
-  - 直接重新 create（保留本地修改优先语义）
-- `status = synced` 且已有 `remote_id`
-  - 远端对象消失，说明被其他端删除
-  - **直接删除本地副本**（尊重远端删除意图）
-  - 这是解决多端删除冲突的关键：synced 状态表示本地未修改，远端消失即意味着应同步删除
-
-#### 本地存在，远端也存在
-
-- `status = modified`
-  - 直接 update 远端
-- `status = synced`
-  - 如果远端 hash 或更新时间变化，直接 pull 覆盖本地
-  - 否则不动
-- `status = local_only`
-  - 若未绑定 `remote_id`，优先 create
-  - 若因异常已有 `remote_id`，按 `modified` 处理，直接 update
-
-#### 本地不存在，远端存在
-
-- 若无 tombstone
-  - 直接 pull 到本地
-- 若有 tombstone
-  - 跳过 pull，继续删远端
+- UI 展示同步状态与 pending tombstone。
+- Human tests 覆盖多端删除 / 多端修改 / rename / 远端删除等场景。
 
 ## 多端边界策略
 
 ### A 删除，B 修改
 
-策略：
-
-- A 写 tombstone，持续删远端
-- B 若稍后同步，会把本地修改重新推上去
-- 最终结果取决于谁最后一次同步成功
-
-这是“直接覆盖”策略下的自然结果，不做额外冲突治理。
+- A 写 tombstone，持续删远端。
+- B 稍后同步会把本地修改重新推上去。
+- 最终取决于谁最后一次同步成功。
 
 ### A 与 B 同时修改
 
-策略：
-
-- 谁后同步，谁覆盖
-- 不做人工干预
+- 谁后同步谁覆盖。
 
 ### A 本地删除，B 本地新建同名
 
-策略：
-
-- A 由 tombstone 删除旧远端对象
-- B 若创建同名规则成功，则绑定新对象
-- 若因远端同名限制失败，则提示用户改名
+- A 由 tombstone 删除旧远端对象。
+- B 若创建同名规则成功则绑定新对象。
+- 若因远端同名限制失败则提示用户改名。
 
 ### A rename，B edit
 
-策略：
-
-- rename 视为一次普通 update
-- 谁后同步，谁覆盖
+- rename 视为一次普通 update。
+- 谁后同步谁覆盖。
 
 ### 远端被其他端删掉
 
-策略：
-
-- 若本地是 `synced` 状态（未修改），直接删除本地副本
-- 若本地是 `modified` 状态（有未同步修改），重新 create 到远端
-- 若本地也删了且有 tombstone，继续保持删除语义
+- 本地 `synced` → 删除本地副本。
+- 本地 `modified` → 重新 create 到远端。
+- 本地也删了且有 tombstone → 保持删除语义。
 
 ### Tombstone 匹配
 
-当前实现：
-
-- Tombstone 按 `remote_id` 或 `rule_name` 任一命中来匹配远端对象
-- 同名拉取阻断：tombstone 中的 `rule_name` 会阻止从远端拉回同名规则
-- 未来计划（planned, not yet shipped as of 2026-06-17）：进一步收敛为只按 `remote_id` 匹配以减少误删其他端同名新规则的风险
+- 当前按 `remote_id` 或 `rule_name` 任一命中匹配远端对象。
+- 同名拉取阻断：tombstone 中的 `rule_name` 阻止从远端拉回同名规则。
+- 严格收敛为“只按 `remote_id` 精确匹配”以减少误删其他端同名新规则的风险（planned as of 2026-07-02）。
 
 ### Tombstone 生命周期管理
 
-策略：
-
-- 远端再也找不到匹配对象，且 tombstone 满 `TOMBSTONE_MIN_AGE_SECS`（120 秒）后清除，避免在同一轮里把刚 commit 的 tombstone 立刻清掉
-- Tombstone 超过 `TOMBSTONE_MAX_AGE_SECS`（7 天）自动过期清除，避免永久累积
-- 远端删除成功后下一轮即可被清理（仍受 min age 约束）
+- 远端再也找不到匹配对象，且 tombstone ≥ `TOMBSTONE_MIN_AGE_SECS`（120 秒）后清除，避免在同一轮里把刚 commit 的 tombstone 立刻清掉。
+- Tombstone 超过 `TOMBSTONE_MAX_AGE_SECS`（7 天）自动过期清除，避免永久累积。
 
 ## 失败处理
 
-### 创建失败
+- **创建失败**：网络错误保留 `local_only` 下次重试；同名冲突直接报错，不自动合并。
+- **更新失败**：网络错误保留 `modified`，下次继续重试。
+- **删除失败**：保留 tombstone，下次继续删。
+- **远端返回异常数据**：跳过本轮对象，保留本地状态，记录日志。
 
-- 常见原因：同名冲突、网络错误
-- 处理：
-  - 网络错误：保留 `local_only`，下次重试
-  - 同名冲突：直接报错，不做自动合并
+## 测试方案
 
-### 更新失败
+### 单元测试（实际落地，见 `crates/bifrost-sync/src/manager.rs::tests` 与 `crates/bifrost-admin/src/handlers/group_rules.rs::tests`）
 
-- 网络错误：保留 `modified`
-- 下次继续重试
+- `crates/bifrost-sync/src/manager.rs`：
+  - Tombstone 过期与最小 age（`TOMBSTONE_MIN_AGE_SECS` / `TOMBSTONE_MAX_AGE_SECS` 覆盖的多个 `#[tokio::test]`）。
+  - 本地 `modified` push、`synced` pull、`local_only` create 路径的 async 测试。
+  - `startup_login_prompt` 去重。
+- `crates/bifrost-admin/src/handlers/group_rules.rs`：
+  - `group_sync_lock_reuses_lock_for_same_group`
+  - `sync_envs_to_local_reports_enabled_rule_content_changes`
+  - `sync_envs_to_local_reports_enabled_rule_removal`
+  - `sync_envs_to_local_ignores_inactive_remote_metadata_changes`
+  - `sync_envs_to_local_skips_unchanged_remote_rule_write`
+  - `sync_envs_to_local_skips_unchanged_normalized_remote_rule_write`
 
-### 删除失败
+### E2E / 真实场景
 
-- 保留 tombstone
-- 下次继续删
+- 多端删除 / 多端修改场景应通过 `bifrost login` 后手工在两个数据目录之间切换验证；当前仓库暂无专用 `test_rule_sync_strategy.sh` 脚本（planned as of 2026-07-02）。
+- Group 幂等回归由 `sync_envs_to_local_skips_unchanged_normalized_remote_rule_write` 保护，配合 `human_tests/rules-filesystem-hot-reload.md` 中的 Group 日志风暴回归条目使用。
 
-### 远端返回异常数据
+## Review/Fix/Test 闭环
 
-- 跳过本轮对象
-- 保留本地状态
-- 记录日志
+### 第 1 轮
 
-## UI 建议
+- 复核策略：tombstone 优先、modified push、synced 允许 pull、local_only create。
+- 复核代码：tombstone 匹配逻辑、`sync_envs_to_local` 归一化、Group 锁复用。
+- 跑 focused：`cargo test -p bifrost-sync -- tombstone` + `cargo test -p bifrost-admin group_sync_lock_reuses_lock_for_same_group`。
 
-rule 编辑页顶部展示：
+### 第 2 轮
 
-- Sync status
-- Created at
-- Updated at
-- Last synced at
-- Remote updated at
+- 复查 `rules-filesystem-hot-reload.md` 与本文档的边界一致（`RulesChanged` 事件带来源，避免 sync 写盘触发自激环）。
+- 跑 `cargo test --workspace --all-features` 与两个 Group 幂等测试。
+- 若仍出现同步风暴 / tombstone 死循环 / synced 未删本地副本，追加第 3 轮。
 
-Sync 面板展示：
+## 风险与决策
 
-- pending tombstone 数量
-- 最近一次同步时间
-- 最近一次同步动作
-
-不展示 conflict，因为没有 conflict。
-
-## 最小落地顺序
-
-建议按这个顺序做：
-
-1. rule 文件补 `rule_id`
-2. rule 文件补 `last_synced_content_hash`
-3. tombstone 补 `base_remote_updated_at` 和 `base_content_hash`
-4. 同步逻辑明确成：
-   - tombstone 永远优先
-   - modified 永远 push
-   - synced 才允许 pull
-
-## 最终结论
-
-在远端不可改、且你明确要求“不做冲突管理，直接覆盖”的前提下，最佳策略就是：
-
-- 删除优先
-- 本地修改优先
-- 本地未修改才接受远端覆盖
-- tombstone 持续重试删除远端
-- 所有并发问题都用“最后一次成功同步覆盖”解决
-
-这不是最强一致的方案，但它是当前约束下最简单、最稳定、最不容易出现“莫名其妙卡死状态”的方案。
+- **同名冲突不做自动合并**：让用户改名是最简单可控的语义；引入自动 rename 会牵扯 UI 提示、rule_id 迁移，得不偿失。
+- **Tombstone 按 `rule_name` 命中的误伤风险**：如果其他端在同名 slot 上新建了完全不同的规则，可能被 tombstone 误删。收敛为“只按 `remote_id`”前，运营侧需要在同名场景下慎重（planned as of 2026-07-02）。
+- **7 天过期是否偏长**：过短会让离线设备恢复后立即拉回已删除对象；7 天在多端离线场景下更稳。
+- **Group 同步的自激环**：`RulesChanged` 事件必须带来源（`LocalApi` / `Filesystem` / `RemoteSync`）；`RemoteSync` 触发的 reload 不能反过来唤醒 Sync，否则会形成写盘 → filesystem watcher → sync 循环。这一约束由 rules-filesystem-hot-reload 模块保障。
+- **不做冲突分支**：本方案的核心决策就是不引入 `conflict` 状态；后续若产品必须支持人工合并，需要重构同步状态机，不建议在当前策略上打补丁。

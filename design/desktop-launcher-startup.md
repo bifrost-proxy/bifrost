@@ -1,37 +1,304 @@
 # Desktop Launcher Startup Flow
 
-## 现状结论
+## 背景
 
-旧文档描述的是“独立 launcher 窗口 + 主窗口”双窗口方案；当前实现已经改成“单个 host window + 原生启动遮罩 + 内嵌 webview handoff”。
+历史上桌面端使用“独立 launcher 窗口 + 主窗口”的双窗口方案：先弹一个小尺寸 launcher 窗口显示 loading，backend 就绪后再创建 main window，最后关掉 launcher。这个模型带来几个问题：
 
-## 实现入口速查
+- 两个窗口在切换时出现明显的窗口闪烁 / 位置跳变。
+- macOS 上双窗口会同时出现在 Dock、Mission Control、Cmd+Tab 里，用户看到“两个 Bifrost”。
+- launcher 是 webview，同样要拉起前端 bundle，实际“Loading”很慢，反而失去了预热效果。
+- 主 webview 只能等 launcher 消失后再挂载，backend 就绪与前端渲染无法并行。
 
-- 原生启动遮罩：`desktop/src-tauri/src/native_launcher.rs`
-- 启动状态与 handoff：`desktop/src-tauri/src/main.rs` 的 `BackendState` 与 `notify_main_window_ready`
+当前实现改成“单个 host window + 原生启动遮罩（macOS 原生 view overlay） + 内嵌 webview handoff”：
 
-## 当前实现
+- 只创建一个 Tauri `host` 窗口。
+- macOS 上启动阶段在 host 窗口内容区安装 `NSView` overlay 作为启动器视觉层。
+- 主业务 webview 通过 `create_main_webview()` 预先创建，并 “停放” 在 host 窗口外的不可见位置继续加载。
+- backend 在后台线程并行启动。
+- 三条流水线（overlay 显示 / webview 加载 / backend 就绪）全部就位后，`start_main_window_handoff` 把 host window 放大、恢复装饰、显示 webview，并淡出 overlay。
+- 非 macOS 平台没有原生 overlay 能力，直接以完整尺寸展示 host 窗口 + webview。
 
-- 桌面端只创建一个 Tauri `host` 窗口，不再创建独立的 `launcher` 窗口。
-- macOS 上启动时：
-  - `host` 窗口先以较小尺寸、透明、无边框方式显示。
-  - 通过 [`desktop/src-tauri/src/native_launcher.rs`](../desktop/src-tauri/src/native_launcher.rs) 在宿主窗口内容区安装原生 overlay，承担启动器视觉层。
-  - 主业务 webview 通过 `create_main_webview()` 预先创建，但会先停放在不可见位置，待切换时再 reveal。
-- 后端 core 仍在后台线程中并行启动，状态写入 `BackendState.startup_ready` / `startup_error`。
-- 前端完成首屏准备后调用 `notify_main_window_ready`，Rust 侧执行：
-  - 放大 `host` 窗口到主界面尺寸；
-  - 恢复背景与装饰；
-  - 显示主 webview；
-  - 淡出并移除原生 launcher overlay。
-- 非 macOS 平台没有原生 launcher overlay，直接进入普通 webview 启动路径。
+本文覆盖 launcher/handoff 语义、状态机、代码入口、错误路径和测试。日志、数据目录、失败上报见 `desktop-startup-observability.md`；关闭/退出/重开语义见 `desktop-macos-close-behavior.md`；端口切换见 `desktop-runtime-port-switch.md`。
 
-## 与旧方案的主要差异
+## 用户目标验证清单
 
-- 没有独立 `launcher` label/window。
-- handoff 的主体是同一个 `host` 窗口，而不是两个窗口之间的切换。
-- 启动页不是前端页面，而是 macOS 原生视图 overlay。
-- 回退路径是“无原生 launcher 时直接进入主 webview”，而不是超时后显示第二个窗口。
+### 必须实现
 
-## 维护建议
+- 桌面端只创建一个 host window，Dock / Cmd+Tab / Mission Control 只出现一个 Bifrost 图标。
+- macOS 上启动阶段展示原生 launcher overlay，无独立第二个窗口。
+- 非 macOS 平台没有 overlay 能力时，host 窗口直接以最终尺寸显示，不阻塞用户使用。
+- 主 webview 与 backend 启动可以并行进行。
+- Overlay、主 webview、backend 三者就绪后自动 handoff：
+  - host 窗口从 `INITIAL_WINDOW_WIDTH×INITIAL_WINDOW_HEIGHT` 平滑放大到 `TARGET_WINDOW_WIDTH×TARGET_WINDOW_HEIGHT`；
+  - 恢复背景色、装饰、阴影、macOS Sidebar/UnderWindow 特效；
+  - 主 webview 从 park 位置移动到 `(0,0)` 并 resize 到 host 内部尺寸；
+  - overlay 分帧淡出并从 NSView 树中移除。
+- handoff 完成后向前端发送 `desktop://handoff-complete` 事件，供前端把 splash / loading 状态收尾。
+- 在 backend 尚未 ready、webview 尚未 loaded 时，handoff 不会被误触发。
+- 允许通过 `BIFROST_DESKTOP_LAUNCHER_ONLY=1` 进入“仅显示 launcher，不启动 backend、不加载 webview”的开发/调试模式。
 
-- 后续若重新引入独立启动窗口，需要重写本文件，不应继续沿用当前描述。
-- 当前设计的关键状态字段集中在 [`desktop/src-tauri/src/main.rs`](../desktop/src-tauri/src/main.rs) 的 `BackendState` 与 handoff 逻辑。
+### 必须不破坏
+
+- 现有 Tauri menu（App / File / Edit / View / Window）继续工作。
+- `set_document_edited` / `write_clipboard` / `get_desktop_runtime` / `update_desktop_proxy_port` / `notify_main_window_ready` 五个 invoke handler 全部可用。
+- `desktop-bootstrap.log`、`desktop-sidecar.out.log`、`desktop-sidecar.err.log` 三条日志继续按 `desktop-startup-observability.md` 描述落盘。
+- macOS 关闭按钮走 `HideWindow`，Dock reopen 走 `restore_host_window`，Cmd+Q 走 `request_desktop_shutdown`。
+- 端口切换、backend watchdog、cert bootstrap 保留现语义。
+
+### 必须真实验证
+
+- macOS 上冷启动能看到原生 overlay 且不出现第二个窗口。
+- macOS 上 handoff 完成后 host 窗口尺寸、装饰、特效、可拖拽调整最小尺寸都正确。
+- 非 macOS 平台冷启动直接进入完整 host 窗口，无 overlay 相关闪烁。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY=1` 场景下 backend 不启动、webview 不创建，但 overlay 正确显示。
+- 前端 App 层能收到 `desktop://handoff-complete` 事件，能移除自身 splash。
+- 关闭 host 窗口后重新从 Dock 打开，overlay 不会重复出现，直接恢复主界面。
+
+## 产品语义
+
+### Launcher = 原生 overlay，不是独立窗口
+
+- Overlay 由 `desktop/src-tauri/src/native_launcher.rs` 通过 objc2 直接创建一个 `NSView`，添加到 host window 的 `contentView` 顶层。
+- Overlay 有自己的动画时钟 (`start_animation`) 和进度值 (`set_overlay_progress`)、alpha (`set_overlay_alpha`)。
+- Overlay 只出现在 macOS。`supports_native_launcher()` 返回 `cfg!(target_os = "macos")`。
+
+### Host window 是唯一顶级窗口
+
+- Tauri label = `HOST_WINDOW_LABEL = "host"`。
+- macOS 启动初始状态：360×260、透明、无装饰、无阴影、`transparent + shadow=false + background_color=(0,0,0,0)`。
+- 其他平台启动状态：1440×920，最小 1180×760，普通装饰 + 阴影，深色背景 `(8,17,23,255)`。
+- Handoff 后统一变为 1440×920 + 最小 1180×760 + 装饰 + 阴影 + `apply_window_effects`（macOS Sidebar + UnderWindowBackground + radius 18；Windows Mica）。
+
+### Main webview 是 host window 内的子 webview
+
+- Tauri webview label = `MAIN_WINDOW_LABEL = "main"`。
+- 由 `create_main_webview()` 通过 `WebviewBuilder::new(MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))` 创建。
+- 初始位置：`(WEBVIEW_PARK_OFFSET=2000.0, 0.0)`（park 在 host window 视觉之外），初始尺寸与 host window 相同。
+- Handoff 时通过 `reveal_main_webview` 移动到 `(0,0)` 并 resize 到当前 host inner size。
+- 页面加载事件通过 `on_page_load` 回调追踪；`PageLoadEvent::Finished` 时把 `main_webview_loaded` 置 true 并触发一次 handoff 尝试。
+
+### handoff 的触发点
+
+`try_start_native_handoff(app, reason)` 是唯一的 handoff 触发入口。它满足三个前置条件才会调用真正的 `start_main_window_handoff`：
+
+1. `supports_native_launcher()` 为 true（macOS）。
+2. `state.startup_ready == true`（backend 就绪或已复用现有 backend）。
+3. `state.main_webview_loaded == true`（webview 完成首屏渲染）。
+
+三条流水线都会调 `try_start_native_handoff`：
+
+- backend bootstrap 完成后：`try_start_native_handoff(app, "backend ready")`。
+- backend watchdog 恢复后：`try_start_native_handoff(app, "backend watchdog recovery")`。
+- webview `PageLoadEvent::Finished` 后：`try_start_native_handoff(webview.app_handle(), "webview finished loading")`。
+- 前端主动握手：`notify_main_window_ready` 调 `start_main_window_handoff(app, "frontend ready handshake")`（跳过 webview_loaded 检查，前端明确表示自己 ready）。
+
+`start_main_window_handoff` 内部用两个原子标记做幂等保护：
+
+- `handoff_started`：`swap(true, SeqCst)`，防止并发触发重复动画。
+- `handoff_completed`：早退检查，避免 handoff 后被误调用。
+
+## 状态机
+
+```
+BackendState {
+  startup_ready: AtomicBool,        // backend 就绪或已复用
+  main_webview_loaded: AtomicBool,  // webview page load finished
+  main_window_ready: AtomicBool,    // 前端 notify_main_window_ready 已到达
+  handoff_started: AtomicBool,      // handoff 动画正在跑
+  handoff_completed: AtomicBool,    // handoff 已完成
+  launcher_overlay: Mutex<Option<usize>>, // 原生 overlay 指针
+}
+```
+
+状态转移：
+
+1. `setup()`：
+   - 创建 host window（macOS 小尺寸透明；其他平台完整尺寸）。
+   - 如果 `supports_native_launcher()`：安装 overlay，`launcher_overlay = Some(ptr)`，启动动画。
+   - 如果不支持原生 overlay：直接把 `handoff_started`、`handoff_completed` 置为 true（跳过 handoff）。
+   - 如果 `is_launcher_only_mode()` = false：`create_main_webview` + `bootstrap_desktop_backend` + `monitor_desktop_backend`。
+2. Backend bootstrap 完成 → `startup_ready = true` → `try_start_native_handoff("backend ready")`。
+3. Webview 首屏 loaded → `main_webview_loaded = true` → `try_start_native_handoff("webview finished loading")`。
+4. 前端 splash 结束调用 `notify_main_window_ready` → `main_window_ready = true` → `start_main_window_handoff("frontend ready handshake")`。
+5. `start_main_window_handoff`：
+   - Swap `handoff_started`，防止重入。
+   - `animate_host_window_to_main_size`：10 帧 easing 放大（16ms/帧，共 ~160ms），同时用 `set_overlay_progress` 让 overlay 随进度收缩/淡化。
+   - 恢复背景色、装饰、阴影、window effects。
+   - `reveal_host_window`：show + unminimize + set_focus。
+   - 设置 resizable、maximizable、min_size。
+   - `prepare_main_webview`：把子 webview resize 到 host inner size。
+   - 起后台线程：睡 `WEBVIEW_REVEAL_SETTLE_DELAY (90ms)`，然后 `reveal_main_webview` 移到 `(0,0)`；如果 `overlay_ptr.is_some()` 就 `fade_out_launcher_overlay`（8 帧 × 14ms，共 ~112ms），最后 emit `desktop://handoff-complete`，置 `handoff_completed = true`。
+6. 非 macOS 平台：状态 4/5 跳过；host window 一开始就是完整尺寸。
+
+## 关键代码入口
+
+- `desktop/src-tauri/src/main.rs`
+  - `main()`：Tauri builder，注册 menu / handler / setup / on_window_event / RunEvent 分流。
+  - `setup(|app|)`：创建 host window、装 overlay、创建 main webview、启动 bootstrap 与 watchdog 线程。
+  - `create_host_window` / `create_main_webview`
+  - `try_start_native_handoff` / `start_main_window_handoff`
+  - `animate_host_window_to_main_size` / `prepare_main_webview` / `reveal_main_webview` / `fade_out_launcher_overlay`
+  - `notify_main_window_ready`（`#[tauri::command]`）
+  - `is_launcher_only_mode`、`supports_native_launcher`
+- `desktop/src-tauri/src/native_launcher.rs`
+  - `install(window) -> Result<Option<usize>>`：在 macOS 上把原生 view 挂到 host window 的 contentView。
+  - `start_animation(window, ptr)`：启动 overlay 内部动画时钟。
+  - `set_overlay_progress(window, ptr, progress)`
+  - `set_overlay_alpha(window, ptr, alpha)`
+  - `remove_overlay(window, ptr)`：从视图树摘除并释放引用。
+  - 非 macOS 提供同名占位实现，返回 `Ok(None)`。
+- `web/src/desktop/tauri.ts`
+  - `DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete"`。
+  - `notifyMainWindowReady()` → `invokeDesktop<void>("notify_main_window_ready")`。
+- `web/src/App.tsx` 在 `DESKTOP_HANDOFF_COMPLETE_EVENT` 到达时移除自身 splash。
+
+## 常量与时序
+
+```rust
+const INITIAL_WINDOW_WIDTH: f64 = 360.0;
+const INITIAL_WINDOW_HEIGHT: f64 = 260.0;
+const TARGET_WINDOW_WIDTH: f64 = 1440.0;
+const TARGET_WINDOW_HEIGHT: f64 = 920.0;
+const TARGET_WINDOW_MIN_WIDTH: f64 = 1180.0;
+const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
+const WINDOW_EXPAND_STEPS: u16 = 10;
+const WINDOW_EXPAND_STEP_DELAY: Duration = Duration::from_millis(16);
+const OVERLAY_FADE_STEPS: u16 = 8;
+const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
+const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
+const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
+const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
+```
+
+窗口放大用 `1 - (1-t)^2` easing，尺寸围绕当前中心点缩放，避免视觉跳位。
+
+## 错误与降级路径
+
+- Overlay 安装失败（`native_launcher::install` 返回 `None` 或 `Err`）：
+  - 把 `handoff_started` / `handoff_completed` 置 true（跳过 handoff），直接沿用 host window 当前状态。
+  - `append_desktop_bootstrap_log`：`native launcher unsupported on this platform; entering webview directly`。
+- Backend 启动失败：
+  - `record_startup_error`；随后 `request_desktop_shutdown`，前端弹窗展示错误。
+  - Handoff 因为 `startup_ready == false` 不会触发；overlay 会一直显示直到进程退出。
+  - Watchdog 后续恢复成功会再触发 handoff。
+- Webview 加载失败（`PageLoadEvent::Started` 之后没有 `Finished`）：
+  - `main_webview_loaded` 保持 false，`try_start_native_handoff` 不会触发。
+  - 需要依赖前端的 `notify_main_window_ready` 兜底：前端在 window `load` / React root ready 时主动握手；即使 `main_webview_loaded == false`，`notify_main_window_ready` 会直接调 `start_main_window_handoff`，避免 overlay 卡死。
+- Overlay 淡出失败（例如 objc2 崩溃）：
+  - `fade_out_launcher_overlay` 内部所有调用 `let _ =`，不会 panic；overlay 引用最后仍会调 `remove_overlay`。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY=1`：
+  - `create_main_webview` 与 `bootstrap_desktop_backend` 都不执行；overlay 会一直显示，用户按 Cmd+Q 退出会走 `request_desktop_shutdown` 的 launcher-only 分支直接 `app.exit(0)`。
+
+## CLI / 环境变量表面
+
+Launcher 本身没有 CLI 命令；控制入口只有环境变量：
+
+- `BIFROST_DESKTOP_LAUNCHER_ONLY=1|true|yes|on`：仅展示 launcher，不启动 backend、不加载 webview，用于开发时快速验证 overlay。
+- `BIFROST_DATA_DIR`：影响 backend 数据目录与日志路径。
+- 桌面端可执行文件本身 (`bifrost-desktop`) 一律无子命令。
+
+## Web 交互契约
+
+前端与桌面 handoff 的契约：
+
+- 前端启动后应尽快调 `notifyMainWindowReady()`，让桌面端在 backend / webview 竞争条件下也能推进 handoff。
+- 前端应订阅 `DESKTOP_HANDOFF_COMPLETE_EVENT` 事件，把内部 loading / splash 状态收尾。
+- 前端不应假设收到事件时 backend 一定 ready；backend 就绪状态需通过 `getDesktopRuntime()` 或对应的 store 读取。
+
+## Admin API 表面
+
+Launcher 不新增 admin API。相关信息通过：
+
+- `get_desktop_runtime` invoke handler：`{ expectedProxyPort, proxyPort, platform, startupReady, startupError }`。
+- `notify_main_window_ready` invoke handler：`Result<(), String>`。
+
+## Sync 边界
+
+- Launcher 是本地视觉层，不涉及任何 sync。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY` 也不写入配置，属于运行时开关。
+
+## 实现切分
+
+### Phase 1：单窗口 + 原生 overlay 骨架（已完成）
+
+- 删除旧 launcher window label 与相关 Tauri config。
+- 新增 `native_launcher` 模块 + macOS 实现。
+- `create_host_window` 分平台初始尺寸/装饰。
+- `try_start_native_handoff` 三条件闸门 + 幂等标记。
+
+### Phase 2：Handoff 动画与前端事件（已完成）
+
+- `animate_host_window_to_main_size`：easing + overlay progress 联动。
+- `prepare_main_webview` / `reveal_main_webview`：park + reveal。
+- `fade_out_launcher_overlay`：分帧 alpha。
+- Emit `desktop://handoff-complete`，前端消费。
+
+### Phase 3：降级路径（已完成）
+
+- 非 macOS 直接跳过 handoff。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY` 支持仅 launcher 调试。
+- 前端 `notify_main_window_ready` 强制推进兜底。
+
+### Phase 4：文档 & 测试维护
+
+- 保持本文与 `desktop-startup-observability.md`、`desktop-macos-close-behavior.md`、`desktop-runtime-port-switch.md` 的边界清晰。
+- 单元测试覆盖 close 行为、port response 解析、recovery guard；handoff / overlay 依赖真实窗口环境，走 human_tests。
+
+## 测试方案
+
+### 单元测试（`desktop/src-tauri/src/main.rs` 内嵌 `#[cfg(test)] mod tests`）
+
+- `desktop_config_uses_shared_data_dir`
+- `desktop_data_dir_matches_shared_cli_dir`
+- `parses_snake_case_port_update_response`
+- `parses_camel_case_port_update_response`
+- `detects_legacy_server_config_response`
+- `macos_close_request_hides_window`
+- `non_macos_close_request_shuts_down_app`
+- `backend_recovery_guard_prevents_parallel_recovery`
+- `poll_managed_backend_exit_reports_exited_child`
+
+Handoff / overlay 相关走真实窗口验证，无独立 unit test。
+
+### E2E / 真实场景
+
+- `human_tests/desktop-launcher-startup.md`（新增或就地维护）：
+  - TC-DLS-01：macOS 冷启动，观察 Dock 中只出现一个 Bifrost 图标，overlay 正确显示。
+  - TC-DLS-02：Handoff 完成后 host 窗口最终尺寸为 1440×920，可拖拽到 1180×760 最小尺寸。
+  - TC-DLS-03：backend 启动异常（临时占用端口）时 overlay 保持显示，`startupError` 通过弹窗展示。
+  - TC-DLS-04：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` 时 backend 与 webview 不启动，overlay 显示，Cmd+Q 立即退出。
+  - TC-DLS-05：非 macOS 平台（Windows/Linux）冷启动直接展示完整 host 窗口，无 overlay。
+  - TC-DLS-06：Handoff 完成后前端收到 `desktop://handoff-complete` 事件，splash 消失。
+
+启动必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。
+
+### 覆盖率与项目校验
+
+- `cargo fmt --all -- --check`
+- `cargo test -p bifrost-desktop --tests`（含上述内嵌 tests）
+- `rust-project-validate`
+- 本机 no-local-coverage 约定生效，交付时说明本地豁免。
+
+## Review/Fix/Test 闭环
+
+### 第 1 轮
+
+- 复核目标：单窗口、并行启动、原生 overlay、handoff 三闸门、幂等、非 macOS 降级、launcher-only 调试。
+- 复核 diff：`main.rs` handoff 逻辑、`native_launcher.rs` 平台分支、`web/src/desktop/tauri.ts` 事件常量、`web/src/App.tsx` 事件订阅。
+- 重点 review：`handoff_started` / `handoff_completed` swap 是否有 race；overlay 在 backend 失败时是否正确留在屏幕上；`notify_main_window_ready` 与自动 handoff 之间是否有双触发。
+- 复测：cargo tests + macOS 冷启动人工验证 + launcher-only 场景。
+
+### 第 2 轮
+
+- 复核第 1 轮发现的问题修复。
+- 再次检查 `git status --short`、`git diff`。
+- 重点 review：错误路径（overlay install 失败、webview 未 finished、backend 挂掉）下 overlay/handoff 状态是否一致。
+- 复测：失败路径重跑，必要时补充真实操作。
+
+## 风险与决策点
+
+- macOS 使用原生 `NSView` overlay 而非 SwiftUI/Metal：兼容性最好，但视觉效果受限于纯 objc2 能力；如未来要引入更丰富动画，可以在 `native_launcher.rs` 里替换实现，无需改动 handoff 状态机。
+- Windows/Linux 目前直接跳过 overlay 是权衡：这些平台窗口装饰更宽、启动更快，overlay 收益不明显；如未来要补齐，可在 `supports_native_launcher()` 与 `native_launcher` 里加平台实现。
+- `notify_main_window_ready` 会绕过 `main_webview_loaded` 检查，一旦前端错误地在页面完全就绪前调用会导致 handoff 提前；权衡是前端可用作 fallback，避免 overlay 永久卡死。
+- `WEBVIEW_PARK_OFFSET=2000.0` 假设显示器逻辑坐标不超过 2000，对超大显示器可能造成 park 位置仍可见；如遇到问题可改用 `webview.hide()` 或负偏移。第一版保持简单。
+- `BIFROST_DESKTOP_LAUNCHER_ONLY` 主要用于开发调试，未来若成为正式产品能力应有明确 UI；当前仅通过环境变量。

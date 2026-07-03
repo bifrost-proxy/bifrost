@@ -2,91 +2,279 @@
 
 > 后续可靠性、结构化 lifecycle event、helper heartbeat/watchdog、`bifrost doctor system-proxy` 诊断包等增量方案见 [System Proxy Reliability and Diagnostics](./system-proxy-reliability-diagnostics.md)。
 
-## 功能模块说明
+## 背景
 
-Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户同时运行 Surge、Clash、系统级 VPN/代理等外部代理时，Bifrost 可以展示真实系统代理状态，但不能把外部代理误判为自身代理，也不能在 `system-proxy disable`、Admin UI 关闭开关或 `bifrost stop` 时清除外部代理。
+Bifrost 的 System Proxy 只应管理自己写入的系统代理配置。用户同时运行 Surge、Clash、系统级 VPN/代理时，Bifrost 必须：
 
-## 实现逻辑
+- 能真实反映当前 OS 代理状态；
+- 不把外部代理误判成自己的、错误清理外部代理；
+- `system-proxy disable`、Admin UI 关闭、`bifrost stop`、崩溃/重启/睡眠恢复等所有清理入口都只清理归属于本 runtime 的系统代理。
 
-- `SystemProxyManager::enable` 在写入系统代理前保存两类状态：`proxy_backup.json` 继续兼容旧恢复逻辑；新增 `proxy_state.json` 记录 Bifrost 本次写入的 target 与写入前 original。`proxy_state.json` 使用两阶段 `applied` 标记：apply 前先写 `applied=false`，macOS network service 写入完成后再标记为 `applied=true`；如果 apply 前崩溃且当前系统代理从未指向 target，recovery 只丢弃 pending state，不把用户原本的外部代理误当成需要恢复的 Bifrost 代理；如果 apply 中途崩溃且任一 service 已指向 target，则按原始状态恢复。
-- 关闭路径新增归属判定：只有当前系统代理 host/port 与 Bifrost target 匹配时，才恢复 original 或关闭；如果当前代理指向其他端口或其他 host，则返回 `OwnedByOther` 并保持系统设置不变。
-- `bifrost stop` 不再在缺失 runtime 时把任意本机端口代理当作 Bifrost 代理；必须有 runtime host/port 且与当前系统代理匹配才会清理。
-- Admin API `GET /api/proxy/system` 返回两类状态：`enabled` / `host` / `port` / `managed_by_bifrost` 表示当前 OS 代理 live 状态，`configured_enabled` / `configured_bypass` 表示用户在 Bifrost 配置中的持久偏好。cleanup-daemon 和 crash recovery 只允许修正 OS 现场，不允许把 `config.toml` 中的 system proxy 期望值改成关闭。WebUI 开关使用 `configured_enabled`，并在配置开启但 live OS 代理尚未由 Bifrost 接管时展示 pending/warning 状态；disable 验证在外部代理仍开启但 `managed_by_bifrost=false` 时视为成功，避免误报 `System proxy is still enabled`。
-- `bifrost start` 在证书检查和端口冲突检查之前同步执行 `SystemProxyManager::recover_from_crash`。这样电脑重启、睡眠唤醒后旧进程已经消失，或下一次启动因为端口被占用而失败时，也会先恢复 `proxy_state.json` 记录的原始系统代理，避免 Wi-Fi/网络服务继续指向已不存在的 Bifrost 端口。
-- 当 `proxy_state.json` / `proxy_backup.json` 已缺失但 `runtime.json` 仍记录上一次运行的 host/port 时，启动前恢复和 LaunchDaemon cleanup 不能直接视为“无状态可恢复”。如果当前 macOS network service 的 Web/Secure Web proxy 仍指向该 runtime target，则这是 Bifrost 残留代理，应按 failsafe 关闭仍指向该 target 的 service；如果当前系统代理指向其他 host/port，则保留外部代理不变。
-- `SystemProxyManager::restore` 不再只依赖当前进程内存态 `is_set`；当新进程只看到落盘的 `proxy_state.json` / `proxy_backup.json` 时，也会进入 crash recovery。macOS 恢复如果遇到 `networksetup` 权限错误，沿用 GUI 授权兜底，而不是静默保留残留代理。
-- 运行期 system proxy reconcile 不再是一次性启动动作。只要本次服务配置要求启用系统代理，后台线程会周期性复核当前系统代理是否仍指向 Bifrost 端口；macOS 另有 wake-gap reconcile 线程，系统休眠恢复后线程重新调度时如果检测到超过 10 秒的时间跳变，会立即触发一次收敛，不必等待 30 秒周期。该路径只做幂等 enable/reconcile，不做 restore/disable，也不根据调度延迟判断进程异常。
-- macOS 启用系统代理时同时启动独立 lifecycle cleanup helper。helper 是单独进程，spawn 时设置独立 process group，避免前台 `Ctrl-C` 或进程组信号把主进程与 helper 同时杀掉；helper 程序路径优先使用仍存在的 `current_exe()`，若该路径因开发环境重编译/daemon 替换失效，则回退到 `argv[0]` 解析出的现存程序，也可用 `BIFROST_SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM` 显式指定。helper 监听 SIGTERM/SIGINT/SIGHUP 并轮询父进程 PID；主进程被 `kill -9`、崩溃或系统关机导致无法优雅执行 restore 时，helper 会根据 `proxy_state.json` 调用 crash recovery 恢复系统代理。为了避免 CPU 高占用、系统恢复后调度延迟等场景造成误处理，helper 不基于"等待超时"做清理；父 PID 路径必须连续 3 次 poll 都不可见才确认父进程退出。测试可通过 `BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1` 禁用 helper，以保留旧的"下次启动恢复"回归路径。
-- lifecycle helper 已扩展为跨平台（macOS / Windows）。Bifrost 当前并不对 Linux 提供系统代理写入能力，`SystemProxyManager::is_supported()` 在 Linux 上固定返回 false，因此 Linux 也不启动 lifecycle helper —— `SystemProxyLifecycleHelperState::ensure_started` 在非 macOS/Windows 平台直接 short-circuit 返回，不创建子进程，也不会写 shutdown marker。`SystemProxyLifecycleHelperState` 在 macOS / Windows 启动 helper 子进程：Unix 通过 `process_group(0)` 设置独立进程组；Windows 通过 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS` 启动以脱离父进程的 console / 进程组（避免父进程被 `Ctrl-Break`/console close 时同步杀死 helper）。父进程异常退出时，`Drop` 走 `detach()` 路径（`mem::forget` 子进程句柄），让 helper 在父进程消失后继续运行兜底清理；只有主动调用 `stop()`（仅在 Admin API/CLI 已确认系统代理收敛到 disabled 状态时才会触发）才会 kill+wait helper。
-- helper 身份判定使用 PID + start_time 双因子，避免 PID 复用：`bifrost-core::process_start_time` 模块提供 `current_process_start_time_ms()` / `get_process_start_time_ms(pid)` / `start_times_match(recorded, observed)`，分别在 macOS 通过 `proc_pidinfo + PROC_PIDTBSDINFO`、Windows 通过 `GetProcessTimes` 读取启动时间，容差 2000ms。Linux 实现保留是为了让 `bifrost-core` 单元测试在 CI Linux runner 上跑通；运行期不会在 Linux 上 spawn helper。`RuntimeInfo.started_at_ms` 持久化主进程启动时间，spawn helper 时通过 `--parent-started-at-ms` 透传给 helper，helper 启动和每轮 poll 都会调用 `start_times_match` 比对：若 PID 仍存活但 start_time 不再匹配，说明原父进程已经退出且 PID 被复用，helper 输出 `pid_reuse_check=mismatch` 后执行受 `proxy_state.json`/last runtime target 保护的 guarded `recover_from_crash`；恢复逻辑仍会保留不再指向 Bifrost target 的外部代理，避免误清理新进程自己的代理。
-- helper cleanup 路径使用共享重试策略 `bifrost-core::system_proxy_recovery::retry_with_policy(window=60s, interval=5s, |attempt| recover_from_crash(...))`。`is_retryable_recovery_error` 区分可重试的 transient 错误（networksetup 暂不可用、network service 枚举为空、临时 IO/lock contention）与不可重试错误（解析失败、状态文件损坏）；普通 transient 在 60 秒窗口超时后记录最后一次错误并退出。同一份重试策略也复用在 `system_proxy_launchd::recover_if_no_live_runtime_with_startup_retry`，确保启动期 cleanup-daemon 与运行期 lifecycle helper 行为一致。当 macOS network service 枚举失败或返回空 service list 时，恢复逻辑必须把它视为“系统网络服务尚未 ready”的可重试 readiness 状态，保留 `proxy_state.json` / `proxy_backup.json` / `runtime.json` 并由当前 helper/cleanup-daemon 进程持续定时重试，直到 service list 成功读取后才继续判断恢复或保留外部代理；禁止退回 `scutil --proxy` 聚合状态后清理证据并退出，也不能指望 one-shot LaunchDaemon 未来再次唤醒。
-- LaunchDaemon 启动恢复判断 live runtime 时同样读取 `runtime.json.started_at_ms`：只有 pid 存活、start time 匹配、且上次 runtime target listener 仍可连接时才跳过 cleanup。旧 runtime 文件缺失 `started_at_ms` 时保留 pid-only 兼容路径并记录日志；如果 pid 被复用或 start time mismatch，即使旧端口有其它 listener，也必须继续执行 guarded crash recovery。
-- 跨进程 lock 文件 `.system_proxy.lock` 通过 `O_NOFOLLOW` 打开并在 fd 上校验 regular file / 单一 hard link，再用 `fchmod(0666)` 修正权限：单纯依赖 `OpenOptions::mode(0o666)` 会被进程的 umask 屏蔽，path-based `chmod` 又会在 root LaunchDaemon 场景跟随用户可控 symlink。fd 级修复后，root + 普通用户混合启动也能正常获得 advisory lock；若旧版本留下 root-owned strict lock，用户态会通过隐藏的 `system-proxy repair-lock --data-dir` GUI 授权路径执行同一套 nofollow + fd chmod 迁移。Windows 不支持 POSIX mode 因此跳过该步骤。
-- 所有 macOS 系统代理写入、恢复和 crash recovery 入口通过 data dir 下的 `.system_proxy.lock` 做跨进程串行化。该锁覆盖主进程 shutdown restore、restore guard、`stop` 命令、lifecycle helper、LaunchDaemon cleanup-daemon、普通 enable/disable、sudo/gui-auth 变体，避免多个进程同时调用 `networksetup` 写同一批 network service。
-- macOS 启用系统代理后，服务启动完成并写入 `runtime.json` 之后，会异步检查系统级 cleanup LaunchDaemon。若 `/Library/LaunchDaemons/com.bifrost.system-proxy-cleanup.plist` 已安装、已加载，且 program 路径、data dir 与当前运行实例一致，则不做任何安装动作；Bifrost 版本号变化但 program 路径不变时，launchd 下次运行仍会执行同一路径上的新二进制，不应仅因版本差异触发 GUI 授权重装。若缺失、未加载、二进制路径/data dir 不一致，或 plist 运行模式需要迁移，则后台线程通过 `osascript do shell script ... with administrator privileges` 触发 macOS GUI 授权安装。用户取消授权不会阻塞或停止 Bifrost 主服务。测试可通过 `BIFROST_SYSTEM_PROXY_DISABLE_LAUNCHD_INSTALL=1` 禁用该后台安装路径。
-- 对已经运行中的服务，Admin API / Web UI 打开 `Enable System Proxy` 成功后必须执行同一套 LaunchDaemon 检查，并确保 runtime lifecycle helper 已启动。也就是说，用户在 9900 等长驻服务的 Settings 页面打开系统代理时，不需要再手动点击 `Boot/Shutdown Cleanup` 才能看到安装授权；如果随后本次运行中的 Bifrost 主进程崩溃，lifecycle helper 仍应按父 PID 兜底恢复系统代理，避免 OS proxy 长时间指向死端口。只有用户明确取消授权或通过环境变量禁用时才不安装 LaunchDaemon；只有 `BIFROST_SYSTEM_PROXY_DISABLE_LIFECYCLE_HELPER=1` 时才跳过 lifecycle helper。
-- Admin API / Web UI 关闭系统代理路径会话语义：用户显式点击关闭时，以当前运行时 host/port 和 live OS proxy 归属为准，`proxy_state.json` / `proxy_backup.json` 只作为恢复辅助证据，不能覆盖用户操作意图。即使落盘 state 缺失，或旧 backup 已经脏到指回当前 Bifrost target，`request.enabled=false` 也必须关闭仍指向本 runtime target 的系统代理，而不是把脏 backup 再恢复回同一个 Bifrost。disable 请求成功且 `managed_by_bifrost=false` 后即可调用 `stop_system_proxy_lifecycle_helper_after_runtime_disable` kill helper；此时外部代理可能仍然 live enabled，但 Bifrost 已不再拥有系统代理。任何 disable 请求未真正生效（例如 `networksetup` 失败，或 live proxy 仍指向 Bifrost target）时，会输出 warning `system proxy admin toggle did not converge to a clean state; lifecycle helper left running`，helper 保持存活；这样后续主进程崩溃仍由 helper 兜底，不会出现"disable 失败但 helper 已被提前停掉"的回归。
-- 运行期 system proxy reconcile 的目标状态不再只来自启动参数。Admin API / Web UI 每次启用或关闭 system proxy 都会更新共享 desired flag；reconcile 和 wake reconcile 只在 desired enabled 时重新 apply。用户在 WebView 点击停止后，即使启动时配置曾要求开启系统代理，后台线程也不能在下一轮把代理重新打开。
-- CLI system-proxy 入口与 WebView/Admin API 对齐：当检测到当前运行中的 Bifrost Admin API 可达，CLI `system-proxy enable/disable` 优先调用 `PUT /_bifrost/api/proxy/system`，由运行中进程统一更新 desired flag、持久配置、lifecycle helper 和 LaunchDaemon 检查。Admin API 不可用时才回退到本地 `SystemProxyManager` 写 OS proxy；本地 disable 会先用 managed state，若 state 缺失或 stale 导致 `OwnedByOther`，再读取 `runtime.json` 的 host/port 作为 expected target 调用 explicit disable，覆盖“state 缺失但 live proxy 仍指向当前 runtime”的旧现场。CLI status 输出 live enabled/host/port/bypass、`Managed by Bifrost`、`Configured enabled` 和 `Configured bypass`，避免把外部代理 live enabled 误读成 Bifrost 仍开启。
-- LaunchDaemon 指向隐藏命令 `bifrost system-proxy cleanup-daemon --data-dir <dir> --installed-version <version>`，plist 同时写入安装版本环境变量。plist 使用 `RunAtLoad=true` 且不写 `KeepAlive`，因此 launchd bootstrap/kickstart 或系统启动时执行一次 startup recovery 检查后退出，空闲时不保留 cleanup-daemon 进程。one-shot 启动后先检查 `runtime.json` / `bifrost.pid`；只有旧 runtime PID 存活且 runtime target 端口也有 live listener 时，才跳过 startup cleanup，避免安装时误清正在运行的系统代理；如果只是 PID 碰巧存活但没有对应 listener，则继续执行 crash recovery。PID 存活判断使用进程 API，不通过外部 `/bin/kill -0`，避免 missing pid 噪声写入 LaunchDaemon stderr；当确认 runtime 不存活且 startup recovery 成功后，cleanup-daemon 会删除 stale `runtime.json` / `bifrost.pid`，避免后续 `bifrost status` 继续显示 stale PID。为了覆盖 macOS 刚启动时 `networksetup` 暂不可用或 network service 枚举暂时为空的窗口，cleanup-daemon 对普通可重试启动期错误执行 60 秒、每 5 秒一次的有限退避重试；对 network service list 为空这类“系统网络服务未 ready”状态，当前 one-shot 进程持续定时重试直到 service list 可读取，然后才执行恢复判断并退出。stop-suppression marker 的职责仅限安装/卸载 LaunchDaemon 期间抑制 bootstrap/kickstart 自身造成的误恢复；graceful stop 后是否恢复由 state/backup/runtime target 与当前系统代理归属决定，不把该短 TTL marker 当作 clean-shutdown 持久语义。运行期主进程异常退出继续由 lifecycle helper 兜底，正常 stop 仍由主进程 graceful restore。
-- CLI 与 Admin API/Web UI 均支持安装/卸载/状态查询 cleanup LaunchDaemon。`GET /api/proxy/system/launchd` 返回 `installed_version`、`installed_mode`、`current_version`、`needs_upgrade`、`needs_upgrade_reason`、plist 路径和加载状态；`installed_version` 用于诊断展示，不应单独触发 `needs_upgrade`。Web UI Settings Proxy 页提供 `Boot/Shutdown Cleanup` 开关，program/data dir 不一致、plist 未加载或运行模式需要迁移时展示 needs-upgrade 状态，用户打开开关会重新安装当前 helper；该开关是显式管理入口，不是系统代理启用时自动保护安装的唯一入口。
-- 收到 SIGTERM/SIGINT/SIGHUP 时，前台和 daemon 分支默认会优先停止系统代理 reconcile 线程并调用 `SystemProxyManager::restore`，再清理代理 listener、后台任务、ASR/浏览器/Agent worker 等资源。前台/daemon listener 异常退出也会先执行同一套 restore，再返回 runtime error；前台兜底 guard 还会在其它异常退出时先停止 reconcile，再执行 restore，避免恢复后被后台线程重新启用。关机/崩溃等非 CLI stop 场景优先恢复 Wi-Fi/Web 代理，减少系统重启后仍绑定到已消失 Bifrost 端口的风险。
-- `bifrost stop` 发 SIGTERM 前会在支持托管系统代理的平台写入短 TTL `foreground_cleanup` shutdown marker，要求运行中进程停止 system proxy reconcile 并跳过 stop-time 二次 `SystemProxyManager::restore`。普通 stop 的 marker 写入是 best-effort：如果 data dir 权限或磁盘问题导致 marker 写失败，stop 仍继续执行前台 cleanup，避免仅因辅助 marker 失败而无法停止服务；restart 的 `preserve_for_restart` marker 仍要求写入成功，失败时不停止旧服务。stop 命令随后在前台先执行 system proxy / CLI proxy cleanup；只有 cleanup 成功或确认当前系统代理不属于本 Bifrost runtime 后，才发送 SIGTERM 停止主服务。若 cleanup 失败，stop 命令必须返回错误并保持主服务运行，避免出现“主服务已停但 OS system proxy 仍指向死端口”的断网窗口。lifecycle helper 在父进程退出、PID 复用或收到 SIGTERM/SIGINT/SIGHUP 后都先读取 shutdown marker；`foreground_cleanup` / `preserve_for_restart` 直接退出且不消费 marker，避免抢在主进程 shutdown restore guard 或 fresh runtime 接管前清掉同一退出窗口的信号。只有兼容旧版本的 `background_cleanup` marker 由 helper 消费并执行 cleanup。
-- `bifrost restart` 和 `bifrost upgrade` 默认自动重启路径在停止旧进程前必须先快照当前系统代理归属：如果 OS system proxy live 状态仍指向旧 `runtime.json` 的 Bifrost host/port（macOS 下包含逐 network service 检查，不只依赖聚合视图），则 fresh daemon 的 `start --daemon --yes --skip-cert-check` argv 必须显式追加 `--system-proxy`，并尽量带回当前 bypass。restart 调用 stop 时写入 `preserve_for_restart` shutdown marker，旧 daemon 和旧 lifecycle helper 都不得清理系统代理；系统代理保持指向同一 host/port，fresh daemon 在端口释放后立即重新监听并接管，避免先关闭系统代理再打开造成长时间断网。restart orphan 在端口释放后不再重复执行 `networksetup` re-apply；该热路径只记录保留的 system proxy target 并尽快 exec fresh daemon，避免系统代理写入阻塞新 listener 接管。fresh daemon 启动后再按 `--system-proxy` reconcile。fresh `start --system-proxy` 在 marker 与旧 `runtime.json` 同时存在时跳过启动前 crash recovery，system proxy reconcile 线程的初始 recovery 也必须跳过同一 handoff 窗口，避免 recovery 把 restart handoff 中仍可用的系统代理恢复为 disabled；如果缺 marker、缺 runtime 或 fresh start 未请求 system proxy，则照常执行 recovery。若 restart handoff 在进入新 runtime 前失败，启动期 guard 会执行 crash recovery，防止旧 listener 已死但系统代理继续悬挂。marker-skip 的 shutdown guard 会先 `detach` manager，core `SystemProxyManager::Drop` 也会读取 `foreground_cleanup` / `preserve_for_restart` marker 并跳过 restore，避免漏网 Drop 在 restart/foreground cleanup 场景下二次回滚。
-- Windows 手动安装的 `bifrost upgrade` 不能在当前进程仍运行时直接覆盖自己的 `bifrost.exe`。当目标安装路径等于 `current_exe()` 时，upgrade 先把新 exe stage 为同目录隐藏 pending 文件；如果存在运行中的 daemon，CLI 默认按上面的 runtime/default-config 规则构造 restart args、停止旧 daemon、等待端口释放，再调度 PowerShell helper。helper 等当前 upgrade 进程退出后删除旧 exe、移动 pending exe 到目标路径，并用替换后的 exe 执行 `start -d -y ...`。如果没有 `runtime.json`，restart args 必须走默认配置路径。Windows x86 CI 通过真实旧 release daemon + 当前 PR CLI archive upgrade restart 链路覆盖该行为；该链路可通过 `BIFROST_DAEMON_READY_TIMEOUT_SECS` 拉长 detached daemon readiness 等待，以吸收 Windows runner 首次启动抖动，失败时上传 `.bifrost-upgrade-*.log` 便于定位替换或重启阶段。
-- shutdown marker 只属于旧 runtime 的退出窗口，不能跨 runtime 持久生效。`bifrost start` 启动前只读取 marker 来决定是否允许 restart handoff 跳过 crash recovery；新 foreground runtime 写入 `runtime.json` 后、或新 daemon 通过 readiness pipe 确认 listener ready 后，才消费旧 marker。若 restart handoff 在新 runtime 接管前失败，启动期 guard 会先执行 crash recovery 再消费 marker。这样旧 lifecycle helper 在延迟确认父进程退出时仍能读到 `preserve_for_restart` 并跳过 cleanup，同时新 daemon 后续 stop/异常退出不会长期误读旧 marker 并跳过应有的系统代理保护动作。
-- macOS 恢复与归属判断必须逐个 network service 检查 `networksetup -getwebproxy` 和 `-getsecurewebproxy`。`scutil --proxy` 是聚合视图，可能出现 Wi-Fi 已恢复但 USB/Thunderbolt service 仍残留 Bifrost 端口的混合状态；当 `proxy_state.json` 中有 Bifrost target 时，restore 只恢复仍指向该 target 的 network service，避免关机时对已被外部代理接管或已恢复的 service 做额外 `networksetup` 调用。只有旧版 `proxy_backup.json` 缺少 target 信息时，才退回全 service 恢复。
-- macOS network service 代理状态读取（`-getwebproxy` / `-getsecurewebproxy`）可以并发执行，降低 one-shot cleanup 在 no-op 场景下的启动期耗时；写入、恢复和 disable 也在 `.system_proxy.lock` 的跨进程保护内按 network service 做有界并行（默认最多 4 个 service 同时执行）。单个 service 内仍保持 HTTP proxy、HTTP state、HTTPS proxy、HTTPS state、bypass 的顺序，GUI 授权路径保持串行以避免多个授权弹窗并发出现。这样多网卡设备上的 enable/restore/disable 不再被所有 service 完全串行拖慢，同时仍避免多个 Bifrost 进程互相写系统代理。
-- 日志覆盖启动恢复、关机清理、锁等待和 service 级 macOS 写入路径。启动时记录 stale state 检查与 crash recovery 决策；关机信号路径记录停止 reconcile、`waiting_for_system_proxy_lock`、`acquired_system_proxy_lock`、restore 开始、耗时、成功或失败；core 层记录恢复到的原始 proxy host/port、目标 service 选择、是否保留外部代理，以及每个 macOS network service 的设置/关闭动作和耗时，方便重启或休眠恢复后按日志定位清理是否执行、执行到哪一步失败。
+历史上 Bifrost 只有一次性 enable/disable，缺归属判定和跨进程锁，导致：外部代理被误关、Bifrost 崩溃后 OS 代理长时间指向死端口、restart 期间出现断网窗口。本方案沉淀多轮线上回归的最终形态。
 
-## 依赖项
+## 用户目标验证清单
 
-- macOS 使用 `networksetup` / `scutil --proxy` 获取和写入系统代理。
-- macOS cleanup LaunchDaemon 使用 `/bin/launchctl`、`/usr/bin/osascript` GUI 授权和 `/Library/LaunchDaemons` plist。安装/卸载需要管理员授权；普通启动只在服务 ready 后异步触发授权流程，授权取消不影响主服务。
-- Windows 继续复用现有 `sysproxy` / 注册表路径。Linux 不支持系统代理写入，因此 Bifrost 在 Linux 上既不修改系统代理、不写 shutdown marker，也不启动 lifecycle helper / cleanup LaunchDaemon；Linux CI 仍执行 `bifrost restart` 的无系统代理真实链路，保证除系统代理差异外的 restart 行为与 macOS 对齐。
-- WebUI 复用 `SystemProxyStatus`，用 `configured_enabled` 驱动 Settings/StatusBar/Traffic toolbar 的开关位置，用 `enabled + managed_by_bifrost` 展示实际运行状态；并新增 `SystemProxyLaunchdStatus` 用于展示 cleanup LaunchDaemon 状态、安装版本诊断信息和 program/data dir/运行模式一致性。
+### 必须实现
+
+- `SystemProxyManager::enable` 使用两阶段 `applied` 标记写入 `proxy_state.json`；`proxy_backup.json` 兼容旧恢复。
+- 关闭/恢复路径先判断归属，`OwnedByOther` 时保持外部代理不变。
+- `bifrost start` 在证书/端口冲突检查之前同步执行 `SystemProxyManager::recover_from_crash`。
+- macOS 启用系统代理时启动跨平台 lifecycle helper（独立进程组/DETACHED_PROCESS）+ 后台异步安装 cleanup LaunchDaemon（用户取消授权不阻塞主服务）。
+- Windows lifecycle helper 使用 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`；父进程崩溃时 helper `Drop::detach()` 继续兜底。
+- helper 身份判定使用 PID + start_time 双因子（容差 2000ms），避免 PID 复用误清理。
+- 所有 macOS 系统代理写入通过 `data_dir/.system_proxy.lock`（`O_NOFOLLOW` + fd `fchmod(0666)`）跨进程串行化。
+- `bifrost restart` / `bifrost upgrade` 在旧 runtime 仍持有系统代理时，为新 daemon argv 附加 `--system-proxy` + bypass，并写 `preserve_for_restart` marker，避免断网窗口。
+- Admin API `GET /api/proxy/system` 返回 live (`enabled/host/port/managed_by_bifrost`) 与 desired (`configured_enabled/configured_bypass`)。
+- CLI `system-proxy enable/disable` 优先调用 Admin API，Admin 不可达时回退本地 `SystemProxyManager`，且能用 `runtime.json` fallback expected target。
+
+### 必须不破坏
+
+- 用户从未启用系统代理时，Bifrost 不应写入 OS 代理，也不启动 helper/LaunchDaemon。
+- Linux 不支持系统代理（`SystemProxyManager::is_supported()` 返回 false），不写 shutdown marker、不启动 helper、不装 LaunchDaemon。
+- 外部代理（Surge/Clash/系统 VPN）在 Bifrost 任何清理路径下都不能被关闭；`disable` 请求成功且 `managed_by_bifrost=false` 时不报错 `System proxy is still enabled`。
+- `bifrost restart` 期间 OS 代理不能出现 disable→enable 的可感断网。
+- 已启用 helper 时 `bifrost stop` 必须先前台清理系统代理，只有 cleanup 成功才发送 SIGTERM。
+
+### 必须真实验证
+
+- macOS 真实 GUI 授权安装/卸载 LaunchDaemon；同一 program/data dir/版本再次启动不重复弹授权。
+- Windows x86 real self-update replacement 在原生 runner 上跑通 `bifrost upgrade`（`E2E Shell (x86_64-pc-windows-msvc)` job）。
+- 睡眠恢复、崩溃恢复、无 `proxy_state.json` 但 `runtime.json` 匹配现场三条恢复路径都真实回归。
+- CLI `system-proxy status` 输出 live/managed/configured 三段。
+
+## 产品语义
+
+### 归属判定是所有清理动作的前提
+
+- `ProxyBackup::target_matches(host, port)` 覆盖 loopback alias（`127.0.0.1` / `localhost` / `0.0.0.0` / IPv6 wildcard）与端口匹配。
+- `decide_managed_state_recovery` 覆盖 `applied=false` + 未出现 target → 丢弃 pending；`applied=false` + 已出现 target → 恢复 original；`applied=true` → 归属判定后恢复。
+- `bifrost stop` 只在 `runtime.json` host/port 与当前 OS 代理匹配时才清理。
+- `recover_from_crash` 在 state/backup 缺失但 `runtime.json` 匹配时执行 failsafe 关闭；不匹配则保留外部代理。
+
+### 两阶段 apply 标记防止误恢复
+
+`proxy_state.json` 写入次序：
+1. `applied=false` 落盘 → 写 macOS network service → `applied=true` 落盘。
+2. Recovery 只在 `applied=true` 或"apply 中途已出现 target"时恢复；否则丢弃 pending。
+
+### 运行期 reconcile 与 wake-gap
+
+- 后台 reconcile 线程周期性复核 (30s)。
+- macOS wake-gap reconcile：检测调度器 tick 时间跳变 > 10s 时立即触发。
+- 只在 desired enabled 时 apply；desired flag 由 Admin API/Web UI 更新。
+
+### lifecycle helper 与 LaunchDaemon 分工
+
+| 角色 | 触发 | 生命周期 |
+| --- | --- | --- |
+| lifecycle helper | 主进程 spawn，`SIGKILL`/崩溃时兜底 restore | 主进程独立进程组子进程；`Drop::detach()` |
+| cleanup LaunchDaemon (macOS) | launchctl bootstrap/kickstart/系统启动 | one-shot，`RunAtLoad=true`，无 `KeepAlive` |
+
+- helper 使用 `retry_with_policy(window=60s, interval=5s)`；`is_retryable_recovery_error` 区分 transient vs 不可重试。
+- LaunchDaemon 处理"系统 network service 未 ready"时持续定时重试直到可读。
+
+### restart / upgrade handoff
+
+- `bifrost restart` 写 `preserve_for_restart` marker，旧 daemon/旧 helper 都跳过清理。
+- fresh daemon `start --system-proxy` 在 marker + 旧 runtime 同时存在时跳过启动前 crash recovery；reconcile 线程也跳过初始 recovery。
+- shutdown marker 只属于旧 runtime 退出窗口；新 runtime 写入 `runtime.json` 或 readiness pipe 确认后消费。
+
+## 技术细节
+
+### 关键源码
+
+| 文件 | 责任 |
+| --- | --- |
+| `crates/bifrost-core/src/system_proxy.rs` | `SystemProxyManager` enable/disable/recover_from_crash、state/backup 序列化、`decide_managed_state_recovery` |
+| `crates/bifrost-core/src/system_proxy_launchd.rs` | plist 生成/解析、`recover_if_no_live_runtime_with_startup_retry` |
+| `crates/bifrost-core/src/system_proxy_recovery.rs` | 共享 `retry_with_policy(window, interval, closure)`、`is_retryable_recovery_error` |
+| `crates/bifrost-core/src/process_start_time.rs` | 跨平台 `current_process_start_time_ms` / `get_process_start_time_ms(pid)` / `start_times_match` |
+| `crates/bifrost-admin/src/state.rs` | `SystemProxyLifecycleHelperState::ensure_started/stop/detach` |
+| `crates/bifrost-admin/src/handlers/proxy.rs` | `GET/PUT /api/proxy/system`、`/api/proxy/system/launchd` |
+| `crates/bifrost-cli/src/commands/system_proxy.rs` | CLI enable/disable/status/cleanup-daemon subcommands，Admin API fallback |
+| `crates/bifrost-cli/src/commands/restart.rs` | restart arg 构造，`runtime_system_proxy_host` wildcard→loopback |
+| `crates/bifrost-cli/src/commands/stop.rs` | 前置 cleanup、写 `foreground_cleanup` marker |
+| `crates/bifrost-cli/src/commands/upgrade.rs` | Windows self-replace via PowerShell helper |
+| `crates/bifrost-cli/src/process.rs` | `runtime_info_system_proxy_target` / `runtime.started_at_ms` |
+| `crates/bifrost-core/src/shell_proxy.rs` | 与 shell rc 分离，不复用 system proxy 路径 |
+
+### 关键数据结构
+
+```rust
+pub struct ProxyBackup { pub enable: bool, pub host: String, pub port: u16, pub bypass: Vec<String> }
+
+pub struct ManagedProxyState {
+    pub target: ProxyBackup,
+    pub original: ProxyBackup,
+    #[serde(default = "managed_proxy_state_applied_default")] // true
+    pub applied: bool,
+}
+
+pub enum ProxyOwnership { OwnedByBifrost, OwnedByOther, Disabled }
+```
+
+### 跨平台差异
+
+- **macOS**：`networksetup -getwebproxy/-getsecurewebproxy` 逐 network service 归属判定；`.system_proxy.lock` 保护写入；GUI 授权走 `osascript ... with administrator privileges`；network service 读取并发、写入按 service 有界并行（默认 4）。
+- **Windows**：`sysproxy` / 注册表；helper 用 `CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS`；不需要 file lock。
+- **Linux**：`is_supported() = false`；仅 CI 跑 `bifrost restart` 无系统代理链路，保证除系统代理外行为对齐。
+
+## CLI + Web + Admin API
+
+### CLI
+
+```bash
+bifrost system-proxy enable [--host <ip>] [--port <p>] [--bypass <cidr>]
+bifrost system-proxy disable
+bifrost system-proxy status                 # 输出 live + Managed by Bifrost + Configured
+bifrost system-proxy cleanup-daemon         # 隐藏子命令，LaunchDaemon 调用
+bifrost system-proxy repair-lock --data-dir <dir>  # 迁移 root-owned strict lock
+bifrost system-proxy launchd status|install|uninstall
+```
+
+行为：CLI 优先调 Admin API；Admin 不可达时回退本地 manager；`disable` 遇 `OwnedByOther` 时读取 `runtime.json` 的 expected target 重试 explicit disable。
+
+### Web UI
+
+- Settings → Proxy：开关按 `configured_enabled` 显示，subtitle 显示 live `enabled + managed_by_bifrost`；不一致时 pending/warning。
+- `Boot/Shutdown Cleanup` 开关调用 `/api/proxy/system/launchd` install/uninstall，`needs_upgrade_reason` 决定是否弹迁移提示。
+- StatusBar / Traffic toolbar 同样使用 `configured_enabled`。
+
+### Admin API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/proxy/system` | `enabled`, `host`, `port`, `bypass`, `managed_by_bifrost`, `configured_enabled`, `configured_bypass` |
+| PUT | `/api/proxy/system` | `{enabled, host?, port?, bypass?}`；更新 desired flag，触发 lifecycle helper + LaunchDaemon 检查 |
+| GET | `/api/proxy/system/launchd` | `installed_version`, `installed_mode`, `current_version`, `needs_upgrade`, `needs_upgrade_reason`, plist 路径 + load 状态 |
+| POST | `/api/proxy/system/launchd/install` | GUI 授权安装 |
+| POST | `/api/proxy/system/launchd/uninstall` | GUI 授权卸载 |
+
+## Sync 边界
+
+系统代理是每台设备的本地状态，不参与 Sync/导入导出/分享；`config.toml` 中的 `system_proxy.enabled` 仅保存本机 desired 偏好。crash recovery / cleanup-daemon 只允许修正 OS 现场，不允许把 `config.toml` 中 desired 改为关闭。
+
+## Phase 1-4
+
+### Phase 1：归属判定与状态文件
+
+- 新增 `ManagedProxyState` + 两阶段 `applied` 标记。
+- 关闭/enable 路径归属判定；返回 `OwnedByOther`。
+- `bifrost stop` 严格依赖 runtime host/port + live OS 匹配。
+
+### Phase 2：跨进程串行化 + startup recovery
+
+- `.system_proxy.lock` (`O_NOFOLLOW` + fd `fchmod`)；覆盖所有写入入口。
+- `bifrost start` 前置 `recover_from_crash`；`runtime.json.started_at_ms` PID + start_time 双因子。
+
+### Phase 3：lifecycle helper + cleanup LaunchDaemon
+
+- macOS + Windows helper（DETACHED/独立进程组）。
+- 共享 `retry_with_policy`；network service list 空视为 readiness 持续重试。
+- LaunchDaemon 后台异步授权安装；`Boot/Shutdown Cleanup` 显式管理入口。
+
+### Phase 4：restart handoff + Admin 一致性
+
+- `preserve_for_restart` marker；fresh daemon 跳过 recovery；旧 helper 跳过 cleanup。
+- Admin API `configured_enabled` / `configured_bypass` 与 CLI 对齐；WebUI Settings/StatusBar/Traffic 全部使用 configured 驱动开关状态。
+- CLI `system-proxy` 优先 Admin API；Admin 不可达时本地 fallback 支持 runtime target。
 
 ## 测试方案
 
-- 单元测试：
-  - `ProxyBackup::target_matches` 覆盖 loopback host alias 和端口不匹配。
-  - `decide_managed_state_recovery` 覆盖当前系统代理仍指向 Bifrost target 时恢复 original、当前代理已指向外部端口时保留外部代理。
-  - `load_last_runtime_proxy_target` 覆盖从 `runtime.json` 读取上次 host/port、`0.0.0.0` 映射到 loopback、非法端口被忽略；`current_proxy_matches_target` 覆盖 loopback alias 匹配。
-  - `recover_if_no_live_runtime_with_startup_retry` 覆盖 cleanup-daemon 启动期 retry 分类，确认 `networksetup` 执行失败和 service 枚举暂时为空会重试，损坏状态文件等非 transient 错误不重试。
-  - `decide_managed_state_recovery` 覆盖 `applied=false` 且 target 未出现时丢弃 pending state、`applied=false` 但 target 已出现时恢复 original，避免 apply 前/中途崩溃语义混淆。
-  - macOS `.system_proxy.lock` 覆盖跨进程入口串行化，确认第二个恢复入口在第一个锁释放前不会进入 networksetup 写入区。
-  - `system_proxy_lock_is_world_writable_after_creation` / `system_proxy_lock_rejects_symlink`：在 macOS 真实创建 lock 文件并断言权限位为 `0o666`，验证 umask-proof fd chmod；同时预置 symlink lock 并确认 `O_NOFOLLOW` 拒绝，避免 root LaunchDaemon 跟随用户可控 symlink chmod。
-  - `runtime_identity_is_not_alive_when_start_time_mismatches`（Unix）：LaunchDaemon 读取 runtime pid 后必须比对 `started_at_ms`，PID 复用时不能因为 pid alive 或端口 listener alive 而跳过 cleanup。
-  - `process_is_running_returns_false_for_missing_pid_without_shelling_out` / `remove_stale_runtime_files_removes_runtime_and_pid_files`：缺失 PID 不应向 LaunchDaemon stderr 写入 `/bin/kill` 噪声；startup recovery 成功后应清理 stale runtime 文件。
-  - `last_runtime_target_has_live_listener_resolves_localhost`：runtime host 为 `localhost` 时 listener 探测必须通过 DNS/loopback 解析，不把活着的 Bifrost 误判为 dead。
-  - `process_start_time::tests::current_process_start_time_is_some` / `start_times_match_within_tolerance` / `start_times_match_outside_tolerance`：跨平台读取当前进程 start_time、容差比对，覆盖 macOS / Linux / Windows 编译路径（运行期 helper 仅在 macOS / Windows 上 spawn）。
-  - `system_proxy_recovery::tests::retry_with_policy_returns_after_success` / `retry_with_policy_gives_up_after_window`：共享重试策略覆盖瞬时失败 -> 成功、超时窗口内多次重试后退出。
-  - CLI restart 参数构造覆盖 `upgrade` 默认自重启与 `restart` 在旧 runtime 正管理系统代理时追加 `--system-proxy` / `--proxy-bypass`；`runtime_system_proxy_host` 覆盖 `0.0.0.0` / IPv6 wildcard 到 loopback 的 target 映射。
-  - Admin state 覆盖 lifecycle helper 程序路径 fallback：`current_exe()` 指向陈旧路径时回退到现存 `argv[0]`，现存 `current_exe()` 优先。
-  - Admin disable 验证覆盖"外部代理仍启用但不归 Bifrost 管理时视为关闭成功"。
-  - explicit disable 覆盖脏备份场景：当 saved original/backup 指回当前 runtime target 时，用户显式关闭应忽略该 backup 并关闭 Bifrost system proxy；当 backup 指向外部代理端口时仍恢复/保留外部代理。
-  - CLI system-proxy 覆盖 runtime target fallback：`runtime_info_system_proxy_target` 将 wildcard listen host 映射到 loopback；CLI disable 仅在 managed state 返回 `OwnedByOther` 且 runtime target 可用时重试 explicit disable。CLI status 人工验证覆盖 `Managed by Bifrost` 与 configured 字段输出。
-  - CLI stop host 判定覆盖 wildcard listen host 到 loopback 的映射。
-- E2E 测试：更新 `e2e-tests/tests/test_system_proxy_e2e.sh`，新增 macOS 外部代理回归：先设置外部本机端口代理，启动 Bifrost `--no-system-proxy`，调用 Admin API disable，断言外部代理仍保留且返回 `managed_by_bifrost=false`；新增 `bifrost restart` 保持系统代理回归：启动时启用 system proxy，执行 restart，断言 fresh daemon ready 后 OS proxy 继续指向 Bifrost host/port；新增 `e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 的无系统代理 restart 跨平台回归：Linux/macOS CI 均启动 `--no-system-proxy` daemon 后执行真实 `bifrost restart`，断言 fresh daemon ready、restart argv 不含 `--system-proxy` 且不残留 shutdown marker；新增 `bifrost stop` 前置 cleanup 回归：stop 输出 foreground cleanup 提示，且不出现 background cleanup 提示或 SIGKILL；新增 lifecycle helper 崩溃兜底回归：强杀启用系统代理的主进程后，断言 helper 在父进程消失后清理残留；新增无 `proxy_state.json` / `proxy_backup.json` 但 `runtime.json` target 匹配当前系统代理的启动前恢复回归；新增运行中 Admin API 启用系统代理回归：服务以 `--no-system-proxy` 启动后调用 `PUT /api/proxy/system {"enabled":true}`，断言日志出现 `system proxy lifecycle helper started after Admin API enable`；新增 Admin API 结构回归，断言 `/api/proxy/system` 同时返回 live `enabled` 与 desired `configured_enabled`；新增 LaunchDaemon plist dry-run 回归，断言 plist 包含 `cleanup-daemon`、`--data-dir`、`--installed-version` 和 `BIFROST_LAUNCHD_INSTALLED_VERSION`；新增 cleanup-daemon 无状态快速退出回归，确认 retry-aware one-shot 在明确无需恢复时不会等待完整 retry 窗口；新增 fake `networksetup` readiness 回归，前两次 service list 只返回空 header，第三次返回真实 service list，断言 cleanup-daemon 输出 retry 日志且只在 network services ready 后完成恢复判定；新增前台 helper 进程组隔离人工/脚本验证点，确认 lifecycle helper 启动日志包含独立 helper pid 且主进程组信号不会作为清理判定来源；保留 helper 禁用时的崩溃残留回归，确认下次启动失败前也会执行 crash recovery。
-- 真实场景测试：更新并执行 `human_tests/cli-system-proxy.md` 的 Surge/外部代理回归用例、睡眠恢复可用用例、lifecycle helper 崩溃兜底用例、无 backup/state 但 runtime target 匹配当前系统代理的回归用例、启动后异步 GUI 授权安装 LaunchDaemon 用例、Web UI 安装/卸载 LaunchDaemon 授权用例、运行中服务通过 Admin API/Web UI 打开系统代理后自动检查 LaunchDaemon 用例、崩溃/重启 cleanup 后 UI 开关仍保持 configured enabled 的用例、normal stop 前置 cleanup 用例，以及关机/崩溃残留恢复用例，验证 CLI disable 与 stop 不清理外部代理，sleep/reboot cleanup 后 Bifrost 仍保留用户期望配置，普通 stop 先恢复/关闭系统代理再停止主服务，restart 不清理系统代理，helper 可在主进程无优雅退出机会时清理残留，启动失败前也清理 Bifrost 残留代理，且 LaunchDaemon 已安装、已加载并且 program/data dir/运行模式一致时不会重复安装。
-- 日志验证：重启/休眠类人工测试需检查日志包含 `checking for stale system proxy state before startup`、`System proxy crash recovery check starting`、`system proxy scheduler or wake gap detected; reconciling immediately`、`system proxy lifecycle cleanup helper started` / `system proxy lifecycle helper started after Admin API enable`（包含 `helper_program` 和 helper pid）、`waiting for system proxy cross-process file lock`、`acquired system proxy cross-process file lock`、`system proxy LaunchDaemon cleanup install starting asynchronously` / `system proxy LaunchDaemon cleanup already installed and current`、未安装时的用户可见提示或 Admin warning `system proxy LaunchDaemon cleanup is not ready after system proxy enable; reboot-time cleanup is unavailable until authorization install succeeds`、Admin API 路径的 `system proxy LaunchDaemon cleanup install starting asynchronously after system proxy enable` / `system proxy LaunchDaemon cleanup already installed and current after system proxy enable`、`system proxy launchd cleanup daemon started`、启动期 transient 失败时的 `system proxy cleanup daemon startup recovery failed with a retryable error; retrying`、`system proxy shutdown restore starting; stopping reconcile first`、`waiting_for_system_proxy_lock`、`acquired_system_proxy_lock`、`System proxy restore requested`、`Restoring macOS system proxy to saved original state`、`Selected macOS network services still pointing at Bifrost target for restore`、`Disabling macOS network service web proxies` / `Setting macOS network service proxy to requested target`、service 级 `elapsed_ms` 与 `system proxy shutdown restore completed`，失败时应包含对应 `failed to restore system proxy`、`system proxy reconcile failed` 或 LaunchDaemon install failed 日志。
+### 单元测试（`cargo test -p bifrost-core system_proxy`）
 
-## Review/Fix/Test 闭环方案
+- `ProxyBackup::target_matches` — loopback alias / 端口不匹配。
+- `decide_managed_state_recovery` — 覆盖 `applied=false` 未出现 target / 中途出现 target / `applied=true` 归属判定。
+- `load_last_runtime_proxy_target` / `current_proxy_matches_target` — `runtime.json` fallback、`0.0.0.0` → loopback、非法端口忽略。
+- `recover_if_no_live_runtime_with_startup_retry` — cleanup-daemon 启动期 retry 分类；空 service list 视为 readiness 持续重试。
+- `system_proxy_lock_is_world_writable_after_creation` / `system_proxy_lock_rejects_symlink` — 真实创建 lock 断言 `0o666`；预置 symlink 断言 `O_NOFOLLOW` 拒绝。
+- `runtime_identity_is_not_alive_when_start_time_mismatches` (Unix) — start_time mismatch 时不能因 PID 存活跳过 cleanup。
+- `process_is_running_returns_false_for_missing_pid_without_shelling_out` — 不用 `/bin/kill -0`。
+- `remove_stale_runtime_files_removes_runtime_and_pid_files`。
+- `last_runtime_target_has_live_listener_resolves_localhost`。
+- `process_start_time::tests::current_process_start_time_is_some` / `start_times_match_within_tolerance` / `start_times_match_outside_tolerance` — macOS / Linux / Windows。
+- `system_proxy_recovery::tests::retry_with_policy_returns_after_success` / `retry_with_policy_gives_up_after_window`。
+- `system_proxy_launchd::tests::*` — plist 版本元数据、ProgramArguments 解析、label 校验、startup retry 分类。
 
-- 第 1 轮：复核用户问题、`git diff`、SystemProxyManager/CLI stop/Admin API/Web store 改动，运行核心单测和系统代理 E2E。
-- 第 2 轮：复查第 1 轮修复后 diff、design/human_tests/readme 一致性，复跑受影响单测、E2E 和 human_tests。
+### CLI/Admin 单元测试
 
-## 校验要求
+- `cargo test -p bifrost-cli commands::stop::tests` — wildcard listen host → loopback 映射。
+- `cargo test -p bifrost-cli commands::system_proxy::tests` — runtime target fallback、`OwnedByOther` 重试 explicit disable。
+- `cargo test -p bifrost-cli commands::restart::tests` — `runtime_system_proxy_host` wildcard/IPv6 映射；upgrade 默认自重启附加 `--system-proxy` / `--proxy-bypass`。
+- `cargo test -p bifrost-admin proxy::tests` — disable 验证外部代理仍启用视为成功。
+- `cargo test -p bifrost-admin lifecycle_helper_program` — helper 程序路径 fallback。
 
-- 必须运行 `cargo test -p bifrost-core system_proxy`、`cargo test -p bifrost-admin proxy::tests`、`cargo test -p bifrost-cli commands::stop::tests`。
-- 必须运行 `cargo test -p bifrost-core system_proxy_launchd`，覆盖 plist 版本元数据、ProgramArguments 解析、label 校验和 cleanup-daemon 启动期 retry 分类。
-- 必须运行 `cargo test -p bifrost-admin lifecycle_helper_program`，覆盖 lifecycle helper 程序路径 fallback。
-- 必须运行 `bash e2e-tests/tests/test_system_proxy_e2e.sh`（macOS/Windows 支持平台；使用临时 `BIFROST_DATA_DIR`；系统代理测试目标明确涉及系统代理，允许省略 `--no-system-proxy`；macOS 覆盖 helper 启用和禁用两种崩溃恢复路径）。
-- 必须运行 `bash e2e-tests/tests/test_upgrade_restart_e2e.sh` 和 `bash e2e-tests/tests/test_upgrade_local_restart_e2e.sh`；Windows x86 真实 self-update replacement 由 CI job `E2E Shell (x86_64-pc-windows-msvc)` 在原生 runner 上执行。
-- 必须真实执行一次 macOS GUI 授权安装/卸载验证：启动 Bifrost 并启用系统代理后确认服务先 ready，再观察授权弹窗；运行中服务通过 Admin API/Web UI 打开系统代理时同样观察到 LaunchDaemon 自动检查/授权安装；用户授权后确认 `launchctl print system/com.bifrost.system-proxy-cleanup` 成功，Web UI 开关可卸载并再次安装，program/data dir/运行模式一致时再次启动不重复弹授权，即使 installed_version 与 current_version 不一致也不应仅因版本差异弹授权。
-- 收尾前按仓库规则运行 `cargo test --workspace --all-features` 与 `rust-project-validate`。
+### E2E 测试
 
-## 文档更新要求
+- `e2e-tests/tests/test_system_proxy_e2e.sh` — 外部代理归属回归、无 backup/state 但 runtime target 匹配启动前恢复、Admin API 运行中启用 helper 检查、Admin API 结构断言、cleanup-daemon 无状态快速退出、fake `networksetup` readiness 回归、helper 崩溃兜底、helper 禁用回归。
+- `e2e-tests/tests/test_stop_restart_shutdown_marker.sh` — Linux/macOS 无系统代理 restart 跨平台回归。
+- `e2e-tests/tests/test_upgrade_restart_e2e.sh` + `test_upgrade_local_restart_e2e.sh` — Windows x86 由 CI job `E2E Shell (x86_64-pc-windows-msvc)` 执行。
 
-- 更新 `human_tests/cli-system-proxy.md` 增加外部代理归属回归。
-- 更新 `human_tests/readme.md` CLI 系统代理用例数与说明。
+### human_tests
+
+`human_tests/cli-system-proxy.md`：
+
+- TC-SP-01：Surge/外部代理归属回归 — CLI disable 与 stop 不清理外部代理。
+- TC-SP-02：睡眠恢复可用回归。
+- TC-SP-03：lifecycle helper 崩溃兜底回归 — 强杀主进程后 helper 恢复。
+- TC-SP-04：无 backup/state 但 runtime target 匹配回归。
+- TC-SP-05：GUI 授权安装 LaunchDaemon（启用系统代理后异步弹授权）。
+- TC-SP-06：Admin API / Web UI 打开系统代理后自动检查 LaunchDaemon 与 helper。
+- TC-SP-07：崩溃/重启 cleanup 后 Web UI 开关仍保留 configured enabled。
+- TC-SP-08：normal stop 前置 cleanup 提示，无 background cleanup / SIGKILL。
+- TC-SP-09：`bifrost restart` 保持系统代理指向 fresh daemon 全程不断网。
+- TC-SP-10：LaunchDaemon 已安装且 program/data dir/mode 一致时再次启动不重复弹授权，即使 `installed_version` 与 `current_version` 差异也不应仅因版本弹授权。
+
+约束：临时 `BIFROST_DATA_DIR`；系统代理用例明确涉及系统代理，可省略 `--no-system-proxy`。
+
+### 日志验证
+
+必须出现（按场景）：`checking for stale system proxy state before startup`、`System proxy crash recovery check starting`、`system proxy scheduler or wake gap detected; reconciling immediately`、`system proxy lifecycle cleanup helper started` / `system proxy lifecycle helper started after Admin API enable`（含 `helper_program` + helper pid）、`waiting_for_system_proxy_lock` / `acquired_system_proxy_lock`、`system proxy LaunchDaemon cleanup install starting asynchronously` / `already installed and current`、`system proxy launchd cleanup daemon started`、`system proxy shutdown restore starting; stopping reconcile first`、`Restoring macOS system proxy to saved original state`、`Selected macOS network services still pointing at Bifrost target for restore`、service 级 `elapsed_ms`。失败场景对应 `failed to restore system proxy` / `system proxy reconcile failed`。
+
+### 覆盖率与项目校验
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+- `rust-project-validate`
+- 本机 no-local-coverage 时不跑 `make coverage`；依赖 CI Linux/macOS/Windows 分片。
+
+## Review/Fix/Test 闭环
+
+### 第 1 轮
+
+- 复核 diff：storage/admin/CLI/Web/core/launchd/helper/restart/upgrade。
+- 重点 review：是否所有清理入口都做归属判定；是否所有写入入口都持有 `.system_proxy.lock`；helper Windows/Unix spawn 是否 detached；restart handoff 是否可能出现旧 helper 抢跑清掉 fresh runtime。
+- 复测：核心单测、`test_system_proxy_e2e.sh`、`test_stop_restart_shutdown_marker.sh`。
+
+### 第 2 轮
+
+- 复核第 1 轮问题修复。
+- 再次检查 `git diff`、human_tests 索引与设计文档一致。
+- 重点 review：Admin API `disable` 未真正 converge 时的 warning 与 helper 保留策略；`installed_version` 差异不应触发 `needs_upgrade`。
+- 复测：真实 macOS GUI 授权流；Windows CI x86 self-update；`bifrost restart` 保持系统代理回归。
+
+## 风险与决策
+
+- **helper 路径漂移**：`current_exe()` 在开发环境 rebuild 后可能失效；实现使用 `argv[0]` fallback，并支持 `BIFROST_SYSTEM_PROXY_LIFECYCLE_HELPER_PROGRAM` 显式指定。
+- **多网卡 macOS**：service 级 enable/restore 有界并行（默认 4），GUI 授权仍串行避免并发弹窗。
+- **network service list 空**：视为 readiness 持续重试，禁止退回 `scutil --proxy` 聚合状态后清理证据。
+- **PID 复用**：任何跳过 cleanup 的判断必须同时校验 PID alive + start_time 匹配 + listener alive；缺一都执行 guarded crash recovery。
+- **restart 断网窗口**：`--system-proxy` 追加 + `preserve_for_restart` marker + fresh daemon 跳过启动前 recovery，三者缺一都可能造成 disable→enable 断网。
+- **Linux**：Linux 不写系统代理；`SystemProxyManager::is_supported()` = false；仅在 `bifrost-core` 编译期保留 process_start_time 实现供 CI 单测。
+- **测试 flake**：Windows detached daemon readiness 通过 `BIFROST_DAEMON_READY_TIMEOUT_SECS` 拉长；失败时上传 `.bifrost-upgrade-*.log`。
+- **旧 root-owned lock**：迁移路径 `system-proxy repair-lock --data-dir` 使用 `O_NOFOLLOW` + fd chmod 修复权限，走 GUI 授权。
+
+## 依赖项
+
+- macOS：`networksetup`、`scutil --proxy`、`/bin/launchctl`、`/usr/bin/osascript`、`/Library/LaunchDaemons` plist。安装/卸载需管理员授权；启动后异步授权，取消不影响主服务。
+- Windows：`sysproxy` + 注册表。
+- Linux：无系统代理写入；CI 保留 `bifrost restart` 无系统代理链路。
+- WebUI：复用 `SystemProxyStatus` + 新 `SystemProxyLaunchdStatus`。
+
+## 文档更新
+
+- `human_tests/cli-system-proxy.md` — 追加外部代理归属、helper 崩溃兜底、LaunchDaemon 授权、`restart` 保持代理、`installed_version` 不重复授权用例。
+- `human_tests/readme.md` — 同步 CLI 系统代理用例数与说明。
+- `design/system-proxy-reliability-diagnostics.md` — 后续 lifecycle event / doctor 增量方案。
+- `design/system-proxy-launchd-oneshot.md` — LaunchDaemon one-shot 决策与 startup retry。

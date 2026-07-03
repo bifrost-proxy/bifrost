@@ -48,6 +48,35 @@ Audio source
 
 因此本方案不建议重写 ASR 模块，而是把已有方向收敛为一层统一的 Speech Pipeline 编排。
 
+## 用户目标验证清单
+
+### 必须实现
+
+- 引入 `SpeechEngineRegistry` 与 `SpeechPipelineProfile`，把 diarization、VAD、enhancement、ASR、postprocess 从各处硬编码路径收敛到统一注册与派生入口。
+- 默认 profile：普通 Directory Task 保持 diarization off；显式启用 diarization 或创建 speaker-aware 任务时默认使用 `sherpa-onnx-balanced`。
+- 高质量 profile：`pyannote-community-quality` 作为显式安装的 Python sidecar，不随默认发行自动启用；缺失依赖时 fallback 到 `sherpa-onnx-balanced` 并给出提示。
+- 自定义 provider：用户可以在 profile 层追加自定义 diarization、ASR、postprocess，无需修改 WebUI/CLI/Directory Task 业务分支。
+- 声纹录入与身份映射：支持"实时朗读录入"和"从已完成任务 speaker 追加样本"两条入口；匹配策略把 similarity threshold、already-known 优先级、跨任务复用参数化。
+- Admin API / WebUI / CLI 三端都能列出、切换、配置 profile；共享 profile 变更立即被 pipeline 采纳。
+- Timeline / Daily Docs / WebUI 展示 speaker 标签，diarization profile 与 speaker 列表持久化在 timeline artifact。
+
+### 必须不破坏
+
+- Qwen3-ASR 本地 server、Directory Task 30 秒窗口、pause/resume、runtime_strategy、chunk metrics、Daily Docs 现有语义。
+- 现有 `AsrDirectoryTask.diarization` / `AsrDiarizationConfig` 字段兼容性；缺省 profile 与旧任务行为一致。
+- `TimelineSegment` / `TranscriptTimeline` 字段与文本渲染既有格式。
+- ASR CLI `bifrost ai asr stream-file` / `task ...` 命令与脚本兼容。
+- 未安装 pyannote sidecar 时 Bifrost 主流程不引入 Python 依赖；构建期不隐式下载 sherpa-onnx runtime 到生产环境（显式管理 runtime/model assets）。
+
+### 必须真实验证
+
+- `cargo test -p bifrost-asr` / `cargo test -p bifrost-admin` 覆盖 profile 派生、AsrUnitPlanner 与 speaker stabilizer。
+- `cargo test --workspace --all-features` 全绿。
+- `bash e2e-tests/tests/test_asr_diarization_cli.sh` 通过。
+- human_tests `human_tests/audio-diarization-asr.md` 与 `human_tests/asr-module-model-autonomy.md`（如适用）逐条真实执行。
+- 真实录音验证 speaker-aware Directory Task 全链路（sherpa-onnx diarization + Qwen3-ASR 转写 + Daily Docs 展示）。
+- 交付：设计文档、Rust/前端测试、E2E、human_tests 和两轮 Review/Fix/Test 闭环。
+
 ## 外部能力判断
 
 ### sherpa-onnx
@@ -1004,3 +1033,37 @@ CLI 输出要求：
 - sherpa-onnx speaker diarization docs: https://k2-fsa.github.io/sherpa/onnx/speaker-diarization/index.html
 - pyannote community-1 model card: https://huggingface.co/pyannote/speaker-diarization-community-1
 - pyannote community-1 release note: https://www.pyannote.ai/blog/community-1
+
+## Sync 边界
+
+Speech Pipeline profile 与声纹样本涉及本机模型/资源，同步策略需要显式区分：
+
+- **profile registry**：内置 profile（`sherpa-onnx-balanced`、`pyannote-community-quality`）随 Bifrost 版本分发，不参与 Rule Sync；自定义 profile 是本机配置，不自动上行到远端共享。
+- **模型资产**：sherpa-onnx / pyannote 模型文件通过显式管理路径落到本地 assets 目录，不进入 Rule Sync 或 Group 同步；缺失时按现有 `ai_provider_bootstrap` 流程按需下载并提示用户。
+- **声纹样本**：属于用户高度隐私数据，`design/speaker-embeddings.jsonl`（或等价存储）不参与 Rule Sync；跨设备同步样本另设专项设计。
+- **ASR 任务 diarization 配置**：`AsrDirectoryTask.diarization.profile` 是任务级字段，若未来 ASR 任务加入跨设备同步，需要在同步侧明确本地专有 profile 名称不能在远端解析时报错，应回退到默认 profile 并告警。
+
+## Review/Fix/Test 闭环
+
+### 第 1 轮
+
+- 复核目标：profile 分层、默认策略、pyannote sidecar 显式启用、自定义 provider 三入口、声纹匹配、隐私边界。
+- 代码 review：`SpeechEngineRegistry` 注册与查找、`plan_asr_units` 参数、`transcribe_diarized_segments_for_task` 与既有 fork/reuse runtime 路径的耦合、Admin API 与 WebUI 表单、缺失依赖时的 fallback 与提示、TimelineSegment 兼容性。
+- 测试运行：`cargo test -p bifrost-asr`、`cargo test -p bifrost-admin` 相关子集、`bash e2e-tests/tests/test_asr_diarization_cli.sh`；抽样 human_tests `TC-ADIA-01..03`。
+
+### 第 2 轮
+
+- 复核第 1 轮修复后的 diff，重点检查：显式启用 pyannote 后 fallback 依然可用、profile 变更热更新是否覆盖所有正在 running 的 Directory Task、声纹样本目录权限与隐私策略。
+- 文档与测试同步：确认 `design/audio-diarization-asr-offline.md`、`design/asr-multi-model-local-service.md`、`human_tests/audio-diarization-asr.md`、`human_tests/asr-module-model-autonomy.md` 中的引用一致。
+- 复跑受影响 Rust/E2E 测试与 human_tests；无需第 3 轮时收尾。
+
+## 风险与决策
+
+- **默认 profile 选择**：`sherpa-onnx-balanced` 兼顾质量与依赖成本，作为默认；pyannote community-1 更好但依赖 Python + Hugging Face token，做显式 opt-in profile。
+- **sherpa-onnx runtime 下载**：构建期自动下载对生产不友好；生产集成必须显式管理 runtime/model assets，避免 CI/离线构建触发隐式网络请求。
+- **pyannote sidecar 隔离**：作为独立 Python 进程运行，进程崩溃不影响主 admin runtime；缺失依赖时 fallback 到 sherpa-onnx 并给出可执行的安装提示。
+- **speaker embedding 匹配阈值**：默认 threshold 保守，避免误合并两个真人；对高置信度已 known speaker 保持优先，低置信度 diarization-only 结果不自动写入声纹库。
+- **profile 变更热更新**：修改 profile 后正在 running 的 Directory Task 采用"本轮跑完当前 chunk，下一次 chunk 起用新 profile"的语义，不中断正在处理的 chunk。
+- **隐私边界**：声纹样本与音频数据默认本地存储；`speaker_display_name` 支持用户覆盖但不做云侧翻译；WebUI 展示位与导出路径不额外拷贝原音频。
+- **自定义 provider 出错的降级**：自定义 diarization/ASR/postprocess 失败时，任务不无声成功，而是按现有 fail-soft 策略标记文件失败并保留 failed reason，避免污染 Daily Docs。
+- **PyTorch/Hugging Face 许可**：pyannote community-1 需要用户接受条款，Bifrost 不代替用户接受；WebUI 显式提示并引导用户完成 token 配置。

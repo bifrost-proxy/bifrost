@@ -1,76 +1,232 @@
-# Body Merge Content-Encoding
+# Body Merge Content-Encoding 设计方案
 
-## 功能模块
+## 背景
 
-`reqMerge://` 和 `resMerge://` 用于把 JSON patch 合并进请求或响应 Body。真实浏览器/API 请求常带 `Content-Encoding: gzip`、`br` 或 `zstd`，Body 规则必须在解压后的明文内容上执行，并在转发给上游或客户端前恢复为最终响应/请求头声明的编码。
+`reqMerge://` 和 `resMerge://` 用于把 JSON patch 合并进请求或响应 Body。真实浏览器/API 请求常带 `Content-Encoding: gzip`、`br` 或 `zstd`，Body 规则必须在解压后的明文内容上执行，并在转发给上游或客户端前恢复为最终响应/请求头声明的编码，否则整个 Body 类规则（`reqBody` / `resBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` / 对应 res 版本、HTML/JS/CSS 内容注入）都会因为对压缩字节做 JSON 解析而静默失败。
 
-## 问题与实现逻辑
+旧代理链路直接把原始 Body bytes 传给 `apply_body_rules`。当 Body 是 gzip JSON 时，`serde_json::from_slice` 读到的是压缩字节，`reqMerge` / `resMerge` 会返回 `Ok(None)` 或原样透传，用户看不到规则应该有的效果，只能通过关掉压缩绕过；这在真实 App 或浏览器场景根本不现实。
 
-- 旧链路直接把原始 Body bytes 传给 `apply_body_rules`。当 Body 是 gzip JSON 时，`serde_json::from_slice` 读到的是压缩字节，`reqMerge` / `resMerge` 会静默跳过。
-- 新增 `apply_body_rules_preserving_encoding`：
-  - 按源 `Content-Encoding` 解压 Body。
-  - 在解压后的明文上执行 `reqBody` / `resBody`、prepend、append、replace、merge 等 Body 规则。
-  - 按规则修改后的最终 `Content-Encoding` 重新压缩；如果最终编码被删除，则输出 identity Body。
-  - 解压失败时保持原始 Body 与原编码，避免生成损坏响应。
-- HTTP 请求侧在 `apply_req_rules` 后读取最终请求 `Content-Encoding`，让 `delete://reqHeaders.Content-Encoding` 或 `reqHeaders://(Content-Encoding: gzip)` 与 Body 实际编码保持一致。
-- HTTP 响应侧在 `apply_res_rules` 后读取最终响应 `Content-Encoding`，先执行 Body 规则保编码，再执行 HTML/JS/CSS 内容注入保编码。
-- 响应命中 `trailers://` 时，普通 HTTP handler、HTTPS tunnel/MITM、mock 与 immediate response 的 buffered body 分支都必须按 trailer stream 规范化响应头：保留 `Trailer` 声明、移除 `Content-Length`，避免最终 body 附带 trailers 但固定长度头被重新写回。
-- HTTPS tunnel/MITM 链路同样使用上述保编码 Body 规则处理，避免仅普通 HTTP 代理路径生效。
-- HTTPS path 级 Body 规则只能在 TLS 解包后看到路径和响应体；CONNECT 阶段没有 path，所以 relay / 远端代理验证时必须同时配置目标 host 的 `tlsIntercept://`，或通过启动配置把目标 host 纳入 TLS 拦截范围。
-- `reqScript` / `resScript` 进入脚本前按当前 `Content-Encoding` 解码为文本；脚本写回 Body 后，再按脚本最终 Header 重新编码或输出 identity。
-- mock / immediate response 路径同样使用保编码 Body 规则和内容注入，避免 rawfile / 远端 mock 携带压缩响应时绕过修复。
-- Replay Admin API 不复用普通代理的完整 transform 管线，必须在 replay 专属路径补齐规则应用：
-  - 请求侧执行 `reqHeaders` / `reqCookies` / `delete://reqHeaders.*` / `delete://urlParams.*` / `urlParams` / `urlReplace` / `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` / `reqType` / `reqCharset` / `forwardedFor` / `headerReplace://req.*` / `reqCors`。
-  - 响应侧执行 `resHeaders` / `delete://resHeaders.*` / `statusCode` / `replaceStatus` / `resCookies` / `resCors` / `resType` / `resCharset` / `cache` / `attachment` / `responseFor` / `trailers` / `headerReplace://res.*` / `resBody` / `resPrepend` / `resAppend` / `resReplace` / `resMerge`，以及 HTML/JS/CSS 内容注入规则。
-  - 脚本侧执行 `reqScript` / `resScript`，并把执行结果写入 Replay 生成的 Traffic 详情；`decode://...` 与 `decode://bp` 作为落库前解码链路执行，解码后的请求/响应 Body 写入 Traffic body 视图，原始 Body 写入 raw body 引用。
-  - `reqDelay` / `resDelay` / `reqSpeed` / `resSpeed` 属于真实代理传输时序控制；Replay Admin API 返回的是执行结果 JSON，不做传输节流语义复现。
+本方案定义一条通用的“按最终 `Content-Encoding` 解码 → 应用 Body 规则 → 按最终 `Content-Encoding` 编码”流水线，覆盖普通 HTTP、HTTPS MITM、mock/immediate response、脚本、内容注入、trailers 与 Replay Admin API 六条落地路径。
 
-## 依赖项
+## 用户目标验证清单
 
-- `crates/bifrost-proxy/src/transform/body.rs`（`apply_body_rules` / `apply_body_rules_preserving_encoding` / `apply_content_injection_preserving_encoding`）
-- `crates/bifrost-proxy/src/transform/compress.rs`
-- `crates/bifrost-proxy/src/transform/decompress.rs`
-- `crates/bifrost-proxy/src/proxy/http/handler.rs`
-- `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`（HTTPS tunnel/MITM 复用相同的保编码 Body 规则与内容注入）
-- `crates/bifrost-admin/src/replay_body_rules.rs` / `replay_response_rules.rs` / `request_rules.rs`（Replay Admin API 专属规则应用链路）
+### 必须实现
+
+- gzip / brotli / zstd 请求 Body 命中 `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` 后，最终发给上游的 Body 与最终 `Content-Encoding` 保持一致；如果规则删除了 `Content-Encoding`，Body 以 identity 输出。
+- gzip / brotli / zstd 响应 Body 命中同类响应规则后，客户端使用 `--compressed` 能读到合并/替换后的明文；如果规则删除了 `Content-Encoding`，客户端读到 identity Body。
+- HTTPS 解包链路（MITM）与普通 HTTP 走同一份保编码 Body 规则代码，不允许存在两套实现导致行为分叉。
+- mock、immediate response、rawfile 响应也走保编码 Body 规则和内容注入，携带压缩响应时不会绕过修复。
+- `reqScript` / `resScript` 进入脚本前按当前 `Content-Encoding` 解码为文本；脚本写回 Body 后按脚本最终 Header 重新编码或输出 identity。
+- HTML / JS / CSS 内容注入必须在解压后的明文上执行，并按最终 `Content-Encoding` 重新编码。
+- 命中 `trailers://` 时，普通 HTTP handler、HTTPS tunnel/MITM、mock 与 immediate response 的 buffered body 分支都必须按 trailer stream 规范化响应头：保留 `Trailer` 声明、移除 `Content-Length`。
+- Replay Admin API 走 replay 专属规则链路，请求/响应两侧的 Body/Header/Cookie/CORS/内容注入/脚本 / `decode://bp` 都被执行；执行结果、`req_script_results` / `res_script_results` 与解码后的 Body 写入 Traffic detail。
+
+### 必须不破坏
+
+- Body 规则不命中的请求走原有零拷贝快路径，不做无谓的解压/再压缩。
+- 未知 `Content-Encoding` 或 identity Body 保持原字节，不引入损坏的压缩输出。
+- 解压失败（例如上游头声明 gzip 但 Body 实际是 identity）时保持原始 Body 与原编码，避免生成损坏响应。
+- `delete://reqHeaders.Content-Encoding` 或 `reqHeaders://(Content-Encoding: gzip)` 修改最终编码时，Body 与最终 `Content-Encoding` 必须保持一致，不允许头声明与实际编码错位。
+- WebSocket / 二进制 tunnel / SSE stream 路径不因新增保编码链路引入强制 body collect。
+- Replay Admin API 返回结构、Traffic detail 现有字段保持向后兼容。
+- Body 规则不命中或没有 `Content-Encoding` 的路径，`Cargo.toml` 不新增强制的解压依赖以外行为。
+
+### 必须真实验证
+
+- 单元测试覆盖 gzip 请求/响应 `reqMerge` / `resMerge`、identity 输出、脚本双向编解码、内容注入保编码。
+- E2E 覆盖普通 HTTP 与 HTTPS MITM 两种链路下的 gzip Body `reqMerge` / `resMerge`。
+- Replay E2E 覆盖 request/response custom rules 全矩阵、Replay script、Replay `decode://bp`。
+- 真实场景使用真实业务 API（例如 `page_permission` 或其他 gzip JSON 接口）验证 `resMerge://({"test":"qwe"})` 命中后，最终 JSON 顶层包含 `"test":"qwe"`。
+- 命中 `trailers://` 的 buffered 响应真实回归：`Content-Length` 必须消失，`Trailer` 声明必须保留。
+
+## 产品语义
+
+### “Body 规则总是在明文上执行”
+
+对用户而言，Body 规则永远在明文 JSON / 文本上执行，与请求/响应最终使用什么编码无关。用户可以直接写：
+
+```txt
+api.example.com resMerge://({"test":"qwe"})
+```
+
+不需要再去思考“上游是不是 gzip”“客户端是否支持 br”。Bifrost 内部先按当前 `Content-Encoding` 解压 → 应用规则 → 按最终 `Content-Encoding` 重新压缩；客户端 / 上游看到的 Body 编码与它们的头声明始终一致。
+
+### “头修改与 Body 编码必须一致”
+
+如果 Header 类规则改动了 `Content-Encoding`（例如 `delete://resHeaders.Content-Encoding` 强制走 identity，或 `resHeaders://(Content-Encoding: gzip)` 强制转 gzip），Body 输出必须按最终 header 重新编码。头声明与实际编码错位是 Bifrost 视角下的“损坏响应”，任何路径都不允许出现。
+
+### “未识别编码保持透传”
+
+对于未知 / 未实现的 `Content-Encoding`（例如 `sdch`、多层 `gzip, br` 复合编码），保编码流水线不尝试解压。命中 Body 规则时，`apply_body_rules_preserving_encoding` 直接返回原 Body 与原编码，日志记录 warning，避免生成任何损坏输出。
+
+## 技术细节
+
+### 核心函数
+
+`crates/bifrost-proxy/src/transform/body.rs`：
+
+- `apply_body_rules(body, rules, phase, content_type, verbose_logging, ctx) -> Bytes`
+  已有的明文 Body 规则执行入口，仅认识 identity Body。
+- `apply_body_rules_preserving_encoding(body, rules, phase, source_encoding, final_encoding, content_type, verbose_logging, ctx) -> Bytes`
+  新增。按 `source_encoding` 解压 → 调 `apply_body_rules` → 按 `final_encoding` 编码；`source_encoding == final_encoding` 且为 identity 时短路直接调 `apply_body_rules`。解压失败保留原字节与原编码。
+- `apply_content_injection_preserving_encoding(body, injection_rules, source_encoding, final_encoding, content_type, ctx) -> Bytes`
+  新增。HTML/JS/CSS 注入的保编码封装。
+
+`crates/bifrost-proxy/src/transform/compress.rs` / `decompress.rs`：负责 gzip / br / zstd / identity 的编解码，并暴露“未知编码返回 None”这一显式语义，供保编码链路做 fallback 判断。
+
+### HTTP / HTTPS 落地
+
+`crates/bifrost-proxy/src/proxy/http/handler.rs`：
+
+- `apply_req_rules` 完成后取最终请求 `Content-Encoding`，调用 `apply_body_rules_preserving_encoding` 处理请求 Body。
+- `apply_res_rules` 完成后取最终响应 `Content-Encoding`，先跑 Body 规则再跑内容注入，两者共用同一份最终 `Content-Encoding`。
+- 命中 `trailers://` 的 buffered body 分支：移除 `Content-Length`、保留 `Trailer` 声明，避免最终 body 附带 trailers 但固定长度头被重新写回。
+
+`crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs`：HTTPS MITM 使用同一份保编码 Body 规则与内容注入。HTTPS path 级 Body 规则要求先命中 `tlsIntercept://`；CONNECT 阶段没有 path，因此 relay / 远端代理验证时必须同时配置目标 host 的 `tlsIntercept://`，或通过启动配置把目标 host 纳入 TLS 拦截范围。
+
+### 脚本 (reqScript / resScript)
+
+进入脚本前：按 `Content-Encoding` 解码为文本 (UTF-8 优先，失败回退 base64)。脚本执行完成后：读取脚本可能改动过的 Header，按最终 `Content-Encoding` 重新编码 Body；如果脚本清空/删除 `Content-Encoding`，Body 以 identity 输出。
+
+### Mock / Immediate Response / Rawfile
+
+`status-code-rule-pipeline` / `mock` / `rawfile` 分支同样调用 `apply_body_rules_preserving_encoding` 与 `apply_content_injection_preserving_encoding`，避免仅普通代理路径生效。命中 `trailers://` 时按同一 trailer 规范化响应头。
+
+### Replay Admin API
+
+Replay 不复用普通代理的 transform 管线，需要在 replay 专属路径补齐规则应用：
+
+请求侧（`crates/bifrost-admin/src/request_rules.rs` + `replay_body_rules.rs`）：
+
+- `reqHeaders` / `reqCookies` / `delete://reqHeaders.*` / `delete://urlParams.*` / `urlParams` / `urlReplace`。
+- `reqBody` / `reqPrepend` / `reqAppend` / `reqReplace` / `reqMerge` / `reqType` / `reqCharset`。
+- `forwardedFor` / `headerReplace://req.*` / `reqCors`。
+
+响应侧（`crates/bifrost-admin/src/replay_response_rules.rs`）：
+
+- `resHeaders` / `delete://resHeaders.*` / `statusCode` / `replaceStatus` / `resCookies` / `resCors` / `resType` / `resCharset` / `cache` / `attachment` / `responseFor` / `trailers` / `headerReplace://res.*`。
+- `resBody` / `resPrepend` / `resAppend` / `resReplace` / `resMerge`，HTML/JS/CSS 内容注入。
+
+脚本 / 解码：
+
+- `reqScript` / `resScript` 通过 `crates/bifrost-admin/src/replay_scripts.rs` 执行并把执行结果写入 Replay 生成的 Traffic 详情。
+- `decode://...` 与 `decode://bp` 作为落库前解码链路执行；解码后的请求/响应 Body 写入 Traffic body 视图，原始 Body 写入 raw body 引用。
+
+Replay 不复现 `reqDelay` / `resDelay` / `reqSpeed` / `resSpeed` 这类传输时序控制（Replay Admin API 返回的是执行结果 JSON，不是真实代理传输）。
+
+## CLI 交互
+
+Body 规则本身没有新增 CLI 命令，但下列 CLI 场景需要行为一致：
+
+- `bifrost rule syntax-check` 对 `reqMerge://` / `resMerge://` 的 JSON 片段做基础校验，非法 JSON 输出可诊断错误。
+- `bifrost traffic get <id>` 与 `bifrost search` 在展示 Body 时读取解码后的 `request_body_ref` / `response_body_ref`（普通代理），或读取 Replay Admin API 写入的解码 Body（Replay Traffic）。
+
+## Web / Admin API
+
+- Rules 编辑器的 syntax hint 对 `reqMerge://` / `resMerge://` 后紧跟的 JSON 片段做补全提示，鼓励用户写完整 JSON 对象；无格式约束的第一版不做阻断。
+- Replay Admin API 返回的 `data.body` 字段是执行完保编码 Body 规则后的最终结果；`raw_body_ref` 保留上游原始 Body 引用。
+- Traffic detail 的响应 body tab 展示解码后的 Body，供搜索和 diff；raw body tab 展示上游最终 Body（保留原编码）。
+
+## Sync 边界
+
+- 保编码链路是代理运行时行为，不产生跨设备状态，不参与 Sync。
+- Replay 的规则应用结果（`req_script_results` / `res_script_results` / decoded body）是本地 Traffic detail 的一部分，不主动 sync。
+
+## 实现切分
+
+### Phase 1：核心函数与普通 HTTP 落地
+
+- 在 `body.rs` 新增 `apply_body_rules_preserving_encoding` 与 `apply_content_injection_preserving_encoding`，附带 gzip / identity / 未知编码单元测试。
+- `handler.rs` 请求侧接入保编码 Body 规则，响应侧接入保编码 Body 规则 + 内容注入。
+- 请求头 `Content-Encoding` 修改与实际 Body 编码保持一致。
+- Trailers 分支：命中 `trailers://` 的 buffered body 移除 `Content-Length`，保留 `Trailer` 声明。
+
+### Phase 2：HTTPS MITM / Mock / Rawfile 对齐
+
+- `tunnel/mod.rs` 请求/响应两侧接入同一份保编码 Body 规则与内容注入。
+- Mock、immediate response、rawfile 分支复用保编码 Body 规则；trailer 头规范化对齐。
+- Handler 与 tunnel 用同一份实现，避免行为漂移。
+
+### Phase 3：脚本双向编解码
+
+- `reqScript` / `resScript` 前置解码 + 后置按最终 header 编码。
+- 脚本删除 `Content-Encoding` 时输出 identity。
+- 单元测试覆盖脚本读写 gzip Body 的双向路径。
+
+### Phase 4：Replay Admin API 与 human_tests
+
+- Replay 请求 / 响应 / 脚本 / decode 全矩阵接入；Replay Traffic body / raw body 一致写入。
+- 更新 `human_tests/proxy-rules-advanced.md` 与 `human_tests/api-replay.md`，新增压缩 JSON 的 `reqMerge` / `resMerge` 回归、Replay 全矩阵回归、Replay 脚本 / `decode://bp` 回归。
+- 更新 `human_tests/readme.md` 用例数量。
 
 ## 测试方案
 
-- 单元测试：
-  - gzip 请求 JSON 经过 `reqMerge` 后，解压结果包含新增字段并覆盖相同 key，输出仍是 gzip。
-  - gzip 响应 JSON 经过 `resMerge` 后，解压结果包含新增字段并覆盖相同 key，输出仍是 gzip。
-  - gzip 响应 JSON 同时删除最终 `Content-Encoding` 后，输出为 identity JSON。
-  - gzip body 进入脚本前会解码为文本，脚本写回 body 后仍可按 gzip 重新编码。
-  - mock / immediate gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
-  - Replay 响应 JSON 经过 `resMerge` 后，`data.body` 里的 JSON 包含新增字段并覆盖相同 key。
-  - Replay request 侧 `reqMerge`、URL 参数删除、请求头替换、Content-Type/charset、CORS 预检头与 forwarded-for 都体现在发给上游的请求中。
-  - Replay response 侧响应头、状态码、cookie、CORS、Content-Type/charset、缓存、附件、responseFor、trailers、响应头替换、内容注入与 Body 修改都体现在 Admin API 的返回数据中。
-  - buffered 响应命中 `trailers://` 后，最终 header normalization 不会重新写回 `Content-Length`，并保留 `Trailer` 声明头。
-  - Replay `reqScript` / `resScript` 修改后的请求与响应会真实生效，Traffic detail 会记录 `req_script_results` / `res_script_results`。
-  - Replay `decode://bp` 会执行绑定的 `bp://` parser，并在 Traffic detail/body 中记录 request/response phase 的 parser 输出。
-- E2E 测试：
-  - `body_reqMerge_gzip_json`：curl 发送 gzip JSON 请求，代理执行 `reqMerge`，上游收到仍可解压的 gzip JSON。
-  - `body_resMerge_gzip_json`：上游返回 gzip JSON，代理执行 `resMerge`，客户端用 `--compressed` 读到合并后的 JSON，响应头仍是 gzip。
-  - `body_https_reqMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
-  - `body_https_resMerge_gzip_json`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
-  - `e2e-tests/tests/test_replay_rules.sh`：使用本地 echo/SSE/WebSocket 上游验证 Replay custom rules，其中 `request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
-- 真实场景测试：
-  - 更新 `human_tests/proxy-rules-advanced.md`，新增压缩 JSON 的 `reqMerge` / `resMerge` 回归用例，并按文档真实执行。
-  - 更新 `human_tests/api-replay.md`，新增 Replay Admin API 的 `resMerge` 响应 Body 回归用例、replay 规则覆盖回归用例和 Replay 脚本/BPDecode 回归用例，并用临时代理端口真实执行。
-  - 使用真实目标 `page_permission` 接口验证 `resMerge://({"test":"qwe"})` 命中后，最终 JSON 顶层包含 `"test":"qwe"`；验证规则需包含目标 host 的 TLS 解包前置规则。
+### 单元测试
+
+- `body::apply_body_rules_preserving_encoding_gzip_reqMerge`：gzip 请求 JSON 经过 `reqMerge` 后，解压结果包含新增字段并覆盖相同 key，输出仍是 gzip。
+- `body::apply_body_rules_preserving_encoding_gzip_resMerge`：gzip 响应 JSON 经过 `resMerge` 后，解压结果包含新增字段并覆盖相同 key，输出仍是 gzip。
+- `body::apply_body_rules_preserving_encoding_gzip_to_identity`：gzip 响应 JSON 同时删除最终 `Content-Encoding` 后，输出为 identity JSON。
+- `body::apply_body_rules_preserving_encoding_unknown_encoding_passthrough`：未识别编码保持原 Body 与原编码。
+- `body::apply_body_rules_preserving_encoding_decode_failure_passthrough`：头声明 gzip 但 Body 实际是 identity，解压失败保留原字节。
+- `body::apply_content_injection_preserving_encoding_gzip_html`：gzip HTML 注入 badge/inline script 后仍是有效 gzip 且解码后 HTML 结构正确。
+- `scripts::script_gzip_roundtrip`：gzip Body 进入脚本前会解码为文本，脚本写回 Body 后仍可按 gzip 重新编码。
+- `handler::mock_gzip_resMerge_preserved`：mock / immediate gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
+- `handler::trailers_buffered_removes_content_length`：buffered 响应命中 `trailers://` 后，最终 header normalization 不会重新写回 `Content-Length`，并保留 `Trailer` 声明头。
+- `replay_body_rules::resMerge_gzip_body_returns_merged_json`：Replay 响应 JSON 经过 `resMerge` 后，`data.body` 里的 JSON 包含新增字段并覆盖相同 key。
+- `request_rules::replay_request_full_matrix`：`reqMerge`、URL 参数删除、请求头替换、Content-Type/charset、CORS 预检头与 forwarded-for 都体现在发给上游的请求中。
+- `replay_response_rules::replay_response_full_matrix`：响应头、状态码、cookie、CORS、Content-Type/charset、缓存、附件、responseFor、trailers、响应头替换、内容注入与 Body 修改都体现在 Admin API 的返回数据中。
+- `replay_scripts::script_results_recorded`：Replay `reqScript` / `resScript` 修改后的请求与响应会真实生效，Traffic detail 会记录 `req_script_results` / `res_script_results`。
+- `replay_scripts::decode_bp_records_parser_output`：Replay `decode://bp` 会执行绑定的 `bp://` parser，并在 Traffic detail/body 中记录 request/response phase 的 parser 输出。
+
+### E2E 测试
+
+- `e2e-tests/tests/test_body_reqmerge_gzip_json.sh`：curl 发送 gzip JSON 请求，代理执行 `reqMerge`，上游收到仍可解压的 gzip JSON。
+- `e2e-tests/tests/test_body_resmerge_gzip_json.sh`：上游返回 gzip JSON，代理执行 `resMerge`，客户端用 `--compressed` 读到合并后的 JSON，响应头仍是 gzip。
+- `e2e-tests/tests/test_body_https_reqmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 请求经过 `reqMerge` 后仍保持有效 gzip。
+- `e2e-tests/tests/test_body_https_resmerge_gzip_json.sh`：HTTPS 解包转发到 HTTP 上游时，gzip JSON 响应经过 `resMerge` 后仍保持有效 gzip。
+- `e2e-tests/tests/test_replay_rules.sh`：本地 echo/SSE/WebSocket 上游验证 Replay custom rules，`request_body_mutations.txt` 覆盖 `reqPrepend` / `reqAppend` / `reqReplace`，`full_modify_matrix.txt` 覆盖 replay 请求修改、响应 metadata、响应 Body 修改和内容注入规则矩阵，`req_res_script.txt` 覆盖 Replay 的 Request/Response Script，`bp_decode.txt` 覆盖 Replay Traffic 落库前的 `decode://bp`。
+
+### 真实场景测试 human_tests
+
+新增 / 更新：
+
+- `human_tests/proxy-rules-advanced.md` 新增压缩 JSON 的 `reqMerge` / `resMerge` 回归用例（普通 HTTP 与 HTTPS MITM 两条链路各一条），按文档真实执行。
+- `human_tests/api-replay.md` 新增 Replay Admin API 的 `resMerge` 响应 Body 回归、replay 规则覆盖回归、Replay 脚本 / BP Decode 回归用例，并用临时代理端口真实执行。
+- 使用真实目标 `page_permission` 接口验证 `resMerge://({"test":"qwe"})` 命中后，最终 JSON 顶层包含 `"test":"qwe"`；验证规则需包含目标 host 的 TLS 解包前置规则。
+- 更新 `human_tests/readme.md` 用例数量。
+
+所有服务启动必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。
+
+### 覆盖率与项目校验
+
+- `cargo fmt --all -- --check`
+- `cargo test -p bifrost-proxy transform::body`
+- `cargo test -p bifrost-admin replay_body_rules replay_response_rules request_rules replay_scripts`
+- 新增的 4 条 E2E 与 `test_replay_rules.sh`
+- `cargo test --workspace --all-features`
+- `rust-project-validate`
+
+本机有 no-local-coverage 约定时，不运行 `make coverage` / `make coverage-unit`；交付说明 coverage 本地豁免，并依赖其他本地验证与远端 CI。
 
 ## Review/Fix/Test 闭环方案
 
-- 第 1 轮：复核用户目标、当前 diff、请求/响应编码一致性；运行 focused 单元测试与两个新增 E2E。
-- 第 2 轮：复查第 1 轮后的最终 diff、human_tests 文档与索引；复跑 affected E2E 与 `cargo test -p bifrost-proxy transform::body`。
+### 第 1 轮
 
-## 校验要求
+- 复核用户目标：gzip/br/zstd 请求/响应 `reqMerge` / `resMerge` 明文可见 → 编码保留 → 头与编码一致；HTTPS MITM 与普通 HTTP 一致；Replay 全矩阵；trailer 规范化。
+- 复核 diff：`body.rs` / `handler.rs` / `tunnel/mod.rs` / mock / rawfile / script / replay 六条路径是否都调用保编码入口。
+- 重点 review：默认路径是否引入不必要的解压；未知 `Content-Encoding` 是否被误当 identity；trailer 分支是否重新写回 `Content-Length`。
+- 复测：focused 单元测试、4 条新增 E2E、`test_replay_rules.sh`、human_tests 真实执行。
 
-- 必须执行 focused Rust 单元测试、两个新增 bifrost-e2e 用例、human_tests 真实命令。
-- 收尾前执行 `cargo test --workspace --all-features` 和 rust-project-validate；若因环境阻塞，必须记录具体失败点。
+### 第 2 轮
 
-## 文档更新要求
+- 复核第 1 轮发现问题的修复。
+- 再次检查 `git status --short`、`git diff`、新增文件与 human_tests 索引。
+- 重点 review：Replay Admin API 返回的 body 是否与执行链路一致；`req_script_results` / `res_script_results` 是否写入 Traffic detail；`decode://bp` 是否与普通代理 decode 路径共用同一份 parser 输出格式。
+- 复测：失败路径重跑、`cargo test --workspace --all-features`、`rust-project-validate`。
 
-- 本设计文档记录实现语义。
-- `human_tests/proxy-rules-advanced.md` 增加真实回归用例。
-- `human_tests/readme.md` 同步用例数量。
+## 风险与决策点
+
+- 未识别编码策略：本方案选择“透传 + warning”，不尝试猜测。若后续需要支持复合 `Content-Encoding`（如 `gzip, br`），需要在 `decompress.rs` 增加多级解压支持并对应更新单元测试。
+- 保编码链路是否引入拷贝开销：所有非命中 Body 规则的请求走 identity 短路，不做无谓的解压/再压缩；命中规则时的一次解压 + 一次压缩是必要开销。
+- Replay 与普通代理保编码链路必须共用 `apply_body_rules_preserving_encoding`，避免两套实现漂移；如果 Replay 出现新的规则类型，必须先补 replay 侧再上普通代理，否则会出现“Replay 有效但真实代理无效”的产品倒挂。
+- HTTPS path 级 Body 规则要求先命中 `tlsIntercept://`；文档、CLI 提示与规则编辑器 hint 需要同步说明这一前置条件，避免用户以为规则未生效而反复调试。

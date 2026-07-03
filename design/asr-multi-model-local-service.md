@@ -2,6 +2,49 @@
 
 > 实施状态(截至 2026-06-16):本文档描述的多 provider 注册表、`/api/asr/config`、Cohere provider、CDP 授权下载、`service.json` schema v2、`AsrModelProfile` 等能力**均为 planned, not yet shipped as of 2026-06-16**。当前仓库只实现了 Qwen3-ASR 单 provider 链路(参见下文「当前实现基线」);除非显式标注「已落地」,本文其余章节都属于尚未实现的设计稿。
 
+## 背景
+
+ASR 能力当前只支持 `Qwen3-ASR-0.6B` / `Qwen3-ASR-1.7B` 两个模型（同一 provider），WebUI、Directory Tasks、CLI 均通过同一 `qwen3_asr_rs` runtime 启动 `asr-server`。用户希望：
+
+- 在 Qwen3 之外可以并行下载/初始化 `CohereLabs/cohere-transcribe-03-2026`（`cohere_transcribe_rs` runtime）。
+- WebUI 可视化切换当前使用的模型，任务与 CLI 通过默认模型配置或显式参数选择。
+- 同一时刻只运行一个 `asr-server` 进程，避免多模型抢占 GPU/统一内存。
+- 保持既有文件上传、麦克风 WebSocket、Directory Task、CLI 流式转写、timeline/文本落盘路径不变；新模型不做旁路产品，走同一套业务流。
+
+## 用户目标验证清单
+
+### 必须实现
+
+- WebUI 可以切换 ASR 模型，并分别展示每个模型的安装、初始化、下载、启动和错误状态。
+- Qwen3 与 Cohere 两类模型可以单独下载和初始化；初始化不启动常驻模型服务。
+- 同时只能运行一个模型服务，切换模型启动时必须先停止或替换当前托管服务，避免两个大模型同时占用内存和 Metal/GPU 资源。
+- 服务端存在默认 ASR 模型配置；WebUI 转写、Directory Task 与 `bifrost ai asr stream-file` 在未显式指定模型时都使用该默认模型。
+- 保留当前文件上传、麦克风 WebSocket、Directory Task、CLI 流式输出、timeline 和文本落盘路径，不把 Cohere 做成另一套旁路产品。
+- 新增 `AsrModelRegistry` / `AsrModelProfile` / Provider Adapter 抽象；业务层不出现 `if provider == "cohere"` 的分支。
+- Cohere gated 权重通过 CDP 授权下载流程处理；Hugging Face token/cookie 不落盘、不出日志。
+- `AsrServiceState` schema v2 引入 `provider` / `model_id` / `runtime` / `display_model` 字段，向后兼容旧 `service.json`。
+
+### 必须不破坏
+
+- 现有 Qwen3-ASR 端到端能力：WebUI 上传/麦克风、Directory Task、CLI `stream-file/start/status/stop`、timeline/text 落盘 schema 全部保持工作。
+- 已保存的 Directory Task `model` 字段（例如 `Qwen3-ASR-1.7B`）可读，服务端归一化为 canonical `model_id` 后继续运行。
+- 现有 CLI 输出格式对下游脚本兼容；schema 迁移只新增字段，不改字段语义。
+- 现有 `~/.bifrost/asr/` 目录布局兼容；`qwen3_asr_rs/` 位置不变，新增 `cohere_transcribe_rs/` 平级目录。
+- `test_qwen3_asr_local_server.sh` 与相关 human_tests 继续通过。
+
+### 必须真实验证
+
+- WebUI 切换 Qwen3 / Cohere 模型，服务真实重启（同 model 复用）。
+- Directory Task 创建时未显式指定模型则写入服务端默认模型。
+- `bifrost ai asr stream-file` 无 `--model` 时使用默认模型。
+- Cohere gated 权重未授权时 UI 明确提示登录/接受协议；授权成功后下载继续。
+- 单服务互斥：启动 Qwen3 后启动 Cohere，旧 Qwen3 被停止，`service.json` 只记录 Cohere。
+- 两轮 Review/Fix/Test。
+
+## 产品语义
+
+### V1 模型清单
+
 ## 功能模块说明
 
 本方案在当前 Qwen3-ASR 本地服务实现基础上，扩展为可同时管理多个本地 ASR 模型资产、但同一时刻只运行一个模型服务的统一 ASR 能力。V1 目标模型为：
@@ -842,6 +885,14 @@ interface AsrConnectionParams {
 - 不复用系统浏览器登录态来获取 gated 权重；如需浏览器授权，只使用 Bifrost 管理的独立 Chrome/Edge profile，且必须由用户显式触发。
 - 不修改系统代理。
 
+## Sync 边界
+
+- 服务端默认模型配置 `~/.bifrost/asr/config.json` 是本机偏好，不参与 Rules/Values sync。
+- `service.json` 是本机运行时状态，不参与 sync；每台机器独立记录当前运行的 provider/model_id。
+- 模型资产（Qwen3、Cohere 权重、tokenizer/vocab）本机下载，不通过 sync 传播；未来若考虑跨机资产分发，需要独立离线包/CDN 方案，不复用 Rules sync。
+- Hugging Face token / CDP cookie 只留在本机 Bifrost 管理的 Chrome/Edge profile 内，不落盘到任何 Bifrost 配置、日志或 SSE。
+- Directory Task 内 `model_id` 属于任务字段，未来若做任务云同步需要考虑不同机器模型资产是否可用；本方案不承诺 Directory Task sync。
+
 ## 实施阶段拆分
 
 ### 阶段 1：模型注册表与默认配置
@@ -1017,7 +1068,7 @@ interface AsrConnectionParams {
 - `human_tests/readme.md`：新增索引。
 - WebUI 可见文案如 `Speech Converter` 中的外部依赖说明和模型限制提示。
 
-## 残余风险
+## 风险与决策点
 
 - Cohere 权重是 gated model，WebUI 初始化如何安全获取 Hugging Face 凭据需要单独评审。
 - CDP 授权下载依赖用户完成浏览器登录和模型条款接受；产品上必须把 `401`、`403`、浏览器缺失、CDP 启动失败分成不同可操作状态，并在 `403` 时强制回跳模型页，否则用户可能停在登录后的非模型页面而找不到接受协议入口。

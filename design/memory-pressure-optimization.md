@@ -1,229 +1,199 @@
-# 代理内存增长分析与优化方案
+# 代理内存压力优化设计方案（Memory Pressure Optimization）
 
 ## 背景
-在高并发与大请求场景下，代理进程内存从 100MB 级别增长到 3000MB，伴随明显性能下降。目标是定位核心增长来源，提供可验证的优化，并用 TLS 解包与不解包场景进行 10000 条请求的压力评估。
 
-## 现状对齐说明（截至 2026-06-16）
-- 本文是压测与优化提案，部分条目已落地，阅读时需要标注状态。
-- 已落地：
-  - `traffic.max_body_probe_size`（默认 64 KiB）存在于 `bifrost-admin` 配置与 `AdminState`（`crates/bifrost-admin/src/state.rs`、`handlers/config.rs`），超阈值时跳过 body 处理，详见 ADMIN_API.md。
-  - `BodyStore` 周期清理：`start_body_cleanup_task`（`crates/bifrost-admin/src/body_store.rs`）按 `retention_days` 滚动清理过期 body 文件。
-  - 连接帧记录周期清理：`start_frame_cleanup_task`（`crates/bifrost-admin/src/frame_store.rs`），配合 `ConnectionMonitor` 内的 LRU/最大帧数策略限制内存。
-  - SSE / WS 帧 `preview_limit` 与 `max_frames_per_connection` 已配置化（`crates/bifrost-admin/src/connection_monitor.rs`，构造入口 `ConnectionMonitor::with_config`）。
-  - 内存指标采集：`MetricsCollector` + `MetricsSnapshot.memory_used`（`crates/bifrost-admin/src/metrics.rs`），通过 `GET /_bifrost/api/metrics` 暴露。
-- 仍为提案 / 未完全落地（planned, not yet shipped as of 2026-06-16）：
-  - 全局统一的 SSE 事件缓冲上限（目前仅有 per-frame `preview_limit`，未做整连接级缓冲合计上限）。
-  - 严格意义上的“三层存储 + BodyRef”分流（未命中规则即落 DB/文件、内存仅留索引）。当前 BodyStore 已有 inline + file 双形态，但分流策略与 BodyRef 抽象尚未完整落地。
-  - 脚本执行的 body 体积短路阈值与内存副本回收策略仍需补齐。
+Bifrost 代理进程在高并发、大 body、TLS 解包 / 不解包混合场景下曾出现 RSS 从 100 MB 涨到 3 GB 的事故。除了单点大请求撑爆内存外，长时间运行的 SSE / WebSocket 缓冲、连接监控历史帧堆积、BodyStore 过期文件不清理都会让内存水位持续抬升。
 
-## 现象与关键路径
-- 请求侧：历史上存在 body 全量读取与多次拷贝路径，当前需以 bounded read 实际行为为准。
-- 响应侧：非处理分支已支持流式 tee，SSE 事件缓冲上限需核对现有实现。
-- 连接监控：连接关闭后的清理节奏需要逐项核对当前实现。
-- BodyStore：过期文件清理是否具备定时任务需核对当前实现。
+本设计围绕"body 三态处理 + 缓存周期清理 + 内存指标可观测"三条主线，覆盖已经落地的能力，并把仍在规划的分层存储 / BodyRef / 严格 SSE 上限清晰标记 planned，防止文档退化为提案汇编，也避免测试与实现错配。
 
-## 核心问题
-1. 请求体读取在需要处理时可能触发内存峰值（已引入 bounded read，需确认是否完全覆盖边界场景）。
-2. SSE 事件缓冲在无边界或长连接场景可能持续增长（需核对是否已有统一上限）。
-3. 连接监控与 BodyStore 清理节奏不足可能导致长期内存水位抬升（需核对现有清理任务）。
-4. 脚本执行对 body 字符串化可能引入不必要拷贝（需核对当前短路与阈值策略）。
+## 用户目标验证清单
 
-## 优化方案
-### 请求体处理优化
-- 当请求体超出最大缓冲阈值时，不再读取到内存，直接流式转发。
-- 大体积请求体场景跳过 body 规则与脚本，避免无意义的内存峰值。
-- 请求体体积统计改为优先使用 Content-Length，确保指标完整。
+### 必须实现（已落地）
 
-### SSE 缓冲上限（planned, not yet shipped as of 2026-06-16）
-- 当前实现仅有 per-frame `preview_limit` 与 `max_frames_per_connection`（见 `connection_monitor.rs`），尚未引入整连接级 SSE 事件缓冲合计上限。
-- 计划：为 SSE 事件缓冲设置最大上限，超过后丢弃缓冲并记录告警，避免无界增长；上限与当前最大 body 缓冲保持一致，避免额外配置复杂度。
+- Traffic 配置存在 `max_body_probe_size`（默认 64 KiB，`crates/bifrost-storage/src/unified_config.rs:410`）并接入 `AdminState`。
+- 超过阈值的 request/response body 走流式转发，跳过 body 规则和脚本，Traffic detail 标记截断。
+- `BodyStore` 提供 `start_body_cleanup_task`（`crates/bifrost-admin/src/body_store.rs`），按 `retention_days` 周期清理过期 body 文件。
+- `FrameStore` 提供 `start_frame_cleanup_task`（`crates/bifrost-admin/src/frame_store.rs`）与按连接粒度的 LRU/上限。
+- `ConnectionMonitor::with_config` 支持配置 `preview_limit` 与 `max_frames_per_connection`（`crates/bifrost-admin/src/connection_monitor.rs`）。
+- `MetricsCollector` + `MetricsSnapshot { memory_used, memory_total, cpu_usage, qps, ... }` 通过 `GET /_bifrost/api/metrics` 暴露 RSS 与历史；`GET /_bifrost/api/system/overview` 打包为总览。
+- WebSocket / SSE payload 存储的 `retention_days` 可配置化并支持热更新（`crates/bifrost-admin/src/ws_payload_store.rs:100-395`）。
 
-### 连接与存储清理
-- 周期性清理已关闭连接的帧记录，避免连接历史积累。
-- 周期性清理 BodyStore 过期文件，防止长期运行后内存与磁盘双增长。
+### 计划中（planned, not shipped）
 
-### 三层存储与流式缓存设计（planned, not yet shipped as of 2026-06-16）
-> 当前 `BodyStore` 已具备 inline + file 双形态与 retention 清理，但严格意义上的“规则命中走内存、未命中走 DB/文件、超阈值走文件 + BodyRef”分流路径尚未完整落地。以下为目标设计。
+- 严格的"三层存储 + BodyRef"分流：未命中规则的解包流量直接落 DB/文件、内存只留索引。
+- 整连接级 SSE 事件缓冲合计上限（当前只有 per-frame `preview_limit`）。
+- 脚本执行的 body 体积短路阈值与内存副本回收策略。
+- 规则引擎匹配缓存 + 失效策略、压缩内容按需解压路径。
 
-#### 目标
-- 不降低核心能力（代理、规则处理、搜索全量记录）的前提下显著降低 CPU 与内存消耗。
-- 将请求/响应体存储拆分为「内存缓存层」「数据库层」「文件层」，以规则命中与体积阈值作为分流条件。
+### 必须不破坏
 
-#### 内存层（规则命中请求）
-- 仅在命中规则且需要处理 body 时，将请求/响应体暂存内存，严格遵循 max_body_buffer_size。
-- 规则处理结束后：
-  - 同步或异步写入数据库/文件；
-  - 若存在前端订阅通道，推送完成后立即清理内存副本。
-- 内存结构采用滚动窗口与引用计数，避免长时间驻留。
+- 命中规则且需修改 body 的请求依旧能完整拿到内存中的 body。
+- Traffic 列表/搜索/详情不因 recent_cache 限容出现明显延迟增长。
+- SSE / WS 帧订阅通道仍能推送最近内容，历史内容通过 body/file 层按需拉取。
+- Metrics 采集本身不能显著抬高 CPU / RSS（要求 `/metrics` 单次调用 < 5 ms）。
 
-#### 数据库层（未命中规则但被解包的 TLS/明文）
-- 任何未命中规则且已解包的请求与响应，直接写入数据库或存储文件，不进入大块内存缓存。
-- 内存只保留最小元数据与短期索引用于搜索与列表展示，采用 ring buffer 与 LRU 结合。
-- 数据库写入使用异步批处理，降低 CPU 抖动与锁竞争。
+### 必须真实验证
 
-#### 文件层（超阈值流式存储）
-- 任何超过阈值的数据采用流式落盘，避免全量读取进内存。
-- 只保留轻量 BodyRef 与文件句柄信息，供搜索与回放定位。
-- 文件清理按 retention 策略滚动处理，保证长期运行稳定。
+- 压测：TLS 解包、TLS 不解包、HTTP、SSE、WebSocket 各 10 000 请求 / 100 长连接（WebSocket 使用内置 Python 客户端替代 websocat）。
+- 采样 `/_bifrost/api/metrics` 的 `memory_used`，观察 RSS 峰值与稳态。
+- 单元测试覆盖 body probe 上限、frame cleanup、body cleanup、metrics snapshot。
 
-### WebSocket/SSE 流式缓存策略
-- 未命中规则的 WebSocket/SSE：
-  - 仅保留少量内存用于前端订阅推送；
-  - 事件与帧流式写入文件层，数据库仅保存元信息与索引，不保存大块内容。
-  - 特别注意要考虑订阅的时机，避免中途订阅的时候数据不一致导致前端展示异常。
-- 命中规则且需要修改时，才进入内存层处理，完成后落库/落盘并释放内存。
-- 客户端订阅通道：
-  - 以分片/窗口方式推送，推送缓冲固定上限并支持回压；
-  - 前端仅消费最近片段，历史内容通过 BodyRef 按需拉取。
+## 产品语义
 
-### 搜索与全量记录能力保留
-- 搜索索引基于数据库元信息 + 文件位置引用构建，不依赖全量 body 常驻内存。
-- 搜索结果需要 body 时，通过 BodyRef 定位文件读取，避免内存常驻。
+### Body 处理的三态
 
-### CPU 与内存综合优化
-- 规则未命中场景走零拷贝与流式写入路径，减少 body collect 与二次拷贝。
-- 前端订阅推送采用固定大小缓冲池，避免频繁分配，仅订阅的 see/websocket 请求才推送，对于列表更新仅需要推送基础数据（列表需要的）。
-- 写入侧采用 backpressure 与批处理配置，稳定高并发下 CPU 使用。
+| 状态 | 判定 | 行为 |
+| --- | --- | --- |
+| in-memory | Content-Length 已知且 `<= max_body_probe_size` | 完整读入内存，参与 body 规则/脚本/detail |
+| bounded probe | Content-Length 未知（chunked/SSE/stream） | 仅读 probe 窗口，超阈值流式转发 |
+| passthrough | Content-Length 已知且 `> max_body_probe_size` | 直接流式转发，跳过 body 规则/脚本，detail 标记截断 |
 
-## 影响评估
-- 大请求场景内存峰值显著下降，避免单连接占用数十 MB 以上。
-- SSE 长连接内存稳定在设定阈值内，防止业务异常导致 OOM。
-- 连接监控与 body 存储对长时间压测的内存影响可控。
-- 仅在超阈值请求上跳过 body 规则与脚本，语义可解释且可通过配置控制阈值。
+### 缓存清理三条线
 
-## 详细技术方案
-### 数据模型与分层路由
-- 核心记录分离为：元信息记录（DB/内存轻量）与 BodyRef（文件/内存引用）。
-- 元信息包含：请求/响应行、必要 headers、时间线、规则命中结果、BodyRef 引用。
-- BodyRef 承载位置：内存 Inline 与文件 File 两类，超阈值强制 File。
+1. `BodyStore`：`start_body_cleanup_task` 周期扫描，按 `retention_days` 淘汰过期文件与内存 inline。
+2. `FrameStore`：`start_frame_cleanup_task` 按连接粒度限容与过期清理，配合 `metadata_cache: LruCache` 限住内存。
+3. `WsPayloadStore`：`WsPayloadStoreState.retention_days` 支持 patch 热更新（`ws_payload_store.rs:263-289`），运行时可以调整保留时长。
 
-### 规则命中路径（内存层）
-- 命中规则且需要处理 body：
-  - 内存读取受 max_body_buffer_size 限制。
-  - 规则处理后同步写入 DB/文件。
-  - 若存在前端订阅，推送完成后释放内存副本。
-- 命中规则但无需处理 body：
-  - 直接流式转发并持久化元信息。
+### 可观测：Metrics
 
-### 未命中路径（数据库层）
-- 明文或已解包 TLS 的未命中请求：
-  - 元信息直接写 DB/文件。
-  - body 流式写文件，DB 仅保存索引与引用。
-- 内存仅保留固定大小的滚动索引与最近列表数据。
+- `MetricsSnapshot { timestamp, memory_used, memory_total, cpu_usage, qps, ... }`（`web/src/types/index.ts:480`）。
+- `GET /_bifrost/api/metrics`：返回当前快照。
+- `GET /_bifrost/api/system/overview`：包 `metrics + connections + ...`。
+- 历史序列见 `useMetricsStore`（前端 store）与 `MetricsTab.tsx` 展示。
 
-### 文件层策略
-- 超阈值 body 采用流式落盘并生成 BodyRef。
-- 文件写入采用顺序追加与批量 flush，减少 CPU 抖动。
-- retention 清理周期化执行，避免长时间驻留。
+## 技术细节
 
-### WebSocket/SSE 流式策略
-- 未命中规则的 WS/SSE：
-  - 仅保留少量内存用于订阅推送。
-  - 分片写入文件层，DB 仅保留元信息与索引。
-- 命中规则且需要修改：
-  - 进入内存层处理后落盘，确保能力不降低。
+### 已落地组件
 
-### 客户端订阅通道
-- 推送采用分片/窗口机制，固定上限缓冲并支持回压。
-- 订阅通道仅推送必要字段与最近片段，历史内容通过 BodyRef 按需拉取。
-- 对列表更新仅推送基础数据，避免重复大 payload。
+- `crates/bifrost-storage/src/unified_config.rs:410`：`traffic.max_body_probe_size`
+- `crates/bifrost-admin/src/body_store.rs`：`start_body_cleanup_task`、`BodyStore`、`BodyRef` 二元存储（inline + file）
+- `crates/bifrost-admin/src/frame_store.rs`：`start_frame_cleanup_task`、`FrameStore`、`FrameStoreStats.metadata_cache_len`
+- `crates/bifrost-admin/src/connection_monitor.rs`：`ConnectionMonitor::with_config(preview_limit, max_frames_per_connection)`
+- `crates/bifrost-admin/src/ws_payload_store.rs`：`WsPayloadStore` 热更新 `retention_days`
+- `crates/bifrost-admin/src/metrics.rs`：`MetricsCollector` + `MetricsSnapshot`
+- `crates/bifrost-admin/src/lib.rs:71-83`：对外暴露 `start_body_cleanup_task` / `start_frame_cleanup_task`
 
-### 搜索与回放
-- 搜索基于 DB 元信息 + BodyRef 索引，保持全量记录能力。
-- 回放与详情查看按需读取文件层，不将大体积 body 常驻内存。
+### 规划中组件（planned）
 
-### 性能关键路径优化清单（基于代码现状）
-- 请求体处理：
-  - 仅在规则或脚本需要时收集 body，超阈值直接流式转发。
-  - 对脚本执行体积设置上限与短路策略，避免大 body 进入脚本引擎。
-- 响应体处理：
-  - 非处理分支走 tee + 上限缓存，减少 collect 全量。
-  - SSE/WS 事件流的 buffer 使用上限与 drop 策略避免无限增长。
-- 记录持久化：
-  - 未命中规则的明文/解包请求，直接落库或落盘，不进入大块内存。
-  - DB 写入采用批处理与异步队列，减少锁竞争。
+- 三层存储路由：内存 (规则命中) → DB (未命中已解包) → 文件 (超阈值)。
+- `BodyRef` 抽象：把 inline / file / DB 三态统一为查询引用，供搜索、回放、按需拉取使用。
+- SSE 整连接级缓冲合计上限：超限即丢缓冲、记录告警，与 `max_body_probe_size` 保持同源阈值。
+- 规则匹配结果缓存 + 版本失效。
+- 压缩内容流式解压 + 索引化。
 
-### 连接与帧监控优化
-- 连接关闭后自动清理 connection monitor 记录，避免历史连接累积。
-- WS/SSE 帧预览长度做配置化，默认降低为更小值，按需拉取完整内容。
-- 帧持久化开启按连接粒度的分片文件，便于清理与检索。
+## CLI / Web / Admin API
 
-### BodyStore 与流式落盘优化
-- Inline 与 File 存储阈值配置化并可热更新。
-- 大体积 body 使用分块写入与 hash 命名，避免重复存储与冲突。
-- 读取端支持按需截断与分页回放，降低一次性加载。
+### Admin API
 
-### 管理接口与前端展示优化
-- 列表接口只返回必要字段与分页摘要，详情页按需拉取 body。
-- 前端订阅通道做增量推送与去重，减少无效传输。
-- 搜索接口先基于索引定位，再按需读取 BodyRef。
+- `GET /_bifrost/api/metrics`：单次 metrics 快照。
+- `GET /_bifrost/api/system/overview`：包含 `metrics` 完整字段。
+- `PATCH /_bifrost/api/config`：热更新 `traffic.max_body_probe_size`、`ws_payload_store.retention_days` 等。
 
-### TLS 解包与非解包差异优化
-- 解包路径仅在规则要求时启用，未命中规则的连接走透明转发。
-- 证书缓存容量可配置，避免高域名基数时占用过大内存。
-- 连接复用与会话复用优先，减少握手开销。
+### CLI
 
-### CPU 与内存协同优化
-- 规则解析与匹配结果缓存，降低重复计算。
-- 统一使用 Bytes/BytesMut 与零拷贝路径，避免 String::from_utf8 的多次拷贝。
-- 为大请求/响应设置 backpressure，避免拥塞导致堆积。
+- `bifrost config get traffic.max_body_probe_size`
+- `bifrost config set traffic.max_body_probe_size <bytes>`
+- `bifrost status`：包含 RSS/CPU 展示（tray/system_stats）。
 
-### 进阶改进
-- 连接池复用策略：对上游连接池设置空闲上限与回收策略，避免大量闲置连接持有缓冲。
-- gzip/deflate 解压策略：采用流式解压，避免全量解压带来的 CPU 与内存开销，入库或存入文件的必须要解压缩，方便后续搜索或消费。
-- 日志采样与限速：高流量场景降低详细日志频率，避免日志 I/O 反压引起吞吐下降。
-- 指标采集频率调整：metrics 收集间隔可配置，避免高频采集带来的 CPU 开销。
-- 大文件回放策略：对回放/重放数据使用范围读取与分块响应，减少单次加载。
-- 规则引擎热路径优化：把匹配器与规则编译结果缓存到内存，减少重复解析。
-- 搜索索引增量更新：仅对新增记录增量索引，避免全量重建导致抖动。
-- 资源清理分层：内存、DB、文件清理任务分离，避免单任务阻塞影响代理主路径。
+### Web
 
-## 完备性检查与待补充项
-### 已覆盖改进
-- 大请求/响应体超阈值时采用流式转发与落盘，避免内存峰值膨胀。
-- SSE/WS 事件预览与缓冲上限，非监控连接不保存大 payload 预览。
-- 连接与 BodyStore 的周期性清理任务，避免长时间运行累积。
-- 订阅通道分片推送与回压策略，避免推送缓存失控。
-- 内存指标通过管理接口实时采集，用于压测验证。
+- Settings → Metrics tab：折线图展示 `memory_used`、`cpu_usage`、`qps` 历史。
+- Settings → Traffic：`max_body_probe_size` 输入。
+- Traffic detail：超阈值时 body 面板显示 `body truncated at <n> bytes`。
 
-### 仍需补充的实现细节
-- 连接监控参数（预览上限、最大帧数）配置化与热更新能力。
-- 规则引擎匹配缓存的落地实现与失效策略。
-- 压缩内容的按需解压与搜索路径适配（避免大体积解压常驻内存）。
-- 分层存储的写入队列与批处理参数配置化，确保高并发下吞吐稳定。
+## Sync 边界
 
-## 验证方案
-- 构建压力测试脚本，执行 10000 条请求：
-  - TLS 解包场景（tlsIntercept）
-  - TLS 不解包场景（tlsPassthrough）
-  - 可选 HTTP 基线
-  - SSE 长连接场景 （100 条连接，每个连接 1000 条事件）
-  - websocket 长连接场景 （100 条连接，每个连接 1000 条消息）
-- 请求与响应均使用较大体积（可配置），统计：
-  - RSS 实时变化（通过管理接口获取内存指标）
-    - 接口：GET /_bifrost/api/metrics
-    - 字段：memory_used（来自 sysinfo::Process::memory，按 bytes 口径统计并换算 MB）
-    - 使用方式示例：
-      - curl -s 'http://127.0.0.1:<PORT>/_bifrost/api/metrics' | jq '{ts:.timestamp, rss_bytes:.memory_used, rss_mb:(.memory_used/1024/1024)}'
-  - 成功率与耗时
-- 同时观察代理日志与连接数变化，确认无持续增长。
+- `max_body_probe_size`、`retention_days` 走 `unified_config` 同步，逐字段热更新；不做跨设备 sync。
+- Metrics 快照与历史属本机运行时数据，不入 sync。
+- BodyStore / FrameStore 文件属本机磁盘产物，不通过 sync 分发。
 
-## 本次压测结果与结论
-- HTTP：10k 请求，成功率约 92%（部分超时），RSS 峰值约 193MB。
-- TLS 解包：10k 请求，成功率 100%，RSS 峰值约 176MB。
-- TLS 不解包：10k 请求，成功率 100%，RSS 峰值约 721MB（超出目标）。
-- SSE：100 连接 * 1000 事件，成功率 100%，RSS 峰值约 558MB。
-- WebSocket：因环境缺少 websocat 未执行。
-  - 更新：使用内置 Python WebSocket 客户端进行压测（不依赖 websocat），50 连接 * 500 消息成功率 100%。
+## Phase 1-4
 
-### 结论与下一步
-- 解包场景与 HTTP 场景接近目标，但 TLS 不解包与 SSE 场景仍超出 300MB 峰值目标。
-- 需要进一步收敛 TLS passthrough 场景的内存占用，优先排查连接级缓存与记录策略。
-- WebSocket 压测需要补齐运行环境依赖并执行。
+### Phase 1：Body probe 与流式转发（已落地）
 
-## 在正式执行验证前，务必详细检查我们的优化事项实现完备，包括但不限于：
-- 内存层与数据库层的交互是否符合预期。
-- 文件层的流式落盘是否按预期工作。
-- 前端订阅通道的推送与拉取是否按预期进行。
-- 搜索接口的索引构建与查询是否按预期工作。
-- 连接监控与 body 存储的清理策略是否按预期执行。
+- 引入 `max_body_probe_size` 与全链路 probe 上限接入（HTTP tunnel / SOCKS / server 中间件）。
+- 单测：`crates/bifrost-storage/src/config_manager.rs:1163` 验证 patch 生效。
+
+### Phase 2：BodyStore / FrameStore / WsPayloadStore 清理（已落地）
+
+- `start_body_cleanup_task` + `retention_days`。
+- `start_frame_cleanup_task` + `metadata_cache: LruCache`。
+- `WsPayloadStore` 热更新 `retention_days`。
+
+### Phase 3：Metrics 与可观测（已落地）
+
+- `MetricsCollector` 采集 RSS / CPU / QPS。
+- `/_bifrost/api/metrics` 与 `/_bifrost/api/system/overview` 暴露快照。
+- 前端 Metrics tab 折线图 + system overview 展示。
+
+### Phase 4：分层存储 + BodyRef + 整连接级 SSE 上限（planned）
+
+1. 抽象 `BodyRef { Inline, File, Db }`，搜索/回放/详情统一走 BodyRef。
+2. 未命中规则的解包流量直接落 DB/文件，内存仅存索引与滚动窗口。
+3. 为 SSE / WS 引入连接级缓冲合计上限，超限 drop 并记录告警。
+4. 规则匹配缓存 + 失效策略，减少高 QPS 场景 CPU。
+
+## 测试方案
+
+### 单元测试（已存在或将补）
+
+| 位置 | 断言 |
+| --- | --- |
+| `crates/bifrost-storage/src/config_manager.rs:1163` | `max_body_probe_size: Some(910)` patch 生效 |
+| `crates/bifrost-admin/src/body_store.rs` | 过期 body 文件被清理 |
+| `crates/bifrost-admin/src/frame_store.rs` | `FrameStoreStats.metadata_cache_len <= LRU 上限` |
+| `crates/bifrost-admin/src/ws_payload_store.rs:263` | `retention_days` patch 生效 |
+| `crates/bifrost-admin/src/metrics.rs` | `MetricsSnapshot.memory_used > 0` |
+
+### 集成测试
+
+- `human_tests/api-metrics.md`：验证 `/api/metrics` `memory_used`、`memory_total`、`cpu_usage`、`qps` 字段（`api-metrics.md:28, 68-105`）。
+- `human_tests/api-system.md`：验证 `/api/system/overview` 的 `metrics.memory_used` > 0（`api-system.md:112, 176-181`）。
+
+### 压测（TLS 解包 / 不解包 / SSE / WS）
+
+采样脚本示例：
+
+```bash
+curl -s 'http://127.0.0.1:8800/_bifrost/api/metrics' \
+  | jq '{ts:.timestamp, rss_bytes:.memory_used, rss_mb:(.memory_used/1024/1024)}'
+```
+
+| 场景 | 请求量 | 目标 |
+| --- | --- | --- |
+| HTTP | 10 000 请求 | RSS 峰值 <= 300 MB |
+| TLS 解包 | 10 000 请求 | RSS 峰值 <= 300 MB |
+| TLS 不解包 | 10 000 请求 | RSS 峰值 <= 300 MB（当前 721 MB，未达标，需 Phase 4） |
+| SSE | 100 连接 × 1000 事件 | RSS 峰值 <= 300 MB（当前 558 MB，未达标，需 Phase 4） |
+| WebSocket | 50 连接 × 500 消息（Python 客户端） | 成功率 100%，RSS 稳定 |
+
+## Review / Fix / Test 闭环
+
+- **第 1 轮**：核对 body probe、body/frame cleanup task、metrics snapshot 字段是否与代码一致；跑受影响单元测试。
+- **第 2 轮**：基于最新 diff 复查 `human_tests/api-metrics.md` / `human_tests/api-system.md` / `human_tests/memory-sqlite-cache-optimization.md` 与索引一致性；重放压测采样 RSS。
+- **第 3 轮（按需）**：Phase 4 落地时补充 BodyRef、SSE 连接级上限、规则匹配缓存对应测试。
+
+## 校验要求
+
+- 优先执行受影响单元与集成测试：
+  - `cargo test -p bifrost-admin body_store:: frame_store:: ws_payload_store:: metrics::`
+  - `cargo test -p bifrost-storage config_manager::`
+- 再执行 `rust-project-validate`：fmt / clippy / `cargo test --workspace --all-features`。
+- `scripts/ci/local-ci.sh` 仅在最终范围需要完整本地 CI 时执行。
+
+## 风险与决策
+
+| 风险 | 决策 |
+| --- | --- |
+| Passthrough 大 body 跳过规则/脚本，业务逻辑差异 | 语义可解释；detail 明确标记截断；阈值可配置化 |
+| SSE 连接级上限未落地 → 长连接内存仍可能失控 | Phase 4 目标；当前依赖 per-frame `preview_limit` + 及时清理连接监控 |
+| 严格分层存储 + BodyRef 未落地 → 未命中解包流量仍占内存 | Phase 4 目标；当前 BodyStore inline+file 已缓解，仍需 DB 分流 |
+| Metrics 采集频率过高导致 CPU 抖动 | `MetricsCollector` 采集周期可配置；默认 1s 快照 |
+| WebSocket 压测缺少 websocat | 用内置 Python WS 客户端替代，作为长期方案 |
+| retention_days 调低后历史检索窗口变短 | 通过 Admin API 热更新，用户可根据磁盘空间自行取舍 |
+
+## 文档更新要求
+
+- 更新 `human_tests/api-metrics.md`、`human_tests/api-system.md`、`human_tests/memory-sqlite-cache-optimization.md`。
+- 更新 `human_tests/readme.md` 索引。
+- README / 协议 / Hook 文档暂不修改；Phase 4 落地后再补 CLI/Web 变更说明。
