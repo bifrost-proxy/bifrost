@@ -691,6 +691,42 @@
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app` 并输出 `BifrostNativeCoreChecks passed`。
 - 2026-07-03：执行源码检查命令，确认存在 `refreshSelectedSidebarData`、按页 `includeOverview/includeRules/includeSystemControls`、`maxNativeRecords` 和 `activityClientAppCounts/activityClientIpCounts` 缓存路径，且不存在 `selectInitialTrafficRecordIfNeeded` 隐藏预取 helper；当前机器辅助访问/截图权限不稳定，人工点击观察项需在有 UI 权限环境复核。
 
+### TC-MNA-26：回归 - 主窗口所有面板必须复用统一 NativeSurface 风格
+
+**操作步骤：**
+1. 执行 SwiftPM 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 检查共享 surface 组件和页面使用点：
+   ```bash
+   rg -n 'struct NativePageScaffold|struct NativePanel|struct NativeCard|struct NativeCardHeader|struct CompactFact|struct StatusPill|struct EmptyNativeState' \
+     apps/macos/Sources/Bifrost/App/NativeSurface.swift
+   rg -n 'NativePageScaffold|NativePanel|NativeCard' \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
+     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift
+   ! rg -n 'RuleSurfaceCard|TopToolbar|ToolbarIconButton|MiniToolbarSwitch' \
+     apps/macos/Sources/Bifrost/App/MainWindowScene.swift \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
+     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift
+   ```
+3. 打开 Native `.app` 后依次查看 `活动`、`概览`、`规则`、`网络`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- `NativeSurface.swift` 是主窗口冷白 surface、白色面板、边缘高光、弱阴影、hover 悬浮、卡片标题和空态的唯一共享实现。
+- Activity、Overview、Network 使用 `NativeCard`；Rules 的列表和编辑器使用同一个 `NativePanel`，不得保留独立 `RuleSurfaceCard`。
+- 主窗口源码中不得保留旧 `TopToolbar`、`ToolbarIconButton`、`MiniToolbarSwitch` 等未渲染旧工具栏代码，避免后续回退到灰色 `.bar` 风格。
+- 四个主入口的页面标题、横向边距、最大内容宽度、面板圆角、描边、发光边缘、hover 阴影和卡片白色填充保持一致。
+- Status bar 可继续使用系统 `.bar` 作为底部状态区域；它不属于主内容面板，不应影响 Activity/Overview/Rules/Network 面板统一性。
+
+**执行记录：**
+- 2026-07-03：执行 `swift build --package-path apps/macos` 通过，确认 `NativeSurface` 共享组件、Dashboard 页面和 Rules 页面可编译。
+- 2026-07-03：执行源码检查命令，确认 `NativeSurface.swift` 包含共享组件，Dashboard/Rules 使用 `NativePageScaffold`、`NativePanel`、`NativeCard`，且 `RuleSurfaceCard`、`TopToolbar`、`ToolbarIconButton`、`MiniToolbarSwitch` 不存在。
+
 ## 清理步骤
 
 ```bash
