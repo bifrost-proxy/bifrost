@@ -727,6 +727,81 @@
 - 2026-07-03：执行 `swift build --package-path apps/macos` 通过，确认 `NativeSurface` 共享组件、Dashboard 页面和 Rules 页面可编译。
 - 2026-07-03：执行源码检查命令，确认 `NativeSurface.swift` 包含共享组件，Dashboard/Rules 使用 `NativePageScaffold`、`NativePanel`、`NativeCard`，且 `RuleSurfaceCard`、`TopToolbar`、`ToolbarIconButton`、`MiniToolbarSwitch` 不存在。
 
+### TC-MNA-27：回归 - Overview 展示证书、移动端可用性和 Remote Invoke 核心操作
+
+**操作步骤：**
+1. 执行 SwiftPM 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行设置数据 smoke，覆盖 Overview 依赖的真实 Admin API：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data
+   ```
+3. 检查 Overview 数据模型和操作入口：
+   ```bash
+   rg -n 'mobileDevices|proxyAddressInfo|trustProbeSession|createRemoteInvokeSshKey|copyRemoteInvokeSshKey|refreshMobileDevices|regenerateTrustProbe|fetchRemoteInvokeGrants|fetchRemoteInvokeCalls|fetchRemoteInvokeSshKey|createTrustProbeSession' \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
+     apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift
+   ```
+4. 检查 Overview 面板渲染结构：
+   ```bash
+   rg -n 'Remote Invoke|生成 SSH Key|复制 SSH Key|证书与移动端|安装本机 CA|刷新设备|重新生成 QR|可用性检查|QRPreview|MobileDeviceRow|TrustProbeDeviceRow|RemoteInvokeGrantRow' \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
+   ```
+5. 打开 Native `.app` 并进入 `概览`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- `--check-settings-data` 输出 `cert_status=`、`mobile_android=`、`mobile_ios=`、`remote_state=`、`grants=`、`calls=`、`ssh_key=`、`trust_probe_host=` 和 `trust_probe_qr=true`。
+- Overview 的 Remote Invoke 面板不再只是发现模式开关；必须展示 SSH Key 状态、生成/重新生成按钮、复制 SSH Key 按钮、已授权客户端数、活动调用数、最近调用数、最近活跃时间，以及最多 3 个授权客户端/最近调用摘要。
+- Overview 的证书与移动端面板必须展示本机 CA 状态、代理地址、移动设备数、证书指纹、`安装本机 CA`、`刷新设备`、`重新生成 QR`。
+- 可用性检查区域必须展示二维码图片容器、检查链接、打开/复制链接操作；扫码后 `trustProbeSession.devices` 中的正在连接设备必须在 `TrustProbeDeviceRow` 中显示网络/TLS/代理状态。
+- USB/ADB/cfgutil 发现的移动设备必须在同一证书面板内显示设备名称、平台图标、证书信任状态或设备状态；没有设备时显示明确空态和扫码引导。
+- 这些能力都在 `概览` 一级页面内完成，不要求用户再进入完整 Settings 页或 WebUI 才能看到基础状态。
+
+**执行记录：**
+- 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
+- 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test && apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `cert_status=installed_and_trusted`、`mobile_android=0`、`mobile_ios=0`、`remote_state=Connected`、`grants=2`、`calls=5`、`ssh_key=true`、`trust_probe_host=10.71.185.109`、`trust_probe_qr=true`。
+- 2026-07-03：执行源码检查命令，确认 Overview 具备 `RemoteInvokeGrantRow`、`MobileDeviceRow`、`AvailabilityProbePanel`、`QRPreview`、`TrustProbeDeviceRow`，并通过 `BifrostClient` 拉取 mobile/proxy/trust-probe/Remote Invoke SSH key/grants/calls。
+
+### TC-MNA-28：回归 - Overview TLS 解密卡片支持名单数量和弹窗编辑
+
+**操作步骤：**
+1. 执行 SwiftPM 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行设置数据 smoke，覆盖 TLS 名单真实 Admin API：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data
+   ```
+3. 检查 Overview TLS 名单 UI 和保存链路：
+   ```bash
+   rg -n 'TlsInterceptionCard|TlsListKind|TlsListEditorSheet|TlsListCountTile|应用白名单|应用黑名单|域名白名单|域名黑名单|IP 白名单|IP 黑名单|updateTlsConfig' \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
+     apps/macos/Sources/Bifrost/App/AppModel.swift
+   ```
+4. 打开 Native `.app`，进入 `概览`，点击 TLS 解密卡片内任一名单数量块：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- `--check-settings-data` 输出 `tls_domain_include=`、`tls_domain_exclude=`、`tls_app_include=`、`tls_app_exclude=`、`tls_ip_include=` 和 `tls_ip_exclude=`。
+- Overview 的 TLS 解密卡片展示应用、域名、IP 三类白名单/黑名单共 6 个计数块；卡片仍保留 TLS 解密总开关。
+- 点击任一计数块弹出编辑框，标题对应具体名单类型，输入区支持每行一个规则并显示该类型示例占位。
+- 保存时会去除空行和重复项，更新对应 `TlsConfig` 字段并调用 `AppModel.updateTlsConfig` 保存到 `/config/tls`。
+- 卡片和弹窗使用 `NativeCard` / `AppSurface` 风格，不能回退到 Settings 全页或 WebUI 才能编辑基础 TLS 解包名单。
+
+**执行记录：**
+- 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
+- 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test && apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `tls_domain_include=2`、`tls_domain_exclude=0`、`tls_app_include=9`、`tls_app_exclude=2`、`tls_ip_include=0`、`tls_ip_exclude=1`。
+- 2026-07-03：执行源码检查命令，确认 `TlsInterceptionCard`、`TlsListKind`、`TlsListEditorSheet`、`TlsListCountTile` 和 `AppModel.updateTlsConfig` 均存在，六类名单标题均在 Overview 源码中出现。
+
 ## 清理步骤
 
 ```bash

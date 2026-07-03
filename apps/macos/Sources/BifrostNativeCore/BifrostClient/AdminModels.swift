@@ -787,6 +787,7 @@ public struct MobileDevice: Decodable, Equatable, Identifiable, Sendable {
     public var platform: String
     public var status: String
     public var capability: String
+    public var certificateStatus: DeviceCertificateStatus?
     public var statusMessage: String
 
     enum CodingKeys: String, CodingKey {
@@ -796,8 +797,139 @@ public struct MobileDevice: Decodable, Equatable, Identifiable, Sendable {
         case platform
         case status
         case capability
+        case certificateStatus = "certificate_status"
         case statusMessage = "status_message"
     }
+}
+
+public struct DeviceCertificateStatus: Decodable, Equatable, Sendable {
+    public var state: String
+    public var trusted: Bool?
+    public var fingerprintMatch: Bool?
+    public var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case state
+        case trusted
+        case fingerprintMatch = "fingerprint_match"
+        case message
+    }
+}
+
+public struct CreateTrustProbeSessionRequest: Encodable, Equatable, Sendable {
+    public var host: String
+    public var ttlSeconds: Int
+
+    public init(host: String, ttlSeconds: Int = 600) {
+        self.host = host
+        self.ttlSeconds = ttlSeconds
+    }
+}
+
+public struct TrustProbeSession: Decodable, Equatable, Identifiable, Sendable {
+    public var sessionID: String
+    public var status: String
+    public var opened: Bool
+    public var proxyAccessStatus: String?
+    public var proxyAccessAllowed: Bool?
+    public var proxyAccessMessage: String?
+    public var proxyConfigured: Bool
+    public var proxyConfigurationMessage: String?
+    public var networkReachable: Bool
+    public var tlsTrusted: Bool
+    public var clientIP: String?
+    public var userAgent: String?
+    public var platformHint: String?
+    public var lastError: String?
+    public var devices: [TrustProbeDevice]
+    public var events: [TrustProbeEvent]
+    public var expiresAt: String
+    public var host: String
+    public var adminPort: Int
+    public var probePort: Int
+    public var landingURL: String
+    public var qrCodeURL: String
+    public var caDownloadURL: String
+    public var proxyQrCodeURL: String
+    public var caFingerprintSHA256: String?
+
+    public var id: String { sessionID }
+
+    enum CodingKeys: String, CodingKey {
+        case sessionID = "sessionId"
+        case status
+        case opened
+        case proxyAccessStatus
+        case proxyAccessAllowed
+        case proxyAccessMessage
+        case proxyConfigured
+        case proxyConfigurationMessage
+        case networkReachable
+        case tlsTrusted
+        case clientIP = "clientIp"
+        case userAgent
+        case platformHint
+        case lastError
+        case devices
+        case events
+        case expiresAt
+        case host
+        case adminPort
+        case probePort
+        case landingURL = "landingUrl"
+        case qrCodeURL = "qrCodeUrl"
+        case caDownloadURL = "caDownloadUrl"
+        case proxyQrCodeURL = "proxyQrCodeUrl"
+        case caFingerprintSHA256 = "caFingerprintSha256"
+    }
+}
+
+public struct TrustProbeDevice: Decodable, Equatable, Identifiable, Sendable {
+    public var deviceID: String
+    public var status: String
+    public var opened: Bool
+    public var proxyAccessStatus: String?
+    public var proxyAccessAllowed: Bool?
+    public var proxyAccessMessage: String?
+    public var proxyConfigured: Bool
+    public var proxyConfigurationMessage: String?
+    public var networkReachable: Bool
+    public var tlsTrusted: Bool
+    public var clientIP: String?
+    public var userAgent: String?
+    public var platformHint: String?
+    public var lastError: String?
+    public var firstSeen: String
+    public var lastSeen: String
+    public var events: [TrustProbeEvent]
+
+    public var id: String { deviceID }
+
+    enum CodingKeys: String, CodingKey {
+        case deviceID = "deviceId"
+        case status
+        case opened
+        case proxyAccessStatus
+        case proxyAccessAllowed
+        case proxyAccessMessage
+        case proxyConfigured
+        case proxyConfigurationMessage
+        case networkReachable
+        case tlsTrusted
+        case clientIP = "clientIp"
+        case userAgent
+        case platformHint
+        case lastError
+        case firstSeen
+        case lastSeen
+        case events
+    }
+}
+
+public struct TrustProbeEvent: Decodable, Equatable, Sendable {
+    public var type: String
+    public var at: String
+    public var message: String?
 }
 
 public struct SyncUser: Decodable, Equatable, Sendable {

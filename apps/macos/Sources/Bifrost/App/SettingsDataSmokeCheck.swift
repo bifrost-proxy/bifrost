@@ -27,6 +27,7 @@ enum SettingsDataSmokeCheck {
                 async let cliProxy = client.fetchCliProxy()
                 async let proxyAddress = client.fetchProxyAddress()
                 async let certInfo = client.fetchCertInfo()
+                async let tlsConfig = client.fetchTlsConfig()
                 async let mobileDevices = client.fetchMobileDevices()
                 async let syncStatus = client.fetchSyncStatus()
                 async let remoteStatus = client.fetchRemoteInvokeStatus()
@@ -40,6 +41,7 @@ enum SettingsDataSmokeCheck {
                 let loadedCliProxy = try await cliProxy
                 let loadedProxyAddress = try await proxyAddress
                 let loadedCertInfo = try await certInfo
+                let loadedTlsConfig = try await tlsConfig
                 let loadedMobileDevices = try await mobileDevices
                 let loadedSyncStatus = try await syncStatus
                 let loadedRemoteStatus = try await remoteStatus
@@ -48,6 +50,11 @@ enum SettingsDataSmokeCheck {
                 let loadedGrants = try await grants
                 let loadedCalls = try await calls
                 let sshKeyAvailable = (try? await client.fetchRemoteInvokeSshKey()) != nil
+                let trustProbeHost = loadedProxyAddress.addresses.first(where: \.isPreferred)?.ip
+                    ?? loadedProxyAddress.localIPs.first
+                    ?? loadedCertInfo.localIPs.first
+                    ?? "127.0.0.1"
+                let loadedTrustProbe = try await client.createTrustProbeSession(host: trustProbeHost)
 
                 print(
                     "Bifrost settings data check passed: port=\(port) " +
@@ -56,6 +63,12 @@ enum SettingsDataSmokeCheck {
                     "launchd_supported=\(loadedLaunchd.supported) " +
                     "cli_proxy=\(loadedCliProxy.enabled) " +
                     "cert_status=\(loadedCertInfo.status) " +
+                    "tls_domain_include=\(loadedTlsConfig.interceptInclude.count) " +
+                    "tls_domain_exclude=\(loadedTlsConfig.interceptExclude.count) " +
+                    "tls_app_include=\(loadedTlsConfig.appInterceptInclude.count) " +
+                    "tls_app_exclude=\(loadedTlsConfig.appInterceptExclude.count) " +
+                    "tls_ip_include=\(loadedTlsConfig.ipInterceptInclude.count) " +
+                    "tls_ip_exclude=\(loadedTlsConfig.ipInterceptExclude.count) " +
                     "mobile_android=\(loadedMobileDevices.android?.devices.count ?? 0) " +
                     "mobile_ios=\(loadedMobileDevices.ios?.devices.count ?? 0) " +
                     "sync_reason=\(loadedSyncStatus.reason) " +
@@ -64,7 +77,9 @@ enum SettingsDataSmokeCheck {
                     "pending_pairings=\(loadedPairings.pairings.count) " +
                     "grants=\(loadedGrants.grants.count) " +
                     "calls=\(loadedCalls.calls.count) " +
-                    "ssh_key=\(sshKeyAvailable)"
+                    "ssh_key=\(sshKeyAvailable) " +
+                    "trust_probe_host=\(loadedTrustProbe.host) " +
+                    "trust_probe_qr=\(!loadedTrustProbe.qrCodeURL.isEmpty)"
                 )
                 Foundation.exit(0)
             } catch {

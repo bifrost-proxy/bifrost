@@ -209,6 +209,17 @@ public actor BifrostClient {
         return try await decode(MobileDevicesResponse.self, from: data)
     }
 
+    public func createTrustProbeSession(host: String, ttlSeconds: Int = 600) async throws -> TrustProbeSession {
+        let body = try JSONEncoder().encode(CreateTrustProbeSessionRequest(host: host, ttlSeconds: ttlSeconds))
+        let data = try await request(.post, path: "/trust-probe/sessions", body: body)
+        return try await decode(TrustProbeSession.self, from: data)
+    }
+
+    public func fetchTrustProbeSession(sessionID: String) async throws -> TrustProbeSession {
+        let data = try await request(.get, path: "/trust-probe/sessions/\(encodePathSegment(sessionID))")
+        return try await decode(TrustProbeSession.self, from: data)
+    }
+
     public func getProxyAddress() async throws -> Data {
         try await request(.get, path: "/proxy/address")
     }
