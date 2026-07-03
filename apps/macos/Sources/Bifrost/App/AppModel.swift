@@ -616,6 +616,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func updateTlsConfig(_ newConfig: TlsConfig) async {
+        guard !isTogglingTls else {
+            return
+        }
+        isTogglingTls = true
+        defer { isTogglingTls = false }
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            tlsConfig = try await client.updateTlsConfig(newConfig)
+            dataError = nil
+        } catch {
+            dataError = error.localizedDescription
+            await refreshData()
+        }
+    }
+
     func setBreakpointEnabled(_ enabled: Bool) async {
         guard !isTogglingBreakpoint else {
             return
