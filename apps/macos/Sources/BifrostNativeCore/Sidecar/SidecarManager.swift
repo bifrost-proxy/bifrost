@@ -1,11 +1,21 @@
 import Foundation
 
+public enum SidecarServiceOrigin: Equatable, Sendable {
+    case existingDefaultDataDirectory
+    case launchedBundledSidecar
+}
+
 public enum SidecarState: Equatable, Sendable {
     case stopped
     case starting
-    case running(port: UInt16)
+    case running(port: UInt16, origin: SidecarServiceOrigin)
     case failed(String)
     case recovering
+}
+
+public struct SidecarProbeResult: Equatable, Sendable {
+    public var port: UInt16
+    public var dataDir: String?
 }
 
 public struct SidecarStatusSnapshot: Decodable, Equatable, Sendable {
@@ -82,16 +92,16 @@ public actor SidecarManager {
 
     public func ensureRunning() async throws {
         state = .starting
-        if let port = try? probeRunningService() {
-            state = .running(port: port)
+        if let probe = try? probeRunningService() {
+            state = .running(port: probe.port, origin: .existingDefaultDataDirectory)
             return
         }
 
         try await start()
 
         for _ in 0..<40 {
-            if let port = try? probeRunningService() {
-                state = .running(port: port)
+            if let probe = try? probeRunningService() {
+                state = .running(port: probe.port, origin: .launchedBundledSidecar)
                 return
             }
             try await Task.sleep(nanoseconds: 250_000_000)
@@ -104,7 +114,7 @@ public actor SidecarManager {
         try JSONDecoder().decode(SidecarStatusSnapshot.self, from: data)
     }
 
-    public func probeRunningService() throws -> UInt16? {
+    public func probeRunningService() throws -> SidecarProbeResult? {
         let output = try runBifrostCommand(arguments: ["status", "--format", "json"])
         guard !output.isEmpty else {
             return nil
@@ -113,7 +123,17 @@ public actor SidecarManager {
         guard snapshot.running, let port = snapshot.listener?.port else {
             return nil
         }
-        return port
+        guard statusSnapshotMatchesConfiguredDataDirectory(snapshot) else {
+            return nil
+        }
+        return SidecarProbeResult(port: port, dataDir: snapshot.dataDir)
+    }
+
+    public func statusSnapshotMatchesConfiguredDataDirectory(_ snapshot: SidecarStatusSnapshot) -> Bool {
+        guard let dataDir = snapshot.dataDir, !dataDir.isEmpty else {
+            return true
+        }
+        return standardizedPath(dataDir) == standardizedPath(configuration.dataDirectory.path)
     }
 
     public func start() async throws {
@@ -142,7 +162,7 @@ public actor SidecarManager {
             self.process = nil
         } else {
             self.process = process
-            state = .running(port: port)
+            state = .running(port: port, origin: .launchedBundledSidecar)
         }
     }
 
@@ -181,6 +201,10 @@ public actor SidecarManager {
             environment["BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT"] = "1"
         }
         return environment
+    }
+
+    private func standardizedPath(_ path: String) -> String {
+        URL(fileURLWithPath: path, isDirectory: true).standardizedFileURL.path
     }
 }
 

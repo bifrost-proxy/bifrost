@@ -16,7 +16,7 @@ enum AdminDataSmokeCheck {
                 )
                 try await manager.ensureRunning()
                 let state = await manager.currentState()
-                guard case .running(let port) = state else {
+                guard case .running(let port, _) = state else {
                     throw SmokeCheckError.serviceNotRunning
                 }
 

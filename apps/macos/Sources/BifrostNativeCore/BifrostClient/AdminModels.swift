@@ -77,6 +77,98 @@ public struct SystemOverview: Decodable, Equatable, Sendable {
     }
 }
 
+public struct AppMetrics: Decodable, Equatable, Sendable {
+    public var appName: String
+    public var requests: UInt64
+    public var activeConnections: UInt64
+    public var bytesSent: UInt64
+    public var bytesReceived: UInt64
+    public var httpRequests: UInt64
+    public var httpsRequests: UInt64
+    public var tunnelRequests: UInt64
+    public var wsRequests: UInt64
+    public var wssRequests: UInt64
+    public var h3Requests: UInt64
+    public var socks5Requests: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case appName = "app_name"
+        case requests
+        case activeConnections = "active_connections"
+        case bytesSent = "bytes_sent"
+        case bytesReceived = "bytes_received"
+        case httpRequests = "http_requests"
+        case httpsRequests = "https_requests"
+        case tunnelRequests = "tunnel_requests"
+        case wsRequests = "ws_requests"
+        case wssRequests = "wss_requests"
+        case h3Requests = "h3_requests"
+        case socks5Requests = "socks5_requests"
+    }
+}
+
+public struct ActiveRulesSummary: Decodable, Equatable, Sendable {
+    public var total: Int
+    public var rules: [ActiveRuleItem]
+    public var variableConflicts: [ActiveRuleVariableConflict]
+    public var mergedContent: String
+
+    enum CodingKeys: String, CodingKey {
+        case total
+        case rules
+        case variableConflicts = "variable_conflicts"
+        case mergedContent = "merged_content"
+    }
+}
+
+public struct ActiveRuleItem: Decodable, Identifiable, Equatable, Sendable {
+    public var name: String
+    public var ruleCount: Int
+    public var groupID: String?
+    public var groupName: String?
+
+    public var id: String {
+        "\(groupID ?? "local"):\(name)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case ruleCount = "rule_count"
+        case groupID = "group_id"
+        case groupName = "group_name"
+    }
+}
+
+public struct ActiveRuleVariableConflict: Decodable, Identifiable, Equatable, Sendable {
+    public var variableName: String
+    public var definitions: [ActiveRuleVariableDefinition]
+
+    public var id: String {
+        variableName
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case variableName = "variable_name"
+        case definitions
+    }
+}
+
+public struct ActiveRuleVariableDefinition: Decodable, Identifiable, Equatable, Sendable {
+    public var ruleName: String
+    public var groupID: String?
+    public var valuePreview: String
+
+    public var id: String {
+        "\(groupID ?? "local"):\(ruleName):\(valuePreview)"
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case ruleName = "rule_name"
+        case groupID = "group_id"
+        case valuePreview = "value_preview"
+    }
+}
+
 public struct VersionCheckResponse: Decodable, Equatable, Sendable {
     public var hasUpdate: Bool
     public var currentVersion: String
@@ -171,12 +263,26 @@ public struct TrafficPerformanceConfig: Decodable, Equatable, Sendable {
     public var maxDatabaseSizeBytes: UInt64?
     public var fileRetentionDays: UInt64?
     public var binaryTrafficPerformanceMode: Bool?
+    public var injectBifrostBadge: Bool?
 
     enum CodingKeys: String, CodingKey {
         case maxRecords = "max_records"
         case maxDatabaseSizeBytes = "max_db_size_bytes"
         case fileRetentionDays = "file_retention_days"
         case binaryTrafficPerformanceMode = "binary_traffic_performance_mode"
+        case injectBifrostBadge = "inject_bifrost_badge"
+    }
+}
+
+public struct UpdatePerformanceConfigRequest: Encodable, Equatable, Sendable {
+    public var injectBifrostBadge: Bool?
+
+    public init(injectBifrostBadge: Bool? = nil) {
+        self.injectBifrostBadge = injectBifrostBadge
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case injectBifrostBadge = "inject_bifrost_badge"
     }
 }
 
@@ -450,15 +556,49 @@ public struct RuleSummary: Decodable, Equatable, Identifiable, Sendable {
     public var name: String
     public var enabled: Bool
     public var sortOrder: Int?
+    public var canReorder: Bool?
+    public var canDelete: Bool?
+    public var canDisable: Bool?
+    public var canRename: Bool?
+    public var canEditContent: Bool?
     public var ruleCount: Int?
     public var updatedAt: String?
 
     public var id: String { name }
 
+    public init(
+        name: String,
+        enabled: Bool,
+        sortOrder: Int? = nil,
+        canReorder: Bool? = nil,
+        canDelete: Bool? = nil,
+        canDisable: Bool? = nil,
+        canRename: Bool? = nil,
+        canEditContent: Bool? = nil,
+        ruleCount: Int? = nil,
+        updatedAt: String? = nil
+    ) {
+        self.name = name
+        self.enabled = enabled
+        self.sortOrder = sortOrder
+        self.canReorder = canReorder
+        self.canDelete = canDelete
+        self.canDisable = canDisable
+        self.canRename = canRename
+        self.canEditContent = canEditContent
+        self.ruleCount = ruleCount
+        self.updatedAt = updatedAt
+    }
+
     enum CodingKeys: String, CodingKey {
         case name
         case enabled
         case sortOrder = "sort_order"
+        case canReorder = "can_reorder"
+        case canDelete = "can_delete"
+        case canDisable = "can_disable"
+        case canRename = "can_rename"
+        case canEditContent = "can_edit_content"
         case ruleCount = "rule_count"
         case updatedAt = "updated_at"
     }
@@ -469,10 +609,232 @@ public struct RuleDetail: Decodable, Equatable, Identifiable, Sendable {
     public var content: String
     public var enabled: Bool
     public var sortOrder: Int?
+    public var canReorder: Bool?
+    public var canDelete: Bool?
+    public var canDisable: Bool?
+    public var canRename: Bool?
+    public var canEditContent: Bool?
     public var createdAt: String?
     public var updatedAt: String?
 
     public var id: String { name }
+
+    public init(
+        name: String,
+        content: String,
+        enabled: Bool,
+        sortOrder: Int? = nil,
+        canReorder: Bool? = nil,
+        canDelete: Bool? = nil,
+        canDisable: Bool? = nil,
+        canRename: Bool? = nil,
+        canEditContent: Bool? = nil,
+        createdAt: String? = nil,
+        updatedAt: String? = nil
+    ) {
+        self.name = name
+        self.content = content
+        self.enabled = enabled
+        self.sortOrder = sortOrder
+        self.canReorder = canReorder
+        self.canDelete = canDelete
+        self.canDisable = canDisable
+        self.canRename = canRename
+        self.canEditContent = canEditContent
+        self.createdAt = createdAt
+        self.updatedAt = updatedAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case content
+        case enabled
+        case sortOrder = "sort_order"
+        case canReorder = "can_reorder"
+        case canDelete = "can_delete"
+        case canDisable = "can_disable"
+        case canRename = "can_rename"
+        case canEditContent = "can_edit_content"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct RemoteEnvelope<T: Decodable & Sendable>: Decodable, Sendable {
+    public var code: Int
+    public var message: String
+    public var data: T
+}
+
+public struct RemoteListPayload<T: Decodable & Sendable>: Decodable, Sendable {
+    public var list: [T]?
+    public var total: Int?
+}
+
+public enum RuleGroupVisibility: String, Decodable, Equatable, Sendable {
+    case `public`
+    case `private`
+}
+
+public struct RuleGroup: Decodable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var name: String
+    public var avatar: String
+    public var description: String
+    public var visibility: RuleGroupVisibility
+    public var level: Int?
+    public var createdBy: String?
+    public var createTime: String
+    public var updateTime: String
+
+    public var isWritable: Bool {
+        if let level {
+            return level >= 0
+        }
+        return false
+    }
+
+    public var permissionRank: Int {
+        switch level {
+        case 2:
+            return 0
+        case 1, 0:
+            return 1
+        default:
+            return 2
+        }
+    }
+
+    public var permissionLabel: String {
+        switch level {
+        case 2:
+            return "Owner"
+        case 1:
+            return "Master"
+        case 0:
+            return "Member"
+        default:
+            return "Public"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case name
+        case avatar
+        case description = "what"
+        case visibility
+        case level
+        case createdBy = "created_by"
+        case createTime = "create_time"
+        case updateTime = "update_time"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        name = try container.decode(String.self, forKey: .name)
+        avatar = try container.decodeIfPresent(String.self, forKey: .avatar) ?? ""
+        description = try container.decodeIfPresent(String.self, forKey: .description) ?? ""
+        level = try container.decodeIfPresent(Int.self, forKey: .level)
+        createdBy = try container.decodeIfPresent(String.self, forKey: .createdBy)
+        createTime = try container.decodeIfPresent(String.self, forKey: .createTime) ?? ""
+        updateTime = try container.decodeIfPresent(String.self, forKey: .updateTime) ?? ""
+
+        if let value = try? container.decodeIfPresent(Int.self, forKey: .visibility) {
+            visibility = value == 1 ? .public : .private
+        } else if let value = try? container.decodeIfPresent(String.self, forKey: .visibility) {
+            visibility = value == "public" ? .public : .private
+        } else {
+            visibility = .private
+        }
+    }
+}
+
+public struct RuleGroupListResponse: Equatable, Sendable {
+    public var list: [RuleGroup]
+    public var total: Int
+
+    public init(list: [RuleGroup], total: Int) {
+        self.list = list
+        self.total = total
+    }
+}
+
+public struct GroupRuleInfo: Decodable, Equatable, Identifiable, Sendable {
+    public var name: String
+    public var enabled: Bool
+    public var sortOrder: Int
+    public var ruleCount: Int
+    public var createdAt: String
+    public var updatedAt: String
+
+    public var id: String { name }
+
+    public var ruleSummary: RuleSummary {
+        RuleSummary(
+            name: name,
+            enabled: enabled,
+            sortOrder: sortOrder,
+            canReorder: false,
+            canDelete: true,
+            canDisable: true,
+            canRename: false,
+            canEditContent: true,
+            ruleCount: ruleCount,
+            updatedAt: updatedAt
+        )
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case enabled
+        case sortOrder = "sort_order"
+        case ruleCount = "rule_count"
+        case createdAt = "created_at"
+        case updatedAt = "updated_at"
+    }
+}
+
+public struct GroupRulesResponse: Decodable, Equatable, Sendable {
+    public var groupID: String
+    public var groupName: String
+    public var writable: Bool
+    public var rules: [GroupRuleInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case groupID = "group_id"
+        case groupName = "group_name"
+        case writable
+        case rules
+    }
+}
+
+public struct GroupRuleDetail: Decodable, Equatable, Identifiable, Sendable {
+    public var name: String
+    public var content: String
+    public var enabled: Bool
+    public var sortOrder: Int
+    public var createdAt: String
+    public var updatedAt: String
+
+    public var id: String { name }
+
+    public var ruleDetail: RuleDetail {
+        RuleDetail(
+            name: name,
+            content: content,
+            enabled: enabled,
+            sortOrder: sortOrder,
+            canReorder: false,
+            canDelete: true,
+            canDisable: true,
+            canRename: false,
+            canEditContent: true,
+            createdAt: createdAt,
+            updatedAt: updatedAt
+        )
+    }
 
     enum CodingKeys: String, CodingKey {
         case name

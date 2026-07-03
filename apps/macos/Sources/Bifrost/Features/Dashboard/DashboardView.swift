@@ -5,6 +5,7 @@ import WebKit
 
 struct ActivityView: View {
     @EnvironmentObject private var appModel: AppModel
+    @State private var contentWidth: CGFloat = 0
 
     private var metrics: SystemOverview.Metrics? {
         appModel.overview?.metrics
@@ -24,21 +25,29 @@ struct ActivityView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
-                    ActivityBars(rows: appModel.activityClientAppCounts.prefix(6).map { ($0.name, $0.count) })
+                    ActivityBars(rows: appModel.activityClientAppCounts.map { ($0.name, $0.count) })
+                        .equatable()
                 }
             }
+
+            ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)
+                .equatable()
         }
+        .background(ActivityWidthReader(width: $contentWidth))
     }
 
     private var activityMetricGrid: some View {
-        ViewThatFits(in: .horizontal) {
-            activityMetricGrid(columnCount: 6)
-            activityMetricGrid(columnCount: 5)
-            activityMetricGrid(columnCount: 4)
-            activityMetricGrid(columnCount: 3)
-            activityMetricGrid(columnCount: 2)
-            activityMetricGrid(columnCount: 1)
+        activityMetricGrid(columnCount: activityMetricColumnCount)
+    }
+
+    private var activityMetricColumnCount: Int {
+        guard contentWidth > 0 else {
+            return 6
         }
+        let minimumCardWidth: CGFloat = 150
+        let spacing: CGFloat = 18
+        let fit = Int((contentWidth + spacing) / (minimumCardWidth + spacing))
+        return min(6, max(1, fit))
     }
 
     private func activityMetricGrid(columnCount: Int) -> some View {
@@ -59,7 +68,7 @@ struct ActivityView: View {
         NativeMetricCard(
             title: "活动连接",
             value: "\(metrics?.activeConnections ?? 0)",
-            caption: "\(appModel.activityClientAppCounts.count) 个应用 · \(appModel.activityClientIpCounts.count) 个 IP",
+            caption: "\(appModel.activityClientAppCounts.count) 个应用",
             tint: .orange
         )
         NativeMetricCard(
@@ -76,7 +85,7 @@ struct ActivityView: View {
         )
         NativeMetricCard(
             title: "请求",
-            value: "\(metrics?.totalRequests ?? appModel.trafficRecords.count)",
+            value: "\(metrics?.totalRequests ?? 0)",
             caption: qpsText,
             tint: .green
         )
@@ -109,8 +118,13 @@ struct ActivityView: View {
 
     private var sidecarStatusText: String {
         switch appModel.sidecarState {
-        case .running:
-            return "运行中"
+        case .running(_, let origin):
+            switch origin {
+            case .existingDefaultDataDirectory:
+                return "运行中 · CLI"
+            case .launchedBundledSidecar:
+                return "运行中 · App"
+            }
         case .starting:
             return "启动中"
         case .recovering:
@@ -120,6 +134,257 @@ struct ActivityView: View {
         case .stopped:
             return "未启动"
         }
+    }
+}
+
+private struct ActivityWidthReader: View {
+    @Binding var width: CGFloat
+
+    var body: some View {
+        GeometryReader { proxy in
+            Color.clear
+                .preference(key: ActivityWidthPreferenceKey.self, value: proxy.size.width)
+        }
+        .onPreferenceChange(ActivityWidthPreferenceKey.self) { nextWidth in
+            guard abs(width - nextWidth) > 1 else {
+                return
+            }
+            width = nextWidth
+        }
+    }
+}
+
+private struct ActivityWidthPreferenceKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = nextValue()
+    }
+}
+
+private struct ActiveRulesSummaryCard: View, Equatable {
+    let summary: ActiveRulesSummary?
+
+    var body: some View {
+        NativeCard {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("生效规则解析")
+                            .font(.system(size: 15, weight: .semibold))
+                        Text("当前代理端口正在使用的规则集合")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    StatusPill(title: summaryStatusText, color: summaryStatusColor)
+                }
+
+                if let summary {
+                    if summary.rules.isEmpty && summary.variableConflicts.isEmpty {
+                        EmptyNativeState(title: "暂无生效规则")
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 18)
+                    } else {
+                        VStack(alignment: .leading, spacing: 14) {
+                            if !summary.variableConflicts.isEmpty {
+                                variableConflicts(summary.variableConflicts)
+                            }
+                            activeRules(summary.rules)
+                            if !summary.mergedContent.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                                mergedRules(summary.mergedContent)
+                            }
+                        }
+                    }
+                } else {
+                    Text("正在读取生效规则解析信息...")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 12)
+                }
+            }
+        }
+    }
+
+    private var summaryStatusText: String {
+        guard let summary else {
+            return "读取中"
+        }
+        return "\(summary.total) active"
+    }
+
+    private var summaryStatusColor: Color {
+        guard let summary else {
+            return .secondary
+        }
+        return summary.total > 0 ? .green : .secondary
+    }
+
+    private func activeRules(_ rules: [ActiveRuleItem]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Active Rules")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .textCase(.uppercase)
+
+            if localRules(in: rules).isEmpty && groupedRules(in: rules).isEmpty {
+                Text("No active rules resolved")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(alignment: .leading, spacing: 10) {
+                    if !localRules(in: rules).isEmpty {
+                        RuleTokenFlow {
+                            ForEach(localRules(in: rules)) { rule in
+                                ActiveRuleToken(rule: rule)
+                            }
+                        }
+                    }
+
+                    ForEach(groupedRules(in: rules), id: \.id) { group in
+                        VStack(alignment: .leading, spacing: 7) {
+                            HStack(spacing: 5) {
+                                Image(systemName: "person.2")
+                                    .font(.system(size: 11, weight: .semibold))
+                                Text(group.name)
+                                    .font(.system(size: 11, weight: .semibold))
+                                    .lineLimit(1)
+                            }
+                            .foregroundStyle(.secondary)
+
+                            RuleTokenFlow {
+                                ForEach(group.rules) { rule in
+                                    ActiveRuleToken(rule: rule)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func variableConflicts(_ conflicts: [ActiveRuleVariableConflict]) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 7) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(Color.orange)
+                Text("Variable Conflicts")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+
+            ForEach(conflicts) { conflict in
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("{\(conflict.variableName)}")
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                    ForEach(conflict.definitions) { definition in
+                        Text("\(definition.ruleName): \(definition.valuePreview)")
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                }
+            }
+        }
+        .padding(12)
+        .background(Color.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 7, style: .continuous)
+                .stroke(Color.orange.opacity(0.20))
+        )
+    }
+
+    private func mergedRules(_ content: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("Merged Rules")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .textCase(.uppercase)
+                Spacer()
+                Text("\(content.split(whereSeparator: \.isNewline).count) lines")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.secondary)
+            }
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                Text(content.trimmingCharacters(in: .whitespacesAndNewlines))
+                    .font(.system(size: 11, design: .monospaced))
+                    .foregroundStyle(.primary)
+                    .lineLimit(10)
+                    .textSelection(.enabled)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+    }
+
+    private func localRules(in rules: [ActiveRuleItem]) -> [ActiveRuleItem] {
+        rules.filter { $0.groupID == nil }
+    }
+
+    private func groupedRules(in rules: [ActiveRuleItem]) -> [ActiveRuleGroup] {
+        let grouped = Dictionary(grouping: rules.filter { $0.groupID != nil }) { rule in
+            rule.groupID ?? ""
+        }
+        return grouped
+            .map { groupID, rules in
+                ActiveRuleGroup(
+                    id: groupID,
+                    name: rules.first?.groupName ?? groupID,
+                    rules: rules.sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+                )
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+    }
+
+    private struct ActiveRuleGroup {
+        let id: String
+        let name: String
+        let rules: [ActiveRuleItem]
+    }
+}
+
+private struct RuleTokenFlow<Content: View>: View {
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.adaptive(minimum: 150, maximum: 260), spacing: 8, alignment: .topLeading)
+            ],
+            alignment: .leading,
+            spacing: 8
+        ) {
+            content
+        }
+    }
+}
+
+private struct ActiveRuleToken: View {
+    let rule: ActiveRuleItem
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Circle()
+                .fill(rule.groupID == nil ? Color.blue : Color.purple)
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                Text("\(rule.ruleCount) entries")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 4)
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 10)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
     }
 }
 
@@ -164,33 +429,10 @@ struct DashboardView: View {
 
     @ViewBuilder
     private var overviewControlCards: some View {
-        OverviewToggleCard(
-            title: "系统代理",
-            subtitle: systemProxySubtitle,
-            status: appModel.systemProxyStatus?.enabled == true ? "已接管" : "未接管",
-            tint: appModel.systemProxyStatus?.enabled == true ? .green : .orange,
-            isOn: appModel.systemProxyStatus?.enabled ?? false,
-            isDisabled: !(appModel.systemProxyStatus?.supported ?? false) || appModel.isTogglingSystemProxy
-        ) { enabled in
-            Task { await appModel.setSystemProxyEnabled(enabled) }
-        }
-
+        SystemProxyCard()
         TlsInterceptionCard()
         SyncControlCard(model: model)
         CertificateManagementCard(model: model)
-    }
-
-    private var systemProxySubtitle: String {
-        guard let status = appModel.systemProxyStatus else {
-            return "读取中"
-        }
-        guard status.supported else {
-            return "当前平台不支持"
-        }
-        if let host = status.host, let port = status.port {
-            return "\(host):\(port)"
-        }
-        return appModel.adminHostPortLabel
     }
 }
 
@@ -198,7 +440,7 @@ struct NetworkWebView: View {
     @EnvironmentObject private var appModel: AppModel
 
     var body: some View {
-        NativePageScaffold(title: "网络") {
+        NativePageScaffold(title: "抓包") {
             NativeCard {
                 VStack(alignment: .leading, spacing: 18) {
                     ViewThatFits(in: .horizontal) {
@@ -225,7 +467,7 @@ struct NetworkWebView: View {
                 .foregroundStyle(.blue)
                 .frame(width: 42, height: 42)
             VStack(alignment: .leading, spacing: 4) {
-                Text("网络详情")
+                Text("抓包详情")
                     .font(.system(size: 18, weight: .semibold))
                 Text(appModel.adminHostPortLabel)
                     .font(.system(size: 12))
@@ -240,6 +482,67 @@ struct NetworkWebView: View {
                 Label("在浏览器打开", systemImage: "arrow.up.right.square")
             }
             .buttonStyle(.borderedProminent)
+        }
+    }
+}
+
+struct GroupsWebView: View {
+    @EnvironmentObject private var appModel: AppModel
+
+    var body: some View {
+        NativePageScaffold(title: "小组管理") {
+            NativeCard {
+                VStack(alignment: .leading, spacing: 16) {
+                    HStack(spacing: 14) {
+                        Image(systemName: "person.2")
+                            .font(.system(size: 26, weight: .medium))
+                            .foregroundStyle(.blue)
+                            .frame(width: 42, height: 42)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("小组管理")
+                                .font(.system(size: 18, weight: .semibold))
+                            Text("复用 Web UI 的 Groups 工作台")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer(minLength: 8)
+                        Button {
+                            appModel.openGroupsWebUI()
+                        } label: {
+                            Label("在浏览器打开", systemImage: "arrow.up.right.square")
+                        }
+                        .buttonStyle(.borderedProminent)
+                    }
+
+                    EmbeddedWebUIPage(url: appModel.webUIURL(path: "groups"))
+                        .frame(minHeight: 560)
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .stroke(AppSurface.cardBorder)
+                        )
+                }
+            }
+        }
+    }
+}
+
+private struct EmbeddedWebUIPage: NSViewRepresentable {
+    let url: URL
+
+    func makeNSView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
+        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
+        let webView = WKWebView(frame: .zero, configuration: configuration)
+        webView.allowsBackForwardNavigationGestures = true
+        webView.setValue(false, forKey: "drawsBackground")
+        webView.load(URLRequest(url: url))
+        return webView
+    }
+
+    func updateNSView(_ webView: WKWebView, context: Context) {
+        if webView.url != url {
+            webView.load(URLRequest(url: url))
         }
     }
 }
@@ -265,6 +568,12 @@ private final class OverviewControlModel: ObservableObject {
     @Published var errorMessage: String?
 
     private var baseURL = URL(string: "http://127.0.0.1:9900")!
+    private var trustProbePollingTask: Task<Void, Never>?
+    private var pollingTrustProbeSessionID: String?
+
+    deinit {
+        trustProbePollingTask?.cancel()
+    }
 
     func configure(baseURL: URL) async {
         self.baseURL = baseURL
@@ -470,17 +779,74 @@ private final class OverviewControlModel: ObservableObject {
     private func refreshTrustProbeSession(client: BifrostClient, forceCreate: Bool) async throws {
         guard let host = preferredTrustProbeHost else {
             trustProbeSession = nil
+            stopTrustProbePolling()
             return
         }
         if !forceCreate,
            let session = trustProbeSession,
            session.host == host {
-            trustProbeSession = try? await client.fetchTrustProbeSession(sessionID: session.sessionID)
-            if trustProbeSession != nil {
+            if let refreshed = try? await client.fetchTrustProbeSession(sessionID: session.sessionID) {
+                applyTrustProbeSession(refreshed)
                 return
             }
         }
-        trustProbeSession = try await client.createTrustProbeSession(host: host, ttlSeconds: 600)
+        applyTrustProbeSession(try await client.createTrustProbeSession(host: host, ttlSeconds: 600))
+    }
+
+    private func applyTrustProbeSession(_ session: TrustProbeSession) {
+        trustProbeSession = session
+        if session.status == "expired" {
+            stopTrustProbePolling()
+        } else {
+            startTrustProbePolling(sessionID: session.sessionID)
+        }
+    }
+
+    private func startTrustProbePolling(sessionID: String) {
+        if pollingTrustProbeSessionID == sessionID,
+           trustProbePollingTask?.isCancelled == false {
+            return
+        }
+        stopTrustProbePolling()
+        pollingTrustProbeSessionID = sessionID
+        let baseURL = baseURL
+        trustProbePollingTask = Task { [weak self] in
+            let client = try? BifrostClient(baseURL: baseURL)
+            while !Task.isCancelled {
+                do {
+                    guard let client else {
+                        return
+                    }
+                    let session = try await client.fetchTrustProbeSession(sessionID: sessionID)
+                    await MainActor.run {
+                        guard self?.trustProbeSession?.sessionID == sessionID else {
+                            return
+                        }
+                        self?.trustProbeSession = session
+                        if session.status == "expired" {
+                            self?.stopTrustProbePolling()
+                        }
+                    }
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch is CancellationError {
+                    return
+                } catch {
+                    await MainActor.run {
+                        guard self?.trustProbeSession?.sessionID == sessionID else {
+                            return
+                        }
+                        self?.errorMessage = error.localizedDescription
+                    }
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                }
+            }
+        }
+    }
+
+    private func stopTrustProbePolling() {
+        trustProbePollingTask?.cancel()
+        trustProbePollingTask = nil
+        pollingTrustProbeSessionID = nil
     }
 
     private func applySyncStatus(_ status: SyncStatus, forceDraft: Bool = false) {
@@ -786,6 +1152,281 @@ private struct RemoteDiscoveryCodeStrip: View {
     }
 }
 
+private struct SystemProxyCard: View {
+    @EnvironmentObject private var appModel: AppModel
+    @State private var copiedAddress: String?
+    @State private var copiedAt: Date?
+
+    var body: some View {
+        NativeCard {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(alignment: .top) {
+                    NativeCardHeader(title: "系统代理", subtitle: systemProxySubtitle)
+                    Spacer()
+                    Toggle("", isOn: Binding(
+                        get: { systemProxyEnabledByBifrost },
+                        set: { enabled in Task { await appModel.setSystemProxyEnabled(enabled) } }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .disabled(systemProxyToggleDisabled)
+                }
+
+                StatusPill(title: systemProxyStatusTitle, color: systemProxyStatusColor)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("代理地址")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .textCase(.uppercase)
+                    if proxyAddresses.isEmpty {
+                        ProxyAddressCopyRow(
+                            title: "本机",
+                            address: appModel.adminHostPortLabel,
+                            isPreferred: true,
+                            isCopied: copiedAddress == appModel.adminHostPortLabel && recentlyCopied
+                        ) {
+                            copyProxyAddress(appModel.adminHostPortLabel)
+                        }
+                    } else {
+                        ForEach(proxyAddresses) { address in
+                            ProxyAddressCopyRow(
+                                title: address.isPreferred ? "推荐" : address.ip,
+                                address: address.address,
+                                isPreferred: address.isPreferred,
+                                isCopied: copiedAddress == address.address && recentlyCopied
+                            ) {
+                                copyProxyAddress(address.address)
+                            }
+                        }
+                    }
+                }
+
+                Divider()
+                    .opacity(0.55)
+
+                VStack(spacing: 9) {
+                    SystemProxyOptionToggleRow(
+                        title: "Boot/Shutdown Cleanup",
+                        detail: launchdDetail,
+                        isOn: launchdEnabled,
+                        isDisabled: launchdToggleDisabled
+                    ) { enabled in
+                        Task { await appModel.setSystemProxyLaunchdEnabled(enabled) }
+                    }
+
+                    SystemProxyOptionToggleRow(
+                        title: "Inject Bifrost Badge",
+                        detail: "只应用于 HTML 页面，用来标记流量正在经过 Bifrost。",
+                        isOn: appModel.performanceConfig?.traffic.injectBifrostBadge ?? false,
+                        isDisabled: appModel.performanceConfig == nil || appModel.isTogglingInjectBifrostBadge
+                    ) { enabled in
+                        Task { await appModel.setInjectBifrostBadgeEnabled(enabled) }
+                    }
+
+                    SystemProxyOptionStatusRow(
+                        title: "CLI Proxy (ENV)",
+                        detail: cliProxyDetail,
+                        status: appModel.cliProxyStatus?.enabled == true ? "Enabled" : "Disabled",
+                        color: appModel.cliProxyStatus?.enabled == true ? .green : .secondary
+                    )
+                }
+            }
+        }
+    }
+
+    private var proxyAddresses: [ProxyAddress] {
+        appModel.proxyAddressInfo?.addresses ?? []
+    }
+
+    private var systemProxyToggleDisabled: Bool {
+        !(appModel.systemProxyStatus?.supported ?? false) || appModel.isTogglingSystemProxy
+    }
+
+    private var systemProxyEnabledByBifrost: Bool {
+        guard let status = appModel.systemProxyStatus else {
+            return false
+        }
+        return status.enabled && status.managedByBifrost != false
+    }
+
+    private var systemProxyStatusTitle: String {
+        guard let status = appModel.systemProxyStatus else {
+            return "读取中"
+        }
+        guard status.supported else {
+            return "不支持"
+        }
+        if status.enabled && status.managedByBifrost == false {
+            return "被其他代理占用"
+        }
+        if status.configuredEnabled == true && !systemProxyEnabledByBifrost {
+            return "已配置待接管"
+        }
+        return systemProxyEnabledByBifrost ? "已接管" : "未接管"
+    }
+
+    private var systemProxyStatusColor: Color {
+        guard let status = appModel.systemProxyStatus else {
+            return .secondary
+        }
+        if status.enabled && status.managedByBifrost == false {
+            return .orange
+        }
+        if status.configuredEnabled == true && !systemProxyEnabledByBifrost {
+            return .orange
+        }
+        return systemProxyEnabledByBifrost ? .green : .secondary
+    }
+
+    private var systemProxySubtitle: String {
+        if let info = appModel.proxyAddressInfo,
+           let preferred = info.addresses.first(where: \.isPreferred) ?? info.addresses.first {
+            return preferred.address
+        }
+        if let status = appModel.systemProxyStatus,
+           let host = status.host,
+           let port = status.port {
+            return "\(host):\(port)"
+        }
+        return appModel.adminHostPortLabel
+    }
+
+    private var launchdEnabled: Bool {
+        guard let launchd = appModel.systemProxyLaunchdStatus else {
+            return false
+        }
+        return launchd.installed && launchd.loaded && launchd.needsUpgrade != true
+    }
+
+    private var launchdToggleDisabled: Bool {
+        !(appModel.systemProxyLaunchdStatus?.supported ?? false) || appModel.isTogglingSystemProxyLaunchd
+    }
+
+    private var launchdDetail: String {
+        guard let launchd = appModel.systemProxyLaunchdStatus else {
+            return "读取中"
+        }
+        if launchd.needsUpgrade == true {
+            return launchd.needsUpgradeReason ?? launchd.message ?? "清理组件需要升级。"
+        }
+        return launchd.message ?? "崩溃恢复和重启后恢复 Bifrost 管理的系统代理设置。"
+    }
+
+    private var cliProxyDetail: String {
+        guard let cli = appModel.cliProxyStatus else {
+            return "读取中"
+        }
+        let shell = cli.shell ?? "-"
+        let files = cli.configFiles.prefix(2).map { URL(fileURLWithPath: $0).lastPathComponent }.joined(separator: ", ")
+        return "Shell: \(shell) · Files: \(files.isEmpty ? "-" : files)"
+    }
+
+    private var recentlyCopied: Bool {
+        guard let copiedAt else {
+            return false
+        }
+        return Date().timeIntervalSince(copiedAt) < 3
+    }
+
+    private func copyProxyAddress(_ address: String) {
+        appModel.copyToPasteboard(address)
+        copiedAddress = address
+        copiedAt = Date()
+    }
+}
+
+private struct ProxyAddressCopyRow: View {
+    let title: String
+    let address: String
+    let isPreferred: Bool
+    let isCopied: Bool
+    let onCopy: () -> Void
+
+    var body: some View {
+        Button(action: onCopy) {
+            HStack(spacing: 8) {
+                Image(systemName: isPreferred ? "star.fill" : "network")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isPreferred ? Color.yellow : Color.secondary)
+                    .frame(width: 14)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                    Text(address)
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Label(isCopied ? "已复制" : "复制", systemImage: isCopied ? "checkmark" : "doc.on.doc")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(isCopied ? Color.green : Color.secondary)
+                    .labelStyle(.titleAndIcon)
+            }
+            .padding(.vertical, 7)
+            .padding(.horizontal, 9)
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct SystemProxyOptionToggleRow: View {
+    let title: String
+    let detail: String
+    let isOn: Bool
+    let isDisabled: Bool
+    let onToggle: (Bool) -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            Toggle("", isOn: Binding(get: { isOn }, set: onToggle))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .disabled(isDisabled)
+        }
+    }
+}
+
+private struct SystemProxyOptionStatusRow: View {
+    let title: String
+    let detail: String
+    let status: String
+    let color: Color
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 10) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(detail)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            StatusPill(title: status, color: color)
+        }
+    }
+}
+
 private struct TlsInterceptionCard: View {
     @EnvironmentObject private var appModel: AppModel
     @State private var editingKind: TlsListKind?
@@ -796,12 +1437,12 @@ private struct TlsInterceptionCard: View {
                 HStack(alignment: .top) {
                     NativeCardHeader(
                         title: "TLS 解密",
-                        subtitle: "按应用、域名和 IP 控制解包范围"
+                        subtitle: "打开为默认解包，关闭为白名单解包"
                     )
                     Spacer()
                     StatusPill(
-                        title: appModel.tlsConfig?.enableTlsInterception == true ? "已开启" : "已关闭",
-                        color: appModel.tlsConfig?.enableTlsInterception == true ? .green : .secondary
+                        title: tlsModeTitle,
+                        color: tlsModeColor
                     )
                     Toggle("", isOn: Binding(
                         get: { appModel.tlsConfig?.enableTlsInterception ?? false },
@@ -846,6 +1487,20 @@ private struct TlsInterceptionCard: View {
                 }
             }
         }
+    }
+
+    private var tlsModeTitle: String {
+        guard let config = appModel.tlsConfig else {
+            return "读取中"
+        }
+        return config.enableTlsInterception ? "默认解包" : "白名单解包"
+    }
+
+    private var tlsModeColor: Color {
+        guard let config = appModel.tlsConfig else {
+            return .secondary
+        }
+        return config.enableTlsInterception ? .green : .blue
     }
 }
 
@@ -1031,6 +1686,7 @@ private struct TlsListEditorSheet: View {
 }
 
 private struct SyncControlCard: View {
+    @EnvironmentObject private var appModel: AppModel
     @ObservedObject var model: OverviewControlModel
 
     var body: some View {
@@ -1044,7 +1700,7 @@ private struct SyncControlCard: View {
                     Spacer()
                     Toggle("", isOn: Binding(
                         get: { model.syncStatus?.enabled ?? false },
-                        set: { enabled in Task { await model.setSyncEnabled(enabled) } }
+                        set: { enabled in Task { await model.setSyncEnabled(enabled); await appModel.refreshSyncStatus() } }
                     ))
                     .labelsHidden()
                     .toggleStyle(.switch)
@@ -1069,7 +1725,7 @@ private struct SyncControlCard: View {
             )
             Toggle("自动同步", isOn: Binding(
                 get: { model.syncStatus?.autoSync ?? false },
-                set: { enabled in Task { await model.setAutoSyncEnabled(enabled) } }
+                set: { enabled in Task { await model.setAutoSyncEnabled(enabled); await appModel.refreshSyncStatus() } }
             ))
             .toggleStyle(.switch)
             .font(.system(size: 12))
@@ -1082,6 +1738,7 @@ private struct SyncControlCard: View {
                     } else {
                         await model.openSyncLogin()
                     }
+                    await appModel.refreshSyncStatus()
                 }
             }
             .buttonStyle(.borderless)
@@ -1378,10 +2035,18 @@ private struct MobileConnectionCheckCard: View {
             }
 
             if let devices = model.trustProbeSession?.devices, !devices.isEmpty {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("扫码设备")
-                        .font(.system(size: 13, weight: .semibold))
-                    ForEach(devices.prefix(3)) { device in
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(spacing: 6) {
+                        Text("扫码设备")
+                            .font(.system(size: 13, weight: .semibold))
+                        Text("\(devices.count)")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary.opacity(0.7), in: Capsule())
+                    }
+                    ForEach(devices.prefix(4)) { device in
                         TrustProbeDeviceRow(device: device)
                     }
                 }
@@ -1389,6 +2054,13 @@ private struct MobileConnectionCheckCard: View {
                 Text("扫码后会在这里显示正在连接的设备。")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
+            }
+
+            if let session = model.trustProbeSession,
+               !session.proxyConfigured,
+               let message = session.proxyConfigurationMessage,
+               !message.isEmpty {
+                TrustProbeMessageRow(symbol: "exclamationmark.triangle.fill", tint: .orange, message: message)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1574,21 +2246,141 @@ private struct TrustProbeDeviceRow: View {
     let device: TrustProbeDevice
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .top, spacing: 8) {
             Circle()
                 .fill(device.tlsTrusted ? Color.green : (device.networkReachable ? Color.blue : Color.orange))
                 .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(device.platformHint ?? device.clientIP ?? device.deviceID)
-                    .font(.system(size: 11, weight: .medium))
-                    .lineLimit(1)
-                Text(device.proxyConfigurationMessage ?? device.lastError ?? device.status)
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                .padding(.top, 5)
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(spacing: 6) {
+                    Text(shortDeviceID)
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .lineLimit(1)
+                    if let platform = device.platformHint, !platform.isEmpty {
+                        Text(platform)
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(.quaternary.opacity(0.65), in: Capsule())
+                    }
+                    if let ip = device.clientIP, !ip.isEmpty {
+                        Text(ip)
+                            .font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    Text(formatProbeLastSeen(device.lastSeen))
+                        .font(.system(size: 10))
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(1)
+                }
+
+                HStack(spacing: 5) {
+                    TrustProbeDeviceStatusTag(title: device.opened ? "已打开" : "等待打开", color: device.opened ? .green : .gray)
+                    TrustProbeDeviceStatusTag(title: device.networkReachable ? "网络可达" : "网络待检", color: device.networkReachable ? .green : .gray)
+                    TrustProbeDeviceStatusTag(title: device.tlsTrusted ? "证书可信" : tlsPendingTitle, color: tlsStatusColor)
+                    TrustProbeDeviceStatusTag(title: proxyAccessTitle, color: proxyAccessColor)
+                    TrustProbeDeviceStatusTag(title: device.proxyConfigured ? "代理已配置" : proxyConfiguredTitle, color: device.proxyConfigured ? .green : proxyConfiguredColor)
+                }
+
+                if let message = device.lastError ?? device.proxyConfigurationMessage ?? device.proxyAccessMessage,
+                   !message.isEmpty {
+                    Text(message)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
+
+    private var shortDeviceID: String {
+        guard device.deviceID.count > 10 else {
+            return device.deviceID
+        }
+        return String(device.deviceID.prefix(8))
+    }
+
+    private var tlsPendingTitle: String {
+        device.status == "tls_failed" ? "证书失败" : "证书待检"
+    }
+
+    private var tlsStatusColor: Color {
+        if device.tlsTrusted {
+            return .green
+        }
+        if device.status == "tls_failed" {
+            return .red
+        }
+        return .gray
+    }
+
+    private var proxyAccessTitle: String {
+        guard let status = device.proxyAccessStatus, !status.isEmpty else {
+            return "授权待检"
+        }
+        return status == "allowed" ? "授权通过" : "授权 \(status)"
+    }
+
+    private var proxyAccessColor: Color {
+        if device.proxyAccessAllowed == true {
+            return .green
+        }
+        return device.proxyAccessStatus == "pending" ? .orange : .gray
+    }
+
+    private var proxyConfiguredTitle: String {
+        device.proxyConfigurationMessage?.isEmpty == false ? "代理缺失" : "代理待检"
+    }
+
+    private var proxyConfiguredColor: Color {
+        device.proxyConfigurationMessage?.isEmpty == false ? .red : .gray
+    }
+}
+
+private struct TrustProbeDeviceStatusTag: View {
+    let title: String
+    let color: Color
+
+    var body: some View {
+        Text(title)
+            .font(.system(size: 9, weight: .medium))
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize(horizontal: true, vertical: false)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(color.opacity(0.10), in: Capsule())
+    }
+}
+
+private struct TrustProbeMessageRow: View {
+    let symbol: String
+    let tint: Color
+    let message: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: symbol)
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(tint)
+                .padding(.top, 1)
+            Text(message)
+                .font(.system(size: 11))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+}
+
+private func formatProbeLastSeen(_ value: String) -> String {
+    if let date = ISO8601DateFormatter().date(from: value) {
+        return date.formatted(date: .omitted, time: .standard)
+    }
+    return value
 }
 
 private struct OverviewToggleCard: View {
@@ -1617,8 +2409,18 @@ private struct OverviewToggleCard: View {
     }
 }
 
-private struct ActivityBars: View {
+private struct ActivityBars: View, Equatable {
     let rows: [(String, Int)]
+
+    static func == (lhs: ActivityBars, rhs: ActivityBars) -> Bool {
+        guard lhs.rows.count == rhs.rows.count else {
+            return false
+        }
+        for index in lhs.rows.indices where lhs.rows[index].0 != rhs.rows[index].0 || lhs.rows[index].1 != rhs.rows[index].1 {
+            return false
+        }
+        return true
+    }
 
     var body: some View {
         let maxValue = max(rows.map(\.1).max() ?? 1, 1)
@@ -1694,8 +2496,19 @@ private func formatBytes(_ value: Int?) -> String {
 }
 
 private func formatBytes(_ value: Int) -> String {
-    let formatter = ByteCountFormatter()
-    formatter.allowedUnits = [.useBytes, .useKB, .useMB, .useGB]
-    formatter.countStyle = .file
-    return formatter.string(fromByteCount: Int64(max(value, 0)))
+    let bytes = max(value, 0)
+    if bytes < 1024 {
+        return "\(bytes) B"
+    }
+    let units = ["KB", "MB", "GB", "TB"]
+    var scaled = Double(bytes) / 1024
+    var unitIndex = 0
+    while scaled >= 1024, unitIndex < units.count - 1 {
+        scaled /= 1024
+        unitIndex += 1
+    }
+    if scaled >= 100 {
+        return String(format: "%.0f %@", scaled, units[unitIndex])
+    }
+    return String(format: "%.1f %@", scaled, units[unitIndex])
 }
