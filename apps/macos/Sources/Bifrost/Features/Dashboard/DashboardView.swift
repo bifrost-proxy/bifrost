@@ -12,46 +12,7 @@ struct ActivityView: View {
 
     var body: some View {
         NativePageScaffold(title: "活动") {
-            LazyVGrid(columns: [
-                GridItem(.adaptive(minimum: 210, maximum: 360), spacing: 18, alignment: .topLeading)
-            ], alignment: .leading, spacing: 18) {
-                NativeMetricCard(
-                    title: "活动连接",
-                    value: "\(metrics?.activeConnections ?? 0)",
-                    caption: "\(appModel.activityClientAppCounts.count) 个应用 · \(appModel.activityClientIpCounts.count) 个 IP",
-                    tint: .orange
-                )
-                NativeMetricCard(
-                    title: "上传",
-                    value: formatRate(metrics?.bytesSentRate),
-                    caption: formatBytes(metrics?.bytesSent),
-                    tint: .indigo
-                )
-                NativeMetricCard(
-                    title: "下载",
-                    value: formatRate(metrics?.bytesReceivedRate),
-                    caption: formatBytes(metrics?.bytesReceived),
-                    tint: .cyan
-                )
-                NativeMetricCard(
-                    title: "请求",
-                    value: "\(metrics?.totalRequests ?? appModel.trafficRecords.count)",
-                    caption: qpsText,
-                    tint: .green
-                )
-                NativeMetricCard(
-                    title: "规则",
-                    value: rulesSummary,
-                    caption: "当前规则集",
-                    tint: .purple
-                )
-                NativeMetricCard(
-                    title: "服务",
-                    value: sidecarStatusText,
-                    caption: appModel.adminHostPortLabel,
-                    tint: .blue
-                )
-            }
+            activityMetricGrid
 
             NativeCard {
                 VStack(alignment: .leading, spacing: 14) {
@@ -67,6 +28,70 @@ struct ActivityView: View {
                 }
             }
         }
+    }
+
+    private var activityMetricGrid: some View {
+        ViewThatFits(in: .horizontal) {
+            activityMetricGrid(columnCount: 6)
+            activityMetricGrid(columnCount: 5)
+            activityMetricGrid(columnCount: 4)
+            activityMetricGrid(columnCount: 3)
+            activityMetricGrid(columnCount: 2)
+            activityMetricGrid(columnCount: 1)
+        }
+    }
+
+    private func activityMetricGrid(columnCount: Int) -> some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(minimum: 150), spacing: 18, alignment: .topLeading),
+                count: columnCount
+            ),
+            alignment: .leading,
+            spacing: 18
+        ) {
+            activityMetricCards
+        }
+    }
+
+    @ViewBuilder
+    private var activityMetricCards: some View {
+        NativeMetricCard(
+            title: "活动连接",
+            value: "\(metrics?.activeConnections ?? 0)",
+            caption: "\(appModel.activityClientAppCounts.count) 个应用 · \(appModel.activityClientIpCounts.count) 个 IP",
+            tint: .orange
+        )
+        NativeMetricCard(
+            title: "上传",
+            value: formatRate(metrics?.bytesSentRate),
+            caption: formatBytes(metrics?.bytesSent),
+            tint: .indigo
+        )
+        NativeMetricCard(
+            title: "下载",
+            value: formatRate(metrics?.bytesReceivedRate),
+            caption: formatBytes(metrics?.bytesReceived),
+            tint: .cyan
+        )
+        NativeMetricCard(
+            title: "请求",
+            value: "\(metrics?.totalRequests ?? appModel.trafficRecords.count)",
+            caption: qpsText,
+            tint: .green
+        )
+        NativeMetricCard(
+            title: "规则",
+            value: rulesSummary,
+            caption: "当前规则集",
+            tint: .purple
+        )
+        NativeMetricCard(
+            title: "服务",
+            value: sidecarStatusText,
+            caption: appModel.adminHostPortLabel,
+            tint: .blue
+        )
     }
 
     private var qpsText: String {
@@ -104,37 +129,55 @@ struct DashboardView: View {
 
     var body: some View {
         NativePageScaffold(title: "概览") {
-            LazyVGrid(columns: [
-                GridItem(.adaptive(minimum: 260, maximum: 560), spacing: 18, alignment: .topLeading)
-            ], alignment: .leading, spacing: 18) {
-                OverviewToggleCard(
-                    title: "系统代理",
-                    subtitle: systemProxySubtitle,
-                    status: appModel.systemProxyStatus?.enabled == true ? "已接管" : "未接管",
-                    tint: appModel.systemProxyStatus?.enabled == true ? .green : .orange,
-                    isOn: appModel.systemProxyStatus?.enabled ?? false,
-                    isDisabled: !(appModel.systemProxyStatus?.supported ?? false) || appModel.isTogglingSystemProxy
-                ) { enabled in
-                    Task { await appModel.setSystemProxyEnabled(enabled) }
-                }
-
-                TlsInterceptionCard()
-            }
+            overviewControlGrid
 
             RemoteInvokeCard(model: model)
-
-            LazyVGrid(columns: [
-                GridItem(.adaptive(minimum: 260, maximum: 560), spacing: 18, alignment: .topLeading)
-            ], alignment: .leading, spacing: 18) {
-                SyncControlCard(model: model)
-                CertificateManagementCard(model: model)
-            }
 
             MobileConnectionCheckCard(model: model)
         }
         .task(id: appModel.adminURL) {
             await model.configure(baseURL: appModel.adminURL)
         }
+    }
+
+    private var overviewControlGrid: some View {
+        ViewThatFits(in: .horizontal) {
+            overviewControlGrid(columnCount: 4)
+            overviewControlGrid(columnCount: 3)
+            overviewControlGrid(columnCount: 2)
+            overviewControlGrid(columnCount: 1)
+        }
+    }
+
+    private func overviewControlGrid(columnCount: Int) -> some View {
+        LazyVGrid(
+            columns: Array(
+                repeating: GridItem(.flexible(minimum: 220), spacing: 18, alignment: .topLeading),
+                count: columnCount
+            ),
+            alignment: .leading,
+            spacing: 18
+        ) {
+            overviewControlCards
+        }
+    }
+
+    @ViewBuilder
+    private var overviewControlCards: some View {
+        OverviewToggleCard(
+            title: "系统代理",
+            subtitle: systemProxySubtitle,
+            status: appModel.systemProxyStatus?.enabled == true ? "已接管" : "未接管",
+            tint: appModel.systemProxyStatus?.enabled == true ? .green : .orange,
+            isOn: appModel.systemProxyStatus?.enabled ?? false,
+            isDisabled: !(appModel.systemProxyStatus?.supported ?? false) || appModel.isTogglingSystemProxy
+        ) { enabled in
+            Task { await appModel.setSystemProxyEnabled(enabled) }
+        }
+
+        TlsInterceptionCard()
+        SyncControlCard(model: model)
+        CertificateManagementCard(model: model)
     }
 
     private var systemProxySubtitle: String {
@@ -213,7 +256,10 @@ private final class OverviewControlModel: ObservableObject {
     @Published var remoteInvokeCalls: CallsListResponse?
     @Published var remoteInvokeSshKey: RemoteInvokeSshKeyRecord?
     @Published var copiedSshKeyAt: Date?
+    @Published var copiedPairCodeAt: Date?
     @Published var copiedProbeURLAt: Date?
+    @Published var syncRemoteBaseURLDraft = ""
+    @Published var isEditingSyncRemoteBaseURL = false
     @Published var isLoading = false
     @Published var isMutating = false
     @Published var errorMessage: String?
@@ -241,7 +287,7 @@ private final class OverviewControlModel: ObservableObject {
             certInfo = try await cert
             mobileDevices = try await mobile
             proxyAddressInfo = try await proxyAddress
-            syncStatus = try await sync
+            applySyncStatus(try await sync)
             remoteInvokeStatus = try await remote
             remoteInvokeGrants = try await grants
             remoteInvokeCalls = try await calls
@@ -265,6 +311,22 @@ private final class OverviewControlModel: ObservableObject {
             self.remoteInvokeGrants = try await client.fetchRemoteInvokeGrants()
             self.remoteInvokeCalls = try await client.fetchRemoteInvokeCalls(limit: 12)
         }
+    }
+
+    func refreshRemotePairCode() async {
+        await mutate {
+            let client = try BifrostClient(baseURL: self.baseURL)
+            _ = try await client.refreshPairCode()
+            self.remoteInvokeStatus = try await client.fetchRemoteInvokeStatus()
+        }
+    }
+
+    func copyRemotePairCode() {
+        guard let pairCode = remoteInvokeStatus?.discoverySession?.pairCode else {
+            return
+        }
+        copyToPasteboard(pairCode)
+        copiedPairCodeAt = Date()
     }
 
     func createRemoteInvokeSshKey() async {
@@ -293,33 +355,66 @@ private final class OverviewControlModel: ObservableObject {
 
     func setSyncEnabled(_ enabled: Bool) async {
         await mutate {
-            self.syncStatus = try await BifrostClient(baseURL: self.baseURL)
+            let status = try await BifrostClient(baseURL: self.baseURL)
                 .updateSyncConfig(UpdateSyncConfigRequest(enabled: enabled))
+            self.applySyncStatus(status)
         }
     }
 
     func setAutoSyncEnabled(_ enabled: Bool) async {
         await mutate {
-            self.syncStatus = try await BifrostClient(baseURL: self.baseURL)
+            let status = try await BifrostClient(baseURL: self.baseURL)
                 .updateSyncConfig(UpdateSyncConfigRequest(autoSync: enabled))
+            self.applySyncStatus(status)
         }
     }
 
     func openSyncLogin() async {
         await mutate {
-            self.syncStatus = try await BifrostClient(baseURL: self.baseURL).openSyncLogin()
+            self.applySyncStatus(try await BifrostClient(baseURL: self.baseURL).openSyncLogin())
         }
     }
 
     func logoutSync() async {
         await mutate {
-            self.syncStatus = try await BifrostClient(baseURL: self.baseURL).logoutSyncSession()
+            self.applySyncStatus(try await BifrostClient(baseURL: self.baseURL).logoutSyncSession())
         }
     }
 
     func runSyncNow() async {
         await mutate {
-            self.syncStatus = try await BifrostClient(baseURL: self.baseURL).runSyncNow()
+            self.applySyncStatus(try await BifrostClient(baseURL: self.baseURL).runSyncNow())
+        }
+    }
+
+    func handleSyncRemoteBaseURLClick() async {
+        guard syncStatus != nil else {
+            return
+        }
+        if syncStatus?.hasSession == true {
+            beginSyncRemoteBaseURLEdit()
+        } else {
+            await openSyncLogin()
+        }
+    }
+
+    func beginSyncRemoteBaseURLEdit() {
+        syncRemoteBaseURLDraft = syncStatus?.remoteBaseURL ?? syncRemoteBaseURLDraft
+        isEditingSyncRemoteBaseURL = true
+    }
+
+    func cancelSyncRemoteBaseURLEdit() {
+        syncRemoteBaseURLDraft = syncStatus?.remoteBaseURL ?? ""
+        isEditingSyncRemoteBaseURL = false
+    }
+
+    func saveSyncRemoteBaseURL() async {
+        let trimmed = syncRemoteBaseURLDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        await mutate {
+            let status = try await BifrostClient(baseURL: self.baseURL)
+                .updateSyncConfig(UpdateSyncConfigRequest(remoteBaseURL: trimmed))
+            self.applySyncStatus(status, forceDraft: true)
+            self.isEditingSyncRemoteBaseURL = false
         }
     }
 
@@ -386,6 +481,13 @@ private final class OverviewControlModel: ObservableObject {
             }
         }
         trustProbeSession = try await client.createTrustProbeSession(host: host, ttlSeconds: 600)
+    }
+
+    private func applySyncStatus(_ status: SyncStatus, forceDraft: Bool = false) {
+        syncStatus = status
+        if forceDraft || !isEditingSyncRemoteBaseURL {
+            syncRemoteBaseURLDraft = status.remoteBaseURL
+        }
     }
 
     private func copyToPasteboard(_ value: String) {
@@ -456,6 +558,10 @@ private struct RemoteInvokeCard: View {
                     .labelsHidden()
                     .toggleStyle(.switch)
                     .disabled(model.remoteInvokeStatus == nil || model.isMutating)
+                }
+
+                if let session = model.remoteInvokeStatus?.discoverySession {
+                    RemoteDiscoveryCodeStrip(session: session, model: model)
                 }
 
                 AdaptiveFactGrid(minimum: 126) {
@@ -595,6 +701,88 @@ private struct RemoteInvokeCard: View {
             return false
         }
         return true
+    }
+}
+
+private struct RemoteDiscoveryCodeStrip: View {
+    let session: DiscoverySession
+    @ObservedObject var model: OverviewControlModel
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 1)) { context in
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("授权码")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Button {
+                        model.copyRemotePairCode()
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(session.pairCode)
+                                .font(.system(size: 28, weight: .semibold, design: .monospaced))
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 13, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("复制授权码")
+                }
+
+                if pairCodeRecentlyCopied {
+                    Text("已复制")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 12)
+
+                VStack(alignment: .trailing, spacing: 6) {
+                    Text(remainingText(now: context.date))
+                        .font(.system(size: 12, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(remainingSeconds(now: context.date) > 0 ? Color.secondary : Color.orange)
+                    Button {
+                        Task { await model.refreshRemotePairCode() }
+                    } label: {
+                        Label("重置", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isMutating)
+                }
+            }
+            .padding(.vertical, 12)
+            .padding(.horizontal, 14)
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+        }
+    }
+
+    private var pairCodeRecentlyCopied: Bool {
+        guard let copiedAt = model.copiedPairCodeAt else {
+            return false
+        }
+        return Date().timeIntervalSince(copiedAt) < 3
+    }
+
+    private func remainingText(now: Date) -> String {
+        let seconds = remainingSeconds(now: now)
+        guard seconds > 0 else {
+            return "已过期"
+        }
+        return String(format: "剩余 %02d:%02d", seconds / 60, seconds % 60)
+    }
+
+    private func remainingSeconds(now: Date) -> Int {
+        let expiresAt = normalizedDate(from: session.expiresAt)
+        return max(0, Int(ceil(expiresAt.timeIntervalSince(now))))
+    }
+
+    private func normalizedDate(from epoch: Double) -> Date {
+        if epoch > 1_000_000_000_000 {
+            return Date(timeIntervalSince1970: epoch / 1000)
+        }
+        return Date(timeIntervalSince1970: epoch)
     }
 }
 
@@ -851,7 +1039,7 @@ private struct SyncControlCard: View {
                 HStack {
                     NativeCardHeader(
                         title: "同步",
-                        subtitle: model.syncStatus?.user?.email ?? model.syncStatus?.remoteBaseURL ?? "读取中"
+                        subtitle: model.syncStatus?.user?.email ?? "规则与设置远端同步"
                     )
                     Spacer()
                     Toggle("", isOn: Binding(
@@ -862,6 +1050,7 @@ private struct SyncControlCard: View {
                     .toggleStyle(.switch)
                     .disabled(model.syncStatus == nil || model.isMutating)
                 }
+                SyncRemoteServiceRow(model: model)
                 ViewThatFits(in: .horizontal) {
                     syncControls
                     VStack(alignment: .leading, spacing: 10) {
@@ -902,6 +1091,102 @@ private struct SyncControlCard: View {
             .buttonStyle(.borderless)
             .disabled(model.syncStatus?.enabled != true || model.isMutating)
         }
+    }
+}
+
+private struct SyncRemoteServiceRow: View {
+    @ObservedObject var model: OverviewControlModel
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Group {
+            if model.isEditingSyncRemoteBaseURL {
+                editingRow
+            } else {
+                readRow
+            }
+        }
+        .animation(.snappy(duration: 0.18), value: model.isEditingSyncRemoteBaseURL)
+    }
+
+    private var readRow: some View {
+        Button {
+            Task { await model.handleSyncRemoteBaseURLClick() }
+        } label: {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("远端服务")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    Text(remoteBaseURLText)
+                        .font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+                Spacer(minLength: 8)
+                Label(isSignedIn ? "编辑" : "登录授权", systemImage: isSignedIn ? "pencil" : "person.crop.circle.badge.checkmark")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .labelStyle(.titleAndIcon)
+            }
+            .padding(.vertical, 9)
+            .padding(.horizontal, 11)
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .disabled(model.syncStatus == nil || model.isMutating)
+        .help(isSignedIn ? "编辑远端服务地址" : "登录并授权远端同步")
+    }
+
+    private var editingRow: some View {
+        HStack(spacing: 8) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text("远端服务")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                TextField("https://bifrost.example.com", text: $model.syncRemoteBaseURLDraft)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12, design: .monospaced))
+                    .focused($isFocused)
+                    .onSubmit {
+                        Task { await model.saveSyncRemoteBaseURL() }
+                    }
+            }
+            Button {
+                Task { await model.saveSyncRemoteBaseURL() }
+            } label: {
+                Image(systemName: "checkmark")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isMutating)
+            .help("保存远端服务地址")
+            Button {
+                model.cancelSyncRemoteBaseURLEdit()
+            } label: {
+                Image(systemName: "xmark")
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.isMutating)
+            .help("取消编辑")
+        }
+        .padding(.vertical, 8)
+        .padding(.horizontal, 11)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .onAppear {
+            isFocused = true
+        }
+    }
+
+    private var remoteBaseURLText: String {
+        guard let value = model.syncStatus?.remoteBaseURL, !value.isEmpty else {
+            return "未配置"
+        }
+        return value
+    }
+
+    private var isSignedIn: Bool {
+        model.syncStatus?.hasSession == true
     }
 }
 
@@ -959,12 +1244,18 @@ private struct CertificateSummarySection: View {
                 .lineLimit(1)
                 .truncationMode(.middle)
 
-            Button("安装本机 CA") {
-                Task { await model.installCertificate() }
+            if shouldShowInstallButton {
+                Button("安装本机 CA") {
+                    Task { await model.installCertificate() }
+                }
+                .buttonStyle(.bordered)
+                .disabled(model.certInfo == nil || model.certInfo?.available == false || model.isMutating)
             }
-            .buttonStyle(.bordered)
-            .disabled(model.certInfo == nil || model.certInfo?.available == false || model.isMutating)
         }
+    }
+
+    private var shouldShowInstallButton: Bool {
+        model.certInfo?.trusted != true
     }
 }
 

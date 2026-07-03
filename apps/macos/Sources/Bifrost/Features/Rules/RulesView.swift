@@ -13,12 +13,9 @@ struct RulesView: View {
     @State private var inlineRenameRuleName: String?
     @State private var inlineRenameDraft = ""
     @State private var isCommittingInlineRename = false
-    @State private var ruleListWidth: CGFloat = 300
-    @State private var ruleListResizeStartWidth: CGFloat?
     @FocusState private var inlineRenameFocused: Bool
 
-    private let ruleListMinWidth: CGFloat = 220
-    private let ruleListMaxWidth: CGFloat = 300
+    private let ruleListWidth: CGFloat = 300
 
     private var filteredRules: [RuleSummary] {
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
@@ -44,14 +41,6 @@ struct RulesView: View {
         appModel.isDefaultRule(appModel.selectedRuleDetail?.name ?? appModel.selectedRuleName)
     }
 
-    private var clampedRuleListWidth: CGFloat {
-        clampRuleListWidth(ruleListWidth)
-    }
-
-    private func clampRuleListWidth(_ width: CGFloat) -> CGFloat {
-        min(max(width, ruleListMinWidth), ruleListMaxWidth)
-    }
-
     var body: some View {
         NativePageScaffold(title: "规则", contentFillsAvailableHeight: true) {
             Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
@@ -69,31 +58,12 @@ struct RulesView: View {
             .buttonStyle(.borderless)
             .font(.system(size: 13, weight: .medium))
         } content: {
-            HStack(alignment: .top, spacing: 10) {
+            HStack(alignment: .top, spacing: 5) {
                 NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     listPane
                 }
-                .frame(width: clampedRuleListWidth)
+                .frame(width: ruleListWidth)
                 .frame(maxHeight: .infinity)
-
-                RuleListResizeHandle()
-                    .frame(width: 10)
-                    .frame(maxHeight: .infinity)
-                    .gesture(
-                        DragGesture(minimumDistance: 0)
-                            .onChanged { value in
-                                let startWidth = ruleListResizeStartWidth ?? clampedRuleListWidth
-                                if ruleListResizeStartWidth == nil {
-                                    ruleListResizeStartWidth = clampedRuleListWidth
-                                }
-                                ruleListWidth = clampRuleListWidth(startWidth + value.translation.width)
-                            }
-                            .onEnded { _ in
-                                ruleListWidth = clampedRuleListWidth
-                                ruleListResizeStartWidth = nil
-                            }
-                    )
-                    .help("Drag to resize rule list")
 
                 NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     detailPane
@@ -507,34 +477,6 @@ private enum RuleAutoSaveState {
     case pending
     case saving
     case failed
-}
-
-private struct RuleListResizeHandle: View {
-    @State private var isHovering = false
-
-    var body: some View {
-        Rectangle()
-            .fill(Color.clear)
-            .overlay {
-                Capsule()
-                    .fill(isHovering ? Color.accentColor.opacity(0.42) : AppSurface.cardBorder.opacity(0.9))
-                    .frame(width: isHovering ? 3 : 1, height: 72)
-            }
-            .contentShape(Rectangle())
-            .onHover { hovering in
-                isHovering = hovering
-                if hovering {
-                    NSCursor.resizeLeftRight.push()
-                } else {
-                    NSCursor.pop()
-                }
-            }
-            .onDisappear {
-                if isHovering {
-                    NSCursor.pop()
-                }
-            }
-    }
 }
 
 private struct RulesEmptyStateView: View {
