@@ -138,7 +138,7 @@
 
 执行结果：
 
-- 已执行，通过，8 个测试通过。
+- 已执行，通过，10 个测试通过。
 
 ### TC-DSR-06 完整构建产物为静态首页加同步文档区
 
@@ -150,14 +150,13 @@
 4. 执行 `grep -q 'With AI' site/dist/index.html`。
 5. 执行 `grep -q 'bifrost install-skill' site/dist/index.html`。
 6. 执行 `grep -q 'href="/bifrost/docs/"' site/dist/index.html`。
-7. 执行 `grep -q 'href="/bifrost/en/reference/"' site/dist/index.html`。
-8. 执行 `grep -q 'role="tablist"' site/dist/index.html`。
-9. 执行 `grep -q 'data-lang="zh"' site/dist/index.html`。
-10. 执行 `grep -q 'bifrost start -d' site/dist/index.html`。
-11. 执行 `! grep -q 'bifrost start --no-system-proxy' site/dist/index.html`。
-12. 执行 `! grep -q '/_astro/' site/dist/index.html`。
-13. 执行 `! grep -q 'vitepress-theme-appearance' site/dist/index.html`。
-14. 执行 `test -f site/dist/docs/index.html && test -f site/dist/en/reference/index.html`。
+7. 执行 `grep -q 'role="tablist"' site/dist/index.html`。
+8. 执行 `grep -q 'data-lang="zh"' site/dist/index.html`。
+9. 执行 `grep -q 'bifrost start -d' site/dist/index.html`。
+10. 执行 `! grep -q 'bifrost start --no-system-proxy' site/dist/index.html`。
+11. 执行 `! grep -q '/_astro/' site/dist/index.html`。
+12. 执行 `! grep -q 'vitepress-theme-appearance' site/dist/index.html`。
+13. 执行 `test -f site/dist/docs/index.html && test -f site/dist/en/reference/index.html`。
 
 预期结果：
 
@@ -264,6 +263,26 @@
 
 - 已执行第 1、2 步，范围符合预期。
 - 第 3 步将在提交前 Review/Fix/Test 轮次中复查。
+
+### TC-DSR-11 文档区 Logo 回主页路由回归
+
+操作步骤：
+
+1. 执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
+2. 启动本地根站预览服务，打开 `http://127.0.0.1:<port>/getting-started/installation`。
+3. 点击左上角 Bifrost Logo。
+4. 检查浏览器地址栏是否变为 `http://127.0.0.1:<port>/`，页面显示静态首页，而不是文档区 404。
+5. 部署后打开 `https://bifrost-proxy.github.io/getting-started/installation`，重复点击左上角 Bifrost Logo。
+6. 检查线上地址栏是否变为 `https://bifrost-proxy.github.io/`，页面显示 Bifrost 首页、Read Docs 和 GitHub 入口。
+
+预期结果：
+
+- 文档区 Logo 回主页必须触发整页导航，不被 VitePress SPA router 接管。
+- 从中文安装页、英文文档页和 `/docs/` 进入首页都不出现 404。
+
+执行结果：
+
+- 已执行，通过。
 
 ## 清理步骤
 

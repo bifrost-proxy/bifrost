@@ -14,7 +14,7 @@
     "home:test": "node --test scripts/home-static.test.mjs",
     "home:verify": "node scripts/verify-home.mjs",
     "site:verify-links": "node scripts/verify-site-links.mjs",
-    "test": "node --test scripts/docs-sync-lib.test.mjs scripts/home-static.test.mjs",
+    "test": "node --test scripts/docs-sync-lib.test.mjs scripts/home-static.test.mjs scripts/docs-home-link.test.mjs",
     "dev": "node scripts/sync-docs.mjs && vitepress dev .",
     "build": "rm -rf dist && node scripts/sync-docs.mjs && node scripts/verify-docs-sync.mjs && vitepress build . && node scripts/write-redirects.mjs && node scripts/build-home.mjs && node scripts/verify-home.mjs && node scripts/verify-site-links.mjs",
     "preview": "pnpm run build && vitepress preview ."

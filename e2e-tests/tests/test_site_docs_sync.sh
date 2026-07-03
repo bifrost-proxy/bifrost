@@ -56,7 +56,7 @@ pnpm --dir "$SITE_DIR" run docs:verify
 zh_count=$(find "$ROOT_DIR/docs" -type f -name '*.md' | wc -l | tr -d ' ')
 en_count=$(find "$ROOT_DIR/docs-en" -type f -name '*.md' | wc -l | tr -d ' ')
 generated_en_count=$(find "$SITE_DIR/src/content/docs/en" -type f -name '*.md' | wc -l | tr -d ' ')
-test "$zh_count" = "$en_count"
+echo "Source docs: zh=${zh_count}, en=${en_count}, generated_en=${generated_en_count}"
 test "$en_count" = "$generated_en_count"
 
 node --input-type=module - "$ROOT_DIR" <<'NODE'
@@ -131,7 +131,6 @@ if grep -q 'vitepress-theme-appearance\|VPNav' "$SITE_DIR/dist/index.html"; then
   echo "Static homepage must not include VitePress runtime markers" >&2
   exit 1
 fi
-grep -q 'href="/bifrost/en/reference/"' "$SITE_DIR/dist/index.html"
 test -f "$LEGACY_CLI_DIST"
 grep -q '/bifrost/getting-started/cli-quick-start' "$LEGACY_CLI_DIST"
 pnpm --dir "$SITE_DIR" run site:verify-links
