@@ -703,7 +703,7 @@ async function openDevtoolsNetworkRow(adminPage, row, textPattern, label) {
   await row.waitFor({ timeout: 8000 });
   let lastError = null;
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    await dispatchVisibleClick(row, `${label}:${attempt}`);
+    await row.click({ force: true, timeout: 5000 });
     try {
       await Promise.any([
         adminPage.getByTestId('devtools-network-fallback-detail').getByText(textPattern).first().waitFor({ timeout: 5000 }),
