@@ -432,6 +432,11 @@ previous runtime settings."
         )]
         source: String,
     },
+    #[command(about = "Manage the native macOS app companion")]
+    NativeApp {
+        #[command(subcommand)]
+        action: NativeAppCommands,
+    },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {
         #[command(subcommand)]
@@ -774,6 +779,39 @@ previous runtime settings."
     Agent {
         #[command(subcommand)]
         action: AgentCommands,
+    },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum NativeAppCommands {
+    #[command(about = "Show native macOS app installation status")]
+    Status {
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Installation directory (default: /Applications)")]
+        install_dir: Option<PathBuf>,
+        #[arg(long, help = "Latest version to compare against")]
+        latest_version: Option<String>,
+        #[arg(long, default_value = "text", value_parser = ["text", "json"], help = "Output format")]
+        format: String,
+    },
+    #[command(about = "Install or update the native macOS app companion")]
+    Install {
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Local Bifrost.app bundle or dmg path")]
+        source: Option<PathBuf>,
+        #[arg(long, help = "Native app dmg download URL")]
+        url: Option<String>,
+        #[arg(
+            long,
+            help = "Latest version used to resolve the default release asset URL"
+        )]
+        latest_version: Option<String>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Installation directory (default: /Applications)")]
+        install_dir: Option<PathBuf>,
+        #[arg(long, help = "Print the planned install without copying files")]
+        dry_run: bool,
+        #[arg(long, help = "Open the app after installation")]
+        open: bool,
+        #[arg(short = 'y', long, help = "Confirm installation without prompting")]
+        yes: bool,
     },
 }
 

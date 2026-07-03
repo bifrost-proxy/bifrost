@@ -1,4 +1,5 @@
 import BifrostNativeCore
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -64,6 +65,8 @@ final class AppModel: ObservableObject {
     private var pollingTask: Task<Void, Never>?
     private var trafficDeltaFlushTask: Task<Void, Never>?
     private var trafficHistoryTask: Task<Void, Never>?
+    private var nativeUpdateTask: Task<Void, Never>?
+    private var promptedNativeUpdateVersions = Set<String>()
     private var pendingTrafficInserts: [TrafficRecordSummary] = []
     private var pendingTrafficUpdates: [TrafficRecordSummary] = []
     private var trafficServerTotal = 0
@@ -114,9 +117,90 @@ final class AppModel: ObservableObject {
             sidecarState = await sidecarManager.currentState()
             await refreshData()
             startRealtimeSync()
+            startNativeAppUpdateChecks()
         } catch {
             didEnsureService = false
             sidecarState = .failed(error.localizedDescription)
+        }
+    }
+
+    private func startNativeAppUpdateChecks() {
+        if nativeUpdateTask != nil {
+            return
+        }
+        if ProcessInfo.processInfo.environment["BIFROST_NATIVE_UPDATE_CHECK_DISABLED"] == "1" {
+            return
+        }
+        nativeUpdateTask = Task { [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled {
+                await self.checkNativeAppUpdate(forceRefresh: false)
+                let seconds = Self.nativeUpdateIntervalSeconds()
+                try? await Task.sleep(nanoseconds: UInt64(seconds) * 1_000_000_000)
+            }
+        }
+    }
+
+    private static func nativeUpdateIntervalSeconds() -> UInt64 {
+        if let raw = ProcessInfo.processInfo.environment["BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS"],
+           let value = UInt64(raw),
+           value >= 60 {
+            return value
+        }
+        return 6 * 60 * 60
+    }
+
+    private func checkNativeAppUpdate(forceRefresh: Bool) async {
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            let version = try await client.fetchVersionCheck(forceRefresh: forceRefresh)
+            guard version.hasUpdate, let latest = version.latestVersion else {
+                return
+            }
+            guard !promptedNativeUpdateVersions.contains(latest) else {
+                return
+            }
+            promptedNativeUpdateVersions.insert(latest)
+
+            let shouldInstall = await confirmNativeAppUpdate(latestVersion: latest)
+            guard shouldInstall else {
+                return
+            }
+            let install = try await client.installNativeApp()
+            await promptNativeAppRestart(
+                latestVersion: latest,
+                installedAppPath: install.status.installPath
+            )
+        } catch {
+            #if DEBUG
+            print("Native app update check failed: \(error.localizedDescription)")
+            #endif
+        }
+    }
+
+    private func confirmNativeAppUpdate(latestVersion: String) async -> Bool {
+        await MainActor.run {
+            let alert = NSAlert()
+            alert.messageText = "Bifrost Native App Update Available"
+            alert.informativeText = "Version \(latestVersion) is ready. Install it now?"
+            alert.addButton(withTitle: "Install")
+            alert.addButton(withTitle: "Later")
+            return alert.runModal() == .alertFirstButtonReturn
+        }
+    }
+
+    private func promptNativeAppRestart(latestVersion: String, installedAppPath: String) async {
+        await MainActor.run {
+            let alert = NSAlert()
+            alert.messageText = "Restart Bifrost Native App"
+            alert.informativeText = "Version \(latestVersion) has been installed. Restart the app to finish updating."
+            alert.addButton(withTitle: "Restart")
+            alert.addButton(withTitle: "Later")
+            if alert.runModal() == .alertFirstButtonReturn {
+                let appURL = URL(fileURLWithPath: installedAppPath)
+                NSWorkspace.shared.open(appURL)
+                NSApp.terminate(nil)
+            }
         }
     }
 

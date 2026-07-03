@@ -5,6 +5,7 @@ pub mod file_access;
 pub mod http_client;
 pub mod limits;
 pub mod logging;
+pub mod macos_native_app;
 pub mod matcher;
 pub mod panic_handler;
 pub mod process_alias;

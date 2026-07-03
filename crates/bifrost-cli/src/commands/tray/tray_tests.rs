@@ -202,6 +202,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
@@ -232,6 +234,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
@@ -530,6 +534,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23% | Memory 18.0 GB / 32.0 GB | Disk 59%".to_string(),
                 network: "Network: Up 1.5 MB/s | Down 512 KB/s".to_string(),
@@ -925,6 +931,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 20%".to_string(),
                 network: "Network: Up 0 B/s | Down 0 B/s".to_string(),
@@ -1228,6 +1236,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             #[cfg(target_os = "macos")]
             system_stats: None,
             #[cfg(target_os = "macos")]
@@ -1262,6 +1272,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             #[cfg(target_os = "macos")]
             system_stats: Some(SystemStatsMenuLines {
                 system: "System: CPU 23%".to_string(),
@@ -1331,6 +1343,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             #[cfg(target_os = "macos")]
             system_stats: None,
             #[cfg(target_os = "macos")]
@@ -1426,6 +1440,8 @@
             pending_action: None,
             bin_available: true,
             update_available: None,
+            native_app_installed: false,
+            native_app_needs_install: false,
             #[cfg(target_os = "macos")]
             system_stats: None,
             #[cfg(target_os = "macos")]

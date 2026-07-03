@@ -40,6 +40,46 @@
             "target": "BifrostMacCoreChecks",
             "configuration": "release",
             "preLaunchTask": "swift: Build Release BifrostMacCoreChecks (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:bifrost-macos-native-auto-update}/apps/macos",
+            "name": "Debug Bifrost (apps/macos)",
+            "target": "Bifrost",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug Bifrost (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:bifrost-macos-native-auto-update}/apps/macos",
+            "name": "Release Bifrost (apps/macos)",
+            "target": "Bifrost",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release Bifrost (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:bifrost-macos-native-auto-update}/apps/macos",
+            "name": "Debug BifrostNativeCoreChecks (apps/macos)",
+            "target": "BifrostNativeCoreChecks",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug BifrostNativeCoreChecks (apps/macos)"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:bifrost-macos-native-auto-update}/apps/macos",
+            "name": "Release BifrostNativeCoreChecks (apps/macos)",
+            "target": "BifrostNativeCoreChecks",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release BifrostNativeCoreChecks (apps/macos)"
         }
     ]
 }

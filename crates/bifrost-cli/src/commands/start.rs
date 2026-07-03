@@ -390,6 +390,47 @@ fn prompt_yes_no() -> bifrost_core::Result<bool> {
     Ok(false)
 }
 
+fn maybe_prompt_install_native_app() -> bifrost_core::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        if std::env::var_os("BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT").is_some()
+            || !io::stdin().is_terminal()
+            || !io::stdout().is_terminal()
+        {
+            return Ok(());
+        }
+
+        let install_dir = bifrost_core::macos_native_app::default_install_dir();
+        let status = bifrost_core::macos_native_app::status_for_install_dir(
+            &install_dir,
+            Some(env!("CARGO_PKG_VERSION")),
+        );
+        if !status.needs_install {
+            return Ok(());
+        }
+
+        println!();
+        println!("Bifrost Native App is not installed in /Applications.");
+        println!("Install it now? This uses the current CLI release asset and opens the app after installation. (y/n)");
+        if prompt_yes_no()? {
+            super::native_app::install_native_app(super::native_app::NativeAppInstallOptions {
+                source: None,
+                url: None,
+                latest_version: Some(env!("CARGO_PKG_VERSION").to_string()),
+                install_dir,
+                dry_run: false,
+                open_after_install: true,
+            })?;
+        } else {
+            println!(
+                "Skipped Native App installation. You can run `bifrost native-app install` later."
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn log_startup_phase(phase: &'static str, started_at: Instant) {
     tracing::info!(
         target: "bifrost_cli::startup",
@@ -1617,6 +1658,7 @@ pub fn run_start(
                 }
             }
             daemon_result?;
+            maybe_prompt_install_native_app()?;
         }
         #[cfg(windows)]
         {
@@ -1636,6 +1678,7 @@ pub fn run_start(
             ));
         }
     } else {
+        maybe_prompt_install_native_app()?;
         let foreground_result = run_foreground(
             proxy_config,
             parsed_rules,

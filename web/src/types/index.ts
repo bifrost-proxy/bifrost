@@ -817,3 +817,19 @@ export interface UpgradeProgress {
   error: string | null;
   updated_at: string;
 }
+
+export interface NativeAppStatus {
+  supported: boolean;
+  installed: boolean;
+  install_path: string;
+  installed_version: string | null;
+  latest_version: string | null;
+  needs_install: boolean;
+  download_url: string | null;
+  message: string;
+}
+
+export interface NativeAppInstallResponse {
+  accepted: boolean;
+  status: NativeAppStatus;
+}

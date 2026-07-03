@@ -10,6 +10,9 @@ use std::os::unix::process::CommandExt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 
+use bifrost_core::macos_native_app::{
+    default_install_dir, status_for_install_dir, MacosNativeAppStatus,
+};
 use bifrost_core::upgrade_progress::{
     is_stale, read_progress, write_progress, UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS,
 };
@@ -63,6 +66,14 @@ pub async fn handle_system(
         "/api/system/cli-install" => match method {
             Method::GET => get_cli_install_status().await,
             Method::POST => install_cli_from_desktop(req).await,
+            _ => method_not_allowed(),
+        },
+        "/api/system/native-app" => match method {
+            Method::GET => get_native_app_status(state).await,
+            _ => method_not_allowed(),
+        },
+        "/api/system/native-app/install" => match method {
+            Method::POST => start_native_app_install(state).await,
             _ => method_not_allowed(),
         },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
@@ -536,6 +547,60 @@ fn clear_macos_xattrs(path: &Path) {
         .status();
 }
 
+async fn get_native_app_status(state: SharedAdminState) -> Response<BoxBody> {
+    let latest = state
+        .version_checker
+        .check(false)
+        .await
+        .latest_version
+        .or_else(|| Some(env!("CARGO_PKG_VERSION").to_string()));
+    let status = native_app_status(latest.as_deref());
+    json_response(&status)
+}
+
+#[derive(Debug, serde::Serialize)]
+struct NativeAppInstallResponse {
+    accepted: bool,
+    status: MacosNativeAppStatus,
+}
+
+async fn start_native_app_install(state: SharedAdminState) -> Response<BoxBody> {
+    let latest = state
+        .version_checker
+        .check(false)
+        .await
+        .latest_version
+        .or_else(|| Some(env!("CARGO_PKG_VERSION").to_string()));
+    let status = native_app_status(latest.as_deref());
+    if !status.supported {
+        return error_response(StatusCode::CONFLICT, &status.message);
+    }
+    if status.installed && !status.needs_install {
+        return json_response(&NativeAppInstallResponse {
+            accepted: false,
+            status,
+        });
+    }
+    if let Err(error) = spawn_native_app_install(latest.as_deref()) {
+        warn!(error = %error, "[SYSTEM] failed to spawn native app install subprocess");
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to start native app installation",
+        );
+    }
+    json_response_with_status(
+        StatusCode::ACCEPTED,
+        &NativeAppInstallResponse {
+            accepted: true,
+            status,
+        },
+    )
+}
+
+fn native_app_status(latest_version: Option<&str>) -> MacosNativeAppStatus {
+    status_for_install_dir(&default_install_dir(), latest_version)
+}
+
 /// Normalize a progress snapshot for readers: a stale active record (no update
 /// within [`DEFAULT_STALE_SECS`]) is mapped to `Failed` so the UI never hangs on
 /// a crashed/abandoned upgrade process. Non-stale and terminal records pass
@@ -659,6 +724,60 @@ fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -
         }
     }
     args
+}
+
+fn spawn_native_app_install(latest_version: Option<&str>) -> std::io::Result<()> {
+    let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
+
+    let mut command = Command::new(&program);
+    command
+        .arg("native-app")
+        .arg("install")
+        .arg("-y")
+        .arg("--open");
+    if let Some(version) = latest_version {
+        command.arg("--latest-version").arg(version);
+    }
+    command
+        .stdin(Stdio::null())
+        .stdout(upgrade_log_stdio())
+        .stderr(upgrade_log_stdio());
+
+    #[cfg(unix)]
+    {
+        command.process_group(0);
+    }
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    }
+
+    let mut child = command.spawn()?;
+    let child_pid = child.id();
+    tracing::info!(
+        target: "bifrost_admin::system",
+        child_pid,
+        program = %program.display(),
+        latest_version = latest_version.unwrap_or(env!("CARGO_PKG_VERSION")),
+        "spawned native app install subprocess"
+    );
+    thread::spawn(move || match child.wait() {
+        Ok(status) => tracing::info!(
+            target: "bifrost_admin::system",
+            child_pid,
+            status = %status,
+            "native app install subprocess exited"
+        ),
+        Err(error) => tracing::warn!(
+            target: "bifrost_admin::system",
+            child_pid,
+            error = %error,
+            "failed to reap native app install subprocess"
+        ),
+    });
+    Ok(())
 }
 
 fn upgrade_log_stdio() -> Stdio {

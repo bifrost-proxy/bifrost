@@ -843,11 +843,164 @@
 - 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
 - 2026-07-03：执行源码检查命令，确认 `BifrostRuleLanguageService`、`BifrostRuleEditorView`、`BifrostRuleTextView`、`BifrostRuleHighlighter`、`BifrostRuleCompletionController`、`BifrostLineNumberRulerView`、`ruleEditorContext`、`refreshRuleEditorDynamicData`、`navigateFromRuleEditor` 均存在。
 
+### TC-MNA-30：CLI 可安装 Native App 到应用目录并查询状态
+
+**操作步骤：**
+1. 执行 shell E2E 回归脚本，使用临时安装目录而不是 `/Applications`：
+   ```bash
+   bash e2e-tests/tests/test_macos_native_app_install.sh
+   ```
+2. 单独验证 CLI dry-run 不写入目标目录：
+   ```bash
+   TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/bifrost-native-app-human.XXXXXX")"
+   mkdir -p "$TEST_ROOT/source/Bifrost.app/Contents" "$TEST_ROOT/install"
+   printf '<plist><dict><key>CFBundleShortVersionString</key><string>9.9.9</string></dict></plist>' \
+     > "$TEST_ROOT/source/Bifrost.app/Contents/Info.plist"
+   cargo run -p bifrost-cli --bin bifrost -- native-app install \
+     --source "$TEST_ROOT/source/Bifrost.app" \
+     --install-dir "$TEST_ROOT/install" \
+     --latest-version 9.9.9 \
+     --dry-run
+   test ! -e "$TEST_ROOT/install/Bifrost.app"
+   rm -rf "$TEST_ROOT"
+   ```
+
+**预期结果：**
+- `native-app install --dry-run` 输出 JSON，包含 `dry_run: true`、source、target 和 open_after_install。
+- 真实安装会把 `Bifrost.app` 拷贝到指定安装目录，并保留 Info.plist 版本号。
+- `native-app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
+- 用例只使用临时目录，不写入 `/Applications`，不启动系统代理，不打开 Sync 登录页。
+
+**执行记录：**
+- 2026-07-03：执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过，输出 `macOS native app install CLI E2E passed`，状态 JSON 包含 `installed: true`、`installed_version: "9.9.9"`、`needs_install: false`。
+- 2026-07-03：执行临时目录 dry-run 命令通过，输出 `{"dry_run":true,...,"target":".../install/Bifrost.app"}`，并确认目标 `Bifrost.app` 未创建。
+
+### TC-MNA-31：Admin API 暴露 Native App 状态与安装入口
+
+**操作步骤：**
+1. 执行 Rust 编译检查，确认 Admin 路由、CLI 子命令和共享状态模型类型一致：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo check -p bifrost-admin --all-targets
+   ```
+2. 检查 Admin 路由与安装子进程命令：
+   ```bash
+   rg -n '"/api/system/native-app"|get_native_app_status|start_native_app_install|native-app|install|-y|--open' \
+     crates/bifrost-admin/src/handlers/system.rs
+   ```
+
+**预期结果：**
+- `cargo check -p bifrost-admin --all-targets` 通过。
+- `GET /api/system/native-app` 使用 `status_for_install_dir` 返回当前安装状态、安装路径、已安装版本、最新版本和 `needs_install`。
+- `POST /api/system/native-app/install` 在 macOS 可安装状态下启动当前 `bifrost native-app install -y --open --latest-version <version>`，让 CLI 负责下载、替换、启动。
+- 非 macOS 或已安装最新版时，API 必须返回明确状态，不应误报已接受安装。
+
+**执行记录：**
+- 2026-07-03：执行 `SKIP_FRONTEND_BUILD=1 cargo check -p bifrost-admin --all-targets` 通过。
+- 2026-07-03：执行源码检查命令通过，确认存在 `/api/system/native-app`、`get_native_app_status`、`start_native_app_install`，安装子进程包含 `native-app install -y --open`。
+
+### TC-MNA-32：Web UI 弹出 Native App 安装提示并调用 Admin API
+
+**操作步骤：**
+1. 执行前端类型检查：
+   ```bash
+   pnpm --dir web exec tsc -b
+   ```
+2. 检查 Web UI 全局挂载点、API client 和安装按钮：
+   ```bash
+   rg -n 'NativeAppInstallPrompt|getNativeAppStatus|installNativeApp|native-app-install-button|bifrost-native-app-install-later' \
+     web/src/App.tsx web/src/api/nativeApp.ts web/src/components/NativeAppInstallPrompt/index.tsx
+   ```
+
+**预期结果：**
+- 前端 typecheck 通过。
+- Web UI 启动后会查询 `/system/native-app`；当 `supported=true` 且 `needs_install=true` 时弹出安装提示。
+- 用户点击安装按钮后调用 `/system/native-app/install`，Admin 接受后显示后台安装提示并刷新状态。
+- 用户点击 Later 只按当前 latest version 记录本地延后，不应永久屏蔽未来新版本。
+
+**执行记录：**
+- 2026-07-03：首次执行 `pnpm --dir web exec tsc -b` 因 `node_modules` 缺失失败；随后执行 `pnpm --dir web install --frozen-lockfile` 按锁文件安装依赖。
+- 2026-07-03：复跑 `pnpm --dir web exec tsc -b` 通过。
+- 2026-07-03：执行 `pnpm --dir web run lint` 通过，但保留既有 14 个 warning；期间修复当前分支 `web/src/api/asr.test.ts` 中阻断 lint 的未使用 mock 参数。
+- 2026-07-03：执行源码检查命令通过，确认 `NativeAppInstallPrompt` 已挂载到 `App.tsx`，API client 与 `native-app-install-button` 存在。
+
+### TC-MNA-33：Tray 菜单提供 Native App 安装/打开入口
+
+**操作步骤：**
+1. 执行 Tray 相关单元测试：
+   ```bash
+   SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli tray:: -- --nocapture
+   ```
+2. 检查 Tray 菜单构建和点击处理：
+   ```bash
+   rg -n 'InstallNativeApp|Open Native App|Install Native App|native_app_installed|native_app_needs_install|bifrost-tray-native-app-install' \
+     crates/bifrost-cli/src/commands/tray/menu.rs \
+     crates/bifrost-cli/src/commands/tray/tray.rs
+   ```
+
+**预期结果：**
+- Tray 单元测试通过。
+- 当 Native App 未安装或需要更新时，菜单显示 `Install Native App`，点击后启动受信任 bifrost 二进制执行 `native-app install -y --open`。
+- 当 Native App 已安装且无需更新时，菜单显示 `Open Native App`。
+- 安装任务必须使用 Tray 现有 busy 状态，避免并发执行升级/安装任务。
+
+**执行记录：**
+- 2026-07-03：执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli tray:: -- --nocapture` 通过，lib 与 bin 两组各 140 个 tray 相关测试通过。
+- 2026-07-03：补充并执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli test_menu_native_app -- --nocapture` 通过，直接覆盖 `Install Native App` 与 `Open Native App` 菜单分支。
+- 2026-07-03：执行源码检查命令通过，确认点击处理会派生 `bifrost-tray-native-app-install` 任务并调用 `native-app install -y --open`。
+
+### TC-MNA-34：Native App 定时检查更新并提示重启
+
+**操作步骤：**
+1. 执行 Swift 构建与 core contract 检查：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+2. 检查 Native App 自动更新 loop、版本检查 API 和重启提示源码：
+   ```bash
+   rg -n 'startNativeAppUpdateChecks|checkNativeAppUpdate|BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS|BIFROST_NATIVE_UPDATE_CHECK_DISABLED|installNativeApp|Restart Bifrost Native App|fetchVersionCheck|fetchNativeAppStatus' \
+     apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift \
+     apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift
+   ```
+
+**预期结果：**
+- Swift 构建和 core contract 检查通过。
+- Native App 启动连接到 Admin API 后，默认每 6 小时检查 `/system/version-check`；测试可用 `BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS` 降低轮询间隔。
+- 检测到新版本后同一个 latest version 只弹一次确认；用户确认后调用 `/system/native-app/install`。
+- 安装 accepted 后弹出重启提示，用户确认后重新打开 `Bifrost.app` 并退出旧进程完成更新。
+
+**执行记录：**
+- 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 2026-07-03：执行源码检查命令通过，确认 `startNativeAppUpdateChecks`、`checkNativeAppUpdate`、`BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS`、`BIFROST_NATIVE_UPDATE_CHECK_DISABLED`、`fetchVersionCheck`、`installNativeApp` 与 `Restart Bifrost Native App` 提示均存在。
+- 2026-07-03：复查并调整重启路径，确认 Native App 重启时打开安装 API 返回的 `install_path`，不是固定打开当前 bundle。
+
+### TC-MNA-35：Release workflow 产出 macOS Native App 安装包
+
+**操作步骤：**
+1. 检查 release workflow 的 native app 构建矩阵和 release artifact 依赖：
+   ```bash
+   ruby -e 'require "yaml"; ci=YAML.load_file(".github/workflows/release.yml"); job=ci.fetch("jobs").fetch("build-macos-native"); matrix=job.fetch("strategy").fetch("matrix").fetch("include"); raise "missing native matrix" unless matrix.any?{|item| item["target"]=="aarch64-apple-darwin"} && matrix.any?{|item| item["target"]=="x86_64-apple-darwin"}; needs=ci.fetch("jobs").fetch("release").fetch("needs"); raise "release does not need native job" unless needs.include?("build-macos-native"); puts "macos native release workflow ok"'
+   ```
+2. 检查 Native App bundle 版本来自发布版本号，而不是硬编码值：
+   ```bash
+   rg -n 'BIFROST_VERSION|CFBundleShortVersionString|CFBundleVersion' scripts/build-macos-native.sh
+   ```
+
+**预期结果：**
+- Release workflow 包含 arm64 与 x86_64 的 `build-macos-native` 矩阵。
+- Release job 等待 `build-macos-native` artifacts，因此 GitHub Release 会包含 `bifrost-native-v<version>-<target>.dmg` 与 checksum。
+- `scripts/build-macos-native.sh` 通过 `BIFROST_VERSION` 写入 Info.plist，Native App 自动更新能读到真实发布版本。
+
+**执行记录：**
+- 2026-07-03：执行 release workflow Ruby 检查通过，输出 `macos native release workflow ok`。
+- 2026-07-03：执行 `rg -n 'BIFROST_VERSION|CFBundleShortVersionString|CFBundleVersion' scripts/build-macos-native.sh` 通过，确认 Info.plist 版本字段来自 `BIFROST_VERSION`。
+
 ## 清理步骤
 
 ```bash
 rm -rf apps/macos/.build/sidecar
 rm -f /tmp/bifrost-shell-shard-list.txt
+rm -rf "${TMPDIR:-/tmp}"/bifrost-native-app-human.*
 pkill -x Bifrost || true
 pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
 ```
