@@ -19,7 +19,7 @@ struct ActivityView: View {
                 NativeMetricCard(
                     title: "活动连接",
                     value: "\(metrics?.activeConnections ?? 0)",
-                    caption: "\(appModel.clientAppCounts.count) 个应用 · \(appModel.clientIpCounts.count) 个 IP",
+                    caption: "\(appModel.activityClientAppCounts.count) 个应用 · \(appModel.activityClientIpCounts.count) 个 IP",
                     tint: .orange
                 )
                 NativeMetricCard(
@@ -64,7 +64,7 @@ struct ActivityView: View {
                             .font(.system(size: 12, weight: .medium))
                             .foregroundStyle(.secondary)
                     }
-                    ActivityBars(rows: appModel.clientAppCounts.prefix(6).map { ($0.name, $0.count) })
+                    ActivityBars(rows: appModel.activityClientAppCounts.prefix(6).map { ($0.name, $0.count) })
                 }
             }
         }
