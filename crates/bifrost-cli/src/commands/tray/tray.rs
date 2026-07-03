@@ -126,6 +126,8 @@ struct MenuDataSnapshot {
     pending_action: Option<menu::PendingMenuAction>,
     bin_available: bool,
     update_available: Option<String>,
+    native_app_installed: bool,
+    native_app_needs_install: bool,
     #[cfg(target_os = "macos")]
     system_stats: Option<SystemStatsMenuLines>,
     #[cfg(target_os = "macos")]
@@ -2471,6 +2473,9 @@ fn load_menu_data_snapshot(
     };
     let tls_interception_known = tls_interception.is_some();
     let tls_interception_enabled = tls_interception.unwrap_or(false);
+    let update_available = detect_update_available(&args.data_dir);
+    let (native_app_installed, native_app_needs_install) =
+        detect_native_app_status(update_available.as_deref());
 
     MenuDataSnapshot {
         runtime,
@@ -2483,7 +2488,9 @@ fn load_menu_data_snapshot(
         tls_interception_enabled,
         pending_action: None,
         bin_available,
-        update_available: detect_update_available(&args.data_dir),
+        update_available,
+        native_app_installed,
+        native_app_needs_install,
         #[cfg(target_os = "macos")]
         system_stats: {
             let stats_config = load_tray_system_stats_config(&args.data_dir);
@@ -2494,6 +2501,14 @@ fn load_menu_data_snapshot(
         #[cfg(target_os = "macos")]
         dashboard: None,
     }
+}
+
+fn detect_native_app_status(latest_version: Option<&str>) -> (bool, bool) {
+    let status = bifrost_core::macos_native_app::status_for_install_dir(
+        &bifrost_core::macos_native_app::default_install_dir(),
+        latest_version.or(Some(env!("CARGO_PKG_VERSION"))),
+    );
+    (status.installed, status.needs_install)
 }
 
 /// Read the version cache written by the admin `VersionChecker` and return the
@@ -2665,6 +2680,8 @@ fn build_menu_from_snapshot(
         upgrade_in_progress,
         menu_system_stats,
         snapshot.pending_action.as_ref(),
+        snapshot.native_app_installed,
+        snapshot.native_app_needs_install,
     )
 }
 
@@ -3913,6 +3930,47 @@ fn execute_action(
                 }
                 // On success the upgrade subprocess writes the progress file; the
                 // state-poll thread reconciles it to OP_IDLE / OP_UPGRADE_FAILED.
+            });
+        }
+        MenuItemAction::InstallNativeApp => {
+            if operation_busy(operation.load(Ordering::Relaxed)) {
+                tracing::warn!("native app install ignored while another action is running");
+                return;
+            }
+            let Some(bin) = resolve_bifrost_binary(args) else {
+                tracing::error!("cannot find trusted bifrost binary to install native app");
+                operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                reload_flag.store(true, Ordering::Relaxed);
+                return;
+            };
+            let operation = operation.clone();
+            let reload_flag = reload_flag.clone();
+            operation.store(OP_UPGRADING, Ordering::Relaxed);
+            reload_flag.store(true, Ordering::Relaxed);
+            spawn_tray_task("bifrost-tray-native-app-install", move || {
+                let status = Command::new(&bin)
+                    .arg("native-app")
+                    .arg("install")
+                    .arg("-y")
+                    .arg("--open")
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status();
+                match status {
+                    Ok(status) if status.success() => {
+                        operation.store(OP_IDLE, Ordering::Relaxed);
+                    }
+                    Ok(status) => {
+                        tracing::error!(status = %status, "native app install command failed");
+                        operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        tracing::error!(error = %error, "failed to spawn native app install command");
+                        operation.store(OP_UPGRADE_FAILED, Ordering::Relaxed);
+                    }
+                }
+                reload_flag.store(true, Ordering::Relaxed);
             });
         }
         MenuItemAction::OpenDirectory(path) => {

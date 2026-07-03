@@ -22,6 +22,22 @@ public actor BifrostClient {
         try await decode(SystemOverview.self, from: getSystemOverview())
     }
 
+    public func fetchVersionCheck(forceRefresh: Bool = false) async throws -> VersionCheckResponse {
+        let query = forceRefresh ? [URLQueryItem(name: "refresh", value: "true")] : []
+        let data = try await request(.get, path: "/system/version-check", queryItems: query)
+        return try await decode(VersionCheckResponse.self, from: data)
+    }
+
+    public func fetchNativeAppStatus() async throws -> NativeAppStatus {
+        let data = try await request(.get, path: "/system/native-app")
+        return try await decode(NativeAppStatus.self, from: data)
+    }
+
+    public func installNativeApp() async throws -> NativeAppInstallResponse {
+        let data = try await request(.post, path: "/system/native-app/install")
+        return try await decode(NativeAppInstallResponse.self, from: data)
+    }
+
     public func listTraffic(query: TrafficQuery = TrafficQuery()) async throws -> Data {
         try await request(.get, path: "/traffic", queryItems: query.queryItems)
     }

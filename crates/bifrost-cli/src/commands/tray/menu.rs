@@ -49,6 +49,7 @@ pub enum MenuItemAction {
     StartUpgrade {
         target_version: String,
     },
+    InstallNativeApp,
     OpenDirectory(String),
     SelectRule {
         target: RuleTarget,
@@ -127,6 +128,8 @@ pub fn build_menu(
         upgrade_in_progress,
         system_stats,
         None,
+        false,
+        false,
     )
 }
 
@@ -164,6 +167,8 @@ pub fn build_menu_with_pending(
         upgrade_in_progress,
         system_stats,
         pending_action,
+        false,
+        false,
     )
 }
 
@@ -185,6 +190,8 @@ pub(crate) fn build_menu_with_pending_and_tls(
     upgrade_in_progress: bool,
     system_stats: Option<&SystemStatsMenuLines>,
     pending_action: Option<&PendingMenuAction>,
+    native_app_installed: bool,
+    native_app_needs_install: bool,
 ) -> Vec<MenuEntry> {
     let mut items = Vec::new();
     let is_running = state == ServiceState::Running;
@@ -277,6 +284,24 @@ pub(crate) fn build_menu_with_pending_and_tls(
     }
 
     items.push(separator("_sep_actions"));
+
+    if native_app_installed && !native_app_needs_install {
+        items.push(item(MenuItemDef {
+            id: "open_native_app".to_string(),
+            label: "Open Native App".to_string(),
+            enabled: true,
+            checked: false,
+            action: MenuItemAction::OpenDirectory("/Applications/Bifrost.app".to_string()),
+        }));
+    } else if native_app_needs_install {
+        items.push(item(MenuItemDef {
+            id: "install_native_app".to_string(),
+            label: "Install Native App".to_string(),
+            enabled: bin_available && !service_action_busy,
+            checked: false,
+            action: MenuItemAction::InstallNativeApp,
+        }));
+    }
 
     if let Some(latest) = update_available {
         let label = if upgrade_in_progress {
@@ -1147,6 +1172,73 @@ mod tests {
             }
             other => panic!("unexpected action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_menu_native_app_needs_install_shows_install_item() {
+        let rt = sample_runtime();
+        let menu = build_menu_with_pending_and_tls(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            false,
+            true,
+        );
+
+        let install = find_item(&menu, "install_native_app").expect("install item present");
+        assert_eq!(install.label, "Install Native App");
+        assert!(install.enabled);
+        assert!(matches!(install.action, MenuItemAction::InstallNativeApp));
+        assert!(find_item(&menu, "open_native_app").is_none());
+    }
+
+    #[test]
+    fn test_menu_native_app_installed_shows_open_item() {
+        let rt = sample_runtime();
+        let menu = build_menu_with_pending_and_tls(
+            Some(&rt),
+            ServiceState::Running,
+            None,
+            false,
+            None,
+            "/tmp/.bifrost",
+            true,
+            &[],
+            &[],
+            None,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            true,
+            false,
+        );
+
+        let open = find_item(&menu, "open_native_app").expect("open item present");
+        assert_eq!(open.label, "Open Native App");
+        assert!(open.enabled);
+        match &open.action {
+            MenuItemAction::OpenDirectory(path) => {
+                assert_eq!(path, "/Applications/Bifrost.app");
+            }
+            other => panic!("unexpected action: {other:?}"),
+        }
+        assert!(find_item(&menu, "install_native_app").is_none());
     }
 
     #[test]

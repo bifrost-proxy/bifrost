@@ -28,6 +28,30 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 
 ## 实现逻辑
 
+### 安装与自动更新
+
+2026-07-03 新增 Native app 安装与更新链路：
+
+- release workflow 产出独立 Native app DMG，命名固定为 `bifrost-native-v<version>-<target>.dmg`，其中 target 为 `aarch64-apple-darwin` 或 `x86_64-apple-darwin`。
+- CLI 新增 `bifrost native-app status/install`：
+  - `status` 读取 `/Applications/Bifrost.app/Contents/Info.plist` 的 `CFBundleShortVersionString`，并与 latest version 比较。
+  - `install` 支持本地 `Bifrost.app`、本地 `.dmg`、显式 `--url`、`BIFROST_NATIVE_APP_SOURCE`、`BIFROST_NATIVE_APP_URL` 和默认 GitHub release URL。
+  - 默认安装目录为 `/Applications`，测试可通过 `--install-dir` 或 `BIFROST_NATIVE_APP_INSTALL_DIR` 改到临时目录。
+  - 安装完成后可用 `--open` 自动启动 Native app。
+- `bifrost start` 在 macOS 交互式终端、非 detached daemon child、未安装 Native app 时提示安装；非交互、CI、daemon child 或设置 `BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT=1` 时不提示，避免自动化被 stdin 阻塞。
+- Admin API 新增：
+  - `GET /_bifrost/api/system/native-app` 返回安装状态。
+  - `POST /_bifrost/api/system/native-app/install` 后台 spawn `bifrost native-app install -y --open`。
+- Web UI 启动后读取 Native app 状态，若需要安装则弹出安装提示；用户可选择 Install 或 Later。
+- Tray 菜单在 macOS 下显示 `Install Native App` 或 `Open Native App`，安装动作复用 CLI 命令。
+- Native Swift app 定时调用 Admin `version-check`；发现新版本后弹原生确认，确认后调用 Admin Native app install API，安装完成后提示用户重启 app。运行中的 Swift 进程不直接覆盖自身，由 CLI helper 替换 `/Applications/Bifrost.app`。
+
+安全边界：
+
+- 安装 helper 支持 dry-run 和测试安装目录，E2E 不写 `/Applications`。
+- 安装流程不修改系统代理、不启动 Tray、不打开 Sync 登录页。
+- 真实 app 替换使用临时目录 + 备份目录 + rename；失败时尽量恢复旧 app。
+
 ### BifrostNativeCore
 
 - `AdminAPIRequestFactory` 统一构造 `/_bifrost/api/` URL、`X-Client-Id`、`Authorization` 和 unsafe method 的 CSRF header。
@@ -97,6 +121,14 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
   - 验证默认数据目录保持 `~/.bifrost`。
   - 验证 start command 包含 `--skip-cert-check`、`--no-system-proxy` 和安全环境变量。
   - 验证端口候选策略与 Tauri 的 preferred port + 递增窗口一致。
+- `macos_native_app` Rust 单元测试：
+  - 解析 `Info.plist` 版本。
+  - 生成 `bifrost-native-v<version>-<target>.dmg` 资产名。
+  - 未安装状态在受支持 macOS target 下标记为需要安装。
+- `native_app` CLI 单元测试：
+  - 本地 `Bifrost.app` 复制到安装目录。
+  - `--dry-run` 不创建目标 app。
+- Tray 单元测试覆盖 Native app 菜单项显示。
 
 执行命令：
 
@@ -115,6 +147,14 @@ scripts/build-macos-native.sh --test
 
 该命令构建 Rust sidecar、复制到 Native app 本地 sidecar 目录，并运行 SwiftPM build 与 `BifrostNativeCoreChecks`。真实代理启动留到 SidecarManager 接入 UI 控制后补充。
 
+Native app 安装链路新增 shell E2E：
+
+```bash
+bash e2e-tests/tests/test_macos_native_app_install.sh
+```
+
+该用例构造本地假 `Bifrost.app`，使用临时安装目录验证 `bifrost native-app install --dry-run`、真实复制、`native-app status --format json`，不启动代理、不触碰系统代理。
+
 ### 真实场景测试
 
 新增 `human_tests/macos-native-app.md`，覆盖：
@@ -132,6 +172,10 @@ scripts/build-macos-native.sh --test
 - Overview 的 Remote Invoke 面板展示 SSH Key 状态、生成/复制操作、已授权客户端数、活动调用数、最近调用和最近活跃时间；证书面板展示本机 CA、移动设备、trust-probe QR 与扫码设备状态。
 - Overview 的 TLS 解密面板展示应用、域名、IP 三类 include/exclude 名单数量；点击任一计数块弹出编辑框，每行一个规则并保存回 `/config/tls`。
 - Rules 编辑器覆盖 Bifrost DSL 注释、`@rule`、`reqScript://`、`resScript://`、`bp://`、`${value}`/`{value}`、`key=value`、`` ```blockVariable ``、正则和 code fence/line block 的 tokenizer；补全数据来自 Rules/Values/Scripts Admin API；本地变量同时来自 `key=value` 与 fenced block 变量定义；本阶段 Values/Scripts 目标在主导航未暴露时 fallback 到 Web UI。
+- CLI 启动时在 macOS 交互式终端提示安装 Native app，非交互或禁用环境变量时不提示。
+- Web UI 弹出 Native app 安装提示，点击 Install 后 Admin API 启动后台安装。
+- Tray 菜单显示 Native app 安装/打开入口。
+- Native app 定时检查版本，发现新版本后确认安装并提示重启。
 
 ## Review/Fix/Test 闭环方案
 
@@ -153,6 +197,7 @@ scripts/build-macos-native.sh --test
 - `swift run --package-path apps/macos BifrostNativeCoreChecks`
 - `swift run --package-path apps/macos Bifrost --check-icon`
 - `scripts/build-macos-native.sh --skip-sidecar --test`
+- `bash e2e-tests/tests/test_macos_native_app_install.sh`
 - `scripts/prepare-macos-native-sidecar.sh --skip-cargo-build` 在已有 binary 时可复用
 - `cargo fmt --all -- --check`
 - `cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check`

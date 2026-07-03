@@ -87,7 +87,8 @@ describe("ASR admin API CSRF headers", () => {
   });
 
   it("adds the admin CSRF token to unsafe ASR module requests", async () => {
-    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
       const url = String(input);
       if (url.includes("/security/csrf")) {
         return new Response(

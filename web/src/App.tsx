@@ -6,6 +6,7 @@ import BifrostFileDropZone from "./components/BifrostFileDropZone";
 import PendingAuthModal from "./components/PendingAuthModal";
 import PendingIpTlsModal from "./components/PendingIpTlsModal";
 import PairingApprovalModal from "./components/PairingApprovalModal";
+import NativeAppInstallPrompt from "./components/NativeAppInstallPrompt";
 import Rules from "./pages/Rules";
 import Traffic from "./pages/Traffic";
 import TrafficDetailPage from "./pages/TrafficDetailPage";
@@ -162,31 +163,32 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       }}
     >
       <AntApp>
-      {isDesktopShell() && desktopPlatform === "macos" ? (
-        <DesktopTransitionMask resolvedTheme={resolvedTheme} />
-      ) : null}
-      <Modal
-        open={desktopCoreVisible}
-        title={
-          desktopCorePhase === "error"
-            ? "Bifrost Core Error"
-            : desktopCorePhase === "booting"
-              ? "Connecting to Bifrost Core"
-              : "Switching Bifrost Port"
-        }
-        closable={desktopCorePhase === "error"}
-        maskClosable={desktopCorePhase === "error"}
-        keyboard={desktopCorePhase === "error"}
-        okText={desktopCorePhase === "error" ? "Close" : undefined}
-        cancelButtonProps={{ style: { display: "none" } }}
-        onOk={hideDesktopCore}
-        onCancel={hideDesktopCore}
-        footer={desktopCorePhase === "error" ? undefined : null}
-        centered
-        width={Math.min(720, Math.max(560, Math.floor(window.innerWidth * 0.42)))}
-        zIndex={1000}
-        styles={overlayStyles}
-      >
+        <NativeAppInstallPrompt />
+        {isDesktopShell() && desktopPlatform === "macos" ? (
+          <DesktopTransitionMask resolvedTheme={resolvedTheme} />
+        ) : null}
+        <Modal
+          open={desktopCoreVisible}
+          title={
+            desktopCorePhase === "error"
+              ? "Bifrost Core Error"
+              : desktopCorePhase === "booting"
+                ? "Connecting to Bifrost Core"
+                : "Switching Bifrost Port"
+          }
+          closable={desktopCorePhase === "error"}
+          maskClosable={desktopCorePhase === "error"}
+          keyboard={desktopCorePhase === "error"}
+          okText={desktopCorePhase === "error" ? "Close" : undefined}
+          cancelButtonProps={{ style: { display: "none" } }}
+          onOk={hideDesktopCore}
+          onCancel={hideDesktopCore}
+          footer={desktopCorePhase === "error" ? undefined : null}
+          centered
+          width={Math.min(720, Math.max(560, Math.floor(window.innerWidth * 0.42)))}
+          zIndex={1000}
+          styles={overlayStyles}
+        >
         <Typography.Paragraph>
           {desktopCorePhase === "booting"
             ? "The interface is waiting for the Bifrost core to become available."

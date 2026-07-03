@@ -41,6 +41,7 @@ create_dev_app_bundle() {
   local resource_bundle="$bin_dir/Bifrost_Bifrost.bundle"
   local app_dir="$PACKAGE_DIR/.build/Bifrost.app"
   local contents_dir="$app_dir/Contents"
+  local bundle_version="${BIFROST_VERSION:-0.0.129}"
 
   if [[ ! -x "$executable" ]]; then
     echo "missing built Bifrost executable: $executable" >&2
@@ -63,7 +64,7 @@ create_dev_app_bundle() {
     cp -R "$resource_bundle" "$contents_dir/Resources/Bifrost_Bifrost.bundle"
   fi
 
-  cat >"$contents_dir/Info.plist" <<'PLIST'
+  cat >"$contents_dir/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -85,9 +86,9 @@ create_dev_app_bundle() {
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.0.129</string>
+  <string>${bundle_version}</string>
   <key>CFBundleVersion</key>
-  <string>0.0.129</string>
+  <string>${bundle_version}</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.developer-tools</string>
   <key>LSMinimumSystemVersion</key>

@@ -514,9 +514,67 @@ jobs:
             dist/${{ env.ASSET }}
             dist/${{ env.ASSET }}.sha256
 
+  build-macos-native:
+    name: Build macOS Native App (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.tag }}
+
+      - name: Install Rust toolchain with retry
+        shell: bash
+        run: |
+          cargo_home="${CARGO_HOME:-$HOME/.cargo}"
+          if ! command -v rustup >/dev/null 2>&1; then
+            curl --proto '=https' --tlsv1.2 --retry 10 --retry-connrefused --location --silent --show-error --fail https://sh.rustup.rs | sh -s -- --default-toolchain none -y
+            echo "${cargo_home}/bin" >> "${GITHUB_PATH}"
+            export PATH="${cargo_home}/bin:${PATH}"
+          fi
+          rustup toolchain install stable --target "${{ matrix.target }}" --profile minimal --no-self-update
+          rustup default stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: rust-native-${{ matrix.target }}
+
+      - name: Build native app bundle
+        env:
+          BIFROST_VERSION: ${{ needs.prepare.outputs.version }}
+        run: scripts/build-macos-native.sh --release --test
+
+      - name: Package native app dmg
+        shell: bash
+        run: |
+          VERSION="${{ needs.prepare.outputs.version }}"
+          TARGET="${{ matrix.target }}"
+          mkdir -p dist
+          DMG_PATH="dist/bifrost-native-v${VERSION}-${TARGET}.dmg"
+          bash scripts/package-macos-dmg.sh apps/macos/.build/Bifrost.app "${DMG_PATH}"
+          ASSET="$(basename "${DMG_PATH}")"
+          shasum -a 256 "${DMG_PATH}" > "dist/${ASSET}.sha256"
+          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-native-${{ matrix.target }}
+          path: |
+            dist/${{ env.ASSET }}
+            dist/${{ env.ASSET }}.sha256
+
   release:
     name: Create Release
-    needs: [prepare, build-cli, build-desktop]
+    needs: [prepare, build-cli, build-desktop, build-macos-native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

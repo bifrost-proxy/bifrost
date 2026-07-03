@@ -63,6 +63,45 @@ public struct SystemOverview: Decodable, Equatable, Sendable {
     public var traffic: TrafficSummary?
 }
 
+public struct VersionCheckResponse: Decodable, Equatable, Sendable {
+    public var hasUpdate: Bool
+    public var currentVersion: String
+    public var latestVersion: String?
+    public var releaseUrl: String?
+
+    enum CodingKeys: String, CodingKey {
+        case hasUpdate = "has_update"
+        case currentVersion = "current_version"
+        case latestVersion = "latest_version"
+        case releaseUrl = "release_url"
+    }
+}
+
+public struct NativeAppStatus: Decodable, Equatable, Sendable {
+    public var supported: Bool
+    public var installed: Bool
+    public var installPath: String
+    public var installedVersion: String?
+    public var latestVersion: String?
+    public var needsInstall: Bool
+    public var message: String
+
+    enum CodingKeys: String, CodingKey {
+        case supported
+        case installed
+        case installPath = "install_path"
+        case installedVersion = "installed_version"
+        case latestVersion = "latest_version"
+        case needsInstall = "needs_install"
+        case message
+    }
+}
+
+public struct NativeAppInstallResponse: Decodable, Equatable, Sendable {
+    public var accepted: Bool
+    public var status: NativeAppStatus
+}
+
 public struct TrafficListResponse: Decodable, Equatable, Sendable {
     public var records: [TrafficRecordSummary]
     public var nextCursor: Int?

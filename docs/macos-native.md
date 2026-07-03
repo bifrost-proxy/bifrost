@@ -51,6 +51,40 @@ If only the Swift scaffold should be checked:
 scripts/build-macos-native.sh --skip-sidecar --test
 ```
 
+## Install
+
+The native app depends on an installed Bifrost CLI. The CLI owns installation,
+sidecar updates, and release asset discovery:
+
+```bash
+bifrost native-app status
+bifrost native-app install -y --open
+```
+
+On macOS, `bifrost start` prompts to install the native app when it is missing
+and the terminal is interactive. Set `BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT=1`
+to suppress the prompt in automation.
+Direct `native-app install` runs prompt before writing the target app unless
+`-y` is provided; Web UI, Tray, and Admin-triggered installs use `-y`.
+
+The default install path is `/Applications/Bifrost.app`. Tests and controlled
+automation can use `--install-dir`, `--source`, `--url`,
+`BIFROST_NATIVE_APP_SOURCE`, or `BIFROST_NATIVE_APP_URL`.
+
+Release assets use this naming contract:
+
+```text
+bifrost-native-v<version>-aarch64-apple-darwin.dmg
+bifrost-native-v<version>-x86_64-apple-darwin.dmg
+```
+
+## Update
+
+The native app periodically asks the running Bifrost Admin API for release
+metadata. When a newer version is available, it asks the user to install it,
+delegates installation to `bifrost native-app install`, and then prompts the
+user to restart the app so the new bundle is loaded.
+
 ## Development Safety
 
 Native development smoke runs must not alter the developer machine proxy state. When the sidecar is started from the Swift side, the command plan includes:
