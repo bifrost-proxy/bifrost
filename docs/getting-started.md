@@ -86,8 +86,8 @@ cargo run -p bifrost-cli -- --version
 ## 启动代理
 
 ```bash
-# 默认监听 0.0.0.0:9900
-bifrost start
+# 后台启动，默认监听 0.0.0.0:9900
+bifrost start -d
 
 # 自定义端口和监听地址
 bifrost -p 9000 -H 127.0.0.1 start
@@ -101,11 +101,11 @@ bifrost start --intercept-include "*.api.local"
 # 按应用启用 TLS 抓包
 bifrost start --app-intercept-include "*Chrome,*curl"
 
-# 守护进程模式
-bifrost start --daemon
+# 前台启动，适合查看实时日志
+bifrost start
 ```
 
-`bifrost start` 默认会启用系统代理，浏览器和桌面应用通常无需额外配置就会进入 Bifrost。TLS 抓包按需开启，不建议默认全局 `--intercept`；优先使用域名白名单、应用白名单或规则级 `tlsIntercept://`。遇到 SSL pinning 应用时，应使用 `--app-intercept-exclude`、`--intercept-exclude` 或规则级 `tlsPassthrough://` 排除。需要 TLS 抓包时，启动流程会自动生成并安装 Bifrost CA；`bifrost ca generate` / `bifrost ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。只有在 CI、沙箱或明确不想影响系统网络时，才使用 `--no-system-proxy`。
+`bifrost start -d` 会以后台服务启动 Bifrost，并按默认配置启用系统代理，浏览器和桌面应用通常无需额外配置就会进入 Bifrost。TLS 抓包按需开启，不建议默认全局 `--intercept`；优先使用域名白名单、应用白名单或规则级 `tlsIntercept://`。遇到 SSL pinning 应用时，应使用 `--app-intercept-exclude`、`--intercept-exclude` 或规则级 `tlsPassthrough://` 排除。需要 TLS 抓包时，启动流程会自动生成并安装 Bifrost CA；`bifrost ca generate` / `bifrost ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。`--no-system-proxy` 只用于 CI、测试沙箱或你明确不希望修改系统网络的诊断场景，不作为普通用户的首次启动路径。
 
 ## 管理端入口
 

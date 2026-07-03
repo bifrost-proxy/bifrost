@@ -189,7 +189,36 @@ bifrost rule add draft --json --allow-invalid --content "@missing-shared"
 # exit code: 0，JSON 中 saved=true、syntax.valid=false
 ```
 
-### 10. 规则分享链接
+### 10. 全局默认规则 Default
+
+Bifrost 会自动维护一条名为 `Default` 的全局默认规则。它适合放置所有代理入口都必须共享的兜底配置，例如统一 DNS 解析、通用请求头、基础 TLS 策略或公司内网默认转发规则。
+
+关键语义：
+
+- `Default` 首次启动或首次访问规则列表时自动创建；如果磁盘上的 `rules/Default.bifrost` 被手工删除，下次启动或规则入口访问会自动恢复。
+- `Default` 始终 enabled，不能停用、删除、重命名或拖拽重排；但可以编辑内容。如果暂时不需要全局配置，可以把内容清空或只保留注释。
+- `Default` 是大小写不敏感的保留名，不能创建或重命名为 `Default`、`default`、`DEFAULT` 等同名变体。
+- `Default` 不参与 Sync，不会被推送到远端，也不会从远端拉取同名规则覆盖本地全局配置。
+- 主端口和所有临时端口都会自动加载 `Default`。合并 active rules 时 `Default` 始终排在最前面，然后才是主端口 enabled 规则或临时端口显式绑定规则。
+- Group 规则里的同名普通规则不具备全局 Default 语义；该保护只作用于本地 My Rules 根目录中的系统规则。
+
+CLI 示例：
+
+```bash
+# 查看全局默认规则
+bifrost rule show Default
+
+# 编辑全局兜底配置
+bifrost rule update Default --content "internal.example.test dns://10.0.0.53"
+
+# 临时端口不需要显式绑定 Default；它会自动生效
+bifrost port bind --port 18888 --rule local-debug
+bifrost port active 18888
+```
+
+`bifrost port bind --rule Default` 或 `--rule default` 会失败，因为临时端口已经自动继承 `Default`。
+
+### 11. 规则分享链接
 
 Bifrost 支持把一条个人规则编码到任意 HTTP/HTTPS URL 的特殊 query 中，用于把规则分享给其他本机 Bifrost 用户或自动化 Agent。协议 query 名固定为 `__bifrost_rule`，内容是 URL-safe base64 编码的 JSON payload，包含规则名称、规则内容、版本号、内容 hash、导入模式和独占启用范围。
 

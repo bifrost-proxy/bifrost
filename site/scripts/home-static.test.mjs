@@ -32,6 +32,7 @@ const html = `<!doctype html>
     <button data-lang="en" aria-pressed="true">EN</button>
     <button data-lang="zh" aria-pressed="false">中文</button>
     <div role="tablist"><button role="tab" aria-selected="true">CLI</button></div>
+    <code>bifrost start -d</code>
   </body>
 </html>`;
 

@@ -113,9 +113,14 @@ test -f "$EN_INDEX_DIST"
 test -f "$EN_INSTALL_DIST"
 test -f "$EN_RULE_DIST"
 grep -q 'A proxy workbench for capturing traffic' "$SITE_DIR/dist/index.html"
+grep -q 'bifrost start -d' "$SITE_DIR/dist/index.html"
 grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
 grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"
 grep -q 'data-lang="zh"' "$SITE_DIR/dist/index.html"
+if grep -q 'bifrost start --no-system-proxy' "$SITE_DIR/dist/index.html"; then
+  echo "Static homepage must not default first-run users to --no-system-proxy" >&2
+  exit 1
+fi
 if grep -q '/_astro/' "$SITE_DIR/dist/index.html"; then
   echo "Static homepage must not include Astro runtime assets" >&2
   exit 1

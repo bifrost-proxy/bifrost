@@ -78,8 +78,8 @@ bifrost --version
 ## Start the Proxy
 
 ```bash
-# Default listener: 0.0.0.0:9900
-bifrost start
+# Start in the background. Default listener: 0.0.0.0:9900
+bifrost start -d
 
 # Custom port and host
 bifrost -p 9000 -H 127.0.0.1 start
@@ -90,11 +90,11 @@ bifrost -p 9900 --socks5-port 1080 start
 # Intercept TLS by domain
 bifrost start --intercept-include "*.api.local"
 
-# Daemon mode
-bifrost start --daemon
+# Foreground mode for live logs
+bifrost start
 ```
 
-`bifrost start` enables the system proxy by default so browsers and desktop apps can enter Bifrost without extra configuration. TLS interception is opt-in; prefer domain allowlists, app allowlists, or rule-level `tlsIntercept://` instead of global interception. Use `--no-system-proxy` only for CI, sandboxes, or cases where you explicitly do not want to change system networking.
+`bifrost start -d` starts Bifrost as a background service and enables the system proxy by default, so browsers and desktop apps can enter Bifrost without extra configuration. TLS interception is opt-in; prefer domain allowlists, app allowlists, or rule-level `tlsIntercept://` instead of global interception. `--no-system-proxy` is for CI, test sandboxes, or explicit diagnostics where you do not want Bifrost to change system networking; it is not the normal first-run path.
 
 ## Admin UI
 
