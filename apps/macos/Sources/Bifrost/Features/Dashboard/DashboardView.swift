@@ -473,66 +473,6 @@ private struct ActivityBars: View {
     }
 }
 
-private struct NativePageScaffold<Content: View>: View {
-    let title: String
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                Text(title)
-                    .font(.system(size: 30, weight: .bold))
-                    .padding(.top, 20)
-                content
-            }
-            .padding(.horizontal, 36)
-            .padding(.bottom, 36)
-            .frame(maxWidth: 1180, alignment: .leading)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurface.content)
-    }
-}
-
-private struct NativeCard<Content: View>: View {
-    @ViewBuilder var content: Content
-    @State private var isHovering = false
-
-    var body: some View {
-        content
-            .padding(18)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background {
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .fill(AppSurface.card)
-            }
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppSurface.cardBorder)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                AppSurface.cardHighlight,
-                                AppSurface.cardHighlight.opacity(0.45),
-                                AppSurface.cardBorder,
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: AppSurface.cardGlow, radius: isHovering ? 22 : 12, x: 0, y: 0)
-            .shadow(color: isHovering ? AppSurface.hoverShadow : AppSurface.cardShadow, radius: isHovering ? 18 : 10, x: 0, y: isHovering ? 10 : 5)
-            .scaleEffect(isHovering ? 1.004 : 1)
-            .animation(.easeOut(duration: 0.16), value: isHovering)
-            .onHover { isHovering = $0 }
-    }
-}
-
 private struct NativeMetricCard: View {
     let title: String
     let value: String
@@ -562,72 +502,6 @@ private struct NativeMetricCard: View {
             }
             .frame(minHeight: 126, alignment: .topLeading)
         }
-    }
-}
-
-private struct NativeCardHeader: View {
-    let title: String
-    let subtitle: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(.system(size: 15, weight: .semibold))
-            Text(subtitle)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-        }
-    }
-}
-
-private struct CompactFact: View {
-    let title: String
-    let value: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 5) {
-            Text(title)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.secondary)
-            Text(value)
-                .font(.system(size: 15, weight: .semibold))
-                .lineLimit(1)
-                .minimumScaleFactor(0.7)
-        }
-        .padding(.vertical, 10)
-        .padding(.horizontal, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
-    }
-}
-
-private struct StatusPill: View {
-    let title: String
-    let color: Color
-
-    var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(title)
-                .font(.system(size: 12, weight: .medium))
-        }
-        .foregroundStyle(.secondary)
-    }
-}
-
-private struct EmptyNativeState: View {
-    let title: String
-
-    var body: some View {
-        VStack(spacing: 8) {
-            Text(title)
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(.tertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 

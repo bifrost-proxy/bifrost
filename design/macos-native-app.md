@@ -46,6 +46,7 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 - `网络` 不再在 Native 内实现复杂捕获/解密/重写工作台，只提供 Web UI 打开入口和少量状态摘要。
 - `Settings` 不作为主导航入口；完整设置页仍保留在 macOS app 的 Settings scene，避免丢失现有实现，但主窗口只暴露核心控制。
 - 视觉以 Apple/Surge 风格的清爽冷白 surface 为主：sidebar 可以保留轻量层级感，主内容避免大面积 `NSVisualEffectView` material 灰化；卡片保持白色、轻描边、弱阴影，并带轻微边缘高光/hover 悬浮反馈；窗口按钮必须可见，页面内容不得被标题栏安全区裁切。
+- Activity、Overview、Rules、Network 的页面骨架和面板必须复用 `NativeSurface` 共享组件；禁止为某个页面复制一套相似但独立的 card/panel 样式，也禁止恢复旧的 `.bar` 顶部 toolbar 作为主内容操作区。
 - 主导航切换必须保持轻量：Activity、Overview、Rules、Network 只刷新当前页面需要的数据，不允许每次切 tab 都全量拉取 overview、rules、system controls 和 traffic；Activity 所需的应用/IP 统计由 `AppModel` 在 traffic 增量合并时缓存，SwiftUI render 路径不能反复遍历 traffic 列表；Native 主窗口最多保留一段轻量 traffic 窗口用于控制台指标，复杂 Network 历史列表继续交给 Web UI。
 
 - 主界面使用 `NavigationSplitView`。
@@ -124,6 +125,7 @@ scripts/build-macos-native.sh --test
 - Linux shell E2E CI 使用现有 shard 机制拆成 4 个 job，避免全量 shell 套件在单个 60 分钟 job 中超时，同时通过覆盖守卫确认用例不丢失。
 - Native app 对外进程/窗口名为 `Bifrost`，且启动时设置 Bifrost app icon。
 - Native app 启动时复用默认数据目录里的已有 CLI daemon；无服务时按需启动共享默认数据目录的 daemon。
+- 主窗口各页面复用 `NativeSurface`，Rules 不再维护单独的 `RuleSurfaceCard`，旧顶部 toolbar 代码不保留。
 - 主窗口四个核心入口切换时按页刷新，Activity 使用缓存流量统计，避免切 tab 卡顿或延迟渲染。
 
 ## Review/Fix/Test 闭环方案

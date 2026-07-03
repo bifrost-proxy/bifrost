@@ -29,46 +29,34 @@ struct RulesView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(spacing: 12) {
-                    Text("规则")
-                        .font(.system(size: 30, weight: .bold))
-                    Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                        .background(AppSurface.subtleFill, in: Capsule())
-                    Spacer()
-                    Button {
-                        createSheetVisible = true
-                    } label: {
-                        Label("New Rule", systemImage: "plus")
-                    }
-                    .buttonStyle(.borderless)
-                    .font(.system(size: 13, weight: .medium))
-                }
-                .padding(.top, 20)
-
-                HStack(alignment: .top, spacing: 18) {
-                    RuleSurfaceCard {
-                        listPane
-                    }
-                    .frame(width: 320)
-
-                    RuleSurfaceCard {
-                        detailPane
-                    }
-                    .frame(maxWidth: .infinity, minHeight: 600)
-                }
+        NativePageScaffold(title: "规则") {
+            Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(AppSurface.subtleFill, in: Capsule())
+            Spacer()
+            Button {
+                createSheetVisible = true
+            } label: {
+                Label("New Rule", systemImage: "plus")
             }
-            .padding(.horizontal, 36)
-            .padding(.bottom, 36)
-            .frame(maxWidth: 1180, alignment: .leading)
+            .buttonStyle(.borderless)
+            .font(.system(size: 13, weight: .medium))
+        } content: {
+            HStack(alignment: .top, spacing: 18) {
+                NativePanel(scaleOnHover: 1.002) {
+                    listPane
+                }
+                .frame(width: 320)
+
+                NativePanel(scaleOnHover: 1.002) {
+                    detailPane
+                }
+                .frame(maxWidth: .infinity, minHeight: 600)
+            }
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurface.content)
         .sheet(isPresented: $createSheetVisible) {
             NameEntrySheet(
                 title: "New Rule",
@@ -286,41 +274,6 @@ private struct RuleRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-    }
-}
-
-private struct RuleSurfaceCard<Content: View>: View {
-    @ViewBuilder var content: Content
-    @State private var isHovering = false
-
-    var body: some View {
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(AppSurface.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(AppSurface.cardBorder)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 8, style: .continuous)
-                    .stroke(
-                        LinearGradient(
-                            colors: [
-                                AppSurface.cardHighlight,
-                                AppSurface.cardHighlight.opacity(0.45),
-                                AppSurface.cardBorder,
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        lineWidth: 1
-                    )
-            )
-            .shadow(color: AppSurface.cardGlow, radius: isHovering ? 22 : 12, x: 0, y: 0)
-            .shadow(color: isHovering ? AppSurface.hoverShadow : AppSurface.cardShadow, radius: isHovering ? 18 : 10, x: 0, y: isHovering ? 10 : 5)
-            .scaleEffect(isHovering ? 1.002 : 1)
-            .animation(.easeOut(duration: 0.16), value: isHovering)
-            .onHover { isHovering = $0 }
     }
 }
 
