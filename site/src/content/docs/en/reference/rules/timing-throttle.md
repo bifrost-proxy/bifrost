@@ -1,14 +1,11 @@
 ---
 title: "Delay and Throttling"
 description: "Delay, speed limiting, and throttling capabilities."
-editUrl: false
-sidebar:
-  label: "Delay and Throttling"
-  order: 260
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/timing-throttle.md`.
-> Language: **English** | [中文](../../../../reference/rules/timing-throttle/)
+> Language: **English** | [中文](../../../reference/rules/timing-throttle)
 
 # Delay and Throttling Rules
 

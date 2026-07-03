@@ -1,10 +1,7 @@
 ---
 title: "桌面版安装与构建"
 description: "桌面版安装方式、本地构建步骤与常见注意事项。"
-editUrl: false
-sidebar:
-  label: "桌面版安装与构建"
-  order: 40
+editLink: false
 ---
 
 > 此页面由 `docs/desktop.md` 自动同步生成。

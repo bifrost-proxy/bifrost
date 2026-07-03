@@ -34,6 +34,14 @@ export function defaultBasePath() {
   return normalizeBasePath(site.hostname.endsWith("github.io") ? site.pathname : "/");
 }
 
+export function defaultSiteUrl() {
+  const site = new URL(process.env.SITE_URL ?? "https://bifrost-proxy.github.io/bifrost");
+  site.pathname = normalizeBasePath(site.pathname);
+  site.search = "";
+  site.hash = "";
+  return site.href;
+}
+
 function assetName(name, content) {
   const ext = path.extname(name);
   const base = path.basename(name, ext);
@@ -54,8 +62,11 @@ export async function buildHome({
   homeRoot = defaultHomeRoot,
   distRoot = defaultDistRoot,
   basePath = defaultBasePath(),
+  siteUrl = defaultSiteUrl(),
 } = {}) {
   const normalizedBasePath = normalizeBasePath(basePath);
+  const normalizedSiteUrl = new URL(siteUrl).href;
+  const ogImageUrl = new URL("og-image.png", normalizedSiteUrl).href;
   const htmlPath = path.join(homeRoot, "index.html");
   const cssPath = path.join(homeRoot, "styles.css");
   const jsPath = path.join(homeRoot, "home.js");
@@ -68,6 +79,8 @@ export async function buildHome({
 
   const html = htmlSource
     .replaceAll("%BASE_PATH%", normalizedBasePath)
+    .replaceAll("%SITE_URL%", normalizedSiteUrl)
+    .replaceAll("%OG_IMAGE%", ogImageUrl)
     .replaceAll("%HOME_CSS%", cssUrl)
     .replaceAll("%HOME_JS%", jsUrl);
 
@@ -132,7 +145,18 @@ export async function collectHomeErrors({
 
   const html = await fsp.readFile(htmlPath, "utf8");
   const errors = [];
-  const forbidden = ["%BASE_PATH%", "%HOME_CSS%", "%HOME_JS%", "astro-island", "/_astro/", "@vite/client"];
+  const forbidden = [
+    "%BASE_PATH%",
+    "%SITE_URL%",
+    "%OG_IMAGE%",
+    "%HOME_CSS%",
+    "%HOME_JS%",
+    "astro-island",
+    "/_astro/",
+    "@vite/client",
+    "vitepress-theme-appearance",
+    "VPNav",
+  ];
   for (const marker of forbidden) {
     if (html.includes(marker)) {
       errors.push(`Home page contains forbidden marker: ${marker}`);
@@ -141,6 +165,45 @@ export async function collectHomeErrors({
 
   if (!html.includes(`href="${normalizedBasePath}docs/"`)) {
     errors.push("Home page is missing the docs link.");
+  }
+  if (!html.includes('rel="canonical"')) {
+    errors.push("Home page is missing the canonical link.");
+  }
+  if (!html.includes('name="robots" content="index, follow, max-image-preview:large"')) {
+    errors.push("Home page is missing crawler-friendly robots metadata.");
+  }
+  for (const property of ["og:title", "og:type", "og:url", "og:image", "og:description"]) {
+    if (!html.includes(`property="${property}"`)) {
+      errors.push(`Home page is missing Open Graph metadata: ${property}.`);
+    }
+  }
+  for (const name of ["twitter:card", "twitter:title", "twitter:description", "twitter:image"]) {
+    if (!html.includes(`name="${name}"`)) {
+      errors.push(`Home page is missing Twitter card metadata: ${name}.`);
+    }
+  }
+  const jsonLdMatches = [...html.matchAll(/<script type="application\/ld\+json">([\s\S]*?)<\/script>/g)];
+  if (jsonLdMatches.length === 0) {
+    errors.push("Home page is missing JSON-LD structured data.");
+  }
+  for (const match of jsonLdMatches) {
+    try {
+      const data = JSON.parse(match[1]);
+      const graphTypes = new Set((data["@graph"] ?? []).map((entry) => entry["@type"]));
+      for (const type of ["Organization", "WebSite", "SoftwareApplication", "WebPage"]) {
+        if (!graphTypes.has(type)) {
+          errors.push(`Home JSON-LD is missing ${type}.`);
+        }
+      }
+    } catch {
+      errors.push("Home JSON-LD structured data is not valid JSON.");
+    }
+  }
+  if (!html.includes('href="https://github.com/bifrost-proxy/bifrost"')) {
+    errors.push("Home page is missing the GitHub repository link.");
+  }
+  if (html.includes('class="nav-links"')) {
+    errors.push("Home page must not render the top text navigation links.");
   }
   if (!html.includes('role="tablist"') || !html.includes('aria-selected="true"')) {
     errors.push("Home page preview tabs are missing accessible tab markup.");

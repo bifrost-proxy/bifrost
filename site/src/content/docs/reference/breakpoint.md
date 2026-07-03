@@ -1,10 +1,7 @@
 ---
 title: "Breakpoint 使用手册"
 description: "从 docs/breakpoint.md 自动同步生成的 Breakpoint 使用手册 文档。"
-editUrl: false
-sidebar:
-  label: "Breakpoint 使用手册"
-  order: 902
+editLink: false
 ---
 
 > 此页面由 `docs/breakpoint.md` 自动同步生成。

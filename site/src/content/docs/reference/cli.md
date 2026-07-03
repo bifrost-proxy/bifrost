@@ -1,16 +1,13 @@
 ---
 title: "CLI 详细命令"
 description: "Bifrost CLI 命令、参数与环境变量的完整参考。"
-editUrl: false
-sidebar:
-  label: "CLI 详细命令"
-  order: 110
+editLink: false
 ---
 
 > 此页面由 `docs/cli.md` 自动同步生成。
 # CLI 详细命令
 
-本文档集中说明 `bifrost` CLI 的所有顶层命令、主要子命令、环境变量和规则模板变量。若只想按使用场景快速上手，请先看 [CLI 快速开始](../../getting-started/cli-quick-start/)。
+本文档集中说明 `bifrost` CLI 的所有顶层命令、主要子命令、环境变量和规则模板变量。若只想按使用场景快速上手，请先看 [CLI 快速开始](../getting-started/cli-quick-start)。
 
 ## 帮助与文档入口
 
@@ -31,12 +28,12 @@ bifrost <command> <subcommand> --help
 
 关键文档：
 
-- [CLI 快速开始](../../getting-started/cli-quick-start/)：按使用场景选择命令路径
-- [安装与启动](../../getting-started/installation/)：安装方式与首次启动
-- [规则语法](../rule-engine/)：规则整体结构、过滤器、优先级
-- [匹配器](../patterns/)：domain / wildcard / regex / path wildcard 等匹配逻辑
-- [操作符说明](../operations/)：`host://`、`reqHeaders://`、`file://` 等 operation 的值格式
-- [规则协议手册](../rules/)：按协议分类的完整能力说明
+- [CLI 快速开始](../getting-started/cli-quick-start)：按使用场景选择命令路径
+- [安装与启动](../getting-started/installation)：安装方式与首次启动
+- [规则语法](./rule-engine)：规则整体结构、过滤器、优先级
+- [匹配器](./patterns)：domain / wildcard / regex / path wildcard 等匹配逻辑
+- [操作符说明](./operations)：`host://`、`reqHeaders://`、`file://` 等 operation 的值格式
+- [规则协议手册](./rules/)：按协议分类的完整能力说明
 
 ## 命令覆盖索引
 
@@ -148,7 +145,7 @@ api.example.com reqHeaders://X-Host=${hostname.replace(example,test)}
 api.example.com file://({"literal":"$${host}"})
 ```
 
-更多变量、URL 编码、replace 语法和数据对象格式见 [操作符说明](../operations/)。
+更多变量、URL 编码、replace 语法和数据对象格式见 [操作符说明](./operations)。
 
 ## `start` 命令
 
@@ -175,7 +172,7 @@ bifrost start --disable-badge-injection
 bifrost start --enable-badge-injection
 ```
 
-`bifrost start -d` 是普通用户推荐的后台启动方式；`bifrost start` 适合需要查看实时日志的前台模式。默认配置会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost。TLS 抓包不是默认建议，应按需通过规则级 `tlsIntercept://`、`--intercept-include` 或 `--app-intercept-include` 收窄到目标域名/应用；遇到 SSL pinning 应用时，用 `tlsPassthrough://`、`--intercept-exclude` 或 `--app-intercept-exclude` 排除。需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA；`ca generate` / `ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。`--no-system-proxy`、`--unsafe-ssl` 和 `--skip-cert-check` 是测试/诊断选项，不应作为普通启动路径。
+`bifrost start -d` 是普通用户推荐的后台启动方式；`bifrost start` 适合需要查看实时日志的前台模式。`bifrost start` 默认会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost。TLS 抓包不是默认建议，应按需通过规则级 `tlsIntercept://`、`--intercept-include` 或 `--app-intercept-include` 收窄到目标域名/应用；遇到 SSL pinning 应用时，用 `tlsPassthrough://`、`--intercept-exclude` 或 `--app-intercept-exclude` 排除。需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA；`ca generate` / `ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。`--no-system-proxy`、`--unsafe-ssl` 和 `--skip-cert-check` 是测试/诊断选项，不应作为普通启动路径。
 
 当检测到已有 Bifrost 进程在运行时，`bifrost start` 会在终端提示是否重启：输入 `y/yes` 将停止旧进程并重新启动；输入 `n/no` 将取消本次启动。
 

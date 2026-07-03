@@ -1,14 +1,11 @@
 ---
 title: "Agent Skill Installation"
 description: "Install and use the Bifrost Agent Skill."
-editUrl: false
-sidebar:
-  label: "Agent Skill Installation"
-  order: 190
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/agent-skill.md`.
-> Language: **English** | [中文](../../../reference/agent-skill/)
+> Language: **English** | [中文](../../reference/agent-skill)
 
 # Agent Skill Installation Guide
 

@@ -1,10 +1,7 @@
 ---
 title: "Remote Invoke v5 PoP Hardening"
 description: "Automatically synced English Remote Invoke v5 PoP Hardening documentation from docs-en/design/remote-invoke-v5-pop-hardening.md."
-editUrl: false
-sidebar:
-  label: "Remote Invoke v5 PoP Hardening"
-  order: 936
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/design/remote-invoke-v5-pop-hardening.md`.

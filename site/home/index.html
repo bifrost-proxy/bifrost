@@ -1,16 +1,126 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" prefix="og: https://ogp.me/ns#">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
     <meta
       name="description"
-      content="Bifrost is a fast proxy workbench for traffic capture, rewrite, replay, TLS interception, scripts, and desktop debugging workflows."
+      content="Bifrost is an open-source proxy for AI-era development. Capture real HTTP traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script rules, and give Coding Agents reproducible evidence."
     />
-    <title>Bifrost | Proxy Workbench</title>
+    <meta
+      name="keywords"
+      content="Bifrost, proxy, HTTP proxy, traffic capture, request rewrite, response rewrite, API replay, TLS interception, Coding Agent, AI agent, developer tools"
+    />
+    <meta name="application-name" content="Bifrost" />
+    <meta name="apple-mobile-web-app-title" content="Bifrost" />
+    <meta name="theme-color" content="#13a58f" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="canonical" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="x-default" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="en" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="zh-CN" href="%SITE_URL%" />
+    <meta property="og:site_name" content="Bifrost" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="%SITE_URL%" />
+    <meta property="og:title" content="Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay" />
+    <meta
+      property="og:description"
+      content="Capture real traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script proxy rules, and turn evidence into reusable Coding Agent workflows."
+    />
+    <meta property="og:image" content="%OG_IMAGE%" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Bifrost traffic capture, rewrite, replay, TLS, scripting, and Coding Agent workflow preview" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="zh_CN" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Bifrost - AI Proxy for Coding Agents" />
+    <meta
+      name="twitter:description"
+      content="Open-source proxy for traffic capture, rewrite, replay, TLS inspection, scripts, and AI Coding Agent workflows."
+    />
+    <meta name="twitter:image" content="%OG_IMAGE%" />
+    <meta name="twitter:image:alt" content="Bifrost proxy workflow preview" />
+    <title>Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay</title>
     <link rel="icon" type="image/png" href="%BASE_PATH%favicon.png" />
     <link rel="stylesheet" href="%HOME_CSS%" />
     <script src="%HOME_JS%" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "%SITE_URL%#organization",
+            "name": "Bifrost",
+            "url": "%SITE_URL%",
+            "logo": "%SITE_URL%favicon.png",
+            "sameAs": ["https://github.com/bifrost-proxy/bifrost"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "%SITE_URL%#website",
+            "name": "Bifrost",
+            "url": "%SITE_URL%",
+            "publisher": { "@id": "%SITE_URL%#organization" },
+            "inLanguage": ["en", "zh-CN"]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "%SITE_URL%#software",
+            "name": "Bifrost",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": ["macOS", "Windows", "Linux"],
+            "url": "%SITE_URL%",
+            "codeRepository": "https://github.com/bifrost-proxy/bifrost",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "description": "Bifrost is an open-source proxy for AI-era development. It captures real traffic, rewrites HTTP requests and responses, replays APIs, inspects TLS traffic, scripts proxy rules, and helps Coding Agents work from reproducible evidence.",
+            "featureList": [
+              "HTTP and HTTPS traffic capture",
+              "Request and response rewrite rules",
+              "API replay and comparison",
+              "TLS interception controls",
+              "Scriptable proxy rules",
+              "Coding Agent evidence workflows"
+            ],
+            "softwareHelp": "%SITE_URL%docs/"
+          },
+          {
+            "@type": "WebPage",
+            "@id": "%SITE_URL%#webpage",
+            "url": "%SITE_URL%",
+            "name": "Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay",
+            "isPartOf": { "@id": "%SITE_URL%#website" },
+            "about": { "@id": "%SITE_URL%#software" },
+            "primaryImageOfPage": {
+              "@type": "ImageObject",
+              "url": "%OG_IMAGE%",
+              "width": 1200,
+              "height": 630
+            },
+            "description": "Capture real traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script proxy rules, and turn evidence into reusable Coding Agent workflows.",
+            "keywords": [
+              "traffic capture",
+              "HTTP proxy",
+              "request rewrite",
+              "response rewrite",
+              "API replay",
+              "TLS interception",
+              "Coding Agent",
+              "AI developer tools"
+            ],
+            "inLanguage": ["en", "zh-CN"]
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <header class="site-header" aria-label="Bifrost">
@@ -18,12 +128,6 @@
         <img src="%BASE_PATH%favicon.png" alt="" width="32" height="32" decoding="async" />
         <span>Bifrost</span>
       </a>
-      <nav class="nav-links" aria-label="Primary navigation">
-        <a href="%BASE_PATH%docs/" data-i18n="navDocs">Docs</a>
-        <a href="%BASE_PATH%getting-started/installation/" data-i18n="navInstall">Install</a>
-        <a href="%BASE_PATH%en/reference/" data-i18n="navEnglish">English</a>
-        <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
-      </nav>
       <div class="language-switch" role="group" aria-label="Language">
         <button type="button" data-lang="en" aria-pressed="true">EN</button>
         <button type="button" data-lang="zh" aria-pressed="false">中文</button>
@@ -33,17 +137,18 @@
     <main>
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow" data-i18n="heroEyebrow">HTTP / HTTPS / SOCKS5 / WebSocket / Replay</p>
+          <p class="eyebrow" data-i18n="heroEyebrow">AI-era proxy / Coding Agent ready</p>
           <h1 id="hero-title">Bifrost</h1>
           <p class="hero-text" data-i18n="heroText">
-            A proxy workbench for capturing traffic, rewriting requests, replaying failures,
-            and debugging real applications from the terminal, desktop, or browser.
+            A one-stop proxy solution for the AI era. Capture real traffic, rewrite and replay
+            requests, then hand the evidence to your Coding Agent so it can build useful skills.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
-            <a class="button primary" href="%BASE_PATH%getting-started/installation/" data-i18n="primaryCta"
+            <a class="button primary" href="%BASE_PATH%getting-started/installation" data-i18n="primaryCta"
               >Install</a
             >
             <a class="button secondary" href="%BASE_PATH%docs/" data-i18n="secondaryCta">Read Docs</a>
+            <a class="button secondary" href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
           </div>
         </div>
 
@@ -53,7 +158,7 @@
               CLI
             </button>
             <button type="button" role="tab" aria-selected="false" aria-controls="panel-web" id="tab-web">
-              Web UI
+              With AI
             </button>
             <button
               type="button"
@@ -78,20 +183,25 @@
           </div>
 
           <div class="preview-panel" id="panel-web" role="tabpanel" aria-labelledby="tab-web" hidden>
-            <div class="ui-window" aria-label="Bifrost web interface preview">
-              <div class="traffic-list">
-                <span class="status ok-dot"></span>
-                <strong>POST</strong>
-                <span>/v1/orders</span>
-                <em>200</em>
+            <div class="ai-window" aria-label="Bifrost with AI workflow preview">
+              <div class="ai-step">
+                <strong data-i18n="aiStepOneTitle">Install the skill</strong>
+                <code>bifrost install-skill</code>
               </div>
-              <div class="traffic-list">
-                <span class="status warn-dot"></span>
-                <strong>GET</strong>
-                <span>/api/session</span>
-                <em>401</em>
+              <div class="ai-step">
+                <strong data-i18n="aiStepTwoTitle">Capture real traffic</strong>
+                <code>bifrost traffic search --include headers,body api.example.com</code>
               </div>
-              <div class="detail-card">Headers · Body · Cookies · Replay · Export</div>
+              <div class="agent-case">
+                <span data-i18n="aiCaseLabel">Agent case</span>
+                <p data-i18n="aiCaseText">
+                  “Help me capture the login API, understand the request and response shape, then
+                  implement a reusable Coding Agent skill for refreshing sessions.”
+                </p>
+              </div>
+              <div class="ai-result" data-i18n="aiResult">
+                Traffic evidence becomes rules, replay scripts, docs, and a working skill.
+              </div>
             </div>
           </div>
 
@@ -105,42 +215,44 @@ api.example.com replay://last-success
       </section>
 
       <section class="signal-strip" aria-label="Bifrost capabilities">
+        <span>AI-ready</span>
+        <span>Coding Agent</span>
         <span>Capture</span>
         <span>Rewrite</span>
         <span>Replay</span>
-        <span>TLS MITM</span>
-        <span>Scripts</span>
-        <span>Desktop</span>
+        <span>Skills</span>
       </section>
 
       <section class="workflow-section" aria-labelledby="workflow-title">
         <div class="section-heading">
           <p class="eyebrow">Workflow</p>
-          <h2 id="workflow-title" data-i18n="workflowTitle">One proxy, several honest debugging paths.</h2>
+          <h2 id="workflow-title" data-i18n="workflowTitle">
+            One proxy layer between real traffic and useful AI work.
+          </h2>
         </div>
         <div class="workflow-grid">
           <article>
-            <h3 data-i18n="workflowOneTitle">Capture the real request</h3>
+            <h3 data-i18n="workflowOneTitle">Give agents real context</h3>
             <p data-i18n="workflowOneText">
-              Inspect headers, bodies, cookies, streaming messages, and the listener port that saw it.
+              Capture headers, bodies, cookies, streams, and replay material instead of describing APIs by memory.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowTwoTitle">Rewrite without rebuilding</h3>
+            <h3 data-i18n="workflowTwoTitle">Turn traffic into skills</h3>
             <p data-i18n="workflowTwoText">
-              Patch headers, bodies, URLs, status codes, latency, and routing with local rules.
+              Let a Coding Agent read traffic evidence, infer flows, and package the result as a reusable skill.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowThreeTitle">Replay the failure</h3>
+            <h3 data-i18n="workflowThreeTitle">Replay before changing code</h3>
             <p data-i18n="workflowThreeText">
-              Turn a captured request into a repeatable curl, HAR, or replay run while you iterate.
+              Convert captured requests into reproducible curl, HAR, and replay runs before the agent edits anything.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowFourTitle">Automate the edge cases</h3>
+            <h3 data-i18n="workflowFourTitle">Debug the edge cases</h3>
             <p data-i18n="workflowFourText">
-              Use scripts and values when static rules are not enough for the flow you are chasing.
+              Combine rules, scripts, values, and TLS controls when production-like behavior needs precise simulation.
             </p>
           </article>
         </div>
@@ -152,11 +264,11 @@ api.example.com replay://last-success
           <h2 id="start-title" data-i18n="startTitle">From zero to inspected traffic in four steps.</h2>
         </div>
         <div class="steps-grid">
-          <a href="%BASE_PATH%getting-started/installation/">
+          <a href="%BASE_PATH%getting-started/installation">
             <strong>01</strong>
             <span data-i18n="stepOne">Install the CLI</span>
           </a>
-          <a href="%BASE_PATH%getting-started/cli-quick-start/">
+          <a href="%BASE_PATH%getting-started/cli-quick-start">
             <strong>02</strong>
             <span data-i18n="stepTwo">Start the daemon</span>
           </a>
@@ -164,7 +276,7 @@ api.example.com replay://last-success
             <strong>03</strong>
             <span data-i18n="stepThree">Add a rule for one target</span>
           </a>
-          <a href="%BASE_PATH%reference/replay/">
+          <a href="%BASE_PATH%reference/replay">
             <strong>04</strong>
             <span data-i18n="stepFour">Replay and compare</span>
           </a>

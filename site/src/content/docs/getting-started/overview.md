@@ -1,10 +1,7 @@
 ---
 title: "项目概览"
 description: "用几分钟理解 Bifrost 的定位、能力边界和适合的使用场景。"
-editUrl: false
-sidebar:
-  label: "项目概览"
-  order: 10
+editLink: false
 ---
 
 > 此页面由 `docs/overview.md` 自动同步生成。

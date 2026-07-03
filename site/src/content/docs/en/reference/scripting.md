@@ -1,14 +1,11 @@
 ---
 title: "Scripting"
 description: "QuickJS scripting capabilities, restrictions, and usage."
-editUrl: false
-sidebar:
-  label: "Scripting"
-  order: 150
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/scripts.md`.
-> Language: **English** | [中文](../../../reference/scripting/)
+> Language: **English** | [中文](../../reference/scripting)
 
 # Scripts Management and Development Guide
 

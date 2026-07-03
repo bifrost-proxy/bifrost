@@ -1,14 +1,11 @@
 ---
 title: "Project Overview"
 description: "Understand Bifrost positioning, scope, and common use cases."
-editUrl: false
-sidebar:
-  label: "Project Overview"
-  order: 10
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/overview.md`.
-> Language: **English** | [中文](../../../getting-started/overview/)
+> Language: **English** | [中文](../../getting-started/overview)
 
 # What Is Bifrost
 

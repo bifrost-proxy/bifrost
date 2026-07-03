@@ -1,10 +1,7 @@
 ---
 title: "WebSocket"
 description: "WebSocket 相关规则与使用说明。"
-editUrl: false
-sidebar:
-  label: "WebSocket"
-  order: 290
+editLink: false
 ---
 
 > 此页面由 `docs/rules/websocket.md` 自动同步生成。
@@ -208,5 +205,5 @@ ws://api.example.com/socket ws://test-server.example.com/socket reqDelay://1000
 
 ## 关联协议
 
-- [host](../routing/#host) - HTTP/HTTPS 请求转发
-- [proxy](../routing/#proxy) - HTTP 代理转发
+- [host](./routing#host) - HTTP/HTTPS 请求转发
+- [proxy](./routing#proxy) - HTTP 代理转发

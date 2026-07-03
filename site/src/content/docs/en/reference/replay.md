@@ -1,14 +1,11 @@
 ---
 title: "Request Replay"
 description: "Request replay capabilities, supported cases, and usage guidance."
-editUrl: false
-sidebar:
-  label: "Request Replay"
-  order: 170
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/replay.md`.
-> Language: **English** | [中文](../../../reference/replay/)
+> Language: **English** | [中文](../../reference/replay)
 
 # Request Replay Guide
 

@@ -1,14 +1,11 @@
 ---
 title: "Body Manipulation"
 description: "Request and response body manipulation capabilities."
-editUrl: false
-sidebar:
-  label: "Body Manipulation"
-  order: 250
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/body-manipulation.md`.
-> Language: **English** | [中文](../../../../reference/rules/body-manipulation/)
+> Language: **English** | [中文](../../../reference/rules/body-manipulation)
 
 # Body Manipulation Rules
 

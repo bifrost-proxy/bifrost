@@ -1,10 +1,7 @@
 ---
 title: "Values 使用说明"
 description: "Values 存储、规则引用、CLI 管理与脚本访问说明。"
-editUrl: false
-sidebar:
-  label: "Values 使用说明"
-  order: 160
+editLink: false
 ---
 
 > 此页面由 `docs/values.md` 自动同步生成。
@@ -53,8 +50,8 @@ pattern host://127.0.0.1:3000 resHeaders://{customHeaders}
 
 更多规则侧细节见：
 
-- [operation.md](../operations/)
-- [rule.md](../rule-engine/)
+- [operation.md](./operations)
+- [rule.md](./rule-engine)
 
 ## 通过 CLI 管理
 
@@ -82,4 +79,4 @@ if (token) {
 
 > ℹ️ 经实测（bifrost 0.0.96，真实 `bifrost start` 路径）：脚本沙箱的 `ctx.values` 会被全局 Values 填充——`bifrost value add API_TOKEN ...` 后，脚本里 `ctx.values["API_TOKEN"]` 能取到该值，`Object.keys(ctx.values)` 包含它。上面这段示例可正常工作。（`ctx` 字段：`requestId / scriptName / scriptType / phase / values / matchedRules`。）
 
-Scripts 侧细节见：[scripts.md](../scripting/)。
+Scripts 侧细节见：[scripts.md](./scripting)。

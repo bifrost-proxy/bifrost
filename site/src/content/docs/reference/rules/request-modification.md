@@ -1,10 +1,7 @@
 ---
 title: "请求改写"
 description: "请求头、请求体与相关字段的改写说明。"
-editUrl: false
-sidebar:
-  label: "请求改写"
-  order: 220
+editLink: false
 ---
 
 > 此页面由 `docs/rules/request-modification.md` 自动同步生成。

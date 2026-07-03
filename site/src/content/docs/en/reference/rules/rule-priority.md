@@ -1,14 +1,11 @@
 ---
 title: "Rule Priority"
 description: "Rule conflict and priority handling."
-editUrl: false
-sidebar:
-  label: "Rule Priority"
-  order: 320
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/rule-priority.md`.
-> Language: **English** | [中文](../../../../reference/rules/rule-priority/)
+> Language: **English** | [中文](../../../reference/rules/rule-priority)
 
 # Rule Priority and Execution Order
 

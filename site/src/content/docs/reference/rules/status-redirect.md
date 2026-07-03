@@ -1,10 +1,7 @@
 ---
 title: "状态跳转"
 description: "状态码控制、重定向和响应分支能力。"
-editUrl: false
-sidebar:
-  label: "状态跳转"
-  order: 270
+editLink: false
 ---
 
 > 此页面由 `docs/rules/status-redirect.md` 自动同步生成。

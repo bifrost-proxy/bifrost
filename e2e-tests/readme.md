@@ -190,7 +190,7 @@ Admin API 测试脚本位于 `tests/` 目录，用于测试 Bifrost 的管理 AP
 | `test_system_admin_api.sh`    | 10     | 系统信息、概览、指标历史             |
 | `test_scripts_admin_api.sh`   | 12     | 脚本 CRUD、列表、内置脚本            |
 | `test_replay_rules.sh`        | 28     | Replay custom rules、请求/响应修改矩阵 |
-| `test_site_docs_sync.sh`      | 1      | 文档站点同步完整性、未来新增 docs 文档自动生成与真实 Astro 构建 |
+| `test_site_docs_sync.sh`      | 1      | 文档站点同步完整性、未来新增 docs 文档自动生成、真实 VitePress 构建与静态首页覆盖 |
 
 ### 运行 Admin API 测试
 

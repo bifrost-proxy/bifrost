@@ -1,14 +1,11 @@
 ---
 title: "Matching Patterns"
 description: "Domain, path, wildcard, regex, and negated pattern behavior."
-editUrl: false
-sidebar:
-  label: "Matching Patterns"
-  order: 140
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/pattern.md`.
-> Language: **English** | [中文](../../../reference/patterns/)
+> Language: **English** | [中文](../../reference/patterns)
 
 # Matching Patterns
 
@@ -47,4 +44,4 @@ Scheme prefixes (`http://`, `https://`, `http*://`, `ws*://`, `//`) are reliable
 | `http*://*.example.com` / `ws*://*.example.com` | **Never matches** (silently) |
 | `//*.example.com` | **Matches every host** (over-broad — can hijack unrelated traffic) |
 
-Write wildcard host patterns bare. To restrict by scheme, use a Domain pattern (e.g. `http*://api.example.com`) or a PathWildcard (e.g. `^http*://example.com/api/*`) instead. See [中文 pattern.md](../../../reference/patterns/) for the full table.
+Write wildcard host patterns bare. To restrict by scheme, use a Domain pattern (e.g. `http*://api.example.com`) or a PathWildcard (e.g. `^http*://example.com/api/*`) instead. See [中文 pattern.md](../../reference/patterns) for the full table.

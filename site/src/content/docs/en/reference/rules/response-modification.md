@@ -1,14 +1,11 @@
 ---
 title: "Response Modification"
 description: "Response headers, body, and related rewrite operations."
-editUrl: false
-sidebar:
-  label: "Response Modification"
-  order: 230
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/response-modification.md`.
-> Language: **English** | [中文](../../../../reference/rules/response-modification/)
+> Language: **English** | [中文](../../../reference/rules/response-modification)
 
 # Response Modification Rules
 

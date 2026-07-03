@@ -1,16 +1,13 @@
 ---
 title: "CLI 快速开始"
 description: "按场景快速掌握 Bifrost CLI 的常用工作流。"
-editUrl: false
-sidebar:
-  label: "CLI 快速开始"
-  order: 30
+editLink: false
 ---
 
 > 此页面由 `docs/cli-quick-start.md` 自动同步生成。
 # CLI 快速开始
 
-本文档不是完整命令清单，而是按“我现在想完成什么事”来选择 Bifrost CLI 路径。完整参数、所有子命令和变量说明见 [CLI 详细命令](../../reference/cli/)；规则语法见 [规则语法](../../reference/rule-engine/)、[匹配器](../../reference/patterns/)、[操作符说明](../../reference/operations/)。
+本文档不是完整命令清单，而是按“我现在想完成什么事”来选择 Bifrost CLI 路径。完整参数、所有子命令和变量说明见 [CLI 详细命令](../reference/cli)；规则语法见 [规则语法](../reference/rule-engine)、[匹配器](../reference/patterns)、[操作符说明](../reference/operations)。
 
 ## 先选场景
 
@@ -203,7 +200,7 @@ example.com host://127.0.0.1:3000 lineProps://important
 example.com host://127.0.0.1:3000 lineProps://disabled
 ```
 
-更多 operation 的值格式和模板变量见 [操作符说明](../../reference/operations/)。
+更多 operation 的值格式和模板变量见 [操作符说明](../reference/operations)。
 
 ## 场景 6：从流量记录定位问题
 
@@ -510,9 +507,9 @@ bifrost port destroy 18882
 
 ## 继续阅读
 
-- [CLI 详细命令](../../reference/cli/)
-- [安装与启动](../installation/)
-- [规则语法](../../reference/rule-engine/)
-- [匹配器](../../reference/patterns/)
-- [操作符说明](../../reference/operations/)
-- [规则协议手册](../../reference/rules/)
+- [CLI 详细命令](../reference/cli)
+- [安装与启动](./installation)
+- [规则语法](../reference/rule-engine)
+- [匹配器](../reference/patterns)
+- [操作符说明](../reference/operations)
+- [规则协议手册](../reference/rules/)

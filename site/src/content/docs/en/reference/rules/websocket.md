@@ -1,14 +1,11 @@
 ---
 title: "WebSocket"
 description: "WebSocket routing rules and usage."
-editUrl: false
-sidebar:
-  label: "WebSocket"
-  order: 290
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/websocket.md`.
-> Language: **English** | [中文](../../../../reference/rules/websocket/)
+> Language: **English** | [中文](../../../reference/rules/websocket)
 
 # WebSocket Rules
 

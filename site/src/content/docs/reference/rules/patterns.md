@@ -1,10 +1,7 @@
 ---
 title: "规则模式"
 description: "Rules 内的匹配模式与优先级细节。"
-editUrl: false
-sidebar:
-  label: "规则模式"
-  order: 310
+editLink: false
 ---
 
 > 此页面由 `docs/rules/patterns.md` 自动同步生成。
@@ -284,7 +281,7 @@ example.com/api/* redirect://`https://new.example.com/v2/$1`
 
 ### 协议与通配符组合
 
-> ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现错误行为：`http://*.example.com` / `https://*.example.com` 能匹配，但单星 `*` 会跨越 `.`，等价于 `**`（丢失单级限制）；`http*://*.example.com` / `ws*://*.example.com` **永不匹配**（静默失效）；`//*.example.com` **匹配所有 host**（过度匹配）。完整说明见 [pattern.md](../../patterns/) 的「不要在 Wildcard 模式前加协议前缀」表。
+> ⚠️ **不要在 Wildcard 模式前加协议前缀**。协议前缀（`http://`、`https://`、`http*://`、`ws*://`、`//`）只对 Domain 和 PathWildcard（`^` 前缀）模式可靠；与 Wildcard 模式组合会出现错误行为：`http://*.example.com` / `https://*.example.com` 能匹配，但单星 `*` 会跨越 `.`，等价于 `**`（丢失单级限制）；`http*://*.example.com` / `ws*://*.example.com` **永不匹配**（静默失效）；`//*.example.com` **匹配所有 host**（过度匹配）。完整说明见 [pattern.md](../patterns) 的「不要在 Wildcard 模式前加协议前缀」表。
 
 需要按协议限定时：裸 Wildcard（如 `*.example.com`）已覆盖 HTTP/HTTPS；要限定单一协议或匹配 WS/WSS，请改用 Domain 模式（如 `http*://api.example.com`）或 PathWildcard（如 `^http*://example.com/api/*`）。
 
@@ -586,7 +583,7 @@ ws*://www.example.com host://ws-backend.local
 !192.168.0.0/16 host://127.0.0.1
 ```
 
-要从一个已命中集合中排除子集，请改用 `excludeFilter://`（见 [filters.md](../filters/)，请求阶段的方法/路径/请求头排除实测可用）：
+要从一个已命中集合中排除子集，请改用 `excludeFilter://`（见 [filters.md](./filters)，请求阶段的方法/路径/请求头排除实测可用）：
 
 ```bash
 # svc.test 整体转发到本地，但 /account 路径排除（实测：/account 走真实后端，其余转发）

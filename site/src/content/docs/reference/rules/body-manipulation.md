@@ -1,10 +1,7 @@
 ---
 title: "Body 改写"
 description: "请求体与响应体改写能力说明。"
-editUrl: false
-sidebar:
-  label: "Body 改写"
-  order: 250
+editLink: false
 ---
 
 > 此页面由 `docs/rules/body-manipulation.md` 自动同步生成。

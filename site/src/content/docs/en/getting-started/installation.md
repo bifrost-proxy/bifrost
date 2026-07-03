@@ -1,14 +1,11 @@
 ---
 title: "Installation and Startup"
 description: "Install and start Bifrost using the English documentation path."
-editUrl: false
-sidebar:
-  label: "Installation and Startup"
-  order: 20
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/getting-started.md`.
-> Language: **English** | [中文](../../../getting-started/installation/)
+> Language: **English** | [中文](../../getting-started/installation)
 
 # Installation and Startup
 

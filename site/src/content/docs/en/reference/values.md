@@ -1,14 +1,11 @@
 ---
 title: "Values Guide"
 description: "Values storage, rule references, CLI management, and script access."
-editUrl: false
-sidebar:
-  label: "Values Guide"
-  order: 160
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/values.md`.
-> Language: **English** | [中文](../../../reference/values/)
+> Language: **English** | [中文](../../reference/values)
 
 # Values Guide
 

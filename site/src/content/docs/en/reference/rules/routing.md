@@ -1,14 +1,11 @@
 ---
 title: "Routing"
 description: "Rule routing, forwarding, and proxy control."
-editUrl: false
-sidebar:
-  label: "Routing"
-  order: 210
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/routing.md`.
-> Language: **English** | [中文](../../../../reference/rules/routing/)
+> Language: **English** | [中文](../../../reference/rules/routing)
 
 # Routing Rules
 

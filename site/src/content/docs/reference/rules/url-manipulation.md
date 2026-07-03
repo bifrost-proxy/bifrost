@@ -1,10 +1,7 @@
 ---
 title: "URL 改写"
 description: "URL、路径与查询参数的改写能力。"
-editUrl: false
-sidebar:
-  label: "URL 改写"
-  order: 240
+editLink: false
 ---
 
 > 此页面由 `docs/rules/url-manipulation.md` 自动同步生成。

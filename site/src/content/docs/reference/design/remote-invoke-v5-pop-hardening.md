@@ -1,10 +1,7 @@
 ---
 title: "Remote Invoke v5 PoP Hardening — P0 修复方案"
 description: "从 docs/design/remote-invoke-v5-pop-hardening.md 自动同步生成的 Remote Invoke v5 PoP Hardening — P0 修复方案 文档。"
-editUrl: false
-sidebar:
-  label: "Remote Invoke v5 PoP Hardening — P0 修复方案"
-  order: 906
+editLink: false
 ---
 
 > 此页面由 `docs/design/remote-invoke-v5-pop-hardening.md` 自动同步生成。

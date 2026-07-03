@@ -1,14 +1,11 @@
 ---
 title: "Breakpoint"
 description: "Pause, inspect, edit, and resume matched HTTP traffic."
-editUrl: false
-sidebar:
-  label: "Breakpoint"
-  order: 195
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/breakpoint.md`.
-> Language: **English** | [中文](../../../reference/breakpoint/)
+> Language: **English** | [中文](../../reference/breakpoint)
 
 # Breakpoint User Guide
 

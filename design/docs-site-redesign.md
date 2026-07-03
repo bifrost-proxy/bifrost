@@ -2,156 +2,125 @@
 
 ## 功能模块
 
-文档站现在拆成两个明确的交付表面：
+文档站拆成两个明确表面：
 
-1. 首页：`/` 由 `site/home/index.html`、`site/home/styles.css` 和 `site/home/home.js` 直接维护。构建时由 `site/scripts/build-home.mjs` 复制到 `site/dist/index.html`，不经过 Astro 页面、Starlight layout、React/Vue runtime 或 hydration。
-2. 文档区：`/docs/`、`/getting-started/`、`/reference/`、`/en/...` 继续使用现有 Astro + Starlight + Pagefind。文档内容仍然从仓库根目录 `docs/` 与 `docs-en/` 自动同步到 `site/src/content/docs/`。
+1. 首页：`/` 由 `site/home/index.html`、`site/home/styles.css` 和 `site/home/home.js` 手写维护。构建后由 `site/scripts/build-home.mjs` 覆盖到 `site/dist/index.html`，首页不经过 VitePress 页面生成，也不加载 Vue/VitePress runtime。
+2. 文档区：`/docs/`、`/getting-started/`、`/reference/`、`/en/...` 使用 VitePress。文档内容每次构建都从仓库根目录 `docs/` 与 `docs-en/` 同步到 `site/src/content/docs/`。
 
-这次实现的核心目标是：让首页保持极轻、极可控，同时让部署每次都重新同步全部源文档，避免文档站与 `docs/`、`docs-en/` 目录漂移。
+当前决策是把文档区技术栈切到 VitePress，和 Vite / Vite 中文文档站的底层文档技术方案保持一致；首页仍保持单独设计的纯 HTML 方案，以便首屏性能和内容表达完全可控。
 
 ## 用户目标验证清单
 
 ### 必须实现
 
-- 调研更适合文档站的方案，并明确不替换现有文档区框架。
-- 首页不使用框架生成页面，不使用生成式模板方案，采用单独设计的纯 HTML 交付。
-- 首页性能优先，首屏不依赖框架运行时、hydration、客户端路由或大型 JS 包。
-- 首页体验参考 `https://bigmodel.cn/glm-coding` 的首屏交互、布局节奏和视觉表达，但不照搬素材、文案和品牌。
-- 部署构建每次都自动从 `docs/` 与 `docs-en/` 生成文档区内容，保持始终同步。
-- 英文文档源 `docs-en/**` 变更必须触发站点 CI 与部署。
+- 文档区技术栈迁移到 VitePress。
+- 首页不使用框架生成页面，不使用生成式模板方案，采用单独设计的纯 HTML / CSS / 原生 JS。
+- 首页强调“AI 时代的一站式代理解决方案”，并突出与 Coding Agent / skill 工作流的配合。
+- 首页右侧预览 Tab 使用 `CLI`、`With AI`、`Rules`，`With AI` 展示 skill 安装、抓取真实流量和让 Agent 实现技能的 case。
+- 部署构建每次自动从 `docs/` 与 `docs-en/` 生成文档区内容，保持始终同步。
+- 文档区布局参考 Vite 文档的三栏阅读结构，但主题色使用 Bifrost 绿色系。
+- 首页首次体验指引使用 `bifrost start -d`，不默认推荐 `--no-system-proxy`。
 
 ### 必须不破坏
 
 - 不改变 `docs/`、`docs-en/` 作为源文档的维护方式。
 - 不破坏现有 `/docs/`、`/getting-started/`、`/reference/`、`/en/...` 深链。
-- 不降低文档区搜索、侧边栏、代码块、i18n、404 和站内链接验证能力。
-- 不让首页视觉资产、脚本或动画拖慢文档区构建。
+- 不让首页引入 VitePress/Vue runtime、hydration 或客户端路由。
+- 不让测试/CI 场景使用的 `--no-system-proxy` 成为普通用户手册或首页默认建议。
+- 不降低文档区搜索、侧边栏、代码块、i18n、404、站内链接验证能力。
 
 ### 必须真实验证
 
-- 真实浏览器打开参考站，记录可借鉴的首屏、滚动段落和交互模式。
-- 执行 `pnpm --dir site run test` 验证文档同步与静态首页脚本单元测试。
-- 执行 `pnpm --dir site run build` 验证部署构建链路：sync docs -> verify docs -> Astro docs build -> static home overlay -> home verify -> site links verify。
-- 执行 `e2e-tests/tests/test_site_docs_sync.sh` 验证新增中文和英文源文档会被自动同步、构建和链接校验覆盖。
-- 用浏览器或本地静态服务打开 `site/dist/index.html`，验证首页布局、Tab 交互和静态资源加载。
+- 执行 `pnpm --dir site run test` 验证 docs sync、站点链接和首页静态脚本单元测试。
+- 执行 `pnpm --dir site run build` 验证部署构建链路：sync docs -> verify docs -> VitePress build -> legacy redirects -> static home overlay -> home verify -> site links verify。
+- 执行 `bash e2e-tests/tests/test_site_docs_sync.sh` 验证新增中文和英文源文档会自动同步、构建和进入链接校验。
+- 使用本地 `vitepress preview` 打开 `/bifrost/`、中文文档、英文文档、暗色模式和移动端并截图观察 UI。
 
 ### 必须交付
 
 - 更新技术方案文档。
-- 实现静态首页源文件、构建脚本、校验脚本和单元测试。
-- 更新站点构建脚本、部署触发路径和 docs sync E2E。
-- 更新 `human_tests/` 真实场景用例并执行。
+- 实现 VitePress 配置、主题、文档同步脚本、重定向脚本和首页 AI 定位。
+- 更新站点 E2E、human_tests 和索引。
 - 完成两轮 Review/Fix/Test。
+- 提交、推送、更新 PR 并看护远端 CI。
 
 ## 任务启动与隔离证据
 
-- 主工作区启动检查：`git status --short --branch` 显示当前位于 `codex/default-global-rule-design`。
-- 本任务从 `origin/main` 创建独立 worktree：`../bifrost-docs-site-plan`。
+- 主工作区存在并行开发风险，本任务使用独立 worktree：`../bifrost-docs-site-plan`。
 - 方案与实现分支：`codex/docs-site-redesign-plan`。
-- 变更只保留在该独立 worktree，不污染主工作区的并行开发改动。
+- 任务启动检查命令：`git status --short --branch`。
 
-## 现状与落地结果
+## 当前实现
 
-当前仓库已经具备文档站基础：
+### VitePress 文档区
 
-- `site/` 使用 Astro + Starlight。
-- `site/src/content/docs/` 由 `site/scripts/sync-docs.mjs` 从 `docs/` 与 `docs-en/` 同步生成。
-- `site/scripts/verify-docs-sync.mjs` 校验生成文档与源文档一致。
-- `site/scripts/verify-site-links.mjs` 校验最终 `site/dist` 内部链接。
-- `.github/workflows/site.yml` 使用 GitHub Pages 部署 `site/dist`。
+- `site/.vitepress/config.mjs` 是 VitePress 入口配置。
+- `srcDir: "src/content/docs"`，`outDir: "dist"`，`cleanUrls: true`，`base` 由 `BASE_PATH` 或 `SITE_URL` 推导，默认适配 GitHub Pages `/bifrost/`。
+- `.vitepress/config.mjs` 直接复用 `site/scripts/docs-sync-lib.mjs` 的 `buildPagesSync()`，从同步页列表生成中文和英文 sidebar。
+- `themeConfig.search.provider = "local"` 使用 VitePress 本地搜索。
+- `themeConfig.i18nRouting = false`，避免 VitePress 对当前路径做简单同构语言映射；本项目中英文源文档有显式映射，语言入口使用固定可用路径。
+- `site/.vitepress/theme/style.css` 覆盖 VitePress 主题变量和布局细节，使用 Bifrost 绿色主题。
+- 静态资源放在 `site/src/content/docs/public/`，符合 VitePress 在 `srcDir/public` 复制静态资源的规则。
 
-本次已落地的变更：
+### 首页
 
-- 删除旧的 `site/src/pages/index.astro`，避免首页继续由 Astro 生成。
-- 新增 `site/home/index.html` 作为首页唯一源文件。
-- 新增 `site/home/styles.css`，首页样式不依赖 Starlight 或远程字体。
-- 新增 `site/home/home.js`，只负责原生 Tab 切换、键盘可访问性和中英文轻量切换。
-- 新增 `site/scripts/build-home.mjs`，在 Astro build 后写入 `site/dist/index.html`，并生成带 hash 的 CSS/JS 资源。
-- 新增 `site/scripts/verify-home.mjs` 与 `site/scripts/home-static-lib.mjs`，禁止首页引入 Astro runtime marker，校验 base path、ARIA、中英文切换、图片尺寸和 gzip 预算。
-- `site/package.json` 的 `build` 保持部署期自动 sync docs，并在文档区构建后覆盖静态首页。
-- `.github/workflows/site.yml` 增加 `docs-en/**` path filter，英文文档变更也会触发站点 CI/部署。
-- `e2e-tests/tests/test_site_docs_sync.sh` 增加静态首页断言，并继续验证临时新增中文和英文文档会自动出现在构建产物中。
+- `site/home/index.html` 是唯一首页源文件。
+- 首页定位：`AI-era proxy / Coding Agent ready` 与中文 `AI 时代代理方案 / 适配 Coding Agent`。
+- 右侧预览 Tab：
+  - `CLI`：展示 `bifrost start -d` 和 traffic search。
+  - `With AI`：展示 `bifrost install-skill`、`bifrost traffic search --include headers,body ...` 和“帮我抓取登录接口，然后实现一个可复用 Coding Agent 会话刷新技能”的 case。
+  - `Rules`：展示规则片段。
+- `site/home/home.js` 只负责原生 Tab 切换、键盘可访问性和中英文轻量切换。
+- `site/scripts/home-static-lib.mjs` 为首页生成带 hash 的 CSS/JS，并校验 base path、ARIA、中英文、图片尺寸、gzip 预算和 forbidden runtime marker。
+
+### 自动同步
+
+- `site/scripts/sync-docs.mjs` 每次构建都执行。
+- `site/scripts/verify-docs-sync.mjs` 在 VitePress build 前执行，源文档和生成文档不一致时提前失败。
+- `site/scripts/docs-sync-lib.mjs` 负责发现 `docs/` 与 `docs-en/` 下所有 Markdown，并生成 VitePress `.md` 内容。
+- README 入口和已知页面映射到稳定路由，例如 `docs/overview.md -> getting-started/overview.md`、`docs-en/README.md -> en/reference/index.md`。
+- Markdown 内部链接按 VitePress clean URL 重写，避免 build 阶段 dead link。
+
+### 重定向与 404
+
+- `site/scripts/write-redirects.mjs` 为旧路径写入静态 redirect HTML，例如 `reference/getting-started/cli-quick-start/index.html -> /bifrost/getting-started/cli-quick-start`。
+- VitePress 生成 `404.html`。公开根站 `https://bifrost-proxy.github.io/` 必须直接使用本仓库 `site/` 构建出的同一套首页与文档产物，不再维护独立跳转壳或独立设计。
+- 根站部署流程：在本仓库执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，然后把 `site/dist/` 同步到 `bifrost-proxy/bifrost-proxy.github.io` 仓库并推送 `main` 触发 GitHub Pages。部署仓库只承载产物，不能手写另一套首页、语言切换、导航、SEO 或文档入口。
 
 ## 外部调研结论
 
-### Astro / Starlight
-
-Astro 适合内容驱动站点，Starlight 提供文档导航、搜索、i18n、SEO、代码高亮和暗色模式。Starlight 默认集成 Pagefind，适合静态文档搜索。
-
-结论：继续用于文档区。替换文档区框架成本高，收益主要不在文档阅读体验。
-
-### Pagefind
-
-Pagefind 对静态 HTML 构建产物生成搜索索引，不需要搜索服务，适合静态文档站。
-
-结论：继续作为文档区搜索方案。首页不加载 Pagefind，避免首屏额外资源。
-
-### Docusaurus
-
-Docusaurus 是 React 静态站点生成器，会生成可见 HTML，但也构建 SPA 和客户端路由体验。
-
-结论：不适合本次目标。它能改善文档生态，但首页“纯 HTML、非框架生成、极致性能”目标会被 React/SPA 运行时拉偏。
-
 ### VitePress
 
-VitePress 是 Vite + Vue 文档静态站点生成器，Markdown 和 Vue 扩展体验好。
+官方 Getting Started 说明 VitePress 通过 `.vitepress/config.*` 配置，源文件是 Markdown，支持 `vitepress dev/build/preview`。官方 Site Config 说明 `base` 需要用于 GitHub Pages 这类子路径部署，`srcDir` 和 `outDir` 可配置。官方 i18n 文档说明 VitePress 内置 `locales` 配置。
 
-结论：不建议迁移。它仍是框架生成文档站，当前 Starlight 已满足内容区能力，迁移只会引入 Vue 主题重写成本。
+结论：文档区采用 VitePress。它与 Vite 文档站的底层方案一致，适合当前“文档区参考 Vite 布局，首页独立纯 HTML”的目标。
 
-### Cloudflare Pages / GitHub Pages
+### Vite / Vite 中文文档
 
-Cloudflare Pages 支持任意静态 HTML 部署，并可通过 `_headers` 控制响应头；GitHub Pages 当前已接入仓库 workflow，部署简单但响应头控制弱。
+Vite 仓库的 `docs/` 使用 `.vitepress` 配置。线上 `vitejs.cn/guide/` 和 `cn.vite.dev/guide/` 的页面资源包含 VitePress runtime、默认主题组件、local search 与 VitePress 样式类，说明其文档区是 VitePress 方案。
 
-结论：短期继续 GitHub Pages，方案中保留 Cloudflare Pages 作为后续性能增强部署目标。
+结论：文档区布局参考 Vite 文档的阅读体验：顶部导航、左侧分组 sidebar、中间正文、右侧目录、搜索和明暗模式；Bifrost 主题改为绿色，不照搬 Vite 首页。
 
-## BigModel GLM Coding 首页体验参考
+### BigModel GLM Coding 首页
 
 2026-07-03 通过真实浏览器打开 `https://bigmodel.cn/glm-coding` 观察，提炼以下可借鉴模式：
 
-1. 首屏高度克制：顶部导航只保留关键入口；主体用超大产品名、短副标题和单主 CTA 建立定位。
-2. 产品演示前置：首屏下半部露出大尺寸终端或 IDE 演示面板，让用户无需滚动就理解产品与工作流。
-3. 轻量 Tab 交互：演示面板提供切换，不跳页，降低理解成本。
-4. 视觉语言集中：白底、大字号、少色彩，关键视觉集中在演示面板。
-5. 滚动叙事顺序清晰：首屏定位 -> 能力信任带 -> 工作流证据 -> 如何开始。
-6. 底部行动路径具体：用编号卡片把开始流程拆成明确动作。
+- 首屏高度克制：顶部导航只保留关键入口。
+- 主体用超大产品名、短副标题和单主 CTA 建立定位。
+- 首屏右侧放可交互演示面板，让用户无需滚动就理解产品工作流。
+- 轻量 Tab 交互不跳页，降低理解成本。
+- 白底、大字号、少色彩，关键视觉集中在演示面板。
 
-Bifrost 首页吸收了这些节奏，但表达为工程工具场景：
+Bifrost 首页吸收这些节奏，但表达为 AI 时代代理工具：左侧强调一站式代理和 Coding Agent，右侧 `With AI` 展示 skill 工作流。
 
-- 首屏标题直接使用 `Bifrost`。
-- 首屏直接展示 CLI、Web UI、Rules 三个真实工作流 Tab。
-- 第二屏用 Capture、Rewrite、Replay、Automate 解释实际能力。
-- “Start” 区域保持四步：安装、后台启动服务、添加规则、回放对比。
-- 顶部提供 `EN / 中文` 轻量切换，默认英文 no-JS 可读，中文用户通过 JS 切换或浏览器语言自动进入中文文案。
-
-## 实现架构
-
-```
-site/
-  home/
-    index.html
-    styles.css
-    home.js
-  src/
-    pages/
-      404.astro
-    content/docs/
-  scripts/
-    build-home.mjs
-    verify-home.mjs
-    home-static-lib.mjs
-    home-static.test.mjs
-    sync-docs.mjs
-    verify-docs-sync.mjs
-    verify-site-links.mjs
-```
-
-构建顺序固定为：
+## 构建流程
 
 ```bash
 rm -rf dist
 node scripts/sync-docs.mjs
 node scripts/verify-docs-sync.mjs
-astro build
+vitepress build .
+node scripts/write-redirects.mjs
 node scripts/build-home.mjs
 node scripts/verify-home.mjs
 node scripts/verify-site-links.mjs
@@ -159,184 +128,77 @@ node scripts/verify-site-links.mjs
 
 关键约束：
 
-- `sync-docs.mjs` 每次部署构建都执行，确保 `docs/` 和 `docs-en/` 是唯一源。
-- `verify-docs-sync.mjs` 在 Astro build 前执行，源文档和生成文档不一致时提前失败。
-- `build-home.mjs` 必须在 Astro build 后执行，最终 `dist/index.html` 才是手写 HTML。
-- `verify-home.mjs` 必须在 `build-home.mjs` 后执行，防止首页重新引入框架 runtime、缺失 base path 或超出预算。
-- `verify-site-links.mjs` 必须最后执行，覆盖首页和文档区的最终链接状态。
-- `BASE_PATH` 或 `SITE_URL` 控制 GitHub Pages `/bifrost/` 前缀，首页链接和 hash 资源必须一致使用该前缀。
-
-## 首页内容结构
-
-1. 顶部导航
-   - 左侧：Bifrost 字标和 favicon。
-   - 右侧：Docs、Install、English、GitHub。
-   - 语言：`EN / 中文` segmented control，不跳页、不加载框架。
-
-2. 首屏
-   - H1：`Bifrost`
-   - 副标题：`A proxy workbench for capturing traffic, rewriting requests, replaying failures...`
-   - 主 CTA：Install。
-   - 次 CTA：Read Docs。
-   - 首屏下半部露出工作台预览，保证桌面和移动端都能看到下一段内容的线索。
-
-3. 原生演示 Tab
-   - `CLI`：展示 `bifrost start -d` 和 traffic search；首页不向首次体验用户推荐 `--no-system-proxy`，该参数只保留给测试、CI、沙箱或明确诊断场景。
-   - `Web UI`：展示 Traffic、Headers、Body、Replay 等 UI 信息层级。
-   - `Rules`：展示规则片段。
-   - Tab 使用 `<button role="tab" aria-selected>`；无 JS 时默认显示 CLI 静态面板。
-
-4. 信任带
-   - 使用能力标签：Capture、Rewrite、Replay、TLS MITM、Scripts、Desktop。
-
-5. 工作流
-   - Capture the real request。
-   - Rewrite without rebuilding。
-   - Replay the failure。
-   - Automate the edge cases。
-
-6. 如何开始
-   - 01 Install the CLI。
-   - 02 Start the daemon。
-   - 03 Add a rule for one target。
-   - 04 Replay and compare。
-
-## 视觉方向
-
-- 默认浅色以白色和浅灰为主，不做大面积深色或单一蓝紫渐变。
-- 暗色模式通过 `prefers-color-scheme: dark` 自动适配，保持终端/工作台的工程工具质感，避免只反转颜色导致的低对比。
-- 首屏标题使用大字号，但文档和工具内页不使用 hero 字号。
-- 视觉主角是产品状态，不是装饰图形。
-- 渐变只用于按钮和演示面板边缘。
-- 卡片半径控制在 8px 以内。
-- 不使用生成图片作为首页主视觉。
-- 不加载远程字体，使用 system font。
-
-## 性能预算
-
-首页预算按移动 4G 和冷缓存制定，由 `verify-home.mjs` 自动校验主要静态预算：
-
-| 项目 | 预算 |
-| --- | --- |
-| HTML | <= 28 KiB gzip |
-| CSS | <= 12 KiB gzip |
-| JS | <= 4 KiB gzip |
-| 首屏图片 | 必须有 width/height |
-| 总首屏传输 | <= 150 KiB gzip |
-| 第三方请求 | 0 |
-| 字体 | system font，不加载远程字体 |
-| LCP | 本地 Lighthouse mobile <= 1.8s 作为目标 |
-| CLS | <= 0.02 |
-
-## 搜索策略
-
-- 首页不加载 Pagefind。
-- 首页顶部入口跳转到 `/docs/`，由 Starlight/Pagefind 接管搜索。
-- 后续如确实需要首页 command palette，必须按需加载 Pagefind，用户点击搜索后才请求搜索 bundle。
-
-## 部署策略
-
-短期：
-
-- 保持 `.github/workflows/site.yml` 部署 GitHub Pages。
-- `site/package.json` 的 `build` 是部署唯一入口，始终先 sync `docs/` 和 `docs-en/`。
-- workflow path filter 包含 `site/**`、`docs/**`、`docs-en/**`、`assets/**`、`package.json`、`pnpm-lock.yaml`。
-
-中期：
-
-- 可增加 Cloudflare Pages 双部署，输出仍为 `site/dist`。
-- 在 Cloudflare Pages 使用 `_headers` 设置：
-  - HTML: 短缓存或 no-cache。
-  - hash 资源: 长缓存 immutable。
-  - 安全头: `X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`。
-
-## 回滚策略
-
-- 恢复 `site/src/pages/index.astro`，并从 `site/package.json` build 中移除 `build-home.mjs` 和 `verify-home.mjs`。
-- 首页手写资产独立在 `site/home/`，回滚不会影响 `docs/` 与 `docs-en/` 同步。
-- 若 GitHub Pages 或后续 Cloudflare Pages 部署异常，仍可通过前一个成功的 Pages artifact 回滚。
+- `build-home.mjs` 必须在 `vitepress build` 后执行，最终 `dist/index.html` 才是手写首页。
+- `verify-home.mjs` 必须在 `build-home.mjs` 后执行，防止首页重新引入 framework marker、缺失 base path 或超出预算。
+- `verify-site-links.mjs` 必须最后执行，覆盖首页、VitePress 文档区和 redirect HTML 的最终链接状态。
 
 ## 测试方案
 
 ### 单元测试
 
-- `pnpm --dir site run home:test`
-  - 验证 base path 替换、hash 资源引用、复制输出和 no-framework marker。
-  - 验证缺失图片尺寸、缺少中英文切换和框架 marker 会失败。
-- `pnpm --dir site run docs:test`
-  - 验证文档同步脚本行为。
 - `pnpm --dir site run test`
-  - 同时执行 docs sync 与静态首页脚本测试。
+- 覆盖 docs source discovery、Markdown link rewrite、stale generated docs cleanup、VitePress clean URL link verification、home static build 和 forbidden marker 校验。
 
-### E2E 测试
+### E2E
 
 - `bash e2e-tests/tests/test_site_docs_sync.sh`
-  - 临时新增中文源文档和英文源文档。
-  - 执行 docs sync、docs verify 和完整 site build。
-  - 验证新增文档进入 `site/dist`。
-  - 验证 `site/dist/index.html` 为静态首页，包含 `bifrost start -d`、`/bifrost/docs/`、`/bifrost/en/reference/`、`role="tablist"`、`data-lang="zh"`，且不包含 `/_astro/` 或默认推荐 `bifrost start --no-system-proxy`。
-  - 执行站内链接校验。
+- 临时新增中文和英文 docs probe，验证无需改站点配置即可被同步、构建、进入 `dist`，并验证首页 AI 文案、`With AI`、`bifrost install-skill`、`bifrost start -d` 和禁止默认推荐 `--no-system-proxy`。
 
-### 真实场景测试
+### Human Tests
 
 - `human_tests/docs-site-redesign.md`
-- 覆盖首页纯 HTML 源、构建顺序、自动同步、部署触发路径、静态首页产物、Tab 交互、中英文、明暗模式和清理要求。
+- 覆盖首页纯 HTML、VitePress build、文档区 Vite-like 布局、本地 preview、中文/英文、明暗模式、移动端和截图观察。
+
+## 已执行验证
+
+- `pnpm --dir site run test`：通过，8 个测试通过。
+- `pnpm --dir site run build`：通过，VitePress build、redirect、home verify、site links verify 全部通过。
+- `bash e2e-tests/tests/test_site_docs_sync.sh`：通过，临时新增中文和英文文档均进入同步和构建链路。
+- 本地服务：
+  - `pnpm --dir site exec vitepress preview . --host 127.0.0.1 --port 4177`
+  - 首页：`http://127.0.0.1:4177/bifrost/`
+  - 中文文档：`http://127.0.0.1:4177/bifrost/getting-started/overview`
+  - 英文文档：`http://127.0.0.1:4177/bifrost/en/getting-started/overview`
+- 截图证据：
+  - `/tmp/bifrost-home-vitepress-overlay-desktop.png`
+  - `/tmp/bifrost-home-vitepress-overlay.png`
+  - `/tmp/bifrost-docs-vitepress-desktop.png`
+  - `/tmp/bifrost-docs-vitepress-dark.png`
+  - `/tmp/bifrost-docs-vitepress-english.png`
+  - `/tmp/bifrost-docs-vitepress-mobile.png`
 
 ## Review/Fix/Test 闭环方案
 
 ### 第 1 轮
 
-- 复核用户目标：BigModel 参考、首页纯 HTML、部署期自动同步、独立 worktree、实现交付。
-- 执行 `git status --short` 和 `git diff`。
-- Review `site/home/*`、`site/scripts/home-static-*`、`site/package.json`、`.github/workflows/site.yml` 和 `e2e-tests/tests/test_site_docs_sync.sh`。
-- 执行 `pnpm --dir site run test`、`pnpm --dir site run build` 和 `bash e2e-tests/tests/test_site_docs_sync.sh`。
+- 复核用户目标：VitePress 迁移、首页 AI 定位、With AI tab、docs sync、`bifrost start -d`。
+- Review 范围：`site/.vitepress/`、`site/home/`、`site/scripts/`、E2E、design、human_tests。
+- 运行：`pnpm --dir site run test`、`pnpm --dir site run build`、`bash e2e-tests/tests/test_site_docs_sync.sh`。
+- 已发现并修复：
+  - Markdown 相对链接按旧页面路径计算，VitePress dead link 检查失败。
+  - VitePress clean URL 与首页链接尾斜杠不一致。
+  - VitePress `srcDir` 下 public 资源位置不对，首页 favicon 校验失败。
+  - VitePress 默认 i18n 对应页推断生成错误语言链接。
 
 ### 第 2 轮
 
-- 复查第 1 轮修复后的 diff。
-- 检查 `human_tests/readme.md` 只更新相关索引行，没有全局汇总数字。
-- 复核 `site/dist/index.html` 是否来自 `site/home/index.html`，且不包含 Astro runtime marker。
-- 复跑受影响测试，并用本地静态服务做浏览器或 HTTP 验证。
+- 复查最新 diff、浏览器 UI 和截图。
+- 运行：`pnpm --dir site run build`，本地 `vitepress preview` 浏览器验证。
+- 已发现并修复：
+  - With AI 面板在真实桌面截图中最后一条结果卡被固定高度裁切。
+  - Python 静态服务不支持 VitePress clean URL，改用 `vitepress preview` 验证真实文档路由。
 
-## 校验要求
+## 残余风险
 
-本次实现阶段必须执行：
+- VitePress `cleanUrls` 在不同静态服务上表现依赖服务端 fallback。GitHub Pages 和 VitePress preview 支持目标路由；本地手写 Python server 仅适合验证 `/bifrost/` 首页，不适合作为 clean URL 文档页验证服务。
+- 本次未改变源文档内容，只同步生成站点内容；源文档若新增大量特殊 Markdown/Vue 语法，仍需要 VitePress build 作为最终门禁。
 
-- `git status --short --branch`
-- `git diff`
-- `git diff --check`
-- `pnpm --dir site run test`
-- `pnpm --dir site run build`
-- `bash e2e-tests/tests/test_site_docs_sync.sh`
-- 按 `human_tests/docs-site-redesign.md` 逐条执行用例
+## 参考资料
 
-以下项目不适用：
-
-- Rust 单元测试：未修改 Rust 代码。
-- `cargo test --workspace --all-features`：站点静态首页、构建脚本和 CI path filter 变更，不触及 Rust workspace 行为。
-- `make coverage`：未修改业务代码，覆盖率门禁不适用。
-- `scripts/ci/local-ci.sh`：本次由站点单元测试、站点 build、docs sync E2E 和远端 CI 覆盖，完整 local-ci 成本与收益不匹配。
-
-## 文档更新要求
-
-- 更新本文档。
-- 更新 `human_tests/docs-site-redesign.md`。
-- 更新 `human_tests/readme.md` 索引。
-- 通过 `site/scripts/sync-docs.mjs` 让 `docs/` 与 `docs-en/` 持续生成文档站内容。
-
-## 调研来源
-
-- Astro: https://astro.build/
-- Astro Why Astro: https://docs.astro.build/en/concepts/why-astro/
-- Astro Starlight: https://starlight.astro.build/
-- Starlight Search: https://starlight.astro.build/guides/site-search/
-- Pagefind: https://pagefind.app/
-- Pagefind docs: https://pagefind.app/docs/
-- Docusaurus SSG: https://docusaurus.io/docs/advanced/ssg
-- Docusaurus introduction: https://docusaurus.io/docs
-- VitePress: https://vitepress.dev/
-- VitePress routing: https://vitepress.dev/guide/routing
-- Cloudflare Pages headers: https://developers.cloudflare.com/pages/configuration/headers/
-- Cloudflare Pages serving pages: https://developers.cloudflare.com/pages/configuration/serving-pages/
-- Cloudflare static HTML: https://developers.cloudflare.com/pages/framework-guides/deploy-anything/
-- BigModel GLM Coding reference: https://bigmodel.cn/glm-coding
+- VitePress Getting Started: https://vitepress.dev/guide/getting-started
+- VitePress Site Config: https://vitepress.dev/reference/site-config
+- VitePress i18n: https://vitepress.dev/guide/i18n
+- Vite docs source: https://github.com/vitejs/vite/tree/main/docs
+- VitePress config in Vite repo: https://github.com/vitejs/vite/blob/main/docs/.vitepress/config.ts
+- Vite 中文文档: https://vitejs.cn/guide/
+- BigModel GLM Coding: https://bigmodel.cn/glm-coding

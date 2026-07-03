@@ -1,10 +1,7 @@
 ---
 title: "脚本规则"
 description: "在 Rules 中接入脚本能力的方式。"
-editUrl: false
-sidebar:
-  label: "脚本规则"
-  order: 300
+editLink: false
 ---
 
 > 此页面由 `docs/rules/scripts.md` 自动同步生成。

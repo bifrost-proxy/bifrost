@@ -1,14 +1,11 @@
 ---
 title: "Status and Redirect"
 description: "Status-code control, redirects, and response branching."
-editUrl: false
-sidebar:
-  label: "Status and Redirect"
-  order: 270
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/status-redirect.md`.
-> Language: **English** | [中文](../../../../reference/rules/status-redirect/)
+> Language: **English** | [中文](../../../reference/rules/status-redirect)
 
 # Status Code and Redirect Rules
 

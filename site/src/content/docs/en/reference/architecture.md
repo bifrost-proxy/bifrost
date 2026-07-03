@@ -1,14 +1,11 @@
 ---
 title: "Project Structure"
 description: "Repository layout and core module descriptions."
-editUrl: false
-sidebar:
-  label: "Project Structure"
-  order: 180
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/architecture.md`.
-> Language: **English** | [中文](../../../reference/architecture/)
+> Language: **English** | [中文](../../reference/architecture)
 
 # Project Structure and Modules
 

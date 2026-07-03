@@ -1,10 +1,7 @@
 ---
 title: "流量控制"
 description: "延迟、限速与相关节流能力说明。"
-editUrl: false
-sidebar:
-  label: "流量控制"
-  order: 260
+editLink: false
 ---
 
 > 此页面由 `docs/rules/timing-throttle.md` 自动同步生成。

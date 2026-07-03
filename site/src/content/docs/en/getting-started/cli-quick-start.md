@@ -1,18 +1,15 @@
 ---
 title: "CLI Quick Start"
 description: "Task-oriented Bifrost CLI workflows."
-editUrl: false
-sidebar:
-  label: "CLI Quick Start"
-  order: 30
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/cli-quick-start.md`.
-> Language: **English** | [中文](../../../getting-started/cli-quick-start/)
+> Language: **English** | [中文](../../getting-started/cli-quick-start)
 
 # CLI Quick Start
 
-This guide is organized by tasks instead of listing every flag. For the full command reference, see [CLI command reference](../../reference/cli/). For rule syntax, see [Rule syntax](../../reference/rule-engine/), [Matching patterns](../../reference/patterns/), and [Operation reference](../../reference/operations/).
+This guide is organized by tasks instead of listing every flag. For the full command reference, see [CLI command reference](../reference/cli). For rule syntax, see [Rule syntax](../reference/rule-engine), [Matching patterns](../reference/patterns), and [Operation reference](../reference/operations).
 
 ## Choose a Scenario
 

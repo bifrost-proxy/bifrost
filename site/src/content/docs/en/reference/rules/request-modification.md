@@ -1,14 +1,11 @@
 ---
 title: "Request Modification"
 description: "Request headers, body, and related rewrite operations."
-editUrl: false
-sidebar:
-  label: "Request Modification"
-  order: 220
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/request-modification.md`.
-> Language: **English** | [中文](../../../../reference/rules/request-modification/)
+> Language: **English** | [中文](../../../reference/rules/request-modification)
 
 # Request Modification Rules
 

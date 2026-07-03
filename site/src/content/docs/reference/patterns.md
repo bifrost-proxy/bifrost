@@ -1,10 +1,7 @@
 ---
 title: "匹配模式"
 description: "域名、路径、通配符与正则等匹配模式说明。"
-editUrl: false
-sidebar:
-  label: "匹配模式"
-  order: 140
+editLink: false
 ---
 
 > 此页面由 `docs/pattern.md` 自动同步生成。
@@ -261,6 +258,6 @@ $api.example.com file:///mock
 
 ## 扩展阅读
 
-- [规则语法文档](../rule-engine/)：了解完整的规则语法结构
-- [操作指令文档](../operations/)：学习如何配置操作指令
-- [规则协议手册](../rules/)：按协议查看各能力说明与示例
+- [规则语法文档](./rule-engine)：了解完整的规则语法结构
+- [操作指令文档](./operations)：学习如何配置操作指令
+- [规则协议手册](./rules/)：按协议查看各能力说明与示例

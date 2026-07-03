@@ -31,6 +31,20 @@
 - **并行开发场景**：多个 Agent、多个功能分支、CI 复现或长任务同时进行时，必须使用独立 worktree。禁止在脏主工作区里直接做不相关开发、提交或 CI 归因。
 - **worktree 命名建议**：使用可识别任务名，例如 `../bifrost-<task-slug>`；进入 worktree 后重新执行 `git status --short --branch` 确认隔离环境。
 
+### 主站与文档站部署边界（强制）
+
+Bifrost 的公开入口站点与文档站涉及两个仓库。任何首页、文档站、SEO、Open Graph、多语言、导航、站点资源或 GitHub Pages 部署相关任务，都必须先按以下边界执行，禁止凭感觉在错误仓库里手写一套：
+
+- **源站仓库**：`bifrost` 本仓库的 `site/` 是首页、文档站、样式、多语言、SEO metadata、Open Graph、分享图、文档同步逻辑的唯一源码来源。
+- **入口部署仓库**：`bifrost-proxy/bifrost-proxy.github.io` 只承载 `https://bifrost-proxy.github.io/` 的 GitHub Pages 发布产物。该仓库不是第二套设计稿来源，不得手写独立首页、独立语言切换、独立导航、独立 SEO 文案或独立文档入口。
+- **入口 URL**：`https://bifrost-proxy.github.io/` 是公开主入口；文档入口是同一发布产物内的 `/docs/`、`/getting-started/...`、`/reference/...`、`/en/...` 等路径。不要再把根站只当作跳转壳处理。
+- **修改方式**：需要改首页、文档站、导航、多语言、SEO、OG 图、文档内容或站点行为时，先在本仓库 `site/`、`docs/`、`docs-en/` 中修改并验证，再构建产物同步到部署仓库。禁止直接在 `bifrost-proxy.github.io` 仓库改 `index.html` 来绕过源站。
+- **根站构建命令**：部署到入口站前，必须在本仓库执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，确保所有资源路径、canonical、OG URL、多语言入口和文档链接按根路径生成。
+- **产物同步命令**：将本仓库 `site/dist/` 原样同步到 `bifrost-proxy.github.io` checkout，例如：`rsync -a --delete --exclude='.git/' --exclude='.github/' --exclude='README.md' <bifrost>/site/dist/ <bifrost-proxy.github.io>/`。如果部署仓库未来有必须保留的额外管理文件，必须明确列入 exclude，并在最终交付说明原因。
+- **部署动作**：在 `bifrost-proxy.github.io` 仓库提交并推送 `main`，触发该仓库 GitHub Pages workflow。源站源码改动也必须在本仓库对应分支提交/推送，不能只提交部署产物。
+- **验证要求**：同步后必须验证本地和线上至少以下路径：`/`、`/docs/`、`/getting-started/overview` 或对应 `.html` 文件、`/en/getting-started/overview` 或对应 `.html` 文件、`/reference/rules/`、`/og-image.png`。本地用 `python3 -m http.server` 验证时要注意它不支持 VitePress clean URL fallback，必要时用 `.html` 路径验证文件存在；线上必须验证 clean URL。
+- **CI/Pages 看护**：推送部署仓库后必须跟进 `bifrost-proxy/bifrost-proxy.github.io` 的 `Pages` 与 `pages-build-deployment` runs 到 success，并用 `curl -L https://bifrost-proxy.github.io/` 验证线上根站已经是源站同步后的首页，不是旧跳转页或手写分叉页。
+
 ### 证据台账
 
 每个开发任务必须维护并在最终交付中摘要呈现以下证据：
