@@ -1,164 +1,273 @@
 # 桌面端 Monaco 编辑命令与文档脏状态统一修复方案
 
-## 功能模块详细描述
+## 背景
 
-当前 Bifrost 桌面端（Tauri + macOS WebView）中，所有基于 Monaco 的编辑器都存在同一类运行时问题，并伴随一个保存后原生窗口状态不同步的问题：
+Bifrost 桌面端（Tauri + macOS WebView）中所有基于 Monaco 的编辑器都存在同一类运行时问题，并伴随一个保存后原生窗口状态不同步的问题。同样的前端代码在 Web 管理端正常，因此问题边界收敛到桌面壳层运行时。
+
+受影响入口：
 
 - `Rules` 页面右侧规则编辑器
 - `Values` 页面右侧值编辑器
 - `Scripts` 页面脚本编辑器
 
-第一类问题是标准编辑命令整体失效，表现为：
+第一类问题——**标准编辑命令整体失效**：
 
-- `Cmd+A` / `Ctrl+A` 无法全选文本
-- `Cmd+C / Cmd+V / Cmd+X` 无法按预期执行
-- `Cmd+Z / Shift+Cmd+Z` 等撤销重做链路不可用
-- macOS 原生 `Edit` 菜单中的 `Undo / Redo / Cut / Copy / Paste / Select All` 处于灰态
+- `Cmd+A` / `Ctrl+A` 无法全选。
+- `Cmd+C / V / X` 剪贴板行为异常。
+- `Cmd+Z / Shift+Cmd+Z` 撤销重做链路不可用。
+- macOS 原生 `Edit` 菜单里的 `Undo / Redo / Cut / Copy / Paste / Select All` 项灰态。
 
-第二类问题是 macOS 窗口左上角关闭按钮黄点（`documentEdited`）在保存后不消失，典型复现为：
+第二类问题——**macOS 关闭按钮黄点（`documentEdited`）保存后不消失**：编辑成 `AB` 后黄点亮起，Undo 回到 `A`，再执行保存，Web 侧保存状态清理，但原生黄点仍然停留。
 
-- 当前内容为 `A`
-- 编辑成 `AB` 后黄点出现
-- 执行 Undo 后内容回到 `A`，黄点仍保留
-- 此时执行保存，黄点不消失
+本方案在**共享 helper** 中统一接入桌面端命令兜底与原生 dirty 状态清理，避免在每个编辑器页面重复补丁。
 
-同样的前端代码在 Web 管理端正常，因此问题边界已经收敛到桌面端运行时，而不是单个页面的业务逻辑。
+## 用户目标验证清单
 
-## 现状与根因
+### 必须实现
 
-### 已确认现象
+- 桌面端所有 Monaco 编辑器都能通过 macOS 原生 `Edit` 菜单触发 Undo / Redo / Select All。
+- 桌面端所有 Monaco 编辑器保存成功后，macOS 关闭按钮黄点被清理。
+- 修复代码统一在共享 helper `web/src/components/MonacoDesktopCommands.ts`，各编辑器只需要一行接入。
+- Web 管理端行为完全不变，非桌面壳环境（`__TAURI__` 未定义）下所有桥接调用 no-op。
+- Cut / Copy / Paste 由 Tauri 原生 `Edit` 菜单的 `PredefinedMenuItem` 承担，走系统 responder，不需要 helper 转发。
 
-1. Web 管理端中的 Monaco 编辑器工作正常。
-2. 桌面客户端中 `Rules / Values / Scripts` 的编辑器都复现同样问题。
-3. 原生 `Edit` 菜单整组编辑命令灰掉，说明问题不是单独某个快捷键没注册，而是桌面端编辑命令链路未接通。
-4. 保存成功后，Web 侧保存状态已恢复，但 macOS 原生黄点没有同步消失。
+### 必须不破坏
 
-### 现状代码路径
+- Web 端 Monaco 保存链路不受影响。
+- 每个编辑器页面已有的 `Cmd/Ctrl+S` 显式注册保持工作。
+- `BifrostEditor` 封装不在 `editor.create` 重写中强绑桌面态，桌面接入由页面显式调用。
+- `Rules` / `Values` / `Scripts` 页面已有的业务保存 store 语义不变。
+- 非桌面环境不引入 Tauri 依赖运行时错误。
 
-- `web/src/components/MonacoDesktopCommands.ts`
-  - 共享 helper，导出 `initDesktopEditEventListener()` 与 `registerDesktopMonacoCommands(editor, isDesktop)`
-  - 监听 Rust 侧通过 `webview.eval()` 派发的 `bifrost-edit-command` DOM CustomEvent，并将其转发给当前/最近聚焦的 Monaco 实例
-- `web/src/components/BifrostEditor/index.ts`
-  - 封装了 Rules 页面使用的 Monaco 初始化；**不**在此处统一接入桌面命令兜底，由各页面自行调用 helper
-- `web/src/pages/Rules/RuleEditor/index.tsx`
-  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(ed, isDesktopShell())`
-- `web/src/pages/Values/ValueEditor/index.tsx`
-  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(ed, isDesktopShell())`
-- `web/src/pages/Scripts/index.tsx`
-  - 显式注册 `Cmd/Ctrl+S`，并调用 `registerDesktopMonacoCommands(editor, isDesktopShell())`
-- `web/src/App.tsx`
-  - 启动时调用一次 `initDesktopEditEventListener()` 安装 CustomEvent 监听
-- `web/src/desktop/tauri.ts`
-  - 提供 `setDesktopDocumentEdited(edited)` / `clearDesktopDocumentEdited()` 桥接，内部 `invoke("set_document_edited", { edited })`
-- `desktop/src-tauri/src/main.rs`
-  - 注册原生 `Edit` 菜单项（`edit-undo` / `edit-redo` / `edit-select-all`），`on_menu_event` 内通过 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent
-  - 暴露 `set_document_edited` Tauri 命令，macOS 下调用 `NSWindow::setDocumentEdited`
-### 根因判断
+### 必须真实验证
 
-#### 问题一：编辑命令链路
+- macOS 真实桌面：菜单 Undo / Redo / Select All 能作用于当前聚焦 Monaco。
+- macOS 真实桌面：编辑 → 保存后关闭按钮黄点消失；Undo 回到原文 → 保存后黄点消失。
+- Web 管理端：所有编辑操作与保存链路无回归。
+- 非桌面环境静默：无 `invoke is not defined` 或 `__TAURI__` 报错。
 
-基于当前证据，根因优先级如下：
+## 产品语义
 
-1. 桌面端 WebView 中，Monaco 没有正确接入 macOS 原生 responder / Edit 菜单链路。
-2. 项目当前只对 `Cmd/Ctrl+S` 这类业务命令做了显式注册，而把标准编辑命令完全交给 Monaco 默认行为。
-3. Monaco 默认行为在 Web 端可用，在 Tauri 桌面壳中不可依赖，因此需要在编辑器初始化时统一补一层桌面端命令兜底。
+### 桌面菜单是命令源头，Web 端保持 Monaco 默认
 
-本次修复先不追求让 macOS 原生 `Edit` 菜单即时恢复高亮，而是优先恢复用户实际可用的编辑快捷键能力。
+本方案的核心决策是：**不在每个 Monaco 实例里逐键 `addCommand`**，而是让 macOS 原生 `Edit` 菜单成为命令源头，通过 Rust `on_menu_event` → `webview.eval` 派发 DOM CustomEvent → 前端 helper 路由到当前/最近聚焦的 Monaco 实例。
 
-#### 问题二：保存后原生文档脏状态未清理
+好处：
 
-1. Web 侧的未保存状态由页面 store 中的 `editingContent` / `savedContent` 或编辑内容本身驱动。
-2. 保存成功后，Web 侧状态会被清理，因此列表未保存圆点、保存按钮状态本身可以恢复。
-3. 但桌面端并没有在保存成功后通知原生窗口将 `documentEdited` 置回 `false`。
-4. 因此会出现“业务状态已保存，但原生窗口黄点仍保留”的状态分裂。
+- 命令注册收敛在 helper，编辑器数量增长时无重复维护成本。
+- 命令语义与原生菜单一致，避免快捷键 vs. 菜单双通道竞态。
+- Cut / Copy / Paste 交由 `PredefinedMenuItem` 承担系统标准 responder 行为，与 macOS 原生输入体验一致。
 
-## 方案边界
+### helper 只桥接 Undo / Redo / Select All
 
-- 修复范围：桌面端所有 Monaco 编辑器
-- 不修改普通 Web 管理端行为
-- 不在页面层分别打补丁，而是抽到共享注册逻辑中统一接入
-- 第一阶段目标：让快捷键实际可用
-- 第二阶段目标：让保存成功后原生窗口黄点与业务保存状态保持一致
+`MonacoDesktopCommands` 只处理这三类命令，映射如下：
 
-## 实施状态
+| CustomEvent detail | Monaco action                | DOM 兜底                       |
+| ------------------ | ---------------------------- | ------------------------------ |
+| `edit-undo`        | `undo`                       | `document.execCommand('undo')` |
+| `edit-redo`        | `redo`                       | `document.execCommand('redo')` |
+| `edit-select-all`  | `editor.action.selectAll`    | `document.execCommand('selectAll')` |
 
-已完成实施（截至 2026-06-16）：
+DOM 兜底用于在焦点被短暂抢走或路由失败时至少保持 web 层可用。
+
+### 焦点追踪：跟随“最近聚焦编辑器”
+
+菜单激活时焦点会被原生菜单短暂抢走，无法用 `document.activeElement` 直接判断当前 Monaco。helper 通过 `onDidFocusEditorText` 记录 last-focused editor，`onDidDispose` 时清理。
+
+### 原生 dirty 状态清理只在保存路径触发
+
+保存链路是明确的清理时机；Undo 回到原文是否消除黄点，交给原生窗口决定，不由前端主动清理，避免误覆盖用户预期。
+
+## 技术细节
+
+### 前端 helper
+
+`web/src/components/MonacoDesktopCommands.ts` 导出两个 API：
+
+```ts
+export function initDesktopEditEventListener(): void;
+export function registerDesktopMonacoCommands(
+  editor: monaco.editor.IStandaloneCodeEditor,
+  isDesktop: boolean,
+): void;
+```
+
+- `initDesktopEditEventListener()`：应用启动一次性安装 `window.addEventListener("bifrost-edit-command", ...)`，把 detail 中的命令名派发给当前/最近聚焦编辑器；Web 模式下也可以安装（listener 本身不会触发），或由调用方跳过。
+- `registerDesktopMonacoCommands(editor, isDesktop)`：注册编辑器 focus/dispose hook，把该 editor 加入 last-focused 追踪集合。若 `isDesktop === false` 直接 no-op。
+
+### Rust 侧菜单与事件派发
+
+`desktop/src-tauri/src/main.rs`：
+
+- 注册原生 `Edit` 菜单项：`edit-undo`、`edit-redo`、`edit-select-all`（自定义 MenuItem）+ Cut/Copy/Paste（`PredefinedMenuItem`）。
+- `on_menu_event` 内匹配 `edit-undo/edit-redo/edit-select-all`，通过 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent：
+
+  ```js
+  window.dispatchEvent(new CustomEvent('bifrost-edit-command', { detail: 'edit-undo' }));
+  ```
+
+- Cut/Copy/Paste 无需 `on_menu_event` 处理。
+
+### 原生 `documentEdited` 桥接
+
+- Tauri 命令 `set_document_edited(edited: bool)`：macOS 主线程上调用 `NSWindow::setDocumentEdited(edited)`（通过 `objc2_app_kit::NSWindow`），非 macOS 平台 no-op。
+- 前端桥接 `web/src/desktop/tauri.ts`：
+  - `setDesktopDocumentEdited(edited: boolean)`：invoke。
+  - `clearDesktopDocumentEdited()`：等价 `setDesktopDocumentEdited(false)`。
+- 所有调用以 `.catch(() => undefined)` 兜底，非桌面环境静默 no-op。
+
+### 接入点
+
+- 应用启动：`web/src/App.tsx` 中 `useEffect` 调用 `initDesktopEditEventListener()`。
+- 编辑器创建后调用 `registerDesktopMonacoCommands(editor, isDesktopShell())`：
+  - `web/src/pages/Rules/RuleEditor/index.tsx`
+  - `web/src/pages/Values/ValueEditor/index.tsx`
+  - `web/src/pages/Scripts/index.tsx`
+- 保存成功路径调用 `clearDesktopDocumentEdited()`：
+  - `web/src/stores/useRulesStore.ts`（规则保存、批量保存、规则删除成功分支）
+  - `web/src/stores/useValuesStore.ts`（值保存成功分支）
+  - `web/src/pages/Scripts/index.tsx`（脚本保存、新建成功分支）
+- `web/src/components/BifrostEditor/index.ts` **不**在 `editor.create` 重写中调用 helper，由各页面显式接入。
+
+## CLI / Admin API / Sync 边界
+
+- 无 CLI 变更。
+- 无 Admin API 变更。
+- 无 Sync 边界变更。所有能力都在桌面壳层，不进入 rules/values/scripts 数据同步链路。
+
+## 实现切分
+
+### Phase 1：共享 helper 与命令桥接
+
+- 新增 `web/src/components/MonacoDesktopCommands.ts` 与单元测试。
+- 在 `Rules / Values / Scripts` 编辑器创建后接入 `registerDesktopMonacoCommands`。
+- `App.tsx` 启动调用 `initDesktopEditEventListener`。
+- Rust 侧 `on_menu_event` 派发 `bifrost-edit-command` CustomEvent。
+
+### Phase 2：原生黄点清理
+
+- Tauri 命令 `set_document_edited` 实现（macOS 生效，其它 no-op）。
+- 前端桥接 `setDesktopDocumentEdited` / `clearDesktopDocumentEdited`。
+- Store 保存成功分支接入 `clearDesktopDocumentEdited()` + `.catch(() => undefined)` 兜底。
+
+### Phase 3：测试与文档
+
+- 新增 `web/src/components/MonacoDesktopCommands.test.ts` 与 `web/src/stores/useRulesStore.test.ts`。
+- 更新 `human_tests/webui-rules.md`、`webui-values.md`、`webui-scripts.md`、`readme.md`。
+- 更新本设计文档。
+
+### Phase 4：观察与回归护栏
+
+- Vitest + jsdom 覆盖桌面/非桌面两种模式。
+- Web UI Playwright 保留 Rules/Values/Scripts 保存链路回归。
+- 桌面真实菜单验证由 human_tests 承担。
+
+## 测试方案
+
+### 单元测试
+
+Vitest + jsdom，覆盖：
+
+- 桌面模式下 `registerDesktopMonacoCommands` 注册全部预期 focus/dispose hook。
+- Web 模式下 `registerDesktopMonacoCommands(editor, false)` 完全 no-op。
+- `bifrost-edit-command` 事件按 detail 派发到 last-focused editor 的正确 Monaco action。
+- 无 last-focused editor 时 DOM 兜底 `document.execCommand` 被调用。
+- `useRulesStore` 保存成功分支调用 `clearDesktopDocumentEdited()`；非桌面环境不影响保存链路。
+
+关键测试文件：
+
+- `web/src/components/MonacoDesktopCommands.test.ts`
+- `web/src/stores/useRulesStore.test.ts`
+
+### E2E 测试
+
+现有 Playwright Web 套件保留：
+
+- `web/tests/ui/admin-rules-values.spec.ts`：验证 Rules / Values 保存链路未回归。
+- `web/tests/ui/admin-scripts.spec.ts`：验证 Scripts 保存与新建路径未回归。
+
+桌面原生菜单和 macOS 黄点无 headless E2E，回归依赖 human_tests。
+
+### 真实场景测试 human_tests
+
+必须新增或更新用例：
+
+- `human_tests/webui-rules.md`：TC-WR-MonacoDesktop-01/02，验证 Rules 编辑器桌面端 Cmd+A、Cmd+Z/Shift+Cmd+Z、菜单 Undo/Redo/Select All、保存后黄点消失、Undo 回到原文再保存后黄点消失。
+- `human_tests/webui-values.md`：TC-WV-MonacoDesktop-01/02，对 Values 编辑器覆盖相同回归。
+- `human_tests/webui-scripts.md`：TC-WS-MonacoDesktop-01/02，对 Scripts 编辑器覆盖相同回归。
+- `human_tests/readme.md`：同步用例总数与索引。
+
+所有真实场景测试必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 与 `--no-system-proxy`。
+
+### 覆盖率与项目校验
+
+- `pnpm --dir web exec vitest run web/src/components/MonacoDesktopCommands.test.ts`
+- `pnpm --dir web exec vitest run web/src/stores/useRulesStore.test.ts`
+- `pnpm --dir web run test:ui -- admin-rules-values admin-scripts`
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
+- `bash scripts/ci/local-ci.sh --skip-e2e`
+
+本机 no-local-coverage 约定下不跑 `make coverage`；在交付备注中说明依赖远端 CI 与 human_tests 覆盖。
+
+## 常见问题排查
+
+- **菜单 Undo 触发后没有反应**：检查 `initDesktopEditEventListener()` 是否已在 `App.tsx` 启动阶段调用；`webview.eval()` 是否成功派发 CustomEvent；`registerDesktopMonacoCommands(editor, isDesktopShell())` 是否在编辑器创建后被调用。
+- **保存后黄点仍在**：确认 `useRulesStore` / `useValuesStore` / `Scripts` 保存成功分支是否调用 `clearDesktopDocumentEdited()`；确认 `set_document_edited` Tauri 命令是否被注册；确认非桌面环境（`__TAURI__` 未定义）不会误 throw。
+- **Web 环境报错 `invoke is not defined`**：`clearDesktopDocumentEdited().catch(() => undefined)` 兜底应吞掉；如报错说明未加 `.catch`，需要修复接入点。
+- **Cut/Copy/Paste 不生效**：确认菜单项是 `PredefinedMenuItem`，走系统 responder；helper 不应也不需要为其转发。
+- **多编辑器 tab 快速切换后菜单命令路由错**：last-focused 追踪存在偶发误路由，可接受；如高频复现需要引入 focus timestamp 比较。
+
+## 已知问题与后续演进
+
+- Undo 后是否清理黄点：当前方案交给原生窗口决定，未来若产品要求“内容等于最初 loaded 内容时黄点自动消失”，需要在 store 层引入 baseline 比较，并扩展 `set_document_edited` 语义或新增 `document_content_equals_baseline` API。
+- `document.execCommand` 已在 Web 标准中过时，仅作为兜底；未来 Chromium/Webkit 若彻底移除，需要改为 Monaco action 内部实现或 IPC 直接指令。
+- 若增加更多桌面命令（例如 Find/Replace 菜单接入），可复用 `bifrost-edit-command` CustomEvent 通道，扩展 detail 值。
+- 若未来 Windows / Linux 也提供 macOS 类似的原生 documentEdited 指示，需要扩展 `set_document_edited` 到相应平台。
+
+## Review/Fix/Test 闭环方案
+
+### 第 1 轮
+
+- 复核用户目标：三个编辑器菜单 Undo/Redo/Select All 可用、保存后黄点清理。
+- 复核 diff：helper、页面接入、store 接入、Rust 菜单事件、Tauri 命令。
+- 重点 review：last-focused 追踪是否有 leak（`onDidDispose` 是否解绑）；非桌面环境是否有静默 no-op；BifrostEditor 是否被误改成自动接入。
+- 复测：Vitest 单测 + 桌面手工 Cmd+A/Z/Shift+Z + 保存黄点观察。
+
+### 第 2 轮
+
+- 复核第 1 轮发现问题的修复。
+- 再次核对 `git status --short`、新增测试文件、human_tests 索引数量。
+- 重点 review：批量保存路径是否漏接入；快捷键与菜单双通道是否重复执行 Undo；Windows / Linux 侧 no-op 是否有异常。
+- 复测：Web 端 Playwright + 桌面 macOS 真实回归 human_tests 全部用例。
+
+## 已实施状态记录（截至 2026-06-16）
+
+已完成实施：
+
 - 桌面端 Monaco 编辑命令链路
-  - 共享 helper `web/src/components/MonacoDesktopCommands.ts`（含 `initDesktopEditEventListener` + `registerDesktopMonacoCommands`）
-  - 接入 `Rules / Values / Scripts` 三个编辑器；`App.tsx` 启动时安装事件监听
-  - Rust 侧 `on_menu_event` 经 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent，前端转发到聚焦/最近聚焦的 Monaco 实例
-  - 单测 `web/src/components/MonacoDesktopCommands.test.ts`；Vitest + jsdom 已配置
+  - 共享 helper `web/src/components/MonacoDesktopCommands.ts`（含 `initDesktopEditEventListener` + `registerDesktopMonacoCommands`）。
+  - 接入 `Rules / Values / Scripts` 三个编辑器；`App.tsx` 启动时安装事件监听。
+  - Rust 侧 `on_menu_event` 经 `webview.eval()` 派发 `bifrost-edit-command` CustomEvent，前端转发到聚焦/最近聚焦的 Monaco 实例。
+  - 单测 `web/src/components/MonacoDesktopCommands.test.ts`；Vitest + jsdom 已配置。
 - 保存后原生 `documentEdited` 清理
-  - Tauri 命令 `set_document_edited`（macOS 调用 `NSWindow::setDocumentEdited`）
+  - Tauri 命令 `set_document_edited`（macOS 调用 `NSWindow::setDocumentEdited`）。
   - 前端桥接 `clearDesktopDocumentEdited()`；接入点：
-    - `web/src/stores/useRulesStore.ts`（规则保存/批量保存路径）
-    - `web/src/stores/useValuesStore.ts`（值保存路径）
-    - `web/src/pages/Scripts/index.tsx`（脚本保存/新建路径）
-  - 单测 `web/src/stores/useRulesStore.test.ts`
-## 实现逻辑
+    - `web/src/stores/useRulesStore.ts`（规则保存 / 批量保存路径）。
+    - `web/src/stores/useValuesStore.ts`（值保存路径）。
+    - `web/src/pages/Scripts/index.tsx`（脚本保存 / 新建路径）。
+  - 单测 `web/src/stores/useRulesStore.test.ts`。
 
-### 统一修复策略
-
-实际实现没有走“在每个 Monaco 编辑器里逐键 `addCommand` 注册 Cmd+A/C/V/X/Z/Shift+Z”这条路径，而是改为 **原生 `Edit` 菜单 → Rust `on_menu_event` → `webview.eval` 派发 DOM CustomEvent → 前端 helper 路由到聚焦的 Monaco 实例** 的桥接方案。这样让 macOS 原生 `Edit` 菜单成为命令源头，避免在每个编辑器实例上重复维护键位绑定。
-
-当前 helper 实际转发的 Monaco action 集合（与 Rust 侧菜单项一一对应）：
-
-- `edit-undo`        → Monaco action `undo`（DOM 兜底：`document.execCommand('undo')`）
-- `edit-redo`        → Monaco action `redo`（DOM 兜底：`document.execCommand('redo')`）
-- `edit-select-all`  → Monaco action `editor.action.selectAll`（DOM 兜底：`document.execCommand('selectAll')`）
-
-说明：Cut / Copy / Paste 由 Tauri 原生 `Edit` 菜单的 `PredefinedMenuItem` 直接承担（系统标准 responder 行为），未走 CustomEvent 通道，因此 helper 内**没有**为它们单独注册转发；这与最初设计中“逐键注册 6 个键位”的描述不同。
-
-### 接入方式
-
-1. 共享 helper：`web/src/components/MonacoDesktopCommands.ts`，导出 `initDesktopEditEventListener()` 与 `registerDesktopMonacoCommands(editor, isDesktop)`
-2. 应用启动一次性安装事件监听：`web/src/App.tsx` 中调用 `initDesktopEditEventListener()`
-3. 各 Monaco 编辑器创建后，调用 `registerDesktopMonacoCommands(editor, isDesktopShell())`：
-   - `web/src/pages/Rules/RuleEditor/index.tsx`
-   - `web/src/pages/Values/ValueEditor/index.tsx`
-   - `web/src/pages/Scripts/index.tsx`
-4. helper 内部用 `isDesktop` 参数（来自 `isDesktopShell()`）做保护，Web 模式直接 no-op；同时记录每个编辑器的 `onDidFocusEditorText` / `onDidDispose` 以维持“最近聚焦编辑器”，避免菜单激活时焦点被原生菜单短暂抢走导致无法路由
-5. 注意：`web/src/components/BifrostEditor/index.ts` **不**在 `editor.create` 重写中调用 helper —— 由各页面自行接入，避免在创建期就强绑桌面态
-
-### 为什么要抽共享 helper
-
-因为当前问题不是页面业务问题，而是“桌面端 Monaco 共性运行时问题”。如果在 `Rules / Values / Scripts` 各自修，会造成：
-
-- 焦点追踪逻辑重复
-- 后续遗漏新的编辑器入口
-- 无法保证桌面端行为统一
-
-统一 helper 才符合当前问题的真实边界。
-
-### 文档脏状态修复策略
-
-在桌面端保存成功后，由前端显式调用 Tauri 命令清理原生 `documentEdited`：
-
-- Web 侧：`clearDesktopDocumentEdited()` → `invoke("set_document_edited", { edited: false })`
-- Tauri macOS 侧：`set_document_edited` 命令在主线程上调用 `NSWindow::setDocumentEdited(edited)`（通过 `objc2_app_kit::NSWindow`），非 macOS 平台为 no-op
-
-实际接入点（保存成功路径内）：
-
-1. `web/src/stores/useRulesStore.ts`：规则保存、批量保存、规则删除等成功分支后清理
-2. `web/src/stores/useValuesStore.ts`：值保存成功分支后清理
-3. `web/src/pages/Scripts/index.tsx`：脚本保存与新建成功分支后清理
-
-所有调用以 `.catch(() => undefined)` 兜底，保证非桌面环境（`__TAURI__` 不存在）下静默 no-op，不影响 Web 端保存链路。
-
-这样可以保证：
-
-- Web 行为完全不变
-- 桌面端黄点和“保存成功”状态保持一致
-- Undo 后是否仍保留黄点继续交给原生窗口/编辑器行为决定，保存是唯一明确的清理时机
 ## 依赖项
 
 - `web/src/components/BifrostEditor/index.ts`
 - `web/src/pages/Rules/RuleEditor/index.tsx`
 - `web/src/pages/Values/ValueEditor/index.tsx`
 - `web/src/pages/Scripts/index.tsx`
-- 新增：`web/src/components/MonacoDesktopCommands.ts`
-- 新增：`web/src/components/MonacoDesktopCommands.test.ts`
-- 新增：`web/src/stores/useRulesStore.test.ts`
+- `web/src/components/MonacoDesktopCommands.ts`（新增）
+- `web/src/components/MonacoDesktopCommands.test.ts`（新增）
+- `web/src/stores/useRulesStore.test.ts`（新增）
 - `web/src/desktop/tauri.ts`
 - `desktop/src-tauri/src/main.rs`
 - `web/tests/ui/admin-rules-values.spec.ts`
@@ -168,71 +277,20 @@
 - `human_tests/webui-scripts.md`
 - `human_tests/readme.md`
 
-## 测试方案
-
-### 单元测试
-
-为共享 helper 与 desktop dirty-state 清理链路编写测试，覆盖：
-
-- 桌面端模式下会注册全部预期命令
-- Web 模式下不会额外注册桌面端兜底命令
-- `Cmd/Ctrl+A / C / V / X / Z / Shift+Cmd/Ctrl+Z` 与目标 action 映射正确
-- Rules 保存成功后会调用 desktop runtime 清理原生 `documentEdited`
-- 非桌面环境下清理 helper 不应影响现有保存逻辑
-
-### E2E 测试
-
-由于当前 UI 自动化主要跑 Web 管理端，而问题仅出现在桌面壳层，因此本次 E2E 目标分两部分：
-
-1. 对共享 helper 做最小单测，保证映射行为不回归
-2. 保持现有 Web UI E2E 不受影响，并补一个最小回归验证：
-   - `Rules` 编辑器快捷键注册逻辑仍不影响保存快捷键
-   - `Scripts` / `Values` 页编辑器初始化路径不报错
-
-说明：桌面端原生命令链路目前不适合直接用现有 Playwright Web 套件验证，因此核心回归依赖 human_tests。
-
-本次新增回归重点：
-
-1. Web UI 自动化继续验证 Rules / Values / Scripts 保存链路未回归
-2. 原生窗口黄点清理依赖 human_tests 在真实桌面壳中验证
-
-### 真实场景测试（human_tests）
-
-必须新增或更新以下文档：
-
-- `human_tests/webui-rules.md`
-- `human_tests/webui-values.md`
-- `human_tests/webui-scripts.md`
-
-新增桌面端专用回归用例，覆盖：
-
-- `Cmd+A` 文本全选
-- `Cmd+C / Cmd+V / Cmd+X`
-- `Cmd+Z / Shift+Cmd+Z`
-- 编辑后保存，macOS 窗口黄点消失
-- Undo 回到原文后保存，macOS 窗口黄点消失
-- Web 端不受影响
-
-同步更新 `human_tests/readme.md` 的测试用例数量与说明。
-
-## 校验要求
-
-实现完成后按以下顺序验证：
-
-1. `pnpm --dir web exec vitest run web/src/components/MonacoDesktopCommands.test.ts`
-2. 定向运行受影响的 Web UI 测试，确保无回归
-3. 使用桌面端开发链路手工执行 human_tests 新增用例
-4. `cargo fmt --all -- --check`
-5. `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-6. `cargo test --workspace --all-features`
-7. `bash scripts/ci/local-ci.sh --skip-e2e`
-
 ## 文档更新要求
 
-- 无需更新 `README.md`
+- 无需更新 `README.md`。
 - 必须更新：
   - `human_tests/webui-rules.md`
   - `human_tests/webui-values.md`
   - `human_tests/webui-scripts.md`
   - `human_tests/readme.md`
   - 本设计文档
+
+## 风险与决策点
+
+- Undo 后黄点是否清理：本方案不主动清理 Undo 场景，交由原生窗口决定；如果产品要求“内容等于最初 loaded 内容时黄点应消失”，需要额外引入 baseline 比较，并明确 API 变更。
+- Cut/Copy/Paste 未走 CustomEvent：依赖 `PredefinedMenuItem` 与系统 responder，跨版本 Tauri 升级时需要 verify 是否仍然生效。
+- last-focused 追踪并发：多编辑器 tab 快速切换时可能出现 focus race，helper 采用最近 focus 优先，可接受偶发误路由。
+- `document.execCommand` 已经在标准中被标记为过时；作为兜底可接受，但不能作为主链路，Monaco action 应优先。
+- 桌面壳层升级 Tauri 版本时需要 verify `webview.eval()` 与 CustomEvent 派发行为不变。

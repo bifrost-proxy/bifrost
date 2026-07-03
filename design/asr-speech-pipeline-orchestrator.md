@@ -4,17 +4,36 @@
 
 本方案把 Bifrost 当前分散的实时语音、离线文件转字幕、ASR Directory Task 和唤醒词能力收敛到一套统一的 `Speech Pipeline Orchestrator`。目标不是重写现有 ASR，而是在现有真实代码基础上抽出决策层、资源层和离线字幕主链路，让三条业务入口共享同一套能力选择、资产检查、资源仲裁和 artifact schema。
 
-用户目标验证清单：
+## 用户目标验证清单
 
-- 必须实现：整理出完整、可执行、repo-backed 的顶层技术方案，而不是停留在讨论稿。
-- 必须实现：统一实时链路、离线单文件链路、定时目录任务链路的模式、引擎、资源和产物决策。
-- 必须实现：明确遗留降级、迁移和下线策略；不为旧 `/api/asr/transcribe-ws`、旧 Directory Task 写法或现有 `/api/asr/transcribe-stream` 维持并行兼容服务。
-- 必须实现：把当前最大缺口 `AsrUnitPlanner` 和 `OfflineSubtitlePipeline` 作为第一优先级落地项。
-- 必须实现：Directory Task 在离线产物落盘后，仍要继续执行现有输出合并、Daily Docs 刷新、Daily Agent / AI Runner 后处理和 IM/report 同步流程，不能被新 pipeline 吞掉。
-- 必须实现：把 ASR 核心能力从 `bifrost-admin` 抽成独立 `crates/bifrost-asr` 包；不同平台通过是否依赖该包、启用哪些 feature 来决定编译方案，避免在 admin 内到处写跨平台 `cfg` / `if else`。
-- 必须不破坏：新产品能力需要复用的 Qwen3-ASR、本地 ASR service/runtime strategy、speaker diarization、voiceprint 和字幕产物链路；旧入口支持级别可以降低。
-- 必须真实验证：本方案、human_tests 索引和静态验收命令能在当前仓库真实执行。
-- 必须交付：设计文档、human_tests 用例、两轮 Review/Fix/Test 记录和最终验证矩阵。
+### 必须实现
+
+- 整理出完整、可执行、repo-backed 的顶层技术方案，而不是停留在讨论稿。
+- 统一实时链路、离线单文件链路、定时目录任务链路的模式、引擎、资源和产物决策。
+- 明确遗留降级、迁移和下线策略；不为旧 `/api/asr/transcribe-ws`、旧 Directory Task 写法或现有 `/api/asr/transcribe-stream` 维持并行兼容服务。
+- 把当前最大缺口 `AsrUnitPlanner` 和 `OfflineSubtitlePipeline` 作为第一优先级落地项。
+- Directory Task 在离线产物落盘后，继续执行现有输出合并、Daily Docs 刷新、Daily Agent / AI Runner 后处理和 IM/report 同步流程，不能被新 pipeline 吞掉。
+- 把 ASR 核心能力从 `bifrost-admin` 抽成独立 `crates/bifrost-asr` 包；不同平台通过是否依赖该包、启用哪些 feature 来决定编译方案，避免在 admin 内到处写跨平台 `cfg` / `if else`。
+- 引入 `SpeechEngineRegistry` / `SpeechPipelineProfile` / `EngineDecisionResolver` / `AsrUnitPlanner` / `Speaker Stabilizer` / `OfflineSubtitlePipeline` / `ResourceLeaseManager` 六大核心模块，形成 pipeline 顶层骨架。
+- 暴露 `/api/speech/{pipelines,decision,resources}`、`/api/asr/offline-jobs`、`/api/voice/listen-ws` 等新 API，替代旧 `transcribe-ws/-stream` 入口。
+- CLI/WebUI 三个入口按同一 pipeline 概念收敛：`bifrost speech pipelines`、Speech Converter、Directory Task 都识别 pipeline profile。
+
+### 必须不破坏
+
+- 新产品能力需要复用的 Qwen3-ASR、本地 ASR service/runtime strategy、speaker diarization、voiceprint 和字幕产物链路；旧入口支持级别可以降低。
+- Directory Task 的 pause/resume、runtime_strategy、chunk metrics、Daily Docs 与 Daily Agent 后处理链路。
+- 现有 `TranscriptTimeline` / `TimelineSegment` 字段与文本渲染既有格式。
+- 实时 `/api/voice/listen-ws` 默认 `Qwen3-ASR-0.6B` + `qwen3_stateful_streaming` provider 的行为；1.7B stateful streaming 仍需显式允许。
+- `bifrost-admin` 对 HTTP API、状态机、FileStore、Daily Agent 后处理的产品编排职责；ASR native provider 迁移到 `bifrost-asr` 但对上层 API 契约无影响。
+
+### 必须真实验证
+
+- 本方案、human_tests 索引和静态验收命令能在当前仓库真实执行。
+- `cargo test -p bifrost-asr` 覆盖 `plan_asr_units`、`Speaker Stabilizer`、`ResourceLeaseManager`。
+- `cargo test -p bifrost-admin` 覆盖 `OfflineSubtitlePipeline`、`EngineDecisionResolver`、Directory Task 后处理契约。
+- `bash e2e-tests/tests/test_asr_offline_jobs.sh` / `test_voice_listen_ws.sh` / `test_asr_directory_task.sh` 通过。
+- human_tests `human_tests/asr-speech-pipeline-orchestrator.md` TC-ASPO-01..12 全部通过。
+- 交付：设计文档、human_tests 用例、两轮 Review/Fix/Test 记录和最终验证矩阵。
 
 ## 当前代码基线
 
@@ -1144,3 +1163,27 @@ WebUI 行为：
 - 每行展示时间范围、speaker tag、置信度或候选声纹、文本内容。
 - 已稳定的实时 timeline 可直接导出 `live-realtime.srt`、`live-realtime.txt`、`live-realtime.timeline.json`。
 - 实时 timeline 是低延迟产品体验；如果需要更准确的多人重叠语音、speaker 重排和字幕产物，应在录制后交给 offline subtitle pipeline 复跑。
+
+## Sync 边界
+
+`Speech Pipeline Orchestrator` 涉及本机模型、任务状态与声纹样本，同步策略如下：
+
+- Pipeline profile（`SpeechPipelineProfile`）：内置 profile 随 Bifrost 版本分发，不参与 Rule Sync；自定义 profile 是本机配置，不上行远端共享。
+- 模型资产：Qwen3-ASR、sherpa-onnx、pyannote sidecar 模型均通过本地 assets 目录管理，不进入 Rule Sync；缺失时按 `ai_provider_bootstrap` 显式下载并提示用户。
+- Directory Task 状态、`FileRecord`、`run_progress.json`、Daily Docs / Daily Agent workspace 均为本地文件，不参与 Rule Sync；后续跨设备任务状态同步另设专项设计。
+- 声纹样本 `speaker-embeddings.jsonl` 属高隐私数据，只在本机存储，不参与任何同步通道。
+- 实时 `/api/voice/listen-ws`、`/api/asr/offline-jobs`、`/api/speech/*` 均为本机 admin API，跨设备访问需要用户显式提供 `--admin-base` 或走远端授权，不改变默认本机语义。
+- `bifrost-asr` 抽出后，Cargo feature 开关（`native`, `qwen3`, `sherpa`, `pyannote-sidecar`）由构建配置决定，不通过运行时同步下发。
+
+## 风险与决策
+
+- **旧 `/api/asr/transcribe-ws` 下线策略**：直接 410 Gone + 迁移说明，不维持并行兼容服务；`transcribe-stream` 同步降级。风险是历史客户端阻塞，缓解方式是提供清晰的迁移文档与错误响应。
+- **Directory Task 后处理边界**：`OfflineSubtitlePipeline` 只替换"单文件音频 → 标准 artifacts"阶段；Daily Docs 刷新、Daily Agent、report sync 保持在 `bifrost-admin` 侧。CI 用 TC-ASPO-07 / TC-ASPO-12 兜底防止新 pipeline 吞掉后处理。
+- **跨平台编译**：把 ASR 拆到 `bifrost-asr`，用 Cargo feature + 平台依赖显式控制；不再散布 `cfg`。TC-ASPO-08 覆盖跨平台编译边界。
+- **实时唤醒词与声纹绑定的误触发**：唤醒文本匹配偏召回、执行边界由声纹门禁兜底；未匹配声纹时只写 rejected 事件，不触发热键。
+- **stateful streaming provider 默认模型**：默认 0.6B 保持轻资源；1.7B 需要显式允许，避免默认路径 OOM。
+- **`ResourceLeaseManager` 抢占**：实时链路优先级高于离线；实时 lease 抢占离线时，离线任务收敛为 paused 并保留 chunk 位点，用户可 resume。
+- **`AsrUnitPlanner` 参数化**：默认合并同 speaker 且 gap<800ms、最大单元 30s；这些是 Directory Task 与离线 pipeline 的共享默认，profile 层可覆盖。
+- **speaker embedding 隐私**：正式阈值通过才显示真人名；未匹配保持本次 session 内 `用户A/B/C/D` 聚类，最多 4 个本地角色，避免"20 个用户"爆炸。
+- **wake worker 后端**：只用 sherpa-onnx `KeywordSpotter` 流式模式；禁止 fallback 到 Qwen3-ASR / `backend_asr_phrase_match` 做常驻关键词检测，避免持续 GPU/CPU 消耗。
+- **live timeline vs offline pipeline**：live 是低延迟产品体验；高准确度多人重叠仍以 offline pipeline 为主，两者在 timeline 上不合并，避免混淆。

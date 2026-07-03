@@ -20,6 +20,34 @@
 - 不把系统音频捕获做成无权限提示的隐式行为。
 - 不在 V1 中重写现有目录任务、长音频 30 秒窗口和已验证的 Qwen3-ASR 安装流程。
 
+## 用户目标验证清单
+
+### 必须实现
+
+- `Voice Input Runtime` 作为独立 crate/module 存在，被 WebUI 录音、CLI 本机监听、macOS 输入法 helper 复用同一 session 抽象。
+- 实时 session first partial < 1s、静音后 final < 1.5s，走 Qwen3-ASR vLLM streaming backend `init/streaming_transcribe/finish` 三段式。
+- 离线长音频保留既有 30 秒切分 + fork_per_chunk 路径,不因实时链路重写而回归。
+- `Bifrost Voice.inputmethod` 输入法通过 InputMethodKit 的 marked text / commit text 写入光标,剪贴板/Accessibility 只作为 fallback 且在 UI/API 展示降级原因。
+- Admin API + CLI 暴露 session lifecycle(start/partial/final/cancel/error)、VAD 事件、资源让路信号,状态可被外部诊断。
+- 原始 transcript 与后置 LLM refined 文本分层保存,词汇表/上下文/profile 通过 provider capability 管控。
+- 实时 session 与目录任务、后台批处理共用 realtime resource yield 语义,实时优先时目录任务自动 pause。
+
+### 必须不破坏
+
+- 现有 Qwen3-ASR 安装脚本、`bifrost ai` CLI、目录任务 pause/resume、Daily Docs/Agent 后处理。
+- macOS 麦克风/辅助功能 TCC 授权流程,首次未授权时给出清晰引导,不做隐式捕获。
+- 音频默认不出设备的隐私默认值;云端 ASR provider 不引入。
+- WebUI 现有 ASR 工具页录音入口、CLI ffmpeg avfoundation 采集能力(作为调试路径)。
+
+### 必须真实验证
+
+- `cargo test -p bifrost-asr` 覆盖 session 状态机、VAD 去重、cancel、error propagation、resource yield。
+- 前端 `npm --prefix web run typecheck` / build 通过。
+- E2E: 启动临时 Bifrost + 预录 wav,通过 Admin API 建立 realtime session,断言 first partial 时延、final 收敛、cancel 生命周期。
+- E2E: macOS 上安装输入法 bundle,在 TextEdit 中触发热键,验证 marked text 与 commit text 真实落到光标。
+- human_tests: `human_tests/asr-realtime-voice-input.md` 覆盖热键、权限引导、profile 切换、后置 LLM refine 开关、降级 fallback 提示。
+- `make coverage`,ASR/E2E 本地不可用时退化 `make coverage-unit` 并在交付说明原因。
+
 ## 外部资料与可行性结论
 
 ### 开源 macOS 语音输入工具的实现共性
@@ -1298,3 +1326,15 @@ bifrost ai voice listen --source mic --duration 60 --format jsonl \
 - 官方 vLLM stateful streaming 本机部署对 GPU/环境要求较高，在 Apple Silicon 上不一定优于 MLX/Rust 路线，需要实验数据决定。
 - Qwen context/hotwords 能力在不同 runtime 的暴露不一致，V1 不能承诺 ASR 原生 hotword 一定生效；必须有后处理和本地 LLM rewrite 兜底。
 - 后置 LLM 改写有误改风险，必须保留 raw ASR、支持撤销，并限制 prompt 为忠实改写。
+
+## Sync 边界
+
+Voice Input Runtime 属于本地设备资源与隐私强绑定的能力,原则上不参与 Bifrost Rule Sync:
+
+- 麦克风采样率、VAD 阈值、热键、输入法启用状态属于设备本地配置,跨设备同步会引发权限、硬件差异和隐私风险。
+- 词汇表 / profile 允许用户手动导出/导入,但默认不通过 sync channel 自动传播;这样避免把用户在 A 机的私人词汇静默推到 B 机。
+- 实时 session 的 transcript 和音频 buffer 只保留在本机,不进入 sync payload;如未来需要跨设备恢复历史,应走显式导出/导入流程,而非隐式同步。
+- ASR 模型二进制、vLLM runtime、输入法 bundle 由本地安装脚本管理,与 Rule Sync 完全解耦。
+
+对未来跨设备场景的显式约束:如果引入"云端账户级 profile 同步",需要单独设计 opt-in 开关、加密传输和撤销机制,不能默认打开。
+

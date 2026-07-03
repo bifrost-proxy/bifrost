@@ -1,351 +1,198 @@
 # 代理性能压力测试方案
 
-## 功能模块说明
+## 背景
 
-本方案用于系统化压测 Bifrost 代理在高并发、高吞吐、流量录制、复杂转发策略和 macOS 应用识别下的性能边界。目标不是只跑出一个峰值 RPS，而是建立可复现、可比较、可定位瓶颈的性能测试体系，覆盖以下四条主线：
+Bifrost 是本机代理 + Traffic 录制 + 规则/脚本转发 + macOS 应用识别的组合体，任何一项能力都可能在高压下退化并把其它能力拖下水。本方案用于系统化压测 Bifrost 在高并发、高吞吐、流量录制、复杂转发策略和 macOS 应用识别下的性能边界，目标不是跑出一个峰值 RPS，而是建立可复现、可比较、可定位瓶颈的持续提升体系，并把每一次优化都固化到基线中，避免为了性能牺牲功能。
 
-1. 代理转发性能：HTTP、HTTPS CONNECT、TLS 解包、WebSocket 和 SSE 在不同 body 大小、连接复用和并发模型下的吞吐、延迟和错误率。
-2. 流量录制性能：Traffic Writer、body cache、traffic DB、详情查询、列表刷新和搜索在高写入压力下的吞吐、写入延迟、内存增长和磁盘增长。
-3. 转发策略性能：无规则、简单 host 规则、大量规则、多协议规则、过滤器、脚本和上游代理链组合下的规则匹配与转发开销。
-4. macOS 应用识别性能：端口到进程、进程到应用、应用到 Traffic/Metrics 的识别链路在高并发和短连接压力下的准确率、延迟、回填和热路径开销。
+四条主线：
 
-## 目标与非目标
+1. 代理转发性能：HTTP、HTTPS CONNECT、TLS 解包、WebSocket、SSE，不同 body 大小、连接复用与并发模型下的吞吐、延迟、错误率。
+2. 流量录制性能：`AsyncTrafficWriter`、`BodyStore`、traffic DB、详情读取、列表刷新与搜索在高写入压力下的吞吐、写入滞后、内存增长和磁盘增长。
+3. 转发策略性能：无规则、简单 host 规则、大量规则、脚本、上游代理链组合下的规则匹配与转发开销。
+4. macOS 应用识别性能：`ProcessResolver` 的 socket 快照、singleflight、并发阀门与 backfill 在高并发短连接下的准确率、延迟、热路径开销。
 
-### 目标
+## 用户目标验证清单
 
-- 以“行业顶级代理服务”为长期方向建立性能、稳定性、可靠性、功能完备性和可运营性五维评价体系；它不是一次压测必须达到的固定数值，而是要求每轮都能衡量现状、发现瓶颈、形成改进项，并持续抬高自身基线。
-- 在不改变软件既有功能、语义、协议能力和用户可见行为的前提下持续提升代理领域能力；任何性能优化都必须先证明功能等价，再讨论性能收益。
-- 输出固定压测矩阵，保证每次性能测试都能横向比较。
-- 每次压测必须同时采集负载结果、Bifrost Admin 指标、进程资源、traffic DB 统计和规则策略维度。
-- 将压测分为 smoke、本地基准、夜间长跑和发布门禁四档，避免把重型压测塞进普通单测。
-- 复用现有 `scripts/loadtest-proxy-stability.mjs` 和 `scripts/loadtest-upstream-502-analysis.mjs`，并在后续新增 `scripts/perf/` 专项压测脚本时保持统一报告格式。
-- 所有启动命令必须使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+### 必须实现
 
-### 持续提升框架
+- 在同机同参数下可复现的压测矩阵与统一 JSON 报告 schema。
+- smoke / baseline / soak / regression 四档分层，PR CI 不承担长压测。
+- 每次压测同时采集 loadtest 结果、Admin metrics、进程资源、traffic DB 统计、apps 归因和规则匹配抽样。
+- 复用 `scripts/loadtest-proxy-stability.mjs`、`scripts/loadtest-upstream-502-analysis.mjs`、`scripts/loadtest-traffic-storage-100k.mjs`；新脚本进入 `scripts/perf/` 时保持同一 run 目录布局。
+- 每轮压测输出 `summary.md`，写清 baseline / bottleneck / next actions。
 
-“行业顶级”在本方案中不是一次性的验收口号，而是持续提升方向。每次压测都必须按五个维度衡量当前水平，并把瓶颈沉淀为下一轮优化目标：
+### 必须不破坏
+
+- 性能优化必须先证明功能等价：HTTP/HTTPS/SOCKS5/WebSocket/SSE、Traffic 完整性、规则语义、TLS 应用策略、macOS 应用归因、Admin/CLI/WebUI 用户可见行为都不允许被削弱。
+- 任何异步化 / 采样 / 缓存 / 批处理 / 延迟回填优化必须证明最终一致性：数据可以晚到，但不能永久缺失或错误。
+- 任何跳过热路径工作的优化必须列出跳过条件、降级结果、用户可见表现和后续回填/诊断路径。
+- 长跑不再使用公网服务作为默认上游；默认走本地 mock upstream。
+
+### 必须真实验证
+
+- 每次 release baseline 都留下 `.artifacts/loadtest/<run-id>/` 目录（run-meta、load、admin-metrics、traffic-samples、app-resolution-samples、logs）。
+- 每次 regression 都产出 `compare-runs` 结果，说明 RPS / p95/p99 / RSS / write lag / recognition rate 对比。
+- 10 万条流量存储专项每次都验证 `retainedRecords`、`writeRps`、`responseBodySearchP95Ms`。
+- macOS 应用识别专项要抽样 `traffic detail`、`metrics apps`、`client-manifest.ndjson` 三向对齐。
+
+## 产品语义
+
+### 持续提升五维
 
 | 维度 | 持续提升方向 | 典型退化信号 |
 | --- | --- | --- |
-| 性能 | 持续提升 RPS、吞吐、p95/p99、CPU/请求和写放大指标 | 只能在关闭录制/关闭规则时快，真实场景一开就退化 |
-| 稳定性 | 持续降低 soak 下 RSS、FD、连接、DB 写入和后台任务的波动 | cooldown 后资源不回落、长连接泄漏、DB 写入积压 |
-| 可靠性 | 持续降低请求错误、traffic 缺失、规则误命中、应用识别 unknown 和不可解释 5xx | 请求成功但无记录、规则误命中、应用识别 unknown 飙升 |
-| 功能完备性 | 持续扩大 HTTP/HTTPS/SOCKS5/WebSocket/SSE/TLS 解包/规则/录制/Replay/应用维度统计的压力覆盖 | 只压 HTTP happy path，关键功能没有压力覆盖 |
-| 可运营性 | 持续提升 run 目录、summary、原始采样、可复跑命令和 next actions 的可复盘质量 | 只有 console 输出，无法复盘、无法比较、无法归因 |
+| 性能 | RPS、吞吐、p95/p99、CPU/请求、写放大 | 关闭录制/规则才快，一开真实场景就退化 |
+| 稳定性 | soak 下 RSS、FD、连接、DB、后台任务波动 | cooldown 不回落、连接泄漏、DB 写入积压 |
+| 可靠性 | 请求错误、traffic 缺失、规则误命中、unknown、5xx | 请求成功但无记录、规则误命中、unknown 飙升 |
+| 功能完备性 | 协议 / 录制 / Replay / apps 统计的覆盖 | 只压 HTTP happy path |
+| 可运营性 | run 目录、summary、原始采样、可复跑命令、next actions | 只有 console 输出 |
 
-每轮压测结论必须至少回答：
-
-- 当前基线是什么：代理核心、流量录制、转发策略、macOS 应用识别分别能稳定到什么水平。
-- 最大瓶颈是什么：CPU、内存、FD、DB、body cache、规则匹配、进程解析、上游还是压测客户端。
-- 下轮要提升什么：列出 P0/P1/P2 改进项，而不是只给“通过/失败”。
-- 基线如何变化：和上一次同机同参数 run 对比，说明进步、退化或不可比原因。
+每轮压测结论必须至少回答：当前基线是什么、最大瓶颈是什么、下轮 P0/P1/P2 要提什么、和上一次同机同参 run 的差异。
 
 ### 功能不变门禁
 
-性能提升不能以牺牲功能和能力为代价。任何后续优化在进入实现前都必须声明“被保护的功能语义”，实现后必须用对应用例证明没有改变。
-
 | 保护对象 | 不允许的优化方式 | 必须保留的行为 |
 | --- | --- | --- |
-| 代理协议 | 为提高 RPS 删除、绕过或弱化 HTTP/HTTPS/SOCKS5/WebSocket/SSE/TLS 解包路径 | 所有已支持协议继续可用，错误语义和连接生命周期保持一致 |
-| 流量录制 | 为降低写入成本丢弃请求/响应记录、body、headers、frames 或详情字段 | 请求成功后记录可追踪，允许异步回填但不能永久丢失 |
-| 规则系统 | 为降低匹配成本改变优先级、filter、merge、script、proxy chain 或 TLS routing 语义 | 同一规则输入在优化前后产生同一转发和修改结果 |
-| macOS 应用识别 | 为减少系统调用直接关闭应用识别、扩大 unknown、跳过应用级 TLS 策略 | 高压下可以降级但必须可解释、可回填，不能系统性破坏策略 |
-| 管理端与 CLI | 为减少后台压力删除 Metrics、Traffic、Search、Replay、Export 或诊断字段 | 用户可见 API/CLI/WebUI 行为保持兼容 |
-| 可靠性边界 | 为追求峰值吞吐取消 timeout、backpressure、清理、错误归因或安全限制 | 失败必须可恢复、可诊断，不能 silent drop 或 silent corruption |
+| 代理协议 | 删除/绕过/弱化 HTTP/HTTPS/SOCKS5/WebSocket/SSE/TLS 解包 | 已支持协议继续可用，错误语义与连接生命周期一致 |
+| 流量录制 | 丢 request/response record、body、headers、frames、详情字段 | 请求成功后记录可追踪，允许异步回填但不能永久丢 |
+| 规则系统 | 改变优先级、filter、merge、script、proxy chain、TLS routing | 同一规则输入优化前后产生同一转发和改写结果 |
+| macOS 应用识别 | 关闭识别、扩大 unknown、跳过应用级 TLS 策略 | 高压下可以降级但必须可解释、可回填 |
+| 管理端与 CLI | 删 Metrics/Traffic/Search/Replay/Export/诊断字段 | 用户可见 API/CLI/WebUI 行为兼容 |
+| 可靠性边界 | 取消 timeout、backpressure、清理、错误归因、安全限制 | 失败可恢复可诊断，不允许 silent drop/silent corruption |
 
-功能等价验证要求：
+## 技术细节
 
-- 每次性能优化必须先跑对应功能回归：规则、Traffic、Search、Replay、Metrics apps、TLS/SOCKS5/WebSocket/SSE 和 macOS 应用识别按影响范围选择。
-- 对任何“异步化、采样、缓存、批处理、延迟回填”优化，必须证明最终一致性：数据可以晚到，但不能永久缺失或错误。
-- 对任何“跳过热路径工作”的优化，必须列出跳过条件、降级结果、用户可见表现和后续回填/诊断路径。
-- 若优化确实需要改变语义，不能作为性能修复直接落地，必须单独进入产品设计和兼容性评审。
+### 指标口径
 
-### 非目标
+#### 代理转发
 
-- 不把性能结果和开发机绝对数值强绑定；门禁优先使用相对退化阈值。
-- 不用公网服务作为默认上游；默认使用本地 mock upstream，公网目标只能作为手工诊断补充。
-- 不在普通 PR CI 中跑 10 分钟以上的长压测；长跑进入 nightly 或手工发布前验证。
-- 不通过关闭、删除、弱化既有功能来换取性能数据提升；这类结果不能进入性能基线。
-
-## 持续提升闭环
-
-本方案不仅用于一次压测，更用于驱动本机持续提升。后续执行时按以下闭环推进，直到主要卡点都被定位、修复并重新纳入基线：
-
-1. Evaluate：在本机用固定矩阵跑出当前基线，输出 `summary.md` 和原始采样。
-2. Diagnose：按分析路径定位最大瓶颈，明确是代理核心、traffic writer、DB/body cache、规则匹配、macOS 应用识别、上游或压测客户端。
-3. Optimize：只做保持功能语义不变的优化，记录优化假设、影响范围和风险。
-4. Verify Function：先跑功能等价验证，证明代理能力、录制能力、规则语义、应用识别和管理端行为没有被削弱。
-5. Verify Performance：复跑同一性能矩阵，和优化前同机同参数 run 对比。
-6. Ratchet：若性能提升且功能等价成立，将新结果写入基线；若退化或不可解释，回滚或继续定位。
-7. Repeat：选择下一项 P0/P1/P2 瓶颈继续推进。
-
-每一轮闭环必须留下：
-
-- baseline run id 与 after run id。
-- 优化假设和改动范围。
-- 功能等价验证命令与结果。
-- 性能变化表，包括提升、退化和不可比项。
-- 下一轮优化队列。
-
-## 指标口径
-
-### 代理转发指标
-
-| 指标 | 口径 | 采集来源 | 门禁建议 |
+| 指标 | 口径 | 采集 | 门禁建议 |
 | --- | --- | --- | --- |
-| RPS | 完成请求数 / 稳态窗口秒数 | loadtest report | 相对 main 基线下降不超过 10% |
-| 吞吐 | 响应 bytes / 稳态窗口秒数 | loadtest report | 相对 main 基线下降不超过 10% |
-| p50/p95/p99 延迟 | 完成请求端到端延迟 | loadtest report | p95/p99 不超过基线 1.2x |
-| 错误率 | timeout + connection error + 5xx 中非预期项 | loadtest report + traffic detail | smoke 为 0，长跑小于 0.1% |
-| CPU/RSS | Bifrost 进程 CPU 与 RSS | `/_bifrost/api/system/memory`、`/_bifrost/api/metrics` | 稳态无持续线性增长 |
-| FD/连接数 | 打开连接和 socket 数 | `lsof`、metrics | cooldown 后回落到接近 idle |
+| RPS | 完成请求数 / 稳态秒数 | loadtest report | 相对 main 下降不超过 10% |
+| 吞吐 | 响应 bytes / 稳态秒数 | loadtest report | 相对 main 下降不超过 10% |
+| p50/p95/p99 | 端到端延迟 | loadtest report | p95/p99 不超过基线 1.2x |
+| 错误率 | timeout + connection error + 非预期 5xx | loadtest + traffic detail | smoke 为 0，长跑小于 0.1% |
+| CPU/RSS | 进程 CPU/RSS | `/_bifrost/api/system/memory`、`/_bifrost/api/metrics` | steady 无线性增长 |
+| FD/连接数 | 打开连接和 socket | `lsof`、metrics | cooldown 回落到接近 idle |
 
-### 流量录制指标
+#### 流量录制
 
-| 指标 | 口径 | 采集来源 | 门禁建议 |
+| 指标 | 口径 | 采集 | 门禁建议 |
 | --- | --- | --- | --- |
-| 记录完整率 | traffic records / 成功请求数 | `/_bifrost/api/traffic` | 默认记录模式下大于 99.9% |
-| 写入滞后 | 请求结束时间到 record 可查询时间 | loadtest 轮询 API | p95 小于 2s |
-| 详情读取延迟 | `GET /api/traffic/{id}` 延迟 | loadtest 采样 | p95 小于 200ms |
-| DB 增长率 | traffic DB bytes / 请求数 | 文件系统统计 | 大小随 body 策略符合预期 |
-| body cache 增长 | body cache bytes / 大 body 请求数 | 文件系统统计 | 清理策略触发后可回收 |
-| 查询退化 | list/search 在高记录数下的 p95 | Admin API 采样 | p95 不超过基线 1.2x |
+| 记录完整率 | records / 成功请求 | `/_bifrost/api/traffic` | 默认大于 99.9% |
+| 写入滞后 | request 结束到 record 可见 | 轮询 API | p95 小于 2s |
+| 详情读取延迟 | `GET /api/traffic/{id}` | 抽样 | p95 小于 200ms |
+| DB 增长率 | traffic DB bytes / 请求 | 文件统计 | 按 body 策略符合预期 |
+| body cache 增长 | body cache bytes / 大 body 请求 | 文件统计 | 清理触发后可回收 |
+| 查询退化 | list/search p95 高记录数下 | Admin API | p95 不超过基线 1.2x |
 
-### 转发策略指标
+#### 转发策略
 
-| 指标 | 口径 | 采集来源 | 门禁建议 |
+| 指标 | 口径 | 采集 | 门禁建议 |
 | --- | --- | --- | --- |
-| 规则集加载时间 | 写入/启用规则到 active 生效时间 | Admin API + loadtest | 大规则集小于 3s |
-| 转发匹配开销 | 同负载下规则组相对 no-rule 延迟差 | loadtest report | simple 小于 5%，large 小于 20% |
-| 候选规则规模 | 每请求命中候选数和最终命中数 | traffic detail `matched_rules` | 与规则矩阵预期一致 |
-| 策略正确率 | host/path/filter/proxy chain 转发结果 | upstream echo + traffic detail | 100% |
-| 脚本规则开销 | reqScript/resScript 与无脚本对比 | loadtest report | 明确单独报告，不并入核心代理门禁 |
+| 规则集加载时间 | 写入到 active 生效 | Admin API + loadtest | 大规则集小于 3s |
+| 匹配开销 | 相对 no-rule 延迟差 | loadtest | simple < 5%、large < 20% |
+| 候选规则规模 | 命中候选数 / 最终命中 | `matched_rules` | 与规则矩阵预期一致 |
+| 策略正确率 | host/path/filter/proxy chain 转发结果 | upstream echo + detail | 100% |
+| 脚本规则开销 | reqScript/resScript 与无脚本对比 | loadtest | 单独报告 |
 
-### macOS 应用识别指标
+#### macOS 应用识别
 
-macOS 上的端口应用识别属于代理核心能力。它会影响应用级 TLS 策略、Traffic 归因、Metrics apps 统计、问题诊断和用户对代理可信度的感知，因此必须纳入压力测试。
-
-| 指标 | 口径 | 采集来源 | 门禁建议 |
+| 指标 | 口径 | 采集 | 门禁建议 |
 | --- | --- | --- | --- |
-| app recognition rate | 成功识别应用的 sampled records / 可识别客户端 records | traffic detail + metrics apps | 常见客户端大于 99%，高压 unknown 不应系统性升高 |
-| app recognition latency | 连接建立到 app info 可见的时间 | traffic detail polling | p95 小于 500ms，p99 小于 2s |
-| resolver overhead | 开启应用识别与关闭/跳过识别场景的 p95 差值 | loadtest 对比 | p95 增量小于 5%，p99 增量小于 10% |
-| resolver timeout rate | 进程解析超时或并发阀门饱和次数 / 请求数 | logs + metrics | steady 小于 0.1%，burst 后可恢复 |
-| snapshot efficiency | 每秒系统 socket/process 扫描次数 / 请求数 | resolver metrics 或日志采样 | 高并发下不随请求数线性增长 |
-| attribution correctness | 端口、PID、bundle/app name 与 ground truth 对齐率 | client harness + traffic detail | 100% 用例正确，允许短期 pending 但最终回填 |
+| app recognition rate | recognized / eligible | traffic detail + metrics apps | 常见客户端 > 99% |
+| app recognition latency | 连接建立到 app info 可见 | detail polling | p95 < 500ms、p99 < 2s |
+| resolver overhead | 开启 vs 跳过路径 p95 差 | loadtest 对比 | p95 增量 < 5%、p99 < 10% |
+| resolver timeout rate | 超时 or 阀门饱和 / 请求 | logs + metrics | steady < 0.1%，burst 可恢复 |
+| snapshot efficiency | 每秒扫描次数 / 请求 | resolver log | 不随请求数线性增长 |
+| attribution correctness | 与 ground truth 对齐 | client-manifest + detail | 100% 用例最终正确 |
 
-### 功能等价指标
+#### 功能等价
 
-| 指标 | 口径 | 采集来源 | 门禁建议 |
+| 指标 | 口径 | 采集 | 门禁 |
 | --- | --- | --- | --- |
-| behavior parity | 优化前后同一功能用例输出一致 | E2E/human_tests/API response diff | 必须 100% |
-| traffic data integrity | 成功请求对应记录、详情、body/header/frame 可追踪 | Traffic API + detail sample | 不允许永久缺失 |
-| rule semantic parity | 同一规则 profile 的命中、转发、改写结果一致 | upstream echo + traffic detail | 必须 100% |
-| app policy parity | macOS 应用识别与应用级策略结果一致 | client manifest + Traffic + metrics apps | 必须 100% |
-| API/CLI compatibility | 公开 API/CLI schema 和关键字段兼容 | snapshot/diff | 不允许无设计评审的破坏性变化 |
+| behavior parity | 优化前后同一用例输出 | E2E/human_tests/API diff | 100% |
+| traffic data integrity | 成功请求可追踪 | Traffic API | 不允许永久缺失 |
+| rule semantic parity | 同一规则 profile 命中/改写一致 | upstream echo + detail | 100% |
+| app policy parity | macOS 应用识别与策略结果一致 | manifest + Traffic + apps | 100% |
+| API/CLI compatibility | 公开 schema 和关键字段 | snapshot/diff | 无破坏性变化 |
 
-## 测试方法
+## CLI+Web+Admin API 触点
 
-性能测试必须按“先校准、再隔离变量、最后组合压力”的顺序执行，避免把上游、压测客户端、流量录制和规则匹配混成一团。
+- Admin metrics：`/_bifrost/api/metrics`、`/_bifrost/api/metrics/apps`、`/_bifrost/api/system/memory`
+- Traffic：`/_bifrost/api/traffic?limit=100`、`/_bifrost/api/traffic/batch`、`/_bifrost/api/traffic/{id}`
+- Performance 配置：`PUT /_bifrost/api/config/performance`（10 万条专项用于设置 `traffic.max_records=100000`）
+- 启动约束：所有压测命令必须使用临时 `BIFROST_DATA_DIR`、`--no-system-proxy`、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+- 环境变量：`BIFROST_PROCESS_RESOLUTION_CONCURRENCY`、`BIFROST_BACKGROUND_PROCESS_RESOLUTION_CONCURRENCY`、`BIFROST_BODY_STORE_BACKGROUND_CONCURRENCY`（参见 `design/process-resolution-performance.md`）。
 
-### 总体流程
+## Sync 边界
 
-1. 环境校准：
-   - 使用同一台机器、同一网络、同一 release binary、同一端口范围。
-   - 先直连本地 upstream，不经过 Bifrost，测出 load generator 与 upstream 自身上限。
-   - 记录 `git rev-parse HEAD`、`rustc -Vv`、`node -v`、CPU 型号、内存、macOS 版本和电源状态。
-2. 代理核心基线：
-   - 使用空规则、默认 traffic 记录配置，跑 HTTP small、HTTP large、HTTPS CONNECT 和 SSE。
-   - 目标是建立 Bifrost 在无复杂规则时的基线吞吐、延迟、CPU/RSS 和错误率。
-3. 流量录制隔离：
-   - 固定相同请求负载，分别跑 metadata-heavy、小 body、大 body、详情高频读取、list/search 并发查询场景。
-   - 目标是拆出 traffic writer、body cache、DB 写入、详情读取和搜索对代理链路的影响。
-4. 转发策略隔离：
-   - 固定相同请求负载，按 `no-rule -> single-host -> path-prefix-100 -> mixed-1000 -> proxy-chain -> script-heavy` 顺序压测。
-   - 目标是用相对 `no-rule` 的差值衡量规则匹配、过滤器、脚本和代理链成本。
-5. macOS 应用识别隔离：
-   - 在 macOS 上固定请求负载，分别用 curl、Node.js、Python、浏览器和短连接子进程发起流量。
-   - 目标是验证端口到进程、进程到应用、应用到 metrics/traffic 的链路在高压下仍准确且不拖慢代理。
-6. 组合压力：
-   - 选择最接近真实使用的规则集、body 配置和请求 mix，执行 30-60 分钟 soak。
-   - 目标是发现内存增长、FD 泄漏、DB 膨胀、写入积压和 cooldown 后无法恢复的问题。
+压测数据、run artifact、matched_rules 抽样、client-manifest 全部为本机文件，不参与云端 sync。任何压测过程中不得使用生产账号或触发用户级 sync；启动前须显式设置 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1` 并使用临时数据目录。
 
-### 代理性能怎么测
+## Phase 1 —— 现有脚本 + 环境校准
 
-代理性能压测以“上游直连基线 + Bifrost 空规则基线 + 协议矩阵”为核心。
+复用：
 
-| 步骤 | 执行动作 | 观察重点 | 产物 |
-| --- | --- | --- | --- |
-| 1 | 启动本地 HTTP/HTTPS/SSE/WebSocket upstream | upstream 无错误、直连延迟稳定 | upstream log |
-| 2 | 直连 upstream 跑 fixed-rate 阶梯：100、300、600、1000、1500 RPS | load generator 自身是否先饱和 | `direct-baseline.json` |
-| 3 | 启动 Bifrost release binary，空规则，经代理跑同一阶梯 | 找到 Bifrost 饱和点 | `proxy-no-rule.json` |
-| 4 | 对 HTTP small、HTTP large、HTTPS CONNECT、TLS 解包、SSE 分别跑 steady + burst + cooldown | 协议差异、连接生命周期、RSS 回落 | `proxy-protocol-*.json` |
-| 5 | 对比 direct 与 proxy | 代理额外延迟、吞吐折损、CPU/请求 | `compare-direct-proxy.json` |
+- `scripts/loadtest-proxy-stability.mjs`：HTTP small/large、HTTPS small/large、SSE、fixed-rate/closed-loop、metrics/memory 采样，输出 `.artifacts/loadtest/proxy-stability-<run-id>.json`。
+- `scripts/loadtest-upstream-502-analysis.mjs`：特定上游 502 分析，输出 `.artifacts/loadtest/upstream-502-<run-id>.json`。
+- `scripts/loadtest-traffic-storage-100k.mjs`：10 万条流量存储专项。
 
-阶梯压测规则：
+环境校准：同一机器、同一网络、同一 release binary、同一端口范围；记录 `git rev-parse HEAD`、`rustc -Vv`、`node -v`、CPU/内存/macOS 版本/电源状态。
 
-- 每个 RPS 档位至少包含 15s warmup、60s steady、15s burst、30s cooldown。
-- 当任一条件出现时停止继续加压：错误率大于 0.1%、p99 超过基线 2 倍、CPU 连续 30s 高于 90%、RSS 线性增长且 cooldown 不回落、load generator 自身开始超时。
-- 饱和点定义为“最后一个同时满足错误率、p99、CPU/RSS 和 cooldown 条件的最高 RPS 档位”。
+## Phase 2 —— 协议矩阵与录制矩阵
 
-### 流量录制性能怎么测
+协议矩阵：
 
-流量录制性能压测要把“代理转发成功”和“记录可用”分开统计。请求成功不代表 traffic 记录已经稳定落库。
-
-| 场景 | 负载 | 采集动作 | 评估点 |
-| --- | --- | --- | --- |
-| metadata-only | 小 body，高 RPS | 每秒查询 `/_bifrost/api/traffic?limit=1` 和总数 | record completeness、write lag |
-| small-body | 1-4 KiB JSON body | 抽样读取 `/_bifrost/api/traffic/{id}` | detail p95、body 是否完整 |
-| large-body | 1-10 MiB body | 统计 DB 与 body cache 文件增长 | 磁盘增长率、RSS 峰值、清理回收 |
-| list-pressure | 写入同时并发 `traffic?limit=100` | list p95 和代理 p99 | 管理端查询是否拖慢代理 |
-| search-pressure | 写入同时执行 body/header/search | search p95、max-scan 成本 | 搜索是否造成写入积压 |
-
-关键计算：
-
-```text
-record_completeness = matched_traffic_records / successful_requests
-write_lag_ms = first_visible_at_ms - request_finished_at_ms
-detail_read_p95_ms = percentile(api_traffic_detail_latency_ms, 95)
-db_bytes_per_request = (traffic_db_bytes_after - traffic_db_bytes_before) / successful_requests
-body_cache_bytes_per_large_request = body_cache_delta_bytes / large_body_successful_requests
-```
-
-流量录制专项必须额外记录：
-
-- `traffic records total`：压测开始前、steady 结束、cooldown 结束各采一次。
-- `traffic detail sample`：每 1000 个成功请求至少抽样 10 条详情。
-- `body_cache` 与 traffic DB 文件大小：每 5s 采样。
-- 写入积压信号：请求已完成但 traffic record 未在 2s 内可见的比例。
-- 管理端查询干扰：有无 list/search 并发时代理 p95/p99 的差值。
-
-### 转发策略性能怎么测
-
-转发策略性能压测以固定流量、替换规则集为原则。除规则文件外，其他变量必须保持一致。
-
-| 规则 profile | 规则规模 | 请求分布 | 评估点 |
-| --- | --- | --- | --- |
-| `no-rule` | 0 | 所有请求直达 upstream | 代理核心基线 |
-| `single-host` | 1 | 100% 命中 host 转发 | 简单规则成本 |
-| `path-prefix-100` | 100 | 80% 命中、20% miss | path 前缀匹配成本 |
-| `mixed-1000` | 1000 | host/path/header/filter 混合 | 候选剪枝与 miss 成本 |
-| `proxy-chain` | 2 层代理 | 100% 经下游代理 | 下游连接复用与错误传播 |
-| `script-heavy` | reqScript/resScript | 10%、50%、100% 命中三档 | JS 执行和 body 变更成本 |
-
-策略评估公式：
-
-```text
-matcher_latency_overhead = rule_profile_p95_ms / no_rule_p95_ms - 1
-matcher_throughput_overhead = 1 - rule_profile_rps / no_rule_rps
-rule_correctness = traffic_records_with_expected_matched_rules / sampled_traffic_records
-proxy_chain_error_rate = downstream_errors / completed_requests
-```
-
-每个规则 profile 必须抽样检查 traffic detail：
-
-- `matched_rules` 是否符合预期。
-- `actual_url`、`actual_host`、`listener_port` 是否正确。
-- miss 请求是否未被错误转发。
-- proxy chain 场景下游代理是否记录 CONNECT 或 HTTP absolute-form 请求。
-
-### macOS 应用识别怎么测
-
-macOS 应用识别压测分为“准确性压测”和“热路径开销压测”。准确性只看识别是否正确，热路径开销看识别过程是否拖慢代理。
-
-| 场景 | 客户端 | 负载 | 验证点 |
-| --- | --- | --- | --- |
-| `app-curl-steady` | curl | 100-1000 RPS fixed-rate | Traffic 记录显示 curl 或可解释的 CLI 进程名 |
-| `app-node-burst` | Node.js 子进程池 | burst 短连接 | 短连接仍能最终回填 app info |
-| `app-python-many-pids` | Python 多进程 | 频繁 PID 变化 | negative cache 不误压制新进程 |
-| `app-browser-connect` | Chrome/Safari | CONNECT/TLS | 应用级 TLS 策略和 Metrics apps 归因正确 |
-| `app-mixed` | curl + node + python + browser | 混合协议 | apps 统计按应用拆分，unknown 不随 RPS 放大 |
-
-执行步骤：
-
-1. 记录 ground truth：
-   - 每个客户端启动时写入 `client-manifest.ndjson`，包含 `scenario`、`pid`、`ppid`、`command`、`expected_app`、`start_time`。
-   - 对浏览器类客户端额外记录 bundle id、app path 和版本。
-2. 产生流量：
-   - 每个客户端使用固定 host/path 标记，例如 `/app/curl/<pid>`、`/app/node/<pid>`，便于从 Traffic 反查。
-   - 同时覆盖 HTTP、HTTPS CONNECT、TLS 解包和短连接 burst。
-3. 采集识别结果：
-   - 每秒查询 `/_bifrost/api/metrics/apps`。
-   - 每 1000 个请求抽样 traffic detail，记录 `client_app`、`client_process`、`client_pid`、`listener_port`、`actual_host`。
-   - 抽样 `lsof -nP -iTCP -sTCP:ESTABLISHED` 或等效系统视图，和 manifest 对齐。
-4. 评估准确率：
-   - `recognized_records / eligible_records`。
-   - `correctly_attributed_records / recognized_records`。
-   - `unknown_after_2s / eligible_records`。
-5. 评估热路径开销：
-   - 同一负载下对比“启用应用识别”和“管理端请求/跳过识别路径”的 p95/p99 差异。
-   - 观察 `spawn_blocking`、进程解析 timeout、并发阀门饱和、snapshot 刷新次数是否随请求数线性增长。
-
-macOS 应用识别专项必须验证：
-
-- 高并发 CONNECT 不导致每请求全量扫描进程表。
-- 大量短连接不会长期 unknown；允许先记录、后 backfill，但最终 Traffic 和 Metrics apps 要一致。
-- 管理端 `/_bifrost` 请求不触发应用识别，不能被 resolver 拖慢。
-- 进程解析超时后必须降级为 unknown 并继续代理，不能阻断请求。
-- 应用级 TLS 拦截白名单/黑名单在高压下不能因为 unknown 系统性失效。
-
-## 压测矩阵
-
-### 负载模型
-
-| 档位 | 用途 | 时长 | 并发 / 速率 | 运行位置 |
-| --- | --- | --- | --- | --- |
-| smoke | PR 前快速回归 | 30-60s | 小并发 + 固定速率 | 本地 / 可选 CI |
-| baseline | 建立当前分支基准 | 3-5min | closed-loop + fixed-rate | 本地 release build |
-| soak | 检查内存、FD、DB 长期增长 | 30-60min | 稳态 + burst + cooldown | nightly / 手工 |
-| regression | 对比 main 与当前分支 | 两次 baseline | 相同机器、相同参数 | 发布前 |
-
-### 请求场景
-
-| 场景 | 协议 | body | 重点观测 |
+| 场景 | 协议 | body | 观测 |
 | --- | --- | --- | --- |
 | `http-small` | HTTP absolute-form | 1-4 KiB | 纯转发 RPS、延迟 |
 | `http-large` | HTTP absolute-form | 1-10 MiB | 吞吐、body cache、RSS |
-| `https-connect` | CONNECT passthrough | 1-4 KiB | tunnel 建立成本、连接复用 |
+| `https-connect` | CONNECT passthrough | 1-4 KiB | tunnel 成本、复用 |
 | `https-mitm` | TLS 解包 | 1-4 KiB + JSON | 证书、解包、规则匹配 |
 | `sse-stream` | SSE | 长连接 + 小 frame | 活跃连接、内存、push |
-| `websocket-echo` | WS/WSS | 小 frame + burst | frame 录制、连接生命周期 |
-| `status-mix` | HTTP | 2xx/4xx/5xx | 错误归因、traffic 状态统计 |
+| `websocket-echo` | WS/WSS | 小 frame + burst | frame 录制、生命周期 |
+| `status-mix` | HTTP | 2xx/4xx/5xx | 错误归因 |
 
-### 转发策略场景
+阶梯规则：每档 15s warmup + 60s steady + 15s burst + 30s cooldown。饱和判定：错误率 > 0.1%、p99 > 基线 2x、CPU 30s > 90%、RSS 线性增长且 cooldown 不回落、load generator 自身超时。
 
-| 场景 | 规则集 | 验证点 |
-| --- | --- | --- |
-| `no-rule` | 空规则 | 代理核心基线 |
-| `single-host` | 1 条 host/http 转发 | 简单匹配开销 |
-| `path-prefix-100` | 100 条 host + path 前缀 | path matcher 退化 |
-| `mixed-1000` | 1000 条 host/path/header/filter | 大规则集候选剪枝 |
-| `proxy-chain` | 下游代理转发 | 连接复用与错误传播 |
-| `script-heavy` | reqScript/resScript | JS 执行开销单独报告 |
-| `mitm-routing` | HTTPS 解包 + 路由例外 | TLS 解包触发与 passthrough 边界 |
+录制矩阵：metadata-only、small-body、large-body、list-pressure、search-pressure。计算 `record_completeness = matched_records / successful_requests`、`write_lag_ms = first_visible_at - request_finished_at`、`db_bytes_per_request`。
 
-### macOS 应用识别场景
+## Phase 3 —— 规则与应用识别专项
 
-| 场景 | 连接模式 | 客户端规模 | 重点观测 |
-| --- | --- | --- | --- |
-| `app-curl-steady` | HTTP keep-alive + 短连接 | 1-16 个 curl 进程 | app 识别准确率、resolver p95 |
-| `app-node-burst` | HTTP/HTTPS burst | 32-256 个短生命周期 Node.js 子进程 | snapshot 新鲜度、backfill 成功率 |
-| `app-browser-connect` | CONNECT + TLS 解包 | Chrome/Safari 稳态浏览器流量 | 应用级 TLS 策略、Metrics apps |
-| `app-mixed-soak` | HTTP/HTTPS/SSE/WS 混合 | curl + node + python + browser | unknown 比例、RSS/FD 回落、apps 统计稳定性 |
+规则 profile：`no-rule` / `single-host` / `path-prefix-100` / `mixed-1000` / `proxy-chain` / `script-heavy` / `mitm-routing`。评估 `matcher_latency_overhead`、`matcher_throughput_overhead`、`rule_correctness`、`proxy_chain_error_rate`。
 
-## 工具链设计
+macOS 应用识别场景：`app-curl-steady`、`app-node-burst`、`app-python-many-pids`、`app-browser-connect`、`app-mixed`。使用 `client-manifest.ndjson` 记录 ground truth。评估 `recognized/eligible`、`correctly_attributed/recognized`、`unknown_after_2s/eligible`，并对比“启用识别 vs `/_bifrost` 跳过路径”的 p95/p99 差异。
 
-### 现有脚本
+必须验证：
 
-- `scripts/loadtest-proxy-stability.mjs`
-  - 适合作为代理转发和资源稳定性的第一版 smoke/baseline 工具。
-  - 已覆盖 HTTP small/large、HTTPS small/large、SSE、fixed-rate/closed-loop、metrics 和 memory 采样。
-  - 输出 `.artifacts/loadtest/proxy-stability-<run-id>.json`。
-- `scripts/loadtest-upstream-502-analysis.mjs`
-  - 适合分析特定上游在并发下的 502、错误详情和 traffic detail 归因。
-  - 输出 `.artifacts/loadtest/upstream-502-<run-id>.json`。
+- 高并发 CONNECT 不导致每请求全量扫描进程表。
+- 大量短连接允许先记录后 backfill，但最终 Traffic/Metrics apps 一致。
+- `/_bifrost` 请求不触发识别。
+- 解析超时降级为 unknown 而非阻断请求。
+- 应用级 TLS 白/黑名单在高压下不因 unknown 系统性失效。
 
-### 采集器职责
+## Phase 4 —— 10 万条流量存储专项 + 长跑
 
-后续性能脚本必须把采集分成七类，统一写入同一个 run 目录：
+执行入口：
+
+```bash
+cargo build --release --bin bifrost
+BIFROST_BIN=./target/release/bifrost \
+BIFROST_PROXY_PORT=19904 \
+BIFROST_UPSTREAM_PORT=28084 \
+LOADTEST_STORAGE_MAX_RECORDS=100000 \
+LOADTEST_STORAGE_RECORDS=100000 \
+LOADTEST_STORAGE_WRITE_CONCURRENCY=256 \
+BIFROST_DISABLE_TRAY=1 \
+BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+node scripts/loadtest-traffic-storage-100k.mjs
+```
+
+必须采集：`before/after.performanceConfig.traffic.max_records`、`write.rps/p95/p99/errors`、`analysis.recordCompleteness`、`latestListP95Ms`、`hostFilterP95Ms`、`statusFilterP95Ms`、`batchDetailP95Ms`、`urlSearchP95Ms`、`responseBodySearchP95Ms`、`after.memory.process/traffic_db`。
+
+长跑 soak：30-60 分钟稳态 + burst + cooldown，观察内存、FD、DB、后台任务 cooldown 恢复。
+
+## 工具链 & Run 目录
 
 ```text
 .artifacts/loadtest/<run-id>/
@@ -363,33 +210,7 @@ macOS 应用识别专项必须验证：
   summary.md
 ```
 
-| 采集类别 | 采样频率 | 采集内容 | 用途 |
-| --- | --- | --- | --- |
-| load | 每请求 + 阶段汇总 | started/completed/ok/error、latency、bytes、inflight | 吞吐、延迟、错误率 |
-| admin metrics | 1s | `/_bifrost/api/metrics`、`/_bifrost/api/system/memory` | CPU/RSS、连接、缓存、队列 |
-| process | 1s | pid、RSS、CPU、FD 数、线程数 | 识别 OS 资源瓶颈 |
-| traffic | 1-5s + 抽样详情 | list total、最新 record、detail latency、matched_rules | 录制完整率与规则正确性 |
-| app resolution | 1s + 抽样详情 | metrics apps、client app、client pid/process、unknown、timeout、snapshot refresh | macOS 应用归因准确率与开销 |
-| files | 5s | traffic DB、body cache、日志目录大小 | 磁盘增长与清理 |
-| logs | 全量 | Bifrost stdout/stderr、upstream error | 错误归因 |
-
-最低采集命令集合：
-
-```bash
-curl -sS "http://127.0.0.1:${BIFROST_PROXY_PORT}/_bifrost/api/metrics"
-curl -sS "http://127.0.0.1:${BIFROST_PROXY_PORT}/_bifrost/api/metrics/apps"
-curl -sS "http://127.0.0.1:${BIFROST_PROXY_PORT}/_bifrost/api/system/memory"
-curl -sS "http://127.0.0.1:${BIFROST_PROXY_PORT}/_bifrost/api/traffic?limit=100"
-lsof -nP -p "${BIFROST_PID}"
-lsof -nP -iTCP -sTCP:ESTABLISHED
-ps -o pid,ppid,%cpu,rss,etime,command -p "${BIFROST_PID}"
-du -sk "${BIFROST_DATA_DIR}"
-find "${BIFROST_DATA_DIR}" -type f -maxdepth 4 -print
-```
-
-### 后续新增脚本结构
-
-建议后续将性能专项脚本集中放入 `scripts/perf/`：
+后续 `scripts/perf/` 建议：
 
 ```text
 scripts/perf/
@@ -398,26 +219,10 @@ scripts/perf/
   rule-strategy.mjs
   app-resolution.mjs
   compare-runs.mjs
-  fixtures/
-    upstream-http.mjs
-    upstream-websocket.mjs
-    client-spawner.mjs
-    rules/
-      no-rule.bifrost
-      single-host.bifrost
-      path-prefix-100.bifrost
-      mixed-1000.bifrost
+  fixtures/{upstream-http.mjs, upstream-websocket.mjs, client-spawner.mjs, rules/*.bifrost}
 ```
 
-脚本职责：
-
-- `proxy-throughput.mjs`：执行直连 upstream 与 Bifrost proxy 的协议吞吐矩阵，输出 direct/proxy 对比。
-- `traffic-recording.mjs`：执行 traffic 写入、详情读取、list/search 并发、body cache 增长和写入滞后测试。
-- `rule-strategy.mjs`：生成或加载规则 profile，执行固定负载并抽样验证 `matched_rules` 与转发目标。
-- `app-resolution.mjs`：仅在 macOS 执行应用识别与端口归因压测，输出识别率、unknown 比例、回填延迟、resolver 开销和 Metrics apps 一致性。
-- `compare-runs.mjs`：对比两个 run 或当前 run 与 main 基线，输出退化项、可能瓶颈和优先排查建议。
-
-统一报告 JSON 必须包含：
+统一报告 schema：
 
 ```json
 {
@@ -435,284 +240,54 @@ scripts/perf/
 }
 ```
 
-## 评估方法
+## 测试方案
 
-### 通过 / 失败 / 需分析
+### 结论分档
 
 | 结论 | 条件 |
 | --- | --- |
 | pass | 错误率、吞吐、p95/p99、RSS、FD、record completeness、规则正确率全部在阈值内 |
-| investigate | 功能正确但 p95/p99、RSS、DB 增长、write lag 或 list/search 有单项明显退化 |
-| fail | 出现请求错误、traffic 记录缺失、规则转发错误、进程崩溃、cooldown 不恢复或资源持续增长 |
-| invalid | 性能数字变好但功能语义、协议能力、数据完整性、规则行为或应用识别被削弱 |
+| investigate | 功能正确但 p95/p99、RSS、DB、write lag、list/search 有单项明显退化 |
+| fail | 请求错误 / traffic 缺失 / 规则转发错误 / 崩溃 / cooldown 不恢复 / 资源持续增长 |
+| invalid | 数字变好但功能语义、协议能力、数据完整性、规则行为或应用识别被削弱 |
 
-### 阈值策略
+### 已固化的基线（示例）
 
-- smoke 阈值：重在发现明显功能和资源问题，要求错误率为 0、脚本退出码为 0、报告 schema 完整。
-- baseline 阈值：用当前 main 的同机同参数结果作为基线。没有历史基线时，首次结果只入库不判失败。
-- regression 阈值：
-  - RPS 或吞吐下降超过 10%：需分析。
-  - p95/p99 上升超过 20%：需分析。
-  - p99 上升超过 50% 或错误率大于 0.1%：失败。
-  - RSS steady 斜率大于 5 MiB/min 且 cooldown 不回落：失败。
-  - record completeness 小于 99.9%：失败。
-  - rule correctness 小于 100%：失败。
-  - macOS app recognition rate 低于 99% 或 unknown_after_2s 超过 1%：需分析；应用级策略场景出现错误归因：失败。
-  - behavior parity、rule semantic parity、app policy parity 任一不满足：本轮性能结果无效，不能作为提升基线。
+- `proxy-stability-2026-06-18T16-36-28.116Z.json`：HTTP small/large + HTTPS + SSE，`ok=27854`、`errors=0`、`non2xx=0`、`cooldownWsOpenConnectionCount=0`、RSS 峰值 110.08 MiB（binary fast path monitor 泄漏修复后）。
+- `traffic-storage-100k-2026-06-18T18-48-34.439Z.json`：`recordCompleteness=1`、`retainedRecords=100000`、`writeRps=20973.15`、`writeP95Ms=19.2`、response body 搜索 p95 417ms（未优化）。
+- `traffic-storage-100k-2026-06-18T20-24-18.611Z.json`：ASCII fast path + BodyStore 预分配 + 缩短锁持有后，response body 搜索 p95 从 417ms 降到 349.88ms，URL 搜索 p95 从 118.72ms 降到 115.32ms，`recordCompleteness=1`。
 
-### 分析方法
+### 首轮已修复问题
 
-分析顺序必须从外到内，先排除压测工具和上游，再定位 Bifrost 内部瓶颈。
+1. **binary fast path 连接监控残留**：`cooldownWsConnectionCount=762 -> 0`；根因 metrics-only forwarding 不关闭 `ConnectionMonitor`。修复：跳过无 payload 价值的 streaming monitor 注册，WebSocket/SSE 语义不变。
+2. **10 万写入 async traffic channel 丢记录**：满队列时不再 `try_send` 丢弃，改为等待队列容量的发送任务；批量从 `record=64/update=32` 提升到 `record=512/update=256`；channel 容量提升到 `MAX_TRAFFIC_MAX_RECORDS * 3`。新增单测 `test_full_channel_defers_without_dropping_records_or_updates`（`crates/bifrost-admin/src/async_traffic.rs:440`）。
+3. **response body 搜索热路径**：ASCII text 走 byte-level case-insensitive fast path，`BodyStore::load/load_bytes` 按 `BodyRef::File.size` 预分配，读锁离开后再搜索。功能语义仍是大小写不敏感、非 ASCII fallback 到 Unicode 路径。
 
-1. 压测客户端是否饱和：
-   - direct upstream 已经高 p99 或错误，说明客户端/upstream 先到瓶颈。
-   - load generator CPU 高于 85% 时，本轮不能作为 Bifrost 上限。
-2. 上游是否饱和：
-   - direct baseline 正常、proxy 场景异常，才进入 Bifrost 分析。
-   - upstream log 出现 connection reset、timeout、backpressure 时，先降低 upstream 成本或换更轻 fixture。
-3. 代理核心是否饱和：
-   - CPU 高、RSS 稳定、FD 稳定、record completeness 正常：多半是 CPU 计算或协议处理瓶颈。
-   - FD 持续增长：优先查连接生命周期、SSE/WS/tunnel cleanup。
-   - cooldown 后活跃连接不回落：优先查 keep-alive、CONNECT、WebSocket close。
-4. 流量录制是否拖慢：
-   - proxy p99 和 write lag 同时升高：优先查 traffic writer 队列、DB 写入、body cache。
-   - list/search 并发时代理 p99 上升：优先查 DB 查询锁、分页、索引、body scan。
-   - DB bytes/request 异常升高：优先查 body 存储策略和清理策略。
-5. 规则策略是否拖慢：
-   - `mixed-1000` 相比 `no-rule` p95 明显升高：优先查候选剪枝、filter gate、path matcher。
-   - miss 请求比 hit 请求更慢：优先查规则全量扫描和 negative cache。
-   - `script-heavy` 单独退化：单独归因为脚本执行或 body decode/encode，不并入核心代理。
-6. macOS 应用识别是否拖慢或失真：
-   - unknown 比例随 RPS 放大：优先查 snapshot TTL、新连接刷新策略、negative cache 和 backfill 饱和。
-   - p99 升高但 CPU 不高：优先查 blocking resolver 排队、系统调用阻塞和并发阀门等待。
-   - Metrics apps 与 traffic detail 不一致：优先查回填顺序、async traffic update 早于 record 的暂存逻辑。
-   - 管理端请求 p95 升高：确认 `/_bifrost` 路径是否跳过进程解析。
-   - 应用级 TLS 策略误判：抽样 `client-manifest.ndjson`、traffic detail、resolver log 和系统 `lsof` 视图交叉验证。
-7. 错误归因：
-   - 所有 5xx 必须抽样 `traffic/{id}`，记录 `error_message`、`actual_url`、`matched_rules`、upstream log。
-   - 502 必须用 `scripts/loadtest-upstream-502-analysis.mjs` 复跑最小场景，区分上游拒绝、连接复用错误、TLS/CONNECT 错误和规则转发错误。
+## Review/Fix/Test 闭环
 
-### 输出分析报告
+### 第 1 轮
 
-每次完整压测必须产出 `summary.md`，结构固定：
+- 复核目标是否覆盖代理性能、流量录制、转发策略、macOS 应用识别四条主线。
+- review `scripts/loadtest-*.mjs` 启动参数是否含 `--no-system-proxy`、`BIFROST_DISABLE_TRAY=1`、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
+- 执行 `node --check` 与 rg 静态验收，确认脚本、指标、阈值、报告 schema 可被检索。
 
-```markdown
-# Bifrost Performance Run <run-id>
+### 第 2 轮
 
-## Conclusion
-- status: pass / investigate / fail
-- top bottleneck:
-- max stable RPS:
-- largest regression:
-- function parity:
+- 复查 `design/`、`human_tests/`、索引是否一致。
+- 复跑 `loadtest-proxy-stability.mjs` release baseline，采样 cooldown monitor 计数。
+- 复跑 `loadtest-traffic-storage-100k.mjs`，采样 responseBodySearchP95Ms 与 retainedRecords。
+- 若发现方案缺口，补充后追加新一轮 review。
 
-## Environment
-- git:
-- binary:
-- machine:
-- command:
+## 风险与决策
 
-## Proxy Throughput
-- direct baseline:
-- no-rule proxy:
-- protocol matrix:
-
-## Traffic Recording
-- record completeness:
-- write lag:
-- detail/list/search latency:
-- DB/body cache growth:
-
-## Rule Strategy
-- no-rule:
-- single-host:
-- path-prefix-100:
-- mixed-1000:
-- proxy-chain:
-- script-heavy:
-
-## macOS App And Port Recognition
-- recognition rate:
-- correctness:
-- unknown after 2s:
-- backfill latency:
-- resolver overhead:
-- metrics apps consistency:
-
-## Evidence
-- artifacts:
-- sampled 5xx:
-- sampled matched_rules:
-
-## Function Parity
-- behavior parity:
-- traffic data integrity:
-- rule semantic parity:
-- app policy parity:
-- API/CLI compatibility:
-
-## Next Actions
-- P0:
-- P1:
-- P2:
-```
-
-## 首轮压测发现与优化记录
-
-### 2026-06-19：binary fast path 连接监控残留
-
-现象：
-
-- fixed-rate 压测包含 HTTP small、HTTP large chunked、HTTPS small、HTTPS large 和 SSE。
-- 优化前报告 `proxy-stability-2026-06-18T16-30-18.900Z.json`：总成功请求 `ok=27854`、`errors=0`、`non2xx=0`，HTTP large `ok=762`。
-- cooldown 结束时 `cooldownWsConnectionCount=762`、`cooldownWsOpenConnectionCount=762`、`cooldownWsFramesInMemory=0`，说明 binary performance fast path 创建了无帧、无详情价值且未关闭的 `ConnectionMonitor` 项。
-
-根因：
-
-- HTTP large chunked 响应在 binary performance mode 下走 metrics-only forwarding，只保留字节统计和 traffic metadata，不保存响应体/帧。
-- 记录创建阶段仍按 streaming 注册 `ConnectionMonitor`，但 metrics-only body 不负责关闭 monitor，导致每个 large 响应留下 open monitor 对象。
-
-优化：
-
-- binary fast path 仍保留 traffic streaming metadata、响应大小统计和转发行为。
-- 仅跳过无 payload 价值的 streaming `ConnectionMonitor` 注册；WebSocket、SSE 和非 binary fast path 的显式 streaming 监控语义不变。
-- streaming 连接关闭时把最终 socket status 写回 traffic record，frames API 在 monitor 被清理后可从持久记录兜底返回关闭状态。
-- `ConnectionMonitor` memory stats 增加 open/closed connection 计数，loadtest 报告增加 cooldown connection count，后续可直接量化该类问题。
-
-复测：
-
-- 优化后报告 `proxy-stability-2026-06-18T16-36-28.116Z.json`：总成功请求 `ok=27854`、`errors=0`、`non2xx=0`，HTTP large `ok=762`，与优化前请求规模一致。
-- cooldown 结束时 `cooldownWsConnectionCount=0`、`cooldownWsOpenConnectionCount=0`、`cooldownWsClosedConnectionCount=0`。
-- 峰值 RSS 从 `161.2 MiB` 降到 `110.08 MiB`。该数值会受 allocator 和运行时状态影响，基线提升以 connection monitor 残留清零为主证据，RSS 下降作为辅助证据。
-- 功能等价门禁：HTTP/HTTPS/SSE 子场景无错误、无非 2xx；未关闭转发、录制、规则匹配、TLS 决策或 macOS 应用识别能力。
-
-### 2026-06-19：10 万条写入时 async traffic channel 丢记录
-
-现象：
-
-- `scripts/loadtest-traffic-storage-100k.mjs` 首轮 10 万条真实代理写入后，压测客户端完成 100000 个 2xx 请求，但 Traffic API 在 120 秒内只看到 `13623` 条记录。
-- SQLite 复核 `traffic_records` 和 `traffic_record_details` 均只有 `13623` 条；最新记录 URL 已到 `/record/99981`，说明请求覆盖到末尾但大量中间记录没有落库。
-- 同一临时数据目录的 `body_cache` 有 `100000` 个响应 body 文件、约 `391 MiB`，说明 body 已落盘但 Traffic DB record 被丢弃，形成数据完整性和 orphan body 风险。
-- 日志包含大量 `Traffic channel full, dropping record/update`，首轮计数约 `259695` 条匹配。
-
-根因：
-
-- `AsyncTrafficWriter` 使用固定 `10000` 容量 channel，热路径 `try_send` 在满队列时直接丢弃 record/update。
-- 高并发小响应在数秒内完成 10 万请求，body cache 写入速度明显快于 Traffic DB 异步落库，channel 被打满后产生静默流量记录缺失。
-- 异步 processor 每批只处理 `64` 条 record 和 `32` 条 update，放大了 channel backlog 和 SQLite commit/spawn_blocking 调度开销。
-
-优化：
-
-- 满队列时不再丢弃 TrafficCommand，而是派生等待队列容量的发送任务，保证 record/update 在进程存活期间最终进入 processor。
-- record 批量从 `64` 提升到 `512`，update 批量从 `32` 提升到 `256`，降低事务和调度开销。
-- 启动时 async traffic channel 容量提升到 `MAX_TRAFFIC_MAX_RECORDS * 3`，覆盖 10 万记录上限下 record、completion update 和 app/backfill update 的短时峰值。
-- 新增单测 `test_full_channel_defers_without_dropping_records_or_updates`：buffer=1 且 processor 尚未启动时连续提交 64 条 record/update，最终必须全部落库并应用更新。
-
-复测：
-
-- 修复后 10 万条报告 `traffic-storage-100k-2026-06-18T18-48-34.439Z.json`：`recordCompleteness=1`、`retainedRecords=100000`、`configuredMaxRecords=100000`、`writeRps=20973.15`、`writeP95Ms=19.2`、`errors=0`、`non2xx=0`。
-- 读写查询指标：`latestListP95Ms=0.76`、`hostFilterP95Ms=17.21`、`statusFilterP95Ms=2.68`、`batchDetailP95Ms=16.42`、`urlSearchP95Ms=118.72`、`responseBodySearchP95Ms=417.09`。
-- 10 万 + 5000 overflow 报告 `traffic-storage-100k-2026-06-18T18-51-02.051Z.json`：最终 `retainedRecords=82977`，符合当前触发清理后回落到约 80% 水位再继续写入的策略；读列表、批量详情、URL 搜索和 response body 搜索均无错误。
-- 修复后日志未再出现 `Traffic channel full`、`dropping record` 或 `dropping update`。
-
-剩余观察：
-
-- overflow 场景最终保留约 8.3 万条而不是接近 10 万条，是当前 `trigger=max+min(max*15%,2000)`、`target=max*80%` 策略的结果。该行为有助于降低高频 cleanup，但用户感知上“max_records=100000”并不表示长期接近保留 100000 条，需要在产品/配置文档中明确。
-- response body 搜索在 10 万记录下 p95 约 `370-420ms`，是当前搜索侧主要成本；它主要来自逐批扫描和 body ref 读取，没有 body 全文索引。后续若继续优化，需要在不改变 Search API 语义的前提下单独设计索引或缓存策略。
-
-### 2026-06-19：10 万条 response body 搜索热路径优化
-
-现象：
-
-- 上一轮 10 万条完整写入报告 `traffic-storage-100k-2026-06-18T18-48-34.439Z.json` 中，`responseBodySearchP95Ms=417.09`，明显高于列表、status 过滤、host 过滤和 URL 搜索，是 10 万记录存储专项里最突出的查询热点。
-- 该路径会读取 body ref、把文件内容转成字符串、对整段内容做 `to_lowercase()` 后再搜索；对压测里的常见 ASCII JSON/text 响应体，这会制造额外分配和解码成本。
-
-优化：
-
-- Search Engine 对 ASCII text/body 走 byte-level case-insensitive fast path，避免常见 ASCII JSON/text body 的整段 lowercase 分配。
-- 文件 body 搜索改为 `BodyStore::load_bytes` 后按字节搜索，只有非 ASCII 或需要 fallback 时再走 `String::from_utf8_lossy` 与原有 Unicode 路径。
-- `BodyStore::load` 与 `load_bytes` 按 `BodyRef::File.size` 预分配 buffer，降低大批量文件 body 读取时的 Vec 扩容。
-- 文件 body 的读取结果先离开 `body_store` 读锁再执行搜索，减少全量扫描期间锁持有时间。
-- 功能语义保持不变：搜索仍是大小写不敏感，preview 保留原始大小写；非 ASCII/非 UTF-8 内容继续走原有 fallback。
-
-验证与尝试：
-
-| run | 关键变化 | response body p95 | URL p95 | latest list p95 | host/status p95 | batch p95 | 结论 |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `traffic-storage-100k-2026-06-18T18-48-34.439Z.json` | 优化前基线 | `417.09ms` | `118.72ms` | `0.76ms` | `17.21ms` / `2.68ms` | `16.42ms` | response body 是主要热点 |
-| `traffic-storage-100k-2026-06-18T20-14-01.523Z.json` | ASCII fast path | `370.97ms` | `116.71ms` | `0.68ms` | `16.98ms` / `2.69ms` | `14.66ms` | 搜索热路径明显下降 |
-| `traffic-storage-100k-2026-06-18T20-17-32.963Z.json` | BodyStore 预分配 + 缩短锁持有 | `364.14ms` | `116.62ms` | `0.63ms` | `10.39ms` / `1.95ms` | `14.92ms` | 查询侧继续改善 |
-| `traffic-storage-100k-2026-06-18T20-20-53.118Z.json` | 尝试 `SEARCH_BATCH_SIZE=5000` | `371.93ms` | `124.09ms` | `0.70ms` | `10.72ms` / `1.90ms` | `13.83ms` | URL/body 搜索变差，已回滚到 `1000` |
-| `traffic-storage-100k-2026-06-18T20-24-18.611Z.json` | 手写 ASCII loop + batch 回滚 | `349.88ms` | `115.32ms` | `0.52ms` | `9.41ms` / `1.64ms` | `14.28ms` | 当前最佳，记录完整性仍为 `1` |
-
-最终收益：
-
-- 在 10 万条记录、`recordCompleteness=1`、`retainedRecords=100000` 的同等压力下，response body 搜索 p95 从 `417.09ms` 降到 `349.88ms`，下降约 `16.1%`。
-- URL 搜索 p95 从 `118.72ms` 降到 `115.32ms`，没有因 body 搜索优化产生回归。
-- 写入仍保持 `write.errors=0`、`write.non2xx=0`；最终 run 的 `writeRps=19550.34`、`writeP95Ms=20.13`。
-
-剩余观察：
-
-- 该优化只消除了 common-case 扫描中的不必要分配和锁持有时间；response body 搜索本质仍是按 body ref 全量扫描，没有全文索引。
-- 下一轮如果继续追求数量级提升，应单独设计 body search index/cache，并用 Search API 等价测试、导出/replay 回归和存储增长门禁验证，不能通过跳过 body 或降低 `max_scan` 换性能。
-
-## 10 万条流量存储专项
-
-本专项用于回答“traffic 记录拉到当前硬上限 100000 后，写入、列表、详情和搜索还能不能稳定工作”。它不是替代代理吞吐压测，而是专门拆出 Traffic DB、body 存储、Admin API 查询和 Search Engine 在高记录数下的退化曲线。
-
-执行入口：
-
-```bash
-cargo build --release --bin bifrost
-BIFROST_BIN=./target/release/bifrost \
-BIFROST_PROXY_PORT=19904 \
-BIFROST_UPSTREAM_PORT=28084 \
-LOADTEST_STORAGE_MAX_RECORDS=100000 \
-LOADTEST_STORAGE_RECORDS=100000 \
-LOADTEST_STORAGE_WRITE_CONCURRENCY=256 \
-BIFROST_DISABLE_TRAY=1 \
-BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
-node scripts/loadtest-traffic-storage-100k.mjs
-```
-
-默认行为：
-
-- 启动独立 Bifrost 实例和本地 upstream，使用临时 `BIFROST_DATA_DIR=.bifrost-storage-100k/<run-id>`，并强制 `--no-system-proxy`。
-- 通过 `PUT /_bifrost/api/config/performance` 将 `traffic.max_records` 设置为硬上限 `100000`。
-- 真实代理写入 `100000` 条小 JSON 响应记录，记录写入 RPS、p50/p95/p99、错误数和非 2xx。
-- 等待 Traffic API 可见记录达到目标后，执行最近列表、host 过滤、status 过滤、`/api/traffic/batch` 详情批取、URL 搜索和 response body 搜索。
-- 输出 `.artifacts/loadtest/traffic-storage-100k-<run-id>.json`，包含 `write`、`readSearch`、`before/after traffic_db`、进程资源和 `analysis` 汇总。
-
-可选极限行为：
-
-- `LOADTEST_STORAGE_OVERFLOW_RECORDS=N` 可以在 `100000` 基线之外继续写入 N 条，用于验证 cleanup 触发后的保留水位、删除成本和查询退化。
-- 当启用 overflow 时，预期最终保留量可能回落到清理目标水位附近；这属于当前 retention 策略需要被显式评估的行为，不可误判为写入丢失。
-
-必须采集和评估：
-
-| 指标 | 采集字段 | 评估方式 |
-| --- | --- | --- |
-| max records 配置 | `before/after.performanceConfig.traffic.max_records` | 必须为 `100000`，否则该轮无效 |
-| 写入成功率 | `write.ok / write.started` | 默认必须 100%，否则先归因代理、上游或 DB 写入错误 |
-| 写入吞吐与延迟 | `write.rps`、`write.p95Ms`、`write.p99Ms` | 与同机历史 run 对比，定位 DB 或代理热路径退化 |
-| 记录可见性 | `afterWrite.total`、`analysis.recordCompleteness` | 无 overflow 时应接近 1；有 overflow 时按 retention 水位解释 |
-| 列表性能 | `latestListP95Ms`、`hostFilterP95Ms`、`statusFilterP95Ms` | 区分无过滤、host 索引、status 索引成本 |
-| 批量详情性能 | `batchDetailP95Ms` | 验证 `/api/traffic/batch` 在 200 ids 上限下的真实用户读取成本 |
-| 搜索性能 | `urlSearchP95Ms`、`responseBodySearchP95Ms`、`searchSamples.totalSearched` | 区分 URL 轻字段搜索与 response body 搜索成本 |
-| 资源曲线 | `after.memory.process`、`after.memory.traffic_db` | 观察 RSS、recent cache、DB stats 是否随记录数异常膨胀 |
-
-分析路径：
-
-1. 如果写入 RPS 低但 upstream 和代理成功率正常，优先看 Traffic DB 单写事务、SQLite WAL、cleanup、body serialize 和 `recent_cache`。
-2. 如果 `latest list` 快但 `host/status filter` 慢，检查 SQL 计划和索引是否被 `LIKE` 或排序组合破坏。
-3. 如果 URL 搜索慢，检查 Search Engine 批次大小、cursor 翻页和 `get_search_fields_by_ids` 批量取字段成本。
-4. 如果 response body 搜索慢，先区分 body ref 读取、解码、大小限制和 `max_scan=100000` 全量扫描成本。
-5. 如果启用 overflow 后查询突然变慢，单独分析 cleanup 删除批量、checkpoint/compact 和写锁阻塞。
-6. 任何优化必须保留 Traffic API、Search API、body/header 详情、retention 和导出/replay 可用性，不允许通过跳过记录或删字段换性能。
+- 性能数字与开发机绝对值不强绑定，门禁优先使用相对退化阈值。
+- 10 万条 overflow 场景最终保留约 8.3 万条属于当前 `trigger=max+min(max*15%,2000)`、`target=max*80%` 策略结果，需要在产品/配置文档中显式说明。
+- response body 搜索仍是全量扫描；下一轮如要数量级提升需单独设计 body index / cache，不能通过跳过 body 或降低 `max_scan` 换性能。
+- 长跑必须使用临时 `BIFROST_DATA_DIR`，禁止在真机主 profile 上运行，避免污染 Traffic DB 和 sync 状态。
 
 ## 执行命令
 
-### 快速 smoke
+### smoke
 
 ```bash
 cargo build --bin bifrost
@@ -757,27 +332,14 @@ node scripts/loadtest-upstream-502-analysis.mjs
 
 ## E2E 与 CI 分层
 
-- PR smoke：只执行 30-60 秒轻量场景，验证脚本可运行、报告 schema 完整、启动保护生效。
-- nightly：执行 full matrix，保存 `.artifacts/loadtest/*.json`，并与 main 最近 7 天中位数比较。
-- release candidate：执行 release baseline + soak + regression，对代理核心、traffic recording、rule strategy 三条主线分别出报告。
-- 普通 `cargo test --workspace --all-features` 不承载性能压测；性能门禁由专用脚本和报告比较承担。
-
-## Review/Fix/Test 闭环方案
-
-第 1 轮：
-
-- 复核用户目标是否覆盖代理性能、流量录制性能、转发策略性能和 macOS 应用识别性能。
-- review `scripts/loadtest-*.mjs` 启动参数是否包含 `--no-system-proxy`、`BIFROST_DISABLE_TRAY=1` 和 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`。
-- 执行 `node --check` 与 `rg` 静态验收，确认方案中的脚本、指标、阈值和报告 schema 可被检索。
-
-第 2 轮：
-
-- 复查 design、human_tests 和索引是否一致。
-- 复跑静态验收命令，确认没有只更新方案但未更新真实场景测试。
-- 如发现方案缺口，补充后追加新一轮 review。
+- PR smoke：只跑 30-60 秒轻量场景，验证脚本可运行、报告 schema 完整、启动保护生效。
+- nightly：full matrix，保存 `.artifacts/loadtest/*.json`，与 main 最近 7 天中位数比较。
+- release candidate：release baseline + soak + regression，对代理核心、traffic recording、rule strategy 分别出报告。
+- `cargo test --workspace --all-features` 不承载性能压测；门禁由专用脚本 + 报告比较承担。
 
 ## 文档更新要求
 
-- 本方案是性能压测体系的入口文档。
-- 每次新增可执行性能脚本时，必须同步更新本文件的工具链、命令、报告 schema 和 `human_tests/proxy-performance-stress-test.md`。
-- 若未来将性能门禁接入 CI，必须同步更新 `scripts/ci/local-ci.sh` 或对应 GitHub Actions 文档，并记录门禁阈值来源。
+- 本文件是性能压测体系入口。
+- 每次新增可执行性能脚本必须同步更新工具链、命令、报告 schema 与 `human_tests/proxy-performance-stress-test.md`。
+- 若将性能门禁接入 CI，必须同步更新 `scripts/ci/local-ci.sh` 或对应 GitHub Actions 文档并记录门禁阈值来源。
+- 与 `design/process-resolution-performance.md` 双向引用，保证 macOS 应用识别专项的功能等价与热路径开销门禁一致。

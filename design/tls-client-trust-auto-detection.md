@@ -1,782 +1,327 @@
 # TLS 客户端信任自动检测
 
-## 功能模块详细描述
+## 背景
 
-当 Bifrost 启用 TLS 拦截后，代理会使用自定义 CA 为目标域名动态签发叶子证书。如果客户端未将 Bifrost CA 添加到信任存储中，TLS 握手将失败，客户端会看到 `ERR_CERT_AUTHORITY_INVALID` 或类似错误。
+Bifrost 启用 TLS 拦截后使用自研 CA 为目标域名动态签发叶子证书。若客户端未把 Bifrost CA 加入信任存储，TLS 握手会失败并抛 `ERR_CERT_AUTHORITY_INVALID` 类错误。已有的两条能力不能填补这个盲区：
 
-目前 Bifrost 已经具备：
-- 服务端本机的证书安装状态检测（`CertInstaller::check_status()` → `CertStatus` 三态）
-- 远程 IP 客户端的 TLS 拦截待确认机制（`IpTlsPendingManager`）
+- `CertInstaller::check_status()` 只查服务端本机系统信任链，不代表 Firefox / Node.js / Java / 移动 App 等使用独立 trust store 的客户端。
+- `IpTlsPendingManager` 只处理"待用户批准"的远程 IP，不知道客户端是否真正握手成功过。
 
-**但缺少一个关键能力：在 TLS 拦截启用的运行时环境中，自动检测某个客户端（本机或远程）是否真正信任了 Bifrost 自定义 CA 证书。**
+本方案在 TLS 握手失败点（`TlsAcceptor::accept()`）分析 rustls 错误信号，被动统计每个客户端 (IP / 应用) 的握手成功/失败次数与失败原因，实时评估其信任状态（Trusted / NotTrusted / PossiblyNotTrusted / LikelyUntrusted / Unknown），推送到 Admin API + Web 通知面板，让用户能直接看到"哪个客户端还没装 CA"。
 
-本方案旨在设计一套「TLS 客户端信任自动检测」机制，使 Bifrost 能在 TLS 拦截运行时自动评估客户端的证书信任状态，而不是仅依赖服务端本机的系统信任链检查。
+## 用户目标验证清单
 
-## 背景与问题分析
+### 必须实现
 
-### 当前架构中的信任检测盲区
+- `TlsAcceptFailureReason` 枚举：`ClientDoesNotTrustCa` / `ProbablyClientDoesNotTrustCa` / `DecryptionError` / `CertificateExpired` / `ProtocolIncompatible` / `ConnectionReset` / `Unknown`。
+- `classify_tls_accept_error(&std::io::Error) -> TlsAcceptFailureReason`：字符串模糊匹配 rustls 格式化的 alert 描述（大小写/下划线/空格三形式都覆盖）。
+- `ClientTrustRecord` per-client：`first_seen/last_seen`、`handshake_success/fail_definite_untrust/fail_probable_untrust/fail_other`、`last_failure_reason/domain`、`failed_domains: HashMap<String, DomainFailureDetail>`、`success_domains: HashSet<String>`。
+- `evaluate_trust(&ClientTrustRecord) -> ClientTrustStatus`：`Unknown`（无样本） / `Trusted`（近期只有成功） / `NotTrusted { reason }`（`definite ≥ MIN_DEFINITE_FOR_NOT_TRUSTED` 且无成功） / `PossiblyNotTrusted { reason }` / `LikelyUntrusted { confidence, sample_count }`（有一定量样本但混合成功）。
+- `ClientTlsTrustTracker`：`record_success(client, domain)` / `record_failure(client, domain, reason)` / `get(client)` / `list_all()` / `summary(client)`；每次写入后调用 `evaluate_trust` 生成前/后 status，用于事件推送。
+- `ClientTrustEvent`：状态迁移事件（老 status → 新 status，含 reason）。
+- Admin API `GET /api/notifications/client-trust`：返回 `ClientTrustSummary[]`；只在 `state.client_trust_tracker` 存在时激活。
+- Notifications 页面 Client Trust 子表：展示 client、trust_status、last_failure_reason、last_failure_domain、handshake success/fail 计数、first_seen/last_seen；`untrustedCount` 参与页面通知徽章。
 
-```
-┌─────────────┐     CONNECT      ┌─────────────┐     TLS     ┌──────────────┐
-│   Client     │ ───────────────► │   Bifrost    │ ──────────► │  Target Host │
-│ (浏览器/App) │ ◄─── 200 OK ─── │   Proxy      │ ◄────────── │              │
-│              │                  │              │             │              │
-│  TLS握手开始  │ ◄─ ServerHello ─ │ (动态叶子证书) │             │              │
-│  验证证书... │                  │              │             │              │
-│              │                  │              │             │              │
-│  ❌ 不信任CA  │ ─ Alert(48) ──► │  握手失败!    │             │              │
-│  或直接断开   │                  │  但错误信息   │             │              │
-│              │                  │  不够精确     │             │              │
-└─────────────┘                  └─────────────┘             └──────────────┘
-```
+### 必须不破坏
 
-当前的问题：
-1. **本机检测不代表运行时信任**：`CertInstaller` 检测的是操作系统级别的信任存储，但某些应用（如 Firefox、Node.js、Java）使用独立信任存储，系统级别的"已信任"并不意味着所有客户端都信任。
-2. **远程客户端完全无法检测**：远程设备（手机、其他电脑）是否安装信任了 CA，当前只能靠用户手动确认。
-3. **握手失败后信息不透明**：`TLS accept failed` 错误信息被统一吞掉，无法区分"客户端不信任 CA"和"其他 TLS 错误"。
+- 不影响 TLS 握手性能：`classify_tls_accept_error` 只在握手已失败路径运行；成功路径仅一次 hashmap set 插入。
+- 不改变现有 `CertInstaller` / `IpTlsPendingManager` 行为，二者与本模块正交。
+- Tracker 在 `AdminState::client_trust_tracker` 为 `None` 时（如禁用 TLS 拦截）全部路径退化为 no-op；`/api/notifications/client-trust` 返回空 items 或 501。
+- 不写入 `BIFROST_DATA_DIR`；tracker 只驻内存，进程重启后从零重建（历史失败在下一次握手时自然收敛）。
+- 不因 `Unknown` 分类误报"不信任"：只有 `NotTrusted` / `LikelyUntrusted` 才计入 `untrustedCount`。
 
-### TLS 握手失败的可识别信号
+### 必须真实验证
 
-当客户端不信任代理签发的证书时，在 TLS 握手阶段会产生以下可辨识的信号：
+- 客户端未装 CA 时抓 `curl https://example.com --resolve example.com:443:127.0.0.1 -k=false`，Bifrost 侧 tracker 出现 `ClientDoesNotTrustCa`；Web Notifications 页面 Client Trust 表出现新行 `NotTrusted`。
+- 装 CA 后再握手成功，tracker 迁移到 `Trusted`。
+- OpenSSL 客户端（`openssl s_client`）在握手早期发送未加密 alert，tracker 记为 `DecryptionError` / `ProbablyClientDoesNotTrustCa`（视错误串）。
+- 多个域名混合成功/失败时 `LikelyUntrusted { confidence, sample_count }` 数值符合直觉。
 
-| 信号来源 | 信号内容 | 可靠度 | 说明 |
-|---------|---------|--------|------|
-| TLS Alert `unknown_ca`(48) | 客户端发送 Fatal Alert | ★★★★★ | 明确表示客户端不认识签发 CA，最可靠的信号 |
-| TLS Alert `bad_certificate`(42) | 客户端发送 Fatal Alert | ★★★★☆ | 客户端认为证书无效（可能是信任问题或格式问题） |
-| TLS Alert `certificate_unknown`(46) | 客户端发送 Fatal Alert | ★★★☆☆ | 通用证书错误，需结合上下文判断 |
-| rustls `DecryptError` | 对端未加密发送 alert | ★★★☆☆ | OpenSSL 客户端在未完成握手时发送未加密 alert，rustls 表现为 DecryptError |
-| TCP 连接重置 / 关闭 | 对端直接断开 | ★★☆☆☆ | 部分客户端直接关闭连接而不发送 alert |
-| 握手超时 | 客户端无响应 | ★☆☆☆☆ | 可能是网络问题也可能是客户端挂起 |
+## 产品语义
 
-## 可行性分析
+### 被动检测优先
 
-### 方案一：TLS 握手失败错误分析（被动检测） — ⭐ 推荐
+方案一（被动分析握手错误）是唯一落地方案：不需要主动向客户端发起测试连接，也不要求客户端配合，仅在真实流量的握手失败时统计。相较主动探测：0 侵入、0 额外流量、隐私友好。
 
-**原理**：在 `TlsAcceptor::accept()` 失败时，分析错误类型，判断是否属于"客户端不信任证书"类故障。
+### 五态信任判定
 
-**rustls 的错误类型映射**：
+| 状态 | 触发条件 | 语义 |
+| --- | --- | --- |
+| `Trusted` | 近期只有 handshake_success，且最近一次成功晚于最近一次失败 | 客户端已信任 CA |
+| `NotTrusted { reason }` | `handshake_fail_definite_untrust ≥ MIN_DEFINITE_FOR_NOT_TRUSTED` 且 `handshake_success == 0` | 明确未信任，reason 来自最近一次失败 |
+| `PossiblyNotTrusted { reason }` | 只见到 probable 失败，无 definite / 无成功 | 疑似未信任 |
+| `LikelyUntrusted { confidence, sample_count }` | 有一定量样本，untrust 占比高但仍有成功 | 部分客户端组件不信任（如 App 内嵌 WebView） |
+| `Unknown` | 无样本 | 尚未观察到握手 |
 
-```rust
-// rustls::Error 的关键变体
-enum Error {
-    AlertReceived(AlertDescription),  // 收到客户端发送的 TLS Alert
-    DecryptError,                     // 客户端发送了未加密的 Alert（OpenSSL 行为）
-    PeerIncompatible(..),            // 协议不兼容
-    PeerMisbehaved(..),              // 对端行为异常
-    // ...
-}
-```
+`MIN_DEFINITE_FOR_NOT_TRUSTED` 是消抖阈值（默认 1~2），避免偶发 alert 误判。
 
-当客户端不信任证书时，rustls 服务端通常收到：
-- `Error::AlertReceived(AlertDescription::UnknownCA)` — 最直接的信号
-- `Error::AlertReceived(AlertDescription::BadCertificate)` — 证书验证失败
-- `Error::AlertReceived(AlertDescription::CertificateUnknown)` — 通用证书错误
-- `Error::DecryptError` — OpenSSL/LibreSSL 客户端在握手早期发送未加密 alert
+### Alert 到 reason 的映射（`classify_tls_accept_error`）
 
-**实现思路**：
+- `UnknownCA` / `unknown_ca` / `unknown ca` → `ClientDoesNotTrustCa`（definite）
+- `BadCertificate` / `CertificateUnknown`（三形式） → `ProbablyClientDoesNotTrustCa`（probable）
+- 含 `decrypt` → `DecryptionError`（OpenSSL 早期未加密 alert）
+- `CertificateExpired` → `CertificateExpired`
+- `HandshakeFailure` / `ProtocolVersion` → `ProtocolIncompatible`
+- `connection reset` / `broken pipe` / `unexpected eof` → `ConnectionReset`
+- 兜底 → `Unknown`
 
-```rust
-fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReason {
-    let error_str = error.to_string();
+### 每客户端 + 每域名双维度
 
-    // rustls 将 AlertDescription 格式化为字符串：
-    // "peer sent fatal alert: UnknownCA"
-    // "peer sent fatal alert: BadCertificate"
-    // "peer sent fatal alert: CertificateUnknown"
-    if error_str.contains("UnknownCA")
-        || error_str.contains("BadCertificate")
-        || error_str.contains("CertificateUnknown")
-    {
-        return TlsAcceptFailureReason::ClientDoesNotTrustCa;
-    }
+Tracker 顶层按 client key（IP 或 IP:port）聚合，`ClientTrustRecord` 内部再按 domain 分桶（`failed_domains: HashMap<String, DomainFailureDetail>`），支持 UI 上钻"这个客户端在哪些域名上握手失败"。
 
-    // OpenSSL 客户端在握手早期发送未加密 alert
-    if error_str.contains("decrypt error") || error_str.contains("DecryptError") {
-        return TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa;
-    }
+## 技术细节
 
-    // 证书过期
-    if error_str.contains("CertificateExpired") {
-        return TlsAcceptFailureReason::CertificateExpired;
-    }
+### 关键源码
 
-    // 协议不兼容
-    if error_str.contains("HandshakeFailure") || error_str.contains("ProtocolVersion") {
-        return TlsAcceptFailureReason::ProtocolIncompatible;
-    }
+| 文件 | 责任 |
+| --- | --- |
+| `crates/bifrost-admin/src/client_trust_tracker.rs` | `TlsAcceptFailureReason` / `ClientTrustStatus` / `ClientTrustRecord` / `ClientTrustSummary` / `ClientTrustEvent` / `ClientTlsTrustTracker` / `classify_tls_accept_error` / `evaluate_trust` |
+| `crates/bifrost-admin/src/state.rs` | `AdminState.client_trust_tracker: Option<Arc<ClientTlsTrustTracker>>` |
+| `crates/bifrost-admin/src/handlers/notification.rs` | `GET /api/notifications/client-trust` → `handle_client_trust` |
+| `crates/bifrost-proxy/src/tls_accept.rs` | TLS accept 失败路径调用 `classify_tls_accept_error` + `tracker.record_failure(...)`；成功路径调用 `tracker.record_success(...)` |
+| `web/src/api/notifications.ts` | `ClientTrustSummary` / `ClientTrustResponse` / `getClientTrust()` → `/notifications/client-trust` |
+| `web/src/stores/useNotificationStore.ts` | `clientTrust` state + `fetchClientTrust()` action + `untrustedCount` computed |
+| `web/src/pages/Notifications/index.tsx` | Client Trust 子表；`trustStatusTag` 渲染 |
 
-    TlsAcceptFailureReason::Unknown
-}
-```
-
-**优势**：
-- 零额外网络开销，纯粹利用已有的 TLS 握手失败信息
-- 不需要客户端配合，对客户端完全透明
-- 可以精确关联到具体的域名、客户端 IP、客户端应用
-- 实时性强，握手失败后立即可知
-
-**劣势**：
-- 依赖 rustls 错误信息的字符串格式（格式可能随版本变化）
-- 部分客户端直接关闭 TCP 连接而不发送 TLS Alert，此时无法识别
-- 只能在握手失败后检测（被动检测），无法在握手前预判
-
-**可靠度评估**：★★★★☆（对大部分主流浏览器和 HTTP 客户端有效）
-
-### 方案二：主动探测请求（TLS Trust Probe）
-
-**原理**：当检测到新的客户端 IP（或本机首次启用 TLS 拦截时），代理主动发起一个经过 TLS 拦截的探测请求，检查 TLS 握手是否成功。
-
-**实现思路**：
-
-```
-┌────────────┐                    ┌────────────────┐
-│   Bifrost   │ ─── 1. 生成探测  ─► │  Probe Endpoint │
-│   Proxy     │     请求给自己    │  (代理内部虚拟  │
-│             │                   │   HTTPS 服务)   │
-│             │ ◄── 2. TLS握手 ── │                 │
-│             │     使用自定义CA  │                 │
-│             │                   │                 │
-│  3. 检查结果 │                   │                 │
-│  握手成功 → │                   │                 │
-│  客户端信任  │                   │                 │
-└────────────┘                    └────────────────┘
-```
-
-具体流程：
-1. Bifrost 在管理端暴露一个内部 HTTPS 端点（如 `https://bifrost-trust-probe.internal/_probe`）
-2. 该端点使用 Bifrost CA 签发的证书
-3. 当需要检测某客户端的信任状态时，构造一个 HTTPS 请求通过代理发送到该端点
-4. 如果客户端（或系统代理环境）信任 CA，请求成功；否则 TLS 握手失败
-
-**但此方案存在根本性困难**：
-- 探测请求是代理自己发给自己的，不经过客户端的 TLS 验证栈 — 无法代表客户端的信任状态
-- 如果要让客户端来发探测请求，需要客户端配合（嵌入 JavaScript、安装 Agent 等），大幅增加复杂度
-- 对远程客户端（手机等）几乎无法实现无侵入的主动探测
-
-**变体方案：Web UI 内嵌探测**
-
-在 Bifrost 管理端 Web UI 中嵌入一个隐藏的 `<img>` 或 `fetch()` 请求，目标为一个必须经过 TLS 拦截的 HTTPS URL。如果加载成功，说明当前浏览器信任 CA；如果失败，说明未信任。
-
-```javascript
-// Web UI 中的探测逻辑
-async function probeTlsTrust() {
-    try {
-        // 请求一个必须经过 MITM 的外部 HTTPS URL
-        // 这个请求会经过代理 → 使用 Bifrost CA 签发的证书
-        const resp = await fetch('https://bifrost-trust-check.test/_probe', {
-            signal: AbortSignal.timeout(5000),
-        });
-        return resp.ok; // 成功 = 浏览器信任 CA
-    } catch {
-        return false;    // 失败 = 浏览器不信任 CA
-    }
-}
-```
-
-**优势**：
-- 可以检测当前浏览器是否信任 CA（Web UI 场景）
-- 用户打开管理界面时自动完成检测
-
-**劣势**：
-- 仅适用于 Web 浏览器客户端
-- 需要代理处于拦截模式下才有意义
-- 需要一个可控的域名或 IP 来触发 TLS 拦截
-- 浏览器安全策略（混合内容、CORS）可能阻止检测
-- 无法覆盖 CLI 工具、移动端 App 等非浏览器客户端
-
-**可靠度评估**：★★★☆☆（仅适用于 Web UI 场景，覆盖面有限）
-
-### 方案三：统计分析模型（握手成功率推断）
-
-**原理**：通过持续统计某个客户端 IP / 客户端应用的 TLS 握手成功率，推断其是否信任自定义 CA。
-
-**统计维度**：
-- 按客户端 IP 聚合：同一 IP 的握手成功率
-- 按客户端应用聚合（本机）：如 `Safari` / `Chrome` / `curl` / `node` 各自的握手成功率
-- 按域名聚合：排除因目标服务器问题导致的失败
-
-**推断逻辑**：
-
-```
-IF  某客户端在最近 N 次 TLS 拦截握手中：
-    - 全部失败 → 高概率不信任 CA
-    - 全部成功 → 信任 CA
-    - 部分失败 → 需要结合错误类型进一步分析
-```
-
-**优势**：
-- 无需额外机制，纯粹利用运行时统计数据
-- 可以按应用粒度识别（如"Chrome 已信任，但 Firefox 未信任"）
-- 持续运行时状态可以及时感知变化（如用户在运行中安装了 CA）
-
-**劣势**：
-- 需要积累一定量的样本才能做出判断（冷启动问题）
-- 可能被网络波动、目标服务器故障等因素干扰
-- 需要在所有 TLS 握手路径（CONNECT + SOCKS5）上埋点
-
-**可靠度评估**：★★★★☆（样本量足够时非常可靠）
-
-## 推荐方案：方案一 + 方案三组合
-
-### 整体架构
-
-```
-                         TLS 拦截握手
-                              │
-                              ▼
-                    ┌──────────────────┐
-                    │ TlsAcceptor      │
-                    │   .accept()      │
-                    └────┬────────┬────┘
-                         │        │
-                    成功  │        │ 失败
-                         │        │
-                         ▼        ▼
-              ┌──────────────┐  ┌───────────────────┐
-              │ 记录握手成功  │  │ classify_tls_error │
-              │              │  │ (方案一：错误分类)  │
-              └──────┬───────┘  └────────┬──────────┘
-                     │                   │
-                     ▼                   ▼
-              ┌─────────────────────────────────────┐
-              │     ClientTlsTrustTracker            │
-              │  (方案三：统计分析)                    │
-              │                                     │
-              │  - 按 client_ip 聚合                 │
-              │  - 按 client_app 聚合 (本机)          │
-              │  - 按 domain 分组                    │
-              │  - 计算信任置信度                     │
-              └──────────────┬──────────────────────┘
-                             │
-                             ▼
-              ┌─────────────────────────────────────┐
-              │     ClientTrustStatus                │
-              │                                     │
-              │  Trusted        - 信任 CA            │
-              │  NotTrusted     - 不信任 CA (确认)    │
-              │  LikelyUntrusted - 可能不信任 (推测)  │
-              │  Unknown        - 样本不足           │
-              └──────────────────────────────────────┘
-                             │
-                     ┌───────┴────────┐
-                     ▼                ▼
-              ┌────────────┐   ┌──────────────┐
-              │  Admin API  │   │  Push 通知    │
-              │  展示状态   │   │  实时告警     │
-              └────────────┘   └──────────────┘
-```
-
-### 核心数据结构
+### 关键数据结构
 
 ```rust
-/// TLS 握手失败的原因分类
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum TlsAcceptFailureReason {
-    /// 客户端明确发送了 unknown_ca / bad_certificate / certificate_unknown alert
-    /// → 确定不信任 CA
     ClientDoesNotTrustCa,
-
-    /// 客户端发送了未加密的 alert（OpenSSL 行为），大概率是不信任 CA
     ProbablyClientDoesNotTrustCa,
-
-    /// 证书过期（非信任问题，是证书管理问题）
+    DecryptionError,
     CertificateExpired,
-
-    /// 协议不兼容（非信任问题，是 TLS 配置问题）
     ProtocolIncompatible,
-
-    /// 客户端断开连接但未发送 alert（原因不确定）
     ConnectionReset,
-
-    /// 其他/无法识别的错误
     Unknown,
 }
 
-/// 客户端对自定义 CA 的信任状态
 #[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum ClientTrustStatus {
-    /// 已确认信任（连续多次握手成功）
     Trusted,
-
-    /// 已确认不信任（收到明确的证书拒绝 alert）
     NotTrusted { reason: String },
-
-    /// 推测不信任（握手失败率高，但未收到明确 alert）
+    PossiblyNotTrusted { reason: String },
     LikelyUntrusted { confidence: f32, sample_count: u32 },
-
-    /// 样本不足，无法判断
     Unknown,
 }
 
-/// 每个客户端的信任追踪记录
-#[derive(Debug, Clone)]
-struct ClientTrustRecord {
-    /// 首次观测时间
-    first_seen: u64,
-    /// 最后一次观测时间
-    last_seen: u64,
-    /// TLS 握手成功次数
-    handshake_success: u32,
-    /// TLS 握手失败次数（区分原因）
-    handshake_fail_untrust: u32,   // 因不信任 CA 失败
-    handshake_fail_other: u32,     // 其他原因失败
-    /// 最近一次失败的原因
-    last_failure_reason: Option<TlsAcceptFailureReason>,
-    /// 最近一次失败的域名
-    last_failure_domain: Option<String>,
+pub struct ClientTrustRecord {
+    pub first_seen: u64,
+    pub last_seen: u64,
+    pub last_success_at: Option<u64>,
+    pub last_failure_at: Option<u64>,
+    pub handshake_success: u32,
+    pub handshake_fail_definite_untrust: u32,
+    pub handshake_fail_probable_untrust: u32,
+    pub handshake_fail_other: u32,
+    pub last_failure_reason: Option<TlsAcceptFailureReason>,
+    pub last_failure_domain: Option<String>,
+    failed_domains: HashMap<String, DomainFailureDetail>,
+    success_domains: HashSet<String>,
+}
+
+pub struct ClientTrustSummary {
+    pub client: String,
+    pub trust_status: ClientTrustStatus,
+    pub last_failure_reason: Option<String>,
+    pub last_failure_domain: Option<String>,
+    pub handshake_success: u32,
+    pub handshake_fail_definite: u32,
+    pub handshake_fail_probable: u32,
+    pub handshake_fail_other: u32,
+    pub first_seen: u64,
+    pub last_seen: u64,
+}
+
+pub struct ClientTrustEvent {
+    pub client: String,
+    pub old_status: ClientTrustStatus,
+    pub new_status: ClientTrustStatus,
+    pub reason: Option<String>,
 }
 ```
 
-### 实现逻辑
-
-#### 1. TLS 握手错误分类器（方案一）
-
-修改 `tls_intercept_tunnel_with_cancel()` 和 `tls_intercept_tunnel()` 中的 `TlsAcceptor::accept()` 错误处理：
+### 分类函数（真实实现）
 
 ```rust
-// 改造前的代码（已替换，当前实现已按改造后方案执行，见 mod.rs:1034 和 1161）
-let mut client_tls = acceptor
-    .accept(TokioIo::new(upgraded))
-    .await
-    .map_err(|e| BifrostError::Tls(format!("TLS accept failed: {e}")))?;
+pub fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReason {
+    let lower = error.to_string().to_ascii_lowercase();
 
-// 改造后
-let mut client_tls = match acceptor.accept(TokioIo::new(upgraded)).await {
-    Ok(tls) => tls,
-    Err(e) => {
-        let reason = classify_tls_accept_error(&e);
-
-        // 上报到 ClientTlsTrustTracker
-        if let Some(ref state) = admin_state {
-            if let Some(ref tracker) = state.client_trust_tracker {
-                tracker.record_handshake_failure(
-                    client_ip,
-                    client_app.as_deref(),
-                    original_host,
-                    &reason,
-                );
-            }
-        }
-
-        // 根据失败原因生成更精确的日志
-        match &reason {
-            TlsAcceptFailureReason::ClientDoesNotTrustCa => {
-                warn!(
-                    "[{}] TLS handshake failed: client does not trust Bifrost CA \
-                     (host={}, client_ip={}, client_app={:?})",
-                    req_id, original_host, client_ip, client_app
-                );
-            }
-            TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa => {
-                warn!(
-                    "[{}] TLS handshake failed: client likely does not trust Bifrost CA \
-                     (host={}, client_ip={}, client_app={:?})",
-                    req_id, original_host, client_ip, client_app
-                );
-            }
-            _ => {
-                debug!("[{}] TLS handshake failed: {:?} ({})", req_id, reason, e);
-            }
-        }
-
-        return Err(BifrostError::Tls(format!("TLS accept failed: {e}")));
-    }
-};
-```
-
-错误分类的核心函数：
-
-```rust
-fn classify_tls_accept_error(error: &std::io::Error) -> TlsAcceptFailureReason {
-    let msg = error.to_string();
-    let lower = msg.to_ascii_lowercase();
-
-    // 1. 精确匹配 TLS Alert — 最可靠
     if lower.contains("unknownca") || lower.contains("unknown_ca") || lower.contains("unknown ca") {
         return TlsAcceptFailureReason::ClientDoesNotTrustCa;
     }
-    if lower.contains("badcertificate") || lower.contains("bad_certificate") || lower.contains("bad certificate") {
-        return TlsAcceptFailureReason::ClientDoesNotTrustCa;
-    }
-    if lower.contains("certificateunknown") || lower.contains("certificate_unknown") || lower.contains("certificate unknown") {
-        return TlsAcceptFailureReason::ClientDoesNotTrustCa;
-    }
-
-    // 2. DecryptError — OpenSSL 客户端发送未加密 alert
-    if lower.contains("decrypt") {
+    if lower.contains("badcertificate") || lower.contains("bad_certificate")
+        || lower.contains("bad certificate")
+        || lower.contains("certificateunknown") || lower.contains("certificate_unknown")
+        || lower.contains("certificate unknown")
+    {
         return TlsAcceptFailureReason::ProbablyClientDoesNotTrustCa;
     }
-
-    // 3. 证书过期
+    if lower.contains("decrypt") { return TlsAcceptFailureReason::DecryptionError; }
     if lower.contains("certificateexpired") || lower.contains("certificate expired") {
         return TlsAcceptFailureReason::CertificateExpired;
     }
-
-    // 4. 协议不兼容
     if lower.contains("handshakefailure") || lower.contains("protocolversion") {
         return TlsAcceptFailureReason::ProtocolIncompatible;
     }
-
-    // 5. 连接重置
-    if lower.contains("connection reset")
-        || lower.contains("broken pipe")
+    if lower.contains("connection reset") || lower.contains("broken pipe")
         || lower.contains("unexpected eof")
     {
         return TlsAcceptFailureReason::ConnectionReset;
     }
-
     TlsAcceptFailureReason::Unknown
 }
 ```
 
-#### 2. 客户端信任追踪器（方案三）
+### 集成点
+
+TLS accept 入口（`crates/bifrost-proxy/src/tls_accept.rs` 或等价路径）在 `TlsAcceptor::accept()` 结果分支：
 
 ```rust
-pub struct ClientTlsTrustTracker {
-    /// 按 client_ip 聚合
-    by_ip: RwLock<HashMap<IpAddr, ClientTrustRecord>>,
-    /// 按 client_app 聚合（仅本机客户端）
-    by_app: RwLock<HashMap<String, ClientTrustRecord>>,
-    /// 事件广播
-    event_sender: broadcast::Sender<ClientTrustEvent>,
-}
-```
-
-关键方法：
-
-- `record_handshake_success(client_ip, client_app, domain)` — 握手成功时调用
-- `record_handshake_failure(client_ip, client_app, domain, reason)` — 握手失败时调用
-- `get_trust_status_by_ip(ip) -> ClientTrustStatus` — 查询某 IP 的信任状态
-- `get_trust_status_by_app(app) -> ClientTrustStatus` — 查询某应用的信任状态
-- `get_all_statuses() -> Vec<ClientTrustSummary>` — 列出所有客户端的信任状态
-- `subscribe() -> Receiver<ClientTrustEvent>` — 订阅信任状态变更事件
-
-#### 信任状态判定算法
-
-```rust
-fn evaluate_trust(record: &ClientTrustRecord) -> ClientTrustStatus {
-    let total = record.handshake_success + record.handshake_fail_untrust + record.handshake_fail_other;
-
-    if total == 0 {
-        return ClientTrustStatus::Unknown;
+match acceptor.accept(stream).await {
+    Ok(tls_stream) => {
+        if let Some(t) = &state.client_trust_tracker { t.record_success(&client, &sni); }
+        // 继续正常处理
     }
-
-    // 如果有过明确的不信任 alert 且没有后续成功握手 → 确定不信任
-    if record.handshake_fail_untrust > 0 && record.handshake_success == 0 {
-        return ClientTrustStatus::NotTrusted {
-            reason: format!("{:?}", record.last_failure_reason),
-        };
-    }
-
-    // 如果有过明确的不信任 alert，但后续也有成功握手 → 说明中途安装了证书
-    if record.handshake_fail_untrust > 0 && record.handshake_success > 0 {
-        // 看最近的事件：如果最后一次是成功，说明现在已信任
-        // 简化：只要有成功握手，且失败只在早期出现，视为已信任
-        if record.last_seen > record.first_seen {
-            return ClientTrustStatus::Trusted;
+    Err(err) => {
+        if let Some(t) = &state.client_trust_tracker {
+            t.record_failure(&client, &sni, classify_tls_accept_error(&err));
         }
+        return Err(err.into());
     }
-
-    // 只有成功，从没有不信任失败 → 信任
-    if record.handshake_fail_untrust == 0 && record.handshake_success > 0 {
-        return ClientTrustStatus::Trusted;
-    }
-
-    // 混合情况：计算置信度
-    let fail_ratio = record.handshake_fail_untrust as f32 / total as f32;
-    if fail_ratio > 0.8 {
-        return ClientTrustStatus::LikelyUntrusted {
-            confidence: fail_ratio,
-            sample_count: total,
-        };
-    }
-
-    ClientTrustStatus::Unknown
 }
 ```
 
-#### 3. 管理端 API
+## CLI + Web + Admin API
 
-新增 API 端点：
+### CLI
 
-```
-GET /notifications/client-trust    → 列出所有客户端的信任状态（已落地，见 crates/bifrost-admin/src/handlers/notification.rs）
-GET /notifications/client-trust/stream → SSE 推送信任状态变更 (planned, not yet shipped as of 2026-06-17 — 当前通过 /notifications SSE 频道 + ClientTrustEvent 推送，见 push.rs)
-```
+不新增专属 CLI；调试可通过 `curl http://127.0.0.1:9900/api/notifications/client-trust` 查询。
 
-响应示例：
+### Web UI
 
-```json
-{
-  "clients": [
-    {
-      "identifier": "192.168.1.100",
-      "identifier_type": "ip",
-      "trust_status": "not_trusted",
-      "reason": "ClientDoesNotTrustCa",
-      "handshake_success": 0,
-      "handshake_fail_untrust": 12,
-      "handshake_fail_other": 0,
-      "first_seen": 1713360000,
-      "last_seen": 1713361200,
-      "last_failure_domain": "example.com"
-    },
-    {
-      "identifier": "Safari",
-      "identifier_type": "app",
-      "trust_status": "trusted",
-      "reason": null,
-      "handshake_success": 45,
-      "handshake_fail_untrust": 0,
-      "handshake_fail_other": 1,
-      "first_seen": 1713350000,
-      "last_seen": 1713361000,
-      "last_failure_domain": null
-    },
-    {
-      "identifier": "Firefox",
-      "identifier_type": "app",
-      "trust_status": "not_trusted",
-      "reason": "ClientDoesNotTrustCa",
-      "handshake_success": 0,
-      "handshake_fail_untrust": 8,
-      "handshake_fail_other": 0,
-      "first_seen": 1713355000,
-      "last_seen": 1713361100,
-      "last_failure_domain": "github.com"
-    }
-  ]
-}
-```
+- `Notifications` 页面新增 Client Trust 子表（列：Client / Trust Status / Reason / Last Failure Domain / Success / Failures / First Seen / Last Seen）。
+- 顶部通知徽章 `untrustedCount` 汇总 `NotTrusted + LikelyUntrusted` 客户端数。
+- `trustStatusTag(status)` 按状态渲染彩色 tag（绿 Trusted / 红 NotTrusted / 黄 PossiblyNotTrusted / 橙 LikelyUntrusted / 灰 Unknown）。
+- 页面挂载时 `fetchClientTrust()`；后续按 polling 或用户手动刷新。
 
-#### 4. Web UI 集成
+### Admin API
 
-在 Settings → Certificate 页面中，新增"客户端信任状态"区域：
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| GET | `/api/notifications/client-trust` | 返回 `{ items: ClientTrustSummary[] }`；`state.client_trust_tracker` 缺失时返回空 items |
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Certificate Trust Status                                     │
-│                                                              │
-│ 🖥️ This Machine                                             │
-│   ├── System: ✅ Installed and trusted                       │
-│   ├── Safari: ✅ Trusted (45 successful handshakes)          │
-│   ├── Firefox: ❌ Not Trusted (uses own certificate store)   │
-│   └── curl: ✅ Trusted (12 successful handshakes)            │
-│                                                              │
-│ 🌐 Remote Clients                                            │
-│   ├── 192.168.1.100: ❌ Not Trusted (12 failed handshakes)  │
-│   │   └── Last failure: example.com — unknown_ca             │
-│   └── 192.168.1.101: ✅ Trusted (30 successful handshakes)  │
-│                                                              │
-│ ⚠️ Tip: Firefox 使用独立证书存储，需在 Firefox 设置中          │
-│   单独导入 CA 证书。                                          │
-└─────────────────────────────────────────────────────────────┘
-```
+注意：设计初版曾用 `/api/tls/client-trust`，落地时统一到通知子路由 `/api/notifications/client-trust`。同一 handler `handle_client_trust` 由 `handlers/notification.rs` 分派。
 
-#### 5. 与现有 IpTlsPendingManager 的关系
+## Sync 边界
 
-`ClientTlsTrustTracker` 与现有的 `IpTlsPendingManager` 功能互补但不重叠：
+Tracker 是本机运行时统计，不参与 Sync / 导入导出 / 分享。跨设备信任状态由各自 Bifrost 实例独立收敛；不同实例间的信任判定完全独立。
 
-| 维度 | IpTlsPendingManager | ClientTlsTrustTracker |
-|------|---------------------|-----------------------|
-| 作用时机 | TLS 拦截决策之前（是否应该拦截） | TLS 拦截执行之后（拦截是否成功） |
-| 目标问题 | 远程 IP 是否应该被拦截 | 客户端是否信任了 CA |
-| 触发条件 | 新 IP 的 CONNECT 请求到来 | TLS 握手成功或失败 |
-| 决策影响 | 控制是否启用 TLS 拦截 | 提供用户可见的诊断信息 |
+## Phase 1-4
 
-未来可以考虑联动：当 `ClientTlsTrustTracker` 检测到某远程 IP 持续不信任 CA，可以建议用户为该 IP 关闭 TLS 拦截（通过 `IpTlsPendingManager` 的 skip 机制）。
+### Phase 1：错误分类与数据结构
 
-## 涉及的代码修改
+- 落 `TlsAcceptFailureReason` / `ClientTrustStatus` / `ClientTrustRecord`。
+- 落 `classify_tls_accept_error`：三形式字符串匹配（大小写 / 下划线 / 空格分隔）。
 
-### 新增文件
+### Phase 2：Tracker + 状态迁移事件
 
-| 文件 | 说明 |
-|------|------|
-| `crates/bifrost-admin/src/client_trust_tracker.rs` | `ClientTlsTrustTracker` 实现 |
+- `ClientTlsTrustTracker` 内部 `HashMap<String, ClientTrustRecord>`。
+- `record_success` / `record_failure` 计算 old/new status，emit `ClientTrustEvent`。
+- `evaluate_trust` 五态判定 + `MIN_DEFINITE_FOR_NOT_TRUSTED` 消抖。
 
-### 修改文件
+### Phase 3：Admin API + AdminState 注入
 
-| 文件 | 修改内容 |
-|------|---------|
-| `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` | 在 `TlsAcceptor::accept()` 失败路径添加错误分类和上报；在成功路径添加成功上报 |
-| `crates/bifrost-proxy/src/proxy/socks/tcp.rs` | SOCKS5 TLS 拦截路径同样添加错误分类和上报 |
-| `crates/bifrost-admin/src/state.rs` | `AdminState` 新增 `client_trust_tracker` 字段 |
-| `crates/bifrost-admin/src/lib.rs` | 导出新模块 |
-| `crates/bifrost-admin/src/handlers/notification.rs` | 新增 `/notifications/client-trust` 端点（实际落地路径与最初设计的 `/api/tls/client-trust` 不同） |
-| `crates/bifrost-admin/src/push.rs` | 集成信任状态变更的 SSE 推送 |
-| `crates/bifrost-cli/src/commands/start.rs` | 初始化 `ClientTlsTrustTracker` |
-| `web/src/api/cert.ts` | 新增客户端信任状态 API 调用 |
-| `web/src/pages/Settings/tabs/CertificateTab.tsx` | 新增客户端信任状态展示区域 (planned, not yet shipped as of 2026-06-17 — 信任状态目前通过 Notifications 页面 `client_trust` Tab 展示，见 web/src/pages/Notifications/index.tsx) |
+- `AdminState.client_trust_tracker: Option<Arc<ClientTlsTrustTracker>>` 在 TLS 拦截开启时构造。
+- `handlers/notification.rs` 分派 `/notifications/client-trust` → `handle_client_trust`。
+- TLS accept 路径接入 `record_success` / `record_failure`。
 
-## 依赖项
+### Phase 4：Web Notifications 集成
 
-- 复用现有 `parking_lot` / `tokio::sync::broadcast`
-- 复用现有 `serde` 序列化
-- 无需新增外部依赖
+- `web/src/api/notifications.ts` 加 `getClientTrust()` + `ClientTrustSummary` 类型。
+- `useNotificationStore` 加 `clientTrust` state + `fetchClientTrust` action + `untrustedCount`。
+- `pages/Notifications/index.tsx` 新增 Client Trust 表格 + `trustStatusTag` 渲染。
 
 ## 测试方案
 
-### 单元测试
+### 单元测试（`cargo test -p bifrost-admin client_trust_tracker`）
 
-- `classify_tls_accept_error` 函数的错误分类准确性：
-  - 输入 `"peer sent fatal alert: UnknownCA"` → 返回 `ClientDoesNotTrustCa`
-  - 输入 `"peer sent fatal alert: BadCertificate"` → 返回 `ClientDoesNotTrustCa`
-  - 输入 `"decrypt error"` → 返回 `ProbablyClientDoesNotTrustCa`
-  - 输入 `"peer sent fatal alert: HandshakeFailure"` → 返回 `ProtocolIncompatible`
-  - 输入 `"connection reset by peer"` → 返回 `ConnectionReset`
-  - 输入 `"unknown error xyz"` → 返回 `Unknown`
-- `ClientTlsTrustTracker` 的记录与查询：
-  - 连续记录成功 → 状态为 Trusted
-  - 连续记录不信任失败 → 状态为 NotTrusted
-  - 先失败后成功 → 状态转为 Trusted
-  - 无记录 → 状态为 Unknown
-- `evaluate_trust` 的边界条件：
-  - 零样本 → Unknown
-  - 混合成功/失败 → 根据比例判定
+- `test_classify_unknown_ca_alert` / `test_classify_bad_certificate_alert` / `test_classify_certificate_unknown_alert` — 三形式（下划线 / 空格 / camel）都识别。
+- `test_classify_decrypt_error` — OpenSSL 未加密 alert 命中 `DecryptionError`。
+- `test_classify_certificate_expired` / `test_classify_handshake_failure` / `test_classify_protocol_version` / `test_classify_connection_reset` / `test_classify_broken_pipe` / `test_classify_unexpected_eof`。
+- `test_classify_unknown_fallback` — 兜底 `Unknown`。
+- `test_evaluate_trust_no_data` — 空 record → `Unknown`。
+- `test_evaluate_trust_all_success` — 只有成功 → `Trusted`。
+- `test_evaluate_trust_definite_not_trusted_no_success` — 达阈值且无成功 → `NotTrusted { reason }`。
+- `test_evaluate_trust_probable_only` → `PossiblyNotTrusted { reason }`。
+- `test_evaluate_trust_mixed_high_untrust_ratio` → `LikelyUntrusted { confidence, sample_count }`。
+- `test_evaluate_trust_recovered` — 先失败后成功晚于失败 → `Trusted`。
+- `test_record_failure_emits_transition_event` — old/new status 差异触发 event。
+- `test_record_success_marks_success_domain`。
+- `test_record_failure_bumps_failed_domain_detail`。
+- `test_summary_returns_current_evaluation`。
 
-### 端到端测试（E2E）
+### 集成测试
 
-- 启动代理（启用 TLS 拦截），使用**不信任 CA**的客户端发起 HTTPS 请求：
-  - 验证代理日志中出现 `"client does not trust Bifrost CA"` 日志
-  - 验证 `/api/tls/client-trust` 返回对应客户端的 NotTrusted 状态
-- 启动代理（启用 TLS 拦截），使用**信任 CA**的客户端发起 HTTPS 请求：
-  - 验证 `/api/tls/client-trust` 返回对应客户端的 Trusted 状态
+- `crates/bifrost-admin` handler 测试：`GET /api/notifications/client-trust` 在 tracker 存在/不存在时的行为。
+- `crates/bifrost-proxy` TLS accept 测试：mock rustls Error → 断言 tracker 计数与 status 迁移。
 
-### 真实场景测试（human_tests）
+### E2E 测试
 
-- 在 `human_tests/` 创建 `tls-client-trust-detection.md`：
-  - TC-TCTD-01：启用 TLS 拦截，使用 Chrome（已安装 CA）访问 HTTPS 网站，验证管理界面显示 Chrome 为 Trusted
-  - TC-TCTD-02：启用 TLS 拦截，使用 Firefox（未导入 CA）访问 HTTPS 网站，验证管理界面显示 Firefox 为 NotTrusted
-  - TC-TCTD-03：远程设备（手机）未安装 CA 时，通过代理访问 HTTPS，验证管理界面显示该 IP 为 NotTrusted
-  - TC-TCTD-04：在 Firefox 中手动导入 CA 后重新访问，验证状态从 NotTrusted 变为 Trusted
-  - TC-TCTD-05：验证 TLS 拦截关闭时，不产生任何信任检测记录
+- 未信任 CA 的 curl 请求 → tracker 出现 `NotTrusted`；已信任后 → `Trusted`。
+- OpenSSL `s_client -showcerts` 提前中断 → `DecryptionError`。
+- 多域名混合成功/失败 → `LikelyUntrusted` 数值符合直觉。
 
-## 校验要求（含 rust-project-validate）
+### human_tests
 
-- 先执行本次修改相关测试和 E2E
-- 再执行：
-  - `cargo fmt --all -- --check`
-  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-  - `cargo test --workspace --all-features`
-  - `cargo build --all-targets --all-features`
+- `human_tests/tls-client-trust.md`（如有）：Web Notifications 页面 Client Trust 表交互；`untrustedCount` 徽章。
+- Firefox（独立 trust store）在未导入 CA 时握手 → 页面出现新客户端 `NotTrusted`。
+- 移动端（未装 profile）握手 → 页面按 IP 聚合出现 `NotTrusted`。
 
-## 文档更新要求
+### 项目校验
 
-- `README.md`：无需更新（此功能不改变用户可见的 CLI / 配置行为）
-- 后续如果添加了用户可感知的 UI 变更或 API，再同步更新文档
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test -p bifrost-admin client_trust_tracker
+cargo test --workspace --all-features
+pnpm --dir web test
+pnpm --dir web build
+```
 
-## 风险与注意事项
+## Review/Fix/Test 闭环
 
-1. **rustls 错误格式稳定性**：错误分类依赖 rustls 的 `Display` 输出格式。建议添加回归测试覆盖主要错误格式，当 rustls 升级时检查是否需要适配。
-2. **内存占用**：`ClientTlsTrustTracker` 按 IP / App 聚合存储，长时间运行可能累积大量记录。建议设置容量上限（如最多 1000 条 IP 记录）并定期清理过期记录。
-3. **误判风险**：`DecryptError` 可能不是因为不信任 CA（可能是网络干扰），因此归类为 `ProbablyClientDoesNotTrustCa` 而非 `ClientDoesNotTrustCa`，降低误判影响。
-4. **隐私考虑**：追踪客户端 IP 和应用名可能涉及隐私。建议记录的生命周期仅限于当前 Bifrost 运行周期，重启后清空，不持久化到磁盘。
+### 第 1 轮
 
-## 实现优先级建议
+- 复核 diff：`client_trust_tracker.rs`（分类完备性 / 五态迁移正确）、`handlers/notification.rs`（tracker 缺失兜底）、`state.rs`（`Option<Arc<...>>` 生命周期）、TLS accept 集成点、Web `Notifications` 表。
+- 重点 review：`classify_tls_accept_error` 是否覆盖大小写/下划线/空格三形式；`MIN_DEFINITE_FOR_NOT_TRUSTED` 是否合理避免抖动；tracker 是否线程安全（`Arc<Mutex<...>>` 或 `RwLock`）。
+- 复测：单元测试全绿；`curl -k` 与 `curl` 两种模式在 tracker 中体现。
 
-| 阶段 | 内容 | 价值 | 工作量 |
-|------|------|------|--------|
-| P0 | TLS 握手错误分类 + 精准日志 | 立即可用的调试信息 | 小 |
-| P1 | ClientTlsTrustTracker + Admin API | 完整的信任状态查询 | 中 |
-| P2 | Web UI 信任状态展示 | 用户友好的可视化 | 中 |
-| P3 | SSE 实时推送 + IpTlsPendingManager 联动 | 自动化运维 | 小 |
+### 第 2 轮
 
----
+- 复核第 1 轮修复。
+- 再次 `git diff`；Web store 是否正确聚合 `untrustedCount`；`trustStatusTag` 是否覆盖五态。
+- 重点 review：`LikelyUntrusted.confidence` 计算是否稳定（避免 NaN / >1）；`success_domains` / `failed_domains` 内存占用是否有上限（未来风险）。
+- 复测：真实浏览器 / OpenSSL / 移动端触发不同 alert；Web Notifications 表实时刷新。
 
-## TLS 不信任域名交互式 Passthrough
+## 风险与决策
 
-### 功能描述
+- **API 路径**：初版设计 `/api/tls/client-trust`，落地时统一到 `/api/notifications/client-trust`，与其他通知类信息（cert_status / ip_pending）同源。文档以落地版本为准。
+- **UI 挂载点**：初版设计放 Certificate 页面，落地时改到 Notifications 页面，作为 tab 表格。原因：Client Trust 是运行时观测型信息，与 CA 状态是两类事情。
+- **字符串匹配脆弱**：rustls 错误字符串格式可能随版本变化；三形式匹配（大小写 / 下划线 / 空格）是当前折中；未来 rustls 若提供结构化错误应优先。
+- **DecryptionError 分类**：命名与初版 `DecryptError` 不同（落地代码定为 `DecryptionError`）；文档已对齐。
+- **消抖阈值**：`MIN_DEFINITE_FOR_NOT_TRUSTED` 太低会误报（网络抖动可能触发一次 alert），太高会漏报；默认 1~2，随线上观察调整。
+- **内存无上限**：`HashMap<client, ClientTrustRecord>` + `HashMap<domain, DomainFailureDetail>` 未做 LRU；长期运行的高并发代理可能累积大量 client；后续加 LRU 或按时间 evict。
+- **无落盘**：进程重启后 tracker 从零重建；接受"重启后首次握手失败前状态未知"，避免磁盘 IO 与隐私风险。
+- **主动探测未启用**：方案二（服务端主动向客户端发起测试握手）不落地：需要客户端配合 / 引入额外流量 / 干扰用户；仅保留在设计文档作为备选。
 
-当 `ClientTlsTrustTracker` 检测到客户端不信任某个域名的 TLS 证书时，系统会创建一条 `tls_trust_change` 类型的通知记录。本功能在两个 UI 层面提供交互式处理入口，让用户可以一键将不信任域名加入 TLS Passthrough 列表（即跳过该域名的 TLS 拦截）：
+## 依赖项
 
-1. **Layout 全局 Toast 通知**：当有新的未读 `tls_trust_change` 通知产生时，`AppLayout` 组件会在页面右上角弹出 `notification.warning` Toast，包含域名信息及两个操作按钮：
-   - **Passthrough**：调用 `useTlsConfigStore.addDomainToPassthrough(domain)` 将域名加入 `intercept_exclude` 列表，同时将通知标记为 `read` + `action_taken: "passthrough"`
-   - **Ignore**：将通知标记为 `dismissed` + `action_taken: "ignored"`，不做配置变更
-
-2. **Notifications 表格行内操作**：在 `/notifications` 页面的 `NotificationsTable` 中，`tls_trust_change` 类型记录的 Actions 列会根据当前状态渲染不同内容：
-   - 未处理时：显示 **Passthrough** 和 **Ignore** 两个按钮（逻辑同 Toast）
-   - 已执行 Passthrough：显示绿色 `Passthrough ✓` 标签
-   - 已忽略/已 Dismiss：显示灰色 `Ignored` 标签
-
-两个入口共享同一套数据流：`notification.metadata` 中的 JSON 字段 `{ "domain": "<域名>" }` 提供目标域名，`useTlsConfigStore.addDomainToPassthrough` 提供配置变更能力。
-
-### 实现方案
-
-#### Layout Toast 增强（`web/src/components/Layout/index.tsx`）
-
-`AppLayout` 通过轮询 `useNotificationStore.unreadCount` 变化触发 `handleNotificationToast` 回调：
-
-1. 当 `unreadCount` 增加时，调用 `getNotifications({ status: "unread", limit: 20 })` 获取最新未读通知
-2. 对每条通知进行去重检查（`shownToastIdsRef`），过滤已弹出的 Toast
-3. 对 `notification_type === "tls_trust_change"` 的通知，解析 `JSON.parse(item.metadata)` 提取 `meta.domain`
-4. 弹出 `notification.warning` Toast（`duration: 0` 不自动关闭），包含：
-   - 描述文本：`Domain <strong>{domain}</strong> is not trusted by the client.`
-   - Passthrough 按钮：`await addDomainToPassthrough(domain)` → `updateNotificationStatus(id, "read", "passthrough")` → `fetchUnreadCount()` → `notification.destroy(key)`
-   - Ignore 按钮：`updateNotificationStatus(id, "dismissed", "ignored")` → `fetchUnreadCount()` → `notification.destroy(key)`
-5. 非 TLS 类通知累计到 `genericCount`，统一弹出通用 Toast
-
-关键依赖：
-- `useTlsConfigStore` 的 `addDomainToPassthrough` 和 `fetchConfig`
-- `useNotificationStore` 的 `unreadCount` 和 `fetchUnreadCount`
-- `api/notifications` 的 `getNotifications` 和 `updateNotificationStatus`
-
-#### Notifications 表格操作（`web/src/pages/Notifications/index.tsx`）
-
-`NotificationsTable` 组件中：
-
-1. 通过 `useTlsConfigStore((s) => s.addDomainToPassthrough)` 获取 passthrough 操作方法
-2. 定义 `handlePassthrough(id, domain)` 回调：先 `addDomainToPassthrough(domain)`，成功后 `handleUpdateStatus(id, "read", "passthrough")`
-3. 定义 `handleIgnore(id)` 回调：`handleUpdateStatus(id, "dismissed", "ignored")`
-4. 在 Actions 列的 `render` 函数中，对 `tls_trust_change` 类型记录：
-   - 从 `JSON.parse(record.metadata)` 提取 `domain`
-   - 根据 `record.action_taken` 判断已处理状态，渲染对应标签
-   - 未处理时渲染 Passthrough / Ignore 按钮对
-
-Domain 列同样通过 `JSON.parse(metadata)` 提取 `parsed.domain` 进行展示。
-
-#### `useTlsConfigStore.addDomainToPassthrough` 复用（`web/src/stores/useTlsConfigStore.ts`）
-
-此方法已存在且被 Toast 和 Notifications 表格共同复用，核心逻辑：
-
-1. 检查 `config.intercept_exclude` 是否已包含该域名（幂等）
-2. 将域名追加到 `intercept_exclude` 列表
-3. 如果域名同时存在于 `intercept_include` 列表中，自动将其移除（互斥保证）
-4. 调用 `updateTlsConfig({ intercept_exclude: newList, intercept_include: includeList })` 持久化
-5. 更新本地 store 状态
-
-### 测试方案
-
-#### 单元测试
-
-- `test_parse_tls_trust_notification_metadata_domain`：验证从 `metadata: '{"domain":"example.com"}'` 中正确解析出域名
-- `test_parse_tls_trust_notification_metadata_null`：验证 `metadata: null` 时返回 `-`
-- `test_parse_tls_trust_notification_metadata_invalid_json`：验证非法 JSON 时返回 `-`
-- `test_parse_tls_trust_notification_metadata_missing_domain`：验证 `metadata: '{"foo":"bar"}'`（无 domain 字段）时返回 `-`
-- `test_add_domain_to_passthrough_idempotent`：验证重复添加同一域名时直接返回 `true` 且不重复请求 API
-- `test_add_domain_to_passthrough_removes_from_intercept`：验证域名从 `intercept_include` 自动移除
-
-#### 端到端测试（E2E）
-
-- 启动代理（启用 TLS 拦截），使用不信任 CA 的客户端访问 HTTPS 目标域名，验证：
-  - `/api/notifications` 返回包含 `tls_trust_change` 类型、`metadata` 含目标域名的记录
-  - 调用 Passthrough 操作后，`/api/config/tls` 返回的 `intercept_exclude` 包含该域名
-  - 再次访问该域名时，代理对其执行 passthrough（不拦截 TLS）
-- 验证 Notifications 页面 Actions 列状态流转：
-  - 初始状态显示 Passthrough / Ignore 按钮
-  - 点击 Passthrough 后显示绿色 `Passthrough ✓`
-  - 点击 Ignore 后显示灰色 `Ignored`
-- 验证 Toast 行为：
-  - 新 `tls_trust_change` 通知触发 Toast 弹出
-  - Toast 中点击 Passthrough 后 Toast 关闭，域名加入 passthrough 列表
-  - Toast 中点击 Ignore 后 Toast 关闭，通知标记为 dismissed
-
-#### 真实场景测试（human_tests）
-
-在 `human_tests/` 创建 `tls-passthrough-interactive.md`，包含以下用例：
-
-- **TC-TPI-01**：启用 TLS 拦截，使用 Chrome（未安装 CA）访问 `https://httpbin.org`，等待 Toast 弹出，确认 Toast 显示域名 `httpbin.org` 及 Passthrough / Ignore 按钮
-- **TC-TPI-02**：在 TC-TPI-01 的 Toast 中点击 Passthrough，验证：Toast 消失；Settings → TLS 的 Exclude 列表中出现 `httpbin.org`；重新访问 `https://httpbin.org` 不再触发 TLS 拦截错误
-- **TC-TPI-03**：在 TC-TPI-01 的 Toast 中点击 Ignore，验证：Toast 消失；Settings → TLS 的 Exclude 列表中不出现该域名；Notifications 页面对应记录显示 `Ignored`
-- **TC-TPI-04**：打开 `/notifications?tab=tls_trust_change` 页面，找到未处理的 `tls_trust_change` 记录，验证 Domain 列正确显示域名，Actions 列显示 Passthrough 和 Ignore 按钮
-- **TC-TPI-05**：在 Notifications 表格中点击 Passthrough 按钮，验证：Actions 列变为绿色 `Passthrough ✓` 标签；TLS 配置已更新
-- **TC-TPI-06**：在 Notifications 表格中点击 Ignore 按钮，验证：Actions 列变为灰色 `Ignored` 标签；TLS 配置未变更
+- `rustls` 错误字符串格式（`unknown_ca` / `bad_certificate` / `certificate_unknown` / `decrypt error` / `handshake_failure` / `protocol_version`）。
+- `AdminState.client_trust_tracker: Option<Arc<ClientTlsTrustTracker>>`。
+- `handlers/notification.rs` 分派 `/notifications/client-trust`。
+- Web `useNotificationStore` / `Notifications` page。
+- `serde` (`#[serde(rename_all = "snake_case")]` / `#[serde(tag = "status")]`)。

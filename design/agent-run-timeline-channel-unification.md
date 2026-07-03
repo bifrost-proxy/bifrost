@@ -2,216 +2,97 @@
 
 ## 背景
 
-当前 Agent 可以从多个入口触发：
+Bifrost Agent 有多个触发入口：Web Agent Chat（`/api/agent/chat/stream`、`/api/im-gateway/agent/chat`）、IM Gateway（飞书、微信）、External Runner（Codex、ChatGPT Web、自定义 CLI Runner）、以及定时任务与手动触发。产品预期是：这些入口只是消息投递与结果展示通道不同，底层 Agent Loop、工具调用、plan、compaction、token/context 状态应该落在同一条可回放的 timeline 上；同一 conversation 上任何通道发起的输入和 Agent 产出的过程/最终结果都应该 fan-out 到该 conversation 已绑定的全部通道。
 
-- Web Agent Chat：`/api/agent/chat/stream` 或 `/api/im-gateway/agent/chat`
-- IM Gateway：飞书、微信等入站消息触发内置 Bifrost Agent
-- External Runner：Codex、ChatGPT Web、自定义 CLI Runner
-- Schedule / Manual Run：定时任务或手动触发 Agent
+现状偏差：Web Chat 打开 IM 触发的同一 thread 时，常常只能看到 user message 与 assistant final response，工具/plan/compaction/context 事件缺失；`session_state.json` 与 canonical JSONL timeline 的读写路径分裂，`/sessions/all` 曾出现 active/history 互斥展示；External Runner 的私有 event 塞在 `tool_result` blob 里未归一化；不同 Agent/Runner 的 running 状态各自维护，导致 Web 认为 idle 但 IM card 仍显示 running 之类的漂移。
 
-产品预期是：这些入口只是消息投递与结果展示通道不同，底层 Agent Loop、执行过程、工具调用、plan、compaction、token/context 状态应该落在同一个可回放的 timeline 上。用户从 IM 发起的任务，也应该能在 Web Chat 页面看到完整执行过程，而不是只看到用户消息和最终 AI 输出。
+本方案把 Agent Loop 下沉到 conversation/session 层，视图上提到 channel projection 层：Web、飞书、微信、API 都只是同一个 conversation 的输入端与展示端。历史数据兼容不作目标，允许直接收敛到新的 canonical timeline + channel binding 数据模型。
 
-更进一步，Loop 应该下沉到 conversation/session 层，视图应该上提到 channel projection 层。Web UI、飞书、微信等通道都只是同一个 conversation 的输入端和展示端。只要它们绑定的是同一个对话：
+（现状更新 2026-06-16：`/sessions/all` 已为 active/running/idle item 合并 `history_path` 与 `has_timeline`，前端 `AgentChatSection` 已通过 `historyEventsToMessages` / `historyEventsToTelemetry` 消费历史 timeline，Phase 1 的步骤 1-4 已 shipped。剩余差距集中在跨通道 binding/fan-out、统一 `AgentRunState`、External Runner event 归一化。）
 
-- 从 IM 发出的用户消息，Web UI 应该实时看到。
-- 从 Web UI 发出的用户消息，IM 通道也应该看到。
-- Agent 的运行状态、工具调用、最终回复，不应该只更新触发通道，而应该 fan-out 到所有绑定通道。
-- 对飞书这类卡片通道，Web 触发的 turn 也应该创建或更新对应 progress card，而不是只有 Web 面板刷新。
-- Web、IM、不同 Agent/Runner 的运行状态也应该使用同一份底层状态，不应该在各自通道里拆出互不感知的 running/completed/failed 状态。
-- 历史数据兼容不作为本方案目标；允许直接收敛到新的 canonical timeline + channel binding 数据模型，避免为了旧读写路径保留复杂分支。
+## 用户目标验证清单
 
-## 现象
+### 必须实现
 
-通过 IM 通道发起 Agent Loop 后，Web 页面打开同一个 chat/thread，通常只能看到：
+- 同一 `session_key` 的同一 turn 只写一条 canonical timeline；Web/IM/API/Schedule 都从该 timeline 投影自己的展示。
+- `SessionInfo` / `SessionDetail` / `/sessions/all` item 暴露 `history_path`、`has_timeline`；打开带 `history_path` 的 thread 时前端优先加载 `historyEventsToMessages` + `historyEventsToTelemetry`，再补 active runtime 状态。
+- `/sessions/all` 合并 active/running/idle session 与 history summary，不再互斥；title 优先级 `显式 title > active title > history title > first user message`。
+- Web Chat 刷新后仍能看到完整历史工具调用、plan、compaction 与最终输出。
+- running turn 刷新恢复时，若 thread summary 仍 `running=true`，最后一个 user message 后必须补 assistant running placeholder 承载后续 process。
+- IM Gateway 内置 Agent worker 与 Web SSE 复用同一 `AgentTurnProgressEvent → ConversationEvent → ChannelFanout` 映射；不再各自维护私有格式。
+- External Runner 私有事件（`ExternalCliRunEvent`、`artifacts.normalized_events`）经 mapper 变成标准 `ConversationEvent`（`tool_call/tool_result/plan_updated/assistant_message/turn_failed/run_state_changed`）后写入 canonical timeline。
+- 统一 `AgentRunState { queued|running|waiting_for_tool|waiting_for_user|compacting|completed|failed|cancelled }`；所有视图从同一状态机感知，`stop/cancel/guide/queue` 作用于 `conversation_id + turn_id`。
+- `ChannelBinding { conversation_id, channel, provider_id, target_id, view_state, enabled }` 记录 Web thread / 飞书 card / 微信 message 等 binding；`ChannelFanoutDispatcher` 把 timeline patch 投递到 conversation 的全部 enabled bindings，各自维护 `last_delivered_event_id` 避免重复投递。
+- Web 发消息也能更新飞书卡片，IM 发消息也能更新 Web thread。
+- 运行态真源按优先级收敛：live runtime registry > canonical JSONL 终态 > persisted `session_state`；内置 `bifrost_agent` 陈旧 running 无 live 证明时投影为 ended/completed 并落盘修复；非内置 runner 无 JSONL 终态且无 live registry 证明时保留 persisted `running` 表达跨装置异步语义。
+- `/stop` 先请求 live runtime 停止；未命中但 persisted 为陈旧 running 时修复为 terminal 并在响应暴露修复计数。
+- Web AgentChat 完成态 loop 默认折叠（`已处理 <duration>` 摘要，可展开），运行态最后 turn 不折叠且顶部 `已处理 <duration>` 每秒刷新；`Ran 1 command · 4m 33s` / `Running 1 command (1 active) · 1m 12s`。
+- 消息区图片（Markdown 与 `content_parts`）注册为当前会话图片序列，点击打开全屏浮窗，支持左右/键盘切换、遮罩关闭、关闭后 `scrollIntoView`。
+- 窄屏（<`md`）隐藏右侧 thread rail、消息区保留水平 padding、长路径/代码/表格不横向溢出。
+- 消息区离开底部时 composer 上方居中显示圆形滚动按钮（opacity+transform 淡入淡出），点击滚到底部。
+- 选中 running 线程时 `New Chat` 仍可点击创建新 session；busy 保护按 `session_key` 隔离。
+- WebUI slash runner 触发的 runner-call 收到 `runner_call_finished status != completed/success/succeeded` 时抛错，把 user/assistant chip 标 `failed`，正文替换错误文本；成功路径不变。
+- External CLI `run_command` 等待子进程时同时监听 `stop_requested` marker；命中后终止进程组并写 `ExternalCliRunStatus::Stopped` + stopped stderr + stopped run event + result。
+- `chatgpt_web::run_adapter` 认证等待阶段用 `tokio::select!` 同时监听 stop marker；被打断时按 profile 清理 managed browser。
+- `read_run_detail` 优先返回 `result.json.response`，仅无 result response 时回退 stdout/events；terminal 状态非 succeeded 且 final response 为空时按 `run_failed event -> stderr -> stdout -> 默认错误文案` 提升为可见 response。
+- WebUI 主 Agent Chat stream `run_finished`/`turn_finished` 非成功值按失败处理，状态进 Error、线程列表停止 running。
+- Codex adapter 默认追加 `--config service_tier="fast"`，若 runner 显式配置 `service_tier=...` 则保留 override。
 
-- user message
-- assistant final response
+### 必须不破坏
 
-缺失内容包括：
+- 已 shipped 的 `history_path` / `has_timeline` 字段、`historyEventsToMessages/Telemetry` 协议与前端 helper。
+- 现有 IM progress card、Web SSE、JSONL persistence 的 event type 命名（短期不改文件格式）。
+- runner-call 子线程隔离（`runner-call:*` 从顶层列表隐藏），仅新增父子 timeline 链接。
+- 已 shipped 的 SSE 帧频、IM card 更新 debounce、chat gateway 现有语义。
+- `session_state.json` 作为线程索引与展示摘要缓存的作用；不再作为消息/运行状态事实源，但不删除文件。
+- `runner_call_finished` 成功路径继续 `response` 替换 assistant 正文与 `success` 标记。
+- Codex 用户显式 `service_tier` override 保留。
 
-- tool started / finished
-- tool arguments / result preview
-- plan updates
-- compaction events
-- context/token runtime changes
-- long task status
+### 必须真实验证
 
-这说明 Loop 过程数据没有被 Web Chat 的当前读取路径完整消费。
+- IM 触发内置 Agent + tool call 后 Web Chat 打开同一 thread 能看到 user、assistant final、tool call/process、plan/compaction telemetry；刷新页面后仍完整。
+- Web 在同一 thread 发送后续消息时，飞书绑定 card 同步更新状态与最终回复；反向亦然。
+- Codex/ChatGPT Web Runner 从 IM 或 Web 触发后 Web Chat 能看到 normalized tool/plan/progress；刷新不退化。
+- Web、IM 对同一 conversation 的 running/completed/failed 状态一致。
+- IM 发起长任务，Web 中途打开同 thread 能看到实时 running process。
+- `/stop` 触发 live runtime 停止；对陈旧 running persisted state 修复响应包含修复计数。
+- Codex 真实链路 `service_tier` 默认注入；traex/chatgpt_web `/stop` 后 stream 归入 `run_finished(status=stopped)` 且无进程残留。
+- WebUI E2E：`AI Agent Chat marks runner-call finished failures as failed`；外部 runner terminal failed 状态 UI 展示 Error。
+- 折叠、图片全屏、窄屏 padding、滚动按钮、New Chat 可用性由 Playwright 覆盖。
 
-## 当前实现观察
+## 产品语义
 
-### Web Stream 路径
+### 通道与会话解耦
 
-`crates/bifrost-admin/src/handlers/agent_chat.rs` 的 Web stream 路径会给 session 设置 `progress_sender`，并把 `AgentTurnProgressEvent` 转成 SSE：
+- `Conversation / AgentSession` owns：loop state、run state、turn queue、context、canonical timeline。
+- `ChannelBinding` owns：provider/channel identity、delivery cursor、card/message projection state。
+- `ChannelView` owns：Web thread view、飞书 card view、微信 message view、API snapshot。
 
-- `ToolStarted` -> `tool_started`
-- `ToolFinished` -> `tool_finished`
-- `PlanUpdated` -> `plan_updated`
-- `Compaction*` -> `compaction_*`
-- `AssistantDelta` / `AssistantFinal`
-
-前端 `AgentChatSection` 运行中消费这些 SSE，所以 Web 自己发起的 turn 能看到执行过程。
-
-### IM 内置 Agent 路径
-
-`crates/bifrost-admin/src/handlers/im_gateway/agent_chat.rs::process_agent_chat()` 不再直接调用 `run_turn_with_mcp_multimodal()`，而是通过 `crate::im_gateway::agent_worker::AgentWorkerClient::spawn_or_fallback()` 启动隔离的 agent worker 子进程（参见 `agent-loop-process-isolation.md`）。worker 内部仍会创建 `ConversationRecorder` 并调用同一个 `bifrost_agent::session::run_turn_with_mcp_multimodal()`（见 `crates/bifrost-admin/src/im_gateway/agent_worker.rs`）。底层 turn loop 会写 JSONL events：
-
-- `user_message`
-- `tool_call`
-- `tool_result`
-- `assistant_message`
-- `plan_updated`
-- `compaction`
-- runtime state events
-
-同时 IM 路径还会把 `progress_sender` 连接到 `ImAgentProgressRegistry`（通过 `run_progress_event_coalescer`），用于飞书 progress card 实时展示；worker 子进程产生的 `AgentTurnProgressEvent` 通过 IPC 转发回主进程的 progress channel。
-
-也就是说，底层并不是完全没有过程数据；问题主要出在 Web Chat 读取和会话索引模型。
-
-### Web Chat 读取路径分裂
-
-前端当前有两套读取路径：
-
-1. active session detail
-   - API：`GET /api/im-gateway/agent/sessions/:key`
-   - 后端优先调用 `agent_session_manager.get_session_detail()`
-   - 返回 `SessionDetail.messages`
-   - 前端 `sessionDetailToMessages()` 只保留 user/assistant
-
-2. history event detail
-   - API：`GET /api/im-gateway/agent/sessions/history/:path`
-   - 返回 JSONL `events`
-   - 前端 `historyEventsToTelemetry()` 才会解析 `tool_call/tool_result/plan_updated/compaction`
-
-关键问题：`/sessions/all` 构造列表时，如果同一个 `session_key` 已经存在 active/idle in-memory session，就跳过同 session_key 的纯 history row。IM turn 完成后 session 会被 `return_session()` 放回内存，因此 Web 点击该 thread 时进入 active 视图，而不是 history event 视图。
-
-结果就是：完整 JSONL timeline 存在，但被 active session detail 遮蔽，Web Chat 看不到过程事件。
-
-（现状更新 2026-06-16：`/sessions/all` 现已为 active/running/idle item 合并同 session_key 的 history `history_path` 与 `has_timeline` 字段，前端 `AgentChatSection` 已通过 `historyEventsToMessages` / `historyEventsToTelemetry` 消费历史 timeline，覆盖了下文 Phase 1 中的步骤 1-4。剩余差距集中在跨通道 binding/fan-out 与统一 `AgentRunState` 上。）
-
-### External Runner 路径的额外问题
-
-External Runner/Codex/ChatGPT Web 还有一层 `session_state.json`。当前 `record_external_cli_result()` 会把 `ExternalCliRunResult.events` 和 artifacts 塞进一个 `tool_result` JSON blob，并只额外保存 `event_types`。这对审计有用，但还不是 Web Chat 可以直接消费的标准 timeline。
-
-因此 External Runner 的过程展示需要两步：
-
-- 保留 run 级 JSONL/persisted artifacts
-- 把 runner 私有 progress / normalized events 归一化成标准 `ConversationEvent`
-
-Web 触发 External Runner 时还存在一个更隐蔽的分叉：如果当前页面已经绑定了内置 Agent/IM 产生的 `history_path`，Web 请求只更新 `session_state.messages`，但没有把本轮 user/assistant 写回同一个 JSONL。刷新后 history view 会重新读取旧 JSONL，并覆盖掉只存在于 `session_state` 的 Web 消息，表现为用户消息消失、running/thinking 挂到上一轮 assistant 下方。
-
-因此 `session_state.json` 只能作为线程索引、外部 thread/conversation 引用、latest run id 和运行摘要缓存；它不能成为消息事实源。External Runner 每一轮，无论来自 Web 还是 IM，都必须追加到 canonical timeline：
-
-- `run_state_changed` 标记 `source_channel=web|im` 与 `agent_kind=<runner_id>`
-- `user_message`
-- 外部 runner 作为标准 `tool_call/tool_result`
-- `assistant_message`
-
-当 Web 请求携带已有 `historyPath` 时，后端必须校验并追加到该 JSONL；当没有历史文件时，后端创建新的 timeline，并把路径回写到 `session_state.history_path` 供线程列表和刷新恢复使用。
-
-## 根因结论
-
-当前系统把“通道视图”误当成了“会话数据边界”：
-
-- IM progress card 是一套实时展示面。
-- Web SSE 是另一套实时展示面。
-- JSONL history 是持久化事件面。
-- active `SessionDetail.messages` 是精简聊天消息面。
-
-这些面没有统一成一个 canonical run timeline。Web Chat 在 active session 存在时优先读精简消息面，于是丢失了 Loop 内部过程。
-
-更深层的问题是：当前运行时仍然隐含了“触发通道 = 唯一展示通道”的假设。`progress_sender` 通常只挂到当前请求路径创建的 sink：
-
-- Web 发起时，sink 是 Web SSE。
-- IM 发起时，sink 是 IM progress registry/card。
-
-这会导致同一个 conversation 上的跨通道输入无法自然同步。例如飞书用户先在 IM 发起一个 Agent task，随后在 Web UI 打开同一个 thread 并继续发送消息。此时底层 session 应该仍是同一个 Loop，但回复和状态更新需要同时回到 Web thread 与飞书卡片；如果 sender 仍是单一通道 sink，就会出现“Web 看到回复，飞书卡片不更新”或反过来的问题。
-
-同样的问题也存在于运行状态层：如果 Web、IM、External Runner、内置 Agent 各自维护状态，就会出现 Web 认为 idle、IM card 仍显示 running，或者 runner 子任务失败但父 conversation 视图无感知。运行状态必须从 Loop/AgentRun 层统一产生，再投影到不同 channel view。
-
-## 设计目标
-
-1. 多通道只影响输入输出，不影响底层 Loop timeline。
-2. 同一 `session_key` 的同一 turn 只写一条 canonical timeline。
-3. Web、IM、API、Schedule 都能从同一 timeline 投影出各自展示。
-4. Web Chat 刷新后仍能看到历史工具调用、plan、compaction 和最终输出。
-5. running 状态与 persisted timeline 能合并展示：运行中看实时事件，结束后看可回放事件。
-6. External Runner 的私有事件必须先归一化，再进入 Web/IM 通用展示。
-7. 同一 conversation 绑定多个 channel 时，任意 channel 发起的消息和 Agent 回复都要广播到所有绑定 channel。
-8. 通道只保存展示状态与投递游标，不拥有 Loop 状态；Loop 不应该依赖“当前触发通道”决定写哪份过程数据。
-9. 不同 Agent/Runner 的状态统一进入 `AgentRunState` / canonical timeline，所有视图从同一状态机感知 queued/running/waiting/failed/completed。
-10. 已结束的 Web Chat turn loop 默认折叠过程消息，只保留 `已处理 <duration>` 摘要与最终 assistant 结论；展开后仍能查看完整 assistant delta、工具调用、plan、compaction 等过程。
-11. 不做旧数据兼容设计；相关 API、前端 helper 和持久化读写可以直接按新模型收敛。
+`AgentSession` 不再直接认为自己属于 Web 或 IM，只接受 `UserInput`，运行 Loop，维护唯一 `AgentRunState`，产出 canonical timeline events。所有通道展示都从 run state + timeline/progress fan-out 得到自己的 projection。
 
 ### 运行态一致性真源
 
-`session_state.json` 只能作为线程索引、外部 runner 引用、latest run id 和展示摘要缓存，不能作为 `running=true` 的唯一事实源。运行态投影必须按以下优先级收敛：
+按优先级：
 
-1. 当前进程的 live runtime registry（内置 Agent active turn、worker stop registry、external CLI worker registry）是“仍在运行”的唯一实时证明。
-2. canonical JSONL timeline 的最新终态 `run_state_changed` 是“已经结束”的持久化事实源，终态包括 `completed`、`failed`、`stopped`、`timed_out`。
-3. `/sessions/all` 合并 persisted `session_state` 时，如果最新模型写入的显式 `history_path` 指向的 canonical JSONL 已有终态，必须按 JSONL 终态投影，并使用 JSONL 终态时间作为排序时间，避免陈旧 `updatedAt` 把 ended history 顶到 running。
-4. 内置 `bifrost_agent` 的 persisted `status:"running"` 如果没有当前进程 live runtime 证明，应视为陈旧残留并投影为 ended/completed；内置 Agent 没有跨装置持久运行语义。
-5. 所有非内置 runner adapter（例如 `codex`、`chatgpt_web`、自定义 CLI adapter）在没有 JSONL 终态且没有本地 live registry 证明时，仍可保留 persisted `running`，用于表达不同装置或外部 runner 的异步运行语义。
-6. `/stop` 先请求 live runtime 停止；如果没有命中任何正在运行的 loop，但 persisted state 确认为陈旧 running，应同步修复 `session_state.json` 为 terminal status，并在响应中暴露修复计数。
-7. 不为旧版 `session_state` 做额外历史文件扫描或 run_state alias 兼容；缺失显式 `history_path` 时，只按当前 persisted metadata 与 live runtime 规则投影。
-
-测试方案：
-
-- 单元测试覆盖内置 Agent 陈旧 running、显式 `history_path` 指向的 JSONL 终态覆盖、所有非内置 runner adapter 无终态时保持 running、陈旧状态修复落盘。
-- E2E 使用临时 `BIFROST_DATA_DIR` 构造 completed JSONL + stale `bifrost_agent` running state，并同时构造 `codex`、`chatgpt_web`、`custom_cli` running state，验证 `/sessions/all`、`/stop` 和落盘状态一致。
-- human_tests 在 `human_tests/agent-session-persistence.md` 记录陈旧 Running 状态与 Stop 一致性回归，并真实执行对应 E2E。
-- Review/Fix/Test 至少两轮复核状态投影、runner 跨装置语义、history 排序、stop 响应和文档/测试一致性。
+1. 当前进程 live runtime registry（内置 Agent active turn、worker stop registry、external CLI worker registry）是“仍在运行”的唯一实时证明。
+2. canonical JSONL timeline 的最新终态 `run_state_changed`（`completed/failed/stopped/timed_out`）是“已经结束”的持久化事实源。
+3. `/sessions/all` 合并 persisted `session_state` 时，如果显式 `history_path` 指向的 JSONL 已有终态，按 JSONL 终态投影并使用 JSONL 终态时间排序。
+4. 内置 `bifrost_agent` persisted `status:"running"` 若无 live 证明视为陈旧，投影为 ended/completed。
+5. 非内置 runner adapter（`codex`/`chatgpt_web`/自定义）无 JSONL 终态且无 live registry 证明时保留 persisted `running`。
+6. `/stop` 未命中 live 但 persisted 为陈旧 running 时同步修复 `session_state.json` 并在响应暴露修复计数。
+7. 不做旧版 `session_state` 历史文件扫描或 alias 兼容。
 
 ### 完成态 Loop 折叠展示
 
-Web Agent Chat 的消息区按 `user_message` 切分 turn：一个用户输入及其后的连续 assistant 片段属于同一个 loop 展示组。当前仍在运行的最后一个 turn 保持展开，继续实时显示 delta、process block、Thinking tail 和工具状态；已经结束的 turn 默认收起中间过程，只在用户消息下方显示轻量摘要行：
-
-```text
-已处理 4m 33s >
-```
-
-摘要耗时来自该 turn 的 user 消息时间戳到最终 assistant 输出时间戳的差值；没有可靠时间戳时显示 `<1s`。默认收起状态下只渲染最后一个可见 assistant 输出（文本、图片或 runner call），并隐藏其 process steps，避免工具调用和状态日志把历史页面撑长。点击摘要行后，按原始顺序恢复渲染该 turn 内的所有 assistant 片段和 process block。
-
-process block 自身也必须显示工具执行耗时：`Ran 1 command · 4m 33s` 表示已完成工具调用的总耗时；运行中显示 `Running 1 command (1 active) · 1m 12s`，并每秒刷新一次。历史 timeline 从 `tool_call.timestamp` 到 `tool_result.timestamp` 计算；实时 SSE 从 `tool_started` 接收时间开始计时，`tool_finished.durationMs` 优先作为完成耗时来源。
-
-边界规则：
-
-- 如果没有 user 消息（例如独立 compaction 状态消息），保持原有单条消息渲染。
-- 如果全局 `running=true`，最后一个 user turn 视为活跃 turn，不做默认折叠；在该 turn 的输出顶部展示 `已处理 <duration>` 并每秒刷新运行时长，更早的 turn 仍可折叠。
-- 折叠只影响展示层，不改变 JSONL timeline、session detail 或续聊上下文。
-- 颜色、边框和文字必须使用 Ant Design token，亮色/暗色主题都要可读。
-- 窄屏时消息列必须随视口收缩并保留水平 padding；右侧 thread rail 在 `md` 以下隐藏，避免把消息内容挤到无 padding 状态；Markdown 长路径、代码块和表格不得撑出横向溢出。
-- 消息区离开底部时，在 composer 正上方居中显示圆形滚动到底部按钮；按钮用 opacity + transform 淡入淡出，点击后复用现有直接滚到底部逻辑，不额外持久化任何 UI-only 滚动状态。
-- `New Chat` 是创建新的独立 session，不属于当前 running turn 的输入或 stop 控制；即使当前选中的线程处于 `Running`，按钮也必须可用。后端 active worker 和 busy 保护按 `session_key` 隔离，只有同一个 session 的并发输入需要进入 guide/queue 或 busy 分支。
+Web Agent Chat 按 `user_message` 切 turn；已结束 turn 默认收起中间过程，只显示 `已处理 <duration> >` 摘要行；运行态最后 turn 保持展开并 `已处理 <duration>` 每秒刷新；process block 显示 `Ran 1 command · 4m 33s` / `Running 1 command (1 active) · 1m 12s`。折叠只影响展示，不改变 JSONL、session detail、续聊上下文；颜色使用 Ant Design token 亮暗主题皆可读。
 
 ### 对话图片全屏预览
 
-Agent Chat 消息中的 Markdown 图片和多模态 `content_parts` 图片统一注册为当前会话图片序列。序列按消息渲染顺序从上到下收集，不按 turn 分组，因此用户可以在全屏浮窗中从某一次输出的图片连续切到前后对话中的图片。
+Markdown 图片与多模态 `content_parts` 图片按渲染顺序收集为会话图片序列；点击打开全屏浮窗（opacity+scale 过渡），支持左右按钮 + 键盘 `ArrowLeft/ArrowRight` 切换、`Escape` 关闭、遮罩关闭；关闭时按稳定 image id `scrollIntoView({ block: "center" })` 回到原位置。
 
-点击任意图片打开全屏浮窗：
+## 技术细节
 
-- 浮窗覆盖整个视口，右上角提供关闭按钮，点击图片区以外的遮罩也关闭。
-- 打开和关闭使用 opacity + scale 过渡动画；关闭动画结束后再卸载浮窗。
-- 图片数大于 1 时显示左右箭头和当前位置计数；按钮与键盘 `ArrowLeft` / `ArrowRight` 都按序切换，`Escape` 关闭。
-- 关闭时按当前预览图片的稳定 image id 查找消息区内原图并 `scrollIntoView({ block: "center" })`，让用户回到刚查看的位置。
-- 该能力只改变展示层，不修改 JSONL、消息内容或图片附件路径。
-
-测试方案：
-
-- 单元/组件：覆盖 completed turn 默认只显示最终输出和 `已处理` 摘要，展开后恢复 process block 与中间 delta。
-- E2E：在 `web/tests/ui/agent-chat.spec.ts` 中覆盖 Web stream 完成态和 history timeline 完成态；运行中 history refresh 用例必须保持当前 turn 展开，并断言顶部 `已处理 <duration>` 会继续更新。
-- E2E 额外覆盖 640px 视口，断言消息区没有横向溢出且 message track 与滚动区之间保留左右 padding。
-- E2E 覆盖消息区离开底部时滚动按钮淡入、位置居中在 composer 上方、点击后滚到底部并淡出。
-- E2E 覆盖选中 running 线程时 `New Chat` 仍可点击并创建新 session。
-- E2E 覆盖 Markdown 图片和 `content_parts` 图片点击后打开全屏浮窗、左右按钮和键盘切换、点击遮罩关闭、关闭后滚回图片位置。
-- human_tests：在 `human_tests/agent-session-persistence.md` 增加完成态折叠回归，按真实 WebUI 或 Playwright mock 逐条执行。
-- Review/Fix/Test：两轮复核折叠默认态、展开态、运行态、暗色主题、历史深链与现有 process block 交互。
-
-## 方案
-
-### 0. Loop 下沉，Channel View 上提（planned, not yet shipped as of 2026-06-16）
-
-核心模型调整：
+### 1. Loop 下沉，Channel View 上提
 
 ```text
 Conversation / AgentSession
@@ -224,9 +105,7 @@ ChannelView
   owns: Web thread view, Feishu card view, Weixin message view, API snapshot
 ```
 
-`AgentSession` 不再直接认为自己属于 Web 或 IM。它只接受 `UserInput`，运行 Agent Loop，维护唯一 `AgentRunState`，并产出 canonical timeline events。所有通道展示都从 run state + timeline/progress fan-out 得到自己的 projection。
-
-建议定义 `ConversationChannelBinding`：
+`ConversationChannelBinding` 结构：
 
 ```json
 {
@@ -243,68 +122,43 @@ ChannelView
 }
 ```
 
-几个关键规则：
+Web 打开 conversation 复用/注册 `web` binding；IM 消息命中 conversation 复用/注册 `im` binding；任何 channel 发来的 user message 先写 canonical timeline 再进 turn queue；Agent progress/final reply 由 timeline fan-out 分发；binding 各自维护 delivery cursor 避免重复更新。
 
-- Web UI 创建或打开一个 conversation 时，注册/复用 `web` binding。
-- IM 消息命中同一个 conversation 时，注册/复用对应 `im` binding。
-- 任何 channel 发来的用户消息都先写入同一 canonical timeline，再进入同一 turn queue。
-- Agent progress/final reply 由 timeline fan-out 分发到所有 enabled bindings。
-- 每个 binding 自己维护 delivery cursor，避免重复更新飞书卡片或重复推送 Web SSE。
+### 2. 跨通道同对话 fan-out 场景
 
-### 0.1 跨通道同对话 fan-out 场景（planned, not yet shipped as of 2026-06-16）
+1. 用户在飞书发消息命中 conversation A。
+2. 系统为 A 绑定 `feishu` channel，创建/更新 progress card。
+3. 用户在 Web UI 打开 A，Web 注册 `web` binding，加载同一 timeline。
+4. 用户在 Web 发新消息，写入 A 的 canonical timeline并进入同一 turn queue。
+5. Agent 运行时产生的 `tool_call/plan/assistant_delta/assistant_final` 同时投影到 Web thread/process panel 与飞书 progress card/final card。
+6. Web 刷新或飞书卡片重试更新时都以 binding cursor + canonical timeline 恢复，不重新跑 Loop。
 
-目标场景：
+`user_message` 事件带 `source_channel` 表达来源；`assistant_final` fan-out 到 conversation 所有 active bindings。
 
-1. 用户在飞书里发送消息，命中 conversation A。
-2. 系统为 conversation A 绑定 `feishu` channel，创建/更新飞书 progress card。
-3. 用户在 Web UI 打开 conversation A，Web 注册 `web` binding，并加载同一 timeline。
-4. 用户接着在 Web UI 发送新消息。
-5. 该消息写入 conversation A 的 canonical timeline，并进入同一 AgentSession turn queue。
-6. Agent 运行时产生的 `tool_call/plan/assistant_delta/assistant_final` 同时投影到：
-   - Web UI thread/process panel
-   - 飞书 progress card/final card
-7. Web 刷新或飞书卡片重试更新时，都以 binding cursor + canonical timeline 恢复，不重新跑 Loop。
+### 3. ChannelBinding 与 turn 并发边界
 
-这个场景要求“触发通道”只作为 user input 的来源字段存在，例如：
-
-```json
-{
-  "event_type": "user_message",
-  "source_channel": "web",
-  "conversation_id": "A",
-  "content": "继续刚才的任务"
-}
-```
-
-但后续 `assistant_final` 不只回到 `source_channel=web`，而是 fan-out 到 conversation A 的所有 active bindings。
-
-### 0.2 ChannelBinding 与 turn 并发边界（planned, not yet shipped as of 2026-06-16）
-
-同一个 conversation 的 Loop 仍应串行化或显式排队，避免 Web 和 IM 同时发消息时上下文顺序不确定：
+同一 conversation 的 Loop 串行/显式排队：
 
 - `AgentSession` 维护 turn queue。
-- 每条 user message 有单调递增 `event_id` / `turn_id`。
-- Web/IM 同时输入时，按进入 canonical timeline 的顺序排队。
-- 被排队的输入也 fan-out：另一个通道应能看到“用户在 Web/IM 追加了消息，等待当前 turn 完成”。
-- 如果当前 runner 支持 interrupt/queue/stop，这些控制命令也应作用于 conversation，而不是只作用于某个 channel 的局部状态。
+- 每条 user message 带单调递增 `event_id`/`turn_id`。
+- Web/IM 同时输入按进入 canonical timeline 顺序排队。
+- 被排队的输入 fan-out：另一通道能看到“用户在 Web/IM 追加了消息，等待当前 turn 完成”。
+- interrupt/queue/stop 作用于 conversation，不作用于某个 channel 局部状态。
 
-### 0.3 统一 AgentRunState（planned, not yet shipped as of 2026-06-16；canonical timeline 已有 `run_state_changed` 事件，但跨 runner 的 enum 与 channel projection 尚未统一）
-
-运行状态需要和 timeline 一样下沉到底层：
+### 4. 统一 AgentRunState
 
 ```text
-AgentRunState
-  queued
-  running
-  waiting_for_tool
-  waiting_for_user
-  compacting
-  completed
-  failed
-  cancelled
+queued
+running
+waiting_for_tool
+waiting_for_user
+compacting
+completed
+failed
+cancelled
 ```
 
-状态事件也写入 canonical timeline，例如：
+canonical timeline `run_state_changed` 事件：
 
 ```json
 {
@@ -317,32 +171,13 @@ AgentRunState
 }
 ```
 
-注意这里的 `source_channel` 只表达“这次输入来自哪里”，不决定状态展示范围。Web thread、IM card、API session list、Schedule run detail 都应该从同一 `AgentRunState` 投影：
+`source_channel` 只表达来源，不决定状态展示范围；Web list、IM card、API session list、Schedule run detail 都从同一状态投影；stop/cancel/guide/queue 作用于 `conversation_id + turn_id`。
 
-- Web list 显示 running，IM card 也显示 running。
-- External Runner 进入 waiting/failed，Web 和 IM 都能看到同一状态。
-- 内置 Agent compaction/tool 状态，不因为入口是 IM 而只在 IM card 可见。
-- stop/cancel/guide/queue 等控制命令作用于 `conversation_id + turn_id`，所有 channel view 同步更新。
+### 5. IM Card 不再绑定“本次请求”
 
-### 0.4 IM Card 不再绑定“本次请求”（planned, not yet shipped as of 2026-06-16）
+飞书 progress card 生命周期从“IM 请求路径创建的临时 card”调整为“conversation 的 IM binding projection”：首次触发创建 card 保存 `im_card_message_id` 到 binding state；后续任何通道触发同一 conversation 复用/更新该 card；无可更新 card 时按通道策略新建 status card 并写回 binding；final reply 到达时所有 binding 更新；更新失败只影响该 binding delivery state，不影响 Loop 与其他通道。
 
-飞书 progress card 的生命周期应从“IM 请求路径创建的临时 card”调整为“conversation 的 IM binding projection”：
-
-- IM 首次触发 conversation：创建 card，保存 `im_card_message_id` 到 binding state。
-- Web 后续触发同一 conversation：如果存在 enabled IM binding，则复用或更新这张 card。
-- 如果没有可更新 card，可以按通道策略创建一张新的 status card，并把新 card id 写回 binding。
-- final reply 到达时，Web 和 IM 都从同一个 `assistant_final` event 更新最终展示。
-- 如果 IM card 更新失败，只影响该 binding 的 delivery 状态，不影响 Loop 和其他通道展示。
-
-### 1. 引入统一 AgentRunTimeline 语义
-
-不一定立即新增大模块，但数据契约要先收敛：
-
-- `ConversationRecorder` 写入的是 canonical timeline。
-- `AgentTurnProgressEvent` 是运行时事件流。
-- Web SSE、IM progress card、JSONL persistence 都应该由 canonical timeline 或 runtime event 的同一映射层产生。
-
-建议定义一个小型 adapter 层：
+### 6. AgentRunTimeline 语义与映射层
 
 ```text
 AgentTurnProgressEvent
@@ -353,19 +188,14 @@ AgentTurnProgressEvent
   -> persisted JSONL
 ```
 
-短期可以先复用现有 JSONL event type，不急着迁移文件格式。关键是 `AgentTurnProgressEvent` 不再只发给单个 `progress_sender`，而是进入一个按 conversation fan-out 的 dispatcher；Web SSE 和 IM card 都是 dispatcher 的 subscribers。
+- `ConversationRecorder` 写 canonical timeline。
+- `AgentTurnProgressEvent` 是运行时事件流。
+- `run_progress_event_coalescer()` 短期继续，但抽出共享 mapper：`AgentTurnProgressEvent -> TimelineEventPatch -> {ImProgressSnapshot, WebRunTelemetry, ConversationEvent}`。
+- 短期复用现有 JSONL event type，不急着迁移文件格式。
 
-### 2. SessionInfo / SessionDetail 带上 history_path
+### 7. SessionInfo / SessionDetail 与 /sessions/all 合并
 
-当 `AgentSession` 持有 recorder 时，应把 recorder file path 暴露到：
-
-- `SessionInfo`
-- `SessionDetail`
-- active/running `/sessions/all` item
-
-这样 Web Chat 即使打开 active/idle session，也能知道它有对应 JSONL event timeline。
-
-建议字段：
+`SessionInfo`、`SessionDetail`、active/running/idle `/sessions/all` item 携带：
 
 ```json
 {
@@ -376,84 +206,26 @@ AgentTurnProgressEvent
 }
 ```
 
-### 3. `/sessions/all` 合并 active 与 history，而不是互斥
+`/sessions/all` 合并优先级：
 
-当前 active key 存在时跳过 history row。应改为只面向 canonical timeline 合并：
-
-- 按 canonical timeline 索引/显式 `history_path` 找到同一 `session_key` 的最新 timeline。
-- active/running/idle session item 与 history summary 合并。
-- 最终只保留一条 thread，但包含 `history_path`。
-
-合并优先级：
-
-- runtime state：`running/state/work_dir/token/context/runner`
+- runtime：`running/state/work_dir/token/context/runner`
 - persisted timeline：`history_path/title/start_time/last_active_time/message count`
 - title：显式 title > active title > history title > first user message
 
-这样不会出现两个重复 thread，也不会丢 timeline。
+不出现重复 thread，也不丢 timeline。
 
-### 4. Web Chat 优先消费 timeline events
+### 8. Web Chat 优先消费 timeline events
 
 前端打开 thread 时：
 
-- 如果 thread 有 `history_path`，先请求 `/sessions/history/:path`。
-- 用 `historyEventsToMessages()` 恢复聊天气泡。
-- 用 `historyEventsToTelemetry()` 恢复 tool/plan/compaction/process。
-- 再用 `/sessions/:key` 或 thread summary 补充 active runtime 状态。
+- 若有 `history_path`，先 `/sessions/history/:path` + `historyEventsToMessages()` + `historyEventsToTelemetry()`。
+- 再 `/sessions/:key` 或 thread summary 补 active runtime 状态。
+- Web 自己发起的 running turn 继续 SSE 增量；IM 发起或刷新恢复的 running turn 周期性重读 history events，直到看到 completed/failed/cancelled。
+- 刷新恢复硬约束：若底层 Loop 仍 running 且 JSONL 只有 `user_message`，视图层必须在最后 user 后补 assistant running placeholder 承载后续 process；后续 `tool_call/tool_result/plan/compaction` append 后就地更新，`assistant_message` 写入后替换为正式回答。
 
-运行中 Web 自己发起的 turn 仍继续使用 SSE 增量更新；IM 发起或刷新后恢复的 running turn 必须继续消费同一条 `history_path` 的 append-only timeline。只要 `run_state` 或 thread summary 的 `running=true` 表示 queued/running/waiting，Web view 就要周期性重新读取 history events，直到看到 completed/failed/cancelled。
+### 9. External Runner 事件归一化
 
-刷新恢复有一个硬约束：如果底层 Loop 仍在 running，消息区不能只剩用户消息。即使 JSONL 暂时只写入了 `user_message`、没有新的 `run_state_changed`、或者还没有新的 `tool_call`，只要 thread summary 仍标记 running，视图层也必须在最后一个 user message 后补一个 assistant running placeholder，用来承载后续 process steps。后续 `tool_call/tool_result/plan/compaction` append 到 timeline 后，placeholder 原位更新为过程卡片；最终 `assistant_message` 写入后替换为正式回答。
-
-关键点：Web Chat 不应因为 `view=active` 就放弃 history events。active/history 应该只是状态，不是能否看到过程的开关。
-
-### 5. IM Progress Card 与 Web Timeline 共用映射
-
-`run_progress_event_coalescer()` 当前直接把 `AgentTurnProgressEvent` 应用到 `ImAgentProgressRegistry`。建议提取共享 mapper：
-
-```text
-AgentTurnProgressEvent -> TimelineEventPatch
-TimelineEventPatch -> ImProgressSnapshot
-TimelineEventPatch -> WebRunTelemetry
-TimelineEventPatch -> ConversationEvent
-```
-
-短期不需要一次性重写 IM card，只要保证新的 canonical event type 不让 IM/Web 各自理解一套私有格式。
-
-### 5.1 ChannelFanoutDispatcher（planned, not yet shipped as of 2026-06-16）
-
-建议新增一个轻量 dispatcher，负责把 canonical timeline patch 投递到所有绑定通道：
-
-```text
-ConversationEvent / TimelineEventPatch
-  -> load enabled ChannelBinding by conversation_id
-  -> deliver to Web subscribers
-  -> deliver to IM card updater
-  -> update binding delivery cursor
-```
-
-Web 通道：
-
-- running thread 有 SSE/websocket subscriber 时，实时推送。
-- 没有 subscriber 时，只推进 persisted timeline；下次打开 Web 时回放。
-
-IM 通道：
-
-- 有 `im_card_message_id` 时更新同一张 progress card。
-- 没有 card 但策略允许时创建 status card。
-- 更新失败记录到 binding，不回滚 canonical timeline。
-
-这样 Web 发消息时也能更新飞书卡片，IM 发消息时也能更新 Web thread，核心行为不再依赖请求入口。
-
-### 6. External Runner 事件归一化
-
-External Runner 当前把 events 放进 tool_result blob。后续要补：
-
-- 解析 `ExternalCliRunResult.events`
-- 解析 `artifacts.normalized_events`
-- 生成标准 `ConversationEvent`
-
-建议映射：
+映射：
 
 | Runner Event | ConversationEvent |
 | --- | --- |
@@ -464,85 +236,104 @@ External Runner 当前把 events 放进 tool_result blob。后续要补：
 | assistant delta/final | `assistant_message` 或 streaming delta event |
 | error | `turn_failed` / failed `tool_result` |
 
-如果 runner events 的 schema 尚不稳定，可以先写 `runner_event`，但 Web helper 必须能解析并展示。
+`record_external_cli_result()` 不只保存 `event_types`，还写入可回放 timeline events 与 `run_state_changed`。`session_state.json` 只保轻量 thread metadata。Web Chat 对 external runner history 使用同一 `historyEventsToTelemetry()` 与 `AgentRunState` projection。不同 runner 私有状态经 adapter 映射为统一 `AgentRunState`。
 
-External Runner、内置 Agent、Codex、ChatGPT Web 不应该各自暴露互不相通的状态枚举。不同 Agent 的私有事件可以先 adapter 成 canonical events：
+### 10. ChannelFanoutDispatcher
 
 ```text
-Runner private state -> AgentRunState
-Runner private event -> ConversationEvent
-Runner artifact      -> Timeline attachment/artifact reference
+ConversationEvent / TimelineEventPatch
+  -> load enabled ChannelBinding by conversation_id
+  -> deliver to Web subscribers
+  -> deliver to IM card updater
+  -> update binding delivery cursor
 ```
 
-视图层不直接理解 runner 私有状态，只理解 `AgentRunState` 和 `ConversationEvent`。
+Web：running thread 有 SSE/websocket subscriber 时实时推；无 subscriber 时推进 persisted timeline，下次打开回放。
+IM：有 `im_card_message_id` 时更新同一 card；无 card 但策略允许时新建 status card；更新失败记录 binding，不回滚 canonical timeline。
 
-### 7. 数据模型收敛策略
+### 11. Web Runner Call 失败状态投影
 
-不为旧数据和旧 active/history 分裂路径额外设计兼容层。需要新增或调整字段时，直接以 canonical 模型为准：
+`runRunnerCallStream` 消费 `/api/im-gateway/chat/runner-calls/stream` NDJSON；收到 `runner_call_finished` 且 `status ∉ {completed,success,succeeded}` 时抛错。`useRunnerCallHandler` catch 分支把 user/assistant runner-call chip 标 `failed`，正文替换错误文本；成功路径不变。
 
-- `history_path: string | null`
-- `has_timeline: boolean`
-- `timeline_event_count: number`
-- `run_state: AgentRunState`
-- `channel_bindings: ChannelBindingSummary[]`
+### 12. External Runner SSE 停止与结果一致性
 
-现有 `messages` 可以作为 timeline projection 的派生结果保留，但不再作为完整 session detail 的权威来源。
+- external CLI `run_command` 等待子进程时同时监听 `stop_requested` marker；命中终止进程组并写 `ExternalCliRunStatus::Stopped` + stopped stderr + stopped run event + result。
+- `chatgpt_web::run_adapter` 认证等待阶段 `tokio::select!` 同时监听 stop marker；被打断按 profile 清理 managed browser 避免 Edge 残留。
+- `read_run_detail` 优先 `result.json.response`；无 result response 才回退 stdout/events。
+- terminal 非 succeeded 且 final response 为空按 `run_failed event -> stderr -> stdout -> 默认错误文案` 提升为可见 response，覆盖 API / session detail / WebUI / IM card。
+- WebUI 主 Agent Chat stream `run_finished`/`turn_finished` 非成功值按失败处理：正文展示 response/error，状态进 Error，线程列表停止 running；与 runner-call failure path 一致。
+- Codex adapter 默认追加 `--config service_tier="fast"`；用户 override 保留。
 
-删除或弱化的语义：
+## CLI / Admin API / Web
 
-- 不再把 `/sessions/:key` 视为完整详情唯一来源。
-- 不再用 active/history 两个 list item 表达同一会话。
-- 不再为“只有 messages、没有 timeline”的历史路径增加复杂 fallback；缺失 timeline 时明确显示数据不可回放即可。
+### CLI
 
-## 推荐实施步骤
+- `bifrost agent chat/status/stop`：`/stop` 走统一 `request_agent_stop()` helper（见 `agent-session-context-restore.md`），同时通知 live runtime 与 external-cli stop marker。
+- `bifrost agent runs list`：展示 canonical run + `AgentRunState`。
 
-### Phase 1：让 Web 能看到 IM 内置 Agent 的完整过程
+### Admin API
+
+- `GET /_bifrost/api/im-gateway/agent/sessions/all`：合并 active/running/idle 与 history summary，item 含 `history_path`/`has_timeline`/`run_state`/`running`。
+- `GET /_bifrost/api/im-gateway/agent/sessions/history/:path`：返回 JSONL events。
+- `POST /_bifrost/api/im-gateway/agent/chat`：`/stop` 归入统一 helper；stream 支持 `run_state_changed`。
+- `POST /_bifrost/api/im-gateway/chat/stream`：SSE 支持 `run_started` / `run_finished(status=...)`；`/chat/runs/{runId}/stop` 修复 stopped 状态语义。
+- `GET /_bifrost/api/im-gateway/chat/runs/{runId}`：优先返回 `result.json.response`。
+- ChannelBinding 相关未来 endpoint（planned）：`POST /agent/channel-bindings`、`GET /agent/conversations/{id}/bindings`。
+
+### Web
+
+- `AgentChatSection`：优先加载 history events + telemetry；running turn 补 placeholder；完成态 loop 默认折叠；`Ran/Running N command · <duration>`；图片全屏浮窗；窄屏 padding；滚动按钮；`New Chat` running 时可用。
+- `useRunnerCallHandler`：runner-call finished 非成功状态标 failed。
+- Playwright 覆盖：`web/tests/ui/agent-chat.spec.ts`。
+
+## Sync 边界
+
+- Canonical timeline JSONL 与 session_state 属于本机数据；不跨设备 sync。
+- ChannelBinding 是本机 conversation 与本机 IM/Web 通道的映射，也不跨设备 sync（跨装置 conversation 恢复走独立设计）。
+- 非内置 runner 的“跨装置 running”语义仅体现在 persisted state；本方案保留该 running 表达，不做跨装置聚合。
+
+## 实现切分
+
+### Phase 1：Web 能看到 IM 内置 Agent 完整过程
 
 1. `AgentSession` / `SessionInfo` / `SessionDetail` 暴露 recorder `history_path`。（shipped）
-2. `/sessions/all` 合并 active session 与最新 history file（active/idle item 已 fallback 到 history `history_path` / `has_timeline`）。（shipped）
-3. `AgentChatSection` 打开带 `history_path` 的 thread 时优先加载 history events（`historyEventsToMessages` / `historyEventsToTelemetry`）。（shipped）
+2. `/sessions/all` 合并 active session 与最新 history file（active/idle item 已 fallback 到 `history_path`/`has_timeline`）。（shipped）
+3. `AgentChatSection` 打开带 `history_path` 的 thread 时优先加载 history events。（shipped）
 4. 保留 active detail 作为运行状态补充。（shipped）
-5. 引入 conversation-level channel binding 元数据，至少能记录 Web thread 与 IM card 的绑定关系。（planned, not yet shipped as of 2026-06-16）
-6. 引入统一 `AgentRunState` projection，让 Web session list、Web thread、IM card 都从同一运行状态更新。（planned, not yet shipped as of 2026-06-16）
-7. 补单元测试和 Web helper 测试。（partially shipped：`historyEventsToTelemetry`/`historyEventsToMessages` 与 `/sessions/all` 已有单测；跨通道 binding 测试待补）
+5. 引入 conversation-level ChannelBinding metadata。（planned as of 2026-06-16）
+6. 引入统一 `AgentRunState` projection。（planned）
+7. 补单元测试与 Web helper 测试（部分 shipped：`historyEventsToTelemetry`/`historyEventsToMessages` 与 `/sessions/all` 已有单测；binding 测试待补）。
 
-验收标准：
+验收：IM 触发内置 Agent + tool call → Web Chat 打开同一 thread 能看到 user/assistant final/tool call+process/plan+compaction；刷新页面仍完整；Web 发消息时飞书 card 同步；running/completed/failed 一致。
 
-- IM 触发内置 Agent + tool call。
-- Web Chat 打开同一 thread。
-- 页面展示 user、assistant final、tool call/process、plan/compaction telemetry。
-- 刷新页面后仍能看到完整过程。
-- Web 在同一 thread 发送后续消息时，飞书绑定 card 也更新状态和最终回复。
-- Web、IM 对同一 conversation 的 running/completed/failed 状态保持一致。
+### Phase 2：External Runner timeline 归一化
 
-### Phase 2：External Runner timeline 归一化（planned, not yet shipped as of 2026-06-16）
+1. `ExternalCliRunEvent → ConversationEvent` mapper。
+2. External Runner 私有状态 → `AgentRunState` mapper。
+3. `record_external_cli_result()` 写可回放 timeline events + run state changes。
+4. `session_state.json` 只保轻量 metadata。
+5. Web Chat 对 external runner history 用同一 `historyEventsToTelemetry()` + `AgentRunState` projection。
 
-1. 给 `ExternalCliRunEvent` 到 `ConversationEvent` 增加 mapper。
-2. 给 External Runner 私有状态到 `AgentRunState` 增加 mapper。
-3. `record_external_cli_result()` 不只保存 `event_types`，还写入可回放 timeline events 和 run state changes。
-4. `session_state.json` 继续保存轻量 thread metadata，不作为过程或运行状态数据源。
-5. Web Chat 对 external runner history 使用同一 `historyEventsToTelemetry()` 和 `AgentRunState` projection。
+验收：Codex/ChatGPT Web Runner 从 IM 或 Web 发起后 Web Chat 能看到 normalized tool/plan/progress；刷新不退化。
 
-验收标准：
+### Phase 3：统一实时订阅
 
-- Codex/ChatGPT Web Runner 从 IM 或 Web 发起后，Web Chat 能看到 normalized tool/plan/progress。
-- 刷新页面后不退化成“用户消息 + 最终输出”。
-- Codex/ChatGPT Web Runner 的 running/failed/completed 状态在 Web 与 IM 绑定视图中一致。
-
-### Phase 3：统一实时订阅（planned, not yet shipped as of 2026-06-16）
-
-1. 增加按 `session_key` 订阅 timeline/progress 的 Web endpoint。
-2. IM 发起的 running turn 在 Web 打开时，也能看到实时过程，而不是等待结束后回放。
+1. 按 `session_key` 订阅 timeline/progress 的 Web endpoint。
+2. IM 发起的 running turn Web 打开能看到实时过程。
 3. IM progress card 与 Web process panel 使用同一状态快照。
-4. 引入 `ChannelFanoutDispatcher`，让 Web/IM/API projection 都订阅 conversation timeline，而不是每条入口链路单独挂一个 sender。
+4. `ChannelFanoutDispatcher`：Web/IM/API projection 都订阅 conversation timeline。
 
-验收标准：
+验收：IM 发长任务 Web 中途打开能看 running process；Web/IM 的 guide/queue/stop 使用同一底层 session；Web 普通消息触发同一 conversation 新 turn，IM progress card 同步。
 
-- IM 发起长任务，Web 中途打开同 thread 能看到 running process。
-- Web 发 guide/queue/stop 与 IM 发 guide/queue/stop 使用同一底层 session。
-- Web 发普通消息触发同一 conversation 的新 turn，IM progress card 同步展示 running/final。
+### Phase 4：状态修复、折叠与图片浮窗
 
-## 测试计划
+1. `/stop` 修复陈旧 running persisted 并暴露修复计数。
+2. Web AgentChat 完成态折叠 + `已处理 <duration>` 摘要 + process block 耗时格式。
+3. 图片全屏浮窗（Markdown + `content_parts`）+ 键盘 + 遮罩 + `scrollIntoView`。
+4. 窄屏 padding、滚动按钮、`New Chat` running 可用。
+5. runner-call failure 投影、External Runner SSE stop、Codex `service_tier="fast"` 默认注入。
+
+## 测试方案
 
 ### 单元测试
 
@@ -555,118 +346,69 @@ Runner artifact      -> Timeline attachment/artifact reference
 - `conversation_turn_queue_orders_web_and_im_inputs`
 - `agent_run_state_projects_to_all_bound_channels`
 - `external_runner_state_maps_to_canonical_agent_run_state`
+- `run_state_projection_prefers_live_registry_then_jsonl_terminal_then_persisted`
+- `stop_repairs_stale_running_persisted_and_returns_fix_count`
+- `read_run_detail_prefers_result_response_over_stdout`
+- `codex_adapter_defaults_service_tier_fast_but_preserves_override`
 
 ### E2E 测试
 
-- `test_im_agent_web_timeline_visibility.sh`
-  - 启动 mock model。
-  - 通过 IM event loop 注入一条会触发 tool call 的消息。
-  - 等 turn 完成。
-  - 调 `/api/im-gateway/agent/sessions/all`，断言同一 session item 有 `history_path`。
-  - 调 `/sessions/history/:path`，断言存在 `tool_call/tool_result/assistant_message`。
-  - 用浏览器打开 Agent Chat，断言 process panel 有 tool step。
+- `test_im_agent_web_timeline_visibility.sh`：mock model + IM event loop 注入 tool call 消息；`/sessions/all` 断言 `history_path`；`/sessions/history/:path` 断言含 `tool_call/tool_result/assistant_message`；Playwright 断言 process panel 有 tool step。
+- `test_external_runner_web_timeline_visibility.sh`：mock external runner 输出 normalized events；IM 或 Web Chat Gateway 触发；Web Chat 刷新后仍显示 runner progress/tool events；running turn 刷新时最后 user 下方必定存在 assistant running/process 卡片。
+- `test_cross_channel_conversation_fanout.sh`：IM 注入命中 conversation A；Web 对同一 A 发送后续；canonical timeline 顺序含 IM user、Web user、assistant/tool；Web thread 与 IM card 都收到 running + final reply。
+- `test_cross_agent_run_state_unification.sh`：内置 Agent 与 mock External Runner 分别触发同一类 run；断言两者都写 `run_state_changed`；Web list/Web thread/IM card 从同一 state projection 展示 queued/running/completed/failed。
+- Playwright（`web/tests/ui/agent-chat.spec.ts`）：Web stream 完成态与 history timeline 完成态折叠；running history refresh 保持当前 turn 展开并顶部 `已处理 <duration>` 更新；640px 视口无横向溢出且保留左右 padding；滚动按钮淡入位置正确；running 时 `New Chat` 可点击；Markdown + `content_parts` 图片浮窗左右/键盘/遮罩/scrollIntoView；`AI Agent Chat marks runner-call finished failures as failed`；外部 runner terminal failed 状态 Error 展示。
+- 真实接口验证：
+  - `codex`：`POST /_bifrost/api/im-gateway/chat/stream` 返回 `run_started -> run_finished(status=failed)`；session projection `run_state=failed`；失败原因来自本机 `service_tier=default`。
+  - `traex`：stream + `POST /chat/runs/{runId}/stop`；stream `run_started -> status -> run_finished(status=stopped)`；run detail `External CLI run was stopped by request.`；session projection failed；无残留。
+  - `abc/chatgpt_web`：stream + stop；`run_started -> run_failed -> run_finished(status=stopped)`；run detail `ChatGPT Web run was stopped by request.`；无 Edge 残留。
 
-- `test_external_runner_web_timeline_visibility.sh`
-  - 使用 mock external runner 输出 normalized events。
-  - 通过 IM 或 Web Chat Gateway 触发。
-  - 断言 Web Chat 刷新后仍显示 runner progress/tool events。
-  - 断言刷新时如果最新 turn 仍 running，最后一个 user message 下方一定存在 assistant running/process 卡片。
+### 真实场景测试（human_tests）
 
-- `test_cross_channel_conversation_fanout.sh`
-  - 通过 IM 注入一条消息，绑定 conversation A 与飞书 card。
-  - 通过 Web UI/API 对同一个 conversation A 发送后续消息。
-  - 断言 canonical timeline 中按顺序存在 IM user message、Web user message、assistant/tool events。
-  - 断言 Web thread 和 IM card 都收到 running 状态与 final reply。
+- 更新 `human_tests/im-gateway-agent.md`：IM→Web timeline 可见；Web 刷新过程完整；External Runner from IM→Web normalized progress；IM 触发 conversation 后 Web 发消息飞书 card 同步；Web 触发 conversation 后 IM 通道看到状态卡/最终消息；内置 vs. External Runner running/failed/completed 双视图一致。
+- 更新 `human_tests/agent-session-persistence.md`：陈旧 Running 状态修复与 Stop 一致性；完成态折叠回归；running turn 刷新 placeholder。
 
-- `test_cross_agent_run_state_unification.sh`
-  - 分别用内置 Agent 与 mock External Runner 触发同一类 conversation run。
-  - 断言两者都写入 canonical `run_state_changed` events。
-  - 断言 Web list、Web thread、IM card 从同一 state projection 展示 queued/running/completed/failed。
+启动 Bifrost 必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`。
 
-### human_tests
+### 覆盖率与项目校验
 
-在 `human_tests/im-gateway-agent.md` 增加用例：
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test -p bifrost-agent conversation timeline run_state`
+- `cargo test -p bifrost-admin im_gateway agent_chat sessions_all sessions_history`
+- `cd web && pnpm exec playwright test tests/ui/agent-chat.spec.ts`
+- `cargo test --workspace --all-features`
+- `rust-project-validate`
+- 本机 no-local-coverage 生效时不跑 `make coverage`；交付时说明。
 
-- IM 通道触发内置 Agent 后，Web Chat 打开同一 thread 能看到工具调用过程。
-- Web 刷新后仍能看到同一过程。
-- External Runner 从 IM 通道触发后，Web Chat 能看到 normalized progress。
-- IM 触发同一 conversation 后，Web UI 继续发送消息，飞书 card 同步更新运行状态与最终回复。
-- Web UI 触发同一 conversation 后，已绑定的 IM 通道能看到状态卡片或最终消息更新。
-- 内置 Agent 与 External Runner 的 running/failed/completed 状态在 Web 和 IM 两个视图中一致。
+## Review/Fix/Test 闭环方案
 
-## 风险与边界
+### 第 1 轮
 
-- 历史文件可能被 retention 清理：active session 应允许 `history_path` 为空，此时 Web 退回 messages-only，但状态要明确。
-- running turn 的 JSONL 可能正在写：读取 events 要支持 append-only 部分可读，必要时做 lossy loading。
-- External Runner 事件 schema 不统一：先定义 canonical mapper，再接各 adapter。
-- 同一 session_key 多 runner 并存：需要保留 `adapter/runner_id` 维度，避免内置 Agent 与外部 Runner 的 timeline 串线。
-- Runner-call 子线程仍需保持隔离：`runner-call:*` 可以继续从顶层列表隐藏，但父消息应能链接到子 timeline。
-- 多通道 fan-out 会带来重复投递风险：必须用 binding-level `last_delivered_event_id` 或幂等 key 控制 Web SSE/IM card 更新。
-- IM card 可能被用户删除、过期或无权限更新：该 binding 应进入 degraded 状态，Web 与 canonical timeline 不受影响。
-- Web 与 IM 同时发消息时必须有明确排队策略；不能让两个 turn 并行改同一个 context。
-- 不做旧数据兼容会让部分历史 session 只显示不可回放或需要重新索引，这是可接受的简化边界。
+- 复核用户目标：canonical timeline 单一事实源；`/sessions/all` 合并；Web 消费 history events；running turn placeholder；ChannelBinding fan-out；统一 `AgentRunState`；External Runner 归一化；折叠与图片浮窗；stop 语义。
+- 复核 diff：agent/admin/im_gateway/external_cli/web/playwright/human_tests。
+- 重点：live vs. persisted 优先级；stop 修复陈旧 running 并暴露修复计数；runner-call failure；Codex service_tier；ChatGPT Web stop 清理 Edge；binding cursor 幂等。
+- 运行受影响单元 + E2E + Playwright。
 
-## Open Questions
+### 第 2 轮
 
-1. Web Chat 默认打开 thread 时，是不是永远优先 timeline events，再补 active status？建议是。
-2. External Runner 的 delta 是否需要逐条展示，还是只展示 tool/plan/final？建议先展示结构化过程，delta 可折叠或聚合。
-3. IM progress card 是否也要支持从 JSONL 回放？建议不需要，IM card 只展示实时与最终态，Web 负责完整回放。
-4. `session_state.json` 是否长期保留 messages？建议只保留轻量 metadata，过程数据和运行状态以 canonical timeline 为准。
-5. 飞书 card 被删除或更新失败时，是否自动重建新 card？建议按 provider 配置决定，但 binding 必须记录失败原因。
-6. 同一个 conversation 绑定多个 IM chat/open_id 时，是否全部 fan-out？建议默认只 fan-out enabled binding，并提供用户可见的绑定管理。
+- 复核第 1 轮问题修复与 human_tests 索引。
+- 复查跨通道 fan-out 幂等性；binding degraded 状态与 Web/canonical timeline 隔离。
+- 复查折叠展开态、暗色主题、深链、process block 交互。
+- 再跑失败用例；追加轮次直到 running/completed/failed 三视图一致、跨通道 fan-out 无重复。
 
-## 2026-06-09 Web Runner Call 失败状态投影
+## 风险与决策点
 
-### 问题
-
-真实 Codex runner call 通过 WebUI slash runner 入口触发后，底层 `chat_runs/<run_id>/result.json` 已写入 `status=failed`，但 WebUI 仍把父消息和 assistant runner-call chip 标成 `success`，assistant 正文停留在 `Runner is running...`。这会让 Web 端误以为 runner 有效完成，而 IM/底层 run 记录显示失败，造成跨通道状态语义不一致。
-
-### 实现逻辑
-
-- `runRunnerCallStream` 继续消费 `/api/im-gateway/chat/runner-calls/stream` 的 NDJSON 事件。
-- 当收到 `runner_call_finished` 且 `status` 不属于 `completed/success/succeeded` 时，前端抛出明确错误。
-- `useRunnerCallHandler` 现有 catch 分支将 user/assistant 两侧 runner-call chip 标成 `failed`，并把 assistant 正文替换成错误文本。
-- 成功路径保持不变，仍在 `runner_call_finished` 时使用 `response` 替换 assistant 正文并标记 `success`。
-
-### 测试方案
-
-- WebUI E2E：`AI Agent Chat marks runner-call finished failures as failed` mock 返回 `runner_call_finished/status=failed`，断言消息区显示 failed 和错误文本，不再显示 `Runner is running...`。
-- 真实场景测试：更新 `human_tests/im-gateway-agent.md`，覆盖真实 runner 配置异常时 WebUI 不误报 success。
-
-### 校验要求
-
-```bash
-cd web && pnpm test:ui tests/ui/agent-chat.spec.ts -g "marks runner-call finished failures as failed"
-```
-
-## 2026-06-09 External Runner SSE 停止与结果一致性
-
-### 问题
-
-真实 `/api/im-gateway/chat/stream` 验证发现，external-runner-worker 场景下 `POST /chat/runs/{runId}/stop` 只会写入 `stop_requested` marker。实际 CLI worker 内部等待子进程时不轮询该 marker，因此 `traex` 会继续运行，session 投影停留在 running。`chatgpt_web` 在登录等待阶段也不会被 run stop marker 打断，导致 stream 只返回 `run_started`，stop 后仍残留临时 Edge 进程。另外 `/chat/runs/{runId}` detail 重新从 stdout 推断 response，在 stopped run 中可能返回原始 NDJSON 而不是 `result.json` 的 stopped 文案。进一步真实 Codex review run 发现，CLI 因本机 `service_tier=default` 配置失败时，stderr 写入 artifact，但 `result.json.response` 为空，WebUI 只能显示 `Runner: codex / Error`，正文没有失败原因。
-
-### 实现逻辑
-
-- external CLI `run_command` 在等待子进程退出时同时监听 `stop_requested` marker。
-- 发现 stop marker 后终止进程组，写入 `ExternalCliRunStatus::Stopped`、stopped stderr、stopped run event 和 result。
-- `chatgpt_web::run_adapter` 在认证等待阶段用 `tokio::select!` 同时监听 `stop_requested`。
-- ChatGPT Web 被 stop 打断时，按 profile 清理 managed browser，避免临时 Edge 进程残留。
-- `read_run_detail` 优先使用 `result.json` 中的 `response`，只有无 result response 时才回退到 stdout/events 推断。
-- external CLI terminal 状态非 succeeded 且 final response 为空时，按 `run_failed event -> stderr -> stdout -> 默认错误文案` 提升为可见 response。这样 API、session detail、WebUI 和 IM card 共享同一失败原因。
-- WebUI 主 Agent Chat stream 收到 `run_finished`/`turn_finished` 且 `status` 为非成功值时，按失败处理：正文展示 response/error，顶部状态进入 Error，线程列表停止显示 running。该逻辑与 runner-call failure path 保持一致，避免外部 Runner failed/stopped/timed_out 被 UI 当作成功完成。
-- Codex adapter 默认追加 `--config service_tier="fast"`，避免用户全局 Codex 配置中的旧值 `service_tier=default` 让 CLI 在读取配置阶段直接失败；如果 runner 显式配置了 `service_tier=...`，保留用户 override，不重复注入默认值。
-
-### 真实接口验证
-
-- `codex`: `POST /_bifrost/api/im-gateway/chat/stream` 返回 `run_started -> run_finished(status=failed)`；session projection 为 `run_state=failed`；失败原因来自真实本机 Codex 配置 `service_tier=default`。
-- `traex`: 启动 stream 后调用 `POST /_bifrost/api/im-gateway/chat/runs/{runId}/stop`，stream 返回 `run_started -> status -> run_finished(status=stopped)`；run detail response 为 `External CLI run was stopped by request.`；session projection 结束为 failed；无对应 run 进程残留。
-- `abc/chatgpt_web`: 启动 stream 后调用 stop，stream 返回 `run_started -> run_failed -> run_finished(status=stopped)`；run detail response 为 `ChatGPT Web run was stopped by request.`；session projection 结束为 failed；无临时 browser profile 进程残留。
-
-### 测试方案
-
-- Rust focused test 覆盖 `request_run_stop` 后 stopped result 不被 late stdout 覆盖。
-- Rust focused test 覆盖 `/chat/runs/{runId}` detail 优先使用 persisted `result.response`。
-- Rust focused test 覆盖 failed run response 为空时使用 stderr 作为用户可见失败摘要。
-- Playwright focused test 覆盖主 external runner `/chat/stream` terminal failed 状态：失败原因可见、状态 tag 为 Error、线程列表不保留 running。
-- Rust focused test 覆盖 Codex 默认命令注入 `service_tier="fast"`，且显式 `service_tier` override 不被覆盖；真实 API 验证覆盖 `configOverrides: []` 下 Codex stream 成功返回 `OK`。
-- human_tests 覆盖真实 `codex`、`traex`、`abc/chatgpt_web` 三类 runner 的 SSE/API 链路。
+- **历史文件被 retention 清理**：active session 允许 `history_path` 为空；Web 退回 messages-only 并明确状态。
+- **running turn JSONL 正在写**：读取 events 支持 append-only 部分可读；必要时 lossy loading。
+- **External Runner 事件 schema 不统一**：先定义 canonical mapper，再接各 adapter。
+- **同 session_key 多 runner 并存**：保留 `adapter/runner_id` 维度，避免串线。
+- **Runner-call 子线程隔离**：`runner-call:*` 顶层列表隐藏，父消息链接到子 timeline。
+- **多通道 fan-out 重复投递**：binding-level `last_delivered_event_id` / 幂等 key 控制 Web SSE / IM card。
+- **IM card 被删除/过期/无权限更新**：binding 进入 degraded；Web 与 canonical timeline 不受影响。
+- **Web 与 IM 同时发消息**：明确排队策略，禁止两个 turn 并行改同一 context。
+- **不做旧数据兼容**：部分历史 session 只可展示不可回放或需重新索引，可接受。
+- **`session_state.json` 语义收敛**：不再作事实源；老工具/脚本若仍读 `messages` 字段应视为 legacy。
+- **跨装置 running 语义**：非内置 runner 保留 persisted running；避免误清导致跨装置视图丢状态。
+- **Codex `service_tier` 默认注入**：与用户全局 Codex 配置存在交互；显式 override 保留是硬约束。
+- **ChatGPT Web stop**：Edge managed profile 清理必须 profile 化，不能全局杀 Edge。

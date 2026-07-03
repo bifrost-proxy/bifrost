@@ -1,220 +1,420 @@
-# bifrost install-skill 技能安装方案
+# bifrost install-skill 与 Skills Runtime 完整方案
 
-## 功能模块描述
+## 背景
 
-为 `bifrost-cli` 新增 `install-skill` 子命令，用于从 GitHub 远端主干（main 分支）下载最新的 `SKILL.md` 与 `skill_remote.md` 两个 skill 文件，并安装到各 AI 编程工具的全局配置目录中。两份内容分别落到 `skills/bifrost/SKILL.md`（本地 bifrost 技能）和 `skills/bifrost-remote/SKILL.md`（远程调用技能）两个并列目录。
+Bifrost 的 skill 体系覆盖两个交叉面：
 
-目标语义：
+1. **对外分发**：`bifrost-cli` 的 `install-skill` 子命令负责把 `SKILL.md` 与 `skill_remote.md` 安装到各 AI 编程工具（Claude Code、Codex、Trae、Cursor、GitHub Copilot、通用 `.agents/skills`）的全局或项目级路径，让不同 agent 都能通过其标准 skill 发现机制加载 Bifrost 技能。目标是覆盖式安装、脱机可用（内嵌兜底）、支持自定义目录与项目级安装、脚本友好。
+2. **对内 runtime**：`crates/skills` crate 承载 skill executor、registry watcher、packager、authoring 状态机；`crates/agent` 里 `SkillsManager::build_skills_instructions()` 把 enabled skill 的名称/描述/路径注入 system prompt（不 eager 注入 body），`AgentSession::new_with_work_dir()` 在真实 session 中装配 `SkillRegistry`。Admin API `POST /agent/skills/import` 接收原始包 bytes，前端 Skill Creator Wizard/Editor 共享 form schema，IM CLI 的 secret 解析走强类型错误。
 
-- 每次安装都是覆盖式安装（overwrite），确保用户始终获取最新版本的技能文件
-- 支持专用目录与通用 Agent Skills 目录的混合安装：
-  - 专用目录：Claude Code、Trae、Trae CN、Cursor、GitHub Copilot
-  - 通用目录：`.agents/skills`，用于兼容 Codex 以及更多遵循 Agent Skills 标准的运行时
-- 默认安装到全部工具，支持通过 `--tool`（`-t`）参数选择单个工具
-- 支持通过 `--dir`（`-d`）参数自定义安装目录，覆盖默认路径
-- 支持 `-y` 跳过安装确认提示，适用于脚本/自动化场景
+feat/agent review fixpass 已经把多个 review 结论沉到代码：executor env 白名单、watcher 精准 reload、checksum 缺失处理、packager scope 保留、authoring 状态机、runtime 装配 SkillRegistry、prompt digest 有界、长期记忆 append 加 advisory lock、admin import 拒收 client PathBuf、CLI secret 强类型、Web 表单 fence 转义、IM Gateway loading/error 清理、E2E env 隔离与 storage size guard。本设计把上述方案统一固化，并按标准模板给出验证与切分。
 
-## 实现逻辑
+## 用户目标验证清单
 
-### 一、下载源
+### 必须实现
 
-从 GitHub 远端主干获取最新 `SKILL.md` 与 `skill_remote.md` 两个文件：
+- **install-skill CLI**：
+  - `bifrost install-skill [OPTIONS]` 覆盖式安装最新 `SKILL.md` + `skill_remote.md` 到各工具目录，遵循 Standard Agent Skills Format。
+  - 支持 `--tool/-t`（`claude-code`/`codex`/`trae`/`cursor`/`github-copilot`/`universal`/`all`，默认 `all`）。
+  - 支持 `--dir/-d` 自定义目录（与 `--cwd` 互斥）；支持 `--cwd` 项目级安装。
+  - 支持 `-y`/`--yes` 跳过确认。
+  - 网络失败或 >45s 超时回退到 `include_str!` 嵌入副本；`BIFROST_INSTALL_SKILL_SOURCE=embedded` 强制走嵌入。
+  - Trae 全局同时安装到 `.trae` 与 `.trae-cn`；Codex 同时安装到 `.codex/skills` 与 `.agents/skills`。
+  - GitHub Copilot 支持专用目录与项目级 `.github/skills`。
+  - `all` 覆盖专用 agent + 通用 `.agents/skills`。
+- **Skills runtime**：
+  - Executor `env_clear()` 后保留白名单：`PATH`、`HOME`、`USER`、`LOGNAME`、`LANG`、`LC_ALL`、`LC_CTYPE`、`TMPDIR`、`TEMP`、`TMP`、`TERM`、`SHELL`、`SSL_CERT_FILE`、`SSL_CERT_DIR`、`CARGO_HOME`、`RUSTUP_HOME`，再叠加 `SkillManifest.env`。
+  - `SkillRegistry::reload_one(slug)` 仅重建对应 slug；目录不存在则删除索引；其他 skill 不受影响；watcher 从事件路径反推 root 下第一级 slug 触发差异重载。
+  - `verify_checksum()` 对缺失 `manifest.json` 返回 `false` 并 warning。
+  - `SkillPackager::import()` 保留包内合法 `manifest.scope`；缺失/非法时用调用方默认 scope。
+  - `SkillAuthoringSession::test()` 在非 `Drafted`/`Validated`/`Tested` 状态返回 `AuthoringError::InvalidState`。
+  - `AgentSession::new_with_work_dir()` 装配 `SkillRegistry`（`with_skills(Arc<SkillRegistry>)` 链式 API 保持兼容），slash router 与 prompt digest 复用同一 registry。
+  - `SkillsManager::build_skills_instructions()` 输出 `## Available Skills` digest：每个 enabled skill 一行 `- <name>: <description_one_line>`，总长度 ≤ 4KB，稳定按名称排序。
+  - 渐进式披露：base prompt 只含 name/description/`SKILL.md` 路径，不 eager 注入 body；模型按需读取。
+  - 长期记忆 append 使用 `fs2::FileExt::lock_exclusive()`，多 session 并发写不交错。
+- **Admin API import**：
+  - `POST /agent/skills/import` 只接受 `application/octet-stream` 原始 bytes 或 `multipart/form-data` 的 `package` 字段，禁收 client `PathBuf`。
+  - bytes 落到 `<agent_data_dir>/skills/.import-tmp/` 后再交 `SkillPackager::import()`。
+  - scope 从 `x-bifrost-skill-scope` 请求头读取，默认 `Repo`。
+  - `AgentSkillError` 分层：参数错误 400、冲突 409、语义校验失败 422、未知 I/O 500。
+- **IM CLI secret**：
+  - `resolve_secret` 返回 `Result<String, ResolveSecretError>`：`Missing` env / `Io` file 读取失败分别报错，不再 warning 后写空 secret。
+- **Web 表单与 IM Gateway**：
+  - Skill Creator Wizard 与 SkillEditor 复用 `utils/skillFormSchema.ts` 与 Manifest/Script Editor/Test Panel 组件。
+  - `buildSkillMd()` 不再把 shell/python/node script body 塞 SKILL.md 正文；inline 用 fenced block，遇三反引号或独立 `---` 行时切换/转义 fence，保 frontmatter 边界。
+  - IM Gateway Tab `fetchData` 失败通过 `message.error()` 暴露，`finally` 清理 loading；切 tab 先 reset loading 再加载新 tab。
+- **E2E env 与 storage size guard**：
+  - `im_gateway_agent` E2E 中涉及 `BIFROST_DATA_DIR` 的用例使用当前布局并通过 `temp-env` 作用域隔离；guard 放 `spawn_blocking` + 单线程 tokio runtime，避免 non-Send guard 跨 await。
+  - `bifrost-core/src/limits.rs::MAX_RULE_FILE_BYTES = 256 * 1024 * 1024`、`ensure_file_size_within_limit(path, limit)` 统一 metadata 检查；`bifrost-storage/src/rules.rs` load/load_summary 复用。
 
+### 必须不破坏
+
+- 已有 skill 目录、SKILL.md 内容、slash 命令语义不变。
+- Agent runtime 装配 SkillRegistry 不改变 slash router 单测已有接口。
+- `install-skill` 命令行参数向后兼容旧调用；未指定 `--tool` 仍然 `all`。
+- `bifrost upgrade` 自动 `install-skill --tool all -y` 的 post-install 步骤保持一致。
+- 长期记忆 lock 只在 append 路径加，不影响读或列出。
+- Admin API 老的 raw PathBuf 上传路径直接下线，前端已切到 multipart，不影响用户已完成的 skill 包。
+
+### 必须真实验证
+
+- CLI E2E：`--dir`、`--cwd`、`--tool` 各值、覆盖安装、frontmatter 校验、未知工具、`--dir` vs. `--cwd` 互斥。
+- Skills runtime 单测：executor env、watcher reload、checksum 缺失、packager scope、authoring 状态机、session skills 集成、prompt digest 有界、长期记忆并发 append。
+- Admin API 单测：multipart import、`AgentSkillError` 映射、rejects raw PathBuf。
+- IM CLI 单测：`resolve_secret` 两条错误路径。
+- Web 单测：`SkillCreatorWizard.test.ts` fence 转义两回归；构建：`pnpm --dir web build`。
+- E2E env：`cargo test -p bifrost-e2e --no-run`、`cargo check -p bifrost-storage --quiet`。
+- human_tests：`skill-creator.md`（新增 TC-SC-07..14）、`agent-runtime-review-fixes.md`（TC-ARF-01..03）、`agent-skills-admin-cli.md`（TC-ASAC-01..03）、`storage-e2e-safety.md`（TC-SES-01..03）、`cli-import-export.md` 覆盖 install-skill 各 tool。
+
+## 产品语义
+
+### install-skill
+
+- 每次安装都是**覆盖式**：确保用户随命令拿到 main 分支最新技能内容。
+- 全局路径优先；`--cwd` 用于给项目仓库注入本地 skill。
+- `.agents/skills` 是通用兜底，兼容任何遵循 Standard Agent Skills Format 的 runtime。
+- 网络不可用时不应阻塞用户，回退嵌入副本；`upgrade` 后台安装失败也只 warning，不阻止升级完成。
+
+### Skills runtime
+
+- **渐进式披露**：SKILL.md body 大时不进 base prompt；只有需要真正调用 skill 时才按路径读入。
+- **SkillRegistry watcher** 是差异 reload：新增/修改/删除单个 slug 只重建该 slug，其他 skill 索引与句柄不动。
+- **长期记忆并发写**：`MEMORY.md` / `raw_memories.md` 是行级 append 语义，必须 advisory lock。
+- **Admin import** 只在服务端信任服务端路径：客户端 payload 是原始 bytes，服务端才决定落到 `.import-tmp/`。
+
+## 技术细节
+
+### 1. install-skill 下载源与嵌入副本
+
+`crates/bifrost-cli/src/commands/install_skill.rs`：
+
+```rust
+const SKILL_RAW_URL: &str = "https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/SKILL.md";
+const REMOTE_SKILL_RAW_URL: &str =
+    "https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/skill_remote.md";
+const EMBEDDED_SKILL_MD: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../SKILL.md"));
+const EMBEDDED_REMOTE_SKILL_MD: &str =
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../skill_remote.md"));
+
+const SKILL_SOURCES: &[SkillSource] = &[
+    SkillSource::Bifrost { url: SKILL_RAW_URL, embedded: EMBEDDED_SKILL_MD, sub_dir: "bifrost" },
+    SkillSource::BifrostRemote { url: REMOTE_SKILL_RAW_URL, embedded: EMBEDDED_REMOTE_SKILL_MD, sub_dir: "bifrost-remote" },
+];
 ```
-https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/SKILL.md
-https://raw.githubusercontent.com/bifrost-proxy/bifrost/main/skill_remote.md
-```
 
-使用 `ureq` 发起 HTTP GET 请求，读取响应体为字符串作为技能文件原始内容；网络不可用或下载超过 45s 时回退到编译时通过 `include_str!` 嵌入的副本（同源仓库根目录的 `SKILL.md` / `skill_remote.md`），保证离线环境下也能完成安装。设置 `BIFROST_INSTALL_SKILL_SOURCE=embedded` 可强制只使用嵌入副本，便于 e2e/离线测试。
+- `download_skill_source(source)`：`ureq` GET，45s 超时；失败或 non-2xx 回退 `embedded`。
+- `download_skill_bundle()` 顺序下载两份 skill；`BIFROST_INSTALL_SKILL_SOURCE=embedded` 强制嵌入。
+- frontmatter warning：下载内容缺 `---` 时 stderr warning（不 fail），提示各 agent 需要 name/description frontmatter。
 
-### 二、工具与路径映射
+### 2. 工具映射与目录
 
-所有工具统一使用 `skills/bifrost/SKILL.md` + `skills/bifrost-remote/SKILL.md` 两套目录结构，遵循 Standard Agent Skills Format 规范。下表展示主目录（bifrost），bifrost-remote 在同一父目录下以并列子目录形式同步写入：
+统一 `skills/bifrost/SKILL.md` + `skills/bifrost-remote/SKILL.md` 双子目录：
 
-| 工具名 | 标识 | 全局安装路径 | 项目级安装路径（--cwd） |
-| ---------- | ---------- | -------------------------------- | ------------------------------- |
+| 工具 | 标识 | 全局路径 | `--cwd` 项目路径 |
+| --- | --- | --- | --- |
 | Claude Code | `claude-code`, `claude` | `~/.claude/skills/bifrost/SKILL.md` | `./.claude/skills/bifrost/SKILL.md` |
-| Codex / 通用 Agent Skills | `codex`, `openai-codex`, `universal` | `~/.codex/skills/bifrost/SKILL.md` + `~/.agents/skills/bifrost/SKILL.md` | `./.codex/skills/bifrost/SKILL.md` + `./.agents/skills/bifrost/SKILL.md` |
+| Codex / 通用 | `codex`, `openai-codex`, `universal` | `~/.codex/skills/bifrost/SKILL.md` + `~/.agents/skills/bifrost/SKILL.md` | `./.codex/skills/bifrost/SKILL.md` + `./.agents/skills/bifrost/SKILL.md` |
 | Trae | `trae` | `~/.trae/skills/bifrost/SKILL.md` + `~/.trae-cn/skills/bifrost/SKILL.md` | `./.trae/skills/bifrost/SKILL.md` |
 | Cursor | `cursor` | `~/.cursor/skills/bifrost/SKILL.md` | `./.cursor/skills/bifrost/SKILL.md` |
 | GitHub Copilot | `github-copilot`, `copilot` | `~/.copilot/skills/bifrost/SKILL.md` | `./.github/skills/bifrost/SKILL.md` |
 
-设计约束：
+- `all` 展开：Claude + Codex + Trae + Cursor + Copilot + `.agents/skills`。
+- `resolve_target_dirs(tool, custom_dir, cwd)`：`--dir` 只替换父目录；`--cwd` 走项目路径；`--dir` 与 `--cwd` 互斥。
+- `install_to_dir()`：创建父目录 → 写入文件（覆盖）。
+- `install_to_tool()`：一个 tool 可映射多个目录，逐个写。
 
-- Trae 在全局模式下同时安装到 `.trae` 和 `.trae-cn` 两个目录（适配国内外版本），项目级安装仅安装到 `.trae`
-- Codex 保留历史兼容路径 `.codex/skills`，同时补充标准通用目录 `.agents/skills`
-- GitHub Copilot 增加专用目录支持，项目级目录使用 `.github/skills`
-- `all` 模式默认包含以上全部目标，以便在一条命令里覆盖专用 agent 和更多标准兼容 agent
+### 3. CLI 参数与错误处理
 
-SKILL.md 源文件自带标准 YAML frontmatter（`name` + `description`），下载后直接写入，不做任何额外处理。
+- 参数：`--tool/-t`、`--dir/-d`、`--cwd`、`-y/--yes`。
+- 未知 tool：`parse_tool()` 返回错误，列出可选值（含 `github-copilot`/`universal`）。
+- 网络错误：DNS/连接超时/非 2xx 分别友好提示；错误发生时若 embedded 可用则回退。
+- 权限错误：无写入权限提示使用 `--dir` 或 sudo。
+- I/O 错误：磁盘空间/一般 I/O 展示具体 message。
+- 终端输出：`colored` 库；成功绿色、失败红色，末尾展示成功/失败数量汇总。
 
-各工具的 skill 自动发现机制基于 frontmatter 中的 `name` 和 `description` 字段：
-- `name`：skill 标识符，≤ 64 字符
-- `description`：触发匹配描述，≤ 1024 字符，AI 通过此字段判断何时加载该 skill
+### 4. Skills crate hardening
 
-### 三、CLI 参数设计
+`crates/skills/src/executor.rs`：
 
-```bash
-bifrost install-skill [OPTIONS]
+```rust
+const HOST_ENV_WHITELIST: &[&str] = &[
+    "PATH","HOME","USER","LOGNAME","LANG","LC_ALL","LC_CTYPE",
+    "TMPDIR","TEMP","TMP","TERM","SHELL",
+    "SSL_CERT_FILE","SSL_CERT_DIR","CARGO_HOME","RUSTUP_HOME",
+];
+cmd.env_clear();
+for key in HOST_ENV_WHITELIST { if let Ok(v) = env::var(key) { cmd.env(key, v); } }
+for (k, v) in &manifest.env { cmd.env(k, v); }
 ```
 
-参数说明：
+`crates/skills/src/registry.rs`：
 
-- `--tool`（`-t`）：指定安装目标工具，可选值为 `claude-code`、`codex`、`trae`、`cursor`、`github-copilot`、`universal`、`all`，默认为 `all`
-- `--dir`（`-d`）：自定义安装目录，覆盖工具的默认安装路径。指定后文件名保持不变，仅替换父目录；与 `--cwd` 互斥
-- `--cwd`：安装到当前工作目录下的项目级路径（`./.<tool>/skills/...`）而非全局 `~/...` 路径；与 `--dir` 互斥
-- `-y`（`--yes`）：跳过确认提示，直接执行安装
+- `reload_one(slug)`：目标目录不存在 → `index.remove(slug)`；存在 → 重新读取 `manifest.json` + `SKILL.md` 并替换单条。
+- Watcher（`notify` crate）事件路径 `<root>/<slug>/...` → 提取第一级 `slug` → `reload_one(slug)`。
 
-### 四、安装流程
+`crates/skills/src/validator.rs::verify_checksum()`：
 
-1. 解析命令行参数，确定目标工具列表；其中 `all` 会展开为全部专用目标 + 通用目录目标
-2. 依次从远端下载 `SKILL.md` 与 `skill_remote.md`（任一文件下载失败/超时则回退到嵌入副本）
-3. 若未指定 `-y`，展示将要安装的工具与目标路径，等待用户确认
-4. 遍历目标工具列表，逐个执行安装：
-   - 创建目标路径的父目录（若不存在）
-   - 一个工具可映射到多个目录（例如 Trae、Codex）
-   - 写入目标文件（覆盖已有文件）
-5. 输出安装结果，包含成功/失败的工具及路径
+- 缺 `manifest.json` → `warn!(...) ; return false`。
 
-### 五、错误处理
+`crates/skills/src/packager.rs::import()`：
 
-网络错误：
+- 包内 `manifest.scope` 合法（`User`/`Repo`/其它枚举）→ 保留；否则用调用方 `default_scope`。
 
-- DNS 解析失败：提示网络不可用或检查代理配置
-- 连接超时：提示重试或检查网络连接
-- HTTP 非 2xx 状态码：提示远端文件不可用，展示状态码
+`crates/skills/src/authoring.rs::test()`：
 
-权限错误：
+- 状态不属于 `Drafted|Validated|Tested` → `AuthoringError::InvalidState`；禁止用空 `PathBuf` 继续执行。
 
-- 目标路径无写入权限：提示使用 `sudo` 或通过 `--dir` 指定有权限的目录
+### 5. Agent runtime 装配
 
-写入失败：
+`crates/agent/src/session.rs`：
 
-- 磁盘空间不足或其他 I/O 错误：提示具体错误信息
+- `AgentSession::new_with_work_dir(work_dir, ...)` 构造 `SkillRegistry::open(work_dir)` 并 `with_skills(Arc::new(registry))`。
+- session 持同一 registry 供 slash router 与 prompt digest 复用。
 
-未知工具名称：
+`crates/agent/src/skills/mod.rs::SkillsManager::build_skills_instructions()`：
 
-- `--tool` 传入不支持的工具名时，提示可选值列表，并包含 `github-copilot` 与 `universal`
+- 输出 `## Available Skills` digest：
+  ```
+  ## Available Skills
+  - foo: One-line description of foo.
+  - bar: One-line description of bar.
+  ```
+- 总长度 ≤ 4KB；按 name 稳定排序；不 eager 注入 `prompt_content`（body 仍在 SKILL.md 文件）。
 
-### 六、终端输出
+`crates/agent/src/prompt/mod.rs`：
 
-使用 `colored` 库实现彩色输出：
+- base prompt 附加上述 digest；模型按需读取路径。
 
-- 成功安装：绿色标记，展示工具名与安装路径
-- 安装失败：红色标记，展示工具名与错误原因
-- 安装总结：展示成功/失败数量
+### 6. 长期记忆 append 锁
 
-## 依赖项
+`crates/agent/src/skills/memory.rs`（或对应文件）：
 
-- `ureq`：已有依赖，用于 HTTP 下载 SKILL.md 文件
-- `dirs`：已有依赖，用于获取用户 home 目录以拼接默认安装路径
-- `colored`：已有依赖，用于终端彩色输出
+```rust
+use fs2::FileExt;
+let file = OpenOptions::new().create(true).append(true).open(&path)?;
+file.lock_exclusive()?;
+file.write_all(line.as_bytes())?;
+file.unlock()?;
+```
 
-无需引入新依赖。
+- 覆盖 `MEMORY.md`、`raw_memories.md`。
+- 单元测试 `append_line_locks_concurrent_writers`：8 线程 × 1000 行验证零交错。
+
+### 7. Admin import + IM CLI secret
+
+`crates/bifrost-admin/src/handlers/agent_skills.rs`：
+
+- `POST /agent/skills/import`：
+  - `application/octet-stream` → 直接 body bytes。
+  - `multipart/form-data` → 提取 `package` 字段 bytes。
+  - Scope：`x-bifrost-skill-scope`，默认 `Repo`。
+  - 写 `<agent_data_dir>/skills/.import-tmp/<uuid>.zip` → `SkillPackager::import(&path, scope)`。
+- `AgentSkillError` → HTTP：
+  - `InvalidArgument` → 400
+  - `Conflict` → 409
+  - `SemanticValidation` → 422
+  - `Io`/其它 → 500
+
+IM CLI `resolve_secret`：
+
+```rust
+pub fn resolve_secret(spec: &SecretSpec) -> Result<String, ResolveSecretError> {
+    match spec {
+        SecretSpec::Env(name) => env::var(name).map_err(|_| ResolveSecretError::Missing(name.clone())),
+        SecretSpec::File(path) => fs::read_to_string(path).map_err(|e| ResolveSecretError::Io(e)),
+    }
+}
+```
+
+调用方转成 CLI 配置错误终止执行，不再 warning 后写空 secret。
+
+### 8. Web 表单与 IM Gateway
+
+- `web/src/pages/Settings/tabs/agent/skills/utils/skillFormSchema.ts`：集中 name/description/slash command/required 校验。
+- Wizard 与 Editor 复用 Manifest、Script Editor、Test Panel 组件。
+- `buildSkillMd()`：非 inline script 引用 `./scripts/run.*`；inline fenced block；遇 ``` 或独立 `---` 行时切换到 ~~~ 或转义。
+- IM Gateway Tab `fetchData` 失败 `message.error(err.message)`；`finally` 清理 loading；切 tab 先 reset。
+
+### 9. E2E env 与 storage size guard
+
+- `im_gateway_agent` 涉及 `BIFROST_DATA_DIR` 的用例：
+  ```rust
+  tokio::task::spawn_blocking(|| {
+      let _guard = temp_env::async_with_vars(vars, /* async block via single-thread rt */);
+      // build local tokio runtime and block_on(test_body())
+  }).await??;
+  ```
+- `bifrost-core/src/limits.rs`：
+  ```rust
+  pub const MAX_RULE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+  pub fn ensure_file_size_within_limit(path: &Path, limit: u64) -> Result<(), BifrostError> { ... }
+  ```
+- `bifrost-storage/src/rules.rs::load/load_summary` 复用 helper。
+
+## CLI / Admin API / Web
+
+### CLI
+
+```bash
+bifrost install-skill                       # 覆盖式安装所有工具
+bifrost install-skill --tool claude-code    # 只装 Claude Code
+bifrost install-skill --tool github-copilot # 覆盖 Copilot
+bifrost install-skill --tool universal      # 只装 .agents/skills
+bifrost install-skill --cwd -t codex        # 项目级 codex + .agents
+bifrost install-skill --dir /tmp/skills-out -y  # 自定义目录，跳过确认
+```
+
+未知 tool：
+
+```text
+Error: unknown tool 'foo'. Supported: claude-code, codex, trae, cursor, github-copilot, universal, all.
+```
+
+### Admin API
+
+- `POST /agent/skills/import`（octet-stream / multipart）；scope header `x-bifrost-skill-scope`。
+- `AgentSkillError` HTTP mapping 保持稳定。
+
+### Web
+
+- Skill Creator Wizard + SkillEditor 共享 form；`buildSkillMd` 保 frontmatter。
+- IM Gateway Tab 错误/loading 语义清晰。
+
+## Sync 边界
+
+- `install-skill` 写本机文件系统，不参与 sync。
+- Runtime SkillRegistry 与长期记忆是本机数据。
+- Admin import 只落到本机 agent 数据目录。
+
+## 实现切分
+
+### Phase 1：install-skill CLI
+
+- 下载源、嵌入副本、tool 映射表、参数解析。
+- `--dir/--cwd` 互斥、`all` 展开、`upgrade` 集成 post-install。
+- 单元测试 + E2E `install_skill.rs`。
+
+### Phase 2：Skills crate hardening
+
+- Executor env 白名单；registry `reload_one`；watcher path→slug；checksum；packager scope；authoring 状态机。
+- 单元测试全部就绪。
+
+### Phase 3：Agent runtime 装配
+
+- `AgentSession::new_with_work_dir` 装配 registry。
+- `SkillsManager::build_skills_instructions` 有界 digest。
+- 长期记忆 append 加锁。
+- 单元/集成测试。
+
+### Phase 4：Admin import + IM CLI secret
+
+- 改造 `POST /agent/skills/import` 只收 bytes。
+- `AgentSkillError` 分层。
+- IM CLI `resolve_secret` 强类型。
+
+### Phase 5：Web 表单与 IM Gateway
+
+- `skillFormSchema.ts` 与共用组件。
+- `buildSkillMd` fence 转义。
+- IM Gateway Tab error/loading。
+
+### Phase 6：E2E env 与 storage size guard
+
+- `temp-env` 隔离 + spawn_blocking + single-thread rt。
+- `MAX_RULE_FILE_BYTES` 与 `ensure_file_size_within_limit`。
+- storage/e2e 复用。
+
+### Phase 7：human_tests 与文档
+
+- 更新 `human_tests/skill-creator.md` 新增 TC-SC-07..14。
+- 新增 `human_tests/agent-runtime-review-fixes.md`（TC-ARF-01..03）。
+- 新增 `human_tests/agent-skills-admin-cli.md`（TC-ASAC-01..03）。
+- 新增 `human_tests/storage-e2e-safety.md`（TC-SES-01..03）。
+- 更新 `human_tests/cli-import-export.md` install-skill 全 tool 回归。
+- 更新 `human_tests/readme.md` 索引与计数。
+- 同步 `docs/agent-skill.md` / `docs-en/agent-skill.md` 支持的 agent 与路径。
 
 ## 测试方案
 
-### Skills crate hardening 回归（feat/agent review fixpass）
+### 单元测试
 
-本模块的运行时 skill 执行、注册表热重载、checksum、导入和 authoring 状态机需要满足以下约束：
-
-1. Executor 在 `env_clear()` 后保留必要宿主环境白名单，包括 `PATH`、`HOME`、`USER`、`LOGNAME`、`LANG`、`LC_ALL`、`LC_CTYPE`、`TMPDIR`、`TEMP`、`TMP`、`TERM`、`SHELL`、`SSL_CERT_FILE`、`SSL_CERT_DIR`、`CARGO_HOME`、`RUSTUP_HOME`，再叠加 `SkillManifest.env`。
-2. `SkillRegistry::reload_one(slug)` 只能重建对应 slug。目录不存在时删除索引；其他 skill 保持不变；watcher 必须从文件事件路径反推出 root 下的第一级 slug 并触发差异重载。
-3. `verify_checksum()` 遇到缺失 `manifest.json` 必须返回 `false` 并记录 warning，交由上层处理。
-4. `SkillPackager::import()` 保留包内合法 `manifest.scope`，仅当 scope 缺失或非法时使用调用方默认 scope。
-5. `SkillAuthoringSession::test()` 在非 `Drafted`/`Validated`/`Tested` 状态下返回 `AuthoringError::InvalidState`，禁止用空 `PathBuf` 继续执行。
-
-验证计划：
-
-- 单元测试：`process_executor_keeps_common_host_env` 验证白名单环境变量；`watcher_reloads_one_slug_and_removes_deleted_slug` 验证写入、删除和其他 skill 不受影响；`verify_checksum_missing_manifest_returns_false` 验证缺失 manifest 返回 false；`import_preserves_manifest_scope_when_valid` 验证合法 scope 保留；`test_rejects_unvalidated_state` 验证非法状态报错。
-- E2E 测试：复用 `test_skill_creator_flow.sh` 覆盖 create -> test -> invoke -> delete -> import 主流程。
-- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-07 到 TC-SC-11，逐条执行对应 cargo/脚本命令并记录实际结果。
-
-### Agent runtime skill 接入回归（feat/agent review fixpass）
-
-Agent runtime 必须在 `AgentSession::new_with_work_dir` 构造出的真实 session 中装配 `SkillRegistry`，而不是只在 slash router 单元测试中手工注入。`with_skills(Arc<SkillRegistry>)` 保持链式 API 兼容，同时 session 持有同一个 registry 供 slash router 和 prompt digest 复用。
-
-System prompt 末尾追加一个有界 `## Available Skills` digest：每个 enabled skill 一行 `- <name>: <description_one_line>`，总长度不超过 4KB；当前缺少使用次数和最近使用时间统计时按名称稳定排序，后续有统计字段后可提升排序策略。
-
-Skill prompt 加载采用渐进式披露：基础 system prompt 只包含 enabled skill 的名称、description 和 `SKILL.md` 路径，不直接注入 `SKILL.md` body。模型在用户显式提及 skill 或根据 description 判定需要使用 skill 时，再按路径读取完整 `SKILL.md`。对应回归要求：
-
-- `SkillsManager::build_skills_instructions` 输出必须包含 enabled skill 的 name / description / file path。
-- 同一输出不得 eager 注入 `prompt_content`，避免大量 skill body 抢占上下文。
-- `skill_loading_enabled_skill_appears_in_prompt` E2E 用例验证上述 metadata 注入与 body 不注入契约。
-
-长期记忆 append 使用 `fs2::FileExt::lock_exclusive()` 对目标文件加 advisory exclusive lock，保护多个本地 session 同时追加 `MEMORY.md` 或 `raw_memories.md` 时不会出现行交错。
-
-验证计划：
-
-- 单元/集成测试：`session_skills_integration` 验证真实 `AgentSession::new_with_work_dir` 下 `/skill list` 能看到 work dir skill；`append_line_locks_concurrent_writers` 验证 8x1000 并发写入行完整；`system_prompt_includes_bounded_skill_registry_digest` 验证 prompt digest 注入 3 个 skill；`test_build_skills_instructions` 验证 base prompt 包含 skill metadata 且不 eager 注入 body。
-- 真实场景测试：新增 `human_tests/agent-runtime-review-fixes.md`，包含 TC-ARF-01 到 TC-ARF-03，逐条执行并记录实际结果。
-
-### Admin import 与 CLI secret 回归（feat/agent review fixpass）
-
-`/agent/skills/import` 禁止继续接受客户端传入的本机 `PathBuf`。接口改为读取 `application/octet-stream` 原始包 bytes，或 multipart/form-data 中的 `package` 字段；服务端将 bytes 暂存到 agent 数据目录下 `skills/.import-tmp/` 后再调用 `SkillPackager::import()`。scope 可通过 `x-bifrost-skill-scope` 请求头传入，默认 `Repo`。
-
-管理端 skill handler 使用 `AgentSkillError` 分层映射：参数错误为 400，冲突为 409，语义校验失败为 422，未知 I/O 为 500。后续如果 handler 迁移到 typed JSON response，可以保留同一映射表。
-
-IM CLI 的 `resolve_secret` 返回 `Result<String, ResolveSecretError>`。缺失 env 映射为 `Missing`，文件读取失败映射为 `Io`，调用方转成 CLI 配置错误并停止，不再 warning 后写入空 secret。
-
-验证计划：
-
-- 单元测试：`multipart_import_extracts_package_field_bytes`、`agent_skill_error_maps_conflict_to_409`、`resolve_secret_missing_env_returns_error`、`resolve_secret_missing_file_returns_io_error`。
-- 真实场景测试：新增 `human_tests/agent-skills-admin-cli.md`，包含 TC-ASAC-01 到 TC-ASAC-03，逐条执行并记录实际结果。
-
-### Web Skill 表单与 IM Gateway 回归（feat/agent review fixpass）
-
-Skill Creator Wizard 的 Manifest、Script Editor、Test Panel 拆成可复用组件，并将 name、description、slash command、required 等字段约束放入 `utils/skillFormSchema.ts`。SkillEditor 直接复用这些 section，以单页 form 方式编辑 manifest、entrypoint、SKILL.md 和非 inline script assets，避免 Wizard 与 Editor 字段漂移。
-
-`buildSkillMd()` 不再把 shell/python/node script body 写入 SKILL.md 正文，而是引用对应 `./scripts/run.*` 文件；inline 内容使用 fenced block，并在脚本包含三反引号或独立 `---` 行时切换/转义 fence，保证 frontmatter 边界不被正文破坏。
-
-IM Gateway Tab 的 `fetchData` 在失败时通过 `message.error()` 暴露错误，并在 `finally` 中稳定清理 loading；切换 tab 时先 reset loading，再触发新 tab 的数据加载。
-
-验证计划：
-
-- 单元测试：`SkillCreatorWizard.test.ts` 覆盖三反引号和 leading `---` 两个 SKILL.md 转义回归。
-- 构建验证：`pnpm --dir web build` 验证 SkillEditor 复用组件与 IM Gateway loading/error 修改的 TypeScript/Vite 构建。
-- 真实场景测试：更新 `human_tests/skill-creator.md`，新增 TC-SC-12 到 TC-SC-14，逐条执行并记录实际结果。
-
-### E2E env 与 storage size guard 回归（feat/agent review fixpass）
-
-`im_gateway_agent` E2E 中涉及 `BIFROST_DATA_DIR` 的测试使用当前 `$BIFROST_DATA_DIR/agent` 布局，并通过 `temp-env` 作用域隔离环境。由于 e2e runner 要求 test future 为 `Send`，temp-env 的 non-Send guard 放在 `spawn_blocking` 内，并在该作用域内使用单线程 Tokio runtime 执行原异步测试体，避免 guard 跨 await 暴露给 runner。
-
-规则文件大小限制抽到 `bifrost-core/src/limits.rs`：`MAX_RULE_FILE_BYTES = 256 * 1024 * 1024`，`ensure_file_size_within_limit(path, limit)` 统一处理 metadata 检查和错误返回。`bifrost-storage/src/rules.rs` 的 load/load_summary 路径复用该 helper。
-
-验证计划：
-
-- 单元测试：`ensure_file_size_within_limit_rejects_oversized_file`。
-- 编译验证：`cargo check -p bifrost-e2e --quiet` 和 `cargo check -p bifrost-storage --quiet`。
-- 真实场景测试：新增 `human_tests/storage-e2e-safety.md`，包含 TC-SES-01 到 TC-SES-03，逐条执行并记录实际结果。
+- Executor：`process_executor_keeps_common_host_env` 验证白名单。
+- Watcher：`watcher_reloads_one_slug_and_removes_deleted_slug`。
+- Checksum：`verify_checksum_missing_manifest_returns_false`。
+- Packager：`import_preserves_manifest_scope_when_valid`。
+- Authoring：`test_rejects_unvalidated_state`。
+- Agent runtime：`session_skills_integration`、`system_prompt_includes_bounded_skill_registry_digest`、`test_build_skills_instructions`。
+- 长期记忆：`append_line_locks_concurrent_writers`（8×1000 并发）。
+- Admin：`multipart_import_extracts_package_field_bytes`、`agent_skill_error_maps_conflict_to_409`。
+- IM CLI：`resolve_secret_missing_env_returns_error`、`resolve_secret_missing_file_returns_io_error`。
+- Storage：`ensure_file_size_within_limit_rejects_oversized_file`。
 
 ### E2E 测试
 
-新增 `bifrost-e2e` 覆盖以下场景：
+`bifrost-e2e` 覆盖：
 
-1. 安装到临时目录验证文件正确写入：使用 `--dir` 指定临时目录，验证新增工具仍能写入正确文件
-2. 覆盖安装验证旧文件被替换：先写入旧内容，再执行安装，验证文件内容更新为最新版本
-3. frontmatter 验证：安装后检查文件是否包含标准 YAML frontmatter（`name` 和 `description` 字段），确保兼容所有工具的 skill 自动发现机制
-4. 未知工具名称的错误处理：传入无效的 `--tool` 参数，验证 CLI 返回正确错误信息
-5. 全部工具安装验证：不指定 `--tool`，验证 `all` 模式会覆盖 `.claude`、`.codex`、`.agents`、`.trae`、`.github` 等目录
-6. `--cwd` 项目级安装验证：验证文件写入到当前目录下的 `.<tool>/skills/bifrost/SKILL.md`，并覆盖 `.agents` 与 `.github`
-7. `--dir` 和 `--cwd` 互斥验证：同时传入两个参数时返回互斥错误
-8. GitHub Copilot 验证：`-t github-copilot` 时安装到 Copilot 专用目录
-9. Universal 验证：`-t universal` 时仅安装到 `.agents/skills/bifrost/SKILL.md`
+1. `install_skill` 到临时目录：`--dir` + frontmatter 校验。
+2. 覆盖安装旧文件被替换。
+3. 未知工具错误分支。
+4. `all` 模式覆盖 `.claude`/`.codex`/`.agents`/`.trae`/`.github`。
+5. `--cwd` 项目级安装；覆盖 `.agents`/`.github`。
+6. `--dir` 与 `--cwd` 互斥错误。
+7. GitHub Copilot、Universal 单独安装。
+8. `test_skill_creator_flow.sh` 覆盖 create → test → invoke → delete → import 主流程。
+9. `skill_loading_enabled_skill_appears_in_prompt` 验证 base prompt 含 metadata 不含 body。
 
-测试约束补充：
+约束：`--cwd` 相关用例临时改进程 `current_dir`，属共享全局状态，必须 serial-only 或加锁；否则 Windows CI 会出现首跑误判、单条重试通过的竞态。
 
-- `--cwd` 相关 E2E 会临时切换进程级 `current_dir`，这属于共享全局状态；在并发 runner 中必须加串行保护，避免不同用例互相污染工作目录
-- Windows CI 上如果缺少这层保护，会出现首跑误判“目标文件不存在”、单条重试立刻通过的竞态现象，因此该类用例必须以“首跑稳定通过”为目标
+### 真实场景测试（human_tests）
 
-## 校验要求
+- 更新 `human_tests/skill-creator.md`：TC-SC-07..11（Skills crate hardening），TC-SC-12..14（Web 表单）。
+- 新增 `human_tests/agent-runtime-review-fixes.md`：TC-ARF-01（session skills 集成）、TC-ARF-02（prompt digest 有界）、TC-ARF-03（长期记忆并发 append）。
+- 新增 `human_tests/agent-skills-admin-cli.md`：TC-ASAC-01（multipart import）、TC-ASAC-02（`AgentSkillError` 映射）、TC-ASAC-03（secret 错误终止）。
+- 新增 `human_tests/storage-e2e-safety.md`：TC-SES-01（E2E env 隔离编译）、TC-SES-02（storage size guard）、TC-SES-03（rule load 拒绝超限文件）。
+- 更新 `human_tests/cli-import-export.md`：install-skill 各 tool 覆盖。
 
-- `cargo build -p bifrost-cli` 编译通过
-- `cargo test --workspace --all-features` 通过
-- `rust-project-validate` 通过
+启动 Bifrost 必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1`、`--no-system-proxy`。
 
-## 文档更新要求
+### 覆盖率与项目校验
 
-- `docs/agent-skill.md` 同步更新支持的 agent 与路径说明
-- `human_tests/cli-import-export.md` 补充 install-skill 更多 agent 兼容回归用例
-- `human_tests/readme.md` 索引同步更新测试用例数量
+- `cargo fmt --all -- --check`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo build -p bifrost-cli`
+- `cargo test -p bifrost-cli install_skill`
+- `cargo test -p bifrost-skills` / `crates/skills` 全量
+- `cargo test -p bifrost-agent session_skills skills prompt memory`
+- `cargo test -p bifrost-admin agent_skills import`
+- `cargo test -p bifrost-e2e --no-run`
+- `cargo check -p bifrost-storage --quiet`
+- `pnpm --dir web build`
+- `pnpm --dir web test -- SkillCreatorWizard`
+- `cargo test --workspace --all-features`
+- `rust-project-validate`
+- 本机 no-local-coverage 生效时不跑 `make coverage`；交付时说明。
+
+## Review/Fix/Test 闭环方案
+
+### 第 1 轮
+
+- 复核用户目标：install-skill CLI 各 tool、runtime 装配、admin import、CLI secret、Web 表单、E2E env、storage size guard。
+- 复核 diff：CLI/skills/agent/admin/web/e2e/storage/human_tests。
+- 重点：`--cwd` 全局状态隔离；registry watcher 差异 reload；prompt digest 4KB 上限；长期记忆 lock；import 拒收 client PathBuf。
+- 运行受影响单测 + E2E（含 install_skill、skill_creator、skill_loading）。
+
+### 第 2 轮
+
+- 复核第 1 轮问题修复与新增 human_tests 索引。
+- 再跑 CLI 全 tool 安装、Playwright fence 转义、真实 skill import。
+- 复查 `docs/agent-skill.md` 与 CLI help 是否同步。
+- 若第 2 轮仍发现口径问题，追加轮次。
+
+## 风险与决策点
+
+- **覆盖式安装**：始终覆盖用户自行修改的 SKILL.md；符合“始终最新”意图，但需在 CLI help 中提示。
+- **网络回退嵌入**：嵌入内容随二进制发布；离线仍可安装，但可能落后 main 分支；`upgrade` 场景可接受，交付说明。
+- **`--cwd` 全局状态**：进程级 `current_dir` 切换必须 serial-only；未来考虑绝对路径解析代替。
+- **`.agents/skills` 通用目录**：作为标准兜底，若上游标准演进（例如 name/description 长度调整），需要同步更新校验。
+- **长期记忆 lock 与 Windows**：`fs2` advisory lock 在部分 Windows/Docker 场景可能返回 unsupported；需要在测试中确认降级或早失败策略。
+- **Admin API 兼容**：拒收 client PathBuf 是安全硬约束；前端已切 multipart，如果外部有历史脚本仍传路径，会直接 400，需在 changelog 提醒。
+- **`AgentSkillError` 映射**：422 用于语义校验（如 slug 冲突之外的字段非法），后续如果扩展错误码，需要保持稳定 mapping 表。
+- **storage size guard**：256MB 是当前上限；超大规则应该走分片或 Group 引用，不放大限制。

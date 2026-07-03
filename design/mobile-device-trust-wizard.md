@@ -1,250 +1,348 @@
-# Mobile Device Trust Wizard
+# Mobile Device Trust Wizard 设计方案
 
-## 功能模块详细描述
+## 背景
 
-Mobile Device Trust Wizard 把现有 CA 下载、二维码和证书状态能力扩展为手机证书安装向导。
+Bifrost 桌面端已经把 CA 下载、二维码和证书状态封装在 `Settings > Certificate` 页面，但手机端信任 CA 一直是排障重灾区：
 
-产品边界分两类：
+- Android 端 CA 需要用户在系统安全设置里手动信任，普通 ADB 无法读取用户证书库导致管理端只能给出模糊状态。
+- iOS 端不仅需要下载 `.mobileconfig`，还必须去 `Settings > General > About > Certificate Trust Settings` 手动开启完全信任，中间步骤最少 4 个界面切换。
+- 用户即使装了 CA，也常常不知道自己手机上的浏览器/App 是否真的能被 Bifrost 解密；缺少一个“真的能用吗”的验收入口。
+- 局域网多网卡环境下，手机连的往往不是本机默认路由 IP，管理端给出的“建议地址”常常是错的。
 
-- 普通个人手机：Bifrost 可以检测 Android USB 设备、推送 CA、打开系统安装入口，或为 iOS 提供 `.mobileconfig` 下载/二维码；手机端仍必须由用户确认安装和信任。
-- 企业/测试受管设备：只有 Android Device Owner/Profile Owner/委派证书安装器，或 iOS Apple Configurator/MDM/MDM enrollment profile 这类受管路径，才允许真正自动安装并启用信任。本次支持 macOS + Apple Configurator/cfgutil 的高级路径；普通网页/二维码下载仍必须手动启用完全信任。
+Mobile Device Trust Wizard 把这些流程统一为一个向导，同时新增 Bifrost Availability Check（可用性检查）作为端到端排障入口，用真实 HTTPS 握手判断“当前扫码浏览器的 TLS 栈是否已经信任本机 Bifrost CA”。
 
-新增 Bifrost Availability Check / 可用性检查，用于验证“目标设备是否能使用 Bifrost”。它不读取 iOS/Android 私有证书库，也不依赖 USB、ADB、Apple Configurator 或 MDM，而是让目标设备扫码打开 HTTP 落地页，自动检查代理访问授权、浏览器是否真的配置了 Bifrost 代理、探针端口可达性，再发起一次由当前 Bifrost CA 签发证书的真实 HTTPS 请求。HTTPS 请求成功表示当前设备浏览器 TLS 栈已经信任 Bifrost CA；失败则说明 CA 未安装、未启用完全信任、证书不匹配、设备时间异常或探针端口被拦截。
+产品边界：
 
-## 实现逻辑
+- 普通个人手机（personal）：Bifrost 可以推送、可以打开安装入口、可以生成 profile 与二维码，但最终信任必须由用户手动确认；管理端不承诺静默安装/信任。
+- 受管设备（managed）：Android Device Owner / Profile Owner / 委派证书安装器，或 iOS Apple Configurator / MDM / enrollment profile。本次落地 macOS + Apple Configurator (`cfgutil`) 的自动信任路径。
 
-### 1. 设备层 crate
+## 用户目标验证清单
 
-新增 `crates/bifrost-device`：
+### 必须实现
 
-- `model.rs` 定义 `MobilePlatform`、`DeviceTrustCapability`、`DeviceStatus`、`InstallMode`、`MobileDevice`、`InstallSession`。
-- `adb.rs` 负责：
+- Settings > Certificate 页展示统一向导：Availability Check、Local install、iOS devices、Android devices、Certificate downloads 五段左侧固定导航，右侧单列滚动。
+- 全局挂载 `MobileDeviceTrustPrompt`，检测到 USB 设备时弹出确认窗口（多设备时列出名称/型号/ID/ECID）。
+- Android USB guided install：`adb push` CA + 尝试 `am start` 证书安装入口 + fallback 到安全设置页。
+- iOS `.mobileconfig` 下载和二维码（`com.apple.security.root` payload）。
+- macOS Apple Configurator 自动安装：`cfgutil -e <ECID> install-profile`，支持多设备定向 ECID。
+- 全局 Availability Check：短期 session + 公开 landing HTML + 双协议（HTTP netcheck + HTTPS trust probe）监听器；`.invalid` 域名探测 proxy 是否已配置。
+- Push 推送：`trust_probe` 和 `mobile_devices` 两个 settings scope 通过 `/api/push` 实时更新，管理端不用轮询。
+- CLI `bifrost ca install --mobile` / `--ios` / `--ios --configurator`。
+- 本机 CA install API 也走确认字符串保护，等价于 `bifrost ca install`。
+
+### 必须不破坏
+
+- `bifrost ca install` 原本机 keychain 安装语义不变，只是同时通过 `/api/cert/install` 提供 WebView 入口。
+- `/api/cert/info` 兼容旧字段，仅新增 `sha256_fingerprint`。
+- Availability Check probe listener 在 60 秒空闲后自愈停止/重建，不与其它监听器冲突。
+- 未启用移动设备场景的用户不会看到额外弹窗；`MobileDeviceTrustPrompt` 只在服务端周期性探测发现真实 USB 设备时推送。
+- Ant Design token 化，不新增硬编码主题色，light/dark 由现有页面统一验证。
+
+### 必须真实验证
+
+- 局域网 IP 生成的二维码在真实手机（iPhone Safari / Android Chrome / WeChat WebView）上可打开、可推进状态。
+- 双协议 probe listener 在 `admin_port + 2` 冲突时自动选空闲端口，session 顶层 `probePort` 与实际监听端口一致。
+- Apple Configurator 未安装时，UI 提示禁用原因并提供 Mac App Store 跳转按钮，不静默安装。
+- `.invalid` 探测请求经代理进入 Bifrost 后被识别为 `proxy_configured_ok`；HTTP netcheck 经代理进入必须返回失败，避免误判直连。
+- 手机端关闭 Wi-Fi 代理后，公开页和管理端在 1-2 轮轮询内回落 `proxyConfigured=false`。
+
+## 产品语义
+
+### 三类身份
+
+Bifrost 明确区分：
+
+1. `personal`：Bifrost 只能推送/打开安装入口，最终信任由用户完成。
+2. `managed_auto_trust`：Apple Configurator/MDM 路径，可静默安装并信任。
+3. `availability_check`：不做任何安装，仅通过真实 HTTPS 请求验证当前浏览器 TLS 是否信任本机 CA。
+
+### 状态机（Availability Check session）
+
+| 状态 | 含义 |
+| ---- | ---- |
+| `created` | 管理端生成二维码，等待设备扫码 |
+| `page_opened` | 目标设备已打开 HTTP 落地页 |
+| `proxy_access_allowed` / `_pending` / `_denied` / `_unavailable` | 代理访问授权检查结果 |
+| `proxy_configured_ok` / `proxy_config_failed` | 目标设备浏览器是否把 HTTP 请求发到 Bifrost |
+| `network_reachable` | probe 端口 HTTP netcheck 可达 |
+| `tls_trusted` | 直连或 CONNECT 后 HTTPS probe 成功 |
+| `tls_failed` | netcheck 成功但 HTTPS 握手/请求失败 |
+| `network_failed` | landing 已打开但 probe 端口不可达 |
+| `expired` | 会话过期 |
+
+`proxy_config_failed` 必须把之前的 `proxy_configured_ok` 回落为 false，保证“手机代理被关掉”和“证书被卸载”这两种回退能被观察到。
+
+### 准确性边界
+
+- 成功只说明“当前扫码设备的当前浏览器 TLS 链路能完成 Bifrost HTTPS probe”。不代表全平台所有 App 都能被解密。
+- 失败也不等价于“证书一定没安装”；可能是 firewall 拦截 probe 端口、时间错、扫码设备不在同一 LAN、IP 错、浏览器缓存旧信任判断。
+- 实验性 iOS Wi-Fi Proxy Profile 已从系统整体移除；旧 endpoint 应返回 404。理由是 Apple managed Wi-Fi payload 把代理绑到受管 Wi-Fi 配置，稳定性和清理体验不可控。
+
+## 技术细节
+
+### 设备层 crate `crates/bifrost-device`
+
+- `src/model.rs`：`MobilePlatform`、`DeviceTrustCapability`、`DeviceStatus`、`InstallMode`、`MobileDevice`、`InstallSession`。
+- `src/adb.rs`：
   - 检测 `BIFROST_ADB_PATH` 或 `PATH` 中的 `adb`。
-  - 解析 `adb devices -l` 输出。
-  - 普通 Android guided install：`adb push` CA 到 `/sdcard/Download/bifrost-ca.crt`，再尝试 `am start` 打开证书安装入口，失败时 fallback 到安全设置页。
-  - Android CA 状态探针：对 connected 设备检查 `/sdcard/Download/bifrost-ca.crt` 是否与当前 CA 文件一致；对 root/emulator/test 设备尝试读取 `/data/misc/user/0/cacerts-added`，按当前 CA DER 的 SHA-256 指纹比对是否已经进入 Android 用户证书库。普通未 root 设备通常无法读取该私有证书库，因此状态会明确显示为“已推送但无法由普通 ADB 确认”或“未知”，不会误称已信任。
-- `mobileconfig.rs` 负责：
-  - 从 PEM/DER 证书文件提取 DER。
-  - 生成 iOS `.mobileconfig`，PayloadType 为 `com.apple.security.root`，并明确写入手动启用完全信任的说明。
-- `ios.rs` 负责：
-  - macOS 上通过 `ioreg` 检测 USB iPhone/iPad。
-  - 检测 Apple Configurator 的 `cfgutil` 是否可用。
-  - 高级路径调用 `cfgutil -e <ECID> install-profile <profile.mobileconfig>`。Bifrost 通过 `cfgutil --format JSON list` 读取每台设备的自定义名称、UDID、ECID 和型号；多台 iPhone/iPad 同时连接时，页面和 CLI 均让用户选择目标设备，并按所选设备 ECID 定向安装，避免误装。
+  - 解析 `adb devices -l`。
+  - guided install：`adb push` 到 `/sdcard/Download/bifrost-ca.crt` + `am start` 证书安装入口，失败 fallback 安全设置。
+  - CA 状态探针：读取 `/sdcard/Download/bifrost-ca.crt`；root/emulator 尝试 `/data/misc/user/0/cacerts-added` 并按 DER SHA-256 指纹匹配。未 root 设备显示 `pushed_to_device` 或 `unknown`，不误报 `installed`。
+- `src/mobileconfig.rs`：PEM/DER 提取 + iOS `.mobileconfig` 生成，PayloadType `com.apple.security.root`。
+- `src/ios.rs`：`ioreg` 检测 USB、检测 `cfgutil`、`cfgutil --format JSON list` 读取自定义名/UDID/ECID/型号、`cfgutil -e <ECID> install-profile` 定向安装。
 
-### 2. Admin API
+### Admin API 路由
 
-新增路由：
+由 `crates/bifrost-admin/src/handlers/mobile_devices.rs` 和 `handlers/trust_probe.rs` 提供：
 
-- `POST /_bifrost/api/cert/install`
-- `GET /_bifrost/api/mobile-devices`
-- `POST /_bifrost/api/mobile-devices/refresh`
-- `POST /_bifrost/api/mobile-devices/{id}/install-ca`
-- `GET /_bifrost/api/mobile-devices/install-sessions/{session_id}`
-- `GET /_bifrost/public/mobile/ios-profile.mobileconfig`
-- `GET /_bifrost/public/mobile/ios-profile.mobileconfig/qrcode`
+| 路由 | 用途 | 访问边界 |
+| ---- | ---- | ---- |
+| `POST /_bifrost/api/cert/install` | 本机 CA 系统信任安装 | loopback/WebView，body 需 `install_local_ca_certificate` |
+| `GET /_bifrost/api/mobile-devices` | 列出 USB/ADB/cfgutil 设备 | loopback/WebView |
+| `POST /_bifrost/api/mobile-devices/refresh` | 强制刷新 | loopback/WebView |
+| `POST /_bifrost/api/mobile-devices/{id}/install-ca` | Android guided / iOS Configurator 安装 | loopback/WebView，body 需 `push_and_open_mobile_certificate_installer` |
+| `GET /_bifrost/api/mobile-devices/install-sessions/{session_id}` | 查询安装进度 | loopback/WebView |
+| `POST /_bifrost/api/trust-probe/sessions` | 创建 Availability Check | loopback/WebView，`host` 必须是本机发现 IP |
+| `GET /_bifrost/api/trust-probe/sessions/{session_id}` | 查询 session（含 `devices[]`） | loopback/WebView |
+| `GET /_bifrost/public/trust-probe` | 手机落地 HTML | LAN 公开，不带 token |
+| `GET /_bifrost/public/trust-probe/qrcode?host=<ip>` | landing 二维码 SVG | LAN 公开 |
+| `GET /_bifrost/public/trust-probe/{session_id}/session?deviceId=<id>` | 手机端轮询 | LAN 公开 |
+| `POST /_bifrost/public/trust-probe/{session_id}/report?deviceId=<id>` | 上报 page_opened/network_failed/tls_failed/proxy_config_failed | LAN 公开 |
+| `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId=<id>` | 借访问控制模块检查授权 | LAN 公开，触发 pending |
+| `GET /_bifrost/public/mobile/ios-profile.mobileconfig` | iOS profile 下载 | LAN 公开 |
+| `GET /_bifrost/public/mobile/ios-profile.mobileconfig/qrcode` | iOS profile 二维码 | LAN 公开 |
+| `GET /_bifrost/public/mobile/ios-wifi-proxy.mobileconfig(/qrcode)` | 实验性 Wi-Fi Proxy Profile | 返回 404（已移除） |
+| `GET /_bifrost/public/proxy/qrcode` | 已知代理二维码 | LAN 公开 |
 
-安全边界：
+`/api/cert/info` 新增 `sha256_fingerprint`（DER 证书 SHA-256），供手机端核对。
 
-- `/api/cert/install` 等价于 `bifrost ca install` 的本机系统信任安装流程，仅允许 loopback / 桌面 WebView 访问；请求体必须携带确认字符串 `install_local_ca_certificate`，避免远程 Admin 或裸 POST 误触发本机 keychain/sudo 安装提示。
-- `/api/mobile-devices*` 仅允许 loopback / 桌面 WebView 访问，避免远程 Admin 触发本机 USB 操作。
-- `/_bifrost/public/cert*` 与 `/_bifrost/public/mobile*` 是公开下载路径，必须允许任意 LAN 客户端访问，不要求交互式授权或白名单；否则手机扫码会拿到非 profile 响应并提示描述文件无效。
-- `/_bifrost/public/proxy*` 同样是公开二维码路径，必须允许任意 LAN 客户端访问；否则可用性检查成功后的 `Open proxy QR code` 会被访问控制拦截成 403。
-- `install-ca` 支持 Android `normal_guide` 和 iOS `managed_auto_trust`。请求体必须携带确认字符串 `push_and_open_mobile_certificate_installer`，并且只有本地 Admin/WebView 能触发。
-- 安装操作记录 tracing audit log。
-- `/api/cert/info` 新增 `sha256_fingerprint`，供用户在手机上核对 CA 指纹。
+### Push 通道
 
-### 3. Web UI
+`crates/bifrost-admin/src/push.rs` 支持两个 settings scope：
 
-在 Settings -> Certificate 的 Mobile Installation 卡片中新增：
+- `trust_probe`：创建/复用 session、公开 landing/qrcode、report、proxy-access 时广播；全局右上角通知中心订阅。
+- `mobile_devices`：仅当存在订阅者时服务端周期性探测 USB/ADB/cfgutil 并推送快照，替代前端定时轮询。
 
-- 普通设备提示：Bifrost 只能推送/打开安装流程，手机端仍需确认。
-- Local Certificate Install 区块在本机 CA 未安装或已安装但未信任时展示 `Install and Trust CA` / `Trust CA` 按钮；点击后调用 `/api/cert/install`，行为等价于 `bifrost ca install`，成功后立即刷新本机证书状态。由于 macOS 安装证书和设为信任可能存在短暂状态传播延迟，前端会继续轮询 `/api/cert/info`，直到状态变为 `Installed and trusted` 或超时。
-- Android USB 区块：检测设备、展示 ADB/设备授权状态和当前 CA 状态；对 connected 设备执行 guided install。CA 状态分为 `unknown`、`not_installed`、`pushed_to_device`、`installed`。其中 `installed` 仅在 Bifrost 能读取 Android 用户证书库并匹配当前 CA 指纹时显示；普通个人手机若只完成了 push/open installer，则 UI 只显示 `pushed_to_device` 并提示继续在手机上确认。
-- 全局设备监听提示：管理端主布局挂载 `MobileDeviceTrustPrompt`，通过 `/api/push` 的 `mobile_devices` settings scope 接收服务端推送；后端只在存在订阅者时周期性探测本机 USB/ADB/cfgutil 设备并推送快照。检测到 connected Android 或 iOS 设备时弹出确认窗口。若同时发现多台设备，弹窗列出每台设备的自定义名称、型号、ID 和 ECID，用户可以选择目标设备后直接点击 `Install Selected`，也可以点击 `Open Certificate Setup` 跳转到 `Settings > Certificate`。跳转时 URL 携带 `mobile_device` / `mobile_platform`，Certificate 页拿到目标设备后自动滚动到对应卡片，高亮该卡片，并让对应安装按钮播放脉冲动画，确保用户知道从哪里继续操作；用户选择 Not now 后只在当前页面会话内记录设备 id，避免旧 localStorage 记录导致后续连接永远不弹。远程 Admin 访问本地 USB API 会得到 403，不打扰远程页面。
-- Certificate 页自身订阅同一个 `mobile_devices` settings scope 展示 Android ADB、Android CA 状态、iOS profile、Apple Configurator 和安装 session；它不再弹局部重复提示。Android 用户在手机端完成安装后，如果设备是 root/emulator 且证书库可读，页面会自动刷新为 `CA installed`；普通设备仍提示系统证书库不可由普通 ADB 验证。
-- Certificate 页使用左侧固定导航和右侧单列章节，不再把 Android 和 iOS 做成并列卡片。导航和右侧内容顺序为 Availability Check、Local install、iOS devices、Android devices、Certificate downloads；可用性检查是手机/跨设备排障的最高优先级入口，iOS 设备安装必须在 Android 之前，证书文件下载和二维码下载放在最后。
-- 代理交互式授权弹窗只保留授权动作。未授权设备触发 `Pending Authorization Requests` 时，弹窗展示请求设备 IP、首次出现时间、尝试次数，以及 Allow/Deny 按钮；可用性检查入口保留在 Certificate 页顶部，避免授权弹窗承担排障流程而干扰用户批准代理访问。
-- iPhone/iPad 区块：
-  - 顶部先展示统一 iOS 流程：把 profile 送到 iPhone -> 在 Settings 安装描述文件 -> Settings > General > About > Certificate Trust Settings -> 打开 Bifrost CA 完全信任。Apple Configurator 和手动扫码/文件安装只作为“送达 profile”的两种入口，不在 UI 上拆成互相割裂的两套模式。
-  - 统一流程之后先展示“选择 profile 送达方式”。Apple Configurator/cfgutil 检测状态、每台 iOS 设备的自定义名称/型号/ID/ECID 和 `Configurator Install` 按钮作为自动送达入口；手动扫码/下载 `.mobileconfig` / LAN profile QR 作为手动送达入口。点击某一台的 Configurator 按钮时，Bifrost 通过该设备 ECID 从电脑侧定向发送 profile；如果 iPhone 仍要求屏幕确认，则继续按同一套 Settings 安装和信任步骤操作。未检测到 `cfgutil` 时，Configurator 区域和设备按钮附近必须直接展示禁用原因，并提供打开 Apple Configurator Mac App Store 页面的按钮；Bifrost 不静默安装 App Store 应用，而是让 macOS/App Store 弹出确认并由用户完成安装，安装后如仍未检测到 `cfgutil`，提示在 Apple Configurator 中安装 Automation Tools。
-  - 实验性 iOS Wi-Fi Proxy Profile 模式已从系统移除。iOS 区块只提供普通 CA profile 的 Apple Configurator 送达和扫码/下载送达；代理配置统一要求用户在系统 Wi-Fi 设置中手动设置 HTTP Proxy，并在完成检查后手动改回 Off。
-  - 手动扫码送达入口使用 `web/src/assets/ios/ios_qr_1.jpeg` 和 `web/src/assets/ios/ios_qr_2.jpeg` 展示唯一区别步骤：用 iPhone Camera 扫 LAN QR 并点击黄色链接，然后允许下载 configuration profile。
-  - 送达方式之后展示共享步骤 `ios_1.png` 到 `ios_7.png`；每一步用图片文件名作为步骤标识，图下文案明确说明：选择 iPhone、确认 profile 已到达、进入 Settings 的 Downloaded Profile、安装 Bifrost CA profile、接受未签名 profile 警告、进入 Settings > General > About、最后在 Certificate Trust Settings 打开 Bifrost CA 完全信任。
-  - `cfgutil` 返回 `ConfigurationUtilityKit.error Code: 625` / “需要用户在设备上交互” 时，Bifrost 将其视为已把安装流程交给 iPhone 的待确认状态，而不是硬失败。
-  - MDM/监督设备路径只做说明，不把普通下载、扫码或普通 USB 连接误描述成静默自动信任。
-- 保留原证书文件 QR，支持手动下载 CA。
-- 新增 UI 使用 Ant Design token，不新增硬编码主题色；light/dark 主题由现有 Settings 页面统一验证。
+新 WebSocket 连接或动态订阅时立即补发当前快照，避免首次打开必须等下一次事件。
 
-### 4. CLI
+### 双协议 probe server
 
-保留 `bifrost ca install` 的原有本机系统信任语义；新增移动设备路径：
+- 创建/复用 session 前必须先 bind probe listener，`probePort` 写入 session 返回体。
+- listener 默认尝试 `admin_port + 2`；端口冲突自动选空闲端口；同 host/admin/CA 下的其它 active session 一起更新为实际端口。
+- listener 按 `host/CA key` 管理：`127.0.0.1` 本机预览与 `10.x.x.x` 手机检查可以共存。
+- 60 秒 idle 自愈停止，下一次流量到来时重建。
+- 同一 TCP 端口通过 `peek` 首字节分流 HTTP vs TLS：HTTP `/_bifrost/trust-probe/netcheck`，HTTPS `/_bifrost/trust-probe/check`。
+- HTTPS 证书由当前 Bifrost CA 给所选 IP 动态签发，IP 写入 SAN。
+- HTTP netcheck 请求若经 Bifrost proxy 送入必须返回失败（避免误判直连），由 `bifrost_admin::is_active_trust_probe_target` 在 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` 中判定。
 
-- `bifrost ca install --mobile`：进入 Android USB guided install。
-- `bifrost ca install --mobile --device <serial>`：指定 ADB serial，适合脚本执行。
-- `bifrost ca install --mobile --yes`：非交互模式；只有一个 ready 设备时自动选择，有多个 ready 设备时要求显式 `--device`。
-- `bifrost ca install --ios`：生成 `bifrost-ca.mobileconfig` 并输出 iPhone/iPad 手动安装和完全信任步骤，不尝试静默控制手机。
-- `bifrost ca install --ios --configurator`：macOS + Apple Configurator 高级路径；检测 `cfgutil` 和 USB iOS 设备后调用 `cfgutil -e <ECID> install-profile`。单台设备自动选择；多台设备在交互终端中显示自定义名称/型号/ID 并让用户选择；非交互模式需要传 `--device <id-or-ecid>`。
+### 代理配置探测
 
-CLI 不承诺普通手机自动启用根 CA 信任；iOS 的自动 SSL/TLS 信任只归属于 Apple Configurator/MDM/监督设备路径。
-Android CLI 会在安装前后输出 `Android CA status`。普通设备通常只能显示 `pushed to device` 或 `unknown`；root/emulator/test 设备可通过用户证书库指纹比对显示 `installed`。
+手机页请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<sid>&deviceId=<id>`。`.invalid` 域名只有在浏览器已配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 代理入口截获该请求，记录 `proxy_configured_ok`，广播 `trust_probe` push。
 
-### 5. Availability Check
+### 手机公开页稳定性
 
-可用性检查由三个部分组成：
+- 手机页每秒重跑 proxy access、HTTPS probe、proxy configured；只在结果真的变化时更新 DOM，否则保持稳定，避免窄屏抖动。
+- `Browser HTTPS probe failed`、`Download Bifrost CA`、下一步说明这三块在未信任状态下必须 DOM 稳定。
+- localStorage 写入 `bifrostAvailabilityDeviceId`，后续所有请求携带 `deviceId`；不作为权限凭据。
+- 多 IP 环境下，手机页顶部推荐使用 `window.location.hostname` 作为代理 host，不用服务端 preferred IP，因为已经被目标设备实际连通。
 
-  - Admin API：
-  - `POST /_bifrost/api/trust-probe/sessions` 创建短期探针会话。请求中的 `host` 必须是 Bifrost 发现到的本机 IP，不能传任意域名或公网地址。
-  - `GET /_bifrost/api/trust-probe/sessions/{session_id}` 查询实时状态。
-  - Public landing：
-  - `GET /_bifrost/public/trust-probe` 返回固定的自包含 HTML 检测页，不依赖登录和主 Web UI bundle，也不在 URL 中携带 token。服务端按请求 Host 复用同一个未过期 Availability Check session；如果没有活跃 session，则为该 Host 创建一个短期 session。
-  - `GET /_bifrost/public/trust-probe/qrcode?host=<local-ip>` 返回固定 landing URL 的扫码二维码。二维码内容是 `http://<local-ip>:<adminPort>/_bifrost/public/trust-probe`，避免旧 token 过期或遗漏导致 `Missing trust probe token`。
-  - 手机公开页首次打开时在浏览器 `localStorage` 写入 `bifrostAvailabilityDeviceId`，后续刷新继续使用同一个 device id；所有 `session`、`report`、`proxy-access`、netcheck、HTTPS check 和 proxy configured 请求都会附带 `deviceId`。该 id 只用于管理端状态聚合，不作为权限凭据。
-  - 手机公开页顶部始终高亮展示当前目标代理服务 `<host>:<adminPort>`，让用户不需要回到管理端即可核对 Wi-Fi HTTP Proxy 的 Server/Port。多 IP / 多网卡环境下，服务端 `preferred` IP 只能作为初始二维码和候选列表的启发式默认值；手机页已经被目标设备打开时，页面顶部高亮的目标代理服务、复制按钮和公开 proxy QR必须优先使用当前页面 URL 的 `hostname`。这个 host 已被目标设备实际连通，比本机通过默认路由、网卡排序或虚拟网卡过滤推断出的 IP 更可靠。实验性 iOS Wi-Fi Proxy Setup 不再展示；手机页只保留手动 Wi-Fi HTTP Proxy 配置说明。
-  - `GET /_bifrost/public/trust-probe/{session_id}/session?deviceId=<id>` 返回该公开页面可用的最小 session 配置，包括当前 `deviceId` 对应的代理配置检测结果。手机页每秒轮询该接口。
-  - `POST /_bifrost/public/trust-probe/{session_id}/report?deviceId=<id>` 接收手机页面通过 HTTP 回报的 `page_opened`、`network_failed`、`tls_failed` 等事件。
-  - `GET /_bifrost/public/trust-probe/{session_id}/proxy-access?deviceId=<id>` 使用访问控制模块检查当前客户端 IP 是否已被允许使用代理；待授权时会写入 pending authorization，让管理端能继续审批。
-  - 手机页会每秒自动重跑 proxy access、浏览器 HTTPS probe 和 proxy configured 三项检查，不要求用户刷新页面才能看到授权、信任或代理配置状态变化。手机页 UI 必须结果驱动：请求发起前和请求进行中不把既有结论改成中间态；只有拿到成功/失败的最终结果且结果确实变化时，才更新代理配置区，避免每秒轮询造成闪烁或抖动。这些公开回报会触发 `trust_probe` settings scope 推送，管理端 Availability Check 卡片和全局右上角通知中心实时更新，不再用浏览器定时轮询管理接口。
-  - 手机页轮询只能更新发生真实变化的状态块。证书未安装或 iOS 代理未配置时，浏览器 HTTPS 失败提示、`Download Bifrost CA`、下一步说明必须保持 DOM 稳定；不得因为每秒轮询把相同 HTML 反复写回，避免窄屏手机上按钮和状态信息闪烁或错位。
-  - 手机页会请求 `http://bifrost-proxy-check.invalid/_bifrost/trust-probe/proxy-configured?sid=<session_id>&deviceId=<id>`。该 `.invalid` 域名只有在浏览器已经配置 HTTP proxy 时才会被送到 Bifrost；Bifrost 在代理入口截获该请求并记录 `proxy_configured_ok`，并立即广播 `trust_probe` push，让管理端 `Connected devices` 无需刷新即可出现 `Proxy config detected`。如果请求失败，手机页通过 HTTP report 回写 `proxy_config_failed`；该失败事件必须清除 session 和当前 device 的历史 proxy configured 状态，因此用户在手机上关闭 Wi-Fi 代理后，手机页和管理端都应自动回落到未配置状态。失败时页面优先提示用户手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。实验性 iOS Wi-Fi Proxy Profile 已移除，失败时只提示手动配置 Wi-Fi 代理：`Settings > Wi-Fi > current network > Configure Proxy > Manual`。
-  - 一个 Availability Check session 支持多台手机/浏览器同时打开同一个固定链接。管理端 session view 返回 `devices[]`，每个设备单独展示 localStorage device id、platform hint、client IP、最近活跃时间、页面打开、probe 端口、浏览器 HTTPS probe、proxy access 和 proxy configured 状态。session 顶层状态保留聚合视图，用于兼容旧 UI 和测试。
-  - Certificate 页顶部 Availability Check 卡片还会接入现有 `/api/mobile-devices` USB/ADB/cfgutil 发现结果，直接展示当前已连接、需要做可用性检查的移动设备，包括设备名、平台、连接状态和 CA 状态。这个列表用于告诉用户“哪台手机该去扫码/打开链接”；扫码后的浏览器级检测状态仍由 session `devices[]` 单独展示。
-- 管理端推送：
-  - `/api/push` 支持 `trust_probe` 和 `mobile_devices` settings scopes。新 WebSocket 连接或动态订阅新增 scope 时，服务端立即补发该 scope 当前快照，避免页面首次打开必须等待下一次状态变化。
-  - `trust_probe` 在创建 session、公开 landing/qrcode 复用或创建 session、公开 report、proxy-access后广播。全局右上角通知中心订阅该 scope；当有设备打开可用性检查页时显示可关闭/可展开的气泡，点击后跳转 Certificate 页顶部 Availability Check 卡片。
-  - `mobile_devices` 在存在订阅者时由服务端周期性探测并推送，替代各 Web UI 组件自行轮询 `/api/mobile-devices/refresh`。
-- 双协议 probe server：
-  - 创建或复用 Availability Check session 时必须先确保对应 host/CA 的 probe listener 已经绑定，并在 API 返回前把 session 的 `probePort` 写为实际监听端口；调用方不能拿到只按 `admin_port + 2` 计算、但尚未确认可用的计划端口。
-  - listener 默认尝试监听 `admin_port + 2`，端口冲突时自动选择空闲端口，并把同一 host/admin port/CA 下的 active session `probePort` 统一更新为实际监听端口；公开 landing page 渲染和 session 轮询继续复用该端口，旧 listener 停止时再自愈重建。
-  - probe listener 按 host/CA key 管理；`127.0.0.1` 本机预览和 `10.x.x.x` 手机检查可以同时存在，不能互相关闭对方的 probe listener。已有 listener 健康时必须复用同一端口；如果旧 listener 已停止，下一次 landing page 或 session 轮询会自愈重建。listener 在 60 秒没有新的公开页、session 轮询、report、proxy-access、netcheck 或 HTTPS check 流量后自动停止，等下一次设备访问再启动，避免多设备并发或页面刷新反复占用新端口。
-  - 同一端口通过 TCP `peek` 首字节区分 HTTP 与 TLS。HTTP 路径提供 `/_bifrost/trust-probe/netcheck`，HTTPS 路径提供 `/_bifrost/trust-probe/check`。
-  - HTTPS 证书由当前 Bifrost CA 给所选 IP 动态签发，IP 写入 SAN。设备浏览器 `fetch(https://ip:probePort/...)` 成功时，Bifrost 将 session 标记为 `tls_trusted`。如果 HTTP `netcheck` absolute-form 探测请求经由 Bifrost HTTP proxy 进入，代理入口必须返回失败，避免把代理路径误判为直连网络可达；但页面不能因此停止证书检查，配置代理后的浏览器可以继续通过 HTTPS CONNECT 或等效真实 TLS 路径访问 probe server，只要当前浏览器实际信任 Bifrost CA，就应推进为 `tls_trusted`。
-  - 公开页上报 `platformHint` 时会结合 User-Agent 做服务端归一化；如果客户端只能上报 `unknown`，服务端仍应尽量从 UA 推断 OS、浏览器或常见应用容器，例如 `macos edge`、`ios safari`、`android wechat`，避免 Web UI 或终端面板展示无意义的 unknown。
-  - 检测成功后，手机页展示可点击复制的代理地址 `<host>:<adminPort>`，并提供公开 proxy QR 链接。
+## CLI
 
-状态机：
+### `bifrost ca install`（保留）
 
-- `created`：管理端生成二维码，等待设备扫码。
-- `page_opened`：目标设备已打开 HTTP 落地页。
-- `proxy_access_allowed` / `proxy_access_pending` / `proxy_access_denied` / `proxy_access_unavailable`：目标设备代理访问授权检查结果，作为 session event 与 view 字段展示。
-- `proxy_configured_ok` / `proxy_config_failed`：目标设备浏览器是否真的把 HTTP 请求发到了 Bifrost 代理。该状态独立于代理授权；授权通过但未配置代理时，页面会提示手动配置当前 Wi-Fi 的 HTTP Proxy。`proxy_config_failed` 不是只记录错误消息，它必须把之前的 `proxy_configured_ok` 回落为 false，保证手机代理被关闭后管理端和公开页不会停留在旧的绿色状态。
-- `network_reachable`：目标设备能访问 probe 端口的 HTTP netcheck。
-- `tls_trusted`：目标设备当前浏览器完成直连 HTTPS probe。该状态不代表 Android 已为所有 App 安装或信任 Bifrost CA。
-- `tls_failed`：netcheck 成功但 HTTPS 握手/请求失败。
-- `network_failed`：HTTP 落地页已打开但 probe 端口不可达。
-- `expired`：会话过期。
+本机 keychain / 系统信任安装，语义不变。
 
-准确性边界：
+### `bifrost ca install --mobile`
 
-- 成功只说明当前扫码设备的当前浏览器 TLS 链路能完成 Bifrost HTTPS probe；它可以是直连 probe 端口，也可以是在代理已配置后经 CONNECT 或等效真实 TLS 路径到达 probe server。
-- 不承诺所有 App 都一定能被 Bifrost 解密；Android App 可能默认不信任用户 CA，部分 App 有 certificate pinning 或自定义 TLS 栈。
-- HTTP netcheck 不能经 Bifrost HTTP proxy 被误判为直连 probe 端口可达；只有 `bifrost-proxy-check.invalid` 专用 URL 可以经代理标记 `proxy_configured_ok`。HTTPS trust probe 可以在代理已配置时经 CONNECT 或等效真实 TLS 路径完成，因为浏览器仍需要验证 probe server 的 Bifrost CA 证书。
-- 失败也不等价于“证书一定没安装”；还可能是探针端口被防火墙拦截、设备时间错误、扫码设备和电脑不在同一网络、IP 选择错误，或浏览器在安装/信任 CA 后仍缓存旧的证书信任判断，需要完整重启浏览器后再重试。
-- 实验性 Wi-Fi Proxy Profile 已移除：Apple managed Wi-Fi payload 会把代理设置绑定到受管 Wi-Fi 配置，稳定性和清理体验不可控。Bifrost 不再生成、不下发、不展示该 profile，旧 public endpoint 应返回 404；安全默认路径是手动配置 Wi-Fi HTTP Proxy 并手动改回 Off。
+Android USB guided install。
 
-## 依赖项
+- `--device <serial>` 指定设备。
+- `--yes` 非交互；只有一个 ready 设备时自动选择，多个 ready 设备必须显式 `--device`。
+- unauthorized/offline 设备直接拒绝。
 
-- `crates/bifrost-device`
-- `crates/bifrost-admin/src/handlers/mobile_devices.rs`
-- `crates/bifrost-admin/src/handlers/cert.rs`
-- `crates/bifrost-admin/src/handlers/trust_probe.rs`
-- `web/src/api/cert.ts`
-- `web/src/pages/Settings/tabs/CertificateTab.tsx`
-- `crates/bifrost-cli/src/commands/ca.rs`
-- `crates/bifrost-e2e/src/tests/admin_api.rs`
+### `bifrost ca install --ios`
+
+生成 `bifrost-ca.mobileconfig`，输出 iPhone 手动安装 + Certificate Trust Settings 步骤，不控制手机。
+
+### `bifrost ca install --ios --configurator`
+
+macOS + Apple Configurator 路径：检测 `cfgutil` + USB iOS 设备，调用 `cfgutil -e <ECID> install-profile`。多设备需要 `--device <id-or-ecid>`。
+
+Android CLI 在安装前后输出 `Android CA status`：普通设备通常显示 `pushed to device` 或 `unknown`，root/emulator 可通过用户证书库指纹显示 `installed`。
+
+## Web UI
+
+### 全局
+
+- `MobileDeviceTrustPrompt`（`web/src/components/MobileDeviceTrustPrompt/index.tsx`）挂载在 `Layout/index.tsx`，订阅 `mobile_devices` scope。
+- 多设备弹窗：自定义名称、型号、ID、ECID，`Install Selected` 直接安装 or `Open Certificate Setup` 跳转（URL 带 `mobile_device` / `mobile_platform`）。
+- 右上角 `AvailabilityCheckNotificationCenter` 订阅 `trust_probe` scope。
+
+### Certificate 页
+
+`web/src/pages/Settings/tabs/CertificateTab.tsx` 使用左侧固定导航 + 右侧单列，五段固定顺序：
+
+1. Availability Check
+2. Local install
+3. iOS devices
+4. Android devices
+5. Certificate downloads
+
+### Local Install
+
+未安装或未信任时显示 `Install and Trust CA` / `Trust CA`；点击后调用 `/api/cert/install`（等价 `bifrost ca install`）。macOS 状态传播有短暂延迟，前端持续轮询 `/api/cert/info`。
+
+### iOS 区块
+
+- 顶部展示统一流程：送 profile → Settings 安装 → Certificate Trust Settings 打开完全信任。
+- 送达方式两选一：Apple Configurator（自动）/ 手动扫码 or LAN profile QR。
+- Configurator 每台设备一个按钮，按 ECID 定向；未检测到 `cfgutil` 时禁用按钮 + Mac App Store 跳转。
+- `cfgutil` 返回 `ConfigurationUtilityKit.error Code: 625`（需要设备端交互）视为待确认，不判失败。
+- 送达方式之后统一步骤图 `ios_1.png` ~ `ios_7.png`，手动扫码步骤展示 `ios_qr_1.jpeg` 和 `ios_qr_2.jpeg`。
+- 实验性 iOS Wi-Fi Proxy Profile 已从 UI 完全移除，只留手动 Wi-Fi HTTP Proxy 提示。
+
+### Android 区块
+
+- 展示 ADB/设备授权状态和 CA 状态：`unknown` / `not_installed` / `pushed_to_device` / `installed`。
+- `installed` 仅在证书库可读且指纹匹配时显示；否则只显示 `pushed_to_device` 并提示继续在手机上确认。
+
+### Availability Check 卡片
+
+- 展示已连接、需要检查的移动设备（合并 `/api/mobile-devices` USB/ADB/cfgutil 结果）。
+- session `devices[]` 每台设备展示：localStorage id、平台 hint、client IP、最近活跃时间、page_opened、probe 端口、HTTPS probe、proxy access、proxy configured。
+- 顶层 `status` 保留聚合视图兼容旧 UI/测试。
+
+### 代理交互式授权弹窗
+
+只展示 pending 请求列表和 Allow/Deny/Clear All；不嵌入二维码/链接/Wi-Fi profile 风险说明。可用性检查入口保留在 Certificate 顶部。
+
+## Sync 边界
+
+- 本地 CA 是每台设备的私有信任状态，不参与任何 sync。
+- Availability Check session 不 sync，只在本机内存/短期 store。
+- `mobile_devices` push 只推给本机 WebSocket 订阅者，远程 Admin 访问 `/api/mobile-devices*` 返回 403，避免远程页面感知本机 USB。
+
+## Phase 拆分
+
+### Phase 1：设备层与 API 骨架
+
+- 新增 `crates/bifrost-device`（adb/ios/mobileconfig/model）。
+- `handlers/mobile_devices.rs`、`handlers/cert.rs` `sha256_fingerprint`、confirmation string 保护。
+- CLI `--mobile` / `--ios` / `--ios --configurator`。
+
+### Phase 2：Availability Check 服务
+
+- `handlers/trust_probe.rs` + 公开 landing HTML + 双协议 listener。
+- `.invalid` proxy 探测入口在 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` 判定并回写。
+- `crates/bifrost-admin/src/mobile_availability.rs` 聚合 session/devices/推送。
+
+### Phase 3：Web UI + Push
+
+- `pushService.ts` `trust_probe` / `mobile_devices` scope。
+- `CertificateTab.tsx` 五段导航 + 卡片。
+- `MobileDeviceTrustPrompt` 全局挂载 + 目标设备跳转。
+- `AvailabilityCheckPanel` + `AvailabilityCheckNotificationCenter`。
+
+### Phase 4：文档 + 迁移边界
+
+- README、`docs/getting-started.md`、`site/src/content/docs/getting-started/cli-quick-start.md`、`site/src/content/docs/reference/cli.md` 把可用性检查作为高优先级排障入口。
+- `human_tests/readme.md` 索引更新。
+- 实验性 iOS Wi-Fi Proxy Profile 回归清理。
 
 ## 测试方案
 
 ### 单元测试
 
 - `bifrost-device`：
-  - `parse_adb_devices` 正确解析 connected/unauthorized/offline 状态。
+  - `parse_adb_devices` connected/unauthorized/offline。
   - `generate_ios_mobileconfig` 包含 `com.apple.security.root` 和手动信任提示。
-  - `generate_ios_wifi_proxy_mobileconfig` 包含 `com.apple.security.root`、`com.apple.wifi.managed`、`SSID_STR`、`ProxyType=Manual`、`ProxyServer`、`ProxyServerPort`，并正确 XML escape SSID。
   - PEM 证书可提取 DER。
-  - `cfgutil_install_profile_args` 使用 `install-profile <profile.mobileconfig>` 子命令；指定设备时使用 `-e <ECID> install-profile <profile.mobileconfig>`。
+  - `cfgutil_install_profile_args` 使用 `install-profile <profile.mobileconfig>`；多设备时 `-e <ECID> install-profile <profile.mobileconfig>`。
+  - Android user CA store PEM 指纹匹配/不匹配路径。
 - `bifrost-admin`：
   - mobile devices API loopback 限制逻辑。
-  - CertInfo SHA-256 指纹按 DER 证书生成。
+  - CertInfo SHA-256 指纹由 DER 生成。
   - Availability Check token hash、状态机流转、TLS 成功覆盖历史失败、proxy access 状态记录。
+  - probe listener 健康复用、stale 自愈、60 秒 idle 停止。
+  - UA 平台推断：Edge、Chrome、iOS Safari、Android WebView/浏览器、WeChat/常见应用容器。
 - `bifrost-cli`：
   - `ca install --mobile` 单个 connected Android 自动选择。
-  - 多个 connected Android 且 `--yes` 时必须传 `--device`。
-  - 指定 unauthorized/offline 设备时拒绝安装。
-  - `ca install --ios --configurator` 参数解析正确。
+  - 多个 connected Android + `--yes` 时必须传 `--device`。
+  - 指定 unauthorized/offline 设备时拒绝。
+  - `ca install --ios --configurator` 参数解析。
 
-### E2E 测试
+### E2E 测试（`crates/bifrost-e2e/src/tests/admin_api.rs`）
 
-在 `crates/bifrost-e2e/src/tests/admin_api.rs` 中新增：
+- `admin_api_mobile_devices_lists_android_ios_discovery`
+- `admin_public_ios_mobileconfig_uses_current_ca`
+- `admin_public_ios_wifi_proxy_mobileconfig_removed`
+- `admin_api_mobile_install_requires_explicit_confirmation`
+- `admin_api_local_ca_install_requires_explicit_confirmation`
+- `admin_trust_probe_verifies_https_trust_with_current_ca`：断言 `probePort` 是实际监听端口；打开 landing/qrcode/proxy-access；配好代理的客户端访问 `.invalid` 探针，断言 `proxyConfigured=true`；HTTP netcheck 经代理仍返回 409；HTTPS check 直连和代理路径均成功；`proxy_config_failed` 上报后 public/管理端都回落为 false。
+- `admin_trust_probe_public_landing_stable_failed_state`：iPhone 窄屏在未信任状态多轮轮询，`Browser HTTPS probe failed`、`Download Bifrost CA`、下一步说明 DOM 稳定。
+- `proxy_rejects_proxy_routed_active_trust_probe_target`（planned，2026-06-16 尚未落地）：目前由 `admin_trust_probe_verifies_https_trust_with_current_ca` 一并覆盖。
+- `cli_ca_install_mobile_single_device_fake_adb`
+- `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`
+- `CLI iOS guide`：真实场景验证 `ca install --ios` 输出 profile 路径、手动步骤、Certificate Trust Settings、Configurator 后续命令。
 
-- `admin_api_mobile_devices_lists_android_ios_discovery`：验证设备发现 API 返回 ADB 状态、iOS 发现结果和普通手机确认提示。
-- `admin_public_ios_mobileconfig_uses_current_ca`：验证 iOS mobileconfig 和二维码 public endpoint。
-- ` admin_public_ios_wifi_proxy_mobileconfig_removed`：验证实验性 iOS Wi-Fi Proxy mobileconfig 和二维码 public endpoint 已移除，返回 404。
-- `LAN public mobile profile`：真实场景用 LAN 地址验证 profile endpoint 不触发交互式授权，返回 `application/x-apple-aspen-config` 且 plist 有效。
-- `admin_api_mobile_install_requires_explicit_confirmation`：验证 Android install 操作必须显式确认。
-- `admin_api_local_ca_install_requires_explicit_confirmation`：验证本机 CA install 操作必须显式确认，自动测试不误触系统证书安装。
-- `admin_trust_probe_verifies_https_trust_with_current_ca`：创建 Availability Check 会话，断言返回的 `probePort` 已是实际绑定端口；打开 public landing/qrcode，访问 public proxy QR、proxy-access；使用配置了 Bifrost HTTP proxy 的客户端访问 `bifrost-proxy-check.invalid` 专用探针，断言 `proxyConfigured=true` 且管理端通过 push 可刷新；再验证 HTTP netcheck 经代理进入时仍返回 409 防误判，同时用当前 Bifrost CA 作为 root CA 访问直连 HTTPS check 和代理 HTTPS check，断言 session 状态为 `tls_trusted`；最后模拟同一 `deviceId` 上报 `proxy_config_failed`，断言 public session 和管理端 session 都回落为 `proxyConfigured=false`。
-- `admin_trust_probe_public_landing_stable_failed_state`：用 iPhone 窄屏浏览器打开 `/_bifrost/tp`，在未安装/未信任 Bifrost CA 的状态下等待多轮轮询，断言 `Browser HTTPS probe failed`、`Download Bifrost CA`、下一步说明不会被相同内容反复替换。
-- `proxy_rejects_proxy_routed_active_trust_probe_target`（planned, not yet shipped as of 2026-06-16）：单独的回归 case 尚未落地；当前 HTTP netcheck 经代理被拒的行为仅由 `admin_trust_probe_verifies_https_trust_with_current_ca` 一并覆盖，运行时由 `bifrost_admin::is_active_trust_probe_target` 在 `crates/bifrost-proxy/src/proxy/http/tunnel/mod.rs` 中判定。
-- `trust_probe` 单元测试：验证 User-Agent 平台推断覆盖 Edge、Chrome、iOS Safari、Android WebView/浏览器和常见应用容器，probe listener 健康复用、stale 自愈、60 秒 idle 停止且不会关闭已替换 listener。
-- `bifrost-device` 单元测试：验证 Android user CA store PEM 指纹匹配和不匹配路径。
-- `cli_ca_install_mobile_single_device_fake_adb`：通过 fake ADB 验证 `ca install --mobile --yes` 单设备自动选择并执行 push/open。
-- `cli_ca_install_mobile_multiple_devices_requires_device_fake_adb`：通过 fake ADB 验证多个 ready 设备的非交互选择边界。
-- `CLI iOS guide`：真实场景验证 `bifrost ca install --ios` 输出 profile 路径、手动安装步骤、Certificate Trust Settings、Configurator 后续命令。
-
-### 真实场景测试
-
-新增 `human_tests/mobile-device-trust.md`：
+### 真实场景测试 `human_tests/mobile-device-trust.md`
 
 - TC-MDT-01：API 设备发现返回普通手机确认边界。
 - TC-MDT-02：iOS mobileconfig 下载包含 root payload 与 Certificate Trust Settings 提示。
 - TC-MDT-03：iOS profile QR endpoint 返回 SVG。
 - TC-MDT-04：Android install 缺少确认时拒绝。
-- TC-MDT-05：Settings Certificate UI 不承诺自动信任，并展示左侧固定导航；右侧单列按 Availability Check、Local install、iOS、Android、Certificate downloads 顺序组织。
-- TC-MDT-06：浅色/暗色主题下手机安装向导可读可操作。
-- TC-MDT-07：任意管理端页面检测到 connected Android/iOS 后弹出全局确认窗口；多设备时弹窗展示设备名称/型号/ID/ECID，支持选择目标设备直接安装或跳转 Certificate 页面；Certificate 页设备列表继续自动刷新，并自动滚动、高亮目标设备卡片和脉冲提示安装按钮。
-- TC-MDT-08：CLI `ca install --mobile --yes` 在 fake ADB 单设备场景自动选择并执行 guided install。
-- TC-MDT-09：CLI `ca install --mobile --yes` 在 fake ADB 多设备场景要求 `--device`。
+- TC-MDT-05：Certificate UI 不承诺自动信任，左侧固定导航 + 右侧五段单列顺序。
+- TC-MDT-06：light/dark 主题下可读可操作。
+- TC-MDT-07：全局 `MobileDeviceTrustPrompt` 多设备弹窗、Install Selected 与 Open Certificate Setup 跳转、目标设备高亮和脉冲。
+- TC-MDT-08：CLI `ca install --mobile --yes` fake ADB 单设备自动选择。
+- TC-MDT-09：CLI `ca install --mobile --yes` fake ADB 多设备要求 `--device`。
 - TC-MDT-10：CLI `ca install --ios` 生成 profile 并输出手动信任步骤。
-- TC-MDT-11：Settings iPhone/iPad 区域先展示统一流程概览，再展示 Apple Configurator 和手动扫码/文件两种 profile 送达方式；扫码方式展示 `ios_qr_1` / `ios_qr_2`；按 cfgutil 可用状态启用或禁用每台设备的安装按钮；多台 iOS 设备同时显示自定义名称、型号、ID、ECID，并按所选设备 ECID 定向安装。
-- TC-MDT-12：Apple Configurator 返回需要手机端交互时，页面显示待用户确认而非失败。
-- TC-MDT-13：Settings iPhone/iPad 在送达方式之后展示 `ios_1` 到 `ios_7` 共享图文步骤，明确 Configurator 和扫码/文件安装只差在送达 profile，后续 profile 安装与 Certificate Trust Settings 完全信任是同一条流程。
-- TC-MDT-14：Android 设备卡片展示当前 CA 状态；普通 ADB 不承诺能验证 user CA store，root/emulator 可通过 `/data/misc/user/0/cacerts-added` 指纹匹配显示已安装。
-- TC-MDT-15：Availability Check 使用局域网 IP 生成二维码，并在 Certificate 页卡片顶部直接展示当前已连接、需要检查的移动设备；扫码设备依次检查代理访问授权、页面已打开、probe 端口可达、HTTPS 信任检查通过/失败，再检查代理是否已经配置；成功后展示可点击复制的代理配置和公开 proxy QR，失败时展示 iOS/Android 下一步安装和信任指引；代理未配置时只提示手动配置当前 Wi-Fi 的 HTTP Proxy。管理端 `Connected devices` 在扫码、代理配置成功和代理关闭后都必须靠 `trust_probe` push 自动刷新，不需要刷新浏览器；手机公开页每秒自检时只在最终状态变化后更新 UI，不能在请求中反复闪烁。多 IP 环境下，如果用户用不同于管理端默认 preferred IP 的 LAN IP 成功打开手机公开页，手机页必须推荐该页面 URL 中的 IP 作为代理 IP。
-- TC-MDT-16：公开 landing、Availability Check QR、公开 proxy QR 和 proxy-access endpoint 不受交互式访问控制误拦截；未授权局域网设备会被记录到 pending authorization。
-- TC-MDT-17：代理交互式授权弹窗保持简洁，只展示 pending 请求列表和 Allow/Deny/Clear All 操作，不嵌入 Availability Check 二维码、链接或 Wi-Fi profile 风险说明；可用性检查入口保留在 Certificate 页顶部。
-- TC-MDT-18：实验性 iOS Wi-Fi Proxy Profile 移除回归。验证旧扫码下载路径返回 404，iOS 设备列表不再展示 `Proxy Config`，Certificate 页、Availability Check 卡片和手机公开页都不再展示 Wi-Fi 名称输入、managed Wi-Fi 风险确认或实验 profile 下载入口。
-- TC-MDT-19：手机公开 Availability Check 页窄屏稳定性。使用 iPhone 宽度打开未信任 CA 的 `/_bifrost/tp`，等待至少 5 秒，确认 `Browser HTTPS probe failed`、`Download Bifrost CA`、下一步说明不会因每秒轮询出现反复 DOM 替换、闪烁或布局错位。
+- TC-MDT-11：Settings iPhone/iPad 统一流程 + Configurator/扫码两种送达；多台 iOS 定向 ECID。
+- TC-MDT-12：Apple Configurator 需要手机端交互时页面显示待用户确认而非失败。
+- TC-MDT-13：`ios_1` ~ `ios_7` 共享图文步骤。
+- TC-MDT-14：Android CA 状态语义（`pushed_to_device` vs `installed`）。
+- TC-MDT-15：Availability Check 端到端：扫码、代理授权、page_opened、probe 端口、HTTPS 信任、代理已配置、成功后代理配置 QR、失败下一步指引；管理端和公开页靠 push 自动刷新；多 IP 时手机页推荐 URL 中 IP。
+- TC-MDT-16：公开 endpoint 不受交互式访问控制误拦截；未授权设备写入 pending。
+- TC-MDT-17：代理授权弹窗简洁；Availability Check 入口在 Certificate 顶部。
+- TC-MDT-18：实验性 iOS Wi-Fi Proxy Profile 移除回归（旧下载 404，UI 无 Wi-Fi 输入/风险确认/入口）。
+- TC-MDT-19：手机公开页窄屏稳定性（未信任状态 5 秒内 DOM 稳定）。
+- 附加：`human_tests/mobile-availability-terminal.md` 与本文档共享 push 通道，回归时一并跑 `e2e-tests/tests/test_mobile_availability_terminal_panel.sh`。
 
-## Review/Fix/Test 闭环方案
+## Review/Fix/Test 闭环
 
-第 1 轮：
+### 第 1 轮
 
-- 复核用户目标、普通/受管模式边界、API 安全限制、UI 文案。
-- 执行 `git status --short`、`git diff`。
-- 运行 `cargo test -p bifrost-device`、`cargo test -p bifrost-admin mobile_devices cert`、相关 E2E、human_tests。
-- 修复发现的问题并复跑失败路径。
+- 复核用户目标与边界（personal / managed_auto_trust / availability_check）。
+- `git status --short` + `git diff`。
+- 运行 `cargo test -p bifrost-device`、`cargo test -p bifrost-admin mobile_devices cert trust_probe`、相关 E2E、human_tests。
+- 重点 review：本机 CA install / mobile install 两条路径的确认字符串保护；probe listener 端口回填；`.invalid` 分流；push scope 首次快照补发。
+- 修复后复跑失败路径。
 
-第 2 轮：
+### 第 2 轮
 
-- 基于最新 diff 复查新增 crate、Admin handler、Web UI、design、human_tests 索引。
+- 基于最新 diff 复查 `bifrost-device`、Admin handler、Web UI（`CertificateTab.tsx`、`MobileDeviceTrustPrompt`、`AvailabilityCheckPanel`、`AvailabilityCheckNotificationCenter`）、design、human_tests 索引。
 - 复跑受影响测试和格式检查。
-- 若发现 UI 文案误导、测试缺口或接口状态不一致，继续追加第 3 轮。
+- 若发现 UI 文案误导（如误称自动信任）、多 IP 提示错误、`proxy_config_failed` 未回落、窄屏抖动，追加第 3 轮。
 
 ## 校验要求
 
-- 先执行本次相关 E2E 和 human_tests。
+- 先跑本次相关 E2E 与 human_tests。
 - 最后执行 rust-project-validate：
   - `cargo fmt --all -- --check`
   - `cargo fmt --manifest-path desktop/src-tauri/Cargo.toml --all -- --check`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test -p bifrost-device`
-- `cargo test -p bifrost-cli ca_install_mobile`
-- `cargo test -p bifrost-admin`
-- `cargo test -p bifrost-e2e admin_api`
+  - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+  - `cargo test -p bifrost-device`
+  - `cargo test -p bifrost-cli ca_install_mobile`
+  - `cargo test -p bifrost-admin`
+  - `cargo test -p bifrost-e2e admin_api`
   - `cargo test --workspace --all-features`
-  - 需要时执行 `scripts/ci/local-ci.sh`
+  - 需要时执行 `scripts/ci/local-ci.sh`。
 
-## 文档更新要求
+## 风险与决策点
 
-- 更新 `human_tests/readme.md`。
-- 更新 README 和 `docs/getting-started.md`，把设备可用性检查作为手机/跨设备排障的高优先级入口说明。
+- **多网卡 preferred IP 误判**：服务端只做启发式默认；一旦手机页真的用某 IP 打开，公开页顶部展示的目标代理服务与 proxy QR 必须以 URL hostname 为准。
+- **手机 App 信任不等于 TLS 解密全成功**：Android App 可能默认不信任用户 CA、部分 App 有 pinning；Availability Check 只承诺当前浏览器 TLS 链路，不承诺全平台 App。
+- **iOS Wi-Fi Proxy Profile 已废弃**：Apple managed Wi-Fi payload 稳定性差，改为始终手动配置 Wi-Fi HTTP Proxy，完成后再手动改回 Off。
+- **Apple Configurator `cfgutil` 缺失**：不静默安装 App Store 应用，由 macOS 弹窗让用户确认；安装后如仍无 `cfgutil`，提示在 Configurator 内安装 Automation Tools。
+- **push scope 空转开销**：`mobile_devices` 只在存在订阅者时周期性探测 USB/ADB/cfgutil，避免无用户时也占用 ADB/cfgutil 子进程。
+- **文档更新范围**：README、`docs/getting-started.md`、`site/src/content/docs/**/cli*.md` 必须一起更新，避免 CLI help、docs 站、README 说法不一致。
