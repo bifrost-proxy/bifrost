@@ -9,12 +9,12 @@ struct RulesView: View {
     @State private var renameSheetVisible = false
     @State private var deleteAlertVisible = false
     @State private var copyFeedback = ""
+    @State private var autoSaveTask: Task<Void, Never>?
+    @State private var autoSaveState = RuleAutoSaveState.saved
 
     private var filteredRules: [RuleSummary] {
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
-        let sortedRules = appModel.rules.sorted {
-            ($0.sortOrder ?? Int.max, $0.name) < ($1.sortOrder ?? Int.max, $1.name)
-        }
+        let sortedRules = appModel.sortedRules
         guard !keyword.isEmpty else {
             return sortedRules
         }
@@ -26,6 +26,14 @@ struct RulesView: View {
             return false
         }
         return appModel.ruleDraftContent != detail.content
+    }
+
+    private var isFiltering: Bool {
+        !searchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private var selectedRuleIsProtected: Bool {
+        appModel.isDefaultRule(appModel.selectedRuleDetail?.name ?? appModel.selectedRuleName)
     }
 
     var body: some View {
@@ -85,6 +93,13 @@ struct RulesView: View {
         } message: {
             Text("Delete \"\(appModel.selectedRuleName ?? "")\"? This cannot be undone.")
         }
+        .onChange(of: appModel.selectedRuleName) { _ in
+            autoSaveTask?.cancel()
+            autoSaveState = .saved
+        }
+        .onDisappear {
+            autoSaveTask?.cancel()
+        }
     }
 
     private var listPane: some View {
@@ -92,26 +107,44 @@ struct RulesView: View {
             listHeader
             if filteredRules.isEmpty {
                 RulesEmptyStateView(title: appModel.rules.isEmpty ? "No rules" : "No matching rules")
-            } else {
+            } else if isFiltering {
                 ScrollView {
                     LazyVStack(spacing: 0) {
-                        ForEach(filteredRules) { rule in
-                            RuleRow(
-                                rule: rule,
-                                isSelected: appModel.selectedRuleName == rule.name,
-                                isBusy: appModel.isSavingRule
-                            ) {
-                                Task { await appModel.selectRule(rule.name) }
-                            } toggle: { enabled in
-                                Task {
-                                    await appModel.selectRule(rule.name)
-                                    await appModel.setSelectedRuleEnabled(enabled)
-                                }
-                            }
-                        }
+                        ruleRows
                     }
                 }
+            } else {
+                List {
+                    ruleRows
+                        .onMove { source, destination in
+                            appModel.moveRules(from: source, to: destination)
+                        }
+                }
+                .listStyle(.plain)
+                .scrollContentBackground(.hidden)
             }
+        }
+    }
+
+    private var ruleRows: some DynamicViewContent {
+        ForEach(filteredRules) { rule in
+            RuleRow(
+                rule: rule,
+                isSelected: appModel.selectedRuleName == rule.name,
+                isBusy: appModel.isSavingRule,
+                isProtected: appModel.isDefaultRule(rule.name),
+                canReorder: !isFiltering && !appModel.isDefaultRule(rule.name)
+            ) {
+                Task { await appModel.selectRule(rule.name) }
+            } toggle: { enabled in
+                Task {
+                    await appModel.selectRule(rule.name)
+                    await appModel.setSelectedRuleEnabled(enabled)
+                }
+            }
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
         }
     }
 
@@ -127,9 +160,11 @@ struct RulesView: View {
                         appModel.navigateFromRuleEditor(target)
                     },
                     onSave: {
-                        Task { await appModel.saveSelectedRule(content: appModel.ruleDraftContent) }
+                        saveDraftImmediately()
                     },
-                    onTextChanged: { _ in }
+                    onTextChanged: { text in
+                        scheduleAutoSave(text)
+                    }
                 )
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
@@ -176,6 +211,10 @@ struct RulesView: View {
                 Text(copyFeedback)
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
+            } else if appModel.selectedRuleDetail != nil {
+                Text(autoSaveStatusText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(autoSaveStatusColor)
             }
             Toggle("Enabled", isOn: Binding(
                 get: { appModel.selectedRuleDetail?.enabled ?? false },
@@ -183,7 +222,8 @@ struct RulesView: View {
             ))
             .toggleStyle(.switch)
             .font(.system(size: 11))
-            .disabled(appModel.selectedRuleDetail == nil || appModel.isSavingRule)
+            .disabled(appModel.selectedRuleDetail == nil || appModel.isSavingRule || selectedRuleIsProtected)
+            .help(selectedRuleIsProtected ? "Default rule is always enabled" : "Toggle rule")
 
             Button {
                 copyToPasteboard(appModel.ruleDraftContent)
@@ -193,25 +233,11 @@ struct RulesView: View {
             .buttonStyle(.borderless)
             .disabled(appModel.selectedRuleDetail == nil)
 
-            Button {
-                appModel.ruleDraftContent = appModel.selectedRuleDetail?.content ?? ""
-            } label: {
-                Label("Revert", systemImage: "arrow.uturn.backward")
-            }
-            .buttonStyle(.borderless)
-            .disabled(!hasUnsavedChanges || appModel.isSavingRule)
-
-            Button {
-                Task { await appModel.saveSelectedRule(content: appModel.ruleDraftContent) }
-            } label: {
-                Label("Save", systemImage: "square.and.arrow.down")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!hasUnsavedChanges || appModel.isSavingRule)
-
             Menu {
                 Button("Rename") { renameSheetVisible = true }
+                    .disabled(selectedRuleIsProtected)
                 Button("Delete", role: .destructive) { deleteAlertVisible = true }
+                    .disabled(selectedRuleIsProtected)
             } label: {
                 Image(systemName: "ellipsis.circle")
             }
@@ -238,12 +264,90 @@ struct RulesView: View {
             copyFeedback = ""
         }
     }
+
+    private var autoSaveStatusText: String {
+        if appModel.isAutoSavingRule || autoSaveState == .saving {
+            return "Saving..."
+        }
+        switch autoSaveState {
+        case .saved:
+            return hasUnsavedChanges ? "Pending" : "Saved"
+        case .pending:
+            return "Pending"
+        case .saving:
+            return "Saving..."
+        case .failed:
+            return "Save failed"
+        }
+    }
+
+    private var autoSaveStatusColor: Color {
+        switch autoSaveState {
+        case .failed:
+            return .red
+        case .pending:
+            return .orange
+        case .saving:
+            return .secondary
+        case .saved:
+            return .secondary
+        }
+    }
+
+    private func scheduleAutoSave(_ content: String) {
+        guard let name = appModel.selectedRuleName else {
+            return
+        }
+        autoSaveTask?.cancel()
+        guard appModel.selectedRuleDetail?.content != content else {
+            autoSaveState = .saved
+            return
+        }
+        autoSaveState = .pending
+        autoSaveTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            guard !Task.isCancelled, appModel.selectedRuleName == name else {
+                return
+            }
+            await saveDraft(name: name, content: content)
+        }
+    }
+
+    private func saveDraftImmediately() {
+        guard let name = appModel.selectedRuleName else {
+            return
+        }
+        autoSaveTask?.cancel()
+        let content = appModel.ruleDraftContent
+        Task { @MainActor in
+            await saveDraft(name: name, content: content)
+        }
+    }
+
+    private func saveDraft(name: String, content: String) async {
+        guard appModel.selectedRuleName == name else {
+            return
+        }
+        guard appModel.selectedRuleDetail?.content != content else {
+            autoSaveState = .saved
+            return
+        }
+        autoSaveState = .saving
+        await appModel.autosaveSelectedRule(name: name, content: content)
+        if appModel.selectedRuleDetail?.content == content {
+            autoSaveState = .saved
+        } else {
+            autoSaveState = .failed
+        }
+    }
 }
 
 private struct RuleRow: View {
     let rule: RuleSummary
     let isSelected: Bool
     let isBusy: Bool
+    let isProtected: Bool
+    let canReorder: Bool
     let action: () -> Void
     let toggle: (Bool) -> Void
 
@@ -262,14 +366,27 @@ private struct RuleRow: View {
                         .foregroundStyle(.secondary)
                 }
                 Spacer()
-                Toggle("", isOn: Binding(
-                    get: { rule.enabled },
-                    set: toggle
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .scaleEffect(0.72)
-                .disabled(isBusy)
+                if isProtected {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .help("Default rule is fixed and always enabled")
+                } else {
+                    Toggle("", isOn: Binding(
+                        get: { rule.enabled },
+                        set: toggle
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(.switch)
+                    .scaleEffect(0.72)
+                    .disabled(isBusy)
+                }
+                if canReorder {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.tertiary)
+                        .help("Drag to reorder")
+                }
             }
             .padding(.horizontal, 12)
             .frame(height: 50)
@@ -281,6 +398,13 @@ private struct RuleRow: View {
         }
         .buttonStyle(.plain)
     }
+}
+
+private enum RuleAutoSaveState {
+    case saved
+    case pending
+    case saving
+    case failed
 }
 
 private struct RulesEmptyStateView: View {

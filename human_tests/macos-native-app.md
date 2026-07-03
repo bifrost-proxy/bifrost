@@ -1024,6 +1024,33 @@
 - Rules 列表与详情两块大容器关闭 hover 缩放动画，保持白色卡片、描边和柔光，避免编辑器区域在 hover 时触发大面积重绘。
 - release scope 仍然只暴露 `活动,概览,规则,网络`，traffic table performance smoke 通过。
 
+### TC-MNA-37：回归 - Rules 原生交互契约与自动保存
+
+**操作步骤：**
+1. 执行 Swift build 与 core contract：
+   ```bash
+   swift run --package-path apps/macos BifrostNativeCoreChecks
+   swift build --package-path apps/macos
+   ```
+2. 检查 Default 规则保护、拖拽排序、自动保存和 Rules 顶部按钮：
+   ```bash
+   rg -n 'isDefaultRule|moveRules\\(|reorderRules|autosaveSelectedRule|RuleAutoSaveState|onMove|Save|Revert|Button\\(\"刷新\"|刷新设备|重新生成 QR' \
+     apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
+   ```
+3. 执行设置数据 smoke，确认移除刷新按钮后页面切入数据仍可自动获取：
+   ```bash
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data
+   ```
+
+**预期结果：**
+- AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且拖拽排序时不能移动 Default。
+- Rules 列表对非搜索状态支持拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化；搜索状态只筛选查看，不做排序。
+- Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
+- 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
+- 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
+
 ## 清理步骤
 
 ```bash

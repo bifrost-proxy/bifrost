@@ -33,6 +33,7 @@ final class AppModel: ObservableObject {
     @Published var selectedRuleDetail: RuleDetail?
     @Published var ruleDraftContent = ""
     @Published var isSavingRule = false
+    @Published var isAutoSavingRule = false
     @Published var selectedValueName: String?
     @Published var selectedValueDraft = ""
     @Published var isSavingValue = false
@@ -67,6 +68,7 @@ final class AppModel: ObservableObject {
     private var trafficDeltaFlushTask: Task<Void, Never>?
     private var trafficHistoryTask: Task<Void, Never>?
     private var nativeUpdateTask: Task<Void, Never>?
+    private var ruleOrderSaveTask: Task<Void, Never>?
     private var promptedNativeUpdateVersions = Set<String>()
     private var pendingTrafficInserts: [TrafficRecordSummary] = []
     private var pendingTrafficUpdates: [TrafficRecordSummary] = []
@@ -380,6 +382,16 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func isDefaultRule(_ name: String?) -> Bool {
+        name == "Default"
+    }
+
+    var sortedRules: [RuleSummary] {
+        rules.sorted {
+            ($0.sortOrder ?? Int.max, $0.name) < ($1.sortOrder ?? Int.max, $1.name)
+        }
+    }
+
     func selectRule(_ name: String) async {
         selectedRuleName = name
         do {
@@ -390,6 +402,28 @@ final class AppModel: ObservableObject {
         } catch {
             selectedRuleDetail = nil
             ruleDraftContent = ""
+            dataError = error.localizedDescription
+        }
+    }
+
+    func autosaveSelectedRule(name: String, content: String) async {
+        guard selectedRuleName == name else {
+            return
+        }
+        guard selectedRuleDetail?.content != content else {
+            return
+        }
+        isAutoSavingRule = true
+        defer { isAutoSavingRule = false }
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            try await client.updateRule(name: name, content: content)
+            if selectedRuleName == name {
+                selectedRuleDetail?.content = content
+            }
+            dataError = nil
+        } catch {
             dataError = error.localizedDescription
         }
     }
@@ -441,6 +475,10 @@ final class AppModel: ObservableObject {
         guard let name = selectedRuleName else {
             return
         }
+        guard !isDefaultRule(name) || enabled else {
+            dataError = "Default rule must stay enabled."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
@@ -458,6 +496,10 @@ final class AppModel: ObservableObject {
 
     func renameSelectedRule(to newName: String) async {
         guard let oldName = selectedRuleName else {
+            return
+        }
+        guard !isDefaultRule(oldName) else {
+            dataError = "Default rule cannot be renamed."
             return
         }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -487,6 +529,10 @@ final class AppModel: ObservableObject {
         guard let name = selectedRuleName else {
             return
         }
+        guard !isDefaultRule(name) else {
+            dataError = "Default rule cannot be deleted."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
@@ -503,6 +549,47 @@ final class AppModel: ObservableObject {
             dataError = nil
         } catch {
             dataError = error.localizedDescription
+        }
+    }
+
+    func moveRules(from source: IndexSet, to destination: Int) {
+        var ordered = sortedRules
+        guard source.allSatisfy({ index in
+            ordered.indices.contains(index) && !isDefaultRule(ordered[index].name)
+        }) else {
+            return
+        }
+        ordered.move(fromOffsets: source, toOffset: destination)
+        if let defaultIndex = ordered.firstIndex(where: { isDefaultRule($0.name) }), defaultIndex != 0 {
+            let defaultRule = ordered.remove(at: defaultIndex)
+            ordered.insert(defaultRule, at: 0)
+        }
+        rules = ordered.enumerated().map { offset, rule in
+            var updated = rule
+            updated.sortOrder = offset
+            return updated
+        }
+        scheduleRuleOrderSave(order: ordered.map(\.name))
+    }
+
+    private func scheduleRuleOrderSave(order: [String]) {
+        ruleOrderSaveTask?.cancel()
+        ruleOrderSaveTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.saveRuleOrder(order)
+        }
+    }
+
+    private func saveRuleOrder(_ order: [String]) async {
+        do {
+            try await BifrostClient(baseURL: adminURL).reorderRules(order)
+            dataError = nil
+        } catch {
+            dataError = error.localizedDescription
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
         }
     }
 
