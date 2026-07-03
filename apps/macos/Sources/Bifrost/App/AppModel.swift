@@ -7,6 +7,7 @@ final class AppModel: ObservableObject {
     private enum TrafficSyncPolicy {
         static let initialWindowLimit = 160
         static let historyBatchLimit = 500
+        static let maxNativeRecords = 240
         static let maxPendingIds = 500
     }
 
@@ -52,6 +53,8 @@ final class AppModel: ObservableObject {
     @Published var realtimeClientId: Int?
     @Published var realtimeFallbackActive = false
     @Published var lastRealtimeEventAt: Date?
+    @Published private(set) var activityClientAppCounts: [(name: String, count: Int)] = []
+    @Published private(set) var activityClientIpCounts: [(name: String, count: Int)] = []
 
     private let sidecarManager: SidecarManager?
     private var didEnsureService = false
@@ -117,25 +120,43 @@ final class AppModel: ObservableObject {
         }
     }
 
-    func refreshData(includeTraffic: Bool? = nil) async {
+    func refreshData(
+        includeTraffic: Bool? = nil,
+        includeOverview: Bool = true,
+        includeRules: Bool = true,
+        includeSystemControls: Bool = true
+    ) async {
         isLoadingData = true
         defer { isLoadingData = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            async let overview = client.fetchSystemOverview()
-            async let rules = client.fetchRules()
-            async let systemProxy = client.fetchSystemProxy()
-            async let tlsConfig = client.fetchTlsConfig()
-            async let breakpointSettings = client.fetchBreakpointSettings()
 
             var errors: [String] = []
             let shouldLoadTraffic = includeTraffic ?? selectedSidebarItem.needsTrafficRecords
+            async let overviewResult: Result<SystemOverview, Error>? = includeOverview
+                ? Self.captureResult { try await client.fetchSystemOverview() }
+                : nil
+            async let rulesResult: Result<[RuleSummary], Error>? = includeRules
+                ? Self.captureResult { try await client.fetchRules() }
+                : nil
+            async let systemProxyResult: Result<SystemProxyStatus, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchSystemProxy() }
+                : nil
+            async let tlsConfigResult: Result<TlsConfig, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchTlsConfig() }
+                : nil
+            async let breakpointResult: Result<BreakpointSettings, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchBreakpointSettings() }
+                : nil
 
-            do {
-                self.overview = try await overview
-            } catch {
-                errors.append("Overview: \(error.localizedDescription)")
+            if let result = await overviewResult {
+                switch result {
+                case .success(let overview):
+                    self.overview = overview
+                case .failure(let error):
+                    errors.append("Overview: \(error.localizedDescription)")
+                }
             }
 
             if shouldLoadTraffic {
@@ -146,40 +167,59 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            do {
-                self.rules = try await rules
-            } catch {
-                errors.append("Rules: \(error.localizedDescription)")
+            if let result = await rulesResult {
+                switch result {
+                case .success(let rules):
+                    self.rules = rules
+                case .failure(let error):
+                    errors.append("Rules: \(error.localizedDescription)")
+                }
             }
 
-            do {
-                self.systemProxyStatus = try await systemProxy
-            } catch {
-                errors.append("System Proxy: \(error.localizedDescription)")
+            if let result = await systemProxyResult {
+                switch result {
+                case .success(let status):
+                    self.systemProxyStatus = status
+                case .failure(let error):
+                    errors.append("System Proxy: \(error.localizedDescription)")
+                }
             }
 
-            do {
-                self.tlsConfig = try await tlsConfig
-            } catch {
-                errors.append("TLS: \(error.localizedDescription)")
+            if let result = await tlsConfigResult {
+                switch result {
+                case .success(let config):
+                    self.tlsConfig = config
+                case .failure(let error):
+                    errors.append("TLS: \(error.localizedDescription)")
+                }
             }
 
-            do {
-                self.breakpointSettings = try await breakpointSettings
-            } catch {
-                errors.append("Breakpoint: \(error.localizedDescription)")
+            if let result = await breakpointResult {
+                switch result {
+                case .success(let settings):
+                    self.breakpointSettings = settings
+                case .failure(let error):
+                    errors.append("Breakpoint: \(error.localizedDescription)")
+                }
             }
 
-            if selectedRuleName == nil {
+            if includeRules && selectedRuleName == nil {
                 selectedRuleName = self.rules.first?.name
             }
             self.dataError = errors.isEmpty ? nil : errors.joined(separator: " · ")
-            if shouldLoadTraffic {
-                await selectInitialTrafficRecordIfNeeded()
-            }
             updateRealtimeSubscription()
         } catch {
             self.dataError = error.localizedDescription
+        }
+    }
+
+    private nonisolated static func captureResult<T: Sendable>(
+        _ operation: @Sendable () async throws -> T
+    ) async -> Result<T, Error> {
+        do {
+            return .success(try await operation())
+        } catch {
+            return .failure(error)
         }
     }
 
@@ -190,7 +230,20 @@ final class AppModel: ObservableObject {
             trafficHistoryTask = nil
         }
         updateRealtimeSubscription()
-        await refreshData(includeTraffic: selectedSidebarItem.needsTrafficRecords)
+        await refreshSelectedSidebarData()
+    }
+
+    private func refreshSelectedSidebarData() async {
+        switch selectedSidebarItem {
+        case .activity:
+            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false)
+        case .overview:
+            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: true)
+        case .rules:
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
+        case .network:
+            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: false)
+        }
     }
 
     func selectRule(_ name: String) async {
@@ -592,6 +645,7 @@ final class AppModel: ObservableObject {
             clearPendingTrafficDelta()
             trafficRecords = []
             trafficRecordIndexById = [:]
+            refreshActivityTrafficSummaries()
             dataError = nil
             await refreshData()
         } catch {
@@ -788,10 +842,12 @@ final class AppModel: ObservableObject {
 
         trafficRecords = initialRecords
         rebuildTrafficRecordIndex()
+        trimNativeTrafficRecordsIfNeeded()
         trafficServerTotal = response.serverTotal
         trafficServerSequence = response.serverSequence
         trafficHasMore = response.hasMore
         refreshTrafficBoundaryState()
+        refreshActivityTrafficSummaries()
         rebuildPendingTrafficIds()
         updateRealtimeSubscription()
 
@@ -896,7 +952,7 @@ final class AppModel: ObservableObject {
         }
         realtimeFallbackActive = realtimeState != .connected
         if realtimeFallbackActive {
-            await refreshData(includeTraffic: selectedSidebarItem.needsTrafficRecords)
+            await refreshSelectedSidebarData()
         }
     }
 
@@ -1021,12 +1077,10 @@ final class AppModel: ObservableObject {
             trafficRecords.sort(by: trafficRecordSortOrder)
             rebuildTrafficRecordIndex()
         }
+        trimNativeTrafficRecordsIfNeeded()
         refreshTrafficBoundaryState()
+        refreshActivityTrafficSummaries()
         rebuildPendingTrafficIds()
-
-        Task {
-            await selectInitialTrafficRecordIfNeeded()
-        }
     }
 
     private func mergeTrafficRecord(
@@ -1066,6 +1120,7 @@ final class AppModel: ObservableObject {
         trafficRecords.removeAll { deleted.contains($0.id) }
         rebuildTrafficRecordIndex()
         refreshTrafficBoundaryState()
+        refreshActivityTrafficSummaries()
         rebuildPendingTrafficIds()
         trafficServerTotal = max(trafficServerTotal - ids.count, 0)
         if let selectedTrafficId, deleted.contains(selectedTrafficId) {
@@ -1116,14 +1171,6 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func selectInitialTrafficRecordIfNeeded() async {
-        guard selectedTrafficId == nil,
-              let firstRecord = displayedTrafficRecords.first ?? trafficRecords.first else {
-            return
-        }
-        await selectTrafficRecord(firstRecord)
-    }
-
     private func rebuildTrafficRecordIndex() {
         var indexById: [String: Int] = [:]
         indexById.reserveCapacity(trafficRecords.count)
@@ -1131,6 +1178,48 @@ final class AppModel: ObservableObject {
             indexById[record.id] = offset
         }
         trafficRecordIndexById = indexById
+    }
+
+    private func trimNativeTrafficRecordsIfNeeded() {
+        let overflow = trafficRecords.count - TrafficSyncPolicy.maxNativeRecords
+        guard overflow > 0 else {
+            return
+        }
+        let removedIds = Set(trafficRecords.prefix(overflow).map(\.id))
+        trafficRecords.removeFirst(overflow)
+        rebuildTrafficRecordIndex()
+        if let selectedTrafficId, removedIds.contains(selectedTrafficId) {
+            self.selectedTrafficId = nil
+            selectedTrafficDetailText = ""
+            selectedTrafficRequestBodyText = ""
+            selectedTrafficResponseBodyText = ""
+        }
+    }
+
+    private func refreshActivityTrafficSummaries() {
+        var apps: [String: Int] = [:]
+        var ips: [String: Int] = [:]
+        for record in trafficRecords {
+            if let clientApp = record.clientApp, !clientApp.isEmpty {
+                apps[clientApp, default: 0] += 1
+            }
+            if let clientIp = record.clientIp, !clientIp.isEmpty {
+                ips[clientIp, default: 0] += 1
+            }
+        }
+        activityClientAppCounts = sortedCounts(apps)
+        activityClientIpCounts = sortedCounts(ips)
+    }
+
+    private func sortedCounts(_ values: [String: Int]) -> [(name: String, count: Int)] {
+        values
+            .map { (name: $0.key, count: $0.value) }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count {
+                    return lhs.count > rhs.count
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
     }
 
     private func refreshTrafficBoundaryState() {

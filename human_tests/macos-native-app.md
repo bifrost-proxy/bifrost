@@ -656,6 +656,41 @@
 - `--check-admin-data` 输出 `traffic_limit=<服务端 max_records>`、`traffic_initial_window=<最新窗口数>`、`traffic_history_page=<历史回填页数>` 和 `traffic_retained_records=<实际返回数>`。
 - 切换到 Rules 或 Settings 后，Native 必须发送 `need_traffic=false` 停止 traffic push/polling；切回 Network 时重新加载最新窗口并按 `last_sequence` / `pending_ids` 恢复增量同步。
 
+### TC-MNA-25：回归 - 主窗口切换 tab 不触发全量刷新和重复统计
+
+**操作步骤：**
+1. 构建 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+2. 执行 release scope smoke：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-release-scope
+   ```
+3. 检查主窗口刷新策略和 Activity 统计缓存：
+   ```bash
+   rg -n 'refreshSelectedSidebarData|includeOverview|includeRules|includeSystemControls|maxNativeRecords|activityClientAppCounts|activityClientIpCounts|selectInitialTrafficRecordIfNeeded' \
+     apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
+   ! rg -n 'selectInitialTrafficRecordIfNeeded' apps/macos/Sources/Bifrost/App/AppModel.swift
+   ```
+4. 打开 Native `.app`，依次快速点击 `活动`、`概览`、`规则`、`网络`、`活动`：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- Activity 切换只加载 overview + traffic，不加载 rules 或 system controls；Overview 切换只加载 overview + system controls，不加载 traffic/rules；Rules 切换只加载 overview + rules，不加载 traffic/system controls；Network 切换不触发 Native traffic 工作台刷新。
+- `AppModel` 保留 `activityClientAppCounts` 与 `activityClientIpCounts` 缓存，并在 traffic reload/merge/delete/clear 后更新；`ActivityView` 使用缓存统计，不在 SwiftUI render 路径反复遍历 `trafficRecords`。
+- Native 主窗口只保留轻量 traffic 窗口，`maxNativeRecords` 限制 Activity 控制台指标的本地记录数量；复杂 Network 历史列表仍由浏览器 Web UI 处理。
+- 切换主导航不预取隐藏 traffic 详情，不调用 `selectInitialTrafficRecordIfNeeded` 作为 tab 切换副作用；只有用户进入需要详情的 Network/WebUI 路径时才按需加载复杂数据。
+- 连续快速切换四个主入口时，页面标题和首屏卡片应立即出现，不应出现明显卡住后才渲染的空白等待。
+
+**执行记录：**
+- 2026-07-03：执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app` 并输出 `BifrostNativeCoreChecks passed`。
+- 2026-07-03：执行源码检查命令，确认存在 `refreshSelectedSidebarData`、按页 `includeOverview/includeRules/includeSystemControls`、`maxNativeRecords` 和 `activityClientAppCounts/activityClientIpCounts` 缓存路径，且不存在 `selectInitialTrafficRecordIfNeeded` 隐藏预取 helper；当前机器辅助访问/截图权限不稳定，人工点击观察项需在有 UI 权限环境复核。
+
 ## 清理步骤
 
 ```bash
