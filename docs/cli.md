@@ -165,7 +165,7 @@ bifrost start --disable-badge-injection
 bifrost start --enable-badge-injection
 ```
 
-`bifrost start -d` 是普通用户推荐的后台启动方式；`bifrost start` 适合需要查看实时日志的前台模式。默认配置会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost。TLS 抓包不是默认建议，应按需通过规则级 `tlsIntercept://`、`--intercept-include` 或 `--app-intercept-include` 收窄到目标域名/应用；遇到 SSL pinning 应用时，用 `tlsPassthrough://`、`--intercept-exclude` 或 `--app-intercept-exclude` 排除。需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA；`ca generate` / `ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。`--no-system-proxy`、`--unsafe-ssl` 和 `--skip-cert-check` 是测试/诊断选项，不应作为普通启动路径。
+`bifrost start -d` 是普通用户推荐的后台启动方式；`bifrost start` 适合需要查看实时日志的前台模式。`bifrost start` 默认会启用系统代理，最快让浏览器和桌面应用流量进入 Bifrost。TLS 抓包不是默认建议，应按需通过规则级 `tlsIntercept://`、`--intercept-include` 或 `--app-intercept-include` 收窄到目标域名/应用；遇到 SSL pinning 应用时，用 `tlsPassthrough://`、`--intercept-exclude` 或 `--app-intercept-exclude` 排除。需要 TLS 抓包时，服务启动流程会自动生成并安装 Bifrost CA；`ca generate` / `ca install` 主要用于手动修复或诊断证书状态。默认访问控制模式为 `interactive`：本机 loopback 直接允许，非本机地址需要管理端审批、白名单或显式 `--allow-lan` / `--access-mode` 放行。`--no-system-proxy`、`--unsafe-ssl` 和 `--skip-cert-check` 是测试/诊断选项，不应作为普通启动路径。
 
 当检测到已有 Bifrost 进程在运行时，`bifrost start` 会在终端提示是否重启：输入 `y/yes` 将停止旧进程并重新启动；输入 `n/no` 将取消本次启动。
 

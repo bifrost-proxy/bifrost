@@ -1,10 +1,7 @@
 ---
 title: "响应改写"
 description: "响应头、响应体与相关字段的改写说明。"
-editUrl: false
-sidebar:
-  label: "响应改写"
-  order: 230
+editLink: false
 ---
 
 > 此页面由 `docs/rules/response-modification.md` 自动同步生成。

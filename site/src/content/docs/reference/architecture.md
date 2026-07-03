@@ -1,10 +1,7 @@
 ---
 title: "项目结构与模块说明"
 description: "Bifrost 代码仓库结构与核心模块说明。"
-editUrl: false
-sidebar:
-  label: "项目结构与模块说明"
-  order: 180
+editLink: false
 ---
 
 > 此页面由 `docs/architecture.md` 自动同步生成。

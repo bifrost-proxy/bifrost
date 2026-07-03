@@ -1,10 +1,7 @@
 ---
 title: "规则引擎"
 description: "Bifrost 规则系统的能力全景与配置入口。"
-editUrl: false
-sidebar:
-  label: "规则引擎"
-  order: 120
+editLink: false
 ---
 
 > 此页面由 `docs/rule.md` 自动同步生成。
@@ -20,8 +17,8 @@ pattern operation [operations...] [filters...] [lineProps://...]
 
 | 组成部分      | 是否必填 | 描述                                                          |
 | :------------ | :------- | :------------------------------------------------------------ |
-| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](../patterns/)           |
-| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](../operations/) |
+| **pattern**   | 是       | 匹配请求 URL 的表达式，详见 [pattern](./patterns)           |
+| **operation** | 是       | 操作指令 `protocol://value`，详见 [operation](./operations) |
 | **filters**   | 否       | 过滤条件，详见下文                                            |
 | **lineProps** | 否       | 规则属性，详见下文                                            |
 
@@ -40,7 +37,7 @@ Pattern 根据格式自动识别类型，优先级影响匹配顺序：
 
 Domain 优先级以 100 为基准，显式协议（`http(s)://`）+5、显式端口 +10，因此带协议带端口的 Domain pattern 可达 100-115。CIDR 优先级为 `70 + prefix_len/4`（约 70-78），低于 Regex（80），因此一条宽泛的 CIDR（如 `/16`）可能排在 Regex 之后；只有精确 IP 才是 95。
 
-取反匹配：所有类型的 pattern 都接受 `!` 前缀（如 `!*.example.com`），且能正常解析、规则状态为 Running；但实测在当前版本（0.0.96）取反匹配在运行时**不产生效果**——非匹配的请求并不会因取反而命中规则（无论是 `resHeaders://` 注入还是 `host://` 改目标，均未触发），因此暂不要依赖 `!` 前缀。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](../patterns/)。
+取反匹配：所有类型的 pattern 都接受 `!` 前缀（如 `!*.example.com`），且能正常解析、规则状态为 Running；但实测在当前版本（0.0.96）取反匹配在运行时**不产生效果**——非匹配的请求并不会因取反而命中规则（无论是 `resHeaders://` 注入还是 `host://` 改目标，均未触发），因此暂不要依赖 `!` 前缀。完整的类型检测顺序、优先级与协议前缀注意事项见 [pattern.md](./patterns)。
 
 ## 高级配置
 
@@ -311,4 +308,4 @@ internal-api.example.test https://10.37.102.138:8080 upstreamUnsafeSsl://true
 
 ## 扩展阅读
 
-- [规则协议手册](../rules/)：按协议查看各能力说明与示例
+- [规则协议手册](./rules/)：按协议查看各能力说明与示例

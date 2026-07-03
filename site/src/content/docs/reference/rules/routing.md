@@ -1,10 +1,7 @@
 ---
 title: "路由控制"
 description: "规则路由、转发与代理控制说明。"
-editUrl: false
-sidebar:
-  label: "路由控制"
-  order: 210
+editLink: false
 ---
 
 > 此页面由 `docs/rules/routing.md` 自动同步生成。
@@ -127,7 +124,7 @@ api.example.com https://backend.example.com
 api.example.com/v1 https://10.0.0.10:8443
 ```
 
-若目标是 WebSocket，请优先使用 [WebSocket 规则](../websocket/) 中的 `ws://` / `wss://`。
+若目标是 WebSocket，请优先使用 [WebSocket 规则](./websocket) 中的 `ws://` / `wss://`。
 
 ### HTTPS CONNECT 行为
 

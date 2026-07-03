@@ -1,14 +1,11 @@
 ---
 title: "Desktop Installation and Build"
 description: "Desktop app installation, local build steps, and notes."
-editUrl: false
-sidebar:
-  label: "Desktop Installation and Build"
-  order: 40
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/desktop.md`.
-> Language: **English** | [中文](../../../getting-started/desktop/)
+> Language: **English** | [中文](../../getting-started/desktop)
 
 # Desktop Installation and Build
 

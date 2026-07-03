@@ -1,10 +1,7 @@
 ---
 title: "过滤器"
 description: "请求与响应过滤条件的配置方式。"
-editUrl: false
-sidebar:
-  label: "过滤器"
-  order: 280
+editLink: false
 ---
 
 > 此页面由 `docs/rules/filters.md` 自动同步生成。

@@ -16,7 +16,7 @@ const knownPages = new Map(
     [
       "docs/README.md",
       {
-        target: "reference/index.mdx",
+        target: "reference/index.md",
         title: "文档总览",
         description: "Bifrost 文档目录与推荐阅读路径。",
         order: 1,
@@ -25,7 +25,7 @@ const knownPages = new Map(
     [
       "docs/overview.md",
       {
-        target: "getting-started/overview.mdx",
+        target: "getting-started/overview.md",
         title: "项目概览",
         description: "用几分钟理解 Bifrost 的定位、能力边界和适合的使用场景。",
         order: 10,
@@ -34,7 +34,7 @@ const knownPages = new Map(
     [
       "docs/getting-started.md",
       {
-        target: "getting-started/installation.mdx",
+        target: "getting-started/installation.md",
         title: "安装与启动",
         description: "按照 docs/getting-started.md 的最新方式安装和启动 Bifrost。",
         order: 20,
@@ -252,7 +252,7 @@ const knownEnglishPages = new Map(
     [
       "docs-en/README.md",
       {
-        target: "en/reference/index.mdx",
+        target: "en/reference/index.md",
         title: "Documentation Overview",
         description: "Bifrost documentation directory and recommended reading paths.",
         order: 1,
@@ -261,7 +261,7 @@ const knownEnglishPages = new Map(
     [
       "docs-en/overview.md",
       {
-        target: "en/getting-started/overview.mdx",
+        target: "en/getting-started/overview.md",
         title: "Project Overview",
         description: "Understand Bifrost positioning, scope, and common use cases.",
         order: 10,
@@ -270,7 +270,7 @@ const knownEnglishPages = new Map(
     [
       "docs-en/getting-started.md",
       {
-        target: "en/getting-started/installation.mdx",
+        target: "en/getting-started/installation.md",
         title: "Installation and Startup",
         description: "Install and start Bifrost using the English documentation path.",
         order: 20,
@@ -540,7 +540,7 @@ function defaultTargetForSource(source) {
   const parsed = path.posix.parse(relative);
 
   if (relative === "README.md") {
-    return isEnglish ? "en/reference/index.mdx" : "reference/index.mdx";
+    return isEnglish ? "en/reference/index.md" : "reference/index.md";
   }
   if (parsed.base === "README.md") {
     return `${isEnglish ? "en/" : ""}reference/${parsed.dir}/index.md`;
@@ -626,10 +626,7 @@ function frontmatter(page) {
     "---",
     `title: ${quoteYaml(page.title)}`,
     `description: ${quoteYaml(page.description)}`,
-    "editUrl: false",
-    "sidebar:",
-    `  label: ${quoteYaml(page.title)}`,
-    `  order: ${page.order}`,
+    "editLink: false",
     "---",
     "",
     page.source.startsWith("docs-en/")
@@ -645,7 +642,15 @@ export function toRoutePath(target) {
     const dir = normalized.replace(/\/index\.mdx?$/, "");
     return dir.length === 0 ? "./" : `${dir}/`;
   }
-  return `${normalized.replace(/\.mdx?$/, "")}/`;
+  return normalized.replace(/\.mdx?$/, "");
+}
+
+function routeDirForTarget(target) {
+  const normalized = normalizePath(target).replace(/\.mdx?$/, "");
+  if (normalized.endsWith("/index")) {
+    return normalized.slice(0, -"/index".length) || ".";
+  }
+  return path.posix.dirname(normalized);
 }
 
 export function rewriteMarkdownLinks(markdown, page, targetMap) {
@@ -665,7 +670,7 @@ export function rewriteMarkdownLinks(markdown, page, targetMap) {
     }
 
     let relativeRoute = normalizePath(
-      path.posix.relative(toRoutePath(page.target), toRoutePath(mappedTarget)),
+      path.posix.relative(routeDirForTarget(page.target), toRoutePath(mappedTarget)),
     );
     if (!relativeRoute) {
       relativeRoute = ".";

@@ -1,14 +1,11 @@
 ---
 title: "URL Manipulation"
 description: "URL, path, and query-parameter rewrite capabilities."
-editUrl: false
-sidebar:
-  label: "URL Manipulation"
-  order: 240
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/url-manipulation.md`.
-> Language: **English** | [中文](../../../../reference/rules/url-manipulation/)
+> Language: **English** | [中文](../../../reference/rules/url-manipulation)
 
 # URL Manipulation Rules
 

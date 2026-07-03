@@ -218,6 +218,7 @@ h1 {
 
 .terminal-window,
 .ui-window,
+.ai-window,
 .rules-window {
   height: 352px;
   margin: 0;
@@ -251,6 +252,66 @@ h1 {
   display: grid;
   gap: 14px;
   align-content: start;
+}
+
+.ai-window {
+  height: auto;
+  min-height: 352px;
+  overflow: visible;
+  padding: 20px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.ai-step,
+.agent-case,
+.ai-result {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.ai-step {
+  min-height: 72px;
+  padding: 14px 16px;
+  display: grid;
+  gap: 8px;
+}
+
+.ai-step strong,
+.agent-case span {
+  font-size: 13px;
+  color: var(--teal);
+  text-transform: uppercase;
+  font-weight: 850;
+}
+
+.ai-step code {
+  overflow: hidden;
+  color: #17241f;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-case {
+  min-height: 114px;
+  padding: 16px;
+}
+
+.agent-case p {
+  margin: 9px 0 0;
+  color: var(--ink);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.ai-result {
+  padding: 14px 16px;
+  color: var(--muted);
+  font-weight: 760;
+  line-height: 1.5;
 }
 
 .traffic-list,
@@ -423,9 +484,17 @@ h2 {
   }
 
   .terminal-window,
-  .ui-window {
+  .ui-window,
+  .ai-window,
+  .ai-step,
+  .agent-case,
+  .ai-result {
     color: var(--ink);
     background: rgba(13, 18, 17, 0.86);
+  }
+
+  .ai-step code {
+    color: var(--ink);
   }
 
   .terminal-window .ok {
@@ -466,6 +535,7 @@ h2 {
   .preview-panel,
   .terminal-window,
   .ui-window,
+  .ai-window,
   .rules-window {
     min-height: 300px;
     height: auto;

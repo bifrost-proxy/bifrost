@@ -1,10 +1,7 @@
 ---
 title: "规则优先级"
 description: "规则冲突与优先级处理方式。"
-editUrl: false
-sidebar:
-  label: "规则优先级"
-  order: 320
+editLink: false
 ---
 
 > 此页面由 `docs/rules/rule-priority.md` 自动同步生成。
@@ -21,7 +18,7 @@ Bifrost 规则的执行遵循两个核心原则：
 1. **转发类规则**：按规则优先级从高到低排序后，第一个匹配的生效
 2. **修改类规则**：相同部位的操作会合并，后面的覆盖前面的
 
-> ⚠️ **先决条件：优先级排序在文件顺序之前。** 引擎先按每条规则的 `priority()`（由 pattern 类型与精确度决定，`lineProps://important` 额外 +10000）从高到低排序，再处理匹配。**文件中的定义顺序只在"同优先级"的规则之间充当 tiebreaker。** 因此，更精确的 Domain 规则即使写在宽泛的 Wildcard 规则下面，仍然先生效。本章下文「先定义的优先」「顺序敏感」等描述，仅适用于 **pattern 相同（即优先级相同）** 的规则之间；不同优先级时由 pattern 类型/精确度决定胜负（详见 [pattern.md](../../patterns/) 优先级表）。
+> ⚠️ **先决条件：优先级排序在文件顺序之前。** 引擎先按每条规则的 `priority()`（由 pattern 类型与精确度决定，`lineProps://important` 额外 +10000）从高到低排序，再处理匹配。**文件中的定义顺序只在"同优先级"的规则之间充当 tiebreaker。** 因此，更精确的 Domain 规则即使写在宽泛的 Wildcard 规则下面，仍然先生效。本章下文「先定义的优先」「顺序敏感」等描述，仅适用于 **pattern 相同（即优先级相同）** 的规则之间；不同优先级时由 pattern 类型/精确度决定胜负（详见 [pattern.md](../patterns) 优先级表）。
 
 ---
 

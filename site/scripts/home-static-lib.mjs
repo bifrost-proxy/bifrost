@@ -132,7 +132,16 @@ export async function collectHomeErrors({
 
   const html = await fsp.readFile(htmlPath, "utf8");
   const errors = [];
-  const forbidden = ["%BASE_PATH%", "%HOME_CSS%", "%HOME_JS%", "astro-island", "/_astro/", "@vite/client"];
+  const forbidden = [
+    "%BASE_PATH%",
+    "%HOME_CSS%",
+    "%HOME_JS%",
+    "astro-island",
+    "/_astro/",
+    "@vite/client",
+    "vitepress-theme-appearance",
+    "VPNav",
+  ];
   for (const marker of forbidden) {
     if (html.includes(marker)) {
       errors.push(`Home page contains forbidden marker: ${marker}`);

@@ -1,10 +1,7 @@
 ---
 title: "安装与启动"
 description: "按照 docs/getting-started.md 的最新方式安装和启动 Bifrost。"
-editUrl: false
-sidebar:
-  label: "安装与启动"
-  order: 20
+editLink: false
 ---
 
 > 此页面由 `docs/getting-started.md` 自动同步生成。

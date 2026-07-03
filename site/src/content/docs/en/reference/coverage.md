@@ -1,14 +1,11 @@
 ---
 title: "Test Coverage Mechanism"
 description: "Automatically synced English Test Coverage Mechanism documentation from docs-en/coverage.md."
-editUrl: false
-sidebar:
-  label: "Test Coverage Mechanism"
-  order: 935
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/coverage.md`.
-> Language: **English** | [中文](../../../reference/coverage/)
+> Language: **English** | [中文](../../reference/coverage)
 
 # Test Coverage Mechanism
 

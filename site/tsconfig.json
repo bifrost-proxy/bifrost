@@ -1,6 +1,9 @@
 {
-  "extends": "astro/tsconfigs/strictest",
   "compilerOptions": {
-    "baseUrl": "."
+    "baseUrl": ".",
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "target": "ES2022",
+    "types": ["vitepress/client"]
   }
 }

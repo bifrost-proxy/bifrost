@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta
       name="description"
-      content="Bifrost is a fast proxy workbench for traffic capture, rewrite, replay, TLS interception, scripts, and desktop debugging workflows."
+      content="Bifrost is an AI-era one-stop proxy solution for traffic capture, rewrite, replay, TLS interception, scripts, and Coding Agent workflows."
     />
-    <title>Bifrost | Proxy Workbench</title>
+    <title>Bifrost | AI-era Proxy Solution</title>
     <link rel="icon" type="image/png" href="%BASE_PATH%favicon.png" />
     <link rel="stylesheet" href="%HOME_CSS%" />
     <script src="%HOME_JS%" defer></script>
@@ -20,7 +20,7 @@
       </a>
       <nav class="nav-links" aria-label="Primary navigation">
         <a href="%BASE_PATH%docs/" data-i18n="navDocs">Docs</a>
-        <a href="%BASE_PATH%getting-started/installation/" data-i18n="navInstall">Install</a>
+        <a href="%BASE_PATH%getting-started/installation" data-i18n="navInstall">Install</a>
         <a href="%BASE_PATH%en/reference/" data-i18n="navEnglish">English</a>
         <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
       </nav>
@@ -33,14 +33,14 @@
     <main>
       <section class="hero" aria-labelledby="hero-title">
         <div class="hero-copy">
-          <p class="eyebrow" data-i18n="heroEyebrow">HTTP / HTTPS / SOCKS5 / WebSocket / Replay</p>
+          <p class="eyebrow" data-i18n="heroEyebrow">AI-era proxy / Coding Agent ready</p>
           <h1 id="hero-title">Bifrost</h1>
           <p class="hero-text" data-i18n="heroText">
-            A proxy workbench for capturing traffic, rewriting requests, replaying failures,
-            and debugging real applications from the terminal, desktop, or browser.
+            A one-stop proxy solution for the AI era. Capture real traffic, rewrite and replay
+            requests, then hand the evidence to your Coding Agent so it can build useful skills.
           </p>
           <div class="hero-actions" aria-label="Primary actions">
-            <a class="button primary" href="%BASE_PATH%getting-started/installation/" data-i18n="primaryCta"
+            <a class="button primary" href="%BASE_PATH%getting-started/installation" data-i18n="primaryCta"
               >Install</a
             >
             <a class="button secondary" href="%BASE_PATH%docs/" data-i18n="secondaryCta">Read Docs</a>
@@ -53,7 +53,7 @@
               CLI
             </button>
             <button type="button" role="tab" aria-selected="false" aria-controls="panel-web" id="tab-web">
-              Web UI
+              With AI
             </button>
             <button
               type="button"
@@ -78,20 +78,25 @@
           </div>
 
           <div class="preview-panel" id="panel-web" role="tabpanel" aria-labelledby="tab-web" hidden>
-            <div class="ui-window" aria-label="Bifrost web interface preview">
-              <div class="traffic-list">
-                <span class="status ok-dot"></span>
-                <strong>POST</strong>
-                <span>/v1/orders</span>
-                <em>200</em>
+            <div class="ai-window" aria-label="Bifrost with AI workflow preview">
+              <div class="ai-step">
+                <strong data-i18n="aiStepOneTitle">Install the skill</strong>
+                <code>bifrost install-skill</code>
               </div>
-              <div class="traffic-list">
-                <span class="status warn-dot"></span>
-                <strong>GET</strong>
-                <span>/api/session</span>
-                <em>401</em>
+              <div class="ai-step">
+                <strong data-i18n="aiStepTwoTitle">Capture real traffic</strong>
+                <code>bifrost traffic search --include headers,body api.example.com</code>
               </div>
-              <div class="detail-card">Headers · Body · Cookies · Replay · Export</div>
+              <div class="agent-case">
+                <span data-i18n="aiCaseLabel">Agent case</span>
+                <p data-i18n="aiCaseText">
+                  “Help me capture the login API, understand the request and response shape, then
+                  implement a reusable Coding Agent skill for refreshing sessions.”
+                </p>
+              </div>
+              <div class="ai-result" data-i18n="aiResult">
+                Traffic evidence becomes rules, replay scripts, docs, and a working skill.
+              </div>
             </div>
           </div>
 
@@ -105,42 +110,44 @@ api.example.com replay://last-success
       </section>
 
       <section class="signal-strip" aria-label="Bifrost capabilities">
+        <span>AI-ready</span>
+        <span>Coding Agent</span>
         <span>Capture</span>
         <span>Rewrite</span>
         <span>Replay</span>
-        <span>TLS MITM</span>
-        <span>Scripts</span>
-        <span>Desktop</span>
+        <span>Skills</span>
       </section>
 
       <section class="workflow-section" aria-labelledby="workflow-title">
         <div class="section-heading">
           <p class="eyebrow">Workflow</p>
-          <h2 id="workflow-title" data-i18n="workflowTitle">One proxy, several honest debugging paths.</h2>
+          <h2 id="workflow-title" data-i18n="workflowTitle">
+            One proxy layer between real traffic and useful AI work.
+          </h2>
         </div>
         <div class="workflow-grid">
           <article>
-            <h3 data-i18n="workflowOneTitle">Capture the real request</h3>
+            <h3 data-i18n="workflowOneTitle">Give agents real context</h3>
             <p data-i18n="workflowOneText">
-              Inspect headers, bodies, cookies, streaming messages, and the listener port that saw it.
+              Capture headers, bodies, cookies, streams, and replay material instead of describing APIs by memory.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowTwoTitle">Rewrite without rebuilding</h3>
+            <h3 data-i18n="workflowTwoTitle">Turn traffic into skills</h3>
             <p data-i18n="workflowTwoText">
-              Patch headers, bodies, URLs, status codes, latency, and routing with local rules.
+              Let a Coding Agent read traffic evidence, infer flows, and package the result as a reusable skill.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowThreeTitle">Replay the failure</h3>
+            <h3 data-i18n="workflowThreeTitle">Replay before changing code</h3>
             <p data-i18n="workflowThreeText">
-              Turn a captured request into a repeatable curl, HAR, or replay run while you iterate.
+              Convert captured requests into reproducible curl, HAR, and replay runs before the agent edits anything.
             </p>
           </article>
           <article>
-            <h3 data-i18n="workflowFourTitle">Automate the edge cases</h3>
+            <h3 data-i18n="workflowFourTitle">Debug the edge cases</h3>
             <p data-i18n="workflowFourText">
-              Use scripts and values when static rules are not enough for the flow you are chasing.
+              Combine rules, scripts, values, and TLS controls when production-like behavior needs precise simulation.
             </p>
           </article>
         </div>
@@ -152,11 +159,11 @@ api.example.com replay://last-success
           <h2 id="start-title" data-i18n="startTitle">From zero to inspected traffic in four steps.</h2>
         </div>
         <div class="steps-grid">
-          <a href="%BASE_PATH%getting-started/installation/">
+          <a href="%BASE_PATH%getting-started/installation">
             <strong>01</strong>
             <span data-i18n="stepOne">Install the CLI</span>
           </a>
-          <a href="%BASE_PATH%getting-started/cli-quick-start/">
+          <a href="%BASE_PATH%getting-started/cli-quick-start">
             <strong>02</strong>
             <span data-i18n="stepTwo">Start the daemon</span>
           </a>
@@ -164,7 +171,7 @@ api.example.com replay://last-success
             <strong>03</strong>
             <span data-i18n="stepThree">Add a rule for one target</span>
           </a>
-          <a href="%BASE_PATH%reference/replay/">
+          <a href="%BASE_PATH%reference/replay">
             <strong>04</strong>
             <span data-i18n="stepFour">Replay and compare</span>
           </a>

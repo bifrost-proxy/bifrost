@@ -1,14 +1,11 @@
 ---
 title: "Rule Engine"
 description: "Bifrost rule system overview and configuration entry points."
-editUrl: false
-sidebar:
-  label: "Rule Engine"
-  order: 120
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rule.md`.
-> Language: **English** | [中文](../../../reference/rule-engine/)
+> Language: **English** | [中文](../../reference/rule-engine)
 
 # Rule Syntax
 
@@ -35,4 +32,4 @@ api.example.com/v1/users tlsIntercept:// host://127.0.0.1:3000
 - Filters narrow when a rule applies.
 - Line properties control metadata such as disabled or important status.
 
-Read [Operation reference](../operations/) and [Rules protocol reference](../rules/) for details.
+Read [Operation reference](./operations) and [Rules protocol reference](./rules/) for details.

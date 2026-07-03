@@ -1,14 +1,11 @@
 ---
 title: "Rule Patterns"
 description: "Rule matching patterns and priority details."
-editUrl: false
-sidebar:
-  label: "Rule Patterns"
-  order: 310
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/patterns.md`.
-> Language: **English** | [中文](../../../../reference/rules/patterns/)
+> Language: **English** | [中文](../../../reference/rules/patterns)
 
 # Rule Matching Patterns
 

@@ -1,14 +1,11 @@
 ---
 title: "Script Rules"
 description: "Attach scripts to Rules."
-editUrl: false
-sidebar:
-  label: "Script Rules"
-  order: 300
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/scripts.md`.
-> Language: **English** | [中文](../../../../reference/rules/scripts/)
+> Language: **English** | [中文](../../../reference/rules/scripts)
 
 # Script Rules
 

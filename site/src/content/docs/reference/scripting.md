@@ -1,10 +1,7 @@
 ---
 title: "脚本能力"
 description: "QuickJS 脚本能力、限制与使用方式。"
-editUrl: false
-sidebar:
-  label: "脚本能力"
-  order: 150
+editLink: false
 ---
 
 > 此页面由 `docs/scripts.md` 自动同步生成。

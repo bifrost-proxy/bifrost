@@ -1,10 +1,7 @@
 ---
 title: "测试覆盖率机制"
 description: "从 docs/coverage.md 自动同步生成的 测试覆盖率机制 文档。"
-editUrl: false
-sidebar:
-  label: "测试覆盖率机制"
-  order: 905
+editLink: false
 ---
 
 > 此页面由 `docs/coverage.md` 自动同步生成。

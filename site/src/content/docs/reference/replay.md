@@ -1,10 +1,7 @@
 ---
 title: "请求重放说明"
 description: "请求重放能力、支持类型和使用建议。"
-editUrl: false
-sidebar:
-  label: "请求重放说明"
-  order: 170
+editLink: false
 ---
 
 > 此页面由 `docs/replay.md` 自动同步生成。

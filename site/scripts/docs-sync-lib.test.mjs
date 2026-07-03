@@ -66,7 +66,7 @@ test("buildPagesSync discovers every docs markdown file recursively", async () =
       );
       assert.equal(
         pages.find((page) => page.source === "docs-en/README.md")?.target,
-        "en/reference/index.mdx",
+        "en/reference/index.md",
       );
       assert.equal(
         pages.find((page) => page.source === "docs-en/cli.md")?.target,
@@ -96,7 +96,7 @@ test("rewriteMarkdownLinks keeps English docs within English site routes", async
       );
       const rewrittenIndex = rewriteMarkdownLinks(englishIndexMarkdown, englishIndex, map);
 
-      assert.match(rewrittenIndex, /\[CLI\]\(\.\/cli\/\)/);
+      assert.match(rewrittenIndex, /\[CLI\]\(\.\/cli\)/);
 
       const englishRules = pages.find(
         (candidate) => candidate.source === "docs-en/rules/README.md",
@@ -107,7 +107,7 @@ test("rewriteMarkdownLinks keeps English docs within English site routes", async
       );
       const rewrittenRules = rewriteMarkdownLinks(englishRulesMarkdown, englishRules, map);
 
-      assert.match(rewrittenRules, /\[Routing\]\(\.\/routing\/\)/);
+      assert.match(rewrittenRules, /\[Routing\]\(\.\/routing\)/);
     },
   );
 });
@@ -131,8 +131,8 @@ test("rewriteMarkdownLinks rewrites links through discovered site routes", async
 
       const rewritten = rewriteMarkdownLinks(markdown, page, map);
 
-      assert.match(rewritten, /\[CLI\]\(\.\/cli\/\)/);
-      assert.match(rewritten, /\[Future\]\(\.\/future\/new-topic\/#usage\)/);
+      assert.match(rewritten, /\[CLI\]\(\.\/cli\)/);
+      assert.match(rewritten, /\[Future\]\(\.\/future\/new-topic#usage\)/);
 
       const quickStart = pages.find((candidate) => candidate.source === "docs/cli-quick-start.md");
       const quickStartMarkdown = fs.readFileSync(
@@ -141,14 +141,14 @@ test("rewriteMarkdownLinks rewrites links through discovered site routes", async
       );
       const rewrittenQuickStart = rewriteMarkdownLinks(quickStartMarkdown, quickStart, map);
 
-      assert.match(rewrittenQuickStart, /\[CLI\]\(\.\.\/\.\.\/reference\/cli\/\)/);
-      assert.match(rewrittenQuickStart, /\[Install\]\(\.\.\/installation\/\)/);
+      assert.match(rewrittenQuickStart, /\[CLI\]\(\.\.\/reference\/cli\)/);
+      assert.match(rewrittenQuickStart, /\[Install\]\(\.\/installation\)/);
 
       const rule = pages.find((candidate) => candidate.source === "docs/rule.md");
       const ruleMarkdown = fs.readFileSync(path.join(root, "docs/rule.md"), "utf8");
       const rewrittenRule = rewriteMarkdownLinks(ruleMarkdown, rule, map);
 
-      assert.match(rewrittenRule, /\[Patterns\]\(\.\.\/patterns\/\)/);
+      assert.match(rewrittenRule, /\[Patterns\]\(\.\/patterns\)/);
     },
   );
 });
@@ -189,7 +189,7 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
       assert.equal(fs.existsSync(path.join(output, "en/reference/stale.md")), false);
       const generated = fs.readFileSync(path.join(output, "reference/new-topic.md"), "utf8");
       assert.match(generated, /> 此页面由 `docs\/new-topic\.md` 自动同步生成。/);
-      assert.match(generated, /sidebar:\n  label: "New Topic"\n  order:/);
+      assert.match(generated, /editLink: false/);
       const englishGenerated = fs.readFileSync(
         path.join(output, "en/reference/new-topic.md"),
         "utf8",
@@ -198,7 +198,7 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
         englishGenerated,
         /> This page is automatically synced from `docs-en\/new-topic\.md`\./,
       );
-      assert.match(englishGenerated, /sidebar:\n  label: "New Topic"\n  order:/);
+      assert.match(englishGenerated, /editLink: false/);
     },
   );
 });
@@ -206,11 +206,11 @@ test("syncDocs removes stale generated pages and writes source metadata", async 
 test("collectSiteLinkErrors verifies local links under the configured base path", async () => {
   await withFixture(
     {
-      "site/dist/index.html": '<a href="/bifrost/reference/getting-started/cli-quick-start/">CLI</a>',
-      "site/dist/reference/getting-started/cli-quick-start/index.html":
-        '<a href="/bifrost/getting-started/cli-quick-start/">Canonical</a>',
-      "site/dist/getting-started/cli-quick-start/index.html": '<a href="../installation/">Install</a>',
-      "site/dist/getting-started/installation/index.html": "<main>Install</main>",
+      "site/dist/index.html": '<a href="/bifrost/reference/getting-started/cli-quick-start">CLI</a>',
+      "site/dist/reference/getting-started/cli-quick-start.html":
+        '<a href="/bifrost/getting-started/cli-quick-start">Canonical</a>',
+      "site/dist/getting-started/cli-quick-start.html": '<a href="./installation">Install</a>',
+      "site/dist/getting-started/installation.html": "<main>Install</main>",
     },
     async (root) => {
       const errors = await collectSiteLinkErrors({

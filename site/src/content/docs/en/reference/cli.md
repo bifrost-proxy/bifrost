@@ -1,18 +1,15 @@
 ---
 title: "CLI Command Reference"
 description: "Bifrost CLI commands, flags, environment variables, and workflows."
-editUrl: false
-sidebar:
-  label: "CLI Command Reference"
-  order: 110
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/cli.md`.
-> Language: **English** | [中文](../../../reference/cli/)
+> Language: **English** | [中文](../../reference/cli)
 
 # CLI Command Reference
 
-This reference explains the top-level `bifrost` commands, major subcommands, environment variables, and rule template variables. For task-oriented usage, read [CLI quick start](../../getting-started/cli-quick-start/).
+This reference explains the top-level `bifrost` commands, major subcommands, environment variables, and rule template variables. For task-oriented usage, read [CLI quick start](../getting-started/cli-quick-start).
 
 ## Help and Documentation
 

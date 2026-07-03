@@ -86,7 +86,8 @@ function fileExistsForPath(distRoot, pathname) {
   }
   return (
     fs.existsSync(absoluteTarget) ||
-    fs.existsSync(path.join(absoluteTarget, "index.html"))
+    fs.existsSync(path.join(absoluteTarget, "index.html")) ||
+    fs.existsSync(`${absoluteTarget}.html`)
   );
 }
 

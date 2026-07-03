@@ -1,14 +1,11 @@
 ---
 title: "Filters"
 description: "Request and response filter configuration."
-editUrl: false
-sidebar:
-  label: "Filters"
-  order: 280
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/rules/filters.md`.
-> Language: **English** | [中文](../../../../reference/rules/filters/)
+> Language: **English** | [中文](../../../reference/rules/filters)
 
 # Filters
 

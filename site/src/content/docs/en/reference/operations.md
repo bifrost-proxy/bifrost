@@ -1,14 +1,11 @@
 ---
 title: "Operation Reference"
 description: "Rule operation value formats and common usage."
-editUrl: false
-sidebar:
-  label: "Operation Reference"
-  order: 130
+editLink: false
 ---
 
 > This page is automatically synced from `docs-en/operation.md`.
-> Language: **English** | [中文](../../../reference/operations/)
+> Language: **English** | [中文](../../reference/operations)
 
 # Operation Reference
 

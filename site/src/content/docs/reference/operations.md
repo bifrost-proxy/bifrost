@@ -1,10 +1,7 @@
 ---
 title: "运行操作"
 description: "启动、使用与运行 Bifrost 的常见操作说明。"
-editUrl: false
-sidebar:
-  label: "运行操作"
-  order: 130
+editLink: false
 ---
 
 > 此页面由 `docs/operation.md` 自动同步生成。

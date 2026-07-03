@@ -1,10 +1,7 @@
 ---
 title: "Agent Skill 安装说明"
 description: "Bifrost Agent Skill 的安装方式与使用入口。"
-editUrl: false
-sidebar:
-  label: "Agent Skill 安装说明"
-  order: 190
+editLink: false
 ---
 
 > 此页面由 `docs/agent-skill.md` 自动同步生成。
