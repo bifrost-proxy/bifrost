@@ -2807,6 +2807,17 @@ async fn handle_intercepted_request_with_protocol(
                     }
                 }
 
+                // Re-derive Content-Length / body-mode headers for the (possibly) rewritten body,
+                // matching the plaintext statusCode path (handler.rs). Without this the response
+                // keeps the original status body's Content-Length and the scripted body is truncated.
+                normalize_res_headers(
+                    &mut sc_parts,
+                    buffered_res_body_mode(
+                        sc_final_body.len(),
+                        !resolved_rules.trailers.is_empty(),
+                    ),
+                    &method_str,
+                );
                 response_body = Some(sc_final_body.clone());
                 response = Response::from_parts(sc_parts, full_body(sc_final_body));
             }
