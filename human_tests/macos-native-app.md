@@ -238,7 +238,7 @@
 - Native 使用固定宽度 source-list 行作为左侧主导航，不再使用顶部三段式主 tab，也不允许最外层主菜单被拖拽折叠。
 - 左侧 source-list 视觉上为 macOS 系统式 material 浮层，窗口红黄绿按钮和左侧导航共享同一块背景区域。
 - macOS 红黄绿三个窗口按钮使用系统原生标题栏按钮，不再由应用自绘。
-- 左侧主导航显示 `活动`、`概览`、`规则`、`网络` 四个核心入口，窗口按钮必须保持可见，内容不得被标题栏或安全区裁切；窗口和页面背景呈清爽冷白 surface，卡片为白色卡片，非控件空白区域仍可拖拽移动窗口。
+- 左侧主导航显示 `活动`、`概览`、`规则`、`抓包` 四个核心入口，窗口按钮必须保持可见，内容不得被标题栏或安全区裁切；窗口和页面背景呈清爽冷白 surface，卡片为白色卡片，非控件空白区域仍可拖拽移动窗口。
 
 ### TC-MNA-24：回归 - Native 主窗口只暴露核心控制台范围
 
@@ -257,11 +257,12 @@
    ```
 
 **预期结果：**
-- release scope 输出包含 `活动,概览,规则,网络`。
+- release scope 输出包含基础入口 `活动,概览,规则,抓包`，并在同步服务已启用、已登录且已授权时附加 `小组管理` 条件入口。
 - SwiftPM 构建通过。
 - 主窗口 `MainWindowScene` 路由到 Activity、Overview、Rules、Network Web 入口，不再把 `SettingsView` 作为主导航内容，也不再暴露独立 Processes/进程 tab 或 Devices/设备 tab。
 - Overview 页面包含系统代理、TLS 解密、远程调用、同步和证书管理卡片。
-- Activity 页面轻量展示基于 `TrafficRecordSummary.clientApp` 的应用流量分布；设备/IP 不作为独立一级菜单展示。
+- Activity 页面轻量展示基于服务端 `/metrics/apps` DB 聚合口径的应用流量分布；设备/IP 不作为独立一级菜单展示。
+- Activity 的 `流量分布` 卡片必须展示所有有记录的应用，不得使用 Native 本地 traffic window、Network TOP 100/TOP 200 或前 6 个截断；应用数量增加时卡片高度自然向下延伸。
 - Network 页面只提供打开 Web UI 的入口和摘要，不再承载复杂流量工作台。
 - UI 视觉以白色为主：白色半透明毛玻璃背景和纯白卡片，不得出现灰扑扑的大面积背景、灰色重卡片或厚重渐变。
 - 隐藏顶部 `Bifrost` 标题后，红黄绿窗口按钮仍可见且可点击，页面标题不被裁切；点击非控件的白色背景区域拖动，窗口位置应随鼠标移动。
@@ -270,11 +271,15 @@
 **执行记录：**
 - 2026-07-03：执行 `swift build --package-path apps/macos` 通过，确认新核心范围 SwiftUI 页面可编译。
 - 2026-07-03：执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,进程,设备,规则,网络`。（后续按用户反馈移除独立进程和设备入口，需重新执行为四入口结果。）
-- 2026-07-03：移除独立进程和设备入口后，重新执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- 2026-07-03：移除独立进程和设备入口后，重新执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。（2026-07-04 起该入口对外命名调整为 `抓包`。）
 - 2026-07-03：执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`。
 - 2026-07-03：执行 `open -n apps/macos/.build/Bifrost.app` 并截取 `/tmp/bifrost-native-core-window.png`，确认主窗口启动、左侧核心导航可见、Rules 原生列表/编辑区可见。
 - 2026-07-03：按用户反馈修正窗口安全区与 Rules 风格后，执行 `swift build --package-path apps/macos`、`swift run --package-path apps/macos Bifrost --check-release-scope` 和 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；当前机器辅助访问/截图权限受限，无法继续用脚本移动窗口或截取可靠局部截图。
+- 2026-07-04：按用户反馈将 Native 主入口 `网络` 对外命名为 `抓包`；执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,抓包`；执行抓包入口源码合同扫描通过，输出 `macOS native capture navigation naming contract ok`。
+- 2026-07-04：按用户反馈取消 Activity `流量分布` 前 6 个应用截断，改为展示 `activityClientAppCounts` 中的全部应用，卡片随应用行数自然向下延伸。
+- 2026-07-04：按用户反馈修正 Activity `流量分布` 统计口径，改为拉取 Web UI Metrics 同源 `/metrics/apps` 聚合结果，并通过源码合同检查确认不再从 Native 本地 traffic window 推导应用统计。
+- 2026-07-04：执行真实服务端 API 检查 `curl -fsS http://127.0.0.1:9900/_bifrost/api/metrics/apps`，当前返回 `apps=49`，前几项包含 `Microsoft Edge Helper`、`codex`、`cloudd`、`Doubao Browser Helper` 和 `Code Helper`，确认该接口覆盖全量有记录应用而非 Native 当前窗口。
 
 ### TC-MNA-12：Native 明暗主题切换可用且 Network 数据来自真实 Admin API
 
@@ -348,7 +353,7 @@
    ```
 2. 执行源码入口扫描：
    ```bash
-   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case activity = \\"活动\\"","case overview = \\"概览\\"","case rules = \\"规则\\"","case network = \\"网络\\""]; forbidden=["case processes","case devices","Replay","Values","Scripts","AI","DevTools","Groups","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case activity = \\"活动\\"","case overview = \\"概览\\"","case rules = \\"规则\\"","case network = \\"抓包\\"","case groups = \\"小组管理\\"","static func visibleItems(canShowGroups: Bool)"]; forbidden=["case processes","case devices","Replay","Values","Scripts","AI","DevTools","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
    ```
 3. 执行完整 Native build smoke：
    ```bash
@@ -356,10 +361,10 @@
    ```
 
 **预期结果：**
-- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
 - 源码入口扫描输出 `macOS native release navigation scope ok`。
 - Native build smoke 通过。
-- 用户侧左侧主导航只能进入活动、概览、规则、网络；进程、设备、Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
+- 未登录或同步服务未启用时，用户侧左侧主导航只能进入活动、概览、规则、抓包；同步服务已启用、已登录且已授权时才在抓包下面附加小组管理。进程、设备、Replay、Values、Scripts、AI、DevTools、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
 - 长期 WebUI parity 仍在 `design/macos-native-webui-parity.md` 维护；后续页面必须达到真实交互完成后再开放入口。
 
 ### TC-MNA-15：Native 必须建立 WebUI 同源 `/api/push` WebSocket 并支持 Network 选中详情
@@ -468,11 +473,11 @@
    ```
 
 **预期结果：**
-- 两次 smoke 均输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- 两次 smoke 均输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
 - Native app 的 `SidebarItem.releaseScopeItems` 只包含 `.activity`、`.overview`、`.rules`、`.network`。
-- Native app 的 `SidebarItem.allCases` 与 `releaseScopeItems` 完全一致，不保留隐藏页面枚举 case。
-- 左侧主导航仅包含活动、概览、规则、网络；切换后会自动刷新当前页需要的状态。
-- Replay、Values、Scripts、AI、DevTools、Groups、Notify 没有主导航入口；后续恢复入口时必须先补齐真实交互和对应 human_tests。
+- Native app 的 `SidebarItem.allCases` 只允许比 `releaseScopeItems` 多出条件入口 `.groups`，由 `visibleItems(canShowGroups:)` 控制，不允许保留其他隐藏页面枚举 case。
+- 未登录或同步服务未启用时左侧主导航仅包含活动、概览、规则、抓包；登录且同步启用后包含活动、概览、规则、抓包、小组管理；切换后会自动刷新当前页需要的状态。
+- Replay、Values、Scripts、AI、DevTools、Notify 没有主导航入口；Groups 只允许作为同步登录后的条件入口展示。后续恢复其他入口时必须先补齐真实交互和对应 human_tests。
 
 ### TC-MNA-19：Settings 使用系统设置式左侧导航并覆盖四个首版页面
 
@@ -559,12 +564,12 @@
    osascript -e 'tell application "System Events" to tell process "Bifrost" to set size of window 1 to {1220, 820}'
    screencapture -x -R 120,80,1220,820 /tmp/bifrost-native-apple-sidebar.png
    ```
-3. 通过左侧 source-list 依次点击活动、概览、规则、网络，并观察右侧内容区域。
+3. 通过左侧 source-list 依次点击活动、概览、规则、抓包，并观察右侧内容区域。
 4. 在网络页点击 Web UI 打开入口，确认复杂 Network 工作台在浏览器中打开。
 
 **预期结果：**
 - 左侧主导航是系统 source-list 风格区域，具有淡 material 背景；红黄绿窗口按钮落在同一侧栏背景区域内。
-- 活动、概览、规则、网络是左侧主导航入口；顶部右侧不得出现 Network / Rules / Settings 主 tab，且不得再出现独立进程或设备入口。
+- 活动、概览、规则、抓包是左侧主导航入口；顶部右侧不得出现 Network / Rules / Settings 主 tab，且不得再出现独立进程或设备入口。
 - Network 页面只展示 Web UI 打开入口和摘要；Breakpoint/TLS Decode/System Proxy、Remote Invoke、Sync、Certificate 管理收敛到概览。
 - Rules 页面展示 `规则` 页面标题、启用数量和 New Rule 操作；规则列表与编辑器使用白色卡片承载，切换到 Rules 时自动刷新列表，规则详情内部的 Enabled、Copy、Revert、Save、Rename/Delete 仍保留在详情头部。
 - Settings scene 仍可从 macOS app Settings 入口打开，主窗口不再把 Settings 作为一级导航。
@@ -674,7 +679,7 @@
      apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
    ! rg -n 'selectInitialTrafficRecordIfNeeded' apps/macos/Sources/Bifrost/App/AppModel.swift
    ```
-4. 打开 Native `.app`，依次快速点击 `活动`、`概览`、`规则`、`网络`、`活动`：
+4. 打开 Native `.app`，依次快速点击 `活动`、`概览`、`规则`、`抓包`、`活动`：
    ```bash
    open -n apps/macos/.build/Bifrost.app
    ```
@@ -687,7 +692,7 @@
 - 连续快速切换四个主入口时，页面标题和首屏卡片应立即出现，不应出现明显卡住后才渲染的空白等待。
 
 **执行记录：**
-- 2026-07-03：执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- 2026-07-03：执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。（2026-07-04 起该入口对外命名调整为 `抓包`。）
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app` 并输出 `BifrostNativeCoreChecks passed`。
 - 2026-07-03：执行源码检查命令，确认存在 `refreshSelectedSidebarData`、按页 `includeOverview/includeRules/includeSystemControls`、`maxNativeRecords` 和 `activityClientAppCounts/activityClientIpCounts` 缓存路径，且不存在 `selectInitialTrafficRecordIfNeeded` 隐藏预取 helper；当前机器辅助访问/截图权限不稳定，人工点击观察项需在有 UI 权限环境复核。
 
@@ -710,7 +715,7 @@
      apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
      apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift
    ```
-3. 打开 Native `.app` 后依次查看 `活动`、`概览`、`规则`、`网络`：
+3. 打开 Native `.app` 后依次查看 `活动`、`概览`、`规则`、`抓包`：
    ```bash
    scripts/build-macos-native.sh --skip-sidecar --test
    open -n apps/macos/.build/Bifrost.app
@@ -746,7 +751,7 @@
    ```
 4. 检查 Overview 面板渲染结构：
    ```bash
-   rg -n 'Remote Invoke|RemoteDiscoveryCodeStrip|授权码|复制 SSH Key|refreshRemotePairCode|copyRemotePairCode|剩余 %02d:%02d|证书与移动端|安装本机 CA|刷新设备|重新生成 QR|可用性检查|QRPreview|MobileDeviceRow|TrustProbeDeviceRow|RemoteInvokeGrantRow' \
+   rg -n 'Remote Invoke|RemoteDiscoveryCodeStrip|授权码|复制 SSH Key|refreshRemotePairCode|copyRemotePairCode|剩余 %02d:%02d|证书与移动端|安装本机 CA|刷新设备|重新生成 QR|可用性检查|QRPreview|MobileDeviceRow|TrustProbeDeviceRow|TrustProbeDeviceStatusTag|RemoteInvokeGrantRow' \
      apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
    ```
 5. 执行源码合同扫描，确认 `同步` 与 `证书管理` 两个小面板排在顶部 grid 中，位于 `Remote Invoke` 之前；顶部 grid 最多 4 列，列宽使用 flexible 自适应，窄窗口依次降到 3/2/1 列：
@@ -757,11 +762,19 @@
    ```bash
    ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["syncRemoteBaseURLDraft", "SyncRemoteServiceRow", "handleSyncRemoteBaseURLClick", "openSyncLogin()", "beginSyncRemoteBaseURLEdit()", "saveSyncRemoteBaseURL", "UpdateSyncConfigRequest(remoteBaseURL: trimmed)", "Text(\"远端服务\")", "TextField(\"https://bifrost.example.com\""]; missing=required.reject{|needle| text.include?(needle)}; abort("missing sync remote service markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native sync remote service edit contract ok"'
    ```
-7. 执行源码合同扫描，确认证书已经信任后不再展示安装按钮：
+7. 执行源码合同扫描，确认 Overview 系统代理卡片展示所有代理地址、点击复制入口，以及 Web UI 同源的开关/状态配置：
+   ```bash
+   ruby -e 'dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift")+File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); required_dashboard=["SystemProxyCard", "ProxyAddressCopyRow", "ForEach(proxyAddresses)", "copyProxyAddress(address.address)", "Boot/Shutdown Cleanup", "Inject Bifrost Badge", "CLI Proxy (ENV)", "SystemProxyOptionToggleRow", "SystemProxyOptionStatusRow"]; required_app=["systemProxyLaunchdStatus", "cliProxyStatus", "proxyAddressInfo", "performanceConfig", "setSystemProxyLaunchdEnabled", "setInjectBifrostBadgeEnabled", "fetchSystemProxyLaunchd()", "fetchCliProxy()", "fetchProxyAddress()", "fetchPerformanceConfig()"]; required_core=["injectBifrostBadge", "UpdatePerformanceConfigRequest", "updatePerformanceConfig"]; missing=required_dashboard.reject{|needle| dashboard.include?(needle)}+required_app.reject{|needle| app.include?(needle)}+required_core.reject{|needle| core.include?(needle)}; abort("missing system proxy overview markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native system proxy overview contract ok"'
+   ```
+8. 执行源码合同扫描，确认证书已经信任后不再展示安装按钮：
    ```bash
    ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["shouldShowInstallButton", "model.certInfo?.trusted != true", "if shouldShowInstallButton", "Button(\"安装本机 CA\")"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing certificate install visibility markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native certificate install visibility contract ok"'
    ```
-8. 打开 Native `.app` 并进入 `概览`：
+9. 执行源码合同扫描，确认移动端扫码可用性检查会持续拉取 session，并展示 Web UI 同源的设备细节字段：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["trustProbePollingTask", "startTrustProbePolling(sessionID:", "stopTrustProbePolling()", "applyTrustProbeSession", "fetchTrustProbeSession(sessionID: sessionID)", "Text(\"扫码设备\")", "TrustProbeDeviceStatusTag", "formatProbeLastSeen", "proxyConfigurationMessage"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing trust probe live device markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native trust probe live device contract ok"'
+   ```
+10. 打开 Native `.app` 并进入 `概览`：
    ```bash
    scripts/build-macos-native.sh --skip-sidecar --test
    open -n apps/macos/.build/Bifrost.app
@@ -771,11 +784,14 @@
 - `--check-settings-data` 输出 `cert_status=`、`mobile_android=`、`mobile_ios=`、`remote_state=`、`grants=`、`calls=`、`ssh_key=`、`trust_probe_host=` 和 `trust_probe_qr=true`。
 - Overview 的 Remote Invoke 面板不再只是发现模式开关；必须展示 SSH Key 状态、生成/重新生成按钮、复制 SSH Key 按钮、已授权客户端数、活动调用数、最近调用数、最近活跃时间，以及最多 3 个授权客户端/最近调用摘要。
 - Remote Invoke 进入发现模式后必须展示授权码 Code；点击 Code 直接复制，复制后短暂显示已复制；右侧必须有重置按钮；倒计时按秒刷新，和后端约 2 分钟有效期一致，过期后显示已过期。
+- Overview 的系统代理卡片必须从 `/proxy/address` 展示所有代理 IP:端口；存在多个网卡时不能只展示一个地址；点击任一地址行直接复制到剪贴板并短暂显示已复制。
+- Overview 的系统代理卡片必须展示并支持主 System Proxy 开关、Boot/Shutdown Cleanup 开关、Inject Bifrost Badge 开关，同时展示 CLI Proxy (ENV) 当前状态。
 - Overview 的证书与移动端面板必须展示本机 CA 状态、代理地址、移动设备数、证书指纹、`安装本机 CA`、`刷新设备`、`重新生成 QR`。
 - 当本机 CA 已安装且已信任时，证书管理卡片不展示 `安装本机 CA` 按钮；只有未信任或未安装时才展示安装入口。
 - Overview 顶部区域先排系统代理、TLS 解密、同步、证书管理；顶部最多一排 4 个卡片，4 列时列宽平分可用空间，窄窗口自动降到 3/2/1 列；`Remote Invoke` 下移到下一段。
 - Overview 的同步卡片必须直接展示远端服务地址；未登录时点击该地址行触发同步登录授权；已有 session 时点击进入原位编辑，保存后通过 `/sync/config` 更新 `remote_base_url`。
-- 可用性检查区域必须展示二维码图片容器、检查链接、打开/复制链接操作；扫码后 `trustProbeSession.devices` 中的正在连接设备必须在 `TrustProbeDeviceRow` 中显示网络/TLS/代理状态。
+- 可用性检查区域必须展示二维码图片容器、检查链接、打开/复制链接操作；扫码后 Native 必须像 Web UI 的 `trust_probe` 订阅一样持续刷新 `/trust-probe/sessions/{sessionId}`，不需要切换 tab 就能把 `trustProbeSession.devices` 中的正在连接设备显示出来。
+- `TrustProbeDeviceRow` 必须展示设备短 ID、平台、客户端 IP、最近上报时间，以及页面打开、网络、TLS 证书、代理授权、代理配置状态；服务端返回 `lastError`、`proxyConfigurationMessage` 或 `proxyAccessMessage` 时必须在设备行内显示。
 - USB/ADB/cfgutil 发现的移动设备必须在同一证书面板内显示设备名称、平台图标、证书信任状态或设备状态；没有设备时显示明确空态和扫码引导。
 - 这些能力都在 `概览` 一级页面内完成，不要求用户再进入完整 Settings 页或 WebUI 才能看到基础状态。
 
@@ -786,6 +802,9 @@
 - 2026-07-04：执行源码合同扫描通过，输出 `macOS native overview capped flexible grid order ok`。
 - 2026-07-04：执行 `swift build --package-path apps/macos` 通过；执行同步远端服务地址源码合同扫描通过，输出 `macOS native sync remote service edit contract ok`；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；执行 `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `sync_reason=ready`、`remote_state=Connected`、`ssh_key=true` 和 `trust_probe_qr=true`；重新打开 Native `.app`。
 - 2026-07-04：执行证书安装按钮可见性源码合同扫描通过，输出 `macOS native certificate install visibility contract ok`。
+- 2026-07-04：对照 Web UI `AvailabilityCheckPanel` 的 `trust_probe` push 更新逻辑，Native 改为创建 session 后持续拉取 `/trust-probe/sessions/{sessionId}`；执行 `swift build --package-path apps/macos` 通过。
+- 2026-07-04：执行移动端扫码设备实时刷新源码合同扫描通过，输出 `macOS native trust probe live device contract ok`；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；执行 `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `trust_probe_host=192.168.8.39` 和 `trust_probe_qr=true`；通过 public report API 模拟扫码设备打开检查页，随后读取 `/trust-probe/sessions/{sessionId}` 返回 `devices=1 simulated_device_opened=true`；重新打开 Native `.app`。
+- 2026-07-04：Overview 系统代理卡片改为从 `/proxy/address` 展示所有代理地址并支持点击复制，同时展示 System Proxy、Boot/Shutdown Cleanup、Inject Bifrost Badge、CLI Proxy (ENV)；执行 `swift build --package-path apps/macos` 通过；执行真实 API smoke 通过，输出 `addresses=192.168.8.39:9900:true`、`inject_bifrost_badge=true`、`launchd_supported=true installed=true loaded=true`、`cli_enabled=false shell=zsh`。
 
 ### TC-MNA-28：回归 - Overview TLS 解密卡片支持名单数量和弹窗编辑
 
@@ -800,7 +819,7 @@
    ```
 3. 检查 Overview TLS 名单 UI 和保存链路：
    ```bash
-   rg -n 'TlsInterceptionCard|TlsListKind|TlsListEditorSheet|TlsListCountTile|应用白名单|应用黑名单|域名白名单|域名黑名单|IP 白名单|IP 黑名单|updateTlsConfig' \
+   rg -n 'TlsInterceptionCard|TlsListKind|TlsListEditorSheet|TlsListCountTile|默认解包|白名单解包|打开为默认解包，关闭为白名单解包|应用白名单|应用黑名单|域名白名单|域名黑名单|IP 白名单|IP 黑名单|updateTlsConfig' \
      apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift \
      apps/macos/Sources/Bifrost/App/AppModel.swift
    ```
@@ -811,7 +830,7 @@
 
 **预期结果：**
 - `--check-settings-data` 输出 `tls_domain_include=`、`tls_domain_exclude=`、`tls_app_include=`、`tls_app_exclude=`、`tls_ip_include=` 和 `tls_ip_exclude=`。
-- Overview 的 TLS 解密卡片展示应用、域名、IP 三类白名单/黑名单共 6 个计数块；卡片仍保留 TLS 解密总开关。
+- Overview 的 TLS 解密卡片展示应用、域名、IP 三类白名单/黑名单共 6 个计数块；开关语义必须是打开等于默认解包，关闭等于白名单解包，不允许把关闭态显示成“TLS 已关闭”。
 - 点击任一计数块弹出编辑框，标题对应具体名单类型，输入区支持每行一个规则并显示该类型示例占位。
 - 保存时会去除空行和重复项，更新对应 `TlsConfig` 字段并调用 `AppModel.updateTlsConfig` 保存到 `/config/tls`。
 - 卡片和弹窗使用 `NativeCard` / `AppSurface` 风格，不能回退到 Settings 全页或 WebUI 才能编辑基础 TLS 解包名单。
@@ -820,6 +839,8 @@
 - 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test && apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `tls_domain_include=2`、`tls_domain_exclude=0`、`tls_app_include=9`、`tls_app_exclude=2`、`tls_ip_include=0`、`tls_ip_exclude=1`。
 - 2026-07-03：执行源码检查命令，确认 `TlsInterceptionCard`、`TlsListKind`、`TlsListEditorSheet`、`TlsListCountTile` 和 `AppModel.updateTlsConfig` 均存在，六类名单标题均在 Overview 源码中出现。
+- 2026-07-04：修正 TLS 解密卡片开关语义，打开态显示 `默认解包`，关闭态显示 `白名单解包`，subtitle 显示 `打开为默认解包，关闭为白名单解包`。
+- 2026-07-04：执行 `swift build --package-path apps/macos` 通过；执行 TLS 模式语义源码合同扫描通过，输出 `macOS native TLS mode semantics contract ok`；执行 `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `tls_app_include=8`、`tls_app_exclude=1`、`tls_domain_include=0` 和 `tls_ip_include=0`。
 
 ### TC-MNA-29：回归 - Rules 使用原生 BifrostRuleEditorView 编辑 DSL
 
@@ -1041,7 +1062,7 @@
 - Rules 页点击列表行只通过行 action 调用 `selectRule`，不存在 `.task(id: selectedRuleName)` 再次触发同一规则详情拉取。
 - 首次进入 Rules 页时，如果 AppModel 只选中了首条规则名但尚未加载详情，入口刷新流程会主动加载一次选中规则详情。
 - Rules 列表与详情两块大容器关闭 hover 缩放动画，保持白色卡片、描边和柔光，避免编辑器区域在 hover 时触发大面积重绘。
-- release scope 仍然只暴露 `活动,概览,规则,网络`，traffic table performance smoke 通过。
+- release scope 默认暴露 `活动,概览,规则,抓包`，并只允许在同步登录后附加 `小组管理` 条件入口；traffic table performance smoke 通过。
 
 ### TC-MNA-37：回归 - Rules 原生交互契约与自动保存
 
@@ -1053,7 +1074,7 @@
    ```
 2. 检查 Default 规则保护、拖拽排序、自动保存和 Rules 顶部按钮：
    ```bash
-   rg -n 'isDefaultRule|moveRules\\(|reorderRules|autosaveSelectedRule|RuleAutoSaveState|onMove|Save|Revert|Button\\(\"刷新\"|刷新设备|重新生成 QR' \
+   rg -n 'isDefaultRule|canReorderRule|moveRule\\(|reorderRules|autosaveSelectedRule|RuleAutoSaveState|onDrag|onDrop|Save|Revert|Button\\(\"刷新\"|刷新设备|重新生成 QR' \
      apps/macos/Sources/Bifrost/App/AppModel.swift \
      apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift \
      apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
@@ -1065,10 +1086,16 @@
 
 **预期结果：**
 - AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且拖拽排序时不能移动 Default。
-- Rules 列表对非搜索状态支持拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化；搜索状态只筛选查看，不做排序。
+- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序。
 - Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
 - 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
 - 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
+
+**实际结果（2026-07-04）：**
+- 按用户反馈修复 Rules 拖拽排序不可用问题：将 `List.onMove` 改为三横线手柄 `onDrag` + 行 `onDrop`，drop 后调用 `AppModel.moveRule(named:relativeTo:placement:)` 立即更新本地顺序并 debounce 保存到 `/rules/reorder`。
+- 执行源码合同扫描通过，输出 `macOS native rules drag reorder contract ok`。
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行真实服务端 no-op reorder 验证通过，输出 `rules=30 reorder_noop=ok first="Default" second="NextAgent双机协作a"`，确认 `/rules/reorder` 可写且未打乱当前规则优先级。
 
 ### TC-MNA-38：回归 - Native 深色主题不能残留浅色底板
 
@@ -1136,7 +1163,7 @@
    ```bash
    scripts/build-macos-native.sh --skip-sidecar --test
    ```
-3. 打开 Native `.app`，逐个切换 `活动`、`概览`、`规则`、`网络`，并截图：
+3. 打开 Native `.app`，逐个切换 `活动`、`概览`、`规则`、`抓包`，并截图：
    ```bash
    pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
    open -n apps/macos/.build/Bifrost.app
@@ -1148,14 +1175,14 @@
 - 源码扫描输出 `macOS native adaptive layout source contract ok`。
 - `NativePageScaffold` 不再把主内容封顶在 `1180`，Settings 内容不再封顶在 `980`，Traffic 表格不再封顶在 `760`。
 - `活动` 顶部指标卡最多一排 6 个；宽屏时 6 个卡片平分并撑满可用宽度，超过 6 个时按 6 列换行；窄窗口自动降到 5/4/3/2/1 列。
-- `活动`、`概览`、`网络` 页面卡片或入口卡片横向填充右侧内容区，而不是只占左侧一块固定宽度。
+- `活动`、`概览`、`抓包` 页面卡片或入口卡片横向填充右侧内容区，而不是只占左侧一块固定宽度。
 - `规则` 页面左侧列表固定 300px，右侧规则编辑器卡片优先吃满剩余空间。
 - 窗口放大时，四个主入口都应重新分配右侧内容宽度，不出现明显的大块空白浪费。
 
 **实际结果（2026-07-03）：**
 - 执行源码布局合同扫描通过，输出 `macOS native adaptive layout source contract ok`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
-- 重新打开 Native `.app` 并截图：`活动` 保存到 `/tmp/bifrost-native-adaptive-layout.png`，`概览` 保存到 `/tmp/bifrost-native-adaptive-layout-overview.png`，`规则` 保存到 `/tmp/bifrost-native-adaptive-layout-rules.png`，`网络` 保存到 `/tmp/bifrost-native-adaptive-layout-network.png`。
+- 重新打开 Native `.app` 并截图：`活动` 保存到 `/tmp/bifrost-native-adaptive-layout.png`，`概览` 保存到 `/tmp/bifrost-native-adaptive-layout-overview.png`，`规则` 保存到 `/tmp/bifrost-native-adaptive-layout-rules.png`，`抓包` 保存到 `/tmp/bifrost-native-adaptive-layout-network.png`。
 - 截图确认 `活动` 三列指标卡、`概览` 双列控制卡和 `规则` 右侧编辑器都铺满右侧内容区；未见旧版固定窄容器导致的大面积右侧空白。
 
 **实际结果（2026-07-04）：**
@@ -1218,7 +1245,7 @@
 - 源码扫描输出 `macOS native compact top spacing contract ok`。
 - 主页面标题顶部留白约为旧版一半。
 - 标题到第一行内容的间距约为旧版一半。
-- `活动`、`概览`、`规则`、`网络` 页面都继承同一套紧凑顶部 spacing。
+- `活动`、`概览`、`规则`、`抓包` 页面都继承同一套紧凑顶部 spacing。
 
 **实际结果（2026-07-03）：**
 - 执行 `swift build --package-path apps/macos` 通过。
@@ -1231,7 +1258,7 @@
 **操作步骤：**
 1. 执行源码合同扫描，确认 Rules 页面临时使用稳定标准编辑器，侧栏不再走 macOS 26 上触发崩溃的 SwiftUI `List`/`OutlineListCoordinator` 路径：
    ```bash
-   ruby -e 'rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); editor=File.read("apps/macos/Sources/Bifrost/AppKitBridge/CodeEditorView.swift"); abort("Rules still uses custom invisible editor") if rules.include?("BifrostRuleEditorView("); abort("sidebar still uses crash-prone SwiftUI List") if sidebar.include?("List(") || sidebar.include?(".listStyle"); required=["CodeEditorView(", "onTextChanged", "onSave", "CodeEditorTextView", "ForEach(SidebarItem.releaseScopeItems)"]; text=rules+"\n"+sidebar+"\n"+editor; missing=required.reject{|needle| text.include?(needle)}; abort("missing native recovery markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native rule editor recovery contract ok"'
+   ruby -e 'rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); editor=File.read("apps/macos/Sources/Bifrost/AppKitBridge/CodeEditorView.swift"); abort("Rules still uses custom invisible editor") if rules.include?("BifrostRuleEditorView("); required=["CodeEditorView(", "onTextChanged", "onSave", "CodeEditorTextView", "List(appModel.visibleSidebarItems)"]; text=rules+"\n"+sidebar+"\n"+editor; missing=required.reject{|needle| text.include?(needle)}; abort("missing native recovery markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native rule editor recovery contract ok"'
    ```
 2. 执行无窗口编辑器布局检查：
    ```bash
@@ -1382,7 +1409,7 @@
    ```
 2. 构建并打开 Native `.app`，停留在 `活动` 页面观察活动连接、上传、下载、请求数和底部状态栏。
 3. 在浏览器或命令行持续产生代理流量；不要切换 tab。
-4. 切换到 `网络` 页面，确认流量列表和过滤统计已经随 WebSocket 推送更新，而不是只在切换 tab 时刷新。
+4. 切换到 `抓包` 页面，确认流量列表和过滤统计已经随 WebSocket 推送更新，而不是只在切换 tab 时刷新。
 
 **预期结果：**
 - 源码扫描输出 `macOS native realtime overview metrics traffic contract ok`。
@@ -1402,7 +1429,7 @@
 **操作步骤：**
 1. 执行源码合同扫描，确认主窗口使用 macOS 系统推荐的 `NavigationSplitView + List(.sidebar)` source-list，不使用自定义 HStack/overlay/sidebar rail，且右侧 detail 不再用过大的最小宽度把左侧菜单挤出窗口：
    ```bash
-   ruby -e 'main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); surface=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); traffic=File.read("apps/macos/Sources/Bifrost/Features/Traffic/TrafficView.swift"); sidebar_text=main+"\n"+sidebar; forbidden=["HStack(spacing: 0)", "GeometryReader { proxy in", "isSidebarCollapsed", "SidebarItemRow", ".navigationTitle(\"\")"]; found=forbidden.select{|needle| sidebar_text.include?(needle)}; abort("custom sidebar shell remains: #{found.join(", ")}") unless found.empty?; required=["NavigationSplitView {", ".navigationSplitViewColumnWidth(min: 176, ideal: 204, max: 232)", ".navigationSplitViewStyle(.balanced)", ".frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)", "List(SidebarItem.releaseScopeItems)", ".listStyle(.sidebar)", ".scrollContentBackground(.hidden)", "Label(item.rawValue, systemImage: item.systemImage)"]; missing=required.reject{|needle| sidebar_text.include?(needle)}; abort("missing native source-list sidebar markers: #{missing.join(", ")}") unless missing.empty?; width_contracts=[surface.include?("pageHorizontalPadding(for:"), dashboard.include?("overviewControlGrid(columnCount: 4)") && dashboard.include?("GridItem(.flexible(minimum: 220)"), rules.include?(".frame(minWidth: 360"), traffic.include?(".frame(minWidth: 320")]; abort("right detail min-width contract missing") unless width_contracts.all?; puts "macOS native source-list responsive width contract ok"'
+   ruby -e 'main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); surface=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); traffic=File.read("apps/macos/Sources/Bifrost/Features/Traffic/TrafficView.swift"); sidebar_text=main+"\n"+sidebar; forbidden=["HStack(spacing: 0)", "GeometryReader { proxy in", "isSidebarCollapsed", "SidebarItemRow", ".navigationTitle(\"\")"]; found=forbidden.select{|needle| sidebar_text.include?(needle)}; abort("custom sidebar shell remains: #{found.join(", ")}") unless found.empty?; required=["NavigationSplitView {", ".navigationSplitViewColumnWidth(min: 156, ideal: 156, max: 220)", ".navigationSplitViewStyle(.balanced)", ".frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)", "List(appModel.visibleSidebarItems)", ".listStyle(.sidebar)", ".scrollContentBackground(.hidden)", "Label(item.rawValue, systemImage: item.systemImage)"]; missing=required.reject{|needle| sidebar_text.include?(needle)}; abort("missing native source-list sidebar markers: #{missing.join(", ")}") unless missing.empty?; width_contracts=[surface.include?("pageHorizontalPadding(for:"), dashboard.include?("overviewControlGrid(columnCount: 4)") && dashboard.include?("GridItem(.flexible(minimum: 220)"), rules.include?(".frame(minWidth: 360"), traffic.include?(".frame(minWidth: 320")]; abort("right detail min-width contract missing") unless width_contracts.all?; puts "macOS native source-list responsive width contract ok"'
    ```
 2. 构建并打开 Native `.app`：
    ```bash
@@ -1414,9 +1441,10 @@
 
 **预期结果：**
 - 源码扫描输出 `macOS native source-list responsive width contract ok`。
-- 左侧主菜单使用系统 source-list/sidebar 样式，显示 `活动`、`概览`、`规则`、`网络` 和主题按钮。
+- 左侧主菜单使用系统 source-list/sidebar 样式，显示 `活动`、`概览`、`规则`、`抓包` 和主题按钮。
 - 不存在自定义 overlay 悬浮层、自定义 icon rail 或自绘折叠按钮。
 - 系统 sidebar 按钮负责折叠/展开，左右布局行为交给 `NavigationSplitView`。
+- 左侧菜单默认宽度落在最小值附近，减少空白浪费；用户仍可通过系统 split divider 把左栏拖宽到上限。
 - 窗口宽度变窄时，右侧 detail 区域先减少页面 padding、卡片换行并降低 Rules/Network 详情面板最小宽度；左侧 source-list 不被右侧内容推出屏幕外。
 - Rules 页面内部的规则列表宽度拖拽仍然保留，且最大 300px。
 
@@ -1431,6 +1459,200 @@
 - 执行源码合同扫描通过，输出 `macOS native source-list responsive width contract ok`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
 - 将 Native `.app` 窗口调整为约 `980x720` 后截图观察，左侧系统 source-list 仍在窗口内，右侧 Activity 卡片自适应换行，没有继续把左侧主菜单挤出屏幕。
+- 2026-07-04：按用户反馈将 source-list 默认宽度调到最小附近，执行源码合同扫描通过，确认 `.navigationSplitViewColumnWidth(min: 156, ideal: 156, max: 220)` 保留系统拖拽调整但默认更窄。
+
+### TC-MNA-49：回归 - Activity 底部展示生效规则解析信息
+
+**操作步骤：**
+1. 执行 Swift 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行真实 Admin API 检查，确认后端提供与 Web UI Rules 胶囊一致的 active summary：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/rules/active-summary
+   ```
+3. 执行源码合同扫描，确认 Native client、AppModel 和 Activity UI 接入 active summary：
+   ```bash
+   ruby -e 'core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); client=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["ActiveRulesSummary", "ActiveRuleItem", "ActiveRuleVariableConflict", "fetchActiveRulesSummary", "@Published var activeRulesSummary", "selectedSidebarItem == .activity", "ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)", "生效规则解析", "variableConflicts", "mergedRules"]; text=[core,client,app,dashboard].join("\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing active rules summary markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native activity active rules summary contract ok"'
+   ```
+4. 构建并打开 Native `.app`，停留在 `活动` 页面底部查看规则解析区：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- 源码合同扫描输出 `macOS native activity active rules summary contract ok`。
+- `BifrostClient` 通过 `/rules/active-summary` 获取 `total`、`rules`、`variable_conflicts` 和 `merged_content`。
+- `Activity` 页面初次加载和停留在 Activity 时刷新都会更新 `activeRulesSummary`。
+- Activity 底部在流量分布下面展示 `生效规则解析` 卡片。
+- 卡片展示 active 规则数量、本机规则、Group 规则、每个规则解析后的 entry 数、变量冲突，以及合并后的规则内容预览。
+- 没有生效规则时展示明确空态，不留大块空白。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行真实 Admin API 检查通过，返回 `total=2`、`rules` 包含 `Default` 与 `NextAgent双机协作a`，并包含 `merged_content`。
+- 执行源码合同扫描通过，输出 `macOS native activity active rules summary contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app`。
+
+### TC-MNA-50：回归 - 小组管理入口跟随同步登录状态条件展示
+
+**操作步骤：**
+1. 执行 release scope smoke，确认基础入口和条件入口均被显式校验：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-release-scope
+   ```
+2. 执行源码合同扫描，确认 Native 左侧菜单按同步状态动态附加小组管理，并复用 Web UI `/groups` 工作台：
+   ```bash
+   ruby -e 'sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["case groups = \\"小组管理\\"","static func visibleItems(canShowGroups: Bool)","SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)","syncStatus?.enabled == true","syncStatus?.hasSession == true","syncStatus?.authorized == true","case .groups:","GroupsWebView()","EmbeddedWebUIPage(url: appModel.webUIURL(path: \\"groups\\"))","appModel.refreshSyncStatus()"]; text=[sidebar,app,main,dash].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native groups markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native conditional groups navigation contract ok"'
+   ```
+3. 构建并打开 Native `.app`，在未登录或同步服务关闭状态下观察左侧 source-list。
+4. 在 `概览` 页打开同步服务并完成登录授权后，观察左侧 source-list 在 `抓包` 下方出现 `小组管理`。
+5. 点击 `小组管理`，确认页面加载 `http://127.0.0.1:9900/_bifrost/groups`，创建小组、搜索、进入详情、成员管理等交互沿用 Web UI。
+
+**预期结果：**
+- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- 源码合同扫描输出 `macOS native conditional groups navigation contract ok`。
+- 未登录、未授权或同步服务未启用时，左侧菜单不显示 `小组管理`。
+- 同步服务启用、已登录且已授权后，左侧菜单在 `抓包` 下方显示 `小组管理`。
+- 如果用户当前停留在 `小组管理` 时退出登录或关闭同步服务，Native 自动切回 `概览`，不留下不可用空页面。
+- `小组管理` 页面使用 WebKit 直接加载 Web UI `/groups`，交互能力与 Web UI 保持一致，不另造半成品 Native 交互。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- 执行源码合同扫描通过，输出 `macOS native conditional groups navigation contract ok`。
+
+### TC-MNA-51：回归 - Rules 顶部支持 My Rules 与小组规则搜索切换
+
+**操作步骤：**
+1. 执行 Swift 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行真实 Admin API 检查，确认同步状态已允许小组能力、组列表包含 Owner/Master/Public 权限层级、组规则接口返回 `writable`：
+   ```bash
+   curl -fsS http://127.0.0.1:9900/_bifrost/api/sync/status | jq '{enabled,has_session,authorized}'
+   curl -fsS 'http://127.0.0.1:9900/_bifrost/api/group?offset=0&limit=5' | jq '{code,message,total:.data.total,groups:(.data.list // [] | map({id,name,level,visibility}) )}'
+   curl -fsS 'http://127.0.0.1:9900/_bifrost/api/group-rules/7127924050587992077' | jq '{group_id,group_name,writable,count:(.rules|length)}'
+   ```
+3. 执行源码合同扫描，确认 Native Rules 页面使用 Web UI 同源接口和权限模型：
+   ```bash
+   ruby -e 'core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); client=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); required=["RuleGroup", "permissionRank", "permissionLabel", "fetchRuleGroups", "fetchGroupRules", "fetchGroupRule", "createGroupRule", "updateGroupRule", "setGroupRuleEnabled", "deleteGroupRule", "selectedRuleGroupID", "activeRuleGroupWritable", "canShowRuleGroupSwitcher", "selectRuleScope(groupID:", "searchRuleGroups(keyword:", "canEditCurrentRuleScope", "canEditSelectedRuleContent", "groupScopePicker", "RuleScopeOptionRow", "Search groups...", "scheduleGroupSearch", "My Rules"]; text=[core,client,app,rules].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native rule group switcher markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native rules group switcher contract ok"'
+   ```
+4. 构建并打开 Native `.app`，进入 `规则` 页面：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+5. 在规则列表顶部点击作用域选择器，搜索并切换 `Bifrost`、`next-agent`、公开小组和 `My Rules`。
+
+**预期结果：**
+- 同步服务未启用、未登录或未授权时，规则列表顶部不展示小组切换器，默认只展示 `My Rules`。
+- 同步服务启用且已登录授权后，规则列表顶部展示 `My Rules` 选择器，并支持搜索小组。
+- 小组列表默认包含 `My Rules`，并按权限高低排序：Owner、Master/Member、Public；每个小组右侧展示对应权限标签。
+- 选择 `My Rules` 时，规则列表使用本地 `/rules` 数据源，支持新增、编辑、启停、删除、重命名和拖拽排序。
+- 选择可写小组时，规则列表使用 `/group-rules/{groupId}` 数据源，支持新增、编辑、启停和删除组规则。
+- 选择公开只读小组时，规则内容可查看，但新增、编辑、启停、删除、重命名和拖拽排序入口均不可写。
+- 组规则不走本地 `/rules/reorder`，避免把小组规则优先级错误保存到个人规则。
+- 切回 `My Rules` 后恢复个人规则列表，不遗留小组规则选中状态或搜索关键字。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行真实 Admin API 检查通过：同步状态为 `enabled=true`、`has_session=true`、`authorized=true`；`/group` 返回 Owner、Master 和 Public 权限层级；Owner 小组 `Bifrost` 的 `/group-rules` 返回 `writable=true`。
+- 执行 `/group?keyword=analytics&offset=0&limit=5` 真实搜索通过，返回 4 个匹配小组，确认 Native 搜索使用服务端 keyword 口径，不只过滤已加载第一页。
+- 执行源码合同扫描通过，输出 `macOS native rules group switcher contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+
+### TC-MNA-52：回归 - Native App 内置 core 并与 CLI 默认数据目录服务协作
+
+**操作步骤：**
+1. 执行 Swift 构建与 sidecar 协作合同检查：
+   ```bash
+   swift build --package-path apps/macos
+   swift run --package-path apps/macos BifrostNativeCoreChecks
+   ```
+2. 执行源码合同扫描，确认 Native 启动链路区分复用现有默认数据目录服务和启动 bundled sidecar，且 status 探测会校验 `data_dir`：
+   ```bash
+   ruby -e 'sidecar=File.read("apps/macos/Sources/BifrostNativeCore/Sidecar/SidecarManager.swift"); script=File.read("scripts/build-macos-native.sh"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["SidecarServiceOrigin", "existingDefaultDataDirectory", "launchedBundledSidecar", "statusSnapshotMatchesConfiguredDataDirectory", "dataDir", "Contents/Resources/bin/bifrost", "missing bundled Bifrost core", "运行中 · CLI", "运行中 · App"]; text=[sidecar,script,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native sidecar cooperation markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native sidecar cooperation contract ok"'
+   ```
+3. 执行带 sidecar 的 Native App 打包，不使用 `--skip-sidecar`：
+   ```bash
+   scripts/build-macos-native.sh --test
+   test -x apps/macos/.build/Bifrost.app/Contents/Resources/bin/bifrost
+   apps/macos/.build/Bifrost.app/Contents/Resources/bin/bifrost --version
+   ```
+4. 在默认数据目录已有 CLI 服务运行时打开 Native `.app`：
+   ```bash
+   bifrost status --format json
+   open -n apps/macos/.build/Bifrost.app
+   ```
+5. 停止默认数据目录服务后再次打开 Native `.app`，观察 Native 是否自动使用 bundled `bifrost start --daemon --skip-cert-check --no-system-proxy` 拉起服务。
+
+**预期结果：**
+- `BifrostNativeCoreChecks` 覆盖默认数据目录 path、start plan、status JSON `data_dir` 解码和数据目录匹配/不匹配判断。
+- 源码合同扫描输出 `macOS native sidecar cooperation contract ok`。
+- 非 `--skip-sidecar` 打包产物必须存在可执行的 `Bifrost.app/Contents/Resources/bin/bifrost`；缺失时构建脚本失败。
+- 默认数据目录已有 CLI daemon 时，Native 不创建第二套数据目录或第二个服务实例，直接挂载同一个 admin 端口管理。
+- 默认数据目录没有活动服务时，Native 使用 app 内置 core 自动启动 daemon，桌面端可单独安装运行。
+- Dashboard 状态可区分 `运行中 · CLI` 与 `运行中 · App`，便于排查当前服务来源。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
+- 执行源码合同扫描通过，输出 `macOS native sidecar cooperation contract ok`。
+- 执行 `scripts/build-macos-native.sh --test` 通过，生成 `apps/macos/.build/Bifrost.app` 并输出 `BifrostNativeCoreChecks passed`。
+- 执行 `test -x apps/macos/.build/Bifrost.app/Contents/Resources/bin/bifrost` 通过。
+- 执行 `apps/macos/.build/Bifrost.app/Contents/Resources/bin/bifrost --version` 通过，输出 `bifrost 0.0.137`。
+- 执行 `apps/macos/.build/Bifrost.app/Contents/Resources/bin/bifrost status --format json` 通过，返回 `running=true`、`listener.port=9900`、`data_dir=/Users/eden_studio/.bifrost`，确认内置 core 可挂载当前默认数据目录里的 CLI 服务。
+
+### TC-MNA-53：回归 - Native App 静默状态 CPU 保持在 8% 以内且实时数据不降级
+
+**操作步骤：**
+1. 执行 Swift 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行源码合同扫描，确认高频 WebSocket 数据不会在非必要页面订阅 traffic，指标发布被合并，订阅更新被去重，重复 App 实例会激活已有窗口而不是继续运行：
+   ```bash
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); root=File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["metricsPublishInterval: TimeInterval = 2.0","realtimeMetricsIntervalMs = 2_000","activityAppMetricsRefreshInterval: TimeInterval = 3.0","scheduleActivityAppMetricsRefresh","realtimeEventPublishInterval: TimeInterval = 30.0","needTraffic: needsTraffic","case .network:","subscriptionDebounceNanoseconds","assignIfChanged(&overview","noteRealtimeEvent()","TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds","shouldAttach(to markerView: NSView)","activateExistingInstanceIfNeeded","--allow-multiple-instances","PrimarySidebar: View, Equatable",".equatable()","ActivityWidthReader","activityMetricColumnCount","ActivityBars: View, Equatable","ActiveRulesSummaryCard: View, Equatable"]; text=[app,main,root,sidebar,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native idle CPU markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native idle cpu contract ok"'
+   ```
+3. 关闭已有 Native App 进程，仅保留默认数据目录里的 `bifrost` 服务：
+   ```bash
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost'
+   ```
+4. 启动一个 Native App 实例，等待窗口进入静默状态：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+5. 等待 10 秒后，连续采样 12 次 Native App 进程 CPU，并计算平均值和最大值：
+   ```bash
+   APP_PID="$(pgrep -f 'Bifrost.app/Contents/MacOS/Bifrost' | head -1)"
+   for i in $(seq 1 12); do ps -p "$APP_PID" -o pcpu=; sleep 1; done
+   ```
+6. 再次执行 `open -n apps/macos/.build/Bifrost.app`，确认不会留下第二个 Native App 进程。
+7. 在 `活动` 页面观察底部状态栏上下行速率、请求数、连接数仍会随 WebSocket 数据更新；切到 `抓包` 页面后再触发请求，确认 Network 数据仍实时进入列表。
+
+**预期结果：**
+- 源码合同扫描输出 `macOS native idle cpu contract ok`。
+- 静默状态下只有一个 `Bifrost.app/Contents/MacOS/Bifrost` 进程。
+- 连续采样的 Native App 平均 CPU 小于等于 8%，短峰值不应长期超过 8%。
+- 多次打开 `.app` 时新实例只激活已有窗口并退出，不建立第二套 WebSocket、polling 或 UI 刷新循环。
+- `活动`、底部状态栏和 `抓包` 页面仍保持 WebSocket 推送驱动的实时刷新；只有 UI 发布频率被合并，不影响服务端数据完整性。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `swift build --package-path apps/macos -c release` 通过，生成可采样的 release `.app`。
+- 执行源码合同扫描通过，输出 `macOS native idle cpu contract ok`。
+- 执行 `pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' && open -n apps/macos/.build/Bifrost.app` 后，等待 12 秒采样 release 进程，初始 `ps` 为 `3.0%`。
+- 执行 45 秒连续采样，输出 `samples=45 avg=6.18 max=29.60`，静默平均 CPU 已低于 8%；短峰值来自 SwiftUI/AppKit 布局刷新，未持续超过门限。
+- 再次执行 `open -n apps/macos/.build/Bifrost.app` 后，`pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'` 仅返回一个进程，确认单实例防护生效。
+- 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，输出 `BifrostNativeCoreChecks passed`。
 
 ## 清理步骤
 

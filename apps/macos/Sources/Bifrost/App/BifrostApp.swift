@@ -27,14 +27,16 @@ struct BifrostApp: App {
             TrafficTablePerformanceSmoke.run()
         }
         if CommandLine.arguments.contains("--check-release-scope") {
-            let items = SidebarItem.releaseScopeItems.map(\.rawValue)
+            let items = SidebarItem.visibleItems(canShowGroups: false).map(\.rawValue)
+            let itemsWithGroups = SidebarItem.visibleItems(canShowGroups: true).map(\.rawValue)
             let allItems = SidebarItem.allCases.map(\.rawValue)
-            let expected = ["活动", "概览", "规则", "网络"]
-            guard items == expected, allItems == items else {
-                fputs("Bifrost release scope check failed: visible=\(items.joined(separator: ",")) all=\(allItems.joined(separator: ","))\n", stderr)
+            let expected = ["活动", "概览", "规则", "抓包"]
+            let expectedWithGroups = expected + ["小组管理"]
+            guard items == expected, itemsWithGroups == expectedWithGroups, allItems == itemsWithGroups else {
+                fputs("Bifrost release scope check failed: visible=\(items.joined(separator: ",")) groups=\(itemsWithGroups.joined(separator: ",")) all=\(allItems.joined(separator: ","))\n", stderr)
                 Foundation.exit(1)
             }
-            print("Bifrost release scope check passed: \(items.joined(separator: ","))")
+            print("Bifrost release scope check passed: \(items.joined(separator: ",")); groups=\(itemsWithGroups.joined(separator: ","))")
             Foundation.exit(0)
         }
         if CommandLine.arguments.contains("--check-theme-contract") {
@@ -82,6 +84,8 @@ struct BifrostApp: App {
             print("Bifrost rule editor layout check passed")
             Foundation.exit(0)
         }
+
+        BifrostApp.activateExistingInstanceIfNeeded()
     }
 
     var body: some Scene {
@@ -103,5 +107,23 @@ struct BifrostApp: App {
             SettingsView()
                 .environmentObject(appModel)
         }
+    }
+
+    private static func activateExistingInstanceIfNeeded() {
+        guard !CommandLine.arguments.contains("--allow-multiple-instances"),
+              let bundleIdentifier = Bundle.main.bundleIdentifier else {
+            return
+        }
+        let currentProcessIdentifier = ProcessInfo.processInfo.processIdentifier
+        let existingApplications = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .filter { application in
+                application.processIdentifier != currentProcessIdentifier && !application.isTerminated
+            }
+        guard let existingApplication = existingApplications.first else {
+            return
+        }
+        existingApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        Foundation.exit(0)
     }
 }

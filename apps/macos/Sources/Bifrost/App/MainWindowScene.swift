@@ -7,8 +7,20 @@ struct MainWindowScene: View {
 
     var body: some View {
         NavigationSplitView {
-            PrimarySidebar(selection: $appModel.selectedSidebarItem)
-                .navigationSplitViewColumnWidth(min: 176, ideal: 204, max: 232)
+            PrimarySidebar(
+                selection: $appModel.selectedSidebarItem,
+                items: appModel.visibleSidebarItems,
+                colorSchemeMode: appModel.colorSchemeMode,
+                canShowGroupManagement: appModel.canShowGroupManagement,
+                toggleColorScheme: {
+                    appModel.colorSchemeMode = appModel.colorSchemeMode.next
+                },
+                ensureSelectionVisible: {
+                    appModel.ensureSelectedSidebarItemVisible()
+                }
+            )
+            .equatable()
+                .navigationSplitViewColumnWidth(min: 156, ideal: 156, max: 220)
         } detail: {
             VStack(spacing: 0) {
                 content
@@ -58,6 +70,8 @@ struct MainWindowScene: View {
             RulesView()
         case .network:
             NetworkWebView()
+        case .groups:
+            GroupsWebView()
         }
     }
 }
@@ -76,6 +90,9 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {
+        guard context.coordinator.shouldAttach(to: nsView) else {
+            return
+        }
         DispatchQueue.main.async {
             context.coordinator.attach(to: nsView)
         }
@@ -83,14 +100,23 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        private weak var markerView: NSView?
         private weak var window: NSWindow?
+
+        func shouldAttach(to markerView: NSView) -> Bool {
+            self.markerView !== markerView || markerView.window !== window
+        }
 
         func attach(to markerView: NSView) {
             guard let window = markerView.window else {
                 return
             }
+            guard self.markerView !== markerView || self.window !== window else {
+                return
+            }
 
             configure(window)
+            self.markerView = markerView
             self.window = window
         }
 
@@ -207,7 +233,7 @@ private struct StatusBar: View {
     }
 
     private var statusColor: Color {
-        if case .running = appModel.sidecarState {
+        if case .running(_, _) = appModel.sidecarState {
             return .green
         }
         if case .failed = appModel.sidecarState {
@@ -232,7 +258,7 @@ private struct StatusBar: View {
 
     private var proxyText: String {
         switch appModel.sidecarState {
-        case .running:
+        case .running(_, _):
             return "Proxy: Running"
         case .starting:
             return "Proxy: Starting"

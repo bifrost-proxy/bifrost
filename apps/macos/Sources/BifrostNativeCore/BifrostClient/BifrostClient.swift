@@ -22,6 +22,11 @@ public actor BifrostClient {
         try await decode(SystemOverview.self, from: getSystemOverview())
     }
 
+    public func fetchAppMetrics() async throws -> [AppMetrics] {
+        let data = try await request(.get, path: "/metrics/apps")
+        return try await decode([AppMetrics].self, from: data)
+    }
+
     public func fetchVersionCheck(forceRefresh: Bool = false) async throws -> VersionCheckResponse {
         let query = forceRefresh ? [URLQueryItem(name: "refresh", value: "true")] : []
         let data = try await request(.get, path: "/system/version-check", queryItems: query)
@@ -59,6 +64,12 @@ public actor BifrostClient {
         return try await decode(PerformanceConfigResponse.self, from: data)
     }
 
+    public func updatePerformanceConfig(_ requestBody: UpdatePerformanceConfigRequest) async throws -> PerformanceConfigResponse {
+        let body = try JSONEncoder().encode(requestBody)
+        let data = try await request(.put, path: "/config/performance", body: body)
+        return try await decode(PerformanceConfigResponse.self, from: data)
+    }
+
     public func fetchAppIcon(appName: String) async throws -> Data {
         try await request(.get, path: "/app-icon/\(appName)")
     }
@@ -85,6 +96,25 @@ public actor BifrostClient {
 
     public func fetchRules() async throws -> [RuleSummary] {
         try await decode([RuleSummary].self, from: listRules())
+    }
+
+    public func fetchRuleGroups(keyword: String? = nil, offset: Int = 0, limit: Int = 50) async throws -> RuleGroupListResponse {
+        var queryItems = [
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        let trimmedKeyword = keyword?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedKeyword.isEmpty {
+            queryItems.insert(URLQueryItem(name: "keyword", value: trimmedKeyword), at: 0)
+        }
+        let data = try await request(.get, path: "/group", queryItems: queryItems)
+        let payload: RemoteListPayload<RuleGroup> = try await decodeRemoteEnvelope(from: data)
+        return RuleGroupListResponse(list: payload.list ?? [], total: payload.total ?? 0)
+    }
+
+    public func fetchActiveRulesSummary() async throws -> ActiveRulesSummary {
+        let data = try await request(.get, path: "/rules/active-summary")
+        return try await decode(ActiveRulesSummary.self, from: data)
     }
 
     public func fetchRule(name: String) async throws -> RuleDetail {
@@ -119,6 +149,47 @@ public actor BifrostClient {
 
     public func deleteRule(name: String) async throws {
         _ = try await request(.delete, path: "/rules/\(encodePathSegment(name))")
+    }
+
+    public func fetchGroupRules(groupID: String) async throws -> GroupRulesResponse {
+        let data = try await request(.get, path: "/group-rules/\(encodePathSegment(groupID))")
+        return try await decode(GroupRulesResponse.self, from: data)
+    }
+
+    public func fetchGroupRule(groupID: String, name: String) async throws -> GroupRuleDetail {
+        let data = try await request(
+            .get,
+            path: "/group-rules/\(encodePathSegment(groupID))/\(encodePathSegment(name))"
+        )
+        return try await decode(GroupRuleDetail.self, from: data)
+    }
+
+    public func createGroupRule(groupID: String, name: String, content: String, enabled: Bool = true) async throws -> GroupRuleDetail {
+        let body = try JSONEncoder().encode(CreateRuleRequest(name: name, content: content, enabled: enabled))
+        let data = try await request(.post, path: "/group-rules/\(encodePathSegment(groupID))", body: body)
+        return try await decode(GroupRuleDetail.self, from: data)
+    }
+
+    public func updateGroupRule(groupID: String, name: String, content: String) async throws -> GroupRuleDetail {
+        let body = try JSONEncoder().encode(UpdateRuleRequest(content: content))
+        let data = try await request(
+            .put,
+            path: "/group-rules/\(encodePathSegment(groupID))/\(encodePathSegment(name))",
+            body: body
+        )
+        return try await decode(GroupRuleDetail.self, from: data)
+    }
+
+    public func setGroupRuleEnabled(groupID: String, name: String, enabled: Bool) async throws {
+        let action = enabled ? "enable" : "disable"
+        _ = try await request(
+            .put,
+            path: "/group-rules/\(encodePathSegment(groupID))/\(encodePathSegment(name))/\(action)"
+        )
+    }
+
+    public func deleteGroupRule(groupID: String, name: String) async throws {
+        _ = try await request(.delete, path: "/group-rules/\(encodePathSegment(groupID))/\(encodePathSegment(name))")
     }
 
     public func listValues() async throws -> Data {
@@ -442,6 +513,14 @@ public actor BifrostClient {
         try JSONDecoder().decode(type, from: data)
     }
 
+    private func decodeRemoteEnvelope<T: Decodable & Sendable>(from data: Data) async throws -> T {
+        let envelope = try await decode(RemoteEnvelope<T>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+        return envelope.data
+    }
+
     private func encodePathSegment(_ segment: String) -> String {
         var allowed = CharacterSet.urlPathAllowed
         allowed.remove(charactersIn: "/?#[]@!$&'()*+,;=")
@@ -451,4 +530,20 @@ public actor BifrostClient {
 
 public enum BifrostClientError: Error, Equatable {
     case httpStatus(Int, Data)
+    case remoteEnvelope(Int, String)
+}
+
+extension BifrostClientError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .httpStatus(let status, let data):
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            if let message, !message.isEmpty {
+                return "HTTP \(status): \(message)"
+            }
+            return "HTTP \(status)"
+        case .remoteEnvelope(_, let message):
+            return message.isEmpty ? "Remote request failed." : message
+        }
+    }
 }
