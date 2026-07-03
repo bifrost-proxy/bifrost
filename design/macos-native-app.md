@@ -38,8 +38,17 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 
 ### Bifrost
 
+2026-07-03 范围收敛：Native UI 不再追求覆盖 WebUI 全量工作台，首屏能力按 Surge 风格收敛为轻量控制台。
+
+- `活动` 展示核心实时指标：活动连接、上传/下载速率、请求数、规则状态、服务状态和应用流量分布。
+- `概览` 承载设置类核心操作：系统代理开关、TLS 解密开关、远程调用发现状态/开关、同步登录/自动同步/立即同步、证书状态与本机 CA 安装。
+- `规则` 保留原生列表、启停和内容编辑保存，并使用与 Activity/Overview 一致的冷白 surface + 白色卡片布局；规则列表和编辑器不能回退到旧的全宽灰色 toolbar、硬分割表格风格。
+- `网络` 不再在 Native 内实现复杂捕获/解密/重写工作台，只提供 Web UI 打开入口和少量状态摘要。
+- `Settings` 不作为主导航入口；完整设置页仍保留在 macOS app 的 Settings scene，避免丢失现有实现，但主窗口只暴露核心控制。
+- 视觉以 Apple/Surge 风格的清爽冷白 surface 为主：sidebar 可以保留轻量层级感，主内容避免大面积 `NSVisualEffectView` material 灰化；卡片保持白色、轻描边、弱阴影，并带轻微边缘高光/hover 悬浮反馈；窗口按钮必须可见，页面内容不得被标题栏安全区裁切。
+
 - 主界面使用 `NavigationSplitView`。
-- Overview/Traffic/Rules 先提供可编译页面骨架。
+- Activity/Overview/Rules/Network 组成主窗口 release scope。
 - Traffic 表格从第一版使用 AppKit `NSTableView` bridge，给后续高吞吐流量列表留出性能边界。
 - Rules 编辑器从第一版使用 AppKit `NSTextView` bridge，后续再补规则 DSL 高亮和诊断。
 - 对外可执行产品名固定为 `Bifrost`，避免 Dock、App Switcher、Console 或 `open` 启动路径暴露内部工程名。

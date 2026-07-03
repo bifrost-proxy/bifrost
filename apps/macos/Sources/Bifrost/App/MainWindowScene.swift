@@ -11,14 +11,6 @@ struct MainWindowScene: View {
                 .navigationSplitViewColumnWidth(min: 188, ideal: 218, max: 252)
         } detail: {
             VStack(spacing: 0) {
-                if appModel.selectedSidebarItem != .settings {
-                    TopToolbar {
-                        createRuleSheetVisible = true
-                    }
-
-                    Divider()
-                }
-
                 content
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
 
@@ -26,11 +18,12 @@ struct MainWindowScene: View {
 
                 StatusBar()
             }
-            .background(Color(nsColor: .windowBackgroundColor))
+            .background {
+                AppSurface.content
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 1180, minHeight: 760)
-        .ignoresSafeArea(.container, edges: .top)
         .preferredColorScheme(appModel.colorSchemeMode.colorScheme)
         .background(WindowChromeConfigurator())
         .sheet(isPresented: $createRuleSheetVisible) {
@@ -56,12 +49,14 @@ struct MainWindowScene: View {
     @ViewBuilder
     private var content: some View {
         switch appModel.selectedSidebarItem {
-        case .network:
-            TrafficView()
+        case .activity:
+            ActivityView()
+        case .overview:
+            DashboardView()
         case .rules:
             RulesView()
-        case .settings:
-            SettingsView()
+        case .network:
+            NetworkWebView()
         }
     }
 }
@@ -101,9 +96,13 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
         }
 
         private func configure(_ window: NSWindow) {
-            window.title = "Bifrost"
+            window.title = ""
             window.titleVisibility = .hidden
             window.titlebarAppearsTransparent = true
+            window.isOpaque = false
+            window.backgroundColor = .clear
+            window.hasShadow = true
+            window.isMovableByWindowBackground = true
             window.styleMask.insert(.fullSizeContentView)
             if #available(macOS 11.0, *) {
                 window.titlebarSeparatorStyle = .none
@@ -125,11 +124,9 @@ private struct TopToolbar: View {
     var body: some View {
         HStack(spacing: 10) {
             switch appModel.selectedSidebarItem {
-            case .network:
-                networkToolbar
             case .rules:
                 rulesToolbar
-            case .settings:
+            case .activity, .overview, .network:
                 EmptyView()
             }
         }
@@ -304,6 +301,19 @@ private struct TopToolbar: View {
         }
         return "Toggle macOS system proxy for \(appModel.adminHostPortLabel)"
     }
+}
+
+enum AppSurface {
+    static let content = Color(red: 0.955, green: 0.972, blue: 0.992)
+    static let sidebar = Color(red: 0.925, green: 0.95, blue: 0.972)
+    static let sidebarSelection = Color(red: 0.82, green: 0.86, blue: 0.90).opacity(0.58)
+    static let card = Color.white
+    static let cardBorder = Color(red: 0.78, green: 0.84, blue: 0.90).opacity(0.28)
+    static let cardHighlight = Color.white.opacity(0.95)
+    static let cardGlow = Color(red: 0.62, green: 0.72, blue: 0.88).opacity(0.20)
+    static let cardShadow = Color.black.opacity(0.040)
+    static let subtleFill = Color(red: 0.72, green: 0.77, blue: 0.83).opacity(0.18)
+    static let hoverShadow = Color.black.opacity(0.065)
 }
 
 private struct ToolbarIconButton: View {

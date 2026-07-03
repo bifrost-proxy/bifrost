@@ -5,13 +5,13 @@ import SwiftUI
 @MainActor
 final class AppModel: ObservableObject {
     private enum TrafficSyncPolicy {
-        static let initialWindowLimit = 500
+        static let initialWindowLimit = 160
         static let historyBatchLimit = 500
         static let maxPendingIds = 500
     }
 
     @Published var sidecarState: SidecarState = .stopped
-    @Published var selectedSidebarItem: SidebarItem = .network
+    @Published var selectedSidebarItem: SidebarItem = .activity
     @Published var colorSchemeMode: ColorSchemeMode = .light
     @Published var isFilterPanelCollapsed = false
     @Published var isDetailPanelCollapsed = false
@@ -130,7 +130,7 @@ final class AppModel: ObservableObject {
             async let breakpointSettings = client.fetchBreakpointSettings()
 
             var errors: [String] = []
-            let shouldLoadTraffic = includeTraffic ?? (selectedSidebarItem == .network)
+            let shouldLoadTraffic = includeTraffic ?? selectedSidebarItem.needsTrafficRecords
 
             do {
                 self.overview = try await overview
@@ -185,12 +185,12 @@ final class AppModel: ObservableObject {
 
     func handleSidebarSelectionChanged() async {
         clearPendingTrafficDelta()
-        if selectedSidebarItem != .network {
+        if !selectedSidebarItem.needsTrafficRecords {
             trafficHistoryTask?.cancel()
             trafficHistoryTask = nil
         }
         updateRealtimeSubscription()
-        await refreshData(includeTraffic: selectedSidebarItem == .network)
+        await refreshData(includeTraffic: selectedSidebarItem.needsTrafficRecords)
     }
 
     func selectRule(_ name: String) async {
@@ -795,9 +795,8 @@ final class AppModel: ObservableObject {
         rebuildPendingTrafficIds()
         updateRealtimeSubscription()
 
-        if response.hasMore {
-            startTrafficHistoryBackfill()
-        }
+        // The native shell shows lightweight activity/device summaries only.
+        // Full Network history remains in the Web UI, so avoid expensive backfill here.
     }
 
     private func startTrafficHistoryBackfill() {
@@ -809,7 +808,7 @@ final class AppModel: ObservableObject {
 
     private func backfillTrafficHistory() async {
         while !Task.isCancelled {
-            guard selectedSidebarItem == .network,
+            guard selectedSidebarItem.needsTrafficRecords,
                   trafficHasMore,
                   let cursor = trafficOldestSequence else {
                 return
@@ -897,7 +896,7 @@ final class AppModel: ObservableObject {
         }
         realtimeFallbackActive = realtimeState != .connected
         if realtimeFallbackActive {
-            await refreshData(includeTraffic: selectedSidebarItem == .network)
+            await refreshData(includeTraffic: selectedSidebarItem.needsTrafficRecords)
         }
     }
 
@@ -924,7 +923,7 @@ final class AppModel: ObservableObject {
             realtimeFallbackActive = false
             updateRealtimeSubscription()
         case .trafficDelta(let data):
-            if selectedSidebarItem == .network {
+            if selectedSidebarItem.needsTrafficRecords {
                 enqueueTrafficDelta(data)
             }
         case .trafficDeleted(let data):
@@ -954,7 +953,7 @@ final class AppModel: ObservableObject {
             return
         }
         trafficDeltaFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 16_000_000)
+            try? await Task.sleep(nanoseconds: 250_000_000)
             if Task.isCancelled {
                 return
             }
@@ -1090,7 +1089,7 @@ final class AppModel: ObservableObject {
     }
 
     private func makePushSubscription() -> PushSubscription {
-        let trafficEnabled = selectedSidebarItem == .network
+        let trafficEnabled = selectedSidebarItem.needsTrafficRecords
         let lastRecord = trafficEnabled ? trafficRecords.last : nil
         return PushSubscription(
             lastTrafficId: lastRecord?.id,
