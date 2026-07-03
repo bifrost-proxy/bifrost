@@ -802,6 +802,47 @@
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test && apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data` 通过，输出包含 `tls_domain_include=2`、`tls_domain_exclude=0`、`tls_app_include=9`、`tls_app_exclude=2`、`tls_ip_include=0`、`tls_ip_exclude=1`。
 - 2026-07-03：执行源码检查命令，确认 `TlsInterceptionCard`、`TlsListKind`、`TlsListEditorSheet`、`TlsListCountTile` 和 `AppModel.updateTlsConfig` 均存在，六类名单标题均在 Overview 源码中出现。
 
+### TC-MNA-29：回归 - Rules 使用原生 BifrostRuleEditorView 编辑 DSL
+
+**操作步骤：**
+1. 执行 core contract 检查：
+   ```bash
+   swift run --package-path apps/macos BifrostNativeCoreChecks
+   ```
+2. 执行 SwiftPM 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+3. 检查语言服务和编辑器分层：
+   ```bash
+   rg -n 'BifrostRuleLanguageService|BifrostRuleToken|BifrostCompletionItem|BifrostReferenceMatch|BifrostNavigationTarget|localVariables' \
+     apps/macos/Sources/BifrostNativeCore/RuleLanguage \
+     apps/macos/Sources/BifrostNativeCoreChecks/main.swift
+   rg -n 'BifrostRuleEditorView|BifrostRuleTextView|BifrostRuleHighlighter|BifrostRuleCompletionController|BifrostLineNumberRulerView|keyDown|mouseDown|NSF12FunctionKey' \
+     apps/macos/Sources/Bifrost/Features/Rules/Editor/BifrostRuleEditorView.swift
+   rg -n 'BifrostRuleEditorView|ruleEditorContext|refreshRuleEditorDynamicData|navigateFromRuleEditor' \
+     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift \
+     apps/macos/Sources/Bifrost/App/AppModel.swift
+   ```
+4. 打开 Native `.app`，进入 `规则`，选择一条规则，手工验证：
+   ```bash
+   open -n apps/macos/.build/Bifrost.app
+   ```
+
+**预期结果：**
+- `BifrostNativeCoreChecks` 覆盖 tokenizer、`key=value` 本地变量、`` ```headers `` fenced block 变量、`@rule` 补全、`{value}`/`{headers}` 补全、`reqScript://` 补全、reference detection 和 navigation target。
+- Rules 详情区使用 `BifrostRuleEditorView`，不再使用通用 `CodeEditorView` 作为规则 DSL 编辑器。
+- 编辑器底层是原生 `NSTextView`，禁用智能引号、破折号、文本替换、拼写/语法检查和自动链接；支持 undo、等宽字体、水平/垂直滚动。
+- 编辑器展示行号；高亮覆盖注释、规则引用、脚本引用、`{value}`/`${value}` 变量、`` ```headers `` 块变量名、scheme、key/value 和正则。
+- 输入 `@`、`{`、`reqScript://`、`resScript://`、`bp://` 时可基于 Rules/Values/Scripts 动态数据弹出补全；`{` 补全同时包含 fenced block 变量和全局 Values；方向键选择，Enter/Tab 插入，Esc 关闭。
+- Cmd+S 调用现有规则保存链路；Cmd+Click/F12 对本地变量跳到定义行，对 `@RuleName` 在 Native Rules 中选择对应规则，对 Values/Scripts 在当前主导航缺失页面时 fallback 打开 Web UI。
+- 不引入 Monaco、WebView、CodeEditSourceEditor、STTextView、CodeEditorView 第三方包或新的 Swift Package 依赖。
+
+**执行记录：**
+- 2026-07-03：执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
+- 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
+- 2026-07-03：执行源码检查命令，确认 `BifrostRuleLanguageService`、`BifrostRuleEditorView`、`BifrostRuleTextView`、`BifrostRuleHighlighter`、`BifrostRuleCompletionController`、`BifrostLineNumberRulerView`、`ruleEditorContext`、`refreshRuleEditorDynamicData`、`navigateFromRuleEditor` 均存在。
+
 ## 清理步骤
 
 ```bash

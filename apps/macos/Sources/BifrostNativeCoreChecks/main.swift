@@ -157,12 +157,132 @@ func runAdminModelDecodingChecks() throws {
     try checkEqual(performanceConfig.traffic.fileRetentionDays, 7, "performance retention days should decode")
 }
 
+func runRuleLanguageChecks() throws {
+    let service = BifrostRuleLanguageService()
+    let text = """
+    # comment
+    token = abc
+    ```headers
+    x-tt-env: boe
+    ```
+    @Default
+    reqScript://auth
+    resScript://rewrite
+    bp://parser
+    proxy://example.com?token={token}&headers={headers}&global=${global_token}
+    /api\\/v1/.*
+    """
+    let context = BifrostRuleEditorContext(
+        currentRuleName: "Current",
+        ruleNames: ["Default", "DirectOnly"],
+        values: ["global_token", "region"],
+        requestScripts: ["auth"],
+        responseScripts: ["rewrite"],
+        parserScripts: ["parser"],
+        localVariables: service.localVariables(in: text)
+    )
+
+    let tokens = service.tokenize(text, context: context)
+    try check(tokens.contains { $0.kind == .comment }, "rule tokenizer should detect comments")
+    try check(tokens.contains { $0.kind == .ruleReference }, "rule tokenizer should detect @rule references")
+    try check(tokens.contains { $0.kind == .requestScript }, "rule tokenizer should detect request script references")
+    try check(tokens.contains { $0.kind == .responseScript }, "rule tokenizer should detect response script references")
+    try check(tokens.contains { $0.kind == .parserScript }, "rule tokenizer should detect parser script references")
+    try check(tokens.contains { $0.kind == .variable }, "rule tokenizer should detect value variables")
+    try check(tokens.contains { $0.kind == .localVariable }, "rule tokenizer should highlight block variable names")
+    try check(tokens.contains { $0.kind == .regexp }, "rule tokenizer should detect regex literals")
+
+    let localVariables = service.localVariables(in: text)
+    try checkEqual(localVariables.first?.name, "token", "rule language should extract local key=value variables")
+    try checkEqual(localVariables.first?.line, 2, "rule language local variable line should be 1-based")
+    try check(
+        localVariables.contains { $0.name == "headers" && $0.line == 3 },
+        "rule language should extract fenced block variables"
+    )
+
+    let ruleCursor = (text as NSString).range(of: "@Def").location + "@Def".utf16.count
+    let ruleCompletions = service.completions(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: ruleCursor),
+        context: context
+    )
+    try checkEqual(ruleCompletions.first?.label, "@Default", "rule completion should fuzzy match @ references")
+
+    let valueCursor = (text as NSString).range(of: "{tok").location + "{tok".utf16.count
+    let valueCompletions = service.completions(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: valueCursor),
+        context: context
+    )
+    try check(valueCompletions.contains { $0.label == "{token}" && $0.kind == .localVariable }, "value completion should include local variables")
+    try check(valueCompletions.contains { $0.label == "{global_token}" }, "value completion should include global values")
+
+    let blockValueCursor = (text as NSString).range(of: "{hea").location + "{hea".utf16.count
+    let blockValueCompletions = service.completions(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: blockValueCursor),
+        context: context
+    )
+    try check(
+        blockValueCompletions.contains { $0.label == "{headers}" && $0.kind == .localVariable },
+        "value completion should include fenced block variables"
+    )
+
+    let scriptCursor = (text as NSString).range(of: "reqScript://au").location + "reqScript://au".utf16.count
+    let scriptCompletions = service.completions(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: scriptCursor),
+        context: context
+    )
+    try checkEqual(scriptCompletions.first?.insertText, "auth", "request script completion should replace only typed suffix")
+
+    let ruleReferenceOffset = (text as NSString).range(of: "@Default").location + 2
+    let ruleReference = service.reference(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: ruleReferenceOffset),
+        context: context
+    )
+    try checkEqual(ruleReference?.name, "Default", "referenceAt should detect @rule under cursor")
+    try checkEqual(
+        service.navigationTarget(for: ruleReference!, context: context),
+        .rule(group: nil, name: "Default"),
+        "rule reference should navigate to rule"
+    )
+
+    let valueReferenceOffset = (text as NSString).range(of: "{token}").location + 2
+    let valueReference = service.reference(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: valueReferenceOffset),
+        context: context
+    )
+    try checkEqual(valueReference?.type, .localVariable, "local variable references should win over global values")
+    try checkEqual(
+        service.navigationTarget(for: valueReference!, context: context),
+        .editorLine(2),
+        "local variable navigation should target defining line"
+    )
+
+    let blockReferenceOffset = (text as NSString).range(of: "{headers}").location + 2
+    let blockReference = service.reference(
+        in: text,
+        cursor: BifrostTextPosition(utf16Offset: blockReferenceOffset),
+        context: context
+    )
+    try checkEqual(blockReference?.type, .localVariable, "block variable references should be local variables")
+    try checkEqual(
+        service.navigationTarget(for: blockReference!, context: context),
+        .editorLine(3),
+        "block variable navigation should target fenced definition line"
+    )
+}
+
 @main
 struct BifrostNativeCoreChecks {
     static func main() async {
         do {
             try runAdminAPIRequestFactoryChecks()
             try runAdminModelDecodingChecks()
+            try runRuleLanguageChecks()
             try await runSidecarConfigurationChecks()
             print("BifrostNativeCoreChecks passed")
         } catch {

@@ -124,7 +124,18 @@ struct RulesView: View {
         VStack(spacing: 0) {
             detailHeader
             if appModel.selectedRuleDetail != nil {
-                CodeEditorView(text: $appModel.ruleDraftContent)
+                BifrostRuleEditorView(
+                    text: $appModel.ruleDraftContent,
+                    context: appModel.ruleEditorContext,
+                    isReadOnly: appModel.isSavingRule,
+                    onNavigate: { target in
+                        appModel.navigateFromRuleEditor(target)
+                    },
+                    onSave: {
+                        Task { await appModel.saveSelectedRule(content: appModel.ruleDraftContent) }
+                    },
+                    onTextChanged: { _ in }
+                )
                     .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
                 RulesEmptyStateView(title: "Select a rule to edit")

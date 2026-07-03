@@ -241,8 +241,53 @@ final class AppModel: ObservableObject {
             await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: true)
         case .rules:
             await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
+            await refreshRuleEditorDynamicData()
         case .network:
             await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: false)
+        }
+    }
+
+    var ruleEditorContext: BifrostRuleEditorContext {
+        let languageService = BifrostRuleLanguageService()
+        return BifrostRuleEditorContext(
+            currentRuleName: selectedRuleName,
+            currentGroupName: nil,
+            ruleNames: rules.map(\.name),
+            values: values.map(\.name),
+            requestScripts: scriptsByType[.request, default: []].map(\.name),
+            responseScripts: scriptsByType[.response, default: []].map(\.name),
+            parserScripts: scriptsByType[.parser, default: []].map(\.name),
+            localVariables: languageService.localVariables(in: ruleDraftContent)
+        )
+    }
+
+    func refreshRuleEditorDynamicData() async {
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            async let rulesResult = client.fetchRules()
+            async let valuesResult = client.fetchValues()
+            async let scriptsResult = client.fetchScripts()
+            rules = try await rulesResult
+            values = try await valuesResult.values
+            let scripts = try await scriptsResult
+            scriptsByType = Dictionary(uniqueKeysWithValues: ScriptType.allCases.map { type in
+                (type, scripts.scripts(for: type))
+            })
+            dataError = nil
+        } catch {
+            dataError = error.localizedDescription
+        }
+    }
+
+    func navigateFromRuleEditor(_ target: BifrostNavigationTarget) {
+        switch target {
+        case .editorLine:
+            break
+        case .rule(_, let name):
+            selectedSidebarItem = .rules
+            Task { await selectRule(name) }
+        case .value, .script:
+            openWebUI()
         }
     }
 

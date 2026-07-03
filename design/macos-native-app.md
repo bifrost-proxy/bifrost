@@ -44,6 +44,7 @@ SwiftPM 是第一阶段的强制可复现构建路径；`Project.yml` 仅作为�
 - `概览` 承载设置类核心操作：系统代理开关、TLS 解密开关、TLS 解包应用/域名/IP 白名单与黑名单数量及弹窗编辑、Remote Invoke 状态/发现开关、SSH Key 生成与复制、已授权客户端/活动调用/最近活跃摘要、同步登录/自动同步/立即同步、证书状态与本机 CA 安装。
 - `概览` 的证书与移动端面板必须展示本机 CA 状态、代理地址、证书指纹、安装按钮、已连接移动设备、移动端可用性检查 QR、检查链接复制/打开操作，以及扫码后正在连接的设备状态；不能只保留 Settings 中的完整证书页入口。
 - `规则` 保留原生列表、启停和内容编辑保存，并使用与 Activity/Overview 一致的冷白 surface + 白色卡片布局；规则列表和编辑器不能回退到旧的全宽灰色 toolbar、硬分割表格风格。
+- `规则` 编辑器使用原生 `NSTextView` bridge 演进出的 `BifrostRuleEditorView`，不引入 Monaco/WebView 或第三方编辑器组件；语言能力由 `BifrostNativeCore/RuleLanguage` 的纯 Swift service 提供，AppKit 层只负责行号、高亮、补全浮窗、Cmd+S、Cmd+Click/F12 导航和文本同步。
 - `网络` 不再在 Native 内实现复杂捕获/解密/重写工作台，只提供 Web UI 打开入口和少量状态摘要。
 - `Settings` 不作为主导航入口；完整设置页仍保留在 macOS app 的 Settings scene，避免丢失现有实现，但主窗口只暴露核心控制。
 - 视觉以 Apple/Surge 风格的清爽冷白 surface 为主：sidebar 可以保留轻量层级感，主内容避免大面积 `NSVisualEffectView` material 灰化；卡片保持白色、轻描边、弱阴影，并带轻微边缘高光/hover 悬浮反馈；窗口按钮必须可见，页面内容不得被标题栏安全区裁切。
@@ -130,6 +131,7 @@ scripts/build-macos-native.sh --test
 - 主窗口四个核心入口切换时按页刷新，Activity 使用缓存流量统计，避免切 tab 卡顿或延迟渲染。
 - Overview 的 Remote Invoke 面板展示 SSH Key 状态、生成/复制操作、已授权客户端数、活动调用数、最近调用和最近活跃时间；证书面板展示本机 CA、移动设备、trust-probe QR 与扫码设备状态。
 - Overview 的 TLS 解密面板展示应用、域名、IP 三类 include/exclude 名单数量；点击任一计数块弹出编辑框，每行一个规则并保存回 `/config/tls`。
+- Rules 编辑器覆盖 Bifrost DSL 注释、`@rule`、`reqScript://`、`resScript://`、`bp://`、`${value}`/`{value}`、`key=value`、`` ```blockVariable ``、正则和 code fence/line block 的 tokenizer；补全数据来自 Rules/Values/Scripts Admin API；本地变量同时来自 `key=value` 与 fenced block 变量定义；本阶段 Values/Scripts 目标在主导航未暴露时 fallback 到 Web UI。
 
 ## Review/Fix/Test 闭环方案
 
