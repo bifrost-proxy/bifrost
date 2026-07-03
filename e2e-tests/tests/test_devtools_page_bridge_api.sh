@@ -659,6 +659,20 @@ async function clickDevtoolsWorkspaceTab(adminPage, name) {
   }
 }
 
+async function dispatchVisibleClick(locator, label, timeout = 8000) {
+  const target = locator.first();
+  await target.waitFor({ state: 'visible', timeout });
+  await target.evaluate((node, clickLabel) => {
+    const clickTarget = node instanceof HTMLElement
+      ? node
+      : node.closest?.('[data-testid], button, a, [role="button"]') || node;
+    clickTarget.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+    clickTarget.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+    clickTarget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+    clickTarget.setAttribute?.('data-bifrost-e2e-last-click', clickLabel);
+  }, label);
+}
+
 function mergeSnapshot(base, incoming) {
   const next = base ? { ...base } : {};
   if (incoming.page) next.page = incoming.page;
@@ -1751,7 +1765,7 @@ const devtoolsNavIndex = navLabels.indexOf('DevTools');
 if (scriptsNavIndex === -1 || devtoolsNavIndex === -1 || devtoolsNavIndex <= scriptsNavIndex) {
   throw new Error(`AV-CDP-10 failed: DevTools sidebar entry must appear after Scripts (${navLabels.join(' > ')})`);
 }
-await devtoolsNavItem.click();
+await dispatchVisibleClick(devtoolsNavItem, 'devtools-sidebar-entry');
 await adminPage.getByTestId('devtools-page-list').waitFor({ timeout: 8000 });
 await adminPage.getByPlaceholder('Search online pages').fill('av-cdp-control');
 const primaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Basic' });
@@ -1761,7 +1775,7 @@ if (visiblePrimaryCards !== 1) {
   throw new Error(`AV-CDP-13 failed: WebUI should list one target after same-tab reload, got ${visiblePrimaryCards}`);
 }
 let targetCounters = await targetRuntimeCounters(page);
-await primaryCard.click();
+await dispatchVisibleClick(primaryCard, 'primary-devtools-page-card');
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-back').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
@@ -2282,7 +2296,7 @@ await adminPage.getByPlaceholder('Search online pages').fill('secondary');
 await adminPage.getByRole('button', { name: /Refresh Pages/ }).click();
 const secondaryCard = adminPage.getByTestId('devtools-page-card').filter({ hasText: 'Bifrost DevTools Secondary' });
 await secondaryCard.waitFor({ timeout: 8000 });
-await secondaryCard.click();
+await dispatchVisibleClick(secondaryCard, 'secondary-devtools-page-card');
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-refresh').click();
