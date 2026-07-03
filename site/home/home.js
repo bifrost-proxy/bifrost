@@ -5,9 +5,6 @@ const panels = new Map(
 const languageButtons = Array.from(document.querySelectorAll("[data-lang]"));
 const translations = {
   en: {
-    navDocs: "Docs",
-    navInstall: "Install",
-    navEnglish: "English",
     heroEyebrow: "AI-era proxy / Coding Agent ready",
     heroText:
       "A one-stop proxy solution for the AI era. Capture real traffic, rewrite and replay requests, then hand the evidence to your Coding Agent so it can build useful skills.",
@@ -37,9 +34,6 @@ const translations = {
     stepFour: "Replay and compare",
   },
   zh: {
-    navDocs: "文档",
-    navInstall: "安装",
-    navEnglish: "English",
     heroEyebrow: "AI 时代代理方案 / 适配 Coding Agent",
     heroText: "Bifrost 是 AI 时代的一站式代理解决方案。抓取真实流量、改写和回放请求，再把证据交给 Coding Agent，让它沉淀可复用的技能。",
     primaryCta: "开始安装",

@@ -1,16 +1,126 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" prefix="og: https://ogp.me/ns#">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="robots" content="index, follow, max-image-preview:large" />
     <meta
       name="description"
-      content="Bifrost is an AI-era one-stop proxy solution for traffic capture, rewrite, replay, TLS interception, scripts, and Coding Agent workflows."
+      content="Bifrost is an open-source proxy for AI-era development. Capture real HTTP traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script rules, and give Coding Agents reproducible evidence."
     />
-    <title>Bifrost | AI-era Proxy Solution</title>
+    <meta
+      name="keywords"
+      content="Bifrost, proxy, HTTP proxy, traffic capture, request rewrite, response rewrite, API replay, TLS interception, Coding Agent, AI agent, developer tools"
+    />
+    <meta name="application-name" content="Bifrost" />
+    <meta name="apple-mobile-web-app-title" content="Bifrost" />
+    <meta name="theme-color" content="#13a58f" />
+    <meta name="color-scheme" content="light dark" />
+    <link rel="canonical" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="x-default" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="en" href="%SITE_URL%" />
+    <link rel="alternate" hreflang="zh-CN" href="%SITE_URL%" />
+    <meta property="og:site_name" content="Bifrost" />
+    <meta property="og:type" content="website" />
+    <meta property="og:url" content="%SITE_URL%" />
+    <meta property="og:title" content="Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay" />
+    <meta
+      property="og:description"
+      content="Capture real traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script proxy rules, and turn evidence into reusable Coding Agent workflows."
+    />
+    <meta property="og:image" content="%OG_IMAGE%" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Bifrost traffic capture, rewrite, replay, TLS, scripting, and Coding Agent workflow preview" />
+    <meta property="og:locale" content="en_US" />
+    <meta property="og:locale:alternate" content="zh_CN" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Bifrost - AI Proxy for Coding Agents" />
+    <meta
+      name="twitter:description"
+      content="Open-source proxy for traffic capture, rewrite, replay, TLS inspection, scripts, and AI Coding Agent workflows."
+    />
+    <meta name="twitter:image" content="%OG_IMAGE%" />
+    <meta name="twitter:image:alt" content="Bifrost proxy workflow preview" />
+    <title>Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay</title>
     <link rel="icon" type="image/png" href="%BASE_PATH%favicon.png" />
     <link rel="stylesheet" href="%HOME_CSS%" />
     <script src="%HOME_JS%" defer></script>
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "%SITE_URL%#organization",
+            "name": "Bifrost",
+            "url": "%SITE_URL%",
+            "logo": "%SITE_URL%favicon.png",
+            "sameAs": ["https://github.com/bifrost-proxy/bifrost"]
+          },
+          {
+            "@type": "WebSite",
+            "@id": "%SITE_URL%#website",
+            "name": "Bifrost",
+            "url": "%SITE_URL%",
+            "publisher": { "@id": "%SITE_URL%#organization" },
+            "inLanguage": ["en", "zh-CN"]
+          },
+          {
+            "@type": "SoftwareApplication",
+            "@id": "%SITE_URL%#software",
+            "name": "Bifrost",
+            "applicationCategory": "DeveloperApplication",
+            "operatingSystem": ["macOS", "Windows", "Linux"],
+            "url": "%SITE_URL%",
+            "codeRepository": "https://github.com/bifrost-proxy/bifrost",
+            "isAccessibleForFree": true,
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD"
+            },
+            "description": "Bifrost is an open-source proxy for AI-era development. It captures real traffic, rewrites HTTP requests and responses, replays APIs, inspects TLS traffic, scripts proxy rules, and helps Coding Agents work from reproducible evidence.",
+            "featureList": [
+              "HTTP and HTTPS traffic capture",
+              "Request and response rewrite rules",
+              "API replay and comparison",
+              "TLS interception controls",
+              "Scriptable proxy rules",
+              "Coding Agent evidence workflows"
+            ],
+            "softwareHelp": "%SITE_URL%docs/"
+          },
+          {
+            "@type": "WebPage",
+            "@id": "%SITE_URL%#webpage",
+            "url": "%SITE_URL%",
+            "name": "Bifrost - AI Proxy for Coding Agents, Traffic Capture, Rewrite and Replay",
+            "isPartOf": { "@id": "%SITE_URL%#website" },
+            "about": { "@id": "%SITE_URL%#software" },
+            "primaryImageOfPage": {
+              "@type": "ImageObject",
+              "url": "%OG_IMAGE%",
+              "width": 1200,
+              "height": 630
+            },
+            "description": "Capture real traffic, rewrite requests and responses, replay APIs, inspect TLS traffic, script proxy rules, and turn evidence into reusable Coding Agent workflows.",
+            "keywords": [
+              "traffic capture",
+              "HTTP proxy",
+              "request rewrite",
+              "response rewrite",
+              "API replay",
+              "TLS interception",
+              "Coding Agent",
+              "AI developer tools"
+            ],
+            "inLanguage": ["en", "zh-CN"]
+          }
+        ]
+      }
+    </script>
   </head>
   <body>
     <header class="site-header" aria-label="Bifrost">
@@ -18,12 +128,6 @@
         <img src="%BASE_PATH%favicon.png" alt="" width="32" height="32" decoding="async" />
         <span>Bifrost</span>
       </a>
-      <nav class="nav-links" aria-label="Primary navigation">
-        <a href="%BASE_PATH%docs/" data-i18n="navDocs">Docs</a>
-        <a href="%BASE_PATH%getting-started/installation" data-i18n="navInstall">Install</a>
-        <a href="%BASE_PATH%en/reference/" data-i18n="navEnglish">English</a>
-        <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
-      </nav>
       <div class="language-switch" role="group" aria-label="Language">
         <button type="button" data-lang="en" aria-pressed="true">EN</button>
         <button type="button" data-lang="zh" aria-pressed="false">中文</button>
@@ -44,6 +148,7 @@
               >Install</a
             >
             <a class="button secondary" href="%BASE_PATH%docs/" data-i18n="secondaryCta">Read Docs</a>
+            <a class="button secondary" href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
           </div>
         </div>
 

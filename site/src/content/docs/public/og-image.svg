@@ -1,0 +1,47 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Bifrost - AI Proxy for Coding Agents</title>
+  <desc id="desc">Bifrost product card showing traffic capture, rewrite, replay, TLS, scripting, and Coding Agent workflows.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#f8fffc"/>
+      <stop offset="0.52" stop-color="#ecf7f2"/>
+      <stop offset="1" stop-color="#e8f0ff"/>
+    </linearGradient>
+    <linearGradient id="panel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#dff8f2"/>
+      <stop offset="1" stop-color="#dfe9ff"/>
+    </linearGradient>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="20" stdDeviation="28" flood-color="#12221e" flood-opacity="0.16"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="630" fill="url(#bg)"/>
+  <circle cx="121" cy="103" r="25" fill="#71eee0"/>
+  <circle cx="121" cy="103" r="11" fill="#ffffff"/>
+  <circle cx="121" cy="103" r="6" fill="#13a58f"/>
+  <text x="165" y="119" fill="#111816" font-family="Inter, Arial, sans-serif" font-size="36" font-weight="800">Bifrost</text>
+  <text x="90" y="228" fill="#13a58f" font-family="Inter, Arial, sans-serif" font-size="24" font-weight="800" letter-spacing="4">AI PROXY FOR CODING AGENTS</text>
+  <text x="88" y="334" fill="#111816" font-family="Inter, Arial, sans-serif" font-size="92" font-weight="900">Capture.</text>
+  <text x="88" y="427" fill="#111816" font-family="Inter, Arial, sans-serif" font-size="92" font-weight="900">Rewrite.</text>
+  <text x="88" y="520" fill="#111816" font-family="Inter, Arial, sans-serif" font-size="92" font-weight="900">Replay.</text>
+  <g filter="url(#shadow)">
+    <rect x="674" y="145" width="420" height="340" rx="16" fill="url(#panel)" stroke="#c7d8d2"/>
+    <rect x="710" y="192" width="348" height="214" rx="10" fill="#ffffff" stroke="#c3d0ca"/>
+    <text x="742" y="246" fill="#13a58f" font-family="Menlo, Consolas, monospace" font-size="24" font-weight="700">$</text>
+    <text x="775" y="246" fill="#1d2a26" font-family="Menlo, Consolas, monospace" font-size="24">bifrost traffic search</text>
+    <text x="742" y="307" fill="#5d6965" font-family="Menlo, Consolas, monospace" font-size="24">200 OK - replay ready</text>
+    <text x="742" y="368" fill="#0d796a" font-family="Menlo, Consolas, monospace" font-size="24">rules + scripts + AI evidence</text>
+  </g>
+  <g fill="#ffffff" stroke="#d5e1dc">
+    <rect x="674" y="520" width="109" height="42" rx="8"/>
+    <rect x="799" y="520" width="93" height="42" rx="8"/>
+    <rect x="908" y="520" width="90" height="42" rx="8"/>
+    <rect x="1014" y="520" width="80" height="42" rx="8"/>
+  </g>
+  <g fill="#5d6965" font-family="Inter, Arial, sans-serif" font-size="18" font-weight="800">
+    <text x="696" y="548">Capture</text>
+    <text x="821" y="548">Rewrite</text>
+    <text x="930" y="548">Replay</text>
+    <text x="1037" y="548">TLS</text>
+  </g>
+</svg>
