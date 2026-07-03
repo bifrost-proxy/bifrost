@@ -19,6 +19,7 @@ export BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1
 export BIFROST_DISABLE_TRAY=1
 
 PROFILE="$TEST_DIR/surge.conf"
+NATIVE_PROFILE="$TEST_DIR/native.bifrost-profile.toml"
 INCLUDE_PROFILE="$TEST_DIR/included.conf"
 RULE_SET="$TEST_DIR/rules.list"
 DOMAIN_SET="$TEST_DIR/domains.list"
@@ -156,9 +157,72 @@ PROFILE_EOF
   echo "DOMAIN-SET,${REMOTE_BASE}/remote-domains.list,DIRECT"
 } >> "$PROFILE"
 
+cat > "$NATIVE_PROFILE" <<'PROFILE_EOF'
+[profile]
+name = "native-e2e"
+version = 1
+
+[[policies]]
+name = "ProxyA"
+type = "proxy"
+url = "http://127.0.0.1:8080"
+
+[[policy_groups]]
+name = "Auto"
+type = "url-test"
+policies = ["ProxyA", "DIRECT", "MissingProxy"]
+
+[[rules]]
+match = { domain = "api.example.com" }
+policy = "DIRECT"
+
+[[rules]]
+match = { domain_suffix = "example.com" }
+policy = "Auto"
+
+[[rules]]
+match = { final = true }
+policy = "REJECT"
+
+[dns]
+servers = ["https://dns.example/dns-query"]
+
+[dns.hosts]
+"api.example.com" = "203.0.113.10"
+
+[mitm]
+include = ["*.example.com"]
+exclude = ["private.example.com"]
+
+[[http_pipeline]]
+match = "^https://rewrite\\.example/path"
+action = "redirect"
+value = "https://target.example/path"
+PROFILE_EOF
+
 echo "Building bifrost CLI for Surge Bridge E2E..."
 cargo build --bin bifrost
 BIFROST_BIN="$ROOT_DIR/target/debug/bifrost"
+
+echo "Running bifrost profile native validate..."
+NATIVE_VALIDATE_OUTPUT="$("$BIFROST_BIN" profile native validate "$NATIVE_PROFILE")"
+assert_body_contains "Bifrost Native Profile validate" "$NATIVE_VALIDATE_OUTPUT" "native validate prints header"
+assert_body_contains "Plan: sha256:" "$NATIVE_VALIDATE_OUTPUT" "native validate prints stable plan id"
+assert_body_contains "Mode: bifrost-native-dry-run" "$NATIVE_VALIDATE_OUTPUT" "native validate prints runtime mode"
+assert_body_contains "Runtime plan: 1 proxies, 1 policy groups, 3 rules, 2 dns entries, 2 mitm entries, 1 pipeline entries" "$NATIVE_VALIDATE_OUTPUT" "native validate prints runtime counts"
+assert_body_contains "native.policy_group.missing_member" "$NATIVE_VALIDATE_OUTPUT" "native validate reports missing policy group members"
+assert_body_contains "dry-run-only" "$NATIVE_VALIDATE_OUTPUT" "native validate stays non-activating"
+
+echo "Running bifrost profile native effective..."
+NATIVE_EFFECTIVE_OUTPUT="$("$BIFROST_BIN" profile native effective "$NATIVE_PROFILE")"
+assert_body_contains "Bifrost Native Profile effective" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints header"
+assert_body_contains "Policies" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints policies"
+assert_body_contains "Policy graph" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints policy graph"
+assert_body_contains "missing members: MissingProxy" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints missing group members"
+assert_body_contains "Ordered rules" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints ordered rules"
+assert_body_contains "DNS entries" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints DNS entries"
+assert_body_contains "MITM entries" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints MITM entries"
+assert_body_contains "HTTP Pipeline entries" "$NATIVE_EFFECTIVE_OUTPUT" "native effective prints HTTP Pipeline entries"
 
 echo "Running bifrost profile import --dry-run..."
 IMPORT_OUTPUT="$("$BIFROST_BIN" profile import "$PROFILE" --dry-run)"
@@ -227,6 +291,10 @@ assert_body_contains "Status: disabled" "$RULE_SHOW_OUTPUT" "saved Surge import 
 assert_body_contains "api.hosted.example passthrough://" "$RULE_SHOW_OUTPUT" "saved rule contains DIRECT passthrough conversion"
 assert_body_contains "*.example.com proxy://http://127.0.0.1:8080" "$RULE_SHOW_OUTPUT" "saved rule contains proxy endpoint conversion"
 assert_body_contains "/.*/ proxy://http://127.0.0.1:8080" "$RULE_SHOW_OUTPUT" "saved rule contains FINAL proxy conversion"
+assert_body_contains "/^https:\\/\\/rewrite\\.example\\/path/ redirect://302:https://target.example/path" "$RULE_SHOW_OUTPUT" "saved rule contains URL Rewrite redirect conversion"
+assert_body_contains "/^https:\\/\\/assets\\.example\\/app\\.js/ file://data/app.js" "$RULE_SHOW_OUTPUT" "saved rule contains Map Local file conversion"
+assert_body_contains "Header Rewrite requires request/response/header-scope review before activation" "$RULE_SHOW_OUTPUT" "saved rule keeps Header Rewrite as manual review comment"
+assert_body_contains "Script entries reference external JavaScript that must be imported into Bifrost scripts before activation" "$RULE_SHOW_OUTPUT" "saved rule keeps Script as manual review comment"
 
 echo "Running bifrost profile effective for managed profile URL..."
 MANAGED_OUTPUT="$("$BIFROST_BIN" profile effective "${REMOTE_BASE}/managed.conf")"

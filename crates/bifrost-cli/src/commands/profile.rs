@@ -1,13 +1,14 @@
 use bifrost_core::profile::{
     analyze_compatibility, compile_resolved_surge_to_bifrost_rules,
     convert_resolved_surge_to_bifrost_preview, explain_surge_request_with_plan,
-    load_surge_profile_path_or_url, CompatibilityReport, ConversionPreview, ExplainReport,
-    ProfileDocument, ResolvedProfileDocument, SupportLevel,
+    load_bifrost_native_profile_file, load_surge_profile_path_or_url, CompatibilityReport,
+    ConversionPreview, ExplainReport, ProfileDocument, ResolvedProfileDocument, RuntimePlanVersion,
+    SupportLevel,
 };
 use bifrost_storage::{RuleFile, RulesStorage};
 use serde::Serialize;
 
-use crate::cli::{ProfileCommands, ProfileConvertTarget};
+use crate::cli::{ProfileCommands, ProfileConvertTarget, ProfileNativeCommands};
 
 #[derive(Debug, Serialize)]
 struct ProfileImportSaveResponse<'a> {
@@ -113,6 +114,24 @@ pub fn handle_profile_command(action: ProfileCommands) -> bifrost_core::Result<(
                 print_effective_profile(&resolved);
             }
         }
+        ProfileCommands::Native { action } => match action {
+            ProfileNativeCommands::Validate { profile, json } => {
+                let plan = load_bifrost_native_profile_file(&profile)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    print_native_validate(&plan);
+                }
+            }
+            ProfileNativeCommands::Effective { profile, json } => {
+                let plan = load_bifrost_native_profile_file(&profile)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&plan)?);
+                } else {
+                    print_native_effective(&plan);
+                }
+            }
+        },
     }
 
     Ok(())
@@ -206,6 +225,160 @@ fn print_effective_profile(resolved: &ResolvedProfileDocument) {
                 rule.policy,
                 rule.origin
             );
+        }
+    }
+}
+
+fn print_native_validate(plan: &RuntimePlanVersion) {
+    println!("Bifrost Native Profile validate");
+    println!("Source: {}", profile_source_label(&plan.source));
+    println!("Plan: {}", plan.plan_id);
+    println!("Mode: {}", plan.mode);
+    println!("Source hash: {}", plan.source_hash);
+    println!(
+        "Runtime plan: {} proxies, {} policy groups, {} rules, {} dns entries, {} mitm entries, {} pipeline entries",
+        plan.runtime_plan.proxies.len(),
+        plan.runtime_plan.policy_groups.len(),
+        plan.runtime_plan.rules.len(),
+        plan.runtime_plan.dns.len(),
+        plan.runtime_plan.mitm.len(),
+        plan.runtime_plan.http_pipeline.len(),
+    );
+    println!(
+        "Safety: {}{}",
+        plan.safety.activation_state,
+        if plan.safety.requires_review {
+            " (manual review required)"
+        } else {
+            ""
+        }
+    );
+    print_native_diagnostics(plan);
+}
+
+fn print_native_effective(plan: &RuntimePlanVersion) {
+    println!("Bifrost Native Profile effective");
+    println!("Source: {}", profile_source_label(&plan.source));
+    println!("Plan: {}", plan.plan_id);
+    println!("Mode: {}", plan.mode);
+    println!(
+        "Runtime plan: {} proxies, {} policy groups, {} rules, {} dns entries, {} mitm entries, {} pipeline entries",
+        plan.runtime_plan.proxies.len(),
+        plan.runtime_plan.policy_groups.len(),
+        plan.runtime_plan.rules.len(),
+        plan.runtime_plan.dns.len(),
+        plan.runtime_plan.mitm.len(),
+        plan.runtime_plan.http_pipeline.len(),
+    );
+
+    if !plan.runtime_plan.proxies.is_empty() {
+        println!();
+        println!("Policies:");
+        for proxy in &plan.runtime_plan.proxies {
+            println!(
+                "  line {:>4} {} = {}, {}",
+                proxy.source.line,
+                proxy.name,
+                proxy.protocol,
+                proxy.fields.join(", ")
+            );
+        }
+    }
+
+    if !plan.runtime_plan.policy_groups.is_empty() {
+        println!();
+        println!("Policy graph:");
+        for group in &plan.runtime_plan.policy_groups {
+            println!(
+                "  line {:>4} {} = {}, {}",
+                group.source.line,
+                group.name,
+                group.group_type,
+                group.policies.join(", ")
+            );
+            if !group.missing_members.is_empty() {
+                println!(
+                    "       missing members: {}",
+                    group.missing_members.join(", ")
+                );
+            }
+        }
+    }
+
+    if !plan.runtime_plan.rules.is_empty() {
+        println!();
+        println!("Ordered rules:");
+        for rule in &plan.runtime_plan.rules {
+            println!(
+                "  line {:>4} {:<14} {:<32} -> {:<16} origin {}",
+                rule.source.line,
+                rule.rule_type,
+                rule.value.as_deref().unwrap_or("<none>"),
+                rule.policy,
+                rule.origin
+            );
+        }
+    }
+
+    if !plan.runtime_plan.dns.is_empty() {
+        println!();
+        println!("DNS entries:");
+        for item in &plan.runtime_plan.dns {
+            println!(
+                "  line {:>4} [{}] {} = {}",
+                item.source.line, item.section, item.key, item.value
+            );
+        }
+    }
+
+    if !plan.runtime_plan.mitm.is_empty() {
+        println!();
+        println!("MITM entries:");
+        for item in &plan.runtime_plan.mitm {
+            println!(
+                "  line {:>4} [{}] {} = {}",
+                item.source.line, item.section, item.key, item.value
+            );
+        }
+    }
+
+    if !plan.runtime_plan.http_pipeline.is_empty() {
+        println!();
+        println!("HTTP Pipeline entries:");
+        for item in &plan.runtime_plan.http_pipeline {
+            println!(
+                "  line {:>4} {} -> {}",
+                item.source.line, item.key, item.value
+            );
+        }
+    }
+
+    print_native_diagnostics(plan);
+}
+
+fn print_native_diagnostics(plan: &RuntimePlanVersion) {
+    if !plan.diagnostics.is_empty() {
+        println!();
+        println!("Diagnostics:");
+        for diagnostic in &plan.diagnostics {
+            println!(
+                "  {:?} line {}:{} [{}] {}",
+                diagnostic.severity,
+                diagnostic.line,
+                diagnostic.column,
+                diagnostic.code,
+                diagnostic.message
+            );
+            if let Some(suggestion) = &diagnostic.suggestion {
+                println!("       suggestion: {suggestion}");
+            }
+        }
+    }
+    if !plan.safety.notes.is_empty() {
+        println!();
+        println!("Safety notes:");
+        for note in &plan.safety.notes {
+            println!("  - {note}");
         }
     }
 }
@@ -332,7 +505,11 @@ fn print_conversion_preview(preview: &ConversionPreview) {
 }
 
 fn source_label(document: &ProfileDocument) -> String {
-    match &document.source {
+    profile_source_label(&document.source)
+}
+
+fn profile_source_label(source: &bifrost_core::profile::ProfileSource) -> String {
+    match source {
         bifrost_core::profile::ProfileSource::LocalPath(path) => path.display().to_string(),
         bifrost_core::profile::ProfileSource::ManagedUrl(url) => url.clone(),
         bifrost_core::profile::ProfileSource::Inline => "<inline>".to_string(),

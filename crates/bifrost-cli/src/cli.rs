@@ -1827,11 +1827,43 @@ pub enum ProfileCommands {
         #[arg(long, help = "Print machine-readable JSON")]
         json: bool,
     },
+    #[command(
+        about = "Validate and inspect a Bifrost Native Profile",
+        long_about = "Compile a Bifrost Native Profile TOML file into a dry-run RuntimePlanVersion without activating proxy, DNS, MITM, TUN, or system proxy state."
+    )]
+    Native {
+        #[command(subcommand)]
+        action: ProfileNativeCommands,
+    },
 }
 
 #[derive(ValueEnum, Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ProfileConvertTarget {
     Bifrost,
+}
+
+#[derive(Subcommand, Clone)]
+pub enum ProfileNativeCommands {
+    #[command(
+        about = "Validate a Bifrost Native Profile",
+        long_about = "Parse and compile a Bifrost Native Profile into RuntimePlanVersion diagnostics without enabling it."
+    )]
+    Validate {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Bifrost Native Profile TOML file")]
+        profile: PathBuf,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
+    #[command(
+        about = "Dump the dry-run effective Bifrost Native Profile",
+        long_about = "Print the compiled RuntimePlanVersion, policy graph, ordered rules, DNS, MITM, and HTTP Pipeline entries."
+    )]
+    Effective {
+        #[arg(value_hint = ValueHint::FilePath, help = "Path to a Bifrost Native Profile TOML file")]
+        profile: PathBuf,
+        #[arg(long, help = "Print machine-readable JSON")]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand, Clone)]

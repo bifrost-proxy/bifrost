@@ -236,6 +236,25 @@ pub struct ResolvedProfileDocument {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePlanVersion {
+    pub plan_id: String,
+    pub source: ProfileSource,
+    pub source_hash: String,
+    pub compiler_version: String,
+    pub mode: String,
+    pub runtime_plan: ProfileRuntimePlan,
+    pub diagnostics: Vec<ProfileDiagnostic>,
+    pub safety: RuntimePlanSafety,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimePlanSafety {
+    pub activation_state: String,
+    pub requires_review: bool,
+    pub notes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileResource {
     pub kind: ProfileResourceKind,
     pub reference: String,
@@ -314,6 +333,114 @@ pub struct RuntimeKeyValue {
     pub source: SourceLine,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BifrostNativeProfileDocument {
+    pub source: ProfileSource,
+    pub raw_text: String,
+    pub profile: BifrostNativeProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BifrostNativeProfile {
+    pub profile: NativeProfileMetadata,
+    #[serde(default)]
+    pub policies: Vec<NativePolicy>,
+    #[serde(default)]
+    pub policy_groups: Vec<NativePolicyGroup>,
+    #[serde(default)]
+    pub rules: Vec<NativeRule>,
+    #[serde(default)]
+    pub dns: NativeDns,
+    #[serde(default)]
+    pub mitm: NativeMitm,
+    #[serde(default)]
+    pub http_pipeline: Vec<NativeHttpPipelineEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeProfileMetadata {
+    pub name: String,
+    #[serde(default = "default_native_profile_version")]
+    pub version: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativePolicy {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub policy_type: String,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub fields: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativePolicyGroup {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub group_type: String,
+    #[serde(default)]
+    pub policies: Vec<String>,
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRule {
+    #[serde(rename = "match")]
+    pub rule_match: NativeRuleMatch,
+    pub policy: String,
+    #[serde(default)]
+    pub parameters: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeRuleMatch {
+    #[serde(default)]
+    pub domain: Option<String>,
+    #[serde(default)]
+    pub domain_suffix: Option<String>,
+    #[serde(default)]
+    pub domain_keyword: Option<String>,
+    #[serde(default)]
+    pub ip_cidr: Option<String>,
+    #[serde(default)]
+    pub ip_cidr6: Option<String>,
+    #[serde(rename = "final")]
+    #[serde(default)]
+    pub final_rule: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeDns {
+    #[serde(default)]
+    pub hosts: BTreeMap<String, String>,
+    #[serde(default)]
+    pub servers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeMitm {
+    #[serde(default)]
+    pub include: Vec<String>,
+    #[serde(default)]
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeHttpPipelineEntry {
+    #[serde(rename = "match")]
+    pub pattern: String,
+    pub action: String,
+    #[serde(default)]
+    pub value: Option<String>,
+}
+
+fn default_native_profile_version() -> u32 {
+    1
+}
+
 pub fn parse_surge_profile_file(path: &Path) -> Result<ProfileDocument> {
     let text = std::fs::read_to_string(path)?;
     Ok(parse_surge_profile(
@@ -375,6 +502,385 @@ pub fn load_surge_profile_url(url: &str) -> Result<ResolvedProfileDocument> {
         resources,
         runtime_plan,
     })
+}
+
+pub fn parse_bifrost_native_profile(
+    text: &str,
+    source: ProfileSource,
+) -> Result<BifrostNativeProfileDocument> {
+    let profile = toml::from_str::<BifrostNativeProfile>(text)
+        .map_err(|err| BifrostError::Config(format!("Invalid Bifrost Native Profile: {err}")))?;
+    Ok(BifrostNativeProfileDocument {
+        source,
+        raw_text: text.to_string(),
+        profile,
+    })
+}
+
+pub fn load_bifrost_native_profile_file(path: &Path) -> Result<RuntimePlanVersion> {
+    let text = std::fs::read_to_string(path)?;
+    let document =
+        parse_bifrost_native_profile(&text, ProfileSource::LocalPath(path.to_path_buf()))?;
+    Ok(compile_bifrost_native_profile(&document))
+}
+
+pub fn compile_bifrost_native_profile(
+    document: &BifrostNativeProfileDocument,
+) -> RuntimePlanVersion {
+    let mut diagnostics = Vec::new();
+    let runtime_plan = build_bifrost_native_runtime_plan(document, &mut diagnostics);
+    let source_hash = sha256_hex(document.raw_text.as_bytes());
+    let compiler_version = env!("CARGO_PKG_VERSION").to_string();
+    let plan_id = format!(
+        "sha256:{}",
+        sha256_hex(
+            format!("{}:{}:{}", source_hash, compiler_version, runtime_plan.mode).as_bytes(),
+        )
+    );
+    let requires_review = diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.severity != DiagnosticSeverity::Info);
+    let mut notes = vec![
+        "Bifrost Native Profile validate/effective compiles a reviewable runtime plan without activating proxy state.".to_string(),
+        "Dynamic Policy Group probing, real DNS/MITM/Rewrite/Script runtime, TUN/VIF, UDP/QUIC/HTTP3 scheduling, Team Profile, and Agent migration consume this plan in later platform milestones.".to_string(),
+    ];
+    if requires_review {
+        notes.push("One or more entries require manual review before activation.".to_string());
+    }
+
+    RuntimePlanVersion {
+        plan_id,
+        source: document.source.clone(),
+        source_hash: format!("sha256:{source_hash}"),
+        compiler_version,
+        mode: runtime_plan.mode.clone(),
+        runtime_plan,
+        diagnostics,
+        safety: RuntimePlanSafety {
+            activation_state: "dry-run-only".to_string(),
+            requires_review,
+            notes,
+        },
+    }
+}
+
+fn build_bifrost_native_runtime_plan(
+    document: &BifrostNativeProfileDocument,
+    diagnostics: &mut Vec<ProfileDiagnostic>,
+) -> ProfileRuntimePlan {
+    let mut plan = ProfileRuntimePlan {
+        mode: "bifrost-native-dry-run".to_string(),
+        proxies: Vec::new(),
+        rules: Vec::new(),
+        policy_groups: Vec::new(),
+        dns: Vec::new(),
+        mitm: Vec::new(),
+        http_pipeline: Vec::new(),
+        diagnostics: Vec::new(),
+    };
+    let profile = &document.profile;
+    if profile.profile.version != 1 {
+        diagnostics.push(native_diagnostic(
+            DiagnosticSeverity::Warning,
+            "native.profile.version_unsupported",
+            format!(
+                "Native Profile version {} is parsed as version 1 compatibility mode",
+                profile.profile.version
+            ),
+            Some("Use version = 1 until RuntimePlanVersion v2 is introduced.".to_string()),
+            1,
+        ));
+    }
+
+    let mut known_policies = builtin_policy_names();
+    for (index, policy) in profile.policies.iter().enumerate() {
+        let line = native_synthetic_line(10 + index, &policy.name);
+        known_policies.insert(policy.name.clone());
+        match policy.policy_type.to_ascii_lowercase().as_str() {
+            "proxy" => {
+                let (protocol, fields) = native_policy_proxy_fields(policy, diagnostics, line.line);
+                plan.proxies.push(RuntimeProxy {
+                    source: line,
+                    name: policy.name.clone(),
+                    protocol,
+                    fields,
+                });
+            }
+            "direct" | "reject" | "reject-drop" | "reject-tinygif" => {
+                diagnostics.push(native_diagnostic(
+                    DiagnosticSeverity::Info,
+                    "native.policy.builtin_alias",
+                    format!(
+                        "Policy {} declares builtin type {}; rules should normally reference the uppercase builtin name",
+                        policy.name, policy.policy_type
+                    ),
+                    Some("Prefer DIRECT, REJECT, REJECT-DROP, or REJECT-TINYGIF for portable runtime plans.".to_string()),
+                    line.line,
+                ));
+            }
+            other => diagnostics.push(native_diagnostic(
+                DiagnosticSeverity::Warning,
+                "native.policy.unsupported_type",
+                format!("Policy {} uses unsupported type {}", policy.name, other),
+                Some(
+                    "Use type = \"proxy\" for endpoints or a supported builtin policy type."
+                        .to_string(),
+                ),
+                line.line,
+            )),
+        }
+    }
+
+    for (index, group) in profile.policy_groups.iter().enumerate() {
+        let line = native_synthetic_line(110 + index, &group.name);
+        known_policies.insert(group.name.clone());
+        plan.policy_groups.push(RuntimePolicyGroup {
+            source: line,
+            name: group.name.clone(),
+            group_type: group.group_type.clone(),
+            policies: group.policies.clone(),
+            parameters: group.parameters.clone(),
+            missing_members: Vec::new(),
+        });
+    }
+
+    for (index, rule) in profile.rules.iter().enumerate() {
+        let line = native_synthetic_line(210 + index, &rule.policy);
+        let line_no = line.line;
+        match native_rule_to_runtime_rule(rule, line) {
+            Some(runtime_rule) => {
+                if !known_policies.contains(&runtime_rule.policy) {
+                    diagnostics.push(native_diagnostic(
+                        DiagnosticSeverity::Warning,
+                        "native.rule.missing_policy",
+                        format!(
+                            "Rule {} references missing policy {}",
+                            runtime_rule.source.content, runtime_rule.policy
+                        ),
+                        Some("Add the policy, add a policy group, or use a builtin policy name.".to_string()),
+                        runtime_rule.source.line,
+                    ));
+                }
+                plan.rules.push(runtime_rule);
+            }
+            None => diagnostics.push(native_diagnostic(
+                DiagnosticSeverity::Error,
+                "native.rule.invalid_match",
+                format!("Rule for policy {} must define exactly one supported match selector", rule.policy),
+                Some("Use domain, domain_suffix, domain_keyword, ip_cidr, ip_cidr6, or final = true.".to_string()),
+                line_no,
+            )),
+        }
+    }
+
+    for (index, (host, address)) in profile.dns.hosts.iter().enumerate() {
+        plan.dns.push(RuntimeKeyValue {
+            section: "dns.host".to_string(),
+            key: host.clone(),
+            value: address.clone(),
+            source: native_synthetic_line(310 + index, host),
+        });
+    }
+    for (index, server) in profile.dns.servers.iter().enumerate() {
+        plan.dns.push(RuntimeKeyValue {
+            section: "dns.server".to_string(),
+            key: "server".to_string(),
+            value: server.clone(),
+            source: native_synthetic_line(330 + index, server),
+        });
+    }
+
+    for (index, host) in profile.mitm.include.iter().enumerate() {
+        plan.mitm.push(RuntimeKeyValue {
+            section: "mitm.include".to_string(),
+            key: host.clone(),
+            value: "include".to_string(),
+            source: native_synthetic_line(410 + index, host),
+        });
+    }
+    for (index, host) in profile.mitm.exclude.iter().enumerate() {
+        plan.mitm.push(RuntimeKeyValue {
+            section: "mitm.exclude".to_string(),
+            key: host.clone(),
+            value: "exclude".to_string(),
+            source: native_synthetic_line(430 + index, host),
+        });
+    }
+
+    for (index, entry) in profile.http_pipeline.iter().enumerate() {
+        plan.http_pipeline.push(RuntimeKeyValue {
+            section: "http_pipeline".to_string(),
+            key: entry.pattern.clone(),
+            value: native_http_pipeline_value(entry),
+            source: native_synthetic_line(510 + index, &entry.pattern),
+        });
+    }
+
+    validate_native_policy_groups(&mut plan, diagnostics, &known_policies);
+    plan.diagnostics = diagnostics.clone();
+    plan
+}
+
+fn native_policy_proxy_fields(
+    policy: &NativePolicy,
+    diagnostics: &mut Vec<ProfileDiagnostic>,
+    line: usize,
+) -> (String, Vec<String>) {
+    if let Some(url) = policy.url.as_deref() {
+        match Url::parse(url) {
+            Ok(parsed) => {
+                let protocol = parsed.scheme().to_string();
+                let host = parsed.host_str().unwrap_or("").to_string();
+                let port = parsed
+                    .port_or_known_default()
+                    .map(|port| port.to_string())
+                    .unwrap_or_default();
+                let mut fields = vec![host, port];
+                if let Some(username) = (!parsed.username().is_empty()).then(|| parsed.username()) {
+                    fields.push(format!("username={username}"));
+                }
+                if let Some(password) = parsed.password() {
+                    fields.push(format!("password={password}"));
+                }
+                return (protocol, fields);
+            }
+            Err(err) => diagnostics.push(native_diagnostic(
+                DiagnosticSeverity::Warning,
+                "native.policy.invalid_url",
+                format!("Policy {} has invalid proxy url: {err}", policy.name),
+                Some(
+                    "Use a URL like http://127.0.0.1:8080 or socks5://127.0.0.1:1080.".to_string(),
+                ),
+                line,
+            )),
+        }
+    }
+
+    let protocol = policy
+        .fields
+        .get("protocol")
+        .cloned()
+        .unwrap_or_else(|| "http".to_string());
+    let host = policy.fields.get("host").cloned().unwrap_or_default();
+    let port = policy.fields.get("port").cloned().unwrap_or_default();
+    (protocol, vec![host, port])
+}
+
+fn native_rule_to_runtime_rule(rule: &NativeRule, source: SourceLine) -> Option<RuntimeRule> {
+    let selectors = [
+        rule.rule_match
+            .domain
+            .as_ref()
+            .map(|value| ("DOMAIN", Some(value.clone()))),
+        rule.rule_match
+            .domain_suffix
+            .as_ref()
+            .map(|value| ("DOMAIN-SUFFIX", Some(value.clone()))),
+        rule.rule_match
+            .domain_keyword
+            .as_ref()
+            .map(|value| ("DOMAIN-KEYWORD", Some(value.clone()))),
+        rule.rule_match
+            .ip_cidr
+            .as_ref()
+            .map(|value| ("IP-CIDR", Some(value.clone()))),
+        rule.rule_match
+            .ip_cidr6
+            .as_ref()
+            .map(|value| ("IP-CIDR6", Some(value.clone()))),
+        rule.rule_match
+            .final_rule
+            .filter(|enabled| *enabled)
+            .map(|_| ("FINAL", None)),
+    ];
+    let mut selected = selectors.into_iter().flatten();
+    let first = selected.next()?;
+    if selected.next().is_some() {
+        return None;
+    }
+
+    Some(RuntimeRule {
+        source: SourceLine {
+            content: format!(
+                "{}{} -> {}",
+                first.0,
+                first
+                    .1
+                    .as_deref()
+                    .map(|value| format!(",{value}"))
+                    .unwrap_or_default(),
+                rule.policy
+            ),
+            ..source
+        },
+        rule_type: first.0.to_string(),
+        value: first.1,
+        policy: rule.policy.clone(),
+        parameters: rule.parameters.clone(),
+        origin: "native".to_string(),
+    })
+}
+
+fn validate_native_policy_groups(
+    plan: &mut ProfileRuntimePlan,
+    diagnostics: &mut Vec<ProfileDiagnostic>,
+    known_policies: &BTreeSet<String>,
+) {
+    for group in &mut plan.policy_groups {
+        group.missing_members = group
+            .policies
+            .iter()
+            .filter(|policy| !known_policies.contains(*policy))
+            .cloned()
+            .collect();
+        for missing in &group.missing_members {
+            diagnostics.push(native_diagnostic(
+                DiagnosticSeverity::Warning,
+                "native.policy_group.missing_member",
+                format!(
+                    "Policy group {} references missing member {}",
+                    group.name, missing
+                ),
+                Some("Add the member policy/group or remove it before activation.".to_string()),
+                group.source.line,
+            ));
+        }
+    }
+}
+
+fn native_http_pipeline_value(entry: &NativeHttpPipelineEntry) -> String {
+    match entry.value.as_deref() {
+        Some(value) => format!("{} {value}", entry.action),
+        None => entry.action.clone(),
+    }
+}
+
+fn native_synthetic_line(line: usize, content: &str) -> SourceLine {
+    source_line(content, line)
+}
+
+fn native_diagnostic(
+    severity: DiagnosticSeverity,
+    code: &str,
+    message: String,
+    suggestion: Option<String>,
+    line: usize,
+) -> ProfileDiagnostic {
+    ProfileDiagnostic {
+        severity,
+        line,
+        column: 1,
+        code: code.to_string(),
+        message,
+        suggestion,
+    }
+}
+
+fn builtin_policy_names() -> BTreeSet<String> {
+    ["DIRECT", "REJECT", "REJECT-DROP", "REJECT-TINYGIF"]
+        .into_iter()
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn resolve_surge_profile(
@@ -783,6 +1289,17 @@ pub fn compile_resolved_surge_to_bifrost_rules(
         ));
     }
     if !resolved.resources.is_empty() {
+        content.push('\n');
+    }
+
+    let pipeline_rules = compile_http_pipeline_entries(&resolved.runtime_plan);
+    if !pipeline_rules.is_empty() {
+        content.push_str("# HTTP pipeline conversions from Surge rewrite/map/script sections.\n");
+        content.push_str("# Review before enabling; dynamic scripts and ambiguous header rewrites stay commented.\n");
+        for line in pipeline_rules {
+            content.push_str(&line);
+            content.push('\n');
+        }
         content.push('\n');
     }
 
@@ -2609,6 +3126,135 @@ fn url_pattern_matches(pattern: &str, url: &str) -> bool {
         .unwrap_or_else(|_| url.contains(trimmed))
 }
 
+fn compile_http_pipeline_entries(plan: &ProfileRuntimePlan) -> Vec<String> {
+    plan.http_pipeline
+        .iter()
+        .flat_map(compile_http_pipeline_entry)
+        .collect()
+}
+
+fn compile_http_pipeline_entry(item: &RuntimeKeyValue) -> Vec<String> {
+    let section = item.section.to_ascii_lowercase();
+    match section.as_str() {
+        "url rewrite" => compile_url_rewrite_entry(item),
+        "map local" => compile_map_local_entry(item),
+        "header rewrite" => vec![manual_http_pipeline_comment(
+            item,
+            "Header Rewrite requires request/response/header-scope review before activation",
+        )],
+        "script" => vec![manual_http_pipeline_comment(
+            item,
+            "Script entries reference external JavaScript that must be imported into Bifrost scripts before activation",
+        )],
+        _ => Vec::new(),
+    }
+}
+
+fn compile_url_rewrite_entry(item: &RuntimeKeyValue) -> Vec<String> {
+    let content = runtime_item_content(item);
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    if fields.len() < 2 {
+        return vec![manual_http_pipeline_comment(
+            item,
+            "URL Rewrite entry is missing a pattern or target",
+        )];
+    }
+
+    let pattern = bifrost_regex_pattern_for_pipeline(fields[0]);
+    let target = trim_profile_token(fields[1]);
+    let mode = fields.get(2).map(|value| trim_profile_token(value));
+
+    if target.to_ascii_lowercase().starts_with("reject") {
+        return vec![format!(
+            "{} {} # surge {} line {}",
+            pattern,
+            reject_operation_for_surge_rewrite(target),
+            item.section,
+            item.source.line
+        )];
+    }
+    if let Some(mode) = mode {
+        if mode.to_ascii_lowercase().starts_with("reject") {
+            return vec![format!(
+                "{} {} # surge {} line {}",
+                pattern,
+                reject_operation_for_surge_rewrite(mode),
+                item.section,
+                item.source.line
+            )];
+        }
+        if let Some(status) = parse_redirect_status(mode) {
+            return vec![format!(
+                "{} redirect://{}:{} # surge {} line {}",
+                pattern, status, target, item.section, item.source.line
+            )];
+        }
+    }
+    if target.starts_with("http://") || target.starts_with("https://") || target.starts_with('/') {
+        return vec![format!(
+            "{} redirect://{} # surge {} line {}",
+            pattern, target, item.section, item.source.line
+        )];
+    }
+
+    vec![manual_http_pipeline_comment(
+        item,
+        "URL Rewrite target is not a safe redirect/status conversion",
+    )]
+}
+
+fn compile_map_local_entry(item: &RuntimeKeyValue) -> Vec<String> {
+    let content = runtime_item_content(item);
+    let fields: Vec<&str> = content.split_whitespace().collect();
+    if fields.len() < 2 {
+        return vec![manual_http_pipeline_comment(
+            item,
+            "Map Local entry is missing a pattern or file path",
+        )];
+    }
+    let pattern = bifrost_regex_pattern_for_pipeline(fields[0]);
+    let file_path = trim_profile_token(fields[1]);
+    if file_path.is_empty() {
+        return vec![manual_http_pipeline_comment(
+            item,
+            "Map Local file path is empty",
+        )];
+    }
+    vec![format!(
+        "{} file://{} # surge {} line {}",
+        pattern, file_path, item.section, item.source.line
+    )]
+}
+
+fn manual_http_pipeline_comment(item: &RuntimeKeyValue, reason: &str) -> String {
+    format!(
+        "# line {} [{}]: {} # {}",
+        item.source.line,
+        item.section,
+        runtime_item_content(item),
+        reason
+    )
+}
+
+fn bifrost_regex_pattern_for_pipeline(pattern: &str) -> String {
+    let trimmed = trim_profile_token(pattern);
+    format!("/{}/", trimmed.replace('/', "\\/"))
+}
+
+fn parse_redirect_status(value: &str) -> Option<u16> {
+    let status = value.parse::<u16>().ok()?;
+    (300..=399).contains(&status).then_some(status)
+}
+
+fn reject_operation_for_surge_rewrite(value: &str) -> &'static str {
+    match value.to_ascii_lowercase().as_str() {
+        "reject-200" | "reject-dict" | "reject-array" | "reject-img" | "reject-tinygif" => {
+            "statusCode://200"
+        }
+        _ => "statusCode://403",
+    }
+}
+
 fn split_profile_list(value: &str) -> Vec<String> {
     value
         .split(',')
@@ -2753,6 +3399,12 @@ fn content_cache_key(kind: ProfileResourceKind, reference: &str, content: &str) 
     format!("sha256:{:x}", hasher.finalize())
 }
 
+fn sha256_hex(content: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content);
+    format!("{:x}", hasher.finalize())
+}
+
 fn reference_cache_key(kind: ProfileResourceKind, reference: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(format!("{kind:?}:{reference}").as_bytes());
@@ -2864,6 +3516,85 @@ FINAL,ProxyA
         assert!(report.summary.translated_with_behavior_note >= 3);
         assert!(report.summary.needs_manual_review >= 1);
         assert!(report.summary.not_supported_yet >= 1);
+    }
+
+    #[test]
+    fn compile_bifrost_native_profile_emits_versioned_runtime_plan() {
+        let document = parse_bifrost_native_profile(
+            r#"
+[profile]
+name = "native-smoke"
+version = 1
+
+[[policies]]
+name = "ProxyA"
+type = "proxy"
+url = "http://127.0.0.1:8080"
+
+[[policy_groups]]
+name = "Auto"
+type = "url-test"
+policies = ["ProxyA", "DIRECT", "MissingProxy"]
+
+[[rules]]
+match = { domain = "api.example.com" }
+policy = "DIRECT"
+
+[[rules]]
+match = { domain_suffix = "example.com" }
+policy = "Auto"
+
+[[rules]]
+match = { final = true }
+policy = "REJECT"
+
+[dns.hosts]
+"api.example.com" = "203.0.113.10"
+
+[dns]
+servers = ["https://dns.example/dns-query"]
+
+[mitm]
+include = ["*.example.com"]
+exclude = ["private.example.com"]
+
+[[http_pipeline]]
+match = "^https://rewrite\\.example/path"
+action = "redirect"
+value = "https://target.example/path"
+"#,
+            ProfileSource::Inline,
+        )
+        .unwrap();
+        let plan = compile_bifrost_native_profile(&document);
+
+        assert_eq!(plan.mode, "bifrost-native-dry-run");
+        assert!(plan.plan_id.starts_with("sha256:"));
+        assert!(plan.source_hash.starts_with("sha256:"));
+        assert_eq!(plan.runtime_plan.proxies.len(), 1);
+        assert_eq!(plan.runtime_plan.proxies[0].name, "ProxyA");
+        assert_eq!(plan.runtime_plan.proxies[0].protocol, "http");
+        assert_eq!(
+            plan.runtime_plan.proxies[0].fields,
+            vec!["127.0.0.1".to_string(), "8080".to_string()]
+        );
+        assert_eq!(plan.runtime_plan.policy_groups.len(), 1);
+        assert_eq!(
+            plan.runtime_plan.policy_groups[0].missing_members,
+            vec!["MissingProxy".to_string()]
+        );
+        assert_eq!(plan.runtime_plan.rules.len(), 3);
+        assert_eq!(plan.runtime_plan.rules[0].rule_type, "DOMAIN");
+        assert_eq!(plan.runtime_plan.rules[1].rule_type, "DOMAIN-SUFFIX");
+        assert_eq!(plan.runtime_plan.rules[2].rule_type, "FINAL");
+        assert_eq!(plan.runtime_plan.dns.len(), 2);
+        assert_eq!(plan.runtime_plan.mitm.len(), 2);
+        assert_eq!(plan.runtime_plan.http_pipeline.len(), 1);
+        assert!(plan.safety.requires_review);
+        assert!(plan
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "native.policy_group.missing_member"));
     }
 
     #[test]
@@ -3151,6 +3882,45 @@ FINAL,DIRECT
         assert!(compiled
             .content
             .contains("unsupported Surge rule PROCESS-NAME,Notes,DIRECT"));
+        assert!(compiled.content.contains("/.*/ passthrough://"));
+    }
+
+    #[test]
+    fn compile_resolved_surge_to_bifrost_rules_emits_http_pipeline_conversions() {
+        let document = parse_surge_profile(
+            r#"
+[URL Rewrite]
+^https://rewrite\.example/path https://target.example/path 302
+^https://reject\.example reject-200
+[Map Local]
+^https://local\.example/api ./fixtures/local.json
+[Header Rewrite]
+^https://headers\.example request-header X-Debug enabled
+[Script]
+http-response ^https://script\.example script-path=scripts/response.js
+[Rule]
+FINAL,DIRECT
+"#,
+            ProfileSource::Inline,
+        );
+        let resolved = resolve_surge_profile(document, Path::new("."));
+        let compiled = compile_resolved_surge_to_bifrost_rules(&resolved);
+
+        assert!(compiled.content.contains(
+            "/^https:\\/\\/rewrite\\.example\\/path/ redirect://302:https://target.example/path"
+        ));
+        assert!(compiled
+            .content
+            .contains("/^https:\\/\\/reject\\.example/ statusCode://200"));
+        assert!(compiled
+            .content
+            .contains("/^https:\\/\\/local\\.example\\/api/ file://./fixtures/local.json"));
+        assert!(compiled.content.contains(
+            "Header Rewrite requires request/response/header-scope review before activation"
+        ));
+        assert!(compiled.content.contains(
+            "Script entries reference external JavaScript that must be imported into Bifrost scripts before activation"
+        ));
         assert!(compiled.content.contains("/.*/ passthrough://"));
     }
 

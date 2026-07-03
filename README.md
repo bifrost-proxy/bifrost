@@ -158,6 +158,8 @@ bifrost profile effective ./surge.conf
 bifrost profile effective https://example.com/managed-surge.conf
 bifrost profile explain --profile ./surge.conf https://example.com/path
 bifrost profile convert ./surge.conf --to bifrost
+bifrost profile native validate ./native.bifrost-profile.toml
+bifrost profile native effective ./native.bifrost-profile.toml
 ```
 
 搜索命令补充说明：

@@ -2,7 +2,7 @@
 
 ## 功能模块说明
 
-本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Profile Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、DNS/MITM/HTTP Pipeline dry-run explain、Bifrost Native Profile conversion preview、非 dry-run 保存 disabled Bifrost rule file、WebUI Profile 工作台，以及方案文档完整性。
+本用例验证 Bifrost 面向 Surge 用户覆盖方案的 Profile Bridge 能力：本地与远程 Surge profile dry-run 导入、兼容性报告、include/ruleset/domain-set resolved plan、managed profile URL、远程资源 ETag/cache、Surge ordered rule explain、Policy Group dry-run decision explain、DNS/MITM/HTTP Pipeline dry-run explain、Bifrost Native Profile conversion preview、Bifrost Native Profile validate/effective dry-run 基座、非 dry-run 保存 disabled Bifrost rule file、URL Rewrite / Map Local 安全转换、未交付 runtime/platform 技术方案、WebUI Profile 工作台，以及方案文档完整性。
 
 ## 前置条件
 
@@ -164,6 +164,7 @@
 - 脚本自动构造临时 Surge profile。
 - 脚本自动启动本地 HTTP server，覆盖远程 include、RULE-SET、DOMAIN-SET、managed profile URL 和 cache-hit。
 - `profile import --dry-run`、`profile effective`、`profile explain`、Policy Group decision explain、DNS/MITM/HTTP Pipeline explain、`profile convert` 五类链路均通过断言。
+- 非 dry-run 导入后的 disabled rule file 包含 URL Rewrite `redirect://`、Map Local `file://`，并保留 Header Rewrite / Script 人工 review 注释。
 - 测试结束后删除临时目录。
 
 ### TC-SURGE-11：非 dry-run import 保存 disabled Bifrost rule file
@@ -183,7 +184,24 @@
 - 规则内容包含 `/.*/ statusCode://403`。
 - 本用例不启动代理服务、不修改系统代理、不把生成规则默认启用。
 
-### TC-SURGE-12：WebUI Profile 工作台展示兼容性与决策时间线
+### TC-SURGE-12：HTTP Pipeline 安全子集导入为可审阅规则
+
+操作步骤：
+
+1. 创建临时 `BIFROST_DATA_DIR` 和 Surge profile，内容包含 `[URL Rewrite] ^https://rewrite\.example/path https://target.example/path 302`、`[Map Local] ^https://assets\.example/app\.js data/app.js`、`[Header Rewrite] ^https://headers\.example header-replace User-Agent Bifrost`、`[Script] http-response ^https://script\.example script-path=scripts/response.js`、`[Rule] FINAL,DIRECT`。
+2. 执行 `BIFROST_DATA_DIR=<tmp>/data BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile import <profile> --name profile/surge-pipeline-smoke`。
+3. 执行 `BIFROST_DATA_DIR=<tmp>/data target/debug/bifrost rule show profile/surge-pipeline-smoke`。
+
+预期结果：
+
+- `rule show` 输出 `Status: disabled`。
+- 规则内容包含 `/^https:\/\/rewrite\.example\/path/ redirect://302:https://target.example/path`。
+- 规则内容包含 `/^https:\/\/assets\.example\/app\.js/ file://data/app.js`。
+- 规则内容包含 `Header Rewrite requires request/response/header-scope review before activation`。
+- 规则内容包含 `Script entries reference external JavaScript that must be imported into Bifrost scripts before activation`。
+- 本用例不启动代理服务、不修改系统代理、不自动启用 Header Rewrite 或 Script。
+
+### TC-SURGE-13：WebUI Profile 工作台展示兼容性与决策时间线
 
 操作步骤：
 
@@ -203,7 +221,37 @@
 - Native Preview 显示 `Bifrost Native Profile Preview`。
 - 启动命令包含 `--no-system-proxy`，且本用例不启用系统代理。
 
+### TC-SURGE-14：未交付 runtime/platform 能力技术方案完整性
+
+操作步骤：
+
+1. 执行 `test -f design/surge-runtime-platform-roadmap.md`。
+2. 执行 `rg -n "迭代二：Bifrost Native Profile 推进方案|迭代三：Bifrost Proxy Platform 推进方案|Native Profile schema|Platform device registry|动态 Policy Group Runtime|真实 DNS / MITM / Rewrite / Script Runtime|Transparent Proxy / TUN / VIF|UDP / QUIC / HTTP3 Scheduling|Team Profile|Agent 自动迁移|RuntimePlanVersion|Decision Timeline|Milestone A|Milestone E|评审问题" design/surge-runtime-platform-roadmap.md`。
+
+预期结果：
+
+- 技术方案文档存在。
+- 检索结果覆盖迭代二 Native Profile 推进方案、迭代三 Proxy Platform 推进方案、六大未交付能力、共同 runtime 基础、Decision Timeline、里程碑拆分和待评审问题。
+- 文档明确这些能力为未交付设计，不把平台级 runtime 写成已上线能力。
+
+### TC-SURGE-15：Bifrost Native Profile validate/effective 生成 dry-run RuntimePlanVersion
+
+操作步骤：
+
+1. 创建临时 `native.bifrost-profile.toml`，包含 `[profile]`、`[[policies]]` proxy、`[[policy_groups]]` url-test、`[[rules]]` domain/domain_suffix/final、`[dns]`、`[dns.hosts]`、`[mitm]` 和 `[[http_pipeline]]`。
+2. 执行 `BIFROST_DATA_DIR=<tmp>/data BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile native validate <native-profile>`。
+3. 执行 `BIFROST_DATA_DIR=<tmp>/data BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 target/debug/bifrost profile native effective <native-profile>`。
+
+预期结果：
+
+- validate 输出包含 `Bifrost Native Profile validate`。
+- validate 输出包含 `Plan: sha256:`、`Source hash: sha256:` 和 `Mode: bifrost-native-dry-run`。
+- validate 输出包含 `Runtime plan: 1 proxies, 1 policy groups, 3 rules, 2 dns entries, 2 mitm entries, 1 pipeline entries`。
+- 当 policy group 引用 `MissingProxy` 时，validate 输出包含 `native.policy_group.missing_member`，且 safety 标记为 `dry-run-only`。
+- effective 输出包含 `Bifrost Native Profile effective`、`Policies`、`Policy graph`、`Ordered rules`、`DNS entries`、`MITM entries` 和 `HTTP Pipeline entries`。
+- 本用例不启动代理服务、不修改系统代理、不启用 DNS/MITM/TUN runtime。
+
 ## 清理步骤
 
 - 删除测试中创建的临时目录。
-- 如果执行了 TC-SURGE-12，停止对应临时 Bifrost 进程。
+- 如果执行了 TC-SURGE-13，停止对应临时 Bifrost 进程。
