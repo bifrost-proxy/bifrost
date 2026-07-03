@@ -132,6 +132,10 @@ export default defineConfig({
   themeConfig: {
     i18nRouting: false,
     logo: "/favicon.png",
+    logoLink: {
+      link: basePath,
+      target: "_self",
+    },
     search: {
       provider: "local",
       options: {

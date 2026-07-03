@@ -60,6 +60,7 @@
 - `themeConfig.search.provider = "local"` 使用 VitePress 本地搜索。
 - `themeConfig.i18nRouting = false`，避免 VitePress 对当前路径做简单同构语言映射；本项目中英文源文档有显式映射，语言入口使用固定可用路径。
 - `site/.vitepress/theme/style.css` 覆盖 VitePress 主题变量和布局细节，使用 Bifrost 绿色主题。
+- `themeConfig.logoLink` 指向当前 `basePath` 且设置 `target: "_self"`，让文档区左上角品牌 Logo 使用浏览器原生整页导航回到站点首页，避免 VitePress SPA router 把静态首页当作文档页处理并显示 404。
 - 静态资源放在 `site/src/content/docs/public/`，符合 VitePress 在 `srcDir/public` 复制静态资源的规则。
 
 ### 首页
