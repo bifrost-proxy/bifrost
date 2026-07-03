@@ -29,16 +29,46 @@ struct RulesView: View {
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            listPane
-                .frame(width: 300)
-                .background(.background)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(spacing: 12) {
+                    Text("规则")
+                        .font(.system(size: 30, weight: .bold))
+                    Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(AppSurface.subtleFill, in: Capsule())
+                    Spacer()
+                    Button {
+                        createSheetVisible = true
+                    } label: {
+                        Label("New Rule", systemImage: "plus")
+                    }
+                    .buttonStyle(.borderless)
+                    .font(.system(size: 13, weight: .medium))
+                }
+                .padding(.top, 20)
 
-            Divider()
+                HStack(alignment: .top, spacing: 18) {
+                    RuleSurfaceCard {
+                        listPane
+                    }
+                    .frame(width: 320)
 
-            detailPane
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    RuleSurfaceCard {
+                        detailPane
+                    }
+                    .frame(maxWidth: .infinity, minHeight: 600)
+                }
+            }
+            .padding(.horizontal, 36)
+            .padding(.bottom, 36)
+            .frame(maxWidth: 1180, alignment: .leading)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(AppSurface.content)
         .sheet(isPresented: $createSheetVisible) {
             NameEntrySheet(
                 title: "New Rule",
@@ -77,7 +107,6 @@ struct RulesView: View {
     private var listPane: some View {
         VStack(spacing: 0) {
             listHeader
-            Divider()
             if filteredRules.isEmpty {
                 RulesEmptyStateView(title: appModel.rules.isEmpty ? "No rules" : "No matching rules")
             } else {
@@ -106,9 +135,9 @@ struct RulesView: View {
     private var detailPane: some View {
         VStack(spacing: 0) {
             detailHeader
-            Divider()
             if appModel.selectedRuleDetail != nil {
                 CodeEditorView(text: $appModel.ruleDraftContent)
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             } else {
                 RulesEmptyStateView(title: "Select a rule to edit")
             }
@@ -124,10 +153,11 @@ struct RulesView: View {
                     .textFieldStyle(.plain)
             }
             .font(.system(size: 12))
-            .padding(.horizontal, 10)
-            .frame(height: 38)
+            .padding(.horizontal, 12)
+            .frame(height: 42)
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+            .padding(12)
         }
-        .background(.bar)
     }
 
     private var detailHeader: some View {
@@ -135,7 +165,7 @@ struct RulesView: View {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
                     Text(appModel.selectedRuleDetail?.name ?? "Rule Detail")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(.system(size: 14, weight: .semibold))
                     if hasUnsavedChanges {
                         Circle()
                             .fill(Color.orange)
@@ -194,9 +224,8 @@ struct RulesView: View {
             .menuStyle(.borderlessButton)
             .disabled(appModel.selectedRuleDetail == nil || appModel.isSavingRule)
         }
-        .padding(.horizontal, 12)
-        .frame(height: 52)
-        .background(.bar)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
     }
 
     private var detailSubtitle: String {
@@ -232,7 +261,7 @@ private struct RuleRow: View {
                     .frame(width: 7, height: 7)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(rule.name)
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 12, weight: .semibold))
                         .lineLimit(1)
                     Text("\(rule.ruleCount ?? 0) entries")
                         .font(.system(size: 11))
@@ -249,11 +278,49 @@ private struct RuleRow: View {
                 .disabled(isBusy)
             }
             .padding(.horizontal, 12)
-            .frame(height: 44)
-            .background(isSelected ? Color.accentColor.opacity(0.12) : Color.clear)
+            .frame(height: 50)
+            .background(
+                isSelected ? AppSurface.sidebarSelection : Color.clear,
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct RuleSurfaceCard<Content: View>: View {
+    @ViewBuilder var content: Content
+    @State private var isHovering = false
+
+    var body: some View {
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .background(AppSurface.card, in: RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(AppSurface.cardBorder)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [
+                                AppSurface.cardHighlight,
+                                AppSurface.cardHighlight.opacity(0.45),
+                                AppSurface.cardBorder,
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+            )
+            .shadow(color: AppSurface.cardGlow, radius: isHovering ? 22 : 12, x: 0, y: 0)
+            .shadow(color: isHovering ? AppSurface.hoverShadow : AppSurface.cardShadow, radius: isHovering ? 18 : 10, x: 0, y: isHovering ? 10 : 5)
+            .scaleEffect(isHovering ? 1.002 : 1)
+            .animation(.easeOut(duration: 0.16), value: isHovering)
+            .onHover { isHovering = $0 }
     }
 }
 

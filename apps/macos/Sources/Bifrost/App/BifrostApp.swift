@@ -28,7 +28,8 @@ struct BifrostApp: App {
         if CommandLine.arguments.contains("--check-release-scope") {
             let items = SidebarItem.releaseScopeItems.map(\.rawValue)
             let allItems = SidebarItem.allCases.map(\.rawValue)
-            guard items == ["Network", "Rules", "Settings"], allItems == items else {
+            let expected = ["活动", "概览", "规则", "网络"]
+            guard items == expected, allItems == items else {
                 fputs("Bifrost release scope check failed: visible=\(items.joined(separator: ",")) all=\(allItems.joined(separator: ","))\n", stderr)
                 Foundation.exit(1)
             }

@@ -23,12 +23,16 @@ struct CodeEditorView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = false
         textView.string = text
         textView.delegate = context.coordinator
+        textView.drawsBackground = true
+        textView.backgroundColor = .white
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = true
         scrollView.autohidesScrollers = false
+        scrollView.drawsBackground = false
+        scrollView.borderType = .noBorder
         return scrollView
     }
 

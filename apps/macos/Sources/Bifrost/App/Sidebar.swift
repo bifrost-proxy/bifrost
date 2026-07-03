@@ -1,21 +1,32 @@
 import SwiftUI
 
 enum SidebarItem: String, CaseIterable, Identifiable {
-    case network = "Network"
-    case rules = "Rules"
-    case settings = "Settings"
+    case activity = "活动"
+    case overview = "概览"
+    case rules = "规则"
+    case network = "网络"
 
     var id: String { rawValue }
 
     static var releaseScopeItems: [SidebarItem] {
-        [.network, .rules, .settings]
+        [.activity, .overview, .rules, .network]
     }
 
     var systemImage: String {
         switch self {
+        case .activity: return "waveform.path.ecg"
+        case .overview: return "square.grid.2x2"
         case .network: return "globe"
         case .rules: return "doc.text"
-        case .settings: return "gearshape"
+        }
+    }
+
+    var needsTrafficRecords: Bool {
+        switch self {
+        case .activity:
+            return true
+        case .overview, .rules, .network:
+            return false
         }
     }
 }
@@ -27,22 +38,22 @@ struct PrimarySidebar: View {
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
-                .frame(height: 56)
+                .frame(height: 54)
 
             List(SidebarItem.releaseScopeItems) { item in
                 Button {
                     selection = item
                 } label: {
                     Label(item.rawValue, systemImage: item.systemImage)
-                        .font(.system(size: 13, weight: .medium))
+                        .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .foregroundStyle(selection == item ? Color.white : Color.primary)
+                .foregroundStyle(selection == item ? Color.primary : Color.secondary)
                 .listRowBackground(
                     RoundedRectangle(cornerRadius: 7, style: .continuous)
-                        .fill(selection == item ? Color.accentColor : Color.clear)
+                        .fill(selection == item ? AppSurface.sidebarSelection : Color.clear)
                 )
                 .help(item.rawValue)
             }
@@ -68,6 +79,6 @@ struct PrimarySidebar: View {
         }
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(.regularMaterial)
+        .background(AppSurface.sidebar)
     }
 }

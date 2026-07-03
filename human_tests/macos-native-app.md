@@ -238,14 +238,43 @@
 - Native 使用 SwiftUI `NavigationSplitView` + source-list 行的左侧主导航，不再使用顶部三段式主 tab。
 - 左侧 source-list 视觉上为 macOS 系统式 material 浮层，窗口红黄绿按钮和左侧导航共享同一块背景区域。
 - macOS 红黄绿三个窗口按钮使用系统原生标题栏按钮，不再由应用自绘。
-- 左侧只显示 Network、Rules、Settings 三个首版入口，文字和 SF Symbol 在同一 source-list 行内。
-- Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得有入口。
-- 主题切换入口位于左侧 source-list 底部，切换后仍覆盖 Network、Rules、Settings。
-- 右侧顶部区域只包含当前页面操作区；Network 下包含过滤面板开关、清空、协议/类型/状态 tag、Add Filter、Fuzzy Search、Breakpoint、TLS Decode、System Proxy、详情面板开关。
-- Request / Response、Overview / Header / Body / Raw 等详情 tab 保留在右侧详情内容内部，不得作为主导航出现。
-- 中间内容为 Web UI 风格三栏：Filters 面板、Network 请求表格、右侧请求详情空态。
-- 底部状态栏很矮，展示 Proxy、Sync、TLS、上下行速率、Total、Conn、Req、Mem、CPU、Uptime、版本和 Skill。
-- `/tmp/bifrost-native-source-list.png` 中 UI 不得出现 Dashboard 卡片式 scaffold、假数据表格、顶部主 tab、旧图标竖栏或侧栏折叠按钮。
+- 左侧主导航显示 `活动`、`概览`、`规则`、`网络` 四个核心入口，窗口按钮必须保持可见，内容不得被标题栏或安全区裁切；窗口和页面背景呈清爽冷白 surface，卡片为白色卡片，非控件空白区域仍可拖拽移动窗口。
+
+### TC-MNA-24：回归 - Native 主窗口只暴露核心控制台范围
+
+**操作步骤：**
+1. 执行 release scope 检查：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-release-scope
+   ```
+2. 执行 SwiftPM 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+3. 代码级检查主窗口路由：
+   ```bash
+   rg -n 'case \\.activity|case \\.overview|case \\.rules|case \\.network|SettingsView\\(' apps/macos/Sources/Bifrost/App apps/macos/Sources/Bifrost/Features/Dashboard
+   ```
+
+**预期结果：**
+- release scope 输出包含 `活动,概览,规则,网络`。
+- SwiftPM 构建通过。
+- 主窗口 `MainWindowScene` 路由到 Activity、Overview、Rules、Network Web 入口，不再把 `SettingsView` 作为主导航内容，也不再暴露独立 Processes/进程 tab 或 Devices/设备 tab。
+- Overview 页面包含系统代理、TLS 解密、远程调用、同步和证书管理卡片。
+- Activity 页面轻量展示基于 `TrafficRecordSummary.clientApp` 的应用流量分布；设备/IP 不作为独立一级菜单展示。
+- Network 页面只提供打开 Web UI 的入口和摘要，不再承载复杂流量工作台。
+- UI 视觉以白色为主：白色半透明毛玻璃背景和纯白卡片，不得出现灰扑扑的大面积背景、灰色重卡片或厚重渐变。
+- 隐藏顶部 `Bifrost` 标题后，红黄绿窗口按钮仍可见且可点击，页面标题不被裁切；点击非控件的白色背景区域拖动，窗口位置应随鼠标移动。
+- Rules 页面必须与 Activity/Overview 使用同一套冷白 surface 与白色卡片：顶部页面标题为 `规则`，规则列表与编辑器分别在白色卡片中展示，卡片具有轻微边缘高光、弱阴影和 hover 悬浮反馈，不再使用旧的全宽灰色 toolbar、硬分割表格和突兀系统编辑器背景。
+
+**执行记录：**
+- 2026-07-03：执行 `swift build --package-path apps/macos` 通过，确认新核心范围 SwiftUI 页面可编译。
+- 2026-07-03：执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,进程,设备,规则,网络`。（后续按用户反馈移除独立进程和设备入口，需重新执行为四入口结果。）
+- 2026-07-03：移除独立进程和设备入口后，重新执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- 2026-07-03：执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
+- 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`。
+- 2026-07-03：执行 `open -n apps/macos/.build/Bifrost.app` 并截取 `/tmp/bifrost-native-core-window.png`，确认主窗口启动、左侧核心导航可见、Rules 原生列表/编辑区可见。
+- 2026-07-03：按用户反馈修正窗口安全区与 Rules 风格后，执行 `swift build --package-path apps/macos`、`swift run --package-path apps/macos Bifrost --check-release-scope` 和 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；当前机器辅助访问/截图权限受限，无法继续用脚本移动窗口或截取可靠局部截图。
 
 ### TC-MNA-12：Native 明暗主题切换可用且 Network 数据来自真实 Admin API
 
@@ -304,7 +333,7 @@
 
 **预期结果：**
 - `/tmp/bifrost-native-titlebar-network.png` 中顶部 macOS 标题栏不再显示单独的 `Network` 标题占位，也不显示 Network/Rules/Settings 顶部主 tab。
-- 右侧顶部区域直接承载 Network 操作区；Network 内容区域从 Filters / Traffic table / Detail 三栏开始。
+- Network 主窗口入口只展示 Web UI 打开入口和摘要；复杂 Network 操作区、Filters / Traffic table / Detail 三栏在 Web UI 中完成。
 - Breakpoint 开关来自 `/breakpoint/settings`，不是固定 false。
 - TLS Decode 开关来自 `/config/tls`，System Proxy 开关来自 `/proxy/system`。
 - Clear traffic、filter tags、Fuzzy Search、Add Filter、detail panel toggle 均有实际 UI 状态变化或真实 API 行为，不是空按钮。
@@ -319,7 +348,7 @@
    ```
 2. 执行源码入口扫描：
    ```bash
-   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case network = \\"Network\\"","case rules = \\"Rules\\"","case settings = \\"Settings\\""]; forbidden=["Replay","Values","Scripts","AI","DevTools","Groups","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case activity = \\"活动\\"","case overview = \\"概览\\"","case rules = \\"规则\\"","case network = \\"网络\\""]; forbidden=["case processes","case devices","Replay","Values","Scripts","AI","DevTools","Groups","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
    ```
 3. 执行完整 Native build smoke：
    ```bash
@@ -327,10 +356,10 @@
    ```
 
 **预期结果：**
-- `--check-release-scope` 输出 `Bifrost release scope check passed: Network,Rules,Settings`。
+- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
 - 源码入口扫描输出 `macOS native release navigation scope ok`。
 - Native build smoke 通过。
-- 用户侧左侧主导航只能进入 Network、Rules、Settings；Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
+- 用户侧左侧主导航只能进入活动、概览、规则、网络；进程、设备、Replay、Values、Scripts、AI、DevTools、Groups、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
 - 长期 WebUI parity 仍在 `design/macos-native-webui-parity.md` 维护；后续页面必须达到真实交互完成后再开放入口。
 
 ### TC-MNA-15：Native 必须建立 WebUI 同源 `/api/push` WebSocket 并支持 Network 选中详情
@@ -439,10 +468,10 @@
    ```
 
 **预期结果：**
-- 两次 smoke 均输出 `Bifrost release scope check passed: Network,Rules,Settings`。
-- Native app 的 `SidebarItem.releaseScopeItems` 只包含 `.network`、`.rules`、`.settings`。
+- 两次 smoke 均输出 `Bifrost release scope check passed: 活动,概览,规则,网络`。
+- Native app 的 `SidebarItem.releaseScopeItems` 只包含 `.activity`、`.overview`、`.rules`、`.network`。
 - Native app 的 `SidebarItem.allCases` 与 `releaseScopeItems` 完全一致，不保留隐藏页面枚举 case。
-- 左侧主导航仅包含 Network、Rules、Settings；切换后会自动刷新当前页需要的状态。
+- 左侧主导航仅包含活动、概览、规则、网络；切换后会自动刷新当前页需要的状态。
 - Replay、Values、Scripts、AI、DevTools、Groups、Notify 没有主导航入口；后续恢复入口时必须先补齐真实交互和对应 human_tests。
 
 ### TC-MNA-19：Settings 使用系统设置式左侧导航并覆盖四个首版页面
@@ -530,16 +559,16 @@
    osascript -e 'tell application "System Events" to tell process "Bifrost" to set size of window 1 to {1220, 820}'
    screencapture -x -R 120,80,1220,820 /tmp/bifrost-native-apple-sidebar.png
    ```
-3. 通过左侧 source-list 依次点击 Network、Rules、Settings，并观察右侧顶部区域。
-4. 在 Network 选中任意请求，观察详情区的 Request / Response、Overview / Header / Body / Raw 切换。
+3. 通过左侧 source-list 依次点击活动、概览、规则、网络，并观察右侧内容区域。
+4. 在网络页点击 Web UI 打开入口，确认复杂 Network 工作台在浏览器中打开。
 
 **预期结果：**
 - 左侧主导航是系统 source-list 风格区域，具有淡 material 背景；红黄绿窗口按钮落在同一侧栏背景区域内。
-- Network、Rules、Settings 是左侧主导航的三个入口；顶部右侧不得出现 Network / Rules / Settings 主 tab。
-- Network 顶部区域展示 Network 操作按钮、过滤 tag、搜索和 Breakpoint/TLS Decode/System Proxy 系统开关。
-- Rules 顶部区域展示 Rules 标识、启用数量和 New Rule 操作；切换到 Rules 时自动刷新列表，规则详情内部的 Enabled、Copy、Revert、Save、Rename/Delete 仍保留在详情头部。
-- Settings 内部仍使用类似 macOS 系统设置的左侧子导航，Proxy、Certificate、Sync、Remote Invoke 四页可切换。
-- Request / Response、Overview / Header / Body / Raw 等 tab 只出现在请求详情内容内部，不得被提升为应用主导航。
+- 活动、概览、规则、网络是左侧主导航入口；顶部右侧不得出现 Network / Rules / Settings 主 tab，且不得再出现独立进程或设备入口。
+- Network 页面只展示 Web UI 打开入口和摘要；Breakpoint/TLS Decode/System Proxy、Remote Invoke、Sync、Certificate 管理收敛到概览。
+- Rules 页面展示 `规则` 页面标题、启用数量和 New Rule 操作；规则列表与编辑器使用白色卡片承载，切换到 Rules 时自动刷新列表，规则详情内部的 Enabled、Copy、Revert、Save、Rename/Delete 仍保留在详情头部。
+- Settings scene 仍可从 macOS app Settings 入口打开，主窗口不再把 Settings 作为一级导航。
+- Request / Response、Overview / Header / Body / Raw 等 Network 详情 tab 不进入 Native 主窗口一级导航。
 
 ### TC-MNA-22：Network 表格文字绘制不得因 CoreText attribute 崩溃
 
