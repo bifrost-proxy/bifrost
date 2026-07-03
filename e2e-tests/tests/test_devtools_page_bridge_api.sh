@@ -1953,7 +1953,8 @@ targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CD
 await panelSearch.fill('manual-refresh');
 await adminPage.locator('[data-testid="devtools-dom-node"][data-selected="true"]').filter({ hasText: 'debug-fixture-manual-refresh' }).waitFor({ timeout: 8000 });
 await panelSearch.fill('');
-await adminPage.getByTestId('devtools-elements-inspect').click();
+await closeOpenAntModals(adminPage, 'before-elements-inspect');
+await dispatchVisibleClick(adminPage.getByTestId('devtools-elements-inspect'), 'devtools-elements-inspect');
 await page.waitForFunction(() => document.documentElement.getAttribute('data-bifrost-devtools-inspecting') === 'true', null, { timeout: 8000 });
 await page.locator('#debug-fixture').hover();
 await page.waitForFunction(() => {
