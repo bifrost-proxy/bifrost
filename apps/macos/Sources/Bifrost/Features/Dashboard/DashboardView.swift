@@ -133,13 +133,6 @@ struct DashboardView: View {
                         HStack {
                             NativeCardHeader(title: "本机服务", subtitle: appModel.adminHostPortLabel)
                             Spacer()
-                            Button("刷新") {
-                                Task {
-                                    await appModel.refreshData()
-                                    await model.refresh()
-                                }
-                            }
-                            .buttonStyle(.borderless)
                         }
                         HStack(spacing: 12) {
                             CompactFact(title: "版本", value: appModel.overview?.system?.version ?? "-")
@@ -905,16 +898,6 @@ private struct CertificateControlCard: View {
                             }
                             .buttonStyle(.bordered)
                             .disabled(model.certInfo == nil || model.certInfo?.available == false || model.isMutating)
-                            Button("刷新设备") {
-                                Task { await model.refreshMobileDevices() }
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(model.isMutating)
-                            Button("重新生成 QR") {
-                                Task { await model.regenerateTrustProbe() }
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(model.preferredTrustProbeHost == nil || model.isMutating)
                         }
 
                         VStack(alignment: .leading, spacing: 8) {
