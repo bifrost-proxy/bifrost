@@ -353,7 +353,7 @@ pub(super) async fn schedule_agent_adapter_config_overrides_runner_without_dropp
             }),
             conversation_ref: None,
         }),
-        timeout_ms: 10_000,
+        timeout_ms: 30_000,
         max_output_bytes: 1024,
         concurrency_policy: Default::default(),
         retry: Default::default(),
