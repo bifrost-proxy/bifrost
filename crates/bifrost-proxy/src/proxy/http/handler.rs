@@ -878,7 +878,10 @@ async fn build_direct_status_request_snapshot(
     let needs_req_processing = needs_request_body_processing(resolved_rules);
     let has_req_body_override = resolved_rules.req_body.is_some();
     let has_req_scripts = !resolved_rules.req_scripts.is_empty();
-    let needs_req_body_read = !has_req_body_override && (needs_req_processing || has_req_scripts);
+    let needs_req_body_read = !has_req_body_override
+        && (needs_req_processing
+            || has_req_scripts
+            || (!resolved_rules.res_scripts.is_empty() && resolved_rules.status_code.is_some()));
     let mut skip_req_scripts = false;
 
     let mut final_body = if needs_req_body_read {
@@ -1531,6 +1534,7 @@ pub async fn handle_http_request(
                 &record_url,
                 &request_snapshot.method,
                 &req_script_headers,
+                Some(String::from_utf8_lossy(&request_snapshot.body).to_string()),
                 &mut res_script_status,
                 &mut res_script_status_text,
                 &mut res_script_headers,
@@ -1656,6 +1660,7 @@ pub async fn handle_http_request(
                 &record_url,
                 &method,
                 &req_script_headers,
+                None,
                 &mut res_script_status,
                 &mut res_script_status_text,
                 &mut res_script_headers,
@@ -3579,6 +3584,7 @@ pub async fn handle_http_request(
             &url,
             &method,
             &req_script_headers,
+            None,
             &mut res_script_status,
             &mut res_script_status_text,
             &mut res_script_headers,

@@ -880,6 +880,16 @@ impl Sandbox {
             .set("headers", req_headers_obj)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
 
+        if let Some(b) = &response.request.body {
+            req_obj
+                .set("body", b.clone())
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        } else {
+            req_obj
+                .set("body", Value::new_null(js_ctx.clone()))
+                .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
+        }
+
         res.set("request", req_obj)
             .map_err(|e| ScriptError::QuickJsError(e.to_string()))?;
 
