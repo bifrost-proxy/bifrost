@@ -726,6 +726,20 @@ async function openDevtoolsNetworkRow(adminPage, row, textPattern, label) {
   return false;
 }
 
+async function requireDevtoolsNetworkRow(adminPage, row, textPattern, label) {
+  if (await openDevtoolsNetworkRow(adminPage, row, textPattern, label)) {
+    return;
+  }
+  const debugState = await adminPage.evaluate(() => ({
+    detail: document.querySelector('[data-testid="devtools-network-detail"]')?.textContent?.slice(0, 1000) || '',
+    fallbackDetail: document.querySelector('[data-testid="devtools-network-fallback-detail"]')?.textContent?.slice(0, 1000) || '',
+    rows: Array.from(document.querySelectorAll('[data-testid="devtools-network-panel"] [data-testid="traffic-row"]')).map((node) =>
+      (node.textContent || '').slice(0, 300)
+    ),
+  }));
+  throw new Error(`Failed to open required DevTools Network row ${label}: ${JSON.stringify(debugState)}`);
+}
+
 function mergeSnapshot(base, incoming) {
   const next = base ? { ...base } : {};
   if (incoming.page) next.page = incoming.page;
@@ -2033,9 +2047,12 @@ if (webuiNetworkRows.length !== 1) {
   throw new Error(`AV-CDP-44 failed: Network should dedupe fetch hook and PerformanceResourceTiming rows ${JSON.stringify(webuiNetworkRows)}`);
 }
 const devtoolsUrlBeforeNetworkDetail = adminPage.url();
-await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').first().click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
-await adminPage.getByTestId('devtools-network-detail').getByText(/webui-network-complete/).first().waitFor({ timeout: 8000 });
+const webuiNetworkCompleteRow = adminPage
+  .getByTestId('devtools-network-panel')
+  .getByTestId('traffic-row')
+  .filter({ hasText: 'webui-network-complete' })
+  .first();
+await requireDevtoolsNetworkRow(adminPage, webuiNetworkCompleteRow, /webui-network-complete/, 'webui-network-complete-row');
 const networkPanelBox = await adminPage.getByTestId('devtools-network-panel').boundingBox();
 const networkTableBox = await adminPage.getByTestId('devtools-network-traffic-table').boundingBox();
 const networkDetailBox = await adminPage.getByTestId('devtools-network-detail').boundingBox();
@@ -2116,10 +2133,7 @@ const uiTrafficEnrichRow = adminPage
   .getByTestId('traffic-row')
   .filter({ hasText: 'ui-traffic-enrich' })
   .first();
-await uiTrafficEnrichRow.waitFor({ timeout: 8000 });
-await uiTrafficEnrichRow.click({ force: true });
-await adminPage.getByTestId('devtools-network-detail').getByTestId('traffic-detail').waitFor({ timeout: 15000 });
-await adminPage.getByTestId('devtools-network-detail').getByText(/ui-traffic-enrich/).first().waitFor({ timeout: 8000 });
+await requireDevtoolsNetworkRow(adminPage, uiTrafficEnrichRow, /ui-traffic-enrich/, 'ui-traffic-enrich-row');
 await panelSearch.fill('');
 await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-key').waitFor({ timeout: 8000 });
