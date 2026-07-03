@@ -3,6 +3,7 @@
 ## 功能模块说明
 
 验证文档站重构已经真实落地：首页由手写静态 HTML 交付，构建期间自动同步 `docs/` 与 `docs-en/`，文档区继续由 Astro/Starlight 生成，最终部署产物中的首页不包含 Astro runtime，并覆盖明暗模式与中英文体验。
+文档区布局参考 Vite 中文文档站的三栏阅读体验，但主题使用 Bifrost 绿色系，且首页不参考 Vite 首页。
 
 ## 前置条件
 
@@ -63,7 +64,22 @@
 - 英文文档源变化会触发站点 CI。
 - E2E 同时覆盖英文文档同步和静态首页产物。
 
-### TC-DSR-04 站点单元测试通过
+### TC-DSR-04 文档区 Vite-like 阅读布局
+
+操作步骤：
+1. 执行 `rg -n "sl-content-width|sidebar-pane|right-sidebar-panel|bifrost-doc-code" site/src/styles/starlight.css`。
+2. 执行 `rg -n -- "--sl-color-accent: #0f9f7e|--sl-color-accent: #25c2a0|--sl-color-text-accent" site/src/styles/starlight.css`。
+3. 执行 `rg -n "content-panel|sl-markdown-content h2|sidebar-content a\\[aria-current=\"page\"\\]|right-sidebar-panel a" site/src/styles/starlight.css`。
+4. 执行 `rg -n "Vite 中文文档站|Vite-like 三栏阅读布局|首页仍保持独立纯 HTML" design/docs-site-redesign.md`。
+5. 检查 `site/home/index.html` 和 `site/home/styles.css` 没有因参考 Vite 文档区而新增 VitePress、Vue 或 Vite 首页相关代码。
+
+预期结果：
+- 技术方案明确文档区参考 Vite 中文文档站，首页不参考 Vite 首页。
+- 文档区样式包含固定正文宽度、左 sidebar、中正文、右目录的覆盖点。
+- 文档区主题以绿色 accent 为主，但背景仍为白/深灰阅读底色，不是一整片绿色。
+- 首页仍是独立纯 HTML 源，未引入文档区框架或 Vite 首页样式。
+
+### TC-DSR-05 站点单元测试通过
 
 操作步骤：
 1. 执行 `pnpm --dir site run test`。
@@ -73,7 +89,7 @@
 - static home 单元测试通过。
 - 命令退出码为 0。
 
-### TC-DSR-05 完整构建产物为静态首页加同步文档区
+### TC-DSR-06 完整构建产物为静态首页加同步文档区
 
 操作步骤：
 1. 执行 `pnpm --dir site run build`。
@@ -97,7 +113,7 @@
 - 首页默认启动指引使用后台 daemon，不把测试隔离参数作为新用户首选命令。
 - 中文和英文文档区产物仍存在。
 
-### TC-DSR-06 docs sync E2E 覆盖未来新增文档
+### TC-DSR-07 docs sync E2E 覆盖未来新增文档
 
 操作步骤：
 1. 执行 `bash e2e-tests/tests/test_site_docs_sync.sh`。
@@ -109,7 +125,7 @@
 - 静态首页断言通过。
 - 脚本清理临时源文档、生成文档和 `site/dist`。
 
-### TC-DSR-07 本地静态服务首页体验验证
+### TC-DSR-08 本地静态服务首页体验验证
 
 操作步骤：
 1. 如果 `site/dist/index.html` 不存在，先执行 `pnpm --dir site run build`。
@@ -132,7 +148,25 @@
 - 浅色和暗色模式都有清晰层级，不出现低对比文字。
 - 桌面和移动布局无明显重叠、遮挡或横向溢出。
 
-### TC-DSR-08 变更范围与生成内容边界
+### TC-DSR-09 本地静态服务文档区体验验证
+
+操作步骤：
+1. 如果 `site/dist/getting-started/overview/index.html` 不存在，先执行 `pnpm --dir site run build`。
+2. 用 `/bifrost/` 前缀模拟 GitHub Pages：`rm -rf /tmp/bifrost-site-preview && mkdir -p /tmp/bifrost-site-preview && ln -s "$PWD/site/dist" /tmp/bifrost-site-preview/bifrost`。
+3. 启动静态服务：`python3 -m http.server 4174 -d /tmp/bifrost-site-preview`。
+4. 在浏览器打开 `http://127.0.0.1:4174/bifrost/getting-started/overview/`。
+5. 在桌面宽度检查顶部导航、左侧 sidebar、中间正文、右侧本页目录同时可见。
+6. 检查当前 sidebar 项、正文链接、inline code 和右侧目录 hover/active 风格使用绿色 accent，而不是蓝紫默认主题。
+7. 切换浅色和暗色模式，检查正文、sidebar、代码块和右侧目录对比度。
+8. 打开移动宽度视图，检查 sidebar 收起、正文优先显示、无横向溢出。
+
+预期结果：
+- 文档区阅读布局接近 Vite 文档站的信息结构：固定导航、左侧分组导航、中间正文、右侧本页目录。
+- Bifrost 绿色主题与 Vite 默认主题有明显区分。
+- 首页仍保持本次自定义纯 HTML 风格，文档区样式没有污染首页。
+- 桌面和移动布局无明显重叠、遮挡或横向溢出。
+
+### TC-DSR-10 变更范围与生成内容边界
 
 操作步骤：
 1. 执行 `git status --short`。
@@ -140,7 +174,7 @@
 3. 执行 `rg -n "2026-06-29 PPE|发布前 PPE header|老 v4 CLI 调 legacy" docs/design/remote-invoke-v5-pop-hardening.md site/src/content/docs/reference/design/remote-invoke-v5-pop-hardening.md`。
 
 预期结果：
-- 变更范围只包含站点首页、站点构建脚本、站点 E2E、设计文档、human_tests、workflow path filter，以及由 docs sync 生成的内容漂移。
+- 变更范围只包含站点首页、文档区 Starlight 样式、站点构建脚本、站点 E2E、设计文档、human_tests、workflow path filter，以及由 docs sync 生成的内容漂移。
 - `site/src/content/docs/reference/design/remote-invoke-v5-pop-hardening.md` 的差异能在源文档 `docs/design/remote-invoke-v5-pop-hardening.md` 中找到对应内容，证明它是 sync 产物。
 
 ## 清理步骤

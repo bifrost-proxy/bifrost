@@ -71,6 +71,7 @@
 - `site/package.json` 的 `build` 保持部署期自动 sync docs，并在文档区构建后覆盖静态首页。
 - `.github/workflows/site.yml` 增加 `docs-en/**` path filter，英文文档变更也会触发站点 CI/部署。
 - `e2e-tests/tests/test_site_docs_sync.sh` 增加静态首页断言，并继续验证临时新增中文和英文文档会自动出现在构建产物中。
+- `site/src/styles/starlight.css` 将文档区调整为 Vite-like 三栏阅读布局：固定顶部导航、左侧分组 sidebar、中间克制正文宽度、右侧本页目录，并使用绿色主题 accent。
 
 ## 外部调研结论
 
@@ -97,6 +98,18 @@ Docusaurus 是 React 静态站点生成器，会生成可见 HTML，但也构建
 VitePress 是 Vite + Vue 文档静态站点生成器，Markdown 和 Vue 扩展体验好。
 
 结论：不建议迁移。它仍是框架生成文档站，当前 Starlight 已满足内容区能力，迁移只会引入 Vue 主题重写成本。
+
+### Vite 中文文档站
+
+2026-07-03 参考 `https://vitejs.cn/guide/` 的文档区布局。该站点的技术体验重点不是首页，而是文档阅读界面：
+
+- 顶部固定导航，搜索、主题切换、语言/版本入口都在同一层级，正文不被营销内容打断。
+- 桌面端三栏布局清晰：左侧分组 sidebar，中间较窄正文，右侧本页目录。
+- 正文区域保持扁平，不把整篇文章包进大卡片；标题、段落、表格和代码块靠留白与细线分层。
+- 当前页面、链接、inline code、focus 状态用品牌色提示，避免大面积彩色背景影响阅读。
+- 移动端收起 sidebar，保留移动目录与正文优先阅读。
+
+结论：文档区参考 Vite 文档的布局节奏和信息密度，但继续使用 Astro + Starlight + Pagefind。主题色改为 Bifrost 绿色系，首页仍保持独立纯 HTML 方案，不参考 Vite 首页。
 
 ### Cloudflare Pages / GitHub Pages
 
@@ -211,6 +224,7 @@ node scripts/verify-site-links.mjs
 - 卡片半径控制在 8px 以内。
 - 不使用生成图片作为首页主视觉。
 - 不加载远程字体，使用 system font。
+- 文档区参考 Vite 文档布局：正文扁平、三栏阅读、窄正文列、右侧目录和左侧分组导航；绿色只作为 active/link/code/focus 状态，不做大面积绿色铺底。
 
 ## 性能预算
 
@@ -280,7 +294,7 @@ node scripts/verify-site-links.mjs
 ### 真实场景测试
 
 - `human_tests/docs-site-redesign.md`
-- 覆盖首页纯 HTML 源、构建顺序、自动同步、部署触发路径、静态首页产物、Tab 交互、中英文、明暗模式和清理要求。
+- 覆盖首页纯 HTML 源、构建顺序、自动同步、部署触发路径、静态首页产物、文档区 Vite-like 三栏布局、绿色主题、Tab 交互、中英文、明暗模式和清理要求。
 
 ## Review/Fix/Test 闭环方案
 
@@ -289,6 +303,7 @@ node scripts/verify-site-links.mjs
 - 复核用户目标：BigModel 参考、首页纯 HTML、部署期自动同步、独立 worktree、实现交付。
 - 执行 `git status --short` 和 `git diff`。
 - Review `site/home/*`、`site/scripts/home-static-*`、`site/package.json`、`.github/workflows/site.yml` 和 `e2e-tests/tests/test_site_docs_sync.sh`。
+- Review `site/src/styles/starlight.css` 是否只影响文档区、不改变首页纯 HTML 交付。
 - 执行 `pnpm --dir site run test`、`pnpm --dir site run build` 和 `bash e2e-tests/tests/test_site_docs_sync.sh`。
 
 ### 第 2 轮
@@ -296,6 +311,7 @@ node scripts/verify-site-links.mjs
 - 复查第 1 轮修复后的 diff。
 - 检查 `human_tests/readme.md` 只更新相关索引行，没有全局汇总数字。
 - 复核 `site/dist/index.html` 是否来自 `site/home/index.html`，且不包含 Astro runtime marker。
+- 复核文档页桌面端是否保留左 sidebar / 中正文 / 右目录，移动端是否无横向溢出。
 - 复跑受影响测试，并用本地静态服务做浏览器或 HTTP 验证。
 
 ## 校验要求
@@ -336,6 +352,7 @@ node scripts/verify-site-links.mjs
 - Docusaurus introduction: https://docusaurus.io/docs
 - VitePress: https://vitepress.dev/
 - VitePress routing: https://vitepress.dev/guide/routing
+- Vite Chinese docs reference: https://vitejs.cn/guide/
 - Cloudflare Pages headers: https://developers.cloudflare.com/pages/configuration/headers/
 - Cloudflare Pages serving pages: https://developers.cloudflare.com/pages/configuration/serving-pages/
 - Cloudflare static HTML: https://developers.cloudflare.com/pages/framework-guides/deploy-anything/
