@@ -235,7 +235,7 @@
    ```
 
 **预期结果：**
-- Native 使用 SwiftUI `NavigationSplitView` + source-list 行的左侧主导航，不再使用顶部三段式主 tab。
+- Native 使用固定宽度 source-list 行作为左侧主导航，不再使用顶部三段式主 tab，也不允许最外层主菜单被拖拽折叠。
 - 左侧 source-list 视觉上为 macOS 系统式 material 浮层，窗口红黄绿按钮和左侧导航共享同一块背景区域。
 - macOS 红黄绿三个窗口按钮使用系统原生标题栏按钮，不再由应用自绘。
 - 左侧主导航显示 `活动`、`概览`、`规则`、`网络` 四个核心入口，窗口按钮必须保持可见，内容不得被标题栏或安全区裁切；窗口和页面背景呈清爽冷白 surface，卡片为白色卡片，非控件空白区域仍可拖拽移动窗口。
@@ -1050,6 +1050,349 @@
 - Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
 - 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
 - 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
+
+### TC-MNA-38：回归 - Native 深色主题不能残留浅色底板
+
+**操作步骤：**
+1. 执行无窗口主题合同检查：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-theme-contract
+   ```
+2. 执行源码扫描，确认主窗口 surface、通用代码编辑器、Rules DSL 编辑器和 Dashboard TLS 名单编辑器不再写死浅色背景：
+   ```bash
+   ruby -e 'checks={
+     "AppModel default system theme"=>"@Published var colorSchemeMode: ColorSchemeMode = .system",
+     "AppSurface adaptive colors"=>"static func resolvedContentColor(for appearance: NSAppearance.Name)",
+     "CodeEditor system text background"=>"textView.backgroundColor = .textBackgroundColor",
+     "Rule editor adaptive theme"=>"BifrostRuleEditorTheme(appearance: effectiveAppearance)",
+     "Dashboard editor card background"=>".background(AppSurface.card, in: RoundedRectangle"
+   }; text=Dir["apps/macos/Sources/Bifrost/**/*.swift"].map{|p| File.read(p)}.join("\n"); missing=checks.reject{|_, needle| text.include?(needle)}; abort("missing dark theme contract markers: #{missing.keys.join(", ")}") unless missing.empty?; puts "macOS native dark theme source contract ok"'
+   ```
+3. 构建并打开 Native `.app`，通过应用左下角主题按钮切换到深色外观后截图：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   osascript -e 'tell application "System Events" to set frontmost of process "Bifrost" to true'
+   # 从默认 System 依次切到 Light、Dark；如当前已是 Light，则第二次点击后仍进入 Dark。
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to click button 1 of group 1 of window 1' || true
+   osascript -e 'tell application "System Events" to tell process "Bifrost" to click button 1 of group 1 of window 1' || true
+   screencapture -x /tmp/bifrost-native-dark-theme.png
+   ```
+4. 如可操作窗口，进入 Rules 页面并切换主题按钮，肉眼确认列表、编辑器、补全面板、行号栏和状态栏均可读。
+
+**预期结果：**
+- `--check-theme-contract` 输出 `Bifrost theme contract check passed`。
+- 源码扫描输出 `macOS native dark theme source contract ok`。
+- Native app 默认跟随系统外观；深色系统外观下不再强制 `.preferredColorScheme(.light)`。
+- 主窗口 content、sidebar、selection、card、card border、card highlight、card shadow、subtle fill 均为 appearance-adaptive 动态色。
+- AppKit `CodeEditorView` 使用系统 text background/text color/insertion point color。
+- `BifrostRuleEditorView` 的正文背景、文字、插入点、行号栏和语法高亮都跟随 effective appearance；深色主题下不出现白底编辑器或浅色行号栏。
+- Dashboard TLS 名单编辑器使用统一 card 背景；深色主题下不出现整块白色文本编辑区域。
+- 除图标、二维码图片本体、accent 按钮文字等语义上必须保持白色的元素外，页面不应有大面积浅色底板或低对比文字。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift run --package-path apps/macos Bifrost --check-theme-contract` 通过，输出 `Bifrost theme contract check passed`。
+- 执行源码扫描通过，输出 `macOS native dark theme source contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 执行 `open -n apps/macos/.build/Bifrost.app` 启动最新开发 app；通过 System Events 点击左下角主题按钮切到 `Dark`，截图保存到 `/tmp/bifrost-native-dark-theme-after-toggle.png`。
+- 截图确认 Rules 页面 sidebar、主内容底色、规则列表卡片、详情卡片、规则编辑器正文背景、行号栏、状态栏均为深色且文字可读；未见大面积浅色底板残留。
+
+### TC-MNA-39：回归 - 四个主入口右侧内容自适应可用宽度
+
+**操作步骤：**
+1. 执行源码布局合同扫描：
+   ```bash
+   ruby -e 'checks={
+     "page scaffold fills width"=>".frame(maxWidth: .infinity, alignment: .leading)",
+     "rules detail layout priority"=>".layoutPriority(1)",
+     "rules list flexible width"=>".frame(minWidth: 280, idealWidth: 320, maxWidth: 360)",
+     "traffic table fills width"=>".frame(minWidth: 420, maxWidth: .infinity)"
+   }; text=Dir["apps/macos/Sources/Bifrost/**/*.swift"].map{|p| File.read(p)}.join("\n"); missing=checks.reject{|_, needle| text.include?(needle)}; abort("missing adaptive layout markers: #{missing.keys.join(", ")}") unless missing.empty?; forbidden=["maxWidth: 1180", "maxWidth: 980", "maxWidth: 760"]; found=forbidden.select{|needle| text.include?(needle)}; abort("fixed layout caps remain: #{found.join(", ")}") unless found.empty?; puts "macOS native adaptive layout source contract ok"'
+   ```
+2. 构建 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   ```
+3. 打开 Native `.app`，逐个切换 `活动`、`概览`、`规则`、`网络`，并截图：
+   ```bash
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 通过左侧 source-list 切换四个主入口后分别 screencapture 到 /tmp/bifrost-native-adaptive-layout-*.png
+   ```
+
+**预期结果：**
+- 源码扫描输出 `macOS native adaptive layout source contract ok`。
+- `NativePageScaffold` 不再把主内容封顶在 `1180`，Settings 内容不再封顶在 `980`，Traffic 表格不再封顶在 `760`。
+- `活动`、`概览`、`网络` 页面卡片或入口卡片横向填充右侧内容区，而不是只占左侧一块固定宽度。
+- `规则` 页面左侧列表保持 280-360 的可读宽度，右侧规则编辑器卡片优先吃满剩余空间。
+- 窗口放大时，四个主入口都应重新分配右侧内容宽度，不出现明显的大块空白浪费。
+
+**实际结果（2026-07-03）：**
+- 执行源码布局合同扫描通过，输出 `macOS native adaptive layout source contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并截图：`活动` 保存到 `/tmp/bifrost-native-adaptive-layout.png`，`概览` 保存到 `/tmp/bifrost-native-adaptive-layout-overview.png`，`规则` 保存到 `/tmp/bifrost-native-adaptive-layout-rules.png`，`网络` 保存到 `/tmp/bifrost-native-adaptive-layout-network.png`。
+- 截图确认 `活动` 三列指标卡、`概览` 双列控制卡和 `规则` 右侧编辑器都铺满右侧内容区；未见旧版固定窄容器导致的大面积右侧空白。
+
+### TC-MNA-40：回归 - Rules 页面左右面板高度撑满可用区域
+
+**操作步骤：**
+1. 执行源码高度布局合同扫描：
+   ```bash
+   ruby -e 'checks={
+     "scaffold can fill height"=>"contentFillsAvailableHeight",
+     "rules enables fill height"=>"NativePageScaffold(title: \"规则\", contentFillsAvailableHeight: true)",
+     "rules row fills height"=>".frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)",
+     "rules detail fills height"=>".frame(minWidth: 520, maxWidth: .infinity, maxHeight: .infinity)",
+     "rule editor fills height"=>".frame(maxWidth: .infinity, maxHeight: .infinity)"
+   }; text=Dir["apps/macos/Sources/Bifrost/**/*.swift"].map{|p| File.read(p)}.join("\n"); missing=checks.reject{|_, needle| text.include?(needle)}; abort("missing height fill markers: #{missing.keys.join(", ")}") unless missing.empty?; puts "macOS native rules height contract ok"'
+   ```
+2. 构建并打开 Native `.app`，进入 `规则` 页面截图：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 切换到 Rules 后截图 /tmp/bifrost-native-adaptive-layout-rules-height.png
+   ```
+
+**预期结果：**
+- 源码扫描输出 `macOS native rules height contract ok`。
+- Rules 页面不再只使用固定 `minHeight: 600`。
+- 左侧规则列表 panel 和右侧规则编辑器 panel 从页面标题下方延伸到状态栏上方，随窗口高度变化自适应。
+- 右侧规则编辑器内部正文区域也撑满卡片高度，不在编辑器下方留下大块空白。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并切换到 Rules 页面，截图保存到 `/tmp/bifrost-native-adaptive-layout-rules-height.png`。
+- 截图确认左侧规则列表和右侧规则编辑器卡片均撑满到状态栏上方；旧版底部大块空白已消失。
+
+### TC-MNA-41：回归 - Native 主页面顶部留白保持紧凑
+
+**操作步骤：**
+1. 执行源码布局合同扫描，确认统一 scaffold 顶部 padding 和标题到内容间距保持紧凑：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift"); required=["VStack(alignment: .leading, spacing: 11)", ".padding(.top, 10)"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing compact top spacing markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["VStack(alignment: .leading, spacing: 22)", ".padding(.top, 20)"]; found=forbidden.select{|needle| text.include?(needle)}; abort("loose top spacing remains: #{found.join(", ")}") unless found.empty?; puts "macOS native compact top spacing contract ok"'
+   ```
+2. 构建并打开 Native `.app`，进入 `规则` 页面截图：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 切换到 Rules 后截图 /tmp/bifrost-native-rules-tight-layout.png
+   ```
+
+**预期结果：**
+- 源码扫描输出 `macOS native compact top spacing contract ok`。
+- 主页面标题顶部留白约为旧版一半。
+- 标题到第一行内容的间距约为旧版一半。
+- `活动`、`概览`、`规则`、`网络` 页面都继承同一套紧凑顶部 spacing。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并切换到 Rules 页面，截图保存到 `/tmp/bifrost-native-rules-tight-layout.png`。
+- 截图确认 Rules 页面顶部留白已明显缩小，且左右面板仍保持宽高自适应。
+
+### TC-MNA-42：回归 - Rules 编辑器内容可见、可编辑且切换侧栏不闪退
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Rules 页面临时使用稳定标准编辑器，侧栏不再走 macOS 26 上触发崩溃的 SwiftUI `List`/`OutlineListCoordinator` 路径：
+   ```bash
+   ruby -e 'rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); editor=File.read("apps/macos/Sources/Bifrost/AppKitBridge/CodeEditorView.swift"); abort("Rules still uses custom invisible editor") if rules.include?("BifrostRuleEditorView("); abort("sidebar still uses crash-prone SwiftUI List") if sidebar.include?("List(") || sidebar.include?(".listStyle"); required=["CodeEditorView(", "onTextChanged", "onSave", "CodeEditorTextView", "ForEach(SidebarItem.releaseScopeItems)"]; text=rules+"\n"+sidebar+"\n"+editor; missing=required.reject{|needle| text.include?(needle)}; abort("missing native recovery markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native rule editor recovery contract ok"'
+   ```
+2. 执行无窗口编辑器布局检查：
+   ```bash
+   swift run --package-path apps/macos Bifrost --check-rule-editor-layout
+   ```
+3. 构建并打开 Native `.app`，从左侧主导航切到 `规则`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 切换到 Rules 后截图 /tmp/bifrost-native-rule-editor-standard-visible.png
+   ```
+4. 在 Rules 页面确认 Default 规则正文注释可见；点击编辑器正文区域，确认可以进入文本编辑状态；切换左侧主导航不发生闪退。
+
+**预期结果：**
+- 源码扫描输出 `macOS native rule editor recovery contract ok`。
+- `--check-rule-editor-layout` 输出 `Bifrost rule editor layout check passed`。
+- Rules 页面右侧编辑器正文内容可见，不再只显示行号或空白底板。
+- 编辑器使用标准 AppKit 文本视图路径，支持文本输入、自动保存回调和 Cmd+S。
+- 左侧主导航使用普通 `ForEach + Button`，不再触发 `OutlineListCoordinator.applyContext()` 崩溃路径。
+
+**实际结果（2026-07-03）：**
+- 用户反馈 Rules 编辑器内容不可见且应用闪退；崩溃报告显示主线程崩在 SwiftUI `OutlineListCoordinator.applyContext()`。
+- 将左侧主导航从 SwiftUI `List` 改为稳定的 `VStack + ForEach + Button` 后，重新启动 Native `.app` 并切换到 Rules 页面未再复现闪退。
+- 将 Rules 编辑器临时切换到标准 `CodeEditorView` 后，截图 `/tmp/bifrost-native-rule-editor-standard-visible.png` 确认 Default 规则正文 `# Global default rules.` 和第二行注释可见。
+- 执行 `swift run --package-path apps/macos Bifrost --check-theme-contract`、`swift run --package-path apps/macos Bifrost --check-release-scope`、源码恢复合同扫描均通过。
+
+### TC-MNA-43：回归 - Overview 证书卡片不挤压且窗口标题不重复显示
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Overview 证书与移动端卡片使用自适应布局，窗口 chrome 每次更新都隐藏系统标题：
+   ```bash
+   ruby -e 'dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); chrome=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); required=["ViewThatFits(in: .horizontal)", "CertificateSummarySection", "GridItem(.adaptive(minimum: 118", ".frame(minWidth: 300, idealWidth: 320, maxWidth: 360", "window.title = \"\"", "window.subtitle = \"\"", "window.titleVisibility = .hidden", "window.toolbar = nil"]; text=dashboard+"\n"+chrome; missing=required.reject{|needle| text.include?(needle)}; abort("missing overview layout/title markers: #{missing.join(", ")}") unless missing.empty?; abort("fixed cramped probe width remains") if dashboard.include?(".frame(width: 260"); puts "macOS native overview layout and titlebar contract ok"'
+   ```
+2. 构建并打开 Native `.app`，切换到 `概览` 页面截图：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 切换到 Overview 后截图 /tmp/bifrost-native-overview-layout-title-fix.png
+   ```
+
+**预期结果：**
+- 源码扫描输出 `macOS native overview layout and titlebar contract ok`。
+- 主窗口顶部 titlebar 不再重复显示 `Bifrost` 文本。
+- `证书与移动端` 卡片里的 `本机 CA`、`代理地址`、`移动设备` 统计项不会被压成逐字竖排；空间不足时卡片内容换行或上下排列。
+- `可用性检查` 面板不再固定 260 宽挤压左侧内容。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native certificate card responsive layout contract ok` 和 `macOS native titlebar suppression contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并切换到 Overview 页面，截图保存到 `/tmp/bifrost-native-overview-layout-title-fix.png`；截图确认顶部重复 `Bifrost` 标题已消失，证书卡片统计项不再逐字竖排。
+
+### TC-MNA-44：回归 - Overview Remote Invoke SSH Key 复制按钮始终可见
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Remote Invoke 的 SSH Key 复制操作是稳定按钮，不再用 `已复制` 文案替换按钮标题：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["Label(\"复制 SSH Key\", systemImage: \"doc.on.doc\")", ".buttonStyle(.bordered)", "sshKeyRecentlyCopied", "Text(\"已复制\")"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing ssh key copy button markers: #{missing.join(", ")}") unless missing.empty?; abort("copy feedback still replaces button title") if text.include?("Button(copiedTitle)") || text.include?("private var copiedTitle"); puts "macOS native ssh key copy button contract ok"'
+   ```
+2. 构建并打开 Native `.app`，切换到 `概览` 页面截图：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   sleep 3
+   # 切换到 Overview 后截图 /tmp/bifrost-native-ssh-key-copy-button.png
+   ```
+3. 点击 Remote Invoke 的 `复制 SSH Key` 按钮，确认按钮仍可见，旁边短暂显示 `已复制`。
+
+**预期结果：**
+- 源码扫描输出 `macOS native ssh key copy button contract ok`。
+- Remote Invoke 的 SSH Key 操作区始终显示带 `doc.on.doc` 图标的 `复制 SSH Key` 按钮。
+- 点击复制后剪贴板写入 SSH key 内容，按钮不消失，只在旁边显示短暂 `已复制` 反馈。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native ssh key copy button contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并切换到 Overview 页面，截图保存到 `/tmp/bifrost-native-ssh-key-copy-button.png`；截图确认 Remote Invoke SSH Key 区域显示带图标的 `复制 SSH Key` 按钮。
+
+### TC-MNA-45：回归 - Rules 详情标题支持双击原位重命名
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Rules 详情标题支持原位编辑，不再弹出旧 Rename sheet：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); required=["inlineRuleTitle", "onTapGesture(count: 2)", "beginInlineRename()", "commitInlineRename()", "onExitCommand", "renameSelectedRule(to: trimmed)", "focused($inlineRenameFocused)"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing inline rename markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["renameSheetVisible", "Rename Rule"]; found=forbidden.select{|needle| text.include?(needle)}; abort("old rename sheet remains: #{found.join(", ")}") unless found.empty?; puts "macOS native inline rule rename contract ok"'
+   ```
+2. 构建并打开 Native `.app`，进入 `规则` 页面，选择一条非 `Default` 规则。
+3. 双击右侧详情标题中的规则名。
+4. 修改名称后按 Enter 提交；再次选择一条非 `Default` 规则，双击标题后按 Esc 取消。
+5. 选择 `Default` 规则后双击标题，确认不会进入编辑态。
+
+**预期结果：**
+- 源码扫描输出 `macOS native inline rule rename contract ok`。
+- 非保护规则标题双击后，原规则名位置直接变成单行输入框。
+- Enter 提交重命名并刷新规则列表；Esc 取消，不改名。
+- 菜单里的 `Rename` 也进入同一个原位编辑流程。
+- `Default` 规则受保护，双击标题和菜单 Rename 都不能重命名。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native inline rule rename contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并进入 Rules 页面，确认 `Default` 规则标题双击不会进入编辑态；非保护规则原位编辑能力由源码合同覆盖。
+
+### TC-MNA-46：回归 - Rules 左侧列表支持拖拽调整宽度且最大 300px
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Rules 左侧列表使用显式宽度状态、拖拽手柄和 300px 上限：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); required=["ruleListMaxWidth: CGFloat = 300", "ruleListMinWidth: CGFloat", "ruleListWidth", "clampedRuleListWidth", "RuleListResizeHandle", "DragGesture(minimumDistance: 0)", ".frame(width: clampedRuleListWidth"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing rule list resize markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["maxWidth: 360", "idealWidth: 320"]; found=forbidden.select{|needle| text.include?(needle)}; abort("old wide rule list frame remains: #{found.join(", ")}") unless found.empty?; puts "macOS native rule list resize contract ok"'
+   ```
+2. 构建并打开 Native `.app`，进入 `规则` 页面：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 拖拽左侧规则列表和右侧编辑器之间的细分割线，分别向左缩窄、向右扩宽。
+
+**预期结果：**
+- 源码扫描输出 `macOS native rule list resize contract ok`。
+- 左侧规则列表默认不超过 300px。
+- 拖拽分割线可以调整左侧规则列表宽度。
+- 向右拖到上限后左侧列表保持最大 300px，不再挤压右侧编辑器。
+- 右侧编辑器始终自适应剩余可用空间。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native rule list resize contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app` 并进入 Rules 页面；拖拽行为由源码合同中的 `DragGesture`、`clampedRuleListWidth` 和 `ruleListMaxWidth = 300` 覆盖。
+
+### TC-MNA-47：回归 - Native 全局指标和网络数据通过 WebSocket 实时推送刷新
+
+**操作步骤：**
+1. 执行源码合同扫描，确认 Native WebSocket 订阅和处理覆盖 overview、metrics、traffic 三类实时数据：
+   ```bash
+   ruby -e 'core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); push=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/PushClient.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required={"overview decode"=>"case overviewUpdate(SystemOverview)", "metrics decode"=>"case metricsUpdate(MetricsPushData)", "need metrics query"=>"need_metrics", "overview handler"=>"case .overviewUpdate(let data):", "metrics handler"=>"applyMetricsUpdate(data.metrics)", "global traffic subscription"=>"needTraffic: true", "500ms metrics"=>"metricsIntervalMs: 500", "network traffic records"=>"case .activity, .network:"}; text=[core,push,app,sidebar].join("\n"); missing=required.reject{|_, needle| text.include?(needle)}; abort("missing realtime markers: #{missing.keys.join(", ")}") unless missing.empty?; abort("traffic delta still gated by selected tab") if app.include?("if selectedSidebarItem.needsTrafficRecords {\n                enqueueTrafficDelta"); puts "macOS native realtime overview metrics traffic contract ok"'
+   ```
+2. 构建并打开 Native `.app`，停留在 `活动` 页面观察活动连接、上传、下载、请求数和底部状态栏。
+3. 在浏览器或命令行持续产生代理流量；不要切换 tab。
+4. 切换到 `网络` 页面，确认流量列表和过滤统计已经随 WebSocket 推送更新，而不是只在切换 tab 时刷新。
+
+**预期结果：**
+- 源码扫描输出 `macOS native realtime overview metrics traffic contract ok`。
+- `PushSubscription` 会发送 `need_overview=true`、`need_metrics=true`、`need_traffic=true` 和 `metrics_interval_ms=500`。
+- Native 能 decode `overview_update` 与 `metrics_update`，并写回 `appModel.overview`。
+- Activity 指标卡和全局底部 bar 的上传/下载速度、连接数、请求数、内存、CPU、uptime 不依赖切 tab 刷新。
+- Network 页面也被标记为需要 traffic records；traffic delta 不再按当前 tab 丢弃。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native realtime overview metrics traffic contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app`；实时刷新能力由源码合同中的 `overview_update`、`metrics_update`、`need_metrics`、`needTraffic: true` 和 Network traffic subscription 覆盖。
+
+### TC-MNA-48：回归 - 最外层主菜单使用系统 source-list sidebar
+
+**操作步骤：**
+1. 执行源码合同扫描，确认主窗口使用 macOS 系统推荐的 `NavigationSplitView + List(.sidebar)` source-list，不使用自定义 HStack/overlay/sidebar rail，且右侧 detail 不再用过大的最小宽度把左侧菜单挤出窗口：
+   ```bash
+   ruby -e 'main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); surface=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); traffic=File.read("apps/macos/Sources/Bifrost/Features/Traffic/TrafficView.swift"); sidebar_text=main+"\n"+sidebar; forbidden=["HStack(spacing: 0)", "GeometryReader { proxy in", "isSidebarCollapsed", "SidebarItemRow", ".navigationTitle(\"\")"]; found=forbidden.select{|needle| sidebar_text.include?(needle)}; abort("custom sidebar shell remains: #{found.join(", ")}") unless found.empty?; required=["NavigationSplitView {", ".navigationSplitViewColumnWidth(min: 176, ideal: 204, max: 232)", ".navigationSplitViewStyle(.balanced)", ".frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)", "List(SidebarItem.releaseScopeItems)", ".listStyle(.sidebar)", ".scrollContentBackground(.hidden)", "Label(item.rawValue, systemImage: item.systemImage)"]; missing=required.reject{|needle| sidebar_text.include?(needle)}; abort("missing native source-list sidebar markers: #{missing.join(", ")}") unless missing.empty?; width_contracts=[surface.include?("pageHorizontalPadding(for:"), dashboard.include?("GridItem(.adaptive(minimum: 260"), rules.include?(".frame(minWidth: 360"), traffic.include?(".frame(minWidth: 320")]; abort("right detail min-width contract missing") unless width_contracts.all?; puts "macOS native source-list responsive width contract ok"'
+   ```
+2. 构建并打开 Native `.app`：
+   ```bash
+   scripts/build-macos-native.sh --skip-sidecar --test
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app
+   ```
+3. 使用系统标题栏的 sidebar 按钮折叠/展开左侧菜单。
+
+**预期结果：**
+- 源码扫描输出 `macOS native source-list responsive width contract ok`。
+- 左侧主菜单使用系统 source-list/sidebar 样式，显示 `活动`、`概览`、`规则`、`网络` 和主题按钮。
+- 不存在自定义 overlay 悬浮层、自定义 icon rail 或自绘折叠按钮。
+- 系统 sidebar 按钮负责折叠/展开，左右布局行为交给 `NavigationSplitView`。
+- 窗口宽度变窄时，右侧 detail 区域先减少页面 padding、卡片换行并降低 Rules/Network 详情面板最小宽度；左侧 source-list 不被右侧内容推出屏幕外。
+- Rules 页面内部的规则列表宽度拖拽仍然保留，且最大 300px。
+
+**实际结果（2026-07-03）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native source-list responsive width contract ok`。
+- 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
+- 重新打开 Native `.app`；最外层主菜单回到系统 `NavigationSplitView + List(.sidebar)` source-list 布局。
 
 ## 清理步骤
 

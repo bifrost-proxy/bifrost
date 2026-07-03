@@ -14,7 +14,7 @@ final class AppModel: ObservableObject {
 
     @Published var sidecarState: SidecarState = .stopped
     @Published var selectedSidebarItem: SidebarItem = .activity
-    @Published var colorSchemeMode: ColorSchemeMode = .light
+    @Published var colorSchemeMode: ColorSchemeMode = .system
     @Published var isFilterPanelCollapsed = false
     @Published var isDetailPanelCollapsed = false
     @Published var networkToolbarFilters = NetworkToolbarFilters()
@@ -334,7 +334,7 @@ final class AppModel: ObservableObject {
                 await selectRule(name)
             }
         case .network:
-            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: false)
+            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false)
         }
     }
 
@@ -1217,13 +1217,15 @@ final class AppModel: ObservableObject {
             realtimeFallbackActive = false
             updateRealtimeSubscription()
         case .trafficDelta(let data):
-            if selectedSidebarItem.needsTrafficRecords {
-                enqueueTrafficDelta(data)
-            }
+            enqueueTrafficDelta(data)
         case .trafficDeleted(let data):
             flushPendingTrafficDelta()
             removeTraffic(ids: data.ids)
             updateRealtimeSubscription()
+        case .overviewUpdate(let data):
+            overview = data
+        case .metricsUpdate(let data):
+            applyMetricsUpdate(data.metrics)
         case .valuesUpdate:
             break
         case .settingsUpdate(let data):
@@ -1381,20 +1383,28 @@ final class AppModel: ObservableObject {
         }
     }
 
+    private func applyMetricsUpdate(_ metrics: SystemOverview.Metrics) {
+        var nextOverview = overview ?? SystemOverview()
+        nextOverview.metrics = metrics
+        overview = nextOverview
+    }
+
     private func makePushSubscription() -> PushSubscription {
-        let trafficEnabled = selectedSidebarItem.needsTrafficRecords
-        let lastRecord = trafficEnabled ? trafficRecords.last : nil
+        let lastRecord = trafficRecords.last
         return PushSubscription(
             lastTrafficId: lastRecord?.id,
             lastSequence: lastRecord?.seq,
-            pendingIds: trafficEnabled ? Array(pendingTrafficIds) : [],
-            needTraffic: trafficEnabled,
+            pendingIds: Array(pendingTrafficIds),
+            needTraffic: true,
+            needOverview: true,
+            needMetrics: true,
             needValues: false,
             needScripts: false,
             settingsScopes: [
                 "system_proxy",
                 "tls_config",
-            ]
+            ],
+            metricsIntervalMs: 500
         )
     }
 
@@ -1686,13 +1696,16 @@ struct NetworkToolbarFilters: Equatable, Sendable {
 }
 
 enum ColorSchemeMode: String, CaseIterable, Identifiable {
+    case system = "System"
     case light = "Light"
     case dark = "Dark"
 
     var id: String { rawValue }
 
-    var colorScheme: ColorScheme {
+    var colorScheme: ColorScheme? {
         switch self {
+        case .system:
+            return nil
         case .light:
             return .light
         case .dark:
@@ -1702,15 +1715,19 @@ enum ColorSchemeMode: String, CaseIterable, Identifiable {
 
     var next: ColorSchemeMode {
         switch self {
+        case .system:
+            return .light
         case .light:
             return .dark
         case .dark:
-            return .light
+            return .system
         }
     }
 
     var systemImage: String {
         switch self {
+        case .system:
+            return "circle.lefthalf.filled"
         case .light:
             return "sun.max"
         case .dark:

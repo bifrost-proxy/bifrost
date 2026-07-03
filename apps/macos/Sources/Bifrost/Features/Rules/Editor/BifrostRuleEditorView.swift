@@ -119,21 +119,19 @@ final class BifrostRuleEditorContainerView: NSView {
     }
 
     private func setup() {
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.white.cgColor
+        wantsLayer = false
+        applyTheme()
 
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = true
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.containerSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = false
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width, .height]
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
         textView.drawsBackground = true
-        textView.backgroundColor = .white
         textView.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
-        textView.textColor = BifrostRuleEditorTheme.light.text
-        textView.insertionPointColor = BifrostRuleEditorTheme.light.text
         textView.allowsUndo = true
         textView.isRichText = false
         textView.importsGraphics = false
@@ -148,22 +146,71 @@ final class BifrostRuleEditorContainerView: NSView {
         let ruler = BifrostLineNumberRulerView(textView: textView)
         textView.lineNumberRuler = ruler
 
+        scrollView.contentView = BifrostRuleClipView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
-        scrollView.hasHorizontalScroller = true
+        scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = false
-        scrollView.drawsBackground = false
+        scrollView.drawsBackground = true
+        scrollView.contentView.drawsBackground = true
         scrollView.borderType = .noBorder
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
         scrollView.verticalRulerView = ruler
         addSubview(scrollView)
+        applyTheme()
     }
 
     override func layout() {
         super.layout()
         scrollView.frame = bounds
+        let clipSize = scrollView.contentView.bounds.size
+        let targetWidth = max(clipSize.width, 1)
+        textView.frame = NSRect(
+            x: 0,
+            y: 0,
+            width: targetWidth,
+            height: max(clipSize.height, 1)
+        )
+
+        var usedHeight: CGFloat = 0
+        if let textContainer = textView.textContainer {
+            textContainer.widthTracksTextView = true
+            textContainer.containerSize = NSSize(width: targetWidth, height: CGFloat.greatestFiniteMagnitude)
+            textView.layoutManager?.invalidateLayout(
+                forCharacterRange: NSRange(location: 0, length: (textView.string as NSString).length),
+                actualCharacterRange: nil
+            )
+            textView.layoutManager?.ensureLayout(for: textContainer)
+            usedHeight = textView.layoutManager?.usedRect(for: textContainer).height ?? 0
+        }
+
+        textView.frame.size.height = max(clipSize.height, usedHeight + textView.textContainerInset.height * 2)
+        scrollView.contentView.scroll(to: .zero)
+        textView.needsDisplay = true
+        scrollView.contentView.needsDisplay = true
     }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        applyTheme()
+        highlight()
+        textView.lineNumberRuler?.needsDisplay = true
+    }
+
+    private func applyTheme() {
+        let theme = BifrostRuleEditorTheme(appearance: effectiveAppearance)
+        textView.backgroundColor = theme.background
+        textView.textColor = theme.text
+        textView.insertionPointColor = theme.text
+        scrollView.backgroundColor = theme.background
+        scrollView.contentView.backgroundColor = theme.background
+        scrollView.verticalRulerView?.needsDisplay = true
+    }
+}
+
+final class BifrostRuleClipView: NSClipView {
+    override var isFlipped: Bool { true }
 }
 
 final class BifrostRuleTextView: NSTextView {
@@ -259,12 +306,12 @@ final class BifrostRuleTextView: NSTextView {
 
 final class BifrostRuleHighlighter {
     private let service = BifrostRuleLanguageService()
-    private let theme = BifrostRuleEditorTheme.light
 
     func applyHighlighting(to textView: NSTextView, context: BifrostRuleEditorContext) {
         guard let storage = textView.textStorage else {
             return
         }
+        let theme = BifrostRuleEditorTheme(appearance: textView.effectiveAppearance)
         let fullRange = NSRange(location: 0, length: storage.length)
         let selection = textView.selectedRanges
         storage.beginEditing()
@@ -278,17 +325,59 @@ final class BifrostRuleHighlighter {
 }
 
 struct BifrostRuleEditorTheme {
-    static let light = BifrostRuleEditorTheme()
+    let background: NSColor
+    let rulerBackground: NSColor
+    let completionBackground: NSColor
+    let text: NSColor
+    let comment: NSColor
+    let keyword: NSColor
+    let string: NSColor
+    let variable: NSColor
+    let reference: NSColor
+    let script: NSColor
+    let attribute: NSColor
+    let regexp: NSColor
 
-    let text = NSColor(calibratedWhite: 0.12, alpha: 1)
-    let comment = NSColor.systemGray
-    let keyword = NSColor.systemBlue
-    let string = NSColor.systemTeal
-    let variable = NSColor.systemPurple
-    let reference = NSColor.systemIndigo
-    let script = NSColor.systemOrange
-    let attribute = NSColor.systemBrown
-    let regexp = NSColor.systemPink
+    init(appearance: NSAppearance = NSApp.effectiveAppearance) {
+        let isDark = appearance.bestMatch(from: [.darkAqua, .aqua, .vibrantDark, .vibrantLight]) == .darkAqua
+            || appearance.bestMatch(from: [.darkAqua, .aqua, .vibrantDark, .vibrantLight]) == .vibrantDark
+        background = isDark
+            ? NSColor(calibratedRed: 0.090, green: 0.102, blue: 0.122, alpha: 1)
+            : NSColor(calibratedWhite: 1.0, alpha: 1)
+        rulerBackground = isDark
+            ? NSColor(calibratedRed: 0.072, green: 0.082, blue: 0.100, alpha: 1)
+            : NSColor(calibratedWhite: 0.98, alpha: 1)
+        completionBackground = isDark
+            ? NSColor(calibratedRed: 0.125, green: 0.145, blue: 0.175, alpha: 1)
+            : NSColor(calibratedWhite: 0.965, alpha: 1)
+        text = isDark
+            ? NSColor(calibratedRed: 0.890, green: 0.920, blue: 0.960, alpha: 1)
+            : NSColor(calibratedRed: 0.120, green: 0.145, blue: 0.180, alpha: 1)
+        comment = isDark
+            ? NSColor(calibratedRed: 0.560, green: 0.620, blue: 0.700, alpha: 1)
+            : NSColor(calibratedRed: 0.430, green: 0.475, blue: 0.535, alpha: 1)
+        keyword = isDark
+            ? NSColor(calibratedRed: 0.420, green: 0.670, blue: 1.000, alpha: 1)
+            : NSColor(calibratedRed: 0.030, green: 0.330, blue: 0.780, alpha: 1)
+        string = isDark
+            ? NSColor(calibratedRed: 0.270, green: 0.780, blue: 0.780, alpha: 1)
+            : NSColor(calibratedRed: 0.000, green: 0.470, blue: 0.490, alpha: 1)
+        variable = isDark
+            ? NSColor(calibratedRed: 0.760, green: 0.560, blue: 1.000, alpha: 1)
+            : NSColor(calibratedRed: 0.480, green: 0.220, blue: 0.760, alpha: 1)
+        reference = isDark
+            ? NSColor(calibratedRed: 0.610, green: 0.650, blue: 1.000, alpha: 1)
+            : NSColor(calibratedRed: 0.250, green: 0.310, blue: 0.780, alpha: 1)
+        script = isDark
+            ? NSColor(calibratedRed: 1.000, green: 0.640, blue: 0.330, alpha: 1)
+            : NSColor(calibratedRed: 0.760, green: 0.340, blue: 0.020, alpha: 1)
+        attribute = isDark
+            ? NSColor(calibratedRed: 0.840, green: 0.650, blue: 0.430, alpha: 1)
+            : NSColor(calibratedRed: 0.540, green: 0.330, blue: 0.130, alpha: 1)
+        regexp = isDark
+            ? NSColor(calibratedRed: 1.000, green: 0.540, blue: 0.780, alpha: 1)
+            : NSColor(calibratedRed: 0.780, green: 0.180, blue: 0.470, alpha: 1)
+    }
 
     var baseAttributes: [NSAttributedString.Key: Any] {
         [
@@ -424,14 +513,17 @@ final class BifrostRuleCompletionController: NSObject, NSTableViewDataSource, NS
         )
         panel.level = .floating
         panel.hasShadow = true
-        panel.backgroundColor = .white
+        panel.backgroundColor = BifrostRuleEditorTheme().completionBackground
 
         let scrollView = NSScrollView(frame: panel.contentView?.bounds ?? .zero)
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
+        scrollView.drawsBackground = true
+        scrollView.backgroundColor = BifrostRuleEditorTheme().completionBackground
         let table = NSTableView()
         table.headerView = nil
         table.rowHeight = 34
+        table.backgroundColor = BifrostRuleEditorTheme().completionBackground
         table.delegate = self
         table.dataSource = self
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("completion"))
@@ -504,7 +596,7 @@ final class BifrostLineNumberRulerView: NSRulerView {
               let textContainer = textView.textContainer else {
             return
         }
-        NSColor(calibratedWhite: 0.98, alpha: 1).setFill()
+        BifrostRuleEditorTheme(appearance: effectiveAppearance).rulerBackground.setFill()
         rect.fill()
 
         let visible = textView.visibleRect

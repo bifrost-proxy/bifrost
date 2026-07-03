@@ -6,11 +6,19 @@ struct RulesView: View {
     @EnvironmentObject private var appModel: AppModel
     @State private var searchText = ""
     @State private var createSheetVisible = false
-    @State private var renameSheetVisible = false
     @State private var deleteAlertVisible = false
     @State private var copyFeedback = ""
     @State private var autoSaveTask: Task<Void, Never>?
     @State private var autoSaveState = RuleAutoSaveState.saved
+    @State private var inlineRenameRuleName: String?
+    @State private var inlineRenameDraft = ""
+    @State private var isCommittingInlineRename = false
+    @State private var ruleListWidth: CGFloat = 300
+    @State private var ruleListResizeStartWidth: CGFloat?
+    @FocusState private var inlineRenameFocused: Bool
+
+    private let ruleListMinWidth: CGFloat = 220
+    private let ruleListMaxWidth: CGFloat = 300
 
     private var filteredRules: [RuleSummary] {
         let keyword = searchText.trimmingCharacters(in: .whitespacesAndNewlines).localizedLowercase
@@ -36,8 +44,16 @@ struct RulesView: View {
         appModel.isDefaultRule(appModel.selectedRuleDetail?.name ?? appModel.selectedRuleName)
     }
 
+    private var clampedRuleListWidth: CGFloat {
+        clampRuleListWidth(ruleListWidth)
+    }
+
+    private func clampRuleListWidth(_ width: CGFloat) -> CGFloat {
+        min(max(width, ruleListMinWidth), ruleListMaxWidth)
+    }
+
     var body: some View {
-        NativePageScaffold(title: "规则") {
+        NativePageScaffold(title: "规则", contentFillsAvailableHeight: true) {
             Text("\(appModel.rules.filter(\.enabled).count)/\(appModel.rules.count) enabled")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(.secondary)
@@ -53,17 +69,39 @@ struct RulesView: View {
             .buttonStyle(.borderless)
             .font(.system(size: 13, weight: .medium))
         } content: {
-            HStack(alignment: .top, spacing: 18) {
+            HStack(alignment: .top, spacing: 10) {
                 NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     listPane
                 }
-                .frame(width: 320)
+                .frame(width: clampedRuleListWidth)
+                .frame(maxHeight: .infinity)
+
+                RuleListResizeHandle()
+                    .frame(width: 10)
+                    .frame(maxHeight: .infinity)
+                    .gesture(
+                        DragGesture(minimumDistance: 0)
+                            .onChanged { value in
+                                let startWidth = ruleListResizeStartWidth ?? clampedRuleListWidth
+                                if ruleListResizeStartWidth == nil {
+                                    ruleListResizeStartWidth = clampedRuleListWidth
+                                }
+                                ruleListWidth = clampRuleListWidth(startWidth + value.translation.width)
+                            }
+                            .onEnded { _ in
+                                ruleListWidth = clampedRuleListWidth
+                                ruleListResizeStartWidth = nil
+                            }
+                    )
+                    .help("Drag to resize rule list")
 
                 NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     detailPane
                 }
-                .frame(maxWidth: .infinity, minHeight: 600)
+                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .sheet(isPresented: $createSheetVisible) {
             NameEntrySheet(
@@ -73,16 +111,6 @@ struct RulesView: View {
                 confirmTitle: "Create"
             ) { name in
                 Task { await appModel.createRule(name: name) }
-            }
-        }
-        .sheet(isPresented: $renameSheetVisible) {
-            NameEntrySheet(
-                title: "Rename Rule",
-                prompt: "Rule name",
-                initialValue: appModel.selectedRuleName ?? "",
-                confirmTitle: "Rename"
-            ) { name in
-                Task { await appModel.renameSelectedRule(to: name) }
             }
         }
         .alert("Delete Rule", isPresented: $deleteAlertVisible) {
@@ -96,6 +124,12 @@ struct RulesView: View {
         .onChange(of: appModel.selectedRuleName) { _ in
             autoSaveTask?.cancel()
             autoSaveState = .saved
+            cancelInlineRename()
+        }
+        .onChange(of: inlineRenameFocused) { focused in
+            if !focused, inlineRenameRuleName != nil {
+                commitInlineRename()
+            }
         }
         .onDisappear {
             autoSaveTask?.cancel()
@@ -152,13 +186,9 @@ struct RulesView: View {
         VStack(spacing: 0) {
             detailHeader
             if appModel.selectedRuleDetail != nil {
-                BifrostRuleEditorView(
+                CodeEditorView(
                     text: $appModel.ruleDraftContent,
-                    context: appModel.ruleEditorContext,
                     isReadOnly: appModel.isSavingRule,
-                    onNavigate: { target in
-                        appModel.navigateFromRuleEditor(target)
-                    },
                     onSave: {
                         saveDraftImmediately()
                     },
@@ -166,11 +196,13 @@ struct RulesView: View {
                         scheduleAutoSave(text)
                     }
                 )
-                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 RulesEmptyStateView(title: "Select a rule to edit")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var listHeader: some View {
@@ -193,8 +225,7 @@ struct RulesView: View {
         HStack(spacing: 10) {
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text(appModel.selectedRuleDetail?.name ?? "Rule Detail")
-                        .font(.system(size: 14, weight: .semibold))
+                    inlineRuleTitle
                     if hasUnsavedChanges {
                         Circle()
                             .fill(Color.orange)
@@ -234,7 +265,7 @@ struct RulesView: View {
             .disabled(appModel.selectedRuleDetail == nil)
 
             Menu {
-                Button("Rename") { renameSheetVisible = true }
+                Button("Rename") { beginInlineRename() }
                     .disabled(selectedRuleIsProtected)
                 Button("Delete", role: .destructive) { deleteAlertVisible = true }
                     .disabled(selectedRuleIsProtected)
@@ -248,12 +279,83 @@ struct RulesView: View {
         .padding(.vertical, 12)
     }
 
+    @ViewBuilder
+    private var inlineRuleTitle: some View {
+        if inlineRenameRuleName != nil {
+            TextField("Rule name", text: $inlineRenameDraft)
+                .textFieldStyle(.plain)
+                .font(.system(size: 14, weight: .semibold))
+                .focused($inlineRenameFocused)
+                .disabled(isCommittingInlineRename)
+                .frame(minWidth: 180, idealWidth: 280, maxWidth: 420, alignment: .leading)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(AppSurface.cardBorder)
+                )
+                .onSubmit {
+                    commitInlineRename()
+                }
+                .onExitCommand {
+                    cancelInlineRename()
+                }
+        } else {
+            Text(appModel.selectedRuleDetail?.name ?? "Rule Detail")
+                .font(.system(size: 14, weight: .semibold))
+                .lineLimit(1)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) {
+                    beginInlineRename()
+                }
+                .help(selectedRuleIsProtected ? "Default rule cannot be renamed" : "Double-click to rename")
+        }
+    }
+
     private var detailSubtitle: String {
         guard let detail = appModel.selectedRuleDetail else {
             return "Loaded from Admin API"
         }
         let state = detail.enabled ? "Enabled" : "Disabled"
         return "\(state) · \(detail.updatedAt ?? "updated time unavailable")"
+    }
+
+    private func beginInlineRename() {
+        guard let name = appModel.selectedRuleDetail?.name,
+              !appModel.isDefaultRule(name),
+              !appModel.isSavingRule else {
+            return
+        }
+        inlineRenameRuleName = name
+        inlineRenameDraft = name
+        DispatchQueue.main.async {
+            inlineRenameFocused = true
+        }
+    }
+
+    private func cancelInlineRename() {
+        inlineRenameRuleName = nil
+        inlineRenameDraft = ""
+        isCommittingInlineRename = false
+        inlineRenameFocused = false
+    }
+
+    private func commitInlineRename() {
+        guard let originalName = inlineRenameRuleName,
+              !isCommittingInlineRename else {
+            return
+        }
+        let trimmed = inlineRenameDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != originalName else {
+            cancelInlineRename()
+            return
+        }
+        isCommittingInlineRename = true
+        Task { @MainActor in
+            await appModel.renameSelectedRule(to: trimmed)
+            cancelInlineRename()
+        }
     }
 
     private func copyToPasteboard(_ value: String) {
@@ -405,6 +507,34 @@ private enum RuleAutoSaveState {
     case pending
     case saving
     case failed
+}
+
+private struct RuleListResizeHandle: View {
+    @State private var isHovering = false
+
+    var body: some View {
+        Rectangle()
+            .fill(Color.clear)
+            .overlay {
+                Capsule()
+                    .fill(isHovering ? Color.accentColor.opacity(0.42) : AppSurface.cardBorder.opacity(0.9))
+                    .frame(width: isHovering ? 3 : 1, height: 72)
+            }
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                isHovering = hovering
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                if isHovering {
+                    NSCursor.pop()
+                }
+            }
+    }
 }
 
 private struct RulesEmptyStateView: View {

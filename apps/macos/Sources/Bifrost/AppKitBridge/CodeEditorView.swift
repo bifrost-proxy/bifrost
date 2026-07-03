@@ -3,13 +3,16 @@ import SwiftUI
 
 struct CodeEditorView: NSViewRepresentable {
     @Binding var text: String
+    var isReadOnly = false
+    var onSave: (() -> Void)?
+    var onTextChanged: ((String) -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(text: $text)
+        Coordinator(self)
     }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let textView = NSTextView()
+        let textView = CodeEditorTextView()
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
@@ -23,8 +26,10 @@ struct CodeEditorView: NSViewRepresentable {
         textView.textContainer?.widthTracksTextView = false
         textView.string = text
         textView.delegate = context.coordinator
+        textView.isEditable = !isReadOnly
+        textView.onSave = onSave
         textView.drawsBackground = true
-        textView.backgroundColor = .white
+        applyEditorTheme(to: textView)
 
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -38,21 +43,47 @@ struct CodeEditorView: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSScrollView, context: Context) {
         guard let textView = nsView.documentView as? NSTextView else { return }
+        context.coordinator.parent = self
         if textView.string != text {
             textView.string = text
         }
+        textView.isEditable = !isReadOnly
+        if let codeTextView = textView as? CodeEditorTextView {
+            codeTextView.onSave = onSave
+        }
+        applyEditorTheme(to: textView)
+    }
+
+    private func applyEditorTheme(to textView: NSTextView) {
+        textView.backgroundColor = .textBackgroundColor
+        textView.textColor = .textColor
+        textView.insertionPointColor = .textColor
     }
 
     final class Coordinator: NSObject, NSTextViewDelegate {
-        @Binding var text: String
+        var parent: CodeEditorView
 
-        init(text: Binding<String>) {
-            _text = text
+        init(_ parent: CodeEditorView) {
+            self.parent = parent
         }
 
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            text = textView.string
+            parent.text = textView.string
+            parent.onTextChanged?(textView.string)
         }
+    }
+}
+
+final class CodeEditorTextView: NSTextView {
+    var onSave: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        if event.modifierFlags.intersection(.deviceIndependentFlagsMask).contains(.command),
+           event.charactersIgnoringModifiers?.lowercased() == "s" {
+            onSave?()
+            return
+        }
+        super.keyDown(with: event)
     }
 }

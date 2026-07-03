@@ -61,6 +61,20 @@ public struct SystemOverview: Decodable, Equatable, Sendable {
     public var system: System?
     public var rules: RulesSummary?
     public var traffic: TrafficSummary?
+
+    public init(
+        metrics: Metrics? = nil,
+        server: Server? = nil,
+        system: System? = nil,
+        rules: RulesSummary? = nil,
+        traffic: TrafficSummary? = nil
+    ) {
+        self.metrics = metrics
+        self.server = server
+        self.system = system
+        self.rules = rules
+        self.traffic = traffic
+    }
 }
 
 public struct VersionCheckResponse: Decodable, Equatable, Sendable {
@@ -302,6 +316,10 @@ public struct ValuesPushData: Decodable, Equatable, Sendable {
     public var total: Int
 }
 
+public struct MetricsPushData: Decodable, Equatable, Sendable {
+    public var metrics: SystemOverview.Metrics
+}
+
 public struct SettingsUpdateData: Decodable, Equatable, Sendable {
     public var scope: String
     public var data: Data
@@ -333,6 +351,8 @@ public enum PushMessage: Decodable, Equatable, Sendable {
     case connected(clientId: Int)
     case trafficDelta(TrafficDeltaData)
     case trafficDeleted(TrafficDeletedData)
+    case overviewUpdate(SystemOverview)
+    case metricsUpdate(MetricsPushData)
     case valuesUpdate(ValuesPushData)
     case settingsUpdate(SettingsUpdateData)
     case breakpointSettingsUpdated(BreakpointSettingsPushData)
@@ -363,6 +383,10 @@ public enum PushMessage: Decodable, Equatable, Sendable {
             self = .trafficDelta(try container.decode(TrafficDeltaData.self, forKey: .data))
         case "traffic_deleted":
             self = .trafficDeleted(try container.decode(TrafficDeletedData.self, forKey: .data))
+        case "overview_update":
+            self = .overviewUpdate(try container.decode(SystemOverview.self, forKey: .data))
+        case "metrics_update":
+            self = .metricsUpdate(try container.decode(MetricsPushData.self, forKey: .data))
         case "values_update":
             self = .valuesUpdate(try container.decode(ValuesPushData.self, forKey: .data))
         case "settings_update":

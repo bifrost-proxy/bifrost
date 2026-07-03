@@ -6,9 +6,11 @@ public struct PushSubscription: Equatable, Sendable {
     public var pendingIds: [String]
     public var needTraffic: Bool
     public var needOverview: Bool
+    public var needMetrics: Bool
     public var needValues: Bool
     public var needScripts: Bool
     public var settingsScopes: [String]
+    public var metricsIntervalMs: Int?
 
     public init(
         lastTrafficId: String? = nil,
@@ -16,6 +18,7 @@ public struct PushSubscription: Equatable, Sendable {
         pendingIds: [String] = [],
         needTraffic: Bool = true,
         needOverview: Bool = true,
+        needMetrics: Bool = true,
         needValues: Bool = true,
         needScripts: Bool = true,
         settingsScopes: [String] = [
@@ -23,16 +26,19 @@ public struct PushSubscription: Equatable, Sendable {
             "tls_config",
             "proxy_address",
             "notifications",
-        ]
+        ],
+        metricsIntervalMs: Int? = nil
     ) {
         self.lastTrafficId = lastTrafficId
         self.lastSequence = lastSequence
         self.pendingIds = pendingIds
         self.needTraffic = needTraffic
         self.needOverview = needOverview
+        self.needMetrics = needMetrics
         self.needValues = needValues
         self.needScripts = needScripts
         self.settingsScopes = settingsScopes
+        self.metricsIntervalMs = metricsIntervalMs
     }
 }
 
@@ -148,6 +154,9 @@ public actor PushClient {
         if subscription.needOverview {
             items.append(URLQueryItem(name: "need_overview", value: "true"))
         }
+        if subscription.needMetrics {
+            items.append(URLQueryItem(name: "need_metrics", value: "true"))
+        }
         if subscription.needValues {
             items.append(URLQueryItem(name: "need_values", value: "true"))
         }
@@ -157,6 +166,9 @@ public actor PushClient {
         if !subscription.settingsScopes.isEmpty {
             items.append(URLQueryItem(name: "settings_scopes", value: subscription.settingsScopes.joined(separator: ",")))
         }
+        if let metricsIntervalMs = subscription.metricsIntervalMs {
+            items.append(URLQueryItem(name: "metrics_interval_ms", value: "\(metricsIntervalMs)"))
+        }
         return items
     }
 
@@ -164,6 +176,7 @@ public actor PushClient {
         var payload: [String: Any] = [
             "need_traffic": subscription.needTraffic,
             "need_overview": subscription.needOverview,
+            "need_metrics": subscription.needMetrics,
             "need_values": subscription.needValues,
             "need_scripts": subscription.needScripts,
         ]
@@ -178,6 +191,9 @@ public actor PushClient {
         }
         if !subscription.settingsScopes.isEmpty {
             payload["settings_scopes"] = subscription.settingsScopes
+        }
+        if let metricsIntervalMs = subscription.metricsIntervalMs {
+            payload["metrics_interval_ms"] = metricsIntervalMs
         }
         return payload
     }
