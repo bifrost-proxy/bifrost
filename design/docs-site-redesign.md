@@ -84,7 +84,8 @@
 ### 重定向与 404
 
 - `site/scripts/write-redirects.mjs` 为旧路径写入静态 redirect HTML，例如 `reference/getting-started/cli-quick-start/index.html -> /bifrost/getting-started/cli-quick-start`。
-- VitePress 生成 `404.html`，根站 `https://bifrost-proxy.github.io/` 仍可通过 GitHub Pages 仓库配置指向 `/bifrost/` 或依靠站点首页入口。
+- VitePress 生成 `404.html`。公开根站 `https://bifrost-proxy.github.io/` 必须直接使用本仓库 `site/` 构建出的同一套首页与文档产物，不再维护独立跳转壳或独立设计。
+- 根站部署流程：在本仓库执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，然后把 `site/dist/` 同步到 `bifrost-proxy/bifrost-proxy.github.io` 仓库并推送 `main` 触发 GitHub Pages。部署仓库只承载产物，不能手写另一套首页、语言切换、导航、SEO 或文档入口。
 
 ## 外部调研结论
 

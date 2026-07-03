@@ -18,6 +18,26 @@
 
 ## 测试用例列表
 
+### TC-DSR-00 主站部署边界与同步流程
+
+操作步骤：
+
+1. 执行 `rg -n "主站与文档站部署边界|bifrost-proxy.github.io|SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/|rsync -a --delete" AGENTS.md design/docs-site-redesign.md`。
+2. 检查 `AGENTS.md` 是否明确写出：`site/` 是唯一源码来源，`bifrost-proxy/bifrost-proxy.github.io` 只承载 GitHub Pages 发布产物。
+3. 检查 `AGENTS.md` 是否明确禁止在 `bifrost-proxy.github.io` 仓库手写独立首页、独立语言切换、独立导航、独立 SEO 文案或独立文档入口。
+4. 检查 `AGENTS.md` 是否给出根站构建命令：`SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
+5. 检查 `AGENTS.md` 是否给出产物同步方式：从本仓库 `site/dist/` 同步到 `bifrost-proxy.github.io` checkout，并保留 `.git/`、`.github/`、`README.md`。
+6. 检查 `AGENTS.md` 是否要求推送部署仓库后跟进 `Pages` 与 `pages-build-deployment` runs，并线上验证 `https://bifrost-proxy.github.io/`。
+
+预期结果：
+
+- 后续涉及主站或文档站更新时，Agent 能从开发手册直接判断：先改本仓库源站，再构建并同步产物到 `bifrost-proxy.github.io`，不能在部署仓库维护第二套页面。
+- 手册包含具体命令、部署仓库、入口 URL、验证路径和 CI/Pages 看护要求。
+
+执行结果：
+
+- 已执行，通过。
+
 ### TC-DSR-01 用户目标与技术方案一致
 
 操作步骤：
