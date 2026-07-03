@@ -2320,7 +2320,10 @@ async fn handle_intercepted_request_with_protocol(
     let has_req_scripts = !resolved_rules.req_scripts.is_empty();
     let has_res_scripts = !resolved_rules.res_scripts.is_empty();
     let has_decode_scripts = !resolved_rules.decode_scripts.is_empty();
-    let needs_req_body_read = !has_req_body_override && (needs_req_processing || has_req_scripts);
+    let needs_req_body_read = !has_req_body_override
+        && (needs_req_processing
+            || has_req_scripts
+            || (has_res_scripts && resolved_rules.status_code.is_some()));
 
     let mut skip_req_scripts = false;
     let mut streaming_body: Option<BoxBody> = None;
@@ -2774,6 +2777,7 @@ async fn handle_intercepted_request_with_protocol(
                     &original_uri,
                     &method_str,
                     &req_script_headers,
+                    Some(String::from_utf8_lossy(&body_bytes).to_string()),
                     &mut res_script_status,
                     &mut res_script_status_text,
                     &mut res_script_headers,
@@ -4564,6 +4568,7 @@ async fn handle_intercepted_request_with_protocol(
             &original_uri,
             &method_str,
             &req_script_headers,
+            None,
             &mut res_script_status,
             &mut res_script_status_text,
             &mut res_script_headers,

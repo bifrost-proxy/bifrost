@@ -244,6 +244,7 @@ pub(in crate::proxy::http) async fn execute_response_scripts(
     request_url: &str,
     request_method: &str,
     request_headers: &HashMap<String, String>,
+    request_body: Option<String>,
     status: &mut u16,
     status_text: &mut String,
     headers: &mut HashMap<String, String>,
@@ -286,7 +287,7 @@ pub(in crate::proxy::http) async fn execute_response_scripts(
             client_ip: ctx.client_ip.clone(),
             client_app: ctx.client_app.clone(),
             headers: request_headers.clone(),
-            body: None,
+            body: request_body,
         },
     };
 
