@@ -46,12 +46,12 @@ struct RulesView: View {
             .font(.system(size: 13, weight: .medium))
         } content: {
             HStack(alignment: .top, spacing: 18) {
-                NativePanel(scaleOnHover: 1.002) {
+                NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     listPane
                 }
                 .frame(width: 320)
 
-                NativePanel(scaleOnHover: 1.002) {
+                NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     detailPane
                 }
                 .frame(maxWidth: .infinity, minHeight: 600)
@@ -84,11 +84,6 @@ struct RulesView: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("Delete \"\(appModel.selectedRuleName ?? "")\"? This cannot be undone.")
-        }
-        .task(id: appModel.selectedRuleName) {
-            if let name = appModel.selectedRuleName {
-                await appModel.selectRule(name)
-            }
         }
     }
 

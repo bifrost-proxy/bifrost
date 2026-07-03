@@ -200,7 +200,7 @@ struct NetworkWebView: View {
                     HStack(spacing: 12) {
                         CompactFact(title: "当前记录", value: "\(appModel.overview?.traffic?.recorded ?? appModel.trafficRecords.count)")
                         CompactFact(title: "活动连接", value: "\(appModel.overview?.metrics?.activeConnections ?? 0)")
-                        CompactFact(title: "规则命中", value: "\(appModel.trafficRecords.filter(\.hasRuleHit).count)")
+                        CompactFact(title: "规则命中", value: "\(appModel.activityRuleHitCount)")
                     }
                 }
             }
