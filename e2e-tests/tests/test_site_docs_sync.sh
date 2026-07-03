@@ -55,8 +55,10 @@ pnpm --dir "$SITE_DIR" run docs:verify
 
 zh_count=$(find "$ROOT_DIR/docs" -type f -name '*.md' | wc -l | tr -d ' ')
 en_count=$(find "$ROOT_DIR/docs-en" -type f -name '*.md' | wc -l | tr -d ' ')
+generated_zh_count=$(find "$SITE_DIR/src/content/docs" -path "$SITE_DIR/src/content/docs/en" -prune -o -path "$SITE_DIR/src/content/docs/docs/index.md" -prune -o -type f -name '*.md' -print | wc -l | tr -d ' ')
 generated_en_count=$(find "$SITE_DIR/src/content/docs/en" -type f -name '*.md' | wc -l | tr -d ' ')
-echo "Source docs: zh=${zh_count}, en=${en_count}, generated_en=${generated_en_count}"
+echo "Source docs: zh=${zh_count}, generated_zh=${generated_zh_count}, en=${en_count}, generated_en=${generated_en_count}"
+test "$zh_count" = "$generated_zh_count"
 test "$en_count" = "$generated_en_count"
 
 node --input-type=module - "$ROOT_DIR" <<'NODE'
@@ -118,6 +120,7 @@ grep -q 'bifrost install-skill' "$SITE_DIR/dist/index.html"
 grep -q 'bifrost start -d' "$SITE_DIR/dist/index.html"
 grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
 grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"
+grep -q 'data-lang="en"' "$SITE_DIR/dist/index.html"
 grep -q 'data-lang="zh"' "$SITE_DIR/dist/index.html"
 if grep -q 'bifrost start --no-system-proxy' "$SITE_DIR/dist/index.html"; then
   echo "Static homepage must not default first-run users to --no-system-proxy" >&2
