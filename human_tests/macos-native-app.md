@@ -1461,7 +1461,7 @@
 - 将 Native `.app` 窗口调整为约 `980x720` 后截图观察，左侧系统 source-list 仍在窗口内，右侧 Activity 卡片自适应换行，没有继续把左侧主菜单挤出屏幕。
 - 2026-07-04：按用户反馈将 source-list 默认宽度调到最小附近，执行源码合同扫描通过，确认 `.navigationSplitViewColumnWidth(min: 156, ideal: 156, max: 220)` 保留系统拖拽调整但默认更窄。
 
-### TC-MNA-49：回归 - Activity 底部展示生效规则解析信息
+### TC-MNA-49：回归 - Activity 在流量分布上方展示生效规则解析信息
 
 **操作步骤：**
 1. 执行 Swift 构建：
@@ -1476,7 +1476,15 @@
    ```bash
    ruby -e 'core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); client=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["ActiveRulesSummary", "ActiveRuleItem", "ActiveRuleVariableConflict", "fetchActiveRulesSummary", "@Published var activeRulesSummary", "selectedSidebarItem == .activity", "ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)", "生效规则解析", "variableConflicts", "mergedRules"]; text=[core,client,app,dashboard].join("\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing active rules summary markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native activity active rules summary contract ok"'
    ```
-4. 构建并打开 Native `.app`，停留在 `活动` 页面底部查看规则解析区：
+4. 执行源码布局顺序检查，确认规则解析区在流量分布上方：
+   ```bash
+   ruby -e 'dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); active=dashboard.index("ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)") or abort("missing active rules card"); traffic=dashboard.index("Text(\\"流量分布\\")") or abort("missing traffic distribution card"); abort("active rules summary must be above traffic distribution") unless active < traffic; puts "macOS native activity active rules order ok"'
+   ```
+5. 执行源码显示完整性检查，确认 Merged Rules 不再固定 10 行截断：
+   ```bash
+   ruby -e 'dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); start=dashboard.index("private func mergedRules") or abort("missing mergedRules"); stop=dashboard.index("private func localRules", start) or abort("missing localRules boundary"); section=dashboard[start...stop]; abort("merged rules still has fixed 10-line clipping") if section.include?(".lineLimit(10)"); abort("merged rules missing vertical fixedSize") unless section.include?(".fixedSize(horizontal: false, vertical: true)"); puts "macOS native activity merged rules full content contract ok"'
+   ```
+6. 构建并打开 Native `.app`，停留在 `活动` 页面查看指标卡、规则解析区和流量分布：
    ```bash
    scripts/build-macos-native.sh --skip-sidecar --test
    pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
@@ -1487,14 +1495,17 @@
 - 源码合同扫描输出 `macOS native activity active rules summary contract ok`。
 - `BifrostClient` 通过 `/rules/active-summary` 获取 `total`、`rules`、`variable_conflicts` 和 `merged_content`。
 - `Activity` 页面初次加载和停留在 Activity 时刷新都会更新 `activeRulesSummary`。
-- Activity 底部在流量分布下面展示 `生效规则解析` 卡片。
+- Activity 在顶部指标卡下方、流量分布上方展示 `生效规则解析` 卡片。
 - 卡片展示 active 规则数量、本机规则、Group 规则、每个规则解析后的 entry 数、变量冲突，以及合并后的规则内容预览。
+- Merged Rules 必须完整展示全部行，卡片高度随规则内容自然向下延伸；不能固定截断为 10 行或让底部内容被裁掉。
 - 没有生效规则时展示明确空态，不留大块空白。
 
 **实际结果（2026-07-04）：**
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行真实 Admin API 检查通过，返回 `total=2`、`rules` 包含 `Default` 与 `NextAgent双机协作a`，并包含 `merged_content`。
 - 执行源码合同扫描通过，输出 `macOS native activity active rules summary contract ok`。
+- 执行源码布局顺序检查通过，输出 `macOS native activity active rules order ok`。
+- 执行源码显示完整性检查通过，输出 `macOS native activity merged rules full content contract ok`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
 - 重新打开 Native `.app`。
 

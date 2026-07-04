@@ -15,6 +15,9 @@ struct ActivityView: View {
         NativePageScaffold(title: "活动") {
             activityMetricGrid
 
+            ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)
+                .equatable()
+
             NativeCard {
                 VStack(alignment: .leading, spacing: 14) {
                     HStack {
@@ -29,9 +32,6 @@ struct ActivityView: View {
                         .equatable()
                 }
             }
-
-            ActiveRulesSummaryCard(summary: appModel.activeRulesSummary)
-                .equatable()
         }
         .background(ActivityWidthReader(width: $contentWidth))
     }
@@ -312,7 +312,7 @@ private struct ActiveRulesSummaryCard: View, Equatable {
                 Text(content.trimmingCharacters(in: .whitespacesAndNewlines))
                     .font(.system(size: 11, design: .monospaced))
                     .foregroundStyle(.primary)
-                    .lineLimit(10)
+                    .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
