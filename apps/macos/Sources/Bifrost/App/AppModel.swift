@@ -35,13 +35,13 @@ final class AppModel: ObservableObject {
         static let maxNativeRecords = 240
         static let maxPendingIds = 500
         static let trafficDeltaFlushDelayNanoseconds: UInt64 = 500_000_000
-        static let metricsPublishInterval: TimeInterval = 5.0
+        static let metricsPublishInterval: TimeInterval = 1.0
         static let activityAppMetricsRefreshInterval: TimeInterval = 10.0
         static let fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0
         static let fallbackPollingIntervalNanoseconds: UInt64 = 8_000_000_000
         static let realtimeEventPublishInterval: TimeInterval = 30.0
         static let subscriptionDebounceNanoseconds: UInt64 = 200_000_000
-        static let realtimeMetricsIntervalMs = 5_000
+        static let realtimeMetricsIntervalMs = 1_000
     }
 
     @Published var sidecarState: SidecarState = .stopped
