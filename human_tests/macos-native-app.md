@@ -257,7 +257,7 @@
    ```
 
 **预期结果：**
-- release scope 输出包含基础入口 `活动,概览,规则,抓包`，并在同步服务已启用、已登录且已授权时附加 `小组管理` 条件入口。
+- release scope 输出包含基础入口 `活动,概览,规则,抓包`，并在同步服务已启用、已登录且已授权时附加 `小组` 条件入口。
 - SwiftPM 构建通过。
 - 主窗口 `MainWindowScene` 路由到 Activity、Overview、Rules、Network Web 入口，不再把 `SettingsView` 作为主导航内容，也不再暴露独立 Processes/进程 tab 或 Devices/设备 tab。
 - Overview 页面包含系统代理、TLS 解密、远程调用、同步和证书管理卡片。
@@ -353,7 +353,7 @@
    ```
 2. 执行源码入口扫描：
    ```bash
-   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case activity = \\"活动\\"","case overview = \\"概览\\"","case rules = \\"规则\\"","case network = \\"抓包\\"","case groups = \\"小组管理\\"","static func visibleItems(canShowGroups: Bool)"]; forbidden=["case processes","case devices","Replay","Values","Scripts","AI","DevTools","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); required=["case activity = \\"活动\\"","case overview = \\"概览\\"","case rules = \\"规则\\"","case network = \\"抓包\\"","case groups = \\"小组\\"","static func visibleItems(canShowGroups: Bool)"]; forbidden=["case processes","case devices","Replay","Values","Scripts","AI","DevTools","Notify"]; missing=required.reject{|x| text.include?(x)}; found=forbidden.select{|x| text.include?(x)}; abort("missing=#{missing.join(",")} forbidden=#{found.join(",")}") unless missing.empty? && found.empty?; puts "macOS native release navigation scope ok"'
    ```
 3. 执行完整 Native build smoke：
    ```bash
@@ -361,10 +361,10 @@
    ```
 
 **预期结果：**
-- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组`。
 - 源码入口扫描输出 `macOS native release navigation scope ok`。
 - Native build smoke 通过。
-- 未登录或同步服务未启用时，用户侧左侧主导航只能进入活动、概览、规则、抓包；同步服务已启用、已登录且已授权时才在抓包下面附加小组管理。进程、设备、Replay、Values、Scripts、AI、DevTools、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
+- 未登录或同步服务未启用时，用户侧左侧主导航只能进入活动、概览、规则、抓包；同步服务已启用、已登录且已授权时才在抓包下面附加小组。进程、设备、Replay、Values、Scripts、AI、DevTools、Notify 不得以占位页、API 状态页或半成品页面形式出现在导航上。
 - 长期 WebUI parity 仍在 `design/macos-native-webui-parity.md` 维护；后续页面必须达到真实交互完成后再开放入口。
 
 ### TC-MNA-15：Native 必须建立 WebUI 同源 `/api/push` WebSocket 并支持 Network 选中详情
@@ -473,10 +473,10 @@
    ```
 
 **预期结果：**
-- 两次 smoke 均输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- 两次 smoke 均输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组`。
 - Native app 的 `SidebarItem.releaseScopeItems` 只包含 `.activity`、`.overview`、`.rules`、`.network`。
 - Native app 的 `SidebarItem.allCases` 只允许比 `releaseScopeItems` 多出条件入口 `.groups`，由 `visibleItems(canShowGroups:)` 控制，不允许保留其他隐藏页面枚举 case。
-- 未登录或同步服务未启用时左侧主导航仅包含活动、概览、规则、抓包；登录且同步启用后包含活动、概览、规则、抓包、小组管理；切换后会自动刷新当前页需要的状态。
+- 未登录或同步服务未启用时左侧主导航仅包含活动、概览、规则、抓包；登录且同步启用后包含活动、概览、规则、抓包、小组；切换后会自动刷新当前页需要的状态。
 - Replay、Values、Scripts、AI、DevTools、Notify 没有主导航入口；Groups 只允许作为同步登录后的条件入口展示。后续恢复其他入口时必须先补齐真实交互和对应 human_tests。
 
 ### TC-MNA-19：Settings 使用系统设置式左侧导航并覆盖四个首版页面
@@ -1073,7 +1073,7 @@
 - Rules 页点击列表行只通过行 action 调用 `selectRule`，不存在 `.task(id: selectedRuleName)` 再次触发同一规则详情拉取。
 - 首次进入 Rules 页时，如果 AppModel 只选中了首条规则名但尚未加载详情，入口刷新流程会主动加载一次选中规则详情。
 - Rules 列表与详情两块大容器关闭 hover 缩放动画，保持白色卡片、描边和柔光，避免编辑器区域在 hover 时触发大面积重绘。
-- release scope 默认暴露 `活动,概览,规则,抓包`，并只允许在同步登录后附加 `小组管理` 条件入口；traffic table performance smoke 通过。
+- release scope 默认暴露 `活动,概览,规则,抓包`，并只允许在同步登录后附加 `小组` 条件入口；traffic table performance smoke 通过。
 
 ### TC-MNA-37：回归 - Rules 原生交互契约与自动保存
 
@@ -1520,41 +1520,42 @@
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
 - 重新打开 Native `.app`。
 
-### TC-MNA-50：回归 - 小组管理入口跟随同步登录状态条件展示
+### TC-MNA-50：回归 - 小组入口跟随同步登录状态条件展示
 
 **操作步骤：**
 1. 执行 release scope smoke，确认基础入口和条件入口均被显式校验：
    ```bash
    swift run --package-path apps/macos Bifrost --check-release-scope
    ```
-2. 执行源码合同扫描，确认 Native 左侧菜单按同步状态动态附加小组管理，并使用原生 Group 管理界面和 Admin API，而不是嵌入 Web UI；页面结构必须复用 Rules 风格的左右两栏，左侧列表与右侧详情独立滚动，新增/编辑在右侧 pane 原地切换：
+2. 执行源码合同扫描，确认 Native 左侧菜单按同步状态动态附加小组，并使用原生 Group 管理界面和 Admin API，而不是嵌入 Web UI；页面结构必须复用 Rules 风格的左右两栏，左侧列表与右侧详情独立滚动，新增/编辑在右侧 pane 原地切换：
    ```bash
-   ruby -e 'sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); models=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); required=["case groups = \"小组管理\"","static func visibleItems(canShowGroups: Bool)","SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)","syncStatus?.enabled == true","syncStatus?.hasSession == true","syncStatus?.authorized == true","case .groups:","GroupsView()","struct GroupsView","GroupsViewModel","contentFillsAvailableHeight: true","groupListWidth: CGFloat = 300","HStack(alignment: .top, spacing: 5)","groupListPane","groupDetailPane","NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false)","GroupDetailMode","GroupEditorPane","新建小组","编辑小组","fetchRuleGroups","fetchGroupRules","fetchGroupMembers","GroupMemberRow","scheduleSearch()","createRuleGroup","updateRuleGroup","updateRuleGroupSetting","deleteRuleGroup","在规则页管理","selectedSidebarItem = .rules","selectRuleScope(groupID:"]; forbidden=["GroupsWebView()","EmbeddedWebUIPage(url: appModel.webUIURL(path: \"groups\"))","复用 Web UI 的 Groups 工作台","GroupEditorSheet"]; text=[sidebar,app,main,dash,core,models].join("\n"); missing=required.reject{|needle| text.include?(needle)}; found=forbidden.select{|needle| text.include?(needle)}; abort("missing native groups markers: #{missing.join(", ")} forbidden=#{found.join(", ")}") unless missing.empty? && found.empty?; puts "macOS native conditional native groups contract ok"'
+   ruby -e 'sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); models=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); required=["case groups = \"小组\"","static func visibleItems(canShowGroups: Bool)","SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)","syncStatus?.enabled == true","syncStatus?.hasSession == true","syncStatus?.authorized == true","case .groups:","GroupsView()","struct GroupsView","GroupsViewModel","contentFillsAvailableHeight: true","groupListWidth: CGFloat = 300","HStack(alignment: .top, spacing: 5)","groupListPane","groupDetailPane","NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false)","GroupDetailMode","GroupEditorPane","新建小组","编辑小组","fetchRuleGroups","fetchGroupRules","fetchGroupMembers","GroupMemberRow","GroupUserSearchRow","scheduleSearch()","scheduleUserSearch(keyword:","searchUsers(keyword:","inviteGroupMember","updateGroupMemberLevel","removeGroupMember","GroupMemberMutationRequest","createRuleGroup","updateRuleGroup","updateRuleGroupSetting","deleteRuleGroup","新增成员","移除成员","在规则页管理","selectedSidebarItem = .rules","selectRuleScope(groupID:"]; forbidden=["GroupsWebView()","EmbeddedWebUIPage(url: appModel.webUIURL(path: \"groups\"))","复用 Web UI 的 Groups 工作台","GroupEditorSheet","GroupRuleSummaryRow"]; text=[sidebar,app,main,dash,core,models].join("\n"); missing=required.reject{|needle| text.include?(needle)}; found=forbidden.select{|needle| text.include?(needle)}; abort("missing native groups markers: #{missing.join(", ")} forbidden=#{found.join(", ")}") unless missing.empty? && found.empty?; puts "macOS native conditional native groups contract ok"'
    ```
 3. 构建并打开 Native `.app`，在未登录或同步服务关闭状态下观察左侧 source-list。
-4. 在 `概览` 页打开同步服务并完成登录授权后，观察左侧 source-list 在 `抓包` 下方出现 `小组管理`。
-5. 点击 `小组管理`，确认页面展示原生小组列表、权限标签、搜索、创建、编辑、删除、规则摘要、成员列表和“在规则页管理”入口。
+4. 在 `概览` 页打开同步服务并完成登录授权后，观察左侧 source-list 在 `抓包` 下方出现 `小组`。
+5. 点击 `小组`，确认页面展示原生小组列表、权限标签、搜索、创建、编辑、删除、成员列表和“在规则页管理”入口；右侧详情不展示“小组规则”的规则摘要列表。
 6. 点击左侧列表滚动条和右侧详情滚动条，确认两栏独立滚动；左侧列表宽度固定为 Rules 同款 300px，不被右侧详情挤压。
 7. 点击左侧列表顶部 `+`，确认右侧详情 pane 原地切换为 `新建小组` 表单，而不是弹窗或跳转 WebUI。
 8. 取消后点击可写小组详情里的 `编辑`，确认右侧详情 pane 原地切换为 `编辑小组` 表单，并回填名称、描述和可见性。
 
 **预期结果：**
-- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组`。
 - 源码合同扫描输出 `macOS native conditional native groups contract ok`。
-- 未登录、未授权或同步服务未启用时，左侧菜单不显示 `小组管理`。
-- 同步服务启用、已登录且已授权后，左侧菜单在 `抓包` 下方显示 `小组管理`。
-- 如果用户当前停留在 `小组管理` 时退出登录或关闭同步服务，Native 自动切回 `概览`，不留下不可用空页面。
-- `小组管理` 页面必须是 SwiftUI 原生实现，不允许 WebKit 嵌入 `/_bifrost/groups`。
-- Native 通过 `/group`、`/group/{id}`、`/group/{id}/members` 和 `/group-rules/{groupID}` 系列 Admin API 实现小组列表、创建、编辑、删除、成员列表和规则摘要。
-- 小组详情页展示 Owner/Master/Member/Public 权限标签，公开只读的小组不可修改；可写小组可从详情页跳转到 Rules 页面管理对应小组规则。
-- 小组管理页面布局必须和 Rules 页面一致：左侧固定宽度列表、右侧自适应详情，左右均为独立滚动区域；新建与编辑不得使用弹窗，必须在右侧 pane 原地切换为表单。
+- 未登录、未授权或同步服务未启用时，左侧菜单不显示 `小组`。
+- 同步服务启用、已登录且已授权后，左侧菜单在 `抓包` 下方显示 `小组`。
+- 如果用户当前停留在 `小组` 时退出登录或关闭同步服务，Native 自动切回 `概览`，不留下不可用空页面。
+- `小组` 页面必须是 SwiftUI 原生实现，不允许 WebKit 嵌入 `/_bifrost/groups`。
+- Native 通过 `/group`、`/group/{id}`、`/group/{id}/members`、`/user`、`/room` 和 `/group-rules/{groupID}` 系列 Admin API 实现小组列表、创建、编辑、删除、成员列表、成员新增、成员移除、角色修改和规则页跳转。
+- 小组详情页展示 Owner/Master/Member/Public 权限标签，公开只读的小组不可修改；Owner/Master 可在成员区新增成员、调整 Member/Master 类型、删除可管理成员；可写小组可从详情页跳转到 Rules 页面管理对应小组规则，详情页本身不展示规则摘要列表。
+- 小组页面布局必须和 Rules 页面一致：左侧固定宽度列表、右侧自适应详情，左右均为独立滚动区域；新建与编辑不得使用弹窗，必须在右侧 pane 原地切换为表单。
 
 **实际结果（2026-07-04）：**
 - 执行 `swift build --package-path apps/macos` 通过。
-- 执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
+- 执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组`。
 - 执行源码合同扫描通过，输出 `macOS native conditional groups navigation contract ok`。
 - 2026-07-04：将 `GroupsWebView` 替换为原生 `GroupsView`，并补齐公开小组的 setting 同步、删除小组的远端业务错误校验；执行 `swift build --package-path apps/macos` 通过；执行源码合同扫描通过，输出 `macOS native conditional native groups contract ok`。
-- 2026-07-04：将小组管理原生页面调整为 Rules 同款左右布局；执行 `swift build --package-path apps/macos` 通过；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；重启 `apps/macos/.build/Bifrost.app` 后用 Computer Use 验证小组管理存在左侧列表 scroll area 与右侧详情 scroll area，点击 `+` 右侧原地显示 `新建小组` 表单，点击 `编辑` 右侧原地显示 `编辑小组` 表单。
+- 2026-07-04：将小组原生页面调整为 Rules 同款左右布局；执行 `swift build --package-path apps/macos` 通过；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；重启 `apps/macos/.build/Bifrost.app` 后用 Computer Use 验证小组存在左侧列表 scroll area 与右侧详情 scroll area，点击 `+` 右侧原地显示 `新建小组` 表单，点击 `编辑` 右侧原地显示 `编辑小组` 表单。
+- 2026-07-04：将菜单和页面标题统一为 `小组`；移除详情页内的小组规则摘要列表；补齐成员搜索、新增、角色修改和移除的 Native API 与交互；执行 `swift build --package-path apps/macos` 通过。
 
 ### TC-MNA-51：回归 - Rules 顶部支持 My Rules 与小组规则搜索切换
 
@@ -1680,9 +1681,9 @@
 - 执行源码合同扫描通过，输出 `macOS native idle cpu contract ok`，确认轻量网速/请求数/连接数指标保持 `metrics_interval_ms=1000` 和 1 秒 UI 发布。
 - 执行 `target/release/bifrost start -d -y --skip-cert-check -p 9900 --host 0.0.0.0 --no-system-proxy` 启动 release sidecar，输出 daemon PID `9544`。
 - 执行 `pkill -x Bifrost && open -na apps/macos/.build/Bifrost.app --args --allow-multiple-instances` 后，确认 Native App PID `9837`，release sidecar PID `9544`。
-- 使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组管理 -> 活动`，所有页面完成切换，进程未崩溃。
+- 使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组 -> 活动`，所有页面完成切换，进程未崩溃。
 - 执行 40 秒连续采样，输出 `avg_app=4.53 avg_service=2.85 max_app=18.40 max_service=12.20 samples=20`，App 与 release sidecar 静默平均 CPU 均低于 8%；短峰值来自切页后的同步和 push 刷新，未持续超过门限。
-- 2026-07-04：按实时性要求将轻量 metrics 恢复为 1 秒刷新，保留应用聚合 10 秒和 fallback 30 秒低频刷新；用 `open -na apps/macos/.build/Bifrost.app` 启动后，使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组管理 -> 活动`，PID 保持 `58625` 未退出；执行 30 秒连续采样，输出 `avg_app=5.88 avg_service=3.81 max_app=24.60 max_service=31.80 samples=30`，App 与 release sidecar 平均 CPU 均低于 8%，短峰值未持续。
+- 2026-07-04：按实时性要求将轻量 metrics 恢复为 1 秒刷新，保留应用聚合 10 秒和 fallback 30 秒低频刷新；用 `open -na apps/macos/.build/Bifrost.app` 启动后，使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组 -> 活动`，PID 保持 `58625` 未退出；执行 30 秒连续采样，输出 `avg_app=5.88 avg_service=3.81 max_app=24.60 max_service=31.80 samples=30`，App 与 release sidecar 平均 CPU 均低于 8%，短峰值未持续。
 - 再次执行 `open -n apps/macos/.build/Bifrost.app` 后，`pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'` 仅返回一个进程，确认单实例防护生效。
 - 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，输出 `BifrostNativeCoreChecks passed`。

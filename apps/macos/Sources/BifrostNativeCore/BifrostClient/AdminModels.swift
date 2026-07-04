@@ -823,6 +823,68 @@ public struct GroupMemberListResponse: Equatable, Sendable {
     }
 }
 
+public struct GroupUser: Decodable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var userID: String
+    public var nickname: String
+    public var avatar: String
+    public var email: String
+    public var channel: Int?
+    public var createTime: String
+    public var updateTime: String
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case userID = "user_id"
+        case nickname
+        case avatar
+        case email
+        case channel
+        case createTime = "create_time"
+        case updateTime = "update_time"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        userID = try container.decodeIfPresent(String.self, forKey: .userID) ?? id
+        nickname = try container.decodeIfPresent(String.self, forKey: .nickname) ?? ""
+        avatar = try container.decodeIfPresent(String.self, forKey: .avatar) ?? ""
+        email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
+        channel = try container.decodeIfPresent(Int.self, forKey: .channel)
+        createTime = try container.decodeIfPresent(String.self, forKey: .createTime) ?? ""
+        updateTime = try container.decodeIfPresent(String.self, forKey: .updateTime) ?? ""
+    }
+}
+
+public struct UserListResponse: Equatable, Sendable {
+    public var list: [GroupUser]
+    public var total: Int
+
+    public init(list: [GroupUser], total: Int) {
+        self.list = list
+        self.total = total
+    }
+}
+
+public struct GroupMemberMutationRequest: Encodable, Equatable, Sendable {
+    public var groupID: String
+    public var userID: String
+    public var level: Int
+
+    public init(groupID: String, userID: String, level: Int) {
+        self.groupID = groupID
+        self.userID = userID
+        self.level = level
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case groupID = "group_id"
+        case userID = "user_id"
+        case level
+    }
+}
+
 public struct RuleGroupMutationRequest: Encodable, Equatable, Sendable {
     public var name: String?
     public var avatar: String?

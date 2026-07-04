@@ -172,6 +172,16 @@ func runAdminModelDecodingChecks() throws {
     let performanceConfig = try JSONDecoder().decode(PerformanceConfigResponse.self, from: performanceConfigJSON)
     try checkEqual(performanceConfig.traffic.maxRecords, 12_000, "performance traffic retention limit should decode")
     try checkEqual(performanceConfig.traffic.fileRetentionDays, 7, "performance retention days should decode")
+
+    let userListJSON = Data("""
+    {"code":0,"message":"ok","data":{"list":[{"id":"u1","user_id":"user-1","nickname":"Eden","create_time":"2026-07-04T00:00:00Z","update_time":"2026-07-04T00:00:00Z"}],"total":1}}
+    """.utf8)
+    let userEnvelope = try JSONDecoder().decode(RemoteEnvelope<RemoteListPayload<GroupUser>>.self, from: userListJSON)
+    guard let user = userEnvelope.data.list?.first else {
+        throw CheckFailure.failed("group user search list should decode")
+    }
+    try checkEqual(user.userID, "user-1", "group user user_id should decode")
+    try checkEqual(user.email, "", "missing group user email should default to empty string")
 }
 
 func runRuleLanguageChecks() throws {

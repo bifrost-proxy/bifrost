@@ -504,11 +504,15 @@ struct GroupsView: View {
     @State private var draftDescription = ""
     @State private var draftVisibility: RuleGroupVisibility = .private
     @State private var pendingDeleteGroup: RuleGroup?
+    @State private var pendingRemoveMember: GroupMember?
+    @State private var isAddingMember = false
+    @State private var memberSearchText = ""
+    @State private var newMemberLevel = 0
 
     private let groupListWidth: CGFloat = 300
 
     var body: some View {
-        NativePageScaffold(title: "小组管理", contentFillsAvailableHeight: true) {
+        NativePageScaffold(title: "小组", contentFillsAvailableHeight: true) {
             HStack(alignment: .top, spacing: 5) {
                 NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
                     groupListPane
@@ -544,6 +548,24 @@ struct GroupsView: View {
             }
         } message: {
             Text("删除后，小组规则和成员关系会从服务端移除。")
+        }
+        .alert(
+            "移除成员",
+            isPresented: Binding(
+                get: { pendingRemoveMember != nil },
+                set: { if !$0 { pendingRemoveMember = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) {
+                pendingRemoveMember = nil
+            }
+            Button("移除", role: .destructive) {
+                guard let member = pendingRemoveMember else { return }
+                pendingRemoveMember = nil
+                Task { await model.removeMember(groupID: member.groupID, userID: member.userID) }
+            }
+        } message: {
+            Text("成员会从这个小组中移除，无法继续管理或同步该小组的规则。")
         }
     }
 
@@ -631,6 +653,8 @@ struct GroupsView: View {
                         isSelected: model.selectedGroupID == group.id,
                         onSelect: {
                             detailMode = .detail
+                            isAddingMember = false
+                            clearMemberInvite()
                             Task { await model.select(groupID: group.id) }
                         }
                     )
@@ -708,7 +732,7 @@ struct GroupsView: View {
                             .foregroundStyle(group.visibility == .public ? .blue : .secondary)
                     }
                     Spacer(minLength: 12)
-                    if group.isWritable {
+                    if group.canManageMembers {
                         Button("编辑") {
                             openEditEditor(group)
                         }
@@ -728,11 +752,6 @@ struct GroupsView: View {
                     CompactFact(title: "规则数量", value: "\(model.selectedGroupRules?.rules.count ?? 0)")
                     CompactFact(title: "成员", value: "\(model.selectedGroupMembers?.total ?? 0)")
                     CompactFact(title: "权限", value: model.selectedGroupRules?.writable == true ? "可修改" : "只读")
-                }
-
-                HStack {
-                    Text("小组规则")
-                        .font(.system(size: 15, weight: .semibold))
                     Spacer()
                     Button {
                         appModel.selectedSidebarItem = .rules
@@ -741,25 +760,6 @@ struct GroupsView: View {
                         Label("在规则页管理", systemImage: "arrow.right")
                     }
                     .buttonStyle(.borderedProminent)
-                }
-
-                if model.isLoadingRules {
-                    ProgressView()
-                        .controlSize(.small)
-                } else if let rules = model.selectedGroupRules?.rules, !rules.isEmpty {
-                    VStack(alignment: .leading, spacing: 8) {
-                        ForEach(rules.prefix(12)) { rule in
-                            GroupRuleSummaryRow(rule: rule)
-                        }
-                        if rules.count > 12 {
-                            Text("还有 \(rules.count - 12) 条规则，可在规则页继续查看。")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                } else {
-                    EmptyNativeState(title: "这个小组还没有规则")
-                        .frame(minHeight: 220)
                 }
 
                 Divider()
@@ -776,6 +776,22 @@ struct GroupsView: View {
                             .background(.quaternary.opacity(0.7), in: Capsule())
                     }
                     Spacer()
+                    if group.canManageMembers {
+                        Button {
+                            isAddingMember.toggle()
+                            if !isAddingMember {
+                                clearMemberInvite()
+                            }
+                        } label: {
+                            Label(isAddingMember ? "收起" : "新增成员", systemImage: "person.badge.plus")
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(model.isSaving)
+                    }
+                }
+
+                if isAddingMember && group.canManageMembers {
+                    memberInvitePane(groupID: group.id)
                 }
 
                 if model.isLoadingMembers {
@@ -783,12 +799,25 @@ struct GroupsView: View {
                         .controlSize(.small)
                 } else if let members = model.selectedGroupMembers?.list, !members.isEmpty {
                     LazyVGrid(
-                        columns: [GridItem(.adaptive(minimum: 210), spacing: 8, alignment: .topLeading)],
+                        columns: [GridItem(.adaptive(minimum: 260), spacing: 8, alignment: .topLeading)],
                         alignment: .leading,
                         spacing: 8
                     ) {
                         ForEach(members.prefix(12)) { member in
-                            GroupMemberRow(member: member)
+                            GroupMemberRow(
+                                member: member,
+                                currentUserID: appModel.syncStatus?.user?.userID,
+                                currentUserLevel: group.level,
+                                isSaving: model.isSaving,
+                                onChangeLevel: { level in
+                                    Task {
+                                        await model.updateMemberLevel(groupID: group.id, userID: member.userID, level: level)
+                                    }
+                                },
+                                onRemove: {
+                                    pendingRemoveMember = member
+                                }
+                            )
                         }
                     }
                     if let total = model.selectedGroupMembers?.total, total > members.count {
@@ -807,6 +836,69 @@ struct GroupsView: View {
             EmptyNativeState(title: "选择一个小组")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+    }
+
+    private func memberInvitePane(groupID: String) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "magnifyingglass")
+                    .foregroundStyle(.secondary)
+                TextField("搜索用户邮箱、ID 或昵称", text: $memberSearchText)
+                    .textFieldStyle(.plain)
+                    .onChange(of: memberSearchText) { value in
+                        model.scheduleUserSearch(keyword: value)
+                    }
+                    .onSubmit {
+                        Task { await model.searchUsers(keyword: memberSearchText) }
+                    }
+                Picker("角色", selection: $newMemberLevel) {
+                    Text("Member").tag(0)
+                    Text("Master").tag(1)
+                }
+                .labelsHidden()
+                .frame(width: 110)
+            }
+            .font(.system(size: 12))
+            .padding(.horizontal, 10)
+            .frame(height: 34)
+            .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+
+            if model.isSearchingUsers {
+                ProgressView()
+                    .controlSize(.small)
+            } else if !memberSearchText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                if model.userSearchResults.isEmpty {
+                    Text("没有匹配用户")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                } else {
+                    VStack(alignment: .leading, spacing: 6) {
+                        ForEach(model.userSearchResults.prefix(8)) { user in
+                            GroupUserSearchRow(user: user, isSaving: model.isSaving) {
+                                Task {
+                                    await model.inviteMember(groupID: groupID, userID: user.userID, level: newMemberLevel)
+                                    if model.errorMessage == nil {
+                                        clearMemberInvite()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .padding(10)
+        .background(AppSurface.card.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(AppSurface.cardBorder)
+        )
+    }
+
+    private func clearMemberInvite() {
+        memberSearchText = ""
+        newMemberLevel = 0
+        model.clearUserSearch()
     }
 
     private func openCreateEditor() {
@@ -862,16 +954,19 @@ private final class GroupsViewModel: ObservableObject {
     @Published var selectedGroupID: String?
     @Published var selectedGroupRules: GroupRulesResponse?
     @Published var selectedGroupMembers: GroupMemberListResponse?
+    @Published var userSearchResults: [GroupUser] = []
     @Published var searchText = ""
     @Published var isLoading = false
     @Published var isLoadingRules = false
     @Published var isLoadingMembers = false
+    @Published var isSearchingUsers = false
     @Published var isSaving = false
     @Published var errorMessage: String?
 
     private var baseURL: URL?
     private var client: BifrostClient?
     private var searchTask: Task<Void, Never>?
+    private var userSearchTask: Task<Void, Never>?
 
     var visibleGroups: [RuleGroup] {
         groups.sorted {
@@ -943,6 +1038,50 @@ private final class GroupsViewModel: ObservableObject {
             }
             await self?.refresh()
         }
+    }
+
+    func scheduleUserSearch(keyword: String) {
+        userSearchTask?.cancel()
+        let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKeyword.isEmpty else {
+            userSearchResults = []
+            isSearchingUsers = false
+            return
+        }
+        userSearchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 350_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.searchUsers(keyword: trimmedKeyword)
+        }
+    }
+
+    func searchUsers(keyword: String) async {
+        guard let client else {
+            return
+        }
+        let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedKeyword.isEmpty else {
+            userSearchResults = []
+            return
+        }
+        isSearchingUsers = true
+        defer { isSearchingUsers = false }
+        do {
+            let response = try await client.searchUsers(keyword: trimmedKeyword)
+            userSearchResults = response.list
+            errorMessage = nil
+        } catch {
+            userSearchResults = []
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func clearUserSearch() {
+        userSearchTask?.cancel()
+        userSearchResults = []
+        isSearchingUsers = false
     }
 
     func select(groupID: String) async {
@@ -1024,6 +1163,51 @@ private final class GroupsViewModel: ObservableObject {
         }
     }
 
+    func inviteMember(groupID: String, userID: String, level: Int) async {
+        guard let client else {
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.inviteGroupMember(groupID: groupID, userID: userID, level: level)
+            await loadMembers(groupID: groupID)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateMemberLevel(groupID: String, userID: String, level: Int) async {
+        guard let client else {
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.updateGroupMemberLevel(groupID: groupID, userID: userID, level: level)
+            await loadMembers(groupID: groupID)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func removeMember(groupID: String, userID: String) async {
+        guard let client else {
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.removeGroupMember(groupID: groupID, userID: userID)
+            await loadMembers(groupID: groupID)
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
     private func loadGroupDetail(groupID: String) async {
         guard let client else {
             return
@@ -1042,6 +1226,21 @@ private final class GroupsViewModel: ObservableObject {
             errorMessage = nil
         } catch {
             selectedGroupRules = nil
+            selectedGroupMembers = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadMembers(groupID: String) async {
+        guard let client else {
+            return
+        }
+        isLoadingMembers = true
+        defer { isLoadingMembers = false }
+        do {
+            selectedGroupMembers = try await client.fetchGroupMembers(id: groupID, limit: 60)
+            errorMessage = nil
+        } catch {
             selectedGroupMembers = nil
             errorMessage = error.localizedDescription
         }
@@ -1085,35 +1284,13 @@ private struct GroupListRow: View {
     }
 }
 
-private struct GroupRuleSummaryRow: View {
-    let rule: GroupRuleInfo
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Circle()
-                .fill(rule.enabled ? Color.green : Color.gray.opacity(0.55))
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rule.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text("\(rule.ruleCount) entries")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
-            }
-            Spacer(minLength: 8)
-            Text(rule.enabled ? "Enabled" : "Disabled")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(rule.enabled ? .green : .secondary)
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
-    }
-}
-
 private struct GroupMemberRow: View {
     let member: GroupMember
+    let currentUserID: String?
+    let currentUserLevel: Int?
+    let isSaving: Bool
+    let onChangeLevel: (Int) -> Void
+    let onRemove: () -> Void
 
     var body: some View {
         HStack(spacing: 9) {
@@ -1131,16 +1308,55 @@ private struct GroupMemberRow: View {
                     .truncationMode(.middle)
             }
             Spacer(minLength: 8)
-            Text(member.permissionLabel)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundStyle(member.permissionColor)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 2)
-                .background(member.permissionColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+            if canManageThisMember {
+                Picker("角色", selection: levelBinding) {
+                    Text("Member").tag(0)
+                    Text("Master").tag(1)
+                }
+                .labelsHidden()
+                .frame(width: 94)
+                .disabled(isSaving)
+
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "trash")
+                }
+                .buttonStyle(.borderless)
+                .help("移除成员")
+                .disabled(isSaving)
+            } else {
+                Text(member.permissionLabel)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(member.permissionColor)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(member.permissionColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+            }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
         .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private var levelBinding: Binding<Int> {
+        Binding(
+            get: { member.level > 0 ? 1 : 0 },
+            set: { newValue in
+                guard newValue != member.level else {
+                    return
+                }
+                onChangeLevel(newValue)
+            }
+        )
+    }
+
+    private var canManageThisMember: Bool {
+        guard let currentUserLevel, currentUserLevel >= 1, member.userID != currentUserID else {
+            return false
+        }
+        if currentUserLevel == 2 {
+            return member.level < 2
+        }
+        return member.level == 0
     }
 
     private var displayName: String {
@@ -1151,6 +1367,50 @@ private struct GroupMemberRow: View {
             return member.email
         }
         return member.userID.isEmpty ? member.id : member.userID
+    }
+}
+
+private struct GroupUserSearchRow: View {
+    let user: GroupUser
+    let isSaving: Bool
+    let onInvite: () -> Void
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(.blue)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(user.email.isEmpty ? user.userID : user.email)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Button(action: onInvite) {
+                Label("添加", systemImage: "plus")
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.small)
+            .disabled(isSaving)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private var displayName: String {
+        if !user.nickname.isEmpty {
+            return user.nickname
+        }
+        if !user.email.isEmpty {
+            return user.email
+        }
+        return user.userID.isEmpty ? user.id : user.userID
     }
 }
 
@@ -1227,6 +1487,10 @@ private extension RuleGroup {
         default:
             return .secondary
         }
+    }
+
+    var canManageMembers: Bool {
+        (level ?? -1) >= 1
     }
 }
 
