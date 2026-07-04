@@ -1654,6 +1654,29 @@
 - 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，输出 `BifrostNativeCoreChecks passed`。
 
+### TC-MNA-54：回归 - CI/E2E pseudo-TTY 前台启动不弹 Native App 安装提示
+
+**操作步骤：**
+1. 执行前台 Ctrl-C shell E2E，用 `CI=1` 模拟 GitHub Actions 的 pseudo-TTY 环境：
+   ```bash
+   CI=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh
+   ```
+2. 执行相关单元测试：
+   ```bash
+   cargo test -p bifrost-cli native_app_install_prompt -- --nocapture
+   ```
+
+**预期结果：**
+- 前台启动不会输出 `Bifrost Native App is not installed in /Applications.` 或 `Install it now?` 交互提示。
+- shell E2E 能看到正常 startup ready 输出，并在 Ctrl-C 后直接退出，不需要额外回车。
+- `CI`、`GITHUB_ACTIONS`、`BIFROST_E2E_REPORT_DIR`、`BIFROST_E2E_SHARD_INDEX` 和 `BIFROST_E2E_SHARD_TOTAL` 均会禁用启动时 Native App 安装提示。
+- 显式 `BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT` 仍然保留。
+
+**实际结果（2026-07-04）：**
+- 执行 `cargo fmt --all -- --check` 通过。
+- 执行 `cargo test -p bifrost-cli native_app_install_prompt -- --nocapture` 通过，2 个相关用例全部通过。
+- 执行 `CI=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh` 通过，输出 `PASS: foreground Ctrl-C stops without an extra Enter`。
+
 ## 清理步骤
 
 ```bash

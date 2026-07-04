@@ -100,6 +100,7 @@ pub(crate) const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHIL
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
 const BIFROST_RUNTIME_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+const NATIVE_APP_DISABLE_INSTALL_PROMPT_ENV: &str = "BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT";
 
 fn create_bifrost_runtime() -> bifrost_core::Result<tokio::runtime::Runtime> {
     tokio::runtime::Builder::new_multi_thread()
@@ -114,6 +115,30 @@ fn env_flag_enabled(value: Option<std::ffi::OsString>) -> bool {
         .and_then(|value| value.into_string().ok())
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false)
+}
+
+fn env_name_present(name: &str) -> bool {
+    std::env::var_os(name).is_some()
+}
+
+fn native_app_install_prompt_disabled_by_env<F>(has_env: F) -> bool
+where
+    F: Fn(&str) -> bool,
+{
+    [
+        NATIVE_APP_DISABLE_INSTALL_PROMPT_ENV,
+        "CI",
+        "GITHUB_ACTIONS",
+        "BIFROST_E2E_REPORT_DIR",
+        "BIFROST_E2E_SHARD_INDEX",
+        "BIFROST_E2E_SHARD_TOTAL",
+    ]
+    .into_iter()
+    .any(has_env)
+}
+
+fn native_app_install_prompt_disabled() -> bool {
+    native_app_install_prompt_disabled_by_env(env_name_present)
 }
 
 pub fn is_detached_daemon_child_process() -> bool {
@@ -393,7 +418,7 @@ fn prompt_yes_no() -> bifrost_core::Result<bool> {
 fn maybe_prompt_install_native_app() -> bifrost_core::Result<()> {
     #[cfg(target_os = "macos")]
     {
-        if std::env::var_os("BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT").is_some()
+        if native_app_install_prompt_disabled()
             || !io::stdin().is_terminal()
             || !io::stdout().is_terminal()
         {
@@ -4700,6 +4725,28 @@ mod tests {
         assert!(!env_flag_enabled(None));
         assert!(!env_flag_enabled(Some(std::ffi::OsString::from("0"))));
         assert!(!env_flag_enabled(Some(std::ffi::OsString::from("false"))));
+    }
+
+    #[test]
+    fn native_app_install_prompt_is_disabled_in_ci_and_e2e_envs() {
+        for name in [
+            NATIVE_APP_DISABLE_INSTALL_PROMPT_ENV,
+            "CI",
+            "GITHUB_ACTIONS",
+            "BIFROST_E2E_REPORT_DIR",
+            "BIFROST_E2E_SHARD_INDEX",
+            "BIFROST_E2E_SHARD_TOTAL",
+        ] {
+            assert!(
+                native_app_install_prompt_disabled_by_env(|candidate| candidate == name),
+                "{name} should disable the Native App install prompt"
+            );
+        }
+    }
+
+    #[test]
+    fn native_app_install_prompt_is_allowed_without_ci_or_e2e_envs() {
+        assert!(!native_app_install_prompt_disabled_by_env(|_| false));
     }
 
     #[test]
