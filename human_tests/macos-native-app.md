@@ -1782,6 +1782,7 @@
 - 通过 `scripts/build-macos-codeedit-rule-editor.sh` 在独立 `apps/macos/.build-codeedit` scratch path 构建实验依赖并生成 `Bifrost-CodeEdit.app`；默认 `apps/macos/.build` 构建随后仍可通过，确认实验依赖不污染兜底路径。
 - 使用真实默认 daemon `http://127.0.0.1:9900/_bifrost/api` 创建临时规则 `codex-codeedit-editor-e2e`，LaunchServices 启动 `BIFROST_NATIVE_RULE_EDITOR=codeedit` 的 `Bifrost-CodeEdit.app`，进入 `规则` 页面并选择临时规则。
 - 首次进入 Rules 时发现 CodeEditSourceEditor 在 `MinimapView.setTheme` 内对 `NSCalibratedWhiteColorSpace` 调用 `brightnessComponent` 崩溃；修复为传入 device RGB 主题色后复测，没有新增 Bifrost crash report。
+- 复查 crash report 后，将 `scripts/build-macos-codeedit-rule-editor.sh` 的上游补丁扩展到 CodeEditSourceEditor `MinimapView.setTheme` 和 `ReformattingGuideView`，确保依赖内部取 `brightnessComponent` 前也先转换到 device RGB，避免动态/系统色漏入时再次崩溃。
 - 真实粘贴 malformed 规则后，编辑区显示 CodeEdit 高亮 token，标题状态显示 `Save failed`，诊断条显示 `1 errors Line 2: Operation schemes use ://, for example host://127.0.0.1:3000.`；后端 API 内容保持原有效内容，证明非法规则未被保存污染。
 - 输入 `@` 后弹出 CodeEditSourceEditor 补全候选，包含 `@Default`、`@NextAgent双机协作a`、`@NextOncall双前端本地开发`、`@codex-codeedit-editor-e2e` 等真实规则引用候选；诊断条保持 `Syntax OK`。
 - 清理临时规则 `codex-codeedit-editor-e2e`，关闭实验 App；未发现默认 daemon 被重启或系统代理被改动。

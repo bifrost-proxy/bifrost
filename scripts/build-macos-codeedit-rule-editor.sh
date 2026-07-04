@@ -86,6 +86,24 @@ end
 RUBY
 }
 
+patch_codeedit_color_space() {
+  local source_dir="$CHECKOUTS_DIR/CodeEditSourceEditor/Sources/CodeEditSourceEditor"
+  [[ -d "$source_dir" ]] || return 0
+  chmod -R u+w "$source_dir/Minimap" "$source_dir/ReformattingGuide" 2>/dev/null || true
+  ruby - "$source_dir" <<'RUBY'
+dir = ARGV.fetch(0)
+{
+  "#{dir}/Minimap/MinimapView.swift" => "let isLightMode = (theme.background.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0.0) > 0.5",
+  "#{dir}/ReformattingGuide/ReformattingGuideView.swift" => "let isLightMode = (theme.background.usingColorSpace(.deviceRGB)?.brightnessComponent ?? 0.0) > 0.5"
+}.each do |path, replacement|
+  next unless File.file?(path)
+  text = File.read(path)
+  patched = text.gsub("let isLightMode = theme.background.brightnessComponent > 0.5", replacement)
+  File.write(path, patched) if patched != text
+end
+RUBY
+}
+
 create_dev_app_bundle() {
   local bin_dir
   bin_dir="$(swift build --package-path "$MACOS_DIR" --scratch-path "$CODEEDIT_SCRATCH_PATH" --skip-update --show-bin-path | tail -n 1)"
@@ -155,6 +173,7 @@ patch_swiftlint_plugin "$CHECKOUTS_DIR/CodeEditTextView/Package.swift"
 patch_swiftlint_plugin "$CHECKOUTS_DIR/CodeEditSourceEditor/Package.swift"
 patch_codeedit_symbols_resources
 patch_codeedit_previews
+patch_codeedit_color_space
 
 swift build --package-path "$MACOS_DIR" --scratch-path "$CODEEDIT_SCRATCH_PATH" --skip-update "$@"
 create_dev_app_bundle
