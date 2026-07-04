@@ -112,6 +112,81 @@ public actor BifrostClient {
         return RuleGroupListResponse(list: payload.list ?? [], total: payload.total ?? 0)
     }
 
+    public func fetchRuleGroup(id: String) async throws -> RuleGroup {
+        let data = try await request(.get, path: "/group/\(encodePathSegment(id))")
+        return try await decodeRemoteEnvelope(from: data)
+    }
+
+    public func createRuleGroup(name: String, description: String = "", visibility: RuleGroupVisibility = .private) async throws -> RuleGroup {
+        let body = try JSONEncoder().encode(
+            RuleGroupMutationRequest(name: name, description: description, visibility: visibility)
+        )
+        let data = try await request(.post, path: "/group", body: body)
+        let group: RuleGroup = try await decodeRemoteEnvelope(from: data)
+        if visibility == .public {
+            try await updateRuleGroupSetting(id: group.id, rulesEnabled: true, visibility: .public)
+        }
+        return group
+    }
+
+    public func updateRuleGroup(
+        id: String,
+        name: String? = nil,
+        description: String? = nil,
+        visibility: RuleGroupVisibility? = nil
+    ) async throws {
+        let body = try JSONEncoder().encode(
+            RuleGroupMutationRequest(name: name, description: description, visibility: visibility)
+        )
+        let data = try await request(.patch, path: "/group/\(encodePathSegment(id))", body: body)
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+        if let visibility {
+            try await updateRuleGroupSetting(id: id, visibility: visibility)
+        }
+    }
+
+    public func updateRuleGroupSetting(
+        id: String,
+        rulesEnabled: Bool? = nil,
+        visibility: RuleGroupVisibility? = nil
+    ) async throws {
+        let body = try JSONEncoder().encode(
+            RuleGroupSettingRequest(rulesEnabled: rulesEnabled, visibility: visibility)
+        )
+        let data = try await request(.patch, path: "/group/\(encodePathSegment(id))/setting", body: body)
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+    }
+
+    public func deleteRuleGroup(id: String) async throws {
+        let data = try await request(.delete, path: "/group/\(encodePathSegment(id))")
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+    }
+
+    public func fetchGroupMembers(
+        id: String,
+        keyword: String? = nil,
+        offset: Int = 0,
+        limit: Int = 50
+    ) async throws -> GroupMemberListResponse {
+        var queryItems = [
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        queryItems.insert(URLQueryItem(name: "keyword", value: keyword ?? ""), at: 0)
+        let data = try await request(.get, path: "/group/\(encodePathSegment(id))/members", queryItems: queryItems)
+        let payload: RemoteListPayload<GroupMember> = try await decodeRemoteEnvelope(from: data)
+        return GroupMemberListResponse(list: payload.list ?? [], total: payload.total ?? 0)
+    }
+
     public func fetchActiveRulesSummary() async throws -> ActiveRulesSummary {
         let data = try await request(.get, path: "/rules/active-summary")
         return try await decode(ActiveRulesSummary.self, from: data)

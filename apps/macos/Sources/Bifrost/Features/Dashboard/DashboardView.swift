@@ -486,63 +486,749 @@ struct NetworkWebView: View {
     }
 }
 
-struct GroupsWebView: View {
+struct GroupsView: View {
     @EnvironmentObject private var appModel: AppModel
+    @StateObject private var model = GroupsViewModel()
+    @State private var detailMode = GroupDetailMode.detail
+    @State private var draftName = ""
+    @State private var draftDescription = ""
+    @State private var draftVisibility: RuleGroupVisibility = .private
+    @State private var pendingDeleteGroup: RuleGroup?
+
+    private let groupListWidth: CGFloat = 300
 
     var body: some View {
-        NativePageScaffold(title: "小组管理") {
-            NativeCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    HStack(spacing: 14) {
+        NativePageScaffold(title: "小组管理", contentFillsAvailableHeight: true) {
+            HStack(alignment: .top, spacing: 5) {
+                NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
+                    groupListPane
+                }
+                .frame(width: groupListWidth)
+                .frame(maxHeight: .infinity)
+
+                NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false) {
+                    groupDetailPane
+                }
+                .frame(minWidth: 360, maxWidth: .infinity, maxHeight: .infinity)
+                .layoutPriority(1)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .task(id: appModel.adminURL) {
+            await model.configure(baseURL: appModel.adminURL)
+        }
+        .alert(
+            "删除小组",
+            isPresented: Binding(
+                get: { pendingDeleteGroup != nil },
+                set: { if !$0 { pendingDeleteGroup = nil } }
+            )
+        ) {
+            Button("取消", role: .cancel) {
+                pendingDeleteGroup = nil
+            }
+            Button("删除", role: .destructive) {
+                guard let group = pendingDeleteGroup else { return }
+                pendingDeleteGroup = nil
+                Task { await model.deleteGroup(id: group.id) }
+            }
+        } message: {
+            Text("删除后，小组规则和成员关系会从服务端移除。")
+        }
+    }
+
+    private var groupListPane: some View {
+        VStack(spacing: 0) {
+            groupListHeader
+
+            if model.isLoading {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 36)
+            }
+
+            if let errorMessage = model.errorMessage {
+                Text(errorMessage)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 8)
+            }
+
+            if model.visibleGroups.isEmpty && !model.isLoading {
+                EmptyNativeState(title: "暂无可用小组")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        groupSection("我管理的", groups: model.managedGroups)
+                        groupSection("我加入的", groups: model.joinedGroups)
+                        groupSection("公开可读", groups: model.publicGroups)
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+
+    private var groupListHeader: some View {
+        HStack(spacing: 6) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("搜索小组", text: $model.searchText)
+                .textFieldStyle(.plain)
+                .onChange(of: model.searchText) { _ in
+                    model.scheduleSearch()
+                }
+                .onSubmit {
+                    Task { await model.refresh() }
+                }
+            Button {
+                Task { await model.refresh() }
+            } label: {
+                Image(systemName: "arrow.clockwise")
+            }
+            .buttonStyle(.borderless)
+            .help("刷新小组")
+
+            Button {
+                openCreateEditor()
+            } label: {
+                Image(systemName: "plus")
+            }
+            .buttonStyle(.borderless)
+            .help("新建小组")
+        }
+        .font(.system(size: 12))
+        .padding(.horizontal, 12)
+        .frame(height: 42)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+        .padding(12)
+    }
+
+    @ViewBuilder
+    private func groupSection(_ title: String, groups: [RuleGroup]) -> some View {
+        if !groups.isEmpty {
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title.uppercased())
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+                ForEach(groups) { group in
+                    GroupListRow(
+                        group: group,
+                        isSelected: model.selectedGroupID == group.id,
+                        onSelect: {
+                            detailMode = .detail
+                            Task { await model.select(groupID: group.id) }
+                        }
+                    )
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var groupDetailPane: some View {
+        switch detailMode {
+        case .create:
+            ScrollView {
+                GroupEditorPane(
+                    title: "新建小组",
+                    actionTitle: "创建",
+                    name: $draftName,
+                    description: $draftDescription,
+                    visibility: $draftVisibility,
+                    isSaving: model.isSaving,
+                    onCancel: { detailMode = .detail },
+                    onSave: { saveEditor(GroupEditorContext(groupID: nil)) }
+                )
+                .padding(18)
+            }
+        case .edit(let groupID):
+            ScrollView {
+                GroupEditorPane(
+                    title: "编辑小组",
+                    actionTitle: "保存",
+                    name: $draftName,
+                    description: $draftDescription,
+                    visibility: $draftVisibility,
+                    isSaving: model.isSaving,
+                    onCancel: { detailMode = .detail },
+                    onSave: { saveEditor(GroupEditorContext(groupID: groupID)) }
+                )
+                .padding(18)
+            }
+        case .detail:
+            ScrollView {
+                groupDetailContent
+                    .padding(18)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var groupDetailContent: some View {
+        if let group = model.selectedGroup {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(alignment: .top, spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(.blue.opacity(0.10))
                         Image(systemName: "person.2")
-                            .font(.system(size: 26, weight: .medium))
+                            .font(.system(size: 22, weight: .medium))
                             .foregroundStyle(.blue)
-                            .frame(width: 42, height: 42)
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("小组管理")
-                                .font(.system(size: 18, weight: .semibold))
-                            Text("复用 Web UI 的 Groups 工作台")
-                                .font(.system(size: 12))
+                    }
+                    .frame(width: 46, height: 46)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Text(group.name)
+                                .font(.system(size: 20, weight: .semibold))
+                                .lineLimit(1)
+                            StatusPill(title: group.permissionLabel, color: group.permissionColor)
+                        }
+                        Text(group.description.isEmpty ? "暂无小组说明" : group.description)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Text(group.visibility.displayName)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(group.visibility == .public ? .blue : .secondary)
+                    }
+                    Spacer(minLength: 12)
+                    if group.isWritable {
+                        Button("编辑") {
+                            openEditEditor(group)
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                    if group.level == 2 {
+                        Button("删除", role: .destructive) {
+                            pendingDeleteGroup = group
+                        }
+                        .buttonStyle(.bordered)
+                    }
+                }
+
+                Divider()
+
+                HStack(spacing: 10) {
+                    CompactFact(title: "规则数量", value: "\(model.selectedGroupRules?.rules.count ?? 0)")
+                    CompactFact(title: "成员", value: "\(model.selectedGroupMembers?.total ?? 0)")
+                    CompactFact(title: "权限", value: model.selectedGroupRules?.writable == true ? "可修改" : "只读")
+                }
+
+                HStack {
+                    Text("小组规则")
+                        .font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    Button {
+                        appModel.selectedSidebarItem = .rules
+                        Task { await appModel.selectRuleScope(groupID: group.id) }
+                    } label: {
+                        Label("在规则页管理", systemImage: "arrow.right")
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+
+                if model.isLoadingRules {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if let rules = model.selectedGroupRules?.rules, !rules.isEmpty {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(rules.prefix(12)) { rule in
+                            GroupRuleSummaryRow(rule: rule)
+                        }
+                        if rules.count > 12 {
+                            Text("还有 \(rules.count - 12) 条规则，可在规则页继续查看。")
+                                .font(.system(size: 11))
                                 .foregroundStyle(.secondary)
                         }
-                        Spacer(minLength: 8)
-                        Button {
-                            appModel.openGroupsWebUI()
-                        } label: {
-                            Label("在浏览器打开", systemImage: "arrow.up.right.square")
-                        }
-                        .buttonStyle(.borderedProminent)
                     }
-
-                    EmbeddedWebUIPage(url: appModel.webUIURL(path: "groups"))
-                        .frame(minHeight: 560)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                                .stroke(AppSurface.cardBorder)
-                        )
+                } else {
+                    EmptyNativeState(title: "这个小组还没有规则")
+                        .frame(minHeight: 220)
                 }
+
+                Divider()
+
+                HStack {
+                    Text("成员")
+                        .font(.system(size: 15, weight: .semibold))
+                    if let total = model.selectedGroupMembers?.total {
+                        Text("\(total)")
+                            .font(.system(size: 11, weight: .semibold))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(.quaternary.opacity(0.7), in: Capsule())
+                    }
+                    Spacer()
+                }
+
+                if model.isLoadingMembers {
+                    ProgressView()
+                        .controlSize(.small)
+                } else if let members = model.selectedGroupMembers?.list, !members.isEmpty {
+                    LazyVGrid(
+                        columns: [GridItem(.adaptive(minimum: 210), spacing: 8, alignment: .topLeading)],
+                        alignment: .leading,
+                        spacing: 8
+                    ) {
+                        ForEach(members.prefix(12)) { member in
+                            GroupMemberRow(member: member)
+                        }
+                    }
+                    if let total = model.selectedGroupMembers?.total, total > members.count {
+                        Text("还有 \(total - members.count) 位成员，可后续继续分页查看。")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text("暂无成员信息")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .topLeading)
+        } else {
+            EmptyNativeState(title: "选择一个小组")
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    private func openCreateEditor() {
+        draftName = ""
+        draftDescription = ""
+        draftVisibility = .private
+        detailMode = .create
+    }
+
+    private func openEditEditor(_ group: RuleGroup) {
+        draftName = group.name
+        draftDescription = group.description
+        draftVisibility = group.visibility
+        detailMode = .edit(group.id)
+    }
+
+    private func saveEditor(_ context: GroupEditorContext) {
+        Task {
+            if let groupID = context.groupID {
+                await model.updateGroup(
+                    id: groupID,
+                    name: draftName,
+                    description: draftDescription,
+                    visibility: draftVisibility
+                )
+            } else {
+                await model.createGroup(
+                    name: draftName,
+                    description: draftDescription,
+                    visibility: draftVisibility
+                )
+            }
+            if model.errorMessage == nil {
+                detailMode = .detail
             }
         }
     }
 }
 
-private struct EmbeddedWebUIPage: NSViewRepresentable {
-    let url: URL
+private enum GroupDetailMode: Equatable {
+    case detail
+    case create
+    case edit(String)
+}
 
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        configuration.defaultWebpagePreferences.allowsContentJavaScript = true
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.allowsBackForwardNavigationGestures = true
-        webView.setValue(false, forKey: "drawsBackground")
-        webView.load(URLRequest(url: url))
-        return webView
+private struct GroupEditorContext {
+    let groupID: String?
+}
+
+@MainActor
+private final class GroupsViewModel: ObservableObject {
+    @Published var groups: [RuleGroup] = []
+    @Published var selectedGroupID: String?
+    @Published var selectedGroupRules: GroupRulesResponse?
+    @Published var selectedGroupMembers: GroupMemberListResponse?
+    @Published var searchText = ""
+    @Published var isLoading = false
+    @Published var isLoadingRules = false
+    @Published var isLoadingMembers = false
+    @Published var isSaving = false
+    @Published var errorMessage: String?
+
+    private var baseURL: URL?
+    private var client: BifrostClient?
+    private var searchTask: Task<Void, Never>?
+
+    var visibleGroups: [RuleGroup] {
+        groups.sorted {
+            ($0.permissionRank, $0.name.localizedLowercase) < ($1.permissionRank, $1.name.localizedLowercase)
+        }
     }
 
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        if webView.url != url {
-            webView.load(URLRequest(url: url))
+    var managedGroups: [RuleGroup] {
+        visibleGroups.filter { ($0.level ?? -1) >= 1 }
+    }
+
+    var joinedGroups: [RuleGroup] {
+        visibleGroups.filter { $0.level == 0 }
+    }
+
+    var publicGroups: [RuleGroup] {
+        visibleGroups.filter { ($0.level ?? -1) < 0 }
+    }
+
+    var selectedGroup: RuleGroup? {
+        guard let selectedGroupID else {
+            return visibleGroups.first
+        }
+        return visibleGroups.first { $0.id == selectedGroupID }
+    }
+
+    func configure(baseURL: URL) async {
+        guard self.baseURL != baseURL else {
+            return
+        }
+        self.baseURL = baseURL
+        do {
+            client = try BifrostClient(baseURL: baseURL)
+            await refresh()
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func refresh() async {
+        guard let client else {
+            return
+        }
+        isLoading = true
+        defer { isLoading = false }
+        do {
+            let response = try await client.fetchRuleGroups(keyword: searchText, limit: 120)
+            groups = response.list
+            if let selectedGroupID, !groups.contains(where: { $0.id == selectedGroupID }) {
+                self.selectedGroupID = nil
+                selectedGroupRules = nil
+                selectedGroupMembers = nil
+            }
+            if let nextSelection = selectedGroupID ?? visibleGroups.first?.id {
+                await select(groupID: nextSelection)
+            }
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func scheduleSearch() {
+        searchTask?.cancel()
+        searchTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 300_000_000)
+            guard !Task.isCancelled else {
+                return
+            }
+            await self?.refresh()
+        }
+    }
+
+    func select(groupID: String) async {
+        guard selectedGroupID != groupID || selectedGroupRules == nil || selectedGroupMembers == nil else {
+            return
+        }
+        selectedGroupID = groupID
+        await loadGroupDetail(groupID: groupID)
+    }
+
+    func createGroup(name: String, description: String, visibility: RuleGroupVisibility) async {
+        guard let client else {
+            return
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            errorMessage = "小组名称不能为空"
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            let group = try await client.createRuleGroup(
+                name: trimmedName,
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                visibility: visibility
+            )
+            selectedGroupID = group.id
+            await refresh()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func updateGroup(id: String, name: String, description: String, visibility: RuleGroupVisibility) async {
+        guard let client else {
+            return
+        }
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedName.isEmpty else {
+            errorMessage = "小组名称不能为空"
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.updateRuleGroup(
+                id: id,
+                name: trimmedName,
+                description: description.trimmingCharacters(in: .whitespacesAndNewlines),
+                visibility: visibility
+            )
+            selectedGroupID = id
+            await refresh()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    func deleteGroup(id: String) async {
+        guard let client else {
+            return
+        }
+        isSaving = true
+        defer { isSaving = false }
+        do {
+            try await client.deleteRuleGroup(id: id)
+            if selectedGroupID == id {
+                selectedGroupID = nil
+                selectedGroupRules = nil
+                selectedGroupMembers = nil
+            }
+            await refresh()
+            errorMessage = nil
+        } catch {
+            errorMessage = error.localizedDescription
+        }
+    }
+
+    private func loadGroupDetail(groupID: String) async {
+        guard let client else {
+            return
+        }
+        isLoadingRules = true
+        isLoadingMembers = true
+        defer {
+            isLoadingRules = false
+            isLoadingMembers = false
+        }
+        do {
+            async let rulesResult = client.fetchGroupRules(groupID: groupID)
+            async let membersResult = client.fetchGroupMembers(id: groupID, limit: 60)
+            selectedGroupRules = try await rulesResult
+            selectedGroupMembers = try await membersResult
+            errorMessage = nil
+        } catch {
+            selectedGroupRules = nil
+            selectedGroupMembers = nil
+            errorMessage = error.localizedDescription
+        }
+    }
+}
+
+private struct GroupListRow: View {
+    let group: RuleGroup
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(group.permissionColor)
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(group.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text(group.description.isEmpty ? group.visibility.displayName : group.description)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 8)
+                Text(group.permissionLabel)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(group.permissionColor)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(group.permissionColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 6))
+            }
+            .contentShape(Rectangle())
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(isSelected ? AppSurface.subtleFill : .clear, in: RoundedRectangle(cornerRadius: 7))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
+private struct GroupRuleSummaryRow: View {
+    let rule: GroupRuleInfo
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(rule.enabled ? Color.green : Color.gray.opacity(0.55))
+                .frame(width: 7, height: 7)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(rule.name)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text("\(rule.ruleCount) entries")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            Text(rule.enabled ? "Enabled" : "Disabled")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(rule.enabled ? .green : .secondary)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+private struct GroupMemberRow: View {
+    let member: GroupMember
+
+    var body: some View {
+        HStack(spacing: 9) {
+            Circle()
+                .fill(member.permissionColor)
+                .frame(width: 8, height: 8)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName)
+                    .font(.system(size: 12, weight: .semibold))
+                    .lineLimit(1)
+                Text(member.email.isEmpty ? member.userID : member.email)
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer(minLength: 8)
+            Text(member.permissionLabel)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(member.permissionColor)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(member.permissionColor.opacity(0.10), in: RoundedRectangle(cornerRadius: 5))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+        .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+    }
+
+    private var displayName: String {
+        if !member.nickname.isEmpty {
+            return member.nickname
+        }
+        if !member.email.isEmpty {
+            return member.email
+        }
+        return member.userID.isEmpty ? member.id : member.userID
+    }
+}
+
+private struct GroupEditorPane: View {
+    let title: String
+    let actionTitle: String
+    @Binding var name: String
+    @Binding var description: String
+    @Binding var visibility: RuleGroupVisibility
+    let isSaving: Bool
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 20, weight: .semibold))
+                Spacer()
+                Button("取消", action: onCancel)
+                    .keyboardShortcut(.cancelAction)
+                Button(actionTitle, action: onSave)
+                    .buttonStyle(.borderedProminent)
+                    .keyboardShortcut(.defaultAction)
+                    .disabled(isSaving)
+            }
+
+            Divider()
+
+            TextField("小组名称", text: $name)
+                .textFieldStyle(.roundedBorder)
+            TextEditor(text: $description)
+                .font(.system(size: 13))
+                .frame(minHeight: 140)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .stroke(AppSurface.cardBorder)
+                )
+            Picker("可见性", selection: $visibility) {
+                ForEach(RuleGroupVisibility.allCases, id: \.self) { item in
+                    Text(item.displayName).tag(item)
+                }
+            }
+            .pickerStyle(.segmented)
+
+            Text("公开小组可被其他用户查看；私有小组仅对成员可见。")
+                .font(.system(size: 12))
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+}
+
+private extension RuleGroupVisibility {
+    var displayName: String {
+        switch self {
+        case .public:
+            return "公开可读"
+        case .private:
+            return "私有"
+        }
+    }
+}
+
+private extension RuleGroup {
+    var permissionColor: Color {
+        switch level {
+        case 2:
+            return .orange
+        case 1:
+            return .blue
+        case 0:
+            return .green
+        default:
+            return .secondary
+        }
+    }
+}
+
+private extension GroupMember {
+    var permissionColor: Color {
+        switch level {
+        case 2:
+            return .orange
+        case 1:
+            return .blue
+        default:
+            return .green
         }
     }
 }
@@ -2058,12 +2744,27 @@ private struct MobileConnectionCheckCard: View {
 
             if let session = model.trustProbeSession,
                !session.proxyConfigured,
-               let message = session.proxyConfigurationMessage,
-               !message.isEmpty {
+               let message = sessionProbeMessage(for: session) {
                 TrustProbeMessageRow(symbol: "exclamationmark.triangle.fill", tint: .orange, message: message)
             }
         }
         .frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func sessionProbeMessage(for session: TrustProbeSession) -> String? {
+        guard let message = normalizedTrustProbeMessage(session.proxyConfigurationMessage) else {
+            return nil
+        }
+        let deviceMessages = Set(
+            session.devices.flatMap { device in
+                [
+                    normalizedTrustProbeMessage(device.proxyConfigurationMessage),
+                    normalizedTrustProbeMessage(device.lastError),
+                    normalizedTrustProbeMessage(device.proxyAccessMessage),
+                ].compactMap { $0 }
+            }
+        )
+        return deviceMessages.contains(message) ? nil : message
     }
 
     private var probeStatusTitle: String {
@@ -2285,8 +2986,7 @@ private struct TrustProbeDeviceRow: View {
                     TrustProbeDeviceStatusTag(title: device.proxyConfigured ? "代理已配置" : proxyConfiguredTitle, color: device.proxyConfigured ? .green : proxyConfiguredColor)
                 }
 
-                if let message = device.lastError ?? device.proxyConfigurationMessage ?? device.proxyAccessMessage,
-                   !message.isEmpty {
+                if let message = probeMessage {
                     Text(message)
                         .font(.system(size: 10))
                         .foregroundStyle(.secondary)
@@ -2302,6 +3002,23 @@ private struct TrustProbeDeviceRow: View {
             return device.deviceID
         }
         return String(device.deviceID.prefix(8))
+    }
+
+    private var probeMessage: String? {
+        var seen = Set<String>()
+        for candidate in [
+            device.proxyConfigurationMessage,
+            device.lastError,
+            device.proxyAccessMessage,
+        ] {
+            guard let message = normalizedTrustProbeMessage(candidate),
+                  !seen.contains(message) else {
+                continue
+            }
+            seen.insert(message)
+            return message
+        }
+        return nil
     }
 
     private var tlsPendingTitle: String {
@@ -2374,6 +3091,18 @@ private struct TrustProbeMessageRow: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
+}
+
+private func normalizedTrustProbeMessage(_ value: String?) -> String? {
+    let message = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !message.isEmpty else {
+        return nil
+    }
+    let normalized = message.lowercased()
+    if normalized.contains("typeerror: load failed") || normalized.contains("load failed") {
+        return "手机浏览器请求失败，请确认 Wi-Fi 代理已指向上方代理地址后重试。"
+    }
+    return message
 }
 
 private func formatProbeLastSeen(_ value: String) -> String {

@@ -671,7 +671,11 @@ public struct RemoteListPayload<T: Decodable & Sendable>: Decodable, Sendable {
     public var total: Int?
 }
 
-public enum RuleGroupVisibility: String, Decodable, Equatable, Sendable {
+public struct EmptyRemotePayload: Decodable, Sendable {
+    public init(from decoder: Decoder) throws {}
+}
+
+public enum RuleGroupVisibility: String, Codable, CaseIterable, Equatable, Sendable {
     case `public`
     case `private`
 }
@@ -758,6 +762,115 @@ public struct RuleGroupListResponse: Equatable, Sendable {
     public init(list: [RuleGroup], total: Int) {
         self.list = list
         self.total = total
+    }
+}
+
+public struct GroupMember: Decodable, Equatable, Identifiable, Sendable {
+    public var id: String
+    public var groupID: String
+    public var userID: String
+    public var level: Int
+    public var nickname: String
+    public var avatar: String
+    public var email: String
+    public var createTime: String
+    public var updateTime: String
+
+    public var permissionLabel: String {
+        switch level {
+        case 2:
+            return "Owner"
+        case 1:
+            return "Master"
+        default:
+            return "Member"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case groupID = "group_id"
+        case userID = "user_id"
+        case level
+        case nickname
+        case avatar
+        case email
+        case createTime = "create_time"
+        case updateTime = "update_time"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(String.self, forKey: .id)
+        groupID = try container.decodeIfPresent(String.self, forKey: .groupID) ?? ""
+        userID = try container.decodeIfPresent(String.self, forKey: .userID) ?? ""
+        level = try container.decodeIfPresent(Int.self, forKey: .level) ?? 0
+        nickname = try container.decodeIfPresent(String.self, forKey: .nickname) ?? ""
+        avatar = try container.decodeIfPresent(String.self, forKey: .avatar) ?? ""
+        email = try container.decodeIfPresent(String.self, forKey: .email) ?? ""
+        createTime = try container.decodeIfPresent(String.self, forKey: .createTime) ?? ""
+        updateTime = try container.decodeIfPresent(String.self, forKey: .updateTime) ?? ""
+    }
+}
+
+public struct GroupMemberListResponse: Equatable, Sendable {
+    public var list: [GroupMember]
+    public var total: Int
+
+    public init(list: [GroupMember], total: Int) {
+        self.list = list
+        self.total = total
+    }
+}
+
+public struct RuleGroupMutationRequest: Encodable, Equatable, Sendable {
+    public var name: String?
+    public var avatar: String?
+    public var description: String?
+    public var visibility: RuleGroupVisibility?
+
+    public init(
+        name: String? = nil,
+        avatar: String? = nil,
+        description: String? = nil,
+        visibility: RuleGroupVisibility? = nil
+    ) {
+        self.name = name
+        self.avatar = avatar
+        self.description = description
+        self.visibility = visibility
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case avatar
+        case description = "what"
+        case visibility
+    }
+}
+
+public struct RuleGroupSettingRequest: Encodable, Equatable, Sendable {
+    public var rulesEnabled: Bool?
+    public var visibility: RuleGroupVisibility?
+
+    public init(rulesEnabled: Bool? = nil, visibility: RuleGroupVisibility? = nil) {
+        self.rulesEnabled = rulesEnabled
+        self.visibility = visibility
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status
+        case level
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let rulesEnabled {
+            try container.encode(rulesEnabled, forKey: .status)
+        }
+        if let visibility {
+            try container.encode(visibility == .public ? 1 : 0, forKey: .level)
+        }
     }
 }
 

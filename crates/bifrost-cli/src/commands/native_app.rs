@@ -57,6 +57,15 @@ pub fn handle_native_app_command(action: NativeAppCommands) -> Result<()> {
             confirm_install_if_needed(&options, yes)?;
             install_native_app(options)
         }
+        NativeAppCommands::Uninstall {
+            install_dir,
+            dry_run,
+            yes,
+        } => {
+            let install_dir = install_dir.unwrap_or_else(default_install_dir);
+            confirm_uninstall_if_needed(&install_dir, dry_run, yes)?;
+            uninstall_native_app(&install_dir, dry_run)
+        }
     }
 }
 
@@ -102,6 +111,8 @@ pub fn install_native_app(options: NativeAppInstallOptions) -> Result<()> {
         )));
     };
 
+    quit_native_app_before_replacement(&target_app);
+
     let temp_target = target_app.with_extension(format!("app.tmp.{}", std::process::id()));
     let backup_target = target_app.with_extension("app.backup");
     let _ = fs::remove_dir_all(&temp_target);
@@ -130,6 +141,33 @@ pub fn install_native_app(options: NativeAppInstallOptions) -> Result<()> {
     Ok(())
 }
 
+pub fn uninstall_native_app(install_dir: &Path, dry_run: bool) -> Result<()> {
+    let target_app = app_path_for_install_dir(install_dir);
+    if dry_run {
+        println!(
+            "{}",
+            json!({
+                "dry_run": true,
+                "target": target_app.display().to_string(),
+                "installed": target_app.exists(),
+            })
+        );
+        return Ok(());
+    }
+
+    quit_native_app_before_replacement(&target_app);
+    if target_app.exists() {
+        fs::remove_dir_all(&target_app)?;
+        println!("Removed {}", target_app.display());
+    } else {
+        println!(
+            "Bifrost Native App is not installed at {}",
+            target_app.display()
+        );
+    }
+    Ok(())
+}
+
 fn confirm_install_if_needed(options: &NativeAppInstallOptions, yes: bool) -> Result<()> {
     if yes || options.dry_run {
         return Ok(());
@@ -154,6 +192,33 @@ fn confirm_install_if_needed(options: &NativeAppInstallOptions, yes: bool) -> Re
     }
     Err(BifrostError::Config(
         "Native app installation was cancelled".to_string(),
+    ))
+}
+
+fn confirm_uninstall_if_needed(install_dir: &Path, dry_run: bool, yes: bool) -> Result<()> {
+    if yes || dry_run {
+        return Ok(());
+    }
+    if !io::stdin().is_terminal() || !io::stdout().is_terminal() {
+        return Err(BifrostError::Config(
+            "Native app uninstall requires -y in non-interactive mode".to_string(),
+        ));
+    }
+
+    let target_app = app_path_for_install_dir(install_dir);
+    print!(
+        "Uninstall Bifrost Native App at {}? (y/n) ",
+        target_app.display()
+    );
+    let _ = io::stdout().flush();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let answer = input.trim().to_ascii_lowercase();
+    if matches!(answer.as_str(), "y" | "yes") {
+        return Ok(());
+    }
+    Err(BifrostError::Config(
+        "Native app uninstall was cancelled".to_string(),
     ))
 }
 
@@ -221,6 +286,61 @@ fn copy_dir_recursive(source: &Path, target: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+fn quit_native_app_before_replacement(target_app: &Path) {
+    if !target_app.exists() {
+        return;
+    }
+    if cfg!(test) {
+        return;
+    }
+    quit_native_app();
+}
+
+#[cfg(target_os = "macos")]
+fn quit_native_app() {
+    use bifrost_core::macos_native_app::BIFROST_NATIVE_BUNDLE_ID;
+    let script = format!(
+        "tell application id \"{}\" to quit",
+        BIFROST_NATIVE_BUNDLE_ID
+    );
+    let _ = Command::new("osascript")
+        .arg("-e")
+        .arg(script)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+
+    for _ in 0..20 {
+        if !is_native_app_process_running() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+
+    let _ = Command::new("pkill")
+        .args(["-x", "Bifrost"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+fn is_native_app_process_running() -> bool {
+    Command::new("pgrep")
+        .args(["-x", "Bifrost"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn quit_native_app() {}
 
 #[cfg(target_os = "macos")]
 fn extract_app_from_dmg(dmg_path: &Path) -> Result<PathBuf> {
@@ -362,6 +482,26 @@ mod tests {
     }
 
     #[test]
+    fn uninstall_removes_target_app() {
+        let install_root = tempfile::tempdir().unwrap();
+        fixture_app(install_root.path(), "0.0.138");
+
+        uninstall_native_app(install_root.path(), false).unwrap();
+
+        assert!(!install_root.path().join(BIFROST_NATIVE_APP_NAME).exists());
+    }
+
+    #[test]
+    fn dry_run_uninstall_keeps_target_app() {
+        let install_root = tempfile::tempdir().unwrap();
+        fixture_app(install_root.path(), "0.0.138");
+
+        uninstall_native_app(install_root.path(), true).unwrap();
+
+        assert!(install_root.path().join(BIFROST_NATIVE_APP_NAME).exists());
+    }
+
+    #[test]
     fn non_interactive_install_requires_yes_flag() {
         let install_root = tempfile::tempdir().unwrap();
         let error = confirm_install_if_needed(
@@ -376,6 +516,16 @@ mod tests {
             false,
         )
         .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires -y in non-interactive mode"));
+    }
+
+    #[test]
+    fn non_interactive_uninstall_requires_yes_flag() {
+        let install_root = tempfile::tempdir().unwrap();
+        let error = confirm_uninstall_if_needed(install_root.path(), false, false).unwrap_err();
 
         assert!(error
             .to_string()

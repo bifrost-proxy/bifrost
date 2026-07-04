@@ -18,10 +18,15 @@ use crate::process::{
     capture_runtime_system_proxy_snapshot, find_process_on_port, is_process_running, read_pid,
     read_runtime_info, RuntimeInfo, RuntimeSystemProxySnapshot,
 };
+#[cfg(target_os = "macos")]
+use bifrost_core::macos_native_app::{default_install_dir, status_for_install_dir};
 use bifrost_core::version_check::{
     is_newer_version, make_release_tag, VersionCache, GITHUB_RELEASE_URL,
 };
 use bifrost_storage::ConfigManager;
+
+#[cfg(target_os = "macos")]
+use super::native_app::{install_native_app, NativeAppInstallOptions};
 const GITHUB_BASE_URL: &str = "https://github.com";
 const DEFAULT_GITHUB_MIRROR_URLS: &[&str] = &[
     "https://github.com",
@@ -1526,6 +1531,7 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
 
     match upgrade_outcome {
         UpgradeInstallOutcome::Installed => {
+            maybe_update_native_app_after_cli_upgrade(&cache.latest_version);
             install_skills_after_upgrade_best_effort(&restart_executable);
             maybe_restart_running_proxy(&restart_executable)?
         }
@@ -1537,6 +1543,56 @@ fn handle_upgrade_inner(restart_if_already_latest: bool) -> Result<(), BifrostEr
 
     Ok(())
 }
+
+#[cfg(target_os = "macos")]
+fn maybe_update_native_app_after_cli_upgrade(version: &str) {
+    if env::var("BIFROST_NATIVE_APP_AUTO_UPDATE").ok().as_deref() == Some("0") {
+        return;
+    }
+
+    let install_dir = default_install_dir();
+    let status = status_for_install_dir(&install_dir, Some(version));
+    if !status.installed || !status.needs_install {
+        return;
+    }
+
+    let env_source = env::var_os("BIFROST_NATIVE_APP_SOURCE").map(PathBuf::from);
+    let env_url = env::var("BIFROST_NATIVE_APP_URL").ok();
+    if test_upgrade_archive_override().ok().flatten().is_some()
+        && env_source.is_none()
+        && env_url.is_none()
+    {
+        println!(
+            "{}",
+            "Skipping native app auto-update for local upgrade test archive.".bright_yellow()
+        );
+        return;
+    }
+
+    println!(
+        "{}",
+        "Detected installed Bifrost Native App; updating it to match the CLI...".bright_cyan()
+    );
+    let result = install_native_app(NativeAppInstallOptions {
+        source: env_source,
+        url: env_url,
+        latest_version: Some(version.to_string()),
+        install_dir,
+        dry_run: false,
+        open_after_install: false,
+    });
+    match result {
+        Ok(()) => println!("{}", "✓ Native App updated successfully.".bright_green()),
+        Err(error) => eprintln!(
+            "{} {}",
+            "⚠ CLI upgraded, but Native App update failed:".bright_yellow(),
+            error.to_string().dimmed()
+        ),
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn maybe_update_native_app_after_cli_upgrade(_version: &str) {}
 
 fn should_restart_when_already_latest(restart_if_already_latest: bool) -> bool {
     restart_if_already_latest

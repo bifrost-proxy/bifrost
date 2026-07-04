@@ -3949,7 +3949,7 @@ fn execute_action(
             reload_flag.store(true, Ordering::Relaxed);
             spawn_tray_task("bifrost-tray-native-app-install", move || {
                 let status = Command::new(&bin)
-                    .arg("native-app")
+                    .arg("app")
                     .arg("install")
                     .arg("-y")
                     .arg("--open")
