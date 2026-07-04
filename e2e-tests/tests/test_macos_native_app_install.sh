@@ -57,6 +57,15 @@ echo "${STATUS_JSON}" | grep -q '"installed": true'
 echo "${STATUS_JSON}" | grep -q '"installed_version": "9.9.9"'
 echo "${STATUS_JSON}" | grep -q '"needs_install": false'
 
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  echo "${STATUS_JSON}" | grep -q '"supported": false'
+  echo "${STATUS_JSON}" | grep -q 'Bifrost Native App is available only on macOS.'
+  "${BIFROST_BIN}" app uninstall --install-dir "${INSTALL_DIR}" -y
+  test ! -e "${INSTALL_DIR}/Bifrost.app"
+  echo "macOS native app install CLI E2E passed on unsupported platform"
+  exit 0
+fi
+
 UPDATE_NEEDED_JSON="$("${BIFROST_BIN}" app status --install-dir "${INSTALL_DIR}" --latest-version 10.0.0 --format json)"
 echo "${UPDATE_NEEDED_JSON}" | grep -q '"installed": true'
 echo "${UPDATE_NEEDED_JSON}" | grep -q '"installed_version": "9.9.9"'
