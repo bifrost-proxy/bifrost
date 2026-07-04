@@ -49,7 +49,7 @@ struct BifrostApp: App {
             let itemsWithGroups = SidebarItem.visibleItems(canShowGroups: true).map(\.rawValue)
             let allItems = SidebarItem.allCases.map(\.rawValue)
             let expected = ["活动", "概览", "规则", "抓包"]
-            let expectedWithGroups = expected + ["小组管理"]
+            let expectedWithGroups = expected + ["小组"]
             guard items == expected, itemsWithGroups == expectedWithGroups, allItems == itemsWithGroups else {
                 fputs("Bifrost release scope check failed: visible=\(items.joined(separator: ",")) groups=\(itemsWithGroups.joined(separator: ",")) all=\(allItems.joined(separator: ","))\n", stderr)
                 Foundation.exit(1)

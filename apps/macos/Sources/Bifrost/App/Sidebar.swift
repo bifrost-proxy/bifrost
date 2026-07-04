@@ -5,7 +5,7 @@ enum SidebarItem: String, CaseIterable, Identifiable {
     case overview = "概览"
     case rules = "规则"
     case network = "抓包"
-    case groups = "小组管理"
+    case groups = "小组"
 
     var id: String { rawValue }
 

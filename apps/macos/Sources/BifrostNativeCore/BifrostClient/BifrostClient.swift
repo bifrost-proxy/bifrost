@@ -187,6 +187,57 @@ public actor BifrostClient {
         return GroupMemberListResponse(list: payload.list ?? [], total: payload.total ?? 0)
     }
 
+    public func searchUsers(keyword: String, offset: Int = 0, limit: Int = 10) async throws -> UserListResponse {
+        var queryItems = [
+            URLQueryItem(name: "offset", value: String(offset)),
+            URLQueryItem(name: "limit", value: String(limit)),
+        ]
+        let trimmedKeyword = keyword.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedKeyword.isEmpty {
+            queryItems.insert(URLQueryItem(name: "keyword", value: trimmedKeyword), at: 0)
+        }
+        let data = try await request(.get, path: "/user", queryItems: queryItems)
+        let payload: RemoteListPayload<GroupUser> = try await decodeRemoteEnvelope(from: data)
+        return UserListResponse(list: payload.list ?? [], total: payload.total ?? 0)
+    }
+
+    public func inviteGroupMember(groupID: String, userID: String, level: Int = 0) async throws {
+        let body = try JSONEncoder().encode(
+            GroupMemberMutationRequest(groupID: groupID, userID: userID, level: level)
+        )
+        let data = try await request(.post, path: "/room", body: body)
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+    }
+
+    public func updateGroupMemberLevel(groupID: String, userID: String, level: Int) async throws {
+        let body = try JSONEncoder().encode(
+            GroupMemberMutationRequest(groupID: groupID, userID: userID, level: level)
+        )
+        let data = try await request(.patch, path: "/room", body: body)
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+    }
+
+    public func removeGroupMember(groupID: String, userID: String) async throws {
+        let data = try await request(
+            .delete,
+            path: "/room",
+            queryItems: [
+                URLQueryItem(name: "group_id", value: groupID),
+                URLQueryItem(name: "user_id", value: userID),
+            ]
+        )
+        let envelope: RemoteEnvelope<EmptyRemotePayload> = try await decode(RemoteEnvelope<EmptyRemotePayload>.self, from: data)
+        guard envelope.code == 0 else {
+            throw BifrostClientError.remoteEnvelope(envelope.code, envelope.message)
+        }
+    }
+
     public func fetchActiveRulesSummary() async throws -> ActiveRulesSummary {
         let data = try await request(.get, path: "/rules/active-summary")
         return try await decode(ActiveRulesSummary.self, from: data)
