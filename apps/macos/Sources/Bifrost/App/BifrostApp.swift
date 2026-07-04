@@ -2,11 +2,21 @@ import AppKit
 import Foundation
 import SwiftUI
 
+@MainActor
+private enum SharedAppModel {
+    static let instance = AppModel()
+}
+
 @main
 struct BifrostApp: App {
-    @StateObject private var appModel = AppModel()
+    @NSApplicationDelegateAdaptor(BifrostAppDelegate.self) private var appDelegate
+    @StateObject private var appModel: AppModel
 
     init() {
+        let model = SharedAppModel.instance
+        _appModel = StateObject(wrappedValue: model)
+        appDelegate.appModel = model
+
         let icon = AppIconInstaller.install()
         if CommandLine.arguments.contains("--check-icon") {
             guard let icon, icon.size.width > 0, icon.size.height > 0 else {
@@ -125,5 +135,80 @@ struct BifrostApp: App {
         }
         existingApplication.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         Foundation.exit(0)
+    }
+}
+
+@MainActor
+final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
+    weak var appModel: AppModel?
+    private var fallbackWindow: NSWindow?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.setActivationPolicy(.regular)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.ensureMainWindowVisible()
+        }
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        ensureMainWindowVisible()
+        return true
+    }
+
+    private func ensureMainWindowVisible() {
+        if let window = NSApp.windows.first(where: { window in
+            window.canBecomeMain && window.isVisible && !window.isMiniaturized
+        }) {
+            placeWindowOnVisibleScreenIfNeeded(window)
+            window.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        if let fallbackWindow, fallbackWindow.isVisible {
+            placeWindowOnVisibleScreenIfNeeded(fallbackWindow)
+            fallbackWindow.makeKeyAndOrderFront(nil)
+            NSApp.activate(ignoringOtherApps: true)
+            return
+        }
+
+        guard let appModel else {
+            return
+        }
+
+        let controller = NSHostingController(
+            rootView: MainWindowScene()
+                .environmentObject(appModel)
+        )
+        let window = NSWindow(contentViewController: controller)
+        window.title = ""
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.styleMask.insert(.fullSizeContentView)
+        window.isReleasedWhenClosed = false
+        window.setContentSize(NSSize(width: 1280, height: 820))
+        window.minSize = NSSize(width: 960, height: 720)
+        placeWindowOnVisibleScreenIfNeeded(window, force: true)
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        fallbackWindow = window
+    }
+
+    private func placeWindowOnVisibleScreenIfNeeded(_ window: NSWindow, force: Bool = false) {
+        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
+        if !force, visibleFrames.contains(where: { $0.intersects(window.frame) }) {
+            return
+        }
+        let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
+            ?? NSRect(x: 0, y: 0, width: 1280, height: 820)
+        let width = min(max(window.frame.width, 960), max(screenFrame.width - 80, 960))
+        let height = min(max(window.frame.height, 720), max(screenFrame.height - 80, 720))
+        let frame = NSRect(
+            x: screenFrame.midX - width / 2,
+            y: screenFrame.midY - height / 2,
+            width: width,
+            height: height
+        )
+        window.setFrame(frame, display: true)
     }
 }

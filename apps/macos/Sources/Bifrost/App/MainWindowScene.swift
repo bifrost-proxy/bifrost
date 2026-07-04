@@ -3,6 +3,7 @@ import SwiftUI
 
 struct MainWindowScene: View {
     @EnvironmentObject private var appModel: AppModel
+    @Environment(\.scenePhase) private var scenePhase
     @State private var createRuleSheetVisible = false
 
     var body: some View {
@@ -34,6 +35,11 @@ struct MainWindowScene: View {
                 AppSurface.content
             }
             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topTrailing) {
+                NativeAppUpdateButton()
+                    .padding(.top, 18)
+                    .padding(.trailing, 24)
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 960, minHeight: 720)
@@ -51,6 +57,15 @@ struct MainWindowScene: View {
         }
         .task {
             await appModel.ensureService()
+        }
+        .onAppear {
+            appModel.setInterfaceActive(scenePhase == .active)
+        }
+        .onDisappear {
+            appModel.setInterfaceActive(false)
+        }
+        .onChange(of: scenePhase) { phase in
+            appModel.setInterfaceActive(phase == .active)
         }
         .onChange(of: appModel.selectedSidebarItem) { _ in
             Task {
@@ -73,6 +88,59 @@ struct MainWindowScene: View {
         case .groups:
             GroupsView()
         }
+    }
+}
+
+private struct NativeAppUpdateButton: View {
+    @EnvironmentObject private var appModel: AppModel
+
+    var body: some View {
+        switch appModel.nativeAppUpdateState {
+        case .idle:
+            EmptyView()
+        case .available(let latestVersion):
+            Button {
+                appModel.installNativeAppUpdate()
+            } label: {
+                Label("更新 \(latestVersion)", systemImage: "arrow.down.circle.fill")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .tint(.blue)
+            .help("下载、安装并重启 Bifrost")
+        case .installing:
+            progressButton(title: "正在更新")
+        case .restarting:
+            progressButton(title: "正在重启")
+        case .failed(_, let latestVersion):
+            Button {
+                appModel.installNativeAppUpdate()
+            } label: {
+                Label(latestVersion.map { "重试更新 \($0)" } ?? "重试更新", systemImage: "exclamationmark.arrow.triangle.2.circlepath")
+                    .lineLimit(1)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.regular)
+            .tint(.blue)
+            .help("更新失败，点击重试")
+        }
+    }
+
+    private func progressButton(title: String) -> some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+                .scaleEffect(0.78)
+            Text(title)
+                .lineLimit(1)
+        }
+        .font(.system(size: 13, weight: .semibold))
+        .foregroundStyle(.white)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.blue, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
+        .shadow(color: Color.blue.opacity(0.20), radius: 12, x: 0, y: 5)
     }
 }
 

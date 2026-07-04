@@ -1,7 +1,8 @@
 use std::collections::{HashSet, VecDeque};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bifrost_script::{ScriptInfo, ScriptType};
 use dashmap::DashMap;
@@ -24,6 +25,7 @@ pub const MAX_CLIENT_CHANNELS: usize = 3;
 pub const MAX_ID_LEN: usize = 256;
 pub const MAX_SETTINGS_SCOPES: usize = 16;
 const TRAFFIC_PENDING_REFRESH_INTERVAL_MS: u64 = 2_000;
+const CERT_STATUS_CACHE_TTL: Duration = Duration::from_secs(30);
 
 pub const SETTINGS_SCOPE_PROXY_SETTINGS: &str = "proxy_settings";
 pub const SETTINGS_SCOPE_TLS_CONFIG: &str = "tls_config";
@@ -411,6 +413,7 @@ pub struct PushManager {
     buckets: DashMap<String, Vec<u64>>,
     bucket_order: Mutex<VecDeque<String>>,
     overview_cache: RwLock<Option<OverviewData>>,
+    cert_status_cache: Mutex<Option<CachedCertStatus>>,
     state: SharedAdminState,
 }
 
@@ -421,6 +424,7 @@ impl PushManager {
             buckets: DashMap::new(),
             bucket_order: Mutex::new(VecDeque::new()),
             overview_cache: RwLock::new(None),
+            cert_status_cache: Mutex::new(None),
             state,
         }
     }
@@ -490,6 +494,30 @@ impl PushManager {
 
     pub fn invalidate_overview_cache(&self) {
         *self.overview_cache.write() = None;
+    }
+
+    fn cached_cert_status(&self) -> CertStatusSnapshot {
+        let cert_path = self.state.ca_cert_path.as_deref();
+        let available = cert_path.map(|path| path.exists()).unwrap_or(false);
+        let now = Instant::now();
+        {
+            let cache = self.cert_status_cache.lock();
+            if let Some(cache) = cache
+                .as_ref()
+                .filter(|cache| cache.is_valid(cert_path, available, now, CERT_STATUS_CACHE_TTL))
+            {
+                return cache.snapshot.clone();
+            }
+        }
+
+        let snapshot = cert_status(cert_path);
+        *self.cert_status_cache.lock() = Some(CachedCertStatus {
+            cert_path: cert_path.map(Path::to_path_buf),
+            available,
+            fetched_at: now,
+            snapshot: snapshot.clone(),
+        });
+        snapshot
     }
 
     async fn build_full_overview(&self) -> OverviewData {
@@ -1153,7 +1181,7 @@ impl PushManager {
                     .map(|info| info.ip)
                     .collect();
                 let port = self.state.port();
-                let status = cert_status(self.state.ca_cert_path.as_deref());
+                let status = self.cached_cert_status();
                 let download_urls: Vec<String> = local_ips
                     .iter()
                     .map(|ip| format!("http://{}:{}/_bifrost/public/cert", ip, port))
@@ -1663,7 +1691,28 @@ struct CertStatusSnapshot {
     status_message: String,
 }
 
-fn cert_status(cert_path: Option<&std::path::Path>) -> CertStatusSnapshot {
+struct CachedCertStatus {
+    cert_path: Option<PathBuf>,
+    available: bool,
+    fetched_at: Instant,
+    snapshot: CertStatusSnapshot,
+}
+
+impl CachedCertStatus {
+    fn is_valid(
+        &self,
+        cert_path: Option<&Path>,
+        available: bool,
+        now: Instant,
+        ttl: Duration,
+    ) -> bool {
+        self.available == available
+            && self.cert_path.as_deref() == cert_path
+            && now.duration_since(self.fetched_at) < ttl
+    }
+}
+
+fn cert_status(cert_path: Option<&Path>) -> CertStatusSnapshot {
     use bifrost_tls::{CertInstaller, CertStatus};
 
     let Some(cert_path) = cert_path.filter(|path| path.exists()) else {
@@ -3028,6 +3077,50 @@ mod coverage_boost {
         assert_eq!(snapshot.status, "not_installed");
         assert!(!snapshot.installed);
         assert!(!snapshot.trusted);
+    }
+
+    #[test]
+    fn cached_cert_status_expires_by_path_availability_and_ttl() {
+        let now = Instant::now();
+        let path = PathBuf::from("/tmp/bifrost-ca.pem");
+        let snapshot = CertStatusSnapshot {
+            status: "installed_and_trusted",
+            status_label: "Installed and trusted",
+            installed: true,
+            trusted: true,
+            status_message: "ok".to_string(),
+        };
+        let cache = CachedCertStatus {
+            cert_path: Some(path.clone()),
+            available: true,
+            fetched_at: now,
+            snapshot,
+        };
+
+        assert!(cache.is_valid(
+            Some(path.as_path()),
+            true,
+            now + Duration::from_secs(1),
+            Duration::from_secs(30)
+        ));
+        assert!(!cache.is_valid(
+            Some(path.as_path()),
+            false,
+            now + Duration::from_secs(1),
+            Duration::from_secs(30)
+        ));
+        assert!(!cache.is_valid(
+            Some(Path::new("/tmp/other-ca.pem")),
+            true,
+            now + Duration::from_secs(1),
+            Duration::from_secs(30)
+        ));
+        assert!(!cache.is_valid(
+            Some(path.as_path()),
+            true,
+            now + Duration::from_secs(31),
+            Duration::from_secs(30)
+        ));
     }
 
     #[tokio::test]
