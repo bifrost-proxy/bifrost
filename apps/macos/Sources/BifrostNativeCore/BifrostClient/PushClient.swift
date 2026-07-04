@@ -6,9 +6,11 @@ public struct PushSubscription: Equatable, Sendable {
     public var pendingIds: [String]
     public var needTraffic: Bool
     public var needOverview: Bool
+    public var needMetrics: Bool
     public var needValues: Bool
     public var needScripts: Bool
     public var settingsScopes: [String]
+    public var metricsIntervalMs: Int?
 
     public init(
         lastTrafficId: String? = nil,
@@ -16,6 +18,7 @@ public struct PushSubscription: Equatable, Sendable {
         pendingIds: [String] = [],
         needTraffic: Bool = true,
         needOverview: Bool = true,
+        needMetrics: Bool = true,
         needValues: Bool = true,
         needScripts: Bool = true,
         settingsScopes: [String] = [
@@ -23,16 +26,19 @@ public struct PushSubscription: Equatable, Sendable {
             "tls_config",
             "proxy_address",
             "notifications",
-        ]
+        ],
+        metricsIntervalMs: Int? = nil
     ) {
         self.lastTrafficId = lastTrafficId
         self.lastSequence = lastSequence
         self.pendingIds = pendingIds
         self.needTraffic = needTraffic
         self.needOverview = needOverview
+        self.needMetrics = needMetrics
         self.needValues = needValues
         self.needScripts = needScripts
         self.settingsScopes = settingsScopes
+        self.metricsIntervalMs = metricsIntervalMs
     }
 }
 
@@ -41,6 +47,7 @@ public actor PushClient {
     private let clientId: String
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
+    private let tracePush = ProcessInfo.processInfo.environment["BIFROST_NATIVE_TRACE_PUSH"] == "1"
 
     public init(
         baseURL: URL,
@@ -59,6 +66,7 @@ public actor PushClient {
         self.task = task
         task.resume()
         try send(subscription: subscription)
+        trace("connected to \(request.url?.absoluteString ?? "<invalid-url>")")
 
         return AsyncThrowingStream { continuation in
             let receiveTask = Task {
@@ -96,19 +104,36 @@ public actor PushClient {
                 let message = try await task.receive()
                 switch message {
                 case .string(let text):
-                    if let data = text.data(using: .utf8) {
-                        continuation.yield(try JSONDecoder().decode(PushMessage.self, from: data))
+                    if let data = text.data(using: .utf8),
+                       let message = decodePushMessage(data) {
+                        trace("message \(message.traceType)")
+                        continuation.yield(message)
                     }
                 case .data(let data):
-                    continuation.yield(try JSONDecoder().decode(PushMessage.self, from: data))
+                    if let message = decodePushMessage(data) {
+                        trace("message \(message.traceType)")
+                        continuation.yield(message)
+                    }
                 @unknown default:
                     break
                 }
             }
             continuation.finish()
         } catch {
+            trace("receive failed: \(error.localizedDescription)")
             continuation.finish(throwing: error)
         }
+    }
+
+    private func decodePushMessage(_ data: Data) -> PushMessage? {
+        try? JSONDecoder().decode(PushMessage.self, from: data)
+    }
+
+    private func trace(_ message: String) {
+        guard tracePush else {
+            return
+        }
+        NSLog("[bifrost-native-push] %@", message)
     }
 
     private func makePushURL(subscription: PushSubscription) throws -> URL {
@@ -148,6 +173,9 @@ public actor PushClient {
         if subscription.needOverview {
             items.append(URLQueryItem(name: "need_overview", value: "true"))
         }
+        if subscription.needMetrics {
+            items.append(URLQueryItem(name: "need_metrics", value: "true"))
+        }
         if subscription.needValues {
             items.append(URLQueryItem(name: "need_values", value: "true"))
         }
@@ -157,6 +185,9 @@ public actor PushClient {
         if !subscription.settingsScopes.isEmpty {
             items.append(URLQueryItem(name: "settings_scopes", value: subscription.settingsScopes.joined(separator: ",")))
         }
+        if let metricsIntervalMs = subscription.metricsIntervalMs {
+            items.append(URLQueryItem(name: "metrics_interval_ms", value: "\(metricsIntervalMs)"))
+        }
         return items
     }
 
@@ -164,6 +195,7 @@ public actor PushClient {
         var payload: [String: Any] = [
             "need_traffic": subscription.needTraffic,
             "need_overview": subscription.needOverview,
+            "need_metrics": subscription.needMetrics,
             "need_values": subscription.needValues,
             "need_scripts": subscription.needScripts,
         ]
@@ -179,6 +211,36 @@ public actor PushClient {
         if !subscription.settingsScopes.isEmpty {
             payload["settings_scopes"] = subscription.settingsScopes
         }
+        if let metricsIntervalMs = subscription.metricsIntervalMs {
+            payload["metrics_interval_ms"] = metricsIntervalMs
+        }
         return payload
+    }
+}
+
+private extension PushMessage {
+    var traceType: String {
+        switch self {
+        case .connected:
+            return "connected"
+        case .trafficDelta:
+            return "traffic_delta"
+        case .trafficDeleted:
+            return "traffic_deleted"
+        case .overviewUpdate:
+            return "overview_update"
+        case .metricsUpdate:
+            return "metrics_update"
+        case .valuesUpdate:
+            return "values_update"
+        case .settingsUpdate:
+            return "settings_update"
+        case .breakpointSettingsUpdated:
+            return "breakpoint_settings_updated"
+        case .disconnect:
+            return "disconnect"
+        case .ignored(let type):
+            return "ignored:\(type)"
+        }
     }
 }

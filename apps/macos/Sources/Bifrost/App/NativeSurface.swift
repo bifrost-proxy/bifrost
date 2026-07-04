@@ -2,42 +2,79 @@ import SwiftUI
 
 struct NativePageScaffold<HeaderAccessory: View, Content: View>: View {
     let title: String
+    let contentFillsAvailableHeight: Bool
     @ViewBuilder var headerAccessory: HeaderAccessory
     @ViewBuilder var content: Content
 
     init(
         title: String,
+        contentFillsAvailableHeight: Bool = false,
         @ViewBuilder headerAccessory: () -> HeaderAccessory,
         @ViewBuilder content: () -> Content
     ) {
         self.title = title
+        self.contentFillsAvailableHeight = contentFillsAvailableHeight
         self.headerAccessory = headerAccessory()
         self.content = content()
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 22) {
-                HStack(spacing: 12) {
-                    Text(title)
-                        .font(.system(size: 30, weight: .bold))
-                    headerAccessory
+        GeometryReader { proxy in
+            let horizontalPadding = pageHorizontalPadding(for: proxy.size.width)
+            if contentFillsAvailableHeight {
+                pageStack
+                    .padding(.horizontal, horizontalPadding)
+                    .padding(.bottom, 36)
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .topLeading)
+            } else {
+                ScrollView {
+                    pageStack
+                        .padding(.horizontal, horizontalPadding)
+                        .padding(.bottom, 36)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
                 }
-                .padding(.top, 20)
-                content
             }
-            .padding(.horizontal, 36)
-            .padding(.bottom, 36)
-            .frame(maxWidth: 1180, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSurface.content)
     }
+
+    private var pageStack: some View {
+        VStack(alignment: .leading, spacing: 11) {
+            HStack(spacing: 12) {
+                Text(title)
+                    .font(.system(size: 30, weight: .bold))
+                headerAccessory
+            }
+            .padding(.top, 10)
+            content
+                .frame(
+                    maxWidth: .infinity,
+                    maxHeight: contentFillsAvailableHeight ? .infinity : nil,
+                    alignment: .topLeading
+                )
+        }
+    }
+
+    private func pageHorizontalPadding(for width: CGFloat) -> CGFloat {
+        if width < 720 {
+            return 20
+        }
+        if width < 980 {
+            return 28
+        }
+        return 36
+    }
 }
 
 extension NativePageScaffold where HeaderAccessory == EmptyView {
-    init(title: String, @ViewBuilder content: () -> Content) {
-        self.init(title: title, headerAccessory: { EmptyView() }, content: content)
+    init(title: String, contentFillsAvailableHeight: Bool = false, @ViewBuilder content: () -> Content) {
+        self.init(
+            title: title,
+            contentFillsAvailableHeight: contentFillsAvailableHeight,
+            headerAccessory: { EmptyView() },
+            content: content
+        )
     }
 }
 
@@ -130,6 +167,26 @@ struct CompactFact: View {
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(AppSurface.subtleFill, in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+struct AdaptiveFactGrid<Content: View>: View {
+    var minimum: CGFloat = 118
+    var maximum: CGFloat = 220
+    var spacing: CGFloat = 10
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        LazyVGrid(
+            columns: [
+                GridItem(.adaptive(minimum: minimum, maximum: maximum), spacing: spacing, alignment: .topLeading)
+            ],
+            alignment: .leading,
+            spacing: spacing
+        ) {
+            content
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

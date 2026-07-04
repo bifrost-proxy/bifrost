@@ -348,7 +348,9 @@ fn run_cli_main() {
             commands::handle_upgrade_background(target, source);
             Ok(())
         }
-        Some(Commands::NativeApp { action }) => commands::handle_native_app_command(action),
+        Some(Commands::NativeApp { action }) | Some(Commands::App { action }) => {
+            commands::handle_native_app_command(action)
+        }
         Some(Commands::InstallSkill {
             tool,
             dir,

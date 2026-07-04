@@ -129,6 +129,23 @@ func runSidecarConfigurationChecks() async throws {
     try checkEqual(snapshot.running, true, "status snapshot should preserve running=true")
     try checkEqual(snapshot.listener?.port, 9900, "status snapshot should decode listener port")
     try checkEqual(snapshot.dataDir, "/Users/tester/.bifrost", "status snapshot should decode shared default data dir")
+
+    let matchingStatusJSON = Data("""
+    {"schema_version":1,"running":true,"listener":{"host":"0.0.0.0","port":9900},"data_dir":"/tmp/bifrost-data"}
+    """.utf8)
+    let matchingSnapshot = try await manager.decodeStatusSnapshot(from: matchingStatusJSON)
+    let acceptsMatchingDataDirectory = await manager.statusSnapshotMatchesConfiguredDataDirectory(matchingSnapshot)
+    let rejectsDifferentDataDirectory = await manager.statusSnapshotMatchesConfiguredDataDirectory(snapshot)
+    try checkEqual(
+        acceptsMatchingDataDirectory,
+        true,
+        "native app should be allowed to mount a running service for the configured default data directory"
+    )
+    try checkEqual(
+        rejectsDifferentDataDirectory,
+        false,
+        "native app must not mount a running service from a different data directory"
+    )
 }
 
 func runAdminModelDecodingChecks() throws {

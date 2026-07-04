@@ -197,10 +197,17 @@ pub struct SyncManager {
     local_callback_url: String,
     state_file: PathBuf,
     state: Mutex<SyncStateFile>,
+    http_client: Mutex<Option<CachedSyncHttpClient>>,
     sync_lock: AsyncMutex<()>,
     login_prompt: Mutex<LoginPromptState>,
     runtime: RwLock<SyncRuntimeState>,
     wake: Notify,
+}
+
+#[derive(Clone)]
+struct CachedSyncHttpClient {
+    connect_timeout_ms: u64,
+    client: SyncHttpClient,
 }
 
 impl SyncManager {
@@ -226,6 +233,7 @@ impl SyncManager {
             local_callback_url: format!("http://127.0.0.1:{admin_port}/login.html"),
             state_file,
             state: Mutex::new(state),
+            http_client: Mutex::new(None),
             sync_lock: AsyncMutex::new(()),
             login_prompt: Mutex::new(LoginPromptState::default()),
             runtime: RwLock::new(SyncRuntimeState::default()),
@@ -283,7 +291,7 @@ impl SyncManager {
 
     pub async fn login_url(&self, callback_url: &str) -> Result<String> {
         let config = self.config_manager.config().await;
-        let client = SyncHttpClient::new(&config.sync)?;
+        let client = self.http_client(&config.sync)?;
         Ok(client.login_url(&config.sync, callback_url))
     }
 
@@ -351,7 +359,7 @@ impl SyncManager {
             .user
             .clone()
             .ok_or_else(|| BifrostError::Config("sync user missing".to_string()))?;
-        let client = SyncHttpClient::new(&config.sync)?;
+        let client = self.http_client(&config.sync)?;
         let mut envs = client
             .search_envs(&config.sync, &token, &user.user_id)
             .await?;
@@ -424,7 +432,7 @@ impl SyncManager {
             .token
             .clone()
             .ok_or_else(|| BifrostError::Config("sync session token missing".to_string()))?;
-        let client = SyncHttpClient::new(&config.sync)?;
+        let client = self.http_client(&config.sync)?;
         client
             .proxy_forward(&config.sync, &token, method, path, query, body)
             .await
@@ -434,7 +442,7 @@ impl SyncManager {
         let config = self.config_manager.config().await;
         let token = { self.state.lock().token.clone() };
         if let Some(token) = token {
-            let client = SyncHttpClient::new(&config.sync)?;
+            let client = self.http_client(&config.sync)?;
             let _ = client.logout(&config.sync, &token).await;
         }
         {
@@ -467,7 +475,7 @@ impl SyncManager {
             });
         }
 
-        let client = SyncHttpClient::new(&config.sync)?;
+        let client = self.http_client(&config.sync)?;
         let reachable = client.probe_reachable(&config.sync).await;
         if !reachable {
             return Ok(SyncOnceResult {
@@ -607,7 +615,7 @@ impl SyncManager {
             return Ok(());
         }
 
-        let client = SyncHttpClient::new(&config.sync)?;
+        let client = self.http_client(&config.sync)?;
         let reachable = client.probe_reachable(&config.sync).await;
         tracing::debug!(
             target: "bifrost_sync::manager",
@@ -752,7 +760,7 @@ impl SyncManager {
                 return Ok(());
             }
 
-            let client = SyncHttpClient::new(&config.sync)?;
+            let client = self.http_client(&config.sync)?;
             let reachable = client.probe_reachable(&config.sync).await;
             tracing::debug!(
                 target: "bifrost_sync::manager",
@@ -848,11 +856,31 @@ impl SyncManager {
             return Ok(false);
         }
 
-        let client = SyncHttpClient::new(sync_config)?;
+        let client = self.http_client(sync_config)?;
         let login_url = client.login_url_with_reauth(sync_config, &self.local_callback_url);
         open_url_in_browser(&login_url)?;
         self.login_prompt.lock().last_opened_at = Some(Utc::now());
         Ok(true)
+    }
+
+    fn http_client(&self, sync_config: &SyncConfig) -> Result<SyncHttpClient> {
+        let connect_timeout_ms = sync_config.connect_timeout_ms.max(500);
+        {
+            let cache = self.http_client.lock();
+            if let Some(cache) = cache
+                .as_ref()
+                .filter(|cache| cache.connect_timeout_ms == connect_timeout_ms)
+            {
+                return Ok(cache.client.clone());
+            }
+        }
+
+        let client = SyncHttpClient::new(sync_config)?;
+        *self.http_client.lock() = Some(CachedSyncHttpClient {
+            connect_timeout_ms,
+            client: client.clone(),
+        });
+        Ok(client)
     }
 
     async fn sync_rules(
@@ -1525,6 +1553,45 @@ mod tests {
             .unwrap();
         let manager = SyncManager::new(config_manager.clone(), 9900).unwrap();
         (temp_dir, config_manager, manager)
+    }
+
+    #[tokio::test]
+    async fn sync_manager_reuses_http_client_until_timeout_changes() {
+        let (_temp_dir, config_manager, manager) =
+            sync_manager_for_remote("http://127.0.0.1:9").await;
+        let config = config_manager.config().await;
+
+        let _first = manager.http_client(&config.sync).unwrap();
+        assert_eq!(
+            manager
+                .http_client
+                .lock()
+                .as_ref()
+                .map(|cache| cache.connect_timeout_ms),
+            Some(5_000)
+        );
+
+        let _second = manager.http_client(&config.sync).unwrap();
+        assert_eq!(
+            manager
+                .http_client
+                .lock()
+                .as_ref()
+                .map(|cache| cache.connect_timeout_ms),
+            Some(5_000)
+        );
+
+        let mut next_sync_config = config.sync.clone();
+        next_sync_config.connect_timeout_ms = 7_000;
+        let _third = manager.http_client(&next_sync_config).unwrap();
+        assert_eq!(
+            manager
+                .http_client
+                .lock()
+                .as_ref()
+                .map(|cache| cache.connect_timeout_ms),
+            Some(7_000)
+        );
     }
 
     fn read_dry_run_urls(path: &std::path::Path) -> Vec<String> {

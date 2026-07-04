@@ -3,6 +3,30 @@ import AppKit
 import Foundation
 import SwiftUI
 
+enum RuleMovePlacement {
+    case before
+    case after
+}
+
+enum NativeAppUpdateState: Equatable {
+    case idle
+    case available(latestVersion: String)
+    case installing(latestVersion: String)
+    case restarting(latestVersion: String)
+    case failed(message: String, latestVersion: String?)
+}
+
+private enum NativeAppUpdateError: LocalizedError {
+    case installTimedOut(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .installTimedOut(let message):
+            "Native app installation timed out: \(message)"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private enum TrafficSyncPolicy {
@@ -10,11 +34,19 @@ final class AppModel: ObservableObject {
         static let historyBatchLimit = 500
         static let maxNativeRecords = 240
         static let maxPendingIds = 500
+        static let trafficDeltaFlushDelayNanoseconds: UInt64 = 500_000_000
+        static let metricsPublishInterval: TimeInterval = 1.0
+        static let activityAppMetricsRefreshInterval: TimeInterval = 10.0
+        static let fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0
+        static let fallbackPollingIntervalNanoseconds: UInt64 = 8_000_000_000
+        static let realtimeEventPublishInterval: TimeInterval = 30.0
+        static let subscriptionDebounceNanoseconds: UInt64 = 200_000_000
+        static let realtimeMetricsIntervalMs = 1_000
     }
 
     @Published var sidecarState: SidecarState = .stopped
     @Published var selectedSidebarItem: SidebarItem = .activity
-    @Published var colorSchemeMode: ColorSchemeMode = .light
+    @Published var colorSchemeMode: ColorSchemeMode = .system
     @Published var isFilterPanelCollapsed = false
     @Published var isDetailPanelCollapsed = false
     @Published var networkToolbarFilters = NetworkToolbarFilters()
@@ -28,6 +60,12 @@ final class AppModel: ObservableObject {
     @Published var overview: SystemOverview?
     @Published var trafficRecords: [TrafficRecordSummary] = []
     @Published var rules: [RuleSummary] = []
+    @Published var ruleGroups: [RuleGroup] = []
+    @Published var selectedRuleGroupID: String?
+    @Published var activeRuleGroupName: String?
+    @Published var activeRuleGroupWritable = false
+    @Published var isLoadingRuleGroups = false
+    @Published var activeRulesSummary: ActiveRulesSummary?
     @Published var values: [ValueItem] = []
     @Published var selectedRuleName: String?
     @Published var selectedRuleDetail: RuleDetail?
@@ -44,17 +82,25 @@ final class AppModel: ObservableObject {
     @Published var selectedScriptDraft = ""
     @Published var isSavingScript = false
     @Published var systemProxyStatus: SystemProxyStatus?
+    @Published var systemProxyLaunchdStatus: SystemProxyLaunchdStatus?
+    @Published var cliProxyStatus: CliProxyStatus?
+    @Published var proxyAddressInfo: ProxyAddressInfo?
+    @Published var syncStatus: SyncStatus?
+    @Published var performanceConfig: PerformanceConfigResponse?
     @Published var tlsConfig: TlsConfig?
     @Published var breakpointSettings: BreakpointSettings?
     @Published var dataError: String?
     @Published var isLoadingData = false
     @Published var isTogglingSystemProxy = false
+    @Published var isTogglingSystemProxyLaunchd = false
+    @Published var isTogglingInjectBifrostBadge = false
     @Published var isTogglingTls = false
     @Published var isTogglingBreakpoint = false
     @Published var realtimeState: RealtimeConnectionState = .disconnected
     @Published var realtimeClientId: Int?
     @Published var realtimeFallbackActive = false
     @Published var lastRealtimeEventAt: Date?
+    @Published var nativeAppUpdateState: NativeAppUpdateState = .idle
     @Published private(set) var activityClientAppCounts: [(name: String, count: Int)] = []
     @Published private(set) var activityClientIpCounts: [(name: String, count: Int)] = []
     @Published private(set) var activityRuleHitCount = 0
@@ -68,15 +114,26 @@ final class AppModel: ObservableObject {
     private var trafficDeltaFlushTask: Task<Void, Never>?
     private var trafficHistoryTask: Task<Void, Never>?
     private var nativeUpdateTask: Task<Void, Never>?
+    private var nativeUpdateInstallTask: Task<Void, Never>?
     private var ruleOrderSaveTask: Task<Void, Never>?
+    private var realtimeSubscriptionTask: Task<Void, Never>?
+    private var activityAppMetricsTask: Task<Void, Never>?
     private var promptedNativeUpdateVersions = Set<String>()
     private var pendingTrafficInserts: [TrafficRecordSummary] = []
     private var pendingTrafficUpdates: [TrafficRecordSummary] = []
+    private var pendingMetricsUpdate: SystemOverview.Metrics?
+    private var metricsPublishTask: Task<Void, Never>?
+    private var lastMetricsPublishAt = Date.distantPast
+    private var lastActivityAppMetricsRefreshAt = Date.distantPast
+    private var lastRealtimeEventPublishAt = Date.distantPast
+    private var lastRealtimeSubscription: PushSubscription?
+    private var pendingRealtimeSubscription: PushSubscription?
     private var trafficServerTotal = 0
     private var trafficServerSequence: Int?
     private var trafficHasMore = false
     private var trafficOldestSequence: Int?
     private var pendingTrafficIds = Set<String>()
+    private var interfaceActive = true
 
     init() {
         if let binaryPath = SidecarResolver.resolveBundledBinary()
@@ -92,11 +149,134 @@ final class AppModel: ObservableObject {
     }
 
     func openWebUI() {
-        NSWorkspace.shared.open(adminURL.appendingPathComponent("_bifrost"))
+        NSWorkspace.shared.open(webUIURL())
+    }
+
+    func openGroupsWebUI() {
+        NSWorkspace.shared.open(webUIURL(path: "groups"))
+    }
+
+    func webUIURL(path: String? = nil) -> URL {
+        let root = adminURL.appendingPathComponent("_bifrost")
+        guard let path, !path.isEmpty else {
+            return root
+        }
+        return root.appendingPathComponent(path)
+    }
+
+    var canShowGroupManagement: Bool {
+        syncStatus?.enabled == true
+            && syncStatus?.hasSession == true
+            && syncStatus?.authorized == true
+    }
+
+    var canShowRuleGroupSwitcher: Bool {
+        canShowGroupManagement
+    }
+
+    var isGroupRulesMode: Bool {
+        selectedRuleGroupID != nil
+    }
+
+    var ruleScopeTitle: String {
+        if let selectedRuleGroupID {
+            return activeRuleGroupName
+                ?? ruleGroups.first { $0.id == selectedRuleGroupID }?.name
+                ?? "Group Rules"
+        }
+        return "My Rules"
+    }
+
+    var sortedRuleGroups: [RuleGroup] {
+        ruleGroups.sorted {
+            ($0.permissionRank, $0.name.localizedLowercase) < ($1.permissionRank, $1.name.localizedLowercase)
+        }
+    }
+
+    var canEditCurrentRuleScope: Bool {
+        !isGroupRulesMode || activeRuleGroupWritable
+    }
+
+    var canCreateRuleInCurrentScope: Bool {
+        canEditCurrentRuleScope
+    }
+
+    var canEditSelectedRuleContent: Bool {
+        guard selectedRuleDetail != nil else {
+            return false
+        }
+        return canEditCurrentRuleScope && selectedRuleDetail?.canEditContent != false
+    }
+
+    var canToggleSelectedRule: Bool {
+        guard let detail = selectedRuleDetail else {
+            return false
+        }
+        if isDefaultRule(detail.name) {
+            return false
+        }
+        return canEditCurrentRuleScope && detail.canDisable != false
+    }
+
+    var canRenameSelectedRule: Bool {
+        guard let detail = selectedRuleDetail else {
+            return false
+        }
+        if isDefaultRule(detail.name) || isGroupRulesMode {
+            return false
+        }
+        return canEditCurrentRuleScope && detail.canRename != false
+    }
+
+    var canDeleteSelectedRule: Bool {
+        guard let detail = selectedRuleDetail else {
+            return false
+        }
+        if isDefaultRule(detail.name) {
+            return false
+        }
+        return canEditCurrentRuleScope && detail.canDelete != false
+    }
+
+    var visibleSidebarItems: [SidebarItem] {
+        SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)
+    }
+
+    func ensureSelectedSidebarItemVisible() {
+        if !visibleSidebarItems.contains(selectedSidebarItem) {
+            selectedSidebarItem = .overview
+        }
+    }
+
+    func setInterfaceActive(_ active: Bool) {
+        guard interfaceActive != active else {
+            return
+        }
+        interfaceActive = active
+        if !active {
+            activityAppMetricsTask?.cancel()
+            activityAppMetricsTask = nil
+            metricsPublishTask?.cancel()
+            metricsPublishTask = nil
+            pendingMetricsUpdate = nil
+        } else {
+            flushPendingMetricsUpdate()
+            scheduleActivityAppMetricsRefresh(force: true)
+        }
+    }
+
+    func refreshSyncStatus() async {
+        do {
+            assignIfChanged(&syncStatus, try await BifrostClient(baseURL: adminURL).fetchSyncStatus())
+            ensureSelectedSidebarItemVisible()
+            assignIfChanged(&dataError, nil)
+        } catch {
+            assignIfChanged(&dataError, error.localizedDescription)
+        }
     }
 
     func ensureService() async {
-        if case .running = sidecarState {
+        if case .running(_, _) = sidecarState {
             return
         }
         if case .starting = sidecarState {
@@ -158,22 +338,16 @@ final class AppModel: ObservableObject {
             let client = try BifrostClient(baseURL: adminURL)
             let version = try await client.fetchVersionCheck(forceRefresh: forceRefresh)
             guard version.hasUpdate, let latest = version.latestVersion else {
+                if case .available = nativeAppUpdateState {
+                    nativeAppUpdateState = .idle
+                }
                 return
             }
-            guard !promptedNativeUpdateVersions.contains(latest) else {
+            guard !promptedNativeUpdateVersions.contains(latest) || forceRefresh else {
                 return
             }
             promptedNativeUpdateVersions.insert(latest)
-
-            let shouldInstall = await confirmNativeAppUpdate(latestVersion: latest)
-            guard shouldInstall else {
-                return
-            }
-            let install = try await client.installNativeApp()
-            await promptNativeAppRestart(
-                latestVersion: latest,
-                installedAppPath: install.status.installPath
-            )
+            nativeAppUpdateState = .available(latestVersion: latest)
         } catch {
             #if DEBUG
             print("Native app update check failed: \(error.localizedDescription)")
@@ -181,37 +355,100 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func confirmNativeAppUpdate(latestVersion: String) async -> Bool {
-        await MainActor.run {
-            let alert = NSAlert()
-            alert.messageText = "Bifrost Native App Update Available"
-            alert.informativeText = "Version \(latestVersion) is ready. Install it now?"
-            alert.addButton(withTitle: "Install")
-            alert.addButton(withTitle: "Later")
-            return alert.runModal() == .alertFirstButtonReturn
+    func installNativeAppUpdate() {
+        guard nativeUpdateInstallTask == nil else {
+            return
+        }
+
+        let targetVersion: String?
+        switch nativeAppUpdateState {
+        case .available(let latest), .failed(_, let latest?):
+            targetVersion = latest
+        default:
+            targetVersion = nil
+        }
+        guard let targetVersion else {
+            return
+        }
+
+        nativeUpdateInstallTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.nativeUpdateInstallTask = nil }
+            await self.runNativeAppUpdateInstall(latestVersion: targetVersion)
         }
     }
 
-    private func promptNativeAppRestart(latestVersion: String, installedAppPath: String) async {
-        await MainActor.run {
-            let alert = NSAlert()
-            alert.messageText = "Restart Bifrost Native App"
-            alert.informativeText = "Version \(latestVersion) has been installed. Restart the app to finish updating."
-            alert.addButton(withTitle: "Restart")
-            alert.addButton(withTitle: "Later")
-            if alert.runModal() == .alertFirstButtonReturn {
-                let appURL = URL(fileURLWithPath: installedAppPath)
-                NSWorkspace.shared.open(appURL)
-                NSApp.terminate(nil)
+    private func runNativeAppUpdateInstall(latestVersion: String) async {
+        nativeAppUpdateState = .installing(latestVersion: latestVersion)
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            let install = try await client.installNativeApp()
+            let installedPath = install.status.installPath
+            if install.accepted {
+                let status = try await waitForNativeAppInstall(
+                    latestVersion: latestVersion,
+                    client: client
+                )
+                restartNativeApp(latestVersion: latestVersion, installedAppPath: status.installPath)
+            } else if install.status.installed && !install.status.needsInstall {
+                restartNativeApp(latestVersion: latestVersion, installedAppPath: installedPath)
+            } else {
+                nativeAppUpdateState = .failed(
+                    message: install.status.message,
+                    latestVersion: latestVersion
+                )
+            }
+        } catch {
+            nativeAppUpdateState = .failed(
+                message: error.localizedDescription,
+                latestVersion: latestVersion
+            )
+        }
+    }
+
+    private func waitForNativeAppInstall(
+        latestVersion: String,
+        client: BifrostClient
+    ) async throws -> NativeAppStatus {
+        var lastStatus: NativeAppStatus?
+        var lastError: Error?
+        for _ in 0..<90 {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            do {
+                let status = try await client.fetchNativeAppStatus()
+                lastStatus = status
+                if status.installed,
+                   !status.needsInstall,
+                   status.installedVersion == nil || status.installedVersion == latestVersion
+                {
+                    return status
+                }
+            } catch {
+                lastError = error
             }
         }
+
+        if let lastStatus {
+            throw NativeAppUpdateError.installTimedOut(lastStatus.message)
+        }
+        throw NativeAppUpdateError.installTimedOut(lastError?.localizedDescription ?? "Installation did not finish in time")
+    }
+
+    private func restartNativeApp(latestVersion: String, installedAppPath: String) {
+        nativeAppUpdateState = .restarting(latestVersion: latestVersion)
+        let appURL = URL(fileURLWithPath: installedAppPath)
+        NSWorkspace.shared.open(appURL)
+        NSApp.terminate(nil)
     }
 
     func refreshData(
         includeTraffic: Bool? = nil,
         includeOverview: Bool = true,
         includeRules: Bool = true,
-        includeSystemControls: Bool = true
+        includeActiveRulesSummary: Bool = false,
+        includeSystemControls: Bool = true,
+        includeActivityAppMetrics: Bool? = nil
     ) async {
         isLoadingData = true
         defer { isLoadingData = false }
@@ -221,14 +458,32 @@ final class AppModel: ObservableObject {
 
             var errors: [String] = []
             let shouldLoadTraffic = includeTraffic ?? selectedSidebarItem.needsTrafficRecords
+            let shouldLoadActiveRulesSummary = includeActiveRulesSummary || selectedSidebarItem == .activity
+            let shouldLoadActivityAppMetrics = includeActivityAppMetrics ?? (selectedSidebarItem == .activity)
             async let overviewResult: Result<SystemOverview, Error>? = includeOverview
                 ? Self.captureResult { try await client.fetchSystemOverview() }
                 : nil
-            async let rulesResult: Result<[RuleSummary], Error>? = includeRules
-                ? Self.captureResult { try await client.fetchRules() }
+            async let activityAppMetricsResult: Result<[AppMetrics], Error>? = shouldLoadActivityAppMetrics
+                ? Self.captureResult { try await client.fetchAppMetrics() }
+                : nil
+            async let activeRulesSummaryResult: Result<ActiveRulesSummary, Error>? = shouldLoadActiveRulesSummary
+                ? Self.captureResult { try await client.fetchActiveRulesSummary() }
                 : nil
             async let systemProxyResult: Result<SystemProxyStatus, Error>? = includeSystemControls
                 ? Self.captureResult { try await client.fetchSystemProxy() }
+                : nil
+            async let systemProxyLaunchdResult: Result<SystemProxyLaunchdStatus, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchSystemProxyLaunchd() }
+                : nil
+            async let cliProxyResult: Result<CliProxyStatus, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchCliProxy() }
+                : nil
+            async let proxyAddressResult: Result<ProxyAddressInfo, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchProxyAddress() }
+                : nil
+            async let syncStatusResult: Result<SyncStatus, Error> = Self.captureResult { try await client.fetchSyncStatus() }
+            async let performanceConfigResult: Result<PerformanceConfigResponse, Error>? = includeSystemControls
+                ? Self.captureResult { try await client.fetchPerformanceConfig() }
                 : nil
             async let tlsConfigResult: Result<TlsConfig, Error>? = includeSystemControls
                 ? Self.captureResult { try await client.fetchTlsConfig() }
@@ -240,7 +495,7 @@ final class AppModel: ObservableObject {
             if let result = await overviewResult {
                 switch result {
                 case .success(let overview):
-                    self.overview = overview
+                    assignIfChanged(&self.overview, overview)
                 case .failure(let error):
                     errors.append("Overview: \(error.localizedDescription)")
                 }
@@ -254,28 +509,99 @@ final class AppModel: ObservableObject {
                 }
             }
 
-            if let result = await rulesResult {
+            if let result = await activityAppMetricsResult {
                 switch result {
-                case .success(let rules):
-                    self.rules = rules
+                case .success(let metrics):
+                    lastActivityAppMetricsRefreshAt = Date()
+                    assignCountsIfChanged(&self.activityClientAppCounts, Self.appMetricsToCounts(metrics))
                 case .failure(let error):
+                    errors.append("App Metrics: \(error.localizedDescription)")
+                }
+            }
+
+            if includeRules {
+                do {
+                    try await loadRulesForCurrentScope(client: client)
+                } catch {
                     errors.append("Rules: \(error.localizedDescription)")
+                }
+            }
+
+            if let result = await activeRulesSummaryResult {
+                switch result {
+                case .success(let summary):
+                    assignIfChanged(&self.activeRulesSummary, summary)
+                case .failure(let error):
+                    errors.append("Active Rules: \(error.localizedDescription)")
                 }
             }
 
             if let result = await systemProxyResult {
                 switch result {
                 case .success(let status):
-                    self.systemProxyStatus = status
+                    assignIfChanged(&self.systemProxyStatus, status)
                 case .failure(let error):
                     errors.append("System Proxy: \(error.localizedDescription)")
+                }
+            }
+
+            if let result = await systemProxyLaunchdResult {
+                switch result {
+                case .success(let status):
+                    assignIfChanged(&self.systemProxyLaunchdStatus, status)
+                case .failure(let error):
+                    errors.append("System Proxy Cleanup: \(error.localizedDescription)")
+                }
+            }
+
+            if let result = await cliProxyResult {
+                switch result {
+                case .success(let status):
+                    assignIfChanged(&self.cliProxyStatus, status)
+                case .failure(let error):
+                    errors.append("CLI Proxy: \(error.localizedDescription)")
+                }
+            }
+
+            if let result = await proxyAddressResult {
+                switch result {
+                case .success(let info):
+                    assignIfChanged(&self.proxyAddressInfo, info)
+                case .failure(let error):
+                    errors.append("Proxy Address: \(error.localizedDescription)")
+                }
+            }
+
+            switch await syncStatusResult {
+            case .success(let status):
+                assignIfChanged(&self.syncStatus, status)
+                ensureSelectedSidebarItemVisible()
+                if canShowRuleGroupSwitcher {
+                    do {
+                        try await loadRuleGroups(client: client)
+                    } catch {
+                        errors.append("Groups: \(error.localizedDescription)")
+                    }
+                } else {
+                    clearRuleGroupScope()
+                }
+            case .failure(let error):
+                errors.append("Sync: \(error.localizedDescription)")
+            }
+
+            if let result = await performanceConfigResult {
+                switch result {
+                case .success(let config):
+                    assignIfChanged(&self.performanceConfig, config)
+                case .failure(let error):
+                    errors.append("Performance: \(error.localizedDescription)")
                 }
             }
 
             if let result = await tlsConfigResult {
                 switch result {
                 case .success(let config):
-                    self.tlsConfig = config
+                    assignIfChanged(&self.tlsConfig, config)
                 case .failure(let error):
                     errors.append("TLS: \(error.localizedDescription)")
                 }
@@ -284,7 +610,7 @@ final class AppModel: ObservableObject {
             if let result = await breakpointResult {
                 switch result {
                 case .success(let settings):
-                    self.breakpointSettings = settings
+                    assignIfChanged(&self.breakpointSettings, settings)
                 case .failure(let error):
                     errors.append("Breakpoint: \(error.localizedDescription)")
                 }
@@ -293,10 +619,10 @@ final class AppModel: ObservableObject {
             if includeRules && selectedRuleName == nil {
                 selectedRuleName = self.rules.first?.name
             }
-            self.dataError = errors.isEmpty ? nil : errors.joined(separator: " · ")
+            assignIfChanged(&self.dataError, errors.isEmpty ? nil : errors.joined(separator: " · "))
             updateRealtimeSubscription()
         } catch {
-            self.dataError = error.localizedDescription
+            assignIfChanged(&self.dataError, error.localizedDescription)
         }
     }
 
@@ -307,6 +633,109 @@ final class AppModel: ObservableObject {
             return .success(try await operation())
         } catch {
             return .failure(error)
+        }
+    }
+
+    private func assignIfChanged<T: Equatable>(_ storage: inout T, _ value: T) {
+        if storage != value {
+            storage = value
+        }
+    }
+
+    private func assignCountsIfChanged(_ storage: inout [(name: String, count: Int)], _ value: [(name: String, count: Int)]) {
+        guard storage.count == value.count else {
+            storage = value
+            return
+        }
+        for index in storage.indices where storage[index].name != value[index].name || storage[index].count != value[index].count {
+            storage = value
+            return
+        }
+    }
+
+    func refreshRuleGroups() async {
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            try await loadRuleGroups(client: client)
+        } catch {
+            dataError = error.localizedDescription
+        }
+    }
+
+    func searchRuleGroups(keyword: String) async -> [RuleGroup] {
+        guard canShowRuleGroupSwitcher else {
+            return []
+        }
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            let response = try await client.fetchRuleGroups(keyword: keyword, limit: 80)
+            return response.list.sorted {
+                ($0.permissionRank, $0.name.localizedLowercase) < ($1.permissionRank, $1.name.localizedLowercase)
+            }
+        } catch {
+            dataError = error.localizedDescription
+            return []
+        }
+    }
+
+    private func loadRuleGroups(client: BifrostClient) async throws {
+        guard canShowRuleGroupSwitcher else {
+            clearRuleGroupScope()
+            return
+        }
+        isLoadingRuleGroups = true
+        defer { isLoadingRuleGroups = false }
+        let response = try await client.fetchRuleGroups(limit: 80)
+        ruleGroups = response.list
+        if let selectedRuleGroupID,
+           !ruleGroups.contains(where: { $0.id == selectedRuleGroupID }) {
+            clearRuleGroupScope()
+            try await loadRulesForCurrentScope(client: client)
+        }
+        dataError = nil
+    }
+
+    private func clearRuleGroupScope() {
+        ruleGroups = []
+        selectedRuleGroupID = nil
+        activeRuleGroupName = nil
+        activeRuleGroupWritable = false
+    }
+
+    private func loadRulesForCurrentScope(client: BifrostClient) async throws {
+        if let groupID = selectedRuleGroupID {
+            let response = try await client.fetchGroupRules(groupID: groupID)
+            activeRuleGroupName = response.groupName
+            activeRuleGroupWritable = response.writable
+            rules = response.rules.map(\.ruleSummary)
+        } else {
+            activeRuleGroupName = nil
+            activeRuleGroupWritable = false
+            rules = try await client.fetchRules()
+        }
+    }
+
+    func selectRuleScope(groupID: String?) async {
+        guard selectedRuleGroupID != groupID else {
+            return
+        }
+        selectedRuleGroupID = groupID
+        activeRuleGroupName = groupID.flatMap { id in ruleGroups.first { $0.id == id }?.name }
+        activeRuleGroupWritable = false
+        selectedRuleName = nil
+        selectedRuleDetail = nil
+        ruleDraftContent = ""
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            try await loadRulesForCurrentScope(client: client)
+            if let firstName = sortedRules.first?.name {
+                await selectRule(firstName)
+            }
+            dataError = nil
+        } catch {
+            rules = []
+            dataError = error.localizedDescription
         }
     }
 
@@ -323,7 +752,7 @@ final class AppModel: ObservableObject {
     private func refreshSelectedSidebarData() async {
         switch selectedSidebarItem {
         case .activity:
-            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false)
+            await refreshData(includeTraffic: true, includeRules: false, includeActiveRulesSummary: true, includeSystemControls: false)
         case .overview:
             await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: true)
         case .rules:
@@ -334,7 +763,9 @@ final class AppModel: ObservableObject {
                 await selectRule(name)
             }
         case .network:
-            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: false)
+            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false)
+        case .groups:
+            await refreshSyncStatus()
         }
     }
 
@@ -355,10 +786,8 @@ final class AppModel: ObservableObject {
     func refreshRuleEditorDynamicData() async {
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            async let rulesResult = client.fetchRules()
             async let valuesResult = client.fetchValues()
             async let scriptsResult = client.fetchScripts()
-            rules = try await rulesResult
             values = try await valuesResult.values
             let scripts = try await scriptsResult
             scriptsByType = Dictionary(uniqueKeysWithValues: ScriptType.allCases.map { type in
@@ -386,6 +815,14 @@ final class AppModel: ObservableObject {
         name == "Default"
     }
 
+    func isRuleProtected(_ rule: RuleSummary) -> Bool {
+        isDefaultRule(rule.name) || !canEditCurrentRuleScope
+    }
+
+    func canReorderRule(_ rule: RuleSummary) -> Bool {
+        !isGroupRulesMode && !isDefaultRule(rule.name) && rule.canReorder != false
+    }
+
     var sortedRules: [RuleSummary] {
         rules.sorted {
             ($0.sortOrder ?? Int.max, $0.name) < ($1.sortOrder ?? Int.max, $1.name)
@@ -396,7 +833,11 @@ final class AppModel: ObservableObject {
         selectedRuleName = name
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            selectedRuleDetail = try await client.fetchRule(name: name)
+            if let groupID = selectedRuleGroupID {
+                selectedRuleDetail = try await client.fetchGroupRule(groupID: groupID, name: name).ruleDetail
+            } else {
+                selectedRuleDetail = try await client.fetchRule(name: name)
+            }
             ruleDraftContent = selectedRuleDetail?.content ?? ""
             dataError = nil
         } catch {
@@ -410,6 +851,10 @@ final class AppModel: ObservableObject {
         guard selectedRuleName == name else {
             return
         }
+        guard canEditSelectedRuleContent else {
+            dataError = "Current rule list is read-only."
+            return
+        }
         guard selectedRuleDetail?.content != content else {
             return
         }
@@ -418,7 +863,11 @@ final class AppModel: ObservableObject {
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            try await client.updateRule(name: name, content: content)
+            if let groupID = selectedRuleGroupID {
+                _ = try await client.updateGroupRule(groupID: groupID, name: name, content: content)
+            } else {
+                try await client.updateRule(name: name, content: content)
+            }
             if selectedRuleName == name {
                 selectedRuleDetail?.content = content
             }
@@ -439,13 +888,21 @@ final class AppModel: ObservableObject {
             dataError = "Rule name is required."
             return
         }
+        guard canCreateRuleInCurrentScope else {
+            dataError = "Current rule list is read-only."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            try await client.createRule(name: trimmed, content: "# New rule\n")
-            await refreshData()
+            if let groupID = selectedRuleGroupID {
+                _ = try await client.createGroupRule(groupID: groupID, name: trimmed, content: "# New rule\n")
+            } else {
+                try await client.createRule(name: trimmed, content: "# New rule\n")
+            }
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
             await selectRule(trimmed)
             dataError = nil
         } catch {
@@ -457,13 +914,21 @@ final class AppModel: ObservableObject {
         guard let name = selectedRuleName else {
             return
         }
+        guard canEditSelectedRuleContent else {
+            dataError = "Current rule list is read-only."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            try await client.updateRule(name: name, content: content)
-            await refreshData()
+            if let groupID = selectedRuleGroupID {
+                _ = try await client.updateGroupRule(groupID: groupID, name: name, content: content)
+            } else {
+                try await client.updateRule(name: name, content: content)
+            }
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
             await selectRule(name)
             dataError = nil
         } catch {
@@ -479,18 +944,26 @@ final class AppModel: ObservableObject {
             dataError = "Default rule must stay enabled."
             return
         }
+        guard canToggleSelectedRule else {
+            dataError = "Current rule list is read-only."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            try await client.setRuleEnabled(name: name, enabled: enabled)
-            await refreshData()
+            if let groupID = selectedRuleGroupID {
+                try await client.setGroupRuleEnabled(groupID: groupID, name: name, enabled: enabled)
+            } else {
+                try await client.setRuleEnabled(name: name, enabled: enabled)
+            }
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
             await selectRule(name)
             dataError = nil
         } catch {
             dataError = error.localizedDescription
-            await refreshData()
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
         }
     }
 
@@ -500,6 +973,10 @@ final class AppModel: ObservableObject {
         }
         guard !isDefaultRule(oldName) else {
             dataError = "Default rule cannot be renamed."
+            return
+        }
+        guard canRenameSelectedRule else {
+            dataError = "Current rule cannot be renamed."
             return
         }
         let trimmed = newName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -517,7 +994,7 @@ final class AppModel: ObservableObject {
             let client = try BifrostClient(baseURL: adminURL)
             try await client.renameRule(oldName: oldName, newName: trimmed)
             selectedRuleName = trimmed
-            await refreshData()
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
             await selectRule(trimmed)
             dataError = nil
         } catch {
@@ -533,17 +1010,25 @@ final class AppModel: ObservableObject {
             dataError = "Default rule cannot be deleted."
             return
         }
+        guard canDeleteSelectedRule else {
+            dataError = "Current rule cannot be deleted."
+            return
+        }
         isSavingRule = true
         defer { isSavingRule = false }
 
         do {
             let client = try BifrostClient(baseURL: adminURL)
-            try await client.deleteRule(name: name)
+            if let groupID = selectedRuleGroupID {
+                try await client.deleteGroupRule(groupID: groupID, name: name)
+            } else {
+                try await client.deleteRule(name: name)
+            }
             selectedRuleName = nil
             selectedRuleDetail = nil
             ruleDraftContent = ""
-            await refreshData()
-            if let nextName = rules.first?.name {
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false)
+            if let nextName = sortedRules.first?.name {
                 await selectRule(nextName)
             }
             dataError = nil
@@ -555,7 +1040,7 @@ final class AppModel: ObservableObject {
     func moveRules(from source: IndexSet, to destination: Int) {
         var ordered = sortedRules
         guard source.allSatisfy({ index in
-            ordered.indices.contains(index) && !isDefaultRule(ordered[index].name)
+            ordered.indices.contains(index) && canReorderRule(ordered[index])
         }) else {
             return
         }
@@ -564,6 +1049,40 @@ final class AppModel: ObservableObject {
             let defaultRule = ordered.remove(at: defaultIndex)
             ordered.insert(defaultRule, at: 0)
         }
+        rules = ordered.enumerated().map { offset, rule in
+            var updated = rule
+            updated.sortOrder = offset
+            return updated
+        }
+        scheduleRuleOrderSave(order: ordered.map(\.name))
+    }
+
+    func moveRule(named name: String, relativeTo targetName: String, placement: RuleMovePlacement) {
+        var ordered = sortedRules
+        guard let sourceIndex = ordered.firstIndex(where: { $0.name == name }),
+              let targetIndex = ordered.firstIndex(where: { $0.name == targetName }),
+              sourceIndex != targetIndex,
+              canReorderRule(ordered[sourceIndex]),
+              canReorderRule(ordered[targetIndex]) else {
+            return
+        }
+
+        let originalOrder = ordered.map(\.name)
+        let movedRule = ordered.remove(at: sourceIndex)
+        var insertionIndex = targetIndex + (placement == .after ? 1 : 0)
+        if sourceIndex < insertionIndex {
+            insertionIndex -= 1
+        }
+        insertionIndex = min(max(insertionIndex, 1), ordered.count)
+        ordered.insert(movedRule, at: insertionIndex)
+
+        guard ordered.map(\.name) != originalOrder else {
+            return
+        }
+        applyRuleOrder(ordered)
+    }
+
+    private func applyRuleOrder(_ ordered: [RuleSummary]) {
         rules = ordered.enumerated().map { offset, rule in
             var updated = rule
             updated.sortOrder = offset
@@ -584,6 +1103,9 @@ final class AppModel: ObservableObject {
     }
 
     private func saveRuleOrder(_ order: [String]) async {
+        guard !isGroupRulesMode else {
+            return
+        }
         do {
             try await BifrostClient(baseURL: adminURL).reorderRules(order)
             dataError = nil
@@ -815,6 +1337,47 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setSystemProxyLaunchdEnabled(_ enabled: Bool) async {
+        guard !isTogglingSystemProxyLaunchd else {
+            return
+        }
+        isTogglingSystemProxyLaunchd = true
+        defer { isTogglingSystemProxyLaunchd = false }
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            systemProxyLaunchdStatus = try await client.setSystemProxyLaunchd(enabled: enabled)
+            dataError = nil
+        } catch {
+            dataError = error.localizedDescription
+            await refreshData()
+        }
+    }
+
+    func setInjectBifrostBadgeEnabled(_ enabled: Bool) async {
+        guard !isTogglingInjectBifrostBadge else {
+            return
+        }
+        isTogglingInjectBifrostBadge = true
+        defer { isTogglingInjectBifrostBadge = false }
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            performanceConfig = try await client.updatePerformanceConfig(
+                UpdatePerformanceConfigRequest(injectBifrostBadge: enabled)
+            )
+            dataError = nil
+        } catch {
+            dataError = error.localizedDescription
+            await refreshData()
+        }
+    }
+
+    func copyToPasteboard(_ value: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(value, forType: .string)
+    }
+
     func setTlsInterceptionEnabled(_ enabled: Bool) async {
         guard !isTogglingTls else {
             return
@@ -883,6 +1446,7 @@ final class AppModel: ObservableObject {
             clearPendingTrafficDelta()
             trafficRecords = []
             trafficRecordIndexById = [:]
+            activityClientAppCounts = []
             refreshActivityTrafficSummaries()
             dataError = nil
             await refreshData()
@@ -933,7 +1497,7 @@ final class AppModel: ObservableObject {
     }
 
     var adminURL: URL {
-        if case .running(let port) = sidecarState {
+        if case .running(let port, _) = sidecarState {
             return URL(string: "http://127.0.0.1:\(port)")!
         }
         return URL(string: "http://127.0.0.1:9900")!
@@ -1145,16 +1709,27 @@ final class AppModel: ObservableObject {
         pollingTask?.cancel()
         trafficDeltaFlushTask?.cancel()
         trafficHistoryTask?.cancel()
+        realtimeSubscriptionTask?.cancel()
+        metricsPublishTask?.cancel()
+        activityAppMetricsTask?.cancel()
         trafficDeltaFlushTask = nil
         trafficHistoryTask = nil
+        realtimeSubscriptionTask = nil
+        metricsPublishTask = nil
+        activityAppMetricsTask = nil
+        pendingRealtimeSubscription = nil
+        lastRealtimeSubscription = nil
+        pendingMetricsUpdate = nil
+        lastMetricsPublishAt = .distantPast
+        lastActivityAppMetricsRefreshAt = .distantPast
+        lastRealtimeEventPublishAt = .distantPast
         pendingTrafficInserts.removeAll(keepingCapacity: true)
         pendingTrafficUpdates.removeAll(keepingCapacity: true)
-        realtimeState = .connecting
-        realtimeFallbackActive = false
+        setRealtimeState(.connecting)
 
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                try? await Task.sleep(nanoseconds: TrafficSyncPolicy.fallbackPollingIntervalNanoseconds)
                 guard let self else { return }
                 await self.refreshDataFromFallback()
             }
@@ -1185,12 +1760,42 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshDataFromFallback() async {
-        guard case .running = sidecarState else {
+        guard case .running(_, _) = sidecarState else {
             return
         }
-        realtimeFallbackActive = realtimeState != .connected
-        if realtimeFallbackActive {
-            await refreshSelectedSidebarData()
+        guard realtimeState != .connected else {
+            assignIfChanged(&realtimeFallbackActive, false)
+            return
+        }
+        assignIfChanged(&realtimeFallbackActive, true)
+        await refreshSelectedSidebarDataFromFallback()
+    }
+
+    private func refreshSelectedSidebarDataFromFallback() async {
+        switch selectedSidebarItem {
+        case .activity:
+            let shouldRefreshAppMetrics = Date().timeIntervalSince(lastActivityAppMetricsRefreshAt)
+                >= TrafficSyncPolicy.fallbackActivityAppMetricsRefreshInterval
+            await refreshData(
+                includeTraffic: true,
+                includeRules: false,
+                includeActiveRulesSummary: true,
+                includeSystemControls: false,
+                includeActivityAppMetrics: shouldRefreshAppMetrics
+            )
+        case .overview:
+            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: true, includeActivityAppMetrics: false)
+        case .rules:
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false, includeActivityAppMetrics: false)
+            await refreshRuleEditorDynamicData()
+            if let name = selectedRuleName,
+               selectedRuleDetail?.name != name {
+                await selectRule(name)
+            }
+        case .network:
+            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false, includeActivityAppMetrics: false)
+        case .groups:
+            await refreshSyncStatus()
         }
     }
 
@@ -1199,40 +1804,47 @@ final class AppModel: ObservableObject {
     }
 
     private func setRealtimeState(_ state: RealtimeConnectionState) {
-        realtimeState = state
-        realtimeFallbackActive = state != .connected
+        assignIfChanged(&realtimeState, state)
+        assignIfChanged(&realtimeFallbackActive, state != .connected)
     }
 
     private func setRealtimeError(_ message: String) {
-        realtimeState = .failed(message)
-        realtimeFallbackActive = true
+        assignIfChanged(&realtimeState, .failed(message))
+        assignIfChanged(&realtimeFallbackActive, true)
     }
 
     private func handlePushMessage(_ message: PushMessage) async {
-        lastRealtimeEventAt = Date()
+        noteRealtimeEvent()
         switch message {
         case .connected(let clientId):
-            realtimeClientId = clientId
-            realtimeState = .connected
-            realtimeFallbackActive = false
-            updateRealtimeSubscription()
+            assignIfChanged(&realtimeClientId, clientId)
+            setRealtimeState(.connected)
+            updateRealtimeSubscription(force: true)
+            scheduleActivityAppMetricsRefresh()
         case .trafficDelta(let data):
-            if selectedSidebarItem.needsTrafficRecords {
-                enqueueTrafficDelta(data)
+            guard selectedSidebarItem.needsTrafficRecords else {
+                return
             }
+            enqueueTrafficDelta(data)
         case .trafficDeleted(let data):
+            guard selectedSidebarItem.needsTrafficRecords else {
+                return
+            }
             flushPendingTrafficDelta()
             removeTraffic(ids: data.ids)
             updateRealtimeSubscription()
+        case .overviewUpdate(let data):
+            assignIfChanged(&overview, data)
+        case .metricsUpdate(let data):
+            applyMetricsUpdate(data.metrics)
         case .valuesUpdate:
             break
         case .settingsUpdate(let data):
             applySettingsUpdate(data)
         case .breakpointSettingsUpdated(let data):
-            breakpointSettings = BreakpointSettings(enabled: data.enabled, maxBodyBytes: data.maxBodyBytes)
+            assignIfChanged(&breakpointSettings, BreakpointSettings(enabled: data.enabled, maxBodyBytes: data.maxBodyBytes))
         case .disconnect(let reason):
-            realtimeState = .failed(reason ?? "Server requested refresh")
-            realtimeFallbackActive = true
+            setRealtimeError(reason ?? "Server requested refresh")
         case .ignored:
             break
         }
@@ -1247,7 +1859,7 @@ final class AppModel: ObservableObject {
             return
         }
         trafficDeltaFlushTask = Task { [weak self] in
-            try? await Task.sleep(nanoseconds: 250_000_000)
+            try? await Task.sleep(nanoseconds: TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds)
             if Task.isCancelled {
                 return
             }
@@ -1278,7 +1890,7 @@ final class AppModel: ObservableObject {
 
     private func mergeTrafficRecords(updates: [TrafficRecordSummary], inserts: [TrafficRecordSummary]) {
         if trafficRecordIndexById.count != trafficRecords.count {
-            trafficRecords = deduplicatedTrafficRecords(trafficRecords)
+            assignIfChanged(&trafficRecords, deduplicatedTrafficRecords(trafficRecords))
             rebuildTrafficRecordIndex()
         }
         var needsSort = false
@@ -1373,40 +1985,184 @@ final class AppModel: ObservableObject {
         let decoder = JSONDecoder()
         switch update.scope {
         case "system_proxy":
-            systemProxyStatus = try? decoder.decode(SystemProxyStatus.self, from: update.data)
+            if let value = try? decoder.decode(SystemProxyStatus.self, from: update.data) {
+                assignIfChanged(&systemProxyStatus, value)
+            }
+        case "cli_proxy":
+            if let value = try? decoder.decode(CliProxyStatus.self, from: update.data) {
+                assignIfChanged(&cliProxyStatus, value)
+            }
+        case "proxy_address":
+            if let value = try? decoder.decode(ProxyAddressInfo.self, from: update.data) {
+                assignIfChanged(&proxyAddressInfo, value)
+            }
         case "tls_config":
-            tlsConfig = try? decoder.decode(TlsConfig.self, from: update.data)
+            if let value = try? decoder.decode(TlsConfig.self, from: update.data) {
+                assignIfChanged(&tlsConfig, value)
+            }
         default:
             break
         }
     }
 
+    private func applyMetricsUpdate(_ metrics: SystemOverview.Metrics) {
+        guard overview?.metrics != metrics else {
+            return
+        }
+        scheduleActivityAppMetricsRefresh()
+        let now = Date()
+        guard now.timeIntervalSince(lastMetricsPublishAt) >= TrafficSyncPolicy.metricsPublishInterval else {
+            pendingMetricsUpdate = metrics
+            schedulePendingMetricsPublish()
+            return
+        }
+        publishMetrics(metrics, at: now)
+    }
+
+    private func schedulePendingMetricsPublish() {
+        guard metricsPublishTask == nil else {
+            return
+        }
+        let elapsed = Date().timeIntervalSince(lastMetricsPublishAt)
+        let delay = max(TrafficSyncPolicy.metricsPublishInterval - elapsed, 0)
+        metricsPublishTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            if Task.isCancelled {
+                return
+            }
+            self?.flushPendingMetricsUpdate()
+        }
+    }
+
+    private func flushPendingMetricsUpdate() {
+        metricsPublishTask = nil
+        guard let metrics = pendingMetricsUpdate else {
+            return
+        }
+        pendingMetricsUpdate = nil
+        guard overview?.metrics != metrics else {
+            return
+        }
+        publishMetrics(metrics, at: Date())
+    }
+
+    private func publishMetrics(_ metrics: SystemOverview.Metrics, at date: Date) {
+        var nextOverview = overview ?? SystemOverview()
+        nextOverview.metrics = metrics
+        assignIfChanged(&overview, nextOverview)
+        lastMetricsPublishAt = date
+    }
+
+    private func scheduleActivityAppMetricsRefresh(force: Bool = false) {
+        guard interfaceActive else {
+            return
+        }
+        guard selectedSidebarItem == .activity else {
+            return
+        }
+        guard activityAppMetricsTask == nil else {
+            return
+        }
+        let now = Date()
+        guard force || now.timeIntervalSince(lastActivityAppMetricsRefreshAt) >= TrafficSyncPolicy.activityAppMetricsRefreshInterval else {
+            return
+        }
+        lastActivityAppMetricsRefreshAt = now
+        activityAppMetricsTask = Task { [weak self] in
+            guard let self else {
+                return
+            }
+            defer {
+                self.activityAppMetricsTask = nil
+            }
+            do {
+                let client = try BifrostClient(baseURL: self.adminURL)
+                let metrics = try await client.fetchAppMetrics()
+                if Task.isCancelled {
+                    return
+                }
+                self.assignCountsIfChanged(&self.activityClientAppCounts, Self.appMetricsToCounts(metrics))
+            } catch {
+                // The overview metrics stream remains authoritative; app distribution refresh is best effort.
+            }
+        }
+    }
+
     private func makePushSubscription() -> PushSubscription {
-        let trafficEnabled = selectedSidebarItem.needsTrafficRecords
-        let lastRecord = trafficEnabled ? trafficRecords.last : nil
+        let lastRecord = trafficRecords.last
+        let needsTraffic = selectedSidebarItem.needsTrafficRecords
         return PushSubscription(
-            lastTrafficId: lastRecord?.id,
-            lastSequence: lastRecord?.seq,
-            pendingIds: trafficEnabled ? Array(pendingTrafficIds) : [],
-            needTraffic: trafficEnabled,
+            lastTrafficId: needsTraffic ? lastRecord?.id : nil,
+            lastSequence: needsTraffic ? lastRecord?.seq : nil,
+            pendingIds: needsTraffic ? Array(pendingTrafficIds) : [],
+            needTraffic: needsTraffic,
+            needOverview: true,
+            needMetrics: true,
             needValues: false,
             needScripts: false,
             settingsScopes: [
                 "system_proxy",
+                "cli_proxy",
+                "proxy_address",
                 "tls_config",
-            ]
+            ],
+            metricsIntervalMs: TrafficSyncPolicy.realtimeMetricsIntervalMs
         )
     }
 
-    private func updateRealtimeSubscription() {
+    private func updateRealtimeSubscription(force: Bool = false) {
         guard realtimeState == .connected,
               let pushClient else {
             return
         }
         let subscription = makePushSubscription()
+        guard force || subscription != lastRealtimeSubscription else {
+            return
+        }
+        pendingRealtimeSubscription = subscription
+        realtimeSubscriptionTask?.cancel()
+        if force {
+            flushPendingRealtimeSubscription(pushClient: pushClient)
+            return
+        }
+        realtimeSubscriptionTask = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: TrafficSyncPolicy.subscriptionDebounceNanoseconds)
+            if Task.isCancelled {
+                return
+            }
+            self?.flushPendingRealtimeSubscription()
+        }
+    }
+
+    private func flushPendingRealtimeSubscription() {
+        guard let pushClient else {
+            return
+        }
+        flushPendingRealtimeSubscription(pushClient: pushClient)
+    }
+
+    private func flushPendingRealtimeSubscription(pushClient: PushClient) {
+        realtimeSubscriptionTask = nil
+        guard let subscription = pendingRealtimeSubscription else {
+            return
+        }
+        pendingRealtimeSubscription = nil
+        guard subscription != lastRealtimeSubscription else {
+            return
+        }
+        lastRealtimeSubscription = subscription
         Task {
             try? await pushClient.send(subscription: subscription)
         }
+    }
+
+    private func noteRealtimeEvent() {
+        let now = Date()
+        guard now.timeIntervalSince(lastRealtimeEventPublishAt) >= TrafficSyncPolicy.realtimeEventPublishInterval else {
+            return
+        }
+        lastRealtimeEventPublishAt = now
+        assignIfChanged(&lastRealtimeEventAt, now)
     }
 
     private func rebuildTrafficRecordIndex() {
@@ -1435,13 +2191,9 @@ final class AppModel: ObservableObject {
     }
 
     private func refreshActivityTrafficSummaries() {
-        var apps: [String: Int] = [:]
         var ips: [String: Int] = [:]
         var ruleHits = 0
         for record in trafficRecords {
-            if let clientApp = record.clientApp, !clientApp.isEmpty {
-                apps[clientApp, default: 0] += 1
-            }
             if let clientIp = record.clientIp, !clientIp.isEmpty {
                 ips[clientIp, default: 0] += 1
             }
@@ -1449,9 +2201,25 @@ final class AppModel: ObservableObject {
                 ruleHits += 1
             }
         }
-        activityClientAppCounts = sortedCounts(apps)
-        activityClientIpCounts = sortedCounts(ips)
-        activityRuleHitCount = ruleHits
+        assignCountsIfChanged(&activityClientIpCounts, sortedCounts(ips))
+        assignIfChanged(&activityRuleHitCount, ruleHits)
+    }
+
+    private static func appMetricsToCounts(_ metrics: [AppMetrics]) -> [(name: String, count: Int)] {
+        metrics
+            .filter { !$0.appName.isEmpty && $0.requests > 0 }
+            .map { metric in
+                (
+                    name: metric.appName,
+                    count: metric.requests > UInt64(Int.max) ? Int.max : Int(metric.requests)
+                )
+            }
+            .sorted { lhs, rhs in
+                if lhs.count != rhs.count {
+                    return lhs.count > rhs.count
+                }
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+            }
     }
 
     private func sortedCounts(_ values: [String: Int]) -> [(name: String, count: Int)] {
@@ -1686,13 +2454,16 @@ struct NetworkToolbarFilters: Equatable, Sendable {
 }
 
 enum ColorSchemeMode: String, CaseIterable, Identifiable {
+    case system = "System"
     case light = "Light"
     case dark = "Dark"
 
     var id: String { rawValue }
 
-    var colorScheme: ColorScheme {
+    var colorScheme: ColorScheme? {
         switch self {
+        case .system:
+            return nil
         case .light:
             return .light
         case .dark:
@@ -1702,15 +2473,19 @@ enum ColorSchemeMode: String, CaseIterable, Identifiable {
 
     var next: ColorSchemeMode {
         switch self {
+        case .system:
+            return .light
         case .light:
             return .dark
         case .dark:
-            return .light
+            return .system
         }
     }
 
     var systemImage: String {
         switch self {
+        case .system:
+            return "circle.lefthalf.filled"
         case .light:
             return "sun.max"
         case .dark:

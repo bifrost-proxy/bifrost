@@ -59,6 +59,12 @@ create_dev_app_bundle() {
     install -m 755 "$sidecar_bin" "$contents_dir/Resources/bin/bifrost"
   fi
 
+  # Packaged apps must contain Contents/Resources/bin/bifrost unless --skip-sidecar is explicit.
+  if [[ "$SKIP_SIDECAR" -eq 0 && ! -x "$contents_dir/Resources/bin/bifrost" ]]; then
+    echo "missing bundled Bifrost core: $contents_dir/Resources/bin/bifrost" >&2
+    exit 1
+  fi
+
   if [[ -d "$resource_bundle" ]]; then
     cp -R "$resource_bundle" "$app_dir/Bifrost_Bifrost.bundle"
     cp -R "$resource_bundle" "$contents_dir/Resources/Bifrost_Bifrost.bundle"
