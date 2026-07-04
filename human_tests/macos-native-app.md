@@ -1085,7 +1085,7 @@
    ```
 2. 检查 Default 规则保护、拖拽排序、自动保存和 Rules 顶部按钮：
    ```bash
-   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); text=[app,main,rules,dash].join("\n"); required=["isDefaultRule","canReorderRule","moveRule(","reorderRules","autosaveSelectedRule","RuleAutoSaveState","autoSaveStatusText","onSave","window.isMovableByWindowBackground = false",".onDrag","onStartDrag()","NSItemProvider(object: rule.name as NSString)","onDrop"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing native rules interaction markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["List.onMove","RuleListResizeHandle","DragGesture(minimumDistance: 0)","RuleDragHandleView","mouseDownCanMoveWindow","beginDraggingSession"]; found=forbidden.select{|needle| rules.include?(needle)}; abort("forbidden rules drag/resize markers remain: #{found.join(", ")}") unless found.empty?; abort("overview manual refresh controls returned") if dash.include?("Button(\"刷新\"") || dash.include?("刷新设备") || dash.include?("重新生成 QR"); puts "macOS native rules drag reorder contract ok"'
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); chrome=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift")+File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift")+File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); text=[app,main,chrome,rules,dash].join("\n"); required=["isDefaultRule","canReorderRule","moveRule(","reorderRules","autosaveSelectedRule","RuleAutoSaveState","autoSaveStatusText","onSave","window.isMovable = false","window.isMovableByWindowBackground = false","let wasMovable = window.isMovable","window.isMovable = true","window.isMovable = wasMovable","struct WindowDragRegion","BifrostDragControlledWindow","override func performDrag(with event: NSEvent)","performExplicitDrag(from: self, event: event)","isExplicitDragAllowed(for: self)","object_setClass(window, BifrostDragControlledWindow.self)","acceptsFirstMouse(for event: NSEvent?) -> Bool","hitTest(_ point: NSPoint) -> NSView?","mouseDownCanMoveWindow: Bool {\n            false","RuleDragHandleView","RuleDragHandleNSView","mouseDownCanMoveWindow: Bool {\n        false","beginDraggingSession","NSDraggingItem(pasteboardWriter: ruleName as NSString)","onDrop"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing native rules interaction markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["List.onMove","RuleListResizeHandle","DragGesture(minimumDistance: 0)",".onDrag {","mouseDownCanMoveWindow: Bool {\n            true"]; found=forbidden.select{|needle| rules.include?(needle) || main.include?(needle)}; abort("forbidden rules drag/resize markers remain: #{found.join(", ")}") unless found.empty?; abort("overview manual refresh controls returned") if dash.include?("Button(\"刷新\"") || dash.include?("刷新设备") || dash.include?("重新生成 QR"); puts "macOS native rules drag reorder contract ok"'
    ```
 3. 执行设置数据 smoke，确认移除刷新按钮后页面切入数据仍可自动获取：
    ```bash
@@ -1094,18 +1094,19 @@
 
 **预期结果：**
 - AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且拖拽排序时不能移动 Default。
-- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序；主窗口不能开启全内容背景拖动，避免 SwiftUI 排序拖拽透传为窗口移动。
+- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序；主窗口默认必须设置 `isMovable = false` 且不能开启全内容背景拖动，`NSWindow.performDrag` 必须被 gate 拦截，只有左侧菜单背景和页面顶部空白背景的 `WindowDragRegion` 可以临时恢复 `isMovable` 并显式放行拖动窗口；中间内容区禁止拖动窗口；Rules 手柄必须显式声明 `mouseDownCanMoveWindow = false`。
 - Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
 - 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
 - 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
 
 **实际结果（2026-07-04）：**
-- 按用户反馈修复 Rules 拖拽排序不可用问题：将 `List.onMove` 改为三横线手柄 `onDrag` + 行 `onDrop`，drop 后调用 `AppModel.moveRule(named:relativeTo:placement:)` 立即更新本地顺序并 debounce 保存到 `/rules/reorder`。
+- 按用户反馈修复 Rules 拖拽排序不可用问题：将 `List.onMove` 改为三横线手柄拖拽源 + 行 `onDrop`，drop 后调用 `AppModel.moveRule(named:relativeTo:placement:)` 立即更新本地顺序并 debounce 保存到 `/rules/reorder`。
 - 执行源码合同扫描通过，输出 `macOS native rules drag reorder contract ok`。
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行真实服务端 no-op reorder 验证通过，输出 `rules=30 reorder_noop=ok first="Default" second="NextAgent双机协作a"`，确认 `/rules/reorder` 可写且未打乱当前规则优先级。
-- 2026-07-04：按用户反馈修复 Rules 列表拖拽时事件透传给窗口移动的问题；关闭全窗口背景拖动 `isMovableByWindowBackground`，保留 SwiftUI 三横线手柄 `onDrag` + 行级 `onDrop` 排序路径和 `/rules/reorder` 持久化。
+- 2026-07-04：按用户反馈修复 Rules 列表拖拽时事件透传给窗口移动的问题；窗口默认设置 `isMovable = false` 并关闭全窗口背景拖动 `isMovableByWindowBackground`，再用 `BifrostDragControlledWindow.performDrag` 拦截系统隐式标题栏拖动；只有 `WindowDragRegion` 会调用 `performExplicitDrag` 临时恢复 `isMovable` 并放行窗口拖动。Rules 三横线手柄改为 AppKit dragging source，显式 `mouseDownCanMoveWindow = false`、`acceptsFirstMouse = true` 和强 `hitTest`，保留行级 `onDrop` 和 `/rules/reorder` 持久化。
 - 2026-07-04：真实启动当前分支 `.build/Bifrost.app` 后在 Rules 页面拖拽 `a` 规则手柄；窗口坐标保持 `755,165,1257,1069` 未移动，服务端顺序从 `Default | NextAgent双机协作a | NextOncall双前端本地开发 | a ...` 变为 `Default | NextAgent双机协作a | a | NextOncall双前端本地开发 ...`，确认拖拽排序生效；随后调用 `/rules/reorder` 恢复原始顺序。
+- 2026-07-05：重新按根因收敛拖拽模型，补充 `window.isMovable = false` 默认门禁和 `WindowDragRegion` 强 hit-test；执行 `swift build --package-path apps/macos`、`swift run --package-path apps/macos BifrostNativeCoreChecks`、`swift run --package-path apps/macos Bifrost --check-release-scope`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-rule-editor-layout`、源码合同扫描、`git diff --check` 和 `/api/rules/reorder` no-op 写回均通过。
 
 ### TC-MNA-38：回归 - Native 深色主题不能残留浅色底板
 

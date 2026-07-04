@@ -54,7 +54,7 @@ struct PrimarySidebar: View, Equatable {
 
     var body: some View {
         VStack(spacing: 0) {
-            Spacer()
+            WindowDragRegion()
                 .frame(height: 54)
 
             List(items) { item in
@@ -79,7 +79,9 @@ struct PrimarySidebar: View, Equatable {
             .animation(.easeInOut(duration: 0.12), value: selection)
             .animation(.easeInOut(duration: 0.16), value: canShowGroupManagement)
 
-            Spacer(minLength: 12)
+            WindowDragRegion()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(minHeight: 12)
 
             Button {
                 toggleColorScheme()

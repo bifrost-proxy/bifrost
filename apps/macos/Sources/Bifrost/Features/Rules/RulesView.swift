@@ -1,3 +1,4 @@
+import AppKit
 import BifrostNativeCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -656,20 +657,100 @@ private struct RuleRow: View {
     @ViewBuilder
     private var dragHandle: some View {
         if canReorder {
-            Image(systemName: "line.3.horizontal")
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(.tertiary)
-                .frame(width: 24, height: 34)
-                .contentShape(Rectangle())
-                .help("Drag to reorder")
-                .onDrag {
-                    onStartDrag()
-                    return NSItemProvider(object: rule.name as NSString)
-                }
+            ZStack {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(.tertiary)
+                RuleDragHandleView(ruleName: rule.name, onStartDrag: onStartDrag)
+            }
+            .frame(width: 24, height: 34)
+            .contentShape(Rectangle())
+            .help("Drag to reorder")
         } else {
             Color.clear
                 .frame(width: 24, height: 34)
         }
+    }
+}
+
+private struct RuleDragHandleView: NSViewRepresentable {
+    let ruleName: String
+    let onStartDrag: () -> Void
+
+    func makeNSView(context: Context) -> RuleDragHandleNSView {
+        let view = RuleDragHandleNSView(frame: .zero)
+        view.ruleName = ruleName
+        view.onStartDrag = onStartDrag
+        return view
+    }
+
+    func updateNSView(_ nsView: RuleDragHandleNSView, context: Context) {
+        nsView.ruleName = ruleName
+        nsView.onStartDrag = onStartDrag
+    }
+}
+
+private final class RuleDragHandleNSView: NSView, NSDraggingSource {
+    var ruleName = ""
+    var onStartDrag: (() -> Void)?
+
+    override var mouseDownCanMoveWindow: Bool {
+        false
+    }
+
+    override var acceptsFirstResponder: Bool {
+        true
+    }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.clear.cgColor
+    }
+
+    required init?(coder: NSCoder) {
+        nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+        true
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        bounds.contains(point) ? self : nil
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard !ruleName.isEmpty else {
+            return
+        }
+        onStartDrag?()
+        let draggingItem = NSDraggingItem(pasteboardWriter: ruleName as NSString)
+        draggingItem.setDraggingFrame(bounds, contents: draggingImage())
+        beginDraggingSession(with: [draggingItem], event: event, source: self)
+    }
+
+    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
+        .move
+    }
+
+    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
+        true
+    }
+
+    private func draggingImage() -> NSImage {
+        let size = bounds.size == .zero ? NSSize(width: 24, height: 34) : bounds.size
+        let image = NSImage(size: size)
+        image.lockFocus()
+        NSColor.clear.setFill()
+        NSRect(origin: .zero, size: size).fill()
+        if let symbol = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: nil) {
+            symbol.size = NSSize(width: 13, height: 13)
+            let origin = NSPoint(x: (size.width - symbol.size.width) / 2, y: (size.height - symbol.size.height) / 2)
+            symbol.draw(at: origin, from: .zero, operation: .sourceOver, fraction: 0.65)
+        }
+        image.unlockFocus()
+        return image
     }
 }
 

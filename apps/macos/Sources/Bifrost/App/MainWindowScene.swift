@@ -1,4 +1,5 @@
 import AppKit
+import ObjectiveC
 import SwiftUI
 
 struct MainWindowScene: View {
@@ -35,6 +36,13 @@ struct MainWindowScene: View {
                 AppSurface.content
             }
             .frame(minWidth: 0, maxWidth: .infinity, maxHeight: .infinity)
+            .overlay(alignment: .topLeading) {
+                GeometryReader { proxy in
+                    WindowDragRegion()
+                        .frame(width: proxy.size.width, height: 38)
+                }
+                .frame(height: 38)
+            }
             .overlay(alignment: .topTrailing) {
                 NativeAppUpdateButton()
                     .padding(.top, 18)
@@ -198,13 +206,95 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
+            window.isMovable = false
             window.isMovableByWindowBackground = false
+            BifrostWindowDragController.install(on: window)
             window.styleMask.insert(.fullSizeContentView)
             if #available(macOS 11.0, *) {
                 window.titlebarSeparatorStyle = .none
             }
             window.isReleasedWhenClosed = false
         }
+    }
+}
+
+struct WindowDragRegion: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        DragRegionView(frame: .zero)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class DragRegionView: NSView {
+        override var mouseDownCanMoveWindow: Bool {
+            false
+        }
+
+        override var acceptsFirstResponder: Bool {
+            true
+        }
+
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            wantsLayer = true
+            layer?.backgroundColor = NSColor.clear.cgColor
+        }
+
+        required init?(coder: NSCoder) {
+            nil
+        }
+
+        override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
+            true
+        }
+
+        override func hitTest(_ point: NSPoint) -> NSView? {
+            bounds.contains(point) ? self : nil
+        }
+
+        override func mouseDown(with event: NSEvent) {
+            BifrostWindowDragController.performExplicitDrag(from: self, event: event)
+        }
+    }
+}
+
+final class BifrostDragControlledWindow: NSWindow {
+    override func performDrag(with event: NSEvent) {
+        guard BifrostWindowDragController.isExplicitDragAllowed(for: self) else {
+            return
+        }
+        super.performDrag(with: event)
+    }
+}
+
+@MainActor
+enum BifrostWindowDragController {
+    private static var explicitlyAllowedWindows = Set<ObjectIdentifier>()
+
+    static func install(on window: NSWindow) {
+        guard !(window is BifrostDragControlledWindow) else {
+            return
+        }
+        object_setClass(window, BifrostDragControlledWindow.self)
+    }
+
+    static func performExplicitDrag(from view: NSView, event: NSEvent) {
+        guard let window = view.window else {
+            return
+        }
+        let identifier = ObjectIdentifier(window)
+        let wasMovable = window.isMovable
+        window.isMovable = true
+        explicitlyAllowedWindows.insert(identifier)
+        defer {
+            explicitlyAllowedWindows.remove(identifier)
+            window.isMovable = wasMovable
+        }
+        window.performDrag(with: event)
+    }
+
+    static func isExplicitDragAllowed(for window: NSWindow) -> Bool {
+        explicitlyAllowedWindows.contains(ObjectIdentifier(window))
     }
 }
 

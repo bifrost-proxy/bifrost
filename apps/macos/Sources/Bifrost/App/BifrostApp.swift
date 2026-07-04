@@ -204,11 +204,14 @@ private enum MainWindowFallback {
                 .environmentObject(appModel)
         )
         traceNativeStartup("fallback creating NSWindow")
-        let window = NSWindow(contentViewController: controller)
+        let window = BifrostDragControlledWindow(contentViewController: controller)
         window.title = ""
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
         window.styleMask.insert(.fullSizeContentView)
+        window.isMovable = false
+        window.isMovableByWindowBackground = false
+        BifrostWindowDragController.install(on: window)
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 1280, height: 820))
         window.minSize = NSSize(width: 960, height: 720)
