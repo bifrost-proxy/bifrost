@@ -1,4 +1,3 @@
-import AppKit
 import BifrostNativeCore
 import SwiftUI
 import UniformTypeIdentifiers

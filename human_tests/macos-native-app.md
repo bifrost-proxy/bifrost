@@ -1085,10 +1085,7 @@
    ```
 2. 检查 Default 规则保护、拖拽排序、自动保存和 Rules 顶部按钮：
    ```bash
-   rg -n 'isDefaultRule|canReorderRule|moveRule\\(|reorderRules|autosaveSelectedRule|RuleAutoSaveState|onDrag|onDrop|Save|Revert|Button\\(\"刷新\"|刷新设备|重新生成 QR' \
-     apps/macos/Sources/Bifrost/App/AppModel.swift \
-     apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift \
-     apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); text=[app,main,rules,dash].join("\n"); required=["isDefaultRule","canReorderRule","moveRule(","reorderRules","autosaveSelectedRule","RuleAutoSaveState","autoSaveStatusText","onSave","window.isMovableByWindowBackground = false",".onDrag","onStartDrag()","NSItemProvider(object: rule.name as NSString)","onDrop"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing native rules interaction markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["List.onMove","RuleListResizeHandle","DragGesture(minimumDistance: 0)","RuleDragHandleView","mouseDownCanMoveWindow","beginDraggingSession"]; found=forbidden.select{|needle| rules.include?(needle)}; abort("forbidden rules drag/resize markers remain: #{found.join(", ")}") unless found.empty?; abort("overview manual refresh controls returned") if dash.include?("Button(\"刷新\"") || dash.include?("刷新设备") || dash.include?("重新生成 QR"); puts "macOS native rules drag reorder contract ok"'
    ```
 3. 执行设置数据 smoke，确认移除刷新按钮后页面切入数据仍可自动获取：
    ```bash
@@ -1097,7 +1094,7 @@
 
 **预期结果：**
 - AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且拖拽排序时不能移动 Default。
-- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序。
+- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序；主窗口不能开启全内容背景拖动，避免 SwiftUI 排序拖拽透传为窗口移动。
 - Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
 - 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
 - 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
@@ -1107,6 +1104,8 @@
 - 执行源码合同扫描通过，输出 `macOS native rules drag reorder contract ok`。
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行真实服务端 no-op reorder 验证通过，输出 `rules=30 reorder_noop=ok first="Default" second="NextAgent双机协作a"`，确认 `/rules/reorder` 可写且未打乱当前规则优先级。
+- 2026-07-04：按用户反馈修复 Rules 列表拖拽时事件透传给窗口移动的问题；关闭全窗口背景拖动 `isMovableByWindowBackground`，保留 SwiftUI 三横线手柄 `onDrag` + 行级 `onDrop` 排序路径和 `/rules/reorder` 持久化。
+- 2026-07-04：真实启动当前分支 `.build/Bifrost.app` 后在 Rules 页面拖拽 `a` 规则手柄；窗口坐标保持 `755,165,1257,1069` 未移动，服务端顺序从 `Default | NextAgent双机协作a | NextOncall双前端本地开发 | a ...` 变为 `Default | NextAgent双机协作a | a | NextOncall双前端本地开发 ...`，确认拖拽排序生效；随后调用 `/rules/reorder` 恢复原始顺序。
 
 ### TC-MNA-38：回归 - Native 深色主题不能残留浅色底板
 

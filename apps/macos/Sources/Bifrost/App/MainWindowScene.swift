@@ -198,7 +198,7 @@ private struct WindowChromeConfigurator: NSViewRepresentable {
             window.isOpaque = false
             window.backgroundColor = .clear
             window.hasShadow = true
-            window.isMovableByWindowBackground = true
+            window.isMovableByWindowBackground = false
             window.styleMask.insert(.fullSizeContentView)
             if #available(macOS 11.0, *) {
                 window.titlebarSeparatorStyle = .none
