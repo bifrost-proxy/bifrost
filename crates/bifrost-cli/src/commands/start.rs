@@ -100,6 +100,7 @@ pub(crate) const DETACHED_DAEMON_CHILD_ENV: &str = "BIFROST_DETACHED_DAEMON_CHIL
 const RULES_FILESYSTEM_FALLBACK_SCAN_INTERVAL: Duration = Duration::from_secs(30);
 const RULES_FILESYSTEM_DEBOUNCE_DELAY: Duration = Duration::from_millis(150);
 const BIFROST_RUNTIME_WORKER_STACK_SIZE: usize = 8 * 1024 * 1024;
+#[cfg(any(target_os = "macos", test))]
 const NATIVE_APP_DISABLE_INSTALL_PROMPT_ENV: &str = "BIFROST_NATIVE_APP_DISABLE_INSTALL_PROMPT";
 
 fn create_bifrost_runtime() -> bifrost_core::Result<tokio::runtime::Runtime> {
@@ -117,10 +118,12 @@ fn env_flag_enabled(value: Option<std::ffi::OsString>) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(target_os = "macos")]
 fn env_name_present(name: &str) -> bool {
     std::env::var_os(name).is_some()
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn native_app_install_prompt_disabled_by_env<F>(has_env: F) -> bool
 where
     F: Fn(&str) -> bool,
@@ -137,6 +140,7 @@ where
     .any(has_env)
 }
 
+#[cfg(target_os = "macos")]
 fn native_app_install_prompt_disabled() -> bool {
     native_app_install_prompt_disabled_by_env(env_name_present)
 }
