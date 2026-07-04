@@ -31,19 +31,22 @@ cat >"${SOURCE_APP}/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-DRY_RUN_OUTPUT="$("${BIFROST_BIN}" native-app install --source "${SOURCE_APP}" --install-dir "${INSTALL_DIR}" --dry-run)"
+DRY_RUN_OUTPUT="$("${BIFROST_BIN}" app install --source "${SOURCE_APP}" --install-dir "${INSTALL_DIR}" --dry-run)"
 echo "${DRY_RUN_OUTPUT}" | grep -q '"dry_run":true'
 test ! -e "${INSTALL_DIR}/Bifrost.app"
 
-"${BIFROST_BIN}" native-app install \
+"${BIFROST_BIN}" app install \
   --source "${SOURCE_APP}" \
   --install-dir "${INSTALL_DIR}" \
   --latest-version 9.9.9 \
   -y
 
 test -f "${INSTALL_DIR}/Bifrost.app/Contents/Info.plist"
-STATUS_JSON="$("${BIFROST_BIN}" native-app status --install-dir "${INSTALL_DIR}" --latest-version 9.9.9 --format json)"
+STATUS_JSON="$("${BIFROST_BIN}" app status --install-dir "${INSTALL_DIR}" --latest-version 9.9.9 --format json)"
 echo "${STATUS_JSON}" | grep -q '"installed": true'
 echo "${STATUS_JSON}" | grep -q '"installed_version": "9.9.9"'
+
+"${BIFROST_BIN}" app uninstall --install-dir "${INSTALL_DIR}" -y
+test ! -e "${INSTALL_DIR}/Bifrost.app"
 
 echo "macOS native app install CLI E2E passed"

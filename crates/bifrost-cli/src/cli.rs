@@ -432,8 +432,13 @@ previous runtime settings."
         )]
         source: String,
     },
-    #[command(about = "Manage the native macOS app companion")]
+    #[command(hide = true, about = "Manage the native macOS app companion")]
     NativeApp {
+        #[command(subcommand)]
+        action: NativeAppCommands,
+    },
+    #[command(about = "Manage the native macOS app companion")]
+    App {
         #[command(subcommand)]
         action: NativeAppCommands,
     },
@@ -811,6 +816,15 @@ pub enum NativeAppCommands {
         #[arg(long, help = "Open the app after installation")]
         open: bool,
         #[arg(short = 'y', long, help = "Confirm installation without prompting")]
+        yes: bool,
+    },
+    #[command(about = "Uninstall the native macOS app companion")]
+    Uninstall {
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Installation directory (default: /Applications)")]
+        install_dir: Option<PathBuf>,
+        #[arg(long, help = "Print the planned uninstall without deleting files")]
+        dry_run: bool,
+        #[arg(short = 'y', long, help = "Confirm uninstall without prompting")]
         yes: bool,
     },
 }

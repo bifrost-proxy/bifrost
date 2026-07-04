@@ -883,7 +883,7 @@
 - 2026-07-03：执行 `swift build --package-path apps/macos` 通过。
 - 2026-07-03：执行源码检查命令，确认 `BifrostRuleLanguageService`、`BifrostRuleEditorView`、`BifrostRuleTextView`、`BifrostRuleHighlighter`、`BifrostRuleCompletionController`、`BifrostLineNumberRulerView`、`ruleEditorContext`、`refreshRuleEditorDynamicData`、`navigateFromRuleEditor` 均存在。
 
-### TC-MNA-30：CLI 可安装 Native App 到应用目录并查询状态
+### TC-MNA-30：CLI 可通过 `bifrost app` 安装、查询并卸载 Native App
 
 **操作步骤：**
 1. 执行 shell E2E 回归脚本，使用临时安装目录而不是 `/Applications`：
@@ -896,7 +896,7 @@
    mkdir -p "$TEST_ROOT/source/Bifrost.app/Contents" "$TEST_ROOT/install"
    printf '<plist><dict><key>CFBundleShortVersionString</key><string>9.9.9</string></dict></plist>' \
      > "$TEST_ROOT/source/Bifrost.app/Contents/Info.plist"
-   cargo run -p bifrost-cli --bin bifrost -- native-app install \
+   cargo run -p bifrost-cli --bin bifrost -- app install \
      --source "$TEST_ROOT/source/Bifrost.app" \
      --install-dir "$TEST_ROOT/install" \
      --latest-version 9.9.9 \
@@ -906,14 +906,16 @@
    ```
 
 **预期结果：**
-- `native-app install --dry-run` 输出 JSON，包含 `dry_run: true`、source、target 和 open_after_install。
+- `app install --dry-run` 输出 JSON，包含 `dry_run: true`、source、target 和 open_after_install。
 - 真实安装会把 `Bifrost.app` 拷贝到指定安装目录，并保留 Info.plist 版本号。
-- `native-app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
+- `app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
+- `app uninstall -y` 会从指定安装目录删除 `Bifrost.app`；旧 `native-app` 命令仅保留为隐藏兼容入口，不作为用户主入口展示。
 - 用例只使用临时目录，不写入 `/Applications`，不启动系统代理，不打开 Sync 登录页。
 
 **执行记录：**
 - 2026-07-03：执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过，输出 `macOS native app install CLI E2E passed`，状态 JSON 包含 `installed: true`、`installed_version: "9.9.9"`、`needs_install: false`。
 - 2026-07-03：执行临时目录 dry-run 命令通过，输出 `{"dry_run":true,...,"target":".../install/Bifrost.app"}`，并确认目标 `Bifrost.app` 未创建。
+- 2026-07-04：将 CLI 主入口调整为 `bifrost app install/status/uninstall`，旧 `native-app` 命令隐藏兼容；执行 `cargo test -p bifrost-cli native_app -- --nocapture` 通过；执行 `cargo test -p bifrost-cli native_app_commands_parse_under_app_namespace --test cli_commands -- --nocapture` 通过；执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过。
 
 ### TC-MNA-31：Admin API 暴露 Native App 状态与安装入口
 
@@ -924,19 +926,20 @@
    ```
 2. 检查 Admin 路由与安装子进程命令：
    ```bash
-   rg -n '"/api/system/native-app"|get_native_app_status|start_native_app_install|native-app|install|-y|--open' \
+   rg -n '"/api/system/native-app"|get_native_app_status|start_native_app_install|arg\("app"\)|install|-y|--open' \
      crates/bifrost-admin/src/handlers/system.rs
    ```
 
 **预期结果：**
 - `cargo check -p bifrost-admin --all-targets` 通过。
 - `GET /api/system/native-app` 使用 `status_for_install_dir` 返回当前安装状态、安装路径、已安装版本、最新版本和 `needs_install`。
-- `POST /api/system/native-app/install` 在 macOS 可安装状态下启动当前 `bifrost native-app install -y --open --latest-version <version>`，让 CLI 负责下载、替换、启动。
+- `POST /api/system/native-app/install` 在 macOS 可安装状态下启动当前 `bifrost app install -y --open --latest-version <version>`，让 CLI 负责下载、替换、启动。
 - 非 macOS 或已安装最新版时，API 必须返回明确状态，不应误报已接受安装。
 
 **执行记录：**
 - 2026-07-03：执行 `SKIP_FRONTEND_BUILD=1 cargo check -p bifrost-admin --all-targets` 通过。
 - 2026-07-03：执行源码检查命令通过，确认存在 `/api/system/native-app`、`get_native_app_status`、`start_native_app_install`，安装子进程包含 `native-app install -y --open`。
+- 2026-07-04：将 Admin 安装子进程切到正式 `app install -y --open` 入口，旧 `native-app` 仅保留为隐藏兼容命令。
 
 ### TC-MNA-32：Web UI 弹出 Native App 安装提示并调用 Admin API
 
@@ -979,7 +982,7 @@
 
 **预期结果：**
 - Tray 单元测试通过。
-- 当 Native App 未安装或需要更新时，菜单显示 `Install Native App`，点击后启动受信任 bifrost 二进制执行 `native-app install -y --open`。
+- 当 Native App 未安装或需要更新时，菜单显示 `Install Native App`，点击后启动受信任 bifrost 二进制执行 `app install -y --open`。
 - 当 Native App 已安装且无需更新时，菜单显示 `Open Native App`。
 - 安装任务必须使用 Tray 现有 busy 状态，避免并发执行升级/安装任务。
 
@@ -987,6 +990,7 @@
 - 2026-07-03：执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli tray:: -- --nocapture` 通过，lib 与 bin 两组各 140 个 tray 相关测试通过。
 - 2026-07-03：补充并执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-cli test_menu_native_app -- --nocapture` 通过，直接覆盖 `Install Native App` 与 `Open Native App` 菜单分支。
 - 2026-07-03：执行源码检查命令通过，确认点击处理会派生 `bifrost-tray-native-app-install` 任务并调用 `native-app install -y --open`。
+- 2026-07-04：将 Tray 安装任务切到正式 `app install -y --open` 入口，旧 `native-app` 仅保留为隐藏兼容命令。
 
 ### TC-MNA-34：Native App 定时检查更新并提示重启
 
@@ -1516,26 +1520,34 @@
    ```bash
    swift run --package-path apps/macos Bifrost --check-release-scope
    ```
-2. 执行源码合同扫描，确认 Native 左侧菜单按同步状态动态附加小组管理，并复用 Web UI `/groups` 工作台：
+2. 执行源码合同扫描，确认 Native 左侧菜单按同步状态动态附加小组管理，并使用原生 Group 管理界面和 Admin API，而不是嵌入 Web UI；页面结构必须复用 Rules 风格的左右两栏，左侧列表与右侧详情独立滚动，新增/编辑在右侧 pane 原地切换：
    ```bash
-   ruby -e 'sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["case groups = \\"小组管理\\"","static func visibleItems(canShowGroups: Bool)","SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)","syncStatus?.enabled == true","syncStatus?.hasSession == true","syncStatus?.authorized == true","case .groups:","GroupsWebView()","EmbeddedWebUIPage(url: appModel.webUIURL(path: \\"groups\\"))","appModel.refreshSyncStatus()"]; text=[sidebar,app,main,dash].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native groups markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native conditional groups navigation contract ok"'
+   ruby -e 'sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); core=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift"); models=File.read("apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift"); required=["case groups = \"小组管理\"","static func visibleItems(canShowGroups: Bool)","SidebarItem.visibleItems(canShowGroups: canShowGroupManagement)","syncStatus?.enabled == true","syncStatus?.hasSession == true","syncStatus?.authorized == true","case .groups:","GroupsView()","struct GroupsView","GroupsViewModel","contentFillsAvailableHeight: true","groupListWidth: CGFloat = 300","HStack(alignment: .top, spacing: 5)","groupListPane","groupDetailPane","NativePanel(scaleOnHover: 1.002, allowsHoverEffect: false)","GroupDetailMode","GroupEditorPane","新建小组","编辑小组","fetchRuleGroups","fetchGroupRules","fetchGroupMembers","GroupMemberRow","scheduleSearch()","createRuleGroup","updateRuleGroup","updateRuleGroupSetting","deleteRuleGroup","在规则页管理","selectedSidebarItem = .rules","selectRuleScope(groupID:"]; forbidden=["GroupsWebView()","EmbeddedWebUIPage(url: appModel.webUIURL(path: \"groups\"))","复用 Web UI 的 Groups 工作台","GroupEditorSheet"]; text=[sidebar,app,main,dash,core,models].join("\n"); missing=required.reject{|needle| text.include?(needle)}; found=forbidden.select{|needle| text.include?(needle)}; abort("missing native groups markers: #{missing.join(", ")} forbidden=#{found.join(", ")}") unless missing.empty? && found.empty?; puts "macOS native conditional native groups contract ok"'
    ```
 3. 构建并打开 Native `.app`，在未登录或同步服务关闭状态下观察左侧 source-list。
 4. 在 `概览` 页打开同步服务并完成登录授权后，观察左侧 source-list 在 `抓包` 下方出现 `小组管理`。
-5. 点击 `小组管理`，确认页面加载 `http://127.0.0.1:9900/_bifrost/groups`，创建小组、搜索、进入详情、成员管理等交互沿用 Web UI。
+5. 点击 `小组管理`，确认页面展示原生小组列表、权限标签、搜索、创建、编辑、删除、规则摘要、成员列表和“在规则页管理”入口。
+6. 点击左侧列表滚动条和右侧详情滚动条，确认两栏独立滚动；左侧列表宽度固定为 Rules 同款 300px，不被右侧详情挤压。
+7. 点击左侧列表顶部 `+`，确认右侧详情 pane 原地切换为 `新建小组` 表单，而不是弹窗或跳转 WebUI。
+8. 取消后点击可写小组详情里的 `编辑`，确认右侧详情 pane 原地切换为 `编辑小组` 表单，并回填名称、描述和可见性。
 
 **预期结果：**
 - `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
-- 源码合同扫描输出 `macOS native conditional groups navigation contract ok`。
+- 源码合同扫描输出 `macOS native conditional native groups contract ok`。
 - 未登录、未授权或同步服务未启用时，左侧菜单不显示 `小组管理`。
 - 同步服务启用、已登录且已授权后，左侧菜单在 `抓包` 下方显示 `小组管理`。
 - 如果用户当前停留在 `小组管理` 时退出登录或关闭同步服务，Native 自动切回 `概览`，不留下不可用空页面。
-- `小组管理` 页面使用 WebKit 直接加载 Web UI `/groups`，交互能力与 Web UI 保持一致，不另造半成品 Native 交互。
+- `小组管理` 页面必须是 SwiftUI 原生实现，不允许 WebKit 嵌入 `/_bifrost/groups`。
+- Native 通过 `/group`、`/group/{id}`、`/group/{id}/members` 和 `/group-rules/{groupID}` 系列 Admin API 实现小组列表、创建、编辑、删除、成员列表和规则摘要。
+- 小组详情页展示 Owner/Master/Member/Public 权限标签，公开只读的小组不可修改；可写小组可从详情页跳转到 Rules 页面管理对应小组规则。
+- 小组管理页面布局必须和 Rules 页面一致：左侧固定宽度列表、右侧自适应详情，左右均为独立滚动区域；新建与编辑不得使用弹窗，必须在右侧 pane 原地切换为表单。
 
 **实际结果（2026-07-04）：**
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行 `swift run --package-path apps/macos Bifrost --check-release-scope` 通过，输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组管理`。
 - 执行源码合同扫描通过，输出 `macOS native conditional groups navigation contract ok`。
+- 2026-07-04：将 `GroupsWebView` 替换为原生 `GroupsView`，并补齐公开小组的 setting 同步、删除小组的远端业务错误校验；执行 `swift build --package-path apps/macos` 通过；执行源码合同扫描通过，输出 `macOS native conditional native groups contract ok`。
+- 2026-07-04：将小组管理原生页面调整为 Rules 同款左右布局；执行 `swift build --package-path apps/macos` 通过；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；重启 `apps/macos/.build/Bifrost.app` 后用 Computer Use 验证小组管理存在左侧列表 scroll area 与右侧详情 scroll area，点击 `+` 右侧原地显示 `新建小组` 表单，点击 `编辑` 右侧原地显示 `编辑小组` 表单。
 
 ### TC-MNA-51：回归 - Rules 顶部支持 My Rules 与小组规则搜索切换
 
@@ -1687,6 +1699,29 @@
 - 执行 `cargo fmt --all -- --check` 通过。
 - 执行 `cargo test -p bifrost-cli native_app_install_prompt -- --nocapture` 通过，2 个相关用例全部通过。
 - 执行 `CI=1 BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_cli_foreground_ctrlc_no_enter.sh` 通过，输出 `PASS: foreground Ctrl-C stops without an extra Enter`。
+
+### TC-MNA-55：回归 - 移动端连接检查不重复裸露浏览器底层 Load failed
+
+**操作步骤：**
+1. 执行 Swift 构建：
+   ```bash
+   swift build --package-path apps/macos
+   ```
+2. 执行源码合同扫描，确认移动端扫码设备和 session 级代理配置错误会先归一化，再去重展示：
+   ```bash
+   ruby -e 'dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["normalizedTrustProbeMessage", "sessionProbeMessage(for:", "deviceMessages.contains(message) ? nil : message", "手机浏览器请求失败，请确认 Wi-Fi 代理已指向上方代理地址后重试。", "TrustProbeDeviceRow", "proxyConfigurationMessage"]; missing=required.reject{|needle| dash.include?(needle)}; abort("missing trust probe message normalization markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native trust probe message normalization contract ok"'
+   ```
+3. 用手机扫码移动端连接检查二维码，但不配置 Wi-Fi 代理，观察 `扫码设备` 区域。
+
+**预期结果：**
+- 源码合同扫描输出 `macOS native trust probe message normalization contract ok`。
+- 设备行仍展示页面打开、网络可达、证书失败/可信、授权通过、代理缺失等状态胶囊。
+- `TypeError: Load failed` 不再以原始英文在设备行和卡片底部重复出现。
+- 对应错误统一显示为“手机浏览器请求失败，请确认 Wi-Fi 代理已指向上方代理地址后重试。”，如果设备行已经展示该信息，卡片底部不再重复展示同一条 session 信息。
+
+**实际结果（2026-07-04）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行源码合同扫描通过，输出 `macOS native trust probe message normalization contract ok`。
 
 ## 清理步骤
 

@@ -451,9 +451,7 @@ fn maybe_prompt_install_native_app() -> bifrost_core::Result<()> {
                 open_after_install: true,
             })?;
         } else {
-            println!(
-                "Skipped Native App installation. You can run `bifrost native-app install` later."
-            );
+            println!("Skipped Native App installation. You can run `bifrost app install` later.");
         }
     }
 

@@ -71,7 +71,7 @@ struct MainWindowScene: View {
         case .network:
             NetworkWebView()
         case .groups:
-            GroupsWebView()
+            GroupsView()
         }
     }
 }

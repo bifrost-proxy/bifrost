@@ -730,11 +730,7 @@ fn spawn_native_app_install(latest_version: Option<&str>) -> std::io::Result<()>
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
     let mut command = Command::new(&program);
-    command
-        .arg("native-app")
-        .arg("install")
-        .arg("-y")
-        .arg("--open");
+    command.arg("app").arg("install").arg("-y").arg("--open");
     if let Some(version) = latest_version {
         command.arg("--latest-version").arg(version);
     }
