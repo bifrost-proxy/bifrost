@@ -1647,9 +1647,9 @@
    ```bash
    swift build --package-path apps/macos
    ```
-2. 执行源码合同扫描，确认高频 WebSocket 数据不会在非必要页面订阅 traffic，指标发布被合并，订阅更新被去重，非活动界面会暂停后台刷新，Overview 移动端检查不再用 WebKit/网络二维码渲染，重复 App 实例会激活已有窗口而不是继续运行：
+2. 执行源码合同扫描，确认轻量 WebSocket 指标保持 1 秒级实时刷新，重型应用聚合和 fallback 轮询降频，高频 WebSocket 数据不会在非必要页面订阅 traffic，指标发布被合并，订阅更新被去重，非活动界面会暂停后台刷新，Overview 移动端检查不再用 WebKit/网络二维码渲染，重复 App 实例会激活已有窗口而不是继续运行：
    ```bash
-   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); root=File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["metricsPublishInterval: TimeInterval = 5.0","realtimeMetricsIntervalMs = 5_000","activityAppMetricsRefreshInterval: TimeInterval = 10.0","fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0","interfaceActive","setInterfaceActive","scheduleActivityAppMetricsRefresh","needTraffic: needsTraffic","case .network:","subscriptionDebounceNanoseconds","assignIfChanged(&overview","noteRealtimeEvent()","TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds","shouldAttach(to markerView: NSView)","activateExistingInstanceIfNeeded","--allow-multiple-instances","PrimarySidebar: View, Equatable",".equatable()","ActivityWidthReader","activityMetricColumnCount","ActivityBars: View, Equatable","ActiveRulesSummaryCard: View, Equatable","setTrustProbePollingActive","CIQRCodeGenerator"]; text=[app,main,root,sidebar,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native idle CPU markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native idle cpu contract ok"'
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); root=File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["metricsPublishInterval: TimeInterval = 1.0","realtimeMetricsIntervalMs = 1_000","activityAppMetricsRefreshInterval: TimeInterval = 10.0","fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0","interfaceActive","setInterfaceActive","scheduleActivityAppMetricsRefresh","needTraffic: needsTraffic","case .network:","subscriptionDebounceNanoseconds","assignIfChanged(&overview","noteRealtimeEvent()","TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds","shouldAttach(to markerView: NSView)","activateExistingInstanceIfNeeded","--allow-multiple-instances","PrimarySidebar: View, Equatable",".equatable()","ActivityWidthReader","activityMetricColumnCount","ActivityBars: View, Equatable","ActiveRulesSummaryCard: View, Equatable","setTrustProbePollingActive","CIQRCodeGenerator"]; text=[app,main,root,sidebar,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native idle CPU markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native idle cpu contract ok"'
    ```
 3. 关闭已有 Native App 进程，仅保留默认数据目录里的 `bifrost` 服务：
    ```bash
@@ -1672,16 +1672,17 @@
 - 静默状态下只有一个 `Bifrost.app/Contents/MacOS/Bifrost` 进程。
 - 连续采样的 Native App 平均 CPU 小于等于 8%，短峰值不应长期超过 8%。
 - 多次打开 `.app` 时新实例只激活已有窗口并退出，不建立第二套 WebSocket、polling 或 UI 刷新循环。
-- `活动`、底部状态栏和 `抓包` 页面仍保持 WebSocket 推送驱动的实时刷新；只有 UI 发布频率被合并，不影响服务端数据完整性。
+- `活动`、底部状态栏和 `抓包` 页面仍保持 WebSocket 推送驱动的实时刷新；网速、请求数、连接数等轻量指标 1 秒级刷新，应用聚合等重型统计按 10 秒或 fallback 30 秒降频，不影响服务端数据完整性。
 
 **实际结果（2026-07-04）：**
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行 `swift build --package-path apps/macos -c release` 通过，生成可采样的 release `.app`。
-- 执行源码合同扫描通过，输出 `macOS native idle cpu contract ok`。
+- 执行源码合同扫描通过，输出 `macOS native idle cpu contract ok`，确认轻量网速/请求数/连接数指标保持 `metrics_interval_ms=1000` 和 1 秒 UI 发布。
 - 执行 `target/release/bifrost start -d -y --skip-cert-check -p 9900 --host 0.0.0.0 --no-system-proxy` 启动 release sidecar，输出 daemon PID `9544`。
 - 执行 `pkill -x Bifrost && open -na apps/macos/.build/Bifrost.app --args --allow-multiple-instances` 后，确认 Native App PID `9837`，release sidecar PID `9544`。
 - 使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组管理 -> 活动`，所有页面完成切换，进程未崩溃。
 - 执行 40 秒连续采样，输出 `avg_app=4.53 avg_service=2.85 max_app=18.40 max_service=12.20 samples=20`，App 与 release sidecar 静默平均 CPU 均低于 8%；短峰值来自切页后的同步和 push 刷新，未持续超过门限。
+- 2026-07-04：按实时性要求将轻量 metrics 恢复为 1 秒刷新，保留应用聚合 10 秒和 fallback 30 秒低频刷新；用 `open -na apps/macos/.build/Bifrost.app` 启动后，使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组管理 -> 活动`，PID 保持 `58625` 未退出；执行 30 秒连续采样，输出 `avg_app=5.88 avg_service=3.81 max_app=24.60 max_service=31.80 samples=30`，App 与 release sidecar 平均 CPU 均低于 8%，短峰值未持续。
 - 再次执行 `open -n apps/macos/.build/Bifrost.app` 后，`pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'` 仅返回一个进程，确认单实例防护生效。
 - 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，输出 `BifrostNativeCoreChecks passed`。

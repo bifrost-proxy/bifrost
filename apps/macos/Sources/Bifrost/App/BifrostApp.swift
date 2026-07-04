@@ -7,12 +7,20 @@ private enum SharedAppModel {
     static let instance = AppModel()
 }
 
+private func traceNativeStartup(_ message: String) {
+    guard ProcessInfo.processInfo.environment["BIFROST_NATIVE_STARTUP_TRACE"] == "1" else {
+        return
+    }
+    FileHandle.standardError.write(Data("[native-startup] \(message)\n".utf8))
+}
+
 @main
 struct BifrostApp: App {
     @NSApplicationDelegateAdaptor(BifrostAppDelegate.self) private var appDelegate
     @StateObject private var appModel: AppModel
 
     init() {
+        traceNativeStartup("BifrostApp.init")
         let model = SharedAppModel.instance
         _appModel = StateObject(wrappedValue: model)
         appDelegate.appModel = model
@@ -96,6 +104,10 @@ struct BifrostApp: App {
         }
 
         BifrostApp.activateExistingInstanceIfNeeded()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            traceNativeStartup("BifrostApp.init async ensure visible")
+            MainWindowFallback.ensureVisible(appModel: SharedAppModel.instance)
+        }
     }
 
     var body: some Scene {
@@ -141,9 +153,9 @@ struct BifrostApp: App {
 @MainActor
 final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
     weak var appModel: AppModel?
-    private var fallbackWindow: NSWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        traceNativeStartup("applicationDidFinishLaunching")
         NSApp.setActivationPolicy(.regular)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
             self?.ensureMainWindowVisible()
@@ -155,10 +167,25 @@ final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
 
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
+
     private func ensureMainWindowVisible() {
-        if let window = NSApp.windows.first(where: { window in
-            window.canBecomeMain && window.isVisible && !window.isMiniaturized
-        }) {
+        traceNativeStartup("delegate ensureMainWindowVisible")
+        MainWindowFallback.ensureVisible(appModel: appModel ?? SharedAppModel.instance)
+    }
+}
+
+@MainActor
+private enum MainWindowFallback {
+    private static var fallbackWindow: NSWindow?
+
+    static func ensureVisible(appModel: AppModel) {
+        traceNativeStartup("fallback ensureVisible windows=\(NSApp.windows.count)")
+        let hasOnscreenWindow = hasOnscreenWindowForCurrentProcess()
+        if hasOnscreenWindow,
+           let window = NSApp.windows.first(where: isUsableMainWindow) {
             placeWindowOnVisibleScreenIfNeeded(window)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -172,14 +199,11 @@ final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        guard let appModel else {
-            return
-        }
-
         let controller = NSHostingController(
             rootView: MainWindowScene()
                 .environmentObject(appModel)
         )
+        traceNativeStartup("fallback creating NSWindow")
         let window = NSWindow(contentViewController: controller)
         window.title = ""
         window.titleVisibility = .hidden
@@ -194,7 +218,33 @@ final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
         fallbackWindow = window
     }
 
-    private func placeWindowOnVisibleScreenIfNeeded(_ window: NSWindow, force: Bool = false) {
+    private static func isUsableMainWindow(_ window: NSWindow) -> Bool {
+        traceNativeStartup("window candidate visible=\(window.isVisible) mini=\(window.isMiniaturized) canMain=\(window.canBecomeMain) frame=\(window.frame)")
+        guard window.canBecomeMain,
+              window.isVisible,
+              !window.isMiniaturized,
+              window.frame.width > 100,
+              window.frame.height > 100
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func hasOnscreenWindowForCurrentProcess() -> Bool {
+        let currentPID = ProcessInfo.processInfo.processIdentifier
+        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        let result = windowList.contains { windowInfo in
+            (windowInfo[kCGWindowOwnerPID as String] as? pid_t) == currentPID
+                && (windowInfo[kCGWindowLayer as String] as? Int ?? -1) == 0
+        }
+        traceNativeStartup("window server onscreen=\(result)")
+        return result
+    }
+
+    private static func placeWindowOnVisibleScreenIfNeeded(_ window: NSWindow, force: Bool = false) {
         let visibleFrames = NSScreen.screens.map(\.visibleFrame)
         if !force, visibleFrames.contains(where: { $0.intersects(window.frame) }) {
             return
