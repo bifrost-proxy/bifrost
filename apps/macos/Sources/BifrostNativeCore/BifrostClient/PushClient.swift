@@ -47,6 +47,7 @@ public actor PushClient {
     private let clientId: String
     private let session: URLSession
     private var task: URLSessionWebSocketTask?
+    private let tracePush = ProcessInfo.processInfo.environment["BIFROST_NATIVE_TRACE_PUSH"] == "1"
 
     public init(
         baseURL: URL,
@@ -65,6 +66,7 @@ public actor PushClient {
         self.task = task
         task.resume()
         try send(subscription: subscription)
+        trace("connected to \(request.url?.absoluteString ?? "<invalid-url>")")
 
         return AsyncThrowingStream { continuation in
             let receiveTask = Task {
@@ -102,19 +104,36 @@ public actor PushClient {
                 let message = try await task.receive()
                 switch message {
                 case .string(let text):
-                    if let data = text.data(using: .utf8) {
-                        continuation.yield(try JSONDecoder().decode(PushMessage.self, from: data))
+                    if let data = text.data(using: .utf8),
+                       let message = decodePushMessage(data) {
+                        trace("message \(message.traceType)")
+                        continuation.yield(message)
                     }
                 case .data(let data):
-                    continuation.yield(try JSONDecoder().decode(PushMessage.self, from: data))
+                    if let message = decodePushMessage(data) {
+                        trace("message \(message.traceType)")
+                        continuation.yield(message)
+                    }
                 @unknown default:
                     break
                 }
             }
             continuation.finish()
         } catch {
+            trace("receive failed: \(error.localizedDescription)")
             continuation.finish(throwing: error)
         }
+    }
+
+    private func decodePushMessage(_ data: Data) -> PushMessage? {
+        try? JSONDecoder().decode(PushMessage.self, from: data)
+    }
+
+    private func trace(_ message: String) {
+        guard tracePush else {
+            return
+        }
+        NSLog("[bifrost-native-push] %@", message)
     }
 
     private func makePushURL(subscription: PushSubscription) throws -> URL {
@@ -196,5 +215,32 @@ public actor PushClient {
             payload["metrics_interval_ms"] = metricsIntervalMs
         }
         return payload
+    }
+}
+
+private extension PushMessage {
+    var traceType: String {
+        switch self {
+        case .connected:
+            return "connected"
+        case .trafficDelta:
+            return "traffic_delta"
+        case .trafficDeleted:
+            return "traffic_deleted"
+        case .overviewUpdate:
+            return "overview_update"
+        case .metricsUpdate:
+            return "metrics_update"
+        case .valuesUpdate:
+            return "values_update"
+        case .settingsUpdate:
+            return "settings_update"
+        case .breakpointSettingsUpdated:
+            return "breakpoint_settings_updated"
+        case .disconnect:
+            return "disconnect"
+        case .ignored(let type):
+            return "ignored:\(type)"
+        }
     }
 }

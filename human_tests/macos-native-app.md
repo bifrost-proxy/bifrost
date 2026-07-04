@@ -909,6 +909,7 @@
 - `app install --dry-run` 输出 JSON，包含 `dry_run: true`、source、target 和 open_after_install。
 - 真实安装会把 `Bifrost.app` 拷贝到指定安装目录，并保留 Info.plist 版本号。
 - `app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
+- 当 `latest_version` 高于已安装版本时，`app status --format json` 返回 `needs_install: true`；再次执行 `app install` 会覆盖安装到新版本，并让 `needs_install` 变回 `false`。
 - `app uninstall -y` 会从指定安装目录删除 `Bifrost.app`；旧 `native-app` 命令仅保留为隐藏兼容入口，不作为用户主入口展示。
 - 用例只使用临时目录，不写入 `/Applications`，不启动系统代理，不打开 Sync 登录页。
 
@@ -916,6 +917,7 @@
 - 2026-07-03：执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过，输出 `macOS native app install CLI E2E passed`，状态 JSON 包含 `installed: true`、`installed_version: "9.9.9"`、`needs_install: false`。
 - 2026-07-03：执行临时目录 dry-run 命令通过，输出 `{"dry_run":true,...,"target":".../install/Bifrost.app"}`，并确认目标 `Bifrost.app` 未创建。
 - 2026-07-04：将 CLI 主入口调整为 `bifrost app install/status/uninstall`，旧 `native-app` 命令隐藏兼容；执行 `cargo test -p bifrost-cli native_app -- --nocapture` 通过；执行 `cargo test -p bifrost-cli native_app_commands_parse_under_app_namespace --test cli_commands -- --nocapture` 通过；执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过。
+- 2026-07-04：扩展 `bash e2e-tests/tests/test_macos_native_app_install.sh` 覆盖真实 install/update/uninstall 链路：临时安装 9.9.9、验证 10.0.0 标记 `needs_install: true`、覆盖安装 10.0.0、验证 `needs_install: false`，最后卸载成功；脚本输出 `macOS native app install/update/uninstall CLI E2E passed`。
 
 ### TC-MNA-31：Admin API 暴露 Native App 状态与安装入口
 
@@ -992,17 +994,18 @@
 - 2026-07-03：执行源码检查命令通过，确认点击处理会派生 `bifrost-tray-native-app-install` 任务并调用 `native-app install -y --open`。
 - 2026-07-04：将 Tray 安装任务切到正式 `app install -y --open` 入口，旧 `native-app` 仅保留为隐藏兼容命令。
 
-### TC-MNA-34：Native App 定时检查更新并提示重启
+### TC-MNA-34：Native App 定时检查更新并通过全局按钮安装重启
 
 **操作步骤：**
 1. 执行 Swift 构建与 core contract 检查：
    ```bash
    scripts/build-macos-native.sh --skip-sidecar --test
    ```
-2. 检查 Native App 自动更新 loop、版本检查 API 和重启提示源码：
+2. 检查 Native App 自动更新 loop、版本检查 API、全局更新按钮和自动重启源码：
    ```bash
-   rg -n 'startNativeAppUpdateChecks|checkNativeAppUpdate|BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS|BIFROST_NATIVE_UPDATE_CHECK_DISABLED|installNativeApp|Restart Bifrost Native App|fetchVersionCheck|fetchNativeAppStatus' \
+   rg -n 'NativeAppUpdateButton|nativeAppUpdateState|startNativeAppUpdateChecks|checkNativeAppUpdate|BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS|BIFROST_NATIVE_UPDATE_CHECK_DISABLED|installNativeAppUpdate|installNativeApp|restartNativeApp|fetchVersionCheck|fetchNativeAppStatus' \
      apps/macos/Sources/Bifrost/App/AppModel.swift \
+     apps/macos/Sources/Bifrost/App/MainWindowScene.swift \
      apps/macos/Sources/BifrostNativeCore/BifrostClient/BifrostClient.swift \
      apps/macos/Sources/BifrostNativeCore/BifrostClient/AdminModels.swift
    ```
@@ -1010,13 +1013,15 @@
 **预期结果：**
 - Swift 构建和 core contract 检查通过。
 - Native App 启动连接到 Admin API 后，默认每 6 小时检查 `/system/version-check`；测试可用 `BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS` 降低轮询间隔。
-- 检测到新版本后同一个 latest version 只弹一次确认；用户确认后调用 `/system/native-app/install`。
-- 安装 accepted 后弹出重启提示，用户确认后重新打开 `Bifrost.app` 并退出旧进程完成更新。
+- 检测到新版本后，所有页面右上角展示蓝色“更新”按钮，同一个 latest version 不重复打扰。
+- 点击更新按钮后调用 `/system/native-app/install`，按钮原位显示“正在更新”进度态。
+- 安装完成后按钮原位显示“正在重启”，重新打开安装路径中的 `Bifrost.app` 并退出旧进程完成更新。
 
 **执行记录：**
 - 2026-07-03：执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，生成 `apps/macos/.build/Bifrost.app`，`BifrostNativeCoreChecks passed`。
 - 2026-07-03：执行源码检查命令通过，确认 `startNativeAppUpdateChecks`、`checkNativeAppUpdate`、`BIFROST_NATIVE_UPDATE_INTERVAL_SECONDS`、`BIFROST_NATIVE_UPDATE_CHECK_DISABLED`、`fetchVersionCheck`、`installNativeApp` 与 `Restart Bifrost Native App` 提示均存在。
 - 2026-07-03：复查并调整重启路径，确认 Native App 重启时打开安装 API 返回的 `install_path`，不是固定打开当前 bundle。
+- 2026-07-04：改为全局状态按钮交互，执行源码检查命令通过，确认更新入口由 `NativeAppUpdateButton` 常驻页面右上角承载，进度态显示在按钮位置，安装完成后自动重启。
 
 ### TC-MNA-35：Release workflow 产出 macOS Native App 安装包
 
@@ -1640,9 +1645,9 @@
    ```bash
    swift build --package-path apps/macos
    ```
-2. 执行源码合同扫描，确认高频 WebSocket 数据不会在非必要页面订阅 traffic，指标发布被合并，订阅更新被去重，重复 App 实例会激活已有窗口而不是继续运行：
+2. 执行源码合同扫描，确认高频 WebSocket 数据不会在非必要页面订阅 traffic，指标发布被合并，订阅更新被去重，非活动界面会暂停后台刷新，Overview 移动端检查不再用 WebKit/网络二维码渲染，重复 App 实例会激活已有窗口而不是继续运行：
    ```bash
-   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); root=File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["metricsPublishInterval: TimeInterval = 2.0","realtimeMetricsIntervalMs = 2_000","activityAppMetricsRefreshInterval: TimeInterval = 3.0","scheduleActivityAppMetricsRefresh","realtimeEventPublishInterval: TimeInterval = 30.0","needTraffic: needsTraffic","case .network:","subscriptionDebounceNanoseconds","assignIfChanged(&overview","noteRealtimeEvent()","TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds","shouldAttach(to markerView: NSView)","activateExistingInstanceIfNeeded","--allow-multiple-instances","PrimarySidebar: View, Equatable",".equatable()","ActivityWidthReader","activityMetricColumnCount","ActivityBars: View, Equatable","ActiveRulesSummaryCard: View, Equatable"]; text=[app,main,root,sidebar,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native idle CPU markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native idle cpu contract ok"'
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); root=File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); sidebar=File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift"); dashboard=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["metricsPublishInterval: TimeInterval = 5.0","realtimeMetricsIntervalMs = 5_000","activityAppMetricsRefreshInterval: TimeInterval = 10.0","fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0","interfaceActive","setInterfaceActive","scheduleActivityAppMetricsRefresh","needTraffic: needsTraffic","case .network:","subscriptionDebounceNanoseconds","assignIfChanged(&overview","noteRealtimeEvent()","TrafficSyncPolicy.trafficDeltaFlushDelayNanoseconds","shouldAttach(to markerView: NSView)","activateExistingInstanceIfNeeded","--allow-multiple-instances","PrimarySidebar: View, Equatable",".equatable()","ActivityWidthReader","activityMetricColumnCount","ActivityBars: View, Equatable","ActiveRulesSummaryCard: View, Equatable","setTrustProbePollingActive","CIQRCodeGenerator"]; text=[app,main,root,sidebar,dashboard].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing native idle CPU markers: #{missing.join(", ")}") unless missing.empty?; puts "macOS native idle cpu contract ok"'
    ```
 3. 关闭已有 Native App 进程，仅保留默认数据目录里的 `bifrost` 服务：
    ```bash
@@ -1671,8 +1676,10 @@
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行 `swift build --package-path apps/macos -c release` 通过，生成可采样的 release `.app`。
 - 执行源码合同扫描通过，输出 `macOS native idle cpu contract ok`。
-- 执行 `pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' && open -n apps/macos/.build/Bifrost.app` 后，等待 12 秒采样 release 进程，初始 `ps` 为 `3.0%`。
-- 执行 45 秒连续采样，输出 `samples=45 avg=6.18 max=29.60`，静默平均 CPU 已低于 8%；短峰值来自 SwiftUI/AppKit 布局刷新，未持续超过门限。
+- 执行 `target/release/bifrost start -d -y --skip-cert-check -p 9900 --host 0.0.0.0 --no-system-proxy` 启动 release sidecar，输出 daemon PID `9544`。
+- 执行 `pkill -x Bifrost && open -na apps/macos/.build/Bifrost.app --args --allow-multiple-instances` 后，确认 Native App PID `9837`，release sidecar PID `9544`。
+- 使用 CGEvent 逐项点击 `活动 -> 概览 -> 规则 -> 抓包 -> 小组管理 -> 活动`，所有页面完成切换，进程未崩溃。
+- 执行 40 秒连续采样，输出 `avg_app=4.53 avg_service=2.85 max_app=18.40 max_service=12.20 samples=20`，App 与 release sidecar 静默平均 CPU 均低于 8%；短峰值来自切页后的同步和 push 刷新，未持续超过门限。
 - 再次执行 `open -n apps/macos/.build/Bifrost.app` 后，`pgrep -fl 'Bifrost.app/Contents/MacOS/Bifrost'` 仅返回一个进程，确认单实例防护生效。
 - 执行 `swift run --package-path apps/macos BifrostNativeCoreChecks` 通过，输出 `BifrostNativeCoreChecks passed`。
 - 执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过，输出 `BifrostNativeCoreChecks passed`。

@@ -8,6 +8,25 @@ enum RuleMovePlacement {
     case after
 }
 
+enum NativeAppUpdateState: Equatable {
+    case idle
+    case available(latestVersion: String)
+    case installing(latestVersion: String)
+    case restarting(latestVersion: String)
+    case failed(message: String, latestVersion: String?)
+}
+
+private enum NativeAppUpdateError: LocalizedError {
+    case installTimedOut(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .installTimedOut(let message):
+            "Native app installation timed out: \(message)"
+        }
+    }
+}
+
 @MainActor
 final class AppModel: ObservableObject {
     private enum TrafficSyncPolicy {
@@ -16,11 +35,13 @@ final class AppModel: ObservableObject {
         static let maxNativeRecords = 240
         static let maxPendingIds = 500
         static let trafficDeltaFlushDelayNanoseconds: UInt64 = 500_000_000
-        static let metricsPublishInterval: TimeInterval = 2.0
-        static let activityAppMetricsRefreshInterval: TimeInterval = 3.0
+        static let metricsPublishInterval: TimeInterval = 5.0
+        static let activityAppMetricsRefreshInterval: TimeInterval = 10.0
+        static let fallbackActivityAppMetricsRefreshInterval: TimeInterval = 30.0
+        static let fallbackPollingIntervalNanoseconds: UInt64 = 8_000_000_000
         static let realtimeEventPublishInterval: TimeInterval = 30.0
         static let subscriptionDebounceNanoseconds: UInt64 = 200_000_000
-        static let realtimeMetricsIntervalMs = 2_000
+        static let realtimeMetricsIntervalMs = 5_000
     }
 
     @Published var sidecarState: SidecarState = .stopped
@@ -79,6 +100,7 @@ final class AppModel: ObservableObject {
     @Published var realtimeClientId: Int?
     @Published var realtimeFallbackActive = false
     @Published var lastRealtimeEventAt: Date?
+    @Published var nativeAppUpdateState: NativeAppUpdateState = .idle
     @Published private(set) var activityClientAppCounts: [(name: String, count: Int)] = []
     @Published private(set) var activityClientIpCounts: [(name: String, count: Int)] = []
     @Published private(set) var activityRuleHitCount = 0
@@ -92,6 +114,7 @@ final class AppModel: ObservableObject {
     private var trafficDeltaFlushTask: Task<Void, Never>?
     private var trafficHistoryTask: Task<Void, Never>?
     private var nativeUpdateTask: Task<Void, Never>?
+    private var nativeUpdateInstallTask: Task<Void, Never>?
     private var ruleOrderSaveTask: Task<Void, Never>?
     private var realtimeSubscriptionTask: Task<Void, Never>?
     private var activityAppMetricsTask: Task<Void, Never>?
@@ -110,6 +133,7 @@ final class AppModel: ObservableObject {
     private var trafficHasMore = false
     private var trafficOldestSequence: Int?
     private var pendingTrafficIds = Set<String>()
+    private var interfaceActive = true
 
     init() {
         if let binaryPath = SidecarResolver.resolveBundledBinary()
@@ -224,6 +248,23 @@ final class AppModel: ObservableObject {
         }
     }
 
+    func setInterfaceActive(_ active: Bool) {
+        guard interfaceActive != active else {
+            return
+        }
+        interfaceActive = active
+        if !active {
+            activityAppMetricsTask?.cancel()
+            activityAppMetricsTask = nil
+            metricsPublishTask?.cancel()
+            metricsPublishTask = nil
+            pendingMetricsUpdate = nil
+        } else {
+            flushPendingMetricsUpdate()
+            scheduleActivityAppMetricsRefresh(force: true)
+        }
+    }
+
     func refreshSyncStatus() async {
         do {
             assignIfChanged(&syncStatus, try await BifrostClient(baseURL: adminURL).fetchSyncStatus())
@@ -297,22 +338,16 @@ final class AppModel: ObservableObject {
             let client = try BifrostClient(baseURL: adminURL)
             let version = try await client.fetchVersionCheck(forceRefresh: forceRefresh)
             guard version.hasUpdate, let latest = version.latestVersion else {
+                if case .available = nativeAppUpdateState {
+                    nativeAppUpdateState = .idle
+                }
                 return
             }
-            guard !promptedNativeUpdateVersions.contains(latest) else {
+            guard !promptedNativeUpdateVersions.contains(latest) || forceRefresh else {
                 return
             }
             promptedNativeUpdateVersions.insert(latest)
-
-            let shouldInstall = await confirmNativeAppUpdate(latestVersion: latest)
-            guard shouldInstall else {
-                return
-            }
-            let install = try await client.installNativeApp()
-            await promptNativeAppRestart(
-                latestVersion: latest,
-                installedAppPath: install.status.installPath
-            )
+            nativeAppUpdateState = .available(latestVersion: latest)
         } catch {
             #if DEBUG
             print("Native app update check failed: \(error.localizedDescription)")
@@ -320,30 +355,91 @@ final class AppModel: ObservableObject {
         }
     }
 
-    private func confirmNativeAppUpdate(latestVersion: String) async -> Bool {
-        await MainActor.run {
-            let alert = NSAlert()
-            alert.messageText = "Bifrost Native App Update Available"
-            alert.informativeText = "Version \(latestVersion) is ready. Install it now?"
-            alert.addButton(withTitle: "Install")
-            alert.addButton(withTitle: "Later")
-            return alert.runModal() == .alertFirstButtonReturn
+    func installNativeAppUpdate() {
+        guard nativeUpdateInstallTask == nil else {
+            return
+        }
+
+        let targetVersion: String?
+        switch nativeAppUpdateState {
+        case .available(let latest), .failed(_, let latest?):
+            targetVersion = latest
+        default:
+            targetVersion = nil
+        }
+        guard let targetVersion else {
+            return
+        }
+
+        nativeUpdateInstallTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.nativeUpdateInstallTask = nil }
+            await self.runNativeAppUpdateInstall(latestVersion: targetVersion)
         }
     }
 
-    private func promptNativeAppRestart(latestVersion: String, installedAppPath: String) async {
-        await MainActor.run {
-            let alert = NSAlert()
-            alert.messageText = "Restart Bifrost Native App"
-            alert.informativeText = "Version \(latestVersion) has been installed. Restart the app to finish updating."
-            alert.addButton(withTitle: "Restart")
-            alert.addButton(withTitle: "Later")
-            if alert.runModal() == .alertFirstButtonReturn {
-                let appURL = URL(fileURLWithPath: installedAppPath)
-                NSWorkspace.shared.open(appURL)
-                NSApp.terminate(nil)
+    private func runNativeAppUpdateInstall(latestVersion: String) async {
+        nativeAppUpdateState = .installing(latestVersion: latestVersion)
+
+        do {
+            let client = try BifrostClient(baseURL: adminURL)
+            let install = try await client.installNativeApp()
+            let installedPath = install.status.installPath
+            if install.accepted {
+                let status = try await waitForNativeAppInstall(
+                    latestVersion: latestVersion,
+                    client: client
+                )
+                restartNativeApp(latestVersion: latestVersion, installedAppPath: status.installPath)
+            } else if install.status.installed && !install.status.needsInstall {
+                restartNativeApp(latestVersion: latestVersion, installedAppPath: installedPath)
+            } else {
+                nativeAppUpdateState = .failed(
+                    message: install.status.message,
+                    latestVersion: latestVersion
+                )
+            }
+        } catch {
+            nativeAppUpdateState = .failed(
+                message: error.localizedDescription,
+                latestVersion: latestVersion
+            )
+        }
+    }
+
+    private func waitForNativeAppInstall(
+        latestVersion: String,
+        client: BifrostClient
+    ) async throws -> NativeAppStatus {
+        var lastStatus: NativeAppStatus?
+        var lastError: Error?
+        for _ in 0..<90 {
+            try await Task.sleep(nanoseconds: 1_000_000_000)
+            do {
+                let status = try await client.fetchNativeAppStatus()
+                lastStatus = status
+                if status.installed,
+                   !status.needsInstall,
+                   status.installedVersion == nil || status.installedVersion == latestVersion
+                {
+                    return status
+                }
+            } catch {
+                lastError = error
             }
         }
+
+        if let lastStatus {
+            throw NativeAppUpdateError.installTimedOut(lastStatus.message)
+        }
+        throw NativeAppUpdateError.installTimedOut(lastError?.localizedDescription ?? "Installation did not finish in time")
+    }
+
+    private func restartNativeApp(latestVersion: String, installedAppPath: String) {
+        nativeAppUpdateState = .restarting(latestVersion: latestVersion)
+        let appURL = URL(fileURLWithPath: installedAppPath)
+        NSWorkspace.shared.open(appURL)
+        NSApp.terminate(nil)
     }
 
     func refreshData(
@@ -351,7 +447,8 @@ final class AppModel: ObservableObject {
         includeOverview: Bool = true,
         includeRules: Bool = true,
         includeActiveRulesSummary: Bool = false,
-        includeSystemControls: Bool = true
+        includeSystemControls: Bool = true,
+        includeActivityAppMetrics: Bool? = nil
     ) async {
         isLoadingData = true
         defer { isLoadingData = false }
@@ -362,7 +459,7 @@ final class AppModel: ObservableObject {
             var errors: [String] = []
             let shouldLoadTraffic = includeTraffic ?? selectedSidebarItem.needsTrafficRecords
             let shouldLoadActiveRulesSummary = includeActiveRulesSummary || selectedSidebarItem == .activity
-            let shouldLoadActivityAppMetrics = selectedSidebarItem == .activity
+            let shouldLoadActivityAppMetrics = includeActivityAppMetrics ?? (selectedSidebarItem == .activity)
             async let overviewResult: Result<SystemOverview, Error>? = includeOverview
                 ? Self.captureResult { try await client.fetchSystemOverview() }
                 : nil
@@ -415,6 +512,7 @@ final class AppModel: ObservableObject {
             if let result = await activityAppMetricsResult {
                 switch result {
                 case .success(let metrics):
+                    lastActivityAppMetricsRefreshAt = Date()
                     assignCountsIfChanged(&self.activityClientAppCounts, Self.appMetricsToCounts(metrics))
                 case .failure(let error):
                     errors.append("App Metrics: \(error.localizedDescription)")
@@ -1631,7 +1729,7 @@ final class AppModel: ObservableObject {
 
         pollingTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: 5_000_000_000)
+                try? await Task.sleep(nanoseconds: TrafficSyncPolicy.fallbackPollingIntervalNanoseconds)
                 guard let self else { return }
                 await self.refreshDataFromFallback()
             }
@@ -1670,7 +1768,35 @@ final class AppModel: ObservableObject {
             return
         }
         assignIfChanged(&realtimeFallbackActive, true)
-        await refreshSelectedSidebarData()
+        await refreshSelectedSidebarDataFromFallback()
+    }
+
+    private func refreshSelectedSidebarDataFromFallback() async {
+        switch selectedSidebarItem {
+        case .activity:
+            let shouldRefreshAppMetrics = Date().timeIntervalSince(lastActivityAppMetricsRefreshAt)
+                >= TrafficSyncPolicy.fallbackActivityAppMetricsRefreshInterval
+            await refreshData(
+                includeTraffic: true,
+                includeRules: false,
+                includeActiveRulesSummary: true,
+                includeSystemControls: false,
+                includeActivityAppMetrics: shouldRefreshAppMetrics
+            )
+        case .overview:
+            await refreshData(includeTraffic: false, includeRules: false, includeSystemControls: true, includeActivityAppMetrics: false)
+        case .rules:
+            await refreshData(includeTraffic: false, includeRules: true, includeSystemControls: false, includeActivityAppMetrics: false)
+            await refreshRuleEditorDynamicData()
+            if let name = selectedRuleName,
+               selectedRuleDetail?.name != name {
+                await selectRule(name)
+            }
+        case .network:
+            await refreshData(includeTraffic: true, includeRules: false, includeSystemControls: false, includeActivityAppMetrics: false)
+        case .groups:
+            await refreshSyncStatus()
+        }
     }
 
     private func setPushClient(_ client: PushClient) {
@@ -1694,7 +1820,7 @@ final class AppModel: ObservableObject {
             assignIfChanged(&realtimeClientId, clientId)
             setRealtimeState(.connected)
             updateRealtimeSubscription(force: true)
-            scheduleActivityAppMetricsRefresh(force: true)
+            scheduleActivityAppMetricsRefresh()
         case .trafficDelta(let data):
             guard selectedSidebarItem.needsTrafficRecords else {
                 return
@@ -1928,6 +2054,9 @@ final class AppModel: ObservableObject {
     }
 
     private func scheduleActivityAppMetricsRefresh(force: Bool = false) {
+        guard interfaceActive else {
+            return
+        }
         guard selectedSidebarItem == .activity else {
             return
         }

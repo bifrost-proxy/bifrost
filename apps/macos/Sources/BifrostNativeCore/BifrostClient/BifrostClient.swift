@@ -581,6 +581,10 @@ public actor BifrostClient {
            !(200..<300).contains(httpResponse.statusCode) {
             throw BifrostClientError.httpStatus(httpResponse.statusCode, data)
         }
+        if ProcessInfo.processInfo.environment["BIFROST_NATIVE_TRACE_HTTP"] == "1" {
+            let query = queryItems.isEmpty ? "" : "?\(queryItems.map { "\($0.name)=\($0.value ?? "")" }.joined(separator: "&"))"
+            NSLog("[bifrost-native-http] %@ %@%@ bytes=%d", method.rawValue, path, query, data.count)
+        }
         return data
     }
 

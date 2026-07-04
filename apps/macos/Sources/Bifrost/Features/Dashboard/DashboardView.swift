@@ -1,7 +1,7 @@
 import AppKit
 import BifrostNativeCore
+import CoreImage
 import SwiftUI
-import WebKit
 
 struct ActivityView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -401,7 +401,17 @@ struct DashboardView: View {
             MobileConnectionCheckCard(model: model)
         }
         .task(id: appModel.adminURL) {
+            model.setTrustProbePollingActive(appModel.selectedSidebarItem == .overview)
             await model.configure(baseURL: appModel.adminURL)
+        }
+        .onAppear {
+            model.setTrustProbePollingActive(appModel.selectedSidebarItem == .overview)
+        }
+        .onDisappear {
+            model.suspendBackgroundWork()
+        }
+        .onChange(of: appModel.selectedSidebarItem) { item in
+            model.setTrustProbePollingActive(item == .overview)
         }
     }
 
@@ -1256,6 +1266,7 @@ private final class OverviewControlModel: ObservableObject {
     private var baseURL = URL(string: "http://127.0.0.1:9900")!
     private var trustProbePollingTask: Task<Void, Never>?
     private var pollingTrustProbeSessionID: String?
+    private var trustProbePollingActive = false
 
     deinit {
         trustProbePollingTask?.cancel()
@@ -1264,6 +1275,25 @@ private final class OverviewControlModel: ObservableObject {
     func configure(baseURL: URL) async {
         self.baseURL = baseURL
         await refresh()
+    }
+
+    func suspendBackgroundWork() {
+        trustProbePollingActive = false
+        stopTrustProbePolling()
+    }
+
+    func setTrustProbePollingActive(_ active: Bool) {
+        guard trustProbePollingActive != active else {
+            return
+        }
+        trustProbePollingActive = active
+        if active,
+           let session = trustProbeSession,
+           session.status != "expired" {
+            startTrustProbePolling(sessionID: session.sessionID)
+        } else if !active {
+            stopTrustProbePolling()
+        }
     }
 
     func refresh() async {
@@ -1481,7 +1511,7 @@ private final class OverviewControlModel: ObservableObject {
 
     private func applyTrustProbeSession(_ session: TrustProbeSession) {
         trustProbeSession = session
-        if session.status == "expired" {
+        if session.status == "expired" || !trustProbePollingActive {
             stopTrustProbePolling()
         } else {
             startTrustProbePolling(sessionID: session.sessionID)
@@ -1489,6 +1519,9 @@ private final class OverviewControlModel: ObservableObject {
     }
 
     private func startTrustProbePolling(sessionID: String) {
+        guard trustProbePollingActive else {
+            return
+        }
         if pollingTrustProbeSessionID == sessionID,
            trustProbePollingTask?.isCancelled == false {
             return
@@ -1513,7 +1546,7 @@ private final class OverviewControlModel: ObservableObject {
                             self?.stopTrustProbePolling()
                         }
                     }
-                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
                 } catch is CancellationError {
                     return
                 } catch {
@@ -2669,15 +2702,9 @@ private struct MobileConnectionCheckCard: View {
                     StatusPill(title: probeStatusTitle, color: probeStatusColor)
                 }
 
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 18) {
-                        QRPreview(urlString: model.trustProbeSession?.qrCodeURL)
-                        mobileProbeDetails
-                    }
-                    VStack(alignment: .leading, spacing: 14) {
-                        QRPreview(urlString: model.trustProbeSession?.qrCodeURL)
-                        mobileProbeDetails
-                    }
+                HStack(alignment: .top, spacing: 18) {
+                    QRPreview(urlString: model.trustProbeSession?.landingURL)
+                    mobileProbeDetails
                 }
             }
         }
@@ -2799,7 +2826,7 @@ private struct MobileConnectionCheckCard: View {
 
 private struct QRPreview: View {
     let urlString: String?
-    @State private var svgText: String?
+    @State private var qrImage: NSImage?
     @State private var isLoading = false
     @State private var didFail = false
 
@@ -2811,9 +2838,12 @@ private struct QRPreview: View {
                     RoundedRectangle(cornerRadius: 8, style: .continuous)
                         .stroke(AppSurface.cardBorder)
                 )
-            if let svgText {
-                InlineSVGView(svgText: svgText)
-                    .padding(10)
+            if let qrImage {
+                Image(nsImage: qrImage)
+                    .interpolation(.none)
+                    .resizable()
+                    .scaledToFit()
+                    .padding(12)
             } else if isLoading {
                 ProgressView()
             } else {
@@ -2829,117 +2859,45 @@ private struct QRPreview: View {
     }
 
     private func loadQRCode() async {
-        await MainActor.run {
-            svgText = nil
-            didFail = false
-            isLoading = urlString != nil
-        }
         guard let value = urlString,
-              let originalURL = URL(string: value),
-              let loadURL = localQRCodeLoadURL(from: originalURL) else {
+              !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             await MainActor.run {
+                qrImage = nil
                 isLoading = false
                 didFail = urlString != nil
             }
             return
         }
 
-        do {
-            var request = URLRequest(url: loadURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 5)
-            request.setValue("image/svg+xml", forHTTPHeaderField: "Accept")
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let http = response as? HTTPURLResponse,
-                  (200 ..< 300).contains(http.statusCode),
-                  let text = String(data: data, encoding: .utf8),
-                  let svg = normalizedSVG(from: text) else {
-                throw URLError(.cannotDecodeContentData)
-            }
-            await MainActor.run {
-                svgText = svg
-                isLoading = false
-                didFail = false
-            }
-        } catch {
-            await MainActor.run {
-                svgText = nil
-                isLoading = false
-                didFail = true
-            }
+        await MainActor.run {
+            qrImage = nil
+            didFail = false
+            isLoading = true
+        }
+
+        let image = makeQRCodeImage(from: value)
+        await MainActor.run {
+            qrImage = image
+            isLoading = false
+            didFail = image == nil
         }
     }
 
-    private func localQRCodeLoadURL(from url: URL) -> URL? {
-        guard var components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
+    private func makeQRCodeImage(from value: String) -> NSImage? {
+        guard let filter = CIFilter(name: "CIQRCodeGenerator") else {
             return nil
         }
-        components.scheme = "http"
-        components.host = "127.0.0.1"
-        return components.url
-    }
-
-    private func normalizedSVG(from text: String) -> String? {
-        guard let range = text.range(of: "<svg", options: [.caseInsensitive]) else {
+        filter.setValue(Data(value.utf8), forKey: "inputMessage")
+        filter.setValue("M", forKey: "inputCorrectionLevel")
+        guard let outputImage = filter.outputImage else {
             return nil
         }
-        return String(text[range.lowerBound...])
-    }
-}
 
-private struct InlineSVGView: NSViewRepresentable {
-    let svgText: String
-
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
-    }
-
-    func makeNSView(context: Context) -> WKWebView {
-        let configuration = WKWebViewConfiguration()
-        let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.setValue(false, forKey: "drawsBackground")
-        return webView
-    }
-
-    func updateNSView(_ webView: WKWebView, context: Context) {
-        guard context.coordinator.lastSVGText != svgText else {
-            return
-        }
-        context.coordinator.lastSVGText = svgText
-        webView.loadHTMLString(html(for: svgText), baseURL: nil)
-    }
-
-    private func html(for svgText: String) -> String {
-        """
-        <!doctype html>
-        <html>
-        <head>
-          <meta name="viewport" content="width=device-width, initial-scale=1">
-          <style>
-            html, body {
-              margin: 0;
-              width: 100%;
-              height: 100%;
-              overflow: hidden;
-              background: transparent;
-            }
-            body {
-              display: flex;
-              align-items: center;
-              justify-content: center;
-            }
-            svg {
-              width: 100%;
-              height: 100%;
-              display: block;
-            }
-          </style>
-        </head>
-        <body>\(svgText)</body>
-        </html>
-        """
-    }
-
-    final class Coordinator {
-        var lastSVGText: String?
+        let scaledImage = outputImage.transformed(by: CGAffineTransform(scaleX: 10, y: 10))
+        let representation = NSCIImageRep(ciImage: scaledImage)
+        let image = NSImage(size: representation.size)
+        image.addRepresentation(representation)
+        return image
     }
 }
 
