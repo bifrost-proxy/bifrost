@@ -595,6 +595,9 @@ pub fn reinit_logging_for_daemon(log_dir: &Path, retention_days: u32, level: &st
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static RUST_LOG_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_log_output_parse() {
@@ -691,6 +694,7 @@ mod tests {
 
     #[test]
     fn build_env_filter_valid_and_invalid() {
+        let _env_guard = RUST_LOG_ENV_LOCK.lock().unwrap();
         // Ensure RUST_LOG is unset so we exercise the try_new branch.
         let saved = std::env::var("RUST_LOG").ok();
         std::env::remove_var("RUST_LOG");
@@ -981,6 +985,7 @@ mod tests {
 
     #[test]
     fn init_logging_with_config_invalid_level_errors() {
+        let _env_guard = RUST_LOG_ENV_LOCK.lock().unwrap();
         let saved = std::env::var("RUST_LOG").ok();
         std::env::remove_var("RUST_LOG");
         let dir = tempfile::tempdir().unwrap();
