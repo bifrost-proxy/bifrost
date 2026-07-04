@@ -516,6 +516,33 @@ async function api(path, options = {}) {
   return response.json();
 }
 
+async function waitForAntModalsClosed(page, timeout = 5000) {
+  await page.waitForFunction(() => {
+    const wraps = Array.from(document.querySelectorAll('.ant-modal-wrap'));
+    return wraps.every((wrap) => {
+      const style = getComputedStyle(wrap);
+      const rect = wrap.getBoundingClientRect();
+      return style.display === 'none' || style.visibility === 'hidden' || rect.width === 0 || rect.height === 0;
+    });
+  }, null, { timeout });
+}
+
+async function closeAntModals(page) {
+  await page.keyboard.press('Escape').catch(() => {});
+  await waitForAntModalsClosed(page, 1000).catch(async () => {
+    const closeButtons = page.locator('.ant-modal-close');
+    for (let index = await closeButtons.count() - 1; index >= 0; index -= 1) {
+      await closeButtons.nth(index).click({ force: true }).catch(() => {});
+    }
+    await waitForAntModalsClosed(page, 8000);
+  });
+}
+
+async function clickDevtoolsRefresh(page) {
+  await closeAntModals(page);
+  await page.getByTestId('devtools-refresh').click();
+}
+
 async function waitForDevToolsPage(predicate, description, timeoutMs = 10000) {
   const startedAt = Date.now();
   let lastPages = [];
@@ -1878,7 +1905,7 @@ await page.evaluate(() => {
   document.body.appendChild(item);
 });
 targetCounters = await targetRuntimeCounters(page);
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await adminPage.getByTestId('devtools-elements-panel').getByText(/debug-fixture-manual-refresh/).waitFor({ timeout: 8000 });
 targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Elements refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('manual-refresh');
@@ -1922,7 +1949,7 @@ await clickDevtoolsWorkspaceTab(adminPage, 'Network');
 await page.evaluate(() => fetch('/devtools/api/extra?case=webui-network-complete').catch(() => {}));
 await page.waitForFunction(() => (window.__bifrostBusinessFetchUrls || []).some((url) => String(url).includes('webui-network-complete')), null, { timeout: 8000 });
 targetCounters = await targetRuntimeCounters(page);
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 try {
   await adminPage.getByTestId('devtools-network-traffic-table').getByTestId('traffic-table').waitFor({ timeout: 8000 });
 } catch (error) {
@@ -1996,7 +2023,7 @@ await adminPage.route('**/_bifrost/api/traffic/**', async (route) => {
 await page.evaluate(() => fetch('/devtools/api/missing?case=bridge-only-detail&foo=fallback', {
   headers: { 'x-bifrost-fallback-header': 'fallback-request' },
 }).catch(() => {}));
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await panelSearch.fill('bridge-only-detail');
 const bridgeOnlyDetailRow = adminPage
   .getByTestId('devtools-network-panel')
@@ -2020,7 +2047,7 @@ await page.evaluate(() => new Promise((resolve) => {
   img.src = '/devtools/api/tag-missing?case=bridge-only-tag-fallback&foo=tag';
   document.body.appendChild(img);
 }));
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await panelSearch.fill('bridge-only-tag-fallback');
 const bridgeOnlyTagRow = adminPage
   .getByTestId('devtools-network-panel')
@@ -2041,7 +2068,7 @@ await page.evaluate(() => new Promise((resolve) => {
   img.src = '/devtools/api/parser-resource?case=ui-traffic-enrich&foo=img';
   document.body.appendChild(img);
 }));
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await panelSearch.fill('ui-traffic-enrich');
 const uiTrafficEnrichRow = adminPage
   .getByTestId('devtools-network-panel')
@@ -2066,7 +2093,7 @@ await page.evaluate(() => {
   sessionStorage.setItem('bifrost-session-live', 'session-live');
 });
 targetCounters = await targetRuntimeCounters(page);
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await adminPage.getByTestId('devtools-local-storage-panel').getByText('bifrost-storage-live').waitFor({ timeout: 8000 });
 targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Storage refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('bifrost-storage-live');
@@ -2083,7 +2110,7 @@ await page.evaluate(() => {
     sessionStorage.setItem(`bifrost-virtual-session-${i}`, `session-${i}`);
   }
 });
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await clickDevtoolsWorkspaceTab(adminPage, 'LocalStorage');
 await adminPage.getByText(/42\d \/ 42\d items/).waitFor({ timeout: 8000 });
 const localStorageRenderedRows = await adminPage.getByTestId('devtools-local-storage-panel').getByTestId('devtools-storage-row').count();
@@ -2203,7 +2230,7 @@ await page.evaluate(() => {
   console.error('bifrost-console-error-live');
   console.log('%cbifrost-console-css-live', 'color: rgb(255, 0, 0); font-weight: 700');
 });
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-info-live').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-debug-live').first().waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-console-panel').getByText('bifrost-console-error-live').first().waitFor({ timeout: 8000 });
@@ -2258,7 +2285,7 @@ await page.reload({ waitUntil: 'load' });
 await page.waitForFunction(() => window.__BIFROST_DEVTOOLS_BRIDGE__?.state === 'connected', null, { timeout: 8000 });
 await page.waitForTimeout(800);
 await clickDevtoolsWorkspaceTab(adminPage, 'Elements');
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await adminPage.getByTestId('devtools-elements-tree').getByText(/debug-fixture/).first().waitFor({ timeout: 8000 });
 await clickDevtoolsWorkspaceTab(adminPage, 'Console');
 await adminPage.getByTestId('devtools-console-input').fill('document.title');
@@ -2283,7 +2310,7 @@ await secondaryCard.waitFor({ timeout: 8000 });
 await secondaryCard.click();
 await adminPage.getByTestId('devtools-detail').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-custom-workspace').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-refresh').click();
+await clickDevtoolsRefresh(adminPage);
 await adminPage.getByTestId('devtools-elements-panel').getByText(/debug-fixture-secondary/).waitFor({ timeout: 8000 });
 if (await adminPage.locator('iframe[title="Chrome DevTools Frontend"]').count()) {
   throw new Error('AV-CDP-09 failed: WebUI should not embed Chrome DevTools frontend when switching pages');
