@@ -10,6 +10,7 @@ debug.md
 .trae/skills/e2e-verify/logs/
 web/test-results/
 web/dist-desktop/
+apps/macos/.build-codeedit/
 site/dist/
 .ui-backend.log
 .ui-backend.pid

@@ -634,6 +634,6 @@ private extension NSRange {
         guard location <= length else {
             return nil
         }
-        return NSRange(location: location, length: min(self.length, length - location))
+        return NSRange(location: location, length: Swift.min(self.length, length - location))
     }
 }

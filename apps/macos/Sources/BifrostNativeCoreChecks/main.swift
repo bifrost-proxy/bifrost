@@ -263,6 +263,38 @@ func runRuleLanguageChecks() throws {
     )
     try checkEqual(scriptCompletions.first?.insertText, "auth", "request script completion should replace only typed suffix")
 
+    let diagnostics = service.diagnostics(
+        in: """
+        example.com host//127.0.0.1:3000
+        api.example.com host://{missing
+        @MissingRule
+        reqScript://missingScript
+        ```
+        value
+        """,
+        context: context
+    )
+    try check(
+        diagnostics.contains { $0.severity == .warning && $0.message.contains("://") },
+        "rule diagnostics should catch malformed operation schemes"
+    )
+    try check(
+        diagnostics.contains { $0.severity == .error && $0.message.contains("Unclosed value reference") },
+        "rule diagnostics should catch unclosed value references"
+    )
+    try check(
+        diagnostics.contains { $0.message.contains("@MissingRule") },
+        "rule diagnostics should warn for unknown rule references"
+    )
+    try check(
+        diagnostics.contains { $0.message.contains("missingScript") },
+        "rule diagnostics should warn for unknown script references"
+    )
+    try check(
+        diagnostics.contains { $0.message.contains("Unclosed fenced value block") },
+        "rule diagnostics should catch unclosed fenced blocks"
+    )
+
     let ruleReferenceOffset = (text as NSString).range(of: "@Default").location + 2
     let ruleReference = service.reference(
         in: text,

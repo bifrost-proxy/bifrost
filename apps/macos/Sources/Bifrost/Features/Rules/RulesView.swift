@@ -192,9 +192,13 @@ struct RulesView: View {
         VStack(spacing: 0) {
             detailHeader
             if appModel.selectedRuleDetail != nil {
-                CodeEditorView(
+                RuleEditorHostView(
                     text: $appModel.ruleDraftContent,
+                    context: appModel.ruleEditorContext,
                     isReadOnly: appModel.isSavingRule || !appModel.canEditSelectedRuleContent,
+                    onNavigate: { target in
+                        appModel.navigateFromRuleEditor(target)
+                    },
                     onSave: {
                         saveDraftImmediately()
                     },

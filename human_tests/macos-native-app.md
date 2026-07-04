@@ -1734,10 +1734,63 @@
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行源码合同扫描通过，输出 `macOS native trust probe message normalization contract ok`。
 
+### TC-MNA-56：实验 - Rules 使用 CodeEditSourceEditor 提升 DSL 高亮、诊断和智能提示
+
+**操作步骤：**
+1. 执行 Swift 构建和核心语言服务检查：
+   ```bash
+   swift build --package-path apps/macos
+   swift run --package-path apps/macos BifrostNativeCoreChecks
+   ```
+2. 执行源码合同扫描，确认 Rules 不再直接使用通用 `CodeEditorView`，默认兜底为当前专用 `BifrostRuleEditorView`，CodeEditSourceEditor 只通过实验开关进入，并复用同一套 `BifrostRuleLanguageService` 高亮、补全和诊断来源：
+   ```bash
+   ruby -e 'rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); host=File.read("apps/macos/Sources/Bifrost/Features/Rules/Editor/RuleEditorHostView.swift"); codeedit=File.read("apps/macos/Sources/Bifrost/Features/Rules/Editor/CodeEditRuleEditorView.swift"); lang=File.read("apps/macos/Sources/BifrostNativeCore/RuleLanguage/BifrostRuleLanguageService.swift"); pkg=File.read("apps/macos/Package.swift"); script=File.read("scripts/build-macos-codeedit-rule-editor.sh"); required=["RuleEditorHostView(","BifrostRuleEditorView(","CodeEditRuleEditorView(","BIFROST_NATIVE_RULE_EDITOR","rules-editor-codeedit","rules-editor-native","rules-editor-diagnostics","BifrostRuleDiagnostic","diagnostics(","HighlightProviding","CodeSuggestionDelegate","CodeEditSourceEditor","BIFROST_BUILD_CODEEDIT_RULE_EDITOR"]; text=[rules,host,codeedit,lang,pkg,script].join("\\n"); missing=required.reject{|needle| text.include?(needle)}; abort("missing codeedit rule editor markers: #{missing.join(", ")}") unless missing.empty?; abort("RulesView still directly uses CodeEditorView") if rules.include?("CodeEditorView("); puts "macOS native CodeEdit rule editor contract ok"'
+   ```
+3. 关闭已有 Native App 进程，仅保留默认数据目录里的 `bifrost` 服务；启动默认兜底编辑器，进入 `规则` 页面并选择可编辑规则：
+   ```bash
+   pkill -x Bifrost || true
+   open -na apps/macos/.build/Bifrost.app
+   ```
+4. 在 Rules 编辑区输入一个有效规则片段，例如 `example.com host://127.0.0.1:3000`，确认诊断条显示 `Syntax OK`，输入 `@` 或 `{` 时出现规则/变量补全候选，Cmd+S 可触发保存。
+5. 关闭 Native App 后以实验开关启动 CodeEditSourceEditor 版本：
+   ```bash
+   pkill -x Bifrost || true
+   scripts/build-macos-codeedit-rule-editor.sh
+   launchctl setenv BIFROST_NATIVE_RULE_EDITOR codeedit
+   open -na apps/macos/.build-codeedit/Bifrost-CodeEdit.app --args --ui-test-mode
+   ```
+6. 在实验编辑器里输入 malformed 规则：
+   ```text
+   example.com host//127.0.0.1:3000
+   api.example.com host://{missing
+   @MissingRule
+   reqScript://missingScript
+   ```
+7. 观察语法高亮、诊断条和补全弹窗；修正为有效写法后再次观察诊断状态恢复。
+
+**预期结果：**
+- 源码合同扫描输出 `macOS native CodeEdit rule editor contract ok`。
+- 默认启动时 Rules 使用当前已启用的专用 `BifrostRuleEditorView` 兜底，不再走通用 `CodeEditorView`。
+- 设置 `BIFROST_NATIVE_RULE_EDITOR=codeedit` 后，Rules 编辑区使用 CodeEditSourceEditor；未设置时不影响默认可用路径。
+- 高亮、规则引用/Value/Script 补全和诊断都来自 `BifrostRuleLanguageService`，两种编辑器行为口径一致。
+- malformed `host//`、未闭合 `{missing`、未知 `@MissingRule` 和未知脚本会在诊断条显示 warning/error；修正后恢复 `Syntax OK`。
+- 真实 Native App 操作期间不崩溃，规则内容编辑、自动保存和 Cmd+S 保存路径保留。
+
+**实际结果（2026-07-04 执行）：**
+- 通过 `swift build --package-path apps/macos` 验证默认兜底构建不引入 CodeEdit 依赖；通过 `swift run --package-path apps/macos BifrostNativeCoreChecks` 验证语言服务诊断合同。
+- 通过源码合同扫描，输出 `macOS native CodeEdit rule editor contract ok`；`RulesView` 不再直接使用通用 `CodeEditorView`，而是经 `RuleEditorHostView` 默认落到 `BifrostRuleEditorView`，实验开关才进入 `CodeEditRuleEditorView`。
+- 通过 `scripts/build-macos-codeedit-rule-editor.sh` 在独立 `apps/macos/.build-codeedit` scratch path 构建实验依赖并生成 `Bifrost-CodeEdit.app`；默认 `apps/macos/.build` 构建随后仍可通过，确认实验依赖不污染兜底路径。
+- 使用真实默认 daemon `http://127.0.0.1:9900/_bifrost/api` 创建临时规则 `codex-codeedit-editor-e2e`，LaunchServices 启动 `BIFROST_NATIVE_RULE_EDITOR=codeedit` 的 `Bifrost-CodeEdit.app`，进入 `规则` 页面并选择临时规则。
+- 首次进入 Rules 时发现 CodeEditSourceEditor 在 `MinimapView.setTheme` 内对 `NSCalibratedWhiteColorSpace` 调用 `brightnessComponent` 崩溃；修复为传入 device RGB 主题色后复测，没有新增 Bifrost crash report。
+- 真实粘贴 malformed 规则后，编辑区显示 CodeEdit 高亮 token，标题状态显示 `Save failed`，诊断条显示 `1 errors Line 2: Operation schemes use ://, for example host://127.0.0.1:3000.`；后端 API 内容保持原有效内容，证明非法规则未被保存污染。
+- 输入 `@` 后弹出 CodeEditSourceEditor 补全候选，包含 `@Default`、`@NextAgent双机协作a`、`@NextOncall双前端本地开发`、`@codex-codeedit-editor-e2e` 等真实规则引用候选；诊断条保持 `Syntax OK`。
+- 清理临时规则 `codex-codeedit-editor-e2e`，关闭实验 App；未发现默认 daemon 被重启或系统代理被改动。
+
 ## 清理步骤
 
 ```bash
 rm -rf apps/macos/.build/sidecar
+rm -rf apps/macos/.build-codeedit
 rm -f /tmp/bifrost-shell-shard-list.txt
 rm -rf "${TMPDIR:-/tmp}"/bifrost-native-app-human.*
 pkill -x Bifrost || true

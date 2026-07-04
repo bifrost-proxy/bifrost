@@ -141,6 +141,33 @@ public struct BifrostReferenceMatch: Equatable, Sendable {
     }
 }
 
+public enum BifrostRuleDiagnosticSeverity: String, Equatable, Sendable {
+    case error
+    case warning
+    case info
+}
+
+public struct BifrostRuleDiagnostic: Identifiable, Equatable, Sendable {
+    public var id: String
+    public var severity: BifrostRuleDiagnosticSeverity
+    public var message: String
+    public var line: Int
+    public var range: NSRange
+
+    public init(
+        severity: BifrostRuleDiagnosticSeverity,
+        message: String,
+        line: Int,
+        range: NSRange
+    ) {
+        self.id = "\(severity.rawValue)-\(line)-\(range.location)-\(range.length)-\(message)"
+        self.severity = severity
+        self.message = message
+        self.line = line
+        self.range = range
+    }
+}
+
 public enum BifrostNavigationTarget: Equatable, Sendable {
     case editorLine(Int)
     case value(name: String)
@@ -368,6 +395,85 @@ public struct BifrostRuleLanguageService: Sendable {
         }
         return result
     }
+
+    public func diagnostics(
+        in text: String,
+        context: BifrostRuleEditorContext = .empty
+    ) -> [BifrostRuleDiagnostic] {
+        let nsText = text as NSString
+        var diagnostics: [BifrostRuleDiagnostic] = []
+        var inCodeFence: (line: Int, range: NSRange)?
+        var inLineBlock: (line: Int, range: NSRange)?
+
+        nsText.enumerateSubstrings(
+            in: NSRange(location: 0, length: nsText.length),
+            options: [.byLines, .substringNotRequired]
+        ) { _, lineRange, _, _ in
+            let line = nsText.substring(with: lineRange)
+            let lineNumber = nsText.substring(to: lineRange.location).filter { $0 == "\n" }.count + 1
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if inCodeFence != nil {
+                if trimmed.hasPrefix("```") {
+                    inCodeFence = nil
+                }
+                return
+            }
+            if inLineBlock != nil {
+                if trimmed == "`" {
+                    inLineBlock = nil
+                }
+                return
+            }
+
+            if trimmed.isEmpty || trimmed.hasPrefix("#") {
+                return
+            }
+            if trimmed.hasPrefix("```") {
+                inCodeFence = (lineNumber, lineRange)
+                return
+            }
+            if trimmed == "line`" {
+                inLineBlock = (lineNumber, lineRange)
+                return
+            }
+
+            diagnostics.append(contentsOf: structuralDiagnostics(in: line, lineRange: lineRange, lineNumber: lineNumber))
+            diagnostics.append(contentsOf: referenceDiagnostics(
+                in: line,
+                lineRange: lineRange,
+                lineNumber: lineNumber,
+                context: context
+            ))
+            if lineNeedsOperationDiagnostic(line) {
+                diagnostics.append(BifrostRuleDiagnostic(
+                    severity: .warning,
+                    message: "Rule line should include a pattern and an operation such as host://, proxy://, or passthrough://.",
+                    line: lineNumber,
+                    range: lineRange
+                ))
+            }
+        }
+
+        if let inCodeFence {
+            diagnostics.append(BifrostRuleDiagnostic(
+                severity: .error,
+                message: "Unclosed fenced value block. Add a closing ``` line.",
+                line: inCodeFence.line,
+                range: inCodeFence.range
+            ))
+        }
+        if let inLineBlock {
+            diagnostics.append(BifrostRuleDiagnostic(
+                severity: .error,
+                message: "Unclosed line` block. Add a closing ` line.",
+                line: inLineBlock.line,
+                range: inLineBlock.range
+            ))
+        }
+
+        return diagnostics.sorted { ($0.line, $0.range.location, $0.message) < ($1.line, $1.range.location, $1.message) }
+    }
 }
 
 private struct RegexMatch {
@@ -435,6 +541,140 @@ private func referenceCandidates(in text: String, context: BifrostRuleEditorCont
     addReferenceMatches(pattern: #"\bresScript://([^#\s]+)"#, text: text, nsText: nsText, type: .responseScript, output: &matches)
     addReferenceMatches(pattern: #"\bbp://([^#\s]+)"#, text: text, nsText: nsText, type: .parserScript, output: &matches)
     return matches.sorted { $0.range.location < $1.range.location }
+}
+
+private func structuralDiagnostics(in line: String, lineRange: NSRange, lineNumber: Int) -> [BifrostRuleDiagnostic] {
+    var diagnostics: [BifrostRuleDiagnostic] = []
+    let nsLine = line as NSString
+    let openVariablePattern = #"\$?\{[^}\s]*(?:\s|$)"#
+    if let regex = try? NSRegularExpression(pattern: openVariablePattern) {
+        for match in regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length)) {
+            let value = nsLine.substring(with: match.range)
+            guard !value.contains("}") else {
+                continue
+            }
+            diagnostics.append(BifrostRuleDiagnostic(
+                severity: .error,
+                message: "Unclosed value reference. Add a closing }.",
+                line: lineNumber,
+                range: offset(match.range, by: lineRange.location)
+            ))
+        }
+    }
+
+    if let regex = try? NSRegularExpression(pattern: #"(?<!:)/(?:/|$)"#) {
+        for match in regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length)) {
+            diagnostics.append(BifrostRuleDiagnostic(
+                severity: .warning,
+                message: "Operation schemes use ://, for example host://127.0.0.1:3000.",
+                line: lineNumber,
+                range: offset(match.range, by: lineRange.location)
+            ))
+        }
+    }
+    return diagnostics
+}
+
+private func referenceDiagnostics(
+    in line: String,
+    lineRange: NSRange,
+    lineNumber: Int,
+    context: BifrostRuleEditorContext
+) -> [BifrostRuleDiagnostic] {
+    let nsLine = line as NSString
+    let localNames = Set(context.localVariables.map(\.name))
+    var diagnostics: [BifrostRuleDiagnostic] = []
+
+    diagnostics.append(contentsOf: missingReferenceDiagnostics(
+        pattern: #"@([A-Za-z0-9_.\-]+)"#,
+        line: line,
+        nsLine: nsLine,
+        lineRange: lineRange,
+        lineNumber: lineNumber,
+        known: Set(context.ruleNames),
+        message: { "Rule reference @\($0) does not match a loaded rule." }
+    ))
+    diagnostics.append(contentsOf: missingReferenceDiagnostics(
+        pattern: #"\$?\{([A-Za-z0-9_\-]+)\}"#,
+        line: line,
+        nsLine: nsLine,
+        lineRange: lineRange,
+        lineNumber: lineNumber,
+        known: Set(context.values).union(localNames),
+        message: { "Value reference {\($0)} does not match a loaded value or local variable." }
+    ))
+    diagnostics.append(contentsOf: missingReferenceDiagnostics(
+        pattern: #"\breqScript://([^#\s]+)"#,
+        line: line,
+        nsLine: nsLine,
+        lineRange: lineRange,
+        lineNumber: lineNumber,
+        known: Set(context.requestScripts),
+        message: { "Request script \($0) is not in the loaded script list." }
+    ))
+    diagnostics.append(contentsOf: missingReferenceDiagnostics(
+        pattern: #"\bresScript://([^#\s]+)"#,
+        line: line,
+        nsLine: nsLine,
+        lineRange: lineRange,
+        lineNumber: lineNumber,
+        known: Set(context.responseScripts),
+        message: { "Response script \($0) is not in the loaded script list." }
+    ))
+    diagnostics.append(contentsOf: missingReferenceDiagnostics(
+        pattern: #"\bbp://([^#\s]+)"#,
+        line: line,
+        nsLine: nsLine,
+        lineRange: lineRange,
+        lineNumber: lineNumber,
+        known: Set(context.parserScripts),
+        message: { "Parser script \($0) is not in the loaded script list." }
+    ))
+
+    return diagnostics
+}
+
+private func missingReferenceDiagnostics(
+    pattern: String,
+    line: String,
+    nsLine: NSString,
+    lineRange: NSRange,
+    lineNumber: Int,
+    known: Set<String>,
+    message: (String) -> String
+) -> [BifrostRuleDiagnostic] {
+    guard !known.isEmpty,
+          let regex = try? NSRegularExpression(pattern: pattern) else {
+        return []
+    }
+    return regex.matches(in: line, range: NSRange(location: 0, length: nsLine.length)).compactMap { match in
+        guard match.numberOfRanges >= 2 else {
+            return nil
+        }
+        let name = nsLine.substring(with: match.range(at: 1))
+        guard !known.contains(name) else {
+            return nil
+        }
+        return BifrostRuleDiagnostic(
+            severity: .warning,
+            message: message(name),
+            line: lineNumber,
+            range: offset(match.range, by: lineRange.location)
+        )
+    }
+}
+
+private func lineNeedsOperationDiagnostic(_ line: String) -> Bool {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    guard !trimmed.isEmpty,
+          !trimmed.hasPrefix("@"),
+          !trimmed.hasPrefix("```"),
+          trimmed != "line`",
+          !trimmed.contains("://"),
+          !trimmed.contains("=") else {
+        return false
+    }
+    return true
 }
 
 private func addReferenceMatches(
