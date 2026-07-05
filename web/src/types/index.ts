@@ -80,6 +80,8 @@ export interface TrafficSummary {
   request_content_type?: string | null;
   request_size: number;
   response_size: number;
+  upload_bytes?: number;
+  download_bytes?: number;
   duration_ms: number;
   listener_port?: number;
   host: string;
@@ -216,6 +218,8 @@ export interface TrafficSummaryCompact {
   req_ct?: string | null;
   req_sz: number;
   res_sz: number;
+  up?: number;
+  down?: number;
   dur: number;
   lp?: number;
   proto: string;

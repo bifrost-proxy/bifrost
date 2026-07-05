@@ -830,6 +830,9 @@ async fn record_traffic_for_unified(
             .and_then(|body_store| body_store.read().store(&traffic_id, "res", body))
     });
 
+    let request_size = applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0);
+    let response_size = response_body.map(|b| b.len()).unwrap_or(0);
+
     let record = TrafficRecord {
         id: traffic_id.clone(),
         sequence: 0,
@@ -842,8 +845,10 @@ async fn record_traffic_for_unified(
         protocol: scheme.to_string(),
         content_type: response_content_type,
         request_content_type,
-        request_size: applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0),
-        response_size: response_body.map(|b| b.len()).unwrap_or(0),
+        request_size,
+        response_size,
+        upload_bytes: request_size,
+        download_bytes: response_size,
         duration_ms,
         listener_port: 0,
         client_ip: "127.0.0.1".to_string(),
@@ -2659,6 +2664,8 @@ fn record_traffic_for_stream(
         None
     };
 
+    let request_size = applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0);
+
     let record = TrafficRecord {
         id: traffic_id.clone(),
         sequence: 0,
@@ -2671,8 +2678,10 @@ fn record_traffic_for_stream(
         protocol,
         content_type: None,
         request_content_type,
-        request_size: applied_request.body.as_ref().map(|b| b.len()).unwrap_or(0),
+        request_size,
         response_size: 0,
+        upload_bytes: request_size,
+        download_bytes: 0,
         duration_ms: 0,
         listener_port: 0,
         client_ip: "127.0.0.1".to_string(),

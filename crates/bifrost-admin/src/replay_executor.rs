@@ -1158,6 +1158,8 @@ impl ReplayExecutor {
             request_content_type,
             request_size,
             response_size,
+            upload_bytes: request_size,
+            download_bytes: response_size,
             duration_ms,
             listener_port: 0,
             client_ip: "127.0.0.1".to_string(),

@@ -450,6 +450,7 @@ impl UdpRelay {
                         let total_received = session_bytes_received_clone.load(Ordering::Relaxed);
                         state.update_traffic_by_id(&req_id_clone, move |record| {
                             record.response_size = total_received as usize;
+                            record.download_bytes = total_received as usize;
                         });
 
                         debug!(
@@ -475,6 +476,7 @@ impl UdpRelay {
             let total_sent = session_bytes_sent.load(Ordering::Relaxed);
             state.update_traffic_by_id(&req_id, move |record| {
                 record.request_size = total_sent as usize;
+                record.upload_bytes = total_sent as usize;
             });
         }
 

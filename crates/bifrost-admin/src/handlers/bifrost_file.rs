@@ -329,6 +329,9 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
 
     let imported_id = format!("OUT-{}", record.id);
 
+    let request_size = record.request_body.as_ref().map_or(0, |b| b.len());
+    let response_size = record.response_body.as_ref().map_or(0, |b| b.len());
+
     TrafficRecord {
         id: imported_id,
         sequence: 0,
@@ -337,8 +340,10 @@ fn network_record_to_traffic_record(record: &NetworkRecord) -> TrafficRecord {
         url: record.url.clone(),
         status: record.status,
         content_type: None,
-        request_size: record.request_body.as_ref().map_or(0, |b| b.len()),
-        response_size: record.response_body.as_ref().map_or(0, |b| b.len()),
+        request_size,
+        response_size,
+        upload_bytes: request_size,
+        download_bytes: response_size,
         duration_ms: record.duration_ms,
         listener_port: record.listener_port.unwrap_or(0),
         timing: None,

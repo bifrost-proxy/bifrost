@@ -189,8 +189,8 @@ export default function Activity() {
   const totalRequests =
     metricSnapshot?.total_requests ??
     (traffic.serverTotal > 0 ? traffic.serverTotal : traffic.records.length);
-  const totalUpload = metricSnapshot?.bytes_sent ?? traffic.records.reduce((sum, record) => sum + record.request_size, 0);
-  const totalDownload = metricSnapshot?.bytes_received ?? traffic.records.reduce((sum, record) => sum + record.response_size, 0);
+  const totalUpload = metricSnapshot?.bytes_sent ?? traffic.records.reduce((sum, record) => sum + (record.upload_bytes ?? record.request_size), 0);
+  const totalDownload = metricSnapshot?.bytes_received ?? traffic.records.reduce((sum, record) => sum + (record.download_bytes ?? record.response_size), 0);
   const rulesTotal = overview?.rules.total ?? activeRules.reduce((sum, rule) => sum + rule.rule_count, 0);
   const rulesEnabled = overview?.rules.enabled ?? activeRules.length;
   const serverPort = overview?.server.port ?? 9900;

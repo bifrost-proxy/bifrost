@@ -655,6 +655,8 @@ impl AdminState {
 
         if let Some(status) = self.runtime_socket_status(&summary.id, summary_is_sse) {
             summary.fc = status.frame_count;
+            summary.up = summary.up.max(status.send_bytes as usize);
+            summary.down = summary.down.max(status.receive_bytes as usize);
             summary.ss = Some(status);
         } else if let Some(socket_status) = summary.ss.as_mut() {
             if socket_status.is_open {
@@ -671,6 +673,8 @@ impl AdminState {
                     summary_response_size,
                     socket_status,
                 );
+                summary.up = summary.up.max(status.send_bytes as usize);
+                summary.down = summary.down.max(status.receive_bytes as usize);
                 *socket_status = status.clone();
                 let frame_count = summary.fc.max(status.frame_count);
                 let response_size = if summary.is_sse() {
@@ -685,9 +689,13 @@ impl AdminState {
                 let record_id = summary.id.clone();
                 self.update_traffic_by_id(&record_id, move |record| {
                     record.socket_status = Some(status.clone());
+                    record.upload_bytes = record.upload_bytes.max(status.send_bytes as usize);
+                    record.download_bytes =
+                        record.download_bytes.max(status.receive_bytes as usize);
                     record.frame_count = record.frame_count.max(frame_count);
                     if let Some(size) = response_size {
                         record.response_size = record.response_size.max(size);
+                        record.download_bytes = record.download_bytes.max(size);
                     }
                 });
             }
@@ -707,6 +715,8 @@ impl AdminState {
         if summary.is_sse() {
             if let Some(ref socket_status) = summary.ss {
                 let total = socket_status.send_bytes + socket_status.receive_bytes;
+                summary.up = summary.up.max(socket_status.send_bytes as usize);
+                summary.down = summary.down.max(socket_status.receive_bytes as usize);
                 summary.res_sz = summary.res_sz.max(total as usize);
             }
         }
@@ -733,6 +743,10 @@ impl AdminState {
 
         if let Some(ref socket_status) = record.socket_status {
             let total = socket_status.send_bytes + socket_status.receive_bytes;
+            record.upload_bytes = record.upload_bytes.max(socket_status.send_bytes as usize);
+            record.download_bytes = record
+                .download_bytes
+                .max(socket_status.receive_bytes as usize);
             if record.is_sse && total > 0 {
                 record.response_size = record.response_size.max(total as usize);
             }

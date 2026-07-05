@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
@@ -113,6 +113,13 @@ impl Default for CachedMetricsSnapshot {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct ByteEvent {
+    timestamp: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
 pub struct MetricsCollector {
     total_requests: AtomicU64,
     active_connections: AtomicU64,
@@ -124,13 +131,6 @@ pub struct MetricsCollector {
     last_bytes_sent: AtomicU64,
     last_bytes_received: AtomicU64,
     last_snapshot_time: AtomicU64,
-    realtime_last_request_count: AtomicU64,
-    realtime_last_bytes_sent: AtomicU64,
-    realtime_last_bytes_received: AtomicU64,
-    realtime_last_time: AtomicU64,
-    smoothed_qps: RwLock<f32>,
-    smoothed_bytes_sent_rate: RwLock<f32>,
-    smoothed_bytes_received_rate: RwLock<f32>,
     system: RwLock<System>,
     pid: Pid,
     max_qps: RwLock<f32>,
@@ -140,6 +140,8 @@ pub struct MetricsCollector {
     client_process_policy_unknown_decisions: AtomicU64,
     cached_cpu: CachedCpuMetrics,
     cached_snapshot: CachedMetricsSnapshot,
+    request_events: Mutex<VecDeque<u64>>,
+    byte_events: Mutex<VecDeque<ByteEvent>>,
     http: TrafficTypeCounters,
     https: TrafficTypeCounters,
     tunnel: TrafficTypeCounters,
@@ -166,13 +168,6 @@ impl MetricsCollector {
             last_bytes_sent: AtomicU64::new(0),
             last_bytes_received: AtomicU64::new(0),
             last_snapshot_time: AtomicU64::new(0),
-            realtime_last_request_count: AtomicU64::new(0),
-            realtime_last_bytes_sent: AtomicU64::new(0),
-            realtime_last_bytes_received: AtomicU64::new(0),
-            realtime_last_time: AtomicU64::new(0),
-            smoothed_qps: RwLock::new(0.0),
-            smoothed_bytes_sent_rate: RwLock::new(0.0),
-            smoothed_bytes_received_rate: RwLock::new(0.0),
             system: RwLock::new(system),
             pid,
             max_qps: RwLock::new(0.0),
@@ -185,6 +180,8 @@ impl MetricsCollector {
                 ..Default::default()
             },
             cached_snapshot: CachedMetricsSnapshot::default(),
+            request_events: Mutex::new(VecDeque::new()),
+            byte_events: Mutex::new(VecDeque::new()),
             http: TrafficTypeCounters::new(),
             https: TrafficTypeCounters::new(),
             tunnel: TrafficTypeCounters::new(),
@@ -216,6 +213,7 @@ impl MetricsCollector {
 
     pub fn increment_requests(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.record_request_event();
         self.invalidate_cached_snapshot();
     }
 
@@ -224,6 +222,7 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .requests
             .fetch_add(1, Ordering::Relaxed);
+        self.record_request_event();
         self.invalidate_cached_snapshot();
     }
 
@@ -255,6 +254,7 @@ impl MetricsCollector {
 
     pub fn add_bytes_sent(&self, bytes: u64) {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+        self.record_byte_event(bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -263,11 +263,13 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_sent
             .fetch_add(bytes, Ordering::Relaxed);
+        self.record_byte_event(bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
     pub fn add_bytes_received(&self, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+        self.record_byte_event(0, bytes);
         self.invalidate_cached_snapshot();
     }
 
@@ -276,7 +278,65 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_received
             .fetch_add(bytes, Ordering::Relaxed);
+        self.record_byte_event(0, bytes);
         self.invalidate_cached_snapshot();
+    }
+
+    fn now_ms() -> u64 {
+        chrono::Utc::now().timestamp_millis() as u64
+    }
+
+    fn record_request_event(&self) {
+        let now = Self::now_ms();
+        let mut events = self.request_events.lock();
+        events.push_back(now);
+        prune_u64_events(&mut events, now, 10_000);
+    }
+
+    fn record_byte_event(&self, bytes_sent: u64, bytes_received: u64) {
+        if bytes_sent == 0 && bytes_received == 0 {
+            return;
+        }
+        let now = Self::now_ms();
+        let mut events = self.byte_events.lock();
+        events.push_back(ByteEvent {
+            timestamp: now,
+            bytes_sent,
+            bytes_received,
+        });
+        prune_byte_events(&mut events, now, 10_000);
+    }
+
+    fn realtime_window_rates(&self, now: u64) -> (f32, f32, f32) {
+        let window_ms = 1_000;
+        let window_secs = window_ms as f32 / 1000.0;
+        let cutoff = now.saturating_sub(window_ms);
+
+        let request_count = {
+            let mut events = self.request_events.lock();
+            prune_u64_events(&mut events, now, 10_000);
+            events.iter().filter(|&&ts| ts >= cutoff).count() as f32
+        };
+
+        let (bytes_sent, bytes_received) = {
+            let mut events = self.byte_events.lock();
+            prune_byte_events(&mut events, now, 10_000);
+            events
+                .iter()
+                .filter(|event| event.timestamp >= cutoff)
+                .fold((0u64, 0u64), |(sent, received), event| {
+                    (
+                        sent.saturating_add(event.bytes_sent),
+                        received.saturating_add(event.bytes_received),
+                    )
+                })
+        };
+
+        (
+            request_count / window_secs,
+            bytes_sent as f32 / window_secs,
+            bytes_received as f32 / window_secs,
+        )
     }
 
     pub fn increment_client_process_resolution_failure(&self) {
@@ -349,78 +409,7 @@ impl MetricsCollector {
         let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received.load(Ordering::Relaxed);
 
-        let realtime_last_count = self.realtime_last_request_count.load(Ordering::Relaxed);
-        let realtime_last_bytes_sent = self.realtime_last_bytes_sent.load(Ordering::Relaxed);
-        let realtime_last_bytes_received =
-            self.realtime_last_bytes_received.load(Ordering::Relaxed);
-        let realtime_last_time = self.realtime_last_time.load(Ordering::Relaxed);
-
-        let min_update_interval_ms: u64 = 500;
-        let elapsed_since_last = now.saturating_sub(realtime_last_time);
-        let should_update_realtime = elapsed_since_last >= min_update_interval_ms;
-
-        let (raw_qps, raw_bytes_sent_rate, raw_bytes_received_rate) =
-            if realtime_last_time > 0 && elapsed_since_last > 0 {
-                let elapsed_secs = elapsed_since_last as f32 / 1000.0;
-                if elapsed_secs > 0.0 {
-                    (
-                        (total_requests.saturating_sub(realtime_last_count)) as f32 / elapsed_secs,
-                        (bytes_sent.saturating_sub(realtime_last_bytes_sent)) as f32 / elapsed_secs,
-                        (bytes_received.saturating_sub(realtime_last_bytes_received)) as f32
-                            / elapsed_secs,
-                    )
-                } else {
-                    (0.0, 0.0, 0.0)
-                }
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-
-        let smoothing_alpha: f32 = 0.4;
-        let decay_alpha: f32 = 0.85;
-
-        let (qps, bytes_sent_rate, bytes_received_rate) = if should_update_realtime {
-            let mut smoothed_qps = self.smoothed_qps.write();
-            let mut smoothed_sent = self.smoothed_bytes_sent_rate.write();
-            let mut smoothed_recv = self.smoothed_bytes_received_rate.write();
-
-            if raw_qps > 0.0 || raw_bytes_sent_rate > 0.0 || raw_bytes_received_rate > 0.0 {
-                *smoothed_qps = smoothing_alpha * raw_qps + (1.0 - smoothing_alpha) * *smoothed_qps;
-                *smoothed_sent = smoothing_alpha * raw_bytes_sent_rate
-                    + (1.0 - smoothing_alpha) * *smoothed_sent;
-                *smoothed_recv = smoothing_alpha * raw_bytes_received_rate
-                    + (1.0 - smoothing_alpha) * *smoothed_recv;
-            } else {
-                *smoothed_qps *= decay_alpha;
-                *smoothed_sent *= decay_alpha;
-                *smoothed_recv *= decay_alpha;
-
-                if *smoothed_qps < 0.01 {
-                    *smoothed_qps = 0.0;
-                }
-                if *smoothed_sent < 1.0 {
-                    *smoothed_sent = 0.0;
-                }
-                if *smoothed_recv < 1.0 {
-                    *smoothed_recv = 0.0;
-                }
-            }
-
-            self.realtime_last_request_count
-                .store(total_requests, Ordering::Relaxed);
-            self.realtime_last_bytes_sent
-                .store(bytes_sent, Ordering::Relaxed);
-            self.realtime_last_bytes_received
-                .store(bytes_received, Ordering::Relaxed);
-            self.realtime_last_time.store(now, Ordering::Relaxed);
-
-            (*smoothed_qps, *smoothed_sent, *smoothed_recv)
-        } else {
-            let smoothed_qps = *self.smoothed_qps.read();
-            let smoothed_sent = *self.smoothed_bytes_sent_rate.read();
-            let smoothed_recv = *self.smoothed_bytes_received_rate.read();
-            (smoothed_qps, smoothed_sent, smoothed_recv)
-        };
+        let (qps, bytes_sent_rate, bytes_received_rate) = self.realtime_window_rates(now);
 
         let max_qps = *self.max_qps.read();
         let max_bytes_sent_rate = *self.max_bytes_sent_rate.read();
@@ -523,6 +512,20 @@ impl MetricsCollector {
 
     pub fn get_active_connections(&self) -> u64 {
         self.active_connections.load(Ordering::Relaxed)
+    }
+}
+
+fn prune_u64_events(events: &mut VecDeque<u64>, now: u64, retention_ms: u64) {
+    let cutoff = now.saturating_sub(retention_ms);
+    while events.front().is_some_and(|timestamp| *timestamp < cutoff) {
+        events.pop_front();
+    }
+}
+
+fn prune_byte_events(events: &mut VecDeque<ByteEvent>, now: u64, retention_ms: u64) {
+    let cutoff = now.saturating_sub(retention_ms);
+    while events.front().is_some_and(|event| event.timestamp < cutoff) {
+        events.pop_front();
     }
 }
 
@@ -725,6 +728,38 @@ mod tests {
         assert_eq!(snapshot.https.requests, 1);
         assert_eq!(snapshot.http.bytes_sent, 100);
         assert_eq!(snapshot.https.bytes_received, 200);
+    }
+
+    #[test]
+    fn test_realtime_metrics_use_recent_event_window() {
+        let collector = MetricsCollector::new(10);
+
+        collector.increment_requests_by_type(TrafficType::Http);
+        collector.increment_requests_by_type(TrafficType::Http);
+        collector.add_bytes_sent_by_type(TrafficType::Http, 512);
+        collector.add_bytes_received_by_type(TrafficType::Http, 1024);
+
+        let snapshot = collector.get_current();
+        assert_eq!(snapshot.total_requests, 2);
+        assert!(snapshot.qps >= 2.0, "qps was {}", snapshot.qps);
+        assert!(
+            snapshot.bytes_sent_rate >= 512.0,
+            "upload rate was {}",
+            snapshot.bytes_sent_rate
+        );
+        assert!(
+            snapshot.bytes_received_rate >= 1024.0,
+            "download rate was {}",
+            snapshot.bytes_received_rate
+        );
+
+        std::thread::sleep(Duration::from_millis(1_300));
+
+        let expired = collector.get_current();
+        assert_eq!(expired.total_requests, 2);
+        assert_eq!(expired.qps, 0.0);
+        assert_eq!(expired.bytes_sent_rate, 0.0);
+        assert_eq!(expired.bytes_received_rate, 0.0);
     }
 
     #[test]

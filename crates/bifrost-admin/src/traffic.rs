@@ -106,6 +106,10 @@ pub struct TrafficRecord {
     pub content_type: Option<String>,
     pub request_size: usize,
     pub response_size: usize,
+    #[serde(default)]
+    pub upload_bytes: usize,
+    #[serde(default)]
+    pub download_bytes: usize,
     pub duration_ms: u64,
     #[serde(default)]
     pub listener_port: u16,
@@ -212,6 +216,8 @@ impl TrafficRecord {
             content_type: None,
             request_size: 0,
             response_size: 0,
+            upload_bytes: 0,
+            download_bytes: 0,
             duration_ms: 0,
             listener_port: 0,
             timing: None,

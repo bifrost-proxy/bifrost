@@ -1,6 +1,6 @@
 use rusqlite::Connection;
 
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 #[derive(Debug)]
 pub enum InitError {
@@ -54,6 +54,7 @@ pub fn init_database(conn: &mut Connection) -> Result<(), InitError> {
         ",
     )?;
 
+    run_migrations(conn)?;
     check_schema_version(conn)?;
     conn.execute_batch(SCHEMA_SQL)?;
 
@@ -76,6 +77,71 @@ fn get_schema_version(conn: &Connection) -> u32 {
     )
     .unwrap_or(0)
 }
+
+fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, InitError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({})", table))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    definition: &str,
+) -> Result<(), InitError> {
+    if !column_exists(conn, table, column)? {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, definition
+        ))?;
+    }
+    Ok(())
+}
+
+fn run_migrations(conn: &Connection) -> Result<(), InitError> {
+    let current_version = get_schema_version(conn);
+    if current_version == 0 {
+        return Ok(());
+    }
+    if current_version > SCHEMA_VERSION {
+        return Err(InitError::VersionMismatch {
+            current: current_version,
+            expected: SCHEMA_VERSION,
+        });
+    }
+
+    if current_version < 13 {
+        add_column_if_missing(
+            conn,
+            "traffic_records",
+            "upload_bytes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        add_column_if_missing(
+            conn,
+            "traffic_records",
+            "download_bytes",
+            "INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute_batch(
+            "UPDATE traffic_records \
+             SET upload_bytes = CASE WHEN upload_bytes = 0 THEN request_size ELSE upload_bytes END, \
+                 download_bytes = CASE WHEN download_bytes = 0 THEN response_size ELSE download_bytes END",
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_version', ?)",
+            [SCHEMA_VERSION.to_string()],
+        )?;
+    }
+
+    Ok(())
+}
 const SCHEMA_SQL: &str = r#"
 CREATE TABLE IF NOT EXISTS traffic_records (
     sequence INTEGER PRIMARY KEY,
@@ -91,6 +157,8 @@ CREATE TABLE IF NOT EXISTS traffic_records (
     request_content_type TEXT,
     request_size INTEGER NOT NULL DEFAULT 0,
     response_size INTEGER NOT NULL DEFAULT 0,
+    upload_bytes INTEGER NOT NULL DEFAULT 0,
+    download_bytes INTEGER NOT NULL DEFAULT 0,
     duration_ms INTEGER NOT NULL DEFAULT 0,
     listener_port INTEGER NOT NULL DEFAULT 0,
     client_ip TEXT NOT NULL DEFAULT '',
@@ -157,7 +225,7 @@ pub fn get_insert_sql() -> &'static str {
     INSERT OR REPLACE INTO traffic_records (
         sequence, id, timestamp, host, method, status, protocol,
         url, path, content_type, request_content_type,
-        request_size, response_size, duration_ms,
+        request_size, response_size, upload_bytes, download_bytes, duration_ms,
         listener_port, client_ip, client_app, client_pid, client_path,
         flags, frame_count, last_frame_id,
         socket_is_open, socket_send_count, socket_receive_count,
@@ -166,11 +234,11 @@ pub fn get_insert_sql() -> &'static str {
     ) VALUES (
         ?1, ?2, ?3, ?4, ?5, ?6, ?7,
         ?8, ?9, ?10, ?11,
-        ?12, ?13, ?14,
-        ?15, ?16, ?17, ?18, ?19,
-        ?20, ?21, ?22,
-        ?23, ?24, ?25, ?26, ?27, ?28,
-        ?29, ?30, ?31
+        ?12, ?13, ?14, ?15, ?16,
+        ?17, ?18, ?19, ?20, ?21,
+        ?22, ?23, ?24,
+        ?25, ?26, ?27, ?28, ?29, ?30,
+        ?31, ?32, ?33
     )
     "#
 }
@@ -205,24 +273,26 @@ pub fn get_update_sql() -> &'static str {
         request_content_type = ?3,
         request_size = ?4,
         response_size = ?5,
-        duration_ms = ?6,
-        listener_port = ?7,
-        client_app = ?8,
-        client_pid = ?9,
-        client_path = ?10,
-        flags = ?11,
-        frame_count = ?12,
-        last_frame_id = ?13,
-        socket_is_open = ?14,
-        socket_send_count = ?15,
-        socket_receive_count = ?16,
-        socket_send_bytes = ?17,
-        socket_receive_bytes = ?18,
-        socket_frame_count = ?19,
-        rule_count = ?20,
-        rule_protocols = ?21,
-        devtools_client_req_id = ?22
-    WHERE id = ?23
+        upload_bytes = ?6,
+        download_bytes = ?7,
+        duration_ms = ?8,
+        listener_port = ?9,
+        client_app = ?10,
+        client_pid = ?11,
+        client_path = ?12,
+        flags = ?13,
+        frame_count = ?14,
+        last_frame_id = ?15,
+        socket_is_open = ?16,
+        socket_send_count = ?17,
+        socket_receive_count = ?18,
+        socket_send_bytes = ?19,
+        socket_receive_bytes = ?20,
+        socket_frame_count = ?21,
+        rule_count = ?22,
+        rule_protocols = ?23,
+        devtools_client_req_id = ?24
+    WHERE id = ?25
     "#
 }
 

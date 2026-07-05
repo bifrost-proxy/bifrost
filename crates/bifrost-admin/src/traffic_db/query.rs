@@ -240,7 +240,7 @@ impl QueryParams {
 
         let sql = format!(
             "SELECT sequence, id, timestamp, host, method, status, protocol, \
-             url, path, content_type, request_size, response_size, duration_ms, \
+             url, path, content_type, request_size, response_size, upload_bytes, download_bytes, duration_ms, \
              listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \

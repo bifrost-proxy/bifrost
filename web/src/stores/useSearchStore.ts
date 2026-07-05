@@ -482,6 +482,8 @@ export const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
     content_type: c.ct || null,
     request_size: c.req_sz,
     response_size: c.res_sz,
+    upload_bytes: c.up ?? c.req_sz,
+    download_bytes: c.down ?? c.res_sz,
     duration_ms: c.dur,
     protocol: c.proto,
     client_ip: c.cip,

@@ -2049,6 +2049,8 @@ mod tests {
             req_ct: None,
             req_sz: 0,
             res_sz: 0,
+            up: 0,
+            down: 0,
             dur: 0,
             lp: 0,
             proto: "http".to_string(),

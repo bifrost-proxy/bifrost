@@ -1654,10 +1654,6 @@ async fn handle_request(
         req.headers_mut().remove("proxy-authorization");
     }
 
-    if let Some(ref state) = admin_state {
-        state.metrics_collector.increment_requests();
-    }
-
     if method == Method::CONNECT {
         let tls_intercept_config = connect_tls_intercept_config
             .clone()

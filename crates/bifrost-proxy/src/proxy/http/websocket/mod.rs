@@ -24,6 +24,10 @@ fn persist_socket_summary(state: &AdminState, record_id: &str) {
         .map(|s| s.send_bytes + s.receive_bytes)
         .unwrap_or(0) as usize;
     state.update_traffic_by_id(record_id, move |record| {
+        if let Some(ref s) = status {
+            record.upload_bytes = s.send_bytes as usize;
+            record.download_bytes = s.receive_bytes as usize;
+        }
         record.response_size = response_size;
         record.frame_count = frame_count;
         record.last_frame_id = last_frame_id;

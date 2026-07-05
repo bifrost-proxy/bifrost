@@ -213,6 +213,14 @@ fn finalize_tunnel_tracking(state: &Arc<AdminState>, req_id: &str) {
     if let Some(socket_status) = socket_status {
         let req_id = req_id.to_string();
         state.update_traffic_by_id(&req_id, move |record| {
+            record.upload_bytes = record.upload_bytes.max(socket_status.send_bytes as usize);
+            record.download_bytes = record
+                .download_bytes
+                .max(socket_status.receive_bytes as usize);
+            record.request_size = record.request_size.max(socket_status.send_bytes as usize);
+            record.response_size = record
+                .response_size
+                .max(socket_status.receive_bytes as usize);
             record.socket_status = Some(socket_status.clone());
         });
     }
@@ -2627,6 +2635,7 @@ async fn handle_intercepted_request_with_protocol(
             } else {
                 req_content_length.unwrap_or(0)
             };
+            pending.upload_bytes = pending.request_size;
             pending.request_content_type = parts
                 .headers
                 .get(hyper::header::CONTENT_TYPE)
@@ -3104,6 +3113,7 @@ async fn handle_intercepted_request_with_protocol(
                     record.original_response_headers.as_deref().unwrap_or(&[]),
                     response_body.len(),
                 );
+                record.download_bytes = response_body.len();
 
                 state.record_traffic(record);
             }
@@ -3866,6 +3876,7 @@ async fn handle_intercepted_request_with_protocol(
                     &req_headers,
                     request_body_size,
                 );
+                record.upload_bytes = request_body_size;
                 record.response_size = 0;
                 record.duration_ms = total_ms;
                 record.host = original_host.to_string();
@@ -4063,6 +4074,7 @@ async fn handle_intercepted_request_with_protocol(
                             record.status = res_parts.status.as_u16();
                             record.content_type = pause_content_type.clone();
                             record.response_size = pause_response_size;
+                            record.download_bytes = pause_response_size;
                             record.duration_ms = record.duration_ms.max(pause_total_ms);
                             record.response_body_ref = pause_body_ref.clone();
                             record.derived_response_body_ref = pause_derived_body_ref.clone();
@@ -4121,6 +4133,7 @@ async fn handle_intercepted_request_with_protocol(
                             .and_then(|v| v.to_str().ok())
                             .map(|s| s.to_string());
                         record.response_size = final_body.len();
+                        record.download_bytes = final_body.len();
                         record.duration_ms = total_ms;
                         record.host = original_host.to_string();
                         record.timing = Some(RequestTiming {
@@ -4292,11 +4305,13 @@ async fn handle_intercepted_request_with_protocol(
             .collect();
         record.request_size =
             calculate_request_size(&method_str, &original_uri, &req_headers, request_body_size);
+        record.upload_bytes = request_body_size;
         record.response_size = calculate_response_size(
             res_parts.status.as_u16(),
             &res_headers,
             original_res_body_len,
         );
+        record.download_bytes = original_res_body_len;
         record.duration_ms = total_ms;
         record.host = original_host.to_string();
         record.timing = Some(RequestTiming {
@@ -4402,6 +4417,7 @@ async fn handle_intercepted_request_with_protocol(
             let response_size = res_body_bytes.len();
             state.update_traffic_by_id(req_id, move |record| {
                 record.response_size = response_size;
+                record.download_bytes = response_size;
                 record.frame_count = event_count;
                 record.last_frame_id = event_count as u64;
                 record.socket_status = Some(bifrost_admin::SocketStatus {
@@ -4695,10 +4711,12 @@ async fn handle_intercepted_request_with_protocol(
                 store.store(req_id, "res", decompressed_res.as_ref())
             });
 
+            let pause_download_bytes = final_body.len();
             state.update_traffic_by_id(req_id, move |record| {
                 record.status = final_status;
                 record.content_type = final_content_type.clone();
                 record.response_size = final_response_size;
+                record.download_bytes = pause_download_bytes;
                 record.duration_ms = record.duration_ms.max(pause_total_ms);
                 record.response_headers = if final_res_headers != original_res_headers_for_pause {
                     Some(final_res_headers.clone())
@@ -4764,11 +4782,13 @@ async fn handle_intercepted_request_with_protocol(
             calculate_response_size(final_status, &final_res_headers, final_body.len());
         let original_res_headers_for_update = original_res_headers.clone();
         let res_script_results_for_update = res_script_results.clone();
+        let final_download_bytes = final_body.len();
         if let Some(ref state) = admin_state {
             state.update_traffic_by_id(req_id, move |record| {
                 record.status = final_status;
                 record.content_type = final_content_type.clone();
                 record.response_size = final_response_size;
+                record.download_bytes = final_download_bytes;
                 record.response_headers = if final_res_headers != original_res_headers_for_update {
                     Some(final_res_headers.clone())
                 } else {
@@ -5958,6 +5978,8 @@ fn record_mock_traffic(
         record.original_response_headers.as_deref().unwrap_or(&[]),
         0,
     );
+    record.upload_bytes = 0;
+    record.download_bytes = 0;
     state.record_traffic(record);
 }
 
@@ -5991,10 +6013,7 @@ fn record_direct_status_traffic(
 
     state
         .metrics_collector
-        .add_bytes_sent_by_type(traffic_type, 0);
-    state
-        .metrics_collector
-        .increment_requests_by_type(traffic_type);
+        .add_bytes_sent_by_type(traffic_type, request_body.len() as u64);
 
     let mock_status = response.status().as_u16();
     let mock_res_headers = super::headers_to_pairs(response.headers());
@@ -6009,6 +6028,12 @@ fn record_direct_status_traffic(
             )
         });
     let mock_body_len = mock_res_body.len();
+    state
+        .metrics_collector
+        .add_bytes_received_by_type(traffic_type, mock_body_len as u64);
+    state
+        .metrics_collector
+        .increment_requests_by_type(traffic_type);
 
     let mut record = TrafficRecord::new(req_id.to_string(), method.to_string(), url.to_string());
     attach_devtools_client_req_id(&mut record, devtools_client_req_id);
@@ -6030,6 +6055,7 @@ fn record_direct_status_traffic(
         record.original_request_headers = Some(original_request_headers.to_vec());
     }
     record.request_size = request_body.len();
+    record.upload_bytes = request_body.len();
     record.request_body_ref = if !request_body.is_empty() {
         store_request_body(
             &Some(Arc::clone(state)),
@@ -6063,6 +6089,7 @@ fn record_direct_status_traffic(
         record.original_response_headers.as_deref().unwrap_or(&[]),
         mock_body_len,
     );
+    record.download_bytes = mock_body_len;
     state.record_traffic(record);
 }
 

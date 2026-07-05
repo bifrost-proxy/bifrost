@@ -871,6 +871,8 @@ const compactToSummary = (c: TrafficSummaryCompact): TrafficSummary => {
     request_content_type: c.req_ct || null,
     request_size: c.req_sz,
     response_size: c.res_sz,
+    upload_bytes: c.up ?? c.req_sz,
+    download_bytes: c.down ?? c.res_sz,
     duration_ms: c.dur,
     listener_port: c.lp || undefined,
     protocol: c.proto,
