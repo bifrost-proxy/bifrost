@@ -1,4 +1,6 @@
 use std::env;
+#[cfg(any(target_os = "windows", test))]
+use std::ffi::OsString;
 use std::fs;
 #[cfg(target_os = "windows")]
 use std::io::{self, Cursor};
@@ -16,11 +18,13 @@ use crate::cli::AppCommands;
 use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::handle_upgrade;
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(any(target_os = "windows", test))]
 const APP_NAME: &str = "Bifrost";
 const MACOS_APP_BUNDLE: &str = "Bifrost.app";
 #[cfg(target_os = "windows")]
-const WINDOWS_APP_EXE: &str = "Bifrost.exe";
+const WINDOWS_APP_EXE: &str = "bifrost-desktop.exe";
+#[cfg(target_os = "windows")]
+const WINDOWS_LEGACY_APP_EXE: &str = "Bifrost.exe";
 const GITHUB_RELEASE_DOWNLOAD_URL: &str =
     "https://github.com/bifrost-proxy/bifrost/releases/download";
 
@@ -396,6 +400,12 @@ fn uninstall_app(app_dir: Option<PathBuf>, dry_run: bool, _yes: bool) -> Result<
             println!("{}", "✓ Desktop app uninstalled.".bright_green());
             return Ok(());
         }
+
+        if let Some(product_code) = find_windows_msi_product_code_for_install_dir(&install_dir) {
+            run_windows_msi_uninstall(&product_code)?;
+            println!("{}", "✓ Desktop app uninstalled.".bright_green());
+            return Ok(());
+        }
     }
 
     if install_path.exists() {
@@ -439,7 +449,7 @@ fn resolve_app_dir(app_dir: Option<PathBuf>) -> Result<PathBuf, BifrostError> {
         let local_app_data = env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .ok_or_else(|| BifrostError::Config("LOCALAPPDATA is not set".to_string()))?;
-        Ok(local_app_data.join("Programs").join(APP_NAME))
+        Ok(local_app_data.join(APP_NAME))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -773,18 +783,52 @@ fn run_windows_installer(_package: &Path, _args: &[&str]) -> Result<(), BifrostE
 
 #[cfg(target_os = "windows")]
 fn run_windows_msi(package: &Path) -> Result<(), BifrostError> {
+    let log_path = windows_msi_log_path(package);
+    let args = windows_msi_install_args(package, &log_path);
     let status = Command::new("msiexec")
-        .arg("/i")
-        .arg(package)
-        .args(["/qn", "/norestart"])
+        .args(&args)
         .stdin(Stdio::null())
         .status()
         .map_err(BifrostError::Io)?;
     if status.success() {
+        let _ = fs::remove_file(&log_path);
         Ok(())
     } else {
+        let log_summary = read_windows_msi_log_summary(&log_path);
         Err(BifrostError::Config(format!(
-            "msiexec exited with status {status}"
+            "msiexec exited with status {status}; log: {}{}",
+            log_path.display(),
+            log_summary
+                .map(|summary| format!("; {summary}"))
+                .unwrap_or_default()
+        )))
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn run_windows_msi_uninstall(product_code: &str) -> Result<(), BifrostError> {
+    let log_path = env::temp_dir().join(format!(
+        "bifrost-desktop-msi-uninstall-{}-{}.log",
+        std::process::id(),
+        product_code.trim_matches(|ch| ch == '{' || ch == '}')
+    ));
+    let args = windows_msi_uninstall_args(product_code, &log_path);
+    let status = Command::new("msiexec")
+        .args(&args)
+        .stdin(Stdio::null())
+        .status()
+        .map_err(BifrostError::Io)?;
+    if status.success() {
+        let _ = fs::remove_file(&log_path);
+        Ok(())
+    } else {
+        let log_summary = read_windows_msi_log_summary(&log_path);
+        Err(BifrostError::Config(format!(
+            "msiexec uninstall exited with status {status}; log: {}{}",
+            log_path.display(),
+            log_summary
+                .map(|summary| format!("; {summary}"))
+                .unwrap_or_default()
         )))
     }
 }
@@ -794,6 +838,180 @@ fn run_windows_msi(_package: &Path) -> Result<(), BifrostError> {
     Err(BifrostError::Config(
         "MSI desktop packages can only be installed on Windows".to_string(),
     ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_msi_install_args(package: &Path, log_path: &Path) -> Vec<OsString> {
+    [
+        OsString::from("/i"),
+        package.as_os_str().to_os_string(),
+        OsString::from("/qn"),
+        OsString::from("/norestart"),
+        // Tauri's WiX bundle sets ALLUSERS=1 by default, which makes silent
+        // installs require elevation. The CLI installs into the current user's
+        // LocalAppData path, so force MSI into a per-user install context.
+        OsString::from("ALLUSERS=2"),
+        OsString::from("MSIINSTALLPERUSER=1"),
+        OsString::from("/l*v"),
+        log_path.as_os_str().to_os_string(),
+    ]
+    .into()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_msi_uninstall_args(product_code: &str, log_path: &Path) -> Vec<OsString> {
+    [
+        OsString::from("/x"),
+        OsString::from(product_code),
+        OsString::from("/qn"),
+        OsString::from("/norestart"),
+        OsString::from("ALLUSERS=2"),
+        OsString::from("MSIINSTALLPERUSER=1"),
+        OsString::from("/l*v"),
+        log_path.as_os_str().to_os_string(),
+    ]
+    .into()
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_msi_log_path(package: &Path) -> PathBuf {
+    let package_name = package
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("desktop")
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    env::temp_dir().join(format!(
+        "bifrost-desktop-msi-{}-{package_name}.log",
+        std::process::id()
+    ))
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn read_windows_msi_log_summary(log_path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(log_path).ok()?;
+    let interesting = contents
+        .lines()
+        .rev()
+        .find(|line| {
+            line.contains("Error ")
+                || line.contains("Return value 3")
+                || line.contains("Installation failed")
+                || line.contains("Product: Bifrost")
+        })
+        .map(str::trim)
+        .filter(|line| !line.is_empty())?;
+    Some(format!("MSI detail: {interesting}"))
+}
+
+#[cfg(target_os = "windows")]
+fn find_windows_msi_product_code_for_install_dir(install_dir: &Path) -> Option<String> {
+    const UNINSTALL_HIVES: [&str; 2] = [
+        r"HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+        r"HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall",
+    ];
+
+    let expected_install_dir = normalize_windows_path_for_compare(install_dir);
+    for hive in UNINSTALL_HIVES {
+        let output = Command::new("reg")
+            .args(["query", hive, "/s"])
+            .output()
+            .ok()?;
+        if !output.status.success() {
+            continue;
+        }
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if let Some(product_code) =
+            parse_windows_msi_product_code_for_install_dir(&stdout, &expected_install_dir)
+        {
+            return Some(product_code);
+        }
+    }
+    None
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_msi_product_code_for_install_dir(
+    reg_output: &str,
+    expected_install_dir: &str,
+) -> Option<String> {
+    let mut display_name = None;
+    let mut uninstall_string = None;
+    let mut install_location = None;
+
+    for line in reg_output.lines().chain(std::iter::once("")) {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with("HKEY_") {
+            if display_name.as_deref() == Some(APP_NAME)
+                && install_location
+                    .as_deref()
+                    .map(normalize_windows_path_for_compare_str)
+                    .as_deref()
+                    == Some(expected_install_dir)
+            {
+                if let Some(product_code) = uninstall_string
+                    .as_deref()
+                    .and_then(extract_msi_product_code)
+                {
+                    return Some(product_code);
+                }
+            }
+            display_name = None;
+            uninstall_string = None;
+            install_location = None;
+            continue;
+        }
+
+        if let Some(value) = parse_reg_value(trimmed, "DisplayName") {
+            display_name = Some(value.to_string());
+        } else if let Some(value) = parse_reg_value(trimmed, "UninstallString") {
+            uninstall_string = Some(value.to_string());
+        } else if let Some(value) = parse_reg_value(trimmed, "InstallLocation") {
+            install_location = Some(value.to_string());
+        }
+    }
+
+    None
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_reg_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let rest = line.strip_prefix(key)?.trim_start();
+    let rest = rest.strip_prefix("REG_SZ")?.trim_start();
+    Some(rest.trim())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn extract_msi_product_code(uninstall_string: &str) -> Option<String> {
+    let start = uninstall_string.find('{')?;
+    let end = uninstall_string[start..].find('}')? + start;
+    let product_code = &uninstall_string[start..=end];
+    if product_code.len() == 38 {
+        Some(product_code.to_string())
+    } else {
+        None
+    }
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_path_for_compare(path: &Path) -> String {
+    normalize_windows_path_for_compare_str(&path.display().to_string())
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn normalize_windows_path_for_compare_str(path: &str) -> String {
+    path.trim()
+        .trim_matches('"')
+        .trim_end_matches(['\\', '/'])
+        .replace('/', "\\")
+        .to_ascii_lowercase()
 }
 
 #[cfg(target_os = "windows")]
@@ -807,12 +1025,14 @@ fn install_windows_zip(package: &Path, install_path: &Path) -> Result<(), Bifros
     archive
         .extract(temp_dir.path())
         .map_err(|error| BifrostError::Parse(format!("failed to extract zip: {error}")))?;
-    let source = find_file_named(temp_dir.path(), WINDOWS_APP_EXE).ok_or_else(|| {
-        BifrostError::NotFound(format!(
-            "{WINDOWS_APP_EXE} not found in {}",
-            package.display()
-        ))
-    })?;
+    let source = find_file_named(temp_dir.path(), WINDOWS_APP_EXE)
+        .or_else(|| find_file_named(temp_dir.path(), WINDOWS_LEGACY_APP_EXE))
+        .ok_or_else(|| {
+            BifrostError::NotFound(format!(
+                "{WINDOWS_APP_EXE} not found in {}",
+                package.display()
+            ))
+        })?;
     if let Some(parent) = install_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -903,6 +1123,116 @@ mod tests {
         assert_eq!(
             release_asset_name("0.0.138", DesktopTarget::WindowsX64),
             "bifrost-desktop-v0.0.138-x86_64-pc-windows-msvc.msi"
+        );
+    }
+
+    #[test]
+    fn windows_msi_args_force_per_user_install_and_write_log() {
+        let package = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost desktop.msi");
+        let log = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost-msi.log");
+        let args = windows_msi_install_args(&package, &log);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args[0], "/i");
+        assert_eq!(args[1], package.to_string_lossy());
+        assert!(args.iter().any(|arg| arg == "/qn"));
+        assert!(args.iter().any(|arg| arg == "/norestart"));
+        assert!(args.iter().any(|arg| arg == "ALLUSERS=2"));
+        assert!(args.iter().any(|arg| arg == "MSIINSTALLPERUSER=1"));
+        assert!(args.iter().any(|arg| arg == "/l*v"));
+        assert_eq!(
+            args.last().expect("log path argument"),
+            &log.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn windows_msi_uninstall_args_force_per_user_uninstall_and_write_log() {
+        let log = PathBuf::from(r"C:\Users\eden\AppData\Local\Temp\bifrost-uninstall.log");
+        let args = windows_msi_uninstall_args("{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}", &log);
+        let args = args
+            .iter()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+
+        assert_eq!(args[0], "/x");
+        assert_eq!(args[1], "{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}");
+        assert!(args.iter().any(|arg| arg == "ALLUSERS=2"));
+        assert!(args.iter().any(|arg| arg == "MSIINSTALLPERUSER=1"));
+        assert!(args.iter().any(|arg| arg == "/l*v"));
+        assert_eq!(
+            args.last().expect("log path argument"),
+            &log.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn windows_msi_log_path_sanitizes_package_name() {
+        let package = PathBuf::from("bifrost desktop:arm64.msi");
+        let log_path = windows_msi_log_path(&package);
+        let file_name = log_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("log file name");
+
+        assert!(file_name.starts_with("bifrost-desktop-msi-"));
+        assert!(file_name.ends_with("bifrost_desktop_arm64.msi.log"));
+    }
+
+    #[test]
+    fn windows_registry_parser_finds_matching_msi_product_code() {
+        let reg_output = r#"
+HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{OTHER}
+    DisplayName    REG_SZ    Bifrost
+    InstallLocation    REG_SZ    C:\Users\eden\AppData\Local\Other\
+    UninstallString    REG_SZ    MsiExec.exe /X{11111111-1111-1111-1111-111111111111}
+
+HKEY_LOCAL_MACHINE\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}
+    DisplayName    REG_SZ    Bifrost
+    DisplayVersion    REG_SZ    0.0.139
+    InstallLocation    REG_SZ    C:\Users\eden\AppData\Local\Bifrost\
+    UninstallString    REG_SZ    MsiExec.exe /X{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}
+"#;
+
+        assert_eq!(
+            parse_windows_msi_product_code_for_install_dir(
+                reg_output,
+                "c:\\users\\eden\\appdata\\local\\bifrost"
+            ),
+            Some("{7A327F4B-BA3C-4751-BB9E-AB2796C1224E}".to_string())
+        );
+    }
+
+    #[test]
+    fn windows_path_normalization_ignores_case_quotes_and_trailing_slash() {
+        assert_eq!(
+            normalize_windows_path_for_compare(Path::new(r"C:\Users\Eden\AppData\Local\Bifrost\")),
+            r"c:\users\eden\appdata\local\bifrost"
+        );
+        assert_eq!(
+            normalize_windows_path_for_compare_str(r#""C:/Users/Eden/AppData/Local/Bifrost/""#),
+            r"c:\users\eden\appdata\local\bifrost"
+        );
+    }
+
+    #[test]
+    fn windows_msi_log_summary_prefers_actionable_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log = dir.path().join("msi.log");
+        fs::write(
+            &log,
+            "Product: Bifrost -- Installation failed.\n\
+             Error 1925. You do not have sufficient privileges.\n\
+             Action ended: InstallFinalize. Return value 3.\n",
+        )
+        .expect("write log");
+
+        assert_eq!(
+            read_windows_msi_log_summary(&log),
+            Some("MSI detail: Action ended: InstallFinalize. Return value 3.".to_string())
         );
     }
 

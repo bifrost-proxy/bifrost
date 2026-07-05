@@ -9,7 +9,7 @@
 - 先安装 CLI：用户可通过 `bifrost app install / upgrade / uninstall` 管理桌面 App。
 - 先安装 App：桌面 Settings 提供 `Install CLI & Skills` 按钮，把内置 CLI 安装到用户命令行路径，并安装 Bifrost AI skills。
 
-本用例中的 CLI dry-run 不修改系统 app、不下载 release、不启动系统代理。临时真实安装用例只写入 `mktemp` 目录，并用 `BIFROST_APP_SKIP_RESTART=1` 避免打开假 app；发布包级验证仍需要 macOS/Windows 桌面环境和真实 `.dmg/.msi`。
+本用例中的 CLI dry-run 不修改系统 app、不下载 release、不启动系统代理。临时真实安装用例只写入 `mktemp` 目录，并用 `BIFROST_APP_SKIP_RESTART=1` 避免打开假 app；发布包级验证仍需要 macOS/Windows 桌面环境和真实 `.dmg/.msi`。Windows MSI 默认安装路径应与 Tauri 产物一致：`%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe`。
 
 ## 前置条件
 
@@ -39,7 +39,7 @@
    "$BIFROST_BIN" app install --dry-run --version 0.0.139 --app-dir "$PWD/.tmp-desktop-app"
    ```
 2. 检查输出包含 `Desktop app install target:`、`Target version: v0.0.139` 或 `Target version: 0.0.139`、`Dry run: no files will be changed.`。
-3. 检查 `.tmp-desktop-app` 不存在或没有新增 `Bifrost.app` / `Bifrost.exe`。
+3. 检查 `.tmp-desktop-app` 不存在或没有新增 `Bifrost.app` / `bifrost-desktop.exe`。
 
 预期结果：
 
@@ -98,7 +98,7 @@
    BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh
    ```
 2. 在 macOS 上，脚本会创建临时 `Bifrost.app`，执行真实 `app install --package <fake.app> --app-dir <tmp> -y`，断言 bundle 被复制到临时目录。
-3. 在 Windows 上，脚本会创建临时 zip 内的 `Bifrost.exe`，执行真实 `app install --package <fake.zip> --app-dir <tmp> -y`，断言 exe 被复制到临时目录。
+3. 在 Windows 上，脚本会创建临时 zip 内的 `bifrost-desktop.exe`，执行真实 `app install --package <fake.zip> --app-dir <tmp> -y`，断言 exe 被复制到临时目录。
 4. 脚本继续执行 `app upgrade --source desktop --no-cli --package <fixture> --app-dir <tmp> -y`，读取临时 `BIFROST_DATA_DIR/upgrade-progress.json`。
 5. 脚本最后执行 `app uninstall --app-dir <tmp> -y`，断言临时 app 被删除。
 
@@ -128,6 +128,33 @@
 
 - 当已安装桌面端版本已经等于目标版本时，`bifrost app upgrade` 不下载 release，不覆盖安装，不重启桌面端。
 - 该判断只在能明确读到已安装桌面端版本时生效；版本读不到时仍继续原升级流程，避免漏装。
+
+### TC-DAU-04D Windows 普通用户静默 MSI 安装回归
+
+操作步骤：
+
+1. 在 Windows 11 普通用户会话中准备真实桌面 MSI，例如：
+   ```powershell
+   $msi="$env:TEMP\bifrost-desktop-v0.0.139-aarch64-pc-windows-msvc.msi"
+   curl.exe -L -o $msi https://github.com/bifrost-proxy/bifrost/releases/download/v0.0.139/bifrost-desktop-v0.0.139-aarch64-pc-windows-msvc.msi
+   ```
+2. 用当前源码构建的 CLI 执行：
+   ```bash
+   BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$msi" -y
+   ```
+3. 检查输出包含 `Desktop app install target:`，且目标为 `%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe`。
+4. 检查 `%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe` 存在。
+5. 执行：
+   ```bash
+   "$BIFROST_BIN" app uninstall -y
+   ```
+6. 检查 `%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe` 已删除，命令退出码为 0。
+
+预期结果：
+
+- 普通用户静默安装不会再因为 MSI `ALLUSERS=1` 报 1603 / Error 1925。
+- CLI 调用 MSI 时使用 per-user 安装属性，并在失败时输出 MSI 日志路径。
+- CLI 显示、重启和卸载使用真实 Tauri MSI 目标路径，不再指向 `%LOCALAPPDATA%\Programs\Bifrost\Bifrost.exe`。
 
 ### TC-DAU-05 Admin API 桌面 channel 与 CLI channel 分离
 
@@ -218,6 +245,42 @@
 - 桌面 app 安装完成后自动重新打开。
 - 若存在独立 CLI 安装，CLI 版本也更新到最新；若不存在，日志明确跳过独立 CLI。
 
+### TC-DAU-09 Windows 桌面快捷方式不弹出 shell 窗口
+
+操作步骤：
+
+1. 在 Windows 11 桌面环境中通过桌面快捷方式 `Bifrost.lnk` 启动应用。
+2. 观察启动期间的窗口列表和任务栏。
+3. 使用 PowerShell 检查进程：
+   ```powershell
+   Get-CimInstance Win32_Process |
+     Where-Object { $_.Name -match 'bifrost|WindowsTerminal|cmd.exe|powershell.exe' -or $_.CommandLine -match 'Bifrost|bifrost' } |
+     Select-Object ProcessId,ParentProcessId,Name,CommandLine
+   ```
+4. 关闭 Bifrost 桌面窗口。
+
+预期结果：
+
+- 桌面快捷方式只显示 Bifrost 桌面 UI，不出现 Windows Terminal、cmd 或 PowerShell shell 窗口。
+- 内置 `bifrost.exe` sidecar 作为后台子进程运行，stdout/stderr 写入桌面日志文件。
+- 关闭桌面 UI 后，sidecar 按桌面壳生命周期正常停止；不存在“关闭 shell 窗口导致 app 一起退出”的用户路径。
+
+### TC-DAU-10 Windows 桌面壳不显示原生标题栏和菜单栏
+
+操作步骤：
+
+1. 在 Windows 11 桌面环境中启动当前构建的 Bifrost Desktop。
+2. 打开 Settings -> Proxy，观察窗口顶部和底部状态栏。
+3. 截图保存启动后的完整桌面窗口。
+4. 检查进程只存在 Bifrost 桌面窗口，不依赖额外原生 menu bar 提供关闭入口。
+
+预期结果：
+
+- 窗口顶部不显示 Windows 原生标题栏，也不显示 `Bifrost / File / Edit / View / Window` 菜单栏。
+- Web UI 从窗口顶部开始使用自定义桌面 chrome，不被系统标题栏向下挤压。
+- 底部状态栏完整可见，Settings 页面内容不会因为顶部系统栏占位而挤出窗口。
+- 右上角自定义最小化、最大化和关闭按钮可见并可点击。
+
 ## 清理步骤
 
 ```bash
@@ -238,3 +301,5 @@ bifrost app uninstall
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |
 | 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；`Install CLI & Skills` 位于 `desktopMode` 分支 |
 | 2026-07-05 | TC-DAU-07 / 08 | 需要真实 macOS/Windows 桌面安装包与 GUI 会话 | 未执行：当前本机未进行真实桌面包安装/GUI 通知验证；需在发布包或本地 `.dmg/.msi` 准备后补跑 |
+| 2026-07-06 | TC-DAU-04C | Parallels Windows 11 ARM64 VM：先用 v0.0.139 MSI 复现 `msiexec /i <msi> /qn /norestart`，再用 `ALLUSERS=2 MSIINSTALLPERUSER=1` 验证普通用户安装 | PASS：原命令稳定复现 1603，日志显示 `Error 1925`；加 per-user MSI 属性后同一 MSI 安装成功并写入 `%LOCALAPPDATA%\Bifrost` |
+| 2026-07-06 | TC-DAU-09 | Parallels Windows 11 ARM64 VM：桌面快捷方式指向 `%LOCALAPPDATA%\Bifrost\bifrost-desktop.exe`，进程树显示 `bifrost-desktop.exe` 启动内置 `bifrost.exe` 后出现 `WindowsTerminal.exe -Embedding` | FAIL 复现：桌面 UI 之外会出现 Windows Terminal 窗口；关闭 shell 窗口会影响桌面 app，需要桌面壳对子进程设置 `CREATE_NO_WINDOW` 后复测 |

@@ -14,6 +14,14 @@ type TauriInvoke = <T>(
   args?: Record<string, unknown>,
 ) => Promise<T>;
 
+type TauriWindowHandle = {
+  startDragging(): Promise<void>;
+  toggleMaximize(): Promise<void>;
+  minimize(): Promise<void>;
+  close(): Promise<void>;
+  isMaximized(): Promise<boolean>;
+};
+
 type TauriEvent = {
   event: string;
   id: number;
@@ -36,11 +44,15 @@ declare global {
         invoke: TauriInvoke;
       };
       event?: TauriEventApi;
+      webviewWindow?: {
+        getCurrentWebviewWindow(): TauriWindowHandle;
+      };
     };
   }
 }
 
 let cachedInvoke: TauriInvoke | null = null;
+let cachedWindowHandle: TauriWindowHandle | null = null;
 
 function getCurrentInvoke(): TauriInvoke | null {
   const invoke = window.__TAURI__?.core?.invoke;
@@ -109,4 +121,14 @@ export async function listenDesktopEvent(
   }
 
   return eventApi.listen(event, handler);
+}
+
+export function getCurrentDesktopWindow() {
+  const currentWindow = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
+  if (currentWindow) {
+    cachedWindowHandle = currentWindow;
+    return currentWindow;
+  }
+
+  return cachedWindowHandle;
 }

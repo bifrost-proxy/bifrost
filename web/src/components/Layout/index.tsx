@@ -14,6 +14,9 @@ import {
   UsergroupAddOutlined,
   BellOutlined,
   BugOutlined,
+  BorderOutlined,
+  CloseOutlined,
+  MinusOutlined,
 } from "@ant-design/icons";
 import type { CSSProperties } from "react";
 import { useCallback, useEffect, useMemo } from "react";
@@ -29,6 +32,7 @@ import { getDesktopPlatform, isDesktopShell } from "../../runtime";
 import { useThemeStore } from "../../stores/useThemeStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import RulesDynamicIsland from "../../pages/Rules/RulesDynamicIsland";
+import { getCurrentDesktopWindow } from "../../desktop/tauri";
 
 interface MenuItem {
   key: string;
@@ -62,6 +66,9 @@ export default function AppLayout() {
   const desktopEnabled = isDesktopShell();
   const desktopPlatform = getDesktopPlatform();
   const macDesktopChrome = desktopEnabled && desktopPlatform === "macos";
+  const desktopCustomChrome =
+    desktopEnabled && (desktopPlatform === "macos" || desktopPlatform === "windows");
+  const showWindowsControls = desktopEnabled && desktopPlatform === "windows";
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setThemeMode = useThemeStore((state) => state.setMode);
   const isDark = resolvedTheme === "dark";
@@ -137,6 +144,23 @@ export default function AppLayout() {
     window.open("/_bifrost/swagger", "_blank", "noopener,noreferrer");
   };
 
+  const handleWindowsWindowAction = (action: "minimize" | "maximize" | "close") => {
+    const desktopWindow = getCurrentDesktopWindow();
+    if (!desktopWindow) {
+      return;
+    }
+
+    const task =
+      action === "minimize"
+        ? desktopWindow.minimize()
+        : action === "maximize"
+          ? desktopWindow.toggleMaximize()
+          : desktopWindow.close();
+    void task.catch((error: unknown) => {
+      console.warn(`[desktop-window] failed to ${action} window`, error);
+    });
+  };
+
   const styles: Record<string, CSSProperties> = {
     layout: {
       display: "flex",
@@ -169,6 +193,39 @@ export default function AppLayout() {
       mixBlendMode: isDark ? "soft-light" : "multiply",
       pointerEvents: "none",
       zIndex: 0,
+    },
+    windowsWindowControls: {
+      position: "absolute",
+      top: 8,
+      right: 8,
+      height: 28,
+      display: "flex",
+      alignItems: "center",
+      gap: 2,
+      padding: 2,
+      borderRadius: 6,
+      background: isDark ? "rgba(8, 13, 20, 0.36)" : "rgba(255, 255, 255, 0.42)",
+      border: isDark
+        ? "1px solid rgba(148, 163, 184, 0.14)"
+        : "1px solid rgba(255, 255, 255, 0.34)",
+      backdropFilter: "blur(12px) saturate(1.08)",
+      zIndex: 20,
+    },
+    windowsWindowControlButton: {
+      width: 32,
+      height: 24,
+      border: 0,
+      borderRadius: 4,
+      display: "flex",
+      alignItems: "center",
+      justifyContent: "center",
+      padding: 0,
+      margin: 0,
+      color: isDark ? "rgba(226, 232, 240, 0.88)" : "rgba(30, 41, 59, 0.82)",
+      background: "transparent",
+      cursor: "pointer",
+      fontSize: 12,
+      lineHeight: 1,
     },
     macTopWash: {
       position: "absolute",
@@ -222,11 +279,11 @@ export default function AppLayout() {
       display: "flex",
       flexDirection: "column",
       alignItems: "center",
-      paddingTop: macDesktopChrome ? 0 : 8,
+      paddingTop: desktopCustomChrome ? 0 : 8,
       flexShrink: 0,
       backdropFilter: desktopEnabled ? "blur(18px) saturate(1.08)" : undefined,
-      cursor: macDesktopChrome ? "default" : undefined,
-      userSelect: macDesktopChrome ? "none" : undefined,
+      cursor: desktopCustomChrome ? "default" : undefined,
+      userSelect: desktopCustomChrome ? "none" : undefined,
     },
     macWindowControlSpacer: {
       width: "100%",
@@ -268,10 +325,10 @@ export default function AppLayout() {
       lineHeight: "9px",
       whiteSpace: "nowrap",
       color: "inherit",
-      pointerEvents: macDesktopChrome ? "none" : undefined,
+      pointerEvents: desktopCustomChrome ? "none" : undefined,
     },
     menuItemIcon: {
-      pointerEvents: macDesktopChrome ? "none" : undefined,
+      pointerEvents: desktopCustomChrome ? "none" : undefined,
     },
     menuItemActive: {
       color: token.colorPrimary,
@@ -306,7 +363,7 @@ export default function AppLayout() {
       flexDirection: "column",
       overflow: "auto",
       boxSizing: "border-box",
-      paddingTop: macDesktopChrome ? MAC_TOP_DRAG_HEIGHT : undefined,
+      paddingTop: desktopCustomChrome ? MAC_TOP_DRAG_HEIGHT : undefined,
       background:
         desktopEnabled
           ? desktopPlatform === "macos"
@@ -372,29 +429,63 @@ export default function AppLayout() {
           <div style={styles.desktopNoise} />
         </>
       ) : null}
-      {macDesktopChrome ? (
+      {desktopCustomChrome ? (
         <div
-          data-testid="desktop-macos-top-drag-region"
+          data-testid="desktop-top-drag-region"
           data-tauri-drag-region=""
           style={styles.macTopDragRegion}
         />
+      ) : null}
+      {showWindowsControls ? (
+        <div style={styles.windowsWindowControls}>
+          <button
+            type="button"
+            aria-label="Minimize window"
+            title="Minimize"
+            style={styles.windowsWindowControlButton}
+            onClick={() => handleWindowsWindowAction("minimize")}
+          >
+            <MinusOutlined />
+          </button>
+          <button
+            type="button"
+            aria-label="Maximize window"
+            title="Maximize"
+            style={styles.windowsWindowControlButton}
+            onClick={() => handleWindowsWindowAction("maximize")}
+          >
+            <BorderOutlined />
+          </button>
+          <button
+            type="button"
+            aria-label="Close window"
+            title="Close"
+            style={{
+              ...styles.windowsWindowControlButton,
+              color: isDark ? "rgba(248, 113, 113, 0.92)" : "rgba(185, 28, 28, 0.88)",
+            }}
+            onClick={() => handleWindowsWindowAction("close")}
+          >
+            <CloseOutlined />
+          </button>
+        </div>
       ) : null}
       <div style={styles.main}>
         <MobileDeviceTrustPrompt />
         <AvailabilityCheckNotificationCenter />
         <RulesDynamicIsland
           onNavigateRule={handleNavigateRuleFromIsland}
-          defaultTop={macDesktopChrome ? MAC_TOP_DRAG_HEIGHT + 10 : undefined}
+          defaultTop={desktopCustomChrome ? MAC_TOP_DRAG_HEIGHT + 10 : undefined}
         />
         <div
           style={styles.sidebar}
           data-testid="desktop-sidebar-window-drag-region"
-          data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
-          data-tauri-drag-region={macDesktopChrome ? "" : undefined}
+          data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
+          data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
         >
-          {macDesktopChrome ? (
+          {desktopCustomChrome ? (
             <div
-              data-testid="desktop-macos-window-control-spacer"
+              data-testid="desktop-window-control-spacer"
               data-desktop-window-drag-region="true"
               data-tauri-drag-region=""
               style={styles.macWindowControlSpacer}
