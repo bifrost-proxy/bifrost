@@ -109,6 +109,26 @@
 - 卸载机制真实移除临时桌面端目标。
 - 测试不触碰 `/Applications`、Windows 开始菜单或真实系统安装目录。
 
+### TC-DAU-04C 已安装桌面端等于目标版本时跳过下载和重装
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh
+   ```
+2. 在 macOS 上，脚本创建带 `CFBundleShortVersionString=0.0.139` 的临时 `Bifrost.app` 并安装到临时目录。
+3. 脚本继续执行不带 `--package` 的：
+   ```bash
+   "$BIFROST_BIN" app upgrade --app-dir "<tmp>" --source desktop --no-cli --version 0.0.139 -y
+   ```
+4. 检查输出包含 `Desktop app is already on target version`，且不包含 `Downloading desktop app:`。
+
+预期结果：
+
+- 当已安装桌面端版本已经等于目标版本时，`bifrost app upgrade` 不下载 release，不覆盖安装，不重启桌面端。
+- 该判断只在能明确读到已安装桌面端版本时生效；版本读不到时仍继续原升级流程，避免漏装。
+
 ### TC-DAU-05 Admin API 桌面 channel 与 CLI channel 分离
 
 操作步骤：
@@ -214,7 +234,7 @@ bifrost app uninstall
 
 | 日期 | 用例 | 执行命令 / 证据 | 结果 |
 | --- | --- | --- | --- |
-| 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | PASS：28/28 通过，覆盖 dry-run、CLI 默认发起 upgrade 会保留 CLI 自更新规划、临时目录真实安装/desktop-source upgrade/progress/uninstall、App -> CLI HTTP 安装 |
+| 2026-07-05 | TC-DAU-01 / 02 / 03 / 04 / 04B / 04C / 06B | `BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_desktop_app_update_cli.sh` | 待复测：本轮新增 04C，验证已安装桌面端等于目标版本时跳过下载和重装 |
 | 2026-07-05 | TC-DAU-05 | `cargo test -p bifrost-admin handlers::system::tests --lib` | PASS：7/7 通过，覆盖 desktop alias、spawn args、CLI install 临时目录与 skip skills |
 | 2026-07-05 | TC-DAU-06 | `pnpm --dir web run test:unit -- src/stores/useVersionStore.test.ts` + 代码 review | PASS：Vitest 22 files / 93 tests 通过；新增 desktop shell 单测确认 `checkVersion/startUpgrade` 使用 `desktop` channel，代码确认桌面缓存窗口为 6 小时，非桌面仍使用 `cli` channel；`Install CLI & Skills` 位于 `desktopMode` 分支 |
 | 2026-07-05 | TC-DAU-07 / 08 | 需要真实 macOS/Windows 桌面安装包与 GUI 会话 | 未执行：当前本机未进行真实桌面包安装/GUI 通知验证；需在发布包或本地 `.dmg/.msi` 准备后补跑 |

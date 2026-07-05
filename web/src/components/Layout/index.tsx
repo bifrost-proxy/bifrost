@@ -37,6 +37,8 @@ interface MenuItem {
   hidden?: boolean;
 }
 
+const MAC_TOP_DRAG_HEIGHT = 35;
+
 export default function AppLayout() {
   const navigate = useNavigate();
   const location = useLocation();
@@ -59,6 +61,7 @@ export default function AppLayout() {
   } = usePairingRequestStore();
   const desktopEnabled = isDesktopShell();
   const desktopPlatform = getDesktopPlatform();
+  const macDesktopChrome = desktopEnabled && desktopPlatform === "macos";
   const resolvedTheme = useThemeStore((state) => state.resolvedTheme);
   const setThemeMode = useThemeStore((state) => state.setMode);
   const isDark = resolvedTheme === "dark";
@@ -180,21 +183,16 @@ export default function AppLayout() {
       pointerEvents: "none",
       zIndex: 1,
     },
-    macSidebarWash: {
+    macTopDragRegion: {
       position: "absolute",
       top: 0,
-      left: 0,
-      width: 112,
-      bottom: 20,
-      background:
-        isDark
-          ? "linear-gradient(180deg, rgba(12,18,27,0.88) 0%, rgba(12,18,27,0.78) 72px, rgba(12,18,27,0.7) 100%)"
-          : "linear-gradient(180deg, rgba(246,248,251,0.98) 0%, rgba(246,248,251,0.92) 72px, rgba(246,248,251,0.82) 100%)",
-      borderRight: isDark
-        ? "1px solid rgba(148, 163, 184, 0.12)"
-        : "1px solid rgba(15, 23, 42, 0.06)",
-      pointerEvents: "none",
-      zIndex: 1,
+      left: 50,
+      right: 0,
+      height: MAC_TOP_DRAG_HEIGHT,
+      zIndex: 4,
+      cursor: "default",
+      userSelect: "none",
+      WebkitUserSelect: "none",
     },
     main: {
       display: "flex",
@@ -224,9 +222,19 @@ export default function AppLayout() {
       display: "flex",
       flexDirection: "column",
       alignItems: "center",
-      paddingTop: desktopEnabled && desktopPlatform === "macos" ? 10 : 8,
+      paddingTop: macDesktopChrome ? 0 : 8,
       flexShrink: 0,
       backdropFilter: desktopEnabled ? "blur(18px) saturate(1.08)" : undefined,
+      cursor: macDesktopChrome ? "default" : undefined,
+      userSelect: macDesktopChrome ? "none" : undefined,
+    },
+    macWindowControlSpacer: {
+      width: "100%",
+      height: 38,
+      minHeight: 38,
+      flexShrink: 0,
+      cursor: "default",
+      userSelect: "none",
     },
     menuScroll: {
       width: "100%",
@@ -260,6 +268,10 @@ export default function AppLayout() {
       lineHeight: "9px",
       whiteSpace: "nowrap",
       color: "inherit",
+      pointerEvents: macDesktopChrome ? "none" : undefined,
+    },
+    menuItemIcon: {
+      pointerEvents: macDesktopChrome ? "none" : undefined,
     },
     menuItemActive: {
       color: token.colorPrimary,
@@ -293,6 +305,8 @@ export default function AppLayout() {
       display: "flex",
       flexDirection: "column",
       overflow: "auto",
+      boxSizing: "border-box",
+      paddingTop: macDesktopChrome ? MAC_TOP_DRAG_HEIGHT : undefined,
       background:
         desktopEnabled
           ? desktopPlatform === "macos"
@@ -350,7 +364,6 @@ export default function AppLayout() {
       {desktopEnabled && desktopPlatform === "macos" ? (
         <>
           <div style={styles.macTopWash} />
-          <div style={styles.macSidebarWash} />
         </>
       ) : null}
       {desktopEnabled ? (
@@ -359,11 +372,34 @@ export default function AppLayout() {
           <div style={styles.desktopNoise} />
         </>
       ) : null}
+      {macDesktopChrome ? (
+        <div
+          data-testid="desktop-macos-top-drag-region"
+          data-tauri-drag-region=""
+          style={styles.macTopDragRegion}
+        />
+      ) : null}
       <div style={styles.main}>
         <MobileDeviceTrustPrompt />
         <AvailabilityCheckNotificationCenter />
-        <RulesDynamicIsland onNavigateRule={handleNavigateRuleFromIsland} />
-        <div style={styles.sidebar}>
+        <RulesDynamicIsland
+          onNavigateRule={handleNavigateRuleFromIsland}
+          defaultTop={macDesktopChrome ? MAC_TOP_DRAG_HEIGHT + 10 : undefined}
+        />
+        <div
+          style={styles.sidebar}
+          data-testid="desktop-sidebar-window-drag-region"
+          data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
+          data-tauri-drag-region={macDesktopChrome ? "" : undefined}
+        >
+          {macDesktopChrome ? (
+            <div
+              data-testid="desktop-macos-window-control-spacer"
+              data-desktop-window-drag-region="true"
+              data-tauri-drag-region=""
+              style={styles.macWindowControlSpacer}
+            />
+          ) : null}
           <div style={styles.menuScroll} data-testid="app-sidebar-nav-scroll">
             {menuItems.filter((item) => !item.hidden).map((item) => {
               const active = isActive(item.key);
@@ -373,6 +409,8 @@ export default function AppLayout() {
                   data-testid="app-sidebar-nav-item"
                   data-nav-label={item.label}
                   data-nav-key={item.key}
+                  data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
+                  data-tauri-drag-region={macDesktopChrome ? "" : undefined}
                   style={{
                     ...styles.menuItem,
                     ...(active ? styles.menuItemActive : {}),
@@ -380,7 +418,7 @@ export default function AppLayout() {
                   onClick={() => handleClick(item.key)}
                 >
                   {active && <div style={styles.activeBorder as CSSProperties} />}
-                  {renderMenuIcon(item)}
+                  <div style={styles.menuItemIcon}>{renderMenuIcon(item)}</div>
                   <div style={styles.menuItemLabel}>{item.label}</div>
                 </div>
               );
@@ -388,6 +426,8 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="app-sidebar-openapi"
+            data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
+            data-tauri-drag-region={macDesktopChrome ? "" : undefined}
             style={styles.openApiLink}
             onClick={handleOpenApiClick}
             title="Open OpenAPI documentation"
@@ -396,6 +436,8 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="theme-toggle"
+            data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
+            data-tauri-drag-region={macDesktopChrome ? "" : undefined}
             style={{
               flexShrink: 0,
               marginBottom: 8,
@@ -415,7 +457,9 @@ export default function AppLayout() {
             }}
             onClick={handleThemeToggle}
           >
-            {isDark ? <SunOutlined /> : <MoonOutlined />}
+            <span style={styles.menuItemIcon}>
+              {isDark ? <SunOutlined /> : <MoonOutlined />}
+            </span>
           </div>
         </div>
         <div style={styles.content}>

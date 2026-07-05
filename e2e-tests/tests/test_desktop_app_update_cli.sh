@@ -206,6 +206,8 @@ if [[ "$HOST_OS" == "Darwin" ]]; then
   <key>CFBundleIdentifier</key><string>dev.bifrost.test</string>
   <key>CFBundleName</key><string>Bifrost</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.0.139</string>
+  <key>CFBundleVersion</key><string>139</string>
 </dict>
 </plist>
 PLIST
@@ -223,6 +225,10 @@ SH
         _log_fail "real install copies app bundle into target app dir" "executable copied" "missing"
         exit 1
     fi
+
+    already_current_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app upgrade --app-dir "$APP_DIR" --source desktop --no-cli --version "$VERSION" -y 2>&1)"
+    assert_contains_text "$already_current_output" "Desktop app is already on target version" "desktop upgrade skips install when installed app version matches target"
+    assert_not_contains_text "$already_current_output" "Downloading desktop app:" "desktop upgrade does not download when installed app version matches target"
 
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"

@@ -21,6 +21,8 @@ use objc2_app_kit::NSWindow;
 #[cfg(target_os = "macos")]
 use tauri::window::EffectState;
 use tauri::window::{Window, WindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     image::Image,
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
@@ -73,6 +75,7 @@ struct DesktopRuntimeInfo {
     platform: &'static str,
     startup_ready: bool,
     startup_error: Option<String>,
+    handoff_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -444,11 +447,17 @@ fn create_host_window(app: &AppHandle) -> tauri::Result<Window> {
             .min_inner_size(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT)
             .resizable(true)
             .maximizable(true)
-            .decorations(false)
             .visible(true)
             .transparent(true)
-            .shadow(false)
             .background_color(Color(0, 0, 0, 0));
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.decorations(true).shadow(true);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            builder = builder.decorations(false).shadow(false);
+        }
     } else {
         builder = builder
             .inner_size(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
@@ -460,6 +469,13 @@ fn create_host_window(app: &AppHandle) -> tauri::Result<Window> {
             .transparent(false)
             .shadow(true)
             .background_color(Color(8, 17, 23, 255));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .hidden_title(true)
+            .title_bar_style(TitleBarStyle::Overlay);
     }
 
     builder
@@ -561,6 +577,14 @@ fn resolve_desktop_config_path(data_dir: &Path) -> PathBuf {
 }
 
 fn ensure_desktop_cert_ready(data_dir: &Path) {
+    if desktop_skip_cert_preflight_requested() {
+        append_desktop_bootstrap_log(
+            data_dir,
+            "desktop certificate preflight skipped by BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT",
+        );
+        return;
+    }
+
     match prepare_desktop_certificates(data_dir) {
         Ok(CertStatus::InstalledAndTrusted) => append_desktop_bootstrap_log(
             data_dir,
@@ -654,20 +678,39 @@ fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Resul
         ),
     );
 
+    let mut args = vec![
+        "start",
+        "--host",
+        BACKEND_BIND_HOST,
+        "--port",
+        &port,
+        "--skip-cert-check",
+    ];
+    if desktop_no_system_proxy_requested() {
+        args.push("--no-system-proxy");
+    }
+
     Command::new(binary_path)
-        .args([
-            "start",
-            "--host",
-            BACKEND_BIND_HOST,
-            "--port",
-            &port,
-            "--skip-cert-check",
-        ])
+        .args(args)
         .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::from(stdout_log))
         .stderr(Stdio::from(stderr_log))
         .spawn()
         .map_err(|error| anyhow(format!("failed to start backend: {error}")))
+}
+
+fn desktop_no_system_proxy_requested() -> bool {
+    env_flag_enabled("BIFROST_DESKTOP_NO_SYSTEM_PROXY")
+}
+
+fn desktop_skip_cert_preflight_requested() -> bool {
+    env_flag_enabled("BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT")
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn ensure_backend_running(
@@ -1229,7 +1272,10 @@ fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()>
     let _ = host_window.set_background_color(Some(Color(8, 17, 23, 255)));
     let _ = host_window.set_decorations(true);
     #[cfg(target_os = "macos")]
-    let _ = host_window.set_shadow(true);
+    {
+        let _ = host_window.set_title_bar_style(TitleBarStyle::Overlay);
+        let _ = host_window.set_shadow(true);
+    }
     let _ = apply_window_effects(&host_window);
     reveal_host_window(&host_window);
     let _ = host_window.set_resizable(true);
@@ -1441,6 +1487,7 @@ fn get_desktop_runtime(state: State<'_, BackendState>) -> Result<DesktopRuntimeI
         platform: std::env::consts::OS,
         startup_ready: state.startup_ready.load(Ordering::SeqCst),
         startup_error,
+        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
     })
 }
 
@@ -1473,6 +1520,7 @@ fn update_desktop_proxy_port(
                     .lock()
                     .map_err(|_| "failed to read desktop startup error".to_string())?
                     .clone(),
+                handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
             });
         }
     }
@@ -1518,6 +1566,7 @@ fn update_desktop_proxy_port(
             .lock()
             .map_err(|_| "failed to read desktop startup error".to_string())?
             .clone(),
+        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
     })
 }
 

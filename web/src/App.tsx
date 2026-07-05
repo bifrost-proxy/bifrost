@@ -23,6 +23,7 @@ import Notifications from "./pages/Notifications";
 import DevTools from "./pages/DevTools";
 import {
   DESKTOP_HANDOFF_COMPLETE_EVENT,
+  getDesktopRuntime,
   listenDesktopEvent,
 } from "./desktop/tauri";
 import { useThemeStore, initThemeListener } from "./stores/useThemeStore";
@@ -362,20 +363,42 @@ function DesktopTransitionMask({ resolvedTheme }: { resolvedTheme: "light" | "da
   useEffect(() => {
     let cancelled = false;
     let exitTimer = 0;
+    let fallbackTimer = 0;
     let detach: (() => void | Promise<void>) | null = null;
 
-    void listenDesktopEvent(DESKTOP_HANDOFF_COMPLETE_EVENT, () => {
+    const hideMask = () => {
       if (cancelled) {
         return;
       }
 
-      setTransitionMaskPhase("exiting");
+      setTransitionMaskPhase((phase) => {
+        if (phase === "hidden" || phase === "exiting") {
+          return phase;
+        }
+        return "exiting";
+      });
       if (exitTimer) {
         window.clearTimeout(exitTimer);
       }
       exitTimer = window.setTimeout(() => {
-        setTransitionMaskPhase("hidden");
+        if (!cancelled) {
+          setTransitionMaskPhase("hidden");
+        }
       }, 220);
+    };
+
+    void getDesktopRuntime()
+      .then((runtime) => {
+        if (runtime.handoffCompleted) {
+          hideMask();
+        }
+      })
+      .catch((error) => {
+        console.error("[desktop-runtime] Failed to read handoff snapshot.", error);
+      });
+
+    void listenDesktopEvent(DESKTOP_HANDOFF_COMPLETE_EVENT, () => {
+      hideMask();
     })
       .then((unlisten) => {
         if (cancelled) {
@@ -389,10 +412,17 @@ function DesktopTransitionMask({ resolvedTheme }: { resolvedTheme: "light" | "da
         setTransitionMaskPhase("hidden");
       });
 
+    fallbackTimer = window.setTimeout(() => {
+      hideMask();
+    }, 1500);
+
     return () => {
       cancelled = true;
       if (exitTimer) {
         window.clearTimeout(exitTimer);
+      }
+      if (fallbackTimer) {
+        window.clearTimeout(fallbackTimer);
       }
       if (detach) {
         void detach();

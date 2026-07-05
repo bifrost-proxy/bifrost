@@ -4,6 +4,7 @@ export interface DesktopRuntimeInfo {
   platform: string;
   startupReady: boolean;
   startupError: string | null;
+  handoffCompleted?: boolean;
 }
 
 export const DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete";
@@ -12,14 +13,6 @@ type TauriInvoke = <T>(
   cmd: string,
   args?: Record<string, unknown>,
 ) => Promise<T>;
-
-type TauriWindowHandle = {
-  startDragging(): Promise<void>;
-  toggleMaximize(): Promise<void>;
-  minimize(): Promise<void>;
-  close(): Promise<void>;
-  isMaximized(): Promise<boolean>;
-};
 
 type TauriEvent = {
   event: string;
@@ -43,15 +36,11 @@ declare global {
         invoke: TauriInvoke;
       };
       event?: TauriEventApi;
-      webviewWindow?: {
-        getCurrentWebviewWindow(): TauriWindowHandle;
-      };
     };
   }
 }
 
 let cachedInvoke: TauriInvoke | null = null;
-let cachedWindowHandle: TauriWindowHandle | null = null;
 
 function getCurrentInvoke(): TauriInvoke | null {
   const invoke = window.__TAURI__?.core?.invoke;
@@ -120,14 +109,4 @@ export async function listenDesktopEvent(
   }
 
   return eventApi.listen(event, handler);
-}
-
-export function getCurrentDesktopWindow() {
-  const currentWindow = window.__TAURI__?.webviewWindow?.getCurrentWebviewWindow();
-  if (currentWindow) {
-    cachedWindowHandle = currentWindow;
-    return currentWindow;
-  }
-
-  return cachedWindowHandle;
 }

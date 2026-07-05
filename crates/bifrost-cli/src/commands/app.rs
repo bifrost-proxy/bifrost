@@ -188,6 +188,30 @@ fn install_or_upgrade_app(request: AppInstallRequest) -> Result<(), BifrostError
         upgrade_cli_if_present(&progress_source)?;
     }
 
+    if operation == AppOperation::Upgrade
+        && package.is_none()
+        && installed_desktop_app_is_target_version(&install_path, &target_version)
+    {
+        write_app_progress(
+            UpgradePhase::Completed,
+            "Desktop app is already up to date",
+            Some(target_version.clone()),
+            &progress_source,
+            None,
+            None,
+        );
+        println!(
+            "{}",
+            format!(
+                "✓ Desktop app is already on target version (v{}); skipping install.",
+                target_version
+            )
+            .bright_green()
+            .bold()
+        );
+        return Ok(());
+    }
+
     let package_path = match package {
         Some(path) => path,
         None => download_desktop_package(&target_version, &progress_source)?,
@@ -438,6 +462,83 @@ fn resolve_app_path(app_dir: &Path) -> PathBuf {
     {
         app_dir.join(APP_NAME)
     }
+}
+
+fn installed_desktop_app_is_target_version(install_path: &Path, target_version: &str) -> bool {
+    installed_desktop_app_version(install_path)
+        .map(|installed| versions_equal(&installed, target_version))
+        .unwrap_or(false)
+}
+
+fn versions_equal(installed: &str, target: &str) -> bool {
+    normalize_version(installed) == normalize_version(target)
+}
+
+fn normalize_version(version: &str) -> &str {
+    version.trim().trim_start_matches('v')
+}
+
+fn installed_desktop_app_version(install_path: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        read_macos_app_version(install_path)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        read_windows_app_version(install_path)
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = install_path;
+        None
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn read_macos_app_version(install_path: &Path) -> Option<String> {
+    let plist_path = install_path.join("Contents").join("Info.plist");
+    let plist = plist::Value::from_file(plist_path).ok()?;
+    let dict = plist.as_dictionary()?;
+    ["CFBundleShortVersionString", "CFBundleVersion"]
+        .into_iter()
+        .find_map(|key| dict.get(key).and_then(|value| value.as_string()))
+        .map(str::to_string)
+}
+
+#[cfg(target_os = "windows")]
+fn read_windows_app_version(install_path: &Path) -> Option<String> {
+    if !install_path.is_file() {
+        return None;
+    }
+    let script = r#"
+param([string]$Path)
+$info = (Get-Item -LiteralPath $Path).VersionInfo
+if ($info.ProductVersion) { $info.ProductVersion } elseif ($info.FileVersion) { $info.FileVersion }
+"#;
+    let powershell = if Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", "$PSVersionTable.PSVersion"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        "powershell.exe"
+    } else {
+        "pwsh"
+    };
+    let output = Command::new(powershell)
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(script)
+        .arg(install_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (!version.is_empty()).then_some(version)
 }
 
 fn release_asset_name(version: &str, target: DesktopTarget) -> String {
@@ -812,5 +913,40 @@ mod tests {
         if cfg!(target_os = "macos") {
             assert_eq!(path, PathBuf::from("/Applications/Bifrost.app"));
         }
+    }
+
+    #[test]
+    fn versions_equal_accepts_optional_v_prefix() {
+        assert!(versions_equal("0.0.139", "v0.0.139"));
+        assert!(versions_equal(" v0.0.139 ", "0.0.139"));
+        assert!(!versions_equal("0.0.138", "0.0.139"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_installed_app_version_reads_info_plist() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app = temp.path().join(MACOS_APP_BUNDLE);
+        let contents = app.join("Contents");
+        fs::create_dir_all(&contents).expect("create Contents");
+        fs::write(
+            contents.join("Info.plist"),
+            r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleShortVersionString</key><string>0.0.139</string>
+  <key>CFBundleVersion</key><string>139</string>
+</dict>
+</plist>
+"#,
+        )
+        .expect("write plist");
+
+        assert_eq!(
+            installed_desktop_app_version(&app).as_deref(),
+            Some("0.0.139")
+        );
+        assert!(installed_desktop_app_is_target_version(&app, "v0.0.139"));
     }
 }
