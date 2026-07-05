@@ -19,9 +19,9 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSWindow;
 #[cfg(target_os = "macos")]
-use tauri::window::EffectState;
-#[cfg(target_os = "macos")]
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
+use tauri::window::EffectState;
 use tauri::window::{Window, WindowBuilder};
 #[cfg(target_os = "macos")]
 use tauri::TitleBarStyle;
