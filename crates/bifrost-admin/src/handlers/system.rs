@@ -1,7 +1,10 @@
-use std::fs::OpenOptions;
+use std::fs::{self, OpenOptions};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 #[cfg(windows)]
@@ -11,7 +14,9 @@ use bifrost_core::upgrade_progress::{
     is_stale, read_progress, write_progress, UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS,
 };
 use bifrost_storage::data_dir;
+use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
+use serde::{Deserialize, Serialize};
 use sysinfo::{Pid, ProcessesToUpdate, System};
 use tracing::warn;
 
@@ -48,11 +53,16 @@ pub async fn handle_system(
             _ => method_not_allowed(),
         },
         "/api/system/upgrade" => match method {
-            Method::POST => start_upgrade(state).await,
+            Method::POST => start_upgrade(state, query).await,
             _ => method_not_allowed(),
         },
         "/api/system/upgrade/progress" => match method {
             Method::GET => get_upgrade_progress().await,
+            _ => method_not_allowed(),
+        },
+        "/api/system/cli-install" => match method {
+            Method::GET => get_cli_install_status().await,
+            Method::POST => install_cli_from_desktop(req).await,
             _ => method_not_allowed(),
         },
         _ => error_response(StatusCode::NOT_FOUND, "Not Found"),
@@ -234,8 +244,9 @@ async fn check_version(state: SharedAdminState, query: Option<&str>) -> Response
 /// the old proxy, swaps the binary and restarts, which would otherwise kill the
 /// admin server mid-request. The progress file survives the restart so the
 /// Web UI can read the terminal state after reconnecting.
-async fn start_upgrade(state: SharedAdminState) -> Response<BoxBody> {
+async fn start_upgrade(state: SharedAdminState, query: Option<&str>) -> Response<BoxBody> {
     let dir = data_dir();
+    let channel = parse_upgrade_channel(query);
 
     // Refuse if an upgrade is already running and still alive.
     let current = read_progress(&dir);
@@ -254,14 +265,14 @@ async fn start_upgrade(state: SharedAdminState) -> Response<BoxBody> {
     // subprocess has had a chance to start writing.
     let initial = UpgradeProgress::new(UpgradePhase::Checking, "Checking for updates…")
         .with_target(target_version.clone())
-        .with_source(Some("admin".to_string()));
+        .with_source(Some(channel.progress_source().to_string()));
     write_progress(&dir, &initial);
 
-    if let Err(error) = spawn_self_update(target_version.as_deref()) {
+    if let Err(error) = spawn_upgrade_process(channel, target_version.as_deref()) {
         warn!(error = %error, "[SYSTEM] failed to spawn self-update subprocess");
         let failed = UpgradeProgress::new(UpgradePhase::Failed, "Upgrade failed to start")
             .with_target(target_version)
-            .with_source(Some("admin".to_string()))
+            .with_source(Some(channel.progress_source().to_string()))
             .with_error(Some(error.to_string()));
         write_progress(&dir, &failed);
         return error_response(
@@ -283,6 +294,248 @@ async fn get_upgrade_progress() -> Response<BoxBody> {
     json_response(&progress)
 }
 
+#[derive(Debug, Deserialize, Default)]
+struct CliInstallRequest {
+    install_dir: Option<PathBuf>,
+    install_skills: Option<bool>,
+    dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+struct CliInstallResponse {
+    installed: bool,
+    install_path: String,
+    install_dir: String,
+    current_exe: String,
+    in_path: bool,
+    path_hint: Option<String>,
+    skills_installed: Option<bool>,
+    skills_message: Option<String>,
+    dry_run: bool,
+}
+
+async fn get_cli_install_status() -> Response<BoxBody> {
+    match build_cli_install_status(None, None, false) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn install_cli_from_desktop(req: Request<Incoming>) -> Response<BoxBody> {
+    let request = match read_optional_cli_install_request(req).await {
+        Ok(request) => request,
+        Err(error) => return error_response(StatusCode::BAD_REQUEST, &error),
+    };
+    match install_cli_from_current_exe(request) {
+        Ok(response) => json_response(&response),
+        Err(error) => error_response(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()),
+    }
+}
+
+async fn read_optional_cli_install_request(
+    req: Request<Incoming>,
+) -> Result<CliInstallRequest, String> {
+    let bytes = req
+        .into_body()
+        .collect()
+        .await
+        .map_err(|error| format!("read request body: {error}"))?
+        .to_bytes();
+    if bytes.is_empty() {
+        return Ok(CliInstallRequest::default());
+    }
+    serde_json::from_slice(&bytes).map_err(|error| format!("invalid request body: {error}"))
+}
+
+fn install_cli_from_current_exe(
+    request: CliInstallRequest,
+) -> Result<CliInstallResponse, std::io::Error> {
+    let install_dir = resolve_cli_install_dir(request.install_dir);
+    let install_path = install_dir.join(cli_binary_name());
+    let current_exe = std::env::current_exe()?;
+    let dry_run = request.dry_run.unwrap_or(false);
+
+    if dry_run {
+        return build_cli_install_status(Some(install_dir), Some(current_exe), true);
+    }
+
+    fs::create_dir_all(&install_dir)?;
+    install_binary_atomically(&current_exe, &install_path)?;
+    #[cfg(target_os = "macos")]
+    clear_macos_xattrs(&install_path);
+
+    let mut response = build_cli_install_status(Some(install_dir), Some(current_exe), false)?;
+    response.installed = install_path.exists();
+
+    if request.install_skills.unwrap_or(true) {
+        let status = Command::new(&install_path)
+            .args(["install-skill", "--tool", "all", "-y"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        match status {
+            Ok(status) if status.success() => {
+                response.skills_installed = Some(true);
+                response.skills_message = Some("Bifrost AI skills installed".to_string());
+            }
+            Ok(status) => {
+                response.skills_installed = Some(false);
+                response.skills_message = Some(format!(
+                    "install-skill exited with status {status}; retry with `bifrost install-skill --tool all -y`"
+                ));
+            }
+            Err(error) => {
+                response.skills_installed = Some(false);
+                response.skills_message = Some(format!(
+                    "install-skill failed: {error}; retry with `bifrost install-skill --tool all -y`"
+                ));
+            }
+        }
+    } else {
+        response.skills_installed = None;
+        response.skills_message = Some("Bifrost AI skill installation skipped".to_string());
+    }
+
+    Ok(response)
+}
+
+fn build_cli_install_status(
+    install_dir: Option<PathBuf>,
+    current_exe: Option<PathBuf>,
+    dry_run: bool,
+) -> Result<CliInstallResponse, std::io::Error> {
+    let install_dir = resolve_cli_install_dir(install_dir);
+    let install_path = install_dir.join(cli_binary_name());
+    let current_exe = match current_exe {
+        Some(path) => path,
+        None => std::env::current_exe()?,
+    };
+    let in_path = path_contains_dir(&install_dir);
+    Ok(CliInstallResponse {
+        installed: install_path.exists(),
+        install_path: install_path.display().to_string(),
+        install_dir: install_dir.display().to_string(),
+        current_exe: current_exe.display().to_string(),
+        in_path,
+        path_hint: if in_path {
+            None
+        } else {
+            Some(cli_path_hint(&install_dir))
+        },
+        skills_installed: None,
+        skills_message: None,
+        dry_run,
+    })
+}
+
+fn resolve_cli_install_dir(override_dir: Option<PathBuf>) -> PathBuf {
+    if let Some(dir) = override_dir {
+        return dir;
+    }
+    if let Some(dir) = std::env::var_os("BIFROST_INSTALL_DIR") {
+        return PathBuf::from(dir);
+    }
+    #[cfg(windows)]
+    {
+        if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+            return PathBuf::from(local_app_data).join("bifrost").join("bin");
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(".local").join("bin");
+        }
+    }
+    std::env::temp_dir().join("bifrost-bin")
+}
+
+fn cli_binary_name() -> &'static str {
+    #[cfg(windows)]
+    {
+        "bifrost.exe"
+    }
+    #[cfg(not(windows))]
+    {
+        "bifrost"
+    }
+}
+
+fn install_binary_atomically(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    let tmp = target.with_extension(format!(
+        "{}.tmp.{}",
+        target
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("bin"),
+        std::process::id()
+    ));
+    let _ = fs::remove_file(&tmp);
+    fs::copy(source, &tmp)?;
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&tmp)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&tmp, permissions)?;
+    }
+    fs::rename(&tmp, target).or_else(|error| {
+        let _ = fs::remove_file(target);
+        fs::rename(&tmp, target).map_err(|_| error)
+    })
+}
+
+fn path_contains_dir(dir: &Path) -> bool {
+    std::env::var_os("PATH")
+        .map(|paths| {
+            std::env::split_paths(&paths).any(|entry| {
+                let entry = fs::canonicalize(&entry).unwrap_or(entry);
+                let dir = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+                entry == dir
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn cli_path_hint(dir: &Path) -> String {
+    #[cfg(windows)]
+    {
+        format!(
+            "Add {} to your Windows User PATH, then restart PowerShell/CMD.",
+            dir.display()
+        )
+    }
+    #[cfg(not(windows))]
+    {
+        format!(
+            "Add `export PATH=\"{}:$PATH\"` to your shell profile.",
+            dir.display()
+        )
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_macos_xattrs(path: &Path) {
+    let _ = Command::new("xattr")
+        .args(["-cr"])
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("xattr")
+        .args(["-d", "com.apple.provenance"])
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 /// Normalize a progress snapshot for readers: a stale active record (no update
 /// within [`DEFAULT_STALE_SECS`]) is mapped to `Failed` so the UI never hangs on
 /// a crashed/abandoned upgrade process. Non-stale and terminal records pass
@@ -302,17 +555,43 @@ fn normalize_progress(progress: UpgradeProgress) -> UpgradeProgress {
 /// The binary is resolved via `current_exe()` (the admin server runs inside the
 /// bifrost process, so `current_exe` is bifrost itself), falling back to a bare
 /// `bifrost` looked up on `PATH`.
-fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpgradeChannel {
+    Cli,
+    Desktop,
+}
+
+impl UpgradeChannel {
+    fn progress_source(self) -> &'static str {
+        match self {
+            Self::Cli => "admin",
+            Self::Desktop => "desktop",
+        }
+    }
+}
+
+fn parse_upgrade_channel(query: Option<&str>) -> UpgradeChannel {
+    if query.unwrap_or_default().split('&').any(|part| {
+        matches!(
+            part,
+            "channel=desktop" | "target=desktop" | "source=desktop"
+        )
+    }) {
+        UpgradeChannel::Desktop
+    } else {
+        UpgradeChannel::Cli
+    }
+}
+
+fn spawn_upgrade_process(
+    channel: UpgradeChannel,
+    target_version: Option<&str>,
+) -> std::io::Result<()> {
     let program = std::env::current_exe().unwrap_or_else(|_| "bifrost".into());
 
     let mut command = Command::new(&program);
-    command.arg("self-update");
-    if let Some(target) = target_version {
-        command.arg("--target").arg(target);
-    }
+    command.args(upgrade_process_args(channel, target_version));
     command
-        .arg("--source")
-        .arg("admin")
         .stdin(Stdio::null())
         .stdout(upgrade_log_stdio())
         .stderr(upgrade_log_stdio());
@@ -334,6 +613,7 @@ fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
         target: "bifrost_admin::system",
         child_pid,
         program = %program.display(),
+        channel = ?channel,
         target_version = target_version.unwrap_or("latest"),
         "spawned background self-update subprocess"
     );
@@ -354,6 +634,33 @@ fn spawn_self_update(target_version: Option<&str>) -> std::io::Result<()> {
     Ok(())
 }
 
+fn upgrade_process_args(channel: UpgradeChannel, target_version: Option<&str>) -> Vec<String> {
+    let mut args = Vec::new();
+    match channel {
+        UpgradeChannel::Cli => {
+            args.push("self-update".to_string());
+            if let Some(target) = target_version {
+                args.push("--target".to_string());
+                args.push(target.to_string());
+            }
+            args.push("--source".to_string());
+            args.push("admin".to_string());
+        }
+        UpgradeChannel::Desktop => {
+            args.push("app".to_string());
+            args.push("upgrade".to_string());
+            if let Some(target) = target_version {
+                args.push("--version".to_string());
+                args.push(target.to_string());
+            }
+            args.push("--source".to_string());
+            args.push("desktop".to_string());
+            args.push("-y".to_string());
+        }
+    }
+    args
+}
+
 fn upgrade_log_stdio() -> Stdio {
     let log_dir = data_dir().join("logs");
     if std::fs::create_dir_all(&log_dir).is_ok() {
@@ -367,7 +674,10 @@ fn upgrade_log_stdio() -> Stdio {
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_progress;
+    use super::{
+        build_cli_install_status, install_cli_from_current_exe, normalize_progress,
+        parse_upgrade_channel, upgrade_process_args, CliInstallRequest, UpgradeChannel,
+    };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
 
@@ -404,5 +714,90 @@ mod tests {
 
         let idle = UpgradeProgress::idle();
         assert_eq!(normalize_progress(idle).phase, UpgradePhase::Idle);
+    }
+
+    #[test]
+    fn parse_upgrade_channel_defaults_to_cli_and_accepts_desktop_aliases() {
+        assert_eq!(parse_upgrade_channel(None), UpgradeChannel::Cli);
+        assert_eq!(
+            parse_upgrade_channel(Some("refresh=true")),
+            UpgradeChannel::Cli
+        );
+        assert_eq!(
+            parse_upgrade_channel(Some("channel=desktop")),
+            UpgradeChannel::Desktop
+        );
+        assert_eq!(
+            parse_upgrade_channel(Some("refresh=true&target=desktop")),
+            UpgradeChannel::Desktop
+        );
+        assert_eq!(
+            parse_upgrade_channel(Some("source=desktop")),
+            UpgradeChannel::Desktop
+        );
+    }
+
+    #[test]
+    fn upgrade_process_args_separate_cli_and_desktop_channels() {
+        assert_eq!(
+            upgrade_process_args(UpgradeChannel::Cli, Some("0.0.139")),
+            vec!["self-update", "--target", "0.0.139", "--source", "admin"]
+        );
+        assert_eq!(
+            upgrade_process_args(UpgradeChannel::Desktop, Some("0.0.139")),
+            vec![
+                "app",
+                "upgrade",
+                "--version",
+                "0.0.139",
+                "--source",
+                "desktop",
+                "-y"
+            ]
+        );
+    }
+
+    #[test]
+    fn cli_install_status_uses_override_dir_and_path_hint() {
+        let dir =
+            std::env::temp_dir().join(format!("bifrost-cli-install-status-{}", std::process::id()));
+        let current_exe = std::env::current_exe().expect("current exe");
+        let status =
+            build_cli_install_status(Some(dir.clone()), Some(current_exe), true).expect("status");
+
+        assert_eq!(status.install_dir, dir.display().to_string());
+        assert_eq!(
+            status.install_path,
+            dir.join(super::cli_binary_name()).display().to_string()
+        );
+        assert!(status.path_hint.is_some());
+        assert!(status.dry_run);
+    }
+
+    #[test]
+    fn cli_install_copies_current_exe_to_override_dir_without_skills() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-cli-install-copy-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let response = install_cli_from_current_exe(CliInstallRequest {
+            install_dir: Some(dir.clone()),
+            install_skills: Some(false),
+            dry_run: Some(false),
+        })
+        .expect("install cli");
+
+        let install_path = dir.join(super::cli_binary_name());
+        assert!(install_path.exists());
+        assert!(response.installed);
+        assert_eq!(response.install_path, install_path.display().to_string());
+        assert_eq!(response.skills_installed, None);
+        assert_eq!(
+            response.skills_message,
+            Some("Bifrost AI skill installation skipped".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

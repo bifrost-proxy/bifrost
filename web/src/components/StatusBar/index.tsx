@@ -3,11 +3,12 @@ import {
   useMemo,
   memo,
   useCallback,
+  useRef,
   type CSSProperties,
   type KeyboardEvent,
 } from "react";
 import { useNavigate } from "react-router-dom";
-import { theme, Tooltip, Popover, Switch } from "antd";
+import { theme, Tooltip, Popover, Switch, notification } from "antd";
 import { ArrowUpOutlined, ArrowDownOutlined } from "@ant-design/icons";
 import { useShallow } from "zustand/react/shallow";
 import type { TlsConfig } from "../../api/config";
@@ -18,13 +19,17 @@ import {
   useProxyStore,
 } from "../../stores/useProxyStore";
 import { useTlsConfigStore } from "../../stores/useTlsConfigStore";
-import { useVersionStore } from "../../stores/useVersionStore";
+import {
+  DESKTOP_CHECK_INTERVAL_MS,
+  useVersionStore,
+} from "../../stores/useVersionStore";
 import { useSyncStore } from "../../stores/useSyncStore";
 import type { SyncStatus } from "../../api/sync";
 import pushService, { type SettingsScope } from "../../services/pushService";
 import VersionModal from "../VersionModal";
 import AiSkillAssistant from "../AiSkillAssistant";
 import { getTlsInterceptionIndicator } from "./statusIndicators";
+import { isDesktopShell } from "../../runtime";
 import "./index.css";
 
 function formatSyncAction(action?: SyncStatus["last_sync_action"]): string | null {
@@ -111,6 +116,7 @@ const StatusBar = memo(function StatusBar() {
   const latestVersion = useVersionStore((state) => state.latestVersion);
   const setModalVisible = useVersionStore((state) => state.setModalVisible);
   const checkVersion = useVersionStore((state) => state.checkVersion);
+  const lastDesktopNotificationVersion = useRef<string | null>(null);
 
   useEffect(() => {
     fetchSystemProxy();
@@ -145,6 +151,38 @@ const StatusBar = memo(function StatusBar() {
     startPolling,
     stopPolling,
   ]);
+
+  useEffect(() => {
+    if (!isDesktopShell()) {
+      return;
+    }
+
+    const runDesktopVersionCheck = async () => {
+      await checkVersion({ forceRefresh: true });
+      const versionState = useVersionStore.getState();
+      if (!versionState.shouldShowAutoModal() || !versionState.latestVersion) {
+        return;
+      }
+      if (lastDesktopNotificationVersion.current !== versionState.latestVersion) {
+        notification.info({
+          message: `Bifrost Desktop v${versionState.latestVersion} is available`,
+          description: "Install the desktop update when you are ready. The CLI will be updated too if it is installed.",
+          placement: "bottomRight",
+          duration: 8,
+          onClick: () => setModalVisible(true),
+        });
+        lastDesktopNotificationVersion.current = versionState.latestVersion;
+      }
+      setModalVisible(true);
+    };
+
+    void runDesktopVersionCheck();
+    const timer = window.setInterval(
+      () => void runDesktopVersionCheck(),
+      DESKTOP_CHECK_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [checkVersion, setModalVisible]);
 
   const metrics = current || overview?.metrics;
 

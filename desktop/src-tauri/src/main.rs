@@ -227,6 +227,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             update_desktop_proxy_port,
+            restart_desktop_after_update,
             notify_main_window_ready,
             set_document_edited,
             write_clipboard
@@ -1402,6 +1403,20 @@ fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Res
         .map_err(|error| anyhow(format!("failed to encode desktop config: {error}")))?;
     fs::write(config_path, format!("{content}\n"))
         .map_err(|error| anyhow(format!("failed to write desktop config: {error}")))
+}
+
+#[tauri::command]
+fn restart_desktop_after_update(app: AppHandle) -> Result<(), String> {
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("failed to resolve current desktop executable: {error}"))?;
+    Command::new(&exe)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| format!("failed to relaunch desktop app: {error}"))?;
+    app.exit(0);
+    Ok(())
 }
 
 #[tauri::command]

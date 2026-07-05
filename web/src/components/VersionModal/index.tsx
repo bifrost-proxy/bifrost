@@ -12,6 +12,7 @@ import { useMemo, useCallback } from "react";
 import { copyToClipboard } from "../../utils/clipboard";
 import { useVersionStore } from "../../stores/useVersionStore";
 import { useMetricsStore } from "../../stores/useMetricsStore";
+import { isDesktopShell } from "../../runtime";
 
 const { Text, Link } = Typography;
 
@@ -25,6 +26,8 @@ export default function VersionModal() {
   const releaseHighlights = useVersionStore((state) => state.releaseHighlights);
   const releaseUrl = useVersionStore((state) => state.releaseUrl);
   const overview = useMetricsStore((state) => state.overview);
+  const desktopMode = isDesktopShell();
+  const upgradeCommand = desktopMode ? "bifrost app upgrade" : "bifrost upgrade";
 
   // Upgrade flow state.
   const upgrading = useVersionStore((state) => state.upgrading);
@@ -56,13 +59,13 @@ export default function VersionModal() {
   }, [startUpgrade]);
 
   const handleCopyCommand = useCallback(async () => {
-    const ok = await copyToClipboard("bifrost upgrade");
+    const ok = await copyToClipboard(upgradeCommand);
     if (ok) {
       message.success("Command copied to clipboard");
     } else {
       message.error("Failed to copy command");
     }
-  }, []);
+  }, [upgradeCommand]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
     () => ({
@@ -204,7 +207,9 @@ export default function VersionModal() {
         <div style={styles.headerText}>
           <p style={styles.headerTitle}>New Version Available</p>
           <p style={styles.headerSubtitle}>
-            A newer version of Bifrost is ready to install
+            {desktopMode
+              ? "A newer Bifrost desktop app is ready to install"
+              : "A newer version of Bifrost is ready to install"}
           </p>
         </div>
       </div>
@@ -250,7 +255,7 @@ export default function VersionModal() {
         </div>
         <div style={styles.commandBox}>
           <Text style={styles.command} copyable={false}>
-            bifrost upgrade
+            {upgradeCommand}
           </Text>
           <Button
             type="text"
@@ -373,7 +378,9 @@ export default function VersionModal() {
             <p style={styles.headerSubtitle}>
               {isFailed
                 ? "The previous version is still available"
-                : `Installing v${latestVersion}…`}
+                : desktopMode
+                  ? `Installing desktop v${latestVersion} and updating CLI if present…`
+                  : `Installing v${latestVersion}…`}
             </p>
           </div>
         </div>

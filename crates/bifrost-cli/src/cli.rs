@@ -14,6 +14,55 @@ pub enum StatusFormat {
     JsonPretty,
 }
 
+#[derive(Subcommand)]
+pub enum AppCommands {
+    #[command(about = "Install the Bifrost desktop app")]
+    Install {
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Use a local .app, .dmg, .exe, .msi, or .zip package instead of downloading a release asset")]
+        package: Option<PathBuf>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Override the desktop app installation directory")]
+        app_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Target version to install (defaults to the latest release)"
+        )]
+        version: Option<String>,
+        #[arg(long, help = "Print planned actions without changing the machine")]
+        dry_run: bool,
+        #[arg(short = 'y', long, help = "Skip confirmation prompts")]
+        yes: bool,
+    },
+    #[command(about = "Uninstall the Bifrost desktop app")]
+    Uninstall {
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Override the desktop app installation directory")]
+        app_dir: Option<PathBuf>,
+        #[arg(long, help = "Print planned actions without changing the machine")]
+        dry_run: bool,
+        #[arg(short = 'y', long, help = "Skip confirmation prompts")]
+        yes: bool,
+    },
+    #[command(about = "Upgrade the Bifrost desktop app")]
+    Upgrade {
+        #[arg(long, value_hint = ValueHint::FilePath, help = "Use a local .app, .dmg, .exe, .msi, or .zip package instead of downloading a release asset")]
+        package: Option<PathBuf>,
+        #[arg(long, value_hint = ValueHint::DirPath, help = "Override the desktop app installation directory")]
+        app_dir: Option<PathBuf>,
+        #[arg(
+            long,
+            help = "Target version to upgrade to (defaults to the latest release)"
+        )]
+        version: Option<String>,
+        #[arg(long, help = "Do not upgrade the CLI even if a CLI install is present")]
+        no_cli: bool,
+        #[arg(long, help = "Progress source label used by Admin/Web/Desktop UI")]
+        source: Option<String>,
+        #[arg(long, help = "Print planned actions without changing the machine")]
+        dry_run: bool,
+        #[arg(short = 'y', long, help = "Skip confirmation prompts")]
+        yes: bool,
+    },
+}
+
 #[derive(Parser)]
 #[command(name = "bifrost")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
@@ -363,6 +412,11 @@ previous runtime settings."
     Upgrade {
         #[arg(short = 'y', long, hide = true)]
         yes: bool,
+    },
+    #[command(about = "Install, uninstall, or upgrade the Bifrost desktop app")]
+    App {
+        #[command(subcommand)]
+        action: AppCommands,
     },
     #[command(
         hide = true,

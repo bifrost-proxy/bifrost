@@ -20,13 +20,13 @@ use cli::{
     TrafficCommands,
 };
 use commands::{
-    check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_ca_command,
-    handle_config_command, handle_export_command, handle_group_command, handle_import_command,
-    handle_install_skill, handle_metrics_command, handle_port_command, handle_rule_command,
-    handle_script_command, handle_sync_command, handle_system_proxy_command, handle_upgrade,
-    handle_value_command, handle_whitelist_command, remote, run_restart, run_search, run_start,
-    run_status, run_status_tui, run_stop, run_traffic_auth_status, run_traffic_clear,
-    run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
+    check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_app_command,
+    handle_ca_command, handle_config_command, handle_export_command, handle_group_command,
+    handle_import_command, handle_install_skill, handle_metrics_command, handle_port_command,
+    handle_rule_command, handle_script_command, handle_sync_command, handle_system_proxy_command,
+    handle_upgrade, handle_value_command, handle_whitelist_command, remote, run_restart,
+    run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_auth_status,
+    run_traffic_clear, run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
     spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions,
     TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
     TrafficReplayOptions,
@@ -96,7 +96,7 @@ fn should_run_update_notice(stdout_is_terminal: bool, command: Option<&Commands>
 
     !matches!(
         command,
-        Some(Commands::VersionCheck) | Some(Commands::Upgrade { .. })
+        Some(Commands::VersionCheck) | Some(Commands::Upgrade { .. }) | Some(Commands::App { .. })
     )
 }
 
@@ -344,6 +344,7 @@ fn run_cli_main() {
         }
         Some(Commands::Script { action }) => handle_script_command(action),
         Some(Commands::Upgrade { yes }) => handle_upgrade(yes),
+        Some(Commands::App { action }) => handle_app_command(action),
         Some(Commands::SelfUpdate { target, source }) => {
             commands::handle_upgrade_background(target, source);
             Ok(())

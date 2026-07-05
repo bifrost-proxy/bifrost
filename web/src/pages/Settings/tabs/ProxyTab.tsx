@@ -16,11 +16,14 @@ import {
   Tag,
   Tooltip,
   Typography,
+  message,
   theme,
 } from "antd";
 import {
   ApiOutlined,
+  CheckCircleOutlined,
   CopyOutlined,
+  DownloadOutlined,
   ExclamationCircleOutlined,
   LockOutlined,
   PlusOutlined,
@@ -46,6 +49,11 @@ import {
 } from "../../../api/ports";
 import type { ProxySettings, TlsConfig } from "../../../api/config";
 import { updateTlsConfig } from "../../../api/config";
+import {
+  getCliInstallStatus,
+  installCliFromDesktop,
+  type CliInstallStatus,
+} from "../../../api/system";
 import { useTlsConfigStore } from "../../../stores/useTlsConfigStore";
 import SystemProxySection from "./SystemProxySection";
 
@@ -992,6 +1000,41 @@ export default function ProxyTab({
   handleRemoveAppExcludePattern,
   appSuggestions,
 }: ProxyTabProps) {
+  const [cliInstallStatus, setCliInstallStatus] = useState<CliInstallStatus | null>(null);
+  const [cliInstallLoading, setCliInstallLoading] = useState(false);
+
+  const refreshCliInstallStatus = useCallback(async () => {
+    if (!desktopMode) {
+      return;
+    }
+    try {
+      setCliInstallStatus(await getCliInstallStatus());
+    } catch {
+      setCliInstallStatus(null);
+    }
+  }, [desktopMode]);
+
+  useEffect(() => {
+    void refreshCliInstallStatus();
+  }, [refreshCliInstallStatus]);
+
+  const handleInstallCli = useCallback(async () => {
+    setCliInstallLoading(true);
+    try {
+      const status = await installCliFromDesktop({ install_skills: true });
+      setCliInstallStatus(status);
+      if (status.skills_installed === false) {
+        message.warning(status.skills_message || "CLI installed, but AI skill setup needs a retry");
+      } else {
+        message.success("CLI and AI skills installed");
+      }
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : "Failed to install CLI");
+    } finally {
+      setCliInstallLoading(false);
+    }
+  }, []);
+
   return (
     <div>
       <Row gutter={[16, 16]}>
@@ -1081,6 +1124,60 @@ export default function ProxyTab({
                     description="The preferred startup port was unavailable, so the embedded core automatically moved to the next available port."
                   />
                 ) : null}
+                <Divider style={{ margin: "4px 0" }} />
+                <Row gutter={[16, 12]} align="middle">
+                  <Col flex="auto">
+                    <Space direction="vertical" size={4} style={{ width: "100%" }}>
+                      <Space wrap>
+                        <Text strong>Command Line & AI Tools</Text>
+                        {cliInstallStatus?.installed ? (
+                          <Tag color="green" icon={<CheckCircleOutlined />}>
+                            CLI installed
+                          </Tag>
+                        ) : (
+                          <Tag>CLI not installed</Tag>
+                        )}
+                        {cliInstallStatus?.skills_installed ? (
+                          <Tag color="blue">AI skills installed</Tag>
+                        ) : null}
+                      </Space>
+                      <Text type="secondary" style={{ fontSize: 12 }}>
+                        {cliInstallStatus?.install_path
+                          ? `CLI path: ${cliInstallStatus.install_path}`
+                          : "Install the bundled CLI so terminals and AI coding tools can call bifrost directly."}
+                      </Text>
+                      {cliInstallStatus?.path_hint ? (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {cliInstallStatus.path_hint}
+                        </Text>
+                      ) : null}
+                      {cliInstallStatus?.skills_message ? (
+                        <Text type="secondary" style={{ fontSize: 12 }}>
+                          {cliInstallStatus.skills_message}
+                        </Text>
+                      ) : null}
+                    </Space>
+                  </Col>
+                  <Col flex="none">
+                    <Space>
+                      <Button
+                        icon={<ReloadOutlined />}
+                        loading={cliInstallLoading}
+                        onClick={refreshCliInstallStatus}
+                      >
+                        Refresh
+                      </Button>
+                      <Button
+                        type="primary"
+                        icon={<DownloadOutlined />}
+                        loading={cliInstallLoading}
+                        onClick={handleInstallCli}
+                      >
+                        Install CLI & Skills
+                      </Button>
+                    </Space>
+                  </Col>
+                </Row>
               </Space>
             </Card>
           </Col>

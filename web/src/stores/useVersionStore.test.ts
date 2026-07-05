@@ -6,6 +6,9 @@ const apiMocks = vi.hoisted(() => ({
   getUpgradeProgress: vi.fn(),
   startUpgrade: vi.fn(),
 }));
+const runtimeMocks = vi.hoisted(() => ({
+  desktopShell: false,
+}));
 
 vi.mock("../api/version", () => ({
   checkVersion: apiMocks.checkVersion,
@@ -16,6 +19,10 @@ vi.mock("../api/version", () => ({
 vi.mock("../api/client", () => ({
   isConnectionIssueError: (error: unknown) =>
     error instanceof Error && error.message === "connection",
+}));
+
+vi.mock("../runtime", () => ({
+  isDesktopShell: () => runtimeMocks.desktopShell,
 }));
 
 type VersionStore = typeof import("./useVersionStore").useVersionStore;
@@ -44,6 +51,7 @@ describe("useVersionStore upgrade polling", () => {
   beforeEach(async () => {
     vi.useFakeTimers();
     vi.resetModules();
+    runtimeMocks.desktopShell = false;
 
     const localStorage = createMemoryStorage();
     const sessionStorage = createMemoryStorage();
@@ -126,6 +134,32 @@ describe("useVersionStore upgrade polling", () => {
 
     expect(useVersionStore.getState().upgrading).toBe(false);
     expect(useVersionStore.getState().upgradePhase).toBe("idle");
-    expect(apiMocks.checkVersion).toHaveBeenCalledWith(true);
+    expect(apiMocks.checkVersion).toHaveBeenCalledWith(true, "cli");
+  });
+
+  it("uses the desktop channel for version checks and upgrades in desktop shell", async () => {
+    runtimeMocks.desktopShell = true;
+    useVersionStore.getState().stopPollUpgradeProgress();
+    useVersionStore = (await import("./useVersionStore")).useVersionStore;
+    useVersionStore.setState({
+      lastChecked: null,
+      upgrading: false,
+      upgradePhase: "idle",
+    });
+    apiMocks.startUpgrade.mockResolvedValue({
+      phase: "checking",
+      percent: null,
+      message: "Checking for updates...",
+      target_version: "0.0.105",
+      source: "desktop",
+      error: null,
+      updated_at: new Date().toISOString(),
+    });
+
+    await useVersionStore.getState().checkVersion({ forceRefresh: true });
+    await useVersionStore.getState().startUpgrade();
+
+    expect(apiMocks.checkVersion).toHaveBeenCalledWith(true, "desktop");
+    expect(apiMocks.startUpgrade).toHaveBeenCalledWith("desktop");
   });
 });
