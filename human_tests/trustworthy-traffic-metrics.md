@@ -9,6 +9,11 @@
 - HTTP/HTTPS/Mock 响应 body 计入 download bytes。
 - QPS 与实时网速来自最近事件窗口，不依赖 UI 轮询间隔。
 - Traffic detail、compact list、host/app distribution 都能读取 trusted upload/download 字段。
+- SSE/streaming 响应使用真实下载字节，不被 legacy socket reconciliation 覆盖成错误口径。
+- 临时代理端口流量记录 listener port 与命中规则详情，且对应 Mock 下载字节真实入账。
+- WebSocket 帧流量计入 trusted upload/download，并保留 `is_websocket` 标记。
+- SOCKS5 HTTP 入口计入 trusted upload/download，并保留 `socks5-http` 协议口径。
+- HTTPS CONNECT 隧道计入 trusted upload/download，并保留 `is_tunnel` 与 `tunnel` 协议口径。
 
 ## 前置条件
 
@@ -36,7 +41,7 @@ BIFROST_BIN="$PWD/target/debug/bifrost" e2e-tests/tests/test_trustworthy_traffic
 
 预期结果：
 
-- `proxy request counter is not double counted` 通过，5 个代理请求只增加 5。
+- `proxy request counter is not double counted across HTTP, SSE, Mock, and temp port` 通过，7 个代理请求只增加 7。
 - `upload bytes include real POST body` 通过。
 - `traffic detail stores trusted POST upload bytes` 通过。
 - `traffic detail stores trusted POST download bytes` 通过。
@@ -54,20 +59,90 @@ BIFROST_BIN="$PWD/target/debug/bifrost" e2e-tests/tests/test_trustworthy_traffic
 - `Mock response body is stored as trusted download bytes` 通过，Mock body 长度精确入账。
 - `download bytes include Mock body` 通过。
 
-### TC-TTM-03 QPS 与实时网速可信性
+### TC-TTM-03 SSE/streaming 下载统计
 
 操作步骤：
 
 1. 继续执行 TC-TTM-01 中的同一脚本。
-2. 观察 burst 后的 Metrics API 断言。
+2. 观察 SSE response 断言。
 
 预期结果：
 
-- `QPS reflects the recent burst` 通过，突发 5 个请求后 QPS 至少为 5。
+- `SSE GET upload bytes include real request bytes` 通过，SSE GET 的真实请求头字节会计入上行。
+- `SSE streamed response bytes are stored as trusted download bytes` 通过。
+- `SSE traffic record is marked as is_sse=true` 通过。
+
+### TC-TTM-04 临时端口流量统计与规则详情
+
+操作步骤：
+
+1. 继续执行 TC-TTM-01 中的同一脚本。
+2. 观察 temporary proxy port 断言。
+
+预期结果：
+
+- `temporary port Mock GET upload bytes remain zero` 通过。
+- `temporary port Mock response body is trusted download bytes` 通过。
+- `temporary port traffic stores listener_port` 通过，记录中的 listener port 等于脚本绑定的临时端口。
+- `temporary port traffic records enabled rule details` 通过，记录包含 `trusted-metrics-temp` 命中规则。
+
+### TC-TTM-05 WebSocket 双向流量统计
+
+操作步骤：
+
+1. 继续执行 TC-TTM-01 中的同一脚本。
+2. 观察 WebSocket frames through proxy 断言。
+
+预期结果：
+
+- `WebSocket traffic increments request counter once` 通过。
+- `WebSocket traffic record is marked as is_websocket=true` 通过。
+- `WebSocket upload bytes include client frames` 通过。
+- `WebSocket download bytes include server frames` 通过。
+
+### TC-TTM-06 SOCKS5 HTTP 双向流量统计
+
+操作步骤：
+
+1. 继续执行 TC-TTM-01 中的同一脚本。
+2. 观察 SOCKS5 proxy 断言。
+
+预期结果：
+
+- `SOCKS5 HTTP traffic increments request counter once` 通过。
+- `SOCKS5 HTTP traffic record uses socks5-http protocol` 通过。
+- `SOCKS5 HTTP upload bytes include real client request bytes` 通过。
+- `SOCKS5 HTTP download bytes include real upstream response bytes` 通过。
+
+### TC-TTM-07 HTTPS CONNECT 隧道双向流量统计
+
+操作步骤：
+
+1. 继续执行 TC-TTM-01 中的同一脚本。
+2. 观察 HTTPS CONNECT tunnel 断言。
+
+预期结果：
+
+- `HTTPS CONNECT tunnel increments request counter once` 通过。
+- `HTTPS CONNECT traffic record is marked as is_tunnel=true` 通过。
+- `HTTPS CONNECT traffic record uses tunnel protocol` 通过。
+- `HTTPS CONNECT upload bytes include real tunnel client bytes` 通过。
+- `HTTPS CONNECT download bytes include real tunnel server bytes` 通过。
+
+### TC-TTM-08 QPS 与实时网速可信性
+
+操作步骤：
+
+1. 继续执行 TC-TTM-01 中的同一脚本。
+2. 观察 mixed burst 后的 Metrics API 断言。
+
+预期结果：
+
+- `QPS reflects the recent mixed burst` 通过，突发 7 个请求后 QPS 至少为 7。
 - `upload rate reflects recent bytes` 通过。
 - `download rate reflects recent bytes` 通过。
 
-### TC-TTM-04 Host/App 分布使用 trusted bytes
+### TC-TTM-09 Host/App 分布使用 trusted bytes
 
 操作步骤：
 
