@@ -20,11 +20,34 @@ FAKE_PROXY_BIN=""
 FAKE_PROXY_STATE=""
 FAKE_PROXY_COMMAND_LOG=""
 
+remove_test_data_dir() {
+    local dir="$1"
+    [[ -n "${dir}" && -d "${dir}" ]] || return 0
+
+    for _ in $(seq 1 5); do
+        rm -rf "${dir}" 2>/dev/null && return 0
+        sleep 0.2
+    done
+
+    # macOS can briefly report "Directory not empty" while daemon log writers
+    # are exiting. Cleanup must not turn a fully-passed regression suite red.
+    rm -rf "${dir}" 2>/dev/null || true
+}
+
 cleanup() {
+    set +e
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
-        BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
-        rm -rf "${TEST_DATA_DIR}"
+        if [[ -n "${FAKE_PROXY_BIN:-}" && -d "${FAKE_PROXY_BIN:-}" ]]; then
+            PATH="${FAKE_PROXY_BIN}:$PATH" \
+            BIFROST_FAKE_SYSTEM_PROXY_STATE="${FAKE_PROXY_STATE:-}" \
+            BIFROST_FAKE_SYSTEM_PROXY_COMMAND_LOG="${FAKE_PROXY_COMMAND_LOG:-}" \
+            BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+        else
+            BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
+        fi
+        remove_test_data_dir "${TEST_DATA_DIR}"
     fi
+    return 0
 }
 trap cleanup EXIT
 
@@ -244,7 +267,7 @@ test_restart_handoff_with_fake_system_proxy() {
 
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
         BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
-        rm -rf "${TEST_DATA_DIR}"
+        remove_test_data_dir "${TEST_DATA_DIR}"
     fi
     TEST_DATA_DIR="$(mktemp -d)"
     PROXY_PORT="$(free_port)"
@@ -329,7 +352,7 @@ test_restart_handoff_with_fake_system_proxy() {
 test_restart_without_system_proxy_cross_platform() {
     if [[ -n "${TEST_DATA_DIR}" && -d "${TEST_DATA_DIR}" ]]; then
         BIFROST_DATA_DIR="${TEST_DATA_DIR}" "${BIFROST_BIN}" stop >/dev/null 2>&1 || true
-        rm -rf "${TEST_DATA_DIR}"
+        remove_test_data_dir "${TEST_DATA_DIR}"
     fi
     TEST_DATA_DIR="$(mktemp -d)"
     PROXY_PORT="$(free_port)"
