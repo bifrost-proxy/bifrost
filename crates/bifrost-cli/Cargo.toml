@@ -29,7 +29,6 @@ bifrost-asr = { path = "../bifrost-asr", default-features = false, features = ["
 parking_lot.workspace = true
 tracing.workspace = true
 notify = "6"
-plist = "1"
 tokio.workspace = true
 clap.workspace = true
 clap_complete.workspace = true
@@ -99,6 +98,7 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 fontdue = "0.9"
 core-foundation = "0.10"
 core-foundation-sys = "0.8"
+plist = "1"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", features = [
     "NSData",
