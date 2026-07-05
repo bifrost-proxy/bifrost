@@ -178,6 +178,7 @@ SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin realtime_metrics -- --nocaptur
 
 - 2026-07-05：执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin realtime_metrics -- --nocapture`，3 个实时统计单测全部通过，覆盖最近窗口、过期归零、固定容量 bucket。
 - 2026-07-05：执行 `bash e2e-tests/tests/test_trustworthy_traffic_metrics.sh`，真实 HTTP、Mock、SSE、临时端口、WebSocket、SOCKS5、HTTPS CONNECT、QPS、上行/下行速率、Traffic detail 与 host/app 分布断言全部通过。
+- 2026-07-05：使用 `target/release/bifrost`、隔离 `BIFROST_DATA_DIR`、本地 upstream、`--no-system-proxy`、`--skip-cert-check`、`--unsafe-ssl` 执行真实压测。Idle 常驻静置后 30 秒平均 CPU 约 4.8%，RSS 不增长。200 QPS / 30 秒场景 6000/6000 成功，实际 199.7 QPS，p50 44ms、p95 77ms、p99 104ms，Bifrost 进程平均 CPU 约 28.4%，RSS 峰值约 94MB，Metrics API 请求增量与客户端成功数一致。50/100/200 QPS 阶梯场景均 100% 成功，平均 CPU 约 16.1% / 21.2% / 28.2%。结论：固定桶实时统计保持可信，但 200 QPS 完整代理与完整 traffic 记录仍高于 10% CPU 目标，后续需继续优化 traffic detail/DB 记录链路。
 
 ## 清理步骤
 
