@@ -115,6 +115,7 @@ bifrost app upgrade [--package <path>] [--app-dir <dir>] [--version <v>] [--no-c
 - release 资产后缀：macOS `.dmg`，Windows `.msi`。
 - `BIFROST_APP_UPGRADE_TEST_PACKAGE` 可让 E2E/测试注入本地包，避免联网。
 - `BIFROST_APP_SKIP_RESTART=1` 仅用于 E2E/自动化临时安装验证，跳过主动打开桌面 app；真实桌面端更新仍由 Tauri WebView 执行 `restart_desktop_after_update`。
+- `BIFROST_DESKTOP_BIN` 仅用于 debug/VM 验证时覆盖 sidecar 路径，避免本地默认 `target/debug/bifrost.exe` 被旧进程锁住；发布包仍使用内置 `resources/bin/bifrost.exe`。
 - Windows 桌面壳内部启动 `resources/bin/bifrost.exe start/stop` 时设置 `CREATE_NO_WINDOW`，避免从桌面快捷方式启动后额外弹出 terminal 窗口；命令行用户直接运行 `bifrost.exe` 不受影响。
 - Tauri 菜单只在 macOS 注册；Windows host window 创建时关闭 decorations，由 Web UI 提供右上角最小化、最大化、关闭按钮和自定义拖拽区域。
 

@@ -563,6 +563,10 @@ fn resolve_bifrost_binary(app: &AppHandle) -> tauri::Result<PathBuf> {
         "bifrost"
     };
 
+    if let Some(path) = resolve_bifrost_binary_from_env() {
+        return Ok(path);
+    }
+
     if cfg!(debug_assertions) {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         return Ok(manifest_dir
@@ -580,6 +584,17 @@ fn resolve_bifrost_binary(app: &AppHandle) -> tauri::Result<PathBuf> {
     }
 
     Ok(resource_dir.join("bin").join(binary_name))
+}
+
+fn resolve_bifrost_binary_from_env() -> Option<PathBuf> {
+    std::env::var_os("BIFROST_DESKTOP_BIN").and_then(|value| {
+        let path = PathBuf::from(value);
+        if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    })
 }
 
 fn resolve_desktop_data_dir() -> tauri::Result<PathBuf> {
@@ -1899,15 +1914,17 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
-        parse_port_update_response, poll_managed_backend_exit, resolve_desktop_config_path,
-        resolve_desktop_data_dir, uses_borderless_desktop_chrome_for_platform, BackendState,
-        HostWindowCloseBehavior,
+        parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
+        resolve_desktop_config_path, resolve_desktop_data_dir,
+        uses_borderless_desktop_chrome_for_platform, BackendState, HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn desktop_config_uses_shared_data_dir() {
@@ -1969,6 +1986,21 @@ mod tests {
     fn windows_desktop_chrome_is_borderless() {
         assert!(uses_borderless_desktop_chrome_for_platform(true));
         assert!(!uses_borderless_desktop_chrome_for_platform(false));
+    }
+
+    #[test]
+    fn desktop_binary_path_can_be_overridden_for_debug_verification() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os("BIFROST_DESKTOP_BIN");
+        std::env::set_var("BIFROST_DESKTOP_BIN", "/tmp/bifrost-debug");
+        assert_eq!(
+            resolve_bifrost_binary_from_env(),
+            Some(PathBuf::from("/tmp/bifrost-debug"))
+        );
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_DESKTOP_BIN", value),
+            None => std::env::remove_var("BIFROST_DESKTOP_BIN"),
+        }
     }
 
     #[test]
