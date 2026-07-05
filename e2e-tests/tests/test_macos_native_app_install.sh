@@ -41,48 +41,51 @@ cat >"${UPDATED_SOURCE_APP}/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
-DRY_RUN_OUTPUT="$("${BIFROST_BIN}" app install --source "${SOURCE_APP}" --install-dir "${INSTALL_DIR}" --dry-run)"
-echo "${DRY_RUN_OUTPUT}" | grep -q '"dry_run":true'
+DRY_RUN_OUTPUT="$("${BIFROST_BIN}" app install --package "${SOURCE_APP}" --app-dir "${INSTALL_DIR}" --version 9.9.9 --dry-run)"
+echo "${DRY_RUN_OUTPUT}" | grep -q "Desktop app install target:"
+echo "${DRY_RUN_OUTPUT}" | grep -q "Dry run: no files will be changed."
 test ! -e "${INSTALL_DIR}/Bifrost.app"
 
-"${BIFROST_BIN}" app install \
-  --source "${SOURCE_APP}" \
-  --install-dir "${INSTALL_DIR}" \
-  --latest-version 9.9.9 \
-  -y
-
-test -f "${INSTALL_DIR}/Bifrost.app/Contents/Info.plist"
-STATUS_JSON="$("${BIFROST_BIN}" app status --install-dir "${INSTALL_DIR}" --latest-version 9.9.9 --format json)"
-echo "${STATUS_JSON}" | grep -q '"installed": true'
-echo "${STATUS_JSON}" | grep -q '"installed_version": "9.9.9"'
-echo "${STATUS_JSON}" | grep -q '"needs_install": false'
-
 if [[ "$(uname -s)" != "Darwin" ]]; then
+  STATUS_JSON="$("${BIFROST_BIN}" native-app status --install-dir "${INSTALL_DIR}" --latest-version 9.9.9 --format json)"
+  echo "${STATUS_JSON}" | grep -q '"installed": false'
   echo "${STATUS_JSON}" | grep -q '"supported": false'
   echo "${STATUS_JSON}" | grep -q 'Bifrost Native App is available only on macOS.'
-  "${BIFROST_BIN}" app uninstall --install-dir "${INSTALL_DIR}" -y
-  test ! -e "${INSTALL_DIR}/Bifrost.app"
   echo "macOS native app install CLI E2E passed on unsupported platform"
   exit 0
 fi
 
-UPDATE_NEEDED_JSON="$("${BIFROST_BIN}" app status --install-dir "${INSTALL_DIR}" --latest-version 10.0.0 --format json)"
+"${BIFROST_BIN}" app install \
+  --package "${SOURCE_APP}" \
+  --app-dir "${INSTALL_DIR}" \
+  --version 9.9.9 \
+  -y
+
+test -f "${INSTALL_DIR}/Bifrost.app/Contents/Info.plist"
+STATUS_JSON="$("${BIFROST_BIN}" native-app status --install-dir "${INSTALL_DIR}" --latest-version 9.9.9 --format json)"
+echo "${STATUS_JSON}" | grep -q '"installed": true'
+echo "${STATUS_JSON}" | grep -q '"installed_version": "9.9.9"'
+echo "${STATUS_JSON}" | grep -q '"needs_install": false'
+
+UPDATE_NEEDED_JSON="$("${BIFROST_BIN}" native-app status --install-dir "${INSTALL_DIR}" --latest-version 10.0.0 --format json)"
 echo "${UPDATE_NEEDED_JSON}" | grep -q '"installed": true'
 echo "${UPDATE_NEEDED_JSON}" | grep -q '"installed_version": "9.9.9"'
 echo "${UPDATE_NEEDED_JSON}" | grep -q '"needs_install": true'
 
-"${BIFROST_BIN}" app install \
-  --source "${UPDATED_SOURCE_APP}" \
-  --install-dir "${INSTALL_DIR}" \
-  --latest-version 10.0.0 \
+"${BIFROST_BIN}" app upgrade \
+  --package "${UPDATED_SOURCE_APP}" \
+  --app-dir "${INSTALL_DIR}" \
+  --source desktop \
+  --no-cli \
+  --version 10.0.0 \
   -y
 
-UPDATED_STATUS_JSON="$("${BIFROST_BIN}" app status --install-dir "${INSTALL_DIR}" --latest-version 10.0.0 --format json)"
+UPDATED_STATUS_JSON="$("${BIFROST_BIN}" native-app status --install-dir "${INSTALL_DIR}" --latest-version 10.0.0 --format json)"
 echo "${UPDATED_STATUS_JSON}" | grep -q '"installed": true'
 echo "${UPDATED_STATUS_JSON}" | grep -q '"installed_version": "10.0.0"'
 echo "${UPDATED_STATUS_JSON}" | grep -q '"needs_install": false'
 
-"${BIFROST_BIN}" app uninstall --install-dir "${INSTALL_DIR}" -y
+"${BIFROST_BIN}" app uninstall --app-dir "${INSTALL_DIR}" -y
 test ! -e "${INSTALL_DIR}/Bifrost.app"
 
 echo "macOS native app install/update/uninstall CLI E2E passed"

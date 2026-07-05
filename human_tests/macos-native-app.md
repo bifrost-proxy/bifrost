@@ -897,20 +897,20 @@
    printf '<plist><dict><key>CFBundleShortVersionString</key><string>9.9.9</string></dict></plist>' \
      > "$TEST_ROOT/source/Bifrost.app/Contents/Info.plist"
    cargo run -p bifrost-cli --bin bifrost -- app install \
-     --source "$TEST_ROOT/source/Bifrost.app" \
-     --install-dir "$TEST_ROOT/install" \
-     --latest-version 9.9.9 \
+     --package "$TEST_ROOT/source/Bifrost.app" \
+     --app-dir "$TEST_ROOT/install" \
+     --version 9.9.9 \
      --dry-run
    test ! -e "$TEST_ROOT/install/Bifrost.app"
    rm -rf "$TEST_ROOT"
    ```
 
 **预期结果：**
-- `app install --dry-run` 输出 JSON，包含 `dry_run: true`、source、target 和 open_after_install。
+- `app install --dry-run` 输出安装目标、目标版本和 no-op 提示，不写入目标目录。
 - 真实安装会把 `Bifrost.app` 拷贝到指定安装目录，并保留 Info.plist 版本号。
-- `app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
-- macOS 上，当 `latest_version` 高于已安装版本时，`app status --format json` 返回 `needs_install: true`；再次执行 `app install` 会覆盖安装到新版本，并让 `needs_install` 变回 `false`。
-- 非 macOS 平台返回 `supported: false` 和 `Bifrost Native App is available only on macOS.`，不要求新版本触发 `needs_install: true`。
+- 隐藏兼容入口 `native-app status --format json` 返回 `installed: true`、`installed_version: 9.9.9`、`needs_install: false`。
+- macOS 上，当 `latest_version` 高于已安装版本时，`native-app status --format json` 返回 `needs_install: true`；再次执行 `app upgrade --package <Bifrost.app> --app-dir <tmp> --source desktop --no-cli --version <version> -y` 会覆盖安装到新版本，并让 `needs_install` 变回 `false`。
+- 非 macOS 平台只验证可见 `app install --dry-run` 和隐藏 `native-app status` 的 `supported: false` / `Bifrost Native App is available only on macOS.`，不执行真实 `.app` 安装，不要求新版本触发 `needs_install: true`。
 - `app uninstall -y` 会从指定安装目录删除 `Bifrost.app`；旧 `native-app` 命令仅保留为隐藏兼容入口，不作为用户主入口展示。
 - 用例只使用临时目录，不写入 `/Applications`，不启动系统代理，不打开 Sync 登录页。
 
@@ -920,6 +920,8 @@
 - 2026-07-04：将 CLI 主入口调整为 `bifrost app install/status/uninstall`，旧 `native-app` 命令隐藏兼容；执行 `cargo test -p bifrost-cli native_app -- --nocapture` 通过；执行 `cargo test -p bifrost-cli native_app_commands_parse_under_app_namespace --test cli_commands -- --nocapture` 通过；执行 `bash e2e-tests/tests/test_macos_native_app_install.sh` 通过。
 - 2026-07-04：扩展 `bash e2e-tests/tests/test_macos_native_app_install.sh` 覆盖真实 install/update/uninstall 链路：临时安装 9.9.9、验证 10.0.0 标记 `needs_install: true`、覆盖安装 10.0.0、验证 `needs_install: false`，最后卸载成功；脚本输出 `macOS native app install/update/uninstall CLI E2E passed`。
 - 2026-07-04：修复 CI Linux shard 对 macOS 专属 `needs_install` 语义的误断言；脚本在非 macOS 平台验证 `supported: false` 后退出，在 macOS 平台继续执行覆盖安装链路。
+- 2026-07-05：跟随可见 CLI 契约把 E2E 从旧 `app install --source/--install-dir/status` 更新为 `app install --package/--app-dir`、`app upgrade --package/--app-dir` 与 `app uninstall --app-dir`；隐藏 `native-app status` 仅用于兼容状态断言。
+- 2026-07-05：修复 Linux CI 不应真实安装 `.app` 的边界；非 macOS 仅执行 dry-run 与 unsupported status 断言，macOS 才继续真实 install/update/uninstall。
 
 ### TC-MNA-31：Admin API 暴露 Native App 状态与安装入口
 
