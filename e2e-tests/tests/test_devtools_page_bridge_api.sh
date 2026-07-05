@@ -1886,7 +1886,7 @@ if (!/\/devtools\/pg_[A-Za-z0-9_%-]+/.test(adminPage.url())) {
 }
 await adminPage.getByTestId('devtools-elements-tree').waitFor({ timeout: 8000 });
 if ((await adminPage.locator('html').getAttribute('data-theme')) !== 'dark') {
-  await adminPage.getByTestId('theme-toggle').click();
+  await dispatchVisibleClick(adminPage.getByTestId('theme-toggle'), 'theme-toggle');
 }
 await adminPage.waitForFunction(() => document.documentElement.getAttribute('data-theme') === 'dark', null, { timeout: 8000 });
 const darkSurfaceColors = await adminPage.evaluate(() => {
