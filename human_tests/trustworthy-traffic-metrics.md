@@ -14,6 +14,7 @@
 - WebSocket 帧流量计入 trusted upload/download，并保留 `is_websocket` 标记。
 - SOCKS5 HTTP 入口计入 trusted upload/download，并保留 `socks5-http` 协议口径。
 - HTTPS CONNECT 隧道计入 trusted upload/download，并保留 `is_tunnel` 与 `tunnel` 协议口径。
+- 实时 QPS 与上下行速率使用固定容量时间桶，避免后台统计在高频流式流量下随事件数线性增长内存。
 
 ## 前置条件
 
@@ -153,6 +154,30 @@ BIFROST_BIN="$PWD/target/debug/bifrost" e2e-tests/tests/test_trustworthy_traffic
 
 - `host distribution uses trusted download bytes` 通过。
 - `app distribution uses trusted download bytes` 通过。
+
+### TC-TTM-10 实时统计固定容量性能回归
+
+操作步骤：
+
+1. 执行：
+
+```bash
+SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin realtime_metrics -- --nocapture
+```
+
+2. 观察 `test_realtime_metrics_use_fixed_capacity_buckets_under_high_event_volume` 和 `test_realtime_metrics_bucket_window_expires_without_residual_rates` 断言。
+3. 继续执行 TC-TTM-01 的真实链路脚本，确认桶化统计没有降低 QPS、上行、下行真实性。
+
+预期结果：
+
+- 高频写入 50,000 个实时事件后，实时统计 bucket 总数仍等于固定的 `REALTIME_BUCKET_COUNT * REALTIME_WINDOW_SHARDS`。
+- 事件窗口过期后 QPS、upload rate、download rate 均归零，不残留旧流量。
+- 真实链路脚本中的 `QPS reflects the recent mixed burst`、`upload rate reflects recent bytes`、`download rate reflects recent bytes` 继续通过。
+
+## 执行记录
+
+- 2026-07-05：执行 `SKIP_FRONTEND_BUILD=1 cargo test -p bifrost-admin realtime_metrics -- --nocapture`，3 个实时统计单测全部通过，覆盖最近窗口、过期归零、固定容量 bucket。
+- 2026-07-05：执行 `bash e2e-tests/tests/test_trustworthy_traffic_metrics.sh`，真实 HTTP、Mock、SSE、临时端口、WebSocket、SOCKS5、HTTPS CONNECT、QPS、上行/下行速率、Traffic detail 与 host/app 分布断言全部通过。
 
 ## 清理步骤
 

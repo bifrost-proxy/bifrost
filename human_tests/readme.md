@@ -132,7 +132,7 @@
 | [api-config.md](./api-config.md) | Config API | 21 | 全量配置、TLS 配置、性能配置、缓存清理、连接断开 |
 | [api-config-advanced.md](./api-config-advanced.md) | Config API（高级） | 30 | Sandbox 沙箱配置、Server 服务器配置、UI 配置、IP-TLS Pending 管理、活跃连接管理 |
 | [api-metrics.md](./api-metrics.md) | Metrics API | 15 | 当前指标、历史指标、应用统计、主机统计 |
-| [trustworthy-traffic-metrics.md](./trustworthy-traffic-metrics.md) | Trustworthy Traffic Metrics | 9 | 真实 HTTP、Mock、SSE、临时端口、WebSocket、SOCKS5、HTTPS CONNECT、QPS、上下行速率、Traffic detail 与 host/app 分布均使用可信 upload/download 字段 |
+| [trustworthy-traffic-metrics.md](./trustworthy-traffic-metrics.md) | Trustworthy Traffic Metrics | 10 | 真实 HTTP、Mock、SSE、临时端口、WebSocket、SOCKS5、HTTPS CONNECT、QPS、上下行速率、固定容量实时统计、Traffic detail 与 host/app 分布均使用可信 upload/download 字段 |
 | [api-system.md](./api-system.md) | System API | 16 | 系统信息、概览、内存诊断 |
 | [api-scripts.md](./api-scripts.md) | Scripts API | 30 | 脚本 CRUD、重命名、运行测试、名称校验、内置脚本保护 |
 | [api-push.md](./api-push.md) | Push WebSocket API | 11 | WebSocket 推送连接、订阅参数、流量/指标/概览实时推送、经代理访问管理端回归 |

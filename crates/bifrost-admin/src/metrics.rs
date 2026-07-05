@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -113,11 +113,67 @@ impl Default for CachedMetricsSnapshot {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ByteEvent {
-    timestamp: u64,
+const REALTIME_BUCKET_MS: u64 = 50;
+const REALTIME_RETENTION_MS: u64 = 10_000;
+const REALTIME_WINDOW_MS: u64 = 1_000;
+const REALTIME_BUCKET_COUNT: usize = (REALTIME_RETENTION_MS / REALTIME_BUCKET_MS) as usize + 1;
+const REALTIME_WINDOW_SHARDS: usize = 16;
+
+#[derive(Clone, Default)]
+struct RealtimeBucket {
+    start_ms: u64,
+    requests: u64,
     bytes_sent: u64,
     bytes_received: u64,
+}
+
+struct RealtimeWindow {
+    buckets: Vec<RealtimeBucket>,
+}
+
+impl RealtimeWindow {
+    fn new() -> Self {
+        Self {
+            buckets: vec![RealtimeBucket::default(); REALTIME_BUCKET_COUNT],
+        }
+    }
+
+    fn record(&mut self, now: u64, requests: u64, bytes_sent: u64, bytes_received: u64) {
+        if requests == 0 && bytes_sent == 0 && bytes_received == 0 {
+            return;
+        }
+
+        let bucket_start = now - (now % REALTIME_BUCKET_MS);
+        let index = ((bucket_start / REALTIME_BUCKET_MS) as usize) % REALTIME_BUCKET_COUNT;
+        let bucket = &mut self.buckets[index];
+        if bucket.start_ms != bucket_start {
+            *bucket = RealtimeBucket {
+                start_ms: bucket_start,
+                ..RealtimeBucket::default()
+            };
+        }
+
+        bucket.requests = bucket.requests.saturating_add(requests);
+        bucket.bytes_sent = bucket.bytes_sent.saturating_add(bytes_sent);
+        bucket.bytes_received = bucket.bytes_received.saturating_add(bytes_received);
+    }
+
+    fn rates(&self, now: u64) -> (u64, u64, u64) {
+        let cutoff = now.saturating_sub(REALTIME_WINDOW_MS);
+        self.buckets
+            .iter()
+            .filter(|bucket| {
+                bucket.start_ms <= now
+                    && bucket.start_ms.saturating_add(REALTIME_BUCKET_MS) > cutoff
+            })
+            .fold((0u64, 0u64, 0u64), |(requests, sent, received), bucket| {
+                (
+                    requests.saturating_add(bucket.requests),
+                    sent.saturating_add(bucket.bytes_sent),
+                    received.saturating_add(bucket.bytes_received),
+                )
+            })
+    }
 }
 
 pub struct MetricsCollector {
@@ -140,8 +196,8 @@ pub struct MetricsCollector {
     client_process_policy_unknown_decisions: AtomicU64,
     cached_cpu: CachedCpuMetrics,
     cached_snapshot: CachedMetricsSnapshot,
-    request_events: Mutex<VecDeque<u64>>,
-    byte_events: Mutex<VecDeque<ByteEvent>>,
+    realtime_shard_cursor: AtomicUsize,
+    realtime_windows: [Mutex<RealtimeWindow>; REALTIME_WINDOW_SHARDS],
     http: TrafficTypeCounters,
     https: TrafficTypeCounters,
     tunnel: TrafficTypeCounters,
@@ -180,8 +236,8 @@ impl MetricsCollector {
                 ..Default::default()
             },
             cached_snapshot: CachedMetricsSnapshot::default(),
-            request_events: Mutex::new(VecDeque::new()),
-            byte_events: Mutex::new(VecDeque::new()),
+            realtime_shard_cursor: AtomicUsize::new(0),
+            realtime_windows: std::array::from_fn(|_| Mutex::new(RealtimeWindow::new())),
             http: TrafficTypeCounters::new(),
             https: TrafficTypeCounters::new(),
             tunnel: TrafficTypeCounters::new(),
@@ -213,7 +269,7 @@ impl MetricsCollector {
 
     pub fn increment_requests(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
-        self.record_request_event();
+        self.record_realtime(1, 0, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -222,7 +278,7 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .requests
             .fetch_add(1, Ordering::Relaxed);
-        self.record_request_event();
+        self.record_realtime(1, 0, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -254,7 +310,7 @@ impl MetricsCollector {
 
     pub fn add_bytes_sent(&self, bytes: u64) {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
-        self.record_byte_event(bytes, 0);
+        self.record_realtime(0, bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -263,13 +319,13 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_sent
             .fetch_add(bytes, Ordering::Relaxed);
-        self.record_byte_event(bytes, 0);
+        self.record_realtime(0, bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
     pub fn add_bytes_received(&self, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
-        self.record_byte_event(0, bytes);
+        self.record_realtime(0, 0, bytes);
         self.invalidate_cached_snapshot();
     }
 
@@ -278,7 +334,7 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_received
             .fetch_add(bytes, Ordering::Relaxed);
-        self.record_byte_event(0, bytes);
+        self.record_realtime(0, 0, bytes);
         self.invalidate_cached_snapshot();
     }
 
@@ -286,54 +342,35 @@ impl MetricsCollector {
         chrono::Utc::now().timestamp_millis() as u64
     }
 
-    fn record_request_event(&self) {
+    fn record_realtime(&self, requests: u64, bytes_sent: u64, bytes_received: u64) {
         let now = Self::now_ms();
-        let mut events = self.request_events.lock();
-        events.push_back(now);
-        prune_u64_events(&mut events, now, 10_000);
+        self.record_realtime_at(now, requests, bytes_sent, bytes_received);
     }
 
-    fn record_byte_event(&self, bytes_sent: u64, bytes_received: u64) {
-        if bytes_sent == 0 && bytes_received == 0 {
-            return;
-        }
-        let now = Self::now_ms();
-        let mut events = self.byte_events.lock();
-        events.push_back(ByteEvent {
-            timestamp: now,
-            bytes_sent,
-            bytes_received,
-        });
-        prune_byte_events(&mut events, now, 10_000);
+    fn record_realtime_at(&self, now: u64, requests: u64, bytes_sent: u64, bytes_received: u64) {
+        let shard =
+            self.realtime_shard_cursor.fetch_add(1, Ordering::Relaxed) % REALTIME_WINDOW_SHARDS;
+        self.realtime_windows[shard]
+            .lock()
+            .record(now, requests, bytes_sent, bytes_received);
     }
 
     fn realtime_window_rates(&self, now: u64) -> (f32, f32, f32) {
-        let window_ms = 1_000;
-        let window_secs = window_ms as f32 / 1000.0;
-        let cutoff = now.saturating_sub(window_ms);
-
-        let request_count = {
-            let mut events = self.request_events.lock();
-            prune_u64_events(&mut events, now, 10_000);
-            events.iter().filter(|&&ts| ts >= cutoff).count() as f32
-        };
-
-        let (bytes_sent, bytes_received) = {
-            let mut events = self.byte_events.lock();
-            prune_byte_events(&mut events, now, 10_000);
-            events
-                .iter()
-                .filter(|event| event.timestamp >= cutoff)
-                .fold((0u64, 0u64), |(sent, received), event| {
-                    (
-                        sent.saturating_add(event.bytes_sent),
-                        received.saturating_add(event.bytes_received),
-                    )
-                })
-        };
+        let window_secs = REALTIME_WINDOW_MS as f32 / 1000.0;
+        let (request_count, bytes_sent, bytes_received) = self
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().rates(now))
+            .fold((0u64, 0u64, 0u64), |(requests, sent, received), current| {
+                (
+                    requests.saturating_add(current.0),
+                    sent.saturating_add(current.1),
+                    received.saturating_add(current.2),
+                )
+            });
 
         (
-            request_count / window_secs,
+            request_count as f32 / window_secs,
             bytes_sent as f32 / window_secs,
             bytes_received as f32 / window_secs,
         )
@@ -512,20 +549,6 @@ impl MetricsCollector {
 
     pub fn get_active_connections(&self) -> u64 {
         self.active_connections.load(Ordering::Relaxed)
-    }
-}
-
-fn prune_u64_events(events: &mut VecDeque<u64>, now: u64, retention_ms: u64) {
-    let cutoff = now.saturating_sub(retention_ms);
-    while events.front().is_some_and(|timestamp| *timestamp < cutoff) {
-        events.pop_front();
-    }
-}
-
-fn prune_byte_events(events: &mut VecDeque<ByteEvent>, now: u64, retention_ms: u64) {
-    let cutoff = now.saturating_sub(retention_ms);
-    while events.front().is_some_and(|event| event.timestamp < cutoff) {
-        events.pop_front();
     }
 }
 
@@ -760,6 +783,53 @@ mod tests {
         assert_eq!(expired.qps, 0.0);
         assert_eq!(expired.bytes_sent_rate, 0.0);
         assert_eq!(expired.bytes_received_rate, 0.0);
+    }
+
+    #[test]
+    fn test_realtime_metrics_bucket_window_expires_without_residual_rates() {
+        let collector = MetricsCollector::new(10);
+        let base = 60_000;
+
+        for i in 0..10_000 {
+            collector.record_realtime_at(base + (i % 20), 1, 2, 3);
+        }
+
+        let (qps, upload_rate, download_rate) = collector.realtime_window_rates(base + 500);
+        assert_eq!(qps, 10_000.0);
+        assert_eq!(upload_rate, 20_000.0);
+        assert_eq!(download_rate, 30_000.0);
+
+        let expired_at = base + REALTIME_WINDOW_MS + REALTIME_BUCKET_MS + 1;
+        let (expired_qps, expired_upload, expired_download) =
+            collector.realtime_window_rates(expired_at);
+        assert_eq!(expired_qps, 0.0);
+        assert_eq!(expired_upload, 0.0);
+        assert_eq!(expired_download, 0.0);
+    }
+
+    #[test]
+    fn test_realtime_metrics_use_fixed_capacity_buckets_under_high_event_volume() {
+        let collector = MetricsCollector::new(10);
+        let initial_bucket_count: usize = collector
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().buckets.len())
+            .sum();
+
+        for i in 0..50_000 {
+            collector.record_realtime_at(120_000 + i, 1, 64, 128);
+        }
+
+        let final_bucket_count: usize = collector
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().buckets.len())
+            .sum();
+        assert_eq!(
+            initial_bucket_count,
+            REALTIME_BUCKET_COUNT * REALTIME_WINDOW_SHARDS
+        );
+        assert_eq!(final_bucket_count, initial_bucket_count);
     }
 
     #[test]
