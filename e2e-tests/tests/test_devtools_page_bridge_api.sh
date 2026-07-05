@@ -721,6 +721,19 @@ async function dispatchVisibleClick(locator, label, timeout = 8000) {
   }, label);
 }
 
+async function dispatchVisibleHover(locator, label, timeout = 8000) {
+  const target = locator.first();
+  await target.waitFor({ state: 'visible', timeout });
+  await target.evaluate((node, hoverLabel) => {
+    const hoverTarget = node instanceof HTMLElement
+      ? node
+      : node.closest?.('[data-testid], button, a, [role="button"]') || node;
+    hoverTarget.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+    hoverTarget.dispatchEvent(new MouseEvent('mouseenter', { bubbles: false, cancelable: true, view: window }));
+    hoverTarget.setAttribute?.('data-bifrost-e2e-last-hover', hoverLabel);
+  }, label);
+}
+
 async function closeOpenAntModals(page, label) {
   await page.keyboard.press('Escape').catch(() => {});
   await page.evaluate((closeLabel) => {
@@ -1942,8 +1955,8 @@ await adminPage.getByTestId('devtools-traffic-link').waitFor({ timeout: 8000 });
 if (await adminPage.getByText('Adapter', { exact: true }).count()) {
   throw new Error('AV-CDP-29 failed: detail summary info strip should be removed');
 }
-await adminPage.getByTestId('devtools-target-url').hover();
-await adminPage.getByTestId('devtools-copy-url').click();
+await dispatchVisibleHover(adminPage.getByTestId('devtools-target-url'), 'devtools-target-url');
+await dispatchVisibleClick(adminPage.getByTestId('devtools-copy-url'), 'devtools-copy-url');
 const copiedTargetUrl = await adminPage.evaluate(() => navigator.clipboard.readText());
 if (!copiedTargetUrl.includes('/basic.html?case=av-cdp-control')) {
   throw new Error(`AV-CDP-29 failed: copied target URL mismatch (${copiedTargetUrl})`);

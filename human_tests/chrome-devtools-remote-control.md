@@ -824,6 +824,21 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - Copy 点击不受 Ant Design modal wrap 或动画时序影响，不触发 Playwright pointer interception 超时。
 - 剪贴板内容与详情弹窗完整文本完全一致。
 
+### TC-CDP-44：详情页目标 URL 复制不被弹窗遮罩时序拦截
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 打开 WebUI DevTools 详情页。
+3. 在详情页顶部目标 URL 区域触发 hover 状态。
+4. 点击 `devtools-copy-url` 复制按钮并读取剪贴板。
+
+预期结果：
+
+- URL 区域 hover 后可触发复制入口。
+- Copy 点击不受 Ant Design modal wrap 或动画时序影响，不触发 Playwright pointer interception 超时。
+- 剪贴板内容包含目标页 URL，例如 `/basic.html?case=av-cdp-control`。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -867,3 +882,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-07-05：通过。根据 PR #309 CI run `28750687264` 的 macOS aarch64 shell shard 1 新失败复核 TC-CDP-06；失败点是 WebUI Network refresh 后等待 `webui-network-complete` 固定 8 秒，在 CI 慢同步窗口下偶发超时。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`、`git diff --check`、`SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`，确认只把 Network 新增记录展示与搜索后展示两处等待提升到 15 秒，仍保留后续搜索过滤、去重和详情点击断言；真实 E2E 输出 `DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-07-05：通过。根据 PR #309 CI run `28752316474` 的 macOS aarch64 shell shard 2 新失败复核 TC-CDP-20；失败点是 DevTools 详情页切换 dark theme 时，`theme-toggle` 已可见但 `ant-modal-wrap` 在点击时拦截 pointer events。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`、`rg -n "dispatchVisibleClick\\(adminPage.getByTestId\\('theme-toggle'\\)" e2e-tests/tests/test_devtools_page_bridge_api.sh`，确认主题切换复用脚本已有的可见元素 dispatch click 路径，避免 modal 遮罩/动画时序导致假超时。
 - 2026-07-05：通过。根据 PR #309 CI run `28754483687` 的 macOS aarch64 shell shard 2 新失败继续复核 TC-CDP-06；失败点仍是 `webui-network-complete` 在安全套件包装下超过 15 秒才进入 DevTools Network 面板。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`、`rg -n "waitForDevtoolsNetworkText|webui-network-complete refresh result" e2e-tests/tests/test_devtools_page_bridge_api.sh`，确认新增等待 helper 会在慢同步窗口内短等、刷新 DevTools snapshot 并保留后续搜索过滤、去重和详情点击断言。
+- 2026-07-05：通过。根据 PR #309 CI run `28755914893` 的 macOS aarch64 shell shard 1 新失败补充 TC-CDP-44；失败点是详情页目标 URL hover 已定位到 `devtools-target-url`，但 `ant-modal-wrap` 在 hover 时拦截 pointer events。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`、`rg -n "dispatchVisibleHover|devtools-copy-url" e2e-tests/tests/test_devtools_page_bridge_api.sh`，确认 URL hover 与 copy 均走脚本内 DOM dispatch 路径，避免 modal 遮罩/动画时序导致假超时。
