@@ -807,6 +807,22 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - `nested:` 属性行缩进在对象摘要下方，对象展开树仍保持对齐。
 - 剪贴板 raw 内容包含 `bifrost-console-object-ready` 与 `"nested"`。
 
+### TC-CDP-43：Elements 详情弹窗复制按钮不被弹窗遮罩时序拦截
+
+操作步骤：
+
+1. 启动 `e2e-tests/tests/test_devtools_page_bridge_api.sh`。
+2. 打开 WebUI DevTools 详情页并切换到 `Elements` tab。
+3. 点击包含超过 120 字符内容的 Elements 详情入口。
+4. 等待 `devtools-elements-detail-value` 展示完整内容。
+5. 点击 `devtools-elements-detail-copy` 复制按钮并读取剪贴板。
+
+预期结果：
+
+- 详情弹窗展示完整长文本，不只展示 120 字符预览。
+- Copy 点击不受 Ant Design modal wrap 或动画时序影响，不触发 Playwright pointer interception 超时。
+- 剪贴板内容与详情弹窗完整文本完全一致。
+
 ## 清理步骤
 
 - 停止临时 Bifrost 进程。
@@ -846,3 +862,4 @@ source ~/.zshrc && e2e-tests/tests/test_devtools_page_bridge_api.sh
 - 2026-05-01：通过。根据 CI #829 macOS aarch64 shell shard 3 新失败补充 TC-CDP-41，验证点击动态标签资源 Network 行时，WebUI 会短暂等待 `client_req_id -> traffic id` 映射落库，不因 page bridge network 事件先到而概率性固定为 fallback 详情。执行命令：`source ~/.zshrc && bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-06：通过。根据 CI `25391191157` macOS aarch64 shell shard 3 的 Console 对象展开一次性等待超时，补充并执行 TC-CDP-42。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`；随后执行 `pnpm --dir web install --frozen-lockfile`、`pnpm --dir web run build`、`cargo build --release --bin bifrost` 和 `SKIP_BUILD=true bash e2e-tests/tests/test_devtools_page_bridge_api.sh`。输出：`DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。
 - 2026-05-06：通过。根据 CI `25393907946` macOS aarch64 shell shard 3 的 Network `TrafficDetail` 等待超时，复核并执行 TC-CDP-41 / TC-CDP-30。执行命令：`pnpm --dir web run build`、`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`，并确认 `findTrafficForDevtoolsRequestWithRetry` 的等待窗口扩展到 40 次 * 250ms；脚本中两处 `devtools-network-detail -> traffic-detail` 和两处 fallback detail 等待提升到 15000ms，覆盖慢映射与最终 fallback 两条路径。
+- 2026-07-05：通过。根据 PR #309 CI run `28748686775` 的 macOS aarch64 shell shard 1 失败补充 TC-CDP-43；失败根因是 `devtools-elements-detail-copy` 已定位到按钮，但 `ant-modal-wrap` 在点击时拦截 pointer events。执行命令：`bash -n e2e-tests/tests/test_devtools_page_bridge_api.sh`、`rg -n "dispatchVisibleClick\\(adminPage.getByTestId\\('devtools-elements-detail-copy'\\)" e2e-tests/tests/test_devtools_page_bridge_api.sh`、`bash e2e-tests/tests/test_devtools_page_bridge_api.sh`，确认详情弹窗复制按钮改用脚本已有的可见元素 dispatch click 路径，避免 modal 遮罩/动画时序导致假超时；真实 E2E 输出 `DevTools custom bridge E2E passed: WS-only page bridge, lightweight WebUI session snapshot refresh, elements/network/storage/console, Traffic-style network table with inline detail, structured console object expansion/copy, UI search/layout, page switching, reload recovery, and Chrome frontend cleanup passed`。

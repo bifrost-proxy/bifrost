@@ -1967,7 +1967,7 @@ const detailText = await adminPage.getByTestId('devtools-elements-detail-value')
 if (!detailText || detailText.length <= 120) {
   throw new Error(`AV-CDP-33 failed: Elements detail modal should show full long value (${detailText})`);
 }
-await adminPage.getByTestId('devtools-elements-detail-copy').click();
+await dispatchVisibleClick(adminPage.getByTestId('devtools-elements-detail-copy'), 'elements-detail-copy');
 const copiedElementDetail = await adminPage.evaluate(() => navigator.clipboard.readText());
 if (copiedElementDetail !== detailText) {
   throw new Error('AV-CDP-33 failed: Elements detail copy should write the full detail value to clipboard');
