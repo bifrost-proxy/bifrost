@@ -803,7 +803,7 @@ struct GroupsView: View {
                         alignment: .leading,
                         spacing: 8
                     ) {
-                        ForEach(members.prefix(12)) { member in
+                        ForEach(members) { member in
                             GroupMemberRow(
                                 member: member,
                                 currentUserID: appModel.syncStatus?.user?.userID,
@@ -820,11 +820,19 @@ struct GroupsView: View {
                             )
                         }
                     }
-                    if let total = model.selectedGroupMembers?.total, total > members.count {
-                        Text("还有 \(total - members.count) 位成员，可后续继续分页查看。")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.secondary)
-                    }
+                    GroupMemberPaginationControl(
+                        page: model.membersPage,
+                        totalPages: model.membersTotalPages,
+                        total: model.membersTotal,
+                        pageSize: model.membersPageSize,
+                        isLoading: model.isLoadingMembers,
+                        onPrevious: {
+                            Task { await model.goToMembersPage(model.membersPage - 1) }
+                        },
+                        onNext: {
+                            Task { await model.goToMembersPage(model.membersPage + 1) }
+                        }
+                    )
                 } else {
                     Text("暂无成员信息")
                         .font(.system(size: 12))
@@ -963,6 +971,9 @@ private final class GroupsViewModel: ObservableObject {
     @Published var isSaving = false
     @Published var errorMessage: String?
 
+    let membersPageSize = 12
+    @Published private(set) var membersPage = 1
+
     private var baseURL: URL?
     private var client: BifrostClient?
     private var searchTask: Task<Void, Never>?
@@ -991,6 +1002,14 @@ private final class GroupsViewModel: ObservableObject {
             return visibleGroups.first
         }
         return visibleGroups.first { $0.id == selectedGroupID }
+    }
+
+    var membersTotal: Int {
+        selectedGroupMembers?.total ?? 0
+    }
+
+    var membersTotalPages: Int {
+        max(1, Int(ceil(Double(membersTotal) / Double(membersPageSize))))
     }
 
     func configure(baseURL: URL) async {
@@ -1088,6 +1107,9 @@ private final class GroupsViewModel: ObservableObject {
         guard selectedGroupID != groupID || selectedGroupRules == nil || selectedGroupMembers == nil else {
             return
         }
+        if selectedGroupID != groupID {
+            membersPage = 1
+        }
         selectedGroupID = groupID
         await loadGroupDetail(groupID: groupID)
     }
@@ -1171,7 +1193,7 @@ private final class GroupsViewModel: ObservableObject {
         defer { isSaving = false }
         do {
             try await client.inviteGroupMember(groupID: groupID, userID: userID, level: level)
-            await loadMembers(groupID: groupID)
+            await loadMembers(groupID: groupID, page: membersPage)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -1186,7 +1208,7 @@ private final class GroupsViewModel: ObservableObject {
         defer { isSaving = false }
         do {
             try await client.updateGroupMemberLevel(groupID: groupID, userID: userID, level: level)
-            await loadMembers(groupID: groupID)
+            await loadMembers(groupID: groupID, page: membersPage)
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
@@ -1201,11 +1223,25 @@ private final class GroupsViewModel: ObservableObject {
         defer { isSaving = false }
         do {
             try await client.removeGroupMember(groupID: groupID, userID: userID)
-            await loadMembers(groupID: groupID)
+            await loadMembers(groupID: groupID, page: membersPage)
+            if selectedGroupMembers?.list.isEmpty == true, membersPage > 1 {
+                await loadMembers(groupID: groupID, page: membersPage - 1)
+            }
             errorMessage = nil
         } catch {
             errorMessage = error.localizedDescription
         }
+    }
+
+    func goToMembersPage(_ page: Int) async {
+        guard let groupID = selectedGroupID else {
+            return
+        }
+        let clampedPage = min(max(1, page), membersTotalPages)
+        guard clampedPage != membersPage else {
+            return
+        }
+        await loadMembers(groupID: groupID, page: clampedPage)
     }
 
     private func loadGroupDetail(groupID: String) async {
@@ -1220,7 +1256,7 @@ private final class GroupsViewModel: ObservableObject {
         }
         do {
             async let rulesResult = client.fetchGroupRules(groupID: groupID)
-            async let membersResult = client.fetchGroupMembers(id: groupID, limit: 60)
+            async let membersResult = client.fetchGroupMembers(id: groupID, limit: membersPageSize)
             selectedGroupRules = try await rulesResult
             selectedGroupMembers = try await membersResult
             errorMessage = nil
@@ -1231,19 +1267,76 @@ private final class GroupsViewModel: ObservableObject {
         }
     }
 
-    private func loadMembers(groupID: String) async {
+    private func loadMembers(groupID: String, page: Int) async {
         guard let client else {
             return
         }
+        let nextPage = max(1, page)
         isLoadingMembers = true
         defer { isLoadingMembers = false }
         do {
-            selectedGroupMembers = try await client.fetchGroupMembers(id: groupID, limit: 60)
+            let response = try await client.fetchGroupMembers(
+                id: groupID,
+                offset: (nextPage - 1) * membersPageSize,
+                limit: membersPageSize
+            )
+            selectedGroupMembers = response
+            membersPage = min(nextPage, max(1, Int(ceil(Double(response.total) / Double(membersPageSize)))))
             errorMessage = nil
         } catch {
             selectedGroupMembers = nil
             errorMessage = error.localizedDescription
         }
+    }
+}
+
+private struct GroupMemberPaginationControl: View {
+    let page: Int
+    let totalPages: Int
+    let total: Int
+    let pageSize: Int
+    let isLoading: Bool
+    let onPrevious: () -> Void
+    let onNext: () -> Void
+
+    private var pageStart: Int {
+        total == 0 ? 0 : (page - 1) * pageSize + 1
+    }
+
+    private var pageEnd: Int {
+        min(total, page * pageSize)
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text("第 \(page) / \(totalPages) 页")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text("\(pageStart)-\(pageEnd) / \(total) 位")
+                .font(.system(size: 11))
+                .foregroundStyle(.tertiary)
+            Spacer(minLength: 12)
+            HStack(spacing: 4) {
+                Button(action: onPrevious) {
+                    Image(systemName: "chevron.left")
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help("上一页")
+                .disabled(isLoading || page <= 1)
+
+                Button(action: onNext) {
+                    Image(systemName: "chevron.right")
+                        .frame(width: 20, height: 20)
+                }
+                .buttonStyle(.borderless)
+                .help("下一页")
+                .disabled(isLoading || page >= totalPages)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(AppSurface.subtleFill.opacity(0.75), in: RoundedRectangle(cornerRadius: 7))
     }
 }
 

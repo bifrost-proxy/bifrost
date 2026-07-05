@@ -1,7 +1,6 @@
 import AppKit
 import BifrostNativeCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct RulesView: View {
     @EnvironmentObject private var appModel: AppModel
@@ -14,7 +13,6 @@ struct RulesView: View {
     @State private var inlineRenameRuleName: String?
     @State private var inlineRenameDraft = ""
     @State private var isCommittingInlineRename = false
-    @State private var draggingRuleName: String?
     @State private var groupPickerVisible = false
     @State private var groupSearchText = ""
     @State private var groupSearchResults: [RuleGroup]?
@@ -133,9 +131,11 @@ struct RulesView: View {
                 RulesEmptyStateView(title: appModel.rules.isEmpty ? "No rules" : "No matching rules")
             } else {
                 ScrollView {
-                    LazyVStack(spacing: 0) {
+                    LazyVStack(alignment: .leading, spacing: 10) {
                         ruleRows
                     }
+                    .padding(.horizontal, 12)
+                    .padding(.bottom, 12)
                 }
             }
         }
@@ -152,15 +152,16 @@ struct RulesView: View {
         let ruleName = rule.name
         let isDefault = appModel.isDefaultRule(ruleName)
         let isReadOnly = !appModel.canEditCurrentRuleScope
-        RuleRow(
+        let moveState = ruleMoveState(for: rule)
+        RuleListRow(
             rule: rule,
             isSelected: appModel.selectedRuleName == ruleName,
             isBusy: appModel.isSavingRule,
             isProtected: isDefault || isReadOnly,
             protectedHelp: isDefault ? "Default rule is fixed and always enabled" : "Current rule list is read-only",
             canToggle: !isDefault && !isReadOnly && rule.canDisable != false,
-            canReorder: !isFiltering && appModel.canReorderRule(rule),
-            isDragging: draggingRuleName == ruleName
+            canMoveUp: moveState.canMoveUp,
+            canMoveDown: moveState.canMoveDown
         ) {
             Task { await appModel.selectRule(ruleName) }
         } toggle: { enabled in
@@ -168,23 +169,45 @@ struct RulesView: View {
                 await appModel.selectRule(ruleName)
                 await appModel.setSelectedRuleEnabled(enabled)
             }
-        } onStartDrag: {
-            draggingRuleName = ruleName
+        } moveUp: {
+            moveRule(rule, direction: .up)
+        } moveDown: {
+            moveRule(rule, direction: .down)
         }
-        .onDrop(of: [.plainText], isTargeted: nil) { _, location in
-            guard let draggingRuleName,
-                  !isFiltering,
-                  draggingRuleName != ruleName else {
-                self.draggingRuleName = nil
-                return false
-            }
-            appModel.moveRule(
-                named: draggingRuleName,
-                relativeTo: ruleName,
-                placement: location.y > 25 ? .after : .before
-            )
-            self.draggingRuleName = nil
-            return true
+    }
+
+    private enum RuleMoveDirection {
+        case up
+        case down
+    }
+
+    private func ruleMoveState(for rule: RuleSummary) -> (canMoveUp: Bool, canMoveDown: Bool) {
+        guard !isFiltering,
+              appModel.canReorderRule(rule),
+              let index = appModel.sortedRules.firstIndex(where: { $0.name == rule.name }) else {
+            return (false, false)
+        }
+        let previousRule = index > 0 ? appModel.sortedRules[index - 1] : nil
+        let nextRule = index + 1 < appModel.sortedRules.count ? appModel.sortedRules[index + 1] : nil
+        return (
+            previousRule.map(appModel.canReorderRule) == true,
+            nextRule.map(appModel.canReorderRule) == true
+        )
+    }
+
+    private func moveRule(_ rule: RuleSummary, direction: RuleMoveDirection) {
+        guard !isFiltering,
+              let index = appModel.sortedRules.firstIndex(where: { $0.name == rule.name }) else {
+            return
+        }
+
+        switch direction {
+        case .up:
+            guard index > 0 else { return }
+            appModel.moveRule(named: rule.name, relativeTo: appModel.sortedRules[index - 1].name, placement: .before)
+        case .down:
+            guard index + 1 < appModel.sortedRules.count else { return }
+            appModel.moveRule(named: rule.name, relativeTo: appModel.sortedRules[index + 1].name, placement: .after)
         }
     }
 
@@ -598,159 +621,76 @@ struct RulesView: View {
     }
 }
 
-private struct RuleRow: View {
+private struct RuleListRow: View {
     let rule: RuleSummary
     let isSelected: Bool
     let isBusy: Bool
     let isProtected: Bool
     let protectedHelp: String
     let canToggle: Bool
-    let canReorder: Bool
-    let isDragging: Bool
+    let canMoveUp: Bool
+    let canMoveDown: Bool
     let action: () -> Void
     let toggle: (Bool) -> Void
-    let onStartDrag: () -> Void
+    let moveUp: () -> Void
+    let moveDown: () -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            Circle()
-                .fill(rule.enabled ? Color.green : Color.secondary.opacity(0.35))
-                .frame(width: 7, height: 7)
-            VStack(alignment: .leading, spacing: 3) {
-                Text(rule.name)
-                    .font(.system(size: 12, weight: .semibold))
-                    .lineLimit(1)
-                Text("\(rule.ruleCount ?? 0) entries")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+        Button(action: action) {
+            HStack(spacing: 9) {
+                Circle()
+                    .fill(rule.enabled ? Color.green : Color.secondary.opacity(0.35))
+                    .frame(width: 7, height: 7)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(rule.name)
+                        .font(.system(size: 13, weight: .semibold))
+                        .lineLimit(1)
+                    Text("\(rule.ruleCount ?? 0) entries")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 8)
+                if isProtected {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                        .help(protectedHelp)
+                } else {
+                    Text(rule.enabled ? "Enabled" : "Disabled")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(rule.enabled ? Color.green : Color.secondary)
+                        .padding(.horizontal, 7)
+                        .padding(.vertical, 3)
+                        .background(
+                            (rule.enabled ? Color.green : Color.secondary).opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        )
+                }
             }
-            Spacer()
-            if isProtected {
-                Image(systemName: "lock.fill")
-                    .font(.system(size: 11, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 48, alignment: .center)
-                    .help(protectedHelp)
-            } else {
-                Toggle("", isOn: Binding(
-                    get: { rule.enabled },
-                    set: toggle
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .scaleEffect(0.72)
-                .disabled(isBusy || !canToggle)
-            }
-            dragHandle
-        }
-        .padding(.horizontal, 12)
-        .frame(height: 50)
-        .background(
-            isSelected ? AppSurface.sidebarSelection : Color.clear,
-            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-        )
-        .opacity(isDragging ? 0.55 : 1)
-        .contentShape(Rectangle())
-        .onTapGesture(perform: action)
-    }
-
-    @ViewBuilder
-    private var dragHandle: some View {
-        if canReorder {
-            ZStack {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(.tertiary)
-                RuleDragHandleView(ruleName: rule.name, onStartDrag: onStartDrag)
-            }
-            .frame(width: 24, height: 34)
             .contentShape(Rectangle())
-            .help("Drag to reorder")
-        } else {
-            Color.clear
-                .frame(width: 24, height: 34)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 8)
+            .background(
+                isSelected ? AppSurface.subtleFill : Color.clear,
+                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+            )
         }
-    }
-}
-
-private struct RuleDragHandleView: NSViewRepresentable {
-    let ruleName: String
-    let onStartDrag: () -> Void
-
-    func makeNSView(context: Context) -> RuleDragHandleNSView {
-        let view = RuleDragHandleNSView(frame: .zero)
-        view.ruleName = ruleName
-        view.onStartDrag = onStartDrag
-        return view
-    }
-
-    func updateNSView(_ nsView: RuleDragHandleNSView, context: Context) {
-        nsView.ruleName = ruleName
-        nsView.onStartDrag = onStartDrag
-    }
-}
-
-private final class RuleDragHandleNSView: NSView, NSDraggingSource {
-    var ruleName = ""
-    var onStartDrag: (() -> Void)?
-
-    override var mouseDownCanMoveWindow: Bool {
-        false
-    }
-
-    override var acceptsFirstResponder: Bool {
-        true
-    }
-
-    override init(frame frameRect: NSRect) {
-        super.init(frame: frameRect)
-        wantsLayer = true
-        layer?.backgroundColor = NSColor.clear.cgColor
-    }
-
-    required init?(coder: NSCoder) {
-        nil
-    }
-
-    override func acceptsFirstMouse(for event: NSEvent?) -> Bool {
-        true
-    }
-
-    override func hitTest(_ point: NSPoint) -> NSView? {
-        bounds.contains(point) ? self : nil
-    }
-
-    override func mouseDown(with event: NSEvent) {
-        guard !ruleName.isEmpty else {
-            return
+        .buttonStyle(.plain)
+        .contextMenu {
+            Button("Move Up") {
+                moveUp()
+            }
+            .disabled(!canMoveUp || isBusy)
+            Button("Move Down") {
+                moveDown()
+            }
+            .disabled(!canMoveDown || isBusy)
+            Divider()
+            Button(rule.enabled ? "Disable" : "Enable") {
+                toggle(!rule.enabled)
+            }
+            .disabled(isProtected || isBusy || !canToggle)
         }
-        onStartDrag?()
-        let draggingItem = NSDraggingItem(pasteboardWriter: ruleName as NSString)
-        draggingItem.setDraggingFrame(bounds, contents: draggingImage())
-        beginDraggingSession(with: [draggingItem], event: event, source: self)
-    }
-
-    func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation {
-        .move
-    }
-
-    func ignoreModifierKeys(for session: NSDraggingSession) -> Bool {
-        true
-    }
-
-    private func draggingImage() -> NSImage {
-        let size = bounds.size == .zero ? NSSize(width: 24, height: 34) : bounds.size
-        let image = NSImage(size: size)
-        image.lockFocus()
-        NSColor.clear.setFill()
-        NSRect(origin: .zero, size: size).fill()
-        if let symbol = NSImage(systemSymbolName: "line.3.horizontal", accessibilityDescription: nil) {
-            symbol.size = NSSize(width: 13, height: 13)
-            let origin = NSPoint(x: (size.width - symbol.size.width) / 2, y: (size.height - symbol.size.height) / 2)
-            symbol.draw(at: origin, from: .zero, operation: .sourceOver, fraction: 0.65)
-        }
-        image.unlockFocus()
-        return image
     }
 }
 

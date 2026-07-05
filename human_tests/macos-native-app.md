@@ -1083,9 +1083,9 @@
    swift run --package-path apps/macos BifrostNativeCoreChecks
    swift build --package-path apps/macos
    ```
-2. 检查 Default 规则保护、拖拽排序、自动保存和 Rules 顶部按钮：
+2. 检查 Default 规则保护、context menu 排序、自动保存和 Rules 顶部按钮：
    ```bash
-   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); main=File.read("apps/macos/Sources/Bifrost/App/MainWindowScene.swift"); chrome=File.read("apps/macos/Sources/Bifrost/App/NativeSurface.swift")+File.read("apps/macos/Sources/Bifrost/App/Sidebar.swift")+File.read("apps/macos/Sources/Bifrost/App/BifrostApp.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); text=[app,main,chrome,rules,dash].join("\n"); required=["isDefaultRule","canReorderRule","moveRule(","reorderRules","autosaveSelectedRule","RuleAutoSaveState","autoSaveStatusText","onSave","window.isMovable = false","window.isMovableByWindowBackground = false","let wasMovable = window.isMovable","window.isMovable = true","window.isMovable = wasMovable","struct WindowDragRegion","BifrostDragControlledWindow","override func performDrag(with event: NSEvent)","performExplicitDrag(from: self, event: event)","isExplicitDragAllowed(for: self)","object_setClass(window, BifrostDragControlledWindow.self)","acceptsFirstMouse(for event: NSEvent?) -> Bool","hitTest(_ point: NSPoint) -> NSView?","mouseDownCanMoveWindow: Bool {\n            false","RuleDragHandleView","RuleDragHandleNSView","mouseDownCanMoveWindow: Bool {\n        false","beginDraggingSession","NSDraggingItem(pasteboardWriter: ruleName as NSString)","onDrop"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing native rules interaction markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["List.onMove","RuleListResizeHandle","DragGesture(minimumDistance: 0)",".onDrag {","mouseDownCanMoveWindow: Bool {\n            true"]; found=forbidden.select{|needle| rules.include?(needle) || main.include?(needle)}; abort("forbidden rules drag/resize markers remain: #{found.join(", ")}") unless found.empty?; abort("overview manual refresh controls returned") if dash.include?("Button(\"刷新\"") || dash.include?("刷新设备") || dash.include?("重新生成 QR"); puts "macOS native rules drag reorder contract ok"'
+   ruby -e 'app=File.read("apps/macos/Sources/Bifrost/App/AppModel.swift"); rules=File.read("apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift"); dash=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); text=[app,rules,dash].join("\n"); required=["isDefaultRule","canReorderRule","moveRule(","reorderRules","autosaveSelectedRule","RuleAutoSaveState","autoSaveStatusText","onSave","RuleListRow","ruleMoveState(for:","Button(action: action)",".contextMenu","Button(\"Move Up\")","Button(\"Move Down\")"]; missing=required.reject{|needle| text.include?(needle)}; abort("missing native rules interaction markers: #{missing.join(", ")}") unless missing.empty?; forbidden=["RuleDragHandleView","RuleDragHandleNSView","NSDraggingSource","onDrop(","UniformTypeIdentifiers","Drag to reorder","line.3.horizontal","List.onMove","RuleListResizeHandle","DragGesture(minimumDistance: 0)",".onDrag {"]; found=forbidden.select{|needle| rules.include?(needle)}; abort("forbidden rules drag/resize markers remain: #{found.join(", ")}") unless found.empty?; abort("overview manual refresh controls returned") if dash.include?("Button(\"刷新\"") || dash.include?("刷新设备") || dash.include?("重新生成 QR"); puts "macOS native rules context-menu reorder contract ok"'
    ```
 3. 执行设置数据 smoke，确认移除刷新按钮后页面切入数据仍可自动获取：
    ```bash
@@ -1093,8 +1093,8 @@
    ```
 
 **预期结果：**
-- AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且拖拽排序时不能移动 Default。
-- Rules 列表对非搜索状态支持从三横线手柄显式拖拽排序，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序；主窗口默认必须设置 `isMovable = false` 且不能开启全内容背景拖动，`NSWindow.performDrag` 必须被 gate 拦截，只有左侧菜单背景和页面顶部空白背景的 `WindowDragRegion` 可以临时恢复 `isMovable` 并显式放行拖动窗口；中间内容区禁止拖动窗口；Rules 手柄必须显式声明 `mouseDownCanMoveWindow = false`。
+- AppModel 对 `Default` 规则有保护：不能禁用、不能重命名、不能删除，且排序时不能移动 Default。
+- Rules 列表使用和 `小组` 页面同源的普通 SwiftUI row，不再使用三横线手柄、`NSDraggingSource`、行内 `Menu` 或 `onDrop`；非搜索状态下通过每行 context menu 的 `Move Up` / `Move Down` 调整优先级，排序通过 `BifrostClient.reorderRules` 持久化到服务端并影响规则生效优先级；搜索状态只筛选查看，不做排序。
 - Rules 详情区没有额外 `Save` / `Revert` 按钮；编辑器输入后 debounce 自动保存，Cmd+S 触发立即保存。
 - 自动保存成功不重新 `selectRule`，避免重置编辑器光标、滚动和 undo 状态。
 - 概览页不展示通用 `刷新`、`刷新设备`、`重新生成 QR` 按钮；切到页面后仍通过自动加载展示系统代理、TLS、Remote Invoke、证书和移动端可用性数据。
@@ -1104,9 +1104,10 @@
 - 执行源码合同扫描通过，输出 `macOS native rules drag reorder contract ok`。
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行真实服务端 no-op reorder 验证通过，输出 `rules=30 reorder_noop=ok first="Default" second="NextAgent双机协作a"`，确认 `/rules/reorder` 可写且未打乱当前规则优先级。
-- 2026-07-04：按用户反馈修复 Rules 列表拖拽时事件透传给窗口移动的问题；窗口默认设置 `isMovable = false` 并关闭全窗口背景拖动 `isMovableByWindowBackground`，再用 `BifrostDragControlledWindow.performDrag` 拦截系统隐式标题栏拖动；只有 `WindowDragRegion` 会调用 `performExplicitDrag` 临时恢复 `isMovable` 并放行窗口拖动。Rules 三横线手柄改为 AppKit dragging source，显式 `mouseDownCanMoveWindow = false`、`acceptsFirstMouse = true` 和强 `hitTest`，保留行级 `onDrop` 和 `/rules/reorder` 持久化。
+- 2026-07-04：按用户反馈修复 Rules 列表拖拽时事件透传给窗口移动的问题；窗口保持 `isMovable = true`，但关闭全窗口背景拖动 `isMovableByWindowBackground`，仅 `WindowDragRegion` 使用系统 `mouseDownCanMoveWindow = true` 成为拖窗热点；内容区用 `WindowDragBlocker` 明确阻断拖窗。Rules 三横线手柄改为 AppKit dragging source，显式 `mouseDownCanMoveWindow = false`、`acceptsFirstMouse = true` 和强 `hitTest`，保留行级 `onDrop` 和 `/rules/reorder` 持久化。
 - 2026-07-04：真实启动当前分支 `.build/Bifrost.app` 后在 Rules 页面拖拽 `a` 规则手柄；窗口坐标保持 `755,165,1257,1069` 未移动，服务端顺序从 `Default | NextAgent双机协作a | NextOncall双前端本地开发 | a ...` 变为 `Default | NextAgent双机协作a | a | NextOncall双前端本地开发 ...`，确认拖拽排序生效；随后调用 `/rules/reorder` 恢复原始顺序。
 - 2026-07-05：重新按根因收敛拖拽模型，补充 `window.isMovable = false` 默认门禁和 `WindowDragRegion` 强 hit-test；执行 `swift build --package-path apps/macos`、`swift run --package-path apps/macos BifrostNativeCoreChecks`、`swift run --package-path apps/macos Bifrost --check-release-scope`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-settings-data`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-rule-editor-layout`、源码合同扫描、`git diff --check` 和 `/api/rules/reorder` no-op 写回均通过。
+- 2026-07-05：按用户要求停止修补旧拖拽实现，直接将 Rules 左侧列表重做为 `小组` 同源普通 row，移除 `RuleDragHandleView`、`RuleDragHandleNSView`、`NSDraggingSource`、行内 `Menu` 和 `onDrop`；排序入口改为 row context menu 的 `Move Up` / `Move Down`，继续调用 `AppModel.moveRule` 和 `/rules/reorder` 持久化。
 
 ### TC-MNA-38：回归 - Native 深色主题不能残留浅色底板
 
@@ -1537,6 +1538,11 @@
 6. 点击左侧列表滚动条和右侧详情滚动条，确认两栏独立滚动；左侧列表宽度固定为 Rules 同款 300px，不被右侧详情挤压。
 7. 点击左侧列表顶部 `+`，确认右侧详情 pane 原地切换为 `新建小组` 表单，而不是弹窗或跳转 WebUI。
 8. 取消后点击可写小组详情里的 `编辑`，确认右侧详情 pane 原地切换为 `编辑小组` 表单，并回填名称、描述和可见性。
+9. 选择成员数超过单页的小组，确认成员区底部展示分页组件，可点击上一页/下一页切换，且不再展示“还有 N 位成员，可后续继续分页查看”的占位提示。
+10. 执行源码合同扫描，确认小组成员列表使用服务端 `offset + limit` 分页，并保留成员角色修改、新增和删除能力：
+   ```bash
+   ruby -e 'text=File.read("apps/macos/Sources/Bifrost/Features/Dashboard/DashboardView.swift"); required=["GroupMemberPaginationControl","membersPageSize = 12","membersPage","membersTotalPages","goToMembersPage","offset: (nextPage - 1) * membersPageSize","limit: membersPageSize","updateMemberLevel(groupID:","removeMember(groupID:","inviteMember(groupID:"]; forbidden=["还有 \\\\(total - members.count) 位成员，可后续继续分页查看","members.prefix(12)"]; missing=required.reject{|needle| text.include?(needle)}; found=forbidden.select{|needle| text.include?(needle)}; abort("missing group member pagination markers: #{missing.join(", ")} forbidden=#{found.join(", ")}") unless missing.empty? && found.empty?; puts "macOS native group member pagination contract ok"'
+   ```
 
 **预期结果：**
 - `--check-release-scope` 输出 `Bifrost release scope check passed: 活动,概览,规则,抓包; groups=活动,概览,规则,抓包,小组`。
@@ -1547,6 +1553,7 @@
 - `小组` 页面必须是 SwiftUI 原生实现，不允许 WebKit 嵌入 `/_bifrost/groups`。
 - Native 通过 `/group`、`/group/{id}`、`/group/{id}/members`、`/user`、`/room` 和 `/group-rules/{groupID}` 系列 Admin API 实现小组列表、创建、编辑、删除、成员列表、成员新增、成员移除、角色修改和规则页跳转。
 - 小组详情页展示 Owner/Master/Member/Public 权限标签，公开只读的小组不可修改；Owner/Master 可在成员区新增成员、调整 Member/Master 类型、删除可管理成员；可写小组可从详情页跳转到 Rules 页面管理对应小组规则，详情页本身不展示规则摘要列表。
+- 成员列表必须使用 `/group/{id}/members?offset=...&limit=...` 同源服务端分页；底部必须是分页组件，不允许退化成“后续继续分页查看”的静态提示。
 - 小组页面布局必须和 Rules 页面一致：左侧固定宽度列表、右侧自适应详情，左右均为独立滚动区域；新建与编辑不得使用弹窗，必须在右侧 pane 原地切换为表单。
 
 **实际结果（2026-07-04）：**
@@ -1556,6 +1563,7 @@
 - 2026-07-04：将 `GroupsWebView` 替换为原生 `GroupsView`，并补齐公开小组的 setting 同步、删除小组的远端业务错误校验；执行 `swift build --package-path apps/macos` 通过；执行源码合同扫描通过，输出 `macOS native conditional native groups contract ok`。
 - 2026-07-04：将小组原生页面调整为 Rules 同款左右布局；执行 `swift build --package-path apps/macos` 通过；执行 `scripts/build-macos-native.sh --skip-sidecar --test` 通过；重启 `apps/macos/.build/Bifrost.app` 后用 Computer Use 验证小组存在左侧列表 scroll area 与右侧详情 scroll area，点击 `+` 右侧原地显示 `新建小组` 表单，点击 `编辑` 右侧原地显示 `编辑小组` 表单。
 - 2026-07-04：将菜单和页面标题统一为 `小组`；移除详情页内的小组规则摘要列表；补齐成员搜索、新增、角色修改和移除的 Native API 与交互；执行 `swift build --package-path apps/macos` 通过。
+- 2026-07-05：将小组详情成员区从“后续继续分页查看”提示改为原生分页组件，成员数据按 `offset + limit` 从服务端分页拉取；执行源码合同扫描通过，输出 `macOS native group member pagination contract ok`。
 
 ### TC-MNA-51：回归 - Rules 顶部支持 My Rules 与小组规则搜索切换
 
@@ -1586,9 +1594,9 @@
 - 同步服务未启用、未登录或未授权时，规则列表顶部不展示小组切换器，默认只展示 `My Rules`。
 - 同步服务启用且已登录授权后，规则列表顶部展示 `My Rules` 选择器，并支持搜索小组。
 - 小组列表默认包含 `My Rules`，并按权限高低排序：Owner、Master/Member、Public；每个小组右侧展示对应权限标签。
-- 选择 `My Rules` 时，规则列表使用本地 `/rules` 数据源，支持新增、编辑、启停、删除、重命名和拖拽排序。
+- 选择 `My Rules` 时，规则列表使用本地 `/rules` 数据源，支持新增、编辑、启停、删除、重命名和菜单排序。
 - 选择可写小组时，规则列表使用 `/group-rules/{groupId}` 数据源，支持新增、编辑、启停和删除组规则。
-- 选择公开只读小组时，规则内容可查看，但新增、编辑、启停、删除、重命名和拖拽排序入口均不可写。
+- 选择公开只读小组时，规则内容可查看，但新增、编辑、启停、删除、重命名和排序入口均不可写。
 - 组规则不走本地 `/rules/reorder`，避免把小组规则优先级错误保存到个人规则。
 - 切回 `My Rules` 后恢复个人规则列表，不遗留小组规则选中状态或搜索关键字。
 
@@ -1733,6 +1741,56 @@
 **实际结果（2026-07-04）：**
 - 执行 `swift build --package-path apps/macos` 通过。
 - 执行源码合同扫描通过，输出 `macOS native trust probe message normalization contract ok`。
+
+### TC-MNA-56：回归 - Rules 页面重做为 Groups 同源列表布局且不再触发窗口拖拽
+
+**操作步骤：**
+1. 执行 Swift 构建与规则编辑器布局检查：
+   ```bash
+   swift build --package-path apps/macos
+   apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-rule-editor-layout
+   ```
+2. 执行源码合同扫描，确认 Rules 页面不再包含旧的 AppKit 拖拽手柄或 drop 排序链路：
+   ```bash
+   ! rg -n 'RuleDrag|NSDraggingSource|onDrop\(|UniformTypeIdentifiers|Drag to reorder|line\.3\.horizontal' apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift
+   ```
+3. 重新生成开发用 app bundle，并确认 bundle 中没有旧拖拽文案、包含 context menu 排序文案：
+   ```bash
+   scripts/build-macos-native.sh
+   strings apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost | rg -n 'Drag to reorder|Move Up|Move Down'
+   ```
+4. 重启 Native app：
+   ```bash
+   pkill -f 'Bifrost.app/Contents/MacOS/Bifrost' || true
+   open -n apps/macos/.build/Bifrost.app --args --allow-multiple-instances
+   ```
+5. 打开 `规则` 页面，检查左侧规则列表：
+   - 列表行应是和 `小组` 页面一致的普通 SwiftUI row。
+   - 规则行展示名称、entries 和 Enabled/Disabled 胶囊。
+   - 不应再展示三横线拖拽手柄。
+   - 可访问性树中不应出现 `Drag`、`line.3.horizontal`、`Drag to reorder` 或 `menu button More`。
+6. 右键规则行打开 context menu，检查排序入口：
+   - 可排序规则提供 `Move Up` / `Move Down`。
+   - 执行排序后仍通过 `AppModel.moveRule` 保存顺序到服务端。
+
+**预期结果：**
+- `RulesView.swift` 中没有 `RuleDragHandleView`、`RuleDragHandleNSView`、`NSDraggingSource`、`onDrop` 和 `UniformTypeIdentifiers`。
+- app bundle 二进制不包含 `Drag to reorder`，包含 `Move Up` / `Move Down`。
+- 真实 Native app 中 Rules 左侧列表不再有拖拽手柄；在列表区域拖动鼠标不会进入窗口移动链路。
+- 规则优先级调整改为行 context menu 触发，继续调用原有服务端排序保存逻辑。
+- `Default` 和只读小组规则仍保持锁定；可写规则仍可从 context menu 或详情页切换 Enabled 状态。
+
+**实际结果（2026-07-05）：**
+- 执行 `swift build --package-path apps/macos` 通过。
+- 执行 `apps/macos/.build/debug/Bifrost --check-rule-editor-layout` 通过，输出 `Bifrost rule editor layout check passed`。
+- 执行 `! rg -n 'RuleDrag|NSDraggingSource|onDrop\(|UniformTypeIdentifiers|Drag to reorder|line\.3\.horizontal' apps/macos/Sources/Bifrost/Features/Rules/RulesView.swift` 通过，确认旧拖拽源码已移除。
+- 发现直接 `swift build` 不会刷新 `apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost`；随后执行 `scripts/build-macos-native.sh` 重新生成 app bundle。
+- 重新打包后，`strings apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost | rg -n 'Drag to reorder|Move Up|Move Down'` 只匹配 `Move Up` 和 `Move Down`，不再匹配 `Drag to reorder`。
+- 启动新 bundle 后，Native app 进程为 `75614 /Users/eden_studio/work/github/bifrost-macos-native-auto-update/apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --allow-multiple-instances`。
+- 使用 Computer Use 打开 `规则` 页面，真实 UI 树中规则行显示为 `button Default, 1 entries`、`button Description: Disabled`；未出现 `Drag`、`line.3.horizontal`、`Drag to reorder` 或 `menu button More`。
+- 2026-07-05 追加重做：将 Rules 行进一步收敛为和 `GroupListRow` 同构的单一 `Button(action: action)`，移除行内可见 `Menu` 和嵌套按钮；规则启停与 `Move Up` / `Move Down` 进入 row context menu，避免规则列表内的鼠标拖动落入窗口移动或旧排序拖拽路径。
+- 2026-07-05 追加重启验证：恢复 `MainWindowFallback.ensureVisible`，并去除动态替换 `NSWindow` class 的自定义窗口拖拽门禁；窗口改为不透明动态背景，避免透明标题栏露出桌面；拖窗改为 AppKit 标准 `mouseDownCanMoveWindow` 热点。执行 `swift build --package-path apps/macos`、规则/窗口源码合同扫描、`scripts/build-macos-native.sh`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-rule-editor-layout`、`swift run --package-path apps/macos BifrostNativeCoreChecks` 均通过。带 `BIFROST_NATIVE_STARTUP_TRACE=1` 启动开发 bundle 后日志显示 `fallback ensureVisible windows=1`、`window server onscreen=true`，CoreGraphics 窗口列表能看到 Bifrost 上屏窗口。
+- 2026-07-05 追加窗口热区验证：启动新 bundle 后 CoreGraphics 显示一个上屏主窗口；对顶部热点执行 80px 自动拖拽，窗口 X 从 `774` 变为 `854`；对中间内容区执行同样拖拽，窗口坐标保持 `854,317` 不变；窗口截图确认标题栏区域不再透出桌面背景。
 
 ## 清理步骤
 

@@ -36,7 +36,10 @@ struct NativePageScaffold<HeaderAccessory: View, Content: View>: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(AppSurface.content)
+        .background {
+            AppSurface.content
+            WindowDragBlocker()
+        }
     }
 
     private var pageStack: some View {
@@ -94,6 +97,8 @@ struct NativePanel<Content: View>: View {
             .background {
                 RoundedRectangle(cornerRadius: 8, style: .continuous)
                     .fill(AppSurface.card)
+                WindowDragBlocker()
+                    .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
             }
             .overlay(
                 RoundedRectangle(cornerRadius: 8, style: .continuous)

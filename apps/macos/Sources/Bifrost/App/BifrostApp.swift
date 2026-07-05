@@ -179,15 +179,15 @@ final class BifrostAppDelegate: NSObject, NSApplicationDelegate {
 
 @MainActor
 private enum MainWindowFallback {
-    private static var fallbackWindow: NSWindow?
+    private static weak var fallbackWindow: NSWindow?
 
     static func ensureVisible(appModel: AppModel) {
         traceNativeStartup("fallback ensureVisible windows=\(NSApp.windows.count)")
-        let hasOnscreenWindow = hasOnscreenWindowForCurrentProcess()
-        if hasOnscreenWindow,
-           let window = NSApp.windows.first(where: isUsableMainWindow) {
+
+        if let window = NSApp.windows.first(where: isUsableMainWindow) {
             placeWindowOnVisibleScreenIfNeeded(window)
             window.makeKeyAndOrderFront(nil)
+            closeExtraMainWindows(keeping: window)
             NSApp.activate(ignoringOtherApps: true)
             return
         }
@@ -199,32 +199,40 @@ private enum MainWindowFallback {
             return
         }
 
+        traceNativeStartup("fallback creating single NSWindow")
         let controller = NSHostingController(
             rootView: MainWindowScene()
                 .environmentObject(appModel)
         )
-        traceNativeStartup("fallback creating NSWindow")
-        let window = BifrostDragControlledWindow(contentViewController: controller)
+        let window = NSWindow(contentViewController: controller)
         window.title = ""
         window.titleVisibility = .hidden
         window.titlebarAppearsTransparent = true
+        window.isOpaque = true
+        window.backgroundColor = AppSurface.windowBackground
         window.styleMask.insert(.fullSizeContentView)
-        window.isMovable = false
+        window.isMovable = true
         window.isMovableByWindowBackground = false
-        BifrostWindowDragController.install(on: window)
         window.isReleasedWhenClosed = false
         window.setContentSize(NSSize(width: 1280, height: 820))
         window.minSize = NSSize(width: 960, height: 720)
         placeWindowOnVisibleScreenIfNeeded(window, force: true)
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
         fallbackWindow = window
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    private static func closeExtraMainWindows(keeping keptWindow: NSWindow) {
+        for window in NSApp.windows where window !== keptWindow && isUsableMainWindow(window) {
+            traceNativeStartup("fallback closing duplicate window frame=\(window.frame)")
+            window.orderOut(nil)
+            window.close()
+        }
     }
 
     private static func isUsableMainWindow(_ window: NSWindow) -> Bool {
         traceNativeStartup("window candidate visible=\(window.isVisible) mini=\(window.isMiniaturized) canMain=\(window.canBecomeMain) frame=\(window.frame)")
         guard window.canBecomeMain,
-              window.isVisible,
               !window.isMiniaturized,
               window.frame.width > 100,
               window.frame.height > 100
@@ -232,19 +240,6 @@ private enum MainWindowFallback {
             return false
         }
         return true
-    }
-
-    private static func hasOnscreenWindowForCurrentProcess() -> Bool {
-        let currentPID = ProcessInfo.processInfo.processIdentifier
-        guard let windowList = CGWindowListCopyWindowInfo([.optionOnScreenOnly], kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
-        let result = windowList.contains { windowInfo in
-            (windowInfo[kCGWindowOwnerPID as String] as? pid_t) == currentPID
-                && (windowInfo[kCGWindowLayer as String] as? Int ?? -1) == 0
-        }
-        traceNativeStartup("window server onscreen=\(result)")
-        return result
     }
 
     private static func placeWindowOnVisibleScreenIfNeeded(_ window: NSWindow, force: Bool = false) {
