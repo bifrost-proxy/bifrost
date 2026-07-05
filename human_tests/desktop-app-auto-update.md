@@ -270,7 +270,7 @@
 操作步骤：
 
 1. 在 Windows 11 桌面环境中启动当前构建的 Bifrost Desktop。
-2. 打开 Settings -> Proxy，观察窗口顶部和底部状态栏。
+2. 等待前端 ready handoff 完成，打开 Settings -> Proxy，观察窗口顶部和底部状态栏。
 3. 截图保存启动后的完整桌面窗口。
 4. 检查进程只存在 Bifrost 桌面窗口，不依赖额外原生 menu bar 提供关闭入口。
 
@@ -280,6 +280,23 @@
 - Web UI 从窗口顶部开始使用自定义桌面 chrome，不被系统标题栏向下挤压。
 - 底部状态栏完整可见，Settings 页面内容不会因为顶部系统栏占位而挤出窗口。
 - 右上角自定义最小化、最大化和关闭按钮可见并可点击。
+
+### TC-DAU-10B Windows handoff 后保持无边框自定义 chrome
+
+操作步骤：
+
+1. 在 Windows 11 桌面环境中启动当前构建的 Bifrost Desktop。
+2. 观察启动初始窗口、Bifrost core ready、前端 ready handoff 后的主界面。
+3. 在左侧侧栏导航项、OpenAPI、主题切换按钮或顶部 35px 空白区域按住鼠标拖动窗口。
+4. 切换暗色/亮色主题，分别观察顶部自定义 chrome 与页面内容间距。
+5. 截图保存 handoff 后的完整桌面窗口。
+
+预期结果：
+
+- handoff 后仍然不显示 Windows 原生标题栏，也不显示 `Bifrost / File / Edit / View / Window` 原生菜单栏。
+- 窗口不因 handoff 被系统标题栏向下挤压；底部状态栏持续完整可见。
+- 左侧侧栏和顶部 35px 区域均可作为拖拽起点，窗口移动跟随鼠标，不触发文本选择。
+- 暗色和亮色主题下顶部空白区、左侧侧栏和右上角自定义窗口按钮风格一致。
 
 ## 清理步骤
 
@@ -304,3 +321,4 @@ bifrost app uninstall
 | 2026-07-06 | TC-DAU-04C | Parallels Windows 11 ARM64 VM：先用 v0.0.139 MSI 复现 `msiexec /i <msi> /qn /norestart`，再用 `ALLUSERS=2 MSIINSTALLPERUSER=1` 验证普通用户安装 | PASS：原命令稳定复现 1603，日志显示 `Error 1925`；加 per-user MSI 属性后同一 MSI 安装成功并写入 `%LOCALAPPDATA%\Bifrost` |
 | 2026-07-06 | TC-DAU-09 | Parallels Windows 11 ARM64 VM：先复现桌面快捷方式启动后额外出现 shell 窗口；修复后构建 `target-desktop-verify/debug/bifrost-desktop.exe`，以 `BIFROST_DESKTOP_BIN=desktop/src-tauri/resources/bin/bifrost.exe` 启动并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：桌面 UI 启动后 sidecar 由桌面壳隐藏控制台启动，截图中没有独立 shell 窗口遮挡；启动验证用 `cmd start` 包装进程已清理，不属于桌面壳子进程 |
 | 2026-07-06 | TC-DAU-10 | Parallels Windows 11 ARM64 VM：`CARGO_TARGET_DIR=target-desktop-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`，启动当前构建并截图 `/tmp/bifrost-windows-custom-chrome-final.png` | PASS：窗口顶部不再显示 Windows 原生标题栏，也没有 `Bifrost / File / Edit / View / Window` 原生菜单栏；Web UI 自定义右上角最小化/最大化/关闭按钮可见，底部状态栏完整可见 |
+| 2026-07-06 | TC-DAU-10B | Parallels Windows 11 ARM64 VM：将当前 diff 应用到 `C:\Users\eden_studio\work\github\bifrost`，执行 `CARGO_TARGET_DIR=target-desktop-chrome-verify cargo build --manifest-path desktop/src-tauri/Cargo.toml`；通过交互计划任务启动 `target-desktop-chrome-verify\debug\bifrost-desktop.exe`，`desktop-bootstrap.log` 显示 `embedded webview page load event Finished`、`desktop backend bootstrap finished`；截图 `/Users/eden_studio/Downloads/bifrost-windows-chrome-hidden-20260706.png` 与 `/Users/eden_studio/Downloads/bifrost-windows-chrome-resized-20260706.png` | PASS：frontend ready handoff 后仍未出现 Windows 原生标题栏和 `Bifrost / File / Edit / View / Window` 菜单栏，Web UI 未被系统 chrome 向下挤压；当前 VM 可视区高度不足以在同一张截图里完整纳入底部状态栏，但回归根因的 Windows handoff decorations 路径已由单测和真实启动截图共同覆盖 |

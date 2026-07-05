@@ -356,12 +356,10 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen {
-                    has_visible_windows,
+                    has_visible_windows: false,
                     ..
                 } => {
-                    if !has_visible_windows {
-                        restore_host_window(app_handle);
-                    }
+                    restore_host_window(app_handle);
                 }
                 _ => {}
             }
@@ -424,6 +422,14 @@ fn uses_borderless_desktop_chrome() -> bool {
 
 fn uses_borderless_desktop_chrome_for_platform(is_windows: bool) -> bool {
     is_windows
+}
+
+fn main_interface_decorations_for_platform(is_windows: bool) -> bool {
+    !uses_borderless_desktop_chrome_for_platform(is_windows)
+}
+
+fn main_interface_decorations() -> bool {
+    main_interface_decorations_for_platform(cfg!(target_os = "windows"))
 }
 
 fn load_app_icon() -> tauri::Result<Image<'static>> {
@@ -1322,7 +1328,7 @@ fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()>
         .and_then(|mut overlay| overlay.take());
     animate_host_window_to_main_size(&host_window, overlay_ptr)?;
     let _ = host_window.set_background_color(Some(Color(8, 17, 23, 255)));
-    let _ = host_window.set_decorations(true);
+    let _ = host_window.set_decorations(main_interface_decorations());
     #[cfg(target_os = "macos")]
     {
         let _ = host_window.set_title_bar_style(TitleBarStyle::Overlay);
@@ -1656,7 +1662,7 @@ fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
                 .cast();
             ns_window.setDocumentEdited(edited);
         });
-        return run_result.map_err(|error| error.to_string());
+        run_result.map_err(|error| error.to_string())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1681,7 +1687,7 @@ fn write_clipboard(text: String) -> Result<(), String> {
         if !ok {
             return Err("NSPasteboard setString failed".into());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1914,9 +1920,10 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
-        parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
-        resolve_desktop_config_path, resolve_desktop_data_dir,
-        uses_borderless_desktop_chrome_for_platform, BackendState, HostWindowCloseBehavior,
+        main_interface_decorations_for_platform, parse_port_update_response,
+        poll_managed_backend_exit, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
+        resolve_desktop_data_dir, uses_borderless_desktop_chrome_for_platform, BackendState,
+        HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::path::PathBuf;
@@ -1986,6 +1993,12 @@ mod tests {
     fn windows_desktop_chrome_is_borderless() {
         assert!(uses_borderless_desktop_chrome_for_platform(true));
         assert!(!uses_borderless_desktop_chrome_for_platform(false));
+    }
+
+    #[test]
+    fn windows_main_interface_handoff_keeps_native_decorations_disabled() {
+        assert!(!main_interface_decorations_for_platform(true));
+        assert!(main_interface_decorations_for_platform(false));
     }
 
     #[test]

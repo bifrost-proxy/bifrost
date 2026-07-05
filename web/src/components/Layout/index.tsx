@@ -65,7 +65,6 @@ export default function AppLayout() {
   } = usePairingRequestStore();
   const desktopEnabled = isDesktopShell();
   const desktopPlatform = getDesktopPlatform();
-  const macDesktopChrome = desktopEnabled && desktopPlatform === "macos";
   const desktopCustomChrome =
     desktopEnabled && (desktopPlatform === "macos" || desktopPlatform === "windows");
   const showWindowsControls = desktopEnabled && desktopPlatform === "windows";
@@ -500,8 +499,8 @@ export default function AppLayout() {
                   data-testid="app-sidebar-nav-item"
                   data-nav-label={item.label}
                   data-nav-key={item.key}
-                  data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
-                  data-tauri-drag-region={macDesktopChrome ? "" : undefined}
+                  data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
+                  data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
                   style={{
                     ...styles.menuItem,
                     ...(active ? styles.menuItemActive : {}),
@@ -517,8 +516,8 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="app-sidebar-openapi"
-            data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
-            data-tauri-drag-region={macDesktopChrome ? "" : undefined}
+            data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
+            data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
             style={styles.openApiLink}
             onClick={handleOpenApiClick}
             title="Open OpenAPI documentation"
@@ -527,8 +526,8 @@ export default function AppLayout() {
           </div>
           <div
             data-testid="theme-toggle"
-            data-desktop-window-drag-region={macDesktopChrome ? "true" : undefined}
-            data-tauri-drag-region={macDesktopChrome ? "" : undefined}
+            data-desktop-window-drag-region={desktopCustomChrome ? "true" : undefined}
+            data-tauri-drag-region={desktopCustomChrome ? "" : undefined}
             style={{
               flexShrink: 0,
               marginBottom: 8,
