@@ -135,6 +135,61 @@
 - extension 存在但 controller 未连接时状态为 `approval_required`。
 - 只有 controller socket 存在并连接时状态才允许为 `running`，`enabled` 才允许为 true。
 
+### TC-MEP-07：真实增强捕获正向验证
+
+**操作步骤**：
+1. 使用带 Network Extension entitlement 的有效签名身份构建并安装 `Bifrost Enhanced Proxy.app`。
+2. 在 macOS 系统设置中批准 Bifrost Network Extension。
+3. 启动临时 Bifrost，必须禁用系统代理：
+   ```bash
+   BIFROST_DATA_DIR="$(mktemp -d /tmp/bifrost-enhanced-real.XXXXXX)" \
+   BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
+   BIFROST_DISABLE_TRAY=1 \
+   bifrost start -p 18991 --host 127.0.0.1 --skip-cert-check --no-system-proxy
+   ```
+4. 执行：
+   ```bash
+   BIFROST_DATA_DIR="$BIFROST_DATA_DIR" bifrost enhanced-proxy enable --host 127.0.0.1 --port 18991
+   ```
+5. 使用一个不配置系统代理、不设置 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` 的独立进程直连 HTTP 目标：
+   ```bash
+   env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+   python3 - <<'PY'
+import http.client
+conn = http.client.HTTPConnection("example.com", 80, timeout=10)
+conn.request("GET", "/bifrost-enhanced-direct-test", headers={"Host": "example.com"})
+print(conn.getresponse().status)
+conn.close()
+PY
+   ```
+6. 查询流量：
+   ```bash
+   bifrost traffic list --port 18991 --host example.com --format json-pretty
+   ```
+
+**预期结果**：
+- `enhanced-proxy status` 显示 `state=running` 且 `enabled=true`。
+- Python 直连请求无需系统代理或环境代理即可出现在 Bifrost traffic 中。
+- 对照组 `curl --proxy http://127.0.0.1:18991 http://example.com/...` 也出现在 traffic 中，证明 Bifrost 显式代理记录链路正常。
+
+### TC-MEP-08：当前 Mac 签名缺失阻塞验证
+
+**操作步骤**：
+1. 执行：
+   ```bash
+   security find-identity -v -p codesigning
+   systemextensionsctl list
+   ```
+2. 按 TC-MEP-07 启动临时 Bifrost 并执行 `enhanced-proxy enable`。
+3. 使用 Python 直连 `example.com:80`。
+4. 查询 `bifrost traffic list --port 18991 --host example.com --format json-pretty`。
+
+**预期结果**：
+- 如果当前机器没有有效签名身份且没有已安装 Bifrost Network Extension，`enhanced-proxy status` 必须保持 `helper_missing`、`extension_missing` 或 `approval_required`，不得显示 `running`。
+- Python 直连请求不得出现在 Bifrost traffic 中。
+- 显式代理对照组仍应出现在 traffic 中。
+- 该结果表示当前机器不具备正向增强捕获验收条件，发布门禁必须保持阻塞。
+
 ## 清理步骤
 
 1. 停止临时 Bifrost。

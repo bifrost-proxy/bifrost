@@ -15,7 +15,7 @@ macOS 上有一类应用不读取系统代理、CLI 环境变量或浏览器代�
 - CLI 支持 `bifrost enhanced-proxy status|enable|disable`，`start` 支持 `--enhanced-proxy` 和 `--no-enhanced-proxy` 持久化 desired state。
 - Admin API 支持 `GET/PUT /api/proxy/enhanced`，返回 configured 与 active 两层状态。
 - Web UI Settings Proxy 页面支持增强模式开关、状态 tag、helper/extension/socket 诊断。
-- 提供 macOS helper/system extension 工程骨架，包含 Transparent Proxy Provider 入口、host app 控制入口、entitlement 与 XcodeGen 配置。
+- 提供 macOS helper/system extension 工程，包含 Transparent Proxy Provider TCP flow -> Bifrost SOCKS5 relay、host app 控制入口、entitlement 与 XcodeGen 配置。
 
 ### 必须不破坏
 
@@ -73,18 +73,22 @@ flowchart LR
 ### Phase 4：macOS helper/system extension
 
 - `apps/macos-enhanced-proxy` 提供 Swift Package 与 XcodeGen 配置。
-- Host app 使用 `NETransparentProxyManager` 加载/保存配置。
-- Extension 使用 `NETransparentProxyProvider` 作为透明捕获入口。V1 只提交工程骨架和 provider 生命周期入口，真实 redirect/flow copy 需要在签名授权后的 macOS 环境继续完善和验证。
+- Host app 使用 `NETransparentProxyManager` 加载/保存配置，并通过 provider configuration 下发 Bifrost loopback host/port。
+- Extension 使用 `NETransparentProxyProvider` 接收 TCP flow，从 `remoteFlowEndpoint` 解析原始目标，并对本机 Bifrost 统一端口建立 SOCKS5 CONNECT 后做双向 relay。这样增强模式复用 Bifrost 现有 SOCKS/TLS/规则/traffic 记录链路。
+- UDP flow 默认不接管；QUIC/UDP 需要单独验证协议语义后再启用。
 
 ### Phase 5：闭环测试与发布门禁
 
 - 单元测试：`cargo test -p bifrost-core enhanced_proxy --lib`。
 - E2E：`cargo run -p bifrost-e2e -- --test admin_api_enhanced_proxy_status_and_toggle`。
 - Web：`pnpm --dir web build` 或 cargo build 触发前端打包。
+- macOS helper：`swift build --package-path apps/macos-enhanced-proxy`。
+- 真实增强捕获：必须在有 Network Extension entitlement、有效签名身份、helper 已安装且用户批准系统扩展的 macOS 上，用不配置系统代理/环境代理的独立进程直连 HTTP/HTTPS 目标，并在 Bifrost traffic 中看到对应记录。
 - 项目校验：按 `rust-project-validate` 执行 fmt/clippy/build/workspace tests；本地 coverage 因当前项目记忆规则豁免，不运行本地 coverage 脚本。
 
 ## 残余边界
 
 - 没有签名、entitlement 和用户授权时，macOS 无法真实激活透明捕获。Bifrost 必须把此状态暴露为 `helper_missing`、`extension_missing` 或 `approval_required`。
+- 当前开发 Mac 的真实验证结果：`security find-identity -v -p codesigning` 返回 0 个有效签名身份，`systemextensionsctl list` 返回 0 个扩展；临时 Bifrost 开启 enhanced desired state 后，Python 直连 `example.com:80` 未进入 Bifrost traffic，显式代理 `curl --proxy 127.0.0.1:<port>` 可进入 traffic。结论是控制面和显式代理链路可用，但本机透明增强捕获正向验收被签名/系统扩展安装条件阻塞。
 - UDP 捕获默认关闭，避免 QUIC/本机服务在未验证前被透明代理改变语义。
 - 捕获策略 V1 默认只覆盖 TCP 80/443，后续可在 UI 中增加高级策略编辑。
