@@ -6,6 +6,104 @@ use std::net::TcpListener;
 pub fn get_all_tests() -> Vec<TestCase> {
     vec![
         TestCase::standalone(
+            "admin_api_enhanced_proxy_status_and_toggle",
+            "Validate enhanced proxy API persists requested state without claiming active capture before helper approval",
+            "admin",
+            || async move {
+                let port = pick_unused_port()?;
+                let (_proxy, _admin_state) =
+                    ProxyInstance::start_with_admin(port, vec![], false, true)
+                        .await
+                        .map_err(|e| format!("Failed to start proxy with admin: {}", e))?;
+
+                let client = reqwest::Client::builder()
+                    .danger_accept_invalid_certs(true)
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| format!("Failed to create client: {}", e))?;
+                let url = format!("http://127.0.0.1:{}/_bifrost/api/proxy/enhanced", port);
+
+                let initial = client
+                    .get(&url)
+                    .send()
+                    .await
+                    .map_err(|e| format!("GET enhanced proxy failed: {}", e))?;
+                assert_status(&initial, 200)?;
+                let initial_json: serde_json::Value = initial
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse initial enhanced proxy JSON: {}", e))?;
+                if initial_json["configured_enabled"].as_bool() != Some(false) {
+                    return Err(format!(
+                        "expected enhanced proxy disabled by default, got {}",
+                        initial_json
+                    ));
+                }
+                if initial_json["policy"]["exclude_apps"]
+                    .as_array()
+                    .is_none_or(|items| items.is_empty())
+                {
+                    return Err(format!(
+                        "expected enhanced proxy default policy to include self-bypass apps, got {}",
+                        initial_json
+                    ));
+                }
+
+                let enabled = client
+                    .put(&url)
+                    .json(&serde_json::json!({ "enabled": true }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PUT enhanced proxy enable failed: {}", e))?;
+                assert_status(&enabled, 200)?;
+                let enabled_json: serde_json::Value = enabled
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse enabled enhanced proxy JSON: {}", e))?;
+                if enabled_json["configured_enabled"].as_bool() != Some(true) {
+                    return Err(format!(
+                        "expected enhanced proxy configured_enabled=true after enable, got {}",
+                        enabled_json
+                    ));
+                }
+                if enabled_json["proxy_port"].as_u64() != Some(port as u64) {
+                    return Err(format!(
+                        "expected enhanced proxy target port {}, got {}",
+                        port, enabled_json
+                    ));
+                }
+                if enabled_json["enabled"].as_bool() == Some(true)
+                    && enabled_json["controller_connected"].as_bool() != Some(true)
+                {
+                    return Err(format!(
+                        "enhanced proxy must not report active capture before controller is connected: {}",
+                        enabled_json
+                    ));
+                }
+
+                let disabled = client
+                    .put(&url)
+                    .json(&serde_json::json!({ "enabled": false }))
+                    .send()
+                    .await
+                    .map_err(|e| format!("PUT enhanced proxy disable failed: {}", e))?;
+                assert_status(&disabled, 200)?;
+                let disabled_json: serde_json::Value = disabled
+                    .json()
+                    .await
+                    .map_err(|e| format!("Failed to parse disabled enhanced proxy JSON: {}", e))?;
+                if disabled_json["configured_enabled"].as_bool() != Some(false)
+                    || disabled_json["enabled"].as_bool() != Some(false)
+                {
+                    return Err(format!(
+                        "expected enhanced proxy disabled after toggle off, got {}",
+                        disabled_json
+                    ));
+                }
+                Ok(())
+            },
+        ),
+        TestCase::standalone(
             "admin_api_cors_preflight_allows_client_id",
             "Validate admin CORS preflight allows desktop client headers",
             "admin",

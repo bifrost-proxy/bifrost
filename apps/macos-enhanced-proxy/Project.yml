@@ -1,0 +1,24 @@
+name: BifrostEnhancedProxy
+options:
+  bundleIdPrefix: com.bifrost.proxy
+  deploymentTarget:
+    macOS: "13.0"
+targets:
+  Bifrost Enhanced Proxy:
+    type: application
+    platform: macOS
+    sources:
+      - Sources/BifrostEnhancedProxyHost
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.bifrost.proxy.enhanced
+      CODE_SIGN_ENTITLEMENTS: Entitlements/Host.entitlements
+    dependencies:
+      - target: BifrostEnhancedProxyExtension
+  BifrostEnhancedProxyExtension:
+    type: system-extension
+    platform: macOS
+    sources:
+      - Sources/BifrostEnhancedProxyExtension
+    settings:
+      PRODUCT_BUNDLE_IDENTIFIER: com.bifrost.proxy.enhanced.network-extension
+      CODE_SIGN_ENTITLEMENTS: Entitlements/Extension.entitlements

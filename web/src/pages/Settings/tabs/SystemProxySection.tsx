@@ -3,6 +3,7 @@ import { Alert, Card, Col, Divider, Row, Space, Switch, Tag, Tooltip, Typography
 import { ExclamationCircleOutlined, GlobalOutlined } from "@ant-design/icons";
 import type {
   CliProxyStatus,
+  EnhancedProxyStatus,
   SystemProxyLaunchdStatus,
   SystemProxyStatus,
 } from "../../../api/proxy";
@@ -16,26 +17,32 @@ const { Text } = Typography;
 interface SystemProxySectionProps {
   systemProxy: SystemProxyStatus | null;
   systemProxyLaunchd: SystemProxyLaunchdStatus | null;
+  enhancedProxy: EnhancedProxyStatus | null;
   cliProxy: CliProxyStatus | null;
   systemProxyLoading: boolean;
   systemProxyLaunchdLoading: boolean;
+  enhancedProxyLoading: boolean;
   injectBifrostBadge: boolean | null;
   injectBifrostBadgeLoading: boolean;
   onToggleSystemProxy: (enabled: boolean) => void;
   onToggleSystemProxyLaunchd: (enabled: boolean) => void;
+  onToggleEnhancedProxy: (enabled: boolean) => void;
   onToggleInjectBifrostBadge: (enabled: boolean) => void;
 }
 
 export default function SystemProxySection({
   systemProxy,
   systemProxyLaunchd,
+  enhancedProxy,
   cliProxy,
   systemProxyLoading,
   systemProxyLaunchdLoading,
+  enhancedProxyLoading,
   injectBifrostBadge,
   injectBifrostBadgeLoading,
   onToggleSystemProxy,
   onToggleSystemProxyLaunchd,
+  onToggleEnhancedProxy,
   onToggleInjectBifrostBadge,
 }: SystemProxySectionProps) {
   const cliProxyDisplay = useMemo(() => {
@@ -76,6 +83,26 @@ export default function SystemProxySection({
     systemProxyConfiguredEnabled &&
     !systemProxyEnabledByBifrost &&
     !systemProxyOwnedByOther;
+  const enhancedProxyTag = useMemo(() => {
+    if (!enhancedProxy) {
+      return { color: "default", text: "Loading" };
+    }
+    switch (enhancedProxy.state) {
+      case "running":
+        return { color: "green", text: "Running" };
+      case "approval_required":
+        return { color: "orange", text: "Approval Required" };
+      case "helper_missing":
+      case "extension_missing":
+        return { color: "red", text: "Setup Needed" };
+      case "unsupported":
+        return { color: "default", text: "Not Supported" };
+      case "disabled":
+        return { color: "default", text: "Disabled" };
+      default:
+        return { color: "red", text: "Error" };
+    }
+  }, [enhancedProxy]);
 
   return (
     <Col xs={24}>
@@ -179,6 +206,75 @@ export default function SystemProxySection({
                 </Text>
               )}
             </Space>
+          )}
+
+          <Divider style={{ margin: "12px 0" }} />
+
+          <Row justify="space-between" align="middle">
+            <Col>
+              <Space>
+                <Text>Enhanced Local Capture</Text>
+                {enhancedProxy ? (
+                  <Tooltip
+                    title={
+                      <pre style={{ margin: 0, whiteSpace: "pre-wrap" }}>
+                        {`Helper: ${enhancedProxy.helper_app_path || "-"}\nExtension: ${
+                          enhancedProxy.extension_path || "-"
+                        }\nSocket: ${enhancedProxy.control_socket_path || "-"}`}
+                      </pre>
+                    }
+                  >
+                    <ExclamationCircleOutlined style={{ color: "#8c8c8c" }} />
+                  </Tooltip>
+                ) : null}
+              </Space>
+            </Col>
+            <Col>
+              {enhancedProxy ? (
+                enhancedProxy.supported ? (
+                  <Switch
+                    checked={enhancedProxy.configured_enabled}
+                    loading={enhancedProxyLoading}
+                    onChange={onToggleEnhancedProxy}
+                    data-testid="settings-enhanced-proxy-switch"
+                  />
+                ) : (
+                  <Tooltip title="Enhanced local capture is only supported on macOS">
+                    <Text type="secondary">Not Supported</Text>
+                  </Tooltip>
+                )
+              ) : (
+                <Text type="secondary">Loading...</Text>
+              )}
+            </Col>
+          </Row>
+          <Space wrap size={6}>
+            <Tag color={enhancedProxyTag.color} data-testid="settings-enhanced-proxy-state">
+              {enhancedProxyTag.text}
+            </Tag>
+            {enhancedProxy ? (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {enhancedProxy.proxy_host}:{enhancedProxy.proxy_port}
+              </Text>
+            ) : null}
+          </Space>
+          {enhancedProxy?.message ? (
+            enhancedProxy.configured_enabled && !enhancedProxy.enabled ? (
+              <Alert
+                type={enhancedProxy.state === "approval_required" ? "warning" : "info"}
+                showIcon
+                message={enhancedProxy.message}
+                description={enhancedProxy.remediation}
+              />
+            ) : (
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                {enhancedProxy.message}
+              </Text>
+            )
+          ) : (
+            <Text type="secondary" style={{ fontSize: 12 }}>
+              Routes apps that ignore system proxy through Bifrost after the macOS Network Extension is installed and approved.
+            </Text>
           )}
 
           <Divider style={{ margin: "12px 0" }} />

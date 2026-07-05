@@ -1324,6 +1324,8 @@ pub fn run_start(
     proxy_bypass: Option<String>,
     cli_proxy: bool,
     cli_proxy_no_proxy: Option<String>,
+    enhanced_proxy: bool,
+    no_enhanced_proxy: bool,
     yes: bool,
     no_tray: bool,
 ) -> bifrost_core::Result<()> {
@@ -1569,6 +1571,30 @@ pub fn run_start(
 
     let system_proxy_bypass =
         proxy_bypass.unwrap_or_else(|| stored_config.system_proxy.bypass.clone());
+
+    let proxy_loopback_host = if host == "0.0.0.0" {
+        "127.0.0.1"
+    } else {
+        &host
+    };
+    let enhanced_proxy_manager = bifrost_core::EnhancedProxyManager::new(bifrost_dir.clone());
+    if enhanced_proxy {
+        enhanced_proxy_manager.set_enabled(true, proxy_loopback_host, port)?;
+    } else if no_enhanced_proxy {
+        enhanced_proxy_manager.set_enabled(false, proxy_loopback_host, port)?;
+    }
+    let enhanced_proxy_status = enhanced_proxy_manager.status();
+    if enhanced_proxy || enhanced_proxy_status.configured_enabled {
+        println!(
+            "Enhanced proxy: {:?} (target: {}:{})",
+            enhanced_proxy_status.state,
+            enhanced_proxy_status.proxy_host,
+            enhanced_proxy_status.proxy_port
+        );
+        if let Some(remediation) = &enhanced_proxy_status.remediation {
+            println!("  Action: {}", remediation);
+        }
+    }
 
     if enable_system_proxy {
         if bifrost_core::SystemProxyManager::is_supported() {

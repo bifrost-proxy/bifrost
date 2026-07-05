@@ -1,9 +1,16 @@
 import { create } from "zustand";
-import type { CliProxyStatus, SystemProxyLaunchdStatus, SystemProxyStatus } from "../api/proxy";
+import type {
+  CliProxyStatus,
+  EnhancedProxyStatus,
+  SystemProxyLaunchdStatus,
+  SystemProxyStatus,
+} from "../api/proxy";
 import {
   getCliProxyStatus,
+  getEnhancedProxyStatus,
   getSystemProxyLaunchdStatus,
   getSystemProxyStatus,
+  setEnhancedProxy,
   setSystemProxy,
   setSystemProxyLaunchd,
 } from "../api/proxy";
@@ -12,26 +19,32 @@ import { isConnectionIssueError } from "../api/client";
 interface ProxyState {
   systemProxy: SystemProxyStatus | null;
   systemProxyLaunchd: SystemProxyLaunchdStatus | null;
+  enhancedProxy: EnhancedProxyStatus | null;
   cliProxy: CliProxyStatus | null;
   loading: boolean;
   launchdLoading: boolean;
+  enhancedLoading: boolean;
   error: string | null;
   applySystemProxySnapshot: (status: SystemProxyStatus) => void;
   applyCliProxySnapshot: (status: CliProxyStatus) => void;
   fetchSystemProxy: () => Promise<void>;
   fetchSystemProxyLaunchd: () => Promise<void>;
+  fetchEnhancedProxy: () => Promise<void>;
   fetchCliProxy: () => Promise<void>;
   toggleSystemProxy: (enabled: boolean) => Promise<boolean>;
   toggleSystemProxyLaunchd: (enabled: boolean) => Promise<boolean>;
+  toggleEnhancedProxy: (enabled: boolean) => Promise<boolean>;
   clearError: () => void;
 }
 
 export const useProxyStore = create<ProxyState>((set, get) => ({
   systemProxy: null,
   systemProxyLaunchd: null,
+  enhancedProxy: null,
   cliProxy: null,
   loading: false,
   launchdLoading: false,
+  enhancedLoading: false,
   error: null,
 
   applySystemProxySnapshot: (status) => {
@@ -55,6 +68,15 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
     try {
       const status = await getSystemProxyLaunchdStatus();
       set({ systemProxyLaunchd: status, error: null });
+    } catch (e) {
+      set({ error: isConnectionIssueError(e) ? null : (e as Error).message });
+    }
+  },
+
+  fetchEnhancedProxy: async () => {
+    try {
+      const status = await getEnhancedProxyStatus();
+      set({ enhancedProxy: status, error: null });
     } catch (e) {
       set({ error: isConnectionIssueError(e) ? null : (e as Error).message });
     }
@@ -117,6 +139,29 @@ export const useProxyStore = create<ProxyState>((set, get) => ({
     }
   },
 
+  toggleEnhancedProxy: async (enabled: boolean) => {
+    const currentState = get().enhancedProxy;
+    set({ enhancedLoading: true, error: null });
+    try {
+      const status = await setEnhancedProxy({ enabled });
+      set({
+        enhancedProxy: status,
+        enhancedLoading: false,
+        error: doesEnhancedProxyMatchRequest(status, enabled)
+          ? null
+          : status.remediation || status.message || "Enhanced proxy did not reach the requested state",
+      });
+      return doesEnhancedProxyMatchRequest(status, enabled);
+    } catch (e) {
+      set({
+        error: isConnectionIssueError(e) ? null : (e as Error).message,
+        enhancedLoading: false,
+        enhancedProxy: currentState,
+      });
+      return false;
+    }
+  },
+
   clearError: () => set({ error: null }),
 }));
 
@@ -137,4 +182,15 @@ export function isSystemProxyConfiguredEnabled(status: SystemProxyStatus): boole
 
 export function isSystemProxyLiveEnabledByBifrost(status: SystemProxyStatus): boolean {
   return status.enabled && status.managed_by_bifrost !== false;
+}
+
+export function doesEnhancedProxyMatchRequest(
+  status: EnhancedProxyStatus,
+  enabled: boolean,
+): boolean {
+  if (enabled) {
+    return status.configured_enabled;
+  }
+
+  return !status.configured_enabled && !status.enabled;
 }

@@ -15,6 +15,7 @@ import type { TlsConfig, PerformanceConfig, PendingIpTls } from '../api/config';
 import type { CertInfo, MobileDevicesResponse, TrustProbeSession } from '../api/cert';
 import type {
   CliProxyStatus,
+  EnhancedProxyStatus,
   ProxyAddressInfo,
   SystemProxyStatus,
 } from '../api/proxy';
@@ -86,6 +87,7 @@ export type SettingsScope =
   | 'proxy_address'
   | 'system_proxy'
   | 'cli_proxy'
+  | 'enhanced_proxy'
   | 'whitelist_status'
   | 'pending_authorizations'
   | 'pending_ip_tls'
@@ -103,6 +105,7 @@ export interface SettingsUpdateData {
     | CertInfo
     | ProxyAddressInfo
     | SystemProxyStatus
+    | EnhancedProxyStatus
     | CliProxyStatus
     | WhitelistStatus
     | PendingAuth[]

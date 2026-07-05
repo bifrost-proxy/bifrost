@@ -12,7 +12,7 @@ use bifrost_proxy::{
     ResolvedRules as ProxyResolvedRules, RuleValue, RulesResolver as ProxyRulesResolverTrait,
     TlsConfig,
 };
-use bifrost_storage::RulesStorage;
+use bifrost_storage::{ConfigManager, RulesStorage};
 use bifrost_tls::{
     generate_root_ca, init_crypto_provider, save_root_ca, DynamicCertGenerator, SniResolver,
 };
@@ -1413,6 +1413,8 @@ impl ProxyInstance {
         let values_dir = temp_dir.join("values");
         let values_storage = bifrost_storage::ValuesStorage::with_dir(values_dir)
             .expect("failed to create temp values storage");
+        let config_manager = ConfigManager::new(temp_dir.join("config"))
+            .expect("failed to create temp config manager");
 
         let auth_db_path = temp_dir.join("admin").join("auth.db");
         std::fs::create_dir_all(auth_db_path.parent().unwrap())
@@ -1435,6 +1437,7 @@ impl ProxyInstance {
             .with_ca_cert_path(ca_cert_path)
             .with_rules_storage(rules_storage)
             .with_values_storage(values_storage)
+            .with_config_manager(config_manager)
             .with_auth_db(auth_db)
             .with_im_gateway_service(im_gateway_service);
         std::mem::drop(start_connection_cleanup_task(

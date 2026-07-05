@@ -283,6 +283,17 @@ pub enum Commands {
             help = "CLI proxy no-proxy list (comma-separated, e.g., 'localhost,127.0.0.1')"
         )]
         cli_proxy_no_proxy: Option<String>,
+        #[arg(
+            long,
+            conflicts_with = "no_enhanced_proxy",
+            help = "Request macOS enhanced local capture for apps that ignore system proxy"
+        )]
+        enhanced_proxy: bool,
+        #[arg(
+            long,
+            help = "Disable the persisted macOS enhanced local capture request"
+        )]
+        no_enhanced_proxy: bool,
 
         #[arg(short = 'y', long, help = "Automatically answer yes to prompts")]
         yes: bool,
@@ -388,6 +399,11 @@ pub enum Commands {
     SystemProxy {
         #[command(subcommand)]
         action: SystemProxyCommands,
+    },
+    #[command(visible_alias = "ep", about = "Manage macOS enhanced local capture")]
+    EnhancedProxy {
+        #[command(subcommand)]
+        action: EnhancedProxyCommands,
     },
     #[command(
         visible_alias = "val",
@@ -2279,6 +2295,29 @@ pub enum SystemProxyCommands {
         #[arg(long)]
         installed_version: Option<String>,
     },
+}
+
+#[derive(Subcommand, Clone)]
+pub enum EnhancedProxyCommands {
+    #[command(about = "Show enhanced proxy status")]
+    Status {
+        #[arg(
+            long,
+            value_enum,
+            default_value_t = StatusFormat::Text,
+            help = "Output format: text (default), json (single-line), or json-pretty (indented)"
+        )]
+        format: StatusFormat,
+    },
+    #[command(about = "Request enhanced local capture")]
+    Enable {
+        #[arg(long, value_hint = ValueHint::Hostname, help = "Bifrost proxy host (default: 127.0.0.1)")]
+        host: Option<String>,
+        #[arg(long, help = "Bifrost proxy port (default: global -p)")]
+        port: Option<u16>,
+    },
+    #[command(about = "Disable enhanced local capture")]
+    Disable,
 }
 
 #[cfg(target_os = "macos")]

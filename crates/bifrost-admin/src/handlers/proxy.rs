@@ -8,9 +8,12 @@ use super::{
     error_response, json_response, json_response_with_status, method_not_allowed, BoxBody,
 };
 use crate::state::SharedAdminState;
+use bifrost_core::EnhancedProxyManager;
 use bifrost_core::ShellProxyManager;
 use bifrost_core::SystemProxyManager;
-use bifrost_storage::{NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate};
+use bifrost_storage::{
+    data_dir, NewSystemProxyConfig as SystemProxyConfig, SystemProxyConfigUpdate,
+};
 
 #[derive(Serialize)]
 struct SystemProxyStatus {
@@ -121,6 +124,11 @@ struct SetSystemProxyLaunchdRequest {
     enabled: bool,
 }
 
+#[derive(Deserialize)]
+struct SetEnhancedProxyRequest {
+    enabled: bool,
+}
+
 #[derive(Serialize)]
 struct ProxyAddressInfo {
     port: u16,
@@ -167,6 +175,11 @@ pub async fn handle_proxy(
             Method::PUT => set_system_proxy_launchd(req, state).await,
             _ => method_not_allowed(),
         },
+        "/api/proxy/enhanced" | "/api/proxy/enhanced/" => match method {
+            Method::GET => get_enhanced_proxy_status(state).await,
+            Method::PUT => set_enhanced_proxy(req, state).await,
+            _ => method_not_allowed(),
+        },
         "/api/proxy/address" | "/api/proxy/address/" => match method {
             Method::GET => get_proxy_address_info(state).await,
             _ => method_not_allowed(),
@@ -198,6 +211,49 @@ async fn get_cli_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
         proxy_url: format!("http://127.0.0.1:{}", state.port()),
     };
     json_response(&resp)
+}
+
+async fn get_enhanced_proxy_status(state: SharedAdminState) -> Response<BoxBody> {
+    let manager = EnhancedProxyManager::new(enhanced_proxy_data_dir(&state));
+    json_response(&manager.status())
+}
+
+async fn set_enhanced_proxy(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {
+    use http_body_util::BodyExt;
+
+    let body = match req.collect().await {
+        Ok(b) => b.to_bytes(),
+        Err(e) => {
+            return error_response(
+                StatusCode::BAD_REQUEST,
+                &format!("Failed to read body: {}", e),
+            )
+        }
+    };
+
+    let request: SetEnhancedProxyRequest = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => return error_response(StatusCode::BAD_REQUEST, &format!("Invalid JSON: {}", e)),
+    };
+
+    let manager = EnhancedProxyManager::new(enhanced_proxy_data_dir(&state));
+    if let Err(e) = manager.set_enabled(request.enabled, "127.0.0.1", state.port()) {
+        return error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("Failed to persist enhanced proxy state: {}", e),
+        );
+    }
+
+    let status = manager.status();
+    json_response(&status)
+}
+
+fn enhanced_proxy_data_dir(state: &SharedAdminState) -> std::path::PathBuf {
+    state
+        .config_manager
+        .as_ref()
+        .map(|config_manager| config_manager.data_dir().to_path_buf())
+        .unwrap_or_else(data_dir)
 }
 
 async fn get_system_proxy_status(state: SharedAdminState) -> Response<BoxBody> {

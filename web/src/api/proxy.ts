@@ -42,12 +42,55 @@ export interface CliProxyStatus {
   proxy_url: string;
 }
 
+export interface EnhancedProxyPolicy {
+  include_apps: string[];
+  exclude_apps: string[];
+  include_hosts: string[];
+  exclude_hosts: string[];
+  tcp_ports: number[];
+  udp_ports: number[];
+  capture_tcp: boolean;
+  capture_udp: boolean;
+}
+
+export type EnhancedProxyState =
+  | "unsupported"
+  | "disabled"
+  | "helper_missing"
+  | "extension_missing"
+  | "approval_required"
+  | "running"
+  | "error";
+
+export interface EnhancedProxyStatus {
+  supported: boolean;
+  state: EnhancedProxyState;
+  enabled: boolean;
+  configured_enabled: boolean;
+  platform: string;
+  helper_bundle_id: string;
+  extension_bundle_id: string;
+  helper_app_path?: string;
+  extension_path?: string;
+  control_socket_path: string;
+  controller_connected: boolean;
+  proxy_host: string;
+  proxy_port: number;
+  policy: EnhancedProxyPolicy;
+  message?: string;
+  remediation?: string;
+}
+
 export interface SetSystemProxyRequest {
   enabled: boolean;
   bypass?: string;
 }
 
 export interface SetSystemProxyLaunchdRequest {
+  enabled: boolean;
+}
+
+export interface SetEnhancedProxyRequest {
   enabled: boolean;
 }
 
@@ -77,6 +120,16 @@ export async function setSystemProxyLaunchd(
 
 export async function getCliProxyStatus(): Promise<CliProxyStatus> {
   return get<CliProxyStatus>("/proxy/cli");
+}
+
+export async function getEnhancedProxyStatus(): Promise<EnhancedProxyStatus> {
+  return get<EnhancedProxyStatus>("/proxy/enhanced");
+}
+
+export async function setEnhancedProxy(
+  request: SetEnhancedProxyRequest,
+): Promise<EnhancedProxyStatus> {
+  return put<EnhancedProxyStatus>("/proxy/enhanced", request);
 }
 
 export interface ProxyAddress {

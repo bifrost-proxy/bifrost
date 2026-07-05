@@ -21,15 +21,15 @@ use cli::{
 };
 use commands::{
     check_and_print_update_notice, handle_admin_command, handle_ai_command, handle_app_command,
-    handle_ca_command, handle_config_command, handle_export_command, handle_group_command,
-    handle_import_command, handle_install_skill, handle_metrics_command, handle_port_command,
-    handle_rule_command, handle_script_command, handle_sync_command, handle_system_proxy_command,
-    handle_upgrade, handle_value_command, handle_whitelist_command, remote, run_restart,
-    run_search, run_start, run_status, run_status_tui, run_stop, run_traffic_auth_status,
-    run_traffic_clear, run_traffic_export, run_traffic_get, run_traffic_list, run_traffic_replay,
-    spawn_update_check_notice, OutputFormat, RestartOptions, SearchOptions,
-    TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions, TrafficListOptions,
-    TrafficReplayOptions,
+    handle_ca_command, handle_config_command, handle_enhanced_proxy_command, handle_export_command,
+    handle_group_command, handle_import_command, handle_install_skill, handle_metrics_command,
+    handle_port_command, handle_rule_command, handle_script_command, handle_sync_command,
+    handle_system_proxy_command, handle_upgrade, handle_value_command, handle_whitelist_command,
+    remote, run_restart, run_search, run_start, run_status, run_status_tui, run_stop,
+    run_traffic_auth_status, run_traffic_clear, run_traffic_export, run_traffic_get,
+    run_traffic_list, run_traffic_replay, spawn_update_check_notice, OutputFormat, RestartOptions,
+    SearchOptions, TrafficAuthStatusOptions, TrafficExportOptions, TrafficGetOptions,
+    TrafficListOptions, TrafficReplayOptions,
 };
 use process::read_runtime_port;
 
@@ -253,6 +253,8 @@ fn run_cli_main() {
             ref proxy_bypass,
             cli_proxy,
             ref cli_proxy_no_proxy,
+            enhanced_proxy,
+            no_enhanced_proxy,
             yes,
             #[cfg(not(target_os = "linux"))]
             no_tray,
@@ -297,6 +299,8 @@ fn run_cli_main() {
                 proxy_bypass.clone(),
                 cli_proxy,
                 cli_proxy_no_proxy.clone(),
+                enhanced_proxy,
+                no_enhanced_proxy,
                 yes,
                 no_tray_flag,
             )
@@ -327,6 +331,9 @@ fn run_cli_main() {
         Some(Commands::Whitelist { action }) => handle_whitelist_command(action),
         Some(Commands::SystemProxy { ref action }) => {
             handle_system_proxy_command(&cli, action.clone())
+        }
+        Some(Commands::EnhancedProxy { ref action }) => {
+            handle_enhanced_proxy_command(&cli, action.clone())
         }
         Some(Commands::Value { action }) => handle_value_command(action),
         Some(Commands::Admin { action }) => handle_admin_command(action),
@@ -762,6 +769,8 @@ fn run_cli_main() {
             None,
             false,
             None,
+            false,
+            false,
             false,
             false,
         ),

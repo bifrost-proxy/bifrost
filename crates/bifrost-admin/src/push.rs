@@ -32,6 +32,7 @@ pub const SETTINGS_SCOPE_CERT_INFO: &str = "cert_info";
 pub const SETTINGS_SCOPE_PROXY_ADDRESS: &str = "proxy_address";
 pub const SETTINGS_SCOPE_SYSTEM_PROXY: &str = "system_proxy";
 pub const SETTINGS_SCOPE_CLI_PROXY: &str = "cli_proxy";
+pub const SETTINGS_SCOPE_ENHANCED_PROXY: &str = "enhanced_proxy";
 pub const SETTINGS_SCOPE_WHITELIST_STATUS: &str = "whitelist_status";
 pub const SETTINGS_SCOPE_PENDING_AUTHORIZATIONS: &str = "pending_authorizations";
 pub const SETTINGS_SCOPE_PENDING_IP_TLS: &str = "pending_ip_tls";
@@ -1227,6 +1228,13 @@ impl PushManager {
                     "config_files": status.config_paths.iter().map(|item| item.to_string_lossy().to_string()).collect::<Vec<_>>(),
                     "proxy_url": format!("http://127.0.0.1:{}", self.state.port()),
                 })
+            }
+            SETTINGS_SCOPE_ENHANCED_PROXY => {
+                let config_manager = self.state.config_manager.as_ref()?;
+                let manager = bifrost_core::EnhancedProxyManager::new(
+                    config_manager.data_dir().to_path_buf(),
+                );
+                serde_json::to_value(manager.status()).ok()?
             }
             SETTINGS_SCOPE_WHITELIST_STATUS => {
                 let access_control = self.state.access_control.as_ref()?;
@@ -2834,6 +2842,19 @@ mod coverage_boost {
         let harness = TestAdminState::builder().build();
         let manager = harness.push_manager();
         assert!(manager.build_settings_update("unknown").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn build_settings_update_for_enhanced_proxy_includes_state() {
+        let harness = TestAdminState::builder().build();
+        let manager = harness.push_manager();
+        let data = manager
+            .build_settings_update(SETTINGS_SCOPE_ENHANCED_PROXY)
+            .await
+            .expect("expected enhanced proxy update");
+        assert_eq!(data.scope, SETTINGS_SCOPE_ENHANCED_PROXY);
+        assert!(data.data["configured_enabled"].is_boolean());
+        assert!(data.data["policy"].is_object());
     }
 
     #[tokio::test]

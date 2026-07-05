@@ -112,6 +112,7 @@ export function useGlobalDataSync({ trafficEnabled = true }: { trafficEnabled?: 
     const initializeGlobalData = async () => {
       await Promise.allSettled([
         proxyStore.fetchSystemProxy(),
+        proxyStore.fetchEnhancedProxy(),
         proxyStore.fetchCliProxy(),
         filterPanelStore.loadFromServer(),
         metricsStore.fetchOverview(),

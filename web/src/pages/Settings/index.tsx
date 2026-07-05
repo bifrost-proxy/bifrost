@@ -151,13 +151,17 @@ export default function Settings() {
   const {
     systemProxy,
     systemProxyLaunchd,
+    enhancedProxy,
     cliProxy,
     loading: systemProxyLoading,
     launchdLoading: systemProxyLaunchdLoading,
+    enhancedLoading: enhancedProxyLoading,
     toggleSystemProxy,
     toggleSystemProxyLaunchd,
+    toggleEnhancedProxy,
     fetchSystemProxy,
     fetchSystemProxyLaunchd,
+    fetchEnhancedProxy,
     fetchCliProxy,
   } = useProxyStore();
   const [tlsConfig, setTlsConfig] = useState<TlsConfig | null>(null);
@@ -377,6 +381,20 @@ export default function Settings() {
     } else {
       const proxyError = useProxyStore.getState().error;
       message.error(proxyError || "Failed to update cleanup fallback");
+    }
+  };
+
+  const handleEnhancedProxyToggle = async (enabled: boolean) => {
+    const success = await toggleEnhancedProxy(enabled);
+    if (success) {
+      message.success(
+        enabled
+          ? "Enhanced proxy requested"
+          : "Enhanced proxy disabled",
+      );
+    } else {
+      const proxyError = useProxyStore.getState().error;
+      message.error(proxyError || "Failed to update enhanced proxy");
     }
   };
 
@@ -811,6 +829,7 @@ export default function Settings() {
           fetchProxyAddressInfo(),
           fetchSystemProxy(),
           fetchSystemProxyLaunchd(),
+          fetchEnhancedProxy(),
           fetchCliProxy(),
           fetchPerformanceConfig(),
         ]);
@@ -855,6 +874,7 @@ export default function Settings() {
     fetchSyncStatusData,
     fetchSystemProxy,
     fetchSystemProxyLaunchd,
+    fetchEnhancedProxy,
     fetchTlsConfigData,
     fetchWhitelistStatus,
   ]);
@@ -1188,11 +1208,14 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
                 onApplyDesktopProxyPort={handleDesktopProxyPortApply}
                 systemProxy={systemProxy}
                 systemProxyLaunchd={systemProxyLaunchd}
+                enhancedProxy={enhancedProxy}
                 cliProxy={cliProxy}
                 systemProxyLoading={systemProxyLoading}
                 systemProxyLaunchdLoading={systemProxyLaunchdLoading}
+                enhancedProxyLoading={enhancedProxyLoading}
                 onToggleSystemProxy={handleSystemProxyToggle}
                 onToggleSystemProxyLaunchd={handleSystemProxyLaunchdToggle}
+                onToggleEnhancedProxy={handleEnhancedProxyToggle}
                 copyProxyConfig={copyProxyConfig}
           overview={overview}
           proxyAddressInfo={proxyAddressInfo}

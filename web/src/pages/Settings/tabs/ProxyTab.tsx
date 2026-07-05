@@ -39,6 +39,7 @@ import type {
   ProxyAddressInfo,
   SystemProxyLaunchdStatus,
   SystemProxyStatus,
+  EnhancedProxyStatus,
 } from "../../../api/proxy";
 import {
   getTemporaryPortActiveSummary,
@@ -919,11 +920,14 @@ export interface ProxyTabProps {
   onApplyDesktopProxyPort: () => void;
   systemProxy: SystemProxyStatus | null;
   systemProxyLaunchd: SystemProxyLaunchdStatus | null;
+  enhancedProxy: EnhancedProxyStatus | null;
   cliProxy: CliProxyStatus | null;
   systemProxyLoading: boolean;
   systemProxyLaunchdLoading: boolean;
+  enhancedProxyLoading: boolean;
   onToggleSystemProxy: (enabled: boolean) => void;
   onToggleSystemProxyLaunchd: (enabled: boolean) => void;
+  onToggleEnhancedProxy: (enabled: boolean) => void;
   copyProxyConfig: () => void;
   overview: SystemOverview | null;
   proxyAddressInfo: ProxyAddressInfo | null;
@@ -966,11 +970,14 @@ export default function ProxyTab({
   onApplyDesktopProxyPort,
   systemProxy,
   systemProxyLaunchd,
+  enhancedProxy,
   cliProxy,
   systemProxyLoading,
   systemProxyLaunchdLoading,
+  enhancedProxyLoading,
   onToggleSystemProxy,
   onToggleSystemProxyLaunchd,
+  onToggleEnhancedProxy,
   copyProxyConfig,
   overview,
   proxyAddressInfo,
@@ -1186,13 +1193,16 @@ export default function ProxyTab({
         <SystemProxySection
           systemProxy={systemProxy}
           systemProxyLaunchd={systemProxyLaunchd}
+          enhancedProxy={enhancedProxy}
           cliProxy={cliProxy}
           systemProxyLoading={systemProxyLoading}
           systemProxyLaunchdLoading={systemProxyLaunchdLoading}
+          enhancedProxyLoading={enhancedProxyLoading}
           injectBifrostBadge={injectBifrostBadge}
           injectBifrostBadgeLoading={injectBifrostBadgeLoading}
           onToggleSystemProxy={onToggleSystemProxy}
           onToggleSystemProxyLaunchd={onToggleSystemProxyLaunchd}
+          onToggleEnhancedProxy={onToggleEnhancedProxy}
           onToggleInjectBifrostBadge={onToggleInjectBifrostBadge}
         />
 
