@@ -127,7 +127,7 @@ final class BifrostRuleEditorContainerView: NSView {
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width, .height]
-        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.textContainerInset = NSSize(width: 16, height: 14)
         textView.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
         textView.drawsBackground = true
@@ -143,9 +143,6 @@ final class BifrostRuleEditorContainerView: NSView {
         textView.isContinuousSpellCheckingEnabled = false
         textView.isGrammarCheckingEnabled = false
 
-        let ruler = BifrostLineNumberRulerView(textView: textView)
-        textView.lineNumberRuler = ruler
-
         scrollView.contentView = BifrostRuleClipView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
@@ -154,6 +151,9 @@ final class BifrostRuleEditorContainerView: NSView {
         scrollView.drawsBackground = true
         scrollView.contentView.drawsBackground = true
         scrollView.borderType = .noBorder
+
+        let ruler = BifrostLineNumberRulerView(textView: textView)
+        textView.lineNumberRuler = ruler
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
         scrollView.verticalRulerView = ruler
@@ -327,6 +327,7 @@ final class BifrostRuleHighlighter {
 struct BifrostRuleEditorTheme {
     let background: NSColor
     let rulerBackground: NSColor
+    let rulerSeparator: NSColor
     let completionBackground: NSColor
     let text: NSColor
     let comment: NSColor
@@ -347,6 +348,9 @@ struct BifrostRuleEditorTheme {
         rulerBackground = isDark
             ? NSColor(calibratedRed: 0.072, green: 0.082, blue: 0.100, alpha: 1)
             : NSColor(calibratedWhite: 0.98, alpha: 1)
+        rulerSeparator = isDark
+            ? NSColor(calibratedRed: 0.165, green: 0.185, blue: 0.215, alpha: 1)
+            : NSColor(calibratedWhite: 0.900, alpha: 1)
         completionBackground = isDark
             ? NSColor(calibratedRed: 0.125, green: 0.145, blue: 0.175, alpha: 1)
             : NSColor(calibratedWhite: 0.965, alpha: 1)
@@ -583,7 +587,7 @@ final class BifrostLineNumberRulerView: NSRulerView {
         self.textView = textView
         super.init(scrollView: textView.enclosingScrollView, orientation: .verticalRuler)
         clientView = textView
-        ruleThickness = 44
+        ruleThickness = 52
     }
 
     required init(coder: NSCoder) {
@@ -596,28 +600,52 @@ final class BifrostLineNumberRulerView: NSRulerView {
               let textContainer = textView.textContainer else {
             return
         }
-        BifrostRuleEditorTheme(appearance: effectiveAppearance).rulerBackground.setFill()
-        rect.fill()
+        let theme = BifrostRuleEditorTheme(appearance: effectiveAppearance)
+        theme.rulerBackground.setFill()
+        bounds.fill()
+
+        theme.rulerSeparator.setStroke()
+        let separator = NSBezierPath()
+        separator.move(to: NSPoint(x: bounds.maxX - 0.5, y: rect.minY))
+        separator.line(to: NSPoint(x: bounds.maxX - 0.5, y: rect.maxY))
+        separator.stroke()
 
         let visible = textView.visibleRect
+        guard layoutManager.numberOfGlyphs > 0 else {
+            draw(lineNumber: 1, at: textView.textContainerOrigin.y - visible.minY)
+            return
+        }
+
         let glyphRange = layoutManager.glyphRange(forBoundingRect: visible, in: textContainer)
+        guard glyphRange.length > 0, glyphRange.location < layoutManager.numberOfGlyphs else {
+            draw(lineNumber: 1, at: textView.textContainerOrigin.y - visible.minY)
+            return
+        }
+
         var lineNumber = lineNumberForCharacter(at: layoutManager.characterIndexForGlyph(at: glyphRange.location), in: textView.string)
         var glyphIndex = glyphRange.location
-        let attrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ]
         while glyphIndex < NSMaxRange(glyphRange) {
             var lineRange = NSRange(location: 0, length: 0)
             let lineRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIndex, effectiveRange: &lineRange)
-            let y = lineRect.minY + textView.textContainerOrigin.y
-            NSString(string: "\(lineNumber)").draw(
-                in: NSRect(x: 4, y: y + 1, width: ruleThickness - 10, height: 14),
-                withAttributes: attrs
-            )
+            let y = lineRect.minY + textView.textContainerOrigin.y - visible.minY
+            draw(lineNumber: lineNumber, at: y, height: max(lineRect.height, 14))
             glyphIndex = NSMaxRange(lineRange)
             lineNumber += 1
         }
+    }
+
+    private func draw(lineNumber: Int, at y: CGFloat, height: CGFloat = 14) {
+        let paragraphStyle = NSMutableParagraphStyle()
+        paragraphStyle.alignment = .right
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor,
+            .paragraphStyle: paragraphStyle,
+        ]
+        NSString(string: "\(lineNumber)").draw(
+            in: NSRect(x: 8, y: y + 1, width: ruleThickness - 16, height: height),
+            withAttributes: attrs
+        )
     }
 
     private func lineNumberForCharacter(at index: Int, in string: String) -> Int {

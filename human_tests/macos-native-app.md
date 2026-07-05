@@ -1766,9 +1766,10 @@
    ```
 5. 打开 `规则` 页面，检查左侧规则列表：
    - 列表行应是和 `小组` 页面一致的普通 SwiftUI row。
-   - 规则行展示名称、entries 和 Enabled/Disabled 胶囊。
+   - 规则行展示名称、entries 和 switch。
    - 不应再展示三横线拖拽手柄。
    - 可访问性树中不应出现 `Drag`、`line.3.horizontal`、`Drag to reorder` 或 `menu button More`。
+   - 右侧规则详情编辑器正文左侧应显示行号栏，正文内容和行号之间保持清晰内距。
 6. 右键规则行打开 context menu，检查排序入口：
    - 可排序规则提供 `Move Up` / `Move Down`。
    - 执行排序后仍通过 `AppModel.moveRule` 保存顺序到服务端。
@@ -1779,6 +1780,7 @@
 - 真实 Native app 中 Rules 左侧列表不再有拖拽手柄；在列表区域拖动鼠标不会进入窗口移动链路。
 - 规则优先级调整改为行 context menu 触发，继续调用原有服务端排序保存逻辑。
 - `Default` 和只读小组规则仍保持锁定；可写规则仍可从 context menu 或详情页切换 Enabled 状态。
+- 规则详情编辑器显示独立行号栏，正文左侧不贴边，滚动时行号与文本行保持对齐。
 
 **实际结果（2026-07-05）：**
 - 执行 `swift build --package-path apps/macos` 通过。
@@ -1791,6 +1793,8 @@
 - 2026-07-05 追加重做：将 Rules 行进一步收敛为和 `GroupListRow` 同构的单一 `Button(action: action)`，移除行内可见 `Menu` 和嵌套按钮；规则启停与 `Move Up` / `Move Down` 进入 row context menu，避免规则列表内的鼠标拖动落入窗口移动或旧排序拖拽路径。
 - 2026-07-05 追加重启验证：恢复 `MainWindowFallback.ensureVisible`，并去除动态替换 `NSWindow` class 的自定义窗口拖拽门禁；窗口改为不透明动态背景，避免透明标题栏露出桌面；拖窗改为 AppKit 标准 `mouseDownCanMoveWindow` 热点。执行 `swift build --package-path apps/macos`、规则/窗口源码合同扫描、`scripts/build-macos-native.sh`、`apps/macos/.build/Bifrost.app/Contents/MacOS/Bifrost --check-rule-editor-layout`、`swift run --package-path apps/macos BifrostNativeCoreChecks` 均通过。带 `BIFROST_NATIVE_STARTUP_TRACE=1` 启动开发 bundle 后日志显示 `fallback ensureVisible windows=1`、`window server onscreen=true`，CoreGraphics 窗口列表能看到 Bifrost 上屏窗口。
 - 2026-07-05 追加窗口热区验证：启动新 bundle 后 CoreGraphics 显示一个上屏主窗口；对顶部热点执行 80px 自动拖拽，窗口 X 从 `774` 变为 `854`；对中间内容区执行同样拖拽，窗口坐标保持 `854,317` 不变；窗口截图确认标题栏区域不再透出桌面背景。
+- 2026-07-05 追加规则列表验证：按用户反馈将 Rules 列表右侧 `Enabled` / `Disabled` 状态胶囊改为独立 switch；行主体仍负责选中规则，switch 只负责启停规则；执行 `swift build --package-path apps/macos`、源码合同扫描和 `git diff --check` 均通过。
+- 2026-07-05 追加编辑器内距验证：按用户反馈将规则编辑器 `NSTextView.textContainerInset` 提升到 `16x14`，避免 DSL 文本贴住编辑器左上边缘；同步 `--check-rule-editor-layout` 检查内距下限；执行 `swift build --package-path apps/macos`、源码合同扫描、`apps/macos/.build/debug/Bifrost --check-rule-editor-layout` 和 `git diff --check` 均通过。
 
 ## 清理步骤
 

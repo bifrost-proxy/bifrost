@@ -90,12 +90,17 @@ struct BifrostApp: App {
                   editor.textView.string == sampleRule,
                   editor.textView.textContainer?.widthTracksTextView == true,
                   !editor.textView.isHorizontallyResizable,
+                  editor.textView.textContainerInset.width >= 16,
+                  editor.textView.textContainerInset.height >= 14,
                   textWidth >= clipWidth - 1,
                   editor.textView.frame.height >= editor.scrollView.contentView.bounds.height - 1,
                   editor.scrollView.contentView.isFlipped,
                   editor.scrollView.contentView.bounds.origin == .zero,
                   editor.scrollView.documentView === editor.textView,
-                  editor.scrollView.verticalRulerView != nil else {
+                  editor.scrollView.hasVerticalRuler,
+                  editor.scrollView.rulersVisible,
+                  editor.scrollView.verticalRulerView === editor.textView.lineNumberRuler,
+                  editor.textView.lineNumberRuler?.ruleThickness ?? 0 >= 52 else {
                 fputs("Bifrost rule editor layout check failed: editable=\(editor.textView.isEditable) textWidth=\(textWidth) clipWidth=\(clipWidth) textLength=\(editor.textView.string.count)\n", stderr)
                 Foundation.exit(1)
             }
@@ -243,12 +248,11 @@ private enum MainWindowFallback {
     }
 
     private static func placeWindowOnVisibleScreenIfNeeded(_ window: NSWindow, force: Bool = false) {
-        let visibleFrames = NSScreen.screens.map(\.visibleFrame)
-        if !force, visibleFrames.contains(where: { $0.intersects(window.frame) }) {
-            return
-        }
         let screenFrame = (NSScreen.main ?? NSScreen.screens.first)?.visibleFrame
             ?? NSRect(x: 0, y: 0, width: 1280, height: 820)
+        if !force, screenFrame.insetBy(dx: 12, dy: 12).contains(NSPoint(x: window.frame.midX, y: window.frame.midY)) {
+            return
+        }
         let width = min(max(window.frame.width, 960), max(screenFrame.width - 80, 960))
         let height = min(max(window.frame.height, 720), max(screenFrame.height - 80, 720))
         let frame = NSRect(

@@ -2,8 +2,8 @@ use std::fs;
 
 use bifrost_cli::cli::{
     AiAsrCommands, AiAsrTaskCommands, AiAsrTaskDailyCommands, AiCommands, AiVoiceCommands,
-    AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, CaCommands, Cli,
-    Commands, NativeAppCommands, RemoteCommands, RemoteFileCommands, SettingCommands, SyncCommands,
+    AiVoiceWakeBindingCommands, AiVoiceWakeCommands, AiVoiceWakeListenerCommands, AppCommands,
+    CaCommands, Cli, Commands, RemoteCommands, RemoteFileCommands, SettingCommands, SyncCommands,
 };
 use bifrost_cli::commands::handle_install_skill;
 use clap::{CommandFactory, Parser};
@@ -55,7 +55,7 @@ fn sync_subcommands_parse() {
 }
 
 #[test]
-fn native_app_commands_parse_under_app_namespace() {
+fn desktop_app_commands_parse_under_app_namespace() {
     let root_help = run_help(&[]);
     assert!(root_help.contains("app"), "root help should expose app");
     assert!(
@@ -64,22 +64,21 @@ fn native_app_commands_parse_under_app_namespace() {
     );
 
     let help = run_help(&["app"]);
-    assert!(help.contains("status"), "app help should contain status");
     assert!(help.contains("install"), "app help should contain install");
     assert!(
         help.contains("uninstall"),
         "app help should contain uninstall"
     );
+    assert!(help.contains("upgrade"), "app help should contain upgrade");
 
     let cli = Cli::try_parse_from([
         "bifrost",
         "app",
         "install",
-        "--source",
-        "/tmp/Bifrost.app",
-        "--install-dir",
+        "--package",
+        "/tmp/Bifrost.dmg",
+        "--app-dir",
         "/tmp/install",
-        "--open",
         "-y",
     ])
     .expect("app install should parse");
@@ -87,17 +86,15 @@ fn native_app_commands_parse_under_app_namespace() {
     match cli.command.expect("command should exist") {
         Commands::App {
             action:
-                NativeAppCommands::Install {
-                    source,
-                    install_dir,
-                    open,
+                AppCommands::Install {
+                    package,
+                    app_dir,
                     yes,
                     ..
                 },
         } => {
-            assert_eq!(source, Some(std::path::PathBuf::from("/tmp/Bifrost.app")));
-            assert_eq!(install_dir, Some(std::path::PathBuf::from("/tmp/install")));
-            assert!(open);
+            assert_eq!(package, Some(std::path::PathBuf::from("/tmp/Bifrost.dmg")));
+            assert_eq!(app_dir, Some(std::path::PathBuf::from("/tmp/install")));
             assert!(yes);
         }
         _ => panic!("unexpected app install command"),
@@ -107,7 +104,7 @@ fn native_app_commands_parse_under_app_namespace() {
         "bifrost",
         "app",
         "uninstall",
-        "--install-dir",
+        "--app-dir",
         "/tmp/install",
         "-y",
     ])
@@ -115,12 +112,9 @@ fn native_app_commands_parse_under_app_namespace() {
 
     match cli.command.expect("command should exist") {
         Commands::App {
-            action:
-                NativeAppCommands::Uninstall {
-                    install_dir, yes, ..
-                },
+            action: AppCommands::Uninstall { app_dir, yes, .. },
         } => {
-            assert_eq!(install_dir, Some(std::path::PathBuf::from("/tmp/install")));
+            assert_eq!(app_dir, Some(std::path::PathBuf::from("/tmp/install")));
             assert!(yes);
         }
         _ => panic!("unexpected app uninstall command"),

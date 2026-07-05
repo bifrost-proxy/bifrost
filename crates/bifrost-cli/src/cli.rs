@@ -437,11 +437,6 @@ previous runtime settings."
         #[command(subcommand)]
         action: NativeAppCommands,
     },
-    #[command(about = "Manage the native macOS app companion")]
-    App {
-        #[command(subcommand)]
-        action: NativeAppCommands,
-    },
     #[command(visible_alias = "cfg", about = "Manage runtime configuration")]
     Config {
         #[command(subcommand)]

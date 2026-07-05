@@ -636,46 +636,59 @@ private struct RuleListRow: View {
     let moveDown: () -> Void
 
     var body: some View {
-        Button(action: action) {
-            HStack(spacing: 9) {
-                Circle()
-                    .fill(rule.enabled ? Color.green : Color.secondary.opacity(0.35))
-                    .frame(width: 7, height: 7)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(rule.name)
-                        .font(.system(size: 13, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(rule.ruleCount ?? 0) entries")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+        HStack(spacing: 9) {
+            Button(action: action) {
+                HStack(spacing: 9) {
+                    Circle()
+                        .fill(rule.enabled ? Color.green : Color.secondary.opacity(0.35))
+                        .frame(width: 7, height: 7)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(rule.name)
+                            .font(.system(size: 13, weight: .semibold))
+                            .lineLimit(1)
+                        Text("\(rule.ruleCount ?? 0) entries")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 8)
                 }
-                Spacer(minLength: 8)
-                if isProtected {
-                    Image(systemName: "lock.fill")
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(.secondary)
-                        .help(protectedHelp)
-                } else {
-                    Text(rule.enabled ? "Enabled" : "Disabled")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(rule.enabled ? Color.green : Color.secondary)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(
-                            (rule.enabled ? Color.green : Color.secondary).opacity(0.10),
-                            in: RoundedRectangle(cornerRadius: 6, style: .continuous)
-                        )
-                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
-            .padding(.horizontal, 9)
-            .padding(.vertical, 8)
-            .background(
-                isSelected ? AppSurface.subtleFill : Color.clear,
-                in: RoundedRectangle(cornerRadius: 7, style: .continuous)
-            )
+            .buttonStyle(.plain)
+            .frame(maxWidth: .infinity)
+
+            if isProtected {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .help(protectedHelp)
+            } else {
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { rule.enabled },
+                        set: { enabled in
+                            guard enabled != rule.enabled else {
+                                return
+                            }
+                            toggle(enabled)
+                        }
+                    )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .disabled(isBusy || !canToggle)
+                .help(canToggle ? "Toggle rule" : protectedHelp)
+            }
         }
-        .buttonStyle(.plain)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 8)
+        .background(
+            isSelected ? AppSurface.subtleFill : Color.clear,
+            in: RoundedRectangle(cornerRadius: 7, style: .continuous)
+        )
+        .contentShape(Rectangle())
         .contextMenu {
             Button("Move Up") {
                 moveUp()
