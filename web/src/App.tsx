@@ -107,7 +107,12 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
       "data-platform",
       isDesktopShell() ? "desktop" : "web",
     );
-  }, []);
+    if (isDesktopShell()) {
+      document.documentElement.setAttribute("data-desktop-platform", desktopPlatform);
+    } else {
+      document.documentElement.removeAttribute("data-desktop-platform");
+    }
+  }, [desktopPlatform]);
 
   const overlayStyles =
     resolvedTheme === "dark"

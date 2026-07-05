@@ -8,6 +8,7 @@ import { useRulesStore } from '../../stores/useRulesStore';
 import { useValuesStore } from '../../stores/useValuesStore';
 import { notifyApiBusinessError } from '../../api/client';
 import pushService from '../../services/pushService';
+import { isMacDesktopShell } from '../../runtime';
 
 const GROUP_PARAM = 'group';
 const RULE_PARAM = 'rule';
@@ -188,7 +189,7 @@ export default function Rules() {
     overflow: 'hidden',
     display: 'flex' as const,
     flexDirection: 'column' as const,
-    backgroundColor: token.colorBgContainer,
+    backgroundColor: isMacDesktopShell() ? 'transparent' : token.colorBgContainer,
     position: 'relative' as const,
   };
 

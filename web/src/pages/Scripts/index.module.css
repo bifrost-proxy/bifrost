@@ -11,6 +11,10 @@
   border-right-color: #303030;
 }
 
+[data-platform="desktop"][data-desktop-platform="macos"] .container {
+  background-color: transparent;
+}
+
 .header {
   display: flex;
   justify-content: space-between;
@@ -206,6 +210,10 @@
 [data-theme="dark"] .footer {
   border-top-color: #303030;
   background-color: #141414;
+}
+
+[data-platform="desktop"][data-desktop-platform="macos"] .footer {
+  background-color: transparent;
 }
 
 .stats {

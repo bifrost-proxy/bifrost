@@ -26,6 +26,7 @@ import {
 } from "@ant-design/icons";
 import { useGroupStore } from "../../stores/useGroupStore";
 import type { Group, GroupVisibility } from "../../api/group";
+import { isMacDesktopShell } from "../../runtime";
 
 const { Title, Paragraph } = Typography;
 
@@ -226,8 +227,8 @@ export default function Groups() {
         width: "100%",
         height: "100%",
         overflow: "auto",
-        backgroundColor: token.colorBgLayout,
-        padding: 24,
+        backgroundColor: isMacDesktopShell() ? "transparent" : token.colorBgLayout,
+        padding: "0 24px 24px",
       }}
     >
       <div style={{ maxWidth: 1200, margin: "0 auto" }}>

@@ -9,6 +9,7 @@ import RequestPanel from "./components/RequestPanel";
 import ResponsePanel from "./components/ResponsePanel";
 import HistoryView from "./components/HistoryView";
 import pushService from "../../services/pushService";
+import { isMacDesktopShell } from "../../runtime";
 
 interface ModeButtonProps {
   mode: ReplayMode;
@@ -120,7 +121,7 @@ export default function Replay() {
       height: "100%",
       width: "100%",
       overflow: "hidden",
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: isMacDesktopShell() ? "transparent" : token.colorBgContainer,
       display: "flex",
     },
     mainContent: {
@@ -137,7 +138,7 @@ export default function Replay() {
       alignItems: "center",
       paddingTop: 8,
       gap: 4,
-      backgroundColor: token.colorBgLayout,
+      backgroundColor: isMacDesktopShell() ? "transparent" : token.colorBgLayout,
     },
     collectionPanel: {
       height: "100%",
@@ -209,6 +210,7 @@ export default function Replay() {
           defaultLeftWidth="280px"
           minLeftWidth={200}
           minRightWidth={500}
+          transparentLeftOnMacDesktop
           left={
             <div style={styles.collectionPanel}>
               <CollectionPanel />

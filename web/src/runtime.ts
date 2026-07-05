@@ -41,6 +41,10 @@ export function getDesktopPlatform(): DesktopPlatform {
   return desktopRuntime.platform;
 }
 
+export function isMacDesktopShell(): boolean {
+  return isDesktopShell() && desktopRuntime.platform === 'macos';
+}
+
 export function setDesktopProxyPort(port: number): void {
   desktopRuntime.proxyPort = port;
 }

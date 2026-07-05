@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type { ReactNode, CSSProperties } from "react";
 import { theme } from "antd";
+import { isMacDesktopShell } from "../../runtime";
 
 interface SplitPaneProps {
   left: ReactNode;
@@ -8,6 +9,7 @@ interface SplitPaneProps {
   defaultLeftWidth?: string;
   minLeftWidth?: number;
   minRightWidth?: number;
+  transparentLeftOnMacDesktop?: boolean;
 }
 
 export default function SplitPane({
@@ -16,8 +18,11 @@ export default function SplitPane({
   defaultLeftWidth = "60%",
   minLeftWidth = 200,
   minRightWidth = 300,
+  transparentLeftOnMacDesktop = false,
 }: SplitPaneProps) {
   const { token } = theme.useToken();
+  const macLeftTransparency = transparentLeftOnMacDesktop && isMacDesktopShell();
+  const paneBackground = token.colorBgContainer;
   const containerRef = useRef<HTMLDivElement>(null);
   const [leftWidth, setLeftWidth] = useState<string>(defaultLeftWidth);
   const [isDragging, setIsDragging] = useState(false);
@@ -29,20 +34,20 @@ export default function SplitPane({
       width: "100%",
       height: "100%",
       overflow: "hidden",
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: macLeftTransparency ? "transparent" : paneBackground,
     },
     leftPane: {
       height: "100%",
       overflow: "auto",
       flexShrink: 0,
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: macLeftTransparency ? "transparent" : paneBackground,
     },
     rightPane: {
       flex: 1,
       height: "100%",
       overflow: "auto",
       minWidth: 0,
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: paneBackground,
     },
     divider: {
       width: 4,

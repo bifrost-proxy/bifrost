@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect, useMemo } from "react";
 import type { ReactNode, CSSProperties } from "react";
 import { theme } from "antd";
+import { isMacDesktopShell } from "../../runtime";
 
 interface ThreeSplitPaneProps {
   left?: ReactNode;
@@ -36,6 +37,7 @@ export default function ThreeSplitPane({
   onRightWidthChange,
 }: ThreeSplitPaneProps) {
   const { token } = theme.useToken();
+  const paneBackground = isMacDesktopShell() ? "transparent" : token.colorBgContainer;
   const containerRef = useRef<HTMLDivElement>(null);
   const [rightWidthPx, setRightWidthPx] = useState<string>(rightWidth);
   const [isDraggingLeft, setIsDraggingLeft] = useState(false);
@@ -50,26 +52,26 @@ export default function ThreeSplitPane({
         width: "100%",
         height: "100%",
         overflow: "hidden",
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: paneBackground,
       },
       leftPane: {
         height: "100%",
         overflow: "hidden",
         flexShrink: 0,
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: paneBackground,
       },
       centerPane: {
         flex: 1,
         height: "100%",
         overflow: "hidden",
         minWidth: 0,
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: paneBackground,
       },
       rightPane: {
         height: "100%",
         overflow: "auto",
         flexShrink: 0,
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: paneBackground,
       },
       divider: {
         width: 4,
@@ -82,7 +84,7 @@ export default function ThreeSplitPane({
         backgroundColor: token.colorPrimary,
       },
     }),
-    [token]
+    [paneBackground, token]
   );
 
   const handleLeftMouseDown = useCallback((e: React.MouseEvent) => {

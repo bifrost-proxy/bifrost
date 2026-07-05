@@ -8,6 +8,7 @@ import {
   FilterOutlined,
 } from "@ant-design/icons";
 import type { ToolbarFilters } from "../../types";
+import { isMacDesktopShell } from "../../runtime";
 
 interface ToolbarProps {
   filters: ToolbarFilters;
@@ -55,6 +56,7 @@ export default function Toolbar({
   onBreakpointToggle,
 }: ToolbarProps) {
   const { token } = theme.useToken();
+  const macDesktopShell = isMacDesktopShell();
 
   const handleTagClick = (group: keyof ToolbarFilters, tag: string) => {
     const currentTags = filters[group];
@@ -84,7 +86,7 @@ export default function Toolbar({
         alignItems: "center",
         justifyContent: "space-between",
         padding: "6px 12px",
-        background: token.colorBgContainer,
+        background: macDesktopShell ? "transparent" : token.colorBgContainer,
         borderBottom: `1px solid ${token.colorBorderSecondary}`,
         flexShrink: 0,
       }}

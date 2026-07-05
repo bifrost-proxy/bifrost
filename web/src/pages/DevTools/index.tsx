@@ -29,6 +29,7 @@ import {
 import type { TrafficRecord } from "../../types";
 import { useTrafficStore } from "../../stores/useTrafficStore";
 import TrafficDetail from "../../components/TrafficDetail";
+import { isMacDesktopShell } from "../../runtime";
 import { ConsoleView, type ConsoleUiEntry } from "./components/ConsolePanel";
 import { DomTree } from "./components/ElementsPanel";
 import { NetworkList } from "./components/NetworkPanel";
@@ -80,7 +81,7 @@ export default function DevTools() {
   const elementInspectingRef = useRef(false);
   const devtoolsThemeVars = useMemo(
     () => ({
-      "--devtools-bg": token.colorBgLayout,
+      "--devtools-bg": isMacDesktopShell() ? "transparent" : token.colorBgLayout,
       "--devtools-surface": token.colorBgContainer,
       "--devtools-surface-alt": token.colorFillQuaternary,
       "--devtools-surface-elevated": token.colorBgElevated,
@@ -579,7 +580,13 @@ export default function DevTools() {
 
   if (!selectedPage) {
     return (
-      <div style={{ ...pageShellStyle, ...devtoolsThemeVars }}>
+      <div
+        style={{
+          ...pageShellStyle,
+          paddingTop: 0,
+          ...devtoolsThemeVars,
+        }}
+      >
         <Space direction="vertical" size={16} style={{ width: "100%", minHeight: 0 }}>
           <div style={listHeaderStyle}>
             <Space direction="vertical" size={4} style={{ minWidth: 0 }}>
@@ -638,7 +645,14 @@ export default function DevTools() {
   }
 
   return (
-    <div data-testid="devtools-detail" style={{ ...detailShellStyle, ...devtoolsThemeVars }}>
+    <div
+      data-testid="devtools-detail"
+      style={{
+        ...detailShellStyle,
+        paddingTop: 0,
+        ...devtoolsThemeVars,
+      }}
+    >
       <div
         style={{
           ...detailContentStyle,
