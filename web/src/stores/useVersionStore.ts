@@ -4,12 +4,15 @@ import {
   checkVersion as checkVersionApi,
   getUpgradeProgress as getUpgradeProgressApi,
   startUpgrade as startUpgradeApi,
+  type UpgradeChannel,
 } from "../api/version";
 import type { UpgradePhase, UpgradeProgress, VersionCheckResponse } from "../types";
 import { isConnectionIssueError } from "../api/client";
+import { isDesktopShell } from "../runtime";
 
 const SEEN_VERSIONS_STORAGE_KEY = "bifrost-seen-versions";
 const CHECK_INTERVAL_MS = 60 * 60 * 1000;
+export const DESKTOP_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const UPGRADE_POLL_INTERVAL_MS = 1000;
 /** sessionStorage flag guarding the single post-upgrade auto-reload. */
 export const UPGRADE_RELOAD_PENDING_KEY = "bifrost-upgrade-reload-pending";
@@ -57,6 +60,10 @@ function isActivePhase(phase: UpgradePhase): boolean {
   );
 }
 
+function currentUpgradeChannel(): UpgradeChannel {
+  return isDesktopShell() ? "desktop" : "cli";
+}
+
 let pollTimer: ReturnType<typeof setInterval> | null = null;
 /** Set once we observe the backend drop (proxy restart) during an upgrade. */
 let sawDisconnect = false;
@@ -70,6 +77,12 @@ function triggerUpgradeReloadOnce() {
     sessionStorage.setItem(UPGRADE_RELOAD_PENDING_KEY, "done");
   } catch {
     // sessionStorage unavailable — fall through and reload anyway.
+  }
+  if (isDesktopShell()) {
+    void import("../desktop/tauri")
+      .then(({ restartDesktopAfterUpdate }) => restartDesktopAfterUpdate())
+      .catch(() => window.location.reload());
+    return;
   }
   window.location.reload();
 }
@@ -99,7 +112,10 @@ export const useVersionStore = create<VersionState>()(
 
         if (!forceRefresh && !skipCache && state.lastChecked) {
           const elapsed = Date.now() - state.lastChecked;
-          if (elapsed < CHECK_INTERVAL_MS) {
+          const interval = currentUpgradeChannel() === "desktop"
+            ? DESKTOP_CHECK_INTERVAL_MS
+            : CHECK_INTERVAL_MS;
+          if (elapsed < interval) {
             return;
           }
         }
@@ -107,7 +123,10 @@ export const useVersionStore = create<VersionState>()(
         set({ loading: true });
 
         try {
-          const response: VersionCheckResponse = await checkVersionApi(forceRefresh);
+          const response: VersionCheckResponse = await checkVersionApi(
+            forceRefresh,
+            currentUpgradeChannel(),
+          );
           set({
             hasUpdate: response.has_update,
             currentVersion: response.current_version,
@@ -166,7 +185,7 @@ export const useVersionStore = create<VersionState>()(
           upgradeError: null,
         });
         try {
-          const progress = await startUpgradeApi();
+          const progress = await startUpgradeApi(currentUpgradeChannel());
           set({
             upgradePhase: progress.phase,
             upgradePercent: progress.percent,

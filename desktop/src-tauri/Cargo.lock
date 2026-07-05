@@ -141,7 +141,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bifrost-core"
-version = "0.0.116"
+version = "0.0.138"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -151,6 +151,7 @@ dependencies = [
  "libc",
  "lru",
  "once_cell",
+ "openssl-probe",
  "parking_lot",
  "rand 0.8.6",
  "regex",
@@ -175,7 +176,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-desktop"
-version = "0.0.116"
+version = "0.0.138"
 dependencies = [
  "bifrost-core",
  "bifrost-storage",
@@ -193,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-storage"
-version = "0.0.116"
+version = "0.0.138"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -212,7 +213,7 @@ dependencies = [
 
 [[package]]
 name = "bifrost-tls"
-version = "0.0.116"
+version = "0.0.138"
 dependencies = [
  "bifrost-core",
  "chrono",
@@ -1583,6 +1584,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "tokio",
  "tokio-rustls",
@@ -3206,6 +3208,7 @@ dependencies = [
  "pin-project-lite",
  "quinn",
  "rustls",
+ "rustls-native-certs",
  "rustls-pki-types",
  "serde",
  "serde_json",
@@ -3322,6 +3325,18 @@ dependencies = [
  "rustls-webpki",
  "subtle",
  "zeroize",
+]
+
+[[package]]
+name = "rustls-native-certs"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dab5152771c58876a2146916e53e35057e1a4dfa2b9df0f0305b07f611fdea4d"
+dependencies = [
+ "openssl-probe",
+ "rustls-pki-types",
+ "schannel",
+ "security-framework",
 ]
 
 [[package]]

@@ -93,6 +93,10 @@ export async function notifyMainWindowReady(): Promise<void> {
   await invokeDesktop<void>("notify_main_window_ready");
 }
 
+export async function restartDesktopAfterUpdate(): Promise<void> {
+  await invokeDesktop<void>("restart_desktop_after_update");
+}
+
 export async function setDesktopDocumentEdited(edited: boolean): Promise<void> {
   const invoke = getCurrentInvoke();
   if (!invoke) {

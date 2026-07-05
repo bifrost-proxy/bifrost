@@ -1,5 +1,6 @@
 mod admin;
 pub mod agent;
+mod app;
 mod asr;
 mod asr_tui;
 mod bifrost_file;
@@ -44,6 +45,7 @@ use serde_json::Value;
 use tracing::debug;
 
 pub use admin::*;
+pub use app::handle_app_command;
 pub use asr::handle_ai_command;
 pub use ca::*;
 pub use capture::{parse_duration, run_capture_wait, CaptureOutputFormat, CaptureWaitOptions};
