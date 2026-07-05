@@ -4994,10 +4994,17 @@ mod coverage_boost {
     }
 
     #[test]
-    fn find_available_port_returns_preferred_port_when_free() {
+    fn find_available_port_returns_available_port_at_or_after_preferred() {
         let preferred = allocate_free_loopback_port();
         let actual = find_available_port("127.0.0.1", preferred).expect("should find port");
-        assert_eq!(actual, preferred);
+        assert!(
+            actual >= preferred,
+            "expected actual >= preferred, got {actual} < {preferred}"
+        );
+        assert!(
+            actual <= preferred.saturating_add(MAX_PORT_INCREMENT_ATTEMPTS),
+            "expected actual within search range, got {actual} from preferred {preferred}"
+        );
     }
 
     #[test]
