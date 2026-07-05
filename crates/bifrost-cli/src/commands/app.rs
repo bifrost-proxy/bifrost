@@ -19,7 +19,7 @@ use super::update_check::get_latest_version_fresh_with_diagnostics;
 use super::upgrade::handle_upgrade;
 
 #[cfg(any(target_os = "windows", test))]
-const APP_NAME: &str = "Bifrost";
+const WINDOWS_APP_NAME: &str = "Bifrost";
 const MACOS_APP_BUNDLE: &str = "Bifrost.app";
 #[cfg(target_os = "windows")]
 const WINDOWS_APP_EXE: &str = "bifrost-desktop.exe";
@@ -449,7 +449,7 @@ fn resolve_app_dir(app_dir: Option<PathBuf>) -> Result<PathBuf, BifrostError> {
         let local_app_data = env::var_os("LOCALAPPDATA")
             .map(PathBuf::from)
             .ok_or_else(|| BifrostError::Config("LOCALAPPDATA is not set".to_string()))?;
-        Ok(local_app_data.join(APP_NAME))
+        Ok(local_app_data.join(WINDOWS_APP_NAME))
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
@@ -470,7 +470,7 @@ fn resolve_app_path(app_dir: &Path) -> PathBuf {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        app_dir.join(APP_NAME)
+        app_dir.join("Bifrost")
     }
 }
 
@@ -949,7 +949,7 @@ fn parse_windows_msi_product_code_for_install_dir(
     for line in reg_output.lines().chain(std::iter::once("")) {
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with("HKEY_") {
-            if display_name.as_deref() == Some(APP_NAME)
+            if display_name.as_deref() == Some(WINDOWS_APP_NAME)
                 && install_location
                     .as_deref()
                     .map(normalize_windows_path_for_compare_str)
