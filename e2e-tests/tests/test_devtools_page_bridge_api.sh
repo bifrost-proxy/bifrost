@@ -542,7 +542,7 @@ async function closeAntModals(page) {
 
 async function clickDevtoolsRefresh(page) {
   await closeAntModals(page);
-  await page.getByTestId('devtools-refresh').click();
+  await dispatchVisibleClick(page.getByTestId('devtools-refresh'), 'devtools-refresh');
 }
 
 async function waitForDevtoolsNetworkText(page, pattern, label, timeoutMs = 30000) {
