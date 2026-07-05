@@ -545,6 +545,27 @@ async function clickDevtoolsRefresh(page) {
   await page.getByTestId('devtools-refresh').click();
 }
 
+async function waitForDevtoolsNetworkText(page, pattern, label, timeoutMs = 30000) {
+  const startedAt = Date.now();
+  let lastPanelText = '';
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await page
+        .getByTestId('devtools-network-panel')
+        .getByText(pattern)
+        .waitFor({ timeout: Math.min(5000, Math.max(1000, timeoutMs - (Date.now() - startedAt))) });
+      return;
+    } catch (error) {
+      lastPanelText = await page
+        .getByTestId('devtools-network-panel')
+        .evaluate((node) => node.textContent?.slice(0, 1000) || '')
+        .catch(() => lastPanelText);
+      await clickDevtoolsRefresh(page).catch(() => {});
+    }
+  }
+  throw new Error(`Timed out waiting for DevTools Network text ${label}: ${lastPanelText}`);
+}
+
 async function waitForDevToolsPage(predicate, description, timeoutMs = 10000) {
   const startedAt = Date.now();
   let lastPages = [];
@@ -2062,10 +2083,10 @@ try {
 await adminPage.getByTestId('devtools-network-panel').getByText('Protocol').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Host').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Path').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 15000 });
+await waitForDevtoolsNetworkText(adminPage, /webui-network-complete/, 'webui-network-complete refresh result');
 targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Network refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('webui-network-complete');
-await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 15000 });
+await waitForDevtoolsNetworkText(adminPage, /webui-network-complete/, 'webui-network-complete search result');
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ state: 'detached', timeout: 8000 });
 const webuiNetworkRows = await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').evaluateAll((rows) =>
   rows.map((row) => row.textContent || '').filter((text) => text.includes('webui-network-complete'))
