@@ -30,6 +30,39 @@ with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
 PY
 }
 
+install_sync_server_dependencies() {
+  local sync_server_dir="$1"
+  local attempts="${BIFROST_SYNC_SERVER_INSTALL_ATTEMPTS:-3}"
+  local attempt
+
+  for attempt in $(seq 1 "$attempts"); do
+    echo "Installing sync-server dependencies (attempt ${attempt}/${attempts})"
+    if (
+      cd "$sync_server_dir"
+      npm_config_fetch_retries="${npm_config_fetch_retries:-5}" \
+        npm_config_fetch_retry_maxtimeout="${npm_config_fetch_retry_maxtimeout:-120000}" \
+        npm_config_fetch_retry_mintimeout="${npm_config_fetch_retry_mintimeout:-10000}" \
+        npm_config_fetch_timeout="${npm_config_fetch_timeout:-120000}" \
+        pnpm install --frozen-lockfile
+    ); then
+      return 0
+    fi
+
+    if [[ "$attempt" -lt "$attempts" ]]; then
+      echo "sync-server dependency install failed; retrying after cleaning native package artifacts" >&2
+      rm -rf \
+        "$sync_server_dir/node_modules/better-sqlite3" \
+        "$sync_server_dir/node_modules/.pnpm"/better-sqlite3@* \
+        "$sync_server_dir/node_modules/.pnpm"/node-gyp@* \
+        2>/dev/null || true
+      sleep $((attempt * 10))
+    fi
+  done
+
+  echo "sync-server dependency install failed after ${attempts} attempts" >&2
+  return 1
+}
+
 start_e2e_sync_server() {
   # Rust E2E group-rule tests exercise sync-backed paths. Keep them on the
   # repo-local test sync server instead of the production default URL.
@@ -39,7 +72,7 @@ start_e2e_sync_server() {
   local sync_server_dir
   sync_server_dir="$(sync_server_dir)"
   if [[ ! -d "$sync_server_dir/node_modules" ]]; then
-    (cd "$sync_server_dir" && pnpm install --frozen-lockfile)
+    install_sync_server_dependencies "$sync_server_dir"
   fi
   if ! sync_server_has_fresh_dist_entry "$sync_server_dir"; then
     (cd "$sync_server_dir" && pnpm run build)
