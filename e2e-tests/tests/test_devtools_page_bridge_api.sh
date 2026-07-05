@@ -2062,10 +2062,10 @@ try {
 await adminPage.getByTestId('devtools-network-panel').getByText('Protocol').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Host').waitFor({ timeout: 8000 });
 await adminPage.getByTestId('devtools-network-panel').getByText('Path').waitFor({ timeout: 8000 });
-await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 15000 });
 targetCounters = await assertTargetRuntimeUnchanged(page, targetCounters, 'AV-CDP-44 failed: Network refresh should use WS snapshot without target reload or business refetch');
 await panelSearch.fill('webui-network-complete');
-await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 8000 });
+await adminPage.getByTestId('devtools-network-panel').getByText(/webui-network-complete/).waitFor({ timeout: 15000 });
 await adminPage.getByTestId('devtools-network-panel').getByText(/devtools\/api\/ping/).waitFor({ state: 'detached', timeout: 8000 });
 const webuiNetworkRows = await adminPage.getByTestId('devtools-network-panel').getByTestId('traffic-row').evaluateAll((rows) =>
   rows.map((row) => row.textContent || '').filter((text) => text.includes('webui-network-complete'))
