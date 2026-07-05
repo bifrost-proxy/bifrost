@@ -10,6 +10,7 @@ import Rules from "./pages/Rules";
 import Traffic from "./pages/Traffic";
 import TrafficDetailPage from "./pages/TrafficDetailPage";
 import Replay from "./pages/Replay";
+import Activity from "./pages/Activity";
 import Settings from "./pages/Settings";
 import SyncLogin from "./pages/SyncLogin";
 import Login from "./pages/Login";
@@ -279,7 +280,8 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                   </AdminAuthGate>
                 }
               >
-                <Route index element={<Navigate to="/traffic" replace />} />
+                <Route index element={<Navigate to="/activity" replace />} />
+                <Route path="activity" element={<Activity />} />
                 <Route path="traffic" element={<Traffic />} />
                 <Route path="replay" element={<Replay />} />
                 <Route path="rules" element={<Rules />} />
@@ -315,7 +317,8 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
                   </AdminAuthGate>
                 }
               >
-                <Route index element={<Navigate to="/traffic" replace />} />
+                <Route index element={<Navigate to="/activity" replace />} />
+                <Route path="activity" element={<Activity />} />
                 <Route path="traffic" element={<Traffic />} />
                 <Route path="replay" element={<Replay />} />
                 <Route path="rules" element={<Rules />} />
@@ -341,7 +344,9 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
 function GlobalRouteEffects() {
   const location = useLocation();
   const trafficEnabled =
-    location.pathname === "/traffic" || location.pathname === "/traffic/detail";
+    location.pathname === "/activity" ||
+    location.pathname === "/traffic" ||
+    location.pathname === "/traffic/detail";
 
   useGlobalDataSync({ trafficEnabled });
   useEditorCompletion();

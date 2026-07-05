@@ -1,0 +1,436 @@
+import { expect, test, type Page, type Route } from "@playwright/test";
+import { apiBase, openPage, uniqueName } from "./helpers/admin-helpers";
+
+const emptyTlsConfig = {
+  enable_tls_interception: false,
+  intercept_exclude: [],
+  intercept_include: [],
+  app_intercept_exclude: [],
+  app_intercept_include: [],
+  ip_intercept_exclude: [],
+  ip_intercept_include: [],
+  unsafe_ssl: false,
+  disconnect_on_config_change: true,
+};
+
+async function fulfillJson(route: Route, body: unknown) {
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify(body),
+  });
+}
+
+function trafficRecord(id: string, seq: number, app: string, responseSize: number) {
+  return {
+    id,
+    seq,
+    ts: Date.now(),
+    m: "GET",
+    h: "example.test",
+    p: `/activity-${seq}`,
+    s: 200,
+    ct: "text/plain",
+    req_sz: 128,
+    res_sz: responseSize,
+    dur: 12,
+    proto: "http",
+    cip: "127.0.0.1",
+    capp: app,
+    cpid: 1000 + seq,
+    flags: 0,
+    fc: 0,
+    st: new Date().toISOString(),
+    et: new Date().toISOString(),
+    rc: 0,
+    rp: [],
+  };
+}
+
+async function mockActivityApi(page: Page) {
+  await page.route("**/_bifrost/api/**", async (route) => {
+    const url = new URL(route.request().url());
+    const apiPath = url.pathname.replace(/^\/_bifrost\/api/, "");
+
+    if (apiPath === "/auth/status") {
+      await fulfillJson(route, { auth_required: false });
+      return;
+    }
+    if (apiPath === "/sync/status") {
+      await fulfillJson(route, {
+        enabled: false,
+        auto_sync: false,
+        remote_base_url: "",
+        has_session: false,
+        reachable: false,
+        authorized: false,
+        syncing: false,
+        reason: "disabled",
+      });
+      return;
+    }
+    if (apiPath === "/config/tls") {
+      await fulfillJson(route, emptyTlsConfig);
+      return;
+    }
+    if (apiPath === "/config") {
+      await fulfillJson(route, {
+        tls: emptyTlsConfig,
+        tray: {
+          enabled: false,
+          supported: false,
+          system_stats_supported: false,
+          show_system_stats: false,
+          system_stats_items: {
+            cpu: false,
+            memory: false,
+            disk: false,
+            upload: false,
+            download: false,
+          },
+        },
+        port: 9900,
+        host: "127.0.0.1",
+      });
+      return;
+    }
+    if (apiPath === "/system/overview") {
+      await fulfillJson(route, {
+        system: {
+          version: "0.0.0-test",
+          device_name: "test",
+          os: "macos",
+          arch: "aarch64",
+          cpu_logical_cores: 8,
+          memory_total_bytes: 1,
+          memory_available_bytes: 1,
+          uptime_secs: 1,
+          pid: 123,
+        },
+        metrics: {
+          timestamp: Date.now(),
+          memory_used: 1,
+          memory_total: 1,
+          cpu_usage: 1,
+          total_requests: 1777,
+          active_connections: 18,
+          bytes_sent: 952107008,
+          bytes_received: 33344717,
+          bytes_sent_rate: 113,
+          bytes_received_rate: 57,
+          qps: 0,
+          max_qps: 0,
+          max_bytes_sent_rate: 0,
+          max_bytes_received_rate: 0,
+          http: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          https: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          tunnel: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          ws: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          wss: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          h3: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          h3s: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+          socks5: { requests: 0, bytes_sent: 0, bytes_received: 0, active_connections: 0 },
+        },
+        rules: { total: 30, enabled: 1 },
+        traffic: { recorded: 1777 },
+        server: { port: 9900, admin_url: "http://127.0.0.1:9900/_bifrost/" },
+        pending_authorizations: 0,
+      });
+      return;
+    }
+    if (apiPath === "/proxy/system") {
+      await fulfillJson(route, {
+        supported: true,
+        enabled: false,
+        host: "127.0.0.1",
+        port: 9900,
+        bypass: "",
+        managed_by_bifrost: false,
+        configured_enabled: false,
+      });
+      return;
+    }
+    if (apiPath === "/proxy/cli") {
+      await fulfillJson(route, {
+        enabled: true,
+        shell: "CLI",
+        config_files: [],
+        proxy_url: "127.0.0.1:9900",
+      });
+      return;
+    }
+    if (apiPath === "/traffic/updates") {
+      await fulfillJson(route, {
+        new_records: [
+          trafficRecord("t-1", 1, "codex", 2207),
+          trafficRecord("t-2", 2, "codex", 800),
+          trafficRecord("t-3", 3, "Microsoft Edge Helper", 990),
+          trafficRecord("t-4", 4, "Lark Helper", 235),
+        ],
+        updated_records: [],
+        has_more: false,
+        server_total: 1777,
+        server_sequence: 4,
+      });
+      return;
+    }
+    if (apiPath === "/rules/active-summary") {
+      await fulfillJson(route, {
+        total: 1,
+        rules: [
+          {
+            name: "Default",
+            rule_count: 1,
+            group_id: null,
+            group_name: null,
+          },
+        ],
+        variable_conflicts: [],
+        merged_content:
+          "# Global default rules.\n# These rules are always enabled and apply to every proxy listener.\n\n# abc\na.com status://200",
+      });
+      return;
+    }
+    if (apiPath === "/ports") {
+      await fulfillJson(route, [
+        {
+          port: 18888,
+          host: "127.0.0.1",
+          name: "Activity temporary port",
+          status: "running",
+          rule_refs: [{ type: "local_rule", name: "activity-temp-rule" }],
+          missing_refs: [],
+          created_at: Date.now(),
+          updated_at: Date.now(),
+        },
+      ]);
+      return;
+    }
+    if (apiPath === "/ports/18888/active-summary") {
+      await fulfillJson(route, {
+        port: 18888,
+        total: 2,
+        rules: [
+          { name: "Default", rule_count: 1, group_id: null, group_name: null },
+          { name: "activity-temp-rule", rule_count: 1, group_id: null, group_name: null },
+        ],
+        merged_content: "# Default\nactivity-temp.test status://219 resBody://(activity-temp-rule)",
+      });
+      return;
+    }
+    if (apiPath === "/notifications/unread-count") {
+      await fulfillJson(route, { unread_count: 0 });
+      return;
+    }
+    if (apiPath === "/notifications/client-trust") {
+      await fulfillJson(route, { items: [], untrusted_count: 0 });
+      return;
+    }
+    if (apiPath === "/whitelist/pending" || apiPath === "/config/ip-tls/pending") {
+      await fulfillJson(route, []);
+      return;
+    }
+    if (apiPath === "/remote-invoke/pairings/pending") {
+      await fulfillJson(route, { pairings: [] });
+      return;
+    }
+    if (apiPath === "/mobile-devices") {
+      await fulfillJson(route, {
+        android: { adb_available: false, devices: [], message: "mocked" },
+        ios: {
+          supported: false,
+          devices: [],
+          configurator: { supported: false, cfgutil_available: false, message: "mocked" },
+          message: "mocked",
+        },
+        ios_profile_url: "",
+        ios_profile_qrcode_url: "",
+      });
+      return;
+    }
+    if (apiPath === "/system/version-check") {
+      await fulfillJson(route, {
+        has_update: false,
+        current_version: "0.0.0-test",
+        latest_version: null,
+        release_highlights: [],
+        release_url: null,
+        checked_at: "2026-07-05T00:00:00Z",
+      });
+      return;
+    }
+    if (apiPath === "/rules") {
+      await fulfillJson(route, []);
+      return;
+    }
+    if (apiPath === "/scripts") {
+      await fulfillJson(route, { request: [], response: [], decode: [], parser: [] });
+      return;
+    }
+    if (apiPath === "/syntax") {
+      await fulfillJson(route, {
+        protocols: [],
+        template_variables: [],
+        patterns: [],
+        protocol_aliases: {},
+        scripts: {
+          request_scripts: [],
+          response_scripts: [],
+          decode_scripts: [],
+          parser_scripts: [],
+        },
+        filter_specs: [],
+      });
+      return;
+    }
+
+    await fulfillJson(route, { success: true });
+  });
+}
+
+test("Activity tab is first, default, data-rich, and animated on hover", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  await mockActivityApi(page);
+
+  await page.goto("/_bifrost/");
+  await expect(page).toHaveURL(/\/_bifrost\/activity$/);
+  await expect(page.getByTestId("activity-page")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Activity" })).toBeVisible();
+
+  const firstNav = page.getByTestId("app-sidebar-nav-item").first();
+  await expect(firstNav).toHaveAttribute("data-nav-label", "Activity");
+  await expect(firstNav).toHaveAttribute("data-nav-key", "/activity");
+
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Active Connections" })).toContainText("18");
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "Upload" })).toContainText("113 B/s");
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("Disabled");
+  await expect(page.getByTestId("activity-stat-card").filter({ hasText: "System Proxy" })).toContainText("http://127.0.0.1:9900");
+  await expect(page.getByTestId("activity-rule-pill").filter({ hasText: "Default" })).toContainText("1 entries");
+  await expect(page.getByTestId("activity-merged-rules")).toContainText("a.com status://200");
+  await expect(page.getByTestId("activity-temporary-ports-panel")).toContainText("Temporary Ports");
+  await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("127.0.0.1:18888");
+  await expect(page.getByTestId("activity-temporary-port-card-18888")).toContainText("activity-temp-rule");
+  await expect(page.getByTestId("activity-temporary-port-merged-18888")).toContainText("resBody://(activity-temp-rule)");
+  await expect(page.getByTestId("activity-app-row").filter({ hasText: "codex" })).toContainText("2");
+
+  const mergedMetrics = await page.getByTestId("activity-merged-rules").evaluate((element) => {
+    const parent = element.parentElement;
+    return {
+      codeHeight: element.getBoundingClientRect().height,
+      parentHeight: parent?.getBoundingClientRect().height ?? 0,
+    };
+  });
+  expect(mergedMetrics.codeHeight).toBeGreaterThan(250);
+  expect(mergedMetrics.parentHeight - mergedMetrics.codeHeight).toBeLessThan(60);
+
+  await page.evaluate(() => navigator.clipboard.writeText(""));
+  await page.getByTestId("activity-merged-rules").evaluate((element) => {
+    const textNode = element.firstChild;
+    if (!textNode) return;
+    const text = textNode.textContent || "";
+    const start = text.indexOf("a.com");
+    const range = document.createRange();
+    range.setStart(textNode, start);
+    range.setEnd(textNode, start + "a.com status://200".length);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+  });
+  await page.getByTestId("activity-copy-merged-rules").click();
+  await expect
+    .poll(async () => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe("a.com status://200");
+
+  await page.evaluate(() => {
+    window.getSelection()?.removeAllRanges();
+    return navigator.clipboard.writeText("");
+  });
+  await page.getByTestId("activity-copy-merged-rules").click();
+  await expect
+    .poll(async () => page.evaluate(() => navigator.clipboard.readText()))
+    .toContain("# Global default rules.");
+
+  const firstCard = page.getByTestId("activity-stat-card").first();
+  const cardTransformBefore = await firstCard.evaluate(
+    (element) => window.getComputedStyle(element).transform,
+  );
+  await firstCard.hover();
+  await page.waitForTimeout(220);
+  const cardTransformAfter = await firstCard.evaluate(
+    (element) => window.getComputedStyle(element).transform,
+  );
+  expect(cardTransformAfter).not.toBe(cardTransformBefore);
+
+  const codexRow = page.getByTestId("activity-app-row").filter({ hasText: "codex" });
+  const fill = codexRow.locator('[class*="barFill"]');
+  const fillFilterBefore = await fill.evaluate((element) => window.getComputedStyle(element).filter);
+  await codexRow.hover();
+  await page.waitForTimeout(220);
+  const fillFilterAfter = await fill.evaluate((element) => window.getComputedStyle(element).filter);
+  expect(fillFilterAfter).not.toBe(fillFilterBefore);
+
+  await page.getByTestId("theme-toggle").click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByTestId("activity-page")).toBeVisible();
+  await expect(page.getByTestId("activity-rules-panel")).toContainText("Active Rule Analysis");
+  await expect(page.getByTestId("activity-distribution-panel")).toContainText("Traffic Distribution");
+  const darkPanelBackground = await page
+    .getByTestId("activity-rules-panel")
+    .evaluate((element) => window.getComputedStyle(element).backgroundColor);
+  expect(darkPanelBackground).not.toBe("rgba(255, 255, 255, 0.86)");
+});
+
+test("Activity shows temporary port details from a running temporary listener", async ({
+  page,
+  request,
+}) => {
+  const ruleName = uniqueName("activity-temp-port-rule");
+  let temporaryPort: number | null = null;
+
+  try {
+    await request.post(`${apiBase}/rules`, {
+      data: {
+        name: ruleName,
+        content: `activity-temp-real.test status://219 resBody://(${ruleName})`,
+        enabled: false,
+      },
+    });
+    const bindRes = await request.post(`${apiBase}/ports`, {
+      data: {
+        port: 0,
+        name: "Activity UI temporary port",
+        rule_refs: [{ type: "local_rule", name: ruleName }],
+      },
+    });
+    const binding = (await bindRes.json()) as { port: number };
+    temporaryPort = binding.port;
+
+    await openPage(page, "activity");
+    const card = page.getByTestId(`activity-temporary-port-card-${temporaryPort}`);
+    await expect(card).toBeVisible();
+    await expect(card).toContainText(`127.0.0.1:${temporaryPort}`);
+    await expect(card).toContainText("Activity UI temporary port");
+    await expect(card).toContainText(ruleName);
+    await expect(page.getByTestId(`activity-temporary-port-merged-${temporaryPort}`)).toContainText(
+      `resBody://(${ruleName})`,
+    );
+
+    const transformBefore = await card.evaluate(
+      (element) => window.getComputedStyle(element).transform,
+    );
+    await card.hover();
+    await page.waitForTimeout(220);
+    const transformAfter = await card.evaluate(
+      (element) => window.getComputedStyle(element).transform,
+    );
+    expect(transformAfter).not.toBe(transformBefore);
+  } finally {
+    if (temporaryPort !== null) {
+      await request.delete(`${apiBase}/ports/${temporaryPort}`);
+    }
+    await request.delete(`${apiBase}/rules/${encodeURIComponent(ruleName)}`);
+  }
+});

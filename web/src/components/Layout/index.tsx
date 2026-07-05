@@ -2,6 +2,7 @@ import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import { theme, Badge } from "antd";
 import {
   GlobalOutlined,
+  DashboardOutlined,
   FileTextOutlined,
   SettingOutlined,
   DatabaseOutlined,
@@ -84,6 +85,7 @@ export default function AppLayout() {
 
   const menuItems: MenuItem[] = useMemo(
     () => [
+      { key: "/activity", icon: <DashboardOutlined />, label: "Activity" },
       { key: "/traffic", icon: <GlobalOutlined />, label: "Network" },
       { key: "/replay", icon: <ThunderboltOutlined />, label: "Replay" },
       { key: "/rules", icon: <FileTextOutlined />, label: "Rules" },
@@ -321,7 +323,7 @@ export default function AppLayout() {
   );
 
   const isActive = (key: string) => {
-    if (key === "/traffic" && location.pathname === "/") return true;
+    if (key === "/activity" && location.pathname === "/") return true;
     return location.pathname === key || location.pathname.startsWith(key + "/");
   };
 

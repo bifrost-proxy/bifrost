@@ -1,0 +1,600 @@
+.activityPage {
+  min-height: 100%;
+  padding: 34px 32px 42px;
+  color: var(--activity-text, #1f2328);
+}
+
+.activityShell {
+  width: min(100%, 1480px);
+  margin: 0 auto;
+}
+
+.pageTitle {
+  margin: 0 0 18px;
+  font-size: 32px;
+  line-height: 1.15;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.statGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(142px, 1fr));
+  gap: 18px;
+  margin-bottom: 14px;
+}
+
+.statCard,
+.panel {
+  border: 1px solid rgba(148, 163, 184, 0.13);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 18px 46px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(18px) saturate(1.08);
+}
+
+.statCard {
+  min-height: 132px;
+  border-radius: 8px;
+  padding: 22px 22px 18px;
+  position: relative;
+  overflow: hidden;
+  transition:
+    transform 180ms ease,
+    box-shadow 180ms ease,
+    border-color 180ms ease,
+    background 180ms ease;
+}
+
+.statCard::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(135deg, rgba(255, 255, 255, 0.64), rgba(255, 255, 255, 0));
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.statCard:hover {
+  transform: translateY(-4px);
+  border-color: rgba(24, 144, 255, 0.24);
+  box-shadow: 0 22px 58px rgba(15, 23, 42, 0.12);
+}
+
+.statCard:hover::after {
+  opacity: 1;
+}
+
+.statHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  color: #7b818d;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.statDot {
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 14%, transparent);
+  flex: 0 0 auto;
+}
+
+.statValue {
+  margin-top: 24px;
+  font-size: clamp(26px, 3vw, 38px);
+  line-height: 1;
+  font-weight: 850;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.statCaption {
+  margin-top: 20px;
+  color: #858b96;
+  font-size: 14px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.panel {
+  border-radius: 8px;
+  padding: 24px;
+  margin-top: 12px;
+}
+
+.rulesPanel {
+  display: flex;
+  min-height: min(560px, max(360px, calc(100vh - 360px)));
+  flex-direction: column;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  margin-bottom: 20px;
+}
+
+.panelTitle {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.3;
+  font-weight: 800;
+}
+
+.panelSubtitle {
+  margin-top: 4px;
+  color: #858b96;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.activeBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  background: transparent;
+  color: #69707c;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+  transition:
+    transform 160ms ease,
+    color 160ms ease;
+}
+
+.activeBadge:hover {
+  color: #178bff;
+  transform: translateY(-1px);
+}
+
+.rulesLayout {
+  display: grid;
+  flex: 1;
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
+  gap: 22px;
+  min-height: 0;
+}
+
+.activeRulesColumn,
+.mergedColumn {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.sectionLabel {
+  margin-bottom: 10px;
+  color: #7b818d;
+  font-size: 12px;
+  font-weight: 850;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ruleList {
+  display: grid;
+  overflow: auto;
+  gap: 8px;
+  padding: 2px 4px 2px 0;
+}
+
+.rulePill {
+  border: 0;
+  border-radius: 7px;
+  width: 100%;
+  padding: 12px 14px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+  background: rgba(241, 245, 249, 0.82);
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.rulePill:hover,
+.rulePillActive {
+  transform: translateX(4px);
+  background: rgba(232, 240, 250, 0.96);
+  box-shadow: inset 3px 0 0 #178bff;
+}
+
+.rulePillName {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.rulePillMeta {
+  margin-top: 3px;
+  padding-left: 20px;
+  color: #7b818d;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.mergedHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.lineCount {
+  color: #858b96;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.mergedActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.copyButton {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(226, 232, 240, 0.9);
+  color: #4b5563;
+  cursor: pointer;
+  transition:
+    transform 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.copyButton:hover {
+  transform: translateY(-1px);
+  background: #178bff;
+  color: #fff;
+}
+
+.mergedCode {
+  flex: 1;
+  min-height: 260px;
+  max-height: none;
+  margin: 0;
+  padding: 16px;
+  border-radius: 7px;
+  overflow: auto;
+  background: linear-gradient(180deg, rgba(241, 245, 249, 0.92), rgba(248, 250, 252, 0.92));
+  color: #4b5563;
+  font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+}
+
+.distributionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 16px;
+}
+
+.temporaryPortsPanel {
+  padding-bottom: 22px;
+}
+
+.temporaryPortGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 14px;
+}
+
+.temporaryPortCard {
+  display: grid;
+  gap: 16px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 8px;
+  padding: 18px;
+  background: rgba(248, 250, 252, 0.72);
+  transition:
+    transform 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease,
+    background 180ms ease;
+}
+
+.temporaryPortCard:hover {
+  transform: translateY(-3px);
+  border-color: rgba(24, 144, 255, 0.24);
+  box-shadow: 0 16px 42px rgba(15, 23, 42, 0.1);
+  background: rgba(255, 255, 255, 0.88);
+}
+
+.tempPortHeader,
+.tempMergedHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.tempPortAddress {
+  font-size: 18px;
+  font-weight: 850;
+}
+
+.tempPortName {
+  margin-top: 4px;
+  color: #7b818d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.tempPortStatus {
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(34, 197, 94, 0.12);
+  color: #15803d;
+  font-size: 12px;
+  font-weight: 850;
+  text-transform: capitalize;
+  white-space: nowrap;
+}
+
+.tempPortStatus[data-status="degraded"] {
+  background: rgba(245, 158, 11, 0.14);
+  color: #b45309;
+}
+
+.tempPortMetaGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.ruleChipList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.ruleChip {
+  max-width: 100%;
+  overflow: hidden;
+  border-radius: 6px;
+  padding: 4px 8px;
+  background: rgba(22, 140, 255, 0.1);
+  color: #1d4ed8;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mutedText,
+.missingRules {
+  color: #7b818d;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.missingRules {
+  border-radius: 6px;
+  padding: 8px 10px;
+  background: rgba(245, 158, 11, 0.12);
+  color: #a16207;
+}
+
+.tempMergedCode {
+  max-height: 180px;
+  min-height: 96px;
+  margin: 0;
+  overflow: auto;
+  border-radius: 7px;
+  padding: 14px;
+  background: rgba(241, 245, 249, 0.82);
+  color: #4b5563;
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  white-space: pre-wrap;
+}
+
+.distributionMode {
+  color: #7b818d;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.barList {
+  display: grid;
+  gap: 13px;
+}
+
+.barRow {
+  display: grid;
+  grid-template-columns: minmax(160px, 210px) minmax(120px, 1fr) minmax(48px, auto);
+  align-items: center;
+  gap: 14px;
+}
+
+.barLabel {
+  overflow: hidden;
+  color: #3f4652;
+  font-size: 14px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.barTrack {
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(226, 232, 240, 0.72);
+  overflow: hidden;
+}
+
+.barFill {
+  height: 100%;
+  min-width: 4px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #4b96ff, #3388ff);
+  transform-origin: left center;
+  transition:
+    transform 180ms ease,
+    filter 180ms ease,
+    background 180ms ease;
+}
+
+.barRow:hover .barFill {
+  transform: scaleX(1.015);
+  filter: brightness(1.08);
+  background: linear-gradient(90deg, #2f83ff, #55a1ff);
+}
+
+.barValue {
+  color: #737b87;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: right;
+}
+
+.emptyState {
+  padding: 28px;
+  border-radius: 7px;
+  background: rgba(241, 245, 249, 0.72);
+  color: #7b818d;
+  font-weight: 650;
+  text-align: center;
+}
+
+:global(html[data-theme="dark"]) .activityPage {
+  --activity-text: #f8fafc;
+}
+
+:global(html[data-theme="dark"]) .statCard,
+:global(html[data-theme="dark"]) .panel {
+  border-color: rgba(148, 163, 184, 0.18);
+  background: rgba(15, 23, 42, 0.74);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+}
+
+:global(html[data-theme="dark"]) .statHeader,
+:global(html[data-theme="dark"]) .statCaption,
+:global(html[data-theme="dark"]) .panelSubtitle,
+:global(html[data-theme="dark"]) .sectionLabel,
+:global(html[data-theme="dark"]) .lineCount,
+:global(html[data-theme="dark"]) .distributionMode,
+:global(html[data-theme="dark"]) .activeBadge,
+:global(html[data-theme="dark"]) .barValue {
+  color: #94a3b8;
+}
+
+:global(html[data-theme="dark"]) .rulePill {
+  background: rgba(30, 41, 59, 0.72);
+}
+
+:global(html[data-theme="dark"]) .rulePill:hover,
+:global(html[data-theme="dark"]) .rulePillActive {
+  background: rgba(37, 54, 76, 0.86);
+}
+
+:global(html[data-theme="dark"]) .copyButton {
+  background: rgba(51, 65, 85, 0.92);
+  color: #cbd5e1;
+}
+
+:global(html[data-theme="dark"]) .copyButton:hover {
+  background: #178bff;
+  color: #fff;
+}
+
+:global(html[data-theme="dark"]) .temporaryPortCard {
+  border-color: rgba(148, 163, 184, 0.16);
+  background: rgba(15, 23, 42, 0.6);
+}
+
+:global(html[data-theme="dark"]) .temporaryPortCard:hover {
+  border-color: rgba(96, 165, 250, 0.32);
+  background: rgba(24, 35, 54, 0.82);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.28);
+}
+
+:global(html[data-theme="dark"]) .tempPortName,
+:global(html[data-theme="dark"]) .mutedText {
+  color: #94a3b8;
+}
+
+:global(html[data-theme="dark"]) .ruleChip {
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+}
+
+:global(html[data-theme="dark"]) .tempMergedCode {
+  background: rgba(15, 23, 42, 0.78);
+  color: #cbd5e1;
+}
+
+:global(html[data-theme="dark"]) .mergedCode,
+:global(html[data-theme="dark"]) .emptyState {
+  background: rgba(15, 23, 42, 0.84);
+  color: #cbd5e1;
+}
+
+:global(html[data-theme="dark"]) .barLabel {
+  color: #e2e8f0;
+}
+
+:global(html[data-theme="dark"]) .barTrack {
+  background: rgba(51, 65, 85, 0.8);
+}
+
+@media (max-width: 1180px) {
+  .statGrid {
+    grid-template-columns: repeat(3, minmax(160px, 1fr));
+  }
+}
+
+@media (max-width: 820px) {
+  .activityPage {
+    padding: 24px 18px 32px;
+  }
+
+  .statGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .rulesLayout {
+    grid-template-columns: 1fr;
+    min-height: 620px;
+  }
+
+  .barRow {
+    grid-template-columns: minmax(112px, 148px) minmax(88px, 1fr) minmax(42px, auto);
+  }
+}
+
+@media (max-width: 560px) {
+  .statGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .barRow {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .barValue {
+    text-align: left;
+  }
+}
