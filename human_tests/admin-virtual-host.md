@@ -90,12 +90,32 @@
 - 响应正文为 `ordinary-target-ok`。
 - 普通代理目标不会被误路由到管理端。
 
+### TC-AVH-07：`bifrost.local` 管理端静态资源经代理可加载
+
+操作步骤：
+
+1. 复用临时 Bifrost 服务。
+2. 执行 `curl --compressed -x http://127.0.0.1:<proxy_port> http://bifrost.local/`，从 HTML 中提取 `/_bifrost/assets/*.js`、`/_bifrost/assets/*.css` 与 `/_bifrost/favicon.png`。
+3. 分别执行：
+   - `curl --compressed -x http://127.0.0.1:<proxy_port> http://bifrost.local/_bifrost/assets/<index>.js`
+   - `curl --compressed -x http://127.0.0.1:<proxy_port> http://bifrost.local/_bifrost/assets/<index>.css`
+   - `curl --compressed -x http://127.0.0.1:<proxy_port> http://bifrost.local/_bifrost/favicon.png`
+
+预期结果：
+
+- 三个资源请求都返回 `200`，不能返回 `403 Forbidden`。
+- JS 响应 `Content-Type` 为 `text/javascript` 或 `application/javascript`。
+- CSS 响应 `Content-Type` 为 `text/css`。
+- favicon 响应 `Content-Type` 为 `image/png`。
+- 响应 body 非空，浏览器可以继续加载管理端页面资源。
+
 ## 执行记录
 
 | 日期 | 用例 | 命令 | 结果 |
 | --- | --- | --- | --- |
 | 2026-07-01 | TC-AVH-01 ~ TC-AVH-06 | `CARGO_TARGET_DIR=/Users/eden/work/github/bifrost/target BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_admin_virtual_host_proxy.sh` | PASS：`http://bifrost.local/`、`https://bifrost.local/`、`http://bifrost.local:<proxy_port>/` 和 `Host: bifrost.local` 直连均返回 Bifrost 管理端 HTML；默认系统代理 bypass 不包含 `*.local`；普通代理目标 `ordinary-target-ok` 仍正确转发；脚本使用临时数据目录、`--no-system-proxy` 并完成清理。 |
 | 2026-07-01 | TC-AVH-01 ~ TC-AVH-06 / SKIP_BUILD 复用路径 | `bash -n e2e-tests/tests/test_admin_virtual_host_proxy.sh`；`CARGO_TARGET_DIR=/Users/eden/work/github/bifrost/target SKIP_BUILD=true BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_BIN=/Users/eden/work/github/bifrost/target/debug/bifrost e2e-tests/tests/test_admin_virtual_host_proxy.sh` | PASS：脚本语法检查通过；已构建 binary 复用路径仍完整通过 HTTP、HTTPS、默认 bypass、直连 Host header 和普通代理目标验证。 |
+| 2026-07-06 | TC-AVH-01 ~ TC-AVH-07 | `CARGO_TARGET_DIR=/Users/eden/work/github/bifrost/target BIFROST_DISABLE_TRAY=1 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 e2e-tests/tests/test_admin_virtual_host_proxy.sh` | PASS：`http://bifrost.local/`、`https://bifrost.local/`、`http://bifrost.local:<proxy_port>/` 均返回管理端 HTML；HTML 引用的 `/_bifrost/assets/index-*.js`、`/_bifrost/assets/index-*.css` 与 `/_bifrost/favicon.png` 经 `http://bifrost.local` 代理访问均返回 `200`，Content-Type 分别为 `text/javascript`、`text/css`、`image/png` 且 body 非空；`Host: bifrost.local` 直连、默认 bypass、普通代理目标边界均通过；测试使用临时数据目录、随机端口、`--no-system-proxy` 并完成清理。 |
 
 ## 清理步骤
 

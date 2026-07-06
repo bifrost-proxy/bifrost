@@ -1546,7 +1546,19 @@ async fn handle_request(
                 );
             }
             let allow_remote_admin = bifrost_admin::is_remote_access_enabled(&state);
-            if is_cert_public_request(&req) {
+            if is_admin_virtual_host {
+                if is_loopback {
+                    debug!(
+                        "Serving admin UI asset/API via {} from {}: {} {}",
+                        ADMIN_VIRTUAL_HOST, peer_addr, method, path
+                    );
+                    let req = rewrite_virtual_host_request(req);
+                    return Ok(convert_admin_response(
+                        AdminRouter::handle(req, state, push_manager, Some(peer_addr)).await,
+                    ));
+                }
+                return Ok(error_response(403, "Forbidden"));
+            } else if is_cert_public_request(&req) {
                 debug!(
                     "Public cert request from {}: {} {}",
                     peer_addr, method, path
@@ -2350,6 +2362,34 @@ mod tests {
 
         assert!(is_admin_virtual_host_request(&req));
         assert!(!is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_admin_virtual_host_absolute_asset_uri_routes_to_admin() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://bifrost.local/_bifrost/assets/index.js")
+            .body(())
+            .unwrap();
+
+        assert!(is_admin_virtual_host_request(&req));
+        assert!(!is_proxy_request_to_other_for_admin_routing(
+            &req, 9900, "0.0.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_external_absolute_admin_asset_uri_still_routes_to_proxy_target() {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("http://evil.example/_bifrost/assets/index.js")
+            .body(())
+            .unwrap();
+
+        assert!(!is_admin_virtual_host_request(&req));
+        assert!(is_proxy_request_to_other_for_admin_routing(
             &req, 9900, "0.0.0.0"
         ));
     }
