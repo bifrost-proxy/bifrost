@@ -10,10 +10,20 @@ type CsrfResponse = {
 
 let cachedToken: string | null = null;
 let inFlight: Promise<string> | null = null;
+const INVALID_CSRF_MESSAGE = 'Missing or invalid admin CSRF token';
 
 export function isUnsafeHttpMethod(method?: string): boolean {
   const normalized = (method || 'GET').toUpperCase();
   return normalized !== 'GET' && normalized !== 'HEAD' && normalized !== 'OPTIONS';
+}
+
+export function clearAdminCsrfToken(): void {
+  cachedToken = null;
+  inFlight = null;
+}
+
+export function isInvalidAdminCsrfMessage(message: string): boolean {
+  return message.toLowerCase().includes(INVALID_CSRF_MESSAGE.toLowerCase());
 }
 
 export async function getAdminCsrfToken(): Promise<string> {

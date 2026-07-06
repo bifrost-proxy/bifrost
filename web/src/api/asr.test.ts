@@ -11,6 +11,7 @@ import {
   streamAsrTranscription,
   updateDailyAgentConfig,
 } from "./asr";
+import { clearAdminCsrfToken } from "./csrf";
 
 describe("Voice realtime ASR params", () => {
   beforeEach(() => {
@@ -83,6 +84,7 @@ describe("Voice realtime ASR params", () => {
 
 describe("ASR admin API CSRF headers", () => {
   afterEach(() => {
+    clearAdminCsrfToken();
     vi.unstubAllGlobals();
   });
 
@@ -131,5 +133,48 @@ describe("ASR admin API CSRF headers", () => {
       const headers = new Headers(init?.headers);
       expect(headers.get("X-Bifrost-CSRF")).toBe("csrf-token-for-test");
     });
+  });
+
+  it("refreshes a stale admin CSRF token and retries unsafe fetch requests once", async () => {
+    let csrfRequestCount = 0;
+    let updateRequestCount = 0;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/security/csrf")) {
+        csrfRequestCount += 1;
+        return new Response(
+          JSON.stringify({
+            csrf_token: csrfRequestCount === 1 ? "stale-token" : "fresh-token",
+            header_name: "X-Bifrost-CSRF",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (url.includes("/asr/tasks/task-1/daily-agent")) {
+        updateRequestCount += 1;
+        const headers = new Headers(init?.headers);
+        if (headers.get("X-Bifrost-CSRF") !== "fresh-token") {
+          return new Response(
+            JSON.stringify({ error: "Missing or invalid admin CSRF token" }),
+            { status: 403, headers: { "Content-Type": "application/json" } },
+          );
+        }
+        return new Response(JSON.stringify({ ok: true }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+
+    vi.stubGlobal("fetch", fetchMock);
+
+    await updateDailyAgentConfig("task-1", { enabled: true });
+
+    expect(csrfRequestCount).toBe(2);
+    expect(updateRequestCount).toBe(2);
   });
 });

@@ -65,6 +65,7 @@ export const usePendingAuthStore = create<PendingAuthState>((set, get) => ({
       if (!isConnectionIssueError(e)) {
         console.error("Failed to approve pending:", e);
       }
+      await get().fetchPendingList();
       return false;
     }
   },
@@ -78,6 +79,7 @@ export const usePendingAuthStore = create<PendingAuthState>((set, get) => ({
       if (!isConnectionIssueError(e)) {
         console.error("Failed to reject pending:", e);
       }
+      await get().fetchPendingList();
       return false;
     }
   },
@@ -91,6 +93,7 @@ export const usePendingAuthStore = create<PendingAuthState>((set, get) => ({
       if (!isConnectionIssueError(e)) {
         console.error("Failed to clear pending:", e);
       }
+      await get().fetchPendingList();
       return false;
     }
   },

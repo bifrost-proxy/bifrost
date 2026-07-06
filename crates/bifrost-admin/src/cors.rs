@@ -129,6 +129,10 @@ pub fn origin_matches_host(origin: &str, host: &str) -> bool {
     host_lower == origin_host_port || host_lower == origin_host_lower
 }
 
+pub fn is_allowed_admin_origin_for_host(origin: &str, host: &str) -> bool {
+    is_allowed_origin(origin) || origin_matches_host(origin, host)
+}
+
 /// CSRF-equivalent guard for WebSocket upgrade requests.
 ///
 /// WebSocket upgrades are `GET` requests, so they bypass the
@@ -139,9 +143,11 @@ pub fn origin_matches_host(origin: &str, host: &str) -> bool {
 ///
 /// This mirrors the origin rules of `check_browser_write_guard`: when the
 /// request carries any browser-controlled context (`Origin` / `Referer` /
-/// `Sec-Fetch-*`) we reject cross-site and cross-origin upgrades. Native
-/// clients (desktop app, CLI, mobile SDK) do not send browser context headers
-/// and are gated by the auth layer instead, so they are left untouched.
+/// `Sec-Fetch-*`) we reject untrusted cross-site and cross-origin upgrades.
+/// Trusted desktop/local origins may be reported as `cross-site` by WebView
+/// fetch metadata when they call the loopback admin backend. Native clients
+/// (desktop app, CLI, mobile SDK) that do not send browser context headers are
+/// gated by the auth layer instead, so they are left untouched.
 ///
 /// Returns `None` when the upgrade is allowed, or `Some(reason)` describing why
 /// it was rejected (suitable for structured logging).
@@ -166,13 +172,19 @@ pub fn websocket_origin_rejection(headers: &hyper::HeaderMap) -> Option<&'static
     if matches!(
         header_value("sec-fetch-site").as_deref(),
         Some("cross-site")
-    ) {
+    ) && !header_value("origin")
+        .as_deref()
+        .map(|origin| {
+            is_allowed_admin_origin_for_host(origin, &header_value("host").unwrap_or_default())
+        })
+        .unwrap_or(false)
+    {
         return Some("cross_site");
     }
 
     if let Some(origin) = header_value("origin") {
         let host = header_value("host").unwrap_or_default();
-        if !is_allowed_origin(&origin) && !origin_matches_host(&origin, &host) {
+        if !is_allowed_admin_origin_for_host(&origin, &host) {
             return Some("cross_origin");
         }
     }
@@ -361,9 +373,19 @@ mod tests {
     }
 
     #[test]
-    fn ws_guard_rejects_cross_site_via_sec_fetch() {
+    fn ws_guard_allows_trusted_desktop_origin_even_when_sec_fetch_is_cross_site() {
         let headers = ws_headers(&[
-            ("origin", "http://localhost:8800"),
+            ("origin", "tauri://localhost"),
+            ("host", "127.0.0.1:9900"),
+            ("sec-fetch-site", "cross-site"),
+        ]);
+        assert_eq!(websocket_origin_rejection(&headers), None);
+    }
+
+    #[test]
+    fn ws_guard_rejects_untrusted_cross_site_via_sec_fetch() {
+        let headers = ws_headers(&[
+            ("origin", "http://evil.example.com"),
             ("host", "localhost:8800"),
             ("sec-fetch-site", "cross-site"),
         ]);

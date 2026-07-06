@@ -8,7 +8,13 @@ import {
   isDesktopCoreTransitionActive,
   useDesktopCoreStore,
 } from '../stores/useDesktopCoreStore';
-import { ADMIN_CSRF_HEADER, getAdminCsrfToken, isUnsafeHttpMethod } from './csrf';
+import {
+  ADMIN_CSRF_HEADER,
+  clearAdminCsrfToken,
+  getAdminCsrfToken,
+  isInvalidAdminCsrfMessage,
+  isUnsafeHttpMethod,
+} from './csrf';
 
 const client = axios.create({
   timeout: 30000,
@@ -23,6 +29,10 @@ type ApiErrorPayload = {
   kind: 'connection' | 'business';
   message: string;
   status?: number;
+};
+
+type CsrfRetryConfig = AxiosRequestConfig & {
+  __csrfRetried?: boolean;
 };
 
 function extractErrorMessage(error: AxiosError): string {
@@ -129,7 +139,21 @@ client.interceptors.response.use(
     useDesktopCoreStore.getState().resolveBooting();
     return response;
   },
-  (error: AxiosError) => {
+  async (error: AxiosError) => {
+    const config = error.config as CsrfRetryConfig | undefined;
+    if (shouldRetryWithFreshCsrf(error, config)) {
+      clearAdminCsrfToken();
+      const retryConfig: CsrfRetryConfig = {
+        ...config,
+        __csrfRetried: true,
+        headers: {
+          ...(config?.headers ?? {}),
+          [ADMIN_CSRF_HEADER]: await getAdminCsrfToken(),
+        },
+      };
+      return client.request(retryConfig);
+    }
+
     const payload = getApiErrorPayload(error);
 
     if (error.response?.status === 401) {
@@ -160,6 +184,19 @@ client.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+function shouldRetryWithFreshCsrf(
+  error: AxiosError,
+  config: CsrfRetryConfig | undefined,
+): boolean {
+  if (!config || config.__csrfRetried || !isUnsafeHttpMethod(config.method)) {
+    return false;
+  }
+  if (error.response?.status !== 403) {
+    return false;
+  }
+  return isInvalidAdminCsrfMessage(extractErrorMessage(error));
+}
 
 export async function get<T>(url: string, config?: AxiosRequestConfig): Promise<T> {
   const response = await client.get<T>(url, config);
