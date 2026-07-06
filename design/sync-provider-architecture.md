@@ -572,11 +572,39 @@ Settings Sync should become provider-first. The page also serves as the sign-in 
 `Settings -> Sync` is a single tab with four full-width sections:
 
 1. `Sync Overview`: global sync controls and aggregate state.
-2. `Connected Services`: provider cards for ByteDance Internal, Bifrost Cloud, GitHub Gist, and future providers.
+2. `Connected Services`: a responsive card grid that always shows every currently supported sync provider type.
 3. `Capability Routing`: editable lane routing for Rules Sync, Config Sync, Group Rules, and Remote Invoke.
 4. `Add Sync Service`: provider catalog and setup entry points.
 
 The tab should remain dense and settings-like. Use compact rows, capability chips, icon buttons with tooltips, and inline status instead of marketing copy. Cards represent provider instances, not decorative page sections.
+
+### Supported provider card grid
+
+The first implementation supports exactly three product provider types. The `Connected Services` area must render all three as first-class cards even when they are not signed in:
+
+1. `ByteDance Internal`
+2. `Bifrost Cloud`
+3. `GitHub Gist`
+
+The grid is the main sync management surface. It replaces the legacy single `Remote Sync` panel shown in earlier builds.
+
+Card grid requirements:
+
+- Desktop and wide tablet: at most three cards in one row, one card per supported provider type.
+- Medium width: cards may wrap into two columns plus one card on the next row.
+- Narrow width: cards stack into one column.
+- The grid must not create an empty fourth column or placeholder card in V1.
+- Cards should share the same height within a row and keep action buttons aligned.
+- Each card is independently connectable, configurable, disconnectable, and syncable.
+- A provider that is not configured still remains visible with capability chips and a primary `Sign in` or `Configure` action.
+- Provider order is stable: ByteDance Internal, Bifrost Cloud, GitHub Gist.
+- Future provider types can be added through provider catalog metadata, but V1 acceptance tests should assert that only these three cards are rendered by default.
+
+Suggested CSS contract:
+
+- Use a CSS grid container with `grid-template-columns: repeat(auto-fit, minmax(280px, 1fr))` and cap the container at three columns through max column width or a `--sync-provider-grid-max-columns: 3` token.
+- Each card has a stable minimum height and a footer action row with fixed-position alignment inside the card.
+- Long endpoint, user, gist id, or error text wraps or ellipsizes within the card body; it must not push the footer outside the card.
 
 ### Sync Overview
 
@@ -620,12 +648,11 @@ Modal layout:
 
 ### Connected Services
 
-List enabled provider instances with compact capability badges:
+Show the supported provider card grid with compact capability badges:
 
 - `ByteDance Internal`: Remote Invoke, Rules Sync, Config Sync, Groups.
 - `Bifrost Cloud`: Remote Invoke when server supports it, Rules Sync, Config Sync, optional Groups.
 - `GitHub Gist`: Rules Sync, Config Sync, Encrypted.
-- `WebDAV`: Rules backup.
 
 Each row/card:
 
@@ -682,7 +709,8 @@ Add provider cards:
 - ByteDance Internal: detected/recommended state.
 - Bifrost Cloud: URL input + login.
 - GitHub Gist: Sign in with GitHub.
-- WebDAV: URL + username + app password.
+
+V1 should not show WebDAV, Dropbox, Google Drive, or custom file-provider cards in the default product UI. They may be introduced later through the provider catalog without changing the card shell.
 
 ### GitHub setup wizard
 
@@ -748,6 +776,7 @@ Recommended stable selectors:
 
 - `settings-sync-overview`
 - `settings-sync-first-run-modal`
+- `settings-sync-provider-grid`
 - `settings-sync-provider-card-bytedance`
 - `settings-sync-provider-card-bifrost-cloud`
 - `settings-sync-provider-card-github-gist`
@@ -874,6 +903,7 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | Case | Mock setup | Assertions |
 | --- | --- | --- |
 | First-run modal | `/sync/providers` returns no sessions; ByteDance detection returns reachable | Modal is visible, three provider cards appear, ByteDance card is highlighted, `Continue local only` dismisses only for current browser session |
+| Supported provider card grid | Provider catalog returns V1 product providers | Exactly three cards render in stable order: ByteDance Internal, Bifrost Cloud, GitHub Gist; no WebDAV/custom placeholder appears; unconfigured providers still show capability chips and sign-in/configure actions |
 | Connected services | ByteDance, Bifrost Cloud, GitHub Gist all signed in | Three provider cards render simultaneously; each shows account, status, Rules Sync, Config Sync; GitHub Gist has no Remote Invoke action |
 | Capability routing | Personal rules and basic config write to all three; Remote Invoke providers are ByteDance + Bifrost Cloud | Routing rows show correct provider chips; GitHub Gist chip is disabled for Remote Invoke with explanatory tooltip |
 | Remote Invoke partial registration | ByteDance registered, Bifrost Cloud failed | UI shows partial registration, retry action targets Bifrost Cloud, ByteDance remains registered |
@@ -882,11 +912,13 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 | Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
 | Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
 | Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
-| Responsive layout | Viewports 390px and 1280px | No overlapping text/buttons; provider cards stack on mobile and grid on desktop; long URLs/gist ids wrap or ellipsize with tooltip |
+| Responsive layout | Viewports 390px, 820px, and 1280px | At 1280px the three provider cards occupy one row with at most three columns; at 820px cards wrap without overlap; at 390px cards stack into one column; long URLs/gist ids wrap or ellipsize with tooltip |
 
 Visual/DOM checks:
 
 - Use computed bounding boxes to assert no provider card text overlaps action buttons.
+- Use card bounding boxes to assert no more than three provider cards share a row.
+- Assert the V1 product UI renders exactly the ByteDance Internal, Bifrost Cloud, and GitHub Gist cards by default.
 - Assert disabled unsupported capability chips are visible and have tooltips.
 - Assert first-run modal does not re-open after dismissing within the same browser session, but `Add Service` remains visible.
 - Assert polling refresh updates provider status without resetting an in-progress Bifrost Cloud URL draft.

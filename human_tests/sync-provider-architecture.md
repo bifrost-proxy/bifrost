@@ -184,6 +184,25 @@
 - 文档列出基础配置同步范围的 UI 验证点。
 - 文档列出暗色主题、响应式布局、长 URL/gist id 不重叠、tooltip、polling 不覆盖 draft 的 DOM/视觉检查。
 
+### TC-SPA-11: 同步管理页以三种 Provider 卡片作为主交互面
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Supported provider card grid|exactly three|ByteDance Internal|Bifrost Cloud|GitHub Gist|at most three cards|one column|stable order|settings-sync-provider-grid|no WebDAV|Supported provider card grid|Responsive layout" design/sync-provider-architecture.md
+   ```
+2. 阅读 Web UI 的 Supported provider card grid、Connected Services 和 Web UI validation 章节。
+
+**预期结果**:
+
+- 文档明确 V1 当前只展示 ByteDance Internal、Bifrost Cloud、GitHub Gist 三种同步 provider 卡片。
+- 文档明确三张卡片即使未登录也常驻展示, 各自可独立登录、配置、断开和手动同步。
+- 文档明确卡片顺序稳定: ByteDance Internal、Bifrost Cloud、GitHub Gist。
+- 文档明确桌面/宽平板最多一排三个卡片, 中等宽度可换行为两列加一列, 窄屏降为一列。
+- 文档明确 V1 默认 UI 不展示 WebDAV/custom placeholder/第四张空卡。
+- 文档明确 Playwright/DOM 验证需要断言三卡数量、顺序、最多三列、窄屏一列和无重叠。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -193,3 +212,4 @@
 - 2026-07-06: PASS - 在 `codex/sync-provider-design` worktree 中执行 TC-SPA-01 至 TC-SPA-04 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计覆盖多 provider 同启、capability 区分、GitHub Gist rules-only、ByteDance 自动检测、UI/CLI/API 和分阶段落地。
 - 2026-07-07: PASS - 执行 TC-SPA-05 至 TC-SPA-08 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计新增三种产品同步服务独立连接、首次无登录弹窗、Remote Invoke 双 provider 注册、基础配置同步范围与 CLI/UI 管理入口。
 - 2026-07-07: PASS - 执行 TC-SPA-09 至 TC-SPA-10 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认 Web UI 设计方案覆盖页面结构、关键交互、错误/冲突/注册状态、响应式和测试钩子, Web UI 验证方案覆盖 Playwright、暗色主题和不重叠检查。
+- 2026-07-07: PASS - 执行 TC-SPA-11 的 `rg` 静态审查命令, 命中三 provider 卡片网格、稳定顺序、最多三列、窄屏一列、V1 不展示 WebDAV/custom placeholder 和 Playwright/DOM 断言要求。
