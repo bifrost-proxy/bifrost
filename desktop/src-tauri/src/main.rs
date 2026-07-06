@@ -249,6 +249,7 @@ fn main() {
             notify_main_window_ready,
             get_pending_desktop_open_requests,
             set_document_edited,
+            open_external_url,
             write_clipboard
         ])
         .setup(|app| {
@@ -1886,6 +1887,17 @@ fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn open_external_url(url: String) -> Result<(), String> {
+    let parsed = tauri::Url::parse(&url).map_err(|error| format!("invalid URL: {error}"))?;
+    match parsed.scheme() {
+        "http" | "https" | "mailto" | "bifrost" | "macappstore" => {}
+        scheme => return Err(format!("unsupported URL scheme: {scheme}")),
+    }
+
+    open::that(parsed.as_str()).map_err(|error| format!("failed to open URL: {error}"))
+}
+
+#[tauri::command]
 fn write_clipboard(text: String) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -2289,6 +2301,7 @@ mod tests {
             handoff_started: AtomicBool::new(false),
             handoff_completed: AtomicBool::new(false),
             launcher_overlay: Mutex::new(None),
+            pending_open_requests: Mutex::new(Vec::new()),
         };
 
         mark_backend_unavailable_for_manual_start(

@@ -123,6 +123,10 @@ export async function restartDesktopAfterUpdate(): Promise<void> {
   await invokeDesktop<void>("restart_desktop_after_update");
 }
 
+export async function openExternalUrl(url: string): Promise<void> {
+  await invokeDesktop<void>("open_external_url", { url });
+}
+
 export async function setDesktopDocumentEdited(edited: boolean): Promise<void> {
   const invoke = getCurrentInvoke();
   if (!invoke) {

@@ -36,6 +36,7 @@ import {
   getPendingDesktopOpenRequests,
   getDesktopRuntime,
   listenDesktopEvent,
+  openExternalUrl,
   startDesktopCore,
   type DesktopRuntimeInfo,
 } from "./desktop/tauri";
@@ -51,6 +52,7 @@ import { initDesktopEditEventListener } from "./components/MonacoDesktopCommands
 import {
   getDesktopPlatform,
   getAdminPrefix,
+  buildBackendUrl,
   initializeDesktopRuntime,
   isDesktopShell,
   setDesktopProxyPort,
@@ -193,6 +195,7 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
         {isDesktopShell() && desktopPlatform === "macos" ? (
           <DesktopTransitionMask resolvedTheme={resolvedTheme} />
         ) : null}
+        {isDesktopShell() ? <DesktopExternalOpenBridge /> : null}
         <Modal
           open={desktopCoreVisible}
           title={
@@ -606,6 +609,84 @@ function GlobalRouteEffects() {
 
   useGlobalDataSync({ trafficEnabled });
   useEditorCompletion();
+
+  return null;
+}
+
+const EXTERNAL_OPEN_SCHEMES = new Set([
+  "http:",
+  "https:",
+  "mailto:",
+  "bifrost:",
+  "macappstore:",
+]);
+
+function resolveDesktopOpenTarget(rawUrl: string): string | null {
+  if (!rawUrl) {
+    return null;
+  }
+
+  if (rawUrl.startsWith("/_bifrost/") || rawUrl.startsWith("/api/") || rawUrl.startsWith("/public/")) {
+    return buildBackendUrl(rawUrl);
+  }
+
+  try {
+    const parsed = new URL(rawUrl, window.location.href);
+    if (parsed.origin === window.location.origin && parsed.hash.startsWith("#/")) {
+      return null;
+    }
+    return EXTERNAL_OPEN_SCHEMES.has(parsed.protocol) ? parsed.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function DesktopExternalOpenBridge() {
+  useEffect(() => {
+    if (!isDesktopShell()) {
+      return;
+    }
+
+    const originalOpen = window.open;
+    window.open = ((url?: string | URL, target?: string, features?: string) => {
+      const rawUrl = typeof url === "string" ? url : url?.toString();
+      const resolved = rawUrl ? resolveDesktopOpenTarget(rawUrl) : null;
+      if (resolved) {
+        void openExternalUrl(resolved).catch((error) => {
+          console.error("[desktop-runtime] Failed to open external URL.", error);
+        });
+        return null;
+      }
+      return originalOpen.call(window, url, target, features);
+    }) as typeof window.open;
+
+    const handleClick = (event: MouseEvent) => {
+      if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
+        return;
+      }
+
+      const anchor = (event.target as Element | null)?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!anchor) {
+        return;
+      }
+
+      const resolved = resolveDesktopOpenTarget(anchor.getAttribute("href") ?? "");
+      if (!resolved) {
+        return;
+      }
+
+      event.preventDefault();
+      void openExternalUrl(resolved).catch((error) => {
+        console.error("[desktop-runtime] Failed to open clicked URL.", error);
+      });
+    };
+
+    document.addEventListener("click", handleClick, true);
+    return () => {
+      window.open = originalOpen;
+      document.removeEventListener("click", handleClick, true);
+    };
+  }, []);
 
   return null;
 }

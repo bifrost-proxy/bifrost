@@ -23,6 +23,7 @@ import {
 } from "../../api/cert";
 import { normalizeApiErrorMessage } from "../../api/client";
 import { pushService, type SettingsScope } from "../../services/pushService";
+import { buildBackendUrl } from "../../runtime";
 
 const { Text, Paragraph } = Typography;
 
@@ -142,10 +143,10 @@ function preserveTrustProbeUrls(
   };
 }
 
-function sameOriginResourceUrl(url: string): string {
+function backendResourceUrl(url: string): string {
   try {
     const parsed = new URL(url, window.location.origin);
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+    return buildBackendUrl(`${parsed.pathname}${parsed.search}${parsed.hash}`);
   } catch {
     return url;
   }
@@ -415,7 +416,7 @@ export default function AvailabilityCheckPanel({
           <Col xs={24} sm={compact ? 24 : 10} md={compact ? 24 : 8}>
             <div style={{ textAlign: compact ? "left" : "center" }}>
               <img
-                src={sameOriginResourceUrl(trustProbeSession.qrCodeUrl)}
+                src={backendResourceUrl(trustProbeSession.qrCodeUrl)}
                 alt="Availability Check QR Code"
                 width={qrSize}
                 height={qrSize}

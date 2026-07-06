@@ -464,6 +464,7 @@
 - `/_bifrost/public/mobile/ios-wifi-proxy.mobileconfig` 及其 QR endpoint 返回 404，不再生成或下发 managed Wi-Fi profile。
 - Availability Check 链接是固定 URL，不包含 `?t=<token>`；二维码内容也指向同一个固定 URL。手机页使用 `localStorage.bifrostAvailabilityDeviceId` 识别同一浏览器设备，刷新页面后仍归到同一台设备。
 - Certificate 页从 `localhost` 打开时，二维码图片本身必须通过当前 WebUI same-origin 路径加载；即使系统代理指向另一个 Bifrost 端口且未 bypass `10.x` LAN 地址，二维码也不能因为图片请求走代理而消失。二维码编码的目标 URL 仍然是局域网公开检测页。
+- 桌面端 App 内打开 Certificate 页时，Availability Check 二维码图片必须通过当前桌面后端 `127.0.0.1:<port>` 加载；即使二维码编码内容是局域网 URL，WebView 中也不能请求 Tauri 静态资源 origin 导致破图。
 - 创建 session 或管理端 HEAD 探活不会提前占用 probe 端口；目标设备 GET 打开公开 Availability Check landing page 后，Bifrost 才按需监听该 session 的实际 `probePort`。本机 `127.0.0.1` 预览和 LAN IP 手机检查不能互相关闭对方的 probe listener。
 - 多台设备可以同时打开同一个 Availability Check 链接。管理端卡片展示扫码后进入检测页的 `Connected devices` live status 列表，每台浏览器设备单独显示短 device id、platform hint、client IP、最近活跃时间、页面打开、网络、浏览器 HTTPS probe、代理授权和代理配置状态。
 - 手机打开 HTTP landing page 后，管理端 `Connected devices` 中该设备的 `Page` 状态变为 `Page opened`。

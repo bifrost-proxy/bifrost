@@ -142,6 +142,25 @@
 - `.bifrost` 导入 POST 请求带 `X-Bifrost-CSRF`，network 导入后跳转 Traffic，rules 导入后跳转 Rules。
 - 同类 `.bifrost-file` detect/import/export 接口统一使用 CSRF-aware API client。
 
+### TC-DOR-08 桌面端 OpenURL 能打开外部链接
+
+操作步骤：
+
+1. 启动桌面端 App。
+2. 在桌面端点击 `Open Docs`、OpenAPI、Availability Check 链接、Apple Configurator App Store 链接等会打开新窗口或外部页面的入口。
+3. 在桌面端控制台或系统默认浏览器中观察打开结果。
+4. 执行：
+   ```bash
+   open 'bifrost://open/settings'
+   ```
+
+预期结果：
+
+- 桌面壳拦截外部 `http(s)`、`mailto`、`macappstore` 和 `bifrost://` URL，并通过原生 OpenURL 打开。
+- `/_bifrost/...`、`/api/...`、`/public/...` 这类后端相对路径会被解析到当前桌面后端端口后再打开，不停留在 Tauri WebView 的静态资源 origin。
+- 内部 `#/traffic/detail` 等桌面壳路由不被误当成外部 URL。
+- `bifrost://open/settings` 仍复用单实例并跳转 Settings。
+
 ## 清理步骤
 
 - 关闭桌面端 App。
