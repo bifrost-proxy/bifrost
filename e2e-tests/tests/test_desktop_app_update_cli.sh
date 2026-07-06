@@ -134,9 +134,11 @@ assert_contains_text "$uninstall_output" "Dry run: would remove the desktop app 
 
 API_DATA_DIR="${TEST_ROOT}/api-data"
 API_INSTALL_DIR="${TEST_ROOT}/api-cli-bin"
+API_SKILL_DIR="${TEST_ROOT}/api-skills/bifrost"
 API_PORT="$(allocate_free_port)"
 _log_info "app-to-CLI HTTP install endpoint"
 BIFROST_DATA_DIR="$API_DATA_DIR" \
+BIFROST_INSTALL_SKILL_DIR="$API_SKILL_DIR" \
 BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 \
 BIFROST_DISABLE_TRAY=1 \
     "$BIFROST_BIN" start --daemon --host 127.0.0.1 -p "$API_PORT" \
@@ -173,6 +175,26 @@ if [[ -f "$API_INSTALL_DIR/bifrost" || -f "$API_INSTALL_DIR/bifrost.exe" ]]; the
     _log_pass "CLI install API copies binary into requested install dir"
 else
     _log_fail "CLI install API copies binary into requested install dir" "bifrost binary exists" "missing"
+    exit 1
+fi
+
+api_install_with_skills_response="$(curl --max-time 30 -fsS -X POST \
+    -H 'Content-Type: application/json' \
+    --data "{\"install_dir\":$(json_escape "$API_INSTALL_DIR"),\"install_skills\":true}" \
+    "http://127.0.0.1:${API_PORT}/_bifrost/api/system/cli-install")"
+api_skills_installed="$(read_json_field "$api_install_with_skills_response" skills_installed)"
+api_skills_message="$(read_json_field "$api_install_with_skills_response" skills_message)"
+if [[ "$api_skills_installed" == "True" || "$api_skills_installed" == "true" ]]; then
+    _log_pass "CLI install API installs AI skills with desktop-safe embedded bundle"
+else
+    _log_fail "CLI install API installs AI skills with desktop-safe embedded bundle" "true" "$api_install_with_skills_response"
+    exit 1
+fi
+assert_contains_text "$api_skills_message" "embedded desktop bundle" "CLI install API reports embedded desktop skill setup"
+if [[ -f "$API_SKILL_DIR/SKILL.md" && -f "${TEST_ROOT}/api-skills/bifrost-remote/SKILL.md" ]]; then
+    _log_pass "CLI install API writes AI skill files to isolated test dir"
+else
+    _log_fail "CLI install API writes AI skill files to isolated test dir" "primary and remote SKILL.md exist" "missing"
     exit 1
 fi
 

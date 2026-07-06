@@ -2,6 +2,7 @@ use std::fs::{self, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
+use std::time::{Duration, Instant};
 
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
@@ -26,6 +27,8 @@ use super::{
 use crate::metrics::SystemInfo;
 use crate::resource_alerts::build_resource_alerts;
 use crate::state::SharedAdminState;
+
+const DESKTOP_INSTALL_SKILL_TIMEOUT: Duration = Duration::from_secs(20);
 
 pub async fn handle_system(
     req: Request<Incoming>,
@@ -368,21 +371,23 @@ fn install_cli_from_current_exe(
     response.installed = install_path.exists();
 
     if request.install_skills.unwrap_or(true) {
-        let status = Command::new(&install_path)
-            .args(["install-skill", "--tool", "all", "-y"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        match status {
-            Ok(status) if status.success() => {
+        match run_desktop_install_skill(&install_path, DESKTOP_INSTALL_SKILL_TIMEOUT) {
+            Ok(DesktopInstallSkillStatus::Success) => {
                 response.skills_installed = Some(true);
-                response.skills_message = Some("Bifrost AI skills installed".to_string());
+                response.skills_message =
+                    Some("Bifrost AI skills installed from embedded desktop bundle".to_string());
             }
-            Ok(status) => {
+            Ok(DesktopInstallSkillStatus::Failed(message)) => {
                 response.skills_installed = Some(false);
                 response.skills_message = Some(format!(
-                    "install-skill exited with status {status}; retry with `bifrost install-skill --tool all -y`"
+                    "{message}; retry with `bifrost install-skill --tool all -y`"
+                ));
+            }
+            Ok(DesktopInstallSkillStatus::TimedOut) => {
+                response.skills_installed = Some(false);
+                response.skills_message = Some(format!(
+                    "install-skill timed out after {}s; retry with `bifrost install-skill --tool all -y`",
+                    DESKTOP_INSTALL_SKILL_TIMEOUT.as_secs()
                 ));
             }
             Err(error) => {
@@ -398,6 +403,47 @@ fn install_cli_from_current_exe(
     }
 
     Ok(response)
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum DesktopInstallSkillStatus {
+    Success,
+    Failed(String),
+    TimedOut,
+}
+
+fn run_desktop_install_skill(
+    install_path: &Path,
+    timeout: Duration,
+) -> std::io::Result<DesktopInstallSkillStatus> {
+    let mut child = Command::new(install_path)
+        .args(["install-skill", "--tool", "all", "-y"])
+        .env("BIFROST_INSTALL_SKILL_SOURCE", "embedded")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(if status.success() {
+                DesktopInstallSkillStatus::Success
+            } else {
+                DesktopInstallSkillStatus::Failed(format!(
+                    "install-skill exited with status {status}"
+                ))
+            });
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(DesktopInstallSkillStatus::TimedOut);
+        }
+
+        thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn build_cli_install_status(
@@ -463,6 +509,10 @@ fn cli_binary_name() -> &'static str {
 }
 
 fn install_binary_atomically(source: &Path, target: &Path) -> Result<(), std::io::Error> {
+    if same_file_path(source, target)? {
+        return Ok(());
+    }
+
     let tmp = target.with_extension(format!(
         "{}.tmp.{}",
         target
@@ -483,6 +533,26 @@ fn install_binary_atomically(source: &Path, target: &Path) -> Result<(), std::io
         let _ = fs::remove_file(target);
         fs::rename(&tmp, target).map_err(|_| error)
     })
+}
+
+fn same_file_path(source: &Path, target: &Path) -> Result<bool, std::io::Error> {
+    let source = fs::canonicalize(source)?;
+    let target = match fs::canonicalize(target) {
+        Ok(target) => target,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+
+    #[cfg(windows)]
+    {
+        Ok(source
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&target.to_string_lossy()))
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(source == target)
+    }
 }
 
 fn path_contains_dir(dir: &Path) -> bool {
@@ -675,8 +745,9 @@ fn upgrade_log_stdio() -> Stdio {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_cli_install_status, install_cli_from_current_exe, normalize_progress,
-        parse_upgrade_channel, upgrade_process_args, CliInstallRequest, UpgradeChannel,
+        build_cli_install_status, install_binary_atomically, install_cli_from_current_exe,
+        normalize_progress, parse_upgrade_channel, upgrade_process_args, CliInstallRequest,
+        UpgradeChannel,
     };
     use bifrost_core::upgrade_progress::{UpgradePhase, UpgradeProgress, DEFAULT_STALE_SECS};
     use chrono::Utc;
@@ -796,6 +867,55 @@ mod tests {
         assert_eq!(
             response.skills_message,
             Some("Bifrost AI skill installation skipped".to_string())
+        );
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn cli_install_with_skill_failure_still_installs_cli_binary() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-cli-install-with-skills-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let response = install_cli_from_current_exe(CliInstallRequest {
+            install_dir: Some(dir.clone()),
+            install_skills: Some(true),
+            dry_run: Some(false),
+        })
+        .expect("install cli");
+
+        let install_path = dir.join(super::cli_binary_name());
+        assert!(install_path.exists());
+        assert!(response.installed);
+        assert_eq!(response.install_path, install_path.display().to_string());
+        assert_eq!(response.skills_installed, Some(false));
+        assert!(response
+            .skills_message
+            .as_deref()
+            .unwrap_or_default()
+            .contains("install-skill"));
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn install_binary_atomically_skips_when_source_is_target() {
+        let dir = std::env::temp_dir().join(format!(
+            "bifrost-cli-install-same-file-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        std::fs::create_dir_all(&dir).expect("create dir");
+        let path = dir.join(super::cli_binary_name());
+        std::fs::write(&path, b"same-file").expect("write source");
+
+        install_binary_atomically(&path, &path).expect("same file install");
+
+        assert_eq!(
+            std::fs::read(&path).expect("read source"),
+            b"same-file".to_vec()
         );
 
         let _ = std::fs::remove_dir_all(dir);

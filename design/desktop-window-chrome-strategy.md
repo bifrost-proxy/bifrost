@@ -101,6 +101,15 @@ fn supports_native_launcher() -> bool {
 - `save_desktop_config()` 必须在写入前创建 `config_path.parent()`，避免 setup 在首次启动、临时数据目录或目录被清理后因为 `os error 3` 中断。
 - core server 没有启动时要先看 setup panic 和 bootstrap log，不能只看端口监听。
 
+### Install CLI 与 AI skills
+
+桌面浮层和 Settings 的 `Install CLI` / `Install CLI & Skills` 入口都调用 `POST /api/system/cli-install`。该入口的产品语义是“先保证 CLI 可用，再尽力完成 AI skills”：
+
+- CLI 复制成功后必须返回 `installed=true`；AI skills 失败、超时或被用户环境拦截时，只能通过 `skills_installed=false` 与 `skills_message` 告知用户重试，不能让整个请求 500。
+- 桌面触发的 skills 安装必须使用随二进制编译进来的 embedded bundle，即传递 `BIFROST_INSTALL_SKILL_SOURCE=embedded`，避免 GitHub raw 429、DNS 慢或离线环境把弹窗请求拖过前端 30 秒超时。
+- skills 子进程必须有显式超时；超时后杀掉子进程并保留已安装 CLI。
+- Windows 上如果当前运行的 `bifrost.exe` 已经是目标安装路径，复制步骤应视为 no-op，避免对正在运行的 exe 做自覆盖而触发文件锁错误。
+
 ## 技术细节
 
 ### 常量与尺寸
