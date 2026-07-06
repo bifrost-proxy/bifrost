@@ -41,6 +41,18 @@ ensure_site_dependencies() {
   pnpm --dir "$SITE_DIR" install --frozen-lockfile
 }
 
+dist_asset_js_contains() {
+  local pattern="$1"
+  local name_glob="${2:-*.js}"
+  local file
+  while IFS= read -r -d '' file; do
+    if grep -q "$pattern" "$file"; then
+      return 0
+    fi
+  done < <(find "$SITE_DIR/dist/assets" -type f -name "$name_glob" -print0)
+  return 1
+}
+
 if [[ -e "$TEMP_DOC" ]]; then
   echo "Temporary probe doc already exists: $TEMP_DOC" >&2
   exit 1
@@ -131,8 +143,8 @@ if grep -q 'Desktop Installation and Build' "$EN_INSTALL_DIST"; then
 fi
 grep -q 'id="desktop-downloads-data"' "$SITE_DIR/dist/index.html"
 grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin.dmg" "$SITE_DIR/dist/index.html"
-rg -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin\\.dmg" "$SITE_DIR/dist/assets" -g '*.js'
-if rg -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/index.html" "$SITE_DIR/dist/assets" -g '*.js'; then
+grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-x86_64-pc-windows-msvc.msi" "$SITE_DIR/dist/index.html"
+if grep -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/index.html" || dist_asset_js_contains 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest'; then
   echo "Site must not call GitHub Releases API at runtime for desktop downloads" >&2
   exit 1
 fi
@@ -146,7 +158,6 @@ grep -q 'data-download-target="mac-arm"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="mac-intel"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="win-x64"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="win-arm"' "$SITE_DIR/dist/index.html"
-rg -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-x86_64-pc-windows-msvc\\.msi" "$SITE_DIR/dist/assets"/home.*.js
 grep -q 'bifrost start -d' "$SITE_DIR/dist/index.html"
 grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
 grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"

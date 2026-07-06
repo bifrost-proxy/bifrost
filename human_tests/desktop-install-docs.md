@@ -128,6 +128,25 @@
 
 - 已执行，通过。已使用根路径构建同步到 `bifrost-proxy.github.io` checkout，部署仓库仅包含 `site/dist/` 产物变更；根站 HTML 不含 `/bifrost` 资源前缀。
 
+### TC-DID-07 回归：CI Shell 环境不依赖 ripgrep 执行站点同步测试
+
+操作步骤：
+
+1. 执行 `bash -n e2e-tests/tests/test_site_docs_sync.sh`。
+2. 执行 `rg() { echo 'rg should not be called in test_site_docs_sync.sh' >&2; return 127; }; export -f rg; bash e2e-tests/tests/test_site_docs_sync.sh`。
+3. 检查输出是否完成 docs sync、VitePress build、static home verification、site link verification，并输出 `Site docs sync E2E passed.`。
+4. 检查脚本不再执行 `rg` 命令，避免 Linux/macOS CI shell runner 缺少 ripgrep 时失败。
+
+预期结果：
+
+- 脚本语法检查通过。
+- 在 PATH 不包含 `rg` 的环境中，站点同步 E2E 仍通过。
+- 下载文件名断言来自 `site/dist/index.html` 中的静态 metadata，运行时 GitHub Releases API 负向断言仍覆盖 HTML 与 JS assets。
+
+执行结果：
+
+- 已执行，通过。
+
 ## 清理步骤
 
 1. 停止本地 preview 进程。
