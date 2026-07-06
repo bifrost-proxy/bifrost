@@ -3,10 +3,11 @@ import mysql, { type ExecuteValues, type Pool, type RowDataPacket, type ResultSe
 import { nanoid } from 'nanoid';
 import type {
   Env, User, CreateEnvReq, UpdateEnvReq, SearchEnvQuery, MysqlConfig,
+  BasicConfig, BasicConfigKey, UpsertBasicConfigReq,
   Group, GroupMember, GroupSetting, UpdateGroupReq, SearchGroupQuery, UpdateGroupSettingReq,
   RemoteInvokePairing, RemoteInvokeGrant, RemoteInvokeCall, RemoteInvokeEvent, RemoteInvokeClientRecord, RemoteInvokeSshClaim,
 } from '../types';
-import type { IUserDao, IEnvDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao } from './types';
+import type { IUserDao, IEnvDao, IBasicConfigDao, IStorage, IGroupDao, IGroupMemberDao, IGroupSettingDao, IRemoteInvokeDao } from './types';
 
 function rowToUser(row: RowDataPacket): User {
   return {
@@ -29,6 +30,18 @@ function rowToEnv(row: RowDataPacket): Env {
     name: row.name,
     rule: row.rule,
     sort_order: row.sort_order ?? 0,
+    create_time: row.create_time,
+    update_time: row.update_time,
+  };
+}
+
+function rowToBasicConfig(row: RowDataPacket): BasicConfig {
+  return {
+    id: row.id,
+    user_id: row.user_id,
+    config_key: row.config_key,
+    value_json: row.value_json,
+    hash: row.hash,
     create_time: row.create_time,
     update_time: row.update_time,
   };
@@ -259,6 +272,74 @@ export class MysqlEnvDao implements IEnvDao {
     );
 
     return { list: rows.map(rowToEnv), total };
+  }
+}
+
+export class MysqlBasicConfigDao implements IBasicConfigDao {
+  private schemaReady: Promise<void>;
+
+  constructor(private pool: Pool) {
+    this.schemaReady = this.createTableIfNeeded();
+  }
+
+  ready(): Promise<void> {
+    return this.schemaReady;
+  }
+
+  private async createTableIfNeeded(): Promise<void> {
+    await this.pool.query(`
+      CREATE TABLE IF NOT EXISTS bifrost_basic_configs (
+        id          VARCHAR(192) NOT NULL PRIMARY KEY,
+        user_id     VARCHAR(128) NOT NULL,
+        config_key  VARCHAR(64)  NOT NULL,
+        value_json  LONGTEXT     NOT NULL,
+        hash        VARCHAR(128) NOT NULL DEFAULT '',
+        create_time VARCHAR(32)  NOT NULL,
+        update_time VARCHAR(32)  NOT NULL,
+        UNIQUE KEY uk_bifrost_basic_config (user_id, config_key),
+        KEY idx_bifrost_basic_configs_user_id (user_id)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+  }
+
+  async find(userId: string, configKey: BasicConfigKey): Promise<BasicConfig | undefined> {
+    await this.ready();
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_basic_configs WHERE user_id = ? AND config_key = ?',
+      [userId, configKey],
+    );
+    return rows.length > 0 ? rowToBasicConfig(rows[0]) : undefined;
+  }
+
+  async upsert(req: UpsertBasicConfigReq): Promise<BasicConfig> {
+    await this.ready();
+    const now = new Date().toISOString();
+    const id = `${req.user_id}:${req.config_key}`;
+    await this.pool.execute(
+      `INSERT INTO bifrost_basic_configs (id, user_id, config_key, value_json, hash, create_time, update_time)
+       VALUES (?, ?, ?, ?, ?, ?, ?)
+       ON DUPLICATE KEY UPDATE value_json = VALUES(value_json), hash = VALUES(hash), update_time = VALUES(update_time)`,
+      [id, req.user_id, req.config_key, req.value_json, req.hash ?? '', now, now],
+    );
+    return (await this.find(req.user_id, req.config_key))!;
+  }
+
+  async delete(userId: string, configKey: BasicConfigKey): Promise<boolean> {
+    await this.ready();
+    const [result] = await this.pool.execute<ResultSetHeader>(
+      'DELETE FROM bifrost_basic_configs WHERE user_id = ? AND config_key = ?',
+      [userId, configKey],
+    );
+    return result.affectedRows > 0;
+  }
+
+  async listByUser(userId: string): Promise<BasicConfig[]> {
+    await this.ready();
+    const [rows] = await this.pool.execute<RowDataPacket[]>(
+      'SELECT * FROM bifrost_basic_configs WHERE user_id = ? ORDER BY config_key ASC',
+      [userId],
+    );
+    return rows.map(rowToBasicConfig);
   }
 }
 
@@ -1134,6 +1215,7 @@ export class MysqlRemoteInvokeDao implements IRemoteInvokeDao {
 export class MysqlStorage implements IStorage {
   public user: MysqlUserDao;
   public env: MysqlEnvDao;
+  public basicConfig: MysqlBasicConfigDao;
   public group: MysqlGroupDao;
   public groupMember: MysqlGroupMemberDao;
   public groupSetting: MysqlGroupSettingDao;
@@ -1152,6 +1234,7 @@ export class MysqlStorage implements IStorage {
     });
     this.user = new MysqlUserDao(this.pool);
     this.env = new MysqlEnvDao(this.pool);
+    this.basicConfig = new MysqlBasicConfigDao(this.pool);
     this.group = new MysqlGroupDao(this.pool);
     this.groupMember = new MysqlGroupMemberDao(this.pool);
     this.groupSetting = new MysqlGroupSettingDao(this.pool);
@@ -1159,6 +1242,7 @@ export class MysqlStorage implements IStorage {
   }
 
   async ready(): Promise<void> {
+    await this.basicConfig.ready();
     await this.remoteInvoke.ready();
   }
 

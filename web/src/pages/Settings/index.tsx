@@ -47,6 +47,7 @@ import {
   openSyncLogin,
   runSyncNow,
   updateSyncConfig,
+  type SyncProviderStatus,
   type SyncStatus,
 } from "../../api/sync";
 import { isConnectionIssueError } from "../../api/client";
@@ -956,6 +957,33 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
     }
   }, [applySyncStatus]);
 
+  const handleSyncProviderSignIn = useCallback(
+    async (provider: SyncProviderStatus) => {
+      if (provider.id === "github_gist") {
+        message.info("GitHub Gist sync is not connected on this device");
+        return;
+      }
+      setSyncLoading(true);
+      try {
+        if (provider.remote_base_url) {
+          const status = await updateSyncConfig({
+            enabled: true,
+            remote_base_url: provider.remote_base_url,
+          });
+          applySyncStatus(status, { syncRemoteBaseUrlDraft: true });
+        }
+        const status = await openSyncLogin();
+        applySyncStatus(status);
+        message.success(`${provider.name} sign-in window opened`);
+      } catch {
+        message.error(`Failed to open ${provider.name} sign-in page`);
+      } finally {
+        setSyncLoading(false);
+      }
+    },
+    [applySyncStatus],
+  );
+
   const handleSyncSignOut = useCallback(async () => {
     setSyncLoading(true);
     try {
@@ -1342,6 +1370,7 @@ HTTPS Proxy: 127.0.0.1:${overview?.server.port || 9900}`;
           onToggleAutoSync={handleSyncAutoToggle}
           onSaveRemoteBaseUrl={handleSyncRemoteBaseUrlSave}
           onSignIn={handleSyncSignIn}
+          onProviderSignIn={handleSyncProviderSignIn}
           onSignOut={handleSyncSignOut}
           onRunSync={handleSyncRunNow}
         />

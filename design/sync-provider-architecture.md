@@ -1157,3 +1157,22 @@ Manual human_tests:
 - `human_tests/webui-settings.md`: provider catalog and routing UI cases.
 - `human_tests/remote-invoke.md`: relay provider capability routing cases.
 - `packages/bifrost-sync-server/README.md`: server capabilities endpoint if added.
+
+## Implementation Update - 2026-07-07
+
+This implementation pass lands the release foundation for provider-aware sync:
+
+- Bifrost Cloud sync server now exposes `/v4/capabilities` and `/v4/config/sync`.
+- Bifrost Cloud stores `app_allowlist`, `domain_allowlist`, and `blacklist` in a dedicated basic-config table for SQLite and MySQL.
+- Bifrost Cloud rejects unsupported config keys and JSON payloads containing sensitive key names such as token/password/secret/credential.
+- ByteDance Internal service has the matching IDL/controller/service/model/DDL plan and implementation in `/Users/eden_studio/work/github/bifrost-server-v4`.
+- The Bifrost client sync manager now tracks basic config sync metadata in `sync-state.json` and syncs the three allowed basic config keys after a successful rule sync.
+- Settings Sync now renders a provider card grid for ByteDance Internal, Bifrost Cloud, and GitHub Gist, capped at three cards per row by layout width and responsive down to one column.
+- Settings Sync first-run modal is dismissible. Selecting ByteDance Internal or Bifrost Cloud and pressing `Start` saves the provider URL and opens the existing login flow.
+- CLI `bifrost sync status` now lists provider status and capability flags.
+
+Known remaining implementation gaps before claiming the full original product target:
+
+- GitHub Gist currently renders as a provider card with Rules Sync and Config Sync capability metadata, but the actual GitHub OAuth/device flow, encrypted gist storage, conflict handling, and recovery key UX are not yet implemented.
+- True concurrent sessions for ByteDance Internal plus Bifrost Cloud are not yet persisted as independent provider sessions; the current implementation keeps the existing single active Bifrost-server session and derives provider card state from that session.
+- Remote Invoke registration fan-out to both ByteDance Internal and Bifrost Cloud is not yet implemented; current status derives registration from the active Bifrost-server session.

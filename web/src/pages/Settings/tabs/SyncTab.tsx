@@ -1,9 +1,12 @@
+import { useEffect, useMemo, useState } from "react";
 import {
   Alert,
   Button,
   Card,
   Descriptions,
   Input,
+  Modal,
+  Radio,
   Space,
   Switch,
   Tag,
@@ -16,7 +19,7 @@ import {
   LogoutOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
-import type { SyncStatus } from "../../../api/sync";
+import type { SyncProviderStatus, SyncStatus } from "../../../api/sync";
 
 const { Text } = Typography;
 
@@ -29,6 +32,7 @@ interface SyncTabProps {
   onToggleAutoSync: (enabled: boolean) => void;
   onSaveRemoteBaseUrl: () => void;
   onSignIn: () => void;
+  onProviderSignIn?: (provider: SyncProviderStatus) => void;
   onSignOut: () => void;
   onRunSync: () => void;
 }
@@ -68,6 +72,77 @@ function renderLastAction(syncStatus: SyncStatus | null) {
   }
 }
 
+function capabilityTags(provider: SyncProviderStatus) {
+  return (
+    <Space size={[4, 4]} wrap>
+      <Tag color={provider.capabilities.remote_invoke ? "blue" : "default"}>
+        Remote Invoke
+      </Tag>
+      <Tag color={provider.capabilities.rules_sync ? "green" : "default"}>
+        Rules Sync
+      </Tag>
+      <Tag color={provider.capabilities.config_sync ? "cyan" : "default"}>
+        Config Sync
+      </Tag>
+    </Space>
+  );
+}
+
+function providerStatusTag(provider: SyncProviderStatus) {
+  if (provider.connected) {
+    return <Tag color="green">Connected</Tag>;
+  }
+  if (provider.enabled && provider.reachable) {
+    return <Tag color="gold">Sign in required</Tag>;
+  }
+  if (provider.enabled && !provider.reachable) {
+    return <Tag color="orange">Offline</Tag>;
+  }
+  return <Tag>Not connected</Tag>;
+}
+
+const fallbackProviders: SyncProviderStatus[] = [
+  {
+    id: "bytedance_internal",
+    name: "ByteDance Internal",
+    description: "Internal trusted sync and Remote Invoke provider.",
+    remote_base_url: "https://bifrost.bytedance.net",
+    connected: false,
+    enabled: false,
+    reachable: false,
+    authorized: false,
+    user: null,
+    capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+    remote_invoke_registered: false,
+  },
+  {
+    id: "bifrost_cloud",
+    name: "Bifrost Cloud",
+    description: "Custom Bifrost sync service for teams and self-hosting.",
+    remote_base_url: "https://sync.bifrostproxy.dev",
+    connected: false,
+    enabled: false,
+    reachable: false,
+    authorized: false,
+    user: null,
+    capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+    remote_invoke_registered: false,
+  },
+  {
+    id: "github_gist",
+    name: "GitHub Gist",
+    description: "Public GitHub Gist-backed portable sync provider.",
+    remote_base_url: null,
+    connected: false,
+    enabled: false,
+    reachable: false,
+    authorized: false,
+    user: null,
+    capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+    remote_invoke_registered: false,
+  },
+];
+
 export default function SyncTab({
   syncStatus,
   syncLoading,
@@ -77,9 +152,42 @@ export default function SyncTab({
   onToggleAutoSync,
   onSaveRemoteBaseUrl,
   onSignIn,
+  onProviderSignIn,
   onSignOut,
   onRunSync,
 }: SyncTabProps) {
+  const providers = syncStatus?.providers?.length
+    ? syncStatus.providers
+    : fallbackProviders;
+  const [firstRunOpen, setFirstRunOpen] = useState(false);
+  const [selectedProviderId, setSelectedProviderId] = useState(providers[0]?.id);
+  const selectedProvider = useMemo(
+    () => providers.find((provider) => provider.id === selectedProviderId) || providers[0],
+    [providers, selectedProviderId],
+  );
+
+  useEffect(() => {
+    if (syncStatus?.first_run_prompt_required) {
+      setFirstRunOpen(true);
+    }
+  }, [syncStatus?.first_run_prompt_required]);
+
+  useEffect(() => {
+    if (!providers.some((provider) => provider.id === selectedProviderId)) {
+      setSelectedProviderId(providers[0]?.id);
+    }
+  }, [providers, selectedProviderId]);
+
+  const handleProviderSignIn = (provider: SyncProviderStatus) => {
+    if (provider.remote_base_url) {
+      setRemoteBaseUrlDraft(provider.remote_base_url);
+    }
+    onProviderSignIn?.(provider);
+    if (!onProviderSignIn) {
+      onSignIn();
+    }
+  };
+
   return (
     <Space direction="vertical" size={16} style={{ width: "100%" }}>
       <Alert
@@ -89,15 +197,87 @@ export default function SyncTab({
         description="Rules continue to work locally at all times. Sync only activates when the configured Bifrost service is reachable and a valid login session exists."
       />
 
-      <Card
-        title={
-          <Space>
-            <CloudOutlined />
-            <span>Remote Sync</span>
-          </Space>
-        }
-        size="small"
+      <div
+        data-testid="settings-sync-provider-grid"
+        style={{
+          display: "grid",
+          gap: 16,
+          gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))",
+          maxWidth: 1080,
+          width: "100%",
+        }}
       >
+        {providers.map((provider) => (
+          <Card
+            key={provider.id}
+            size="small"
+            data-testid={`settings-sync-provider-card-${provider.id}`}
+            title={
+              <Space>
+                <CloudOutlined />
+                <span>{provider.name}</span>
+              </Space>
+            }
+            extra={providerStatusTag(provider)}
+          >
+            <Space direction="vertical" size={12} style={{ width: "100%" }}>
+              <Text type="secondary">{provider.description}</Text>
+              {capabilityTags(provider)}
+              <Descriptions
+                size="small"
+                column={1}
+                items={[
+                  {
+                    key: "account",
+                    label: "Account",
+                    children:
+                      provider.user?.user_id ||
+                      (provider.connected ? "Signed in" : "Not signed in"),
+                  },
+                  {
+                    key: "remote",
+                    label: "Remote",
+                    children: provider.remote_base_url || "GitHub Gist",
+                  },
+                  {
+                    key: "invoke",
+                    label: "Remote Invoke",
+                    children: provider.capabilities.remote_invoke
+                      ? provider.remote_invoke_registered
+                        ? "Registered"
+                        : "Supported"
+                      : "Not supported",
+                  },
+                ]}
+              />
+              <Space wrap>
+                <Button
+                  type={provider.connected ? "default" : "primary"}
+                  icon={<LoginOutlined />}
+                  onClick={() => handleProviderSignIn(provider)}
+                  disabled={provider.id === "github_gist" || syncLoading}
+                  loading={syncLoading}
+                  data-testid={`settings-sync-provider-login-${provider.id}`}
+                >
+                  {provider.connected ? "Reconnect" : "Sign In"}
+                </Button>
+                {provider.connected ? (
+                  <Button
+                    icon={<LogoutOutlined />}
+                    onClick={onSignOut}
+                    loading={syncLoading}
+                    data-testid={`settings-sync-provider-logout-${provider.id}`}
+                  >
+                    Sign Out
+                  </Button>
+                ) : null}
+              </Space>
+            </Space>
+          </Card>
+        ))}
+      </div>
+
+      <Card title="Remote Sync" size="small">
         <Space direction="vertical" size={16} style={{ width: "100%" }}>
           <Descriptions
             size="small"
@@ -109,21 +289,18 @@ export default function SyncTab({
                 children: renderStatusTag(syncStatus),
               },
               {
-                key: "reachability",
-                label: "Connectivity",
-                children: syncStatus?.reachable ? "Reachable" : "Local only",
+                key: "last-sync",
+                label: "Last Sync",
+                children: syncStatus?.last_sync_at || "Never",
               },
               {
                 key: "session",
                 label: "Session",
-                children: syncStatus?.has_session
-                  ? syncStatus.user?.user_id || "Signed in on this device"
-                  : "Not signed in",
-              },
-              {
-                key: "last-sync",
-                label: "Last Sync",
-                children: syncStatus?.last_sync_at || "Never",
+                children: (
+                  <span data-testid="settings-sync-session">
+                    {syncStatus?.user?.user_id || "Not signed in"}
+                  </span>
+                ),
               },
               {
                 key: "last-sync-action",
@@ -154,7 +331,6 @@ export default function SyncTab({
               onChange={onToggleEnabled}
               data-testid="settings-sync-enable-switch"
             />
-            <Text type="secondary">Optional and environment-aware</Text>
           </Space>
 
           <Space align="center">
@@ -166,7 +342,6 @@ export default function SyncTab({
               disabled={!(syncStatus?.enabled ?? false)}
               data-testid="settings-sync-auto-switch"
             />
-            <Text type="secondary">Automatically resync after reconnection</Text>
           </Space>
 
           <Space.Compact style={{ width: "100%" }}>
@@ -219,6 +394,51 @@ export default function SyncTab({
           </Space>
         </Space>
       </Card>
+
+      <Modal
+        title="Choose a sync service"
+        open={firstRunOpen}
+        onCancel={() => setFirstRunOpen(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setFirstRunOpen(false)}>
+            Not now
+          </Button>,
+          <Button
+            key="start"
+            type="primary"
+            icon={<LoginOutlined />}
+            disabled={!selectedProvider || selectedProvider.id === "github_gist"}
+            loading={syncLoading}
+            onClick={() => {
+              if (selectedProvider) {
+                handleProviderSignIn(selectedProvider);
+                setFirstRunOpen(false);
+              }
+            }}
+            data-testid="settings-sync-first-run-start"
+          >
+            Start
+          </Button>,
+        ]}
+        data-testid="settings-sync-first-run-modal"
+      >
+        <Radio.Group
+          value={selectedProviderId}
+          onChange={(event) => setSelectedProviderId(event.target.value)}
+          style={{ width: "100%" }}
+        >
+          <Space direction="vertical" size={12} style={{ width: "100%" }}>
+            {providers.map((provider) => (
+              <Radio key={provider.id} value={provider.id}>
+                <Space direction="vertical" size={2}>
+                  <Text strong>{provider.name}</Text>
+                  {capabilityTags(provider)}
+                </Space>
+              </Radio>
+            ))}
+          </Space>
+        </Radio.Group>
+      </Modal>
     </Space>
   );
 }

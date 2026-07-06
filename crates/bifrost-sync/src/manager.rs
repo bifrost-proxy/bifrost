@@ -10,7 +10,7 @@ use std::time::Duration;
 use bifrost_core::{BifrostError, Result};
 use bifrost_storage::{
     content_hash, ConfigChangeEvent, ConfigManager, RuleFile, RuleSyncStatus, RulesChangeOrigin,
-    RulesStorage, SyncConfig, SyncConfigUpdate,
+    RulesStorage, SyncConfig, SyncConfigUpdate, TlsConfigUpdate, DEFAULT_REMOTE_BASE_URL,
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -18,8 +18,9 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, Mutex as AsyncMutex, Notify, RwLock};
 
 use crate::client::SyncHttpClient;
+use crate::client::{SyncBasicConfigCheckItem, SyncBasicConfigUpdateItem};
 use crate::normalize::normalize_remote_rule;
-use crate::types::{RemoteEnv, RemoteUser, SyncReason};
+use crate::types::{RemoteBasicConfig, RemoteEnv, RemoteUser, SyncReason};
 
 const TOMBSTONE_MAX_AGE_SECS: i64 = 7 * 24 * 3600;
 const TOMBSTONE_MIN_AGE_SECS: i64 = 120;
@@ -50,6 +51,12 @@ struct StartupLoginPromptFile {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct BasicConfigSyncMeta {
+    remote_updated_at: Option<String>,
+    hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct SyncStateFile {
     token: Option<String>,
     user: Option<RemoteUser>,
@@ -57,6 +64,7 @@ struct SyncStateFile {
     last_sync_action: Option<SyncAction>,
     startup_login_prompt: Option<StartupLoginPromptFile>,
     deleted_rules: HashMap<String, DeletedRuleTombstone>,
+    basic_configs: HashMap<String, BasicConfigSyncMeta>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +111,30 @@ pub struct SyncStatus {
     pub last_sync_action: Option<SyncAction>,
     pub last_error: Option<String>,
     pub user: Option<RemoteUser>,
+    pub providers: Vec<SyncProviderStatus>,
+    pub first_run_prompt_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncProviderCapabilities {
+    pub rules_sync: bool,
+    pub config_sync: bool,
+    pub remote_invoke: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SyncProviderStatus {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub remote_base_url: Option<String>,
+    pub connected: bool,
+    pub enabled: bool,
+    pub reachable: bool,
+    pub authorized: bool,
+    pub user: Option<RemoteUser>,
+    pub capabilities: SyncProviderCapabilities,
+    pub remote_invoke_registered: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -131,6 +163,87 @@ pub struct SyncRuntimeState {
     pub syncing: bool,
     pub reason: SyncReason,
     pub last_error: Option<String>,
+}
+
+fn is_bytedance_remote(remote_base_url: &str) -> bool {
+    remote_base_url.contains("bytedance.net")
+}
+
+fn build_provider_statuses(
+    sync_config: &SyncConfig,
+    runtime: &SyncRuntimeState,
+    user: &Option<RemoteUser>,
+    has_session: bool,
+) -> Vec<SyncProviderStatus> {
+    let current_url = sync_config
+        .remote_base_url
+        .trim_end_matches('/')
+        .to_string();
+    let bytedance_selected = is_bytedance_remote(&current_url);
+    let cloud_selected = !bytedance_selected && !current_url.is_empty();
+    let current_connected = has_session && runtime.authorized;
+
+    vec![
+        SyncProviderStatus {
+            id: "bytedance_internal".to_string(),
+            name: "ByteDance Internal".to_string(),
+            description: "Internal trusted sync and Remote Invoke provider.".to_string(),
+            remote_base_url: Some(DEFAULT_REMOTE_BASE_URL.to_string()),
+            connected: bytedance_selected && current_connected,
+            enabled: sync_config.enabled && bytedance_selected,
+            reachable: bytedance_selected && runtime.reachable,
+            authorized: bytedance_selected && runtime.authorized,
+            user: (bytedance_selected && has_session)
+                .then(|| user.clone())
+                .flatten(),
+            capabilities: SyncProviderCapabilities {
+                rules_sync: true,
+                config_sync: true,
+                remote_invoke: true,
+            },
+            remote_invoke_registered: bytedance_selected && runtime.authorized,
+        },
+        SyncProviderStatus {
+            id: "bifrost_cloud".to_string(),
+            name: "Bifrost Cloud".to_string(),
+            description: "Custom Bifrost sync service for teams and self-hosting.".to_string(),
+            remote_base_url: Some(if cloud_selected {
+                current_url.clone()
+            } else {
+                "https://sync.bifrostproxy.dev".to_string()
+            }),
+            connected: cloud_selected && current_connected,
+            enabled: sync_config.enabled && cloud_selected,
+            reachable: cloud_selected && runtime.reachable,
+            authorized: cloud_selected && runtime.authorized,
+            user: (cloud_selected && has_session)
+                .then(|| user.clone())
+                .flatten(),
+            capabilities: SyncProviderCapabilities {
+                rules_sync: true,
+                config_sync: true,
+                remote_invoke: true,
+            },
+            remote_invoke_registered: cloud_selected && runtime.authorized,
+        },
+        SyncProviderStatus {
+            id: "github_gist".to_string(),
+            name: "GitHub Gist".to_string(),
+            description: "Public GitHub Gist-backed portable sync provider.".to_string(),
+            remote_base_url: None,
+            connected: false,
+            enabled: false,
+            reachable: false,
+            authorized: false,
+            user: None,
+            capabilities: SyncProviderCapabilities {
+                rules_sync: true,
+                config_sync: true,
+                remote_invoke: false,
+            },
+            remote_invoke_registered: false,
+        },
+    ]
 }
 
 #[derive(Clone)]
@@ -251,6 +364,7 @@ impl SyncManager {
             .token
             .as_deref()
             .is_some_and(|token| !token.trim().is_empty());
+        let providers = build_provider_statuses(&config.sync, &runtime, &state.user, has_session);
         SyncStatus {
             enabled: config.sync.enabled,
             auto_sync: config.sync.auto_sync,
@@ -264,6 +378,8 @@ impl SyncManager {
             last_sync_action: state.last_sync_action,
             last_error: runtime.last_error,
             user: state.user,
+            first_run_prompt_required: !providers.iter().any(|provider| provider.connected),
+            providers,
         }
     }
 
@@ -518,7 +634,13 @@ impl SyncManager {
             .filter(|rule| !RulesStorage::is_default_rule_name(&rule.name))
             .count();
 
-        let result = self.sync_rules(&client, &config.sync, &token, &user).await;
+        let result = match self.sync_rules(&client, &config.sync, &token, &user).await {
+            Ok(()) => {
+                self.sync_basic_configs(&client, &config.sync, &token, &user)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         let state = self.state.lock().clone();
         let synced_count = rules_storage
             .load_all()?
@@ -683,7 +805,13 @@ impl SyncManager {
             runtime.last_error = None;
         }
 
-        let result = self.sync_rules(&client, &config.sync, &token, &user).await;
+        let result = match self.sync_rules(&client, &config.sync, &token, &user).await {
+            Ok(()) => {
+                self.sync_basic_configs(&client, &config.sync, &token, &user)
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         let mut runtime = self.runtime.write().await;
         runtime.reachable = true;
         runtime.authorized = true;
@@ -1272,6 +1400,165 @@ impl SyncManager {
         }
 
         Ok(())
+    }
+
+    async fn sync_basic_configs(
+        &self,
+        client: &SyncHttpClient,
+        config: &SyncConfig,
+        token: &str,
+        user: &RemoteUser,
+    ) -> Result<()> {
+        let unified = self.config_manager.config().await;
+        let snapshots = [
+            (
+                "app_allowlist",
+                serde_json::to_string(&unified.tls.app_intercept_include)
+                    .map_err(|e| BifrostError::Config(format!("encode app allowlist: {e}")))?,
+            ),
+            (
+                "domain_allowlist",
+                serde_json::to_string(&unified.tls.intercept_include)
+                    .map_err(|e| BifrostError::Config(format!("encode domain allowlist: {e}")))?,
+            ),
+            (
+                "blacklist",
+                serde_json::to_string(&unified.tls.intercept_exclude)
+                    .map_err(|e| BifrostError::Config(format!("encode blacklist: {e}")))?,
+            ),
+        ];
+
+        let state_snapshot = self.state.lock().clone();
+        let mut check_list = Vec::new();
+        let mut update_list = Vec::new();
+        for (key, value_json) in snapshots {
+            let hash = content_hash(&value_json);
+            match state_snapshot.basic_configs.get(key) {
+                Some(meta) if meta.hash.as_deref() == Some(hash.as_str()) => {
+                    check_list.push(SyncBasicConfigCheckItem {
+                        id: key.to_string(),
+                        user_id: user.user_id.clone(),
+                        config_key: key.to_string(),
+                        update_time: meta.remote_updated_at.clone().unwrap_or_default(),
+                        hash,
+                    });
+                }
+                _ => update_list.push(SyncBasicConfigUpdateItem {
+                    user_id: user.user_id.clone(),
+                    config_key: key.to_string(),
+                    value_json,
+                    hash,
+                }),
+            }
+        }
+
+        let data = match client
+            .sync_basic_configs(config, token, &user.user_id, check_list, update_list)
+            .await
+        {
+            Ok(data) => data,
+            Err(error)
+                if error
+                    .to_string()
+                    .contains("sync basic config returned empty data")
+                    || error.to_string().contains("status 404") =>
+            {
+                tracing::debug!(
+                    target: "bifrost_sync::manager",
+                    error = %error,
+                    "remote sync provider does not expose basic config sync; skipping"
+                );
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
+
+        let mut remote_applied = false;
+        for remote in &data.local_update_list {
+            if self.apply_remote_basic_config(remote).await? {
+                remote_applied = true;
+            }
+        }
+
+        {
+            let mut state = self.state.lock();
+            for remote in data.local_update_list {
+                if !remote.config_key.trim().is_empty() {
+                    state.basic_configs.insert(
+                        remote.config_key.clone(),
+                        BasicConfigSyncMeta {
+                            remote_updated_at: Some(remote.update_time),
+                            hash: Some(remote.hash),
+                        },
+                    );
+                }
+            }
+            for item in data.result_list {
+                if item.status != 0 {
+                    tracing::warn!(
+                        target: "bifrost_sync::manager",
+                        config_key = %item.config_key,
+                        message = ?item.msg,
+                        "remote rejected basic config sync item"
+                    );
+                    continue;
+                }
+                let key = if !item.config_key.trim().is_empty() {
+                    item.config_key
+                } else {
+                    item.id
+                };
+                if key.trim().is_empty() {
+                    continue;
+                }
+                state.basic_configs.insert(
+                    key,
+                    BasicConfigSyncMeta {
+                        remote_updated_at: Some(item.update_time),
+                        hash: Some(item.hash),
+                    },
+                );
+            }
+            for key in data.local_delete_list {
+                state.basic_configs.remove(&key);
+            }
+            self.persist_state(&state)?;
+        }
+
+        if remote_applied {
+            tracing::info!(
+                target: "bifrost_sync::manager",
+                "remote basic config changes applied"
+            );
+        }
+
+        Ok(())
+    }
+
+    async fn apply_remote_basic_config(&self, remote: &RemoteBasicConfig) -> Result<bool> {
+        let values: Vec<String> = serde_json::from_str(&remote.value_json).map_err(|e| {
+            BifrostError::Config(format!(
+                "remote basic config '{}' is not a string list: {e}",
+                remote.config_key
+            ))
+        })?;
+        let update = match remote.config_key.as_str() {
+            "app_allowlist" => TlsConfigUpdate {
+                app_intercept_include: Some(values),
+                ..Default::default()
+            },
+            "domain_allowlist" => TlsConfigUpdate {
+                intercept_include: Some(values),
+                ..Default::default()
+            },
+            "blacklist" => TlsConfigUpdate {
+                intercept_exclude: Some(values),
+                ..Default::default()
+            },
+            _ => return Ok(false),
+        };
+        self.config_manager.update_tls_config(update).await?;
+        Ok(true)
     }
 
     fn save_remote_as_local(

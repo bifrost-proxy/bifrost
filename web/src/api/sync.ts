@@ -35,6 +35,28 @@ export interface SyncStatus {
   last_sync_action?: SyncAction | null;
   last_error?: string | null;
   user?: SyncUser | null;
+  providers?: SyncProviderStatus[];
+  first_run_prompt_required?: boolean;
+}
+
+export interface SyncProviderCapabilities {
+  rules_sync: boolean;
+  config_sync: boolean;
+  remote_invoke: boolean;
+}
+
+export interface SyncProviderStatus {
+  id: string;
+  name: string;
+  description: string;
+  remote_base_url?: string | null;
+  connected: boolean;
+  enabled: boolean;
+  reachable: boolean;
+  authorized: boolean;
+  user?: SyncUser | null;
+  capabilities: SyncProviderCapabilities;
+  remote_invoke_registered: boolean;
 }
 
 export interface UpdateSyncConfigRequest {

@@ -24,6 +24,17 @@ CREATE TABLE IF NOT EXISTS bifrost_envs (
   UNIQUE(user_id, name)
 );
 
+CREATE TABLE IF NOT EXISTS bifrost_basic_configs (
+  id          TEXT PRIMARY KEY,
+  user_id     TEXT NOT NULL,
+  config_key  TEXT NOT NULL,
+  value_json  TEXT NOT NULL DEFAULT '{}',
+  hash        TEXT NOT NULL DEFAULT '',
+  create_time TEXT NOT NULL,
+  update_time TEXT NOT NULL,
+  UNIQUE(user_id, config_key)
+);
+
 CREATE TABLE IF NOT EXISTS bifrost_groups (
   id          TEXT PRIMARY KEY,
   name        TEXT NOT NULL,
@@ -52,6 +63,7 @@ CREATE TABLE IF NOT EXISTS bifrost_group_settings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_bifrost_envs_user_id ON bifrost_envs(user_id);
+CREATE INDEX IF NOT EXISTS idx_bifrost_basic_configs_user_id ON bifrost_basic_configs(user_id);
 CREATE INDEX IF NOT EXISTS idx_bifrost_users_token  ON bifrost_users(token);
 CREATE INDEX IF NOT EXISTS idx_bifrost_group_members_group_id ON bifrost_group_members(group_id);
 CREATE INDEX IF NOT EXISTS idx_bifrost_group_members_user_id  ON bifrost_group_members(user_id);

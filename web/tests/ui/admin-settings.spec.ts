@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Route } from "@playwright/test";
 import {
   apiBase,
   backendPort,
@@ -290,6 +290,70 @@ test("Settings TLS 与证书页支持开关、模式和只读展示", async ({
 test("Certificate iOS Configurator 缺失时在禁用按钮旁显示安装入口", async ({
   page,
 }) => {
+  const mobileDevicesPayload = {
+    android: {
+      adb_available: false,
+      adb_path: null,
+      devices: [],
+      message: "Android ADB is not available.",
+    },
+    ios: {
+      supported: true,
+      devices: [
+        {
+          id: "00008112000839C63621401E",
+          name: "iPad",
+          managed_install_target: null,
+          platform: "ios",
+          status: "connected",
+          capability: "guide_only",
+          certificate_status: null,
+          status_message:
+            "Detected over USB. Download the iOS profile, install it on the phone, then enable full trust in Certificate Trust Settings.",
+        },
+      ],
+      configurator: {
+        supported: true,
+        cfgutil_available: false,
+        cfgutil_path: null,
+        message:
+          "Apple Configurator cfgutil was not found. Install Apple Configurator from the Mac App Store to enable computer-side iPhone profile installation.",
+      },
+      message: "Detected 1 iOS USB device(s).",
+    },
+    ios_profile_url: "/_bifrost/public/mobileconfig/ios",
+    ios_profile_qrcode_url: "/_bifrost/public/mobileconfig/ios/qrcode",
+    ordinary_device_notice: "Ordinary devices require manual confirmation.",
+    managed_device_notice:
+      "Managed devices can support automatic trust through Configurator or MDM.",
+  };
+
+  await page.routeWebSocket(/\/api\/push/, (ws) => {
+    const server = ws.connectToServer();
+    ws.onMessage((message) => {
+      server.send(message);
+    });
+    server.onMessage((message) => {
+      try {
+        const parsed = JSON.parse(String(message));
+        if (parsed?.type === "settings_update" && parsed?.data?.scope === "mobile_devices") {
+          ws.send(
+            JSON.stringify({
+              ...parsed,
+              data: {
+                ...parsed.data,
+                data: mobileDevicesPayload,
+              },
+            }),
+          );
+          return;
+        }
+      } catch {
+        // Non-JSON push messages should pass through unchanged.
+      }
+      ws.send(message);
+    });
+  });
   await page.route("**/_bifrost/api/cert/info", async (route) => {
     await route.fulfill({
       json: {
@@ -306,47 +370,15 @@ test("Certificate iOS Configurator 缺失时在禁用按钮旁显示安装入口
       },
     });
   });
-  await page.route("**/_bifrost/api/mobile-devices", async (route) => {
+  const fulfillMobileDevices = async (route: Route) => {
     await route.fulfill({
-      json: {
-        android: {
-          adb_available: false,
-          adb_path: null,
-          devices: [],
-          message: "Android ADB is not available.",
-        },
-        ios: {
-          supported: true,
-          devices: [
-            {
-              id: "00008112000839C63621401E",
-              name: "iPad",
-              managed_install_target: null,
-              platform: "ios",
-              status: "connected",
-              capability: "guide_only",
-              certificate_status: null,
-              status_message:
-                "Detected over USB. Download the iOS profile, install it on the phone, then enable full trust in Certificate Trust Settings.",
-            },
-          ],
-          configurator: {
-            supported: true,
-            cfgutil_available: false,
-            cfgutil_path: null,
-            message:
-              "Apple Configurator cfgutil was not found. Install Apple Configurator from the Mac App Store to enable computer-side iPhone profile installation.",
-          },
-          message: "Detected 1 iOS USB device(s).",
-        },
-        ios_profile_url: "/_bifrost/public/mobileconfig/ios",
-        ios_profile_qrcode_url: "/_bifrost/public/mobileconfig/ios/qrcode",
-        ordinary_device_notice: "Ordinary devices require manual confirmation.",
-        managed_device_notice:
-          "Managed devices can support automatic trust through Configurator or MDM.",
-      },
+      json: mobileDevicesPayload,
     });
-  });
+  };
+  await page.route(
+    /\/_bifrost\/api\/mobile-devices(?:\/refresh)?(?:\?.*)?$/,
+    fulfillMobileDevices,
+  );
 
   await openPage(page, "settings?tab=certificate");
 
@@ -834,7 +866,7 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
     "true",
   );
   await expect(page.getByText("Sign in required")).toBeVisible();
-  await expect(page.getByText("Not signed in")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-session")).toHaveText("Not signed in");
   await expect(page.getByTestId("settings-sync-run-now")).toBeDisabled();
   await expect(page.getByTestId("statusbar-sync")).toHaveAttribute(
     "data-sync-state",
@@ -842,7 +874,9 @@ test("Settings Sync 打开时会轮询刷新页面与底部状态栏", async ({ 
   );
 
   signedIn = true;
-  await expect(page.getByText("poll-user")).toBeVisible({ timeout: 5_000 });
+  await expect(page.getByTestId("settings-sync-session")).toHaveText("poll-user", {
+    timeout: 5_000,
+  });
   await expect(page.getByText("Ready")).toBeVisible();
   await expect(page.getByTestId("settings-sync-last-action")).toHaveText(
     "No changes detected",
@@ -927,6 +961,113 @@ test("Settings Sync 轮询刷新不会覆盖正在编辑的 Remote URL", async (
   await waitForToast(page, "Remote sync URL updated");
   expect(savedRemoteBaseUrl).toBe("http://127.0.0.1:61580/custom/");
   await expect(remoteUrlInput).toHaveValue("http://127.0.0.1:61580/custom/");
+});
+
+test("Settings Sync 展示三类 Provider 卡片并支持首登弹窗关闭与启动", async ({ page }) => {
+  let configUpdated = false;
+  let loginOpened = false;
+  const statusBody = {
+    enabled: true,
+    auto_sync: true,
+    remote_base_url: "https://bifrost.bytedance.net",
+    has_session: false,
+    reachable: true,
+    authorized: false,
+    syncing: false,
+    reason: "unauthorized",
+    last_sync_at: null,
+    last_sync_action: null,
+    last_error: null,
+    user: null,
+    first_run_prompt_required: true,
+    providers: [
+      {
+        id: "bytedance_internal",
+        name: "ByteDance Internal",
+        description: "Internal trusted sync and Remote Invoke provider.",
+        remote_base_url: "https://bifrost.bytedance.net",
+        connected: false,
+        enabled: true,
+        reachable: true,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+      {
+        id: "bifrost_cloud",
+        name: "Bifrost Cloud",
+        description: "Custom Bifrost sync service for teams and self-hosting.",
+        remote_base_url: "https://sync.example.test",
+        connected: false,
+        enabled: false,
+        reachable: false,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: true, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+      {
+        id: "github_gist",
+        name: "GitHub Gist",
+        description: "Public GitHub Gist-backed portable sync provider.",
+        remote_base_url: null,
+        connected: false,
+        enabled: false,
+        reachable: false,
+        authorized: false,
+        user: null,
+        capabilities: { remote_invoke: false, rules_sync: true, config_sync: true },
+        remote_invoke_registered: false,
+      },
+    ],
+  };
+
+  await page.route("**/_bifrost/api/sync/status", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/config", async (route) => {
+    configUpdated = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody),
+    });
+  });
+  await page.route("**/_bifrost/api/sync/login", async (route) => {
+    loginOpened = true;
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(statusBody),
+    });
+  });
+
+  await openPage(page, "settings?tab=sync");
+
+  await expect(page.getByTestId("settings-sync-provider-grid")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-provider-card-bytedance_internal")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-provider-card-bifrost_cloud")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toBeVisible();
+  await expect(page.getByTestId("settings-sync-provider-card-github_gist")).toContainText(
+    "Not supported",
+  );
+  await expect(page.getByTestId("settings-sync-provider-login-github_gist")).toBeDisabled();
+
+  const modal = page.getByRole("dialog", { name: "Choose a sync service" });
+  await expect(modal).toBeVisible();
+  await page.getByRole("button", { name: "Not now" }).click();
+  await expect(modal).toBeHidden();
+
+  await page.reload();
+  await expect(page.getByRole("dialog", { name: "Choose a sync service" })).toBeVisible();
+  await page.getByTestId("settings-sync-first-run-start").click();
+  await expect.poll(() => Promise.resolve(configUpdated)).toBe(true);
+  await expect.poll(() => Promise.resolve(loginOpened)).toBe(true);
 });
 
 test("Settings Agent 三层 instructions 使用大窗口编辑", async ({ page }) => {
