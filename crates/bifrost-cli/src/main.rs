@@ -778,10 +778,18 @@ mod tests {
     use super::*;
     use crate::cli::{RemoteCommands, RemoteConnCommands};
     use bifrost_storage::UnifiedConfig;
+    use std::sync::{Mutex, MutexGuard};
     use tempfile::TempDir;
+
+    static UPDATE_NOTICE_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    fn lock_update_notice_env() -> MutexGuard<'static, ()> {
+        UPDATE_NOTICE_ENV_LOCK.lock().unwrap()
+    }
 
     #[test]
     fn should_run_update_notice_when_forced_even_without_tty() {
+        let _env_lock = lock_update_notice_env();
         let previous = std::env::var_os("BIFROST_FORCE_UPDATE_CHECK");
         unsafe {
             std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", "1");
@@ -900,6 +908,12 @@ mod tests {
 
     #[test]
     fn should_run_update_notice_skips_non_tty_output() {
+        let _env_lock = lock_update_notice_env();
+        let previous = std::env::var_os("BIFROST_FORCE_UPDATE_CHECK");
+        unsafe {
+            std::env::remove_var("BIFROST_FORCE_UPDATE_CHECK");
+        }
+
         assert!(!should_run_update_notice(
             false,
             Some(&Commands::Status {
@@ -907,6 +921,12 @@ mod tests {
                 format: cli::StatusFormat::Text
             })
         ));
+
+        if let Some(value) = previous {
+            unsafe {
+                std::env::set_var("BIFROST_FORCE_UPDATE_CHECK", value);
+            }
+        }
     }
 
     #[test]
