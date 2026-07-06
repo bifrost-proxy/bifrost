@@ -14,6 +14,7 @@ import { copyToClipboard } from "../../utils/clipboard";
 
 interface Props {
   onNavigateRule: (name: string, groupId: string | null) => void;
+  defaultTop?: number;
 }
 
 const DRAG_THRESHOLD = 4;
@@ -21,7 +22,7 @@ const VIEWPORT_MARGIN = 8;
 
 type IslandPosition = { x: number; y: number };
 
-export default function RulesDynamicIsland({ onNavigateRule }: Props) {
+export default function RulesDynamicIsland({ onNavigateRule, defaultTop = 14 }: Props) {
   const { token } = theme.useToken();
   const [expanded, setExpanded] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -191,7 +192,7 @@ export default function RulesDynamicIsland({ onNavigateRule }: Props) {
   const positionStyle: CSSProperties =
     position !== null
       ? { left: position.x, top: position.y }
-      : { top: 14, left: "50%", transform: "translateX(-50%)" };
+      : { top: defaultTop, left: "50%", transform: "translateX(-50%)" };
   const panelOpensUp =
     position !== null && position.y > Math.max(180, window.innerHeight / 2);
 

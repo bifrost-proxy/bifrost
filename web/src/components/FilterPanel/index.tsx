@@ -7,6 +7,7 @@ import FilterSection from "./FilterSection";
 import PinnedFilters from "./PinnedFilters";
 import FilterItem from "./FilterItem";
 import AppIcon from "../AppIcon";
+import { isMacDesktopShell } from "../../runtime";
 
 interface FilterPanelProps {
   availableClientIps: string[];
@@ -26,6 +27,8 @@ export default function FilterPanel({
   domainCounts,
 }: FilterPanelProps) {
   const { token } = theme.useToken();
+  const panelBackground = isMacDesktopShell() ? "transparent" : token.colorBgContainer;
+  const headerBackground = isMacDesktopShell() ? "transparent" : token.colorBgLayout;
   const { fetchConfig } = useTlsConfigStore();
 
   useEffect(() => {
@@ -74,7 +77,7 @@ export default function FilterPanel({
         flexDirection: "column",
         height: "100%",
         minHeight: 0,
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: panelBackground,
         borderRight: `1px solid ${token.colorBorderSecondary}`,
       },
       header: {
@@ -83,14 +86,14 @@ export default function FilterPanel({
         justifyContent: "space-between",
         padding: "8px 12px",
         borderBottom: `1px solid ${token.colorBorderSecondary}`,
-        backgroundColor: token.colorBgLayout,
+        backgroundColor: headerBackground,
         flexShrink: 0,
         gap: 8,
       },
       searchWrapper: {
         padding: "6px 8px",
         borderBottom: `1px solid ${token.colorBorderSecondary}`,
-        backgroundColor: token.colorBgContainer,
+        backgroundColor: panelBackground,
         flexShrink: 0,
       },
       title: {
@@ -126,7 +129,7 @@ export default function FilterPanel({
         padding: "8px 12px",
       },
     }),
-    [token]
+    [headerBackground, panelBackground, token]
   );
 
   const sortedClientIps = useMemo(() => {

@@ -9,6 +9,10 @@
   background-color: #171717;
 }
 
+[data-platform="desktop"][data-desktop-platform="macos"] .container {
+  background-color: transparent;
+}
+
 .header {
   display: flex;
   align-items: center;
@@ -98,6 +102,10 @@
   background-color: #171717;
 }
 
+[data-platform="desktop"][data-desktop-platform="macos"] .empty {
+  background-color: transparent;
+}
+
 .usageGuide {
   max-width: 400px;
   margin-top: 24px;
@@ -179,4 +187,8 @@
 
 [data-theme="dark"] .loading {
   background-color: #171717;
+}
+
+[data-platform="desktop"][data-desktop-platform="macos"] .loading {
+  background-color: transparent;
 }

@@ -19,11 +19,14 @@ use std::time::{Duration, Instant, SystemTime};
 #[cfg(target_os = "macos")]
 use objc2_app_kit::NSWindow;
 #[cfg(target_os = "macos")]
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
+#[cfg(target_os = "macos")]
 use tauri::window::EffectState;
 use tauri::window::{Window, WindowBuilder};
+#[cfg(target_os = "macos")]
+use tauri::TitleBarStyle;
 use tauri::{
     image::Image,
-    menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
     webview::{Color, WebviewBuilder},
     window::{Effect, EffectsBuilder},
     AppHandle, Emitter, LogicalPosition, LogicalSize, Manager, Position, Size, State, WebviewUrl,
@@ -73,6 +76,7 @@ struct DesktopRuntimeInfo {
     platform: &'static str,
     startup_ready: bool,
     startup_error: Option<String>,
+    handoff_completed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -123,7 +127,10 @@ enum HostWindowCloseBehavior {
 }
 
 fn main() {
-    tauri::Builder::default()
+    let builder = tauri::Builder::default();
+
+    #[cfg(target_os = "macos")]
+    let builder = builder
         .menu(|app| {
             // App menu (macOS displays first submenu as app name)
             let app_menu = Submenu::with_items(
@@ -223,7 +230,9 @@ fn main() {
                     let _ = webview.eval(&js);
                 }
             }
-        })
+        });
+
+    builder
         .invoke_handler(tauri::generate_handler![
             get_desktop_runtime,
             update_desktop_proxy_port,
@@ -347,12 +356,10 @@ fn main() {
                 }
                 #[cfg(target_os = "macos")]
                 tauri::RunEvent::Reopen {
-                    has_visible_windows,
+                    has_visible_windows: false,
                     ..
                 } => {
-                    if !has_visible_windows {
-                        restore_host_window(app_handle);
-                    }
+                    restore_host_window(app_handle);
                 }
                 _ => {}
             }
@@ -409,6 +416,22 @@ fn supports_native_launcher() -> bool {
     cfg!(target_os = "macos")
 }
 
+fn uses_borderless_desktop_chrome() -> bool {
+    uses_borderless_desktop_chrome_for_platform(cfg!(target_os = "windows"))
+}
+
+fn uses_borderless_desktop_chrome_for_platform(is_windows: bool) -> bool {
+    is_windows
+}
+
+fn main_interface_decorations_for_platform(is_windows: bool) -> bool {
+    !uses_borderless_desktop_chrome_for_platform(is_windows)
+}
+
+fn main_interface_decorations() -> bool {
+    main_interface_decorations_for_platform(cfg!(target_os = "windows"))
+}
+
 fn load_app_icon() -> tauri::Result<Image<'static>> {
     Image::from_bytes(include_bytes!("../../../assets/bifrost.png"))
 }
@@ -444,22 +467,35 @@ fn create_host_window(app: &AppHandle) -> tauri::Result<Window> {
             .min_inner_size(INITIAL_WINDOW_WIDTH, INITIAL_WINDOW_HEIGHT)
             .resizable(true)
             .maximizable(true)
-            .decorations(false)
             .visible(true)
             .transparent(true)
-            .shadow(false)
             .background_color(Color(0, 0, 0, 0));
+        #[cfg(target_os = "macos")]
+        {
+            builder = builder.decorations(true).shadow(true);
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            builder = builder.decorations(false).shadow(false);
+        }
     } else {
         builder = builder
             .inner_size(TARGET_WINDOW_WIDTH, TARGET_WINDOW_HEIGHT)
             .min_inner_size(TARGET_WINDOW_MIN_WIDTH, TARGET_WINDOW_MIN_HEIGHT)
             .resizable(true)
             .maximizable(true)
-            .decorations(true)
+            .decorations(!uses_borderless_desktop_chrome())
             .visible(true)
             .transparent(false)
             .shadow(true)
             .background_color(Color(8, 17, 23, 255));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        builder = builder
+            .hidden_title(true)
+            .title_bar_style(TitleBarStyle::Overlay);
     }
 
     builder
@@ -533,6 +569,10 @@ fn resolve_bifrost_binary(app: &AppHandle) -> tauri::Result<PathBuf> {
         "bifrost"
     };
 
+    if let Some(path) = resolve_bifrost_binary_from_env() {
+        return Ok(path);
+    }
+
     if cfg!(debug_assertions) {
         let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         return Ok(manifest_dir
@@ -552,6 +592,17 @@ fn resolve_bifrost_binary(app: &AppHandle) -> tauri::Result<PathBuf> {
     Ok(resource_dir.join("bin").join(binary_name))
 }
 
+fn resolve_bifrost_binary_from_env() -> Option<PathBuf> {
+    std::env::var_os("BIFROST_DESKTOP_BIN").and_then(|value| {
+        let path = PathBuf::from(value);
+        if path.as_os_str().is_empty() {
+            None
+        } else {
+            Some(path)
+        }
+    })
+}
+
 fn resolve_desktop_data_dir() -> tauri::Result<PathBuf> {
     Ok(shared_bifrost_data_dir())
 }
@@ -561,6 +612,14 @@ fn resolve_desktop_config_path(data_dir: &Path) -> PathBuf {
 }
 
 fn ensure_desktop_cert_ready(data_dir: &Path) {
+    if desktop_skip_cert_preflight_requested() {
+        append_desktop_bootstrap_log(
+            data_dir,
+            "desktop certificate preflight skipped by BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT",
+        );
+        return;
+    }
+
     match prepare_desktop_certificates(data_dir) {
         Ok(CertStatus::InstalledAndTrusted) => append_desktop_bootstrap_log(
             data_dir,
@@ -654,20 +713,42 @@ fn start_backend(binary_path: &Path, data_dir: &Path, port: u16) -> tauri::Resul
         ),
     );
 
-    Command::new(binary_path)
-        .args([
-            "start",
-            "--host",
-            BACKEND_BIND_HOST,
-            "--port",
-            &port,
-            "--skip-cert-check",
-        ])
+    let mut args = vec![
+        "start",
+        "--host",
+        BACKEND_BIND_HOST,
+        "--port",
+        &port,
+        "--skip-cert-check",
+    ];
+    if desktop_no_system_proxy_requested() {
+        args.push("--no-system-proxy");
+    }
+
+    let mut command = Command::new(binary_path);
+    command
+        .args(args)
         .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
+        .stderr(Stdio::from(stderr_log));
+    hide_windows_child_console(&mut command);
+    command
         .spawn()
         .map_err(|error| anyhow(format!("failed to start backend: {error}")))
+}
+
+fn desktop_no_system_proxy_requested() -> bool {
+    env_flag_enabled("BIFROST_DESKTOP_NO_SYSTEM_PROXY")
+}
+
+fn desktop_skip_cert_preflight_requested() -> bool {
+    env_flag_enabled("BIFROST_DESKTOP_SKIP_CERT_PREFLIGHT")
+}
+
+fn env_flag_enabled(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false)
 }
 
 fn ensure_backend_running(
@@ -1079,11 +1160,14 @@ fn stop_backend_with_binary(binary_path: &Path, data_dir: &Path) -> tauri::Resul
             data_dir.display()
         ),
     );
-    let status = Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .arg("stop")
         .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::null());
+    hide_windows_child_console(&mut command);
+    let status = command
         .status()
         .map_err(|error| anyhow(format!("failed to stop backend: {error}")))?;
 
@@ -1108,13 +1192,30 @@ fn spawn_backend_stop(binary_path: &Path, data_dir: &Path) -> tauri::Result<Chil
     let stdout_log = open_sidecar_log_file(data_dir, "desktop-sidecar.out.log")?;
     let stderr_log = open_sidecar_log_file(data_dir, "desktop-sidecar.err.log")?;
 
-    Command::new(binary_path)
+    let mut command = Command::new(binary_path);
+    command
         .arg("stop")
         .env("BIFROST_DATA_DIR", data_dir)
         .stdout(Stdio::from(stdout_log))
-        .stderr(Stdio::from(stderr_log))
+        .stderr(Stdio::from(stderr_log));
+    hide_windows_child_console(&mut command);
+    command
         .spawn()
         .map_err(|error| anyhow(format!("failed to spawn backend stop: {error}")))
+}
+
+fn hide_windows_child_console(command: &mut Command) {
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = command;
+    }
 }
 
 fn terminate_child(mut child: Child) -> tauri::Result<()> {
@@ -1227,9 +1328,12 @@ fn start_main_window_handoff(app: &AppHandle, reason: &str) -> tauri::Result<()>
         .and_then(|mut overlay| overlay.take());
     animate_host_window_to_main_size(&host_window, overlay_ptr)?;
     let _ = host_window.set_background_color(Some(Color(8, 17, 23, 255)));
-    let _ = host_window.set_decorations(true);
+    let _ = host_window.set_decorations(main_interface_decorations());
     #[cfg(target_os = "macos")]
-    let _ = host_window.set_shadow(true);
+    {
+        let _ = host_window.set_title_bar_style(TitleBarStyle::Overlay);
+        let _ = host_window.set_shadow(true);
+    }
     let _ = apply_window_effects(&host_window);
     reveal_host_window(&host_window);
     let _ = host_window.set_resizable(true);
@@ -1441,6 +1545,7 @@ fn get_desktop_runtime(state: State<'_, BackendState>) -> Result<DesktopRuntimeI
         platform: std::env::consts::OS,
         startup_ready: state.startup_ready.load(Ordering::SeqCst),
         startup_error,
+        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
     })
 }
 
@@ -1473,6 +1578,7 @@ fn update_desktop_proxy_port(
                     .lock()
                     .map_err(|_| "failed to read desktop startup error".to_string())?
                     .clone(),
+                handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
             });
         }
     }
@@ -1518,6 +1624,7 @@ fn update_desktop_proxy_port(
             .lock()
             .map_err(|_| "failed to read desktop startup error".to_string())?
             .clone(),
+        handoff_completed: state.handoff_completed.load(Ordering::SeqCst),
     })
 }
 
@@ -1555,7 +1662,7 @@ fn set_document_edited(app: AppHandle, edited: bool) -> Result<(), String> {
                 .cast();
             ns_window.setDocumentEdited(edited);
         });
-        return run_result.map_err(|error| error.to_string());
+        run_result.map_err(|error| error.to_string())
     }
 
     #[cfg(not(target_os = "macos"))]
@@ -1580,7 +1687,7 @@ fn write_clipboard(text: String) -> Result<(), String> {
         if !ok {
             return Err("NSPasteboard setString failed".into());
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -1813,14 +1920,18 @@ fn is_server_config_response(response_body: &str) -> bool {
 mod tests {
     use super::{
         begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
-        parse_port_update_response, poll_managed_backend_exit, resolve_desktop_config_path,
-        resolve_desktop_data_dir, BackendState, HostWindowCloseBehavior,
+        main_interface_decorations_for_platform, parse_port_update_response,
+        poll_managed_backend_exit, resolve_bifrost_binary_from_env, resolve_desktop_config_path,
+        resolve_desktop_data_dir, uses_borderless_desktop_chrome_for_platform, BackendState,
+        HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::path::PathBuf;
     use std::process::Command;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn desktop_config_uses_shared_data_dir() {
@@ -1876,6 +1987,33 @@ mod tests {
             host_window_close_behavior_for_platform(false),
             HostWindowCloseBehavior::ShutdownApp
         );
+    }
+
+    #[test]
+    fn windows_desktop_chrome_is_borderless() {
+        assert!(uses_borderless_desktop_chrome_for_platform(true));
+        assert!(!uses_borderless_desktop_chrome_for_platform(false));
+    }
+
+    #[test]
+    fn windows_main_interface_handoff_keeps_native_decorations_disabled() {
+        assert!(!main_interface_decorations_for_platform(true));
+        assert!(main_interface_decorations_for_platform(false));
+    }
+
+    #[test]
+    fn desktop_binary_path_can_be_overridden_for_debug_verification() {
+        let _guard = ENV_LOCK.lock().expect("env lock");
+        let previous = std::env::var_os("BIFROST_DESKTOP_BIN");
+        std::env::set_var("BIFROST_DESKTOP_BIN", "/tmp/bifrost-debug");
+        assert_eq!(
+            resolve_bifrost_binary_from_env(),
+            Some(PathBuf::from("/tmp/bifrost-debug"))
+        );
+        match previous {
+            Some(value) => std::env::set_var("BIFROST_DESKTOP_BIN", value),
+            None => std::env::remove_var("BIFROST_DESKTOP_BIN"),
+        }
     }
 
     #[test]

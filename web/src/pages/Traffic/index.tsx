@@ -35,7 +35,7 @@ import {
   decodeJsonFromQueryParam,
   encodeJsonForQueryParam,
 } from "../../utils/urlState";
-import { buildAppRouteUrl } from "../../runtime";
+import { buildAppRouteUrl, isMacDesktopShell } from "../../runtime";
 import type {
   TrafficSummary,
   FilterCondition,
@@ -671,42 +671,45 @@ export default function Traffic() {
   }, [deferredFilterConditions, deferredPanelFilters, deferredToolbarFilters, records]);
 
   const styles = useMemo<Record<string, CSSProperties>>(
-    () => ({
-      container: {
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        overflow: "hidden",
-        backgroundColor: token.colorBgContainer,
-      },
-      filterBarWrapper: {
-        padding: "8px 16px",
-        backgroundColor: token.colorBgContainer,
-        borderBottom: `1px solid ${token.colorBorderSecondary}`,
-      },
-      mainContent: {
-        flex: 1,
-        overflow: "hidden",
-        backgroundColor: token.colorBgContainer,
-      },
-      centerWrapper: {
-        display: "flex",
-        flexDirection: "column",
-        height: "100%",
-        overflow: "hidden",
-      },
-      tableWrapper: {
-        flex: 1,
-        minHeight: 0,
-        backgroundColor: token.colorBgContainer,
-      },
-      detailWrapper: {
-        height: "100%",
-        padding: 4,
-        backgroundColor: token.colorBgContainer,
-        overflow: "auto",
-      },
-    }),
+    () => {
+      const macDesktopShell = isMacDesktopShell();
+      return {
+        container: {
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          overflow: "hidden",
+          backgroundColor: macDesktopShell ? "transparent" : token.colorBgContainer,
+        },
+        filterBarWrapper: {
+          padding: "8px 16px",
+          backgroundColor: token.colorBgContainer,
+          borderBottom: `1px solid ${token.colorBorderSecondary}`,
+        },
+        mainContent: {
+          flex: 1,
+          overflow: "hidden",
+          backgroundColor: macDesktopShell ? "transparent" : token.colorBgContainer,
+        },
+        centerWrapper: {
+          display: "flex",
+          flexDirection: "column",
+          height: "100%",
+          overflow: "hidden",
+        },
+        tableWrapper: {
+          flex: 1,
+          minHeight: 0,
+          backgroundColor: token.colorBgContainer,
+        },
+        detailWrapper: {
+          height: "100%",
+          padding: 4,
+          backgroundColor: token.colorBgContainer,
+          overflow: "auto",
+        },
+      };
+    },
     [token],
   );
 

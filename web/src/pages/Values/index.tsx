@@ -7,6 +7,7 @@ import ValueEditor from './ValueEditor';
 import { useValuesStore } from '../../stores/useValuesStore';
 import { notifyApiBusinessError } from '../../api/client';
 import pushService from '../../services/pushService';
+import { isMacDesktopShell } from '../../runtime';
 
 export default function Values() {
   const { token } = theme.useToken();
@@ -73,7 +74,7 @@ export default function Values() {
     width: '100%',
     height: '100%',
     overflow: 'hidden',
-    backgroundColor: token.colorBgContainer,
+    backgroundColor: isMacDesktopShell() ? 'transparent' : token.colorBgContainer,
   };
 
   return (

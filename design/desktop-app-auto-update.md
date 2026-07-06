@@ -28,6 +28,8 @@ Bifrost 桌面端基于 Tauri 打包，但桌面 WebView 与普通 Web UI 共享
 - 桌面端 Settings 提供一键安装 CLI 和 AI skills 按钮。
 - 桌面端安装完成后自动重启桌面应用。
 - 如果存在独立 CLI 安装，桌面端升级时也会更新该 CLI；桌面内置 sidecar 由桌面安装包更新。
+- Windows 桌面快捷方式只显示桌面 UI；桌面壳启动内置 `bifrost.exe` sidecar 时使用隐藏控制台进程，不弹出 Windows Terminal / shell 窗口。
+- Windows 桌面壳使用 Web UI 自定义窗口 chrome，不挂载 Tauri 原生 menu，也不显示系统标题栏，避免 `Bifrost / File / Edit / View / Window` 菜单栏挤占 WebView 高度。
 
 ### 必须不破坏
 
@@ -108,11 +110,14 @@ bifrost app upgrade [--package <path>] [--app-dir <dir>] [--version <v>] [--no-c
 实现位于 `crates/bifrost-cli/src/commands/app.rs`：
 
 - macOS 默认安装目录 `/Applications`，目标 `/Applications/Bifrost.app`。
-- Windows 默认安装目录 `%LOCALAPPDATA%\Programs\Bifrost`，目标 `Bifrost.exe`。
+- Windows MSI 默认安装目录 `%LOCALAPPDATA%\Bifrost`，目标 `bifrost-desktop.exe`；CLI 调用 MSI 时强制 `ALLUSERS=2 MSIINSTALLPERUSER=1`，避免普通用户静默安装被当作全用户安装并以 1603 / Error 1925 失败。
 - release 下载 URL 使用 `https://github.com/bifrost-proxy/bifrost/releases/download/v<version>/bifrost-desktop-v<version>-<target>.<ext>`。
 - release 资产后缀：macOS `.dmg`，Windows `.msi`。
 - `BIFROST_APP_UPGRADE_TEST_PACKAGE` 可让 E2E/测试注入本地包，避免联网。
 - `BIFROST_APP_SKIP_RESTART=1` 仅用于 E2E/自动化临时安装验证，跳过主动打开桌面 app；真实桌面端更新仍由 Tauri WebView 执行 `restart_desktop_after_update`。
+- `BIFROST_DESKTOP_BIN` 仅用于 debug/VM 验证时覆盖 sidecar 路径，避免本地默认 `target/debug/bifrost.exe` 被旧进程锁住；发布包仍使用内置 `resources/bin/bifrost.exe`。
+- Windows 桌面壳内部启动 `resources/bin/bifrost.exe start/stop` 时设置 `CREATE_NO_WINDOW`，避免从桌面快捷方式启动后额外弹出 terminal 窗口；命令行用户直接运行 `bifrost.exe` 不受影响。
+- Tauri 菜单只在 macOS 注册；Windows host window 创建时关闭 decorations，由 Web UI 提供右上角最小化、最大化、关闭按钮和自定义拖拽区域。
 
 ### Admin API
 
@@ -165,7 +170,8 @@ Tauri 官方 updater plugin 支持静态 JSON endpoint、签名和 install mode�
   - `bifrost app upgrade --dry-run --no-cli` 不展示 CLI 联动提示。
   - `bifrost app uninstall --dry-run` 只规划桌面卸载。
   - macOS 构造临时 `Bifrost.app`，真实安装到临时目录、真实 desktop-source upgrade、检查 `upgrade-progress.json` 为 `completed/source=desktop`，再真实卸载。
-  - Windows 构造临时 zip 内的 `Bifrost.exe`，真实安装到临时目录、真实 desktop-source upgrade、检查进度文件，再真实卸载。
+  - Windows 构造临时 zip 内的 `bifrost-desktop.exe`，真实安装到临时目录、真实 desktop-source upgrade、检查进度文件，再真实卸载；设置 `BIFROST_DESKTOP_REAL_MSI` 时额外执行真实 MSI 普通用户安装/卸载回归。
+  - Windows VM 中启动桌面包并截图确认没有原生标题栏/菜单栏，底部状态栏仍完整可见。
   - 启动临时 Bifrost 服务，调用 `POST /api/system/cli-install` 把 CLI 安装到临时目录，断言二进制存在，并通过 `GET /api/system/cli-install` 获取状态。
 
 ### human_tests

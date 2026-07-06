@@ -1,1 +1,1 @@
-{}
+{"default":{"identifier":"default","description":"Default desktop window capability.","local":true,"windows":["host"],"permissions":["core:default","core:window:allow-start-dragging"]}}

@@ -16,18 +16,21 @@ async function loadDesktopRuntimeSnapshot(): Promise<void> {
   const runtime = await getDesktopRuntime();
   desktopRuntime.expectedProxyPort = runtime.expectedProxyPort;
   desktopRuntime.proxyPort = runtime.proxyPort;
-  desktopRuntime.platform =
-    runtime.platform === 'darwin'
-      ? 'macos'
-      : runtime.platform === 'win32'
-        ? 'windows'
-        : runtime.platform === 'linux'
-          ? 'linux'
-          : 'web';
+  desktopRuntime.platform = normalizeDesktopPlatform(runtime.platform);
 
   if (runtime.startupError) {
     console.error('[desktop-runtime] Core reported a startup error during snapshot.', runtime.startupError);
   }
+}
+
+export function normalizeDesktopPlatform(platform: string): DesktopPlatform {
+  return platform === 'darwin' || platform === 'macos'
+    ? 'macos'
+    : platform === 'win32' || platform === 'windows'
+      ? 'windows'
+      : platform === 'linux'
+        ? 'linux'
+        : 'web';
 }
 
 export function isDesktopShell(): boolean {
@@ -36,6 +39,10 @@ export function isDesktopShell(): boolean {
 
 export function getDesktopPlatform(): DesktopPlatform {
   return desktopRuntime.platform;
+}
+
+export function isMacDesktopShell(): boolean {
+  return isDesktopShell() && desktopRuntime.platform === 'macos';
 }
 
 export function setDesktopProxyPort(port: number): void {

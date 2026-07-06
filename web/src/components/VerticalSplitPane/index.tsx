@@ -22,6 +22,7 @@ export default function VerticalSplitPane({
   onTopHeightChange,
 }: VerticalSplitPaneProps) {
   const { token } = theme.useToken();
+  const paneBackground = token.colorBgContainer;
   const containerRef = useRef<HTMLDivElement>(null);
   const [internalTopHeight, setInternalTopHeight] = useState<string>(defaultTopHeight);
   const [isDragging, setIsDragging] = useState(false);
@@ -36,7 +37,7 @@ export default function VerticalSplitPane({
       width: "100%",
       height: "100%",
       overflow: "hidden",
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: paneBackground,
     },
     topPane: {
       width: "100%",
@@ -45,7 +46,7 @@ export default function VerticalSplitPane({
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: paneBackground,
     },
     bottomPane: {
       flex: 1,
@@ -54,7 +55,7 @@ export default function VerticalSplitPane({
       minHeight: 0,
       display: "flex",
       flexDirection: "column",
-      backgroundColor: token.colorBgContainer,
+      backgroundColor: paneBackground,
     },
     divider: {
       height: 4,

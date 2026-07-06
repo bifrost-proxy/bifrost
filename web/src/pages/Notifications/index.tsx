@@ -26,6 +26,7 @@ import {
 import { useNotificationStore } from '../../stores/useNotificationStore';
 import { useTlsConfigStore } from '../../stores/useTlsConfigStore';
 import type { NotificationRecord, ClientTrustSummary } from '../../api/notifications';
+import { isMacDesktopShell } from '../../runtime';
 
 const { Text } = Typography;
 type NotificationFilterStatus = 'all' | 'read' | 'unread';
@@ -503,8 +504,8 @@ export default function Notifications() {
     display: 'flex',
     flexDirection: 'column',
     overflow: 'hidden',
-    padding: '16px 20px 0',
-    background: token.colorBgLayout,
+    padding: '0 20px 0',
+    background: isMacDesktopShell() ? 'transparent' : token.colorBgLayout,
   };
 
   const tabContentStyle = `

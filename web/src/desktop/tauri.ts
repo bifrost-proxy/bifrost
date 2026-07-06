@@ -4,6 +4,7 @@ export interface DesktopRuntimeInfo {
   platform: string;
   startupReady: boolean;
   startupError: string | null;
+  handoffCompleted?: boolean;
 }
 
 export const DESKTOP_HANDOFF_COMPLETE_EVENT = "desktop://handoff-complete";

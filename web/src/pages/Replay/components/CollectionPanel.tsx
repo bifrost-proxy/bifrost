@@ -18,6 +18,7 @@ import { useReplayStore } from "../../../stores/useReplayStore";
 import type { ReplayRequestSummary, ReplayGroup } from "../../../types";
 import { ImportBifrostButton } from "../../../components/ImportBifrostButton";
 import { useExportBifrost } from "../../../hooks/useExportBifrost";
+import { isMacDesktopShell } from "../../../runtime";
 
 const { Text } = Typography;
 
@@ -72,6 +73,7 @@ function isActionButtonClick(target: EventTarget | null): boolean {
 
 export default function CollectionPanel() {
   const { token } = theme.useToken();
+  const macDesktopShell = isMacDesktopShell();
   const {
     savedRequests,
     currentRequest,
@@ -233,7 +235,7 @@ export default function CollectionPanel() {
       flexDirection: 'column',
       height: '100%',
       overflow: 'hidden',
-      backgroundColor: token.colorBgLayout,
+      backgroundColor: macDesktopShell ? 'transparent' : token.colorBgLayout,
     },
     header: {
       display: 'flex',
@@ -310,7 +312,7 @@ export default function CollectionPanel() {
       justifyContent: 'space-between',
       width: '100%',
     },
-  }), [token]);
+  }), [macDesktopShell, token]);
 
   const buildRequestNode = useCallback((req: ReplayRequestSummary, groupId: string | null): DataNode => {
     const displayName = req.name || truncateUrl(req.url);

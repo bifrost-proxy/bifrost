@@ -206,6 +206,8 @@ if [[ "$HOST_OS" == "Darwin" ]]; then
   <key>CFBundleIdentifier</key><string>dev.bifrost.test</string>
   <key>CFBundleName</key><string>Bifrost</string>
   <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleShortVersionString</key><string>0.0.139</string>
+  <key>CFBundleVersion</key><string>139</string>
 </dict>
 </plist>
 PLIST
@@ -223,6 +225,10 @@ SH
         _log_fail "real install copies app bundle into target app dir" "executable copied" "missing"
         exit 1
     fi
+
+    already_current_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app upgrade --app-dir "$APP_DIR" --source desktop --no-cli --version "$VERSION" -y 2>&1)"
+    assert_contains_text "$already_current_output" "Desktop app is already on target version" "desktop upgrade skips install when installed app version matches target"
+    assert_not_contains_text "$already_current_output" "Downloading desktop app:" "desktop upgrade does not download when installed app version matches target"
 
     rm -rf "$DATA_DIR"
     mkdir -p "$DATA_DIR"
@@ -257,11 +263,11 @@ elif [[ "$HOST_OS" == MINGW* || "$HOST_OS" == MSYS* || "$HOST_OS" == CYGWIN* ]];
     FAKE_WIN_DIR="${TEST_ROOT}/fixtures/windows"
     FAKE_WIN_ZIP="${TEST_ROOT}/fixtures/bifrost-desktop.zip"
     mkdir -p "$FAKE_WIN_DIR"
-    printf 'fake bifrost exe\n' >"$FAKE_WIN_DIR/Bifrost.exe"
+    printf 'fake bifrost desktop exe\n' >"$FAKE_WIN_DIR/bifrost-desktop.exe"
     if command -v pwsh >/dev/null 2>&1; then
-        pwsh -NoProfile -Command "Compress-Archive -Path '${FAKE_WIN_DIR//\'/\'\'}\\Bifrost.exe' -DestinationPath '${FAKE_WIN_ZIP//\'/\'\'}' -Force"
+        pwsh -NoProfile -Command "Compress-Archive -Path '${FAKE_WIN_DIR//\'/\'\'}\\bifrost-desktop.exe' -DestinationPath '${FAKE_WIN_ZIP//\'/\'\'}' -Force"
     elif command -v powershell.exe >/dev/null 2>&1; then
-        powershell.exe -NoProfile -Command "Compress-Archive -Path '${FAKE_WIN_DIR}\\Bifrost.exe' -DestinationPath '${FAKE_WIN_ZIP}' -Force"
+        powershell.exe -NoProfile -Command "Compress-Archive -Path '${FAKE_WIN_DIR}\\bifrost-desktop.exe' -DestinationPath '${FAKE_WIN_ZIP}' -Force"
     else
         _log_warning "Windows zip install coverage skipped because PowerShell is unavailable"
         FAKE_WIN_ZIP=""
@@ -270,10 +276,10 @@ elif [[ "$HOST_OS" == MINGW* || "$HOST_OS" == MSYS* || "$HOST_OS" == CYGWIN* ]];
     if [[ -n "$FAKE_WIN_ZIP" && -f "$FAKE_WIN_ZIP" ]]; then
         install_real_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$FAKE_WIN_ZIP" --app-dir "$APP_DIR" -y 2>&1)"
         assert_contains_text "$install_real_output" "Desktop app install target:" "real Windows zip install prints target path"
-        if [[ -f "$APP_DIR/Bifrost.exe" ]]; then
-            _log_pass "real Windows zip install copies Bifrost.exe into target app dir"
+        if [[ -f "$APP_DIR/bifrost-desktop.exe" ]]; then
+            _log_pass "real Windows zip install copies bifrost-desktop.exe into target app dir"
         else
-            _log_fail "real Windows zip install copies Bifrost.exe into target app dir" "Bifrost.exe copied" "missing"
+            _log_fail "real Windows zip install copies bifrost-desktop.exe into target app dir" "bifrost-desktop.exe copied" "missing"
             exit 1
         fi
 
@@ -293,10 +299,36 @@ elif [[ "$HOST_OS" == MINGW* || "$HOST_OS" == MSYS* || "$HOST_OS" == CYGWIN* ]];
 
         uninstall_real_output="$("$BIFROST_BIN" app uninstall --app-dir "$APP_DIR" -y 2>&1)"
         assert_contains_text "$uninstall_real_output" "Desktop app path:" "real Windows uninstall prints target path"
-        if [[ ! -e "$APP_DIR/Bifrost.exe" ]]; then
-            _log_pass "real Windows uninstall removes Bifrost.exe from target app dir"
+        if [[ ! -e "$APP_DIR/bifrost-desktop.exe" ]]; then
+            _log_pass "real Windows uninstall removes bifrost-desktop.exe from target app dir"
         else
-            _log_fail "real Windows uninstall removes Bifrost.exe from target app dir" "Bifrost.exe removed" "still exists"
+            _log_fail "real Windows uninstall removes bifrost-desktop.exe from target app dir" "bifrost-desktop.exe removed" "still exists"
+            exit 1
+        fi
+    fi
+
+    if [[ -n "${BIFROST_DESKTOP_REAL_MSI:-}" ]]; then
+        if [[ ! -f "$BIFROST_DESKTOP_REAL_MSI" ]]; then
+            _log_fail "real Windows MSI fixture exists" "$BIFROST_DESKTOP_REAL_MSI" "missing"
+            exit 1
+        fi
+        _log_info "real Windows MSI install/uninstall regression"
+        real_msi_install_output="$(BIFROST_APP_SKIP_RESTART=1 "$BIFROST_BIN" app install --package "$BIFROST_DESKTOP_REAL_MSI" -y 2>&1)"
+        assert_contains_text "$real_msi_install_output" "Desktop app install target:" "real Windows MSI install prints target path"
+        WINDOWS_DEFAULT_APP_DIR="${LOCALAPPDATA}\\Bifrost"
+        if [[ -f "${WINDOWS_DEFAULT_APP_DIR}\\bifrost-desktop.exe" ]]; then
+            _log_pass "real Windows MSI install creates bifrost-desktop.exe in LocalAppData"
+        else
+            _log_fail "real Windows MSI install creates bifrost-desktop.exe in LocalAppData" "desktop exe exists" "missing"
+            exit 1
+        fi
+
+        real_msi_uninstall_output="$("$BIFROST_BIN" app uninstall -y 2>&1)"
+        assert_contains_text "$real_msi_uninstall_output" "Desktop app path:" "real Windows MSI uninstall prints target path"
+        if [[ ! -e "${WINDOWS_DEFAULT_APP_DIR}\\bifrost-desktop.exe" ]]; then
+            _log_pass "real Windows MSI uninstall removes bifrost-desktop.exe"
+        else
+            _log_fail "real Windows MSI uninstall removes bifrost-desktop.exe" "desktop exe removed" "still exists"
             exit 1
         fi
     fi

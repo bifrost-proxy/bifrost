@@ -1195,6 +1195,28 @@
 - 第 5 步输出 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.`。
 - 上述命令均为列表或静态校验，不启动 Bifrost、不使用 9900、不修改系统代理。
 
+### TC-CS-48: macOS shell 用例清理阶段不因临时目录短暂非空变红
+
+**背景**：GitHub Actions run `28751216421` 的 `E2E Shell (aarch64-apple-darwin, shard 2/2)` 中，`test_stop_restart_shutdown_marker.sh` 的 14 个业务断言全部通过，但退出 trap 执行 `rm -rf <tmp>` 时 macOS 短暂返回 `Directory not empty`，在 `set -e` 下把 suite 标记为失败。清理失败不应覆盖已经通过的 stop/restart/system proxy handoff 回归结论。
+
+**操作步骤**：
+1. 执行脚本语法检查：
+   ```bash
+   bash -n e2e-tests/tests/test_stop_restart_shutdown_marker.sh
+   ```
+2. 使用当前 release/debug binary 执行该 focused shell E2E：
+   ```bash
+   SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh
+   ```
+   如果本地没有 release binary，可先执行 `cargo build -p bifrost-cli` 并改用 `BIFROST_BIN="$PWD/target/debug/bifrost"`。
+3. 检查输出的 `Test Summary`。
+
+**预期结果**：
+- 脚本语法检查通过。
+- 业务断言保持 `Total: 14 / Passed: 14 / Failed: 0`。
+- 即使 macOS daemon/log writer 在退出瞬间仍持有临时目录，cleanup 会 stop daemon、重试删除并 best-effort 收尾，不再因 `rm: ... Directory not empty` 把脚本退出码改为 1。
+- 全程使用临时数据目录和随机端口，不使用 9900，不修改真实系统代理。
+
 ## 本轮执行记录
 
 测试日期：2026-05-09
@@ -1239,6 +1261,7 @@
 | TC-CS-45 | 通过 | 2026-06-22 本轮执行：GitHub Actions `CI` run `27924364360` 的 `E2E Shell (Linux)` 失败套件为 `shell:test_socks5_tls_routing_exceptions.sh`，失败原因为 `Network error: Failed to bind to 0.0.0.0:19379: Address already in use`。完整 job log 显示 runner 分配 `PROXY_PORT=19373`、`SOCKS5_PORT=19379`，脚本旧的 `DOWNSTREAM_PROXY_PORT=18890 + ($$ % 500)` 在 PID `36489` 下也算成 `19379`，下游代理和独立 SOCKS5 listener 端口碰撞。修复为 `DOWNSTREAM_PROXY_PORT` 优先使用 runner 注入的 `ECHO_PROXY_PORT` / `MOCK_ECHO_PROXY_PORT`，再 fallback 到 `PROXY_PORT+7`。执行 `bash -n e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 通过；执行静态 `rg` 确认默认值链路存在；随后使用 `PROXY_PORT=19373 SOCKS5_PORT=19379 ECHO_PROXY_PORT=19380 MOCK_ECHO_PROXY_PORT=19380 ECHO_HTTP_PORT=19374 ECHO_HTTPS_PORT=19375 SKIP_BUILD=true BIFROST_BIN="$PWD/target/release/bifrost" bash e2e-tests/tests/test_socks5_tls_routing_exceptions.sh` 真实复现 CI 端口形态，脚本完成所有 routing exception 断言并退出 0，全程未使用 9900，未修改系统代理。 |
 | TC-CS-46 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^(test_asr_admin_csrf|test_chatgpt_web_shared_profile)\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集两个重型低频脚本；随后分别确认 `bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_asr_admin_csrf\\.sh$'` 和同命令匹配 `test_chatgpt_web_shared_profile.sh` 均通过，说明本地 full-shell 专项入口仍保留；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
 | TC-CS-47 | 通过 | 2026-07-01 本轮执行：`bash -n scripts/run_all_e2e.sh` 通过；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg '^test_security_hardening\\.sh$'` 无输出且退出码为 1，确认默认 PR CI shell shard 不再收集安全聚合 wrapper；`bash scripts/run_all_e2e.sh --ci --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening_functional\\.sh$'` 通过，确认安全功能子路径仍在默认 CI shell 覆盖中；`bash scripts/run_all_e2e.sh --full-shell --skip-rules --skip-runner --skip-ui --skip-build --list-shell-tests | rg -q '^test_security_hardening\\.sh$'` 通过，确认本地 full-shell / release-gate 仍保留聚合入口；`bash scripts/ci/check-e2e-shell-ci-coverage.sh` 输出 selected/skipped 统计并以 `OK: every test_*.sh shell E2E script is selected by CI or explicitly skipped.` 结束。全部命令只列测试或做静态校验，未启动 Bifrost，未使用 9900，未修改系统代理。 |
+| TC-CS-48 | 通过 | 2026-07-06 新增回归：先用 GitHub Actions run `28751216421` artifact 确认原失败为 `test_stop_restart_shutdown_marker.sh` 14/14 业务断言通过后 cleanup `rm: ... Directory not empty`；本轮修复 cleanup retry/best-effort 后执行 `bash -n e2e-tests/tests/test_stop_restart_shutdown_marker.sh` 通过，并执行 `SKIP_BUILD=true BIFROST_BIN="$PWD/target/debug/bifrost" bash e2e-tests/tests/test_stop_restart_shutdown_marker.sh`，输出 `Total: 14 / Passed: 14 / Failed: 0`，退出码 0；全程使用随机端口和临时数据目录，未使用 9900，未修改真实系统代理。 |
 
 ## 清理步骤
 
