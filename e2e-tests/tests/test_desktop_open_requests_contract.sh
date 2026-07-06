@@ -50,6 +50,13 @@ grep -q 'confirmBifrostFileImport' "$WEB_IMPORT_BUTTON"
 grep -q 'TrafficDetail' "$WEB_PREVIEW"
 
 cargo test -p bifrost-cli tray::
-cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests
+
+if [[ "$(uname -s)" == "Linux" ]] && {
+  ! command -v pkg-config >/dev/null 2>&1 || ! pkg-config --exists gobject-2.0;
+}; then
+  echo "skipping desktop open_requests Rust test: Linux Tauri GTK/GObject dependencies are not installed"
+else
+  cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests
+fi
 
 echo "desktop open request contract passed"
