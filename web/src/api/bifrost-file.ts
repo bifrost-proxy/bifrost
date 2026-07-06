@@ -1,6 +1,7 @@
 import { getClientId } from '../services/clientId';
 import { buildApiUrl } from '../runtime';
 import { apiFetch } from './apiFetch';
+import type { TrafficRecord } from '../types';
 
 interface AxiosLikeError {
   isAxiosError: true;
@@ -21,6 +22,49 @@ export type BifrostFileType = 'rules' | 'network' | 'script' | 'values' | 'templ
 export interface DetectResponse {
   file_type: BifrostFileType;
   meta: Record<string, unknown>;
+}
+
+export interface PreviewResponse {
+  file_type: BifrostFileType;
+  meta: Record<string, unknown> | null;
+  rules?: RulesPreview;
+  network?: NetworkPreview;
+  item_count?: number;
+}
+
+export interface RulesPreview {
+  name: string;
+  enabled: boolean;
+  description?: string | null;
+  line_count: number;
+  content: string;
+}
+
+export interface NetworkPreview {
+  record_count: number;
+  hosts: string[];
+  records: NetworkPreviewRecord[];
+  single_record?: NetworkPreviewDetail | null;
+}
+
+export interface NetworkPreviewRecord {
+  id: string;
+  method: string;
+  url: string;
+  status: number;
+  host: string;
+  path: string;
+  protocol: string;
+  client_app?: string | null;
+  duration_ms: number;
+  request_size: number;
+  response_size: number;
+}
+
+export interface NetworkPreviewDetail {
+  record: TrafficRecord;
+  request_body?: string | null;
+  response_body?: string | null;
 }
 
 export interface ImportResponse {
@@ -177,6 +221,10 @@ export function getEmptyExportMessage(
 
 export async function detectType(content: string): Promise<DetectResponse> {
   return postBifrostFileJson<DetectResponse>('/detect', content, 'text/plain');
+}
+
+export async function previewFile(content: string): Promise<PreviewResponse> {
+  return postBifrostFileJson<PreviewResponse>('/preview', content, 'text/plain');
 }
 
 export async function importFile(content: string): Promise<ImportResponse> {

@@ -8,6 +8,7 @@ import {
   getExportItemCount,
   getImportedItemCount,
   importFile,
+  previewFile,
   type ImportResponse,
 } from './bifrost-file';
 import { clearAdminCsrfToken } from './csrf';
@@ -88,6 +89,51 @@ describe('bifrost file export helpers', () => {
 });
 
 describe('bifrost file API requests', () => {
+  it('previews files through the CSRF-aware API client', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      void init;
+      const url = String(input);
+      if (url.includes('/security/csrf')) {
+        return new Response(JSON.stringify({ csrf_token: 'csrf-token-for-preview' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      }
+      if (url.includes('/bifrost-file/preview')) {
+        return new Response(
+          JSON.stringify({
+            file_type: 'rules',
+            meta: {},
+            rules: {
+              name: 'Default',
+              enabled: true,
+              line_count: 1,
+              content: 'example.com proxy://127.0.0.1:8080',
+            },
+          }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
+      }
+      return new Response('not found', { status: 404 });
+    });
+    globalThis.fetch = fetchMock as typeof fetch;
+
+    await expect(previewFile('rules package')).resolves.toMatchObject({
+      file_type: 'rules',
+      rules: { name: 'Default' },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    const [, previewInit] = fetchMock.mock.calls[1];
+    const headers = new Headers(previewInit?.headers);
+    expect(previewInit?.method).toBe('POST');
+    expect(headers.get('Content-Type')).toBe('text/plain');
+    expect(headers.get('X-Bifrost-CSRF')).toBe('csrf-token-for-preview');
+  });
+
   it('imports files through the CSRF-aware API client', async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       void init;

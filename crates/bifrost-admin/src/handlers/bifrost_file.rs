@@ -8,6 +8,7 @@ use bifrost_storage::{RuleFile, RulesStorage};
 use http_body_util::BodyExt;
 use hyper::{body::Incoming, Method, Request, Response, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use super::{error_response, full_body, json_response, method_not_allowed, BoxBody};
 use crate::state::SharedAdminState;
@@ -19,6 +20,58 @@ const EMPTY_NETWORK_IMPORT_ERROR: &str = "Network file contains 0 records; nothi
 pub struct DetectResponse {
     pub file_type: BifrostFileType,
     pub meta: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreviewResponse {
+    pub file_type: BifrostFileType,
+    pub meta: serde_json::Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<RulesPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RulesPreview {
+    pub name: String,
+    pub enabled: bool,
+    pub description: Option<String>,
+    pub line_count: usize,
+    pub content: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPreview {
+    pub record_count: usize,
+    pub hosts: Vec<String>,
+    pub records: Vec<NetworkPreviewRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub single_record: Option<NetworkPreviewDetail>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPreviewRecord {
+    pub id: String,
+    pub method: String,
+    pub url: String,
+    pub status: u16,
+    pub host: String,
+    pub path: String,
+    pub protocol: String,
+    pub client_app: Option<String>,
+    pub duration_ms: u64,
+    pub request_size: usize,
+    pub response_size: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct NetworkPreviewDetail {
+    pub record: TrafficRecord,
+    pub request_body: Option<String>,
+    pub response_body: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -100,6 +153,7 @@ pub async fn handle_bifrost_file(
 ) -> Response<BoxBody> {
     match (req.method(), path) {
         (&Method::POST, "/detect") => handle_detect(req).await,
+        (&Method::POST, "/preview") => handle_preview(req).await,
         (&Method::POST, "/import") => handle_import(req, state).await,
         (&Method::POST, "/export/rules") => handle_export_rules(req, state).await,
         (&Method::POST, "/export/network") => handle_export_network(req, state).await,
@@ -159,6 +213,143 @@ async fn handle_detect(req: Request<Incoming>) -> Response<BoxBody> {
     };
 
     json_response(&DetectResponse { file_type, meta })
+}
+
+async fn handle_preview(req: Request<Incoming>) -> Response<BoxBody> {
+    let content = match read_body(req).await {
+        Ok(c) => c,
+        Err(resp) => return resp,
+    };
+
+    match build_preview(&content) {
+        Ok(preview) => json_response(&preview),
+        Err(message) => error_response(StatusCode::BAD_REQUEST, &message),
+    }
+}
+
+fn build_preview(content: &str) -> Result<PreviewResponse, String> {
+    let file_type = BifrostFileParser::detect_type(content)
+        .map_err(|e| format!("Failed to detect type: {}", e))?;
+    let meta = BifrostFileParser::parse_raw(content)
+        .ok()
+        .and_then(|raw| toml::from_str::<toml::Value>(&raw.meta_raw).ok())
+        .map(toml_to_json)
+        .unwrap_or(serde_json::Value::Null);
+
+    match file_type {
+        BifrostFileType::Rules => {
+            let result = BifrostFileParser::parse_rules_tolerant(content);
+            let file = result.data;
+            let line_count = file
+                .content
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .count();
+            Ok(PreviewResponse {
+                file_type,
+                meta,
+                rules: Some(RulesPreview {
+                    name: file.meta.name,
+                    enabled: file.meta.enabled,
+                    description: file.meta.description,
+                    line_count,
+                    content: file.content,
+                }),
+                network: None,
+                item_count: Some(1),
+            })
+        }
+        BifrostFileType::Network => {
+            let file = BifrostFileParser::parse_network(content)
+                .map_err(|e| format!("Failed to parse network file: {}", e))?;
+            Ok(PreviewResponse {
+                file_type,
+                meta,
+                rules: None,
+                item_count: Some(file.content.len()),
+                network: Some(build_network_preview(&file.content)),
+            })
+        }
+        BifrostFileType::Script => {
+            let file = BifrostFileParser::parse_script(content)
+                .map_err(|e| format!("Failed to parse script file: {}", e))?;
+            Ok(PreviewResponse {
+                file_type,
+                meta,
+                rules: None,
+                network: None,
+                item_count: Some(file.content.len()),
+            })
+        }
+        BifrostFileType::Values => {
+            let file = BifrostFileParser::parse_values(content)
+                .map_err(|e| format!("Failed to parse values file: {}", e))?;
+            Ok(PreviewResponse {
+                file_type,
+                meta,
+                rules: None,
+                network: None,
+                item_count: Some(file.content.len()),
+            })
+        }
+        BifrostFileType::Template => {
+            let file = BifrostFileParser::parse_template(content)
+                .map_err(|e| format!("Failed to parse template file: {}", e))?;
+            Ok(PreviewResponse {
+                file_type,
+                meta,
+                rules: None,
+                network: None,
+                item_count: Some(file.content.groups.len() + file.content.requests.len()),
+            })
+        }
+    }
+}
+
+fn build_network_preview(records: &[NetworkRecord]) -> NetworkPreview {
+    let mut hosts = BTreeSet::new();
+    let preview_records: Vec<NetworkPreviewRecord> = records
+        .iter()
+        .take(50)
+        .map(|record| {
+            let traffic_record = network_record_to_traffic_record(record);
+            hosts.insert(traffic_record.host.clone());
+            NetworkPreviewRecord {
+                id: record.id.clone(),
+                method: record.method.clone(),
+                url: record.url.clone(),
+                status: record.status,
+                host: traffic_record.host,
+                path: traffic_record.path,
+                protocol: traffic_record.protocol,
+                client_app: record.client_app.clone(),
+                duration_ms: record.duration_ms,
+                request_size: record.request_body.as_ref().map_or(0, |body| body.len()),
+                response_size: record.response_body.as_ref().map_or(0, |body| body.len()),
+            }
+        })
+        .collect();
+
+    for record in records.iter().skip(50) {
+        let traffic_record = network_record_to_traffic_record(record);
+        hosts.insert(traffic_record.host);
+    }
+
+    let single_record = records
+        .first()
+        .filter(|_| records.len() == 1)
+        .map(|record| NetworkPreviewDetail {
+            record: network_record_to_traffic_record(record),
+            request_body: record.request_body.clone(),
+            response_body: record.response_body.clone(),
+        });
+
+    NetworkPreview {
+        record_count: records.len(),
+        hosts: hosts.into_iter().take(20).collect(),
+        records: preview_records,
+        single_record,
+    }
 }
 
 async fn handle_import(req: Request<Incoming>, state: SharedAdminState) -> Response<BoxBody> {

@@ -7,8 +7,10 @@ import {
   formatImportSuccessMessage,
   getImportedItemCount,
   importFile,
+  previewFile,
 } from "../../api/bifrost-file";
 import type { BifrostFileType } from "../../api/bifrost-file";
+import { confirmBifrostFileImport } from "../BifrostFilePreview";
 import { useValuesStore } from "../../stores/useValuesStore";
 import { useScriptsStore } from "../../stores/useScriptsStore";
 import { useReplayStore } from "../../stores/useReplayStore";
@@ -63,29 +65,41 @@ export const importBifrostFileContent = async (
   filename: string,
   navigate: (route: string) => void,
   onImportSuccess?: (fileType: BifrostFileType) => void,
+  setImporting?: (importing: boolean) => void,
 ) => {
-  const result = await importFile(content);
-  const importedCount = getImportedItemCount(result);
-
-  if (importedCount === 0) {
-    message.warning(formatImportSuccessMessage(result, filename));
+  const preview = await previewFile(content);
+  const confirmed = await confirmBifrostFileImport(filename, preview);
+  if (!confirmed) {
     return;
   }
 
-  if (result.warnings && result.warnings.length > 0) {
-    message.warning(
-      `Imported ${filename} with ${result.warnings.length} warning(s)`,
-    );
-  } else {
-    message.success(formatImportSuccessMessage(result, filename));
-  }
+  setImporting?.(true);
+  try {
+    const result = await importFile(content);
+    const importedCount = getImportedItemCount(result);
 
-  await refreshStoreByType(result.file_type);
-  onImportSuccess?.(result.file_type);
+    if (importedCount === 0) {
+      message.warning(formatImportSuccessMessage(result, filename));
+      return;
+    }
 
-  const route = fileTypeRoutes[result.file_type];
-  if (route) {
-    navigate(route);
+    if (result.warnings && result.warnings.length > 0) {
+      message.warning(
+        `Imported ${filename} with ${result.warnings.length} warning(s)`,
+      );
+    } else {
+      message.success(formatImportSuccessMessage(result, filename));
+    }
+
+    await refreshStoreByType(result.file_type);
+    onImportSuccess?.(result.file_type);
+
+    const route = fileTypeRoutes[result.file_type];
+    if (route) {
+      navigate(route);
+    }
+  } finally {
+    setImporting?.(false);
   }
 };
 
@@ -136,8 +150,6 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
         return;
       }
 
-      setIsImporting(true);
-
       try {
         for (const file of bifrostFiles) {
           const content = await file.text();
@@ -146,12 +158,11 @@ export const BifrostFileDropZone: React.FC<DropZoneProps> = ({
             file.name,
             navigate,
             onImportSuccess,
+            setIsImporting,
           );
         }
       } catch (error) {
         message.error(`Import failed: ${formatBifrostFileError(error)}`);
-      } finally {
-        setIsImporting(false);
       }
     },
     [navigate, onImportSuccess],
