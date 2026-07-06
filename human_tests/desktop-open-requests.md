@@ -127,6 +127,21 @@
 - tray 菜单动作使用 `OpenAppRoute`，并保留 Web UI fallback。
 - focused Rust tests 通过。
 
+### TC-DOR-07 .bifrost 导入导出带 Admin CSRF
+
+操作步骤：
+
+1. 在桌面端或 Web UI 中打开 Traffic 页面，选中一条请求，点击 `Export as .bifrost`。
+2. 在 Rules 页面选择或创建一条规则，执行 rules `.bifrost` 导出。
+3. 将导出的 network `.bifrost` 和 rules `.bifrost` 文件重新拖入页面或通过文件关联打开。
+4. 查看浏览器 DevTools Network 或桌面端控制台错误。
+
+预期结果：
+
+- `.bifrost` 导出 POST 请求带 `X-Bifrost-CSRF`，不会返回 `403 Missing or invalid admin CSRF token`。
+- `.bifrost` 导入 POST 请求带 `X-Bifrost-CSRF`，network 导入后跳转 Traffic，rules 导入后跳转 Rules。
+- 同类 `.bifrost-file` detect/import/export 接口统一使用 CSRF-aware API client。
+
 ## 清理步骤
 
 - 关闭桌面端 App。
@@ -140,3 +155,4 @@
 | --- | --- | --- |
 | 2026-07-06 | TC-DOR-06 | PASS：`bash e2e-tests/tests/test_desktop_open_requests_contract.sh` 通过，覆盖协议/文件关联配置、single-instance/deep-link 依赖、tray app route fallback 契约、desktop open request parser。 |
 | 2026-07-06 | TC-DOR-01 / TC-DOR-03 / TC-DOR-04 / TC-DOR-05 的核心代码路径 | PASS：`cargo test -p bifrost-cli tray::` 通过，`cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests` 通过，`pnpm --dir web run build:desktop` 通过，`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 通过。真实已安装 App 的 LaunchServices/文件双击操作仍需发布包安装环境复测。 |
+| 2026-07-06 | TC-DOR-07 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 import/export POST 请求带 `X-Bifrost-CSRF`；`rg` 扫描确认前端直接 `axios.post/put/delete/patch` 只剩全局 CSRF-aware client 和错误格式化使用。 |

@@ -1,6 +1,20 @@
-import axios from 'axios';
 import { getClientId } from '../services/clientId';
 import { buildApiUrl } from '../runtime';
+import { apiFetch } from './apiFetch';
+
+interface AxiosLikeError {
+  isAxiosError: true;
+  message?: string;
+  response?: { data?: unknown };
+}
+
+function isAxiosLikeError(error: unknown): error is AxiosLikeError {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    (error as { isAxiosError?: unknown }).isAxiosError === true
+  );
+}
 
 export type BifrostFileType = 'rules' | 'network' | 'script' | 'values' | 'template';
 
@@ -62,7 +76,7 @@ export function formatImportSuccessMessage(result: ImportResponse, filename?: st
 }
 
 export function formatBifrostFileError(error: unknown): string {
-  if (axios.isAxiosError(error)) {
+  if (isAxiosLikeError(error)) {
     const data = error.response?.data;
     if (data && typeof data === 'object' && 'error' in data) {
       const message = (data as { error?: unknown }).error;
@@ -162,57 +176,85 @@ export function getEmptyExportMessage(
 }
 
 export async function detectType(content: string): Promise<DetectResponse> {
-  const response = await axios.post<DetectResponse>(`${buildApiUrl('/bifrost-file')}/detect`, content, {
-    headers: { 'Content-Type': 'text/plain', 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileJson<DetectResponse>('/detect', content, 'text/plain');
 }
 
 export async function importFile(content: string): Promise<ImportResponse> {
-  const response = await axios.post<ImportResponse>(`${buildApiUrl('/bifrost-file')}/import`, content, {
-    headers: { 'Content-Type': 'text/plain', 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileJson<ImportResponse>('/import', content, 'text/plain');
 }
 
 export async function exportRules(request: ExportRulesRequest): Promise<string> {
-  const response = await axios.post<string>(`${buildApiUrl('/bifrost-file')}/export/rules`, request, {
-    responseType: 'text',
-    headers: { 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileText('/export/rules', request);
 }
 
 export async function exportNetwork(request: ExportNetworkRequest): Promise<string> {
-  const response = await axios.post<string>(`${buildApiUrl('/bifrost-file')}/export/network`, request, {
-    responseType: 'text',
-    headers: { 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileText('/export/network', request);
 }
 
 export async function exportScripts(request: ExportScriptRequest): Promise<string> {
-  const response = await axios.post<string>(`${buildApiUrl('/bifrost-file')}/export/scripts`, request, {
-    responseType: 'text',
-    headers: { 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileText('/export/scripts', request);
 }
 
 export async function exportValues(request: ExportValuesRequest): Promise<string> {
-  const response = await axios.post<string>(`${buildApiUrl('/bifrost-file')}/export/values`, request, {
-    responseType: 'text',
-    headers: { 'X-Client-Id': getClientId() },
-  });
-  return response.data;
+  return postBifrostFileText('/export/values', request);
 }
 
 export async function exportTemplates(request: ExportTemplateRequest): Promise<string> {
-  const response = await axios.post<string>(`${buildApiUrl('/bifrost-file')}/export/templates`, request, {
-    responseType: 'text',
-    headers: { 'X-Client-Id': getClientId() },
+  return postBifrostFileText('/export/templates', request);
+}
+
+async function postBifrostFileJson<T>(
+  path: string,
+  body: string | unknown,
+  contentType = 'application/json',
+): Promise<T> {
+  const response = await postBifrostFile(path, body, contentType);
+  return (await response.json()) as T;
+}
+
+async function postBifrostFileText(path: string, body: unknown): Promise<string> {
+  const response = await postBifrostFile(path, body, 'application/json');
+  return response.text();
+}
+
+async function postBifrostFile(
+  path: string,
+  body: string | unknown,
+  contentType: string,
+): Promise<Response> {
+  const response = await apiFetch(`${buildApiUrl('/bifrost-file')}${path}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': contentType,
+      'X-Client-Id': getClientId(),
+    },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
   });
-  return response.data;
+
+  if (!response.ok) {
+    throw new Error(await readBifrostFileError(response));
+  }
+
+  return response;
+}
+
+async function readBifrostFileError(response: Response): Promise<string> {
+  const fallback = `Request failed with status ${response.status}`;
+  const contentType = response.headers.get('Content-Type') || '';
+  try {
+    if (contentType.includes('application/json')) {
+      const payload = (await response.json()) as { error?: unknown; message?: unknown };
+      const message = payload.error || payload.message;
+      if (typeof message === 'string' && message.trim()) {
+        return message;
+      }
+      return fallback;
+    }
+    const text = await response.text();
+    return text.trim() || fallback;
+  } catch {
+    return fallback;
+  }
 }
 
 export function downloadFile(content: string, filename: string): void {
