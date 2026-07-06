@@ -42,6 +42,7 @@ Bifrost 的公开入口站点与文档站涉及两个仓库。任何首页、文
 - **根站构建命令**：部署到入口站前，必须在本仓库执行 `SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`，确保所有资源路径、canonical、OG URL、多语言入口和文档链接按根路径生成。
 - **产物同步命令**：将本仓库 `site/dist/` 原样同步到 `bifrost-proxy.github.io` checkout，例如：`rsync -a --delete --exclude='.git/' --exclude='.github/' --exclude='README.md' <bifrost>/site/dist/ <bifrost-proxy.github.io>/`。如果部署仓库未来有必须保留的额外管理文件，必须明确列入 exclude，并在最终交付说明原因。
 - **部署动作**：在 `bifrost-proxy.github.io` 仓库提交并推送 `main`，触发该仓库 GitHub Pages workflow。源站源码改动也必须在本仓库对应分支提交/推送，不能只提交部署产物。
+- **主仓库项目站**：本仓库 `.github/workflows/site.yml` 只负责构建校验 `site/dist`，不得再使用 `actions/configure-pages`、`actions/upload-pages-artifact` 或 `actions/deploy-pages` 部署 `https://bifrost-proxy.github.io/bifrost/` 项目站；该项目站应在 GitHub Pages 设置中下线，避免遮蔽入口部署仓库中的 `/bifrost/` 兼容 redirect。
 - **验证要求**：同步后必须验证本地和线上至少以下路径：`/`、`/docs/`、`/getting-started/overview` 或对应 `.html` 文件、`/en/getting-started/overview` 或对应 `.html` 文件、`/reference/rules/`、`/og-image.png`。本地用 `python3 -m http.server` 验证时要注意它不支持 VitePress clean URL fallback，必要时用 `.html` 路径验证文件存在；线上必须验证 clean URL。
 - **CI/Pages 看护**：推送部署仓库后必须跟进 `bifrost-proxy/bifrost-proxy.github.io` 的 `Pages` 与 `pages-build-deployment` runs 到 success，并用 `curl -L https://bifrost-proxy.github.io/` 验证线上根站已经是源站同步后的首页，不是旧跳转页或手写分叉页。
 

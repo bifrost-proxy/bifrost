@@ -28,13 +28,13 @@
 4. 检查 `AGENTS.md` 是否给出根站构建命令：`SITE_URL=https://bifrost-proxy.github.io/ BASE_PATH=/ pnpm run site:build`。
 5. 检查 `AGENTS.md` 是否给出产物同步方式：从本仓库 `site/dist/` 同步到 `bifrost-proxy.github.io` checkout，并保留 `.git/`、`.github/`、`README.md`。
 6. 检查 `AGENTS.md` 是否要求推送部署仓库后跟进 `Pages` 与 `pages-build-deployment` runs，并线上验证 `https://bifrost-proxy.github.io/`。
-7. 执行 `rg -n "Build legacy project Pages redirect|Upload legacy project Pages redirect|Deploy legacy project Pages redirect|project-pages-redirect-dist" .github/workflows/site.yml site/scripts/build-project-pages-redirect.mjs`，确认主仓库 Site workflow 在非 PR 事件只部署项目站 tombstone。
+7. 执行 `! rg -n "configure-pages|upload-pages-artifact|deploy-pages|pages: write|id-token: write|project-pages-redirect-dist|Build legacy project Pages redirect|Deploy legacy project Pages redirect" .github/workflows/site.yml site/scripts`，确认主仓库 Site workflow 只构建校验，不再部署 `/bifrost/` 项目站。
 
 预期结果：
 
 - 后续涉及主站或文档站更新时，Agent 能从开发手册直接判断：先改本仓库源站，再构建并同步产物到 `bifrost-proxy.github.io`，不能在部署仓库维护第二套页面。
 - 手册包含具体命令、部署仓库、入口 URL、验证路径和 CI/Pages 看护要求。
-- 主仓库不会继续通过 GitHub Pages 项目站发布第二套完整站点；`/bifrost/` 只会作为 noindex redirect 指向根站，避免它与根站入口分叉。
+- 主仓库不会继续通过 GitHub Pages 项目站发布 `/bifrost/`；稳定根站和文档站仍由 `bifrost-proxy.github.io` 部署仓库承载。
 
 执行结果：
 
