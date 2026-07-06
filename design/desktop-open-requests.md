@@ -51,6 +51,7 @@ Unknown protocol routes are ignored and logged. Non-`.bifrost` file arguments ar
   - `pnpm --dir web run build:desktop` verifies the Tauri WebView bridge compiles.
 - E2E contract:
   - `bash e2e-tests/tests/test_desktop_open_requests_contract.sh` checks the config/dependency contract and runs the focused Rust guards.
+  - Before running the desktop crate `open_requests` Rust test, the contract builds the debug CLI sidecar and prepares `desktop/src-tauri/resources/bin/*`, matching Tauri's resource requirement on clean macOS/Windows runners.
   - On Linux runners without Tauri GTK/GObject development packages, the contract keeps static desktop registration checks and skips only the desktop crate `open_requests` Rust test. macOS runners and Linux runners with the required packages still run it.
 - Human:
   - `human_tests/desktop-open-requests.md` covers installed-app routing, fallback, `.bifrost` import, and strict single-instance behavior.

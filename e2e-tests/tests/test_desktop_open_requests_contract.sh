@@ -56,6 +56,8 @@ if [[ "$(uname -s)" == "Linux" ]] && {
 }; then
   echo "skipping desktop open_requests Rust test: Linux Tauri GTK/GObject dependencies are not installed"
 else
+  cargo build -p bifrost-cli --bin bifrost
+  node scripts/prepare-tauri-sidecar.mjs debug
   cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests
 fi
 
