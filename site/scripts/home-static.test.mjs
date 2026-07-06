@@ -50,11 +50,14 @@ const html = `<!doctype html>
   </head>
   <body>
     <a href="%BASE_PATH%docs/">Docs</a>
+    <a href="%BASE_PATH%getting-started/desktop">Desktop</a>
     <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
     <img src="%BASE_PATH%favicon.png" alt="" width="32" height="32" />
     <button data-lang="en" aria-pressed="true">EN</button>
     <button data-lang="zh" aria-pressed="false">中文</button>
     <div role="tablist"><button role="tab" aria-selected="true">CLI</button></div>
+    <button aria-controls="panel-apps">Apps</button>
+    <a data-download-target="mac-arm" href="#">macOS</a>
     <code>bifrost start -d</code>
   </body>
 </html>`;
@@ -121,10 +124,13 @@ test("collectHomeErrors rejects the removed top text navigation", async () => {
           }
         </script>
         <a href="https://github.com/bifrost-proxy/bifrost">GitHub</a>
+        <a href="/getting-started/desktop">Desktop</a>
         <img src="/favicon.png" alt="" width="32" height="32" />
         <button data-lang="en" aria-pressed="true">EN</button>
         <button data-lang="zh" aria-pressed="false">中文</button>
         <div role="tablist"><button role="tab" aria-selected="true">CLI</button></div>
+        <button aria-controls="panel-apps">Apps</button>
+        <a data-download-target="mac-arm" href="#">macOS</a>
         <code>bifrost start -d</code>
       </body></html>`,
       "utf8",

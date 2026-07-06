@@ -119,7 +119,16 @@ make setup
 
 ## 用不习惯 CLI？想要使用桌面端 APP？
 
-请直接到[releases](https://github.com/bifrost-proxy/bifrost/releases)中下载对应平台的桌面端程序
+桌面端适合日常抓包、查看流量、编辑规则和更新 Bifrost，不需要先记住 CLI 命令：
+
+1. 打开 [GitHub Releases](https://github.com/bifrost-proxy/bifrost/releases)。
+2. 选择最新版本的 `Assets`。
+3. macOS 下载与你芯片匹配的 `.dmg`，Apple Silicon 选择 `aarch64-apple-darwin`，Intel Mac 选择 `x86_64-apple-darwin`。
+4. Windows 下载 `.msi`，普通 x64 电脑选择 `x86_64-pc-windows-msvc`，ARM 设备选择 `aarch64-pc-windows-msvc`。
+5. macOS 打开 `.dmg` 后把 `Bifrost.app` 拖到 `Applications`，Windows 双击 `.msi` 按向导安装。
+6. 启动 Bifrost 后等待桌面端完成内置代理后端启动；首次启动会异步检查并安装 Bifrost CA。
+
+如果你希望桌面端也安装命令行能力，打开桌面端 Settings，在 `Desktop Proxy Core` 中点击 `Install CLI & Skills`。详细教程见 [`docs/desktop.md`](docs/desktop.md)。
 
 如果 `bifrost version-check`、`bifrost upgrade`、`bifrost install-skill`、Sync/登录、AI/Agent provider、ASR/语音模型下载、脚本 `net.fetch` 或规则远程 URL 在企业网络、Linux 沙箱或 CI 中访问 HTTPS 时报 `UnknownIssuer`、`invalid peer certificate`、`certificate verify failed` 等 TLS 证书错误，优先把企业/沙箱根证书安装进系统 trust store。系统 CA 不可控时，GitHub/升级链路可设置 `BIFROST_GITHUB_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_UPGRADE_CA_BUNDLE=/path/to/ca.pem`；通用外部 HTTPS 链路可设置 `BIFROST_CA_BUNDLE=/path/to/ca.pem` 或 `BIFROST_CA_DIR=/path/to/certs`。同时兼容 `SSL_CERT_FILE`、`SSL_CERT_DIR`、`REQUESTS_CA_BUNDLE`、`CURL_CA_BUNDLE`、`NODE_EXTRA_CA_CERTS`、`GIT_SSL_CAINFO`、`AWS_CA_BUNDLE`、`PIP_CERT`、`NPM_CONFIG_CAFILE`、`GRPC_DEFAULT_SSL_ROOTS_FILE_PATH` 等常见 CA 环境变量。只有在受控临时环境且无法注入 CA 时，才使用 `BIFROST_UPGRADE_UNSAFE_SSL=1`、`BIFROST_GITHUB_UNSAFE_SSL=1` 或 `BIFROST_UNSAFE_SSL=1` 跳过相应外部 HTTPS 链路的证书校验。
 

@@ -166,6 +166,9 @@ export async function collectHomeErrors({
   if (!html.includes(`href="${normalizedBasePath}docs/"`)) {
     errors.push("Home page is missing the docs link.");
   }
+  if (!html.includes(`href="${normalizedBasePath}getting-started/desktop"`)) {
+    errors.push("Home page is missing the desktop install guide link.");
+  }
   if (!html.includes('rel="canonical"')) {
     errors.push("Home page is missing the canonical link.");
   }
@@ -207,6 +210,9 @@ export async function collectHomeErrors({
   }
   if (!html.includes('role="tablist"') || !html.includes('aria-selected="true"')) {
     errors.push("Home page preview tabs are missing accessible tab markup.");
+  }
+  if (!html.includes('aria-controls="panel-apps"') || !html.includes('data-download-target="mac-arm"')) {
+    errors.push("Home page is missing the Apps direct-download panel.");
   }
   if (!html.includes('data-lang="zh"') || !html.includes('data-lang="en"')) {
     errors.push("Home page is missing the English/Chinese language switch.");
