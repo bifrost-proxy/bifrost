@@ -1,3 +1,5 @@
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+
 mod native_launcher;
 mod open_requests;
 
@@ -1698,6 +1700,11 @@ fn load_desktop_config(config_path: &Path) -> tauri::Result<DesktopConfig> {
 }
 
 fn save_desktop_config(config_path: &Path, config: &DesktopConfig) -> tauri::Result<()> {
+    if let Some(config_dir) = config_path.parent() {
+        fs::create_dir_all(config_dir)
+            .map_err(|error| anyhow(format!("failed to create desktop config dir: {error}")))?;
+    }
+
     let content = serde_json::to_string_pretty(config)
         .map_err(|error| anyhow(format!("failed to encode desktop config: {error}")))?;
     fs::write(config_path, format!("{content}\n"))
@@ -2146,8 +2153,9 @@ mod tests {
         begin_backend_recovery, host_window_close_behavior_for_platform, is_server_config_response,
         main_interface_decorations_for_platform, mark_backend_unavailable_for_manual_start,
         parse_port_update_response, poll_managed_backend_exit, resolve_bifrost_binary_from_env,
-        resolve_desktop_config_path, resolve_desktop_data_dir,
-        uses_borderless_desktop_chrome_for_platform, BackendState, HostWindowCloseBehavior,
+        resolve_desktop_config_path, resolve_desktop_data_dir, save_desktop_config,
+        uses_borderless_desktop_chrome_for_platform, BackendState, DesktopConfig,
+        HostWindowCloseBehavior,
     };
     use bifrost_storage::data_dir as shared_bifrost_data_dir;
     use std::fs;
@@ -2173,6 +2181,21 @@ mod tests {
             resolve_desktop_data_dir().unwrap(),
             shared_bifrost_data_dir()
         );
+    }
+
+    #[test]
+    fn save_desktop_config_creates_parent_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_path = temp_dir
+            .path()
+            .join("missing")
+            .join("nested")
+            .join("desktop-config.json");
+
+        save_desktop_config(&config_path, &DesktopConfig { proxy_port: 19945 }).unwrap();
+
+        let content = fs::read_to_string(config_path).unwrap();
+        assert!(content.contains("\"proxy_port\": 19945"));
     }
 
     #[test]
