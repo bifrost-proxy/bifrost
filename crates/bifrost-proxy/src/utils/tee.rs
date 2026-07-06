@@ -136,6 +136,7 @@ fn persist_socket_summary(state: &AdminState, record_id: &str, total_bytes: usiz
     }
     state.update_traffic_by_id(record_id, move |record| {
         record.response_size = response_size;
+        record.download_bytes = response_size;
         record.frame_count = frame_count;
         record.last_frame_id = last_frame_id;
         if let Some(ref s) = status {
@@ -257,9 +258,11 @@ impl TeeBodyDropGuard {
                 None
             };
 
-            let total_bytes = self.total_bytes + self.response_headers_size;
+            let body_bytes = self.total_bytes;
+            let total_bytes = body_bytes + self.response_headers_size;
             state.update_traffic_by_id(&self.record_id, move |record| {
                 record.response_size = total_bytes;
+                record.download_bytes = body_bytes;
                 if let Some(ref mut timing) = record.timing {
                     if timing.first_byte_ms.is_none() {
                         timing.first_byte_ms = Some(record.duration_ms);

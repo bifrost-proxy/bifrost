@@ -39,6 +39,10 @@ pub struct TrafficSummaryCompact {
     pub req_ct: Option<String>,
     pub req_sz: usize,
     pub res_sz: usize,
+    #[serde(default)]
+    pub up: usize,
+    #[serde(default)]
+    pub down: usize,
     pub dur: u64,
     #[serde(default)]
     pub lp: u16,
@@ -103,6 +107,8 @@ impl TrafficSummaryCompact {
             req_ct: record.request_content_type.clone(),
             req_sz: record.request_size,
             res_sz: record.response_size,
+            up: record.upload_bytes,
+            down: record.download_bytes,
             dur: record.duration_ms,
             lp: record.listener_port,
             proto: record.protocol.clone(),

@@ -38,6 +38,30 @@ fn decode_detail_blob<T: serde::de::DeserializeOwned>(bytes: &[u8]) -> postcard:
     postcard::from_bytes(bytes)
 }
 
+fn trusted_upload_bytes(record: &TrafficRecord) -> usize {
+    if record.upload_bytes > 0 {
+        return record.upload_bytes;
+    }
+    if let Some(status) = record.socket_status.as_ref() {
+        if status.send_bytes > 0 {
+            return status.send_bytes as usize;
+        }
+    }
+    record.request_size
+}
+
+fn trusted_download_bytes(record: &TrafficRecord) -> usize {
+    if record.download_bytes > 0 {
+        return record.download_bytes;
+    }
+    if let Some(status) = record.socket_status.as_ref() {
+        if status.receive_bytes > 0 {
+            return status.receive_bytes as usize;
+        }
+    }
+    record.response_size
+}
+
 struct ReadPool {
     conns: Vec<Mutex<Connection>>,
     next: AtomicUsize,
@@ -437,6 +461,8 @@ impl TrafficDbStore {
         seq: u64,
         record: &TrafficRecord,
     ) -> rusqlite::Result<()> {
+        let upload_bytes = trusted_upload_bytes(record);
+        let download_bytes = trusted_download_bytes(record);
         let flags = encode_flags(record);
         let socket_is_open = record.socket_status.as_ref().is_some_and(|s| s.is_open);
         let socket_send_count = record.socket_status.as_ref().map_or(0, |s| s.send_count);
@@ -484,6 +510,8 @@ impl TrafficDbStore {
                 &record.request_content_type,
                 record.request_size as i64,
                 record.response_size as i64,
+                upload_bytes as i64,
+                download_bytes as i64,
                 record.duration_ms as i64,
                 record.listener_port as i64,
                 &record.client_ip,
@@ -668,6 +696,8 @@ impl TrafficDbStore {
 
     fn persist_update(&self, record: &TrafficRecord) {
         let mut conn = self.write_conn.lock();
+        let upload_bytes = trusted_upload_bytes(record);
+        let download_bytes = trusted_download_bytes(record);
         let flags = encode_flags(record);
         let socket_is_open = record.socket_status.as_ref().is_some_and(|s| s.is_open);
         let socket_send_count = record.socket_status.as_ref().map_or(0, |s| s.send_count);
@@ -709,6 +739,8 @@ impl TrafficDbStore {
                     &record.request_content_type,
                     record.request_size as i64,
                     record.response_size as i64,
+                    upload_bytes as i64,
+                    download_bytes as i64,
                     record.duration_ms as i64,
                     record.listener_port as i64,
                     &record.client_app,
@@ -816,16 +848,16 @@ impl TrafficDbStore {
         let records: Vec<TrafficSummaryCompact> = stmt
             .query_map(param_refs.as_slice(), |row| {
                 let socket_status = build_socket_status_summary(
-                    row.get::<_, bool>(19)?,
-                    row.get::<_, i64>(20)? as u64,
-                    row.get::<_, i64>(21)? as u64,
+                    row.get::<_, bool>(21)?,
                     row.get::<_, i64>(22)? as u64,
                     row.get::<_, i64>(23)? as u64,
-                    row.get::<_, i64>(24)? as usize,
+                    row.get::<_, i64>(24)? as u64,
+                    row.get::<_, i64>(25)? as u64,
+                    row.get::<_, i64>(26)? as usize,
                 );
-                let rc = row.get::<_, i64>(25)? as usize;
+                let rc = row.get::<_, i64>(27)? as usize;
                 let rp = row
-                    .get::<_, Option<String>>(26)?
+                    .get::<_, Option<String>>(28)?
                     .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                     .unwrap_or_default();
 
@@ -839,21 +871,23 @@ impl TrafficDbStore {
                     proto: row.get(6)?,
                     p: row.get(8)?,
                     ct: row.get(9)?,
-                    req_ct: row.get(27)?,
+                    req_ct: row.get(29)?,
                     req_sz: row.get::<_, i64>(10)? as usize,
                     res_sz: row.get::<_, i64>(11)? as usize,
-                    dur: row.get::<_, i64>(12)? as u64,
-                    lp: row.get::<_, i64>(13)? as u16,
-                    cip: row.get(14)?,
-                    capp: row.get(15)?,
-                    cpid: row.get::<_, Option<i32>>(16)?.map(|v| v as u32),
-                    flags: row.get::<_, i32>(17)? as u32,
-                    fc: row.get::<_, i64>(18)? as usize,
+                    up: row.get::<_, i64>(12)? as usize,
+                    down: row.get::<_, i64>(13)? as usize,
+                    dur: row.get::<_, i64>(14)? as u64,
+                    lp: row.get::<_, i64>(15)? as u16,
+                    cip: row.get(16)?,
+                    capp: row.get(17)?,
+                    cpid: row.get::<_, Option<i32>>(18)?.map(|v| v as u32),
+                    flags: row.get::<_, i32>(19)? as u32,
+                    fc: row.get::<_, i64>(20)? as usize,
                     ss: socket_status,
                     st: format_timestamp_ms(row.get::<_, i64>(2)? as u64),
                     et: {
                         let ts = row.get::<_, i64>(2)? as u64;
-                        let dur = row.get::<_, i64>(12)? as u64;
+                        let dur = row.get::<_, i64>(14)? as u64;
                         if dur > 0 {
                             Some(format_timestamp_ms(ts + dur))
                         } else {
@@ -1111,7 +1145,7 @@ impl TrafficDbStore {
         let mut record = conn
             .query_row(
                 "SELECT sequence, id, timestamp, host, method, status, protocol, url, path, \
-                 content_type, request_content_type, request_size, response_size, duration_ms, \
+                 content_type, request_content_type, request_size, response_size, upload_bytes, download_bytes, duration_ms, \
                  listener_port, client_ip, client_app, client_pid, client_path, flags, frame_count, \
                  last_frame_id, socket_is_open, socket_send_count, socket_receive_count, \
                  socket_send_bytes, socket_receive_bytes, socket_frame_count, \
@@ -1138,7 +1172,7 @@ impl TrafficDbStore {
         let placeholders: Vec<&str> = ids.iter().map(|_| "?").collect();
         let sql = format!(
             "SELECT sequence, id, timestamp, host, method, status, protocol, \
-             url, path, content_type, request_size, response_size, duration_ms, \
+             url, path, content_type, request_size, response_size, upload_bytes, download_bytes, duration_ms, \
              listener_port, client_ip, client_app, client_pid, flags, frame_count, \
              socket_is_open, socket_send_count, socket_receive_count, \
              socket_send_bytes, socket_receive_bytes, socket_frame_count, \
@@ -1158,16 +1192,16 @@ impl TrafficDbStore {
 
         stmt.query_map(params.as_slice(), |row| {
             let socket_status = build_socket_status_summary(
-                row.get::<_, bool>(19)?,
-                row.get::<_, i64>(20)? as u64,
-                row.get::<_, i64>(21)? as u64,
+                row.get::<_, bool>(21)?,
                 row.get::<_, i64>(22)? as u64,
                 row.get::<_, i64>(23)? as u64,
-                row.get::<_, i64>(24)? as usize,
+                row.get::<_, i64>(24)? as u64,
+                row.get::<_, i64>(25)? as u64,
+                row.get::<_, i64>(26)? as usize,
             );
-            let rc = row.get::<_, i64>(25)? as usize;
+            let rc = row.get::<_, i64>(27)? as usize;
             let rp = row
-                .get::<_, Option<String>>(26)?
+                .get::<_, Option<String>>(28)?
                 .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
                 .unwrap_or_default();
 
@@ -1181,21 +1215,23 @@ impl TrafficDbStore {
                 proto: row.get(6)?,
                 p: row.get(8)?,
                 ct: row.get(9)?,
-                req_ct: row.get(27)?,
+                req_ct: row.get(29)?,
                 req_sz: row.get::<_, i64>(10)? as usize,
                 res_sz: row.get::<_, i64>(11)? as usize,
-                dur: row.get::<_, i64>(12)? as u64,
-                lp: row.get::<_, i64>(13)? as u16,
-                cip: row.get(14)?,
-                capp: row.get(15)?,
-                cpid: row.get::<_, Option<i32>>(16)?.map(|v| v as u32),
-                flags: row.get::<_, i32>(17)? as u32,
-                fc: row.get::<_, i64>(18)? as usize,
+                up: row.get::<_, i64>(12)? as usize,
+                down: row.get::<_, i64>(13)? as usize,
+                dur: row.get::<_, i64>(14)? as u64,
+                lp: row.get::<_, i64>(15)? as u16,
+                cip: row.get(16)?,
+                capp: row.get(17)?,
+                cpid: row.get::<_, Option<i32>>(18)?.map(|v| v as u32),
+                flags: row.get::<_, i32>(19)? as u32,
+                fc: row.get::<_, i64>(20)? as usize,
                 ss: socket_status,
                 st: format_timestamp_ms(row.get::<_, i64>(2)? as u64),
                 et: {
                     let ts = row.get::<_, i64>(2)? as u64;
-                    let dur = row.get::<_, i64>(12)? as u64;
+                    let dur = row.get::<_, i64>(14)? as u64;
                     if dur > 0 {
                         Some(format_timestamp_ms(ts + dur))
                     } else {
@@ -1227,6 +1263,8 @@ impl TrafficDbStore {
             request_content_type: row.get("request_content_type")?,
             request_size: row.get::<_, i64>("request_size")? as usize,
             response_size: row.get::<_, i64>("response_size")? as usize,
+            upload_bytes: row.get::<_, i64>("upload_bytes")? as usize,
+            download_bytes: row.get::<_, i64>("download_bytes")? as usize,
             duration_ms: row.get::<_, i64>("duration_ms")? as u64,
             listener_port: row.get::<_, i64>("listener_port")? as u16,
             client_ip: row.get("client_ip")?,
@@ -1627,8 +1665,8 @@ impl TrafficDbStore {
         let conn = self.read_pool.acquire();
         let sql = "SELECT COALESCE(NULLIF(host, ''), 'Unknown') AS host, \
                    COUNT(*) AS requests, \
-                   COALESCE(SUM(request_size), 0) AS bytes_sent, \
-                   COALESCE(SUM(response_size), 0) AS bytes_received, \
+                   COALESCE(SUM(upload_bytes), 0) AS bytes_sent, \
+                   COALESCE(SUM(download_bytes), 0) AS bytes_received, \
                    SUM(CASE WHEN protocol = 'http' THEN 1 ELSE 0 END) AS http_requests, \
                    SUM(CASE WHEN protocol = 'https' THEN 1 ELSE 0 END) AS https_requests, \
                    SUM(CASE WHEN protocol = 'tunnel' THEN 1 ELSE 0 END) AS tunnel_requests, \
@@ -1684,8 +1722,8 @@ impl TrafficDbStore {
         let conn = self.read_pool.acquire();
         let sql = "SELECT COALESCE(NULLIF(client_app, ''), 'Unknown') AS app_name, \
                    COUNT(*) AS requests, \
-                   COALESCE(SUM(request_size), 0) AS bytes_sent, \
-                   COALESCE(SUM(response_size), 0) AS bytes_received, \
+                   COALESCE(SUM(upload_bytes), 0) AS bytes_sent, \
+                   COALESCE(SUM(download_bytes), 0) AS bytes_received, \
                    SUM(CASE WHEN protocol = 'http' THEN 1 ELSE 0 END) AS http_requests, \
                    SUM(CASE WHEN protocol = 'https' THEN 1 ELSE 0 END) AS https_requests, \
                    SUM(CASE WHEN protocol = 'tunnel' THEN 1 ELSE 0 END) AS tunnel_requests, \
@@ -2328,6 +2366,54 @@ mod tests {
             .unwrap();
 
         assert!(!has_idx_flags);
+
+        cleanup_test_dir(&dir);
+    }
+
+    #[test]
+    fn test_metrics_aggregates_use_trusted_upload_download_bytes() {
+        let dir = create_test_dir();
+        let store = TrafficDbStore::new(dir.clone(), 100, 0, None).unwrap();
+
+        let mut record = TrafficRecord::new(
+            "metric-1".to_string(),
+            "POST".to_string(),
+            "http://metrics.example.test/echo".to_string(),
+        );
+        record.client_app = Some("Metric Test App".to_string());
+        record.request_size = 9_999;
+        record.response_size = 8_888;
+        record.upload_bytes = 37;
+        record.download_bytes = 73;
+        store.record(record);
+
+        let host = store
+            .aggregate_host_metrics()
+            .into_iter()
+            .find(|m| m.host == "metrics.example.test")
+            .expect("host aggregate should exist");
+        assert_eq!(host.requests, 1);
+        assert_eq!(host.bytes_sent, 37);
+        assert_eq!(host.bytes_received, 73);
+
+        let app = store
+            .aggregate_app_metrics()
+            .into_iter()
+            .find(|m| m.app_name == "Metric Test App")
+            .expect("app aggregate should exist");
+        assert_eq!(app.requests, 1);
+        assert_eq!(app.bytes_sent, 37);
+        assert_eq!(app.bytes_received, 73);
+
+        let summary = store
+            .get_by_ids(&["metric-1"])
+            .into_iter()
+            .next()
+            .expect("summary should exist");
+        assert_eq!(summary.req_sz, 9_999);
+        assert_eq!(summary.res_sz, 8_888);
+        assert_eq!(summary.up, 37);
+        assert_eq!(summary.down, 73);
 
         cleanup_test_dir(&dir);
     }

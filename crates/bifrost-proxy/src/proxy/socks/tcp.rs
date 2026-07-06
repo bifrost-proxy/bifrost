@@ -1569,6 +1569,8 @@ impl SocksHandler {
             state.update_traffic_by_id(&req_id, move |record| {
                 record.request_size = total_sent as usize;
                 record.response_size = total_received as usize;
+                record.upload_bytes = total_sent as usize;
+                record.download_bytes = total_received as usize;
                 record.duration_ms = duration_ms;
             });
 
@@ -2027,6 +2029,8 @@ impl SocksHandler {
             state.update_traffic_by_id(&req_id, move |record| {
                 record.request_size = total_sent as usize;
                 record.response_size = total_received as usize;
+                record.upload_bytes = total_sent as usize;
+                record.download_bytes = total_received as usize;
                 record.duration_ms = duration_ms;
             });
 

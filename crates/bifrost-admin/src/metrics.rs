@@ -1,10 +1,10 @@
 use std::collections::VecDeque;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, Pid, ProcessesToUpdate, System};
 use tokio::task::JoinHandle;
@@ -113,6 +113,69 @@ impl Default for CachedMetricsSnapshot {
     }
 }
 
+const REALTIME_BUCKET_MS: u64 = 50;
+const REALTIME_RETENTION_MS: u64 = 10_000;
+const REALTIME_WINDOW_MS: u64 = 1_000;
+const REALTIME_BUCKET_COUNT: usize = (REALTIME_RETENTION_MS / REALTIME_BUCKET_MS) as usize + 1;
+const REALTIME_WINDOW_SHARDS: usize = 16;
+
+#[derive(Clone, Default)]
+struct RealtimeBucket {
+    start_ms: u64,
+    requests: u64,
+    bytes_sent: u64,
+    bytes_received: u64,
+}
+
+struct RealtimeWindow {
+    buckets: Vec<RealtimeBucket>,
+}
+
+impl RealtimeWindow {
+    fn new() -> Self {
+        Self {
+            buckets: vec![RealtimeBucket::default(); REALTIME_BUCKET_COUNT],
+        }
+    }
+
+    fn record(&mut self, now: u64, requests: u64, bytes_sent: u64, bytes_received: u64) {
+        if requests == 0 && bytes_sent == 0 && bytes_received == 0 {
+            return;
+        }
+
+        let bucket_start = now - (now % REALTIME_BUCKET_MS);
+        let index = ((bucket_start / REALTIME_BUCKET_MS) as usize) % REALTIME_BUCKET_COUNT;
+        let bucket = &mut self.buckets[index];
+        if bucket.start_ms != bucket_start {
+            *bucket = RealtimeBucket {
+                start_ms: bucket_start,
+                ..RealtimeBucket::default()
+            };
+        }
+
+        bucket.requests = bucket.requests.saturating_add(requests);
+        bucket.bytes_sent = bucket.bytes_sent.saturating_add(bytes_sent);
+        bucket.bytes_received = bucket.bytes_received.saturating_add(bytes_received);
+    }
+
+    fn rates(&self, now: u64) -> (u64, u64, u64) {
+        let cutoff = now.saturating_sub(REALTIME_WINDOW_MS);
+        self.buckets
+            .iter()
+            .filter(|bucket| {
+                bucket.start_ms <= now
+                    && bucket.start_ms.saturating_add(REALTIME_BUCKET_MS) > cutoff
+            })
+            .fold((0u64, 0u64, 0u64), |(requests, sent, received), bucket| {
+                (
+                    requests.saturating_add(bucket.requests),
+                    sent.saturating_add(bucket.bytes_sent),
+                    received.saturating_add(bucket.bytes_received),
+                )
+            })
+    }
+}
+
 pub struct MetricsCollector {
     total_requests: AtomicU64,
     active_connections: AtomicU64,
@@ -124,13 +187,6 @@ pub struct MetricsCollector {
     last_bytes_sent: AtomicU64,
     last_bytes_received: AtomicU64,
     last_snapshot_time: AtomicU64,
-    realtime_last_request_count: AtomicU64,
-    realtime_last_bytes_sent: AtomicU64,
-    realtime_last_bytes_received: AtomicU64,
-    realtime_last_time: AtomicU64,
-    smoothed_qps: RwLock<f32>,
-    smoothed_bytes_sent_rate: RwLock<f32>,
-    smoothed_bytes_received_rate: RwLock<f32>,
     system: RwLock<System>,
     pid: Pid,
     max_qps: RwLock<f32>,
@@ -140,6 +196,8 @@ pub struct MetricsCollector {
     client_process_policy_unknown_decisions: AtomicU64,
     cached_cpu: CachedCpuMetrics,
     cached_snapshot: CachedMetricsSnapshot,
+    realtime_shard_cursor: AtomicUsize,
+    realtime_windows: [Mutex<RealtimeWindow>; REALTIME_WINDOW_SHARDS],
     http: TrafficTypeCounters,
     https: TrafficTypeCounters,
     tunnel: TrafficTypeCounters,
@@ -166,13 +224,6 @@ impl MetricsCollector {
             last_bytes_sent: AtomicU64::new(0),
             last_bytes_received: AtomicU64::new(0),
             last_snapshot_time: AtomicU64::new(0),
-            realtime_last_request_count: AtomicU64::new(0),
-            realtime_last_bytes_sent: AtomicU64::new(0),
-            realtime_last_bytes_received: AtomicU64::new(0),
-            realtime_last_time: AtomicU64::new(0),
-            smoothed_qps: RwLock::new(0.0),
-            smoothed_bytes_sent_rate: RwLock::new(0.0),
-            smoothed_bytes_received_rate: RwLock::new(0.0),
             system: RwLock::new(system),
             pid,
             max_qps: RwLock::new(0.0),
@@ -185,6 +236,8 @@ impl MetricsCollector {
                 ..Default::default()
             },
             cached_snapshot: CachedMetricsSnapshot::default(),
+            realtime_shard_cursor: AtomicUsize::new(0),
+            realtime_windows: std::array::from_fn(|_| Mutex::new(RealtimeWindow::new())),
             http: TrafficTypeCounters::new(),
             https: TrafficTypeCounters::new(),
             tunnel: TrafficTypeCounters::new(),
@@ -216,6 +269,7 @@ impl MetricsCollector {
 
     pub fn increment_requests(&self) {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
+        self.record_realtime(1, 0, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -224,6 +278,7 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .requests
             .fetch_add(1, Ordering::Relaxed);
+        self.record_realtime(1, 0, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -255,6 +310,7 @@ impl MetricsCollector {
 
     pub fn add_bytes_sent(&self, bytes: u64) {
         self.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
+        self.record_realtime(0, bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
@@ -263,11 +319,13 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_sent
             .fetch_add(bytes, Ordering::Relaxed);
+        self.record_realtime(0, bytes, 0);
         self.invalidate_cached_snapshot();
     }
 
     pub fn add_bytes_received(&self, bytes: u64) {
         self.bytes_received.fetch_add(bytes, Ordering::Relaxed);
+        self.record_realtime(0, 0, bytes);
         self.invalidate_cached_snapshot();
     }
 
@@ -276,7 +334,46 @@ impl MetricsCollector {
         self.get_counters(traffic_type)
             .bytes_received
             .fetch_add(bytes, Ordering::Relaxed);
+        self.record_realtime(0, 0, bytes);
         self.invalidate_cached_snapshot();
+    }
+
+    fn now_ms() -> u64 {
+        chrono::Utc::now().timestamp_millis() as u64
+    }
+
+    fn record_realtime(&self, requests: u64, bytes_sent: u64, bytes_received: u64) {
+        let now = Self::now_ms();
+        self.record_realtime_at(now, requests, bytes_sent, bytes_received);
+    }
+
+    fn record_realtime_at(&self, now: u64, requests: u64, bytes_sent: u64, bytes_received: u64) {
+        let shard =
+            self.realtime_shard_cursor.fetch_add(1, Ordering::Relaxed) % REALTIME_WINDOW_SHARDS;
+        self.realtime_windows[shard]
+            .lock()
+            .record(now, requests, bytes_sent, bytes_received);
+    }
+
+    fn realtime_window_rates(&self, now: u64) -> (f32, f32, f32) {
+        let window_secs = REALTIME_WINDOW_MS as f32 / 1000.0;
+        let (request_count, bytes_sent, bytes_received) = self
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().rates(now))
+            .fold((0u64, 0u64, 0u64), |(requests, sent, received), current| {
+                (
+                    requests.saturating_add(current.0),
+                    sent.saturating_add(current.1),
+                    received.saturating_add(current.2),
+                )
+            });
+
+        (
+            request_count as f32 / window_secs,
+            bytes_sent as f32 / window_secs,
+            bytes_received as f32 / window_secs,
+        )
     }
 
     pub fn increment_client_process_resolution_failure(&self) {
@@ -349,78 +446,7 @@ impl MetricsCollector {
         let bytes_sent = self.bytes_sent.load(Ordering::Relaxed);
         let bytes_received = self.bytes_received.load(Ordering::Relaxed);
 
-        let realtime_last_count = self.realtime_last_request_count.load(Ordering::Relaxed);
-        let realtime_last_bytes_sent = self.realtime_last_bytes_sent.load(Ordering::Relaxed);
-        let realtime_last_bytes_received =
-            self.realtime_last_bytes_received.load(Ordering::Relaxed);
-        let realtime_last_time = self.realtime_last_time.load(Ordering::Relaxed);
-
-        let min_update_interval_ms: u64 = 500;
-        let elapsed_since_last = now.saturating_sub(realtime_last_time);
-        let should_update_realtime = elapsed_since_last >= min_update_interval_ms;
-
-        let (raw_qps, raw_bytes_sent_rate, raw_bytes_received_rate) =
-            if realtime_last_time > 0 && elapsed_since_last > 0 {
-                let elapsed_secs = elapsed_since_last as f32 / 1000.0;
-                if elapsed_secs > 0.0 {
-                    (
-                        (total_requests.saturating_sub(realtime_last_count)) as f32 / elapsed_secs,
-                        (bytes_sent.saturating_sub(realtime_last_bytes_sent)) as f32 / elapsed_secs,
-                        (bytes_received.saturating_sub(realtime_last_bytes_received)) as f32
-                            / elapsed_secs,
-                    )
-                } else {
-                    (0.0, 0.0, 0.0)
-                }
-            } else {
-                (0.0, 0.0, 0.0)
-            };
-
-        let smoothing_alpha: f32 = 0.4;
-        let decay_alpha: f32 = 0.85;
-
-        let (qps, bytes_sent_rate, bytes_received_rate) = if should_update_realtime {
-            let mut smoothed_qps = self.smoothed_qps.write();
-            let mut smoothed_sent = self.smoothed_bytes_sent_rate.write();
-            let mut smoothed_recv = self.smoothed_bytes_received_rate.write();
-
-            if raw_qps > 0.0 || raw_bytes_sent_rate > 0.0 || raw_bytes_received_rate > 0.0 {
-                *smoothed_qps = smoothing_alpha * raw_qps + (1.0 - smoothing_alpha) * *smoothed_qps;
-                *smoothed_sent = smoothing_alpha * raw_bytes_sent_rate
-                    + (1.0 - smoothing_alpha) * *smoothed_sent;
-                *smoothed_recv = smoothing_alpha * raw_bytes_received_rate
-                    + (1.0 - smoothing_alpha) * *smoothed_recv;
-            } else {
-                *smoothed_qps *= decay_alpha;
-                *smoothed_sent *= decay_alpha;
-                *smoothed_recv *= decay_alpha;
-
-                if *smoothed_qps < 0.01 {
-                    *smoothed_qps = 0.0;
-                }
-                if *smoothed_sent < 1.0 {
-                    *smoothed_sent = 0.0;
-                }
-                if *smoothed_recv < 1.0 {
-                    *smoothed_recv = 0.0;
-                }
-            }
-
-            self.realtime_last_request_count
-                .store(total_requests, Ordering::Relaxed);
-            self.realtime_last_bytes_sent
-                .store(bytes_sent, Ordering::Relaxed);
-            self.realtime_last_bytes_received
-                .store(bytes_received, Ordering::Relaxed);
-            self.realtime_last_time.store(now, Ordering::Relaxed);
-
-            (*smoothed_qps, *smoothed_sent, *smoothed_recv)
-        } else {
-            let smoothed_qps = *self.smoothed_qps.read();
-            let smoothed_sent = *self.smoothed_bytes_sent_rate.read();
-            let smoothed_recv = *self.smoothed_bytes_received_rate.read();
-            (smoothed_qps, smoothed_sent, smoothed_recv)
-        };
+        let (qps, bytes_sent_rate, bytes_received_rate) = self.realtime_window_rates(now);
 
         let max_qps = *self.max_qps.read();
         let max_bytes_sent_rate = *self.max_bytes_sent_rate.read();
@@ -725,6 +751,85 @@ mod tests {
         assert_eq!(snapshot.https.requests, 1);
         assert_eq!(snapshot.http.bytes_sent, 100);
         assert_eq!(snapshot.https.bytes_received, 200);
+    }
+
+    #[test]
+    fn test_realtime_metrics_use_recent_event_window() {
+        let collector = MetricsCollector::new(10);
+
+        collector.increment_requests_by_type(TrafficType::Http);
+        collector.increment_requests_by_type(TrafficType::Http);
+        collector.add_bytes_sent_by_type(TrafficType::Http, 512);
+        collector.add_bytes_received_by_type(TrafficType::Http, 1024);
+
+        let snapshot = collector.get_current();
+        assert_eq!(snapshot.total_requests, 2);
+        assert!(snapshot.qps >= 2.0, "qps was {}", snapshot.qps);
+        assert!(
+            snapshot.bytes_sent_rate >= 512.0,
+            "upload rate was {}",
+            snapshot.bytes_sent_rate
+        );
+        assert!(
+            snapshot.bytes_received_rate >= 1024.0,
+            "download rate was {}",
+            snapshot.bytes_received_rate
+        );
+
+        std::thread::sleep(Duration::from_millis(1_300));
+
+        let expired = collector.get_current();
+        assert_eq!(expired.total_requests, 2);
+        assert_eq!(expired.qps, 0.0);
+        assert_eq!(expired.bytes_sent_rate, 0.0);
+        assert_eq!(expired.bytes_received_rate, 0.0);
+    }
+
+    #[test]
+    fn test_realtime_metrics_bucket_window_expires_without_residual_rates() {
+        let collector = MetricsCollector::new(10);
+        let base = 60_000;
+
+        for i in 0..10_000 {
+            collector.record_realtime_at(base + (i % 20), 1, 2, 3);
+        }
+
+        let (qps, upload_rate, download_rate) = collector.realtime_window_rates(base + 500);
+        assert_eq!(qps, 10_000.0);
+        assert_eq!(upload_rate, 20_000.0);
+        assert_eq!(download_rate, 30_000.0);
+
+        let expired_at = base + REALTIME_WINDOW_MS + REALTIME_BUCKET_MS + 1;
+        let (expired_qps, expired_upload, expired_download) =
+            collector.realtime_window_rates(expired_at);
+        assert_eq!(expired_qps, 0.0);
+        assert_eq!(expired_upload, 0.0);
+        assert_eq!(expired_download, 0.0);
+    }
+
+    #[test]
+    fn test_realtime_metrics_use_fixed_capacity_buckets_under_high_event_volume() {
+        let collector = MetricsCollector::new(10);
+        let initial_bucket_count: usize = collector
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().buckets.len())
+            .sum();
+
+        for i in 0..50_000 {
+            collector.record_realtime_at(120_000 + i, 1, 64, 128);
+        }
+
+        let final_bucket_count: usize = collector
+            .realtime_windows
+            .iter()
+            .map(|window| window.lock().buckets.len())
+            .sum();
+        assert_eq!(
+            initial_bucket_count,
+            REALTIME_BUCKET_COUNT * REALTIME_WINDOW_SHARDS
+        );
+        assert_eq!(final_bucket_count, initial_bucket_count);
     }
 
     #[test]

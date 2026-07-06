@@ -330,6 +330,8 @@ fn record_http_mock_traffic(
         record.original_response_headers.as_deref().unwrap_or(&[]),
         0,
     );
+    record.upload_bytes = 0;
+    record.download_bytes = 0;
     state.record_traffic(record);
 }
 
@@ -1114,7 +1116,10 @@ fn record_direct_status_traffic(
 
     state
         .metrics_collector
-        .add_bytes_sent_by_type(traffic_type, 0);
+        .add_bytes_sent_by_type(traffic_type, request_snapshot.body.len() as u64);
+    state
+        .metrics_collector
+        .add_bytes_received_by_type(traffic_type, mock_body_len as u64);
     state
         .metrics_collector
         .increment_requests_by_type(traffic_type);
@@ -1141,6 +1146,7 @@ fn record_direct_status_traffic(
     record.request_headers = Some(request_snapshot.headers.clone());
     record.original_request_headers = request_snapshot.original_headers.clone();
     record.request_size = request_snapshot.body.len();
+    record.upload_bytes = request_snapshot.body.len();
     record.request_body_ref = store_request_body(
         &Some(Arc::clone(state)),
         ctx.id_str(),
@@ -1164,6 +1170,7 @@ fn record_direct_status_traffic(
         record.original_response_headers.as_deref().unwrap_or(&[]),
         mock_body_len,
     );
+    record.download_bytes = mock_body_len;
     state.record_traffic(record);
 }
 
@@ -1723,11 +1730,20 @@ pub async fn handle_http_request(
                     )
                 });
             let mock_body_len = mock_res_body.len();
+            let mock_request_body_len = req
+                .headers()
+                .get(hyper::header::CONTENT_LENGTH)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(0);
 
             let traffic_type = get_traffic_type_from_url(&record_url);
             state
                 .metrics_collector
-                .add_bytes_sent_by_type(traffic_type, 0);
+                .add_bytes_sent_by_type(traffic_type, mock_request_body_len as u64);
+            state
+                .metrics_collector
+                .add_bytes_received_by_type(traffic_type, mock_body_len as u64);
             state
                 .metrics_collector
                 .increment_requests_by_type(traffic_type);
@@ -1749,6 +1765,7 @@ pub async fn handle_http_request(
                 total_ms,
             });
             record.request_headers = Some(req_headers_pairs);
+            record.upload_bytes = mock_request_body_len;
             record.original_response_headers = Some(mock_res_headers);
             record.has_rule_hit = has_rules;
             record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
@@ -1767,6 +1784,7 @@ pub async fn handle_http_request(
                 record.original_response_headers.as_deref().unwrap_or(&[]),
                 mock_body_len,
             );
+            record.download_bytes = mock_body_len;
             state.record_traffic(record);
         }
 
@@ -2252,6 +2270,7 @@ pub async fn handle_http_request(
             } else {
                 content_length.unwrap_or(0)
             };
+            pending.upload_bytes = pending.request_size;
             pending.request_content_type = parts
                 .headers
                 .get(hyper::header::CONTENT_TYPE)
@@ -2371,6 +2390,8 @@ pub async fn handle_http_request(
                     }
                 }
                 record.request_headers = Some(req_headers.clone());
+                record.request_size = request_body_size;
+                record.upload_bytes = request_body_size;
                 record.has_rule_hit = has_rules;
                 record.matched_rules = crate::utils::build_matched_rules(&resolved_rules);
                 record.error_message = Some(error_msg.clone());
@@ -2448,6 +2469,7 @@ pub async fn handle_http_request(
                     record.original_response_headers.as_deref().unwrap_or(&[]),
                     response_body.len(),
                 );
+                record.download_bytes = response_body.len();
                 apply_request_context(&mut record, ctx);
 
                 state.record_traffic(record);
@@ -3243,6 +3265,7 @@ pub async fn handle_http_request(
                     .map(|s| s.to_string());
                 record.request_size =
                     calculate_request_size(&method, &record_url, &req_headers, request_body_size);
+                record.upload_bytes = request_body_size;
                 record.response_size = 0;
                 record.duration_ms = total_ms;
                 record.timing = Some(RequestTiming {
@@ -3686,6 +3709,7 @@ pub async fn handle_http_request(
             pending.host = original_host.clone();
             pending.request_headers = Some(req_headers.clone());
             pending.request_size = request_body_size;
+            pending.upload_bytes = request_body_size;
             pending.request_content_type = res_parts
                 .headers
                 .get(hyper::header::CONTENT_TYPE)
@@ -3738,11 +3762,13 @@ pub async fn handle_http_request(
             } else {
                 None
             };
+            let pause_download_bytes = final_res_body.len();
 
             state.update_traffic_by_id(ctx.id_str(), move |record| {
                 record.status = pause_status;
                 record.content_type = pause_content_type.clone();
                 record.response_size = pause_response_size;
+                record.download_bytes = pause_download_bytes;
                 record.duration_ms = record.duration_ms.max(pause_total_ms);
                 record.original_response_headers = Some(pause_res_headers.clone());
                 record.response_body_ref = pause_body_ref.clone();
@@ -3812,11 +3838,13 @@ pub async fn handle_http_request(
             .expect("response headers captured when admin state is enabled");
         record.request_size =
             calculate_request_size(&method, &record_url, &req_headers, request_body_size);
+        record.upload_bytes = request_body_size;
         record.response_size = calculate_response_size(
             res_parts.status.as_u16(),
             &res_headers,
             final_res_body.len(),
         );
+        record.download_bytes = final_res_body.len();
         record.duration_ms = total_ms;
         record.timing = Some(RequestTiming {
             dns_ms,
@@ -3989,6 +4017,7 @@ pub async fn handle_http_request(
             let event_count = parse_and_record_sse_events(&final_res_body);
             let response_size = final_res_body.len();
             record.response_size = response_size;
+            record.download_bytes = response_size;
             record.frame_count = event_count;
             record.last_frame_id = event_count as u64;
             record.socket_status = Some(bifrost_admin::SocketStatus {
