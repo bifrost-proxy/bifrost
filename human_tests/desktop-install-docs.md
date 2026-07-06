@@ -9,7 +9,7 @@
 1. 当前工作目录位于 Bifrost 主仓库任务分支。
 2. 已执行 `pnpm --dir site run build`。
 3. 本地预览服务可用：`pnpm --dir site exec vitepress preview . --host 127.0.0.1 --port 4177`。
-4. 网络可以访问 GitHub Releases API 和用户提供的 Windows/macOS 图标地址。
+4. 网络可以访问 GitHub Release 静态下载 URL 和用户提供的 Windows/macOS 图标地址。
 
 ## 测试用例列表
 
@@ -68,28 +68,24 @@
 
 - 已执行，通过。
 
-### TC-DID-04 Apps 点击下载解析最新 release
+### TC-DID-04 Apps 点击下载使用静态发布命名规则
 
 操作步骤：
 
-1. 执行 `node --input-type=module` 脚本请求 `https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest`。
-2. 分别匹配以下资产：
-   - `bifrost-desktop-v.+-aarch64-apple-darwin.dmg`
-   - `bifrost-desktop-v.+-x86_64-apple-darwin.dmg`
-   - `bifrost-desktop-v.+-x86_64-pc-windows-msvc.msi`
-   - `bifrost-desktop-v.+-aarch64-pc-windows-msvc.msi`
-3. 检查每个匹配结果是否都有 `browser_download_url`。
-4. 执行 `rg -n "api.github.com/repos/bifrost-proxy/bifrost/releases/latest|browser_download_url|data-download-target" site/home site/dist/assets/home.*.js site/dist/index.html`。
+1. 执行 `node scripts/sync-site-downloads.mjs`。
+2. 执行 `node -e 'const m=require("./site/desktop-downloads.json"); console.log(m.tag, Object.values(m.assets).join("\\n"))'`。
+3. 执行 `rg -n "desktop-downloads-data|bifrost-desktop-v0.0.141-aarch64-apple-darwin.dmg|data-download-target" site/home site/dist/index.html site/dist/assets/home.*.js`。
+4. 执行 `! rg -n "api.github.com/repos/bifrost-proxy/bifrost/releases/latest|browser_download_url" site/home site/.vitepress/theme site/dist/index.html site/dist/assets -g "*.js"`。
 
 预期结果：
 
-- 四类桌面端安装包都能从 latest release 匹配到真实下载 URL。
-- 首页 JS 使用 GitHub Releases API 解析最新版本，点击卡片直接使用 `browser_download_url`。
-- 解析失败时卡片保持 disabled，不跳转到错误地址。
+- `site/desktop-downloads.json` 使用当前发布版本生成四类桌面安装包文件名。
+- 首页 HTML 内嵌静态下载 metadata，首页 JS 只按命名规则拼 release asset 直链。
+- 首页和文档产物中不包含运行时 GitHub Releases API 请求。
 
 执行结果：
 
-- 已执行，通过，当前 latest release 为 `v0.0.141`，四个资产均存在下载 URL。
+- 已执行，通过，当前静态版本为 `v0.0.141`，四个资产直链均按命名规则生成，页面产物不再包含 GitHub Releases API 请求。
 
 ### TC-DID-05 安装手册页提供直接下载按钮
 
@@ -97,14 +93,14 @@
 
 1. 执行 `curl -sS http://127.0.0.1:4177/bifrost/getting-started/installation | rg -n "直接下载最新版|desktop-download-card|data-vp-download-target"`。
 2. 执行 `curl -sS http://127.0.0.1:4177/bifrost/getting-started/installation | perl -0ne 'while(/data-vp-download-target="([^"]+)"/g){print "$1\n"}'`。
-3. 执行 `rg -n "api.github.com/repos/bifrost-proxy/bifrost/releases/latest|browser_download_url|data-vp-download-target" site/.vitepress/theme/index.js site/dist/assets -g "*.js"`，并检查 `site/dist/getting-started/installation.html` 与 `site/dist/en/getting-started/installation.html`。
+3. 执行 `rg -n "bifrost-desktop-v0.0.141-aarch64-apple-darwin.dmg|data-vp-download-target" site/.vitepress/theme/index.js site/dist/assets -g "*.js"`，并检查 `site/dist/getting-started/installation.html` 与 `site/dist/en/getting-started/installation.html`。
 4. 在浏览器打开 `http://127.0.0.1:4177/bifrost/getting-started/installation`，检查 `安装桌面端 App` 段落下是否展示四个下载按钮。
 
 预期结果：
 
 - 安装手册不再要求用户进入 GitHub Releases 手动展开 `Assets` 查找桌面端安装包。
 - 下载按钮顺序为 `mac-arm`、`mac-intel`、`win-x64`、`win-arm`。
-- VitePress 主题脚本会解析 latest release 并把按钮 href 替换为真实 `browser_download_url`。
+- VitePress 主题脚本会读取静态 manifest 并把按钮 href 替换为 release asset 直链。
 
 执行结果：
 

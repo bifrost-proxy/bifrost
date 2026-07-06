@@ -6,13 +6,7 @@ const languageButtons = Array.from(document.querySelectorAll("[data-lang]"));
 const downloadCards = Array.from(document.querySelectorAll("[data-download-target]"));
 const downloadStatus = document.querySelector("[data-download-status]");
 const downloadMessage = document.querySelector("[data-download-message]");
-const releaseApiUrl = "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
-const downloadTargets = {
-  "mac-arm": /bifrost-desktop-v.+-aarch64-apple-darwin\.dmg$/,
-  "mac-intel": /bifrost-desktop-v.+-x86_64-apple-darwin\.dmg$/,
-  "win-x64": /bifrost-desktop-v.+-x86_64-pc-windows-msvc\.msi$/,
-  "win-arm": /bifrost-desktop-v.+-aarch64-pc-windows-msvc\.msi$/,
-};
+const desktopDownloads = readDesktopDownloads();
 const translations = {
   en: {
     heroEyebrow: "AI-era proxy / Coding Agent ready",
@@ -30,10 +24,10 @@ const translations = {
       "“Help me capture the login API, understand the request and response shape, then implement a reusable Coding Agent skill for refreshing sessions.”",
     aiResult: "Traffic evidence becomes rules, replay scripts, docs, and a working skill.",
     appsTitle: "Download desktop apps",
-    appsSubtitle: "Latest release, direct download.",
-    appsLoading: "Resolving latest release...",
-    appsReady: "Ready. Click an app to download the latest package.",
-    appsError: "Could not resolve the latest packages. Please try again later.",
+    appsSubtitle: "Current release, direct download.",
+    appsLoading: "Preparing current release links...",
+    appsReady: "Ready. Click an app to download the current package.",
+    appsError: "Download links are not available in this build.",
     macArmTitle: "macOS Apple Silicon",
     macArmText: "M1 / M2 / M3 / M4",
     macIntelTitle: "macOS Intel",
@@ -81,10 +75,10 @@ const translations = {
     aiCaseText: "“帮我抓取登录接口，理解请求和响应结构，然后实现一个可复用的 Coding Agent 会话刷新技能。”",
     aiResult: "真实流量会变成规则、回放脚本、文档和可运行的技能。",
     appsTitle: "下载桌面端 App",
-    appsSubtitle: "自动获取最新版本，点击直接下载。",
-    appsLoading: "正在解析最新版本...",
-    appsReady: "已就绪，点击应用卡片即可下载最新安装包。",
-    appsError: "暂时无法解析最新安装包，请稍后再试。",
+    appsSubtitle: "按当前发布版本生成直链，点击直接下载。",
+    appsLoading: "正在准备当前版本下载链接...",
+    appsReady: "已就绪，点击应用卡片即可下载当前安装包。",
+    appsError: "当前构建未包含下载链接。",
     macArmTitle: "macOS Apple Silicon",
     macArmText: "M1 / M2 / M3 / M4",
     macIntelTitle: "macOS Intel",
@@ -176,17 +170,40 @@ function setDownloadMessage(key) {
   downloadMessage.textContent = dictionary[key] ?? translations.en[key] ?? "";
 }
 
-function applyDownloads(assets) {
+function readDesktopDownloads() {
+  const script = document.getElementById("desktop-downloads-data");
+  if (!script?.textContent) {
+    return null;
+  }
+  try {
+    const data = JSON.parse(script.textContent);
+    if (!data?.baseUrl || !data?.assets) {
+      return null;
+    }
+    return data;
+  } catch {
+    return null;
+  }
+}
+
+function assetUrl(target) {
+  const asset = desktopDownloads?.assets?.[target];
+  if (!asset) {
+    return null;
+  }
+  return new URL(asset, desktopDownloads.baseUrl).href;
+}
+
+function applyDownloads() {
   let readyCount = 0;
   for (const card of downloadCards) {
-    const matcher = downloadTargets[card.dataset.downloadTarget];
-    const asset = assets.find((candidate) => matcher?.test(candidate.name));
-    if (!asset?.browser_download_url) {
+    const href = assetUrl(card.dataset.downloadTarget);
+    if (!href) {
       card.href = "#";
       card.setAttribute("aria-disabled", "true");
       continue;
     }
-    card.href = asset.browser_download_url;
+    card.href = href;
     card.setAttribute("download", "");
     card.removeAttribute("aria-disabled");
     readyCount += 1;
@@ -198,28 +215,11 @@ function applyDownloads(assets) {
   setDownloadMessage(readyCount > 0 ? "appsReady" : "appsError");
 }
 
-async function resolveLatestDownloads() {
+function resolveDownloads() {
   if (downloadCards.length === 0) {
     return;
   }
-  try {
-    const response = await fetch(releaseApiUrl, { headers: { Accept: "application/vnd.github+json" } });
-    if (!response.ok) {
-      throw new Error(`GitHub release API returned ${response.status}`);
-    }
-    const release = await response.json();
-    applyDownloads(Array.isArray(release.assets) ? release.assets : []);
-  } catch {
-    if (downloadStatus) {
-      downloadStatus.dataset.downloadStatus = "error";
-    }
-    for (const card of downloadCards) {
-      card.href = "#";
-      card.setAttribute("aria-disabled", "true");
-      card.removeAttribute("download");
-    }
-    setDownloadMessage("appsError");
-  }
+  applyDownloads();
 }
 
 for (const card of downloadCards) {
@@ -238,4 +238,4 @@ if (navigator.language?.toLowerCase().startsWith("zh")) {
   setLanguage("zh");
 }
 
-resolveLatestDownloads();
+resolveDownloads();

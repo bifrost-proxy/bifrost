@@ -14,6 +14,8 @@ EN_INDEX_DIST="$SITE_DIR/dist/en/reference/index.html"
 EN_INSTALL_DIST="$SITE_DIR/dist/en/getting-started/installation.html"
 EN_RULE_DIST="$SITE_DIR/dist/en/reference/rules/routing.html"
 LEGACY_CLI_DIST="$SITE_DIR/dist/reference/getting-started/cli-quick-start/index.html"
+DESKTOP_DOWNLOAD_VERSION=$(node -e 'console.log(JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).version)' "$SITE_DIR/desktop-downloads.json")
+DESKTOP_DOWNLOAD_TAG="v${DESKTOP_DOWNLOAD_VERSION}"
 
 cleanup() {
   local cleanup_status=0
@@ -119,7 +121,13 @@ grep -q 'data-vp-download-target="mac-intel"' "$SITE_DIR/dist/getting-started/in
 grep -q 'data-vp-download-target="win-x64"' "$SITE_DIR/dist/getting-started/installation.html"
 grep -q 'data-vp-download-target="win-arm"' "$SITE_DIR/dist/getting-started/installation.html"
 grep -q 'data-vp-download-target="mac-arm"' "$EN_INSTALL_DIST"
-rg -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/assets" -g '*.js'
+grep -q 'id="desktop-downloads-data"' "$SITE_DIR/dist/index.html"
+grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin.dmg" "$SITE_DIR/dist/index.html"
+rg -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin\\.dmg" "$SITE_DIR/dist/assets" -g '*.js'
+if rg -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/index.html" "$SITE_DIR/dist/assets" -g '*.js'; then
+  echo "Site must not call GitHub Releases API at runtime for desktop downloads" >&2
+  exit 1
+fi
 grep -q 'A one-stop proxy solution for the AI era' "$SITE_DIR/dist/index.html"
 grep -q 'With AI' "$SITE_DIR/dist/index.html"
 grep -q 'bifrost install-skill' "$SITE_DIR/dist/index.html"
@@ -130,7 +138,7 @@ grep -q 'data-download-target="mac-arm"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="mac-intel"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="win-x64"' "$SITE_DIR/dist/index.html"
 grep -q 'data-download-target="win-arm"' "$SITE_DIR/dist/index.html"
-grep -q 'api.github.com/repos/bifrost-proxy/bifrost/releases/latest' "$SITE_DIR/dist/assets"/home.*.js
+rg -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-x86_64-pc-windows-msvc\\.msi" "$SITE_DIR/dist/assets"/home.*.js
 grep -q 'bifrost start -d' "$SITE_DIR/dist/index.html"
 grep -q 'href="/bifrost/docs/"' "$SITE_DIR/dist/index.html"
 grep -q 'role="tablist"' "$SITE_DIR/dist/index.html"

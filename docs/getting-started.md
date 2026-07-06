@@ -84,7 +84,7 @@ cargo build --release
 
 ### 直接下载最新版
 
-点击与你设备匹配的安装包，页面会自动解析最新版本并直接开始下载。
+点击与你设备匹配的安装包，页面会使用当前发布版本的命名规则生成直链并直接开始下载。
 
 <div class="desktop-download-grid" data-vp-download-status="loading">
   <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-arm">
@@ -109,7 +109,7 @@ cargo build --release
   </a>
 </div>
 
-<p class="desktop-download-status" data-vp-download-message>正在解析最新版本...</p>
+<p class="desktop-download-status" data-vp-download-message>正在准备当前版本下载链接...</p>
 
 ### macOS 安装
 

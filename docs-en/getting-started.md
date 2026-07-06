@@ -72,7 +72,7 @@ The desktop app is built with Tauri. The installer bundles the Web UI and the `b
 
 ### Download the Latest Package Directly
 
-Click the installer that matches your device. The page resolves the latest release and starts the download directly.
+Click the installer that matches your device. The page uses the current release naming rules to generate a direct download link.
 
 <div class="desktop-download-grid" data-vp-download-status="loading">
   <a class="desktop-download-card" href="#" aria-disabled="true" data-vp-download-target="mac-arm">
@@ -97,7 +97,7 @@ Click the installer that matches your device. The page resolves the latest relea
   </a>
 </div>
 
-<p class="desktop-download-status" data-vp-download-message>Resolving latest release...</p>
+<p class="desktop-download-status" data-vp-download-message>Preparing current release links...</p>
 
 ### macOS Install
 

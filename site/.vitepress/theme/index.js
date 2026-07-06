@@ -1,34 +1,19 @@
 import DefaultTheme from "vitepress/theme";
+import desktopDownloads from "../../desktop-downloads.json";
 import "./style.css";
-
-const releaseApiUrl = "https://api.github.com/repos/bifrost-proxy/bifrost/releases/latest";
-const downloadTargets = {
-  "mac-arm": /bifrost-desktop-v.+-aarch64-apple-darwin\.dmg$/,
-  "mac-intel": /bifrost-desktop-v.+-x86_64-apple-darwin\.dmg$/,
-  "win-x64": /bifrost-desktop-v.+-x86_64-pc-windows-msvc\.msi$/,
-  "win-arm": /bifrost-desktop-v.+-aarch64-pc-windows-msvc\.msi$/,
-};
-
-let releaseAssetsPromise;
-
-function getReleaseAssets() {
-  releaseAssetsPromise ??= fetch(releaseApiUrl, {
-    headers: { Accept: "application/vnd.github+json" },
-  })
-    .then((response) => {
-      if (!response.ok) {
-        throw new Error(`GitHub release API returned ${response.status}`);
-      }
-      return response.json();
-    })
-    .then((release) => (Array.isArray(release.assets) ? release.assets : []));
-  return releaseAssetsPromise;
-}
 
 function setDownloadMessage(message) {
   for (const node of document.querySelectorAll("[data-vp-download-message]")) {
     node.textContent = message;
   }
+}
+
+function assetUrl(target) {
+  const asset = desktopDownloads.assets?.[target];
+  if (!asset) {
+    return null;
+  }
+  return new URL(asset, desktopDownloads.baseUrl).href;
 }
 
 function bindDesktopDownloads() {
@@ -49,44 +34,28 @@ function bindDesktopDownloads() {
     });
   }
 
-  getReleaseAssets()
-    .then((assets) => {
-      let readyCount = 0;
-      for (const card of cards) {
-        const matcher = downloadTargets[card.dataset.vpDownloadTarget];
-        const asset = assets.find((candidate) => matcher?.test(candidate.name));
-        if (!asset?.browser_download_url) {
-          card.href = "#";
-          card.setAttribute("aria-disabled", "true");
-          continue;
-        }
-        card.href = asset.browser_download_url;
-        card.setAttribute("download", "");
-        card.removeAttribute("aria-disabled");
-        readyCount += 1;
-      }
-      for (const grid of document.querySelectorAll("[data-vp-download-status]")) {
-        grid.dataset.vpDownloadStatus = readyCount > 0 ? "ready" : "error";
-      }
-      setDownloadMessage(
-        readyCount > 0
-          ? "已就绪，点击应用卡片即可下载最新安装包。 / Ready. Click a card to download the latest package."
-          : "暂时无法解析最新安装包，请稍后再试。 / Could not resolve the latest packages. Please try again later.",
-      );
-    })
-    .catch(() => {
-      for (const card of cards) {
-        card.href = "#";
-        card.setAttribute("aria-disabled", "true");
-        card.removeAttribute("download");
-      }
-      for (const grid of document.querySelectorAll("[data-vp-download-status]")) {
-        grid.dataset.vpDownloadStatus = "error";
-      }
-      setDownloadMessage(
-        "暂时无法解析最新安装包，请稍后再试。 / Could not resolve the latest packages. Please try again later.",
-      );
-    });
+  let readyCount = 0;
+  for (const card of cards) {
+    const href = assetUrl(card.dataset.vpDownloadTarget);
+    if (!href) {
+      card.href = "#";
+      card.setAttribute("aria-disabled", "true");
+      card.removeAttribute("download");
+      continue;
+    }
+    card.href = href;
+    card.setAttribute("download", "");
+    card.removeAttribute("aria-disabled");
+    readyCount += 1;
+  }
+  for (const grid of document.querySelectorAll("[data-vp-download-status]")) {
+    grid.dataset.vpDownloadStatus = readyCount > 0 ? "ready" : "error";
+  }
+  setDownloadMessage(
+    readyCount > 0
+      ? `已就绪，点击应用卡片即可下载 ${desktopDownloads.tag} 安装包。 / Ready. Click a card to download ${desktopDownloads.tag}.`
+      : "当前构建未包含下载链接。 / Download links are not available in this build.",
+  );
 }
 
 export default {
