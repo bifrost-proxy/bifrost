@@ -217,7 +217,7 @@
 | [docs-site-redesign.md](./docs-site-redesign.md) | Docs Site Redesign | 12 | 文档站重构实现验证：首页纯 HTML 源、AI 时代代理定位、With AI skill 工作流、部署期 docs/docs-en 自动同步、VitePress 文档区、绿色主题、中英文、明暗模式、主站部署边界、文档区 Logo 回主页路由、E2E 与本地 preview 截图体验 |
 | [utf8-safe-preview.md](./utf8-safe-preview.md) | UTF-8 安全 Preview 截断 | 3 | Agent compaction tool arguments、IM Gateway 任务输出、CLI/API/E2E 错误 preview 在中文/emoji 多字节边界截断时不触发 char boundary panic |
 | [web-lint-cleanup.md](./web-lint-cleanup.md) | Web ESLint 清理 | 2 | web 全量 ESLint 零错误零警告与 TypeScript/Vite build 未退化 |
-| [admin-activity-tab.md](./admin-activity-tab.md) | Admin Activity Tab | 6 | WebUI Activity 一级 tab 默认入口、活动概览卡片 hover、系统代理状态、生效规则解析、Merged Rules 选区/全文复制、撑满高度、临时端口规则详情、按应用流量分布 hover、亮暗主题真实场景验证 |
+| [admin-activity-tab.md](./admin-activity-tab.md) | Admin Activity Tab | 7 | WebUI Activity 一级 tab 默认入口、活动概览卡片 hover、系统代理状态、顶部指标长数值不溢出、生效规则解析、Merged Rules 选区/全文复制、撑满高度、临时端口规则详情、按应用流量分布 hover、亮暗主题真实场景验证 |
 | [storage-e2e-safety.md](./storage-e2e-safety.md) | Storage and E2E Safety | 3 | temp-env 作用域编译回归、core size guard 单元回归、storage rules size guard 编译回归 |
 | [agent-development-review-loop.md](./agent-development-review-loop.md) | Agent Development Review Loop | 9 | Agent 开发任务至少两轮目标复核、代码 review、修复问题、测试运行、结果复盘闭环，持续改进引导语、任务模式判定、任务启动工作区检查、并行开发优先 worktree 隔离、证据台账、完成定义、用户目标验证清单、git diff/status 复核、测试失败归因、默认提交/MR/CI 看护、最终交付验证矩阵、AGENTS/design/human_tests 索引同步，以及 `human_tests/readme.md` 禁止全局总计数字 |
 | [agent-codex-alignment.md](./agent-codex-alignment.md) | Agent Codex Alignment | 8 | 默认 prompt 不泄露兼容实现说明、MCP resource canonical 工具名、shell_command/local_shell 历史 alias 已移除、真实 Bifrost 服务 `/agent/chat` 覆盖 MCP resource / update_plan / set_title / tool_search / 并发工具批、turn events、FuturesOrdered 并发工具批与 history 顺序回填、CI 预构建 release binary 回归、P1 工具链回归 |

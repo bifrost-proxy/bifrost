@@ -250,7 +250,14 @@ export default function Activity() {
                 <span>{stat.label}</span>
                 <span className={styles.statDot} style={{ color: stat.color, backgroundColor: stat.color }} />
               </div>
-              <div className={styles.statValue}>{stat.value}</div>
+              <div
+                className={`${styles.statValue} ${
+                  stat.value.length >= 9 ? styles.statValueCompact : ""
+                }`}
+                title={stat.value}
+              >
+                {stat.value}
+              </div>
               <div className={styles.statCaption}>{stat.caption}</div>
             </article>
           ))}
