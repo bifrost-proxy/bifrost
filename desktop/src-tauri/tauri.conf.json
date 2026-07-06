@@ -21,6 +21,27 @@
     ],
     "resources": [
       "resources/bin/*"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["bifrost"],
+        "name": "Bifrost Capture or Rules Package",
+        "description": "Bifrost capture, rules, replay, script, or values package",
+        "mimeType": "application/x-bifrost",
+        "role": "Editor",
+        "rank": "Owner",
+        "exportedType": {
+          "identifier": "com.bifrost.desktop.bifrost",
+          "conformsTo": ["public.data", "public.text"]
+        }
+      }
     ]
+  },
+  "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["bifrost"]
+      }
+    }
   }
 }

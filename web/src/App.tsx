@@ -1,8 +1,17 @@
 import { useEffect, useState, useCallback, type CSSProperties } from "react";
-import { BrowserRouter, HashRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import {
+  BrowserRouter,
+  HashRouter,
+  Routes,
+  Route,
+  Navigate,
+  useLocation,
+  useNavigate,
+} from "react-router-dom";
 import { ConfigProvider, Modal, Steps, App as AntApp, message, theme, Typography, Button, Space } from "antd";
 import AppLayout from "./components/Layout";
 import BifrostFileDropZone from "./components/BifrostFileDropZone";
+import { importBifrostFileContent } from "./components/BifrostFileDropZone";
 import PendingAuthModal from "./components/PendingAuthModal";
 import PendingIpTlsModal from "./components/PendingIpTlsModal";
 import PairingApprovalModal from "./components/PairingApprovalModal";
@@ -23,12 +32,15 @@ import Notifications from "./pages/Notifications";
 import DevTools from "./pages/DevTools";
 import {
   DESKTOP_HANDOFF_COMPLETE_EVENT,
+  DESKTOP_OPEN_REQUEST_EVENT,
+  getPendingDesktopOpenRequests,
   getDesktopRuntime,
   listenDesktopEvent,
   startDesktopCore,
   type DesktopRuntimeInfo,
 } from "./desktop/tauri";
 import { getCliInstallStatus, installCliFromDesktop, type CliInstallStatus } from "./api/system";
+import type { DesktopOpenRequest } from "./desktop/tauri";
 import { useThemeStore, initThemeListener } from "./stores/useThemeStore";
 import { useGlobalDataSync } from "./hooks/useGlobalDataSync";
 import { useEditorCompletion } from "./hooks/useEditorCompletion";
@@ -182,175 +194,182 @@ function AppShell({ desktopPlatform }: { desktopPlatform: ReturnType<typeof getD
           <DesktopTransitionMask resolvedTheme={resolvedTheme} />
         ) : null}
         <Modal
-        open={desktopCoreVisible}
-        title={
-          desktopCorePhase === "error"
-            ? "Bifrost Core Error"
-            : desktopCorePhase === "booting"
-              ? "Connecting to Bifrost Core"
-              : "Switching Bifrost Port"
-        }
-        closable={desktopCorePhase === "error"}
-        maskClosable={desktopCorePhase === "error"}
-        keyboard={desktopCorePhase === "error"}
-        okText={desktopCorePhase === "error" ? "Close" : undefined}
-        cancelButtonProps={{ style: { display: "none" } }}
-        onOk={hideDesktopCore}
-        onCancel={hideDesktopCore}
-        footer={desktopCorePhase === "error" ? undefined : null}
-        centered
-        width={Math.min(720, Math.max(560, Math.floor(window.innerWidth * 0.42)))}
-        zIndex={1000}
-        styles={overlayStyles}
-      >
-        <Typography.Paragraph>
-          {desktopCorePhase === "booting"
-            ? "The interface is waiting for the Bifrost core to become available."
-            : desktopCoreTargetPort
-              ? `Bifrost is switching the local core to port ${desktopCoreTargetPort}.`
-              : "Bifrost is updating the local core listener and reconnecting the interface."}
-        </Typography.Paragraph>
-        <Steps
-          size="small"
-          style={
-            resolvedTheme === "dark"
-              ? ({
-                  ["--ant-color-text" as string]: "rgba(241, 245, 249, 0.92)",
-                  ["--ant-color-text-description" as string]:
-                    "rgba(148, 163, 184, 0.92)",
-                  ["--ant-color-primary" as string]: "#7dd3fc",
-                  ["--ant-color-split" as string]:
-                    "rgba(148, 163, 184, 0.16)",
-                } as CSSProperties)
-              : undefined
+          open={desktopCoreVisible}
+          title={
+            desktopCorePhase === "error"
+              ? "Bifrost Core Error"
+              : desktopCorePhase === "booting"
+                ? "Connecting to Bifrost Core"
+                : "Switching Bifrost Port"
           }
-          current={
-            desktopCorePhase === "booting"
-              ? 0
-              : desktopCorePhase === "saving"
-              ? 0
-              : desktopCorePhase === "restarting"
-                ? 1
-                : desktopCorePhase === "reconnecting"
-                  ? 2
-                  : 1
-          }
-          status={desktopCorePhase === "error" ? "error" : "process"}
-          items={[
-            {
-              title:
-                desktopCorePhase === "booting" ? "Wait for Core" : "Save Config",
-            },
-            { title: "Rebind Port" },
-            { title: "Reconnect UI" },
-          ]}
-        />
-        <Typography.Paragraph
-          type={desktopCorePhase === "error" ? "danger" : "secondary"}
-          style={{ marginTop: 16, marginBottom: 0 }}
+          closable={desktopCorePhase === "error"}
+          maskClosable={desktopCorePhase === "error"}
+          keyboard={desktopCorePhase === "error"}
+          okText={desktopCorePhase === "error" ? "Close" : undefined}
+          cancelButtonProps={{ style: { display: "none" } }}
+          onOk={hideDesktopCore}
+          onCancel={hideDesktopCore}
+          footer={desktopCorePhase === "error" ? undefined : null}
+          centered
+          width={Math.min(
+            720,
+            Math.max(560, Math.floor(window.innerWidth * 0.42)),
+          )}
+          zIndex={1000}
+          styles={overlayStyles}
         >
-          {desktopCoreDetail}
-        </Typography.Paragraph>
-      </Modal>
-      <Modal
-        open={forceRefreshVisible}
-        title="Page Disconnected"
-        closable={false}
-        maskClosable={false}
-        keyboard={false}
-        okText="Refresh Page"
-        cancelButtonProps={{ style: { display: "none" } }}
-        onOk={() => {
-          window.location.reload();
-        }}
-      >
-        <Typography.Paragraph>
-          The connection has been closed by the server due to too many open pages.
-        </Typography.Paragraph>
-        {forceRefreshReason ? (
-          <Typography.Paragraph type="secondary">
-            Reason: {forceRefreshReason}
+          <Typography.Paragraph>
+            {desktopCorePhase === "booting"
+              ? "The interface is waiting for the Bifrost core to become available."
+              : desktopCoreTargetPort
+                ? `Bifrost is switching the local core to port ${desktopCoreTargetPort}.`
+                : "Bifrost is updating the local core listener and reconnecting the interface."}
           </Typography.Paragraph>
-        ) : null}
-        <Typography.Paragraph type="secondary">
-          Please refresh the page to continue.
-        </Typography.Paragraph>
-      </Modal>
-      {isDesktopShell() ? (
-        <HashRouter>
-          <BifrostFileDropZone>
-            <GlobalRouteEffects />
-            <PendingAuthModal />
-            <PendingIpTlsModal />
-            <PairingApprovalModal />
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/sync-login" element={<SyncLogin />} />
-              <Route path="/traffic/detail" element={<TrafficDetailPage />} />
-              <Route
-                path="/"
-                element={
-                  <AdminAuthGate>
-                    <AppLayout />
-                  </AdminAuthGate>
-                }
-              >
-                <Route index element={<Navigate to="/activity" replace />} />
-                <Route path="activity" element={<Activity />} />
-                <Route path="traffic" element={<Traffic />} />
-                <Route path="replay" element={<Replay />} />
-                <Route path="rules" element={<Rules />} />
-                <Route path="values" element={<Values />} />
-                <Route path="scripts" element={<Scripts />} />
-                <Route path="ai" element={<AI />} />
-                <Route path="devtools" element={<DevTools />} />
-                <Route path="devtools/:pageId" element={<DevTools />} />
-                <Route path="groups" element={<Groups />} />
-                <Route path="groups/:id" element={<GroupDetail />} />
-                <Route path="notifications" element={<Notifications />} />
-                <Route path="settings" element={<Settings />} />
-              </Route>
-            </Routes>
-          </BifrostFileDropZone>
-        </HashRouter>
-      ) : (
-        <BrowserRouter basename={getAdminPrefix()}>
-          <BifrostFileDropZone>
-            <GlobalRouteEffects />
-            <PendingAuthModal />
-            <PendingIpTlsModal />
-            <PairingApprovalModal />
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/sync-login" element={<SyncLogin />} />
-              <Route path="/traffic/detail" element={<TrafficDetailPage />} />
-              <Route
-                path="/"
-                element={
-                  <AdminAuthGate>
-                    <AppLayout />
-                  </AdminAuthGate>
-                }
-              >
-                <Route index element={<Navigate to="/activity" replace />} />
-                <Route path="activity" element={<Activity />} />
-                <Route path="traffic" element={<Traffic />} />
-                <Route path="replay" element={<Replay />} />
-                <Route path="rules" element={<Rules />} />
-                <Route path="values" element={<Values />} />
-                <Route path="scripts" element={<Scripts />} />
-                <Route path="ai" element={<AI />} />
-                <Route path="devtools" element={<DevTools />} />
-                <Route path="devtools/:pageId" element={<DevTools />} />
-                <Route path="groups" element={<Groups />} />
-                <Route path="groups/:id" element={<GroupDetail />} />
-                <Route path="notifications" element={<Notifications />} />
-                <Route path="settings" element={<Settings />} />
-              </Route>
-            </Routes>
-          </BifrostFileDropZone>
-        </BrowserRouter>
-      )}
+          <Steps
+            size="small"
+            style={
+              resolvedTheme === "dark"
+                ? ({
+                    ["--ant-color-text" as string]: "rgba(241, 245, 249, 0.92)",
+                    ["--ant-color-text-description" as string]:
+                      "rgba(148, 163, 184, 0.92)",
+                    ["--ant-color-primary" as string]: "#7dd3fc",
+                    ["--ant-color-split" as string]:
+                      "rgba(148, 163, 184, 0.16)",
+                  } as CSSProperties)
+                : undefined
+            }
+            current={
+              desktopCorePhase === "booting"
+                ? 0
+                : desktopCorePhase === "saving"
+                  ? 0
+                  : desktopCorePhase === "restarting"
+                    ? 1
+                    : desktopCorePhase === "reconnecting"
+                      ? 2
+                      : 1
+            }
+            status={desktopCorePhase === "error" ? "error" : "process"}
+            items={[
+              {
+                title:
+                  desktopCorePhase === "booting"
+                    ? "Wait for Core"
+                    : "Save Config",
+              },
+              { title: "Rebind Port" },
+              { title: "Reconnect UI" },
+            ]}
+          />
+          <Typography.Paragraph
+            type={desktopCorePhase === "error" ? "danger" : "secondary"}
+            style={{ marginTop: 16, marginBottom: 0 }}
+          >
+            {desktopCoreDetail}
+          </Typography.Paragraph>
+        </Modal>
+        <Modal
+          open={forceRefreshVisible}
+          title="Page Disconnected"
+          closable={false}
+          maskClosable={false}
+          keyboard={false}
+          okText="Refresh Page"
+          cancelButtonProps={{ style: { display: "none" } }}
+          onOk={() => {
+            window.location.reload();
+          }}
+        >
+          <Typography.Paragraph>
+            The connection has been closed by the server due to too many open pages.
+          </Typography.Paragraph>
+          {forceRefreshReason ? (
+            <Typography.Paragraph type="secondary">
+              Reason: {forceRefreshReason}
+            </Typography.Paragraph>
+          ) : null}
+          <Typography.Paragraph type="secondary">
+            Please refresh the page to continue.
+          </Typography.Paragraph>
+        </Modal>
+        {isDesktopShell() ? (
+          <HashRouter>
+            <BifrostFileDropZone>
+              <GlobalRouteEffects />
+              <DesktopOpenRequestBridge />
+              <PendingAuthModal />
+              <PendingIpTlsModal />
+              <PairingApprovalModal />
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/sync-login" element={<SyncLogin />} />
+                <Route path="/traffic/detail" element={<TrafficDetailPage />} />
+                <Route
+                  path="/"
+                  element={
+                    <AdminAuthGate>
+                      <AppLayout />
+                    </AdminAuthGate>
+                  }
+                >
+                  <Route index element={<Navigate to="/activity" replace />} />
+                  <Route path="activity" element={<Activity />} />
+                  <Route path="traffic" element={<Traffic />} />
+                  <Route path="replay" element={<Replay />} />
+                  <Route path="rules" element={<Rules />} />
+                  <Route path="values" element={<Values />} />
+                  <Route path="scripts" element={<Scripts />} />
+                  <Route path="ai" element={<AI />} />
+                  <Route path="devtools" element={<DevTools />} />
+                  <Route path="devtools/:pageId" element={<DevTools />} />
+                  <Route path="groups" element={<Groups />} />
+                  <Route path="groups/:id" element={<GroupDetail />} />
+                  <Route path="notifications" element={<Notifications />} />
+                  <Route path="settings" element={<Settings />} />
+                </Route>
+              </Routes>
+            </BifrostFileDropZone>
+          </HashRouter>
+        ) : (
+          <BrowserRouter basename={getAdminPrefix()}>
+            <BifrostFileDropZone>
+              <GlobalRouteEffects />
+              <DesktopOpenRequestBridge />
+              <PendingAuthModal />
+              <PendingIpTlsModal />
+              <PairingApprovalModal />
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/sync-login" element={<SyncLogin />} />
+                <Route path="/traffic/detail" element={<TrafficDetailPage />} />
+                <Route
+                  path="/"
+                  element={
+                    <AdminAuthGate>
+                      <AppLayout />
+                    </AdminAuthGate>
+                  }
+                >
+                  <Route index element={<Navigate to="/activity" replace />} />
+                  <Route path="activity" element={<Activity />} />
+                  <Route path="traffic" element={<Traffic />} />
+                  <Route path="replay" element={<Replay />} />
+                  <Route path="rules" element={<Rules />} />
+                  <Route path="values" element={<Values />} />
+                  <Route path="scripts" element={<Scripts />} />
+                  <Route path="ai" element={<AI />} />
+                  <Route path="devtools" element={<DevTools />} />
+                  <Route path="devtools/:pageId" element={<DevTools />} />
+                  <Route path="groups" element={<Groups />} />
+                  <Route path="groups/:id" element={<GroupDetail />} />
+                  <Route path="notifications" element={<Notifications />} />
+                  <Route path="settings" element={<Settings />} />
+                </Route>
+              </Routes>
+            </BifrostFileDropZone>
+          </BrowserRouter>
+        )}
       </AntApp>
     </ConfigProvider>
   );
@@ -589,6 +608,89 @@ function GlobalRouteEffects() {
   useEditorCompletion();
 
   return null;
+}
+
+function DesktopOpenRequestBridge() {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    if (!isDesktopShell()) {
+      return;
+    }
+
+    let cancelled = false;
+
+    const handleRequest = async (request: DesktopOpenRequest) => {
+      if (cancelled) {
+        return;
+      }
+
+      if (request.kind === "route") {
+        navigate(request.route);
+        return;
+      }
+
+      if (request.kind === "bifrostFile") {
+        await importBifrostFileContent(request.content, request.filename, navigate);
+      }
+    };
+
+    const drainPending = async (fallback?: unknown) => {
+      try {
+        const pending = await getPendingDesktopOpenRequests();
+        const requests =
+          pending.length > 0 ? pending : normalizeDesktopOpenPayload(fallback);
+        for (const request of requests) {
+          await handleRequest(request);
+        }
+      } catch (error) {
+        console.error("[desktop-runtime] Failed to handle desktop open request.", error);
+      }
+    };
+
+    void drainPending();
+    let detach: (() => void | Promise<void>) | null = null;
+    void listenDesktopEvent(DESKTOP_OPEN_REQUEST_EVENT, (event) => {
+      void drainPending(event.payload);
+    })
+      .then((unlisten) => {
+        if (cancelled) {
+          void unlisten();
+          return;
+        }
+        detach = unlisten;
+      })
+      .catch((error) => {
+        console.error("[desktop-runtime] Failed to subscribe to open requests.", error);
+      });
+
+    return () => {
+      cancelled = true;
+      if (detach) {
+        void detach();
+      }
+    };
+  }, [navigate]);
+
+  return null;
+}
+
+function normalizeDesktopOpenPayload(payload: unknown): DesktopOpenRequest[] {
+  if (!payload || typeof payload !== "object") {
+    return [];
+  }
+  const candidate = payload as Partial<DesktopOpenRequest>;
+  if (candidate.kind === "route" && typeof candidate.route === "string") {
+    return [candidate as DesktopOpenRequest];
+  }
+  if (
+    candidate.kind === "bifrostFile" &&
+    typeof candidate.filename === "string" &&
+    typeof candidate.content === "string"
+  ) {
+    return [candidate as DesktopOpenRequest];
+  }
+  return [];
 }
 
 function DesktopTransitionMask({ resolvedTheme }: { resolvedTheme: "light" | "dark" }) {

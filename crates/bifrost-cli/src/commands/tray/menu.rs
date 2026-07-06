@@ -31,6 +31,10 @@ pub struct MenuItemDef {
 #[derive(Debug, Clone)]
 pub enum MenuItemAction {
     OpenUrl(String),
+    OpenAppRoute {
+        route: String,
+        fallback_url: String,
+    },
     CopyText(String),
     AdminApi {
         method: String,
@@ -226,7 +230,10 @@ pub(crate) fn build_menu_with_pending_and_tls(
             label: "Open Traffic".to_string(),
             enabled: is_running,
             checked: false,
-            action: MenuItemAction::OpenUrl(format!("{}traffic", admin_url)),
+            action: MenuItemAction::OpenAppRoute {
+                route: "/traffic".to_string(),
+                fallback_url: format!("{}traffic", admin_url),
+            },
         }));
 
         items.push(item(MenuItemDef {
@@ -234,7 +241,10 @@ pub(crate) fn build_menu_with_pending_and_tls(
             label: "Open Rules".to_string(),
             enabled: is_running,
             checked: false,
-            action: MenuItemAction::OpenUrl(format!("{}rules", admin_url)),
+            action: MenuItemAction::OpenAppRoute {
+                route: "/rules".to_string(),
+                fallback_url: format!("{}rules", admin_url),
+            },
         }));
 
         items.push(item(MenuItemDef {
@@ -242,7 +252,10 @@ pub(crate) fn build_menu_with_pending_and_tls(
             label: "Open Settings".to_string(),
             enabled: is_running,
             checked: false,
-            action: MenuItemAction::OpenUrl(format!("{}settings", admin_url)),
+            action: MenuItemAction::OpenAppRoute {
+                route: "/settings".to_string(),
+                fallback_url: format!("{}settings", admin_url),
+            },
         }));
 
         items.push(item(MenuItemDef {
@@ -934,8 +947,12 @@ mod tests {
         assert_eq!(open_settings.label, "Open Settings");
         assert!(open_settings.enabled);
         match &open_settings.action {
-            MenuItemAction::OpenUrl(url) => {
-                assert_eq!(url, "http://127.0.0.1:8800/_bifrost/settings");
+            MenuItemAction::OpenAppRoute {
+                route,
+                fallback_url,
+            } => {
+                assert_eq!(route, "/settings");
+                assert_eq!(fallback_url, "http://127.0.0.1:8800/_bifrost/settings");
             }
             other => panic!("unexpected action: {other:?}"),
         }
