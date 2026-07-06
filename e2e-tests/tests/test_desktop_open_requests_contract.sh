@@ -56,7 +56,9 @@ if [[ "$(uname -s)" == "Linux" ]] && {
 }; then
   echo "skipping desktop open_requests Rust test: Linux Tauri GTK/GObject dependencies are not installed"
 else
-  # Clean CI checkouts do not have the Tauri sidecar resource until we prepare it.
+  # Clean CI checkouts do not have the desktop frontend or Tauri sidecar
+  # resources until we prepare them.
+  pnpm --dir web run build:desktop
   cargo build -p bifrost-cli --bin bifrost
   node scripts/prepare-tauri-sidecar.mjs debug
   cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests
