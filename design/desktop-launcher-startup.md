@@ -15,7 +15,7 @@
 - macOS 上启动阶段在 host 窗口内容区安装 `NSView` overlay 作为启动器视觉层。
 - 主业务 webview 通过 `create_main_webview()` 预先创建，并 “停放” 在 host 窗口外的不可见位置继续加载。
 - backend 在后台线程并行启动。
-- 三条流水线（overlay 显示 / webview 加载 / backend 就绪）全部就位后，`start_main_window_handoff` 把 host window 放大、恢复装饰、显示 webview，并淡出 overlay。
+- 三条流水线（overlay 显示 / webview 加载 / backend 就绪）全部就位后，`start_main_window_handoff` 保持 host window 在最终尺寸，恢复主界面背景与特效，显示 webview，并淡出 overlay。
 - 非 macOS 平台没有原生 overlay 能力，直接以完整尺寸展示 host 窗口 + webview。
 
 本文覆盖 launcher/handoff 语义、状态机、代码入口、错误路径和测试。日志、数据目录、失败上报见 `desktop-startup-observability.md`；关闭/退出/重开语义见 `desktop-macos-close-behavior.md`；端口切换见 `desktop-runtime-port-switch.md`。
@@ -29,13 +29,14 @@
 - 非 macOS 平台没有 overlay 能力时，host 窗口直接以最终尺寸显示，不阻塞用户使用。
 - 主 webview 与 backend 启动可以并行进行。
 - Overlay、主 webview、backend 三者就绪后自动 handoff：
-  - host 窗口从 `INITIAL_WINDOW_WIDTH×INITIAL_WINDOW_HEIGHT` 平滑放大到 `TARGET_WINDOW_WIDTH×TARGET_WINDOW_HEIGHT`；
+  - host 窗口从启动一开始就是 `TARGET_WINDOW_WIDTH×TARGET_WINDOW_HEIGHT`，避免主 Web UI 在中间尺寸下响应式重排；
   - 恢复背景色、装饰、阴影、macOS Sidebar/UnderWindow 特效；
   - 主 webview 从 park 位置移动到 `(0,0)` 并 resize 到 host 内部尺寸；
   - overlay 分帧淡出并从 NSView 树中移除。
 - handoff 完成后向前端发送 `desktop://handoff-complete` 事件，供前端把 splash / loading 状态收尾。
 - 在 backend 尚未 ready、webview 尚未 loaded 时，handoff 不会被误触发。
 - 允许通过 `BIFROST_DESKTOP_LAUNCHER_ONLY=1` 进入“仅显示 launcher，不启动 backend、不加载 webview”的开发/调试模式。
+- macOS launcher 采用接近系统启动页的虚拟水平进度条：首次绘制即显示 21%，约 1 秒推进到 80%，约 1.5 秒推进到 99%，真正 handoff 时补到 100% 并淡出；该进度不代表真实 backend/WebView 进度。
 
 ### 必须不破坏
 
@@ -61,11 +62,12 @@
 - Overlay 由 `desktop/src-tauri/src/native_launcher.rs` 通过 objc2 直接创建一个 `NSView`，添加到 host window 的 `contentView` 顶层。
 - Overlay 有自己的动画时钟 (`start_animation`) 和进度值 (`set_overlay_progress`)、alpha (`set_overlay_alpha`)。
 - Overlay 只出现在 macOS。`supports_native_launcher()` 返回 `cfg!(target_os = "macos")`。
+- Launcher 视觉为全尺寸 `NSVisualEffectView` 毛玻璃层 + 居中水平进度条；背景由 macOS `UnderWindowBackground` 材质承载，并只叠加低透明度 Bifrost surface tint，让桌面背景在启动页后方若隐若现。亮色环境下材质会呈现柔和浅灰玻璃，暗色环境下保持接近主窗口深色背景，标题和进度条使用低饱和中性色，避免固定纯黑或纯白造成 handoff 跳变。
 
 ### Host window 是唯一顶级窗口
 
 - Tauri label = `HOST_WINDOW_LABEL = "host"`。
-- macOS 启动初始状态：360×260、透明、无装饰、无阴影、`transparent + shadow=false + background_color=(0,0,0,0)`。
+- macOS 启动初始状态：1440×920，最小 1180×760，透明 host window + 全尺寸原生 launcher overlay。主 webview 仍在窗口外 park，不会在 overlay 淡出前露出响应式布局内容。
 - 其他平台启动状态：1440×920，最小 1180×760，普通装饰 + 阴影，深色背景 `(8,17,23,255)`。
 - Handoff 后统一变为 1440×920 + 最小 1180×760 + 装饰 + 阴影 + `apply_window_effects`（macOS Sidebar + UnderWindowBackground + radius 18；Windows Mica）。
 
@@ -73,7 +75,7 @@
 
 - Tauri webview label = `MAIN_WINDOW_LABEL = "main"`。
 - 由 `create_main_webview()` 通过 `WebviewBuilder::new(MAIN_WINDOW_LABEL, WebviewUrl::App("index.html".into()))` 创建。
-- 初始位置：`(WEBVIEW_PARK_OFFSET=2000.0, 0.0)`（park 在 host window 视觉之外），初始尺寸与 host window 相同。
+- 初始位置：`(WEBVIEW_PARK_OFFSET=2000.0, 0.0)`（park 在 host window 视觉之外），初始尺寸为最终窗口尺寸。
 - Handoff 时通过 `reveal_main_webview` 移动到 `(0,0)` 并 resize 到当前 host inner size。
 - 页面加载事件通过 `on_page_load` 回调追踪；`PageLoadEvent::Finished` 时把 `main_webview_loaded` 置 true 并触发一次 handoff 尝试。
 
@@ -113,7 +115,7 @@ BackendState {
 状态转移：
 
 1. `setup()`：
-   - 创建 host window（macOS 小尺寸透明；其他平台完整尺寸）。
+   - 创建 host window（macOS 和其他平台都使用最终尺寸；macOS 启动阶段由全尺寸 overlay 覆盖）。
    - 如果 `supports_native_launcher()`：安装 overlay，`launcher_overlay = Some(ptr)`，启动动画。
    - 如果不支持原生 overlay：直接把 `handoff_started`、`handoff_completed` 置为 true（跳过 handoff）。
    - 如果 `is_launcher_only_mode()` = false：`create_main_webview` + `bootstrap_desktop_backend` + `monitor_desktop_backend`。
@@ -122,12 +124,12 @@ BackendState {
 4. 前端 splash 结束调用 `notify_main_window_ready` → `main_window_ready = true` → `start_main_window_handoff("frontend ready handshake")`。
 5. `start_main_window_handoff`：
    - Swap `handoff_started`，防止重入。
-   - `animate_host_window_to_main_size`：10 帧 easing 放大（16ms/帧，共 ~160ms），同时用 `set_overlay_progress` 让 overlay 随进度收缩/淡化。
+   - `animate_host_window_to_main_size`：历史命名保留，当前不再执行窗口放大；只确认 host window 为最终尺寸，并用 `set_overlay_progress(..., 1.0)` 让虚拟进度条补到 100%。
    - 恢复背景色、装饰、阴影、window effects。
    - `reveal_host_window`：show + unminimize + set_focus。
    - 设置 resizable、maximizable、min_size。
    - `prepare_main_webview`：把子 webview resize 到 host inner size。
-   - 起后台线程：睡 `WEBVIEW_REVEAL_SETTLE_DELAY (90ms)`，然后 `reveal_main_webview` 移到 `(0,0)`；如果 `overlay_ptr.is_some()` 就 `fade_out_launcher_overlay`（8 帧 × 14ms，共 ~112ms），最后 emit `desktop://handoff-complete`，置 `handoff_completed = true`。
+   - 起后台线程：睡 `WEBVIEW_REVEAL_SETTLE_DELAY (90ms)`，然后 `reveal_main_webview` 移到 `(0,0)`；如果 `overlay_ptr.is_some()` 就 `fade_out_launcher_overlay`（8 帧 × 14ms，共 ~112ms），形成 launcher 淡出、正式页面淡入的稳定过渡，最后 emit `desktop://handoff-complete`，置 `handoff_completed = true`。
 6. 非 macOS 平台：状态 4/5 跳过；host window 一开始就是完整尺寸。
 
 ## 关键代码入口
@@ -155,14 +157,10 @@ BackendState {
 ## 常量与时序
 
 ```rust
-const INITIAL_WINDOW_WIDTH: f64 = 360.0;
-const INITIAL_WINDOW_HEIGHT: f64 = 260.0;
 const TARGET_WINDOW_WIDTH: f64 = 1440.0;
 const TARGET_WINDOW_HEIGHT: f64 = 920.0;
 const TARGET_WINDOW_MIN_WIDTH: f64 = 1180.0;
 const TARGET_WINDOW_MIN_HEIGHT: f64 = 760.0;
-const WINDOW_EXPAND_STEPS: u16 = 10;
-const WINDOW_EXPAND_STEP_DELAY: Duration = Duration::from_millis(16);
 const OVERLAY_FADE_STEPS: u16 = 8;
 const OVERLAY_FADE_STEP_DELAY: Duration = Duration::from_millis(14);
 const WEBVIEW_PARK_OFFSET: f64 = 2000.0;
@@ -170,7 +168,7 @@ const WEBVIEW_REVEAL_SETTLE_DELAY: Duration = Duration::from_millis(90);
 const HANDOFF_COMPLETE_EVENT: &str = "desktop://handoff-complete";
 ```
 
-窗口放大用 `1 - (1-t)^2` easing，尺寸围绕当前中心点缩放，避免视觉跳位。
+启动窗口不再放大。macOS launcher overlay 使用全尺寸毛玻璃背景遮住 parked WebView，玻璃层保留桌面背景的模糊透出感，虚拟进度条按固定节奏推进到 99%；handoff 时主 WebView 移入窗口，overlay 淡出。
 
 ## 错误与降级路径
 
@@ -228,7 +226,7 @@ Launcher 不新增 admin API。相关信息通过：
 
 ### Phase 2：Handoff 动画与前端事件（已完成）
 
-- `animate_host_window_to_main_size`：easing + overlay progress 联动。
+- `animate_host_window_to_main_size`：保持最终尺寸 + overlay progress 收尾。
 - `prepare_main_webview` / `reveal_main_webview`：park + reveal。
 - `fade_out_launcher_overlay`：分帧 alpha。
 - Emit `desktop://handoff-complete`，前端消费。
@@ -257,18 +255,18 @@ Launcher 不新增 admin API。相关信息通过：
 - `non_macos_close_request_shuts_down_app`
 - `backend_recovery_guard_prevents_parallel_recovery`
 - `poll_managed_backend_exit_reports_exited_child`
+- `native_launcher::imp::tests::virtual_progress_matches_startup_milestones`
+- `native_launcher::imp::tests::handoff_progress_uses_only_final_one_percent`
 
-Handoff / overlay 相关走真实窗口验证，无独立 unit test。
+Overlay 视觉、窗口层级和 handoff 仍以真实窗口验证为主；虚拟进度时序通过 unit test 固定关键里程碑。
 
 ### E2E / 真实场景
 
 - `human_tests/desktop-launcher-startup.md`（新增或就地维护）：
-  - TC-DLS-01：macOS 冷启动，观察 Dock 中只出现一个 Bifrost 图标，overlay 正确显示。
-  - TC-DLS-02：Handoff 完成后 host 窗口最终尺寸为 1440×920，可拖拽到 1180×760 最小尺寸。
-  - TC-DLS-03：backend 启动异常（临时占用端口）时 overlay 保持显示，`startupError` 通过弹窗展示。
-  - TC-DLS-04：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` 时 backend 与 webview 不启动，overlay 显示，Cmd+Q 立即退出。
-  - TC-DLS-05：非 macOS 平台（Windows/Linux）冷启动直接展示完整 host 窗口，无 overlay。
-  - TC-DLS-06：Handoff 完成后前端收到 `desktop://handoff-complete` 事件，splash 消失。
+  - TC-DLS-01：macOS 冷启动显示全尺寸启动页，只出现一个 Bifrost 窗口，主 Web UI 在 overlay 淡出前不可见。
+  - TC-DLS-02：`BIFROST_DESKTOP_LAUNCHER_ONLY=1` 下截图验证虚拟进度条首次约 21%、约 1 秒 80%、约 1.5 秒 99%。
+  - TC-DLS-03：验证启动页背景在当前暗色/亮色偏好下与主窗口背景风格连续，标题和进度条可读且不过度抢眼。
+  - TC-DLS-04：真实 handoff 过程中窗口尺寸和位置保持稳定，仅发生 launcher 淡出和正式页面淡入。
 
 启动必须使用临时 `BIFROST_DATA_DIR`、非 9900 端口、`BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1`、`BIFROST_DISABLE_TRAY=1` 和 `--no-system-proxy`。
 
@@ -302,3 +300,4 @@ Handoff / overlay 相关走真实窗口验证，无独立 unit test。
 - `notify_main_window_ready` 会绕过 `main_webview_loaded` 检查，一旦前端错误地在页面完全就绪前调用会导致 handoff 提前；权衡是前端可用作 fallback，避免 overlay 永久卡死。
 - `WEBVIEW_PARK_OFFSET=2000.0` 假设显示器逻辑坐标不超过 2000，对超大显示器可能造成 park 位置仍可见；如遇到问题可改用 `webview.hide()` 或负偏移。第一版保持简单。
 - `BIFROST_DESKTOP_LAUNCHER_ONLY` 主要用于开发调试，未来若成为正式产品能力应有明确 UI；当前仅通过环境变量。
+- 进度条是虚拟进度，不绑定 backend/WebView 的真实加载百分比；如果未来引入真实进度，需要避免倒退，并保留短启动时的稳定视觉节奏。

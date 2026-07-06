@@ -8,3 +8,6 @@ overrides:
 
 onlyBuiltDependencies:
   - esbuild
+
+allowBuilds:
+  esbuild: true
