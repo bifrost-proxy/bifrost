@@ -64,14 +64,18 @@ jobs:
           fi
           pnpm run build
         working-directory: site
-      - name: Upload pages artifact
+      - name: Build legacy project Pages redirect
+        if: github.event_name != 'pull_request'
+        run: node scripts/build-project-pages-redirect.mjs
+        working-directory: site
+      - name: Upload legacy project Pages redirect
         if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v4
         with:
-          path: site/dist
+          path: site/project-pages-redirect-dist
 
   deploy:
-    name: Deploy to GitHub Pages
+    name: Deploy legacy project Pages redirect
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest

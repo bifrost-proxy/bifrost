@@ -114,6 +114,8 @@ VitePress 默认 `i18nRouting` 会按当前路径同构映射语言链接，但 
 ### 重定向与 404
 
 - `site/scripts/write-redirects.mjs` 为旧路径写入静态 redirect HTML，例如 `reference/getting-started/cli-quick-start/index.html -> /bifrost/getting-started/cli-quick-start`。
+- 根站部署（`BASE_PATH=/`）时，`site/scripts/write-redirects.mjs` 还会生成 `bifrost/index.html -> /`，主动覆盖历史 GitHub Pages `/bifrost/` 入口，避免旧发布产物继续以另一套首页、canonical、资源路径和文档入口被搜索引擎或用户访问。
+- 子路径部署（`BASE_PATH=/bifrost/`）时不能生成上述 redirect，因为 `/bifrost/` 本身就是该部署形态的真实首页。
 - VitePress 生成 `404.html`。
 
 ### 根站部署边界
@@ -148,6 +150,7 @@ node scripts/verify-site-links.mjs
 - `build-home.mjs` 必须在 `vitepress build` 后执行，最终 `dist/index.html` 才是手写首页。
 - `verify-home.mjs` 必须在 `build-home.mjs` 后执行，防止首页重新引入 framework marker、缺失 base path 或超出预算。
 - `verify-site-links.mjs` 必须最后执行，覆盖首页、VitePress 文档区和 redirect HTML 的最终链接状态。
+- 根站构建产物必须包含 `site/dist/bifrost/index.html`，并且该文件只能作为 noindex redirect 指向 `/`；禁止在 `bifrost/` 下保留第二套首页。
 
 ## CLI 与 Admin API
 
@@ -156,6 +159,8 @@ node scripts/verify-site-links.mjs
 - `pnpm --dir site run test`
 - `pnpm --dir site run build`
 - `pnpm run site:build`（根站变体）
+
+`.github/workflows/site.yml` 在 PR 和 main push 上完整构建校验 `site/dist`。非 PR 事件仍会使用 GitHub Pages 权限发布主仓库项目站，但上传的 artifact 只包含 `site/project-pages-redirect-dist/index.html` 这个 noindex redirect，目标是 `https://bifrost-proxy.github.io/`。公开入口统一由 `bifrost-proxy/bifrost-proxy.github.io` 仓库承载，主仓库项目站只作为历史 `/bifrost/` tombstone，避免继续与根站分叉。
 
 ## Sync / 导入导出边界
 
