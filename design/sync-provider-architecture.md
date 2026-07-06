@@ -796,7 +796,7 @@ When the user opens Settings Sync and no sync provider has a valid session:
    - `Bifrost Cloud`: Remote Invoke if supported by server, Rules Sync, Config Sync.
    - `GitHub Gist`: Rules Sync, Config Sync.
 4. Let the user dismiss the modal and continue local-only; do not block Bifrost local proxy usage.
-5. Do not auto-login GitHub or Bifrost Cloud. ByteDance auto-detection may auto-open the existing internal SSO prompt only when internal provider is reachable and no user choice exists.
+5. Do not auto-login any provider when the modal appears. ByteDance auto-detection may preselect or highlight the internal provider, but SSO must start only after the user clicks `Start`.
 6. The modal must remember dismissal for the current browser session, but Settings Sync still shows an `Add Service` call to action until at least one provider is connected.
 
 Modal layout:
@@ -804,8 +804,19 @@ Modal layout:
 - Title: `Set up sync`.
 - Three provider choice cards in a responsive grid.
 - Each provider card shows icon, provider name, short endpoint/account hint, and capability chips.
-- Buttons: `Continue local only`, `Sign in`, and a close icon.
-- ByteDance card can show `Detected` or `Not on internal network`; Bifrost Cloud card shows a URL field after selection; GitHub card starts GitHub login.
+- Buttons: `Continue local only`, `Start`, and a close icon.
+- ByteDance card can show `Detected` or `Not on internal network`; Bifrost Cloud and GitHub Gist cards show setup hints. Provider login or setup starts only after the selected card's `Start` action.
+
+Modal interaction state machine:
+
+1. Initial state: modal opens with the recommended provider preselected only when detection has a clear recommendation; otherwise no provider is selected and `Start` is disabled.
+2. Close icon or `Continue local only`: dismisses the modal, keeps the user on Settings Sync, leaves all providers disconnected, and does not start any auth flow.
+3. Provider card click: selects exactly one provider card and updates the footer summary to show what will happen next.
+4. `Start` with `ByteDance Internal`: starts the internal SSO/login flow or opens the existing ByteDance login prompt. If internal detection is unavailable, show an inline unavailable state and keep the modal open.
+5. `Start` with `Bifrost Cloud`: advances to the Bifrost Cloud setup wizard, starting with server URL entry or saved endpoint selection, then capability probe and login.
+6. `Start` with `GitHub Gist`: starts the GitHub auth/setup wizard, including gist create/import and recovery-key setup.
+7. Failed auth or cancelled setup returns to the same modal/provider card state, with an inline error and no provider marked connected.
+8. Successful login closes the modal, marks that provider card connected in Settings Sync, and runs the first eligible Rules Sync and Config Sync probe according to capability.
 
 ### Connected Services
 
@@ -1083,7 +1094,8 @@ Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a de
 
 | Case | Mock setup | Assertions |
 | --- | --- | --- |
-| First-run modal | `/sync/providers` returns no sessions; ByteDance detection returns reachable | Modal is visible, three provider cards appear, ByteDance card is highlighted, `Continue local only` dismisses only for current browser session |
+| First-run modal | `/sync/providers` returns no sessions; ByteDance detection returns reachable | Modal is visible, three provider cards appear, ByteDance card is highlighted, close icon and `Continue local only` dismiss only for current browser session, and no auth API is called |
+| First-run modal start flow | No provider session; provider cards are rendered; auth endpoints are mocked per provider | Selecting ByteDance then `Start` calls the internal SSO flow; selecting Bifrost Cloud then `Start` opens URL/capability/login wizard; selecting GitHub Gist then `Start` opens GitHub gist auth/setup; failed/cancelled auth returns to modal without marking connected |
 | Supported provider card grid | Provider catalog returns V1 product providers | Exactly three cards render in stable order: ByteDance Internal, Bifrost Cloud, GitHub Gist; no WebDAV/custom placeholder appears; unconfigured providers still show capability chips and sign-in/configure actions |
 | Connected services | ByteDance, Bifrost Cloud, GitHub Gist all signed in | Three provider cards render simultaneously; each shows account, status, Rules Sync, Config Sync; GitHub Gist has no Remote Invoke action |
 | Capability routing | Personal rules and basic config write to all three; Remote Invoke providers are ByteDance + Bifrost Cloud | Routing rows show correct provider chips; GitHub Gist chip is disabled for Remote Invoke with explanatory tooltip |
@@ -1102,6 +1114,8 @@ Visual/DOM checks:
 - Assert the V1 product UI renders exactly the ByteDance Internal, Bifrost Cloud, and GitHub Gist cards by default.
 - Assert disabled unsupported capability chips are visible and have tooltips.
 - Assert first-run modal does not re-open after dismissing within the same browser session, but `Add Service` remains visible.
+- Assert closing/dismissing the modal never calls provider auth/start endpoints.
+- Assert `Start` is disabled until a provider is selected when there is no recommended provider.
 - Assert polling refresh updates provider status without resetting an in-progress Bifrost Cloud URL draft.
 
 Manual human_tests:

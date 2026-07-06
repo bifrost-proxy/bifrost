@@ -223,6 +223,26 @@
 - 文档明确如果服务端未返回 `config_sync`, UI/CLI 必须禁用或标记不可用, 不能假设支持。
 - 文档明确最终推进需要 Bifrost client/admin、Bifrost Cloud、ByteDance Internal 三个 PR 一起完成。
 
+### TC-SPA-13: 首次无登录弹窗可关闭且 Start 后才进入所选 Provider 登录流程
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Modal interaction state machine|Continue local only|Start|Provider card click|ByteDance Internal|Bifrost Cloud|GitHub Gist|failed auth|Successful login|First-run modal start flow|closing/dismissing the modal never calls provider auth" design/sync-provider-architecture.md
+   ```
+2. 阅读 Web UI 的 First-run sign-in modal 和 Web UI validation 章节。
+
+**预期结果**:
+
+- 文档明确没有任何同步服务登录时, 打开 Settings Sync 会弹出同步服务选择窗口。
+- 文档明确弹窗可以通过 close icon 或 `Continue local only` 关闭, 关闭后停留在 Settings Sync, 不阻断本地代理能力。
+- 文档明确关闭弹窗不会触发任何 provider 登录、auth/start 或 setup API。
+- 文档明确用户点击 provider card 后只选中一个 provider, 并通过 `Start` 进入后续流程。
+- 文档明确 ByteDance Internal 的 `Start` 进入内部 SSO/login prompt, Bifrost Cloud 的 `Start` 进入 URL/capability/login wizard, GitHub Gist 的 `Start` 进入 GitHub gist auth/setup。
+- 文档明确失败或取消登录会回到弹窗/选中 provider 状态, 不把 provider 标记为 connected。
+- 文档明确 Web UI validation 有对应 Playwright 用例覆盖 dismiss 和 start flow。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -234,3 +254,4 @@
 - 2026-07-07: PASS - 执行 TC-SPA-09 至 TC-SPA-10 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认 Web UI 设计方案覆盖页面结构、关键交互、错误/冲突/注册状态、响应式和测试钩子, Web UI 验证方案覆盖 Playwright、暗色主题和不重叠检查。
 - 2026-07-07: PASS - 执行 TC-SPA-11 的 `rg` 静态审查命令, 命中三 provider 卡片网格、稳定顺序、最多三列、窄屏一列、V1 不展示 WebDAV/custom placeholder 和 Playwright/DOM 断言要求。
 - 2026-07-07: PASS - 执行 TC-SPA-12 的 `rg` 静态审查命令, 命中 ByteDance Internal 与 Bifrost Cloud 两个服务端路径、现有代码入口、`/v4/config/sync`、`/v4/capabilities`、新增表、capability gating 和三 PR 协同发布要求。
+- 2026-07-07: PASS - 执行 TC-SPA-13 的 `rg` 静态审查命令, 命中首次无登录弹窗状态机、关闭不触发登录、选择 provider 后点击 Start 才进入 ByteDance/Bifrost Cloud/GitHub Gist 对应登录或 setup 流程、失败/取消回到弹窗状态和 Playwright 覆盖要求。
