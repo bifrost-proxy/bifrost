@@ -74,6 +74,21 @@
 - 第一条命令 0 退出，证明远程 PAC 加载路径和真实 E2E 均显式保留“不吃系统代理 / 不改系统代理 / 不拉托盘登录弹窗”的约束。
 - 第二条命令非 0 退出，证明 PAC 文档和语法提示不再残留“未实现”描述。
 
+### TC-PAC-05：PAC CPU 超时错误归一化
+
+操作步骤：
+
+1. 执行：
+   ```bash
+   cargo test -p bifrost-script pac::tests::times_out_cpu_intensive_scripts --lib -- --nocapture
+   cargo test -p bifrost-script --lib -- --nocapture
+   ```
+
+预期结果：
+
+- `FindProxyForURL` 中的无限循环触发 PAC timeout 后返回 `ScriptError::Timeout`，不依赖 QuickJS 在不同平台上的底层错误文案。
+- `bifrost-script` lib 全量测试通过，PAC 正常执行、JavaScript 错误上报、sandbox timeout 和网络/file sandbox 用例不受影响。
+
 ## 清理步骤
 
 - E2E 脚本退出时会停止入口 Bifrost、上游 Bifrost、Mock Server，并删除 `.bifrost-e2e-pac.*` 临时目录。
@@ -90,3 +105,4 @@
 | 2026-07-02 | TC-PAC-01 | 通过 | 执行 `cargo test -p bifrost-script pac -- --nocapture`，5 passed；执行 `cargo test -p bifrost-core parse_bare_domain -- --nocapture`，3 passed；执行 `cargo test -p bifrost-cli pac_ -- --nocapture`，lib 8 passed、main 8 passed，包含 PAC 执行失败和不支持代理 scheme 的 fail-closed 回归。 |
 | 2026-07-02 | TC-PAC-02..03 | 通过 | 执行 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT=1 BIFROST_DISABLE_TRAY=1 bash e2e-tests/tests/test_pac_proxy_auto_config.sh`。脚本构建当前 release binary，启动 Mock HTTP Server、上游 Bifrost 和入口 Bifrost；Values PAC 与远程 PAC 均经入口 Bifrost -> 上游 Bifrost -> Mock Server 返回 200；PAC + `proxy://127.0.0.1:1` + `host://127.0.0.1:<echo_port>` 场景返回 200 并确认 `/forward` 与 query 保留。专项脚本 13/13 通过；`python3 check_rules.py rules/forwarding/pac.txt` 语法 fixture 1/1 通过。 |
 | 2026-07-02 | TC-PAC-04 | 通过 | 执行系统代理不变量扫描命中 `outbound_blocking_reqwest_client_builder`、`.no_proxy()`、E2E 的 `--no-system-proxy`、`BIFROST_DISABLE_TRAY` 与 `BIFROST_SYNC_DISABLE_AUTO_LOGIN_PROMPT`；执行旧提示残留扫描，确认 `not yet implemented`、`尚未实现`、`未实现`、远程 PAC 不拉取和不执行 PAC JS 等旧描述均无残留。 |
+| 2026-07-06 | TC-PAC-05 | 通过 | 执行 `cargo test -p bifrost-script pac::tests::times_out_cpu_intensive_scripts --lib -- --nocapture`，1 passed；执行 `cargo clippy -p bifrost-script --lib --tests -- -D warnings` 通过；执行 `cargo test -p bifrost-script --lib -- --nocapture`，136 passed。 |
