@@ -478,6 +478,167 @@ Product behavior:
 - If both ByteDance Internal and Bifrost Cloud are signed in, both get Remote Invoke registration.
 - Server `/v4/capabilities` decides whether group rules and remote invoke are available; UI must not assume every custom URL supports them.
 
+## Server-Side Config Sync Changes
+
+Rules Sync already exists on both server implementations as the `/v4/env/sync` protocol. Basic Config Sync does not exist yet and must be added to both Bifrost Cloud and ByteDance Internal in the same delivery as the client provider work. The final implementation push should not ship a UI that advertises `Config Sync` until both server paths can store, return, and conflict-check the allowed config snapshot.
+
+### Existing code inventory
+
+| Service | Repo/path | Current rules sync surface | Current storage | Current gap |
+| --- | --- | --- | --- | --- |
+| ByteDance Internal | `/Users/eden_studio/work/github/bifrost-server-v4` | `app/idl/env.thrift`, `typings/app/idl/env.ts`, `app/controller/env.ts`, `app/service/env.ts` expose `/v4/env/sync` | `app/model/env.ts` and `db.sql` store `bifrost_server_env` rows | No config-sync IDL, controller, service, model, or DB table |
+| Bifrost Cloud | `packages/bifrost-sync-server` | `src/routes/env.ts` exposes `/v4/env/sync` | `src/dao/{types,sqlite,mysql}.ts` and `sql/init-{sqlite,mysql}.sql` store `bifrost_envs` rows | No config-sync route, DAO, schema, or capability endpoint |
+
+Both services also have Remote Invoke relay code, but Remote Invoke grants, pairings, clients, calls, and SSH claims must remain outside Config Sync.
+
+### Shared Basic Config Sync protocol
+
+Add a new server protocol, versioned under `/v4/config/sync`, instead of extending `/v4/env/sync`. Keeping the lane separate makes it testable and prevents accidental mixing of rules and local settings.
+
+Request shape:
+
+```ts
+interface SyncBasicConfigReq {
+  scope: 'basic_config';
+  check_list: Array<{
+    key: BasicConfigKey;
+    update_time: string;
+    hash: string;
+  }>;
+  update_list: Array<{
+    key: BasicConfigKey;
+    value_json: string;
+    hash: string;
+    update_time: string;
+  }>;
+  delete_list: Array<{
+    key: BasicConfigKey;
+    delete_time: string;
+  }>;
+}
+```
+
+Response shape:
+
+```ts
+interface SyncBasicConfigRes {
+  code: number;
+  message: string;
+  data: {
+    local_update_list: Array<{
+      key: BasicConfigKey;
+      value_json: string;
+      hash: string;
+      update_time: string;
+    }>;
+    local_delete_list: BasicConfigKey[];
+    result_list: Array<{
+      type: 0 | 1 | 3;
+      status: 0 | 1;
+      key?: BasicConfigKey;
+      msg?: string;
+      update_time?: string;
+    }>;
+  };
+}
+```
+
+Allowed keys:
+
+```ts
+type BasicConfigKey =
+  | 'app_allowlist'
+  | 'domain_allowlist'
+  | 'blacklist';
+```
+
+Server validation requirements:
+
+- Reject unknown keys with 400/422 before writing.
+- Reject values that contain secrets, certificates, tokens, local port, system proxy state, Remote Invoke grants, shell policy, traffic history, or local machine identifiers.
+- Store `value_json` as canonical JSON with stable key ordering before calculating `hash`.
+- Enforce per-user ownership through the existing login token/session. Basic config is user-scoped only in V1; it is not group-scoped.
+- Preserve optimistic sync semantics matching `/v4/env/sync`: client sends local check/update/delete lists; server returns remote updates and delete markers.
+- Use the same timestamp comparison style as rules sync, but include `hash` in conflict metadata so clients can detect same timestamp/different content.
+
+### Bifrost Cloud service changes
+
+Bifrost Cloud lives in the current repo under `packages/bifrost-sync-server`.
+
+Required implementation work:
+
+- Add `BasicConfigKey`, `BasicConfigSnapshot`, `SyncBasicConfigReq`, and `SyncBasicConfigRes` to `src/types.ts`.
+- Add an `IConfigDao` to `src/dao/types.ts` and expose it from `IStorage`.
+- Implement `SqliteConfigDao` in `src/dao/sqlite.ts` and `MysqlConfigDao` in `src/dao/mysql.ts`.
+- Add schema to both `sql/init-sqlite.sql` and `sql/init-mysql.sql`:
+  - table name: `bifrost_basic_configs`
+  - columns: `user_id`, `config_key`, `value_json`, `hash`, `create_time`, `update_time`
+  - unique key: `(user_id, config_key)`
+  - index: `user_id`
+- Add `src/routes/config.ts` with `POST /v4/config/sync`.
+- Register `handleConfig` in `src/index.ts` before Remote Invoke routes.
+- Add `GET /v4/capabilities` returning at least:
+  - `rules_sync`
+  - `config_sync`
+  - `group_rules` when group routes are enabled
+  - `remote_invoke_relay` when `remote_invoke.enabled` is true
+- Update `README.md` and `config.example.yaml` to document the new capability and storage table.
+- Add tests next to existing sync-server tests:
+  - config sync create/update/delete/check path
+  - unknown key rejection
+  - sensitive field rejection
+  - SQLite and MySQL DAO coverage where practical
+  - `/v4/capabilities` reflects Remote Invoke enabled/disabled state
+
+Compatibility:
+
+- Existing `/v4/env/sync`, user auth, OAuth2, group, and Remote Invoke endpoints stay unchanged.
+- Existing SQLite/MySQL deployments need additive migrations. Do not require dropping existing remote-invoke tables.
+- Old clients that do not call `/v4/config/sync` continue to work.
+
+### ByteDance Internal service changes
+
+ByteDance Internal lives in `/Users/eden_studio/work/github/bifrost-server-v4`. This repo must be changed and submitted as a separate PR when implementation starts.
+
+Required implementation work:
+
+- Add config-sync thrift definitions in `app/idl/env.thrift` or a new `app/idl/config.thrift`, and include the service from `app/idl/index.thrift`.
+- Regenerate/update `typings/app/idl/*.ts` for the new request/response types.
+- Add a controller method, either `ConfigController.SyncBasicConfig` or `EnvController.SyncBasicConfig`, exposing `POST /v4/config/sync`.
+- Add `app/service/config.ts` or a clearly separated config-sync section in `app/service/env.ts`.
+- Add a Sequelize model, suggested `app/model/basicConfig.ts`, mapped to `bifrost_server_basic_config`.
+- Add DDL to `db.sql`:
+  - table name: `bifrost_server_basic_config`
+  - columns: `id`, `user_id`, `config_key`, `value_json`, `hash`, `create_time`, `update_time`
+  - unique key: `(user_id, config_key)`
+  - index: `user_id`
+- Reuse existing SSO/session middleware and `ctx.session.user_id`; V1 config sync is only for the current user, not group virtual users.
+- Add `GET /v4/capabilities` through IDL/controller so client detection can stop relying on fallback capability guesses.
+- Return `config_sync` only after the new DB table and endpoint are deployed.
+- Keep Remote Invoke routes in `app/routes/remoteInvoke.ts` unchanged except capability reporting.
+- Add repo-local tests:
+  - `SyncBasicConfig` happy path and conflict/check path
+  - unknown/sensitive key rejection
+  - session isolation between two users
+  - `/v4/capabilities` returns `config_sync` and `remote_invoke_relay`
+
+Compatibility:
+
+- Existing `SyncEnv` in `app/service/env.ts` remains the rules sync implementation.
+- Existing `bifrost_server_env` data is not migrated into config rows.
+- Existing Remote Invoke Redis/SQL state is never serialized into config sync.
+- Deployment must be additive and backward-compatible for old clients.
+
+### Cross-service rollout contract
+
+Implementation should land as one coordinated feature across three PRs:
+
+1. Bifrost client/admin/provider PR in this repo.
+2. Bifrost Cloud service PR in this repo under `packages/bifrost-sync-server`.
+3. ByteDance Internal service PR in `/Users/eden_studio/work/github/bifrost-server-v4`.
+
+The feature is considered ready only when all three are implemented and validated together. UI may show provider cards early, but `Config Sync` must stay disabled or marked unavailable for a server until `/v4/capabilities` advertises `config_sync` and `/v4/config/sync` passes an authenticated smoke test.
+
 ## Admin API
 
 New endpoints should be additive. Existing endpoints stay compatible.
@@ -838,7 +999,15 @@ V1 does not sync:
 - Migrate `remote_base_url` read path to default provider instance.
 - Keep existing API/UI behavior.
 
-### Phase 2: ByteDance detection and routing
+### Phase 2: Service-side config sync protocol
+
+- Add shared `/v4/config/sync` protocol and `/v4/capabilities` contract.
+- Implement Bifrost Cloud service changes in `packages/bifrost-sync-server`.
+- Implement ByteDance Internal service changes in `/Users/eden_studio/work/github/bifrost-server-v4`.
+- Keep `config_sync` disabled for any provider whose capability probe does not advertise support.
+- Validate both services before enabling the UI `Config Sync` badge as active.
+
+### Phase 3: ByteDance detection and routing
 
 - Add managed `bytedance-internal` provider.
 - Add catalog/detect APIs.
@@ -846,14 +1015,14 @@ V1 does not sync:
 - Split Remote Invoke relay URL from generic Sync URL.
 - Add first-run sign-in modal trigger when no provider session exists.
 
-### Phase 3: UI and CLI provider management
+### Phase 4: UI and CLI provider management
 
 - Add provider catalog UI and lane routing UI.
 - Add connected-services display to Settings Sync.
 - Add CLI provider/lane commands, including interactive `provider add` and `provider login`.
 - Keep old commands as aliases.
 
-### Phase 4: GitHub Gist provider
+### Phase 5: GitHub Gist provider
 
 - Implement OAuth device flow.
 - Implement gist discovery/create/update.
@@ -861,13 +1030,21 @@ V1 does not sync:
 - Add conflict detection and user conflict resolution.
 - Support both rules snapshot and basic config snapshot.
 
-### Phase 5: Remote Invoke multi-registration
+### Phase 6: Remote Invoke multi-registration
 
 - Register local Remote Invoke service with every enabled signed-in provider that has `remote_invoke_relay`.
 - Show registration status per provider in Settings Sync and CLI status.
 - Keep outbound Remote Invoke provider selection explicit or priority-based.
 
-### Phase 6: Additional providers
+### Phase 7: Coordinated release gate
+
+- Merge and deploy Bifrost Cloud config sync support.
+- Merge and deploy ByteDance Internal config sync support.
+- Land Bifrost client/admin changes with capability gating.
+- Enable `Config Sync` by default only for ByteDance Internal and Bifrost Cloud once their deployed `/v4/capabilities` returns `config_sync`.
+- Keep GitHub Gist config sync independent because it stores encrypted snapshots in the user's gist.
+
+### Phase 8: Additional providers
 
 - Add WebDAV or Gitee as new provider type without modifying Sync Engine.
 - Extend provider catalog metadata and tests.
@@ -883,6 +1060,9 @@ V1 does not sync:
 - GitHub provider payload encryption never serializes raw rule or config content.
 - Gist conflict detection when remote revision changes.
 - ByteDance detection handles 200, 401, timeout, TLS failure, DNS failure.
+- Bifrost Cloud `/v4/config/sync` rejects unknown keys, rejects sensitive values, syncs create/update/delete/check lists, and isolates users.
+- ByteDance Internal `SyncBasicConfig` rejects unknown keys, rejects sensitive values, syncs create/update/delete/check lists, and isolates sessions.
+- Both services' `/v4/capabilities` advertise `config_sync` only after the endpoint and table are available.
 
 ### E2E tests
 
@@ -890,6 +1070,7 @@ V1 does not sync:
 - ByteDance detected provider configures lanes only when no user-selected provider exists.
 - First Settings Sync visit with zero provider sessions opens the sign-in modal and offers ByteDance Internal, Bifrost Cloud, and GitHub Gist.
 - Settings Sync shows all connected services and each card's Remote Invoke, Rules Sync, and Config Sync capabilities.
+- ByteDance Internal and Bifrost Cloud run authenticated Basic Config Sync for app allowlist, domain allowlist, and blacklist without syncing secrets or local machine state.
 - GitHub Gist sync writes encrypted personal rules and basic config snapshots and never exposes group/remote invoke actions.
 - ByteDance Internal and Bifrost Cloud can both be connected; Remote Invoke registration is attempted for both.
 - Remote Invoke fails with clear message when no `remote_invoke_relay` provider is configured.

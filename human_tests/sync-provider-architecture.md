@@ -203,6 +203,26 @@
 - 文档明确 V1 默认 UI 不展示 WebDAV/custom placeholder/第四张空卡。
 - 文档明确 Playwright/DOM 验证需要断言三卡数量、顺序、最多三列、窄屏一列和无重叠。
 
+### TC-SPA-12: ByteDance Internal 和 Bifrost Cloud 配置同步服务端改造方案完整
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Server-Side Config Sync Changes|/Users/eden_studio/work/github/bifrost-server-v4|packages/bifrost-sync-server|/v4/config/sync|/v4/capabilities|bifrost_basic_configs|bifrost_server_basic_config|Config Sync must stay disabled|Coordinated release gate" design/sync-provider-architecture.md
+   ```
+2. 阅读 Server-Side Config Sync Changes、Implementation Phases 和 Test Plan 章节。
+
+**预期结果**:
+
+- 文档明确 ByteDance Internal 服务在 `/Users/eden_studio/work/github/bifrost-server-v4` 改造, 后续需在该目录完成开发并单独提交 PR。
+- 文档明确 Bifrost Cloud 服务在当前仓库 `packages/bifrost-sync-server` 改造。
+- 文档列出现有代码入口: ByteDance Internal 的 IDL/controller/service/model/db.sql, Bifrost Cloud 的 routes/types/dao/sql/index。
+- 文档定义共享 `/v4/config/sync` 协议、`/v4/capabilities` 能力声明和 Basic Config 三个允许 key。
+- 文档列出两边需要新增的表、DAO/model、route/controller/service、测试和兼容策略。
+- 文档明确如果服务端未返回 `config_sync`, UI/CLI 必须禁用或标记不可用, 不能假设支持。
+- 文档明确最终推进需要 Bifrost client/admin、Bifrost Cloud、ByteDance Internal 三个 PR 一起完成。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -213,3 +233,4 @@
 - 2026-07-07: PASS - 执行 TC-SPA-05 至 TC-SPA-08 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计新增三种产品同步服务独立连接、首次无登录弹窗、Remote Invoke 双 provider 注册、基础配置同步范围与 CLI/UI 管理入口。
 - 2026-07-07: PASS - 执行 TC-SPA-09 至 TC-SPA-10 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认 Web UI 设计方案覆盖页面结构、关键交互、错误/冲突/注册状态、响应式和测试钩子, Web UI 验证方案覆盖 Playwright、暗色主题和不重叠检查。
 - 2026-07-07: PASS - 执行 TC-SPA-11 的 `rg` 静态审查命令, 命中三 provider 卡片网格、稳定顺序、最多三列、窄屏一列、V1 不展示 WebDAV/custom placeholder 和 Playwright/DOM 断言要求。
+- 2026-07-07: PASS - 执行 TC-SPA-12 的 `rg` 静态审查命令, 命中 ByteDance Internal 与 Bifrost Cloud 两个服务端路径、现有代码入口、`/v4/config/sync`、`/v4/capabilities`、新增表、capability gating 和三 PR 协同发布要求。
