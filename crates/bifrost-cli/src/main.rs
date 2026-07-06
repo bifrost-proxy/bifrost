@@ -784,6 +784,7 @@ mod tests {
     static UPDATE_NOTICE_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn lock_update_notice_env() -> MutexGuard<'static, ()> {
+        // These tests read and mutate a process-wide env var, so they must not run in parallel.
         UPDATE_NOTICE_ENV_LOCK.lock().unwrap()
     }
 
