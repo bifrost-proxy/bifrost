@@ -148,6 +148,42 @@
 - 文档明确其它 Settings 配置暂不同步。
 - 文档明确密码、证书、token、API key、Remote Invoke grant、本机端口和流量历史等敏感/本机状态不参与同步。
 
+### TC-SPA-09: Web UI 设计方案覆盖页面结构和关键交互
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Information architecture|Sync Overview|First-run sign-in modal|Connected Services|Capability Routing|Add Sync Service|setup wizard|Status and error surfaces|Responsive and theme requirements|Test ids" design/sync-provider-architecture.md
+   ```
+2. 阅读 Web UI 章节。
+
+**预期结果**:
+
+- 文档包含 Settings Sync 的四段页面结构: Overview、Connected Services、Capability Routing、Add Sync Service。
+- 文档定义首次无登录弹窗、ByteDance/Bifrost Cloud/GitHub Gist 三种卡片和 dismiss 行为。
+- 文档定义三种 provider 卡片状态、能力 badge、Remote Invoke 注册状态和操作按钮。
+- 文档定义 Bifrost Cloud、GitHub Gist、ByteDance 三条 setup wizard。
+- 文档定义错误、冲突、部分 Remote Invoke 注册失败的展示方式。
+- 文档定义响应式、暗色主题、长文本不重叠和稳定 test id 要求。
+
+### TC-SPA-10: Web UI 验证方案覆盖 Playwright 和视觉检查
+
+**操作步骤**:
+
+1. 执行:
+   ```bash
+   rg -n "Web UI validation|First-run modal|Connected services|Capability routing|partial registration|Bifrost Cloud setup|GitHub Gist setup|Basic config scope|Dark theme|Responsive layout|Visual/DOM checks" design/sync-provider-architecture.md
+   ```
+2. 阅读 Test Plan 的 Web UI validation 章节。
+
+**预期结果**:
+
+- 文档列出 first-run modal、三 provider 同时连接、capability routing、Remote Invoke 部分注册失败等 Playwright 用例。
+- 文档列出 GitHub Gist 和 Bifrost Cloud setup wizard 验证点。
+- 文档列出基础配置同步范围的 UI 验证点。
+- 文档列出暗色主题、响应式布局、长 URL/gist id 不重叠、tooltip、polling 不覆盖 draft 的 DOM/视觉检查。
+
 ## 清理步骤
 
 本用例只读文档, 无需清理临时服务或数据目录。
@@ -156,3 +192,4 @@
 
 - 2026-07-06: PASS - 在 `codex/sync-provider-design` worktree 中执行 TC-SPA-01 至 TC-SPA-04 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计覆盖多 provider 同启、capability 区分、GitHub Gist rules-only、ByteDance 自动检测、UI/CLI/API 和分阶段落地。
 - 2026-07-07: PASS - 执行 TC-SPA-05 至 TC-SPA-08 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认设计新增三种产品同步服务独立连接、首次无登录弹窗、Remote Invoke 双 provider 注册、基础配置同步范围与 CLI/UI 管理入口。
+- 2026-07-07: PASS - 执行 TC-SPA-09 至 TC-SPA-10 的 `rg` 静态审查命令, 均能命中对应章节; 人工复核确认 Web UI 设计方案覆盖页面结构、关键交互、错误/冲突/注册状态、响应式和测试钩子, Web UI 验证方案覆盖 Playwright、暗色主题和不重叠检查。

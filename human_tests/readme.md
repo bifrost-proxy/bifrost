@@ -150,7 +150,7 @@
 | [webui-csrf-transport-guard.md](./webui-csrf-transport-guard.md) | Web UI CSRF 传输层 ESLint 守卫 | 5 | ESLint `no-restricted-imports` 禁止 `web/src/**` 直接 `import axios`（仅 `api/client.ts` 白名单），强制写接口走 `apiFetch` 或共享 `client` 注入 `X-Bifrost-CSRF`；覆盖规则真实触发、白名单不误伤、`bifrost-file.ts` 移除默认 axios 后行为不变、`pnpm lint` 全绿与全量单测/类型构建通过 |
 | [security-hardening.md](./security-hardening.md) | Security Hardening | 11 | 2026-07 安全审计修复回归：Shell 策略全匹配、登录失败非破坏性、脚本 SSRF 防护、Admin 虚拟主机鉴权、SSH 密钥权限/授权有效期、安装 checksum fail-close、glob symlink、open_call AAD、Sync 禁明文和 unsafe SSL 显式 opt-in |
 | [api-sync.md](./api-sync.md) | Sync API | 36 | 同步状态/配置/登录/登出/运行/Session，Env/Room/User 代理转发端点，CI/沙箱 token-only 默认 Provider 与 token+URL 直登，一级 `bifrost login` 等价入口，缺少 CLI token 值时提示默认或自定义 token 获取链接，启动登录预检与调试环境变量禁用自动弹窗 |
-| [sync-provider-architecture.md](./sync-provider-architecture.md) | Sync Provider Architecture | 8 | 设计阶段验证多 Provider 同时启用、capability/lane 路由、ByteDance Internal/Bifrost Cloud/GitHub Gist 独立连接、首次无登录弹窗、GitHub Gist rules/config 加密同步、Remote Invoke 合格 provider 双注册、基础配置同步范围、UI/CLI/API 可扩展操作面 |
+| [sync-provider-architecture.md](./sync-provider-architecture.md) | Sync Provider Architecture | 10 | 设计阶段验证多 Provider 同时启用、capability/lane 路由、ByteDance Internal/Bifrost Cloud/GitHub Gist 独立连接、首次无登录弹窗、GitHub Gist rules/config 加密同步、Remote Invoke 合格 provider 双注册、基础配置同步范围、Web UI 页面/交互/验证方案、UI/CLI/API 可扩展操作面 |
 | [api-misc.md](./api-misc.md) | Misc API | 32 | Syntax 语法信息、App Icon、WebSocket 连接、Audit 审计日志、Bifrost File 导入导出 |
 
 ### 代理核心功能测试

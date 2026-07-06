@@ -565,15 +565,36 @@ bifrost sync encryption import-recovery-key --provider github-personal
 
 ## Web UI
 
-Settings Sync should become provider-first. The page also serves as the sign-in hub for all sync services.
+Settings Sync should become provider-first. The page also serves as the sign-in hub for all sync services. The UI must be operational, not a landing page: users should be able to see connected services, connect a new provider, run sync, inspect Remote Invoke registration, and resolve conflicts from the same tab.
 
-### Section 1: Overview
+### Information architecture
+
+`Settings -> Sync` is a single tab with four full-width sections:
+
+1. `Sync Overview`: global sync controls and aggregate state.
+2. `Connected Services`: provider cards for ByteDance Internal, Bifrost Cloud, GitHub Gist, and future providers.
+3. `Capability Routing`: editable lane routing for Rules Sync, Config Sync, Group Rules, and Remote Invoke.
+4. `Add Sync Service`: provider catalog and setup entry points.
+
+The tab should remain dense and settings-like. Use compact rows, capability chips, icon buttons with tooltips, and inline status instead of marketing copy. Cards represent provider instances, not decorative page sections.
+
+### Sync Overview
+
+Controls and fields:
 
 - Global sync enabled switch.
 - Auto sync switch.
-- Aggregate status: Ready, Degraded, Needs sign in, Conflict, Disabled.
+- Aggregate status tag: Ready, Degraded, Needs sign in, Conflict, Disabled.
 - Last sync time and last lane result.
 - Connected services summary: ByteDance Internal, Bifrost Cloud, GitHub Gist, each showing signed-in user and last sync/registration state.
+- Primary action buttons: `Sync Now`, `Add Service`, `Resolve Conflict` when conflicts exist.
+- Secondary icon actions: refresh status, open logs/details.
+
+Interaction rules:
+
+- `Sync Now` opens a small menu: All lanes, Rules Sync, Config Sync, Group Rules. Remote Invoke registration has its own `Register Remote Invoke` action because it is live service registration, not data sync.
+- Disabled global sync keeps provider login sessions but pauses lane runs.
+- Degraded status shows which provider/lane failed and keeps healthy providers usable.
 
 ### First-run sign-in modal
 
@@ -587,8 +608,17 @@ When the user opens Settings Sync and no sync provider has a valid session:
    - `GitHub Gist`: Rules Sync, Config Sync.
 4. Let the user dismiss the modal and continue local-only; do not block Bifrost local proxy usage.
 5. Do not auto-login GitHub or Bifrost Cloud. ByteDance auto-detection may auto-open the existing internal SSO prompt only when internal provider is reachable and no user choice exists.
+6. The modal must remember dismissal for the current browser session, but Settings Sync still shows an `Add Service` call to action until at least one provider is connected.
 
-### Section 2: Sync Targets
+Modal layout:
+
+- Title: `Set up sync`.
+- Three provider choice cards in a responsive grid.
+- Each provider card shows icon, provider name, short endpoint/account hint, and capability chips.
+- Buttons: `Continue local only`, `Sign in`, and a close icon.
+- ByteDance card can show `Detected` or `Not on internal network`; Bifrost Cloud card shows a URL field after selection; GitHub card starts GitHub login.
+
+### Connected Services
 
 List enabled provider instances with compact capability badges:
 
@@ -605,7 +635,26 @@ Each row/card:
 - Remote Invoke registration state where supported.
 - Actions: Sign in, Sign out, Sync now, Configure, Remove.
 
-### Section 3: Capability Routing
+Provider card states:
+
+| State | User-visible behavior |
+| --- | --- |
+| Not configured | Shows provider capabilities and a primary `Sign in` or `Configure` action. |
+| Signing in | Shows progress, polling state, and cancel action. |
+| Connected | Shows account, last sync, enabled lanes, and action buttons. |
+| Needs sign in | Keeps config visible; primary action is `Reconnect`. |
+| Degraded | Shows the failing lane/provider detail with retry action. |
+| Conflict | Shows conflict count and `Resolve` action. |
+| Disabled | Muted card, session retained, no auto sync. |
+
+Provider card content requirements:
+
+- ByteDance Internal card: detection status, signed-in user, Remote Invoke registration badge, `Re-detect` action.
+- Bifrost Cloud card: server URL, capability probe result, signed-in user, Remote Invoke registration badge if supported.
+- GitHub Gist card: GitHub user, gist id, encryption/recovery-key status, Rules Sync and Config Sync badges, no Remote Invoke controls.
+- Future providers inherit the same card shell and declare capabilities through catalog metadata.
+
+### Capability Routing
 
 Rows by lane:
 
@@ -616,7 +665,17 @@ Rows by lane:
 
 Invalid provider choices are disabled with explanation text, not silently hidden in advanced routing dialogs.
 
-### Section 4: Provider Catalog
+Routing editor interaction:
+
+- Each lane row has `Read from`, `Write to`, and `Policy` columns.
+- Provider chips show provider icon, name, health, and capability support.
+- Unsupported provider chips appear disabled with tooltip, for example `GitHub Gist does not support Remote Invoke`.
+- Rules Sync and Config Sync can write to multiple providers; default secondary providers are mirrors.
+- Remote Invoke uses registration policy `all eligible`; the row shows ByteDance Internal and Bifrost Cloud registration states separately.
+- Editing opens a drawer, not a nested card. The drawer includes provider checkboxes, capability warnings, and a dry-run summary.
+- Saving invalid routing is blocked client-side and server-side.
+
+### Add Sync Service
 
 Add provider cards:
 
@@ -634,6 +693,71 @@ Steps:
 3. Create or import encryption recovery key.
 4. Preview capability: `Rules Sync + Config Sync`, no Remote Invoke.
 5. Enable as primary or mirror.
+
+### Bifrost Cloud setup wizard
+
+Steps:
+
+1. Enter server URL or choose a saved/self-hosted endpoint.
+2. Probe `/v4/capabilities`; show Rules Sync, Config Sync, Group Rules, and Remote Invoke support before login.
+3. Sign in through browser or paste token.
+4. If Remote Invoke is supported, ask whether to register this device immediately.
+5. Confirm lane routing; default to Rules Sync + Config Sync enabled, Remote Invoke registered if supported.
+
+### ByteDance setup flow
+
+Steps:
+
+1. Auto-detect internal endpoint in the background.
+2. Show card as `Detected` when reachable.
+3. Opening the card starts the existing internal SSO prompt.
+4. After login, enable Rules Sync, Config Sync, Group Rules, and Remote Invoke registration by default.
+5. If Bifrost Cloud is already connected, keep it connected and register Remote Invoke to both eligible providers.
+
+### Status and error surfaces
+
+Settings Sync should have three levels of error presentation:
+
+- Card-level inline error for provider-specific failures.
+- Lane-level warning for routing or conflict problems.
+- Modal/drawer for conflicts that need user choice.
+
+Conflict resolution modal:
+
+- Shows lane, provider, local update time, remote update time, remote device name, and affected object count.
+- Actions: Pull remote, Push local, Save local as copy, Cancel.
+- GitHub Gist conflicts mention that the provider has weak CAS and Bifrost re-read remote metadata before write.
+
+Remote Invoke registration errors:
+
+- Per provider registration state appears on the provider card and Remote Invoke lane row.
+- If ByteDance succeeds and Bifrost Cloud fails, the UI shows `Partial registration` rather than failing the entire Sync tab.
+- `Register Remote Invoke` retries only eligible providers.
+
+### Responsive and theme requirements
+
+- Desktop: overview controls in a compact two-column grid; provider cards use a responsive grid with equal-height cards.
+- Narrow viewport: provider cards stack in one column; routing rows remain readable with horizontal provider chips wrapping onto a second line.
+- Dark theme: all status tags, warning panels, disabled provider chips, and modal surfaces must use theme tokens and remain readable.
+- Long server URLs, gist ids, account names, and error messages must wrap or use ellipsis with tooltip; they must not overlap action buttons.
+- All primary actions must have stable `data-testid` hooks for Playwright.
+
+### Test ids
+
+Recommended stable selectors:
+
+- `settings-sync-overview`
+- `settings-sync-first-run-modal`
+- `settings-sync-provider-card-bytedance`
+- `settings-sync-provider-card-bifrost-cloud`
+- `settings-sync-provider-card-github-gist`
+- `settings-sync-provider-capability-remote-invoke`
+- `settings-sync-provider-capability-rules`
+- `settings-sync-provider-capability-config`
+- `settings-sync-routing-row-personal-rules`
+- `settings-sync-routing-row-basic-config`
+- `settings-sync-routing-row-remote-invoke`
+- `settings-sync-remote-registration-status`
 
 ## Product Defaults
 
@@ -742,6 +866,35 @@ V1 does not sync:
 - Remote Invoke fails with clear message when no `remote_invoke_relay` provider is configured.
 - CLI interactive `bifrost sync provider add` and `bifrost sync provider login` can add/login each provider type.
 - CLI `bifrost sync status --providers` lists all provider session, sync, and Remote Invoke registration states.
+
+### Web UI validation
+
+Add focused Playwright coverage in `web/tests/ui/admin-settings.spec.ts` or a dedicated `settings-sync-provider.spec.ts`:
+
+| Case | Mock setup | Assertions |
+| --- | --- | --- |
+| First-run modal | `/sync/providers` returns no sessions; ByteDance detection returns reachable | Modal is visible, three provider cards appear, ByteDance card is highlighted, `Continue local only` dismisses only for current browser session |
+| Connected services | ByteDance, Bifrost Cloud, GitHub Gist all signed in | Three provider cards render simultaneously; each shows account, status, Rules Sync, Config Sync; GitHub Gist has no Remote Invoke action |
+| Capability routing | Personal rules and basic config write to all three; Remote Invoke providers are ByteDance + Bifrost Cloud | Routing rows show correct provider chips; GitHub Gist chip is disabled for Remote Invoke with explanatory tooltip |
+| Remote Invoke partial registration | ByteDance registered, Bifrost Cloud failed | UI shows partial registration, retry action targets Bifrost Cloud, ByteDance remains registered |
+| Bifrost Cloud setup | Capabilities probe returns Rules Sync + Config Sync + Remote Invoke | Wizard shows capability preview before login and offers immediate Remote Invoke registration |
+| GitHub Gist setup | GitHub auth succeeds and gist id is returned | Wizard shows encrypted snapshot status, recovery key step, Rules Sync + Config Sync preview, no Remote Invoke controls |
+| Basic config scope | Routing drawer opens Basic Config lane | Drawer lists app allowlist, domain allowlist, blacklist/exclude list; no secrets, certificates, tokens, local port, or Remote Invoke grant fields appear |
+| Degraded/conflict states | Provider status includes conflict and last_error | Card-level error and conflict modal show lane/provider/object metadata and Pull/Push/Save copy actions |
+| Dark theme | `bifrost-theme=dark` before page load | Provider cards, modal, disabled chips, warning panels, and routing drawer use dark tokens and text remains readable |
+| Responsive layout | Viewports 390px and 1280px | No overlapping text/buttons; provider cards stack on mobile and grid on desktop; long URLs/gist ids wrap or ellipsize with tooltip |
+
+Visual/DOM checks:
+
+- Use computed bounding boxes to assert no provider card text overlaps action buttons.
+- Assert disabled unsupported capability chips are visible and have tooltips.
+- Assert first-run modal does not re-open after dismissing within the same browser session, but `Add Service` remains visible.
+- Assert polling refresh updates provider status without resetting an in-progress Bifrost Cloud URL draft.
+
+Manual human_tests:
+
+- `human_tests/webui-settings.md` should gain implementation-phase cases for the real Settings Sync page.
+- `human_tests/sync-provider-architecture.md` remains the design-review gate until implementation starts.
 
 ### human_tests
 
