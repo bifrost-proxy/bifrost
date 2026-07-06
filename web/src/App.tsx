@@ -40,6 +40,7 @@ import {
   startDesktopCore,
   type DesktopRuntimeInfo,
 } from "./desktop/tauri";
+import { resolveDesktopOpenTarget } from "./desktop/openTarget";
 import { getCliInstallStatus, installCliFromDesktop, type CliInstallStatus } from "./api/system";
 import type { DesktopOpenRequest } from "./desktop/tauri";
 import { useThemeStore, initThemeListener } from "./stores/useThemeStore";
@@ -52,7 +53,6 @@ import { initDesktopEditEventListener } from "./components/MonacoDesktopCommands
 import {
   getDesktopPlatform,
   getAdminPrefix,
-  buildBackendUrl,
   initializeDesktopRuntime,
   isDesktopShell,
   setDesktopProxyPort,
@@ -611,34 +611,6 @@ function GlobalRouteEffects() {
   useEditorCompletion();
 
   return null;
-}
-
-const EXTERNAL_OPEN_SCHEMES = new Set([
-  "http:",
-  "https:",
-  "mailto:",
-  "bifrost:",
-  "macappstore:",
-]);
-
-function resolveDesktopOpenTarget(rawUrl: string): string | null {
-  if (!rawUrl) {
-    return null;
-  }
-
-  if (rawUrl.startsWith("/_bifrost/") || rawUrl.startsWith("/api/") || rawUrl.startsWith("/public/")) {
-    return buildBackendUrl(rawUrl);
-  }
-
-  try {
-    const parsed = new URL(rawUrl, window.location.href);
-    if (parsed.origin === window.location.origin && parsed.hash.startsWith("#/")) {
-      return null;
-    }
-    return EXTERNAL_OPEN_SCHEMES.has(parsed.protocol) ? parsed.toString() : null;
-  } catch {
-    return null;
-  }
 }
 
 function DesktopExternalOpenBridge() {

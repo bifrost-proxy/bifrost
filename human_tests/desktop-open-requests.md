@@ -178,7 +178,7 @@
 
 - 桌面壳拦截外部 `http(s)`、`mailto`、`macappstore` 和 `bifrost://` URL，并通过原生 OpenURL 打开。
 - `/_bifrost/...`、`/api/...`、`/public/...` 这类后端相对路径会被解析到当前桌面后端端口后再打开，不停留在 Tauri WebView 的静态资源 origin。
-- 内部 `#/traffic/detail` 等桌面壳路由不被误当成外部 URL。
+- 内部 `#/traffic/detail`、`#certificate-*`、`/#/...` 等桌面壳路由不被误当成外部 URL。
 - `bifrost://open/settings` 仍复用单实例并跳转 Settings。
 
 ## 清理步骤
@@ -196,3 +196,4 @@
 | 2026-07-06 | TC-DOR-01 / TC-DOR-03 / TC-DOR-04 / TC-DOR-05 的核心代码路径 | PASS：`cargo test -p bifrost-cli tray::` 通过，`cargo test --manifest-path desktop/src-tauri/Cargo.toml open_requests` 通过，`pnpm --dir web run build:desktop` 通过，`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 通过。真实已安装 App 的 LaunchServices/文件双击操作仍需发布包安装环境复测。 |
 | 2026-07-06 | TC-DOR-07 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 import/export POST 请求带 `X-Bifrost-CSRF`；`rg` 扫描确认前端直接 `axios.post/put/delete/patch` 只剩全局 CSRF-aware client 和错误格式化使用。 |
 | 2026-07-06 | TC-DOR-08 | PASS：`pnpm --dir web test:unit src/api/bifrost-file.test.ts` 覆盖 preview POST 请求带 `X-Bifrost-CSRF`；`pnpm --dir web exec eslint ...` 与 `pnpm --dir web run build:desktop` 覆盖 rules、多请求 network、单请求 network 预览确认 UI 编译通过；`cargo test -p bifrost-admin bifrost_file --lib` 覆盖 preview 后端解析与单请求详情数据。 |
+| 2026-07-06 | TC-DOR-09 | PASS：`pnpm --dir web test:unit src/desktop/openTarget.test.ts` 通过，覆盖同源 hash 与 `/#/...` 不外跳、后端相对路径转桌面后端 URL、`https`/`mailto`/`macappstore`/`bifrost` 外部 scheme 原生打开，以及 custom protocol 下 `mailto`/`bifrost` 不被 `origin=null` 误拦截。 |
