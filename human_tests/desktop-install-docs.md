@@ -94,13 +94,15 @@
 1. 执行 `curl -sS http://127.0.0.1:4177/bifrost/getting-started/installation | rg -n "直接下载最新版|desktop-download-card|data-vp-download-target"`。
 2. 执行 `curl -sS http://127.0.0.1:4177/bifrost/getting-started/installation | perl -0ne 'while(/data-vp-download-target="([^"]+)"/g){print "$1\n"}'`。
 3. 执行 `rg -n "bifrost-desktop-v0.0.141-aarch64-apple-darwin.dmg|data-vp-download-target" site/.vitepress/theme/index.js site/dist/assets -g "*.js"`，并检查 `site/dist/getting-started/installation.html` 与 `site/dist/en/getting-started/installation.html`。
-4. 在浏览器打开 `http://127.0.0.1:4177/bifrost/getting-started/installation`，检查 `安装桌面端 App` 段落下是否展示四个下载按钮。
+4. 执行 `! rg -n "桌面版安装与构建|Desktop Installation and Build" site/dist/getting-started/installation.html site/dist/en/getting-started/installation.html`。
+5. 在浏览器打开 `http://127.0.0.1:4177/bifrost/getting-started/installation`，检查 `安装桌面端 App` 段落下是否展示四个下载按钮，左侧 Getting Started 侧边栏不再展示独立桌面版安装入口。
 
 预期结果：
 
 - 安装手册不再要求用户进入 GitHub Releases 手动展开 `Assets` 查找桌面端安装包。
 - 下载按钮顺序为 `mac-arm`、`mac-intel`、`win-x64`、`win-arm`。
 - VitePress 主题脚本会读取静态 manifest 并把按钮 href 替换为 release asset 直链。
+- 侧边栏不再把桌面版安装页作为单独 Getting Started 入口展示。
 
 执行结果：
 

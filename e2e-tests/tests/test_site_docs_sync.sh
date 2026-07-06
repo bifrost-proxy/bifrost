@@ -121,6 +121,14 @@ grep -q 'data-vp-download-target="mac-intel"' "$SITE_DIR/dist/getting-started/in
 grep -q 'data-vp-download-target="win-x64"' "$SITE_DIR/dist/getting-started/installation.html"
 grep -q 'data-vp-download-target="win-arm"' "$SITE_DIR/dist/getting-started/installation.html"
 grep -q 'data-vp-download-target="mac-arm"' "$EN_INSTALL_DIST"
+if grep -q '桌面版安装与构建' "$SITE_DIR/dist/getting-started/installation.html"; then
+  echo "Desktop install page must not be listed as a separate Getting Started sidebar item" >&2
+  exit 1
+fi
+if grep -q 'Desktop Installation and Build' "$EN_INSTALL_DIST"; then
+  echo "Desktop install page must not be listed as a separate English Getting Started sidebar item" >&2
+  exit 1
+fi
 grep -q 'id="desktop-downloads-data"' "$SITE_DIR/dist/index.html"
 grep -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin.dmg" "$SITE_DIR/dist/index.html"
 rg -q "bifrost-desktop-${DESKTOP_DOWNLOAD_TAG}-aarch64-apple-darwin\\.dmg" "$SITE_DIR/dist/assets" -g '*.js'
